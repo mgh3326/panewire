@@ -68,6 +68,17 @@ func TestPromptClaudeQueuedWithoutChipIsSubmissionEvidence(t *testing.T) {
 	}
 }
 
+func TestPromptClaudeTranscriptEchoWithEmptyComposerIsSubmitted(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	configurePromptFixture(fixture, "claude", "❯ R2-MARKER\n────\n❯\n────\nstatus\n")
+	d, _ := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t)}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
+		t.Fatalf("Claude transcript echo exit=%d want %d", got, panewire.ExitOK)
+	}
+}
+
 func TestPromptPollsSubmissionEvidenceAfterFirstRead(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
