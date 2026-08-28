@@ -159,6 +159,8 @@ func (s *Store) PromptBody(ctx context.Context, id string) (string, bool, error)
 }
 
 func (s *Store) GetDelivery(ctx context.Context, id string) (Delivery, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	var d Delivery
 	var stored int
 	var requested, completed, preflight, send, evidence sql.NullInt64
@@ -197,6 +199,8 @@ preflight_read_sha256,preflight_result,herdr_acceptance,submission_result,uptake
 // It returns false when the correlation id already exists, making retries
 // idempotent across CLI processes.
 func (s *Store) InsertDelivery(ctx context.Context, d Delivery, body string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
@@ -224,6 +228,8 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, d.DeliveryID, d.RequestedAtMS,
 }
 
 func (s *Store) UpdateDelivery(ctx context.Context, d Delivery) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx, `UPDATE deliveries SET completed_at_ms=?,resolved_pane_id=?,resolved_workspace_id=?,
 preflight_revision=?,send_revision=?,preflight_read_sha256=?,preflight_result=?,herdr_acceptance=?,submission_result=?,
 uptake_mode=?,uptake_result=?,evidence_revision=?,error_code=? WHERE delivery_id=?`, d.CompletedAtMS, d.ResolvedPaneID,
