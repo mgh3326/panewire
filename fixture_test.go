@@ -21,7 +21,12 @@ type herdrFixture struct {
 
 func newHerdrFixture(t *testing.T, schema string) *herdrFixture {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "herdr.sock")
+	base, err := os.MkdirTemp("/tmp", "pw-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(base) })
+	path := filepath.Join(base, "h.sock")
 	l, err := net.Listen("unix", path)
 	if err != nil {
 		t.Fatal(err)

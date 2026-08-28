@@ -3,6 +3,10 @@ package panewire_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -45,4 +49,48 @@ func TestEventLogSubscriptionsAndInboxPersist(t *testing.T) {
 		t.Fatalf("persisted event rows=%d, want 5", got)
 	}
 	_ = time.Now() // keep this fixture explicitly wall-clock independent
+}
+
+func TestUnknownHerdrEventAndFieldArePreservedAsWarningMetadata(t *testing.T) {
+	ev, ok := panewire.DecodeHerdrEvent([]byte(`{"event":{"type":"pane.future_changed","pane_id":"p1","workspace_id":"w1","revision":8,"future_field":"fixture-only"}}`))
+	if !ok || ev.Kind != "pane.future_changed" || string(ev.UnknownFields) == "{}" || !strings.Contains(string(ev.UnknownFields), "future_field") {
+		t.Fatalf("event=%+v ok=%v", ev, ok)
+	}
+}
+
+func TestInboxWatcherRecordsCreateAndChange(t *testing.T) {
+	store := panewire.NewMemoryStore(t)
+	defer store.Close()
+	root := t.TempDir()
+	watcher, err := panewire.NewInboxWatcher(root, store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = watcher.Run(ctx) }()
+	path := filepath.Join(root, "answer.md")
+	if err := os.WriteFile(path, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitFor(func() bool { return store.CountEventKind("inbox.file_created") >= 1 }, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("fixture changed"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := waitFor(func() bool { return store.CountEventKind("inbox.file_changed") >= 1 }, time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitFor(condition func() bool, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if condition() {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("condition not observed before timeout")
 }

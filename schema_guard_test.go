@@ -20,7 +20,7 @@ func TestSchemaGuardFixtures(t *testing.T) {
 		t.Fatalf("unknown schema fields must warn without disabling capabilities: guard=%+v err=%v", unknown, err)
 	}
 
-	missing, err := panewire.GuardSchema(strings.NewReader(fixtureSchema(false, true)))
+	missing, err := panewire.GuardSchema(strings.NewReader(fixtureSchema(false, false)))
 	if err != nil || missing.AgentWait || missing.Prompt || !missing.Events {
 		t.Fatalf("missing required agent contract must fail closed: guard=%+v err=%v", missing, err)
 	}
