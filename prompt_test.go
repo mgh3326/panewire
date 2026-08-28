@@ -68,6 +68,21 @@ func TestPromptClaudeQueuedWithoutChipIsSubmissionEvidence(t *testing.T) {
 	}
 }
 
+func TestPromptPollsSubmissionEvidenceAfterFirstRead(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	configurePromptFixturePolling(fixture)
+	d, _ := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	args := []string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--timeout", "500ms"}
+	if got := panewire.RunCLI(args, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
+		t.Fatalf("delayed evidence exit=%d want %d", got, panewire.ExitOK)
+	}
+	if got := fixture.Requests("agent.read"); got < 3 {
+		t.Fatalf("read requests=%d want at least preflight + two post reads", got)
+	}
+}
+
 func TestPromptKimiAndAgyHaveNoPositiveMatcher(t *testing.T) {
 	for _, harness := range []string{"kimi", "agy"} {
 		t.Run(harness, func(t *testing.T) {
@@ -152,7 +167,7 @@ func TestPromptExpectMismatchDoesNotCallHerdrPrompt(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
 	configurePromptFixture(fixture, "claude", "assistant saw R2-MARKER\n")
-	d, _ := startPromptDaemon(t, fixture)
+	d, db := startPromptDaemon(t, fixture)
 	defer d.Stop()
 	path := filepath.Join(t.TempDir(), "prompt.md")
 	if err := os.WriteFile(path, []byte("expect: name=wrong cwd=/work\n\nR2-MARKER\n"), 0600); err != nil {
@@ -163,6 +178,35 @@ func TestPromptExpectMismatchDoesNotCallHerdrPrompt(t *testing.T) {
 	}
 	if got := fixture.Requests("agent.prompt"); got != 0 {
 		t.Fatalf("prompt requests=%d want 0", got)
+	}
+	delivery, ok, err := db.LatestDelivery(t.Context())
+	if err != nil || !ok || delivery.ErrorDetail != "expect_failed=name" {
+		t.Fatalf("expect detail=%q delivery=%+v err=%v", delivery.ErrorDetail, delivery, err)
+	}
+}
+
+func TestPromptMismatchIsNotDedupedAfterExpectCorrection(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	configurePromptFixture(fixture, "claude", "assistant saw R2-MARKER\n")
+	d, _ := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	path := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(path, []byte("expect: name=wrong cwd=/work\n\nR2-MARKER\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	args := []string{"prompt", "--from", "sender", "--to", "orch", "--file", path}
+	if got := panewire.RunCLI(args, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitConditionInvalid {
+		t.Fatalf("first exit=%d", got)
+	}
+	if err := os.WriteFile(path, []byte("expect: name=orch cwd=/work\n\nR2-MARKER\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := panewire.RunCLI(args, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
+		t.Fatalf("corrected retry exit=%d", got)
+	}
+	if got := fixture.Requests("agent.prompt"); got != 1 {
+		t.Fatalf("prompt requests=%d want 1", got)
 	}
 }
 
@@ -348,6 +392,25 @@ func configurePromptFixture(f *herdrFixture, harness, screen string) {
 			return map[string]any{"text": "idle pane\n", "revision": 10}
 		}
 		return map[string]any{"text": screen, "revision": 11}
+	})
+	f.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
+}
+
+func configurePromptFixturePolling(f *herdrFixture) {
+	f.On("agent.list", func() any {
+		return map[string]any{"agents": []any{map[string]any{"agent": "orch", "name": "orch", "label": "orch", "harness": "claude", "pane_id": "p1", "workspace_id": "w1", "cwd": "/work", "revision": 10, "agent_status": "idle"}}}
+	})
+	reads := 0
+	f.On("agent.read", func() any {
+		reads++
+		switch reads {
+		case 1:
+			return map[string]any{"text": "idle pane\n", "revision": 10}
+		case 2:
+			return map[string]any{"text": "renderer has not painted marker yet\n", "revision": 10}
+		default:
+			return map[string]any{"text": "assistant saw R2-MARKER\n", "revision": 11}
+		}
 	})
 	f.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
 }
