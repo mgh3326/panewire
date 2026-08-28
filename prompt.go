@@ -305,7 +305,7 @@ func resolvePane(ctx context.Context, c *HerdrClient, target string) (paneIdenti
 }
 
 func identityFromMap(a map[string]any) paneIdentity {
-	return paneIdentity{PaneID: aString(a, "pane_id"), WorkspaceID: aString(a, "workspace_id"), TabID: firstString(a, "tab_id", "tab"), Agent: aString(a, "agent"), Name: aString(a, "name"), Label: firstString(a, "label", "tab_label", "display_agent"), Title: aString(a, "title"), CWD: firstString(a, "cwd", "workdir", "working_dir"), Harness: firstString(a, "harness", "harness_kind", "kind"), Status: aString(a, "agent_status"), Revision: aInt(a, "revision")}
+	return paneIdentity{PaneID: aString(a, "pane_id"), WorkspaceID: aString(a, "workspace_id"), TabID: firstString(a, "tab_id", "tab"), Agent: aString(a, "agent"), Name: aString(a, "name"), Label: firstString(a, "label", "tab_label", "display_agent"), Title: aString(a, "title"), CWD: firstString(a, "cwd", "workdir", "working_dir"), Harness: firstString(a, "harness", "harness_kind", "kind", "agent"), Status: aString(a, "agent_status"), Revision: aInt(a, "revision")}
 }
 func aString(a map[string]any, key string) string { v, _ := a[key].(string); return v }
 func firstString(a map[string]any, keys ...string) string {
@@ -414,9 +414,6 @@ func classifySubmission(harness, screen, marker string) string {
 		return "composer_residue"
 	}
 	if strings.EqualFold(harness, "claude") && claudeComposerContains(screen, marker) {
-		return "composer_residue"
-	}
-	if !strings.EqualFold(harness, "claude") && marker != "" && (strings.Contains(screen, "❯ "+marker) || strings.Contains(screen, "› "+marker)) {
 		return "composer_residue"
 	}
 	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex")) && strings.Contains(screen, "Press up to edit queued messages") && !pasteChipRE.MatchString(screen) {
