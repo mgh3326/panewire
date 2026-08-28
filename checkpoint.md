@@ -1,4 +1,4 @@
-ROB-1320 R1 checkpoint
-HEAD: envelope/lifecycle regression committed after 7a1c1ef; tests-first RED remains c7667bc
-Completed: R1-1 through R1-5 with real one-shot herdr calls and stream subscription handling
-Next: capture final live read-only smoke, push branch, create PR(base=main), write report
+ROB-1320 R2 checkpoint
+HEAD: RED fixtures/tests added; implementation not started
+Completed: R1-1 through R1-5; R2 fixture coverage started for target safety, matchers, swallow, and idempotency
+Next: implement prompt delivery and commit each R2 acceptance condition separately; no live prompt smoke

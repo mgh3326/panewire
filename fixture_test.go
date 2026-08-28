@@ -17,6 +17,7 @@ type herdrFixture struct {
 	mu       sync.Mutex
 	handlers map[string]func() any
 	conns    []net.Conn
+	requests []map[string]any
 }
 
 func newHerdrFixture(t *testing.T, schema string) *herdrFixture {
@@ -42,6 +43,17 @@ func (f *herdrFixture) On(method string, handler func() any) {
 	defer f.mu.Unlock()
 	f.handlers[method] = handler
 }
+func (f *herdrFixture) Requests(method string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	n := 0
+	for _, req := range f.requests {
+		if req["method"] == method {
+			n++
+		}
+	}
+	return n
+}
 func (f *herdrFixture) serve(t *testing.T) {
 	for {
 		c, err := f.listener.Accept()
@@ -64,6 +76,7 @@ func (f *herdrFixture) connection(t *testing.T, c net.Conn) {
 		}
 		method, _ := req["method"].(string)
 		f.mu.Lock()
+		f.requests = append(f.requests, req)
 		h := f.handlers[method]
 		f.mu.Unlock()
 		if h == nil {
