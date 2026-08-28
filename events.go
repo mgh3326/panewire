@@ -7,7 +7,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
@@ -86,5 +85,3 @@ func recordHerdrEvent(ctx context.Context, s *Store, ev HerdrEvent, protocol, sc
 	p := json.RawMessage(fmt.Sprintf(`{"kind":"%s","pane_id":"%s","workspace_id":"%s","revision":%d}`, ev.Kind, ev.PaneID, ev.WorkspaceID, ev.Revision))
 	_ = s.RecordEvent(ctx, Event{Source: "herdr", Kind: ev.Kind, PaneID: ev.PaneID, WorkspaceID: ev.WorkspaceID, AgentStatus: ev.AgentStatus, Revision: ev.Revision, Protocol: int64(protocol), SchemaVersion: int64(schema), Payload: p, Unknown: ev.UnknownFields})
 }
-
-var _ = time.UTC

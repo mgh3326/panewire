@@ -58,6 +58,13 @@ func TestUnknownHerdrEventAndFieldArePreservedAsWarningMetadata(t *testing.T) {
 	}
 }
 
+func TestRealSubscriptionEnvelopeUsesStringEventAndDataObject(t *testing.T) {
+	ev, ok := panewire.DecodeHerdrEvent([]byte(`{"event":"pane_agent_status_changed","data":{"pane_id":"p1","workspace_id":"w1","agent_status":"idle","revision":9}}`))
+	if !ok || ev.Kind != "pane_agent_status_changed" || ev.PaneID != "p1" || ev.AgentStatus != "idle" || ev.Revision != 9 {
+		t.Fatalf("event=%+v ok=%v", ev, ok)
+	}
+}
+
 func TestInboxWatcherRecordsCreateAndChange(t *testing.T) {
 	store := panewire.NewMemoryStore(t)
 	defer store.Close()

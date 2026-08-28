@@ -22,9 +22,11 @@ type HerdrClient struct {
 }
 
 func NewHerdrClient(path string) (*HerdrClient, error) {
-	if _, err := net.DialTimeout("unix", path, 2*time.Second); err != nil {
+	conn, err := net.DialTimeout("unix", path, 2*time.Second)
+	if err != nil {
 		return nil, err
 	}
+	_ = conn.Close()
 	return &HerdrClient{path: path, closed: make(chan struct{})}, nil
 }
 func (c *HerdrClient) nextID() string {
