@@ -57,6 +57,17 @@ func TestPromptCodexPositiveAndNegativeMatchers(t *testing.T) {
 	}
 }
 
+func TestPromptClaudeQueuedWithoutChipIsSubmissionEvidence(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	configurePromptFixture(fixture, "claude", "Press up to edit queued messages\n")
+	d, _ := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t)}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
+		t.Fatalf("exit=%d want %d", got, panewire.ExitOK)
+	}
+}
+
 func TestPromptKimiAndAgyHaveNoPositiveMatcher(t *testing.T) {
 	for _, harness := range []string{"kimi", "agy"} {
 		t.Run(harness, func(t *testing.T) {
@@ -152,6 +163,20 @@ func TestPromptExpectMismatchDoesNotCallHerdrPrompt(t *testing.T) {
 	}
 	if got := fixture.Requests("agent.prompt"); got != 0 {
 		t.Fatalf("prompt requests=%d want 0", got)
+	}
+}
+
+func TestPromptMissingTargetDoesNotCallHerdrPrompt(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	configurePromptFixture(fixture, "claude", "assistant saw R2-MARKER\n")
+	d, _ := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "missing", "--file", promptFile(t)}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitConditionInvalid {
+		t.Fatalf("exit=%d want %d", got, panewire.ExitConditionInvalid)
+	}
+	if got := fixture.Requests("agent.prompt"); got != 0 {
+		t.Fatalf("prompt requests=%d", got)
 	}
 }
 

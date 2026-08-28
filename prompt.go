@@ -144,9 +144,9 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 			return finishPrompt(ctx, store, d, &codedError{ExitDaemonUnavailable, err})
 		}
 	}
-	acceptedTarget := pane.Agent
+	acceptedTarget := pane.PaneID
 	if acceptedTarget == "" {
-		acceptedTarget = pane.PaneID
+		acceptedTarget = pane.Agent
 	}
 	_, err = client.Call(ctx, "agent.prompt", map[string]any{"target": acceptedTarget, "text": body})
 	d.HerdrAcceptance = "accepted"
@@ -317,9 +317,9 @@ func identityChanged(a, b paneIdentity) bool {
 }
 
 func readPane(ctx context.Context, c *HerdrClient, p paneIdentity, source string) (readEvidence, error) {
-	target := p.Agent
+	target := p.PaneID
 	if target == "" {
-		target = p.PaneID
+		target = p.Agent
 	}
 	raw, err := c.Call(ctx, "agent.read", map[string]any{"target": target, "source": source})
 	if err != nil {
