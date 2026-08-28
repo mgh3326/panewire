@@ -11,6 +11,10 @@
 		<string>--db</string><string>/Users/REPLACE_ME/Library/Application Support/panewire/panewire.sqlite3</string>
 		<string>--inbox-root</string><string>/Users/REPLACE_ME/work/herdr-inbox</string>
 	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key><string>/Users/REPLACE_ME/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+	</dict>
 	<key>RunAtLoad</key><true/>
 	<key>KeepAlive</key><true/>
 	<key>StandardOutPath</key><string>/Users/REPLACE_ME/Library/Logs/panewired.log</string>

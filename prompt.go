@@ -269,6 +269,32 @@ func parsePromptFile(raw string) (expectFields, string, error) {
 	return e, body, nil
 }
 
+// tabLabels joins tab.list into a tab_id→label map. L8(2026-08-29 라이브): herdr 의
+// agent 레코드에는 label 필드가 없다 — 라벨의 정본은 tab.list 다. agent.list 만 읽는
+// 라벨 폴백은 실데이터에서 항상 실패했다(fixture 가 agent 레코드에 label 을 넣어 줘서
+// 통과해 보였을 뿐). tab.list 실패는 라벨 폴백만 잃고 이름 해석은 계속한다(fail-open —
+// 라벨은 폴백 경로라서다).
+func tabLabels(ctx context.Context, c *HerdrClient) map[string]string {
+	raw, err := c.Call(ctx, "tab.list", map[string]any{})
+	if err != nil {
+		return nil
+	}
+	var top struct {
+		Tabs []map[string]any `json:"tabs"`
+	}
+	if json.Unmarshal(raw, &top) != nil {
+		return nil
+	}
+	labels := make(map[string]string, len(top.Tabs))
+	for _, tab := range top.Tabs {
+		id, label := aString(tab, "tab_id"), aString(tab, "label")
+		if id != "" && label != "" {
+			labels[id] = label
+		}
+	}
+	return labels
+}
+
 func resolvePane(ctx context.Context, c *HerdrClient, target string) (paneIdentity, error) {
 	raw, err := c.Call(ctx, "agent.list", map[string]any{})
 	if err != nil {
@@ -280,9 +306,13 @@ func resolvePane(ctx context.Context, c *HerdrClient, target string) (paneIdenti
 	if json.Unmarshal(raw, &top) != nil {
 		return paneIdentity{}, &codedError{ExitConditionInvalid, fmt.Errorf("invalid herdr agent list")}
 	}
+	labels := tabLabels(ctx, c)
 	var named, labeled []paneIdentity
 	for _, a := range top.Agents {
 		p := identityFromMap(a)
+		if p.Label == "" && p.TabID != "" {
+			p.Label = labels[p.TabID]
+		}
 		if p.Agent == target || p.Name == target {
 			named = append(named, p)
 		} else if p.Label == target || p.TabID == target || p.Title == target || aString(a, "tab_label") == target {

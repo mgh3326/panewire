@@ -229,6 +229,39 @@ func TestPromptCompleteSwallowIsUnproven(t *testing.T) {
 	}
 }
 
+// L8 (2026-08-29 라이브): herdr agent 레코드에는 label 필드가 없다 — 라벨은 tab.list 의
+// {tab_id,label} 에만 있다. 리졸버가 agent.list 만 읽으면 라벨 폴백은 실데이터에서 죽은
+// 코드다. 실물 모양(agent 레코드 무라벨 + tab.list 라벨)으로 폴백 경로를 고정한다.
+func TestPromptResolvesUnnamedAgentByRealTabListLabel(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	// 실물 agent 레코드: label/harness/name 없음 — herdr 가 실제로 주는 필드만.
+	fixture.On("agent.list", func() any {
+		return map[string]any{"agents": []any{map[string]any{"agent": "claude", "pane_id": "w:p1", "workspace_id": "w", "tab_id": "w:t9", "cwd": "/work", "revision": 10, "agent_status": "idle"}}}
+	})
+	fixture.On("tab.list", func() any {
+		return map[string]any{"tabs": []any{map[string]any{"tab_id": "w:t9", "label": "claude-mock", "workspace_id": "w"}}}
+	})
+	reads := 0
+	fixture.On("agent.read", func() any {
+		reads++
+		if reads <= 1 {
+			return map[string]any{"text": "idle pane\n", "revision": 10}
+		}
+		return map[string]any{"text": "assistant saw R2-MARKER\n", "revision": 11}
+	})
+	fixture.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
+	d, _ := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	path := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(path, []byte("expect: cwd=/work label=claude-mock\n\nR2-MARKER\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "claude-mock", "--file", path}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != 0 {
+		t.Fatalf("exit=%d want 0", got)
+	}
+}
+
 func TestPromptExpectMismatchDoesNotCallHerdrPrompt(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
