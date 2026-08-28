@@ -90,6 +90,22 @@ func TestPromptClaudeComposerMarkerBetweenDividersIsResidue(t *testing.T) {
 	}
 }
 
+func TestPromptClaudeTransientComposerResidueThenEchoSucceeds(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	configurePromptFixtureSequence(fixture, "claude", []string{
+		"────\n❯ R2-MARKER\n────\nstatus\n",
+		"────\n❯ R2-MARKER\n────\nstatus\n",
+		"❯ R2-MARKER\n────\n❯\n────\nstatus\n",
+	})
+	d, _ := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	args := []string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--timeout", "700ms"}
+	if got := panewire.RunCLI(args, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
+		t.Fatalf("transient composer residue exit=%d want %d", got, panewire.ExitOK)
+	}
+}
+
 func TestPromptPollsSubmissionEvidenceAfterFirstRead(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
@@ -433,6 +449,25 @@ func configurePromptFixturePolling(f *herdrFixture) {
 		default:
 			return map[string]any{"text": "assistant saw R2-MARKER\n", "revision": 11}
 		}
+	})
+	f.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
+}
+
+func configurePromptFixtureSequence(f *herdrFixture, harness string, screens []string) {
+	f.On("agent.list", func() any {
+		return map[string]any{"agents": []any{map[string]any{"agent": "orch", "name": "orch", "label": "orch", "harness": harness, "pane_id": "p1", "workspace_id": "w1", "cwd": "/work", "revision": 10, "agent_status": "idle"}}}
+	})
+	reads := 0
+	f.On("agent.read", func() any {
+		reads++
+		if reads == 1 {
+			return map[string]any{"text": "idle pane\n", "revision": 10}
+		}
+		idx := reads - 2
+		if idx >= len(screens) {
+			idx = len(screens) - 1
+		}
+		return map[string]any{"text": screens[idx], "revision": int64(11 + idx)}
 	})
 	f.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
 }
