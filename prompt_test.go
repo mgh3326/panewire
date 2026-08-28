@@ -57,6 +57,75 @@ func TestPromptCodexPositiveAndNegativeMatchers(t *testing.T) {
 	}
 }
 
+func TestPromptKimiAndAgyHaveNoPositiveMatcher(t *testing.T) {
+	for _, harness := range []string{"kimi", "agy"} {
+		t.Run(harness, func(t *testing.T) {
+			fixture := newHerdrFixture(t, promptFixtureSchema(false))
+			defer fixture.Close()
+			configurePromptFixture(fixture, harness, "assistant saw R2-MARKER\nPress up to edit queued messages\n")
+			d, _ := startPromptDaemon(t, fixture)
+			defer d.Stop()
+			if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t)}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitDeliveryFailure {
+				t.Fatalf("exit=%d want %d", got, panewire.ExitDeliveryFailure)
+			}
+		})
+	}
+}
+
+func TestPromptToolUptakeRequiresHarnessReceiptAndRevision(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	configurePromptFixture(fixture, "codex", "• Ran R2-MARKER\n")
+	d, _ := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--uptake", "tool"}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
+		t.Fatalf("positive exit=%d", got)
+	}
+
+	fixture2 := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture2.Close()
+	configurePromptFixture(fixture2, "codex", "• Ran unrelated command\n")
+	d2, _ := startPromptDaemon(t, fixture2)
+	defer d2.Stop()
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--uptake", "tool"}, panewire.CLIConfig{SocketPath: dSocket(d2)}); got != panewire.ExitDeliveryFailure {
+		t.Fatalf("negative exit=%d", got)
+	}
+}
+
+func TestPromptStatusTransitionNeedsIdleToWorking(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(true))
+	defer fixture.Close()
+	configurePromptFixture(fixture, "claude", "assistant saw R2-MARKER\n")
+	fixture.On("agent.prompt", func() any {
+		go func() {
+			// The event is emitted only after the prompt request is observed.
+			fixture.Event(map[string]any{"event": map[string]any{"type": "pane_agent_status_changed", "pane_id": "p1", "agent_status": "working", "revision": 12}})
+		}()
+		return map[string]any{"accepted": true}
+	})
+	d, _ := startPromptDaemonWithSchema(t, fixture, promptFixtureSchema(true))
+	defer d.Stop()
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--uptake", "status-transition"}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
+		t.Fatalf("transition exit=%d", got)
+	}
+
+	fixture2 := newHerdrFixture(t, promptFixtureSchema(true))
+	defer fixture2.Close()
+	fixture2.On("agent.list", func() any {
+		return map[string]any{"agents": []any{map[string]any{"agent": "orch", "name": "orch", "label": "orch", "harness": "claude", "pane_id": "p1", "workspace_id": "w1", "cwd": "/work", "revision": 10, "agent_status": "working"}}}
+	})
+	fixture2.On("agent.read", func() any { return map[string]any{"text": "assistant saw R2-MARKER\n", "revision": 10} })
+	fixture2.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
+	d2, _ := startPromptDaemonWithSchema(t, fixture2, promptFixtureSchema(true))
+	defer d2.Stop()
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--uptake", "status-transition"}, panewire.CLIConfig{SocketPath: dSocket(d2)}); got != panewire.ExitDeliveryFailure {
+		t.Fatalf("already working exit=%d", got)
+	}
+	if got := fixture2.Requests("agent.prompt"); got != 0 {
+		t.Fatalf("already working prompt requests=%d", got)
+	}
+}
+
 func TestPromptCompleteSwallowIsUnproven(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
@@ -223,7 +292,11 @@ func promptFixtureSchema(events bool) string {
 	if events {
 		methods += `,"events.subscribe"`
 	}
-	return `{"protocol":20,"schema_version":1,"schemas":{"request":{"methods":` + methods + `],"read_source":["visible","recent","recent_unwrapped"]}}}`
+	suffix := ``
+	if events {
+		suffix = `,"subscriptions":["pane.agent_status_changed"]`
+	}
+	return `{"protocol":20,"schema_version":1,"schemas":{"request":{"methods":` + methods + `],"read_source":["visible","recent","recent_unwrapped"]` + suffix + `}}}`
 }
 
 func configurePromptFixture(f *herdrFixture, harness, screen string) {
@@ -242,10 +315,14 @@ func configurePromptFixture(f *herdrFixture, harness, screen string) {
 }
 
 func startPromptDaemon(t *testing.T, fixture *herdrFixture) (*panewire.Daemon, *panewire.Store) {
+	return startPromptDaemonWithSchema(t, fixture, promptFixtureSchema(false))
+}
+
+func startPromptDaemonWithSchema(t *testing.T, fixture *herdrFixture, schemaText string) (*panewire.Daemon, *panewire.Store) {
 	t.Helper()
 	db := panewire.NewMemoryStore(t)
 	schema := filepath.Join(t.TempDir(), "schema.json")
-	if err := os.WriteFile(schema, []byte(promptFixtureSchema(false)), 0600); err != nil {
+	if err := os.WriteFile(schema, []byte(schemaText), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cmd := filepath.Join(t.TempDir(), "schema.sh")

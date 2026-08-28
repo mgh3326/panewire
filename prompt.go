@@ -379,7 +379,7 @@ func classifySubmission(harness, screen, marker string) string {
 	if marker != "" && (strings.Contains(screen, "❯ "+marker) || strings.Contains(screen, "› "+marker)) {
 		return "composer_residue"
 	}
-	if strings.Contains(screen, "Press up to edit queued messages") && !pasteChipRE.MatchString(screen) {
+	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex")) && strings.Contains(screen, "Press up to edit queued messages") && !pasteChipRE.MatchString(screen) {
 		return "queued"
 	}
 	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex")) && marker != "" && strings.Contains(screen, marker) {
