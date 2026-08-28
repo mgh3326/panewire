@@ -106,6 +106,34 @@ func TestPromptClaudeTransientComposerResidueThenEchoSucceeds(t *testing.T) {
 	}
 }
 
+func TestPromptRealHerdrClaudeAgentFieldDrivesClaudeMatcher(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	configureRealHerdrAgentFixture(fixture, "claude", "❯ R2-MARKER\n────\n❯\n────\nstatus\n")
+	d, _ := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	path := promptFileForTarget(t, "pw-scratch")
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "pw-scratch", "--file", path}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
+		t.Fatalf("real herdr Claude agent exit=%d want %d", got, panewire.ExitOK)
+	}
+}
+
+func TestPromptUnknownHerdrHarnessDoesNotUseGlobalChevronResidue(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	configureRealHerdrAgentFixture(fixture, "mystery", "❯ R2-MARKER\n")
+	d, db := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	path := promptFileForTarget(t, "pw-scratch")
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "pw-scratch", "--file", path, "--timeout", "250ms"}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitDeliveryFailure {
+		t.Fatalf("unknown harness exit=%d want %d", got, panewire.ExitDeliveryFailure)
+	}
+	delivery, ok, err := db.LatestDelivery(t.Context())
+	if err != nil || !ok || delivery.SubmissionResult != "unproven" {
+		t.Fatalf("unknown harness submission=%q delivery=%+v err=%v", delivery.SubmissionResult, delivery, err)
+	}
+}
+
 func TestPromptPollsSubmissionEvidenceAfterFirstRead(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
@@ -470,6 +498,33 @@ func configurePromptFixtureSequence(f *herdrFixture, harness string, screens []s
 		return map[string]any{"text": screens[idx], "revision": int64(11 + idx)}
 	})
 	f.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
+}
+
+func configureRealHerdrAgentFixture(f *herdrFixture, agent, screen string) {
+	f.On("agent.list", func() any {
+		return map[string]any{"agents": []any{map[string]any{
+			"agent": agent, "name": "pw-scratch", "display_agent": nil, "title": nil,
+			"pane_id": "p1", "workspace_id": "w1", "cwd": "/work", "revision": 10, "agent_status": "idle",
+		}}}
+	})
+	reads := 0
+	f.On("agent.read", func() any {
+		reads++
+		if reads == 1 {
+			return map[string]any{"text": "idle pane\n", "revision": 10}
+		}
+		return map[string]any{"text": screen, "revision": 11}
+	})
+	f.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
+}
+
+func promptFileForTarget(t *testing.T, target string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "prompt.md")
+	if err := os.WriteFile(path, []byte("expect: name="+target+" cwd=/work\n\nR2-MARKER\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func startPromptDaemon(t *testing.T, fixture *herdrFixture) (*panewire.Daemon, *panewire.Store) {
