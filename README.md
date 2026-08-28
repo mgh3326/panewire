@@ -40,7 +40,7 @@ panewire prompt --from 'sender (role, pane-id)' --to orch-mock \
   --file "$HOME/work/herdr-inbox/jobs/example/prompt.md" --uptake status-transition
 ```
 
-Prompt files begin with recipient metadata such as `expect: name=orch-mock cwd=/work`; `name=` or `cwd=` is required. Panewire records the prompt SHA-256, path, target identity, revisions, and evidence states, but does not store prompt text by default. To opt in, pass `--store-prompt-body` to `panewire prompt` or configure the daemon with `--store-prompt-body`; the body is then kept only in the separate `delivery_bodies` table.
+Prompt files begin with recipient metadata such as `expect: name=orch-mock cwd=/work`; `name=` or `cwd=` is required. `cwd=` uses exact absolute-path matching. Panewire records the prompt SHA-256, path, target identity, revisions, and evidence states, but does not store prompt text by default. To opt in, pass `--store-prompt-body` to `panewire prompt` or configure the daemon with `--store-prompt-body`; the body is then kept only in the separate `delivery_bodies` table.
 
 The CLI never falls back to herdr directly. If the daemon socket is absent it exits 4. `PANEWIRE_SOCKET` is available for tests and non-default local installations.
 

@@ -21,6 +21,7 @@ type PromptRequest struct {
 type PromptResult struct {
 	DeliveryID, PreflightResult, SubmissionResult, UptakeResult string
 	PreflightRevision, SendRevision, EvidenceRevision           int64
+	Cached                                                      bool `json:"cached,omitempty"`
 }
 
 type paneIdentity struct {
@@ -64,7 +65,18 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	if old, ok, e := store.GetDelivery(ctx, id); e != nil {
 		return PromptResult{}, &codedError{ExitInternal, e}
 	} else if ok {
-		return deliveryResult(old), deliveryError(old)
+		if old.CompletedAtMS == 0 {
+			return cachedDeliveryResult(old), deliveryError(old)
+		}
+		// A preflight rejection never reached herdr, so retrying after the
+		// operator corrects expect/identity cannot create a duplicate injection.
+		if old.HerdrAcceptance == "" {
+			if e := store.DeleteDelivery(ctx, id); e != nil {
+				return PromptResult{}, &codedError{ExitInternal, e}
+			}
+		} else {
+			return cachedDeliveryResult(old), deliveryError(old)
+		}
 	}
 
 	if !caps.Prompt || !caps.AgentRead {
@@ -94,7 +106,8 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 		}
 	}
 	if !matchesExpect(expect, pane, pre.Text) {
-		return recordFailureForRequestWithPane(ctx, store, id, req, promptHash, body, req.StorePromptBody, pane, pre.Revision, digest(pre.Text), "mismatch", &codedError{ExitConditionInvalid, fmt.Errorf("recipient identity does not match expect")})
+		failed := expectFailures(expect, pane, pre.Text)
+		return recordFailureForRequestWithPaneDetail(ctx, store, id, req, promptHash, body, req.StorePromptBody, pane, pre.Revision, digest(pre.Text), "mismatch", "expect_failed="+strings.Join(failed, ","), &codedError{ExitConditionInvalid, fmt.Errorf("recipient identity does not match expect")})
 	}
 	if req.Uptake != "" && pane.Status == "working" {
 		return recordFailureForRequestWithPane(ctx, store, id, req, promptHash, body, req.StorePromptBody, pane, pre.Revision, digest(pre.Text), "passed", &codedError{ExitDeliveryFailure, fmt.Errorf("uptake_unproven: target is already working")})
@@ -131,7 +144,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 		if e != nil || !ok {
 			return PromptResult{}, &codedError{ExitInternal, fmt.Errorf("correlation id already exists but cannot be read")}
 		}
-		return deliveryResult(old), deliveryError(old)
+		return cachedDeliveryResult(old), deliveryError(old)
 	}
 
 	var statusEvents <-chan HerdrEvent
@@ -159,10 +172,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 		return finishPrompt(ctx, store, d, &codedError{code, fmt.Errorf("herdr prompt rejected: %w", err)})
 	}
 
-	post, postErr := readPane(ctx, client, pane, "recent_unwrapped")
-	if postErr == nil && post.Text == "" {
-		post, postErr = readPane(ctx, client, pane, "visible")
-	}
+	post, submission, postErr := pollSubmission(ctx, client, pane, markerFor(body))
 	if postErr != nil {
 		d.SubmissionResult = "unproven"
 		code := ExitDeliveryFailure
@@ -171,7 +181,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 		}
 		return finishPrompt(ctx, store, d, &codedError{code, postErr})
 	}
-	d.SubmissionResult = classifySubmission(pane.Harness, post.Text, markerFor(body))
+	d.SubmissionResult = submission
 	d.EvidenceRevision = post.Revision
 	if post.Revision == 0 {
 		d.EvidenceRevision = sendPane.Revision
@@ -378,22 +388,26 @@ func markerFor(body string) string {
 }
 
 func matchesExpect(e expectFields, p paneIdentity, recent string) bool {
+	return len(expectFailures(e, p, recent)) == 0
+}
+func expectFailures(e expectFields, p paneIdentity, recent string) []string {
+	failed := make([]string, 0, 5)
 	if e.Name != "" && e.Name != p.Agent && e.Name != p.Name {
-		return false
+		failed = append(failed, "name")
 	}
 	if e.Label != "" && e.Label != p.Label && e.Label != p.Title {
-		return false
+		failed = append(failed, "label")
 	}
 	if e.CWD != "" && e.CWD != p.CWD {
-		return false
+		failed = append(failed, "cwd")
 	}
 	if e.TitleContains != "" && !strings.Contains(p.Title, e.TitleContains) {
-		return false
+		failed = append(failed, "title~")
 	}
 	if e.RecentContains != "" && !strings.Contains(recent, e.RecentContains) {
-		return false
+		failed = append(failed, "recent~")
 	}
-	return true
+	return failed
 }
 func classifySubmission(harness, screen, marker string) string {
 	if pasteChipRE.MatchString(screen) {
@@ -423,11 +437,46 @@ func toolReceipt(harness, screen, marker string, evidenceRevision, sendRevision 
 	return false
 }
 
+func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, marker string) (readEvidence, string, error) {
+	var last readEvidence
+	for {
+		post, err := readPane(ctx, c, p, "recent_unwrapped")
+		if err == nil && post.Text == "" {
+			post, err = readPane(ctx, c, p, "visible")
+		}
+		if err != nil {
+			if ctx.Err() != nil {
+				return last, "unproven", nil
+			}
+			return last, "unproven", err
+		}
+		last = post
+		result := classifySubmission(p.Harness, post.Text, marker)
+		if result != "unproven" {
+			return post, result, nil
+		}
+		timer := time.NewTimer(20 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return last, "unproven", nil
+		case <-timer.C:
+		}
+	}
+}
+
 func correlationID(sender, target, path, hash, uptake string) string {
 	return digest(sender + "\x00" + target + "\x00" + path + "\x00" + hash + "\x00" + uptake)
 }
 func deliveryResult(d Delivery) PromptResult {
 	return PromptResult{DeliveryID: d.DeliveryID, PreflightResult: d.PreflightResult, SubmissionResult: d.SubmissionResult, UptakeResult: d.UptakeResult, PreflightRevision: d.PreflightRevision, SendRevision: d.SendRevision, EvidenceRevision: d.EvidenceRevision}
+}
+func cachedDeliveryResult(d Delivery) PromptResult {
+	r := deliveryResult(d)
+	r.Cached = true
+	return r
 }
 func deliveryError(d Delivery) error {
 	if d.CompletedAtMS == 0 {
@@ -452,17 +501,21 @@ func recordNewFailure(ctx context.Context, s *Store, d Delivery, body string, st
 	d.BodyStored = storeBody
 	d.CompletedAtMS = time.Now().UnixMilli()
 	d.ErrorCode = errorCodeFor(code)
-	if _, err := s.InsertDelivery(ctx, d, body); err != nil {
+	if _, err := s.InsertDelivery(context.WithoutCancel(ctx), d, body); err != nil {
 		return PromptResult{}, &codedError{ExitInternal, err}
 	}
 	return deliveryResult(d), &codedError{code, fmt.Errorf("%s", msg)}
 }
 func recordFailureForRequest(ctx context.Context, s *Store, id string, req PromptRequest, hash, body string, storeBody bool, result string, err error) (PromptResult, error) {
-	return recordFailureForRequestWithPane(ctx, s, id, req, hash, body, storeBody, paneIdentity{}, 0, "", result, err)
+	return recordFailureForRequestWithPaneDetail(ctx, s, id, req, hash, body, storeBody, paneIdentity{}, 0, "", result, "", err)
 }
 func recordFailureForRequestWithPane(ctx context.Context, s *Store, id string, req PromptRequest, hash, body string, storeBody bool, p paneIdentity, revision int64, readHash, result string, err error) (PromptResult, error) {
+	return recordFailureForRequestWithPaneDetail(ctx, s, id, req, hash, body, storeBody, p, revision, readHash, result, "", err)
+}
+func recordFailureForRequestWithPaneDetail(ctx context.Context, s *Store, id string, req PromptRequest, hash, body string, storeBody bool, p paneIdentity, revision int64, readHash, result, detail string, err error) (PromptResult, error) {
 	d := Delivery{DeliveryID: id, Sender: req.Sender, TargetInput: req.Target, ResolvedPaneID: p.PaneID, ResolvedWorkspaceID: p.WorkspaceID, SourcePath: req.Path, PromptSHA256: hash, BodyStored: storeBody, RequestedAtMS: time.Now().UnixMilli(), CompletedAtMS: time.Now().UnixMilli(), PreflightRevision: revision, PreflightReadSHA256: readHash, PreflightResult: result, UptakeMode: req.Uptake, UptakeResult: "not_requested", ErrorCode: errorCodeFor(ExitCode(err))}
-	if _, e := s.InsertDelivery(ctx, d, body); e != nil {
+	d.ErrorDetail = detail
+	if _, e := s.InsertDelivery(context.WithoutCancel(ctx), d, body); e != nil {
 		return PromptResult{}, &codedError{ExitInternal, e}
 	}
 	return deliveryResult(d), err
@@ -472,7 +525,7 @@ func finishPrompt(ctx context.Context, s *Store, d Delivery, err error) (PromptR
 	if err != nil && d.ErrorCode == "" {
 		d.ErrorCode = errorCodeFor(ExitCode(err))
 	}
-	if e := s.UpdateDelivery(ctx, d); e != nil {
+	if e := s.UpdateDelivery(context.WithoutCancel(ctx), d); e != nil {
 		return PromptResult{}, &codedError{ExitInternal, e}
 	}
 	return deliveryResult(d), err

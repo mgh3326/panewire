@@ -24,7 +24,7 @@ type Delivery struct {
 	DeliveryID, Sender, TargetInput, ResolvedPaneID, ResolvedWorkspaceID string
 	SourcePath, PromptSHA256, PreflightReadSHA256, PreflightResult       string
 	HerdrAcceptance, SubmissionResult, UptakeMode, UptakeResult          string
-	ErrorCode                                                            string
+	ErrorCode, ErrorDetail                                               string
 	RequestedAtMS, CompletedAtMS, PreflightRevision, SendRevision        int64
 	EvidenceRevision                                                     int64
 	BodyStored                                                           bool
@@ -67,6 +67,9 @@ func OpenStore(path string) (*Store, error) {
 			return nil, err
 		}
 	}
+	// R3 adds detail for structured expect mismatch reasons. Ignore the
+	// duplicate-column error when opening a database already migrated.
+	_, _ = db.Exec(`ALTER TABLE deliveries ADD COLUMN error_detail TEXT`)
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS delivery_bodies (
 	 delivery_id TEXT PRIMARY KEY REFERENCES deliveries(delivery_id) ON DELETE CASCADE,
 	 body TEXT NOT NULL
@@ -166,10 +169,10 @@ func (s *Store) GetDelivery(ctx context.Context, id string) (Delivery, bool, err
 	var requested, completed, preflight, send, evidence sql.NullInt64
 	err := s.db.QueryRowContext(ctx, `SELECT delivery_id,requested_at_ms,completed_at_ms,sender,target_input,
 resolved_pane_id,resolved_workspace_id,source_path,prompt_sha256,body_stored,preflight_revision,send_revision,
-preflight_read_sha256,preflight_result,herdr_acceptance,submission_result,uptake_mode,uptake_result,evidence_revision,error_code
+preflight_read_sha256,preflight_result,herdr_acceptance,submission_result,uptake_mode,uptake_result,evidence_revision,error_code,error_detail
 	FROM deliveries WHERE delivery_id=?`, id).Scan(&d.DeliveryID, &requested, &completed, &d.Sender, &d.TargetInput,
 		&d.ResolvedPaneID, &d.ResolvedWorkspaceID, &d.SourcePath, &d.PromptSHA256, &stored, &preflight, &send,
-		&d.PreflightReadSHA256, &d.PreflightResult, &d.HerdrAcceptance, &d.SubmissionResult, &d.UptakeMode, &d.UptakeResult, &evidence, &d.ErrorCode)
+		&d.PreflightReadSHA256, &d.PreflightResult, &d.HerdrAcceptance, &d.SubmissionResult, &d.UptakeMode, &d.UptakeResult, &evidence, &d.ErrorCode, &d.ErrorDetail)
 	if err == sql.ErrNoRows {
 		return Delivery{}, false, nil
 	}
@@ -208,11 +211,11 @@ func (s *Store) InsertDelivery(ctx context.Context, d Delivery, body string) (bo
 	defer tx.Rollback()
 	_, err = tx.ExecContext(ctx, `INSERT INTO deliveries(delivery_id,requested_at_ms,completed_at_ms,sender,target_input,
 resolved_pane_id,resolved_workspace_id,source_path,prompt_sha256,body_stored,preflight_revision,send_revision,
-preflight_read_sha256,preflight_result,herdr_acceptance,submission_result,uptake_mode,uptake_result,evidence_revision,error_code)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, d.DeliveryID, d.RequestedAtMS, d.CompletedAtMS, d.Sender, d.TargetInput,
+preflight_read_sha256,preflight_result,herdr_acceptance,submission_result,uptake_mode,uptake_result,evidence_revision,error_code,error_detail)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, d.DeliveryID, d.RequestedAtMS, d.CompletedAtMS, d.Sender, d.TargetInput,
 		d.ResolvedPaneID, d.ResolvedWorkspaceID, d.SourcePath, d.PromptSHA256, boolInt(d.BodyStored), nullableInt(d.PreflightRevision),
 		nullableInt(d.SendRevision), d.PreflightReadSHA256, d.PreflightResult, d.HerdrAcceptance, d.SubmissionResult, d.UptakeMode,
-		d.UptakeResult, nullableInt(d.EvidenceRevision), d.ErrorCode)
+		d.UptakeResult, nullableInt(d.EvidenceRevision), d.ErrorCode, d.ErrorDetail)
 	if err != nil {
 		return false, err
 	}
@@ -232,9 +235,16 @@ func (s *Store) UpdateDelivery(ctx context.Context, d Delivery) error {
 	defer s.mu.Unlock()
 	_, err := s.db.ExecContext(ctx, `UPDATE deliveries SET completed_at_ms=?,resolved_pane_id=?,resolved_workspace_id=?,
 preflight_revision=?,send_revision=?,preflight_read_sha256=?,preflight_result=?,herdr_acceptance=?,submission_result=?,
-uptake_mode=?,uptake_result=?,evidence_revision=?,error_code=? WHERE delivery_id=?`, d.CompletedAtMS, d.ResolvedPaneID,
+uptake_mode=?,uptake_result=?,evidence_revision=?,error_code=?,error_detail=? WHERE delivery_id=?`, d.CompletedAtMS, d.ResolvedPaneID,
 		d.ResolvedWorkspaceID, nullableInt(d.PreflightRevision), nullableInt(d.SendRevision), d.PreflightReadSHA256, d.PreflightResult,
-		d.HerdrAcceptance, d.SubmissionResult, d.UptakeMode, d.UptakeResult, nullableInt(d.EvidenceRevision), d.ErrorCode, d.DeliveryID)
+		d.HerdrAcceptance, d.SubmissionResult, d.UptakeMode, d.UptakeResult, nullableInt(d.EvidenceRevision), d.ErrorCode, d.ErrorDetail, d.DeliveryID)
+	return err
+}
+
+func (s *Store) DeleteDelivery(ctx context.Context, id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM deliveries WHERE delivery_id=?`, id)
 	return err
 }
 

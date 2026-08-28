@@ -81,6 +81,11 @@ func RunCLI(args []string, cfg CLIConfig) int {
 		}
 		return resp.Code
 	}
+	if result, ok := resp.Result.(map[string]any); ok {
+		if cached, _ := result["cached"].(bool); cached {
+			fmt.Fprintln(os.Stderr, "cached delivery; no prompt reinjected")
+		}
+	}
 	return ExitOK
 }
 
@@ -91,7 +96,7 @@ func runPromptCLI(args []string, cfg CLIConfig) int {
 	target := fs.String("to", "", "recipient target")
 	file := fs.String("file", "", "prompt file")
 	uptake := fs.String("uptake", "", "uptake mode")
-	timeout := fs.Duration("timeout", 30*time.Second, "overall timeout")
+	timeout := fs.Duration("timeout", 2*time.Second, "overall timeout")
 	storeBody := fs.Bool("store-prompt-body", false, "opt in to storing prompt body")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
