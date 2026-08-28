@@ -172,6 +172,9 @@ type localRequest struct {
 	Op        string `json:"op"`
 	Path      string `json:"path,omitempty"`
 	Target    string `json:"target,omitempty"`
+	Sender    string `json:"sender,omitempty"`
+	Uptake    string `json:"uptake,omitempty"`
+	StoreBody bool   `json:"store_body,omitempty"`
 	Status    string `json:"status,omitempty"`
 	SettleMS  int64  `json:"settle_ms,omitempty"`
 	TimeoutMS int64  `json:"timeout_ms,omitempty"`
@@ -215,6 +218,18 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 					_ = c2.Close()
 				}
 			}
+		case "prompt":
+			if !d.caps.Prompt || !d.caps.AgentRead {
+				err = &codedError{ExitDaemonUnavailable, fmt.Errorf("prompt capability unavailable")}
+			} else {
+				c2, e := NewHerdrClient(d.cfg.HerdrSocket)
+				if e != nil {
+					err = &codedError{ExitDaemonUnavailable, e}
+				} else {
+					result, err = Prompt(callCtx, d.store, c2, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody}, d.caps)
+					_ = c2.Close()
+				}
+			}
 		default:
 			err = &codedError{ExitUsage, fmt.Errorf("unknown operation")}
 		}
@@ -250,6 +265,12 @@ func (d *Daemon) Stop() error {
 		return d.store.Close()
 	}
 	return nil
+}
+func (d *Daemon) SocketPath() string {
+	if d.cfg.SocketPath != "" {
+		return d.cfg.SocketPath
+	}
+	return defaultSocketPath()
 }
 func defaultSocketPath() string {
 	home, _ := os.UserHomeDir()

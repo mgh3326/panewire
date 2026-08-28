@@ -19,6 +19,17 @@ type Store struct {
 	mu   sync.Mutex
 }
 
+// Delivery is the durable, body-free audit record for one prompt request.
+type Delivery struct {
+	DeliveryID, Sender, TargetInput, ResolvedPaneID, ResolvedWorkspaceID string
+	SourcePath, PromptSHA256, PreflightReadSHA256, PreflightResult       string
+	HerdrAcceptance, SubmissionResult, UptakeMode, UptakeResult          string
+	ErrorCode                                                            string
+	RequestedAtMS, CompletedAtMS, PreflightRevision, SendRevision        int64
+	EvidenceRevision                                                     int64
+	BodyStored                                                           bool
+}
+
 // NewMemoryStore is a temporary on-disk SQLite store for fixtures and callers
 // that need persistence without choosing a production path.
 func NewMemoryStore(t interface{ TempDir() string }) *Store {
@@ -55,6 +66,13 @@ func OpenStore(path string) (*Store, error) {
 			db.Close()
 			return nil, err
 		}
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS delivery_bodies (
+	 delivery_id TEXT PRIMARY KEY REFERENCES deliveries(delivery_id) ON DELETE CASCADE,
+	 body TEXT NOT NULL
+)`); err != nil {
+		db.Close()
+		return nil, err
 	}
 	return s, nil
 }
@@ -108,4 +126,115 @@ func (s *Store) ContainsPayload(value string) bool {
 	var n int
 	_ = s.db.QueryRow(`SELECT count(*) FROM events WHERE payload_json LIKE ?`, "%"+value+"%").Scan(&n)
 	return n > 0
+}
+
+func (s *Store) CountDeliveries() int {
+	var n int
+	_ = s.db.QueryRow(`SELECT count(*) FROM deliveries`).Scan(&n)
+	return n
+}
+
+func (s *Store) LatestDelivery(ctx context.Context) (Delivery, bool, error) {
+	var id string
+	err := s.db.QueryRowContext(ctx, `SELECT delivery_id FROM deliveries ORDER BY requested_at_ms DESC LIMIT 1`).Scan(&id)
+	if err == sql.ErrNoRows {
+		return Delivery{}, false, nil
+	}
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	return s.GetDelivery(ctx, id)
+}
+
+func (s *Store) PromptBody(ctx context.Context, id string) (string, bool, error) {
+	var body string
+	err := s.db.QueryRowContext(ctx, `SELECT body FROM delivery_bodies WHERE delivery_id=?`, id).Scan(&body)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return body, true, nil
+}
+
+func (s *Store) GetDelivery(ctx context.Context, id string) (Delivery, bool, error) {
+	var d Delivery
+	var stored int
+	var requested, completed, preflight, send, evidence sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT delivery_id,requested_at_ms,completed_at_ms,sender,target_input,
+resolved_pane_id,resolved_workspace_id,source_path,prompt_sha256,body_stored,preflight_revision,send_revision,
+preflight_read_sha256,preflight_result,herdr_acceptance,submission_result,uptake_mode,uptake_result,evidence_revision,error_code
+	FROM deliveries WHERE delivery_id=?`, id).Scan(&d.DeliveryID, &requested, &completed, &d.Sender, &d.TargetInput,
+		&d.ResolvedPaneID, &d.ResolvedWorkspaceID, &d.SourcePath, &d.PromptSHA256, &stored, &preflight, &send,
+		&d.PreflightReadSHA256, &d.PreflightResult, &d.HerdrAcceptance, &d.SubmissionResult, &d.UptakeMode, &d.UptakeResult, &evidence, &d.ErrorCode)
+	if err == sql.ErrNoRows {
+		return Delivery{}, false, nil
+	}
+	if err != nil {
+		return Delivery{}, false, err
+	}
+	d.BodyStored = stored != 0
+	if requested.Valid {
+		d.RequestedAtMS = requested.Int64
+	}
+	if completed.Valid {
+		d.CompletedAtMS = completed.Int64
+	}
+	if preflight.Valid {
+		d.PreflightRevision = preflight.Int64
+	}
+	if send.Valid {
+		d.SendRevision = send.Int64
+	}
+	if evidence.Valid {
+		d.EvidenceRevision = evidence.Int64
+	}
+	return d, true, nil
+}
+
+// InsertDelivery commits the preflight record before any herdr prompt call.
+// It returns false when the correlation id already exists, making retries
+// idempotent across CLI processes.
+func (s *Store) InsertDelivery(ctx context.Context, d Delivery, body string) (bool, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	_, err = tx.ExecContext(ctx, `INSERT INTO deliveries(delivery_id,requested_at_ms,completed_at_ms,sender,target_input,
+resolved_pane_id,resolved_workspace_id,source_path,prompt_sha256,body_stored,preflight_revision,send_revision,
+preflight_read_sha256,preflight_result,herdr_acceptance,submission_result,uptake_mode,uptake_result,evidence_revision,error_code)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, d.DeliveryID, d.RequestedAtMS, d.CompletedAtMS, d.Sender, d.TargetInput,
+		d.ResolvedPaneID, d.ResolvedWorkspaceID, d.SourcePath, d.PromptSHA256, boolInt(d.BodyStored), nullableInt(d.PreflightRevision),
+		nullableInt(d.SendRevision), d.PreflightReadSHA256, d.PreflightResult, d.HerdrAcceptance, d.SubmissionResult, d.UptakeMode,
+		d.UptakeResult, nullableInt(d.EvidenceRevision), d.ErrorCode)
+	if err != nil {
+		return false, err
+	}
+	if d.BodyStored {
+		if _, err = tx.ExecContext(ctx, `INSERT INTO delivery_bodies(delivery_id,body) VALUES(?,?)`, d.DeliveryID, body); err != nil {
+			return false, err
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (s *Store) UpdateDelivery(ctx context.Context, d Delivery) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE deliveries SET completed_at_ms=?,resolved_pane_id=?,resolved_workspace_id=?,
+preflight_revision=?,send_revision=?,preflight_read_sha256=?,preflight_result=?,herdr_acceptance=?,submission_result=?,
+uptake_mode=?,uptake_result=?,evidence_revision=?,error_code=? WHERE delivery_id=?`, d.CompletedAtMS, d.ResolvedPaneID,
+		d.ResolvedWorkspaceID, nullableInt(d.PreflightRevision), nullableInt(d.SendRevision), d.PreflightReadSHA256, d.PreflightResult,
+		d.HerdrAcceptance, d.SubmissionResult, d.UptakeMode, d.UptakeResult, nullableInt(d.EvidenceRevision), d.ErrorCode, d.DeliveryID)
+	return err
+}
+
+func boolInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }

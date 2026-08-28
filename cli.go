@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 )
 
 type CLIConfig struct{ SocketPath string }
@@ -18,6 +19,9 @@ type CLIConfig struct{ SocketPath string }
 func RunCLI(args []string, cfg CLIConfig) int {
 	if len(args) == 0 {
 		return ExitUsage
+	}
+	if args[0] == "prompt" {
+		return runPromptCLI(args[1:], cfg)
 	}
 	if args[0] != "wait" {
 		return ExitUsage
@@ -59,6 +63,53 @@ func RunCLI(args []string, cfg CLIConfig) int {
 		op = "wait.agent"
 	}
 	req := localRequest{Op: op, Path: *file, Target: *agent, Status: *status, SettleMS: settle.Milliseconds(), TimeoutMS: timeout.Milliseconds()}
+	b, _ := json.Marshal(req)
+	if _, err = fmt.Fprintf(conn, "%s\n", b); err != nil {
+		return ExitDaemonUnavailable
+	}
+	scan := bufio.NewScanner(conn)
+	if !scan.Scan() {
+		return ExitDaemonUnavailable
+	}
+	var resp localResponse
+	if json.Unmarshal(scan.Bytes(), &resp) != nil {
+		return ExitInternal
+	}
+	if !resp.OK {
+		if resp.Error != "" {
+			fmt.Fprintln(os.Stderr, resp.Error)
+		}
+		return resp.Code
+	}
+	return ExitOK
+}
+
+func runPromptCLI(args []string, cfg CLIConfig) int {
+	fs := flag.NewFlagSet("panewire prompt", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	sender := fs.String("from", "", "sender provenance")
+	target := fs.String("to", "", "recipient target")
+	file := fs.String("file", "", "prompt file")
+	uptake := fs.String("uptake", "", "uptake mode")
+	timeout := fs.Duration("timeout", 30*time.Second, "overall timeout")
+	storeBody := fs.Bool("store-prompt-body", false, "opt in to storing prompt body")
+	if err := fs.Parse(args); err != nil {
+		return ExitUsage
+	}
+	if *sender == "" || *target == "" || *file == "" || *timeout <= 0 || (*uptake != "" && *uptake != "tool" && *uptake != "status-transition") {
+		return ExitConditionInvalid
+	}
+	path := cfg.SocketPath
+	if path == "" {
+		path = socketPathFromEnv()
+	}
+	conn, err := net.Dial("unix", path)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "panewired unavailable: %s\n", path)
+		return ExitDaemonUnavailable
+	}
+	defer conn.Close()
+	req := localRequest{Op: "prompt", Sender: *sender, Target: *target, Path: *file, Uptake: *uptake, StoreBody: *storeBody, TimeoutMS: timeout.Milliseconds()}
 	b, _ := json.Marshal(req)
 	if _, err = fmt.Fprintf(conn, "%s\n", b); err != nil {
 		return ExitDaemonUnavailable

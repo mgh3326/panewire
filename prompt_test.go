@@ -103,6 +103,120 @@ func TestPromptRetryDoesNotInjectTwice(t *testing.T) {
 	}
 }
 
+func TestPromptLabelFallbackAndRevisionDriftAreRecorded(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	lists := 0
+	fixture.On("agent.list", func() any {
+		lists++
+		return map[string]any{"agents": []any{map[string]any{"label": "tab-one", "pane_id": "p1", "workspace_id": "w1", "cwd": "/work", "harness": "claude", "revision": 10 + lists - 1, "agent_status": "idle"}}}
+	})
+	reads := 0
+	fixture.On("agent.read", func() any {
+		reads++
+		if reads == 1 {
+			return map[string]any{"text": "idle pane\n", "revision": 10}
+		}
+		return map[string]any{"text": "assistant saw R2-MARKER\n", "revision": 11}
+	})
+	d, db := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	path := filepath.Join(t.TempDir(), "label-prompt.md")
+	if err := os.WriteFile(path, []byte("expect: label=tab-one cwd=/work\n\nR2-MARKER\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "tab-one", "--file", path}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
+		t.Fatalf("exit=%d", got)
+	}
+	delivery, ok, err := db.LatestDelivery(t.Context())
+	if err != nil || !ok {
+		t.Fatalf("delivery=%+v ok=%v err=%v", delivery, ok, err)
+	}
+	if delivery.ResolvedPaneID != "p1" || delivery.PreflightRevision != 10 || delivery.SendRevision != 11 || delivery.PreflightResult != "passed" {
+		t.Fatalf("delivery=%+v", delivery)
+	}
+}
+
+func TestPromptIdentityChangeAndAmbiguousLabelAreFailClosed(t *testing.T) {
+	tests := []struct {
+		name string
+		list func(int) any
+	}{
+		{"pane id changed", func(n int) any {
+			pane := map[string]any{"agent": "orch", "name": "orch", "pane_id": "p1", "workspace_id": "w1", "cwd": "/work", "harness": "claude", "revision": 10, "agent_status": "idle"}
+			if n > 1 {
+				pane["pane_id"] = "p2"
+			}
+			return map[string]any{"agents": []any{pane}}
+		}},
+		{"ambiguous label", func(n int) any {
+			return map[string]any{"agents": []any{
+				map[string]any{"label": "same", "pane_id": "p1", "cwd": "/work", "harness": "claude", "agent_status": "idle"},
+				map[string]any{"label": "same", "pane_id": "p2", "cwd": "/work", "harness": "claude", "agent_status": "idle"},
+			}}
+		}},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newHerdrFixture(t, promptFixtureSchema(false))
+			defer fixture.Close()
+			calls := 0
+			fixture.On("agent.list", func() any { calls++; return tc.list(calls) })
+			fixture.On("agent.read", func() any { return map[string]any{"text": "idle pane\n", "revision": 10} })
+			d, _ := startPromptDaemon(t, fixture)
+			defer d.Stop()
+			target := "orch"
+			if tc.name == "ambiguous label" {
+				target = "same"
+			}
+			if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", target, "--file", promptFile(t)}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitConditionInvalid {
+				t.Fatalf("exit=%d", got)
+			}
+			if got := fixture.Requests("agent.prompt"); got != 0 {
+				t.Fatalf("prompt requests=%d", got)
+			}
+		})
+	}
+}
+
+func TestPromptPrivacyBodyOptInOnly(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture.Close()
+	configurePromptFixture(fixture, "claude", "assistant saw R2-MARKER\n")
+	d, db := startPromptDaemon(t, fixture)
+	defer d.Stop()
+	path := promptFile(t)
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", path}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
+		t.Fatalf("default exit=%d", got)
+	}
+	delivery, ok, err := db.LatestDelivery(t.Context())
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	if delivery.BodyStored {
+		t.Fatal("body stored by default")
+	}
+	if body, found, err := db.PromptBody(t.Context(), delivery.DeliveryID); err != nil || found || body != "" {
+		t.Fatalf("default body=%q found=%v err=%v", body, found, err)
+	}
+
+	fixture2 := newHerdrFixture(t, promptFixtureSchema(false))
+	defer fixture2.Close()
+	configurePromptFixture(fixture2, "claude", "assistant saw R2-MARKER\n")
+	d2, db2 := startPromptDaemon(t, fixture2)
+	defer d2.Stop()
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--store-prompt-body"}, panewire.CLIConfig{SocketPath: dSocket(d2)}); got != panewire.ExitOK {
+		t.Fatalf("opt-in exit=%d", got)
+	}
+	delivery2, ok, err := db2.LatestDelivery(t.Context())
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	if body, found, err := db2.PromptBody(t.Context(), delivery2.DeliveryID); err != nil || !found || body == "" {
+		t.Fatalf("opt-in body=%q found=%v err=%v", body, found, err)
+	}
+}
+
 func promptFixtureSchema(events bool) string {
 	methods := `[` +
 		`"agent.read","agent.prompt","agent.list"`
@@ -138,7 +252,9 @@ func startPromptDaemon(t *testing.T, fixture *herdrFixture) (*panewire.Daemon, *
 	if err := os.WriteFile(cmd, []byte("#!/bin/sh\ncat \"$1\"\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	d := panewire.NewDaemon(panewire.Config{Store: db, SocketPath: filepath.Join(t.TempDir(), "panewire.sock"), HerdrSocket: fixture.Path(), SchemaCommand: []string{"sh", cmd, schema}})
+	socket := filepath.Join("/tmp", "pw-d-"+filepath.Base(t.TempDir())+".sock")
+	t.Cleanup(func() { _ = os.Remove(socket) })
+	d := panewire.NewDaemon(panewire.Config{Store: db, SocketPath: socket, HerdrSocket: fixture.Path(), SchemaCommand: []string{"sh", cmd, schema}})
 	if err := d.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
