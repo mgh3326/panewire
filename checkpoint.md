@@ -1,4 +1,4 @@
 ROB-1320 R1 checkpoint
-HEAD: implementation hardening committed after 01714ef; tests-first RED remains c7667bc
-Completed: R1-1 schema guard, R1-2 events/inbox watcher, R1-3 file wait, R1-4 agent wait, R1-5 daemon-only CLI
-Next: final vet/test output, live read-only smoke evidence, push and open PR without merge
+HEAD: envelope/lifecycle regression committed after 7a1c1ef; tests-first RED remains c7667bc
+Completed: R1-1 through R1-5 with real one-shot herdr calls and stream subscription handling
+Next: capture final live read-only smoke, push branch, create PR(base=main), write report
