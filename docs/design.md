@@ -100,7 +100,7 @@ flowchart LR
   H <--> P
 ```
 
-`panewired`는 사용자 launchd agent로 상주한다. 시작할 때 herdr schema drift guard를 수행하고, herdr unix socket에 subscription을 열며, 설정된 inbox root를 fsnotify로 감시한다. fsnotify 이벤트는 파일 출현을 알리는 신호일 뿐이며, 완료 판정은 실제 파일 `stat`/내용 read와 settle 검증으로 한다.
+`panewired`는 사용자 launchd agent로 상주한다. 시작할 때 herdr schema drift guard를 수행하고, herdr unix socket에 subscription을 열며, 설정된 inbox root를 fsnotify로 감시한다. fsnotify 이벤트는 파일 출현을 알리는 신호일 뿐이며, 완료 판정은 실제 파일 `stat`/내용 read와 settle 검증으로 한다. macOS kqueue 기반 fsnotify는 비재귀이므로 `jobs/**` 같은 하위 트리는 디렉터리별 등록 또는 FSEvents 계열을 사용해야 한다. 구체적인 구현 방식은 R1에서 확정한다.
 
 `panewire`는 로컬 unix socket으로 데몬에 요청한다. 모든 wait/prompt 결과는 데몬이 SQLite에 먼저 기록하고 CLI에 반환한다. SQLite write가 되지 않으면 성공을 반환하지 않는다.
 
@@ -128,13 +128,15 @@ panewire wait --agent TARGET --status STATUS --settle DURATION --timeout DURATIO
 
 | 인자 | 계약 |
 |---|---|
-| `--file PATH` | 파일이 존재하고 읽을 수 있는지 확인한다. 출현 뒤 크기, mtime, SHA-256이 `--settle` 동안 변하지 않아야 match다. 파일 내용은 SQLite에 복사하지 않는다. |
+| `--file PATH` | 파일이 존재하고 읽을 수 있는지 확인한다. 먼저 size/mtime이 `--settle` 동안 안정된 것을 확인하고, 성공 직전에 SHA-256을 한 번 계산한다. 파일 내용은 SQLite에 복사하지 않는다. |
 | `--agent TARGET` | herdr target을 유일하게 해석하고 해당 pane의 상태 이벤트를 기다린다. 이름 우선, pane/tab label은 유일할 때만 폴백한다. |
 | `--status STATUS` | agent wait에서 필수. herdr enum의 다섯 값만 허용한다. 파일 wait에서는 사용하면 usage error다. |
 | `--settle DURATION` | `0` 이상. 파일은 content/stat 안정, agent는 원하는 상태가 연속 유지된 시간을 뜻한다. 상태가 다른 값으로 바뀌면 settle clock을 초기화한다. |
 | `--timeout DURATION` | 전체 기한. 만료 시 exit 3이며 마지막 관찰값과 로그 ID를 출력한다. |
 
 파일 wait는 `ask-session` 계약처럼 파일 출현을 완료의 권위로 사용한다. settle은 불필요한 “아직 쓰는 중” 판정을 줄이는 추가 안정화이며, agent 상태는 절대 파일 출현을 대신하지 않는다. 상태 플랩은 이벤트와 clock reset으로 흡수한다.
+
+agent wait는 subscription을 기다리기 전에 현재 상태를 1회 snapshot/read한다. 이미 원하는 상태라면 그 snapshot 시각부터 settle clock을 시작하고, 이후 다른 상태 event가 오면 clock을 초기화한다. 따라서 이미 `working`인 pane에서 영영 idle→working 전이를 기다리는 교착이 없다. 데몬이 wait 중 재시작되어 연결이 끊기면 CLI는 exit 4로 종료하며, 완료로 가장하거나 조용히 재개하지 않는다. 호출자는 새 wait를 명시적으로 재시도한다.
 
 실패 모드: 잘못된 조합/상태/경로는 2 또는 5, 데몬 미기동은 4, timeout은 3, SQLite commit 실패는 70이다. `blocked`, `done`, `unknown`도 herdr가 실제로 관측한 값이면 정상적인 조건 값이며, 의미를 임의로 idle로 치환하지 않는다.
 
@@ -148,20 +150,20 @@ panewire prompt --from SENDER --to TARGET --file PATH [--uptake tool|status-tran
 |---|---|
 | `--from SENDER` | 비어 있지 않은 provenance. 권고 형식은 `세션이름 (역할, pane_id)`이며, 모델명만으로 식별하지 않는다. 원문 prompt와 함께 로그에 남긴다. |
 | `--to TARGET` | agent 이름 우선, 없을 때 유일한 탭 라벨 폴백. 복수 후보, 부재, 현재 pane과 문맥 불일치는 전송하지 않는다. |
-| `--file PATH` | prompt 본문을 읽을 입력 파일. 파일은 전송의 원문 정본이며 SHA-256을 계산한다. 첫 metadata block에 `target-context:`를 포함해야 한다. |
+| `--file PATH` | prompt 본문을 읽을 입력 파일. 파일은 전송의 원문 정본이며 SHA-256을 계산한다. 첫 metadata block에 수신자 identity를 기술하는 `expect:`를 포함해야 한다. |
 | `--uptake` | `status-transition` 또는 `tool`. 생략 시 제출 검증까지만 수행하며 uptake 성공을 주장하지 않는다. |
 
-`target-context`는 사람의 §2 화면 판정을 기계적으로 감사 가능하게 만드는 최소 envelope다. 예시는 다음과 같다.
+`expect:`는 사람의 §2 화면 판정을 기계적으로 감사 가능하게 만드는 최소 envelope다. 이것은 **새 임무의 token이 아니라 수신자의 현재 identity**를 기술한다. 새 임무 ID는 아직 수신자 pane의 title/read에 없으므로 매칭 대상이 아니다. 예시는 다음과 같다.
 
 ```text
-target-context: ROB-1320 / design-doc / KR-orchestration
+expect: name=orch-mock cwd=auto_trader
 
 여기부터 실제 prompt 본문
 ```
 
-데몬은 이 token을 target pane의 `title`, `state_labels`, cwd/작업 경로, 최근 read에서 찾고, 일치 증거가 없으면 send 이전에 exit 5로 중단한다. 의미론적 자연어 이해로 “맞겠지”를 판정하지 않는다. 맥락 token은 짧고 재현 가능해야 하며, 어떤 token을 요구할지는 발신자가 정한다. 일치 결과와 불일치 이유를 delivery log에 남긴다.
+`expect:`에는 검사 가능한 `name=`, `label=`, `cwd=`, `title~=`, `recent~=` 키를 쓸 수 있고, `name=` 또는 `cwd=` 중 하나 이상의 강한 키가 필수다. 데몬은 수신 pane의 title, state labels, cwd/작업 경로, 최근 read와 필드별로 대조하고, identity 일치 증거가 없으면 send 이전에 exit 5로 중단한다. 임무 ID나 새 prompt 내용은 매칭 대상이 아니다. 의미론적 자연어 이해로 “맞겠지”를 판정하지 않는다. expect 값은 짧고 재현 가능해야 하며, 일치 결과와 불일치 이유를 delivery log에 남긴다.
 
-실패 모드: prompt 파일 부재/읽기 실패, provenance 누락, metadata 누락, target 모호성, 문맥 불일치, herdr schema capability 불능은 exit 5 또는 4다. `agent.prompt` 정상 응답만 받고 성공으로 끝내지 않으며, 제출 또는 요청한 uptake 증거가 없으면 exit 6이다. 본문은 기본적으로 DB에 저장하지 않고 hash와 경로만 기록한다.
+실패 모드: prompt 파일 부재/읽기 실패, provenance 누락, metadata 누락, target 모호성, 수신자 identity 불일치, herdr schema capability 불능은 exit 5 또는 4다. `agent.prompt` 정상 응답만 받고 성공으로 끝내지 않으며, 제출 또는 요청한 uptake 증거가 없으면 exit 6이다. 본문은 기본적으로 DB에 저장하지 않고 hash와 경로만 기록한다.
 
 ## 오배송 방지와 uptake
 
@@ -170,9 +172,9 @@ target-context: ROB-1320 / design-doc / KR-orchestration
 `relay-handoff` §2를 다음 증거 체인으로 코드화한다.
 
 1. target을 agent 이름으로 resolve하고, 이름이 없을 때만 탭 라벨을 조회한다. 후보가 하나가 아니면 자동 선택하지 않는다.
-2. resolve 직후 고정된 `pane_id`, `workspace_id`, tab id, cwd, agent/name, terminal title, revision을 캡처한다. 전송 시점에 pane이 바뀌면 stale target으로 거부한다.
+2. resolve 직후 고정된 `pane_id`, `workspace_id`, tab id, cwd, agent/name, terminal title, revision을 캡처한다. 전송 시점에 pane이 소멸하거나 pane_id, agent/name, cwd가 바뀌면 identity-changed target으로 거부한다. 출력 한 줄 때문에 생긴 revision drift는 거부하지 않고 preflight/send revision을 모두 기록한다.
 3. `agent.read`의 `recent_unwrapped`를 우선 사용해 직전 작업과 마지막 줄을 캡처한다. 빈 응답이면 절차대로 `visible`을 재시도한다. ANSI와 컴포저 상태도 판정에 보존한다.
-4. 파일의 `target-context`가 pane metadata/read에 나타나는지 확인한다. 후보 pane이 기대한 작업(KR/US/crypto·역할)과 맞지 않거나 화면이 다른 작업을 가리키면 주입하지 않는다.
+4. 파일의 `expect:` identity field를 pane metadata/read에 대조한다. 후보 pane이 기대한 수신자 name/cwd/label/title/recent identity와 맞지 않으면 주입하지 않는다. 새로 보낼 임무의 ID가 아직 화면에 없다는 이유로 실패시키지는 않는다.
 5. preflight의 revision, read digest, target resolution을 SQLite에 commit한 뒤에만 prompt를 제출한다.
 
 이렇게 하면 자동화가 “직전 작업의 의미”를 완전히 이해하지 못하더라도 어떤 pane을 어떤 revision에서 읽고 왜 통과/거부했는지가 재현된다. read 증거가 없거나 애매하면 안전한 답은 오배송 방지용 거부다.
@@ -182,6 +184,7 @@ target-context: ROB-1320 / design-doc / KR-orchestration
 주입 후에는 세 상태를 분리한다: `accepted_by_herdr`, `submitted_to_composer`, `uptake_confirmed`. 첫 상태는 transport 응답일 뿐 마지막 두 상태의 증거가 아니다.
 
 - 대상 pane을 다시 read한다. 짧은 recent가 비어 있으면 `visible`을 사용하고, 전사 회수가 필요하면 `recent_unwrapped`를 사용한다.
+- 제출 evidence의 1순위는 주입한 prompt 원문의 marker가 post-injection read/전사에서 관찰되는 것이다. marker는 선두 N자 또는 prompt digest에 대응하는 deterministic snippet으로 매칭하고, 기본 로그에는 원문 대신 marker 종류와 매칭 line digest만 저장한다. scrollback 어디에도 marker가 없으면 빈 컴포저·칩 없음이어도 `unproven`이다. 이는 cold-start에서 주입이 무흔적으로 삼켜진 ROB-1321 사고를 직접 검출한다.
 - `❯ 뒤 텍스트`만으로는 제출을 판정하지 않는다.
 - `[Pasted text #N +M lines]` 칩이 남아 있거나 방금 원문이 컴포저에 그대로 남아 있으면 **미제출**이다. 이때 자동으로 return을 반복하지 않는다. 사람이 pane을 확인해야 한다.
 - `Press up to edit queued messages`가 있고 paste chip이 없으면 절차상 **제출됨/큐 대기** 증거다.
@@ -189,6 +192,17 @@ target-context: ROB-1320 / design-doc / KR-orchestration
 - interactive pane에 사용자의 타이핑, 텍스트, slash picker가 보이면 주입을 보류하고 exit 6으로 기록한다.
 
 `--uptake`의 의미는 새 프로토콜을 발명하지 않고 현행 절차를 그대로 이름 붙인 것이다.
+
+제출과 tool uptake 매처는 harness kind별로 닫힌 표를 사용한다. Claude 전용 문자열을 Codex·kimi·agy에 일반화하지 않으며, kind를 모르면 보수적으로 `unproven`이다.
+
+| harness kind | 제출 positive matcher | tool-uptake matcher | negative/주의 | R2 fixture |
+|---|---|---|---|---|
+| Claude | prompt marker; 또는 paste chip이 사라진 `Press up to edit queued messages` | 주입 후 같은 pane의 접수 확인 tool-call 표식 + marker/revision | paste chip 잔존·컴포저 원문 잔존은 미제출; `❯` 단독 금지 | 필수 |
+| Codex | prompt marker; 또는 주입 후 해당 prompt 처리와 연결된 `• Ran` tool line | post-injection `• Ran` 접수 확인 tool-call 표식 + marker/revision | 빈 `›`는 증거 아님; 일반 `• Ran`만으로 접수 확인을 주장하지 않음 | 필수 |
+| kimi | R2에서 positive screen matcher를 정의하지 않음 | 정의하지 않음 | 일반 텍스트는 `unproven` | 보수적 실패만 |
+| agy | R2에서 positive screen matcher를 정의하지 않음 | 정의하지 않음 | 일반 텍스트는 `unproven` | 보수적 실패만 |
+
+표의 marker와 tool line은 주입 이후 revision 범위에 있어야 하며, timestamp만으로 과거 화면을 증거로 재사용하지 않는다.
 
 | mode | 착수 확인으로 인정하는 유일한 조건 | 인정하지 않는 것 |
 |---|---|---|
@@ -233,10 +247,11 @@ DB 위치는 `~/Library/Application Support/panewire/panewire.sqlite3`를 기본
 | `prompt_sha256` | TEXT NOT NULL | 본문 자체 대신 재현용 digest |
 | `body_stored` | INTEGER NOT NULL DEFAULT 0 | 명시적 opt-in 여부 |
 | `preflight_revision` | INTEGER | 직전 read revision |
+| `send_revision` | INTEGER | prompt 제출 직전 revision; 출력 drift 기록용 |
 | `preflight_read_sha256` | TEXT | screen evidence digest |
-| `preflight_result` | TEXT NOT NULL | `passed`, `ambiguous`, `mismatch`, `stale` |
+| `preflight_result` | TEXT NOT NULL | `passed`, `ambiguous`, `mismatch`, `identity_changed` |
 | `herdr_acceptance` | TEXT | `accepted`, `rejected`, `unknown` |
-| `submission_result` | TEXT | `submitted`, `queued`, `composer_residue`, `unproven` |
+| `submission_result` | TEXT | `marker_observed`, `submitted`, `queued`, `composer_residue`, `unproven` |
 | `uptake_mode` | TEXT | `tool`, `status-transition`, NULL |
 | `uptake_result` | TEXT | `confirmed`, `unproven`, `not_requested` |
 | `evidence_revision` | INTEGER | 제출/uptake evidence revision |
@@ -259,6 +274,8 @@ DB 위치는 `~/Library/Application Support/panewire/panewire.sqlite3`를 기본
 3. 알려지지 않은 event kind, subscription data field, response field는 `warning`으로 기록하고 처리를 계속한다. unknown field는 payload에 보존하되 allowlist 밖의 의미를 추론하지 않는다. 이는 차단하지 않는다.
 4. 반대로 필수 메서드가 없어졌거나 필수 field의 타입/enum이 호환되지 않으면 해당 capability를 `unavailable`로 표시한다. 데몬 프로세스 자체는 살아 있어 inbox-only wait를 계속할 수 있지만, agent wait/prompt는 exit 4로 fail-closed하며 send를 시도하지 않는다.
 5. schema command 자체가 실패하면 마지막 schema를 조용히 캐시 폴백하지 않는다. startup 경고와 herdr capability unavailable을 기록한다. 운영자는 upstream CLI를 확인한 뒤 재시작한다.
+
+herdr socket이 끊겼다가 재연결될 때도 subscription을 다시 열기 전에 1~5단계의 schema guard를 재실행한다. 재연결 generation과 guard 결과를 `events`에 남기며, 재연결 시점의 필수 계약이 불능이면 해당 capability를 즉시 unavailable로 둔다.
 
 스키마 snapshot을 레포에 복사해 정본으로 삼지 않는 이유는 upstream 실물 응답과의 대조가 목적이기 때문이다. fixture에는 정상 snapshot, unknown event/field, missing required method/field, enum drift를 각각 둔다. unknown은 warning-only, required incompatibility는 capability fail-closed라는 판정이 테스트로 고정된다.
 
@@ -300,17 +317,17 @@ go install github.com/mgh3326/panewire/cmd/panewired@latest
 
 ### R1 — scaffold + events + wait
 
-- **R1-1 schema guard:** 정상 fixture에서 startup 검증 결과가 기록된다. unknown event/field fixture에서는 warning만 남고 데몬과 inbox wait가 살아 있다. 필수 method/field 제거 fixture에서는 agent wait/prompt capability가 unavailable이고 send는 0회다.
+- **R1-1 schema guard:** 정상 fixture에서 startup·reconnect 검증 결과가 기록된다. unknown event/field fixture에서는 warning만 남고 데몬과 inbox wait가 살아 있다. 필수 method/field 제거 fixture에서는 agent wait/prompt capability가 unavailable이고 send는 0회다.
 - **R1-2 event log:** status/output/scroll subscription과 inbox create/change가 각각 `events`에 source, kind, pane/path, revision, payload metadata로 남고, 재시작 후 기존 row가 사라지지 않는다.
-- **R1-3 file wait:** 존재하지 않는 파일은 timeout 3이다. partial write fixture는 settle 전 성공하지 않으며, 안정화 후 exit 0이다. 파일 본문 substring이 DB에 없어야 한다.
-- **R1-4 agent wait:** 목표 상태가 settle 동안 유지될 때만 exit 0이다. 상태 flap은 settle을 재시작하고, 기한이 지나면 exit 3이다. `idle`, `working`, `blocked`, `done`, `unknown`을 임의 변환하지 않는다.
+- **R1-3 file wait:** 존재하지 않는 파일은 timeout 3이다. partial write fixture는 settle 전 성공하지 않으며, size/mtime 안정화 후 SHA-256을 한 번 계산해 exit 0이다. 파일 본문 substring이 DB에 없어야 한다.
+- **R1-4 agent wait:** 시작 시 현재 상태 snapshot이 목표 상태면 그 시점부터 settle을 시작한다. 목표 상태가 settle 동안 유지될 때만 exit 0이고, 상태 flap은 settle을 재시작하며, 기한이 지나면 exit 3이다. `idle`, `working`, `blocked`, `done`, `unknown`을 임의 변환하지 않는다. 데몬 재시작으로 연결이 끊기면 exit 4다.
 - **R1-5 no daemon fallback:** socket을 닫은 상태에서 두 CLI 모두 exit 4이고 herdr에 직접 요청하지 않는다.
 
 ### R2 — prompt verification + uptake
 
-- **R2-1 target safety:** ambiguous/missing target, stale pane revision, target-context mismatch는 prompt request 전에 exit 5이며 `agent.prompt` 호출 수가 0이다.
-- **R2-2 preflight evidence:** 성공 delivery row에는 resolved pane/workspace, preflight revision, read digest, target-context 판정이 있고, `❯`만 있는 fixture는 통과하지 않는다.
-- **R2-3 submission evidence:** 정상 transport 응답만 있는 fixture는 exit 6이다. queued-message/no-chip 또는 idle→working fixture만 현행 절차가 허용하는 제출 evidence로 분류된다. composer chip/text residue는 미제출이다.
+- **R2-1 target safety:** ambiguous/missing target, pane 소멸 또는 pane_id/agent/name/cwd identity change, `expect:` mismatch는 prompt request 전에 exit 5이며 `agent.prompt` 호출 수가 0이다. 일반 출력으로 인한 revision drift만 있는 fixture는 거부하지 않고 두 revision을 기록한다.
+- **R2-2 preflight evidence:** 성공 delivery row에는 resolved pane/workspace, preflight revision, send revision, read digest, `expect:` identity 판정이 있고, `❯`만 있는 fixture는 통과하지 않는다.
+- **R2-3 submission evidence:** 정상 transport 응답만 있는 fixture는 exit 6이다. prompt marker, harness별 positive matcher, queued-message/no-chip 또는 idle→working fixture만 현행 절차가 허용하는 제출 evidence로 분류된다. composer chip/text residue는 미제출이며, **완전 삼킴 fixture(빈 컴포저·칩 없음·scrollback marker 없음)**도 exit 6이다.
 - **R2-4 uptake semantics:** `status-transition`은 pre-idle→post-working 전이가 없으면 실패한다. pre-working 상태 fixture는 재주입하지 않는다. `tool`은 post-injection receipt tool-call line과 revision이 없으면 실패하고, 일반 텍스트는 성공으로 세지 않는다.
 - **R2-5 privacy:** 기본 설정의 `deliveries`에는 prompt 본문이 없고 SHA-256/path/metadata만 있다. explicit body opt-in fixture에서만 별도 body row가 생긴다.
 - **R2-6 auditability:** 성공·거부·timeout·daemon unavailable 모두 stable error/result와 correlation id를 남기며, 동일 request 재시도 정책이 중복 주입을 만들지 않는다.
