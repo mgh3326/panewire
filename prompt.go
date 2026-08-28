@@ -463,6 +463,7 @@ func toolReceipt(harness, screen, marker string, evidenceRevision, sendRevision 
 
 func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, marker string) (readEvidence, string, error) {
 	var last readEvidence
+	lastResult := "unproven"
 	for {
 		post, err := readPane(ctx, c, p, "recent_unwrapped")
 		if err == nil && post.Text == "" {
@@ -470,22 +471,25 @@ func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, marker 
 		}
 		if err != nil {
 			if ctx.Err() != nil {
-				return last, "unproven", nil
+				return last, lastResult, nil
 			}
 			return last, "unproven", err
 		}
 		last = post
 		result := classifySubmission(p.Harness, post.Text, marker)
-		if result != "unproven" {
+		lastResult = result
+		if result == "marker_observed" || result == "submitted" || result == "queued" {
 			return post, result, nil
 		}
-		timer := time.NewTimer(20 * time.Millisecond)
+		// composer_residue is expected during the paste→submit transition;
+		// retain it as the possible final result but keep polling for proof.
+		timer := time.NewTimer(200 * time.Millisecond)
 		select {
 		case <-ctx.Done():
 			if !timer.Stop() {
 				<-timer.C
 			}
-			return last, "unproven", nil
+			return last, lastResult, nil
 		case <-timer.C:
 		}
 	}
