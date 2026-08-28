@@ -1,0 +1,22 @@
+# Go build output
+/bin/
+*.test
+*.out
+
+# Coverage and profiling
+coverage.out
+coverage.html
+*.prof
+
+# Local databases and runtime state
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
+.panewire/
+
+# macOS and editor files
+.DS_Store
+.idea/
+.vscode/
