@@ -413,7 +413,10 @@ func classifySubmission(harness, screen, marker string) string {
 	if pasteChipRE.MatchString(screen) {
 		return "composer_residue"
 	}
-	if marker != "" && (strings.Contains(screen, "❯ "+marker) || strings.Contains(screen, "› "+marker)) {
+	if strings.EqualFold(harness, "claude") && claudeComposerContains(screen, marker) {
+		return "composer_residue"
+	}
+	if !strings.EqualFold(harness, "claude") && marker != "" && (strings.Contains(screen, "❯ "+marker) || strings.Contains(screen, "› "+marker)) {
 		return "composer_residue"
 	}
 	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex")) && strings.Contains(screen, "Press up to edit queued messages") && !pasteChipRE.MatchString(screen) {
@@ -423,6 +426,27 @@ func classifySubmission(harness, screen, marker string) string {
 		return "marker_observed"
 	}
 	return "unproven"
+}
+
+// Claude echoes submitted prompts in the transcript with a leading ❯. Only
+// text between the final two horizontal divider lines is the live composer;
+// an echo above those dividers is submission evidence, not residue.
+func claudeComposerContains(screen, marker string) bool {
+	if marker == "" {
+		return false
+	}
+	lines := strings.Split(screen, "\n")
+	dividers := make([]int, 0, 2)
+	for i, line := range lines {
+		if strings.Contains(line, "─") && strings.Trim(line, " \t─") == "" {
+			dividers = append(dividers, i)
+		}
+	}
+	if len(dividers) < 2 {
+		return false
+	}
+	start, end := dividers[len(dividers)-2], dividers[len(dividers)-1]
+	return strings.Contains(strings.Join(lines[start+1:end], "\n"), marker)
 }
 func toolReceipt(harness, screen, marker string, evidenceRevision, sendRevision int64) bool {
 	if evidenceRevision <= sendRevision || marker == "" || !strings.Contains(screen, marker) {
