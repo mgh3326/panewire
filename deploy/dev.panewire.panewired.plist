@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key><string>dev.panewire.panewired</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/REPLACE_ME/go/bin/panewire</string>
+		<string>daemon</string>
+		<string>--herdr-socket</string><string>/Users/REPLACE_ME/.config/herdr/herdr.sock</string>
+		<string>--db</string><string>/Users/REPLACE_ME/Library/Application Support/panewire/panewire.sqlite3</string>
+		<string>--inbox-root</string><string>/Users/REPLACE_ME/work/herdr-inbox</string>
+	</array>
+	<key>RunAtLoad</key><true/>
+	<key>KeepAlive</key><true/>
+	<key>StandardOutPath</key><string>/Users/REPLACE_ME/Library/Logs/panewired.log</string>
+	<key>StandardErrorPath</key><string>/Users/REPLACE_ME/Library/Logs/panewired.error.log</string>
+</dict>
+</plist>
