@@ -1,14 +1,15 @@
 # panewire
 
-Panewire is a local daemon and CLI for watching agent panes and waiting on stable state.
+Panewire is a local daemon and CLI for watching agent panes, waiting on stable state, and delivering prompts with verified evidence.
 
-R1 implements the daemon, herdr event subscription, recursive inbox watching, and `wait`. Prompt delivery remains outside this R1 binary surface; R2 is intentionally not included.
+R2 adds `prompt` delivery with target preflight, identity checks, submission proof, optional uptake confirmation, and SQLite delivery audit records.
 
 ## Scope
 
 The first usable slice is deliberately small:
 
 - `wait` for a durable inbox file or a stable herdr agent state.
+- `prompt` for verified delivery to an already-running pane.
 - A local SQLite log of observed herdr and inbox events.
 
 The file inbox and pane injection remain the system of record. panewire automates the surrounding watching, checking, waiting, and recording procedures; it does not turn session-to-session coordination into server communication.
@@ -35,10 +36,14 @@ Install [deploy/dev.panewire.panewired.plist](deploy/dev.panewire.panewired.plis
 ```sh
 panewire wait --file "$HOME/work/herdr-inbox/jobs/example/report.md" --settle 2s --timeout 10m
 panewire wait --agent rob1320-r1 --status idle --settle 2s --timeout 10m
+panewire prompt --from 'sender (role, pane-id)' --to orch-mock \
+  --file "$HOME/work/herdr-inbox/jobs/example/prompt.md" --uptake status-transition
 ```
+
+Prompt files begin with recipient metadata such as `expect: name=orch-mock cwd=/work`; `name=` or `cwd=` is required. Panewire records the prompt SHA-256, path, target identity, revisions, and evidence states, but does not store prompt text by default. To opt in, pass `--store-prompt-body` to `panewire prompt` or configure the daemon with `--store-prompt-body`; the body is then kept only in the separate `delivery_bodies` table.
 
 The CLI never falls back to herdr directly. If the daemon socket is absent it exits 4. `PANEWIRE_SOCKET` is available for tests and non-default local installations.
 
 ## Status
 
-R1: scaffold, schema drift guard, events, inbox watcher, and wait implementation. See [docs/design.md](docs/design.md) for the contract and explicit R2 boundary.
+R2: prompt target safety, verified submission/uptake, privacy-preserving delivery audit, schema guard, events, inbox watcher, and wait. Live prompt smoke remains prohibited in the fixture test job; use an operator-approved scratch pane separately.

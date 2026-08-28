@@ -61,7 +61,7 @@ func OpenStore(path string) (*Store, error) {
  prompt_sha256 TEXT NOT NULL DEFAULT '', body_stored INTEGER NOT NULL DEFAULT 0, preflight_revision INTEGER,
  send_revision INTEGER, preflight_read_sha256 TEXT, preflight_result TEXT NOT NULL DEFAULT '', herdr_acceptance TEXT,
  submission_result TEXT, uptake_mode TEXT, uptake_result TEXT, evidence_revision INTEGER, error_code TEXT
-)`, `CREATE INDEX IF NOT EXISTS events_kind_time ON events(event_kind, observed_at_ms)`, `CREATE INDEX IF NOT EXISTS events_pane_time ON events(pane_id, observed_at_ms)`} {
+)`, `CREATE INDEX IF NOT EXISTS events_kind_time ON events(event_kind, observed_at_ms)`, `CREATE INDEX IF NOT EXISTS events_pane_time ON events(pane_id, observed_at_ms)`, `CREATE INDEX IF NOT EXISTS deliveries_pane_time ON deliveries(resolved_pane_id, requested_at_ms)`, `CREATE INDEX IF NOT EXISTS deliveries_path_time ON deliveries(source_path, requested_at_ms)`} {
 		if _, err := db.Exec(q); err != nil {
 			db.Close()
 			return nil, err

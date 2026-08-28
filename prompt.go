@@ -72,15 +72,24 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	}
 	pane, err := resolvePane(ctx, client, req.Target)
 	if err != nil {
+		if ctx.Err() != nil {
+			err = &codedError{ExitTimeout, fmt.Errorf("timeout resolving target")}
+		}
 		return recordFailureForRequest(ctx, store, id, req, promptHash, body, req.StorePromptBody, "ambiguous", err)
 	}
 	pre, err := readPane(ctx, client, pane, "recent_unwrapped")
 	if err != nil {
+		if ctx.Err() != nil {
+			err = &codedError{ExitTimeout, fmt.Errorf("timeout reading target")}
+		}
 		return recordFailureForRequest(ctx, store, id, req, promptHash, body, req.StorePromptBody, "ambiguous", err)
 	}
 	if pre.Text == "" {
 		pre, err = readPane(ctx, client, pane, "visible")
 		if err != nil {
+			if ctx.Err() != nil {
+				err = &codedError{ExitTimeout, fmt.Errorf("timeout reading target")}
+			}
 			return recordFailureForRequest(ctx, store, id, req, promptHash, body, req.StorePromptBody, "ambiguous", err)
 		}
 	}
@@ -95,6 +104,9 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	// is a hard stop before the durable preflight commit/send boundary.
 	sendPane, err := resolvePane(ctx, client, req.Target)
 	if err != nil {
+		if ctx.Err() != nil {
+			err = &codedError{ExitTimeout, fmt.Errorf("timeout resolving target")}
+		}
 		return recordFailureForRequestWithPane(ctx, store, id, req, promptHash, body, req.StorePromptBody, pane, pre.Revision, digest(pre.Text), "identity_changed", err)
 	}
 	if identityChanged(pane, sendPane) {
@@ -140,7 +152,11 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	d.HerdrAcceptance = "accepted"
 	if err != nil {
 		d.HerdrAcceptance = "rejected"
-		return finishPrompt(ctx, store, d, &codedError{ExitDeliveryFailure, fmt.Errorf("herdr prompt rejected: %w", err)})
+		code := ExitDeliveryFailure
+		if ctx.Err() != nil {
+			code = ExitTimeout
+		}
+		return finishPrompt(ctx, store, d, &codedError{code, fmt.Errorf("herdr prompt rejected: %w", err)})
 	}
 
 	post, postErr := readPane(ctx, client, pane, "recent_unwrapped")
@@ -149,7 +165,11 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	}
 	if postErr != nil {
 		d.SubmissionResult = "unproven"
-		return finishPrompt(ctx, store, d, &codedError{ExitDeliveryFailure, postErr})
+		code := ExitDeliveryFailure
+		if ctx.Err() != nil {
+			code = ExitTimeout
+		}
+		return finishPrompt(ctx, store, d, &codedError{code, postErr})
 	}
 	d.SubmissionResult = classifySubmission(pane.Harness, post.Text, markerFor(body))
 	d.EvidenceRevision = post.Revision
@@ -177,7 +197,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 					return finishPrompt(ctx, store, d, nil)
 				}
 			case <-ctx.Done():
-				return finishPrompt(ctx, store, d, &codedError{ExitDeliveryFailure, fmt.Errorf("uptake_unproven: status transition not observed")})
+				return finishPrompt(ctx, store, d, &codedError{ExitTimeout, fmt.Errorf("uptake_unproven: status transition not observed")})
 			}
 		}
 	}
@@ -306,6 +326,9 @@ func readPane(ctx context.Context, c *HerdrClient, p paneIdentity, source string
 		raw, err = c.Call(ctx, "pane.read", map[string]any{"pane_id": p.PaneID, "source": source})
 	}
 	if err != nil {
+		if ctx.Err() != nil {
+			return readEvidence{}, &codedError{ExitTimeout, fmt.Errorf("timeout reading target")}
+		}
 		return readEvidence{}, &codedError{ExitDaemonUnavailable, err}
 	}
 	return decodeRead(raw), nil
@@ -407,6 +430,9 @@ func deliveryResult(d Delivery) PromptResult {
 	return PromptResult{DeliveryID: d.DeliveryID, PreflightResult: d.PreflightResult, SubmissionResult: d.SubmissionResult, UptakeResult: d.UptakeResult, PreflightRevision: d.PreflightRevision, SendRevision: d.SendRevision, EvidenceRevision: d.EvidenceRevision}
 }
 func deliveryError(d Delivery) error {
+	if d.CompletedAtMS == 0 {
+		return &codedError{ExitDeliveryFailure, fmt.Errorf("delivery %s is still in progress", d.DeliveryID)}
+	}
 	if d.ErrorCode == "" || d.UptakeResult == "confirmed" || d.SubmissionResult == "marker_observed" || d.SubmissionResult == "queued" && d.UptakeMode == "" {
 		return nil
 	}
@@ -417,10 +443,14 @@ func deliveryError(d Delivery) error {
 	if d.ErrorCode == "daemon_unavailable" {
 		code = ExitDaemonUnavailable
 	}
+	if d.ErrorCode == "timeout" {
+		code = ExitTimeout
+	}
 	return &codedError{code, fmt.Errorf("delivery %s: %s", d.DeliveryID, d.ErrorCode)}
 }
 func recordNewFailure(ctx context.Context, s *Store, d Delivery, body string, storeBody bool, code int, msg string) (PromptResult, error) {
 	d.BodyStored = storeBody
+	d.CompletedAtMS = time.Now().UnixMilli()
 	d.ErrorCode = errorCodeFor(code)
 	if _, err := s.InsertDelivery(ctx, d, body); err != nil {
 		return PromptResult{}, &codedError{ExitInternal, err}
@@ -431,7 +461,7 @@ func recordFailureForRequest(ctx context.Context, s *Store, id string, req Promp
 	return recordFailureForRequestWithPane(ctx, s, id, req, hash, body, storeBody, paneIdentity{}, 0, "", result, err)
 }
 func recordFailureForRequestWithPane(ctx context.Context, s *Store, id string, req PromptRequest, hash, body string, storeBody bool, p paneIdentity, revision int64, readHash, result string, err error) (PromptResult, error) {
-	d := Delivery{DeliveryID: id, Sender: req.Sender, TargetInput: req.Target, ResolvedPaneID: p.PaneID, ResolvedWorkspaceID: p.WorkspaceID, SourcePath: req.Path, PromptSHA256: hash, BodyStored: storeBody, RequestedAtMS: time.Now().UnixMilli(), PreflightRevision: revision, PreflightReadSHA256: readHash, PreflightResult: result, UptakeMode: req.Uptake, UptakeResult: "not_requested", ErrorCode: errorCodeFor(ExitCode(err))}
+	d := Delivery{DeliveryID: id, Sender: req.Sender, TargetInput: req.Target, ResolvedPaneID: p.PaneID, ResolvedWorkspaceID: p.WorkspaceID, SourcePath: req.Path, PromptSHA256: hash, BodyStored: storeBody, RequestedAtMS: time.Now().UnixMilli(), CompletedAtMS: time.Now().UnixMilli(), PreflightRevision: revision, PreflightReadSHA256: readHash, PreflightResult: result, UptakeMode: req.Uptake, UptakeResult: "not_requested", ErrorCode: errorCodeFor(ExitCode(err))}
 	if _, e := s.InsertDelivery(ctx, d, body); e != nil {
 		return PromptResult{}, &codedError{ExitInternal, e}
 	}
@@ -460,4 +490,24 @@ func errorCodeFor(code int) string {
 	default:
 		return "internal"
 	}
+}
+
+func recordUnavailablePrompt(ctx context.Context, store *Store, req PromptRequest, code int, msg string) (PromptResult, error) {
+	raw, readErr := os.ReadFile(req.Path)
+	body := string(raw)
+	if _, parsed, parseErr := parsePromptFile(body); parseErr == nil {
+		body = parsed
+	}
+	hash := digest(body)
+	d := Delivery{DeliveryID: correlationID(req.Sender, req.Target, req.Path, hash, req.Uptake), Sender: req.Sender, TargetInput: req.Target, SourcePath: req.Path, PromptSHA256: hash, BodyStored: req.StorePromptBody, RequestedAtMS: time.Now().UnixMilli(), CompletedAtMS: time.Now().UnixMilli(), PreflightResult: "ambiguous", UptakeMode: req.Uptake, UptakeResult: "not_requested", ErrorCode: errorCodeFor(code)}
+	if readErr != nil {
+		d.ErrorCode = errorCodeFor(ExitConditionInvalid)
+	}
+	if _, err := store.InsertDelivery(ctx, d, body); err != nil {
+		return PromptResult{}, &codedError{ExitInternal, err}
+	}
+	if readErr != nil {
+		return deliveryResult(d), &codedError{ExitConditionInvalid, readErr}
+	}
+	return deliveryResult(d), &codedError{code, fmt.Errorf("%s", msg)}
 }

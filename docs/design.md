@@ -306,8 +306,10 @@ fixture 테스트와 분리된 선택적 smoke job에서 실제 `herdr api schem
 
 ```text
 go install github.com/mgh3326/panewire/cmd/panewire@latest
-go install github.com/mgh3326/panewire/cmd/panewired@latest
+panewire daemon --herdr-socket "$HOME/.config/herdr/herdr.sock"
 ```
+
+The single `panewire` binary provides the `daemon` subcommand; there is no separately installed `panewired` binary.
 
 회사 MacBook 설치 경로는 관리되는 Go toolchain으로 `go install`을 실행하고, per-user `~/Library/LaunchAgents/dev.panewire.panewired.plist`를 설치해 로그인 시 데몬을 시작하는 방식이다. plist는 DB·socket·inbox root를 명시하고 stdout/stderr 로그 경로와 재시작 정책을 가져야 한다. herdr가 없는 노트북에서는 데몬을 실행해도 agent capability가 unavailable이며 prompt를 성공 처리하지 않는다.
 

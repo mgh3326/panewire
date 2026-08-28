@@ -286,6 +286,19 @@ func TestPromptPrivacyBodyOptInOnly(t *testing.T) {
 	}
 }
 
+func TestPromptDaemonUnavailableStillAuditsRequest(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(false))
+	d, db := startPromptDaemon(t, fixture)
+	fixture.Close()
+	defer d.Stop()
+	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t)}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitDaemonUnavailable {
+		t.Fatalf("exit=%d want %d", got, panewire.ExitDaemonUnavailable)
+	}
+	if got := db.CountDeliveries(); got != 1 {
+		t.Fatalf("deliveries=%d want 1", got)
+	}
+}
+
 func promptFixtureSchema(events bool) string {
 	methods := `[` +
 		`"agent.read","agent.prompt","agent.list"`

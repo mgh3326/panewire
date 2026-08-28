@@ -149,10 +149,11 @@ func runDaemonCLI(args []string) int {
 	herdr := fs.String("herdr-socket", "", "herdr socket")
 	db := fs.String("db", "", "SQLite path")
 	inbox := fs.String("inbox-root", "", "inbox root")
+	storeBody := fs.Bool("store-prompt-body", false, "opt in to storing prompt bodies")
 	if fs.Parse(args) != nil {
 		return ExitUsage
 	}
-	d := NewDaemon(Config{SocketPath: *socket, HerdrSocket: *herdr, DBPath: *db, InboxRoot: *inbox})
+	d := NewDaemon(Config{SocketPath: *socket, HerdrSocket: *herdr, DBPath: *db, InboxRoot: *inbox, StorePromptBody: *storeBody, Logging: LoggingConfig{StorePromptBody: *storeBody}})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := d.Start(ctx); err != nil {

@@ -17,9 +17,15 @@ import (
 
 type Config struct {
 	SocketPath, HerdrSocket, DBPath, InboxRoot string
+	StorePromptBody                            bool
+	Logging                                    LoggingConfig
 	Store                                      *Store
 	SchemaCommand                              []string
 	Logger                                     *slog.Logger
+}
+
+type LoggingConfig struct {
+	StorePromptBody bool
 }
 type Daemon struct {
 	cfg      Config
@@ -220,13 +226,13 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 			}
 		case "prompt":
 			if !d.caps.Prompt || !d.caps.AgentRead {
-				err = &codedError{ExitDaemonUnavailable, fmt.Errorf("prompt capability unavailable")}
+				result, err = recordUnavailablePrompt(callCtx, d.store, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, ExitDaemonUnavailable, "prompt capability unavailable")
 			} else {
 				c2, e := NewHerdrClient(d.cfg.HerdrSocket)
 				if e != nil {
-					err = &codedError{ExitDaemonUnavailable, e}
+					result, err = recordUnavailablePrompt(callCtx, d.store, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, ExitDaemonUnavailable, e.Error())
 				} else {
-					result, err = Prompt(callCtx, d.store, c2, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody}, d.caps)
+					result, err = Prompt(callCtx, d.store, c2, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, d.caps)
 					_ = c2.Close()
 				}
 			}
