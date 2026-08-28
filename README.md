@@ -15,11 +15,13 @@ The file inbox and pane injection remain the system of record. panewire automate
 
 Spawning remains the responsibility of `wrk`, including scopefuel gating, arbiter decisions, and landed verification. panewire is a messaging and monitoring layer for sessions that are already alive.
 
-See [docs/design.md](docs/design.md) for the complete R0 contract and acceptance criteria.
+See [docs/design.md](docs/design.md) for the complete contract and acceptance criteria.
 
 ## Installation and use
 
 R1 ships one executable, `panewire`, with a `daemon` subcommand. This avoids two separately versioned Go artifacts while keeping the launchd entry point explicit (`panewire daemon`).
+
+The daemon uses `modernc.org/sqlite` to keep the build cgo-free and `log/slog` for structured startup/reconnect diagnostics. Inbox watching uses fsnotify with one registration per directory: macOS kqueue is not recursive, so the watcher walks the root and adds newly created directories immediately. This is simpler to operate and test on the required macOS runner than relying on a separate FSEvents backend.
 
 ```sh
 go install github.com/mgh3326/panewire/cmd/panewire@latest

@@ -40,7 +40,7 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	s := &Store{db: db, path: path}
-	for _, q := range []string{"PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", `CREATE TABLE IF NOT EXISTS events (
+	for _, q := range []string{"PRAGMA busy_timeout=5000", "PRAGMA journal_mode=WAL", "PRAGMA foreign_keys=ON", `CREATE TABLE IF NOT EXISTS events (
  id INTEGER PRIMARY KEY AUTOINCREMENT, observed_at_ms INTEGER NOT NULL, source TEXT NOT NULL,
  event_kind TEXT NOT NULL, protocol INTEGER, schema_version INTEGER, pane_id TEXT, workspace_id TEXT,
  agent TEXT, agent_status TEXT, revision INTEGER, path TEXT, payload_json TEXT NOT NULL, unknown_fields_json TEXT

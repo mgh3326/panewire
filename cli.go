@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 )
 
 type CLIConfig struct{ SocketPath string }
@@ -106,7 +108,11 @@ func runDaemonCLI(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return ExitInternal
 	}
-	select {}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, syscall.SIGINT, syscall.SIGTERM)
+	<-signals
+	_ = d.Stop()
+	return ExitOK
 }
 func joinArgs(a []string) string { return strings.Join(a, " ") }
 
