@@ -22,6 +22,12 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if len(args) == 0 {
 		return ExitUsage
 	}
+	if args[0] == "enroll-machine" {
+		return runEnrollMachineCLI(args[1:], os.Stdout, os.Stderr, enrollDeps{})
+	}
+	if args[0] == "smoke-supabase" {
+		return runSmokeSupabaseCLI(args[1:], os.Stdout, os.Stderr, smokeDeps{})
+	}
 	if args[0] == "prompt" {
 		return runPromptCLI(args[1:], cfg)
 	}

@@ -25,6 +25,8 @@ import (
 type Config struct {
 	BaseURL               string
 	AccessToken           string
+	APIKey                string
+	Schema                string
 	CredentialPath        string
 	HTTPClient            *http.Client
 	Visibility            time.Duration
@@ -34,6 +36,8 @@ type Config struct {
 type Adapter struct {
 	baseURL    *url.URL
 	access     string
+	apiKey     string
+	schema     string
 	httpClient *http.Client
 	visibility time.Duration
 }
@@ -61,8 +65,12 @@ func New(cfg Config) (*Adapter, error) {
 	if visibility <= 0 {
 		visibility = 30 * time.Second
 	}
+	schema := cfg.Schema
+	if schema == "" {
+		schema = "panewire"
+	}
 	u.Path = strings.TrimSuffix(u.Path, "/")
-	return &Adapter{baseURL: u, access: cfg.AccessToken, httpClient: client, visibility: visibility}, nil
+	return &Adapter{baseURL: u, access: cfg.AccessToken, apiKey: cfg.APIKey, schema: schema, httpClient: client, visibility: visibility}, nil
 }
 
 // LoadAccessToken is opt-in: no adapter constructor probes a default home
@@ -105,8 +113,8 @@ func LoadAccessToken(file string) (string, error) {
 }
 
 type publishRequest struct {
-	Envelope   core.Envelope `json:"envelope"`
-	PayloadB64 string        `json:"payload_b64"`
+	Envelope   core.Envelope `json:"p_envelope"`
+	PayloadB64 string        `json:"p_payload_b64"`
 }
 
 type publishResponse struct {
@@ -124,10 +132,14 @@ func (a *Adapter) Publish(ctx context.Context, env core.Envelope, reader core.Pa
 	if len(data) > core.MaxInlineBytes || int64(len(data)) != env.Payload.SizeBytes {
 		return core.PublishReceipt{}, fmt.Errorf("Supabase publish inline size is invalid")
 	}
-	var out publishResponse
-	if err := a.call(ctx, http.MethodPost, "/rest/v1/panewire_queue?on_conflict=delivery_id", publishRequest{Envelope: env, PayloadB64: base64.StdEncoding.EncodeToString(data)}, &out); err != nil {
+	var rows []publishResponse
+	if err := a.call(ctx, http.MethodPost, "/rest/v1/rpc/panewire_publish", publishRequest{Envelope: env, PayloadB64: base64.StdEncoding.EncodeToString(data)}, &rows); err != nil {
 		return core.PublishReceipt{}, err
 	}
+	if len(rows) != 1 {
+		return core.PublishReceipt{}, fmt.Errorf("Supabase publish returned an unexpected receipt count")
+	}
+	out := rows[0]
 	if out.MessageID == "" {
 		out.MessageID = env.MessageID
 	}
@@ -141,8 +153,9 @@ func (a *Adapter) Publish(ctx context.Context, env core.Envelope, reader core.Pa
 }
 
 type claimRequest struct {
-	DestinationMachineID string `json:"destination_machine_id"`
-	VisibilitySeconds    int64  `json:"visibility_seconds"`
+	DestinationMachineID string `json:"p_destination_machine_id"`
+	VisibilitySeconds    int64  `json:"p_visibility_seconds"`
+	Limit                int64  `json:"p_limit"`
 }
 
 type claimRow struct {
@@ -154,7 +167,7 @@ type claimRow struct {
 
 func (a *Adapter) Receive(ctx context.Context, destination core.Destination, handler core.DeliveryHandler) error {
 	var rows []claimRow
-	if err := a.call(ctx, http.MethodPost, "/rest/v1/rpc/panewire_claim", claimRequest{DestinationMachineID: destination.MachineID, VisibilitySeconds: int64(a.visibility.Seconds())}, &rows); err != nil {
+	if err := a.call(ctx, http.MethodPost, "/rest/v1/rpc/panewire_claim", claimRequest{DestinationMachineID: destination.MachineID, VisibilitySeconds: int64(a.visibility.Seconds()), Limit: 32}, &rows); err != nil {
 		return err
 	}
 	var first error
@@ -177,7 +190,7 @@ func (a *Adapter) Receive(ctx context.Context, destination core.Destination, han
 }
 
 type fetchRequest struct {
-	Token string `json:"token"`
+	Token string `json:"p_token"`
 }
 
 type fetchResponse struct {
@@ -185,10 +198,14 @@ type fetchResponse struct {
 }
 
 func (a *Adapter) FetchPayload(ctx context.Context, delivery core.Delivery, limit int64) (core.PayloadReader, error) {
-	var out fetchResponse
-	if err := a.call(ctx, http.MethodPost, "/rest/v1/rpc/panewire_fetch_payload", fetchRequest{Token: string(delivery.Token)}, &out); err != nil {
+	var rows []fetchResponse
+	if err := a.call(ctx, http.MethodPost, "/rest/v1/rpc/panewire_fetch_payload", fetchRequest{Token: string(delivery.Token)}, &rows); err != nil {
 		return nil, err
 	}
+	if len(rows) != 1 {
+		return nil, fmt.Errorf("Supabase payload fetch returned an unexpected row count")
+	}
+	out := rows[0]
 	data, err := base64.StdEncoding.DecodeString(out.PayloadB64)
 	if err != nil {
 		return nil, fmt.Errorf("invalid Supabase payload encoding")
@@ -200,12 +217,35 @@ func (a *Adapter) FetchPayload(ctx context.Context, delivery core.Delivery, limi
 }
 
 type ackRequest struct {
-	Token       string              `json:"token"`
-	Disposition core.AckDisposition `json:"disposition"`
+	Token       string              `json:"p_token"`
+	Disposition core.AckDisposition `json:"p_disposition"`
 }
 
 func (a *Adapter) Ack(ctx context.Context, token core.OpaqueDeliveryToken, disposition core.AckDisposition) error {
 	return a.call(ctx, http.MethodPost, "/rest/v1/rpc/panewire_ack", ackRequest{Token: string(token), Disposition: disposition}, nil)
+}
+
+// MessageStatus exposes no body bytes.  The operator smoke tool uses it only
+// to prove that the terminal acknowledgement erased transport body storage.
+type MessageStatus struct {
+	State      string    `json:"state"`
+	BodyErased bool      `json:"body_erased"`
+	AckedAt    time.Time `json:"acked_at"`
+}
+
+type messageStatusRequest struct {
+	DeliveryID string `json:"p_delivery_id"`
+}
+
+func (a *Adapter) MessageStatus(ctx context.Context, deliveryID string) (MessageStatus, error) {
+	var rows []MessageStatus
+	if err := a.call(ctx, http.MethodPost, "/rest/v1/rpc/panewire_message_status", messageStatusRequest{DeliveryID: deliveryID}, &rows); err != nil {
+		return MessageStatus{}, err
+	}
+	if len(rows) != 1 {
+		return MessageStatus{}, fmt.Errorf("Supabase message status returned an unexpected row count")
+	}
+	return rows[0], nil
 }
 
 func (a *Adapter) Health(ctx context.Context) (core.TransportHealth, error) {
@@ -240,6 +280,16 @@ func (a *Adapter) call(ctx context.Context, method, endpoint string, input any, 
 	req.Header.Set("Accept", "application/json")
 	if a.access != "" {
 		req.Header.Set("Authorization", "Bearer "+a.access)
+	}
+	if a.apiKey != "" {
+		req.Header.Set("apikey", a.apiKey)
+	}
+	if a.schema != "" {
+		if method == http.MethodGet || method == http.MethodHead {
+			req.Header.Set("Accept-Profile", a.schema)
+		} else {
+			req.Header.Set("Content-Profile", a.schema)
+		}
 	}
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
