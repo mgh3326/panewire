@@ -203,10 +203,10 @@ Required validation order is schema, destination, expiry, classification,
 declared size, payload retrieval, actual size, hash, and only then local write.
 Raw values of unknown fields are never persisted to SQLite, audit JSON, or
 logs. Audit may record only allowlisted field names/types plus non-body metadata
-such as schema version or a digest. Unknown fields never relax a known guard:
-one in a closed or required envelope region is rejected as a poison message;
-one in an explicitly forward-compatible region is ignored without preserving
-its value. An unknown schema version is also a poison message and fails closed.
+such as schema version or a digest. An unknown field never relaxes a known guard:
+closed or required envelope regions reject it as a poison message; explicitly
+forward-compatible regions ignore it without preserving its raw value. An unknown
+schema version is also a poison message and fails closed.
 
 ### Inline body versus pointer
 
