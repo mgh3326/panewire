@@ -1037,10 +1037,10 @@ func (q *r1HTTPQueue) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 	case "/rest/v1/":
 		w.WriteHeader(http.StatusNoContent)
 		return
-	case "/rest/v1/panewire_queue":
+	case "/rest/v1/rpc/panewire_publish":
 		var in struct {
-			Envelope   core.Envelope `json:"envelope"`
-			PayloadB64 string        `json:"payload_b64"`
+			Envelope   core.Envelope `json:"p_envelope"`
+			PayloadB64 string        `json:"p_payload_b64"`
 		}
 		if json.NewDecoder(req.Body).Decode(&in) != nil {
 			http.Error(w, "bad publish", http.StatusBadRequest)
@@ -1057,11 +1057,11 @@ func (q *r1HTTPQueue) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			q.rows[in.Envelope.DeliveryID] = &r1HTTPRow{envelope: in.Envelope, payload: payload, destination: in.Envelope.Destination.MachineID}
 		}
 		q.mu.Unlock()
-		_ = json.NewEncoder(w).Encode(map[string]any{"message_id": in.Envelope.MessageID, "delivery_id": in.Envelope.DeliveryID, "accepted_at": q.now, "duplicate": duplicate})
+		_ = json.NewEncoder(w).Encode([]map[string]any{{"message_id": in.Envelope.MessageID, "delivery_id": in.Envelope.DeliveryID, "accepted_at": q.now, "duplicate": duplicate}})
 		return
 	case "/rest/v1/rpc/panewire_claim":
 		var in struct {
-			DestinationMachineID string `json:"destination_machine_id"`
+			DestinationMachineID string `json:"p_destination_machine_id"`
 		}
 		if json.NewDecoder(req.Body).Decode(&in) != nil {
 			http.Error(w, "bad claim", http.StatusBadRequest)
@@ -1092,14 +1092,14 @@ func (q *r1HTTPQueue) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	case "/rest/v1/rpc/panewire_fetch_payload":
 		var in struct {
-			Token string `json:"token"`
+			Token string `json:"p_token"`
 		}
 		_ = json.NewDecoder(req.Body).Decode(&in)
 		q.mu.Lock()
 		defer q.mu.Unlock()
 		for _, row := range q.rows {
 			if row.token == in.Token && !row.acked {
-				_ = json.NewEncoder(w).Encode(map[string]string{"payload_b64": base64.StdEncoding.EncodeToString(row.payload)})
+				_ = json.NewEncoder(w).Encode([]map[string]string{{"payload_b64": base64.StdEncoding.EncodeToString(row.payload)}})
 				return
 			}
 		}
@@ -1107,7 +1107,7 @@ func (q *r1HTTPQueue) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 		return
 	case "/rest/v1/rpc/panewire_ack":
 		var in struct {
-			Token string `json:"token"`
+			Token string `json:"p_token"`
 		}
 		_ = json.NewDecoder(req.Body).Decode(&in)
 		q.mu.Lock()
@@ -1120,6 +1120,23 @@ func (q *r1HTTPQueue) ServeHTTP(w http.ResponseWriter, req *http.Request) {
 			}
 		}
 		http.Error(w, "missing token", http.StatusNotFound)
+		return
+	case "/rest/v1/rpc/panewire_message_status":
+		var in struct {
+			DeliveryID string `json:"p_delivery_id"`
+		}
+		_ = json.NewDecoder(req.Body).Decode(&in)
+		q.mu.Lock()
+		defer q.mu.Unlock()
+		if row := q.rows[in.DeliveryID]; row != nil {
+			state := "claimed"
+			if row.acked {
+				state = "acked"
+			}
+			_ = json.NewEncoder(w).Encode([]map[string]any{{"state": state, "body_erased": row.payload == nil, "acked_at": q.now}})
+			return
+		}
+		http.Error(w, "missing delivery", http.StatusNotFound)
 		return
 	default:
 		http.NotFound(w, req)
