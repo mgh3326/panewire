@@ -201,8 +201,12 @@ reply:
 
 Required validation order is schema, destination, expiry, classification,
 declared size, payload retrieval, actual size, hash, and only then local write.
-An unknown field is retained in transport audit metadata but cannot relax a
-known guard. An unknown schema version is a poison message and fails closed.
+Raw values of unknown fields are never persisted to SQLite, audit JSON, or
+logs. Audit may record only allowlisted field names/types plus non-body metadata
+such as schema version or a digest. Unknown fields never relax a known guard:
+one in a closed or required envelope region is rejected as a poison message;
+one in an explicitly forward-compatible region is ignored without preserving
+its value. An unknown schema version is also a poison message and fails closed.
 
 ### Inline body versus pointer
 
@@ -385,7 +389,7 @@ cases repeated against the Supabase adapter in an isolated test environment.
 | tampered hash | `go test ./... -run '^TestR1TamperedHash$' -count=1 -v` | A one-byte mutation fails SHA-256, writes no canonical inbox file, and cannot ack success. |
 | company-data classification fail-close | `go test ./... -run '^TestR1CompanyDataFailClosed$' -count=1 -v` | `company`, `unknown`, and missing values cause zero adapter publish and zero receive materialization. |
 | secret/repo leak guard | `go test ./... -run '^TestR1SecretRepoLeakGuard$' -count=1 -v` | Credentials load only from a mode-0600 `~/.config/` fixture; repository and captured logs contain no fixture token or private-key marker. |
-| SQLite body absence | `go test ./... -run '^TestR1SQLiteBodyAbsence$' -count=1 -v` | Schema and every text/blob value contain metadata only; a unique payload marker is absent after success, failure, and retry. |
+| SQLite body absence | `go test ./... -run '^TestR1SQLiteBodyAbsence$' -count=1 -v` | Schema and every text/blob value contain metadata only; inject an unknown-field body-smuggling marker into success, failure, and retry paths and verify that the marker is absent from SQLite, audit JSON, and logs. |
 | wrk gate denial/no bypass | `go test ./... -run '^TestR1WrkGateDenialNoBypass$' -count=1 -v` | Denial produces no agent process, direct spawn call, or alternate path; retry does not call the gate twice. |
 | reverse completion duplicate/correlation | `go test ./... -run '^TestR1ReverseCompletionIdempotent$' -count=1 -v` | Repeated completion delivery yields one terminal transition and preserves original correlation/causation IDs. |
 | adapter contract tests/no SDK leakage | `go test ./... -run '^TestR1AdapterContract$' -count=1 -v && go test ./... -run '^TestR1CoreNoSDKLeakage$' -count=1 -v` | Fake and Supabase adapters pass the same contract; core dependency/import output contains no Supabase, NATS, or Herdr SDK. |
