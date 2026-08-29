@@ -44,6 +44,23 @@ Prompt files begin with recipient metadata such as `expect: name=orch-mock cwd=/
 
 The CLI never falls back to herdr directly. If the daemon socket is absent it exits 4. `PANEWIRE_SOCKET` is available for tests and non-default local installations.
 
+## Stage 2 offline R1
+
+`panewire submit` writes a metadata-only stage 2 outbox record; it does not
+open a remote connection or load a credential file. The stage 2 publisher and
+receiver loop is an explicit `Stage2.Enabled` daemon configuration gate and is
+off by default, so the existing launchd invocation remains a stage 1 daemon.
+
+```sh
+panewire submit --db /safe/local/stage2.sqlite3 --file ./brief.md \
+  --from-machine sender --destination-machine receiver --namespace jobs \
+  --logical-path jobs/example/brief.md --classification personal_non_company
+```
+
+The R1 implementation is fixture-only: its Supabase adapter is exercised
+against an in-process HTTP fake. Live Supabase credentials and smoke testing
+are intentionally deferred to R2.
+
 ## Status
 
 R2: prompt target safety, verified submission/uptake, privacy-preserving delivery audit, schema guard, events, inbox watcher, and wait. Live prompt smoke remains prohibited in the fixture test job; use an operator-approved scratch pane separately.

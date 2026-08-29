@@ -19,6 +19,7 @@ type Config struct {
 	SocketPath, HerdrSocket, DBPath, InboxRoot string
 	StorePromptBody                            bool
 	Logging                                    LoggingConfig
+	Stage2                                     Stage2Config
 	Store                                      *Store
 	SchemaCommand                              []string
 	Logger                                     *slog.Logger
@@ -94,6 +95,9 @@ func (d *Daemon) Start(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	d.cancel = cancel
 	go d.serve(runCtx)
+	if d.cfg.Stage2.Enabled {
+		go d.stage2Loop(runCtx)
+	}
 	return nil
 }
 func (d *Daemon) runGuard(ctx context.Context, phase string) GuardResult {

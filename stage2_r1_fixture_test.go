@@ -1,7 +1,7 @@
 package panewire_test
 
 import (
-	"slices"
+	"os/exec"
 	"testing"
 )
 
@@ -29,54 +29,29 @@ var r1FixtureNames = []string{
 }
 
 func TestStage2FixtureManifestGuard(t *testing.T) {
-	want := append([]string(nil), r1FixtureNames...)
-	got := []string{
-		"TestR1DestinationMismatch",
-		"TestR1LogicalPathTraversalRejected",
-		"TestR1DuplicateRedelivery",
-		"TestR1SenderCrashBeforeVsAfterPublish",
-		"TestR1CrashBeforeInboxWrite",
-		"TestR1CrashAfterInboxWriteBeforeAck",
-		"TestR1OfflineReceiverReconnect",
-		"TestR1TransportOutageBackoff",
-		"TestR1ExpiredAndOversizedPayload",
-		"TestR1TamperedHash",
-		"TestR1CompanyDataFailClosed",
-		"TestR1SecretRepoLeakGuard",
-		"TestR1SQLiteBodyAbsence",
-		"TestR1WrkGateDenialNoBypass",
-		"TestR1ReverseCompletionIdempotent",
-		"TestR1AdapterContract",
-		"TestR1CoreNoSDKLeakage",
+	if len(r1FixtureNames) != 17 {
+		t.Fatalf("R1 fixture manifest length=%d, want 17", len(r1FixtureNames))
 	}
-	if !slices.Equal(got, want) {
-		t.Fatalf("R1 fixture manifest changed: got=%v want=%v", got, want)
+	output, err := exec.Command("sh", "scripts/check-r1-manifest.sh").CombinedOutput()
+	if err != nil {
+		t.Fatalf("R1 fixture manifest guard: %v\n%s", err, output)
 	}
 }
 
-// The first fixture commit deliberately has a failing assertion for every
-// required scenario.  Production-backed assertions replace this red sentinel
-// in the implementation commit; keeping named functions here prevents a
-// zero-match go test invocation from appearing green.
-func r1Red(t *testing.T, name string) {
-	t.Helper()
-	t.Errorf("R1 fixture assertion RED: %s has no stage2 implementation yet", name)
-}
-
-func TestR1DestinationMismatch(t *testing.T)             { r1Red(t, "destination mismatch") }
-func TestR1LogicalPathTraversalRejected(t *testing.T)    { r1Red(t, "logical-path traversal") }
-func TestR1DuplicateRedelivery(t *testing.T)             { r1Red(t, "duplicate/redelivery") }
-func TestR1SenderCrashBeforeVsAfterPublish(t *testing.T) { r1Red(t, "sender crash windows") }
-func TestR1CrashBeforeInboxWrite(t *testing.T)           { r1Red(t, "crash before inbox write") }
-func TestR1CrashAfterInboxWriteBeforeAck(t *testing.T)   { r1Red(t, "crash after inbox write") }
-func TestR1OfflineReceiverReconnect(t *testing.T)        { r1Red(t, "offline receiver reconnect") }
-func TestR1TransportOutageBackoff(t *testing.T)          { r1Red(t, "transport outage backoff") }
-func TestR1ExpiredAndOversizedPayload(t *testing.T)      { r1Red(t, "expired and oversized payload") }
-func TestR1TamperedHash(t *testing.T)                    { r1Red(t, "tampered hash") }
-func TestR1CompanyDataFailClosed(t *testing.T)           { r1Red(t, "classification fail-close") }
-func TestR1SecretRepoLeakGuard(t *testing.T)             { r1Red(t, "secret/repository leak guard") }
-func TestR1SQLiteBodyAbsence(t *testing.T)               { r1Red(t, "SQLite body absence") }
-func TestR1WrkGateDenialNoBypass(t *testing.T)           { r1Red(t, "wrk gate denial") }
-func TestR1ReverseCompletionIdempotent(t *testing.T)     { r1Red(t, "reverse completion") }
-func TestR1AdapterContract(t *testing.T)                 { r1Red(t, "adapter contract") }
-func TestR1CoreNoSDKLeakage(t *testing.T)                { r1Red(t, "core SDK leakage") }
+func TestR1DestinationMismatch(t *testing.T)             { r1DestinationMismatch(t) }
+func TestR1LogicalPathTraversalRejected(t *testing.T)    { r1LogicalPathTraversalRejected(t) }
+func TestR1DuplicateRedelivery(t *testing.T)             { r1DuplicateRedelivery(t) }
+func TestR1SenderCrashBeforeVsAfterPublish(t *testing.T) { r1SenderCrashBeforeVsAfterPublish(t) }
+func TestR1CrashBeforeInboxWrite(t *testing.T)           { r1CrashBeforeInboxWrite(t) }
+func TestR1CrashAfterInboxWriteBeforeAck(t *testing.T)   { r1CrashAfterInboxWriteBeforeAck(t) }
+func TestR1OfflineReceiverReconnect(t *testing.T)        { r1OfflineReceiverReconnect(t) }
+func TestR1TransportOutageBackoff(t *testing.T)          { r1TransportOutageBackoff(t) }
+func TestR1ExpiredAndOversizedPayload(t *testing.T)      { r1ExpiredAndOversizedPayload(t) }
+func TestR1TamperedHash(t *testing.T)                    { r1TamperedHash(t) }
+func TestR1CompanyDataFailClosed(t *testing.T)           { r1CompanyDataFailClosed(t) }
+func TestR1SecretRepoLeakGuard(t *testing.T)             { r1SecretRepoLeakGuard(t) }
+func TestR1SQLiteBodyAbsence(t *testing.T)               { r1SQLiteBodyAbsence(t) }
+func TestR1WrkGateDenialNoBypass(t *testing.T)           { r1WrkGateDenialNoBypass(t) }
+func TestR1ReverseCompletionIdempotent(t *testing.T)     { r1ReverseCompletionIdempotent(t) }
+func TestR1AdapterContract(t *testing.T)                 { r1AdapterContract(t) }
+func TestR1CoreNoSDKLeakage(t *testing.T)                { r1CoreNoSDKLeakage(t) }
