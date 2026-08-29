@@ -9,18 +9,19 @@ import (
 )
 
 const (
-	CodeSchema          = "schema"
-	CodeDestination     = "destination_mismatch"
-	CodeLogicalPath     = "logical_path"
-	CodeExpired         = "expired"
-	CodeClassification  = "classification"
-	CodeDeclaredSize    = "declared_size"
-	CodeActualSize      = "actual_size"
-	CodeHash            = "hash_mismatch"
-	CodeCollision       = "logical_path_collision"
-	CodePaneMismatch    = "pane_mismatch"
-	CodeGateDenied      = "gate_denied"
-	CodeManualReconcile = "manual_reconciliation"
+	CodeSchema           = "schema"
+	CodeDestination      = "destination_mismatch"
+	CodeLogicalPath      = "logical_path"
+	CodeExpired          = "expired"
+	CodeClassification   = "classification"
+	CodeDeclaredSize     = "declared_size"
+	CodeActualSize       = "actual_size"
+	CodeHash             = "hash_mismatch"
+	CodeCollision        = "logical_path_collision"
+	CodePaneMismatch     = "pane_mismatch"
+	CodeGateDenied       = "gate_denied"
+	CodeGateNotInstalled = "gate_not_installed"
+	CodeManualReconcile  = "manual_reconciliation"
 )
 
 // ValidationError is safe to persist as metadata: it intentionally carries no

@@ -201,10 +201,10 @@ func (r *Receiver) afterPublished(ctx context.Context, delivery Delivery, record
 		return r.ack(ctx, delivery, AckAccepted)
 	}
 	if r.cfg.Gate == nil {
-		if err := r.cfg.Store.MarkGateState(ctx, delivery.Envelope.DeliveryID, InboxSpawnUnknown, CodeManualReconcile, now); err != nil {
-			return err
-		}
-		return validation(CodeManualReconcile, "spawn requested without a wrk gate")
+		// A daemon started without --stage2-wrk-gate has made an intentional
+		// policy choice, not an ambiguous wrk outcome. Persist a terminal reject
+		// that says so and acknowledge it; never mislabel this as GATE_DENIED.
+		return r.terminal(ctx, delivery, validation(CodeGateNotInstalled, "wrk gate is not installed"))
 	}
 	if err := r.cfg.Store.MarkGateState(ctx, delivery.Envelope.DeliveryID, InboxSpawnRequested, "", now); err != nil {
 		return err

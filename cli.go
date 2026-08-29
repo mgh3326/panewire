@@ -6,13 +6,19 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"io"
+	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/mgh3326/panewire/stage2/adapters/supabase"
+	"github.com/mgh3326/panewire/stage2/adapters/wrkgate"
 	"github.com/mgh3326/panewire/stage2/core"
 )
 
@@ -33,6 +39,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if args[0] == "submit" {
 		return runSubmitCLI(args[1:])
+	}
+	if args[0] == "outbox" {
+		return runOutboxCLI(args[1:])
 	}
 	if args[0] != "wait" {
 		return ExitUsage
@@ -104,26 +113,61 @@ func RunCLI(args []string, cfg CLIConfig) int {
 // the explicit default-off daemon loop, so this command never opens a remote
 // connection or loads a credential file.
 func runSubmitCLI(args []string) int {
+	return runSubmitCLIWithWriters(args, os.Stdout, os.Stderr)
+}
+
+func runSubmitCLIWithWriters(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("panewire submit", flag.ContinueOnError)
-	fs.SetOutput(os.Stderr)
+	fs.SetOutput(stderr)
 	dbPath := fs.String("db", "", "stage2 metadata SQLite path")
 	file := fs.String("file", "", "canonical source file")
 	from := fs.String("from-machine", "", "stable source machine identity")
-	to := fs.String("destination-machine", "", "stable destination machine identity")
-	namespace := fs.String("namespace", "", "approved destination inbox namespace")
-	logicalPath := fs.String("logical-path", "", "normalized namespace-relative path")
-	classification := fs.String("classification", "", "public or personal_non_company")
+	destinationMachine := fs.String("destination-machine", "", "stable destination machine identity (legacy long form)")
+	to := fs.String("to", "", "stable destination machine identity")
+	namespace := fs.String("namespace", "inbox", "approved destination inbox namespace")
+	legacyLogicalPath := fs.String("logical-path", "", "normalized namespace-relative path (legacy long form)")
+	logicalPath := fs.String("path", "", "normalized namespace-relative path")
+	classification := fs.String("classification", string(core.ClassificationPersonalNonCompany), "public or personal_non_company")
+	kind := fs.String("kind", string(core.MessageKindInbox), "inbox.delivery or workflow.completion")
+	correlationID := fs.String("correlation-id", "", "original message ID for a workflow completion")
+	causationID := fs.String("causation-id", "", "terminal outcome for a workflow completion")
 	expiresAt := fs.String("expires-at", "", "RFC3339 UTC expiry (default 72h)")
 	policy := fs.String("policy-version", "stage2-allowlist-v1", "classification policy version")
 	requestWrk := fs.Bool("request-wrk", false, "request only the receiving wrk admission gate")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
-	if *dbPath == "" || *file == "" || *from == "" || *to == "" || *namespace == "" || *logicalPath == "" || *classification == "" {
+	destination, err := singleFlagValue(*destinationMachine, *to, "destination machine")
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return ExitConditionInvalid
+	}
+	logical, err := singleFlagValue(*legacyLogicalPath, *logicalPath, "logical path")
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return ExitConditionInvalid
+	}
+	if *dbPath == "" || *file == "" || *from == "" || destination == "" || *namespace == "" || logical == "" {
 		return ExitUsage
 	}
+	if !machineIDPattern.MatchString(*from) || !machineIDPattern.MatchString(destination) {
+		fmt.Fprintln(stderr, "submit rejected: machine IDs must be stable lowercase identifiers")
+		return ExitConditionInvalid
+	}
+	if *classification != string(core.ClassificationPublic) && *classification != string(core.ClassificationPersonalNonCompany) {
+		fmt.Fprintln(stderr, "submit rejected: classification must be public or personal_non_company")
+		return ExitConditionInvalid
+	}
+	messageKind := core.MessageKind(*kind)
+	if messageKind != core.MessageKindInbox && messageKind != core.MessageKindCompletion {
+		fmt.Fprintln(stderr, "submit rejected: unsupported message kind")
+		return ExitConditionInvalid
+	}
+	if messageKind == core.MessageKindCompletion && (*correlationID == "" || *causationID == "") {
+		fmt.Fprintln(stderr, "submit rejected: workflow completion requires correlation-id and causation-id")
+		return ExitConditionInvalid
+	}
 	var expiry time.Time
-	var err error
 	if *expiresAt != "" {
 		expiry, err = time.Parse(time.RFC3339, *expiresAt)
 		if err != nil {
@@ -132,7 +176,7 @@ func runSubmitCLI(args []string) int {
 	}
 	store, err := core.OpenMetadataStore(*dbPath)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(stderr, err)
 		return ExitInternal
 	}
 	defer store.Close()
@@ -140,17 +184,71 @@ func runSubmitCLI(args []string) int {
 	record, err := sender.Submit(context.Background(), core.Submission{
 		SourcePath:     *file,
 		Source:         core.Identity{MachineID: *from},
-		Destination:    core.Destination{MachineID: *to, InboxNamespace: *namespace, LogicalPath: *logicalPath},
+		Destination:    core.Destination{MachineID: destination, InboxNamespace: *namespace, LogicalPath: logical},
 		Classification: core.Classification(*classification),
 		PolicyVersion:  *policy,
+		MessageKind:    messageKind,
+		CorrelationID:  *correlationID,
+		CausationID:    *causationID,
 		ExpiresAt:      expiry,
 		Spawn:          core.Spawn{Requested: *requestWrk},
 	})
 	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
+		fmt.Fprintln(stderr, err)
 		return ExitConditionInvalid
 	}
-	fmt.Fprintln(os.Stdout, record.MessageID)
+	fmt.Fprintln(stdout, record.MessageID)
+	return ExitOK
+}
+
+func singleFlagValue(legacy, concise, label string) (string, error) {
+	if legacy != "" && concise != "" && legacy != concise {
+		return "", fmt.Errorf("submit rejected: conflicting %s flags", label)
+	}
+	if concise != "" {
+		return concise, nil
+	}
+	return legacy, nil
+}
+
+func runOutboxCLI(args []string) int {
+	return runOutboxCLIWithWriters(args, os.Stdout, os.Stderr)
+}
+
+func runOutboxCLIWithWriters(args []string, stdout, stderr io.Writer) int {
+	if len(args) == 0 || args[0] != "list" {
+		return ExitUsage
+	}
+	fs := flag.NewFlagSet("panewire outbox list", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	dbPath := fs.String("db", "", "stage2 metadata SQLite path")
+	state := fs.String("state", "", "optional SUBMITTED, PUBLISHED, COMPLETED, or EXPIRED filter")
+	if err := fs.Parse(args[1:]); err != nil {
+		return ExitUsage
+	}
+	if *dbPath == "" {
+		return ExitUsage
+	}
+	filter := core.OutboxState(*state)
+	if filter != "" && filter != core.OutboxSubmitted && filter != core.OutboxPublished && filter != core.OutboxCompleted && filter != core.OutboxExpired {
+		fmt.Fprintln(stderr, "outbox rejected: unknown state filter")
+		return ExitConditionInvalid
+	}
+	store, err := core.OpenMetadataStore(*dbPath)
+	if err != nil {
+		fmt.Fprintln(stderr, "outbox unavailable")
+		return ExitInternal
+	}
+	defer store.Close()
+	records, err := store.ListOutbox(context.Background(), filter)
+	if err != nil {
+		fmt.Fprintln(stderr, "outbox unavailable")
+		return ExitInternal
+	}
+	fmt.Fprintln(stdout, "MESSAGE_ID\tDESTINATION\tLOGICAL_PATH\tSTATE\tATTEMPTS\tUPDATED_AT")
+	for _, record := range records {
+		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%d\t%s\n", record.MessageID, record.DestinationMachineID, record.LogicalPath, record.State, record.Attempts, record.UpdatedAt.UTC().Format(time.RFC3339))
+	}
 	return ExitOK
 }
 
@@ -213,20 +311,24 @@ func Main(args []string) int {
 	}
 	return RunCLI(args, CLIConfig{})
 }
+
+type daemonCLIDeps struct {
+	HTTPClient            *http.Client
+	AllowInsecureForTests bool
+	SchemaCommand         []string
+	Logger                *slog.Logger
+}
+
 func runDaemonCLI(args []string) int {
-	fs := flag.NewFlagSet("panewire daemon", flag.ContinueOnError)
-	socket := fs.String("socket", socketPathFromEnv(), "local daemon socket")
-	herdr := fs.String("herdr-socket", "", "herdr socket")
-	db := fs.String("db", "", "SQLite path")
-	inbox := fs.String("inbox-root", "", "inbox root")
-	storeBody := fs.Bool("store-prompt-body", false, "opt in to storing prompt bodies")
-	if fs.Parse(args) != nil {
-		return ExitUsage
+	d, code, err := newDaemonForCLI(args, daemonCLIDeps{})
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "daemon configuration rejected:", err)
+		return code
 	}
-	d := NewDaemon(Config{SocketPath: *socket, HerdrSocket: *herdr, DBPath: *db, InboxRoot: *inbox, StorePromptBody: *storeBody, Logging: LoggingConfig{StorePromptBody: *storeBody}})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := d.Start(ctx); err != nil {
+		_ = d.Stop()
 		fmt.Fprintln(os.Stderr, err)
 		return ExitInternal
 	}
@@ -235,6 +337,155 @@ func runDaemonCLI(args []string) int {
 	<-signals
 	_ = d.Stop()
 	return ExitOK
+}
+
+// newDaemonForCLI keeps daemon assembly independently testable: the production
+// entrypoint passes no dependencies, while fixtures can use an httptest client
+// and an explicitly permitted HTTP endpoint without weakening production TLS.
+func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
+	fs := flag.NewFlagSet("panewire daemon", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	socket := fs.String("socket", socketPathFromEnv(), "local daemon socket")
+	herdr := fs.String("herdr-socket", "", "herdr socket")
+	db := fs.String("db", "", "SQLite path")
+	inbox := fs.String("inbox-root", "", "inbox root")
+	storeBody := fs.Bool("store-prompt-body", false, "opt in to storing prompt bodies")
+	stage2ClientEnv := fs.String("stage2-client-env", "", "explicit mode-0600 enrolled client env")
+	stage2InboxRoot := fs.String("stage2-inbox-root", "", "stage2 logical-path namespace root")
+	stage2DB := fs.String("stage2-db", "", "stage2 metadata SQLite path (defaults to --db or a sibling of stage2 inbox)")
+	stage2Namespace := fs.String("stage2-namespace", "inbox", "approved stage2 inbox namespace name")
+	stage2Poll := fs.Duration("stage2-poll", 30*time.Second, "stage2 publish/claim poll interval")
+	stage2WrkGate := fs.Bool("stage2-wrk-gate", false, "attach the wrk admission gate for spawn requests")
+	if fs.Parse(args) != nil {
+		return nil, ExitUsage, fmt.Errorf("invalid daemon flags")
+	}
+	cfg := Config{
+		SocketPath:      *socket,
+		HerdrSocket:     *herdr,
+		DBPath:          *db,
+		InboxRoot:       *inbox,
+		StorePromptBody: *storeBody,
+		Logging:         LoggingConfig{StorePromptBody: *storeBody},
+		SchemaCommand:   deps.SchemaCommand,
+		Logger:          deps.Logger,
+	}
+	if stage2FlagsProvided(args) {
+		if *stage2ClientEnv == "" || *stage2InboxRoot == "" {
+			return nil, ExitConditionInvalid, fmt.Errorf("stage2 requires both --stage2-client-env and --stage2-inbox-root")
+		}
+		if *stage2Poll <= 0 {
+			return nil, ExitConditionInvalid, fmt.Errorf("stage2 poll interval must be positive")
+		}
+		stage2, resolvedInbox, err := buildStage2DaemonConfig(*stage2ClientEnv, *stage2InboxRoot, *stage2DB, *db, *stage2Namespace, *stage2Poll, *stage2WrkGate, deps)
+		if err != nil {
+			return nil, ExitConditionInvalid, err
+		}
+		if *inbox != "" {
+			legacyInbox, err := filepath.Abs(*inbox)
+			if err != nil || legacyInbox != resolvedInbox {
+				_ = stage2.Close()
+				return nil, ExitConditionInvalid, fmt.Errorf("--inbox-root must match --stage2-inbox-root when stage2 is enabled")
+			}
+		}
+		cfg.InboxRoot = resolvedInbox
+		cfg.Stage2 = stage2
+	}
+	return NewDaemon(cfg), ExitOK, nil
+}
+
+func stage2FlagsProvided(args []string) bool {
+	for _, name := range []string{
+		"stage2-client-env", "stage2-inbox-root", "stage2-db", "stage2-namespace", "stage2-poll", "stage2-wrk-gate",
+	} {
+		flagName := "--" + name
+		for _, arg := range args {
+			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func loadStage2ClientEnv(path string) (clientCredentialEnv, error) {
+	values, err := loadMode0600Env(path)
+	if err != nil {
+		return clientCredentialEnv{}, fmt.Errorf("stage2 client env must be a regular mode-0600 file")
+	}
+	credential := clientCredentialEnv{
+		URL:            values["PANEWIRE_SUPABASE_URL"],
+		MachineID:      values["PANEWIRE_MACHINE_ID"],
+		AccessToken:    values["PANEWIRE_SUPABASE_ACCESS_TOKEN"],
+		RefreshToken:   values["PANEWIRE_SUPABASE_REFRESH_TOKEN"],
+		PublishableKey: values["PANEWIRE_SUPABASE_PUBLISHABLE_KEY"],
+	}
+	if credential.URL == "" || credential.AccessToken == "" || credential.RefreshToken == "" || credential.PublishableKey == "" || !machineIDPattern.MatchString(credential.MachineID) {
+		return clientCredentialEnv{}, fmt.Errorf("stage2 client env is missing required enrolled values")
+	}
+	return credential, nil
+}
+
+func buildStage2DaemonConfig(clientEnvPath, inboxRoot, explicitMetadataDB, stage1DB, namespace string, poll time.Duration, wrkGateEnabled bool, deps daemonCLIDeps) (Stage2Config, string, error) {
+	credential, err := loadStage2ClientEnv(clientEnvPath)
+	if err != nil {
+		return Stage2Config{}, "", err
+	}
+	if namespace == "" || strings.ContainsAny(namespace, "/\\\x00") {
+		return Stage2Config{}, "", fmt.Errorf("stage2 namespace is invalid")
+	}
+	resolvedInbox, err := filepath.Abs(inboxRoot)
+	if err != nil {
+		return Stage2Config{}, "", fmt.Errorf("resolve stage2 inbox root")
+	}
+	metadataDB := explicitMetadataDB
+	if metadataDB == "" {
+		metadataDB = stage1DB
+	}
+	if metadataDB == "" {
+		metadataDB = filepath.Join(filepath.Dir(resolvedInbox), ".panewire-stage2.sqlite3")
+	}
+	metadata, err := core.OpenMetadataStore(metadataDB)
+	if err != nil {
+		return Stage2Config{}, "", fmt.Errorf("open stage2 metadata store")
+	}
+	closeMetadata := func() error { return metadata.Close() }
+	adapter, err := supabase.New(supabase.Config{
+		BaseURL:               credential.URL,
+		AccessToken:           credential.AccessToken,
+		RefreshToken:          credential.RefreshToken,
+		APIKey:                credential.PublishableKey,
+		HTTPClient:            deps.HTTPClient,
+		AllowInsecureForTests: deps.AllowInsecureForTests,
+	})
+	if err != nil {
+		_ = closeMetadata()
+		return Stage2Config{}, "", fmt.Errorf("configure stage2 Supabase adapter")
+	}
+	var gate core.Gate
+	if wrkGateEnabled {
+		gate = wrkgate.New(wrkgate.Config{})
+	}
+	stagingRoot := filepath.Join(filepath.Dir(resolvedInbox), "."+filepath.Base(resolvedInbox)+"-stage2-staging")
+	receiver, err := core.NewReceiver(core.ReceiverConfig{
+		MachineID:   credential.MachineID,
+		Namespaces:  map[string]string{namespace: resolvedInbox},
+		InboxRoot:   resolvedInbox,
+		StagingRoot: stagingRoot,
+		Store:       metadata,
+		Transport:   adapter,
+		Gate:        gate,
+	})
+	if err != nil {
+		_ = closeMetadata()
+		return Stage2Config{}, "", fmt.Errorf("configure stage2 receiver")
+	}
+	return Stage2Config{
+		Enabled:      true,
+		Publisher:    &core.Sender{Store: metadata, Transport: adapter},
+		Receiver:     receiver,
+		PollInterval: poll,
+		Close:        closeMetadata,
+	}, resolvedInbox, nil
 }
 func joinArgs(a []string) string { return strings.Join(a, " ") }
 
