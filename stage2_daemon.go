@@ -12,6 +12,9 @@ type Stage2Config struct {
 	Publisher    interface{ PublishPending(context.Context) error }
 	Receiver     interface{ PollOnce(context.Context) error }
 	PollInterval time.Duration
+	// Close releases the separately-owned stage2 metadata connection after the
+	// loop has stopped. It is nil for the historical default-off configuration.
+	Close func() error
 }
 
 func (d *Daemon) stage2Loop(ctx context.Context) {

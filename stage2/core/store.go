@@ -249,6 +249,38 @@ func (s *MetadataStore) OutboxByDelivery(ctx context.Context, id string) (Outbox
 	return s.outboxByDeliveryLocked(ctx, id)
 }
 
+// ListOutbox returns metadata-only status rows for the operator CLI.  It never
+// opens a source file or queries a transport, so inspection is safe while the
+// daemon is offline.
+func (s *MetadataStore) ListOutbox(ctx context.Context, state OutboxState) ([]OutboxRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	query := `SELECT delivery_id,message_id,destination_machine_id,source_path,sha256,size_bytes,inbox_namespace,logical_path,classification,content_type,policy_version,message_kind,
+source_machine_id,source_instance_id,expect_machine_id,expect_pane_name,expect_pane_label,expect_pane_cwd,expect_workspace_id,correlation_id,causation_id,
+reply_destination_machine_id,reply_correlation_id,reply_requested,spawn_requested,created_at_ms,expires_at_ms,updated_at_ms,last_attempt_at_ms,attempts,state,receipt_id,last_error_code
+FROM s2_outbox`
+	var args []any
+	if state != "" {
+		query += ` WHERE state=?`
+		args = append(args, string(state))
+	}
+	query += ` ORDER BY created_at_ms,message_id`
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []OutboxRecord
+	for rows.Next() {
+		record, _, err := scanOutbox(rows)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
 func (s *MetadataStore) outboxByDeliveryLocked(ctx context.Context, id string) (OutboxRecord, bool, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT delivery_id,message_id,destination_machine_id,source_path,sha256,size_bytes,inbox_namespace,logical_path,classification,content_type,policy_version,message_kind,
 source_machine_id,source_instance_id,expect_machine_id,expect_pane_name,expect_pane_label,expect_pane_cwd,expect_workspace_id,correlation_id,causation_id,

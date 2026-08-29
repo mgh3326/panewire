@@ -17,6 +17,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/mgh3326/panewire/stage2/core"
@@ -25,6 +26,7 @@ import (
 type Config struct {
 	BaseURL               string
 	AccessToken           string
+	RefreshToken          string
 	APIKey                string
 	Schema                string
 	CredentialPath        string
@@ -35,7 +37,10 @@ type Config struct {
 
 type Adapter struct {
 	baseURL    *url.URL
+	mu         sync.RWMutex
+	refreshMu  sync.Mutex
 	access     string
+	refresh    string
 	apiKey     string
 	schema     string
 	httpClient *http.Client
@@ -70,7 +75,7 @@ func New(cfg Config) (*Adapter, error) {
 		schema = "panewire"
 	}
 	u.Path = strings.TrimSuffix(u.Path, "/")
-	return &Adapter{baseURL: u, access: cfg.AccessToken, apiKey: cfg.APIKey, schema: schema, httpClient: client, visibility: visibility}, nil
+	return &Adapter{baseURL: u, access: cfg.AccessToken, refresh: cfg.RefreshToken, apiKey: cfg.APIKey, schema: schema, httpClient: client, visibility: visibility}, nil
 }
 
 // LoadAccessToken is opt-in: no adapter constructor probes a default home
@@ -256,12 +261,29 @@ func (a *Adapter) Health(ctx context.Context) (core.TransportHealth, error) {
 }
 
 func (a *Adapter) call(ctx context.Context, method, endpoint string, input any, output any) error {
-	var body io.Reader
+	var encoded []byte
 	if input != nil {
-		encoded, err := json.Marshal(input)
+		var err error
+		encoded, err = json.Marshal(input)
 		if err != nil {
 			return err
 		}
+	}
+	access := a.accessToken()
+	status, err := a.callOnce(ctx, method, endpoint, encoded, access, output)
+	if status != http.StatusUnauthorized {
+		return err
+	}
+	if err := a.refreshAccessToken(ctx, access); err != nil {
+		return fmt.Errorf("Supabase token refresh failed")
+	}
+	_, err = a.callOnce(ctx, method, endpoint, encoded, a.accessToken(), output)
+	return err
+}
+
+func (a *Adapter) callOnce(ctx context.Context, method, endpoint string, encoded []byte, access string, output any) (int, error) {
+	var body io.Reader
+	if encoded != nil {
 		body = bytes.NewReader(encoded)
 	}
 	u := *a.baseURL
@@ -274,12 +296,12 @@ func (a *Adapter) call(ctx context.Context, method, endpoint string, input any, 
 	}
 	req, err := http.NewRequestWithContext(ctx, method, u.String(), body)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	if a.access != "" {
-		req.Header.Set("Authorization", "Bearer "+a.access)
+	if access != "" {
+		req.Header.Set("Authorization", "Bearer "+access)
 	}
 	if a.apiKey != "" {
 		req.Header.Set("apikey", a.apiKey)
@@ -293,22 +315,84 @@ func (a *Adapter) call(ctx context.Context, method, endpoint string, input any, 
 	}
 	resp, err := a.httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("Supabase HTTP request failed")
+		return 0, fmt.Errorf("Supabase HTTP request failed")
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		// Do not return response text: it can contain untrusted fields or a
 		// reflected credential and must not reach logs/audit metadata.
-		return fmt.Errorf("Supabase HTTP status %d", resp.StatusCode)
+		return resp.StatusCode, fmt.Errorf("Supabase HTTP status %d", resp.StatusCode)
 	}
 	if output == nil || resp.StatusCode == http.StatusNoContent {
-		return nil
+		return resp.StatusCode, nil
 	}
 	decoder := json.NewDecoder(io.LimitReader(resp.Body, 2<<20))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(output); err != nil {
-		return fmt.Errorf("decode Supabase response: %w", err)
+		return resp.StatusCode, fmt.Errorf("decode Supabase response: %w", err)
 	}
+	return resp.StatusCode, nil
+}
+
+func (a *Adapter) accessToken() string {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.access
+}
+
+// refreshAccessToken serializes refreshes so concurrent sender/receiver calls
+// do not rotate the same credential twice. A caller whose rejected token was
+// already replaced by a peer simply retries with the newer access token.
+func (a *Adapter) refreshAccessToken(ctx context.Context, rejectedAccess string) error {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+	a.mu.RLock()
+	if a.access != rejectedAccess && a.access != "" {
+		a.mu.RUnlock()
+		return nil
+	}
+	refresh := a.refresh
+	a.mu.RUnlock()
+	if refresh == "" {
+		return fmt.Errorf("Supabase refresh token is unavailable")
+	}
+	body, err := json.Marshal(map[string]string{"refresh_token": refresh})
+	if err != nil {
+		return err
+	}
+	u := *a.baseURL
+	u.Path = strings.TrimSuffix(u.Path, "/") + "/auth/v1/token"
+	u.RawQuery = "grant_type=refresh_token"
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+	if a.apiKey != "" {
+		req.Header.Set("apikey", a.apiKey)
+	}
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("Supabase refresh request failed")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("Supabase refresh rejected")
+	}
+	var session struct {
+		AccessToken  string `json:"access_token"`
+		RefreshToken string `json:"refresh_token"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&session); err != nil || session.AccessToken == "" {
+		return fmt.Errorf("Supabase refresh response is invalid")
+	}
+	a.mu.Lock()
+	a.access = session.AccessToken
+	if session.RefreshToken != "" {
+		a.refresh = session.RefreshToken
+	}
+	a.mu.Unlock()
 	return nil
 }
 

@@ -29,13 +29,14 @@ type LoggingConfig struct {
 	StorePromptBody bool
 }
 type Daemon struct {
-	cfg      Config
-	store    *Store
-	listener net.Listener
-	cancel   context.CancelFunc
-	herdr    *HerdrClient
-	caps     GuardResult
-	mu       sync.Mutex
+	cfg        Config
+	store      *Store
+	listener   net.Listener
+	cancel     context.CancelFunc
+	herdr      *HerdrClient
+	caps       GuardResult
+	stage2Done chan struct{}
+	mu         sync.Mutex
 }
 
 func NewDaemon(cfg Config) *Daemon {
@@ -96,7 +97,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 	d.cancel = cancel
 	go d.serve(runCtx)
 	if d.cfg.Stage2.Enabled {
-		go d.stage2Loop(runCtx)
+		d.stage2Done = make(chan struct{})
+		go func() {
+			defer close(d.stage2Done)
+			d.stage2Loop(runCtx)
+		}()
 	}
 	return nil
 }
@@ -262,6 +267,10 @@ func (d *Daemon) Stop() error {
 	if d.cancel != nil {
 		d.cancel()
 	}
+	if d.stage2Done != nil {
+		<-d.stage2Done
+		d.stage2Done = nil
+	}
 	if d.herdr != nil {
 		_ = d.herdr.Close()
 	}
@@ -271,10 +280,17 @@ func (d *Daemon) Stop() error {
 	if d.cfg.SocketPath != "" {
 		_ = os.Remove(d.cfg.SocketPath)
 	}
-	if d.store != nil {
-		return d.store.Close()
+	var stage2Err error
+	if d.cfg.Stage2.Close != nil {
+		stage2Err = d.cfg.Stage2.Close()
+		d.cfg.Stage2.Close = nil
 	}
-	return nil
+	if d.store != nil {
+		if err := d.store.Close(); err != nil {
+			return err
+		}
+	}
+	return stage2Err
 }
 func (d *Daemon) SocketPath() string {
 	if d.cfg.SocketPath != "" {
