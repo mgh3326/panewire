@@ -34,6 +34,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "smoke-supabase" {
 		return runSmokeSupabaseCLI(args[1:], os.Stdout, os.Stderr, smokeDeps{})
 	}
+	if args[0] == "sentinel" {
+		return runSentinelCLI(args[1:], os.Stdout, os.Stderr, sentinelCLIDeps{})
+	}
 	if args[0] == "prompt" {
 		return runPromptCLI(args[1:], cfg)
 	}
@@ -324,6 +327,7 @@ func Main(args []string) int {
 type daemonCLIDeps struct {
 	HTTPClient            *http.Client
 	AllowInsecureForTests bool
+	TelegramBaseURL       string
 	SchemaCommand         []string
 	Logger                *slog.Logger
 }
@@ -366,6 +370,12 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	stage2Poll := fs.Duration("stage2-poll", 30*time.Second, "stage2 publish/claim poll interval")
 	stage2WrkGate := fs.Bool("stage2-wrk-gate", false, "attach the wrk admission gate for spawn requests")
 	stage2SpawnPolicy := fs.String("stage2-spawn-policy", "", "receiving-machine JSON policy for wrk spawn context")
+	sentinelEnabled := fs.Bool("sentinel", false, "enable L2 sentinel heartbeat publication")
+	sentinelWatch := fs.Bool("sentinel-watch", false, "evaluate peer sentinel heartbeats and send Telegram alerts")
+	sentinelConfig := fs.String("sentinel-config", "", "explicit sentinel node/check JSON configuration")
+	sentinelTGEnv := fs.String("sentinel-tg-env", "", "explicit mode-0600 TG_BOT_TOKEN/TG_CHAT_ID env file")
+	sentinelPoll := fs.Duration("sentinel-poll", time.Minute, "sentinel heartbeat poll interval")
+	sentinelWatchPoll := fs.Duration("sentinel-watch-poll", 2*time.Minute, "sentinel peer evaluation poll interval")
 	if fs.Parse(args) != nil {
 		return nil, ExitUsage, fmt.Errorf("invalid daemon flags")
 	}
@@ -379,7 +389,32 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		SchemaCommand:   deps.SchemaCommand,
 		Logger:          deps.Logger,
 	}
-	if stage2FlagsProvided(args) {
+	if sentinelFlagsProvided(args) && !*sentinelEnabled {
+		return nil, ExitConditionInvalid, fmt.Errorf("sentinel options require --sentinel")
+	}
+	if *sentinelEnabled {
+		if *stage2ClientEnv == "" || *sentinelConfig == "" {
+			return nil, ExitConditionInvalid, fmt.Errorf("sentinel requires --stage2-client-env and --sentinel-config")
+		}
+		if *sentinelPoll <= 0 || *sentinelWatchPoll <= 0 {
+			return nil, ExitConditionInvalid, fmt.Errorf("sentinel poll intervals must be positive")
+		}
+		if *sentinelWatch && *sentinelTGEnv == "" {
+			return nil, ExitConditionInvalid, fmt.Errorf("--sentinel-watch requires --sentinel-tg-env")
+		}
+		configuredSentinel, err := buildSentinelDaemonConfig(*stage2ClientEnv, *sentinelConfig, *sentinelTGEnv, *sentinelWatch, *sentinelPoll, *sentinelWatchPoll, deps)
+		if err != nil {
+			return nil, ExitConditionInvalid, err
+		}
+		cfg.Sentinel = configuredSentinel
+	}
+	stage2Requested := stage2FlagsProvided(args)
+	if *sentinelEnabled && !stage2OperationalFlagsProvided(args) {
+		// An explicit credential file is shared with sentinel, but must not
+		// accidentally turn on stage-2 message transport by itself.
+		stage2Requested = false
+	}
+	if stage2Requested {
 		if *stage2ClientEnv == "" || *stage2InboxRoot == "" {
 			return nil, ExitConditionInvalid, fmt.Errorf("stage2 requires both --stage2-client-env and --stage2-inbox-root")
 		}
@@ -409,6 +444,34 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 func stage2FlagsProvided(args []string) bool {
 	for _, name := range []string{
 		"stage2-client-env", "stage2-inbox-root", "stage2-db", "stage2-namespace", "stage2-poll", "stage2-wrk-gate", "stage2-spawn-policy",
+	} {
+		flagName := "--" + name
+		for _, arg := range args {
+			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func stage2OperationalFlagsProvided(args []string) bool {
+	for _, name := range []string{
+		"stage2-inbox-root", "stage2-db", "stage2-namespace", "stage2-poll", "stage2-wrk-gate", "stage2-spawn-policy",
+	} {
+		flagName := "--" + name
+		for _, arg := range args {
+			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func sentinelFlagsProvided(args []string) bool {
+	for _, name := range []string{
+		"sentinel", "sentinel-watch", "sentinel-config", "sentinel-tg-env", "sentinel-poll", "sentinel-watch-poll",
 	} {
 		flagName := "--" + name
 		for _, arg := range args {

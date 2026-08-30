@@ -20,6 +20,7 @@ type Config struct {
 	StorePromptBody                            bool
 	Logging                                    LoggingConfig
 	Stage2                                     Stage2Config
+	Sentinel                                   SentinelConfig
 	Store                                      *Store
 	SchemaCommand                              []string
 	Logger                                     *slog.Logger
@@ -29,14 +30,15 @@ type LoggingConfig struct {
 	StorePromptBody bool
 }
 type Daemon struct {
-	cfg        Config
-	store      *Store
-	listener   net.Listener
-	cancel     context.CancelFunc
-	herdr      *HerdrClient
-	caps       GuardResult
-	stage2Done chan struct{}
-	mu         sync.Mutex
+	cfg          Config
+	store        *Store
+	listener     net.Listener
+	cancel       context.CancelFunc
+	herdr        *HerdrClient
+	caps         GuardResult
+	stage2Done   chan struct{}
+	sentinelDone chan struct{}
+	mu           sync.Mutex
 }
 
 func NewDaemon(cfg Config) *Daemon {
@@ -101,6 +103,13 @@ func (d *Daemon) Start(ctx context.Context) error {
 		go func() {
 			defer close(d.stage2Done)
 			d.stage2Loop(runCtx)
+		}()
+	}
+	if d.cfg.Sentinel.Enabled {
+		d.sentinelDone = make(chan struct{})
+		go func() {
+			defer close(d.sentinelDone)
+			d.sentinelLoop(runCtx)
 		}()
 	}
 	return nil
@@ -270,6 +279,10 @@ func (d *Daemon) Stop() error {
 	if d.stage2Done != nil {
 		<-d.stage2Done
 		d.stage2Done = nil
+	}
+	if d.sentinelDone != nil {
+		<-d.sentinelDone
+		d.sentinelDone = nil
 	}
 	if d.herdr != nil {
 		_ = d.herdr.Close()
