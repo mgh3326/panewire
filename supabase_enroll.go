@@ -57,6 +57,38 @@ type clientCredentialEnv struct {
 	PublishableKey string
 }
 
+type enrollmentResult struct {
+	Credential                        clientCredentialEnv
+	ExistingPasswordRotationAttempted bool
+}
+
+// enrollmentStepError deliberately exposes only a stable stage label and HTTP
+// status. It never includes a response body, password, token, or raw service
+// error because the CLI writes it to an operator-visible stream.
+type enrollmentStepError struct {
+	Step       string
+	HTTPStatus int
+}
+
+func (e *enrollmentStepError) Error() string {
+	if e.HTTPStatus > 0 {
+		return fmt.Sprintf("enrollment failed (step=%s http=%d)", e.Step, e.HTTPStatus)
+	}
+	return fmt.Sprintf("enrollment failed (step=%s)", e.Step)
+}
+
+func enrollmentStepFailure(step string, httpStatus int) error {
+	return &enrollmentStepError{Step: step, HTTPStatus: httpStatus}
+}
+
+func enrollmentFailureText(err error) string {
+	var stepErr *enrollmentStepError
+	if errors.As(err, &stepErr) {
+		return stepErr.Error()
+	}
+	return "enrollment failed"
+}
+
 // runEnrollMachineCLI performs the only credential-creation path in this
 // repository.  It has no default admin-env or output path: accidental use
 // cannot read ~/.config/panewire or write a secret file there.
@@ -86,12 +118,12 @@ func runEnrollMachineCLI(args []string, stdout, stderr io.Writer, deps enrollDep
 
 	env, err := loadSupabaseAdminEnv(*adminEnvPath)
 	if err != nil {
-		fmt.Fprintln(stderr, "enrollment failed: admin environment is invalid")
+		fmt.Fprintln(stderr, "enrollment failed (step=admin_environment)")
 		return ExitConditionInvalid
 	}
 	client, err := newSupabaseAdminClient(env, deps)
 	if err != nil {
-		fmt.Fprintln(stderr, "enrollment failed: Supabase URL is invalid")
+		fmt.Fprintln(stderr, "enrollment failed (step=admin_client)")
 		return ExitConditionInvalid
 	}
 
@@ -105,13 +137,19 @@ func runEnrollMachineCLI(args []string, stdout, stderr io.Writer, deps enrollDep
 		return ExitOK
 	}
 
-	credential, err := enrollMachine(ctx, client, *machineID, env.PublishableKey, deps)
+	result, err := enrollMachine(ctx, client, *machineID, env.PublishableKey, deps)
 	if err != nil {
-		fmt.Fprintln(stderr, "enrollment failed")
+		fmt.Fprintln(stderr, enrollmentFailureText(err))
+		if result.ExistingPasswordRotationAttempted {
+			fmt.Fprintln(stderr, "warning: existing sessions may have been invalidated; retry enrollment is required")
+		}
 		return ExitInternal
 	}
-	if err := writeClientCredentialEnv(*outPath, credential); err != nil {
-		fmt.Fprintln(stderr, "enrollment failed: client credential file was not written")
+	if err := writeClientCredentialEnv(*outPath, result.Credential); err != nil {
+		fmt.Fprintln(stderr, "enrollment failed (step=client_credential_write)")
+		if result.ExistingPasswordRotationAttempted {
+			fmt.Fprintln(stderr, "warning: existing sessions may have been invalidated; retry enrollment is required")
+		}
 		return ExitInternal
 	}
 	fmt.Fprintf(stdout, "CONFIRMED: enrolled machine_id=%s and wrote mode-0600 client credential file at %s; no credential values were printed\n", *machineID, *outPath)
@@ -194,6 +232,10 @@ func newSupabaseAdminClient(env supabaseAdminEnv, deps enrollDeps) (*supabaseAdm
 }
 
 func (c *supabaseAdminClient) request(ctx context.Context, method, endpoint string, input any, output any, profile string) (int, error) {
+	return c.requestWithCredentials(ctx, method, endpoint, input, output, profile, c.secret, c.secret, "")
+}
+
+func (c *supabaseAdminClient) requestWithCredentials(ctx context.Context, method, endpoint string, input any, output any, profile, apiKey, bearer, prefer string) (int, error) {
 	var body io.Reader
 	if input != nil {
 		encoded, err := json.Marshal(input)
@@ -216,14 +258,21 @@ func (c *supabaseAdminClient) request(ctx context.Context, method, endpoint stri
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.secret)
-	req.Header.Set("apikey", c.secret)
+	if bearer != "" {
+		req.Header.Set("Authorization", "Bearer "+bearer)
+	}
+	if apiKey != "" {
+		req.Header.Set("apikey", apiKey)
+	}
 	if profile != "" {
 		if method == http.MethodGet || method == http.MethodHead {
 			req.Header.Set("Accept-Profile", profile)
 		} else {
 			req.Header.Set("Content-Profile", profile)
 		}
+	}
+	if prefer != "" {
+		req.Header.Set("Prefer", prefer)
 	}
 	response, err := c.client.Do(req)
 	if err != nil {
@@ -245,22 +294,25 @@ func (c *supabaseAdminClient) request(ctx context.Context, method, endpoint stri
 
 func machineEmail(machineID string) string { return "pw-" + machineID + "@machines.invalid" }
 
-func (c *supabaseAdminClient) findUser(ctx context.Context, email string) (authAdminUser, bool, error) {
+func (c *supabaseAdminClient) findUser(ctx context.Context, email string) (authAdminUser, bool, int, error) {
 	var result struct {
 		Users []authAdminUser `json:"users"`
 	}
-	if _, err := c.request(ctx, http.MethodGet, "/auth/v1/admin/users?page=1&per_page=1000", nil, &result, ""); err != nil {
-		return authAdminUser{}, false, err
+	// Match the bounded admin-list request exercised against the live service;
+	// it avoids relying on an undocumented large-page limit before mutation.
+	status, err := c.request(ctx, http.MethodGet, "/auth/v1/admin/users?per_page=50", nil, &result, "")
+	if err != nil {
+		return authAdminUser{}, false, status, err
 	}
 	for _, user := range result.Users {
 		if user.Email == email {
 			if _, err := uuid.Parse(user.ID); err != nil {
-				return authAdminUser{}, false, errors.New("invalid auth user ID")
+				return authAdminUser{}, false, status, errors.New("invalid auth user ID")
 			}
-			return user, true, nil
+			return user, true, status, nil
 		}
 	}
-	return authAdminUser{}, false, nil
+	return authAdminUser{}, false, status, nil
 }
 
 func randomEnrollmentPassword(source io.Reader) (string, error) {
@@ -274,68 +326,81 @@ func randomEnrollmentPassword(source io.Reader) (string, error) {
 	return "pw." + base64.RawURLEncoding.EncodeToString(bytes), nil
 }
 
-func enrollMachine(ctx context.Context, client *supabaseAdminClient, machineID, publishableKey string, deps enrollDeps) (clientCredentialEnv, error) {
+func enrollMachine(ctx context.Context, client *supabaseAdminClient, machineID, publishableKey string, deps enrollDeps) (enrollmentResult, error) {
+	var result enrollmentResult
+	// The password grant must use the client-facing publishable key. Validate
+	// that dependency before looking up or rotating an existing Auth user.
+	if publishableKey == "" {
+		return result, enrollmentStepFailure("session_create", 0)
+	}
 	email := machineEmail(machineID)
 	password, err := randomEnrollmentPassword(deps.Random)
 	if err != nil {
-		return clientCredentialEnv{}, err
+		return result, enrollmentStepFailure("password_generate", 0)
 	}
-	user, found, err := client.findUser(ctx, email)
+	user, found, status, err := client.findUser(ctx, email)
 	if err != nil {
-		return clientCredentialEnv{}, err
+		return result, enrollmentStepFailure("admin_user_lookup", status)
 	}
 	if !found {
 		var created authAdminUser
-		_, err = client.request(ctx, http.MethodPost, "/auth/v1/admin/users", map[string]any{
+		status, err = client.request(ctx, http.MethodPost, "/auth/v1/admin/users", map[string]any{
 			"email": email, "password": password, "email_confirm": true,
 		}, &created, "")
 		if err != nil {
-			return clientCredentialEnv{}, err
+			return result, enrollmentStepFailure("admin_user_create", status)
+		}
+		if _, err := uuid.Parse(created.ID); err != nil || created.Email != "" && created.Email != email {
+			return result, enrollmentStepFailure("admin_user_create", status)
 		}
 		user = created
 	} else {
-		var updated authAdminUser
-		_, err = client.request(ctx, http.MethodPut, "/auth/v1/admin/users/"+url.PathEscape(user.ID), map[string]any{
+		// findUser has already verified the existing ID and email. Do not decode
+		// a rotate response after mutating the password: that response is not
+		// needed for any later request and a malformed body must not create a
+		// post-rotation failure.
+		result.ExistingPasswordRotationAttempted = true
+		status, err = client.request(ctx, http.MethodPut, "/auth/v1/admin/users/"+url.PathEscape(user.ID), map[string]any{
 			"password": password, "email_confirm": true, "ban_duration": "none",
-		}, &updated, "")
+		}, nil, "")
 		if err != nil {
-			return clientCredentialEnv{}, err
-		}
-		if updated.ID != "" {
-			user = updated
+			return result, enrollmentStepFailure("admin_user_rotate", status)
 		}
 	}
 	if _, err := uuid.Parse(user.ID); err != nil || user.Email != "" && user.Email != email {
-		return clientCredentialEnv{}, errors.New("invalid auth user response")
+		return result, enrollmentStepFailure("admin_user_validate", status)
 	}
 
 	var session struct {
 		AccessToken  string `json:"access_token"`
 		RefreshToken string `json:"refresh_token"`
 	}
-	if _, err := client.request(ctx, http.MethodPost, "/auth/v1/token?grant_type=password", map[string]string{
+	status, err = client.requestWithCredentials(ctx, http.MethodPost, "/auth/v1/token?grant_type=password", map[string]string{
 		"email": email, "password": password,
-	}, &session, ""); err != nil || session.AccessToken == "" || session.RefreshToken == "" {
-		return clientCredentialEnv{}, errors.New("machine session creation failed")
+	}, &session, "", publishableKey, "", "")
+	if err != nil || session.AccessToken == "" || session.RefreshToken == "" {
+		return result, enrollmentStepFailure("session_create", status)
 	}
 
 	row := []map[string]any{{
 		"machine_id": machineID, "auth_user_id": user.ID, "state": "active",
 		"revoked_at": nil, "updated_at": nowFor(deps),
 	}}
-	if _, err := client.request(ctx, http.MethodPost, "/rest/v1/machine_registry?on_conflict=machine_id", row, nil, "panewire"); err != nil {
-		return clientCredentialEnv{}, err
+	status, err = client.requestWithCredentials(ctx, http.MethodPost, "/rest/v1/machine_registry?on_conflict=machine_id", row, nil, "panewire", client.secret, client.secret, "resolution=merge-duplicates")
+	if err != nil {
+		return result, enrollmentStepFailure("registry_upsert", status)
 	}
-	return clientCredentialEnv{
+	result.Credential = clientCredentialEnv{
 		URL: envURL(client), MachineID: machineID, AccessToken: session.AccessToken,
 		RefreshToken: session.RefreshToken, PublishableKey: publishableKey,
-	}, nil
+	}
+	return result, nil
 }
 
 func envURL(client *supabaseAdminClient) string { return client.baseURL.String() }
 
 func revokeMachine(ctx context.Context, client *supabaseAdminClient, machineID string, now time.Time) error {
-	user, found, err := client.findUser(ctx, machineEmail(machineID))
+	user, found, _, err := client.findUser(ctx, machineEmail(machineID))
 	if err != nil {
 		return err
 	}

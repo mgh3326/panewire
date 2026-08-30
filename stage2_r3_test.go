@@ -47,6 +47,25 @@ func TestR3SubmitValidationAndOutboxList(t *testing.T) {
 		t.Fatalf("records=%+v err=%v", records, err)
 	}
 
+	spawnDB := filepath.Join(root, "spawn.sqlite3")
+	spawnArgs := append([]string{}, base...)
+	spawnArgs[1] = spawnDB
+	spawnArgs = append(spawnArgs, "--request-wrk", "--wrk-label", "fixture-spawn")
+	stdout.Reset()
+	stderr.Reset()
+	if code := runSubmitCLIWithWriters(spawnArgs, &stdout, &stderr); code != ExitOK {
+		t.Fatalf("spawn submit code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	spawnStore, err := core.OpenMetadataStore(spawnDB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	spawnRecords, err := spawnStore.ListOutbox(t.Context(), "")
+	_ = spawnStore.Close()
+	if err != nil || len(spawnRecords) != 1 || !spawnRecords[0].Spawn.Requested || spawnRecords[0].Spawn.Label != "fixture-spawn" {
+		t.Fatalf("spawn records=%+v err=%v", spawnRecords, err)
+	}
+
 	stdout.Reset()
 	stderr.Reset()
 	if code := runOutboxCLIWithWriters([]string{"list", "--db", dbPath}, &stdout, &stderr); code != ExitOK {
@@ -86,6 +105,8 @@ func TestR3SubmitValidationAndOutboxList(t *testing.T) {
 		{name: "logical path traversal", args: append(append([]string{}, base...), "--path", "../escape.md")},
 		{name: "company classification", args: append(append([]string{}, base...), "--classification", "company")},
 		{name: "unknown classification", args: append(append([]string{}, base...), "--classification", "unknown")},
+		{name: "spawn missing label", args: append(append([]string{}, base...), "--request-wrk")},
+		{name: "spawn label without request", args: append(append([]string{}, base...), "--wrk-label", "fixture-spawn")},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var out, errOut bytes.Buffer
@@ -131,6 +152,17 @@ func TestR3DaemonClientEnvModesAndDefaultOff(t *testing.T) {
 	}
 	if err := os.Chmod(clientEnv, 0600); err != nil {
 		t.Fatal(err)
+	}
+	spawnPolicy := filepath.Join(root, "spawn-policy.json")
+	if err := os.WriteFile(spawnPolicy, []byte(`{"rules":[]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if d, code, err := newDaemonForCLI([]string{
+		"--socket", filepath.Join(root, "policy.sock"), "--db", filepath.Join(root, "policy.sqlite3"),
+		"--stage2-client-env", clientEnv, "--stage2-inbox-root", filepath.Join(root, "policy-inbox"),
+		"--stage2-spawn-policy", spawnPolicy,
+	}, daemonCLIDeps{}); d != nil || code != ExitConditionInvalid || err == nil {
+		t.Fatalf("policy without gate daemon=%v code=%d err=%v", d, code, err)
 	}
 
 	legacyInbox := filepath.Join(root, "legacy-inbox")
@@ -312,7 +344,7 @@ func TestR3DaemonStage2E2EWithoutHerdrAndNoWrkGate(t *testing.T) {
 		t.Fatal(err)
 	}
 	spawnMessageID := r3Submit(t, []string{
-		"--db", aStage2, "--file", spawnSource, "--from-machine", "fixture-a", "--to", "fixture-b", "--path", "jobs/r3/spawn.md", "--request-wrk",
+		"--db", aStage2, "--file", spawnSource, "--from-machine", "fixture-a", "--to", "fixture-b", "--path", "jobs/r3/spawn.md", "--request-wrk", "--wrk-label", "fixture-spawn",
 	})
 	var spawnOutbox core.OutboxRecord
 	r3Eventually(t, "spawn request publish state", func() bool {

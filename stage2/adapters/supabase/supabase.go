@@ -12,10 +12,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,27 +26,36 @@ import (
 )
 
 type Config struct {
-	BaseURL               string
-	AccessToken           string
-	RefreshToken          string
-	APIKey                string
-	Schema                string
-	CredentialPath        string
+	BaseURL        string
+	AccessToken    string
+	RefreshToken   string
+	APIKey         string
+	Schema         string
+	CredentialPath string
+	// ClientEnvPath is the enrolled client env file. When Supabase rotates a
+	// session during refresh, the adapter atomically rewrites its two session
+	// entries here so a daemon restart uses the still-valid refresh token.
+	ClientEnvPath         string
+	Logger                *slog.Logger
 	HTTPClient            *http.Client
 	Visibility            time.Duration
 	AllowInsecureForTests bool
 }
 
 type Adapter struct {
-	baseURL    *url.URL
-	mu         sync.RWMutex
-	refreshMu  sync.Mutex
-	access     string
-	refresh    string
-	apiKey     string
-	schema     string
-	httpClient *http.Client
-	visibility time.Duration
+	baseURL          *url.URL
+	mu               sync.RWMutex
+	refreshMu        sync.Mutex
+	access           string
+	refresh          string
+	apiKey           string
+	schema           string
+	httpClient       *http.Client
+	visibility       time.Duration
+	clientEnvPath    string
+	persistClientEnv func(path, accessToken, refreshToken string) error
+	warn             func(msg string, args ...any)
+	createTemp       func(dir, pattern string) (*os.File, error)
 }
 
 func New(cfg Config) (*Adapter, error) {
@@ -74,8 +85,20 @@ func New(cfg Config) (*Adapter, error) {
 	if schema == "" {
 		schema = "panewire"
 	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
 	u.Path = strings.TrimSuffix(u.Path, "/")
-	return &Adapter{baseURL: u, access: cfg.AccessToken, refresh: cfg.RefreshToken, apiKey: cfg.APIKey, schema: schema, httpClient: client, visibility: visibility}, nil
+	adapter := &Adapter{
+		baseURL: u, access: cfg.AccessToken, refresh: cfg.RefreshToken, apiKey: cfg.APIKey,
+		schema: schema, httpClient: client, visibility: visibility, clientEnvPath: cfg.ClientEnvPath,
+		warn: logger.Warn, createTemp: os.CreateTemp,
+	}
+	adapter.persistClientEnv = func(path, accessToken, refreshToken string) error {
+		return rewriteClientEnvTokens(path, accessToken, refreshToken, adapter.createTemp)
+	}
+	return adapter, nil
 }
 
 // LoadAccessToken is opt-in: no adapter constructor probes a default home
@@ -387,13 +410,181 @@ func (a *Adapter) refreshAccessToken(ctx context.Context, rejectedAccess string)
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 2<<20)).Decode(&session); err != nil || session.AccessToken == "" {
 		return fmt.Errorf("Supabase refresh response is invalid")
 	}
+	rotatedRefresh := session.RefreshToken
+	if rotatedRefresh == "" {
+		// Some Auth configurations rotate only the access token. Persist the
+		// effective (still-valid) refresh token rather than blanking it.
+		rotatedRefresh = refresh
+	}
 	a.mu.Lock()
 	a.access = session.AccessToken
-	if session.RefreshToken != "" {
-		a.refresh = session.RefreshToken
-	}
+	a.refresh = rotatedRefresh
 	a.mu.Unlock()
+	if a.clientEnvPath != "" {
+		if err := a.persistClientEnv(a.clientEnvPath, session.AccessToken, rotatedRefresh); err != nil {
+			// Refresh is already valid in memory. A local persistence failure must
+			// not turn a recoverable disk problem into an authentication outage.
+			a.warn("stage2 Supabase credential persistence failed; continuing with in-memory credentials", "error", err)
+		}
+	}
 	return nil
+}
+
+// rewriteClientEnvTokens preserves the enrolled env file's unrelated lines,
+// key order, and value style while replacing the effective session pair. It
+// writes a mode-0600 temporary file in the target's own directory and atomically
+// renames it into place, so concurrent readers see either the old complete env
+// or the new complete env, never a truncated mixture.
+func rewriteClientEnvTokens(path, accessToken, refreshToken string, createTemp func(string, string) (*os.File, error)) error {
+	if path == "" {
+		return fmt.Errorf("client env path is empty")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve client env path")
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return fmt.Errorf("inspect client env")
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		return fmt.Errorf("client env must be a regular mode-0600 file")
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return fmt.Errorf("read client env")
+	}
+	updated, accessFound, refreshFound := rewriteClientEnvContent(data, accessToken, refreshToken)
+	if !accessFound || !refreshFound {
+		return fmt.Errorf("client env is missing session token entries")
+	}
+	if createTemp == nil {
+		createTemp = os.CreateTemp
+	}
+	temporary, err := createTemp(filepath.Dir(abs), ".panewire-client-env-")
+	if err != nil {
+		return fmt.Errorf("create temporary client env")
+	}
+	temporaryName := temporary.Name()
+	installed := false
+	defer func() {
+		if !installed {
+			_ = os.Remove(temporaryName)
+		}
+	}()
+	if err := temporary.Chmod(0600); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("set temporary client env mode")
+	}
+	if _, err := temporary.Write(updated); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("write temporary client env")
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return fmt.Errorf("sync temporary client env")
+	}
+	if err := temporary.Close(); err != nil {
+		return fmt.Errorf("close temporary client env")
+	}
+	if err := os.Rename(temporaryName, abs); err != nil {
+		return fmt.Errorf("install refreshed client env")
+	}
+	installed = true
+	return nil
+}
+
+func rewriteClientEnvContent(content []byte, accessToken, refreshToken string) ([]byte, bool, bool) {
+	lines := strings.SplitAfter(string(content), "\n")
+	accessFound, refreshFound := false, false
+	for index, line := range lines {
+		body, ending := splitEnvLineEnding(line)
+		if rewritten, found := rewriteClientEnvLine(body, "PANEWIRE_SUPABASE_ACCESS_TOKEN", accessToken); found {
+			lines[index] = rewritten + ending
+			accessFound = true
+			continue
+		}
+		if rewritten, found := rewriteClientEnvLine(body, "PANEWIRE_SUPABASE_REFRESH_TOKEN", refreshToken); found {
+			lines[index] = rewritten + ending
+			refreshFound = true
+		}
+	}
+	return []byte(strings.Join(lines, "")), accessFound, refreshFound
+}
+
+func splitEnvLineEnding(line string) (string, string) {
+	ending := ""
+	if strings.HasSuffix(line, "\n") {
+		line = strings.TrimSuffix(line, "\n")
+		ending = "\n"
+	}
+	if strings.HasSuffix(line, "\r") {
+		line = strings.TrimSuffix(line, "\r")
+		ending = "\r" + ending
+	}
+	return line, ending
+}
+
+func rewriteClientEnvLine(line, wantedKey, replacement string) (string, bool) {
+	equals := strings.IndexByte(line, '=')
+	if equals < 0 {
+		return line, false
+	}
+	left, right := line[:equals], line[equals+1:]
+	key := strings.TrimSpace(left)
+	if strings.HasPrefix(key, "export ") {
+		key = strings.TrimSpace(strings.TrimPrefix(key, "export "))
+	}
+	if key != wantedKey {
+		return line, false
+	}
+	return left + "=" + formatClientEnvValue(right, replacement), true
+}
+
+func formatClientEnvValue(existing, replacement string) string {
+	leading := len(existing) - len(strings.TrimLeft(existing, " \t"))
+	prefix, rest := existing[:leading], existing[leading:]
+	if rest == "" {
+		return prefix + strconv.Quote(replacement)
+	}
+	if rest[0] == '"' || rest[0] == '\'' {
+		quote := rest[0]
+		for index := 1; index < len(rest); index++ {
+			if rest[index] == quote && (index == 0 || rest[index-1] != '\\') {
+				return prefix + strconv.Quote(replacement) + rest[index+1:]
+			}
+		}
+	}
+	valueEnd := len(rest)
+	for index, char := range rest {
+		if char == ' ' || char == '\t' {
+			valueEnd = index
+			break
+		}
+	}
+	value := replacement
+	if !safeBareEnvValue(replacement) {
+		value = strconv.Quote(replacement)
+	}
+	return prefix + value + rest[valueEnd:]
+}
+
+func safeBareEnvValue(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
+			continue
+		}
+		switch char {
+		case '.', '-', '_', '~', '+', '/', '=', ':':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func decodeEnvelope(raw json.RawMessage) (core.Envelope, error) {

@@ -134,6 +134,7 @@ func runSubmitCLIWithWriters(args []string, stdout, stderr io.Writer) int {
 	expiresAt := fs.String("expires-at", "", "RFC3339 UTC expiry (default 72h)")
 	policy := fs.String("policy-version", "stage2-allowlist-v1", "classification policy version")
 	requestWrk := fs.Bool("request-wrk", false, "request only the receiving wrk admission gate")
+	wrkLabel := fs.String("wrk-label", "", "receiving spawn-policy label (required with --request-wrk)")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -167,6 +168,14 @@ func runSubmitCLIWithWriters(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "submit rejected: workflow completion requires correlation-id and causation-id")
 		return ExitConditionInvalid
 	}
+	if *requestWrk && *wrkLabel == "" {
+		fmt.Fprintln(stderr, "submit rejected: --request-wrk requires --wrk-label")
+		return ExitConditionInvalid
+	}
+	if !*requestWrk && *wrkLabel != "" {
+		fmt.Fprintln(stderr, "submit rejected: --wrk-label requires --request-wrk")
+		return ExitConditionInvalid
+	}
 	var expiry time.Time
 	if *expiresAt != "" {
 		expiry, err = time.Parse(time.RFC3339, *expiresAt)
@@ -191,7 +200,7 @@ func runSubmitCLIWithWriters(args []string, stdout, stderr io.Writer) int {
 		CorrelationID:  *correlationID,
 		CausationID:    *causationID,
 		ExpiresAt:      expiry,
-		Spawn:          core.Spawn{Requested: *requestWrk},
+		Spawn:          core.Spawn{Requested: *requestWrk, Label: *wrkLabel},
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -356,6 +365,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	stage2Namespace := fs.String("stage2-namespace", "inbox", "approved stage2 inbox namespace name")
 	stage2Poll := fs.Duration("stage2-poll", 30*time.Second, "stage2 publish/claim poll interval")
 	stage2WrkGate := fs.Bool("stage2-wrk-gate", false, "attach the wrk admission gate for spawn requests")
+	stage2SpawnPolicy := fs.String("stage2-spawn-policy", "", "receiving-machine JSON policy for wrk spawn context")
 	if fs.Parse(args) != nil {
 		return nil, ExitUsage, fmt.Errorf("invalid daemon flags")
 	}
@@ -376,7 +386,10 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		if *stage2Poll <= 0 {
 			return nil, ExitConditionInvalid, fmt.Errorf("stage2 poll interval must be positive")
 		}
-		stage2, resolvedInbox, err := buildStage2DaemonConfig(*stage2ClientEnv, *stage2InboxRoot, *stage2DB, *db, *stage2Namespace, *stage2Poll, *stage2WrkGate, deps)
+		if *stage2SpawnPolicy != "" && !*stage2WrkGate {
+			return nil, ExitConditionInvalid, fmt.Errorf("--stage2-spawn-policy requires --stage2-wrk-gate")
+		}
+		stage2, resolvedInbox, err := buildStage2DaemonConfig(*stage2ClientEnv, *stage2InboxRoot, *stage2DB, *db, *stage2Namespace, *stage2Poll, *stage2WrkGate, *stage2SpawnPolicy, deps)
 		if err != nil {
 			return nil, ExitConditionInvalid, err
 		}
@@ -395,7 +408,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 
 func stage2FlagsProvided(args []string) bool {
 	for _, name := range []string{
-		"stage2-client-env", "stage2-inbox-root", "stage2-db", "stage2-namespace", "stage2-poll", "stage2-wrk-gate",
+		"stage2-client-env", "stage2-inbox-root", "stage2-db", "stage2-namespace", "stage2-poll", "stage2-wrk-gate", "stage2-spawn-policy",
 	} {
 		flagName := "--" + name
 		for _, arg := range args {
@@ -425,7 +438,7 @@ func loadStage2ClientEnv(path string) (clientCredentialEnv, error) {
 	return credential, nil
 }
 
-func buildStage2DaemonConfig(clientEnvPath, inboxRoot, explicitMetadataDB, stage1DB, namespace string, poll time.Duration, wrkGateEnabled bool, deps daemonCLIDeps) (Stage2Config, string, error) {
+func buildStage2DaemonConfig(clientEnvPath, inboxRoot, explicitMetadataDB, stage1DB, namespace string, poll time.Duration, wrkGateEnabled bool, spawnPolicyPath string, deps daemonCLIDeps) (Stage2Config, string, error) {
 	credential, err := loadStage2ClientEnv(clientEnvPath)
 	if err != nil {
 		return Stage2Config{}, "", err
@@ -454,6 +467,8 @@ func buildStage2DaemonConfig(clientEnvPath, inboxRoot, explicitMetadataDB, stage
 		AccessToken:           credential.AccessToken,
 		RefreshToken:          credential.RefreshToken,
 		APIKey:                credential.PublishableKey,
+		ClientEnvPath:         clientEnvPath,
+		Logger:                deps.Logger,
 		HTTPClient:            deps.HTTPClient,
 		AllowInsecureForTests: deps.AllowInsecureForTests,
 	})
@@ -463,7 +478,7 @@ func buildStage2DaemonConfig(clientEnvPath, inboxRoot, explicitMetadataDB, stage
 	}
 	var gate core.Gate
 	if wrkGateEnabled {
-		gate = wrkgate.New(wrkgate.Config{})
+		gate = wrkgate.New(wrkgate.Config{SpawnPolicyPath: spawnPolicyPath})
 	}
 	stagingRoot := filepath.Join(filepath.Dir(resolvedInbox), "."+filepath.Base(resolvedInbox)+"-stage2-staging")
 	receiver, err := core.NewReceiver(core.ReceiverConfig{

@@ -209,7 +209,15 @@ func (r *Receiver) afterPublished(ctx context.Context, delivery Delivery, record
 	if err := r.cfg.Store.MarkGateState(ctx, delivery.Envelope.DeliveryID, InboxSpawnRequested, "", now); err != nil {
 		return err
 	}
-	receipt, err := r.cfg.Gate.Spawn(ctx, delivery.Envelope.DeliveryID)
+	promptPath, err := r.materializedPath(delivery.Envelope)
+	if err != nil {
+		return r.terminal(ctx, delivery, err)
+	}
+	receipt, err := r.cfg.Gate.Spawn(ctx, GateSpawnRequest{
+		DeliveryID: delivery.Envelope.DeliveryID,
+		Label:      delivery.Envelope.Spawn.Label,
+		PromptPath: promptPath,
+	})
 	if err != nil || !receipt.Durable {
 		_ = r.cfg.Store.MarkGateState(ctx, delivery.Envelope.DeliveryID, InboxSpawnUnknown, CodeManualReconcile, now)
 		if err != nil {
@@ -218,7 +226,11 @@ func (r *Receiver) afterPublished(ctx context.Context, delivery Delivery, record
 		return validation(CodeManualReconcile, "wrk receipt is not durable")
 	}
 	if !receipt.Accepted {
-		if err := r.cfg.Store.MarkGateState(ctx, delivery.Envelope.DeliveryID, InboxGateDenied, CodeGateDenied, now); err != nil {
+		reason := receipt.RejectionCode
+		if reason == "" {
+			reason = CodeGateDenied
+		}
+		if err := r.cfg.Store.MarkGateState(ctx, delivery.Envelope.DeliveryID, InboxGateDenied, reason, now); err != nil {
 			return err
 		}
 		return r.ack(ctx, delivery, AckTerminalReject)
@@ -384,6 +396,20 @@ func (r *Receiver) publishedMatches(env Envelope) (bool, error) {
 		return false, err
 	}
 	return exists && matches, nil
+}
+
+// materializedPath is intentionally derived only after the receiver has
+// published the validated payload. It is the exact logical path that wrk gets
+// as -p; no sender-supplied local path or private staging name crosses the gate.
+func (r *Receiver) materializedPath(env Envelope) (string, error) {
+	root, ok := r.cfg.Namespaces[env.Destination.InboxNamespace]
+	if !ok {
+		return "", validation(CodeLogicalPath, "namespace is not approved")
+	}
+	if _, err := ValidateLogicalPath(env.Destination.LogicalPath); err != nil {
+		return "", err
+	}
+	return filepath.Join(root, filepath.FromSlash(env.Destination.LogicalPath)), nil
 }
 
 func (r *Receiver) publishStage(env Envelope, stagePath string) (string, error) {
