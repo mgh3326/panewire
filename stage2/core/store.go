@@ -126,7 +126,39 @@ func OpenMetadataStore(file string) (*MetadataStore, error) {
 			return nil, fmt.Errorf("create stage2 metadata schema: %w", err)
 		}
 	}
+	if err := ensureOutboxSpawnLabelColumn(db); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("migrate stage2 metadata schema: %w", err)
+	}
 	return s, nil
+}
+
+// ensureOutboxSpawnLabelColumn keeps pre-R4 metadata databases readable. The
+// sender outbox must retain the policy label across a crash before publication;
+// otherwise a recovered spawn request could silently lose its receiver policy
+// selector.
+func ensureOutboxSpawnLabelColumn(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(s2_outbox)`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, typ string
+		var defaultValue sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &primaryKey); err != nil {
+			return err
+		}
+		if name == "spawn_label" {
+			return nil
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	_, err = db.Exec(`ALTER TABLE s2_outbox ADD COLUMN spawn_label TEXT NOT NULL DEFAULT ''`)
+	return err
 }
 
 var metadataSchema = []string{
@@ -158,6 +190,7 @@ var metadataSchema = []string{
  reply_correlation_id TEXT NOT NULL,
  reply_requested INTEGER NOT NULL,
  spawn_requested INTEGER NOT NULL,
+	spawn_label TEXT NOT NULL DEFAULT '',
  created_at_ms INTEGER NOT NULL,
  expires_at_ms INTEGER NOT NULL,
  updated_at_ms INTEGER NOT NULL,
@@ -215,12 +248,12 @@ func (s *MetadataStore) InsertOutbox(ctx context.Context, r OutboxRecord) (bool,
 	_, err := s.db.ExecContext(ctx, `INSERT INTO s2_outbox(
 delivery_id,message_id,destination_machine_id,source_path,sha256,size_bytes,inbox_namespace,logical_path,classification,content_type,policy_version,message_kind,
 source_machine_id,source_instance_id,expect_machine_id,expect_pane_name,expect_pane_label,expect_pane_cwd,expect_workspace_id,
-correlation_id,causation_id,reply_destination_machine_id,reply_correlation_id,reply_requested,spawn_requested,created_at_ms,expires_at_ms,updated_at_ms,state)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+correlation_id,causation_id,reply_destination_machine_id,reply_correlation_id,reply_requested,spawn_requested,spawn_label,created_at_ms,expires_at_ms,updated_at_ms,state)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		r.DeliveryID, r.MessageID, r.DestinationMachineID, r.SourcePath, r.SHA256, r.SizeBytes, r.InboxNamespace, r.LogicalPath,
 		string(r.Classification), r.ContentType, r.PolicyVersion, string(r.MessageKind), r.Source.MachineID, r.Source.InstanceID, r.Expect.MachineID,
 		r.Expect.Pane.Name, r.Expect.Pane.Label, r.Expect.Pane.CWD, r.Expect.Pane.WorkspaceID, r.CorrelationID, r.CausationID,
-		r.Reply.DestinationMachineID, r.Reply.CorrelationID, boolInt(r.Reply.Requested), boolInt(r.Spawn.Requested), millis(r.CreatedAt), millis(r.ExpiresAt), millis(r.UpdatedAt), string(r.State))
+		r.Reply.DestinationMachineID, r.Reply.CorrelationID, boolInt(r.Reply.Requested), boolInt(r.Spawn.Requested), r.Spawn.Label, millis(r.CreatedAt), millis(r.ExpiresAt), millis(r.UpdatedAt), string(r.State))
 	if err == nil {
 		return true, nil
 	}
@@ -240,7 +273,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 func sameOutboxImmutable(a, b OutboxRecord) bool {
 	return a.DeliveryID == b.DeliveryID && a.MessageID == b.MessageID && a.DestinationMachineID == b.DestinationMachineID &&
 		a.SourcePath == b.SourcePath && a.SHA256 == b.SHA256 && a.SizeBytes == b.SizeBytes && a.InboxNamespace == b.InboxNamespace &&
-		a.LogicalPath == b.LogicalPath && a.Classification == b.Classification && a.ExpiresAt.Equal(b.ExpiresAt)
+		a.LogicalPath == b.LogicalPath && a.Classification == b.Classification && a.Spawn == b.Spawn && a.ExpiresAt.Equal(b.ExpiresAt)
 }
 
 func (s *MetadataStore) OutboxByDelivery(ctx context.Context, id string) (OutboxRecord, bool, error) {
@@ -257,7 +290,7 @@ func (s *MetadataStore) ListOutbox(ctx context.Context, state OutboxState) ([]Ou
 	defer s.mu.Unlock()
 	query := `SELECT delivery_id,message_id,destination_machine_id,source_path,sha256,size_bytes,inbox_namespace,logical_path,classification,content_type,policy_version,message_kind,
 source_machine_id,source_instance_id,expect_machine_id,expect_pane_name,expect_pane_label,expect_pane_cwd,expect_workspace_id,correlation_id,causation_id,
-reply_destination_machine_id,reply_correlation_id,reply_requested,spawn_requested,created_at_ms,expires_at_ms,updated_at_ms,last_attempt_at_ms,attempts,state,receipt_id,last_error_code
+reply_destination_machine_id,reply_correlation_id,reply_requested,spawn_requested,spawn_label,created_at_ms,expires_at_ms,updated_at_ms,last_attempt_at_ms,attempts,state,receipt_id,last_error_code
 FROM s2_outbox`
 	var args []any
 	if state != "" {
@@ -284,7 +317,7 @@ FROM s2_outbox`
 func (s *MetadataStore) outboxByDeliveryLocked(ctx context.Context, id string) (OutboxRecord, bool, error) {
 	row := s.db.QueryRowContext(ctx, `SELECT delivery_id,message_id,destination_machine_id,source_path,sha256,size_bytes,inbox_namespace,logical_path,classification,content_type,policy_version,message_kind,
 source_machine_id,source_instance_id,expect_machine_id,expect_pane_name,expect_pane_label,expect_pane_cwd,expect_workspace_id,correlation_id,causation_id,
-reply_destination_machine_id,reply_correlation_id,reply_requested,spawn_requested,created_at_ms,expires_at_ms,updated_at_ms,last_attempt_at_ms,attempts,state,receipt_id,last_error_code
+reply_destination_machine_id,reply_correlation_id,reply_requested,spawn_requested,spawn_label,created_at_ms,expires_at_ms,updated_at_ms,last_attempt_at_ms,attempts,state,receipt_id,last_error_code
 FROM s2_outbox WHERE delivery_id=?`, id)
 	return scanOutbox(row)
 }
@@ -294,7 +327,7 @@ func (s *MetadataStore) PendingOutbox(ctx context.Context, now time.Time) ([]Out
 	defer s.mu.Unlock()
 	rows, err := s.db.QueryContext(ctx, `SELECT delivery_id,message_id,destination_machine_id,source_path,sha256,size_bytes,inbox_namespace,logical_path,classification,content_type,policy_version,message_kind,
 source_machine_id,source_instance_id,expect_machine_id,expect_pane_name,expect_pane_label,expect_pane_cwd,expect_workspace_id,correlation_id,causation_id,
-reply_destination_machine_id,reply_correlation_id,reply_requested,spawn_requested,created_at_ms,expires_at_ms,updated_at_ms,last_attempt_at_ms,attempts,state,receipt_id,last_error_code
+reply_destination_machine_id,reply_correlation_id,reply_requested,spawn_requested,spawn_label,created_at_ms,expires_at_ms,updated_at_ms,last_attempt_at_ms,attempts,state,receipt_id,last_error_code
 FROM s2_outbox WHERE state=? ORDER BY created_at_ms`, string(OutboxSubmitted))
 	if err != nil {
 		return nil, err
@@ -498,12 +531,13 @@ func (s *MetadataStore) CompletionAnomalyCount(ctx context.Context, correlationI
 func scanOutbox(row interface{ Scan(...any) error }) (OutboxRecord, bool, error) {
 	var r OutboxRecord
 	var class, kind, state string
+	var spawnLabel string
 	var replyRequested, spawnRequested int
 	var created, expires, updated int64
 	var last sql.NullInt64
 	err := row.Scan(&r.DeliveryID, &r.MessageID, &r.DestinationMachineID, &r.SourcePath, &r.SHA256, &r.SizeBytes, &r.InboxNamespace, &r.LogicalPath, &class, &r.ContentType, &r.PolicyVersion, &kind,
 		&r.Source.MachineID, &r.Source.InstanceID, &r.Expect.MachineID, &r.Expect.Pane.Name, &r.Expect.Pane.Label, &r.Expect.Pane.CWD, &r.Expect.Pane.WorkspaceID, &r.CorrelationID, &r.CausationID,
-		&r.Reply.DestinationMachineID, &r.Reply.CorrelationID, &replyRequested, &spawnRequested, &created, &expires, &updated, &last, &r.Attempts, &state, &r.ReceiptID, &r.LastErrorCode)
+		&r.Reply.DestinationMachineID, &r.Reply.CorrelationID, &replyRequested, &spawnRequested, &spawnLabel, &created, &expires, &updated, &last, &r.Attempts, &state, &r.ReceiptID, &r.LastErrorCode)
 	if errors.Is(err, sql.ErrNoRows) {
 		return OutboxRecord{}, false, nil
 	}
@@ -511,7 +545,7 @@ func scanOutbox(row interface{ Scan(...any) error }) (OutboxRecord, bool, error)
 		return OutboxRecord{}, false, err
 	}
 	r.Classification, r.MessageKind, r.State = Classification(class), MessageKind(kind), OutboxState(state)
-	r.Reply.Requested, r.Spawn.Requested = replyRequested != 0, spawnRequested != 0
+	r.Reply.Requested, r.Spawn.Requested, r.Spawn.Label = replyRequested != 0, spawnRequested != 0, spawnLabel
 	r.CreatedAt, r.ExpiresAt, r.UpdatedAt = fromMillis(created), fromMillis(expires), fromMillis(updated)
 	if last.Valid {
 		r.LastAttemptAt = fromMillis(last.Int64)

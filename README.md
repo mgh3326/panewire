@@ -61,6 +61,37 @@ The R1 implementation is fixture-only: its Supabase adapter is exercised
 against an in-process HTTP fake. Live Supabase credentials and smoke testing
 are intentionally deferred to R2.
 
+### Credential rotation and optional receiving `wrk` gate
+
+When a stage 2 daemon refreshes a Supabase session, it atomically rewrites the
+access and refresh-token values in its explicit `--stage2-client-env` file. The
+replacement is a mode-0600 temporary file in the same directory followed by a
+rename, so another mode-0600 env consumer such as `smoke-supabase` sees either
+the complete old file or the complete new file, never a partial file. The
+daemon continues with its in-memory credentials if that rewrite fails, but it
+logs a warning; repair the file before restarting the daemon. A smoke command
+reads its env at startup and does not itself persist a refresh, so restart the
+smoke command if a concurrently running daemon rotates the shared credentials.
+
+Remote spawning remains disabled unless the receiving daemon is started with
+`--stage2-wrk-gate` and a local `--stage2-spawn-policy` file. A sender may send
+only a request and label:
+
+```sh
+panewire submit ... --request-wrk --wrk-label rob1330-task
+```
+
+The receiver owns the launch context. Its plain JSON policy maps allowed label
+prefixes to the local model, workspace, tier, and absolute working directory:
+
+```json
+{"rules":[{"label_prefix":"rob1330-","model":"codex-terra","workspace":"workers","t":"T1","cwd":"/safe/local/work"}]}
+```
+
+The materialized logical inbox path is supplied to `wrk` as `-p`; no sender
+field can choose the model, workspace, tier, or CWD. A missing `wrk`, absent or
+invalid policy, or unmatched label is terminal and fail-closed.
+
 ## Status
 
 R2: prompt target safety, verified submission/uptake, privacy-preserving delivery audit, schema guard, events, inbox watcher, and wait. Live prompt smoke remains prohibited in the fixture test job; use an operator-approved scratch pane separately.

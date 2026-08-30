@@ -83,9 +83,12 @@ type Reply struct {
 }
 
 // Spawn is an explicit stage2 extension of the illustrative D0 envelope. It
-// carries only the request bit: actual admission is always delegated to wrk.
+// carries only the request bit and a receiving-policy lookup label: actual
+// admission and every execution setting remain delegated to the local wrk
+// gate, never the sender.
 type Spawn struct {
-	Requested bool `json:"requested,omitempty"`
+	Requested bool   `json:"requested,omitempty"`
+	Label     string `json:"label,omitempty"`
 }
 
 // Envelope contains metadata only. Payload bytes always travel through a
@@ -155,16 +158,27 @@ type Transport interface {
 }
 
 type GateReceipt struct {
-	Accepted bool
-	Durable  bool
-	Found    bool
-	Detail   string
+	Accepted      bool
+	Durable       bool
+	Found         bool
+	Detail        string
+	RejectionCode string
 }
 
-// Gate is a narrow, mockable representation of the live wrk contract. The
-// only job key core ever supplies is the stable delivery ID.
+// GateSpawnRequest deliberately carries no model, workspace, tier, or CWD.
+// Those values are selected only by the receiving machine's local policy.
+// PromptPath is the already-materialized consumer-visible logical path.
+type GateSpawnRequest struct {
+	DeliveryID string
+	Label      string
+	PromptPath string
+}
+
+// Gate is a narrow, mockable representation of the live wrk contract. Core
+// provides the stable job key, sender-selected label, and materialized prompt;
+// the receiving adapter supplies every local launch setting.
 type Gate interface {
-	Spawn(context.Context, string) (GateReceipt, error)
+	Spawn(context.Context, GateSpawnRequest) (GateReceipt, error)
 	Lookup(context.Context, string) (GateReceipt, error)
 }
 

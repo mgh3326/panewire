@@ -114,6 +114,12 @@ func ValidateBeforeFetch(env Envelope, claimedDestination string, receiverMachin
 	if env.Payload.Mode != "inline" || env.Payload.SizeBytes < 0 || env.Payload.SizeBytes > MaxInlineBytes || !IsHexSHA256(env.Payload.SHA256) {
 		return validation(CodeDeclaredSize, "inline payload metadata is invalid or oversized")
 	}
+	if env.Spawn.Requested && env.Spawn.Label == "" {
+		return validation(CodeSchema, "spawn request is missing its policy label")
+	}
+	if !env.Spawn.Requested && env.Spawn.Label != "" {
+		return validation(CodeSchema, "spawn label is present without a spawn request")
+	}
 	if env.MessageKind == MessageKindCompletion && env.MessageID != CompletionIDFor(env.CorrelationID, env.CausationID, env.Payload.SHA256) {
 		return validation(CodeSchema, "completion ID is not the stable derived ID")
 	}

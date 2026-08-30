@@ -115,7 +115,7 @@ func (r *r1Rig) submit(t *testing.T, source, messageID, logicalPath string, spaw
 		Destination:    core.Destination{MachineID: "receiver", InboxNamespace: "jobs", LogicalPath: logicalPath},
 		Expect:         core.Expectation{MachineID: "receiver"},
 		Classification: core.ClassificationPublic,
-		Spawn:          core.Spawn{Requested: spawn},
+		Spawn:          r1SpawnRequest(spawn),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -185,17 +185,26 @@ type r1Gate struct {
 	mu            sync.Mutex
 	spawnCalls    int
 	lookupCalls   int
+	lastSpawn     core.GateSpawnRequest
 	spawnReceipt  core.GateReceipt
 	lookupReceipt core.GateReceipt
 	spawnErr      error
 	lookupErr     error
 }
 
-func (g *r1Gate) Spawn(context.Context, string) (core.GateReceipt, error) {
+func (g *r1Gate) Spawn(_ context.Context, request core.GateSpawnRequest) (core.GateReceipt, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.spawnCalls++
+	g.lastSpawn = request
 	return g.spawnReceipt, g.spawnErr
+}
+
+func r1SpawnRequest(requested bool) core.Spawn {
+	if !requested {
+		return core.Spawn{}
+	}
+	return core.Spawn{Requested: true, Label: "fixture-spawn"}
 }
 
 func (g *r1Gate) Lookup(context.Context, string) (core.GateReceipt, error) {
@@ -209,6 +218,12 @@ func (g *r1Gate) SpawnCalls() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.spawnCalls
+}
+
+func (g *r1Gate) LastSpawnRequest() core.GateSpawnRequest {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.lastSpawn
 }
 
 type r1Pane struct {
@@ -242,7 +257,7 @@ func r1DestinationMismatch(t *testing.T) {
 	pane := &r1Pane{err: fmt.Errorf("identity mismatch")}
 	good := r1Envelope(rig.now, "pane-wrong", "receiver", "pane.md", []byte("pane-mismatch"))
 	good.Expect.Pane.Name = "exact-agent"
-	good.Spawn.Requested = true
+	good.Spawn = r1SpawnRequest(true)
 	rig.transport.Inject("receiver", good, []byte("pane-mismatch"))
 	receiver = rig.receiver(t, gate, pane, nil)
 	r1Poll(t, receiver)
@@ -316,7 +331,7 @@ func r1DuplicateRedelivery(t *testing.T) {
 	receiver := rig.receiver(t, gate, nil, nil)
 	body := []byte("duplicate-safe")
 	env := r1Envelope(rig.now, "same-message", "receiver", "duplicates/brief.md", body)
-	env.Spawn.Requested = true
+	env.Spawn = r1SpawnRequest(true)
 	for i := 0; i < 10; i++ {
 		rig.transport.Inject("receiver", env, body)
 		r1Poll(t, receiver)
@@ -427,7 +442,7 @@ func r1CrashAfterInboxWriteBeforeAck(t *testing.T) {
 	rig := newR1Rig(t)
 	body := []byte("restart-after-rename")
 	env := r1Envelope(rig.now, "after-rename", "receiver", "crash/after.md", body)
-	env.Spawn.Requested = true
+	env.Spawn = r1SpawnRequest(true)
 	gate := &r1Gate{spawnReceipt: core.GateReceipt{Accepted: true, Durable: true}}
 	point := os.Getenv("PW_FIXTURE_CRASH_AT")
 	if point == "" {
@@ -820,13 +835,17 @@ func r1WrkGateDenialNoBypass(t *testing.T) {
 	receiver := rig.receiver(t, gate, nil, nil)
 	body := []byte("gate-denied")
 	env := r1Envelope(rig.now, "gate-denial", "receiver", "gate/brief.md", body)
-	env.Spawn.Requested = true
+	env.Spawn = r1SpawnRequest(true)
 	rig.transport.Inject("receiver", env, body)
 	r1Poll(t, receiver)
 	if gate.SpawnCalls() != 1 {
 		t.Fatalf("wrk gate calls=%d want 1", gate.SpawnCalls())
 	}
 	r1ExpectFile(t, r1FinalPath(rig, "gate/brief.md"), body)
+	request := gate.LastSpawnRequest()
+	if request.DeliveryID != env.DeliveryID || request.Label != env.Spawn.Label || request.PromptPath != r1FinalPath(rig, "gate/brief.md") {
+		t.Fatalf("gate request=%+v is not the materialized logical prompt", request)
+	}
 	record, found, err := rig.receiverStore.InboxByDelivery(t.Context(), env.DeliveryID)
 	if err != nil || !found || record.TerminalReason != core.CodeGateDenied {
 		t.Fatalf("gate denial metadata=%+v found=%v err=%v", record, found, err)
@@ -843,7 +862,7 @@ func r1WrkGateDenialNoBypass(t *testing.T) {
 	unknownGate := &r1Gate{spawnErr: fmt.Errorf("ambiguous wrk result"), lookupReceipt: core.GateReceipt{Found: false}}
 	unknownReceiver := unknownRig.receiver(t, unknownGate, nil, nil)
 	unknown := r1Envelope(unknownRig.now, "gate-unknown", "receiver", "gate/unknown.md", []byte("unknown"))
-	unknown.Spawn.Requested = true
+	unknown.Spawn = r1SpawnRequest(true)
 	unknownRig.transport.Inject("receiver", unknown, []byte("unknown"))
 	if err := unknownReceiver.PollOnce(t.Context()); err == nil {
 		t.Fatal("ambiguous wrk result was accepted")

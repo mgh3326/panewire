@@ -9,7 +9,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
+	"strings"
 
 	"github.com/mgh3326/panewire/stage2/core"
 )
@@ -51,15 +55,18 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) (Result,
 }
 
 type Config struct {
-	WrkPath     string
-	ArbiterPath string
-	Runner      Runner
+	WrkPath         string
+	ArbiterPath     string
+	SpawnPolicyPath string
+	Runner          Runner
 }
 
 type Gate struct {
-	wrk     string
-	arbiter string
-	runner  Runner
+	wrk       string
+	arbiter   string
+	runner    Runner
+	policy    spawnPolicy
+	policyErr error
 }
 
 func New(cfg Config) *Gate {
@@ -75,28 +82,144 @@ func New(cfg Config) *Gate {
 	if runner == nil {
 		runner = ExecRunner{}
 	}
-	return &Gate{wrk: wrk, arbiter: arbiter, runner: runner}
+	policy, policyErr := loadSpawnPolicy(cfg.SpawnPolicyPath)
+	return &Gate{wrk: wrk, arbiter: arbiter, runner: runner, policy: policy, policyErr: policyErr}
 }
 
-// Spawn accepts only the stable delivery ID as a job key.  A successful wrk
-// process exit is not durable evidence by itself: arbiter job-get's receipt is
-// re-read before core may ack a delivery.
-func (g *Gate) Spawn(ctx context.Context, deliveryID string) (core.GateReceipt, error) {
-	if deliveryID == "" {
+const maxSpawnPolicyBytes = 1 << 20
+
+// spawnPolicy is intentionally local to the receiver. The sender may choose a
+// label, but cannot select any executable, workspace, tier, or working
+// directory through the transport envelope.
+type spawnPolicy struct {
+	Rules []spawnPolicyRule `json:"rules"`
+}
+
+type spawnPolicyRule struct {
+	LabelPrefix string `json:"label_prefix"`
+	Model       string `json:"model"`
+	Workspace   string `json:"workspace"`
+	Tier        string `json:"t"`
+	CWD         string `json:"cwd"`
+}
+
+func loadSpawnPolicy(path string) (spawnPolicy, error) {
+	if path == "" {
+		return spawnPolicy{}, fmt.Errorf("spawn policy path is required")
+	}
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return spawnPolicy{}, fmt.Errorf("spawn policy must be a regular file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return spawnPolicy{}, fmt.Errorf("open spawn policy")
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxSpawnPolicyBytes+1))
+	if err != nil || len(data) > maxSpawnPolicyBytes {
+		return spawnPolicy{}, fmt.Errorf("read spawn policy")
+	}
+	var policy spawnPolicy
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&policy); err != nil {
+		return spawnPolicy{}, fmt.Errorf("decode spawn policy")
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return spawnPolicy{}, fmt.Errorf("spawn policy has trailing data")
+	}
+	if len(policy.Rules) == 0 {
+		return spawnPolicy{}, fmt.Errorf("spawn policy has no rules")
+	}
+	seen := make(map[string]struct{}, len(policy.Rules))
+	for _, rule := range policy.Rules {
+		if !validSpawnLabel(rule.LabelPrefix) || !safePolicyAtom(rule.Model) || !safePolicyAtom(rule.Workspace) || !validTier(rule.Tier) || !validPolicyCWD(rule.CWD) {
+			return spawnPolicy{}, fmt.Errorf("spawn policy rule is invalid")
+		}
+		if _, exists := seen[rule.LabelPrefix]; exists {
+			return spawnPolicy{}, fmt.Errorf("spawn policy has duplicate label prefixes")
+		}
+		seen[rule.LabelPrefix] = struct{}{}
+	}
+	return policy, nil
+}
+
+func (p spawnPolicy) match(label string) (spawnPolicyRule, bool) {
+	if !validSpawnLabel(label) {
+		return spawnPolicyRule{}, false
+	}
+	var selected spawnPolicyRule
+	found := false
+	for _, rule := range p.Rules {
+		if strings.HasPrefix(label, rule.LabelPrefix) && (!found || len(rule.LabelPrefix) > len(selected.LabelPrefix)) {
+			selected, found = rule, true
+		}
+	}
+	return selected, found
+}
+
+func validSpawnLabel(value string) bool {
+	if len(value) == 0 || len(value) > 32 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, char := range value[1:] {
+		if (char >= 'a' && char <= 'z') || (char >= '0' && char <= '9') || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func safePolicyAtom(value string) bool {
+	return value != "" && !strings.ContainsAny(value, " \t\r\n\x00")
+}
+
+func validTier(value string) bool {
+	return value == "T0" || value == "T1" || value == "T2" || value == "T3"
+}
+
+func validPolicyCWD(value string) bool {
+	return value != "" && filepath.IsAbs(value) && filepath.Clean(value) == value && !strings.ContainsRune(value, '\x00')
+}
+
+// Spawn accepts the stable delivery ID plus the just-materialized prompt path
+// and a sender label. The receiving policy, not the envelope, supplies model,
+// workspace, tier, and CWD. A successful wrk process exit is not durable
+// evidence by itself: arbiter job-get's receipt is re-read before core may ack.
+func (g *Gate) Spawn(ctx context.Context, request core.GateSpawnRequest) (core.GateReceipt, error) {
+	if request.DeliveryID == "" {
 		return core.GateReceipt{}, fmt.Errorf("wrk gate requires a delivery ID")
 	}
-	result, err := g.runner.Run(ctx, g.wrk, "spawn", "--job", deliveryID)
+	if !filepath.IsAbs(request.PromptPath) {
+		return core.GateReceipt{Durable: true, Detail: "materialized prompt path is invalid", RejectionCode: core.CodeGateDenied}, nil
+	}
+	if g.policyErr != nil {
+		return core.GateReceipt{Durable: true, Detail: "wrk spawn policy is unavailable", RejectionCode: core.CodeGateNotInstalled}, nil
+	}
+	rule, found := g.policy.match(request.Label)
+	if !found {
+		return core.GateReceipt{Durable: true, Detail: "wrk spawn policy does not match label", RejectionCode: core.CodeGateDenied}, nil
+	}
+	result, err := g.runner.Run(ctx, g.wrk,
+		"spawn", "-c", rule.CWD, "-m", rule.Model, "-p", request.PromptPath,
+		"-w", rule.Workspace, "-l", request.Label, "--t", rule.Tier, "--job", request.DeliveryID,
+	)
 	if err != nil {
+		if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
+			return core.GateReceipt{Durable: true, Detail: "wrk is not installed", RejectionCode: core.CodeGateNotInstalled}, nil
+		}
 		return core.GateReceipt{Detail: "wrk invocation failed"}, fmt.Errorf("wrk invocation failed")
 	}
 	switch result.ExitCode {
 	case 0:
-		return g.Lookup(ctx, deliveryID)
+		return g.Lookup(ctx, request.DeliveryID)
 	case ExitActiveJobDuplicate:
 		// 74 is not a durable denial.  Another process may have already made
 		// the delivery durable, so core must enter SPAWN_UNKNOWN and recover
 		// through the one authoritative arbiter lookup surface.
-		receipt, lookupErr := g.Lookup(ctx, deliveryID)
+		receipt, lookupErr := g.Lookup(ctx, request.DeliveryID)
 		if lookupErr != nil {
 			return core.GateReceipt{Detail: "active duplicate lookup failed"}, lookupErr
 		}
