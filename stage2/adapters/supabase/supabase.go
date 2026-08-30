@@ -284,6 +284,13 @@ func (a *Adapter) Health(ctx context.Context) (core.TransportHealth, error) {
 }
 
 func (a *Adapter) call(ctx context.Context, method, endpoint string, input any, output any) error {
+	return a.callWithHeaders(ctx, method, endpoint, input, output, nil)
+}
+
+// callWithHeaders keeps the common authenticated/refresh path while allowing
+// PostgREST operations such as an idempotent upsert to add a narrow, explicit
+// preference header.  Callers never provide credentials or response bodies.
+func (a *Adapter) callWithHeaders(ctx context.Context, method, endpoint string, input any, output any, headers http.Header) error {
 	var encoded []byte
 	if input != nil {
 		var err error
@@ -293,18 +300,18 @@ func (a *Adapter) call(ctx context.Context, method, endpoint string, input any, 
 		}
 	}
 	access := a.accessToken()
-	status, err := a.callOnce(ctx, method, endpoint, encoded, access, output)
+	status, err := a.callOnce(ctx, method, endpoint, encoded, access, output, headers)
 	if status != http.StatusUnauthorized {
 		return err
 	}
 	if err := a.refreshAccessToken(ctx, access); err != nil {
 		return fmt.Errorf("Supabase token refresh failed")
 	}
-	_, err = a.callOnce(ctx, method, endpoint, encoded, a.accessToken(), output)
+	_, err = a.callOnce(ctx, method, endpoint, encoded, a.accessToken(), output, headers)
 	return err
 }
 
-func (a *Adapter) callOnce(ctx context.Context, method, endpoint string, encoded []byte, access string, output any) (int, error) {
+func (a *Adapter) callOnce(ctx context.Context, method, endpoint string, encoded []byte, access string, output any, headers http.Header) (int, error) {
 	var body io.Reader
 	if encoded != nil {
 		body = bytes.NewReader(encoded)
@@ -334,6 +341,12 @@ func (a *Adapter) callOnce(ctx context.Context, method, endpoint string, encoded
 			req.Header.Set("Accept-Profile", a.schema)
 		} else {
 			req.Header.Set("Content-Profile", a.schema)
+		}
+	}
+	for name, values := range headers {
+		req.Header.Del(name)
+		for _, value := range values {
+			req.Header.Add(name, value)
 		}
 	}
 	resp, err := a.httpClient.Do(req)
