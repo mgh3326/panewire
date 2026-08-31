@@ -76,6 +76,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	authPath := flags.String("hub-auth", "", "mode-0600 HUB_TOKEN_<machine_id> file")
 	tgEnvPath := flags.String("hub-tg-env", "", "optional mode-0600 TG_BOT_TOKEN/TG_CHAT_ID env file")
 	gracePeriod := flags.Duration("hub-grace", defaultHubGracePeriod, "continuous disconnected/stale grace period")
+	alertNodesCSV := flags.String("alert-nodes", "", "comma-separated authenticated machine IDs to alert on")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return nil, "", ExitUsage, errors.New("invalid hub flags")
 	}
@@ -93,6 +94,19 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if *gracePeriod <= 0 {
 		return nil, "", ExitConditionInvalid, errors.New("hub grace period must be positive")
 	}
+	var alertNodes map[string]struct{}
+	alertNodesSet := false
+	flags.Visit(func(flag *flag.Flag) {
+		if flag.Name == "alert-nodes" {
+			alertNodesSet = true
+		}
+	})
+	if alertNodesSet {
+		alertNodes, err = parseHubAlertNodes(*alertNodesCSV, tokens)
+		if err != nil {
+			return nil, "", ExitConditionInvalid, errors.New("hub alert nodes are invalid")
+		}
+	}
 	var notifier HubNotifier
 	if *tgEnvPath != "" {
 		env, err := loadHubTelegramEnv(*tgEnvPath)
@@ -106,11 +120,32 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub Telegram configuration is invalid")
 		}
 	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger})
+	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}
 	return hub, address, ExitOK, nil
+}
+
+func parseHubAlertNodes(raw string, tokens map[string]string) (map[string]struct{}, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, errors.New("alert nodes are required when the flag is set")
+	}
+	alertNodes := make(map[string]struct{})
+	for _, item := range strings.Split(raw, ",") {
+		machineID := strings.TrimSpace(item)
+		if machineID == "" || machineID == hubOperatorMachineID || !machineIDPattern.MatchString(machineID) {
+			return nil, errors.New("invalid alert node")
+		}
+		if _, exists := tokens[machineID]; !exists {
+			return nil, errors.New("unknown alert node")
+		}
+		if _, duplicate := alertNodes[machineID]; duplicate {
+			return nil, errors.New("duplicate alert node")
+		}
+		alertNodes[machineID] = struct{}{}
+	}
+	return alertNodes, nil
 }
 
 func runHubCLI(args []string) int {
@@ -298,7 +333,7 @@ func hubHTTPSEndpoint(raw, endpoint string, allowInsecureForTests bool) (*url.UR
 
 func validHubStatusNodes(nodes []HubNode) bool {
 	for _, node := range nodes {
-		if !machineIDPattern.MatchString(node.MachineID) || (node.State != "connected" && node.State != "stale" && node.State != "disconnected") || node.LastPingMS < 0 || len(node.RemoteMeta) > 8 {
+		if !machineIDPattern.MatchString(node.MachineID) || (node.AlertClass != "watched" && node.AlertClass != "presence-only") || (node.State != "connected" && node.State != "stale" && node.State != "disconnected") || node.LastPingMS < 0 || len(node.RemoteMeta) > 8 {
 			return false
 		}
 		for key, value := range node.RemoteMeta {
@@ -313,9 +348,9 @@ func validHubStatusNodes(nodes []HubNode) bool {
 func renderHubStatus(writer io.Writer, nodes []HubNode) {
 	rows := append([]HubNode(nil), nodes...)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].MachineID < rows[j].MachineID })
-	fmt.Fprintln(writer, "MACHINE\tSTATE\tCONNECTED_SINCE\tLAST_PING_MS\tREMOTE_META")
+	fmt.Fprintln(writer, "MACHINE\tCLASS\tSTATE\tCONNECTED_SINCE\tLAST_PING_MS\tREMOTE_META")
 	for _, node := range rows {
 		meta, _ := json.Marshal(node.RemoteMeta)
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%d\t%s\n", node.MachineID, node.State, node.ConnectedSince.UTC().Format(time.RFC3339), node.LastPingMS, meta)
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%d\t%s\n", node.MachineID, node.AlertClass, node.State, node.ConnectedSince.UTC().Format(time.RFC3339), node.LastPingMS, meta)
 	}
 }

@@ -1,4 +1,4 @@
-# R7 hub: presence, checks, and notification
+# R8 hub: presence, checks, and notification
 
 ## Scope and durability boundary
 
@@ -32,7 +32,8 @@ panewire hub \
   --listen 127.0.0.1:9377 \
   --hub-auth /etc/panewire/hub-auth.env \
   --hub-tg-env /etc/panewire/hub-tg.env \
-  --hub-grace 2m
+  --hub-grace 2m \
+  --alert-nodes mac-a,server-b
 ```
 
 `--hub-auth` is an explicit regular file with mode `0600` (not a symlink). Its
@@ -50,6 +51,15 @@ for `/v1/agent`; its token cannot authenticate operator endpoints. Tokens are
 issued by an operator editing this file. There is no enrollment or token
 minting endpoint.
 
+`--alert-nodes` is optional. When omitted, every authenticated node is
+`watched`, preserving the R7 behavior. When supplied, it is a comma-separated
+list of authenticated node machine IDs: listed nodes are `watched`; every
+other authenticated node is `presence-only`. Presence-only nodes stay in the
+presence API and status output, but never enter the Telegram presence or
+heartbeat-check alert state machine. An empty, duplicate, reserved, malformed,
+or unauthenticated ID rejects hub startup; correct the auth file or list before
+restarting.
+
 Endpoints are:
 
 | Endpoint | Authentication | Purpose |
@@ -59,9 +69,10 @@ Endpoints are:
 | `WS /v1/agent` | `X-Panewire-Machine-ID` plus that node's bearer token | node connection |
 | `WS /v1/events` | operator bearer token | all-node event subscription |
 
-The node list includes `machine_id`, `connected_since`, `last_ping_ms` (the
-non-negative elapsed milliseconds since the last node keepalive), and
-`remote_meta` (the protocol version and peer address), plus `state`:
+The node list includes `machine_id`, `alert_class` (`watched` or
+`presence-only`), `connected_since`, `last_ping_ms` (the non-negative elapsed
+milliseconds since the last node keepalive), and `remote_meta` (the protocol
+version and peer address), plus `state`:
 `connected`, `stale`, or `disconnected`. A WebSocket close marks a node
 `disconnected` immediately. The hub marks a live connection `stale` after 30
 seconds with no application keepalive and restores `connected` after a new
@@ -175,7 +186,7 @@ only as headers on the HTTPS request.
    notification is desired. Install a `panewire-hub.service` unit whose
    `ExecStart` is equivalent to `panewire hub --listen 127.0.0.1:9377
    --hub-auth /etc/panewire/hub-auth.env --hub-tg-env
-   /etc/panewire/hub-tg.env --hub-grace 2m`.
+   /etc/panewire/hub-tg.env --hub-grace 2m --alert-nodes mac-a,server-b`.
    Run it as a dedicated unprivileged service account with `Restart=always`.
    Verify locally with `curl http://127.0.0.1:9377/healthz`.
 3. Configure `cloudflared` on that same NCP host to map the hostname

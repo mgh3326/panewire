@@ -50,7 +50,7 @@ type hubNotification struct {
 }
 
 func (h *HubServer) observeNodeAlertLocked(now time.Time, record *hubNodeRecord) []hubNotification {
-	if record == nil {
+	if record == nil || !h.watchesAlerts(record.machineID) {
 		return nil
 	}
 	if record.state == "connected" {
@@ -64,6 +64,9 @@ func (h *HubServer) observeNodeAlertLocked(now time.Time, record *hubNodeRecord)
 }
 
 func (h *HubServer) observeHeartbeatAlerts(machineID string, heartbeat hubHeartbeatPayload) {
+	if !h.watchesAlerts(machineID) {
+		return
+	}
 	now := h.now().UTC()
 	notifications := make([]hubNotification, 0, len(heartbeat.Checks))
 	h.mu.Lock()
