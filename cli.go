@@ -37,6 +37,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "hub-status" {
 		return runHubStatusCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
+	if args[0] == "hub-emit" {
+		return runHubEmitCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
 	if args[0] == "prompt" {
 		return runPromptCLI(args[1:], cfg)
 	}
