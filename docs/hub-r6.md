@@ -97,6 +97,9 @@ The WebSocket envelope is closed JSON. A node first sends:
 {"type":"hello","machine_id":"mac-a","version":"panewired-r7"}
 ```
 
+One-shot event publishers may add `"transient":true` to hello. A transient
+session can send events but never changes the machine's presence record.
+
 It can then send `{"type":"ping"}` and events:
 
 ```json

@@ -70,14 +70,14 @@ type hubNodeRecord struct {
 	lastKeepaliveSent time.Time
 	stateSince        time.Time
 	remoteMeta        map[string]string
-	lastNote          *HubLastNote
 	state             string
 	agent             *hubAgent
 }
 
 type hubAgent struct {
-	conn    *websocket.Conn
-	writeMu sync.Mutex
+	conn      *websocket.Conn
+	writeMu   sync.Mutex
+	transient bool
 }
 
 type hubEvent struct {
@@ -109,6 +109,7 @@ type HubServer struct {
 
 	mu              sync.Mutex
 	nodes           map[string]*hubNodeRecord
+	lastNotes       map[string]*HubLastNote
 	subscribers     map[*hubEventSubscriber]struct{}
 	alerts          map[string]*hubAlertState
 	unknownMessages uint64
@@ -161,7 +162,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	return &HubServer{
 		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger,
-		nodes: make(map[string]*hubNodeRecord), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState),
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState),
 	}, nil
 }
 
@@ -249,8 +250,20 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			h.countUnknownMessage()
 			return
 		}
+		if agent.transient {
+			h.countUnknownMessage()
+			return
+		}
+		if message.Transient {
+			agent.transient = true
+			return
+		}
 		h.connect(machineID, message.Version, remoteAddr, agent)
 	case "ping", "pong":
+		if agent.transient {
+			h.countUnknownMessage()
+			return
+		}
 		if !h.touch(machineID, agent) {
 			h.countUnknownMessage()
 			return
@@ -259,7 +272,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			_ = agent.writeJSON(hubOutbound{Type: "pong"})
 		}
 	case "event":
-		if !h.touch(machineID, agent) {
+		if !agent.transient && !h.touch(machineID, agent) {
 			h.countUnknownMessage()
 			return
 		}
@@ -278,7 +291,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			// updates the display state; every valid event object still follows
 			// the established broadcast path.
 			if note, valid := decodeHubNotePayload(message.Payload); valid {
-				_ = h.recordNote(machineID, agent, note.Text, received)
+				h.recordNote(machineID, note.Text, received)
 			}
 		}
 		h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: received})
@@ -291,6 +304,7 @@ type hubInbound struct {
 	Type      string
 	MachineID string
 	Version   string
+	Transient bool
 	Kind      string
 	Payload   json.RawMessage
 }
@@ -389,7 +403,10 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 	}
 	switch message.Type {
 	case "hello":
-		if !allowed("type", "machine_id", "version") || json.Unmarshal(fields["machine_id"], &message.MachineID) != nil || json.Unmarshal(fields["version"], &message.Version) != nil || message.MachineID == "" || message.Version == "" {
+		if !allowed("type", "machine_id", "version", "transient") || json.Unmarshal(fields["machine_id"], &message.MachineID) != nil || json.Unmarshal(fields["version"], &message.Version) != nil || message.MachineID == "" || message.Version == "" {
+			return hubInbound{}, false
+		}
+		if rawTransient, exists := fields["transient"]; exists && json.Unmarshal(rawTransient, &message.Transient) != nil {
 			return hubInbound{}, false
 		}
 	case "ping", "pong":
@@ -464,15 +481,10 @@ func (h *HubServer) touch(machineID string, agent *hubAgent) bool {
 	return true
 }
 
-func (h *HubServer) recordNote(machineID string, agent *hubAgent, text string, received time.Time) bool {
+func (h *HubServer) recordNote(machineID, text string, received time.Time) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	record := h.nodes[machineID]
-	if record == nil || record.agent != agent {
-		return false
-	}
-	record.lastNote = &HubLastNote{Text: text, ReceivedAt: received}
-	return true
+	h.lastNotes[machineID] = &HubLastNote{Text: text, ReceivedAt: received}
 }
 
 func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
@@ -571,8 +583,8 @@ func (h *HubServer) Nodes() []HubNode {
 			remoteMeta[key] = value
 		}
 		var lastNote *HubLastNote
-		if record.lastNote != nil {
-			lastNote = &HubLastNote{Text: record.lastNote.Text, ReceivedAt: record.lastNote.ReceivedAt}
+		if note := h.lastNotes[record.machineID]; note != nil {
+			lastNote = &HubLastNote{Text: note.Text, ReceivedAt: note.ReceivedAt}
 		}
 		nodes = append(nodes, HubNode{
 			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, RemoteMeta: remoteMeta, State: record.state,
