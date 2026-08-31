@@ -342,6 +342,7 @@ type pendingAlert struct {
 	retryAt      time.Time
 	ownedFailure bool
 	sent         bool
+	relayed      bool
 }
 
 type observation struct {
@@ -362,6 +363,7 @@ type Service struct {
 	now       func() time.Time
 	execute   func(context.Context, []string) error
 	warn      func(string)
+	onAlert   func(Alert)
 
 	evaluateMu   sync.Mutex
 	observations map[string]*observation
@@ -375,6 +377,9 @@ type ServiceConfig struct {
 	Now       func() time.Time
 	Execute   func(context.Context, []string) error
 	Warn      func(string)
+	// OnAlert observes a locally claimed alert exactly once. It is optional and
+	// receives only the same closed, credential-free fields sent to Notifier.
+	OnAlert func(Alert)
 }
 
 func NewService(config ServiceConfig) (*Service, error) {
@@ -396,9 +401,12 @@ func NewService(config ServiceConfig) (*Service, error) {
 	if config.Warn == nil {
 		config.Warn = func(string) {}
 	}
+	if config.OnAlert == nil {
+		config.OnAlert = func(Alert) {}
+	}
 	return &Service{
 		machineID: config.MachineID, settings: config.Settings, remote: config.Remote, notifier: config.Notifier,
-		now: config.Now, execute: config.Execute, warn: config.Warn, observations: make(map[string]*observation),
+		now: config.Now, execute: config.Execute, warn: config.Warn, onAlert: config.OnAlert, observations: make(map[string]*observation),
 	}, nil
 }
 
@@ -588,6 +596,12 @@ func (s *Service) tryNotify(ctx context.Context, now time.Time, pending *pending
 			return false
 		}
 		return true
+	}
+	if !pending.relayed {
+		pending.relayed = true
+		alert := pending.alert
+		alert.Checks = cloneChecks(pending.alert.Checks)
+		s.onAlert(alert)
 	}
 	if s.notifier == nil {
 		pending.ownedFailure = true

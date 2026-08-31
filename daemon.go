@@ -21,6 +21,7 @@ type Config struct {
 	Logging                                    LoggingConfig
 	Stage2                                     Stage2Config
 	Sentinel                                   SentinelConfig
+	Hub                                        HubDaemonConfig
 	Store                                      *Store
 	SchemaCommand                              []string
 	Logger                                     *slog.Logger
@@ -38,6 +39,7 @@ type Daemon struct {
 	caps         GuardResult
 	stage2Done   chan struct{}
 	sentinelDone chan struct{}
+	hubDone      chan struct{}
 	mu           sync.Mutex
 }
 
@@ -110,6 +112,13 @@ func (d *Daemon) Start(ctx context.Context) error {
 		go func() {
 			defer close(d.sentinelDone)
 			d.sentinelLoop(runCtx)
+		}()
+	}
+	if d.cfg.Hub.Enabled && d.cfg.Hub.Client != nil {
+		d.hubDone = make(chan struct{})
+		go func() {
+			defer close(d.hubDone)
+			d.cfg.Hub.Client.Run(runCtx)
 		}()
 	}
 	return nil
@@ -283,6 +292,10 @@ func (d *Daemon) Stop() error {
 	if d.sentinelDone != nil {
 		<-d.sentinelDone
 		d.sentinelDone = nil
+	}
+	if d.hubDone != nil {
+		<-d.hubDone
+		d.hubDone = nil
 	}
 	if d.herdr != nil {
 		_ = d.herdr.Close()
