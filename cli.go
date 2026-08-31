@@ -17,7 +17,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/mgh3326/panewire/sentinel"
 	"github.com/mgh3326/panewire/stage2/adapters/supabase"
 	"github.com/mgh3326/panewire/stage2/adapters/wrkgate"
 	"github.com/mgh3326/panewire/stage2/core"
@@ -34,9 +33,6 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if args[0] == "smoke-supabase" {
 		return runSmokeSupabaseCLI(args[1:], os.Stdout, os.Stderr, smokeDeps{})
-	}
-	if args[0] == "sentinel" {
-		return runSentinelCLI(args[1:], os.Stdout, os.Stderr, sentinelCLIDeps{})
 	}
 	if args[0] == "hub-status" {
 		return runHubStatusCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
@@ -377,15 +373,10 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	stage2Poll := fs.Duration("stage2-poll", 30*time.Second, "stage2 publish/claim poll interval")
 	stage2WrkGate := fs.Bool("stage2-wrk-gate", false, "attach the wrk admission gate for spawn requests")
 	stage2SpawnPolicy := fs.String("stage2-spawn-policy", "", "receiving-machine JSON policy for wrk spawn context")
-	sentinelEnabled := fs.Bool("sentinel", false, "enable L2 sentinel heartbeat publication")
-	sentinelWatch := fs.Bool("sentinel-watch", false, "evaluate peer sentinel heartbeats and send Telegram alerts")
-	sentinelConfig := fs.String("sentinel-config", "", "explicit sentinel node/check JSON configuration")
-	sentinelTGEnv := fs.String("sentinel-tg-env", "", "explicit mode-0600 TG_BOT_TOKEN/TG_CHAT_ID env file")
-	sentinelPoll := fs.Duration("sentinel-poll", time.Minute, "sentinel heartbeat poll interval")
-	sentinelWatchPoll := fs.Duration("sentinel-watch-poll", 2*time.Minute, "sentinel peer evaluation poll interval")
 	hubURL := fs.String("hub-url", "", "optional WSS hub base URL")
 	hubTokenEnv := fs.String("hub-token-env", "", "optional mode-0600 HUB_MACHINE_ID/HUB_TOKEN env file")
 	hubCFEnv := fs.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
+	checksConfig := fs.String("checks-config", "", "explicit local hub check JSON configuration")
 	if fs.Parse(args) != nil {
 		return nil, ExitUsage, fmt.Errorf("invalid daemon flags")
 	}
@@ -404,42 +395,22 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		if *hubURL == "" || *hubTokenEnv == "" {
 			return nil, ExitConditionInvalid, fmt.Errorf("hub requires both --hub-url and --hub-token-env")
 		}
-		configuredHub, err := buildHubDaemonClient(*hubURL, *hubTokenEnv, *hubCFEnv, *sentinelEnabled, deps)
+		var checks []HubCheck
+		if *checksConfig != "" {
+			loadedChecks, err := LoadHubChecksConfig(*checksConfig)
+			if err != nil {
+				return nil, ExitConditionInvalid, fmt.Errorf("checks config is invalid")
+			}
+			checks = loadedChecks
+		}
+		configuredHub, err := buildHubDaemonClient(*hubURL, *hubTokenEnv, *hubCFEnv, checks, deps)
 		if err != nil {
 			return nil, ExitConditionInvalid, err
 		}
 		hubClient = configuredHub
 		cfg.Hub = HubDaemonConfig{Enabled: true, Client: hubClient}
 	}
-	if sentinelFlagsProvided(args) && !*sentinelEnabled {
-		return nil, ExitConditionInvalid, fmt.Errorf("sentinel options require --sentinel")
-	}
-	if *sentinelEnabled {
-		if *stage2ClientEnv == "" || *sentinelConfig == "" {
-			return nil, ExitConditionInvalid, fmt.Errorf("sentinel requires --stage2-client-env and --sentinel-config")
-		}
-		if *sentinelPoll <= 0 || *sentinelWatchPoll <= 0 {
-			return nil, ExitConditionInvalid, fmt.Errorf("sentinel poll intervals must be positive")
-		}
-		if *sentinelWatch && *sentinelTGEnv == "" {
-			return nil, ExitConditionInvalid, fmt.Errorf("--sentinel-watch requires --sentinel-tg-env")
-		}
-		var onAlert func(sentinel.Alert)
-		if hubClient != nil {
-			onAlert = func(alert sentinel.Alert) { _ = hubClient.PublishSentinelAlert(alert) }
-		}
-		configuredSentinel, err := buildSentinelDaemonConfig(*stage2ClientEnv, *sentinelConfig, *sentinelTGEnv, *sentinelWatch, *sentinelPoll, *sentinelWatchPoll, deps, onAlert)
-		if err != nil {
-			return nil, ExitConditionInvalid, err
-		}
-		cfg.Sentinel = configuredSentinel
-	}
 	stage2Requested := stage2FlagsProvided(args)
-	if *sentinelEnabled && !stage2OperationalFlagsProvided(args) {
-		// An explicit credential file is shared with sentinel, but must not
-		// accidentally turn on stage-2 message transport by itself.
-		stage2Requested = false
-	}
 	if stage2Requested {
 		if *stage2ClientEnv == "" || *stage2InboxRoot == "" {
 			return nil, ExitConditionInvalid, fmt.Errorf("stage2 requires both --stage2-client-env and --stage2-inbox-root")
@@ -481,36 +452,8 @@ func stage2FlagsProvided(args []string) bool {
 	return false
 }
 
-func stage2OperationalFlagsProvided(args []string) bool {
-	for _, name := range []string{
-		"stage2-inbox-root", "stage2-db", "stage2-namespace", "stage2-poll", "stage2-wrk-gate", "stage2-spawn-policy",
-	} {
-		flagName := "--" + name
-		for _, arg := range args {
-			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
-func sentinelFlagsProvided(args []string) bool {
-	for _, name := range []string{
-		"sentinel", "sentinel-watch", "sentinel-config", "sentinel-tg-env", "sentinel-poll", "sentinel-watch-poll",
-	} {
-		flagName := "--" + name
-		for _, arg := range args {
-			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "checks-config"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {

@@ -4,7 +4,7 @@
 -- roles.  This isolated helper supplies the smallest local stand-ins needed to
 -- parse and exercise the idempotent DDL: auth schema, auth.uid(), and the
 -- anon/authenticated/service_role NOLOGIN roles.  It does not emulate JWT
--- verification, GoTrue, PostgREST, Realtime, or service_role's Supabase
+-- verification, GoTrue, PostgREST, or service_role's Supabase
 -- BYPASSRLS attribute.
 
 DO $$

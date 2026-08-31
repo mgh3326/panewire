@@ -479,7 +479,7 @@ func r1OfflineReceiverReconnect(t *testing.T) {
 	if _, ok := rig.transport.Snapshot(record.DeliveryID); !ok {
 		t.Fatal("message was not retained for offline receiver")
 	}
-	rig.transport.Advance(time.Hour) // no Realtime hint; normal polling repairs it.
+	rig.transport.Advance(time.Hour) // normal polling repairs delayed delivery.
 	receiver := rig.receiver(t, nil, nil, nil)
 	r1Poll(t, receiver)
 	r1ExpectFile(t, r1FinalPath(rig, "offline/brief.md"), []byte("offline-then-poll"))

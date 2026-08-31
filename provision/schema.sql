@@ -7,9 +7,8 @@
 --   2. psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f provision/schema.sql
 --
 -- Do not configure `postgres_changes` for panewire.message_queue: it would
--- send a whole row, including inline_body, to subscribers.  Use a private
--- Supabase Realtime Broadcast channel whose payload is only
--- `{ "message_id": "..." }`; claim polling remains the source of truth.
+-- send a whole row, including inline_body, to subscribers. Claim polling is
+-- the sole delivery wake-up and correctness path.
 --
 -- Post-run verification (contains no payload or credentials):
 --   SELECT n.nspname, c.relname

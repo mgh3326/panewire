@@ -58,11 +58,24 @@ func hubListenAddress(raw string) (string, error) {
 	return net.JoinHostPort(host, portText), nil
 }
 
+type hubServerCLIDeps struct {
+	TelegramHTTPClient    *http.Client
+	TelegramBaseURL       string
+	AllowInsecureForTests bool
+	Now                   func() time.Time
+}
+
 func newHubServerForCLI(args []string, logger *slog.Logger) (*HubServer, string, int, error) {
+	return newHubServerForCLIWithDeps(args, logger, hubServerCLIDeps{})
+}
+
+func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServerCLIDeps) (*HubServer, string, int, error) {
 	flags := flag.NewFlagSet("panewire hub", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	listen := flags.String("listen", "127.0.0.1:9377", "loopback listen address")
 	authPath := flags.String("hub-auth", "", "mode-0600 HUB_TOKEN_<machine_id> file")
+	tgEnvPath := flags.String("hub-tg-env", "", "optional mode-0600 TG_BOT_TOKEN/TG_CHAT_ID env file")
+	gracePeriod := flags.Duration("hub-grace", defaultHubGracePeriod, "continuous disconnected/stale grace period")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return nil, "", ExitUsage, errors.New("invalid hub flags")
 	}
@@ -77,7 +90,23 @@ func newHubServerForCLI(args []string, logger *slog.Logger) (*HubServer, string,
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth file is invalid")
 	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, Logger: logger})
+	if *gracePeriod <= 0 {
+		return nil, "", ExitConditionInvalid, errors.New("hub grace period must be positive")
+	}
+	var notifier HubNotifier
+	if *tgEnvPath != "" {
+		env, err := loadHubTelegramEnv(*tgEnvPath)
+		if err != nil {
+			return nil, "", ExitConditionInvalid, errors.New("hub Telegram env is invalid")
+		}
+		notifier, err = newHubTelegramNotifier(env, hubNotifierDeps{
+			HTTPClient: deps.TelegramHTTPClient, BaseURL: deps.TelegramBaseURL, AllowInsecureForTests: deps.AllowInsecureForTests,
+		})
+		if err != nil {
+			return nil, "", ExitConditionInvalid, errors.New("hub Telegram configuration is invalid")
+		}
+	}
+	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}
@@ -156,7 +185,7 @@ type hubCLIDeps struct {
 	AllowInsecureForTests bool
 }
 
-func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, sentinelEnabled bool, deps daemonCLIDeps) (*HubClient, error) {
+func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, deps daemonCLIDeps) (*HubClient, error) {
 	env, err := loadHubTokenEnv(tokenEnvPath)
 	if err != nil || env.MachineID == hubOperatorMachineID {
 		return nil, errors.New("hub token env must contain a node credential")
@@ -173,7 +202,7 @@ func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, sentinelEnable
 		logger = slog.Default()
 	}
 	client, err := NewHubClient(HubClientConfig{
-		URL: rawURL, MachineID: env.MachineID, Token: env.Token, CFAccessClientID: cfAccess.ClientID, CFAccessClientSecret: cfAccess.ClientSecret, SentinelEnabled: sentinelEnabled,
+		URL: rawURL, MachineID: env.MachineID, Token: env.Token, CFAccessClientID: cfAccess.ClientID, CFAccessClientSecret: cfAccess.ClientSecret, Checks: checks,
 		AllowInsecureForTests: deps.AllowInsecureForTests,
 		Warn:                  func(message string) { logger.Warn(message) },
 	})

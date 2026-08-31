@@ -1,4 +1,4 @@
-# R6 hub: live presence and event push
+# R7 hub: presence, checks, and notification
 
 ## Scope and durability boundary
 
@@ -9,11 +9,10 @@ record and deliberately has no persistence layer.
 The durable split is fixed:
 
 - **Supabase stage 2** retains file relay and the recipient's offline buffer.
-- **Supabase sentinel** retains heartbeat and alert-board state.
-- **Hub** provides only live presence and fan-out while a node and an operator
-  are both connected.
+- **Hub** owns live presence, node-local heartbeat check results, and optional
+  operator notification while nodes are connected.
 
-Consequently a hub outage must not block stage 1, stage 2, or sentinel. A
+Consequently a hub outage must not block stage 1 or stage 2. A
 `panewired` daemon reconnects in the background with exponential backoff from
 one second to a maximum of 60 seconds. Hub events are bounded in memory and
 may be dropped during an outage; that is intentional because they are not a
@@ -31,7 +30,9 @@ every host other than `127.0.0.1`.
 ```sh
 panewire hub \
   --listen 127.0.0.1:9377 \
-  --hub-auth /etc/panewire/hub-auth.env
+  --hub-auth /etc/panewire/hub-auth.env \
+  --hub-tg-env /etc/panewire/hub-tg.env \
+  --hub-grace 2m
 ```
 
 `--hub-auth` is an explicit regular file with mode `0600` (not a symlink). Its
@@ -69,19 +70,26 @@ seconds with no application keepalive and restores `connected` after a new
 The bearer token is never copied to logs, error responses, event payloads, or
 status output.
 
+`--hub-tg-env` is optional. When set, it is an explicit non-symlink regular
+mode-`0600` file with `TG_BOT_TOKEN` and `TG_CHAT_ID`. The hub sends one
+incident after a node has stayed `disconnected` or `stale` for `--hub-grace`
+(two minutes by default), then one recovery after two connected observations.
+Each failed local check likewise needs two consecutive heartbeat observations;
+its recovery also needs two healthy observations. Telegram text contains only
+the machine ID, reason, and check name.
+
 ## Protocol
 
 The WebSocket envelope is closed JSON. A node first sends:
 
 ```json
-{"type":"hello","machine_id":"mac-a","version":"panewired-r6"}
+{"type":"hello","machine_id":"mac-a","version":"panewired-r7"}
 ```
 
 It can then send `{"type":"ping"}` and events:
 
 ```json
-{"type":"event","kind":"heartbeat","payload":{"status":"alive"}}
-{"type":"event","kind":"sentinel_alert","payload":{"machine_id":"mac-b","reason":"stale"}}
+{"type":"event","kind":"heartbeat","payload":{"status":"alive","checks":{"disk":"ok","service":"fail"}}}
 {"type":"event","kind":"note","payload":{"message":"operator-visible note"}}
 ```
 
@@ -92,9 +100,8 @@ do not disconnect an authenticated node. Authentication failures are rejected
 before the WebSocket handshake.
 
 `panewired` sends a heartbeat event after connecting and alongside its
-periodic ping. It relays `sentinel_alert` only when `--sentinel` is enabled;
-the sentinel callback occurs after the local watcher has acquired the existing
-shared alert claim.
+periodic ping. The heartbeat accepts only `status:"alive"` and a map of local
+check names to `ok` or `fail`; argv and command output never leave the node.
 
 ## Node and operator clients
 
@@ -112,7 +119,8 @@ daemon invocation:
 panewire daemon \
   --hub-url wss://hub.robinco.dev \
   --hub-token-env /Users/you/.config/panewire/hub-node.env \
-  --hub-cf-env /Users/you/.config/panewire/hub-cf-access.env
+  --hub-cf-env /Users/you/.config/panewire/hub-cf-access.env \
+  --checks-config /Users/you/.config/panewire/checks.json
 ```
 
 In production `--hub-url` must be a `wss://` base URL. The daemon appends
@@ -132,6 +140,11 @@ The daemon sends those values only as `CF-Access-Client-Id` and
 `CF-Access-Client-Secret` on each WebSocket upgrade request. They are never
 printed or logged. Omit the flag when the hub does not require Cloudflare
 Access Service Auth.
+
+`--checks-config` is optional and local to that node. Its simple JSON schema
+contains only a `checks` array of `{name, argv, timeout}` values. The file is
+explicit, regular, and not a symlink. A check result is `ok` or `fail`; command
+output is discarded.
 
 For an operator, create another explicit mode-`0600` file:
 
@@ -158,8 +171,11 @@ only as headers on the HTTPS request.
    `/etc/panewire/hub-auth.env` as mode `0600` owned by the dedicated
    `panewire` service account (keep the containing directory root-controlled).
    Do not put its values in a systemd unit or command line.
-2. Install a `panewire-hub.service` unit whose `ExecStart` is equivalent to
-   `panewire hub --listen 127.0.0.1:9377 --hub-auth /etc/panewire/hub-auth.env`.
+2. Create `/etc/panewire/hub-tg.env` as a mode-`0600` file only when Telegram
+   notification is desired. Install a `panewire-hub.service` unit whose
+   `ExecStart` is equivalent to `panewire hub --listen 127.0.0.1:9377
+   --hub-auth /etc/panewire/hub-auth.env --hub-tg-env
+   /etc/panewire/hub-tg.env --hub-grace 2m`.
    Run it as a dedicated unprivileged service account with `Restart=always`.
    Verify locally with `curl http://127.0.0.1:9377/healthz`.
 3. Configure `cloudflared` on that same NCP host to map the hostname
@@ -172,11 +188,11 @@ only as headers on the HTTPS request.
    identity.
 5. On each Mac, write its own node env file and, for Service Auth, its separate
    Access env file with mode `0600`; add
-   `--hub-url wss://hub.robinco.dev --hub-token-env … --hub-cf-env …` to the
-   existing daemon launch configuration, and restart the daemon. Verify with the operator
+   `--hub-url wss://hub.robinco.dev --hub-token-env … --hub-cf-env …
+   --checks-config …` to the existing daemon launch configuration, and restart
+   the daemon. Verify with the operator
    `hub-status` command and an Access-authenticated `/v1/events` client.
 
 The deployment assumes the NCP host is the intentionally always-on hub for
-this R6 scope. It is still not a durable data authority: recovery is simply
-restart the service/tunnel, while Supabase retains offline files and sentinel
-state.
+this R7 scope. It is still not a durable data authority: recovery is simply
+restart the service/tunnel, while Supabase retains offline files.

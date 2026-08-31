@@ -119,7 +119,6 @@ func TestR2SmokeFixtureRoundTripAndRLS(t *testing.T) {
 		"--inbox-root", filepath.Join(root, "inbox"), "--confirm",
 	}, &stdout, &stderr, smokeDeps{
 		HTTPClient: server.Client(), AllowInsecureForTests: true,
-		NewHintProbe: func() smokeHintProbe { return unavailableHintProbe{} },
 	})
 	if code != ExitOK || stderr.Len() != 0 || strings.Contains(stdout.String(), "FAIL") {
 		t.Fatalf("smoke code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())

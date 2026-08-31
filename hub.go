@@ -34,6 +34,8 @@ type HubServerConfig struct {
 	Now               func() time.Time
 	StaleAfter        time.Duration
 	KeepaliveInterval time.Duration
+	GracePeriod       time.Duration
+	Notifier          HubNotifier
 	Logger            *slog.Logger
 }
 
@@ -52,6 +54,7 @@ type hubNodeRecord struct {
 	connectedSince    time.Time
 	lastPing          time.Time
 	lastKeepaliveSent time.Time
+	stateSince        time.Time
 	remoteMeta        map[string]string
 	state             string
 	agent             *hubAgent
@@ -83,11 +86,15 @@ type HubServer struct {
 	now               func() time.Time
 	staleAfter        time.Duration
 	keepaliveInterval time.Duration
+	gracePeriod       time.Duration
+	alertObservations int
+	notifier          HubNotifier
 	logger            *slog.Logger
 
 	mu              sync.Mutex
 	nodes           map[string]*hubNodeRecord
 	subscribers     map[*hubEventSubscriber]struct{}
+	alerts          map[string]*hubAlertState
 	unknownMessages uint64
 }
 
@@ -116,12 +123,16 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.KeepaliveInterval <= 0 {
 		config.KeepaliveInterval = 10 * time.Second
 	}
+	if config.GracePeriod <= 0 {
+		config.GracePeriod = defaultHubGracePeriod
+	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
 	return &HubServer{
-		tokens: tokens, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval, logger: config.Logger,
-		nodes: make(map[string]*hubNodeRecord), subscribers: make(map[*hubEventSubscriber]struct{}),
+		tokens: tokens, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
+		gracePeriod: config.GracePeriod, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger,
+		nodes: make(map[string]*hubNodeRecord), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState),
 	}, nil
 }
 
@@ -209,6 +220,14 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			h.countUnknownMessage()
 			return
 		}
+		if message.Kind == "heartbeat" {
+			heartbeat, valid := decodeHubHeartbeatPayload(message.Payload)
+			if !valid {
+				h.countUnknownMessage()
+				return
+			}
+			h.observeHeartbeatAlerts(machineID, heartbeat)
+		}
 		h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: h.now().UTC()})
 	default:
 		h.countUnknownMessage()
@@ -221,6 +240,43 @@ type hubInbound struct {
 	Version   string
 	Kind      string
 	Payload   json.RawMessage
+}
+
+type hubHeartbeatPayload struct {
+	Status string                    `json:"status"`
+	Checks map[string]HubCheckStatus `json:"checks"`
+}
+
+func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil || fields == nil {
+		return hubHeartbeatPayload{}, false
+	}
+	for name := range fields {
+		if name != "status" && name != "checks" {
+			return hubHeartbeatPayload{}, false
+		}
+	}
+	rawStatus, exists := fields["status"]
+	if !exists {
+		return hubHeartbeatPayload{}, false
+	}
+	var heartbeat hubHeartbeatPayload
+	if json.Unmarshal(rawStatus, &heartbeat.Status) != nil || heartbeat.Status != "alive" {
+		return hubHeartbeatPayload{}, false
+	}
+	heartbeat.Checks = make(map[string]HubCheckStatus)
+	if rawChecks, exists := fields["checks"]; exists {
+		if json.Unmarshal(rawChecks, &heartbeat.Checks) != nil || heartbeat.Checks == nil {
+			return hubHeartbeatPayload{}, false
+		}
+	}
+	for name, status := range heartbeat.Checks {
+		if !hubCheckNamePattern.MatchString(name) || !status.valid() {
+			return hubHeartbeatPayload{}, false
+		}
+	}
+	return heartbeat, true
 }
 
 type hubOutbound struct {
@@ -278,6 +334,11 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 		if !knownHubEventKind(message.Kind) {
 			return hubInbound{}, false
 		}
+		if message.Kind == "heartbeat" {
+			if _, valid := decodeHubHeartbeatPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
 		message.Payload = append(json.RawMessage(nil), rawPayload...)
 	default:
 		return hubInbound{}, false
@@ -287,7 +348,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "sentinel_alert", "note":
+	case "heartbeat", "note":
 		return true
 	}
 	return false
@@ -303,7 +364,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	h.nodes[machineID] = &hubNodeRecord{
 		machineID: machineID, connectedSince: now, lastPing: now,
 		remoteMeta: map[string]string{"version": version, "remote_addr": remoteAddr},
-		state:      "connected", agent: agent,
+		state:      "connected", stateSince: now, agent: agent,
 	}
 	h.mu.Unlock()
 	if previous != nil && previous != agent {
@@ -319,6 +380,9 @@ func (h *HubServer) touch(machineID string, agent *hubAgent) bool {
 		return false
 	}
 	record.lastPing = h.now().UTC()
+	if record.state != "connected" {
+		record.stateSince = record.lastPing
+	}
 	record.state = "connected"
 	return true
 }
@@ -328,6 +392,9 @@ func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 	defer h.mu.Unlock()
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {
 		record.agent = nil
+		if record.state == "connected" {
+			record.stateSince = h.now().UTC()
+		}
 		record.state = "disconnected"
 	}
 }
@@ -430,20 +497,21 @@ func (h *HubServer) Sweep() {
 	now := h.now().UTC()
 	type pendingPing struct{ agent *hubAgent }
 	var pings []pendingPing
+	var notifications []hubNotification
 	h.mu.Lock()
 	for _, record := range h.nodes {
-		if record.agent == nil {
-			continue
-		}
-		if now.Sub(record.lastPing) >= h.staleAfter {
+		if record.agent != nil && now.Sub(record.lastPing) >= h.staleAfter && record.state != "stale" {
 			record.state = "stale"
+			record.stateSince = now
 		}
-		if record.lastKeepaliveSent.IsZero() || now.Sub(record.lastKeepaliveSent) >= h.keepaliveInterval {
+		notifications = append(notifications, h.observeNodeAlertLocked(now, record)...)
+		if record.agent != nil && (record.lastKeepaliveSent.IsZero() || now.Sub(record.lastKeepaliveSent) >= h.keepaliveInterval) {
 			record.lastKeepaliveSent = now
 			pings = append(pings, pendingPing{agent: record.agent})
 		}
 	}
 	h.mu.Unlock()
+	h.dispatchHubNotifications(notifications)
 	for _, ping := range pings {
 		_ = ping.agent.writeJSON(hubOutbound{Type: "ping"})
 	}
