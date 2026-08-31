@@ -96,7 +96,7 @@ invalid policy, or unmatched label is terminal and fail-closed.
 
 R2: prompt target safety, verified submission/uptake, privacy-preserving delivery audit, schema guard, events, inbox watcher, and wait. Live prompt smoke remains prohibited in the fixture test job; use an operator-approved scratch pane separately.
 
-## R7 hub: presence, checks, and notification
+## R8 hub: presence, checks, and notification
 
 `panewire hub` is the optional, always-on live channel for presence and
 operator event push. It is deliberately **not** the durable transport:
@@ -111,6 +111,11 @@ operator event push. It is deliberately **not** the durable transport:
 The hub binds only `127.0.0.1`; expose it solely through a Cloudflare Tunnel
 protected by Cloudflare Access. It has no command-dispatch endpoint. Command
 dispatch requires a separately reviewed allowlist policy in a later round.
+
+By default every authenticated node is watched for presence and heartbeat-check
+alerts. Pass `--alert-nodes machine-a,server-b` on the hub to limit alerts to
+those authenticated machine IDs; other nodes remain visible as
+`presence-only` in `hub-status` and `/v1/nodes`.
 
 See [docs/hub-r6.md](docs/hub-r6.md) for token-file formats, CLI examples, the
 closed WebSocket vocabulary, and the NCP/systemd + tunnel deployment runbook.

@@ -30,7 +30,12 @@ var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // operator credential is the HUB_TOKEN_operator entry; agent credentials use
 // their own stable machine ID entries.
 type HubServerConfig struct {
-	Tokens            map[string]string
+	Tokens map[string]string
+	// AlertNodes is the optional watched-node allowlist. A nil map preserves
+	// the original behavior and watches every authenticated node. A non-nil
+	// map watches only its entries; all other authenticated nodes remain in
+	// presence views but never enter the alert state machine.
+	AlertNodes        map[string]struct{}
 	Now               func() time.Time
 	StaleAfter        time.Duration
 	KeepaliveInterval time.Duration
@@ -43,6 +48,7 @@ type HubServerConfig struct {
 // operators. RemoteMeta records only protocol metadata, never credentials.
 type HubNode struct {
 	MachineID      string            `json:"machine_id"`
+	AlertClass     string            `json:"alert_class"`
 	ConnectedSince time.Time         `json:"connected_since"`
 	LastPingMS     int64             `json:"last_ping_ms"`
 	RemoteMeta     map[string]string `json:"remote_meta"`
@@ -83,6 +89,7 @@ type hubEventSubscriber struct {
 // file relay, durable queue, command dispatcher, or credentials after startup.
 type HubServer struct {
 	tokens            map[string]string
+	alertNodes        map[string]struct{}
 	now               func() time.Time
 	staleAfter        time.Duration
 	keepaliveInterval time.Duration
@@ -114,6 +121,19 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if !validHubToken(tokens[hubOperatorMachineID]) {
 		return nil, errors.New("hub operator token is required")
 	}
+	var alertNodes map[string]struct{}
+	if config.AlertNodes != nil {
+		alertNodes = make(map[string]struct{}, len(config.AlertNodes))
+		for machineID := range config.AlertNodes {
+			if machineID == hubOperatorMachineID || !machineIDPattern.MatchString(machineID) {
+				return nil, errors.New("hub alert node configuration is invalid")
+			}
+			if _, exists := tokens[machineID]; !exists {
+				return nil, errors.New("hub alert node configuration is invalid")
+			}
+			alertNodes[machineID] = struct{}{}
+		}
+	}
 	if config.Now == nil {
 		config.Now = time.Now
 	}
@@ -130,10 +150,24 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		config.Logger = slog.Default()
 	}
 	return &HubServer{
-		tokens: tokens, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
+		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger,
 		nodes: make(map[string]*hubNodeRecord), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState),
 	}, nil
+}
+
+func (h *HubServer) alertClass(machineID string) string {
+	if h.alertNodes == nil {
+		return "watched"
+	}
+	if _, watched := h.alertNodes[machineID]; watched {
+		return "watched"
+	}
+	return "presence-only"
+}
+
+func (h *HubServer) watchesAlerts(machineID string) bool {
+	return h.alertClass(machineID) == "watched"
 }
 
 func validHubToken(token string) bool {
@@ -483,7 +517,7 @@ func (h *HubServer) Nodes() []HubNode {
 			remoteMeta[key] = value
 		}
 		nodes = append(nodes, HubNode{
-			MachineID: record.machineID, ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), RemoteMeta: remoteMeta, State: record.state,
+			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), RemoteMeta: remoteMeta, State: record.state,
 		})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })
