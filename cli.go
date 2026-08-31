@@ -385,6 +385,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	sentinelWatchPoll := fs.Duration("sentinel-watch-poll", 2*time.Minute, "sentinel peer evaluation poll interval")
 	hubURL := fs.String("hub-url", "", "optional WSS hub base URL")
 	hubTokenEnv := fs.String("hub-token-env", "", "optional mode-0600 HUB_MACHINE_ID/HUB_TOKEN env file")
+	hubCFEnv := fs.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
 	if fs.Parse(args) != nil {
 		return nil, ExitUsage, fmt.Errorf("invalid daemon flags")
 	}
@@ -403,7 +404,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		if *hubURL == "" || *hubTokenEnv == "" {
 			return nil, ExitConditionInvalid, fmt.Errorf("hub requires both --hub-url and --hub-token-env")
 		}
-		configuredHub, err := buildHubDaemonClient(*hubURL, *hubTokenEnv, *sentinelEnabled, deps)
+		configuredHub, err := buildHubDaemonClient(*hubURL, *hubTokenEnv, *hubCFEnv, *sentinelEnabled, deps)
 		if err != nil {
 			return nil, ExitConditionInvalid, err
 		}
@@ -509,7 +510,7 @@ func sentinelFlagsProvided(args []string) bool {
 }
 
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {

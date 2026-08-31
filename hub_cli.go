@@ -122,6 +122,11 @@ type hubTokenEnv struct {
 	Token     string
 }
 
+type hubCFAccessEnv struct {
+	ClientID     string
+	ClientSecret string
+}
+
 func loadHubTokenEnv(path string) (hubTokenEnv, error) {
 	values, err := loadMode0600Env(path)
 	if err != nil {
@@ -134,22 +139,41 @@ func loadHubTokenEnv(path string) (hubTokenEnv, error) {
 	return env, nil
 }
 
+func loadHubCFAccessEnv(path string) (hubCFAccessEnv, error) {
+	values, err := loadMode0600Env(path)
+	if err != nil {
+		return hubCFAccessEnv{}, errors.New("hub Cloudflare Access env must be a regular mode-0600 file")
+	}
+	env := hubCFAccessEnv{ClientID: values["CF_ACCESS_CLIENT_ID"], ClientSecret: values["CF_ACCESS_CLIENT_SECRET"]}
+	if !validHubCFAccessValue(env.ClientID) || !validHubCFAccessValue(env.ClientSecret) {
+		return hubCFAccessEnv{}, errors.New("hub Cloudflare Access env is invalid")
+	}
+	return env, nil
+}
+
 type hubCLIDeps struct {
 	HTTPClient            *http.Client
 	AllowInsecureForTests bool
 }
 
-func buildHubDaemonClient(rawURL, tokenEnvPath string, sentinelEnabled bool, deps daemonCLIDeps) (*HubClient, error) {
+func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, sentinelEnabled bool, deps daemonCLIDeps) (*HubClient, error) {
 	env, err := loadHubTokenEnv(tokenEnvPath)
 	if err != nil || env.MachineID == hubOperatorMachineID {
 		return nil, errors.New("hub token env must contain a node credential")
+	}
+	var cfAccess hubCFAccessEnv
+	if cfEnvPath != "" {
+		cfAccess, err = loadHubCFAccessEnv(cfEnvPath)
+		if err != nil {
+			return nil, errors.New("hub Cloudflare Access env is invalid")
+		}
 	}
 	logger := deps.Logger
 	if logger == nil {
 		logger = slog.Default()
 	}
 	client, err := NewHubClient(HubClientConfig{
-		URL: rawURL, MachineID: env.MachineID, Token: env.Token, SentinelEnabled: sentinelEnabled,
+		URL: rawURL, MachineID: env.MachineID, Token: env.Token, CFAccessClientID: cfAccess.ClientID, CFAccessClientSecret: cfAccess.ClientSecret, SentinelEnabled: sentinelEnabled,
 		AllowInsecureForTests: deps.AllowInsecureForTests,
 		Warn:                  func(message string) { logger.Warn(message) },
 	})
@@ -164,6 +188,7 @@ func runHubStatusCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) i
 	flags.SetOutput(stderr)
 	hubURL := flags.String("hub-url", "", "HTTPS hub base URL")
 	tokenEnvPath := flags.String("hub-token-env", "", "mode-0600 HUB_MACHINE_ID/HUB_TOKEN env file")
+	cfEnvPath := flags.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || *hubURL == "" || *tokenEnvPath == "" {
 		return ExitUsage
 	}
@@ -171,6 +196,14 @@ func runHubStatusCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) i
 	if err != nil || env.MachineID != hubOperatorMachineID {
 		fmt.Fprintln(stderr, "hub-status rejected: invalid operator token env")
 		return ExitConditionInvalid
+	}
+	var cfAccess hubCFAccessEnv
+	if *cfEnvPath != "" {
+		cfAccess, err = loadHubCFAccessEnv(*cfEnvPath)
+		if err != nil {
+			fmt.Fprintln(stderr, "hub-status rejected: invalid Cloudflare Access env")
+			return ExitConditionInvalid
+		}
 	}
 	endpoint, err := hubHTTPSEndpoint(*hubURL, "/v1/nodes", deps.AllowInsecureForTests)
 	if err != nil {
@@ -189,6 +222,10 @@ func runHubStatusCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) i
 		return ExitInternal
 	}
 	request.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
+	if cfAccess.ClientID != "" {
+		request.Header.Set("CF-Access-Client-Id", cfAccess.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", cfAccess.ClientSecret)
+	}
 	response, err := client.Do(request)
 	if err != nil {
 		fmt.Fprintln(stderr, "hub-status unavailable")

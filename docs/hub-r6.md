@@ -111,13 +111,27 @@ daemon invocation:
 ```sh
 panewire daemon \
   --hub-url wss://hub.robinco.dev \
-  --hub-token-env /Users/you/.config/panewire/hub-node.env
+  --hub-token-env /Users/you/.config/panewire/hub-node.env \
+  --hub-cf-env /Users/you/.config/panewire/hub-cf-access.env
 ```
 
 In production `--hub-url` must be a `wss://` base URL. The daemon appends
 `/v1/agent`, maintains the outbound connection, and emits a constant warning
 on retry without exposing a URL response or token. It does not read a default
 credential path.
+
+When the Cloudflare Access application uses Service Auth, `--hub-cf-env` is
+the explicit optional mode-`0600` regular file (not a symlink) containing:
+
+```sh
+CF_ACCESS_CLIENT_ID=replace-with-access-service-client-id
+CF_ACCESS_CLIENT_SECRET=replace-with-access-service-client-secret
+```
+
+The daemon sends those values only as `CF-Access-Client-Id` and
+`CF-Access-Client-Secret` on each WebSocket upgrade request. They are never
+printed or logged. Omit the flag when the hub does not require Cloudflare
+Access Service Auth.
 
 For an operator, create another explicit mode-`0600` file:
 
@@ -131,8 +145,12 @@ Then request the human-readable status table:
 ```sh
 panewire hub-status \
   --hub-url https://hub.robinco.dev \
-  --hub-token-env /safe/operator/hub-operator.env
+  --hub-token-env /safe/operator/hub-operator.env \
+  --hub-cf-env /safe/operator/hub-cf-access.env
 ```
+
+`hub-status` uses the same optional Access env format and sends its two values
+only as headers on the HTTPS request.
 
 ## NCP deployment checklist
 
@@ -152,9 +170,10 @@ panewire hub-status \
    identities. The hub's static bearer authentication remains required behind
    Access, so Access is a network gate rather than a replacement for node
    identity.
-5. On each Mac, write its own node env file with mode `0600`, add
-   `--hub-url wss://hub.robinco.dev --hub-token-env …` to the existing daemon
-   launch configuration, and restart the daemon. Verify with the operator
+5. On each Mac, write its own node env file and, for Service Auth, its separate
+   Access env file with mode `0600`; add
+   `--hub-url wss://hub.robinco.dev --hub-token-env … --hub-cf-env …` to the
+   existing daemon launch configuration, and restart the daemon. Verify with the operator
    `hub-status` command and an Access-authenticated `/v1/events` client.
 
 The deployment assumes the NCP host is the intentionally always-on hub for
