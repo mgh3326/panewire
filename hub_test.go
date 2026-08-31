@@ -21,9 +21,11 @@ import (
 )
 
 const (
-	r6OperatorToken = "r6-fixture-operator-token-not-for-logs"
-	r6NodeAToken    = "r6-fixture-node-a-token-not-for-logs"
-	r6NodeBToken    = "r6-fixture-node-b-token-not-for-logs"
+	r6OperatorToken         = "r6-fixture-operator-token-not-for-logs"
+	r6NodeAToken            = "r6-fixture-node-a-token-not-for-logs"
+	r6NodeBToken            = "r6-fixture-node-b-token-not-for-logs"
+	r61CFAccessClientID     = "r61-fixture-cf-client-id-not-for-logs"
+	r61CFAccessClientSecret = "r61-fixture-cf-client-secret-not-for-logs"
 )
 
 func TestR6HubAuthenticationAndTokenPrivacy(t *testing.T) {
@@ -97,10 +99,132 @@ func TestR6HubAuthenticationAndTokenPrivacy(t *testing.T) {
 	if handshake == nil || handshake.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("events handshake=%v err=%v, want 401", handshake, err)
 	}
-	if text := logs.String(); strings.Contains(text, r6OperatorToken) || strings.Contains(text, r6NodeAToken) || strings.Contains(text, r6NodeBToken) {
-		t.Fatal("hub logs exposed a fixture token")
+	for _, marker := range []string{r6OperatorToken, r6NodeAToken, r6NodeBToken, r61CFAccessClientID, r61CFAccessClientSecret} {
+		if strings.Contains(logs.String(), marker) {
+			t.Fatal("hub logs exposed a fixture credential")
+		}
 	}
 	_ = hub
+}
+
+func TestR61CFAccessHeadersForHubWebSocketAndStatus(t *testing.T) {
+	root := t.TempDir()
+	nodeEnv := filepath.Join(root, "hub-node.env")
+	operatorEnv := filepath.Join(root, "hub-operator.env")
+	cfEnv := filepath.Join(root, "hub-cf.env")
+	if err := os.WriteFile(nodeEnv, []byte("HUB_MACHINE_ID=node-a\nHUB_TOKEN="+r6NodeAToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(operatorEnv, []byte("HUB_MACHINE_ID=operator\nHUB_TOKEN="+r6OperatorToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfEnv, []byte("CF_ACCESS_CLIENT_ID="+r61CFAccessClientID+"\nCF_ACCESS_CLIENT_SECRET="+r61CFAccessClientSecret+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	websocketHeaders := make(chan http.Header, 1)
+	httpHeaders := make(chan http.Header, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("CF-Access-Client-Id") != r61CFAccessClientID || request.Header.Get("CF-Access-Client-Secret") != r61CFAccessClientSecret {
+			http.Error(writer, "Cloudflare Access service token required", http.StatusForbidden)
+			return
+		}
+		switch request.URL.Path {
+		case "/v1/agent":
+			websocketHeaders <- request.Header.Clone()
+			connection, err := websocket.Accept(writer, request, nil)
+			if err == nil {
+				defer connection.CloseNow()
+				ctx, cancel := context.WithTimeout(request.Context(), time.Second)
+				defer cancel()
+				_, _, _ = connection.Read(ctx)
+			}
+		case "/v1/nodes":
+			if request.Header.Get(hubAuthorizationHeader) != "Bearer "+r6OperatorToken {
+				http.Error(writer, "operator token required", http.StatusUnauthorized)
+				return
+			}
+			httpHeaders <- request.Header.Clone()
+			_ = json.NewEncoder(writer).Encode(struct {
+				Nodes []HubNode `json:"nodes"`
+			}{})
+		default:
+			http.NotFound(writer, request)
+		}
+	}))
+	defer server.Close()
+
+	daemon, code, err := newDaemonForCLI([]string{"--hub-url", r6WSURL(server.URL, ""), "--hub-token-env", nodeEnv, "--hub-cf-env", cfEnv}, daemonCLIDeps{AllowInsecureForTests: true})
+	if daemon == nil || code != ExitOK || err != nil || daemon.cfg.Hub.Client == nil || daemon.cfg.Hub.Client.cfAccessClientID != r61CFAccessClientID || daemon.cfg.Hub.Client.cfAccessSecret != r61CFAccessClientSecret {
+		t.Fatalf("daemon Cloudflare Access flag was not applied: daemon=%v code=%d err=%v", daemon, code, err)
+	}
+	client, err := buildHubDaemonClient(r6WSURL(server.URL, ""), nodeEnv, cfEnv, false, daemonCLIDeps{AllowInsecureForTests: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.Run(ctx)
+	}()
+	select {
+	case headers := <-websocketHeaders:
+		if headers.Get("CF-Access-Client-Id") != r61CFAccessClientID || headers.Get("CF-Access-Client-Secret") != r61CFAccessClientSecret {
+			t.Fatal("hub websocket omitted Cloudflare Access headers")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Cloudflare Access fake server rejected the hub websocket")
+	}
+
+	var stdout, stderr bytes.Buffer
+	if code := runHubStatusCLI([]string{"--hub-url", server.URL, "--hub-token-env", operatorEnv, "--hub-cf-env", cfEnv}, &stdout, &stderr, hubCLIDeps{HTTPClient: server.Client(), AllowInsecureForTests: true}); code != ExitOK || stderr.Len() != 0 {
+		t.Fatalf("hub-status code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	select {
+	case headers := <-httpHeaders:
+		if headers.Get("CF-Access-Client-Id") != r61CFAccessClientID || headers.Get("CF-Access-Client-Secret") != r61CFAccessClientSecret {
+			t.Fatal("hub-status omitted Cloudflare Access headers")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Cloudflare Access fake server rejected hub-status")
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("hub client did not stop")
+	}
+	for _, marker := range []string{r6NodeAToken, r6OperatorToken, r61CFAccessClientID, r61CFAccessClientSecret} {
+		if strings.Contains(stdout.String()+stderr.String(), marker) {
+			t.Fatalf("credential marker %q leaked to CLI output", marker)
+		}
+	}
+}
+
+func TestR61CFAccessEnvUsesMode0600RegularFiles(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub-cf.env")
+	body := []byte("CF_ACCESS_CLIENT_ID=" + r61CFAccessClientID + "\nCF_ACCESS_CLIENT_SECRET=" + r61CFAccessClientSecret + "\n")
+	if err := os.WriteFile(path, body, 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadHubCFAccessEnv(path); err == nil {
+		t.Fatal("non-0600 Cloudflare Access env was accepted")
+	}
+	if err := os.Chmod(path, 0600); err != nil {
+		t.Fatal(err)
+	}
+	env, err := loadHubCFAccessEnv(path)
+	if err != nil || env.ClientID != r61CFAccessClientID || env.ClientSecret != r61CFAccessClientSecret {
+		t.Fatalf("Cloudflare Access env load failed: err=%v", err)
+	}
+	symlink := path + ".symlink"
+	if err := os.Symlink(path, symlink); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := loadHubCFAccessEnv(symlink); err == nil {
+		t.Fatal("symlinked Cloudflare Access env was accepted")
+	}
 }
 
 func TestR6HubPresenceDisconnectAndStaleRecovery(t *testing.T) {

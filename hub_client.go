@@ -26,6 +26,8 @@ type HubClientConfig struct {
 	URL                   string
 	MachineID             string
 	Token                 string
+	CFAccessClientID      string
+	CFAccessClientSecret  string
 	SentinelEnabled       bool
 	PingInterval          time.Duration
 	InitialBackoff        time.Duration
@@ -52,24 +54,26 @@ type hubClientEvent struct {
 // HubClient owns a bounded in-memory event queue. It is intentionally not a
 // durable relay: Supabase remains responsible for offline stage2 delivery.
 type HubClient struct {
-	endpoint        string
-	machineID       string
-	token           string
-	sentinelEnabled bool
-	pingInterval    time.Duration
-	initialBackoff  time.Duration
-	maxBackoff      time.Duration
-	dial            HubDial
-	wait            HubWait
-	warn            func(string)
-	events          chan hubClientEvent
+	endpoint         string
+	machineID        string
+	token            string
+	cfAccessClientID string
+	cfAccessSecret   string
+	sentinelEnabled  bool
+	pingInterval     time.Duration
+	initialBackoff   time.Duration
+	maxBackoff       time.Duration
+	dial             HubDial
+	wait             HubWait
+	warn             func(string)
+	events           chan hubClientEvent
 }
 
 // NewHubClient validates the public base URL and all local inputs without
 // opening a connection. Production accepts only wss URLs; ws is fixture-only.
 func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	endpoint, err := hubWSEndpoint(config.URL, config.AllowInsecureForTests)
-	if err != nil || config.MachineID == hubOperatorMachineID || !machineIDPattern.MatchString(config.MachineID) || !validHubToken(config.Token) {
+	if err != nil || config.MachineID == hubOperatorMachineID || !machineIDPattern.MatchString(config.MachineID) || !validHubToken(config.Token) || (config.CFAccessClientID == "") != (config.CFAccessClientSecret == "") || (config.CFAccessClientID != "" && (!validHubCFAccessValue(config.CFAccessClientID) || !validHubCFAccessValue(config.CFAccessClientSecret))) {
 		return nil, errors.New("hub client configuration is invalid")
 	}
 	if config.PingInterval <= 0 {
@@ -94,10 +98,22 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		config.Warn = func(string) {}
 	}
 	return &HubClient{
-		endpoint: endpoint, machineID: config.MachineID, token: config.Token, sentinelEnabled: config.SentinelEnabled,
+		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, sentinelEnabled: config.SentinelEnabled,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, events: make(chan hubClientEvent, 64),
 	}, nil
+}
+
+func validHubCFAccessValue(value string) bool {
+	if value == "" || len(value) > 512 {
+		return false
+	}
+	for _, character := range value {
+		if character < 0x20 || character == 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func hubWSEndpoint(raw string, allowInsecureForTests bool) (string, error) {
@@ -183,6 +199,10 @@ func (client *HubClient) Run(ctx context.Context) {
 		headers := make(http.Header)
 		headers.Set(hubMachineIDHeader, client.machineID)
 		headers.Set(hubAuthorizationHeader, "Bearer "+client.token)
+		if client.cfAccessClientID != "" {
+			headers.Set("CF-Access-Client-Id", client.cfAccessClientID)
+			headers.Set("CF-Access-Client-Secret", client.cfAccessSecret)
+		}
 		connection, _, err := client.dial(ctx, client.endpoint, &websocket.DialOptions{HTTPHeader: headers})
 		if err == nil {
 			backoff = client.initialBackoff
