@@ -11,7 +11,6 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/mgh3326/panewire/sentinel"
 )
 
 // HubDial and HubWait make retry behavior deterministic in fixture tests. The
@@ -28,7 +27,8 @@ type HubClientConfig struct {
 	Token                 string
 	CFAccessClientID      string
 	CFAccessClientSecret  string
-	SentinelEnabled       bool
+	Checks                []HubCheck
+	Execute               HubCheckExecutor
 	PingInterval          time.Duration
 	InitialBackoff        time.Duration
 	MaxBackoff            time.Duration
@@ -59,7 +59,8 @@ type HubClient struct {
 	token            string
 	cfAccessClientID string
 	cfAccessSecret   string
-	sentinelEnabled  bool
+	checks           []HubCheck
+	execute          HubCheckExecutor
 	pingInterval     time.Duration
 	initialBackoff   time.Duration
 	maxBackoff       time.Duration
@@ -73,7 +74,7 @@ type HubClient struct {
 // opening a connection. Production accepts only wss URLs; ws is fixture-only.
 func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	endpoint, err := hubWSEndpoint(config.URL, config.AllowInsecureForTests)
-	if err != nil || config.MachineID == hubOperatorMachineID || !machineIDPattern.MatchString(config.MachineID) || !validHubToken(config.Token) || (config.CFAccessClientID == "") != (config.CFAccessClientSecret == "") || (config.CFAccessClientID != "" && (!validHubCFAccessValue(config.CFAccessClientID) || !validHubCFAccessValue(config.CFAccessClientSecret))) {
+	if err != nil || config.MachineID == hubOperatorMachineID || !machineIDPattern.MatchString(config.MachineID) || !validHubToken(config.Token) || !validHubChecks(config.Checks) || (config.CFAccessClientID == "") != (config.CFAccessClientSecret == "") || (config.CFAccessClientID != "" && (!validHubCFAccessValue(config.CFAccessClientID) || !validHubCFAccessValue(config.CFAccessClientSecret))) {
 		return nil, errors.New("hub client configuration is invalid")
 	}
 	if config.PingInterval <= 0 {
@@ -97,8 +98,11 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.Warn == nil {
 		config.Warn = func(string) {}
 	}
+	if config.Execute == nil {
+		config.Execute = executeHubCheck
+	}
 	return &HubClient{
-		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, sentinelEnabled: config.SentinelEnabled,
+		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, events: make(chan hubClientEvent, 64),
 	}, nil
@@ -169,27 +173,8 @@ func (client *HubClient) Publish(kind string, payload any) bool {
 	}
 }
 
-// PublishSentinelAlert is gated even if a caller holds a HubClient reference:
-// a node without --sentinel can never emit the sentinel_alert vocabulary.
-func (client *HubClient) PublishSentinelAlert(alert sentinel.Alert) bool {
-	if !client.sentinelEnabled {
-		return false
-	}
-	checks := make(map[string]sentinel.CheckStatus, len(alert.Checks))
-	for name, status := range alert.Checks {
-		checks[name] = status
-	}
-	return client.Publish("sentinel_alert", struct {
-		Recovery  bool                            `json:"recovery"`
-		MachineID string                          `json:"machine_id"`
-		Reason    string                          `json:"reason"`
-		LastSeen  time.Time                       `json:"last_seen"`
-		Checks    map[string]sentinel.CheckStatus `json:"checks"`
-	}{Recovery: alert.Recovery, MachineID: alert.MachineID, Reason: alert.Reason, LastSeen: alert.LastSeen.UTC(), Checks: checks})
-}
-
 // Run reconnects until its context is canceled. Any hub error is isolated to
-// this goroutine: it never propagates into stage1, stage2, or sentinel loops.
+// this goroutine: it never propagates into stage1 or stage2 loops.
 func (client *HubClient) Run(ctx context.Context) {
 	backoff := client.initialBackoff
 	for {
@@ -241,10 +226,10 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 		Type      string `json:"type"`
 		MachineID string `json:"machine_id"`
 		Version   string `json:"version"`
-	}{Type: "hello", MachineID: client.machineID, Version: "panewired-r6"}); err != nil {
+	}{Type: "hello", MachineID: client.machineID, Version: "panewired-r7"}); err != nil {
 		return err
 	}
-	if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: "heartbeat", Payload: json.RawMessage(`{"status":"alive"}`)})); err != nil {
+	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 		return err
 	}
 	readErrors := make(chan error, 1)
@@ -288,11 +273,16 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 			if err := peer.write(ctx, hubOutbound{Type: "ping"}); err != nil {
 				return err
 			}
-			if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: "heartbeat", Payload: json.RawMessage(`{"status":"alive"}`)})); err != nil {
+			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 				return err
 			}
 		}
 	}
+}
+
+func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
+	payload, _ := json.Marshal(hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute)})
+	return hubClientEvent{Kind: "heartbeat", Payload: payload}
 }
 
 func hubClientWireEvent(event hubClientEvent) struct {

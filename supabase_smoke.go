@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -22,7 +23,6 @@ import (
 type smokeDeps struct {
 	HTTPClient            *http.Client
 	AllowInsecureForTests bool
-	NewHintProbe          func() smokeHintProbe
 }
 
 type smokeClientEnv struct {
@@ -36,16 +36,6 @@ type smokeStep struct {
 	Name   string
 	Result string
 	Detail string
-}
-
-// smokeHintProbe is deliberately advisory.  Realtime only wakes polling: a
-// missing hint is not a lost delivery.  A private Broadcast implementation is
-// supplied for live runs, while fixture tests inject a deterministic probe.
-type smokeHintProbe interface {
-	Start(context.Context, smokeClientEnv, string) error
-	Broadcast(context.Context, smokeClientEnv, string, string) error
-	Observed(context.Context, string) (bool, error)
-	Close() error
 }
 
 func runSmokeSupabaseCLI(args []string, stdout, stderr io.Writer, deps smokeDeps) int {
@@ -62,7 +52,7 @@ func runSmokeSupabaseCLI(args []string, stdout, stderr io.Writer, deps smokeDeps
 		return ExitUsage
 	}
 	if !*confirm {
-		fmt.Fprintf(stdout, "DRY-RUN smoke plan: use client env A at %s and client env B at %s; create a temporary private staging/inbox tree below %s; verify publish→claim→materialize→ack→completion, RLS claim denial, publishable-key zero-row select, advisory Realtime hint/poll correction, and ack body erasure. No credentials were read and no network call was made.\n", *clientEnvAPath, *clientEnvBPath, *inboxRoot)
+		fmt.Fprintf(stdout, "DRY-RUN smoke plan: use client env A at %s and client env B at %s; create a temporary private staging/inbox tree below %s; verify publish→claim→materialize→ack→completion, RLS claim denial, publishable-key zero-row select, and ack body erasure. No credentials were read and no network call was made.\n", *clientEnvAPath, *clientEnvBPath, *inboxRoot)
 		return ExitOK
 	}
 
@@ -119,23 +109,6 @@ func runSmokeSupabaseCLI(args []string, stdout, stderr io.Writer, deps smokeDeps
 	}
 	defer bStore.Close()
 
-	probeFactory := deps.NewHintProbe
-	if probeFactory == nil {
-		probeFactory = func() smokeHintProbe { return newRealtimeHintProbe() }
-	}
-	probe := probeFactory()
-	if probe == nil {
-		probe = unavailableHintProbe{}
-	}
-	channel := "panewire:" + b.MachineID
-	hintReady := false
-	if b.PublishableKey != "" {
-		if err := probe.Start(ctx, b, channel); err == nil {
-			hintReady = true
-		}
-	}
-	defer probe.Close()
-
 	body := []byte("# Panewire stage 2 smoke\n\nfixture-safe transport round trip\n")
 	source := filepath.Join(sessionRoot, "a-source.md")
 	if err := os.WriteFile(source, body, 0600); err != nil {
@@ -159,10 +132,6 @@ func runSmokeSupabaseCLI(args []string, stdout, stderr io.Writer, deps smokeDeps
 		return ExitInternal
 	}
 	steps = append(steps, smokePass("A publish", "delivery metadata accepted"))
-
-	if hintReady {
-		_ = probe.Broadcast(ctx, a, channel, record.MessageID)
-	}
 
 	// The explicit foreign destination turns a missing RLS check into an
 	// observable permission error rather than a harmless empty queue.
@@ -208,14 +177,6 @@ func runSmokeSupabaseCLI(args []string, stdout, stderr io.Writer, deps smokeDeps
 		return ExitInternal
 	}
 	steps = append(steps, smokePass("ack body erasure", "transport metadata retained; body erased"))
-
-	if observed, err := probe.Observed(ctx, record.MessageID); err == nil && observed {
-		steps = append(steps, smokePass("Realtime hint", "B recorded message-id hint; claim polling also succeeded"))
-	} else {
-		// Hints are intentionally advisory.  The already-successful PollOnce is
-		// the required correction path for a lost or unavailable broadcast.
-		steps = append(steps, smokePass("Realtime hint", "not observed; claim polling corrected delivery"))
-	}
 
 	completion := []byte("# Panewire stage 2 smoke completion\n")
 	completionSource := filepath.Join(sessionRoot, "b-completion.md")
@@ -314,6 +275,17 @@ func smokeFileMatches(path string, want []byte) bool {
 	}
 	gotSum, wantSum := sha256.Sum256(got), sha256.Sum256(want)
 	return hex.EncodeToString(gotSum[:]) == hex.EncodeToString(wantSum[:])
+}
+
+func urlForSmoke(raw string) (*url.URL, error) {
+	parsed, err := url.Parse(raw)
+	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") {
+		return nil, errors.New("invalid Supabase URL")
+	}
+	parsed.Path = strings.TrimSuffix(parsed.Path, "/")
+	parsed.RawQuery = ""
+	parsed.Fragment = ""
+	return parsed, nil
 }
 
 func unauthenticatedQueueRowCount(ctx context.Context, env smokeClientEnv, deps smokeDeps) (int, error) {

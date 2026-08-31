@@ -96,16 +96,17 @@ invalid policy, or unmatched label is terminal and fail-closed.
 
 R2: prompt target safety, verified submission/uptake, privacy-preserving delivery audit, schema guard, events, inbox watcher, and wait. Live prompt smoke remains prohibited in the fixture test job; use an operator-approved scratch pane separately.
 
-## R6 hub: live presence and event push
+## R7 hub: presence, checks, and notification
 
 `panewire hub` is the optional, always-on live channel for presence and
 operator event push. It is deliberately **not** the durable transport:
 
 - Supabase remains the stage 2 file relay and the offline recipient buffer.
-- Supabase also remains the sentinel heartbeat/alert board.
+- The hub evaluates node presence and local heartbeat checks, and can send
+  optional Telegram incident/recovery notification.
 - The hub is useful only while both sides are connected. Its process restart or
-  outage loses no stage 1/2 or sentinel state, and `panewired` retries it as a
-  non-blocking side channel.
+  outage loses no stage 1/2 state, and `panewired` retries it as a non-blocking
+  side channel.
 
 The hub binds only `127.0.0.1`; expose it solely through a Cloudflare Tunnel
 protected by Cloudflare Access. It has no command-dispatch endpoint. Command

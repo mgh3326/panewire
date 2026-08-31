@@ -17,7 +17,6 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
-	"github.com/mgh3326/panewire/sentinel"
 )
 
 const (
@@ -158,7 +157,7 @@ func TestR61CFAccessHeadersForHubWebSocketAndStatus(t *testing.T) {
 	if daemon == nil || code != ExitOK || err != nil || daemon.cfg.Hub.Client == nil || daemon.cfg.Hub.Client.cfAccessClientID != r61CFAccessClientID || daemon.cfg.Hub.Client.cfAccessSecret != r61CFAccessClientSecret {
 		t.Fatalf("daemon Cloudflare Access flag was not applied: daemon=%v code=%d err=%v", daemon, code, err)
 	}
-	client, err := buildHubDaemonClient(r6WSURL(server.URL, ""), nodeEnv, cfEnv, false, daemonCLIDeps{AllowInsecureForTests: true})
+	client, err := buildHubDaemonClient(r6WSURL(server.URL, ""), nodeEnv, cfEnv, nil, daemonCLIDeps{AllowInsecureForTests: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,9 +388,6 @@ func TestR6HubClientReconnectBackoffWithoutSleep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if client.PublishSentinelAlert(sentinel.Alert{MachineID: "node-b", Reason: "stale"}) {
-		t.Fatal("sentinel alert was queued for a sentinel-disabled client")
-	}
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -501,43 +497,7 @@ func TestR6HubUnavailableDoesNotBlockStage1OrStage2(t *testing.T) {
 	}
 }
 
-func TestR6HubSentinelRelayAndDaemonFlagGate(t *testing.T) {
-	_, server := r6HubServer(t, time.Now, nil)
-	defer server.Close()
-	subscriber := r6DialEvents(t, server.URL)
-	defer subscriber.Close(websocket.StatusNormalClosure, "")
-	client, err := NewHubClient(HubClientConfig{
-		URL:                   r6WSURL(server.URL, ""),
-		MachineID:             "node-a",
-		Token:                 r6NodeAToken,
-		SentinelEnabled:       true,
-		AllowInsecureForTests: true,
-		PingInterval:          time.Hour,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		client.Run(ctx)
-	}()
-	r6ReadHubEvent(t, subscriber, "heartbeat")
-	if !client.PublishSentinelAlert(sentinel.Alert{MachineID: "node-b", Reason: "stale", Checks: map[string]sentinel.CheckStatus{"service": sentinel.CheckFail}}) {
-		t.Fatal("sentinel-enabled client did not queue its alert")
-	}
-	event := r6ReadHubEvent(t, subscriber, "sentinel_alert")
-	if event.MachineID != "node-a" || !strings.Contains(string(event.Payload), "node-b") || !strings.Contains(string(event.Payload), "stale") {
-		t.Fatalf("sentinel event=%+v", event)
-	}
-	cancel()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("sentinel-enabled client did not stop")
-	}
-
+func TestR6HubDaemonFlagGate(t *testing.T) {
 	root := t.TempDir()
 	envPath := filepath.Join(root, "hub-node.env")
 	if err := os.WriteFile(envPath, []byte("HUB_MACHINE_ID=node-a\nHUB_TOKEN="+r6NodeAToken+"\n"), 0600); err != nil {
