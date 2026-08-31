@@ -81,7 +81,7 @@ func renderSentinelStatus(writer io.Writer, localMachineID string, heartbeats []
 	}
 }
 
-func buildSentinelDaemonConfig(clientEnvPath, configPath, telegramEnvPath string, watch bool, heartbeatInterval, watchInterval time.Duration, deps daemonCLIDeps) (SentinelConfig, error) {
+func buildSentinelDaemonConfig(clientEnvPath, configPath, telegramEnvPath string, watch bool, heartbeatInterval, watchInterval time.Duration, deps daemonCLIDeps, onAlert func(sentinel.Alert)) (SentinelConfig, error) {
 	credential, err := loadStage2ClientEnv(clientEnvPath)
 	if err != nil {
 		return SentinelConfig{}, fmt.Errorf("sentinel client env must be a regular mode-0600 file")
@@ -116,7 +116,7 @@ func buildSentinelDaemonConfig(clientEnvPath, configPath, telegramEnvPath string
 	}
 	runner, err := sentinel.NewService(sentinel.ServiceConfig{
 		MachineID: credential.MachineID, Settings: settings, Remote: adapter, Notifier: notifier,
-		Warn: func(message string) { logger.Warn(message) },
+		Warn: func(message string) { logger.Warn(message) }, OnAlert: onAlert,
 	})
 	if err != nil {
 		return SentinelConfig{}, fmt.Errorf("configure sentinel service")

@@ -3,6 +3,7 @@ module github.com/mgh3326/panewire
 go 1.27
 
 require (
+	github.com/coder/websocket v1.8.15
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/google/uuid v1.6.0
 	golang.org/x/sys v0.36.0

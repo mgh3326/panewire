@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mgh3326/panewire/sentinel"
 	"github.com/mgh3326/panewire/stage2/adapters/supabase"
 	"github.com/mgh3326/panewire/stage2/adapters/wrkgate"
 	"github.com/mgh3326/panewire/stage2/core"
@@ -36,6 +37,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if args[0] == "sentinel" {
 		return runSentinelCLI(args[1:], os.Stdout, os.Stderr, sentinelCLIDeps{})
+	}
+	if args[0] == "hub-status" {
+		return runHubStatusCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
 	if args[0] == "prompt" {
 		return runPromptCLI(args[1:], cfg)
@@ -321,6 +325,9 @@ func Main(args []string) int {
 	if len(args) > 0 && args[0] == "daemon" {
 		return runDaemonCLI(args[1:])
 	}
+	if len(args) > 0 && args[0] == "hub" {
+		return runHubCLI(args[1:])
+	}
 	return RunCLI(args, CLIConfig{})
 }
 
@@ -376,6 +383,8 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	sentinelTGEnv := fs.String("sentinel-tg-env", "", "explicit mode-0600 TG_BOT_TOKEN/TG_CHAT_ID env file")
 	sentinelPoll := fs.Duration("sentinel-poll", time.Minute, "sentinel heartbeat poll interval")
 	sentinelWatchPoll := fs.Duration("sentinel-watch-poll", 2*time.Minute, "sentinel peer evaluation poll interval")
+	hubURL := fs.String("hub-url", "", "optional WSS hub base URL")
+	hubTokenEnv := fs.String("hub-token-env", "", "optional mode-0600 HUB_MACHINE_ID/HUB_TOKEN env file")
 	if fs.Parse(args) != nil {
 		return nil, ExitUsage, fmt.Errorf("invalid daemon flags")
 	}
@@ -388,6 +397,18 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		Logging:         LoggingConfig{StorePromptBody: *storeBody},
 		SchemaCommand:   deps.SchemaCommand,
 		Logger:          deps.Logger,
+	}
+	var hubClient *HubClient
+	if hubFlagsProvided(args) {
+		if *hubURL == "" || *hubTokenEnv == "" {
+			return nil, ExitConditionInvalid, fmt.Errorf("hub requires both --hub-url and --hub-token-env")
+		}
+		configuredHub, err := buildHubDaemonClient(*hubURL, *hubTokenEnv, *sentinelEnabled, deps)
+		if err != nil {
+			return nil, ExitConditionInvalid, err
+		}
+		hubClient = configuredHub
+		cfg.Hub = HubDaemonConfig{Enabled: true, Client: hubClient}
 	}
 	if sentinelFlagsProvided(args) && !*sentinelEnabled {
 		return nil, ExitConditionInvalid, fmt.Errorf("sentinel options require --sentinel")
@@ -402,7 +423,11 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		if *sentinelWatch && *sentinelTGEnv == "" {
 			return nil, ExitConditionInvalid, fmt.Errorf("--sentinel-watch requires --sentinel-tg-env")
 		}
-		configuredSentinel, err := buildSentinelDaemonConfig(*stage2ClientEnv, *sentinelConfig, *sentinelTGEnv, *sentinelWatch, *sentinelPoll, *sentinelWatchPoll, deps)
+		var onAlert func(sentinel.Alert)
+		if hubClient != nil {
+			onAlert = func(alert sentinel.Alert) { _ = hubClient.PublishSentinelAlert(alert) }
+		}
+		configuredSentinel, err := buildSentinelDaemonConfig(*stage2ClientEnv, *sentinelConfig, *sentinelTGEnv, *sentinelWatch, *sentinelPoll, *sentinelWatchPoll, deps, onAlert)
 		if err != nil {
 			return nil, ExitConditionInvalid, err
 		}
@@ -473,6 +498,18 @@ func sentinelFlagsProvided(args []string) bool {
 	for _, name := range []string{
 		"sentinel", "sentinel-watch", "sentinel-config", "sentinel-tg-env", "sentinel-poll", "sentinel-watch-poll",
 	} {
+		flagName := "--" + name
+		for _, arg := range args {
+			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hubFlagsProvided(args []string) bool {
+	for _, name := range []string{"hub-url", "hub-token-env"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
