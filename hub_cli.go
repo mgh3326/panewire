@@ -18,6 +18,9 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/coder/websocket"
+	"github.com/coder/websocket/wsjson"
 )
 
 // loadHubAuthFile accepts the intentionally small server-side token format:
@@ -220,6 +223,86 @@ type hubCLIDeps struct {
 	AllowInsecureForTests bool
 }
 
+// runHubEmitCLI sends one display-only note as an authenticated node and
+// exits. It deliberately does not use HubClient: that sidecar owns a retrying
+// heartbeat loop, while this command is an explicit one-shot operation.
+func runHubEmitCLI(args []string, _ io.Writer, stderr io.Writer, deps hubCLIDeps) int {
+	flags := flag.NewFlagSet("panewire hub-emit", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	hubURL := flags.String("hub-url", "", "WSS hub base URL")
+	tokenEnvPath := flags.String("hub-token-env", "", "mode-0600 HUB_MACHINE_ID/HUB_TOKEN env file")
+	cfEnvPath := flags.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
+	text := flags.String("text", "", "note text")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || *hubURL == "" || *tokenEnvPath == "" || !hubEmitTextProvided(flags) {
+		return ExitUsage
+	}
+	if !validHubNoteText(*text) {
+		fmt.Fprintln(stderr, "hub-emit rejected: invalid text")
+		return ExitConditionInvalid
+	}
+	env, err := loadHubTokenEnv(*tokenEnvPath)
+	if err != nil || env.MachineID == hubOperatorMachineID {
+		fmt.Fprintln(stderr, "hub-emit rejected: invalid node token env")
+		return ExitConditionInvalid
+	}
+	var cfAccess hubCFAccessEnv
+	if *cfEnvPath != "" {
+		cfAccess, err = loadHubCFAccessEnv(*cfEnvPath)
+		if err != nil {
+			fmt.Fprintln(stderr, "hub-emit rejected: invalid Cloudflare Access env")
+			return ExitConditionInvalid
+		}
+	}
+	endpoint, err := hubWSEndpoint(*hubURL, deps.AllowInsecureForTests)
+	if err != nil {
+		fmt.Fprintln(stderr, "hub-emit rejected: invalid hub URL")
+		return ExitConditionInvalid
+	}
+	headers := make(http.Header)
+	headers.Set(hubMachineIDHeader, env.MachineID)
+	headers.Set(hubAuthorizationHeader, "Bearer "+env.Token)
+	if cfAccess.ClientID != "" {
+		headers.Set("CF-Access-Client-Id", cfAccess.ClientID)
+		headers.Set("CF-Access-Client-Secret", cfAccess.ClientSecret)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	connection, _, err := websocket.Dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: headers})
+	if err != nil {
+		fmt.Fprintln(stderr, "hub-emit unavailable")
+		return ExitInternal
+	}
+	defer connection.Close(websocket.StatusNormalClosure, "")
+	if err := wsjson.Write(ctx, connection, struct {
+		Type      string `json:"type"`
+		MachineID string `json:"machine_id"`
+		Version   string `json:"version"`
+	}{Type: "hello", MachineID: env.MachineID, Version: "panewire-r9"}); err != nil {
+		fmt.Fprintln(stderr, "hub-emit unavailable")
+		return ExitInternal
+	}
+	payload, err := json.Marshal(hubNotePayload{Text: *text})
+	if err != nil {
+		fmt.Fprintln(stderr, "hub-emit unavailable")
+		return ExitInternal
+	}
+	if err := wsjson.Write(ctx, connection, hubClientWireEvent(hubClientEvent{Kind: "note", Payload: payload})); err != nil {
+		fmt.Fprintln(stderr, "hub-emit unavailable")
+		return ExitInternal
+	}
+	return ExitOK
+}
+
+func hubEmitTextProvided(flags *flag.FlagSet) bool {
+	provided := false
+	flags.Visit(func(item *flag.Flag) {
+		if item.Name == "text" {
+			provided = true
+		}
+	})
+	return provided
+}
+
 func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, deps daemonCLIDeps) (*HubClient, error) {
 	env, err := loadHubTokenEnv(tokenEnvPath)
 	if err != nil || env.MachineID == hubOperatorMachineID {
@@ -336,6 +419,9 @@ func validHubStatusNodes(nodes []HubNode) bool {
 		if !machineIDPattern.MatchString(node.MachineID) || (node.AlertClass != "watched" && node.AlertClass != "presence-only") || (node.State != "connected" && node.State != "stale" && node.State != "disconnected") || node.LastPingMS < 0 || len(node.RemoteMeta) > 8 {
 			return false
 		}
+		if node.LastNote != nil && (!validHubNoteText(node.LastNote.Text) || node.LastNote.ReceivedAt.IsZero()) {
+			return false
+		}
 		for key, value := range node.RemoteMeta {
 			if key == "" || len(key) > 64 || len(value) > 512 {
 				return false
@@ -348,9 +434,28 @@ func validHubStatusNodes(nodes []HubNode) bool {
 func renderHubStatus(writer io.Writer, nodes []HubNode) {
 	rows := append([]HubNode(nil), nodes...)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].MachineID < rows[j].MachineID })
-	fmt.Fprintln(writer, "MACHINE\tCLASS\tSTATE\tCONNECTED_SINCE\tLAST_PING_MS\tREMOTE_META")
+	fmt.Fprintln(writer, "MACHINE\tCLASS\tSTATE\tCONNECTED_SINCE\tLAST_PING_MS\tLAST_NOTE\tREMOTE_META")
 	for _, node := range rows {
 		meta, _ := json.Marshal(node.RemoteMeta)
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%d\t%s\n", node.MachineID, node.AlertClass, node.State, node.ConnectedSince.UTC().Format(time.RFC3339), node.LastPingMS, meta)
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", node.MachineID, node.AlertClass, node.State, node.ConnectedSince.UTC().Format(time.RFC3339), node.LastPingMS, renderHubLastNote(node.LastNote, time.Now().UTC()), meta)
 	}
+}
+
+func renderHubLastNote(note *HubLastNote, now time.Time) string {
+	if note == nil {
+		return "-"
+	}
+	age := now.Sub(note.ReceivedAt)
+	if age < 0 {
+		age = 0
+	}
+	return fmt.Sprintf("%q (%s)", hubNoteSummary(note.Text), age.Round(time.Second))
+}
+
+func hubNoteSummary(text string) string {
+	runes := []rune(text)
+	if len(runes) <= 60 {
+		return text
+	}
+	return string(runes[:60])
 }

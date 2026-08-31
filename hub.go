@@ -51,8 +51,16 @@ type HubNode struct {
 	AlertClass     string            `json:"alert_class"`
 	ConnectedSince time.Time         `json:"connected_since"`
 	LastPingMS     int64             `json:"last_ping_ms"`
+	LastNote       *HubLastNote      `json:"last_note,omitempty"`
 	RemoteMeta     map[string]string `json:"remote_meta"`
 	State          string            `json:"state"`
+}
+
+// HubLastNote is the most recent display-only note received from a node. It
+// is intentionally in-memory only and has no relationship to alert state.
+type HubLastNote struct {
+	Text       string    `json:"text"`
+	ReceivedAt time.Time `json:"received_at"`
 }
 
 type hubNodeRecord struct {
@@ -62,6 +70,7 @@ type hubNodeRecord struct {
 	lastKeepaliveSent time.Time
 	stateSince        time.Time
 	remoteMeta        map[string]string
+	lastNote          *HubLastNote
 	state             string
 	agent             *hubAgent
 }
@@ -254,6 +263,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			h.countUnknownMessage()
 			return
 		}
+		received := h.now().UTC()
 		if message.Kind == "heartbeat" {
 			heartbeat, valid := decodeHubHeartbeatPayload(message.Payload)
 			if !valid {
@@ -262,7 +272,16 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.observeHeartbeatAlerts(machineID, heartbeat)
 		}
-		h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: h.now().UTC()})
+		if message.Kind == "note" {
+			// `note` was reserved before R9 and may be consumed by existing
+			// subscribers with their own payload. Only the canonical text shape
+			// updates the display state; every valid event object still follows
+			// the established broadcast path.
+			if note, valid := decodeHubNotePayload(message.Payload); valid {
+				_ = h.recordNote(machineID, agent, note.Text, received)
+			}
+		}
+		h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: received})
 	default:
 		h.countUnknownMessage()
 	}
@@ -279,6 +298,30 @@ type hubInbound struct {
 type hubHeartbeatPayload struct {
 	Status string                    `json:"status"`
 	Checks map[string]HubCheckStatus `json:"checks"`
+}
+
+type hubNotePayload struct {
+	Text string `json:"text"`
+}
+
+func validHubNoteText(text string) bool {
+	return len(text) <= 512 && !strings.ContainsAny(text, "\r\n")
+}
+
+func decodeHubNotePayload(payload []byte) (hubNotePayload, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil || len(fields) != 1 {
+		return hubNotePayload{}, false
+	}
+	rawText, exists := fields["text"]
+	if !exists {
+		return hubNotePayload{}, false
+	}
+	var note hubNotePayload
+	if json.Unmarshal(rawText, &note.Text) != nil || !validHubNoteText(note.Text) {
+		return hubNotePayload{}, false
+	}
+	return note, true
 }
 
 func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
@@ -421,6 +464,17 @@ func (h *HubServer) touch(machineID string, agent *hubAgent) bool {
 	return true
 }
 
+func (h *HubServer) recordNote(machineID string, agent *hubAgent, text string, received time.Time) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	record := h.nodes[machineID]
+	if record == nil || record.agent != agent {
+		return false
+	}
+	record.lastNote = &HubLastNote{Text: text, ReceivedAt: received}
+	return true
+}
+
 func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -516,8 +570,12 @@ func (h *HubServer) Nodes() []HubNode {
 		for key, value := range record.remoteMeta {
 			remoteMeta[key] = value
 		}
+		var lastNote *HubLastNote
+		if record.lastNote != nil {
+			lastNote = &HubLastNote{Text: record.lastNote.Text, ReceivedAt: record.lastNote.ReceivedAt}
+		}
 		nodes = append(nodes, HubNode{
-			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), RemoteMeta: remoteMeta, State: record.state,
+			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, RemoteMeta: remoteMeta, State: record.state,
 		})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })
