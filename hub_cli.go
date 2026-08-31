@@ -277,7 +277,8 @@ func runHubEmitCLI(args []string, _ io.Writer, stderr io.Writer, deps hubCLIDeps
 		Type      string `json:"type"`
 		MachineID string `json:"machine_id"`
 		Version   string `json:"version"`
-	}{Type: "hello", MachineID: env.MachineID, Version: "panewire-r9"}); err != nil {
+		Transient bool   `json:"transient"`
+	}{Type: "hello", MachineID: env.MachineID, Version: "panewire-r9", Transient: true}); err != nil {
 		fmt.Fprintln(stderr, "hub-emit unavailable")
 		return ExitInternal
 	}

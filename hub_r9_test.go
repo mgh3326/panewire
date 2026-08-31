@@ -16,7 +16,7 @@ import (
 	"github.com/coder/websocket/wsjson"
 )
 
-func TestR9HubEmitUpdatesPresenceOnlyNodeAndBroadcastsWithoutAlert(t *testing.T) {
+func TestR9HubEmitIsTransientAndRetainsNoteAcrossReconnect(t *testing.T) {
 	clock := time.Date(2026, 9, 1, 3, 40, 0, 0, time.UTC)
 	notifier := &r9Notifier{}
 	hub, err := NewHubServer(HubServerConfig{
@@ -34,6 +34,14 @@ func TestR9HubEmitUpdatesPresenceOnlyNodeAndBroadcastsWithoutAlert(t *testing.T)
 	}
 	server := httptest.NewServer(hub.Handler())
 	defer server.Close()
+
+	daemon := r6DialAgent(t, server.URL, "node-b", r6NodeBToken)
+	defer daemon.Close(websocket.StatusNormalClosure, "")
+	r6Write(t, daemon, map[string]any{"type": "hello", "machine_id": "node-b", "version": "daemon-r9"})
+	r6Eventually(t, "daemon presence", func() bool {
+		return r6NodeState(r6Nodes(t, server), "node-b") == "connected"
+	})
+	before := r9Node(t, hub.Nodes(), "node-b")
 
 	root := t.TempDir()
 	nodeEnv := filepath.Join(root, "node.env")
@@ -72,15 +80,34 @@ func TestR9HubEmitUpdatesPresenceOnlyNodeAndBroadcastsWithoutAlert(t *testing.T)
 		t.Fatalf("unexpected note payload: %s err=%v", event.Payload, err)
 	}
 
-	nodes := hub.Nodes()
-	if len(nodes) != 1 || nodes[0].MachineID != "node-b" || nodes[0].AlertClass != "presence-only" || nodes[0].LastNote == nil || nodes[0].LastNote.Text != payload.Text || nodes[0].LastNote.ReceivedAt != clock {
-		t.Fatalf("presence-only last note was not retained: %+v", nodes)
+	afterEmit := r9Node(t, hub.Nodes(), "node-b")
+	if afterEmit.ConnectedSince != before.ConnectedSince || afterEmit.RemoteMeta["remote_addr"] != before.RemoteMeta["remote_addr"] || afterEmit.State != "connected" {
+		t.Fatalf("transient emit changed daemon presence: before=%+v after=%+v", before, afterEmit)
+	}
+	if afterEmit.AlertClass != "presence-only" || afterEmit.LastNote == nil || afterEmit.LastNote.Text != payload.Text || afterEmit.LastNote.ReceivedAt != clock {
+		t.Fatalf("presence-only last note was not retained: %+v", afterEmit)
 	}
 	if got := notifier.Alerts(); len(got) != 0 {
 		t.Fatalf("note changed alert/TG state: %+v", got)
 	}
 	if len(hub.alerts) != 0 {
 		t.Fatalf("note created alert state: %+v", hub.alerts)
+	}
+	if err := daemon.Close(websocket.StatusNormalClosure, "reconnect fixture"); err != nil {
+		t.Fatal(err)
+	}
+	r6Eventually(t, "daemon disconnect", func() bool {
+		return r6NodeState(r6Nodes(t, server), "node-b") == "disconnected"
+	})
+	reconnected := r6DialAgent(t, server.URL, "node-b", r6NodeBToken)
+	defer reconnected.Close(websocket.StatusNormalClosure, "")
+	r6Write(t, reconnected, map[string]any{"type": "hello", "machine_id": "node-b", "version": "daemon-r9-reconnect"})
+	r6Eventually(t, "daemon reconnect", func() bool {
+		return r6NodeState(r6Nodes(t, server), "node-b") == "connected"
+	})
+	afterReconnect := r9Node(t, hub.Nodes(), "node-b")
+	if afterReconnect.LastNote == nil || afterReconnect.LastNote.Text != payload.Text || afterReconnect.LastNote.ReceivedAt != clock {
+		t.Fatalf("note was lost across daemon reconnect: %+v", afterReconnect)
 	}
 
 	stdout.Reset()
@@ -91,6 +118,17 @@ func TestR9HubEmitUpdatesPresenceOnlyNodeAndBroadcastsWithoutAlert(t *testing.T)
 	if got := stdout.String(); !strings.Contains(got, "LAST_NOTE") || !strings.Contains(got, `"completed: evidence recorded"`) {
 		t.Fatalf("hub-status omitted last note: %q", got)
 	}
+}
+
+func r9Node(t *testing.T, nodes []HubNode, machineID string) HubNode {
+	t.Helper()
+	for _, node := range nodes {
+		if node.MachineID == machineID {
+			return node
+		}
+	}
+	t.Fatalf("node %q not found in %+v", machineID, nodes)
+	return HubNode{}
 }
 
 func TestR9HubEmitRejects513ByteText(t *testing.T) {
