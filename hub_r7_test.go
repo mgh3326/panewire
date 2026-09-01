@@ -97,7 +97,7 @@ func TestR7HubCheckAlertsArePerCheckAndFlapSuppressed(t *testing.T) {
 		t.Fatal(err)
 	}
 	agent := &hubAgent{}
-	hub.connect("node-a", "r7-a", "fixture", agent)
+	hub.connect("node-a", "r7-a", "fixture", agent, false)
 
 	r7Heartbeat(t, hub, agent, HubCheckFail)
 	r7Heartbeat(t, hub, agent, HubCheckOK) // one failed observation must not alert

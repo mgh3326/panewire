@@ -39,7 +39,7 @@ func TestR8PresenceOnlyNodeSuppressesPresenceAndCheckAlerts(t *testing.T) {
 	}
 
 	agent := &hubAgent{}
-	hub.connect("node-b", "r8-b", "fixture", agent)
+	hub.connect("node-b", "r8-b", "fixture", agent, false)
 	hub.disconnect("node-b", agent)
 	clock = clock.Add(defaultHubGracePeriod)
 	hub.Sweep() // first post-grace observation
@@ -50,7 +50,7 @@ func TestR8PresenceOnlyNodeSuppressesPresenceAndCheckAlerts(t *testing.T) {
 	}
 
 	agent = &hubAgent{}
-	hub.connect("node-b", "r8-b", "fixture", agent)
+	hub.connect("node-b", "r8-b", "fixture", agent, false)
 	r8Heartbeat(t, hub, "node-b", agent, HubCheckFail)
 	r8Heartbeat(t, hub, "node-b", agent, HubCheckFail)
 	if got := capture.Messages(); len(got) != 0 {

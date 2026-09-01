@@ -70,9 +70,10 @@ Endpoints are:
 | `WS /v1/events` | operator bearer token | all-node event subscription |
 
 The node list includes `machine_id`, `alert_class` (`watched` or
-`presence-only`), `connected_since`, `last_ping_ms` (the non-negative elapsed
-milliseconds since the last node keepalive), and `remote_meta` (the protocol
-version and peer address), plus `state`:
+`presence-only`), `accepting` (the node's self-reported paper/standby-job
+readiness, false when omitted), `connected_since`, `last_ping_ms` (the
+non-negative elapsed milliseconds since the last node keepalive), and
+`remote_meta` (the protocol version and peer address), plus `state`:
 `connected`, `stale`, or `disconnected`. A WebSocket close marks a node
 `disconnected` immediately. The hub marks a live connection `stale` after 30
 seconds with no application keepalive and restores `connected` after a new
@@ -94,11 +95,14 @@ the machine ID, reason, and check name.
 The WebSocket envelope is closed JSON. A node first sends:
 
 ```json
-{"type":"hello","machine_id":"mac-a","version":"panewired-r7"}
+{"type":"hello","machine_id":"mac-a","version":"panewired-r10"}
 ```
 
 One-shot event publishers may add `"transient":true` to hello. A transient
 session can send events but never changes the machine's presence record.
+An ordinary daemon may instead add `"accepting":true` to self-report that it
+can receive paper or standby jobs; absence means false. Changing this value in
+v1 requires reconnecting so the daemon sends hello again.
 
 It can then send `{"type":"ping"}` and events:
 
@@ -112,6 +116,13 @@ and accepts the node's `pong` response. Unknown fields, malformed envelopes,
 and unknown event kinds are ignored while an internal counter advances; they
 do not disconnect an authenticated node. Authentication failures are rejected
 before the WebSocket handshake.
+
+After the existing watched-node presence grace period and second consecutive
+observation confirm an incident, `/v1/events` emits exactly
+`{"type":"failover","machine":"mac-a","phase":"down"}`. The symmetric
+recovery confirmation emits the same fixed shape with `"phase":"up"`.
+Presence-only nodes and heartbeat-check alerts never emit this event. It has no
+payload, command, SSH, or credential field.
 
 `panewired` sends a heartbeat event after connecting and alongside its
 periodic ping. The heartbeat accepts only `status:"alive"` and a map of local
@@ -134,6 +145,7 @@ panewire daemon \
   --hub-url wss://hub.robinco.dev \
   --hub-token-env /Users/you/.config/panewire/hub-node.env \
   --hub-cf-env /Users/you/.config/panewire/hub-cf-access.env \
+  --hub-accepting \
   --checks-config /Users/you/.config/panewire/checks.json
 ```
 
@@ -178,6 +190,11 @@ panewire hub-status \
 
 `hub-status` uses the same optional Access env format and sends its two values
 only as headers on the HTTPS request.
+
+`--hub-accepting` is optional and defaults to false. It is only a node
+self-report shown by `/v1/nodes` and `hub-status`; it does not create a job
+API or mutate a running connection. Remove or add it and restart/reconnect the
+daemon to change the value.
 
 ## NCP deployment checklist
 
