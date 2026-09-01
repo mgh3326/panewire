@@ -380,9 +380,23 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	hubTokenEnv := fs.String("hub-token-env", "", "optional mode-0600 HUB_MACHINE_ID/HUB_TOKEN env file")
 	hubCFEnv := fs.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
 	hubAccepting := fs.Bool("hub-accepting", false, "advertise readiness for paper or standby jobs to the hub")
+	failoverWakeOn := fs.String("failover-wake-on", "", "fixed failover machine ID that may receive one Wake-on-LAN packet")
+	failoverWakeMAC := fs.String("failover-wake-mac", "", "fixed Wake-on-LAN MAC address for --failover-wake-on")
 	checksConfig := fs.String("checks-config", "", "explicit local hub check JSON configuration")
 	if fs.Parse(args) != nil {
 		return nil, ExitUsage, fmt.Errorf("invalid daemon flags")
+	}
+	wakeOnSet, wakeMACSet := false, false
+	fs.Visit(func(item *flag.Flag) {
+		switch item.Name {
+		case "failover-wake-on":
+			wakeOnSet = true
+		case "failover-wake-mac":
+			wakeMACSet = true
+		}
+	})
+	if wakeOnSet != wakeMACSet || (wakeOnSet && (*failoverWakeOn == "" || *failoverWakeMAC == "")) {
+		return nil, ExitConditionInvalid, fmt.Errorf("failover wake requires both --failover-wake-on and --failover-wake-mac")
 	}
 	cfg := Config{
 		SocketPath:      *socket,
@@ -407,7 +421,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 			}
 			checks = loadedChecks
 		}
-		configuredHub, err := buildHubDaemonClient(*hubURL, *hubTokenEnv, *hubCFEnv, checks, *hubAccepting, deps)
+		configuredHub, err := buildHubDaemonClient(*hubURL, *hubTokenEnv, *hubCFEnv, checks, *hubAccepting, *failoverWakeOn, *failoverWakeMAC, deps)
 		if err != nil {
 			return nil, ExitConditionInvalid, err
 		}
@@ -457,7 +471,7 @@ func stage2FlagsProvided(args []string) bool {
 }
 
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "checks-config"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "failover-wake-on", "failover-wake-mac", "checks-config"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
