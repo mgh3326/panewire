@@ -113,7 +113,7 @@ protected by Cloudflare Access. It has no command-dispatch endpoint. Command
 dispatch requires a separately reviewed allowlist policy in a later round.
 
 By default every authenticated node is watched for presence and heartbeat-check
-alerts. Pass `--alert-nodes machine-a,server-b` on the hub to limit alerts to
+alerts. Pass `--alert-nodes machine-a,machine-b` on the hub to limit alerts to
 those authenticated machine IDs; other nodes remain visible as
 `presence-only` in `hub-status` and `/v1/nodes`.
 

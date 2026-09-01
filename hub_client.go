@@ -7,6 +7,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -307,9 +308,10 @@ type hubClientConnection struct {
 }
 
 type hubOutboundMessage struct {
-	Type    string
-	Machine string
-	Phase   string
+	Type      string
+	Machine   string
+	Phase     string
+	EmittedAt time.Time
 }
 
 func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) error {
@@ -417,13 +419,29 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 			return hubOutboundMessage{}, false
 		}
 	case "failover":
-		if len(fields) != 3 || json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["phase"], &message.Phase) != nil || !machineIDPattern.MatchString(message.Machine) || !validHubFailoverPhase(message.Phase) {
+		var emittedAt string
+		if len(fields) != 4 || json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["phase"], &message.Phase) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &message.EmittedAt) || !machineIDPattern.MatchString(message.Machine) || !validHubFailoverPhase(message.Phase) {
 			return hubOutboundMessage{}, false
 		}
 	default:
 		return hubOutboundMessage{}, false
 	}
 	return message, true
+}
+
+// parseHubFailoverEmittedAt accepts only the canonical RFC3339 UTC rendering
+// produced by the hub. Its value is audit metadata, never a wake eligibility
+// input.
+func parseHubFailoverEmittedAt(value string, destination *time.Time) bool {
+	if destination == nil || !strings.HasSuffix(value, "Z") {
+		return false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, value)
+	if err != nil || parsed.IsZero() || parsed.Format(time.RFC3339Nano) != value {
+		return false
+	}
+	*destination = parsed.UTC()
+	return true
 }
 
 func (client *HubClient) handleHubFailover(ctx context.Context, message hubOutboundMessage) {

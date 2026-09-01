@@ -20,11 +20,13 @@ const (
 
 // hubFailoverEvent is emitted only by the server after the established
 // watched-node presence state machine confirms an incident or recovery.
-// It deliberately has no arbitrary payload field.
+// Its closed vocabulary is type, machine, phase, and emitted_at; it deliberately
+// has no arbitrary payload field.
 type hubFailoverEvent struct {
-	Type    string `json:"type"`
-	Machine string `json:"machine"`
-	Phase   string `json:"phase"`
+	Type      string    `json:"type"`
+	Machine   string    `json:"machine"`
+	Phase     string    `json:"phase"`
+	EmittedAt time.Time `json:"emitted_at"`
 }
 
 func validHubFailoverPhase(phase string) bool {
@@ -88,10 +90,10 @@ func (h *HubServer) observeNodeAlertLocked(now time.Time, record *hubNodeRecord)
 		return notifications, nil
 	}
 	if !wasActive && state.active {
-		return notifications, []hubFailoverEvent{{Type: "failover", Machine: record.machineID, Phase: hubFailoverPhaseDown}}
+		return notifications, []hubFailoverEvent{{Type: "failover", Machine: record.machineID, Phase: hubFailoverPhaseDown, EmittedAt: now.UTC()}}
 	}
 	if wasActive && !state.active {
-		return notifications, []hubFailoverEvent{{Type: "failover", Machine: record.machineID, Phase: hubFailoverPhaseUp}}
+		return notifications, []hubFailoverEvent{{Type: "failover", Machine: record.machineID, Phase: hubFailoverPhaseUp, EmittedAt: now.UTC()}}
 	}
 	return notifications, nil
 }
