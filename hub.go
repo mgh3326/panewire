@@ -42,6 +42,7 @@ type HubServerConfig struct {
 	GracePeriod       time.Duration
 	Notifier          HubNotifier
 	Logger            *slog.Logger
+	BurstPolicyPath   string
 }
 
 // HubNode is the deliberately small presence view returned to authenticated
@@ -81,6 +82,7 @@ type hubAgent struct {
 	writeMu   sync.Mutex
 	transient bool
 	failovers chan hubFailoverEvent
+	bursts    chan hubBurstEvent
 }
 
 type hubEvent struct {
@@ -118,12 +120,16 @@ type HubServer struct {
 	notifier          HubNotifier
 	logger            *slog.Logger
 
-	mu              sync.Mutex
-	nodes           map[string]*hubNodeRecord
-	lastNotes       map[string]*HubLastNote
-	subscribers     map[*hubEventSubscriber]struct{}
-	alerts          map[string]*hubAlertState
-	unknownMessages uint64
+	mu                 sync.Mutex
+	nodes              map[string]*hubNodeRecord
+	lastNotes          map[string]*HubLastNote
+	subscribers        map[*hubEventSubscriber]struct{}
+	alerts             map[string]*hubAlertState
+	burstPolicyPath    string
+	burstPolicy        BurstPolicy
+	burstPolicyModTime time.Time
+	burstState         *hubBurstState
+	unknownMessages    uint64
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -167,13 +173,22 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.GracePeriod <= 0 {
 		config.GracePeriod = defaultHubGracePeriod
 	}
+	var burstPolicy BurstPolicy
+	var burstPolicyModTime time.Time
+	if config.BurstPolicyPath != "" {
+		policy, modTime, err := LoadBurstPolicy(config.BurstPolicyPath)
+		if err != nil {
+			return nil, errors.New("hub burst policy is invalid")
+		}
+		burstPolicy, burstPolicyModTime = policy, modTime
+	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
 	return &HubServer{
 		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
-		gracePeriod: config.GracePeriod, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState),
+		gracePeriod: config.GracePeriod, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{},
 	}, nil
 }
 
@@ -201,9 +216,29 @@ func (h *HubServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.handleHealthz)
 	mux.HandleFunc("GET /v1/nodes", h.handleNodes)
+	mux.HandleFunc("GET /v1/burst", h.handleBurst)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	return mux
+}
+
+func (h *HubServer) handleBurst(writer http.ResponseWriter, request *http.Request) {
+	if !h.authorizeOperator(request) {
+		hubUnauthorized(writer)
+		return
+	}
+	policy, state, configured := h.burstStatus()
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(struct {
+		Configured  bool        `json:"configured"`
+		Policy      BurstPolicy `json:"policy,omitempty"`
+		SourceRuns  int         `json:"source_runs"`
+		IdleSince   time.Time   `json:"idle_since,omitempty"`
+		LastUp      time.Time   `json:"last_up,omitempty"`
+		LastDown    time.Time   `json:"last_down,omitempty"`
+		UpCompleted bool        `json:"up_completed"`
+		LastLoad    HubHostLoad `json:"last_load"`
+	}{configured, policy, state.SourceRuns, state.IdleSince, state.LastUp, state.LastDown, state.UpCompleted, state.LastLoad})
 }
 
 func (h *HubServer) handleHealthz(writer http.ResponseWriter, _ *http.Request) {
@@ -233,11 +268,12 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64)}
+	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
 	go agent.writeFailovers(agentContext)
+	go agent.writeBursts(agentContext)
 	for {
 		messageType, payload, err := connection.Read(request.Context())
 		if err != nil {
@@ -298,6 +334,14 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				return
 			}
 			h.observeHeartbeatAlerts(machineID, heartbeat)
+			if heartbeat.HostLoad != nil {
+				h.mu.Lock()
+				bursts := h.observeBurstLocked(received, machineID, *heartbeat.HostLoad)
+				h.mu.Unlock()
+				for _, burst := range bursts {
+					h.dispatchBurst(burst)
+				}
+			}
 		}
 		if message.Kind == "note" {
 			// `note` was reserved before R9 and may be consumed by existing
@@ -325,8 +369,9 @@ type hubInbound struct {
 }
 
 type hubHeartbeatPayload struct {
-	Status string                    `json:"status"`
-	Checks map[string]HubCheckStatus `json:"checks"`
+	Status   string                    `json:"status"`
+	Checks   map[string]HubCheckStatus `json:"checks"`
+	HostLoad *HubHostLoad              `json:"host_load,omitempty"`
 }
 
 type hubNotePayload struct {
@@ -359,7 +404,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" {
+		if name != "status" && name != "checks" && name != "host_load" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -376,6 +421,22 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		if json.Unmarshal(rawChecks, &heartbeat.Checks) != nil || heartbeat.Checks == nil {
 			return hubHeartbeatPayload{}, false
 		}
+	}
+	if rawLoad, exists := fields["host_load"]; exists {
+		var loadFields map[string]json.RawMessage
+		if json.Unmarshal(rawLoad, &loadFields) != nil || len(loadFields) != 4 {
+			return hubHeartbeatPayload{}, false
+		}
+		for _, name := range []string{"load1", "load5", "swap_used_gb", "worker_procs"} {
+			if _, exists := loadFields[name]; !exists {
+				return hubHeartbeatPayload{}, false
+			}
+		}
+		var load HubHostLoad
+		if json.Unmarshal(rawLoad, &load) != nil || !load.valid() {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.HostLoad = &load
 	}
 	for name, status := range heartbeat.Checks {
 		if !hubCheckNamePattern.MatchString(name) || !status.valid() {
@@ -477,6 +538,9 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now,
 		remoteMeta: map[string]string{"version": version, "remote_addr": remoteAddr},
 		state:      "connected", stateSince: now, agent: agent,
+	}
+	if h.burstPolicyPath != "" && machineID == h.burstPolicy.TargetMachine && accepting && !h.burstState.LastUp.IsZero() {
+		h.burstState.UpCompleted = true
 	}
 	h.mu.Unlock()
 	if previous != nil && previous != agent {
@@ -713,6 +777,32 @@ func (agent *hubAgent) writeFailovers(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case event := <-agent.failovers:
+			if err := agent.writeJSON(event); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (agent *hubAgent) queueBurst(event hubBurstEvent) {
+	if agent == nil || agent.bursts == nil {
+		return
+	}
+	select {
+	case agent.bursts <- event:
+	default:
+		if agent.conn != nil {
+			_ = agent.conn.Close(websocket.StatusPolicyViolation, "slow")
+		}
+	}
+}
+
+func (agent *hubAgent) writeBursts(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-agent.bursts:
 			if err := agent.writeJSON(event); err != nil {
 				return
 			}

@@ -80,6 +80,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	tgEnvPath := flags.String("hub-tg-env", "", "optional mode-0600 TG_BOT_TOKEN/TG_CHAT_ID env file")
 	gracePeriod := flags.Duration("hub-grace", defaultHubGracePeriod, "continuous disconnected/stale grace period")
 	alertNodesCSV := flags.String("alert-nodes", "", "comma-separated authenticated machine IDs to alert on")
+	burstPolicyPath := flags.String("burst-policy", "", "explicit regular JSON burst policy file (hot-reloaded)")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return nil, "", ExitUsage, errors.New("invalid hub flags")
 	}
@@ -123,7 +124,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub Telegram configuration is invalid")
 		}
 	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger})
+	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}
@@ -305,6 +306,10 @@ func hubEmitTextProvided(flags *flag.FlagSet) bool {
 }
 
 func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, accepting bool, failoverWakeOn, failoverWakeMAC string, deps daemonCLIDeps) (*HubClient, error) {
+	return buildHubDaemonClientWithBurst(rawURL, tokenEnvPath, cfEnvPath, checks, accepting, failoverWakeOn, failoverWakeMAC, "", false, deps)
+}
+
+func buildHubDaemonClientWithBurst(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, accepting bool, failoverWakeOn, failoverWakeMAC, burstWakeMAC string, burstPoweroffAllowed bool, deps daemonCLIDeps) (*HubClient, error) {
 	env, err := loadHubTokenEnv(tokenEnvPath)
 	if err != nil || env.MachineID == hubOperatorMachineID {
 		return nil, errors.New("hub token env must contain a node credential")
@@ -322,7 +327,7 @@ func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCh
 	}
 	client, err := NewHubClient(HubClientConfig{
 		URL: rawURL, MachineID: env.MachineID, Token: env.Token, CFAccessClientID: cfAccess.ClientID, CFAccessClientSecret: cfAccess.ClientSecret, Accepting: accepting,
-		FailoverWakeOn: failoverWakeOn, FailoverWakeMAC: failoverWakeMAC, Checks: checks,
+		FailoverWakeOn: failoverWakeOn, FailoverWakeMAC: failoverWakeMAC, BurstWakeMAC: burstWakeMAC, BurstPoweroffAllowed: burstPoweroffAllowed, Checks: checks,
 		AllowInsecureForTests: deps.AllowInsecureForTests,
 		Warn:                  func(message string) { logger.Warn(message) },
 	})
