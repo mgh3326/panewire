@@ -99,7 +99,7 @@ type hubEventSubscriber struct {
 
 // hubSubscriptionMessage keeps the operator event stream's vocabulary
 // explicit. Agent events retain their existing envelope; server-originated
-// failover messages have their own fixed three-field shape.
+// failover messages have their own fixed four-field shape.
 type hubSubscriptionMessage struct {
 	event    *hubEvent
 	failover *hubFailoverEvent

@@ -33,7 +33,7 @@ panewire hub \
   --hub-auth /etc/panewire/hub-auth.env \
   --hub-tg-env /etc/panewire/hub-tg.env \
   --hub-grace 2m \
-  --alert-nodes mac-a,server-b
+  --alert-nodes machine-a,machine-b
 ```
 
 `--hub-auth` is an explicit regular file with mode `0600` (not a symlink). Its
@@ -41,8 +41,8 @@ only non-comment entries are static node tokens:
 
 ```sh
 HUB_TOKEN_operator=replace-with-operator-token
-HUB_TOKEN_mac-a=replace-with-mac-a-token
-HUB_TOKEN_mac-b=replace-with-mac-b-token
+HUB_TOKEN_machine-a=replace-with-machine-a-token
+HUB_TOKEN_machine-b=replace-with-machine-b-token
 ```
 
 `operator` is reserved: `HUB_TOKEN_operator` authenticates `/v1/nodes`,
@@ -95,7 +95,7 @@ the machine ID, reason, and check name.
 The WebSocket envelope is closed JSON. A node first sends:
 
 ```json
-{"type":"hello","machine_id":"mac-a","version":"panewired-r10"}
+{"type":"hello","machine_id":"machine-a","version":"panewired-r10"}
 ```
 
 One-shot event publishers may add `"transient":true` to hello. A transient
@@ -119,10 +119,12 @@ before the WebSocket handshake.
 
 After the existing watched-node presence grace period and second consecutive
 observation confirm an incident, `/v1/events` emits exactly
-`{"type":"failover","machine":"mac-a","phase":"down"}`. The symmetric
-recovery confirmation emits the same fixed shape with `"phase":"up"`.
+`{"type":"failover","machine":"machine-a","phase":"down","emitted_at":"2026-09-01T08:00:04Z"}`.
+The symmetric recovery confirmation emits the same fixed shape with `"phase":"up"`.
 Presence-only nodes and heartbeat-check alerts never emit this event. It has no
-payload, command, SSH, or credential field.
+payload, command, SSH, or credential field. `machine` is the global
+`machine_id`; `emitted_at` is the hub's RFC3339 UTC emission timestamp. It is
+audit metadata only and never suppresses Wake-on-LAN based on event age.
 
 `panewired` sends a heartbeat event after connecting and alongside its
 periodic ping. The heartbeat accepts only `status:"alive"` and a map of local
@@ -133,8 +135,8 @@ check names to `ok` or `fail`; argv and command output never leave the node.
 Node credentials also require an explicit mode-`0600` regular file:
 
 ```sh
-HUB_MACHINE_ID=mac-a
-HUB_TOKEN=replace-with-mac-a-token
+HUB_MACHINE_ID=machine-a
+HUB_TOKEN=replace-with-machine-a-token
 ```
 
 Hub connectivity is off by default. Add these options to the existing node
@@ -205,7 +207,7 @@ Wake-on-LAN target. Add both flags to that RPi's existing daemon invocation:
 panewire daemon \
   --hub-url wss://hub.robinco.dev \
   --hub-token-env /etc/panewire/rpi-hub-node.env \
-  --failover-wake-on mac-a \
+  --failover-wake-on machine-a \
   --failover-wake-mac 02:1a:2b:3c:4d:5e
 ```
 
@@ -228,7 +230,7 @@ execution facility.
    notification is desired. Install a `panewire-hub.service` unit whose
    `ExecStart` is equivalent to `panewire hub --listen 127.0.0.1:9377
    --hub-auth /etc/panewire/hub-auth.env --hub-tg-env
-   /etc/panewire/hub-tg.env --hub-grace 2m --alert-nodes mac-a,server-b`.
+   /etc/panewire/hub-tg.env --hub-grace 2m --alert-nodes machine-a,machine-b`.
    Run it as a dedicated unprivileged service account with `Restart=always`.
    Verify locally with `curl http://127.0.0.1:9377/healthz`.
 3. Configure `cloudflared` on that same NCP host to map the hostname

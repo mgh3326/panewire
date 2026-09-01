@@ -92,12 +92,13 @@ func TestHubR105FailoverWakeSendsOneMagicPacketAndRearms(t *testing.T) {
 		if err != nil || hello.Type != "hello" || hello.MachineID != "node-b" {
 			return
 		}
+		emittedAt := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
 		select {
 		case <-helloSeen:
 		default:
 			close(helloSeen)
 		}
-		if wsjson.Write(request.Context(), connection, hubFailoverEvent{Type: "failover", Machine: "node-b", Phase: hubFailoverPhaseDown}) != nil {
+		if wsjson.Write(request.Context(), connection, hubFailoverEvent{Type: "failover", Machine: "node-b", Phase: hubFailoverPhaseDown, EmittedAt: emittedAt}) != nil {
 			return
 		}
 		select {
@@ -105,7 +106,7 @@ func TestHubR105FailoverWakeSendsOneMagicPacketAndRearms(t *testing.T) {
 		case <-request.Context().Done():
 			return
 		}
-		down := hubFailoverEvent{Type: "failover", Machine: "node-a", Phase: hubFailoverPhaseDown}
+		down := hubFailoverEvent{Type: "failover", Machine: "node-a", Phase: hubFailoverPhaseDown, EmittedAt: emittedAt}
 		if wsjson.Write(request.Context(), connection, down) != nil || wsjson.Write(request.Context(), connection, down) != nil {
 			return
 		}
@@ -114,7 +115,7 @@ func TestHubR105FailoverWakeSendsOneMagicPacketAndRearms(t *testing.T) {
 		case <-request.Context().Done():
 			return
 		}
-		if wsjson.Write(request.Context(), connection, hubFailoverEvent{Type: "failover", Machine: "node-a", Phase: hubFailoverPhaseUp}) != nil || wsjson.Write(request.Context(), connection, down) != nil {
+		if wsjson.Write(request.Context(), connection, hubFailoverEvent{Type: "failover", Machine: "node-a", Phase: hubFailoverPhaseUp, EmittedAt: emittedAt}) != nil || wsjson.Write(request.Context(), connection, down) != nil {
 			return
 		}
 		<-request.Context().Done()
@@ -169,8 +170,30 @@ func TestHubR105FailoverWakeSendsOneMagicPacketAndRearms(t *testing.T) {
 }
 
 func TestHubR105FailoverParserRejectsPayloadCarrier(t *testing.T) {
-	if _, ok := parseHubOutbound([]byte(`{"type":"failover","machine":"node-a","phase":"down","payload":{"argv":["sh"]}}`)); ok {
+	if _, ok := parseHubOutbound([]byte(`{"type":"failover","machine":"node-a","phase":"down","emitted_at":"2026-09-01T09:00:00Z","payload":{"argv":["sh"]}}`)); ok {
 		t.Fatal("failover payload carrier was accepted")
+	}
+}
+
+func TestHubR11FailoverEmittedAtContract(t *testing.T) {
+	emittedAt := time.Date(2026, 9, 1, 9, 0, 0, 123456789, time.UTC)
+	wire, err := json.Marshal(hubFailoverEvent{Type: "failover", Machine: "node-a", Phase: hubFailoverPhaseDown, EmittedAt: emittedAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, ok := parseHubOutbound(wire)
+	if !ok || !parsed.EmittedAt.Equal(emittedAt) || parsed.EmittedAt.Location() != time.UTC {
+		t.Fatalf("failover emitted_at did not round-trip: parsed=%+v ok=%t", parsed, ok)
+	}
+	if _, ok := parseHubOutbound([]byte(`{"type":"failover","machine":"node-a","phase":"down"}`)); ok {
+		t.Fatal("failover without emitted_at was accepted")
+	}
+	zeroWire, err := json.Marshal(hubFailoverEvent{Type: "failover", Machine: "node-a", Phase: hubFailoverPhaseDown})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := parseHubOutbound(zeroWire); ok {
+		t.Fatal("failover with zero emitted_at was accepted")
 	}
 }
 
@@ -229,11 +252,12 @@ func r105ReadAgentFailover(t *testing.T, connection *websocket.Conn) r10Failover
 		if json.Unmarshal(fields["type"], &eventType) == nil && eventType == "ping" {
 			continue
 		}
-		if len(fields) != 3 {
+		if len(fields) != 4 {
 			t.Fatalf("agent failover event has non-closed shape: %v", fields)
 		}
 		var event r10FailoverWire
-		if err := json.Unmarshal(fields["type"], &event.Type); err != nil || event.Type != "failover" || json.Unmarshal(fields["machine"], &event.Machine) != nil || json.Unmarshal(fields["phase"], &event.Phase) != nil || !machineIDPattern.MatchString(event.Machine) || !validHubFailoverPhase(event.Phase) {
+		var emittedAt string
+		if err := json.Unmarshal(fields["type"], &event.Type); err != nil || event.Type != "failover" || json.Unmarshal(fields["machine"], &event.Machine) != nil || json.Unmarshal(fields["phase"], &event.Phase) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &event.EmittedAt) || !machineIDPattern.MatchString(event.Machine) || !validHubFailoverPhase(event.Phase) {
 			t.Fatalf("invalid agent failover event: fields=%v err=%v", fields, err)
 		}
 		return event

@@ -60,7 +60,7 @@ func TestHubR10FailoverEventsFollowWatchedPresenceStateMachine(t *testing.T) {
 	hub.Sweep() // first post-grace observation
 	clock = clock.Add(time.Second)
 	hub.Sweep() // second post-grace observation
-	if event := r10ReadFailover(t, events); event.Machine != "node-a" || event.Phase != hubFailoverPhaseDown {
+	if event := r10ReadFailover(t, events); event.Machine != "node-a" || event.Phase != hubFailoverPhaseDown || !event.EmittedAt.Equal(clock) {
 		t.Fatalf("down event=%+v", event)
 	}
 
@@ -69,7 +69,7 @@ func TestHubR10FailoverEventsFollowWatchedPresenceStateMachine(t *testing.T) {
 	hub.Sweep() // first clear observation
 	clock = clock.Add(500 * time.Millisecond)
 	hub.Sweep() // second clear observation
-	if event := r10ReadFailover(t, events); event.Machine != "node-a" || event.Phase != hubFailoverPhaseUp {
+	if event := r10ReadFailover(t, events); event.Machine != "node-a" || event.Phase != hubFailoverPhaseUp || !event.EmittedAt.Equal(clock) {
 		t.Fatalf("up event=%+v", event)
 	}
 }
@@ -128,9 +128,10 @@ func TestHubR10AcceptingFlagAppearsInNodesAndStatus(t *testing.T) {
 }
 
 type r10FailoverWire struct {
-	Type    string
-	Machine string
-	Phase   string
+	Type      string
+	Machine   string
+	Phase     string
+	EmittedAt time.Time
 }
 
 func r10ReadFailover(t *testing.T, connection *websocket.Conn) r10FailoverWire {
@@ -141,11 +142,12 @@ func r10ReadFailover(t *testing.T, connection *websocket.Conn) r10FailoverWire {
 	if err := wsjson.Read(ctx, connection, &fields); err != nil {
 		t.Fatalf("read failover event: %v", err)
 	}
-	if len(fields) != 3 {
+	if len(fields) != 4 {
 		t.Fatalf("failover event has non-closed shape: %v", fields)
 	}
 	var event r10FailoverWire
-	if err := json.Unmarshal(fields["type"], &event.Type); err != nil || event.Type != "failover" || json.Unmarshal(fields["machine"], &event.Machine) != nil || json.Unmarshal(fields["phase"], &event.Phase) != nil || !machineIDPattern.MatchString(event.Machine) || !validHubFailoverPhase(event.Phase) {
+	var emittedAt string
+	if err := json.Unmarshal(fields["type"], &event.Type); err != nil || event.Type != "failover" || json.Unmarshal(fields["machine"], &event.Machine) != nil || json.Unmarshal(fields["phase"], &event.Phase) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &event.EmittedAt) || !machineIDPattern.MatchString(event.Machine) || !validHubFailoverPhase(event.Phase) {
 		t.Fatalf("invalid failover event: fields=%v err=%v", fields, err)
 	}
 	return event
