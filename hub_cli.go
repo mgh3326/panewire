@@ -304,7 +304,7 @@ func hubEmitTextProvided(flags *flag.FlagSet) bool {
 	return provided
 }
 
-func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, deps daemonCLIDeps) (*HubClient, error) {
+func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, accepting bool, deps daemonCLIDeps) (*HubClient, error) {
 	env, err := loadHubTokenEnv(tokenEnvPath)
 	if err != nil || env.MachineID == hubOperatorMachineID {
 		return nil, errors.New("hub token env must contain a node credential")
@@ -321,7 +321,7 @@ func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCh
 		logger = slog.Default()
 	}
 	client, err := NewHubClient(HubClientConfig{
-		URL: rawURL, MachineID: env.MachineID, Token: env.Token, CFAccessClientID: cfAccess.ClientID, CFAccessClientSecret: cfAccess.ClientSecret, Checks: checks,
+		URL: rawURL, MachineID: env.MachineID, Token: env.Token, CFAccessClientID: cfAccess.ClientID, CFAccessClientSecret: cfAccess.ClientSecret, Accepting: accepting, Checks: checks,
 		AllowInsecureForTests: deps.AllowInsecureForTests,
 		Warn:                  func(message string) { logger.Warn(message) },
 	})
@@ -435,10 +435,10 @@ func validHubStatusNodes(nodes []HubNode) bool {
 func renderHubStatus(writer io.Writer, nodes []HubNode) {
 	rows := append([]HubNode(nil), nodes...)
 	sort.Slice(rows, func(i, j int) bool { return rows[i].MachineID < rows[j].MachineID })
-	fmt.Fprintln(writer, "MACHINE\tCLASS\tSTATE\tCONNECTED_SINCE\tLAST_PING_MS\tLAST_NOTE\tREMOTE_META")
+	fmt.Fprintln(writer, "MACHINE\tCLASS\tSTATE\tACCEPTING\tCONNECTED_SINCE\tLAST_PING_MS\tLAST_NOTE\tREMOTE_META")
 	for _, node := range rows {
 		meta, _ := json.Marshal(node.RemoteMeta)
-		fmt.Fprintf(writer, "%s\t%s\t%s\t%s\t%d\t%s\t%s\n", node.MachineID, node.AlertClass, node.State, node.ConnectedSince.UTC().Format(time.RFC3339), node.LastPingMS, renderHubLastNote(node.LastNote, time.Now().UTC()), meta)
+		fmt.Fprintf(writer, "%s\t%s\t%s\t%t\t%s\t%d\t%s\t%s\n", node.MachineID, node.AlertClass, node.State, node.Accepting, node.ConnectedSince.UTC().Format(time.RFC3339), node.LastPingMS, renderHubLastNote(node.LastNote, time.Now().UTC()), meta)
 	}
 }
 

@@ -49,6 +49,7 @@ type HubServerConfig struct {
 type HubNode struct {
 	MachineID      string            `json:"machine_id"`
 	AlertClass     string            `json:"alert_class"`
+	Accepting      bool              `json:"accepting"`
 	ConnectedSince time.Time         `json:"connected_since"`
 	LastPingMS     int64             `json:"last_ping_ms"`
 	LastNote       *HubLastNote      `json:"last_note,omitempty"`
@@ -65,6 +66,7 @@ type HubLastNote struct {
 
 type hubNodeRecord struct {
 	machineID         string
+	accepting         bool
 	connectedSince    time.Time
 	lastPing          time.Time
 	lastKeepaliveSent time.Time
@@ -91,7 +93,15 @@ type hubEventSubscriber struct {
 	conn     *websocket.Conn
 	ctx      context.Context
 	cancel   context.CancelFunc
-	messages chan hubEvent
+	messages chan hubSubscriptionMessage
+}
+
+// hubSubscriptionMessage keeps the operator event stream's vocabulary
+// explicit. Agent events retain their existing envelope; server-originated
+// failover messages have their own fixed three-field shape.
+type hubSubscriptionMessage struct {
+	event    *hubEvent
+	failover *hubFailoverEvent
 }
 
 // HubServer is an in-memory presence and event relay. It deliberately owns no
@@ -258,7 +268,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			agent.transient = true
 			return
 		}
-		h.connect(machineID, message.Version, remoteAddr, agent)
+		h.connect(machineID, message.Version, remoteAddr, agent, message.Accepting)
 	case "ping", "pong":
 		if agent.transient {
 			h.countUnknownMessage()
@@ -305,6 +315,7 @@ type hubInbound struct {
 	MachineID string
 	Version   string
 	Transient bool
+	Accepting bool
 	Kind      string
 	Payload   json.RawMessage
 }
@@ -403,10 +414,13 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 	}
 	switch message.Type {
 	case "hello":
-		if !allowed("type", "machine_id", "version", "transient") || json.Unmarshal(fields["machine_id"], &message.MachineID) != nil || json.Unmarshal(fields["version"], &message.Version) != nil || message.MachineID == "" || message.Version == "" {
+		if !allowed("type", "machine_id", "version", "transient", "accepting") || json.Unmarshal(fields["machine_id"], &message.MachineID) != nil || json.Unmarshal(fields["version"], &message.Version) != nil || message.MachineID == "" || message.Version == "" {
 			return hubInbound{}, false
 		}
 		if rawTransient, exists := fields["transient"]; exists && json.Unmarshal(rawTransient, &message.Transient) != nil {
+			return hubInbound{}, false
+		}
+		if rawAccepting, exists := fields["accepting"]; exists && json.Unmarshal(rawAccepting, &message.Accepting) != nil {
 			return hubInbound{}, false
 		}
 	case "ping", "pong":
@@ -448,7 +462,7 @@ func knownHubEventKind(kind string) bool {
 	return false
 }
 
-func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAgent) {
+func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAgent, accepting bool) {
 	now := h.now().UTC()
 	var previous *hubAgent
 	h.mu.Lock()
@@ -456,7 +470,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		previous = existing.agent
 	}
 	h.nodes[machineID] = &hubNodeRecord{
-		machineID: machineID, connectedSince: now, lastPing: now,
+		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now,
 		remoteMeta: map[string]string{"version": version, "remote_addr": remoteAddr},
 		state:      "connected", stateSince: now, agent: agent,
 	}
@@ -500,11 +514,19 @@ func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 }
 
 func (h *HubServer) broadcast(event hubEvent) {
+	h.broadcastSubscriptionMessage(hubSubscriptionMessage{event: &event})
+}
+
+func (h *HubServer) broadcastFailover(event hubFailoverEvent) {
+	h.broadcastSubscriptionMessage(hubSubscriptionMessage{failover: &event})
+}
+
+func (h *HubServer) broadcastSubscriptionMessage(message hubSubscriptionMessage) {
 	h.mu.Lock()
 	var slow []*hubEventSubscriber
 	for subscriber := range h.subscribers {
 		select {
-		case subscriber.messages <- event:
+		case subscriber.messages <- message:
 		default:
 			slow = append(slow, subscriber)
 		}
@@ -587,7 +609,7 @@ func (h *HubServer) Nodes() []HubNode {
 			lastNote = &HubLastNote{Text: note.Text, ReceivedAt: note.ReceivedAt}
 		}
 		nodes = append(nodes, HubNode{
-			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, RemoteMeta: remoteMeta, State: record.state,
+			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: record.accepting, ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, RemoteMeta: remoteMeta, State: record.state,
 		})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })
@@ -602,19 +624,25 @@ func (h *HubServer) Sweep() {
 	type pendingPing struct{ agent *hubAgent }
 	var pings []pendingPing
 	var notifications []hubNotification
+	var failovers []hubFailoverEvent
 	h.mu.Lock()
 	for _, record := range h.nodes {
 		if record.agent != nil && now.Sub(record.lastPing) >= h.staleAfter && record.state != "stale" {
 			record.state = "stale"
 			record.stateSince = now
 		}
-		notifications = append(notifications, h.observeNodeAlertLocked(now, record)...)
+		recordNotifications, recordFailovers := h.observeNodeAlertLocked(now, record)
+		notifications = append(notifications, recordNotifications...)
+		failovers = append(failovers, recordFailovers...)
 		if record.agent != nil && (record.lastKeepaliveSent.IsZero() || now.Sub(record.lastKeepaliveSent) >= h.keepaliveInterval) {
 			record.lastKeepaliveSent = now
 			pings = append(pings, pendingPing{agent: record.agent})
 		}
 	}
 	h.mu.Unlock()
+	for _, failover := range failovers {
+		h.broadcastFailover(failover)
+	}
 	h.dispatchHubNotifications(notifications)
 	for _, ping := range pings {
 		_ = ping.agent.writeJSON(hubOutbound{Type: "ping"})
@@ -662,7 +690,7 @@ func (h *HubServer) handleEvents(writer http.ResponseWriter, request *http.Reque
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
 	ctx, cancel := context.WithCancel(request.Context())
-	subscriber := &hubEventSubscriber{conn: connection, ctx: ctx, cancel: cancel, messages: make(chan hubEvent, 64)}
+	subscriber := &hubEventSubscriber{conn: connection, ctx: ctx, cancel: cancel, messages: make(chan hubSubscriptionMessage, 64)}
 	h.mu.Lock()
 	h.subscribers[subscriber] = struct{}{}
 	h.mu.Unlock()
@@ -687,9 +715,18 @@ func (subscriber *hubEventSubscriber) writeLoop() {
 		select {
 		case <-subscriber.ctx.Done():
 			return
-		case event := <-subscriber.messages:
+		case message := <-subscriber.messages:
+			var value any
+			switch {
+			case message.event != nil:
+				value = message.event
+			case message.failover != nil:
+				value = message.failover
+			default:
+				continue
+			}
 			writeContext, cancel := context.WithTimeout(subscriber.ctx, 5*time.Second)
-			err := wsjson.Write(writeContext, subscriber.conn, event)
+			err := wsjson.Write(writeContext, subscriber.conn, value)
 			cancel()
 			if err != nil {
 				subscriber.cancel()

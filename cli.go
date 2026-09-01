@@ -379,6 +379,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	hubURL := fs.String("hub-url", "", "optional WSS hub base URL")
 	hubTokenEnv := fs.String("hub-token-env", "", "optional mode-0600 HUB_MACHINE_ID/HUB_TOKEN env file")
 	hubCFEnv := fs.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
+	hubAccepting := fs.Bool("hub-accepting", false, "advertise readiness for paper or standby jobs to the hub")
 	checksConfig := fs.String("checks-config", "", "explicit local hub check JSON configuration")
 	if fs.Parse(args) != nil {
 		return nil, ExitUsage, fmt.Errorf("invalid daemon flags")
@@ -406,7 +407,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 			}
 			checks = loadedChecks
 		}
-		configuredHub, err := buildHubDaemonClient(*hubURL, *hubTokenEnv, *hubCFEnv, checks, deps)
+		configuredHub, err := buildHubDaemonClient(*hubURL, *hubTokenEnv, *hubCFEnv, checks, *hubAccepting, deps)
 		if err != nil {
 			return nil, ExitConditionInvalid, err
 		}
@@ -456,7 +457,7 @@ func stage2FlagsProvided(args []string) bool {
 }
 
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "checks-config"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "checks-config"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {

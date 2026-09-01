@@ -27,6 +27,7 @@ type HubClientConfig struct {
 	Token                 string
 	CFAccessClientID      string
 	CFAccessClientSecret  string
+	Accepting             bool
 	Checks                []HubCheck
 	Execute               HubCheckExecutor
 	PingInterval          time.Duration
@@ -59,6 +60,7 @@ type HubClient struct {
 	token            string
 	cfAccessClientID string
 	cfAccessSecret   string
+	accepting        bool
 	checks           []HubCheck
 	execute          HubCheckExecutor
 	pingInterval     time.Duration
@@ -102,7 +104,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		config.Execute = executeHubCheck
 	}
 	return &HubClient{
-		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, checks: cloneHubChecks(config.Checks), execute: config.Execute,
+		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, events: make(chan hubClientEvent, 64),
 	}, nil
@@ -226,7 +228,8 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 		Type      string `json:"type"`
 		MachineID string `json:"machine_id"`
 		Version   string `json:"version"`
-	}{Type: "hello", MachineID: client.machineID, Version: "panewired-r7"}); err != nil {
+		Accepting bool   `json:"accepting,omitempty"`
+	}{Type: "hello", MachineID: client.machineID, Version: "panewired-r10", Accepting: client.accepting}); err != nil {
 		return err
 	}
 	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {

@@ -157,7 +157,7 @@ func TestR61CFAccessHeadersForHubWebSocketAndStatus(t *testing.T) {
 	if daemon == nil || code != ExitOK || err != nil || daemon.cfg.Hub.Client == nil || daemon.cfg.Hub.Client.cfAccessClientID != r61CFAccessClientID || daemon.cfg.Hub.Client.cfAccessSecret != r61CFAccessClientSecret {
 		t.Fatalf("daemon Cloudflare Access flag was not applied: daemon=%v code=%d err=%v", daemon, code, err)
 	}
-	client, err := buildHubDaemonClient(r6WSURL(server.URL, ""), nodeEnv, cfEnv, nil, daemonCLIDeps{AllowInsecureForTests: true})
+	client, err := buildHubDaemonClient(r6WSURL(server.URL, ""), nodeEnv, cfEnv, nil, false, daemonCLIDeps{AllowInsecureForTests: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -558,6 +558,7 @@ func (probe *r6Stage2Probe) PollOnce(context.Context) error {
 
 type r6NodeWire struct {
 	MachineID      string            `json:"machine_id"`
+	Accepting      bool              `json:"accepting"`
 	ConnectedSince time.Time         `json:"connected_since"`
 	LastPingMS     int64             `json:"last_ping_ms"`
 	RemoteMeta     map[string]string `json:"remote_meta"`

@@ -14,7 +14,22 @@ const (
 	hubAlertReasonStale         = "stale"
 	hubAlertReasonCheckFailed   = "check_failed"
 	hubAlertNoCheck             = "none"
+	hubFailoverPhaseDown        = "down"
+	hubFailoverPhaseUp          = "up"
 )
+
+// hubFailoverEvent is emitted only by the server after the established
+// watched-node presence state machine confirms an incident or recovery.
+// It deliberately has no arbitrary payload field.
+type hubFailoverEvent struct {
+	Type    string `json:"type"`
+	Machine string `json:"machine"`
+	Phase   string `json:"phase"`
+}
+
+func validHubFailoverPhase(phase string) bool {
+	return phase == hubFailoverPhaseDown || phase == hubFailoverPhaseUp
+}
 
 // HubAlert carries only the three operator-visible identifiers.  Check status,
 // timing, command output, and every credential remain outside this boundary.
@@ -49,18 +64,36 @@ type hubNotification struct {
 	alert    HubAlert
 }
 
-func (h *HubServer) observeNodeAlertLocked(now time.Time, record *hubNodeRecord) []hubNotification {
+func (h *HubServer) observeNodeAlertLocked(now time.Time, record *hubNodeRecord) ([]hubNotification, []hubFailoverEvent) {
 	if record == nil || !h.watchesAlerts(record.machineID) {
-		return nil
+		return nil, nil
 	}
+	key := "node:" + record.machineID
+	wasActive := false
+	if state := h.alerts[key]; state != nil {
+		wasActive = state.active
+	}
+	var notifications []hubNotification
 	if record.state == "connected" {
-		return h.observeHubAlertLocked(now, "node:"+record.machineID, false, time.Time{}, "", hubAlertNoCheck, h.gracePeriod)
+		notifications = h.observeHubAlertLocked(now, key, false, time.Time{}, "", hubAlertNoCheck, h.gracePeriod)
+	} else {
+		reason := hubAlertReasonDisconnected
+		if record.state == "stale" {
+			reason = hubAlertReasonStale
+		}
+		notifications = h.observeHubAlertLocked(now, key, true, record.stateSince, reason, hubAlertNoCheck, h.gracePeriod)
 	}
-	reason := hubAlertReasonDisconnected
-	if record.state == "stale" {
-		reason = hubAlertReasonStale
+	state := h.alerts[key]
+	if state == nil {
+		return notifications, nil
 	}
-	return h.observeHubAlertLocked(now, "node:"+record.machineID, true, record.stateSince, reason, hubAlertNoCheck, h.gracePeriod)
+	if !wasActive && state.active {
+		return notifications, []hubFailoverEvent{{Type: "failover", Machine: record.machineID, Phase: hubFailoverPhaseDown}}
+	}
+	if wasActive && !state.active {
+		return notifications, []hubFailoverEvent{{Type: "failover", Machine: record.machineID, Phase: hubFailoverPhaseUp}}
+	}
+	return notifications, nil
 }
 
 func (h *HubServer) observeHeartbeatAlerts(machineID string, heartbeat hubHeartbeatPayload) {
