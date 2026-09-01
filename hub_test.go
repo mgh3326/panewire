@@ -157,7 +157,7 @@ func TestR61CFAccessHeadersForHubWebSocketAndStatus(t *testing.T) {
 	if daemon == nil || code != ExitOK || err != nil || daemon.cfg.Hub.Client == nil || daemon.cfg.Hub.Client.cfAccessClientID != r61CFAccessClientID || daemon.cfg.Hub.Client.cfAccessSecret != r61CFAccessClientSecret {
 		t.Fatalf("daemon Cloudflare Access flag was not applied: daemon=%v code=%d err=%v", daemon, code, err)
 	}
-	client, err := buildHubDaemonClient(r6WSURL(server.URL, ""), nodeEnv, cfEnv, nil, false, daemonCLIDeps{AllowInsecureForTests: true})
+	client, err := buildHubDaemonClient(r6WSURL(server.URL, ""), nodeEnv, cfEnv, nil, false, "", "", daemonCLIDeps{AllowInsecureForTests: true})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -80,6 +80,7 @@ type hubAgent struct {
 	conn      *websocket.Conn
 	writeMu   sync.Mutex
 	transient bool
+	failovers chan hubFailoverEvent
 }
 
 type hubEvent struct {
@@ -232,8 +233,11 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection}
+	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64)}
 	defer connection.CloseNow()
+	agentContext, agentCancel := context.WithCancel(request.Context())
+	defer agentCancel()
+	go agent.writeFailovers(agentContext)
 	for {
 		messageType, payload, err := connection.Read(request.Context())
 		if err != nil {
@@ -519,6 +523,17 @@ func (h *HubServer) broadcast(event hubEvent) {
 
 func (h *HubServer) broadcastFailover(event hubFailoverEvent) {
 	h.broadcastSubscriptionMessage(hubSubscriptionMessage{failover: &event})
+	h.mu.Lock()
+	agents := make([]*hubAgent, 0, len(h.nodes))
+	for _, record := range h.nodes {
+		if record.agent != nil {
+			agents = append(agents, record.agent)
+		}
+	}
+	h.mu.Unlock()
+	for _, agent := range agents {
+		agent.queueFailover(event)
+	}
 }
 
 func (h *HubServer) broadcastSubscriptionMessage(message hubSubscriptionMessage) {
@@ -677,6 +692,32 @@ func (agent *hubAgent) writeJSON(value any) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return wsjson.Write(ctx, agent.conn, value)
+}
+
+func (agent *hubAgent) queueFailover(event hubFailoverEvent) {
+	if agent == nil || agent.failovers == nil {
+		return
+	}
+	select {
+	case agent.failovers <- event:
+	default:
+		if agent.conn != nil {
+			_ = agent.conn.Close(websocket.StatusPolicyViolation, "slow")
+		}
+	}
+}
+
+func (agent *hubAgent) writeFailovers(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-agent.failovers:
+			if err := agent.writeJSON(event); err != nil {
+				return
+			}
+		}
+	}
 }
 
 func (h *HubServer) handleEvents(writer http.ResponseWriter, request *http.Request) {
