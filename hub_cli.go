@@ -304,7 +304,7 @@ func hubEmitTextProvided(flags *flag.FlagSet) bool {
 	return provided
 }
 
-func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, accepting bool, deps daemonCLIDeps) (*HubClient, error) {
+func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, accepting bool, failoverWakeOn, failoverWakeMAC string, deps daemonCLIDeps) (*HubClient, error) {
 	env, err := loadHubTokenEnv(tokenEnvPath)
 	if err != nil || env.MachineID == hubOperatorMachineID {
 		return nil, errors.New("hub token env must contain a node credential")
@@ -321,7 +321,8 @@ func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCh
 		logger = slog.Default()
 	}
 	client, err := NewHubClient(HubClientConfig{
-		URL: rawURL, MachineID: env.MachineID, Token: env.Token, CFAccessClientID: cfAccess.ClientID, CFAccessClientSecret: cfAccess.ClientSecret, Accepting: accepting, Checks: checks,
+		URL: rawURL, MachineID: env.MachineID, Token: env.Token, CFAccessClientID: cfAccess.ClientID, CFAccessClientSecret: cfAccess.ClientSecret, Accepting: accepting,
+		FailoverWakeOn: failoverWakeOn, FailoverWakeMAC: failoverWakeMAC, Checks: checks,
 		AllowInsecureForTests: deps.AllowInsecureForTests,
 		Warn:                  func(message string) { logger.Warn(message) },
 	})

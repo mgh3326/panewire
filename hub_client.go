@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/url"
 	"sync"
@@ -28,6 +29,8 @@ type HubClientConfig struct {
 	CFAccessClientID      string
 	CFAccessClientSecret  string
 	Accepting             bool
+	FailoverWakeOn        string
+	FailoverWakeMAC       string
 	Checks                []HubCheck
 	Execute               HubCheckExecutor
 	PingInterval          time.Duration
@@ -37,6 +40,10 @@ type HubClientConfig struct {
 	Dial                  HubDial
 	Wait                  HubWait
 	Warn                  func(string)
+
+	// failoverWakeDestination is a package-private fixture override. Production
+	// always uses the fixed broadcast destination below.
+	failoverWakeDestination string
 }
 
 // HubDaemonConfig keeps the optional hub process separate from stage2's
@@ -55,21 +62,26 @@ type hubClientEvent struct {
 // HubClient owns a bounded in-memory event queue. It is intentionally not a
 // durable relay: Supabase remains responsible for offline stage2 delivery.
 type HubClient struct {
-	endpoint         string
-	machineID        string
-	token            string
-	cfAccessClientID string
-	cfAccessSecret   string
-	accepting        bool
-	checks           []HubCheck
-	execute          HubCheckExecutor
-	pingInterval     time.Duration
-	initialBackoff   time.Duration
-	maxBackoff       time.Duration
-	dial             HubDial
-	wait             HubWait
-	warn             func(string)
-	events           chan hubClientEvent
+	endpoint          string
+	machineID         string
+	token             string
+	cfAccessClientID  string
+	cfAccessSecret    string
+	accepting         bool
+	failoverWakeOn    string
+	failoverWakeMAC   net.HardwareAddr
+	failoverWakeDest  string
+	failoverWakeMu    sync.Mutex
+	failoverWakeArmed bool
+	checks            []HubCheck
+	execute           HubCheckExecutor
+	pingInterval      time.Duration
+	initialBackoff    time.Duration
+	maxBackoff        time.Duration
+	dial              HubDial
+	wait              HubWait
+	warn              func(string)
+	events            chan hubClientEvent
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -78,6 +90,26 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	endpoint, err := hubWSEndpoint(config.URL, config.AllowInsecureForTests)
 	if err != nil || config.MachineID == hubOperatorMachineID || !machineIDPattern.MatchString(config.MachineID) || !validHubToken(config.Token) || !validHubChecks(config.Checks) || (config.CFAccessClientID == "") != (config.CFAccessClientSecret == "") || (config.CFAccessClientID != "" && (!validHubCFAccessValue(config.CFAccessClientID) || !validHubCFAccessValue(config.CFAccessClientSecret))) {
 		return nil, errors.New("hub client configuration is invalid")
+	}
+	wakeRequested := config.FailoverWakeOn != "" || config.FailoverWakeMAC != ""
+	var wakeMAC net.HardwareAddr
+	if wakeRequested {
+		if config.FailoverWakeOn == "" || config.FailoverWakeMAC == "" || config.FailoverWakeOn == hubOperatorMachineID || !machineIDPattern.MatchString(config.FailoverWakeOn) {
+			return nil, errors.New("hub client configuration is invalid")
+		}
+		var wakeErr error
+		wakeMAC, wakeErr = parseHubFailoverWakeMAC(config.FailoverWakeMAC)
+		if wakeErr != nil {
+			return nil, errors.New("hub client configuration is invalid")
+		}
+	}
+	wakeDestination := hubFailoverWakeBroadcastAddress
+	if config.failoverWakeDestination != "" {
+		address, resolveErr := net.ResolveUDPAddr("udp4", config.failoverWakeDestination)
+		if !wakeRequested || resolveErr != nil || address.IP == nil || address.IP.To4() == nil || address.Port <= 0 {
+			return nil, errors.New("hub client configuration is invalid")
+		}
+		wakeDestination = address.String()
 	}
 	if config.PingInterval <= 0 {
 		config.PingInterval = 10 * time.Second
@@ -104,10 +136,63 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		config.Execute = executeHubCheck
 	}
 	return &HubClient{
-		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, checks: cloneHubChecks(config.Checks), execute: config.Execute,
+		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting,
+		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
+		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, events: make(chan hubClientEvent, 64),
 	}, nil
+}
+
+const hubFailoverWakeBroadcastAddress = "255.255.255.255:9"
+
+func parseHubFailoverWakeMAC(raw string) (net.HardwareAddr, error) {
+	mac, err := net.ParseMAC(raw)
+	if err != nil || len(mac) != 6 {
+		return nil, errors.New("invalid failover wake MAC")
+	}
+	return append(net.HardwareAddr(nil), mac...), nil
+}
+
+func hubWakeMagicPacket(mac net.HardwareAddr) []byte {
+	if len(mac) != 6 {
+		return nil
+	}
+	packet := make([]byte, 6+16*len(mac))
+	for index := 0; index < 6; index++ {
+		packet[index] = 0xff
+	}
+	for index := 6; index < len(packet); index += len(mac) {
+		copy(packet[index:], mac)
+	}
+	return packet
+}
+
+func sendHubFailoverWakePacket(ctx context.Context, destination string, mac net.HardwareAddr) error {
+	if ctx.Err() != nil || len(mac) != 6 {
+		return errors.New("failover wake unavailable")
+	}
+	address, err := net.ResolveUDPAddr("udp4", destination)
+	if err != nil || address.IP == nil || address.IP.To4() == nil || address.Port <= 0 {
+		return errors.New("failover wake unavailable")
+	}
+	connection, err := net.DialUDP("udp4", nil, address)
+	if err != nil {
+		return errors.New("failover wake unavailable")
+	}
+	defer connection.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	if contextDeadline, exists := ctx.Deadline(); exists && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	if err := connection.SetWriteDeadline(deadline); err != nil {
+		return errors.New("failover wake unavailable")
+	}
+	packet := hubWakeMagicPacket(mac)
+	if written, err := connection.Write(packet); err != nil || written != len(packet) {
+		return errors.New("failover wake unavailable")
+	}
+	return nil
 }
 
 func validHubCFAccessValue(value string) bool {
@@ -221,6 +306,12 @@ type hubClientConnection struct {
 	writeMu    sync.Mutex
 }
 
+type hubOutboundMessage struct {
+	Type    string
+	Machine string
+	Phase   string
+}
+
 func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) error {
 	connection.SetReadLimit(hubMaxMessageBytes)
 	peer := &hubClientConnection{connection: connection}
@@ -249,7 +340,12 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 			if messageType != websocket.MessageText {
 				continue
 			}
-			if kind, ok := parseHubOutbound(payload); ok && kind == "ping" {
+			message, ok := parseHubOutbound(payload)
+			if !ok {
+				continue
+			}
+			switch message.Type {
+			case "ping":
 				if err := peer.write(ctx, hubOutbound{Type: "pong"}); err != nil {
 					select {
 					case readErrors <- err:
@@ -257,6 +353,8 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 					}
 					return
 				}
+			case "failover":
+				client.handleHubFailover(ctx, message)
 			}
 		}
 	}()
@@ -300,20 +398,55 @@ func hubClientWireEvent(event hubClientEvent) struct {
 	}{Type: "event", Kind: event.Kind, Payload: event.Payload}
 }
 
-func parseHubOutbound(payload []byte) (string, bool) {
+func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) != 1 {
-		return "", false
+	if json.Unmarshal(payload, &fields) != nil || fields == nil {
+		return hubOutboundMessage{}, false
 	}
 	rawType, exists := fields["type"]
 	if !exists {
-		return "", false
+		return hubOutboundMessage{}, false
 	}
-	var kind string
-	if json.Unmarshal(rawType, &kind) != nil || (kind != "ping" && kind != "pong") {
-		return "", false
+	var message hubOutboundMessage
+	if json.Unmarshal(rawType, &message.Type) != nil {
+		return hubOutboundMessage{}, false
 	}
-	return kind, true
+	switch message.Type {
+	case "ping", "pong":
+		if len(fields) != 1 {
+			return hubOutboundMessage{}, false
+		}
+	case "failover":
+		if len(fields) != 3 || json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["phase"], &message.Phase) != nil || !machineIDPattern.MatchString(message.Machine) || !validHubFailoverPhase(message.Phase) {
+			return hubOutboundMessage{}, false
+		}
+	default:
+		return hubOutboundMessage{}, false
+	}
+	return message, true
+}
+
+func (client *HubClient) handleHubFailover(ctx context.Context, message hubOutboundMessage) {
+	if client.failoverWakeOn == "" || message.Machine != client.failoverWakeOn || !validHubFailoverPhase(message.Phase) {
+		return
+	}
+	client.failoverWakeMu.Lock()
+	if message.Phase == hubFailoverPhaseUp {
+		client.failoverWakeArmed = true
+		client.failoverWakeMu.Unlock()
+		return
+	}
+	if !client.failoverWakeArmed {
+		client.failoverWakeMu.Unlock()
+		return
+	}
+	client.failoverWakeArmed = false
+	mac := append(net.HardwareAddr(nil), client.failoverWakeMAC...)
+	destination := client.failoverWakeDest
+	client.failoverWakeMu.Unlock()
+	if err := sendHubFailoverWakePacket(ctx, destination, mac); err != nil {
+		client.warn("failover wake unavailable")
+	}
 }
 
 func (peer *hubClientConnection) write(ctx context.Context, value any) error {

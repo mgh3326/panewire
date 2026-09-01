@@ -196,6 +196,28 @@ self-report shown by `/v1/nodes` and `hub-status`; it does not create a job
 API or mutate a running connection. Remove or add it and restart/reconnect the
 daemon to change the value.
 
+### R10.5 fixed RPi Wake-on-LAN
+
+The only action-capable hub client configuration is an explicitly fixed RPi
+Wake-on-LAN target. Add both flags to that RPi's existing daemon invocation:
+
+```sh
+panewire daemon \
+  --hub-url wss://hub.robinco.dev \
+  --hub-token-env /etc/panewire/rpi-hub-node.env \
+  --failover-wake-on mac-a \
+  --failover-wake-mac 02:1a:2b:3c:4d:5e
+```
+
+Both flags are required; a missing mate, an empty value, an invalid machine
+ID, or a malformed/non-EUI-48 MAC rejects daemon startup. The client consumes
+only the fixed `failover` shape from `/v1/agent`. A matching `down` sends one
+pure-Go UDP broadcast magic packet to `255.255.255.255:9` (six `FF` bytes then
+the target MAC 16 times). Repeated matching `down` events are ignored until a
+matching `up` re-arms it. The event never chooses a target, a MAC, a UDP
+destination, an argument, or a command; this path has no shell-out or remote
+execution facility.
+
 ## NCP deployment checklist
 
 1. On the NCP host, install the reviewed `panewire` binary and create
