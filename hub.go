@@ -45,9 +45,13 @@ type HubServerConfig struct {
 	StaleAfter        time.Duration
 	KeepaliveInterval time.Duration
 	GracePeriod       time.Duration
-	Notifier          HubNotifier
-	Logger            *slog.Logger
-	BurstPolicyPath   string
+	// OrphanGrace is the continuous disconnected period before jobs reported by
+	// that node are marked orphaned. A zero value deliberately follows the
+	// established presence grace rather than creating a second surprise timer.
+	OrphanGrace     time.Duration
+	Notifier        HubNotifier
+	Logger          *slog.Logger
+	BurstPolicyPath string
 	// UIAllowCFOnly deliberately requires an explicit operator opt-in before
 	// serving the browser UI. UI requests must then originate on loopback or
 	// include the identity header injected by Cloudflare Access.
@@ -84,14 +88,52 @@ type hubNodeRecord struct {
 	remoteMeta        map[string]string
 	state             string
 	agent             *hubAgent
+	activeJobs        map[string]HubActiveJob
 }
 
 type hubAgent struct {
-	conn      *websocket.Conn
-	writeMu   sync.Mutex
-	transient bool
-	failovers chan hubFailoverEvent
-	bursts    chan hubBurstEvent
+	conn        *websocket.Conn
+	writeMu     sync.Mutex
+	transient   bool
+	failovers   chan hubFailoverEvent
+	bursts      chan hubBurstEvent
+	revocations chan hubJobRevokedEvent
+}
+
+// HubActiveJob is deliberately metadata-only. It is copied from a node's
+// local jobs/*/events files, never from a brief or pane transcript.
+type HubActiveJob struct {
+	JobID        string `json:"job_id"`
+	AgentLabel   string `json:"agent_label"`
+	LastEventSeq uint64 `json:"last_event_seq"`
+	PushSHA      string `json:"push_sha,omitempty"`
+	Epoch        uint64 `json:"epoch"`
+}
+
+type hubJobRecord struct {
+	HubActiveJob
+	Node           string
+	LastSeen       time.Time
+	Orphaned       bool
+	Completed      bool
+	ReassignedFrom string
+	RevokedEpoch   uint64
+}
+
+type hubJobEventPayload struct {
+	JobID      string    `json:"job_id"`
+	Node       string    `json:"node,omitempty"`
+	From       string    `json:"from,omitempty"`
+	To         string    `json:"to,omitempty"`
+	Epoch      uint64    `json:"epoch"`
+	LastSeen   time.Time `json:"last_seen,omitempty"`
+	ResumeHint string    `json:"resume_hint,omitempty"`
+}
+
+type hubJobRevokedEvent struct {
+	Type  string `json:"type"`
+	JobID string `json:"job_id"`
+	Epoch uint64 `json:"epoch"`
 }
 
 type hubEvent struct {
@@ -115,6 +157,7 @@ type hubUIEvent struct {
 	Kind      string    `json:"kind"`
 	Phase     string    `json:"phase"`
 	MachineID string    `json:"machine_id"`
+	JobID     string    `json:"job_id,omitempty"`
 	At        time.Time `json:"at"`
 }
 
@@ -135,6 +178,7 @@ type HubServer struct {
 	staleAfter        time.Duration
 	keepaliveInterval time.Duration
 	gracePeriod       time.Duration
+	orphanGrace       time.Duration
 	alertObservations int
 	notifier          HubNotifier
 	logger            *slog.Logger
@@ -152,6 +196,7 @@ type HubServer struct {
 	startedAt          time.Time
 	uiAllowCFOnly      bool
 	uiEvents           []hubUIEvent
+	jobs               map[string]*hubJobRecord
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -195,6 +240,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.GracePeriod <= 0 {
 		config.GracePeriod = defaultHubGracePeriod
 	}
+	if config.OrphanGrace <= 0 {
+		config.OrphanGrace = config.GracePeriod
+	}
 	var burstPolicy BurstPolicy
 	var burstPolicyModTime time.Time
 	if config.BurstPolicyPath != "" {
@@ -209,8 +257,8 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	return &HubServer{
 		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
-		gracePeriod: config.GracePeriod, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly,
+		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord),
 	}, nil
 }
 
@@ -241,6 +289,8 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /ui/data.json", h.handleUIData)
 	mux.HandleFunc("GET /v1/nodes", h.handleNodes)
 	mux.HandleFunc("GET /v1/burst", h.handleBurst)
+	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
+	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	return mux
@@ -391,6 +441,41 @@ func (h *HubServer) handleBurst(writer http.ResponseWriter, request *http.Reques
 	}{configured, policy, state.SourceRuns, state.IdleSince, state.LastUp, state.LastDown, state.UpCompleted, state.LastLoad})
 }
 
+func (h *HubServer) handleOrphanedJobs(writer http.ResponseWriter, request *http.Request) {
+	if !h.authorizeOperator(request) {
+		hubUnauthorized(writer)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(struct {
+		Jobs []hubJobEventPayload `json:"jobs"`
+	}{Jobs: h.orphanedJobs()})
+}
+
+func (h *HubServer) handleReassignJob(writer http.ResponseWriter, request *http.Request) {
+	if !h.authorizeOperator(request) {
+		hubUnauthorized(writer)
+		return
+	}
+	var requestBody struct {
+		JobID string `json:"job_id"`
+		To    string `json:"to"`
+	}
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&requestBody) != nil {
+		http.Error(writer, "invalid job reassignment", http.StatusBadRequest)
+		return
+	}
+	result, ok := h.reassignJob(requestBody.JobID, requestBody.To)
+	if !ok {
+		http.Error(writer, "job reassignment rejected", http.StatusConflict)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(result)
+}
+
 func (h *HubServer) handleHealthz(writer http.ResponseWriter, _ *http.Request) {
 	writer.Header().Set("Content-Type", "application/json")
 	_, _ = writer.Write([]byte(`{"status":"ok"}\n`))
@@ -418,12 +503,13 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64)}
+	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), revocations: make(chan hubJobRevokedEvent, 64)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
 	go agent.writeFailovers(agentContext)
 	go agent.writeBursts(agentContext)
+	go agent.writeRevocations(agentContext)
 	for {
 		messageType, payload, err := connection.Read(request.Context())
 		if err != nil {
@@ -484,6 +570,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				return
 			}
 			h.observeHeartbeatAlerts(machineID, heartbeat)
+			h.observeActiveJobs(machineID, heartbeat.ActiveJobs, received)
 			if heartbeat.HostLoad != nil {
 				h.mu.Lock()
 				bursts := h.observeBurstLocked(received, machineID, *heartbeat.HostLoad)
@@ -491,6 +578,13 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				for _, burst := range bursts {
 					h.dispatchBurst(burst)
 				}
+			}
+		}
+		if message.Kind == "job.completed" {
+			completion, valid := decodeHubJobCompletionPayload(message.Payload)
+			if !valid || !h.observeJobCompletion(machineID, completion, received) {
+				h.countUnknownMessage()
+				return
 			}
 		}
 		if message.Kind == "note" {
@@ -519,9 +613,10 @@ type hubInbound struct {
 }
 
 type hubHeartbeatPayload struct {
-	Status   string                    `json:"status"`
-	Checks   map[string]HubCheckStatus `json:"checks"`
-	HostLoad *HubHostLoad              `json:"host_load,omitempty"`
+	Status     string                    `json:"status"`
+	Checks     map[string]HubCheckStatus `json:"checks"`
+	HostLoad   *HubHostLoad              `json:"host_load,omitempty"`
+	ActiveJobs []HubActiveJob            `json:"active_jobs,omitempty"`
 }
 
 type hubNotePayload struct {
@@ -554,7 +649,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "active_jobs" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -587,6 +682,42 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.HostLoad = &load
+	}
+	if rawJobs, exists := fields["active_jobs"]; exists {
+		var rawActive []map[string]json.RawMessage
+		if json.Unmarshal(rawJobs, &rawActive) != nil || len(rawActive) > 32 {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.ActiveJobs = make([]HubActiveJob, 0, len(rawActive))
+		seen := make(map[string]struct{}, len(heartbeat.ActiveJobs))
+		for _, rawJob := range rawActive {
+			if len(rawJob) < 4 {
+				return hubHeartbeatPayload{}, false
+			}
+			for name := range rawJob {
+				if name != "job_id" && name != "agent_label" && name != "last_event_seq" && name != "push_sha" && name != "epoch" {
+					return hubHeartbeatPayload{}, false
+				}
+			}
+			for _, name := range []string{"job_id", "agent_label", "last_event_seq", "epoch"} {
+				if _, present := rawJob[name]; !present {
+					return hubHeartbeatPayload{}, false
+				}
+			}
+			encoded, _ := json.Marshal(rawJob)
+			var job HubActiveJob
+			if json.Unmarshal(encoded, &job) != nil {
+				return hubHeartbeatPayload{}, false
+			}
+			if !validHubActiveJob(job) {
+				return hubHeartbeatPayload{}, false
+			}
+			if _, duplicate := seen[job.JobID]; duplicate {
+				return hubHeartbeatPayload{}, false
+			}
+			seen[job.JobID] = struct{}{}
+			heartbeat.ActiveJobs = append(heartbeat.ActiveJobs, job)
+		}
 	}
 	for name, status := range heartbeat.Checks {
 		if !hubCheckNamePattern.MatchString(name) || !status.valid() {
@@ -662,6 +793,11 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
+		if message.Kind == "job.completed" {
+			if _, valid := decodeHubJobCompletionPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
 		message.Payload = append(json.RawMessage(nil), rawPayload...)
 	default:
 		return hubInbound{}, false
@@ -671,7 +807,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note":
+	case "heartbeat", "note", "job.completed":
 		return true
 	}
 	return false
@@ -687,7 +823,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	h.nodes[machineID] = &hubNodeRecord{
 		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now,
 		remoteMeta: map[string]string{"version": version, "remote_addr": remoteAddr},
-		state:      "connected", stateSince: now, agent: agent,
+		state:      "connected", stateSince: now, agent: agent, activeJobs: make(map[string]HubActiveJob),
 	}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
 	if h.burstPolicyPath != "" && machineID == h.burstPolicy.TargetMachine && accepting && !h.burstState.LastUp.IsZero() {
@@ -762,10 +898,14 @@ func (h *HubServer) recordUIEvent(kind, phase, machineID string, at time.Time) {
 }
 
 func (h *HubServer) recordUIEventLocked(kind, phase, machineID string, at time.Time) {
+	h.recordUIEventWithJobLocked(kind, phase, machineID, "", at)
+}
+
+func (h *HubServer) recordUIEventWithJobLocked(kind, phase, machineID, jobID string, at time.Time) {
 	if at.IsZero() {
 		at = h.now().UTC()
 	}
-	h.uiEvents = append(h.uiEvents, hubUIEvent{Kind: kind, Phase: phase, MachineID: machineID, At: at.UTC()})
+	h.uiEvents = append(h.uiEvents, hubUIEvent{Kind: kind, Phase: phase, MachineID: machineID, JobID: jobID, At: at.UTC()})
 	if len(h.uiEvents) > hubUIEventLimit {
 		h.uiEvents = append([]hubUIEvent(nil), h.uiEvents[len(h.uiEvents)-hubUIEventLimit:]...)
 	}
@@ -891,6 +1031,7 @@ func (h *HubServer) Sweep() {
 		}
 	}
 	h.mu.Unlock()
+	h.sweepOrphanedJobs(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)
 	}
@@ -975,6 +1116,19 @@ func (agent *hubAgent) writeBursts(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case event := <-agent.bursts:
+			if err := agent.writeJSON(event); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (agent *hubAgent) writeRevocations(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-agent.revocations:
 			if err := agent.writeJSON(event); err != nil {
 				return
 			}

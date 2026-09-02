@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -447,6 +448,100 @@ func renderHubStatus(writer io.Writer, nodes []HubNode) {
 		meta, _ := json.Marshal(node.RemoteMeta)
 		fmt.Fprintf(writer, "%s\t%s\t%s\t%t\t%s\t%d\t%s\t%s\n", node.MachineID, node.AlertClass, node.State, node.Accepting, node.ConnectedSince.UTC().Format(time.RFC3339), node.LastPingMS, renderHubLastNote(node.LastNote, time.Now().UTC()), meta)
 	}
+}
+
+func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
+	if len(args) == 0 || (args[0] != "orphaned" && args[0] != "reassign") {
+		return ExitUsage
+	}
+	flags := flag.NewFlagSet("panewire jobs "+args[0], flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	hubURL := flags.String("hub-url", "", "HTTPS hub base URL")
+	tokenEnvPath := flags.String("hub-token-env", "", "mode-0600 operator HUB_MACHINE_ID/HUB_TOKEN env file")
+	cfEnvPath := flags.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
+	jobID := flags.String("job-id", "", "orphaned job ID")
+	to := flags.String("to", "", "destination node identity")
+	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *hubURL == "" || *tokenEnvPath == "" || (args[0] == "reassign" && (*jobID == "" || *to == "")) {
+		return ExitUsage
+	}
+	env, err := loadHubTokenEnv(*tokenEnvPath)
+	if err != nil || env.MachineID != hubOperatorMachineID {
+		fmt.Fprintln(stderr, "jobs rejected: invalid operator token env")
+		return ExitConditionInvalid
+	}
+	var cfAccess hubCFAccessEnv
+	if *cfEnvPath != "" {
+		cfAccess, err = loadHubCFAccessEnv(*cfEnvPath)
+		if err != nil {
+			fmt.Fprintln(stderr, "jobs rejected: invalid Cloudflare Access env")
+			return ExitConditionInvalid
+		}
+	}
+	path, method := "/v1/jobs/orphaned", http.MethodGet
+	var body io.Reader
+	if args[0] == "reassign" {
+		if !hubJobIDPattern.MatchString(*jobID) || !machineIDPattern.MatchString(*to) || *to == hubOperatorMachineID {
+			fmt.Fprintln(stderr, "jobs rejected: invalid reassignment")
+			return ExitConditionInvalid
+		}
+		encoded, _ := json.Marshal(struct {
+			JobID string `json:"job_id"`
+			To    string `json:"to"`
+		}{*jobID, *to})
+		path, method, body = "/v1/jobs/reassign", http.MethodPost, bytes.NewReader(encoded)
+	}
+	endpoint, err := hubHTTPSEndpoint(*hubURL, path, deps.AllowInsecureForTests)
+	if err != nil {
+		fmt.Fprintln(stderr, "jobs rejected: invalid hub URL")
+		return ExitConditionInvalid
+	}
+	client := deps.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
+	if err != nil {
+		return ExitInternal
+	}
+	request.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if cfAccess.ClientID != "" {
+		request.Header.Set("CF-Access-Client-Id", cfAccess.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", cfAccess.ClientSecret)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		fmt.Fprintln(stderr, "jobs unavailable")
+		return ExitInternal
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		fmt.Fprintln(stderr, "jobs unavailable")
+		return ExitConditionInvalid
+	}
+	if args[0] == "orphaned" {
+		var result struct {
+			Jobs []hubJobEventPayload `json:"jobs"`
+		}
+		if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result) != nil {
+			return ExitInternal
+		}
+		fmt.Fprintln(stdout, "JOB_ID\tNODE\tEPOCH\tLAST_SEEN\tRESUME_HINT")
+		for _, job := range result.Jobs {
+			fmt.Fprintf(stdout, "%s\t%s\t%d\t%s\t%s\n", job.JobID, job.Node, job.Epoch, job.LastSeen.UTC().Format(time.RFC3339), job.ResumeHint)
+		}
+		return ExitOK
+	}
+	var result hubJobEventPayload
+	if json.NewDecoder(io.LimitReader(response.Body, 4096)).Decode(&result) != nil || !hubJobIDPattern.MatchString(result.JobID) || !machineIDPattern.MatchString(result.From) || !machineIDPattern.MatchString(result.To) || result.Epoch == 0 {
+		return ExitInternal
+	}
+	fmt.Fprintf(stdout, "%s\t%s\t%s\t%d\n", result.JobID, result.From, result.To, result.Epoch)
+	return ExitOK
 }
 
 func renderHubLastNote(note *HubLastNote, now time.Time) string {

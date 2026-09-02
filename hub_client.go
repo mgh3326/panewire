@@ -33,6 +33,7 @@ type HubClientConfig struct {
 	CFAccessClientID      string
 	CFAccessClientSecret  string
 	Accepting             bool
+	JobsInboxRoot         string
 	FailoverWakeOn        string
 	FailoverWakeMAC       string
 	BurstWakeMAC          string
@@ -75,6 +76,7 @@ type HubClient struct {
 	cfAccessClientID     string
 	cfAccessSecret       string
 	accepting            bool
+	jobsInboxRoot        string
 	failoverWakeOn       string
 	failoverWakeMAC      net.HardwareAddr
 	failoverWakeDest     string
@@ -163,7 +165,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		config.burstPoweroff = executeHubBurstPoweroff
 	}
 	return &HubClient{
-		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting,
+		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
@@ -340,6 +342,8 @@ type hubOutboundMessage struct {
 	Phase     string
 	EmittedAt time.Time
 	WakeMAC   string
+	JobID     string
+	Epoch     uint64
 }
 
 func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) error {
@@ -387,6 +391,10 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 				client.handleHubFailover(ctx, message)
 			case "burst":
 				client.handleHubBurst(ctx, message)
+			case "job.revoked":
+				if err := writeHubRevocation(client.jobsInboxRoot, hubJobRevokedEvent{Type: message.Type, JobID: message.JobID, Epoch: message.Epoch}); err != nil {
+					client.warn("job revocation local write unavailable")
+				}
 			}
 		}
 	}()
@@ -414,7 +422,7 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 }
 
 func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
-	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute)}
+	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: scanHubActiveJobs(client.jobsInboxRoot)}
 	if load, err := collectHubHostLoad(ctx); err == nil {
 		heartbeat.HostLoad = &load
 	}
@@ -471,6 +479,10 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 				return hubOutboundMessage{}, false
 			}
 		} else if len(fields) != 4 {
+			return hubOutboundMessage{}, false
+		}
+	case "job.revoked":
+		if len(fields) != 3 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Epoch == 0 {
 			return hubOutboundMessage{}, false
 		}
 	default:

@@ -52,6 +52,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "outbox" {
 		return runOutboxCLI(args[1:])
 	}
+	if args[0] == "jobs" {
+		return runJobsCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
 	if args[0] != "wait" {
 		return ExitUsage
 	}
@@ -383,6 +386,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	hubTokenEnv := fs.String("hub-token-env", "", "optional mode-0600 HUB_MACHINE_ID/HUB_TOKEN env file")
 	hubCFEnv := fs.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
 	hubAccepting := fs.Bool("hub-accepting", false, "advertise readiness for paper or standby jobs to the hub")
+	hubJobsRoot := fs.String("hub-jobs-root", "", "local inbox root containing jobs/*/events for metadata-only heartbeats")
 	failoverWakeOn := fs.String("failover-wake-on", "", "fixed failover machine ID that may receive one Wake-on-LAN packet")
 	failoverWakeMAC := fs.String("failover-wake-mac", "", "fixed Wake-on-LAN MAC address for --failover-wake-on")
 	burstWakeMAC := fs.String("burst-wake-mac", "", "Wake-on-LAN MAC for hub burst events (defaults to failover MAC when configured)")
@@ -430,6 +434,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		if err != nil {
 			return nil, ExitConditionInvalid, err
 		}
+		configuredHub.jobsInboxRoot = *hubJobsRoot
 		hubClient = configuredHub
 		cfg.Hub = HubDaemonConfig{Enabled: true, Client: hubClient}
 	}
@@ -458,6 +463,11 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		cfg.InboxRoot = resolvedInbox
 		cfg.Stage2 = stage2
 	}
+	if hubClient != nil && hubClient.jobsInboxRoot == "" {
+		// Reuse the daemon's already-authorized local inbox when available; the
+		// explicit hub flag remains useful for a dedicated jobs tree.
+		hubClient.jobsInboxRoot = cfg.InboxRoot
+	}
 	return NewDaemon(cfg), ExitOK, nil
 }
 
@@ -476,7 +486,7 @@ func stage2FlagsProvided(args []string) bool {
 }
 
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "checks-config"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "checks-config"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
