@@ -294,6 +294,7 @@ func (h *HubServer) burstStatus() (BurstPolicy, hubBurstState, bool) {
 	return h.burstPolicy, *h.burstState, h.burstPolicyPath != ""
 }
 func (h *HubServer) dispatchBurst(event hubBurstEvent) {
+	h.recordUIEvent("burst", event.Phase, event.Machine, event.EmittedAt)
 	h.mu.Lock()
 	policy := h.burstPolicy
 	record := h.nodes[policy.WakeVia]

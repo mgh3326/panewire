@@ -81,6 +81,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	gracePeriod := flags.Duration("hub-grace", defaultHubGracePeriod, "continuous disconnected/stale grace period")
 	alertNodesCSV := flags.String("alert-nodes", "", "comma-separated authenticated machine IDs to alert on")
 	burstPolicyPath := flags.String("burst-policy", "", "explicit regular JSON burst policy file (hot-reloaded)")
+	uiAllowCFOnly := flags.Bool("ui-allow-cf-only", false, "serve /ui only to Cloudflare Access identities or loopback clients")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return nil, "", ExitUsage, errors.New("invalid hub flags")
 	}
@@ -124,7 +125,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub Telegram configuration is invalid")
 		}
 	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath})
+	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, UIAllowCFOnly: *uiAllowCFOnly})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}

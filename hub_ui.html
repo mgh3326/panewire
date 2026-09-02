@@ -1,0 +1,23 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>panewire hub</title>
+<style>
+:root{font-family:ui-sans-serif,system-ui,sans-serif;color:#17202a;background:#f6f8fa}body{margin:0;padding:1.25rem;max-width:1200px;margin-inline:auto}.top{display:flex;justify-content:space-between;gap:1rem;align-items:baseline}h1{font-size:1.45rem;margin:0}h2{font-size:1.05rem;margin:1.5rem 0 .5rem}.muted{color:#5f6b76;font-size:.9rem}.card{background:#fff;border:1px solid #d0d7de;border-radius:.5rem;padding:.9rem;overflow:auto}table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;padding:.55rem;border-bottom:1px solid #d8dee4;white-space:nowrap}th{color:#57606a}.state{font-weight:600}.connected{color:#1a7f37}.disconnected,.stale{color:#cf222e}.grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}.details{display:grid;grid-template-columns:auto 1fr;gap:.45rem 1rem;margin:0;font-size:.9rem}.details dt{color:#57606a}.details dd{margin:0;overflow-wrap:anywhere}.empty{color:#5f6b76;font-style:italic}@media(max-width:700px){body{padding:.8rem}.grid{grid-template-columns:1fr}.top{display:block}table{font-size:.8rem}th,td{padding:.42rem}}
+@media(prefers-color-scheme:dark){:root{color:#e6edf3;background:#0d1117}.card{background:#161b22;border-color:#30363d}th{color:#8b949e}th,td{border-color:#30363d}.muted,.details dt,.empty{color:#8b949e}.connected{color:#3fb950}.disconnected,.stale{color:#ff7b72}}
+</style>
+</head>
+<body>
+<div class="top"><h1>panewire hub</h1><div class="muted" id="status">Loading…</div></div>
+<section><h2>Nodes</h2><div class="card"><table><thead><tr><th>Machine</th><th>State</th><th>Since</th><th>Alert</th><th>Accepting</th><th>Last ping</th><th>Version</th></tr></thead><tbody id="nodes"></tbody></table></div></section>
+<div class="grid"><section><h2>Burst</h2><div class="card"><dl class="details" id="burst"></dl></div></section><section><h2>Recent events</h2><div class="card"><table><thead><tr><th>Type</th><th>Phase</th><th>Machine</th><th>When</th></tr></thead><tbody id="events"></tbody></table></div></section></div>
+<script>
+const q=s=>document.querySelector(s),esc=v=>String(v??""),when=v=>v?new Date(v).toLocaleString():"—",cell=(r,v)=>{let e=document.createElement("td");e.textContent=esc(v);r.append(e)};
+function rows(sel,items,make,span){let root=q(sel);root.replaceChildren();if(!items.length){let r=document.createElement("tr"),e=document.createElement("td");e.colSpan=span;e.className="empty";e.textContent="None";r.append(e);root.append(r);return}items.forEach(x=>root.append(make(x)))}
+function render(d){q("#status").textContent=`${d.hub.version} · uptime ${Math.floor(d.hub.uptime_ms/1000)}s · ${d.hub.unknown_messages} unknown messages`;rows("#nodes",d.nodes,n=>{let r=document.createElement("tr");cell(r,n.machine_id);let s=n.state;cell(r,s);r.lastChild.className=`state ${s}`;cell(r,when(n.state_since));cell(r,n.alert_class);cell(r,n.accepting?"yes":"no");cell(r,`${n.last_ping_ms} ms`);cell(r,n.version||"—");return r},7);let b=d.burst,p=b.policy,vals=[["Configured",b.configured?"yes":"no"],["Policy",p?`${p.source_machine} → ${p.target_machine}`:"—"],["Threshold",p?`load5 ≥ ${p.load5}, swap ≥ ${p.swap_gb} GB, ${p.consecutive} runs`:"—"],["Source runs",b.source_runs],["Last load",`load1 ${b.last_load.load1}, load5 ${b.last_load.load5}, swap ${b.last_load.swap_used_gb} GB, workers ${b.last_load.worker_procs}`],["Last up",when(b.last_up)],["Last down",when(b.last_down)],["Up completed",b.up_completed?"yes":"no"],["Idle since",when(b.idle_since)]];let dl=q("#burst");dl.replaceChildren();vals.forEach(([k,v])=>{let dt=document.createElement("dt"),dd=document.createElement("dd");dt.textContent=k;dd.textContent=esc(v);dl.append(dt,dd)});rows("#events",d.events,e=>{let r=document.createElement("tr");cell(r,e.kind);cell(r,e.phase);cell(r,e.machine_id);cell(r,when(e.at));return r},4)}
+async function load(){try{let r=await fetch("/ui/data.json",{cache:"no-store"});if(!r.ok)throw Error("unavailable");render(await r.json())}catch{q("#status").textContent="Status data unavailable"}}load();setInterval(load,15000);
+</script>
+</body></html>
