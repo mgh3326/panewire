@@ -3,9 +3,12 @@ package panewire
 import (
 	"context"
 	"crypto/subtle"
+	_ "embed"
 	"encoding/json"
 	"errors"
+	"html/template"
 	"log/slog"
+	"net"
 	"net/http"
 	"regexp"
 	"sort"
@@ -22,6 +25,8 @@ const (
 	hubMachineIDHeader     = "X-Panewire-Machine-ID"
 	hubAuthorizationHeader = "Authorization"
 	hubMaxMessageBytes     = 32 << 10
+	hubUIEventLimit        = 20
+	hubVersion             = "panewire-r13"
 )
 
 var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
@@ -43,6 +48,10 @@ type HubServerConfig struct {
 	Notifier          HubNotifier
 	Logger            *slog.Logger
 	BurstPolicyPath   string
+	// UIAllowCFOnly deliberately requires an explicit operator opt-in before
+	// serving the browser UI. UI requests must then originate on loopback or
+	// include the identity header injected by Cloudflare Access.
+	UIAllowCFOnly bool
 }
 
 // HubNode is the deliberately small presence view returned to authenticated
@@ -99,6 +108,16 @@ type hubEventSubscriber struct {
 	messages chan hubSubscriptionMessage
 }
 
+// hubUIEvent is a closed, display-only event record. It never retains event
+// payloads, so data intended for an authenticated operator websocket cannot
+// accidentally become browser-visible.
+type hubUIEvent struct {
+	Kind      string    `json:"kind"`
+	Phase     string    `json:"phase"`
+	MachineID string    `json:"machine_id"`
+	At        time.Time `json:"at"`
+}
+
 // hubSubscriptionMessage keeps the operator event stream's vocabulary
 // explicit. Agent events retain their existing envelope; server-originated
 // failover messages have their own fixed four-field shape.
@@ -130,6 +149,9 @@ type HubServer struct {
 	burstPolicyModTime time.Time
 	burstState         *hubBurstState
 	unknownMessages    uint64
+	startedAt          time.Time
+	uiAllowCFOnly      bool
+	uiEvents           []hubUIEvent
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -188,7 +210,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	return &HubServer{
 		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{},
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly,
 	}, nil
 }
 
@@ -215,11 +237,134 @@ func validHubToken(token string) bool {
 func (h *HubServer) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", h.handleHealthz)
+	mux.HandleFunc("GET /ui", h.handleUI)
+	mux.HandleFunc("GET /ui/data.json", h.handleUIData)
 	mux.HandleFunc("GET /v1/nodes", h.handleNodes)
 	mux.HandleFunc("GET /v1/burst", h.handleBurst)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	return mux
+}
+
+//go:embed hub_ui.html
+var hubUIHTML string
+
+var hubUITemplate = template.Must(template.New("hub-ui").Parse(hubUIHTML))
+
+type hubUIData struct {
+	SchemaVersion int          `json:"schema_version"`
+	Hub           hubUIHub     `json:"hub"`
+	Nodes         []hubUINode  `json:"nodes"`
+	Burst         hubUIBurst   `json:"burst"`
+	Events        []hubUIEvent `json:"events"`
+}
+
+type hubUIHub struct {
+	Version         string `json:"version"`
+	UptimeMS        int64  `json:"uptime_ms"`
+	UnknownMessages uint64 `json:"unknown_messages"`
+}
+
+type hubUINode struct {
+	MachineID  string    `json:"machine_id"`
+	State      string    `json:"state"`
+	StateSince time.Time `json:"state_since"`
+	AlertClass string    `json:"alert_class"`
+	Accepting  bool      `json:"accepting"`
+	LastPingMS int64     `json:"last_ping_ms"`
+	Version    string    `json:"version"`
+}
+
+type hubUIBurstPolicy struct {
+	SourceMachine   string  `json:"source_machine"`
+	TargetMachine   string  `json:"target_machine"`
+	SwapGB          float64 `json:"swap_gb"`
+	Load5           float64 `json:"load5"`
+	Consecutive     int     `json:"consecutive"`
+	IdleMinutes     int     `json:"idle_minutes"`
+	CooldownMinutes int     `json:"cooldown_minutes"`
+}
+
+type hubUIBurst struct {
+	Configured  bool              `json:"configured"`
+	Policy      *hubUIBurstPolicy `json:"policy"`
+	SourceRuns  int               `json:"source_runs"`
+	LastLoad    HubHostLoad       `json:"last_load"`
+	LastUp      time.Time         `json:"last_up"`
+	LastDown    time.Time         `json:"last_down"`
+	UpCompleted bool              `json:"up_completed"`
+	IdleSince   time.Time         `json:"idle_since"`
+}
+
+func (h *HubServer) handleUI(writer http.ResponseWriter, request *http.Request) {
+	if !h.authorizeUI(request) {
+		http.NotFound(writer, request)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Type", "text/html; charset=utf-8")
+	if err := hubUITemplate.Execute(writer, nil); err != nil {
+		h.logger.Error("hub ui template failed")
+	}
+}
+
+func (h *HubServer) handleUIData(writer http.ResponseWriter, request *http.Request) {
+	if !h.authorizeUI(request) {
+		http.NotFound(writer, request)
+		return
+	}
+	writer.Header().Set("Cache-Control", "no-store")
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(h.uiData())
+}
+
+// authorizeUI intentionally does not trust forwarded-address headers. A UI
+// request is accepted only through the local tunnel endpoint or when the
+// Cloudflare Access identity header is present.
+func (h *HubServer) authorizeUI(request *http.Request) bool {
+	if !h.uiAllowCFOnly {
+		return false
+	}
+	if strings.TrimSpace(request.Header.Get("Cf-Access-Authenticated-User-Email")) != "" {
+		return true
+	}
+	host, _, err := net.SplitHostPort(request.RemoteAddr)
+	if err != nil {
+		host = request.RemoteAddr
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func (h *HubServer) uiData() hubUIData {
+	now := h.now().UTC()
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	nodes := make([]hubUINode, 0, len(h.nodes))
+	for _, record := range h.nodes {
+		age := now.Sub(record.lastPing)
+		if age < 0 {
+			age = 0
+		}
+		alertClass := "unwatched"
+		if h.watchesAlerts(record.machineID) {
+			alertClass = "watched"
+		}
+		nodes = append(nodes, hubUINode{MachineID: record.machineID, State: record.state, StateSince: record.stateSince, AlertClass: alertClass, Accepting: record.accepting, LastPingMS: age.Milliseconds(), Version: record.remoteMeta["version"]})
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })
+	var policy *hubUIBurstPolicy
+	if h.burstPolicyPath != "" {
+		h.reloadBurstPolicyLocked()
+		policy = &hubUIBurstPolicy{SourceMachine: h.burstPolicy.SourceMachine, TargetMachine: h.burstPolicy.TargetMachine, SwapGB: h.burstPolicy.SwapGB, Load5: h.burstPolicy.Load5, Consecutive: h.burstPolicy.Consecutive, IdleMinutes: h.burstPolicy.IdleMinutes, CooldownMinutes: h.burstPolicy.CooldownMinutes}
+	}
+	events := append([]hubUIEvent(nil), h.uiEvents...)
+	uptime := now.Sub(h.startedAt)
+	if uptime < 0 {
+		uptime = 0
+	}
+	state := *h.burstState
+	return hubUIData{SchemaVersion: 1, Hub: hubUIHub{Version: hubVersion, UptimeMS: uptime.Milliseconds(), UnknownMessages: h.unknownMessages}, Nodes: nodes, Burst: hubUIBurst{Configured: h.burstPolicyPath != "", Policy: policy, SourceRuns: state.SourceRuns, LastLoad: state.LastLoad, LastUp: state.LastUp, LastDown: state.LastDown, UpCompleted: state.UpCompleted, IdleSince: state.IdleSince}, Events: events}
 }
 
 func (h *HubServer) handleBurst(writer http.ResponseWriter, request *http.Request) {
@@ -539,6 +684,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		remoteMeta: map[string]string{"version": version, "remote_addr": remoteAddr},
 		state:      "connected", stateSince: now, agent: agent,
 	}
+	h.recordUIEventLocked("presence", "connected", machineID, now)
 	if h.burstPolicyPath != "" && machineID == h.burstPolicy.TargetMachine && accepting && !h.burstState.LastUp.IsZero() {
 		h.burstState.UpCompleted = true
 	}
@@ -558,6 +704,7 @@ func (h *HubServer) touch(machineID string, agent *hubAgent) bool {
 	record.lastPing = h.now().UTC()
 	if record.state != "connected" {
 		record.stateSince = record.lastPing
+		h.recordUIEventLocked("presence", "connected", machineID, record.lastPing)
 	}
 	record.state = "connected"
 	return true
@@ -574,10 +721,12 @@ func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 	defer h.mu.Unlock()
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {
 		record.agent = nil
+		now := h.now().UTC()
 		if record.state == "connected" {
-			record.stateSince = h.now().UTC()
+			record.stateSince = now
 		}
 		record.state = "disconnected"
+		h.recordUIEventLocked("presence", "disconnected", machineID, now)
 	}
 }
 
@@ -586,6 +735,7 @@ func (h *HubServer) broadcast(event hubEvent) {
 }
 
 func (h *HubServer) broadcastFailover(event hubFailoverEvent) {
+	h.recordUIEvent("failover", event.Phase, event.Machine, event.EmittedAt)
 	h.broadcastSubscriptionMessage(hubSubscriptionMessage{failover: &event})
 	h.mu.Lock()
 	agents := make([]*hubAgent, 0, len(h.nodes))
@@ -597,6 +747,22 @@ func (h *HubServer) broadcastFailover(event hubFailoverEvent) {
 	h.mu.Unlock()
 	for _, agent := range agents {
 		agent.queueFailover(event)
+	}
+}
+
+func (h *HubServer) recordUIEvent(kind, phase, machineID string, at time.Time) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.recordUIEventLocked(kind, phase, machineID, at)
+}
+
+func (h *HubServer) recordUIEventLocked(kind, phase, machineID string, at time.Time) {
+	if at.IsZero() {
+		at = h.now().UTC()
+	}
+	h.uiEvents = append(h.uiEvents, hubUIEvent{Kind: kind, Phase: phase, MachineID: machineID, At: at.UTC()})
+	if len(h.uiEvents) > hubUIEventLimit {
+		h.uiEvents = append([]hubUIEvent(nil), h.uiEvents[len(h.uiEvents)-hubUIEventLimit:]...)
 	}
 }
 
@@ -709,6 +875,7 @@ func (h *HubServer) Sweep() {
 		if record.agent != nil && now.Sub(record.lastPing) >= h.staleAfter && record.state != "stale" {
 			record.state = "stale"
 			record.stateSince = now
+			h.recordUIEventLocked("presence", "stale", record.machineID, now)
 		}
 		recordNotifications, recordFailovers := h.observeNodeAlertLocked(now, record)
 		notifications = append(notifications, recordNotifications...)
