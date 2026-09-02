@@ -85,6 +85,44 @@ func TestBurstPolicyLastGoodHotReloadAndDecisions(t *testing.T) {
 	}
 }
 
+// This fixes the safety boundary that matters most for a desktop: a worker
+// observed after almost-idle time must reset the clock and must itself never
+// receive a poweroff decision. Keep the two assertions separate so removing
+// either the reset branch or the WorkerProcs guard turns this test red.
+func TestBurstWorkerAppearanceResetsIdleAndProhibitsDown(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "burst.json")
+	policy := BurstPolicy{SourceMachine: "mac-personal", SwapGB: 8, Load5: 6, Consecutive: 3, WakeVia: "rpi", WakeMAC: "02:1a:2b:3c:4d:5e", TargetMachine: "desktop", IdleMinutes: 30, CooldownMinutes: 0}
+	if err := os.WriteFile(path, []byte(formatBurstPolicy(policy)), 0600); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "mac-personal": r6NodeAToken, "rpi": r6NodeBToken, "desktop": "desktop-token-123456"}, BurstPolicyPath: path, Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	observe := func(load HubHostLoad) []hubBurstEvent {
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		return hub.observeBurstLocked(now, "desktop", load)
+	}
+	if got := observe(HubHostLoad{WorkerProcs: 0}); len(got) != 0 {
+		t.Fatalf("initial idle event=%+v", got)
+	}
+	now = now.Add(29 * time.Minute)
+	if got := observe(HubHostLoad{WorkerProcs: 0}); len(got) != 0 {
+		t.Fatalf("pre-threshold idle event=%+v", got)
+	}
+	now = now.Add(time.Minute)
+	if got := observe(HubHostLoad{WorkerProcs: 1}); len(got) != 0 {
+		t.Fatalf("worker heartbeat must never down: %+v", got)
+	}
+	now = now.Add(29 * time.Minute)
+	if got := observe(HubHostLoad{WorkerProcs: 0}); len(got) != 0 {
+		t.Fatalf("idle below reset threshold must not down: %+v", got)
+	}
+}
+
 func TestBurstCLISetWritesPolicyAtomically(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "burst.json")
 	policy := BurstPolicy{SourceMachine: "mac-personal", SwapGB: 8, Load5: 6, Consecutive: 3, WakeVia: "rpi", WakeMAC: "02:1a:2b:3c:4d:5e", TargetMachine: "desktop", IdleMinutes: 30, CooldownMinutes: 20}
