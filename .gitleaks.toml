@@ -2,8 +2,8 @@
 useDefault = true
 
 [[allowlists]]
-description = "Non-secret Supabase test fixture sentinel"
+description = "Non-secret Supabase test token fixture"
 regexTarget = "match"
 regexes = [
-  '''fixture-publishable''',
+  '''opaque-12345''',
 ]
