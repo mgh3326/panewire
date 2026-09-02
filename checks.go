@@ -309,18 +309,28 @@ func parseLinuxHostLoad(loads, meminfo string) (HubHostLoad, error) {
 }
 
 func countHubWorkerProcesses(ctx context.Context, run func(context.Context, ...string) ([]byte, error)) (int, error) {
-	output, runErr := run(ctx, "pgrep", "-fc", "codex|claude")
-	value, parseErr := strconv.Atoi(strings.TrimSpace(string(output)))
-	if parseErr != nil || value < 0 {
-		return 0, errors.New("worker count unavailable")
-	}
-	// pgrep exits 1 when its count is zero. That is the normal idle signal,
-	// not a collection failure; every other command failure suppresses telemetry.
+	// `pgrep -c` is Linux-only; macOS pgrep rejects it with exit 2. Listing
+	// matching PIDs and counting lines is portable across both platforms.
+	output, runErr := run(ctx, "pgrep", "-f", "codex|claude")
 	if runErr != nil {
+		// pgrep exits 1 when nothing matches. That is the normal idle signal,
+		// not a collection failure; every other command failure suppresses telemetry.
 		var exitErr *exec.ExitError
-		if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 1 || value != 0 {
+		if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 1 || strings.TrimSpace(string(output)) != "" {
 			return 0, errors.New("worker count unavailable")
 		}
+		return 0, nil
+	}
+	value := 0
+	for _, line := range strings.Split(strings.TrimSpace(string(output)), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if _, err := strconv.Atoi(line); err != nil {
+			return 0, errors.New("worker count unavailable")
+		}
+		value++
 	}
 	return value, nil
 }

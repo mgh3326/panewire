@@ -1,9 +1,12 @@
 package panewire
 
 import (
+	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 )
@@ -135,5 +138,46 @@ func TestBurstCLISetWritesPolicyAtomically(t *testing.T) {
 	got, _, err := LoadBurstPolicy(path)
 	if err != nil || got.SwapGB != 9 || got.Load5 != 7 || got.Consecutive != 4 || got.IdleMinutes != 31 {
 		t.Fatalf("policy=%+v err=%v", got, err)
+	}
+}
+
+// macOS pgrep has no -c flag (exit 2 on Linux-only "-fc"), so the worker count
+// must be derived from listed PIDs on both platforms. A zero match is pgrep
+// exit 1 with empty output; anything else that fails must suppress telemetry.
+func TestWorkerCountIsPortableAcrossPgrepVariants(t *testing.T) {
+	ctx := context.Background()
+	exit := func(code int) error {
+		cmd := exec.Command("sh", "-c", "exit "+strconv.Itoa(code))
+		return cmd.Run()
+	}
+	cases := []struct {
+		name   string
+		output string
+		err    error
+		want   int
+		wantOK bool
+	}{
+		{"three workers listed", "123\n456\n789\n", nil, 3, true},
+		{"idle: exit 1 with no output", "", exit(1), 0, true},
+		{"usage error (macOS -c): exit 2", "usage: pgrep", exit(2), 0, false},
+		{"garbage line", "123\nnot-a-pid\n", nil, 0, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var argv []string
+			run := func(_ context.Context, args ...string) ([]byte, error) {
+				argv = args
+				return []byte(tc.output), tc.err
+			}
+			got, err := countHubWorkerProcesses(ctx, run)
+			if (err == nil) != tc.wantOK || got != tc.want {
+				t.Fatalf("got %d, err=%v; want %d ok=%v", got, err, tc.want, tc.wantOK)
+			}
+			for _, a := range argv {
+				if a == "-fc" || a == "-c" {
+					t.Fatalf("worker count must not use the Linux-only pgrep -c flag: %v", argv)
+				}
+			}
+		})
 	}
 }
