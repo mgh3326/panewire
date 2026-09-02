@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Non-secret Supabase test fixture sentinel"
+regexTarget = "match"
+regexes = [
+  '''fixture-publishable''',
+]
