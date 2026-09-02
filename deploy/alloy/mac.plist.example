@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>dev.alloy.fleet</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/alloy</string>
+    <string>run</string>
+    <string>/ABSOLUTE/PATH/TO/config.mac.alloy</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>LOKI_URL</key>
+    <string>__LOKI_URL__</string>
+    <key>LOKI_USER</key>
+    <string>__LOKI_USER__</string>
+    <key>LOKI_TOKEN</key>
+    <string>__LOKI_TOKEN__</string>
+  </dict>
+  <key>RunAtLoad</key>
+  <true/>
+</dict>
+</plist>
