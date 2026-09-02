@@ -318,14 +318,19 @@ func (h *HubServer) handleUIData(writer http.ResponseWriter, request *http.Reque
 	_ = json.NewEncoder(writer).Encode(h.uiData())
 }
 
-// authorizeUI intentionally does not trust forwarded-address headers. A UI
-// request is accepted only through the local tunnel endpoint or when the
-// Cloudflare Access identity header is present.
+// authorizeUI intentionally does not trust forwarded-address headers. A
+// Cloudflare-routed request is accepted only when Access injected an identity;
+// loopback is reserved for a truly local request with no Cloudflare headers.
 func (h *HubServer) authorizeUI(request *http.Request) bool {
 	if !h.uiAllowCFOnly {
 		return false
 	}
-	if strings.TrimSpace(request.Header.Get("Cf-Access-Authenticated-User-Email")) != "" {
+	accessIdentity := strings.TrimSpace(request.Header.Get("Cf-Access-Authenticated-User-Email")) != ""
+	cloudflareRouted := strings.TrimSpace(request.Header.Get("Cf-Ray")) != "" || strings.TrimSpace(request.Header.Get("Cf-Connecting-Ip")) != ""
+	if cloudflareRouted {
+		return accessIdentity
+	}
+	if accessIdentity {
 		return true
 	}
 	host, _, err := net.SplitHostPort(request.RemoteAddr)

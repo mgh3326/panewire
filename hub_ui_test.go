@@ -53,9 +53,20 @@ func TestHubUIAccessAndDataSchema(t *testing.T) {
 	if loopbackResponse.Code != http.StatusOK {
 		t.Fatalf("loopback UI status=%d, want 200", loopbackResponse.Code)
 	}
+	// This tunnel-shaped request must not inherit loopback access. Removing the
+	// Cf-Ray identity check makes this authorization mutant return 200.
+	cloudflareWithoutIdentity := httptest.NewRequest(http.MethodGet, "/ui", nil)
+	cloudflareWithoutIdentity.RemoteAddr = "127.0.0.1:4444"
+	cloudflareWithoutIdentity.Header.Set("Cf-Ray", "fixture-ray")
+	cloudflareWithoutIdentityResponse := httptest.NewRecorder()
+	hub.Handler().ServeHTTP(cloudflareWithoutIdentityResponse, cloudflareWithoutIdentity)
+	if cloudflareWithoutIdentityResponse.Code != http.StatusNotFound {
+		t.Fatalf("Cloudflare request without Access identity status=%d, want 404", cloudflareWithoutIdentityResponse.Code)
+	}
 
 	page := httptest.NewRequest(http.MethodGet, "/ui", nil)
 	page.RemoteAddr = "198.51.100.25:4444"
+	page.Header.Set("Cf-Ray", "fixture-ray")
 	page.Header.Set("Cf-Access-Authenticated-User-Email", "operator@example.test")
 	pageResponse := httptest.NewRecorder()
 	hub.Handler().ServeHTTP(pageResponse, page)
@@ -70,6 +81,7 @@ func TestHubUIAccessAndDataSchema(t *testing.T) {
 
 	dataRequest := httptest.NewRequest(http.MethodGet, "/ui/data.json", nil)
 	dataRequest.RemoteAddr = "198.51.100.25:4444"
+	dataRequest.Header.Set("Cf-Ray", "fixture-ray")
 	dataRequest.Header.Set("Cf-Access-Authenticated-User-Email", "operator@example.test")
 	dataResponse := httptest.NewRecorder()
 	hub.Handler().ServeHTTP(dataResponse, dataRequest)

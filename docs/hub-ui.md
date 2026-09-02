@@ -14,11 +14,14 @@ event status.
    using Email one-time PIN and/or Google login. Leave the existing service
    token policy for node endpoints in place; the UI Access application is a
    separate browser-login policy.
-4. Verify a browser request to `/ui` has the Cloudflare Access identity header
-   `Cf-Access-Authenticated-User-Email`. The hub also accepts loopback callers
-   for local diagnostics and the tunnel origin. Any other caller receives 404.
+4. Verify a browser request to `/ui` has both the Cloudflare routing header
+   `Cf-Ray` (or `Cf-Connecting-Ip`) and the Access identity header
+   `Cf-Access-Authenticated-User-Email`. The hub rejects a Cloudflare-routed
+   request without that identity even though `cloudflared` reaches the origin
+   from `127.0.0.1`. Loopback is accepted only when neither routing header is
+   present, for a true local diagnostic request. Any other caller receives 404.
 
 The UI fetches `/ui/data.json` every 15 seconds. It uses no external CDN or
-browser token. Keep Cloudflare Access in front of the `/ui*` path; the header
-is a signal from that trusted proxy, not a replacement for protecting the
-origin.
+browser token. The defense is the Cloudflare Access login policy plus the
+hub's `Cf-Ray`/identity gate; keep Access in front of `/ui*` and do not expose
+the origin.
