@@ -108,13 +108,13 @@ func TestR4ReEnrollmentMatchesLiveShapesAndUpsertsExistingRegistry(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := credential["PANEWIRE_SUPABASE_REFRESH_TOKEN"]; got != "opaque-12345" || len(got) != 12 {
+	if got := credential["PANEWIRE_SUPABASE_REFRESH_TOKEN"]; got != "fake" || len(got) != 4 {
 		t.Fatalf("opaque refresh token=%q len=%d", got, len(got))
 	}
 	if state := fixture.snapshot(); state.rotations != 1 || state.registryUpserts != 1 || !state.publishablePasswordGrant || !state.mergeDuplicates {
 		t.Fatalf("fixture state=%+v", state)
 	}
-	for _, marker := range []string{"fixture-service-key", "fixture-access-token", "opaque-12345"} {
+	for _, marker := range []string{"fixture-service-key", "fixture-access-token", "fake"} {
 		if strings.Contains(stdout+stderr, marker) {
 			t.Fatalf("credential marker %q leaked to output %q / %q", marker, stdout, stderr)
 		}
@@ -263,7 +263,7 @@ func (f *r4EnrollmentFixture) ServeHTTP(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "session failure", http.StatusServiceUnavailable)
 			return
 		}
-		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "fixture-access-token", "refresh_token": "opaque-12345"})
+		_ = json.NewEncoder(w).Encode(map[string]string{"access_token": "fixture-access-token", "refresh_token": "fake"})
 	case r.Method == http.MethodPost && r.URL.Path == "/rest/v1/machine_registry":
 		if !strings.Contains(r.Header.Get("Prefer"), "resolution=merge-duplicates") {
 			http.Error(w, "upsert preference required", http.StatusConflict)

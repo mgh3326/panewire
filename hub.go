@@ -36,6 +36,10 @@ var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // their own stable machine ID entries.
 type HubServerConfig struct {
 	Tokens map[string]string
+	// ContextStore is optional so existing presence-only installations retain
+	// their prior startup contract. When configured it is the durable context
+	// authority exposed exclusively by the context HTTP endpoints.
+	ContextStore *ContextStore
 	// AlertNodes is the optional watched-node allowlist. A nil map preserves
 	// the original behavior and watches every authenticated node. A non-nil
 	// map watches only its entries; all other authenticated nodes remain in
@@ -152,6 +156,8 @@ type HubServer struct {
 	startedAt          time.Time
 	uiAllowCFOnly      bool
 	uiEvents           []hubUIEvent
+	contextStore       *ContextStore
+	tailnetListen      string
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -211,6 +217,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly,
+		contextStore: config.ContextStore,
 	}, nil
 }
 
@@ -243,6 +250,18 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/burst", h.handleBurst)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
+	if h.contextStore != nil {
+		mux.HandleFunc("POST /v1/context/checkpoints", h.handleContextCheckpoints)
+		mux.HandleFunc("GET /v1/context/checkpoints", h.handleContextCheckpoints)
+		mux.HandleFunc("GET /v1/context/search", h.handleContextSearch)
+		mux.HandleFunc("GET /v1/context/memory/{agent}", h.handleContextMemoryList)
+		mux.HandleFunc("GET /v1/context/memory/{agent}/{name}", h.handleContextMemoryItem)
+		mux.HandleFunc("PUT /v1/context/memory/{agent}/{name}", h.handleContextMemoryItem)
+		mux.HandleFunc("DELETE /v1/context/memory/{agent}/{name}", h.handleContextMemoryItem)
+		mux.HandleFunc("GET /v1/context/docs", h.handleContextDocuments)
+		mux.HandleFunc("GET /v1/context/docs/{key...}", h.handleContextDocumentItem)
+		mux.HandleFunc("PUT /v1/context/docs/{key...}", h.handleContextDocumentItem)
+	}
 	return mux
 }
 

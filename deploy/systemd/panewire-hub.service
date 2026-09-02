@@ -1,0 +1,23 @@
+[Unit]
+Description=Panewire hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=panewire
+Group=panewire
+StateDirectory=panewire
+StateDirectoryMode=0750
+EnvironmentFile=/etc/panewire/context-db.env
+ExecStart=/usr/local/bin/panewire hub --listen 127.0.0.1:9377 --hub-auth /etc/panewire/hub-auth.env --ui-allow-cf-only
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/panewire
+
+[Install]
+WantedBy=multi-user.target

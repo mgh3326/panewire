@@ -1,0 +1,15 @@
+[Unit]
+Description=Back up Panewire context database
+After=panewire-hub.service
+
+[Service]
+Type=oneshot
+User=panewire
+Group=panewire
+EnvironmentFile=/etc/panewire/context-db.env
+ExecStart=/bin/sh -c 'set -eu; mkdir -p /var/lib/panewire/backups; pg_dump -Fc --dbname="$PANEWIRE_CONTEXT_DB_URL" --file "/var/lib/panewire/backups/context-$(date -u +%%Y%%m%%d).dump"; find /var/lib/panewire/backups -type f -name "context-*.dump" -mtime +13 -delete'
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/panewire

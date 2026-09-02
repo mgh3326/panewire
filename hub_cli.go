@@ -61,6 +61,24 @@ func hubListenAddress(raw string) (string, error) {
 	return net.JoinHostPort(host, portText), nil
 }
 
+// hubTailnetListenAddress permits only Tailscale's CGNAT range. This prevents
+// a typo from turning the context API into a public listener.
+func hubTailnetListenAddress(raw string) (string, error) {
+	host, portText, err := net.SplitHostPort(raw)
+	if err != nil {
+		return "", errors.New("hub tailnet listen address must be 100.64.0.0/10:PORT")
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || ip.To4() == nil || ip.To4()[0] != 100 || ip.To4()[1] < 64 || ip.To4()[1] > 127 {
+		return "", errors.New("hub tailnet listen address must be 100.64.0.0/10:PORT")
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port < 0 || port > 65535 || strconv.Itoa(port) != portText {
+		return "", errors.New("hub tailnet listen address must be 100.64.0.0/10:PORT")
+	}
+	return net.JoinHostPort(ip.String(), portText), nil
+}
+
 type hubServerCLIDeps struct {
 	TelegramHTTPClient    *http.Client
 	TelegramBaseURL       string
@@ -76,7 +94,9 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	flags := flag.NewFlagSet("panewire hub", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	listen := flags.String("listen", "127.0.0.1:9377", "loopback listen address")
+	listenTailnet := flags.String("listen-tailnet", "", "optional Tailscale 100.64.0.0/10 listen address")
 	authPath := flags.String("hub-auth", "", "mode-0600 HUB_TOKEN_<machine_id> file")
+	contextDBURL := flags.String("context-db-url", os.Getenv("PANEWIRE_CONTEXT_DB_URL"), "optional PostgreSQL context database URL (defaults PANEWIRE_CONTEXT_DB_URL)")
 	tgEnvPath := flags.String("hub-tg-env", "", "optional mode-0600 TG_BOT_TOKEN/TG_CHAT_ID env file")
 	gracePeriod := flags.Duration("hub-grace", defaultHubGracePeriod, "continuous disconnected/stale grace period")
 	alertNodesCSV := flags.String("alert-nodes", "", "comma-separated authenticated machine IDs to alert on")
@@ -91,6 +111,13 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	address, err := hubListenAddress(*listen)
 	if err != nil {
 		return nil, "", ExitConditionInvalid, err
+	}
+	var tailnetAddress string
+	if *listenTailnet != "" {
+		tailnetAddress, err = hubTailnetListenAddress(*listenTailnet)
+		if err != nil {
+			return nil, "", ExitConditionInvalid, err
+		}
 	}
 	tokens, err := loadHubAuthFile(*authPath)
 	if err != nil {
@@ -125,10 +152,24 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub Telegram configuration is invalid")
 		}
 	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, UIAllowCFOnly: *uiAllowCFOnly})
+	var contextStore *ContextStore
+	if *contextDBURL != "" {
+		contextStore, err = OpenContextStore(*contextDBURL)
+		if err != nil {
+			if errors.Is(err, ErrContextTrigramUnavailable) {
+				return nil, "", ExitConditionInvalid, errors.New("context PostgreSQL pg_trgm extension unavailable")
+			}
+			return nil, "", ExitConditionInvalid, errors.New("context PostgreSQL database is invalid")
+		}
+	}
+	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, ContextStore: contextStore, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, UIAllowCFOnly: *uiAllowCFOnly})
 	if err != nil {
+		if contextStore != nil {
+			_ = contextStore.Close()
+		}
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}
+	hub.tailnetListen = tailnetAddress
 	return hub, address, ExitOK, nil
 }
 
@@ -159,12 +200,24 @@ func runHubCLI(args []string) int {
 		fmt.Fprintln(os.Stderr, "hub configuration rejected:", err)
 		return code
 	}
+	if hub.contextStore != nil {
+		defer hub.contextStore.Close()
+	}
 	listener, err := net.Listen("tcp", address)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hub unavailable")
 		return ExitInternal
 	}
 	defer listener.Close()
+	var tailnetListener net.Listener
+	if hub.tailnetListen != "" {
+		tailnetListener, err = net.Listen("tcp", hub.tailnetListen)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "hub unavailable")
+			return ExitInternal
+		}
+		defer tailnetListener.Close()
+	}
 	server := &http.Server{
 		Handler:           hub.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -179,6 +232,9 @@ func runHubCLI(args []string) int {
 		defer shutdownCancel()
 		_ = server.Shutdown(shutdownContext)
 	}()
+	if tailnetListener != nil {
+		go func() { _ = server.Serve(tailnetListener) }()
+	}
 	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintln(os.Stderr, "hub unavailable")
 		return ExitInternal
@@ -418,7 +474,12 @@ func hubHTTPSEndpoint(raw, endpoint string, allowInsecureForTests bool) (*url.UR
 	default:
 		return nil, errors.New("invalid hub URL")
 	}
-	parsed.Path = endpoint
+	endpointURL, err := url.Parse(endpoint)
+	if err != nil || endpointURL.IsAbs() || endpointURL.Host != "" || !strings.HasPrefix(endpointURL.Path, "/") {
+		return nil, errors.New("invalid hub URL")
+	}
+	parsed.Path = endpointURL.Path
+	parsed.RawQuery = endpointURL.RawQuery
 	return parsed, nil
 }
 

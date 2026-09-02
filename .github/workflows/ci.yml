@@ -7,6 +7,7 @@ on:
 jobs:
   test:
     runs-on: macos-latest
+
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -15,3 +16,30 @@ jobs:
           cache: true
       - run: go vet ./...
       - run: go test ./...
+
+  context-postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: panewire
+          POSTGRES_PASSWORD: panewire-ci-only
+          POSTGRES_DB: panewire
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U panewire -d panewire"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - run: go vet ./...
+      - run: go test -race ./...
+        env:
+          PANEWIRE_TEST_DB_URL: postgres://panewire:panewire-ci-only@127.0.0.1:5432/panewire?sslmode=disable
