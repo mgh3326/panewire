@@ -69,10 +69,18 @@ func newHubTelegramNotifier(env hubTelegramEnv, deps hubNotifierDeps) (*hubTeleg
 }
 
 func (notifier *hubTelegramNotifier) Send(ctx context.Context, alert HubAlert) error {
+	return notifier.sendText(ctx, formatHubAlert(alert))
+}
+
+func (notifier *hubTelegramNotifier) SendBurst(ctx context.Context, text string) error {
+	return notifier.sendText(ctx, text)
+}
+
+func (notifier *hubTelegramNotifier) sendText(ctx context.Context, text string) error {
 	body, err := json.Marshal(struct {
 		ChatID string `json:"chat_id"`
 		Text   string `json:"text"`
-	}{ChatID: notifier.chatID, Text: formatHubAlert(alert)})
+	}{ChatID: notifier.chatID, Text: text})
 	if err != nil {
 		return errors.New("hub Telegram message encoding failed")
 	}

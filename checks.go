@@ -6,12 +6,30 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"math"
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
+	"strconv"
 	"strings"
 	"time"
 )
+
+// HubHostLoad is the bounded machine telemetry used only by the burst policy.
+// It intentionally contains measurements, never command output.
+type HubHostLoad struct {
+	Load1       float64 `json:"load1"`
+	Load5       float64 `json:"load5"`
+	SwapUsedGB  float64 `json:"swap_used_gb"`
+	WorkerProcs int     `json:"worker_procs"`
+}
+
+func (load HubHostLoad) valid() bool {
+	return load.Load1 >= 0 && load.Load5 >= 0 && load.SwapUsedGB >= 0 && load.WorkerProcs >= 0 &&
+		!math.IsNaN(load.Load1) && !math.IsNaN(load.Load5) && !math.IsNaN(load.SwapUsedGB) &&
+		!math.IsInf(load.Load1, 0) && !math.IsInf(load.Load5, 0) && !math.IsInf(load.SwapUsedGB, 0)
+}
 
 var hubCheckNamePattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,63}$`)
 
@@ -175,4 +193,134 @@ func executeHubCheck(ctx context.Context, argv []string) error {
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	return command.Run()
+}
+
+// collectHubHostLoad reads the two platform load sources and a local worker
+// count. Command text is parsed and discarded before the value leaves here.
+func collectHubHostLoad(ctx context.Context) (HubHostLoad, error) {
+	var load HubHostLoad
+	var err error
+	if runtime.GOOS == "darwin" {
+		load, err = collectDarwinHostLoad(ctx, runHubMeasurement)
+	} else if runtime.GOOS == "linux" {
+		load, err = collectLinuxHostLoad(os.ReadFile)
+	} else {
+		return HubHostLoad{}, errors.New("host load unsupported")
+	}
+	if err != nil {
+		return HubHostLoad{}, err
+	}
+	workers, err := countHubWorkerProcesses(ctx, runHubMeasurement)
+	if err != nil {
+		return HubHostLoad{}, err
+	}
+	load.WorkerProcs = workers
+	return load, nil
+}
+
+func runHubMeasurement(ctx context.Context, argv ...string) ([]byte, error) {
+	if len(argv) == 0 {
+		return nil, errors.New("measurement unavailable")
+	}
+	command := exec.CommandContext(ctx, argv[0], argv[1:]...)
+	return command.Output()
+}
+
+func collectDarwinHostLoad(ctx context.Context, run func(context.Context, ...string) ([]byte, error)) (HubHostLoad, error) {
+	loads, err := run(ctx, "sysctl", "-n", "vm.loadavg")
+	if err != nil {
+		return HubHostLoad{}, errors.New("host load unavailable")
+	}
+	swap, err := run(ctx, "sysctl", "-n", "vm.swapusage")
+	if err != nil {
+		return HubHostLoad{}, errors.New("host load unavailable")
+	}
+	return parseDarwinHostLoad(string(loads), string(swap))
+}
+
+func parseDarwinHostLoad(loads, swap string) (HubHostLoad, error) {
+	fields := strings.Fields(strings.Trim(strings.TrimSpace(loads), "{}"))
+	if len(fields) < 3 {
+		return HubHostLoad{}, errors.New("host load unavailable")
+	}
+	parse := func(value string) (float64, error) { return strconv.ParseFloat(strings.Trim(value, "{}"), 64) }
+	load1, err1 := parse(fields[0])
+	load5, err5 := parse(fields[1])
+	match := regexp.MustCompile(`(?i)used\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMG])`).FindStringSubmatch(swap)
+	if err1 != nil || err5 != nil || len(match) != 3 {
+		return HubHostLoad{}, errors.New("host load unavailable")
+	}
+	used, err := strconv.ParseFloat(match[1], 64)
+	if err != nil {
+		return HubHostLoad{}, errors.New("host load unavailable")
+	}
+	switch strings.ToUpper(match[2]) {
+	case "K":
+		used /= 1024 * 1024
+	case "M":
+		used /= 1024
+	case "G":
+	}
+	load := HubHostLoad{Load1: load1, Load5: load5, SwapUsedGB: used}
+	if !load.valid() {
+		return HubHostLoad{}, errors.New("host load unavailable")
+	}
+	return load, nil
+}
+
+func collectLinuxHostLoad(read func(string) ([]byte, error)) (HubHostLoad, error) {
+	loads, err := read("/proc/loadavg")
+	if err != nil {
+		return HubHostLoad{}, errors.New("host load unavailable")
+	}
+	meminfo, err := read("/proc/meminfo")
+	if err != nil {
+		return HubHostLoad{}, errors.New("host load unavailable")
+	}
+	return parseLinuxHostLoad(string(loads), string(meminfo))
+}
+
+func parseLinuxHostLoad(loads, meminfo string) (HubHostLoad, error) {
+	fields := strings.Fields(loads)
+	if len(fields) < 2 {
+		return HubHostLoad{}, errors.New("host load unavailable")
+	}
+	load1, err1 := strconv.ParseFloat(fields[0], 64)
+	load5, err5 := strconv.ParseFloat(fields[1], 64)
+	values := make(map[string]float64)
+	for _, line := range strings.Split(meminfo, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			if value, err := strconv.ParseFloat(fields[1], 64); err == nil {
+				values[strings.TrimSuffix(fields[0], ":")] = value
+			}
+		}
+	}
+	total, totalOK := values["SwapTotal"]
+	free, freeOK := values["SwapFree"]
+	if err1 != nil || err5 != nil || !totalOK || !freeOK || free > total {
+		return HubHostLoad{}, errors.New("host load unavailable")
+	}
+	load := HubHostLoad{Load1: load1, Load5: load5, SwapUsedGB: (total - free) / (1024 * 1024)}
+	if !load.valid() {
+		return HubHostLoad{}, errors.New("host load unavailable")
+	}
+	return load, nil
+}
+
+func countHubWorkerProcesses(ctx context.Context, run func(context.Context, ...string) ([]byte, error)) (int, error) {
+	output, runErr := run(ctx, "pgrep", "-fc", "codex|claude")
+	value, parseErr := strconv.Atoi(strings.TrimSpace(string(output)))
+	if parseErr != nil || value < 0 {
+		return 0, errors.New("worker count unavailable")
+	}
+	// pgrep exits 1 when its count is zero. That is the normal idle signal,
+	// not a collection failure; every other command failure suppresses telemetry.
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if !errors.As(runErr, &exitErr) || exitErr.ExitCode() != 1 || value != 0 {
+			return 0, errors.New("worker count unavailable")
+		}
+	}
+	return value, nil
 }

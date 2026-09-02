@@ -40,6 +40,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "hub-emit" {
 		return runHubEmitCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
+	if args[0] == "burst" {
+		return runBurstCLI(args[1:], os.Stdout, os.Stderr)
+	}
 	if args[0] == "prompt" {
 		return runPromptCLI(args[1:], cfg)
 	}
@@ -382,6 +385,8 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	hubAccepting := fs.Bool("hub-accepting", false, "advertise readiness for paper or standby jobs to the hub")
 	failoverWakeOn := fs.String("failover-wake-on", "", "fixed failover machine ID that may receive one Wake-on-LAN packet")
 	failoverWakeMAC := fs.String("failover-wake-mac", "", "fixed Wake-on-LAN MAC address for --failover-wake-on")
+	burstWakeMAC := fs.String("burst-wake-mac", "", "Wake-on-LAN MAC for hub burst events (defaults to failover MAC when configured)")
+	burstPoweroffAllowed := fs.Bool("burst-poweroff-allowed", false, "allow authenticated hub burst down events to run sudo -n /usr/sbin/poweroff")
 	checksConfig := fs.String("checks-config", "", "explicit local hub check JSON configuration")
 	if fs.Parse(args) != nil {
 		return nil, ExitUsage, fmt.Errorf("invalid daemon flags")
@@ -421,7 +426,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 			}
 			checks = loadedChecks
 		}
-		configuredHub, err := buildHubDaemonClient(*hubURL, *hubTokenEnv, *hubCFEnv, checks, *hubAccepting, *failoverWakeOn, *failoverWakeMAC, deps)
+		configuredHub, err := buildHubDaemonClientWithBurst(*hubURL, *hubTokenEnv, *hubCFEnv, checks, *hubAccepting, *failoverWakeOn, *failoverWakeMAC, *burstWakeMAC, *burstPoweroffAllowed, deps)
 		if err != nil {
 			return nil, ExitConditionInvalid, err
 		}
@@ -471,7 +476,7 @@ func stage2FlagsProvided(args []string) bool {
 }
 
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "failover-wake-on", "failover-wake-mac", "checks-config"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "checks-config"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
