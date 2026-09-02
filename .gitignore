@@ -20,3 +20,6 @@ coverage.html
 .DS_Store
 .idea/
 .vscode/
+
+# Fleet Alloy credentials stay local.
+deploy/alloy/loki.env
