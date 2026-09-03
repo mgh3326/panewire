@@ -112,12 +112,21 @@ type HubActiveJob struct {
 
 type hubJobRecord struct {
 	HubActiveJob
-	Node           string
-	LastSeen       time.Time
-	Orphaned       bool
-	Completed      bool
-	ReassignedFrom string
-	RevokedEpoch   uint64
+	Node          string
+	LastSeen      time.Time
+	Orphaned      bool
+	Completed     bool
+	FencedNodes   map[string]uint64
+	Reassignments []hubJobReassignment
+}
+
+// hubJobReassignment is retained in-memory as an audit trail for every
+// predecessor that must remain fenced across later redispatches.
+type hubJobReassignment struct {
+	From  string
+	To    string
+	Epoch uint64
+	At    time.Time
 }
 
 type hubJobEventPayload struct {
@@ -197,6 +206,7 @@ type HubServer struct {
 	uiAllowCFOnly      bool
 	uiEvents           []hubUIEvent
 	jobs               map[string]*hubJobRecord
+	pendingRevocations map[string]map[string]hubJobRevokedEvent
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -258,7 +268,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	return &HubServer{
 		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord),
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent),
 	}, nil
 }
 
@@ -587,6 +597,13 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				return
 			}
 		}
+		if message.Kind == "job.revocation.ack" {
+			ack, valid := decodeHubJobCompletionPayload(message.Payload)
+			if !valid || !h.acknowledgeRevocation(machineID, ack) {
+				h.countUnknownMessage()
+				return
+			}
+		}
 		if message.Kind == "note" {
 			// `note` was reserved before R9 and may be consumed by existing
 			// subscribers with their own payload. Only the canonical text shape
@@ -793,7 +810,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
-		if message.Kind == "job.completed" {
+		if message.Kind == "job.completed" || message.Kind == "job.revocation.ack" {
 			if _, valid := decodeHubJobCompletionPayload(rawPayload); !valid {
 				return hubInbound{}, false
 			}
@@ -807,7 +824,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note", "job.completed":
+	case "heartbeat", "note", "job.completed", "job.revocation.ack":
 		return true
 	}
 	return false
@@ -830,6 +847,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		h.burstState.UpCompleted = true
 	}
 	h.mu.Unlock()
+	h.tryPendingRevocations(machineID)
 	if previous != nil && previous != agent {
 		_ = previous.conn.Close(websocket.StatusPolicyViolation, "replaced")
 	}

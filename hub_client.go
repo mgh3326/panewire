@@ -96,6 +96,7 @@ type HubClient struct {
 	wait                 HubWait
 	warn                 func(string)
 	events               chan hubClientEvent
+	completedJobs        map[string]uint64
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -170,7 +171,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
-		dial: config.Dial, wait: config.Wait, warn: config.Warn, events: make(chan hubClientEvent, 64),
+		dial: config.Dial, wait: config.Wait, warn: config.Warn, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64),
 	}, nil
 }
 
@@ -360,6 +361,11 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 		return err
 	}
+	for _, event := range client.jobCompletionEvents() {
+		if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
+			return err
+		}
+	}
 	readErrors := make(chan error, 1)
 	go func() {
 		for {
@@ -394,6 +400,12 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 			case "job.revoked":
 				if err := writeHubRevocation(client.jobsInboxRoot, hubJobRevokedEvent{Type: message.Type, JobID: message.JobID, Epoch: message.Epoch}); err != nil {
 					client.warn("job revocation local write unavailable")
+				} else if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: "job.revocation.ack", Payload: hubJobCompletionPayload(message.JobID, message.Epoch)})); err != nil {
+					select {
+					case readErrors <- err:
+					case <-ctx.Done():
+					}
+					return
 				}
 			}
 		}
@@ -417,6 +429,11 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 				return err
 			}
+			for _, event := range client.jobCompletionEvents() {
+				if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
+					return err
+				}
+			}
 		}
 	}
 }
@@ -428,6 +445,29 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	}
 	payload, _ := json.Marshal(heartbeat)
 	return hubClientEvent{Kind: "heartbeat", Payload: payload}
+}
+
+func hubJobCompletionPayload(jobID string, epoch uint64) json.RawMessage {
+	payload, _ := json.Marshal(struct {
+		JobID string `json:"job_id"`
+		Epoch uint64 `json:"epoch"`
+	}{JobID: jobID, Epoch: epoch})
+	return payload
+}
+
+// jobCompletionEvents is the node-side producer for the fenced completion
+// contract. It emits only a local terminal-event ID/epoch once per epoch.
+func (client *HubClient) jobCompletionEvents() []hubClientEvent {
+	completed := scanHubCompletedJobs(client.jobsInboxRoot)
+	events := make([]hubClientEvent, 0, len(completed))
+	for _, job := range completed {
+		if client.completedJobs[job.JobID] == job.Epoch {
+			continue
+		}
+		client.completedJobs[job.JobID] = job.Epoch
+		events = append(events, hubClientEvent{Kind: "job.completed", Payload: hubJobCompletionPayload(job.JobID, job.Epoch)})
+	}
+	return events
 }
 
 func hubClientWireEvent(event hubClientEvent) struct {

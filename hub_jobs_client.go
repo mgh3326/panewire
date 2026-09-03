@@ -36,6 +36,68 @@ func scanHubActiveJobs(inboxRoot string) []HubActiveJob {
 	return jobs
 }
 
+// scanHubCompletedJobs is intentionally separate from the active-set scan:
+// only an explicit local completion event produces a hub completion message.
+// A revocation is terminal locally but is never a completion acknowledgement.
+func scanHubCompletedJobs(inboxRoot string) []HubActiveJob {
+	if inboxRoot == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(filepath.Join(inboxRoot, "jobs"))
+	if err != nil {
+		return nil
+	}
+	completed := make([]HubActiveJob, 0)
+	for _, entry := range entries {
+		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
+			continue
+		}
+		if job, ok := scanHubJobCompletion(filepath.Join(inboxRoot, "jobs", entry.Name(), "events"), entry.Name()); ok {
+			completed = append(completed, job)
+		}
+	}
+	sort.Slice(completed, func(i, j int) bool { return completed[i].JobID < completed[j].JobID })
+	return completed
+}
+
+func scanHubJobCompletion(eventsDir, jobID string) (HubActiveJob, bool) {
+	entries, err := os.ReadDir(eventsDir)
+	if err != nil {
+		return HubActiveJob{}, false
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	var completed HubActiveJob
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		contents, err := os.ReadFile(filepath.Join(eventsDir, entry.Name()))
+		if err != nil || len(contents) > 16<<10 {
+			continue
+		}
+		var event struct {
+			Type  string `json:"type"`
+			Kind  string `json:"kind"`
+			Event string `json:"event"`
+			Epoch uint64 `json:"epoch"`
+		}
+		if json.Unmarshal(contents, &event) != nil {
+			continue
+		}
+		kind := event.Type
+		if kind == "" {
+			kind = event.Kind
+		}
+		if kind == "" {
+			kind = event.Event
+		}
+		if (kind == "job.completed" || kind == "job.completion") && event.Epoch > 0 {
+			completed = HubActiveJob{JobID: jobID, Epoch: event.Epoch}
+		}
+	}
+	return completed, completed.JobID != ""
+}
+
 func scanHubJobEvents(eventsDir, jobID string) (HubActiveJob, bool) {
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {

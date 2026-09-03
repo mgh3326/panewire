@@ -38,7 +38,6 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 
 func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, received time.Time) {
 	seen := make(map[string]struct{}, len(active))
-	revocations := make([]hubJobRevokedEvent, 0)
 	h.mu.Lock()
 	record := h.nodes[machineID]
 	if record == nil {
@@ -50,17 +49,21 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		seen[job.JobID] = struct{}{}
 		record.activeJobs[job.JobID] = job
 		current := h.jobs[job.JobID]
-		if current != nil && current.Epoch > job.Epoch && current.ReassignedFrom == machineID {
-			if current.RevokedEpoch < current.Epoch {
-				current.RevokedEpoch = current.Epoch
-				revocations = append(revocations, hubJobRevokedEvent{Type: "job.revoked", JobID: job.JobID, Epoch: current.Epoch})
-				h.queueJobEventLocked("job.revoked", hubJobEventPayload{JobID: job.JobID, Node: machineID, Epoch: current.Epoch, LastSeen: received})
+		if current == nil {
+			// Epoch 1 is issued by the hub for a first-seen job. A node cannot
+			// establish authority by presenting an arbitrary higher epoch.
+			if job.Epoch == 1 {
+				h.jobs[job.JobID] = &hubJobRecord{HubActiveJob: job, Node: machineID, LastSeen: received, FencedNodes: make(map[string]uint64)}
 			}
 			continue
 		}
-		if current == nil || current.Completed || job.Epoch >= current.Epoch {
-			h.jobs[job.JobID] = &hubJobRecord{HubActiveJob: job, Node: machineID, LastSeen: received}
+		if current.Completed || current.Node != machineID || current.Epoch != job.Epoch {
+			// A stale or self-promoted heartbeat is presence-only. It must not
+			// modify ownership, epoch, fencing, or liveness of the true owner.
+			continue
 		}
+		// Same owner and hub-issued epoch: only local metadata/liveness advances.
+		current.AgentLabel, current.LastEventSeq, current.PushSHA, current.LastSeen = job.AgentLabel, job.LastEventSeq, job.PushSHA, received
 	}
 	// A job absent after the node has reconnected is a local terminal-file
 	// observation. Inspect the durable-in-process job view rather than just the
@@ -70,38 +73,64 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		if _, stillActive := seen[id]; stillActive {
 			continue
 		}
-		if current.Node == machineID && current.Orphaned && current.ReassignedFrom == "" {
+		if current.Node == machineID && current.Orphaned {
 			current.Orphaned, current.Completed = false, true
 			h.queueJobEventLocked("job.recovered", hubJobEventPayload{JobID: id, Node: machineID, Epoch: current.Epoch, LastSeen: received})
 		}
 	}
 	h.mu.Unlock()
-	for _, revoked := range revocations {
-		h.queueRevocation(machineID, revoked)
-	}
+	h.tryPendingRevocations(machineID)
 }
 
-func (h *HubServer) queueRevocation(machineID string, event hubJobRevokedEvent) {
+// tryPendingRevocations deliberately retains every event until the node
+// acknowledges its local marker write. A missing agent or full channel is a
+// retry condition, never a delivery acknowledgement.
+func (h *HubServer) tryPendingRevocations(machineID string) {
 	h.mu.Lock()
 	record := h.nodes[machineID]
+	pending := h.pendingRevocations[machineID]
+	events := make([]hubJobRevokedEvent, 0, len(pending))
+	for _, event := range pending {
+		events = append(events, event)
+	}
 	var agent *hubAgent
 	if record != nil {
 		agent = record.agent
 	}
 	h.mu.Unlock()
-	if agent != nil {
+	if agent == nil {
+		return
+	}
+	for _, event := range events {
 		agent.queueRevocation(event)
 	}
 }
 
-func (agent *hubAgent) queueRevocation(event hubJobRevokedEvent) {
+func (agent *hubAgent) queueRevocation(event hubJobRevokedEvent) bool {
 	if agent == nil || agent.revocations == nil {
-		return
+		return false
 	}
 	select {
 	case agent.revocations <- event:
+		return true
 	default:
+		return false
 	}
+}
+
+func (h *HubServer) acknowledgeRevocation(machineID string, ack hubJobEventPayload) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	pending := h.pendingRevocations[machineID]
+	event, exists := pending[ack.JobID]
+	if !exists || event.Epoch != ack.Epoch {
+		return false
+	}
+	delete(pending, ack.JobID)
+	if len(pending) == 0 {
+		delete(h.pendingRevocations, machineID)
+	}
+	return true
 }
 
 func (h *HubServer) observeJobCompletion(machineID string, completion hubJobEventPayload, received time.Time) bool {
@@ -155,20 +184,58 @@ func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, bool) {
 		return hubJobEventPayload{}, false
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	job := h.jobs[jobID]
 	if job == nil || !job.Orphaned || job.Completed || job.Node == to {
+		h.mu.Unlock()
 		return hubJobEventPayload{}, false
 	}
 	if _, knownNode := h.tokens[to]; !knownNode {
+		h.mu.Unlock()
 		return hubJobEventPayload{}, false
 	}
 	from := job.Node
 	job.Epoch++
-	job.ReassignedFrom, job.Node, job.Orphaned = from, to, false
+	if job.FencedNodes == nil {
+		job.FencedNodes = make(map[string]uint64)
+	}
+	// A node may become the current owner again (A→B→A). Its old local epoch
+	// is still fenced by the hub epoch comparison, but this node-level channel
+	// must not deliver a revocation for the assignment it is about to own.
+	delete(job.FencedNodes, to)
+	if pending := h.pendingRevocations[to]; pending != nil {
+		delete(pending, jobID)
+		if len(pending) == 0 {
+			delete(h.pendingRevocations, to)
+		}
+	}
+	for node := range job.FencedNodes {
+		job.FencedNodes[node] = job.Epoch
+	}
+	job.FencedNodes[from] = job.Epoch
+	job.Reassignments = append(job.Reassignments, hubJobReassignment{From: from, To: to, Epoch: job.Epoch, At: h.now().UTC()})
+	job.Node, job.Orphaned = to, false
+	for node, epoch := range job.FencedNodes {
+		h.enqueueRevocationLocked(node, hubJobRevokedEvent{Type: "job.revoked", JobID: jobID, Epoch: epoch})
+	}
 	payload := hubJobEventPayload{JobID: jobID, From: from, To: to, Epoch: job.Epoch, LastSeen: job.LastSeen}
 	h.queueJobEventLocked("job.reassigned", payload)
+	h.mu.Unlock()
+	// The queue is also retried on reconnect and heartbeat; attempting now only
+	// reduces the time to a local stop marker for an already-online predecessor.
+	h.tryPendingRevocations(from)
 	return payload, true
+}
+
+func (h *HubServer) enqueueRevocationLocked(machineID string, event hubJobRevokedEvent) {
+	pending := h.pendingRevocations[machineID]
+	if pending == nil {
+		pending = make(map[string]hubJobRevokedEvent)
+		h.pendingRevocations[machineID] = pending
+	}
+	if prior, exists := pending[event.JobID]; !exists || prior.Epoch < event.Epoch {
+		pending[event.JobID] = event
+		h.queueJobEventLocked("job.revoked", hubJobEventPayload{JobID: event.JobID, Node: machineID, Epoch: event.Epoch})
+	}
 }
 
 // queueJobEventLocked records only fixed job metadata for UI/event listeners.
