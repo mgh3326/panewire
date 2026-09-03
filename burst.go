@@ -330,13 +330,15 @@ func (h *HubServer) reloadBurstPolicyLocked() {
 		return
 	}
 	info, err := os.Stat(h.burstPolicyPath)
-	if err != nil || !info.Mode().IsRegular() || info.ModTime().Equal(h.burstPolicyModTime) {
+	if err != nil || !info.Mode().IsRegular() {
 		return
 	}
 	policy, modTime, err := LoadBurstPolicy(h.burstPolicyPath)
 	if err != nil {
 		h.logger.Warn("burst policy reload rejected")
-		h.burstPolicyModTime = info.ModTime()
+		// Keep the last good timestamp. A rapid atomic replacement can share a
+		// filesystem timestamp with a rejected edit; advancing here would make
+		// the repaired policy invisible until a later timestamp tick.
 		return
 	}
 	h.burstPolicy, h.burstPolicyModTime = policy, modTime

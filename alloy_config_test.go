@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -30,5 +31,36 @@ func TestAlloyConfigFormat(t *testing.T) {
 				t.Fatalf("alloy fmt %s: %v\n%s", config, err, output)
 			}
 		})
+	}
+}
+
+func TestAlloyMetricLabelContract(t *testing.T) {
+	for _, config := range []string{"deploy/alloy/config.linux.alloy", "deploy/alloy/config.mac.alloy"} {
+		contents, err := os.ReadFile(config)
+		if err != nil {
+			t.Fatal(err)
+		}
+		text := string(contents)
+		for _, required := range []string{"prometheus.exporter.unix", "prometheus.remote_write", "sys.env(\"MACHINE_ID\")", "sys.env(\"PROM_REMOTE_WRITE_URL\")"} {
+			if !strings.Contains(text, required) {
+				t.Fatalf("%s missing %s", config, required)
+			}
+		}
+		if strings.Contains(text, "machine_id = \"mac-personal\"") {
+			t.Fatalf("%s has a static machine label", config)
+		}
+	}
+	install, err := os.ReadFile("deploy/alloy/install-linux.sh")
+	if err != nil || !strings.Contains(string(install), "PROM_REMOTE_WRITE_URL is required") {
+		t.Fatal("linux installer must reject a missing remote write URL")
+	}
+	checker := "deploy/alloy/run-alloy.sh"
+	if output, err := exec.Command("sh", checker, "true", "config").CombinedOutput(); err == nil || !strings.Contains(string(output), "MACHINE_ID is required") {
+		t.Fatalf("mac launcher must reject missing machine ID: %v %s", err, output)
+	}
+	command := exec.Command("sh", checker, "true", "config")
+	command.Env = append(os.Environ(), "MACHINE_ID=test", "PROM_REMOTE_WRITE_URL=http://prom.example")
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("mac launcher rejected complete environment: %v %s", err, output)
 	}
 }

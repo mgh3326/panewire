@@ -6,12 +6,16 @@
   <string>dev.alloy.fleet</string>
   <key>ProgramArguments</key>
   <array>
+    <string>/ABSOLUTE/PATH/TO/run-alloy.sh</string>
     <string>/opt/homebrew/bin/alloy</string>
-    <string>run</string>
     <string>/ABSOLUTE/PATH/TO/config.mac.alloy</string>
   </array>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>MACHINE_ID</key>
+    <string>__MACHINE_ID__</string>
+    <key>PROM_REMOTE_WRITE_URL</key>
+    <string>__PROM_REMOTE_WRITE_URL__</string>
     <key>LOKI_URL</key>
     <string>__LOKI_URL__</string>
     <key>LOKI_USER</key>

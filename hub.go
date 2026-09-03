@@ -52,6 +52,15 @@ type HubServerConfig struct {
 	Notifier        HubNotifier
 	Logger          *slog.Logger
 	BurstPolicyPath string
+	// PlacementPolicyPath is an optional operator-owned JSON policy. It is
+	// deliberately separate from the R12 burst policy because placement never
+	// changes pressure thresholds or dispatches work.
+	PlacementPolicyPath string
+	PrometheusURL       string
+	PrometheusClient    *http.Client
+	PrometheusBearer    string
+	PrometheusBasicUser string
+	PrometheusBasicPass string
 	// UIAllowCFOnly deliberately requires an explicit operator opt-in before
 	// serving the browser UI. UI requests must then originate on loopback or
 	// include the identity header injected by Cloudflare Access.
@@ -207,22 +216,31 @@ type HubServer struct {
 	notifier          HubNotifier
 	logger            *slog.Logger
 
-	mu                 sync.Mutex
-	nodes              map[string]*hubNodeRecord
-	lastNotes          map[string]*HubLastNote
-	subscribers        map[*hubEventSubscriber]struct{}
-	alerts             map[string]*hubAlertState
-	burstPolicyPath    string
-	burstPolicy        BurstPolicy
-	burstPolicyModTime time.Time
-	burstState         *hubBurstState
-	unknownMessages    uint64
-	startedAt          time.Time
-	uiAllowCFOnly      bool
-	uiEvents           []hubUIEvent
-	jobs               map[string]*hubJobRecord
-	pendingRevocations map[string]map[string]hubJobRevokedEvent
-	holds              map[string]*hubBurstHold
+	mu                     sync.Mutex
+	nodes                  map[string]*hubNodeRecord
+	lastNotes              map[string]*HubLastNote
+	subscribers            map[*hubEventSubscriber]struct{}
+	alerts                 map[string]*hubAlertState
+	burstPolicyPath        string
+	burstPolicy            BurstPolicy
+	burstPolicyModTime     time.Time
+	burstState             *hubBurstState
+	unknownMessages        uint64
+	startedAt              time.Time
+	uiAllowCFOnly          bool
+	uiEvents               []hubUIEvent
+	jobs                   map[string]*hubJobRecord
+	pendingRevocations     map[string]map[string]hubJobRevokedEvent
+	holds                  map[string]*hubBurstHold
+	placementPolicyPath    string
+	placementPolicy        PlacementPolicy
+	placementPolicyModTime time.Time
+	prometheusURL          string
+	prometheusClient       *http.Client
+	prometheusBearer       string
+	prometheusBasicUser    string
+	prometheusBasicPass    string
+	placementCache         placementCache
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -278,12 +296,22 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		}
 		burstPolicy, burstPolicyModTime = policy, modTime
 	}
+	var placementPolicy PlacementPolicy
+	var placementPolicyModTime time.Time
+	if config.PlacementPolicyPath != "" {
+		policy, modTime, err := LoadPlacementPolicy(config.PlacementPolicyPath)
+		if err != nil {
+			return nil, errors.New("hub placement policy is invalid")
+		}
+		placementPolicy, placementPolicyModTime = policy, modTime
+	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
 	return &HubServer{
 		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
+		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold),
 	}, nil
 }
@@ -318,6 +346,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/burst/request", h.handleBurstRequest)
 	mux.HandleFunc("POST /v1/burst/release", h.handleBurstRelease)
 	mux.HandleFunc("GET /v1/burst/holds", h.handleBurstHolds)
+	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)

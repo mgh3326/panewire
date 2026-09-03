@@ -15,5 +15,5 @@ jobs:
           cache: true
       - run: go vet ./...
       - run: go test ./...
-      - run: sh -n deploy/alloy/install-linux.sh
+      - run: sh -n deploy/alloy/install-linux.sh deploy/alloy/run-alloy.sh
       - uses: gitleaks/gitleaks-action@v2
