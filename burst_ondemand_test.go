@@ -65,8 +65,30 @@ func TestBurstR16RequestWakeUpLeaseAndHoldSuppression(t *testing.T) {
 	if err := json.NewDecoder(response.Body).Decode(&lease); err != nil || lease.Status != "active" || lease.Target != "desktop" || lease.ID == "" {
 		t.Fatalf("lease=%+v err=%v", lease, err)
 	}
-	// Mutant ①: removing holdsActiveLocked from observeBurstLocked makes this RED.
-	now = now.Add(time.Minute)
+	// Mutant M1: removing the hold gate makes the subject emit the same down
+	// event as this no-hold control on its second, elapsed-idle observation.
+	controlNow := now
+	control := r16Hub(t, &controlNow)
+	control.mu.Lock()
+	if events := control.observeBurstLocked(controlNow, "desktop", HubHostLoad{WorkerProcs: 0}); len(events) != 0 {
+		control.mu.Unlock()
+		t.Fatalf("idle control emitted too early: %+v", events)
+	}
+	control.mu.Unlock()
+	controlNow = controlNow.Add(2 * time.Minute)
+	control.mu.Lock()
+	controlEvents := control.observeBurstLocked(controlNow, "desktop", HubHostLoad{WorkerProcs: 0})
+	control.mu.Unlock()
+	if len(controlEvents) != 1 || controlEvents[0].Phase != hubFailoverPhaseDown {
+		t.Fatalf("no-hold control did not emit idle poweroff: %+v", controlEvents)
+	}
+	hub.mu.Lock()
+	if events := hub.observeBurstLocked(now, "desktop", HubHostLoad{WorkerProcs: 0}); len(events) != 0 {
+		hub.mu.Unlock()
+		t.Fatalf("held target emitted too early: %+v", events)
+	}
+	hub.mu.Unlock()
+	now = now.Add(2 * time.Minute)
 	hub.mu.Lock()
 	events := hub.observeBurstLocked(now, "desktop", HubHostLoad{WorkerProcs: 0})
 	hub.mu.Unlock()
@@ -93,10 +115,10 @@ func TestBurstR16TTLAuthAndTimeoutCLI(t *testing.T) {
 	now = now.Add(time.Second)
 	hub.mu.Lock()
 	active := hub.holdsActiveLocked("desktop", now)
-	status := hub.holds["hold-fixture"].Status
+	_, retained := hub.holds["hold-fixture"]
 	hub.mu.Unlock()
-	if active || status != "expired" {
-		t.Fatalf("TTL lease remained active: active=%t status=%s", active, status)
+	if active || retained {
+		t.Fatalf("TTL lease remained active or was not pruned: active=%t retained=%t", active, retained)
 	}
 	server := httptest.NewServer(hub.Handler())
 	defer server.Close()
@@ -138,11 +160,41 @@ func TestBurstR16ClientAdoptsAssignedEpochAndHoldResponse(t *testing.T) {
 	if !ok || !heartbeat.HoldsActive || len(heartbeat.ActiveJobs) != 1 || heartbeat.ActiveJobs[0].Epoch != 2 {
 		t.Fatalf("node did not adopt directives: %+v ok=%t", heartbeat, ok)
 	}
+	if err := os.WriteFile(filepath.Join(events, "00002-job.completed.json"), []byte(`{"type":"job.completed","epoch":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Mutant M5c: removing the completion overlay sends local epoch 1 instead
+	// of the hub-issued 2 and makes the hub reject this completion.
+	completed := client.jobCompletionEvents()
+	if len(completed) != 1 {
+		t.Fatalf("completion events=%+v", completed)
+	}
+	completion, ok := decodeHubJobCompletionPayload(completed[0].Payload)
+	if !ok || completion.Epoch != 2 {
+		t.Fatalf("completion did not adopt assigned epoch: %+v ok=%t", completion, ok)
+	}
+	now := time.Date(2026, 9, 4, 3, 0, 0, 0, time.UTC)
+	hub := r16Hub(t, &now)
+	hub.jobs["job-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-a", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 2}, Node: "wake"}
+	if !hub.observeJobCompletion("wake", completion, now) {
+		t.Fatal("hub rejected completion at assigned epoch")
+	}
 	if parsed, ok := parseHubOutbound([]byte(`{"type":"job.assigned","job_id":"job-a","epoch":2}`)); !ok || parsed.Epoch != 2 {
 		t.Fatalf("assigned parse=%+v ok=%t", parsed, ok)
 	}
 	if parsed, ok := parseHubOutbound([]byte(`{"type":"burst.holds","holds_active":true}`)); !ok || !parsed.HoldsActive {
 		t.Fatalf("holds parse=%+v ok=%t", parsed, ok)
 	}
-	_ = context.Background()
+	poweroffs := 0
+	client.burstPoweroffAllowed = true
+	client.burstPoweroff = func(context.Context) error { poweroffs++; return nil }
+	client.handleHubBurst(context.Background(), hubOutboundMessage{Type: "burst", Phase: hubFailoverPhaseDown, EmittedAt: now})
+	if poweroffs != 0 {
+		t.Fatal("node poweroff was not gated by holds_active")
+	}
+	client.burstHoldsActive = false
+	client.handleHubBurst(context.Background(), hubOutboundMessage{Type: "burst", Phase: hubFailoverPhaseDown, EmittedAt: now.Add(time.Nanosecond)})
+	if poweroffs != 1 {
+		t.Fatal("node did not resume poweroff after hold cleared")
+	}
 }

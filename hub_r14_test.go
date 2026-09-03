@@ -178,6 +178,30 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	}
 }
 
+func TestHubR14ReassignImmediatelyDeliversAssignedEpoch(t *testing.T) {
+	clock := time.Date(2026, 9, 4, 3, 10, 0, 0, time.UTC)
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken, "node-b": r6NodeBToken}, Now: func() time.Time { return clock }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.jobs["immediate-assignment"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "immediate-assignment", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 1}, Node: "node-a", Orphaned: true, FencedNodes: make(map[string]uint64)}
+	recipient := &hubAgent{assignments: make(chan hubJobAssignedEvent, 1)}
+	hub.connect("node-b", "r14", "fixture", recipient, false)
+	// Mutant M5b: deleting reassignJob's immediate queueAssignment leaves this
+	// receive empty even though the heartbeat re-delivery path still exists.
+	if result, ok := hub.reassignJob("immediate-assignment", "node-b"); !ok || result.Epoch != 2 {
+		t.Fatalf("reassignment failed: result=%+v ok=%t", result, ok)
+	}
+	select {
+	case assigned := <-recipient.assignments:
+		if assigned.JobID != "immediate-assignment" || assigned.Epoch != 2 {
+			t.Fatalf("bad immediate assignment: %+v", assigned)
+		}
+	default:
+		t.Fatal("reassign did not immediately deliver assigned epoch")
+	}
+}
+
 func TestHubR14HeartbeatJobMetadataIsBoundedAndBodyFree(t *testing.T) {
 	jobs := make([]HubActiveJob, 40)
 	for i := range jobs {

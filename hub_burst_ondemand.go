@@ -33,9 +33,12 @@ func newBurstHoldID() string {
 }
 
 func (h *HubServer) sweepBurstHoldsLocked(now time.Time) {
-	for _, hold := range h.holds {
+	for id, hold := range h.holds {
 		if hold.Status == "active" && !now.Before(hold.ExpiresAt) {
 			hold.Status = "expired"
+		}
+		if hold.Status == "expired" {
+			delete(h.holds, id)
 		}
 	}
 }
@@ -109,11 +112,19 @@ func (h *HubServer) requestBurst(ctx context.Context, target, reason string, hol
 		return hubBurstHold{}, "target_unavailable"
 	}
 	wake := h.nodes[h.burstPolicy.WakeVia]
-	event := hubBurstEvent{Type: "burst", Machine: target, Phase: hubFailoverPhaseUp, EmittedAt: now, WakeMAC: h.burstPolicy.WakeMAC}
-	h.mu.Unlock()
 	if wake == nil || wake.agent == nil {
+		h.mu.Unlock()
 		return hubBurstHold{}, "wake_via_unavailable"
 	}
+	if h.burstPolicy.CooldownMinutes > 0 && !h.burstState.LastUp.IsZero() && now.Sub(h.burstState.LastUp) < time.Duration(h.burstPolicy.CooldownMinutes)*time.Minute {
+		h.mu.Unlock()
+		return hubBurstHold{}, "cooldown_active"
+	}
+	// On-demand wakes use the existing R12 wake path and participate in its
+	// cooldown accounting so repeated requests cannot spam WoL/notifiers.
+	h.burstState.LastUp, h.burstState.UpCompleted = now, false
+	event := hubBurstEvent{Type: "burst", Machine: target, Phase: hubFailoverPhaseUp, EmittedAt: now, WakeMAC: h.burstPolicy.WakeMAC}
+	h.mu.Unlock()
 	// Reuse the exact R12 target/wake-via dispatch path; packet send outcome is
 	// intentionally confirmed only by the target's authenticated heartbeat.
 	h.dispatchBurst(event)

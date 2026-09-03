@@ -62,7 +62,8 @@ When an orphaned owner returns while its local claim is still active, the hub
 clears the orphan marker and emits `job.recovered`; it no longer appears in the
 reassignable list. The receiving node receives the hub-issued epoch as
 `job.assigned` immediately when connected and again with heartbeat directives,
-then uses that epoch in its active-job heartbeat and completion event.
+then uses `max(local_epoch, assigned_epoch)` in both its active-job heartbeat
+and its completion event.
 
 The hub job/fence view and retry queue are intentionally in memory. A hub
 restart loses orphan, epoch, reassignment, and pending-revocation state; local

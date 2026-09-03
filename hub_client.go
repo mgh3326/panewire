@@ -482,6 +482,13 @@ func hubJobCompletionPayload(jobID string, epoch uint64) json.RawMessage {
 // contract. It emits only a local terminal-event ID/epoch once per epoch.
 func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 	completed := scanHubCompletedJobs(client.jobsInboxRoot)
+	client.assignmentMu.Lock()
+	for index := range completed {
+		if assigned := client.assignedJobs[completed[index].JobID]; assigned > completed[index].Epoch {
+			completed[index].Epoch = assigned
+		}
+	}
+	client.assignmentMu.Unlock()
 	events := make([]hubClientEvent, 0, len(completed))
 	for _, job := range completed {
 		if client.completedJobs[job.JobID] == job.Epoch {
@@ -588,6 +595,15 @@ func (client *HubClient) handleHubBurst(ctx context.Context, message hubOutbound
 		return
 	}
 	if !poweroffAllowed {
+		return
+	}
+	// The hub is authoritative for idle evaluation, but a target that has
+	// already received a live hold must also reject a delayed down event. This
+	// prevents an in-flight or future emitter from defeating the hold locally.
+	client.burstMu.Lock()
+	holdsActive := client.burstHoldsActive
+	client.burstMu.Unlock()
+	if holdsActive {
 		return
 	}
 	if err := poweroff(ctx); err != nil {

@@ -1190,8 +1190,15 @@ func (agent *hubAgent) queueAssignment(event hubJobAssignedEvent) {
 	select {
 	case agent.assignments <- event:
 	default:
-		if agent.conn != nil {
-			_ = agent.conn.Close(websocket.StatusPolicyViolation, "slow")
+		// Directives are idempotent. Preserve a current assignment rather than
+		// disconnecting a healthy node because heartbeat writes lag briefly.
+		select {
+		case <-agent.assignments:
+		default:
+		}
+		select {
+		case agent.assignments <- event:
+		default:
 		}
 	}
 }
