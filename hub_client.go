@@ -33,6 +33,7 @@ type HubClientConfig struct {
 	CFAccessClientID      string
 	CFAccessClientSecret  string
 	Accepting             bool
+	JobsInboxRoot         string
 	FailoverWakeOn        string
 	FailoverWakeMAC       string
 	BurstWakeMAC          string
@@ -75,6 +76,7 @@ type HubClient struct {
 	cfAccessClientID     string
 	cfAccessSecret       string
 	accepting            bool
+	jobsInboxRoot        string
 	failoverWakeOn       string
 	failoverWakeMAC      net.HardwareAddr
 	failoverWakeDest     string
@@ -94,6 +96,7 @@ type HubClient struct {
 	wait                 HubWait
 	warn                 func(string)
 	events               chan hubClientEvent
+	completedJobs        map[string]uint64
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -163,12 +166,12 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		config.burstPoweroff = executeHubBurstPoweroff
 	}
 	return &HubClient{
-		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting,
+		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
-		dial: config.Dial, wait: config.Wait, warn: config.Warn, events: make(chan hubClientEvent, 64),
+		dial: config.Dial, wait: config.Wait, warn: config.Warn, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64),
 	}, nil
 }
 
@@ -340,6 +343,8 @@ type hubOutboundMessage struct {
 	Phase     string
 	EmittedAt time.Time
 	WakeMAC   string
+	JobID     string
+	Epoch     uint64
 }
 
 func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) error {
@@ -355,6 +360,11 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 	}
 	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 		return err
+	}
+	for _, event := range client.jobCompletionEvents() {
+		if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
+			return err
+		}
 	}
 	readErrors := make(chan error, 1)
 	go func() {
@@ -387,6 +397,16 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 				client.handleHubFailover(ctx, message)
 			case "burst":
 				client.handleHubBurst(ctx, message)
+			case "job.revoked":
+				if err := writeHubRevocation(client.jobsInboxRoot, hubJobRevokedEvent{Type: message.Type, JobID: message.JobID, Epoch: message.Epoch}); err != nil {
+					client.warn("job revocation local write unavailable")
+				} else if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: "job.revocation.ack", Payload: hubJobCompletionPayload(message.JobID, message.Epoch)})); err != nil {
+					select {
+					case readErrors <- err:
+					case <-ctx.Done():
+					}
+					return
+				}
 			}
 		}
 	}()
@@ -409,17 +429,45 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 				return err
 			}
+			for _, event := range client.jobCompletionEvents() {
+				if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
+					return err
+				}
+			}
 		}
 	}
 }
 
 func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
-	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute)}
+	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: scanHubActiveJobs(client.jobsInboxRoot)}
 	if load, err := collectHubHostLoad(ctx); err == nil {
 		heartbeat.HostLoad = &load
 	}
 	payload, _ := json.Marshal(heartbeat)
 	return hubClientEvent{Kind: "heartbeat", Payload: payload}
+}
+
+func hubJobCompletionPayload(jobID string, epoch uint64) json.RawMessage {
+	payload, _ := json.Marshal(struct {
+		JobID string `json:"job_id"`
+		Epoch uint64 `json:"epoch"`
+	}{JobID: jobID, Epoch: epoch})
+	return payload
+}
+
+// jobCompletionEvents is the node-side producer for the fenced completion
+// contract. It emits only a local terminal-event ID/epoch once per epoch.
+func (client *HubClient) jobCompletionEvents() []hubClientEvent {
+	completed := scanHubCompletedJobs(client.jobsInboxRoot)
+	events := make([]hubClientEvent, 0, len(completed))
+	for _, job := range completed {
+		if client.completedJobs[job.JobID] == job.Epoch {
+			continue
+		}
+		client.completedJobs[job.JobID] = job.Epoch
+		events = append(events, hubClientEvent{Kind: "job.completed", Payload: hubJobCompletionPayload(job.JobID, job.Epoch)})
+	}
+	return events
 }
 
 func hubClientWireEvent(event hubClientEvent) struct {
@@ -471,6 +519,10 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 				return hubOutboundMessage{}, false
 			}
 		} else if len(fields) != 4 {
+			return hubOutboundMessage{}, false
+		}
+	case "job.revoked":
+		if len(fields) != 3 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Epoch == 0 {
 			return hubOutboundMessage{}, false
 		}
 	default:

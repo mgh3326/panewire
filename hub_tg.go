@@ -76,6 +76,12 @@ func (notifier *hubTelegramNotifier) SendBurst(ctx context.Context, text string)
 	return notifier.sendText(ctx, text)
 }
 
+// SendJob is intentionally a single metadata-only line. It satisfies the job
+// resilience notification path without extending the general alert payload.
+func (notifier *hubTelegramNotifier) SendJob(ctx context.Context, text string) error {
+	return notifier.sendText(ctx, text)
+}
+
 func (notifier *hubTelegramNotifier) sendText(ctx context.Context, text string) error {
 	body, err := json.Marshal(struct {
 		ChatID string `json:"chat_id"`
