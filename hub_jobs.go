@@ -62,6 +62,13 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 			// modify ownership, epoch, fencing, or liveness of the true owner.
 			continue
 		}
+		// A returned current owner can prove it is still working. This is distinct
+		// from a local terminal-file observation below: clear sticky orphan state
+		// and make it unavailable for redispatch again.
+		if current.Orphaned {
+			current.Orphaned = false
+			h.queueJobEventLocked("job.recovered", hubJobEventPayload{JobID: job.JobID, Node: machineID, Epoch: job.Epoch, LastSeen: received})
+		}
 		// Same owner and hub-issued epoch: only local metadata/liveness advances.
 		current.AgentLabel, current.LastEventSeq, current.PushSHA, current.LastSeen = job.AgentLabel, job.LastEventSeq, job.PushSHA, received
 	}
@@ -220,6 +227,14 @@ func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, bool) {
 	payload := hubJobEventPayload{JobID: jobID, From: from, To: to, Epoch: job.Epoch, LastSeen: job.LastSeen}
 	h.queueJobEventLocked("job.reassigned", payload)
 	h.mu.Unlock()
+	// The recipient also gets this on its next heartbeat/connect. Immediate
+	// delivery narrows the window for an already-online receiving node.
+	h.mu.Lock()
+	newOwner := h.nodes[to]
+	h.mu.Unlock()
+	if newOwner != nil {
+		newOwner.agent.queueAssignment(hubJobAssignedEvent{Type: "job.assigned", JobID: jobID, Epoch: payload.Epoch})
+	}
 	// The queue is also retried on reconnect and heartbeat; attempting now only
 	// reduces the time to a local stop marker for an already-online predecessor.
 	h.tryPendingRevocations(from)

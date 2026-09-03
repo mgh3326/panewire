@@ -97,6 +97,9 @@ type HubClient struct {
 	warn                 func(string)
 	events               chan hubClientEvent
 	completedJobs        map[string]uint64
+	assignedJobs         map[string]uint64
+	assignmentMu         sync.Mutex
+	burstHoldsActive     bool
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -171,7 +174,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
-		dial: config.Dial, wait: config.Wait, warn: config.Warn, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64),
+		dial: config.Dial, wait: config.Wait, warn: config.Warn, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), assignedJobs: make(map[string]uint64),
 	}, nil
 }
 
@@ -338,13 +341,14 @@ type hubClientConnection struct {
 }
 
 type hubOutboundMessage struct {
-	Type      string
-	Machine   string
-	Phase     string
-	EmittedAt time.Time
-	WakeMAC   string
-	JobID     string
-	Epoch     uint64
+	Type        string
+	Machine     string
+	Phase       string
+	EmittedAt   time.Time
+	WakeMAC     string
+	JobID       string
+	Epoch       uint64
+	HoldsActive bool
 }
 
 func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) error {
@@ -407,6 +411,14 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 					}
 					return
 				}
+			case "job.assigned":
+				client.assignmentMu.Lock()
+				client.assignedJobs[message.JobID] = message.Epoch
+				client.assignmentMu.Unlock()
+			case "burst.holds":
+				client.burstMu.Lock()
+				client.burstHoldsActive = message.HoldsActive
+				client.burstMu.Unlock()
 			}
 		}
 	}()
@@ -439,7 +451,18 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 }
 
 func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
-	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: scanHubActiveJobs(client.jobsInboxRoot)}
+	active := scanHubActiveJobs(client.jobsInboxRoot)
+	client.assignmentMu.Lock()
+	for i := range active {
+		if epoch := client.assignedJobs[active[i].JobID]; epoch > active[i].Epoch {
+			active[i].Epoch = epoch
+		}
+	}
+	client.assignmentMu.Unlock()
+	client.burstMu.Lock()
+	holdsActive := client.burstHoldsActive
+	client.burstMu.Unlock()
+	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HoldsActive: holdsActive}
 	if load, err := collectHubHostLoad(ctx); err == nil {
 		heartbeat.HostLoad = &load
 	}
@@ -459,6 +482,13 @@ func hubJobCompletionPayload(jobID string, epoch uint64) json.RawMessage {
 // contract. It emits only a local terminal-event ID/epoch once per epoch.
 func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 	completed := scanHubCompletedJobs(client.jobsInboxRoot)
+	client.assignmentMu.Lock()
+	for index := range completed {
+		if assigned := client.assignedJobs[completed[index].JobID]; assigned > completed[index].Epoch {
+			completed[index].Epoch = assigned
+		}
+	}
+	client.assignmentMu.Unlock()
 	events := make([]hubClientEvent, 0, len(completed))
 	for _, job := range completed {
 		if client.completedJobs[job.JobID] == job.Epoch {
@@ -525,6 +555,14 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		if len(fields) != 3 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Epoch == 0 {
 			return hubOutboundMessage{}, false
 		}
+	case "job.assigned":
+		if len(fields) != 3 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Epoch == 0 {
+			return hubOutboundMessage{}, false
+		}
+	case "burst.holds":
+		if len(fields) != 2 || json.Unmarshal(fields["holds_active"], &message.HoldsActive) != nil {
+			return hubOutboundMessage{}, false
+		}
 	default:
 		return hubOutboundMessage{}, false
 	}
@@ -557,6 +595,15 @@ func (client *HubClient) handleHubBurst(ctx context.Context, message hubOutbound
 		return
 	}
 	if !poweroffAllowed {
+		return
+	}
+	// The hub is authoritative for idle evaluation, but a target that has
+	// already received a live hold must also reject a delayed down event. This
+	// prevents an in-flight or future emitter from defeating the hold locally.
+	client.burstMu.Lock()
+	holdsActive := client.burstHoldsActive
+	client.burstMu.Unlock()
+	if holdsActive {
 		return
 	}
 	if err := poweroff(ctx); err != nil {

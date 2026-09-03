@@ -98,6 +98,8 @@ type hubAgent struct {
 	failovers   chan hubFailoverEvent
 	bursts      chan hubBurstEvent
 	revocations chan hubJobRevokedEvent
+	assignments chan hubJobAssignedEvent
+	holds       chan hubBurstHoldsEvent
 }
 
 // HubActiveJob is deliberately metadata-only. It is copied from a node's
@@ -143,6 +145,19 @@ type hubJobRevokedEvent struct {
 	Type  string `json:"type"`
 	JobID string `json:"job_id"`
 	Epoch uint64 `json:"epoch"`
+}
+
+// hubJobAssignedEvent is the hub-issued epoch a redispatched owner must use.
+// It deliberately carries no work body or execution instruction.
+type hubJobAssignedEvent struct {
+	Type  string `json:"type"`
+	JobID string `json:"job_id"`
+	Epoch uint64 `json:"epoch"`
+}
+
+type hubBurstHoldsEvent struct {
+	Type        string `json:"type"`
+	HoldsActive bool   `json:"holds_active"`
 }
 
 type hubEvent struct {
@@ -207,6 +222,7 @@ type HubServer struct {
 	uiEvents           []hubUIEvent
 	jobs               map[string]*hubJobRecord
 	pendingRevocations map[string]map[string]hubJobRevokedEvent
+	holds              map[string]*hubBurstHold
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -268,7 +284,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	return &HubServer{
 		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent),
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold),
 	}, nil
 }
 
@@ -299,6 +315,9 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /ui/data.json", h.handleUIData)
 	mux.HandleFunc("GET /v1/nodes", h.handleNodes)
 	mux.HandleFunc("GET /v1/burst", h.handleBurst)
+	mux.HandleFunc("POST /v1/burst/request", h.handleBurstRequest)
+	mux.HandleFunc("POST /v1/burst/release", h.handleBurstRelease)
+	mux.HandleFunc("GET /v1/burst/holds", h.handleBurstHolds)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
@@ -513,13 +532,15 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), revocations: make(chan hubJobRevokedEvent, 64)}
+	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
 	go agent.writeFailovers(agentContext)
 	go agent.writeBursts(agentContext)
 	go agent.writeRevocations(agentContext)
+	go agent.writeAssignments(agentContext)
+	go agent.writeHolds(agentContext)
 	for {
 		messageType, payload, err := connection.Read(request.Context())
 		if err != nil {
@@ -589,6 +610,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 					h.dispatchBurst(burst)
 				}
 			}
+			h.sendHeartbeatDirectives(machineID, agent)
 		}
 		if message.Kind == "job.completed" {
 			completion, valid := decodeHubJobCompletionPayload(message.Payload)
@@ -630,10 +652,11 @@ type hubInbound struct {
 }
 
 type hubHeartbeatPayload struct {
-	Status     string                    `json:"status"`
-	Checks     map[string]HubCheckStatus `json:"checks"`
-	HostLoad   *HubHostLoad              `json:"host_load,omitempty"`
-	ActiveJobs []HubActiveJob            `json:"active_jobs,omitempty"`
+	Status      string                    `json:"status"`
+	Checks      map[string]HubCheckStatus `json:"checks"`
+	HostLoad    *HubHostLoad              `json:"host_load,omitempty"`
+	ActiveJobs  []HubActiveJob            `json:"active_jobs,omitempty"`
+	HoldsActive bool                      `json:"holds_active,omitempty"`
 }
 
 type hubNotePayload struct {
@@ -666,7 +689,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "active_jobs" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "active_jobs" && name != "holds_active" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -679,6 +702,9 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	heartbeat.Checks = make(map[string]HubCheckStatus)
+	if rawHolds, exists := fields["holds_active"]; exists && json.Unmarshal(rawHolds, &heartbeat.HoldsActive) != nil {
+		return hubHeartbeatPayload{}, false
+	}
 	if rawChecks, exists := fields["checks"]; exists {
 		if json.Unmarshal(rawChecks, &heartbeat.Checks) != nil || heartbeat.Checks == nil {
 			return hubHeartbeatPayload{}, false
@@ -885,6 +911,7 @@ func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 			record.stateSince = now
 		}
 		record.state = "disconnected"
+		h.markBurstHoldsLostLocked(machineID)
 		h.recordUIEventLocked("presence", "disconnected", machineID, now)
 	}
 }
@@ -1034,10 +1061,12 @@ func (h *HubServer) Sweep() {
 	var notifications []hubNotification
 	var failovers []hubFailoverEvent
 	h.mu.Lock()
+	h.sweepBurstHoldsLocked(now)
 	for _, record := range h.nodes {
 		if record.agent != nil && now.Sub(record.lastPing) >= h.staleAfter && record.state != "stale" {
 			record.state = "stale"
 			record.stateSince = now
+			h.markBurstHoldsLostLocked(record.machineID)
 			h.recordUIEventLocked("presence", "stale", record.machineID, now)
 		}
 		recordNotifications, recordFailovers := h.observeNodeAlertLocked(now, record)
@@ -1147,6 +1176,70 @@ func (agent *hubAgent) writeRevocations(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case event := <-agent.revocations:
+			if err := agent.writeJSON(event); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (agent *hubAgent) queueAssignment(event hubJobAssignedEvent) {
+	if agent == nil || agent.assignments == nil {
+		return
+	}
+	select {
+	case agent.assignments <- event:
+	default:
+		// Directives are idempotent. Preserve a current assignment rather than
+		// disconnecting a healthy node because heartbeat writes lag briefly.
+		select {
+		case <-agent.assignments:
+		default:
+		}
+		select {
+		case agent.assignments <- event:
+		default:
+		}
+	}
+}
+
+func (agent *hubAgent) writeAssignments(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-agent.assignments:
+			if err := agent.writeJSON(event); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (agent *hubAgent) queueHolds(event hubBurstHoldsEvent) {
+	if agent == nil || agent.holds == nil {
+		return
+	}
+	select {
+	case agent.holds <- event:
+	default:
+		select {
+		case <-agent.holds:
+		default:
+		}
+		select {
+		case agent.holds <- event:
+		default:
+		}
+	}
+}
+
+func (agent *hubAgent) writeHolds(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-agent.holds:
 			if err := agent.writeJSON(event); err != nil {
 				return
 			}

@@ -42,8 +42,22 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 		t.Fatalf("orphan was duplicated: %+v", hub.uiEvents)
 	}
 	hub.connect("node-a", "r14", "fixture", old, false)
-	hub.observeActiveJobs("node-a", nil, clock) // local completion removed it from the active scan
+	// Mutant F1: deleting the active-return recovery branch leaves this orphan
+	// eligible for reassignment and turns the assertion red.
+	hub.observeActiveJobs("node-a", []HubActiveJob{first}, clock)
+	if got := hub.orphanedJobs(); len(got) != 0 || hub.jobs[first.JobID].Orphaned {
+		t.Fatalf("working return left sticky orphan: jobs=%+v record=%+v", got, hub.jobs[first.JobID])
+	}
 	if countR14UIEvents(hub, "recovered") != 1 {
+		t.Fatalf("working return did not record recovery: %+v", hub.uiEvents)
+	}
+	// Terminal return is separately retained for the original completion case.
+	hub.disconnect("node-a", old)
+	clock = clock.Add(2 * time.Second)
+	r14Sweep(hub)
+	hub.connect("node-a", "r14", "fixture", old, false)
+	hub.observeActiveJobs("node-a", nil, clock) // local completion removed it from the active scan
+	if countR14UIEvents(hub, "recovered") != 2 {
 		t.Fatalf("reconnect completion did not recover orphan: %+v", hub.uiEvents)
 	}
 
@@ -57,8 +71,19 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	if !ok || result.From != "node-a" || result.To != "node-b" || result.Epoch != 2 {
 		t.Fatalf("bad reassignment: result=%+v ok=%t", result, ok)
 	}
-	newOwner := &hubAgent{revocations: make(chan hubJobRevokedEvent, 4)}
+	newOwner := &hubAgent{revocations: make(chan hubJobRevokedEvent, 4), assignments: make(chan hubJobAssignedEvent, 4)}
 	hub.connect("node-b", "r14", "fixture", newOwner, false)
+	hub.sendHeartbeatDirectives("node-b", newOwner)
+	// Mutant F2: deleting assigned-epoch delivery leaves the new owner unable
+	// to adopt the hub fence and makes this assertion red.
+	select {
+	case assigned := <-newOwner.assignments:
+		if assigned.JobID != second.JobID || assigned.Epoch != 2 {
+			t.Fatalf("bad assigned epoch: %+v", assigned)
+		}
+	default:
+		t.Fatal("new owner was not sent hub-issued epoch")
+	}
 	hub.observeActiveJobs("node-b", []HubActiveJob{{JobID: second.JobID, AgentLabel: "wrk-b", LastEventSeq: 3, Epoch: 2}}, clock)
 	// New-owner metadata must never erase the predecessor fence.
 	if got := hub.jobs[second.JobID].FencedNodes["node-a"]; got != 2 {
@@ -150,6 +175,30 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	}
 	if hub.observeJobCompletion("node-b", hubJobEventPayload{JobID: third.JobID, Epoch: 2}, clock) {
 		t.Fatal("B completion at N+1 was accepted after N+2 reassignment")
+	}
+}
+
+func TestHubR14ReassignImmediatelyDeliversAssignedEpoch(t *testing.T) {
+	clock := time.Date(2026, 9, 4, 3, 10, 0, 0, time.UTC)
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken, "node-b": r6NodeBToken}, Now: func() time.Time { return clock }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.jobs["immediate-assignment"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "immediate-assignment", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 1}, Node: "node-a", Orphaned: true, FencedNodes: make(map[string]uint64)}
+	recipient := &hubAgent{assignments: make(chan hubJobAssignedEvent, 1)}
+	hub.connect("node-b", "r14", "fixture", recipient, false)
+	// Mutant M5b: deleting reassignJob's immediate queueAssignment leaves this
+	// receive empty even though the heartbeat re-delivery path still exists.
+	if result, ok := hub.reassignJob("immediate-assignment", "node-b"); !ok || result.Epoch != 2 {
+		t.Fatalf("reassignment failed: result=%+v ok=%t", result, ok)
+	}
+	select {
+	case assigned := <-recipient.assignments:
+		if assigned.JobID != "immediate-assignment" || assigned.Epoch != 2 {
+			t.Fatalf("bad immediate assignment: %+v", assigned)
+		}
+	default:
+		t.Fatal("reassign did not immediately deliver assigned epoch")
 	}
 }
 
