@@ -58,6 +58,12 @@ An old-epoch `job.completed` event is rejected by the hub. A completion from a
 node that returns before reassignment turns the prior orphan record into
 `job.recovered`.
 
+When an orphaned owner returns while its local claim is still active, the hub
+clears the orphan marker and emits `job.recovered`; it no longer appears in the
+reassignable list. The receiving node receives the hub-issued epoch as
+`job.assigned` immediately when connected and again with heartbeat directives,
+then uses that epoch in its active-job heartbeat and completion event.
+
 The hub job/fence view and retry queue are intentionally in memory. A hub
 restart loses orphan, epoch, reassignment, and pending-revocation state; local
 job event files remain the system of record, but the hub does not yet

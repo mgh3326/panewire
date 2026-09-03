@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -106,8 +107,15 @@ func formatBurstPolicy(policy BurstPolicy) string {
 }
 
 func runBurstCLI(args []string, stdout, stderr io.Writer) int {
+	return runBurstCLIWithDeps(args, stdout, stderr, hubCLIDeps{})
+}
+
+func runBurstCLIWithDeps(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if len(args) == 0 {
 		return ExitUsage
+	}
+	if args[0] == "request" || args[0] == "release" || args[0] == "holds" {
+		return runBurstOnDemandCLI(args, stdout, stderr, deps)
 	}
 	flags := flag.NewFlagSet("panewire burst "+args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
@@ -170,6 +178,93 @@ func runBurstCLI(args []string, stdout, stderr io.Writer) int {
 	default:
 		return ExitUsage
 	}
+}
+
+func runBurstOnDemandCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
+	flags := flag.NewFlagSet("panewire burst "+args[0], flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	hubURL := flags.String("hub-url", "", "HTTPS hub base URL")
+	tokenPath := flags.String("hub-token-env", "", "mode-0600 operator HUB_MACHINE_ID/HUB_TOKEN env file")
+	cfPath := flags.String("hub-cf-env", "", "optional mode-0600 CF Access env file")
+	target := flags.String("target", "", "policy target machine")
+	hold := flags.Duration("hold", 0, "hold duration")
+	reason := flags.String("reason", "", "operator audit reason")
+	timeout := flags.Duration("timeout", 120*time.Second, "wake confirmation timeout")
+	leaseID := flags.String("lease-id", "", "hold lease ID")
+	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *hubURL == "" || *tokenPath == "" || *timeout <= 0 {
+		return ExitUsage
+	}
+	if args[0] == "request" && (!machineIDPattern.MatchString(*target) || !validBurstHold(*reason, *hold)) {
+		return ExitUsage
+	}
+	if args[0] == "release" && !strings.HasPrefix(*leaseID, "hold-") {
+		return ExitUsage
+	}
+	env, err := loadHubTokenEnv(*tokenPath)
+	if err != nil || env.MachineID != hubOperatorMachineID {
+		fmt.Fprintln(stderr, "burst rejected: invalid operator token env")
+		return ExitConditionInvalid
+	}
+	endpointPath, method := "/v1/burst/holds", http.MethodGet
+	var body io.Reader
+	if args[0] == "request" {
+		encoded, _ := json.Marshal(struct {
+			Target  string `json:"target"`
+			Hold    string `json:"hold"`
+			Reason  string `json:"reason"`
+			Timeout string `json:"timeout"`
+		}{*target, hold.String(), *reason, timeout.String()})
+		endpointPath, method, body = "/v1/burst/request", http.MethodPost, bytes.NewReader(encoded)
+	} else if args[0] == "release" {
+		encoded, _ := json.Marshal(struct {
+			ID string `json:"id"`
+		}{*leaseID})
+		endpointPath, method, body = "/v1/burst/release", http.MethodPost, bytes.NewReader(encoded)
+	}
+	endpoint, err := hubHTTPSEndpoint(*hubURL, endpointPath, deps.AllowInsecureForTests)
+	if err != nil {
+		fmt.Fprintln(stderr, "burst rejected: invalid hub URL")
+		return ExitConditionInvalid
+	}
+	client := deps.HTTPClient
+	if client == nil {
+		client = http.DefaultClient
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), *timeout+2*time.Second)
+	defer cancel()
+	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
+	if err != nil {
+		return ExitInternal
+	}
+	request.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	if *cfPath != "" {
+		cf, cfErr := loadHubCFAccessEnv(*cfPath)
+		if cfErr != nil {
+			return ExitConditionInvalid
+		}
+		request.Header.Set("CF-Access-Client-Id", cf.ClientID)
+		request.Header.Set("CF-Access-Client-Secret", cf.ClientSecret)
+	}
+	response, err := client.Do(request)
+	if err != nil {
+		fmt.Fprintln(stderr, "burst unavailable")
+		return ExitTimeout
+	}
+	defer response.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(response.Body, 64<<10))
+	if response.StatusCode == http.StatusGatewayTimeout {
+		_, _ = stdout.Write(data)
+		return ExitTimeout
+	}
+	if response.StatusCode != http.StatusOK {
+		fmt.Fprintln(stderr, "burst rejected")
+		return ExitConditionInvalid
+	}
+	_, _ = stdout.Write(data)
+	return ExitOK
 }
 
 func runBurstShowLive(rawURL, tokenPath, cfPath string, stdout, stderr io.Writer) int {
@@ -268,6 +363,12 @@ func (h *HubServer) observeBurstLocked(now time.Time, machineID string, load Hub
 	}
 	if machineID == policy.TargetMachine {
 		state.LastLoad = load
+		// An on-demand lease is an additive safety gate: it suppresses only the
+		// idle down decision and leaves R12 pressure/up semantics untouched.
+		if h.holdsActiveLocked(machineID, now) {
+			state.IdleRuns, state.IdleSince = 0, time.Time{}
+			return nil
+		}
 		if load.WorkerProcs == 0 {
 			if state.IdleRuns == 0 {
 				state.IdleSince = now
