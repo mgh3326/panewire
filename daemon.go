@@ -106,6 +106,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}()
 	}
 	if d.cfg.Hub.Enabled && d.cfg.Hub.Client != nil {
+		d.cfg.Hub.Client.setRelayStore(d.store)
 		d.hubDone = make(chan struct{})
 		go func() {
 			defer close(d.hubDone)

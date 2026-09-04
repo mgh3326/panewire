@@ -37,15 +37,29 @@ func truncateHubRelayPayloadText(value string, normalizeNewlines bool) (string, 
 
 func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 12 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 14 {
 		return hubJobEventPayload{}, nil, false
 	}
 	for name := range fields {
-		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" {
+		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_time" && name != "replay" {
 			return hubJobEventPayload{}, nil, false
 		}
 	}
 	var completion hubJobEventPayload
+	if raw, present := fields["event_time"]; present {
+		var rendered string
+		if json.Unmarshal(raw, &rendered) != nil || !strings.HasSuffix(rendered, "Z") {
+			return hubJobEventPayload{}, nil, false
+		}
+		parsed, err := time.Parse(time.RFC3339Nano, rendered)
+		if err != nil || parsed.IsZero() {
+			return hubJobEventPayload{}, nil, false
+		}
+		completion.EventTime = parsed.UTC()
+	}
+	if raw, present := fields["replay"]; present && json.Unmarshal(raw, &completion.Replay) != nil {
+		return hubJobEventPayload{}, nil, false
+	}
 	if json.Unmarshal(fields["job_id"], &completion.JobID) != nil || json.Unmarshal(fields["epoch"], &completion.Epoch) != nil || !hubJobIDPattern.MatchString(completion.JobID) || completion.Epoch == 0 {
 		return hubJobEventPayload{}, nil, false
 	}
@@ -86,7 +100,7 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 // operator-readable reason; it is not a command channel.
 func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 13 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 15 {
 		return hubJobEventPayload{}, nil, false
 	}
 	if _, hasReason := fields["reason"]; !hasReason {

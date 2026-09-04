@@ -34,3 +34,23 @@ scan, so they are not forced back into the heartbeat instead.
 Duplicate injection is prevented by the hub-side relay dedupe keyed on
 kind, job id, epoch and report path, which is what makes a node restart's
 re-sent terminal records safe.
+
+## Restart retransmission policy
+
+The node keeps the authoritative completion and escalation files in its inbox,
+but records each successfully written relay key (`kind`, job id, epoch, report
+path, and reason) in the daemon `--db` SQLite database. `relay_sent` records
+the send time and whether the hub later returned `relay.delivered` or
+`relay.unconfirmed`. On restart, acknowledged keys are never sent again;
+unacknowledged writes are retried once on the next hub connection in case the
+hub lost the first write. Records are garbage-collected after the same
+`PANEWIRE_JOB_ACTIVE_MAX_AGE` window used for terminal event scanning (72 hours
+by default).
+
+The first scan after a node starts marks an event absent from `relay_sent` as a
+replay when its file mtime predates node startup. It sends that mtime as
+`event_time`; no change to the `wrk done` flat-record contract is required. A
+hub that has just started suppresses a marked replay whose `event_time` is at
+least `RELAY_REPLAY_GRACE` old (10 minutes by default), broadcasts
+`relay.replayed` to the operator feed, and does not inject it into a pane.
+Files created after node startup are normal relays, not replays.

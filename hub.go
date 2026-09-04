@@ -69,6 +69,9 @@ type HubServerConfig struct {
 	ReportRelayPath string
 	// RelayAckTimeout bounds the time an injected relay may remain silent.
 	RelayAckTimeout time.Duration
+	// RelayReplayGrace suppresses old node replay records just after hub start.
+	// Zero uses RELAY_REPLAY_GRACE (10 minutes by default).
+	RelayReplayGrace time.Duration
 	// AcceptingOverridesPath optionally makes operator acceptance choices durable.
 	AcceptingOverridesPath string
 }
@@ -118,6 +121,7 @@ type hubAgent struct {
 	assignments chan hubJobAssignedEvent
 	holds       chan hubBurstHoldsEvent
 	relays      chan hubRelayInjectEvent
+	relayAcks   chan hubRelayAckEvent
 }
 
 // HubActiveJob is deliberately metadata-only. It is copied from a node's
@@ -173,6 +177,8 @@ type hubJobEventPayload struct {
 	PR             string    `json:"pr,omitempty"`
 	Head           string    `json:"head,omitempty"`
 	PaneID         string    `json:"pane_id,omitempty"`
+	EventTime      time.Time `json:"event_time,omitempty"`
+	Replay         bool      `json:"replay,omitempty"`
 }
 
 type relayAckPayload struct {
@@ -186,6 +192,18 @@ type hubRelayInjectEvent struct {
 	JobID string `json:"job_id"`
 	Pane  string `json:"pane"`
 	Text  string `json:"text"`
+}
+
+// hubRelayAckEvent is returned only to the originating node. It contains the
+// complete node durable-dedupe key, never report content.
+type hubRelayAckEvent struct {
+	Type       string `json:"type"`
+	Status     string `json:"status"`
+	Kind       string `json:"kind"`
+	JobID      string `json:"job_id"`
+	Epoch      uint64 `json:"epoch"`
+	ReportPath string `json:"report_path"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 type hubJobRevokedEvent struct {
@@ -283,6 +301,7 @@ type HubServer struct {
 	r19a                   r19aHubState
 	reportRelayPath        string
 	relayDedupe            map[string]struct{}
+	relayReplayGrace       time.Duration
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -350,6 +369,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.RelayAckTimeout <= 0 {
 		config.RelayAckTimeout = relayAckTimeoutFromEnv()
 	}
+	if config.RelayReplayGrace <= 0 {
+		config.RelayReplayGrace = relayReplayGraceFromEnv()
+	}
 	overrides, err := loadAcceptingOverrides(config.AcceptingOverridesPath)
 	if err != nil {
 		return nil, errors.New("hub accepting overrides are invalid")
@@ -361,7 +383,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}),
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}), relayReplayGrace: config.RelayReplayGrace,
 	}, nil
 }
 
@@ -615,7 +637,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), relays: make(chan hubRelayInjectEvent, 64)}
+	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), relays: make(chan hubRelayInjectEvent, 64), relayAcks: make(chan hubRelayAckEvent, 64)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
@@ -625,6 +647,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 	go agent.writeAssignments(agentContext)
 	go agent.writeHolds(agentContext)
 	go agent.writeRelays(agentContext)
+	go agent.writeRelayAcks(agentContext)
 	for {
 		messageType, payload, err := connection.Read(request.Context())
 		if err != nil {
@@ -713,7 +736,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.logger.Info("completion relayed without job registration", "job", completion.JobID, "node", machineID)
 				h.lateRegisterJobCompletion(machineID, completion, received)
 			}
-			h.relayJobCompletion(completion)
+			h.relayJobCompletionFrom(machineID, completion)
 		}
 		if message.Kind == "job.escalate" || message.Kind == "job.joined" {
 			event, truncated, valid := decodeHubJobEscalationPayloadDetailed(message.Payload)
@@ -724,7 +747,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			for _, field := range truncated {
 				h.logger.Warn("relay payload truncated", "field", field, "job", event.JobID)
 			}
-			h.relayJobEvent(message.Kind, event)
+			h.relayJobEventFrom(machineID, message.Kind, event)
 		}
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
 			ack, valid := decodeRelayAckPayload(message.Payload)
@@ -732,10 +755,12 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
-			if !h.acknowledgeRelay(machineID, ack) {
+			pending, acknowledged := h.acknowledgeRelay(machineID, ack)
+			if !acknowledged {
 				h.countUnknownMessage()
 				return
 			}
+			h.sendRelayAck(pending, strings.TrimPrefix(message.Kind, "relay."))
 		}
 		if message.Kind == "job.revocation.ack" {
 			ack, valid := decodeHubJobCompletionPayload(message.Payload)
@@ -1411,6 +1436,29 @@ func (agent *hubAgent) writeRelays(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case event := <-agent.relays:
+			if err := agent.writeJSON(event); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (agent *hubAgent) queueRelayAck(event hubRelayAckEvent) {
+	if agent == nil || agent.relayAcks == nil {
+		return
+	}
+	select {
+	case agent.relayAcks <- event:
+	default:
+	}
+}
+
+func (agent *hubAgent) writeRelayAcks(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-agent.relayAcks:
 			if err := agent.writeJSON(event); err != nil {
 				return
 			}

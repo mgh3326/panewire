@@ -50,7 +50,10 @@ type HubClientConfig struct {
 	Dial                  HubDial
 	Wait                  HubWait
 	Warn                  func(string)
-	relayInject           func(context.Context, string, string) bool // fixture seam
+	// RelayStore is the daemon's --db SQLite store. It is optional for library
+	// callers, but the daemon attaches its store before starting the client.
+	RelayStore  *Store
+	relayInject func(context.Context, string, string) bool // fixture seam
 
 	// failoverWakeDestination is a package-private fixture override. Production
 	// always uses the fixed broadcast destination below.
@@ -67,8 +70,9 @@ type HubDaemonConfig struct {
 }
 
 type hubClientEvent struct {
-	Kind    string
-	Payload json.RawMessage
+	Kind     string
+	Payload  json.RawMessage
+	relayKey string
 }
 
 // HubClient owns a bounded in-memory event queue. It is intentionally not a
@@ -104,6 +108,10 @@ type HubClient struct {
 	events               chan hubClientEvent
 	completedJobs        map[string]uint64
 	completedReports     map[string]struct{}
+	relayKnown           map[string]struct{}
+	relayStore           *Store
+	relayStartedAt       time.Time
+	relayMu              sync.Mutex
 	assignedJobs         map[string]uint64
 	assignmentMu         sync.Mutex
 	burstHoldsActive     bool
@@ -175,15 +183,83 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.burstPoweroff == nil {
 		config.burstPoweroff = executeHubBurstPoweroff
 	}
-	return &HubClient{
+	client := &HubClient{
 		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		r19a:   newR19aClientState(config),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
-		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
-	}, nil
+		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), relayKnown: make(map[string]struct{}), relayStore: config.RelayStore, relayStartedAt: time.Now().UTC(), assignedJobs: make(map[string]uint64),
+	}
+	if config.RelayStore != nil {
+		client.reloadRelaySent()
+	}
+	return client, nil
+}
+
+// setRelayStore binds the client's relay journal to the daemon's --db store
+// at daemon startup, after the daemon has opened that database.
+func (client *HubClient) setRelayStore(store *Store) {
+	client.relayMu.Lock()
+	client.relayStore = store
+	client.relayStartedAt = time.Now().UTC()
+	client.relayMu.Unlock()
+	client.reloadRelaySent()
+}
+
+func (client *HubClient) reloadRelaySent() {
+	client.relayMu.Lock()
+	store := client.relayStore
+	client.completedReports = make(map[string]struct{})
+	client.relayKnown = make(map[string]struct{})
+	client.relayMu.Unlock()
+	if store == nil {
+		return
+	}
+	records, err := store.LoadRelaySent(context.Background(), time.Now().UTC().Add(-hubJobActiveMaxAge()))
+	if err != nil {
+		client.warn("relay sent journal unavailable")
+		return
+	}
+	client.relayMu.Lock()
+	defer client.relayMu.Unlock()
+	for _, record := range records {
+		client.relayKnown[record.Key] = struct{}{}
+		if record.HubAck == "delivered" || record.HubAck == "unconfirmed" {
+			client.completedReports[record.Key] = struct{}{}
+		}
+	}
+}
+
+func (client *HubClient) relaySent(event hubClientEvent) {
+	if event.relayKey == "" {
+		return
+	}
+	client.relayMu.Lock()
+	store := client.relayStore
+	if client.relayKnown == nil {
+		client.relayKnown = make(map[string]struct{})
+	}
+	client.relayKnown[event.relayKey] = struct{}{}
+	client.relayMu.Unlock()
+	if store != nil && store.RecordRelaySent(context.Background(), event.relayKey, time.Now().UTC()) != nil {
+		client.warn("relay sent journal unavailable")
+	}
+}
+
+func (client *HubClient) relayAcknowledged(message hubOutboundMessage) {
+	key := hubRelayKey(message.Kind, message.JobID, message.Epoch, message.ReportPath, message.Reason)
+	client.relayMu.Lock()
+	if client.completedReports == nil {
+		client.completedReports = make(map[string]struct{})
+	}
+	client.completedReports[key] = struct{}{}
+	store := client.relayStore
+	client.relayMu.Unlock()
+	if store != nil && store.RecordRelayAck(context.Background(), key, message.Status) != nil {
+		client.warn("relay acknowledgement journal unavailable")
+	}
 }
 
 const hubFailoverWakeBroadcastAddress = "255.255.255.255:9"
@@ -359,6 +435,10 @@ type hubOutboundMessage struct {
 	HoldsActive bool
 	Pane        string
 	Text        string
+	Status      string
+	Kind        string
+	ReportPath  string
+	Reason      string
 }
 
 func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
@@ -379,6 +459,9 @@ func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
 }
 
 func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) error {
+	// An unacknowledged write is retried once on every new connection; accepted
+	// delivery/unconfirmed results remain suppressed from the SQLite journal.
+	client.reloadRelaySent()
 	connection.SetReadLimit(hubMaxMessageBytes)
 	peer := &hubClientConnection{connection: connection}
 	if err := peer.write(ctx, struct {
@@ -396,6 +479,7 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 		if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
 			return err
 		}
+		client.relaySent(event)
 	}
 	readErrors := make(chan error, 1)
 	go func() {
@@ -417,6 +501,10 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 			}
 			if message.Type == "relay.inject" {
 				go client.handleRelayInject(ctx, peer, message)
+				continue
+			}
+			if message.Type == "relay.ack" {
+				client.relayAcknowledged(message)
 				continue
 			}
 			switch message.Type {
@@ -485,6 +573,7 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 			if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
 				return err
 			}
+			client.relaySent(event)
 		case <-ticker.C:
 			if err := peer.write(ctx, hubOutbound{Type: "ping"}); err != nil {
 				return err
@@ -496,6 +585,7 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 				if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
 					return err
 				}
+				client.relaySent(event)
 			}
 		}
 	}
@@ -569,17 +659,19 @@ func hubJobCompletionPayload(jobID string, epoch uint64) json.RawMessage {
 // hubJobCompletionPayloadForJob carries the claim's agent_label alongside the
 // terminal record. The hub needs it to late-register a job it never saw in a
 // heartbeat; it is metadata on an already-terminal record, not a claim.
-func hubJobCompletionPayloadForJob(job HubActiveJob) json.RawMessage {
+func hubJobCompletionPayloadForJob(job HubActiveJob, eventTime time.Time, replay bool) json.RawMessage {
 	payload, _ := json.Marshal(struct {
-		JobID          string `json:"job_id"`
-		Epoch          uint64 `json:"epoch"`
-		AgentLabel     string `json:"agent_label,omitempty"`
-		OwnerLane      string `json:"owner_lane,omitempty"`
-		Label          string `json:"label,omitempty"`
-		Host           string `json:"host,omitempty"`
-		ReportPath     string `json:"report_path,omitempty"`
-		ReportLastLine string `json:"report_last_line,omitempty"`
-	}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine})
+		JobID          string    `json:"job_id"`
+		Epoch          uint64    `json:"epoch"`
+		AgentLabel     string    `json:"agent_label,omitempty"`
+		OwnerLane      string    `json:"owner_lane,omitempty"`
+		Label          string    `json:"label,omitempty"`
+		Host           string    `json:"host,omitempty"`
+		ReportPath     string    `json:"report_path,omitempty"`
+		ReportLastLine string    `json:"report_last_line,omitempty"`
+		EventTime      time.Time `json:"event_time,omitempty"`
+		Replay         bool      `json:"replay,omitempty"`
+	}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, eventTime, replay})
 	return payload
 }
 
@@ -601,38 +693,53 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 	client.assignmentMu.Unlock()
 	events := make([]hubClientEvent, 0, len(completed))
 	for _, job := range completed {
-		key := job.Kind + "\x00" + job.JobID + "\x00" + strconv.FormatUint(job.Epoch, 10) + "\x00" + job.ReportPath + "\x00" + job.Reason
+		key := hubRelayKey(job.Kind, job.JobID, job.Epoch, job.ReportPath, job.Reason)
+		client.relayMu.Lock()
 		if client.completedReports == nil {
 			client.completedReports = make(map[string]struct{})
 		}
+		if client.relayKnown == nil {
+			client.relayKnown = make(map[string]struct{})
+		}
 		if _, sent := client.completedReports[key]; sent {
+			client.relayMu.Unlock()
 			continue
 		}
+		_, known := client.relayKnown[key]
+		startedAt := client.relayStartedAt
+		client.completedReports[key] = struct{}{}
+		client.relayMu.Unlock()
 		if job.Kind == "job.completed" {
 			client.completedJobs[job.JobID] = job.Epoch
 		}
-		client.completedReports[key] = struct{}{}
-		payload := hubJobCompletionPayloadForJob(job.HubActiveJob)
+		replay := !known && !job.EventTime.After(startedAt)
+		payload := hubJobCompletionPayloadForJob(job.HubActiveJob, job.EventTime, replay)
 		if job.Kind == "job.escalate" || job.Kind == "job.joined" {
 			payload, _ = json.Marshal(struct {
-				JobID          string `json:"job_id"`
-				Epoch          uint64 `json:"epoch"`
-				AgentLabel     string `json:"agent_label,omitempty"`
-				OwnerLane      string `json:"owner_lane,omitempty"`
-				Label          string `json:"label,omitempty"`
-				Host           string `json:"host,omitempty"`
-				ReportPath     string `json:"report_path,omitempty"`
-				ReportLastLine string `json:"report_last_line,omitempty"`
-				Reason         string `json:"reason"`
-				Question       string `json:"question,omitempty"`
-				PR             string `json:"pr,omitempty"`
-				Head           string `json:"head,omitempty"`
-				PaneID         string `json:"pane_id,omitempty"`
-			}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, compactHubRelayEventText(job.ReportLastLine, false), compactHubRelayEventText(job.Reason, false), compactHubRelayEventText(job.Question, true), job.PR, job.Head, job.PaneID})
+				JobID          string    `json:"job_id"`
+				Epoch          uint64    `json:"epoch"`
+				AgentLabel     string    `json:"agent_label,omitempty"`
+				OwnerLane      string    `json:"owner_lane,omitempty"`
+				Label          string    `json:"label,omitempty"`
+				Host           string    `json:"host,omitempty"`
+				ReportPath     string    `json:"report_path,omitempty"`
+				ReportLastLine string    `json:"report_last_line,omitempty"`
+				Reason         string    `json:"reason"`
+				Question       string    `json:"question,omitempty"`
+				PR             string    `json:"pr,omitempty"`
+				Head           string    `json:"head,omitempty"`
+				PaneID         string    `json:"pane_id,omitempty"`
+				EventTime      time.Time `json:"event_time,omitempty"`
+				Replay         bool      `json:"replay,omitempty"`
+			}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, compactHubRelayEventText(job.ReportLastLine, false), compactHubRelayEventText(job.Reason, false), compactHubRelayEventText(job.Question, true), job.PR, job.Head, job.PaneID, job.EventTime, replay})
 		}
-		events = append(events, hubClientEvent{Kind: job.Kind, Payload: payload})
+		events = append(events, hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key})
 	}
 	return events
+}
+
+func hubRelayKey(kind, jobID string, epoch uint64, reportPath, reason string) string {
+	return kind + "\x00" + jobID + "\x00" + strconv.FormatUint(epoch, 10) + "\x00" + reportPath + "\x00" + reason
 }
 
 func hubClientWireEvent(event hubClientEvent) struct {
@@ -700,6 +807,13 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		}
 	case "relay.inject":
 		if len(fields) != 4 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["pane"], &message.Pane) != nil || json.Unmarshal(fields["text"], &message.Text) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Pane == "" || len(message.Pane) > 128 || !validHubNoteText(message.Text) {
+			return hubOutboundMessage{}, false
+		}
+	case "relay.ack":
+		if len(fields) < 6 || len(fields) > 7 || json.Unmarshal(fields["status"], &message.Status) != nil || json.Unmarshal(fields["kind"], &message.Kind) != nil || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || json.Unmarshal(fields["report_path"], &message.ReportPath) != nil || message.Status != "delivered" && message.Status != "unconfirmed" || (message.Kind != "job.completed" && message.Kind != "job.escalate" && message.Kind != "job.joined") || !hubJobIDPattern.MatchString(message.JobID) || message.Epoch == 0 || strings.ContainsAny(message.ReportPath, "\x00\r\n") {
+			return hubOutboundMessage{}, false
+		}
+		if raw, exists := fields["reason"]; exists && (json.Unmarshal(raw, &message.Reason) != nil || strings.ContainsAny(message.Reason, "\x00\r\n")) {
 			return hubOutboundMessage{}, false
 		}
 	default:

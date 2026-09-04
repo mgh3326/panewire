@@ -86,11 +86,12 @@ func scanHubCompletedJobs(inboxRoot string) []HubActiveJob {
 type hubScannedRelayEvent struct {
 	Kind string
 	HubActiveJob
-	Reason   string
-	Question string
-	PR       string
-	Head     string
-	PaneID   string
+	EventTime time.Time
+	Reason    string
+	Question  string
+	PR        string
+	Head      string
+	PaneID    string
 }
 
 // scanHubRelayEvents retains the completion scan and also forwards the two
@@ -132,6 +133,10 @@ func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
 			if json.Unmarshal(contents, &event) != nil || event.eventTime(file, dir).Before(time.Now().Add(-hubJobActiveMaxAge())) {
 				continue
 			}
+			info, err := file.Info()
+			if err != nil {
+				continue
+			}
 			kind := event.eventKind()
 			if kind == "job.claimed" || kind == "job.claim" {
 				if label := event.agentLabel(); hubAgentLabelPattern.MatchString(label) {
@@ -162,7 +167,7 @@ func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
 				// report exists. The hub payload must point operators back to it.
 				reportPath = filepath.Join(dir, file.Name())
 			}
-			events = append(events, hubScannedRelayEvent{Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID()})
+			events = append(events, hubScannedRelayEvent{Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, EventTime: info.ModTime().UTC(), Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID()})
 		}
 	}
 	sort.Slice(events, func(i, j int) bool {

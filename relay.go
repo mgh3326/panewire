@@ -124,14 +124,22 @@ func relayDedupeKey(completion hubJobEventPayload) string {
 }
 
 func relayEventDedupeKey(kind string, completion hubJobEventPayload) string {
-	return kind + "\x00" + relayDedupeKey(completion)
+	return kind + "\x00" + relayDedupeKey(completion) + "\x00" + completion.Reason
 }
 
 func (h *HubServer) relayJobCompletion(completion hubJobEventPayload) {
-	h.relayJobEvent("job.completed", completion)
+	h.relayJobCompletionFrom("", completion)
 }
 
 func (h *HubServer) relayJobEvent(kind string, event hubJobEventPayload) {
+	h.relayJobEventFrom("", kind, event)
+}
+
+func (h *HubServer) relayJobCompletionFrom(sourceMachine string, completion hubJobEventPayload) {
+	h.relayJobEventFrom(sourceMachine, "job.completed", completion)
+}
+
+func (h *HubServer) relayJobEventFrom(sourceMachine, kind string, event hubJobEventPayload) {
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
 	}
@@ -142,6 +150,13 @@ func (h *HubServer) relayJobEvent(kind string, event hubJobEventPayload) {
 		return
 	}
 	h.relayDedupe[key] = struct{}{}
+	if event.Replay && !event.EventTime.IsZero() && !event.EventTime.After(h.startedAt.Add(-h.relayReplayGrace)) {
+		h.mu.Unlock()
+		payload, _ := json.Marshal(event)
+		h.broadcast(hubEvent{MachineID: sourceMachine, Kind: "relay.replayed", Payload: payload, Received: h.now().UTC()})
+		h.sendRelayAck(relayPending{sourceMachine: sourceMachine, kind: kind, event: event}, "unconfirmed")
+		return
+	}
 	routes := loadReportRelayRoutes(h.reportRelayPath)
 	route, exists := routes[event.OwnerLane]
 	if exists && (kind == "job.escalate" || kind == "job.joined") {
@@ -164,5 +179,5 @@ func (h *HubServer) relayJobEvent(kind string, event hubJobEventPayload) {
 		h.broadcast(hubEvent{Kind: "relay.unrouted", Payload: payload, Received: h.now().UTC()})
 		return
 	}
-	h.startRelayAck(event.JobID, route.Machine, route.Pane)
+	h.startRelayAckForRelay(event.JobID, route.Machine, route.Pane, sourceMachine, kind, event)
 }

@@ -61,7 +61,9 @@ func OpenStore(path string) (*Store, error) {
  prompt_sha256 TEXT NOT NULL DEFAULT '', body_stored INTEGER NOT NULL DEFAULT 0, preflight_revision INTEGER,
  send_revision INTEGER, preflight_read_sha256 TEXT, preflight_result TEXT NOT NULL DEFAULT '', herdr_acceptance TEXT,
  submission_result TEXT, uptake_mode TEXT, uptake_result TEXT, evidence_revision INTEGER, error_code TEXT
-)`, `CREATE INDEX IF NOT EXISTS events_kind_time ON events(event_kind, observed_at_ms)`, `CREATE INDEX IF NOT EXISTS events_pane_time ON events(pane_id, observed_at_ms)`, `CREATE INDEX IF NOT EXISTS deliveries_pane_time ON deliveries(resolved_pane_id, requested_at_ms)`, `CREATE INDEX IF NOT EXISTS deliveries_path_time ON deliveries(source_path, requested_at_ms)`} {
+)`, `CREATE INDEX IF NOT EXISTS events_kind_time ON events(event_kind, observed_at_ms)`, `CREATE INDEX IF NOT EXISTS events_pane_time ON events(pane_id, observed_at_ms)`, `CREATE INDEX IF NOT EXISTS deliveries_pane_time ON deliveries(resolved_pane_id, requested_at_ms)`, `CREATE INDEX IF NOT EXISTS deliveries_path_time ON deliveries(source_path, requested_at_ms)`, `CREATE TABLE IF NOT EXISTS relay_sent (
+ relay_key TEXT PRIMARY KEY, sent_at INTEGER NOT NULL, hub_ack TEXT NOT NULL DEFAULT ''
+)`, `CREATE INDEX IF NOT EXISTS relay_sent_sent_at ON relay_sent(sent_at)`} {
 		if _, err := db.Exec(q); err != nil {
 			db.Close()
 			return nil, err
@@ -81,6 +83,59 @@ func OpenStore(path string) (*Store, error) {
 }
 func (s *Store) Path() string { return s.path }
 func (s *Store) Close() error { return s.db.Close() }
+
+// RelaySent is the minimal durable record of a node-to-hub report relay. The
+// event file remains authoritative; this only prevents restart replay storms.
+type RelaySent struct {
+	Key    string
+	SentAt time.Time
+	HubAck string
+}
+
+func (s *Store) LoadRelaySent(ctx context.Context, cutoff time.Time) ([]RelaySent, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM relay_sent WHERE sent_at < ?`, cutoff.UTC().UnixMilli()); err != nil {
+		return nil, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT relay_key,sent_at,hub_ack FROM relay_sent`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var records []RelaySent
+	for rows.Next() {
+		var record RelaySent
+		var sentAt int64
+		if err := rows.Scan(&record.Key, &sentAt, &record.HubAck); err != nil {
+			return nil, err
+		}
+		record.SentAt = time.UnixMilli(sentAt).UTC()
+		records = append(records, record)
+	}
+	return records, rows.Err()
+}
+
+func (s *Store) RecordRelaySent(ctx context.Context, key string, sentAt time.Time) error {
+	if key == "" {
+		return fmt.Errorf("empty relay key")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO relay_sent(relay_key,sent_at,hub_ack) VALUES(?,?, '')
+ ON CONFLICT(relay_key) DO UPDATE SET sent_at=excluded.sent_at`, key, sentAt.UTC().UnixMilli())
+	return err
+}
+
+func (s *Store) RecordRelayAck(ctx context.Context, key, ack string) error {
+	if key == "" || (ack != "delivered" && ack != "unconfirmed") {
+		return fmt.Errorf("invalid relay acknowledgement")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `UPDATE relay_sent SET hub_ack=? WHERE relay_key=?`, ack, key)
+	return err
+}
 
 type Event struct {
 	ObservedAt                                                  time.Time
