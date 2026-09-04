@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestLookupMapsArbiterExit7ToDurableAbsence(t *testing.T) {
@@ -13,7 +14,12 @@ func TestLookupMapsArbiterExit7ToDurableAbsence(t *testing.T) {
 		ArbiterPath:     r2Stub(t, "arbiter", "exit 7"),
 		SpawnPolicyPath: r4PolicyFile(t, "delivery-", "fixture-model", "fixture-workspace", "T1", t.TempDir()),
 	})
-	receipt, err := gate.Lookup(context.Background(), "delivery-7")
+	// A broken external arbiter must produce a bounded, actionable test
+	// failure rather than consume the package's full (historically 11 minute)
+	// test timeout. The fixture itself exits immediately.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	receipt, err := gate.Lookup(ctx, "delivery-7")
 	if err != nil || receipt.Found || !receipt.Durable || receipt.Accepted {
 		t.Fatalf("exit 7 receipt=%+v err=%v", receipt, err)
 	}

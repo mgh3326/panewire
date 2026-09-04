@@ -76,10 +76,15 @@ func scanHubJobCompletion(eventsDir, jobID string) (HubActiveJob, bool) {
 			continue
 		}
 		var event struct {
-			Type  string `json:"type"`
-			Kind  string `json:"kind"`
-			Event string `json:"event"`
-			Epoch uint64 `json:"epoch"`
+			Type           string `json:"type"`
+			Kind           string `json:"kind"`
+			Event          string `json:"event"`
+			Epoch          uint64 `json:"epoch"`
+			OwnerLane      string `json:"owner_lane"`
+			Label          string `json:"label"`
+			Host           string `json:"host"`
+			ReportPath     string `json:"report_path"`
+			ReportLastLine string `json:"report_last_line"`
 		}
 		if json.Unmarshal(contents, &event) != nil {
 			continue
@@ -92,7 +97,7 @@ func scanHubJobCompletion(eventsDir, jobID string) (HubActiveJob, bool) {
 			kind = event.Event
 		}
 		if (kind == "job.completed" || kind == "job.completion") && event.Epoch > 0 {
-			completed = HubActiveJob{JobID: jobID, Epoch: event.Epoch}
+			completed = HubActiveJob{JobID: jobID, Epoch: event.Epoch, OwnerLane: event.OwnerLane, Label: event.Label, Host: event.Host, ReportPath: event.ReportPath, ReportLastLine: event.ReportLastLine}
 		}
 	}
 	return completed, completed.JobID != ""

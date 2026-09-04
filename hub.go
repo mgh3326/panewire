@@ -65,6 +65,8 @@ type HubServerConfig struct {
 	// serving the browser UI. UI requests must then originate on loopback or
 	// include the identity header injected by Cloudflare Access.
 	UIAllowCFOnly bool
+	// ReportRelayPath is an operator-owned route file. It is never sent to nodes.
+	ReportRelayPath string
 }
 
 // HubNode is the deliberately small presence view returned to authenticated
@@ -109,16 +111,22 @@ type hubAgent struct {
 	revocations chan hubJobRevokedEvent
 	assignments chan hubJobAssignedEvent
 	holds       chan hubBurstHoldsEvent
+	relays      chan hubRelayInjectEvent
 }
 
 // HubActiveJob is deliberately metadata-only. It is copied from a node's
 // local jobs/*/events files, never from a brief or pane transcript.
 type HubActiveJob struct {
-	JobID        string `json:"job_id"`
-	AgentLabel   string `json:"agent_label"`
-	LastEventSeq uint64 `json:"last_event_seq"`
-	PushSHA      string `json:"push_sha,omitempty"`
-	Epoch        uint64 `json:"epoch"`
+	JobID          string `json:"job_id"`
+	AgentLabel     string `json:"agent_label"`
+	LastEventSeq   uint64 `json:"last_event_seq"`
+	PushSHA        string `json:"push_sha,omitempty"`
+	Epoch          uint64 `json:"epoch"`
+	OwnerLane      string `json:"owner_lane,omitempty"`
+	Label          string `json:"label,omitempty"`
+	Host           string `json:"host,omitempty"`
+	ReportPath     string `json:"report_path,omitempty"`
+	ReportLastLine string `json:"report_last_line,omitempty"`
 }
 
 type hubJobRecord struct {
@@ -141,13 +149,25 @@ type hubJobReassignment struct {
 }
 
 type hubJobEventPayload struct {
-	JobID      string    `json:"job_id"`
-	Node       string    `json:"node,omitempty"`
-	From       string    `json:"from,omitempty"`
-	To         string    `json:"to,omitempty"`
-	Epoch      uint64    `json:"epoch"`
-	LastSeen   time.Time `json:"last_seen,omitempty"`
-	ResumeHint string    `json:"resume_hint,omitempty"`
+	JobID          string    `json:"job_id"`
+	Node           string    `json:"node,omitempty"`
+	From           string    `json:"from,omitempty"`
+	To             string    `json:"to,omitempty"`
+	Epoch          uint64    `json:"epoch"`
+	LastSeen       time.Time `json:"last_seen,omitempty"`
+	ResumeHint     string    `json:"resume_hint,omitempty"`
+	OwnerLane      string    `json:"owner_lane,omitempty"`
+	Label          string    `json:"label,omitempty"`
+	Host           string    `json:"host,omitempty"`
+	ReportPath     string    `json:"report_path,omitempty"`
+	ReportLastLine string    `json:"report_last_line,omitempty"`
+}
+
+type hubRelayInjectEvent struct {
+	Type  string `json:"type"`
+	JobID string `json:"job_id"`
+	Pane  string `json:"pane"`
+	Text  string `json:"text"`
 }
 
 type hubJobRevokedEvent struct {
@@ -241,6 +261,8 @@ type HubServer struct {
 	prometheusBasicUser    string
 	prometheusBasicPass    string
 	placementCache         placementCache
+	reportRelayPath        string
+	relayDedupe            map[string]struct{}
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -312,7 +334,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold),
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}),
 	}, nil
 }
 
@@ -561,7 +583,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4)}
+	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), relays: make(chan hubRelayInjectEvent, 64)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
@@ -570,6 +592,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 	go agent.writeRevocations(agentContext)
 	go agent.writeAssignments(agentContext)
 	go agent.writeHolds(agentContext)
+	go agent.writeRelays(agentContext)
 	for {
 		messageType, payload, err := connection.Read(request.Context())
 		if err != nil {
@@ -647,6 +670,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
+			h.relayJobCompletion(completion)
 		}
 		if message.Kind == "job.revocation.ack" {
 			ack, valid := decodeHubJobCompletionPayload(message.Payload)
@@ -879,7 +903,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note", "job.completed", "job.revocation.ack":
+	case "heartbeat", "note", "job.completed", "job.revocation.ack", "relay.delivered", "relay.unconfirmed":
 		return true
 	}
 	return false
@@ -1269,6 +1293,31 @@ func (agent *hubAgent) writeHolds(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case event := <-agent.holds:
+			if err := agent.writeJSON(event); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (agent *hubAgent) queueRelay(event hubRelayInjectEvent) bool {
+	if agent == nil || agent.relays == nil {
+		return false
+	}
+	select {
+	case agent.relays <- event:
+		return true
+	default:
+		return false
+	}
+}
+
+func (agent *hubAgent) writeRelays(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-agent.relays:
 			if err := agent.writeJSON(event); err != nil {
 				return
 			}

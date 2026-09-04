@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,7 @@ type HubClientConfig struct {
 	Dial                  HubDial
 	Wait                  HubWait
 	Warn                  func(string)
+	relayInject           func(context.Context, string, string) bool // fixture seam
 
 	// failoverWakeDestination is a package-private fixture override. Production
 	// always uses the fixed broadcast destination below.
@@ -95,8 +97,10 @@ type HubClient struct {
 	dial                 HubDial
 	wait                 HubWait
 	warn                 func(string)
+	relayInject          func(context.Context, string, string) bool
 	events               chan hubClientEvent
 	completedJobs        map[string]uint64
+	completedReports     map[string]struct{}
 	assignedJobs         map[string]uint64
 	assignmentMu         sync.Mutex
 	burstHoldsActive     bool
@@ -174,7 +178,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
-		dial: config.Dial, wait: config.Wait, warn: config.Warn, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), assignedJobs: make(map[string]uint64),
+		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
 	}, nil
 }
 
@@ -349,6 +353,25 @@ type hubOutboundMessage struct {
 	JobID       string
 	Epoch       uint64
 	HoldsActive bool
+	Pane        string
+	Text        string
+}
+
+func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
+	if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
+		return false
+	}
+	out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", "10").Output()
+	if err != nil || !bytes.Contains(out, []byte("[Pasted text")) {
+		return err == nil
+	}
+	// The relay-handoff contract permits exactly one return only when the
+	// pasted-text chip proves the prompt remained in the composer.
+	if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
+		return false
+	}
+	out, err = exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", "10").Output()
+	return err == nil && !bytes.Contains(out, []byte("[Pasted text"))
 }
 
 func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) error {
@@ -419,6 +442,26 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 				client.burstMu.Lock()
 				client.burstHoldsActive = message.HoldsActive
 				client.burstMu.Unlock()
+			case "relay.inject":
+				inject := client.relayInject
+				if inject == nil {
+					inject = defaultHubRelayInject
+				}
+				kind := "relay.unconfirmed"
+				if inject(ctx, message.Pane, message.Text) {
+					kind = "relay.delivered"
+				}
+				response, _ := json.Marshal(struct {
+					JobID string `json:"job_id"`
+					Pane  string `json:"pane"`
+				}{message.JobID, message.Pane})
+				if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: kind, Payload: response})); err != nil {
+					select {
+					case readErrors <- err:
+					case <-ctx.Done():
+					}
+					return
+				}
 			}
 		}
 	}()
@@ -478,6 +521,19 @@ func hubJobCompletionPayload(jobID string, epoch uint64) json.RawMessage {
 	return payload
 }
 
+func hubJobCompletionPayloadForJob(job HubActiveJob) json.RawMessage {
+	payload, _ := json.Marshal(struct {
+		JobID          string `json:"job_id"`
+		Epoch          uint64 `json:"epoch"`
+		OwnerLane      string `json:"owner_lane,omitempty"`
+		Label          string `json:"label,omitempty"`
+		Host           string `json:"host,omitempty"`
+		ReportPath     string `json:"report_path,omitempty"`
+		ReportLastLine string `json:"report_last_line,omitempty"`
+	}{job.JobID, job.Epoch, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine})
+	return payload
+}
+
 // jobCompletionEvents is the node-side producer for the fenced completion
 // contract. It emits only a local terminal-event ID/epoch once per epoch.
 func (client *HubClient) jobCompletionEvents() []hubClientEvent {
@@ -491,11 +547,16 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 	client.assignmentMu.Unlock()
 	events := make([]hubClientEvent, 0, len(completed))
 	for _, job := range completed {
-		if client.completedJobs[job.JobID] == job.Epoch {
+		key := job.JobID + "\x00" + strconv.FormatUint(job.Epoch, 10) + "\x00" + job.ReportPath
+		if client.completedReports == nil {
+			client.completedReports = make(map[string]struct{})
+		}
+		if _, sent := client.completedReports[key]; sent {
 			continue
 		}
 		client.completedJobs[job.JobID] = job.Epoch
-		events = append(events, hubClientEvent{Kind: "job.completed", Payload: hubJobCompletionPayload(job.JobID, job.Epoch)})
+		client.completedReports[key] = struct{}{}
+		events = append(events, hubClientEvent{Kind: "job.completed", Payload: hubJobCompletionPayloadForJob(job)})
 	}
 	return events
 }
@@ -561,6 +622,10 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		}
 	case "burst.holds":
 		if len(fields) != 2 || json.Unmarshal(fields["holds_active"], &message.HoldsActive) != nil {
+			return hubOutboundMessage{}, false
+		}
+	case "relay.inject":
+		if len(fields) != 4 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["pane"], &message.Pane) != nil || json.Unmarshal(fields["text"], &message.Text) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Pane == "" || len(message.Pane) > 128 || !validHubNoteText(message.Text) {
 			return hubOutboundMessage{}, false
 		}
 	default:

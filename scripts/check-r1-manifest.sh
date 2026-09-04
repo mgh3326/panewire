@@ -19,5 +19,9 @@ expected="$(printf '%s\n' \
   TestR1ReverseCompletionIdempotent \
   TestR1AdapterContract \
   TestR1CoreNoSDKLeakage | sort)"
-actual="$(go test ./... -list '^TestR1' | grep -E '^TestR1[A-Za-z0-9_]+$' | sort)"
+# The R1 family uses a letter (or underscore) immediately after its prefix.
+# Keep that boundary in the discovery expression: ^TestR1 also matches future
+# families such as TestR18 and made the fixed R1 manifest reject unrelated
+# fixtures.
+actual="$(go test ./... -list '^TestR1[A-Za-z_][A-Za-z0-9_]*$' | grep -E '^TestR1[A-Za-z_][A-Za-z0-9_]*$' | sort)"
 test "$actual" = "$expected"
