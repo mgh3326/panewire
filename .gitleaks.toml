@@ -1,0 +1,9 @@
+# The sole allowlist entry is a deterministic fake token in a Supabase unit
+# test. It has no authority outside that fixture; real repository history and
+# all other files remain scanned.
+[allowlist]
+description = "fixture-only opaque refresh token"
+regexTarget = "match"
+regexes = [
+  '''refresh_token": "opaque-12345"''',
+]

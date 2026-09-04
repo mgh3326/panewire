@@ -1,0 +1,92 @@
+// Fleet log shipper for the already-running Linux fleet (NCP, OCI, and RPi).
+// Source configuration was captured on 2026-09-02; preserve its runtime behavior.
+// Credentials are repository-external: local loki.env, loaded through the systemd EnvironmentFile.
+loki.write "cloud" {
+	endpoint {
+		url = sys.env("LOKI_URL") + "/loki/api/v1/push"
+
+		basic_auth {
+			username = sys.env("LOKI_USER")
+			password = sys.env("LOKI_TOKEN")
+		}
+	}
+	external_labels = {
+		machine_id = sys.env("MACHINE_ID"),
+		env        = "prod",
+	}
+}
+
+// node_exporter-compatible host metrics for hub placement. MACHINE_ID is an
+// EnvironmentFile contract, not a literal host label.
+prometheus.exporter.unix "node" { }
+
+discovery.relabel "node" {
+	targets = prometheus.exporter.unix.node.targets
+
+	rule {
+		target_label = "machine_id"
+		replacement  = sys.env("MACHINE_ID")
+	}
+}
+
+prometheus.remote_write "fleet" {
+	endpoint {
+		url = sys.env("PROM_REMOTE_WRITE_URL")
+	}
+}
+
+prometheus.scrape "node" {
+	targets    = discovery.relabel.node.output
+	forward_to = [prometheus.remote_write.fleet.receiver]
+}
+
+// systemd journal (units, kernel, sshd, timers)
+loki.relabel "journal" {
+	forward_to = []
+
+	rule {
+		source_labels = ["__journal__systemd_unit"]
+		target_label  = "unit"
+	}
+
+	rule {
+		source_labels = ["__journal_syslog_identifier"]
+		target_label  = "app"
+	}
+
+	rule {
+		source_labels = ["__journal_priority_keyword"]
+		target_label  = "level"
+	}
+}
+
+loki.source.journal "journal" {
+	max_age       = "12h"
+	relabel_rules = loki.relabel.journal.rules
+	labels        = {source = "journal"}
+	forward_to    = [loki.write.cloud.receiver]
+}
+
+// BEGIN docker containers
+// docker containers (at-api, at-scheduler, broker-edge, gatewayd, pg17, redis, dev kit …)
+discovery.docker "local" {
+	host = "unix:///var/run/docker.sock"
+}
+
+discovery.relabel "docker" {
+	targets = discovery.docker.local.targets
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+}
+
+loki.source.docker "docker" {
+	host       = "unix:///var/run/docker.sock"
+	targets    = discovery.relabel.docker.output
+	labels     = {source = "docker"}
+	forward_to = [loki.write.cloud.receiver]
+}
+// END docker containers

@@ -43,6 +43,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "burst" {
 		return runBurstCLI(args[1:], os.Stdout, os.Stderr)
 	}
+	if args[0] == "place" {
+		return runPlaceCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
 	if args[0] == "prompt" {
 		return runPromptCLI(args[1:], cfg)
 	}
