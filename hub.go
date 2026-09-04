@@ -702,10 +702,13 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			h.relayJobCompletion(completion)
 		}
 		if message.Kind == "job.escalate" || message.Kind == "job.joined" {
-			event, valid := decodeHubJobEscalationPayload(message.Payload)
+			event, truncated, valid := decodeHubJobEscalationPayloadDetailed(message.Payload)
 			if !valid {
 				h.countUnknownMessage()
 				return
+			}
+			for _, field := range truncated {
+				h.logger.Warn("relay payload truncated", "field", field, "job", event.JobID)
 			}
 			h.relayJobEvent(message.Kind, event)
 		}

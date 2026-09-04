@@ -12,6 +12,9 @@ file is reloaded for every relay decision. `job.completed` goes to its
 files are migrated. See [the lane contract](docs/r19-lanes.md) for the exact
 file and acknowledgement contract.
 
+Escalation `question` text is capped at 240 characters for hub relay; read the
+full question from the referenced events file (or its explicit report file).
+
 R2 adds `prompt` delivery with target preflight, identity checks, submission proof, optional uptake confirmation, and SQLite delivery audit records.
 
 ## Scope

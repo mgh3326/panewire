@@ -12,6 +12,9 @@ addresses, or installation-specific pane names in a public configuration.
 `job.joined` use the same flat metadata as a completion plus a non-empty
 `reason`; they are injected into the owner lane's parent pane. A missing lane,
 parent, or connected node yields `relay.unrouted` rather than a silent drop.
+An escalation `question` longer than 240 characters is truncated for the hub;
+the complete question remains in the referenced events file (or explicit
+report file), which is shown in the relay text.
 The older `{"routes":...}` form and the `--report-relay-routes` flag remain
 read-compatible during migration.
 

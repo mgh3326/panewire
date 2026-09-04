@@ -579,6 +579,11 @@ func hubJobCompletionPayloadForJob(job HubActiveJob) json.RawMessage {
 	return payload
 }
 
+func compactHubRelayEventText(value string, normalizeNewlines bool) string {
+	value, _ = truncateHubRelayPayloadText(value, normalizeNewlines)
+	return value
+}
+
 // jobCompletionEvents is the node-side producer for the fenced completion
 // contract. It emits only a local terminal-event ID/epoch once per epoch.
 func (client *HubClient) jobCompletionEvents() []hubClientEvent {
@@ -618,7 +623,7 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 				PR             string `json:"pr,omitempty"`
 				Head           string `json:"head,omitempty"`
 				PaneID         string `json:"pane_id,omitempty"`
-			}{job.JobID, job.Epoch, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Question, job.PR, job.Head, job.PaneID})
+			}{job.JobID, job.Epoch, job.OwnerLane, job.Label, job.Host, job.ReportPath, compactHubRelayEventText(job.ReportLastLine, false), compactHubRelayEventText(job.Reason, false), compactHubRelayEventText(job.Question, true), job.PR, job.Head, job.PaneID})
 		}
 		events = append(events, hubClientEvent{Kind: job.Kind, Payload: payload})
 	}
