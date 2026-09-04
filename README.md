@@ -2,6 +2,16 @@
 
 Panewire is a local daemon and CLI for watching agent panes, waiting on stable state, and delivering prompts with verified evidence.
 
+## Lane routing
+
+The hub can relay terminal and escalation records to a small hierarchy of
+operator-owned lanes. Start it with `--lanes /etc/panewire/lanes.json`; the
+file is reloaded for every relay decision. `job.completed` goes to its
+`owner_lane`; `job.escalate` and `job.joined` go to that lane's `parent`.
+`--report-relay-routes` and a legacy `routes` key remain supported while lane
+files are migrated. See [the lane contract](docs/r19-lanes.md) for the exact
+file and acknowledgement contract.
+
 R2 adds `prompt` delivery with target preflight, identity checks, submission proof, optional uptake confirmation, and SQLite delivery audit records.
 
 ## Scope
