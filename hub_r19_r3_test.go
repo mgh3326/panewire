@@ -114,7 +114,7 @@ func TestR19ConcurrentUpdateInstructionsApplyOnce(t *testing.T) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(asset)), Request: request}, nil
 	})}
 
-	busy := make(chan struct{}, 4)
+	busy := make(chan struct{}, 8)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		conn, err := websocket.Accept(writer, request, nil)
 		if err != nil {
@@ -192,13 +192,21 @@ func TestR19ConcurrentUpdateInstructionsApplyOnce(t *testing.T) {
 	if !answeredBusy {
 		t.Fatal("the declined update instruction was not answered with update.busy")
 	}
+
+	// The guard admits one update at a time, not one update ever. A guard that
+	// is never released would decline every later instruction for the life of
+	// the process, which looks identical to correct behaviour above.
+	if !client.beginHubUpdate() {
+		t.Fatal("the in-flight guard was not released after the update completed")
+	}
+	client.endHubUpdate()
 	installed, readErr := os.ReadFile(executable)
 	if readErr != nil || string(installed) != string(asset) {
 		t.Fatalf("executable=%q err=%v", installed, readErr)
 	}
 	backups, globErr := filepath.Glob(executable + ".bak-*")
 	if globErr != nil || len(backups) != 1 {
-		t.Fatalf("one applied update left backups=%v err=%v", backups, globErr)
+		t.Fatalf("one applied update left backups=%v err=%v", backupNames(backups), globErr)
 	}
 	cancel()
 	select {
