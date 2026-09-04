@@ -3,6 +3,7 @@ package panewire
 import (
 	"encoding/json"
 	"os"
+	"strconv"
 	"strings"
 )
 
@@ -45,11 +46,15 @@ func relayText(completion hubJobEventPayload) string {
 	return "(같은 내용이 두 번 보이면 재실행 금지) [report] " + completion.Label + " (" + completion.Host + ") :: " + line + " → " + completion.ReportPath
 }
 
+func relayDedupeKey(completion hubJobEventPayload) string {
+	return completion.JobID + "\x00" + strconv.FormatUint(completion.Epoch, 10) + "\x00" + completion.ReportPath
+}
+
 func (h *HubServer) relayJobCompletion(completion hubJobEventPayload) {
 	if completion.OwnerLane == "" || completion.ReportPath == "" {
 		return
 	}
-	key := completion.JobID + "\x00" + string(rune(completion.Epoch)) + "\x00" + completion.ReportPath
+	key := relayDedupeKey(completion)
 	h.mu.Lock()
 	if _, exists := h.relayDedupe[key]; exists {
 		h.mu.Unlock()

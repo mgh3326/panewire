@@ -351,6 +351,102 @@ func TestHubR14LocalScannerAndRevocationAreMetadataOnly(t *testing.T) {
 	}
 }
 
+func TestHubJobScannerReadsArbiterEnvelopeAndKeepsFlatCompatibility(t *testing.T) {
+	root := t.TempDir()
+	now := time.Now().UTC().Format(time.RFC3339)
+	envelope := filepath.Join(root, "jobs", "job-20260101-0000", "events")
+	if err := os.MkdirAll(envelope, 0700); err != nil {
+		t.Fatal(err)
+	}
+	// This is the arbiter.record_event shape and key order, not a scanner-only fixture.
+	if err := os.WriteFile(filepath.Join(envelope, "00001-job.claim.json"), []byte(`{"created_at":"`+now+`","job_id":"job-20260101-0000","kind":"job.claim","payload":{"agent_label":"wrk-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := scanHubActiveJobs(root)
+	if len(jobs) != 1 || jobs[0].AgentLabel != "wrk-a" || jobs[0].Epoch != 1 {
+		t.Fatalf("M1/M4: envelope claim was not active with default epoch 1: %+v", jobs)
+	}
+	flat := filepath.Join(root, "jobs", "job-flat", "events")
+	if err := os.MkdirAll(flat, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(flat, "00001-job.claimed.json"), []byte(`{"type":"job.claimed","agent_label":"wrk-a","epoch":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := scanHubActiveJobs(root); len(got) != 2 {
+		t.Fatalf("flat compatibility claim disappeared: %+v", got)
+	}
+	if err := os.WriteFile(filepath.Join(envelope, "00002-job.completed.json"), []byte(`{"created_at":"`+now+`","job_id":"job-20260101-0000","kind":"job.completed","payload":{"agent_label":"wrk-a","owner_lane":"lane-a","label":"wrk-a","report_path":"report.md","report_last_line":"VERDICT: DONE","host":"host-a"},"seq":2}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	completed := scanHubCompletedJobs(root)
+	if len(completed) != 1 || completed[0].OwnerLane != "lane-a" || completed[0].ReportPath != "report.md" {
+		t.Fatalf("envelope completion was not reported: %+v", completed)
+	}
+}
+
+func TestHubActiveScannerNewestFirstAndAgeCut(t *testing.T) {
+	root := t.TempDir()
+	old := time.Now().UTC().Add(-73 * time.Hour).Format(time.RFC3339)
+	fresh := time.Now().UTC().Format(time.RFC3339)
+	legacyLast := time.Now().UTC().Add(2 * time.Hour).Format(time.RFC3339)
+	for i := 0; i < 1000; i++ {
+		name := fmt.Sprintf("job-legacy-%04d", i)
+		dir := filepath.Join(root, "jobs", name, "events")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		// The last event is new, but the still-open claim is beyond the replay age.
+		if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+old+`","kind":"job.claim","payload":{"agent_label":"wrk-a"},"seq":1}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "00002-note.json"), []byte(`{"created_at":"`+legacyLast+`","kind":"note","payload":{},"seq":2}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i := 0; i < 40; i++ {
+		name := fmt.Sprintf("job-a-fresh-%04d", i)
+		dir := filepath.Join(root, "jobs", name, "events")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+fresh+`","kind":"job.claim","payload":{"agent_label":"wrk-a"},"seq":1}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	dir := filepath.Join(root, "jobs", "job-z-newest", "events")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	newest := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+newest+`","job_id":"job-z-newest","kind":"job.claim","payload":{"agent_label":"wrk-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	jobs := scanHubActiveJobs(root)
+	found := false
+	for _, job := range jobs {
+		found = found || job.JobID == "job-z-newest"
+	}
+	if len(jobs) != 32 || !found {
+		t.Fatalf("M2/M3: newest valid job was displaced by legacy entries: %+v", jobs)
+	}
+}
+
+func TestHubCompletedScannerAgeCut(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "jobs", "job-old", "events")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().UTC().Add(-73 * time.Hour).Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(dir, "00001-job.completed.json"), []byte(`{"created_at":"`+old+`","kind":"job.completed","epoch":1,"payload":{"owner_lane":"lane-a","report_path":"report.md"},"seq":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := scanHubCompletedJobs(root); len(got) != 0 {
+		t.Fatalf("completed age cut removed (restart would replay): %+v", got)
+	}
+}
+
 func countR14UIEvents(hub *HubServer, phase string) int {
 	hub.mu.Lock()
 	defer hub.mu.Unlock()

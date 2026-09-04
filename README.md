@@ -119,3 +119,11 @@ those authenticated machine IDs; other nodes remain visible as
 
 See [docs/hub-r6.md](docs/hub-r6.md) for token-file formats, CLI examples, the
 closed WebSocket vocabulary, and the NCP/systemd + tunnel deployment runbook.
+
+## Hub job inbox compatibility
+
+For node job heartbeats, the local inbox contract is the arbiter envelope as
+the source of truth, with the prior flat event shape retained for compatibility.
+The default `PANEWIRE_JOB_ACTIVE_MAX_AGE` is **72h**; see
+[the job resilience contract](docs/jobs-resilience.md#node-inbox-event-contract)
+for the event-field table and selection rules.

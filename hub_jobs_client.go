@@ -8,7 +8,24 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
+
+const defaultHubJobActiveMaxAge = 72 * time.Hour
+
+// hubJobActiveMaxAge bounds local inbox replay. PANEWIRE_JOB_ACTIVE_MAX_AGE
+// accepts a Go duration and defaults to 72h when absent or invalid.
+func hubJobActiveMaxAge() time.Duration {
+	if value, err := time.ParseDuration(os.Getenv("PANEWIRE_JOB_ACTIVE_MAX_AGE")); err == nil && value > 0 {
+		return value
+	}
+	return defaultHubJobActiveMaxAge
+}
+
+type hubScannedJob struct {
+	job       HubActiveJob
+	lastEvent time.Time
+}
 
 // scanHubActiveJobs reads only structured local event metadata. It is capped
 // before it reaches a wire payload; brief text is never copied.
@@ -20,20 +37,26 @@ func scanHubActiveJobs(inboxRoot string) []HubActiveJob {
 	if err != nil {
 		return nil
 	}
-	jobs := make([]HubActiveJob, 0, 32)
+	jobs := make([]hubScannedJob, 0, len(entries))
 	for _, entry := range entries {
-		if len(jobs) == 32 {
-			break
-		}
 		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
 			continue
 		}
-		if active, ok := scanHubJobEvents(filepath.Join(inboxRoot, "jobs", entry.Name(), "events"), entry.Name()); ok {
-			jobs = append(jobs, active)
+		if scanned, ok := scanHubJobEventDetails(filepath.Join(inboxRoot, "jobs", entry.Name(), "events"), entry.Name()); ok {
+			jobs = append(jobs, scanned)
 		}
 	}
-	sort.Slice(jobs, func(i, j int) bool { return jobs[i].JobID < jobs[j].JobID })
-	return jobs
+	// Do not let old lexically early inbox directories hide recent work.
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].lastEvent.After(jobs[j].lastEvent) })
+	if len(jobs) > 32 {
+		jobs = jobs[:32]
+	}
+	active := make([]HubActiveJob, 0, len(jobs))
+	for _, scanned := range jobs {
+		active = append(active, scanned.job)
+	}
+	sort.Slice(active, func(i, j int) bool { return active[i].JobID < active[j].JobID })
+	return active
 }
 
 // scanHubCompletedJobs is intentionally separate from the active-set scan:
@@ -75,79 +98,128 @@ func scanHubJobCompletion(eventsDir, jobID string) (HubActiveJob, bool) {
 		if err != nil || len(contents) > 16<<10 {
 			continue
 		}
-		var event struct {
-			Type           string `json:"type"`
-			Kind           string `json:"kind"`
-			Event          string `json:"event"`
-			Epoch          uint64 `json:"epoch"`
-			OwnerLane      string `json:"owner_lane"`
-			Label          string `json:"label"`
-			Host           string `json:"host"`
-			ReportPath     string `json:"report_path"`
-			ReportLastLine string `json:"report_last_line"`
-		}
+		var event hubInboxEvent
 		if json.Unmarshal(contents, &event) != nil {
 			continue
 		}
-		kind := event.Type
-		if kind == "" {
-			kind = event.Kind
-		}
-		if kind == "" {
-			kind = event.Event
-		}
-		if (kind == "job.completed" || kind == "job.completion") && event.Epoch > 0 {
-			completed = HubActiveJob{JobID: jobID, Epoch: event.Epoch, OwnerLane: event.OwnerLane, Label: event.Label, Host: event.Host, ReportPath: event.ReportPath, ReportLastLine: event.ReportLastLine}
+		kind := event.eventKind()
+		if (kind == "job.completed" || kind == "job.completion") && !event.eventTime(entry, eventsDir).Before(time.Now().Add(-hubJobActiveMaxAge())) {
+			epoch := event.Epoch
+			if epoch == 0 {
+				epoch = 1
+			}
+			completed = HubActiveJob{JobID: jobID, Epoch: epoch, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: event.reportPath(), ReportLastLine: event.reportLastLine()}
 		}
 	}
 	return completed, completed.JobID != ""
 }
 
-func scanHubJobEvents(eventsDir, jobID string) (HubActiveJob, bool) {
+// hubInboxEvent accepts the arbiter envelope as the canonical form while
+// retaining the older flat form emitted by existing wrk done installations.
+type hubInboxEvent struct {
+	Type           string `json:"type"`
+	Kind           string `json:"kind"`
+	Event          string `json:"event"`
+	CreatedAt      string `json:"created_at"`
+	AgentLabel     string `json:"agent_label"`
+	PushSHA        string `json:"push_sha"`
+	Epoch          uint64 `json:"epoch"`
+	OwnerLane      string `json:"owner_lane"`
+	Label          string `json:"label"`
+	Host           string `json:"host"`
+	ReportPath     string `json:"report_path"`
+	ReportLastLine string `json:"report_last_line"`
+	Payload        struct {
+		AgentLabel     string `json:"agent_label"`
+		OwnerLane      string `json:"owner_lane"`
+		Label          string `json:"label"`
+		Host           string `json:"host"`
+		ReportPath     string `json:"report_path"`
+		ReportLastLine string `json:"report_last_line"`
+	} `json:"payload"`
+}
+
+func (e hubInboxEvent) eventKind() string {
+	if e.Type != "" {
+		return e.Type
+	}
+	if e.Kind != "" {
+		return e.Kind
+	}
+	return e.Event
+}
+func firstHubValue(top, nested string) string {
+	if top != "" {
+		return top
+	}
+	return nested
+}
+func (e hubInboxEvent) agentLabel() string { return firstHubValue(e.AgentLabel, e.Payload.AgentLabel) }
+func (e hubInboxEvent) ownerLane() string  { return firstHubValue(e.OwnerLane, e.Payload.OwnerLane) }
+func (e hubInboxEvent) label() string      { return firstHubValue(e.Label, e.Payload.Label) }
+func (e hubInboxEvent) host() string       { return firstHubValue(e.Host, e.Payload.Host) }
+func (e hubInboxEvent) reportPath() string { return firstHubValue(e.ReportPath, e.Payload.ReportPath) }
+func (e hubInboxEvent) reportLastLine() string {
+	return firstHubValue(e.ReportLastLine, e.Payload.ReportLastLine)
+}
+func (e hubInboxEvent) eventTime(entry os.DirEntry, eventsDir string) time.Time {
+	if parsed, err := time.Parse(time.RFC3339, e.CreatedAt); err == nil {
+		return parsed
+	}
+	if info, err := entry.Info(); err == nil {
+		return info.ModTime()
+	}
+	return time.Time{}
+}
+
+func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
-		return HubActiveJob{}, false
+		return hubScannedJob{}, false
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	var active HubActiveJob
+	var claimTime, lastEvent time.Time
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		contents, readErr := os.ReadFile(filepath.Join(eventsDir, entry.Name()))
-		if readErr != nil || len(contents) > 16<<10 {
+		contents, err := os.ReadFile(filepath.Join(eventsDir, entry.Name()))
+		if err != nil || len(contents) > 16<<10 {
 			continue
 		}
-		var event struct {
-			Type       string `json:"type"`
-			Kind       string `json:"kind"`
-			Event      string `json:"event"`
-			AgentLabel string `json:"agent_label"`
-			PushSHA    string `json:"push_sha"`
-			Epoch      uint64 `json:"epoch"`
-		}
+		var event hubInboxEvent
 		if json.Unmarshal(contents, &event) != nil {
 			continue
 		}
-		kind := event.Type
-		if kind == "" {
-			kind = event.Kind
-		}
-		if kind == "" {
-			kind = event.Event
+		eventTime := event.eventTime(entry, eventsDir)
+		if eventTime.After(lastEvent) {
+			lastEvent = eventTime
 		}
 		seq, seqOK := hubEventSequence(entry.Name())
-		switch kind {
+		switch event.eventKind() {
 		case "job.claimed", "job.claim":
-			candidate := HubActiveJob{JobID: jobID, AgentLabel: event.AgentLabel, LastEventSeq: seq, PushSHA: event.PushSHA, Epoch: event.Epoch}
+			epoch := event.Epoch
+			if epoch == 0 {
+				epoch = 1
+			}
+			candidate := HubActiveJob{JobID: jobID, AgentLabel: event.agentLabel(), LastEventSeq: seq, PushSHA: event.PushSHA, Epoch: epoch}
 			if seqOK && validHubActiveJob(candidate) {
-				active = candidate
+				active, claimTime = candidate, eventTime
 			}
 		case "job.completed", "job.completion", "job.revoked":
-			active = HubActiveJob{}
+			active, claimTime = HubActiveJob{}, time.Time{}
 		}
 	}
-	return active, validHubActiveJob(active)
+	if !validHubActiveJob(active) || claimTime.Before(time.Now().Add(-hubJobActiveMaxAge())) {
+		return hubScannedJob{}, false
+	}
+	return hubScannedJob{job: active, lastEvent: lastEvent}, true
+}
+
+func scanHubJobEvents(eventsDir, jobID string) (HubActiveJob, bool) {
+	scanned, ok := scanHubJobEventDetails(eventsDir, jobID)
+	return scanned.job, ok
 }
 
 func hubEventSequence(name string) (uint64, bool) {
