@@ -16,5 +16,6 @@ interactive operator pane. `panewire relay routes --routes <path>` prints the
 effective map; `panewire relay test --routes <path> --lane <lane>` checks that
 the requested route exists before that authenticated round trip.
 
-The node first prompts and then reads the pane. A visible pasted-text chip is
-reported as `relay.unconfirmed`; no automatic duplicate prompt is attempted.
+The node first prompts and then reads the pane. A visible pasted-text chip
+causes exactly one `return` submission and a second read; if that cannot be
+confirmed it reports `relay.unconfirmed`. No duplicate prompt is attempted.

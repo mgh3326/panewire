@@ -362,6 +362,15 @@ func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
 		return false
 	}
 	out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", "10").Output()
+	if err != nil || !bytes.Contains(out, []byte("[Pasted text")) {
+		return err == nil
+	}
+	// The relay-handoff contract permits exactly one return only when the
+	// pasted-text chip proves the prompt remained in the composer.
+	if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
+		return false
+	}
+	out, err = exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", "10").Output()
 	return err == nil && !bytes.Contains(out, []byte("[Pasted text"))
 }
 
