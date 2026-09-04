@@ -37,17 +37,25 @@ func truncateHubRelayPayloadText(value string, normalizeNewlines bool) (string, 
 
 func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 11 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 12 {
 		return hubJobEventPayload{}, nil, false
 	}
 	for name := range fields {
-		if name != "job_id" && name != "epoch" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" {
+		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" {
 			return hubJobEventPayload{}, nil, false
 		}
 	}
 	var completion hubJobEventPayload
 	if json.Unmarshal(fields["job_id"], &completion.JobID) != nil || json.Unmarshal(fields["epoch"], &completion.Epoch) != nil || !hubJobIDPattern.MatchString(completion.JobID) || completion.Epoch == 0 {
 		return hubJobEventPayload{}, nil, false
+	}
+	// agent_label is the claim metadata a node carries on the terminal record so
+	// the hub can late-register a job it never saw active. It is descriptive
+	// only; it never grants ownership on its own.
+	if raw, present := fields["agent_label"]; present {
+		if json.Unmarshal(raw, &completion.AgentLabel) != nil || !hubAgentLabelPattern.MatchString(completion.AgentLabel) {
+			return hubJobEventPayload{}, nil, false
+		}
 	}
 	var truncated []string
 	for key, destination := range map[string]*string{"owner_lane": &completion.OwnerLane, "label": &completion.Label, "host": &completion.Host, "report_path": &completion.ReportPath, "report_last_line": &completion.ReportLastLine, "question": &completion.Question, "pr": &completion.PR, "head": &completion.Head, "pane_id": &completion.PaneID} {
@@ -78,7 +86,7 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 // operator-readable reason; it is not a command channel.
 func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 12 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 13 {
 		return hubJobEventPayload{}, nil, false
 	}
 	if _, hasReason := fields["reason"]; !hasReason {
@@ -243,6 +251,35 @@ func (h *HubServer) observeJobCompletion(machineID string, completion hubJobEven
 	job.Completed, job.Orphaned, job.LastSeen = true, false, received
 	if wasOrphaned {
 		h.queueJobEventLocked("job.recovered", hubJobEventPayload{JobID: job.JobID, Node: machineID, Epoch: job.Epoch, LastSeen: received})
+	}
+	return true
+}
+
+// lateRegisterJobCompletion admits a terminal record for a job that never
+// reached h.jobs, so the operator job view is not silently missing work that
+// finished before a heartbeat could carry it. The record is created with
+// Completed set, which keeps it out of the orphan sweep and out of
+// reassignJob: it is a receipt, never a redispatch candidate.
+//
+// Registration is restricted to epoch 1 for the same reason observeActiveJobs
+// is: every epoch above 1 was issued by the hub, so a first-seen job claiming
+// one cannot be proving anything. A higher-epoch record is still relayed; only
+// its bookkeeping entry is declined.
+func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJobEventPayload, received time.Time) bool {
+	if completion.Epoch != 1 || !hubAgentLabelPattern.MatchString(completion.AgentLabel) {
+		return false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.jobs[completion.JobID] != nil {
+		return false
+	}
+	h.jobs[completion.JobID] = &hubJobRecord{
+		HubActiveJob: HubActiveJob{JobID: completion.JobID, AgentLabel: completion.AgentLabel, Epoch: completion.Epoch},
+		Node:         machineID,
+		LastSeen:     received,
+		Completed:    true,
+		FencedNodes:  make(map[string]uint64),
 	}
 	return true
 }
