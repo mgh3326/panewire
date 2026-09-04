@@ -11,7 +11,7 @@ import (
 func TestR19aRelayContextAndLanesJSONAuthority(t *testing.T) {
 	event := hubJobEventPayload{Label: "worker", Host: "host-a", Question: strings.Repeat("q", 300), ReportPath: "report.md"}
 	escalated := relayTextForKind("job.escalate", event)
-	if !strings.Contains(escalated, "[escalate] worker (host-a) :: Q: ") || !strings.Contains(escalated, strings.Repeat("q", 240)) || !strings.HasSuffix(escalated, " → report.md") || len(escalated) > 512 {
+	if !strings.Contains(escalated, "[escalate] worker (host-a) :: Q: ") || !strings.Contains(escalated, strings.Repeat("q", 240)) || !strings.Contains(escalated, " … → report.md") || !strings.HasSuffix(escalated, " (전문: report.md)") || len(escalated) > 512 {
 		t.Fatalf("escalation text=%q", escalated)
 	}
 	joined := relayTextForKind("job.joined", hubJobEventPayload{Label: "captain", PR: "#32", Head: "0123456789abcdef", ReportPath: "report.md"})
