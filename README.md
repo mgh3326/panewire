@@ -108,9 +108,53 @@ operator event push. It is deliberately **not** the durable transport:
   outage loses no stage 1/2 state, and `panewired` retries it as a non-blocking
   side channel.
 
-The hub binds only `127.0.0.1`; expose it solely through a Cloudflare Tunnel
-protected by Cloudflare Access. It has no command-dispatch endpoint. Command
-dispatch requires a separately reviewed allowlist policy in a later round.
+### Transport: outbound-only nodes, tailnet + Cloudflare
+
+Nodes always initiate the WebSocket, so laptops and company-managed machines
+need no inbound SSH, port forwarding, or publicly reachable service. The hub
+may bind both its loopback address for Cloudflare Tunnel and its tailnet
+address with the same mux and token file:
+
+```sh
+panewire hub --hub-auth /etc/panewire/hub.env \
+  --listen 127.0.0.1:9377 --listen 100.64.0.1:9377
+```
+
+`100.64.0.1` is documentation-only CGNAT example space; never publish a real
+tailnet address, token, or pane ID. A node lists its preferred tailnet URL
+first and its Cloudflare URL second (each flag may also contain a comma list):
+
+```sh
+panewire daemon --hub-url wss://100.64.0.1:9377 --hub-url wss://hub.example.invalid \
+  --hub-token-env /etc/panewire/node.env --hub-cf-env /etc/panewire/cf.env
+```
+
+It attempts URLs in order, backs off only after all fail, and every
+`HUB_PREFER_RETRY` (default `10m`) probes a higher-priority route before
+switching. Cloudflare Access headers apply only to non-tailnet URLs.
+
+### Self-update runbook
+
+Build and attach a release asset named `panewire_<goos>_<goarch>` (for example
+`panewire_darwin_arm64`) to a GitHub Release, calculate its SHA-256, then
+publish an explicit target list:
+
+```sh
+panewire update publish --hub-url https://hub.example.invalid \
+  --hub-token-env /etc/panewire/operator.env --version r19b \
+  --url https://github.com/org/panewire/releases/download/r19b/panewire_darwin_arm64 \
+  --sha256 <asset-sha256> --machines company-m1,desktop
+```
+
+Nodes accept HTTPS assets only, verify SHA-256 before changing anything, retain
+the prior binary as `.bak-<timestamp>`, and exit only after replacement. Their
+supervisor must restart them: launchd needs `KeepAlive=true`; systemd needs
+`Restart=always`. The next hello version is the success signal. Update or
+download verification failures leave the existing binary untouched.
+
+Quota is on-demand rather than a 60-second poll: `POST /v1/quota/<machine>`
+asks the connected GUI-session node to execute `scopefuel --json` once and
+caches opaque stdout for `QUOTA_CACHE_TTL` (default `5m`).
 
 By default every authenticated node is watched for presence and heartbeat-check
 alerts. Pass `--alert-nodes machine-a,machine-b` on the hub to limit alerts to

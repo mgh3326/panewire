@@ -52,14 +52,34 @@ func loadHubAuthFile(path string) (map[string]string, error) {
 
 func hubListenAddress(raw string) (string, error) {
 	host, portText, err := net.SplitHostPort(raw)
-	if err != nil || host != "127.0.0.1" {
-		return "", errors.New("hub listen address must be 127.0.0.1:PORT")
+	ip := net.ParseIP(host)
+	if err != nil || ip == nil || (!ip.IsLoopback() && !isTailnetIPv4(ip)) {
+		return "", errors.New("hub listen address must be loopback or tailnet IP:PORT")
 	}
 	port, err := strconv.Atoi(portText)
 	if err != nil || port < 0 || port > 65535 || strconv.Itoa(port) != portText {
 		return "", errors.New("hub listen address must be 127.0.0.1:PORT")
 	}
 	return net.JoinHostPort(host, portText), nil
+}
+
+func isTailnetIPv4(ip net.IP) bool {
+	v4 := ip.To4()
+	return v4 != nil && v4[0] == 100 && v4[1] >= 64 && v4[1] <= 127
+}
+
+type hubListenValues []string
+
+func (values *hubListenValues) String() string { return strings.Join(*values, ",") }
+func (values *hubListenValues) Set(raw string) error {
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			return errors.New("hub listen address is required")
+		}
+		*values = append(*values, item)
+	}
+	return nil
 }
 
 type hubServerCLIDeps struct {
@@ -76,7 +96,8 @@ func newHubServerForCLI(args []string, logger *slog.Logger) (*HubServer, string,
 func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServerCLIDeps) (*HubServer, string, int, error) {
 	flags := flag.NewFlagSet("panewire hub", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
-	listen := flags.String("listen", "127.0.0.1:9377", "loopback listen address")
+	var listens hubListenValues
+	flags.Var(&listens, "listen", "repeatable loopback or tailnet listen address")
 	authPath := flags.String("hub-auth", "", "mode-0600 HUB_TOKEN_<machine_id> file")
 	tgEnvPath := flags.String("hub-tg-env", "", "optional mode-0600 TG_BOT_TOKEN/TG_CHAT_ID env file")
 	gracePeriod := flags.Duration("hub-grace", defaultHubGracePeriod, "continuous disconnected/stale grace period")
@@ -91,7 +112,10 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if *authPath == "" {
 		return nil, "", ExitUsage, errors.New("hub auth file is required")
 	}
-	address, err := hubListenAddress(*listen)
+	if len(listens) == 0 {
+		listens = append(listens, "127.0.0.1:9377")
+	}
+	address, err := hubListenAddress(listens[0])
 	if err != nil {
 		return nil, "", ExitConditionInvalid, err
 	}
@@ -139,6 +163,42 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	return hub, address, ExitOK, nil
 }
 
+// hubListenAddresses parses the same flag grammar used to construct the hub.
+// It is separate so the historical constructor signature remains stable.
+func hubListenAddresses(args []string) ([]string, error) {
+	var values hubListenValues
+	for index := 0; index < len(args); index++ {
+		arg := args[index]
+		if arg == "--listen" {
+			if index+1 >= len(args) || values.Set(args[index+1]) != nil {
+				return nil, errors.New("invalid hub listen")
+			}
+			index++
+		} else if value, found := strings.CutPrefix(arg, "--listen="); found {
+			if values.Set(value) != nil {
+				return nil, errors.New("invalid hub listen")
+			}
+		}
+	}
+	if len(values) == 0 {
+		values = append(values, "127.0.0.1:9377")
+	}
+	seen := make(map[string]struct{}, len(values))
+	addresses := make([]string, 0, len(values))
+	for _, value := range values {
+		address, err := hubListenAddress(value)
+		if err != nil {
+			return nil, err
+		}
+		if _, duplicate := seen[address]; duplicate {
+			return nil, errors.New("duplicate hub listen address")
+		}
+		seen[address] = struct{}{}
+		addresses = append(addresses, address)
+	}
+	return addresses, nil
+}
+
 func parseHubAlertNodes(raw string, tokens map[string]string) (map[string]struct{}, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, errors.New("alert nodes are required when the flag is set")
@@ -161,17 +221,33 @@ func parseHubAlertNodes(raw string, tokens map[string]string) (map[string]struct
 }
 
 func runHubCLI(args []string) int {
-	hub, address, code, err := newHubServerForCLI(args, slog.Default())
+	hub, _, code, err := newHubServerForCLI(args, slog.Default())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hub configuration rejected:", err)
 		return code
 	}
-	listener, err := net.Listen("tcp", address)
+	addresses, err := hubListenAddresses(args)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "hub unavailable")
-		return ExitInternal
+		fmt.Fprintln(os.Stderr, "hub configuration rejected:", err)
+		return ExitConditionInvalid
 	}
-	defer listener.Close()
+	listeners := make([]net.Listener, 0, len(addresses))
+	for _, address := range addresses {
+		listener, listenErr := net.Listen("tcp", address)
+		if listenErr != nil {
+			for _, open := range listeners {
+				_ = open.Close()
+			}
+			fmt.Fprintln(os.Stderr, "hub unavailable")
+			return ExitInternal
+		}
+		listeners = append(listeners, listener)
+	}
+	defer func() {
+		for _, listener := range listeners {
+			_ = listener.Close()
+		}
+	}()
 	server := &http.Server{
 		Handler:           hub.Handler(),
 		ReadHeaderTimeout: 5 * time.Second,
@@ -186,7 +262,11 @@ func runHubCLI(args []string) int {
 		defer shutdownCancel()
 		_ = server.Shutdown(shutdownContext)
 	}()
-	if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	errs := make(chan error, len(listeners))
+	for _, listener := range listeners {
+		go func(listener net.Listener) { errs <- server.Serve(listener) }(listener)
+	}
+	if serveErr := <-errs; serveErr != nil && !errors.Is(serveErr, http.ErrServerClosed) {
 		fmt.Fprintln(os.Stderr, "hub unavailable")
 		return ExitInternal
 	}
