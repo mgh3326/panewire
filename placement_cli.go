@@ -79,6 +79,10 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		fmt.Fprintln(stderr, "place unavailable")
 		return ExitInternal
 	}
+	if result.Decision == "unavailable" {
+		fmt.Fprintln(stderr, "place unavailable")
+		return ExitInternal
+	}
 	if *explain {
 		renderPlacementExplain(stdout, result)
 	} else {

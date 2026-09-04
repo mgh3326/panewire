@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -34,6 +35,7 @@ type HubClientConfig struct {
 	CFAccessClientID      string
 	CFAccessClientSecret  string
 	Accepting             bool
+	RelayInjectTimeout    time.Duration
 	JobsInboxRoot         string
 	FailoverWakeOn        string
 	FailoverWakeMAC       string
@@ -78,6 +80,7 @@ type HubClient struct {
 	cfAccessClientID     string
 	cfAccessSecret       string
 	accepting            bool
+	r19a                 r19aClientState
 	jobsInboxRoot        string
 	failoverWakeOn       string
 	failoverWakeMAC      net.HardwareAddr
@@ -176,6 +179,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
+		r19a:   newR19aClientState(config),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
@@ -411,6 +415,10 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 			if !ok {
 				continue
 			}
+			if message.Type == "relay.inject" {
+				go client.handleRelayInject(ctx, peer, message)
+				continue
+			}
 			switch message.Type {
 			case "ping":
 				if err := peer.write(ctx, hubOutbound{Type: "pong"}); err != nil {
@@ -493,6 +501,43 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 	}
 }
 
+// handleRelayInject is isolated from serve so transport extensions can add
+// their own outbound message cases without changing relay acknowledgement.
+func (client *HubClient) handleRelayInject(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
+	client.respondRelayInject(ctx, peer, message)
+}
+
+const defaultRelayInjectTimeout = 10 * time.Second
+
+func relayInjectTimeout(configured time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+	if timeout, err := time.ParseDuration(os.Getenv("RELAY_INJECT_TIMEOUT")); err == nil && timeout > 0 {
+		return timeout
+	}
+	return defaultRelayInjectTimeout
+}
+
+func (client *HubClient) respondRelayInject(parent context.Context, peer *hubClientConnection, message hubOutboundMessage) {
+	inject := client.relayInject
+	if inject == nil {
+		inject = defaultHubRelayInject
+	}
+	ctx, cancel := context.WithTimeout(parent, client.r19a.relayInjectTimeout)
+	delivered := inject(ctx, message.Pane, message.Text)
+	cancel()
+	kind := "relay.unconfirmed"
+	if delivered {
+		kind = "relay.delivered"
+	}
+	response, _ := json.Marshal(struct {
+		JobID string `json:"job_id"`
+		Pane  string `json:"pane"`
+	}{message.JobID, message.Pane})
+	_ = peer.write(parent, hubClientWireEvent(hubClientEvent{Kind: kind, Payload: response}))
+}
+
 func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	active := scanHubActiveJobs(client.jobsInboxRoot)
 	client.assignmentMu.Lock()
@@ -537,7 +582,7 @@ func hubJobCompletionPayloadForJob(job HubActiveJob) json.RawMessage {
 // jobCompletionEvents is the node-side producer for the fenced completion
 // contract. It emits only a local terminal-event ID/epoch once per epoch.
 func (client *HubClient) jobCompletionEvents() []hubClientEvent {
-	completed := scanHubCompletedJobs(client.jobsInboxRoot)
+	completed := scanHubRelayEvents(client.jobsInboxRoot)
 	client.assignmentMu.Lock()
 	for index := range completed {
 		if assigned := client.assignedJobs[completed[index].JobID]; assigned > completed[index].Epoch {
@@ -547,16 +592,35 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 	client.assignmentMu.Unlock()
 	events := make([]hubClientEvent, 0, len(completed))
 	for _, job := range completed {
-		key := job.JobID + "\x00" + strconv.FormatUint(job.Epoch, 10) + "\x00" + job.ReportPath
+		key := job.Kind + "\x00" + job.JobID + "\x00" + strconv.FormatUint(job.Epoch, 10) + "\x00" + job.ReportPath + "\x00" + job.Reason
 		if client.completedReports == nil {
 			client.completedReports = make(map[string]struct{})
 		}
 		if _, sent := client.completedReports[key]; sent {
 			continue
 		}
-		client.completedJobs[job.JobID] = job.Epoch
+		if job.Kind == "job.completed" {
+			client.completedJobs[job.JobID] = job.Epoch
+		}
 		client.completedReports[key] = struct{}{}
-		events = append(events, hubClientEvent{Kind: "job.completed", Payload: hubJobCompletionPayloadForJob(job)})
+		payload := hubJobCompletionPayloadForJob(job.HubActiveJob)
+		if job.Kind == "job.escalate" || job.Kind == "job.joined" {
+			payload, _ = json.Marshal(struct {
+				JobID          string `json:"job_id"`
+				Epoch          uint64 `json:"epoch"`
+				OwnerLane      string `json:"owner_lane,omitempty"`
+				Label          string `json:"label,omitempty"`
+				Host           string `json:"host,omitempty"`
+				ReportPath     string `json:"report_path,omitempty"`
+				ReportLastLine string `json:"report_last_line,omitempty"`
+				Reason         string `json:"reason"`
+				Question       string `json:"question,omitempty"`
+				PR             string `json:"pr,omitempty"`
+				Head           string `json:"head,omitempty"`
+				PaneID         string `json:"pane_id,omitempty"`
+			}{job.JobID, job.Epoch, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Question, job.PR, job.Head, job.PaneID})
+		}
+		events = append(events, hubClientEvent{Kind: job.Kind, Payload: payload})
 	}
 	return events
 }

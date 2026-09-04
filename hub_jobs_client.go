@@ -83,6 +83,76 @@ func scanHubCompletedJobs(inboxRoot string) []HubActiveJob {
 	return completed
 }
 
+type hubScannedRelayEvent struct {
+	Kind string
+	HubActiveJob
+	Reason   string
+	Question string
+	PR       string
+	Head     string
+	PaneID   string
+}
+
+// scanHubRelayEvents retains the completion scan and also forwards the two
+// compact escalation records emitted by workers and captains. No event body is
+// executed; this only copies bounded metadata into the hub event envelope.
+func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
+	if inboxRoot == "" {
+		return nil
+	}
+	entries, err := os.ReadDir(filepath.Join(inboxRoot, "jobs"))
+	if err != nil {
+		return nil
+	}
+	var events []hubScannedRelayEvent
+	for _, entry := range entries {
+		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
+			continue
+		}
+		dir := filepath.Join(inboxRoot, "jobs", entry.Name(), "events")
+		files, err := os.ReadDir(dir)
+		if err != nil {
+			continue
+		}
+		sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
+		for _, file := range files {
+			if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+				continue
+			}
+			contents, err := os.ReadFile(filepath.Join(dir, file.Name()))
+			if err != nil || len(contents) > 16<<10 {
+				continue
+			}
+			var event hubInboxEvent
+			if json.Unmarshal(contents, &event) != nil || event.eventTime(file, dir).Before(time.Now().Add(-hubJobActiveMaxAge())) {
+				continue
+			}
+			kind := event.eventKind()
+			if kind != "job.completed" && kind != "job.completion" && kind != "job.escalate" && kind != "job.joined" {
+				continue
+			}
+			epoch := event.Epoch
+			if epoch == 0 {
+				epoch = 1
+			}
+			if (kind == "job.escalate" || kind == "job.joined") && event.reason() == "" {
+				continue
+			}
+			if kind == "job.completion" {
+				kind = "job.completed"
+			}
+			events = append(events, hubScannedRelayEvent{Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: event.reportPath(), ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID()})
+		}
+	}
+	sort.Slice(events, func(i, j int) bool {
+		if events[i].JobID == events[j].JobID {
+			return events[i].Kind < events[j].Kind
+		}
+		return events[i].JobID < events[j].JobID
+	})
+	return events
+}
+
 func scanHubJobCompletion(eventsDir, jobID string) (HubActiveJob, bool) {
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
@@ -129,6 +199,11 @@ type hubInboxEvent struct {
 	Host           string `json:"host"`
 	ReportPath     string `json:"report_path"`
 	ReportLastLine string `json:"report_last_line"`
+	Reason         string `json:"reason"`
+	Question       string `json:"question"`
+	PR             string `json:"pr"`
+	Head           string `json:"head"`
+	PaneID         string `json:"pane_id"`
 	Payload        struct {
 		AgentLabel     string `json:"agent_label"`
 		OwnerLane      string `json:"owner_lane"`
@@ -136,6 +211,11 @@ type hubInboxEvent struct {
 		Host           string `json:"host"`
 		ReportPath     string `json:"report_path"`
 		ReportLastLine string `json:"report_last_line"`
+		Reason         string `json:"reason"`
+		Question       string `json:"question"`
+		PR             string `json:"pr"`
+		Head           string `json:"head"`
+		PaneID         string `json:"pane_id"`
 	} `json:"payload"`
 }
 
@@ -162,6 +242,11 @@ func (e hubInboxEvent) reportPath() string { return firstHubValue(e.ReportPath, 
 func (e hubInboxEvent) reportLastLine() string {
 	return firstHubValue(e.ReportLastLine, e.Payload.ReportLastLine)
 }
+func (e hubInboxEvent) reason() string   { return firstHubValue(e.Reason, e.Payload.Reason) }
+func (e hubInboxEvent) question() string { return firstHubValue(e.Question, e.Payload.Question) }
+func (e hubInboxEvent) pr() string       { return firstHubValue(e.PR, e.Payload.PR) }
+func (e hubInboxEvent) head() string     { return firstHubValue(e.Head, e.Payload.Head) }
+func (e hubInboxEvent) paneID() string   { return firstHubValue(e.PaneID, e.Payload.PaneID) }
 func (e hubInboxEvent) eventTime(entry os.DirEntry, eventsDir string) time.Time {
 	if parsed, err := time.Parse(time.RFC3339, e.CreatedAt); err == nil {
 		return parsed

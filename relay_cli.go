@@ -14,7 +14,7 @@ func runRelayCLI(args []string, stdout, stderr io.Writer) int {
 	}
 	fs := flag.NewFlagSet("panewire relay "+args[0], flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	path := fs.String("routes", "/etc/panewire/report-relay.json", "operator-owned route JSON")
+	path := fs.String("routes", "/etc/panewire/lanes.json", "operator-owned lane route JSON")
 	lane := fs.String("lane", "", "owner lane (required for test)")
 	if fs.Parse(args[1:]) != nil || fs.NArg() != 0 {
 		return ExitUsage

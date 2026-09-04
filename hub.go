@@ -67,19 +67,25 @@ type HubServerConfig struct {
 	UIAllowCFOnly bool
 	// ReportRelayPath is an operator-owned route file. It is never sent to nodes.
 	ReportRelayPath string
+	// RelayAckTimeout bounds the time an injected relay may remain silent.
+	RelayAckTimeout time.Duration
+	// AcceptingOverridesPath optionally makes operator acceptance choices durable.
+	AcceptingOverridesPath string
 }
 
 // HubNode is the deliberately small presence view returned to authenticated
 // operators. RemoteMeta records only protocol metadata, never credentials.
 type HubNode struct {
-	MachineID      string            `json:"machine_id"`
-	AlertClass     string            `json:"alert_class"`
-	Accepting      bool              `json:"accepting"`
-	ConnectedSince time.Time         `json:"connected_since"`
-	LastPingMS     int64             `json:"last_ping_ms"`
-	LastNote       *HubLastNote      `json:"last_note,omitempty"`
-	RemoteMeta     map[string]string `json:"remote_meta"`
-	State          string            `json:"state"`
+	MachineID          string            `json:"machine_id"`
+	AlertClass         string            `json:"alert_class"`
+	Accepting          bool              `json:"accepting"`
+	AcceptingEffective bool              `json:"accepting_effective"`
+	AcceptingOverride  string            `json:"accepting_override"`
+	ConnectedSince     time.Time         `json:"connected_since"`
+	LastPingMS         int64             `json:"last_ping_ms"`
+	LastNote           *HubLastNote      `json:"last_note,omitempty"`
+	RemoteMeta         map[string]string `json:"remote_meta"`
+	State              string            `json:"state"`
 }
 
 // HubLastNote is the most recent display-only note received from a node. It
@@ -161,6 +167,17 @@ type hubJobEventPayload struct {
 	Host           string    `json:"host,omitempty"`
 	ReportPath     string    `json:"report_path,omitempty"`
 	ReportLastLine string    `json:"report_last_line,omitempty"`
+	Reason         string    `json:"reason,omitempty"`
+	Question       string    `json:"question,omitempty"`
+	PR             string    `json:"pr,omitempty"`
+	Head           string    `json:"head,omitempty"`
+	PaneID         string    `json:"pane_id,omitempty"`
+}
+
+type relayAckPayload struct {
+	JobID  string `json:"job_id"`
+	Pane   string `json:"pane"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type hubRelayInjectEvent struct {
@@ -261,6 +278,7 @@ type HubServer struct {
 	prometheusBasicUser    string
 	prometheusBasicPass    string
 	placementCache         placementCache
+	r19a                   r19aHubState
 	reportRelayPath        string
 	relayDedupe            map[string]struct{}
 }
@@ -327,11 +345,18 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		}
 		placementPolicy, placementPolicyModTime = policy, modTime
 	}
+	if config.RelayAckTimeout <= 0 {
+		config.RelayAckTimeout = relayAckTimeoutFromEnv()
+	}
+	overrides, err := loadAcceptingOverrides(config.AcceptingOverridesPath)
+	if err != nil {
+		return nil, errors.New("hub accepting overrides are invalid")
+	}
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
 	return &HubServer{
-		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
+		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}),
@@ -364,6 +389,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /ui", h.handleUI)
 	mux.HandleFunc("GET /ui/data.json", h.handleUIData)
 	mux.HandleFunc("GET /v1/nodes", h.handleNodes)
+	mux.HandleFunc("POST /v1/nodes/{machine}/accepting", h.handleAcceptingOverride)
 	mux.HandleFunc("GET /v1/burst", h.handleBurst)
 	mux.HandleFunc("POST /v1/burst/request", h.handleBurstRequest)
 	mux.HandleFunc("POST /v1/burst/release", h.handleBurstRelease)
@@ -396,13 +422,15 @@ type hubUIHub struct {
 }
 
 type hubUINode struct {
-	MachineID  string    `json:"machine_id"`
-	State      string    `json:"state"`
-	StateSince time.Time `json:"state_since"`
-	AlertClass string    `json:"alert_class"`
-	Accepting  bool      `json:"accepting"`
-	LastPingMS int64     `json:"last_ping_ms"`
-	Version    string    `json:"version"`
+	MachineID          string    `json:"machine_id"`
+	State              string    `json:"state"`
+	StateSince         time.Time `json:"state_since"`
+	AlertClass         string    `json:"alert_class"`
+	Accepting          bool      `json:"accepting"`
+	AcceptingEffective bool      `json:"accepting_effective"`
+	AcceptingOverride  string    `json:"accepting_override"`
+	LastPingMS         int64     `json:"last_ping_ms"`
+	Version            string    `json:"version"`
 }
 
 type hubUIBurstPolicy struct {
@@ -485,7 +513,8 @@ func (h *HubServer) uiData() hubUIData {
 		if h.watchesAlerts(record.machineID) {
 			alertClass = "watched"
 		}
-		nodes = append(nodes, hubUINode{MachineID: record.machineID, State: record.state, StateSince: record.stateSince, AlertClass: alertClass, Accepting: record.accepting, LastPingMS: age.Milliseconds(), Version: record.remoteMeta["version"]})
+		effective := h.acceptingEffectiveLocked(record.machineID, record.accepting)
+		nodes = append(nodes, hubUINode{MachineID: record.machineID, State: record.state, StateSince: record.stateSince, AlertClass: alertClass, Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), LastPingMS: age.Milliseconds(), Version: record.remoteMeta["version"]})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })
 	var policy *hubUIBurstPolicy
@@ -671,6 +700,25 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				return
 			}
 			h.relayJobCompletion(completion)
+		}
+		if message.Kind == "job.escalate" || message.Kind == "job.joined" {
+			event, valid := decodeHubJobEscalationPayload(message.Payload)
+			if !valid {
+				h.countUnknownMessage()
+				return
+			}
+			h.relayJobEvent(message.Kind, event)
+		}
+		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
+			ack, valid := decodeRelayAckPayload(message.Payload)
+			if !valid {
+				h.countUnknownMessage()
+				return
+			}
+			if !h.acknowledgeRelay(machineID, ack) {
+				h.countUnknownMessage()
+				return
+			}
 		}
 		if message.Kind == "job.revocation.ack" {
 			ack, valid := decodeHubJobCompletionPayload(message.Payload)
@@ -894,6 +942,16 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
+		if message.Kind == "job.escalate" || message.Kind == "job.joined" {
+			if _, valid := decodeHubJobEscalationPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
+		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
+			if _, valid := decodeRelayAckPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
 		message.Payload = append(json.RawMessage(nil), rawPayload...)
 	default:
 		return hubInbound{}, false
@@ -903,7 +961,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note", "job.completed", "job.revocation.ack", "relay.delivered", "relay.unconfirmed":
+	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "job.revocation.ack", "relay.delivered", "relay.unconfirmed":
 		return true
 	}
 	return false
@@ -921,6 +979,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		remoteMeta: map[string]string{"version": version, "remote_addr": remoteAddr},
 		state:      "connected", stateSince: now, agent: agent, activeJobs: make(map[string]HubActiveJob),
 	}
+	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
 	if h.burstPolicyPath != "" && machineID == h.burstPolicy.TargetMachine && accepting && !h.burstState.LastUp.IsZero() {
 		h.burstState.UpCompleted = true
@@ -1096,8 +1155,9 @@ func (h *HubServer) Nodes() []HubNode {
 		if note := h.lastNotes[record.machineID]; note != nil {
 			lastNote = &HubLastNote{Text: note.Text, ReceivedAt: note.ReceivedAt}
 		}
+		effective := h.acceptingEffectiveLocked(record.machineID, record.accepting)
 		nodes = append(nodes, HubNode{
-			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: record.accepting, ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, RemoteMeta: remoteMeta, State: record.state,
+			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, RemoteMeta: remoteMeta, State: record.state,
 		})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })
