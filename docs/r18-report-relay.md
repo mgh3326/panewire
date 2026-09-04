@@ -1,21 +1,6 @@
-# R18 report relay local round trip
+# R18 report relay compatibility
 
-The hub loads its operator-owned route map from
-`/etc/panewire/report-relay.json` (or `panewire hub --report-relay-routes`).
-The file contains identifiers only:
-
-```json
-{"routes":{"<owner-lane>":{"machine":"<machine-id>","pane":"<test-pane-id>"}}}
-```
-
-For a safe desktop check, create a fresh herdr test pane, point a local
-httptest hub/node at that route, then write a `job.completed` event with a
-report path. Confirm the node receives `relay.inject`, the fake herdr records
-`agent prompt`, and the hub receives `relay.delivered`. Do not target an
-interactive operator pane. `panewire relay routes --routes <path>` prints the
-effective map; `panewire relay test --routes <path> --lane <lane>` checks that
-the requested route exists before that authenticated round trip.
-
-The node first prompts and then reads the pane. A visible pasted-text chip
-causes exactly one `return` submission and a second read; if that cannot be
-confirmed it reports `relay.unconfirmed`. No duplicate prompt is attempted.
+R18's report relay is superseded by the R19 lane contract in
+[r19-lanes.md](r19-lanes.md). Existing `--report-relay-routes` deployments and
+files using the `routes` JSON key remain readable, but new deployments should
+use `--lanes /etc/panewire/lanes.json` and the `lanes` key.

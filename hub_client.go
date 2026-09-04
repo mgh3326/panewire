@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -49,6 +50,7 @@ type HubClientConfig struct {
 	Wait                  HubWait
 	Warn                  func(string)
 	relayInject           func(context.Context, string, string) bool // fixture seam
+	RelayInjectTimeout    time.Duration
 
 	// failoverWakeDestination is a package-private fixture override. Production
 	// always uses the fixed broadcast destination below.
@@ -98,6 +100,7 @@ type HubClient struct {
 	wait                 HubWait
 	warn                 func(string)
 	relayInject          func(context.Context, string, string) bool
+	relayInjectTimeout   time.Duration
 	events               chan hubClientEvent
 	completedJobs        map[string]uint64
 	completedReports     map[string]struct{}
@@ -178,7 +181,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
-		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
+		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayInjectTimeout: relayInjectTimeout(config.RelayInjectTimeout), events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
 	}, nil
 }
 
@@ -443,25 +446,9 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 				client.burstHoldsActive = message.HoldsActive
 				client.burstMu.Unlock()
 			case "relay.inject":
-				inject := client.relayInject
-				if inject == nil {
-					inject = defaultHubRelayInject
-				}
-				kind := "relay.unconfirmed"
-				if inject(ctx, message.Pane, message.Text) {
-					kind = "relay.delivered"
-				}
-				response, _ := json.Marshal(struct {
-					JobID string `json:"job_id"`
-					Pane  string `json:"pane"`
-				}{message.JobID, message.Pane})
-				if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: kind, Payload: response})); err != nil {
-					select {
-					case readErrors <- err:
-					case <-ctx.Done():
-					}
-					return
-				}
+				// Herdr can stall. Do not make the websocket read loop hostage to a
+				// pane command: the bounded work reports its own receipt later.
+				go client.respondRelayInject(ctx, peer, message)
 			}
 		}
 	}()
@@ -491,6 +478,37 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 			}
 		}
 	}
+}
+
+const defaultRelayInjectTimeout = 10 * time.Second
+
+func relayInjectTimeout(configured time.Duration) time.Duration {
+	if configured > 0 {
+		return configured
+	}
+	if timeout, err := time.ParseDuration(os.Getenv("RELAY_INJECT_TIMEOUT")); err == nil && timeout > 0 {
+		return timeout
+	}
+	return defaultRelayInjectTimeout
+}
+
+func (client *HubClient) respondRelayInject(parent context.Context, peer *hubClientConnection, message hubOutboundMessage) {
+	inject := client.relayInject
+	if inject == nil {
+		inject = defaultHubRelayInject
+	}
+	ctx, cancel := context.WithTimeout(parent, client.relayInjectTimeout)
+	delivered := inject(ctx, message.Pane, message.Text)
+	cancel()
+	kind := "relay.unconfirmed"
+	if delivered {
+		kind = "relay.delivered"
+	}
+	response, _ := json.Marshal(struct {
+		JobID string `json:"job_id"`
+		Pane  string `json:"pane"`
+	}{message.JobID, message.Pane})
+	_ = peer.write(parent, hubClientWireEvent(hubClientEvent{Kind: kind, Payload: response}))
 }
 
 func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
@@ -537,7 +555,7 @@ func hubJobCompletionPayloadForJob(job HubActiveJob) json.RawMessage {
 // jobCompletionEvents is the node-side producer for the fenced completion
 // contract. It emits only a local terminal-event ID/epoch once per epoch.
 func (client *HubClient) jobCompletionEvents() []hubClientEvent {
-	completed := scanHubCompletedJobs(client.jobsInboxRoot)
+	completed := scanHubRelayEvents(client.jobsInboxRoot)
 	client.assignmentMu.Lock()
 	for index := range completed {
 		if assigned := client.assignedJobs[completed[index].JobID]; assigned > completed[index].Epoch {
@@ -547,16 +565,31 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 	client.assignmentMu.Unlock()
 	events := make([]hubClientEvent, 0, len(completed))
 	for _, job := range completed {
-		key := job.JobID + "\x00" + strconv.FormatUint(job.Epoch, 10) + "\x00" + job.ReportPath
+		key := job.Kind + "\x00" + job.JobID + "\x00" + strconv.FormatUint(job.Epoch, 10) + "\x00" + job.ReportPath + "\x00" + job.Reason
 		if client.completedReports == nil {
 			client.completedReports = make(map[string]struct{})
 		}
 		if _, sent := client.completedReports[key]; sent {
 			continue
 		}
-		client.completedJobs[job.JobID] = job.Epoch
+		if job.Kind == "job.completed" {
+			client.completedJobs[job.JobID] = job.Epoch
+		}
 		client.completedReports[key] = struct{}{}
-		events = append(events, hubClientEvent{Kind: "job.completed", Payload: hubJobCompletionPayloadForJob(job)})
+		payload := hubJobCompletionPayloadForJob(job.HubActiveJob)
+		if job.Kind == "job.escalate" || job.Kind == "job.joined" {
+			payload, _ = json.Marshal(struct {
+				JobID          string `json:"job_id"`
+				Epoch          uint64 `json:"epoch"`
+				OwnerLane      string `json:"owner_lane,omitempty"`
+				Label          string `json:"label,omitempty"`
+				Host           string `json:"host,omitempty"`
+				ReportPath     string `json:"report_path,omitempty"`
+				ReportLastLine string `json:"report_last_line,omitempty"`
+				Reason         string `json:"reason"`
+			}{job.JobID, job.Epoch, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason})
+		}
+		events = append(events, hubClientEvent{Kind: job.Kind, Payload: payload})
 	}
 	return events
 }

@@ -41,6 +41,51 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 	return completion, true
 }
 
+// decodeHubJobEscalationPayload is the flat record contract written by wrk
+// and captains. It deliberately reuses completion metadata and adds a compact
+// operator-readable reason; it is not a command channel.
+func decodeHubJobEscalationPayload(payload []byte) (hubJobEventPayload, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 8 {
+		return hubJobEventPayload{}, false
+	}
+	if _, hasReason := fields["reason"]; !hasReason {
+		return hubJobEventPayload{}, false
+	}
+	copyFields := make(map[string]json.RawMessage, len(fields)-1)
+	for key, value := range fields {
+		if key != "reason" {
+			copyFields[key] = value
+		}
+	}
+	base, _ := json.Marshal(copyFields)
+	event, valid := decodeHubJobCompletionPayload(base)
+	if !valid || json.Unmarshal(fields["reason"], &event.Reason) != nil || event.Reason == "" || len(event.Reason) > 240 || strings.ContainsAny(event.Reason, "\r\n\x00") {
+		return hubJobEventPayload{}, false
+	}
+	return event, true
+}
+
+func decodeRelayAckPayload(payload []byte) (relayAckPayload, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 3 {
+		return relayAckPayload{}, false
+	}
+	for name := range fields {
+		if name != "job_id" && name != "pane" && name != "reason" {
+			return relayAckPayload{}, false
+		}
+	}
+	var ack relayAckPayload
+	if json.Unmarshal(fields["job_id"], &ack.JobID) != nil || json.Unmarshal(fields["pane"], &ack.Pane) != nil || !hubJobIDPattern.MatchString(ack.JobID) || ack.Pane == "" || len(ack.Pane) > 128 {
+		return relayAckPayload{}, false
+	}
+	if raw, ok := fields["reason"]; ok && (json.Unmarshal(raw, &ack.Reason) != nil || len(ack.Reason) > 240 || strings.ContainsAny(ack.Reason, "\r\n\x00")) {
+		return relayAckPayload{}, false
+	}
+	return ack, true
+}
+
 func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, received time.Time) {
 	seen := make(map[string]struct{}, len(active))
 	h.mu.Lock()

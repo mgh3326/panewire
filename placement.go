@@ -203,7 +203,7 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		record := h.nodes[machine]
 		connected, accepting, jobs := false, false, 0
 		if record != nil {
-			connected, accepting, jobs = record.agent != nil && record.state == "connected", record.accepting, len(record.activeJobs)
+			connected, accepting, jobs = record.agent != nil && record.state == "connected", h.acceptingEffectiveLocked(machine, record.accepting), len(record.activeJobs)
 		}
 		holdsActive := h.holdsActiveLocked(machine, now)
 		burstReady := h.burstPolicyPath != "" && h.burstPolicy.TargetMachine == machine && h.burstState.UpCompleted
