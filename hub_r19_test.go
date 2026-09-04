@@ -160,6 +160,12 @@ func TestR19QuotaTimeoutKillsProcessGroup(t *testing.T) {
 	if err := os.WriteFile(command, []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
+	// The liveness poll below tolerates a zombie. Confirm first that it still
+	// reports a plainly running process as running, so that tolerance cannot
+	// decay into "everything is dead".
+	if dead, state := hubTestProcessIsDead(os.Getpid()); dead {
+		t.Fatalf("the liveness check calls this running test process dead (%s)", state)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	// Bound the call: without the group kill a descendant holds the stdout pipe
