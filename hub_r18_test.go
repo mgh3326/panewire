@@ -81,6 +81,65 @@ func TestR18RelayDedupeAndUnroutedEvent(t *testing.T) {
 	}
 }
 
+func TestR18EnvelopeHeartbeatThenFlatCompletionRelays(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "jobs", "job-20260101-0000", "events")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+now+`","job_id":"job-20260101-0000","kind":"job.claim","payload":{"agent_label":"wrk-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	routes := filepath.Join(t.TempDir(), "routes.json")
+	if err := os.WriteFile(routes, []byte(`{"routes":{"lane-a":{"machine":"node-a","pane":"w1:p1"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op"}, ReportRelayPath: routes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 1)}
+	h.nodes["node-a"] = &hubNodeRecord{agent: agent}
+	client := &HubClient{jobsInboxRoot: root, assignedJobs: map[string]uint64{}, completedJobs: map[string]uint64{}, completedReports: map[string]struct{}{}}
+	heartbeat, ok := decodeHubHeartbeatPayload(client.heartbeatEvent(context.Background()).Payload)
+	if !ok || len(heartbeat.ActiveJobs) != 1 {
+		t.Fatalf("envelope heartbeat did not produce active job: %+v", heartbeat)
+	}
+	h.observeActiveJobs("node-a", heartbeat.ActiveJobs, time.Now().UTC())
+	if h.jobs["job-20260101-0000"] == nil {
+		t.Fatal("hub did not register envelope job")
+	}
+	if err := os.WriteFile(filepath.Join(dir, "00002-job.completed.json"), []byte(`{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"report.md","report_last_line":"VERDICT: DONE"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	events := client.jobCompletionEvents()
+	if len(events) != 1 {
+		t.Fatalf("flat completion missing: %+v", events)
+	}
+	completion, ok := decodeHubJobCompletionPayload(events[0].Payload)
+	if !ok || !h.observeJobCompletion("node-a", completion, time.Now().UTC()) {
+		t.Fatalf("hub fenced flat completion: %+v", completion)
+	}
+	h.relayJobCompletion(completion)
+	select {
+	case relay := <-agent.relays:
+		if relay.Pane != "w1:p1" {
+			t.Fatalf("relay=%+v", relay)
+		}
+	default:
+		t.Fatal("R18 relay.inject not queued")
+	}
+}
+
+func TestR18RelayDedupeKeyUsesDecimalEpoch(t *testing.T) {
+	one := relayDedupeKey(hubJobEventPayload{JobID: "job", Epoch: 1, ReportPath: "report.md"})
+	asciiOne := relayDedupeKey(hubJobEventPayload{JobID: "job", Epoch: 0x31, ReportPath: "report.md"})
+	if one != "job\x001\x00report.md" || asciiOne != "job\x0049\x00report.md" || one == asciiOne {
+		t.Fatalf("M5: epoch dedupe key is not unambiguous decimal: %q %q", one, asciiOne)
+	}
+}
+
 func TestR18RelaySubmissionVerificationReturnsOnceThenUnconfirmed(t *testing.T) {
 	dir := t.TempDir()
 	log := filepath.Join(dir, "herdr.log")

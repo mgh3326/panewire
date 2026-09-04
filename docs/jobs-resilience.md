@@ -22,6 +22,25 @@ legacy-compatible `job.claim` is also read); a terminal `job.completed`,
 event with the local epoch. Briefs, command text, and pane output are never
 sent.
 
+### Node inbox event contract
+
+The node treats the arbiter event envelope as canonical. The older flat form
+remains accepted only for compatibility with existing `wrk done` writers.
+Top-level metadata takes precedence when both forms provide a value.
+
+| Form | Required event discriminator | Metadata read by node |
+| --- | --- | --- |
+| Arbiter envelope (canonical) | top-level `kind` | `payload.agent_label`, `payload.owner_lane`, `payload.label`, `payload.report_path`, `payload.report_last_line`, `payload.host` |
+| Flat (compatibility) | `type`, `kind`, or `event` | corresponding top-level metadata fields |
+
+An envelope claim without `epoch` is reported as epoch 1, the hub's first-seen
+epoch; a node still cannot self-promote to a higher epoch. Active scans keep
+the 32-record limit but select by each job's latest event time (top-level
+`created_at`, otherwise file mtime), newest first. Claims older than
+`PANEWIRE_JOB_ACTIVE_MAX_AGE` are excluded; its default is **72h**. Completed
+events use the same cutoff based on the completion event time, preventing old
+terminal files from being resent after node restart.
+
 The hub waits `--hub-grace` after a disconnected/stale presence transition
 before emitting one `job.orphaned` event. It appears in the authenticated
 `/v1/events` stream, UI Recent events, and (when Telegram is configured) as
