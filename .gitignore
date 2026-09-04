@@ -1,5 +1,8 @@
 # Go build output
 /bin/
+# Root-level `go build ./cmd/panewire` output. Anchored so the cmd/panewire
+# package directory is unaffected.
+/panewire
 *.test
 *.out
 
