@@ -40,6 +40,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "hub-emit" {
 		return runHubEmitCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
+	if args[0] == "update" {
+		return runUpdateCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
 	if args[0] == "burst" {
 		return runBurstCLI(args[1:], os.Stdout, os.Stderr)
 	}
@@ -333,8 +336,24 @@ func socketPathFromEnv() string {
 	return defaultSocketPath()
 }
 func Main(args []string) int {
+	return MainWithVersion(args, "panewire-dev")
+}
+
+// MainWithVersion is called by the command package so release builds can pass
+// their ldflags-injected version into both `panewire version` and node hello.
+func MainWithVersion(args []string, version string) int {
+	if version == "" || !hubVersionPattern.MatchString(version) {
+		version = "panewire-dev"
+	}
+	if len(args) > 0 && args[0] == "version" {
+		if len(args) != 1 {
+			return ExitUsage
+		}
+		fmt.Fprintln(os.Stdout, version)
+		return ExitOK
+	}
 	if len(args) > 0 && args[0] == "daemon" {
-		return runDaemonCLI(args[1:])
+		return runDaemonCLIWithDeps(args[1:], daemonCLIDeps{Version: version})
 	}
 	if len(args) > 0 && args[0] == "hub" {
 		return runHubCLI(args[1:])
@@ -348,10 +367,15 @@ type daemonCLIDeps struct {
 	TelegramBaseURL       string
 	SchemaCommand         []string
 	Logger                *slog.Logger
+	Version               string
 }
 
 func runDaemonCLI(args []string) int {
-	d, code, err := newDaemonForCLI(args, daemonCLIDeps{})
+	return runDaemonCLIWithDeps(args, daemonCLIDeps{})
+}
+
+func runDaemonCLIWithDeps(args []string, deps daemonCLIDeps) int {
+	d, code, err := newDaemonForCLI(args, deps)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon configuration rejected:", err)
 		return code
@@ -388,7 +412,8 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	stage2Poll := fs.Duration("stage2-poll", 30*time.Second, "stage2 publish/claim poll interval")
 	stage2WrkGate := fs.Bool("stage2-wrk-gate", false, "attach the wrk admission gate for spawn requests")
 	stage2SpawnPolicy := fs.String("stage2-spawn-policy", "", "receiving-machine JSON policy for wrk spawn context")
-	hubURL := fs.String("hub-url", "", "optional WSS hub base URL")
+	var hubURLs hubURLValues
+	fs.Var(&hubURLs, "hub-url", "repeatable optional WSS hub base URL (first is preferred)")
 	hubTokenEnv := fs.String("hub-token-env", "", "optional mode-0600 HUB_MACHINE_ID/HUB_TOKEN env file")
 	hubCFEnv := fs.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
 	hubAccepting := fs.Bool("hub-accepting", false, "advertise readiness for paper or standby jobs to the hub")
@@ -425,7 +450,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	}
 	var hubClient *HubClient
 	if hubFlagsProvided(args) {
-		if *hubURL == "" || *hubTokenEnv == "" {
+		if len(hubURLs) == 0 || *hubTokenEnv == "" {
 			return nil, ExitConditionInvalid, fmt.Errorf("hub requires both --hub-url and --hub-token-env")
 		}
 		var checks []HubCheck
@@ -436,7 +461,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 			}
 			checks = loadedChecks
 		}
-		configuredHub, err := buildHubDaemonClientWithBurst(*hubURL, *hubTokenEnv, *hubCFEnv, checks, *hubAccepting, *failoverWakeOn, *failoverWakeMAC, *burstWakeMAC, *burstPoweroffAllowed, deps)
+		configuredHub, err := buildHubDaemonClientWithBurst(strings.Join(hubURLs, ","), *hubTokenEnv, *hubCFEnv, checks, *hubAccepting, *failoverWakeOn, *failoverWakeMAC, *burstWakeMAC, *burstPoweroffAllowed, deps)
 		if err != nil {
 			return nil, ExitConditionInvalid, err
 		}
@@ -475,6 +500,20 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		hubClient.jobsInboxRoot = cfg.InboxRoot
 	}
 	return NewDaemon(cfg), ExitOK, nil
+}
+
+type hubURLValues []string
+
+func (values *hubURLValues) String() string { return strings.Join(*values, ",") }
+func (values *hubURLValues) Set(raw string) error {
+	for _, value := range strings.Split(raw, ",") {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return fmt.Errorf("hub URL is required")
+		}
+		*values = append(*values, value)
+	}
+	return nil
 }
 
 func stage2FlagsProvided(args []string) bool {
