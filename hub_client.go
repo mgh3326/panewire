@@ -80,7 +80,7 @@ type HubClient struct {
 	cfAccessClientID     string
 	cfAccessSecret       string
 	accepting            bool
-	relayInjectTimeout   time.Duration
+	r19a                 r19aClientState
 	jobsInboxRoot        string
 	failoverWakeOn       string
 	failoverWakeMAC      net.HardwareAddr
@@ -175,16 +175,15 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.burstPoweroff == nil {
 		config.burstPoweroff = executeHubBurstPoweroff
 	}
-	client := &HubClient{
+	return &HubClient{
 		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
+		r19a:         newR19aClientState(config),
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
-	}
-	client.initR19a(config)
-	return client, nil
+	}, nil
 }
 
 const hubFailoverWakeBroadcastAddress = "255.255.255.255:9"
@@ -451,10 +450,6 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 				client.burstMu.Lock()
 				client.burstHoldsActive = message.HoldsActive
 				client.burstMu.Unlock()
-			case "relay.inject":
-				// Herdr can stall. Do not make the websocket read loop hostage to a
-				// pane command: the bounded work reports its own receipt later.
-				go client.respondRelayInject(ctx, peer, message)
 			}
 		}
 	}()
@@ -509,7 +504,7 @@ func (client *HubClient) respondRelayInject(parent context.Context, peer *hubCli
 	if inject == nil {
 		inject = defaultHubRelayInject
 	}
-	ctx, cancel := context.WithTimeout(parent, client.relayInjectTimeout)
+	ctx, cancel := context.WithTimeout(parent, client.r19a.relayInjectTimeout)
 	delivered := inject(ctx, message.Pane, message.Text)
 	cancel()
 	kind := "relay.unconfirmed"

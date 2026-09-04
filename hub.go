@@ -277,11 +277,6 @@ type HubServer struct {
 	prometheusBearer       string
 	prometheusBasicUser    string
 	prometheusBasicPass    string
-	relayAckTimeout        time.Duration
-	relayPending           map[string]relayPending
-	relayTimeouts          map[string]struct{}
-	acceptingOverride      map[string]string
-	acceptingOverridesPath string
 	placementCache         placementCache
 	r19a                   r19aHubState
 	reportRelayPath        string
@@ -360,14 +355,12 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
-	hub := &HubServer{
-		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
+	return &HubServer{
+		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}),
-	}
-	hub.initR19a(config, overrides)
-	return hub, nil
+	}, nil
 }
 
 func (h *HubServer) alertClass(machineID string) string {

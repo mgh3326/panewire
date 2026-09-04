@@ -13,18 +13,17 @@ type r19aHubState struct {
 	acceptingOverridesPath string
 }
 
-func (h *HubServer) initR19a(config HubServerConfig, overrides map[string]string) {
-	h.r19a = r19aHubState{
+type r19aClientState struct {
+	relayInjectTimeout time.Duration
+}
+
+func newR19aHubState(config HubServerConfig, overrides map[string]string) r19aHubState {
+	return r19aHubState{
 		relayAckTimeout: config.RelayAckTimeout, relayPending: make(map[string]relayPending), relayTimeouts: make(map[string]struct{}),
 		acceptingOverride: overrides, acceptingOverridesPath: config.AcceptingOverridesPath,
 	}
-	h.relayAckTimeout = config.RelayAckTimeout
-	h.relayPending = h.r19a.relayPending
-	h.relayTimeouts = h.r19a.relayTimeouts
-	h.acceptingOverride = overrides
-	h.acceptingOverridesPath = config.AcceptingOverridesPath
 }
 
-func (client *HubClient) initR19a(config HubClientConfig) {
-	client.relayInjectTimeout = relayInjectTimeout(config.RelayInjectTimeout)
+func newR19aClientState(config HubClientConfig) r19aClientState {
+	return r19aClientState{relayInjectTimeout: relayInjectTimeout(config.RelayInjectTimeout)}
 }

@@ -48,7 +48,7 @@ func loadAcceptingOverrides(path string) (map[string]string, error) {
 }
 
 func (h *HubServer) acceptingOverrideLocked(machine string) string {
-	if mode := h.acceptingOverride[machine]; mode != "" {
+	if mode := h.r19a.acceptingOverride[machine]; mode != "" {
 		return mode
 	}
 	return acceptingOverrideAuto
@@ -66,14 +66,14 @@ func (h *HubServer) acceptingEffectiveLocked(machine string, advertised bool) bo
 }
 
 func (h *HubServer) persistAcceptingOverridesLocked(next map[string]string) error {
-	if h.acceptingOverridesPath == "" {
+	if h.r19a.acceptingOverridesPath == "" {
 		return nil
 	}
 	b, err := json.Marshal(acceptingOverrideFile{Overrides: next})
 	if err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(h.acceptingOverridesPath), ".accepting-overrides-*")
+	temporary, err := os.CreateTemp(filepath.Dir(h.r19a.acceptingOverridesPath), ".accepting-overrides-*")
 	if err != nil {
 		return err
 	}
@@ -86,7 +86,7 @@ func (h *HubServer) persistAcceptingOverridesLocked(next map[string]string) erro
 	if _, err := temporary.Write(append(b, '\n')); err != nil || temporary.Close() != nil {
 		return errors.New("write override file")
 	}
-	return os.Rename(name, h.acceptingOverridesPath)
+	return os.Rename(name, h.r19a.acceptingOverridesPath)
 }
 
 func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request *http.Request) {
@@ -110,8 +110,8 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 		http.Error(writer, "unknown node", http.StatusNotFound)
 		return
 	}
-	next := make(map[string]string, len(h.acceptingOverride)+1)
-	for key, value := range h.acceptingOverride {
+	next := make(map[string]string, len(h.r19a.acceptingOverride)+1)
+	for key, value := range h.r19a.acceptingOverride {
 		next[key] = value
 	}
 	next[machine] = body.Mode
@@ -120,7 +120,7 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 		http.Error(writer, "accepting override unavailable", http.StatusInternalServerError)
 		return
 	}
-	h.acceptingOverride = next
+	h.r19a.acceptingOverride = next
 	effective := false
 	if record := h.nodes[machine]; record != nil {
 		effective = h.acceptingEffectiveLocked(machine, record.accepting)
