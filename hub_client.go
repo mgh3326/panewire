@@ -179,8 +179,8 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
+		r19a:   newR19aClientState(config),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
-		r19a:         newR19aClientState(config),
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
 	}, nil
@@ -450,6 +450,26 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 				client.burstMu.Lock()
 				client.burstHoldsActive = message.HoldsActive
 				client.burstMu.Unlock()
+			case "relay.inject":
+				inject := client.relayInject
+				if inject == nil {
+					inject = defaultHubRelayInject
+				}
+				kind := "relay.unconfirmed"
+				if inject(ctx, message.Pane, message.Text) {
+					kind = "relay.delivered"
+				}
+				response, _ := json.Marshal(struct {
+					JobID string `json:"job_id"`
+					Pane  string `json:"pane"`
+				}{message.JobID, message.Pane})
+				if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: kind, Payload: response})); err != nil {
+					select {
+					case readErrors <- err:
+					case <-ctx.Done():
+					}
+					return
+				}
 			}
 		}
 	}()
