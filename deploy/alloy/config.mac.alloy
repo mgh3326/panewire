@@ -2,60 +2,69 @@
 // Source configuration was captured on 2026-09-02; preserve its runtime behavior.
 // Credentials are repository-external: launchd plist EnvironmentVariables, never this repository.
 loki.write "cloud" {
-  endpoint {
-    url = sys.env("LOKI_URL") + "/loki/api/v1/push"
-    basic_auth {
-      username = sys.env("LOKI_USER")
-      password = sys.env("LOKI_TOKEN")
-    }
-  }
-  external_labels = {
-    machine_id = sys.env("MACHINE_ID"),
-    env        = "prod",
-  }
+	endpoint {
+		url = sys.env("LOKI_URL") + "/loki/api/v1/push"
+
+		basic_auth {
+			username = sys.env("LOKI_USER")
+			password = sys.env("LOKI_TOKEN")
+		}
+	}
+	external_labels = {
+		machine_id = sys.env("MACHINE_ID"),
+		env        = "prod",
+	}
 }
 
 // Node metrics are sent to the private Prometheus receiver, never Loki. The
 // host identity is injected by launchd so a copied config cannot silently
 // report itself as mac-personal.
 prometheus.exporter.unix "node" {
-  enable_collectors = ["thermal"]
+	enable_collectors = ["thermal"]
 }
+
 discovery.relabel "node" {
-  targets = prometheus.exporter.unix.node.targets
-  rule {
-    target_label = "machine_id"
-    replacement  = sys.env("MACHINE_ID")
-  }
+	targets = prometheus.exporter.unix.node.targets
+
+	rule {
+		target_label = "machine_id"
+		replacement  = sys.env("MACHINE_ID")
+	}
 }
+
 prometheus.remote_write "fleet" {
-  endpoint {
-    url = sys.env("PROM_REMOTE_WRITE_URL")
-  }
+	endpoint {
+		url = sys.env("PROM_REMOTE_WRITE_URL")
+	}
 }
+
 prometheus.scrape "node" {
-  targets    = discovery.relabel.node.output
-  forward_to = [prometheus.remote_write.fleet.receiver]
+	targets    = discovery.relabel.node.output
+	forward_to = [prometheus.remote_write.fleet.receiver]
 }
+
 local.file_match "runtime" {
-  path_targets = [
-    { __path__ = "${HOME}/services/auto_trader/logs/*.log", source = "auto_trader" },
-    { __path__ = "${HOME}/services/prefect/logs/*.log", source = "prefect" },
-    { __path__ = "${HOME}/.local/state/watch-alert-relay/*.log", source = "watch-alert-relay" },
-    { __path__ = "${HOME}/.local/state/fill-event-triage/*.log", source = "fill-event-triage" },
-  ]
-  sync_period = "30s"
+	path_targets = [
+		{__path__ = "${HOME}/services/auto_trader/logs/*.log", source = "auto_trader"},
+		{__path__ = "${HOME}/services/prefect/logs/*.log", source = "prefect"},
+		{__path__ = "${HOME}/.local/state/watch-alert-relay/*.log", source = "watch-alert-relay"},
+		{__path__ = "${HOME}/.local/state/fill-event-triage/*.log", source = "fill-event-triage"},
+	]
+	sync_period = "30s"
 }
+
 loki.relabel "files" {
-  forward_to = []
-  rule {
-    source_labels = ["__path__"]
-    regex         = ".*/([^/]+)$"
-    target_label  = "file"
-  }
+	forward_to = []
+
+	rule {
+		source_labels = ["__path__"]
+		regex         = ".*/([^/]+)$"
+		target_label  = "file"
+	}
 }
+
 loki.source.file "runtime" {
-  targets       = local.file_match.runtime.targets
-  forward_to    = [loki.write.cloud.receiver]
-  tail_from_end = true
+	targets       = local.file_match.runtime.targets
+	forward_to    = [loki.write.cloud.receiver]
+	tail_from_end = true
 }
