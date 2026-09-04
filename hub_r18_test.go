@@ -1,10 +1,13 @@
 package panewire
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 )
 
 func TestR18CompletionPayloadPreservesReportAndDedupesPath(t *testing.T) {
@@ -27,6 +30,75 @@ func TestR18CompletionPayloadPreservesReportAndDedupesPath(t *testing.T) {
 	}
 	if got := c.jobCompletionEvents(); len(got) != 0 {
 		t.Fatalf("duplicate=%d", len(got))
+	}
+}
+
+func TestR18RelayDedupeAndUnroutedEvent(t *testing.T) {
+	routes := filepath.Join(t.TempDir(), "routes.json")
+	if err := os.WriteFile(routes, []byte(`{"routes":{"lane-a":{"machine":"node-a","pane":"test-pane"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "node-a": "node"}, ReportRelayPath: routes})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 2)}
+	h.nodes["node-a"] = &hubNodeRecord{agent: agent}
+	completed := hubJobEventPayload{JobID: "r18", Epoch: 1, OwnerLane: "lane-a", Label: "worker", Host: "host", ReportPath: "report.md", ReportLastLine: "done"}
+	h.relayJobCompletion(completed)
+	select {
+	case directive := <-agent.relays:
+		if directive.Pane != "test-pane" {
+			t.Fatalf("directive=%+v", directive)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("missing directive")
+	}
+	h.relayJobCompletion(completed)
+	select {
+	case <-agent.relays:
+		t.Fatal("dedupe removed: duplicate directive")
+	default:
+	}
+
+	// An absent mapping is a visible relay.unrouted result, never a silent drop.
+	h2, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sub := &hubEventSubscriber{ctx: ctx, cancel: cancel, messages: make(chan hubSubscriptionMessage, 1)}
+	h2.subscribers[sub] = struct{}{}
+	h2.relayJobCompletion(completed)
+	select {
+	case result := <-sub.messages:
+		if result.event == nil || result.event.Kind != "relay.unrouted" {
+			t.Fatalf("event=%+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("unrouted completion was silently dropped")
+	}
+}
+
+func TestR18RelaySubmissionVerificationReturnsOnceThenUnconfirmed(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "herdr.log")
+	binary := filepath.Join(dir, "herdr")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho \"$2\" >>\"$R18_HERDR_LOG\"\ncase \"$2\" in read) echo '[Pasted text #1]' ;; esac\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("R18_HERDR_LOG", log)
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	if defaultHubRelayInject(context.Background(), "test-pane", "one line") {
+		t.Fatal("pasted composer reported delivered")
+	}
+	b, err := os.ReadFile(log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Fields(string(b)); strings.Join(got, ",") != "prompt,read,send-keys,read" {
+		t.Fatalf("submission verification removed or repeated: %q", b)
 	}
 }
 
