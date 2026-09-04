@@ -30,6 +30,7 @@ type HubWait func(context.Context, time.Duration) error
 // historical behavior.
 type HubClientConfig struct {
 	URL                   string
+	URLs                  []string
 	MachineID             string
 	Token                 string
 	CFAccessClientID      string
@@ -46,6 +47,11 @@ type HubClientConfig struct {
 	PingInterval          time.Duration
 	InitialBackoff        time.Duration
 	MaxBackoff            time.Duration
+	PreferRetry           time.Duration
+	Version               string
+	UpdateHTTPClient      *http.Client
+	ExecutablePath        string // fixture seam; production uses os.Executable.
+	Restart               func() // fixture seam; production exits for its supervisor.
 	AllowInsecureForTests bool
 	Dial                  HubDial
 	Wait                  HubWait
@@ -75,6 +81,7 @@ type hubClientEvent struct {
 // durable relay: Supabase remains responsible for offline stage2 delivery.
 type HubClient struct {
 	endpoint             string
+	endpoints            []string
 	machineID            string
 	token                string
 	cfAccessClientID     string
@@ -97,6 +104,11 @@ type HubClient struct {
 	pingInterval         time.Duration
 	initialBackoff       time.Duration
 	maxBackoff           time.Duration
+	preferRetry          time.Duration
+	version              string
+	updateHTTPClient     *http.Client
+	executablePath       string
+	restart              func()
 	dial                 HubDial
 	wait                 HubWait
 	warn                 func(string)
@@ -107,13 +119,36 @@ type HubClient struct {
 	assignedJobs         map[string]uint64
 	assignmentMu         sync.Mutex
 	burstHoldsActive     bool
+	updateMu             sync.Mutex
+	updateInFlight       bool
 }
 
 // NewHubClient validates the public base URL and all local inputs without
 // opening a connection. Production accepts only wss URLs; ws is fixture-only.
 func NewHubClient(config HubClientConfig) (*HubClient, error) {
-	endpoint, err := hubWSEndpoint(config.URL, config.AllowInsecureForTests)
-	if err != nil || config.MachineID == hubOperatorMachineID || !machineIDPattern.MatchString(config.MachineID) || !validHubToken(config.Token) || !validHubChecks(config.Checks) || (config.CFAccessClientID == "") != (config.CFAccessClientSecret == "") || (config.CFAccessClientID != "" && (!validHubCFAccessValue(config.CFAccessClientID) || !validHubCFAccessValue(config.CFAccessClientSecret))) {
+	rawURLs := append([]string(nil), config.URLs...)
+	if config.URL != "" {
+		rawURLs = append([]string{config.URL}, rawURLs...)
+	}
+	if len(rawURLs) == 0 {
+		return nil, errors.New("hub client configuration is invalid")
+	}
+	endpoints := make([]string, 0, len(rawURLs))
+	seen := make(map[string]struct{}, len(rawURLs))
+	for _, raw := range rawURLs {
+		for _, item := range strings.Split(raw, ",") {
+			endpoint, err := hubWSEndpoint(strings.TrimSpace(item), config.AllowInsecureForTests)
+			if err != nil {
+				return nil, errors.New("hub client configuration is invalid")
+			}
+			if _, duplicate := seen[endpoint]; duplicate {
+				continue
+			}
+			seen[endpoint] = struct{}{}
+			endpoints = append(endpoints, endpoint)
+		}
+	}
+	if len(endpoints) == 0 || config.MachineID == hubOperatorMachineID || !machineIDPattern.MatchString(config.MachineID) || !validHubToken(config.Token) || !validHubChecks(config.Checks) || (config.CFAccessClientID == "") != (config.CFAccessClientSecret == "") || (config.CFAccessClientID != "" && (!validHubCFAccessValue(config.CFAccessClientID) || !validHubCFAccessValue(config.CFAccessClientSecret))) {
 		return nil, errors.New("hub client configuration is invalid")
 	}
 	wakeRequested := config.FailoverWakeOn != "" || config.FailoverWakeMAC != ""
@@ -160,6 +195,23 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.MaxBackoff < config.InitialBackoff {
 		return nil, errors.New("hub client configuration is invalid")
 	}
+	if config.PreferRetry <= 0 {
+		config.PreferRetry = 10 * time.Minute
+		if raw := os.Getenv("HUB_PREFER_RETRY"); raw != "" {
+			if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
+				config.PreferRetry = parsed
+			}
+		}
+	}
+	if config.Version == "" {
+		config.Version = "panewire-dev"
+	}
+	if !hubVersionPattern.MatchString(config.Version) {
+		return nil, errors.New("hub client configuration is invalid")
+	}
+	if config.UpdateHTTPClient == nil {
+		config.UpdateHTTPClient = &http.Client{Timeout: 15 * time.Second}
+	}
 	if config.Dial == nil {
 		config.Dial = websocket.Dial
 	}
@@ -175,13 +227,16 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.burstPoweroff == nil {
 		config.burstPoweroff = executeHubBurstPoweroff
 	}
+	if config.Restart == nil {
+		config.Restart = func() { os.Exit(0) }
+	}
 	return &HubClient{
-		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot,
+		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		r19a:   newR19aClientState(config),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
-		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
+		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version, updateHTTPClient: config.UpdateHTTPClient, executablePath: config.ExecutablePath, restart: config.Restart,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
 	}, nil
 }
@@ -310,16 +365,10 @@ func (client *HubClient) Run(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		headers := make(http.Header)
-		headers.Set(hubMachineIDHeader, client.machineID)
-		headers.Set(hubAuthorizationHeader, "Bearer "+client.token)
-		if client.cfAccessClientID != "" {
-			headers.Set("CF-Access-Client-Id", client.cfAccessClientID)
-			headers.Set("CF-Access-Client-Secret", client.cfAccessSecret)
-		}
-		connection, _, err := client.dial(ctx, client.endpoint, &websocket.DialOptions{HTTPHeader: headers})
+		connection, endpoint, err := client.dialAny(ctx)
 		if err == nil {
 			backoff = client.initialBackoff
+			client.endpoint = endpoint
 			err = client.serve(ctx, connection)
 			_ = connection.CloseNow()
 		}
@@ -334,6 +383,51 @@ func (client *HubClient) Run(ctx context.Context) {
 		}
 		backoff = nextHubBackoff(backoff, client.maxBackoff)
 	}
+}
+
+func (client *HubClient) dialHeaders(endpoint string) http.Header {
+	headers := make(http.Header)
+	headers.Set(hubMachineIDHeader, client.machineID)
+	headers.Set(hubAuthorizationHeader, "Bearer "+client.token)
+	parsed, _ := url.Parse(endpoint)
+	// A tailnet endpoint authenticates with the hub token only. Cloudflare
+	// Access credentials are deliberately never sent to a numeric tailnet peer.
+	if client.cfAccessClientID != "" && (parsed == nil || !isTailnetIPv4(net.ParseIP(parsed.Hostname()))) {
+		headers.Set("CF-Access-Client-Id", client.cfAccessClientID)
+		headers.Set("CF-Access-Client-Secret", client.cfAccessSecret)
+	}
+	return headers
+}
+
+func (client *HubClient) dialAny(ctx context.Context) (*websocket.Conn, string, error) {
+	var last error
+	for _, endpoint := range client.endpoints {
+		connection, _, err := client.dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: client.dialHeaders(endpoint)})
+		if err == nil {
+			return connection, endpoint, nil
+		}
+		last = err
+	}
+	return nil, "", last
+}
+
+// dialPreferred is non-disruptive: it never touches the current socket unless
+// a better endpoint has completed its TCP/WebSocket handshake.
+func (client *HubClient) dialPreferred(ctx context.Context) (*websocket.Conn, string, bool) {
+	current := 0
+	for index, endpoint := range client.endpoints {
+		if endpoint == client.endpoint {
+			current = index
+			break
+		}
+	}
+	for _, endpoint := range client.endpoints[:current] {
+		connection, _, err := client.dial(ctx, endpoint, &websocket.DialOptions{HTTPHeader: client.dialHeaders(endpoint)})
+		if err == nil {
+			return connection, endpoint, true
+		}
+	}
+	return nil, "", false
 }
 
 func nextHubBackoff(current, maximum time.Duration) time.Duration {
@@ -359,6 +453,10 @@ type hubOutboundMessage struct {
 	HoldsActive bool
 	Pane        string
 	Text        string
+	RequestID   string
+	URL         string
+	SHA256      string
+	Version     string
 }
 
 func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
@@ -378,7 +476,30 @@ func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
 	return err == nil && !bytes.Contains(out, []byte("[Pasted text"))
 }
 
+// serve runs the node side of one hub session. A preference switch replaces the
+// live connection rather than nesting another session: serveConnection hands
+// the already-open candidate back and this loop continues on it, so each
+// session's ticker, preference ticker, and reader goroutine are released at the
+// switch instead of at the end of a recursive chain.
 func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) error {
+	current := connection
+	for {
+		next, err := client.serveConnection(ctx, current)
+		if next == nil {
+			if current != connection {
+				// Run only closes the connection it dialed.
+				_ = current.CloseNow()
+			}
+			return err
+		}
+		current = next
+	}
+}
+
+// serveConnection returns a non-nil connection only when the caller should
+// continue the session on that already-open preferred endpoint; the superseded
+// connection has been closed by then.
+func (client *HubClient) serveConnection(ctx context.Context, connection *websocket.Conn) (*websocket.Conn, error) {
 	connection.SetReadLimit(hubMaxMessageBytes)
 	peer := &hubClientConnection{connection: connection}
 	if err := peer.write(ctx, struct {
@@ -386,15 +507,15 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 		MachineID string `json:"machine_id"`
 		Version   string `json:"version"`
 		Accepting bool   `json:"accepting,omitempty"`
-	}{Type: "hello", MachineID: client.machineID, Version: "panewired-r10", Accepting: client.accepting}); err != nil {
-		return err
+	}{Type: "hello", MachineID: client.machineID, Version: client.version, Accepting: client.accepting}); err != nil {
+		return nil, err
 	}
 	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
-		return err
+		return nil, err
 	}
 	for _, event := range client.jobCompletionEvents() {
 		if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	readErrors := make(chan error, 1)
@@ -470,33 +591,89 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 					}
 					return
 				}
+			case "update.available":
+				if !client.beginHubUpdate() {
+					// One self-update at a time; the hub is told rather than
+					// left to infer the outcome from a missing restart.
+					if err := peer.write(ctx, hubOutbound{Type: "update.busy"}); err != nil {
+						select {
+						case readErrors <- err:
+						case <-ctx.Done():
+						}
+						return
+					}
+					continue
+				}
+				go client.handleHubUpdate(message)
+			case "quota.request":
+				go client.handleHubQuota(ctx, peer, message)
 			}
 		}
 	}()
 	ticker := time.NewTicker(client.pingInterval)
 	defer ticker.Stop()
+	prefer := time.NewTicker(client.preferRetry)
+	defer prefer.Stop()
+	type preferenceResult struct {
+		connection *websocket.Conn
+		endpoint   string
+		switched   bool
+	}
+	preferenceResults := make(chan preferenceResult, 1)
+	serveDone := make(chan struct{})
+	defer close(serveDone)
+	preferenceProbing := false
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case err := <-readErrors:
-			return err
+			return nil, err
 		case event := <-client.events:
 			if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
-				return err
+				return nil, err
 			}
 		case <-ticker.C:
 			if err := peer.write(ctx, hubOutbound{Type: "ping"}); err != nil {
-				return err
+				return nil, err
 			}
 			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
-				return err
+				return nil, err
 			}
 			for _, event := range client.jobCompletionEvents() {
 				if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
-					return err
+					return nil, err
 				}
 			}
+		case result := <-preferenceResults:
+			preferenceProbing = false
+			if result.switched {
+				// Hand the already-open candidate back to serve, which
+				// continues the session on it. The old connection stays live
+				// until this point, so a failed preference probe cannot cause
+				// an outage.
+				client.endpoint = result.endpoint
+				_ = connection.CloseNow()
+				return result.connection, nil
+			}
+		case <-prefer.C:
+			if preferenceProbing {
+				continue
+			}
+			preferenceProbing = true
+			go func() {
+				attemptContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+				candidate, endpoint, switched := client.dialPreferred(attemptContext)
+				cancel()
+				result := preferenceResult{connection: candidate, endpoint: endpoint, switched: switched}
+				select {
+				case preferenceResults <- result:
+				case <-serveDone:
+					if candidate != nil {
+						_ = candidate.CloseNow()
+					}
+				}
+			}()
 		}
 	}
 }
@@ -700,6 +877,15 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		}
 	case "relay.inject":
 		if len(fields) != 4 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["pane"], &message.Pane) != nil || json.Unmarshal(fields["text"], &message.Text) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Pane == "" || len(message.Pane) > 128 || !validHubNoteText(message.Text) {
+			return hubOutboundMessage{}, false
+		}
+	case "update.available":
+		if len(fields) != 4 || json.Unmarshal(fields["version"], &message.Version) != nil || json.Unmarshal(fields["sha256"], &message.SHA256) != nil || json.Unmarshal(fields["url"], &message.URL) != nil || !hubVersionPattern.MatchString(message.Version) || !validHubSHA256(message.SHA256) || !validHubUpdateURL(message.URL) {
+			return hubOutboundMessage{}, false
+		}
+	case "quota.request":
+		var tool string
+		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["tool"], &tool) != nil || !validHubRequestID(message.RequestID) || tool != "scopefuel" {
 			return hubOutboundMessage{}, false
 		}
 	default:

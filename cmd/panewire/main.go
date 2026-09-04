@@ -6,4 +6,7 @@ import (
 	"github.com/mgh3326/panewire"
 )
 
-func main() { os.Exit(panewire.Main(os.Args[1:])) }
+// version is set by release builds with: -ldflags "-X main.version=<tag>".
+var version = "panewire-dev"
+
+func main() { os.Exit(panewire.MainWithVersion(os.Args[1:], version)) }
