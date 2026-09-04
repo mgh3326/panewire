@@ -86,7 +86,11 @@ func scanHubCompletedJobs(inboxRoot string) []HubActiveJob {
 type hubScannedRelayEvent struct {
 	Kind string
 	HubActiveJob
-	Reason string
+	Reason   string
+	Question string
+	PR       string
+	Head     string
+	PaneID   string
 }
 
 // scanHubRelayEvents retains the completion scan and also forwards the two
@@ -137,7 +141,7 @@ func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
 			if kind == "job.completion" {
 				kind = "job.completed"
 			}
-			events = append(events, hubScannedRelayEvent{Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: event.reportPath(), ReportLastLine: event.reportLastLine()}, Reason: event.reason()})
+			events = append(events, hubScannedRelayEvent{Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: event.reportPath(), ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID()})
 		}
 	}
 	sort.Slice(events, func(i, j int) bool {
@@ -196,6 +200,10 @@ type hubInboxEvent struct {
 	ReportPath     string `json:"report_path"`
 	ReportLastLine string `json:"report_last_line"`
 	Reason         string `json:"reason"`
+	Question       string `json:"question"`
+	PR             string `json:"pr"`
+	Head           string `json:"head"`
+	PaneID         string `json:"pane_id"`
 	Payload        struct {
 		AgentLabel     string `json:"agent_label"`
 		OwnerLane      string `json:"owner_lane"`
@@ -204,6 +212,10 @@ type hubInboxEvent struct {
 		ReportPath     string `json:"report_path"`
 		ReportLastLine string `json:"report_last_line"`
 		Reason         string `json:"reason"`
+		Question       string `json:"question"`
+		PR             string `json:"pr"`
+		Head           string `json:"head"`
+		PaneID         string `json:"pane_id"`
 	} `json:"payload"`
 }
 
@@ -230,7 +242,11 @@ func (e hubInboxEvent) reportPath() string { return firstHubValue(e.ReportPath, 
 func (e hubInboxEvent) reportLastLine() string {
 	return firstHubValue(e.ReportLastLine, e.Payload.ReportLastLine)
 }
-func (e hubInboxEvent) reason() string { return firstHubValue(e.Reason, e.Payload.Reason) }
+func (e hubInboxEvent) reason() string   { return firstHubValue(e.Reason, e.Payload.Reason) }
+func (e hubInboxEvent) question() string { return firstHubValue(e.Question, e.Payload.Question) }
+func (e hubInboxEvent) pr() string       { return firstHubValue(e.PR, e.Payload.PR) }
+func (e hubInboxEvent) head() string     { return firstHubValue(e.Head, e.Payload.Head) }
+func (e hubInboxEvent) paneID() string   { return firstHubValue(e.PaneID, e.Payload.PaneID) }
 func (e hubInboxEvent) eventTime(entry os.DirEntry, eventsDir string) time.Time {
 	if parsed, err := time.Parse(time.RFC3339, e.CreatedAt); err == nil {
 		return parsed

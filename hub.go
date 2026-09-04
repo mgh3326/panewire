@@ -168,6 +168,10 @@ type hubJobEventPayload struct {
 	ReportPath     string    `json:"report_path,omitempty"`
 	ReportLastLine string    `json:"report_last_line,omitempty"`
 	Reason         string    `json:"reason,omitempty"`
+	Question       string    `json:"question,omitempty"`
+	PR             string    `json:"pr,omitempty"`
+	Head           string    `json:"head,omitempty"`
+	PaneID         string    `json:"pane_id,omitempty"`
 }
 
 type relayAckPayload struct {
@@ -273,14 +277,15 @@ type HubServer struct {
 	prometheusBearer       string
 	prometheusBasicUser    string
 	prometheusBasicPass    string
-	placementCache         placementCache
-	reportRelayPath        string
-	relayDedupe            map[string]struct{}
 	relayAckTimeout        time.Duration
 	relayPending           map[string]relayPending
 	relayTimeouts          map[string]struct{}
 	acceptingOverride      map[string]string
 	acceptingOverridesPath string
+	placementCache         placementCache
+	r19a                   r19aHubState
+	reportRelayPath        string
+	relayDedupe            map[string]struct{}
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -355,12 +360,14 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.Logger == nil {
 		config.Logger = slog.Default()
 	}
-	return &HubServer{
+	hub := &HubServer{
 		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}), relayAckTimeout: config.RelayAckTimeout, relayPending: make(map[string]relayPending), relayTimeouts: make(map[string]struct{}), acceptingOverride: overrides, acceptingOverridesPath: config.AcceptingOverridesPath,
-	}, nil
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}),
+	}
+	hub.initR19a(config, overrides)
+	return hub, nil
 }
 
 func (h *HubServer) alertClass(machineID string) string {

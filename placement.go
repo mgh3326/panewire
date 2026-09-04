@@ -90,6 +90,45 @@ type PlacementResult struct {
 	Candidates []PlacementCandidate `json:"candidates"`
 	Source     string               `json:"source"`
 	Asof       time.Time            `json:"asof"`
+	Reason     string               `json:"reason,omitempty"`
+}
+
+// MarshalJSON keeps the internal unavailable sentinel useful to callers while
+// presenting the API contract's null decision to external clients.
+func (r PlacementResult) MarshalJSON() ([]byte, error) {
+	type wirePlacementResult struct {
+		Decision   *string              `json:"decision"`
+		Candidates []PlacementCandidate `json:"candidates"`
+		Source     string               `json:"source"`
+		Asof       time.Time            `json:"asof"`
+		Reason     string               `json:"reason,omitempty"`
+	}
+	var decision *string
+	if r.Decision != "unavailable" {
+		decision = &r.Decision
+	}
+	return json.Marshal(wirePlacementResult{Decision: decision, Candidates: r.Candidates, Source: r.Source, Asof: r.Asof, Reason: r.Reason})
+}
+
+func (r *PlacementResult) UnmarshalJSON(data []byte) error {
+	type wirePlacementResult struct {
+		Decision   *string              `json:"decision"`
+		Candidates []PlacementCandidate `json:"candidates"`
+		Source     string               `json:"source"`
+		Asof       time.Time            `json:"asof"`
+		Reason     string               `json:"reason"`
+	}
+	var wire wirePlacementResult
+	if err := json.Unmarshal(data, &wire); err != nil {
+		return err
+	}
+	r.Candidates, r.Source, r.Asof, r.Reason = wire.Candidates, wire.Source, wire.Asof, wire.Reason
+	if wire.Decision == nil {
+		r.Decision = "unavailable"
+	} else {
+		r.Decision = *wire.Decision
+	}
+	return nil
 }
 
 type placementCache struct {
@@ -267,6 +306,12 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 				break
 			}
 		}
+		// Capacity pressure retains the historical local fallback when no spill
+		// is available. An explicit/off effective acceptance is different: it
+		// is an operator prohibition and must never be returned as a placement.
+		if decision == policy.LocalMachine && strings.Contains(candidates[0].Reason, "not_accepting") {
+			decision = "unavailable"
+		}
 	}
 	// A disconnected spill target is still the actionable answer when wake is
 	// enabled; callers can observe that fact in its reason.
@@ -279,7 +324,11 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		decision = "unavailable"
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
-	return PlacementResult{Decision: decision, Candidates: candidates, Source: source, Asof: now}
+	reason := ""
+	if decision == "unavailable" {
+		reason = "unavailable"
+	}
+	return PlacementResult{Decision: decision, Candidates: candidates, Source: source, Asof: now, Reason: reason}
 }
 
 func placementUsable(candidate PlacementCandidate, policy PlacementPolicy, source string) bool {

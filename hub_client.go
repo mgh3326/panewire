@@ -35,6 +35,7 @@ type HubClientConfig struct {
 	CFAccessClientID      string
 	CFAccessClientSecret  string
 	Accepting             bool
+	RelayInjectTimeout    time.Duration
 	JobsInboxRoot         string
 	FailoverWakeOn        string
 	FailoverWakeMAC       string
@@ -50,7 +51,6 @@ type HubClientConfig struct {
 	Wait                  HubWait
 	Warn                  func(string)
 	relayInject           func(context.Context, string, string) bool // fixture seam
-	RelayInjectTimeout    time.Duration
 
 	// failoverWakeDestination is a package-private fixture override. Production
 	// always uses the fixed broadcast destination below.
@@ -80,6 +80,7 @@ type HubClient struct {
 	cfAccessClientID     string
 	cfAccessSecret       string
 	accepting            bool
+	relayInjectTimeout   time.Duration
 	jobsInboxRoot        string
 	failoverWakeOn       string
 	failoverWakeMAC      net.HardwareAddr
@@ -100,7 +101,6 @@ type HubClient struct {
 	wait                 HubWait
 	warn                 func(string)
 	relayInject          func(context.Context, string, string) bool
-	relayInjectTimeout   time.Duration
 	events               chan hubClientEvent
 	completedJobs        map[string]uint64
 	completedReports     map[string]struct{}
@@ -175,14 +175,16 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.burstPoweroff == nil {
 		config.burstPoweroff = executeHubBurstPoweroff
 	}
-	return &HubClient{
+	client := &HubClient{
 		endpoint: endpoint, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff,
-		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayInjectTimeout: relayInjectTimeout(config.RelayInjectTimeout), events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
-	}, nil
+		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
+	}
+	client.initR19a(config)
+	return client, nil
 }
 
 const hubFailoverWakeBroadcastAddress = "255.255.255.255:9"
@@ -414,6 +416,10 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 			if !ok {
 				continue
 			}
+			if message.Type == "relay.inject" {
+				go client.handleRelayInject(ctx, peer, message)
+				continue
+			}
 			switch message.Type {
 			case "ping":
 				if err := peer.write(ctx, hubOutbound{Type: "pong"}); err != nil {
@@ -478,6 +484,12 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 			}
 		}
 	}
+}
+
+// handleRelayInject is isolated from serve so transport extensions can add
+// their own outbound message cases without changing relay acknowledgement.
+func (client *HubClient) handleRelayInject(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
+	client.respondRelayInject(ctx, peer, message)
 }
 
 const defaultRelayInjectTimeout = 10 * time.Second
@@ -587,7 +599,11 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 				ReportPath     string `json:"report_path,omitempty"`
 				ReportLastLine string `json:"report_last_line,omitempty"`
 				Reason         string `json:"reason"`
-			}{job.JobID, job.Epoch, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason})
+				Question       string `json:"question,omitempty"`
+				PR             string `json:"pr,omitempty"`
+				Head           string `json:"head,omitempty"`
+				PaneID         string `json:"pane_id,omitempty"`
+			}{job.JobID, job.Epoch, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Question, job.PR, job.Head, job.PaneID})
 		}
 		events = append(events, hubClientEvent{Kind: job.Kind, Payload: payload})
 	}

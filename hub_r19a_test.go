@@ -40,12 +40,12 @@ func TestR19HierarchicalLanesAndLegacyRoutes(t *testing.T) {
 	h.relayJobCompletion(event)
 	if got := <-agent.relays; got.Pane != "w1:p1" {
 		t.Fatalf("completed pane=%q", got.Pane)
-	} // M1: removing normal lane routing fails.
+	}
 	event.JobID = "job-b"
 	h.relayJobEvent("job.escalate", event)
 	if got := <-agent.relays; got.Pane != "w1:p2" {
 		t.Fatalf("escalation parent pane=%q", got.Pane)
-	} // M2: ignoring parent fails.
+	}
 	noParent := filepath.Join(t.TempDir(), "no-parent.json")
 	if err := os.WriteFile(noParent, []byte(`{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`), 0600); err != nil {
 		t.Fatal(err)
@@ -76,7 +76,6 @@ func TestR19RelayAckTimeoutBroadcastsOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// This fake agent receives inject but never replies, reproducing the lost-ack case.
 	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 1)}
 	h.nodes["host-a"] = &hubNodeRecord{agent: agent}
 	ctx, cancel := context.WithCancel(t.Context())
@@ -99,7 +98,7 @@ func TestR19RelayAckTimeoutBroadcastsOnce(t *testing.T) {
 	case got := <-sub.messages:
 		t.Fatalf("duplicate timeout=%+v", got)
 	default:
-	} // M3: deleting pending/timeout dedupe fails.
+	}
 }
 
 func TestR19AcceptingOverrideControlsPlacementAndUI(t *testing.T) {
@@ -120,9 +119,9 @@ func TestR19AcceptingOverrideControlsPlacementAndUI(t *testing.T) {
 		t.Fatalf("off status=%d", got)
 	}
 	policy := PlacementPolicy{LocalMachine: "host-a", MaxActiveJobs: 1, LoadRatio: 1}
-	if result := h.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()); result.Decision != "host-a" || result.Candidates[0].Reason != "not_accepting" {
+	if result := h.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()); result.Decision != "unavailable" || result.Reason != "unavailable" || result.Candidates[0].Reason != "not_accepting" {
 		t.Fatalf("off placement=%+v", result)
-	} // M4: reading hello accepting instead of effective fails.
+	}
 	if data := h.uiData(); data.Nodes[0].AcceptingEffective || data.Nodes[0].AcceptingOverride != "off" {
 		t.Fatalf("UI override=%+v", data.Nodes[0])
 	}
@@ -203,7 +202,7 @@ func TestR19NodeScansFlatEscalationRecord(t *testing.T) {
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "00001-job.escalate.json"), []byte(`{"kind":"job.escalate","epoch":1,"owner_lane":"lane-a","label":"worker","host":"host-a","report_path":"report.md","report_last_line":"waiting","reason":"needs captain"}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "00001-job.escalate.json"), []byte(`{"kind":"job.escalate","epoch":1,"owner_lane":"lane-a","parent_lane":"ignored-by-hub","label":"worker","host":"host-a","report_path":"report.md","report_last_line":"waiting","reason":"needs captain"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	client := &HubClient{jobsInboxRoot: root, completedJobs: map[string]uint64{}, completedReports: map[string]struct{}{}, assignedJobs: map[string]uint64{}}
@@ -211,7 +210,7 @@ func TestR19NodeScansFlatEscalationRecord(t *testing.T) {
 	if len(events) != 1 || events[0].Kind != "job.escalate" {
 		t.Fatalf("escalation scan=%+v", events)
 	}
-	if event, ok := decodeHubJobEscalationPayload(events[0].Payload); !ok || event.Reason != "needs captain" {
+	if event, ok := decodeHubJobEscalationPayload(events[0].Payload); !ok || event.Reason != "needs captain" || event.OwnerLane != "lane-a" {
 		t.Fatalf("escalation payload=%s", events[0].Payload)
 	}
 }

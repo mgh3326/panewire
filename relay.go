@@ -5,6 +5,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // reportRelayRoutes is intentionally a tiny operator-owned configuration:
@@ -50,6 +51,22 @@ func loadReportRelayRoutes(path string) map[string]reportRelayRoute {
 }
 
 func relayText(completion hubJobEventPayload) string {
+	return relayTextForKind("job.completed", completion)
+}
+
+func relayTextForKind(kind string, event hubJobEventPayload) string {
+	if kind == "job.escalate" {
+		question := truncateRelayText(event.Question, 240)
+		return boundRelayText("[escalate] "+truncateRelayText(event.Label, 100)+" ("+truncateRelayText(event.Host, 100)+") :: Q: "+question+" → ", event.ReportPath)
+	}
+	if kind == "job.joined" {
+		head := truncateRelayText(event.Head, 9)
+		return boundRelayText("[joined] "+truncateRelayText(event.Label, 120)+" :: PR "+truncateRelayText(event.PR, 120)+" @ "+head+" → ", event.ReportPath)
+	}
+	return completedRelayText(event)
+}
+
+func completedRelayText(completion hubJobEventPayload) string {
 	line := strings.ReplaceAll(strings.ReplaceAll(completion.ReportLastLine, "\n", " "), "\r", " ")
 	if len(line) > 240 {
 		line = line[:240]
@@ -59,6 +76,29 @@ func relayText(completion hubJobEventPayload) string {
 		reason = " [reason: " + completion.Reason + "]"
 	}
 	return "(같은 내용이 두 번 보이면 재실행 금지) [report] " + completion.Label + " (" + completion.Host + ")" + reason + " :: " + line + " → " + completion.ReportPath
+}
+
+func truncateRelayText(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	for limit > 0 && !utf8.ValidString(value[:limit]) {
+		limit--
+	}
+	return value[:limit]
+}
+
+// boundRelayText protects the websocket note contract while keeping the
+// human question/PR context intact; the report path is deliberately last.
+func boundRelayText(prefix, reportPath string) string {
+	const max = 512
+	if len(prefix)+len(reportPath) <= max {
+		return prefix + reportPath
+	}
+	if len(prefix) >= max {
+		return truncateRelayText(prefix, max)
+	}
+	return prefix + truncateRelayText(reportPath, max-len(prefix))
 }
 
 func relayDedupeKey(completion hubJobEventPayload) string {
@@ -99,7 +139,7 @@ func (h *HubServer) relayJobEvent(kind string, event hubJobEventPayload) {
 		agent = h.nodes[route.Machine].agent
 	}
 	h.mu.Unlock()
-	if !exists || agent == nil || !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", JobID: event.JobID, Pane: route.Pane, Text: relayText(event)}) {
+	if !exists || agent == nil || !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", JobID: event.JobID, Pane: route.Pane, Text: relayTextForKind(kind, event)}) {
 		// An unrouted/temporarily disconnected target remains observable to the
 		// operator event feed. It is deliberately not reinterpreted as success.
 		payload, _ := json.Marshal(event)
