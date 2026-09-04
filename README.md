@@ -146,15 +146,28 @@ panewire update publish --hub-url https://hub.example.invalid \
   --sha256 <asset-sha256> --machines company-m1,desktop
 ```
 
-Nodes accept HTTPS assets only, verify SHA-256 before changing anything, retain
-the prior binary as `.bak-<timestamp>`, and exit only after replacement. Their
-supervisor must restart them: launchd needs `KeepAlive=true`; systemd needs
-`Restart=always`. The next hello version is the success signal. Update or
+Nodes accept only GitHub release URLs: `github.com` plus the GitHub release
+asset redirect host `objects.githubusercontent.com`. Redirects must remain
+HTTPS, stay on that allowlist, and are limited to three hops. Nodes verify
+SHA-256 before changing anything, retain the prior binary as
+`.bak-<timestamp>`, then atomically rename the verified replacement over the
+existing executable. Their supervisor must restart them: launchd needs
+`KeepAlive=true`; systemd needs `Restart=always`. Publishing records the
+expected version per target: only a later hello with that exact version emits
+`update.succeeded`; no matching hello within ten minutes emits
+`update.unconfirmed`. Release builds inject this version with
+`-ldflags "-X main.version=<tag>"`, and `panewire version` prints it. Update or
 download verification failures leave the existing binary untouched.
 
 Quota is on-demand rather than a 60-second poll: `POST /v1/quota/<machine>`
 asks the connected GUI-session node to execute `scopefuel --json` once and
-caches opaque stdout for `QUOTA_CACHE_TTL` (default `5m`).
+caches its result for `QUOTA_CACHE_TTL` (default `5m`). Stdout is limited to
+16 KiB and an oversized result is discarded with `output_too_large`; a timeout
+kills the command's complete process group. The child environment is rebuilt
+from the allowlist `PATH`, `HOME`, `USER`, `LANG`, `CODEX_HOME`, and
+`CLAUDE_CONFIG_DIR`. The last two are scopefuel's documented credential
+location overrides; hub tokens, Cloudflare headers, and all other daemon
+environment values are never inherited.
 
 By default every authenticated node is watched for presence and heartbeat-check
 alerts. Pass `--alert-nodes machine-a,machine-b` on the hub to limit alerts to

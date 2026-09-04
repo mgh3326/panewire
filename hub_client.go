@@ -200,7 +200,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		}
 	}
 	if config.Version == "" {
-		config.Version = "panewired-r19b"
+		config.Version = "panewire-dev"
 	}
 	if !hubVersionPattern.MatchString(config.Version) {
 		return nil, errors.New("hub client configuration is invalid")
@@ -570,6 +570,15 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 	defer ticker.Stop()
 	prefer := time.NewTicker(client.preferRetry)
 	defer prefer.Stop()
+	type preferenceResult struct {
+		connection *websocket.Conn
+		endpoint   string
+		switched   bool
+	}
+	preferenceResults := make(chan preferenceResult, 1)
+	serveDone := make(chan struct{})
+	defer close(serveDone)
+	preferenceProbing := false
 	for {
 		select {
 		case <-ctx.Done():
@@ -592,18 +601,34 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 					return err
 				}
 			}
-		case <-prefer.C:
-			attemptContext, cancel := context.WithTimeout(ctx, 5*time.Second)
-			candidate, endpoint, switched := client.dialPreferred(attemptContext)
-			cancel()
-			if switched {
+		case result := <-preferenceResults:
+			preferenceProbing = false
+			if result.switched {
 				// Returning hands the already-open candidate to Run; the old
 				// connection stays live until this point, so a failed preference
 				// probe cannot cause an outage.
-				client.endpoint = endpoint
+				client.endpoint = result.endpoint
 				_ = connection.CloseNow()
-				return client.serve(ctx, candidate)
+				return client.serve(ctx, result.connection)
 			}
+		case <-prefer.C:
+			if preferenceProbing {
+				continue
+			}
+			preferenceProbing = true
+			go func() {
+				attemptContext, cancel := context.WithTimeout(ctx, 5*time.Second)
+				candidate, endpoint, switched := client.dialPreferred(attemptContext)
+				cancel()
+				result := preferenceResult{connection: candidate, endpoint: endpoint, switched: switched}
+				select {
+				case preferenceResults <- result:
+				case <-serveDone:
+					if candidate != nil {
+						_ = candidate.CloseNow()
+					}
+				}
+			}()
 		}
 	}
 }

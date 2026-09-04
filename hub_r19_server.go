@@ -47,7 +47,7 @@ func parseHubQuotaReport(raw []byte) (hubQuotaReport, bool) {
 		}
 	}
 	if value, found := fields["error"]; found {
-		if json.Unmarshal(value, &report.Error) != nil || (report.Error != "unsupported" && report.Error != "scopefuel failed") {
+		if json.Unmarshal(value, &report.Error) != nil || (report.Error != "unsupported" && report.Error != "scopefuel failed" && report.Error != "output_too_large" && report.Error != "timeout") {
 			return hubQuotaReport{}, false
 		}
 	}
@@ -183,6 +183,10 @@ func (h *HubServer) handleUpdatePublish(w http.ResponseWriter, r *http.Request) 
 		}
 		agents = append(agents, h.nodes[machine].agent)
 	}
+	deadline := h.now().UTC().Add(h.updateConfirmationTimeout)
+	for _, machine := range request.Machines {
+		h.expectedVersion[machine] = hubExpectedVersion{version: request.Version, deadline: deadline}
+	}
 	h.mu.Unlock()
 	message := struct {
 		Type    string `json:"type"`
@@ -192,6 +196,11 @@ func (h *HubServer) handleUpdatePublish(w http.ResponseWriter, r *http.Request) 
 	}{"update.available", request.Version, request.SHA256, request.URL}
 	for _, agent := range agents {
 		if agent.writeJSON(message) != nil {
+			h.mu.Lock()
+			for _, machine := range request.Machines {
+				delete(h.expectedVersion, machine)
+			}
+			h.mu.Unlock()
 			http.Error(w, "node unavailable", http.StatusServiceUnavailable)
 			return
 		}

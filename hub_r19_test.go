@@ -1,15 +1,20 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
+	"syscall"
 	"testing"
+	"time"
 
 	"github.com/coder/websocket"
 )
@@ -48,15 +53,26 @@ func TestR19HubURLFallbackAndPreference(t *testing.T) {
 	}
 }
 
+type hubRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (fn hubRoundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
+
 func TestR19UpdateChecksumFailureDoesNotReplace(t *testing.T) {
 	asset := []byte("new binary")
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write(asset) }))
-	defer server.Close()
+	client := &http.Client{Transport: hubRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		if request.URL.Hostname() != "github.com" {
+			t.Fatalf("download host=%q", request.URL.Hostname())
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(asset)), Request: request}, nil
+	})}
 	path := filepath.Join(t.TempDir(), "panewire")
 	if err := os.WriteFile(path, []byte("old binary"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := applyHubUpdate(context.Background(), server.Client(), path, server.URL, "0000000000000000000000000000000000000000000000000000000000000000"); err == nil {
+	url := "https://github.com/mgh3326/panewire/releases/download/r19b/panewire_darwin_arm64"
+	if err := applyHubUpdate(context.Background(), client, path, url, "0000000000000000000000000000000000000000000000000000000000000000"); err == nil {
 		t.Fatal("checksum mismatch accepted")
 	}
 	got, err := os.ReadFile(path)
@@ -64,11 +80,124 @@ func TestR19UpdateChecksumFailureDoesNotReplace(t *testing.T) {
 		t.Fatalf("binary changed: %q err=%v", got, err)
 	}
 	hash := sha256.Sum256(asset)
-	if err := applyHubUpdate(context.Background(), server.Client(), path, server.URL, hex.EncodeToString(hash[:])); err != nil {
+	if err := applyHubUpdate(context.Background(), client, path, url, hex.EncodeToString(hash[:])); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = os.ReadFile(path)
 	if string(got) != string(asset) {
 		t.Fatalf("got %q", got)
+	}
+	backups, globErr := filepath.Glob(path + ".bak-*")
+	if globErr != nil || len(backups) != 1 {
+		t.Fatalf("backups=%v err=%v", backups, globErr)
+	}
+	previous, readErr := os.ReadFile(backups[0])
+	if readErr != nil || string(previous) != "old binary" {
+		t.Fatalf("backup=%q err=%v", previous, readErr)
+	}
+}
+
+func TestR19UpdateURLAllowlistAndRedirectDowngrade(t *testing.T) {
+	for _, raw := range []string{
+		"https://github.com/mgh3326/panewire/releases/download/r19b/panewire_darwin_arm64",
+		"https://objects.githubusercontent.com/asset?X-Amz-Signature=fixture",
+	} {
+		if !validHubUpdateURL(raw) {
+			t.Fatalf("allowed URL rejected: %s", raw)
+		}
+	}
+	if validHubUpdateURL("https://example.invalid/panewire_darwin_arm64") {
+		t.Fatal("non-GitHub update host accepted")
+	}
+	path := filepath.Join(t.TempDir(), "panewire")
+	if err := os.WriteFile(path, []byte("old binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	client := &http.Client{Transport: hubRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": []string{"http://127.0.0.1/panewire"}}, Body: io.NopCloser(bytes.NewReader(nil)), Request: request}, nil
+	})}
+	err := applyHubUpdate(context.Background(), client, path, "https://github.com/mgh3326/panewire/releases/download/r19b/panewire_darwin_arm64", hex.EncodeToString(make([]byte, 32)))
+	if err == nil {
+		t.Fatal("HTTPS redirect downgrade accepted")
+	}
+	got, readErr := os.ReadFile(path)
+	if readErr != nil || string(got) != "old binary" {
+		t.Fatalf("original was changed: %q err=%v", got, readErr)
+	}
+}
+
+func TestR19QuotaOutputAndEnvironmentAreBounded(t *testing.T) {
+	if got := hubScopefuelEnvironment([]string{"PATH=/bin", "HOME=/tmp/home", "HUB_TOKEN=secret", "CF_ACCESS_CLIENT_SECRET=secret", "CODEX_HOME=/tmp/codex"}); len(got) != 3 {
+		t.Fatalf("allowlisted environment=%q", got)
+	}
+	command := filepath.Join(t.TempDir(), "scopefuel")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\nhead -c 16385 /dev/zero\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runHubScopefuel(context.Background(), command); err == nil || err.Error() != "output_too_large" {
+		t.Fatalf("oversized output error=%v", err)
+	}
+	t.Setenv("HUB_TOKEN", "quota-secret-sentinel")
+	if err := os.WriteFile(command, []byte("#!/bin/sh\nprintf '%s' \"$HUB_TOKEN\"\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	output, err := runHubScopefuel(context.Background(), command)
+	if err != nil || strings.Contains(string(output), "quota-secret-sentinel") {
+		t.Fatalf("secret inherited: output=%q err=%v", output, err)
+	}
+}
+
+func TestR19QuotaTimeoutKillsProcessGroup(t *testing.T) {
+	directory := t.TempDir()
+	command := filepath.Join(directory, "scopefuel")
+	pidPath := filepath.Join(directory, "child.pid")
+	script := "#!/bin/sh\nsleep 60 &\necho $! > " + strconv.Quote(pidPath) + "\nwait\n"
+	if err := os.WriteFile(command, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if _, err := runHubScopefuel(ctx, command); err == nil || err.Error() != "timeout" {
+		t.Fatalf("timeout error=%v", err)
+	}
+	rawPID, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(rawPID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Kill(pid, 0); err == nil {
+		t.Fatalf("descendant %d still running", pid)
+	} else if !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("descendant %d status=%v", pid, err)
+	}
+}
+
+func TestR19ExpectedVersionConfirmationAndTimeout(t *testing.T) {
+	now := time.Date(2026, 9, 4, 16, 0, 0, 0, time.UTC)
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "operator-token", "node-a": "node-token"}, Now: func() time.Time { return now }, UpdateConfirmationTimeout: time.Minute})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.expectedVersion["node-a"] = hubExpectedVersion{version: "r19c", deadline: now.Add(time.Minute)}
+	hub.connect("node-a", "r19c", "127.0.0.1:1", &hubAgent{}, false)
+	confirmed := false
+	for _, event := range hub.uiEvents {
+		confirmed = confirmed || (event.Kind == "update" && event.Phase == "succeeded")
+	}
+	if _, waiting := hub.expectedVersion["node-a"]; waiting || !confirmed {
+		t.Fatalf("success confirmation missing: %+v", hub.uiEvents)
+	}
+	hub.expectedVersion["node-a"] = hubExpectedVersion{version: "r19d", deadline: now}
+	hub.nodes["node-a"].agent = nil // confirmation timeout is independent of a live socket.
+	hub.Sweep()
+	unconfirmed := false
+	for _, event := range hub.uiEvents {
+		unconfirmed = unconfirmed || (event.Kind == "update" && event.Phase == "unconfirmed")
+	}
+	if _, waiting := hub.expectedVersion["node-a"]; waiting || !unconfirmed {
+		t.Fatalf("timeout confirmation missing: %+v", hub.uiEvents)
 	}
 }

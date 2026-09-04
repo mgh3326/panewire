@@ -416,6 +416,7 @@ func buildHubDaemonClientWithBurst(rawURL, tokenEnvPath, cfEnvPath string, check
 	client, err := NewHubClient(HubClientConfig{
 		URL: rawURL, MachineID: env.MachineID, Token: env.Token, CFAccessClientID: cfAccess.ClientID, CFAccessClientSecret: cfAccess.ClientSecret, Accepting: accepting,
 		FailoverWakeOn: failoverWakeOn, FailoverWakeMAC: failoverWakeMAC, BurstWakeMAC: burstWakeMAC, BurstPoweroffAllowed: burstPoweroffAllowed, Checks: checks,
+		Version:               deps.Version,
 		AllowInsecureForTests: deps.AllowInsecureForTests,
 		Warn:                  func(message string) { logger.Warn(message) },
 	})

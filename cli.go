@@ -336,8 +336,24 @@ func socketPathFromEnv() string {
 	return defaultSocketPath()
 }
 func Main(args []string) int {
+	return MainWithVersion(args, "panewire-dev")
+}
+
+// MainWithVersion is called by the command package so release builds can pass
+// their ldflags-injected version into both `panewire version` and node hello.
+func MainWithVersion(args []string, version string) int {
+	if version == "" || !hubVersionPattern.MatchString(version) {
+		version = "panewire-dev"
+	}
+	if len(args) > 0 && args[0] == "version" {
+		if len(args) != 1 {
+			return ExitUsage
+		}
+		fmt.Fprintln(os.Stdout, version)
+		return ExitOK
+	}
 	if len(args) > 0 && args[0] == "daemon" {
-		return runDaemonCLI(args[1:])
+		return runDaemonCLIWithDeps(args[1:], daemonCLIDeps{Version: version})
 	}
 	if len(args) > 0 && args[0] == "hub" {
 		return runHubCLI(args[1:])
@@ -351,10 +367,15 @@ type daemonCLIDeps struct {
 	TelegramBaseURL       string
 	SchemaCommand         []string
 	Logger                *slog.Logger
+	Version               string
 }
 
 func runDaemonCLI(args []string) int {
-	d, code, err := newDaemonForCLI(args, daemonCLIDeps{})
+	return runDaemonCLIWithDeps(args, daemonCLIDeps{})
+}
+
+func runDaemonCLIWithDeps(args []string, deps daemonCLIDeps) int {
+	d, code, err := newDaemonForCLI(args, deps)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon configuration rejected:", err)
 		return code

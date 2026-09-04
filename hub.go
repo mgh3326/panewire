@@ -67,6 +67,9 @@ type HubServerConfig struct {
 	UIAllowCFOnly bool
 	// ReportRelayPath is an operator-owned route file. It is never sent to nodes.
 	ReportRelayPath string
+	// UpdateConfirmationTimeout bounds how long a published version may wait
+	// for the node's post-restart hello. Zero uses the ten-minute contract.
+	UpdateConfirmationTimeout time.Duration
 }
 
 // HubNode is the deliberately small presence view returned to authenticated
@@ -236,36 +239,43 @@ type HubServer struct {
 	notifier          HubNotifier
 	logger            *slog.Logger
 
-	mu                     sync.Mutex
-	nodes                  map[string]*hubNodeRecord
-	lastNotes              map[string]*HubLastNote
-	subscribers            map[*hubEventSubscriber]struct{}
-	alerts                 map[string]*hubAlertState
-	burstPolicyPath        string
-	burstPolicy            BurstPolicy
-	burstPolicyModTime     time.Time
-	burstState             *hubBurstState
-	unknownMessages        uint64
-	startedAt              time.Time
-	uiAllowCFOnly          bool
-	uiEvents               []hubUIEvent
-	jobs                   map[string]*hubJobRecord
-	pendingRevocations     map[string]map[string]hubJobRevokedEvent
-	holds                  map[string]*hubBurstHold
-	placementPolicyPath    string
-	placementPolicy        PlacementPolicy
-	placementPolicyModTime time.Time
-	prometheusURL          string
-	prometheusClient       *http.Client
-	prometheusBearer       string
-	prometheusBasicUser    string
-	prometheusBasicPass    string
-	placementCache         placementCache
-	reportRelayPath        string
-	relayDedupe            map[string]struct{}
-	quotaCache             map[string]hubQuotaCacheEntry
-	quotaWaiters           map[string]chan hubQuotaResult
-	quotaCacheTTL          time.Duration
+	mu                        sync.Mutex
+	nodes                     map[string]*hubNodeRecord
+	lastNotes                 map[string]*HubLastNote
+	subscribers               map[*hubEventSubscriber]struct{}
+	alerts                    map[string]*hubAlertState
+	burstPolicyPath           string
+	burstPolicy               BurstPolicy
+	burstPolicyModTime        time.Time
+	burstState                *hubBurstState
+	unknownMessages           uint64
+	startedAt                 time.Time
+	uiAllowCFOnly             bool
+	uiEvents                  []hubUIEvent
+	jobs                      map[string]*hubJobRecord
+	pendingRevocations        map[string]map[string]hubJobRevokedEvent
+	holds                     map[string]*hubBurstHold
+	placementPolicyPath       string
+	placementPolicy           PlacementPolicy
+	placementPolicyModTime    time.Time
+	prometheusURL             string
+	prometheusClient          *http.Client
+	prometheusBearer          string
+	prometheusBasicUser       string
+	prometheusBasicPass       string
+	placementCache            placementCache
+	reportRelayPath           string
+	relayDedupe               map[string]struct{}
+	quotaCache                map[string]hubQuotaCacheEntry
+	quotaWaiters              map[string]chan hubQuotaResult
+	quotaCacheTTL             time.Duration
+	expectedVersion           map[string]hubExpectedVersion
+	updateConfirmationTimeout time.Duration
+}
+
+type hubExpectedVersion struct {
+	version  string
+	deadline time.Time
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -312,6 +322,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.OrphanGrace <= 0 {
 		config.OrphanGrace = config.GracePeriod
 	}
+	if config.UpdateConfirmationTimeout <= 0 {
+		config.UpdateConfirmationTimeout = 10 * time.Minute
+	}
 	var burstPolicy BurstPolicy
 	var burstPolicyModTime time.Time
 	if config.BurstPolicyPath != "" {
@@ -337,7 +350,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}), quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(),
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}), quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
 	}, nil
 }
 
@@ -931,6 +944,10 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		remoteMeta: map[string]string{"version": version, "remote_addr": remoteAddr},
 		state:      "connected", stateSince: now, agent: agent, activeJobs: make(map[string]HubActiveJob),
 	}
+	if expected, waiting := h.expectedVersion[machineID]; waiting && version == expected.version {
+		delete(h.expectedVersion, machineID)
+		h.recordUIEventLocked("update", "succeeded", machineID, now)
+	}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
 	if h.burstPolicyPath != "" && machineID == h.burstPolicy.TargetMachine && accepting && !h.burstState.LastUp.IsZero() {
 		h.burstState.UpCompleted = true
@@ -1125,6 +1142,12 @@ func (h *HubServer) Sweep() {
 	var failovers []hubFailoverEvent
 	h.mu.Lock()
 	h.sweepBurstHoldsLocked(now)
+	for machineID, expected := range h.expectedVersion {
+		if !now.Before(expected.deadline) {
+			delete(h.expectedVersion, machineID)
+			h.recordUIEventLocked("update", "unconfirmed", machineID, now)
+		}
+	}
 	for _, record := range h.nodes {
 		if record.agent != nil && now.Sub(record.lastPing) >= h.staleAfter && record.state != "stale" {
 			record.state = "stale"
