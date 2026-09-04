@@ -1,0 +1,9 @@
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Non-secret Supabase test token fixture"
+regexTarget = "match"
+regexes = [
+  '''opaque-12345''',
+]
