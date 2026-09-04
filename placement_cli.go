@@ -75,7 +75,7 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		return ExitInternal
 	}
 	var result PlacementResult
-	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result) != nil || !machineIDPattern.MatchString(result.Decision) || (result.Source != "prometheus" && result.Source != "hub-only") {
+	if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result) != nil || (result.Decision != "unavailable" && !machineIDPattern.MatchString(result.Decision)) || (result.Source != "prometheus" && result.Source != "hub-only") {
 		fmt.Fprintln(stderr, "place unavailable")
 		return ExitInternal
 	}

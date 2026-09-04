@@ -73,15 +73,16 @@ func LoadPlacementPolicy(path string) (PlacementPolicy, time.Time, error) {
 }
 
 type PlacementCandidate struct {
-	Machine     string  `json:"machine"`
-	Score       float64 `json:"score"`
-	LoadRatio   float64 `json:"load_ratio,omitempty"`
-	Throttled   bool    `json:"throttled"`
-	ActiveJobs  int     `json:"active_jobs"`
-	Connected   bool    `json:"connected"`
-	HoldsActive bool    `json:"holds_active"`
-	BurstReady  bool    `json:"burst_ready"`
-	Reason      string  `json:"reason"`
+	Machine      string  `json:"machine"`
+	Score        float64 `json:"score"`
+	LoadRatio    float64 `json:"load_ratio,omitempty"`
+	Throttled    bool    `json:"throttled"`
+	ActiveJobs   int     `json:"active_jobs"`
+	Connected    bool    `json:"connected"`
+	MetricsKnown bool    `json:"metrics_known"`
+	HoldsActive  bool    `json:"holds_active"`
+	BurstReady   bool    `json:"burst_ready"`
+	Reason       string  `json:"reason"`
 }
 
 type PlacementResult struct {
@@ -99,7 +100,6 @@ type placementCache struct {
 type placementMetrics struct {
 	load      map[string]float64
 	throttled map[string]bool
-	memory    map[string]float64
 }
 
 func (h *HubServer) reloadPlacementPolicyLocked() {
@@ -160,7 +160,7 @@ func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementR
 	h.placementCache = placementCache{key: key, at: now, result: result}
 	h.mu.Unlock()
 	h.logger.Info("placement decision", "machine", result.Decision, "score", placementDecisionScore(result), "reason", placementDecisionReason(result))
-	if policy.WakeOnSpill && result.Decision != policy.LocalMachine && !placementConnected(result, result.Decision) {
+	if policy.WakeOnSpill && result.Decision != "unavailable" && result.Decision != policy.LocalMachine && !placementConnected(result, result.Decision) {
 		go func(target string) {
 			wakeCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 			defer cancel()
@@ -207,7 +207,7 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		}
 		holdsActive := h.holdsActiveLocked(machine, now)
 		burstReady := h.burstPolicyPath != "" && h.burstPolicy.TargetMachine == machine && h.burstState.UpCompleted
-		load, hasLoad := metrics.load[machine]
+		load, metricsKnown := metrics.load[machine]
 		throttled := metrics.throttled[machine]
 		reasons := make([]string, 0, 4)
 		if !connected {
@@ -216,7 +216,10 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		if connected && !accepting {
 			reasons = append(reasons, "not_accepting")
 		}
-		if hasLoad && load >= policy.LoadRatio {
+		if !metricsKnown && source == "prometheus" {
+			reasons = append(reasons, "load_unknown")
+		}
+		if metricsKnown && load >= policy.LoadRatio {
 			reasons = append(reasons, fmt.Sprintf("load_ratio>=%.2f", policy.LoadRatio))
 		}
 		if throttled {
@@ -241,6 +244,9 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		if !accepting {
 			score -= 200
 		}
+		if !metricsKnown && source == "prometheus" {
+			score -= 500
+		}
 		if throttled {
 			score -= 100
 		}
@@ -250,7 +256,7 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		if burstReady {
 			score += 5
 		}
-		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Connected: connected, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ",")})
+		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ",")})
 	}
 	h.mu.Unlock()
 	decision := policy.LocalMachine
@@ -267,12 +273,20 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 	if decision == policy.LocalMachine && !placementUsable(candidates[0], policy, source) && policy.WakeOnSpill && len(candidates) > 1 {
 		decision = candidates[1].Machine
 	}
+	// Prometheus responding without a local load sample is not the same as a
+	// hub-only outage: never silently turn that unknown into a local decision.
+	if decision == policy.LocalMachine && source == "prometheus" && !candidates[0].MetricsKnown {
+		decision = "unavailable"
+	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
 	return PlacementResult{Decision: decision, Candidates: candidates, Source: source, Asof: now}
 }
 
 func placementUsable(candidate PlacementCandidate, policy PlacementPolicy, source string) bool {
 	if !candidate.Connected || strings.Contains(candidate.Reason, "not_accepting") || candidate.ActiveJobs >= policy.MaxActiveJobs {
+		return false
+	}
+	if source == "prometheus" && !candidate.MetricsKnown {
 		return false
 	}
 	if source == "prometheus" && (candidate.Throttled || candidate.LoadRatio >= policy.LoadRatio) {
@@ -291,7 +305,7 @@ func (h *HubServer) fetchPlacementMetrics(ctx context.Context) (placementMetrics
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
-	queries := []string{"avg_over_time(node_load5[5m]) / count by (machine_id) (count by (machine_id, cpu) (node_cpu_seconds_total))", "min_over_time(node_thermal_cpu_speed_limit_ratio[5m])", "max_over_time(node_memory_MemAvailable_bytes[5m])"}
+	queries := []string{"avg by (machine_id) (avg_over_time(node_load5[5m])) / on (machine_id) count by (machine_id) (count by (machine_id, cpu) (node_cpu_seconds_total))", "min by (machine_id) (min_over_time(node_thermal_cpu_speed_limit_ratio[5m]))"}
 	values := make([]map[string]float64, len(queries))
 	for i, query := range queries {
 		got, err := prometheusVector(ctx, client, rawURL, query, bearer, user, pass)
@@ -304,7 +318,7 @@ func (h *HubServer) fetchPlacementMetrics(ctx context.Context) (placementMetrics
 	for machine, value := range values[1] {
 		throttled[machine] = value < 1
 	}
-	return placementMetrics{load: values[0], throttled: throttled, memory: values[2]}, nil
+	return placementMetrics{load: values[0], throttled: throttled}, nil
 }
 
 func prometheusVector(ctx context.Context, client *http.Client, rawURL, query, bearer, user, pass string) (map[string]float64, error) {

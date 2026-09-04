@@ -26,10 +26,13 @@ must be regular files; unknown fields and duplicate targets are rejected. A
 changed valid file hot-reloads without changing the last known-good policy.
 
 The hub queries `PANEWIRE_PROM_URL`'s `/api/v1/query` endpoint with the
-five-minute node load, thermal speed limit, and memory-available PromQL
-queries. Set either `PANEWIRE_PROM_BEARER` or
+five-minute node load ratio and thermal speed-limit PromQL queries. Load is
+aggregated by `machine_id` before CPU-count division, so remote-write scrape
+labels such as `instance` and `job` cannot break vector matching. Set either `PANEWIRE_PROM_BEARER` or
 `PANEWIRE_PROM_BASIC_USER`/`PANEWIRE_PROM_BASIC_PASS` outside the repository.
-Prometheus samples must have `machine_id`. Results are cached for 30 seconds.
+Prometheus samples must have `machine_id`. A missing load sample is explicitly
+`load_unknown`: it cannot select the local machine; if no safe spill candidate
+exists the decision is `unavailable`. Results are cached for 30 seconds.
 If Prometheus is unavailable or malformed, the endpoint always returns a 200
 hub-only decision based on connected/accepting state and heartbeat active-job
 counts; it never returns a scheduler 500.

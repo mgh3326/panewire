@@ -70,6 +70,46 @@ func TestPlacementHubOnlyNeverFailsAndCaches(t *testing.T) {
 	}
 }
 
+func TestPlacementEmptyLoadIsUnknownNotLocal(t *testing.T) {
+	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		query := r.URL.Query().Get("query")
+		result := []any{}
+		if strings.Contains(query, "thermal") {
+			result = []any{map[string]any{"metric": map[string]string{"machine_id": "mac-work"}, "value": []any{float64(1), "1"}}}
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": result}})
+	}))
+	defer prom.Close()
+	hub := placementHub(t, prom.URL)
+	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
+	got := hub.placement(t.Context(), "worker", "repo")
+	if got.Decision != "unavailable" || got.Source != "prometheus" {
+		t.Fatalf("empty load selected local: %+v", got)
+	}
+	for _, candidate := range got.Candidates {
+		if candidate.Machine == "mac-work" && strings.Contains(candidate.Reason, "load_unknown") {
+			return
+		}
+	}
+	t.Fatalf("missing unknown reason: %+v", got.Candidates)
+}
+
+func TestPlacementLoadQueryAggregatesMachineID(t *testing.T) {
+	var query string
+	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Query().Get("query"), "node_load5") {
+			query = r.URL.Query().Get("query")
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": []any{}}})
+	}))
+	defer prom.Close()
+	hub := placementHub(t, prom.URL)
+	_, _ = hub.fetchPlacementMetrics(t.Context())
+	if !strings.Contains(query, "avg by (machine_id)") || !strings.Contains(query, "/ on (machine_id)") {
+		t.Fatalf("load query does not normalize labels: %q", query)
+	}
+}
+
 func TestPlacementOperatorAuthentication(t *testing.T) {
 	hub := placementHub(t, "")
 	recorder := httptest.NewRecorder()

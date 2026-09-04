@@ -19,7 +19,7 @@ loki.write "cloud" {
 // host identity is injected by launchd so a copied config cannot silently
 // report itself as mac-personal.
 prometheus.exporter.unix "node" {
-  enabled_collectors = ["thermal"]
+  enable_collectors = ["thermal"]
 }
 discovery.relabel "node" {
   targets = prometheus.exporter.unix.node.targets
