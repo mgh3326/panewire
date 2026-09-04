@@ -115,6 +115,11 @@ func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
 			continue
 		}
 		sort.Slice(files, func(i, j int) bool { return files[i].Name() < files[j].Name() })
+		// The claim record is the node-local source of a job's agent label. It
+		// is carried onto the terminal record so the hub can late-register a job
+		// that finished before any heartbeat advertised it (R19e). Files are in
+		// sequence order, so the claim is seen before its own completion.
+		var claimLabel string
 		for _, file := range files {
 			if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
 				continue
@@ -128,8 +133,18 @@ func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
 				continue
 			}
 			kind := event.eventKind()
+			if kind == "job.claimed" || kind == "job.claim" {
+				if label := event.agentLabel(); hubAgentLabelPattern.MatchString(label) {
+					claimLabel = label
+				}
+				continue
+			}
 			if kind != "job.completed" && kind != "job.completion" && kind != "job.escalate" && kind != "job.joined" {
 				continue
+			}
+			agentLabel := event.agentLabel()
+			if !hubAgentLabelPattern.MatchString(agentLabel) {
+				agentLabel = claimLabel
 			}
 			epoch := event.Epoch
 			if epoch == 0 {
@@ -147,7 +162,7 @@ func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
 				// report exists. The hub payload must point operators back to it.
 				reportPath = filepath.Join(dir, file.Name())
 			}
-			events = append(events, hubScannedRelayEvent{Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID()})
+			events = append(events, hubScannedRelayEvent{Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID()})
 		}
 	}
 	sort.Slice(events, func(i, j int) bool {

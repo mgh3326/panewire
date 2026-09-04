@@ -15,6 +15,12 @@ file and acknowledgement contract.
 Escalation `question` text is capped at 240 characters for hub relay; read the
 full question from the referenced events file (or its explicit report file).
 
+Relay is independent of hub job registration: a `job.completed`, `job.escalate`
+or `job.joined` record from an authenticated node is relayed on its own merits,
+even for a job the hub never saw in a heartbeat. Epoch fencing decides
+redispatch, not delivery; unregistered terminal records are counted as
+`unfenced_completions`, never as `unknown_messages`.
+
 R2 adds `prompt` delivery with target preflight, identity checks, submission proof, optional uptake confirmation, and SQLite delivery audit records.
 
 ## Scope
