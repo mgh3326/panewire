@@ -119,6 +119,8 @@ type HubClient struct {
 	assignedJobs         map[string]uint64
 	assignmentMu         sync.Mutex
 	burstHoldsActive     bool
+	updateMu             sync.Mutex
+	updateInFlight       bool
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -474,7 +476,30 @@ func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
 	return err == nil && !bytes.Contains(out, []byte("[Pasted text"))
 }
 
+// serve runs the node side of one hub session. A preference switch replaces the
+// live connection rather than nesting another session: serveConnection hands
+// the already-open candidate back and this loop continues on it, so each
+// session's ticker, preference ticker, and reader goroutine are released at the
+// switch instead of at the end of a recursive chain.
 func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) error {
+	current := connection
+	for {
+		next, err := client.serveConnection(ctx, current)
+		if next == nil {
+			if current != connection {
+				// Run only closes the connection it dialed.
+				_ = current.CloseNow()
+			}
+			return err
+		}
+		current = next
+	}
+}
+
+// serveConnection returns a non-nil connection only when the caller should
+// continue the session on that already-open preferred endpoint; the superseded
+// connection has been closed by then.
+func (client *HubClient) serveConnection(ctx context.Context, connection *websocket.Conn) (*websocket.Conn, error) {
 	connection.SetReadLimit(hubMaxMessageBytes)
 	peer := &hubClientConnection{connection: connection}
 	if err := peer.write(ctx, struct {
@@ -483,14 +508,14 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 		Version   string `json:"version"`
 		Accepting bool   `json:"accepting,omitempty"`
 	}{Type: "hello", MachineID: client.machineID, Version: client.version, Accepting: client.accepting}); err != nil {
-		return err
+		return nil, err
 	}
 	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
-		return err
+		return nil, err
 	}
 	for _, event := range client.jobCompletionEvents() {
 		if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
-			return err
+			return nil, err
 		}
 	}
 	readErrors := make(chan error, 1)
@@ -567,6 +592,18 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 					return
 				}
 			case "update.available":
+				if !client.beginHubUpdate() {
+					// One self-update at a time; the hub is told rather than
+					// left to infer the outcome from a missing restart.
+					if err := peer.write(ctx, hubOutbound{Type: "update.busy"}); err != nil {
+						select {
+						case readErrors <- err:
+						case <-ctx.Done():
+						}
+						return
+					}
+					continue
+				}
 				go client.handleHubUpdate(message)
 			case "quota.request":
 				go client.handleHubQuota(ctx, peer, message)
@@ -589,34 +626,35 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			return nil, ctx.Err()
 		case err := <-readErrors:
-			return err
+			return nil, err
 		case event := <-client.events:
 			if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
-				return err
+				return nil, err
 			}
 		case <-ticker.C:
 			if err := peer.write(ctx, hubOutbound{Type: "ping"}); err != nil {
-				return err
+				return nil, err
 			}
 			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
-				return err
+				return nil, err
 			}
 			for _, event := range client.jobCompletionEvents() {
 				if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
-					return err
+					return nil, err
 				}
 			}
 		case result := <-preferenceResults:
 			preferenceProbing = false
 			if result.switched {
-				// Returning hands the already-open candidate to Run; the old
-				// connection stays live until this point, so a failed preference
-				// probe cannot cause an outage.
+				// Hand the already-open candidate back to serve, which
+				// continues the session on it. The old connection stays live
+				// until this point, so a failed preference probe cannot cause
+				// an outage.
 				client.endpoint = result.endpoint
 				_ = connection.CloseNow()
-				return client.serve(ctx, result.connection)
+				return result.connection, nil
 			}
 		case <-prefer.C:
 			if preferenceProbing {

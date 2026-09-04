@@ -142,8 +142,13 @@ func TestR19QuotaOutputAndEnvironmentAreBounded(t *testing.T) {
 		t.Fatal(err)
 	}
 	output, err := runHubScopefuel(context.Background(), command)
-	if err != nil || strings.Contains(string(output), "quota-secret-sentinel") {
-		t.Fatalf("secret inherited: output=%q err=%v", output, err)
+	if err != nil {
+		t.Fatalf("scopefuel run failed: err=%v", err)
+	}
+	// Report the variable name only: the value is the secret under assertion,
+	// and a failure message lands in CI logs.
+	if strings.Contains(string(output), "quota-secret-sentinel") {
+		t.Fatal("daemon secret reached the child: HUB_TOKEN")
 	}
 }
 
@@ -157,8 +162,21 @@ func TestR19QuotaTimeoutKillsProcessGroup(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	if _, err := runHubScopefuel(ctx, command); err == nil || err.Error() != "timeout" {
-		t.Fatalf("timeout error=%v", err)
+	// Bound the call: without the group kill a descendant holds the stdout pipe
+	// open and runHubScopefuel never returns, which must read as a failure
+	// rather than a hung test binary.
+	runErrors := make(chan error, 1)
+	go func() {
+		_, err := runHubScopefuel(ctx, command)
+		runErrors <- err
+	}()
+	select {
+	case err := <-runErrors:
+		if err == nil || err.Error() != "timeout" {
+			t.Fatalf("timeout error=%v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("runHubScopefuel never returned: a descendant still holds the stdout pipe")
 	}
 	rawPID, err := os.ReadFile(pidPath)
 	if err != nil {
@@ -168,11 +186,59 @@ func TestR19QuotaTimeoutKillsProcessGroup(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := syscall.Kill(pid, 0); err == nil {
-		t.Fatalf("descendant %d still running", pid)
-	} else if !errors.Is(err, syscall.ESRCH) {
-		t.Fatalf("descendant %d status=%v", pid, err)
+	// The grandchild's parent dies in the same group kill, so the grandchild is
+	// reparented and reaped asynchronously. Until the reaper runs it is a
+	// zombie, and kill(pid, 0) succeeds for a zombie: on Linux that made this
+	// assertion report a process that is already dead as "still running".
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		dead, state := hubTestProcessIsDead(pid)
+		if dead {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("descendant %d still running (%s)", pid, state)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
+}
+
+// hubTestProcessIsDead reports whether pid names no live process, treating a
+// not-yet-reaped zombie as dead. The returned string describes what was
+// observed and is used only in failure messages.
+func hubTestProcessIsDead(pid int) (bool, string) {
+	err := syscall.Kill(pid, 0)
+	if errors.Is(err, syscall.ESRCH) {
+		return true, "ESRCH"
+	}
+	if err != nil {
+		return false, "status=" + err.Error()
+	}
+	if state, ok := hubTestProcessState(pid); ok {
+		return state == "Z", "state=" + state
+	}
+	return false, "signalable"
+}
+
+// hubTestProcessState reads the scheduler state letter from /proc/<pid>/stat.
+// It reports false on systems without procfs, where the ESRCH poll above is the
+// only signal available.
+func hubTestProcessState(pid int) (string, bool) {
+	raw, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return "", false
+	}
+	// The comm field is parenthesised and may itself contain spaces, so the
+	// state letter is the first field after the final ')'.
+	close := bytes.LastIndexByte(raw, ')')
+	if close < 0 {
+		return "", false
+	}
+	fields := strings.Fields(string(raw[close+1:]))
+	if len(fields) == 0 {
+		return "", false
+	}
+	return fields[0], true
 }
 
 func TestR19ExpectedVersionConfirmationAndTimeout(t *testing.T) {

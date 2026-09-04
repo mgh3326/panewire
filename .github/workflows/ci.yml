@@ -6,7 +6,13 @@ on:
 
 jobs:
   test:
-    runs-on: macos-latest
+    # The process-group kill and reaping behaviour the R19 quota path depends on
+    # differs between Darwin and Linux, so both are exercised.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -16,4 +22,6 @@ jobs:
       - run: go vet ./...
       - run: go test ./...
       - run: sh -n deploy/alloy/install-linux.sh deploy/alloy/run-alloy.sh
-      - run: brew install gitleaks && gitleaks git --no-banner --config .gitleaks.toml
+      # gitleaks is installed through Homebrew, which only the macOS runner has.
+      - if: runner.os == 'macOS'
+        run: brew install gitleaks && gitleaks git --no-banner --config .gitleaks.toml

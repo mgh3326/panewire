@@ -692,6 +692,18 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 		if message.Type == "ping" {
 			_ = agent.writeJSON(hubOutbound{Type: "pong"})
 		}
+	case "update.busy":
+		// The node already had a self-update running and declined this one.
+		// Recording it keeps the published version's expectation pending until
+		// its own deadline rather than silently waiting on a restart that the
+		// node was never going to perform for this instruction.
+		if agent.transient || !h.touch(machineID, agent) {
+			h.countUnknownMessage()
+			return
+		}
+		h.mu.Lock()
+		h.recordUIEventLocked("update", "busy", machineID, h.now().UTC())
+		h.mu.Unlock()
 	case "event":
 		if !agent.transient && !h.touch(machineID, agent) {
 			h.countUnknownMessage()
@@ -936,7 +948,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 		if rawAccepting, exists := fields["accepting"]; exists && json.Unmarshal(rawAccepting, &message.Accepting) != nil {
 			return hubInbound{}, false
 		}
-	case "ping", "pong":
+	case "ping", "pong", "update.busy":
 		if !allowed("type") {
 			return hubInbound{}, false
 		}

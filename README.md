@@ -161,7 +161,11 @@ asset redirect host `objects.githubusercontent.com`. Redirects must remain
 HTTPS, stay on that allowlist, and are limited to three hops. Nodes verify
 SHA-256 before changing anything, retain the prior binary as
 `.bak-<timestamp>`, then atomically rename the verified replacement over the
-existing executable. Their supervisor must restart them: launchd needs
+existing executable. Only the two newest `.bak-<timestamp>` copies are kept;
+older ones are removed after a successful replacement. One self-update runs at
+a time: a second `update.available` arriving while one is in flight is declined
+with `update.busy` and recorded as an `update`/`busy` event. Their supervisor
+must restart them: launchd needs
 `KeepAlive=true`; systemd needs `Restart=always`. Publishing records the
 expected version per target: only a later hello with that exact version emits
 `update.succeeded`; no matching hello within ten minutes emits
@@ -172,8 +176,9 @@ download verification failures leave the existing binary untouched.
 Quota is on-demand rather than a 60-second poll: `POST /v1/quota/<machine>`
 asks the connected GUI-session node to execute `scopefuel --json` once and
 caches its result for `QUOTA_CACHE_TTL` (default `5m`). Stdout is limited to
-16 KiB and an oversized result is discarded with `output_too_large`; a timeout
-kills the command's complete process group. The child environment is rebuilt
+16 KiB, and to 24 KiB once JSON-escaped so the report always fits the 32 KiB
+protocol message; a result over either bound is discarded with
+`output_too_large`. A timeout kills the command's complete process group. The child environment is rebuilt
 from the allowlist `PATH`, `HOME`, `USER`, `LANG`, `CODEX_HOME`, and
 `CLAUDE_CONFIG_DIR`. The last two are scopefuel's documented credential
 location overrides; hub tokens, Cloudflare headers, and all other daemon

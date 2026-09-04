@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -23,6 +24,16 @@ var hubRequestIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,96}$`)
 const (
 	hubUpdateRedirectLimit = 3
 	hubQuotaOutputLimit    = 16 << 10
+	// A quota report crosses the wire as a JSON string inside a message the hub
+	// reads under hubMaxMessageBytes. JSON escaping can more than double the raw
+	// stdout size ("" and \n cost two bytes each, control bytes six), so the raw
+	// cap alone can still produce a message the hub refuses. The bound that
+	// matters is therefore the encoded one, and it is kept below
+	// hubMaxMessageBytes so the surrounding envelope still fits.
+	hubQuotaEncodedLimit = 24 << 10
+	// hubUpdateBackupsKept bounds the rollback copies left beside the
+	// executable; each one is a full binary.
+	hubUpdateBackupsKept = 2
 )
 
 func validHubRequestID(value string) bool { return hubRequestIDPattern.MatchString(value) }
@@ -126,7 +137,39 @@ func applyHubUpdate(ctx context.Context, httpClient *http.Client, executable, as
 	if err = os.Rename(temporaryName, executable); err != nil {
 		return errors.New("update unavailable")
 	}
+	pruneHubUpdateBackups(executable, hubUpdateBackupsKept)
 	return nil
+}
+
+// pruneHubUpdateBackups keeps the newest rollback copies beside the executable
+// and removes the rest. Without it every successful update leaves another full
+// binary in the install directory forever. Pruning runs after the replacement
+// has succeeded, so a failed update never costs a rollback copy, and a failure
+// to remove a stale copy is deliberately not an update failure.
+func pruneHubUpdateBackups(executable string, keep int) {
+	if keep < 1 {
+		keep = 1
+	}
+	directory := filepath.Dir(executable)
+	prefix := filepath.Base(executable) + ".bak-"
+	entries, err := os.ReadDir(directory)
+	if err != nil {
+		return
+	}
+	backups := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasPrefix(entry.Name(), prefix) {
+			backups = append(backups, entry.Name())
+		}
+	}
+	if len(backups) <= keep {
+		return
+	}
+	// The suffix is a fixed-width UTC timestamp, so lexical order is age order.
+	sort.Strings(backups)
+	for _, stale := range backups[:len(backups)-keep] {
+		_ = os.Remove(filepath.Join(directory, stale))
+	}
 }
 
 func linkOrCopyHubExecutable(source, destination string, mode os.FileMode) error {
@@ -154,7 +197,30 @@ func linkOrCopyHubExecutable(source, destination string, mode os.FileMode) error
 	return closeErr
 }
 
+// beginHubUpdate admits one self-update at a time. Concurrent update.available
+// instructions would otherwise race two applyHubUpdate calls against the same
+// executable: each rename is atomic so the binary is never corrupt, but the
+// surviving version becomes whichever download finished last and every loser
+// still leaves a rollback copy behind. The caller replies update.busy when this
+// returns false.
+func (client *HubClient) beginHubUpdate() bool {
+	client.updateMu.Lock()
+	defer client.updateMu.Unlock()
+	if client.updateInFlight {
+		return false
+	}
+	client.updateInFlight = true
+	return true
+}
+
+func (client *HubClient) endHubUpdate() {
+	client.updateMu.Lock()
+	client.updateInFlight = false
+	client.updateMu.Unlock()
+}
+
 func (client *HubClient) handleHubUpdate(message hubOutboundMessage) {
+	defer client.endHubUpdate()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	if err := applyHubUpdate(ctx, client.updateHTTPClient, client.executablePath, message.URL, message.SHA256); err != nil {
@@ -252,9 +318,18 @@ func runHubScopefuel(ctx context.Context, command string) ([]byte, error) {
 	if readErr != nil || waitErr != nil {
 		return nil, errors.New("scopefuel failed")
 	}
+	if hubQuotaEncodedSize(out) > hubQuotaEncodedLimit {
+		return nil, errors.New("output_too_large")
+	}
 	return out, nil
 }
 
-// Keep json imported in this file so payload formation stays deliberately
-// explicit when this code is changed; quota values are opaque stdout.
-var _ = json.RawMessage{}
+// hubQuotaEncodedSize is what carrying payload as a JSON string actually costs
+// on the wire, quotes and every escape included.
+func hubQuotaEncodedSize(payload []byte) int {
+	encoded, err := json.Marshal(string(payload))
+	if err != nil {
+		return hubQuotaEncodedLimit + 1
+	}
+	return len(encoded)
+}
