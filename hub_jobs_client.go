@@ -141,7 +141,13 @@ func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
 			if kind == "job.completion" {
 				kind = "job.completed"
 			}
-			events = append(events, hubScannedRelayEvent{Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: event.reportPath(), ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID()})
+			reportPath := event.reportPath()
+			if kind == "job.escalate" && reportPath == "" {
+				// The event is the durable full-question record when no separate
+				// report exists. The hub payload must point operators back to it.
+				reportPath = filepath.Join(dir, file.Name())
+			}
+			events = append(events, hubScannedRelayEvent{Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID()})
 		}
 	}
 	sort.Slice(events, func(i, j int) bool {

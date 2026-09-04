@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 var (
@@ -19,38 +20,69 @@ func validHubActiveJob(job HubActiveJob) bool {
 	return hubJobIDPattern.MatchString(job.JobID) && hubAgentLabelPattern.MatchString(job.AgentLabel) && job.Epoch > 0 && (job.PushSHA == "" || hubPushSHAPattern.MatchString(job.PushSHA))
 }
 
-func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
+const hubRelayPayloadTextLimit = 240
+
+// truncateHubRelayPayloadText applies the character (rather than byte) bound
+// used by the relay record contract. Newlines in a question are display text,
+// not a record separator, so callers may opt into normalization for it.
+func truncateHubRelayPayloadText(value string, normalizeNewlines bool) (string, bool) {
+	if normalizeNewlines {
+		value = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(value)
+	}
+	if utf8.RuneCountInString(value) <= hubRelayPayloadTextLimit {
+		return value, false
+	}
+	return string([]rune(value)[:hubRelayPayloadTextLimit]), true
+}
+
+func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 11 {
-		return hubJobEventPayload{}, false
+		return hubJobEventPayload{}, nil, false
 	}
 	for name := range fields {
 		if name != "job_id" && name != "epoch" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" {
-			return hubJobEventPayload{}, false
+			return hubJobEventPayload{}, nil, false
 		}
 	}
 	var completion hubJobEventPayload
 	if json.Unmarshal(fields["job_id"], &completion.JobID) != nil || json.Unmarshal(fields["epoch"], &completion.Epoch) != nil || !hubJobIDPattern.MatchString(completion.JobID) || completion.Epoch == 0 {
-		return hubJobEventPayload{}, false
+		return hubJobEventPayload{}, nil, false
 	}
+	var truncated []string
 	for key, destination := range map[string]*string{"owner_lane": &completion.OwnerLane, "label": &completion.Label, "host": &completion.Host, "report_path": &completion.ReportPath, "report_last_line": &completion.ReportLastLine, "question": &completion.Question, "pr": &completion.PR, "head": &completion.Head, "pane_id": &completion.PaneID} {
-		if raw, ok := fields[key]; ok && (json.Unmarshal(raw, destination) != nil || len(*destination) > 240 || strings.ContainsAny(*destination, "\r\n\x00")) {
-			return hubJobEventPayload{}, false
+		if raw, ok := fields[key]; ok {
+			if json.Unmarshal(raw, destination) != nil || strings.Contains(*destination, "\x00") {
+				return hubJobEventPayload{}, nil, false
+			}
+			if key != "question" && strings.ContainsAny(*destination, "\r\n") {
+				return hubJobEventPayload{}, nil, false
+			}
+			var wasTruncated bool
+			*destination, wasTruncated = truncateHubRelayPayloadText(*destination, key == "question")
+			if wasTruncated {
+				truncated = append(truncated, key)
+			}
 		}
 	}
-	return completion, true
+	return completion, truncated, true
+}
+
+func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
+	event, _, valid := decodeHubJobCompletionPayloadDetailed(payload)
+	return event, valid
 }
 
 // decodeHubJobEscalationPayload is the flat record contract written by wrk
 // and captains. It deliberately reuses completion metadata and adds a compact
 // operator-readable reason; it is not a command channel.
-func decodeHubJobEscalationPayload(payload []byte) (hubJobEventPayload, bool) {
+func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 12 {
-		return hubJobEventPayload{}, false
+		return hubJobEventPayload{}, nil, false
 	}
 	if _, hasReason := fields["reason"]; !hasReason {
-		return hubJobEventPayload{}, false
+		return hubJobEventPayload{}, nil, false
 	}
 	copyFields := make(map[string]json.RawMessage, len(fields)-1)
 	for key, value := range fields {
@@ -59,11 +91,21 @@ func decodeHubJobEscalationPayload(payload []byte) (hubJobEventPayload, bool) {
 		}
 	}
 	base, _ := json.Marshal(copyFields)
-	event, valid := decodeHubJobCompletionPayload(base)
-	if !valid || json.Unmarshal(fields["reason"], &event.Reason) != nil || event.Reason == "" || len(event.Reason) > 240 || strings.ContainsAny(event.Reason, "\r\n\x00") {
-		return hubJobEventPayload{}, false
+	event, truncated, valid := decodeHubJobCompletionPayloadDetailed(base)
+	if !valid || json.Unmarshal(fields["reason"], &event.Reason) != nil || event.Reason == "" || strings.ContainsAny(event.Reason, "\r\n\x00") {
+		return hubJobEventPayload{}, nil, false
 	}
-	return event, true
+	var wasTruncated bool
+	event.Reason, wasTruncated = truncateHubRelayPayloadText(event.Reason, false)
+	if wasTruncated {
+		truncated = append(truncated, "reason")
+	}
+	return event, truncated, true
+}
+
+func decodeHubJobEscalationPayload(payload []byte) (hubJobEventPayload, bool) {
+	event, _, valid := decodeHubJobEscalationPayloadDetailed(payload)
+	return event, valid
 }
 
 func decodeRelayAckPayload(payload []byte) (relayAckPayload, bool) {

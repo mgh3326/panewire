@@ -56,14 +56,32 @@ func relayText(completion hubJobEventPayload) string {
 
 func relayTextForKind(kind string, event hubJobEventPayload) string {
 	if kind == "job.escalate" {
-		question := truncateRelayText(event.Question, 240)
-		return boundRelayText("[escalate] "+truncateRelayText(event.Label, 100)+" ("+truncateRelayText(event.Host, 100)+") :: Q: "+question+" → ", event.ReportPath)
+		return escalationRelayText(event)
 	}
 	if kind == "job.joined" {
 		head := truncateRelayText(event.Head, 9)
 		return boundRelayText("[joined] "+truncateRelayText(event.Label, 120)+" :: PR "+truncateRelayText(event.PR, 120)+" @ "+head+" → ", event.ReportPath)
 	}
 	return completedRelayText(event)
+}
+
+func escalationRelayText(event hubJobEventPayload) string {
+	const max = 512
+	prefix := "[escalate] " + truncateRelayText(event.Label, 64) + " (" + truncateRelayText(event.Host, 64) + ") :: Q: "
+	question, _ := truncateHubRelayPayloadText(event.Question, true)
+	arrow := " … → "
+	fullText := " (전문: "
+	path := event.ReportPath
+	// Keep the question ahead of the path, but retain both the established
+	// arrow form and an explicit full-text pointer within the 512-byte note.
+	fixed := len(prefix) + len(arrow) + len(fullText) + len(")")
+	roomForPaths := max - fixed - len(question)
+	if roomForPaths < 2 {
+		question = truncateRelayText(question, max-fixed-2)
+		roomForPaths = 2
+	}
+	path = truncateRelayText(path, roomForPaths/2)
+	return prefix + question + arrow + path + fullText + path + ")"
 }
 
 func completedRelayText(completion hubJobEventPayload) string {
