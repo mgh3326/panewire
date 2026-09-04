@@ -743,16 +743,20 @@ func hubJobCompletionPayload(jobID string, epoch uint64) json.RawMessage {
 	return payload
 }
 
+// hubJobCompletionPayloadForJob carries the claim's agent_label alongside the
+// terminal record. The hub needs it to late-register a job it never saw in a
+// heartbeat; it is metadata on an already-terminal record, not a claim.
 func hubJobCompletionPayloadForJob(job HubActiveJob) json.RawMessage {
 	payload, _ := json.Marshal(struct {
 		JobID          string `json:"job_id"`
 		Epoch          uint64 `json:"epoch"`
+		AgentLabel     string `json:"agent_label,omitempty"`
 		OwnerLane      string `json:"owner_lane,omitempty"`
 		Label          string `json:"label,omitempty"`
 		Host           string `json:"host,omitempty"`
 		ReportPath     string `json:"report_path,omitempty"`
 		ReportLastLine string `json:"report_last_line,omitempty"`
-	}{job.JobID, job.Epoch, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine})
+	}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine})
 	return payload
 }
 
@@ -790,6 +794,7 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 			payload, _ = json.Marshal(struct {
 				JobID          string `json:"job_id"`
 				Epoch          uint64 `json:"epoch"`
+				AgentLabel     string `json:"agent_label,omitempty"`
 				OwnerLane      string `json:"owner_lane,omitempty"`
 				Label          string `json:"label,omitempty"`
 				Host           string `json:"host,omitempty"`
@@ -800,7 +805,7 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 				PR             string `json:"pr,omitempty"`
 				Head           string `json:"head,omitempty"`
 				PaneID         string `json:"pane_id,omitempty"`
-			}{job.JobID, job.Epoch, job.OwnerLane, job.Label, job.Host, job.ReportPath, compactHubRelayEventText(job.ReportLastLine, false), compactHubRelayEventText(job.Reason, false), compactHubRelayEventText(job.Question, true), job.PR, job.Head, job.PaneID})
+			}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, compactHubRelayEventText(job.ReportLastLine, false), compactHubRelayEventText(job.Reason, false), compactHubRelayEventText(job.Question, true), job.PR, job.Head, job.PaneID})
 		}
 		events = append(events, hubClientEvent{Kind: job.Kind, Payload: payload})
 	}

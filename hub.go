@@ -163,6 +163,7 @@ type hubJobEventPayload struct {
 	From           string    `json:"from,omitempty"`
 	To             string    `json:"to,omitempty"`
 	Epoch          uint64    `json:"epoch"`
+	AgentLabel     string    `json:"agent_label,omitempty"`
 	LastSeen       time.Time `json:"last_seen,omitempty"`
 	ResumeHint     string    `json:"resume_hint,omitempty"`
 	OwnerLane      string    `json:"owner_lane,omitempty"`
@@ -266,6 +267,7 @@ type HubServer struct {
 	burstPolicyModTime        time.Time
 	burstState                *hubBurstState
 	unknownMessages           uint64
+	unfencedCompletions       uint64
 	startedAt                 time.Time
 	uiAllowCFOnly             bool
 	uiEvents                  []hubUIEvent
@@ -435,9 +437,10 @@ type hubUIData struct {
 }
 
 type hubUIHub struct {
-	Version         string `json:"version"`
-	UptimeMS        int64  `json:"uptime_ms"`
-	UnknownMessages uint64 `json:"unknown_messages"`
+	Version             string `json:"version"`
+	UptimeMS            int64  `json:"uptime_ms"`
+	UnknownMessages     uint64 `json:"unknown_messages"`
+	UnfencedCompletions uint64 `json:"unfenced_completions"`
 }
 
 type hubUINode struct {
@@ -547,7 +550,7 @@ func (h *HubServer) uiData() hubUIData {
 		uptime = 0
 	}
 	state := *h.burstState
-	return hubUIData{SchemaVersion: 1, Hub: hubUIHub{Version: hubVersion, UptimeMS: uptime.Milliseconds(), UnknownMessages: h.unknownMessages}, Nodes: nodes, Burst: hubUIBurst{Configured: h.burstPolicyPath != "", Policy: policy, SourceRuns: state.SourceRuns, LastLoad: state.LastLoad, LastUp: state.LastUp, LastDown: state.LastDown, UpCompleted: state.UpCompleted, IdleSince: state.IdleSince}, Events: events}
+	return hubUIData{SchemaVersion: 1, Hub: hubUIHub{Version: hubVersion, UptimeMS: uptime.Milliseconds(), UnknownMessages: h.unknownMessages, UnfencedCompletions: h.unfencedCompletions}, Nodes: nodes, Burst: hubUIBurst{Configured: h.burstPolicyPath != "", Policy: policy, SourceRuns: state.SourceRuns, LastLoad: state.LastLoad, LastUp: state.LastUp, LastDown: state.LastDown, UpCompleted: state.UpCompleted, IdleSince: state.IdleSince}, Events: events}
 }
 
 func (h *HubServer) handleBurst(writer http.ResponseWriter, request *http.Request) {
@@ -730,9 +733,20 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 		}
 		if message.Kind == "job.completed" {
 			completion, valid := decodeHubJobCompletionPayload(message.Payload)
-			if !valid || !h.observeJobCompletion(machineID, completion, received) {
+			if !valid {
 				h.countUnknownMessage()
 				return
+			}
+			// R14 fencing answers "may this job be redispatched"; R18 relay
+			// answers "must this report reach its lane". They are different
+			// questions, so a completion the hub never registered - a job that
+			// finished before any heartbeat carried it, or one outside the
+			// node-side active-scan cap - is still relayed. `job.escalate` and
+			// `job.joined` below are relayed on the same terms.
+			if !h.observeJobCompletion(machineID, completion, received) {
+				h.countUnfencedCompletion()
+				h.logger.Info("completion relayed without job registration", "job", completion.JobID, "node", machineID)
+				h.lateRegisterJobCompletion(machineID, completion, received)
 			}
 			h.relayJobCompletion(completion)
 		}
@@ -1167,6 +1181,22 @@ func (h *HubServer) countUnknownMessage() {
 	h.mu.Lock()
 	h.unknownMessages++
 	h.mu.Unlock()
+}
+
+// countUnfencedCompletion records a terminal record that arrived for a job the
+// hub had not registered. It is deliberately not an unknown message: the
+// message was well-formed and its report was relayed.
+func (h *HubServer) countUnfencedCompletion() {
+	h.mu.Lock()
+	h.unfencedCompletions++
+	h.mu.Unlock()
+}
+
+// UnfencedCompletionCount exists for local monitoring and tests.
+func (h *HubServer) UnfencedCompletionCount() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.unfencedCompletions
 }
 
 // UnknownMessageCount exists for local monitoring and tests. It intentionally
