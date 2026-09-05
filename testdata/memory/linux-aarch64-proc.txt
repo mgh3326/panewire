@@ -1,4 +1,4 @@
-### host: linux-aarch64 (kernel 6.12.25+rpt-rpi-2712, no CONFIG_PSI), captured 2026-09-05 by captain-9
+### captured 2026-09-05 via `cat` on a linux-aarch64 host (kernel built without CONFIG_PSI)
 ### file: /proc/meminfo
 MemTotal:        8257232 kB
 MemFree:         1134672 kB

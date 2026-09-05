@@ -1,4 +1,4 @@
-### command: memory_pressure   (host: macOS 15 / darwin arm-agnostic, captured 2026-09-05 by captain-9)
+### captured 2026-09-05 via `memory_pressure` on a macOS host
 The system has 34359738368 (8388608 pages with a page size of 4096).
 
 Stats: 

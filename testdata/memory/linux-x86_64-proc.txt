@@ -1,4 +1,4 @@
-### host: linux-x86_64 (kernel 7.0.0-30-generic), captured 2026-09-05 by captain-9
+### captured 2026-09-05 via `cat` on a linux-x86_64 host (PSI available)
 ### file: /proc/meminfo
 MemTotal:       32814612 kB
 MemFree:         8914028 kB
