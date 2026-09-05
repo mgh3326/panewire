@@ -17,6 +17,8 @@ jobs reach `max_active_jobs`. `spill_targets` are considered in policy order.
   "spill_targets": ["desktop"],
   "max_active_jobs": 5,
   "load_ratio": 0.5,
+  "memory_free_pct_min": 30,
+  "swap_used_mb_max": 1536,
   "wake_on_spill": false
 }
 ```
@@ -24,6 +26,13 @@ jobs reach `max_active_jobs`. `spill_targets` are considered in policy order.
 The default is the same local `mac-work` / `desktop` spill shape. Policy files
 must be regular files; unknown fields and duplicate targets are rejected. A
 changed valid file hot-reloads without changing the last known-good policy.
+
+`memory_free_pct_min` and `swap_used_mb_max` are optional admission thresholds.
+They default to 30 percent and 1536 MB respectively; an explicit zero remains
+zero. A candidate is excluded when reported free memory is below the first
+threshold or reported swap use is above the second. Missing memory telemetry is
+fail-open, so older nodes and individual unavailable measurements keep the
+existing placement behavior.
 
 The hub queries `PANEWIRE_PROM_URL`'s `/api/v1/query` endpoint with the
 five-minute node load ratio and thermal speed-limit PromQL queries. Load is

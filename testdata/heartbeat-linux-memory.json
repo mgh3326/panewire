@@ -1,0 +1,1 @@
+{"status":"alive","checks":{"service":"ok"},"host_load":{"load1":0.30,"load5":0.39,"swap_used_gb":0,"worker_procs":1},"host_memory":{"free_pct":91.97202758332172,"compressed_mb":null,"swap_used_mb":0,"psi_some_avg10":0,"source":"proc_meminfo"}}

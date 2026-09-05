@@ -31,6 +31,53 @@ func (load HubHostLoad) valid() bool {
 		!math.IsInf(load.Load1, 0) && !math.IsInf(load.Load5, 0) && !math.IsInf(load.SwapUsedGB, 0)
 }
 
+// HubHostMemory is bounded memory telemetry used by placement admission. It
+// intentionally contains measurements, never command output. A nil numeric
+// value means that individual signal could not be measured.
+type HubHostMemory struct {
+	FreePct      *float64 `json:"free_pct"`
+	CompressedMB *float64 `json:"compressed_mb"`
+	SwapUsedMB   *float64 `json:"swap_used_mb"`
+	PSISomeAvg10 *float64 `json:"psi_some_avg10"`
+	Source       string   `json:"source"`
+}
+
+func (memory HubHostMemory) valid() bool {
+	if memory.Source != "memory_pressure" && memory.Source != "vm_stat" && memory.Source != "proc_meminfo" {
+		return false
+	}
+	return validOptionalMemoryFloat(memory.FreePct, 0, 100) &&
+		validOptionalMemoryFloat(memory.CompressedMB, 0, math.Inf(1)) &&
+		validOptionalMemoryFloat(memory.SwapUsedMB, 0, math.Inf(1)) &&
+		validOptionalMemoryFloat(memory.PSISomeAvg10, 0, math.Inf(1))
+}
+
+func validOptionalMemoryFloat(value *float64, minimum, maximum float64) bool {
+	return value == nil || (!math.IsNaN(*value) && !math.IsInf(*value, 0) && *value >= minimum && *value <= maximum)
+}
+
+func cloneHubHostMemory(memory *HubHostMemory) *HubHostMemory {
+	if memory == nil {
+		return nil
+	}
+	copy := *memory
+	copy.FreePct = cloneMemoryFloat(memory.FreePct)
+	copy.CompressedMB = cloneMemoryFloat(memory.CompressedMB)
+	copy.SwapUsedMB = cloneMemoryFloat(memory.SwapUsedMB)
+	copy.PSISomeAvg10 = cloneMemoryFloat(memory.PSISomeAvg10)
+	return &copy
+}
+
+func cloneMemoryFloat(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func memoryFloat(value float64) *float64 { return &value }
+
 var hubCheckNamePattern = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,63}$`)
 
 // HubCheckStatus is the closed result vocabulary that may leave a node.  The
@@ -218,6 +265,201 @@ func collectHubHostLoad(ctx context.Context) (HubHostLoad, error) {
 	return load, nil
 }
 
+// collectHubHostMemory reads platform memory telemetry. Command and file text
+// is parsed and discarded before the values leave here.
+func collectHubHostMemory(ctx context.Context) (*HubHostMemory, error) {
+	if runtime.GOOS == "darwin" {
+		return collectDarwinHostMemory(ctx, runHubMeasurement)
+	}
+	if runtime.GOOS == "linux" {
+		return collectLinuxHostMemory(os.ReadFile)
+	}
+	return nil, errors.New("host memory unsupported")
+}
+
+func collectDarwinHostMemory(ctx context.Context, run func(context.Context, ...string) ([]byte, error)) (*HubHostMemory, error) {
+	pressure, pressureErr := run(ctx, "memory_pressure")
+	swap, _ := run(ctx, "sysctl", "-n", "vm.swapusage")
+	var primary *HubHostMemory
+	if pressureErr == nil {
+		memory, freeOK := parseDarwinMemoryPressure(string(pressure))
+		primary = &memory
+		if freeOK {
+			setDarwinMemorySwap(&memory, swap)
+			return &memory, nil
+		}
+	}
+
+	vmstat, vmstatErr := run(ctx, "vm_stat")
+	memsize, memsizeErr := run(ctx, "sysctl", "-n", "hw.memsize")
+	if vmstatErr == nil && memsizeErr == nil {
+		memory, freeOK := parseDarwinVMStat(string(vmstat), string(memsize))
+		if freeOK {
+			setDarwinMemorySwap(&memory, swap)
+			return &memory, nil
+		}
+		if primary == nil {
+			primary = &memory
+		}
+	}
+	if primary != nil {
+		setDarwinMemorySwap(primary, swap)
+		return primary, nil
+	}
+	return nil, errors.New("host memory unavailable")
+}
+
+func setDarwinMemorySwap(memory *HubHostMemory, swap []byte) {
+	if used, ok := parseDarwinSwapUsedMB(string(swap)); ok {
+		memory.SwapUsedMB = memoryFloat(used)
+	}
+}
+
+func collectLinuxHostMemory(read func(string) ([]byte, error)) (*HubHostMemory, error) {
+	meminfo, meminfoErr := read("/proc/meminfo")
+	psi, psiErr := read("/proc/pressure/memory") // PSI is optional on Linux.
+	if meminfoErr != nil && psiErr != nil {
+		return nil, errors.New("host memory unavailable")
+	}
+	memory, ok := parseLinuxHostMemory(string(meminfo), string(psi))
+	if !ok {
+		return nil, errors.New("host memory unavailable")
+	}
+	return &memory, nil
+}
+
+func parseDarwinMemoryPressure(output string) (HubHostMemory, bool) {
+	memory := HubHostMemory{Source: "memory_pressure"}
+	free, freeOK := parseMemoryPressureFreePct(output)
+	if freeOK {
+		memory.FreePct = memoryFloat(free)
+	}
+	if pages, ok := parseDarwinPageCount(output, "Pages used by compressor"); ok {
+		if pageSize, ok := parseDarwinPageSize(output); ok {
+			memory.CompressedMB = memoryFloat(pages * pageSize / (1024 * 1024))
+		}
+	}
+	return memory, freeOK && memory.valid()
+}
+
+func parseDarwinVMStat(output, memsize string) (HubHostMemory, bool) {
+	memory := HubHostMemory{Source: "vm_stat"}
+	pageSize, pageSizeOK := parseDarwinPageSize(output)
+	if pages, ok := parseDarwinPageCount(output, "Pages occupied by compressor"); ok && pageSizeOK {
+		memory.CompressedMB = memoryFloat(pages * pageSize / (1024 * 1024))
+	}
+	freePages, freeOK := parseDarwinPageCount(output, "Pages free")
+	inactivePages, inactiveOK := parseDarwinPageCount(output, "Pages inactive")
+	totalBytes, totalOK := parsePositiveFloat(memsize)
+	if !pageSizeOK || !freeOK || !inactiveOK || !totalOK || pageSize <= 0 {
+		return memory, false
+	}
+	totalPages := totalBytes / pageSize
+	if totalPages <= 0 || freePages+inactivePages > totalPages {
+		return memory, false
+	}
+	memory.FreePct = memoryFloat((freePages + inactivePages) / totalPages * 100)
+	return memory, memory.valid()
+}
+
+func parseLinuxHostMemory(meminfo, psi string) (HubHostMemory, bool) {
+	values := parseLinuxMeminfo(meminfo)
+	memory := HubHostMemory{Source: "proc_meminfo"}
+	if total, totalOK := values["MemTotal"]; totalOK {
+		if available, availableOK := values["MemAvailable"]; availableOK && total > 0 && available >= 0 && available <= total {
+			memory.FreePct = memoryFloat(available / total * 100)
+		}
+	}
+	if swapTotal, totalOK := values["SwapTotal"]; totalOK {
+		if swapFree, freeOK := values["SwapFree"]; freeOK && swapFree >= 0 && swapFree <= swapTotal {
+			memory.SwapUsedMB = memoryFloat((swapTotal - swapFree) / 1024)
+		}
+	}
+	if psiSome, ok := parseLinuxPSISomeAvg10(psi); ok {
+		memory.PSISomeAvg10 = memoryFloat(psiSome)
+	}
+	return memory, memory.valid()
+}
+
+func parseMemoryPressureFreePct(output string) (float64, bool) {
+	match := regexp.MustCompile(`(?m)^System-wide memory free percentage:\s*([0-9]+(?:\.[0-9]+)?)%\s*$`).FindStringSubmatch(output)
+	if len(match) != 2 {
+		return 0, false
+	}
+	value, err := strconv.ParseFloat(match[1], 64)
+	return value, err == nil && value >= 0 && value <= 100
+}
+
+func parseDarwinPageSize(output string) (float64, bool) {
+	match := regexp.MustCompile(`(?i)page size of\s+([0-9]+)\s*(?:bytes)?`).FindStringSubmatch(output)
+	if len(match) != 2 {
+		return 0, false
+	}
+	return parsePositiveFloat(match[1])
+}
+
+func parseDarwinPageCount(output, label string) (float64, bool) {
+	match := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(label) + `:\s*([0-9]+)\.?\s*$`).FindStringSubmatch(output)
+	if len(match) != 2 {
+		return 0, false
+	}
+	return parsePositiveOrZeroFloat(match[1])
+}
+
+func parsePositiveFloat(value string) (float64, bool) {
+	parsed, ok := parsePositiveOrZeroFloat(value)
+	return parsed, ok && parsed > 0
+}
+
+func parsePositiveOrZeroFloat(value string) (float64, bool) {
+	parsed, err := strconv.ParseFloat(strings.TrimSpace(value), 64)
+	return parsed, err == nil && !math.IsNaN(parsed) && !math.IsInf(parsed, 0) && parsed >= 0
+}
+
+var darwinSwapUsageRE = regexp.MustCompile(`(?i)used\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMG])`)
+
+func parseDarwinSwapUsedMB(swap string) (float64, bool) {
+	match := darwinSwapUsageRE.FindStringSubmatch(swap)
+	if len(match) != 3 {
+		return 0, false
+	}
+	used, err := strconv.ParseFloat(match[1], 64)
+	if err != nil || math.IsNaN(used) || math.IsInf(used, 0) || used < 0 {
+		return 0, false
+	}
+	switch strings.ToUpper(match[2]) {
+	case "K":
+		used /= 1024
+	case "M":
+	case "G":
+		used *= 1024
+	default:
+		return 0, false
+	}
+	return used, true
+}
+
+func parseLinuxMeminfo(meminfo string) map[string]float64 {
+	values := make(map[string]float64)
+	for _, line := range strings.Split(meminfo, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) >= 2 {
+			if value, ok := parsePositiveOrZeroFloat(fields[1]); ok {
+				values[strings.TrimSuffix(fields[0], ":")] = value
+			}
+		}
+	}
+	return values
+}
+
+func parseLinuxPSISomeAvg10(psi string) (float64, bool) {
+	match := regexp.MustCompile(`(?m)^some\s+.*\bavg10=([0-9]+(?:\.[0-9]+)?)\b`).FindStringSubmatch(psi)
+	if len(match) != 2 {
+		return 0, false
+	}
+	return parsePositiveOrZeroFloat(match[1])
+}
+
 func runHubMeasurement(ctx context.Context, argv ...string) ([]byte, error) {
 	if len(argv) == 0 {
 		return nil, errors.New("measurement unavailable")
@@ -246,22 +488,11 @@ func parseDarwinHostLoad(loads, swap string) (HubHostLoad, error) {
 	parse := func(value string) (float64, error) { return strconv.ParseFloat(strings.Trim(value, "{}"), 64) }
 	load1, err1 := parse(fields[0])
 	load5, err5 := parse(fields[1])
-	match := regexp.MustCompile(`(?i)used\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*([KMG])`).FindStringSubmatch(swap)
-	if err1 != nil || err5 != nil || len(match) != 3 {
+	usedMB, swapOK := parseDarwinSwapUsedMB(swap)
+	if err1 != nil || err5 != nil || !swapOK {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
-	used, err := strconv.ParseFloat(match[1], 64)
-	if err != nil {
-		return HubHostLoad{}, errors.New("host load unavailable")
-	}
-	switch strings.ToUpper(match[2]) {
-	case "K":
-		used /= 1024 * 1024
-	case "M":
-		used /= 1024
-	case "G":
-	}
-	load := HubHostLoad{Load1: load1, Load5: load5, SwapUsedGB: used}
+	load := HubHostLoad{Load1: load1, Load5: load5, SwapUsedGB: usedMB / 1024}
 	if !load.valid() {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}

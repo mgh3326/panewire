@@ -1,0 +1,29 @@
+### command: memory_pressure   (host: macOS 15 / darwin arm-agnostic, captured 2026-09-05 by captain-9)
+The system has 34359738368 (8388608 pages with a page size of 4096).
+
+Stats: 
+Pages free: 228593 
+Pages purgeable: 29119 
+Pages purged: 98406 
+
+Swap I/O:
+Swapins: 0 
+Swapouts: 0 
+
+Page Q counts:
+Pages active: 3663754 
+Pages inactive: 2769006 
+Pages speculative: 895142 
+Pages throttled: 0 
+Pages wired down: 831218 
+
+Compressor Stats:
+Pages used by compressor: 0 
+Pages decompressed: 0 
+Pages compressed: 0 
+
+File I/O:
+Pageins: 4113286 
+Pageouts: 0 
+
+System-wide memory free percentage: 90%

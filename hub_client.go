@@ -759,6 +759,9 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	if load, err := collectHubHostLoad(ctx); err == nil {
 		heartbeat.HostLoad = &load
 	}
+	if memory, err := collectHubHostMemory(ctx); err == nil {
+		heartbeat.HostMemory = memory
+	}
 	payload, _ := json.Marshal(heartbeat)
 	return hubClientEvent{Kind: "heartbeat", Payload: payload}
 }
