@@ -532,7 +532,11 @@ func collectDarwinHostLoad(ctx context.Context, run func(context.Context, ...str
 
 func parseDarwinHostLoad(loads, swap string) (HubHostLoad, error) {
 	fields := strings.Fields(strings.Trim(strings.TrimSpace(loads), "{}"))
-	if len(fields) < 2 {
+	// vm.loadavg always reports three averages. Accepting a shorter reading
+	// would feed the burst policy a sample from a malformed source, which the
+	// pre-R23 collector deliberately refused; load15 is optional in the wire
+	// payload, not in this measurement.
+	if len(fields) < 3 {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
 	parse := func(value string) (float64, error) { return strconv.ParseFloat(strings.Trim(value, "{}"), 64) }
@@ -543,6 +547,8 @@ func parseDarwinHostLoad(loads, swap string) (HubHostLoad, error) {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
 	load := HubHostLoad{Load1: load1, Load5: load5, SwapUsedGB: usedMB / 1024}
+	// The guard above already requires three averages; this bound is kept so a
+	// future change to it cannot turn a short reading into an index panic.
 	if len(fields) >= 3 {
 		if load15, err := parse(fields[2]); err == nil && load15 >= 0 && !math.IsNaN(load15) && !math.IsInf(load15, 0) {
 			load.Load15 = &load15

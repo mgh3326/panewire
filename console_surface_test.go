@@ -119,6 +119,12 @@ func TestT12HostLoadCollectorsUseFixturesAndRetainPartialCPU(t *testing.T) {
 	if err != nil || macPartial.NCPU != nil || macPartial.Load15 == nil {
 		t.Fatalf("Darwin partial CPU collection=%+v err=%v", macPartial, err)
 	}
+	// A malformed vm.loadavg must still fail the whole measurement: load15 is
+	// optional on the wire, never a licence to admit a two-average reading
+	// into the burst policy that pre-R23 refused.
+	if short, err := parseDarwinHostLoad("{ 1.00 2.00 }", "total = 0.00M  used = 0.00M  free = 0.00M"); err == nil {
+		t.Fatalf("two-field vm.loadavg was admitted: %+v", short)
+	}
 
 	linuxPath := filepath.Join("testdata", "load", "linux-x86_64-loadavg.txt")
 	linuxLoads := t12FixtureBlock(t, linuxPath, "### file: /proc/loadavg")
