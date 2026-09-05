@@ -8,6 +8,8 @@ import (
 
 const defaultRelayAckTimeout = 15 * time.Second
 
+const relayTimeoutsMaxEntries = 4096
+
 type relayPending struct {
 	machine string
 	pane    string
@@ -53,19 +55,9 @@ func (h *HubServer) expireRelayAck(jobID string) {
 		return
 	}
 	delete(h.r19a.relayPending, jobID)
-	if _, already := h.r19a.relayTimeouts[jobID]; already {
-		h.mu.Unlock()
-		return
-	}
-	h.r19a.relayTimeouts[jobID] = struct{}{}
 	h.mu.Unlock()
-	payload, _ := json.Marshal(struct {
-		JobID  string `json:"job_id"`
-		Reason string `json:"reason"`
-	}{JobID: jobID, Reason: "ack_timeout"})
-	h.broadcast(hubEvent{Kind: "relay.unconfirmed", Payload: payload, Received: h.now().UTC()})
-	// An injection nobody confirmed is a spent attempt. Recording it here is
-	// what keeps the startup replay from retrying a hopeless row forever.
+	// Every expired window spends an attempt and releases its lane.event claim.
+	// relayTimeouts only suppresses duplicate operator broadcasts below.
 	h.recordRelayAttempt(pending)
 	if pending.kind == "lane.event" {
 		// lanePersisted still remembers the durable row for source ACK recovery,
@@ -73,6 +65,17 @@ func (h *HubServer) expireRelayAck(jobID string) {
 		// can retry without a hub restart.
 		h.forgetRelayEvent(relayEventDedupeKey("lane.event", pending.event))
 	}
+	h.mu.Lock()
+	broadcast := h.r19a.rememberRelayTimeout(jobID)
+	h.mu.Unlock()
+	if !broadcast {
+		return
+	}
+	payload, _ := json.Marshal(struct {
+		JobID  string `json:"job_id"`
+		Reason string `json:"reason"`
+	}{JobID: jobID, Reason: "ack_timeout"})
+	h.broadcast(hubEvent{Kind: "relay.unconfirmed", Payload: payload, Received: h.now().UTC()})
 }
 
 func (h *HubServer) acknowledgeRelay(machineID string, ack relayAckPayload) bool {

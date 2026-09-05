@@ -70,3 +70,16 @@ delivery path. That consumer delivery acknowledgement records the destination
 pane in handoffkeep; it does not travel to or depend on the producer's
 machine. The earlier `relay.persisted` acknowledgement is separately returned
 to the producer node when the hub accepts durable responsibility.
+
+## Bounded relay bookkeeping
+
+The hub removes a `lanePersisted` entry and its `relayTimeouts` suppression
+entry when the destination confirms delivery. Both are also bounded LRU caches.
+Evicting `lanePersisted` is not delivery loss: a producer resend re-POSTs the
+same first-writer-wins key and receives the same durable row, at the cost of one
+POST. An evicted timeout suppression key can only cause one extra
+`relay.unconfirmed` observation. `relay.replay_exhausted` is broadcast and
+counted once per durable row (subject to a bounded remembered set); eviction can
+only repeat that observation. The three-attempt exhausted contract is unchanged:
+each acknowledgement timeout now records its attempt and releases the active
+lane-event claim, ensuring the existing gate is actually reached.

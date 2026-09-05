@@ -316,6 +316,9 @@ type HubServer struct {
 	// row ID while that claim is deliberately released between lane retries.
 	relayDedupe                 map[string]int64
 	lanePersisted               map[string]int64
+	lanePersistedOrder          lruIndex[string]
+	replayExhausted             map[int64]struct{}
+	replayExhaustedOrder        lruIndex[int64]
 	handoffkeep                 *handoffkeepRelayClient
 	unpersistedRelayEvents      uint64
 	replayExhaustedEvents       uint64
@@ -411,7 +414,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), lanePersisted: make(map[string]int64), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
 	}, nil
 }
 
@@ -1277,12 +1280,28 @@ func (h *HubServer) AlreadyDeliveredRelayEventCount() uint64 {
 	return h.alreadyDeliveredRelayEvents
 }
 
-// countReplayExhaustedEvent records a durable row the startup replay refused
-// to re-inject because it had already spent its delivery attempts.
-func (h *HubServer) countReplayExhaustedEvent() {
+// countReplayExhaustedEvent records a durable row the replay refused to
+// re-inject because it had already spent its delivery attempts. The bounded
+// remembered set keeps both this metric and the operator broadcast one per row.
+func (h *HubServer) countReplayExhaustedEvent(eventID int64) bool {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, already := h.replayExhausted[eventID]; already {
+		h.replayExhaustedOrder.touch(eventID, relayReplayExhaustedMaxEntries)
+		return false
+	}
+	if h.replayExhausted == nil {
+		h.replayExhausted = make(map[int64]struct{})
+	}
+	_, evicted, overflowed := h.replayExhaustedOrder.touch(eventID, relayReplayExhaustedMaxEntries)
+	if overflowed {
+		// Forgetting an old durable row can only repeat its operator broadcast
+		// and count if it is encountered again; replay remains attempt-gated.
+		delete(h.replayExhausted, evicted)
+	}
+	h.replayExhausted[eventID] = struct{}{}
 	h.replayExhaustedEvents++
-	h.mu.Unlock()
+	return true
 }
 
 // ReplayExhaustedEventCount exists for local monitoring and tests.
