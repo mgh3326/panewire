@@ -56,8 +56,8 @@ func TestR20EmitWithoutDaemonKeepsFileAndExitsOK(t *testing.T) {
 	}
 }
 
-// TE5: a second emit of the same dedupe key writes no second file, but the
-// socket push still happens - wrk writes the file itself before calling emit.
+// TE5: a second emit of the same dedupe key writes no second file or socket
+// push, and it returns an explicit conflict instead of pretending success.
 func TestR20EmitDuplicateSuppressesFileNotPush(t *testing.T) {
 	inbox := t.TempDir()
 	socket := filepath.Join(r20SocketRoot(t), "emit.sock")
@@ -93,10 +93,12 @@ func TestR20EmitDuplicateSuppressesFileNotPush(t *testing.T) {
 		}
 	}()
 	args := []string{"--kind", "job.completed", "--job", "r20-dupe", "--report", "report.md", "--owner-lane", "lane-a", "--inbox-root", inbox}
-	for attempt := 0; attempt < 2; attempt++ {
-		if code := runEmitCLI(args, &bytes.Buffer{}, &bytes.Buffer{}, CLIConfig{SocketPath: socket}); code != ExitOK {
-			t.Fatalf("attempt %d code=%d", attempt, code)
-		}
+	if code := runEmitCLI(args, &bytes.Buffer{}, &bytes.Buffer{}, CLIConfig{SocketPath: socket}); code != ExitOK {
+		t.Fatalf("first emit code=%d", code)
+	}
+	var stderr bytes.Buffer
+	if code := runEmitCLI(args, &bytes.Buffer{}, &stderr, CLIConfig{SocketPath: socket}); code != ExitDeliveryFailure || !strings.Contains(stderr.String(), "duplicate outbox key") {
+		t.Fatalf("duplicate code=%d stderr=%q", code, stderr.String())
 	}
 	if names := r20EventFiles(t, inbox, "r20-dupe"); len(names) != 1 {
 		t.Fatalf("a duplicate emit wrote a second file: %v", names)
@@ -106,9 +108,9 @@ func TestR20EmitDuplicateSuppressesFileNotPush(t *testing.T) {
 		mu.Lock()
 		count := len(pushes)
 		mu.Unlock()
-		if count == 2 || time.Now().After(deadline) {
-			if count != 2 {
-				t.Fatalf("socket pushes=%d, want 2", count)
+		if count == 1 || time.Now().After(deadline) {
+			if count != 1 {
+				t.Fatalf("socket pushes=%d, want 1", count)
 			}
 			break
 		}

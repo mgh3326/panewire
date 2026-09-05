@@ -3,6 +3,7 @@ package panewire
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -23,6 +24,8 @@ var emitRelayKinds = map[string]bool{"job.completed": true, "job.escalate": true
 // both consult this map: if only one of them substituted the event path, the
 // same event would carry two different report paths and so two dedupe keys.
 var relayEventPathFallbackKinds = map[string]bool{"job.escalate": true, "job.joined": true}
+
+var errEmitDuplicateOutboxKey = errors.New("duplicate outbox key")
 
 // emitInboxRoot resolves the same namespace the daemon watches, so an event a
 // worker writes is the event the node later scans.
@@ -108,6 +111,10 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	// record, and the node outbox is what picks it up afterwards.
 	eventPath, err := writeEmitRecord(root, record)
 	if err != nil {
+		if errors.Is(err, errEmitDuplicateOutboxKey) {
+			fmt.Fprintln(stderr, "emit: duplicate outbox key")
+			return ExitDeliveryFailure
+		}
 		fmt.Fprintln(stderr, "emit: event file could not be written:", err)
 		return ExitInternal
 	}
@@ -131,9 +138,9 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	return ExitOK
 }
 
-// writeEmitRecord is a no-op when an event with the same dedupe key already
-// exists, so a wrk-then-emit sequence does not produce two records. It returns
-// the path of the event file holding the record, written or already present.
+// writeEmitRecord rejects a duplicate event key before it reaches the socket.
+// Empty-report escalations compare question too: their distinct event files
+// become distinct report_path values on the scanner path without new key fields.
 func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	eventsDir := filepath.Join(inboxRoot, "jobs", record.JobID, "events")
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
@@ -153,9 +160,14 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		if existing, ok := readEmitDedupeKey(eventsDir, entry.Name(), record.JobID); ok && existing == key {
-			return filepath.Join(eventsDir, entry.Name()), nil
+		existing, ok := readEmitDedupeKey(eventsDir, entry.Name(), record.JobID)
+		if !ok || existing.key != key {
+			continue
 		}
+		if record.Type == "job.escalate" && record.ReportPath == "" && existing.question != record.Question {
+			continue
+		}
+		return "", errEmitDuplicateOutboxKey
 	}
 	contents, err := json.Marshal(record)
 	if err != nil {
@@ -185,31 +197,36 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	return final, nil
 }
 
-// readEmitDedupeKey reads one existing event file into the dedupe key of the
+type emitDedupeRecord struct {
+	key      string
+	question string
+}
+
+// readEmitDedupeKey reads one existing event file into the dedupe record of the
 // record it holds. The event-path fallback is deliberately not applied here:
 // suppressing a duplicate file compares what the files carry, and a record that
 // has not been named yet has no event path to compare against.
-func readEmitDedupeKey(eventsDir, name, jobID string) (string, bool) {
+func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 	contents, err := os.ReadFile(filepath.Join(eventsDir, name))
 	if err != nil || len(contents) > 16<<10 {
-		return "", false
+		return emitDedupeRecord{}, false
 	}
 	var event hubInboxEvent
 	if json.Unmarshal(contents, &event) != nil {
-		return "", false
+		return emitDedupeRecord{}, false
 	}
 	kind := event.eventKind()
 	if kind == "job.completion" {
 		kind = "job.completed"
 	}
 	if !emitRelayKinds[kind] {
-		return "", false
+		return emitDedupeRecord{}, false
 	}
 	epoch := event.Epoch
 	if epoch == 0 {
 		epoch = 1
 	}
-	return relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()), true
+	return emitDedupeRecord{key: relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()), question: event.question()}, true
 }
 
 func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout time.Duration) bool {
