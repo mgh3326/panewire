@@ -18,6 +18,12 @@ import (
 // node scanner and handoffkeep's own CHECK constraint.
 var emitRelayKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true}
 
+// relayEventPathFallbackKinds are the kinds whose own event file is the durable
+// record when no separate report exists. `panewire emit` and the node scanner
+// both consult this map: if only one of them substituted the event path, the
+// same event would carry two different report paths and so two dedupe keys.
+var relayEventPathFallbackKinds = map[string]bool{"job.escalate": true, "job.joined": true}
+
 // emitInboxRoot resolves the same namespace the daemon watches, so an event a
 // worker writes is the event the node later scans.
 func emitInboxRoot(explicit string) string {
@@ -75,7 +81,13 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	if fs.Parse(args) != nil || fs.NArg() != 0 {
 		return ExitUsage
 	}
-	if !emitRelayKinds[*kind] || *job == "" || *report == "" || *timeout <= 0 || !hubJobIDPattern.MatchString(*job) {
+	if !emitRelayKinds[*kind] || *job == "" || *timeout <= 0 || !hubJobIDPattern.MatchString(*job) {
+		return ExitUsage
+	}
+	// A completion is meaningless without the report it announces. An escalation
+	// or a join carries its own question in the event file, so an empty report is
+	// the normal shape there and the event file stands in for the report path.
+	if *report == "" && !relayEventPathFallbackKinds[*kind] {
 		return ExitUsage
 	}
 	if *epoch == 0 {
@@ -94,9 +106,16 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	root := emitInboxRoot(*inboxRoot)
 	// The file lands before the socket call: a dead daemon must never cost the
 	// record, and the node outbox is what picks it up afterwards.
-	if err := writeEmitRecord(root, record); err != nil {
+	eventPath, err := writeEmitRecord(root, record)
+	if err != nil {
 		fmt.Fprintln(stderr, "emit: event file could not be written:", err)
 		return ExitInternal
+	}
+	// Only the pushed record is rewritten; the file on disk keeps its empty
+	// report_path so the scanner derives the very same substitution from the
+	// same root, byte for byte.
+	if record.ReportPath == "" && relayEventPathFallbackKinds[record.Type] {
+		record.ReportPath = eventPath
 	}
 	socket := cfg.SocketPath
 	if socket == "" {
@@ -110,15 +129,16 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 }
 
 // writeEmitRecord is a no-op when an event with the same dedupe key already
-// exists, so a wrk-then-emit sequence does not produce two records.
-func writeEmitRecord(inboxRoot string, record emitRecord) error {
+// exists, so a wrk-then-emit sequence does not produce two records. It returns
+// the path of the event file holding the record, written or already present.
+func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	eventsDir := filepath.Join(inboxRoot, "jobs", record.JobID, "events")
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
-		return err
+		return "", err
 	}
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	key := relayEventOutboxKey(record.Type, record.JobID, record.Epoch, record.ReportPath, record.Reason)
@@ -131,35 +151,41 @@ func writeEmitRecord(inboxRoot string, record emitRecord) error {
 			continue
 		}
 		if existing, ok := readEmitDedupeKey(eventsDir, entry.Name(), record.JobID); ok && existing == key {
-			return nil
+			return filepath.Join(eventsDir, entry.Name()), nil
 		}
 	}
 	contents, err := json.Marshal(record)
 	if err != nil {
-		return err
+		return "", err
 	}
 	temporary, err := os.CreateTemp(eventsDir, ".emit-*")
 	if err != nil {
-		return err
+		return "", err
 	}
 	name := temporary.Name()
 	defer os.Remove(name)
 	if err := temporary.Chmod(0600); err != nil {
 		_ = temporary.Close()
-		return err
+		return "", err
 	}
 	if _, err := temporary.Write(contents); err != nil {
 		_ = temporary.Close()
-		return err
+		return "", err
 	}
 	if err := temporary.Close(); err != nil {
-		return err
+		return "", err
 	}
-	return os.Rename(name, filepath.Join(eventsDir, fmt.Sprintf("%05d-%s.json", highest+1, record.Type)))
+	final := filepath.Join(eventsDir, fmt.Sprintf("%05d-%s.json", highest+1, record.Type))
+	if err := os.Rename(name, final); err != nil {
+		return "", err
+	}
+	return final, nil
 }
 
-// readEmitDedupeKey mirrors the node scanner's normalization, including the
-// escalation fallback that points an empty report path at the event file.
+// readEmitDedupeKey reads one existing event file into the dedupe key of the
+// record it holds. The event-path fallback is deliberately not applied here:
+// suppressing a duplicate file compares what the files carry, and a record that
+// has not been named yet has no event path to compare against.
 func readEmitDedupeKey(eventsDir, name, jobID string) (string, bool) {
 	contents, err := os.ReadFile(filepath.Join(eventsDir, name))
 	if err != nil || len(contents) > 16<<10 {
@@ -180,11 +206,7 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (string, bool) {
 	if epoch == 0 {
 		epoch = 1
 	}
-	reportPath := event.reportPath()
-	if kind == "job.escalate" && reportPath == "" {
-		reportPath = filepath.Join(eventsDir, name)
-	}
-	return relayEventOutboxKey(kind, jobID, epoch, reportPath, event.reason()), true
+	return relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()), true
 }
 
 func pushEmitRecord(socket string, record emitRecord, timeout time.Duration) bool {
