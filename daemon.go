@@ -243,6 +243,9 @@ type localRequest struct {
 	Question       string `json:"question,omitempty"`
 	PR             string `json:"pr,omitempty"`
 	Head           string `json:"head,omitempty"`
+	EventID        string `json:"event_id,omitempty"`
+	Text           string `json:"text,omitempty"`
+	Truncated      bool   `json:"truncated,omitempty"`
 	// InboxRoot names the namespace the caller recorded the event in. A daemon
 	// that watches a different root must refuse it: the event file lives in the
 	// caller's namespace, but the relay outbox row would be written in this
@@ -406,7 +409,14 @@ func sameLocalPath(left, right string) bool {
 // immediate queue. A hub that is absent or disconnected is not an error: the
 // event file is durable and the node outbox retries from it.
 func (d *Daemon) emitRelayEvent(req localRequest) error {
-	if !emitRelayKinds[req.Kind] || !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {
+	if !emitRelayKinds[req.Kind] {
+		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
+	}
+	if req.Kind == "lane.event" {
+		if !hubAgentLabelPattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || len(req.Text) > laneEventTextLimit {
+			return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
+		}
+	} else if !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if !d.emitNamespaceMatches(req.InboxRoot) {
@@ -419,13 +429,18 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 	if d.cfg.Hub.Client == nil {
 		return nil
 	}
-	d.cfg.Hub.Client.EnqueueRelayEvent(hubScannedRelayEvent{
+	event := hubScannedRelayEvent{
 		Kind: req.Kind,
 		HubActiveJob: HubActiveJob{
 			JobID: req.JobID, Epoch: epoch, AgentLabel: req.AgentLabel, OwnerLane: req.OwnerLane,
 			Label: req.Label, Host: req.Host, ReportPath: req.ReportPath, ReportLastLine: req.ReportLastLine,
 		},
-		Reason: req.Reason, Question: req.Question, PR: req.PR, Head: req.Head, PaneID: req.PaneID,
-	})
+		Reason: req.Reason, Question: req.Question, PR: req.PR, Head: req.Head, PaneID: req.PaneID, EventID: req.EventID, Text: req.Text, Truncated: req.Truncated,
+	}
+	if req.Kind == "lane.event" {
+		event.JobID = laneEventTransportID(req.OwnerLane, req.EventID)
+		event.ReportPath, event.Reason = "", ""
+	}
+	d.cfg.Hub.Client.EnqueueRelayEvent(event)
 	return nil
 }

@@ -67,6 +67,12 @@ func (h *HubServer) expireRelayAck(jobID string) {
 	// An injection nobody confirmed is a spent attempt. Recording it here is
 	// what keeps the startup replay from retrying a hopeless row forever.
 	h.recordRelayAttempt(pending)
+	if pending.kind == "lane.event" {
+		// lanePersisted still remembers the durable row for source ACK recovery,
+		// but this active injection claim must be released so a later node hello
+		// can retry without a hub restart.
+		h.forgetRelayEvent(relayEventDedupeKey("lane.event", pending.event))
+	}
 }
 
 func (h *HubServer) acknowledgeRelay(machineID string, ack relayAckPayload) bool {

@@ -123,6 +123,39 @@ func decodeHubJobEscalationPayload(payload []byte) (hubJobEventPayload, bool) {
 	return event, valid
 }
 
+// decodeHubLaneEventPayload is isolated from job decoders: a direct lane
+// notification may use the relay transport but must never be treated as a
+// heartbeat, completion, late registration, or orphan-sweep candidate.
+func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 6 {
+		return hubJobEventPayload{}, false
+	}
+	for name := range fields {
+		if name != "owner_lane" && name != "event_id" && name != "text" && name != "epoch" && name != "truncated" && name != "replay" {
+			return hubJobEventPayload{}, false
+		}
+	}
+	var event hubJobEventPayload
+	if json.Unmarshal(fields["owner_lane"], &event.OwnerLane) != nil || json.Unmarshal(fields["event_id"], &event.EventID) != nil || json.Unmarshal(fields["text"], &event.Text) != nil || !hubAgentLabelPattern.MatchString(event.OwnerLane) || !validLaneEventID(event.EventID) || !validLaneEventText(event.Text) || len(event.Text) > laneEventTextLimit {
+		return hubJobEventPayload{}, false
+	}
+	if raw, present := fields["epoch"]; present && (json.Unmarshal(raw, &event.Epoch) != nil || event.Epoch == 0) {
+		return hubJobEventPayload{}, false
+	}
+	if event.Epoch == 0 {
+		event.Epoch = 1
+	}
+	if raw, present := fields["truncated"]; present && json.Unmarshal(raw, &event.Truncated) != nil {
+		return hubJobEventPayload{}, false
+	}
+	if raw, present := fields["replay"]; present && json.Unmarshal(raw, &event.Replay) != nil {
+		return hubJobEventPayload{}, false
+	}
+	event.JobID = laneEventTransportID(event.OwnerLane, event.EventID)
+	return event, true
+}
+
 func decodeRelayAckPayload(payload []byte) (relayAckPayload, bool) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 3 {

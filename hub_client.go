@@ -458,24 +458,26 @@ type hubClientConnection struct {
 }
 
 type hubOutboundMessage struct {
-	Type        string
-	Machine     string
-	Phase       string
-	EmittedAt   time.Time
-	WakeMAC     string
-	JobID       string
-	Epoch       uint64
-	HoldsActive bool
-	Pane        string
-	Text        string
-	Kind        string
-	ReportPath  string
-	Reason      string
-	EventID     int64
-	RequestID   string
-	URL         string
-	SHA256      string
-	Version     string
+	Type            string
+	Machine         string
+	Phase           string
+	EmittedAt       time.Time
+	WakeMAC         string
+	JobID           string
+	Epoch           uint64
+	HoldsActive     bool
+	Pane            string
+	Text            string
+	Kind            string
+	ReportPath      string
+	Reason          string
+	EventID         int64
+	Lane            string
+	ProducerEventID string
+	RequestID       string
+	URL             string
+	SHA256          string
+	Version         string
 }
 
 func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
@@ -807,6 +809,12 @@ func normalizeRelayEventText(value string) string {
 // so the five key fields are the same strings on the scan path, the
 // `panewire emit` path, and the restart replay path alike.
 func relayEventWireForm(job hubScannedRelayEvent) hubScannedRelayEvent {
+	if job.Kind == "lane.event" {
+		// lane.event text was validated and, if necessary, byte-truncated only
+		// by emit before its file was written. Do not apply the job.* 240-rune
+		// normalizer here: a second shape would strand its persisted cursor.
+		return job
+	}
 	job.OwnerLane = normalizeRelayEventText(job.OwnerLane)
 	job.Label = normalizeRelayEventText(job.Label)
 	job.Host = normalizeRelayEventText(job.Host)
@@ -827,6 +835,9 @@ func relayEventWireForm(job hubScannedRelayEvent) hubScannedRelayEvent {
 // form: a key built from un-normalized text names a row nothing will ever
 // acknowledge.
 func relayEventOutboxKeyFor(job hubScannedRelayEvent) relayOutboxKey {
+	if job.Kind == "lane.event" {
+		return relayOutboxKey{Kind: job.Kind, JobID: job.JobID, Epoch: job.Epoch, Lane: job.OwnerLane, EventID: job.EventID}
+	}
 	reason := job.Reason
 	if job.Kind == "job.completed" {
 		reason = ""
@@ -875,6 +886,17 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 	}
 	if job.Kind == "job.completed" {
 		client.completedJobs[job.JobID] = job.Epoch
+	}
+	if job.Kind == "lane.event" {
+		payload, _ := json.Marshal(struct {
+			OwnerLane string `json:"owner_lane"`
+			EventID   string `json:"event_id"`
+			Text      string `json:"text"`
+			Epoch     uint64 `json:"epoch,omitempty"`
+			Truncated bool   `json:"truncated,omitempty"`
+			Replay    bool   `json:"replay,omitempty"`
+		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay})
+		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 	}
 	payload := hubJobCompletionPayloadForJob(job.HubActiveJob, replay)
 	if job.Kind == "job.escalate" || job.Kind == "job.joined" {
@@ -1010,7 +1032,7 @@ func (client *HubClient) recordRelayPersisted(message hubOutboundMessage) {
 	if client.outbox == nil {
 		return
 	}
-	key := relayOutboxKey{Kind: message.Kind, JobID: message.JobID, Epoch: message.Epoch, ReportPath: message.ReportPath, Reason: message.Reason}
+	key := relayOutboxKey{Kind: message.Kind, JobID: message.JobID, Epoch: message.Epoch, ReportPath: message.ReportPath, Reason: message.Reason, Lane: message.Lane, EventID: message.ProducerEventID}
 	if err := client.outbox.RecordRelayPersisted(context.Background(), key, time.Now().UTC()); err != nil {
 		client.warnMessage("relay outbox persistence was not recorded")
 	}
@@ -1130,11 +1152,30 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 			return hubOutboundMessage{}, false
 		}
 	case "relay.inject":
-		if len(fields) != 4 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["pane"], &message.Pane) != nil || json.Unmarshal(fields["text"], &message.Text) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Pane == "" || len(message.Pane) > 128 || !validHubNoteText(message.Text) {
+		if json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["pane"], &message.Pane) != nil || json.Unmarshal(fields["text"], &message.Text) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Pane == "" || len(message.Pane) > 128 {
+			return hubOutboundMessage{}, false
+		}
+		if len(fields) == 4 {
+			if !validHubNoteText(message.Text) {
+				return hubOutboundMessage{}, false
+			}
+		} else if len(fields) == 5 {
+			var kind string
+			if json.Unmarshal(fields["kind"], &kind) != nil || kind != "lane.event" || !validLaneRelayText(message.Text) {
+				return hubOutboundMessage{}, false
+			}
+		} else {
 			return hubOutboundMessage{}, false
 		}
 	case "relay.persisted":
-		if len(fields) != 7 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["kind"], &message.Kind) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || json.Unmarshal(fields["report_path"], &message.ReportPath) != nil || json.Unmarshal(fields["reason"], &message.Reason) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || !hubJobIDPattern.MatchString(message.JobID) || !relayPersistedKinds[message.Kind] || message.EventID < 1 {
+		if json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["kind"], &message.Kind) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || json.Unmarshal(fields["report_path"], &message.ReportPath) != nil || json.Unmarshal(fields["reason"], &message.Reason) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || !hubJobIDPattern.MatchString(message.JobID) || !relayPersistedKinds[message.Kind] || message.EventID < 1 {
+			return hubOutboundMessage{}, false
+		}
+		if message.Kind == "lane.event" {
+			if len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID) {
+				return hubOutboundMessage{}, false
+			}
+		} else if len(fields) != 7 {
 			return hubOutboundMessage{}, false
 		}
 	case "update.available":
@@ -1248,4 +1289,4 @@ func (peer *hubClientConnection) write(ctx context.Context, value any) error {
 
 // relayPersistedKinds bounds the hub-originated acknowledgement to the three
 // relay record kinds. It is a closed set, not a passthrough.
-var relayPersistedKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true}
+var relayPersistedKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "lane.event": true}
