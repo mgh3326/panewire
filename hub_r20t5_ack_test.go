@@ -418,8 +418,18 @@ func TestR20T5UnconfirmedInjectionRecordsAnAttempt(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	if unconfirmed := events("relay.unconfirmed"); len(unconfirmed) != 1 {
-		t.Fatalf("relay.unconfirmed broadcasts=%d, want 1", len(unconfirmed))
+	// The durable attempt is recorded before the broadcast, so a fast runner
+	// can observe attempts==2 in the small window before the event fanout.
+	// Wait for the same deadline-bound asynchronous outcome rather than making
+	// that scheduling window a platform-dependent failure.
+	for {
+		if unconfirmed := events("relay.unconfirmed"); len(unconfirmed) == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("relay.unconfirmed broadcast was not observed after attempt recording")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	if fake.rowCount() != 1 {
 		t.Fatalf("the attempt bump created a row: handoffkeep holds %d", fake.rowCount())
