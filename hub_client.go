@@ -122,6 +122,8 @@ type HubClient struct {
 	burstHoldsActive     bool
 	updateMu             sync.Mutex
 	updateInFlight       bool
+	panesAlive           panesAliveFunc
+	panesAliveMu         sync.Mutex
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -723,7 +725,7 @@ func (client *HubClient) respondRelayInject(parent context.Context, peer *hubCli
 }
 
 func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
-	active := scanHubActiveJobs(client.jobsInboxRoot)
+	active := scanHubActiveJobsWithPanes(ctx, client.jobsInboxRoot, client.panesAliveHook())
 	client.assignmentMu.Lock()
 	for i := range active {
 		if epoch := client.assignedJobs[active[i].JobID]; epoch > active[i].Epoch {
@@ -915,6 +917,20 @@ func (client *HubClient) SetRelayOutbox(store *Store) {
 	client.outboxMu.Lock()
 	defer client.outboxMu.Unlock()
 	client.outbox = store
+}
+
+// SetPanesAlive attaches the pane liveness lookup used to drop jobs whose pane
+// is gone. A nil hook keeps the heartbeat's inbox-only active set.
+func (client *HubClient) SetPanesAlive(panesAlive panesAliveFunc) {
+	client.panesAliveMu.Lock()
+	defer client.panesAliveMu.Unlock()
+	client.panesAlive = panesAlive
+}
+
+func (client *HubClient) panesAliveHook() panesAliveFunc {
+	client.panesAliveMu.Lock()
+	defer client.panesAliveMu.Unlock()
+	return client.panesAlive
 }
 
 func hubClientWireEvent(event hubClientEvent) struct {

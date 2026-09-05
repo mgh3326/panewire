@@ -79,6 +79,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 		// The outbox lives in the daemon's own SQLite file, so it is attached
 		// once the store is open rather than at hub client construction.
 		d.cfg.Hub.Client.SetRelayOutbox(d.store)
+		d.cfg.Hub.Client.SetPanesAlive(hubPanesAliveHook(d.cfg.HerdrSocket))
 	}
 	if d.cfg.InboxRoot != "" {
 		if w, err := NewInboxWatcher(d.cfg.InboxRoot, d.store); err == nil {
@@ -119,6 +120,25 @@ func (d *Daemon) Start(ctx context.Context) error {
 	}
 	return nil
 }
+
+// hubPanesAliveHook dials herdr per scan the way wait.agent and prompt do: the
+// subscription client belongs to the event loop and is reconnected there, so
+// the hub's heartbeat goroutine must not borrow it. No socket means no hook,
+// which leaves the heartbeat's active set exactly as it was.
+func hubPanesAliveHook(socket string) panesAliveFunc {
+	if socket == "" {
+		return nil
+	}
+	return func(ctx context.Context) (map[string]bool, error) {
+		client, err := NewHerdrClient(socket)
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		return client.PanesAlive(ctx)
+	}
+}
+
 func (d *Daemon) runGuard(ctx context.Context, phase string) GuardResult {
 	cmd := d.cfg.SchemaCommand
 	if len(cmd) == 0 {

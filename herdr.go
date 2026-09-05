@@ -90,6 +90,31 @@ func (c *HerdrClient) Call(ctx context.Context, method string, params any) (json
 	return readResponse(ctx, bufio.NewReader(conn), id)
 }
 
+// PanesAlive reports the panes herdr currently has an agent on. agent.list
+// returns live agents only, which is the definition this needs: a pane with no
+// agent left on it is not running a job.
+func (c *HerdrClient) PanesAlive(ctx context.Context) (map[string]bool, error) {
+	snapshot, err := c.Call(ctx, "agent.list", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var listed struct {
+		Agents []struct {
+			PaneID string `json:"pane_id"`
+		} `json:"agents"`
+	}
+	if json.Unmarshal(snapshot, &listed) != nil {
+		return nil, fmt.Errorf("invalid herdr agent list")
+	}
+	alive := make(map[string]bool, len(listed.Agents))
+	for _, agent := range listed.Agents {
+		if agent.PaneID != "" {
+			alive[agent.PaneID] = true
+		}
+	}
+	return alive, nil
+}
+
 type HerdrEvent struct {
 	Kind                             string
 	PaneID, WorkspaceID, AgentStatus string
