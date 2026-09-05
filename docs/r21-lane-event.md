@@ -34,7 +34,9 @@ tries the local daemon socket. That namespace is separate from `jobs/<id>/`:
 there is no real job ID to collide with, and job scanners cannot mistake a
 lane event for a claim, completion, or orphan. If the daemon is absent, the
 file remains and the command reports the established file-only message with a
-successful exit.
+successful exit. If the daemon is reached but rejects the inbox namespace, the
+file still remains but `emit` exits nonzero and prints the daemon's reason to
+standard error.
 
 The hub persists the event before injection. If the lane is not present in
 `lanes.json`, its target node is disconnected, or the queue cannot accept an
