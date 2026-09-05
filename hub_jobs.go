@@ -37,11 +37,11 @@ func truncateHubRelayPayloadText(value string, normalizeNewlines bool) (string, 
 
 func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 12 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 13 {
 		return hubJobEventPayload{}, nil, false
 	}
 	for name := range fields {
-		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" {
+		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "replay" {
 			return hubJobEventPayload{}, nil, false
 		}
 	}
@@ -54,6 +54,13 @@ func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, 
 	// only; it never grants ownership on its own.
 	if raw, present := fields["agent_label"]; present {
 		if json.Unmarshal(raw, &completion.AgentLabel) != nil || !hubAgentLabelPattern.MatchString(completion.AgentLabel) {
+			return hubJobEventPayload{}, nil, false
+		}
+	}
+	// replay marks a record the node had already sent before it restarted. It
+	// is log and event metadata only; routing never consults it.
+	if raw, present := fields["replay"]; present {
+		if json.Unmarshal(raw, &completion.Replay) != nil {
 			return hubJobEventPayload{}, nil, false
 		}
 	}
@@ -86,7 +93,7 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 // operator-readable reason; it is not a command channel.
 func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 13 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 14 {
 		return hubJobEventPayload{}, nil, false
 	}
 	if _, hasReason := fields["reason"]; !hasReason {

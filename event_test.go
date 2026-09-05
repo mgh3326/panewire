@@ -66,6 +66,9 @@ func TestRealSubscriptionEnvelopeUsesStringEventAndDataObject(t *testing.T) {
 }
 
 func TestInboxWatcherRecordsCreateAndChange(t *testing.T) {
+	// This fixture exercises the fsnotify watcher specifically. R20 defaults
+	// macOS to poll, so the mode is named rather than inherited from GOOS.
+	t.Setenv("PANEWIRE_INBOX_WATCH", "fsnotify")
 	store := panewire.NewMemoryStore(t)
 	defer store.Close()
 	root := t.TempDir()

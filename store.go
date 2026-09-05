@@ -77,6 +77,16 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// R20 moves the node's "already relayed" mark off the heap. A restart used
+	// to replay every retained event because the marker lived in memory only.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS relay_sent (
+	 kind TEXT NOT NULL, job_id TEXT NOT NULL, epoch INTEGER NOT NULL, report_path TEXT NOT NULL, reason TEXT NOT NULL,
+	 sent_at INTEGER, persisted_at INTEGER,
+	 PRIMARY KEY(kind, job_id, epoch, report_path, reason)
+)`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 func (s *Store) Path() string { return s.path }

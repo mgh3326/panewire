@@ -74,6 +74,9 @@ type HubServerConfig struct {
 	RelayAckTimeout time.Duration
 	// AcceptingOverridesPath optionally makes operator acceptance choices durable.
 	AcceptingOverridesPath string
+	// handoffkeep is the durable relay-event store. It is package-private so the
+	// hub's public configuration keeps no credential-bearing field.
+	handoffkeep *handoffkeepRelayClient
 }
 
 // HubNode is the deliberately small presence view returned to authenticated
@@ -121,6 +124,7 @@ type hubAgent struct {
 	assignments chan hubJobAssignedEvent
 	holds       chan hubBurstHoldsEvent
 	relays      chan hubRelayInjectEvent
+	persisted   chan hubRelayPersistedEvent
 }
 
 // HubActiveJob is deliberately metadata-only. It is copied from a node's
@@ -176,6 +180,8 @@ type hubJobEventPayload struct {
 	PR             string    `json:"pr,omitempty"`
 	Head           string    `json:"head,omitempty"`
 	PaneID         string    `json:"pane_id,omitempty"`
+	// Replay marks a record a node had already sent before it restarted.
+	Replay bool `json:"replay,omitempty"`
 }
 
 type relayAckPayload struct {
@@ -195,6 +201,19 @@ type hubJobRevokedEvent struct {
 	Type  string `json:"type"`
 	JobID string `json:"job_id"`
 	Epoch uint64 `json:"epoch"`
+}
+
+// hubRelayPersistedEvent tells a node that handoffkeep now owns this record,
+// so the node may retire it from its local outbox. It carries the same dedupe
+// fields the node keyed the outbox row by.
+type hubRelayPersistedEvent struct {
+	Type       string `json:"type"`
+	JobID      string `json:"job_id"`
+	Kind       string `json:"kind"`
+	Epoch      uint64 `json:"epoch"`
+	ReportPath string `json:"report_path"`
+	Reason     string `json:"reason"`
+	EventID    int64  `json:"event_id"`
 }
 
 // hubJobAssignedEvent is the hub-issued epoch a redispatched owner must use.
@@ -286,6 +305,8 @@ type HubServer struct {
 	r19a                      r19aHubState
 	reportRelayPath           string
 	relayDedupe               map[string]struct{}
+	handoffkeep               *handoffkeepRelayClient
+	unpersistedRelayEvents    uint64
 	quotaCache                map[string]hubQuotaCacheEntry
 	quotaWaiters              map[string]chan hubQuotaResult
 	quotaCacheTTL             time.Duration
@@ -377,7 +398,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}), quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
 	}, nil
 }
 
@@ -634,7 +655,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), relays: make(chan hubRelayInjectEvent, 64)}
+	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
@@ -644,6 +665,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 	go agent.writeAssignments(agentContext)
 	go agent.writeHolds(agentContext)
 	go agent.writeRelays(agentContext)
+	go agent.writePersisted(agentContext)
 	for {
 		messageType, payload, err := connection.Read(request.Context())
 		if err != nil {
@@ -748,6 +770,9 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.logger.Info("completion relayed without job registration", "job", completion.JobID, "node", machineID)
 				h.lateRegisterJobCompletion(machineID, completion, received)
 			}
+			if completion.Replay {
+				h.logger.Info("relay record replayed after node restart", "job", completion.JobID, "kind", message.Kind, "node", machineID)
+			}
 			h.relayJobCompletion(completion)
 		}
 		if message.Kind == "job.escalate" || message.Kind == "job.joined" {
@@ -759,6 +784,9 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			for _, field := range truncated {
 				h.logger.Warn("relay payload truncated", "field", field, "job", event.JobID)
 			}
+			if event.Replay {
+				h.logger.Info("relay record replayed after node restart", "job", event.JobID, "kind", message.Kind, "node", machineID)
+			}
 			h.relayJobEvent(message.Kind, event)
 		}
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
@@ -767,9 +795,13 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
-			if !h.acknowledgeRelay(machineID, ack) {
+			pending, acknowledged := h.acknowledgeRelayPending(machineID, ack)
+			if !acknowledged {
 				h.countUnknownMessage()
 				return
+			}
+			if message.Kind == "relay.delivered" {
+				h.markRelayEventDelivered(pending)
 			}
 		}
 		if message.Kind == "job.revocation.ack" {
@@ -1192,6 +1224,22 @@ func (h *HubServer) countUnfencedCompletion() {
 	h.mu.Unlock()
 }
 
+// countUnpersistedRelayEvent records a relay event handoffkeep refused or was
+// unreachable for. The record was neither injected nor dropped: the node keeps
+// it in its outbox and retries.
+func (h *HubServer) countUnpersistedRelayEvent() {
+	h.mu.Lock()
+	h.unpersistedRelayEvents++
+	h.mu.Unlock()
+}
+
+// UnpersistedRelayEventCount exists for local monitoring and tests.
+func (h *HubServer) UnpersistedRelayEventCount() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.unpersistedRelayEvents
+}
+
 // UnfencedCompletionCount exists for local monitoring and tests.
 func (h *HubServer) UnfencedCompletionCount() uint64 {
 	h.mu.Lock()
@@ -1282,6 +1330,9 @@ func (h *HubServer) Sweep() {
 // RunMaintenance keeps the testable state transition separate from a real
 // ticker. It returns promptly when the containing HTTP server is shutting down.
 func (h *HubServer) RunMaintenance(ctx context.Context) {
+	// Startup replay runs once, before the first keepalive tick: whatever
+	// Postgres still holds as undelivered predates this process.
+	h.replayUndeliveredRelayEvents(ctx)
 	interval := h.keepaliveInterval
 	if halfStale := h.staleAfter / 2; halfStale > 0 && halfStale < interval {
 		interval = halfStale
@@ -1447,6 +1498,31 @@ func (agent *hubAgent) queueRelay(event hubRelayInjectEvent) bool {
 		return true
 	default:
 		return false
+	}
+}
+
+func (agent *hubAgent) queuePersisted(event hubRelayPersistedEvent) bool {
+	if agent == nil || agent.persisted == nil {
+		return false
+	}
+	select {
+	case agent.persisted <- event:
+		return true
+	default:
+		return false
+	}
+}
+
+func (agent *hubAgent) writePersisted(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-agent.persisted:
+			if err := agent.writeJSON(event); err != nil {
+				return
+			}
+		}
 	}
 }
 

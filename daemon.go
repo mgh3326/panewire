@@ -75,6 +75,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 			d.cfg.Logger.Warn("herdr unavailable", "error", err)
 		}
 	}
+	if d.cfg.Hub.Client != nil {
+		// The outbox lives in the daemon's own SQLite file, so it is attached
+		// once the store is open rather than at hub client construction.
+		d.cfg.Hub.Client.SetRelayOutbox(d.store)
+	}
 	if d.cfg.InboxRoot != "" {
 		if w, err := NewInboxWatcher(d.cfg.InboxRoot, d.store); err == nil {
 			go func() { _ = w.Run(ctx) }()
@@ -202,6 +207,22 @@ type localRequest struct {
 	Status    string `json:"status,omitempty"`
 	SettleMS  int64  `json:"settle_ms,omitempty"`
 	TimeoutMS int64  `json:"timeout_ms,omitempty"`
+	// The fields below belong to the R20 emit op. The names above are the
+	// established wait/prompt request contract and must not be renamed.
+	Kind           string `json:"kind,omitempty"`
+	JobID          string `json:"job_id,omitempty"`
+	Epoch          uint64 `json:"epoch,omitempty"`
+	OwnerLane      string `json:"owner_lane,omitempty"`
+	AgentLabel     string `json:"agent_label,omitempty"`
+	Label          string `json:"label,omitempty"`
+	Host           string `json:"host,omitempty"`
+	PaneID         string `json:"pane_id,omitempty"`
+	ReportPath     string `json:"report_path,omitempty"`
+	ReportLastLine string `json:"report_last_line,omitempty"`
+	Reason         string `json:"reason,omitempty"`
+	Question       string `json:"question,omitempty"`
+	PR             string `json:"pr,omitempty"`
+	Head           string `json:"head,omitempty"`
 }
 type localResponse struct {
 	OK     bool   `json:"ok"`
@@ -242,6 +263,8 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 					_ = c2.Close()
 				}
 			}
+		case "emit":
+			err = d.emitRelayEvent(req)
 		case "prompt":
 			if !d.caps.Prompt || !d.caps.AgentRead {
 				result, err = recordUnavailablePrompt(callCtx, d.store, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, ExitDaemonUnavailable, "prompt capability unavailable")
@@ -314,4 +337,29 @@ func (d *Daemon) SocketPath() string {
 func defaultSocketPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, "Library", "Application Support", "panewire", "panewire.sock")
+}
+
+// emitRelayEvent hands one already-recorded relay event to the hub client's
+// immediate queue. A hub that is absent or disconnected is not an error: the
+// event file is durable and the node outbox retries from it.
+func (d *Daemon) emitRelayEvent(req localRequest) error {
+	if !emitRelayKinds[req.Kind] || !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {
+		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
+	}
+	epoch := req.Epoch
+	if epoch == 0 {
+		epoch = 1
+	}
+	if d.cfg.Hub.Client == nil {
+		return nil
+	}
+	d.cfg.Hub.Client.EnqueueRelayEvent(hubScannedRelayEvent{
+		Kind: req.Kind,
+		HubActiveJob: HubActiveJob{
+			JobID: req.JobID, Epoch: epoch, AgentLabel: req.AgentLabel, OwnerLane: req.OwnerLane,
+			Label: req.Label, Host: req.Host, ReportPath: req.ReportPath, ReportLastLine: req.ReportLastLine,
+		},
+		Reason: req.Reason, Question: req.Question, PR: req.PR, Head: req.Head, PaneID: req.PaneID,
+	})
+	return nil
 }

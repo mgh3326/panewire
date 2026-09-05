@@ -97,8 +97,19 @@ type hubScannedRelayEvent struct {
 // compact escalation records emitted by workers and captains. No event body is
 // executed; this only copies bounded metadata into the hub event envelope.
 func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
+	return scanHubRelayEventsWithin(inboxRoot, 0)
+}
+
+// scanHubRelayEventsWithin additionally bounds the scan by event-file mtime.
+// The node outbox passes relayOutboxMaxAge so a restart cannot resurrect days
+// of retained files; a zero maxAge keeps the historical unbounded behavior.
+func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScannedRelayEvent {
 	if inboxRoot == "" {
 		return nil
+	}
+	var mtimeCutoff time.Time
+	if maxAge > 0 {
+		mtimeCutoff = time.Now().Add(-maxAge)
 	}
 	entries, err := os.ReadDir(filepath.Join(inboxRoot, "jobs"))
 	if err != nil {
@@ -123,6 +134,12 @@ func scanHubRelayEvents(inboxRoot string) []hubScannedRelayEvent {
 		for _, file := range files {
 			if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
 				continue
+			}
+			if !mtimeCutoff.IsZero() {
+				info, statErr := file.Info()
+				if statErr != nil || info.ModTime().Before(mtimeCutoff) {
+					continue
+				}
 			}
 			contents, err := os.ReadFile(filepath.Join(dir, file.Name()))
 			if err != nil || len(contents) > 16<<10 {
