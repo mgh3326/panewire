@@ -136,7 +136,11 @@ func relayEventDedupeKey(kind string, completion hubJobEventPayload) string {
 }
 
 func (h *HubServer) relayJobCompletion(completion hubJobEventPayload) {
-	h.relayJobEvent("job.completed", completion)
+	h.relayJobCompletionFrom("", completion)
+}
+
+func (h *HubServer) relayJobCompletionFrom(senderMachine string, completion hubJobEventPayload) {
+	h.relayJobEventFrom(senderMachine, "job.completed", completion)
 }
 
 // h.relayDedupe maps one dedupe key to the handoffkeep row it stands for. The
@@ -147,6 +151,10 @@ func (h *HubServer) relayJobCompletion(completion hubJobEventPayload) {
 // Postgres is the canonical record of "was this reported", so injecting an
 // event nobody durably stored is how a restart turns into a resend storm.
 func (h *HubServer) relayJobEvent(kind string, event hubJobEventPayload) {
+	h.relayJobEventFrom("", kind, event)
+}
+
+func (h *HubServer) relayJobEventFrom(senderMachine, kind string, event hubJobEventPayload) {
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
 	}
@@ -160,10 +168,10 @@ func (h *HubServer) relayJobEvent(kind string, event hubJobEventPayload) {
 	if duplicate {
 		// A node only resends what its outbox still owes it. Returning here
 		// without an answer is what leaves persisted_at NULL for good.
-		h.reacknowledgeRelayEvent(kind, event, key, knownID)
+		h.reacknowledgeRelayEventFrom(senderMachine, kind, event, key, knownID)
 		return
 	}
-	route, agent, routed := h.resolveRelayRoute(kind, event)
+	route, destinationAgent, routed := h.resolveRelayRoute(kind, event)
 	if !routed {
 		// Nothing was persisted, so the key must not outlive the attempt.
 		// Keeping it would make every resend after the destination reconnects
@@ -185,11 +193,11 @@ func (h *HubServer) relayJobEvent(kind string, event hubJobEventPayload) {
 		// handoffkeep already holds this record as delivered, so the note is in
 		// the pane. The node still owes its outbox row an answer: acknowledge,
 		// and put the injection nobody needs on the operator feed instead.
-		h.queueRelayPersisted(kind, event, agent, stored.ID)
+		h.queueRelayPersisted(kind, event, h.relayPersistedAgent(senderMachine, destinationAgent), stored.ID)
 		h.broadcastRelayAlreadyDelivered(kind, event, stored)
 		return
 	}
-	h.injectRelayEvent(kind, event, route, agent, stored.ID, key)
+	h.injectRelayEvent(kind, event, route, destinationAgent, h.relayPersistedAgent(senderMachine, destinationAgent), stored.ID, key)
 }
 
 // relayEventAlreadyDelivered is the hub's inject gate. Its authority is
@@ -206,12 +214,16 @@ func relayEventAlreadyDelivered(status int, stored handoffkeepRelayEvent) bool {
 // else: re-injecting would put the same note in the pane twice, and staying
 // silent would keep the node resending it after every restart forever.
 func (h *HubServer) reacknowledgeRelayEvent(kind string, event hubJobEventPayload, key string, knownID int64) {
+	h.reacknowledgeRelayEventFrom("", kind, event, key, knownID)
+}
+
+func (h *HubServer) reacknowledgeRelayEventFrom(senderMachine, kind string, event hubJobEventPayload, key string, knownID int64) {
 	if h.handoffkeep == nil {
 		// A hub with no durable record has no acknowledgement to give. This
 		// is the pre-R20 behavior the compatibility path depends on.
 		return
 	}
-	route, agent, routed := h.resolveRelayRoute(kind, event)
+	route, destinationAgent, routed := h.resolveRelayRoute(kind, event)
 	if !routed {
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
@@ -232,7 +244,7 @@ func (h *HubServer) reacknowledgeRelayEvent(kind string, event hubJobEventPayloa
 	if knownID == 0 {
 		return
 	}
-	h.queueRelayPersisted(kind, event, agent, knownID)
+	h.queueRelayPersisted(kind, event, h.relayPersistedAgent(senderMachine, destinationAgent), knownID)
 }
 
 // rememberRelayEvent records the handoffkeep row a dedupe key stands for, so a
@@ -256,10 +268,25 @@ func (h *HubServer) forgetRelayEvent(key string) {
 // queueRelayPersisted tells a node its outbox row may be retired. The node
 // keys the row by exactly these five fields.
 func (h *HubServer) queueRelayPersisted(kind string, event hubJobEventPayload, agent *hubAgent, eventID int64) bool {
-	if eventID == 0 {
+	if eventID == 0 || agent == nil {
 		return false
 	}
 	return agent.queuePersisted(hubRelayPersistedEvent{Type: "relay.persisted", JobID: event.JobID, Kind: kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: eventID})
+}
+
+func (h *HubServer) relayPersistedAgent(senderMachine string, fallback *hubAgent) *hubAgent {
+	if senderMachine == "" {
+		return fallback
+	}
+	h.mu.Lock()
+	sender := h.nodes[senderMachine]
+	h.mu.Unlock()
+	if sender == nil || sender.agent == nil {
+		// The hub retains no acknowledgement state. A disconnected sender
+		// resends after reconnecting, then this path addresses its new agent.
+		return nil
+	}
+	return sender.agent
 }
 
 func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (reportRelayRoute, *hubAgent, bool) {
@@ -283,20 +310,20 @@ func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (re
 }
 
 // injectRelayEvent reports whether the injection was queued.
-func (h *HubServer) injectRelayEvent(kind string, event hubJobEventPayload, route reportRelayRoute, agent *hubAgent, eventID int64, key string) bool {
-	if !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", JobID: event.JobID, Pane: route.Pane, Text: relayTextForKind(kind, event)}) {
+func (h *HubServer) injectRelayEvent(kind string, event hubJobEventPayload, route reportRelayRoute, destinationAgent, persistedAgent *hubAgent, eventID int64, key string) bool {
+	if !destinationAgent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", JobID: event.JobID, Pane: route.Pane, Text: relayTextForKind(kind, event)}) {
 		// The row is durable but this injection never happened. Holding the
 		// key back would swallow the node's resend, and withholding the
 		// acknowledgement would keep that resend coming forever. Do neither:
 		// the row exists, so re-injection belongs to the undelivered replay.
 		h.forgetRelayEvent(key)
-		h.queueRelayPersisted(kind, event, agent, eventID)
+		h.queueRelayPersisted(kind, event, persistedAgent, eventID)
 		h.broadcastRelayUnrouted(event)
 		return false
 	}
 	h.startRelayAckEvent(kind, event, route.Machine, route.Pane, eventID)
 	// The node retires its outbox row on this, not on the injection itself.
-	h.queueRelayPersisted(kind, event, agent, eventID)
+	h.queueRelayPersisted(kind, event, persistedAgent, eventID)
 	return true
 }
 
@@ -488,7 +515,9 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 		h.broadcastRelayUnrouted(event)
 		return
 	}
-	if !h.injectRelayEvent(record.Kind, event, route, agent, record.ID, key) {
+	// handoffkeep replay records the destination machine, not the original
+	// sender. Do not acknowledge that destination; the sender's resend does so.
+	if !h.injectRelayEvent(record.Kind, event, route, agent, nil, record.ID, key) {
 		return
 	}
 	// The replay just spent an attempt. Recording it is what makes the gate
