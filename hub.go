@@ -90,6 +90,7 @@ type HubNode struct {
 	ConnectedSince     time.Time         `json:"connected_since"`
 	LastPingMS         int64             `json:"last_ping_ms"`
 	LastNote           *HubLastNote      `json:"last_note,omitempty"`
+	Memory             *HubHostMemory    `json:"memory"`
 	RemoteMeta         map[string]string `json:"remote_meta"`
 	State              string            `json:"state"`
 }
@@ -112,6 +113,7 @@ type hubNodeRecord struct {
 	state             string
 	agent             *hubAgent
 	activeJobs        map[string]HubActiveJob
+	hostMemory        *HubHostMemory
 }
 
 type hubAgent struct {
@@ -754,6 +756,14 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
+			h.mu.Lock()
+			if record := h.nodes[machineID]; record != nil && record.agent == agent {
+				if !equalHubHostMemory(record.hostMemory, heartbeat.HostMemory) {
+					record.hostMemory = cloneHubHostMemory(heartbeat.HostMemory)
+					h.placementCache = placementCache{}
+				}
+			}
+			h.mu.Unlock()
 			h.observeHeartbeatAlerts(machineID, heartbeat)
 			h.observeActiveJobs(machineID, heartbeat.ActiveJobs, received)
 			if heartbeat.HostLoad != nil {
@@ -861,6 +871,7 @@ type hubHeartbeatPayload struct {
 	Status      string                    `json:"status"`
 	Checks      map[string]HubCheckStatus `json:"checks"`
 	HostLoad    *HubHostLoad              `json:"host_load,omitempty"`
+	HostMemory  *HubHostMemory            `json:"host_memory,omitempty"`
 	ActiveJobs  []HubActiveJob            `json:"active_jobs,omitempty"`
 	HoldsActive bool                      `json:"holds_active,omitempty"`
 }
@@ -895,7 +906,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "active_jobs" && name != "holds_active" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "host_memory" && name != "active_jobs" && name != "holds_active" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -931,6 +942,22 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.HostLoad = &load
+	}
+	if rawMemory, exists := fields["host_memory"]; exists {
+		var memoryFields map[string]json.RawMessage
+		if json.Unmarshal(rawMemory, &memoryFields) != nil || len(memoryFields) != 5 {
+			return hubHeartbeatPayload{}, false
+		}
+		for _, name := range []string{"free_pct", "compressed_mb", "swap_used_mb", "psi_some_avg10", "source"} {
+			if _, exists := memoryFields[name]; !exists {
+				return hubHeartbeatPayload{}, false
+			}
+		}
+		var memory HubHostMemory
+		if json.Unmarshal(rawMemory, &memory) != nil || !memory.valid() {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.HostMemory = &memory
 	}
 	if rawJobs, exists := fields["active_jobs"]; exists {
 		var rawActive []map[string]json.RawMessage
@@ -1336,7 +1363,7 @@ func (h *HubServer) Nodes() []HubNode {
 		}
 		effective := h.acceptingEffectiveLocked(record.machineID, record.accepting)
 		nodes = append(nodes, HubNode{
-			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, RemoteMeta: remoteMeta, State: record.state,
+			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, Memory: cloneHubHostMemory(record.hostMemory), RemoteMeta: remoteMeta, State: record.state,
 		})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })

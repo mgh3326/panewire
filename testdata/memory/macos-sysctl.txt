@@ -1,0 +1,6 @@
+### command: sysctl -n vm.swapusage
+total = 0.00M  used = 0.00M  free = 0.00M  (encrypted)
+### command: sysctl -n hw.memsize
+34359738368
+### command: sysctl -n vm.loadavg
+{ 3.58 3.69 3.90 }
