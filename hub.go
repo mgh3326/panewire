@@ -90,9 +90,21 @@ type HubNode struct {
 	ConnectedSince     time.Time         `json:"connected_since"`
 	LastPingMS         int64             `json:"last_ping_ms"`
 	LastNote           *HubLastNote      `json:"last_note,omitempty"`
+	Load               *HubNodeLoad      `json:"load"`
 	Memory             *HubHostMemory    `json:"memory"`
 	RemoteMeta         map[string]string `json:"remote_meta"`
 	State              string            `json:"state"`
+}
+
+// HubNodeLoad is the CPU-only console projection of a heartbeat host_load.
+// It deliberately excludes burst-only swap and worker-process measurements.
+// Every field is present when Load is non-nil; a nil value is an unavailable
+// measurement rather than a fabricated zero.
+type HubNodeLoad struct {
+	Load1  *float64 `json:"load1"`
+	Load5  *float64 `json:"load5"`
+	Load15 *float64 `json:"load15"`
+	NCPU   *int     `json:"ncpu"`
 }
 
 // HubLastNote is the most recent display-only note received from a node. It
@@ -113,6 +125,7 @@ type hubNodeRecord struct {
 	state             string
 	agent             *hubAgent
 	activeJobs        map[string]HubActiveJob
+	hostLoad          *HubHostLoad
 	hostMemory        *HubHostMemory
 }
 
@@ -142,6 +155,12 @@ type HubActiveJob struct {
 	Host           string `json:"host,omitempty"`
 	ReportPath     string `json:"report_path,omitempty"`
 	ReportLastLine string `json:"report_last_line,omitempty"`
+	Pane           string `json:"pane,omitempty"`
+	Tier           string `json:"tier,omitempty"`
+	Role           string `json:"role,omitempty"`
+	StartedAt      string `json:"started_at,omitempty"`
+	LastEventKind  string `json:"last_event_kind,omitempty"`
+	LastEventAt    string `json:"last_event_at,omitempty"`
 }
 
 type hubJobRecord struct {
@@ -452,6 +471,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/burst/release", h.handleBurstRelease)
 	mux.HandleFunc("GET /v1/burst/holds", h.handleBurstHolds)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
+	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
@@ -622,6 +642,22 @@ func (h *HubServer) handleOrphanedJobs(writer http.ResponseWriter, request *http
 	}{Jobs: h.orphanedJobs()})
 }
 
+func (h *HubServer) handleJobs(writer http.ResponseWriter, request *http.Request) {
+	if !h.authorizeOperator(request) {
+		hubUnauthorized(writer)
+		return
+	}
+	machine := request.URL.Query().Get("machine")
+	if machine != "" && !machineIDPattern.MatchString(machine) {
+		http.Error(writer, "invalid machine", http.StatusBadRequest)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(writer).Encode(struct {
+		Jobs []hubConsoleJob `json:"jobs"`
+	}{Jobs: h.activeConsoleJobs(machine)})
+}
+
 func (h *HubServer) handleReassignJob(writer http.ResponseWriter, request *http.Request) {
 	if !h.authorizeOperator(request) {
 		hubUnauthorized(writer)
@@ -761,6 +797,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.mu.Lock()
 			if record := h.nodes[machineID]; record != nil && record.agent == agent {
+				record.hostLoad = cloneHubHostLoad(heartbeat.HostLoad)
 				if !equalHubHostMemory(record.hostMemory, heartbeat.HostMemory) {
 					record.hostMemory = cloneHubHostMemory(heartbeat.HostMemory)
 					h.placementCache = placementCache{}
@@ -932,11 +969,24 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 	}
 	if rawLoad, exists := fields["host_load"]; exists {
 		var loadFields map[string]json.RawMessage
-		if json.Unmarshal(rawLoad, &loadFields) != nil || len(loadFields) != 4 {
+		if json.Unmarshal(rawLoad, &loadFields) != nil || (len(loadFields) != 4 && len(loadFields) != 6) {
 			return hubHeartbeatPayload{}, false
+		}
+		for name := range loadFields {
+			if name != "load1" && name != "load5" && name != "swap_used_gb" && name != "worker_procs" && name != "load15" && name != "ncpu" {
+				return hubHeartbeatPayload{}, false
+			}
 		}
 		for _, name := range []string{"load1", "load5", "swap_used_gb", "worker_procs"} {
 			if _, exists := loadFields[name]; !exists {
+				return hubHeartbeatPayload{}, false
+			}
+		}
+		if len(loadFields) == 6 {
+			if _, exists := loadFields["load15"]; !exists {
+				return hubHeartbeatPayload{}, false
+			}
+			if _, exists := loadFields["ncpu"]; !exists {
 				return hubHeartbeatPayload{}, false
 			}
 		}
@@ -974,7 +1024,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 				return hubHeartbeatPayload{}, false
 			}
 			for name := range rawJob {
-				if name != "job_id" && name != "agent_label" && name != "last_event_seq" && name != "push_sha" && name != "epoch" {
+				if name != "job_id" && name != "agent_label" && name != "last_event_seq" && name != "push_sha" && name != "epoch" && name != "owner_lane" && name != "pane" && name != "tier" && name != "role" && name != "started_at" && name != "last_event_kind" && name != "last_event_at" {
 					return hubHeartbeatPayload{}, false
 				}
 			}
@@ -991,6 +1041,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			if !validHubActiveJob(job) {
 				return hubHeartbeatPayload{}, false
 			}
+			normalizeHubActiveJobMetadata(&job)
 			if _, duplicate := seen[job.JobID]; duplicate {
 				return hubHeartbeatPayload{}, false
 			}
@@ -1382,11 +1433,28 @@ func (h *HubServer) Nodes() []HubNode {
 		}
 		effective := h.acceptingEffectiveLocked(record.machineID, record.accepting)
 		nodes = append(nodes, HubNode{
-			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, Memory: cloneHubHostMemory(record.hostMemory), RemoteMeta: remoteMeta, State: record.state,
+			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, Load: hubNodeLoadFromHostLoad(record.hostLoad), Memory: cloneHubHostMemory(record.hostMemory), RemoteMeta: remoteMeta, State: record.state,
 		})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })
 	return nodes
+}
+
+func hubNodeLoadFromHostLoad(load *HubHostLoad) *HubNodeLoad {
+	if load == nil {
+		return nil
+	}
+	load1, load5 := load.Load1, load.Load5
+	view := &HubNodeLoad{Load1: &load1, Load5: &load5}
+	if load.Load15 != nil {
+		value := *load.Load15
+		view.Load15 = &value
+	}
+	if load.NCPU != nil {
+		value := *load.NCPU
+		view.NCPU = &value
+	}
+	return view
 }
 
 // Sweep updates stale state and sends the server side of the application

@@ -11,13 +11,44 @@ import (
 )
 
 var (
-	hubJobIDPattern      = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
-	hubAgentLabelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	hubPushSHAPattern    = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+	hubJobIDPattern         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+	hubAgentLabelPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+	hubPushSHAPattern       = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
+	hubLastEventKindPattern = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,31}$`)
 )
 
 func validHubActiveJob(job HubActiveJob) bool {
 	return hubJobIDPattern.MatchString(job.JobID) && hubAgentLabelPattern.MatchString(job.AgentLabel) && job.Epoch > 0 && (job.PushSHA == "" || hubPushSHAPattern.MatchString(job.PushSHA))
+}
+
+// normalizeHubActiveJobMetadata rejects invalid optional console metadata
+// without discarding an otherwise valid active job heartbeat.
+func normalizeHubActiveJobMetadata(job *HubActiveJob) {
+	if !hubAgentLabelPattern.MatchString(job.OwnerLane) {
+		job.OwnerLane = ""
+	}
+	if job.Pane == "" || len(job.Pane) > 128 {
+		job.Pane = ""
+	}
+	if job.Tier != "T0" && job.Tier != "T1" && job.Tier != "T2" && job.Tier != "T3" {
+		job.Tier = ""
+	}
+	if job.Role != "worker" && job.Role != "captain" {
+		job.Role = ""
+	}
+	if job.StartedAt != "" {
+		if _, err := time.Parse(time.RFC3339, job.StartedAt); err != nil {
+			job.StartedAt = ""
+		}
+	}
+	if !hubLastEventKindPattern.MatchString(job.LastEventKind) {
+		job.LastEventKind = ""
+	}
+	if job.LastEventAt != "" {
+		if _, err := time.Parse(time.RFC3339, job.LastEventAt); err != nil {
+			job.LastEventAt = ""
+		}
+	}
 }
 
 const hubRelayPayloadTextLimit = 240
@@ -137,7 +168,7 @@ func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 		}
 	}
 	var event hubJobEventPayload
-	if json.Unmarshal(fields["owner_lane"], &event.OwnerLane) != nil || json.Unmarshal(fields["event_id"], &event.EventID) != nil || json.Unmarshal(fields["text"], &event.Text) != nil || !hubAgentLabelPattern.MatchString(event.OwnerLane) || !validLaneEventID(event.EventID) || !validLaneEventText(event.Text) || len(event.Text) > laneEventTextLimit {
+	if json.Unmarshal(fields["owner_lane"], &event.OwnerLane) != nil || json.Unmarshal(fields["event_id"], &event.EventID) != nil || json.Unmarshal(fields["text"], &event.Text) != nil || !hubAgentLabelPattern.MatchString(event.OwnerLane) || !validLaneEventID(event.EventID) || !validLaneEventText(event.Text) || len(event.Text) > laneEventTextLimitSink {
 		return hubJobEventPayload{}, false
 	}
 	if raw, present := fields["epoch"]; present && (json.Unmarshal(raw, &event.Epoch) != nil || event.Epoch == 0) {
@@ -210,7 +241,7 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 			h.queueJobEventLocked("job.recovered", hubJobEventPayload{JobID: job.JobID, Node: machineID, Epoch: job.Epoch, LastSeen: received})
 		}
 		// Same owner and hub-issued epoch: only local metadata/liveness advances.
-		current.AgentLabel, current.LastEventSeq, current.PushSHA, current.LastSeen = job.AgentLabel, job.LastEventSeq, job.PushSHA, received
+		current.HubActiveJob, current.LastSeen = job, received
 	}
 	// A job absent after the node has reconnected is a local terminal-file
 	// observation. Inspect the durable-in-process job view rather than just the
@@ -346,10 +377,48 @@ func (h *HubServer) orphanedJobs() []hubJobEventPayload {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	jobs := make([]hubJobEventPayload, 0)
-	for _, job := range h.jobs {
-		if job.Orphaned && !job.Completed {
+	for _, job := range h.activeJobRecordsLocked() {
+		if job.Orphaned {
 			jobs = append(jobs, hubJobEventPayload{JobID: job.JobID, Node: job.Node, Epoch: job.Epoch, LastSeen: job.LastSeen, ResumeHint: "local events retained"})
 		}
+	}
+	sort.Slice(jobs, func(i, j int) bool { return jobs[i].JobID < jobs[j].JobID })
+	return jobs
+}
+
+// activeJobRecordsLocked is the single active-definition source shared by the
+// operator registry and the orphan view. The caller must hold h.mu.
+func (h *HubServer) activeJobRecordsLocked() []*hubJobRecord {
+	active := make([]*hubJobRecord, 0, len(h.jobs))
+	for _, job := range h.jobs {
+		if !job.Completed {
+			active = append(active, job)
+		}
+	}
+	return active
+}
+
+type hubConsoleJob struct {
+	Machine       string `json:"machine"`
+	JobID         string `json:"job_id"`
+	OwnerLane     string `json:"owner_lane,omitempty"`
+	Pane          string `json:"pane,omitempty"`
+	Tier          string `json:"tier,omitempty"`
+	Role          string `json:"role,omitempty"`
+	StartedAt     string `json:"started_at,omitempty"`
+	LastEventKind string `json:"last_event_kind,omitempty"`
+	LastEventAt   string `json:"last_event_at,omitempty"`
+}
+
+func (h *HubServer) activeConsoleJobs(machine string) []hubConsoleJob {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	jobs := make([]hubConsoleJob, 0)
+	for _, job := range h.activeJobRecordsLocked() {
+		if machine != "" && job.Node != machine {
+			continue
+		}
+		jobs = append(jobs, hubConsoleJob{Machine: job.Node, JobID: job.JobID, OwnerLane: job.OwnerLane, Pane: job.Pane, Tier: job.Tier, Role: job.Role, StartedAt: job.StartedAt, LastEventKind: job.LastEventKind, LastEventAt: job.LastEventAt})
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].JobID < jobs[j].JobID })
 	return jobs

@@ -20,7 +20,10 @@ import (
 // node scanner and handoffkeep's own CHECK constraint.
 var emitRelayKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "lane.event": true}
 
-const laneEventTextLimit = 2048
+const (
+	laneEventTextLimit     = 2048
+	laneEventTextLimitSink = 8192
+)
 
 var errDuplicateLaneEventID = errors.New("duplicate lane event id")
 
@@ -77,6 +80,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	lane := fs.String("lane", "", "direct destination lane for lane.event")
 	eventID := fs.String("event-id", "", "producer event id for lane.event")
 	text := fs.String("text", "", "payload for lane.event")
+	sink := fs.Bool("sink", false, "allow sink lane.event text up to 8192 bytes")
 	report := fs.String("report", "", "report path")
 	ownerLane := fs.String("owner-lane", "", "owning lane")
 	epoch := fs.Uint64("epoch", 0, "job epoch (defaults to 1)")
@@ -100,7 +104,11 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		if !hubAgentLabelPattern.MatchString(*lane) || !validLaneEventID(*eventID) || !validLaneEventText(*text) {
 			return ExitUsage
 		}
-		finalText, truncated := truncateLaneEventText(*text)
+		limit := laneEventTextLimit
+		if *sink {
+			limit = laneEventTextLimitSink
+		}
+		finalText, truncated := truncateLaneEventTextAtLimit(*text, limit)
 		record := emitRecord{Type: *kind, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: *pane, EventID: *eventID, Text: finalText, Truncated: truncated}
 		if record.Epoch == 0 {
 			record.Epoch = 1
@@ -325,7 +333,7 @@ func validLaneEventText(value string) bool {
 }
 
 func validLaneRelayText(value string) bool {
-	if value == "" || len(value) > 4096 || !utf8.ValidString(value) {
+	if value == "" || len(value) > laneEventTextLimitSink || !utf8.ValidString(value) {
 		return false
 	}
 	for _, r := range value {
@@ -341,15 +349,19 @@ func validLaneRelayText(value string) bool {
 // are made; the hub only validates this final form so acknowledgements cannot
 // name a different record after a restart.
 func truncateLaneEventText(value string) (string, bool) {
-	if len(value) <= laneEventTextLimit {
+	return truncateLaneEventTextAtLimit(value, laneEventTextLimit)
+}
+
+func truncateLaneEventTextAtLimit(value string, limit int) (string, bool) {
+	if len(value) <= limit {
 		return value, false
 	}
 	const marker = "[truncated]"
-	limit := laneEventTextLimit - len(marker)
-	for limit > 0 && !utf8.ValidString(value[:limit]) {
-		limit--
+	textLimit := limit - len(marker)
+	for textLimit > 0 && !utf8.ValidString(value[:textLimit]) {
+		textLimit--
 	}
-	return value[:limit] + marker, true
+	return value[:textLimit] + marker, true
 }
 
 // readEmitDedupeKey reads one existing event file into the dedupe key of the
