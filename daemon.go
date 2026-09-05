@@ -243,6 +243,12 @@ type localRequest struct {
 	Question       string `json:"question,omitempty"`
 	PR             string `json:"pr,omitempty"`
 	Head           string `json:"head,omitempty"`
+	// InboxRoot names the namespace the caller recorded the event in. A daemon
+	// that watches a different root must refuse it: the event file lives in the
+	// caller's namespace, but the relay outbox row would be written in this
+	// daemon's. That is how a test run against a temporary inbox root ends up
+	// stamping the operator's production journal.
+	InboxRoot string `json:"inbox_root,omitempty"`
 }
 type localResponse struct {
 	OK     bool   `json:"ok"`
@@ -359,12 +365,52 @@ func defaultSocketPath() string {
 	return filepath.Join(home, "Library", "Application Support", "panewire", "panewire.sock")
 }
 
+// emitNamespaceMatches reports whether a caller's inbox root is the one this
+// daemon relays from. An empty request root is a pre-R20t7 client and is
+// accepted unchanged; an empty daemon root means this daemon has no namespace
+// of its own to defend.
+func (d *Daemon) emitNamespaceMatches(requested string) bool {
+	if requested == "" {
+		return true
+	}
+	local := ""
+	if d.cfg.Hub.Client != nil {
+		local = d.cfg.Hub.Client.jobsInboxRoot
+	}
+	if local == "" {
+		local = d.cfg.InboxRoot
+	}
+	if local == "" {
+		return true
+	}
+	return sameLocalPath(requested, local)
+}
+
+// sameLocalPath compares two filesystem paths by their resolved absolute form.
+func sameLocalPath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(left)
+	rightAbs, rightErr := filepath.Abs(right)
+	if leftErr != nil || rightErr != nil {
+		return filepath.Clean(left) == filepath.Clean(right)
+	}
+	if resolved, err := filepath.EvalSymlinks(leftAbs); err == nil {
+		leftAbs = resolved
+	}
+	if resolved, err := filepath.EvalSymlinks(rightAbs); err == nil {
+		rightAbs = resolved
+	}
+	return leftAbs == rightAbs
+}
+
 // emitRelayEvent hands one already-recorded relay event to the hub client's
 // immediate queue. A hub that is absent or disconnected is not an error: the
 // event file is durable and the node outbox retries from it.
 func (d *Daemon) emitRelayEvent(req localRequest) error {
 	if !emitRelayKinds[req.Kind] || !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
+	}
+	if !d.emitNamespaceMatches(req.InboxRoot) {
+		return &codedError{ExitUsage, fmt.Errorf("emit inbox root does not match this daemon")}
 	}
 	epoch := req.Epoch
 	if epoch == 0 {

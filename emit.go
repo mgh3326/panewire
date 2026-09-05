@@ -121,7 +121,10 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	if socket == "" {
 		socket = socketPathFromEnv()
 	}
-	if !pushEmitRecord(socket, record, *timeout) {
+	// The push carries the namespace the file was written in. A daemon that
+	// watches a different root refuses it, so a run against a temporary inbox
+	// root cannot reach the operator's live relay outbox.
+	if !pushEmitRecord(socket, record, root, *timeout) {
 		fmt.Fprintln(stderr, "emit: panewired unavailable; event recorded to file only")
 		return ExitOK
 	}
@@ -209,7 +212,7 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (string, bool) {
 	return relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()), true
 }
 
-func pushEmitRecord(socket string, record emitRecord, timeout time.Duration) bool {
+func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout time.Duration) bool {
 	connection, err := net.DialTimeout("unix", socket, timeout)
 	if err != nil {
 		return false
@@ -220,7 +223,7 @@ func pushEmitRecord(socket string, record emitRecord, timeout time.Duration) boo
 		Op: "emit", Kind: record.Type, JobID: record.JobID, Epoch: record.Epoch, OwnerLane: record.OwnerLane,
 		Label: record.Label, Host: record.Host, PaneID: record.PaneID, ReportPath: record.ReportPath,
 		ReportLastLine: record.ReportLastLine, Reason: record.Reason, Question: record.Question,
-		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, TimeoutMS: timeout.Milliseconds(),
+		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),
 	}
 	body, _ := json.Marshal(request)
 	if _, err := fmt.Fprintf(connection, "%s\n", body); err != nil {

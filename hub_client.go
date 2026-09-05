@@ -74,6 +74,12 @@ type HubDaemonConfig struct {
 type hubClientEvent struct {
 	Kind    string
 	Payload json.RawMessage
+	// relayKey names the outbox row this event stands for, and relayPending
+	// says the row is still waiting for its send stamp. sent_at is written by
+	// commitRelaySent once the write has actually left the node, so an event
+	// that never reached the wire carries no stamp at all.
+	relayKey     relayOutboxKey
+	relayPending bool
 }
 
 // HubClient owns a bounded in-memory event queue. It is intentionally not a
@@ -115,15 +121,21 @@ type HubClient struct {
 	events               chan hubClientEvent
 	completedJobs        map[string]uint64
 	completedReports     map[string]struct{}
-	outbox               *Store
-	outboxMu             sync.Mutex
-	assignedJobs         map[string]uint64
-	assignmentMu         sync.Mutex
-	burstHoldsActive     bool
-	updateMu             sync.Mutex
-	updateInFlight       bool
-	panesAlive           panesAliveFunc
-	panesAliveMu         sync.Mutex
+	// relayInflight holds the keys selected for a send that has not been
+	// stamped yet. It keeps the scan and `panewire emit` from offering the
+	// same record twice while it is in a write queue.
+	relayInflight map[string]struct{}
+	outbox        *Store
+	outboxMu      sync.Mutex
+	// now is the outbox retry clock. Tests pin it; production leaves it nil.
+	now              func() time.Time
+	assignedJobs     map[string]uint64
+	assignmentMu     sync.Mutex
+	burstHoldsActive bool
+	updateMu         sync.Mutex
+	updateInFlight   bool
+	panesAlive       panesAliveFunc
+	panesAliveMu     sync.Mutex
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -520,10 +532,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 		return nil, err
 	}
-	for _, event := range client.jobCompletionEvents() {
-		if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
-			return nil, err
-		}
+	if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+		return nil, err
 	}
 	readErrors := make(chan error, 1)
 	go func() {
@@ -640,8 +650,10 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			return nil, err
 		case event := <-client.events:
 			if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
+				client.releaseRelayEvents(event)
 				return nil, err
 			}
+			client.commitRelaySent(event)
 		case <-ticker.C:
 			if err := peer.write(ctx, hubOutbound{Type: "ping"}); err != nil {
 				return nil, err
@@ -649,10 +661,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 				return nil, err
 			}
-			for _, event := range client.jobCompletionEvents() {
-				if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
-					return nil, err
-				}
+			if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+				return nil, err
 			}
 		case result := <-preferenceResults:
 			preferenceProbing = false
@@ -685,6 +695,13 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			}()
 		}
 	}
+}
+
+// relayWriter is the one-event write this connection performs. Taking it as a
+// function is what lets writeRelayEvents be exercised with a write that fails
+// half-way through a batch.
+func (peer *hubClientConnection) relayWriter(ctx context.Context) func(hubClientEvent) error {
+	return func(event hubClientEvent) error { return peer.write(ctx, hubClientWireEvent(event)) }
 }
 
 // handleRelayInject is isolated from serve so transport extensions can add
@@ -775,6 +792,57 @@ func compactHubRelayEventText(value string, normalizeNewlines bool) string {
 	return value
 }
 
+// normalizeRelayEventText applies the hub's own receipt rules - the 240-rune
+// bound and newline removal - on the node, before either the outbox key or the
+// wire payload is built. The hub truncates these fields on arrival and rejects
+// an embedded newline outright, so a value normalized on only one side is
+// exactly how a relay.persisted acknowledgement stops naming the row it was
+// meant to retire.
+func normalizeRelayEventText(value string) string {
+	return compactHubRelayEventText(value, true)
+}
+
+// relayEventWireForm is the one normalized form of a scanned record. The outbox
+// key, the wire payload, and the hub's acknowledgement are all built from it,
+// so the five key fields are the same strings on the scan path, the
+// `panewire emit` path, and the restart replay path alike.
+func relayEventWireForm(job hubScannedRelayEvent) hubScannedRelayEvent {
+	job.OwnerLane = normalizeRelayEventText(job.OwnerLane)
+	job.Label = normalizeRelayEventText(job.Label)
+	job.Host = normalizeRelayEventText(job.Host)
+	job.ReportPath = normalizeRelayEventText(job.ReportPath)
+	job.ReportLastLine = normalizeRelayEventText(job.ReportLastLine)
+	job.Reason = normalizeRelayEventText(job.Reason)
+	job.Question = normalizeRelayEventText(job.Question)
+	job.PR = normalizeRelayEventText(job.PR)
+	job.Head = normalizeRelayEventText(job.Head)
+	job.PaneID = normalizeRelayEventText(job.PaneID)
+	return job
+}
+
+// relayEventOutboxKeyFor keys the outbox by exactly what leaves the node. A
+// job.completed payload carries no reason field, so the hub can only ever echo
+// an empty reason for it; keying such a row by the record's own reason is a
+// mismatch that leaves persisted_at NULL for good. Callers must pass the wire
+// form: a key built from un-normalized text names a row nothing will ever
+// acknowledge.
+func relayEventOutboxKeyFor(job hubScannedRelayEvent) relayOutboxKey {
+	reason := job.Reason
+	if job.Kind == "job.completed" {
+		reason = ""
+	}
+	return relayOutboxKey{Kind: job.Kind, JobID: job.JobID, Epoch: job.Epoch, ReportPath: job.ReportPath, Reason: reason}
+}
+
+// nowUTC is the outbox retry clock, injectable so a fixture can pin the
+// sixty-second backoff instead of racing the wall clock.
+func (client *HubClient) nowUTC() time.Time {
+	if client.now != nil {
+		return client.now().UTC()
+	}
+	return time.Now().UTC()
+}
+
 // jobCompletionEvents is the node-side producer for the fenced completion
 // contract. It emits only a local terminal-event ID/epoch once per epoch.
 func (client *HubClient) jobCompletionEvents() []hubClientEvent {
@@ -799,8 +867,9 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 // the single place that decides whether a scanned record is still owed to the
 // hub, so `panewire emit` and the periodic scan cannot disagree.
 func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientEvent, bool) {
-	key := relayOutboxKey{Kind: job.Kind, JobID: job.JobID, Epoch: job.Epoch, ReportPath: job.ReportPath, Reason: job.Reason}
-	send, replay := client.claimRelayEvent(key)
+	job = relayEventWireForm(job)
+	key := relayEventOutboxKeyFor(job)
+	send, replay := client.selectRelayEvent(key)
 	if !send {
 		return hubClientEvent{}, false
 	}
@@ -824,54 +893,115 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			Head           string `json:"head,omitempty"`
 			PaneID         string `json:"pane_id,omitempty"`
 			Replay         bool   `json:"replay,omitempty"`
-		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, compactHubRelayEventText(job.ReportLastLine, false), compactHubRelayEventText(job.Reason, false), compactHubRelayEventText(job.Question, true), job.PR, job.Head, job.PaneID, replay})
+		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Question, job.PR, job.Head, job.PaneID, replay})
 	}
-	return hubClientEvent{Kind: job.Kind, Payload: payload}, true
+	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 }
 
-// claimRelayEvent answers "should this record go out now, and is it a replay".
+// selectRelayEvent answers "should this record go out now, and is it a replay".
+// It deliberately writes nothing durable: sent_at belongs to commitRelaySent,
+// once the write has actually left the node. Stamping here is what made a
+// batch that died half-way mark records it never sent, so the backoff held
+// them back and a restart repeated the whole thing.
+//
 // Without a durable outbox it degrades to the historical per-process memory,
 // which is exactly the R19f behavior the SQLite table replaces.
-func (client *HubClient) claimRelayEvent(key relayOutboxKey) (send bool, replay bool) {
+func (client *HubClient) selectRelayEvent(key relayOutboxKey) (send bool, replay bool) {
 	client.outboxMu.Lock()
 	defer client.outboxMu.Unlock()
 	if client.completedReports == nil {
 		client.completedReports = make(map[string]struct{})
 	}
+	if client.relayInflight == nil {
+		client.relayInflight = make(map[string]struct{})
+	}
 	text := key.String()
+	// A record already queued for a write it has not been stamped for is not
+	// offered again; otherwise the scan and `panewire emit` would both take it.
+	if _, inflight := client.relayInflight[text]; inflight {
+		return false, false
+	}
 	_, sentThisProcess := client.completedReports[text]
 	if client.outbox == nil {
 		if sentThisProcess {
 			return false, false
 		}
-		client.completedReports[text] = struct{}{}
+		client.relayInflight[text] = struct{}{}
 		return true, false
 	}
-	now := time.Now().UTC()
 	state, err := client.outbox.RelayOutboxState(context.Background(), key)
 	if err != nil {
 		client.warnMessage("relay outbox state unavailable")
 		if sentThisProcess {
 			return false, false
 		}
-		client.completedReports[text] = struct{}{}
+		client.relayInflight[text] = struct{}{}
 		return true, false
 	}
 	if state.Persisted {
 		client.completedReports[text] = struct{}{}
 		return false, false
 	}
-	if !state.SentAt.IsZero() && now.Sub(state.SentAt) < relayOutboxBackoff {
+	// The backoff gates a record that really did go out. One that was selected
+	// and never written carries no stamp, so it lands here eligible again.
+	if !state.SentAt.IsZero() && client.nowUTC().Sub(state.SentAt) < relayOutboxBackoff {
 		return false, false
 	}
 	// A row already stamped by a previous process is a restart replay. The hub
 	// records the flag; it never lets it change routing.
 	replay = !sentThisProcess && !state.SentAt.IsZero()
-	if err := client.outbox.RecordRelaySent(context.Background(), key, now); err != nil {
-		client.warnMessage("relay outbox attempt was not recorded")
+	client.relayInflight[text] = struct{}{}
+	return true, replay
+}
+
+// commitRelaySent stamps sent_at for a record whose write has succeeded. Until
+// this runs the record is unsent as far as the outbox is concerned, which is
+// what puts it back in the very next scan rather than behind the backoff.
+func (client *HubClient) commitRelaySent(event hubClientEvent) {
+	if !event.relayPending {
+		return
+	}
+	client.outboxMu.Lock()
+	defer client.outboxMu.Unlock()
+	text := event.relayKey.String()
+	delete(client.relayInflight, text)
+	if client.completedReports == nil {
+		client.completedReports = make(map[string]struct{})
 	}
 	client.completedReports[text] = struct{}{}
-	return true, replay
+	if client.outbox == nil {
+		return
+	}
+	if err := client.outbox.RecordRelaySent(context.Background(), event.relayKey, client.nowUTC()); err != nil {
+		client.warnMessage("relay outbox attempt was not recorded")
+	}
+}
+
+// releaseRelayEvents returns records that never reached the wire to the pool of
+// sendable events. Nothing durable is touched: an event that was not sent must
+// not carry a send stamp, and it must be eligible again immediately.
+func (client *HubClient) releaseRelayEvents(events ...hubClientEvent) {
+	client.outboxMu.Lock()
+	defer client.outboxMu.Unlock()
+	for _, event := range events {
+		if event.relayPending {
+			delete(client.relayInflight, event.relayKey.String())
+		}
+	}
+}
+
+// writeRelayEvents stamps each record only after its own write succeeded. A
+// mid-batch failure therefore leaves every record behind it unstamped and
+// retryable on the next connection, instead of stamped and never sent.
+func (client *HubClient) writeRelayEvents(events []hubClientEvent, write func(hubClientEvent) error) error {
+	for index, event := range events {
+		if err := write(event); err != nil {
+			client.releaseRelayEvents(events[index:]...)
+			return err
+		}
+		client.commitRelaySent(event)
+	}
+	return nil
 }
 
 // recordRelayPersisted retires an outbox row once the hub confirms handoffkeep
@@ -897,7 +1027,10 @@ func (client *HubClient) EnqueueRelayEvent(job hubScannedRelayEvent) bool {
 	case client.events <- event:
 		return true
 	default:
-		// The event file is still on disk; the next scan picks it up.
+		// The event file is still on disk; the next scan picks it up. A drop is
+		// not a send, so the record keeps its unstamped outbox row and is
+		// eligible again straight away rather than after the retry backoff.
+		client.releaseRelayEvents(event)
 		client.warnMessage("relay event queue is full")
 		return false
 	}

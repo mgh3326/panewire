@@ -81,8 +81,27 @@ re-persisted: no replay creates a row. A destination node that is not connected
 yields `relay.unrouted`, as before. The contract exposes no cursor, so one
 startup replays at most `limit` (200) distinct events, oldest first.
 
-The replay is gated. A row is re-injected only if `delivered_at` is NULL **and**
-`attempts < 3`; without that bound a row whose destination never acknowledges is
+### `delivered_at` gates injection, not just replay
+
+The same authority applies to a live send. When a POST comes back **200** (the
+row already existed) **with a `delivered_at`**, the note is already in the pane:
+the hub does not inject it again. It still sends `relay.persisted` — the node
+retires its outbox row on that and nothing else, so withholding it is what
+turns a settled record into a permanent resend — and broadcasts
+`relay.already_delivered` with
+`{"job_id":…,"kind":…,"event_id":…,"delivered_at":…,"reason":"already_delivered"}`,
+counted in `already_delivered_relay_events`.
+
+A **201** is a row nothing can have delivered yet, and a 200 with an empty
+`delivered_at` is a row that never reached its pane; both inject as before.
+
+The authority here is handoffkeep's `delivered_at`, never the node's `replay`
+flag. `replay` says a node restarted, which is a different question from
+whether this record ever reached the pane; it stays log and event metadata, as
+the R19f contract requires.
+
+The startup replay is gated. A row is re-injected only if `delivered_at` is
+NULL **and** `attempts < 3`; without that bound a row whose destination never acknowledges is
 re-injected on every hub restart, forever. A row over the limit is not dropped
 silently — it is broadcast as `relay.replay_exhausted` with
 `{"job_id":…,"kind":…,"event_id":…,"attempts":…,"reason":"attempts_exhausted"}`
@@ -105,8 +124,17 @@ persisted_at)` in its own SQLite database. Its primary key is the same dedupe
 key handoffkeep uses for idempotency, assembled in the same field order.
 
 - A row with `persisted_at` set is never sent again, across restarts.
+- `sent_at` is stamped **after the write leaves the node**, never when the
+  record is picked. A scan claims a whole batch at once and writes it one
+  message at a time, so stamping at claim time marked every record behind a
+  failed write as sent: they were then held by the 60-second backoff with no
+  send to show for it, and a restart repeated the same half-batch. A record
+  that was selected and not written carries no stamp and is offered again on
+  the very next attempt. The same holds for a record the immediate-send queue
+  had no room for.
 - A row whose `sent_at` is under 60 seconds old is not retried yet; that
-  backoff is what keeps a dead handoffkeep from being hammered every scan.
+  backoff is what keeps a dead handoffkeep from being hammered every scan. It
+  gates records that really did go out, and only those.
 - The scan only considers event files whose mtime is within 24 hours. Override
   with `PANEWIRE_RELAY_OUTBOX_MAX_AGE` (a Go duration).
   `PANEWIRE_JOB_ACTIVE_MAX_AGE` (72h) is a different axis and is unaffected:
@@ -118,6 +146,26 @@ The hub's own dedupe key counts the same five fields, in the same order. When
 it counted only four (it omitted `reason` before R20T5), two events the node
 and handoffkeep both treated as distinct were folded into one here, and the
 second one's outbox row could never be retired.
+
+### The key is what goes on the wire
+
+The hub bounds every relay text field to 240 runes on receipt and rejects an
+embedded newline outright, and `relay.persisted` can only echo what the hub
+received. So the node normalizes **once**, before it builds either the key or
+the payload, and keys the outbox by that same wire form:
+
+- a `report_path` or `reason` past 240 runes is truncated identically on both
+  sides, instead of the node keying the full value and the hub naming the
+  truncated one;
+- a newline anywhere in a relay text field becomes a space, instead of the hub
+  refusing the whole message and the row waiting for an answer that can never
+  come;
+- a `job.completed` outbox row is keyed with an empty `reason`, because the
+  `job.completed` payload carries no `reason` field and the hub can therefore
+  only ever echo an empty one.
+
+A row keyed by un-normalized text names something no acknowledgement will ever
+match, which is `persisted_at` NULL for the life of the row.
 
 ## Two properties of the persistence contract
 
@@ -172,6 +220,14 @@ The inbox root comes from `--inbox-root`, else `PANEWIRE_INBOX_ROOT`, else the
 daemon's default data directory. `--kind` must be `job.completed`,
 `job.escalate`, or `job.joined`; a missing `--job` or `--report` is a usage
 error.
+
+The push carries the inbox root the file was written in, and a daemon relaying
+from a different root refuses it. Redirecting `--inbox-root` alone does not
+redirect the socket: without this guard a verification run against a scratch
+directory still reached the operator's live daemon, whose hub client then wrote
+a `relay_sent` row for it in the production journal. The refusal is not an
+error for the caller — the event file is durable in the namespace it chose, and
+`emit` reports `panewired unavailable; event recorded to file only`.
 
 The file is written first and the socket is called second. A record whose
 dedupe key already exists in `jobs/<job_id>/events/` does not produce a second
