@@ -34,6 +34,17 @@ func r20Node(inbox string, store *Store) *HubClient {
 	return client
 }
 
+// r20Sent is one successful write of everything the node offered. The send
+// stamp lands only after the write leaves the node, so a test that skips the
+// commit is modelling a node whose events never made it onto the wire.
+func r20Sent(node *HubClient) []hubClientEvent {
+	events := node.jobCompletionEvents()
+	for _, event := range events {
+		node.commitRelaySent(event)
+	}
+	return events
+}
+
 // TE6: persisted rows never come back after a restart; rows only marked sent do,
 // and they carry the replay flag so the hub can tell them apart.
 func TestR20OutboxSurvivesNodeRestart(t *testing.T) {
@@ -90,16 +101,16 @@ func TestR20OutboxBacksOffWithinSixtySeconds(t *testing.T) {
 	store := NewMemoryStore(t)
 	defer store.Close()
 	r20WriteEvent(t, inbox, "r20-backoff", "00001-job.completed.json", `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"a.md","report_last_line":"done"}`, time.Time{})
-	if events := r20Node(inbox, store).jobCompletionEvents(); len(events) != 1 {
+	if events := r20Sent(r20Node(inbox, store)); len(events) != 1 {
 		t.Fatalf("first send=%d", len(events))
 	}
-	if events := r20Node(inbox, store).jobCompletionEvents(); len(events) != 0 {
+	if events := r20Sent(r20Node(inbox, store)); len(events) != 0 {
 		t.Fatalf("a fresh attempt inside the backoff window resent %d events", len(events))
 	}
 	if err := store.RecordRelaySent(context.Background(), relayOutboxKey{Kind: "job.completed", JobID: "r20-backoff", Epoch: 1, ReportPath: "a.md"}, time.Now().Add(-2*relayOutboxBackoff)); err != nil {
 		t.Fatal(err)
 	}
-	if events := r20Node(inbox, store).jobCompletionEvents(); len(events) != 1 {
+	if events := r20Sent(r20Node(inbox, store)); len(events) != 1 {
 		t.Fatalf("an aged-out attempt was not retried: %d", len(events))
 	}
 }

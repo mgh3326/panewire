@@ -1,0 +1,29 @@
+job.completed	job-16	1	/inbox/jobs/job-16/report.md		1788568603994	1788568604124
+job.completed	job-19	1	/inbox/jobs/job-19/report.md		1788568603996	1788568604127
+job.completed	job-18	1	/inbox/jobs/job-18/report.md		1788568603998	1788568604129
+job.completed	job-02	1	/inbox/jobs/job-02/report.md		1788568604000	1788568604131
+job.completed	job-14	1	/inbox/jobs/job-14/report.md		1788568604004	1788568604133
+job.completed	job-04	1	/inbox/jobs/job-04/report.md		1788568604006	1788568604135
+job.completed	job-12	1	/inbox/jobs/job-12/report.md		1788568604008	1788568604137
+job.escalate	captain-a	1	/inbox/jobs/captain-a/events/00003-job.escalate.json	captain escalation	1788579255121	None
+job.joined	captain-b	1	/inbox/jobs/job-14/report.md	captain joined PR	1788579255129	None
+job.joined	captain-b	1	/inbox/jobs/job-12/report.md	captain joined PR	1788579255127	None
+job.completed	job-01	1	/inbox/jobs/job-01/report.md		1788579255137	None
+job.completed	job-07	1	/inbox/jobs/job-07/report.md		1788568604020	1788568604156
+job.completed	job-09	1	/inbox/jobs/job-09/report.md		1788570165077	1788570165183
+job.escalate	captain-b	1	/inbox/jobs/captain-b/events/00007-job.escalate.json	captain escalation	1788579255125	None
+job.completed	probe-absent	1	/tmp/tmp.SCRATCH/r20-report.md		1788570931179	None
+job.completed	job-05	1	/inbox/jobs/job-05/report.md		1788571494097	1788571494205
+job.completed	job-11	1	/inbox/jobs/job-11/report.md		1788571744088	1788571744197
+job.completed	job-10	1	/inbox/jobs/job-10/report.md		1788572794109	1788572794221
+job.joined	captain-b	1	/inbox/jobs/job-10/report.md	captain joined PR	1788579255131	None
+job.completed	job-03	1	/inbox/jobs/job-03/report.md		1788574482493	1788574482598
+job.completed	job-15	1	/inbox/jobs/job-15/report.md		1788575685993	1788575686080
+job.joined	captain-b	1	/inbox/jobs/job-15/report.md	captain joined PR	1788579255134	None
+job.joined	captain-b	1	/inbox/jobs/job-11/report.md	captain joined PR	1788579255135	None
+job.completed	job-08	1	/inbox/jobs/job-08/report.md		1788577182750	1788577182823
+job.completed	job-17	1	/inbox/jobs/job-17/report.md		1788577333223	1788577333297
+job.completed	job-06	1	/inbox/jobs/job-06/report.md		1788578882641	1788578882716
+job.joined	captain-a	1	/inbox/jobs/job-06/report.md	captain joined PR	1788579255123	None
+job.completed	job-13	1	/inbox/jobs/job-13/report.md		1788579088498	1788579088571
+job.joined	captain-b	1	/inbox/jobs/job-13/report.md	captain joined PR	1788579265144	None

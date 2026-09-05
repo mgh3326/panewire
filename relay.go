@@ -172,7 +172,7 @@ func (h *HubServer) relayJobEvent(kind string, event hubJobEventPayload) {
 		h.broadcastRelayUnrouted(event)
 		return
 	}
-	eventID, persisted := h.persistRelayEvent(kind, event, route)
+	stored, status, persisted := h.persistRelayEventRecord(kind, event, route)
 	if !persisted {
 		// The event must stay resendable: the node still holds it, and its
 		// next attempt has to survive this hub's in-memory dedupe.
@@ -180,8 +180,25 @@ func (h *HubServer) relayJobEvent(kind string, event hubJobEventPayload) {
 		h.broadcastRelayUnpersisted(kind, event)
 		return
 	}
-	h.rememberRelayEvent(key, eventID)
-	h.injectRelayEvent(kind, event, route, agent, eventID, key)
+	h.rememberRelayEvent(key, stored.ID)
+	if relayEventAlreadyDelivered(status, stored) {
+		// handoffkeep already holds this record as delivered, so the note is in
+		// the pane. The node still owes its outbox row an answer: acknowledge,
+		// and put the injection nobody needs on the operator feed instead.
+		h.queueRelayPersisted(kind, event, agent, stored.ID)
+		h.broadcastRelayAlreadyDelivered(kind, event, stored)
+		return
+	}
+	h.injectRelayEvent(kind, event, route, agent, stored.ID, key)
+}
+
+// relayEventAlreadyDelivered is the hub's inject gate. Its authority is
+// handoffkeep's delivered_at on a row that already existed (200), never the
+// node's `replay` flag: `replay` says a node restarted, which is not the same
+// question as whether this record ever reached the pane. 201 is a row nothing
+// can have delivered yet, so it always injects.
+func relayEventAlreadyDelivered(status int, stored handoffkeepRelayEvent) bool {
+	return status == http.StatusOK && strings.TrimSpace(stored.DeliveredAt) != ""
 }
 
 // reacknowledgeRelayEvent answers a resend of an event this hub already took.
@@ -305,6 +322,21 @@ func (h *HubServer) broadcastRelayReplayExhausted(record handoffkeepRelayEvent) 
 	h.broadcast(hubEvent{Kind: "relay.replay_exhausted", Payload: payload, Received: h.now().UTC()})
 }
 
+// broadcastRelayAlreadyDelivered keeps a suppressed injection visible. An
+// operator who sees the note absent from the pane must be able to tell "the
+// hub decided it was already there" from "the relay lost it".
+func (h *HubServer) broadcastRelayAlreadyDelivered(kind string, event hubJobEventPayload, stored handoffkeepRelayEvent) {
+	h.countAlreadyDeliveredRelayEvent()
+	payload, _ := json.Marshal(struct {
+		JobID       string `json:"job_id"`
+		Kind        string `json:"kind"`
+		EventID     int64  `json:"event_id"`
+		DeliveredAt string `json:"delivered_at"`
+		Reason      string `json:"reason"`
+	}{JobID: event.JobID, Kind: kind, EventID: stored.ID, DeliveredAt: stored.DeliveredAt, Reason: "already_delivered"})
+	h.broadcast(hubEvent{Kind: "relay.already_delivered", Payload: payload, Received: h.now().UTC()})
+}
+
 func (h *HubServer) broadcastRelayUnpersisted(kind string, event hubJobEventPayload) {
 	h.countUnpersistedRelayEvent()
 	payload, _ := json.Marshal(struct {
@@ -357,13 +389,21 @@ func (h *HubServer) recordRelayAttempt(pending relayPending) {
 // 201 (new row) and 200 (the existing row for this idempotency key) are both
 // success, so a resend is acknowledged exactly like a first send.
 func (h *HubServer) persistRelayEvent(kind string, event hubJobEventPayload, route reportRelayRoute) (int64, bool) {
+	stored, _, persisted := h.persistRelayEventRecord(kind, event, route)
+	return stored.ID, persisted
+}
+
+// persistRelayEventRecord returns handoffkeep's own row and reply status
+// alongside the id, because the id alone cannot tell a first write from a row
+// the parent pane already received.
+func (h *HubServer) persistRelayEventRecord(kind string, event hubJobEventPayload, route reportRelayRoute) (handoffkeepRelayEvent, int, bool) {
 	if h.handoffkeep == nil {
-		return 0, true
+		return handoffkeepRelayEvent{}, 0, true
 	}
 	stored, status, err := h.handoffkeep.appendEvent(context.Background(), h.relayEventRequest(kind, event, route))
 	if err != nil {
 		h.logger.Warn("relay event was not persisted", "job", event.JobID, "kind", kind, "status", status)
-		return 0, false
+		return handoffkeepRelayEvent{}, status, false
 	}
 	// owner_lane is not part of handoffkeep's idempotency key, so a duplicate
 	// key raised by another lane returns that lane's row. Routing stays as this
@@ -371,7 +411,7 @@ func (h *HubServer) persistRelayEvent(kind string, event hubJobEventPayload, rou
 	if status == http.StatusOK && stored.OwnerLane != event.OwnerLane {
 		h.logger.Warn("persisted relay event reports a different owner lane", "job", event.JobID, "kind", kind, "sent", event.OwnerLane, "stored", stored.OwnerLane)
 	}
-	return stored.ID, true
+	return stored, status, true
 }
 
 // markRelayEventDelivered closes the loop on a node's relay.delivered. A

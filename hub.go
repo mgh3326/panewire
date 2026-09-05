@@ -276,43 +276,44 @@ type HubServer struct {
 	notifier          HubNotifier
 	logger            *slog.Logger
 
-	mu                        sync.Mutex
-	nodes                     map[string]*hubNodeRecord
-	lastNotes                 map[string]*HubLastNote
-	subscribers               map[*hubEventSubscriber]struct{}
-	alerts                    map[string]*hubAlertState
-	burstPolicyPath           string
-	burstPolicy               BurstPolicy
-	burstPolicyModTime        time.Time
-	burstState                *hubBurstState
-	unknownMessages           uint64
-	unfencedCompletions       uint64
-	startedAt                 time.Time
-	uiAllowCFOnly             bool
-	uiEvents                  []hubUIEvent
-	jobs                      map[string]*hubJobRecord
-	pendingRevocations        map[string]map[string]hubJobRevokedEvent
-	holds                     map[string]*hubBurstHold
-	placementPolicyPath       string
-	placementPolicy           PlacementPolicy
-	placementPolicyModTime    time.Time
-	prometheusURL             string
-	prometheusClient          *http.Client
-	prometheusBearer          string
-	prometheusBasicUser       string
-	prometheusBasicPass       string
-	placementCache            placementCache
-	r19a                      r19aHubState
-	reportRelayPath           string
-	relayDedupe               map[string]int64
-	handoffkeep               *handoffkeepRelayClient
-	unpersistedRelayEvents    uint64
-	replayExhaustedEvents     uint64
-	quotaCache                map[string]hubQuotaCacheEntry
-	quotaWaiters              map[string]chan hubQuotaResult
-	quotaCacheTTL             time.Duration
-	expectedVersion           map[string]hubExpectedVersion
-	updateConfirmationTimeout time.Duration
+	mu                          sync.Mutex
+	nodes                       map[string]*hubNodeRecord
+	lastNotes                   map[string]*HubLastNote
+	subscribers                 map[*hubEventSubscriber]struct{}
+	alerts                      map[string]*hubAlertState
+	burstPolicyPath             string
+	burstPolicy                 BurstPolicy
+	burstPolicyModTime          time.Time
+	burstState                  *hubBurstState
+	unknownMessages             uint64
+	unfencedCompletions         uint64
+	startedAt                   time.Time
+	uiAllowCFOnly               bool
+	uiEvents                    []hubUIEvent
+	jobs                        map[string]*hubJobRecord
+	pendingRevocations          map[string]map[string]hubJobRevokedEvent
+	holds                       map[string]*hubBurstHold
+	placementPolicyPath         string
+	placementPolicy             PlacementPolicy
+	placementPolicyModTime      time.Time
+	prometheusURL               string
+	prometheusClient            *http.Client
+	prometheusBearer            string
+	prometheusBasicUser         string
+	prometheusBasicPass         string
+	placementCache              placementCache
+	r19a                        r19aHubState
+	reportRelayPath             string
+	relayDedupe                 map[string]int64
+	handoffkeep                 *handoffkeepRelayClient
+	unpersistedRelayEvents      uint64
+	replayExhaustedEvents       uint64
+	alreadyDeliveredRelayEvents uint64
+	quotaCache                  map[string]hubQuotaCacheEntry
+	quotaWaiters                map[string]chan hubQuotaResult
+	quotaCacheTTL               time.Duration
+	expectedVersion             map[string]hubExpectedVersion
+	updateConfirmationTimeout   time.Duration
 }
 
 type hubExpectedVersion struct {
@@ -1232,6 +1233,21 @@ func (h *HubServer) countUnpersistedRelayEvent() {
 	h.mu.Lock()
 	h.unpersistedRelayEvents++
 	h.mu.Unlock()
+}
+
+// countAlreadyDeliveredRelayEvent records a resend the hub answered without
+// re-injecting because handoffkeep already holds the row as delivered.
+func (h *HubServer) countAlreadyDeliveredRelayEvent() {
+	h.mu.Lock()
+	h.alreadyDeliveredRelayEvents++
+	h.mu.Unlock()
+}
+
+// AlreadyDeliveredRelayEventCount exists for local monitoring and tests.
+func (h *HubServer) AlreadyDeliveredRelayEventCount() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.alreadyDeliveredRelayEvents
 }
 
 // countReplayExhaustedEvent records a durable row the startup replay refused
