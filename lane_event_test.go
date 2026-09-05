@@ -5,10 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 )
 
@@ -166,6 +170,129 @@ func TestLaneEventOutboxRetiresOnlyOnPersistedAckAcrossRestart(t *testing.T) {
 		if events := r20Node(inbox, store).jobCompletionEvents(); len(events) != 0 {
 			t.Fatalf("restart %d resent persisted lane event: %d", restart, len(events))
 		}
+	}
+}
+
+func TestLaneEventProducerResendsDoNotSpendBudgetBeforeRoute(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	routes := r20LanesFile(t, `{"lanes":{}}`)
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "host-a": "source", "host-b": "target"}, ReportRelayPath: routes, handoffkeep: client})
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &hubAgent{persisted: make(chan hubRelayPersistedEvent, 8)}
+	inbox, outbox := t.TempDir(), NewMemoryStore(t)
+	defer outbox.Close()
+	if code, stderr := emitLaneEvent(t, inbox, "lane-a", "producer-resend", "payload"); code != ExitOK || !strings.Contains(stderr, "event recorded to file only") {
+		t.Fatalf("emit code=%d stderr=%q", code, stderr)
+	}
+	scanned := scannedLaneEvent(t, inbox, outbox)
+	event := hubJobEventPayload{JobID: scanned.JobID, Epoch: scanned.Epoch, OwnerLane: scanned.OwnerLane, EventID: scanned.EventID, Text: scanned.Text}
+	hub.relayLaneEvent(event, source)
+	initialAttempts := fake.laneAttemptsFor("lane-a", "producer-resend")
+	for resend := 0; resend < 3; resend++ {
+		hub.relayLaneEvent(event, source)
+	}
+	if rows, attempts, posts := fake.rowCount(), fake.laneAttemptsFor("lane-a", "producer-resend"), fake.count(http.MethodPost, "/v1/relay/events"); rows != 1 || attempts != initialAttempts || posts != 1 {
+		t.Fatalf("unrouted resends rows=%d attempts=%d initial=%d posts=%d", rows, attempts, initialAttempts, posts)
+	}
+	if acks := drainPersisted(source); len(acks) != 4 {
+		t.Fatalf("producer persisted acknowledgements=%d", len(acks))
+	} else {
+		for _, ack := range acks {
+			if ack.Epoch != 1 {
+				t.Fatalf("lane persisted acknowledgement epoch=%d want=1", ack.Epoch)
+			}
+		}
+	}
+	if err := os.WriteFile(routes, []byte(`{"lanes":{"lane-a":{"machine":"host-b","pane":"w1:p1"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 2)}
+	hub.nodes["host-b"] = &hubNodeRecord{agent: destination}
+	hub.replayUndeliveredLaneEvents(context.Background())
+	if injections := drainRelays(destination); injections != 1 {
+		t.Fatalf("registered lane injections=%d", injections)
+	}
+	hub.replayUndeliveredLaneEvents(context.Background())
+	if injections := drainRelays(destination); injections != 0 {
+		t.Fatalf("duplicate replay injections=%d", injections)
+	}
+}
+
+func TestLaneEventAckTimeoutReleasesDedupeForLiveReplay(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	hub := r20Hub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, nil)
+	source := &hubAgent{persisted: make(chan hubRelayPersistedEvent, 2)}
+	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 3)}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: destination}
+	event := hubJobEventPayload{JobID: laneEventTransportID("lane-a", "producer-timeout"), Epoch: 1, OwnerLane: "lane-a", EventID: "producer-timeout", Text: "payload"}
+	hub.relayLaneEvent(event, source)
+	if injections := drainRelays(destination); injections != 1 {
+		t.Fatalf("initial injections=%d", injections)
+	}
+	key := relayEventDedupeKey("lane.event", event)
+	if _, held := hub.relayDedupe[key]; !held {
+		t.Fatal("initial lane injection did not hold dedupe key")
+	}
+	hub.expireRelayAck(event.JobID)
+	if _, held := hub.relayDedupe[key]; held {
+		t.Fatal("ack timeout kept lane injection dedupe key")
+	}
+	hub.replayUndeliveredLaneEvents(context.Background())
+	if injections := drainRelays(destination); injections != 1 {
+		t.Fatalf("live replay injections after ack timeout=%d", injections)
+	}
+	if attempts := fake.laneAttemptsFor("lane-a", "producer-timeout"); attempts < 2 {
+		t.Fatalf("ack timeout did not record delivery attempt: attempts=%d", attempts)
+	}
+}
+
+func TestLaneEventReplayFiltersKindAndAdvancesCursor(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	seed := make([]handoffkeepRelayEvent, 0, 401)
+	for id := 1; id <= 200; id++ {
+		seed = append(seed, handoffkeepRelayEvent{ID: int64(id), Kind: "job.completed", JobID: fmt.Sprintf("old-job-%d", id), Epoch: 1, OwnerLane: "lane-a", ReportPath: "report.md"})
+	}
+	for id := 201; id <= 401; id++ {
+		producerID := fmt.Sprintf("producer-page-%d", id)
+		seed = append(seed, handoffkeepRelayEvent{ID: int64(id), Kind: "lane.event", OwnerLane: "lane-a", EventID: producerID, Text: "payload"})
+	}
+	fake.seedUndelivered(seed...)
+	hub := r20Hub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, nil)
+	hub.r19a.relayAckTimeout = time.Hour
+	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 402)}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: destination}
+	hub.replayUndeliveredLaneEvents(context.Background())
+	if injections := drainRelays(destination); injections != 201 {
+		t.Fatalf("lane events behind 200 older rows injected=%d", injections)
+	}
+	queries := fake.queries("/v1/relay/events")
+	if len(queries) != 2 {
+		t.Fatalf("replay pages=%d queries=%v", len(queries), queries)
+	}
+	first, err := url.ParseQuery(queries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := url.ParseQuery(queries[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Get("kind") != "lane.event" || first.Get("after_id") != "" || second.Get("kind") != "lane.event" || second.Get("after_id") != "400" {
+		t.Fatalf("replay did not use advancing lane cursor: first=%q second=%q", queries[0], queries[1])
+	}
+}
+
+func TestJobRelayDedupeKeyDoesNotDependOnLaneEventID(t *testing.T) {
+	job := hubJobEventPayload{JobID: "job-a", Epoch: 1, ReportPath: "report.md", Reason: "reason"}
+	withLaneField := job
+	withLaneField.EventID = "not-a-job-key"
+	if relayDedupeKey(job) != relayDedupeKey(withLaneField) {
+		t.Fatalf("job relay key changed with lane-only event_id: base=%q changed=%q", relayDedupeKey(job), relayDedupeKey(withLaneField))
 	}
 }
 

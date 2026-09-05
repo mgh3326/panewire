@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +40,7 @@ type fakeHandoffkeep struct {
 type fakeHandoffkeepCall struct {
 	Method string
 	Path   string
+	Query  string
 	Body   map[string]any
 }
 
@@ -59,7 +62,7 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		_ = json.Unmarshal(raw, &body)
 	}
 	f.mu.Lock()
-	f.calls = append(f.calls, fakeHandoffkeepCall{Method: r.Method, Path: r.URL.Path, Body: body})
+	f.calls = append(f.calls, fakeHandoffkeepCall{Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery, Body: body})
 	status := f.status
 	observe := f.observe
 	f.mu.Unlock()
@@ -77,6 +80,26 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+		query := r.URL.Query()
+		kind := query.Get("kind")
+		lane := query.Get("lane")
+		afterID, _ := strconv.ParseInt(query.Get("after_id"), 10, 64)
+		limit, _ := strconv.Atoi(query.Get("limit"))
+		if limit <= 0 {
+			limit = handoffkeepReplayLimit
+		}
+		filtered := pending[:0]
+		for _, record := range pending {
+			if (kind != "" && record.Kind != kind) || (lane != "" && record.OwnerLane != lane) || record.ID <= afterID {
+				continue
+			}
+			filtered = append(filtered, record)
+		}
+		sort.Slice(filtered, func(i, j int) bool { return filtered[i].ID < filtered[j].ID })
+		if len(filtered) > limit {
+			filtered = filtered[:limit]
+		}
+		pending = filtered
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": pending})
 	case strings.HasSuffix(r.URL.Path, "/delivered"):
@@ -163,6 +186,28 @@ func (f *fakeHandoffkeep) attemptsFor(kind, jobID string, epoch int, reportPath,
 		return -1
 	}
 	return row.Attempts
+}
+
+func (f *fakeHandoffkeep) laneAttemptsFor(lane, eventID string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	row, exists := f.rows[fakeHandoffkeepLaneEventKey(lane, eventID)]
+	if !exists {
+		return -1
+	}
+	return row.Attempts
+}
+
+func (f *fakeHandoffkeep) queries(path string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := []string{}
+	for _, call := range f.calls {
+		if call.Method == http.MethodGet && call.Path == path {
+			out = append(out, call.Query)
+		}
+	}
+	return out
 }
 
 // rowCount is how many distinct rows handoffkeep holds. A resend or an attempt
@@ -416,6 +461,39 @@ func TestR20StartupReinjectsUndelivered(t *testing.T) {
 		if got := fake.attemptsFor("job.completed", row.job, 1, row.path, ""); got != 1 {
 			t.Fatalf("%s attempts=%d after replay, want 1", row.job, got)
 		}
+	}
+}
+
+func TestR20StartupReplayAdvancesDurableCursor(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	seed := make([]handoffkeepRelayEvent, 0, handoffkeepReplayLimit+1)
+	for id := 1; id <= handoffkeepReplayLimit+1; id++ {
+		seed = append(seed, handoffkeepRelayEvent{ID: int64(id), Kind: "job.completed", JobID: "cursor-job-" + strconv.Itoa(id), Epoch: 1, OwnerLane: "lane-a", ReportPath: "report.md"})
+	}
+	fake.seedUndelivered(seed...)
+	hub := r20Hub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, nil)
+	hub.r19a.relayAckTimeout = time.Hour
+	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, handoffkeepReplayLimit+2), persisted: make(chan hubRelayPersistedEvent, handoffkeepReplayLimit+2)}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: agent}
+	hub.replayUndeliveredRelayEvents(context.Background())
+	if injections := drainRelays(agent); injections != handoffkeepReplayLimit+1 {
+		t.Fatalf("startup replay injections=%d", injections)
+	}
+	queries := fake.queries("/v1/relay/events")
+	if len(queries) != 2 {
+		t.Fatalf("startup replay pages=%d queries=%v", len(queries), queries)
+	}
+	first, err := url.ParseQuery(queries[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := url.ParseQuery(queries[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Get("after_id") != "" || second.Get("after_id") != strconv.Itoa(handoffkeepReplayLimit) {
+		t.Fatalf("startup cursor did not advance: first=%q second=%q", queries[0], queries[1])
 	}
 }
 

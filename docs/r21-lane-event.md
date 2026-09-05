@@ -41,9 +41,24 @@ The hub persists the event before injection. If the lane is not present in
 injection, the hub still stores the undelivered record and sends
 `relay.persisted` to the producer node so its outbox can retire. It also emits
 `relay.unrouted` for observation. A later destination-node registration
-replays undelivered lane events without restarting the hub. Replay uses the
-same `delivered_at` and `attempts < 3` gates as R20 and the same in-memory
-dedupe gate, so a delivered event is never injected again.
+replays undelivered lane events without restarting the hub. That replay asks
+handoffkeep only for `lane.event` rows and advances by durable ID, so older
+undelivered report rows cannot hide a newer direct notification. Once the hub
+has the durable row ID, producer resends receive `relay.persisted` again but do
+not re-append the row or spend delivery budget.
+
+Replay uses the same `delivered_at` and `attempts < 3` gates as R20. A queued
+injection that does not receive its delivery acknowledgement spends a delivery
+attempt and releases the active dedupe claim; a later destination registration
+can therefore retry it without a hub restart. This is deliberately bounded:
+after three recorded delivery attempts, the hub broadcasts
+`relay.replay_exhausted` and does not inject that undelivered row again. A
+delivered row is never injected again.
+
+**Deploy handoffkeep schema v7 before a hub that emits `lane.event`.** A hub
+connected to an older server cannot durably append this kind, sends no
+`relay.persisted`, logs an error, and increments the unpersisted relay counter;
+the producer must retain its file until a v7 server is available.
 
 Consumers receive exactly this prompt text:
 

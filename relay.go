@@ -131,9 +131,6 @@ func boundRelayText(prefix, reportPath string) string {
 // an earlier one is swallowed here, and its outbox row never learns it was
 // persisted.
 func relayDedupeKey(completion hubJobEventPayload) string {
-	if completion.EventID != "" {
-		return completion.OwnerLane + "\x00" + completion.EventID
-	}
 	return completion.JobID + "\x00" + strconv.FormatUint(completion.Epoch, 10) + "\x00" + completion.ReportPath + "\x00" + completion.Reason
 }
 
@@ -157,6 +154,14 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
 	}
 	key := relayEventDedupeKey("lane.event", event)
 	h.mu.Lock()
+	if persistedID := h.lanePersisted[key]; persistedID != 0 {
+		h.mu.Unlock()
+		// The hub already owns the durable row. A source retry is an ACK-loss
+		// recovery, not another delivery attempt, so it must not re-POST and
+		// consume the delivery budget.
+		h.queueLaneRelayPersisted(event, sender, persistedID)
+		return
+	}
 	knownID, duplicate := h.relayDedupe[key]
 	if !duplicate {
 		h.relayDedupe[key] = 0
@@ -176,6 +181,7 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
 	route, target, routed := h.resolveRelayRoute("lane.event", event)
 	stored, status, persisted := h.persistRelayEventRecord("lane.event", event, route)
 	if !persisted {
+		h.logger.Error("lane.event persistence failed; handoffkeep schema v7 must be deployed before this hub", "lane", event.OwnerLane, "producer_event_id", event.EventID, "status", status)
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnpersisted("lane.event", event)
 		return
@@ -185,6 +191,7 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
 	if status == http.StatusOK {
 		event = laneEventFromStored(stored)
 	}
+	h.rememberLanePersisted(key, stored.ID)
 	h.rememberRelayEvent(key, stored.ID)
 	if event.Truncated {
 		h.broadcastRelayTruncated(event)
@@ -197,8 +204,9 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
 		return
 	}
 	if !routed {
-		// The durable row remains for replay. Releasing the memory key lets a
-		// reconnect-triggered replay claim it without a hub restart.
+		// The durable row remains for replay. The active injection claim is
+		// released, while lanePersisted retains its row ID so producer retries
+		// are acknowledged without re-POSTing.
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
 		return
@@ -323,6 +331,22 @@ func (h *HubServer) rememberRelayEvent(key string, eventID int64) {
 	h.mu.Unlock()
 }
 
+// rememberLanePersisted retains a durable lane row independently from the
+// active injection claim. The latter is released after a route miss or ACK
+// timeout so replay can try again; retaining this ID keeps producer resends
+// from being miscounted as delivery attempts in the meantime.
+func (h *HubServer) rememberLanePersisted(key string, eventID int64) {
+	if eventID == 0 {
+		return
+	}
+	h.mu.Lock()
+	if h.lanePersisted == nil {
+		h.lanePersisted = make(map[string]int64)
+	}
+	h.lanePersisted[key] = eventID
+	h.mu.Unlock()
+}
+
 // forgetRelayEvent releases a dedupe key that stands for no durable row.
 func (h *HubServer) forgetRelayEvent(key string) {
 	h.mu.Lock()
@@ -343,7 +367,7 @@ func (h *HubServer) queueLaneRelayPersisted(event hubJobEventPayload, agent *hub
 	if agent == nil || eventID == 0 {
 		return false
 	}
-	return agent.queuePersisted(hubRelayPersistedEvent{Type: "relay.persisted", JobID: event.JobID, Kind: "lane.event", EventID: eventID, Lane: event.OwnerLane, ProducerEventID: event.EventID})
+	return agent.queuePersisted(hubRelayPersistedEvent{Type: "relay.persisted", JobID: event.JobID, Kind: "lane.event", Epoch: event.Epoch, EventID: eventID, Lane: event.OwnerLane, ProducerEventID: event.EventID})
 }
 
 func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (reportRelayRoute, *hubAgent, bool) {
@@ -533,25 +557,25 @@ func (h *HubServer) replayUndeliveredRelayEvents(ctx context.Context) {
 	if h.handoffkeep == nil {
 		return
 	}
-	seen := make(map[int64]struct{})
-	// The contract exposes no cursor, so paging stops as soon as a page adds
-	// nothing new. Rows come back id-ascending, so the oldest are replayed first.
-	for page := 0; page < 16; page++ {
-		records, err := h.handoffkeep.listUndelivered(ctx, "", handoffkeepReplayLimit)
+	var afterID int64
+	for {
+		pageStart := afterID
+		records, err := h.handoffkeep.listUndelivered(ctx, "", "", afterID, handoffkeepReplayLimit)
 		if err != nil {
 			h.logger.Warn("undelivered relay events could not be read at startup")
 			return
 		}
-		added := 0
 		for _, record := range records {
-			if _, duplicate := seen[record.ID]; duplicate {
-				continue
-			}
-			seen[record.ID] = struct{}{}
-			added++
 			h.replayRelayEvent(record)
+			if record.ID > afterID {
+				afterID = record.ID
+			}
 		}
-		if added == 0 || len(records) < handoffkeepReplayLimit {
+		if len(records) < handoffkeepReplayLimit {
+			return
+		}
+		if afterID <= pageStart {
+			h.logger.Warn("undelivered relay replay cursor did not advance", "after_id", pageStart)
 			return
 		}
 	}
@@ -565,14 +589,26 @@ func (h *HubServer) replayUndeliveredLaneEvents(ctx context.Context) {
 	if h.handoffkeep == nil {
 		return
 	}
-	records, err := h.handoffkeep.listUndelivered(ctx, "", handoffkeepReplayLimit)
-	if err != nil {
-		h.logger.Warn("undelivered lane events could not be read after node registration")
-		return
-	}
-	for _, record := range records {
-		if record.Kind == "lane.event" {
+	var afterID int64
+	for {
+		pageStart := afterID
+		records, err := h.handoffkeep.listUndelivered(ctx, "", "lane.event", afterID, handoffkeepReplayLimit)
+		if err != nil {
+			h.logger.Warn("undelivered lane events could not be read after node registration")
+			return
+		}
+		for _, record := range records {
 			h.replayRelayEvent(record)
+			if record.ID > afterID {
+				afterID = record.ID
+			}
+		}
+		if len(records) < handoffkeepReplayLimit {
+			return
+		}
+		if afterID <= pageStart {
+			h.logger.Warn("undelivered lane replay cursor did not advance", "after_id", pageStart)
+			return
 		}
 	}
 }
@@ -600,6 +636,9 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 		return
 	}
 	key := relayEventDedupeKey(record.Kind, event)
+	if record.Kind == "lane.event" {
+		h.rememberLanePersisted(key, record.ID)
+	}
 	h.mu.Lock()
 	if _, exists := h.relayDedupe[key]; exists {
 		h.mu.Unlock()

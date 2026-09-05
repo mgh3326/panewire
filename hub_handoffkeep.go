@@ -203,7 +203,10 @@ func (c *handoffkeepRelayClient) markDelivered(ctx context.Context, id int64, ma
 	return nil
 }
 
-func (c *handoffkeepRelayClient) listUndelivered(ctx context.Context, lane string, limit int) ([]handoffkeepRelayEvent, error) {
+// listUndelivered reads one durable cursor page. kind is optional for legacy
+// startup replay; lane.event registration replay always supplies it so older
+// job rows cannot hide a directly addressed notification behind the page cap.
+func (c *handoffkeepRelayClient) listUndelivered(ctx context.Context, lane, kind string, afterID int64, limit int) ([]handoffkeepRelayEvent, error) {
 	if limit <= 0 {
 		limit = handoffkeepReplayLimit
 	}
@@ -212,6 +215,12 @@ func (c *handoffkeepRelayClient) listUndelivered(ctx context.Context, lane strin
 	query.Set("limit", strconv.Itoa(limit))
 	if lane != "" {
 		query.Set("lane", lane)
+	}
+	if kind != "" {
+		query.Set("kind", kind)
+	}
+	if afterID > 0 {
+		query.Set("after_id", strconv.FormatInt(afterID, 10))
 	}
 	status, payload, err := c.do(ctx, http.MethodGet, c.endpoint("/v1/relay/events")+"?"+query.Encode(), nil)
 	if err != nil {
