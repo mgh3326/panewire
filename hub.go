@@ -162,6 +162,11 @@ type hubJobReassignment struct {
 }
 
 type hubJobEventPayload struct {
+	// lane.event uses these relay-only fields. It deliberately never enters
+	// the hub's job registration paths despite sharing the delivery envelope.
+	EventID        string    `json:"event_id,omitempty"`
+	Text           string    `json:"text,omitempty"`
+	Truncated      bool      `json:"truncated,omitempty"`
 	JobID          string    `json:"job_id"`
 	Node           string    `json:"node,omitempty"`
 	From           string    `json:"from,omitempty"`
@@ -192,6 +197,7 @@ type relayAckPayload struct {
 
 type hubRelayInjectEvent struct {
 	Type  string `json:"type"`
+	Kind  string `json:"kind,omitempty"`
 	JobID string `json:"job_id"`
 	Pane  string `json:"pane"`
 	Text  string `json:"text"`
@@ -207,13 +213,15 @@ type hubJobRevokedEvent struct {
 // so the node may retire it from its local outbox. It carries the same dedupe
 // fields the node keyed the outbox row by.
 type hubRelayPersistedEvent struct {
-	Type       string `json:"type"`
-	JobID      string `json:"job_id"`
-	Kind       string `json:"kind"`
-	Epoch      uint64 `json:"epoch"`
-	ReportPath string `json:"report_path"`
-	Reason     string `json:"reason"`
-	EventID    int64  `json:"event_id"`
+	Type            string `json:"type"`
+	JobID           string `json:"job_id"`
+	Kind            string `json:"kind"`
+	Epoch           uint64 `json:"epoch"`
+	ReportPath      string `json:"report_path"`
+	Reason          string `json:"reason"`
+	EventID         int64  `json:"event_id"`
+	Lane            string `json:"lane,omitempty"`
+	ProducerEventID string `json:"producer_event_id,omitempty"`
 }
 
 // hubJobAssignedEvent is the hub-issued epoch a redispatched owner must use.
@@ -791,6 +799,14 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.relayJobEvent(message.Kind, event)
 		}
+		if message.Kind == "lane.event" {
+			event, valid := decodeHubLaneEventPayload(message.Payload)
+			if !valid {
+				h.countUnknownMessage()
+				return
+			}
+			h.relayLaneEvent(event, agent)
+		}
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
 			ack, valid := decodeRelayAckPayload(message.Payload)
 			if !valid {
@@ -1033,6 +1049,11 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
+		if message.Kind == "lane.event" {
+			if _, valid := decodeHubLaneEventPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
 			if _, valid := decodeRelayAckPayload(rawPayload); !valid {
 				return hubInbound{}, false
@@ -1047,13 +1068,16 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "job.revocation.ack", "relay.delivered", "relay.unconfirmed":
+	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "lane.event", "job.revocation.ack", "relay.delivered", "relay.unconfirmed":
 		return true
 	}
 	return false
 }
 
 func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAgent, accepting bool) {
+	// A node registration is the safe no-restart retry trigger for durable
+	// lane.event rows whose route was absent or disconnected when produced.
+	defer func() { go h.replayUndeliveredLaneEvents(context.Background()) }()
 	now := h.now().UTC()
 	var previous *hubAgent
 	h.mu.Lock()

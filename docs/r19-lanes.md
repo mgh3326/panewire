@@ -38,3 +38,7 @@ file is read at startup and atomically updated after each successful POST:
 The transport this contract rides on changed in R20: relay events are now
 persisted to Postgres before injection and acknowledged back. See
 [r20-relay-persistence.md](r20-relay-persistence.md).
+
+Direct producer notifications use the related [R21 lane-event
+contract](r21-lane-event.md). Unlike `job.escalate` and `job.joined`, an R21
+event addresses its named lane directly and never follows `parent`.

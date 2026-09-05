@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -147,11 +148,14 @@ func scanHubCompletedJobs(inboxRoot string) []HubActiveJob {
 type hubScannedRelayEvent struct {
 	Kind string
 	HubActiveJob
-	Reason   string
-	Question string
-	PR       string
-	Head     string
-	PaneID   string
+	Reason    string
+	Question  string
+	PR        string
+	Head      string
+	PaneID    string
+	EventID   string
+	Text      string
+	Truncated bool
 }
 
 // scanHubRelayEvents retains the completion scan and also forwards the two
@@ -174,7 +178,7 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 	}
 	entries, err := os.ReadDir(filepath.Join(inboxRoot, "jobs"))
 	if err != nil {
-		return nil
+		return scanHubLaneEventsWithin(inboxRoot, maxAge)
 	}
 	var events []hubScannedRelayEvent
 	for _, entry := range entries {
@@ -250,7 +254,67 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 		}
 		return events[i].JobID < events[j].JobID
 	})
-	return events
+	return append(events, scanHubLaneEventsWithin(inboxRoot, maxAge)...)
+}
+
+// scanHubLaneEventsWithin reads the isolated lane-event namespace. It never
+// traverses jobs/, which keeps direct lane notifications out of active job
+// registration, late registration, and orphan sweeping.
+func scanHubLaneEventsWithin(inboxRoot string, maxAge time.Duration) []hubScannedRelayEvent {
+	dir := filepath.Join(inboxRoot, "events-lane")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var cutoff time.Time
+	if maxAge > 0 {
+		cutoff = time.Now().Add(-maxAge)
+	}
+	out := make([]hubScannedRelayEvent, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		if !cutoff.IsZero() {
+			info, statErr := entry.Info()
+			if statErr != nil || info.ModTime().Before(cutoff) {
+				continue
+			}
+		}
+		contents, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil || len(contents) > 16<<10 {
+			continue
+		}
+		var event hubInboxEvent
+		if json.Unmarshal(contents, &event) != nil || event.eventKind() != "lane.event" {
+			continue
+		}
+		lane, eventID, text := event.ownerLane(), event.eventID(), event.text()
+		if !hubAgentLabelPattern.MatchString(lane) || !validLaneEventID(eventID) || !validLaneEventText(text) || len(text) > laneEventTextLimit {
+			continue
+		}
+		epoch := event.Epoch
+		if epoch == 0 {
+			epoch = 1
+		}
+		out = append(out, hubScannedRelayEvent{Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated()})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].OwnerLane == out[j].OwnerLane {
+			return out[i].EventID < out[j].EventID
+		}
+		return out[i].OwnerLane < out[j].OwnerLane
+	})
+	return out
+}
+
+// laneEventTransportID is protocol plumbing only: lane events never enter the
+// hub job map. The relay acknowledgement envelope already carries job_id, so
+// this deterministic valid identifier lets its existing delivery cursor work
+// without making producer event IDs look like job IDs.
+func laneEventTransportID(lane, eventID string) string {
+	sum := sha256.Sum256([]byte(lane + "\x00" + eventID))
+	return fmt.Sprintf("lane-event-%x", sum[:16])
 }
 
 func scanHubJobCompletion(eventsDir, jobID string) (HubActiveJob, bool) {
@@ -304,6 +368,9 @@ type hubInboxEvent struct {
 	PR             string `json:"pr"`
 	Head           string `json:"head"`
 	PaneID         string `json:"pane_id"`
+	EventID        string `json:"event_id"`
+	Text           string `json:"text"`
+	Truncated      bool   `json:"truncated"`
 	Payload        struct {
 		AgentLabel     string `json:"agent_label"`
 		OwnerLane      string `json:"owner_lane"`
@@ -347,6 +414,9 @@ func (e hubInboxEvent) question() string { return firstHubValue(e.Question, e.Pa
 func (e hubInboxEvent) pr() string       { return firstHubValue(e.PR, e.Payload.PR) }
 func (e hubInboxEvent) head() string     { return firstHubValue(e.Head, e.Payload.Head) }
 func (e hubInboxEvent) paneID() string   { return firstHubValue(e.PaneID, e.Payload.PaneID) }
+func (e hubInboxEvent) eventID() string  { return e.EventID }
+func (e hubInboxEvent) text() string     { return e.Text }
+func (e hubInboxEvent) truncated() bool  { return e.Truncated }
 func (e hubInboxEvent) eventTime(entry os.DirEntry, eventsDir string) time.Time {
 	if parsed, err := time.Parse(time.RFC3339, e.CreatedAt); err == nil {
 		return parsed

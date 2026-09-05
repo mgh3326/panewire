@@ -103,6 +103,8 @@ type handoffkeepRelayEventRequest struct {
 	PR             string `json:"pr"`
 	Head           string `json:"head"`
 	Reason         string `json:"reason"`
+	EventID        string `json:"event_id,omitempty"`
+	Text           string `json:"text,omitempty"`
 	EventTime      string `json:"event_time"`
 }
 
@@ -120,6 +122,8 @@ type handoffkeepRelayEvent struct {
 	PR             string `json:"pr"`
 	Head           string `json:"head"`
 	Reason         string `json:"reason"`
+	EventID        string `json:"event_id"`
+	Text           string `json:"text"`
 	Attempts       int    `json:"attempts"`
 	// DeliveredAt is read only by the startup replay gate. It arrives as JSON
 	// null for an undelivered row, which decodes to the empty string.
