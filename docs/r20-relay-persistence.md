@@ -34,6 +34,25 @@ with `{"job_id":…,"kind":…,"reason":"persist_failed"}` and increments
 `unpersisted_relay_events`. The node never receives `relay.persisted`, so the
 event stays in its outbox and is retried. Nothing is silently dropped.
 
+## The node must always learn the answer
+
+An outbox row is retired by `relay.persisted` and by nothing else. Every path
+that ends without sending one leaves `persisted_at` NULL, so the node resends
+the event after every restart — and if the hub also kept an in-memory dedupe
+key for it, each of those resends is swallowed and the row is stuck for the
+life of the hub process. Four paths used to end that way:
+
+| path | before | now |
+|---|---|---|
+| the hub already took this event | dropped, key kept | re-POST (200) and `relay.persisted` again; **no** second injection |
+| no route or no connected node | key kept, nothing stored | key deleted, `relay.unrouted` |
+| `queueRelay` refused the injection | key kept, no acknowledgement | key deleted, `relay.persisted` sent, `relay.unrouted` |
+| an event differing only in `reason` | folded into the earlier one | a separate record, because the key now counts `reason` |
+
+The hub's dedupe map is `key → handoffkeep row id`. A key that stands for no
+durable row is deleted rather than left behind, and a key that does stand for
+one answers a resend instead of swallowing it.
+
 **The event files are no longer the canonical record.** They are the offline
 fallback: they let `panewire emit` succeed with no daemon running, and they let
 a node that was offline hand its backlog to the hub on reconnect. The answer to
@@ -57,10 +76,27 @@ Without the flag the hub behaves exactly as it did before R20: it injects
 without persisting and calls handoffkeep zero times.
 
 At startup a configured hub reads `GET /v1/relay/events?undelivered=1` once and
-re-routes what it finds. Those records are already stored, so they are not
-re-persisted. A destination node that is not connected yields `relay.unrouted`,
-as before. The contract exposes no cursor, so one startup replays at most
-`limit` (200) distinct events, oldest first.
+re-routes what it finds. Those records are already stored, so they are never
+re-persisted: no replay creates a row. A destination node that is not connected
+yields `relay.unrouted`, as before. The contract exposes no cursor, so one
+startup replays at most `limit` (200) distinct events, oldest first.
+
+The replay is gated. A row is re-injected only if `delivered_at` is NULL **and**
+`attempts < 3`; without that bound a row whose destination never acknowledges is
+re-injected on every hub restart, forever. A row over the limit is not dropped
+silently — it is broadcast as `relay.replay_exhausted` with
+`{"job_id":…,"kind":…,"event_id":…,"attempts":…,"reason":"attempts_exhausted"}`
+and counted in `replay_exhausted_events`.
+
+Two things spend an attempt, and both record it the same way: a startup replay
+that queued an injection, and an injection the node never acknowledged
+(`relay.unconfirmed`).
+
+**handoffkeep exposes no endpoint that sets `attempts`.** The hub therefore
+re-POSTs the row it already stored: the idempotency key collides, handoffkeep
+answers 200 with `attempts + 1`, the row itself is unchanged (first-writer-wins,
+below), and `delivered_at` is not touched by that path. The contract is
+unchanged; this is the counter it already had.
 
 ## Node outbox
 
@@ -77,6 +113,11 @@ key handoffkeep uses for idempotency, assembled in the same field order.
   it bounds the active-job heartbeat, not undelivered relay traffic.
 - The first send after a process restart of a row that already had `sent_at`
   carries `"replay": true`. The hub logs it; routing never consults it.
+
+The hub's own dedupe key counts the same five fields, in the same order. When
+it counted only four (it omitted `reason` before R20T5), two events the node
+and handoffkeep both treated as distinct were folded into one here, and the
+second one's outbox row could never be retired.
 
 ## Two properties of the persistence contract
 

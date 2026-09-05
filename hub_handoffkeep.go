@@ -17,6 +17,10 @@ import (
 const (
 	handoffkeepTimeout     = 10 * time.Second
 	handoffkeepReplayLimit = 200
+	// relayReplayMaxAttempts bounds how often one durable row may be
+	// re-injected across hub restarts. Without it a row whose destination
+	// never acknowledges is re-injected on every startup, forever.
+	relayReplayMaxAttempts = 3
 )
 
 type hubHandoffkeepEnv struct {
@@ -117,6 +121,9 @@ type handoffkeepRelayEvent struct {
 	Head           string `json:"head"`
 	Reason         string `json:"reason"`
 	Attempts       int    `json:"attempts"`
+	// DeliveredAt is read only by the startup replay gate. It arrives as JSON
+	// null for an undelivered row, which decodes to the empty string.
+	DeliveredAt string `json:"delivered_at"`
 }
 
 func (c *handoffkeepRelayClient) endpoint(path string) string {
