@@ -413,7 +413,7 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if req.Kind == "lane.event" {
-		if !hubAgentLabelPattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || len(req.Text) > laneEventTextLimit {
+		if !hubAgentLabelPattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || len(req.Text) > laneEventTextLimitSink {
 			return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 		}
 	} else if !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {

@@ -16,19 +16,40 @@ import (
 	"time"
 )
 
-// HubHostLoad is the bounded machine telemetry used only by the burst policy.
+// HubHostLoad is bounded machine telemetry. The original four values are used
+// by the burst policy; the optional CPU values are observation-only.
 // It intentionally contains measurements, never command output.
 type HubHostLoad struct {
-	Load1       float64 `json:"load1"`
-	Load5       float64 `json:"load5"`
-	SwapUsedGB  float64 `json:"swap_used_gb"`
-	WorkerProcs int     `json:"worker_procs"`
+	Load1       float64  `json:"load1"`
+	Load5       float64  `json:"load5"`
+	SwapUsedGB  float64  `json:"swap_used_gb"`
+	WorkerProcs int      `json:"worker_procs"`
+	Load15      *float64 `json:"load15"`
+	NCPU        *int     `json:"ncpu"`
 }
 
 func (load HubHostLoad) valid() bool {
 	return load.Load1 >= 0 && load.Load5 >= 0 && load.SwapUsedGB >= 0 && load.WorkerProcs >= 0 &&
 		!math.IsNaN(load.Load1) && !math.IsNaN(load.Load5) && !math.IsNaN(load.SwapUsedGB) &&
-		!math.IsInf(load.Load1, 0) && !math.IsInf(load.Load5, 0) && !math.IsInf(load.SwapUsedGB, 0)
+		!math.IsInf(load.Load1, 0) && !math.IsInf(load.Load5, 0) && !math.IsInf(load.SwapUsedGB, 0) &&
+		(load.Load15 == nil || (!math.IsNaN(*load.Load15) && !math.IsInf(*load.Load15, 0) && *load.Load15 >= 0)) &&
+		(load.NCPU == nil || *load.NCPU >= 1)
+}
+
+func cloneHubHostLoad(load *HubHostLoad) *HubHostLoad {
+	if load == nil {
+		return nil
+	}
+	copy := *load
+	if load.Load15 != nil {
+		value := *load.Load15
+		copy.Load15 = &value
+	}
+	if load.NCPU != nil {
+		value := *load.NCPU
+		copy.NCPU = &value
+	}
+	return &copy
 }
 
 // HubHostMemory is bounded memory telemetry used by placement admission. It
@@ -268,7 +289,7 @@ func collectHubHostLoad(ctx context.Context) (HubHostLoad, error) {
 	if runtime.GOOS == "darwin" {
 		load, err = collectDarwinHostLoad(ctx, runHubMeasurement)
 	} else if runtime.GOOS == "linux" {
-		load, err = collectLinuxHostLoad(os.ReadFile)
+		load, err = collectLinuxHostLoad(os.ReadFile, runHubMeasurement)
 	} else {
 		return HubHostLoad{}, errors.New("host load unsupported")
 	}
@@ -495,12 +516,23 @@ func collectDarwinHostLoad(ctx context.Context, run func(context.Context, ...str
 	if err != nil {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
-	return parseDarwinHostLoad(string(loads), string(swap))
+	load, err := parseDarwinHostLoad(string(loads), string(swap))
+	if err != nil {
+		return HubHostLoad{}, err
+	}
+	// These console-only fields must never suppress the four legacy burst
+	// measurements. A failed optional command is represented by JSON null.
+	if output, err := run(ctx, "sysctl", "-n", "hw.ncpu"); err == nil {
+		if value, ok := parseHubNCPU(string(output)); ok {
+			load.NCPU = &value
+		}
+	}
+	return load, nil
 }
 
 func parseDarwinHostLoad(loads, swap string) (HubHostLoad, error) {
 	fields := strings.Fields(strings.Trim(strings.TrimSpace(loads), "{}"))
-	if len(fields) < 3 {
+	if len(fields) < 2 {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
 	parse := func(value string) (float64, error) { return strconv.ParseFloat(strings.Trim(value, "{}"), 64) }
@@ -511,13 +543,18 @@ func parseDarwinHostLoad(loads, swap string) (HubHostLoad, error) {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
 	load := HubHostLoad{Load1: load1, Load5: load5, SwapUsedGB: usedMB / 1024}
+	if len(fields) >= 3 {
+		if load15, err := parse(fields[2]); err == nil && load15 >= 0 && !math.IsNaN(load15) && !math.IsInf(load15, 0) {
+			load.Load15 = &load15
+		}
+	}
 	if !load.valid() {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
 	return load, nil
 }
 
-func collectLinuxHostLoad(read func(string) ([]byte, error)) (HubHostLoad, error) {
+func collectLinuxHostLoad(read func(string) ([]byte, error), runners ...func(context.Context, ...string) ([]byte, error)) (HubHostLoad, error) {
 	loads, err := read("/proc/loadavg")
 	if err != nil {
 		return HubHostLoad{}, errors.New("host load unavailable")
@@ -526,7 +563,18 @@ func collectLinuxHostLoad(read func(string) ([]byte, error)) (HubHostLoad, error
 	if err != nil {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
-	return parseLinuxHostLoad(string(loads), string(meminfo))
+	load, err := parseLinuxHostLoad(string(loads), string(meminfo))
+	if err != nil {
+		return HubHostLoad{}, err
+	}
+	if len(runners) > 0 && runners[0] != nil {
+		if output, err := runners[0](context.Background(), "nproc"); err == nil {
+			if value, ok := parseHubNCPU(string(output)); ok {
+				load.NCPU = &value
+			}
+		}
+	}
+	return load, nil
 }
 
 func parseLinuxHostLoad(loads, meminfo string) (HubHostLoad, error) {
@@ -551,10 +599,24 @@ func parseLinuxHostLoad(loads, meminfo string) (HubHostLoad, error) {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
 	load := HubHostLoad{Load1: load1, Load5: load5, SwapUsedGB: (total - free) / (1024 * 1024)}
+	if len(fields) >= 3 {
+		if load15, err := strconv.ParseFloat(fields[2], 64); err == nil && load15 >= 0 && !math.IsNaN(load15) && !math.IsInf(load15, 0) {
+			load.Load15 = &load15
+		}
+	}
 	if !load.valid() {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
 	return load, nil
+}
+
+func parseHubNCPU(value string) (int, bool) {
+	fields := strings.Fields(value)
+	if len(fields) != 1 {
+		return 0, false
+	}
+	count, err := strconv.Atoi(fields[0])
+	return count, err == nil && count >= 1
 }
 
 func countHubWorkerProcesses(ctx context.Context, run func(context.Context, ...string) ([]byte, error)) (int, error) {

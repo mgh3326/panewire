@@ -15,13 +15,18 @@ in the same lane is a producer error; `panewire emit` exits nonzero and writes
 `duplicate event_id` to standard error. The same event ID in a different lane
 is independent.
 
-`text` is required, must contain no NUL or C0/C1 control character (including
-tab, CR, and LF), and is limited to 2048 bytes. Producers must escape
-structured payloads before passing them as text. When text is too long, the
-node truncates it once at a UTF-8 boundary, appends `[truncated]`, persists
-that final form, and broadcasts `relay.truncated`; no later component applies
-the 240-rune job-report rule. This one-node truncation point keeps the stored
-record, wire payload, and outbox acknowledgement identical.
+`text` is required and must contain no NUL or C0/C1 control character
+(including tab, CR, and LF). The lane's `lanes.json` route is authoritative:
+ordinary pane routes permit 2048 bytes, while a sink route permits 8192 bytes.
+See [R23 console surface](r23-console-surface.md) for the `--sink` producer
+choice and the hub's route-based enforcement. Producers must escape structured
+payloads before passing them as text. When text is too long, the node truncates
+it once at a UTF-8 boundary, appends `[truncated]`, persists that final form,
+and broadcasts `relay.truncated`; no later component applies the 240-rune
+job-report rule. This remains the one-node truncation point: the producer
+chooses only a 2048- or 8192-byte bound, and the hub validates rather than
+truncating, so stored record, wire payload, and outbox acknowledgement stay
+identical.
 
 For example:
 

@@ -1,0 +1,5 @@
+### captured 2026-09-05 via `cat` on a linux-x86_64 host
+### file: /proc/loadavg
+0.50 6.00 8.50 1/100 1
+### command: nproc
+8

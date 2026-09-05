@@ -557,7 +557,7 @@ func renderHubStatus(writer io.Writer, nodes []HubNode) {
 }
 
 func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
-	if len(args) == 0 || (args[0] != "orphaned" && args[0] != "reassign") {
+	if len(args) == 0 || (args[0] != "jobs" && args[0] != "orphaned" && args[0] != "reassign") {
 		return ExitUsage
 	}
 	flags := flag.NewFlagSet("panewire jobs "+args[0], flag.ContinueOnError)
@@ -567,7 +567,8 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	cfEnvPath := flags.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
 	jobID := flags.String("job-id", "", "orphaned job ID")
 	to := flags.String("to", "", "destination node identity")
-	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *hubURL == "" || *tokenEnvPath == "" || (args[0] == "reassign" && (*jobID == "" || *to == "")) {
+	machine := flags.String("machine", "", "filter active jobs by machine identity")
+	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *hubURL == "" || *tokenEnvPath == "" || (args[0] == "reassign" && (*jobID == "" || *to == "")) || (args[0] == "jobs" && *machine != "" && !machineIDPattern.MatchString(*machine)) {
 		return ExitUsage
 	}
 	env, err := loadHubTokenEnv(*tokenEnvPath)
@@ -585,6 +586,9 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	}
 	path, method := "/v1/jobs/orphaned", http.MethodGet
 	var body io.Reader
+	if args[0] == "jobs" {
+		path = "/v1/jobs"
+	}
 	if args[0] == "reassign" {
 		if !hubJobIDPattern.MatchString(*jobID) || !machineIDPattern.MatchString(*to) || *to == hubOperatorMachineID {
 			fmt.Fprintln(stderr, "jobs rejected: invalid reassignment")
@@ -600,6 +604,11 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if err != nil {
 		fmt.Fprintln(stderr, "jobs rejected: invalid hub URL")
 		return ExitConditionInvalid
+	}
+	if args[0] == "jobs" && *machine != "" {
+		query := endpoint.Query()
+		query.Set("machine", *machine)
+		endpoint.RawQuery = query.Encode()
 	}
 	client := deps.HTTPClient
 	if client == nil {
@@ -628,6 +637,19 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if response.StatusCode != http.StatusOK {
 		fmt.Fprintln(stderr, "jobs unavailable")
 		return ExitConditionInvalid
+	}
+	if args[0] == "jobs" {
+		var result struct {
+			Jobs []hubConsoleJob `json:"jobs"`
+		}
+		if json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&result) != nil {
+			return ExitInternal
+		}
+		fmt.Fprintln(stdout, "MACHINE\tJOB_ID\tOWNER_LANE\tPANE\tTIER\tROLE\tSTARTED_AT\tLAST_EVENT_KIND\tLAST_EVENT_AT")
+		for _, job := range result.Jobs {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n", job.Machine, job.JobID, job.OwnerLane, job.Pane, job.Tier, job.Role, job.StartedAt, job.LastEventKind, job.LastEventAt)
+		}
+		return ExitOK
 	}
 	if args[0] == "orphaned" {
 		var result struct {

@@ -27,6 +27,7 @@ type reportRelayRoute struct {
 	Machine string `json:"machine"`
 	Pane    string `json:"pane"`
 	Parent  string `json:"parent,omitempty"`
+	Sink    bool   `json:"sink,omitempty"`
 }
 
 func loadReportRelayRoutes(path string) map[string]reportRelayRoute {
@@ -47,11 +48,23 @@ func loadReportRelayRoutes(path string) map[string]reportRelayRoute {
 		routes.Routes = routes.Lanes
 	}
 	for lane, route := range routes.Routes {
-		if !hubAgentLabelPattern.MatchString(lane) || !machineIDPattern.MatchString(route.Machine) || strings.TrimSpace(route.Pane) == "" || len(route.Pane) > 128 {
+		if !hubAgentLabelPattern.MatchString(lane) {
 			delete(routes.Routes, lane)
 			continue
 		}
 		if route.Parent != "" && !hubAgentLabelPattern.MatchString(route.Parent) {
+			delete(routes.Routes, lane)
+			continue
+		}
+		// A sink is an operator-only durable destination. An empty pane is the
+		// backwards-compatible sink spelling; explicit sink wins over supplied
+		// transport fields and is never eligible for pane injection.
+		if route.Sink || strings.TrimSpace(route.Pane) == "" {
+			route.Sink, route.Machine, route.Pane = true, "", ""
+			routes.Routes[lane] = route
+			continue
+		}
+		if !machineIDPattern.MatchString(route.Machine) || len(route.Pane) > 128 {
 			delete(routes.Routes, lane)
 		}
 	}
@@ -184,6 +197,11 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
 		return
 	}
 	route, target, routed := h.resolveRelayRoute("lane.event", event)
+	if len(event.Text) > laneEventTextLimitSink || (!route.Sink && len(event.Text) > laneEventTextLimit) {
+		h.forgetRelayEvent(key)
+		h.broadcastRelayRejected(event, "text_too_long")
+		return
+	}
 	stored, status, persisted := h.persistRelayEventRecord("lane.event", event, route)
 	if !persisted {
 		h.logger.Error("lane.event persistence failed; handoffkeep schema v7 must be deployed before this hub", "lane", event.OwnerLane, "producer_event_id", event.EventID, "status", status)
@@ -206,6 +224,16 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
 	h.queueLaneRelayPersisted(event, sender, stored.ID)
 	if relayEventAlreadyDelivered(status, stored) {
 		h.broadcastRelayAlreadyDelivered("lane.event", event, stored)
+		return
+	}
+	if route.Sink {
+		if err := h.handoffkeep.markDelivered(context.Background(), stored.ID, "sink", "sink:"+event.OwnerLane); err != nil {
+			h.logger.Warn("sink relay delivery was not recorded", "event_id", stored.ID, "lane", event.OwnerLane)
+			// The durable row remains undelivered for operator observation, but a
+			// sink never falls back to a pane injection.
+			h.forgetRelayEvent(key)
+			h.broadcastRelayUnrouted(event)
+		}
 		return
 	}
 	if !routed {
@@ -412,6 +440,9 @@ func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (re
 			route = parent
 		}
 	}
+	if exists && route.Sink && kind == "lane.event" {
+		return route, nil, true
+	}
 	var agent *hubAgent
 	if exists && h.nodes[route.Machine] != nil {
 		agent = h.nodes[route.Machine].agent
@@ -452,6 +483,12 @@ func (h *HubServer) injectLaneRelayEvent(event hubJobEventPayload, route reportR
 func (h *HubServer) broadcastRelayUnrouted(event hubJobEventPayload) {
 	payload, _ := json.Marshal(event)
 	h.broadcast(hubEvent{Kind: "relay.unrouted", Payload: payload, Received: h.now().UTC()})
+}
+
+func (h *HubServer) broadcastRelayRejected(event hubJobEventPayload, reason string) {
+	event.Reason = reason
+	payload, _ := json.Marshal(event)
+	h.broadcast(hubEvent{Kind: "relay.rejected", Payload: payload, Received: h.now().UTC()})
 }
 
 func (h *HubServer) broadcastRelayTruncated(event hubJobEventPayload) {
@@ -687,6 +724,13 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 	h.mu.Unlock()
 	route, agent, routed := h.resolveRelayRoute(record.Kind, event)
 	if !routed {
+		h.forgetRelayEvent(key)
+		h.broadcastRelayUnrouted(event)
+		return
+	}
+	if record.Kind == "lane.event" && route.Sink {
+		// A failed sink delivery mark leaves an observable undelivered row, but
+		// its later replay must never reinterpret the sink as a pane target.
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
 		return
