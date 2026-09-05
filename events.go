@@ -7,16 +7,21 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/fsnotify/fsnotify"
 )
 
-// InboxWatcher uses one kqueue watch per directory. macOS kqueue does not
-// recurse, so new directories are walked and registered as they appear.
+// InboxWatcher observes the inbox tree in one of two modes. fsnotify keeps one
+// kqueue watch per directory, which macOS cannot recurse; that is why
+// inboxWatchMode defaults darwin to the descriptor-free poll mode instead.
 type InboxWatcher struct {
-	watcher *fsnotify.Watcher
-	root    string
-	store   *Store
+	watcher  *fsnotify.Watcher
+	root     string
+	store    *Store
+	mode     string
+	poll     time.Duration
+	baseline map[string]inboxFileState
 }
 
 func NewInboxWatcher(root string, store *Store) (*InboxWatcher, error) {
@@ -26,11 +31,16 @@ func NewInboxWatcher(root string, store *Store) (*InboxWatcher, error) {
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
+	iw := &InboxWatcher{root: root, store: store, mode: inboxWatchModeFromEnv(), poll: inboxPollInterval()}
+	if iw.mode == inboxWatchPoll {
+		iw.takeBaseline()
+		return iw, nil
+	}
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, err
 	}
-	iw := &InboxWatcher{watcher: w, root: root, store: store}
+	iw.watcher = w
 	if err := iw.addTree(root); err != nil {
 		w.Close()
 		return nil, err
@@ -49,6 +59,9 @@ func (iw *InboxWatcher) addTree(root string) error {
 	})
 }
 func (iw *InboxWatcher) Run(ctx context.Context) error {
+	if iw.mode == inboxWatchPoll {
+		return iw.runPoll(ctx)
+	}
 	defer iw.watcher.Close()
 	for {
 		select {

@@ -64,6 +64,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "relay" {
 		return runRelayCLI(args[1:], os.Stdout, os.Stderr)
 	}
+	if args[0] == "emit" {
+		return runEmitCLI(args[1:], os.Stdout, os.Stderr, cfg)
+	}
 	if args[0] != "wait" {
 		return ExitUsage
 	}

@@ -34,3 +34,7 @@ file is read at startup and atomically updated after each successful POST:
 ```json
 {"overrides":{"host-a":"off"}}
 ```
+
+The transport this contract rides on changed in R20: relay events are now
+persisted to Postgres before injection and acknowledged back. See
+[r20-relay-persistence.md](r20-relay-persistence.md).

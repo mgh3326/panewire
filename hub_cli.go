@@ -86,6 +86,7 @@ type hubServerCLIDeps struct {
 	TelegramHTTPClient    *http.Client
 	TelegramBaseURL       string
 	AllowInsecureForTests bool
+	HandoffkeepHTTPClient *http.Client
 	Now                   func() time.Time
 }
 
@@ -108,6 +109,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	lanesPath := flags.String("lanes", "/etc/panewire/lanes.json", "operator-owned lane routing JSON (hot-reloaded)")
 	reportRelayPath := flags.String("report-relay-routes", "", "deprecated alias for --lanes")
 	acceptingOverridesPath := flags.String("accepting-overrides", "", "optional accepting override JSON (updated by operator POST)")
+	handoffkeepEnvPath := flags.String("handoffkeep-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file enabling durable relay events")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return nil, "", ExitUsage, errors.New("invalid hub flags")
 	}
@@ -162,7 +164,18 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if *reportRelayPath != "" {
 		routePath = *reportRelayPath
 	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, ReportRelayPath: routePath, AcceptingOverridesPath: *acceptingOverridesPath})
+	var handoffkeep *handoffkeepRelayClient
+	if *handoffkeepEnvPath != "" {
+		env, err := loadHubHandoffkeepEnv(*handoffkeepEnvPath)
+		if err != nil {
+			return nil, "", ExitConditionInvalid, errors.New("hub handoffkeep env is invalid")
+		}
+		handoffkeep, err = newHandoffkeepRelayClient(env, deps.HandoffkeepHTTPClient)
+		if err != nil {
+			return nil, "", ExitConditionInvalid, errors.New("hub handoffkeep configuration is invalid")
+		}
+	}
+	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, ReportRelayPath: routePath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}
