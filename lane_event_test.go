@@ -187,3 +187,32 @@ func TestLaneEventUsesDirectLaneWhileEscalationUsesParent(t *testing.T) {
 		t.Fatalf("direct=%+v parent=%+v", first, second)
 	}
 }
+
+// lane.event must not alter the three established job relay contracts: a
+// completed report stays on its owner lane, escalation and joined follow the
+// parent, duplicate job reports do not inject twice, and report text remains
+// subject to the existing 240-byte compatibility limit.
+func TestJobRelayKindsKeepRoutingDedupeAndTruncation(t *testing.T) {
+	_, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	hub := r20Hub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1","parent":"lane-parent"},"lane-parent":{"machine":"host-a","pane":"w1:p2"}}}`, client, nil)
+	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: agent}
+
+	completed := hubJobEventPayload{JobID: "job-completed", Epoch: 1, OwnerLane: "lane-a", Label: "label", Host: "host-a", ReportPath: "report.md", ReportLastLine: strings.Repeat("x", 300)}
+	hub.relayJobEvent("job.completed", completed)
+	hub.relayJobEvent("job.completed", completed) // Existing key stays idempotent.
+	hub.relayJobEvent("job.escalate", hubJobEventPayload{JobID: "job-escalate", Epoch: 1, OwnerLane: "lane-a", Label: "label", Host: "host-a", ReportPath: "report.md", Question: "question"})
+	hub.relayJobEvent("job.joined", hubJobEventPayload{JobID: "job-joined", Epoch: 1, OwnerLane: "lane-a", Label: "label", Host: "host-a", ReportPath: "report.md", PR: "https://example.test/pr/1", Head: "abcdef012345"})
+
+	completedInject, escalationInject, joinedInject := <-agent.relays, <-agent.relays, <-agent.relays
+	if completedInject.Pane != "w1:p1" || !strings.Contains(completedInject.Text, strings.Repeat("x", 240)) || strings.Contains(completedInject.Text, strings.Repeat("x", 241)) {
+		t.Fatalf("completed route/text=%+v", completedInject)
+	}
+	if escalationInject.Pane != "w1:p2" || joinedInject.Pane != "w1:p2" {
+		t.Fatalf("parent routes escalation=%+v joined=%+v", escalationInject, joinedInject)
+	}
+	if injected := drainRelays(agent); injected != 0 {
+		t.Fatalf("duplicate job event injected %d times", injected)
+	}
+}
