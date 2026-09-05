@@ -476,6 +476,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
+	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)
 	mux.HandleFunc("POST /v1/update", h.handleUpdatePublish)
 	mux.HandleFunc("GET /v1/quota/{machine}", h.handleQuotaGet)
 	mux.HandleFunc("POST /v1/quota/{machine}", h.handleQuotaRequest)
