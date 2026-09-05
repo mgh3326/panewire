@@ -276,11 +276,23 @@ func writeLaneEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	if err := temporary.Close(); err != nil {
 		return "", err
 	}
-	final := filepath.Join(eventsDir, fmt.Sprintf("%05d-lane.event.json", highest+1))
-	if err := os.Rename(name, final); err != nil {
-		return "", err
+	for {
+		highest++
+		final := filepath.Join(eventsDir, fmt.Sprintf("%05d-lane.event.json", highest))
+		// Link publishes the already-closed temporary file without replacing an
+		// existing name. Rename would let two concurrent producers select the
+		// same sequence and overwrite one another, which is unacceptable for a
+		// durable lane event. A collision is either this key's duplicate or a
+		// different producer that won the sequence, in which case try the next.
+		if err := os.Link(name, final); err == nil {
+			return final, nil
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		if existing, ok := readEmitLaneEventDedupeKey(eventsDir, filepath.Base(final)); ok && existing == key {
+			return "", errDuplicateLaneEventID
+		}
 	}
-	return final, nil
 }
 
 func readEmitLaneEventDedupeKey(eventsDir, name string) (string, bool) {

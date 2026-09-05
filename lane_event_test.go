@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -97,6 +98,37 @@ func TestLaneEventDuplicateEmitIsLoudAndMakesNoSecondFile(t *testing.T) {
 	entries, err := os.ReadDir(filepath.Join(inbox, "events-lane"))
 	if err != nil || len(entries) != 1 {
 		t.Fatalf("lane event files=%+v err=%v", entries, err)
+	}
+}
+
+func TestLaneEventConcurrentDuplicateNeverOverwritesTheFirstFile(t *testing.T) {
+	inbox := t.TempDir()
+	record := emitRecord{Type: "lane.event", OwnerLane: "lane-a", EventID: "producer-race", Text: "payload"}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for range 2 {
+		go func() {
+			<-start
+			_, err := writeLaneEmitRecord(inbox, record)
+			results <- err
+		}()
+	}
+	close(start)
+	first, second := <-results, <-results
+	successes, duplicates := 0, 0
+	for _, err := range []error{first, second} {
+		if err == nil {
+			successes++
+		} else if errors.Is(err, errDuplicateLaneEventID) {
+			duplicates++
+		}
+	}
+	if successes != 1 || duplicates != 1 {
+		t.Fatalf("concurrent results successes=%d duplicates=%d first=%v second=%v", successes, duplicates, first, second)
+	}
+	entries, err := os.ReadDir(filepath.Join(inbox, "events-lane"))
+	if err != nil || len(entries) != 1 {
+		t.Fatalf("concurrent lane files=%+v err=%v", entries, err)
 	}
 }
 
