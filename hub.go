@@ -786,7 +786,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			if completion.Replay {
 				h.logger.Info("relay record replayed after node restart", "job", completion.JobID, "kind", message.Kind, "node", machineID)
 			}
-			h.relayJobCompletion(completion)
+			h.relayJobCompletionFrom(machineID, completion)
 		}
 		if message.Kind == "job.escalate" || message.Kind == "job.joined" {
 			event, truncated, valid := decodeHubJobEscalationPayloadDetailed(message.Payload)
@@ -800,7 +800,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			if event.Replay {
 				h.logger.Info("relay record replayed after node restart", "job", event.JobID, "kind", message.Kind, "node", machineID)
 			}
-			h.relayJobEvent(message.Kind, event)
+			h.relayJobEventFrom(machineID, message.Kind, event)
 		}
 		if message.Kind == "lane.event" {
 			event, valid := decodeHubLaneEventPayload(message.Payload)

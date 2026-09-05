@@ -24,6 +24,12 @@ const laneEventTextLimit = 2048
 
 var errDuplicateLaneEventID = errors.New("duplicate lane event id")
 
+// errEmitDuplicateOutboxKey means an existing file has the same relay key but
+// represents different metadata. Unlike a wrk-written record followed by its
+// immediate notification, that second record would be lost if treated as an
+// ordinary duplicate.
+var errEmitDuplicateOutboxKey = errors.New("duplicate outbox key")
+
 // relayEventPathFallbackKinds are the kinds whose own event file is the durable
 // record when no separate report exists. `panewire emit` and the node scanner
 // both consult this map: if only one of them substituted the event path, the
@@ -150,6 +156,10 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	// record, and the node outbox is what picks it up afterwards.
 	eventPath, err := writeEmitRecord(root, record)
 	if err != nil {
+		if errors.Is(err, errEmitDuplicateOutboxKey) {
+			fmt.Fprintln(stderr, "emit: duplicate outbox key")
+			return ExitDeliveryFailure
+		}
 		fmt.Fprintln(stderr, "emit: event file could not be written:", err)
 		return ExitInternal
 	}
@@ -173,9 +183,11 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	return ExitOK
 }
 
-// writeEmitRecord is a no-op when an event with the same dedupe key already
-// exists, so a wrk-then-emit sequence does not produce two records. It returns
-// the path of the event file holding the record, written or already present.
+// writeEmitRecord recognizes a byte-for-byte equivalent relay record already
+// written by wrk as the durable half of the same event. It returns that path so
+// emit can still make the immediate socket notification. A same-key record with
+// different metadata is an explicit conflict: silently reusing its file would
+// discard a real event.
 func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	eventsDir := filepath.Join(inboxRoot, "jobs", record.JobID, "events")
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
@@ -195,9 +207,20 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		if existing, ok := readEmitDedupeKey(eventsDir, entry.Name(), record.JobID); ok && existing == key {
+		existing, ok := readEmitDedupeKey(eventsDir, entry.Name(), record.JobID)
+		if !ok || existing.key != key {
+			continue
+		}
+		// Empty-report escalations derive their eventual relay key from their
+		// own event-file path. Different questions must therefore receive
+		// separate files, even though the pre-file key is the same.
+		if record.Type == "job.escalate" && record.ReportPath == "" && existing.question != record.Question {
+			continue
+		}
+		if existing.matches(record) {
 			return filepath.Join(eventsDir, entry.Name()), nil
 		}
+		return "", errEmitDuplicateOutboxKey
 	}
 	contents, err := json.Marshal(record)
 	if err != nil {
@@ -359,31 +382,78 @@ func truncateLaneEventText(value string) (string, bool) {
 	return value[:limit] + marker, true
 }
 
-// readEmitDedupeKey reads one existing event file into the dedupe key of the
-// record it holds. The event-path fallback is deliberately not applied here:
-// suppressing a duplicate file compares what the files carry, and a record that
-// has not been named yet has no event path to compare against.
-func readEmitDedupeKey(eventsDir, name, jobID string) (string, bool) {
+type emitDedupeRecord struct {
+	key            string
+	kind           string
+	epoch          uint64
+	ownerLane      string
+	label          string
+	host           string
+	reportPath     string
+	reportLastLine string
+	reason         string
+	question       string
+	pr             string
+	head           string
+	paneID         string
+}
+
+// matches intentionally omits CreatedAt and AgentLabel. CreatedAt is local
+// write time, while older wrk records do not carry AgentLabel; neither changes
+// the relay event wrk asks emit to notify immediately.
+func (existing emitDedupeRecord) matches(record emitRecord) bool {
+	return existing.kind == record.Type &&
+		existing.epoch == record.Epoch &&
+		existing.ownerLane == record.OwnerLane &&
+		existing.label == record.Label &&
+		existing.host == record.Host &&
+		existing.reportPath == record.ReportPath &&
+		existing.reportLastLine == record.ReportLastLine &&
+		existing.reason == record.Reason &&
+		existing.question == record.Question &&
+		existing.pr == record.PR &&
+		existing.head == record.Head &&
+		existing.paneID == record.PaneID
+}
+
+// readEmitDedupeKey reads one existing event file into the dedupe record it
+// holds. The event-path fallback is deliberately not applied here: comparing a
+// file written before it was named must use the fields it actually carries.
+func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 	contents, err := os.ReadFile(filepath.Join(eventsDir, name))
 	if err != nil || len(contents) > 16<<10 {
-		return "", false
+		return emitDedupeRecord{}, false
 	}
 	var event hubInboxEvent
 	if json.Unmarshal(contents, &event) != nil {
-		return "", false
+		return emitDedupeRecord{}, false
 	}
 	kind := event.eventKind()
 	if kind == "job.completion" {
 		kind = "job.completed"
 	}
 	if !emitRelayKinds[kind] {
-		return "", false
+		return emitDedupeRecord{}, false
 	}
 	epoch := event.Epoch
 	if epoch == 0 {
 		epoch = 1
 	}
-	return relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()), true
+	return emitDedupeRecord{
+		key:            relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()),
+		kind:           kind,
+		epoch:          epoch,
+		ownerLane:      event.ownerLane(),
+		label:          event.label(),
+		host:           event.host(),
+		reportPath:     event.reportPath(),
+		reportLastLine: event.reportLastLine(),
+		reason:         event.reason(),
+		question:       event.question(),
+		pr:             event.pr(),
+		head:           event.head(),
+		paneID:         event.paneID(),
+	}, true
 }
 
 func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout time.Duration) bool {

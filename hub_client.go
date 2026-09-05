@@ -880,6 +880,15 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientEvent, bool) {
 	job = relayEventWireForm(job)
 	key := relayEventOutboxKeyFor(job)
+	if client.outbox != nil {
+		if outstanding, found, err := client.outbox.UnpersistedRelayOutboxKey(context.Background(), key); err != nil {
+			client.warnMessage("relay outbox outstanding key unavailable")
+		} else if found {
+			// The scanner's assignment epoch is process memory. Reuse the one
+			// outstanding row so the same retained event file is re-presented.
+			key, job.Epoch = outstanding, outstanding.Epoch
+		}
+	}
 	send, replay := client.selectRelayEvent(key)
 	if !send {
 		return hubClientEvent{}, false

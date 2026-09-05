@@ -132,25 +132,30 @@ func TestR20T4EscalateWithoutReportPushesScannerIdenticalPath(t *testing.T) {
 	}
 }
 
-// TK1b: emit after wrk already wrote the record must not add a second file; two
-// files with an empty report_path would become two rows and two pane notes.
-func TestR20T4EscalateWithoutReportSuppressesDuplicateFile(t *testing.T) {
+// TK1b: an identical emit after the durable record exists must not add a
+// second file, but it still sends the immediate notification.
+func TestR20T4EscalateWithoutReportStillPushesRecordedEvent(t *testing.T) {
 	inbox := t.TempDir()
 	pushes := &r20t4Pushes{}
 	socket := r20t4Socket(t, pushes.add)
 	args := []string{"--kind", "job.escalate", "--job", "r20t4-dupe", "--owner-lane", "lane-a", "--reason", "needs captain", "--inbox-root", inbox}
-	for attempt := 0; attempt < 2; attempt++ {
-		if code := runEmitCLI(args, &bytes.Buffer{}, &bytes.Buffer{}, CLIConfig{SocketPath: socket}); code != ExitOK {
-			t.Fatalf("attempt %d code=%d", attempt, code)
-		}
+	if code := runEmitCLI(args, &bytes.Buffer{}, &bytes.Buffer{}, CLIConfig{SocketPath: socket}); code != ExitOK {
+		t.Fatalf("first emit code=%d", code)
+	}
+	var stderr bytes.Buffer
+	if code := runEmitCLI(args, &bytes.Buffer{}, &stderr, CLIConfig{SocketPath: socket}); code != ExitOK || stderr.Len() != 0 {
+		t.Fatalf("repeat code=%d stderr=%q", code, stderr.String())
 	}
 	names := r20EventFiles(t, inbox, "r20t4-dupe")
 	if len(names) != 1 {
 		t.Fatalf("a repeated empty-report escalation wrote a second file: %v", names)
 	}
 	records := pushes.await(t, 2)
+	if len(records) != 2 {
+		t.Fatalf("repeat produced %d pushes, want two", len(records))
+	}
 	if records[0].ReportPath != records[1].ReportPath {
-		t.Fatalf("the two pushes disagreed: %q vs %q", records[0].ReportPath, records[1].ReportPath)
+		t.Fatalf("repeat paths=%q and %q, want the same durable event path", records[0].ReportPath, records[1].ReportPath)
 	}
 }
 
