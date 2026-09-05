@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -19,11 +20,14 @@ import (
 // fakeHandoffkeep records every request in arrival order so a test can assert
 // the persist/inject/deliver sequence rather than only its effects.
 type fakeHandoffkeep struct {
-	mu         sync.Mutex
-	calls      []fakeHandoffkeepCall
-	nextID     int64
-	status     int
-	stored     []handoffkeepRelayEvent
+	mu     sync.Mutex
+	calls  []fakeHandoffkeepCall
+	nextID int64
+	status int
+	stored []handoffkeepRelayEvent
+	// rows models handoffkeep's idempotency index, keyed by the documented
+	// five fields. A POST that collides updates only attempts and replies 200.
+	rows       map[string]*handoffkeepRelayEvent
 	ownerLane  string
 	undelivere []handoffkeepRelayEvent
 	// observe runs at the start of every request, before any reply, so a test
@@ -39,7 +43,7 @@ type fakeHandoffkeepCall struct {
 
 func newFakeHandoffkeep(t *testing.T) (*fakeHandoffkeep, *handoffkeepRelayClient, func()) {
 	t.Helper()
-	fake := &fakeHandoffkeep{nextID: 100, status: http.StatusCreated}
+	fake := &fakeHandoffkeep{nextID: 100, status: http.StatusCreated, rows: map[string]*handoffkeepRelayEvent{}}
 	server := httptest.NewServer(fake)
 	client, err := newHandoffkeepRelayClient(hubHandoffkeepEnv{URL: server.URL, Token: "test-token"}, server.Client())
 	if err != nil {
@@ -78,21 +82,80 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		f.mu.Lock()
-		f.nextID++
-		stored := handoffkeepRelayEvent{ID: f.nextID, Kind: asString(body["kind"]), JobID: asString(body["job_id"]), OwnerLane: asString(body["owner_lane"])}
-		if f.ownerLane != "" {
-			stored.OwnerLane = f.ownerLane
+		key := fakeHandoffkeepRowKey(asString(body["kind"]), asString(body["job_id"]), asInt(body["epoch"]), asString(body["report_path"]), asString(body["reason"]))
+		row, duplicate := f.rows[key]
+		if duplicate {
+			// The documented contract: a duplicate POST updates only attempts
+			// and returns the original row with 200.
+			row.Attempts++
+			status = http.StatusOK
+		} else {
+			f.nextID++
+			row = &handoffkeepRelayEvent{ID: f.nextID, Kind: asString(body["kind"]), JobID: asString(body["job_id"]),
+				Epoch: asInt(body["epoch"]), OwnerLane: asString(body["owner_lane"]), ReportPath: asString(body["report_path"]),
+				Reason: asString(body["reason"]), Attempts: 1}
+			if f.ownerLane != "" {
+				row.OwnerLane = f.ownerLane
+			}
+			f.rows[key] = row
+			f.stored = append(f.stored, *row)
 		}
-		f.stored = append(f.stored, stored)
+		stored := *row
 		f.mu.Unlock()
 		w.WriteHeader(status)
 		_ = json.NewEncoder(w).Encode(stored)
 	}
 }
 
+// fakeHandoffkeepRowKey is handoffkeep's idempotency key, in the field order
+// the node outbox and the hub dedupe key both use.
+func fakeHandoffkeepRowKey(kind, jobID string, epoch int, reportPath, reason string) string {
+	return kind + "\x00" + jobID + "\x00" + strconv.Itoa(epoch) + "\x00" + reportPath + "\x00" + reason
+}
+
+// seedUndelivered puts rows handoffkeep already holds behind both the
+// undelivered listing and the idempotency index, so a hub that re-POSTs one of
+// them gets 200 with attempts+1 rather than a new row.
+func (f *fakeHandoffkeep) seedUndelivered(records ...handoffkeepRelayEvent) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, record := range records {
+		row := record
+		f.rows[fakeHandoffkeepRowKey(row.Kind, row.JobID, row.Epoch, row.ReportPath, row.Reason)] = &row
+		f.undelivere = append(f.undelivere, row)
+		if row.ID > f.nextID {
+			f.nextID = row.ID
+		}
+	}
+}
+
+// attemptsFor reports the durable attempt counter for one row.
+func (f *fakeHandoffkeep) attemptsFor(kind, jobID string, epoch int, reportPath, reason string) int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	row, exists := f.rows[fakeHandoffkeepRowKey(kind, jobID, epoch, reportPath, reason)]
+	if !exists {
+		return -1
+	}
+	return row.Attempts
+}
+
+// rowCount is how many distinct rows handoffkeep holds. A resend or an attempt
+// bump must never change it.
+func (f *fakeHandoffkeep) rowCount() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.rows)
+}
+
 func asString(value any) string {
 	text, _ := value.(string)
 	return text
+}
+
+func asInt(value any) int {
+	number, _ := value.(float64)
+	return int(number)
 }
 
 func (f *fakeHandoffkeep) sequence() []string {
@@ -284,10 +347,10 @@ func TestR20PersistFailureSkipsInject(t *testing.T) {
 func TestR20StartupReinjectsUndelivered(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
-	fake.undelivere = []handoffkeepRelayEvent{
-		{ID: 7, Kind: "job.completed", JobID: "r20-one", Epoch: 1, OwnerLane: "lane-a", ReportPath: "one.md", ReportLastLine: "done one"},
-		{ID: 9, Kind: "job.completed", JobID: "r20-two", Epoch: 1, OwnerLane: "lane-b", ReportPath: "two.md", ReportLastLine: "done two"},
-	}
+	fake.seedUndelivered(
+		handoffkeepRelayEvent{ID: 7, Kind: "job.completed", JobID: "r20-one", Epoch: 1, OwnerLane: "lane-a", ReportPath: "one.md", ReportLastLine: "done one"},
+		handoffkeepRelayEvent{ID: 9, Kind: "job.completed", JobID: "r20-two", Epoch: 1, OwnerLane: "lane-b", ReportPath: "two.md", ReportLastLine: "done two"},
+	)
 	hub := r20Hub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"},"lane-b":{"machine":"host-a","pane":"w1:p2"}}}`, client, nil)
 	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
 	hub.nodes["host-a"] = &hubNodeRecord{agent: agent}
@@ -311,9 +374,23 @@ func TestR20StartupReinjectsUndelivered(t *testing.T) {
 		t.Fatalf("a delivered event was re-injected: %+v", directive)
 	default:
 	}
-	// Startup replay must never re-persist a row that already exists.
-	if fake.count(http.MethodPost, "/v1/relay/events") != 0 {
-		t.Fatalf("startup replay re-persisted %d events", fake.count(http.MethodPost, "/v1/relay/events"))
+	// Startup replay must never re-persist a row that already exists. R20T5
+	// re-POSTs each replayed row, but only as the attempt bump the contract
+	// has no other endpoint for: the row count is what "not re-persisted"
+	// means, and it must not move.
+	if fake.rowCount() != 2 {
+		t.Fatalf("startup replay created rows: handoffkeep holds %d, want the 2 it started with", fake.rowCount())
+	}
+	if posts := fake.count(http.MethodPost, "/v1/relay/events"); posts != 2 {
+		t.Fatalf("startup replay POSTed %d times, want one attempt bump per replayed row", posts)
+	}
+	for _, row := range []struct {
+		job  string
+		path string
+	}{{"r20-one", "one.md"}, {"r20-two", "two.md"}} {
+		if got := fake.attemptsFor("job.completed", row.job, 1, row.path, ""); got != 1 {
+			t.Fatalf("%s attempts=%d after replay, want 1", row.job, got)
+		}
 	}
 }
 

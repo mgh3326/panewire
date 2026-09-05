@@ -135,7 +135,9 @@ func TestR18EnvelopeHeartbeatThenFlatCompletionRelays(t *testing.T) {
 func TestR18RelayDedupeKeyUsesDecimalEpoch(t *testing.T) {
 	one := relayDedupeKey(hubJobEventPayload{JobID: "job", Epoch: 1, ReportPath: "report.md"})
 	asciiOne := relayDedupeKey(hubJobEventPayload{JobID: "job", Epoch: 0x31, ReportPath: "report.md"})
-	if one != "job\x001\x00report.md" || asciiOne != "job\x0049\x00report.md" || one == asciiOne {
+	// The trailing field is reason: R20T5 widened the key to the same five
+	// fields the node outbox and handoffkeep already counted.
+	if one != "job\x001\x00report.md\x00" || asciiOne != "job\x0049\x00report.md\x00" || one == asciiOne {
 		t.Fatalf("M5: epoch dedupe key is not unambiguous decimal: %q %q", one, asciiOne)
 	}
 }

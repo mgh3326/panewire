@@ -14,6 +14,11 @@ type relayPending struct {
 	// eventID is the handoffkeep row this injection came from. It lives only
 	// for the acknowledgement window; the hub stays stateless about relays.
 	eventID int64
+	// kind and event are retained for the same window so an expiry can record
+	// the spent attempt the only way the contract allows: a re-POST of this
+	// exact row. Nothing else reads them.
+	kind  string
+	event hubJobEventPayload
 }
 
 func relayAckTimeoutFromEnv() time.Duration {
@@ -24,16 +29,17 @@ func relayAckTimeoutFromEnv() time.Duration {
 }
 
 func (h *HubServer) startRelayAck(jobID, machine, pane string) {
-	h.startRelayAckEvent(jobID, machine, pane, 0)
+	h.startRelayAckEvent("", hubJobEventPayload{JobID: jobID}, machine, pane, 0)
 }
 
-func (h *HubServer) startRelayAckEvent(jobID, machine, pane string, eventID int64) {
+func (h *HubServer) startRelayAckEvent(kind string, event hubJobEventPayload, machine, pane string, eventID int64) {
+	jobID := event.JobID
 	h.mu.Lock()
 	if _, exists := h.r19a.relayPending[jobID]; exists {
 		h.mu.Unlock()
 		return
 	}
-	h.r19a.relayPending[jobID] = relayPending{machine: machine, pane: pane, eventID: eventID}
+	h.r19a.relayPending[jobID] = relayPending{machine: machine, pane: pane, eventID: eventID, kind: kind, event: event}
 	timeout := h.r19a.relayAckTimeout
 	h.mu.Unlock()
 	time.AfterFunc(timeout, func() { h.expireRelayAck(jobID) })
@@ -41,7 +47,8 @@ func (h *HubServer) startRelayAckEvent(jobID, machine, pane string, eventID int6
 
 func (h *HubServer) expireRelayAck(jobID string) {
 	h.mu.Lock()
-	if _, pending := h.r19a.relayPending[jobID]; !pending {
+	pending, isPending := h.r19a.relayPending[jobID]
+	if !isPending {
 		h.mu.Unlock()
 		return
 	}
@@ -57,6 +64,9 @@ func (h *HubServer) expireRelayAck(jobID string) {
 		Reason string `json:"reason"`
 	}{JobID: jobID, Reason: "ack_timeout"})
 	h.broadcast(hubEvent{Kind: "relay.unconfirmed", Payload: payload, Received: h.now().UTC()})
+	// An injection nobody confirmed is a spent attempt. Recording it here is
+	// what keeps the startup replay from retrying a hopeless row forever.
+	h.recordRelayAttempt(pending)
 }
 
 func (h *HubServer) acknowledgeRelay(machineID string, ack relayAckPayload) bool {

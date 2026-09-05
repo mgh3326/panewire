@@ -304,9 +304,10 @@ type HubServer struct {
 	placementCache            placementCache
 	r19a                      r19aHubState
 	reportRelayPath           string
-	relayDedupe               map[string]struct{}
+	relayDedupe               map[string]int64
 	handoffkeep               *handoffkeepRelayClient
 	unpersistedRelayEvents    uint64
+	replayExhaustedEvents     uint64
 	quotaCache                map[string]hubQuotaCacheEntry
 	quotaWaiters              map[string]chan hubQuotaResult
 	quotaCacheTTL             time.Duration
@@ -398,7 +399,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
 	}, nil
 }
 
@@ -1231,6 +1232,21 @@ func (h *HubServer) countUnpersistedRelayEvent() {
 	h.mu.Lock()
 	h.unpersistedRelayEvents++
 	h.mu.Unlock()
+}
+
+// countReplayExhaustedEvent records a durable row the startup replay refused
+// to re-inject because it had already spent its delivery attempts.
+func (h *HubServer) countReplayExhaustedEvent() {
+	h.mu.Lock()
+	h.replayExhaustedEvents++
+	h.mu.Unlock()
+}
+
+// ReplayExhaustedEventCount exists for local monitoring and tests.
+func (h *HubServer) ReplayExhaustedEventCount() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.replayExhaustedEvents
 }
 
 // UnpersistedRelayEventCount exists for local monitoring and tests.
