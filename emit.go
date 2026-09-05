@@ -118,10 +118,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		if socket == "" {
 			socket = socketPathFromEnv()
 		}
-		if !pushEmitRecord(socket, record, root, *timeout) {
-			fmt.Fprintln(stderr, "emit: panewired unavailable; event recorded to file only")
-		}
-		return ExitOK
+		return reportEmitPushResult(stderr, pushEmitRecord(socket, record, root, *timeout))
 	}
 	if *job == "" || !hubJobIDPattern.MatchString(*job) {
 		return ExitUsage
@@ -166,11 +163,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	// The push carries the namespace the file was written in. A daemon that
 	// watches a different root refuses it, so a run against a temporary inbox
 	// root cannot reach the operator's live relay outbox.
-	if !pushEmitRecord(socket, record, root, *timeout) {
-		fmt.Fprintln(stderr, "emit: panewired unavailable; event recorded to file only")
-		return ExitOK
-	}
-	return ExitOK
+	return reportEmitPushResult(stderr, pushEmitRecord(socket, record, root, *timeout))
 }
 
 // writeEmitRecord is a no-op when an event with the same dedupe key already
@@ -386,10 +379,33 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (string, bool) {
 	return relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()), true
 }
 
-func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout time.Duration) bool {
+type emitPushResult struct {
+	reached bool
+	ok      bool
+	code    int
+	err     string
+}
+
+func reportEmitPushResult(stderr io.Writer, result emitPushResult) int {
+	if !result.reached {
+		fmt.Fprintln(stderr, "emit: panewired unavailable; event recorded to file only")
+		return ExitOK
+	}
+	if result.ok {
+		return ExitOK
+	}
+	if strings.HasPrefix(result.err, "inbox root mismatch (") {
+		fmt.Fprintln(stderr, "emit:", result.err)
+		return ExitUsage
+	}
+	fmt.Fprintln(stderr, "emit: daemon rejected the event:", result.err)
+	return ExitUsage
+}
+
+func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout time.Duration) emitPushResult {
 	connection, err := net.DialTimeout("unix", socket, timeout)
 	if err != nil {
-		return false
+		return emitPushResult{}
 	}
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(timeout))
@@ -401,12 +417,15 @@ func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout 
 	}
 	body, _ := json.Marshal(request)
 	if _, err := fmt.Fprintf(connection, "%s\n", body); err != nil {
-		return false
+		return emitPushResult{}
 	}
 	scanner := bufio.NewScanner(connection)
 	if !scanner.Scan() {
-		return false
+		return emitPushResult{}
 	}
 	var response localResponse
-	return json.Unmarshal(scanner.Bytes(), &response) == nil && response.OK
+	if json.Unmarshal(scanner.Bytes(), &response) != nil {
+		return emitPushResult{}
+	}
+	return emitPushResult{reached: true, ok: response.OK, code: response.Code, err: response.Error}
 }

@@ -11,6 +11,11 @@ import (
 	"unicode/utf8"
 )
 
+const (
+	lanePersistedMaxEntries        = 4096
+	relayReplayExhaustedMaxEntries = 4096
+)
+
 // reportRelayRoutes is intentionally a tiny operator-owned configuration:
 // routes contain identifiers only, never host addresses, tokens, or panes
 // from a particular installation.
@@ -154,7 +159,7 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
 	}
 	key := relayEventDedupeKey("lane.event", event)
 	h.mu.Lock()
-	if persistedID := h.lanePersisted[key]; persistedID != 0 {
+	if persistedID := h.lanePersistedIDLocked(key); persistedID != 0 {
 		h.mu.Unlock()
 		// The hub already owns the durable row. A source retry is an ACK-loss
 		// recovery, not another delivery attempt, so it must not re-POST and
@@ -340,11 +345,35 @@ func (h *HubServer) rememberLanePersisted(key string, eventID int64) {
 		return
 	}
 	h.mu.Lock()
+	h.rememberLanePersistedLocked(key, eventID)
+	h.mu.Unlock()
+}
+
+func (h *HubServer) lanePersistedIDLocked(key string) int64 {
+	persistedID := h.lanePersisted[key]
+	if persistedID != 0 {
+		h.lanePersistedOrder.touch(key, lanePersistedMaxEntries)
+	}
+	return persistedID
+}
+
+func (h *HubServer) rememberLanePersistedLocked(key string, eventID int64) {
 	if h.lanePersisted == nil {
 		h.lanePersisted = make(map[string]int64)
 	}
+	_, evicted, overflowed := h.lanePersistedOrder.touch(key, lanePersistedMaxEntries)
+	if overflowed {
+		// An evicted producer resend re-POSTs to handoffkeep. Its idempotency
+		// key is first-writer-wins, so handoffkeep returns the same durable row:
+		// this trades one POST for bounded memory, not delivery loss.
+		delete(h.lanePersisted, evicted)
+	}
 	h.lanePersisted[key] = eventID
-	h.mu.Unlock()
+}
+
+func (h *HubServer) forgetLanePersistedLocked(key string) {
+	delete(h.lanePersisted, key)
+	h.lanePersistedOrder.forget(key)
 }
 
 // forgetRelayEvent releases a dedupe key that stands for no durable row.
@@ -437,7 +466,9 @@ func (h *HubServer) broadcastRelayTruncated(event hubJobEventPayload) {
 // visible. Dropping it silently is how a stuck record turns into an
 // unexplained gap between Postgres and the pane.
 func (h *HubServer) broadcastRelayReplayExhausted(record handoffkeepRelayEvent) {
-	h.countReplayExhaustedEvent()
+	if !h.countReplayExhaustedEvent(record.ID) {
+		return
+	}
 	payload, _ := json.Marshal(struct {
 		JobID    string `json:"job_id"`
 		Kind     string `json:"kind"`
@@ -543,6 +574,14 @@ func (h *HubServer) persistRelayEventRecord(kind string, event hubJobEventPayloa
 // markRelayEventDelivered closes the loop on a node's relay.delivered. A
 // failure here is operator signal only; it must never stall the relay path.
 func (h *HubServer) markRelayEventDelivered(pending relayPending) {
+	// Cleanup belongs to the successful relay.delivered acknowledgement, not
+	// to handoffkeep. Pre-R20 deployments still need bounded local state.
+	h.mu.Lock()
+	h.r19a.forgetRelayTimeout(pending.event.JobID)
+	if pending.kind == "lane.event" {
+		h.forgetLanePersistedLocked(relayEventDedupeKey("lane.event", pending.event))
+	}
+	h.mu.Unlock()
 	if h.handoffkeep == nil || pending.eventID == 0 {
 		return
 	}
