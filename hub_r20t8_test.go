@@ -158,6 +158,91 @@ func TestR20T8RestartReusesUnpersistedOutboxEpoch(t *testing.T) {
 	}
 }
 
+// TestR20T8LiveEpochDoesNotReuseOlderUnpersistedRow is the P5 regression:
+// after an epoch-1 completion was persisted by the hub but lost its sender ACK,
+// a live assignment at epoch 2 using the same report must remain epoch 2. The
+// second completion is a new logical event and must reach its destination.
+func TestR20T8LiveEpochDoesNotReuseOlderUnpersistedRow(t *testing.T) {
+	inbox := t.TempDir()
+	store := NewMemoryStore(t)
+	defer store.Close()
+	const jobID = "t8-live-epoch"
+	const first = `{"type":"job.completed","epoch":1,"owner_lane":"lane-destination","label":"lane-source","host":"host-a","report_path":"report.md","report_last_line":"done"}`
+	r20WriteEvent(t, inbox, jobID, "00001-job.completed.json", first, time.Time{})
+
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	hub := r20Hub(t, r20t8Lanes, client, nil)
+	sourceAgent := &hubAgent{relays: make(chan hubRelayInjectEvent, 4), persisted: make(chan hubRelayPersistedEvent, 4)}
+	destinationAgent := &hubAgent{relays: make(chan hubRelayInjectEvent, 4), persisted: make(chan hubRelayPersistedEvent, 4)}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: sourceAgent}
+	hub.nodes["host-b"] = &hubNodeRecord{agent: destinationAgent}
+
+	firstNode := r20Node(inbox, store)
+	firstBatch := firstNode.jobCompletionEvents()
+	if len(firstBatch) != 1 || firstBatch[0].relayKey.Epoch != 1 {
+		t.Fatalf("first batch=%+v, want one epoch-1 event", firstBatch)
+	}
+	firstWire, err := json.Marshal(hubClientWireEvent(firstBatch[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.handleAgentMessage("host-a", "fixture", sourceAgent, firstWire)
+	firstNode.commitRelaySent(firstBatch[0])
+	if injected := drainRelays(destinationAgent); injected != 1 {
+		t.Fatalf("epoch-1 injections=%d, want one", injected)
+	}
+	_ = drainPersisted(sourceAgent) // The sender's acknowledgement was lost.
+
+	// A redispatched run writes another completion for the same report path.
+	r20WriteEvent(t, inbox, jobID, "00002-job.completed.json", first, time.Time{})
+	liveNode := r20Node(inbox, store)
+	liveNode.assignedJobs[jobID] = 2
+	liveBatch := liveNode.jobCompletionEvents()
+	if len(liveBatch) != 1 || liveBatch[0].relayKey.Epoch != 2 {
+		t.Fatalf("live epoch-2 batch=%+v, want one epoch-2 event", liveBatch)
+	}
+	liveWire, err := json.Marshal(hubClientWireEvent(liveBatch[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.handleAgentMessage("host-a", "fixture", sourceAgent, liveWire)
+	liveNode.commitRelaySent(liveBatch[0])
+	if injected := drainRelays(destinationAgent); injected != 1 {
+		t.Fatalf("epoch-2 injections=%d, want one distinct completion", injected)
+	}
+	var rows int
+	if err := store.db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM relay_sent WHERE job_id=?", jobID).Scan(&rows); err != nil {
+		t.Fatal(err)
+	}
+	if rows != 2 || fake.rowCount() != 2 {
+		t.Fatalf("epoch split rows=%d handoffkeep=%d, want two each", rows, fake.rowCount())
+	}
+}
+
+// TestR20T8DisconnectedSenderDoesNotAckDestination covers the no-fallback
+// branch. A durable job relay can still inject into the destination pane, but
+// an offline sender must not cause that destination to retire a twin outbox.
+func TestR20T8DisconnectedSenderDoesNotAckDestination(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	hub := r20Hub(t, r20t8Lanes, client, nil)
+	destinationAgent := &hubAgent{relays: make(chan hubRelayInjectEvent, 2), persisted: make(chan hubRelayPersistedEvent, 2)}
+	hub.nodes["host-b"] = &hubNodeRecord{agent: destinationAgent}
+
+	event := hubJobEventPayload{JobID: "t8-offline-sender", Epoch: 1, OwnerLane: "lane-destination", ReportPath: "report.md"}
+	hub.relayJobEventFrom("host-a", "job.completed", event) // host-a is disconnected.
+	if injected := drainRelays(destinationAgent); injected != 1 {
+		t.Fatalf("destination injections=%d, want one", injected)
+	}
+	if acks := drainPersisted(destinationAgent); len(acks) != 0 {
+		t.Fatalf("offline sender acknowledged destination: %+v", acks)
+	}
+	if fake.rowCount() != 1 {
+		t.Fatalf("handoffkeep rows=%d, want one durable relay", fake.rowCount())
+	}
+}
+
 // TestR20T8TwoNodeSnapshotAcknowledgesOnlySender reproduces the incident from
 // its sanitized journal using distinct sender and destination stores. It pins
 // AC1 through AC5, including real twin rows on the destination node.
@@ -200,6 +285,7 @@ func TestR20T8TwoNodeSnapshotAcknowledgesOnlySender(t *testing.T) {
 	destinationStore := NewMemoryStore(t)
 	defer destinationStore.Close()
 	r20t8SeedOutbox(t, destinationStore, stuck) // Actual destination twins.
+	destination := r20t7Node(inbox, destinationStore, latest.Add(time.Hour))
 
 	sourceRowsBefore := r20t8OutboxRows(t, sourceStore)
 	destinationRowsBefore := r20t8OutboxRows(t, destinationStore)
@@ -216,8 +302,12 @@ func TestR20T8TwoNodeSnapshotAcknowledgesOnlySender(t *testing.T) {
 		}
 		hub.handleAgentMessage("host-a", "fixture", sourceAgent, wire)
 		injections += drainRelays(destinationAgent)
-		if acks := drainPersisted(destinationAgent); len(acks) != 0 {
-			t.Fatalf("destination received relay.persisted for sender event: %+v", acks)
+		destinationAcks := drainPersisted(destinationAgent)
+		for _, ack := range destinationAcks {
+			destination.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID})
+		}
+		if len(destinationAcks) != 0 {
+			t.Fatalf("destination received relay.persisted for sender event: %+v", destinationAcks)
 		}
 		acks := drainPersisted(sourceAgent)
 		if len(acks) != 1 || acks[0].JobID != event.relayKey.JobID || acks[0].Epoch != event.relayKey.Epoch {

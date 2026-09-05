@@ -13,19 +13,28 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // emitRelayKinds is the closed set of relay record kinds. It matches both the
 // node scanner and handoffkeep's own CHECK constraint.
-var emitRelayKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true}
+var emitRelayKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "lane.event": true}
+
+const laneEventTextLimit = 2048
+
+var errDuplicateLaneEventID = errors.New("duplicate lane event id")
+
+// errEmitDuplicateOutboxKey means an existing file has the same relay key but
+// represents different metadata. Unlike a wrk-written record followed by its
+// immediate notification, that second record would be lost if treated as an
+// ordinary duplicate.
+var errEmitDuplicateOutboxKey = errors.New("duplicate outbox key")
 
 // relayEventPathFallbackKinds are the kinds whose own event file is the durable
 // record when no separate report exists. `panewire emit` and the node scanner
 // both consult this map: if only one of them substituted the event path, the
 // same event would carry two different report paths and so two dedupe keys.
 var relayEventPathFallbackKinds = map[string]bool{"job.escalate": true, "job.joined": true}
-
-var errEmitDuplicateOutboxKey = errors.New("duplicate outbox key")
 
 // emitInboxRoot resolves the same namespace the daemon watches, so an event a
 // worker writes is the event the node later scans.
@@ -61,13 +70,19 @@ type emitRecord struct {
 	PR             string `json:"pr,omitempty"`
 	Head           string `json:"head,omitempty"`
 	PaneID         string `json:"pane_id,omitempty"`
+	EventID        string `json:"event_id,omitempty"`
+	Text           string `json:"text,omitempty"`
+	Truncated      bool   `json:"truncated,omitempty"`
 }
 
 func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	fs := flag.NewFlagSet("panewire emit", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	kind := fs.String("kind", "", "job.completed | job.escalate | job.joined")
+	kind := fs.String("kind", "", "job.completed | job.escalate | job.joined | lane.event")
 	job := fs.String("job", "", "job id")
+	lane := fs.String("lane", "", "direct destination lane for lane.event")
+	eventID := fs.String("event-id", "", "producer event id for lane.event")
+	text := fs.String("text", "", "payload for lane.event")
 	report := fs.String("report", "", "report path")
 	ownerLane := fs.String("owner-lane", "", "owning lane")
 	epoch := fs.Uint64("epoch", 0, "job epoch (defaults to 1)")
@@ -84,7 +99,37 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	if fs.Parse(args) != nil || fs.NArg() != 0 {
 		return ExitUsage
 	}
-	if !emitRelayKinds[*kind] || *job == "" || *timeout <= 0 || !hubJobIDPattern.MatchString(*job) {
+	if !emitRelayKinds[*kind] || *timeout <= 0 {
+		return ExitUsage
+	}
+	if *kind == "lane.event" {
+		if !hubAgentLabelPattern.MatchString(*lane) || !validLaneEventID(*eventID) || !validLaneEventText(*text) {
+			return ExitUsage
+		}
+		finalText, truncated := truncateLaneEventText(*text)
+		record := emitRecord{Type: *kind, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: *pane, EventID: *eventID, Text: finalText, Truncated: truncated}
+		if record.Epoch == 0 {
+			record.Epoch = 1
+		}
+		root := emitInboxRoot(*inboxRoot)
+		if _, err := writeLaneEmitRecord(root, record); err != nil {
+			if errors.Is(err, errDuplicateLaneEventID) {
+				fmt.Fprintln(stderr, "emit: duplicate event_id")
+				return ExitUsage
+			}
+			fmt.Fprintln(stderr, "emit: event file could not be written:", err)
+			return ExitInternal
+		}
+		socket := cfg.SocketPath
+		if socket == "" {
+			socket = socketPathFromEnv()
+		}
+		if !pushEmitRecord(socket, record, root, *timeout) {
+			fmt.Fprintln(stderr, "emit: panewired unavailable; event recorded to file only")
+		}
+		return ExitOK
+	}
+	if *job == "" || !hubJobIDPattern.MatchString(*job) {
 		return ExitUsage
 	}
 	// A completion is meaningless without the report it announces. An escalation
@@ -138,9 +183,11 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	return ExitOK
 }
 
-// writeEmitRecord rejects a duplicate event key before it reaches the socket.
-// Empty-report escalations compare question too: their distinct event files
-// become distinct report_path values on the scanner path without new key fields.
+// writeEmitRecord recognizes a byte-for-byte equivalent relay record already
+// written by wrk as the durable half of the same event. It returns that path so
+// emit can still make the immediate socket notification. A same-key record with
+// different metadata is an explicit conflict: silently reusing its file would
+// discard a real event.
 func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	eventsDir := filepath.Join(inboxRoot, "jobs", record.JobID, "events")
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
@@ -164,8 +211,14 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		if !ok || existing.key != key {
 			continue
 		}
+		// Empty-report escalations derive their eventual relay key from their
+		// own event-file path. Different questions must therefore receive
+		// separate files, even though the pre-file key is the same.
 		if record.Type == "job.escalate" && record.ReportPath == "" && existing.question != record.Question {
 			continue
+		}
+		if existing.matches(record) {
+			return filepath.Join(eventsDir, entry.Name()), nil
 		}
 		return "", errEmitDuplicateOutboxKey
 	}
@@ -197,15 +250,175 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	return final, nil
 }
 
-type emitDedupeRecord struct {
-	key      string
-	question string
+// writeLaneEmitRecord intentionally uses events-lane rather than jobs/<id>.
+// These records have no job lifecycle and must never enter active-job scans,
+// late registration, or orphan sweeping. The producer-visible key is the
+// direct (owner_lane,event_id) pair, so duplicates are an error rather than
+// the silent job.* file reuse contract.
+func writeLaneEmitRecord(inboxRoot string, record emitRecord) (string, error) {
+	eventsDir := filepath.Join(inboxRoot, "events-lane")
+	if err := os.MkdirAll(eventsDir, 0700); err != nil {
+		return "", err
+	}
+	entries, err := os.ReadDir(eventsDir)
+	if err != nil {
+		return "", err
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	var highest uint64
+	key := relayLaneEventOutboxKey(record.OwnerLane, record.EventID)
+	for _, entry := range entries {
+		if seq, ok := hubEventSequence(entry.Name()); ok && seq > highest {
+			highest = seq
+		}
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		if existing, ok := readEmitLaneEventDedupeKey(eventsDir, entry.Name()); ok && existing == key {
+			return "", errDuplicateLaneEventID
+		}
+	}
+	contents, err := json.Marshal(record)
+	if err != nil {
+		return "", err
+	}
+	temporary, err := os.CreateTemp(eventsDir, ".emit-*")
+	if err != nil {
+		return "", err
+	}
+	name := temporary.Name()
+	defer os.Remove(name)
+	if err := temporary.Chmod(0600); err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
+	if _, err := temporary.Write(contents); err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
+	if err := temporary.Close(); err != nil {
+		return "", err
+	}
+	for {
+		highest++
+		final := filepath.Join(eventsDir, fmt.Sprintf("%05d-lane.event.json", highest))
+		// Link publishes the already-closed temporary file without replacing an
+		// existing name. Rename would let two concurrent producers select the
+		// same sequence and overwrite one another, which is unacceptable for a
+		// durable lane event. A collision is either this key's duplicate or a
+		// different producer that won the sequence, in which case try the next.
+		if err := os.Link(name, final); err == nil {
+			return final, nil
+		} else if !errors.Is(err, os.ErrExist) {
+			return "", err
+		}
+		if existing, ok := readEmitLaneEventDedupeKey(eventsDir, filepath.Base(final)); ok && existing == key {
+			return "", errDuplicateLaneEventID
+		}
+	}
 }
 
-// readEmitDedupeKey reads one existing event file into the dedupe record of the
-// record it holds. The event-path fallback is deliberately not applied here:
-// suppressing a duplicate file compares what the files carry, and a record that
-// has not been named yet has no event path to compare against.
+func readEmitLaneEventDedupeKey(eventsDir, name string) (string, bool) {
+	contents, err := os.ReadFile(filepath.Join(eventsDir, name))
+	if err != nil || len(contents) > 16<<10 {
+		return "", false
+	}
+	var event emitRecord
+	if json.Unmarshal(contents, &event) != nil || event.Type != "lane.event" || !validLaneEventID(event.EventID) || !hubAgentLabelPattern.MatchString(event.OwnerLane) {
+		return "", false
+	}
+	return relayLaneEventOutboxKey(event.OwnerLane, event.EventID), true
+}
+
+func validLaneEventID(value string) bool {
+	if value == "" || len(value) > 512 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
+}
+
+func validLaneEventText(value string) bool {
+	if value == "" || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
+}
+
+func validLaneRelayText(value string) bool {
+	if value == "" || len(value) > 4096 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+			return false
+		}
+	}
+	return true
+}
+
+// truncateLaneEventText is the only truncation point for lane.event text.
+// It runs on the producer node before the file, outbox key, and wire payload
+// are made; the hub only validates this final form so acknowledgements cannot
+// name a different record after a restart.
+func truncateLaneEventText(value string) (string, bool) {
+	if len(value) <= laneEventTextLimit {
+		return value, false
+	}
+	const marker = "[truncated]"
+	limit := laneEventTextLimit - len(marker)
+	for limit > 0 && !utf8.ValidString(value[:limit]) {
+		limit--
+	}
+	return value[:limit] + marker, true
+}
+
+type emitDedupeRecord struct {
+	key            string
+	kind           string
+	epoch          uint64
+	ownerLane      string
+	label          string
+	host           string
+	reportPath     string
+	reportLastLine string
+	reason         string
+	question       string
+	pr             string
+	head           string
+	paneID         string
+}
+
+// matches intentionally omits CreatedAt and AgentLabel. CreatedAt is local
+// write time, while older wrk records do not carry AgentLabel; neither changes
+// the relay event wrk asks emit to notify immediately.
+func (existing emitDedupeRecord) matches(record emitRecord) bool {
+	return existing.kind == record.Type &&
+		existing.epoch == record.Epoch &&
+		existing.ownerLane == record.OwnerLane &&
+		existing.label == record.Label &&
+		existing.host == record.Host &&
+		existing.reportPath == record.ReportPath &&
+		existing.reportLastLine == record.ReportLastLine &&
+		existing.reason == record.Reason &&
+		existing.question == record.Question &&
+		existing.pr == record.PR &&
+		existing.head == record.Head &&
+		existing.paneID == record.PaneID
+}
+
+// readEmitDedupeKey reads one existing event file into the dedupe record it
+// holds. The event-path fallback is deliberately not applied here: comparing a
+// file written before it was named must use the fields it actually carries.
 func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 	contents, err := os.ReadFile(filepath.Join(eventsDir, name))
 	if err != nil || len(contents) > 16<<10 {
@@ -226,7 +439,21 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 	if epoch == 0 {
 		epoch = 1
 	}
-	return emitDedupeRecord{key: relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()), question: event.question()}, true
+	return emitDedupeRecord{
+		key:            relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()),
+		kind:           kind,
+		epoch:          epoch,
+		ownerLane:      event.ownerLane(),
+		label:          event.label(),
+		host:           event.host(),
+		reportPath:     event.reportPath(),
+		reportLastLine: event.reportLastLine(),
+		reason:         event.reason(),
+		question:       event.question(),
+		pr:             event.pr(),
+		head:           event.head(),
+		paneID:         event.paneID(),
+	}, true
 }
 
 func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout time.Duration) bool {
@@ -240,7 +467,7 @@ func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout 
 		Op: "emit", Kind: record.Type, JobID: record.JobID, Epoch: record.Epoch, OwnerLane: record.OwnerLane,
 		Label: record.Label, Host: record.Host, PaneID: record.PaneID, ReportPath: record.ReportPath,
 		ReportLastLine: record.ReportLastLine, Reason: record.Reason, Question: record.Question,
-		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),
+		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, EventID: record.EventID, Text: record.Text, Truncated: record.Truncated, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),
 	}
 	body, _ := json.Marshal(request)
 	if _, err := fmt.Fprintf(connection, "%s\n", body); err != nil {

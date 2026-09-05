@@ -58,6 +58,9 @@ func relayText(completion hubJobEventPayload) string {
 }
 
 func relayTextForKind(kind string, event hubJobEventPayload) string {
+	if kind == "lane.event" {
+		return "(같은 내용이 두 번 보이면 재실행 금지) [event] " + event.OwnerLane + " :: " + event.Text
+	}
 	if kind == "job.escalate" {
 		return escalationRelayText(event)
 	}
@@ -132,6 +135,9 @@ func relayDedupeKey(completion hubJobEventPayload) string {
 }
 
 func relayEventDedupeKey(kind string, completion hubJobEventPayload) string {
+	if kind == "lane.event" {
+		return relayLaneEventOutboxKey(completion.OwnerLane, completion.EventID)
+	}
 	return kind + "\x00" + relayDedupeKey(completion)
 }
 
@@ -141,6 +147,85 @@ func (h *HubServer) relayJobCompletion(completion hubJobEventPayload) {
 
 func (h *HubServer) relayJobCompletionFrom(senderMachine string, completion hubJobEventPayload) {
 	h.relayJobEventFrom(senderMachine, "job.completed", completion)
+}
+
+// relayLaneEvent follows the R20 persistence cursor but has intentionally
+// different routing failure semantics from job.*: no route is still a durable
+// handoffkeep row, and the sending node is acknowledged once that row exists.
+func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
+	if event.OwnerLane == "" || event.EventID == "" || event.Text == "" {
+		return
+	}
+	key := relayEventDedupeKey("lane.event", event)
+	h.mu.Lock()
+	if persistedID := h.lanePersisted[key]; persistedID != 0 {
+		h.mu.Unlock()
+		// The hub already owns the durable row. A source retry is an ACK-loss
+		// recovery, not another delivery attempt, so it must not re-POST and
+		// consume the delivery budget.
+		h.queueLaneRelayPersisted(event, sender, persistedID)
+		return
+	}
+	knownID, duplicate := h.relayDedupe[key]
+	if !duplicate {
+		h.relayDedupe[key] = 0
+	}
+	h.mu.Unlock()
+	if duplicate {
+		if knownID != 0 {
+			h.queueLaneRelayPersisted(event, sender, knownID)
+		}
+		return
+	}
+	if h.handoffkeep == nil {
+		h.forgetRelayEvent(key)
+		h.broadcastRelayUnpersisted("lane.event", event)
+		return
+	}
+	route, target, routed := h.resolveRelayRoute("lane.event", event)
+	stored, status, persisted := h.persistRelayEventRecord("lane.event", event, route)
+	if !persisted {
+		h.logger.Error("lane.event persistence failed; handoffkeep schema v7 must be deployed before this hub", "lane", event.OwnerLane, "producer_event_id", event.EventID, "status", status)
+		h.forgetRelayEvent(key)
+		h.broadcastRelayUnpersisted("lane.event", event)
+		return
+	}
+	// handoffkeep is first-writer-wins. A hub that restarted after the first
+	// POST must inject the returned durable text, not a changed duplicate body.
+	if status == http.StatusOK {
+		event = laneEventFromStored(stored)
+	}
+	h.rememberLanePersisted(key, stored.ID)
+	h.rememberRelayEvent(key, stored.ID)
+	if event.Truncated {
+		h.broadcastRelayTruncated(event)
+	}
+	// Delivery responsibility has moved to the hub at this point. This ACK is
+	// deliberately sent to the producer's node, never the destination pane.
+	h.queueLaneRelayPersisted(event, sender, stored.ID)
+	if relayEventAlreadyDelivered(status, stored) {
+		h.broadcastRelayAlreadyDelivered("lane.event", event, stored)
+		return
+	}
+	if !routed {
+		// The durable row remains for replay. The active injection claim is
+		// released, while lanePersisted retains its row ID so producer retries
+		// are acknowledged without re-POSTing.
+		h.forgetRelayEvent(key)
+		h.broadcastRelayUnrouted(event)
+		return
+	}
+	h.injectLaneRelayEvent(event, route, target, stored.ID, key)
+}
+
+func laneEventFromStored(record handoffkeepRelayEvent) hubJobEventPayload {
+	return hubJobEventPayload{
+		JobID:     laneEventTransportID(record.OwnerLane, record.EventID),
+		Epoch:     uint64(record.Epoch),
+		OwnerLane: record.OwnerLane,
+		EventID:   record.EventID,
+		Text:      record.Text,
+	}
 }
 
 // h.relayDedupe maps one dedupe key to the handoffkeep row it stands for. The
@@ -258,6 +343,22 @@ func (h *HubServer) rememberRelayEvent(key string, eventID int64) {
 	h.mu.Unlock()
 }
 
+// rememberLanePersisted retains a durable lane row independently from the
+// active injection claim. The latter is released after a route miss or ACK
+// timeout so replay can try again; retaining this ID keeps producer resends
+// from being miscounted as delivery attempts in the meantime.
+func (h *HubServer) rememberLanePersisted(key string, eventID int64) {
+	if eventID == 0 {
+		return
+	}
+	h.mu.Lock()
+	if h.lanePersisted == nil {
+		h.lanePersisted = make(map[string]int64)
+	}
+	h.lanePersisted[key] = eventID
+	h.mu.Unlock()
+}
+
 // forgetRelayEvent releases a dedupe key that stands for no durable row.
 func (h *HubServer) forgetRelayEvent(key string) {
 	h.mu.Lock()
@@ -274,6 +375,11 @@ func (h *HubServer) queueRelayPersisted(kind string, event hubJobEventPayload, a
 	return agent.queuePersisted(hubRelayPersistedEvent{Type: "relay.persisted", JobID: event.JobID, Kind: kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: eventID})
 }
 
+// relayPersistedAgent selects the actual producer when this arrived over a
+// node connection. Direct unit-test and internal callers without sender
+// identity retain the historical destination fallback. A disconnected sender
+// receives no speculative acknowledgement; its resend after reconnecting is
+// addressed to its newly connected agent.
 func (h *HubServer) relayPersistedAgent(senderMachine string, fallback *hubAgent) *hubAgent {
 	if senderMachine == "" {
 		return fallback
@@ -282,11 +388,16 @@ func (h *HubServer) relayPersistedAgent(senderMachine string, fallback *hubAgent
 	sender := h.nodes[senderMachine]
 	h.mu.Unlock()
 	if sender == nil || sender.agent == nil {
-		// The hub retains no acknowledgement state. A disconnected sender
-		// resends after reconnecting, then this path addresses its new agent.
 		return nil
 	}
 	return sender.agent
+}
+
+func (h *HubServer) queueLaneRelayPersisted(event hubJobEventPayload, agent *hubAgent, eventID int64) bool {
+	if agent == nil || eventID == 0 {
+		return false
+	}
+	return agent.queuePersisted(hubRelayPersistedEvent{Type: "relay.persisted", JobID: event.JobID, Kind: "lane.event", Epoch: event.Epoch, EventID: eventID, Lane: event.OwnerLane, ProducerEventID: event.EventID})
 }
 
 func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (reportRelayRoute, *hubAgent, bool) {
@@ -327,11 +438,29 @@ func (h *HubServer) injectRelayEvent(kind string, event hubJobEventPayload, rout
 	return true
 }
 
+func (h *HubServer) injectLaneRelayEvent(event hubJobEventPayload, route reportRelayRoute, agent *hubAgent, eventID int64, key string) bool {
+	if !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", Kind: "lane.event", JobID: event.JobID, Pane: route.Pane, Text: relayTextForKind("lane.event", event)}) {
+		h.forgetRelayEvent(key)
+		h.broadcastRelayUnrouted(event)
+		return false
+	}
+	h.startRelayAckEvent("lane.event", event, route.Machine, route.Pane, eventID)
+	return true
+}
+
 // An unrouted/temporarily disconnected target remains observable to the
 // operator event feed. It is deliberately not reinterpreted as success.
 func (h *HubServer) broadcastRelayUnrouted(event hubJobEventPayload) {
 	payload, _ := json.Marshal(event)
 	h.broadcast(hubEvent{Kind: "relay.unrouted", Payload: payload, Received: h.now().UTC()})
+}
+
+func (h *HubServer) broadcastRelayTruncated(event hubJobEventPayload) {
+	payload, _ := json.Marshal(struct {
+		Lane    string `json:"lane"`
+		EventID string `json:"event_id"`
+	}{Lane: event.OwnerLane, EventID: event.EventID})
+	h.broadcast(hubEvent{Kind: "relay.truncated", Payload: payload, Received: h.now().UTC()})
 }
 
 // broadcastRelayReplayExhausted keeps a row the hub has stopped replaying
@@ -381,7 +510,7 @@ func (h *HubServer) relayEventRequest(kind string, event hubJobEventPayload, rou
 	return handoffkeepRelayEventRequest{
 		Kind: kind, JobID: event.JobID, Epoch: int(event.Epoch), OwnerLane: event.OwnerLane,
 		Machine: route.Machine, PaneID: route.Pane, ReportPath: event.ReportPath, ReportLastLine: event.ReportLastLine,
-		Question: event.Question, PR: event.PR, Head: event.Head, Reason: event.Reason,
+		Question: event.Question, PR: event.PR, Head: event.Head, Reason: event.Reason, EventID: event.EventID, Text: event.Text,
 		EventTime: h.now().UTC().Format(time.RFC3339),
 	}
 }
@@ -458,25 +587,57 @@ func (h *HubServer) replayUndeliveredRelayEvents(ctx context.Context) {
 	if h.handoffkeep == nil {
 		return
 	}
-	seen := make(map[int64]struct{})
-	// The contract exposes no cursor, so paging stops as soon as a page adds
-	// nothing new. Rows come back id-ascending, so the oldest are replayed first.
-	for page := 0; page < 16; page++ {
-		records, err := h.handoffkeep.listUndelivered(ctx, "", handoffkeepReplayLimit)
+	var afterID int64
+	for {
+		pageStart := afterID
+		records, err := h.handoffkeep.listUndelivered(ctx, "", "", afterID, handoffkeepReplayLimit)
 		if err != nil {
 			h.logger.Warn("undelivered relay events could not be read at startup")
 			return
 		}
-		added := 0
 		for _, record := range records {
-			if _, duplicate := seen[record.ID]; duplicate {
-				continue
-			}
-			seen[record.ID] = struct{}{}
-			added++
 			h.replayRelayEvent(record)
+			if record.ID > afterID {
+				afterID = record.ID
+			}
 		}
-		if added == 0 || len(records) < handoffkeepReplayLimit {
+		if len(records) < handoffkeepReplayLimit {
+			return
+		}
+		if afterID <= pageStart {
+			h.logger.Warn("undelivered relay replay cursor did not advance", "after_id", pageStart)
+			return
+		}
+	}
+}
+
+// replayUndeliveredLaneEvents runs after a node hello. A lanes.json edit has
+// no daemon restart signal of its own, so the next destination registration is
+// the safe retry trigger. The ordinary delivered_at and attempts gates remain
+// centralized in replayRelayEvent.
+func (h *HubServer) replayUndeliveredLaneEvents(ctx context.Context) {
+	if h.handoffkeep == nil {
+		return
+	}
+	var afterID int64
+	for {
+		pageStart := afterID
+		records, err := h.handoffkeep.listUndelivered(ctx, "", "lane.event", afterID, handoffkeepReplayLimit)
+		if err != nil {
+			h.logger.Warn("undelivered lane events could not be read after node registration")
+			return
+		}
+		for _, record := range records {
+			h.replayRelayEvent(record)
+			if record.ID > afterID {
+				afterID = record.ID
+			}
+		}
+		if len(records) < handoffkeepReplayLimit {
+			return
+		}
+		if afterID <= pageStart {
+			h.logger.Warn("undelivered lane replay cursor did not advance", "after_id", pageStart)
 			return
 		}
 	}
@@ -486,7 +647,10 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 	event := hubJobEventPayload{
 		JobID: record.JobID, Epoch: uint64(record.Epoch), OwnerLane: record.OwnerLane,
 		ReportPath: record.ReportPath, ReportLastLine: record.ReportLastLine,
-		Question: record.Question, PR: record.PR, Head: record.Head, Reason: record.Reason, PaneID: record.PaneID,
+		Question: record.Question, PR: record.PR, Head: record.Head, Reason: record.Reason, PaneID: record.PaneID, EventID: record.EventID, Text: record.Text,
+	}
+	if record.Kind == "lane.event" {
+		event.JobID = laneEventTransportID(record.OwnerLane, record.EventID)
 	}
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
@@ -502,6 +666,9 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 		return
 	}
 	key := relayEventDedupeKey(record.Kind, event)
+	if record.Kind == "lane.event" {
+		h.rememberLanePersisted(key, record.ID)
+	}
 	h.mu.Lock()
 	if _, exists := h.relayDedupe[key]; exists {
 		h.mu.Unlock()
@@ -515,9 +682,14 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 		h.broadcastRelayUnrouted(event)
 		return
 	}
-	// handoffkeep replay records the destination machine, not the original
-	// sender. Do not acknowledge that destination; the sender's resend does so.
-	if !h.injectRelayEvent(record.Kind, event, route, agent, nil, record.ID, key) {
+	if record.Kind == "lane.event" {
+		if !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", Kind: "lane.event", JobID: event.JobID, Pane: route.Pane, Text: relayTextForKind("lane.event", event)}) {
+			h.forgetRelayEvent(key)
+			h.broadcastRelayUnrouted(event)
+			return
+		}
+		h.startRelayAckEvent("lane.event", event, route.Machine, route.Pane, record.ID)
+	} else if !h.injectRelayEvent(record.Kind, event, route, agent, nil, record.ID, key) {
 		return
 	}
 	// The replay just spent an attempt. Recording it is what makes the gate

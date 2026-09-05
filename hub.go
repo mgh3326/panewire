@@ -162,6 +162,11 @@ type hubJobReassignment struct {
 }
 
 type hubJobEventPayload struct {
+	// lane.event uses these relay-only fields. It deliberately never enters
+	// the hub's job registration paths despite sharing the delivery envelope.
+	EventID        string    `json:"event_id,omitempty"`
+	Text           string    `json:"text,omitempty"`
+	Truncated      bool      `json:"truncated,omitempty"`
 	JobID          string    `json:"job_id"`
 	Node           string    `json:"node,omitempty"`
 	From           string    `json:"from,omitempty"`
@@ -192,6 +197,7 @@ type relayAckPayload struct {
 
 type hubRelayInjectEvent struct {
 	Type  string `json:"type"`
+	Kind  string `json:"kind,omitempty"`
 	JobID string `json:"job_id"`
 	Pane  string `json:"pane"`
 	Text  string `json:"text"`
@@ -207,13 +213,15 @@ type hubJobRevokedEvent struct {
 // so the node may retire it from its local outbox. It carries the same dedupe
 // fields the node keyed the outbox row by.
 type hubRelayPersistedEvent struct {
-	Type       string `json:"type"`
-	JobID      string `json:"job_id"`
-	Kind       string `json:"kind"`
-	Epoch      uint64 `json:"epoch"`
-	ReportPath string `json:"report_path"`
-	Reason     string `json:"reason"`
-	EventID    int64  `json:"event_id"`
+	Type            string `json:"type"`
+	JobID           string `json:"job_id"`
+	Kind            string `json:"kind"`
+	Epoch           uint64 `json:"epoch"`
+	ReportPath      string `json:"report_path"`
+	Reason          string `json:"reason"`
+	EventID         int64  `json:"event_id"`
+	Lane            string `json:"lane,omitempty"`
+	ProducerEventID string `json:"producer_event_id,omitempty"`
 }
 
 // hubJobAssignedEvent is the hub-issued epoch a redispatched owner must use.
@@ -276,35 +284,38 @@ type HubServer struct {
 	notifier          HubNotifier
 	logger            *slog.Logger
 
-	mu                          sync.Mutex
-	nodes                       map[string]*hubNodeRecord
-	lastNotes                   map[string]*HubLastNote
-	subscribers                 map[*hubEventSubscriber]struct{}
-	alerts                      map[string]*hubAlertState
-	burstPolicyPath             string
-	burstPolicy                 BurstPolicy
-	burstPolicyModTime          time.Time
-	burstState                  *hubBurstState
-	unknownMessages             uint64
-	unfencedCompletions         uint64
-	startedAt                   time.Time
-	uiAllowCFOnly               bool
-	uiEvents                    []hubUIEvent
-	jobs                        map[string]*hubJobRecord
-	pendingRevocations          map[string]map[string]hubJobRevokedEvent
-	holds                       map[string]*hubBurstHold
-	placementPolicyPath         string
-	placementPolicy             PlacementPolicy
-	placementPolicyModTime      time.Time
-	prometheusURL               string
-	prometheusClient            *http.Client
-	prometheusBearer            string
-	prometheusBasicUser         string
-	prometheusBasicPass         string
-	placementCache              placementCache
-	r19a                        r19aHubState
-	reportRelayPath             string
+	mu                     sync.Mutex
+	nodes                  map[string]*hubNodeRecord
+	lastNotes              map[string]*HubLastNote
+	subscribers            map[*hubEventSubscriber]struct{}
+	alerts                 map[string]*hubAlertState
+	burstPolicyPath        string
+	burstPolicy            BurstPolicy
+	burstPolicyModTime     time.Time
+	burstState             *hubBurstState
+	unknownMessages        uint64
+	unfencedCompletions    uint64
+	startedAt              time.Time
+	uiAllowCFOnly          bool
+	uiEvents               []hubUIEvent
+	jobs                   map[string]*hubJobRecord
+	pendingRevocations     map[string]map[string]hubJobRevokedEvent
+	holds                  map[string]*hubBurstHold
+	placementPolicyPath    string
+	placementPolicy        PlacementPolicy
+	placementPolicyModTime time.Time
+	prometheusURL          string
+	prometheusClient       *http.Client
+	prometheusBearer       string
+	prometheusBasicUser    string
+	prometheusBasicPass    string
+	placementCache         placementCache
+	r19a                   r19aHubState
+	reportRelayPath        string
+	// relayDedupe is an active injection claim. lanePersisted keeps the durable
+	// row ID while that claim is deliberately released between lane retries.
 	relayDedupe                 map[string]int64
+	lanePersisted               map[string]int64
 	handoffkeep                 *handoffkeepRelayClient
 	unpersistedRelayEvents      uint64
 	replayExhaustedEvents       uint64
@@ -400,7 +411,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), lanePersisted: make(map[string]int64), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
 	}, nil
 }
 
@@ -791,6 +802,14 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.relayJobEventFrom(machineID, message.Kind, event)
 		}
+		if message.Kind == "lane.event" {
+			event, valid := decodeHubLaneEventPayload(message.Payload)
+			if !valid {
+				h.countUnknownMessage()
+				return
+			}
+			h.relayLaneEvent(event, agent)
+		}
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
 			ack, valid := decodeRelayAckPayload(message.Payload)
 			if !valid {
@@ -1033,6 +1052,11 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
+		if message.Kind == "lane.event" {
+			if _, valid := decodeHubLaneEventPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
 			if _, valid := decodeRelayAckPayload(rawPayload); !valid {
 				return hubInbound{}, false
@@ -1047,13 +1071,16 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "job.revocation.ack", "relay.delivered", "relay.unconfirmed":
+	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "lane.event", "job.revocation.ack", "relay.delivered", "relay.unconfirmed":
 		return true
 	}
 	return false
 }
 
 func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAgent, accepting bool) {
+	// A node registration is the safe no-restart retry trigger for durable
+	// lane.event rows whose route was absent or disconnected when produced.
+	defer func() { go h.replayUndeliveredLaneEvents(context.Background()) }()
 	now := h.now().UTC()
 	var previous *hubAgent
 	h.mu.Lock()

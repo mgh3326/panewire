@@ -5,6 +5,10 @@ R19 relayed reports from files the node rescanned every ten seconds, and the
 everything the inbox still held. R20 keeps the files but moves the canonical
 record into Postgres, behind handoffkeep.
 
+The same cursor machinery also carries direct producer notifications under the
+[R21 lane-event contract](r21-lane-event.md); its separate key and isolated
+file namespace keep those records out of job lifecycle processing.
+
 ## The flow
 
 ```
