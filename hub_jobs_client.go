@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -25,11 +26,67 @@ func hubJobActiveMaxAge() time.Duration {
 type hubScannedJob struct {
 	job       HubActiveJob
 	lastEvent time.Time
+	// paneID is node-local: it is used only to cross-check liveness and is
+	// deliberately absent from HubActiveJob, the wire payload.
+	paneID string
+}
+
+// panesAliveFunc reports the panes that currently host a live agent. A nil
+// hook, or one that fails, leaves the active set untouched.
+type panesAliveFunc func(context.Context) (map[string]bool, error)
+
+// hubPanesAliveTimeout bounds the once-per-scan liveness lookup. The scan runs
+// inline in the heartbeat, so a stalled herdr must not hold it open.
+const hubPanesAliveTimeout = 2 * time.Second
+
+// hubPanesAlive performs the single liveness lookup for one scan. The second
+// result is false whenever the answer is unknown, which keeps every job active.
+func hubPanesAlive(ctx context.Context, panesAlive panesAliveFunc) (map[string]bool, bool) {
+	if panesAlive == nil {
+		return nil, false
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lookup, cancel := context.WithTimeout(ctx, hubPanesAliveTimeout)
+	defer cancel()
+	alive, err := panesAlive(lookup)
+	if err != nil {
+		return nil, false
+	}
+	return alive, true
+}
+
+// filterActiveJobsByPane drops jobs whose spawn pane no longer hosts an agent.
+// Every uncertainty fails open toward "active": an unknown pane, or an
+// unavailable liveness source (aliveKnown false), keeps the job. Counting a
+// dead job as active only costs this node a placement refusal, while dropping
+// a live one invites overplacement onto an already-loaded machine.
+func filterActiveJobsByPane(jobs []hubScannedJob, alive map[string]bool, aliveKnown bool) []hubScannedJob {
+	if !aliveKnown {
+		return jobs
+	}
+	kept := make([]hubScannedJob, 0, len(jobs))
+	for _, scanned := range jobs {
+		if scanned.paneID != "" && !alive[scanned.paneID] {
+			continue
+		}
+		kept = append(kept, scanned)
+	}
+	return kept
 }
 
 // scanHubActiveJobs reads only structured local event metadata. It is capped
 // before it reaches a wire payload; brief text is never copied.
 func scanHubActiveJobs(inboxRoot string) []HubActiveJob {
+	return scanHubActiveJobsWithPanes(context.Background(), inboxRoot, nil)
+}
+
+// scanHubActiveJobsWithPanes cross-checks the scanned set against the panes
+// that still host an agent. A job whose pane is gone left no terminal event
+// behind — a killed pane writes nothing — so pane liveness is the only
+// remaining truth about it. panesAlive is called at most once per scan.
+func scanHubActiveJobsWithPanes(ctx context.Context, inboxRoot string, panesAlive panesAliveFunc) []HubActiveJob {
 	if inboxRoot == "" {
 		return nil
 	}
@@ -46,6 +103,10 @@ func scanHubActiveJobs(inboxRoot string) []HubActiveJob {
 			jobs = append(jobs, scanned)
 		}
 	}
+	// Filtering precedes the cap: stale entries must not consume the 32 slots
+	// that the still-live jobs need.
+	alive, aliveKnown := hubPanesAlive(ctx, panesAlive)
+	jobs = filterActiveJobsByPane(jobs, alive, aliveKnown)
 	// Do not let old lexically early inbox directories hide recent work.
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].lastEvent.After(jobs[j].lastEvent) })
 	if len(jobs) > 32 {
@@ -304,6 +365,7 @@ func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	var active HubActiveJob
 	var claimTime, lastEvent time.Time
+	var paneID string
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -331,14 +393,17 @@ func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 			if seqOK && validHubActiveJob(candidate) {
 				active, claimTime = candidate, eventTime
 			}
+		case "job.spawned":
+			// The spawn record is the only place the worker pane is named.
+			paneID = event.paneID()
 		case "job.completed", "job.completion", "job.revoked":
-			active, claimTime = HubActiveJob{}, time.Time{}
+			active, claimTime, paneID = HubActiveJob{}, time.Time{}, ""
 		}
 	}
 	if !validHubActiveJob(active) || claimTime.Before(time.Now().Add(-hubJobActiveMaxAge())) {
 		return hubScannedJob{}, false
 	}
-	return hubScannedJob{job: active, lastEvent: lastEvent}, true
+	return hubScannedJob{job: active, lastEvent: lastEvent, paneID: paneID}, true
 }
 
 func scanHubJobEvents(eventsDir, jobID string) (HubActiveJob, bool) {
