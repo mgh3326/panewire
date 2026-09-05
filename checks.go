@@ -68,6 +68,24 @@ func cloneHubHostMemory(memory *HubHostMemory) *HubHostMemory {
 	return &copy
 }
 
+func equalHubHostMemory(left, right *HubHostMemory) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Source == right.Source &&
+		equalMemoryFloat(left.FreePct, right.FreePct) &&
+		equalMemoryFloat(left.CompressedMB, right.CompressedMB) &&
+		equalMemoryFloat(left.SwapUsedMB, right.SwapUsedMB) &&
+		equalMemoryFloat(left.PSISomeAvg10, right.PSISomeAvg10)
+}
+
+func equalMemoryFloat(left, right *float64) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
+}
+
 func cloneMemoryFloat(value *float64) *float64 {
 	if value == nil {
 		return nil

@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -262,6 +263,72 @@ func TestMemoryFieldsAreExposedByPlacementAndNodesAPIs(t *testing.T) {
 	if memory, exists := nodes.Nodes[0]["memory"]; !exists || !strings.Contains(string(memory), `"free_pct":50`) {
 		t.Fatalf("nodes omitted memory: %s", nodesResponse.Body.String())
 	}
+}
+
+func TestPlacementCacheKeepsSameMemoryHeartbeatAndInvalidatesChange(t *testing.T) {
+	var calls atomic.Int32
+	prom := placementPromServer(t, .1, 1, &calls)
+	defer prom.Close()
+	hub := placementHub(t, prom.URL)
+	agent := &hubAgent{}
+	hub.connect("mac-work", "fixture", "fixture", agent, true)
+	memory := &HubHostMemory{FreePct: memoryFloat(50), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"}
+	sendMemoryHeartbeat(t, hub, "mac-work", agent, memory)
+	first := hub.placement(t.Context(), "worker", "cache-fixture")
+	if first.Decision != "mac-work" || calls.Load() != 2 {
+		t.Fatalf("first placement=%+v calls=%d", first, calls.Load())
+	}
+	hub.mu.Lock()
+	cacheAt := hub.placementCache.at
+	hub.mu.Unlock()
+
+	sendMemoryHeartbeat(t, hub, "mac-work", agent, cloneHubHostMemory(memory))
+	second := hub.placement(t.Context(), "worker", "cache-fixture")
+	hub.mu.Lock()
+	secondCacheAt := hub.placementCache.at
+	hub.mu.Unlock()
+	if second.Decision != "mac-work" || calls.Load() != 2 || !secondCacheAt.Equal(cacheAt) {
+		t.Fatalf("same heartbeat invalidated placement cache: second=%+v calls=%d at=%s want=%s", second, calls.Load(), secondCacheAt, cacheAt)
+	}
+
+	sendMemoryHeartbeat(t, hub, "mac-work", agent, &HubHostMemory{FreePct: memoryFloat(20), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"})
+	changed := hub.placement(t.Context(), "worker", "cache-fixture")
+	if changed.Decision != "unavailable" || calls.Load() != 4 {
+		t.Fatalf("changed heartbeat did not invalidate placement cache: changed=%+v calls=%d", changed, calls.Load())
+	}
+}
+
+func TestHeartbeatEventIncludesCollectedHostMemory(t *testing.T) {
+	want := &HubHostMemory{FreePct: memoryFloat(50), CompressedMB: memoryFloat(12), SwapUsedMB: memoryFloat(3), PSISomeAvg10: memoryFloat(.25), Source: "proc_meminfo"}
+	client, err := NewHubClient(HubClientConfig{
+		URL:                   "ws://fixture.invalid",
+		MachineID:             "node-a",
+		Token:                 r6NodeAToken,
+		JobsInboxRoot:         t.TempDir(),
+		AllowInsecureForTests: true,
+		hostLoadCollector: func(context.Context) (HubHostLoad, error) {
+			return HubHostLoad{}, nil
+		},
+		hostMemoryCollector: func(context.Context) (*HubHostMemory, error) {
+			return cloneHubHostMemory(want), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	heartbeat, ok := decodeHubHeartbeatPayload(client.heartbeatEvent(t.Context()).Payload)
+	if !ok || !equalHubHostMemory(heartbeat.HostMemory, want) {
+		t.Fatalf("heartbeat omitted or changed collected memory: %+v ok=%t", heartbeat, ok)
+	}
+}
+
+func sendMemoryHeartbeat(t *testing.T, hub *HubServer, machine string, agent *hubAgent, memory *HubHostMemory) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{"type": "event", "kind": "heartbeat", "payload": map[string]any{"status": "alive", "host_memory": memory}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.handleAgentMessage(machine, "fixture", agent, payload)
 }
 
 func memoryPlacementHub(t *testing.T, machines ...string) *HubServer {

@@ -47,8 +47,11 @@ hub-only decision based on connected/accepting state and heartbeat active-job
 counts; it never returns a scheduler 500.
 
 ```json
-{"decision":"desktop","candidates":[{"machine":"mac-work","score":47,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"reason":"load_ratio>=0.50"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
+{"decision":"desktop","candidates":[{"machine":"mac-work","score":37,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"reason":"load_ratio>=0.50,memory_unknown"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
 ```
+
+A node that does not send memory telemetry records `memory_unknown` rather
+than `available`; this remains fail-open and does not change its score.
 
 When `wake_on_spill` is true and the selected spill target is disconnected, the
 hub starts the existing R16 on-demand burst request in the background with a

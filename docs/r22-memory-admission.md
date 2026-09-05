@@ -45,6 +45,10 @@ candidate is pressured and no usable spill target exists, the decision is
 `unavailable`. This is intentionally fail-closed to protect the local host;
 the mitigation is to hot-reload an adjusted threshold policy.
 
+Because memory pressure follows the non-accepting path, `wake_on_spill` does
+not wake a disconnected spill target for memory pressure: the decision remains
+`unavailable`. Capacity-pressure spill behavior is unchanged.
+
 When `host_memory` is absent, or either admission signal is null, placement is
 fail-open: it does not exclude the candidate or change its score. The candidate
 can record `memory_unknown` as evidence. This preserves behavior for partial

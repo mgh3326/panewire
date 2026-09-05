@@ -55,7 +55,9 @@ type HubClientConfig struct {
 	Dial                  HubDial
 	Wait                  HubWait
 	Warn                  func(string)
-	relayInject           func(context.Context, string, string) bool // fixture seam
+	relayInject           func(context.Context, string, string) bool    // fixture seam
+	hostLoadCollector     func(context.Context) (HubHostLoad, error)    // fixture seam
+	hostMemoryCollector   func(context.Context) (*HubHostMemory, error) // fixture seam
 
 	// failoverWakeDestination is a package-private fixture override. Production
 	// always uses the fixed broadcast destination below.
@@ -118,6 +120,8 @@ type HubClient struct {
 	wait                 HubWait
 	warn                 func(string)
 	relayInject          func(context.Context, string, string) bool
+	hostLoadCollector    func(context.Context) (HubHostLoad, error)
+	hostMemoryCollector  func(context.Context) (*HubHostMemory, error)
 	events               chan hubClientEvent
 	completedJobs        map[string]uint64
 	completedReports     map[string]struct{}
@@ -252,7 +256,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		r19a:   newR19aClientState(config),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version, updateHTTPClient: config.UpdateHTTPClient, executablePath: config.ExecutablePath, restart: config.Restart,
-		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
+		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
 	}, nil
 }
 
@@ -756,10 +760,18 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	holdsActive := client.burstHoldsActive
 	client.burstMu.Unlock()
 	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HoldsActive: holdsActive}
-	if load, err := collectHubHostLoad(ctx); err == nil {
+	collectLoad := client.hostLoadCollector
+	if collectLoad == nil {
+		collectLoad = collectHubHostLoad
+	}
+	if load, err := collectLoad(ctx); err == nil {
 		heartbeat.HostLoad = &load
 	}
-	if memory, err := collectHubHostMemory(ctx); err == nil {
+	collectMemory := client.hostMemoryCollector
+	if collectMemory == nil {
+		collectMemory = collectHubHostMemory
+	}
+	if memory, err := collectMemory(ctx); err == nil {
 		heartbeat.HostMemory = memory
 	}
 	payload, _ := json.Marshal(heartbeat)

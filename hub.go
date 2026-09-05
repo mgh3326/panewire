@@ -758,8 +758,10 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.mu.Lock()
 			if record := h.nodes[machineID]; record != nil && record.agent == agent {
-				record.hostMemory = cloneHubHostMemory(heartbeat.HostMemory)
-				h.placementCache = placementCache{}
+				if !equalHubHostMemory(record.hostMemory, heartbeat.HostMemory) {
+					record.hostMemory = cloneHubHostMemory(heartbeat.HostMemory)
+					h.placementCache = placementCache{}
+				}
 			}
 			h.mu.Unlock()
 			h.observeHeartbeatAlerts(machineID, heartbeat)
