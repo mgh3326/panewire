@@ -13,6 +13,18 @@ import (
 	"time"
 )
 
+// r20SocketRoot keeps the unix socket path inside the macOS sun_path limit,
+// matching the shortRoot pattern the existing daemon fixtures use.
+func r20SocketRoot(t *testing.T) string {
+	t.Helper()
+	root, err := os.MkdirTemp("/tmp", "pw-r20-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	return root
+}
+
 func r20EventFiles(t *testing.T, inbox, jobID string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(filepath.Join(inbox, "jobs", jobID, "events"))
@@ -48,7 +60,7 @@ func TestR20EmitWithoutDaemonKeepsFileAndExitsOK(t *testing.T) {
 // socket push still happens - wrk writes the file itself before calling emit.
 func TestR20EmitDuplicateSuppressesFileNotPush(t *testing.T) {
 	inbox := t.TempDir()
-	socket := filepath.Join(t.TempDir(), "emit.sock")
+	socket := filepath.Join(r20SocketRoot(t), "emit.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +126,7 @@ func TestR20EmitDuplicateSuppressesFileNotPush(t *testing.T) {
 // inbox during the call already sees the record.
 func TestR20EmitWritesFileBeforeSocketCall(t *testing.T) {
 	inbox := t.TempDir()
-	socket := filepath.Join(t.TempDir(), "order.sock")
+	socket := filepath.Join(r20SocketRoot(t), "order.sock")
 	listener, err := net.Listen("unix", socket)
 	if err != nil {
 		t.Fatal(err)
