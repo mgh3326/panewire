@@ -31,7 +31,7 @@ func TestR19dLongEscalationIsAcceptedRelayedAndMarked(t *testing.T) {
 		t.Fatalf("long escalation was not accepted and rune-truncated: %+v ok=%t", event, ok)
 	}
 	routes := filepath.Join(t.TempDir(), "lanes.json")
-	if err := os.WriteFile(routes, []byte(`{"lanes":{"worker-lane":{"machine":"synthetic-node","pane":"synthetic-child","parent":"captain-lane"},"captain-lane":{"machine":"synthetic-node","pane":"synthetic-parent"}}}`), 0600); err != nil {
+	if err := os.WriteFile(routes, []byte(`{"lanes":{"worker-lane":{"machine":"synthetic-node","pane":"synthetic-child","parent":"lead-lane"},"lead-lane":{"machine":"synthetic-node","pane":"synthetic-parent"}}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	var logs bytes.Buffer

@@ -11,7 +11,7 @@ Request:
 ```json
 {"request_id":"<uuid4>","machine":"machine-a","cwd_key":"repo-a",
  "brief":{"inline":"<≤65536 bytes UTF-8>"},
- "args":["<wrk flag>","<value>"],
+ "args":["-m","codex-terra","-w","worker","-l","label-a","--t","T1","--job","job-a","--owner","lane-a"],
  "wait_seconds":120}
 ```
 

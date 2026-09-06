@@ -11,10 +11,10 @@ On the operator Mac, use a mode-0600 admin env outside the repository.
 
 ```sh
 export ADMIN_ENV="$HOME/.config/panewire/pilot-admin.env"
-export MAC_CLIENT_ENV="$HOME/.config/panewire/pilot-mac-personal.env"
+export MAC_CLIENT_ENV="$HOME/.config/panewire/pilot-machine-a.env"
 export NCP_CLIENT_ENV="$HOME/.config/panewire/pilot-ncp.env"
 chmod 600 "$ADMIN_ENV"
-panewire enroll-machine --admin-env "$ADMIN_ENV" --machine-id mac-personal --out "$MAC_CLIENT_ENV" --confirm
+panewire enroll-machine --admin-env "$ADMIN_ENV" --machine-id machine-a --out "$MAC_CLIENT_ENV" --confirm
 panewire enroll-machine --admin-env "$ADMIN_ENV" --machine-id ncp-pilot --out "$NCP_CLIENT_ENV" --confirm
 stat -f '%Lp %N' "$MAC_CLIENT_ENV" "$NCP_CLIENT_ENV"
 ```
@@ -90,7 +90,7 @@ export BRIEF="$HOME/panewire-pilot/$JOB_ID-brief.md"
 printf '%s\n' '# Stage 2 pilot' 'cross-machine delivery check' > "$BRIEF"
 MESSAGE_ID=$(panewire submit \
   --db "$MAC_STAGE2_DB" --file "$BRIEF" \
-  --from-machine mac-personal --to ncp-pilot \
+  --from-machine machine-a --to ncp-pilot \
   --path "jobs/$JOB_ID/brief.md" \
   --classification personal_non_company)
 printf 'submitted message_id=%s\n' "$MESSAGE_ID"
@@ -109,7 +109,7 @@ export COMPLETE_BODY="$HOME/panewire-pilot/$JOB_ID-completion.json"
 printf '%s\n' '{"outcome":"received"}' > "$COMPLETE_BODY"
 "$NCP_BIN" submit \
   --db "$NCP_STAGE2_DB" --file "$COMPLETE_BODY" \
-  --from-machine ncp-pilot --to mac-personal \
+  --from-machine ncp-pilot --to machine-a \
   --path "completions/$MESSAGE_ID.json" \
   --kind workflow.completion \
   --correlation-id "$MESSAGE_ID" --causation-id received \

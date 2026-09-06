@@ -131,20 +131,19 @@ operator event push. It is deliberately **not** the durable transport:
 
 Nodes always initiate the WebSocket, so laptops and company-managed machines
 need no inbound SSH, port forwarding, or publicly reachable service. The hub
-may bind both its loopback address for Cloudflare Tunnel and its tailnet
-address with the same mux and token file:
+binds its loopback address for Cloudflare Tunnel with the same mux and token
+file:
 
 ```sh
 panewire hub --hub-auth /etc/panewire/hub.env \
-  --listen 127.0.0.1:9377 --listen 100.64.0.1:9377
+  --listen 127.0.0.1:9377
 ```
 
-`100.64.0.1` is documentation-only CGNAT example space; never publish a real
-tailnet address, token, or pane ID. A node lists its preferred tailnet URL
-first and its Cloudflare URL second (each flag may also contain a comma list):
+Never publish a real tailnet address, token, or pane ID. A node lists its
+Cloudflare URL explicitly (the flag may contain a comma list):
 
 ```sh
-panewire daemon --hub-url wss://100.64.0.1:9377 --hub-url wss://hub.example.invalid \
+panewire daemon --hub-url wss://hub.example.invalid \
   --hub-token-env /etc/panewire/node.env --hub-cf-env /etc/panewire/cf.env
 ```
 

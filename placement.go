@@ -29,7 +29,7 @@ type PlacementPolicy struct {
 }
 
 func DefaultPlacementPolicy() PlacementPolicy {
-	return PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop"}, MaxActiveJobs: 5, LoadRatio: 0.5, MemoryFreePctMin: memoryFloat(30), SwapUsedMBMax: memoryFloat(1536)}
+	return PlacementPolicy{LocalMachine: "machine-b", SpillTargets: []string{"desktop"}, MaxActiveJobs: 5, LoadRatio: 0.5, MemoryFreePctMin: memoryFloat(30), SwapUsedMBMax: memoryFloat(1536)}
 }
 
 func (p PlacementPolicy) valid() bool {

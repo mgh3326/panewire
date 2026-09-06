@@ -2,7 +2,7 @@
   "job_id": "synthetic-r19d-job",
   "epoch": 1,
   "owner_lane": "worker-lane",
-  "label": "captain-synthetic",
+  "label": "lead-synthetic",
   "host": "synthetic-node",
   "report_path": "/synthetic/inbox/jobs/synthetic-r19d-job/report.md",
   "report_last_line": "waiting for parent decision",

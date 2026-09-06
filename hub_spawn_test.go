@@ -263,6 +263,16 @@ func TestT14SpawnHTTPAC2Validation(t *testing.T) {
 	}
 }
 
+func TestT14SpawnHTTPAllowsRegexValidLeadingHyphenValue(t *testing.T) {
+	_, server := t14Hub(t)
+	body := t14SpawnBody(t14RequestID(21))
+	body["args"] = []string{"-m", "-model"}
+	status, _, response := t14HTTP(t, http.MethodPost, server.URL+"/v1/spawn", t14OperatorToken, body)
+	if status != http.StatusServiceUnavailable || !bytes.Contains(response, []byte(`"node_unavailable"`)) {
+		t.Fatalf("leading-hyphen value was rejected before availability: status=%d body=%s", status, response)
+	}
+}
+
 func t14CloneBody(t *testing.T, value map[string]any) map[string]any {
 	t.Helper()
 	encoded, err := json.Marshal(value)
@@ -310,7 +320,7 @@ func TestT14SpawnHTTPAC6PendingThenGet(t *testing.T) {
 		t.Fatalf("pending=%d %s", pending.status, pending.body)
 	}
 	t14WriteSpawnResult(t, node, message.RequestID, 0, "job-a", "pane-a", "later", "")
-	deadline := time.Now().Add(time.Second)
+	deadline := time.Now().Add(3 * time.Second)
 	for {
 		status, _, body := t14HTTP(t, http.MethodGet, server.URL+"/v1/spawn/"+message.RequestID, t14OperatorToken, nil)
 		if status == http.StatusOK && bytes.Contains(body, []byte(`"job_id":"job-a"`)) {

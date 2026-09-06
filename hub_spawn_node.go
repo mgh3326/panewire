@@ -119,7 +119,9 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.RC, result.Error = 1, "spawn_failed"
 		return result
 	}
-	if _, err := io.WriteString(temporary, message.BriefInline); err != nil || temporary.Close() != nil {
+	_, writeErr := io.WriteString(temporary, message.BriefInline)
+	closeErr := temporary.Close()
+	if writeErr != nil || closeErr != nil {
 		result.RC, result.Error = 1, "spawn_failed"
 		return result
 	}

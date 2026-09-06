@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
-	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -75,7 +74,7 @@ func validHubSpawnArgs(args []string) bool {
 		"-m": {}, "-w": {}, "-l": {}, "--t": {}, "--effort": {}, "--job": {}, "--owner": {}, "--report": {}, "--role": {}, "--lane": {}, "--parent": {}, "-L": {},
 	}
 	for index := 0; index < len(args); index += 2 {
-		if _, found := allowed[args[index]]; !found || !hubSpawnArgValuePattern.MatchString(args[index+1]) || strings.HasPrefix(args[index+1], "-") {
+		if _, found := allowed[args[index]]; !found || !hubSpawnArgValuePattern.MatchString(args[index+1]) {
 			return false
 		}
 	}

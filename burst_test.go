@@ -25,12 +25,12 @@ func TestHostLoadParsersFixedSamples(t *testing.T) {
 func TestBurstPolicyLastGoodHotReloadAndDecisions(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "burst.json")
-	policy := BurstPolicy{SourceMachine: "mac-personal", SwapGB: 8, Load5: 6, Consecutive: 3, WakeVia: "rpi", WakeMAC: "02:1a:2b:3c:4d:5e", TargetMachine: "desktop", IdleMinutes: 30, CooldownMinutes: 20}
+	policy := BurstPolicy{SourceMachine: "machine-a", SwapGB: 8, Load5: 6, Consecutive: 3, WakeVia: "rpi", WakeMAC: "02:1a:2b:3c:4d:5e", TargetMachine: "desktop", IdleMinutes: 30, CooldownMinutes: 20}
 	if err := os.WriteFile(path, []byte(formatBurstPolicy(policy)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 9, 2, 8, 30, 0, 0, time.UTC)
-	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "mac-personal": r6NodeAToken, "rpi": r6NodeBToken, "desktop": "desktop-token-123456"}, BurstPolicyPath: path, Now: func() time.Time { return now }})
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "machine-a": r6NodeAToken, "rpi": r6NodeBToken, "desktop": "desktop-token-123456"}, BurstPolicyPath: path, Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -40,16 +40,16 @@ func TestBurstPolicyLastGoodHotReloadAndDecisions(t *testing.T) {
 		return hub.observeBurstLocked(now, machine, load)
 	}
 	load := HubHostLoad{Load5: 6, SwapUsedGB: 0, WorkerProcs: 1} // exact load boundary
-	if got := observe("mac-personal", load); len(got) != 0 {
+	if got := observe("machine-a", load); len(got) != 0 {
 		t.Fatalf("early burst=%+v", got)
 	}
-	if got := observe("mac-personal", load); len(got) != 0 {
+	if got := observe("machine-a", load); len(got) != 0 {
 		t.Fatalf("early burst=%+v", got)
 	}
-	if got := observe("mac-personal", load); len(got) != 1 || got[0].Phase != "up" {
+	if got := observe("machine-a", load); len(got) != 1 || got[0].Phase != "up" {
 		t.Fatalf("burst=%+v", got)
 	}
-	if got := observe("mac-personal", load); len(got) != 0 {
+	if got := observe("machine-a", load); len(got) != 0 {
 		t.Fatalf("cooldown burst=%+v", got)
 	}
 	if got := observe("desktop", HubHostLoad{WorkerProcs: 1}); len(got) != 0 {
@@ -71,7 +71,7 @@ func TestBurstPolicyLastGoodHotReloadAndDecisions(t *testing.T) {
 	hub.reloadBurstPolicyLocked()
 	current := hub.burstPolicy
 	hub.mu.Unlock()
-	if current.SourceMachine != "mac-personal" {
+	if current.SourceMachine != "machine-a" {
 		t.Fatalf("bad reload replaced last good: %+v", current)
 	}
 	policy.Load5 = 7
@@ -95,12 +95,12 @@ func TestBurstPolicyLastGoodHotReloadAndDecisions(t *testing.T) {
 func TestBurstWorkerAppearanceResetsIdleAndProhibitsDown(t *testing.T) {
 	directory := t.TempDir()
 	path := filepath.Join(directory, "burst.json")
-	policy := BurstPolicy{SourceMachine: "mac-personal", SwapGB: 8, Load5: 6, Consecutive: 3, WakeVia: "rpi", WakeMAC: "02:1a:2b:3c:4d:5e", TargetMachine: "desktop", IdleMinutes: 30, CooldownMinutes: 0}
+	policy := BurstPolicy{SourceMachine: "machine-a", SwapGB: 8, Load5: 6, Consecutive: 3, WakeVia: "rpi", WakeMAC: "02:1a:2b:3c:4d:5e", TargetMachine: "desktop", IdleMinutes: 30, CooldownMinutes: 0}
 	if err := os.WriteFile(path, []byte(formatBurstPolicy(policy)), 0600); err != nil {
 		t.Fatal(err)
 	}
 	now := time.Date(2026, 9, 2, 9, 0, 0, 0, time.UTC)
-	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "mac-personal": r6NodeAToken, "rpi": r6NodeBToken, "desktop": "desktop-token-123456"}, BurstPolicyPath: path, Now: func() time.Time { return now }})
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "machine-a": r6NodeAToken, "rpi": r6NodeBToken, "desktop": "desktop-token-123456"}, BurstPolicyPath: path, Now: func() time.Time { return now }})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -128,7 +128,7 @@ func TestBurstWorkerAppearanceResetsIdleAndProhibitsDown(t *testing.T) {
 
 func TestBurstCLISetWritesPolicyAtomically(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "burst.json")
-	policy := BurstPolicy{SourceMachine: "mac-personal", SwapGB: 8, Load5: 6, Consecutive: 3, WakeVia: "rpi", WakeMAC: "02:1a:2b:3c:4d:5e", TargetMachine: "desktop", IdleMinutes: 30, CooldownMinutes: 20}
+	policy := BurstPolicy{SourceMachine: "machine-a", SwapGB: 8, Load5: 6, Consecutive: 3, WakeVia: "rpi", WakeMAC: "02:1a:2b:3c:4d:5e", TargetMachine: "desktop", IdleMinutes: 30, CooldownMinutes: 20}
 	if err := os.WriteFile(path, []byte(formatBurstPolicy(policy)), 0600); err != nil {
 		t.Fatal(err)
 	}

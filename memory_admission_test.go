@@ -271,27 +271,27 @@ func TestPlacementCacheKeepsSameMemoryHeartbeatAndInvalidatesChange(t *testing.T
 	defer prom.Close()
 	hub := placementHub(t, prom.URL)
 	agent := &hubAgent{}
-	hub.connect("mac-work", "fixture", "fixture", agent, true)
+	hub.connect("machine-b", "fixture", "fixture", agent, true)
 	memory := &HubHostMemory{FreePct: memoryFloat(50), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"}
-	sendMemoryHeartbeat(t, hub, "mac-work", agent, memory)
+	sendMemoryHeartbeat(t, hub, "machine-b", agent, memory)
 	first := hub.placement(t.Context(), "worker", "cache-fixture")
-	if first.Decision != "mac-work" || calls.Load() != 2 {
+	if first.Decision != "machine-b" || calls.Load() != 2 {
 		t.Fatalf("first placement=%+v calls=%d", first, calls.Load())
 	}
 	hub.mu.Lock()
 	cacheAt := hub.placementCache.at
 	hub.mu.Unlock()
 
-	sendMemoryHeartbeat(t, hub, "mac-work", agent, cloneHubHostMemory(memory))
+	sendMemoryHeartbeat(t, hub, "machine-b", agent, cloneHubHostMemory(memory))
 	second := hub.placement(t.Context(), "worker", "cache-fixture")
 	hub.mu.Lock()
 	secondCacheAt := hub.placementCache.at
 	hub.mu.Unlock()
-	if second.Decision != "mac-work" || calls.Load() != 2 || !secondCacheAt.Equal(cacheAt) {
+	if second.Decision != "machine-b" || calls.Load() != 2 || !secondCacheAt.Equal(cacheAt) {
 		t.Fatalf("same heartbeat invalidated placement cache: second=%+v calls=%d at=%s want=%s", second, calls.Load(), secondCacheAt, cacheAt)
 	}
 
-	sendMemoryHeartbeat(t, hub, "mac-work", agent, &HubHostMemory{FreePct: memoryFloat(20), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"})
+	sendMemoryHeartbeat(t, hub, "machine-b", agent, &HubHostMemory{FreePct: memoryFloat(20), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"})
 	changed := hub.placement(t.Context(), "worker", "cache-fixture")
 	if changed.Decision != "unavailable" || calls.Load() != 4 {
 		t.Fatalf("changed heartbeat did not invalidate placement cache: changed=%+v calls=%d", changed, calls.Load())
