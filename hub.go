@@ -465,6 +465,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /ui", h.handleUI)
 	mux.HandleFunc("GET /ui/data.json", h.handleUIData)
 	mux.HandleFunc("GET /v1/nodes", h.handleNodes)
+	mux.HandleFunc("GET /v1/lanes", h.handleLanes)
 	mux.HandleFunc("POST /v1/nodes/{machine}/accepting", h.handleAcceptingOverride)
 	mux.HandleFunc("GET /v1/burst", h.handleBurst)
 	mux.HandleFunc("POST /v1/burst/request", h.handleBurstRequest)
@@ -697,6 +698,44 @@ func (h *HubServer) handleNodes(writer http.ResponseWriter, request *http.Reques
 	_ = json.NewEncoder(writer).Encode(struct {
 		Nodes []HubNode `json:"nodes"`
 	}{Nodes: h.Nodes()})
+}
+
+// hubLaneProjection is the intentionally narrow operator view of a lanes.json
+// entry. It must not expose the loader's internal representation directly.
+type hubLaneProjection struct {
+	Lane    string `json:"lane"`
+	Machine string `json:"machine"`
+	Pane    string `json:"pane"`
+	Parent  string `json:"parent"`
+	Sink    bool   `json:"sink"`
+}
+
+func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Request) {
+	if !h.authorizeOperator(request) {
+		hubUnauthorized(writer)
+		return
+	}
+	writer.Header().Set("Content-Type", "application/json")
+	routes, err := loadReportRelayRoutesResult(h.reportRelayPath)
+	if err != nil {
+		writer.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(writer).Encode(struct {
+			Error string `json:"error"`
+		}{Error: "lanes_invalid"})
+		return
+	}
+	lanes := make([]hubLaneProjection, 0, len(routes))
+	for lane, route := range routes {
+		lanes = append(lanes, hubLaneProjection{
+			Lane: lane, Machine: route.Machine, Pane: route.Pane, Parent: route.Parent, Sink: route.Sink,
+		})
+	}
+	sort.Slice(lanes, func(i, j int) bool {
+		return lanes[i].Lane < lanes[j].Lane
+	})
+	_ = json.NewEncoder(writer).Encode(struct {
+		Lanes []hubLaneProjection `json:"lanes"`
+	}{Lanes: lanes})
 }
 
 func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Request) {
