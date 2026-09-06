@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strconv"
@@ -30,17 +31,32 @@ type reportRelayRoute struct {
 	Sink    bool   `json:"sink,omitempty"`
 }
 
+var errReportRelayRoutesInvalid = errors.New("report relay routes invalid")
+
+// loadReportRelayRoutes preserves the established best-effort relay behavior:
+// absent, unreadable, oversized, and invalid files all produce no routes.
 func loadReportRelayRoutes(path string) map[string]reportRelayRoute {
+	routes, _ := loadReportRelayRoutesResult(path)
+	return routes
+}
+
+// loadReportRelayRoutesResult is the shared R19 lanes loader. Read failures
+// remain an empty result, while malformed or oversized file contents are
+// reported so the operator HTTP projection can distinguish them.
+func loadReportRelayRoutesResult(path string) (map[string]reportRelayRoute, error) {
 	if path == "" {
-		return nil
+		return nil, nil
 	}
 	b, err := os.ReadFile(path)
-	if err != nil || len(b) > 64<<10 {
-		return nil
+	if err != nil {
+		return nil, nil
+	}
+	if len(b) > 64<<10 {
+		return nil, errReportRelayRoutesInvalid
 	}
 	var routes reportRelayRoutes
-	if json.Unmarshal(b, &routes) != nil {
-		return nil
+	if err := json.Unmarshal(b, &routes); err != nil {
+		return nil, err
 	}
 	// lanes is the R19 contract. Keep routes as a deliberate compatibility
 	// reader for installations that have not renamed their operator file yet.
@@ -68,7 +84,7 @@ func loadReportRelayRoutes(path string) map[string]reportRelayRoute {
 			delete(routes.Routes, lane)
 		}
 	}
-	return routes.Routes
+	return routes.Routes, nil
 }
 
 func relayText(completion hubJobEventPayload) string {
