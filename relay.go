@@ -3,12 +3,18 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
+)
+
+const (
+	lanePersistedMaxEntries        = 4096
+	relayReplayExhaustedMaxEntries = 4096
 )
 
 // reportRelayRoutes is intentionally a tiny operator-owned configuration:
@@ -22,19 +28,35 @@ type reportRelayRoute struct {
 	Machine string `json:"machine"`
 	Pane    string `json:"pane"`
 	Parent  string `json:"parent,omitempty"`
+	Sink    bool   `json:"sink,omitempty"`
 }
 
+var errReportRelayRoutesInvalid = errors.New("report relay routes invalid")
+
+// loadReportRelayRoutes preserves the established best-effort relay behavior:
+// absent, unreadable, oversized, and invalid files all produce no routes.
 func loadReportRelayRoutes(path string) map[string]reportRelayRoute {
+	routes, _ := loadReportRelayRoutesResult(path)
+	return routes
+}
+
+// loadReportRelayRoutesResult is the shared R19 lanes loader. Read failures
+// remain an empty result, while malformed or oversized file contents are
+// reported so the operator HTTP projection can distinguish them.
+func loadReportRelayRoutesResult(path string) (map[string]reportRelayRoute, error) {
 	if path == "" {
-		return nil
+		return nil, nil
 	}
 	b, err := os.ReadFile(path)
-	if err != nil || len(b) > 64<<10 {
-		return nil
+	if err != nil {
+		return nil, nil
+	}
+	if len(b) > 64<<10 {
+		return nil, errReportRelayRoutesInvalid
 	}
 	var routes reportRelayRoutes
-	if json.Unmarshal(b, &routes) != nil {
-		return nil
+	if err := json.Unmarshal(b, &routes); err != nil {
+		return nil, err
 	}
 	// lanes is the R19 contract. Keep routes as a deliberate compatibility
 	// reader for installations that have not renamed their operator file yet.
@@ -42,15 +64,27 @@ func loadReportRelayRoutes(path string) map[string]reportRelayRoute {
 		routes.Routes = routes.Lanes
 	}
 	for lane, route := range routes.Routes {
-		if !hubAgentLabelPattern.MatchString(lane) || !machineIDPattern.MatchString(route.Machine) || strings.TrimSpace(route.Pane) == "" || len(route.Pane) > 128 {
+		if !hubAgentLabelPattern.MatchString(lane) {
 			delete(routes.Routes, lane)
 			continue
 		}
 		if route.Parent != "" && !hubAgentLabelPattern.MatchString(route.Parent) {
 			delete(routes.Routes, lane)
+			continue
+		}
+		// A sink is an operator-only durable destination. An empty pane is the
+		// backwards-compatible sink spelling; explicit sink wins over supplied
+		// transport fields and is never eligible for pane injection.
+		if route.Sink || strings.TrimSpace(route.Pane) == "" {
+			route.Sink, route.Machine, route.Pane = true, "", ""
+			routes.Routes[lane] = route
+			continue
+		}
+		if !machineIDPattern.MatchString(route.Machine) || len(route.Pane) > 128 {
+			delete(routes.Routes, lane)
 		}
 	}
-	return routes.Routes
+	return routes.Routes, nil
 }
 
 func relayText(completion hubJobEventPayload) string {
@@ -149,22 +183,39 @@ func (h *HubServer) relayJobCompletionFrom(senderMachine string, completion hubJ
 	h.relayJobEventFrom(senderMachine, "job.completed", completion)
 }
 
+// relayLaneEventResult is the HTTP ingress view of the existing lane-event
+// relay state machine. Node callers intentionally ignore it.
+type relayLaneEventResult struct {
+	ID              int64
+	Routed          bool
+	Machine         string
+	Duplicate       bool
+	PersistFailed   bool
+	RejectedTooLong bool
+}
+
 // relayLaneEvent follows the R20 persistence cursor but has intentionally
 // different routing failure semantics from job.*: no route is still a durable
-// handoffkeep row, and the sending node is acknowledged once that row exists.
-func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
+// handoffkeep row, and a sending node is acknowledged once that row exists.
+// A nil sender is the authenticated HTTP ingress: it uses the same durable
+// and injection machinery, but has no producer node to acknowledge.
+func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) relayLaneEventResult {
+	ingress := sender == nil
 	if event.OwnerLane == "" || event.EventID == "" || event.Text == "" {
-		return
+		return relayLaneEventResult{}
 	}
 	key := relayEventDedupeKey("lane.event", event)
 	h.mu.Lock()
-	if persistedID := h.lanePersisted[key]; persistedID != 0 {
+	if persistedID := h.lanePersistedIDLocked(key); persistedID != 0 {
 		h.mu.Unlock()
 		// The hub already owns the durable row. A source retry is an ACK-loss
 		// recovery, not another delivery attempt, so it must not re-POST and
 		// consume the delivery budget.
-		h.queueLaneRelayPersisted(event, sender, persistedID)
-		return
+		if !ingress {
+			h.queueLaneRelayPersisted(event, sender, persistedID)
+			return relayLaneEventResult{ID: persistedID}
+		}
+		return relayLaneEventResult{ID: persistedID, Duplicate: true}
 	}
 	knownID, duplicate := h.relayDedupe[key]
 	if !duplicate {
@@ -172,23 +223,48 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
 	}
 	h.mu.Unlock()
 	if duplicate {
+		if ingress {
+			// A concurrent request can see a claim before the first POST has
+			// learned its durable id. It is still a duplicate; a retry can name
+			// the id once the first request finishes.
+			return relayLaneEventResult{ID: knownID, Duplicate: true}
+		}
 		if knownID != 0 {
 			h.queueLaneRelayPersisted(event, sender, knownID)
 		}
-		return
+		return relayLaneEventResult{ID: knownID}
 	}
 	if h.handoffkeep == nil {
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnpersisted("lane.event", event)
-		return
+		return relayLaneEventResult{PersistFailed: true}
 	}
 	route, target, routed := h.resolveRelayRoute("lane.event", event)
-	stored, status, persisted := h.persistRelayEventRecord("lane.event", event, route)
+	if len(event.Text) > laneEventTextLimitSink || (!route.Sink && len(event.Text) > laneEventTextLimit) {
+		h.forgetRelayEvent(key)
+		h.broadcastRelayRejected(event, "text_too_long")
+		return relayLaneEventResult{RejectedTooLong: true}
+	}
+	persistRoute := route
+	if ingress {
+		// HTTP has no producer node. Its supplied/default hub host describes
+		// the durable source record; the resolved route remains injection-only.
+		persistRoute = reportRelayRoute{Machine: event.Host, Pane: ""}
+	}
+	stored, status, persisted := h.persistRelayEventRecord("lane.event", event, persistRoute)
 	if !persisted {
 		h.logger.Error("lane.event persistence failed; handoffkeep schema v7 must be deployed before this hub", "lane", event.OwnerLane, "producer_event_id", event.EventID, "status", status)
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnpersisted("lane.event", event)
-		return
+		return relayLaneEventResult{PersistFailed: true}
+	}
+	if ingress && status == http.StatusOK {
+		// A restarted hub discovers a durable duplicate only after its first
+		// POST. Do not inject it here: replay owns an undelivered row. Retain
+		// the id for future 409s, then release the active claim for replay.
+		h.rememberLanePersisted(key, stored.ID)
+		h.forgetRelayEvent(key)
+		return relayLaneEventResult{ID: stored.ID, Duplicate: true}
 	}
 	// handoffkeep is first-writer-wins. A hub that restarted after the first
 	// POST must inject the returned durable text, not a changed duplicate body.
@@ -202,10 +278,23 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
 	}
 	// Delivery responsibility has moved to the hub at this point. This ACK is
 	// deliberately sent to the producer's node, never the destination pane.
-	h.queueLaneRelayPersisted(event, sender, stored.ID)
+	if !ingress {
+		h.queueLaneRelayPersisted(event, sender, stored.ID)
+	}
 	if relayEventAlreadyDelivered(status, stored) {
 		h.broadcastRelayAlreadyDelivered("lane.event", event, stored)
-		return
+		return relayLaneEventResult{ID: stored.ID}
+	}
+	if route.Sink {
+		if err := h.handoffkeep.markDelivered(context.Background(), stored.ID, "sink", "sink:"+event.OwnerLane); err != nil {
+			h.logger.Warn("sink relay delivery was not recorded", "event_id", stored.ID, "lane", event.OwnerLane)
+			// The durable row remains undelivered for operator observation, but a
+			// sink never falls back to a pane injection.
+			h.forgetRelayEvent(key)
+			h.broadcastRelayUnrouted(event)
+			return relayLaneEventResult{ID: stored.ID}
+		}
+		return relayLaneEventResult{ID: stored.ID, Routed: true, Machine: "sink"}
 	}
 	if !routed {
 		// The durable row remains for replay. The active injection claim is
@@ -213,9 +302,12 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) {
 		// are acknowledged without re-POSTing.
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
-		return
+		return relayLaneEventResult{ID: stored.ID}
 	}
-	h.injectLaneRelayEvent(event, route, target, stored.ID, key)
+	if !h.injectLaneRelayEvent(event, route, target, stored.ID, key) {
+		return relayLaneEventResult{ID: stored.ID}
+	}
+	return relayLaneEventResult{ID: stored.ID, Routed: true, Machine: route.Machine}
 }
 
 func laneEventFromStored(record handoffkeepRelayEvent) hubJobEventPayload {
@@ -352,11 +444,35 @@ func (h *HubServer) rememberLanePersisted(key string, eventID int64) {
 		return
 	}
 	h.mu.Lock()
+	h.rememberLanePersistedLocked(key, eventID)
+	h.mu.Unlock()
+}
+
+func (h *HubServer) lanePersistedIDLocked(key string) int64 {
+	persistedID := h.lanePersisted[key]
+	if persistedID != 0 {
+		h.lanePersistedOrder.touch(key, lanePersistedMaxEntries)
+	}
+	return persistedID
+}
+
+func (h *HubServer) rememberLanePersistedLocked(key string, eventID int64) {
 	if h.lanePersisted == nil {
 		h.lanePersisted = make(map[string]int64)
 	}
+	_, evicted, overflowed := h.lanePersistedOrder.touch(key, lanePersistedMaxEntries)
+	if overflowed {
+		// An evicted producer resend re-POSTs to handoffkeep. Its idempotency
+		// key is first-writer-wins, so handoffkeep returns the same durable row:
+		// this trades one POST for bounded memory, not delivery loss.
+		delete(h.lanePersisted, evicted)
+	}
 	h.lanePersisted[key] = eventID
-	h.mu.Unlock()
+}
+
+func (h *HubServer) forgetLanePersistedLocked(key string) {
+	delete(h.lanePersisted, key)
+	h.lanePersistedOrder.forget(key)
 }
 
 // forgetRelayEvent releases a dedupe key that stands for no durable row.
@@ -413,6 +529,9 @@ func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (re
 			route = parent
 		}
 	}
+	if exists && route.Sink && kind == "lane.event" {
+		return route, nil, true
+	}
 	var agent *hubAgent
 	if exists && h.nodes[route.Machine] != nil {
 		agent = h.nodes[route.Machine].agent
@@ -455,6 +574,12 @@ func (h *HubServer) broadcastRelayUnrouted(event hubJobEventPayload) {
 	h.broadcast(hubEvent{Kind: "relay.unrouted", Payload: payload, Received: h.now().UTC()})
 }
 
+func (h *HubServer) broadcastRelayRejected(event hubJobEventPayload, reason string) {
+	event.Reason = reason
+	payload, _ := json.Marshal(event)
+	h.broadcast(hubEvent{Kind: "relay.rejected", Payload: payload, Received: h.now().UTC()})
+}
+
 func (h *HubServer) broadcastRelayTruncated(event hubJobEventPayload) {
 	payload, _ := json.Marshal(struct {
 		Lane    string `json:"lane"`
@@ -467,7 +592,9 @@ func (h *HubServer) broadcastRelayTruncated(event hubJobEventPayload) {
 // visible. Dropping it silently is how a stuck record turns into an
 // unexplained gap between Postgres and the pane.
 func (h *HubServer) broadcastRelayReplayExhausted(record handoffkeepRelayEvent) {
-	h.countReplayExhaustedEvent()
+	if !h.countReplayExhaustedEvent(record.ID) {
+		return
+	}
 	payload, _ := json.Marshal(struct {
 		JobID    string `json:"job_id"`
 		Kind     string `json:"kind"`
@@ -573,6 +700,14 @@ func (h *HubServer) persistRelayEventRecord(kind string, event hubJobEventPayloa
 // markRelayEventDelivered closes the loop on a node's relay.delivered. A
 // failure here is operator signal only; it must never stall the relay path.
 func (h *HubServer) markRelayEventDelivered(pending relayPending) {
+	// Cleanup belongs to the successful relay.delivered acknowledgement, not
+	// to handoffkeep. Pre-R20 deployments still need bounded local state.
+	h.mu.Lock()
+	h.r19a.forgetRelayTimeout(pending.event.JobID)
+	if pending.kind == "lane.event" {
+		h.forgetLanePersistedLocked(relayEventDedupeKey("lane.event", pending.event))
+	}
+	h.mu.Unlock()
 	if h.handoffkeep == nil || pending.eventID == 0 {
 		return
 	}
@@ -678,6 +813,13 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 	h.mu.Unlock()
 	route, agent, routed := h.resolveRelayRoute(record.Kind, event)
 	if !routed {
+		h.forgetRelayEvent(key)
+		h.broadcastRelayUnrouted(event)
+		return
+	}
+	if record.Kind == "lane.event" && route.Sink {
+		// A failed sink delivery mark leaves an observable undelivered row, but
+		// its later replay must never reinterpret the sink as a pane target.
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
 		return

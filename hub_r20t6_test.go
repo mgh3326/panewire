@@ -172,24 +172,26 @@ func TestR20T6LookupIsOncePerScan(t *testing.T) {
 	}
 }
 
-// TL8: pane liveness is node-local. The wire payload must not grow a field.
-func TestR20T6WireContractHasNoPaneID(t *testing.T) {
+// TL8: pane liveness remains node-local, and the bounded runtime pane is now
+// deliberately carried for the operator console. Briefs and transcripts are
+// still absent from the wire payload.
+func TestR20T6WireContractCarriesRuntimePaneOnly(t *testing.T) {
 	root := t.TempDir()
-	writeR20T6Job(t, root, "job-live", "w1:p1B", time.Now())
-	hook, _ := aliveR20T6Hook("w1:p1B")
+	writeR20T6Job(t, root, "job-live", "pane-a", time.Now())
+	hook, _ := aliveR20T6Hook("pane-a")
 	encoded, err := json.Marshal(scanHubActiveJobsWithPanes(context.Background(), root, hook))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(encoded), "pane_id") || strings.Contains(string(encoded), "w1:p1B") {
-		t.Fatalf("TL8: pane leaked onto the wire payload: %s", encoded)
+	if strings.Contains(string(encoded), "pane_id") || !strings.Contains(string(encoded), `"pane":"pane-a"`) {
+		t.Fatalf("TL8: runtime pane contract=%s", encoded)
 	}
 	single, err := json.Marshal(HubActiveJob{JobID: "job-live", AgentLabel: "wrk-a", Epoch: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(single), "pane_id") {
-		t.Fatalf("TL8: HubActiveJob grew a pane field: %s", single)
+	if strings.Contains(string(single), "pane_id") || strings.Contains(string(single), `"pane"`) {
+		t.Fatalf("TL8: empty runtime pane was serialized: %s", single)
 	}
 }
 

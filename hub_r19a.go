@@ -9,8 +9,29 @@ type r19aHubState struct {
 	relayAckTimeout        time.Duration
 	relayPending           map[string]relayPending
 	relayTimeouts          map[string]struct{}
+	relayTimeoutOrder      lruIndex[string]
 	acceptingOverride      map[string]string
 	acceptingOverridesPath string
+}
+
+func (s *r19aHubState) rememberRelayTimeout(jobID string) bool {
+	if _, already := s.relayTimeouts[jobID]; already {
+		s.relayTimeoutOrder.touch(jobID, relayTimeoutsMaxEntries)
+		return false
+	}
+	_, evicted, overflowed := s.relayTimeoutOrder.touch(jobID, relayTimeoutsMaxEntries)
+	if overflowed {
+		// An eviction may allow one extra relay.unconfirmed broadcast later; it
+		// never changes the durable delivery state or retry budget.
+		delete(s.relayTimeouts, evicted)
+	}
+	s.relayTimeouts[jobID] = struct{}{}
+	return true
+}
+
+func (s *r19aHubState) forgetRelayTimeout(jobID string) {
+	delete(s.relayTimeouts, jobID)
+	s.relayTimeoutOrder.forget(jobID)
 }
 
 type r19aClientState struct {

@@ -1,0 +1,1 @@
+{"status":"alive","checks":{"service":"ok"},"host_load":{"load1":3.58,"load5":3.69,"swap_used_gb":0,"worker_procs":2},"host_memory":{"free_pct":90,"compressed_mb":0,"swap_used_mb":0,"psi_some_avg10":null,"source":"memory_pressure"}}

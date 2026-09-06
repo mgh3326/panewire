@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -119,7 +120,7 @@ func TestR19AcceptingOverrideControlsPlacementAndUI(t *testing.T) {
 		t.Fatalf("off status=%d", got)
 	}
 	policy := PlacementPolicy{LocalMachine: "host-a", MaxActiveJobs: 1, LoadRatio: 1}
-	if result := h.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()); result.Decision != "unavailable" || result.Reason != "unavailable" || result.Candidates[0].Reason != "not_accepting" {
+	if result := h.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()); result.Decision != "unavailable" || result.Reason != "unavailable" || !strings.Contains(result.Candidates[0].Reason, "not_accepting") {
 		t.Fatalf("off placement=%+v", result)
 	}
 	if data := h.uiData(); data.Nodes[0].AcceptingEffective || data.Nodes[0].AcceptingOverride != "off" {

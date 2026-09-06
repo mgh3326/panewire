@@ -27,8 +27,9 @@ func hubJobActiveMaxAge() time.Duration {
 type hubScannedJob struct {
 	job       HubActiveJob
 	lastEvent time.Time
-	// paneID is node-local: it is used only to cross-check liveness and is
-	// deliberately absent from HubActiveJob, the wire payload.
+	// paneID remains the local liveness cross-check. It is also sent as the
+	// bounded HubActiveJob pane so the operator console can jump to a runtime
+	// pane; briefs and transcripts are still never transported.
 	paneID string
 }
 
@@ -290,7 +291,7 @@ func scanHubLaneEventsWithin(inboxRoot string, maxAge time.Duration) []hubScanne
 			continue
 		}
 		lane, eventID, text := event.ownerLane(), event.eventID(), event.text()
-		if !hubAgentLabelPattern.MatchString(lane) || !validLaneEventID(eventID) || !validLaneEventText(text) || len(text) > laneEventTextLimit {
+		if !hubAgentLabelPattern.MatchString(lane) || !validLaneEventID(eventID) || !validLaneEventText(text) || len(text) > laneEventTextLimitSink {
 			continue
 		}
 		epoch := event.Epoch
@@ -368,6 +369,8 @@ type hubInboxEvent struct {
 	PR             string `json:"pr"`
 	Head           string `json:"head"`
 	PaneID         string `json:"pane_id"`
+	Role           string `json:"role"`
+	TLevel         string `json:"t_level"`
 	EventID        string `json:"event_id"`
 	Text           string `json:"text"`
 	Truncated      bool   `json:"truncated"`
@@ -383,6 +386,8 @@ type hubInboxEvent struct {
 		PR             string `json:"pr"`
 		Head           string `json:"head"`
 		PaneID         string `json:"pane_id"`
+		Role           string `json:"role"`
+		TLevel         string `json:"t_level"`
 	} `json:"payload"`
 }
 
@@ -414,6 +419,8 @@ func (e hubInboxEvent) question() string { return firstHubValue(e.Question, e.Pa
 func (e hubInboxEvent) pr() string       { return firstHubValue(e.PR, e.Payload.PR) }
 func (e hubInboxEvent) head() string     { return firstHubValue(e.Head, e.Payload.Head) }
 func (e hubInboxEvent) paneID() string   { return firstHubValue(e.PaneID, e.Payload.PaneID) }
+func (e hubInboxEvent) role() string     { return firstHubValue(e.Role, e.Payload.Role) }
+func (e hubInboxEvent) tLevel() string   { return firstHubValue(e.TLevel, e.Payload.TLevel) }
 func (e hubInboxEvent) eventID() string  { return e.EventID }
 func (e hubInboxEvent) text() string     { return e.Text }
 func (e hubInboxEvent) truncated() bool  { return e.Truncated }
@@ -435,6 +442,7 @@ func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	var active HubActiveJob
 	var claimTime, lastEvent time.Time
+	var lastEventKind string
 	var paneID string
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
@@ -449,8 +457,9 @@ func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 			continue
 		}
 		eventTime := event.eventTime(entry, eventsDir)
-		if eventTime.After(lastEvent) {
+		if !eventTime.Before(lastEvent) {
 			lastEvent = eventTime
+			lastEventKind = event.eventKind()
 		}
 		seq, seqOK := hubEventSequence(entry.Name())
 		switch event.eventKind() {
@@ -459,7 +468,11 @@ func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 			if epoch == 0 {
 				epoch = 1
 			}
-			candidate := HubActiveJob{JobID: jobID, AgentLabel: event.agentLabel(), LastEventSeq: seq, PushSHA: event.PushSHA, Epoch: epoch}
+			candidate := HubActiveJob{JobID: jobID, AgentLabel: event.agentLabel(), LastEventSeq: seq, PushSHA: event.PushSHA, Epoch: epoch, OwnerLane: event.ownerLane(), Tier: event.tLevel(), Role: event.role()}
+			if !eventTime.IsZero() {
+				candidate.StartedAt = eventTime.UTC().Format(time.RFC3339)
+			}
+			normalizeHubActiveJobMetadata(&candidate)
 			if seqOK && validHubActiveJob(candidate) {
 				active, claimTime = candidate, eventTime
 			}
@@ -473,6 +486,12 @@ func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 	if !validHubActiveJob(active) || claimTime.Before(time.Now().Add(-hubJobActiveMaxAge())) {
 		return hubScannedJob{}, false
 	}
+	active.Pane = paneID
+	active.LastEventKind = lastEventKind
+	if !lastEvent.IsZero() {
+		active.LastEventAt = lastEvent.UTC().Format(time.RFC3339)
+	}
+	normalizeHubActiveJobMetadata(&active)
 	return hubScannedJob{job: active, lastEvent: lastEvent, paneID: paneID}, true
 }
 

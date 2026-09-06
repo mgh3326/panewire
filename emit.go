@@ -20,7 +20,10 @@ import (
 // node scanner and handoffkeep's own CHECK constraint.
 var emitRelayKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "lane.event": true}
 
-const laneEventTextLimit = 2048
+const (
+	laneEventTextLimit     = 2048
+	laneEventTextLimitSink = 8192
+)
 
 var errDuplicateLaneEventID = errors.New("duplicate lane event id")
 
@@ -83,6 +86,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	lane := fs.String("lane", "", "direct destination lane for lane.event")
 	eventID := fs.String("event-id", "", "producer event id for lane.event")
 	text := fs.String("text", "", "payload for lane.event")
+	sink := fs.Bool("sink", false, "allow sink lane.event text up to 8192 bytes")
 	report := fs.String("report", "", "report path")
 	ownerLane := fs.String("owner-lane", "", "owning lane")
 	epoch := fs.Uint64("epoch", 0, "job epoch (defaults to 1)")
@@ -106,7 +110,11 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		if !hubAgentLabelPattern.MatchString(*lane) || !validLaneEventID(*eventID) || !validLaneEventText(*text) {
 			return ExitUsage
 		}
-		finalText, truncated := truncateLaneEventText(*text)
+		limit := laneEventTextLimit
+		if *sink {
+			limit = laneEventTextLimitSink
+		}
+		finalText, truncated := truncateLaneEventTextAtLimit(*text, limit)
 		record := emitRecord{Type: *kind, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: *pane, EventID: *eventID, Text: finalText, Truncated: truncated}
 		if record.Epoch == 0 {
 			record.Epoch = 1
@@ -124,10 +132,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		if socket == "" {
 			socket = socketPathFromEnv()
 		}
-		if !pushEmitRecord(socket, record, root, *timeout) {
-			fmt.Fprintln(stderr, "emit: panewired unavailable; event recorded to file only")
-		}
-		return ExitOK
+		return reportEmitPushResult(stderr, pushEmitRecord(socket, record, root, *timeout))
 	}
 	if *job == "" || !hubJobIDPattern.MatchString(*job) {
 		return ExitUsage
@@ -176,11 +181,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	// The push carries the namespace the file was written in. A daemon that
 	// watches a different root refuses it, so a run against a temporary inbox
 	// root cannot reach the operator's live relay outbox.
-	if !pushEmitRecord(socket, record, root, *timeout) {
-		fmt.Fprintln(stderr, "emit: panewired unavailable; event recorded to file only")
-		return ExitOK
-	}
-	return ExitOK
+	return reportEmitPushResult(stderr, pushEmitRecord(socket, record, root, *timeout))
 }
 
 // writeEmitRecord recognizes a byte-for-byte equivalent relay record already
@@ -355,7 +356,7 @@ func validLaneEventText(value string) bool {
 }
 
 func validLaneRelayText(value string) bool {
-	if value == "" || len(value) > 4096 || !utf8.ValidString(value) {
+	if value == "" || len(value) > laneEventTextLimitSink || !utf8.ValidString(value) {
 		return false
 	}
 	for _, r := range value {
@@ -371,15 +372,19 @@ func validLaneRelayText(value string) bool {
 // are made; the hub only validates this final form so acknowledgements cannot
 // name a different record after a restart.
 func truncateLaneEventText(value string) (string, bool) {
-	if len(value) <= laneEventTextLimit {
+	return truncateLaneEventTextAtLimit(value, laneEventTextLimit)
+}
+
+func truncateLaneEventTextAtLimit(value string, limit int) (string, bool) {
+	if len(value) <= limit {
 		return value, false
 	}
 	const marker = "[truncated]"
-	limit := laneEventTextLimit - len(marker)
-	for limit > 0 && !utf8.ValidString(value[:limit]) {
-		limit--
+	textLimit := limit - len(marker)
+	for textLimit > 0 && !utf8.ValidString(value[:textLimit]) {
+		textLimit--
 	}
-	return value[:limit] + marker, true
+	return value[:textLimit] + marker, true
 }
 
 type emitDedupeRecord struct {
@@ -456,10 +461,33 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 	}, true
 }
 
-func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout time.Duration) bool {
+type emitPushResult struct {
+	reached bool
+	ok      bool
+	code    int
+	err     string
+}
+
+func reportEmitPushResult(stderr io.Writer, result emitPushResult) int {
+	if !result.reached {
+		fmt.Fprintln(stderr, "emit: panewired unavailable; event recorded to file only")
+		return ExitOK
+	}
+	if result.ok {
+		return ExitOK
+	}
+	if strings.HasPrefix(result.err, "inbox root mismatch (") {
+		fmt.Fprintln(stderr, "emit:", result.err)
+		return ExitUsage
+	}
+	fmt.Fprintln(stderr, "emit: daemon rejected the event:", result.err)
+	return ExitUsage
+}
+
+func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout time.Duration) emitPushResult {
 	connection, err := net.DialTimeout("unix", socket, timeout)
 	if err != nil {
-		return false
+		return emitPushResult{}
 	}
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(timeout))
@@ -471,12 +499,15 @@ func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout 
 	}
 	body, _ := json.Marshal(request)
 	if _, err := fmt.Fprintf(connection, "%s\n", body); err != nil {
-		return false
+		return emitPushResult{}
 	}
 	scanner := bufio.NewScanner(connection)
 	if !scanner.Scan() {
-		return false
+		return emitPushResult{}
 	}
 	var response localResponse
-	return json.Unmarshal(scanner.Bytes(), &response) == nil && response.OK
+	if json.Unmarshal(scanner.Bytes(), &response) != nil {
+		return emitPushResult{}
+	}
+	return emitPushResult{reached: true, ok: response.OK, code: response.Code, err: response.Error}
 }

@@ -413,14 +413,16 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if req.Kind == "lane.event" {
-		if !hubAgentLabelPattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || len(req.Text) > laneEventTextLimit {
+		if !hubAgentLabelPattern.MatchString(req.OwnerLane) || !validLaneEventID(req.EventID) || !validLaneEventText(req.Text) || len(req.Text) > laneEventTextLimitSink {
 			return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 		}
 	} else if !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if !d.emitNamespaceMatches(req.InboxRoot) {
-		return &codedError{ExitUsage, fmt.Errorf("emit inbox root does not match this daemon")}
+		local := d.emitNamespaceRoot()
+		d.cfg.Logger.Warn("emit inbox root mismatch", "daemon", local, "given", req.InboxRoot)
+		return &codedError{ExitUsage, fmt.Errorf("inbox root mismatch (daemon=%s, given=%s)", local, req.InboxRoot)}
 	}
 	epoch := req.Epoch
 	if epoch == 0 {
@@ -443,4 +445,17 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 	}
 	d.cfg.Hub.Client.EnqueueRelayEvent(event)
 	return nil
+}
+
+// emitNamespaceRoot is only for rejection diagnostics. emitNamespaceMatches
+// remains the authority for its acceptance rules, including empty roots.
+func (d *Daemon) emitNamespaceRoot() string {
+	local := ""
+	if d.cfg.Hub.Client != nil {
+		local = d.cfg.Hub.Client.jobsInboxRoot
+	}
+	if local == "" {
+		local = d.cfg.InboxRoot
+	}
+	return local
 }

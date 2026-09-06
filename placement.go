@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -18,19 +19,22 @@ import (
 // PlacementPolicy is deliberately small and operator-owned. It selects a
 // local machine first, then considers spill targets in the listed order.
 type PlacementPolicy struct {
-	LocalMachine  string   `json:"local_machine"`
-	SpillTargets  []string `json:"spill_targets"`
-	MaxActiveJobs int      `json:"max_active_jobs"`
-	LoadRatio     float64  `json:"load_ratio"`
-	WakeOnSpill   bool     `json:"wake_on_spill"`
+	LocalMachine     string   `json:"local_machine"`
+	SpillTargets     []string `json:"spill_targets"`
+	MaxActiveJobs    int      `json:"max_active_jobs"`
+	LoadRatio        float64  `json:"load_ratio"`
+	WakeOnSpill      bool     `json:"wake_on_spill"`
+	MemoryFreePctMin *float64 `json:"memory_free_pct_min,omitempty"`
+	SwapUsedMBMax    *float64 `json:"swap_used_mb_max,omitempty"`
 }
 
 func DefaultPlacementPolicy() PlacementPolicy {
-	return PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop"}, MaxActiveJobs: 5, LoadRatio: 0.5}
+	return PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop"}, MaxActiveJobs: 5, LoadRatio: 0.5, MemoryFreePctMin: memoryFloat(30), SwapUsedMBMax: memoryFloat(1536)}
 }
 
 func (p PlacementPolicy) valid() bool {
-	if !machineIDPattern.MatchString(p.LocalMachine) || p.LocalMachine == hubOperatorMachineID || p.MaxActiveJobs < 1 || p.MaxActiveJobs > 10000 || p.LoadRatio <= 0 || p.LoadRatio > 100 {
+	if !machineIDPattern.MatchString(p.LocalMachine) || p.LocalMachine == hubOperatorMachineID || p.MaxActiveJobs < 1 || p.MaxActiveJobs > 10000 || p.LoadRatio <= 0 || p.LoadRatio > 100 ||
+		!validOptionalMemoryFloat(p.MemoryFreePctMin, 0, 100) || !validOptionalMemoryFloat(p.SwapUsedMBMax, 0, math.Inf(1)) {
 		return false
 	}
 	seen := map[string]struct{}{p.LocalMachine: {}}
@@ -46,11 +50,38 @@ func (p PlacementPolicy) valid() bool {
 	return true
 }
 
+func (p PlacementPolicy) memoryFreePctMin() float64 {
+	if p.MemoryFreePctMin == nil {
+		return 30
+	}
+	return *p.MemoryFreePctMin
+}
+
+func (p PlacementPolicy) swapUsedMBMax() float64 {
+	if p.SwapUsedMBMax == nil {
+		return 1536
+	}
+	return *p.SwapUsedMBMax
+}
+
+func (p *PlacementPolicy) applyMemoryDefaults() {
+	if p.MemoryFreePctMin == nil {
+		p.MemoryFreePctMin = memoryFloat(30)
+	}
+	if p.SwapUsedMBMax == nil {
+		p.SwapUsedMBMax = memoryFloat(1536)
+	}
+}
+
 func ParsePlacementPolicy(data []byte) (PlacementPolicy, error) {
 	var policy PlacementPolicy
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&policy); err != nil || decoder.Decode(&struct{}{}) != io.EOF || !policy.valid() {
+	if err := decoder.Decode(&policy); err != nil || decoder.Decode(&struct{}{}) != io.EOF {
+		return PlacementPolicy{}, errors.New("placement policy is invalid")
+	}
+	policy.applyMemoryDefaults()
+	if !policy.valid() {
 		return PlacementPolicy{}, errors.New("placement policy is invalid")
 	}
 	return policy, nil
@@ -73,16 +104,19 @@ func LoadPlacementPolicy(path string) (PlacementPolicy, time.Time, error) {
 }
 
 type PlacementCandidate struct {
-	Machine      string  `json:"machine"`
-	Score        float64 `json:"score"`
-	LoadRatio    float64 `json:"load_ratio,omitempty"`
-	Throttled    bool    `json:"throttled"`
-	ActiveJobs   int     `json:"active_jobs"`
-	Connected    bool    `json:"connected"`
-	MetricsKnown bool    `json:"metrics_known"`
-	HoldsActive  bool    `json:"holds_active"`
-	BurstReady   bool    `json:"burst_ready"`
-	Reason       string  `json:"reason"`
+	Machine       string   `json:"machine"`
+	Score         float64  `json:"score"`
+	LoadRatio     float64  `json:"load_ratio,omitempty"`
+	Throttled     bool     `json:"throttled"`
+	ActiveJobs    int      `json:"active_jobs"`
+	Connected     bool     `json:"connected"`
+	MetricsKnown  bool     `json:"metrics_known"`
+	MemoryFreePct *float64 `json:"memory_free_pct"`
+	SwapUsedMB    *float64 `json:"swap_used_mb"`
+	MemoryKnown   bool     `json:"memory_known"`
+	HoldsActive   bool     `json:"holds_active"`
+	BurstReady    bool     `json:"burst_ready"`
+	Reason        string   `json:"reason"`
 }
 
 type PlacementResult struct {
@@ -241,14 +275,16 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 	for _, machine := range machines {
 		record := h.nodes[machine]
 		connected, accepting, jobs := false, false, 0
+		var memory *HubHostMemory
 		if record != nil {
 			connected, accepting, jobs = record.agent != nil && record.state == "connected", h.acceptingEffectiveLocked(machine, record.accepting), len(record.activeJobs)
+			memory = cloneHubHostMemory(record.hostMemory)
 		}
 		holdsActive := h.holdsActiveLocked(machine, now)
 		burstReady := h.burstPolicyPath != "" && h.burstPolicy.TargetMachine == machine && h.burstState.UpCompleted
 		load, metricsKnown := metrics.load[machine]
 		throttled := metrics.throttled[machine]
-		reasons := make([]string, 0, 4)
+		reasons := make([]string, 0, 5)
 		if !connected {
 			reasons = append(reasons, "disconnected")
 		}
@@ -273,6 +309,15 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		if burstReady {
 			reasons = append(reasons, "burst_ready")
 		}
+		memoryKnown := memory != nil && memory.FreePct != nil && memory.SwapUsedMB != nil
+		memoryPressure := memory != nil &&
+			(memory.FreePct != nil && *memory.FreePct < policy.memoryFreePctMin() ||
+				memory.SwapUsedMB != nil && *memory.SwapUsedMB > policy.swapUsedMBMax())
+		if memoryPressure {
+			reasons = append(reasons, "not_accepting(memory_pressure)")
+		} else if !memoryKnown {
+			reasons = append(reasons, "memory_unknown")
+		}
 		if len(reasons) == 0 {
 			reasons = append(reasons, "available")
 		}
@@ -295,7 +340,11 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		if burstReady {
 			score += 5
 		}
-		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ",")})
+		var freePct, swapUsedMB *float64
+		if memory != nil {
+			freePct, swapUsedMB = cloneMemoryFloat(memory.FreePct), cloneMemoryFloat(memory.SwapUsedMB)
+		}
+		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ",")})
 	}
 	h.mu.Unlock()
 	decision := policy.LocalMachine

@@ -17,6 +17,8 @@ jobs reach `max_active_jobs`. `spill_targets` are considered in policy order.
   "spill_targets": ["desktop"],
   "max_active_jobs": 5,
   "load_ratio": 0.5,
+  "memory_free_pct_min": 30,
+  "swap_used_mb_max": 1536,
   "wake_on_spill": false
 }
 ```
@@ -24,6 +26,13 @@ jobs reach `max_active_jobs`. `spill_targets` are considered in policy order.
 The default is the same local `mac-work` / `desktop` spill shape. Policy files
 must be regular files; unknown fields and duplicate targets are rejected. A
 changed valid file hot-reloads without changing the last known-good policy.
+
+`memory_free_pct_min` and `swap_used_mb_max` are optional admission thresholds.
+They default to 30 percent and 1536 MB respectively; an explicit zero remains
+zero. A candidate is excluded when reported free memory is below the first
+threshold or reported swap use is above the second. Missing memory telemetry is
+fail-open, so older nodes and individual unavailable measurements keep the
+existing placement behavior.
 
 The hub queries `PANEWIRE_PROM_URL`'s `/api/v1/query` endpoint with the
 five-minute node load ratio and thermal speed-limit PromQL queries. Load is
@@ -38,8 +47,11 @@ hub-only decision based on connected/accepting state and heartbeat active-job
 counts; it never returns a scheduler 500.
 
 ```json
-{"decision":"desktop","candidates":[{"machine":"mac-work","score":47,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"reason":"load_ratio>=0.50"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
+{"decision":"desktop","candidates":[{"machine":"mac-work","score":37,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"reason":"load_ratio>=0.50,memory_unknown"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
 ```
+
+A node that does not send memory telemetry records `memory_unknown` rather
+than `available`; this remains fail-open and does not change its score.
 
 When `wake_on_spill` is true and the selected spill target is disconnected, the
 hub starts the existing R16 on-demand burst request in the background with a

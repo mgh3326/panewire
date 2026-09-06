@@ -103,6 +103,17 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": pending})
 	case strings.HasSuffix(r.URL.Path, "/delivered"):
+		idText := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/relay/events/"), "/delivered")
+		if id, err := strconv.ParseInt(idText, 10, 64); err == nil {
+			f.mu.Lock()
+			for _, row := range f.rows {
+				if row.ID == id {
+					row.DeliveredAt = "2026-09-05T00:00:00Z"
+					break
+				}
+			}
+			f.mu.Unlock()
+		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{"id": 1})
 	default:
