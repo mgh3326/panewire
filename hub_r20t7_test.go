@@ -84,9 +84,9 @@ const r20t7Lanes = `{"lanes":{` +
 
 func r20t7Lane(jobID string) string {
 	switch {
-	case strings.HasPrefix(jobID, "lead-a"):
+	case strings.HasPrefix(jobID, "captain-a"):
 		return "lane-cap-a"
-	case strings.HasPrefix(jobID, "lead-b"):
+	case strings.HasPrefix(jobID, "captain-b"):
 		return "lane-cap-b"
 	default:
 		return "lane-w"

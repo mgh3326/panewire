@@ -144,7 +144,7 @@ daemon invocation:
 
 ```sh
 panewire daemon \
-  --hub-url wss://hub.example.invalid \
+  --hub-url wss://hub.robinco.dev \
   --hub-token-env /Users/you/.config/panewire/hub-node.env \
   --hub-cf-env /Users/you/.config/panewire/hub-cf-access.env \
   --hub-accepting \
@@ -185,7 +185,7 @@ Then request the human-readable status table:
 
 ```sh
 panewire hub-status \
-  --hub-url https://hub.example.invalid \
+  --hub-url https://hub.robinco.dev \
   --hub-token-env /safe/operator/hub-operator.env \
   --hub-cf-env /safe/operator/hub-cf-access.env
 ```
@@ -205,7 +205,7 @@ Wake-on-LAN target. Add both flags to that RPi's existing daemon invocation:
 
 ```sh
 panewire daemon \
-  --hub-url wss://hub.example.invalid \
+  --hub-url wss://hub.robinco.dev \
   --hub-token-env /etc/panewire/rpi-hub-node.env \
   --failover-wake-on machine-a \
   --failover-wake-mac 02:1a:2b:3c:4d:5e
@@ -234,16 +234,16 @@ execution facility.
    Run it as a dedicated unprivileged service account with `Restart=always`.
    Verify locally with `curl http://127.0.0.1:9377/healthz`.
 3. Configure `cloudflared` on that same NCP host to map the hostname
-   `hub.example.invalid` to `http://127.0.0.1:9377`. The hub itself remains
+   `hub.robinco.dev` to `http://127.0.0.1:9377`. The hub itself remains
    loopback-only; do not open an NCP firewall listener for port 9377.
-4. Create a Cloudflare Access application for `hub.example.invalid` before
+4. Create a Cloudflare Access application for `hub.robinco.dev` before
    distributing node flags. Restrict it to the approved machines/service
    identities. The hub's static bearer authentication remains required behind
    Access, so Access is a network gate rather than a replacement for node
    identity.
 5. On each Mac, write its own node env file and, for Service Auth, its separate
    Access env file with mode `0600`; add
-   `--hub-url wss://hub.example.invalid --hub-token-env … --hub-cf-env …
+   `--hub-url wss://hub.robinco.dev --hub-token-env … --hub-cf-env …
    --checks-config …` to the existing daemon launch configuration, and restart
    the daemon. Verify with the operator
    `hub-status` command and an Access-authenticated `/v1/events` client.

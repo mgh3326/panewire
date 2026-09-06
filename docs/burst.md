@@ -8,7 +8,7 @@ active.
 
 ```json
 {
-  "source_machine": "machine-a",
+  "source_machine": "mac-personal",
   "swap_gb": 8,
   "load5": 6,
   "consecutive": 3,

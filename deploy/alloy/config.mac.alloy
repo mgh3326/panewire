@@ -18,7 +18,7 @@ loki.write "cloud" {
 
 // Node metrics are sent to the private Prometheus receiver, never Loki. The
 // host identity is injected by launchd so a copied config cannot silently
-// report itself as machine-a.
+// report itself as mac-personal.
 prometheus.exporter.unix "node" {
 	enable_collectors = ["thermal"]
 }

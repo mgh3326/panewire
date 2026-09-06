@@ -40,7 +40,7 @@ On macOS, install Alloy with `brew install alloy` and node_exporter with
 `node_thermal_cpu_speed_limit_ratio`, `node_thermal_zone_temp`, and
 `node_load5` (the thermal collector must be enabled; availability varies by
 hardware/OS). Set the plist's absolute configuration path and distinct
-`MACHINE_ID` (for example `machine-b`, never `machine-a` by copy/paste), then
+`MACHINE_ID` (for example `mac-work`, never `mac-personal` by copy/paste), then
 keep that plist under the user's launchd management. Copy `run-alloy.sh` beside
 the private plist and use it as shown: it fails closed if either identity or
 Prometheus URL is missing.

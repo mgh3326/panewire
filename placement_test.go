@@ -23,18 +23,18 @@ func TestPlacementPrometheusPolicyBranches(t *testing.T) {
 		desktop   bool
 		want      string
 	}{
-		{"local capacity", .23, 1, 0, true, "machine-b"},
+		{"local capacity", .23, 1, 0, true, "mac-work"},
 		{"local overloaded", .53, 1, 0, true, "desktop"},
 		{"thermal throttle", .12, .89, 0, true, "desktop"}, // Mutant ①: deleting throttle eligibility makes this RED.
 		{"active job maximum", .12, 1, 5, true, "desktop"},
-		{"spill unavailable", .53, 1, 0, false, "machine-b"},
+		{"spill unavailable", .53, 1, 0, false, "mac-work"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			prom := placementPromServer(t, tc.load, tc.thermal, nil)
 			defer prom.Close()
 			hub := placementHub(t, prom.URL)
-			hub.connect("machine-b", "test", "fixture", &hubAgent{}, true)
+			hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
 			if tc.desktop {
 				hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
 			}
@@ -42,7 +42,7 @@ func TestPlacementPrometheusPolicyBranches(t *testing.T) {
 			for i := range jobs {
 				jobs[i] = HubActiveJob{JobID: "job-" + string(rune('a'+i)), AgentLabel: "wrk", Epoch: 1}
 			}
-			hub.observeActiveJobs("machine-b", jobs, time.Now().UTC())
+			hub.observeActiveJobs("mac-work", jobs, time.Now().UTC())
 			got := hub.placement(t.Context(), "worker", "repo")
 			if got.Decision != tc.want || got.Source != "prometheus" {
 				t.Fatalf("decision=%+v", got)
@@ -59,10 +59,10 @@ func TestPlacementHubOnlyNeverFailsAndCaches(t *testing.T) {
 	}))
 	defer prom.Close()
 	hub := placementHub(t, prom.URL)
-	hub.connect("machine-b", "test", "fixture", &hubAgent{}, true)
+	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
 	first := hub.placement(t.Context(), "worker", "repo")
 	second := hub.placement(t.Context(), "worker", "repo")
-	if first.Source != "hub-only" || first.Decision != "machine-b" || second.Source != "hub-only" {
+	if first.Source != "hub-only" || first.Decision != "mac-work" || second.Source != "hub-only" {
 		t.Fatalf("must degrade: first=%+v second=%+v", first, second)
 	} // Mutant ②: returning a Prometheus failure turns this RED.
 	if got := calls.Load(); got != 1 {
@@ -75,19 +75,19 @@ func TestPlacementEmptyLoadIsUnknownNotLocal(t *testing.T) {
 		query := r.URL.Query().Get("query")
 		result := []any{}
 		if strings.Contains(query, "thermal") {
-			result = []any{map[string]any{"metric": map[string]string{"machine_id": "machine-b"}, "value": []any{float64(1), "1"}}}
+			result = []any{map[string]any{"metric": map[string]string{"machine_id": "mac-work"}, "value": []any{float64(1), "1"}}}
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": result}})
 	}))
 	defer prom.Close()
 	hub := placementHub(t, prom.URL)
-	hub.connect("machine-b", "test", "fixture", &hubAgent{}, true)
+	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
 	got := hub.placement(t.Context(), "worker", "repo")
 	if got.Decision != "unavailable" || got.Source != "prometheus" {
 		t.Fatalf("empty load selected local: %+v", got)
 	}
 	for _, candidate := range got.Candidates {
-		if candidate.Machine == "machine-b" && strings.Contains(candidate.Reason, "load_unknown") {
+		if candidate.Machine == "mac-work" && strings.Contains(candidate.Reason, "load_unknown") {
 			return
 		}
 	}
@@ -148,12 +148,12 @@ func TestPlaceCLIJSONAndExplain(t *testing.T) {
 func placementHub(t *testing.T, promURL string) *HubServer {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "placement.json")
-	policy := PlacementPolicy{LocalMachine: "machine-b", SpillTargets: []string{"desktop"}, MaxActiveJobs: 5, LoadRatio: .5}
+	policy := PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop"}, MaxActiveJobs: 5, LoadRatio: .5}
 	data, _ := json.Marshal(policy)
 	if err := os.WriteFile(path, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "machine-b": r6NodeAToken, "desktop": r6NodeBToken}, PlacementPolicyPath: path, PrometheusURL: promURL})
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "mac-work": r6NodeAToken, "desktop": r6NodeBToken}, PlacementPolicyPath: path, PrometheusURL: promURL})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +179,7 @@ func placementPromServer(t *testing.T, load, thermal float64, calls *atomic.Int3
 			desktop = "1"
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": []any{
-			map[string]any{"metric": map[string]string{"machine_id": "machine-b"}, "value": []any{float64(1), formatPlacementValue(value)}},
+			map[string]any{"metric": map[string]string{"machine_id": "mac-work"}, "value": []any{float64(1), formatPlacementValue(value)}},
 			map[string]any{"metric": map[string]string{"machine_id": "desktop"}, "value": []any{float64(1), desktop}},
 		}}})
 	}))

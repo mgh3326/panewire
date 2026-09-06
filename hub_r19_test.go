@@ -19,9 +19,9 @@ import (
 	"github.com/coder/websocket"
 )
 
-func TestR19ListenListsAcceptLoopback(t *testing.T) {
-	addresses, err := hubListenAddresses([]string{"--hub-auth", "ignored", "--listen", "127.0.0.1:9377"})
-	if err != nil || len(addresses) != 1 || addresses[0] != "127.0.0.1:9377" {
+func TestR19ListenListsAcceptLoopbackAndTailnet(t *testing.T) {
+	addresses, err := hubListenAddresses([]string{"--hub-auth", "ignored", "--listen", "127.0.0.1:9377,100.64.0.1:9377"})
+	if err != nil || len(addresses) != 2 || addresses[1] != "100.64.0.1:9377" {
 		t.Fatalf("addresses=%v err=%v", addresses, err)
 	}
 	if _, err := hubListenAddress("192.0.2.1:9377"); err == nil {
@@ -38,7 +38,7 @@ func TestR19HubURLFallbackAndPreference(t *testing.T) {
 		}
 		return nil, nil, nil
 	}
-	client, err := NewHubClient(HubClientConfig{URLs: []string{"ws://127.0.0.2:9377", "ws://127.0.0.1:9377"}, MachineID: "node-a", Token: "fixture", AllowInsecureForTests: true, Dial: dial})
+	client, err := NewHubClient(HubClientConfig{URLs: []string{"ws://100.64.0.1:9377", "ws://127.0.0.1:9377"}, MachineID: "node-a", Token: "fixture", AllowInsecureForTests: true, Dial: dial})
 	if err != nil {
 		t.Fatal(err)
 	}

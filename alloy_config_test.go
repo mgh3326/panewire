@@ -46,7 +46,7 @@ func TestAlloyMetricLabelContract(t *testing.T) {
 				t.Fatalf("%s missing %s", config, required)
 			}
 		}
-		if strings.Contains(text, "machine_id = \"machine-a\"") {
+		if strings.Contains(text, "machine_id = \"mac-personal\"") {
 			t.Fatalf("%s has a static machine label", config)
 		}
 	}
