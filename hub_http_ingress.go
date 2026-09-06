@@ -31,15 +31,19 @@ type hubRelayIngressResponse struct {
 	Machine string `json:"machine"`
 }
 
-func decodeHubRelayIngressRequest(writer http.ResponseWriter, request *http.Request) (hubRelayIngressRequest, bool) {
-	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, hubRelayIngressMaxBodyBytes))
+func decodeHubJSON(writer http.ResponseWriter, request *http.Request, maxBytes int64, target any) bool {
+	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, maxBytes))
 	decoder.DisallowUnknownFields()
-	var body hubRelayIngressRequest
-	if decoder.Decode(&body) != nil {
-		return hubRelayIngressRequest{}, false
+	if decoder.Decode(target) != nil {
+		return false
 	}
 	var trailing any
-	if decoder.Decode(&trailing) != io.EOF {
+	return decoder.Decode(&trailing) == io.EOF
+}
+
+func decodeHubRelayIngressRequest(writer http.ResponseWriter, request *http.Request) (hubRelayIngressRequest, bool) {
+	var body hubRelayIngressRequest
+	if !decodeHubJSON(writer, request, hubRelayIngressMaxBodyBytes, &body) {
 		return hubRelayIngressRequest{}, false
 	}
 	if body.Kind != "lane.event" || !hubAgentLabelPattern.MatchString(body.Lane) || !validLaneEventID(body.EventID) || !validLaneEventText(body.Text) || !hubAgentLabelPattern.MatchString(body.Label) {
@@ -54,7 +58,7 @@ func decodeHubRelayIngressRequest(writer http.ResponseWriter, request *http.Requ
 	return body, true
 }
 
-func writeHubRelayIngressJSON(writer http.ResponseWriter, status int, value any) {
+func writeHubJSON(writer http.ResponseWriter, status int, value any) {
 	writer.Header().Set("Content-Type", "application/json")
 	writer.WriteHeader(status)
 	_ = json.NewEncoder(writer).Encode(value)
@@ -67,7 +71,7 @@ func (h *HubServer) handleRelayIngress(writer http.ResponseWriter, request *http
 	}
 	body, valid := decodeHubRelayIngressRequest(writer, request)
 	if !valid {
-		writeHubRelayIngressJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	event := hubJobEventPayload{
@@ -82,22 +86,22 @@ func (h *HubServer) handleRelayIngress(writer http.ResponseWriter, request *http
 	}
 	result := h.relayLaneEvent(event, nil)
 	if result.RejectedTooLong {
-		writeHubRelayIngressJSON(writer, http.StatusBadRequest, map[string]string{"error": "text_too_long"})
+		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "text_too_long"})
 		return
 	}
 	if result.PersistFailed {
-		writeHubRelayIngressJSON(writer, http.StatusBadGateway, map[string]string{"error": "persist_failed"})
+		writeHubJSON(writer, http.StatusBadGateway, map[string]string{"error": "persist_failed"})
 		return
 	}
 	if result.Duplicate {
-		writeHubRelayIngressJSON(writer, http.StatusConflict, struct {
+		writeHubJSON(writer, http.StatusConflict, struct {
 			Error string `json:"error"`
 			ID    int64  `json:"id"`
 		}{Error: "duplicate_event_id", ID: result.ID})
 		return
 	}
 	h.broadcastRelayHTTPIngress(body, result.Routed)
-	writeHubRelayIngressJSON(writer, http.StatusCreated, hubRelayIngressResponse{ID: result.ID, EventID: body.EventID, Lane: body.Lane, Routed: result.Routed, Machine: result.Machine})
+	writeHubJSON(writer, http.StatusCreated, hubRelayIngressResponse{ID: result.ID, EventID: body.EventID, Lane: body.Lane, Routed: result.Routed, Machine: result.Machine})
 }
 
 func (h *HubServer) broadcastRelayHTTPIngress(request hubRelayIngressRequest, routed bool) {

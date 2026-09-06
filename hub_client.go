@@ -55,9 +55,12 @@ type HubClientConfig struct {
 	Dial                  HubDial
 	Wait                  HubWait
 	Warn                  func(string)
-	relayInject           func(context.Context, string, string) bool    // fixture seam
-	hostLoadCollector     func(context.Context) (HubHostLoad, error)    // fixture seam
-	hostMemoryCollector   func(context.Context) (*HubHostMemory, error) // fixture seam
+	// SpawnConfigPath is the local, operator-provisioned job.spawn policy.
+	// It is injectable so tests never consult a user's real configuration.
+	SpawnConfigPath     string
+	relayInject         func(context.Context, string, string) bool    // fixture seam
+	hostLoadCollector   func(context.Context) (HubHostLoad, error)    // fixture seam
+	hostMemoryCollector func(context.Context) (*HubHostMemory, error) // fixture seam
 
 	// failoverWakeDestination is a package-private fixture override. Production
 	// always uses the fixed broadcast destination below.
@@ -132,14 +135,19 @@ type HubClient struct {
 	outbox        *Store
 	outboxMu      sync.Mutex
 	// now is the outbox retry clock. Tests pin it; production leaves it nil.
-	now              func() time.Time
-	assignedJobs     map[string]uint64
-	assignmentMu     sync.Mutex
-	burstHoldsActive bool
-	updateMu         sync.Mutex
-	updateInFlight   bool
-	panesAlive       panesAliveFunc
-	panesAliveMu     sync.Mutex
+	now               func() time.Time
+	assignedJobs      map[string]uint64
+	assignmentMu      sync.Mutex
+	burstHoldsActive  bool
+	updateMu          sync.Mutex
+	updateInFlight    bool
+	panesAlive        panesAliveFunc
+	panesAliveMu      sync.Mutex
+	spawnConfigPath   string
+	spawnMu           sync.Mutex
+	spawnSeenMu       sync.Mutex
+	spawnSeen         map[string]struct{}
+	spawnTimeoutExtra time.Duration // fixture seam; production is 60 seconds.
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -250,7 +258,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		config.Restart = func() { os.Exit(0) }
 	}
 	return &HubClient{
-		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot,
+		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnSeen: make(map[string]struct{}), spawnTimeoutExtra: 60 * time.Second,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		r19a:   newR19aClientState(config),
@@ -482,6 +490,10 @@ type hubOutboundMessage struct {
 	URL             string
 	SHA256          string
 	Version         string
+	CWDKey          string
+	BriefInline     string
+	Args            []string
+	WaitSeconds     int
 }
 
 func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
@@ -525,7 +537,7 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 // continue the session on that already-open preferred endpoint; the superseded
 // connection has been closed by then.
 func (client *HubClient) serveConnection(ctx context.Context, connection *websocket.Conn) (*websocket.Conn, error) {
-	connection.SetReadLimit(hubMaxMessageBytes)
+	connection.SetReadLimit(hubSpawnMaxBodyBytes)
 	peer := &hubClientConnection{connection: connection}
 	if err := peer.write(ctx, struct {
 		Type      string `json:"type"`
@@ -632,6 +644,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				go client.handleHubUpdate(message)
 			case "quota.request":
 				go client.handleHubQuota(ctx, peer, message)
+			case "job.spawn":
+				go client.handleHubSpawn(ctx, peer, message)
 			}
 		}
 	}()
@@ -1200,6 +1214,15 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 	case "quota.request":
 		var tool string
 		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["tool"], &tool) != nil || !validHubRequestID(message.RequestID) || tool != "scopefuel" {
+			return hubOutboundMessage{}, false
+		}
+	case "job.spawn":
+		var brief hubSpawnBrief
+		if len(fields) != 6 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["args"], &message.Args) != nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
+			return hubOutboundMessage{}, false
+		}
+		message.BriefInline = brief.Inline
+		if !validHubSpawnRequest(hubSpawnRequest{RequestID: message.RequestID, Machine: "machine-a", CWDKey: message.CWDKey, Brief: brief, Args: message.Args, WaitSeconds: message.WaitSeconds}) {
 			return hubOutboundMessage{}, false
 		}
 	default:
