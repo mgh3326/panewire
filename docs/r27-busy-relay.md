@@ -44,3 +44,9 @@ handoffkeep 행의 `text`는 발신 원본이고, 실제 주입된 텍스트의 
 취소는 `pane="cancelled"` 센티널로 delivered 마킹해 재생에서 제외한다.
 이 값은 pane이 아니며 노드는 절대 pane으로 해석하지 않는다. handoffkeep의
 명시적 cancel 상태는 후속 v8 additive 작업으로 남긴다.
+
+취소 요청을 허브가 204로 확정하고 `relay.cancelled`를 브로드캐스트한 뒤에도,
+같은 pane의 release가 이미 prompt 호출에 들어간 짧은 분산 레이스 창은 남는다.
+이 창에서는 화면의 취소 관측보다 실제 pane 입력이 앞설 수 있다. 이후
+`relay.delivered`가 같은 `original_event_id`로 도착하면 실제 전달로 관측하고
+운영자가 그 사실을 기준으로 판단한다.

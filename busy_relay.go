@@ -186,13 +186,13 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 		policy = relayDeliveryPolicy{Name: "idle", MaxWait: defaultRelayMaxWait}
 	}
 	if policy.Name == "now" || message.EventID == 0 || message.Lane == "" {
-		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name}}, false)
+		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
 	runner := manager.client.relayRunner()
 	if runner == nil {
 		// Fixture-only clients without the explicit command seam are fail-open.
-		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name}}, false)
+		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
 	getContext, cancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
@@ -200,10 +200,10 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 	cancel()
 	status, parsed := parseRelayAgentStatus(output)
 	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" {
-		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name}}, false)
+		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
-	held := relayHeld{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name, MaxWait: policy.MaxWait, fresh: true}
+	held := relayHeld{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name, MaxWait: policy.MaxWait, RecvSeq: message.RecvSeq, fresh: true}
 	manager.hold(parent, held, status)
 }
 
@@ -342,8 +342,6 @@ func (manager *relayBusyManager) release(parent context.Context, pane string, ex
 	if store == nil {
 		return
 	}
-	// Serializing the decision through the actual prompt prevents a queued
-	// edit/cancel command from racing a text snapshot into a pane.
 	manager.mu.Lock()
 	items, err := store.RelayHeldForPane(parent, pane)
 	if err != nil || len(items) == 0 {
@@ -352,8 +350,10 @@ func (manager *relayBusyManager) release(parent context.Context, pane string, ex
 	}
 	delete(manager.waits, pane)
 	delete(manager.held, pane)
-	manager.deliver(parent, items, expired)
 	manager.mu.Unlock()
+	// The state transition is serialized above, but prompt itself must not hold
+	// the manager-wide map lock: another pane's read-loop work stays independent.
+	manager.deliver(parent, items, expired)
 }
 
 func relayBatchText(items []relayHeld, expired bool, now time.Time) string {
@@ -513,13 +513,18 @@ func (manager *relayBusyManager) restore(ctx context.Context) {
 		return
 	}
 	byPane := make(map[string][]relayHeld)
+	var maxRecvSeq int64
 	for _, item := range items {
 		if item.Pane == relayCancelledPane {
 			_, _ = store.DeleteRelayHeld(ctx, item.EventID)
 			continue
 		}
+		if item.RecvSeq > maxRecvSeq {
+			maxRecvSeq = item.RecvSeq
+		}
 		byPane[item.Pane] = append(byPane[item.Pane], item)
 	}
+	manager.client.seedRelayRecvSeq(maxRecvSeq)
 	manager.mu.Lock()
 	manager.held = byPane
 	manager.mu.Unlock()

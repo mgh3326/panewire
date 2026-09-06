@@ -107,7 +107,18 @@ func (h *HubServer) consumeRelayCancelled(id int64) bool {
 		return false
 	}
 	delete(h.relayCancelled, id)
+	h.relayCancelledOrder.forget(id)
 	return true
+}
+
+func (h *HubServer) rememberRelayCancelledLocked(id int64) {
+	_, evicted, overflowed := h.relayCancelledOrder.touch(id, relayCancelledMaxEntries)
+	if overflowed {
+		// The durable sentinel already prevents replay; eviction can only allow
+		// one late node confirmation to be observed as a duplicate broadcast.
+		delete(h.relayCancelled, evicted)
+	}
+	h.relayCancelled[id] = struct{}{}
 }
 
 func (h *HubServer) handleRelayHeld(writer http.ResponseWriter, request *http.Request) {
@@ -182,7 +193,7 @@ func (h *HubServer) handleRelayHeldDelete(writer http.ResponseWriter, request *h
 		return
 	}
 	delete(h.relayHeld, id)
-	h.relayCancelled[id] = struct{}{}
+	h.rememberRelayCancelledLocked(id)
 	h.cancelRelayPendingLocked(id, held.JobID)
 	h.mu.Unlock()
 	if h.handoffkeep != nil {
@@ -206,7 +217,14 @@ func (h *HubServer) queueRelayHeldControl(id int64, control hubRelayInjectEvent)
 		return false
 	}
 	record := h.nodes[held.Machine]
-	return record != nil && record.agent != nil && record.agent.queueRelay(control)
+	if record == nil || record.agent == nil || !record.agent.queueRelay(control) {
+		return false
+	}
+	if control.Type == "relay.edit" {
+		held.Preview = truncateRelayText(control.Text, 240)
+		h.relayHeld[id] = held
+	}
+	return true
 }
 
 func (h *HubServer) cancelRelayPendingLocked(eventID int64, jobID string) {

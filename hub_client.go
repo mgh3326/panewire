@@ -153,6 +153,8 @@ type HubClient struct {
 	busyRelay         *relayBusyManager
 	relayCommand      relayCommandRunner   // fixture seam for agent get/wait.
 	relayEmitter      func(hubClientEvent) // fixture/connection-owned writer.
+	relayRecvSeqMu    sync.Mutex
+	relayRecvSeq      int64 // assigned synchronously by the hub read loop.
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -500,6 +502,7 @@ type hubOutboundMessage struct {
 	BriefInline     string
 	Args            []string
 	WaitSeconds     int
+	RecvSeq         int64 // local read-loop order; never part of the wire shape.
 }
 
 func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
@@ -580,7 +583,10 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				continue
 			}
 			if message.Type == "relay.inject" {
-				client.handleRelayInject(ctx, peer, message)
+				// Preserve websocket receive order before moving potentially blocking
+				// agent get/wait/prompt work out of the read loop.
+				message.RecvSeq = client.nextRelayRecvSeq()
+				go client.handleRelayInject(ctx, peer, message)
 				continue
 			}
 			switch message.Type {
@@ -757,6 +763,21 @@ func (client *HubClient) relayHeldByKey(ctx context.Context, lane string, eventI
 		return relayHeld{}, false, nil
 	}
 	return store.RelayHeldByKey(ctx, lane, eventID)
+}
+
+func (client *HubClient) nextRelayRecvSeq() int64 {
+	client.relayRecvSeqMu.Lock()
+	defer client.relayRecvSeqMu.Unlock()
+	client.relayRecvSeq++
+	return client.relayRecvSeq
+}
+
+func (client *HubClient) seedRelayRecvSeq(value int64) {
+	client.relayRecvSeqMu.Lock()
+	if value > client.relayRecvSeq {
+		client.relayRecvSeq = value
+	}
+	client.relayRecvSeqMu.Unlock()
 }
 
 func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {

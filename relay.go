@@ -15,6 +15,7 @@ import (
 const (
 	lanePersistedMaxEntries        = 4096
 	relayReplayExhaustedMaxEntries = 4096
+	relayCancelledMaxEntries       = 4096
 )
 
 // reportRelayRoutes is intentionally a tiny operator-owned configuration:

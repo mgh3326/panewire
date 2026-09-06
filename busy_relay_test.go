@@ -22,6 +22,8 @@ import (
 type r27FakeHerdr struct {
 	t          *testing.T
 	getStatus  string
+	getOutput  []byte
+	getErr     error
 	waitStatus string
 	waitGate   chan struct{}
 	started    chan struct{}
@@ -58,6 +60,9 @@ func TestR27HeldProjectionEditCancelAPIs(t *testing.T) {
 		}
 	default:
 		t.Fatal("PATCH did not relay edit to owning node")
+	}
+	if held := hub.relayHeld[301]; held.Preview != "after" {
+		t.Fatalf("PATCH preview=%q, want edited text", held.Preview)
 	}
 	deleteRequest := httptest.NewRequest(http.MethodDelete, "/v1/relay/events/301", nil)
 	deleteRequest.Header.Set("Authorization", "Bearer op")
@@ -97,7 +102,11 @@ func (fake *r27FakeHerdr) run(ctx context.Context, args ...string) ([]byte, erro
 	fake.calls = append(fake.calls, append([]string(nil), args...))
 	fake.mu.Unlock()
 	if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
-		return r27Fixture(fake.t, "agent-get-"+fake.getStatus+".json"), nil
+		output := fake.getOutput
+		if output == nil {
+			output = r27Fixture(fake.t, "agent-get-"+fake.getStatus+".json")
+		}
+		return output, fake.getErr
 	}
 	if len(args) >= 2 && args[0] == "agent" && args[1] == "wait" {
 		select {
@@ -407,6 +416,125 @@ func TestR27BatchByteLimitKeepsOversizedItemIntact(t *testing.T) {
 	}
 	if _, valid := decodeRelayAckPayload(delivered.Payload); !valid {
 		t.Fatalf("oversized delivery rejected by hub parser: %s", delivered.Payload)
+	}
+}
+
+func TestR27FailOpenAgentGetPathsUseFixtureHerdr(t *testing.T) {
+	r27GuardInbox(t)
+	tests := []struct {
+		name   string
+		output func(*testing.T) []byte
+		err    error
+	}{
+		{name: "unknown status", output: func(t *testing.T) []byte { return r27Fixture(t, "agent-get-unknown.json") }},
+		{name: "exit status one", output: func(t *testing.T) []byte { return r27Fixture(t, "agent-get-working.json") }, err: errors.New("exit status 1")},
+		{name: "agent not found", output: func(t *testing.T) []byte { return r27Fixture(t, "agent-get-not-found.json") }, err: errors.New("exit status 1")},
+		{name: "malformed JSON", output: func(*testing.T) []byte { return []byte("not json") }},
+	}
+	for index, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &r27FakeHerdr{t: t, getOutput: test.output(t), getErr: test.err, waitStatus: "idle", started: make(chan struct{}, 1)}
+			store := NewMemoryStore(t)
+			defer store.Close()
+			client, prompts, _ := r27Node(t, store, fake)
+			client.relayBusyManager().offer(t.Context(), r27Directive(int64(130+index), "fail open", "idle"))
+			if len(*prompts) != 1 || fake.count("wait") != 0 {
+				t.Fatalf("prompts=%q wait=%d", *prompts, fake.count("wait"))
+			}
+		})
+	}
+}
+
+func TestR27ExplicitReceiveSequenceOrdersHeldRows(t *testing.T) {
+	r27GuardInbox(t)
+	gate := make(chan struct{})
+	fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 3)}
+	store := NewMemoryStore(t)
+	defer store.Close()
+	client, _, _ := r27Node(t, store, fake)
+	second := r27Directive(141, "second", "idle")
+	second.RecvSeq = 2
+	first := r27Directive(140, "first", "idle")
+	first.RecvSeq = 1
+	client.relayBusyManager().offer(t.Context(), second)
+	client.relayBusyManager().offer(t.Context(), first)
+	items, err := store.RelayHeldForPane(t.Context(), "fixture-pane")
+	if err != nil || len(items) != 2 || items[0].EventID != 140 || items[0].RecvSeq != 1 || items[1].EventID != 141 || items[1].RecvSeq != 2 {
+		t.Fatalf("held=%+v err=%v", items, err)
+	}
+	close(gate)
+}
+
+func TestR27CancelledConfirmationBounded(t *testing.T) {
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.mu.Lock()
+	for id := int64(1); id <= relayCancelledMaxEntries+1; id++ {
+		hub.rememberRelayCancelledLocked(id)
+	}
+	length := len(hub.relayCancelled)
+	_, oldestPresent := hub.relayCancelled[1]
+	_, newestPresent := hub.relayCancelled[relayCancelledMaxEntries+1]
+	hub.mu.Unlock()
+	if length != relayCancelledMaxEntries || oldestPresent || !newestPresent {
+		t.Fatalf("cancelled length=%d oldest=%t newest=%t", length, oldestPresent, newestPresent)
+	}
+}
+
+func TestR27HubIngestsBusyRelayNodeEvents(t *testing.T) {
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "host-a": "node"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &hubAgent{}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: agent}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	subscriber := &hubEventSubscriber{ctx: ctx, cancel: cancel, messages: make(chan hubSubscriptionMessage, 4)}
+	hub.subscribers[subscriber] = struct{}{}
+	send := func(kind string, value any) {
+		t.Helper()
+		payload, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		wire, err := json.Marshal(struct {
+			Type    string          `json:"type"`
+			Kind    string          `json:"kind"`
+			Payload json.RawMessage `json:"payload"`
+		}{Type: "event", Kind: kind, Payload: payload})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, valid := parseHubInbound(wire); !valid {
+			t.Fatalf("parseHubInbound rejected %s", wire)
+		}
+		hub.handleAgentMessage("host-a", "fixture", agent, wire)
+	}
+	held := relayHeldPayload{EventID: 501, JobID: "relay-job-501", Pane: "fixture-pane", Lane: "lane-a", Reason: "working", Preview: "waiting", HeldSince: "2026-01-01T00:00:00Z", DeliverPolicy: "idle"}
+	send("relay.held", held)
+	if projection, exists := hub.relayHeld[501]; !exists || projection.Preview != "waiting" {
+		t.Fatalf("held projection=%+v exists=%t", projection, exists)
+	}
+	send("relay.released", relayReleasedPayload{JobID: held.JobID, Pane: held.Pane, Lane: held.Lane, FinalText: "final text", Edited: true, OriginalEventID: held.EventID})
+	if _, exists := hub.relayHeld[501]; exists {
+		t.Fatal("released relay remained held")
+	}
+	send("relay.cancelled", relayCancelledPayload{OriginalEventID: 502})
+	send("relay.batched", relayBatchedPayload{Pane: "fixture-pane", Lane: "lane-a", EventIDs: []int64{503, 504}})
+	seen := make(map[string]json.RawMessage, 4)
+	for range 4 {
+		message := <-subscriber.messages
+		if message.event == nil {
+			t.Fatalf("non-event broadcast=%+v", message)
+		}
+		seen[message.event.Kind] = message.event.Payload
+	}
+	released, valid := decodeRelayReleasedPayload(seen["relay.released"])
+	if !valid || released.FinalText != "final text" || !released.Edited || released.OriginalEventID != held.EventID || len(seen) != 4 {
+		t.Fatalf("released=%+v valid=%t broadcasts=%v", released, valid, seen)
 	}
 }
 

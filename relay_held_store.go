@@ -26,9 +26,13 @@ func (s *Store) InsertRelayHeld(ctx context.Context, held relayHeld) (bool, erro
 		return false, err
 	}
 	defer tx.Rollback()
-	var next int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(recv_seq),0)+1 FROM relay_held`).Scan(&next); err != nil {
-		return false, err
+	next := held.RecvSeq
+	if next == 0 {
+		// Direct/legacy callers have no read-loop sequence; recovery uses the
+		// persisted maximum only as their fallback.
+		if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(recv_seq),0)+1 FROM relay_held`).Scan(&next); err != nil {
+			return false, err
+		}
 	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO relay_held(pane,lane,event_id,job_id,text,held_since,deliver_policy,max_wait,recv_seq,edited)
 VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(lane,event_id) DO NOTHING`, held.Pane, held.Lane, held.EventID, held.JobID, held.Text,

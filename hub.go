@@ -345,6 +345,7 @@ type HubServer struct {
 	relayDedupe                 map[string]int64
 	relayHeld                   map[int64]hubRelayHeldProjection
 	relayCancelled              map[int64]struct{}
+	relayCancelledOrder         lruIndex[int64]
 	lanePersisted               map[string]int64
 	lanePersistedOrder          lruIndex[string]
 	replayExhausted             map[int64]struct{}
