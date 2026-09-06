@@ -347,6 +347,7 @@ type HubServer struct {
 	quotaCache                  map[string]hubQuotaCacheEntry
 	quotaWaiters                map[string]chan hubQuotaResult
 	quotaCacheTTL               time.Duration
+	spawnRecords                map[string]*hubSpawnRecord
 	expectedVersion             map[string]hubExpectedVersion
 	updateConfirmationTimeout   time.Duration
 }
@@ -435,7 +436,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
 	}, nil
 }
 
@@ -478,6 +479,8 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)
+	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
+	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
 	mux.HandleFunc("POST /v1/update", h.handleUpdatePublish)
 	mux.HandleFunc("GET /v1/quota/{machine}", h.handleQuotaGet)
 	mux.HandleFunc("POST /v1/quota/{machine}", h.handleQuotaRequest)
@@ -775,6 +778,10 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 }
 
 func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubAgent, payload []byte) {
+	if result, ok := parseHubSpawnResult(payload); ok {
+		h.resolveSpawn(machineID, result)
+		return
+	}
 	if report, ok := parseHubQuotaReport(payload); ok {
 		h.resolveQuota(machineID, report)
 		return
@@ -1252,6 +1259,7 @@ func (h *HubServer) recordNote(machineID, text string, received time.Time) {
 }
 
 func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
+	h.loseSpawns(machineID, agent)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {
