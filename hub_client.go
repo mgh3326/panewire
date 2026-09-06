@@ -1218,7 +1218,8 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		}
 	case "job.spawn":
 		var brief hubSpawnBrief
-		if len(fields) != 6 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["args"], &message.Args) != nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
+		var briefFields map[string]json.RawMessage
+		if len(fields) != 6 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || len(briefFields) != 1 || json.Unmarshal(briefFields["inline"], &brief.Inline) != nil || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
 			return hubOutboundMessage{}, false
 		}
 		message.BriefInline = brief.Inline

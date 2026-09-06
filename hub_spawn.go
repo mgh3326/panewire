@@ -61,7 +61,7 @@ type hubSpawnRecord struct {
 func validHubSpawnRequestID(value string) bool { return hubSpawnRequestIDPattern.MatchString(value) }
 
 func validHubSpawnRequest(request hubSpawnRequest) bool {
-	if !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.Machine) || !hubSpawnCWDKeyPattern.MatchString(request.CWDKey) || request.WaitSeconds < 1 || request.WaitSeconds > 300 || request.Brief.Inline == "" || !utf8.ValidString(request.Brief.Inline) || len([]byte(request.Brief.Inline)) > hubSpawnMaxBriefBytes {
+	if request.Args == nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.Machine) || !hubSpawnCWDKeyPattern.MatchString(request.CWDKey) || request.WaitSeconds < 1 || request.WaitSeconds > 300 || request.Brief.Inline == "" || !utf8.ValidString(request.Brief.Inline) || len([]byte(request.Brief.Inline)) > hubSpawnMaxBriefBytes {
 		return false
 	}
 	return validHubSpawnArgs(request.Args)

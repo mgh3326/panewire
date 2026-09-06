@@ -185,11 +185,28 @@ func (output *hubSpawnOutput) Write(value []byte) (int, error) {
 }
 
 func (output *hubSpawnOutput) parseLine() {
-	line := strings.TrimSuffix(string(output.line), "\r")
-	if !strings.HasPrefix(line, "OK pane=") {
+	pane, jobID := parseHubSpawnOKLine(strings.TrimSuffix(string(output.line), "\r"))
+	if pane == "" && jobID == "" {
 		return
 	}
-	var pane, jobID string
+	output.pane, output.jobID = pane, jobID
+}
+
+// parseHubSpawnOK follows wrk's stable OK line rather than guessing from a
+// human-facing transcript. Missing keys remain empty by contract.
+func parseHubSpawnOK(raw []byte) (pane, jobID string) {
+	for _, line := range strings.Split(string(raw), "\n") {
+		if parsedPane, parsedJob := parseHubSpawnOKLine(strings.TrimSuffix(line, "\r")); parsedPane != "" || parsedJob != "" {
+			pane, jobID = parsedPane, parsedJob
+		}
+	}
+	return pane, jobID
+}
+
+func parseHubSpawnOKLine(line string) (pane, jobID string) {
+	if !strings.HasPrefix(line, "OK pane=") {
+		return "", ""
+	}
 	for _, field := range strings.Fields(line) {
 		key, value, found := strings.Cut(field, "=")
 		if !found {
@@ -202,7 +219,7 @@ func (output *hubSpawnOutput) parseLine() {
 			jobID = value
 		}
 	}
-	output.pane, output.jobID = pane, jobID
+	return pane, jobID
 }
 
 func (output *hubSpawnOutput) tailString() string {
