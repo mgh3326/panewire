@@ -97,6 +97,24 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// R27 keeps delayed relay delivery on the receiving node.  handoffkeep is
+	// still the durable record of what was sent; this table only answers when a
+	// local pane may safely receive it.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS relay_held (
+	 pane TEXT NOT NULL, lane TEXT NOT NULL, event_id INTEGER NOT NULL, job_id TEXT NOT NULL,
+	 text TEXT NOT NULL, held_since INTEGER NOT NULL, deliver_policy TEXT NOT NULL,
+	 max_wait INTEGER NOT NULL, recv_seq INTEGER NOT NULL, edited INTEGER NOT NULL DEFAULT 0,
+	 PRIMARY KEY(lane,event_id)
+)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// Kept additive for databases created by an early R27 build.
+	_, _ = db.Exec(`ALTER TABLE relay_held ADD COLUMN edited INTEGER NOT NULL DEFAULT 0`)
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS relay_held_pane_recv_seq ON relay_held(pane,recv_seq)`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 func (s *Store) Path() string { return s.path }

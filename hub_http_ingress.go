@@ -21,6 +21,7 @@ type hubRelayIngressRequest struct {
 	Text    string `json:"text"`
 	Label   string `json:"label"`
 	Host    string `json:"host"`
+	Deliver string `json:"deliver,omitempty"`
 }
 
 type hubRelayIngressResponse struct {
@@ -55,6 +56,9 @@ func decodeHubRelayIngressRequest(writer http.ResponseWriter, request *http.Requ
 	if !machineIDPattern.MatchString(body.Host) {
 		return hubRelayIngressRequest{}, false
 	}
+	if body.Deliver != "" && !validRelayDeliver(body.Deliver) {
+		return hubRelayIngressRequest{}, false
+	}
 	return body, true
 }
 
@@ -75,14 +79,15 @@ func (h *HubServer) handleRelayIngress(writer http.ResponseWriter, request *http
 		return
 	}
 	event := hubJobEventPayload{
-		JobID:     laneEventTransportID(body.Lane, body.EventID),
-		Epoch:     1,
-		OwnerLane: body.Lane,
-		EventID:   body.EventID,
-		Text:      body.Text,
-		Label:     body.Label,
-		Host:      body.Host,
-		Reason:    "http_ingress:" + body.Label,
+		JobID:         laneEventTransportID(body.Lane, body.EventID),
+		Epoch:         1,
+		OwnerLane:     body.Lane,
+		EventID:       body.EventID,
+		Text:          body.Text,
+		Label:         body.Label,
+		Host:          body.Host,
+		Reason:        "http_ingress:" + body.Label,
+		DeliverPolicy: body.Deliver,
 	}
 	result := h.relayLaneEvent(event, nil)
 	if result.RejectedTooLong {
