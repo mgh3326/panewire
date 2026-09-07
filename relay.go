@@ -71,11 +71,11 @@ func parseReportRelayRoutes(b []byte) (map[string]reportRelayRoute, error) {
 		routes.Routes = routes.Lanes
 	}
 	for lane, route := range routes.Routes {
-		if !hubAgentLabelPattern.MatchString(lane) {
+		if !validReportRelayLaneName(lane) {
 			delete(routes.Routes, lane)
 			continue
 		}
-		if route.Parent != "" && !hubAgentLabelPattern.MatchString(route.Parent) {
+		if route.Parent != "" && !validReportRelayLaneName(route.Parent) {
 			delete(routes.Routes, lane)
 			continue
 		}
@@ -92,6 +92,14 @@ func parseReportRelayRoutes(b []byte) (map[string]reportRelayRoute, error) {
 		}
 	}
 	return routes.Routes, nil
+}
+
+// validReportRelayLaneName accepts both the established relay label spelling
+// and every lane name the R28 write API is required to persist. Keeping the
+// union prevents a successful write from becoming invisible to the hot loader
+// while retaining compatibility with operator files created before R28.
+func validReportRelayLaneName(value string) bool {
+	return hubAgentLabelPattern.MatchString(value) || laneNamePattern.MatchString(value)
 }
 
 func validRelayDeliver(value string) bool {

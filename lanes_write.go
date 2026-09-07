@@ -242,7 +242,7 @@ func validateLaneWriteRequest(h *HubServer, lane string, body hubLaneWriteReques
 		return errLaneRequestInvalid
 	}
 	if body.Parent != "" {
-		if !laneNamePattern.MatchString(body.Parent) || body.Parent == lane {
+		if !validReportRelayLaneName(body.Parent) || body.Parent == lane {
 			return errLaneRequestInvalid
 		}
 		if _, exists := routes[body.Parent]; !exists {
@@ -337,7 +337,7 @@ func readLanesFileForWrite(path string) (lanesFileSnapshot, error) {
 	if len(contents) > lanesFileMaxBytes {
 		return lanesFileSnapshot{}, errLanesWriteInvalid
 	}
-	routes, err := parseReportRelayRoutes(contents)
+	routes, err := parseReportRelayRoutesForWrite(contents)
 	if err != nil {
 		return lanesFileSnapshot{}, fmt.Errorf("%w: %v", errLanesWriteInvalid, err)
 	}
@@ -345,6 +345,34 @@ func readLanesFileForWrite(path string) (lanesFileSnapshot, error) {
 		routes = make(map[string]reportRelayRoute)
 	}
 	return lanesFileSnapshot{Bytes: contents, Routes: routes, Exists: true}, nil
+}
+
+// parseReportRelayRoutesForWrite adds a loss-prevention precondition to the
+// best-effort hot loader. Reads may continue omitting semantically invalid
+// operator entries, but an unrelated write must never serialize that filtered
+// projection over the source file and silently erase them.
+func parseReportRelayRoutesForWrite(contents []byte) (map[string]reportRelayRoute, error) {
+	var source reportRelayRoutes
+	if err := json.Unmarshal(contents, &source); err != nil {
+		return nil, err
+	}
+	authoritative := source.Routes
+	if source.Lanes != nil {
+		authoritative = source.Lanes
+	}
+	routes, err := parseReportRelayRoutes(contents)
+	if err != nil {
+		return nil, err
+	}
+	if len(routes) != len(authoritative) {
+		return nil, errReportRelayRoutesInvalid
+	}
+	for lane := range authoritative {
+		if _, retained := routes[lane]; !retained {
+			return nil, errReportRelayRoutesInvalid
+		}
+	}
+	return routes, nil
 }
 
 func withLanesFileLock(path string, operation func() error) error {

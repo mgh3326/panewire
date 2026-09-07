@@ -139,6 +139,106 @@ func TestLanesWriteCreateUpdateDeleteAndEvents(t *testing.T) {
 	}
 }
 
+func TestLanesWriteLeadingHyphenRoundTripsThroughHotLoader(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	lanesProjectionWrite(t, path, `{"lanes":{}}`)
+	hub := lanesWriteHub(t, path)
+
+	create := lanesWriteRequest(t, hub, http.MethodPut, "/v1/lanes/-x", "fixture-operator-token", `{"machine":"machine-a","pane":"w1:p1"}`)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("leading-hyphen create status=%d body=%s", create.Code, create.Body.String())
+	}
+	assertVisible := func(stage string) {
+		t.Helper()
+		lanes := lanesProjectionResponse(t, lanesProjectionGet(hub, "fixture-operator-token"))
+		for _, lane := range lanes {
+			if lane["lane"] == "-x" {
+				return
+			}
+		}
+		t.Fatalf("leading-hyphen lane missing %s: %v", stage, lanes)
+	}
+	assertVisible("after create")
+
+	unrelated := lanesWriteRequest(t, hub, http.MethodPut, "/v1/lanes/lane-b", "fixture-operator-token", `{"machine":"machine-a","pane":"w1:p2"}`)
+	if unrelated.Code != http.StatusCreated {
+		t.Fatalf("unrelated create status=%d body=%s", unrelated.Code, unrelated.Body.String())
+	}
+	assertVisible("after unrelated write")
+
+	remove := lanesWriteRequest(t, hub, http.MethodDelete, "/v1/lanes/-x", "fixture-operator-token", "")
+	if remove.Code != http.StatusOK || remove.Body.String() != `{"lane":"-x","removed":true}`+"\n" {
+		t.Fatalf("leading-hyphen remove status=%d body=%q", remove.Code, remove.Body.String())
+	}
+}
+
+func TestLanesWriteAcceptsLegacyParentName(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	lanesProjectionWrite(t, path, `{"lanes":{"legacy.parent":{"machine":"machine-a","pane":"w1:p1"}}}`)
+	hub := lanesWriteHub(t, path)
+
+	writer := lanesWriteRequest(t, hub, http.MethodPut, "/v1/lanes/lane-child", "fixture-operator-token", `{"machine":"machine-a","pane":"w1:p2","parent":"legacy.parent"}`)
+	if writer.Code != http.StatusCreated {
+		t.Fatalf("legacy-parent create status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	if got := decodeLaneProjection(t, writer.Body.Bytes()); got.Parent != "legacy.parent" {
+		t.Fatalf("legacy-parent projection=%+v", got)
+	}
+	lanes := lanesProjectionResponse(t, lanesProjectionGet(hub, "fixture-operator-token"))
+	seen := false
+	for _, lane := range lanes {
+		if lane["lane"] == "lane-child" && lane["parent"] == "legacy.parent" {
+			seen = true
+			break
+		}
+	}
+	if !seen {
+		t.Fatalf("legacy-parent child missing from projection: %v", lanes)
+	}
+}
+
+func TestLanesWriteRejectsSemanticDataLossBeforeFilesystemChanges(t *testing.T) {
+	for _, method := range []string{http.MethodPut, http.MethodDelete} {
+		t.Run(method, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "lanes.json")
+			original := []byte(`{"lanes":{"lane-good":{"machine":"machine-a","pane":"w1:p1"},"lane-invalid":{"machine":"machine-a","pane":"w1:p2","deliver":"not-a-policy"}}}`)
+			if err := os.WriteFile(path, original, 0600); err != nil {
+				t.Fatal(err)
+			}
+			hub := lanesWriteHub(t, path)
+			subscriber := lanesWriteSubscriber(t, hub)
+			var writer *httptest.ResponseRecorder
+			if method == http.MethodPut {
+				writer = lanesWriteRequest(t, hub, method, "/v1/lanes/lane-new", "fixture-operator-token", `{"machine":"machine-a","pane":"w1:p3"}`)
+			} else {
+				writer = lanesWriteRequest(t, hub, method, "/v1/lanes/lane-good", "fixture-operator-token", "")
+			}
+			if writer.Code != http.StatusInternalServerError || writer.Body.String() != `{"error":"lanes_invalid"}`+"\n" {
+				t.Fatalf("method=%s status=%d body=%q", method, writer.Code, writer.Body.String())
+			}
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !reflect.DeepEqual(contents, original) {
+				t.Fatalf("method=%s changed semantic-invalid source bytes", method)
+			}
+			backups, err := filepath.Glob(path + ".bak-*")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(backups) != 0 {
+				t.Fatalf("method=%s created backups before validation: %v", method, backups)
+			}
+			select {
+			case message := <-subscriber.messages:
+				t.Fatalf("method=%s broadcast event on rejected write: %+v", method, message)
+			case <-time.After(50 * time.Millisecond):
+			}
+		})
+	}
+}
+
 func TestLanesWriteSinkNormalizationAndStrictValidation(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lanes.json")
 	hub := lanesWriteHub(t, path)
