@@ -26,11 +26,12 @@ type reportRelayRoutes struct {
 	Lanes  map[string]reportRelayRoute `json:"lanes"`
 }
 type reportRelayRoute struct {
-	Machine string `json:"machine"`
-	Pane    string `json:"pane"`
-	Parent  string `json:"parent,omitempty"`
-	Sink    bool   `json:"sink,omitempty"`
-	Deliver string `json:"deliver,omitempty"`
+	Machine   string `json:"machine"`
+	Pane      string `json:"pane"`
+	Parent    string `json:"parent,omitempty"`
+	Sink      bool   `json:"sink,omitempty"`
+	Deliver   string `json:"deliver,omitempty"`
+	Protected bool   `json:"protected,omitempty"`
 }
 
 var errReportRelayRoutesInvalid = errors.New("report relay routes invalid")
@@ -53,9 +54,13 @@ func loadReportRelayRoutesResult(path string) (map[string]reportRelayRoute, erro
 	if err != nil {
 		return nil, nil
 	}
-	if len(b) > 64<<10 {
+	if len(b) > lanesFileMaxBytes {
 		return nil, errReportRelayRoutesInvalid
 	}
+	return parseReportRelayRoutes(b)
+}
+
+func parseReportRelayRoutes(b []byte) (map[string]reportRelayRoute, error) {
 	var routes reportRelayRoutes
 	if err := json.Unmarshal(b, &routes); err != nil {
 		return nil, err
