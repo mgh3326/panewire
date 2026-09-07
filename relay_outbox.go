@@ -88,6 +88,44 @@ func (s *Store) RelayOutboxState(ctx context.Context, key relayOutboxKey) (relay
 	return state, nil
 }
 
+// UnpersistedRelayOutboxKey returns the one outstanding key that can raise a
+// scanned event after a restart lost its in-memory assignment epoch. It never
+// lowers a live event: doing so would fold a new assignment epoch into a stale
+// unpersisted row for the same file. Ambiguous rows are left alone because this
+// table deliberately has no event-file ID.
+func (s *Store) UnpersistedRelayOutboxKey(ctx context.Context, key relayOutboxKey) (relayOutboxKey, bool, error) {
+	if key.Kind == "lane.event" {
+		return relayOutboxKey{}, false, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.QueryContext(ctx, `SELECT epoch FROM relay_sent
+ WHERE kind=? AND job_id=? AND report_path=? AND reason=? AND persisted_at IS NULL
+ ORDER BY sent_at DESC LIMIT 2`, key.Kind, key.JobID, key.ReportPath, key.Reason)
+	if err != nil {
+		return relayOutboxKey{}, false, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return relayOutboxKey{}, false, rows.Err()
+	}
+	var epoch int64
+	if err := rows.Scan(&epoch); err != nil {
+		return relayOutboxKey{}, false, err
+	}
+	if rows.Next() {
+		return relayOutboxKey{}, false, rows.Err()
+	}
+	if err := rows.Err(); err != nil {
+		return relayOutboxKey{}, false, err
+	}
+	if uint64(epoch) < key.Epoch {
+		return relayOutboxKey{}, false, nil
+	}
+	key.Epoch = uint64(epoch)
+	return key, true, nil
+}
+
 // RecordRelaySent stamps an attempt. It never clears persisted_at, so a row the
 // hub has already durably stored stays out of the scan for good.
 func (s *Store) RecordRelaySent(ctx context.Context, key relayOutboxKey, at time.Time) error {

@@ -56,9 +56,10 @@ func TestR20EmitWithoutDaemonKeepsFileAndExitsOK(t *testing.T) {
 	}
 }
 
-// TE5: a second emit of the same dedupe key writes no second file, but the
-// socket push still happens - wrk writes the file itself before calling emit.
-func TestR20EmitDuplicateSuppressesFileNotPush(t *testing.T) {
+// TE5: a second notification for the same durable event writes no second file
+// but still reaches the socket. This is wrk's file-first immediate-notify
+// contract, not a conflict.
+func TestR20EmitRecordedEventStillPushes(t *testing.T) {
 	inbox := t.TempDir()
 	socket := filepath.Join(r20SocketRoot(t), "emit.sock")
 	listener, err := net.Listen("unix", socket)
@@ -93,10 +94,12 @@ func TestR20EmitDuplicateSuppressesFileNotPush(t *testing.T) {
 		}
 	}()
 	args := []string{"--kind", "job.completed", "--job", "r20-dupe", "--report", "report.md", "--owner-lane", "lane-a", "--inbox-root", inbox}
-	for attempt := 0; attempt < 2; attempt++ {
-		if code := runEmitCLI(args, &bytes.Buffer{}, &bytes.Buffer{}, CLIConfig{SocketPath: socket}); code != ExitOK {
-			t.Fatalf("attempt %d code=%d", attempt, code)
-		}
+	if code := runEmitCLI(args, &bytes.Buffer{}, &bytes.Buffer{}, CLIConfig{SocketPath: socket}); code != ExitOK {
+		t.Fatalf("first emit code=%d", code)
+	}
+	var stderr bytes.Buffer
+	if code := runEmitCLI(args, &bytes.Buffer{}, &stderr, CLIConfig{SocketPath: socket}); code != ExitOK || stderr.Len() != 0 {
+		t.Fatalf("repeat code=%d stderr=%q", code, stderr.String())
 	}
 	if names := r20EventFiles(t, inbox, "r20-dupe"); len(names) != 1 {
 		t.Fatalf("a duplicate emit wrote a second file: %v", names)
@@ -116,9 +119,13 @@ func TestR20EmitDuplicateSuppressesFileNotPush(t *testing.T) {
 	}
 	mu.Lock()
 	first := pushes[0]
+	second := pushes[1]
 	mu.Unlock()
 	if first.Op != "emit" || first.JobID != "r20-dupe" || first.Kind != "job.completed" || first.ReportPath != "report.md" {
 		t.Fatalf("push=%+v", first)
+	}
+	if second != first {
+		t.Fatalf("repeat push=%+v, want original=%+v", second, first)
 	}
 }
 
