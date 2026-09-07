@@ -15,6 +15,7 @@ import (
 const (
 	lanePersistedMaxEntries        = 4096
 	relayReplayExhaustedMaxEntries = 4096
+	relayCancelledMaxEntries       = 4096
 )
 
 // reportRelayRoutes is intentionally a tiny operator-owned configuration:
@@ -29,6 +30,7 @@ type reportRelayRoute struct {
 	Pane    string `json:"pane"`
 	Parent  string `json:"parent,omitempty"`
 	Sink    bool   `json:"sink,omitempty"`
+	Deliver string `json:"deliver,omitempty"`
 }
 
 var errReportRelayRoutesInvalid = errors.New("report relay routes invalid")
@@ -80,11 +82,16 @@ func loadReportRelayRoutesResult(path string) (map[string]reportRelayRoute, erro
 			routes.Routes[lane] = route
 			continue
 		}
-		if !machineIDPattern.MatchString(route.Machine) || len(route.Pane) > 128 {
+		if !machineIDPattern.MatchString(route.Machine) || len(route.Pane) > 128 || (route.Deliver != "" && !validRelayDeliver(route.Deliver)) {
 			delete(routes.Routes, lane)
 		}
 	}
 	return routes.Routes, nil
+}
+
+func validRelayDeliver(value string) bool {
+	_, valid := parseRelayDeliveryPolicy(value)
+	return valid
 }
 
 func relayText(completion hubJobEventPayload) string {
@@ -511,30 +518,55 @@ func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (re
 
 // injectRelayEvent reports whether the injection was queued.
 func (h *HubServer) injectRelayEvent(kind string, event hubJobEventPayload, route reportRelayRoute, agent *hubAgent, eventID int64, key string) bool {
-	if !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", JobID: event.JobID, Pane: route.Pane, Text: relayTextForKind(kind, event)}) {
+	h.registerRelayAckEvent(kind, event, route.Machine, route.Pane, eventID)
+	if !agent.queueRelay(relayInjectDirective(kind, event, route, eventID)) {
 		// The row is durable but this injection never happened. Holding the
 		// key back would swallow the node's resend, and withholding the
 		// acknowledgement would keep that resend coming forever. Do neither:
 		// the row exists, so re-injection belongs to the undelivered replay.
 		h.forgetRelayEvent(key)
+		h.forgetRelayAckEvent(eventID, event.JobID)
 		h.queueRelayPersisted(kind, event, agent, eventID)
 		h.broadcastRelayUnrouted(event)
 		return false
 	}
-	h.startRelayAckEvent(kind, event, route.Machine, route.Pane, eventID)
+	h.armRelayAckEvent(eventID, event.JobID)
 	// The node retires its outbox row on this, not on the injection itself.
 	h.queueRelayPersisted(kind, event, agent, eventID)
 	return true
 }
 
 func (h *HubServer) injectLaneRelayEvent(event hubJobEventPayload, route reportRelayRoute, agent *hubAgent, eventID int64, key string) bool {
-	if !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", Kind: "lane.event", JobID: event.JobID, Pane: route.Pane, Text: relayTextForKind("lane.event", event)}) {
+	h.registerRelayAckEvent("lane.event", event, route.Machine, route.Pane, eventID)
+	if !agent.queueRelay(relayInjectDirective("lane.event", event, route, eventID)) {
 		h.forgetRelayEvent(key)
+		h.forgetRelayAckEvent(eventID, event.JobID)
 		h.broadcastRelayUnrouted(event)
 		return false
 	}
-	h.startRelayAckEvent("lane.event", event, route.Machine, route.Pane, eventID)
+	h.armRelayAckEvent(eventID, event.JobID)
 	return true
+}
+
+func relayInjectDirective(kind string, event hubJobEventPayload, route reportRelayRoute, eventID int64) hubRelayInjectEvent {
+	if eventID == 0 {
+		// Pre-R20/no-handoffkeep operation has no durable identity and therefore
+		// cannot hold safely. Keep its established wire shape and fail-open
+		// delivery behavior rather than emitting an unparseable hybrid message.
+		directive := hubRelayInjectEvent{Type: "relay.inject", JobID: event.JobID, Pane: route.Pane, Text: relayTextForKind(kind, event)}
+		if kind == "lane.event" {
+			directive.Kind = kind
+		}
+		return directive
+	}
+	deliver := event.DeliverPolicy
+	if deliver == "" {
+		deliver = route.Deliver
+	}
+	if deliver == "" {
+		deliver = "idle"
+	}
+	return hubRelayInjectEvent{Type: "relay.inject", Kind: kind, JobID: event.JobID, Pane: route.Pane, Text: relayTextForKind(kind, event), Lane: event.OwnerLane, EventID: eventID, Deliver: deliver}
 }
 
 // An unrouted/temporarily disconnected target remains observable to the
@@ -795,12 +827,14 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 		return
 	}
 	if record.Kind == "lane.event" {
-		if !agent.queueRelay(hubRelayInjectEvent{Type: "relay.inject", Kind: "lane.event", JobID: event.JobID, Pane: route.Pane, Text: relayTextForKind("lane.event", event)}) {
+		h.registerRelayAckEvent("lane.event", event, route.Machine, route.Pane, record.ID)
+		if !agent.queueRelay(relayInjectDirective("lane.event", event, route, record.ID)) {
 			h.forgetRelayEvent(key)
+			h.forgetRelayAckEvent(record.ID, event.JobID)
 			h.broadcastRelayUnrouted(event)
 			return
 		}
-		h.startRelayAckEvent("lane.event", event, route.Machine, route.Pane, record.ID)
+		h.armRelayAckEvent(record.ID, event.JobID)
 	} else if !h.injectRelayEvent(record.Kind, event, route, agent, record.ID, key) {
 		return
 	}

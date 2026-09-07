@@ -189,11 +189,11 @@ func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 
 func decodeRelayAckPayload(payload []byte) (relayAckPayload, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 3 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 6 {
 		return relayAckPayload{}, false
 	}
 	for name := range fields {
-		if name != "job_id" && name != "pane" && name != "reason" {
+		if name != "job_id" && name != "pane" && name != "reason" && name != "final_text" && name != "edited" && name != "original_event_id" {
 			return relayAckPayload{}, false
 		}
 	}
@@ -204,7 +204,20 @@ func decodeRelayAckPayload(payload []byte) (relayAckPayload, bool) {
 	if raw, ok := fields["reason"]; ok && (json.Unmarshal(raw, &ack.Reason) != nil || len(ack.Reason) > 240 || strings.ContainsAny(ack.Reason, "\r\n\x00")) {
 		return relayAckPayload{}, false
 	}
+	if raw, ok := fields["final_text"]; ok && (json.Unmarshal(raw, &ack.FinalText) != nil || !validRelayFinalText(ack.FinalText)) {
+		return relayAckPayload{}, false
+	}
+	if raw, ok := fields["edited"]; ok && json.Unmarshal(raw, &ack.Edited) != nil {
+		return relayAckPayload{}, false
+	}
+	if raw, ok := fields["original_event_id"]; ok && (json.Unmarshal(raw, &ack.OriginalEventID) != nil || ack.OriginalEventID < 1) {
+		return relayAckPayload{}, false
+	}
 	return ack, true
+}
+
+func validRelayFinalText(value string) bool {
+	return value != "" && len(value) <= relaySingleItemMax && !strings.ContainsAny(value, "\r\n\x00")
 }
 
 func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, received time.Time) {

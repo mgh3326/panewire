@@ -58,6 +58,7 @@ type HubClientConfig struct {
 	// SpawnConfigPath is the local, operator-provisioned job.spawn policy.
 	// It is injectable so tests never consult a user's real configuration.
 	SpawnConfigPath     string
+	relayCommand        relayCommandRunner                            // fixture seam for agent get/wait.
 	relayInject         func(context.Context, string, string) bool    // fixture seam
 	hostLoadCollector   func(context.Context) (HubHostLoad, error)    // fixture seam
 	hostMemoryCollector func(context.Context) (*HubHostMemory, error) // fixture seam
@@ -148,6 +149,12 @@ type HubClient struct {
 	spawnSeenMu       sync.Mutex
 	spawnSeen         map[string]struct{}
 	spawnTimeoutExtra time.Duration // fixture seam; production is 60 seconds.
+	busyRelayMu       sync.Mutex
+	busyRelay         *relayBusyManager
+	relayCommand      relayCommandRunner   // fixture seam for agent get/wait.
+	relayEmitter      func(hubClientEvent) // fixture/connection-owned writer.
+	relayRecvSeqMu    sync.Mutex
+	relayRecvSeq      int64 // assigned synchronously by the hub read loop.
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -264,7 +271,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		r19a:   newR19aClientState(config),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version, updateHTTPClient: config.UpdateHTTPClient, executablePath: config.ExecutablePath, restart: config.Restart,
-		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
+		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
 	}, nil
 }
 
@@ -480,6 +487,7 @@ type hubOutboundMessage struct {
 	HoldsActive     bool
 	Pane            string
 	Text            string
+	DeliverPolicy   string
 	Kind            string
 	ReportPath      string
 	Reason          string
@@ -494,6 +502,7 @@ type hubOutboundMessage struct {
 	BriefInline     string
 	Args            []string
 	WaitSeconds     int
+	RecvSeq         int64 // local read-loop order; never part of the wire shape.
 }
 
 func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
@@ -547,6 +556,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	}{Type: "hello", MachineID: client.machineID, Version: client.version, Accepting: client.accepting}); err != nil {
 		return nil, err
 	}
+	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
+	client.relayBusyManager().resume(ctx)
 	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 		return nil, err
 	}
@@ -572,6 +583,9 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				continue
 			}
 			if message.Type == "relay.inject" {
+				// Preserve websocket receive order before moving potentially blocking
+				// agent get/wait/prompt work out of the read loop.
+				message.RecvSeq = client.nextRelayRecvSeq()
 				go client.handleRelayInject(ctx, peer, message)
 				continue
 			}
@@ -608,26 +622,10 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				client.burstMu.Lock()
 				client.burstHoldsActive = message.HoldsActive
 				client.burstMu.Unlock()
-			case "relay.inject":
-				inject := client.relayInject
-				if inject == nil {
-					inject = defaultHubRelayInject
-				}
-				kind := "relay.unconfirmed"
-				if inject(ctx, message.Pane, message.Text) {
-					kind = "relay.delivered"
-				}
-				response, _ := json.Marshal(struct {
-					JobID string `json:"job_id"`
-					Pane  string `json:"pane"`
-				}{message.JobID, message.Pane})
-				if err := peer.write(ctx, hubClientWireEvent(hubClientEvent{Kind: kind, Payload: response})); err != nil {
-					select {
-					case readErrors <- err:
-					case <-ctx.Done():
-					}
-					return
-				}
+			case "relay.edit":
+				client.relayBusyManager().edit(ctx, message.EventID, message.Text)
+			case "relay.cancel":
+				client.relayBusyManager().cancel(ctx, message.EventID)
 			case "update.available":
 				if !client.beginHubUpdate() {
 					// One self-update at a time; the hub is told rather than
@@ -743,22 +741,43 @@ func relayInjectTimeout(configured time.Duration) time.Duration {
 }
 
 func (client *HubClient) respondRelayInject(parent context.Context, peer *hubClientConnection, message hubOutboundMessage) {
-	inject := client.relayInject
-	if inject == nil {
-		inject = defaultHubRelayInject
+	client.relayBusyManager().offer(parent, message)
+}
+
+func (client *HubClient) relayInjectTimeout() time.Duration {
+	if client.r19a.relayInjectTimeout > 0 {
+		return client.r19a.relayInjectTimeout
 	}
-	ctx, cancel := context.WithTimeout(parent, client.r19a.relayInjectTimeout)
-	delivered := inject(ctx, message.Pane, message.Text)
-	cancel()
-	kind := "relay.unconfirmed"
-	if delivered {
-		kind = "relay.delivered"
+	return defaultRelayInjectTimeout
+}
+
+func (client *HubClient) relayStore() *Store {
+	client.outboxMu.Lock()
+	defer client.outboxMu.Unlock()
+	return client.outbox
+}
+
+func (client *HubClient) relayHeldByKey(ctx context.Context, lane string, eventID int64) (relayHeld, bool, error) {
+	store := client.relayStore()
+	if store == nil {
+		return relayHeld{}, false, nil
 	}
-	response, _ := json.Marshal(struct {
-		JobID string `json:"job_id"`
-		Pane  string `json:"pane"`
-	}{message.JobID, message.Pane})
-	_ = peer.write(parent, hubClientWireEvent(hubClientEvent{Kind: kind, Payload: response}))
+	return store.RelayHeldByKey(ctx, lane, eventID)
+}
+
+func (client *HubClient) nextRelayRecvSeq() int64 {
+	client.relayRecvSeqMu.Lock()
+	defer client.relayRecvSeqMu.Unlock()
+	client.relayRecvSeq++
+	return client.relayRecvSeq
+}
+
+func (client *HubClient) seedRelayRecvSeq(value int64) {
+	client.relayRecvSeqMu.Lock()
+	if value > client.relayRecvSeq {
+		client.relayRecvSeq = value
+	}
+	client.relayRecvSeqMu.Unlock()
 }
 
 func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
@@ -1099,8 +1118,9 @@ func (client *HubClient) warnMessage(message string) {
 // its SQLite store is open.
 func (client *HubClient) SetRelayOutbox(store *Store) {
 	client.outboxMu.Lock()
-	defer client.outboxMu.Unlock()
 	client.outbox = store
+	client.outboxMu.Unlock()
+	client.relayBusyManager().restore(context.Background())
 }
 
 // SetPanesAlive attaches the pane liveness lookup used to drop jobs whose pane
@@ -1193,7 +1213,25 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 			if json.Unmarshal(fields["kind"], &kind) != nil || kind != "lane.event" || !validLaneRelayText(message.Text) {
 				return hubOutboundMessage{}, false
 			}
+		} else if len(fields) == 8 {
+			if json.Unmarshal(fields["kind"], &message.Kind) != nil || (message.Kind != "lane.event" && message.Kind != "job.completed" && message.Kind != "job.escalate" && message.Kind != "job.joined") {
+				return hubOutboundMessage{}, false
+			}
+			if json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || json.Unmarshal(fields["deliver"], &message.DeliverPolicy) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || message.EventID < 1 {
+				return hubOutboundMessage{}, false
+			}
+			if _, valid := parseRelayDeliveryPolicy(message.DeliverPolicy); !valid || !validRelayInjectedText(message.Kind, message.Text) {
+				return hubOutboundMessage{}, false
+			}
 		} else {
+			return hubOutboundMessage{}, false
+		}
+	case "relay.edit":
+		if len(fields) != 3 || json.Unmarshal(fields["event_id"], &message.EventID) != nil || json.Unmarshal(fields["text"], &message.Text) != nil || message.EventID < 1 || !validRelayFinalText(message.Text) {
+			return hubOutboundMessage{}, false
+		}
+	case "relay.cancel":
+		if len(fields) != 2 || json.Unmarshal(fields["event_id"], &message.EventID) != nil || message.EventID < 1 {
 			return hubOutboundMessage{}, false
 		}
 	case "relay.persisted":
@@ -1230,6 +1268,12 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		return hubOutboundMessage{}, false
 	}
 	return message, true
+}
+
+func validRelayInjectedText(kind, text string) bool {
+	// The hub's normal lane ingress remains bounded by validLaneRelayText;
+	// this receiving-side directive also admits the B3 single-item exception.
+	return validRelayFinalText(text)
 }
 
 func (client *HubClient) handleHubBurst(ctx context.Context, message hubOutboundMessage) {

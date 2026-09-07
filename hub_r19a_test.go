@@ -141,6 +141,7 @@ func TestR19AcceptingOverrideControlsPlacementAndUI(t *testing.T) {
 
 func TestR19RelayInjectDoesNotBlockClientReadLoop(t *testing.T) {
 	pong := make(chan struct{}, 1)
+	injectStarted := make(chan struct{}, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := websocket.Accept(w, r, nil)
 		if err != nil {
@@ -164,7 +165,14 @@ func TestR19RelayInjectDoesNotBlockClientReadLoop(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	client, err := NewHubClient(HubClientConfig{URL: r6WSURL(server.URL, ""), MachineID: "host-a", Token: "node-token", AllowInsecureForTests: true, RelayInjectTimeout: 25 * time.Millisecond, PingInterval: time.Hour, relayInject: func(ctx context.Context, _, _ string) bool { <-ctx.Done(); return false }})
+	client, err := NewHubClient(HubClientConfig{URL: r6WSURL(server.URL, ""), MachineID: "host-a", Token: "node-token", AllowInsecureForTests: true, RelayInjectTimeout: 2 * time.Second, PingInterval: time.Hour, relayInject: func(ctx context.Context, _, _ string) bool {
+		select {
+		case injectStarted <- struct{}{}:
+		default:
+		}
+		<-ctx.Done()
+		return false
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -176,8 +184,13 @@ func TestR19RelayInjectDoesNotBlockClientReadLoop(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- client.serve(ctx, conn) }()
 	select {
-	case <-pong:
+	case <-injectStarted:
 	case <-time.After(time.Second):
+		t.Fatal("relay injection did not start")
+	}
+	select {
+	case <-pong:
+	case <-time.After(300 * time.Millisecond):
 		t.Fatal("relay inject blocked node read loop")
 	}
 	cancel()
