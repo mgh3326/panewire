@@ -187,6 +187,7 @@ type hubJobEventPayload struct {
 	// the hub's job registration paths despite sharing the delivery envelope.
 	EventID        string    `json:"event_id,omitempty"`
 	Text           string    `json:"text,omitempty"`
+	DeliverPolicy  string    `json:"deliver,omitempty"`
 	Truncated      bool      `json:"truncated,omitempty"`
 	JobID          string    `json:"job_id"`
 	Node           string    `json:"node,omitempty"`
@@ -211,17 +212,23 @@ type hubJobEventPayload struct {
 }
 
 type relayAckPayload struct {
-	JobID  string `json:"job_id"`
-	Pane   string `json:"pane"`
-	Reason string `json:"reason,omitempty"`
+	JobID           string `json:"job_id"`
+	Pane            string `json:"pane"`
+	Reason          string `json:"reason,omitempty"`
+	FinalText       string `json:"final_text,omitempty"`
+	Edited          bool   `json:"edited,omitempty"`
+	OriginalEventID int64  `json:"original_event_id,omitempty"`
 }
 
 type hubRelayInjectEvent struct {
-	Type  string `json:"type"`
-	Kind  string `json:"kind,omitempty"`
-	JobID string `json:"job_id"`
-	Pane  string `json:"pane"`
-	Text  string `json:"text"`
+	Type    string `json:"type"`
+	Kind    string `json:"kind,omitempty"`
+	JobID   string `json:"job_id,omitempty"`
+	Pane    string `json:"pane,omitempty"`
+	Text    string `json:"text,omitempty"`
+	Lane    string `json:"lane,omitempty"`
+	EventID int64  `json:"event_id,omitempty"`
+	Deliver string `json:"deliver,omitempty"`
 }
 
 type hubJobRevokedEvent struct {
@@ -336,6 +343,9 @@ type HubServer struct {
 	// relayDedupe is an active injection claim. lanePersisted keeps the durable
 	// row ID while that claim is deliberately released between lane retries.
 	relayDedupe                 map[string]int64
+	relayHeld                   map[int64]hubRelayHeldProjection
+	relayCancelled              map[int64]struct{}
+	relayCancelledOrder         lruIndex[int64]
 	lanePersisted               map[string]int64
 	lanePersistedOrder          lruIndex[string]
 	replayExhausted             map[int64]struct{}
@@ -347,6 +357,7 @@ type HubServer struct {
 	quotaCache                  map[string]hubQuotaCacheEntry
 	quotaWaiters                map[string]chan hubQuotaResult
 	quotaCacheTTL               time.Duration
+	spawnRecords                map[string]*hubSpawnRecord
 	expectedVersion             map[string]hubExpectedVersion
 	updateConfirmationTimeout   time.Duration
 }
@@ -435,7 +446,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
 	}, nil
 }
 
@@ -478,6 +489,11 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)
+	mux.HandleFunc("GET /v1/relay/held", h.handleRelayHeld)
+	mux.HandleFunc("PATCH /v1/relay/events/{id}", h.handleRelayHeldEdit)
+	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
+	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
+	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
 	mux.HandleFunc("POST /v1/update", h.handleUpdatePublish)
 	mux.HandleFunc("GET /v1/quota/{machine}", h.handleQuotaGet)
 	mux.HandleFunc("POST /v1/quota/{machine}", h.handleQuotaRequest)
@@ -775,6 +791,10 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 }
 
 func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubAgent, payload []byte) {
+	if result, ok := parseHubSpawnResult(payload); ok {
+		h.resolveSpawn(machineID, result)
+		return
+	}
 	if report, ok := parseHubQuotaReport(payload); ok {
 		h.resolveQuota(machineID, report)
 		return
@@ -913,6 +933,36 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			if message.Kind == "relay.delivered" {
 				h.markRelayEventDelivered(pending)
+			}
+		}
+		if message.Kind == "relay.held" {
+			held, valid := decodeRelayHeldPayload(message.Payload)
+			if !valid || !h.rememberRelayHeld(machineID, held) {
+				h.countUnknownMessage()
+				return
+			}
+		}
+		if message.Kind == "relay.released" {
+			released, valid := decodeRelayReleasedPayload(message.Payload)
+			if !valid || !h.releaseRelayHeld(machineID, released) {
+				h.countUnknownMessage()
+				return
+			}
+		}
+		if message.Kind == "relay.cancelled" {
+			cancelled, valid := decodeRelayCancelledPayload(message.Payload)
+			if !valid {
+				h.countUnknownMessage()
+				return
+			}
+			if h.consumeRelayCancelled(cancelled.OriginalEventID) {
+				return
+			}
+		}
+		if message.Kind == "relay.batched" {
+			if _, valid := decodeRelayBatchedPayload(message.Payload); !valid {
+				h.countUnknownMessage()
+				return
 			}
 		}
 		if message.Kind == "job.revocation.ack" {
@@ -1183,6 +1233,26 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
+		if message.Kind == "relay.held" {
+			if _, valid := decodeRelayHeldPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
+		if message.Kind == "relay.released" {
+			if _, valid := decodeRelayReleasedPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
+		if message.Kind == "relay.cancelled" {
+			if _, valid := decodeRelayCancelledPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
+		if message.Kind == "relay.batched" {
+			if _, valid := decodeRelayBatchedPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
 		message.Payload = append(json.RawMessage(nil), rawPayload...)
 	default:
 		return hubInbound{}, false
@@ -1192,7 +1262,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "lane.event", "job.revocation.ack", "relay.delivered", "relay.unconfirmed":
+	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "lane.event", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched":
 		return true
 	}
 	return false
@@ -1252,6 +1322,7 @@ func (h *HubServer) recordNote(machineID, text string, received time.Time) {
 }
 
 func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
+	h.loseSpawns(machineID, agent)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {
