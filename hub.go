@@ -340,6 +340,7 @@ type HubServer struct {
 	placementCache         placementCache
 	r19a                   r19aHubState
 	reportRelayPath        string
+	lanesWriteOps          lanesWriteOps
 	// relayDedupe is an active injection claim. lanePersisted keeps the durable
 	// row ID while that claim is deliberately released between lane retries.
 	relayDedupe                 map[string]int64
@@ -468,7 +469,7 @@ func validHubToken(token string) bool {
 	return token != "" && len(token) <= 512 && !strings.ContainsAny(token, "\x00\r\n\t ")
 }
 
-// Handler exposes the three v1 hub endpoints. The caller is responsible for
+// Handler exposes the v1 hub endpoints. The caller is responsible for
 // binding it only on loopback; hubListenAddress enforces that CLI invariant.
 func (h *HubServer) Handler() http.Handler {
 	mux := http.NewServeMux()
@@ -477,6 +478,8 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /ui/data.json", h.handleUIData)
 	mux.HandleFunc("GET /v1/nodes", h.handleNodes)
 	mux.HandleFunc("GET /v1/lanes", h.handleLanes)
+	mux.HandleFunc("PUT /v1/lanes/{lane}", h.handlePutLane)
+	mux.HandleFunc("DELETE /v1/lanes/{lane}", h.handleDeleteLane)
 	mux.HandleFunc("POST /v1/nodes/{machine}/accepting", h.handleAcceptingOverride)
 	mux.HandleFunc("GET /v1/burst", h.handleBurst)
 	mux.HandleFunc("POST /v1/burst/request", h.handleBurstRequest)

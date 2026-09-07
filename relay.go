@@ -26,11 +26,12 @@ type reportRelayRoutes struct {
 	Lanes  map[string]reportRelayRoute `json:"lanes"`
 }
 type reportRelayRoute struct {
-	Machine string `json:"machine"`
-	Pane    string `json:"pane"`
-	Parent  string `json:"parent,omitempty"`
-	Sink    bool   `json:"sink,omitempty"`
-	Deliver string `json:"deliver,omitempty"`
+	Machine   string `json:"machine"`
+	Pane      string `json:"pane"`
+	Parent    string `json:"parent,omitempty"`
+	Sink      bool   `json:"sink,omitempty"`
+	Deliver   string `json:"deliver,omitempty"`
+	Protected bool   `json:"protected,omitempty"`
 }
 
 var errReportRelayRoutesInvalid = errors.New("report relay routes invalid")
@@ -53,9 +54,13 @@ func loadReportRelayRoutesResult(path string) (map[string]reportRelayRoute, erro
 	if err != nil {
 		return nil, nil
 	}
-	if len(b) > 64<<10 {
+	if len(b) > lanesFileMaxBytes {
 		return nil, errReportRelayRoutesInvalid
 	}
+	return parseReportRelayRoutes(b)
+}
+
+func parseReportRelayRoutes(b []byte) (map[string]reportRelayRoute, error) {
 	var routes reportRelayRoutes
 	if err := json.Unmarshal(b, &routes); err != nil {
 		return nil, err
@@ -66,11 +71,11 @@ func loadReportRelayRoutesResult(path string) (map[string]reportRelayRoute, erro
 		routes.Routes = routes.Lanes
 	}
 	for lane, route := range routes.Routes {
-		if !hubAgentLabelPattern.MatchString(lane) {
+		if !validReportRelayLaneName(lane) {
 			delete(routes.Routes, lane)
 			continue
 		}
-		if route.Parent != "" && !hubAgentLabelPattern.MatchString(route.Parent) {
+		if route.Parent != "" && !validReportRelayLaneName(route.Parent) {
 			delete(routes.Routes, lane)
 			continue
 		}
@@ -87,6 +92,14 @@ func loadReportRelayRoutesResult(path string) (map[string]reportRelayRoute, erro
 		}
 	}
 	return routes.Routes, nil
+}
+
+// validReportRelayLaneName accepts both the established relay label spelling
+// and every lane name the R28 write API is required to persist. Keeping the
+// union prevents a successful write from becoming invisible to the hot loader
+// while retaining compatibility with operator files created before R28.
+func validReportRelayLaneName(value string) bool {
+	return hubAgentLabelPattern.MatchString(value) || laneNamePattern.MatchString(value)
 }
 
 func validRelayDeliver(value string) bool {
