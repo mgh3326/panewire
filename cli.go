@@ -61,6 +61,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "jobs" {
 		return runJobsCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
+	if args[0] == "lanes" {
+		return runLanesCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
 	if args[0] == "relay" {
 		return runRelayCLI(args[1:], os.Stdout, os.Stderr)
 	}
