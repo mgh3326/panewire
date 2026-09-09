@@ -281,7 +281,7 @@ func TestPlacementQuotaPolicyCorruptionRejectsStartupOrStaysStale(t *testing.T) 
 	}
 	invalidLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	invalidHub, err := NewHubServer(HubServerConfig{
-		Tokens: map[string]string{hubOperatorMachineID: quotaOperatorToken, "mac-work": quotaNodeAToken},
+		Tokens:              map[string]string{hubOperatorMachineID: quotaOperatorToken, "mac-work": quotaNodeAToken},
 		PlacementPolicyPath: invalidPath,
 		Now:                 func() time.Time { return now },
 		Logger:              invalidLogger,
