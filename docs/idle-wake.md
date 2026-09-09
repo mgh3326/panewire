@@ -69,12 +69,30 @@ candidate while herdr is unavailable. Once a current herdr observation has
 been accepted, the ordinary settle tick may advance a continuously
 non-working candidate.
 
+If the schema guard cannot prove herdr event support, the observation loop
+re-probes on a bounded `1s, 2s, 4s, ... 30s` delay. It does not run the external
+schema command on the ordinary 100-millisecond socket reconnect cadence, and a
+successful capability probe proceeds to subscription without another delay.
+
+Terminal candidate rows are retained for the existing
+`PANEWIRE_RELAY_OUTBOX_MAX_AGE` horizon (24 hours by default) and then pruned.
+Only cancelled or suppressed rows and assigned rows with a completed local
+materialization timestamp are eligible. Unsettled, unassigned, and
+unmaterialized retry rows are never removed by this retention pass;
+`idle_wake_panes` and its monotonic sequence remain intact.
+
 ## Route changes and durable acceptance
 
 Route lookup happens after settle, so a parent reassigned during the 60-second
 window receives the event. The first valid route decision written to the node
 journal is then pinned. A later route response or a route change during a
 persistence retry cannot change it.
+
+The node accepts route responses into a bounded FIFO handled by one worker,
+keeping SQLite and file work off the WebSocket read loop while preserving
+receive order. If that queue is full, the newest response is dropped and the
+still-undecided candidate repeats its route request after the normal retry
+interval.
 
 The node writes the atomic mode-0600 `events-lane/` record before enqueueing
 the WebSocket event. A local write failure leaves the assigned candidate

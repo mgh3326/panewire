@@ -15,6 +15,12 @@ import (
 	"time"
 )
 
+const (
+	daemonRetryDelay             = 100 * time.Millisecond
+	daemonCapabilityRetryInitial = time.Second
+	daemonCapabilityRetryMax     = 30 * time.Second
+)
+
 type Config struct {
 	SocketPath, HerdrSocket, DBPath, InboxRoot string
 	StorePromptBody                            bool
@@ -193,6 +199,7 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 	var settle <-chan time.Time
 	var poll <-chan time.Time
 	var settleTicker, pollTicker *time.Ticker
+	capabilityBackoff := daemonCapabilityRetryInitial
 	if d.idleWake != nil {
 		settleTicker = time.NewTicker(time.Second)
 		pollTicker = time.NewTicker(idleWakeObservationPoll)
@@ -205,6 +212,23 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		default:
+		}
+		// Idle-wake starts this loop even when the startup guard could not
+		// prove events support. Probe that external capability command on a
+		// bounded backoff instead of spawning it on the ordinary 100ms socket
+		// reconnect cadence. A successful probe proceeds immediately.
+		if !d.capabilities().Events {
+			if !waitDaemonRetryFor(ctx, capabilityBackoff) {
+				return
+			}
+			guard := d.runGuard(ctx, "reconnect")
+			d.setCapabilities(guard)
+			_ = d.RecordSchemaGuard(ctx, guard, "reconnect")
+			if !guard.Events {
+				capabilityBackoff = nextDaemonCapabilityBackoff(capabilityBackoff)
+				continue
+			}
+			capabilityBackoff = daemonCapabilityRetryInitial
 		}
 		client := d.herdrClient()
 		if client == nil {
@@ -219,18 +243,6 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 				return
 			}
 			client = connected
-			if !d.capabilities().Events {
-				guard := d.runGuard(ctx, "reconnect")
-				d.setCapabilities(guard)
-				_ = d.RecordSchemaGuard(ctx, guard, "reconnect")
-				if !guard.Events {
-					d.clearHerdrClient(client)
-					if !waitDaemonRetry(ctx) {
-						return
-					}
-					continue
-				}
-			}
 		}
 		events, err := client.Subscribe(ctx)
 		if err != nil {
@@ -286,7 +298,11 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 }
 
 func waitDaemonRetry(ctx context.Context) bool {
-	timer := time.NewTimer(100 * time.Millisecond)
+	return waitDaemonRetryFor(ctx, daemonRetryDelay)
+}
+
+func waitDaemonRetryFor(ctx context.Context, delay time.Duration) bool {
+	timer := time.NewTimer(delay)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -294,6 +310,13 @@ func waitDaemonRetry(ctx context.Context) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+func nextDaemonCapabilityBackoff(current time.Duration) time.Duration {
+	if current >= daemonCapabilityRetryMax || current > daemonCapabilityRetryMax/2 {
+		return daemonCapabilityRetryMax
+	}
+	return current * 2
 }
 
 func (d *Daemon) setHerdrClient(client *HerdrClient) {

@@ -88,6 +88,8 @@ type hubClientEvent struct {
 	relayPending bool
 }
 
+const hubIdleWakeRouteQueueDepth = 64
+
 // HubClient owns a bounded in-memory event queue. It is intentionally not a
 // durable relay: Supabase remains responsible for offline stage2 delivery.
 type HubClient struct {
@@ -532,9 +534,13 @@ func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
 // session's ticker, preference ticker, and reader goroutine are released at the
 // switch instead of at the end of a recursive chain.
 func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) error {
+	routeContext, cancelRoutes := context.WithCancel(ctx)
+	defer cancelRoutes()
+	idleWakeRoutes := make(chan hubIdleWakeRouteEvent, hubIdleWakeRouteQueueDepth)
+	go client.applyIdleWakeRoutes(routeContext, idleWakeRoutes)
 	current := connection
 	for {
-		next, err := client.serveConnection(ctx, current)
+		next, err := client.serveConnection(routeContext, current, idleWakeRoutes)
 		if next == nil {
 			if current != connection {
 				// Run only closes the connection it dialed.
@@ -546,10 +552,27 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 	}
 }
 
+// applyIdleWakeRoutes keeps route persistence off the WebSocket reader while
+// retaining the order in which that reader accepted decisions. A full queue
+// drops only the newest decision; the unsettled journal row will request its
+// route again after idleWakeRouteRetry.
+func (client *HubClient) applyIdleWakeRoutes(ctx context.Context, routes <-chan hubIdleWakeRouteEvent) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case route := <-routes:
+			if manager := client.idleWakeManager(); manager != nil {
+				manager.ApplyRoute(ctx, route)
+			}
+		}
+	}
+}
+
 // serveConnection returns a non-nil connection only when the caller should
 // continue the session on that already-open preferred endpoint; the superseded
 // connection has been closed by then.
-func (client *HubClient) serveConnection(ctx context.Context, connection *websocket.Conn) (*websocket.Conn, error) {
+func (client *HubClient) serveConnection(ctx context.Context, connection *websocket.Conn, idleWakeRoutes chan<- hubIdleWakeRouteEvent) (*websocket.Conn, error) {
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
 	peer := &hubClientConnection{connection: connection}
 	if err := peer.write(ctx, struct {
@@ -623,8 +646,14 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			case "relay.persisted":
 				client.recordRelayPersisted(message)
 			case "idle-wake.route":
-				if manager := client.idleWakeManager(); manager != nil {
-					manager.ApplyRoute(ctx, hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason})
+				if ctx.Err() != nil {
+					return
+				}
+				decision := hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason}
+				select {
+				case idleWakeRoutes <- decision:
+				default:
+					client.warnMessage("idle-wake route queue is full; retrying")
 				}
 			case "burst.holds":
 				client.burstMu.Lock()

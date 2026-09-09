@@ -137,14 +137,23 @@ func OpenStore(path string) (*Store, error) {
 	 pane_id TEXT NOT NULL, state_change_seq INTEGER NOT NULL, workspace_id TEXT NOT NULL DEFAULT '',
 	 label TEXT NOT NULL DEFAULT '', agent_status TEXT NOT NULL, changed_at INTEGER NOT NULL,
 	 due_at INTEGER NOT NULL, settled_at INTEGER, route_requested_at INTEGER,
-	 decision TEXT NOT NULL DEFAULT '', decision_reason TEXT NOT NULL DEFAULT '', owner_lane TEXT NOT NULL DEFAULT '',
+	 decision TEXT NOT NULL DEFAULT '', decision_at INTEGER, decision_reason TEXT NOT NULL DEFAULT '', owner_lane TEXT NOT NULL DEFAULT '',
 	 event_id TEXT NOT NULL UNIQUE, text TEXT NOT NULL DEFAULT '', job_id TEXT NOT NULL DEFAULT '', materialized_at INTEGER,
 	 PRIMARY KEY(pane_id,state_change_seq)
 	)`); err != nil {
 		db.Close()
 		return nil, err
 	}
+	// Kept additive for journals opened by the first ROB-1353 build. Terminal
+	// legacy rows get a conservative timestamp so they enter the same bounded
+	// retention policy without touching pending delivery work.
+	_, _ = db.Exec(`ALTER TABLE idle_wake_candidates ADD COLUMN decision_at INTEGER`)
+	_, _ = db.Exec(`UPDATE idle_wake_candidates SET decision_at=COALESCE(materialized_at,settled_at,due_at,changed_at) WHERE decision_at IS NULL AND decision IN ('assigned','cancelled','suppressed')`)
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idle_wake_candidates_due ON idle_wake_candidates(decision,settled_at,due_at)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idle_wake_candidates_retention ON idle_wake_candidates(decision,decision_at,materialized_at)`); err != nil {
 		db.Close()
 		return nil, err
 	}

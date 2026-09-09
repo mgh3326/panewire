@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -65,6 +66,96 @@ func countIdleWakeFiles(t *testing.T, root string) int {
 		t.Fatal(err)
 	}
 	return len(entries)
+}
+
+func TestIdleWakeSchemaGuardHelperProcess(t *testing.T) {
+	if len(os.Args) < 3 || os.Args[len(os.Args)-2] != "idle-wake-schema-helper" {
+		return
+	}
+	counter := os.Args[len(os.Args)-1]
+	file, err := os.OpenFile(counter, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		os.Exit(2)
+	}
+	if _, err = file.WriteString("probe\n"); err != nil || file.Close() != nil {
+		os.Exit(2)
+	}
+	_, _ = os.Stdout.WriteString(`{}`)
+	os.Exit(0)
+}
+
+func TestIdleWakeUnavailableEventsCapabilityUsesBoundedProbeBackoff(t *testing.T) {
+	socketRoot, err := os.MkdirTemp("/tmp", "pw-iw-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(socketRoot) })
+	listener, err := net.Listen("unix", filepath.Join(socketRoot, "herdr.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	go func() {
+		for {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				return
+			}
+			_ = connection.Close()
+		}
+	}()
+
+	store := NewMemoryStore(t)
+	defer store.Close()
+	counter := filepath.Join(t.TempDir(), "schema-probes")
+	command := []string{os.Args[0], "-test.run=^TestIdleWakeSchemaGuardHelperProcess$", "--", "idle-wake-schema-helper", counter}
+	daemon := NewDaemon(Config{Store: store, HerdrSocket: listener.Addr().String(), SchemaCommand: command, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	// A non-nil manager is the condition that keeps the observation loop alive
+	// while the startup schema guard says events are unavailable.
+	daemon.idleWake = &idleWakeManager{}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		daemon.eventLoop(ctx)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+
+	probeCount := func() int {
+		contents, readErr := os.ReadFile(counter)
+		if os.IsNotExist(readErr) {
+			return 0
+		}
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return len(strings.Fields(string(contents)))
+	}
+	time.Sleep(350 * time.Millisecond)
+	if got := probeCount(); got != 0 {
+		t.Fatalf("capability probes before initial backoff=%d", got)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for probeCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := probeCount(); got != 1 {
+		t.Fatalf("capability probes after initial backoff=%d", got)
+	}
+	time.Sleep(350 * time.Millisecond)
+	if got := probeCount(); got != 1 {
+		t.Fatalf("capability probe repeated on socket retry cadence: %d", got)
+	}
+	backoff := daemonCapabilityRetryInitial
+	for _, want := range []time.Duration{2 * time.Second, 4 * time.Second, 8 * time.Second, 16 * time.Second, 30 * time.Second, 30 * time.Second} {
+		backoff = nextDaemonCapabilityBackoff(backoff)
+		if backoff != want {
+			t.Fatalf("capability backoff=%s, want %s", backoff, want)
+		}
+	}
 }
 
 func TestIdleWakeWorkingToIdleOrDoneSettlesForSixtySeconds(t *testing.T) {
@@ -604,6 +695,99 @@ func TestIdleWakeHubProtocolQueuesCurrentRouteDecision(t *testing.T) {
 		}
 	default:
 		t.Fatal("route decision was not queued")
+	}
+}
+
+func TestIdleWakeRouteWorkerPreservesReceiveOrder(t *testing.T) {
+	rig := newIdleWakeTestRig(t, time.Second)
+	rig.observe("working", 1, rig.now)
+	rig.observe("idle", 2, rig.now.Add(time.Second))
+	rig.now = rig.now.Add(2 * time.Second)
+	rig.manager.Tick(context.Background(), rig.now)
+	if len(rig.requests) != 1 {
+		t.Fatalf("route requests=%d, want 1", len(rig.requests))
+	}
+	emitted := make(chan hubScannedRelayEvent, 1)
+	rig.manager.enqueue = func(event hubScannedRelayEvent) bool {
+		emitted <- event
+		return true
+	}
+	request := rig.requests[0]
+	first := hubIdleWakeRouteEvent{Type: "idle-wake.route", EventID: request.EventID, Pane: request.Pane, Eligible: true, Lane: "owner-a", Text: idleWakeRouteText(request, idleWakeOwnerResolution{Lane: "owner-a"})}
+	second := hubIdleWakeRouteEvent{Type: "idle-wake.route", EventID: request.EventID, Pane: request.Pane, Eligible: true, Lane: "owner-b", Text: idleWakeRouteText(request, idleWakeOwnerResolution{Lane: "owner-b"})}
+	routes := make(chan hubIdleWakeRouteEvent, 2)
+	// Queue both before starting the sole worker so scheduling cannot reorder
+	// the conflicting decisions.
+	routes <- first
+	routes <- second
+	client := &HubClient{warn: func(string) {}}
+	client.SetIdleWakeManager(rig.manager)
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		client.applyIdleWakeRoutes(ctx, routes)
+	}()
+	defer func() {
+		cancel()
+		<-done
+	}()
+	select {
+	case event := <-emitted:
+		if event.OwnerLane != "owner-a" {
+			t.Fatalf("first queued route lost receive order: %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("queued idle-wake route was not applied")
+	}
+}
+
+func TestIdleWakeTerminalCandidateRetentionKeepsPendingRetry(t *testing.T) {
+	t.Setenv("PANEWIRE_RELAY_OUTBOX_MAX_AGE", "24h")
+	rig := newIdleWakeTestRig(t, time.Second)
+	base := rig.now
+
+	rig.observe("working", 1, base)
+	rig.observe("idle", 2, base.Add(time.Second))
+	rig.now = base.Add(2 * time.Second)
+	rig.manager.Tick(context.Background(), rig.now)
+	rig.route(0, "owner-a") // assigned and materialized
+
+	rig.observe("working", 3, base.Add(3*time.Second))
+	rig.observe("idle", 4, base.Add(4*time.Second))
+	rig.now = base.Add(5 * time.Second)
+	rig.manager.Tick(context.Background(), rig.now)
+	request := rig.requests[1]
+	rig.manager.ApplyRoute(context.Background(), hubIdleWakeRouteEvent{Type: "idle-wake.route", EventID: request.EventID, Pane: request.Pane, Reason: idleWakeReasonUnknown})
+
+	rig.observe("working", 5, base.Add(6*time.Second))
+	rig.observe("idle", 6, base.Add(7*time.Second))
+	cancelledAt := base.Add(7500 * time.Millisecond)
+	rig.observe("working", 7, cancelledAt)          // cancelled before settle
+	rig.observe("idle", 8, base.Add(8*time.Second)) // pending retry; never prune
+
+	var total, missingDecisionTime int
+	if err := rig.store.db.QueryRow(`SELECT COUNT(*) FROM idle_wake_candidates`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.store.db.QueryRow(`SELECT COUNT(*) FROM idle_wake_candidates WHERE decision!='' AND decision_at IS NULL`).Scan(&missingDecisionTime); err != nil {
+		t.Fatal(err)
+	}
+	if total != 4 || missingDecisionTime != 0 {
+		t.Fatalf("before retention total=%d terminal_without_time=%d", total, missingDecisionTime)
+	}
+
+	pruneAt := cancelledAt.Add(relayOutboxMaxAge() + time.Millisecond)
+	rig.manager.RetrySettled(context.Background(), pruneAt)
+	var pending, sequence int
+	if err := rig.store.db.QueryRow(`SELECT COUNT(*) FROM idle_wake_candidates`).Scan(&total); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.store.db.QueryRow(`SELECT COUNT(*),COALESCE(MAX(state_change_seq),0) FROM idle_wake_candidates WHERE decision=''`).Scan(&pending, &sequence); err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || pending != 1 || sequence != 8 {
+		t.Fatalf("after retention total=%d pending=%d sequence=%d", total, pending, sequence)
 	}
 }
 

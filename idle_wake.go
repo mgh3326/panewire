@@ -293,7 +293,7 @@ func (m *idleWakeManager) Observe(ctx context.Context, observation HerdrAgentSta
 		// A not-yet-settled candidate cannot prove continuous non-working
 		// across a lost herdr revision namespace. Already-settled candidates
 		// retain their right to route and remain idempotent.
-		if _, err = tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET decision=?,decision_reason=? WHERE pane_id=? AND decision='' AND settled_at IS NULL`, idleWakeDecisionCancelled, "source_namespace_reset", observation.PaneID); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET decision=?,decision_at=?,decision_reason=? WHERE pane_id=? AND decision='' AND settled_at IS NULL`, idleWakeDecisionCancelled, at.UnixMilli(), "source_namespace_reset", observation.PaneID); err != nil {
 			return err
 		}
 	}
@@ -311,7 +311,7 @@ func (m *idleWakeManager) Observe(ctx context.Context, observation HerdrAgentSta
 	}
 	sequence := state.StateChangeSeq + 1
 	if !eligibleIdleWakeStatus(observation.Status) {
-		if _, err = tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET decision=?,decision_reason=? WHERE pane_id=? AND decision='' AND settled_at IS NULL`, idleWakeDecisionCancelled, "state_flap", observation.PaneID); err != nil {
+		if _, err = tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET decision=?,decision_at=?,decision_reason=? WHERE pane_id=? AND decision='' AND settled_at IS NULL`, idleWakeDecisionCancelled, at.UnixMilli(), "state_flap", observation.PaneID); err != nil {
 			return err
 		}
 	}
@@ -380,7 +380,7 @@ func (s *Store) markIdleWakePanesMissing(ctx context.Context, seen map[string]st
 		return err
 	}
 	for _, pane := range missing {
-		if _, err := tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET decision=?,decision_reason=? WHERE pane_id=? AND decision='' AND settled_at IS NULL`, idleWakeDecisionCancelled, "pane_missing", pane); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET decision=?,decision_at=?,decision_reason=? WHERE pane_id=? AND decision='' AND settled_at IS NULL`, idleWakeDecisionCancelled, at.UnixMilli(), "pane_missing", pane); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE idle_wake_panes SET agent_status='unknown',state_change_seq=state_change_seq+1,changed_at=? WHERE pane_id=? AND agent_status!='unknown'`, at.UTC().UnixMilli(), pane); err != nil {
@@ -464,7 +464,7 @@ func (s *Store) markIdleWakeRouteRequested(ctx context.Context, eventID string, 
 	return err
 }
 
-func (s *Store) decideIdleWakeRoute(ctx context.Context, decision hubIdleWakeRouteEvent) (idleWakeCandidate, bool, error) {
+func (s *Store) decideIdleWakeRoute(ctx context.Context, decision hubIdleWakeRouteEvent, at time.Time) (idleWakeCandidate, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -482,12 +482,12 @@ func (s *Store) decideIdleWakeRoute(ctx context.Context, decision hubIdleWakeRou
 		return idleWakeCandidate{}, false, nil
 	}
 	if !decision.Eligible {
-		if _, err := tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET decision=?,decision_reason=? WHERE event_id=? AND decision=''`, idleWakeDecisionSuppressed, decision.Reason, decision.EventID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET decision=?,decision_at=?,decision_reason=? WHERE event_id=? AND decision=''`, idleWakeDecisionSuppressed, at.UnixMilli(), decision.Reason, decision.EventID); err != nil {
 			return idleWakeCandidate{}, false, err
 		}
 		return idleWakeCandidate{}, false, tx.Commit()
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET decision=?,owner_lane=?,text=?,job_id=? WHERE event_id=? AND decision=''`, idleWakeDecisionAssigned, decision.Lane, decision.Text, decision.JobID, decision.EventID); err != nil {
+	if _, err := tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET decision=?,decision_at=?,owner_lane=?,text=?,job_id=? WHERE event_id=? AND decision=''`, idleWakeDecisionAssigned, at.UnixMilli(), decision.Lane, decision.Text, decision.JobID, decision.EventID); err != nil {
 		return idleWakeCandidate{}, false, err
 	}
 	rows, err := tx.QueryContext(ctx, `SELECT pane_id,state_change_seq,workspace_id,label,agent_status,changed_at,due_at,settled_at,event_id,owner_lane,text,job_id FROM idle_wake_candidates WHERE event_id=?`, decision.EventID)
@@ -537,6 +537,20 @@ func (s *Store) markIdleWakeMaterialized(ctx context.Context, eventID string, at
 	return err
 }
 
+// pruneIdleWakeCandidates bounds terminal observation history using the same
+// configurable horizon as the R21 event-file outbox. Rows that can still
+// settle, route, materialize, or retry are deliberately never eligible.
+func (s *Store) pruneIdleWakeCandidates(ctx context.Context, before time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `DELETE FROM idle_wake_candidates WHERE
+	 (decision IN (?,?) AND decision_at IS NOT NULL AND decision_at<?) OR
+	 (decision=? AND materialized_at IS NOT NULL AND materialized_at<?)`,
+		idleWakeDecisionCancelled, idleWakeDecisionSuppressed, before.UnixMilli(),
+		idleWakeDecisionAssigned, before.UnixMilli())
+	return err
+}
+
 func (m *idleWakeManager) Tick(ctx context.Context, at time.Time) {
 	m.tick(ctx, at, true)
 }
@@ -583,15 +597,19 @@ func (m *idleWakeManager) ApplyRoute(ctx context.Context, decision hubIdleWakeRo
 		m.logger.Warn("idle-wake route decision rejected")
 		return
 	}
-	_, _, err := m.store.decideIdleWakeRoute(ctx, decision)
+	now := m.now().UTC()
+	_, _, err := m.store.decideIdleWakeRoute(ctx, decision, now)
 	if err != nil {
 		m.logger.Warn("idle-wake route decision was not recorded")
 		return
 	}
-	m.materializeAssigned(ctx, m.now().UTC())
+	m.materializeAssigned(ctx, now)
 }
 
 func (m *idleWakeManager) materializeAssigned(ctx context.Context, at time.Time) {
+	if err := m.store.pruneIdleWakeCandidates(ctx, at.Add(-relayOutboxMaxAge())); err != nil {
+		m.logger.Warn("idle-wake terminal history prune unavailable")
+	}
 	candidates, err := m.store.assignedIdleWakeCandidates(ctx)
 	if err != nil {
 		m.logger.Warn("idle-wake materialization scan unavailable")
