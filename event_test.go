@@ -58,10 +58,35 @@ func TestUnknownHerdrEventAndFieldArePreservedAsWarningMetadata(t *testing.T) {
 	}
 }
 
-func TestRealSubscriptionEnvelopeUsesStringEventAndDataObject(t *testing.T) {
-	ev, ok := panewire.DecodeHerdrEvent([]byte(`{"event":"pane_agent_status_changed","data":{"pane_id":"p1","workspace_id":"w1","agent_status":"idle","revision":9}}`))
-	if !ok || ev.Kind != "pane_agent_status_changed" || ev.PaneID != "p1" || ev.AgentStatus != "idle" || ev.Revision != 9 {
+func TestRealSubscriptionEnvelopeMayOmitRevision(t *testing.T) {
+	ev, ok := panewire.DecodeHerdrEvent([]byte(`{"event":"pane_agent_status_changed","data":{"pane_id":"p1","workspace_id":"w1","agent_status":"idle"}}`))
+	if !ok || ev.Kind != "pane_agent_status_changed" || ev.PaneID != "p1" || ev.AgentStatus != "idle" || ev.Revision != 0 {
 		t.Fatalf("event=%+v ok=%v", ev, ok)
+	}
+}
+
+func TestIdleWakeSnapshotUsesRealAgentShapeAndTabListLabel(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(true))
+	defer fixture.Close()
+	fixture.On("agent.list", func() any {
+		return map[string]any{"agents": []any{map[string]any{
+			"agent": "codex", "pane_id": "workspace:pane-1", "workspace_id": "workspace", "tab_id": "workspace:tab-1", "agent_status": "working", "revision": 1, "state_change_seq": 42,
+		}}}
+	})
+	fixture.On("tab.list", func() any {
+		return map[string]any{"tabs": []any{map[string]any{"tab_id": "workspace:tab-1", "workspace_id": "workspace", "label": "worker-synthetic"}}}
+	})
+	client, err := panewire.NewHerdrClient(fixture.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	states, err := client.AgentStates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 || states[0].PaneID != "workspace:pane-1" || states[0].WorkspaceID != "workspace" || states[0].Label != "worker-synthetic" || states[0].Status != "working" || states[0].Revision != 1 || states[0].SourceStateChangeSeq != 42 || !states[0].Authoritative {
+		t.Fatalf("agent states=%+v", states)
 	}
 }
 

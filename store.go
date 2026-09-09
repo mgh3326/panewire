@@ -115,6 +115,54 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// ROB-1353 keeps its observation sequence and settle candidates in the
+	// node journal.  These tables are deliberately separate from relay_sent:
+	// observation is not durable delivery, and only the existing R21 outbox may
+	// answer whether a lane.event has been accepted by handoffkeep.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS idle_wake_meta (
+	 key TEXT PRIMARY KEY, value TEXT NOT NULL
+	)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS idle_wake_panes (
+	 pane_id TEXT PRIMARY KEY, workspace_id TEXT NOT NULL DEFAULT '', label TEXT NOT NULL DEFAULT '',
+	 agent_status TEXT NOT NULL, state_change_seq INTEGER NOT NULL, upstream_revision INTEGER NOT NULL DEFAULT 0,
+	 upstream_state_change_seq INTEGER NOT NULL DEFAULT 0,
+	 upstream_generation INTEGER NOT NULL DEFAULT 1, changed_at INTEGER NOT NULL
+	)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// Additive migration for journals created by the first ROB-1353 candidate.
+	// Inspect first so only the expected already-migrated case is skipped;
+	// incompatible schemas and other SQLite failures must fail OpenStore.
+	var sourceSequenceColumn string
+	columnErr := db.QueryRow(`SELECT name FROM pragma_table_info('idle_wake_panes') WHERE name='upstream_state_change_seq'`).Scan(&sourceSequenceColumn)
+	if columnErr == sql.ErrNoRows {
+		if _, err := db.Exec(`ALTER TABLE idle_wake_panes ADD COLUMN upstream_state_change_seq INTEGER NOT NULL DEFAULT 0`); err != nil {
+			db.Close()
+			return nil, err
+		}
+	} else if columnErr != nil {
+		db.Close()
+		return nil, columnErr
+	}
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS idle_wake_candidates (
+	 pane_id TEXT NOT NULL, state_change_seq INTEGER NOT NULL, workspace_id TEXT NOT NULL DEFAULT '',
+	 label TEXT NOT NULL DEFAULT '', agent_status TEXT NOT NULL, changed_at INTEGER NOT NULL,
+	 due_at INTEGER NOT NULL, settled_at INTEGER, route_requested_at INTEGER,
+	 decision TEXT NOT NULL DEFAULT '', decision_reason TEXT NOT NULL DEFAULT '', owner_lane TEXT NOT NULL DEFAULT '',
+	 event_id TEXT NOT NULL UNIQUE, text TEXT NOT NULL DEFAULT '', job_id TEXT NOT NULL DEFAULT '', materialized_at INTEGER,
+	 PRIMARY KEY(pane_id,state_change_seq)
+	)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idle_wake_candidates_due ON idle_wake_candidates(decision,settled_at,due_at)`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return s, nil
 }
 func (s *Store) Path() string { return s.path }

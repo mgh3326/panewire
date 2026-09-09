@@ -265,6 +265,9 @@ func TestT12JobsCLIListsAndFiltersActiveRegistry(t *testing.T) {
 }
 
 func TestT12ScannerCarriesConsoleMetadataAndCompletionRemovesIt(t *testing.T) {
+	// This fixture asserts metadata projection, not the production 72-hour
+	// active-job cutoff. Keep its fixed synthetic timestamps valid over time.
+	t.Setenv("PANEWIRE_JOB_ACTIVE_MAX_AGE", "2000000h")
 	root, events := t.TempDir(), ""
 	events = filepath.Join(root, "jobs", "job-scan", "events")
 	if err := os.MkdirAll(events, 0700); err != nil {

@@ -424,6 +424,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	hubCFEnv := fs.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
 	hubAccepting := fs.Bool("hub-accepting", false, "advertise readiness for paper or standby jobs to the hub")
 	hubJobsRoot := fs.String("hub-jobs-root", "", "local inbox root containing jobs/*/events for metadata-only heartbeats")
+	idleWakeSettle := fs.Duration("idle-wake-settle", defaultIdleWakeSettle, "stable idle/done interval before owner notification")
 	failoverWakeOn := fs.String("failover-wake-on", "", "fixed failover machine ID that may receive one Wake-on-LAN packet")
 	failoverWakeMAC := fs.String("failover-wake-mac", "", "fixed Wake-on-LAN MAC address for --failover-wake-on")
 	burstWakeMAC := fs.String("burst-wake-mac", "", "Wake-on-LAN MAC for hub burst events (defaults to failover MAC when configured)")
@@ -450,12 +451,16 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		DBPath:          *db,
 		InboxRoot:       *inbox,
 		StorePromptBody: *storeBody,
+		IdleWakeSettle:  *idleWakeSettle,
 		Logging:         LoggingConfig{StorePromptBody: *storeBody},
 		SchemaCommand:   deps.SchemaCommand,
 		Logger:          deps.Logger,
 	}
 	var hubClient *HubClient
 	if hubFlagsProvided(args) {
+		if *idleWakeSettle <= 0 {
+			return nil, ExitConditionInvalid, fmt.Errorf("idle-wake settle must be positive")
+		}
 		if len(hubURLs) == 0 || *hubTokenEnv == "" {
 			return nil, ExitConditionInvalid, fmt.Errorf("hub requires both --hub-url and --hub-token-env")
 		}
@@ -537,7 +542,7 @@ func stage2FlagsProvided(args []string) bool {
 }
 
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "checks-config"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "checks-config"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {

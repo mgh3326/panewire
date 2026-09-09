@@ -319,6 +319,42 @@ func writeLaneEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	}
 }
 
+// ensureLaneEmitRecord is the restart-safe internal form used by idle-wake.
+// The public producer contract still reports a duplicate event_id as an
+// error; an internal recovery of the exact same first-writer record instead
+// reuses the already-written file. Different data under the same R21 key is a
+// conflict and is never overwritten.
+func ensureLaneEmitRecord(inboxRoot string, record emitRecord) (string, error) {
+	path, err := writeLaneEmitRecord(inboxRoot, record)
+	if !errors.Is(err, errDuplicateLaneEventID) {
+		return path, err
+	}
+	dir := filepath.Join(inboxRoot, "events-lane")
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		return "", readErr
+	}
+	wantKey := relayLaneEventOutboxKey(record.OwnerLane, record.EventID)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		contents, readErr := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if readErr != nil || len(contents) > 16<<10 {
+			continue
+		}
+		var existing emitRecord
+		if json.Unmarshal(contents, &existing) != nil || relayLaneEventOutboxKey(existing.OwnerLane, existing.EventID) != wantKey {
+			continue
+		}
+		if existing.Type == record.Type && existing.Epoch == record.Epoch && existing.CreatedAt == record.CreatedAt && existing.OwnerLane == record.OwnerLane && existing.Label == record.Label && existing.Host == record.Host && existing.PaneID == record.PaneID && existing.EventID == record.EventID && existing.Text == record.Text && existing.Truncated == record.Truncated {
+			return filepath.Join(dir, entry.Name()), nil
+		}
+		return "", errEmitDuplicateOutboxKey
+	}
+	return "", errDuplicateLaneEventID
+}
+
 func readEmitLaneEventDedupeKey(eventsDir, name string) (string, bool) {
 	contents, err := os.ReadFile(filepath.Join(eventsDir, name))
 	if err != nil || len(contents) > 16<<10 {
