@@ -274,6 +274,10 @@ func hubScopefuelEnvironment(environment []string) []string {
 		"PATH": true, "HOME": true, "USER": true, "LANG": true,
 		"CODEX_HOME": true, "CLAUDE_CONFIG_DIR": true,
 	}
+	return filterHubEnvironment(environment, allowed)
+}
+
+func filterHubEnvironment(environment []string, allowed map[string]bool) []string {
 	filtered := make([]string, 0, len(allowed))
 	for _, entry := range environment {
 		name, _, found := strings.Cut(entry, "=")
@@ -285,8 +289,12 @@ func hubScopefuelEnvironment(environment []string) []string {
 }
 
 func runHubScopefuel(ctx context.Context, command string) ([]byte, error) {
+	return runHubScopefuelWithEnvironment(ctx, command, hubScopefuelEnvironment(os.Environ()))
+}
+
+func runHubScopefuelWithEnvironment(ctx context.Context, command string, environment []string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, command, "--json")
-	cmd.Env = hubScopefuelEnvironment(os.Environ())
+	cmd.Env = environment
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = time.Second
 	cmd.Cancel = func() error {

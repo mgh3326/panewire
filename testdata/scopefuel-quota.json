@@ -1,0 +1,41 @@
+{
+  "schema": "scopefuel.v1",
+  "generated_at": "2026-09-09T05:58:50+00:00",
+  "summary": {"mark": "degraded", "usage_mark": "ok"},
+  "providers": [
+    {
+      "id": "claude",
+      "status": "ok",
+      "plan": "max",
+      "source": "oauth-usage-api",
+      "buckets": [
+        {"label":"5h","window":"5h","horizon":"now","used_pct":24.0,"remaining_pct":76.0,"pace":null,"full_use_rate":null,"full_use_rate_unit":null,"resets_at":"2026-09-09T10:29:59Z","scope":{"kind":"account","name":null},"severity":"ok","note":null}
+      ]
+    },
+    {
+      "id": "codex",
+      "status": "ok",
+      "plan": null,
+      "source": "wham-usage-api",
+      "buckets": [
+        {"label":"7d","window":"7d","horizon":"week","used_pct":65.0,"remaining_pct":35.0,"pace":null,"full_use_rate":null,"full_use_rate_unit":null,"resets_at":"2026-09-13T19:59:59Z","scope":{"kind":"account","name":null},"severity":"ok","note":null}
+      ]
+    },
+    {
+      "id": "grok",
+      "status": "ok",
+      "plan": null,
+      "source": "usage-api",
+      "buckets": [
+        {"label":"7d","window":"7d","horizon":"week","used_pct":null,"remaining_pct":null,"pace":null,"full_use_rate":null,"full_use_rate_unit":null,"resets_at":null,"scope":{"kind":"account","name":null},"severity":"ok","note":null}
+      ]
+    },
+    {
+      "id": "kiro",
+      "status": "error",
+      "plan": null,
+      "source": null,
+      "buckets": []
+    }
+  ]
+}
