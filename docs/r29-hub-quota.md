@@ -110,21 +110,26 @@ The pool comes from scopefuel gate output. Panewire has no profile-to-pool map
 and must never add one. “Hub first” means the hub owns policy judgement, not
 profile mapping.
 
-Quota-aware placement responses contain a `quota` object with the selector,
-`allow`/`boost`/`deny`/`unknown` decision, reason, and policy status:
+Every placement response contains top-level `policy_status`, including requests
+without a pool selector. Quota-aware responses additionally contain a `quota`
+object with the selector, `allow`/`boost`/`deny`/`unknown` decision, reason, and
+the same policy status for quota-aware clients:
 
 | policy status | meaning |
 | --- | --- |
 | `default` | no operator policy path is configured |
 | `current` | configured policy parsed successfully |
 | `stale` | reload failed; the last valid policy remains active |
-| `invalid` | a configured path has never yielded a valid policy |
 
-Policy modtime is checked before the 30-second placement cache, and any change
-invalidates that cache. Parse/read failure is logged without reflecting file
-contents. A stale policy keeps its quota rules. A never-valid configured policy
-makes only the quota axis fail closed (`unknown`/no decision); legacy placement
-without a pool continues its existing default load/memory/spill behavior.
+At startup, a configured policy path must yield a valid policy. An unreadable or
+unparseable startup policy makes `NewHubServer` return an error, and the hub CLI
+reports the invalid-condition exit instead of starting with hard-coded defaults.
+After a valid startup, policy modtime is checked before the 30-second placement
+cache, and any change invalidates that cache. A runtime read or parse failure is
+logged without reflecting file contents, reports `stale`, and keeps the last
+valid policy and its quota rules. Thus a running hub cannot have a configured
+policy that has never been valid, while existing load, memory, spill, and wake
+decisions remain unchanged.
 
 ## wrk adapter contract
 

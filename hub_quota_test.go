@@ -60,9 +60,9 @@ func TestHubQuotaHeartbeatCompatibilityAndStrictValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseGolden := []byte(`{"decision":"host-a","candidates":[{"machine":"host-a","score":100,"throttled":false,"active_jobs":0,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"reason":"memory_unknown"}],"source":"hub-only","asof":"2026-09-09T06:00:00Z"}`)
+	baseGolden := []byte(`{"decision":"host-a","candidates":[{"machine":"host-a","score":100,"throttled":false,"active_jobs":0,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"reason":"memory_unknown"}],"source":"hub-only","asof":"2026-09-09T06:00:00Z","policy_status":"current"}`)
 	if !bytes.Equal(before, baseGolden) {
-		t.Fatalf("legacy placement drifted from base wire bytes: got=%s want=%s", before, baseGolden)
+		t.Fatalf("legacy placement drifted beyond the required policy-status field: got=%s want=%s", before, baseGolden)
 	}
 	sendRawQuotaHeartbeat(t, hub, "host-a", agent, legacy)
 	after, err := json.Marshal(hub.placement(t.Context(), "worker", "legacy-fixture"))
@@ -254,7 +254,7 @@ func TestPlacementQuotaPolicyHotReloadAndExpiry(t *testing.T) {
 	}
 }
 
-func TestPlacementQuotaPolicyCorruptionIsStaleOrFailClosed(t *testing.T) {
+func TestPlacementQuotaPolicyCorruptionRejectsStartupOrStaysStale(t *testing.T) {
 	now := time.Date(2026, 9, 9, 6, 0, 0, 0, time.UTC)
 	path := filepath.Join(t.TempDir(), "placement.json")
 	writeQuotaPolicy(t, path, []PlacementQuotaRule{{Pool: "claude"}}, nil)
@@ -279,16 +279,51 @@ func TestPlacementQuotaPolicyCorruptionIsStaleOrFailClosed(t *testing.T) {
 	if err := os.WriteFile(invalidPath, []byte(`{"local_machine":`), 0600); err != nil {
 		t.Fatal(err)
 	}
-	var invalidLogs bytes.Buffer
-	invalidHub := newQuotaTestHub(t, []string{"mac-work"}, invalidPath, func() time.Time { return now }, slog.New(slog.NewTextHandler(&invalidLogs, nil)))
-	invalidHub.connect("mac-work", "fixture", "fixture", &hubAgent{}, true)
-	base := invalidHub.placement(t.Context(), "worker", "base-axis")
-	failClosed := invalidHub.placementWithQuota(t.Context(), "worker", "quota-axis", "claude", "")
-	if base.Decision != "mac-work" || base.Quota != nil {
-		t.Fatalf("invalid quota policy changed legacy load/memory/spill fallback: %+v", base)
+	invalidLogger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	invalidHub, err := NewHubServer(HubServerConfig{
+		Tokens: map[string]string{hubOperatorMachineID: quotaOperatorToken, "mac-work": quotaNodeAToken},
+		PlacementPolicyPath: invalidPath,
+		Now:                 func() time.Time { return now },
+		Logger:              invalidLogger,
+	})
+	if invalidHub != nil || err == nil || err.Error() != "hub placement policy is invalid" {
+		t.Fatalf("invalid startup policy was accepted: hub=%v err=%v", invalidHub != nil, err)
 	}
-	if failClosed.Decision != "unavailable" || failClosed.Quota == nil || failClosed.Quota.Decision != "unknown" || failClosed.Quota.PolicyStatus != "invalid" || failClosed.Reason != "quota_policy_invalid" || !strings.Contains(invalidLogs.String(), "placement policy load failed") || !strings.Contains(invalidLogs.String(), "policy_status=invalid") {
-		t.Fatalf("never-valid policy was permissive or invisible: result=%+v logs=%q", failClosed, invalidLogs.String())
+
+	authPath := filepath.Join(t.TempDir(), "hub-auth.env")
+	if err := os.WriteFile(authPath, []byte("HUB_TOKEN_operator="+quotaOperatorToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cliHub, _, code, err := newHubServerForCLI([]string{"--hub-auth", authPath, "--placement-policy", invalidPath}, invalidLogger)
+	if cliHub != nil || code != ExitConditionInvalid || err == nil {
+		t.Fatalf("CLI did not map invalid startup policy to condition-invalid: hub=%v code=%d err=%v", cliHub != nil, code, err)
+	}
+}
+
+func TestPlacementPolicyStatusVisibleWithoutQuotaSelector(t *testing.T) {
+	now := time.Date(2026, 9, 9, 6, 0, 0, 0, time.UTC)
+	path := filepath.Join(t.TempDir(), "placement.json")
+	writeQuotaPolicy(t, path, nil, nil)
+	hub := newQuotaTestHub(t, []string{"host-a"}, path, func() time.Time { return now }, slog.Default())
+	hub.connect("host-a", "fixture", "fixture", &hubAgent{}, true)
+
+	request := httptest.NewRequest(http.MethodGet, "/v1/placement?class=worker&cwd=no-pool", nil)
+	request.Header.Set(hubAuthorizationHeader, "Bearer "+quotaOperatorToken)
+	response := httptest.NewRecorder()
+	hub.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("placement status=%d body=%s", response.Code, response.Body.String())
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	var policyStatus string
+	if raw, ok := wire["policy_status"]; !ok || json.Unmarshal(raw, &policyStatus) != nil || policyStatus != "current" {
+		t.Fatalf("pool-free placement omitted top-level policy status: %s", response.Body.Bytes())
+	}
+	if _, ok := wire["quota"]; ok {
+		t.Fatalf("pool-free placement fabricated quota decision: %s", response.Body.Bytes())
 	}
 }
 

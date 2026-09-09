@@ -442,11 +442,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.PlacementPolicyPath != "" {
 		policy, modTime, err := LoadPlacementPolicy(config.PlacementPolicyPath)
 		if err != nil {
-			placementPolicyLoaded = false
-			placementPolicyStatus = "invalid"
-			placementPolicyLastFailure = "invalid"
-			placementPolicyObservedModTime = modTime
-			config.Logger.Error("placement policy load failed", "policy_status", placementPolicyStatus, "failure", placementPolicyLastFailure)
+			return nil, errors.New("hub placement policy is invalid")
 		} else {
 			placementPolicy, placementPolicyModTime = policy, modTime
 			placementPolicyObservedModTime = modTime

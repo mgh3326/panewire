@@ -150,40 +150,43 @@ type PlacementQuotaDecision struct {
 }
 
 type PlacementResult struct {
-	Decision   string                  `json:"decision"`
-	Candidates []PlacementCandidate    `json:"candidates"`
-	Source     string                  `json:"source"`
-	Asof       time.Time               `json:"asof"`
-	Reason     string                  `json:"reason,omitempty"`
-	Quota      *PlacementQuotaDecision `json:"quota,omitempty"`
+	Decision     string                  `json:"decision"`
+	Candidates   []PlacementCandidate    `json:"candidates"`
+	Source       string                  `json:"source"`
+	Asof         time.Time               `json:"asof"`
+	PolicyStatus string                  `json:"policy_status"`
+	Reason       string                  `json:"reason,omitempty"`
+	Quota        *PlacementQuotaDecision `json:"quota,omitempty"`
 }
 
 // MarshalJSON keeps the internal unavailable sentinel useful to callers while
 // presenting the API contract's null decision to external clients.
 func (r PlacementResult) MarshalJSON() ([]byte, error) {
 	type wirePlacementResult struct {
-		Decision   *string                 `json:"decision"`
-		Candidates []PlacementCandidate    `json:"candidates"`
-		Source     string                  `json:"source"`
-		Asof       time.Time               `json:"asof"`
-		Reason     string                  `json:"reason,omitempty"`
-		Quota      *PlacementQuotaDecision `json:"quota,omitempty"`
+		Decision     *string                 `json:"decision"`
+		Candidates   []PlacementCandidate    `json:"candidates"`
+		Source       string                  `json:"source"`
+		Asof         time.Time               `json:"asof"`
+		PolicyStatus string                  `json:"policy_status"`
+		Reason       string                  `json:"reason,omitempty"`
+		Quota        *PlacementQuotaDecision `json:"quota,omitempty"`
 	}
 	var decision *string
 	if r.Decision != "unavailable" {
 		decision = &r.Decision
 	}
-	return json.Marshal(wirePlacementResult{Decision: decision, Candidates: r.Candidates, Source: r.Source, Asof: r.Asof, Reason: r.Reason, Quota: r.Quota})
+	return json.Marshal(wirePlacementResult{Decision: decision, Candidates: r.Candidates, Source: r.Source, Asof: r.Asof, PolicyStatus: r.PolicyStatus, Reason: r.Reason, Quota: r.Quota})
 }
 
 func (r *PlacementResult) UnmarshalJSON(data []byte) error {
 	type wirePlacementResult struct {
-		Decision   *string                 `json:"decision"`
-		Candidates []PlacementCandidate    `json:"candidates"`
-		Source     string                  `json:"source"`
-		Asof       time.Time               `json:"asof"`
-		Reason     string                  `json:"reason"`
-		Quota      *PlacementQuotaDecision `json:"quota"`
+		Decision     *string                 `json:"decision"`
+		Candidates   []PlacementCandidate    `json:"candidates"`
+		Source       string                  `json:"source"`
+		Asof         time.Time               `json:"asof"`
+		PolicyStatus string                  `json:"policy_status"`
+		Reason       string                  `json:"reason"`
+		Quota        *PlacementQuotaDecision `json:"quota"`
 	}
 	var wire wirePlacementResult
 	decoder := json.NewDecoder(bytes.NewReader(data))
@@ -194,7 +197,7 @@ func (r *PlacementResult) UnmarshalJSON(data []byte) error {
 	if err := decoder.Decode(&struct{}{}); err != io.EOF {
 		return errors.New("placement response is invalid")
 	}
-	r.Candidates, r.Source, r.Asof, r.Reason, r.Quota = wire.Candidates, wire.Source, wire.Asof, wire.Reason, wire.Quota
+	r.Candidates, r.Source, r.Asof, r.PolicyStatus, r.Reason, r.Quota = wire.Candidates, wire.Source, wire.Asof, wire.PolicyStatus, wire.Reason, wire.Quota
 	if wire.Decision == nil {
 		r.Decision = "unavailable"
 	} else {
@@ -295,7 +298,8 @@ func (h *HubServer) placementWithQuota(ctx context.Context, class, cwd, pool, ac
 	if !policy.valid() {
 		policy = DefaultPlacementPolicy()
 	}
-	quota := evaluatePlacementQuota(policy, h.placementPolicyStatus, h.placementPolicyLoaded, pool, accountFP, now)
+	policyStatus := h.placementPolicyStatus
+	quota := evaluatePlacementQuota(policy, policyStatus, h.placementPolicyLoaded, pool, accountFP, now)
 	h.mu.Unlock()
 
 	metrics, err := h.fetchPlacementMetrics(ctx)
@@ -305,6 +309,7 @@ func (h *HubServer) placementWithQuota(ctx context.Context, class, cwd, pool, ac
 		metrics = placementMetrics{}
 	}
 	result := h.makePlacementWithQuota(policy, metrics, source, now, quota)
+	result.PolicyStatus = policyStatus
 	h.mu.Lock()
 	h.placementCache = placementCache{key: key, at: now, result: result}
 	h.mu.Unlock()
