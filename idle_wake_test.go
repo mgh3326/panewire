@@ -84,6 +84,29 @@ func TestIdleWakeSchemaGuardHelperProcess(t *testing.T) {
 	os.Exit(0)
 }
 
+func TestIdleWakeSourceSequenceMigrationRejectsIncompatibleSchema(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "node.sqlite3")
+	store, err := OpenStore(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`DROP TABLE idle_wake_panes`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE VIEW idle_wake_panes AS SELECT 'synthetic-pane' AS pane_id`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	reopened, err := OpenStore(dbPath)
+	if err == nil {
+		_ = reopened.Close()
+		t.Fatal("OpenStore accepted an idle_wake_panes object that cannot be migrated")
+	}
+}
+
 func TestIdleWakeUnavailableEventsCapabilityUsesBoundedProbeBackoff(t *testing.T) {
 	socketRoot, err := os.MkdirTemp("/tmp", "pw-iw-")
 	if err != nil {

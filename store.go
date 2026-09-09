@@ -135,7 +135,19 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	// Additive migration for journals created by the first ROB-1353 candidate.
-	_, _ = db.Exec(`ALTER TABLE idle_wake_panes ADD COLUMN upstream_state_change_seq INTEGER NOT NULL DEFAULT 0`)
+	// Inspect first so only the expected already-migrated case is skipped;
+	// incompatible schemas and other SQLite failures must fail OpenStore.
+	var sourceSequenceColumn string
+	columnErr := db.QueryRow(`SELECT name FROM pragma_table_info('idle_wake_panes') WHERE name='upstream_state_change_seq'`).Scan(&sourceSequenceColumn)
+	if columnErr == sql.ErrNoRows {
+		if _, err := db.Exec(`ALTER TABLE idle_wake_panes ADD COLUMN upstream_state_change_seq INTEGER NOT NULL DEFAULT 0`); err != nil {
+			db.Close()
+			return nil, err
+		}
+	} else if columnErr != nil {
+		db.Close()
+		return nil, columnErr
+	}
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS idle_wake_candidates (
 	 pane_id TEXT NOT NULL, state_change_seq INTEGER NOT NULL, workspace_id TEXT NOT NULL DEFAULT '',
 	 label TEXT NOT NULL DEFAULT '', agent_status TEXT NOT NULL, changed_at INTEGER NOT NULL,
