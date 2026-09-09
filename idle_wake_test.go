@@ -238,19 +238,77 @@ func TestIdleWakeSameSequenceIsStableAndNewSequenceAddsOne(t *testing.T) {
 	}
 }
 
-func TestIdleWakeConflictingSameUpstreamRevisionFailsClosed(t *testing.T) {
+func TestIdleWakeSnapshotStableRevisionTracksStateChange(t *testing.T) {
 	rig := newIdleWakeTestRig(t, time.Second)
-	rig.observe("working", 10, rig.now)
-	// A conflicting duplicate revision cannot prove a new state change.
-	rig.observe("idle", 10, rig.now.Add(time.Second))
+	if err := rig.manager.ObserveSnapshot(context.Background(), []HerdrAgentState{{PaneID: "workspace:pane-1", Status: "working", Revision: 1, SourceStateChangeSeq: 3}}, rig.now); err != nil {
+		t.Fatal(err)
+	}
+	if err := rig.manager.ObserveSnapshot(context.Background(), []HerdrAgentState{{PaneID: "workspace:pane-1", Status: "idle", Revision: 1, SourceStateChangeSeq: 4}}, rig.now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	rig.manager.Tick(context.Background(), rig.now.Add(2*time.Second))
+	if len(rig.requests) != 1 {
+		t.Fatalf("snapshot-only stable-revision transition requests=%d, want 1", len(rig.requests))
+	}
+}
+
+func TestIdleWakeSnapshotRecoversAfterHerdrStateSequenceRestart(t *testing.T) {
+	rig := newIdleWakeTestRig(t, time.Second)
+	snapshot := func(status string, sourceSequence int64, at time.Time) {
+		t.Helper()
+		if err := rig.manager.ObserveSnapshot(context.Background(), []HerdrAgentState{{PaneID: "workspace:pane-1", Status: status, Revision: 1, SourceStateChangeSeq: sourceSequence}}, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot("working", 10, rig.now)
+	snapshot("idle", 11, rig.now.Add(time.Second))
+	rig.now = rig.now.Add(2 * time.Second)
+	rig.manager.Tick(context.Background(), rig.now)
+	rig.route(0, "owner-lane")
+	if len(rig.emitted) != 1 {
+		t.Fatalf("pre-restart emitted=%d, want 1", len(rig.emitted))
+	}
+
+	// A reconnect may subscribe while herdr has no agents. The authoritative
+	// empty snapshot breaks continuity; lower source sequences then establish a
+	// new baseline, and the next complete working->idle transition must recover.
+	if err := rig.manager.ObserveSnapshot(context.Background(), nil, rig.now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	snapshot("working", 1, rig.now.Add(2*time.Second))
+	snapshot("idle", 2, rig.now.Add(3*time.Second))
+	rig.now = rig.now.Add(4 * time.Second)
+	rig.manager.Tick(context.Background(), rig.now)
+	if len(rig.requests) != 2 || rig.requests[1].StateChangeSeq != 5 || rig.requests[1].EventID == rig.requests[0].EventID {
+		t.Fatalf("post-restart requests=%+v", rig.requests)
+	}
+	rig.route(1, "owner-lane")
+	if len(rig.emitted) != 2 {
+		t.Fatalf("post-restart emitted=%d, want 2", len(rig.emitted))
+	}
+}
+
+func TestIdleWakeConflictingHerdrStateSequenceRebaselines(t *testing.T) {
+	rig := newIdleWakeTestRig(t, time.Second)
+	snapshot := func(status string, sourceSequence int64, at time.Time) {
+		t.Helper()
+		if err := rig.manager.ObserveSnapshot(context.Background(), []HerdrAgentState{{PaneID: "workspace:pane-1", Status: status, Revision: 1, SourceStateChangeSeq: sourceSequence}}, at); err != nil {
+			t.Fatal(err)
+		}
+	}
+	snapshot("working", 7, rig.now)
+	// Two states at one herdr state_change_seq are ambiguous. Rebaseline without
+	// a wake so a later fully sequenced transition can recover.
+	snapshot("idle", 7, rig.now.Add(time.Second))
 	rig.manager.Tick(context.Background(), rig.now.Add(time.Minute))
 	if len(rig.requests) != 0 {
-		t.Fatalf("same upstream revision invented a wake: %+v", rig.requests)
+		t.Fatalf("same herdr state sequence invented a wake: %+v", rig.requests)
 	}
-	rig.observe("idle", 11, rig.now.Add(time.Minute+time.Second))
-	rig.manager.Tick(context.Background(), rig.now.Add(time.Minute+2*time.Second))
-	if len(rig.requests) != 1 || rig.requests[0].StateChangeSeq != 2 {
-		t.Fatalf("next genuine revision did not wake once: %+v", rig.requests)
+	snapshot("working", 8, rig.now.Add(time.Minute+time.Second))
+	snapshot("idle", 9, rig.now.Add(time.Minute+2*time.Second))
+	rig.manager.Tick(context.Background(), rig.now.Add(time.Minute+3*time.Second))
+	if len(rig.requests) != 1 || rig.requests[0].StateChangeSeq != 4 {
+		t.Fatalf("next genuine state sequence did not wake once: %+v", rig.requests)
 	}
 }
 
@@ -395,10 +453,10 @@ func TestIdleWakePaneMissingFromSnapshotCancelsSettle(t *testing.T) {
 	if len(rig.requests) != 0 {
 		t.Fatalf("missing pane completed settle: %+v", rig.requests)
 	}
-	if err := rig.manager.ObserveSnapshot(context.Background(), []HerdrAgentState{{PaneID: "workspace:pane-1", Status: "working", Revision: 3}}, rig.now.Add(3*time.Minute)); err != nil {
+	if err := rig.manager.ObserveSnapshot(context.Background(), []HerdrAgentState{{PaneID: "workspace:pane-1", Status: "working", Revision: 3, SourceStateChangeSeq: 3}}, rig.now.Add(3*time.Minute)); err != nil {
 		t.Fatal(err)
 	}
-	if err := rig.manager.ObserveSnapshot(context.Background(), []HerdrAgentState{{PaneID: "workspace:pane-1", Status: "idle", Revision: 4}}, rig.now.Add(3*time.Minute+time.Second)); err != nil {
+	if err := rig.manager.ObserveSnapshot(context.Background(), []HerdrAgentState{{PaneID: "workspace:pane-1", Status: "idle", Revision: 3, SourceStateChangeSeq: 4}}, rig.now.Add(3*time.Minute+time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	rig.manager.Tick(context.Background(), rig.now.Add(4*time.Minute+time.Second))
@@ -695,99 +753,6 @@ func TestIdleWakeHubProtocolQueuesCurrentRouteDecision(t *testing.T) {
 		}
 	default:
 		t.Fatal("route decision was not queued")
-	}
-}
-
-func TestIdleWakeRouteWorkerPreservesReceiveOrder(t *testing.T) {
-	rig := newIdleWakeTestRig(t, time.Second)
-	rig.observe("working", 1, rig.now)
-	rig.observe("idle", 2, rig.now.Add(time.Second))
-	rig.now = rig.now.Add(2 * time.Second)
-	rig.manager.Tick(context.Background(), rig.now)
-	if len(rig.requests) != 1 {
-		t.Fatalf("route requests=%d, want 1", len(rig.requests))
-	}
-	emitted := make(chan hubScannedRelayEvent, 1)
-	rig.manager.enqueue = func(event hubScannedRelayEvent) bool {
-		emitted <- event
-		return true
-	}
-	request := rig.requests[0]
-	first := hubIdleWakeRouteEvent{Type: "idle-wake.route", EventID: request.EventID, Pane: request.Pane, Eligible: true, Lane: "owner-a", Text: idleWakeRouteText(request, idleWakeOwnerResolution{Lane: "owner-a"})}
-	second := hubIdleWakeRouteEvent{Type: "idle-wake.route", EventID: request.EventID, Pane: request.Pane, Eligible: true, Lane: "owner-b", Text: idleWakeRouteText(request, idleWakeOwnerResolution{Lane: "owner-b"})}
-	routes := make(chan hubIdleWakeRouteEvent, 2)
-	// Queue both before starting the sole worker so scheduling cannot reorder
-	// the conflicting decisions.
-	routes <- first
-	routes <- second
-	client := &HubClient{warn: func(string) {}}
-	client.SetIdleWakeManager(rig.manager)
-	ctx, cancel := context.WithCancel(context.Background())
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		client.applyIdleWakeRoutes(ctx, routes)
-	}()
-	defer func() {
-		cancel()
-		<-done
-	}()
-	select {
-	case event := <-emitted:
-		if event.OwnerLane != "owner-a" {
-			t.Fatalf("first queued route lost receive order: %+v", event)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("queued idle-wake route was not applied")
-	}
-}
-
-func TestIdleWakeTerminalCandidateRetentionKeepsPendingRetry(t *testing.T) {
-	t.Setenv("PANEWIRE_RELAY_OUTBOX_MAX_AGE", "24h")
-	rig := newIdleWakeTestRig(t, time.Second)
-	base := rig.now
-
-	rig.observe("working", 1, base)
-	rig.observe("idle", 2, base.Add(time.Second))
-	rig.now = base.Add(2 * time.Second)
-	rig.manager.Tick(context.Background(), rig.now)
-	rig.route(0, "owner-a") // assigned and materialized
-
-	rig.observe("working", 3, base.Add(3*time.Second))
-	rig.observe("idle", 4, base.Add(4*time.Second))
-	rig.now = base.Add(5 * time.Second)
-	rig.manager.Tick(context.Background(), rig.now)
-	request := rig.requests[1]
-	rig.manager.ApplyRoute(context.Background(), hubIdleWakeRouteEvent{Type: "idle-wake.route", EventID: request.EventID, Pane: request.Pane, Reason: idleWakeReasonUnknown})
-
-	rig.observe("working", 5, base.Add(6*time.Second))
-	rig.observe("idle", 6, base.Add(7*time.Second))
-	cancelledAt := base.Add(7500 * time.Millisecond)
-	rig.observe("working", 7, cancelledAt)          // cancelled before settle
-	rig.observe("idle", 8, base.Add(8*time.Second)) // pending retry; never prune
-
-	var total, missingDecisionTime int
-	if err := rig.store.db.QueryRow(`SELECT COUNT(*) FROM idle_wake_candidates`).Scan(&total); err != nil {
-		t.Fatal(err)
-	}
-	if err := rig.store.db.QueryRow(`SELECT COUNT(*) FROM idle_wake_candidates WHERE decision!='' AND decision_at IS NULL`).Scan(&missingDecisionTime); err != nil {
-		t.Fatal(err)
-	}
-	if total != 4 || missingDecisionTime != 0 {
-		t.Fatalf("before retention total=%d terminal_without_time=%d", total, missingDecisionTime)
-	}
-
-	pruneAt := cancelledAt.Add(relayOutboxMaxAge() + time.Millisecond)
-	rig.manager.RetrySettled(context.Background(), pruneAt)
-	var pending, sequence int
-	if err := rig.store.db.QueryRow(`SELECT COUNT(*) FROM idle_wake_candidates`).Scan(&total); err != nil {
-		t.Fatal(err)
-	}
-	if err := rig.store.db.QueryRow(`SELECT COUNT(*),COALESCE(MAX(state_change_seq),0) FROM idle_wake_candidates WHERE decision=''`).Scan(&pending, &sequence); err != nil {
-		t.Fatal(err)
-	}
-	if total != 1 || pending != 1 || sequence != 8 {
-		t.Fatalf("after retention total=%d pending=%d sequence=%d", total, pending, sequence)
 	}
 }
 

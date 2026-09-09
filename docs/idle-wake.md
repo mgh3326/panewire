@@ -8,9 +8,10 @@ not complete, join, lose, spawn, or reap a job.
 
 ## Observation and routing sources
 
-The node reads status, pane, workspace, and revision from herdr `agent.list`
-through `HerdrClient.AgentStates`; the optional display label is joined from
-the existing herdr `tab.list` source. Status-change subscription events and a
+The node reads status, pane, workspace, stable pane `revision`, and herdr's
+separate `state_change_seq` from `agent.list` through
+`HerdrClient.AgentStates`; the optional display label is joined from the
+existing herdr `tab.list` source. Status-change subscription events and a
 five-second authoritative snapshot poll feed the same SQLite state journal.
 
 The hub resolves an already-settled request at request time:
@@ -34,10 +35,12 @@ the two sources disagree. Idle-wake does not add or reinterpret any
 
 ## Sequence and recovery contract
 
-`state_change_seq` is a monotonically increasing, pane-local counter in the
-panewire SQLite journal. It increments on each accepted status change. It is
-not the herdr revision. The journal also owns a random 128-bit namespace that
-survives an ordinary panewire restart. The producer event ID is:
+The `state_change_seq` carried in the wake is a monotonically increasing,
+pane-local counter in the panewire SQLite journal. It increments on each
+accepted status change. It is distinct from both herdr's stable pane
+`revision` and herdr's own `state_change_seq`. The journal also owns a random
+128-bit namespace that survives an ordinary panewire restart. The producer
+event ID is:
 
 ```
 idle-wake:<node-journal-namespace>:<base64url-pane>:<state_change_seq>
@@ -50,18 +53,24 @@ handoffkeep duplicate response all retain that same key. A later genuine
 working-to-non-working change has a new local sequence and therefore a new
 event.
 
-Herdr revision is used only to reject stale observations and detect an
-upstream namespace reset. When an authoritative snapshot moves backwards or
-loses a previously nonzero revision entirely, an unsettled candidate is
-cancelled because continuity across the restart is unknown. An event carrying
-an older revision is ignored, and two different
-states carrying the same nonzero revision fail closed. A candidate that was
-already durably marked settled remains retryable. After the reset, a newly
-observed `working -> idle|done` transition receives the next node-local
-sequence. A pane missing from a complete `agent.list` snapshot is recorded as
-`unknown` and its unsettled candidate is cancelled. Loss of the panewire
-SQLite journal creates a new namespace; an
-already-idle first snapshot is only a baseline and cannot synthesize a wake.
+Herdr pane `revision` is not treated as a state-change counter: real snapshots
+may keep it stable while herdr `state_change_seq` advances. The source state
+sequence orders authoritative snapshots, so a stable-revision
+`working -> idle|done` change is accepted when that sequence advances. Live
+subscription events may omit both values; they retain the last comparable
+snapshot markers and are accepted in stream order.
+
+Both upstream values remain reset evidence. When an authoritative snapshot
+moves either value backwards, loses a previously nonzero value, or reports two
+different states for one source state sequence, an unsettled candidate is
+cancelled because continuity is unknown. The conflicting snapshot becomes a
+baseline rather than a wake, so the next fully sequenced
+`working -> idle|done` transition can recover. A stale sequenced event is
+ignored. A candidate already durably marked settled remains retryable. A pane
+missing from a complete `agent.list` snapshot is recorded as `unknown` and its
+unsettled candidate is cancelled. Loss of the panewire SQLite journal creates
+a new namespace; an already-idle first snapshot is only a baseline and cannot
+synthesize a wake.
 
 On node startup, recovery retries only candidates already marked settled and
 already-assigned event files. It cannot advance a merely due, unverified
@@ -74,25 +83,12 @@ re-probes on a bounded `1s, 2s, 4s, ... 30s` delay. It does not run the external
 schema command on the ordinary 100-millisecond socket reconnect cadence, and a
 successful capability probe proceeds to subscription without another delay.
 
-Terminal candidate rows are retained for the existing
-`PANEWIRE_RELAY_OUTBOX_MAX_AGE` horizon (24 hours by default) and then pruned.
-Only cancelled or suppressed rows and assigned rows with a completed local
-materialization timestamp are eligible. Unsettled, unassigned, and
-unmaterialized retry rows are never removed by this retention pass;
-`idle_wake_panes` and its monotonic sequence remain intact.
-
 ## Route changes and durable acceptance
 
 Route lookup happens after settle, so a parent reassigned during the 60-second
 window receives the event. The first valid route decision written to the node
 journal is then pinned. A later route response or a route change during a
 persistence retry cannot change it.
-
-The node accepts route responses into a bounded FIFO handled by one worker,
-keeping SQLite and file work off the WebSocket read loop while preserving
-receive order. If that queue is full, the newest response is dropped and the
-still-undecided candidate repeats its route request after the normal retry
-interval.
 
 The node writes the atomic mode-0600 `events-lane/` record before enqueueing
 the WebSocket event. A local write failure leaves the assigned candidate
