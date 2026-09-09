@@ -155,6 +155,8 @@ type HubClient struct {
 	relayEmitter      func(hubClientEvent) // fixture/connection-owned writer.
 	relayRecvSeqMu    sync.Mutex
 	relayRecvSeq      int64 // assigned synchronously by the hub read loop.
+	idleWakeMu        sync.Mutex
+	idleWake          *idleWakeManager
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -494,6 +496,8 @@ type hubOutboundMessage struct {
 	EventID         int64
 	Lane            string
 	ProducerEventID string
+	IdleWakeEventID string
+	Eligible        bool
 	RequestID       string
 	URL             string
 	SHA256          string
@@ -618,6 +622,10 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				client.assignmentMu.Unlock()
 			case "relay.persisted":
 				client.recordRelayPersisted(message)
+			case "idle-wake.route":
+				if manager := client.idleWakeManager(); manager != nil {
+					manager.ApplyRoute(ctx, hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason})
+				}
 			case "burst.holds":
 				client.burstMu.Lock()
 				client.burstHoldsActive = message.HoldsActive
@@ -1115,6 +1123,26 @@ func (client *HubClient) EnqueueRelayEvent(job hubScannedRelayEvent) bool {
 	}
 }
 
+// EnqueueIdleWakeRouteRequest asks the hub to resolve one already-settled
+// observation. It is not a delivery acknowledgement and never touches the R21
+// outbox; only the later lane.event does that.
+func (client *HubClient) EnqueueIdleWakeRouteRequest(request idleWakeRouteRequest) bool {
+	if !validIdleWakeRouteRequest(request) {
+		return false
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return false
+	}
+	select {
+	case client.events <- hubClientEvent{Kind: "idle-wake.route.request", Payload: payload}:
+		return true
+	default:
+		client.warnMessage("idle-wake route queue is full")
+		return false
+	}
+}
+
 // warnMessage tolerates the directly-constructed clients used by fixtures,
 // which do not go through NewHubClient's defaulting.
 func (client *HubClient) warnMessage(message string) {
@@ -1138,6 +1166,18 @@ func (client *HubClient) SetPanesAlive(panesAlive panesAliveFunc) {
 	client.panesAliveMu.Lock()
 	defer client.panesAliveMu.Unlock()
 	client.panesAlive = panesAlive
+}
+
+func (client *HubClient) SetIdleWakeManager(manager *idleWakeManager) {
+	client.idleWakeMu.Lock()
+	client.idleWake = manager
+	client.idleWakeMu.Unlock()
+}
+
+func (client *HubClient) idleWakeManager() *idleWakeManager {
+	client.idleWakeMu.Lock()
+	defer client.idleWakeMu.Unlock()
+	return client.idleWake
 }
 
 func (client *HubClient) panesAliveHook() panesAliveFunc {
@@ -1252,6 +1292,30 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 				return hubOutboundMessage{}, false
 			}
 		} else if len(fields) != 7 {
+			return hubOutboundMessage{}, false
+		}
+	case "idle-wake.route":
+		for name := range fields {
+			if name != "type" && name != "event_id" && name != "pane" && name != "eligible" && name != "lane" && name != "text" && name != "job_id" && name != "reason" {
+				return hubOutboundMessage{}, false
+			}
+		}
+		if json.Unmarshal(fields["event_id"], &message.IdleWakeEventID) != nil || json.Unmarshal(fields["pane"], &message.Pane) != nil || json.Unmarshal(fields["eligible"], &message.Eligible) != nil {
+			return hubOutboundMessage{}, false
+		}
+		if raw, exists := fields["lane"]; exists && json.Unmarshal(raw, &message.Lane) != nil {
+			return hubOutboundMessage{}, false
+		}
+		if raw, exists := fields["text"]; exists && json.Unmarshal(raw, &message.Text) != nil {
+			return hubOutboundMessage{}, false
+		}
+		if raw, exists := fields["job_id"]; exists && json.Unmarshal(raw, &message.JobID) != nil {
+			return hubOutboundMessage{}, false
+		}
+		if raw, exists := fields["reason"]; exists && json.Unmarshal(raw, &message.Reason) != nil {
+			return hubOutboundMessage{}, false
+		}
+		if !validHubIdleWakeRouteEvent(hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason}) {
 			return hubOutboundMessage{}, false
 		}
 	case "update.available":

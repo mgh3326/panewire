@@ -65,6 +65,31 @@ func TestRealSubscriptionEnvelopeUsesStringEventAndDataObject(t *testing.T) {
 	}
 }
 
+func TestIdleWakeSnapshotUsesRealAgentShapeAndTabListLabel(t *testing.T) {
+	fixture := newHerdrFixture(t, promptFixtureSchema(true))
+	defer fixture.Close()
+	fixture.On("agent.list", func() any {
+		return map[string]any{"agents": []any{map[string]any{
+			"agent": "codex", "pane_id": "workspace:pane-1", "workspace_id": "workspace", "tab_id": "workspace:tab-1", "agent_status": "working", "revision": 42,
+		}}}
+	})
+	fixture.On("tab.list", func() any {
+		return map[string]any{"tabs": []any{map[string]any{"tab_id": "workspace:tab-1", "workspace_id": "workspace", "label": "worker-synthetic"}}}
+	})
+	client, err := panewire.NewHerdrClient(fixture.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	states, err := client.AgentStates(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(states) != 1 || states[0].PaneID != "workspace:pane-1" || states[0].WorkspaceID != "workspace" || states[0].Label != "worker-synthetic" || states[0].Status != "working" || states[0].Revision != 42 || !states[0].Authoritative {
+		t.Fatalf("agent states=%+v", states)
+	}
+}
+
 func TestInboxWatcherRecordsCreateAndChange(t *testing.T) {
 	// This fixture exercises the fsnotify watcher specifically. R20 defaults
 	// macOS to poll, so the mode is named rather than inherited from GOOS.

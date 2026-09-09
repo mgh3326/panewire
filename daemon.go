@@ -18,6 +18,7 @@ import (
 type Config struct {
 	SocketPath, HerdrSocket, DBPath, InboxRoot string
 	StorePromptBody                            bool
+	IdleWakeSettle                             time.Duration
 	Logging                                    LoggingConfig
 	Stage2                                     Stage2Config
 	Hub                                        HubDaemonConfig
@@ -35,7 +36,10 @@ type Daemon struct {
 	listener   net.Listener
 	cancel     context.CancelFunc
 	herdr      *HerdrClient
+	idleWake   *idleWakeManager
 	caps       GuardResult
+	eventDone  chan struct{}
+	idleDone   chan struct{}
 	stage2Done chan struct{}
 	hubDone    chan struct{}
 	mu         sync.Mutex
@@ -65,12 +69,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 		d.store = s
 	}
 	guard := d.runGuard(ctx, "startup")
-	d.caps = guard
+	d.setCapabilities(guard)
 	_ = d.RecordSchemaGuard(ctx, guard, "startup")
 	if guard.Events && d.cfg.HerdrSocket != "" {
 		if c, err := NewHerdrClient(d.cfg.HerdrSocket); err == nil {
-			d.herdr = c
-			go d.eventLoop(ctx)
+			d.setHerdrClient(c)
 		} else {
 			d.cfg.Logger.Warn("herdr unavailable", "error", err)
 		}
@@ -80,6 +83,18 @@ func (d *Daemon) Start(ctx context.Context) error {
 		// once the store is open rather than at hub client construction.
 		d.cfg.Hub.Client.SetRelayOutbox(d.store)
 		d.cfg.Hub.Client.SetPanesAlive(hubPanesAliveHook(d.cfg.HerdrSocket))
+		idleRoot := d.cfg.Hub.Client.jobsInboxRoot
+		if idleRoot == "" {
+			idleRoot = d.cfg.InboxRoot
+		}
+		if d.cfg.HerdrSocket != "" && idleRoot != "" {
+			manager, err := newIdleWakeManager(d.store, idleRoot, d.cfg.IdleWakeSettle, d.cfg.Hub.Client.EnqueueIdleWakeRouteRequest, d.cfg.Hub.Client.EnqueueRelayEvent, d.cfg.Logger)
+			if err != nil {
+				return err
+			}
+			d.idleWake = manager
+			d.cfg.Hub.Client.SetIdleWakeManager(manager)
+		}
 	}
 	if d.cfg.InboxRoot != "" {
 		if w, err := NewInboxWatcher(d.cfg.InboxRoot, d.store); err == nil {
@@ -104,6 +119,20 @@ func (d *Daemon) Start(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	d.cancel = cancel
 	go d.serve(runCtx)
+	if d.cfg.HerdrSocket != "" && (guard.Events || d.idleWake != nil) {
+		d.eventDone = make(chan struct{})
+		go func() {
+			defer close(d.eventDone)
+			d.eventLoop(runCtx)
+		}()
+	}
+	if d.idleWake != nil {
+		d.idleDone = make(chan struct{})
+		go func() {
+			defer close(d.idleDone)
+			d.idleWakeRetryLoop(runCtx)
+		}()
+	}
 	if d.cfg.Stage2.Enabled {
 		d.stage2Done = make(chan struct{})
 		go func() {
@@ -161,43 +190,180 @@ func (d *Daemon) runGuard(ctx context.Context, phase string) GuardResult {
 	return g
 }
 func (d *Daemon) eventLoop(ctx context.Context) {
+	var settle <-chan time.Time
+	var poll <-chan time.Time
+	var settleTicker, pollTicker *time.Ticker
+	if d.idleWake != nil {
+		settleTicker = time.NewTicker(time.Second)
+		pollTicker = time.NewTicker(idleWakeObservationPoll)
+		settle, poll = settleTicker.C, pollTicker.C
+		defer settleTicker.Stop()
+		defer pollTicker.Stop()
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
 		}
-		if d.herdr == nil {
-			return
+		client := d.herdrClient()
+		if client == nil {
+			connected, err := NewHerdrClient(d.cfg.HerdrSocket)
+			if err != nil {
+				if !waitDaemonRetry(ctx) {
+					return
+				}
+				continue
+			}
+			if !d.adoptHerdrClient(ctx, connected) {
+				return
+			}
+			client = connected
+			if !d.capabilities().Events {
+				guard := d.runGuard(ctx, "reconnect")
+				d.setCapabilities(guard)
+				_ = d.RecordSchemaGuard(ctx, guard, "reconnect")
+				if !guard.Events {
+					d.clearHerdrClient(client)
+					if !waitDaemonRetry(ctx) {
+						return
+					}
+					continue
+				}
+			}
 		}
-		events, err := d.herdr.Subscribe(ctx)
+		events, err := client.Subscribe(ctx)
 		if err != nil {
 			d.cfg.Logger.Warn("herdr subscribe failed", "error", err)
-			_ = d.herdr.Close()
-			time.Sleep(100 * time.Millisecond)
-			if g := d.runGuard(ctx, "reconnect"); true {
-				d.caps = g
-				_ = d.RecordSchemaGuard(ctx, g, "reconnect")
+			d.clearHerdrClient(client)
+			if !waitDaemonRetry(ctx) {
+				return
 			}
-			if c, e := NewHerdrClient(d.cfg.HerdrSocket); e == nil {
-				d.herdr = c
+			if g := d.runGuard(ctx, "reconnect"); true {
+				d.setCapabilities(g)
+				_ = d.RecordSchemaGuard(ctx, g, "reconnect")
 			}
 			continue
 		}
-		for ev := range events {
-			if len(ev.UnknownFields) > 2 || !knownHerdrEvent(ev.Kind) {
-				d.cfg.Logger.Warn("unknown herdr event; recording without inference", "kind", ev.Kind, "fields", string(ev.UnknownFields))
+		if d.idleWake != nil {
+			d.observeIdleWakeSnapshot(ctx, client)
+			d.idleWake.Tick(ctx, time.Now().UTC())
+		}
+		streamOpen := true
+		for streamOpen {
+			select {
+			case <-ctx.Done():
+				return
+			case ev, open := <-events:
+				if !open {
+					streamOpen = false
+					continue
+				}
+				if len(ev.UnknownFields) > 2 || !knownHerdrEvent(ev.Kind) {
+					d.cfg.Logger.Warn("unknown herdr event; recording without inference", "kind", ev.Kind, "fields", string(ev.UnknownFields))
+				}
+				caps := d.capabilities()
+				recordHerdrEvent(ctx, d.store, ev, caps.Protocol, caps.Schema)
+				if d.idleWake != nil && ev.AgentStatus != "" && (ev.Kind == "pane.agent_status_changed" || ev.Kind == "pane_agent_status_changed") {
+					if err := d.idleWake.Observe(ctx, HerdrAgentState{PaneID: ev.PaneID, WorkspaceID: ev.WorkspaceID, Status: ev.AgentStatus, Revision: ev.Revision}, time.Now().UTC()); err != nil {
+						d.cfg.Logger.Warn("idle-wake observation rejected")
+					}
+				}
+			case at := <-settle:
+				d.idleWake.Tick(ctx, at.UTC())
+			case <-poll:
+				d.observeIdleWakeSnapshot(ctx, client)
 			}
-			recordHerdrEvent(ctx, d.store, ev, d.caps.Protocol, d.caps.Schema)
 		}
-		_ = d.herdr.Close()
-		time.Sleep(100 * time.Millisecond)
+		d.clearHerdrClient(client)
+		if !waitDaemonRetry(ctx) {
+			return
+		}
 		g := d.runGuard(ctx, "reconnect")
-		d.caps = g
+		d.setCapabilities(g)
 		_ = d.RecordSchemaGuard(ctx, g, "reconnect")
-		if c, e := NewHerdrClient(d.cfg.HerdrSocket); e == nil {
-			d.herdr = c
+	}
+}
+
+func waitDaemonRetry(ctx context.Context) bool {
+	timer := time.NewTimer(100 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (d *Daemon) setHerdrClient(client *HerdrClient) {
+	d.mu.Lock()
+	d.herdr = client
+	d.mu.Unlock()
+}
+
+func (d *Daemon) setCapabilities(capabilities GuardResult) {
+	d.mu.Lock()
+	d.caps = capabilities
+	d.mu.Unlock()
+}
+
+func (d *Daemon) capabilities() GuardResult {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.caps
+}
+
+func (d *Daemon) adoptHerdrClient(ctx context.Context, client *HerdrClient) bool {
+	d.mu.Lock()
+	if ctx.Err() != nil {
+		d.mu.Unlock()
+		_ = client.Close()
+		return false
+	}
+	d.herdr = client
+	d.mu.Unlock()
+	return true
+}
+
+func (d *Daemon) herdrClient() *HerdrClient {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.herdr
+}
+
+func (d *Daemon) clearHerdrClient(client *HerdrClient) {
+	d.mu.Lock()
+	if d.herdr == client {
+		d.herdr = nil
+	}
+	d.mu.Unlock()
+	_ = client.Close()
+}
+
+func (d *Daemon) idleWakeRetryLoop(ctx context.Context) {
+	d.idleWake.RetrySettled(ctx, time.Now().UTC())
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case at := <-ticker.C:
+			d.idleWake.RetrySettled(ctx, at.UTC())
 		}
+	}
+}
+
+func (d *Daemon) observeIdleWakeSnapshot(ctx context.Context, client *HerdrClient) {
+	lookup, cancel := context.WithTimeout(ctx, hubPanesAliveTimeout)
+	defer cancel()
+	states, err := client.AgentStates(lookup)
+	if err != nil {
+		return
+	}
+	if err := d.idleWake.ObserveSnapshot(ctx, states, time.Now().UTC()); err != nil {
+		d.cfg.Logger.Warn("idle-wake snapshot observation rejected")
 	}
 }
 func knownHerdrEvent(kind string) bool {
@@ -277,11 +443,12 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 		callCtx, cancel := context.WithTimeout(ctx, timeout)
 		var result any
 		var err error
+		caps := d.capabilities()
 		switch req.Op {
 		case "wait.file":
 			result, err = WaitFile(callCtx, d.store, req.Path, time.Duration(req.SettleMS)*time.Millisecond)
 		case "wait.agent":
-			if !d.caps.AgentCapability() {
+			if !caps.AgentCapability() {
 				err = &codedError{ExitDaemonUnavailable, fmt.Errorf("agent capability unavailable")}
 			} else {
 				c2, e := NewHerdrClient(d.cfg.HerdrSocket)
@@ -295,14 +462,14 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 		case "emit":
 			err = d.emitRelayEvent(req)
 		case "prompt":
-			if !d.caps.Prompt || !d.caps.AgentRead {
+			if !caps.Prompt || !caps.AgentRead {
 				result, err = recordUnavailablePrompt(callCtx, d.store, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, ExitDaemonUnavailable, "prompt capability unavailable")
 			} else {
 				c2, e := NewHerdrClient(d.cfg.HerdrSocket)
 				if e != nil {
 					result, err = recordUnavailablePrompt(callCtx, d.store, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, ExitDaemonUnavailable, e.Error())
 				} else {
-					result, err = Prompt(callCtx, d.store, c2, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, d.caps)
+					result, err = Prompt(callCtx, d.store, c2, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, caps)
 					_ = c2.Close()
 				}
 			}
@@ -328,6 +495,21 @@ func (d *Daemon) Stop() error {
 	if d.cancel != nil {
 		d.cancel()
 	}
+	d.mu.Lock()
+	herdr := d.herdr
+	d.herdr = nil
+	d.mu.Unlock()
+	if herdr != nil {
+		_ = herdr.Close()
+	}
+	if d.eventDone != nil {
+		<-d.eventDone
+		d.eventDone = nil
+	}
+	if d.idleDone != nil {
+		<-d.idleDone
+		d.idleDone = nil
+	}
 	if d.stage2Done != nil {
 		<-d.stage2Done
 		d.stage2Done = nil
@@ -335,9 +517,6 @@ func (d *Daemon) Stop() error {
 	if d.hubDone != nil {
 		<-d.hubDone
 		d.hubDone = nil
-	}
-	if d.herdr != nil {
-		_ = d.herdr.Close()
 	}
 	if d.listener != nil {
 		_ = d.listener.Close()

@@ -140,6 +140,7 @@ type hubAgent struct {
 	holds       chan hubBurstHoldsEvent
 	relays      chan hubRelayInjectEvent
 	persisted   chan hubRelayPersistedEvent
+	idleRoutes  chan hubIdleWakeRouteEvent
 }
 
 // HubActiveJob is deliberately metadata-only. It is copied from a node's
@@ -768,7 +769,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64)}
+	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
@@ -779,6 +780,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 	go agent.writeHolds(agentContext)
 	go agent.writeRelays(agentContext)
 	go agent.writePersisted(agentContext)
+	go agent.writeIdleWakeRoutes(agentContext)
 	for {
 		messageType, payload, err := connection.Read(request.Context())
 		if err != nil {
@@ -922,6 +924,15 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				return
 			}
 			h.relayLaneEvent(event, agent)
+		}
+		if message.Kind == "idle-wake.route.request" {
+			request, valid := decodeIdleWakeRouteRequest(message.Payload)
+			if !valid {
+				h.countUnknownMessage()
+				return
+			}
+			resolution := h.resolveIdleWakeOwner(machineID, request.Pane)
+			agent.queueIdleWakeRoute(idleWakeRouteDecision(request, resolution))
 		}
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
 			ack, valid := decodeRelayAckPayload(message.Payload)
@@ -1231,6 +1242,11 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
+		if message.Kind == "idle-wake.route.request" {
+			if _, valid := decodeIdleWakeRouteRequest(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
 			if _, valid := decodeRelayAckPayload(rawPayload); !valid {
 				return hubInbound{}, false
@@ -1265,7 +1281,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "lane.event", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched":
+	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "lane.event", "idle-wake.route.request", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched":
 		return true
 	}
 	return false
@@ -1806,6 +1822,31 @@ func (agent *hubAgent) writePersisted(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case event := <-agent.persisted:
+			if err := agent.writeJSON(event); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (agent *hubAgent) queueIdleWakeRoute(event hubIdleWakeRouteEvent) bool {
+	if agent == nil || agent.idleRoutes == nil {
+		return false
+	}
+	select {
+	case agent.idleRoutes <- event:
+		return true
+	default:
+		return false
+	}
+}
+
+func (agent *hubAgent) writeIdleWakeRoutes(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event := <-agent.idleRoutes:
 			if err := agent.writeJSON(event); err != nil {
 				return
 			}

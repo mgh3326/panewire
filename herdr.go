@@ -115,6 +115,35 @@ func (c *HerdrClient) PanesAlive(ctx context.Context) (map[string]bool, error) {
 	return alive, nil
 }
 
+// AgentStates reads the real herdr agent snapshot and joins the tab label from
+// tab.list, its existing source of truth. A missing tab snapshot costs only
+// optional display context; pane, status, and revision remain usable.
+func (c *HerdrClient) AgentStates(ctx context.Context) ([]HerdrAgentState, error) {
+	snapshot, err := c.Call(ctx, "agent.list", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var listed struct {
+		Agents []map[string]any `json:"agents"`
+	}
+	if json.Unmarshal(snapshot, &listed) != nil {
+		return nil, fmt.Errorf("invalid herdr agent list")
+	}
+	labels := tabLabels(ctx, c)
+	states := make([]HerdrAgentState, 0, len(listed.Agents))
+	for _, raw := range listed.Agents {
+		pane := identityFromMap(raw)
+		if pane.Label == "" {
+			pane.Label = labels[pane.TabID]
+		}
+		if !validIdleWakePane(pane.PaneID) || !validObservedAgentStatus(pane.Status) {
+			continue
+		}
+		states = append(states, HerdrAgentState{PaneID: pane.PaneID, WorkspaceID: pane.WorkspaceID, Label: pane.Label, Status: pane.Status, Revision: pane.Revision, Authoritative: true})
+	}
+	return states, nil
+}
+
 type HerdrEvent struct {
 	Kind                             string
 	PaneID, WorkspaceID, AgentStatus string

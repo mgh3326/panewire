@@ -12,6 +12,11 @@ file is reloaded for every relay decision. `job.completed` goes to its
 files are migrated. See [the lane contract](docs/r19-lanes.md) for the exact
 file and acknowledgement contract.
 
+Idle-wake can turn a real `working -> idle|done` transition into one durable
+direct notification for the pane's owner after a default 60-second settle. It
+does not decide job completion or alter job lifecycle state. See the
+[idle-wake contract and isolated E2E runbook](docs/idle-wake.md).
+
 Escalation `question` text is capped at 240 characters for hub relay; read the
 full question from the referenced events file (or its explicit report file).
 
