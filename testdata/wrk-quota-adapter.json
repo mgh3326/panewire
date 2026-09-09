@@ -1,0 +1,91 @@
+[
+  {
+    "name": "hub allow local allow",
+    "hub_status": 200,
+    "hub_body": {"decision":"host-a","candidates":[{"machine":"host-a","score":100,"throttled":false,"active_jobs":0,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"quota_decision":"allow","quota_reason":"quota_allowed","reason":"memory_unknown"}],"source":"hub-only","asof":"2026-09-09T05:58:50Z","quota":{"pool":"claude","account_fp":"a1b2c3d4","decision":"allow","reason":"quota_allowed","policy_status":"current"}},
+    "local_exit": 0,
+    "local_stdout": "profile=worker-a pool=claude used_pct=24 class=preserve\nquota gate allowed\n",
+    "local_stderr": "",
+    "want_hub": "allow",
+    "want_final": "allow"
+  },
+  {
+    "name": "hub allow local deny",
+    "hub_status": 200,
+    "hub_body": {"decision":"host-a","candidates":[{"machine":"host-a","score":100,"throttled":false,"active_jobs":0,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"quota_decision":"allow","quota_reason":"quota_allowed","reason":"memory_unknown"}],"source":"hub-only","asof":"2026-09-09T05:58:50Z","quota":{"pool":"claude","account_fp":"a1b2c3d4","decision":"allow","reason":"quota_allowed","policy_status":"current"}},
+    "local_exit": 3,
+    "local_stdout": "",
+    "local_stderr": "quota gate denied; alternatives=worker-b\n",
+    "want_hub": "allow",
+    "want_final": "deny"
+  },
+  {
+    "name": "hub allow local unavailable",
+    "hub_status": 200,
+    "hub_body": {"decision":"host-a","candidates":[{"machine":"host-a","score":100,"throttled":false,"active_jobs":0,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"quota_decision":"allow","quota_reason":"quota_allowed","reason":"memory_unknown"}],"source":"hub-only","asof":"2026-09-09T05:58:50Z","quota":{"pool":"claude","account_fp":"a1b2c3d4","decision":"allow","reason":"quota_allowed","policy_status":"current"}},
+    "local_exit": 4,
+    "local_stdout": "",
+    "local_stderr": "quota measurement unavailable\n",
+    "want_hub": "allow",
+    "want_final": "unknown"
+  },
+  {
+    "name": "hub deny local allow",
+    "hub_status": 200,
+    "hub_body": {"decision":null,"candidates":[{"machine":"host-a","score":-9900,"throttled":false,"active_jobs":0,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"quota_decision":"deny","quota_reason":"quota_excluded","reason":"quota_excluded,memory_unknown"}],"source":"hub-only","asof":"2026-09-09T05:58:50Z","reason":"quota_excluded","quota":{"pool":"claude","account_fp":"a1b2c3d4","decision":"deny","reason":"quota_excluded","policy_status":"current"}},
+    "local_exit": 0,
+    "local_stdout": "profile=worker-a pool=claude used_pct=24 class=preserve\nquota gate allowed\n",
+    "local_stderr": "",
+    "want_hub": "deny",
+    "want_final": "deny"
+  },
+  {
+    "name": "hub 503 local allow",
+    "hub_status": 503,
+    "hub_body": {"error":"temporarily unavailable"},
+    "local_exit": 0,
+    "local_stdout": "profile=worker-a pool=claude used_pct=24 class=preserve\nquota gate allowed\n",
+    "local_stderr": "",
+    "want_hub": "unavailable",
+    "want_final": "allow"
+  },
+  {
+    "name": "hub timeout local deny",
+    "transport_error": "timeout",
+    "local_exit": 3,
+    "local_stdout": "",
+    "local_stderr": "quota gate denied; alternatives=worker-b\n",
+    "want_hub": "unavailable",
+    "want_final": "deny"
+  },
+  {
+    "name": "hub 401 local allow",
+    "hub_status": 401,
+    "hub_body": {"error":"unauthorized"},
+    "local_exit": 0,
+    "local_stdout": "profile=worker-a pool=claude used_pct=24 class=preserve\nquota gate allowed\n",
+    "local_stderr": "",
+    "want_hub": "authentication_error",
+    "want_final": "authentication_error"
+  },
+  {
+    "name": "hub 403 local allow",
+    "hub_status": 403,
+    "hub_body": {"error":"forbidden"},
+    "local_exit": 0,
+    "local_stdout": "profile=worker-a pool=claude used_pct=24 class=preserve\nquota gate allowed\n",
+    "local_stderr": "",
+    "want_hub": "authentication_error",
+    "want_final": "authentication_error"
+  },
+  {
+    "name": "hub malformed local allow",
+    "hub_status": 200,
+    "hub_body": "not-a-placement-object",
+    "local_exit": 0,
+    "local_stdout": "profile=worker-a pool=claude used_pct=24 class=preserve\nquota gate allowed\n",
+    "local_stderr": "",
+    "want_hub": "fail_closed",
+    "want_final": "fail_closed"
+  }
+]

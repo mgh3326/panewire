@@ -312,35 +312,40 @@ type HubServer struct {
 	notifier          HubNotifier
 	logger            *slog.Logger
 
-	mu                     sync.Mutex
-	nodes                  map[string]*hubNodeRecord
-	lastNotes              map[string]*HubLastNote
-	subscribers            map[*hubEventSubscriber]struct{}
-	alerts                 map[string]*hubAlertState
-	burstPolicyPath        string
-	burstPolicy            BurstPolicy
-	burstPolicyModTime     time.Time
-	burstState             *hubBurstState
-	unknownMessages        uint64
-	unfencedCompletions    uint64
-	startedAt              time.Time
-	uiAllowCFOnly          bool
-	uiEvents               []hubUIEvent
-	jobs                   map[string]*hubJobRecord
-	pendingRevocations     map[string]map[string]hubJobRevokedEvent
-	holds                  map[string]*hubBurstHold
-	placementPolicyPath    string
-	placementPolicy        PlacementPolicy
-	placementPolicyModTime time.Time
-	prometheusURL          string
-	prometheusClient       *http.Client
-	prometheusBearer       string
-	prometheusBasicUser    string
-	prometheusBasicPass    string
-	placementCache         placementCache
-	r19a                   r19aHubState
-	reportRelayPath        string
-	lanesWriteOps          lanesWriteOps
+	mu                             sync.Mutex
+	nodes                          map[string]*hubNodeRecord
+	nodeQuota                      map[string]*hubQuotaRecord
+	lastNotes                      map[string]*HubLastNote
+	subscribers                    map[*hubEventSubscriber]struct{}
+	alerts                         map[string]*hubAlertState
+	burstPolicyPath                string
+	burstPolicy                    BurstPolicy
+	burstPolicyModTime             time.Time
+	burstState                     *hubBurstState
+	unknownMessages                uint64
+	unfencedCompletions            uint64
+	startedAt                      time.Time
+	uiAllowCFOnly                  bool
+	uiEvents                       []hubUIEvent
+	jobs                           map[string]*hubJobRecord
+	pendingRevocations             map[string]map[string]hubJobRevokedEvent
+	holds                          map[string]*hubBurstHold
+	placementPolicyPath            string
+	placementPolicy                PlacementPolicy
+	placementPolicyModTime         time.Time
+	placementPolicyObservedModTime time.Time
+	placementPolicyLoaded          bool
+	placementPolicyStatus          string
+	placementPolicyLastFailure     string
+	prometheusURL                  string
+	prometheusClient               *http.Client
+	prometheusBearer               string
+	prometheusBasicUser            string
+	prometheusBasicPass            string
+	placementCache                 placementCache
+	r19a                           r19aHubState
+	reportRelayPath                string
+	lanesWriteOps                  lanesWriteOps
 	// relayDedupe is an active injection claim. lanePersisted keeps the durable
 	// row ID while that claim is deliberately released between lane retries.
 	relayDedupe                 map[string]int64
@@ -400,6 +405,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.Now == nil {
 		config.Now = time.Now
 	}
+	if config.Logger == nil {
+		config.Logger = slog.Default()
+	}
 	if config.StaleAfter <= 0 {
 		config.StaleAfter = 30 * time.Second
 	}
@@ -424,14 +432,25 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		}
 		burstPolicy, burstPolicyModTime = policy, modTime
 	}
-	var placementPolicy PlacementPolicy
+	placementPolicy := DefaultPlacementPolicy()
 	var placementPolicyModTime time.Time
+	var placementPolicyObservedModTime time.Time
+	placementPolicyLoaded := true
+	placementPolicyStatus := "default"
+	placementPolicyLastFailure := ""
 	if config.PlacementPolicyPath != "" {
 		policy, modTime, err := LoadPlacementPolicy(config.PlacementPolicyPath)
 		if err != nil {
-			return nil, errors.New("hub placement policy is invalid")
+			placementPolicyLoaded = false
+			placementPolicyStatus = "invalid"
+			placementPolicyLastFailure = "invalid"
+			placementPolicyObservedModTime = modTime
+			config.Logger.Error("placement policy load failed", "policy_status", placementPolicyStatus, "failure", placementPolicyLastFailure)
+		} else {
+			placementPolicy, placementPolicyModTime = policy, modTime
+			placementPolicyObservedModTime = modTime
+			placementPolicyStatus = "current"
 		}
-		placementPolicy, placementPolicyModTime = policy, modTime
 	}
 	if config.RelayAckTimeout <= 0 {
 		config.RelayAckTimeout = relayAckTimeoutFromEnv()
@@ -440,14 +459,11 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if err != nil {
 		return nil, errors.New("hub accepting overrides are invalid")
 	}
-	if config.Logger == nil {
-		config.Logger = slog.Default()
-	}
 	return &HubServer{
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
-		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
+		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
+		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
 	}, nil
 }
 
@@ -486,6 +502,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/burst/release", h.handleBurstRelease)
 	mux.HandleFunc("GET /v1/burst/holds", h.handleBurstHolds)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
+	mux.HandleFunc("GET /v1/quota", h.handleQuotaList)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
@@ -802,8 +819,12 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 		h.resolveQuota(machineID, report)
 		return
 	}
+	hasHeartbeatQuota := hubInboundHeartbeatHasQuota(payload)
 	message, ok := parseHubInbound(payload)
 	if !ok {
+		if hasHeartbeatQuota {
+			h.recordRejectedHubQuota(machineID, agent, h.now().UTC())
+		}
 		h.countUnknownMessage()
 		return
 	}
@@ -865,6 +886,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 					record.hostMemory = cloneHubHostMemory(heartbeat.HostMemory)
 					h.placementCache = placementCache{}
 				}
+				h.recordHubQuotaLocked(machineID, heartbeat.Quota, received)
 			}
 			h.mu.Unlock()
 			h.observeHeartbeatAlerts(machineID, heartbeat)
@@ -1005,6 +1027,7 @@ type hubHeartbeatPayload struct {
 	Checks      map[string]HubCheckStatus `json:"checks"`
 	HostLoad    *HubHostLoad              `json:"host_load,omitempty"`
 	HostMemory  *HubHostMemory            `json:"host_memory,omitempty"`
+	Quota       *HubQuotaSnapshot         `json:"quota,omitempty"`
 	ActiveJobs  []HubActiveJob            `json:"active_jobs,omitempty"`
 	HoldsActive bool                      `json:"holds_active,omitempty"`
 }
@@ -1039,7 +1062,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "host_memory" && name != "active_jobs" && name != "holds_active" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1104,6 +1127,13 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.HostMemory = &memory
+	}
+	if rawQuota, exists := fields["quota"]; exists {
+		quota, valid := decodeHubQuotaSnapshot(rawQuota)
+		if !valid {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.Quota = quota
 	}
 	if rawJobs, exists := fields["active_jobs"]; exists {
 		var rawActive []map[string]json.RawMessage

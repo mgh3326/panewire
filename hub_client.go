@@ -58,10 +58,11 @@ type HubClientConfig struct {
 	// SpawnConfigPath is the local, operator-provisioned job.spawn policy.
 	// It is injectable so tests never consult a user's real configuration.
 	SpawnConfigPath     string
-	relayCommand        relayCommandRunner                            // fixture seam for agent get/wait.
-	relayInject         func(context.Context, string, string) bool    // fixture seam
-	hostLoadCollector   func(context.Context) (HubHostLoad, error)    // fixture seam
-	hostMemoryCollector func(context.Context) (*HubHostMemory, error) // fixture seam
+	relayCommand        relayCommandRunner                               // fixture seam for agent get/wait.
+	relayInject         func(context.Context, string, string) bool       // fixture seam
+	hostLoadCollector   func(context.Context) (HubHostLoad, error)       // fixture seam
+	hostMemoryCollector func(context.Context) (*HubHostMemory, error)    // fixture seam
+	quotaCollector      func(context.Context) (*HubQuotaSnapshot, error) // fixture seam
 
 	// failoverWakeDestination is a package-private fixture override. Production
 	// always uses the fixed broadcast destination below.
@@ -126,6 +127,7 @@ type HubClient struct {
 	relayInject          func(context.Context, string, string) bool
 	hostLoadCollector    func(context.Context) (HubHostLoad, error)
 	hostMemoryCollector  func(context.Context) (*HubHostMemory, error)
+	quotaCollector       func(context.Context) (*HubQuotaSnapshot, error)
 	events               chan hubClientEvent
 	completedJobs        map[string]uint64
 	completedReports     map[string]struct{}
@@ -258,6 +260,9 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.Execute == nil {
 		config.Execute = executeHubCheck
 	}
+	if config.quotaCollector == nil && !config.AllowInsecureForTests {
+		config.quotaCollector = collectHubQuota
+	}
 	if config.burstPoweroff == nil {
 		config.burstPoweroff = executeHubBurstPoweroff
 	}
@@ -271,7 +276,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		r19a:   newR19aClientState(config),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version, updateHTTPClient: config.UpdateHTTPClient, executablePath: config.ExecutablePath, restart: config.Restart,
-		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
+		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, quotaCollector: config.quotaCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
 	}, nil
 }
 
@@ -807,6 +812,15 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	if memory, err := collectMemory(ctx); err == nil {
 		heartbeat.HostMemory = memory
 	}
+	collectQuota := client.quotaCollector
+	quota := unavailableHubQuotaSnapshot()
+	if collectQuota != nil {
+		collected, err := collectQuota(ctx)
+		if err == nil && collected != nil && collected.valid() {
+			quota = collected
+		}
+	}
+	heartbeat.Quota = cloneHubQuotaSnapshot(quota)
 	payload, _ := json.Marshal(heartbeat)
 	return hubClientEvent{Kind: "heartbeat", Payload: payload}
 }

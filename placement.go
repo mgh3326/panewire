@@ -19,13 +19,21 @@ import (
 // PlacementPolicy is deliberately small and operator-owned. It selects a
 // local machine first, then considers spill targets in the listed order.
 type PlacementPolicy struct {
-	LocalMachine     string   `json:"local_machine"`
-	SpillTargets     []string `json:"spill_targets"`
-	MaxActiveJobs    int      `json:"max_active_jobs"`
-	LoadRatio        float64  `json:"load_ratio"`
-	WakeOnSpill      bool     `json:"wake_on_spill"`
-	MemoryFreePctMin *float64 `json:"memory_free_pct_min,omitempty"`
-	SwapUsedMBMax    *float64 `json:"swap_used_mb_max,omitempty"`
+	LocalMachine     string               `json:"local_machine"`
+	SpillTargets     []string             `json:"spill_targets"`
+	MaxActiveJobs    int                  `json:"max_active_jobs"`
+	LoadRatio        float64              `json:"load_ratio"`
+	WakeOnSpill      bool                 `json:"wake_on_spill"`
+	MemoryFreePctMin *float64             `json:"memory_free_pct_min,omitempty"`
+	SwapUsedMBMax    *float64             `json:"swap_used_mb_max,omitempty"`
+	QuotaExclude     []PlacementQuotaRule `json:"quota_exclude,omitempty"`
+	QuotaBoost       []PlacementQuotaRule `json:"quota_boost,omitempty"`
+}
+
+type PlacementQuotaRule struct {
+	Pool      string `json:"pool"`
+	AccountFP string `json:"account_fp,omitempty"`
+	Until     string `json:"until,omitempty"`
 }
 
 func DefaultPlacementPolicy() PlacementPolicy {
@@ -46,6 +54,18 @@ func (p PlacementPolicy) valid() bool {
 			return false
 		}
 		seen[target] = struct{}{}
+	}
+	for _, rules := range [][]PlacementQuotaRule{p.QuotaExclude, p.QuotaBoost} {
+		for _, rule := range rules {
+			if !hubQuotaPoolPattern.MatchString(rule.Pool) || (rule.AccountFP != "" && !hubQuotaAccountFPPattern.MatchString(rule.AccountFP)) {
+				return false
+			}
+			if rule.Until != "" {
+				if _, err := time.Parse(time.RFC3339, rule.Until); err != nil {
+					return false
+				}
+			}
+		}
 	}
 	return true
 }
@@ -116,47 +136,65 @@ type PlacementCandidate struct {
 	MemoryKnown   bool     `json:"memory_known"`
 	HoldsActive   bool     `json:"holds_active"`
 	BurstReady    bool     `json:"burst_ready"`
+	QuotaDecision string   `json:"quota_decision,omitempty"`
+	QuotaReason   string   `json:"quota_reason,omitempty"`
 	Reason        string   `json:"reason"`
 }
 
+type PlacementQuotaDecision struct {
+	Pool         string `json:"pool"`
+	AccountFP    string `json:"account_fp,omitempty"`
+	Decision     string `json:"decision"`
+	Reason       string `json:"reason"`
+	PolicyStatus string `json:"policy_status"`
+}
+
 type PlacementResult struct {
-	Decision   string               `json:"decision"`
-	Candidates []PlacementCandidate `json:"candidates"`
-	Source     string               `json:"source"`
-	Asof       time.Time            `json:"asof"`
-	Reason     string               `json:"reason,omitempty"`
+	Decision   string                  `json:"decision"`
+	Candidates []PlacementCandidate    `json:"candidates"`
+	Source     string                  `json:"source"`
+	Asof       time.Time               `json:"asof"`
+	Reason     string                  `json:"reason,omitempty"`
+	Quota      *PlacementQuotaDecision `json:"quota,omitempty"`
 }
 
 // MarshalJSON keeps the internal unavailable sentinel useful to callers while
 // presenting the API contract's null decision to external clients.
 func (r PlacementResult) MarshalJSON() ([]byte, error) {
 	type wirePlacementResult struct {
-		Decision   *string              `json:"decision"`
-		Candidates []PlacementCandidate `json:"candidates"`
-		Source     string               `json:"source"`
-		Asof       time.Time            `json:"asof"`
-		Reason     string               `json:"reason,omitempty"`
+		Decision   *string                 `json:"decision"`
+		Candidates []PlacementCandidate    `json:"candidates"`
+		Source     string                  `json:"source"`
+		Asof       time.Time               `json:"asof"`
+		Reason     string                  `json:"reason,omitempty"`
+		Quota      *PlacementQuotaDecision `json:"quota,omitempty"`
 	}
 	var decision *string
 	if r.Decision != "unavailable" {
 		decision = &r.Decision
 	}
-	return json.Marshal(wirePlacementResult{Decision: decision, Candidates: r.Candidates, Source: r.Source, Asof: r.Asof, Reason: r.Reason})
+	return json.Marshal(wirePlacementResult{Decision: decision, Candidates: r.Candidates, Source: r.Source, Asof: r.Asof, Reason: r.Reason, Quota: r.Quota})
 }
 
 func (r *PlacementResult) UnmarshalJSON(data []byte) error {
 	type wirePlacementResult struct {
-		Decision   *string              `json:"decision"`
-		Candidates []PlacementCandidate `json:"candidates"`
-		Source     string               `json:"source"`
-		Asof       time.Time            `json:"asof"`
-		Reason     string               `json:"reason"`
+		Decision   *string                 `json:"decision"`
+		Candidates []PlacementCandidate    `json:"candidates"`
+		Source     string                  `json:"source"`
+		Asof       time.Time               `json:"asof"`
+		Reason     string                  `json:"reason"`
+		Quota      *PlacementQuotaDecision `json:"quota"`
 	}
 	var wire wirePlacementResult
-	if err := json.Unmarshal(data, &wire); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&wire); err != nil {
 		return err
 	}
-	r.Candidates, r.Source, r.Asof, r.Reason = wire.Candidates, wire.Source, wire.Asof, wire.Reason
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return errors.New("placement response is invalid")
+	}
+	r.Candidates, r.Source, r.Asof, r.Reason, r.Quota = wire.Candidates, wire.Source, wire.Asof, wire.Reason, wire.Quota
 	if wire.Decision == nil {
 		r.Decision = "unavailable"
 	} else {
@@ -178,15 +216,42 @@ type placementMetrics struct {
 func (h *HubServer) reloadPlacementPolicyLocked() {
 	if h.placementPolicyPath == "" {
 		h.placementPolicy = DefaultPlacementPolicy()
+		h.placementPolicyLoaded = true
+		h.placementPolicyStatus = "default"
 		return
 	}
-	info, err := os.Stat(h.placementPolicyPath)
-	if err != nil || !info.Mode().IsRegular() {
+	info, err := os.Lstat(h.placementPolicyPath)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		h.setPlacementPolicyFailureLocked("unreadable")
+		return
+	}
+	if info.ModTime().Equal(h.placementPolicyObservedModTime) {
 		return
 	}
 	policy, modTime, err := LoadPlacementPolicy(h.placementPolicyPath)
-	if err == nil {
-		h.placementPolicy, h.placementPolicyModTime = policy, modTime
+	if err != nil {
+		h.placementPolicyObservedModTime = info.ModTime()
+		h.setPlacementPolicyFailureLocked("invalid")
+		return
+	}
+	h.placementPolicy, h.placementPolicyModTime = policy, modTime
+	h.placementPolicyObservedModTime = modTime
+	h.placementPolicyLoaded = true
+	h.placementPolicyStatus = "current"
+	h.placementPolicyLastFailure = ""
+	h.placementCache = placementCache{}
+}
+
+func (h *HubServer) setPlacementPolicyFailureLocked(failure string) {
+	status := "invalid"
+	if h.placementPolicyLoaded {
+		status = "stale"
+	}
+	changed := h.placementPolicyStatus != status || h.placementPolicyLastFailure != failure
+	h.placementPolicyStatus, h.placementPolicyLastFailure = status, failure
+	if changed {
+		h.placementCache = placementCache{}
+		h.logger.Error("placement policy reload failed", "policy_status", status, "failure", failure)
 	}
 }
 
@@ -200,26 +265,37 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid placement class", http.StatusBadRequest)
 		return
 	}
-	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"))
+	pool, accountFP := r.URL.Query().Get("pool"), r.URL.Query().Get("account_fp")
+	if (pool == "" && accountFP != "") || (pool != "" && !hubQuotaPoolPattern.MatchString(pool)) || (accountFP != "" && !hubQuotaAccountFPPattern.MatchString(accountFP)) {
+		http.Error(w, "invalid quota selector", http.StatusBadRequest)
+		return
+	}
+	result := h.placementWithQuota(r.Context(), class, r.URL.Query().Get("cwd"), pool, accountFP)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(result)
 }
 
 func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementResult {
+	return h.placementWithQuota(ctx, class, cwd, "", "")
+}
+
+func (h *HubServer) placementWithQuota(ctx context.Context, class, cwd, pool, accountFP string) PlacementResult {
 	now := h.now().UTC()
-	key := class + "\x00" + cwd
+	key := class + "\x00" + cwd + "\x00" + pool + "\x00" + accountFP
 	h.mu.Lock()
+	h.reloadPlacementPolicyLocked()
 	if h.placementCache.key == key && now.Sub(h.placementCache.at) < 30*time.Second {
 		cached := h.placementCache.result
 		cached.Candidates = append([]PlacementCandidate(nil), cached.Candidates...)
+		cached.Quota = clonePlacementQuotaDecision(cached.Quota)
 		h.mu.Unlock()
 		return cached
 	}
-	h.reloadPlacementPolicyLocked()
 	policy := h.placementPolicy
 	if !policy.valid() {
 		policy = DefaultPlacementPolicy()
 	}
+	quota := evaluatePlacementQuota(policy, h.placementPolicyStatus, h.placementPolicyLoaded, pool, accountFP, now)
 	h.mu.Unlock()
 
 	metrics, err := h.fetchPlacementMetrics(ctx)
@@ -228,7 +304,7 @@ func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementR
 		source = "hub-only"
 		metrics = placementMetrics{}
 	}
-	result := h.makePlacement(policy, metrics, source, now)
+	result := h.makePlacementWithQuota(policy, metrics, source, now, quota)
 	h.mu.Lock()
 	h.placementCache = placementCache{key: key, at: now, result: result}
 	h.mu.Unlock()
@@ -241,6 +317,49 @@ func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementR
 		}(result.Decision)
 	}
 	return result
+}
+
+func clonePlacementQuotaDecision(decision *PlacementQuotaDecision) *PlacementQuotaDecision {
+	if decision == nil {
+		return nil
+	}
+	copy := *decision
+	return &copy
+}
+
+func evaluatePlacementQuota(policy PlacementPolicy, policyStatus string, policyLoaded bool, pool, accountFP string, now time.Time) *PlacementQuotaDecision {
+	if pool == "" {
+		return nil
+	}
+	decision := &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "allow", Reason: "quota_allowed", PolicyStatus: policyStatus}
+	if !policyLoaded {
+		decision.Decision, decision.Reason = "unknown", "quota_policy_invalid"
+		return decision
+	}
+	for _, rule := range policy.QuotaExclude {
+		if placementQuotaRuleMatches(rule, pool, accountFP, now) {
+			decision.Decision, decision.Reason = "deny", "quota_excluded"
+			return decision
+		}
+	}
+	for _, rule := range policy.QuotaBoost {
+		if placementQuotaRuleMatches(rule, pool, accountFP, now) {
+			decision.Decision, decision.Reason = "boost", "quota_boosted"
+			return decision
+		}
+	}
+	return decision
+}
+
+func placementQuotaRuleMatches(rule PlacementQuotaRule, pool, accountFP string, now time.Time) bool {
+	if rule.Pool != pool || (rule.AccountFP != "" && rule.AccountFP != accountFP) {
+		return false
+	}
+	if rule.Until == "" {
+		return true
+	}
+	until, err := time.Parse(time.RFC3339, rule.Until)
+	return err == nil && now.Before(until)
 }
 
 func placementDecisionScore(result PlacementResult) float64 {
@@ -269,6 +388,10 @@ func placementConnected(result PlacementResult, machine string) bool {
 }
 
 func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetrics, source string, now time.Time) PlacementResult {
+	return h.makePlacementWithQuota(policy, metrics, source, now, nil)
+}
+
+func (h *HubServer) makePlacementWithQuota(policy PlacementPolicy, metrics placementMetrics, source string, now time.Time, quota *PlacementQuotaDecision) PlacementResult {
 	machines := append([]string{policy.LocalMachine}, policy.SpillTargets...)
 	candidates := make([]PlacementCandidate, 0, len(machines))
 	h.mu.Lock()
@@ -309,6 +432,13 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		if burstReady {
 			reasons = append(reasons, "burst_ready")
 		}
+		quotaDecision, quotaReason := "", ""
+		if quota != nil {
+			quotaDecision, quotaReason = quota.Decision, quota.Reason
+			if quota.Decision == "deny" || quota.Decision == "unknown" || quota.Decision == "boost" {
+				reasons = append(reasons, quota.Reason)
+			}
+		}
 		memoryKnown := memory != nil && memory.FreePct != nil && memory.SwapUsedMB != nil
 		memoryPressure := memory != nil &&
 			(memory.FreePct != nil && *memory.FreePct < policy.memoryFreePctMin() ||
@@ -340,11 +470,19 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		if burstReady {
 			score += 5
 		}
+		if quota != nil {
+			switch quota.Decision {
+			case "boost":
+				score += 10
+			case "deny", "unknown":
+				score -= 10000
+			}
+		}
 		var freePct, swapUsedMB *float64
 		if memory != nil {
 			freePct, swapUsedMB = cloneMemoryFloat(memory.FreePct), cloneMemoryFloat(memory.SwapUsedMB)
 		}
-		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ",")})
+		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, QuotaDecision: quotaDecision, QuotaReason: quotaReason, Reason: strings.Join(reasons, ",")})
 	}
 	h.mu.Unlock()
 	decision := policy.LocalMachine
@@ -372,15 +510,24 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 	if decision == policy.LocalMachine && source == "prometheus" && !candidates[0].MetricsKnown {
 		decision = "unavailable"
 	}
+	if quota != nil && (quota.Decision == "deny" || quota.Decision == "unknown") {
+		decision = "unavailable"
+	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
 	reason := ""
 	if decision == "unavailable" {
 		reason = "unavailable"
+		if quota != nil && (quota.Decision == "deny" || quota.Decision == "unknown") {
+			reason = quota.Reason
+		}
 	}
-	return PlacementResult{Decision: decision, Candidates: candidates, Source: source, Asof: now, Reason: reason}
+	return PlacementResult{Decision: decision, Candidates: candidates, Source: source, Asof: now, Reason: reason, Quota: clonePlacementQuotaDecision(quota)}
 }
 
 func placementUsable(candidate PlacementCandidate, policy PlacementPolicy, source string) bool {
+	if candidate.QuotaDecision == "deny" || candidate.QuotaDecision == "unknown" {
+		return false
+	}
 	if !candidate.Connected || strings.Contains(candidate.Reason, "not_accepting") || candidate.ActiveJobs >= policy.MaxActiveJobs {
 		return false
 	}

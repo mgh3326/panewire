@@ -132,9 +132,13 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	}
 	var alertNodes map[string]struct{}
 	alertNodesSet := false
+	placementPolicySet := false
 	flags.Visit(func(flag *flag.Flag) {
 		if flag.Name == "alert-nodes" {
 			alertNodesSet = true
+		}
+		if flag.Name == "placement-policy" {
+			placementPolicySet = true
 		}
 	})
 	if alertNodesSet {
@@ -157,7 +161,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 		}
 	}
 	placementPath := *placementPolicyPath
-	if _, err := os.Stat(placementPath); os.IsNotExist(err) {
+	if _, err := os.Stat(placementPath); !placementPolicySet && os.IsNotExist(err) {
 		placementPath = ""
 	}
 	routePath := *lanesPath

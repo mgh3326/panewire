@@ -1,0 +1,13 @@
+{
+  "status": "alive",
+  "checks": {"service": "ok"},
+  "quota": {
+    "status": "ok",
+    "collected_at": "2026-09-09T05:58:50Z",
+    "pools": [
+      {"pool": "claude", "account_fp": "a1b2c3d4", "window": "5h", "used_pct": 24.0, "reset_at": "2026-09-09T10:29:59Z", "source": "oauth-usage-api"},
+      {"pool": "claude", "account_fp": "a1b2c3d4", "window": "7d", "used_pct": 65.0, "reset_at": "2026-09-13T19:59:59Z", "source": "oauth-usage-api"},
+      {"pool": "kiro", "account_fp": "a1b2c3d4", "window": "7d", "used_pct": null, "reset_at": null, "source": "unavailable"}
+    ]
+  }
+}
