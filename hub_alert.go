@@ -10,6 +10,7 @@ import (
 const (
 	defaultHubGracePeriod       = 2 * time.Minute
 	defaultHubAlertObservations = 2
+	defaultHubPresenceReminder  = 30 * time.Minute
 	hubAlertReasonDisconnected  = "disconnected"
 	hubAlertReasonStale         = "stale"
 	hubAlertReasonCheckFailed   = "check_failed"
@@ -48,22 +49,28 @@ type HubNotifier interface {
 }
 
 type hubAlertState struct {
-	badSince          time.Time
-	badRuns           int
-	clearRuns         int
-	active            bool
-	reason            string
-	check             string
-	incidentDelivered bool
-	incidentPending   bool
-	recoveryNeeded    bool
-	recoveryPending   bool
+	badSince             time.Time
+	badRuns              int
+	clearRuns            int
+	active               bool
+	reason               string
+	check                string
+	incidentDelivered    bool
+	incidentPending      bool
+	reminderPending      bool
+	remindersStopped     bool
+	incidentGeneration   uint64
+	lastIncidentDelivery time.Time
+	recoveryNeeded       bool
+	recoveryPending      bool
 }
 
 type hubNotification struct {
-	key      string
-	incident bool
-	alert    HubAlert
+	key        string
+	incident   bool
+	reminder   bool
+	generation uint64
+	alert      HubAlert
 }
 
 func (h *HubServer) observeNodeAlertLocked(now time.Time, record *hubNodeRecord) ([]hubNotification, []hubFailoverEvent) {
@@ -162,7 +169,13 @@ func (h *HubServer) observeHubAlertLocked(now time.Time, key string, problem boo
 				state.badSince = time.Time{}
 				state.reason = reason
 				state.check = check
+				state.incidentGeneration++
 				state.incidentDelivered = false
+				state.incidentPending = false
+				state.reminderPending = false
+				state.remindersStopped = false
+				state.lastIncidentDelivery = time.Time{}
+				state.recoveryPending = false
 			}
 		}
 	} else {
@@ -170,6 +183,8 @@ func (h *HubServer) observeHubAlertLocked(now time.Time, key string, problem boo
 		state.badRuns = 0
 		if state.active {
 			state.clearRuns++
+			state.remindersStopped = true
+			state.reminderPending = false
 			if state.clearRuns >= h.alertObservations {
 				state.active = false
 				state.clearRuns = 0
@@ -179,24 +194,41 @@ func (h *HubServer) observeHubAlertLocked(now time.Time, key string, problem boo
 			}
 		}
 	}
-	return h.pendingHubNotificationLocked(key, state)
+	return h.pendingHubNotificationAtLocked(now, key, state)
 }
 
 func (h *HubServer) pendingHubNotificationLocked(key string, state *hubAlertState) []hubNotification {
+	var now time.Time
+	if h.now != nil {
+		now = h.now().UTC()
+	}
+	return h.pendingHubNotificationAtLocked(now, key, state)
+}
+
+func (h *HubServer) pendingHubNotificationAtLocked(now time.Time, key string, state *hubAlertState) []hubNotification {
 	if h.notifier == nil {
 		return nil
 	}
 	if state.active && !state.incidentDelivered && !state.incidentPending {
 		state.incidentPending = true
 		return []hubNotification{{
-			key: key, incident: true,
+			key: key, incident: true, generation: state.incidentGeneration,
+			alert: HubAlert{MachineID: hubAlertMachineID(key), Reason: state.reason, Check: state.check},
+		}}
+	}
+	if strings.HasPrefix(key, "node:") && state.active && state.incidentDelivered && !state.remindersStopped && !state.reminderPending &&
+		!state.lastIncidentDelivery.IsZero() &&
+		!now.Before(state.lastIncidentDelivery.Add(defaultHubPresenceReminder)) {
+		state.reminderPending = true
+		return []hubNotification{{
+			key: key, incident: true, reminder: true, generation: state.incidentGeneration,
 			alert: HubAlert{MachineID: hubAlertMachineID(key), Reason: state.reason, Check: state.check},
 		}}
 	}
 	if !state.active && state.recoveryNeeded && !state.recoveryPending {
 		state.recoveryPending = true
 		return []hubNotification{{
-			key: key, incident: false,
+			key: key, incident: false, generation: state.incidentGeneration,
 			alert: HubAlert{Recovery: true, MachineID: hubAlertMachineID(key), Reason: state.reason, Check: state.check},
 		}}
 	}
@@ -220,25 +252,64 @@ func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 		if notifier == nil {
 			continue
 		}
+		h.mu.Lock()
+		state := h.alerts[notification.key]
+		shouldSend := state != nil && state.incidentGeneration == notification.generation
+		if shouldSend {
+			if notification.incident {
+				if notification.reminder {
+					shouldSend = state.active && state.reminderPending && !state.remindersStopped
+				} else {
+					shouldSend = state.active && state.incidentPending
+				}
+			} else {
+				shouldSend = !state.active && state.recoveryNeeded && state.recoveryPending
+			}
+		}
+		if !shouldSend && state != nil && state.incidentGeneration == notification.generation {
+			switch {
+			case notification.reminder:
+				state.reminderPending = false
+			case notification.incident:
+				state.incidentPending = false
+			default:
+				state.recoveryPending = false
+			}
+		}
+		h.mu.Unlock()
+		if !shouldSend {
+			continue
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		err := notifier.Send(ctx, notification.alert)
 		cancel()
 		if err != nil {
 			h.logger.Warn("hub Telegram notification failed")
 		}
+		var deliveredAt time.Time
+		if err == nil {
+			deliveredAt = h.now().UTC()
+		}
 		h.mu.Lock()
-		state := h.alerts[notification.key]
-		if state != nil {
+		state = h.alerts[notification.key]
+		if state != nil && state.incidentGeneration == notification.generation {
 			if notification.incident {
-				state.incidentPending = false
-				if err == nil && state.active {
+				if notification.reminder {
+					state.reminderPending = false
+				} else {
+					state.incidentPending = false
+				}
+				if err == nil && state.active && (!notification.reminder || !state.remindersStopped) {
 					state.incidentDelivered = true
+					state.lastIncidentDelivery = deliveredAt
 				}
 			} else {
 				state.recoveryPending = false
 				if err == nil && !state.active && state.recoveryNeeded {
 					state.recoveryNeeded = false
 					state.incidentDelivered = false
+					state.lastIncidentDelivery = time.Time{}
+					state.remindersStopped = false
 					state.reason = ""
 					state.check = ""
 				}
@@ -268,5 +339,9 @@ func formatHubAlert(alert HubAlert) string {
 	if check != hubAlertNoCheck && !hubCheckNamePattern.MatchString(check) {
 		check = "unknown"
 	}
-	return "machine: " + machineID + "\nreason: " + reason + "\ncheck: " + check
+	message := "machine: " + machineID + "\nreason: " + reason + "\ncheck: " + check
+	if !alert.Recovery && (reason == hubAlertReasonDisconnected || reason == hubAlertReasonStale) {
+		message += "\nREBOOT/UNLOCK NEEDED — fleet on " + machineID + " is dead until a human acts"
+	}
+	return message
 }
