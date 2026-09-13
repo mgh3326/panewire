@@ -82,11 +82,19 @@ func TestR7PresenceGraceMustElapseBeforeIncidentAndRecovers(t *testing.T) {
 	if got := len(capture.Messages()); got != 2 {
 		t.Fatalf("recovery fired before debounce: %v", capture.Messages())
 	}
+	for i, message := range capture.Messages() {
+		if message.Text != incidentText {
+			t.Fatalf("message[%d] after first connected observation=%q, want incident (recovery debounce must still hold)", i, message.Text)
+		}
+	}
 	clock = clock.Add(time.Second)
 	hub.Sweep()
 	r7Eventually(t, "presence recovery", func() bool { return len(capture.Messages()) == 3 })
 	if got := capture.Messages()[2].Text; got != "machine: node-a\nreason: recovered_disconnected\ncheck: none" {
 		t.Fatalf("recovery text=%q", got)
+	}
+	if strings.Contains(capture.Messages()[2].Text, "REBOOT/UNLOCK NEEDED") {
+		t.Fatalf("recovery contained presence-down line: %q", capture.Messages()[2].Text)
 	}
 	clock = clock.Add(30*time.Minute + time.Minute)
 	hub.Sweep()
@@ -181,6 +189,107 @@ func (notifier *task198Notifier) Accepted() int {
 	notifier.mu.Lock()
 	defer notifier.mu.Unlock()
 	return len(notifier.alerts)
+}
+
+func (notifier *task198Notifier) Alerts() []HubAlert {
+	notifier.mu.Lock()
+	defer notifier.mu.Unlock()
+	return append([]HubAlert(nil), notifier.alerts...)
+}
+
+func TestTask198StalePresenceReminderThenRecovers(t *testing.T) {
+	clock := time.Date(2026, 8, 31, 7, 0, 0, 0, time.UTC)
+	notifier := &task198Notifier{}
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens: map[string]string{"operator": r6OperatorToken, "node-a": r6NodeAToken},
+		Now:    func() time.Time { return clock }, GracePeriod: defaultHubGracePeriod, Notifier: notifier,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.mu.Lock()
+	hub.nodes["node-a"] = &hubNodeRecord{machineID: "node-a", state: "stale", stateSince: clock}
+	hub.mu.Unlock()
+
+	clock = clock.Add(defaultHubGracePeriod)
+	hub.Sweep() // first post-grace observation
+	if got := notifier.Accepted(); got != 0 {
+		t.Fatalf("stale incident before debounce: %d", got)
+	}
+	clock = clock.Add(time.Second)
+	hub.Sweep() // second post-grace observation
+	if got := notifier.Accepted(); got != 1 {
+		t.Fatalf("stale incident count=%d, want 1", got)
+	}
+	const incidentText = "machine: node-a\nreason: stale\ncheck: none\nREBOOT/UNLOCK NEEDED — fleet on node-a is dead until a human acts"
+	if got := formatHubAlert(notifier.Alerts()[0]); got != incidentText {
+		t.Fatalf("stale incident text=%q", got)
+	}
+
+	clock = clock.Add(30*time.Minute - time.Second)
+	hub.Sweep()
+	if got := notifier.Accepted(); got != 1 {
+		t.Fatalf("stale reminder fired before boundary: %d", got)
+	}
+	clock = clock.Add(time.Second)
+	hub.Sweep()
+	if got := notifier.Accepted(); got != 2 {
+		t.Fatalf("stale reminder count at boundary=%d, want 2", got)
+	}
+	if got := formatHubAlert(notifier.Alerts()[1]); got != incidentText {
+		t.Fatalf("stale reminder text=%q", got)
+	}
+
+	hub.mu.Lock()
+	hub.nodes["node-a"] = &hubNodeRecord{machineID: "node-a", state: "connected", stateSince: clock}
+	hub.mu.Unlock()
+	clock = clock.Add(time.Second)
+	hub.Sweep() // first connected observation must not recover
+	if got := notifier.Accepted(); got != 2 {
+		t.Fatalf("recovery fired before debounce: count=%d alerts=%v", got, notifier.Alerts())
+	}
+	hub.mu.Lock()
+	state := *hub.alerts["node:node-a"]
+	hub.mu.Unlock()
+	if !state.active || state.clearRuns != 1 || !state.remindersStopped || state.recoveryNeeded {
+		t.Fatalf("first connected observation skipped recovery debounce: %+v", state)
+	}
+	for i, alert := range notifier.Alerts() {
+		if alert.Recovery {
+			t.Fatalf("recovery notification before second observation: i=%d alert=%+v", i, alert)
+		}
+	}
+
+	clock = clock.Add(time.Second)
+	hub.Sweep() // second connected observation
+	if got := notifier.Accepted(); got != 3 {
+		t.Fatalf("stale recovery count=%d, want 3", got)
+	}
+	recovery := notifier.Alerts()[2]
+	if !recovery.Recovery {
+		t.Fatalf("third notification was not recovery: %+v", recovery)
+	}
+	const recoveryText = "machine: node-a\nreason: recovered_stale\ncheck: none"
+	if got := formatHubAlert(recovery); got != recoveryText {
+		t.Fatalf("stale recovery text=%q", got)
+	}
+
+	clock = clock.Add(30*time.Minute + time.Minute)
+	hub.Sweep()
+	if got := notifier.Accepted(); got != 3 {
+		t.Fatalf("recovered stale incident produced a reminder: %d", got)
+	}
+	hub.mu.Lock()
+	var failoverPhases []string
+	for _, event := range hub.uiEvents {
+		if event.Kind == "failover" && event.MachineID == "node-a" {
+			failoverPhases = append(failoverPhases, event.Phase)
+		}
+	}
+	hub.mu.Unlock()
+	if got := strings.Join(failoverPhases, ","); got != "down,up" {
+		t.Fatalf("stale reminder changed failover events: %q", got)
+	}
 }
 
 func TestTask198PresenceDownLineIsExcludedFromRecoveryAndChecks(t *testing.T) {
