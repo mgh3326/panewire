@@ -96,11 +96,11 @@ func TestT12HostLoadCollectorsUseFixturesAndRetainPartialCPU(t *testing.T) {
 	macPath := filepath.Join("testdata", "memory", "macos-sysctl.txt")
 	macRun := func(_ context.Context, argv ...string) ([]byte, error) {
 		switch strings.Join(argv, " ") {
-		case "sysctl -n vm.loadavg":
+		case "/usr/sbin/sysctl -n vm.loadavg":
 			return []byte(t12FixtureBlock(t, macPath, "### command: sysctl -n vm.loadavg")), nil
-		case "sysctl -n vm.swapusage":
+		case "/usr/sbin/sysctl -n vm.swapusage":
 			return []byte(t12FixtureBlock(t, macPath, "### command: sysctl -n vm.swapusage")), nil
-		case "sysctl -n hw.ncpu":
+		case "/usr/sbin/sysctl -n hw.ncpu":
 			return []byte(t12FixtureBlock(t, macPath, "### command: sysctl -n hw.ncpu")), nil
 		default:
 			return nil, errors.New("unexpected fixture command")
@@ -111,7 +111,7 @@ func TestT12HostLoadCollectorsUseFixturesAndRetainPartialCPU(t *testing.T) {
 		t.Fatalf("Darwin fixture load=%+v err=%v", mac, err)
 	}
 	macPartial, err := collectDarwinHostLoad(t.Context(), func(ctx context.Context, argv ...string) ([]byte, error) {
-		if strings.Join(argv, " ") == "sysctl -n hw.ncpu" {
+		if len(argv) == 3 && argv[0] == "/usr/sbin/sysctl" && argv[1] == "-n" && argv[2] == "hw.ncpu" {
 			return nil, errors.New("fixture ncpu unavailable")
 		}
 		return macRun(ctx, argv...)

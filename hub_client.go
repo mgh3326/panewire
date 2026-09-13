@@ -812,6 +812,8 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	}
 	if load, err := collectLoad(ctx); err == nil {
 		heartbeat.HostLoad = &load
+	} else {
+		heartbeat.LoadError = err.Error()
 	}
 	collectMemory := client.hostMemoryCollector
 	if collectMemory == nil {
