@@ -85,10 +85,17 @@ status output.
 `--hub-tg-env` is optional. When set, it is an explicit non-symlink regular
 mode-`0600` file with `TG_BOT_TOKEN` and `TG_CHAT_ID`. The hub sends one
 incident after a node has stayed `disconnected` or `stale` for `--hub-grace`
-(two minutes by default), then one recovery after two connected observations.
-Each failed local check likewise needs two consecutive heartbeat observations;
-its recovery also needs two healthy observations. Telegram text contains only
-the machine ID, reason, and check name.
+(two minutes by default). While that presence incident remains active, it
+redelivers the down notification every 30 minutes, measured from the last
+successful delivery; there is no reminder before the boundary. Reminders stop
+as soon as the node is observed connected, and the hub sends one recovery after
+two connected observations. A later distinct down incident starts a new
+reminder interval. Each failed local check likewise needs two consecutive
+heartbeat observations; its recovery also needs two healthy observations and
+does not use presence-down reminders. Telegram presence-down text contains the
+machine ID, reason, check name, and the operator line
+`REBOOT/UNLOCK NEEDED — fleet on <machine> is dead until a human acts`; recovery
+and check messages retain their existing fields without that line.
 
 ## Protocol
 
