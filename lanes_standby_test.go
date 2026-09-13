@@ -185,6 +185,93 @@ func TestLanesStandbyAC11UnknownPUTFieldIsRejected(t *testing.T) {
 	}
 }
 
+func TestLanesStandbyR2AC1UnknownStandbyMachineRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	original := []byte(`{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"}}}`)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	writer := lanesWriteRequest(t, lanesWriteHub(t, path), http.MethodPut, "/v1/lanes/lane-a", "fixture-operator-token", `{"machine":"machine-a","pane":"w1:p1","standby":{"machine":"rpi","pane":"w2:p2"}}`)
+	if writer.Code < http.StatusBadRequest || writer.Code >= http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("unknown standby machine changed lanes file: got=%s want=%s", got, original)
+	}
+}
+
+func TestLanesStandbyR2AC2OperatorStandbyMachineRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	original := []byte(`{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"}}}`)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	writer := lanesWriteRequest(t, lanesWriteHub(t, path), http.MethodPut, "/v1/lanes/lane-a", "fixture-operator-token", `{"machine":"machine-a","pane":"w1:p1","standby":{"machine":"operator","pane":"w2:p2"}}`)
+	if writer.Code < http.StatusBadRequest || writer.Code >= http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("operator standby machine changed lanes file: got=%s want=%s", got, original)
+	}
+}
+
+func TestLanesStandbyR2AC3MalformedStandbyPaneRejected(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	original := []byte(`{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"}}}`)
+	if err := os.WriteFile(path, original, 0600); err != nil {
+		t.Fatal(err)
+	}
+	writer := lanesWriteRequest(t, lanesWriteHub(t, path), http.MethodPut, "/v1/lanes/lane-a", "fixture-operator-token", `{"machine":"machine-a","pane":"w1:p1","standby":{"machine":"machine-b","pane":"mac-director-pane"}}`)
+	if writer.Code < http.StatusBadRequest || writer.Code >= http.StatusInternalServerError {
+		t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("malformed standby pane changed lanes file: got=%s want=%s", got, original)
+	}
+}
+
+func TestLanesStandbyR2AC4AndAC5ValidStandbyStoresAndPromotes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	lanesProjectionWrite(t, path, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"}}}`)
+	hub := lanesWriteHub(t, path)
+	store := lanesWriteRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", "fixture-operator-token", `{"machine":"machine-a","pane":"w1:p1","standby":{"machine":"machine-b","pane":"w2:p2"}}`)
+	if store.Code != http.StatusOK {
+		t.Fatalf("store status=%d body=%s", store.Code, store.Body.String())
+	}
+	if got := standbyGETLane(t, hub, "lane-a")["standby"]; !reflect.DeepEqual(got, map[string]any{"machine": "machine-b", "pane": "w2:p2"}) {
+		t.Fatalf("GET standby=%v", got)
+	}
+	promote := lanesWriteRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", "fixture-operator-token", `{"machine":"machine-b","pane":"w2:p2"}`)
+	if promote.Code != http.StatusOK {
+		t.Fatalf("promote status=%d body=%s", promote.Code, promote.Body.String())
+	}
+	if got := standbyGETLane(t, hub, "lane-a"); got["machine"] != "machine-b" || got["pane"] != "w2:p2" {
+		t.Fatalf("after promote GET=%v", got)
+	}
+}
+
+func TestLanesStandbyR2AC6LoaderStaysLooseOnStandby(t *testing.T) {
+	routes, err := parseReportRelayRoutes([]byte(`{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1","standby":{"machine":"rpi","pane":"mac-director-pane"}}}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, want := routes["lane-a"].Standby, standby("rpi", "mac-director-pane"); !reflect.DeepEqual(got, want) {
+		t.Fatalf("lane dropped by loader for a promote-ineligible standby: standby=%+v want=%+v", got, want)
+	}
+}
+
 func TestLanesStandbyAC12FlipRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lanes.json")
 	lanesProjectionWrite(t, path, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1","standby":{"machine":"machine-b","pane":"w2:p2"}}}}`)

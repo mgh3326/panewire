@@ -272,8 +272,22 @@ func validateLaneWriteRequest(h *HubServer, lane string, body hubLaneWriteReques
 		// Keep that compatibility: machine and pane are normalized away below.
 		return nil
 	}
-	if body.standbyPresent && body.Standby != nil && !validReportRelayStandby(*body.Standby) {
-		return errLaneRequestInvalid
+	if body.standbyPresent && body.Standby != nil {
+		if !validReportRelayStandby(*body.Standby) {
+			return errLaneRequestInvalid
+		}
+		// The write path must not persist a standby it would later refuse to
+		// promote: require the same machine/pane checks the primary route is
+		// held to below, so a failover PUT of standby into machine/pane always
+		// succeeds. The hot loader (parseReportRelayRoutes) deliberately keeps
+		// the looser validReportRelayStandby-only check above so an operator's
+		// hand-edited lanes file is never silently dropped on read.
+		if body.Standby.Machine == hubOperatorMachineID || !h.knownLaneMachine(body.Standby.Machine, routes) {
+			return errLaneRequestInvalid
+		}
+		if !validLanePane(body.Standby.Pane) {
+			return errLaneRequestInvalid
+		}
 	}
 	if body.Machine == hubOperatorMachineID || !machineIDPattern.MatchString(body.Machine) || !h.knownLaneMachine(body.Machine, routes) {
 		return errLaneRequestInvalid
