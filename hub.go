@@ -736,11 +736,12 @@ func (h *HubServer) handleNodes(writer http.ResponseWriter, request *http.Reques
 // hubLaneProjection is the intentionally narrow operator view of a lanes.json
 // entry. It must not expose the loader's internal representation directly.
 type hubLaneProjection struct {
-	Lane    string `json:"lane"`
-	Machine string `json:"machine"`
-	Pane    string `json:"pane"`
-	Parent  string `json:"parent"`
-	Sink    bool   `json:"sink"`
+	Lane    string              `json:"lane"`
+	Machine string              `json:"machine"`
+	Pane    string              `json:"pane"`
+	Parent  string              `json:"parent"`
+	Sink    bool                `json:"sink"`
+	Standby *reportRelayStandby `json:"standby,omitempty"`
 }
 
 func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Request) {
@@ -760,7 +761,7 @@ func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Reques
 	lanes := make([]hubLaneProjection, 0, len(routes))
 	for lane, route := range routes {
 		lanes = append(lanes, hubLaneProjection{
-			Lane: lane, Machine: route.Machine, Pane: route.Pane, Parent: route.Parent, Sink: route.Sink,
+			Lane: lane, Machine: route.Machine, Pane: route.Pane, Parent: route.Parent, Sink: route.Sink, Standby: route.Standby,
 		})
 	}
 	sort.Slice(lanes, func(i, j int) bool {
