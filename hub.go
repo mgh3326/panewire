@@ -1034,6 +1034,7 @@ type hubHeartbeatPayload struct {
 	Status      string                    `json:"status"`
 	Checks      map[string]HubCheckStatus `json:"checks"`
 	HostLoad    *HubHostLoad              `json:"host_load,omitempty"`
+	LoadError   string                    `json:"load_error,omitempty"`
 	HostMemory  *HubHostMemory            `json:"host_memory,omitempty"`
 	Quota       *HubQuotaSnapshot         `json:"quota,omitempty"`
 	ActiveJobs  []HubActiveJob            `json:"active_jobs,omitempty"`
@@ -1070,7 +1071,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1119,6 +1120,11 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.HostLoad = &load
+	}
+	if rawLoadError, exists := fields["load_error"]; exists {
+		if json.Unmarshal(rawLoadError, &heartbeat.LoadError) != nil || !validHubLoadError(heartbeat.LoadError) {
+			return hubHeartbeatPayload{}, false
+		}
 	}
 	if rawMemory, exists := fields["host_memory"]; exists {
 		var memoryFields map[string]json.RawMessage
@@ -1186,6 +1192,10 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		}
 	}
 	return heartbeat, true
+}
+
+func validHubLoadError(value string) bool {
+	return len(value) > 0 && len(value) <= 256 && !strings.ContainsAny(value, "\r\n")
 }
 
 type hubOutbound struct {

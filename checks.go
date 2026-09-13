@@ -508,11 +508,11 @@ func runHubMeasurement(ctx context.Context, argv ...string) ([]byte, error) {
 }
 
 func collectDarwinHostLoad(ctx context.Context, run func(context.Context, ...string) ([]byte, error)) (HubHostLoad, error) {
-	loads, err := run(ctx, "sysctl", "-n", "vm.loadavg")
+	loads, err := runDarwinSysctl(ctx, run, "-n", "vm.loadavg")
 	if err != nil {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
-	swap, err := run(ctx, "sysctl", "-n", "vm.swapusage")
+	swap, err := runDarwinSysctl(ctx, run, "-n", "vm.swapusage")
 	if err != nil {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
@@ -522,12 +522,25 @@ func collectDarwinHostLoad(ctx context.Context, run func(context.Context, ...str
 	}
 	// These console-only fields must never suppress the four legacy burst
 	// measurements. A failed optional command is represented by JSON null.
-	if output, err := run(ctx, "sysctl", "-n", "hw.ncpu"); err == nil {
+	if output, err := runDarwinSysctl(ctx, run, "-n", "hw.ncpu"); err == nil {
 		if value, ok := parseHubNCPU(string(output)); ok {
 			load.NCPU = &value
 		}
 	}
 	return load, nil
+}
+
+// runDarwinSysctl prefers the system path because LaunchAgent environments
+// need not include /usr/sbin in PATH. The PATH lookup remains a compatibility
+// fallback for installations where sysctl is provided elsewhere.
+func runDarwinSysctl(ctx context.Context, run func(context.Context, ...string) ([]byte, error), args ...string) ([]byte, error) {
+	argv := append([]string{"/usr/sbin/sysctl"}, args...)
+	output, err := run(ctx, argv...)
+	if err == nil {
+		return output, nil
+	}
+	argv[0] = "sysctl"
+	return run(ctx, argv...)
 }
 
 func parseDarwinHostLoad(loads, swap string) (HubHostLoad, error) {
