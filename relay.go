@@ -25,13 +25,22 @@ type reportRelayRoutes struct {
 	Routes map[string]reportRelayRoute `json:"routes"`
 	Lanes  map[string]reportRelayRoute `json:"lanes"`
 }
+
+// reportRelayStandby is the optional alternate pane kept with a lane route
+// for an external failover controller to swap into the primary destination.
+type reportRelayStandby struct {
+	Machine string `json:"machine"`
+	Pane    string `json:"pane"`
+}
+
 type reportRelayRoute struct {
-	Machine   string `json:"machine"`
-	Pane      string `json:"pane"`
-	Parent    string `json:"parent,omitempty"`
-	Sink      bool   `json:"sink,omitempty"`
-	Deliver   string `json:"deliver,omitempty"`
-	Protected bool   `json:"protected,omitempty"`
+	Machine   string              `json:"machine"`
+	Pane      string              `json:"pane"`
+	Parent    string              `json:"parent,omitempty"`
+	Sink      bool                `json:"sink,omitempty"`
+	Deliver   string              `json:"deliver,omitempty"`
+	Protected bool                `json:"protected,omitempty"`
+	Standby   *reportRelayStandby `json:"standby,omitempty"`
 }
 
 var errReportRelayRoutesInvalid = errors.New("report relay routes invalid")
@@ -83,11 +92,11 @@ func parseReportRelayRoutes(b []byte) (map[string]reportRelayRoute, error) {
 		// backwards-compatible sink spelling; explicit sink wins over supplied
 		// transport fields and is never eligible for pane injection.
 		if route.Sink || strings.TrimSpace(route.Pane) == "" {
-			route.Sink, route.Machine, route.Pane = true, "", ""
+			route.Sink, route.Machine, route.Pane, route.Standby = true, "", "", nil
 			routes.Routes[lane] = route
 			continue
 		}
-		if !machineIDPattern.MatchString(route.Machine) || len(route.Pane) > 128 || (route.Deliver != "" && !validRelayDeliver(route.Deliver)) {
+		if !machineIDPattern.MatchString(route.Machine) || len(route.Pane) > 128 || (route.Standby != nil && !validReportRelayStandby(*route.Standby)) || (route.Deliver != "" && !validRelayDeliver(route.Deliver)) {
 			delete(routes.Routes, lane)
 		}
 	}
@@ -105,6 +114,10 @@ func validReportRelayLaneName(value string) bool {
 func validRelayDeliver(value string) bool {
 	_, valid := parseRelayDeliveryPolicy(value)
 	return valid
+}
+
+func validReportRelayStandby(standby reportRelayStandby) bool {
+	return machineIDPattern.MatchString(standby.Machine) && strings.TrimSpace(standby.Pane) != "" && len(standby.Pane) <= 128
 }
 
 func relayText(completion hubJobEventPayload) string {

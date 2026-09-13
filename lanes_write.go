@@ -35,10 +35,12 @@ var (
 )
 
 type hubLaneWriteRequest struct {
-	Machine string `json:"machine"`
-	Pane    string `json:"pane"`
-	Parent  string `json:"parent"`
-	Sink    bool   `json:"sink"`
+	Machine        string              `json:"machine"`
+	Pane           string              `json:"pane"`
+	Parent         string              `json:"parent"`
+	Sink           bool                `json:"sink"`
+	Standby        *reportRelayStandby `json:"standby"`
+	standbyPresent bool
 }
 
 func (body *hubLaneWriteRequest) UnmarshalJSON(data []byte) error {
@@ -51,7 +53,7 @@ func (body *hubLaneWriteRequest) UnmarshalJSON(data []byte) error {
 	}
 	for field := range fields {
 		switch field {
-		case "machine", "pane", "parent", "sink":
+		case "machine", "pane", "parent", "sink", "standby":
 		default:
 			return fmt.Errorf("unknown lane request field %q", field)
 		}
@@ -81,6 +83,16 @@ func (body *hubLaneWriteRequest) UnmarshalJSON(data []byte) error {
 	if value, present := fields["sink"]; present {
 		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) || json.Unmarshal(value, &body.Sink) != nil {
 			return errors.New("lane request field sink must be a boolean")
+		}
+	}
+	if value, present := fields["standby"]; present {
+		body.standbyPresent = true
+		if !bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
+			var standby reportRelayStandby
+			if err := json.Unmarshal(value, &standby); err != nil {
+				return errors.New("lane request field standby must be an object")
+			}
+			body.Standby = &standby
 		}
 	}
 	return nil
@@ -187,11 +199,17 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest) (hubLaneProje
 		if err := validateLaneWriteRequest(h, lane, body, snapshot.Routes); err != nil {
 			return err
 		}
-		route := reportRelayRoute{Machine: body.Machine, Pane: body.Pane, Parent: body.Parent, Deliver: existing.Deliver, Protected: existing.Protected}
+		route := reportRelayRoute{Machine: body.Machine, Pane: body.Pane, Parent: body.Parent, Deliver: existing.Deliver, Protected: existing.Protected, Standby: existing.Standby}
+		// Failover swaps only machine/pane; preserve an omitted standby so a later
+		// reverse swap still has its alternate destination.
+		if body.standbyPresent {
+			route.Standby = body.Standby
+		}
 		if body.Sink {
 			route.Sink = true
 			route.Machine = ""
 			route.Pane = ""
+			route.Standby = nil
 		}
 		if snapshot.Routes == nil {
 			snapshot.Routes = make(map[string]reportRelayRoute)
@@ -201,7 +219,7 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest) (hubLaneProje
 			return err
 		}
 		created = !exists
-		projection = hubLaneProjection{Lane: lane, Machine: route.Machine, Pane: route.Pane, Parent: route.Parent, Sink: route.Sink}
+		projection = hubLaneProjection{Lane: lane, Machine: route.Machine, Pane: route.Pane, Parent: route.Parent, Sink: route.Sink, Standby: route.Standby}
 		return nil
 	})
 	if err != nil {
@@ -253,6 +271,23 @@ func validateLaneWriteRequest(h *HubServer, lane string, body hubLaneWriteReques
 		// The loader gives an explicit sink precedence over transport fields.
 		// Keep that compatibility: machine and pane are normalized away below.
 		return nil
+	}
+	if body.standbyPresent && body.Standby != nil {
+		if !validReportRelayStandby(*body.Standby) {
+			return errLaneRequestInvalid
+		}
+		// The write path must not persist a standby it would later refuse to
+		// promote: require the same machine/pane checks the primary route is
+		// held to below, so a failover PUT of standby into machine/pane always
+		// succeeds. The hot loader (parseReportRelayRoutes) deliberately keeps
+		// the looser validReportRelayStandby-only check above so an operator's
+		// hand-edited lanes file is never silently dropped on read.
+		if body.Standby.Machine == hubOperatorMachineID || !h.knownLaneMachine(body.Standby.Machine, routes) {
+			return errLaneRequestInvalid
+		}
+		if !validLanePane(body.Standby.Pane) {
+			return errLaneRequestInvalid
+		}
 	}
 	if body.Machine == hubOperatorMachineID || !machineIDPattern.MatchString(body.Machine) || !h.knownLaneMachine(body.Machine, routes) {
 		return errLaneRequestInvalid
