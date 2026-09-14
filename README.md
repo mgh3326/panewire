@@ -57,6 +57,12 @@ panewire daemon --herdr-socket "$HOME/.config/herdr/herdr.sock" \
 
 Install [deploy/dev.panewire.panewired.plist](deploy/dev.panewire.panewired.plist) as `~/Library/LaunchAgents/dev.panewire.panewired.plist` after replacing its user-specific paths. It uses the same `panewire` executable and restarts on exit.
 
+Release installs should pin a tag and stamp the same version the hub sees, e.g.
+`go install -ldflags "-X main.version=<tag>" github.com/mgh3326/panewire/cmd/panewire@<tag>`.
+Builds from a checkout get that value from `scripts/dist-version.sh`, which
+prints `git describe --always --dirty` and refuses anything outside the hub
+version pattern.
+
 ```sh
 panewire wait --file "$HOME/work/herdr-inbox/jobs/example/report.md" --settle 2s --timeout 10m
 panewire wait --agent rob1320-r1 --status idle --settle 2s --timeout 10m

@@ -9,9 +9,11 @@ case "$output" in
 	*) output="$(pwd)/$output" ;;
 esac
 
+version=$("$script_dir/dist-version.sh")
+
 mkdir -p "$(dirname -- "$output")"
 (
 	cd "$repo_root"
-	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -o "$output" ./cmd/panewire
+	GOOS=linux GOARCH=amd64 CGO_ENABLED=0 go build -ldflags "-X main.version=$version" -o "$output" ./cmd/panewire
 )
 file "$output"
