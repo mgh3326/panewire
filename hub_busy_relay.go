@@ -46,6 +46,17 @@ func decodeRelayCancelledPayload(raw []byte) (relayCancelledPayload, bool) {
 	return value, json.Unmarshal(raw, &value) == nil && value.OriginalEventID > 0
 }
 
+// decodeRelayDroppedPayload validates #264 D1's terminal signal: a node gave
+// up retrying a held inject and deleted its own local row. The hub mirrors
+// that by dropping the held projection in consumeRelayDropped below.
+func decodeRelayDroppedPayload(raw []byte) (relayDroppedPayload, bool) {
+	var value relayDroppedPayload
+	if json.Unmarshal(raw, &value) != nil || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !hubAgentLabelPattern.MatchString(value.Lane) || value.OriginalEventID < 1 || value.Reason == "" || len(value.Reason) > 64 {
+		return relayDroppedPayload{}, false
+	}
+	return value, true
+}
+
 func decodeRelayBatchedPayload(raw []byte) (relayBatchedPayload, bool) {
 	var value relayBatchedPayload
 	if json.Unmarshal(raw, &value) != nil || value.Pane == "" || value.Pane == relayCancelledPane || !hubAgentLabelPattern.MatchString(value.Lane) || len(value.EventIDs) < 2 {
@@ -96,6 +107,20 @@ func (h *HubServer) releaseRelayHeld(machine string, released relayReleasedPaylo
 		h.r19a.relayPending[key] = pending
 	}
 	go h.armRelayAckEvent(released.OriginalEventID, released.JobID)
+	return true
+}
+
+// consumeRelayDropped removes the held projection for a node's own explicit
+// drop (#264 D1). Unlike releaseRelayHeld/consumeRelayCancelled it never
+// races an operator action on the same row, so it only needs to guard
+// against a stale report from a machine that no longer owns the row.
+func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayload) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if held, exists := h.relayHeld[dropped.OriginalEventID]; exists && held.Machine != machine {
+		return false
+	}
+	delete(h.relayHeld, dropped.OriginalEventID)
 	return true
 }
 
