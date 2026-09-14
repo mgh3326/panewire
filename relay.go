@@ -24,6 +24,10 @@ const (
 type reportRelayRoutes struct {
 	Routes map[string]reportRelayRoute `json:"routes"`
 	Lanes  map[string]reportRelayRoute `json:"lanes"`
+	// Control stays raw here so a control block the hub cannot make sense of
+	// never costs it the lane routes beside it. Both readers decode it
+	// separately, and only the write path treats a failure as fatal.
+	Control json.RawMessage `json:"control,omitempty"`
 }
 
 // reportRelayStandby is the optional alternate pane kept with a lane route
