@@ -839,7 +839,9 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 		payload, _ := json.Marshal(heartbeat)
 		return hubClientEvent{Kind: "heartbeat", Payload: payload}
 	}
-	states, err := collectSessions(ctx)
+	lookup, cancel := context.WithTimeout(ctx, hubSessionSnapshotTimeout)
+	defer cancel()
+	states, err := collectSessions(lookup)
 	if err != nil {
 		heartbeat.SnapshotStatus = hubSnapshotStatusUnavailable
 		heartbeat.Sessions = nil

@@ -14,6 +14,13 @@ const (
 	// byte-budget check below is still authoritative because labels and other
 	// existing heartbeat fields have variable encoded sizes.
 	hubMaxHeartbeatSessions = 64
+
+	// hubSessionSnapshotTimeout bounds the once-per-heartbeat agent.list
+	// lookup. The collection runs inline in the heartbeat write loop, so a
+	// stalled herdr must surface as snapshot_status=unavailable instead of
+	// holding the loop — and every ping/relay behind it — open. Mirrors
+	// hubPanesAliveTimeout on the pane liveness hook.
+	hubSessionSnapshotTimeout = 2 * time.Second
 )
 
 // HubSession is the allowlisted, metadata-only view of one local herdr agent.

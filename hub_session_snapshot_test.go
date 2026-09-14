@@ -396,6 +396,58 @@ func TestTask268AC6SessionCapByteLimitAndDeterministicTruncation(t *testing.T) {
 	}
 }
 
+func TestTask268B1HangingHerdrSocketYieldsUnavailable(t *testing.T) {
+	directory, err := os.MkdirTemp("/tmp", "pw-task268-hang-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(directory) })
+	listener, err := net.Listen("unix", filepath.Join(directory, "herdr.sock"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := make(chan net.Conn, 8)
+	t.Cleanup(func() {
+		_ = listener.Close()
+		for {
+			select {
+			case conn := <-held:
+				_ = conn.Close()
+			default:
+				return
+			}
+		}
+	})
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			held <- conn
+		}
+	}()
+
+	client := task268HeartbeatClient(t, hubSessionSnapshotHook(listener.Addr().String()))
+	done := make(chan hubClientEvent, 1)
+	go func() { done <- client.heartbeatEvent(context.Background()) }()
+	select {
+	case event := <-done:
+		heartbeat, fields := task268DecodeHeartbeat(t, event)
+		if heartbeat.SnapshotStatus != hubSnapshotStatusUnavailable {
+			t.Fatalf("hung herdr socket status=%q, want unavailable: %s", heartbeat.SnapshotStatus, event.Payload)
+		}
+		if heartbeat.Sessions != nil {
+			t.Fatalf("hung herdr socket was represented as a session array: %s", event.Payload)
+		}
+		if raw, exists := fields["sessions"]; exists && !isJSONNull(raw) {
+			t.Fatalf("hung herdr socket serialized sessions=%s, want absent/null: %s", raw, event.Payload)
+		}
+	case <-time.After(4 * hubSessionSnapshotTimeout):
+		t.Fatalf("heartbeatEvent still blocked after %s on a hung herdr socket (hubSessionSnapshotTimeout=%s)", 4*hubSessionSnapshotTimeout, hubSessionSnapshotTimeout)
+	}
+}
+
 func task268HerdrAgentListSocket(t *testing.T, agents []map[string]any) string {
 	t.Helper()
 	directory, err := os.MkdirTemp("/tmp", "pw-task268-")
