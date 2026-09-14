@@ -63,6 +63,7 @@ type HubClientConfig struct {
 	hostLoadCollector   func(context.Context) (HubHostLoad, error)       // fixture seam
 	hostMemoryCollector func(context.Context) (*HubHostMemory, error)    // fixture seam
 	quotaCollector      func(context.Context) (*HubQuotaSnapshot, error) // fixture seam
+	sessionCollector    func(context.Context) ([]HerdrAgentState, error) // fixture seam
 
 	// failoverWakeDestination is a package-private fixture override. Production
 	// always uses the fixed broadcast destination below.
@@ -128,6 +129,7 @@ type HubClient struct {
 	hostLoadCollector    func(context.Context) (HubHostLoad, error)
 	hostMemoryCollector  func(context.Context) (*HubHostMemory, error)
 	quotaCollector       func(context.Context) (*HubQuotaSnapshot, error)
+	sessionCollector     func(context.Context) ([]HerdrAgentState, error)
 	events               chan hubClientEvent
 	completedJobs        map[string]uint64
 	completedReports     map[string]struct{}
@@ -146,6 +148,7 @@ type HubClient struct {
 	updateInFlight    bool
 	panesAlive        panesAliveFunc
 	panesAliveMu      sync.Mutex
+	sessionMu         sync.Mutex
 	spawnConfigPath   string
 	spawnMu           sync.Mutex
 	spawnSeenMu       sync.Mutex
@@ -278,7 +281,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		r19a:   newR19aClientState(config),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version, updateHTTPClient: config.UpdateHTTPClient, executablePath: config.ExecutablePath, restart: config.Restart,
-		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, quotaCollector: config.quotaCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
+		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, quotaCollector: config.quotaCollector, sessionCollector: config.sessionCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
 	}, nil
 }
 
@@ -831,7 +834,23 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 		}
 	}
 	heartbeat.Quota = cloneHubQuotaSnapshot(quota)
-	payload, _ := json.Marshal(heartbeat)
+	collectSessions := client.sessionSnapshotHook()
+	if collectSessions == nil {
+		payload, _ := json.Marshal(heartbeat)
+		return hubClientEvent{Kind: "heartbeat", Payload: payload}
+	}
+	lookup, cancel := context.WithTimeout(ctx, hubSessionSnapshotTimeout)
+	defer cancel()
+	states, err := collectSessions(lookup)
+	if err != nil {
+		heartbeat.SnapshotStatus = hubSnapshotStatusUnavailable
+		heartbeat.Sessions = nil
+		heartbeat.Truncated = false
+		payload, _ := marshalHubHeartbeatForWire(heartbeat)
+		return hubClientEvent{Kind: "heartbeat", Payload: payload}
+	}
+	heartbeat.SnapshotStatus = hubSnapshotStatusOK
+	payload := marshalHubHeartbeatWithSessions(heartbeat, states)
 	return hubClientEvent{Kind: "heartbeat", Payload: payload}
 }
 
@@ -1184,6 +1203,14 @@ func (client *HubClient) SetPanesAlive(panesAlive panesAliveFunc) {
 	client.panesAlive = panesAlive
 }
 
+// SetSessionSnapshot attaches the local herdr agent.list lookup used by the
+// heartbeat. A nil hook preserves the pre-snapshot heartbeat shape.
+func (client *HubClient) SetSessionSnapshot(collector func(context.Context) ([]HerdrAgentState, error)) {
+	client.sessionMu.Lock()
+	defer client.sessionMu.Unlock()
+	client.sessionCollector = collector
+}
+
 func (client *HubClient) SetIdleWakeManager(manager *idleWakeManager) {
 	client.idleWakeMu.Lock()
 	client.idleWake = manager
@@ -1200,6 +1227,12 @@ func (client *HubClient) panesAliveHook() panesAliveFunc {
 	client.panesAliveMu.Lock()
 	defer client.panesAliveMu.Unlock()
 	return client.panesAlive
+}
+
+func (client *HubClient) sessionSnapshotHook() func(context.Context) ([]HerdrAgentState, error) {
+	client.sessionMu.Lock()
+	defer client.sessionMu.Unlock()
+	return client.sessionCollector
 }
 
 func hubClientWireEvent(event hubClientEvent) struct {

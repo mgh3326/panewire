@@ -91,18 +91,19 @@ type HubServerConfig struct {
 // HubNode is the deliberately small presence view returned to authenticated
 // operators. RemoteMeta records only protocol metadata, never credentials.
 type HubNode struct {
-	MachineID          string            `json:"machine_id"`
-	AlertClass         string            `json:"alert_class"`
-	Accepting          bool              `json:"accepting"`
-	AcceptingEffective bool              `json:"accepting_effective"`
-	AcceptingOverride  string            `json:"accepting_override"`
-	ConnectedSince     time.Time         `json:"connected_since"`
-	LastPingMS         int64             `json:"last_ping_ms"`
-	LastNote           *HubLastNote      `json:"last_note,omitempty"`
-	Load               *HubNodeLoad      `json:"load"`
-	Memory             *HubHostMemory    `json:"memory"`
-	RemoteMeta         map[string]string `json:"remote_meta"`
-	State              string            `json:"state"`
+	MachineID          string              `json:"machine_id"`
+	AlertClass         string              `json:"alert_class"`
+	Accepting          bool                `json:"accepting"`
+	AcceptingEffective bool                `json:"accepting_effective"`
+	AcceptingOverride  string              `json:"accepting_override"`
+	ConnectedSince     time.Time           `json:"connected_since"`
+	LastPingMS         int64               `json:"last_ping_ms"`
+	LastNote           *HubLastNote        `json:"last_note,omitempty"`
+	Load               *HubNodeLoad        `json:"load"`
+	Memory             *HubHostMemory      `json:"memory"`
+	RemoteMeta         map[string]string   `json:"remote_meta"`
+	State              string              `json:"state"`
+	SessionSnapshot    *HubSessionSnapshot `json:"session_snapshot,omitempty"`
 }
 
 // HubNodeLoad is the CPU-only console projection of a heartbeat host_load.
@@ -136,6 +137,7 @@ type hubNodeRecord struct {
 	activeJobs        map[string]HubActiveJob
 	hostLoad          *HubHostLoad
 	hostMemory        *HubHostMemory
+	sessionSnapshot   *hubSessionSnapshotRecord
 }
 
 type hubAgent struct {
@@ -947,6 +949,9 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 					h.placementCache = placementCache{}
 				}
 				h.recordHubQuotaLocked(machineID, heartbeat.Quota, received)
+				if heartbeat.SnapshotStatus != "" {
+					record.sessionSnapshot = hubSessionSnapshotRecordFromHeartbeat(heartbeat, received)
+				}
 			}
 			h.mu.Unlock()
 			h.observeHeartbeatAlerts(machineID, heartbeat)
@@ -1092,14 +1097,17 @@ type hubInbound struct {
 }
 
 type hubHeartbeatPayload struct {
-	Status      string                    `json:"status"`
-	Checks      map[string]HubCheckStatus `json:"checks"`
-	HostLoad    *HubHostLoad              `json:"host_load,omitempty"`
-	LoadError   string                    `json:"load_error,omitempty"`
-	HostMemory  *HubHostMemory            `json:"host_memory,omitempty"`
-	Quota       *HubQuotaSnapshot         `json:"quota,omitempty"`
-	ActiveJobs  []HubActiveJob            `json:"active_jobs,omitempty"`
-	HoldsActive bool                      `json:"holds_active,omitempty"`
+	Status         string                    `json:"status"`
+	Checks         map[string]HubCheckStatus `json:"checks"`
+	HostLoad       *HubHostLoad              `json:"host_load,omitempty"`
+	LoadError      string                    `json:"load_error,omitempty"`
+	HostMemory     *HubHostMemory            `json:"host_memory,omitempty"`
+	Quota          *HubQuotaSnapshot         `json:"quota,omitempty"`
+	ActiveJobs     []HubActiveJob            `json:"active_jobs,omitempty"`
+	HoldsActive    bool                      `json:"holds_active,omitempty"`
+	Sessions       *[]HubSession             `json:"sessions,omitempty"`
+	SnapshotStatus string                    `json:"snapshot_status,omitempty"`
+	Truncated      bool                      `json:"truncated,omitempty"`
 }
 
 type hubNotePayload struct {
@@ -1132,7 +1140,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "sessions" && name != "snapshot_status" && name != "truncated" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1209,6 +1217,40 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.Quota = quota
+	}
+	rawSnapshotStatus, hasSnapshotStatus := fields["snapshot_status"]
+	if hasSnapshotStatus {
+		if json.Unmarshal(rawSnapshotStatus, &heartbeat.SnapshotStatus) != nil || (heartbeat.SnapshotStatus != hubSnapshotStatusOK && heartbeat.SnapshotStatus != hubSnapshotStatusUnavailable) {
+			return hubHeartbeatPayload{}, false
+		}
+	}
+	rawTruncated, hasTruncated := fields["truncated"]
+	if hasTruncated {
+		if !hasSnapshotStatus || isJSONNull(rawTruncated) || json.Unmarshal(rawTruncated, &heartbeat.Truncated) != nil {
+			return hubHeartbeatPayload{}, false
+		}
+	}
+	rawSessions, hasSessions := fields["sessions"]
+	if hasSessions {
+		sessions, valid := decodeHubSessionSnapshots(rawSessions)
+		if !valid {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.Sessions = &sessions
+	}
+	if hasSnapshotStatus {
+		switch heartbeat.SnapshotStatus {
+		case hubSnapshotStatusOK:
+			if !hasSessions || isJSONNull(rawSessions) {
+				return hubHeartbeatPayload{}, false
+			}
+		case hubSnapshotStatusUnavailable:
+			if (hasSessions && !isJSONNull(rawSessions)) || heartbeat.Truncated {
+				return hubHeartbeatPayload{}, false
+			}
+		}
+	} else if hasSessions || hasTruncated {
+		return hubHeartbeatPayload{}, false
 	}
 	if rawJobs, exists := fields["active_jobs"]; exists {
 		var rawActive []map[string]json.RawMessage
@@ -1391,14 +1433,16 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	defer func() { go h.replayUndeliveredLaneEvents(context.Background()) }()
 	now := h.now().UTC()
 	var previous *hubAgent
+	var previousSnapshot *hubSessionSnapshotRecord
 	h.mu.Lock()
 	if existing := h.nodes[machineID]; existing != nil {
 		previous = existing.agent
+		previousSnapshot = cloneHubSessionSnapshotRecord(existing.sessionSnapshot)
 	}
 	h.nodes[machineID] = &hubNodeRecord{
 		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now,
 		remoteMeta: map[string]string{"version": version, "remote_addr": remoteAddr},
-		state:      "connected", stateSince: now, agent: agent, activeJobs: make(map[string]HubActiveJob),
+		state:      "connected", stateSince: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
 	}
 	h.placementCache = placementCache{}
 	if expected, waiting := h.expectedVersion[machineID]; waiting && version == expected.version {
@@ -1662,6 +1706,7 @@ func (h *HubServer) Nodes() []HubNode {
 		effective := h.acceptingEffectiveLocked(record.machineID, record.accepting)
 		nodes = append(nodes, HubNode{
 			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, Load: hubNodeLoadFromHostLoad(record.hostLoad), Memory: cloneHubHostMemory(record.hostMemory), RemoteMeta: remoteMeta, State: record.state,
+			SessionSnapshot: hubSessionSnapshotView(record.sessionSnapshot, record.state == "stale" || record.state == "disconnected"),
 		})
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })

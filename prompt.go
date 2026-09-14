@@ -27,6 +27,7 @@ type PromptResult struct {
 type paneIdentity struct {
 	PaneID, WorkspaceID, TabID, Agent, Name, Label, Title, CWD, Harness, Status string
 	Revision, StateChangeSeq                                                    int64
+	InteractiveReady                                                            *bool
 }
 
 type expectFields struct {
@@ -335,9 +336,16 @@ func resolvePane(ctx context.Context, c *HerdrClient, target string) (paneIdenti
 }
 
 func identityFromMap(a map[string]any) paneIdentity {
-	return paneIdentity{PaneID: aString(a, "pane_id"), WorkspaceID: aString(a, "workspace_id"), TabID: firstString(a, "tab_id", "tab"), Agent: aString(a, "agent"), Name: aString(a, "name"), Label: firstString(a, "label", "tab_label", "display_agent"), Title: aString(a, "title"), CWD: firstString(a, "cwd", "workdir", "working_dir"), Harness: firstString(a, "harness", "harness_kind", "kind", "agent"), Status: aString(a, "agent_status"), Revision: aInt(a, "revision"), StateChangeSeq: aInt(a, "state_change_seq")}
+	return paneIdentity{PaneID: aString(a, "pane_id"), WorkspaceID: aString(a, "workspace_id"), TabID: firstString(a, "tab_id", "tab"), Agent: aString(a, "agent"), Name: aString(a, "name"), Label: firstString(a, "label", "tab_label", "display_agent"), Title: aString(a, "title"), CWD: firstString(a, "cwd", "workdir", "working_dir"), Harness: firstString(a, "harness", "harness_kind", "kind", "agent"), Status: aString(a, "agent_status"), Revision: aInt(a, "revision"), StateChangeSeq: aInt(a, "state_change_seq"), InteractiveReady: aBoolPtr(a, "interactive_ready")}
 }
 func aString(a map[string]any, key string) string { v, _ := a[key].(string); return v }
+func aBoolPtr(a map[string]any, key string) *bool {
+	v, ok := a[key].(bool)
+	if !ok {
+		return nil
+	}
+	return &v
+}
 func firstString(a map[string]any, keys ...string) string {
 	for _, k := range keys {
 		if v := aString(a, k); v != "" {
