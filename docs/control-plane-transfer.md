@@ -22,6 +22,10 @@ ACTIVE --drain--> DRAINING --handover_ready--> HANDOVER_READY --commit--> TRANSF
 409 `request_id_conflict` 다. history 는 최근 8건만 보관하므로 그보다 오래된
 `request_id` 의 재시도는 `stale_epoch` 로 안전하게 떨어진다.
 
+`handover_ready` 는 `inflight_operations == 0` 일 때만 통과한다. 🔴 `inflight_operations` 는
+**호출자(운영자)가 주장하는 값이고 서버가 세지 않는다** — 서버는 그 주장을 검증할 자료구조가 없다.
+따라서 `handover_ready` 의 "조용함"은 서버가 보장하는 것이 아니라 그 주장에 의존한다.
+
 ## A3 readiness
 
 `model_login` · `tools` · `handoffkeep_read` · `hub_read` · `target_pane` 다섯

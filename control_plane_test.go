@@ -915,9 +915,18 @@ func TestControlPlaneW14ServerOverridesReadinessClaim(t *testing.T) {
 		"lane-alpha": {Machine: "machine-c", Pane: "w3:p1"},
 		"lane-beta":  {Machine: "machine-c", Pane: "w3:p2"},
 	}
+	before := mustReadControlPlaneFile(t, path)
+	beforeProjection := controlPlaneGetLanes(t, hub).Body.String()
 	writer := controlPlanePost(t, hub, controlPlaneBody(controlPlaneID(0x521), "commit", 0, controlPlaneSideA, unknownTarget, 0, controlPlaneReady))
 	if writer.Code != http.StatusConflict || controlPlaneJSONError(t, writer)["error"] != "target_not_ready" {
 		t.Fatalf("an all-true hook overrode the server check: status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	// A status code alone does not show that nothing moved: read it back.
+	if !bytes.Equal(before, mustReadControlPlaneFile(t, path)) {
+		t.Fatalf("the refused commit changed the lanes file: %s", mustReadControlPlaneFile(t, path))
+	}
+	if got := controlPlaneGetLanes(t, hub).Body.String(); got != beforeProjection {
+		t.Fatalf("the refused commit changed the projection: before=%s after=%s", beforeProjection, got)
 	}
 }
 
@@ -1630,5 +1639,113 @@ func TestControlPlaneW35DeploymentStepIsDocumented(t *testing.T) {
 		if !strings.Contains(string(contents), required) {
 			t.Fatalf("the deployment step does not mention %q", required)
 		}
+	}
+}
+
+// TestControlPlaneDamagedControlBlockStaysReadable is the read/write split. A
+// control block the hub cannot parse must not cost the operator the ability to
+// look at the file they just edited, and it must not take the self-check
+// witness down with it — the observation hook reads this same projection. The
+// write side stays closed: authority lanes are still refused.
+func TestControlPlaneDamagedControlBlockStaysReadable(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		control string
+	}{
+		{"unknown state", `{"epoch":3,"owner":"machine-a","state":"NOT-A-STATE","history":[]}`},
+		{"invalid owner", `{"epoch":3,"owner":"operator","state":"ACTIVE","history":[]}`},
+		{"history over retention", `{"epoch":3,"owner":"machine-a","state":"ACTIVE","history":[{},{},{},{},{},{},{},{},{}]}`},
+		{"wrong type", `"a string where an object belongs"`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := filepath.Join(root, "lanes.json")
+			contents := `{"lanes":{"lane-alpha":{"machine":"machine-a","pane":"w1:p1"},"lane-beta":{"machine":"machine-a","pane":"w1:p2"},"lane-general":{"machine":"machine-a","pane":"w1:p3"}},"control":` + test.control + `}`
+			if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+				t.Fatal(err)
+			}
+			hub := controlPlaneHub(t, path, "lane-alpha", "lane-beta")
+
+			// (1) The read succeeds.
+			response := controlPlaneGetLanes(t, hub)
+			if response.Code != http.StatusOK {
+				t.Fatalf("a damaged control block broke the read: status=%d body=%s", response.Code, response.Body.String())
+			}
+			var envelope struct {
+				Lanes                   []hubLaneProjection `json:"lanes"`
+				ControlEpoch            uint64              `json:"control_epoch"`
+				ControlOwner            string              `json:"control_owner"`
+				ControlState            string              `json:"control_state"`
+				LastRequestID           string              `json:"last_request_id"`
+				AuthorityLaneProtection string              `json:"authority_lane_protection"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &envelope); err != nil {
+				t.Fatal(err)
+			}
+
+			// (2) And says why it cannot vouch for the control state.
+			if envelope.AuthorityLaneProtection != "invalid" {
+				t.Fatalf("protection=%q want invalid", envelope.AuthorityLaneProtection)
+			}
+			// The damaged values are not passed through: safe defaults only.
+			if envelope.ControlEpoch != 0 || envelope.ControlOwner != "" || envelope.ControlState != "" || envelope.LastRequestID != "" {
+				t.Fatalf("a damaged control block leaked into the envelope: %+v", envelope)
+			}
+
+			// (3) Authority lanes are still refused, both verbs.
+			before := mustReadControlPlaneFile(t, path)
+			for _, lane := range []string{"lane-alpha", "lane-beta"} {
+				put := lanesWriteRequest(t, hub, http.MethodPut, "/v1/lanes/"+lane, controlPlaneOperatorToken, `{"machine":"machine-b","pane":"w2:p1"}`)
+				if put.Code != http.StatusConflict || controlPlaneJSONError(t, put)["error"] != "authority_lane_direct_write" {
+					t.Fatalf("PUT %s status=%d body=%s", lane, put.Code, put.Body.String())
+				}
+				remove := lanesWriteRequest(t, hub, http.MethodDelete, "/v1/lanes/"+lane, controlPlaneOperatorToken, "")
+				if remove.Code != http.StatusConflict || controlPlaneJSONError(t, remove)["error"] != "authority_lane_direct_write" {
+					t.Fatalf("DELETE %s status=%d body=%s", lane, remove.Code, remove.Body.String())
+				}
+			}
+			// And the write path is still strict about overwriting what it did
+			// not understand: an ordinary lane write does not rewrite the file.
+			general := lanesWriteRequest(t, hub, http.MethodPut, "/v1/lanes/lane-general", controlPlaneOperatorToken, `{"machine":"machine-b","pane":"w2:p3"}`)
+			if general.Code != http.StatusInternalServerError {
+				t.Fatalf("a write overwrote a damaged control block: status=%d body=%s", general.Code, general.Body.String())
+			}
+			if !bytes.Equal(before, mustReadControlPlaneFile(t, path)) {
+				t.Fatalf("the lanes file changed: %s", mustReadControlPlaneFile(t, path))
+			}
+
+			// (4) The lanes themselves project normally.
+			if len(envelope.Lanes) != 3 {
+				t.Fatalf("lanes=%+v", envelope.Lanes)
+			}
+			want := map[string]hubLaneProjection{
+				"lane-alpha":   {Lane: "lane-alpha", Machine: "machine-a", Pane: "w1:p1"},
+				"lane-beta":    {Lane: "lane-beta", Machine: "machine-a", Pane: "w1:p2"},
+				"lane-general": {Lane: "lane-general", Machine: "machine-a", Pane: "w1:p3"},
+			}
+			for _, lane := range envelope.Lanes {
+				if expected, known := want[lane.Lane]; !known || !reflect.DeepEqual(lane, expected) {
+					t.Fatalf("lane=%+v want %+v", lane, want[lane.Lane])
+				}
+			}
+
+			// (5) The self-check witness still works: the observation hook must
+			// not die with the thing it observes.
+			server := httptest.NewServer(hub.Handler())
+			defer server.Close()
+			envPath := controlPlaneSelfCheckEnv(t)
+			args := []string{"self-check", "--lane", "lane-alpha", "--expect-machine", "machine-a", "--expect-pane", "w1:p1", "--expect-epoch", "0", "--hub-url", server.URL, "--hub-token-env", envPath}
+			var stdout, stderr strings.Builder
+			if code := runLanesCLI(args, &stdout, &stderr, hubCLIDeps{HTTPClient: server.Client(), AllowInsecureForTests: true}); code != ExitOK {
+				t.Fatalf("self-check died with the control block: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			var witness controlPlaneSelfCheckWitness
+			if err := json.Unmarshal([]byte(stdout.String()), &witness); err != nil {
+				t.Fatal(err)
+			}
+			if witness.Verdict != "owner" || witness.Observed.Machine != "machine-a" {
+				t.Fatalf("witness=%+v", witness)
+			}
+		})
 	}
 }

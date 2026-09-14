@@ -439,8 +439,10 @@ func controlPlaneExpectedRoutesMatch(requested []controlPlaneTransferLane, route
 	return true
 }
 
-// readinessClearance is created only after all requested readiness checks have
-// passed while the lanes lock is held.
+// readinessClearance is produced only by the readiness gate, after every
+// requested check has passed while the lanes lock is held. It marks the A3
+// ordering at each call site; it does not enforce it (see
+// commitControlPlaneRoutes).
 type readinessClearance struct {
 	checks []controlPlaneReadinessCheck
 	at     time.Time
@@ -505,8 +507,13 @@ func controlPlaneTargetsReady(hub *HubServer, requested []controlPlaneTransferLa
 	return true
 }
 
-// commitControlPlaneRoutes cannot be called without a readiness clearance.
-// A3 ordering is enforced by the signature, not by call-site discipline.
+// commitControlPlaneRoutes takes a readinessClearance so that A3's ordering is
+// written into the call: the value only exists after the readiness gate has
+// run. That is a marker, not a guarantee — readinessClearance is constructible
+// inside this package, so a zero value would compile and this function does not
+// inspect it. What actually holds the property is the tests: readiness failure
+// leaves both routes where they were (TestControlPlaneW14*), and the gate runs
+// before the file is replaced (TestControlPlaneW15ReadinessRunsBeforeRename).
 func commitControlPlaneRoutes(snapshot *lanesFileSnapshot, requested []controlPlaneTransferLane, clearance readinessClearance) {
 	_ = clearance
 	for _, requestedLane := range requested {
@@ -551,12 +558,14 @@ func controlPlaneReadinessChecksCopy(checks []controlPlaneReadinessCheck) []cont
 	return append(copied, checks...)
 }
 
-func controlFromLanesFile(source *lanesFileControl) (lanesFileControl, error) {
-	if source == nil {
+func controlFromLanesFile(source json.RawMessage) (lanesFileControl, error) {
+	if len(source) == 0 || bytes.Equal(bytes.TrimSpace(source), []byte("null")) {
 		return lanesFileControl{}, nil
 	}
-	control := *source
-	control.History = append([]controlPlaneHistoryRecord(nil), source.History...)
+	var control lanesFileControl
+	if err := json.Unmarshal(source, &control); err != nil {
+		return lanesFileControl{}, errors.New("control block is not an object")
+	}
 	if err := validateLanesFileControl(control); err != nil {
 		return lanesFileControl{}, err
 	}
@@ -628,32 +637,42 @@ func validControlPlaneState(state controlPlaneState) bool {
 	}
 }
 
-func loadReportRelayRoutesAndControlResult(path string) (map[string]reportRelayRoute, lanesFileControl, error) {
+// loadReportRelayRoutesAndControlResult reads the lanes projection for GET.
+// A control block it cannot make sense of is reported as unreadable rather
+// than failing the read: the guard exists to stop unauthorized writes, not
+// reads, and a hand-edited file that the hub refuses to show is a file the
+// operator cannot diagnose. The self-check witness reads this same projection,
+// so failing here would take the observation hook down with the thing it
+// observes. The write path stays strict — nothing overwrites a control block
+// it did not understand.
+func loadReportRelayRoutesAndControlResult(path string) (map[string]reportRelayRoute, lanesFileControl, bool, error) {
 	if path == "" {
-		return nil, lanesFileControl{}, nil
+		return nil, lanesFileControl{}, true, nil
 	}
 	contents, err := os.ReadFile(path)
 	if err != nil {
-		return nil, lanesFileControl{}, nil
+		return nil, lanesFileControl{}, true, nil
 	}
 	if len(contents) > lanesFileMaxBytes {
-		return nil, lanesFileControl{}, errReportRelayRoutesInvalid
+		return nil, lanesFileControl{}, false, errReportRelayRoutesInvalid
 	}
 	routes, err := parseReportRelayRoutes(contents)
 	if err != nil {
-		return nil, lanesFileControl{}, err
+		return nil, lanesFileControl{}, false, err
 	}
 	var source struct {
-		Control *lanesFileControl `json:"control"`
+		Control json.RawMessage `json:"control"`
 	}
 	if err := json.Unmarshal(contents, &source); err != nil {
-		return nil, lanesFileControl{}, err
+		return routes, lanesFileControl{}, false, nil
 	}
 	control, err := controlFromLanesFile(source.Control)
 	if err != nil {
-		return nil, lanesFileControl{}, err
+		// Safe defaults, never the damaged values: epoch 0 and empty strings
+		// read as "no control state", which is what an unreadable block means.
+		return routes, lanesFileControl{}, false, nil
 	}
-	return routes, control, nil
+	return routes, control, true, nil
 }
 
 // --- authority lane policy -------------------------------------------------
@@ -764,10 +783,16 @@ func (h *HubServer) setControlPlaneLanesFailureLocked(failure string) {
 // placement policy uses, with "disabled" for the unconfigured default. An
 // opt-in guard that says nothing about being off stays off, so the state is
 // reported where an operator already looks.
-func (h *HubServer) authorityLaneProtection() string {
+func (h *HubServer) authorityLaneProtection(controlReadable bool) string {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.reloadControlPlaneLanesLocked()
+	if !controlReadable {
+		// The control block the guard depends on does not parse. That is the
+		// same "configured but not understood" condition the policy file has,
+		// and it reads the same way to an operator.
+		return "invalid"
+	}
 	if h.controlPlaneLanesStatus == "default" {
 		return "disabled"
 	}

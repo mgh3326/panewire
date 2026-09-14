@@ -802,7 +802,7 @@ func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json")
-	routes, control, err := loadReportRelayRoutesAndControlResult(h.reportRelayPath)
+	routes, control, controlReadable, err := loadReportRelayRoutesAndControlResult(h.reportRelayPath)
 	if err != nil {
 		writer.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(writer).Encode(struct {
@@ -829,7 +829,7 @@ func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Reques
 	}{
 		Lanes: lanes, ControlEpoch: control.Epoch, ControlOwner: control.Owner,
 		ControlState: string(control.State), LastRequestID: control.LastRequestID,
-		AuthorityLaneProtection: h.authorityLaneProtection(),
+		AuthorityLaneProtection: h.authorityLaneProtection(controlReadable),
 	})
 }
 
