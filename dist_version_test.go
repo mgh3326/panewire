@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -106,8 +107,9 @@ func TestDistVersionPrintsValidValuesVerbatim(t *testing.T) {
 }
 
 // The deploy build path must actually stamp the derived version. Removing the
-// -ldflags injection from build-linux.sh makes this fail: the binary then
-// carries no -X main.version build setting.
+// -ldflags injection — or using the full-importpath -X form, which the linker
+// silently ignores — leaves the artifact reporting "panewire-dev", and this
+// test must catch that: a deploy artifact that reports the placeholder fails.
 func TestBuildLinuxScriptStampsDerivedVersion(t *testing.T) {
 	want, stderr, err := runDistVersion(t, "", false)
 	if err != nil {
@@ -123,6 +125,35 @@ func TestBuildLinuxScriptStampsDerivedVersion(t *testing.T) {
 	}
 	if !strings.Contains(string(info), "-X main.version="+want) {
 		t.Fatalf("built binary lacks -X main.version=%s:\n%s", want, info)
+	}
+	if runtime.GOOS == "linux" {
+		b, err := exec.Command(output, "version").CombinedOutput()
+		if err != nil {
+			t.Fatalf("artifact version run failed: %v\n%s", err, b)
+		}
+		if got := strings.TrimSpace(string(b)); got != want {
+			t.Fatalf("deploy artifact reports %q, want %q (placeholder=%q)", got, want, "panewire-dev")
+		}
+	}
+}
+
+// The full-importpath -X form is silently ignored by the linker: the build
+// succeeds and the binary still reports the placeholder. Pin that trap — it is
+// exactly the silent regression TestBuildLinuxScriptStampsDerivedVersion guards.
+func TestFullImportPathInjectionIsSilentlyIgnored(t *testing.T) {
+	output := filepath.Join(t.TempDir(), "panewire")
+	b, err := exec.Command("go", "build",
+		"-ldflags", "-X github.com/mgh3326/panewire/cmd/panewire.version=v9.9.9",
+		"-o", output, "./cmd/panewire").CombinedOutput()
+	if err != nil {
+		t.Fatalf("go build failed: %v\n%s", err, b)
+	}
+	b, err = exec.Command(output, "version").CombinedOutput()
+	if err != nil {
+		t.Fatalf("version run failed: %v\n%s", err, b)
+	}
+	if got := strings.TrimSpace(string(b)); got != "panewire-dev" {
+		t.Fatalf("full-importpath -X reported %q, want silently-ignored panewire-dev", got)
 	}
 }
 
