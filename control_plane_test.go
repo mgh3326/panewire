@@ -646,6 +646,35 @@ func TestControlPlaneW9WriteFailureLeavesRoutesAndEpoch(t *testing.T) {
 	}
 }
 
+// TestControlPlaneW9PartialTransferIsNotObservable is AC2 stated directly: a
+// second file replacement is made to fail, and the lanes file still never shows
+// one lane moved and the other left behind. With a single replacement the
+// injected failure has nothing to fire on.
+func TestControlPlaneW9PartialTransferIsNotObservable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	controlPlaneRoutesFixture(t, path, "")
+	hub := controlPlaneHub(t, path, "lane-alpha", "lane-beta")
+	hub.lanesWriteOps.createBackup = func(string, []byte, time.Time) error { return nil }
+	controlPlanePrepare(t, hub, controlPlaneID(0x90A), 0)
+	renameCount := 0
+	hub.lanesWriteOps.rename = func(oldPath, newPath string) error {
+		renameCount++
+		if renameCount > 1 {
+			return errors.New("injected second-write failure")
+		}
+		return os.Rename(oldPath, newPath)
+	}
+	writer := controlPlanePost(t, hub, controlPlaneForward(controlPlaneID(0x90B), "commit", 0))
+	routes := controlPlaneFileRoutes(t, path)
+	alpha, beta := routes["lane-alpha"], routes["lane-beta"]
+	if alpha.Machine != beta.Machine {
+		t.Fatalf("a half-transferred bundle is observable: lane-alpha=%+v lane-beta=%+v (status=%d)", alpha, beta, writer.Code)
+	}
+	if writer.Code != http.StatusOK || alpha.Machine != "machine-b" {
+		t.Fatalf("status=%d routes=%+v body=%s", writer.Code, routes, writer.Body.String())
+	}
+}
+
 func TestControlPlaneW10LostResponseRetryConverges(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lanes.json")
 	controlPlaneRoutesFixture(t, path, "")
