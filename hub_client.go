@@ -521,17 +521,67 @@ func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
 	if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
 		return false
 	}
-	out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", "10").Output()
-	if err != nil || !bytes.Contains(out, []byte("[Pasted text")) {
-		return err == nil
+	// #264 D2: verification used to gate solely on claude's "[Pasted text"
+	// composer chip, so any harness lacking that chip reported success on
+	// err==nil alone. classifySubmission is the same harness-aware
+	// classifier prompt.go's direct-prompt path already uses; reusing it
+	// here lets a non-claude harness (e.g. codex's "queued" composer state)
+	// fail verification instead of being reported delivered unconditionally.
+	harness := relayInjectHarness(ctx, pane)
+	return relayInjectVerifySubmission(ctx, pane, harness, text)
+}
+
+func relayInjectHarness(ctx context.Context, pane string) string {
+	out, err := exec.CommandContext(ctx, "herdr", "agent", "get", pane).Output()
+	if err != nil {
+		return ""
 	}
-	// The relay-handoff contract permits exactly one return only when the
-	// pasted-text chip proves the prompt remained in the composer.
-	if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
+	var response struct {
+		Result struct {
+			Agent struct {
+				Agent   string `json:"agent"`
+				Harness string `json:"harness"`
+				Kind    string `json:"kind"`
+			} `json:"agent"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(out, &response) != nil {
+		return ""
+	}
+	for _, candidate := range []string{response.Result.Agent.Harness, response.Result.Agent.Kind, response.Result.Agent.Agent} {
+		if candidate != "" {
+			return candidate
+		}
+	}
+	return ""
+}
+
+func relayInjectVerifySubmission(ctx context.Context, pane, harness, text string) bool {
+	out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", "10").Output()
+	if err != nil {
 		return false
 	}
-	out, err = exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", "10").Output()
-	return err == nil && !bytes.Contains(out, []byte("[Pasted text"))
+	marker := markerFor(text)
+	switch classifySubmission(harness, string(out), marker) {
+	case "composer_residue", "queued":
+		// The relay-handoff contract permits exactly one return only when the
+		// classifier proves the prompt has not left the composer/queue yet.
+		if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
+			return false
+		}
+		out, err = exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", "10").Output()
+		if err != nil {
+			return false
+		}
+		switch classifySubmission(harness, string(out), marker) {
+		case "composer_residue", "queued":
+			return false
+		default:
+			return true
+		}
+	default:
+		return true
+	}
 }
 
 // serve runs the node side of one hub session. A preference switch replaces the

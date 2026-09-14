@@ -1064,6 +1064,13 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				return
 			}
 		}
+		if message.Kind == "relay.dropped" {
+			dropped, valid := decodeRelayDroppedPayload(message.Payload)
+			if !valid || !h.consumeRelayDropped(machineID, dropped) {
+				h.countUnknownMessage()
+				return
+			}
+		}
 		if message.Kind == "job.revocation.ack" {
 			ack, valid := decodeHubJobCompletionPayload(message.Payload)
 			if !valid || !h.acknowledgeRevocation(machineID, ack) {
@@ -1412,6 +1419,11 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
+		if message.Kind == "relay.dropped" {
+			if _, valid := decodeRelayDroppedPayload(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
 		message.Payload = append(json.RawMessage(nil), rawPayload...)
 	default:
 		return hubInbound{}, false
@@ -1421,7 +1433,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "lane.event", "idle-wake.route.request", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched":
+	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "lane.event", "idle-wake.route.request", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched", "relay.dropped":
 		return true
 	}
 	return false

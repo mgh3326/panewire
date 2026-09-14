@@ -20,6 +20,11 @@ const (
 	relaySingleItemMax = 24 << 10
 	// relayCancelledPane is a handoffkeep delivery sentinel, never a pane id.
 	relayCancelledPane = "cancelled"
+	// relayMaxInjectAttempts bounds #264 D1's rearm-on-failure retry so a
+	// permanently broken pane (deleted, unreachable) cannot spin the busy
+	// manager forever; once hit, the held row is dropped explicitly instead
+	// of rotting past its policy's max_wait.
+	relayMaxInjectAttempts = 3
 )
 
 type relayCommandRunner func(context.Context, ...string) ([]byte, error)
@@ -110,6 +115,14 @@ type relayBatchedPayload struct {
 	Pane     string  `json:"pane"`
 	Lane     string  `json:"lane"`
 	EventIDs []int64 `json:"event_ids"`
+}
+
+type relayDroppedPayload struct {
+	JobID           string `json:"job_id"`
+	Pane            string `json:"pane"`
+	Lane            string `json:"lane"`
+	OriginalEventID int64  `json:"original_event_id"`
+	Reason          string `json:"reason"`
 }
 
 // relayBusyManager serializes each pane, so a returned wait can batch every
@@ -252,6 +265,37 @@ func (manager *relayBusyManager) hold(parent context.Context, item relayHeld, re
 	manager.mu.Unlock()
 	manager.reportHeld(item, reason)
 	manager.arm(parent, item.Pane)
+}
+
+// retryOrDrop is #264 D1's fix: deliver() used to leave a failed inject's
+// row in relay_held forever (no rearm, no delete), which is why stale rows
+// were observed there hours past their max_wait. A held-eligible item
+// (EventID/Lane set) is re-armed with a fresh hold so it retries the next
+// time its pane goes idle; once relayMaxInjectAttempts is exhausted it is
+// deleted and reported via relay.dropped instead of rotting silently.
+// Fire-and-forget items (EventID==0 or Lane=="") were never held in the
+// first place, so there is nothing to rearm or drop.
+//
+// This deliberately uses context.Background() rather than deliver()'s
+// incoming context: deliver() is reached from waitForPane's own per-pane
+// wait context, and re-arming calls arm(), which cancels that same context
+// as "the previous wait" -- reusing it here would cancel the retry before
+// it starts.
+func (manager *relayBusyManager) retryOrDrop(item relayHeld) {
+	if item.EventID == 0 || item.Lane == "" {
+		return
+	}
+	ctx := context.Background()
+	if store := manager.client.relayStore(); store != nil {
+		_, _ = store.DeleteRelayHeld(ctx, item.EventID)
+	}
+	item.Attempts++
+	if item.Attempts >= relayMaxInjectAttempts {
+		manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: "inject_failed_max_attempts"})
+		return
+	}
+	item.HeldSince = manager.client.relayNow()
+	manager.hold(ctx, item, "retry")
 }
 
 func (manager *relayBusyManager) recoverExisting(parent context.Context, item relayHeld) {
@@ -419,6 +463,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		if !success {
 			for _, item := range group {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, OriginalEventID: item.EventID})
+				manager.retryOrDrop(item)
 			}
 			continue
 		}
