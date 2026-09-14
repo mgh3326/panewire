@@ -107,6 +107,10 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	placementPolicyPath := flags.String("placement-policy", "/etc/panewire/placement.json", "operator-owned JSON placement policy (hot-reloaded)")
 	uiAllowCFOnly := flags.Bool("ui-allow-cf-only", false, "serve /ui only to Cloudflare Access identities or loopback clients")
 	lanesPath := flags.String("lanes", "/etc/panewire/lanes.json", "operator-owned lane routing JSON (hot-reloaded)")
+	// The default is empty, not /etc/panewire/control-plane-lanes.json: the
+	// authority guard is fail-closed, so defaulting to a path would block every
+	// lane write on each existing deployment that does not have the file yet.
+	controlPlaneLanesPath := flags.String("control-plane-lanes", "", "operator-owned JSON authority lane set, e.g. /etc/panewire/control-plane-lanes.json (hot-reloaded)")
 	reportRelayPath := flags.String("report-relay-routes", "", "deprecated alias for --lanes")
 	acceptingOverridesPath := flags.String("accepting-overrides", "", "optional accepting override JSON (updated by operator POST)")
 	handoffkeepEnvPath := flags.String("handoffkeep-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file enabling durable relay events")
@@ -179,10 +183,11 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub handoffkeep configuration is invalid")
 		}
 	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, ReportRelayPath: routePath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep})
+	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, ReportRelayPath: routePath, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}
+	hub.logAuthorityLaneProtection()
 	return hub, address, ExitOK, nil
 }
 

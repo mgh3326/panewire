@@ -22,8 +22,9 @@ const (
 // routes contain identifiers only, never host addresses, tokens, or panes
 // from a particular installation.
 type reportRelayRoutes struct {
-	Routes map[string]reportRelayRoute `json:"routes"`
-	Lanes  map[string]reportRelayRoute `json:"lanes"`
+	Routes  map[string]reportRelayRoute `json:"routes"`
+	Lanes   map[string]reportRelayRoute `json:"lanes"`
+	Control *lanesFileControl           `json:"control,omitempty"`
 }
 
 // reportRelayStandby is the optional alternate pane kept with a lane route

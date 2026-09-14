@@ -17,16 +17,19 @@ import (
 const lanesCLIRequestTimeout = 15 * time.Second
 
 type lanesCLIOptions struct {
-	Command  string
-	Lane     string
-	Machine  string
-	Pane     string
-	Parent   string
-	Sink     bool
-	HubURL   string
-	TokenEnv string
-	CFEnv    string
-	seen     map[string]bool
+	Command         string
+	Lane            string
+	Machine         string
+	Pane            string
+	Parent          string
+	ExpectedMachine string
+	ExpectedPane    string
+	ExpectedEpoch   uint64
+	Sink            bool
+	HubURL          string
+	TokenEnv        string
+	CFEnv           string
+	seen            map[string]bool
 }
 
 func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
@@ -50,6 +53,10 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 			fmt.Fprintln(stderr, "lanes rejected: invalid parent")
 			return ExitConditionInvalid
 		}
+	}
+	if options.Command == "self-check" && (options.ExpectedMachine == hubOperatorMachineID || !machineIDPattern.MatchString(options.ExpectedMachine) || !validLanePane(options.ExpectedPane)) {
+		fmt.Fprintln(stderr, "lanes rejected: invalid expected route")
+		return ExitConditionInvalid
 	}
 	env, err := loadHubTokenEnv(options.TokenEnv)
 	if err != nil || env.MachineID != hubOperatorMachineID {
@@ -143,9 +150,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		if response.StatusCode != http.StatusOK {
 			return lanesCLIStatus(stderr, response.StatusCode)
 		}
-		var result struct {
-			Lanes []hubLaneProjection `json:"lanes"`
-		}
+		var result lanesEnvelope
 		if err := decodeLanesJSON(response.Body, &result); err != nil {
 			fmt.Fprintln(stderr, "lanes unavailable")
 			return ExitInternal
@@ -162,6 +167,54 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		sort.Slice(result.Lanes, func(i, j int) bool { return result.Lanes[i].Lane < result.Lanes[j].Lane })
 		_ = json.NewEncoder(stdout).Encode(result)
 		return ExitOK
+	case "self-check":
+		if response.StatusCode != http.StatusOK {
+			return lanesCLIStatus(stderr, response.StatusCode)
+		}
+		var result lanesEnvelope
+		if err := decodeLanesJSON(response.Body, &result); err != nil {
+			fmt.Fprintln(stderr, "lanes unavailable")
+			return ExitInternal
+		}
+		var observed controlPlaneSelfCheckObserved
+		verdict := "unknown"
+		action := "self_stop"
+		for _, lane := range result.Lanes {
+			if lane.Lane != options.Lane {
+				continue
+			}
+			if !validHubLaneProjection(lane) {
+				break
+			}
+			observed = controlPlaneSelfCheckObserved{Machine: lane.Machine, Pane: lane.Pane, Epoch: result.ControlEpoch, Owner: result.ControlOwner, State: result.ControlState}
+			if lane.Machine == options.ExpectedMachine && lane.Pane == options.ExpectedPane && result.ControlEpoch == options.ExpectedEpoch {
+				verdict, action = "owner", "proceed"
+			} else {
+				verdict, action = "not_owner", "self_stop"
+			}
+			break
+		}
+		witness := controlPlaneSelfCheckWitness{
+			Kind: "control_plane.self_check", At: time.Now().UTC(), Lane: options.Lane,
+			Expected: controlPlaneSelfCheckExpected{Machine: options.ExpectedMachine, Pane: options.ExpectedPane, Epoch: options.ExpectedEpoch},
+			Observed: observed, Verdict: verdict, Action: action,
+		}
+		if err := json.NewEncoder(stdout).Encode(witness); err != nil {
+			return ExitInternal
+		}
+		// Exit 0 means and only means "still the owner". A lane the hub does not
+		// project cannot be confirmed either way, so it exits non-zero as well:
+		// ExitConditionInvalid keeps it distinguishable from the exit 3 the
+		// contract reserves for an observed loss of ownership, and its witness
+		// still records action "self_stop".
+		switch verdict {
+		case "owner":
+			return ExitOK
+		case "not_owner":
+			return ExitTimeout
+		default:
+			return ExitConditionInvalid
+		}
 	default:
 		return ExitUsage
 	}
@@ -172,7 +225,7 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 		return lanesCLIOptions{}, errors.New("lanes command is required")
 	}
 	options := lanesCLIOptions{Command: args[0], seen: make(map[string]bool)}
-	if options.Command != "add" && options.Command != "rm" && options.Command != "ls" {
+	if options.Command != "add" && options.Command != "rm" && options.Command != "ls" && options.Command != "self-check" {
 		return lanesCLIOptions{}, errors.New("unknown lanes command")
 	}
 	positionals := make([]string, 0, 1)
@@ -198,7 +251,13 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 				return lanesCLIOptions{}, errors.New("invalid sink value")
 			}
 			options.Sink = parsed
-		case "--hub-url", "--hub-token-env", "--hub-cf-env", "--machine", "--pane", "--parent":
+		case "--hub-url", "--hub-token-env", "--hub-cf-env", "--machine", "--pane", "--parent", "--lane", "--expect-machine", "--expect-pane", "--expect-epoch":
+			switch name {
+			case "--lane", "--expect-machine", "--expect-pane", "--expect-epoch":
+				if options.Command != "self-check" {
+					return lanesCLIOptions{}, errors.New("invalid self-check flag")
+				}
+			}
 			if options.seen[name] {
 				return lanesCLIOptions{}, errors.New("duplicate lanes flag")
 			}
@@ -223,6 +282,18 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 				options.Pane = value
 			case "--parent":
 				options.Parent = value
+			case "--lane":
+				options.Lane = value
+			case "--expect-machine":
+				options.ExpectedMachine = value
+			case "--expect-pane":
+				options.ExpectedPane = value
+			case "--expect-epoch":
+				parsed, err := strconv.ParseUint(value, 10, 64)
+				if err != nil {
+					return lanesCLIOptions{}, errors.New("invalid expected epoch")
+				}
+				options.ExpectedEpoch = parsed
 			}
 		default:
 			return lanesCLIOptions{}, errors.New("unknown lanes flag")
@@ -243,8 +314,24 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 		if len(positionals) != 0 || options.seen["--machine"] || options.seen["--pane"] || options.seen["--parent"] || options.seen["--sink"] {
 			return lanesCLIOptions{}, errors.New("invalid lanes list flags")
 		}
+	case "self-check":
+		if len(positionals) != 0 || !options.seen["--lane"] || !options.seen["--expect-machine"] || !options.seen["--expect-pane"] || !options.seen["--expect-epoch"] {
+			return lanesCLIOptions{}, errors.New("self-check flags are required")
+		}
 	}
 	return options, nil
+}
+
+// lanesEnvelope decodes the GET /v1/lanes envelope. The decoder rejects
+// unknown fields, so every field the hub adds has to be mirrored here; the
+// lanes[] elements themselves are unchanged.
+type lanesEnvelope struct {
+	Lanes                   []hubLaneProjection `json:"lanes"`
+	ControlEpoch            uint64              `json:"control_epoch"`
+	ControlOwner            string              `json:"control_owner"`
+	ControlState            string              `json:"control_state"`
+	LastRequestID           string              `json:"last_request_id"`
+	AuthorityLaneProtection string              `json:"authority_lane_protection"`
 }
 
 func lanesCLIStatus(stderr io.Writer, status int) int {

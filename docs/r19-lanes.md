@@ -18,6 +18,11 @@ report file), which is shown in the relay text.
 The older `{"routes":...}` form and the `--report-relay-routes` flag remain
 read-compatible during migration.
 
+Lanes that carry control-plane authority are moved with
+`POST /v1/control-plane/transfer` rather than a direct `PUT`; the authority set
+itself is deployment configuration. See
+[control-plane-transfer.md](control-plane-transfer.md).
+
 After a `relay.inject`, the hub waits `RELAY_ACK_TIMEOUT` (15 seconds by
 default) for `relay.delivered` or `relay.unconfirmed`. On silence it broadcasts
 one hub-generated `relay.unconfirmed` with `{"reason":"ack_timeout"}`. The

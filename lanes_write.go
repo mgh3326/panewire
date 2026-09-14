@@ -104,9 +104,10 @@ type hubLaneDeleteResponse struct {
 }
 
 type lanesFileSnapshot struct {
-	Bytes  []byte
-	Routes map[string]reportRelayRoute
-	Exists bool
+	Bytes   []byte
+	Routes  map[string]reportRelayRoute
+	Control lanesFileControl
+	Exists  bool
 }
 
 // lanesWriteOps keeps filesystem failure injection local to package tests
@@ -147,6 +148,14 @@ func (h *HubServer) handlePutLane(writer http.ResponseWriter, request *http.Requ
 			writeLaneJSONError(writer, http.StatusBadRequest, "invalid_lane_request")
 			return
 		}
+		if errors.Is(err, errAuthorityLaneDirectWrite) {
+			writeAuthorityLaneError(writer, "authority_lane_direct_write")
+			return
+		}
+		if errors.Is(err, errAuthorityLanePolicyUnavailable) {
+			writeAuthorityLaneError(writer, "authority_lane_policy_unavailable")
+			return
+		}
 		writeLanesWriteError(writer, err)
 		return
 	}
@@ -169,6 +178,10 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 	}
 	if err := h.deleteLane(lane); err != nil {
 		switch {
+		case errors.Is(err, errAuthorityLaneDirectWrite):
+			writeAuthorityLaneError(writer, "authority_lane_direct_write")
+		case errors.Is(err, errAuthorityLanePolicyUnavailable):
+			writeAuthorityLaneError(writer, "authority_lane_policy_unavailable")
 		case errors.Is(err, errLaneNotFound):
 			writeLaneJSONError(writer, http.StatusNotFound, "lane_not_found")
 		case errors.Is(err, errLaneProtected):
@@ -183,6 +196,7 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 }
 
 var errLaneRequestInvalid = errors.New("lane request is invalid")
+var errAuthorityLaneDirectWrite = errors.New("authority lane direct write is disabled")
 
 func (h *HubServer) putLane(lane string, body hubLaneWriteRequest) (hubLaneProjection, bool, error) {
 	if h.reportRelayPath == "" {
@@ -191,6 +205,13 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest) (hubLaneProje
 	var projection hubLaneProjection
 	var created bool
 	err := withLanesFileLock(h.reportRelayPath, func() error {
+		// The authority decision comes from hub configuration, never from the
+		// lanes file, so it is answered before the source is read. Deciding
+		// after the read would let a malformed lanes file report lanes_invalid
+		// for a write this hub refuses outright.
+		if err := h.controlPlaneAuthorityDecision(lane); err != nil {
+			return err
+		}
 		snapshot, err := readLanesFileForWrite(h.reportRelayPath)
 		if err != nil {
 			return err
@@ -234,6 +255,9 @@ func (h *HubServer) deleteLane(lane string) error {
 		return errLanesWriteUnconfigured
 	}
 	err := withLanesFileLock(h.reportRelayPath, func() error {
+		if err := h.controlPlaneAuthorityDecision(lane); err != nil {
+			return err
+		}
 		snapshot, err := readLanesFileForWrite(h.reportRelayPath)
 		if err != nil {
 			return err
@@ -333,6 +357,18 @@ func writeLaneJSONError(writer http.ResponseWriter, status int, code string) {
 	}{Error: code})
 }
 
+// writeAuthorityLaneError adds a "use" field beside the unchanged "error" key.
+// A refusal that does not say where to go instead pushes an operator toward
+// editing the lanes file by hand, which is the one path this API cannot reach.
+func writeAuthorityLaneError(writer http.ResponseWriter, code string) {
+	writer.Header().Set("Content-Type", "application/json")
+	writer.WriteHeader(http.StatusConflict)
+	_ = json.NewEncoder(writer).Encode(struct {
+		Error string `json:"error"`
+		Use   string `json:"use"`
+	}{Error: code, Use: "POST /v1/control-plane/transfer"})
+}
+
 func writeLanesWriteError(writer http.ResponseWriter, err error) {
 	code := "lanes_write_failed"
 	if errors.Is(err, errLanesWriteInvalid) {
@@ -372,24 +408,28 @@ func readLanesFileForWrite(path string) (lanesFileSnapshot, error) {
 	if len(contents) > lanesFileMaxBytes {
 		return lanesFileSnapshot{}, errLanesWriteInvalid
 	}
-	routes, err := parseReportRelayRoutesForWrite(contents)
+	routes, control, err := parseReportRelayRoutesForWrite(contents)
 	if err != nil {
 		return lanesFileSnapshot{}, fmt.Errorf("%w: %v", errLanesWriteInvalid, err)
 	}
 	if routes == nil {
 		routes = make(map[string]reportRelayRoute)
 	}
-	return lanesFileSnapshot{Bytes: contents, Routes: routes, Exists: true}, nil
+	return lanesFileSnapshot{Bytes: contents, Routes: routes, Control: control, Exists: true}, nil
 }
 
 // parseReportRelayRoutesForWrite adds a loss-prevention precondition to the
 // best-effort hot loader. Reads may continue omitting semantically invalid
 // operator entries, but an unrelated write must never serialize that filtered
 // projection over the source file and silently erase them.
-func parseReportRelayRoutesForWrite(contents []byte) (map[string]reportRelayRoute, error) {
+func parseReportRelayRoutesForWrite(contents []byte) (map[string]reportRelayRoute, lanesFileControl, error) {
 	var source reportRelayRoutes
 	if err := json.Unmarshal(contents, &source); err != nil {
-		return nil, err
+		return nil, lanesFileControl{}, err
+	}
+	control, err := controlFromLanesFile(source.Control)
+	if err != nil {
+		return nil, lanesFileControl{}, err
 	}
 	authoritative := source.Routes
 	if source.Lanes != nil {
@@ -397,17 +437,17 @@ func parseReportRelayRoutesForWrite(contents []byte) (map[string]reportRelayRout
 	}
 	routes, err := parseReportRelayRoutes(contents)
 	if err != nil {
-		return nil, err
+		return nil, lanesFileControl{}, err
 	}
 	if len(routes) != len(authoritative) {
-		return nil, errReportRelayRoutesInvalid
+		return nil, lanesFileControl{}, errReportRelayRoutesInvalid
 	}
 	for lane := range authoritative {
 		if _, retained := routes[lane]; !retained {
-			return nil, errReportRelayRoutesInvalid
+			return nil, lanesFileControl{}, errReportRelayRoutesInvalid
 		}
 	}
-	return routes, nil
+	return routes, control, nil
 }
 
 func withLanesFileLock(path string, operation func() error) error {
@@ -434,9 +474,15 @@ func withLanesFileLock(path string, operation func() error) error {
 }
 
 func (h *HubServer) replaceLanesFile(path string, snapshot lanesFileSnapshot, now time.Time) error {
+	var control *lanesFileControl
+	if snapshot.Control.shouldPersist() {
+		copied := snapshot.Control
+		control = &copied
+	}
 	contents, err := json.MarshalIndent(struct {
-		Lanes map[string]reportRelayRoute `json:"lanes"`
-	}{Lanes: snapshot.Routes}, "", "  ")
+		Lanes   map[string]reportRelayRoute `json:"lanes"`
+		Control *lanesFileControl           `json:"control,omitempty"`
+	}{Lanes: snapshot.Routes, Control: control}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("%w: encode lanes file: %v", errLanesWriteFailed, err)
 	}
