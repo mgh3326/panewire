@@ -36,6 +36,15 @@ var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // their own stable machine ID entries.
 type HubServerConfig struct {
 	Tokens map[string]string
+	// ControlPlaneLanesPath names the operator-owned JSON file listing the
+	// authority lane bundle, hot-reloaded like the placement policy. It is the
+	// production path: which lanes carry authority is deployment configuration,
+	// never source. An empty path leaves direct lane writes unprotected, which
+	// is what every installation that has not opted in still gets.
+	ControlPlaneLanesPath string
+	// ControlPlaneLanes injects the same set in process. It is a test seam and
+	// a ControlPlaneLanesPath, when set, takes precedence over it.
+	ControlPlaneLanes []string
 	// AlertNodes is the optional watched-node allowlist. A nil map preserves
 	// the original behavior and watches every authenticated node. A non-nil
 	// map watches only its entries; all other authenticated nodes remain in
@@ -315,40 +324,48 @@ type HubServer struct {
 	notifier          HubNotifier
 	logger            *slog.Logger
 
-	mu                             sync.Mutex
-	nodes                          map[string]*hubNodeRecord
-	nodeQuota                      map[string]*hubQuotaRecord
-	lastNotes                      map[string]*HubLastNote
-	subscribers                    map[*hubEventSubscriber]struct{}
-	alerts                         map[string]*hubAlertState
-	burstPolicyPath                string
-	burstPolicy                    BurstPolicy
-	burstPolicyModTime             time.Time
-	burstState                     *hubBurstState
-	unknownMessages                uint64
-	unfencedCompletions            uint64
-	startedAt                      time.Time
-	uiAllowCFOnly                  bool
-	uiEvents                       []hubUIEvent
-	jobs                           map[string]*hubJobRecord
-	pendingRevocations             map[string]map[string]hubJobRevokedEvent
-	holds                          map[string]*hubBurstHold
-	placementPolicyPath            string
-	placementPolicy                PlacementPolicy
-	placementPolicyModTime         time.Time
-	placementPolicyObservedModTime time.Time
-	placementPolicyLoaded          bool
-	placementPolicyStatus          string
-	placementPolicyLastFailure     string
-	prometheusURL                  string
-	prometheusClient               *http.Client
-	prometheusBearer               string
-	prometheusBasicUser            string
-	prometheusBasicPass            string
-	placementCache                 placementCache
-	r19a                           r19aHubState
-	reportRelayPath                string
-	lanesWriteOps                  lanesWriteOps
+	mu                               sync.Mutex
+	nodes                            map[string]*hubNodeRecord
+	nodeQuota                        map[string]*hubQuotaRecord
+	lastNotes                        map[string]*HubLastNote
+	subscribers                      map[*hubEventSubscriber]struct{}
+	alerts                           map[string]*hubAlertState
+	burstPolicyPath                  string
+	burstPolicy                      BurstPolicy
+	burstPolicyModTime               time.Time
+	burstState                       *hubBurstState
+	unknownMessages                  uint64
+	unfencedCompletions              uint64
+	startedAt                        time.Time
+	uiAllowCFOnly                    bool
+	uiEvents                         []hubUIEvent
+	jobs                             map[string]*hubJobRecord
+	pendingRevocations               map[string]map[string]hubJobRevokedEvent
+	holds                            map[string]*hubBurstHold
+	placementPolicyPath              string
+	placementPolicy                  PlacementPolicy
+	placementPolicyModTime           time.Time
+	placementPolicyObservedModTime   time.Time
+	placementPolicyLoaded            bool
+	placementPolicyStatus            string
+	placementPolicyLastFailure       string
+	prometheusURL                    string
+	prometheusClient                 *http.Client
+	prometheusBearer                 string
+	prometheusBasicUser              string
+	prometheusBasicPass              string
+	placementCache                   placementCache
+	r19a                             r19aHubState
+	reportRelayPath                  string
+	lanesWriteOps                    lanesWriteOps
+	controlReadiness                 func(controlPlaneTransferRequest, map[string]reportRelayRoute) []controlPlaneReadinessCheck
+	controlPlaneLanesPath            string
+	controlPlaneLanes                map[string]struct{}
+	controlPlaneLanesModTime         time.Time
+	controlPlaneLanesObservedModTime time.Time
+	controlPlaneLanesLoaded          bool
+	controlPlaneLanesStatus          string
+	controlPlaneLanesLastFailure     string
 	// relayDedupe is an active injection claim. lanePersisted keeps the durable
 	// row ID while that claim is deliberately released between lane retries.
 	relayDedupe                 map[string]int64
@@ -458,11 +475,45 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if err != nil {
 		return nil, errors.New("hub accepting overrides are invalid")
 	}
+	controlPlaneLanes := make(map[string]struct{}, len(config.ControlPlaneLanes))
+	for _, lane := range config.ControlPlaneLanes {
+		if !laneNamePattern.MatchString(lane) {
+			return nil, errors.New("hub control-plane lanes are invalid")
+		}
+		if _, duplicate := controlPlaneLanes[lane]; duplicate {
+			return nil, errors.New("hub control-plane lanes are invalid")
+		}
+		controlPlaneLanes[lane] = struct{}{}
+	}
+	var controlPlaneLanesModTime time.Time
+	var controlPlaneLanesObservedModTime time.Time
+	controlPlaneLanesLoaded := true
+	controlPlaneLanesStatus := "default"
+	controlPlaneLanesLastFailure := ""
+	if len(controlPlaneLanes) != 0 {
+		controlPlaneLanesStatus = "current"
+	}
+	if config.ControlPlaneLanesPath != "" {
+		// Unlike the placement policy this does not refuse to start: an
+		// authority set that has never loaded is a fail-closed state the hub
+		// has to be running to report, not a reason to leave the hub down.
+		controlPlaneLanesLoaded = false
+		controlPlaneLanesStatus = "invalid"
+		controlPlaneLanesLastFailure = controlPlaneLanesFailureReason(config.ControlPlaneLanesPath)
+		controlPlaneLanes = make(map[string]struct{})
+		if lanes, modTime, err := LoadControlPlaneLanes(config.ControlPlaneLanesPath); err == nil {
+			controlPlaneLanes, controlPlaneLanesModTime = lanes, modTime
+			controlPlaneLanesObservedModTime = modTime
+			controlPlaneLanesLoaded = true
+			controlPlaneLanesStatus = "current"
+			controlPlaneLanesLastFailure = ""
+		}
+	}
 	return &HubServer{
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
+		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
 	}, nil
 }
 
@@ -495,6 +546,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/lanes", h.handleLanes)
 	mux.HandleFunc("PUT /v1/lanes/{lane}", h.handlePutLane)
 	mux.HandleFunc("DELETE /v1/lanes/{lane}", h.handleDeleteLane)
+	mux.HandleFunc("POST /v1/control-plane/transfer", h.handleControlPlaneTransfer)
 	mux.HandleFunc("POST /v1/nodes/{machine}/accepting", h.handleAcceptingOverride)
 	mux.HandleFunc("GET /v1/burst", h.handleBurst)
 	mux.HandleFunc("POST /v1/burst/request", h.handleBurstRequest)
@@ -752,7 +804,7 @@ func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	writer.Header().Set("Content-Type", "application/json")
-	routes, err := loadReportRelayRoutesResult(h.reportRelayPath)
+	routes, control, controlReadable, err := loadReportRelayRoutesAndControlResult(h.reportRelayPath)
 	if err != nil {
 		writer.WriteHeader(http.StatusInternalServerError)
 		_ = json.NewEncoder(writer).Encode(struct {
@@ -770,8 +822,17 @@ func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Reques
 		return lanes[i].Lane < lanes[j].Lane
 	})
 	_ = json.NewEncoder(writer).Encode(struct {
-		Lanes []hubLaneProjection `json:"lanes"`
-	}{Lanes: lanes})
+		Lanes                   []hubLaneProjection `json:"lanes"`
+		ControlEpoch            uint64              `json:"control_epoch"`
+		ControlOwner            string              `json:"control_owner"`
+		ControlState            string              `json:"control_state"`
+		LastRequestID           string              `json:"last_request_id"`
+		AuthorityLaneProtection string              `json:"authority_lane_protection"`
+	}{
+		Lanes: lanes, ControlEpoch: control.Epoch, ControlOwner: control.Owner,
+		ControlState: string(control.State), LastRequestID: control.LastRequestID,
+		AuthorityLaneProtection: h.authorityLaneProtection(controlReadable),
+	})
 }
 
 func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Request) {
