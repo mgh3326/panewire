@@ -2005,3 +2005,211 @@ func TestControlPlaneW34UnreadableControlOutranksDisabled(t *testing.T) {
 		t.Fatalf("unconfigured hub with a damaged control block: protection=%q want invalid", got)
 	}
 }
+
+// controlPlaneB1Fixture sets up a hub whose authority bundle comes from a
+// policy file, so the bundle can be changed under a running hub the way the
+// hot reload lets an operator change it.
+func controlPlaneB1Fixture(t *testing.T, bundle string) (*HubServer, string, string) {
+	t.Helper()
+	root := t.TempDir()
+	path := filepath.Join(root, "lanes.json")
+	controlPlaneRoutesFixture(t, path, `,"lane-general":{"machine":"machine-a","pane":"w1:p3"},"lane-other":{"machine":"machine-a","pane":"w1:p4"}`)
+	policyPath := filepath.Join(root, "control-plane-lanes.json")
+	controlPlaneLanesPolicyFixture(t, policyPath, bundle)
+	return controlPlaneHubWithPolicy(t, path, policyPath), path, policyPath
+}
+
+// TestControlPlaneW7RetryConvergesAcrossAPolicyReload is the convergence case a
+// fixed injected set cannot reach. The authority policy is reloadable by
+// design, so a caller that lost its response can retry into a hub whose bundle
+// has since changed. The stored result is still the result: anything else
+// leaves that caller unable to find out whether its transfer happened.
+func TestControlPlaneW7RetryConvergesAcrossAPolicyReload(t *testing.T) {
+	hub, path, policyPath := controlPlaneB1Fixture(t, `{"authority_lanes":["lane-alpha","lane-beta"]}`)
+	controlPlanePrepare(t, hub, controlPlaneID(0x900), 0)
+	id := controlPlaneID(0x901)
+	body := controlPlaneForward(id, "commit", 0)
+	first := controlPlanePost(t, hub, body)
+	if first.Code != http.StatusOK {
+		t.Fatalf("commit status=%d body=%s", first.Code, first.Body.String())
+	}
+	afterCommit := mustReadControlPlaneFile(t, path)
+
+	// The operator repoints the bundle at a different, equally valid pair.
+	controlPlaneLanesPolicyFixture(t, policyPath, `{"authority_lanes":["lane-general","lane-other"]}`)
+	// The reload really happened: a request that was the bundle a moment ago
+	// is no longer one.
+	fresh := controlPlanePost(t, hub, controlPlaneForward(controlPlaneID(0x902), "prepare", 1))
+	if fresh.Code != http.StatusConflict || controlPlaneJSONError(t, fresh)["error"] != "authority_bundle_mismatch" {
+		t.Fatalf("the policy did not reload: status=%d body=%s", fresh.Code, fresh.Body.String())
+	}
+
+	// The caller never saw the first response and retries it verbatim.
+	for retry := 0; retry < 3; retry++ {
+		again := controlPlanePost(t, hub, body)
+		if again.Code != first.Code || again.Body.String() != first.Body.String() {
+			t.Fatalf("retry=%d did not converge on the stored result: status=%d body=%q want=%q", retry, again.Code, again.Body.String(), first.Body.String())
+		}
+	}
+	if !bytes.Equal(afterCommit, mustReadControlPlaneFile(t, path)) {
+		t.Fatal("a converged retry changed the lanes file")
+	}
+	if epoch := controlPlaneEpoch(t, hub); epoch != 1 {
+		t.Fatalf("epoch=%d want 1", epoch)
+	}
+}
+
+// TestControlPlaneB1PreconditionOrder asserts the order itself rather than any
+// one of its consequences. Every precondition here can change while a hub runs,
+// so each has to sit behind the stored replay, and the bundle check has to sit
+// ahead of the epoch and route checks it would otherwise mask. A check moved to
+// the wrong place is the defect class this pins down; only an order assertion
+// catches that class in general.
+func TestControlPlaneB1PreconditionOrder(t *testing.T) {
+	// 1. The stored replay outranks the bundle check: the bundle changed under
+	//    the hub, and the retry still converges.
+	t.Run("replay outranks bundle", func(t *testing.T) {
+		hub, _, policyPath := controlPlaneB1Fixture(t, `{"authority_lanes":["lane-alpha","lane-beta"]}`)
+		id := controlPlaneID(0x910)
+		body := controlPlaneForward(id, "prepare", 0)
+		first := controlPlanePost(t, hub, body)
+		if first.Code != http.StatusOK {
+			t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+		}
+		controlPlaneLanesPolicyFixture(t, policyPath, `{"authority_lanes":["lane-general","lane-other"]}`)
+		again := controlPlanePost(t, hub, body)
+		if again.Code != first.Code || again.Body.String() != first.Body.String() {
+			t.Fatalf("the bundle check ran before the stored replay: status=%d body=%s want=%s", again.Code, again.Body.String(), first.Body.String())
+		}
+	})
+
+	// 2. The stored replay outranks the epoch check: the retry carries the
+	//    epoch it still believes in, which is now one behind.
+	t.Run("replay outranks epoch", func(t *testing.T) {
+		hub, _, _ := controlPlaneB1Fixture(t, `{"authority_lanes":["lane-alpha","lane-beta"]}`)
+		controlPlanePrepare(t, hub, controlPlaneID(0x920), 0)
+		body := controlPlaneForward(controlPlaneID(0x921), "commit", 0)
+		first := controlPlanePost(t, hub, body)
+		if first.Code != http.StatusOK {
+			t.Fatalf("first status=%d body=%s", first.Code, first.Body.String())
+		}
+		again := controlPlanePost(t, hub, body)
+		if again.Code != first.Code || again.Body.String() != first.Body.String() {
+			t.Fatalf("the epoch check ran before the stored replay: status=%d body=%s", again.Code, again.Body.String())
+		}
+	})
+
+	// 3. The bundle check outranks the epoch and route checks. This request
+	//    fails all three, and the answer has to name the bundle: an operator
+	//    told "stale_epoch" would go hunting for the current epoch instead of
+	//    noticing they addressed the wrong lanes entirely.
+	t.Run("bundle outranks epoch and route", func(t *testing.T) {
+		hub, path, _ := controlPlaneB1Fixture(t, `{"authority_lanes":["lane-alpha","lane-beta"]}`)
+		wrongExpected := map[string]controlPlaneTransferRoute{
+			"lane-general": {Machine: "machine-a", Pane: "w9:p9"},
+			"lane-other":   {Machine: "machine-a", Pane: "w9:p8"},
+		}
+		wrongTarget := map[string]controlPlaneTransferRoute{
+			"lane-general": {Machine: "machine-b", Pane: "w2:p3"},
+			"lane-other":   {Machine: "machine-b", Pane: "w2:p4"},
+		}
+		before := mustReadControlPlaneFile(t, path)
+		writer := controlPlanePost(t, hub, controlPlaneBody(controlPlaneID(0x930), "prepare", 99, wrongExpected, wrongTarget, 0, controlPlaneReady))
+		if writer.Code != http.StatusConflict {
+			t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
+		}
+		if got := controlPlaneJSONError(t, writer)["error"]; got != "authority_bundle_mismatch" {
+			t.Fatalf("error=%q want authority_bundle_mismatch: the bundle check ran after the epoch or route check", got)
+		}
+		if !bytes.Equal(before, mustReadControlPlaneFile(t, path)) {
+			t.Fatal("a refused transfer changed the lanes file")
+		}
+	})
+
+	// 4. And a bundle the history has never seen is still refused: moving the
+	//    check did not weaken it.
+	t.Run("a new request is still refused", func(t *testing.T) {
+		hub, _, _ := controlPlaneB1Fixture(t, `{"authority_lanes":["lane-alpha","lane-beta"]}`)
+		mixed := map[string]controlPlaneTransferRoute{
+			"lane-alpha":   controlPlaneSideA["lane-alpha"],
+			"lane-general": {Machine: "machine-a", Pane: "w1:p3"},
+		}
+		mixedTarget := map[string]controlPlaneTransferRoute{
+			"lane-alpha":   controlPlaneSideB["lane-alpha"],
+			"lane-general": {Machine: "machine-b", Pane: "w2:p3"},
+		}
+		writer := controlPlanePost(t, hub, controlPlaneBody(controlPlaneID(0x940), "prepare", 0, mixed, mixedTarget, 0, controlPlaneReady))
+		if writer.Code != http.StatusConflict || controlPlaneJSONError(t, writer)["error"] != "authority_bundle_mismatch" {
+			t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
+		}
+		if controlPlaneJSONError(t, writer)["use"] == "" {
+			t.Fatalf("the refusal lost its guidance once it moved inside the lock: %s", writer.Body.String())
+		}
+	})
+}
+
+// TestControlPlaneB1BundleRefusalInsideTheLockLeavesNothingBehind covers what
+// changed by moving the check: it now fails with the lanes file lock held. That
+// is a new failure position, not a new failure — but only if the lock is
+// released and nothing half-written is left behind.
+func TestControlPlaneB1BundleRefusalInsideTheLockLeavesNothingBehind(t *testing.T) {
+	hub, path, _ := controlPlaneB1Fixture(t, `{"authority_lanes":["lane-alpha","lane-beta"]}`)
+	root := filepath.Dir(path)
+	before := mustReadControlPlaneFile(t, path)
+
+	mixed := map[string]controlPlaneTransferRoute{
+		"lane-alpha":   controlPlaneSideA["lane-alpha"],
+		"lane-general": {Machine: "machine-a", Pane: "w1:p3"},
+	}
+	mixedTarget := map[string]controlPlaneTransferRoute{
+		"lane-alpha":   controlPlaneSideB["lane-alpha"],
+		"lane-general": {Machine: "machine-b", Pane: "w2:p3"},
+	}
+	writer := controlPlanePost(t, hub, controlPlaneBody(controlPlaneID(0x950), "prepare", 0, mixed, mixedTarget, 0, controlPlaneReady))
+	if writer.Code != http.StatusConflict || controlPlaneJSONError(t, writer)["error"] != "authority_bundle_mismatch" {
+		t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
+	}
+
+	// The file is untouched and no scratch survives the refusal.
+	if !bytes.Equal(before, mustReadControlPlaneFile(t, path)) {
+		t.Fatalf("the refused transfer changed the lanes file: %s", mustReadControlPlaneFile(t, path))
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	present := make(map[string]struct{}, len(entries))
+	for _, entry := range entries {
+		present[entry.Name()] = struct{}{}
+		if strings.Contains(entry.Name(), ".tmp-") {
+			t.Fatalf("a temporary file survived the refusal: %s", entry.Name())
+		}
+		if strings.Contains(entry.Name(), ".bak-") {
+			t.Fatalf("a backup was taken for a transfer that never wrote: %s", entry.Name())
+		}
+	}
+	for _, expected := range []string{"lanes.json", "control-plane-lanes.json"} {
+		if _, found := present[expected]; !found {
+			t.Fatalf("%s is missing: %v", expected, present)
+		}
+	}
+
+	// And the lock is free: the next operation completes rather than hanging.
+	// A lock left held would block here forever, so this waits with a bound.
+	done := make(chan int, 1)
+	go func() {
+		done <- controlPlanePost(t, hub, controlPlaneForward(controlPlaneID(0x951), "prepare", 0)).Code
+	}()
+	select {
+	case code := <-done:
+		if code != http.StatusOK {
+			t.Fatalf("the operation after a refusal failed: status=%d", code)
+		}
+	case <-time.After(20 * time.Second):
+		t.Fatal("the lanes file lock was not released by the bundle refusal")
+	}
+	// The write path still works afterwards too.
+	if remove := lanesWriteRequest(t, hub, http.MethodDelete, "/v1/lanes/lane-other", controlPlaneOperatorToken, ""); remove.Code != http.StatusOK {
+		t.Fatalf("an ordinary lane write after a refusal failed: status=%d body=%s", remove.Code, remove.Body.String())
+	}
+}

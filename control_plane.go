@@ -206,22 +206,15 @@ func (h *HubServer) handleControlPlaneTransfer(writer http.ResponseWriter, reque
 		writeLaneJSONError(writer, http.StatusBadRequest, code)
 		return
 	}
-	// The bundle is decided from hub configuration, so it is answered before
-	// any file work. A transfer that carries only part of the authority set
-	// would leave the rest with the old owner, which is the split this endpoint
-	// exists to make impossible.
-	if err := h.controlPlaneBundleDecision(body.Lanes); err != nil {
-		var bundleError *controlPlaneTransferError
-		if errors.As(err, &bundleError) {
-			writeAuthorityLaneError(writer, bundleError.code)
-			return
-		}
-	}
 	fingerprint := controlPlaneRequestFingerprint(body)
 	response, err := h.transferControlPlane(body, fingerprint)
 	if err != nil {
 		var transferError *controlPlaneTransferError
 		if errors.As(err, &transferError) {
+			if _, guided := authorityLaneErrorGuidance[transferError.code]; guided {
+				writeAuthorityLaneError(writer, transferError.code)
+				return
+			}
 			writeLaneJSONError(writer, transferError.status, transferError.code)
 			return
 		}
@@ -358,6 +351,17 @@ func (h *HubServer) transferControlPlane(request controlPlaneTransferRequest, fi
 			}
 			response = controlPlaneResponseFromHistory(record)
 			return nil
+		}
+		// Every precondition that can change under a running hub sits behind
+		// that replay, and the authority bundle is one of them: the policy file
+		// hot-reloads, so the same request can be a valid bundle at the first
+		// attempt and a mismatched one at the retry. Deciding it before the
+		// replay would answer a caller who lost its response with a different
+		// result than the one already stored, which is the convergence AC1
+		// asks for. A request the history has never seen is refused here as
+		// before.
+		if err := h.controlPlaneBundleDecision(request.Lanes); err != nil {
+			return err
 		}
 		if *request.ExpectedEpoch != snapshot.Control.Epoch {
 			return controlPlaneConflictError("stale_epoch")
