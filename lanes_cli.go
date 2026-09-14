@@ -187,6 +187,21 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 				break
 			}
 			observed = controlPlaneSelfCheckObserved{Machine: lane.Machine, Pane: lane.Pane, Epoch: result.ControlEpoch, Owner: result.ControlOwner, State: result.ControlState}
+			// The hub reports "invalid" when it could not validate the control
+			// state it just returned, and substitutes epoch 0 for the values it
+			// could not read. Confirming ownership from those numbers would
+			// answer "proceed" out of the one reading the server disowned,
+			// which is the answer this hook exists never to give. The
+			// observation is still recorded so the operator can see what was
+			// read; the verdict stays unknown.
+			//
+			// "stale" is not the same case: it means a policy reload failed
+			// while a last-known-good set is still held, and the control block
+			// itself parsed. Epoch and owner are trustworthy there, so the
+			// verdict is decided normally.
+			if result.AuthorityLaneProtection == "invalid" {
+				break
+			}
 			if lane.Machine == options.ExpectedMachine && lane.Pane == options.ExpectedPane && result.ControlEpoch == options.ExpectedEpoch {
 				verdict, action = "owner", "proceed"
 			} else {

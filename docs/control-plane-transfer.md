@@ -61,6 +61,20 @@ readiness 게이트는 **`commit` 경로에만** 적용된다. 계약(A3)이 요
 | 지정됨 · 로드 후 reload 실패 | `stale` | last-known-good 집합만 거부, 일반 레인 정상 |
 | 지정됨 · 로드 성공 | `current` | 설정된 집합만 거부, 일반 레인 정상 |
 
+🔴 **transfer 요청의 두 lane 은 설정된 권위 집합과 정확히 일치해야 한다.** 일치하지 않으면
+409 `authority_bundle_mismatch` 이고 변경은 0 이다. 권위 레인 하나와 무관한 레인 하나를 함께
+넘기면 남은 권위 레인이 옛 owner 에 남는다 — 이 API 가 막으려는 split authority 그 자체다.
+`invalid`(로드 실패) 상태에서는 transfer 도 409 로 거부된다. 무엇이 묶음인지 모르는 상태에서
+묶음 이전을 허용할 수 없다.
+
+권위 집합이 **미설정(`disabled`)이면 이 일치 검사는 적용되지 않는다** — 대조할 묶음이 없기
+때문이고, 기본 배포에서 API 가 죽지 않게 하기 위해서다. 🔴 즉 **보호를 켜기 전까지는 transfer 가
+묶음 단위임을 강제하지 못한다.** 배포 절차에서 `--control-plane-lanes` 를 지정하라.
+
+🔴 요청의 `lanes` 는 정확히 2개이므로, 위 일치 규칙은 **권위 집합도 정확히 2개**여야 transfer 가
+가능하다는 뜻이다. 3개 이상을 설정하면 모든 transfer 가 `authority_bundle_mismatch` 로 거부된다.
+
+
 `invalid` 에서 모든 lane 을 막는 이유는 파일을 못 읽으면 **어느 레인이 권위
 레인인지 알 수 없기** 때문이다. 그 상태에서 통과시키면 가드가 없는 것과 같다.
 
@@ -99,6 +113,9 @@ exit code 로 판정을 알린다.
 | `unknown` (레인이 투영에 없거나 투영이 불량) | 5 | `self_stop` |
 
 exit 0 은 "여전히 owner" 일 때만 나온다. 확인할 수 없는 상태는 0 이 아니다.
+🔴 `authority_lane_protection` 이 `invalid` 면 route 와 epoch 가 기대값과 같아 보여도 `unknown`
+으로 간다 — hub 가 검증하지 못한다고 말한 control 상태에서 나온 값이기 때문이다. `stale` 은
+last-known-good 집합이 있고 control 블록 자체는 정상이므로 평소대로 판정한다.
 
 이것은 강제가 아니라 1회 관측이며, 확인을 건너뛴 세션은 여전히 행동할 수 있다.
 

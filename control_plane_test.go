@@ -1339,7 +1339,7 @@ func TestControlPlaneW29UnreadablePolicyRefusesEveryLane(t *testing.T) {
 					t.Fatalf("PUT %s status=%d body=%s", lane, put.Code, put.Body.String())
 				}
 				fields := controlPlaneJSONError(t, put)
-				if fields["error"] != "authority_lane_policy_unavailable" || fields["use"] != "POST /v1/control-plane/transfer" {
+				if fields["error"] != "authority_lane_policy_unavailable" || fields["use"] != "restore the --control-plane-lanes policy file" {
 					t.Fatalf("PUT %s body=%s", lane, put.Body.String())
 				}
 				remove := lanesWriteRequest(t, hub, http.MethodDelete, "/v1/lanes/"+lane, controlPlaneOperatorToken, "")
@@ -1729,23 +1729,279 @@ func TestControlPlaneDamagedControlBlockStaysReadable(t *testing.T) {
 				}
 			}
 
-			// (5) The self-check witness still works: the observation hook must
-			// not die with the thing it observes.
+			// (5) The self-check witness survives and says stop. Surviving is
+			// the point of F-1 — the observation hook must not die with the
+			// thing it observes — but surviving into "proceed" would be worse
+			// than dying: the hub has just said it cannot validate this control
+			// state, and the route match is against an epoch it substituted.
 			server := httptest.NewServer(hub.Handler())
 			defer server.Close()
 			envPath := controlPlaneSelfCheckEnv(t)
 			args := []string{"self-check", "--lane", "lane-alpha", "--expect-machine", "machine-a", "--expect-pane", "w1:p1", "--expect-epoch", "0", "--hub-url", server.URL, "--hub-token-env", envPath}
 			var stdout, stderr strings.Builder
-			if code := runLanesCLI(args, &stdout, &stderr, hubCLIDeps{HTTPClient: server.Client(), AllowInsecureForTests: true}); code != ExitOK {
-				t.Fatalf("self-check died with the control block: code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
-			}
+			code := runLanesCLI(args, &stdout, &stderr, hubCLIDeps{HTTPClient: server.Client(), AllowInsecureForTests: true})
 			var witness controlPlaneSelfCheckWitness
 			if err := json.Unmarshal([]byte(stdout.String()), &witness); err != nil {
-				t.Fatal(err)
+				t.Fatalf("self-check died with the control block: code=%d stdout=%q stderr=%q err=%v", code, stdout.String(), stderr.String(), err)
 			}
-			if witness.Verdict != "owner" || witness.Observed.Machine != "machine-a" {
-				t.Fatalf("witness=%+v", witness)
+			if witness.Kind != "control_plane.self_check" || witness.Observed.Machine != "machine-a" {
+				t.Fatalf("the witness did not record what it read: %+v", witness)
+			}
+			if code == ExitOK || witness.Verdict == "owner" || witness.Action != "self_stop" {
+				t.Fatalf("self-check confirmed ownership from a control state the hub disowned: code=%d witness=%+v", code, witness)
+			}
+			if code != ExitConditionInvalid || witness.Verdict != "unknown" {
+				t.Fatalf("code=%d witness=%+v want unknown/self_stop and exit %d", code, witness, ExitConditionInvalid)
 			}
 		})
+	}
+}
+
+// TestControlPlaneG1TransferMustCarryTheWholeBundle is the split this endpoint
+// exists to prevent, approached from the other side: not a partial write, but a
+// request that only ever names part of the bundle. Moving one authority lane
+// and something unrelated leaves the other authority lane with the old owner
+// just as surely as a half-finished write would.
+func TestControlPlaneG1TransferMustCarryTheWholeBundle(t *testing.T) {
+	authorityPair := map[string]controlPlaneTransferRoute{
+		"lane-alpha": controlPlaneSideA["lane-alpha"],
+		"lane-beta":  controlPlaneSideA["lane-beta"],
+	}
+	authorityTarget := map[string]controlPlaneTransferRoute{
+		"lane-alpha": controlPlaneSideB["lane-alpha"],
+		"lane-beta":  controlPlaneSideB["lane-beta"],
+	}
+	mixedPair := map[string]controlPlaneTransferRoute{
+		"lane-alpha":   controlPlaneSideA["lane-alpha"],
+		"lane-general": {Machine: "machine-a", Pane: "w1:p3"},
+	}
+	mixedTarget := map[string]controlPlaneTransferRoute{
+		"lane-alpha":   controlPlaneSideB["lane-alpha"],
+		"lane-general": {Machine: "machine-b", Pane: "w2:p3"},
+	}
+	unrelatedPair := map[string]controlPlaneTransferRoute{
+		"lane-general": {Machine: "machine-a", Pane: "w1:p3"},
+		"lane-other":   {Machine: "machine-a", Pane: "w1:p4"},
+	}
+	unrelatedTarget := map[string]controlPlaneTransferRoute{
+		"lane-general": {Machine: "machine-b", Pane: "w2:p3"},
+		"lane-other":   {Machine: "machine-b", Pane: "w2:p4"},
+	}
+	extras := `,"lane-general":{"machine":"machine-a","pane":"w1:p3"},"lane-other":{"machine":"machine-a","pane":"w1:p4"}`
+
+	// (1) The configured bundle, exactly, transfers.
+	t.Run("exact bundle commits", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "lanes.json")
+		controlPlaneRoutesFixture(t, path, extras)
+		hub := controlPlaneHub(t, path, "lane-alpha", "lane-beta")
+		controlPlanePrepare(t, hub, controlPlaneID(0x700), 0)
+		commit := controlPlanePost(t, hub, controlPlaneForward(controlPlaneID(0x701), "commit", 0))
+		if commit.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", commit.Code, commit.Body.String())
+		}
+		controlPlaneAssertRoutes(t, path, controlPlaneSideB)
+	})
+
+	// (2)(3)(4) Anything that is not the whole bundle is refused, unchanged.
+	for _, test := range []struct {
+		name     string
+		expected map[string]controlPlaneTransferRoute
+		target   map[string]controlPlaneTransferRoute
+	}{
+		{"one authority lane plus an unrelated lane", mixedPair, mixedTarget},
+		{"two unrelated lanes", unrelatedPair, unrelatedTarget},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			for index, action := range []string{"prepare", "drain", "commit"} {
+				path := filepath.Join(t.TempDir(), "lanes.json")
+				controlPlaneRoutesFixture(t, path, extras)
+				hub := controlPlaneHub(t, path, "lane-alpha", "lane-beta")
+				before := mustReadControlPlaneFile(t, path)
+				writer := controlPlanePost(t, hub, controlPlaneBody(controlPlaneID(0x710+index), action, 0, test.expected, test.target, 0, controlPlaneReady))
+				if writer.Code != http.StatusConflict {
+					t.Fatalf("%s status=%d body=%s", action, writer.Code, writer.Body.String())
+				}
+				fields := controlPlaneJSONError(t, writer)
+				if fields["error"] != "authority_bundle_mismatch" || fields["use"] == "" {
+					t.Fatalf("%s body=%s", action, writer.Body.String())
+				}
+				if !bytes.Equal(before, mustReadControlPlaneFile(t, path)) {
+					t.Fatalf("%s changed the lanes file", action)
+				}
+				if epoch := controlPlaneEpoch(t, hub); epoch != 0 {
+					t.Fatalf("%s moved the epoch to %d", action, epoch)
+				}
+			}
+		})
+	}
+
+	// (4) A bundle larger than a request can carry is a mismatch, not a
+	// partial transfer: the request schema fixes lanes at exactly two.
+	t.Run("bundle wider than the request", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "lanes.json")
+		controlPlaneRoutesFixture(t, path, extras)
+		hub := controlPlaneHub(t, path, "lane-alpha", "lane-beta", "lane-general")
+		before := mustReadControlPlaneFile(t, path)
+		writer := controlPlanePost(t, hub, controlPlaneBody(controlPlaneID(0x720), "prepare", 0, authorityPair, authorityTarget, 0, controlPlaneReady))
+		if writer.Code != http.StatusConflict || controlPlaneJSONError(t, writer)["error"] != "authority_bundle_mismatch" {
+			t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
+		}
+		if !bytes.Equal(before, mustReadControlPlaneFile(t, path)) {
+			t.Fatal("a refused transfer changed the lanes file")
+		}
+	})
+
+	// (5) An unconfigured hub has no bundle to compare against and keeps the
+	// behavior it had: the guard is opt-in.
+	t.Run("unconfigured hub is unchanged", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "lanes.json")
+		controlPlaneRoutesFixture(t, path, extras)
+		hub := controlPlaneHub(t, path)
+		writer := controlPlanePost(t, hub, controlPlaneBody(controlPlaneID(0x730), "prepare", 0, mixedPair, mixedTarget, 0, controlPlaneReady))
+		if writer.Code != http.StatusOK {
+			t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
+		}
+	})
+
+	// (6) A policy that never loaded refuses the transfer too. Moving a bundle
+	// the hub cannot name is not safer than not moving it.
+	t.Run("unloaded policy refuses transfer", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "lanes.json")
+		controlPlaneRoutesFixture(t, path, extras)
+		policyPath := filepath.Join(root, "control-plane-lanes.json")
+		controlPlaneLanesPolicyFixture(t, policyPath, `{"authority_lanes":`)
+		hub := controlPlaneHubWithPolicy(t, path, policyPath)
+		before := mustReadControlPlaneFile(t, path)
+		writer := controlPlanePost(t, hub, controlPlaneForward(controlPlaneID(0x740), "prepare", 0))
+		if writer.Code != http.StatusConflict {
+			t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
+		}
+		fields := controlPlaneJSONError(t, writer)
+		if fields["error"] != "authority_lane_policy_unavailable" || fields["use"] == "" {
+			t.Fatalf("body=%s", writer.Body.String())
+		}
+		if !bytes.Equal(before, mustReadControlPlaneFile(t, path)) {
+			t.Fatal("a refused transfer changed the lanes file")
+		}
+	})
+
+	// And a loaded policy file drives the same rule as the injected set.
+	t.Run("loaded policy enforces its own bundle", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "lanes.json")
+		controlPlaneRoutesFixture(t, path, extras)
+		policyPath := filepath.Join(root, "control-plane-lanes.json")
+		controlPlaneLanesPolicyFixture(t, policyPath, `{"authority_lanes":["lane-alpha","lane-beta"]}`)
+		hub := controlPlaneHubWithPolicy(t, path, policyPath)
+		if writer := controlPlanePost(t, hub, controlPlaneBody(controlPlaneID(0x750), "prepare", 0, mixedPair, mixedTarget, 0, controlPlaneReady)); writer.Code != http.StatusConflict {
+			t.Fatalf("mixed pair status=%d body=%s", writer.Code, writer.Body.String())
+		}
+		if writer := controlPlanePost(t, hub, controlPlaneForward(controlPlaneID(0x751), "prepare", 0)); writer.Code != http.StatusOK {
+			t.Fatalf("exact bundle status=%d body=%s", writer.Code, writer.Body.String())
+		}
+	})
+}
+
+// TestControlPlaneG2SelfCheckNeverProceedsOnDisownedState states the rule on
+// its own: exit 0 requires a projection the hub is willing to stand behind.
+func TestControlPlaneG2SelfCheckNeverProceedsOnDisownedState(t *testing.T) {
+	run := func(t *testing.T, hub *HubServer, epoch string) (int, controlPlaneSelfCheckWitness) {
+		t.Helper()
+		server := httptest.NewServer(hub.Handler())
+		defer server.Close()
+		envPath := controlPlaneSelfCheckEnv(t)
+		args := []string{"self-check", "--lane", "lane-alpha", "--expect-machine", "machine-a", "--expect-pane", "w1:p1", "--expect-epoch", epoch, "--hub-url", server.URL, "--hub-token-env", envPath}
+		var stdout, stderr strings.Builder
+		code := runLanesCLI(args, &stdout, &stderr, hubCLIDeps{HTTPClient: server.Client(), AllowInsecureForTests: true})
+		var witness controlPlaneSelfCheckWitness
+		if err := json.Unmarshal([]byte(stdout.String()), &witness); err != nil {
+			t.Fatalf("code=%d stdout=%q stderr=%q err=%v", code, stdout.String(), stderr.String(), err)
+		}
+		return code, witness
+	}
+
+	// A hub that cannot validate its control state never yields exit 0, even
+	// when every field the check compares happens to line up.
+	t.Run("damaged control block", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "lanes.json")
+		contents := `{"lanes":{"lane-alpha":{"machine":"machine-a","pane":"w1:p1"},"lane-beta":{"machine":"machine-a","pane":"w1:p2"}},"control":{"epoch":9,"owner":"machine-a","state":"NOT-A-STATE","history":[]}}`
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+		hub := controlPlaneHub(t, path, "lane-alpha", "lane-beta")
+		code, witness := run(t, hub, "0")
+		if code != ExitConditionInvalid || witness.Verdict != "unknown" || witness.Action != "self_stop" {
+			t.Fatalf("code=%d witness=%+v", code, witness)
+		}
+	})
+
+	// An unloaded policy is the same answer: the hub is reporting invalid.
+	t.Run("unloaded policy", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "lanes.json")
+		controlPlaneRoutesFixture(t, path, "")
+		policyPath := filepath.Join(root, "control-plane-lanes.json")
+		controlPlaneLanesPolicyFixture(t, policyPath, `{"authority_lanes":`)
+		hub := controlPlaneHubWithPolicy(t, path, policyPath)
+		code, witness := run(t, hub, "0")
+		if code == ExitOK || witness.Verdict == "owner" {
+			t.Fatalf("code=%d witness=%+v", code, witness)
+		}
+	})
+
+	// "stale" is a different state and keeps deciding normally: a policy
+	// reload failed, but the last-known-good set is held and the control block
+	// itself parsed, so epoch and owner are trustworthy.
+	t.Run("stale policy still decides", func(t *testing.T) {
+		root := t.TempDir()
+		path := filepath.Join(root, "lanes.json")
+		controlPlaneRoutesFixture(t, path, "")
+		policyPath := filepath.Join(root, "control-plane-lanes.json")
+		controlPlaneLanesPolicyFixture(t, policyPath, `{"authority_lanes":["lane-alpha","lane-beta"]}`)
+		hub := controlPlaneHubWithPolicy(t, path, policyPath)
+		controlPlaneLanesPolicyFixture(t, policyPath, `{"authority_lanes":`)
+		code, witness := run(t, hub, "0")
+		if code != ExitOK || witness.Verdict != "owner" {
+			t.Fatalf("stale must still decide: code=%d witness=%+v", code, witness)
+		}
+		code, witness = run(t, hub, "7")
+		if code != ExitTimeout || witness.Verdict != "not_owner" {
+			t.Fatalf("stale must still refuse a wrong epoch: code=%d witness=%+v", code, witness)
+		}
+	})
+}
+
+// TestControlPlaneW34UnreadableControlOutranksDisabled pins the precedence that
+// makes the field usable as a trust signal.
+func TestControlPlaneW34UnreadableControlOutranksDisabled(t *testing.T) {
+	protection := func(t *testing.T, hub *HubServer) string {
+		t.Helper()
+		var envelope struct {
+			AuthorityLaneProtection string `json:"authority_lane_protection"`
+		}
+		if err := json.Unmarshal(controlPlaneGetLanes(t, hub).Body.Bytes(), &envelope); err != nil {
+			t.Fatal(err)
+		}
+		return envelope.AuthorityLaneProtection
+	}
+	root := t.TempDir()
+
+	// No policy, readable control: the guard is simply off.
+	readable := filepath.Join(root, "readable.json")
+	controlPlaneRoutesFixture(t, readable, "")
+	if got := protection(t, controlPlaneHub(t, readable)); got != "disabled" {
+		t.Fatalf("unconfigured hub with a readable file: protection=%q want disabled", got)
+	}
+
+	// No policy, damaged control: still "invalid". Reporting "disabled" would
+	// be more accurate about the guard and less safe about the data, and this
+	// field is what self-check trusts.
+	damaged := filepath.Join(root, "damaged.json")
+	if err := os.WriteFile(damaged, []byte(`{"lanes":{"lane-alpha":{"machine":"machine-a","pane":"w1:p1"}},"control":{"state":"NOT-A-STATE"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if got := protection(t, controlPlaneHub(t, damaged)); got != "invalid" {
+		t.Fatalf("unconfigured hub with a damaged control block: protection=%q want invalid", got)
 	}
 }

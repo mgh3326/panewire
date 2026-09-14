@@ -206,6 +206,17 @@ func (h *HubServer) handleControlPlaneTransfer(writer http.ResponseWriter, reque
 		writeLaneJSONError(writer, http.StatusBadRequest, code)
 		return
 	}
+	// The bundle is decided from hub configuration, so it is answered before
+	// any file work. A transfer that carries only part of the authority set
+	// would leave the rest with the old owner, which is the split this endpoint
+	// exists to make impossible.
+	if err := h.controlPlaneBundleDecision(body.Lanes); err != nil {
+		var bundleError *controlPlaneTransferError
+		if errors.As(err, &bundleError) {
+			writeAuthorityLaneError(writer, bundleError.code)
+			return
+		}
+	}
 	fingerprint := controlPlaneRequestFingerprint(body)
 	response, err := h.transferControlPlane(body, fingerprint)
 	if err != nil {
@@ -791,6 +802,13 @@ func (h *HubServer) authorityLaneProtection(controlReadable bool) string {
 		// The control block the guard depends on does not parse. That is the
 		// same "configured but not understood" condition the policy file has,
 		// and it reads the same way to an operator.
+		//
+		// This deliberately outranks "disabled", including on a hub with no
+		// policy configured. The field is also what self-check trusts: if an
+		// unreadable control block reported "disabled" here, the witness would
+		// confirm ownership from the epoch 0 the hub substituted for values it
+		// could not validate — and it would do so on the default configuration,
+		// which is most of them.
 		return "invalid"
 	}
 	if h.controlPlaneLanesStatus == "default" {
@@ -836,6 +854,39 @@ func controlPlaneLanesFailureReason(path string) string {
 }
 
 var errAuthorityLanePolicyUnavailable = errors.New("authority lane policy is unavailable")
+
+// controlPlaneBundleDecision answers whether these two lanes are the authority
+// bundle. Without it a transfer moves whatever pair it was handed: one
+// authority lane plus an unrelated one raises the epoch and changes the owner
+// while the other authority lane stays behind — the split authority this
+// endpoint was built to prevent.
+//
+// An unconfigured hub has no bundle to compare against, so it keeps today's
+// behavior rather than refusing every transfer; the guard is opt-in and turning
+// it on is a deployment step. A configured-but-unloaded policy refuses the
+// transfer for the same reason it refuses a direct write: the hub does not know
+// what the bundle is, and moving one it cannot name is not safer than not
+// moving it.
+func (h *HubServer) controlPlaneBundleDecision(lanes []controlPlaneTransferLane) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.reloadControlPlaneLanesLocked()
+	if h.controlPlaneLanesPath != "" && !h.controlPlaneLanesLoaded {
+		return controlPlaneConflictError("authority_lane_policy_unavailable")
+	}
+	if len(h.controlPlaneLanes) == 0 {
+		return nil
+	}
+	if len(lanes) != len(h.controlPlaneLanes) {
+		return controlPlaneConflictError("authority_bundle_mismatch")
+	}
+	for _, lane := range lanes {
+		if _, configured := h.controlPlaneLanes[lane.Lane]; !configured {
+			return controlPlaneConflictError("authority_bundle_mismatch")
+		}
+	}
+	return nil
+}
 
 // controlPlaneAuthorityDecision answers whether a direct lane write may
 // proceed. It is deliberately fail-closed: a configured policy that has never
