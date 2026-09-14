@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -151,4 +152,57 @@ func installFakeHerdr(t *testing.T, dir, script string) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestTask264HubConsumesRelayDropped is the BLOCKER-1 fix from the adversarial
+// verify round: the node-emitted relay.dropped wire event (busy_relay.go's
+// retryOrDrop) was never registered in knownHubEventKind, so the hub rejected
+// it at the parse stage before dispatch or broadcast ever saw it -- the held
+// projection (h.relayHeld) then stayed a permanent ghost row, reproducing the
+// exact "stuck forever" symptom D1 fixed on the node one layer up. This drives
+// the actual hub receive path (parseHubInbound + handleAgentMessage), not the
+// node-local relayInject/setRelayEmitter seam the D1 tests use, so it would
+// have caught the gap the D1 tests structurally could not.
+func TestTask264HubConsumesRelayDropped(t *testing.T) {
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "host-a": "node"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &hubAgent{}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: agent}
+	hub.relayHeld[601] = hubRelayHeldProjection{ID: 601, Lane: "lane-a", Pane: "fixture-pane", Machine: "host-a", Preview: "stuck", HeldSince: "2026-01-01T00:00:00Z", DeliverPolicy: "idle", JobID: "relay-job-601"}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	subscriber := &hubEventSubscriber{ctx: ctx, cancel: cancel, messages: make(chan hubSubscriptionMessage, 4)}
+	hub.subscribers[subscriber] = struct{}{}
+
+	dropped := relayDroppedPayload{JobID: "relay-job-601", Pane: "fixture-pane", Lane: "lane-a", OriginalEventID: 601, Reason: "inject_failed_max_attempts"}
+	payload, err := json.Marshal(dropped)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := json.Marshal(struct {
+		Type    string          `json:"type"`
+		Kind    string          `json:"kind"`
+		Payload json.RawMessage `json:"payload"`
+	}{Type: "event", Kind: "relay.dropped", Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, valid := parseHubInbound(wire); !valid {
+		t.Fatalf("parseHubInbound rejected relay.dropped: %s", wire)
+	}
+	hub.handleAgentMessage("host-a", "fixture", agent, wire)
+
+	if _, exists := hub.relayHeld[601]; exists {
+		t.Fatal("dropped relay remained held: relay.dropped did not reach the hub's projection cleanup")
+	}
+	select {
+	case message := <-subscriber.messages:
+		if message.event == nil || message.event.Kind != "relay.dropped" {
+			t.Fatalf("broadcast=%+v, want relay.dropped", message)
+		}
+	default:
+		t.Fatal("relay.dropped was not broadcast to subscribers")
+	}
 }
