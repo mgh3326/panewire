@@ -89,6 +89,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 		// once the store is open rather than at hub client construction.
 		d.cfg.Hub.Client.SetRelayOutbox(d.store)
 		d.cfg.Hub.Client.SetPanesAlive(hubPanesAliveHook(d.cfg.HerdrSocket))
+		d.cfg.Hub.Client.SetSessionSnapshot(hubSessionSnapshotHook(d.cfg.HerdrSocket))
 		idleRoot := d.cfg.Hub.Client.jobsInboxRoot
 		if idleRoot == "" {
 			idleRoot = d.cfg.InboxRoot
@@ -171,6 +172,23 @@ func hubPanesAliveHook(socket string) panesAliveFunc {
 		}
 		defer client.Close()
 		return client.PanesAlive(ctx)
+	}
+}
+
+// hubSessionSnapshotHook dials herdr per heartbeat just like the pane
+// liveness hook. The heartbeat must use a separate short-lived client because
+// the event loop owns the daemon's long-lived subscription connection.
+func hubSessionSnapshotHook(socket string) func(context.Context) ([]HerdrAgentState, error) {
+	if socket == "" {
+		return nil
+	}
+	return func(ctx context.Context) ([]HerdrAgentState, error) {
+		client, err := NewHerdrClient(socket)
+		if err != nil {
+			return nil, err
+		}
+		defer client.Close()
+		return client.AgentStates(ctx)
 	}
 }
 

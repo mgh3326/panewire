@@ -30,6 +30,7 @@ const (
 type HerdrAgentState struct {
 	PaneID, WorkspaceID, Label, Status string
 	Revision, SourceStateChangeSeq     int64
+	InteractiveReady                   *bool
 	// Authoritative is true for an agent.list snapshot. Only a snapshot may
 	// declare that herdr's revision or state-change namespace moved backwards;
 	// an older event racing a newer snapshot is ignored instead.

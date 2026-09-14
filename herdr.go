@@ -140,7 +140,7 @@ func (c *HerdrClient) AgentStates(ctx context.Context) ([]HerdrAgentState, error
 		if !validIdleWakePane(pane.PaneID) || !validObservedAgentStatus(pane.Status) {
 			continue
 		}
-		states = append(states, HerdrAgentState{PaneID: pane.PaneID, WorkspaceID: pane.WorkspaceID, Label: pane.Label, Status: pane.Status, Revision: pane.Revision, SourceStateChangeSeq: pane.StateChangeSeq, Authoritative: true})
+		states = append(states, HerdrAgentState{PaneID: pane.PaneID, WorkspaceID: pane.WorkspaceID, Label: pane.Label, Status: pane.Status, Revision: pane.Revision, SourceStateChangeSeq: pane.StateChangeSeq, InteractiveReady: pane.InteractiveReady, Authoritative: true})
 	}
 	return states, nil
 }
