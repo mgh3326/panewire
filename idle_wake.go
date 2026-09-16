@@ -24,6 +24,13 @@ const (
 	idleWakeDecisionAssigned   = "assigned"
 	idleWakeDecisionCancelled  = "cancelled"
 	idleWakeDecisionSuppressed = "suppressed"
+	// idleWakeSuppressionLogWindow bounds how often a suppressed-candidate
+	// tally is flushed as a log line. Suppressions run in the hundreds per
+	// day (observed: 439/651 candidates over 36h), so logging one line per
+	// candidate would itself become the noise; a periodic aggregate keeps
+	// the signal ("how many, which reasons") visible outside the DB without
+	// adding per-event volume.
+	idleWakeSuppressionLogWindow = 10 * time.Minute
 )
 
 // HerdrAgentState is the bounded subset of agent.list used by idle-wake.
@@ -75,6 +82,11 @@ type idleWakeManager struct {
 	enqueue     func(hubScannedRelayEvent) bool
 	writeRecord func(string, emitRecord) (string, error)
 	logger      *slog.Logger
+	// suppressCounts/suppressWindowStart tally suppressed idle-wake
+	// candidates by decision_reason for the periodic aggregate log in
+	// flushSuppressionLogLocked. Guarded by mu.
+	suppressCounts      map[string]int
+	suppressWindowStart time.Time
 }
 
 func newIdleWakeManager(store *Store, inboxRoot string, settle time.Duration, request func(idleWakeRouteRequest) bool, enqueue func(hubScannedRelayEvent) bool, logger *slog.Logger) (*idleWakeManager, error) {
@@ -87,7 +99,7 @@ func newIdleWakeManager(store *Store, inboxRoot string, settle time.Duration, re
 	if logger == nil {
 		logger = slog.Default()
 	}
-	manager := &idleWakeManager{store: store, inboxRoot: inboxRoot, settle: settle, now: time.Now, request: request, enqueue: enqueue, writeRecord: ensureLaneEmitRecord, logger: logger}
+	manager := &idleWakeManager{store: store, inboxRoot: inboxRoot, settle: settle, now: time.Now, request: request, enqueue: enqueue, writeRecord: ensureLaneEmitRecord, logger: logger, suppressCounts: make(map[string]int)}
 	if _, err := store.idleWakeNamespace(context.Background()); err != nil {
 		return nil, err
 	}
@@ -574,6 +586,7 @@ func (m *idleWakeManager) tick(ctx context.Context, at time.Time, advanceSettle 
 		at = m.now()
 	}
 	at = at.UTC()
+	m.flushSuppressionLogLocked(at)
 	var candidates []idleWakeCandidate
 	var err error
 	if advanceSettle {
@@ -607,7 +620,48 @@ func (m *idleWakeManager) ApplyRoute(ctx context.Context, decision hubIdleWakeRo
 		m.logger.Warn("idle-wake route decision was not recorded")
 		return
 	}
-	m.materializeAssigned(ctx, m.now().UTC())
+	at := m.now().UTC()
+	if !decision.Eligible {
+		m.recordSuppressionLocked(decision.Reason, at)
+	}
+	m.materializeAssigned(ctx, at)
+}
+
+// recordSuppressionLocked tallies one suppressed idle-wake candidate by
+// reason. The decision itself already landed as a DB row via
+// decideIdleWakeRoute above -- this only makes it countable outside the DB
+// too, without changing which candidates get suppressed. Caller holds m.mu.
+func (m *idleWakeManager) recordSuppressionLocked(reason string, at time.Time) {
+	if m.suppressWindowStart.IsZero() {
+		m.suppressWindowStart = at
+	}
+	m.suppressCounts[reason]++
+	m.flushSuppressionLogLocked(at)
+}
+
+// flushSuppressionLogLocked emits one aggregated log line per
+// idleWakeSuppressionLogWindow summarizing suppressions tallied since the
+// last flush, then resets the window. A window with zero suppressions emits
+// nothing, so quiet periods stay quiet. Caller holds m.mu.
+func (m *idleWakeManager) flushSuppressionLogLocked(at time.Time) {
+	if len(m.suppressCounts) == 0 || at.Sub(m.suppressWindowStart) < idleWakeSuppressionLogWindow {
+		return
+	}
+	total := 0
+	args := make([]any, 0, 2*len(m.suppressCounts)+6)
+	for _, reason := range []string{idleWakeReasonUnknown, idleWakeReasonAmbiguous, idleWakeReasonParentless, idleWakeReasonInvalid} {
+		count, ok := m.suppressCounts[reason]
+		if !ok {
+			continue
+		}
+		args = append(args, reason, count)
+		total += count
+	}
+	args = append([]any{"total", total}, args...)
+	args = append(args, "since", m.suppressWindowStart.UTC().Format(time.RFC3339), "until", at.UTC().Format(time.RFC3339))
+	m.logger.Warn("idle-wake suppressed wake candidates", args...)
+	m.suppressCounts = make(map[string]int)
+	m.suppressWindowStart = at
 }
 
 func (m *idleWakeManager) materializeAssigned(ctx context.Context, at time.Time) {

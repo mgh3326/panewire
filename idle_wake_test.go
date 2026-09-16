@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -25,6 +26,10 @@ type idleWakeTestRig struct {
 }
 
 func newIdleWakeTestRig(t *testing.T, settle time.Duration) *idleWakeTestRig {
+	return newIdleWakeTestRigWithLogger(t, settle, slog.New(slog.NewTextHandler(io.Discard, nil)))
+}
+
+func newIdleWakeTestRigWithLogger(t *testing.T, settle time.Duration, logger *slog.Logger) *idleWakeTestRig {
 	t.Helper()
 	rig := &idleWakeTestRig{t: t, store: NewMemoryStore(t), now: time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC)}
 	manager, err := newIdleWakeManager(rig.store, t.TempDir(), settle, func(request idleWakeRouteRequest) bool {
@@ -33,7 +38,7 @@ func newIdleWakeTestRig(t *testing.T, settle time.Duration) *idleWakeTestRig {
 	}, func(event hubScannedRelayEvent) bool {
 		rig.emitted = append(rig.emitted, event)
 		return true
-	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	}, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -688,6 +693,45 @@ func TestIdleWakeUnknownAndParentlessDecisionsProduceZeroDelivery(t *testing.T) 
 				t.Fatalf("suppressed decision delivered: requests=%d emitted=%d files=%d", len(rig.requests), len(rig.emitted), countIdleWakeFiles(t, rig.manager.inboxRoot))
 			}
 		})
+	}
+}
+
+// TestIdleWakeSuppressionIsVisibleOutsideTheDBWithoutPerCandidateNoise checks
+// A-3's actual requirement: suppression decisions land as a DB row already
+// (decideIdleWakeRoute), but nothing else records that they happened. This
+// asserts the aggregate log line shows up once the tally window elapses, with
+// per-reason counts, and NOT before -- proving both "visible outside the DB"
+// and "not one log line per candidate".
+func TestIdleWakeSuppressionIsVisibleOutsideTheDBWithoutPerCandidateNoise(t *testing.T) {
+	var buf bytes.Buffer
+	rig := newIdleWakeTestRigWithLogger(t, time.Second, slog.New(slog.NewTextHandler(&buf, nil)))
+
+	revision := int64(0)
+	suppress := func(reason string) {
+		revision++
+		rig.observe("working", revision, rig.now)
+		revision++
+		rig.observe("idle", revision, rig.now.Add(time.Second))
+		rig.now = rig.now.Add(2 * time.Second)
+		rig.manager.Tick(context.Background(), rig.now)
+		request := rig.requests[len(rig.requests)-1]
+		rig.manager.ApplyRoute(context.Background(), hubIdleWakeRouteEvent{Type: "idle-wake.route", EventID: request.EventID, Pane: request.Pane, Reason: reason})
+	}
+	suppress(idleWakeReasonParentless)
+	suppress(idleWakeReasonUnknown)
+	if buf.Len() != 0 {
+		t.Fatalf("suppression logged before the aggregation window elapsed: %q", buf.String())
+	}
+
+	rig.now = rig.now.Add(idleWakeSuppressionLogWindow)
+	rig.manager.Tick(context.Background(), rig.now)
+
+	out := buf.String()
+	if !strings.Contains(out, "idle-wake suppressed") ||
+		!strings.Contains(out, "total=2") ||
+		!strings.Contains(out, "parentless_lane=1") ||
+		!strings.Contains(out, "unknown_owner=1") {
+		t.Fatalf("aggregated suppression log missing expected fields: %q", out)
 	}
 }
 
