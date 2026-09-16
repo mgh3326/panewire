@@ -447,17 +447,38 @@ func expectFailures(e expectFields, p paneIdentity, recent string) []string {
 	}
 	return failed
 }
+
+// devin shares claude's fixed two-divider composer layout (verified live on
+// 2026-09-16 across devin's idle, working, and queued screens), so
+// claudeComposerContains -- despite its name -- is reused for devin's residue
+// check rather than duplicated: it locates the live input row by position
+// (between the last two divider lines) instead of by matching one of devin's
+// several placeholder strings ("Ask Devin to build features...", "Guide Devin
+// while it works", "Press Enter to send queued messages now"), which sidesteps
+// the open unknown of whether those strings are stable across devin CLI
+// versions. A placeholder-text rule (marker absent from screen == unproven,
+// placeholder absent == residue) was tried first and rejected: a live capture
+// showed devin's idle placeholder stays absent for the entire multi-second
+// "Thinking"/"Running tools" duration of a real turn, so that rule would
+// misclassify an already-submitted, still-processing prompt as
+// composer_residue for the whole turn -- not just the brief post-submit
+// render-lag window -- which would make relayInjectVerifySubmission's
+// return-once re-read land on composer_residue again and report unconfirmed,
+// driving a hub retry that re-injects into the still-live pane.
 func classifySubmission(harness, screen, marker string) string {
 	if pasteChipRE.MatchString(screen) {
 		return "composer_residue"
 	}
-	if strings.EqualFold(harness, "claude") && claudeComposerContains(screen, marker) {
+	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "devin")) && claudeComposerContains(screen, marker) {
 		return "composer_residue"
 	}
 	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex")) && strings.Contains(screen, "Press up to edit queued messages") && !pasteChipRE.MatchString(screen) {
 		return "queued"
 	}
-	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex")) && marker != "" && strings.Contains(screen, marker) {
+	if strings.EqualFold(harness, "devin") && strings.Contains(screen, "send now") {
+		return "queued"
+	}
+	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex") || strings.EqualFold(harness, "devin")) && marker != "" && strings.Contains(screen, marker) {
 		return "marker_observed"
 	}
 	return "unproven"
