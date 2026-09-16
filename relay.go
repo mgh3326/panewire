@@ -196,11 +196,10 @@ func boundRelayText(prefix, reportPath string) string {
 	return prefix + truncateRelayText(reportPath, max-len(prefix))
 }
 
-// relayDedupeKey is the hub's half of the one dedupe key shared by the node
-// outbox and handoffkeep's idempotency index. All three must count the same
-// five fields: an event the other two treat as distinct but the hub folds into
-// an earlier one is swallowed here, and its outbox row never learns it was
-// persisted.
+// relayDedupeKey is the five-field body shared by handoffkeep's idempotency
+// index. The hub's own dedupe key and the node outbox append the producer's
+// event identity on top: an event the hub folds into an earlier round is
+// swallowed here, and its outbox row never learns it was persisted.
 func relayDedupeKey(completion hubJobEventPayload) string {
 	return completion.JobID + "\x00" + strconv.FormatUint(completion.Epoch, 10) + "\x00" + completion.ReportPath + "\x00" + completion.Reason
 }
@@ -209,7 +208,11 @@ func relayEventDedupeKey(kind string, completion hubJobEventPayload) string {
 	if kind == "lane.event" {
 		return relayLaneEventOutboxKey(completion.OwnerLane, completion.EventID)
 	}
-	return kind + "\x00" + relayDedupeKey(completion)
+	// The producer's event_id distinguishes one event file from the same job's
+	// next round even though handoffkeep's five-field index folds them into a
+	// single durable row. Events from old producers carry no event_id and keep
+	// the historic key.
+	return kind + "\x00" + relayDedupeKey(completion) + "\x00" + completion.EventID
 }
 
 func (h *HubServer) relayJobCompletion(completion hubJobEventPayload) {
@@ -318,7 +321,7 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 	if !ingress {
 		h.queueLaneRelayPersisted(event, sender, stored.ID)
 	}
-	if relayEventAlreadyDelivered(status, stored) {
+	if relayEventAlreadyDelivered(status, stored, event) {
 		h.broadcastRelayAlreadyDelivered("lane.event", event, stored)
 		return relayLaneEventResult{ID: stored.ID}
 	}
@@ -403,7 +406,7 @@ func (h *HubServer) relayJobEventFrom(senderMachine, kind string, event hubJobEv
 		return
 	}
 	h.rememberRelayEvent(key, stored.ID)
-	if relayEventAlreadyDelivered(status, stored) {
+	if relayEventAlreadyDelivered(status, stored, event) {
 		// handoffkeep already holds this record as delivered, so the note is in
 		// the pane. The node still owes its outbox row an answer: acknowledge,
 		// and put the injection nobody needs on the operator feed instead.
@@ -419,8 +422,15 @@ func (h *HubServer) relayJobEventFrom(senderMachine, kind string, event hubJobEv
 // node's `replay` flag: `replay` says a node restarted, which is not the same
 // question as whether this record ever reached the pane. 201 is a row nothing
 // can have delivered yet, so it always injects.
-func relayEventAlreadyDelivered(status int, stored handoffkeepRelayEvent) bool {
-	return status == http.StatusOK && strings.TrimSpace(stored.DeliveredAt) != ""
+//
+// handoffkeep's job.* idempotency index is the five-field key, so a later
+// round for the same job folds into the first round's row and reports 200 for
+// an event it never stored. A 200 only proves THIS event was delivered when
+// the stored row names the same producer event identity; a folded row (or a
+// legacy row written before event_id existed) cannot answer for the new
+// event, so its note still goes to the pane.
+func relayEventAlreadyDelivered(status int, stored handoffkeepRelayEvent, event hubJobEventPayload) bool {
+	return status == http.StatusOK && strings.TrimSpace(stored.DeliveredAt) != "" && stored.EventID == event.EventID
 }
 
 // reacknowledgeRelayEvent answers a resend of an event this hub already took.
@@ -520,12 +530,13 @@ func (h *HubServer) forgetRelayEvent(key string) {
 }
 
 // queueRelayPersisted tells a node its outbox row may be retired. The node
-// keys the row by exactly these five fields.
+// keys the row by the five shared fields plus the producer's event identity,
+// which is echoed back so an acknowledgement names exactly one event's row.
 func (h *HubServer) queueRelayPersisted(kind string, event hubJobEventPayload, agent *hubAgent, eventID int64) bool {
 	if eventID == 0 || agent == nil {
 		return false
 	}
-	return agent.queuePersisted(hubRelayPersistedEvent{Type: "relay.persisted", JobID: event.JobID, Kind: kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: eventID})
+	return agent.queuePersisted(hubRelayPersistedEvent{Type: "relay.persisted", JobID: event.JobID, Kind: kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: eventID, ProducerEventID: event.EventID})
 }
 
 // relayPersistedAgent selects the actual producer when this arrived over a
@@ -755,6 +766,13 @@ func (h *HubServer) persistRelayEventRecord(kind string, event hubJobEventPayloa
 	// hub decided it; the divergence is only worth one line of operator signal.
 	if status == http.StatusOK && stored.OwnerLane != event.OwnerLane {
 		h.logger.Warn("persisted relay event reports a different owner lane", "job", event.JobID, "kind", kind, "sent", event.OwnerLane, "stored", stored.OwnerLane)
+	}
+	// event_id is not part of the job.* idempotency key either, so a new round
+	// folds into the first round's row. The folded row is still the durable
+	// receipt this event is acknowledged by, but the mismatch is how a dropped
+	// notification would otherwise hide.
+	if status == http.StatusOK && stored.EventID != event.EventID {
+		h.logger.Warn("relay event folded into a different event's durable row", "job", event.JobID, "kind", kind, "sent", event.EventID, "stored", stored.EventID)
 	}
 	return stored, status, true
 }

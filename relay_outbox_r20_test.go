@@ -59,14 +59,14 @@ func TestR20OutboxSurvivesNodeRestart(t *testing.T) {
 		t.Fatalf("first process sent %d events, want 2", len(events))
 	}
 	// The hub confirms only one of the two.
-	first.recordRelayPersisted(hubOutboundMessage{Type: "relay.persisted", JobID: "r20-persisted", Kind: "job.completed", Epoch: 1, ReportPath: "a.md", EventID: 5})
+	first.recordRelayPersisted(hubOutboundMessage{Type: "relay.persisted", JobID: "r20-persisted", Kind: "job.completed", Epoch: 1, ReportPath: "a.md", EventID: 5, ProducerEventID: "00001-job.completed.json"})
 
 	// A restart is a fresh client over the same SQLite file. Age both rows out
 	// of the retry backoff so persisted_at is the only thing separating them.
 	aged := time.Now().Add(-2 * relayOutboxBackoff)
 	for _, key := range []relayOutboxKey{
-		{Kind: "job.completed", JobID: "r20-persisted", Epoch: 1, ReportPath: "a.md"},
-		{Kind: "job.completed", JobID: "r20-pending", Epoch: 1, ReportPath: "b.md"},
+		{Kind: "job.completed", JobID: "r20-persisted", Epoch: 1, ReportPath: "a.md", EventID: "00001-job.completed.json"},
+		{Kind: "job.completed", JobID: "r20-pending", Epoch: 1, ReportPath: "b.md", EventID: "00001-job.completed.json"},
 	} {
 		if err := store.RecordRelaySent(context.Background(), key, aged); err != nil {
 			t.Fatal(err)
@@ -107,7 +107,7 @@ func TestR20OutboxBacksOffWithinSixtySeconds(t *testing.T) {
 	if events := r20Sent(r20Node(inbox, store)); len(events) != 0 {
 		t.Fatalf("a fresh attempt inside the backoff window resent %d events", len(events))
 	}
-	if err := store.RecordRelaySent(context.Background(), relayOutboxKey{Kind: "job.completed", JobID: "r20-backoff", Epoch: 1, ReportPath: "a.md"}, time.Now().Add(-2*relayOutboxBackoff)); err != nil {
+	if err := store.RecordRelaySent(context.Background(), relayOutboxKey{Kind: "job.completed", JobID: "r20-backoff", Epoch: 1, ReportPath: "a.md", EventID: "00001-job.completed.json"}, time.Now().Add(-2*relayOutboxBackoff)); err != nil {
 		t.Fatal(err)
 	}
 	if events := r20Sent(r20Node(inbox, store)); len(events) != 1 {

@@ -304,7 +304,7 @@ func TestR20T8TwoNodeSnapshotAcknowledgesOnlySender(t *testing.T) {
 		injections += drainRelays(destinationAgent)
 		destinationAcks := drainPersisted(destinationAgent)
 		for _, ack := range destinationAcks {
-			destination.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID})
+			destination.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID, ProducerEventID: ack.ProducerEventID})
 		}
 		if len(destinationAcks) != 0 {
 			t.Fatalf("destination received relay.persisted for sender event: %+v", destinationAcks)
@@ -314,7 +314,7 @@ func TestR20T8TwoNodeSnapshotAcknowledgesOnlySender(t *testing.T) {
 			t.Fatalf("source relay.persisted=%+v for key=%+v", acks, event.relayKey)
 		}
 		for _, ack := range acks {
-			source.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID})
+			source.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID, ProducerEventID: ack.ProducerEventID})
 		}
 		source.commitRelaySent(event)
 	}

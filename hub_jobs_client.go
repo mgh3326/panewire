@@ -246,7 +246,10 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 				// and `panewire emit` substitutes the very same path.
 				reportPath = filepath.Join(dir, file.Name())
 			}
-			events = append(events, hubScannedRelayEvent{Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID()})
+			// The event file name is the job event's durable identity: it is
+			// unique per emission, stable across node restarts, and shared by
+			// `panewire emit`, which derives the same value for its file.
+			events = append(events, hubScannedRelayEvent{Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name()})
 		}
 	}
 	sort.Slice(events, func(i, j int) bool {

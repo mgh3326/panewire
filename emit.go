@@ -520,6 +520,60 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 	}, true
 }
 
+// emitJobEventFileID locates the durable event file behind a pushed job.*
+// record. The file name is the event's relay identity, so the daemon derives
+// it from the namespace it actually watches rather than trusting the request.
+// The push substitutes the event path for an empty escalation/join report,
+// so the file's own empty report_path is a second candidate key. No match
+// means an old caller or a vanished file; the event keeps the legacy
+// five-field key.
+func emitJobEventFileID(inboxRoot string, req localRequest, epoch uint64) string {
+	if inboxRoot == "" {
+		return ""
+	}
+	record := emitRecord{
+		Type: req.Kind, JobID: req.JobID, Epoch: epoch, OwnerLane: req.OwnerLane,
+		Label: req.Label, Host: req.Host, ReportPath: req.ReportPath,
+		ReportLastLine: req.ReportLastLine, Reason: req.Reason, Question: req.Question,
+		PR: req.PR, Head: req.Head, PaneID: req.PaneID,
+	}
+	reportPaths := []string{record.ReportPath}
+	if relayEventPathFallbackKinds[req.Kind] && record.ReportPath != "" {
+		reportPaths = append(reportPaths, "")
+	}
+	eventsDir := filepath.Join(inboxRoot, "jobs", req.JobID, "events")
+	entries, err := os.ReadDir(eventsDir)
+	if err != nil {
+		return ""
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		existing, ok := readEmitDedupeKey(eventsDir, entry.Name(), record.JobID)
+		if !ok {
+			continue
+		}
+		for _, reportPath := range reportPaths {
+			if existing.key != relayEventOutboxKey(record.Type, record.JobID, record.Epoch, reportPath, record.Reason) {
+				continue
+			}
+			// The event-path fallback gives distinct questions separate files
+			// even though their pre-file key is the same.
+			if record.Type == "job.escalate" && reportPath == "" && existing.question != record.Question {
+				continue
+			}
+			probe := record
+			probe.ReportPath = reportPath
+			if existing.matches(probe) {
+				return entry.Name()
+			}
+		}
+	}
+	return ""
+}
+
 type emitPushResult struct {
 	reached bool
 	ok      bool
