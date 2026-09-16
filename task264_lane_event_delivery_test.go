@@ -106,7 +106,29 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 		}
 	})
 
-	t.Run("codex queue clears after return, verification reports success", func(t *testing.T) {
+	// R1: a queue banner clearing after the return keypress used to be enough
+	// to report delivered even with no marker echo -- that is precisely the
+	// "unproven reported as delivered" defect R1 fixed (a real relay message
+	// went missing for 11 hours because of it). Real marker evidence in the
+	// post-return screen is required now.
+	t.Run("codex queue clears after return with marker evidence, verification reports success", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := filepath.Join(dir, "returned")
+		script := "#!/bin/sh\ncase \"$2\" in\n" +
+			"get) echo '{\"result\":{\"agent\":{\"agent\":\"codex\"}}}' ;;\n" +
+			"read) if [ -f \"" + marker + "\" ]; then echo 'do the thing'; else echo 'Press up to edit queued messages'; fi ;;\n" +
+			"send-keys) touch \"" + marker + "\" ;;\n" +
+			"esac\n"
+		installFakeHerdr(t, dir, script)
+		if !defaultHubRelayInject(context.Background(), "codex-pane", "do the thing") {
+			t.Fatal("codex message echoed the marker after return, but injection reported failure")
+		}
+	})
+
+	// R1: a queue banner clearing after return with no marker evidence at all
+	// is unproven, not delivered -- the same defect as above, just without a
+	// marker ever appearing.
+	t.Run("codex queue clears after return without marker evidence, verification reports failure", func(t *testing.T) {
 		dir := t.TempDir()
 		marker := filepath.Join(dir, "returned")
 		script := "#!/bin/sh\ncase \"$2\" in\n" +
@@ -115,11 +137,25 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 			"send-keys) touch \"" + marker + "\" ;;\n" +
 			"esac\n"
 		installFakeHerdr(t, dir, script)
-		if !defaultHubRelayInject(context.Background(), "codex-pane", "do the thing") {
-			t.Fatal("codex message cleared the queue after return, but injection reported failure")
+		if defaultHubRelayInject(context.Background(), "codex-pane", "do the thing") {
+			t.Fatal("codex message cleared the queue after return with no marker evidence, but injection reported delivered")
 		}
 	})
 
+	// #264 D2 AC0 / R1 rework (operator decision hk:doc
+	// decision/2026-09-16/pwrelay-ac0-revert): a harness with no
+	// submission-evidence path at all -- classifySubmission gates queued and
+	// marker_observed on harness in {claude, codex}, and devin's real screen
+	// ("── N queued ── / send now") does not match claude's paste-chip text
+	// either, so devin can only ever land on unproven here -- must still
+	// report delivered. Reporting false would retry via busy_relay.go's
+	// retryOrDrop, and defaultHubRelayInject sends the prompt before
+	// verifying, so the retry would re-inject the same body into a still-live
+	// devin pane: a real duplicate-injection outcome, which is worse than the
+	// silent-loss defect R1 fixed for claude/codex. This is an intentional,
+	// interim carve-out (harnessHasSubmissionEvidence in hub_client.go), not
+	// an oversight -- giving devin its own real evidence path is tracked as a
+	// separate followup.
 	t.Run("devin harness with no chip/queue evidence still reports delivered", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeHerdr(t, dir, map[string]string{
