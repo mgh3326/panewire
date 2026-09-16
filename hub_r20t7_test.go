@@ -133,15 +133,20 @@ func r20t7WriteEvent(t *testing.T, inbox, jobID, name, contents string) {
 	r20WriteEvent(t, inbox, jobID, name, contents, time.Time{})
 }
 
-// r20t7SeedOutbox recreates the operator's relay_sent table row for row.
+// r20t7SeedOutbox recreates the operator's relay_sent table row for row. Each
+// row carries its event file's identity, which is the shape every row takes
+// once the producing binary keys sends by event.
 func r20t7SeedOutbox(t *testing.T, store *Store, rows []r20t7SnapshotRow) {
 	t.Helper()
-	for _, row := range rows {
-		if err := store.RecordRelaySent(context.Background(), row.key(), row.SentAt); err != nil {
+	names := r20t7EventFileNames(rows)
+	for index, row := range rows {
+		key := row.key()
+		key.EventID = names[index]
+		if err := store.RecordRelaySent(context.Background(), key, row.SentAt); err != nil {
 			t.Fatal(err)
 		}
 		if row.Persisted {
-			if err := store.RecordRelayPersisted(context.Background(), row.key(), row.PersistedAt); err != nil {
+			if err := store.RecordRelayPersisted(context.Background(), key, row.PersistedAt); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -273,7 +278,9 @@ func TestR20T7SnapshotRestartsStopResendingAndReinjecting(t *testing.T) {
 		t.Fatalf("the parent pane was re-injected %d times across three restarts, want 0", injections)
 	}
 	for _, row := range stuck {
-		state, err := store.RelayOutboxState(context.Background(), row.key())
+		key := row.key()
+		key.EventID = nameOf[row]
+		state, err := store.RelayOutboxState(context.Background(), key)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -549,7 +556,7 @@ func TestR20T7ReplayFlaggedRecordIsAcknowledged(t *testing.T) {
 	defer store.Close()
 	r20t7WriteEvent(t, inbox, "r20t7-replay", "00001-job.completed.json",
 		`{"type":"job.completed","epoch":1,"owner_lane":"lane-w","label":"lane-w","host":"host-a","report_path":"replay.md","report_last_line":"done"}`)
-	key := relayOutboxKey{Kind: "job.completed", JobID: "r20t7-replay", Epoch: 1, ReportPath: "replay.md"}
+	key := relayOutboxKey{Kind: "job.completed", JobID: "r20t7-replay", Epoch: 1, ReportPath: "replay.md", EventID: "00001-job.completed.json"}
 	if err := store.RecordRelaySent(context.Background(), key, time.Now().Add(-2*relayOutboxBackoff)); err != nil {
 		t.Fatal(err)
 	}

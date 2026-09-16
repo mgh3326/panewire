@@ -1057,6 +1057,9 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientEvent, bool) {
 	job = relayEventWireForm(job)
 	key := relayEventOutboxKeyFor(job)
+	if client.suppressPreMigrationRelayEvent(job, key) {
+		return hubClientEvent{}, false
+	}
 	if client.outbox != nil {
 		if outstanding, found, err := client.outbox.UnpersistedRelayOutboxKey(context.Background(), key); err != nil {
 			client.warnMessage("relay outbox outstanding key unavailable")
@@ -1107,6 +1110,33 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 }
 
+// suppressPreMigrationRelayEvent retires event files that predate this node's
+// event-identity migration by more than the grace window. Deploying the keyed
+// outbox used to replay the whole retained backlog as fresh notifications -
+// including the completion an old binary already sent. The cutoff is this
+// node's own migration instant minus relayMigrationGrace: events inside the
+// window may be relayed (a rolling restart's in-flight work is still fresh
+// news), everything older is recorded as suppressed and never offered. A
+// missing migration stamp or an unidentifiable file fails open, since a lost
+// notification is worse than a duplicate.
+func (client *HubClient) suppressPreMigrationRelayEvent(job hubScannedRelayEvent, key relayOutboxKey) bool {
+	if client.outbox == nil || key.EventID == "" || job.Kind == "lane.event" || job.EventTime.IsZero() {
+		return false
+	}
+	migratedAt, ok, err := client.outbox.RelayEventIDMigrationAt(context.Background())
+	if err != nil {
+		client.warnMessage("relay migration stamp unavailable")
+		return false
+	}
+	if !ok || !job.EventTime.Before(migratedAt.Add(-relayMigrationGrace)) {
+		return false
+	}
+	if err := client.outbox.RecordRelaySuppressed(context.Background(), key, client.nowUTC()); err != nil {
+		client.warnMessage("relay suppression record failed")
+	}
+	return true
+}
+
 // selectRelayEvent answers "should this record go out now, and is it a replay".
 // It deliberately writes nothing durable: sent_at belongs to commitRelaySent,
 // once the write has actually left the node. Stamping here is what made a
@@ -1147,7 +1177,7 @@ func (client *HubClient) selectRelayEvent(key relayOutboxKey) (send bool, replay
 		client.relayInflight[text] = struct{}{}
 		return true, false
 	}
-	if state.Persisted {
+	if state.Persisted || state.Suppressed {
 		client.completedReports[text] = struct{}{}
 		return false, false
 	}

@@ -449,6 +449,7 @@ func truncateLaneEventTextAtLimit(value string, limit int) (string, bool) {
 type emitDedupeRecord struct {
 	key            string
 	kind           string
+	createdAt      string
 	epoch          uint64
 	ownerLane      string
 	label          string
@@ -506,6 +507,7 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 	return emitDedupeRecord{
 		key:            relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()),
 		kind:           kind,
+		createdAt:      event.CreatedAt,
 		epoch:          epoch,
 		ownerLane:      event.ownerLane(),
 		label:          event.label(),
@@ -521,15 +523,15 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 }
 
 // emitJobEventFileID locates the durable event file behind a pushed job.*
-// record. The file name is the event's relay identity, so the daemon derives
-// it from the namespace it actually watches rather than trusting the request.
-// The push substitutes the event path for an empty escalation/join report,
-// so the file's own empty report_path is a second candidate key. No match
-// means an old caller or a vanished file; the event keeps the legacy
-// five-field key.
-func emitJobEventFileID(inboxRoot string, req localRequest, epoch uint64) string {
+// record. The file name is the event's relay identity and its timestamp feeds
+// the deployment cutoff, so the daemon derives both from the namespace it
+// actually watches rather than trusting the request. The push substitutes the
+// event path for an empty escalation/join report, so the file's own empty
+// report_path is a second candidate key. No match means an old caller or a
+// vanished file; the event keeps the legacy five-field key.
+func emitJobEventFileID(inboxRoot string, req localRequest, epoch uint64) (string, time.Time) {
 	if inboxRoot == "" {
-		return ""
+		return "", time.Time{}
 	}
 	record := emitRecord{
 		Type: req.Kind, JobID: req.JobID, Epoch: epoch, OwnerLane: req.OwnerLane,
@@ -544,7 +546,7 @@ func emitJobEventFileID(inboxRoot string, req localRequest, epoch uint64) string
 	eventsDir := filepath.Join(inboxRoot, "jobs", req.JobID, "events")
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
-		return ""
+		return "", time.Time{}
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	for _, entry := range entries {
@@ -567,11 +569,17 @@ func emitJobEventFileID(inboxRoot string, req localRequest, epoch uint64) string
 			probe := record
 			probe.ReportPath = reportPath
 			if existing.matches(probe) {
-				return entry.Name()
+				var eventTime time.Time
+				if parsed, parseErr := time.Parse(time.RFC3339, existing.createdAt); parseErr == nil {
+					eventTime = parsed
+				} else if info, statErr := entry.Info(); statErr == nil {
+					eventTime = info.ModTime()
+				}
+				return entry.Name(), eventTime
 			}
 		}
 	}
-	return ""
+	return "", time.Time{}
 }
 
 type emitPushResult struct {

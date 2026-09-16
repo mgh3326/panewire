@@ -81,7 +81,7 @@ func OpenStore(path string) (*Store, error) {
 	// to replay every retained event because the marker lived in memory only.
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS relay_sent (
 	 kind TEXT NOT NULL, job_id TEXT NOT NULL, epoch INTEGER NOT NULL, report_path TEXT NOT NULL, reason TEXT NOT NULL, lane TEXT NOT NULL DEFAULT '', event_id TEXT NOT NULL DEFAULT '',
-	 sent_at INTEGER, persisted_at INTEGER,
+	 sent_at INTEGER, persisted_at INTEGER, suppressed_at INTEGER,
 	 PRIMARY KEY(kind, job_id, epoch, report_path, reason, event_id)
 )`); err != nil {
 		db.Close()
@@ -93,7 +93,8 @@ func OpenStore(path string) (*Store, error) {
 	// next round, which is how later rounds were silently discarded. SQLite
 	// cannot extend a primary key in place, so an existing table is rebuilt
 	// row-for-row; rows written before event_id existed keep the empty string
-	// and are adopted by the first matching event file.
+	// and stay inert - the per-node migration cutoff suppresses their event
+	// files before they reach the send gate.
 	_, _ = db.Exec(`ALTER TABLE relay_sent ADD COLUMN lane TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE relay_sent ADD COLUMN event_id TEXT NOT NULL DEFAULT ''`)
 	var eventIDInPrimaryKey int
@@ -109,10 +110,10 @@ func OpenStore(path string) (*Store, error) {
 		}
 		if _, err := tx.Exec(`CREATE TABLE relay_sent_rekeyed (
 	 kind TEXT NOT NULL, job_id TEXT NOT NULL, epoch INTEGER NOT NULL, report_path TEXT NOT NULL, reason TEXT NOT NULL, lane TEXT NOT NULL DEFAULT '', event_id TEXT NOT NULL DEFAULT '',
-	 sent_at INTEGER, persisted_at INTEGER,
+	 sent_at INTEGER, persisted_at INTEGER, suppressed_at INTEGER,
 	 PRIMARY KEY(kind, job_id, epoch, report_path, reason, event_id)
 )`); err == nil {
-			_, err = tx.Exec(`INSERT INTO relay_sent_rekeyed SELECT kind,job_id,epoch,report_path,reason,lane,event_id,sent_at,persisted_at FROM relay_sent`)
+			_, err = tx.Exec(`INSERT INTO relay_sent_rekeyed SELECT kind,job_id,epoch,report_path,reason,lane,event_id,sent_at,persisted_at,NULL FROM relay_sent`)
 		}
 		if err == nil {
 			_, err = tx.Exec(`DROP TABLE relay_sent`)
@@ -129,6 +130,22 @@ func OpenStore(path string) (*Store, error) {
 			db.Close()
 			return nil, err
 		}
+	}
+	// Covers databases already rekeyed by a build that predates the column.
+	_, _ = db.Exec(`ALTER TABLE relay_sent ADD COLUMN suppressed_at INTEGER`)
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS relay_meta (
+	 key TEXT PRIMARY KEY, value INTEGER NOT NULL
+)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	// The instant this node's outbox first carried event identity is the base
+	// of its deployment cutoff. It is per-node because rollouts are sequential:
+	// a global constant would suppress ordinary completions on the nodes that
+	// migrate last. INSERT OR IGNORE keeps the first - and truest - stamp.
+	if _, err := db.Exec(`INSERT OR IGNORE INTO relay_meta(key,value) VALUES('event_id_since',?)`, time.Now().UnixMilli()); err != nil {
+		db.Close()
+		return nil, err
 	}
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS relay_sent_lane_event_idempotency ON relay_sent(lane,event_id) WHERE kind='lane.event'`); err != nil {
 		db.Close()

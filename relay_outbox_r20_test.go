@@ -28,6 +28,16 @@ func r20WriteEvent(t *testing.T, inbox, jobID, name, contents string, mtime time
 	return path
 }
 
+// r20AgeMigrationStamp moves the store's event-identity migration stamp, which
+// a fresh store sets to now. Fixtures for events older than the grace window
+// need a node that migrated earlier still.
+func r20AgeMigrationStamp(t *testing.T, store *Store, at time.Time) {
+	t.Helper()
+	if _, err := store.db.Exec(`UPDATE relay_meta SET value=? WHERE key='event_id_since'`, at.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func r20Node(inbox string, store *Store) *HubClient {
 	client := &HubClient{jobsInboxRoot: inbox, completedJobs: map[string]uint64{}, completedReports: map[string]struct{}{}, assignedJobs: map[string]uint64{}, events: make(chan hubClientEvent, 8)}
 	client.SetRelayOutbox(store)
@@ -120,6 +130,9 @@ func TestR20OutboxScanKeepsTwentyFourHourWindow(t *testing.T) {
 	inbox := t.TempDir()
 	store := NewMemoryStore(t)
 	defer store.Close()
+	// This node migrated two days ago, so the deployment cutoff sits well
+	// behind the fixture files and cannot swallow them.
+	r20AgeMigrationStamp(t, store, time.Now().Add(-48*time.Hour))
 	// created_at is absent, so the scan falls back to the file's mtime.
 	const body = `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"REPORT","report_last_line":"done"}`
 	r20WriteEvent(t, inbox, "r20-fresh", "00001-job.completed.json", strings.Replace(body, "REPORT", "fresh.md", 1), time.Now().Add(-23*time.Hour))

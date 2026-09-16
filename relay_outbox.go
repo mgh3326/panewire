@@ -13,6 +13,13 @@ const (
 	// relayOutboxBackoff keeps a failing handoffkeep from being retried on
 	// every ten-second scan. A row is eligible again once it has aged out.
 	relayOutboxBackoff = 60 * time.Second
+	// relayMigrationGrace is subtracted from this node's event-identity
+	// migration time to form the suppression cutoff. A deploy restarts each
+	// node, so a completion emitted minutes before that restart is fresh news,
+	// not backlog - suppressing it would lose the one notification a finished
+	// job ever gets. Ten minutes covers a rolling restart with margin, and the
+	// window length caps how much recent work a deployment may relay.
+	relayMigrationGrace = 10 * time.Minute
 )
 
 // relayOutboxMaxAge bounds which local event files the node still offers to
@@ -57,68 +64,56 @@ func (k relayOutboxKey) String() string {
 }
 
 // relayOutboxState is the durable answer to "has the hub already taken this
-// event". persisted is terminal; sentAt only starts the retry backoff.
+// event". persisted and suppressed are terminal; sentAt only starts the retry
+// backoff.
 type relayOutboxState struct {
-	SentAt    time.Time
-	Persisted bool
-	Found     bool
+	SentAt     time.Time
+	Persisted  bool
+	Suppressed bool
+	Found      bool
 }
 
 func (s *Store) relayOutboxArgs(key relayOutboxKey) []any {
 	return []any{key.Kind, key.JobID, int64(key.Epoch), key.ReportPath, key.Reason}
 }
 
-// claimLegacyRelaySentRow adopts the row a pre-event_id binary already wrote
-// for this event file. Such rows carry event_id=”, and the five legacy
-// fields cannot tell the file they recorded from a later round's file, so a
-// file adopts a row only while no row already carries its event_id. A single
-// unpersisted legacy row is preferred at any epoch - the old unpersisted
-// lookup ignored epoch - and the epoch-exact fallback is the old state
-// lookup's own selection. Rows that adopt nothing stay inert under their
-// legacy key.
-func (s *Store) claimLegacyRelaySentRow(ctx context.Context, key relayOutboxKey) error {
-	if key.EventID == "" {
-		return nil
+// RelayEventIDMigrationAt reports when this node's outbox first carried event
+// identity. It is the base of the deployment cutoff, which is per-node on
+// purpose: rollouts are sequential, so each node suppresses only the events
+// its own pre-migration binary could have left behind.
+func (s *Store) RelayEventIDMigrationAt(ctx context.Context) (time.Time, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var at int64
+	err := s.db.QueryRowContext(ctx, `SELECT value FROM relay_meta WHERE key='event_id_since'`).Scan(&at)
+	if err == sql.ErrNoRows {
+		return time.Time{}, false, nil
 	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE relay_sent SET event_id=?
- WHERE kind=? AND job_id=? AND report_path=? AND reason=? AND event_id='' AND persisted_at IS NULL
- AND (SELECT COUNT(*) FROM relay_sent WHERE kind=? AND job_id=? AND report_path=? AND reason=? AND event_id='' AND persisted_at IS NULL)=1
- AND NOT EXISTS (SELECT 1 FROM relay_sent WHERE kind=? AND job_id=? AND event_id=?)`,
-		key.EventID, key.Kind, key.JobID, key.ReportPath, key.Reason,
-		key.Kind, key.JobID, key.ReportPath, key.Reason,
-		key.Kind, key.JobID, key.EventID); err != nil {
-		return err
+	if err != nil {
+		return time.Time{}, false, err
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE relay_sent SET event_id=?
- WHERE kind=? AND job_id=? AND epoch=? AND report_path=? AND reason=? AND event_id=''
- AND NOT EXISTS (SELECT 1 FROM relay_sent WHERE kind=? AND job_id=? AND event_id=?)`,
-		key.EventID, key.Kind, key.JobID, int64(key.Epoch), key.ReportPath, key.Reason,
-		key.Kind, key.JobID, key.EventID)
-	return err
+	return time.UnixMilli(at), true, nil
 }
 
 // RelayOutboxState reports the durable send state for one relay event.
 func (s *Store) RelayOutboxState(ctx context.Context, key relayOutboxKey) (relayOutboxState, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var sentAt, persistedAt sql.NullInt64
-	query, args := `SELECT sent_at,persisted_at FROM relay_sent WHERE kind=? AND job_id=? AND epoch=? AND report_path=? AND reason=?`, s.relayOutboxArgs(key)
+	var sentAt, persistedAt, suppressedAt sql.NullInt64
+	query, args := `SELECT sent_at,persisted_at,suppressed_at FROM relay_sent WHERE kind=? AND job_id=? AND epoch=? AND report_path=? AND reason=?`, s.relayOutboxArgs(key)
 	if key.Kind == "lane.event" {
-		query, args = `SELECT sent_at,persisted_at FROM relay_sent WHERE kind='lane.event' AND lane=? AND event_id=?`, []any{key.Lane, key.EventID}
+		query, args = `SELECT sent_at,persisted_at,suppressed_at FROM relay_sent WHERE kind='lane.event' AND lane=? AND event_id=?`, []any{key.Lane, key.EventID}
 	} else if key.EventID != "" {
-		if err := s.claimLegacyRelaySentRow(ctx, key); err != nil {
-			return relayOutboxState{}, err
-		}
-		query, args = `SELECT sent_at,persisted_at FROM relay_sent WHERE kind=? AND job_id=? AND event_id=?`, []any{key.Kind, key.JobID, key.EventID}
+		query, args = `SELECT sent_at,persisted_at,suppressed_at FROM relay_sent WHERE kind=? AND job_id=? AND event_id=?`, []any{key.Kind, key.JobID, key.EventID}
 	}
-	err := s.db.QueryRowContext(ctx, query, args...).Scan(&sentAt, &persistedAt)
+	err := s.db.QueryRowContext(ctx, query, args...).Scan(&sentAt, &persistedAt, &suppressedAt)
 	if err == sql.ErrNoRows {
 		return relayOutboxState{}, nil
 	}
 	if err != nil {
 		return relayOutboxState{}, err
 	}
-	state := relayOutboxState{Found: true, Persisted: persistedAt.Valid}
+	state := relayOutboxState{Found: true, Persisted: persistedAt.Valid, Suppressed: suppressedAt.Valid}
 	if sentAt.Valid && sentAt.Int64 > 0 {
 		state.SentAt = time.UnixMilli(sentAt.Int64)
 	}
@@ -138,11 +133,8 @@ func (s *Store) UnpersistedRelayOutboxKey(ctx context.Context, key relayOutboxKe
 	if key.EventID != "" {
 		// One event names at most one row, so the outstanding lookup is exact
 		// rather than the ambiguous five-field scan the legacy key needed.
-		if err := s.claimLegacyRelaySentRow(ctx, key); err != nil {
-			return relayOutboxKey{}, false, err
-		}
 		var epoch int64
-		err := s.db.QueryRowContext(ctx, `SELECT epoch FROM relay_sent WHERE kind=? AND job_id=? AND event_id=? AND persisted_at IS NULL`, key.Kind, key.JobID, key.EventID).Scan(&epoch)
+		err := s.db.QueryRowContext(ctx, `SELECT epoch FROM relay_sent WHERE kind=? AND job_id=? AND event_id=? AND persisted_at IS NULL AND suppressed_at IS NULL`, key.Kind, key.JobID, key.EventID).Scan(&epoch)
 		if err == sql.ErrNoRows {
 			return relayOutboxKey{}, false, nil
 		}
@@ -156,7 +148,7 @@ func (s *Store) UnpersistedRelayOutboxKey(ctx context.Context, key relayOutboxKe
 		return key, true, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT epoch FROM relay_sent
- WHERE kind=? AND job_id=? AND report_path=? AND reason=? AND persisted_at IS NULL
+ WHERE kind=? AND job_id=? AND report_path=? AND reason=? AND persisted_at IS NULL AND suppressed_at IS NULL
  ORDER BY sent_at DESC LIMIT 2`, key.Kind, key.JobID, key.ReportPath, key.Reason)
 	if err != nil {
 		return relayOutboxKey{}, false, err
@@ -223,5 +215,21 @@ func (s *Store) RecordRelayPersisted(ctx context.Context, key relayOutboxKey, at
 	args := append(s.relayOutboxArgs(key), at.UnixMilli(), at.UnixMilli())
 	_, err := s.db.ExecContext(ctx, `INSERT INTO relay_sent(kind,job_id,epoch,report_path,reason,event_id,sent_at,persisted_at) VALUES(?,?,?,?,?,'',?,?)
  ON CONFLICT(kind,job_id,epoch,report_path,reason,event_id) DO UPDATE SET persisted_at=excluded.persisted_at`, args...)
+	return err
+}
+
+// RecordRelaySuppressed retires a pre-migration event without sending it. The
+// row is the audit record that the file was seen and deliberately held back:
+// sent_at stays NULL because nothing was written, persisted_at stays NULL
+// because the hub never took it. A conflicting row - a send that somehow beat
+// the cutoff - is never clobbered.
+func (s *Store) RecordRelaySuppressed(ctx context.Context, key relayOutboxKey, at time.Time) error {
+	if key.Kind == "lane.event" || key.EventID == "" {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO relay_sent(kind,job_id,epoch,report_path,reason,lane,event_id,suppressed_at) VALUES(?,?,?,?,?,'',?,?)
+ ON CONFLICT DO NOTHING`, key.Kind, key.JobID, int64(key.Epoch), key.ReportPath, key.Reason, key.EventID, at.UnixMilli())
 	return err
 }

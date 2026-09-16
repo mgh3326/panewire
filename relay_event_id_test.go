@@ -255,49 +255,201 @@ func TestJobEventAcknowledgementRetiresOnlyItsOwnRound(t *testing.T) {
 	}
 }
 
-// A relay_sent row written before event_id existed is adopted by the event
-// file it recorded, so an already-sent event is neither re-notified nor
-// duplicated, and a later round still gets its own row.
-func TestJobEventIdentityAdoptsLegacyRow(t *testing.T) {
+func relaySentSuppressedIDs(t *testing.T, store *Store, jobID string) []string {
+	t.Helper()
+	rows, err := store.db.QueryContext(context.Background(), `SELECT event_id FROM relay_sent WHERE job_id=? AND suppressed_at IS NOT NULL ORDER BY event_id`, jobID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, id)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+// A relay_sent row written before event_id existed records a send the file's
+// timestamp can no longer prove - and cannot prove which file it recorded,
+// since the five shared fields are identical across rounds. Rather than
+// guessing, the per-node migration cutoff suppresses every pre-cutoff file:
+// the event is never sent, the file gets a suppressed audit row under its own
+// identity, and the legacy row stays inert - adopted by no one, resent by no
+// one.
+func TestJobEventLegacyRowIsSuppressedNotAdopted(t *testing.T) {
 	inbox := t.TempDir()
-	r20WriteEvent(t, inbox, "job-legacy", "00001-job.completed.json", relayEventIDBody, time.Time{})
+	old := time.Now().Add(-time.Hour)
+	r20WriteEvent(t, inbox, "job-legacy", "00001-job.completed.json", relayEventIDBody, old)
 	store := NewMemoryStore(t)
 	defer store.Close()
 	legacyKey := relayOutboxKey{Kind: "job.completed", JobID: "job-legacy", Epoch: 1, ReportPath: "report.md"}
-	if err := store.RecordRelaySent(context.Background(), legacyKey, time.Now().Add(-2*relayOutboxBackoff)); err != nil {
+	if err := store.RecordRelaySent(context.Background(), legacyKey, old); err != nil {
 		t.Fatal(err)
 	}
 
 	node := r20Node(inbox, store)
-	events := node.jobCompletionEvents()
-	if len(events) != 1 {
-		t.Fatalf("the scan offered %d events for one adopted row, want 1", len(events))
+	if events := node.jobCompletionEvents(); len(events) != 0 {
+		t.Fatalf("a pre-cutoff event was offered %d times, want 0", len(events))
 	}
-	var payload struct {
-		Replay bool `json:"replay"`
+	if got := relaySentSuppressedIDs(t, store, "job-legacy"); len(got) != 1 || got[0] != "00001-job.completed.json" {
+		t.Fatalf("the pre-cutoff file was not recorded as suppressed: %v", got)
 	}
-	if json.Unmarshal(events[0].Payload, &payload) != nil || !payload.Replay {
-		t.Fatalf("the adopted row was not flagged as a replay: %s", events[0].Payload)
+	legacy, err := store.RelayOutboxState(context.Background(), legacyKey)
+	if err != nil || !legacy.Found || legacy.Suppressed {
+		t.Fatalf("the legacy row was touched: state=%+v err=%v", legacy, err)
 	}
-	if got := relaySentEventIDs(t, store, "job-legacy"); len(got) != 1 || got[0] != "00001-job.completed.json" {
-		t.Fatalf("the legacy row was not adopted: event_id values=%v", got)
+	var legacyEventID string
+	if err := store.db.QueryRowContext(context.Background(), `SELECT event_id FROM relay_sent WHERE kind=? AND job_id=? AND event_id=''`, "job.completed", "job-legacy").Scan(&legacyEventID); err != nil {
+		t.Fatalf("the legacy row was adopted or removed: %v", err)
 	}
-	if rows := relaySentRowCount(t, store, "job-legacy"); rows != 1 {
-		t.Fatalf("adoption minted a duplicate row: relay_sent rows=%d, want 1", rows)
+	if rows := relaySentRowCount(t, store, "job-legacy"); rows != 2 {
+		t.Fatalf("relay_sent rows=%d, want the inert legacy row plus the suppressed audit row", rows)
 	}
 
-	// A second round is a new event, adopted or not. Committing round one's
-	// replayed send puts it inside the retry backoff, so only the new file is
-	// offered next.
-	node.commitRelaySent(events[0])
-	r20WriteEvent(t, inbox, "job-legacy", "00002-job.completed.json", relayEventIDBody, time.Time{})
-	second := r20Node(inbox, store).jobCompletionEvents()
-	if len(second) != 1 || second[0].relayKey.EventID != "00002-job.completed.json" {
-		t.Fatalf("the second round offered %+v, want only its own event", second)
+	// Restarting changes nothing: the suppressed row is terminal.
+	if events := r20Node(inbox, store).jobCompletionEvents(); len(events) != 0 {
+		t.Fatalf("a restart re-offered %d suppressed events, want 0", len(events))
 	}
-	r20Node(inbox, store).commitRelaySent(second[0])
-	if rows := relaySentRowCount(t, store, "job-legacy"); rows != 2 {
-		t.Fatalf("a sent second round produced %d rows, want 2", rows)
+}
+
+// Deployment must not replay the retained backlog as fresh notifications:
+// every event file older than this node's migration cutoff is suppressed,
+// regardless of how many there are.
+func TestJobEventPreMigrationBacklogEmitsZero(t *testing.T) {
+	for _, backlog := range []int{0, 1, 5} {
+		t.Run(fmt.Sprintf("N=%d", backlog), func(t *testing.T) {
+			inbox := t.TempDir()
+			old := time.Now().Add(-time.Hour)
+			for index := 1; index <= backlog; index++ {
+				r20WriteEvent(t, inbox, "job-backlog", fmt.Sprintf("%05d-job.completed.json", index), relayEventIDBody, old.Add(time.Duration(index)*time.Minute))
+			}
+			// A file older than the 24h scan window is dropped before the
+			// cutoff even sees it; it must not count as a send either.
+			r20WriteEvent(t, inbox, "job-backlog", "00999-job.completed.json", relayEventIDBody, time.Now().Add(-25*time.Hour))
+
+			fake, client, closeServer := newFakeHandoffkeep(t)
+			defer closeServer()
+			hub, agent := r20t5Hub(t, relayEventIDLanes, client, 8)
+			store := NewMemoryStore(t)
+			defer store.Close()
+
+			events := r20Node(inbox, store).jobCompletionEvents()
+			if len(events) != 0 {
+				t.Fatalf("a pre-cutoff backlog of %d offered %d events, want 0", backlog, len(events))
+			}
+			if got := relaySentSuppressedIDs(t, store, "job-backlog"); len(got) != backlog {
+				t.Fatalf("suppressed rows=%v, want %d audit rows (one per in-window file)", got, backlog)
+			}
+			injections := 0
+			for _, event := range events {
+				injected, _ := r20t7Deliver(t, hub, agent, r20Node(inbox, store), event)
+				injections += injected
+			}
+			if injections != 0 || fake.rowCount() != 0 {
+				t.Fatalf("suppressed backlog injected=%d handoffkeep=%d, want 0", injections, fake.rowCount())
+			}
+		})
+	}
+}
+
+// The cutoff's near edge is a grace window: an event emitted minutes before
+// this node's migration is fresh news from the old binary's last seconds, and
+// suppressing it would lose the one notification that job ever gets. Five of
+// them send, because the window bounds the blast radius by time, not count.
+func TestJobEventWithinMigrationGraceStillSends(t *testing.T) {
+	inbox := t.TempDir()
+	recent := time.Now().Add(-time.Minute)
+	for index := 1; index <= 5; index++ {
+		r20WriteEvent(t, inbox, "job-grace", fmt.Sprintf("%05d-job.completed.json", index), relayEventIDBody, recent.Add(time.Duration(index)*time.Second))
+	}
+	_, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	hub, agent := r20t5Hub(t, relayEventIDLanes, client, 8)
+	store := NewMemoryStore(t)
+	defer store.Close()
+
+	node := r20Node(inbox, store)
+	events := node.jobCompletionEvents()
+	if len(events) != 5 {
+		t.Fatalf("the grace window offered %d events, want all 5", len(events))
+	}
+	injections := 0
+	for _, event := range events {
+		injected, _ := r20t7Deliver(t, hub, agent, node, event)
+		injections += injected
+		node.commitRelaySent(event)
+	}
+	if injections != 5 {
+		t.Fatalf("grace-window events injected %d notes, want 5", injections)
+	}
+	if got := relaySentSuppressedIDs(t, store, "job-grace"); len(got) != 0 {
+		t.Fatalf("in-window events were suppressed: %v", got)
+	}
+}
+
+// The boundary is exact: one second inside the window sends, one second
+// outside suppresses.
+func TestJobEventMigrationGraceBoundary(t *testing.T) {
+	inbox := t.TempDir()
+	store := NewMemoryStore(t)
+	defer store.Close()
+	migrated := time.Now().Truncate(time.Second)
+	r20AgeMigrationStamp(t, store, migrated)
+	cutoff := migrated.Add(-relayMigrationGrace)
+
+	r20WriteEvent(t, inbox, "job-edge", "00001-job.completed.json", relayEventIDBody, cutoff.Add(-time.Second))
+	r20WriteEvent(t, inbox, "job-edge", "00002-job.completed.json", relayEventIDBody, cutoff.Add(time.Second))
+
+	node := r20Node(inbox, store)
+	events := node.jobCompletionEvents()
+	if len(events) != 1 || events[0].relayKey.EventID != "00002-job.completed.json" {
+		t.Fatalf("the boundary offered %+v, want only the in-window event", events)
+	}
+	if got := relaySentSuppressedIDs(t, store, "job-edge"); len(got) != 1 || got[0] != "00001-job.completed.json" {
+		t.Fatalf("the out-of-window event was not suppressed: %v", got)
+	}
+}
+
+// The cutoff is per-node: it is the instant THAT node's store gained event
+// identity, minus the grace. Two stores migrating an hour apart disagree on
+// the same file - the early node sees a post-migration event to send, the
+// late node sees its own pre-migration backlog to suppress.
+func TestJobEventMigrationCutoffIsPerNode(t *testing.T) {
+	inbox := t.TempDir()
+	// The event predates the late node's migration but postdates the early
+	// node's cutoff.
+	r20WriteEvent(t, inbox, "job-pernode", "00001-job.completed.json", relayEventIDBody, time.Now().Add(-30*time.Minute))
+
+	early := NewMemoryStore(t)
+	defer early.Close()
+	r20AgeMigrationStamp(t, early, time.Now().Add(-time.Hour))
+	late := NewMemoryStore(t)
+	defer late.Close()
+
+	migratedEarly, okEarly, errEarly := early.RelayEventIDMigrationAt(context.Background())
+	migratedLate, okLate, errLate := late.RelayEventIDMigrationAt(context.Background())
+	if errEarly != nil || errLate != nil || !okEarly || !okLate {
+		t.Fatalf("migration stamps: early=%s(%v,%v) late=%s(%v,%v)", migratedEarly, okEarly, errEarly, migratedLate, okLate, errLate)
+	}
+	if !migratedEarly.Before(migratedLate) {
+		t.Fatalf("the fixture needs distinct migration times: early=%s late=%s", migratedEarly, migratedLate)
+	}
+
+	if events := r20Node(inbox, early).jobCompletionEvents(); len(events) != 1 {
+		t.Fatalf("the early-migrated node offered %d events, want 1 (the file postdates its cutoff)", len(events))
+	}
+	if events := r20Node(inbox, late).jobCompletionEvents(); len(events) != 0 {
+		t.Fatalf("the late-migrated node offered %d events, want 0 (the file is its own backlog)", len(events))
+	}
+	if got := relaySentSuppressedIDs(t, late, "job-pernode"); len(got) != 1 {
+		t.Fatalf("the late node recorded %v suppressed rows, want the one file", got)
 	}
 }
 
