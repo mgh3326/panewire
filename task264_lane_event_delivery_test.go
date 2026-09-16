@@ -142,20 +142,28 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 		}
 	})
 
-	// R1: a harness with no composer-chip/queue detection at all (e.g. devin)
-	// can still only prove delivery via classifySubmission's marker_observed
-	// path, which the classifier gates on harness == claude/codex. Absence of
-	// negative evidence is not proof of delivery for any harness -- that
-	// blanket assumption (AC0, #264 D2) is the same defect R1 fixed, so this
-	// now stays unconfirmed instead of defaulting to delivered.
-	t.Run("devin harness with no chip/queue evidence stays unconfirmed", func(t *testing.T) {
+	// #264 D2 AC0 / R1 rework (operator decision hk:doc
+	// decision/2026-09-16/pwrelay-ac0-revert): a harness with no
+	// submission-evidence path at all -- classifySubmission gates queued and
+	// marker_observed on harness in {claude, codex}, and devin's real screen
+	// ("── N queued ── / send now") does not match claude's paste-chip text
+	// either, so devin can only ever land on unproven here -- must still
+	// report delivered. Reporting false would retry via busy_relay.go's
+	// retryOrDrop, and defaultHubRelayInject sends the prompt before
+	// verifying, so the retry would re-inject the same body into a still-live
+	// devin pane: a real duplicate-injection outcome, which is worse than the
+	// silent-loss defect R1 fixed for claude/codex. This is an intentional,
+	// interim carve-out (harnessHasSubmissionEvidence in hub_client.go), not
+	// an oversight -- giving devin its own real evidence path is tracked as a
+	// separate followup.
+	t.Run("devin harness with no chip/queue evidence still reports delivered", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeHerdr(t, dir, map[string]string{
 			"get":  `{"result":{"agent":{"agent":"devin"}}}`,
 			"read": "task acknowledged",
 		})
-		if defaultHubRelayInject(context.Background(), "devin-pane", "do the thing") {
-			t.Fatal("devin harness with no queue/chip/marker evidence reported delivered")
+		if !defaultHubRelayInject(context.Background(), "devin-pane", "do the thing") {
+			t.Fatal("devin harness with no queue/chip evidence should still report delivered (AC0: devin submits without a composer chip)")
 		}
 	})
 }

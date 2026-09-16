@@ -219,3 +219,65 @@ func TestRelayInjectVerifySubmissionQueuedArmUnchanged(t *testing.T) {
 		t.Fatalf("unexpected herdr calls: %q", got)
 	}
 }
+
+// TestRelayInjectVerifySubmissionHarnessEvidenceMatrix is the closed
+// enumeration the 2026-09-16 rework requires: every harness family (claude,
+// codex, a harness with no submission-evidence path such as devin, and an
+// unrecognized/empty harness string) crossed with every classifySubmission
+// value it can actually reach, pinning both the delivered/unconfirmed result
+// and whether that result would drive a hub retry (busy_relay.go's
+// retryOrDrop fires on false; defaultHubRelayInject sends the prompt before
+// verifying, so a retry re-injects into a still-live pane -- see
+// hub_client.go's harnessHasSubmissionEvidence for why that distinction
+// exists).
+//
+// Reachability by harness (classifySubmission's own gating):
+//   - claude:  composer_residue (chip or divider-echo), queued, marker_observed, unproven
+//   - codex:   composer_residue (chip only), queued, marker_observed, unproven
+//   - devin:   composer_residue (chip only, and devin's real screen never emits
+//     one), unproven -- queued and marker_observed are unreachable
+//     (harness-gated)
+//   - other:   same as devin -- composer_residue (chip only), unproven
+func TestRelayInjectVerifySubmissionHarnessEvidenceMatrix(t *testing.T) {
+	cases := []struct {
+		name       string
+		harness    string
+		reads      []string
+		classify   string // the classifySubmission value the final read lands on
+		wantResult bool   // relayInjectVerifySubmission's return value
+		wouldRetry bool   // !wantResult: whether the hub would retry/re-inject
+	}{
+		{"claude marker_observed direct", "claude", []string{"prefix one line suffix"}, "marker_observed", true, false},
+		{"claude unproven direct", "claude", []string{"nothing relevant"}, "unproven", false, true},
+		{"claude queued then still queued after return", "claude", []string{"Press up to edit queued messages", "Press up to edit queued messages"}, "queued", false, true},
+		{"claude composer_residue then unproven after return", "claude", []string{"[Pasted text #1]", "nothing relevant"}, "unproven", false, true},
+
+		{"codex marker_observed direct", "codex", []string{"one line"}, "marker_observed", true, false},
+		{"codex unproven direct", "codex", []string{"nothing relevant"}, "unproven", false, true},
+		{"codex queued then still queued after return", "codex", []string{"Press up to edit queued messages", "Press up to edit queued messages"}, "queued", false, true},
+		{"codex composer_residue then unproven after return", "codex", []string{"[Pasted text #1]", "nothing relevant"}, "unproven", false, true},
+
+		// devin has no evidence path: queued/marker_observed are unreachable
+		// (harness-gated), so every real screen lands on unproven, and the
+		// carve-out reports delivered to avoid re-injecting into a live pane.
+		{"devin unproven direct (typical screen)", "devin", []string{"── 1 queued ── send now"}, "unproven", true, false},
+		{"devin unproven direct (marker text present but harness-gated)", "devin", []string{"one line"}, "unproven", true, false},
+		{"devin composer_residue then unproven after return (edge case)", "devin", []string{"[Pasted text #1]", "nothing relevant"}, "unproven", true, false},
+
+		// An unrecognized/empty harness string gets the same carve-out as devin.
+		{"unrecognized harness unproven direct", "some-future-harness", []string{"nothing relevant"}, "unproven", true, false},
+		{"empty harness unproven direct", "", []string{"nothing relevant"}, "unproven", true, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.wantResult == tc.wouldRetry {
+				t.Fatalf("test case is self-contradictory: wantResult=%t wouldRetry=%t", tc.wantResult, tc.wouldRetry)
+			}
+			unprovenSetupHerdr(t, tc.reads)
+			got := relayInjectVerifySubmission(context.Background(), "test-pane", tc.harness, "one line")
+			if got != tc.wantResult {
+				t.Fatalf("harness=%q reads=%v: relayInjectVerifySubmission=%t, want %t (retry=%t)", tc.harness, tc.reads, got, tc.wantResult, tc.wouldRetry)
+			}
+		})
+	}
+}
