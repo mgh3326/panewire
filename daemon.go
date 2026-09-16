@@ -649,7 +649,7 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		epoch = 1
 	}
 	if d.cfg.Hub.Client == nil {
-		return nil
+		return &codedError{ExitDaemonUnavailable, fmt.Errorf("hub client unavailable")}
 	}
 	event := hubScannedRelayEvent{
 		Kind: req.Kind,

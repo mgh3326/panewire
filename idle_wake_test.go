@@ -896,8 +896,23 @@ func TestIdleWakeAdversarialLabelRemainsDataAtShellBoundary(t *testing.T) {
 	if !validLaneEventText(text) || strings.ContainsAny(text, "\r\n\x00") || !strings.Contains(text, "$(touch") {
 		t.Fatalf("lane text did not preserve escaped data safely: %q", text)
 	}
+	// The fake herdr's "read" case cats a file holding the exact submission
+	// marker (rather than embedding the adversarial text in the shell script
+	// itself) so classifySubmission can prove marker_observed -- required for
+	// defaultHubRelayInject to report delivered now that an unproven
+	// classification is no longer treated as delivered.
+	markerFile := filepath.Join(dir, "marker.txt")
+	if err := os.WriteFile(markerFile, []byte(markerFor(text)), 0600); err != nil {
+		t.Fatal(err)
+	}
 	script := filepath.Join(dir, "herdr")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\ncase \"$2\" in prompt) exit 0;; read) exit 0;; *) exit 1;; esac\n"), 0700); err != nil {
+	scriptBody := "#!/bin/sh\ncase \"$2\" in\n" +
+		"get) echo '{\"result\":{\"agent\":{\"agent\":\"claude\"}}}' ;;\n" +
+		"read) cat '" + markerFile + "' ;;\n" +
+		"prompt) exit 0 ;;\n" +
+		"*) exit 1 ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(script, []byte(scriptBody), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))

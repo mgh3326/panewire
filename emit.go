@@ -241,12 +241,23 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		_ = temporary.Close()
 		return "", err
 	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
 	if err := temporary.Close(); err != nil {
 		return "", err
 	}
 	final := filepath.Join(eventsDir, fmt.Sprintf("%05d-%s.json", highest+1, record.Type))
 	if err := os.Rename(name, final); err != nil {
 		return "", err
+	}
+	// Directory sync is best effort across the supported filesystems. The
+	// rename above is the visibility boundary; a directory fsync failure must
+	// not turn a successfully replaced, parseable file into a reported failure.
+	if directoryFile, err := os.Open(eventsDir); err == nil {
+		_ = directoryFile.Sync()
+		_ = directoryFile.Close()
 	}
 	return final, nil
 }
@@ -297,6 +308,10 @@ func writeLaneEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		_ = temporary.Close()
 		return "", err
 	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return "", err
+	}
 	if err := temporary.Close(); err != nil {
 		return "", err
 	}
@@ -309,6 +324,14 @@ func writeLaneEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		// durable lane event. A collision is either this key's duplicate or a
 		// different producer that won the sequence, in which case try the next.
 		if err := os.Link(name, final); err == nil {
+			// Directory sync is best effort across the supported filesystems.
+			// The link above is the visibility boundary; a directory fsync
+			// failure must not turn a successfully published file into a
+			// reported failure.
+			if directoryFile, err := os.Open(eventsDir); err == nil {
+				_ = directoryFile.Sync()
+				_ = directoryFile.Close()
+			}
 			return final, nil
 		} else if !errors.Is(err, os.ErrExist) {
 			return "", err

@@ -576,11 +576,19 @@ func relayInjectVerifySubmission(ctx context.Context, pane, harness, text string
 		switch classifySubmission(harness, string(out), marker) {
 		case "composer_residue", "queued":
 			return false
-		default:
+		case "marker_observed":
 			return true
+		default:
+			// unproven: the submission was neither proven delivered nor proven
+			// still stuck in the composer/queue. Report false so the hub
+			// retries/holds instead of retiring the message as delivered.
+			return false
 		}
-	default:
+	case "marker_observed":
 		return true
+	default:
+		// unproven: same reasoning as above.
+		return false
 	}
 }
 
