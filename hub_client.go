@@ -947,7 +947,7 @@ func hubJobCompletionPayload(jobID string, epoch uint64) json.RawMessage {
 // hubJobCompletionPayloadForJob carries the claim's agent_label alongside the
 // terminal record. The hub needs it to late-register a job it never saw in a
 // heartbeat; it is metadata on an already-terminal record, not a claim.
-func hubJobCompletionPayloadForJob(job HubActiveJob, replay bool) json.RawMessage {
+func hubJobCompletionPayloadForJob(job HubActiveJob, eventID string, replay bool) json.RawMessage {
 	payload, _ := json.Marshal(struct {
 		JobID          string `json:"job_id"`
 		Epoch          uint64 `json:"epoch"`
@@ -957,8 +957,9 @@ func hubJobCompletionPayloadForJob(job HubActiveJob, replay bool) json.RawMessag
 		Host           string `json:"host,omitempty"`
 		ReportPath     string `json:"report_path,omitempty"`
 		ReportLastLine string `json:"report_last_line,omitempty"`
+		EventID        string `json:"event_id,omitempty"`
 		Replay         bool   `json:"replay,omitempty"`
-	}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, replay})
+	}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, eventID, replay})
 	return payload
 }
 
@@ -998,6 +999,7 @@ func relayEventWireForm(job hubScannedRelayEvent) hubScannedRelayEvent {
 	job.PR = normalizeRelayEventText(job.PR)
 	job.Head = normalizeRelayEventText(job.Head)
 	job.PaneID = normalizeRelayEventText(job.PaneID)
+	job.EventID = normalizeRelayEventText(job.EventID)
 	return job
 }
 
@@ -1015,7 +1017,9 @@ func relayEventOutboxKeyFor(job hubScannedRelayEvent) relayOutboxKey {
 	if job.Kind == "job.completed" {
 		reason = ""
 	}
-	return relayOutboxKey{Kind: job.Kind, JobID: job.JobID, Epoch: job.Epoch, ReportPath: job.ReportPath, Reason: reason}
+	// EventID distinguishes one durable event file from the job's next round;
+	// an empty one preserves the legacy five-field key for old producers.
+	return relayOutboxKey{Kind: job.Kind, JobID: job.JobID, Epoch: job.Epoch, ReportPath: job.ReportPath, Reason: reason, EventID: job.EventID}
 }
 
 // nowUTC is the outbox retry clock, injectable so a fixture can pin the
@@ -1053,6 +1057,9 @@ func (client *HubClient) jobCompletionEvents() []hubClientEvent {
 func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientEvent, bool) {
 	job = relayEventWireForm(job)
 	key := relayEventOutboxKeyFor(job)
+	if client.suppressPreMigrationRelayEvent(job, key) {
+		return hubClientEvent{}, false
+	}
 	if client.outbox != nil {
 		if outstanding, found, err := client.outbox.UnpersistedRelayOutboxKey(context.Background(), key); err != nil {
 			client.warnMessage("relay outbox outstanding key unavailable")
@@ -1080,7 +1087,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay})
 		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 	}
-	payload := hubJobCompletionPayloadForJob(job.HubActiveJob, replay)
+	payload := hubJobCompletionPayloadForJob(job.HubActiveJob, job.EventID, replay)
 	if job.Kind == "job.escalate" || job.Kind == "job.joined" {
 		payload, _ = json.Marshal(struct {
 			JobID          string `json:"job_id"`
@@ -1096,10 +1103,38 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			PR             string `json:"pr,omitempty"`
 			Head           string `json:"head,omitempty"`
 			PaneID         string `json:"pane_id,omitempty"`
+			EventID        string `json:"event_id,omitempty"`
 			Replay         bool   `json:"replay,omitempty"`
-		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Question, job.PR, job.Head, job.PaneID, replay})
+		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Question, job.PR, job.Head, job.PaneID, job.EventID, replay})
 	}
 	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
+}
+
+// suppressPreMigrationRelayEvent retires event files that predate this node's
+// event-identity migration by more than the grace window. Deploying the keyed
+// outbox used to replay the whole retained backlog as fresh notifications -
+// including the completion an old binary already sent. The cutoff is this
+// node's own migration instant minus relayMigrationGrace: events inside the
+// window may be relayed (a rolling restart's in-flight work is still fresh
+// news), everything older is recorded as suppressed and never offered. A
+// missing migration stamp or an unidentifiable file fails open, since a lost
+// notification is worse than a duplicate.
+func (client *HubClient) suppressPreMigrationRelayEvent(job hubScannedRelayEvent, key relayOutboxKey) bool {
+	if client.outbox == nil || key.EventID == "" || job.Kind == "lane.event" || job.EventTime.IsZero() {
+		return false
+	}
+	migratedAt, ok, err := client.outbox.RelayEventIDMigrationAt(context.Background())
+	if err != nil {
+		client.warnMessage("relay migration stamp unavailable")
+		return false
+	}
+	if !ok || !job.EventTime.Before(migratedAt.Add(-relayMigrationGrace)) {
+		return false
+	}
+	if err := client.outbox.RecordRelaySuppressed(context.Background(), key, client.nowUTC()); err != nil {
+		client.warnMessage("relay suppression record failed")
+	}
+	return true
 }
 
 // selectRelayEvent answers "should this record go out now, and is it a replay".
@@ -1142,7 +1177,7 @@ func (client *HubClient) selectRelayEvent(key relayOutboxKey) (send bool, replay
 		client.relayInflight[text] = struct{}{}
 		return true, false
 	}
-	if state.Persisted {
+	if state.Persisted || state.Suppressed {
 		client.completedReports[text] = struct{}{}
 		return false, false
 	}
@@ -1420,6 +1455,14 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		}
 		if message.Kind == "lane.event" {
 			if len(fields) != 9 || json.Unmarshal(fields["lane"], &message.Lane) != nil || json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || !hubAgentLabelPattern.MatchString(message.Lane) || !validLaneEventID(message.ProducerEventID) {
+				return hubOutboundMessage{}, false
+			}
+		} else if len(fields) == 8 {
+			// Newer hubs echo the producer's event identity so the
+			// acknowledgement retires the exact event's outbox row. An
+			// older seven-field acknowledgement leaves it empty and keeps
+			// the legacy five-field match.
+			if json.Unmarshal(fields["producer_event_id"], &message.ProducerEventID) != nil || len(message.ProducerEventID) > 240 {
 				return hubOutboundMessage{}, false
 			}
 		} else if len(fields) != 7 {

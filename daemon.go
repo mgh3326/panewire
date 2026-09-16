@@ -662,6 +662,12 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 	if req.Kind == "lane.event" {
 		event.JobID = laneEventTransportID(req.OwnerLane, req.EventID)
 		event.ReportPath, event.Reason = "", ""
+	} else {
+		// A job.* event's identity is its durable file name, derived here from
+		// the daemon's own namespace so the immediate send and the later scan
+		// name the same outbox row. The file's timestamp feeds the deployment
+		// cutoff the scan applies.
+		event.EventID, event.EventTime = emitJobEventFileID(d.emitNamespaceRoot(), req, epoch)
 	}
 	d.cfg.Hub.Client.EnqueueRelayEvent(event)
 	return nil
