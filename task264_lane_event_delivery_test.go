@@ -142,28 +142,56 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 		}
 	})
 
-	// #264 D2 AC0 / R1 rework (operator decision hk:doc
-	// decision/2026-09-16/pwrelay-ac0-revert): a harness with no
-	// submission-evidence path at all -- classifySubmission gates queued and
-	// marker_observed on harness in {claude, codex}, and devin's real screen
-	// ("── N queued ── / send now") does not match claude's paste-chip text
-	// either, so devin can only ever land on unproven here -- must still
-	// report delivered. Reporting false would retry via busy_relay.go's
-	// retryOrDrop, and defaultHubRelayInject sends the prompt before
-	// verifying, so the retry would re-inject the same body into a still-live
-	// devin pane: a real duplicate-injection outcome, which is worse than the
-	// silent-loss defect R1 fixed for claude/codex. This is an intentional,
-	// interim carve-out (harnessHasSubmissionEvidence in hub_client.go), not
-	// an oversight -- giving devin its own real evidence path is tracked as a
-	// separate followup.
-	t.Run("devin harness with no chip/queue evidence still reports delivered", func(t *testing.T) {
+	// #264 D2 AC0 was reversed by hk:doc
+	// brief/2026-09-16/devin-submission-evidence: devin's screen syntax
+	// (idle placeholder text, its own "send now" queue banner, and a fixed
+	// two-divider composer layout classifySubmission now recognizes for
+	// devin too) turned out to carry real submission evidence after all --
+	// classifySubmission was just never taught to read it. devin now shares
+	// claude/codex's evidence path (see harnessHasSubmissionEvidence), so the
+	// AC0 carve-out only remains for a harness with genuinely no evidence
+	// path (e.g. grok). A devin read with neither queue nor marker evidence
+	// must now report unconfirmed and retry, exactly like claude/codex.
+	t.Run("devin harness with no queue/marker evidence reports unconfirmed, not delivered", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeHerdr(t, dir, map[string]string{
 			"get":  `{"result":{"agent":{"agent":"devin"}}}`,
 			"read": "task acknowledged",
 		})
+		if defaultHubRelayInject(context.Background(), "devin-pane", "do the thing") {
+			t.Fatal("devin harness with no queue/marker evidence reported delivered; carve-out should be gone")
+		}
+	})
+
+	// The other half of AC0's reversal: devin's own queue banner ("send
+	// now") is now real evidence, so a still-queued devin screen must not be
+	// reported delivered either -- mirrors the codex queued case above.
+	t.Run("devin queued state never confirms, verification reports failure", func(t *testing.T) {
+		dir := t.TempDir()
+		writeFakeHerdr(t, dir, map[string]string{
+			"get":       `{"result":{"agent":{"agent":"devin"}}}`,
+			"read":      "── 1 queued ── send now",
+			"send-keys": "",
+		})
+		if defaultHubRelayInject(context.Background(), "devin-pane", "do the thing") {
+			t.Fatal("devin message still shown queued after return, but injection reported delivered")
+		}
+	})
+
+	// And the positive case: once devin's own marker echo appears after the
+	// return keypress, injection must report delivered -- mirrors the codex
+	// marker-evidence case above.
+	t.Run("devin queue clears after return with marker evidence, verification reports success", func(t *testing.T) {
+		dir := t.TempDir()
+		marker := filepath.Join(dir, "returned")
+		script := "#!/bin/sh\ncase \"$2\" in\n" +
+			"get) echo '{\"result\":{\"agent\":{\"agent\":\"devin\"}}}' ;;\n" +
+			"read) if [ -f \"" + marker + "\" ]; then echo 'do the thing'; else echo '── 1 queued ── send now'; fi ;;\n" +
+			"send-keys) touch \"" + marker + "\" ;;\n" +
+			"esac\n"
+		installFakeHerdr(t, dir, script)
 		if !defaultHubRelayInject(context.Background(), "devin-pane", "do the thing") {
-			t.Fatal("devin harness with no queue/chip evidence should still report delivered (AC0: devin submits without a composer chip)")
+			t.Fatal("devin message echoed the marker after return, but injection reported failure")
 		}
 	})
 }

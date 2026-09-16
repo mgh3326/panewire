@@ -558,13 +558,14 @@ func relayInjectHarness(ctx context.Context, pane string) string {
 
 // harnessHasSubmissionEvidence reports whether classifySubmission can ever
 // prove this harness's submission one way or the other. queued and
-// marker_observed are both gated on harness being claude or codex; any other
-// harness (e.g. devin) can only ever land on composer_residue (and only if it
-// happens to emit claude's literal paste-chip text, which most don't) or
-// unproven. See the unproven carve-out below for why that distinction
-// matters.
+// marker_observed are gated on harness being claude, codex, or devin (see
+// classifySubmission); any other harness (e.g. grok, which exposes no prompt
+// in recent-unwrapped at all -- see 2026-09-14 fleet notes) can only ever
+// land on composer_residue (and only if it happens to emit claude's literal
+// paste-chip text, which most don't) or unproven. See the unproven carve-out
+// below for why that distinction matters.
 func harnessHasSubmissionEvidence(harness string) bool {
-	return strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex")
+	return strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex") || strings.EqualFold(harness, "devin")
 }
 
 func relayInjectVerifySubmission(ctx context.Context, pane, harness, text string) bool {
@@ -592,20 +593,20 @@ func relayInjectVerifySubmission(ctx context.Context, pane, harness, text string
 		default:
 			// unproven: the submission was neither proven delivered nor proven
 			// still stuck in the composer/queue. For a harness that can
-			// actually produce marker_observed (claude/codex), report false
-			// so the hub retries/holds instead of retiring the message as
-			// delivered -- that was #264/R1's fix for an 11-hour message
+			// actually produce marker_observed (claude/codex/devin), report
+			// false so the hub retries/holds instead of retiring the message
+			// as delivered -- that was #264/R1's fix for an 11-hour message
 			// loss. For a harness with no submission-evidence path at all
-			// (#264 D2 AC0, e.g. devin: classifySubmission gates queued and
-			// marker_observed on harness in {claude, codex}, so it can never
-			// land on anything but unproven here), a false report retries
-			// via busy_relay.go's retryOrDrop, and defaultHubRelayInject
-			// sends the prompt before verifying -- so the retry re-injects
-			// into a still-live pane, which is worse than the silent loss
-			// R1 fixed. Keep the pre-R1 behavior for such a harness (report
-			// delivered on no negative evidence) until it gets its own
-			// evidence path; that is tracked as a separate followup, not
-			// this fix's scope.
+			// (#264 D2 AC0, e.g. grok: classifySubmission gates queued and
+			// marker_observed on harness in {claude, codex, devin}, so it can
+			// never land on anything but unproven here), a false report
+			// retries via busy_relay.go's retryOrDrop, and
+			// defaultHubRelayInject sends the prompt before verifying -- so
+			// the retry re-injects into a still-live pane, which is worse
+			// than the silent loss R1 fixed. Keep the pre-R1 behavior for
+			// such a harness (report delivered on no negative evidence)
+			// until it gets its own evidence path; that is tracked as a
+			// separate followup, not this fix's scope.
 			return !harnessHasSubmissionEvidence(harness)
 		}
 	case "marker_observed":
