@@ -1,8 +1,9 @@
 # Hub UI behind Cloudflare Access
 
-The hub UI is read-only. It does not use an operator token, does not expose a
+`/ui` is read-only. It does not use an operator token, does not expose a
 write endpoint, and its browser data contains only sanitized node, burst, and
-event status.
+event status. The operator chat screen `/chat` is a separate surface with
+browser write paths; see `docs/hub-chat.md`.
 
 1. Run the hub with `--ui-allow-cf-only` and keep `--listen` on its default
    `127.0.0.1:9377`. This opt-in serves `GET /ui` and `GET /ui/data.json`.

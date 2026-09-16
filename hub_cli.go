@@ -87,6 +87,7 @@ type hubServerCLIDeps struct {
 	TelegramBaseURL       string
 	AllowInsecureForTests bool
 	HandoffkeepHTTPClient *http.Client
+	ChatHTTPClient        *http.Client
 	Now                   func() time.Time
 }
 
@@ -114,6 +115,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	reportRelayPath := flags.String("report-relay-routes", "", "deprecated alias for --lanes")
 	acceptingOverridesPath := flags.String("accepting-overrides", "", "optional accepting override JSON (updated by operator POST)")
 	handoffkeepEnvPath := flags.String("handoffkeep-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file enabling durable relay events")
+	chatEnvPath := flags.String("chat-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file for the operator chat store (defaults to --handoffkeep-env)")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return nil, "", ExitUsage, errors.New("invalid hub flags")
 	}
@@ -183,7 +185,26 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub handoffkeep configuration is invalid")
 		}
 	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, ReportRelayPath: routePath, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep})
+	// The chat store defaults to the relay handoffkeep but is a separate client
+	// with its own pool, so a chat outage and a relay outage stay independent.
+	// --chat-env splits the failure domain explicitly ahead of any later
+	// storage separation.
+	var chatStore ChatStore
+	chatEnv := *chatEnvPath
+	if chatEnv == "" {
+		chatEnv = *handoffkeepEnvPath
+	}
+	if chatEnv != "" {
+		env, err := loadHubHandoffkeepEnv(chatEnv)
+		if err != nil {
+			return nil, "", ExitConditionInvalid, errors.New("hub chat store env is invalid")
+		}
+		chatStore, err = newHandoffkeepChatStore(env, deps.ChatHTTPClient)
+		if err != nil {
+			return nil, "", ExitConditionInvalid, errors.New("hub chat store configuration is invalid")
+		}
+	}
+	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, ReportRelayPath: routePath, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep, ChatStore: chatStore})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}
