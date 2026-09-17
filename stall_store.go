@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -23,6 +24,7 @@ const (
 	stallCauseUnobserved       = "unobserved"
 	stallCauseUnowned          = "unowned"
 	stallCauseConflict         = "conflict"
+	stallCauseSuperseded       = "superseded"
 	stallCauseStartupSuspect   = "startup_block_suspect"
 )
 
@@ -218,12 +220,17 @@ func stallDetectMigrate(db *sql.DB) error {
 		`CREATE TABLE IF NOT EXISTS stall_beat (
 		 id INTEGER PRIMARY KEY CHECK(id=1),
 		 beat_ms INTEGER NOT NULL DEFAULT 0, interval_ms INTEGER NOT NULL DEFAULT 0,
-		 panes INTEGER NOT NULL DEFAULT 0)`,
+		 panes INTEGER NOT NULL DEFAULT 0, degraded INTEGER NOT NULL DEFAULT 0)`,
 	}
 	for _, statement := range statements {
 		if _, err := db.Exec(statement); err != nil {
 			return err
 		}
+	}
+	// Stores created before the degraded column existed still have the old
+	// three-column beat row.
+	if _, err := db.Exec(`ALTER TABLE stall_beat ADD COLUMN degraded INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
 	}
 	return nil
 }
@@ -699,28 +706,41 @@ func (s *Store) stallUnownedCandidates(ctx context.Context) ([]stallUnownedRow, 
 	return out, rows.Err()
 }
 
-// recordStallBeat is the node-side durability half of the hub no-data
-// contract: the last completed scan survives a daemon restart.
-func (s *Store) recordStallBeat(ctx context.Context, beat time.Time, interval time.Duration, panes int) error {
+// markStallJobTerminal closes a job row without touching the worker. Used
+// when another job's spawn proves this pane moved on — the [superseded]
+// incident is the record; this flag only stops further reads on the row.
+func (s *Store) markStallJobTerminal(ctx context.Context, jobID string, attempt int64, kind string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO stall_beat(id,beat_ms,interval_ms,panes) VALUES(1,?,?,?)
-	 ON CONFLICT(id) DO UPDATE SET beat_ms=excluded.beat_ms,interval_ms=excluded.interval_ms,panes=excluded.panes`, stallMS(beat), interval.Milliseconds(), panes)
+	_, err := s.db.ExecContext(ctx, `UPDATE stall_jobs SET terminal=1,terminal_kind=? WHERE job_id=? AND attempt=?`, kind, jobID, attempt)
 	return err
 }
 
-func (s *Store) stallBeat(ctx context.Context) (beat time.Time, interval time.Duration, panes int, err error) {
+// recordStallBeat is the node-side durability half of the hub no-data
+// contract: the last completed scan survives a daemon restart. degraded marks
+// a cycle whose observation failed — the beat keeps moving but must not look
+// like healthy coverage.
+func (s *Store) recordStallBeat(ctx context.Context, beat time.Time, interval time.Duration, panes int, degraded bool) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, err := s.db.ExecContext(ctx, `INSERT INTO stall_beat(id,beat_ms,interval_ms,panes,degraded) VALUES(1,?,?,?,?)
+	 ON CONFLICT(id) DO UPDATE SET beat_ms=excluded.beat_ms,interval_ms=excluded.interval_ms,panes=excluded.panes,degraded=excluded.degraded`, stallMS(beat), interval.Milliseconds(), panes, boolInt(degraded))
+	return err
+}
+
+func (s *Store) stallBeat(ctx context.Context) (beat time.Time, interval time.Duration, panes int, degraded bool, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var beatMS, intervalMS int64
-	err = s.db.QueryRowContext(ctx, `SELECT beat_ms,interval_ms,panes FROM stall_beat WHERE id=1`).Scan(&beatMS, &intervalMS, &panes)
+	var deg int
+	err = s.db.QueryRowContext(ctx, `SELECT beat_ms,interval_ms,panes,degraded FROM stall_beat WHERE id=1`).Scan(&beatMS, &intervalMS, &panes, &deg)
 	if err == sql.ErrNoRows {
-		return time.Time{}, 0, 0, nil
+		return time.Time{}, 0, 0, false, nil
 	}
 	if err != nil {
-		return time.Time{}, 0, 0, err
+		return time.Time{}, 0, 0, false, err
 	}
-	return stallTime(beatMS), time.Duration(intervalMS) * time.Millisecond, panes, nil
+	return stallTime(beatMS), time.Duration(intervalMS) * time.Millisecond, panes, deg != 0, nil
 }
 
 // relayLanePersisted answers whether a lane.event we emitted is known to have

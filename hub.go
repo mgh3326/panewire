@@ -393,10 +393,11 @@ type HubServer struct {
 // records the last advancing beat and when the hub saw it advance, so a
 // frozen beat_ms and a vanished field are both observable problems.
 type hubStallBeatState struct {
-	seen        bool
-	lastBeatMS  int64
-	lastAdvance time.Time
-	intervalMS  int64
+	seen          bool
+	lastBeatMS    int64
+	lastAdvance   time.Time
+	intervalMS    int64
+	degradedSince time.Time
 }
 
 type hubExpectedVersion struct {
@@ -1131,11 +1132,14 @@ type hubHeartbeatPayload struct {
 
 // hubStallBeatPayload is the node detector's no-data contract. beat_ms is the
 // last completed scan; the hub alerts when it stops advancing or the field
-// vanishes from a node that was previously reporting it.
+// vanishes from a node that was previously reporting it. panes is nullable on
+// purpose: null (or degraded=true) means the cycle could not observe, which
+// is a degraded signal — never to be read as "zero panes seen".
 type hubStallBeatPayload struct {
 	BeatMS     int64 `json:"beat_ms"`
 	IntervalMS int64 `json:"interval_ms"`
-	Panes      int   `json:"panes"`
+	Panes      *int  `json:"panes"`
+	Degraded   bool  `json:"degraded"`
 }
 
 type hubNotePayload struct {
@@ -1248,16 +1252,16 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 	}
 	if rawStall, exists := fields["stall_detect"]; exists {
 		var stallFields map[string]json.RawMessage
-		if json.Unmarshal(rawStall, &stallFields) != nil || len(stallFields) != 3 {
+		if json.Unmarshal(rawStall, &stallFields) != nil || len(stallFields) != 4 {
 			return hubHeartbeatPayload{}, false
 		}
-		for _, name := range []string{"beat_ms", "interval_ms", "panes"} {
+		for _, name := range []string{"beat_ms", "interval_ms", "panes", "degraded"} {
 			if _, exists := stallFields[name]; !exists {
 				return hubHeartbeatPayload{}, false
 			}
 		}
 		var beat hubStallBeatPayload
-		if json.Unmarshal(rawStall, &beat) != nil || beat.BeatMS < 0 || beat.IntervalMS < 0 || beat.Panes < 0 {
+		if json.Unmarshal(rawStall, &beat) != nil || beat.BeatMS < 0 || beat.IntervalMS < 0 || (beat.Panes != nil && *beat.Panes < 0) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.StallDetect = &beat

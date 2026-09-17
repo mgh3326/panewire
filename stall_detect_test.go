@@ -3,11 +3,14 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -162,11 +165,11 @@ func stallCauses(rows []stallIncidentRow) []string {
 // the exact cause name and exactly one would-be notification.
 func TestStallRealErrorFixtures(t *testing.T) {
 	cases := []struct {
-		name, text, cause, status string
+		name, text, cause string
 	}{
-		{"limit_refused", "working...\n" + stallFixtureLimit + "\n", stallCauseLimitRefused, "idle"},
-		{"auth_refused", "boot\n" + stallFixtureAuth + "\n", stallCauseAuthRefused, "idle"},
-		{"input_unsubmitted", "queued\n" + stallFixtureQueue + "\n", stallCauseInputUnsubmitted, "idle"},
+		{"limit_refused", "working...\n" + stallFixtureLimit + "\n", stallCauseLimitRefused},
+		{"auth_refused", "boot\n" + stallFixtureAuth + "\n", stallCauseAuthRefused},
+		{"input_unsubmitted", "queued\n" + stallFixtureQueue + "\n", stallCauseInputUnsubmitted},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -174,10 +177,13 @@ func TestStallRealErrorFixtures(t *testing.T) {
 			claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
 			fx.reads["w1:p1"] = readEvidence{Text: "normal work output\n", Revision: 1}
 			fx.scan() // baseline
-			fx.agents[0].Status = tc.status
 			fx.reads["w1:p1"] = readEvidence{Text: tc.text, Revision: 2}
-			fx.advance(time.Minute)
-			fx.scan()
+			// The queue banner needs a confirming second read; the other two
+			// record on first sighting. A second identical scan adds nothing.
+			for i := 0; i < 2; i++ {
+				fx.advance(time.Minute)
+				fx.scan()
+			}
 			rows := stallIncidentsFor(t, fx, "job-a")
 			if len(rows) != 1 || rows[0].Cause != tc.cause {
 				t.Fatalf("want one %s incident, got %+v", tc.cause, stallCauses(rows))
@@ -219,15 +225,44 @@ func TestStallRepeatedErrorIsNewOccurrence(t *testing.T) {
 	}
 }
 
-// A2 — the queued-input banner under a working agent is input already sent;
-// the same banner on an idle pane is unsubmitted input.
+// A2 — the queued-input banner alone is ambiguous: a submitted prompt leaves
+// the same banner behind. The detector does not consult the status string; a
+// banner must hold across a second read to be recorded as unsubmitted input,
+// and two advancing clean reads recover it.
 func TestStallUnsubmittedVersusSubmitted(t *testing.T) {
-	if matches := classifyScreen(stallFixtureQueue+"\n", "working"); len(matches) != 0 {
-		t.Fatalf("working agent with queue banner matched: %+v", matches)
+	if matches := classifyScreen(stallFixtureQueue + "\n"); len(matches) != 1 || matches[0].cause != stallCauseInputUnsubmitted {
+		t.Fatalf("queue banner did not classify: %+v", matches)
 	}
-	matches := classifyScreen(stallFixtureQueue+"\n", "idle")
-	if len(matches) != 1 || matches[0].cause != stallCauseInputUnsubmitted {
-		t.Fatalf("idle agent queue banner did not match: %+v", matches)
+	fx := newStallFixture(t, false)
+	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+	fx.reads["w1:p1"] = readEvidence{Text: "typing a prompt\n", Revision: 1}
+	fx.scan()
+	// First sighting of the banner: could be queued-and-sent. Not yet an
+	// incident.
+	fx.reads["w1:p1"] = readEvidence{Text: "typing a prompt\n" + stallFixtureQueue + "\n", Revision: 2}
+	fx.advance(time.Minute)
+	fx.scan()
+	if rows := stallIncidentsFor(t, fx, "job-a"); len(rows) != 0 {
+		t.Fatalf("single banner sighting recorded: %+v", stallCauses(rows))
+	}
+	// The banner persists into the next read: unsubmitted input.
+	fx.reads["w1:p1"] = readEvidence{Text: "typing a prompt\n" + stallFixtureQueue + "\n", Revision: 3}
+	fx.advance(time.Minute)
+	fx.scan()
+	rows := stallIncidentsFor(t, fx, "job-a")
+	if len(rows) != 1 || rows[0].Cause != stallCauseInputUnsubmitted {
+		t.Fatalf("persistent banner not recorded: %+v", stallCauses(rows))
+	}
+	// The operator submits it; output advances cleanly twice. The row
+	// recovers and stays in history.
+	for i := 0; i < 2; i++ {
+		fx.reads["w1:p1"] = readEvidence{Text: fmt.Sprintf("answer part %d\n", i), Revision: int64(4 + i)}
+		fx.advance(time.Minute)
+		fx.scan()
+	}
+	rows = stallIncidentsFor(t, fx, "job-a")
+	if len(rows) != 1 || rows[0].RecoveredAt.IsZero() {
+		t.Fatalf("submitted input did not recover the row: %+v", rows)
 	}
 }
 
@@ -344,52 +379,191 @@ func TestStallRestartRestoresWithoutDuplicates(t *testing.T) {
 }
 
 // AC7 — old scrollback at first observation is baseline, never a confirmed
-// incident; a job spawned inside the startup grace gets startup_block_suspect.
+// incident. Two suspicion shapes are still recorded rather than dropped: a
+// job inside its startup grace, and — outside grace — a match anchored at
+// the buffer tail where current output lives. A banner buried under newer
+// lines records nothing.
 func TestStallScrollbackAndStartupSuspect(t *testing.T) {
 	fx := newStallFixture(t, false)
 	claimJob(t, fx, "job-old", "w1:p1", nil, fx.now.Add(-3*time.Hour))
-	fx.reads["w1:p1"] = readEvidence{Text: stallFixtureAuth + "\n", Revision: 9}
+	fx.reads["w1:p1"] = readEvidence{Text: stallFixtureAuth + "\nwork continued\nmore output\nlatest state\n", Revision: 9}
 	fx.scan()
 	if rows := stallIncidentsFor(t, fx, "job-old"); len(rows) != 0 {
-		t.Fatalf("old scrollback produced a confirmed incident: %+v", stallCauses(rows))
+		t.Fatalf("buried scrollback produced an incident: %+v", stallCauses(rows))
+	}
+
+	// Same old job, but the banner is the last thing on screen: tail-anchored,
+	// so the baseline read names it a startup suspect rather than dropping it.
+	fx1 := newStallFixture(t, false)
+	claimJob(t, fx1, "job-tail", "w1:p9", nil, fx1.now.Add(-3*time.Hour))
+	fx1.reads["w1:p9"] = readEvidence{Text: "some output\n" + stallFixtureAuth + "\n", Revision: 9}
+	fx1.scan()
+	rows := stallIncidentsFor(t, fx1, "job-tail")
+	if len(rows) != 1 || rows[0].Cause != stallCauseStartupSuspect {
+		t.Fatalf("tail-anchored baseline match was not recorded as suspect: %+v", stallCauses(rows))
 	}
 
 	fx2 := newStallFixture(t, false)
 	claimJob(t, fx2, "job-new", "w2:p2", nil, fx2.now.Add(-30*time.Second))
 	fx2.reads["w2:p2"] = readEvidence{Text: stallFixtureAuth + "\n", Revision: 1}
 	fx2.scan()
-	rows := stallIncidentsFor(t, fx2, "job-new")
+	rows = stallIncidentsFor(t, fx2, "job-new")
 	if len(rows) != 1 || rows[0].Cause != stallCauseStartupSuspect {
 		t.Fatalf("boot-time auth failure was not recorded as startup suspect: %+v", stallCauses(rows))
 	}
 }
 
-// AC8 — a report carrying a fake token is stored verbatim locally but uploads
-// to handoffkeep with the secret removed.
-func TestStallReportUploadRedactsSecrets(t *testing.T) {
-	fx := newStallFixture(t, false)
+// writeRawJobEvent writes one journal record verbatim — used for fixtures
+// captured byte-for-byte from the real herdr-inbox journal, so the reader is
+// tested against shapes that actually exist rather than invented ones.
+func writeRawJobEvent(t *testing.T, inbox, jobID, name, raw string) {
+	t.Helper()
+	dir := filepath.Join(inbox, "jobs", jobID, "events")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// B2 — the real journal keeps report_path at the top level on 535 of 543
+// terminal records (flat panewire emit shape, captured from
+// 179-observability-impl-20260909-1900), inside payload.note's `report=`
+// token on the wrk-era remainder (captured from installer-126l-20260908),
+// and absent entirely on notes that name no report (tester-2073 capture).
+// The reader must take all three.
+func TestStallReportPathRealJournalShapes(t *testing.T) {
 	report := filepath.Join(t.TempDir(), "report.md")
 	body := "done\nkey: sk-ABCdef1234567890ghiJEL\n"
 	if err := os.WriteFile(report, []byte(body), 0600); err != nil {
 		t.Fatal(err)
 	}
+
+	t.Run("top_level", func(t *testing.T) {
+		fx := newStallFixture(t, false)
+		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json", fmt.Sprintf(
+			`{"kind":"job.completed","job_id":"job-a","owner_lane":"builder-49","label":"task179-observability-impl","pane_id":"w1:p1","host":"mbp-server","report_path":%q,"report_last_line":"completed","epoch":1}`, report))
+		fx.scan()
+		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
+		if err != nil || !found || row.LocalPath == "" || row.SHA256 == "" {
+			t.Fatalf("top-level report_path was not finalized: %+v found=%v err=%v", row, found, err)
+		}
+	})
+
+	t.Run("payload_note", func(t *testing.T) {
+		fx := newStallFixture(t, false)
+		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+		writeRawJobEvent(t, fx.inbox, "job-a", "00007-job.completed.json", fmt.Sprintf(
+			`{"created_at": "2026-09-07T19:27:00+00:00", "job_id": "job-a", "kind": "job.completed", "payload": {"note": "JOIN installer-126l: RESULT=INSTALLED target=b40953cfd7c22d35b6131eb5e00428f93504075b; poststate independently verified (HEAD/status/overlay/counsel backup/12 role links x3/wrk+arbiter/#119 ledger); report=%s log=/var/log/install.log marker=report/role126-local-install/executed hk:doc brief/role126/local-install-preflight-fix"}, "seq": 7}`, report))
+		fx.scan()
+		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
+		if err != nil || !found || row.LocalPath == "" {
+			t.Fatalf("note report= path was not finalized: %+v found=%v err=%v", row, found, err)
+		}
+	})
+
+	t.Run("no_report_in_note", func(t *testing.T) {
+		fx := newStallFixture(t, false)
+		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json",
+			`{"created_at": "2026-09-14T20:56:20+00:00", "job_id": "job-a", "kind": "job.completed", "payload": {"note": "VERDICT=FAIL · BLOCKER 1(F3 port-less DSN) + SHOULD 5 · 머지 보류 판정 소비 완료"}, "seq": 4}`)
+		fx.scan()
+		if _, found, err := fx.store.stallReport(context.Background(), "job-a", 1); err != nil || found {
+			t.Fatalf("report-less completion fabricated a row: found=%v err=%v", found, err)
+		}
+	})
+}
+
+// AC8 + shadow BLOCKER — with ReportUpload off (the rollout default) the
+// report is finalized locally, hashed, and never written to the shared
+// remote: the upload seam must see zero calls. With it on, the uploaded body
+// is the redacted copy while the local file stays verbatim.
+func TestStallReportUploadRedactsSecrets(t *testing.T) {
+	report := filepath.Join(t.TempDir(), "report.md")
+	body := "done\nkey: sk-ABCdef1234567890ghiJEL\n"
+	if err := os.WriteFile(report, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
+	topLevel := fmt.Sprintf(`{"kind":"job.completed","job_id":"job-a","owner_lane":"builder-49","report_path":%q,"epoch":1}`, report)
+
+	t.Run("shadow_uploads_nothing", func(t *testing.T) {
+		fx := newStallFixture(t, false)
+		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json", topLevel)
+		fx.scan()
+		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
+		if err != nil || !found || row.LocalPath == "" || row.SHA256 == "" {
+			t.Fatalf("local finalize missing under shadow: %+v found=%v err=%v", row, found, err)
+		}
+		if row.RemoteState != "disabled" {
+			t.Fatalf("shadow remote state=%q", row.RemoteState)
+		}
+		if len(fx.uploads) != 0 {
+			t.Fatalf("shadow performed %d remote writes", len(fx.uploads))
+		}
+	})
+
+	t.Run("upload_redacts", func(t *testing.T) {
+		fx := newStallFixture(t, false)
+		fx.mgr.cfg.ReportUpload = true
+		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json", topLevel)
+		fx.scan()
+		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
+		if err != nil || !found {
+			t.Fatalf("report row missing: %v %v", found, err)
+		}
+		if row.RemoteState != "uploaded" || row.LocalPath == "" || row.SHA256 == "" {
+			t.Fatalf("report not finalized+uploaded: %+v", row)
+		}
+		uploaded := fx.uploads["report/job-a/1"]
+		if strings.Contains(uploaded, "sk-ABCdef1234567890ghiJEL") || !strings.Contains(uploaded, "[redacted]") {
+			t.Fatalf("remote body leaked the token: %q", uploaded)
+		}
+		local, err := os.ReadFile(row.LocalPath)
+		if err != nil || string(local) != body {
+			t.Fatalf("local finalized copy was altered")
+		}
+	})
+}
+
+// B3 — a report whose on-disk bytes do not match the recorded hash must not
+// be renamed into the final path. The readDisk seam stands in for the
+// post-write verification read.
+func TestStallReportFinalizeVerifiesDisk(t *testing.T) {
+	fx := newStallFixture(t, false)
+	fx.mgr.cfg.ReportUpload = true
+	report := filepath.Join(t.TempDir(), "report.md")
+	body := "done\n"
+	if err := os.WriteFile(report, []byte(body), 0600); err != nil {
+		t.Fatal(err)
+	}
 	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
-	writeJobEvent(t, fx.inbox, "job-a", 4, "job.completed", map[string]any{"report_path": report}, fx.now)
+	writeRawJobEvent(t, fx.inbox, "job-a", "00005-job.completed.json", fmt.Sprintf(
+		`{"kind":"job.completed","job_id":"job-a","report_path":%q,"epoch":1}`, report))
+	fx.mgr.deps.readDisk = func(name string) ([]byte, error) {
+		disk, err := os.ReadFile(name)
+		if err != nil {
+			return nil, err
+		}
+		return append(disk, '\n', 't', 'r', 'u', 'n', 'c', 'a', 't', 'e', 'd'), nil
+	}
 	fx.scan()
 	row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
 	if err != nil || !found {
 		t.Fatalf("report row missing: %v %v", found, err)
 	}
-	if row.RemoteState != "uploaded" || row.LocalPath == "" || row.SHA256 == "" {
-		t.Fatalf("report not finalized+uploaded: %+v", row)
+	if row.LocalPath != "" || row.RemoteState != "finalize_failed" {
+		t.Fatalf("hash-mismatched file was finalized: %+v", row)
 	}
-	uploaded := fx.uploads["report/job-a/1"]
-	if strings.Contains(uploaded, "sk-ABCdef1234567890ghiJEL") || !strings.Contains(uploaded, "[redacted]") {
-		t.Fatalf("remote body leaked the token: %q", uploaded)
+	final := filepath.Join(fx.inbox, "jobs", "job-a", "final", "report-1.md")
+	if _, err := os.Stat(final); err == nil {
+		t.Fatal("mismatched temp file was renamed to the final path")
 	}
-	local, err := os.ReadFile(row.LocalPath)
-	if err != nil || string(local) != body {
-		t.Fatalf("local finalized copy was altered")
+	if len(fx.uploads) != 0 {
+		t.Fatal("a failed finalize was uploaded")
 	}
 }
 
@@ -635,6 +809,8 @@ func TestStallConflictObservation(t *testing.T) {
 	}
 }
 
+func stallInt(n int) *int { return &n }
+
 // Node-side beat: after a scan the provider reports the persisted beat, and
 // the heartbeat encoder accepts the field on the wire.
 func TestStallBeatHeartbeatContract(t *testing.T) {
@@ -652,6 +828,50 @@ func TestStallBeatHeartbeatContract(t *testing.T) {
 	decoded, ok := decodeHubHeartbeatPayload(payload)
 	if !ok || decoded.StallDetect == nil || decoded.StallDetect.BeatMS != beat.BeatMS {
 		t.Fatalf("hub rejected the stall beat: %s", payload)
+	}
+}
+
+// B1 — a failed agent.list must not read as "zero panes". The beat records
+// observation=nil + degraded, pane judgement is withheld, and a later healthy
+// scan with an honestly empty pane set reports panes=0 — three states the
+// wire must keep apart.
+func TestStallBeatDegradedOnListFailure(t *testing.T) {
+	fx := newStallFixture(t, false)
+	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+	fail := errors.New("herdr agent.list unavailable")
+	fx.mgr.deps.listAgents = func(context.Context) ([]paneIdentity, error) { return nil, fail }
+	fx.scan()
+	beat := fx.mgr.StallBeat()
+	if beat == nil || !beat.Degraded || beat.Panes != nil {
+		t.Fatalf("list failure must record observation=nil, degraded: %+v", beat)
+	}
+	// Judgement was withheld: no unobserved/other pane incidents exist.
+	if rows := stallIncidentsFor(t, fx, "job-a"); len(rows) != 0 {
+		t.Fatalf("degraded cycle still judged panes: %+v", stallCauses(rows))
+	}
+	// And the wire keeps the distinction: panes:null, degraded:true.
+	payload, err := json.Marshal(hubHeartbeatPayload{Status: "alive", Checks: map[string]HubCheckStatus{}, StallDetect: beat})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var wire map[string]any
+	if json.Unmarshal(payload, &wire) != nil {
+		t.Fatal("unmarshal wire")
+	}
+	stall, _ := wire["stall_detect"].(map[string]any)
+	if panes, exists := stall["panes"]; !exists || panes != nil {
+		t.Fatalf("degraded beat must carry panes:null on the wire: %s", payload)
+	}
+	if stall["degraded"] != true {
+		t.Fatalf("degraded flag missing on the wire: %s", payload)
+	}
+	// A valid observation of zero panes is a different state entirely.
+	fx.mgr.deps.listAgents = func(context.Context) ([]paneIdentity, error) { return nil, nil }
+	fx.advance(time.Minute)
+	fx.scan()
+	beat = fx.mgr.StallBeat()
+	if beat == nil || beat.Degraded || beat.Panes == nil || *beat.Panes != 0 {
+		t.Fatalf("empty-but-observed pane set must be panes=0, not degraded: %+v", beat)
 	}
 }
 
@@ -676,25 +896,25 @@ func TestStallHubNoDataAlert(t *testing.T) {
 	send := func(beat *hubStallBeatPayload) {
 		task268SendHeartbeat(t, hub, "node-a", agent, hubHeartbeatPayload{Status: "alive", Checks: map[string]HubCheckStatus{}, StallDetect: beat})
 	}
-	send(&hubStallBeatPayload{BeatMS: now.Add(-time.Minute).UnixMilli(), IntervalMS: 60000, Panes: 2})
+	send(&hubStallBeatPayload{BeatMS: now.Add(-time.Minute).UnixMilli(), IntervalMS: 60000, Panes: stallInt(2)})
 	now = now.Add(30 * time.Second)
-	send(&hubStallBeatPayload{BeatMS: now.Add(-10 * time.Second).UnixMilli(), IntervalMS: 60000, Panes: 2})
+	send(&hubStallBeatPayload{BeatMS: now.Add(-10 * time.Second).UnixMilli(), IntervalMS: 60000, Panes: stallInt(2)})
 	if len(alerts) != 0 {
 		t.Fatalf("advancing beat alerted: %+v", alerts)
 	}
 	// Beat frozen past the threshold.
 	now = now.Add(4 * time.Minute)
-	send(&hubStallBeatPayload{BeatMS: now.Add(-5 * time.Minute).UnixMilli(), IntervalMS: 60000, Panes: 2})
+	send(&hubStallBeatPayload{BeatMS: now.Add(-5 * time.Minute).UnixMilli(), IntervalMS: 60000, Panes: stallInt(2)})
 	now = now.Add(10 * time.Second)
-	send(&hubStallBeatPayload{BeatMS: now.Add(-5 * time.Minute).UnixMilli(), IntervalMS: 60000, Panes: 2})
+	send(&hubStallBeatPayload{BeatMS: now.Add(-5 * time.Minute).UnixMilli(), IntervalMS: 60000, Panes: stallInt(2)})
 	if len(alerts) != 1 || alerts[0].Reason != hubAlertReasonNoData || alerts[0].MachineID != "node-a" {
 		t.Fatalf("no-data alert missing: %+v", alerts)
 	}
 	// Recovery once the beat advances again.
 	now = now.Add(time.Minute)
-	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: 2})
+	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: stallInt(2)})
 	now = now.Add(10 * time.Second)
-	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: 2})
+	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: stallInt(2)})
 	var recovered bool
 	for _, alert := range alerts {
 		if alert.Recovery && alert.Reason == hubAlertReasonNoData {
@@ -725,6 +945,274 @@ func TestStallNoMutationPaths(t *testing.T) {
 		} {
 			if strings.Contains(string(body), banned) {
 				t.Fatalf("%s contains forbidden write path %q", file, banned)
+			}
+		}
+	}
+}
+
+// B1 hub half — a degraded/nil-observation beat fires the stall_degraded
+// alert while a genuinely-observed panes=0 stays quiet.
+func TestStallHubDegradedAlert(t *testing.T) {
+	now := time.Date(2026, 9, 17, 12, 0, 0, 0, time.UTC)
+	var alerts []HubAlert
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens: map[string]string{hubOperatorMachineID: "op", "node-a": "node"},
+		Now:    func() time.Time { return now },
+		Notifier: hubNotifierFunc(func(_ context.Context, alert HubAlert) error {
+			alerts = append(alerts, alert)
+			return nil
+		}),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &hubAgent{}
+	hub.connect("node-a", "test", "fixture", agent, true)
+	send := func(beat *hubStallBeatPayload) {
+		task268SendHeartbeat(t, hub, "node-a", agent, hubHeartbeatPayload{Status: "alive", Checks: map[string]HubCheckStatus{}, StallDetect: beat})
+	}
+	// Establish a healthy reporter, then a real empty observation.
+	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: stallInt(0)})
+	now = now.Add(30 * time.Second)
+	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: stallInt(0)})
+	for _, alert := range alerts {
+		if !alert.Recovery {
+			t.Fatalf("panes=0 alerted — valid observation was read as degraded: %+v", alerts)
+		}
+	}
+	// The listing fails: the beat still advances but the observation is nil.
+	now = now.Add(time.Minute)
+	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: nil, Degraded: true})
+	now = now.Add(30 * time.Second)
+	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: nil, Degraded: true})
+	var degraded bool
+	for _, alert := range alerts {
+		if !alert.Recovery && alert.Reason == hubAlertReasonStallDegraded {
+			degraded = true
+		}
+	}
+	if !degraded {
+		t.Fatalf("degraded observation did not alert: %+v", alerts)
+	}
+	// Nil panes without the flag is still an unobserved cycle.
+	now = now.Add(time.Minute)
+	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: nil})
+	if reason := hub.stallBeats["node-a"]; reason == nil {
+		t.Fatal("beat state vanished")
+	}
+	// Healthy beat returns: degraded clears after the debounce.
+	now = now.Add(2 * time.Minute)
+	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: stallInt(3)})
+	now = now.Add(30 * time.Second)
+	send(&hubStallBeatPayload{BeatMS: now.UnixMilli(), IntervalMS: 60000, Panes: stallInt(3)})
+	var recovered bool
+	for _, alert := range alerts {
+		if alert.Recovery && alert.Reason == hubAlertReasonStallDegraded {
+			recovered = true
+		}
+	}
+	if !recovered {
+		t.Fatalf("degraded recovery missing: %+v", alerts)
+	}
+}
+
+// [superseded] — a pane that takes a new job while its previous job has no
+// terminal event is recorded on the old job. Observation only: nothing is
+// emitted, sent, or mutated beyond the row's own mark.
+func TestStallSupersededObservation(t *testing.T) {
+	fx := newStallFixture(t, false)
+	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-2*time.Hour))
+	fx.reads["w1:p1"] = readEvidence{Text: "ok\n", Revision: 1}
+	fx.scan()
+	if rows := stallIncidentsFor(t, fx, "job-a"); len(rows) != 0 {
+		t.Fatalf("setup produced incidents: %+v", stallCauses(rows))
+	}
+	// The worker takes job-b on the same pane; job-a never completed.
+	claimJob(t, fx, "job-b", "w1:p1", nil, fx.now.Add(-time.Minute))
+	fx.advance(time.Minute)
+	fx.scan()
+	rows := stallIncidentsFor(t, fx, "job-a")
+	if len(rows) != 1 || rows[0].Cause != stallCauseSuperseded {
+		t.Fatalf("superseded not recorded on the orphaned job: %+v", stallCauses(rows))
+	}
+	var evidence map[string]any
+	if err := json.Unmarshal(rows[0].Evidence, &evidence); err != nil {
+		t.Fatal(err)
+	}
+	if evidence["superseded_by"] != "job-b" {
+		t.Fatalf("superseded evidence does not name the new job: %v", evidence)
+	}
+	// job-a's row is marked so the detector stops reading it; job-b stays
+	// live and unencumbered.
+	jobs, err := fx.store.stallJobs(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].JobID != "job-b" {
+		t.Fatalf("open set wrong after supersede: %+v", jobs)
+	}
+	// Zero outward action: no lane events, no uploads, nothing to the pane.
+	if len(fx.sent) != 0 || len(fx.uploads) != 0 {
+		t.Fatalf("superseded observation acted on the world: sent=%d uploads=%d", len(fx.sent), len(fx.uploads))
+	}
+	// Stable across scans — no stacking.
+	fx.advance(time.Minute)
+	fx.scan()
+	if again := stallIncidentsFor(t, fx, "job-a"); len(again) != 1 {
+		t.Fatalf("superseded duplicated: %+v", stallCauses(again))
+	}
+}
+
+// J4 — an unavailable subscription set (nil) is "not proven", not a proven
+// empty set. It gets a grace window before [unobserved] is recorded.
+func TestStallCoverageNilSetGrace(t *testing.T) {
+	fx := newStallFixture(t, false)
+	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+	fx.reads["w1:p1"] = readEvidence{Text: "ok\n", Revision: 1}
+	fx.subscribed = nil // subscription evidence itself is missing
+	fx.scan()
+	if rows := stallIncidentsFor(t, fx, "job-a"); len(rows) != 0 {
+		t.Fatalf("unproven coverage recorded unobserved immediately: %+v", stallCauses(rows))
+	}
+	if fx.resubs == 0 {
+		t.Fatal("unproven coverage did not request resubscribe")
+	}
+	fx.advance(90 * time.Second)
+	fx.scan()
+	if rows := stallIncidentsFor(t, fx, "job-a"); len(rows) != 0 {
+		t.Fatalf("inside grace window an incident was recorded: %+v", stallCauses(rows))
+	}
+	fx.advance(time.Minute)
+	fx.scan()
+	rows := stallIncidentsFor(t, fx, "job-a")
+	if len(rows) != 1 || rows[0].Cause != stallCauseUnobserved {
+		t.Fatalf("prolonged unproven coverage not recorded: %+v", stallCauses(rows))
+	}
+	// The distinction: a proven-empty set records without the grace wait.
+	fx2 := newStallFixture(t, false)
+	claimJob(t, fx2, "job-b", "w1:p2", nil, fx2.now.Add(-time.Hour))
+	fx2.reads["w1:p2"] = readEvidence{Text: "ok\n", Revision: 1}
+	delete(fx2.subscribed, "w1:p2")
+	fx2.scan()
+	if rows := stallIncidentsFor(t, fx2, "job-b"); len(rows) != 1 || rows[0].Cause != stallCauseUnobserved {
+		t.Fatalf("proven-empty coverage was not recorded: %+v", stallCauses(rows))
+	}
+}
+
+// J6d — a launcher and its harness child in one worktree are one worker:
+// the parent/child pair must not double-count into [unowned].
+func TestStallUnownedCollapsesProcessTree(t *testing.T) {
+	fx := newStallFixture(t, false)
+	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+	fx.trees["/work/job-a"] = "/work/job-a"
+	fx.reads["w1:p1"] = readEvidence{Text: "ok\n", Revision: 1}
+	started := fx.now.Add(-30 * time.Minute)
+	// devin wrapper (4242) + child (4243) in the same tree, pane gone.
+	fx.procs = []stallProc{
+		{PID: 4242, PPID: 1, StartedAt: started, Name: "devin"},
+		{PID: 4243, PPID: 4242, StartedAt: started, Name: "devin"},
+	}
+	fx.procCWD[4242] = "/work/job-a"
+	fx.procCWD[4243] = "/work/job-a"
+	// First scan while the pane is alive: the process tree is owned, and the
+	// pane's cwd lands in the known-tree set.
+	fx.scan()
+	if rows := stallIncidentsFor(t, fx, ""); len(rows) != 0 {
+		t.Fatalf("owned process tree recorded unowned: %+v", stallCauses(rows))
+	}
+	fx.agents = nil
+	fx.advance(time.Minute)
+	fx.scan()
+	fx.advance(time.Minute)
+	fx.scan()
+	var unowned int
+	for _, row := range stallIncidentsFor(t, fx, "") {
+		if row.Cause == stallCauseUnowned {
+			unowned++
+		}
+	}
+	if unowned != 1 {
+		t.Fatalf("wrapper+child counted as %d unowned, want 1", unowned)
+	}
+}
+
+// J1 — the no-write guarantee is enforced at the type and wiring level, not
+// by hoping nobody adds a call: stallDeps may only ever carry the whitelisted
+// read/record seams, and the daemon's wiring block may only use the read-only
+// herdr methods.
+func TestStallDepsAreReadOnly(t *testing.T) {
+	allowed := map[string]bool{
+		"listAgents": true, "readPane": true, "subscribed": true, "resubscribe": true,
+		"worktree": true, "procs": true, "procCWD": true, "writeRecord": true,
+		"enqueue": true, "upload": true, "lanePersisted": true, "readDisk": true, "now": true,
+	}
+	depsType := reflect.TypeOf(stallDeps{})
+	for i := 0; i < depsType.NumField(); i++ {
+		field := depsType.Field(i)
+		if !allowed[field.Name] {
+			t.Fatalf("stallDeps grew a non-whitelisted seam %q — every dep must be read-only or local-record", field.Name)
+		}
+	}
+	// The daemon wiring may only hand the detector read methods. Adding a
+	// pane-write dep — or routing Prompt/send_keys through an existing one —
+	// fails this check.
+	body, err := os.ReadFile("daemon.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(string(body), "deps := stallDeps{")
+	if start < 0 {
+		t.Fatal("stallDeps wiring block not found in daemon.go")
+	}
+	end := strings.Index(string(body[start:]), "\n\t}")
+	if end < 0 {
+		t.Fatal("stallDeps wiring block unterminated")
+	}
+	block := string(body[start : start+end])
+	for _, banned := range []string{"send_keys", "sendKeys", "SendKeys", "agent.prompt", "Prompt(", "pane.input", "Write("} {
+		if strings.Contains(block, banned) {
+			t.Fatalf("daemon stallDeps wiring references %q", banned)
+		}
+	}
+	for _, call := range regexp.MustCompile(`c\.(\w+)\(`).FindAllStringSubmatch(block, -1) {
+		if call[1] != "AgentDetails" && call[1] != "ReadPane" && call[1] != "Close" {
+			t.Fatalf("stall wiring calls non-read herdr method %s", call[1])
+		}
+	}
+}
+
+// J2 — notification evidence is an allowlist. An implementation must not
+// smuggle a verdict-shaped field (worker_state:"hung" and friends) into the
+// lane payload.
+func TestStallNotifyEvidenceAllowlist(t *testing.T) {
+	fx := newStallFixture(t, true)
+	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+	fx.reads["w1:p1"] = readEvidence{Text: "ok\n", Revision: 1}
+	fx.scan()
+	fx.reads["w1:p1"] = readEvidence{Text: stallFixtureLimit + "\n", Revision: 2}
+	fx.advance(time.Minute)
+	fx.scan()
+	if len(fx.sent) != 1 {
+		t.Fatalf("notification missing: %+v", fx.sent)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(fx.sent[0].Text), &payload); err != nil {
+		t.Fatal(err)
+	}
+	topAllowed := map[string]bool{"observation": true, "job": true, "attempt": true, "round": true, "occurrence": true, "pane": true, "summary": true, "evidence": true}
+	for key := range payload {
+		if !topAllowed[key] {
+			t.Fatalf("notification carries non-allowlisted key %q: %s", key, fx.sent[0].Text)
+		}
+	}
+	if _, exists := payload["kind"]; exists {
+		t.Fatalf("notification still carries a kind token: %s", fx.sent[0].Text)
+	}
+	if evidence, ok := payload["evidence"].(map[string]any); ok {
+		evidenceAllowed := map[string]bool{"pane": true, "observed_at": true, "revision": true}
+		for key := range evidence {
+			if !evidenceAllowed[key] {
+				t.Fatalf("notification evidence carries non-allowlisted key %q: %s", key, fx.sent[0].Text)
 			}
 		}
 	}

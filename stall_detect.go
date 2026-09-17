@@ -33,20 +33,25 @@ const (
 	defaultStallMaxReads        = 8
 	defaultStallSuspendFailures = 5
 	stallResubscribeMinInterval = 30 * time.Second
+	stallMinScanInterval        = 5 * time.Second
 	stallScreenExcerptRunes     = 600
 	stallReportMaxBytes         = 1 << 20
 	stallMaxProcLookups         = 8
 	stallRepsMinSamples         = 3
 	stallRepsFloor              = 30 * time.Minute
 	stallRepsCap                = 8 * time.Hour
+	stallTailAnchorLines        = 3
+	stallReportMaxAge           = 72 * time.Hour
 )
 
-// StallDetectConfig gates the whole feature. Notify stays false through the
-// shadow rollout step: incidents and their would-be notifications are still
-// recorded, but nothing is emitted to a lane.
+// StallDetectConfig gates the whole feature. Notify and ReportUpload stay
+// false through the shadow rollout step: shadow means zero outward side
+// effects — incidents and their would-be notifications are recorded locally,
+// but nothing is emitted to a lane and no report body leaves the node.
 type StallDetectConfig struct {
 	Enabled              bool
 	Notify               bool
+	ReportUpload         bool
 	Harnesses            []string
 	PollInterval         time.Duration
 	StartupGrace         time.Duration
@@ -108,6 +113,7 @@ type stallDeps struct {
 	enqueue       func(hubScannedRelayEvent) bool
 	upload        func(context.Context, string, []byte) error
 	lanePersisted func(context.Context, string, string) (bool, error)
+	readDisk      func(string) ([]byte, error)
 	now           func() time.Time
 }
 
@@ -125,8 +131,28 @@ type stallDetectManager struct {
 	suspendedTill time.Time
 	lastResub     time.Time
 	lastBeat      time.Time
+	lastScanAt    time.Time
 	trackedPanes  int
 	procCWDCache  map[int64]string
+	// coverageUnknownSince marks when the proven-subscription set first went
+	// missing while tracked panes were live. A gap has to persist before it
+	// becomes [unobserved] — a subscribe in flight is not a coverage proof
+	// either way.
+	coverageUnknownSince time.Time
+	// unsubStreak and cleanReads are per-pane volatile counters for the
+	// two-read confirmations (queued-input banner stable, clean-read
+	// recovery). They reset on daemon restart, which only delays the
+	// observation by one poll.
+	unsubStreak map[string]int
+	cleanReads  map[string]int
+	// scanCache skips re-parsing an unchanged job event journal. Directory
+	// mtime is the change signal — events are append-only files.
+	scanCache map[string]stallJobScanCache
+}
+
+type stallJobScanCache struct {
+	modTime time.Time
+	scan    stallJobScan
 }
 
 func newStallDetectManager(store *Store, inboxRoot string, cfg StallDetectConfig, deps stallDeps, logger *slog.Logger) (*stallDetectManager, error) {
@@ -158,12 +184,17 @@ func newStallDetectManager(store *Store, inboxRoot string, cfg StallDetectConfig
 	if deps.lanePersisted == nil {
 		deps.lanePersisted = store.relayLanePersisted
 	}
+	if deps.readDisk == nil {
+		deps.readDisk = os.ReadFile
+	}
 	return &stallDetectManager{
 		cfg: cfg, store: store, inboxRoot: inboxRoot,
 		reportDir: filepath.Join(inboxRoot, "jobs"),
 		deps:      deps, logger: logger,
 		wake: make(chan string, 64), wakePending: make(map[string]struct{}),
 		procCWDCache: make(map[int64]string),
+		unsubStreak:  make(map[string]int), cleanReads: make(map[string]int),
+		scanCache: make(map[string]stallJobScanCache),
 	}, nil
 }
 
@@ -179,17 +210,27 @@ func (m *stallDetectManager) Wake(paneID string) {
 	}
 }
 
-// StallBeat is the node half of the hub no-data contract. A heartbeat that
-// keeps shipping an unchanged beat means the scan loop has stopped producing.
+// StallBeat is the node half of the hub no-data contract. The pane count is
+// nullable on purpose: nil means the scan could not observe (agent.list
+// failed or has not run yet), which must surface as degraded on the hub — a
+// placeholder zero would disguise blindness as healthy emptiness.
 func (m *stallDetectManager) StallBeat() *hubStallBeatPayload {
-	beat, interval, panes, err := m.store.stallBeat(context.Background())
+	beat, interval, panes, degraded, err := m.store.stallBeat(context.Background())
 	if err != nil || beat.IsZero() {
 		if !m.lastBeat.IsZero() {
-			return &hubStallBeatPayload{BeatMS: m.lastBeat.UnixMilli(), IntervalMS: m.cfg.PollInterval.Milliseconds(), Panes: m.trackedPanes}
+			return m.beatPayload(m.lastBeat, m.cfg.PollInterval, m.trackedPanes, true)
 		}
-		return &hubStallBeatPayload{BeatMS: 0, IntervalMS: m.cfg.PollInterval.Milliseconds(), Panes: 0}
+		return m.beatPayload(time.Time{}, m.cfg.PollInterval, 0, true)
 	}
-	return &hubStallBeatPayload{BeatMS: beat.UnixMilli(), IntervalMS: interval.Milliseconds(), Panes: panes}
+	return m.beatPayload(beat, interval, panes, degraded)
+}
+
+func (m *stallDetectManager) beatPayload(beat time.Time, interval time.Duration, panes int, degraded bool) *hubStallBeatPayload {
+	payload := &hubStallBeatPayload{BeatMS: beat.UnixMilli(), IntervalMS: interval.Milliseconds(), Degraded: degraded}
+	if !degraded {
+		payload.Panes = &panes
+	}
+	return payload
 }
 
 func (m *stallDetectManager) Run(ctx context.Context) {
@@ -204,13 +245,19 @@ func (m *stallDetectManager) Run(ctx context.Context) {
 			return
 		case pane := <-m.wake:
 			m.wakePending[pane] = struct{}{}
-			// Coalesce a burst of wake events into a single bounded scan.
+			// Coalesce a burst of wake events into a single bounded scan,
+			// but never more often than the floor: output_matched is a wake
+			// hint, not a scan schedule. The pane stays marked due and the
+			// next tick takes it.
 			drain := time.NewTimer(200 * time.Millisecond)
 			select {
 			case <-ctx.Done():
 				drain.Stop()
 				return
 			case <-drain.C:
+			}
+			if now := m.deps.now().UTC(); !m.lastScanAt.IsZero() && now.Sub(m.lastScanAt) < stallMinScanInterval {
+				continue
 			}
 			m.scan(ctx)
 		case <-ticker.C:
@@ -260,12 +307,13 @@ type stallDeadlineExt struct {
 // does not carry. The generic payload map keeps this scanner forward-tolerant:
 // unknown payload keys are ignored, never executed.
 type stallInboxEvent struct {
-	Type      string                     `json:"type"`
-	Kind      string                     `json:"kind"`
-	Event     string                     `json:"event"`
-	CreatedAt string                     `json:"created_at"`
-	Epoch     uint64                     `json:"epoch"`
-	Payload   map[string]json.RawMessage `json:"payload"`
+	Type       string                     `json:"type"`
+	Kind       string                     `json:"kind"`
+	Event      string                     `json:"event"`
+	CreatedAt  string                     `json:"created_at"`
+	Epoch      uint64                     `json:"epoch"`
+	ReportPath string                     `json:"report_path"`
+	Payload    map[string]json.RawMessage `json:"payload"`
 }
 
 func (e stallInboxEvent) eventKind() string {
@@ -429,10 +477,10 @@ func scanStallJobEvents(eventsDir, jobID string) (stallJobScan, bool) {
 			// time against the claim's owner_lane; anything else is inert.
 			ext := stallDeadlineExt{Seq: int64(seq), IssuerLane: stallPayloadString(event.Payload, "issuer_lane", "owner_lane"), Reason: stallPayloadString(event.Payload, "reason"), NewDeadlineAt: stallPayloadTime(event.Payload, "deadline_at", "new_deadline_at")}
 			job.Extensions = append(job.Extensions, ext)
-		case "job.completed", "job.completion", "job.revoked":
+		case "job.completed", "job.completion", "job.revoked", "job.lost", "job.reaped", "job.escalate", "job.joined":
 			job.Terminal = true
 			job.TerminalKind = event.eventKind()
-			if path := stallPayloadString(event.Payload, "report_path"); path != "" {
+			if path := stallReportPathOf(event); path != "" {
 				job.ReportPath = path
 			}
 		}
@@ -441,6 +489,32 @@ func scanStallJobEvents(eventsDir, jobID string) (stallJobScan, bool) {
 		return stallJobScan{}, false
 	}
 	return job, true
+}
+
+// stallNoteReportPattern finds `report=<path>` inside a free-text note. The
+// wrk-era journal records that carry no report_path field keep the path in
+// payload.note in exactly this shape when they name a report at all — some
+// carry none, which resolves to empty rather than a guess.
+var stallNoteReportPattern = regexp.MustCompile(`(?:^|\s)report=(\S+)`)
+
+// stallReportPathOf resolves the report path a terminal event points at.
+// Precedence: the top-level report_path field first — it is the current
+// panewire emit shape and covers 535 of 543 real journal records — then an
+// explicit payload.report_path field, then the legacy `report=` token inside
+// payload.note, which is free text and therefore the weakest signal.
+func stallReportPathOf(event stallInboxEvent) string {
+	if event.ReportPath != "" {
+		return event.ReportPath
+	}
+	if path := stallPayloadString(event.Payload, "report_path"); path != "" {
+		return path
+	}
+	if note := stallPayloadString(event.Payload, "note"); note != "" {
+		if match := stallNoteReportPattern.FindStringSubmatch(note); match != nil {
+			return match[1]
+		}
+	}
+	return ""
 }
 
 // repsDeadlineSuggestion computes a default deadline proposal from every
@@ -471,12 +545,44 @@ func repsDeadlineSuggestion(jobs []stallJobScan, family string) (time.Duration, 
 	return p90, len(durations)
 }
 
+// scanJobs is the cached journal read: a job directory whose events dir has
+// not changed since the last scan returns its memoized view. Events are
+// append-only seq-named files, so directory mtime is a sound change signal.
+func (m *stallDetectManager) scanJobs() []stallJobScan {
+	jobsDir := filepath.Join(m.inboxRoot, "jobs")
+	entries, err := os.ReadDir(jobsDir)
+	if err != nil {
+		return nil
+	}
+	var jobs []stallJobScan
+	for _, entry := range entries {
+		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
+			continue
+		}
+		eventsDir := filepath.Join(jobsDir, entry.Name(), "events")
+		info, err := os.Stat(eventsDir)
+		if err == nil {
+			if cached, ok := m.scanCache[entry.Name()]; ok && cached.modTime.Equal(info.ModTime()) {
+				jobs = append(jobs, cached.scan)
+				continue
+			}
+		}
+		if job, ok := scanStallJobEvents(eventsDir, entry.Name()); ok {
+			if err == nil {
+				m.scanCache[entry.Name()] = stallJobScanCache{modTime: info.ModTime(), scan: job}
+			}
+			jobs = append(jobs, job)
+		}
+	}
+	return jobs
+}
+
 // refreshJobs folds the current journal scan into the durable job table and
 // resolves each attempt's deadline: issuer value first, then a reps proposal,
 // then an explicit unmeasured mark. Issuer extensions are applied in sequence
 // order and never erase already-recorded overdue incidents.
 func (m *stallDetectManager) refreshJobs(ctx context.Context, at time.Time) ([]stallJobRow, error) {
-	scans := scanStallJobs(m.inboxRoot)
+	scans := m.scanJobs()
 	for _, scan := range scans {
 		if !m.cfg.harnessAllowed(scan.Family) {
 			continue
@@ -612,24 +718,41 @@ type stallMatch struct {
 	fingerprint string
 	count       int64
 	line        string
+	// tail is true when a matching line sits inside the last
+	// stallTailAnchorLines non-empty lines — the region where current
+	// output lives. A baseline match anchored there is suspect even when
+	// the job is outside its startup grace.
+	tail bool
 }
 
-// classifyScreen returns the patterns visible in this read. input_unsubmitted
-// is additionally gated on the pane not being marked working: a submitted
-// prompt leaves the queue banner behind, so the same string while the agent
-// is working describes queued input already sent, not unsubmitted input.
-func classifyScreen(text, agentStatus string) []stallMatch {
+// classifyScreen returns the patterns visible in this read. It deliberately
+// takes no agent status: the contract distrusts status strings, so the
+// unsubmitted/submitted-input distinction is made from read persistence,
+// not from what the pane claims to be doing.
+func classifyScreen(text string) []stallMatch {
 	if text == "" {
 		return nil
 	}
-	var matches []stallMatch
-	for _, pattern := range stallPatterns {
-		if pattern.cause == stallCauseInputUnsubmitted && agentStatus == "working" {
+	lines := strings.Split(text, "\n")
+	// Index of the first line inside the tail anchor region: the last
+	// stallTailAnchorLines non-empty lines of the buffer.
+	tailStart := len(lines)
+	for i, nonEmpty := len(lines)-1, 0; i >= 0; i-- {
+		if strings.TrimSpace(lines[i]) == "" {
 			continue
 		}
+		nonEmpty++
+		tailStart = i
+		if nonEmpty >= stallTailAnchorLines {
+			break
+		}
+	}
+	var matches []stallMatch
+	for _, pattern := range stallPatterns {
 		var count int64
 		var first string
-		for _, line := range strings.Split(text, "\n") {
+		var inTail bool
+		for index, line := range lines {
 			matched := true
 			for _, required := range pattern.all {
 				if !strings.Contains(line, required) {
@@ -644,35 +767,57 @@ func classifyScreen(text, agentStatus string) []stallMatch {
 			if first == "" {
 				first = strings.TrimSpace(line)
 			}
+			if index >= tailStart {
+				inTail = true
+			}
 		}
 		if count == 0 {
 			continue
 		}
 		sum := sha256.Sum256([]byte(pattern.cause + "\x00" + first))
-		matches = append(matches, stallMatch{cause: pattern.cause, fingerprint: hex.EncodeToString(sum[:8]), count: count, line: first})
+		matches = append(matches, stallMatch{cause: pattern.cause, fingerprint: hex.EncodeToString(sum[:8]), count: count, line: first, tail: inTail})
 	}
 	return matches
 }
 
+// scan is one detector cycle: journal refresh → superseded → coverage →
+// conflicts → pane reads → overdue → unowned → reports → notifications →
+// beat. When the live-agent listing cannot be obtained the cycle is degraded:
+// no observation is made on a pane set the detector never saw, and the beat
+// records observation=nil so the hub surfaces it. A tool failure is not
+// evidence about a pane — a failed agent.list must not read as "no panes".
 func (m *stallDetectManager) scan(ctx context.Context) {
 	at := m.deps.now().UTC()
+	m.lastScanAt = at
 	if at.Before(m.suspendedTill) {
 		return
 	}
 	jobs, err := m.refreshJobs(ctx, at)
 	if err != nil {
 		m.logger.Warn("stall-detect job refresh unavailable")
+		m.finishScan(ctx, at, -1, true)
 		return
 	}
-	var agents []paneIdentity
-	if m.deps.listAgents != nil {
-		listed, listErr := m.deps.listAgents(ctx)
-		if listErr != nil {
-			m.noteReadFailure()
-		} else {
-			agents = listed
-		}
+	if m.deps.listAgents == nil {
+		m.finishScan(ctx, at, -1, true)
+		return
 	}
+	agents, listErr := m.deps.listAgents(ctx)
+	if listErr != nil {
+		m.logger.Warn("stall-detect agent list failed; judgement withheld this cycle")
+		m.noteReadFailure()
+		m.coverageUnknownSince = time.Time{}
+		m.finishScan(ctx, at, -1, true)
+		if m.readFailures >= m.cfg.SuspendAfterFailures {
+			// A listing that keeps failing is the same class of problem as a
+			// read loop that keeps failing: suspend and let the frozen beat
+			// raise the hub no-data alert.
+			m.suspendedTill = at.Add(m.cfg.PollInterval * 10)
+			m.logger.Warn("stall-detect suspended after repeated observation failures")
+		}
+		return
+	}
+	m.observeSuperseded(ctx, jobs, at)
 	m.observeCoverage(ctx, jobs, agents, at)
 	m.observeConflicts(ctx, jobs, agents, at)
 	m.readPanes(ctx, jobs, agents, at)
@@ -680,13 +825,59 @@ func (m *stallDetectManager) scan(ctx context.Context) {
 	m.observeUnowned(ctx, agents, at)
 	m.persistReports(ctx, at)
 	m.notifyTick(ctx, at)
-	m.trackedPanes = len(agents)
+	m.readFailures = 0
+	m.finishScan(ctx, at, len(agents), false)
+}
+
+// finishScan records the detector beat. A degraded cycle keeps the beat
+// moving but marks the observation missing; the hub is required to tell that
+// apart from a healthy beat that observed zero panes.
+func (m *stallDetectManager) finishScan(ctx context.Context, at time.Time, panes int, degraded bool) {
 	m.lastBeat = at
-	if err := m.store.recordStallBeat(ctx, at, m.cfg.PollInterval, len(agents)); err != nil {
+	if !degraded {
+		m.trackedPanes = panes
+	}
+	if err := m.store.recordStallBeat(ctx, at, m.cfg.PollInterval, panes, degraded); err != nil {
 		m.logger.Warn("stall-detect beat was not recorded")
 	}
 	for key := range m.wakePending {
 		delete(m.wakePending, key)
+	}
+}
+
+// observeSuperseded records [superseded] when one pane carries two open job
+// rows: the newer spawn proves the worker moved on while the older job never
+// produced a terminal event. Observation only — the old row is marked so the
+// detector stops reading it; nothing is sent to the pane and no job state is
+// otherwise mutated.
+func (m *stallDetectManager) observeSuperseded(ctx context.Context, jobs []stallJobRow, at time.Time) {
+	byPane := make(map[string][]stallJobRow)
+	for _, job := range jobs {
+		if job.PaneID == "" || job.Terminal {
+			continue
+		}
+		byPane[job.PaneID] = append(byPane[job.PaneID], job)
+	}
+	for pane, rows := range byPane {
+		if len(rows) < 2 {
+			continue
+		}
+		sort.Slice(rows, func(i, j int) bool {
+			if !rows[i].SpawnedAt.Equal(rows[j].SpawnedAt) {
+				return rows[i].SpawnedAt.Before(rows[j].SpawnedAt)
+			}
+			return rows[i].JobID < rows[j].JobID
+		})
+		newest := rows[len(rows)-1]
+		for _, row := range rows[:len(rows)-1] {
+			if open, err := m.openCauseExists(ctx, row, stallCauseSuperseded); err != nil || open {
+				continue
+			}
+			m.openIncident(ctx, row, stallCauseSuperseded, stallMatch{line: "worker took a new job before this job reached a terminal event"}, at, true, map[string]any{
+				"pane": pane, "superseded_by": newest.JobID, "superseded_by_attempt": newest.Attempt,
+			})
+			_ = m.store.markStallJobTerminal(ctx, row.JobID, row.Attempt, "superseded")
+		}
 	}
 }
 
@@ -703,6 +894,45 @@ func (m *stallDetectManager) observeCoverage(ctx context.Context, jobs []stallJo
 	for _, agent := range agents {
 		live[agent.PaneID] = true
 	}
+	tracked := 0
+	for _, job := range jobs {
+		if job.PaneID != "" && live[job.PaneID] {
+			tracked++
+		}
+	}
+	if covered == nil {
+		// The subscription set itself is unavailable — that is not a proven
+		// empty set. Give the resubscribe path a grace window before
+		// recording [unobserved] so a restart or reconnect does not open
+		// rows on a coverage gap nobody could have verified.
+		if tracked == 0 {
+			m.coverageUnknownSince = time.Time{}
+			return
+		}
+		if m.coverageUnknownSince.IsZero() {
+			m.coverageUnknownSince = at
+		}
+		if m.deps.resubscribe != nil && at.Sub(m.lastResub) >= stallResubscribeMinInterval {
+			m.lastResub = at
+			m.deps.resubscribe()
+		}
+		if at.Sub(m.coverageUnknownSince) < 2*m.cfg.PollInterval {
+			return
+		}
+		for _, job := range jobs {
+			if job.PaneID == "" || !live[job.PaneID] {
+				continue
+			}
+			if open, err := m.openCauseExists(ctx, job, stallCauseUnobserved); err == nil && open {
+				continue
+			}
+			m.openIncident(ctx, job, stallCauseUnobserved, stallMatch{line: "subscription coverage unproven"}, at, true, map[string]any{
+				"pane": job.PaneID, "reason": "subscription set unavailable past grace",
+			})
+		}
+		return
+	}
+	m.coverageUnknownSince = time.Time{}
 	resubscribeNeeded := false
 	for _, job := range jobs {
 		if job.PaneID == "" || !live[job.PaneID] {
@@ -884,6 +1114,8 @@ func (m *stallDetectManager) readOnePane(ctx context.Context, job stallJobRow, a
 		// left over in scrollback is not a new sighting of the old one.
 		pane.BaselineDone = false
 		pane.Fingerprints = map[string]int64{}
+		delete(m.unsubStreak, job.PaneID)
+		delete(m.cleanReads, job.PaneID)
 	}
 	pane.JobID, pane.Attempt = job.JobID, job.Attempt
 	pane.WorkspaceID = agent.WorkspaceID
@@ -899,42 +1131,70 @@ func (m *stallDetectManager) readOnePane(ctx context.Context, job stallJobRow, a
 	if pane.Fingerprints == nil {
 		pane.Fingerprints = map[string]int64{}
 	}
-	matches := classifyScreen(evidence.Text, agent.Status)
+	matches := classifyScreen(evidence.Text)
 	if !pane.BaselineDone {
 		// The first read after attach is baseline: matching lines are old
-		// scrollback until proven new. A job spawned inside the startup grace
-		// gets the separate startup_block_suspect name so a real boot-time
-		// failure is recorded without being asserted as a mid-run stall.
+		// scrollback until proven new. Two exceptions keep a real current
+		// failure from being silently swallowed: a job inside its startup
+		// grace, and a match anchored at the buffer tail where live output
+		// sits. Both record startup_block_suspect — a named suspicion, never
+		// a stall verdict.
 		for _, match := range matches {
 			pane.Fingerprints[match.fingerprint] = match.count
 		}
 		pane.BaselineDone = true
-		if pane.SpawnedRecent {
-			seen := map[string]bool{}
-			for _, match := range matches {
-				if seen[match.cause] {
-					continue
-				}
-				seen[match.cause] = true
-				m.openIncident(ctx, job, stallCauseStartupSuspect, match, at, true, map[string]any{
-					"pane": job.PaneID, "matched_cause": match.cause, "matched_line": redactSecrets(match.line),
-				})
+		seen := map[string]bool{}
+		for _, match := range matches {
+			if seen[match.cause] || (!pane.SpawnedRecent && !match.tail) {
+				continue
 			}
+			seen[match.cause] = true
+			m.openIncident(ctx, job, stallCauseStartupSuspect, match, at, true, map[string]any{
+				"pane": job.PaneID, "matched_cause": match.cause, "matched_line": redactSecrets(match.line),
+				"spawned_recent": pane.SpawnedRecent, "tail_anchored": match.tail,
+			})
 		}
 		m.savePane(ctx, pane)
 		return
 	}
-	if len(matches) == 0 && newOutput && (agent.Status == "working" || agent.Status == "done") {
-		// A clean read on an advancing pane is the subsequent-success half of
-		// the recovery rule: observed errors recover, observed rows remain.
-		if err := m.store.recoverStallIncidents(ctx, job.JobID, job.Attempt, job.Round, []string{stallCauseLimitRefused, stallCauseAuthRefused, stallCauseInputUnsubmitted}, at); err != nil {
-			m.logger.Warn("stall-detect recovery was not recorded")
+	if len(matches) == 0 && newOutput {
+		// Clean reads on an advancing pane are the subsequent-success half of
+		// the recovery rule — decided by revision movement, not by a status
+		// string. Two in a row, so a banner momentarily hidden by a redraw
+		// does not retract a real observation.
+		m.cleanReads[job.PaneID]++
+		if m.cleanReads[job.PaneID] >= 2 {
+			if err := m.store.recoverStallIncidents(ctx, job.JobID, job.Attempt, job.Round, []string{stallCauseLimitRefused, stallCauseAuthRefused, stallCauseInputUnsubmitted}, at); err != nil {
+				m.logger.Warn("stall-detect recovery was not recorded")
+			}
 		}
+	} else {
+		m.cleanReads[job.PaneID] = 0
 	}
+	bannerSeen := false
 	for _, match := range matches {
+		if match.cause == stallCauseInputUnsubmitted {
+			bannerSeen = true
+		}
 		seen := pane.Fingerprints[match.fingerprint]
+		if match.count < seen {
+			// The buffer dropped matching lines (scrollback eviction or a
+			// redraw). Lower the watermark to what is actually on screen so a
+			// stale high count cannot suppress a genuinely new sighting.
+			pane.Fingerprints[match.fingerprint] = match.count
+			continue
+		}
 		if match.count <= seen {
 			continue
+		}
+		if match.cause == stallCauseInputUnsubmitted {
+			// A submitted prompt leaves the same banner queued behind it, so
+			// one sighting cannot tell unsubmitted input from queued input
+			// already sent. The banner must hold across a second read.
+			m.unsubStreak[job.PaneID]++
+			if m.unsubStreak[job.PaneID] < 2 {
+				continue
+			}
 		}
 		pane.Fingerprints[match.fingerprint] = match.count
 		for i := seen + 1; i <= match.count; i++ {
@@ -942,6 +1202,9 @@ func (m *stallDetectManager) readOnePane(ctx context.Context, job stallJobRow, a
 				"pane": job.PaneID, "matched_line": redactSecrets(match.line), "revision": evidence.Revision,
 			})
 		}
+	}
+	if !bannerSeen {
+		m.unsubStreak[job.PaneID] = 0
 	}
 	m.savePane(ctx, pane)
 }
@@ -1118,7 +1381,7 @@ func (m *stallDetectManager) sendNotification(ctx context.Context, row *stallNot
 func stallNotifyText(incident stallIncidentRow) string {
 	summary := "[" + incident.Cause + "] 확인 필요"
 	body := map[string]any{
-		"kind": "stall." + incident.Cause, "job": incident.JobID,
+		"observation": incident.Cause, "job": incident.JobID,
 		"attempt": incident.Attempt, "round": incident.Round, "occurrence": incident.Occurrence,
 		"pane": incident.PaneID, "summary": summary,
 	}
@@ -1291,7 +1554,11 @@ var stallHarnessNames = map[string]bool{
 }
 
 func stallHarnessProcs(ctx context.Context) ([]stallProc, error) {
-	out, err := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,lstart=,comm=").Output()
+	// LC_ALL=C pins the lstart format; parsing it in time.Local matches the
+	// zone ps printed it in.
+	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,lstart=,comm=")
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
+	out, err := cmd.Output()
 	if err != nil {
 		return nil, err
 	}
@@ -1303,7 +1570,7 @@ func stallHarnessProcs(ctx context.Context) ([]stallProc, error) {
 		}
 		pid, err1 := strconv.ParseInt(fields[0], 10, 64)
 		ppid, err2 := strconv.ParseInt(fields[1], 10, 64)
-		started, err3 := time.Parse("Mon Jan 2 15:04:05 2006", strings.Join(fields[2:7], " "))
+		started, err3 := time.ParseInLocation("Mon Jan 2 15:04:05 2006", strings.Join(fields[2:7], " "), time.Local)
 		if err1 != nil || err2 != nil || err3 != nil {
 			continue
 		}
@@ -1400,12 +1667,27 @@ func (m *stallDetectManager) observeUnowned(ctx context.Context, agents []paneId
 		byTree[root] = append(byTree[root], proc)
 	}
 	for root, members := range byTree {
-		excess := len(members) - liveTrees[root]
+		// One process tree is one worker: a launcher and its harness child
+		// (the devin wrapper shape) both surface in ps, but the pane owns
+		// the whole tree. Collapse parent/child chains and count only the
+		// topmost member, or every wrapper would double-count as unowned.
+		memberPIDs := make(map[int64]bool, len(members))
+		for _, proc := range members {
+			memberPIDs[proc.PID] = true
+		}
+		var roots []stallProc
+		for _, proc := range members {
+			if memberPIDs[proc.PPID] {
+				continue
+			}
+			roots = append(roots, proc)
+		}
+		excess := len(roots) - liveTrees[root]
 		if excess <= 0 {
 			continue
 		}
-		sort.Slice(members, func(i, j int) bool { return members[i].PID < members[j].PID })
-		for _, proc := range members[:excess] {
+		sort.Slice(roots, func(i, j int) bool { return roots[i].PID < roots[j].PID })
+		for _, proc := range roots[:excess] {
 			key := fmt.Sprintf("%d:%d", proc.PID, proc.StartedAt.Unix())
 			row := stallUnownedRow{ProcKey: key, PID: proc.PID, PPID: proc.PPID, CWD: proc.CWD, StartedAt: proc.StartedAt, FirstSeenAt: at, Confirmations: 1}
 			if existing, err := m.store.stallUnownedCandidates(ctx); err == nil {
@@ -1465,10 +1747,13 @@ func (m *stallDetectManager) cpuForDir(ctx context.Context, dir string) string {
 	return strings.Join(strings.Fields(string(out)), ",")
 }
 
-// persistReports finalizes terminal-job reports locally, then uploads the
-// secret-redacted body to handoffkeep. Local finalize is atomic; the remote
-// receipt is a separate column so an upload failure can never masquerade as
-// worker incompletion. Only the declared report file is read.
+// persistReports finalizes terminal-job reports locally; upload to
+// handoffkeep happens only when ReportUpload is enabled — shadow means zero
+// outward side effects, so the default path never writes to the shared
+// remote. Local finalize is atomic; the remote receipt is a separate column
+// so an upload failure can never masquerade as worker incompletion. Only the
+// declared report file is read, and terminal jobs older than
+// stallReportMaxAge are outside the scan window entirely.
 func (m *stallDetectManager) persistReports(ctx context.Context, at time.Time) {
 	jobs, err := m.store.stallJobs(ctx, true)
 	if err != nil {
@@ -1483,12 +1768,28 @@ func (m *stallDetectManager) persistReports(ctx context.Context, at time.Time) {
 			continue
 		}
 		if !found {
+			if !job.LastEventAt.IsZero() && at.Sub(job.LastEventAt) > stallReportMaxAge {
+				// The job finished long before this detector saw it; a
+				// late finalize would fabricate history. Leave it alone.
+				continue
+			}
 			report = stallReportRow{JobID: job.JobID, Attempt: job.Attempt, ReportPath: job.ReportPath, RemoteState: "pending"}
 		}
 		if report.LocalPath == "" {
 			m.finalizeReport(ctx, &report, job, at)
 		}
-		if report.LocalPath == "" || report.RemoteState == "uploaded" {
+		if report.LocalPath == "" {
+			continue
+		}
+		if !m.cfg.ReportUpload {
+			if report.RemoteState == "" || report.RemoteState == "pending" {
+				report.RemoteState = "disabled"
+				report.RemoteError = "shadow: upload off"
+				_ = m.store.upsertStallReport(ctx, report)
+			}
+			continue
+		}
+		if report.RemoteState == "uploaded" {
 			continue
 		}
 		m.uploadReport(ctx, &report, at)
@@ -1516,15 +1817,34 @@ func (m *stallDetectManager) finalizeReport(ctx context.Context, report *stallRe
 	}
 	name := temporary.Name()
 	defer os.Remove(name)
-	if err := temporary.Chmod(0600); err == nil {
-		if _, err = temporary.Write(contents); err == nil {
-			err = temporary.Sync()
+	writeErr := func() error {
+		if err := temporary.Chmod(0600); err != nil {
+			return err
 		}
+		if _, err := temporary.Write(contents); err != nil {
+			return err
+		}
+		if err := temporary.Sync(); err != nil {
+			return err
+		}
+		return temporary.Close()
+	}()
+	if writeErr != nil {
+		_ = temporary.Close()
+		return
 	}
-	if closeErr := temporary.Close(); err == nil {
-		err = closeErr
-	}
+	// The recorded hash must describe the bytes that actually landed. A write
+	// can report success and still leave different bytes on disk, so the file
+	// is re-read and re-hashed before it earns the final name; a mismatch is
+	// a finalize failure, never a renamed truncated copy.
+	disk, err := m.deps.readDisk(name)
 	if err != nil {
+		return
+	}
+	if sha256.Sum256(disk) != sum {
+		report.RemoteState = "finalize_failed"
+		report.RemoteError = "disk_hash_mismatch"
+		_ = m.store.upsertStallReport(ctx, *report)
 		return
 	}
 	if err := os.Rename(name, final); err != nil {

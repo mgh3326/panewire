@@ -15,6 +15,7 @@ const (
 	hubAlertReasonStale         = "stale"
 	hubAlertReasonCheckFailed   = "check_failed"
 	hubAlertReasonNoData        = "no_data"
+	hubAlertReasonStallDegraded = "stall_degraded"
 	hubAlertNoCheck             = "none"
 	hubFailoverPhaseDown        = "down"
 	hubFailoverPhaseUp          = "up"
@@ -156,6 +157,7 @@ func (h *HubServer) observeStallBeatLocked(now time.Time, machineID string, beat
 		h.stallBeats[machineID] = state
 	}
 	problem := false
+	reason := hubAlertReasonNoData
 	var problemSince time.Time
 	if beat == nil {
 		if state.seen {
@@ -163,6 +165,20 @@ func (h *HubServer) observeStallBeatLocked(now time.Time, machineID string, beat
 			problemSince = state.lastAdvance
 		}
 	} else {
+		if beat.Degraded || beat.Panes == nil {
+			// The node is heartbeating but the scan could not observe —
+			// a failed agent.list surfaces here instead of pretending an
+			// empty pane set. Distinct from no_data: the detector is alive
+			// and blind, not silent.
+			problem = true
+			reason = hubAlertReasonStallDegraded
+			if state.degradedSince.IsZero() {
+				state.degradedSince = now
+			}
+			problemSince = state.degradedSince
+		} else {
+			state.degradedSince = time.Time{}
+		}
 		if !state.seen || beat.BeatMS > state.lastBeatMS {
 			state.seen = true
 			state.lastBeatMS = beat.BeatMS
@@ -180,13 +196,14 @@ func (h *HubServer) observeStallBeatLocked(now time.Time, machineID string, beat
 		}
 		if state.seen && now.Sub(state.lastAdvance) > threshold {
 			problem = true
+			reason = hubAlertReasonNoData
 			problemSince = state.lastAdvance
 		}
 	}
 	if problemSince.IsZero() {
 		problemSince = now
 	}
-	return h.observeHubAlertLocked(now, key, problem, problemSince, hubAlertReasonNoData, hubAlertNoCheck, 0)
+	return h.observeHubAlertLocked(now, key, problem, problemSince, reason, hubAlertNoCheck, 0)
 }
 
 // observeHubAlertLocked applies the shared two-observation debounce.  For a
@@ -371,7 +388,7 @@ func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 }
 
 func validHubAlertReason(reason string) bool {
-	return reason == hubAlertReasonDisconnected || reason == hubAlertReasonStale || reason == hubAlertReasonCheckFailed || reason == hubAlertReasonNoData
+	return reason == hubAlertReasonDisconnected || reason == hubAlertReasonStale || reason == hubAlertReasonCheckFailed || reason == hubAlertReasonNoData || reason == hubAlertReasonStallDegraded
 }
 
 func formatHubAlert(alert HubAlert) string {
