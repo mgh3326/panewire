@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -28,14 +29,57 @@ func r20WriteEvent(t *testing.T, inbox, jobID, name, contents string, mtime time
 	return path
 }
 
-// r20AgeMigrationStamp moves the store's event-identity migration stamp, which
-// a fresh store sets to now. Fixtures for events older than the grace window
-// need a node that migrated earlier still.
+// r20AgeMigrationStamp places the store's event-identity migration stamp.
+// Only an open that rekeyed legacy job.* rows stamps itself, so fixtures that
+// need a node which migrated at a known time place the stamp explicitly.
 func r20AgeMigrationStamp(t *testing.T, store *Store, at time.Time) {
 	t.Helper()
-	if _, err := store.db.Exec(`UPDATE relay_meta SET value=? WHERE key='event_id_since'`, at.UnixMilli()); err != nil {
+	if _, err := store.db.Exec(`INSERT OR REPLACE INTO relay_meta(key,value) VALUES('event_id_since',?)`, at.UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// r20LegacySchemaDB writes a database file the way the pre-event_id binary
+// left it: relay_sent with the five-field primary key and the R21 lane and
+// event_id columns, seeded with the given job.* rows (unkeyed, sent long
+// ago). Reopening it through OpenStore performs the rekey migration for
+// real - the only open that earns the event_id_since stamp.
+func r20LegacySchemaDB(t *testing.T, path string, seeds []relayOutboxKey) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE relay_sent (
+	 kind TEXT NOT NULL, job_id TEXT NOT NULL, epoch INTEGER NOT NULL, report_path TEXT NOT NULL, reason TEXT NOT NULL,
+	 lane TEXT NOT NULL DEFAULT '', event_id TEXT NOT NULL DEFAULT '',
+	 sent_at INTEGER, persisted_at INTEGER,
+	 PRIMARY KEY(kind, job_id, epoch, report_path, reason)
+)`); err != nil {
+		t.Fatal(err)
+	}
+	sentAt := time.Now().Add(-time.Hour).UnixMilli()
+	for _, key := range seeds {
+		if _, err := db.Exec(`INSERT INTO relay_sent(kind,job_id,epoch,report_path,reason,lane,event_id,sent_at) VALUES(?,?,?,?,?,?,?,?)`,
+			key.Kind, key.JobID, int64(key.Epoch), key.ReportPath, key.Reason, key.Lane, key.EventID, sentAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// r20MigratedStore opens a store over a database the old binary actually
+// wrote: the rekey runs on open and stamps event_id_since, exactly the state
+// a node is in right after deploying the keyed-outbox build.
+func r20MigratedStore(t *testing.T, seeds []relayOutboxKey) *Store {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "panewire.sqlite3")
+	r20LegacySchemaDB(t, path, seeds)
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
 }
 
 func r20Node(inbox string, store *Store) *HubClient {

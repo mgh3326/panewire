@@ -97,6 +97,14 @@ func OpenStore(path string) (*Store, error) {
 	// files before they reach the send gate.
 	_, _ = db.Exec(`ALTER TABLE relay_sent ADD COLUMN lane TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE relay_sent ADD COLUMN event_id TEXT NOT NULL DEFAULT ''`)
+	// relay_meta holds this node's migration stamp; it is created before the
+	// rekey so the migration can record itself in the same transaction.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS relay_meta (
+	 key TEXT PRIMARY KEY, value INTEGER NOT NULL
+)`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	var eventIDInPrimaryKey int
 	if err := db.QueryRow(`SELECT pk FROM pragma_table_info('relay_sent') WHERE name='event_id'`).Scan(&eventIDInPrimaryKey); err != nil {
 		db.Close()
@@ -108,7 +116,21 @@ func OpenStore(path string) (*Store, error) {
 			db.Close()
 			return nil, err
 		}
-		if _, err := tx.Exec(`CREATE TABLE relay_sent_rekeyed (
+		// Only a rekey that actually carried legacy job.* rows earns the
+		// migration stamp. A fresh or rowless database has no migration to
+		// date: the old binary demonstrably never relayed a job event from
+		// it, so stamping one would mint a cutoff out of nothing and
+		// permanently suppress completions that were still owed.
+		var legacyJobRows int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM relay_sent WHERE kind<>'lane.event'`).Scan(&legacyJobRows); err != nil {
+			tx.Rollback()
+			db.Close()
+			return nil, err
+		}
+		// The outer err must see every failure: a shadowed one here let a
+		// failed copy fall through to DROP+RENAME+commit, silently replacing
+		// the populated legacy table with an empty rekeyed one.
+		if _, err = tx.Exec(`CREATE TABLE relay_sent_rekeyed (
 	 kind TEXT NOT NULL, job_id TEXT NOT NULL, epoch INTEGER NOT NULL, report_path TEXT NOT NULL, reason TEXT NOT NULL, lane TEXT NOT NULL DEFAULT '', event_id TEXT NOT NULL DEFAULT '',
 	 sent_at INTEGER, persisted_at INTEGER, suppressed_at INTEGER,
 	 PRIMARY KEY(kind, job_id, epoch, report_path, reason, event_id)
@@ -120,6 +142,14 @@ func OpenStore(path string) (*Store, error) {
 		}
 		if err == nil {
 			_, err = tx.Exec(`ALTER TABLE relay_sent_rekeyed RENAME TO relay_sent`)
+		}
+		// The instant this node's outbox was rekeyed onto event identity is
+		// the base of its deployment cutoff. It is per-node because rollouts
+		// are sequential: a global constant would suppress ordinary
+		// completions on the nodes that migrate last. INSERT OR IGNORE keeps
+		// the first - and truest - stamp.
+		if err == nil && legacyJobRows > 0 {
+			_, err = tx.Exec(`INSERT OR IGNORE INTO relay_meta(key,value) VALUES('event_id_since',?)`, time.Now().UnixMilli())
 		}
 		if err != nil {
 			tx.Rollback()
@@ -133,20 +163,6 @@ func OpenStore(path string) (*Store, error) {
 	}
 	// Covers databases already rekeyed by a build that predates the column.
 	_, _ = db.Exec(`ALTER TABLE relay_sent ADD COLUMN suppressed_at INTEGER`)
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS relay_meta (
-	 key TEXT PRIMARY KEY, value INTEGER NOT NULL
-)`); err != nil {
-		db.Close()
-		return nil, err
-	}
-	// The instant this node's outbox first carried event identity is the base
-	// of its deployment cutoff. It is per-node because rollouts are sequential:
-	// a global constant would suppress ordinary completions on the nodes that
-	// migrate last. INSERT OR IGNORE keeps the first - and truest - stamp.
-	if _, err := db.Exec(`INSERT OR IGNORE INTO relay_meta(key,value) VALUES('event_id_since',?)`, time.Now().UnixMilli()); err != nil {
-		db.Close()
-		return nil, err
-	}
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS relay_sent_lane_event_idempotency ON relay_sent(lane,event_id) WHERE kind='lane.event'`); err != nil {
 		db.Close()
 		return nil, err
