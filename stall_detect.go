@@ -520,8 +520,9 @@ func scanStallJobEvents(eventsDir, jobID string) (stallJobScan, bool) {
 				job.Terminal = true
 				job.TerminalKind = event.eventKind()
 				job.TerminalSeq = int64(seq)
-				if path := stallReportPathOf(event); path != "" {
-					job.ReportPath = path
+				if kind, ref := stallReportRefOf(event, filepath.Dir(eventsDir)); kind != "" {
+					job.ReportKind = kind
+					job.ReportPath = ref
 				}
 			}
 		}
@@ -532,30 +533,72 @@ func scanStallJobEvents(eventsDir, jobID string) (stallJobScan, bool) {
 	return job, true
 }
 
-// stallNoteReportPattern finds `report=<path>` inside a free-text note. The
-// wrk-era journal records that carry no report_path field keep the path in
-// payload.note in exactly this shape when they name a report at all — some
-// carry none, which resolves to empty rather than a guess.
+// Report reference kinds. A "path" is a local file the finalize path can
+// read; a "doc_key" is a handoffkeep document key — a different identifier
+// family that must never be opened as a file.
+const (
+	stallReportRefPath   = "path"
+	stallReportRefDocKey = "doc_key"
+)
+
+// stallNoteReportPattern finds `report=<token>` inside a free-text note. The
+// wrk-era journal records that carry no report_path field keep the reference
+// in payload.note in exactly this shape — and the token is not always a
+// path: the same note grammar also carries handoffkeep keys (`marker=` and
+// `hk:doc` companions show the family), so the token's shape decides.
 var stallNoteReportPattern = regexp.MustCompile(`(?:^|\s)report=(\S+)`)
 
-// stallReportPathOf resolves the report path a terminal event points at.
-// Precedence: the top-level report_path field first — it is the current
-// panewire emit shape and covers 535 of 543 real journal records — then an
-// explicit payload.report_path field, then the legacy `report=` token inside
-// payload.note, which is free text and therefore the weakest signal.
-func stallReportPathOf(event stallInboxEvent) string {
-	if event.ReportPath != "" {
-		return event.ReportPath
-	}
-	if path := stallPayloadString(event.Payload, "report_path"); path != "" {
-		return path
+// stallReportRefOf resolves the report reference a terminal event declares,
+// by shape. Sources in precedence order: the top-level report_path field
+// (the current panewire emit shape, 535 of 543 real records), the wrk-era
+// top-level report field (worker.complete), payload.report_path, then the
+// `report=` token inside payload.note — free text and therefore the weakest
+// signal. Declared fields are paths by contract; a note token is classified
+// by stallResolveReportToken. Nothing is guessed here: jobs/<job>/report.md
+// convention fallback happens per-scan in refreshJob so a report written
+// after the terminal record is still found.
+func stallReportRefOf(event stallInboxEvent, jobDir string) (kind, ref string) {
+	for _, candidate := range []string{event.ReportPath, event.Report, stallPayloadString(event.Payload, "report_path")} {
+		if candidate != "" {
+			return stallReportRefPath, candidate
+		}
 	}
 	if note := stallPayloadString(event.Payload, "note"); note != "" {
 		if match := stallNoteReportPattern.FindStringSubmatch(note); match != nil {
-			return match[1]
+			if token := strings.TrimRight(match[1], ";,"); token != "" {
+				return stallResolveReportToken(token, jobDir)
+			}
 		}
 	}
-	return ""
+	return "", ""
+}
+
+// stallResolveReportToken classifies a free-text `report=` token. Absolute
+// and home-relative forms are paths. A relative token that lands on a real
+// file under the job directory is a path (the wrk-era `events/x.md` shape).
+// A bare namespaced token with no file on disk and no extension is a
+// handoffkeep document key (report/<ns>/<name>) — recorded as a remote
+// reference, never read from the filesystem.
+func stallResolveReportToken(token, jobDir string) (kind, ref string) {
+	switch {
+	case filepath.IsAbs(token):
+		return stallReportRefPath, token
+	case strings.HasPrefix(token, "~/"):
+		if home, err := os.UserHomeDir(); err == nil {
+			return stallReportRefPath, filepath.Join(home, token[2:])
+		}
+		return stallReportRefPath, token
+	}
+	joined := filepath.Join(jobDir, filepath.FromSlash(token))
+	if info, err := os.Stat(joined); err == nil && !info.IsDir() {
+		return stallReportRefPath, joined
+	}
+	if filepath.Ext(token) != "" {
+		// The extension marks path intent even when the file is gone; the
+		// read fails and the row records missing_local — an honest answer.
+		return stallReportRefPath, joined
+	}
+	return stallReportRefDocKey, token
 }
 
 // repsDeadlineSuggestion computes a default deadline proposal from every
@@ -636,11 +679,22 @@ func (m *stallDetectManager) refreshJobs(ctx context.Context, at time.Time) ([]s
 }
 
 func (m *stallDetectManager) refreshJob(ctx context.Context, scan stallJobScan, all []stallJobScan) error {
+	if scan.Terminal && scan.ReportKind == "" {
+		// jobs/<job>/report.md is the fleet's fixed reporting convention: a
+		// terminal record that names nothing still yields the report when
+		// the file exists. Resolved here, outside the cached journal scan,
+		// so a report written after the terminal record is still picked up.
+		conventional := filepath.Join(m.inboxRoot, "jobs", scan.JobID, "report.md")
+		if info, err := os.Stat(conventional); err == nil && !info.IsDir() {
+			scan.ReportKind = stallReportRefPath
+			scan.ReportPath = conventional
+		}
+	}
 	base := stallJobRow{
 		JobID: scan.JobID, OwnerLane: scan.OwnerLane, ParentLane: scan.ParentLane,
 		AgentLabel: scan.AgentLabel, Harness: scan.Family, ClaimedAt: scan.ClaimedAt,
 		Terminal: scan.Terminal, TerminalKind: scan.TerminalKind, LastEventAt: scan.LastEventAt,
-		ReportPath: scan.ReportPath,
+		ReportPath: scan.ReportPath, ReportKind: scan.ReportKind,
 	}
 	if len(scan.Spawns) == 0 {
 		row := base
@@ -1798,16 +1852,21 @@ func (m *stallDetectManager) cpuForDir(ctx context.Context, dir string) string {
 // handoffkeep happens only when ReportUpload is enabled — shadow means zero
 // outward side effects, so the default path never writes to the shared
 // remote. Local finalize is atomic; the remote receipt is a separate column
-// so an upload failure can never masquerade as worker incompletion. Only the
-// declared report file is read, and terminal jobs older than
-// stallReportMaxAge are outside the scan window entirely.
+// so an upload failure can never masquerade as worker incompletion.
+//
+// Every terminal job gets a stall_reports row — a skipped report is a
+// recorded decision, never a silent drop: "remote_only" when the event named
+// a handoffkeep document key, "no_report" when nothing was declared and the
+// conventional jobs/<job>/report.md is absent, "stale" when the job ended
+// before the retention window (a late finalize would fabricate history).
+// Only the resolved local path is ever opened.
 func (m *stallDetectManager) persistReports(ctx context.Context, at time.Time) {
 	jobs, err := m.store.stallJobs(ctx, true)
 	if err != nil {
 		return
 	}
 	for _, job := range jobs {
-		if !job.Terminal || job.ReportPath == "" {
+		if !job.Terminal {
 			continue
 		}
 		report, found, err := m.store.stallReport(ctx, job.JobID, job.Attempt)
@@ -1815,15 +1874,55 @@ func (m *stallDetectManager) persistReports(ctx context.Context, at time.Time) {
 			continue
 		}
 		if !found {
-			if !job.LastEventAt.IsZero() && at.Sub(job.LastEventAt) > stallReportMaxAge {
-				// The job finished long before this detector saw it; a
-				// late finalize would fabricate history. Leave it alone.
+			switch {
+			case job.ReportKind == stallReportRefDocKey:
+				// The report body already lives in handoffkeep under this
+				// key — the event's `report=` token named a document, not a
+				// file. Recording the remote reference is the handling: a
+				// key is never opened as a local path, and shadow fetches
+				// nothing.
+				_ = m.store.upsertStallReport(ctx, stallReportRow{
+					JobID: job.JobID, Attempt: job.Attempt, ReportPath: job.ReportPath,
+					RemoteKey: job.ReportPath, RemoteState: "remote_only",
+				})
 				continue
+			case job.ReportPath == "":
+				// A journal-terminal job that named no report and has no
+				// jobs/<job>/report.md either. Dropping it silently was the
+				// B2 defect: the row records exactly why nothing finalized.
+				if stallTerminalKinds[job.TerminalKind] {
+					_ = m.store.upsertStallReport(ctx, stallReportRow{
+						JobID: job.JobID, Attempt: job.Attempt, RemoteState: "no_report",
+						RemoteError: "no report declared and jobs/<job>/report.md absent",
+					})
+				}
+				continue
+			default:
+				report = stallReportRow{JobID: job.JobID, Attempt: job.Attempt, ReportPath: job.ReportPath, RemoteState: "pending"}
 			}
-			report = stallReportRow{JobID: job.JobID, Attempt: job.Attempt, ReportPath: job.ReportPath, RemoteState: "pending"}
+		}
+		if report.RemoteState == "no_report" && job.ReportPath != "" {
+			// The convention file materialized after the bookkeeping row
+			// was recorded — upgrade it into a real finalize candidate.
+			report.ReportPath = job.ReportPath
+			report.RemoteState = "pending"
+			report.RemoteError = ""
+		}
+		if report.RemoteState == "pending" && !job.LastEventAt.IsZero() && at.Sub(job.LastEventAt) > stallReportMaxAge {
+			// The job finished long before this detector saw it; a late
+			// finalize would fabricate history. The row records the skip.
+			report.RemoteState = "stale"
+			report.RemoteError = "terminal record older than the report window"
+			_ = m.store.upsertStallReport(ctx, report)
+			continue
 		}
 		if report.LocalPath == "" {
-			m.finalizeReport(ctx, &report, job, at)
+			switch report.RemoteState {
+			case "pending", "missing_local", "finalize_failed":
+				m.finalizeReport(ctx, &report, job, at)
+			default:
+				continue
+			}
 		}
 		if report.LocalPath == "" {
 			continue

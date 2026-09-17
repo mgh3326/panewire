@@ -427,12 +427,14 @@ func writeRawJobEvent(t *testing.T, inbox, jobID, name, raw string) {
 	}
 }
 
-// B2 — the real journal keeps report_path at the top level on 535 of 543
-// terminal records (flat panewire emit shape, captured from
-// 179-observability-impl-20260909-1900), inside payload.note's `report=`
-// token on the wrk-era remainder (captured from installer-126l-20260908),
-// and absent entirely on notes that name no report (tester-2073 capture).
-// The reader must take all three.
+// B2 — the real journal's 543 terminal records carry the report reference in
+// four shapes: top-level report_path (535, flat panewire emit, captured from
+// 179-observability-impl-20260909-1900), payload.note's `report=` token as a
+// local path (installer-126l-20260908), the same token as a handoffkeep
+// document key (builder44-idlewake-20260909), and nothing at all with the
+// report at the convention path jobs/<job>/report.md (tester-2073 and the
+// 09-15 completions) or genuinely absent (rob1353). Each shape gets its own
+// handling below — nothing is dropped silently.
 func TestStallReportPathRealJournalShapes(t *testing.T) {
 	report := filepath.Join(t.TempDir(), "report.md")
 	body := "done\nkey: sk-ABCdef1234567890ghiJEL\n"
@@ -464,14 +466,99 @@ func TestStallReportPathRealJournalShapes(t *testing.T) {
 		}
 	})
 
+	// The 6 real note-only completions split three ways: jobs/<job>/report.md
+	// exists for 5 (convention path — finalize must run), is genuinely absent
+	// for 1 (recorded no_report, not dropped silently), and one `report=`
+	// token is a handoffkeep document key, never a local path.
+	t.Run("convention_report_md", func(t *testing.T) {
+		fx := newStallFixture(t, false)
+		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+		// tester-2073's real shape: a completion whose note names no report,
+		// with the report sitting at the fleet-convention path.
+		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json",
+			`{"created_at": "2026-09-14T20:56:20+00:00", "job_id": "job-a", "kind": "job.completed", "payload": {"note": "VERDICT=FAIL · BLOCKER 1(F3 port-less DSN) + SHOULD 5 · 머지 보류 판정 소비 완료"}, "seq": 4}`)
+		if err := os.WriteFile(filepath.Join(fx.inbox, "jobs", "job-a", "report.md"), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		fx.scan()
+		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
+		if err != nil || !found || row.LocalPath == "" || row.SHA256 == "" {
+			t.Fatalf("convention-path report was not finalized: %+v found=%v err=%v", row, found, err)
+		}
+		local, err := os.ReadFile(row.LocalPath)
+		if err != nil || string(local) != body {
+			t.Fatal("finalized copy does not match the convention report")
+		}
+	})
+
+	t.Run("note_doc_key", func(t *testing.T) {
+		fx := newStallFixture(t, false)
+		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+		// builder44-idlewake-20260909's real record, byte for byte: the
+		// report= token is a handoffkeep document key, not a path.
+		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json",
+			`{"created_at": "2026-09-09T04:00:46+00:00", "job_id": "job-a", "kind": "job.completed", "payload": {"note": "disposition=UNVERIFIED/HOLD; report=report/task172/hold-ack; head=ca94ac5a67a9986ab1115ed5f839148c9d7ed2ea; coordinator assignment complete; no join/merge/deploy"}, "seq": 4}`)
+		fx.scan()
+		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
+		if err != nil || !found {
+			t.Fatalf("doc-key report left no record: found=%v err=%v", found, err)
+		}
+		if row.RemoteState != "remote_only" || row.RemoteKey != "report/task172/hold-ack" || row.LocalPath != "" {
+			t.Fatalf("doc key was mishandled: %+v", row)
+		}
+		// The key must never be opened as a file — no final/ copy exists.
+		if _, err := os.Stat(filepath.Join(fx.inbox, "jobs", "job-a", "final")); err == nil {
+			t.Fatal("a document key was read as a local path")
+		}
+	})
+
 	t.Run("no_report_in_note", func(t *testing.T) {
 		fx := newStallFixture(t, false)
 		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
 		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json",
 			`{"created_at": "2026-09-14T20:56:20+00:00", "job_id": "job-a", "kind": "job.completed", "payload": {"note": "VERDICT=FAIL · BLOCKER 1(F3 port-less DSN) + SHOULD 5 · 머지 보류 판정 소비 완료"}, "seq": 4}`)
 		fx.scan()
-		if _, found, err := fx.store.stallReport(context.Background(), "job-a", 1); err != nil || found {
-			t.Fatalf("report-less completion fabricated a row: found=%v err=%v", found, err)
+		// rob1353's real shape: nothing declared, convention file absent.
+		// The drop is a recorded row, not silence.
+		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
+		if err != nil || !found {
+			t.Fatalf("report-less completion left no record: found=%v err=%v", found, err)
+		}
+		if row.RemoteState != "no_report" || row.RemoteError == "" || row.LocalPath != "" {
+			t.Fatalf("no-report row malformed: %+v", row)
+		}
+	})
+
+	// A report.md landing after the terminal record is still finalized on a
+	// later scan — the no_report row upgrades instead of fossilizing.
+	t.Run("late_convention_report", func(t *testing.T) {
+		fx := newStallFixture(t, false)
+		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json",
+			`{"kind":"job.completed","job_id":"job-a","payload":{"note":"done"},"seq":4,"created_at":"2026-09-17T09:00:00Z"}`)
+		fx.scan()
+		if err := os.WriteFile(filepath.Join(fx.inbox, "jobs", "job-a", "report.md"), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		fx.advance(time.Minute)
+		fx.scan()
+		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
+		if err != nil || !found || row.LocalPath == "" {
+			t.Fatalf("late convention report was not finalized: %+v found=%v err=%v", row, found, err)
+		}
+	})
+
+	// A terminal record older than the report window is never finalized —
+	// and the skip is a recorded row, not silence.
+	t.Run("stale_terminal_records_skip", func(t *testing.T) {
+		fx := newStallFixture(t, false)
+		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-100*time.Hour))
+		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json", fmt.Sprintf(
+			`{"kind":"job.completed","job_id":"job-a","report_path":%q,"created_at":%q,"seq":4}`, report, fx.now.Add(-96*time.Hour).Format(time.RFC3339)))
+		fx.scan()
+		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
+		if err != nil || !found || row.RemoteState != "stale" || row.LocalPath != "" {
+			t.Fatalf("aged terminal record was not marked stale: %+v found=%v err=%v", row, found, err)
 		}
 	})
 }

@@ -82,6 +82,9 @@ type stallJobRow struct {
 	TerminalKind   string
 	LastEventAt    time.Time
 	ReportPath     string
+	// ReportKind names what ReportPath holds: "path" for a local file,
+	// "doc_key" for a handoffkeep document key, "" when nothing resolves.
+	ReportKind string
 }
 
 type stallIncidentRow struct {
@@ -173,6 +176,7 @@ func stallDetectMigrate(db *sql.DB) error {
 		 deadline_at INTEGER NOT NULL DEFAULT 0, deadline_source TEXT NOT NULL DEFAULT '',
 		 terminal INTEGER NOT NULL DEFAULT 0, terminal_kind TEXT NOT NULL DEFAULT '',
 		 last_event_at INTEGER NOT NULL DEFAULT 0, report_path TEXT NOT NULL DEFAULT '',
+		 report_kind TEXT NOT NULL DEFAULT '',
 		 PRIMARY KEY(job_id, attempt))`,
 		`CREATE TABLE IF NOT EXISTS stall_deadline_ext (
 		 job_id TEXT NOT NULL, seq INTEGER NOT NULL, issuer_lane TEXT NOT NULL,
@@ -232,6 +236,11 @@ func stallDetectMigrate(db *sql.DB) error {
 	if _, err := db.Exec(`ALTER TABLE stall_beat ADD COLUMN degraded INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 		return err
 	}
+	// Same for report_kind on stall_jobs: pre-round-3 stores carry report_path
+	// without its kind.
+	if _, err := db.Exec(`ALTER TABLE stall_jobs ADD COLUMN report_kind TEXT NOT NULL DEFAULT ''`); err != nil && !strings.Contains(err.Error(), "duplicate column") {
+		return err
+	}
 	return nil
 }
 
@@ -258,8 +267,8 @@ func (s *Store) upsertStallJob(ctx context.Context, job stallJobRow) error {
 		deadlineSource = job.DeadlineSource
 	}
 	spawned := stallMS(job.SpawnedAt)
-	_, err = tx.ExecContext(ctx, `INSERT INTO stall_jobs(job_id,attempt,owner_lane,parent_lane,agent_label,harness,profile,pane_id,workspace_id,cwd,round,claimed_at,spawned_at,deadline_at,deadline_source,terminal,terminal_kind,last_event_at,report_path)
-	 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err = tx.ExecContext(ctx, `INSERT INTO stall_jobs(job_id,attempt,owner_lane,parent_lane,agent_label,harness,profile,pane_id,workspace_id,cwd,round,claimed_at,spawned_at,deadline_at,deadline_source,terminal,terminal_kind,last_event_at,report_path,report_kind)
+	 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	 ON CONFLICT(job_id,attempt) DO UPDATE SET
 	  owner_lane=CASE WHEN excluded.owner_lane<>'' THEN excluded.owner_lane ELSE owner_lane END,
 	  parent_lane=CASE WHEN excluded.parent_lane<>'' THEN excluded.parent_lane ELSE parent_lane END,
@@ -276,10 +285,11 @@ func (s *Store) upsertStallJob(ctx context.Context, job stallJobRow) error {
 	  terminal=CASE WHEN excluded.terminal=0 AND terminal_kind IN ('job.escalate','job.joined') THEN 0 ELSE MAX(terminal,excluded.terminal) END,
 	  terminal_kind=CASE WHEN excluded.terminal=0 AND terminal_kind IN ('job.escalate','job.joined') THEN '' WHEN excluded.terminal_kind<>'' THEN excluded.terminal_kind ELSE terminal_kind END,
 	  last_event_at=MAX(last_event_at,excluded.last_event_at),
-	  report_path=CASE WHEN excluded.report_path<>'' THEN excluded.report_path ELSE report_path END`,
+	  report_path=CASE WHEN excluded.report_path<>'' THEN excluded.report_path ELSE report_path END,
+	  report_kind=excluded.report_kind`,
 		job.JobID, job.Attempt, job.OwnerLane, job.ParentLane, job.AgentLabel, job.Harness, job.Profile,
 		job.PaneID, job.WorkspaceID, job.CWD, job.Round, stallMS(job.ClaimedAt), spawned,
-		deadlineAt, deadlineSource, boolInt(job.Terminal), job.TerminalKind, stallMS(job.LastEventAt), job.ReportPath)
+		deadlineAt, deadlineSource, boolInt(job.Terminal), job.TerminalKind, stallMS(job.LastEventAt), job.ReportPath, job.ReportKind)
 	if err != nil {
 		return err
 	}
@@ -289,7 +299,7 @@ func (s *Store) upsertStallJob(ctx context.Context, job stallJobRow) error {
 func (s *Store) stallJobs(ctx context.Context, includeTerminal bool) ([]stallJobRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	query := `SELECT job_id,attempt,owner_lane,parent_lane,agent_label,harness,profile,pane_id,workspace_id,cwd,round,claimed_at,spawned_at,deadline_at,deadline_source,terminal,terminal_kind,last_event_at,report_path FROM stall_jobs`
+	query := `SELECT job_id,attempt,owner_lane,parent_lane,agent_label,harness,profile,pane_id,workspace_id,cwd,round,claimed_at,spawned_at,deadline_at,deadline_source,terminal,terminal_kind,last_event_at,report_path,report_kind FROM stall_jobs`
 	if !includeTerminal {
 		query += ` WHERE terminal=0`
 	}
@@ -304,7 +314,7 @@ func (s *Store) stallJobs(ctx context.Context, includeTerminal bool) ([]stallJob
 		var job stallJobRow
 		var claimedAt, spawnedAt, deadlineAt, lastEventAt int64
 		var terminal int
-		if err := rows.Scan(&job.JobID, &job.Attempt, &job.OwnerLane, &job.ParentLane, &job.AgentLabel, &job.Harness, &job.Profile, &job.PaneID, &job.WorkspaceID, &job.CWD, &job.Round, &claimedAt, &spawnedAt, &deadlineAt, &job.DeadlineSource, &terminal, &job.TerminalKind, &lastEventAt, &job.ReportPath); err != nil {
+		if err := rows.Scan(&job.JobID, &job.Attempt, &job.OwnerLane, &job.ParentLane, &job.AgentLabel, &job.Harness, &job.Profile, &job.PaneID, &job.WorkspaceID, &job.CWD, &job.Round, &claimedAt, &spawnedAt, &deadlineAt, &job.DeadlineSource, &terminal, &job.TerminalKind, &lastEventAt, &job.ReportPath, &job.ReportKind); err != nil {
 			return nil, err
 		}
 		job.ClaimedAt = stallTime(claimedAt)
