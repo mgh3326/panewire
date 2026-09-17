@@ -12,6 +12,8 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -36,7 +38,6 @@ type stallFixture struct {
 	reads      map[string]readEvidence
 	subscribed map[string]bool
 	sent       []hubScannedRelayEvent
-	uploads    map[string]string
 	resubs     int
 	procs      []stallProc
 	procCWD    map[int64]string
@@ -61,7 +62,6 @@ func newStallFixture(t *testing.T, notify bool) *stallFixture {
 		now:        time.Date(2026, 9, 17, 10, 0, 0, 0, time.UTC),
 		reads:      map[string]readEvidence{},
 		subscribed: map[string]bool{},
-		uploads:    map[string]string{},
 		procCWD:    map[int64]string{},
 		trees:      map[string]string{},
 		persisted:  map[string]bool{},
@@ -78,10 +78,6 @@ func newStallFixture(t *testing.T, notify bool) *stallFixture {
 		procs:       func(context.Context) ([]stallProc, error) { return fx.procs, nil },
 		procCWD:     func(_ context.Context, pid int64) (string, error) { return fx.procCWD[pid], nil },
 		enqueue:     func(event hubScannedRelayEvent) bool { fx.sent = append(fx.sent, event); return true },
-		upload: func(_ context.Context, key string, body []byte) error {
-			fx.uploads[key] = string(body)
-			return nil
-		},
 		lanePersisted: func(_ context.Context, lane, eventID string) (bool, error) {
 			return fx.persisted[lane+"\x00"+eventID], nil
 		},
@@ -497,40 +493,50 @@ func writeRawJobEvent(t *testing.T, inbox, jobID, name, raw string) {
 // 09-15 completions) or genuinely absent (rob1353). Each shape gets its own
 // handling below — nothing is dropped silently.
 func TestStallReportPathRealJournalShapes(t *testing.T) {
-	report := filepath.Join(t.TempDir(), "report.md")
 	body := "done\nkey: sk-ABCdef1234567890ghiJEL\n"
-	if err := os.WriteFile(report, []byte(body), 0600); err != nil {
-		t.Fatal(err)
-	}
 
+	// Declared references are recorded as inert strings and never opened —
+	// the only filesystem observation is the convention file's Lstat.
 	t.Run("top_level", func(t *testing.T) {
 		fx := newStallFixture(t, false)
 		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
-		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json", fmt.Sprintf(
-			`{"kind":"job.completed","job_id":"job-a","owner_lane":"builder-49","label":"task179-observability-impl","pane_id":"w1:p1","host":"mbp-server","report_path":%q,"report_last_line":"completed","epoch":1}`, report))
+		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json",
+			`{"kind":"job.completed","job_id":"job-a","owner_lane":"builder-49","label":"task179-observability-impl","pane_id":"w1:p1","host":"node-a","report_path":"/outside/report.md","report_last_line":"completed","epoch":1}`)
+		if err := os.WriteFile(filepath.Join(fx.inbox, "jobs", "job-a", "report.md"), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
 		fx.scan()
 		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
-		if err != nil || !found || row.LocalPath == "" || row.SHA256 == "" {
-			t.Fatalf("top-level report_path was not finalized: %+v found=%v err=%v", row, found, err)
+		if err != nil || !found || row.State != "observed" || row.MTime.IsZero() {
+			t.Fatalf("convention file was not observed: %+v found=%v err=%v", row, found, err)
+		}
+		if row.RefKind != "path" || row.RefValue != "/outside/report.md" {
+			t.Fatalf("declared reference not recorded as string: %+v", row)
 		}
 	})
 
 	t.Run("payload_note", func(t *testing.T) {
 		fx := newStallFixture(t, false)
 		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
-		writeRawJobEvent(t, fx.inbox, "job-a", "00007-job.completed.json", fmt.Sprintf(
-			`{"created_at": "2026-09-07T19:27:00+00:00", "job_id": "job-a", "kind": "job.completed", "payload": {"note": "JOIN installer-126l: RESULT=INSTALLED target=b40953cfd7c22d35b6131eb5e00428f93504075b; poststate independently verified (HEAD/status/overlay/counsel backup/12 role links x3/wrk+arbiter/#119 ledger); report=%s log=/var/log/install.log marker=report/role126-local-install/executed hk:doc brief/role126/local-install-preflight-fix"}, "seq": 7}`, report))
+		writeRawJobEvent(t, fx.inbox, "job-a", "00007-job.completed.json",
+			`{"created_at": "2026-09-07T19:27:00+00:00", "job_id": "job-a", "kind": "job.completed", "payload": {"note": "JOIN installer-126l: RESULT=INSTALLED; report=/outside/report.md marker=report/role126-local-install/executed hk:doc brief/role126/local-install-preflight-fix"}, "seq": 7}`)
+		if err := os.WriteFile(filepath.Join(fx.inbox, "jobs", "job-a", "report.md"), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
 		fx.scan()
 		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
-		if err != nil || !found || row.LocalPath == "" {
-			t.Fatalf("note report= path was not finalized: %+v found=%v err=%v", row, found, err)
+		if err != nil || !found || row.State != "observed" {
+			t.Fatalf("convention file was not observed: %+v found=%v err=%v", row, found, err)
+		}
+		if row.RefKind != "path" || row.RefValue != "/outside/report.md" {
+			t.Fatalf("note report= token not recorded as string: %+v", row)
 		}
 	})
 
 	// The 6 real note-only completions split three ways: jobs/<job>/report.md
-	// exists for 5 (convention path — finalize must run), is genuinely absent
-	// for 1 (recorded no_report, not dropped silently), and one `report=`
-	// token is a handoffkeep document key, never a local path.
+	// exists for 5 (observed with mtime), is genuinely absent for 1 (recorded
+	// no_report, not dropped silently), and one `report=` token is a
+	// handoffkeep document key, never a local path.
 	t.Run("convention_report_md", func(t *testing.T) {
 		fx := newStallFixture(t, false)
 		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
@@ -538,17 +544,18 @@ func TestStallReportPathRealJournalShapes(t *testing.T) {
 		// with the report sitting at the fleet-convention path.
 		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json",
 			`{"created_at": "2026-09-14T20:56:20+00:00", "job_id": "job-a", "kind": "job.completed", "payload": {"note": "VERDICT=FAIL · BLOCKER 1(F3 port-less DSN) + SHOULD 5 · 머지 보류 판정 소비 완료"}, "seq": 4}`)
-		if err := os.WriteFile(filepath.Join(fx.inbox, "jobs", "job-a", "report.md"), []byte(body), 0600); err != nil {
+		written := fx.now.Add(-time.Hour)
+		reportPath := filepath.Join(fx.inbox, "jobs", "job-a", "report.md")
+		if err := os.WriteFile(reportPath, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(reportPath, written, written); err != nil {
 			t.Fatal(err)
 		}
 		fx.scan()
 		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
-		if err != nil || !found || row.LocalPath == "" || row.SHA256 == "" {
-			t.Fatalf("convention-path report was not finalized: %+v found=%v err=%v", row, found, err)
-		}
-		local, err := os.ReadFile(row.LocalPath)
-		if err != nil || string(local) != body {
-			t.Fatal("finalized copy does not match the convention report")
+		if err != nil || !found || row.State != "observed" || !row.MTime.Equal(written) {
+			t.Fatalf("convention report existence/mtime not observed: %+v found=%v err=%v", row, found, err)
 		}
 	})
 
@@ -564,12 +571,8 @@ func TestStallReportPathRealJournalShapes(t *testing.T) {
 		if err != nil || !found {
 			t.Fatalf("doc-key report left no record: found=%v err=%v", found, err)
 		}
-		if row.RemoteState != "remote_only" || row.RemoteKey != "report/task172/hold-ack" || row.LocalPath != "" {
+		if row.RefKind != "doc_key" || row.RefValue != "report/task172/hold-ack" || row.State != "no_report" {
 			t.Fatalf("doc key was mishandled: %+v", row)
-		}
-		// The key must never be opened as a file — no final/ copy exists.
-		if _, err := os.Stat(filepath.Join(fx.inbox, "jobs", "job-a", "final")); err == nil {
-			t.Fatal("a document key was read as a local path")
 		}
 	})
 
@@ -585,41 +588,52 @@ func TestStallReportPathRealJournalShapes(t *testing.T) {
 		if err != nil || !found {
 			t.Fatalf("report-less completion left no record: found=%v err=%v", found, err)
 		}
-		if row.RemoteState != "no_report" || row.RemoteError == "" || row.LocalPath != "" {
+		if row.State != "no_report" || row.Note == "" {
 			t.Fatalf("no-report row malformed: %+v", row)
 		}
 	})
 
-	// A report.md landing after the terminal record is still finalized on a
-	// later scan — the no_report row upgrades instead of fossilizing.
+	// A report.md landing after the terminal record is observed on the next
+	// scan — the no_report row upgrades instead of fossilizing.
 	t.Run("late_convention_report", func(t *testing.T) {
 		fx := newStallFixture(t, false)
 		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
 		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json",
 			`{"kind":"job.completed","job_id":"job-a","payload":{"note":"done"},"seq":4,"created_at":"2026-09-17T09:00:00Z"}`)
 		fx.scan()
+		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
+		if err != nil || !found || row.State != "no_report" {
+			t.Fatalf("absent report was not recorded: %+v", row)
+		}
 		if err := os.WriteFile(filepath.Join(fx.inbox, "jobs", "job-a", "report.md"), []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
 		fx.advance(time.Minute)
 		fx.scan()
-		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
-		if err != nil || !found || row.LocalPath == "" {
-			t.Fatalf("late convention report was not finalized: %+v found=%v err=%v", row, found, err)
+		row, found, err = fx.store.stallReport(context.Background(), "job-a", 1)
+		if err != nil || !found || row.State != "observed" || row.MTime.IsZero() {
+			t.Fatalf("late convention report was not observed: %+v found=%v err=%v", row, found, err)
 		}
 	})
 
-	// A terminal record older than the report window is never finalized —
-	// and the skip is a recorded row, not silence.
-	t.Run("stale_terminal_records_skip", func(t *testing.T) {
+	// A symlink at the convention path is refused without being followed —
+	// the row records exactly why nothing was observed.
+	t.Run("convention_symlink_refused", func(t *testing.T) {
 		fx := newStallFixture(t, false)
-		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-100*time.Hour))
-		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json", fmt.Sprintf(
-			`{"kind":"job.completed","job_id":"job-a","report_path":%q,"created_at":%q,"seq":4}`, report, fx.now.Add(-96*time.Hour).Format(time.RFC3339)))
+		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json",
+			`{"kind":"job.completed","job_id":"job-a","payload":{"note":"done"},"seq":4,"created_at":"2026-09-17T09:00:00Z"}`)
+		target := filepath.Join(t.TempDir(), "outside.md")
+		if err := os.WriteFile(target, []byte("canary\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, filepath.Join(fx.inbox, "jobs", "job-a", "report.md")); err != nil {
+			t.Fatal(err)
+		}
 		fx.scan()
 		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
-		if err != nil || !found || row.RemoteState != "stale" || row.LocalPath != "" {
-			t.Fatalf("aged terminal record was not marked stale: %+v found=%v err=%v", row, found, err)
+		if err != nil || !found || row.State != "symlink_refused" || !row.MTime.IsZero() {
+			t.Fatalf("symlinked report was not refused: %+v found=%v err=%v", row, found, err)
 		}
 	})
 }
@@ -745,94 +759,164 @@ func TestStallFalseTerminalRowReopens(t *testing.T) {
 	}
 }
 
-// AC8 + shadow BLOCKER — with ReportUpload off (the rollout default) the
-// report is finalized locally, hashed, and never written to the shared
-// remote: the upload seam must see zero calls. With it on, the uploaded body
-// is the redacted copy while the local file stays verbatim.
-func TestStallReportUploadRedactsSecrets(t *testing.T) {
-	report := filepath.Join(t.TempDir(), "report.md")
-	body := "done\nkey: sk-ABCdef1234567890ghiJEL\n"
-	if err := os.WriteFile(report, []byte(body), 0600); err != nil {
+// W2 — the detector may stat the convention file and nothing else. Every
+// reference shape points outside jobs/<job>/ at a canary, and the check is
+// deterministic rather than judgement: the lstat seam records each path it
+// is asked about, a fifo canary hangs any code path that re-learns to open
+// it (the watchdog fails the test), and afterwards neither the inbox tree
+// nor the store may carry the canary's body. Resurrecting a ReadFile+final/
+// copy lands canary bytes under jobs/ — an assertion failure, not a timeout.
+func TestStallReportNeverOpensOutsidePaths(t *testing.T) {
+	outside := t.TempDir()
+	marker := "R4-CANARY-deadbeef42"
+	canary := filepath.Join(outside, "canary.md")
+	if err := os.WriteFile(canary, []byte(marker+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	topLevel := fmt.Sprintf(`{"kind":"job.completed","job_id":"job-a","owner_lane":"builder-49","report_path":%q,"epoch":1}`, report)
-
-	t.Run("shadow_uploads_nothing", func(t *testing.T) {
-		fx := newStallFixture(t, false)
-		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
-		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json", topLevel)
-		fx.scan()
-		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
-		if err != nil || !found || row.LocalPath == "" || row.SHA256 == "" {
-			t.Fatalf("local finalize missing under shadow: %+v found=%v err=%v", row, found, err)
-		}
-		if row.RemoteState != "disabled" {
-			t.Fatalf("shadow remote state=%q", row.RemoteState)
-		}
-		if len(fx.uploads) != 0 {
-			t.Fatalf("shadow performed %d remote writes", len(fx.uploads))
-		}
-	})
-
-	t.Run("upload_redacts", func(t *testing.T) {
-		fx := newStallFixture(t, false)
-		fx.mgr.cfg.ReportUpload = true
-		claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
-		writeRawJobEvent(t, fx.inbox, "job-a", "00004-job.completed.json", topLevel)
-		fx.scan()
-		row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
-		if err != nil || !found {
-			t.Fatalf("report row missing: %v %v", found, err)
-		}
-		if row.RemoteState != "uploaded" || row.LocalPath == "" || row.SHA256 == "" {
-			t.Fatalf("report not finalized+uploaded: %+v", row)
-		}
-		uploaded := fx.uploads["report/job-a/1"]
-		if strings.Contains(uploaded, "sk-ABCdef1234567890ghiJEL") || !strings.Contains(uploaded, "[redacted]") {
-			t.Fatalf("remote body leaked the token: %q", uploaded)
-		}
-		local, err := os.ReadFile(row.LocalPath)
-		if err != nil || string(local) != body {
-			t.Fatalf("local finalized copy was altered")
-		}
-	})
-}
-
-// B3 — a report whose on-disk bytes do not match the recorded hash must not
-// be renamed into the final path. The readDisk seam stands in for the
-// post-write verification read.
-func TestStallReportFinalizeVerifiesDisk(t *testing.T) {
-	fx := newStallFixture(t, false)
-	fx.mgr.cfg.ReportUpload = true
-	report := filepath.Join(t.TempDir(), "report.md")
-	body := "done\n"
-	if err := os.WriteFile(report, []byte(body), 0600); err != nil {
+	fifo := filepath.Join(outside, "fifo.md")
+	if err := syscall.Mkfifo(fifo, 0600); err != nil {
 		t.Fatal(err)
 	}
-	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
-	writeRawJobEvent(t, fx.inbox, "job-a", "00005-job.completed.json", fmt.Sprintf(
-		`{"kind":"job.completed","job_id":"job-a","report_path":%q,"epoch":1}`, report))
-	fx.mgr.deps.readDisk = func(name string) ([]byte, error) {
-		disk, err := os.ReadFile(name)
-		if err != nil {
-			return nil, err
+	home := filepath.Join(outside, "home")
+	if err := os.MkdirAll(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("HOME", home)
+
+	var mu sync.Mutex
+	var statted []string
+
+	newFixture := func(t *testing.T) *stallFixture {
+		fx := newStallFixture(t, false)
+		fx.mgr.deps.lstat = func(path string) (os.FileInfo, error) {
+			mu.Lock()
+			statted = append(statted, path)
+			mu.Unlock()
+			return os.Lstat(path)
 		}
-		return append(disk, '\n', 't', 'r', 'u', 'n', 'c', 'a', 't', 'e', 'd'), nil
+		return fx
 	}
-	fx.scan()
-	row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
-	if err != nil || !found {
-		t.Fatalf("report row missing: %v %v", found, err)
+	scan := func(fx *stallFixture) {
+		done := make(chan struct{})
+		go func() { defer close(done); fx.scan() }()
+		select {
+		case <-done:
+		case <-time.After(30 * time.Second):
+			t.Fatal("scan blocked — a path was opened for reading (fifo canary)")
+		}
 	}
-	if row.LocalPath != "" || row.RemoteState != "finalize_failed" {
-		t.Fatalf("hash-mismatched file was finalized: %+v", row)
+	terminal := func(fx *stallFixture, seq int, raw string) {
+		writeRawJobEvent(t, fx.inbox, "job-a", fmt.Sprintf("%05d-job.completed.json", seq), raw)
 	}
-	final := filepath.Join(fx.inbox, "jobs", "job-a", "final", "report-1.md")
-	if _, err := os.Stat(final); err == nil {
-		t.Fatal("mismatched temp file was renamed to the final path")
+
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, fx *stallFixture)
+		state string
+		// preExisting names a canary-bearing path the fixture itself placed
+		// in the inbox (a hardlink is the same inode) — the walk skips it;
+		// the detector still must never open it.
+		preExisting string
+	}{
+		{"note_absolute", func(t *testing.T, fx *stallFixture) {
+			terminal(fx, 4, fmt.Sprintf(`{"kind":"job.completed","job_id":"job-a","payload":{"note":"done report=%s"},"seq":4}`, canary))
+		}, "no_report", ""},
+		{"toplevel_report_path", func(t *testing.T, fx *stallFixture) {
+			terminal(fx, 4, fmt.Sprintf(`{"kind":"job.completed","job_id":"job-a","report_path":%q,"seq":4}`, canary))
+		}, "no_report", ""},
+		{"payload_report_path", func(t *testing.T, fx *stallFixture) {
+			terminal(fx, 4, fmt.Sprintf(`{"kind":"job.completed","job_id":"job-a","payload":{"report_path":%q},"seq":4}`, canary))
+		}, "no_report", ""},
+		{"toplevel_report_field", func(t *testing.T, fx *stallFixture) {
+			terminal(fx, 4, fmt.Sprintf(`{"kind":"worker.complete","job_id":"job-a","report":%q,"seq":4}`, canary))
+		}, "no_report", ""},
+		{"uppercase_REPORT_PATH", func(t *testing.T, fx *stallFixture) {
+			// encoding/json matches field names case-insensitively — the
+			// variant still lands in ReportPath, and must stay a string.
+			terminal(fx, 4, fmt.Sprintf(`{"kind":"job.completed","job_id":"job-a","REPORT_PATH":%q,"seq":4}`, canary))
+		}, "no_report", ""},
+		{"mixedcase_Report", func(t *testing.T, fx *stallFixture) {
+			terminal(fx, 4, fmt.Sprintf(`{"kind":"job.completed","job_id":"job-a","Report":%q,"seq":4}`, canary))
+		}, "no_report", ""},
+		{"note_home_relative", func(t *testing.T, fx *stallFixture) {
+			terminal(fx, 4, `{"kind":"job.completed","job_id":"job-a","payload":{"note":"done report=~/canary.md"},"seq":4}`)
+		}, "no_report", ""},
+		{"note_parent_relative", func(t *testing.T, fx *stallFixture) {
+			terminal(fx, 4, `{"kind":"job.completed","job_id":"job-a","payload":{"note":"done report=../../../outside.md"},"seq":4}`)
+		}, "no_report", ""},
+		{"note_fifo_absolute", func(t *testing.T, fx *stallFixture) {
+			// A read of this token would block forever — the watchdog above
+			// turns that into an assertion failure.
+			terminal(fx, 4, fmt.Sprintf(`{"kind":"job.completed","job_id":"job-a","payload":{"note":"done report=%s"},"seq":4}`, fifo))
+		}, "no_report", ""},
+		{"convention_symlink", func(t *testing.T, fx *stallFixture) {
+			terminal(fx, 4, `{"kind":"job.completed","job_id":"job-a","seq":4}`)
+			if err := os.Symlink(canary, filepath.Join(fx.inbox, "jobs", "job-a", "report.md")); err != nil {
+				t.Fatal(err)
+			}
+		}, "symlink_refused", ""},
+		{"convention_hardlink", func(t *testing.T, fx *stallFixture) {
+			terminal(fx, 4, `{"kind":"job.completed","job_id":"job-a","seq":4}`)
+			if err := os.Link(canary, filepath.Join(fx.inbox, "jobs", "job-a", "report.md")); err != nil {
+				t.Fatal(err)
+			}
+		}, "observed", "report.md"},
+		{"convention_fifo", func(t *testing.T, fx *stallFixture) {
+			terminal(fx, 4, `{"kind":"job.completed","job_id":"job-a","seq":4}`)
+			if err := syscall.Mkfifo(filepath.Join(fx.inbox, "jobs", "job-a", "report.md"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}, "non_regular", ""},
 	}
-	if len(fx.uploads) != 0 {
-		t.Fatal("a failed finalize was uploaded")
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newFixture(t)
+			claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+			tc.setup(t, fx)
+			scan(fx)
+			row, found, err := fx.store.stallReport(context.Background(), "job-a", 1)
+			if err != nil || !found || row.State != tc.state {
+				t.Fatalf("state=%q want %q: %+v found=%v err=%v", row.State, tc.state, row, found, err)
+			}
+			// No file the detector leaves behind may contain the canary body.
+			err = filepath.Walk(fx.inbox, func(path string, info os.FileInfo, err error) error {
+				if err != nil || info.IsDir() {
+					return err
+				}
+				if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+					return nil
+				}
+				if tc.preExisting != "" && filepath.Base(path) == tc.preExisting {
+					return nil
+				}
+				contents, err := os.ReadFile(path)
+				if err == nil && strings.Contains(string(contents), marker) {
+					t.Errorf("canary body landed in %s", path)
+				}
+				return nil
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := os.Lstat(filepath.Join(fx.inbox, "jobs", "job-a", "final")); err == nil {
+				t.Fatal("a final/ copy directory was created")
+			}
+			if strings.Contains(row.RefValue, marker) || strings.Contains(row.Note, marker) {
+				t.Fatalf("canary body recorded in the report row: %+v", row)
+			}
+		})
+	}
+
+	// Across every shape, no stat ever touched a path outside the fixture
+	// inbox's jobs tree.
+	mu.Lock()
+	defer mu.Unlock()
+	for _, path := range statted {
+		if !strings.HasPrefix(path, outside) {
+			continue
+		}
+		t.Fatalf("detector statted an outside path %s", path)
 	}
 }
 
@@ -1377,9 +1461,9 @@ func TestStallSupersededObservation(t *testing.T) {
 	if len(jobs) != 1 || jobs[0].JobID != "job-b" {
 		t.Fatalf("open set wrong after supersede: %+v", jobs)
 	}
-	// Zero outward action: no lane events, no uploads, nothing to the pane.
-	if len(fx.sent) != 0 || len(fx.uploads) != 0 {
-		t.Fatalf("superseded observation acted on the world: sent=%d uploads=%d", len(fx.sent), len(fx.uploads))
+	// Zero outward action: no lane events, nothing to the pane.
+	if len(fx.sent) != 0 {
+		t.Fatalf("superseded observation acted on the world: sent=%d", len(fx.sent))
 	}
 	// Stable across scans — no stacking.
 	fx.advance(time.Minute)
@@ -1470,7 +1554,7 @@ func TestStallDepsAreReadOnly(t *testing.T) {
 	allowed := map[string]bool{
 		"listAgents": true, "readPane": true, "subscribed": true, "resubscribe": true,
 		"worktree": true, "procs": true, "procCWD": true, "writeRecord": true,
-		"enqueue": true, "upload": true, "lanePersisted": true, "readDisk": true, "now": true,
+		"enqueue": true, "lanePersisted": true, "lstat": true, "now": true,
 	}
 	depsType := reflect.TypeOf(stallDeps{})
 	for i := 0; i < depsType.NumField(); i++ {

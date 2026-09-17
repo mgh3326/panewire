@@ -138,17 +138,22 @@ type stallPaneRow struct {
 	Subscribed    bool
 }
 
+// stallReportRow is an observation record, nothing more. The detector never
+// reads, hashes, copies, or uploads a report body: Path is always the
+// convention location jobs/<job>/report.md, RefKind/RefValue are the
+// declared journal reference recorded as inert strings, and MTime is the
+// only file attribute observed. Report-body handling is a follow-up package
+// pending a structural isolation decision.
 type stallReportRow struct {
-	JobID       string
-	Attempt     int64
-	ReportPath  string
-	LocalPath   string
-	SHA256      string
-	RemoteKey   string
-	RemoteState string
-	RemoteAt    time.Time
-	RemoteError string
-	FinalizedAt time.Time
+	JobID      string
+	Attempt    int64
+	Path       string
+	State      string // observed | symlink_refused | non_regular | no_report
+	RefKind    string // path | doc_key — the declared reference's shape
+	RefValue   string // the declared reference string; never opened
+	MTime      time.Time
+	ObservedAt time.Time
+	Note       string
 }
 
 // stallUnownedRow tracks a process that may lack an owning job. Recording is
@@ -212,10 +217,9 @@ func stallDetectMigrate(db *sql.DB) error {
 		 subscribed INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS stall_reports (
 		 job_id TEXT NOT NULL, attempt INTEGER NOT NULL, report_path TEXT NOT NULL DEFAULT '',
-		 local_path TEXT NOT NULL DEFAULT '', sha256 TEXT NOT NULL DEFAULT '',
-		 remote_key TEXT NOT NULL DEFAULT '', remote_state TEXT NOT NULL DEFAULT 'pending',
-		 remote_at INTEGER NOT NULL DEFAULT 0, remote_error TEXT NOT NULL DEFAULT '',
-		 finalized_at INTEGER NOT NULL DEFAULT 0,
+		 state TEXT NOT NULL DEFAULT '', ref_kind TEXT NOT NULL DEFAULT '',
+		 ref_value TEXT NOT NULL DEFAULT '', report_mtime INTEGER NOT NULL DEFAULT 0,
+		 observed_at INTEGER NOT NULL DEFAULT 0, note TEXT NOT NULL DEFAULT '',
 		 PRIMARY KEY(job_id, attempt))`,
 		`CREATE TABLE IF NOT EXISTS stall_unowned (
 		 proc_key TEXT PRIMARY KEY, pid INTEGER NOT NULL, ppid INTEGER NOT NULL,
@@ -611,35 +615,20 @@ func (s *Store) upsertStallPane(ctx context.Context, row stallPaneRow) error {
 func (s *Store) upsertStallReport(ctx context.Context, row stallReportRow) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO stall_reports(job_id,attempt,report_path,local_path,sha256,remote_key,remote_state,remote_at,remote_error,finalized_at) VALUES(?,?,?,?,?,?,?,?,?,?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO stall_reports(job_id,attempt,report_path,state,ref_kind,ref_value,report_mtime,observed_at,note) VALUES(?,?,?,?,?,?,?,?,?)
 	 ON CONFLICT(job_id,attempt) DO UPDATE SET
-	  report_path=CASE WHEN excluded.report_path<>'' THEN excluded.report_path ELSE report_path END,
-	  local_path=CASE WHEN excluded.local_path<>'' THEN excluded.local_path ELSE local_path END,
-	  sha256=CASE WHEN excluded.sha256<>'' THEN excluded.sha256 ELSE sha256 END,
-	  remote_key=CASE WHEN excluded.remote_key<>'' THEN excluded.remote_key ELSE remote_key END,
-	  remote_state=CASE WHEN excluded.remote_state<>'' THEN excluded.remote_state ELSE remote_state END,
-	  remote_at=CASE WHEN excluded.remote_at<>0 THEN excluded.remote_at ELSE remote_at END,
-	  remote_error=excluded.remote_error,
-	  finalized_at=CASE WHEN excluded.finalized_at<>0 THEN excluded.finalized_at ELSE finalized_at END`,
-		row.JobID, row.Attempt, row.ReportPath, row.LocalPath, row.SHA256, row.RemoteKey, row.RemoteState, stallMS(row.RemoteAt), row.RemoteError, stallMS(row.FinalizedAt))
+	  report_path=excluded.report_path, state=excluded.state,
+	  ref_kind=excluded.ref_kind, ref_value=excluded.ref_value,
+	  report_mtime=excluded.report_mtime, observed_at=excluded.observed_at,
+	  note=excluded.note`,
+		row.JobID, row.Attempt, row.Path, row.State, row.RefKind, row.RefValue, stallMS(row.MTime), stallMS(row.ObservedAt), row.Note)
 	return err
-}
-
-func (s *Store) stallReportsPending(ctx context.Context) ([]stallReportRow, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT job_id,attempt,report_path,local_path,sha256,remote_key,remote_state,remote_at,remote_error,finalized_at FROM stall_reports WHERE remote_state IN ('pending','failed') ORDER BY job_id,attempt`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	return scanStallReports(rows)
 }
 
 func (s *Store) stallReport(ctx context.Context, jobID string, attempt int64) (stallReportRow, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT job_id,attempt,report_path,local_path,sha256,remote_key,remote_state,remote_at,remote_error,finalized_at FROM stall_reports WHERE job_id=? AND attempt=?`, jobID, attempt)
+	rows, err := s.db.QueryContext(ctx, `SELECT job_id,attempt,report_path,state,ref_kind,ref_value,report_mtime,observed_at,note FROM stall_reports WHERE job_id=? AND attempt=?`, jobID, attempt)
 	if err != nil {
 		return stallReportRow{}, false, err
 	}
@@ -655,12 +644,12 @@ func scanStallReports(rows *sql.Rows) ([]stallReportRow, error) {
 	var out []stallReportRow
 	for rows.Next() {
 		var row stallReportRow
-		var remoteAt, finalizedAt int64
-		if err := rows.Scan(&row.JobID, &row.Attempt, &row.ReportPath, &row.LocalPath, &row.SHA256, &row.RemoteKey, &row.RemoteState, &remoteAt, &row.RemoteError, &finalizedAt); err != nil {
+		var mtime, observedAt int64
+		if err := rows.Scan(&row.JobID, &row.Attempt, &row.Path, &row.State, &row.RefKind, &row.RefValue, &mtime, &observedAt, &row.Note); err != nil {
 			return nil, err
 		}
-		row.RemoteAt = stallTime(remoteAt)
-		row.FinalizedAt = stallTime(finalizedAt)
+		row.MTime = stallTime(mtime)
+		row.ObservedAt = stallTime(observedAt)
 		out = append(out, row)
 	}
 	return out, rows.Err()
