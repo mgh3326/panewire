@@ -411,6 +411,20 @@ func TestStallScrollbackAndStartupSuspect(t *testing.T) {
 	if len(rows) != 1 || rows[0].Cause != stallCauseStartupSuspect {
 		t.Fatalf("boot-time auth failure was not recorded as startup suspect: %+v", stallCauses(rows))
 	}
+
+	// Startup grace is its own signal, independent of the tail anchor: a new
+	// job whose boot error is already pushed off the tail by later output is
+	// still a suspect. Removing the grace branch (the C4b mutant) drops this
+	// case while the tail-anchored fixtures above keep passing — this is the
+	// assertion that pins the grace down.
+	fx3 := newStallFixture(t, false)
+	claimJob(t, fx3, "job-new-mid", "w3:p3", nil, fx3.now.Add(-30*time.Second))
+	fx3.reads["w3:p3"] = readEvidence{Text: stallFixtureAuth + "\nretrying boot\nload average ok\nwaiting on socket\nlatest line\n", Revision: 1}
+	fx3.scan()
+	rows = stallIncidentsFor(t, fx3, "job-new-mid")
+	if len(rows) != 1 || rows[0].Cause != stallCauseStartupSuspect {
+		t.Fatalf("in-grace mid-buffer boot failure was not recorded as startup suspect: %+v", stallCauses(rows))
+	}
 }
 
 // writeRawJobEvent writes one journal record verbatim — used for fixtures
