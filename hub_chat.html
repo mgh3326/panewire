@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>panewire chat</title>
+<style>
+:root{font-family:ui-sans-serif,system-ui,sans-serif;color:#17202a;background:#f6f8fa}body{margin:0;padding:1.25rem;max-width:1100px;margin-inline:auto}.top{display:flex;justify-content:space-between;gap:1rem;align-items:baseline}h1{font-size:1.45rem;margin:0}h2{font-size:1.05rem;margin:1.5rem 0 .5rem}.muted{color:#5f6b76;font-size:.9rem}.card{background:#fff;border:1px solid #d0d7de;border-radius:.5rem;padding:.9rem}table{width:100%;border-collapse:collapse;font-size:.9rem}th,td{text-align:left;padding:.55rem;border-bottom:1px solid #d8dee4;vertical-align:top}th{color:#57606a;white-space:nowrap}.empty{color:#5f6b76;font-style:italic}.badge{display:inline-block;border-radius:.75rem;padding:.1rem .55rem;font-size:.8rem;font-weight:600;white-space:nowrap}.q-pending{background:#fff8c5;color:#7d4e00}.q-resolved{background:#dafbe1;color:#116329}.q-withdrawn{background:#f0f0f0;color:#57606a}.m-stored{background:#ddf4ff;color:#0550ae}.m-delivered{background:#dafbe1;color:#116329}.msg{border-left:4px solid transparent;border-radius:.35rem;padding:.5rem .7rem;margin-bottom:.5rem;background:#f6f8fa}.msg .body{white-space:pre-wrap;overflow-wrap:anywhere;margin:.2rem 0}.msg .meta{font-size:.8rem;color:#5f6b76}.msg.failed{background:#ffebe9;border-left-color:#cf222e}.msg.failed .body{font-weight:600}.msg.stored{background:#ddf4ff;border-left-color:#0550ae}button{cursor:pointer;font-size:.85rem;margin-right:.3rem}button.danger{color:#cf222e}#composer{margin-top:1.5rem}#target{display:inline-block;background:#ddf4ff;color:#0550ae;border-radius:.75rem;padding:.15rem .7rem;font-size:.85rem;font-weight:600}#body{width:100%;box-sizing:border-box;min-height:4.5rem;font:inherit;margin:.5rem 0;padding:.5rem;border:1px solid #d0d7de;border-radius:.4rem}.error{color:#cf222e;font-weight:600}@media(max-width:700px){body{padding:.8rem}table{font-size:.8rem}th,td{padding:.42rem}}
+@media(prefers-color-scheme:dark){:root{color:#e6edf3;background:#0d1117}.card{background:#161b22;border-color:#30363d}th{color:#8b949e}th,td{border-color:#30363d}.muted,.msg .meta,.empty{color:#8b949e}.msg{background:#161b22}.msg.failed{background:#3d1215;border-left-color:#ff7b72}.msg.stored{background:#0c2d6b;border-left-color:#58a6ff}.q-pending{background:#4d3d00;color:#f0c040}.q-resolved,.m-delivered{background:#0f2d1a;color:#3fb950}.q-withdrawn{background:#21262d;color:#8b949e}.m-stored,#target{background:#0c2d6b;color:#58a6ff}#body{background:#0d1117;color:#e6edf3;border-color:#30363d}.error{color:#ff7b72}}
+</style>
+</head>
+<body>
+<div class="top"><h1>panewire chat</h1><div class="muted" id="status">불러오는 중…</div></div>
+<section><h2>질문</h2><div class="card"><table><thead><tr><th>상태</th><th>ID</th><th>레인</th><th>질문</th><th>시각</th><th>동작</th></tr></thead><tbody id="questions"></tbody></table></div></section>
+<section><h2>메시지</h2><div class="card" id="messages"></div></section>
+<section id="composer"><h2>답변</h2><div class="card">
+<div>대상: <span id="target">선택 안 됨</span> <span class="muted" id="targetq"></span></div>
+<div style="margin-top:.4rem"><input id="lane" placeholder="레인 이름 (질문을 클릭하면 자동 입력)" style="font:inherit;padding:.35rem;width:16rem"></div>
+<textarea id="body" placeholder="창구로 보낼 답변"></textarea>
+<div><button id="send">보내기</button><span class="muted">2048바이트가 넘으면 레인에는 참조 한 줄만 가고 전문은 저장소에 남는다</span></div>
+</div></section>
+<script>
+const q=s=>document.querySelector(s),esc=v=>String(v??""),when=v=>v?new Date(v).toLocaleString():"—";
+let selectedQuestion="";
+function badge(text,cls){let e=document.createElement("span");e.className="badge "+cls;e.textContent=text;return e}
+function qBadge(state){if(state==="pending")return badge("⏳ 대기","q-pending");if(state==="resolved")return badge("✅ 처리됨","q-resolved");return badge("취소됨","q-withdrawn")}
+function mBadge(state,cancelled){if(state==="stored")return badge("⏳ 전송 중","m-stored");if(cancelled)return badge("취소됨","q-withdrawn");if(state==="delivered")return badge("✅ 전달됨","m-delivered");return badge("🔴 전송 실패","q-pending")}
+function cell(r,v){let e=document.createElement("td");e.textContent=esc(v);r.append(e);return e}
+function btn(text,fn,danger){let b=document.createElement("button");b.textContent=text;if(danger)b.className="danger";b.onclick=fn;return b}
+async function post(url,body){let r=await fetch(url,{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(body||{})});let data=null;try{data=await r.json()}catch{}if(!r.ok){throw Error((data&&data.error)||("HTTP "+r.status))}return data}
+function setTarget(lane,qid){q("#lane").value=lane;selectedQuestion=qid||"";q("#target").textContent=lane;q("#targetq").textContent=qid?("→ "+qid+" 에 답변"):""}
+async function resolveQ(id,to){try{await post("/chat/questions/"+encodeURIComponent(id)+"/transition",{to});load()}catch(e){q("#status").textContent="질문 전이 실패: "+e.message}}
+let msgById={};
+async function retryMsg(id){let m=msgById[id]||{};try{await post("/chat/messages/"+id+"/retry",{lane:m.lane||"",question_id:m.question_id||""});load()}catch(e){q("#status").textContent="재전송 실패: "+e.message}}
+async function cancelMsg(id){if(!confirm("이 메시지를 종결할까요? (stored → delivered, 보존 정리 대상이 됨)"))return;try{await post("/chat/messages/"+id+"/cancel",{});load()}catch(e){q("#status").textContent="취소 거부됨: "+e.message}}
+async function send(){let lane=q("#lane").value.trim(),body=q("#body").value;if(!lane||!body.trim()){q("#status").textContent="레인과 내용을 입력하라";return}try{await post("/chat/messages",{lane,body,question_id:selectedQuestion});q("#body").value="";selectedQuestion="";q("#targetq").textContent="";load()}catch(e){q("#status").textContent="전송 실패: "+e.message}}
+function renderQuestions(list){let root=q("#questions");root.replaceChildren();let pending=list.filter(x=>x.state==="pending"),rest=list.filter(x=>x.state!=="pending").slice(-20);let all=pending.concat(rest);
+if(!all.length){let r=document.createElement("tr"),e=document.createElement("td");e.colSpan=6;e.className="empty";e.textContent="질문 없음";r.append(e);root.append(r);return}
+all.forEach(x=>{let r=document.createElement("tr");let c=document.createElement("td");c.append(qBadge(x.state));r.append(c);cell(r,x.id);cell(r,x.lane);cell(r,x.body).style.whiteSpace="pre-wrap";cell(r,when(x.created_at));let a=document.createElement("td");if(x.state==="pending"){a.append(btn("답변",()=>setTarget(x.lane,x.id)));a.append(btn("해결",()=>resolveQ(x.id,"resolved")));a.append(btn("철회",()=>resolveQ(x.id,"withdrawn"),true))}r.append(a);root.append(r)})}
+function renderMessages(list){let root=q("#messages");root.replaceChildren();msgById={};if(!list.length){let e=document.createElement("div");e.className="empty";e.textContent="메시지 없음";root.append(e);return}
+list.forEach(m=>{msgById[m.id]=m;let d=document.createElement("div");d.className="msg "+(m.relay_state==="failed"?"failed":m.relay_state==="stored"?"stored":"");let head=document.createElement("div");head.append(mBadge(m.relay_state,m.cancelled));head.append(" ");head.append(badge(m.author==="operator"?"운영자":"창구","q-withdrawn"));d.append(head);let b=document.createElement("div");b.className="body";b.textContent=m.body;d.append(b);let meta=document.createElement("div");meta.className="meta";meta.textContent="#"+m.id+(m.lane?(" → "+m.lane):"")+" · "+when(m.created_at)+(m.question_id?(" · "+m.question_id+" 답변"):"")+(m.delivered_at?(" · 전달 "+when(m.delivered_at)):"");if(m.relay_state==="failed"){meta.append(" ");meta.append(btn("재전송",()=>retryMsg(m.id)));meta.append(btn("취소",()=>cancelMsg(m.id),true))}if(m.relay_state==="stored"){meta.append(" ");meta.append(btn("취소",()=>cancelMsg(m.id),true))}d.append(meta);root.append(d)})}
+async function load(){try{let r=await fetch("/chat/data",{cache:"no-store"});if(!r.ok)throw Error("HTTP "+r.status);let d=await r.json();renderQuestions(d.questions||[]);renderMessages(d.messages||[]);q("#status").textContent="5초마다 갱신 · "+new Date().toLocaleTimeString()}catch(e){q("#status").textContent="채팅 저장소 사용 불가 ("+e.message+")"}}
+q("#send").onclick=send;load();setInterval(load,5000);
+</script>
+</body></html>

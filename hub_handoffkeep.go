@@ -237,3 +237,35 @@ func (c *handoffkeepRelayClient) listUndelivered(ctx context.Context, lane, kind
 	}
 	return result.Events, nil
 }
+
+// listRelayEvents reads one cursor page of durable relay rows regardless of
+// delivery state. Cold retry link recovery needs the full history: a source
+// row was marked delivered when its directive went out, and a retry marker
+// row can sit in either state.
+func (c *handoffkeepRelayClient) listRelayEvents(ctx context.Context, kind string, afterID int64, limit int) ([]handoffkeepRelayEvent, error) {
+	if limit <= 0 {
+		limit = handoffkeepReplayLimit
+	}
+	query := url.Values{}
+	query.Set("limit", strconv.Itoa(limit))
+	if kind != "" {
+		query.Set("kind", kind)
+	}
+	if afterID > 0 {
+		query.Set("after_id", strconv.FormatInt(afterID, 10))
+	}
+	status, payload, err := c.do(ctx, http.MethodGet, c.endpoint("/v1/relay/events")+"?"+query.Encode(), nil)
+	if err != nil {
+		return nil, err
+	}
+	if status != http.StatusOK {
+		return nil, errors.New("handoffkeep rejected the relay event query")
+	}
+	var result struct {
+		Events []handoffkeepRelayEvent `json:"events"`
+	}
+	if json.Unmarshal(payload, &result) != nil {
+		return nil, errors.New("handoffkeep returned an unusable relay event list")
+	}
+	return result.Events, nil
+}
