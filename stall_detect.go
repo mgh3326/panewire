@@ -300,9 +300,15 @@ type stallJobScan struct {
 	Extensions     []stallDeadlineExt
 	Terminal       bool
 	TerminalKind   string
-	// TerminalSeq is the journal sequence of the terminal record. A spawn
-	// after it is a fresh attempt, not a continuation of the ended one.
+	// TerminalSeq is the journal sequence of the terminal record.
+	// TerminalPos is its position in sorted-filename journal order; a spawn
+	// whose Pos is greater is a fresh attempt, not a continuation of the
+	// ended one. Position — not Seq — is the comparison key: the real
+	// journal contains same-seq terminal+spawn pairs (a respawn flushed in
+	// the same batch as the loss), and filename order is the only
+	// deterministic key inside a tie.
 	TerminalSeq    int64
+	TerminalPos    int64
 	LastEventAt    time.Time
 	ReportPath     string
 	// ReportKind names what ReportPath holds: "path" for a local file,
@@ -318,7 +324,10 @@ type stallSpawnScan struct {
 	Profile     string
 	Round       int64
 	Seq         int64
-	At          time.Time
+	// Pos is this record's position in sorted-filename journal order —
+	// the deterministic tie-break inside a shared sequence number.
+	Pos int64
+	At  time.Time
 }
 
 type stallDeadlineExt struct {
@@ -484,7 +493,7 @@ func scanStallJobEvents(eventsDir, jobID string) (stallJobScan, bool) {
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	job := stallJobScan{JobID: jobID}
-	for _, entry := range entries {
+	for index, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
@@ -523,6 +532,7 @@ func scanStallJobEvents(eventsDir, jobID string) (stallJobScan, bool) {
 				Profile:     stallPayloadString(event.Payload, "profile"),
 				Round:       stallPayloadInt(event.Payload, "round"),
 				Seq:         int64(seq),
+				Pos:         int64(index),
 				At:          at,
 			}
 			if job.Family == "" {
@@ -539,6 +549,7 @@ func scanStallJobEvents(eventsDir, jobID string) (stallJobScan, bool) {
 				job.Terminal = true
 				job.TerminalKind = event.eventKind()
 				job.TerminalSeq = int64(seq)
+				job.TerminalPos = int64(index)
 				if kind, ref := stallReportRefOf(event); kind != "" {
 					job.ReportKind = kind
 					job.ReportPath = ref
@@ -705,9 +716,11 @@ func (m *stallDetectManager) refreshJob(ctx context.Context, scan stallJobScan, 
 		row.WorkspaceID = spawn.WorkspaceID
 		row.Profile = spawn.Profile
 		row.SpawnedAt = spawn.At
-		if scan.Terminal && spawn.Seq > 0 && scan.TerminalSeq > 0 && spawn.Seq > scan.TerminalSeq {
-			// A spawn recorded after the terminal record is a fresh attempt
-			// of a recycled job id — it did not inherit the earlier ending.
+		if scan.Terminal && spawn.Pos > scan.TerminalPos {
+			// A spawn recorded after the terminal record — in journal order,
+			// filename-sorted, so a same-seq tie resolves deterministically —
+			// is a fresh attempt of a recycled job id; it did not inherit
+			// the earlier ending.
 			row.Terminal = false
 			row.TerminalKind = ""
 		}

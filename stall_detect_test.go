@@ -806,6 +806,72 @@ func TestStallSpawnAfterTerminalIsNewAttempt(t *testing.T) {
 	}
 }
 
+// W3 — the real journal flushes a loss and its respawn in the same batch:
+// 00010-job.lost.json and 00010-job.spawned.json share one sequence number
+// (and one created_at). Journal order — sorted filenames — is the
+// deterministic tie-break: the spawn sits after the loss, so the new
+// attempt must not inherit the ending, and its overdue detection must work.
+func TestStallSameSeqTerminalSpawnIsNewAttempt(t *testing.T) {
+	fx := newStallFixture(t, false)
+	at := fx.now.Add(-time.Hour)
+	writeJobEvent(t, fx.inbox, "job-a", 1, "job.claim", map[string]any{"owner_lane": "owner-1", "deadline_at": at.Add(30 * time.Minute).Format(time.RFC3339)}, at)
+	writeJobEvent(t, fx.inbox, "job-a", 3, "job.spawned", map[string]any{"pane_id": "w1:p1"}, at)
+	// Same seq, same timestamp — the real tie.
+	writeJobEvent(t, fx.inbox, "job-a", 5, "job.lost", map[string]any{}, at.Add(30*time.Minute))
+	writeJobEvent(t, fx.inbox, "job-a", 5, "job.spawned", map[string]any{"pane_id": "w1:p2"}, at.Add(30*time.Minute))
+	fx.agents = append(fx.agents, paneIdentity{PaneID: "w1:p2", CWD: "/work/job-a", Harness: "devin"})
+	fx.subscribed["w1:p2"] = true
+	fx.reads["w1:p2"] = readEvidence{Text: "fresh run\n", Revision: 1}
+	fx.scan()
+	jobs, err := fx.store.stallJobs(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var live *stallJobRow
+	for i := range jobs {
+		if jobs[i].PaneID == "w1:p2" {
+			live = &jobs[i]
+		}
+	}
+	if live == nil || live.Terminal {
+		t.Fatalf("same-seq respawn stayed terminal: %+v", jobs)
+	}
+	// The fresh attempt is past its issuer deadline — it must be detected.
+	rows := stallIncidentsFor(t, fx, "job-a")
+	if len(rows) != 1 || rows[0].Cause != stallCauseOverdue {
+		t.Fatalf("same-seq respawn's overdue did not fire: %+v", stallCauses(rows))
+	}
+}
+
+// The same tie resolved the other way: when the terminal record sorts after
+// the spawn inside a shared seq (worker.complete outranks job.spawned in
+// filename order), the terminal is genuinely later — the attempt stays
+// closed. Reopening on every same-seq pair would be just as wrong.
+func TestStallSameSeqSpawnBeforeTerminalStaysClosed(t *testing.T) {
+	fx := newStallFixture(t, false)
+	at := fx.now.Add(-time.Hour)
+	writeJobEvent(t, fx.inbox, "job-b", 1, "job.claim", map[string]any{"owner_lane": "owner-1"}, at)
+	writeJobEvent(t, fx.inbox, "job-b", 5, "job.spawned", map[string]any{"pane_id": "w1:p1"}, at.Add(30*time.Minute))
+	writeJobEvent(t, fx.inbox, "job-b", 5, "worker.complete", map[string]any{"report": "report.md"}, at.Add(30*time.Minute))
+	fx.scan()
+	jobs, err := fx.store.stallJobs(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, job := range jobs {
+		if job.JobID == "job-b" {
+			found = true
+			if !job.Terminal {
+				t.Fatalf("spawn-before-terminal same-seq attempt reopened: %+v", job)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("job-b attempt row missing")
+	}
+}
+
 // A row closed by the retracted escalate/joined rule must reopen on the next
 // scan — the durable flag must not fossilize the bug.
 func TestStallFalseTerminalRowReopens(t *testing.T) {
