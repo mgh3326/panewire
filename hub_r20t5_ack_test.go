@@ -96,7 +96,7 @@ func TestR20T5NodeRestartsResendOnceAndStopWithPersistedAt(t *testing.T) {
 	store := NewMemoryStore(t)
 	defer store.Close()
 	r20WriteEvent(t, inbox, "r20t5-restart", "00001-job.completed.json", `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"a.md","report_last_line":"done"}`, time.Time{})
-	key := relayOutboxKey{Kind: "job.completed", JobID: "r20t5-restart", Epoch: 1, ReportPath: "a.md"}
+	key := relayOutboxKey{Kind: "job.completed", JobID: "r20t5-restart", Epoch: 1, ReportPath: "a.md", EventID: "00001-job.completed.json"}
 
 	// The first send is the one that got lost: the hub persisted and injected,
 	// but the node never saw relay.persisted, so its row stays unpersisted.
@@ -136,7 +136,7 @@ func TestR20T5NodeRestartsResendOnceAndStopWithPersistedAt(t *testing.T) {
 			reinjections += drainRelays(agent)
 			// The node is connected now, so it applies what the hub answers.
 			for _, ack := range drainPersisted(agent) {
-				node.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID})
+				node.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID, ProducerEventID: ack.ProducerEventID})
 			}
 		}
 	}

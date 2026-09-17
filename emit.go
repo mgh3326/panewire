@@ -449,6 +449,7 @@ func truncateLaneEventTextAtLimit(value string, limit int) (string, bool) {
 type emitDedupeRecord struct {
 	key            string
 	kind           string
+	createdAt      string
 	epoch          uint64
 	ownerLane      string
 	label          string
@@ -506,6 +507,7 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 	return emitDedupeRecord{
 		key:            relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()),
 		kind:           kind,
+		createdAt:      event.CreatedAt,
 		epoch:          epoch,
 		ownerLane:      event.ownerLane(),
 		label:          event.label(),
@@ -518,6 +520,66 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 		head:           event.head(),
 		paneID:         event.paneID(),
 	}, true
+}
+
+// emitJobEventFileID locates the durable event file behind a pushed job.*
+// record. The file name is the event's relay identity and its timestamp feeds
+// the deployment cutoff, so the daemon derives both from the namespace it
+// actually watches rather than trusting the request. The push substitutes the
+// event path for an empty escalation/join report, so the file's own empty
+// report_path is a second candidate key. No match means an old caller or a
+// vanished file; the event keeps the legacy five-field key.
+func emitJobEventFileID(inboxRoot string, req localRequest, epoch uint64) (string, time.Time) {
+	if inboxRoot == "" {
+		return "", time.Time{}
+	}
+	record := emitRecord{
+		Type: req.Kind, JobID: req.JobID, Epoch: epoch, OwnerLane: req.OwnerLane,
+		Label: req.Label, Host: req.Host, ReportPath: req.ReportPath,
+		ReportLastLine: req.ReportLastLine, Reason: req.Reason, Question: req.Question,
+		PR: req.PR, Head: req.Head, PaneID: req.PaneID,
+	}
+	reportPaths := []string{record.ReportPath}
+	if relayEventPathFallbackKinds[req.Kind] && record.ReportPath != "" {
+		reportPaths = append(reportPaths, "")
+	}
+	eventsDir := filepath.Join(inboxRoot, "jobs", req.JobID, "events")
+	entries, err := os.ReadDir(eventsDir)
+	if err != nil {
+		return "", time.Time{}
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		existing, ok := readEmitDedupeKey(eventsDir, entry.Name(), record.JobID)
+		if !ok {
+			continue
+		}
+		for _, reportPath := range reportPaths {
+			if existing.key != relayEventOutboxKey(record.Type, record.JobID, record.Epoch, reportPath, record.Reason) {
+				continue
+			}
+			// The event-path fallback gives distinct questions separate files
+			// even though their pre-file key is the same.
+			if record.Type == "job.escalate" && reportPath == "" && existing.question != record.Question {
+				continue
+			}
+			probe := record
+			probe.ReportPath = reportPath
+			if existing.matches(probe) {
+				var eventTime time.Time
+				if parsed, parseErr := time.Parse(time.RFC3339, existing.createdAt); parseErr == nil {
+					eventTime = parsed
+				} else if info, statErr := entry.Info(); statErr == nil {
+					eventTime = info.ModTime()
+				}
+				return entry.Name(), eventTime
+			}
+		}
+	}
+	return "", time.Time{}
 }
 
 type emitPushResult struct {

@@ -68,11 +68,11 @@ func truncateHubRelayPayloadText(value string, normalizeNewlines bool) (string, 
 
 func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 13 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 14 {
 		return hubJobEventPayload{}, nil, false
 	}
 	for name := range fields {
-		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "replay" {
+		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" {
 			return hubJobEventPayload{}, nil, false
 		}
 	}
@@ -96,7 +96,7 @@ func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, 
 		}
 	}
 	var truncated []string
-	for key, destination := range map[string]*string{"owner_lane": &completion.OwnerLane, "label": &completion.Label, "host": &completion.Host, "report_path": &completion.ReportPath, "report_last_line": &completion.ReportLastLine, "question": &completion.Question, "pr": &completion.PR, "head": &completion.Head, "pane_id": &completion.PaneID} {
+	for key, destination := range map[string]*string{"owner_lane": &completion.OwnerLane, "label": &completion.Label, "host": &completion.Host, "report_path": &completion.ReportPath, "report_last_line": &completion.ReportLastLine, "question": &completion.Question, "pr": &completion.PR, "head": &completion.Head, "pane_id": &completion.PaneID, "event_id": &completion.EventID} {
 		if raw, ok := fields[key]; ok {
 			if json.Unmarshal(raw, destination) != nil || strings.Contains(*destination, "\x00") {
 				return hubJobEventPayload{}, nil, false
@@ -124,7 +124,7 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 // operator-readable reason; it is not a command channel.
 func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 14 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 15 {
 		return hubJobEventPayload{}, nil, false
 	}
 	if _, hasReason := fields["reason"]; !hasReason {

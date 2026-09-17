@@ -93,13 +93,25 @@ func r20t7Lane(jobID string) string {
 	}
 }
 
+// r20t7EventFileNames reproduces the file names r20t7SeedInbox gives each
+// row's event: a per-job sequence zero-padded to five digits. The name is the
+// event's relay identity, so fixtures that seed durable rows need it.
+func r20t7EventFileNames(rows []r20t7SnapshotRow) []string {
+	names := make([]string, len(rows))
+	sequence := map[string]int{}
+	for index, row := range rows {
+		sequence[row.JobID]++
+		names[index] = fmt.Sprintf("%05d-%s.json", sequence[row.JobID], row.Kind)
+	}
+	return names
+}
+
 // r20t7SeedInbox writes one local event file per snapshot row, so the node
 // scanner produces exactly the records the journal says it produced.
 func r20t7SeedInbox(t *testing.T, inbox string, rows []r20t7SnapshotRow) {
 	t.Helper()
-	sequence := map[string]int{}
-	for _, row := range rows {
-		sequence[row.JobID]++
+	names := r20t7EventFileNames(rows)
+	for index, row := range rows {
 		record := map[string]any{
 			"type": row.Kind, "epoch": row.Epoch, "owner_lane": r20t7Lane(row.JobID),
 			"agent_label": r20t7Lane(row.JobID), "label": r20t7Lane(row.JobID), "host": "host-a",
@@ -112,7 +124,7 @@ func r20t7SeedInbox(t *testing.T, inbox string, rows []r20t7SnapshotRow) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r20t7WriteEvent(t, inbox, row.JobID, fmt.Sprintf("%05d-%s.json", sequence[row.JobID], row.Kind), string(contents))
+		r20t7WriteEvent(t, inbox, row.JobID, names[index], string(contents))
 	}
 }
 
@@ -121,15 +133,20 @@ func r20t7WriteEvent(t *testing.T, inbox, jobID, name, contents string) {
 	r20WriteEvent(t, inbox, jobID, name, contents, time.Time{})
 }
 
-// r20t7SeedOutbox recreates the operator's relay_sent table row for row.
+// r20t7SeedOutbox recreates the operator's relay_sent table row for row. Each
+// row carries its event file's identity, which is the shape every row takes
+// once the producing binary keys sends by event.
 func r20t7SeedOutbox(t *testing.T, store *Store, rows []r20t7SnapshotRow) {
 	t.Helper()
-	for _, row := range rows {
-		if err := store.RecordRelaySent(context.Background(), row.key(), row.SentAt); err != nil {
+	names := r20t7EventFileNames(rows)
+	for index, row := range rows {
+		key := row.key()
+		key.EventID = names[index]
+		if err := store.RecordRelaySent(context.Background(), key, row.SentAt); err != nil {
 			t.Fatal(err)
 		}
 		if row.Persisted {
-			if err := store.RecordRelayPersisted(context.Background(), row.key(), row.PersistedAt); err != nil {
+			if err := store.RecordRelayPersisted(context.Background(), key, row.PersistedAt); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -180,7 +197,7 @@ func r20t7Deliver(t *testing.T, hub *HubServer, agent *hubAgent, node *HubClient
 	injected := drainRelays(agent)
 	acknowledgements := drainPersisted(agent)
 	for _, ack := range acknowledgements {
-		node.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID})
+		node.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID, ProducerEventID: ack.ProducerEventID})
 	}
 	return injected, acknowledgements
 }
@@ -215,11 +232,18 @@ func TestR20T7SnapshotRestartsStopResendingAndReinjecting(t *testing.T) {
 	hub, agent := r20t5Hub(t, r20t7Lanes, client, 64)
 	// Every stuck row had already been injected and delivered before the
 	// restart: that is why the hub kept logging a replay and the pane kept
-	// getting the same note. handoffkeep therefore answers 200 + delivered_at.
+	// getting the same note. handoffkeep therefore answers 200 + delivered_at
+	// with the producing event's identity, which is what suppresses the
+	// re-injection - a folded row naming a different event cannot answer for it.
+	names := r20t7EventFileNames(rows)
+	nameOf := map[r20t7SnapshotRow]string{}
+	for index, row := range rows {
+		nameOf[row] = names[index]
+	}
 	for index, row := range stuck {
 		fake.seedDelivered("2026-09-05T13:35:00Z", handoffkeepRelayEvent{
 			ID: int64(500 + index), Kind: row.Kind, JobID: row.JobID, Epoch: int(row.Epoch),
-			OwnerLane: r20t7Lane(row.JobID), ReportPath: row.ReportPath, Reason: row.Reason, Attempts: 1,
+			OwnerLane: r20t7Lane(row.JobID), ReportPath: row.ReportPath, Reason: row.Reason, EventID: nameOf[row], Attempts: 1,
 		})
 	}
 
@@ -254,7 +278,9 @@ func TestR20T7SnapshotRestartsStopResendingAndReinjecting(t *testing.T) {
 		t.Fatalf("the parent pane was re-injected %d times across three restarts, want 0", injections)
 	}
 	for _, row := range stuck {
-		state, err := store.RelayOutboxState(context.Background(), row.key())
+		key := row.key()
+		key.EventID = nameOf[row]
+		state, err := store.RelayOutboxState(context.Background(), key)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -279,12 +305,15 @@ func TestR20T7SnapshotResendsExactlyTheUnpersistedRows(t *testing.T) {
 
 	latest := time.Time{}
 	want := map[string]struct{}{}
-	for _, row := range rows {
+	names := r20t7EventFileNames(rows)
+	for index, row := range rows {
 		if row.SentAt.After(latest) {
 			latest = row.SentAt
 		}
 		if !row.Persisted {
-			want[row.key().String()] = struct{}{}
+			key := row.key()
+			key.EventID = names[index]
+			want[key.String()] = struct{}{}
 		}
 	}
 	node := r20t7Node(inbox, store, latest.Add(time.Hour))
@@ -398,7 +427,7 @@ func TestR20T7QueueFullDropDoesNotStamp(t *testing.T) {
 
 // r20t7AckKey is the outbox key the hub's acknowledgement names.
 func r20t7AckKey(ack hubRelayPersistedEvent) relayOutboxKey {
-	return relayOutboxKey{Kind: ack.Kind, JobID: ack.JobID, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason}
+	return relayOutboxKey{Kind: ack.Kind, JobID: ack.JobID, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.ProducerEventID}
 }
 
 // TA4/AC3/AC4: the node's outbox key and the five fields the hub echoes must be
@@ -527,7 +556,7 @@ func TestR20T7ReplayFlaggedRecordIsAcknowledged(t *testing.T) {
 	defer store.Close()
 	r20t7WriteEvent(t, inbox, "r20t7-replay", "00001-job.completed.json",
 		`{"type":"job.completed","epoch":1,"owner_lane":"lane-w","label":"lane-w","host":"host-a","report_path":"replay.md","report_last_line":"done"}`)
-	key := relayOutboxKey{Kind: "job.completed", JobID: "r20t7-replay", Epoch: 1, ReportPath: "replay.md"}
+	key := relayOutboxKey{Kind: "job.completed", JobID: "r20t7-replay", Epoch: 1, ReportPath: "replay.md", EventID: "00001-job.completed.json"}
 	if err := store.RecordRelaySent(context.Background(), key, time.Now().Add(-2*relayOutboxBackoff)); err != nil {
 		t.Fatal(err)
 	}
