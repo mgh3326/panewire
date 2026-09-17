@@ -104,7 +104,7 @@ func WaitAgent(ctx context.Context, client *HerdrClient, target, status string, 
 	if !ok {
 		return AgentWaitResult{}, &codedError{ExitConditionInvalid, fmt.Errorf("agent target not found: %s", target)}
 	}
-	events, err := client.Subscribe(deadlineCtx)
+	events, _, err := client.Subscribe(deadlineCtx)
 	if err != nil {
 		return AgentWaitResult{}, &codedError{ExitDaemonUnavailable, err}
 	}

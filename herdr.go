@@ -153,10 +153,13 @@ type HerdrEvent struct {
 	UnknownFields                    json.RawMessage
 }
 
-func (c *HerdrClient) Subscribe(ctx context.Context) (<-chan HerdrEvent, error) {
+// Subscribe also returns the pane set the request covered. Callers that need
+// to prove observation coverage — the stall detector on attach and reconnect —
+// diff this set against what agent.list later reports.
+func (c *HerdrClient) Subscribe(ctx context.Context) (<-chan HerdrEvent, []string, error) {
 	snapshot, err := c.Call(ctx, "agent.list", map[string]any{})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	var listed struct {
 		Agents []struct {
@@ -164,18 +167,20 @@ func (c *HerdrClient) Subscribe(ctx context.Context) (<-chan HerdrEvent, error) 
 		} `json:"agents"`
 	}
 	if json.Unmarshal(snapshot, &listed) != nil {
-		return nil, fmt.Errorf("invalid herdr agent list")
+		return nil, nil, fmt.Errorf("invalid herdr agent list")
 	}
 	subs := make([]any, 0, len(listed.Agents)*3)
+	panes := make([]string, 0, len(listed.Agents))
 	for _, a := range listed.Agents {
 		if a.PaneID == "" {
 			continue
 		}
+		panes = append(panes, a.PaneID)
 		subs = append(subs, map[string]any{"type": "pane.agent_status_changed", "pane_id": a.PaneID}, map[string]any{"type": "pane.output_matched", "pane_id": a.PaneID, "source": "recent_unwrapped", "match": map[string]any{"type": "regex", "value": ".*"}, "strip_ansi": true}, map[string]any{"type": "pane.scroll_changed", "pane_id": a.PaneID})
 	}
 	conn, err := net.DialTimeout("unix", c.path, 2*time.Second)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if d, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(d)
@@ -183,12 +188,12 @@ func (c *HerdrClient) Subscribe(ctx context.Context) (<-chan HerdrEvent, error) 
 	id := c.nextID()
 	if err := writeRequest(conn, id, "events.subscribe", map[string]any{"subscriptions": subs}); err != nil {
 		conn.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	reader := bufio.NewReader(conn)
 	if _, err := readResponse(ctx, reader, id); err != nil {
 		conn.Close()
-		return nil, err
+		return nil, nil, err
 	}
 	c.mu.Lock()
 	c.subConn = conn
@@ -213,7 +218,51 @@ func (c *HerdrClient) Subscribe(ctx context.Context) (<-chan HerdrEvent, error) 
 			}
 		}
 	}()
-	return out, nil
+	return out, panes, nil
+}
+
+// AgentDetails returns the full agent.list identity rows — cwd and harness
+// included, which the HubSession projection deliberately drops. The stall
+// detector needs both for worktree conflict observation and family checks.
+func (c *HerdrClient) AgentDetails(ctx context.Context) ([]paneIdentity, error) {
+	snapshot, err := c.Call(ctx, "agent.list", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var listed struct {
+		Agents []map[string]any `json:"agents"`
+	}
+	if json.Unmarshal(snapshot, &listed) != nil {
+		return nil, fmt.Errorf("invalid herdr agent list")
+	}
+	labels := tabLabels(ctx, c)
+	agents := make([]paneIdentity, 0, len(listed.Agents))
+	for _, raw := range listed.Agents {
+		pane := identityFromMap(raw)
+		if pane.Label == "" {
+			pane.Label = labels[pane.TabID]
+		}
+		if pane.PaneID == "" {
+			continue
+		}
+		agents = append(agents, pane)
+	}
+	return agents, nil
+}
+
+// ReadPane performs one bounded recent_unwrapped read, falling back to the
+// visible viewport when the recent buffer is empty. The detector uses this
+// after an output_matched wake and on its measured poll cadence; it is a read
+// only and never touches pane input.
+func (c *HerdrClient) ReadPane(ctx context.Context, paneID string) (readEvidence, error) {
+	evidence, err := readPane(ctx, c, paneIdentity{PaneID: paneID}, "recent_unwrapped")
+	if err != nil {
+		return readEvidence{}, err
+	}
+	if evidence.Text == "" {
+		return readPane(ctx, c, paneIdentity{PaneID: paneID}, "visible")
+	}
+	return evidence, nil
 }
 func decodeHerdrEvent(line []byte) (HerdrEvent, bool) {
 	var env struct {

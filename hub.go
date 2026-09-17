@@ -386,6 +386,17 @@ type HubServer struct {
 	spawnRecords                map[string]*hubSpawnRecord
 	expectedVersion             map[string]hubExpectedVersion
 	updateConfirmationTimeout   time.Duration
+	stallBeats                  map[string]*hubStallBeatState
+}
+
+// hubStallBeatState is the hub's half of the detector no-data contract. It
+// records the last advancing beat and when the hub saw it advance, so a
+// frozen beat_ms and a vanished field are both observable problems.
+type hubStallBeatState struct {
+	seen        bool
+	lastBeatMS  int64
+	lastAdvance time.Time
+	intervalMS  int64
 }
 
 type hubExpectedVersion struct {
@@ -513,7 +524,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
+		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, stallBeats: make(map[string]*hubStallBeatState),
 	}, nil
 }
 
@@ -1115,6 +1126,16 @@ type hubHeartbeatPayload struct {
 	Sessions       *[]HubSession             `json:"sessions,omitempty"`
 	SnapshotStatus string                    `json:"snapshot_status,omitempty"`
 	Truncated      bool                      `json:"truncated,omitempty"`
+	StallDetect    *hubStallBeatPayload      `json:"stall_detect,omitempty"`
+}
+
+// hubStallBeatPayload is the node detector's no-data contract. beat_ms is the
+// last completed scan; the hub alerts when it stops advancing or the field
+// vanishes from a node that was previously reporting it.
+type hubStallBeatPayload struct {
+	BeatMS     int64 `json:"beat_ms"`
+	IntervalMS int64 `json:"interval_ms"`
+	Panes      int   `json:"panes"`
 }
 
 type hubNotePayload struct {
@@ -1147,7 +1168,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "sessions" && name != "snapshot_status" && name != "truncated" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1224,6 +1245,22 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.Quota = quota
+	}
+	if rawStall, exists := fields["stall_detect"]; exists {
+		var stallFields map[string]json.RawMessage
+		if json.Unmarshal(rawStall, &stallFields) != nil || len(stallFields) != 3 {
+			return hubHeartbeatPayload{}, false
+		}
+		for _, name := range []string{"beat_ms", "interval_ms", "panes"} {
+			if _, exists := stallFields[name]; !exists {
+				return hubHeartbeatPayload{}, false
+			}
+		}
+		var beat hubStallBeatPayload
+		if json.Unmarshal(rawStall, &beat) != nil || beat.BeatMS < 0 || beat.IntervalMS < 0 || beat.Panes < 0 {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.StallDetect = &beat
 	}
 	rawSnapshotStatus, hasSnapshotStatus := fields["snapshot_status"]
 	if hasSnapshotStatus {

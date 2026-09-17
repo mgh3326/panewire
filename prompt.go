@@ -153,7 +153,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 		if !caps.Events {
 			return finishPrompt(ctx, store, d, &codedError{ExitDaemonUnavailable, fmt.Errorf("events capability unavailable")})
 		}
-		statusEvents, err = client.Subscribe(ctx)
+		statusEvents, _, err = client.Subscribe(ctx)
 		if err != nil {
 			return finishPrompt(ctx, store, d, &codedError{ExitDaemonUnavailable, err})
 		}
