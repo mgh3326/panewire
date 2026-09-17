@@ -1097,6 +1097,52 @@ func TestStallBeatDegradedOnListFailure(t *testing.T) {
 	}
 }
 
+// B1's sibling — a successful listing whose one tracked pane can never be
+// read is partial blindness, not healthy coverage. A single failure stays
+// quiet; the second consecutive failure opens [unreadable] and the beat
+// goes degraded, and a working read closes the row and clears the flag.
+func TestStallUnreadablePaneSurfaces(t *testing.T) {
+	fx := newStallFixture(t, false)
+	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+	readErr := errors.New("herdr agent.read unavailable")
+	fx.mgr.deps.readPane = func(context.Context, string) (readEvidence, error) { return readEvidence{}, readErr }
+	fx.scan()
+	if rows := stallIncidentsFor(t, fx, "job-a"); len(rows) != 0 {
+		t.Fatalf("a single read failure recorded an incident: %+v", stallCauses(rows))
+	}
+	if beat := fx.mgr.StallBeat(); beat == nil || beat.Degraded {
+		t.Fatalf("one transient failure must not degrade the beat: %+v", beat)
+	}
+	fx.advance(time.Minute)
+	fx.scan()
+	rows := stallIncidentsFor(t, fx, "job-a")
+	if len(rows) != 1 || rows[0].Cause != stallCauseUnreadable {
+		t.Fatalf("persistent read failure not surfaced: %+v", stallCauses(rows))
+	}
+	beat := fx.mgr.StallBeat()
+	if beat == nil || !beat.Degraded {
+		t.Fatalf("partial blindness must mark the beat degraded: %+v", beat)
+	}
+	// A third failed scan adds no second row.
+	fx.advance(time.Minute)
+	fx.scan()
+	if rows := stallIncidentsFor(t, fx, "job-a"); len(rows) != 1 {
+		t.Fatalf("unreadable gap duplicated incidents: %+v", stallCauses(rows))
+	}
+	// Reads recover: the row closes and the beat is healthy again.
+	fx.mgr.deps.readPane = func(_ context.Context, pane string) (readEvidence, error) { return fx.reads[pane], nil }
+	fx.reads["w1:p1"] = readEvidence{Text: "ok\n", Revision: 1}
+	fx.advance(time.Minute)
+	fx.scan()
+	rows = stallIncidentsFor(t, fx, "job-a")
+	if len(rows) != 1 || rows[0].RecoveredAt.IsZero() {
+		t.Fatalf("recovered read did not close the unreadable row: %+v", rows)
+	}
+	if beat := fx.mgr.StallBeat(); beat.Degraded {
+		t.Fatal("beat stayed degraded after reads recovered")
+	}
+}
+
 // AC5 — a node whose stall beat stops advancing, then vanishes, raises the
 // hub no-data alert.
 func TestStallHubNoDataAlert(t *testing.T) {

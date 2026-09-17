@@ -42,6 +42,9 @@ const (
 	stallRepsCap                = 8 * time.Hour
 	stallTailAnchorLines        = 3
 	stallReportMaxAge           = 72 * time.Hour
+	// stallUnreadableAfterReads is the consecutive read-failure streak that
+	// turns a pane's unobservability into a recorded gap and a degraded beat.
+	stallUnreadableAfterReads = 2
 )
 
 // StallDetectConfig gates the whole feature. Notify and ReportUpload stay
@@ -155,6 +158,11 @@ type stallDetectManager struct {
 	// observation by one poll.
 	unsubStreak map[string]int
 	cleanReads  map[string]int
+	// paneReadStreak counts consecutive read failures per pane. A listing
+	// that succeeds while one pane can never be read is partial blindness —
+	// the same class as a failed agent.list — so the streak surfaces as an
+	// incident and a degraded beat instead of passing for healthy coverage.
+	paneReadStreak map[string]int
 	// scanCache skips re-parsing an unchanged job event journal. Directory
 	// mtime is the change signal — events are append-only files.
 	scanCache map[string]stallJobScanCache
@@ -204,7 +212,8 @@ func newStallDetectManager(store *Store, inboxRoot string, cfg StallDetectConfig
 		wake: make(chan string, 64), wakePending: make(map[string]struct{}),
 		procCWDCache: make(map[int64]string),
 		unsubStreak:  make(map[string]int), cleanReads: make(map[string]int),
-		scanCache: make(map[string]stallJobScanCache),
+		paneReadStreak: make(map[string]int),
+		scanCache:      make(map[string]stallJobScanCache),
 	}, nil
 }
 
@@ -937,7 +946,23 @@ func (m *stallDetectManager) scan(ctx context.Context) {
 	m.persistReports(ctx, at)
 	m.notifyTick(ctx, at)
 	m.readFailures = 0
-	m.finishScan(ctx, at, len(agents), false)
+	m.finishScan(ctx, at, len(agents), m.anyUnreadable(jobs, agents))
+}
+
+// anyUnreadable reports whether a tracked, live pane has failed its reads
+// past the surfacing streak — partial blindness that must mark the beat
+// degraded rather than pass for healthy coverage.
+func (m *stallDetectManager) anyUnreadable(jobs []stallJobRow, agents []paneIdentity) bool {
+	live := make(map[string]bool, len(agents))
+	for _, agent := range agents {
+		live[agent.PaneID] = true
+	}
+	for _, job := range jobs {
+		if job.PaneID != "" && live[job.PaneID] && m.paneReadStreak[job.PaneID] >= stallUnreadableAfterReads {
+			return true
+		}
+	}
+	return false
 }
 
 // finishScan records the detector beat. A degraded cycle keeps the beat
@@ -1174,6 +1199,13 @@ func (m *stallDetectManager) readPanes(ctx context.Context, jobs []stallJobRow, 
 	for _, agent := range agents {
 		live[agent.PaneID] = agent
 	}
+	// Streaks for panes that vanished from the listing are stale — a dead
+	// pane's old failures must not keep the beat degraded.
+	for pane := range m.paneReadStreak {
+		if _, ok := live[pane]; !ok {
+			delete(m.paneReadStreak, pane)
+		}
+	}
 	reads := 0
 	for _, job := range jobs {
 		if job.PaneID == "" {
@@ -1210,13 +1242,29 @@ func (m *stallDetectManager) readOnePane(ctx context.Context, job stallJobRow, a
 	cancel()
 	if err != nil {
 		m.readFailures++
+		m.paneReadStreak[job.PaneID]++
 		if found {
 			pane.LastReadAt, pane.LastReadOK = at, false
 			m.savePane(ctx, pane)
 		}
+		if m.paneReadStreak[job.PaneID] >= stallUnreadableAfterReads {
+			// One open row covers the whole gap; the beat marks degraded in
+			// finishScan so the hub sees the partial blindness too.
+			if open, oerr := m.openCauseExists(ctx, job, stallCauseUnreadable); oerr == nil && !open {
+				m.openIncident(ctx, job, stallCauseUnreadable, stallMatch{line: "pane read keeps failing"}, at, true, map[string]any{
+					"pane": job.PaneID, "read_failures": m.paneReadStreak[job.PaneID],
+					"last_error": redactSecrets(err.Error()),
+				})
+			}
+		}
 		return
 	}
 	m.readFailures = 0
+	delete(m.paneReadStreak, job.PaneID)
+	// A successful read ends the gap even after a restart wiped the streak.
+	if err := m.store.recoverStallIncidents(ctx, job.JobID, job.Attempt, job.Round, []string{stallCauseUnreadable}, at); err != nil {
+		m.logger.Warn("stall-detect unreadable recovery was not recorded")
+	}
 	if !found {
 		pane = stallPaneRow{PaneID: job.PaneID, Fingerprints: map[string]int64{}, FirstSeenAt: at}
 	} else if pane.JobID != job.JobID || pane.Attempt != job.Attempt {
