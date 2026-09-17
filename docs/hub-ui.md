@@ -11,10 +11,14 @@ browser write paths and a stricter gate; see `docs/hub-chat.md`.
 2. Configure the Cloudflare Tunnel origin for `hub.robinco.dev` to the local
    hub address. Do not expose that origin directly to the Internet.
 3. In Cloudflare Zero Trust, create an **Access application** for
-   `https://hub.robinco.dev/ui*`. Add an Allow policy for the intended people,
-   using Email one-time PIN and/or Google login. Leave the existing service
-   token policy for node endpoints in place; the UI Access application is a
-   separate browser-login policy.
+   `https://hub.robinco.dev` whose protected paths include both `/ui*` and
+   `/chat*`. One application's AUD tag covers every path in it, so the single
+   `--cf-access-aud` value below authorizes both surfaces; an application
+   scoped to `/ui*` alone leaves `/chat` requests without a JWT and they get
+   404. Add an Allow policy for the intended people, using Email one-time PIN
+   and/or Google login. Leave the existing service token policy for node
+   endpoints in place; the UI Access application is a separate browser-login
+   policy.
 4. Configure `--cf-access-team <team>` and `--cf-access-aud <aud>` (the
    application's AUD tag from the Access dashboard). With these set, a
    `Cf-Access-Jwt-Assertion` is verified against the team certs at

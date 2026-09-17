@@ -27,7 +27,17 @@ relay path.
   present, must match the request host, and `Sec-Fetch-Site` must be
   `same-origin`/`none`. Cross-origin POSTs get 403; unauthenticated requests
   get 404. Browser deployments therefore need `--cf-access-team` and
-  `--cf-access-aud`; without them only the operator token opens `/chat`.
+  `--cf-access-aud`; without them only the operator token opens `/chat`. The
+  Access application must protect `/chat*` as well as `/ui*` — one
+  application's AUD covers all its paths, so no second `--cf-access-aud` is
+  needed, but a `/ui*`-only application issues no JWT on `/chat` and every
+  browser request there fails closed.
+  Key verification is fail closed and never on the request path: fetched
+  certs are cached for an hour and re-fetched by a background loop (proactive
+  refresh plus a kick whenever a request sees a missing/stale key). A request
+  that finds no usable cached key is rejected — it never waits on the
+  network — so a certs/DNS outage cannot stall requests, only reject them
+  until the background refresh lands keys again.
 - `POST /v1/chat/questions` — the desk-session hook path, authenticated with
   the operator bearer token like every other `/v1` API. Unchanged.
 
