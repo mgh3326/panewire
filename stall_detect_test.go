@@ -476,6 +476,127 @@ func TestStallReportPathRealJournalShapes(t *testing.T) {
 	})
 }
 
+// BLOCKER-2 — job.escalate and job.joined are coordination records inside a
+// live job, not endings: in the real journal 242 of 274 escalates and 65 of
+// 88 joins are followed by further job events. A job that escalated and then
+// overran its deadline must still record [overdue].
+func TestStallEscalateDoesNotEndTheJob(t *testing.T) {
+	fx := newStallFixture(t, false)
+	claimJob(t, fx, "job-a", "w1:p1", map[string]any{"deadline_at": fx.now.Add(-time.Minute).Format(time.RFC3339)}, fx.now.Add(-2*time.Hour))
+	writeJobEvent(t, fx.inbox, "job-a", 4, "job.escalate", map[string]any{"note": "asked flag for judgement"}, fx.now.Add(-30*time.Minute))
+	writeJobEvent(t, fx.inbox, "job-a", 5, "job.joined", map[string]any{"reason": "builder joined PR"}, fx.now.Add(-20*time.Minute))
+	fx.reads["w1:p1"] = readEvidence{Text: "still working\n", Revision: 3}
+	fx.scan()
+	jobs, err := fx.store.stallJobs(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	open := false
+	for _, job := range jobs {
+		if job.JobID == "job-a" && job.Attempt == 1 && !job.Terminal {
+			open = true
+		}
+	}
+	if !open {
+		t.Fatal("an escalated/joined job was closed as terminal")
+	}
+	var overdue bool
+	for _, row := range stallIncidentsFor(t, fx, "job-a") {
+		if row.Cause == stallCauseOverdue {
+			overdue = true
+		}
+	}
+	if !overdue {
+		t.Fatal("deadline lapse after escalation recorded nothing")
+	}
+	// And an on-screen confirmed error still records — the pane keeps its
+	// coverage through the escalation.
+	fx.reads["w1:p1"] = readEvidence{Text: "still working\n" + stallFixtureLimit + "\n", Revision: 4}
+	fx.advance(time.Minute)
+	fx.scan()
+	var refused bool
+	for _, row := range stallIncidentsFor(t, fx, "job-a") {
+		if row.Cause == stallCauseLimitRefused {
+			refused = true
+		}
+	}
+	if !refused {
+		t.Fatal("post-escalation screen error was not recorded")
+	}
+}
+
+// The terminal set is a closed enumeration backed by the real journal: end
+// records close the job, coordination and pool records never do.
+func TestStallTerminalKindEnumeration(t *testing.T) {
+	terminal := []string{"job.completed", "job.completion", "job.revoked", "job.lost", "job.reaped", "job.aborted", "worker.complete"}
+	live := []string{"job.escalate", "job.joined", "job.reclaim", "quota_pool.release", "lane.event"}
+	closedBy := func(kind string) bool {
+		inbox := t.TempDir()
+		writeJobEvent(t, inbox, "job-x", 1, "job.claim", map[string]any{"owner_lane": "owner-1"}, time.Now())
+		writeJobEvent(t, inbox, "job-x", 2, kind, map[string]any{}, time.Now())
+		jobs := scanStallJobs(inbox)
+		return len(jobs) == 1 && jobs[0].Terminal
+	}
+	for _, kind := range terminal {
+		if !closedBy(kind) {
+			t.Fatalf("%s did not close the job", kind)
+		}
+	}
+	for _, kind := range live {
+		if closedBy(kind) {
+			t.Fatalf("%s closed a live job", kind)
+		}
+	}
+}
+
+// A spawn recorded after a terminal record is a new attempt of a recycled
+// job id — it must not inherit the earlier ending.
+func TestStallSpawnAfterTerminalIsNewAttempt(t *testing.T) {
+	fx := newStallFixture(t, false)
+	at := fx.now.Add(-time.Hour)
+	writeJobEvent(t, fx.inbox, "job-a", 1, "job.claim", map[string]any{"owner_lane": "owner-1"}, at)
+	writeJobEvent(t, fx.inbox, "job-a", 2, "quota_pool.record", map[string]any{"pool": "devin"}, at)
+	writeJobEvent(t, fx.inbox, "job-a", 3, "job.spawned", map[string]any{"pane_id": "w1:p1"}, at)
+	writeJobEvent(t, fx.inbox, "job-a", 4, "job.lost", map[string]any{}, at.Add(30*time.Minute))
+	writeJobEvent(t, fx.inbox, "job-a", 5, "job.spawned", map[string]any{"pane_id": "w1:p2"}, at.Add(40*time.Minute))
+	fx.agents = append(fx.agents, paneIdentity{PaneID: "w1:p2", CWD: "/work/job-a", Harness: "devin"})
+	fx.subscribed["w1:p2"] = true
+	fx.reads["w1:p2"] = readEvidence{Text: "fresh run\n", Revision: 1}
+	fx.scan()
+	jobs, err := fx.store.stallJobs(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(jobs) != 1 || jobs[0].Attempt != 2 || jobs[0].PaneID != "w1:p2" {
+		t.Fatalf("post-terminal spawn did not stay open: %+v", jobs)
+	}
+}
+
+// A row closed by the retracted escalate/joined rule must reopen on the next
+// scan — the durable flag must not fossilize the bug.
+func TestStallFalseTerminalRowReopens(t *testing.T) {
+	fx := newStallFixture(t, false)
+	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+	if err := fx.store.upsertStallJob(context.Background(), stallJobRow{JobID: "job-a", Attempt: 1, Terminal: true, TerminalKind: "job.escalate"}); err != nil {
+		t.Fatal(err)
+	}
+	fx.reads["w1:p1"] = readEvidence{Text: "ok\n", Revision: 1}
+	fx.scan()
+	jobs, err := fx.store.stallJobs(context.Background(), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, job := range jobs {
+		if job.JobID == "job-a" && job.Attempt == 1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("falsely-terminal row did not reopen")
+	}
+}
+
 // AC8 + shadow BLOCKER — with ReportUpload off (the rollout default) the
 // report is finalized locally, hashed, and never written to the shared
 // remote: the upload seam must see zero calls. With it on, the uploaded body

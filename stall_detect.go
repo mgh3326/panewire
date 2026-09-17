@@ -281,8 +281,14 @@ type stallJobScan struct {
 	Extensions     []stallDeadlineExt
 	Terminal       bool
 	TerminalKind   string
+	// TerminalSeq is the journal sequence of the terminal record. A spawn
+	// after it is a fresh attempt, not a continuation of the ended one.
+	TerminalSeq    int64
 	LastEventAt    time.Time
 	ReportPath     string
+	// ReportKind names what ReportPath holds: "path" for a local file,
+	// "doc_key" for a handoffkeep document key, "" when nothing resolves.
+	ReportKind  string
 }
 
 type stallSpawnScan struct {
@@ -292,6 +298,7 @@ type stallSpawnScan struct {
 	Label       string
 	Profile     string
 	Round       int64
+	Seq         int64
 	At          time.Time
 }
 
@@ -313,7 +320,10 @@ type stallInboxEvent struct {
 	CreatedAt  string                     `json:"created_at"`
 	Epoch      uint64                     `json:"epoch"`
 	ReportPath string                     `json:"report_path"`
-	Payload    map[string]json.RawMessage `json:"payload"`
+	// Report is the wrk-era completion record's report field (worker.complete
+	// carries it at the top level, relative to the job directory).
+	Report  string                     `json:"report"`
+	Payload map[string]json.RawMessage `json:"payload"`
 }
 
 func (e stallInboxEvent) eventKind() string {
@@ -402,6 +412,33 @@ func stallFamily(pool, profile, harness string) string {
 	return ""
 }
 
+// stallTerminalKinds is the closed set of journal records that end a job.
+// Membership is earned from the real journal, not assumed from the name:
+// every kind here records the job's end state, and what little follows it in
+// the journal is bookkeeping (reaper marks, quota release, a late duplicate
+// completion). The counts from the real journal:
+//
+//	job.completed  543 events, followers are lost/reaped/dup-completed bookkeeping
+//	job.lost       502 events, 52 followed — late completed/reaped records
+//	job.reaped      87 events, 51 followed — paired job.lost bookkeeping
+//	job.revoked      3 events, followers are quota release only
+//	job.aborted      1 event,  followed by quota_pool.release.force only
+//	worker.complete  1 event,  nothing follows (wrk-era end record)
+//
+// Explicitly NOT terminal — the journal proves work continues after them:
+//
+//	job.escalate   274 events, 242 followed (escalate→joined/completed work)
+//	job.joined      88 events,  65 followed (joined→completed/lost/escalate)
+//
+// An escalation is a question to an upper lane and a join is one outcome
+// record inside a live job; either one marked terminal would silence the
+// detector on exactly the jobs most likely to stall.
+var stallTerminalKinds = map[string]bool{
+	"job.completed": true, "job.completion": true, "job.revoked": true,
+	"job.lost": true, "job.reaped": true, "job.aborted": true,
+	"worker.complete": true,
+}
+
 // scanStallJobs reads each job's event journal into the detector's view.
 // File contents are metadata only; no event body is ever executed.
 func scanStallJobs(inboxRoot string) []stallJobScan {
@@ -466,6 +503,7 @@ func scanStallJobEvents(eventsDir, jobID string) (stallJobScan, bool) {
 				Label:       stallPayloadString(event.Payload, "label"),
 				Profile:     stallPayloadString(event.Payload, "profile"),
 				Round:       stallPayloadInt(event.Payload, "round"),
+				Seq:         int64(seq),
 				At:          at,
 			}
 			if job.Family == "" {
@@ -477,11 +515,14 @@ func scanStallJobEvents(eventsDir, jobID string) (stallJobScan, bool) {
 			// time against the claim's owner_lane; anything else is inert.
 			ext := stallDeadlineExt{Seq: int64(seq), IssuerLane: stallPayloadString(event.Payload, "issuer_lane", "owner_lane"), Reason: stallPayloadString(event.Payload, "reason"), NewDeadlineAt: stallPayloadTime(event.Payload, "deadline_at", "new_deadline_at")}
 			job.Extensions = append(job.Extensions, ext)
-		case "job.completed", "job.completion", "job.revoked", "job.lost", "job.reaped", "job.escalate", "job.joined":
-			job.Terminal = true
-			job.TerminalKind = event.eventKind()
-			if path := stallReportPathOf(event); path != "" {
-				job.ReportPath = path
+		default:
+			if stallTerminalKinds[event.eventKind()] {
+				job.Terminal = true
+				job.TerminalKind = event.eventKind()
+				job.TerminalSeq = int64(seq)
+				if path := stallReportPathOf(event); path != "" {
+					job.ReportPath = path
+				}
 			}
 		}
 	}
@@ -618,6 +659,12 @@ func (m *stallDetectManager) refreshJob(ctx context.Context, scan stallJobScan, 
 		row.WorkspaceID = spawn.WorkspaceID
 		row.Profile = spawn.Profile
 		row.SpawnedAt = spawn.At
+		if scan.Terminal && spawn.Seq > 0 && scan.TerminalSeq > 0 && spawn.Seq > scan.TerminalSeq {
+			// A spawn recorded after the terminal record is a fresh attempt
+			// of a recycled job id — it did not inherit the earlier ending.
+			row.Terminal = false
+			row.TerminalKind = ""
+		}
 		if index < len(scan.Spawns)-1 {
 			// A later spawn supersedes this attempt: only the newest attempt
 			// of a job may still be live, so the older row closes instead of
