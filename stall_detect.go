@@ -99,6 +99,16 @@ func (cfg StallDetectConfig) harnessAllowed(family string) bool {
 	return false
 }
 
+// stallReader is the only herdr handle the detector may hold. The interface
+// cannot express input — prompt submission, key injection, and the generic
+// request method are simply not members — so no wiring can hand them in and
+// no seam can smuggle them through.
+type stallReader interface {
+	AgentDetails(context.Context) ([]paneIdentity, error)
+	ReadPane(context.Context, string) (readEvidence, error)
+	Close() error
+}
+
 // stallDeps are the side-effecting seams. Production wiring dials herdr per
 // call the way the heartbeat hooks do; fixtures replace every one of them.
 type stallDeps struct {

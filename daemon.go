@@ -125,9 +125,12 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}
 		d.resub = make(chan struct{}, 1)
 		socket := d.cfg.HerdrSocket
+		// Every herdr handle the detector touches is a stallReader: the
+		// interface has no input methods, so the wiring cannot express one.
+		dial := func() (stallReader, error) { return NewHerdrClient(socket) }
 		deps := stallDeps{
 			listAgents: func(ctx context.Context) ([]paneIdentity, error) {
-				c, err := NewHerdrClient(socket)
+				c, err := dial()
 				if err != nil {
 					return nil, err
 				}
@@ -135,7 +138,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 				return c.AgentDetails(ctx)
 			},
 			readPane: func(ctx context.Context, pane string) (readEvidence, error) {
-				c, err := NewHerdrClient(socket)
+				c, err := dial()
 				if err != nil {
 					return readEvidence{}, err
 				}

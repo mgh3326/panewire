@@ -29,6 +29,10 @@ func NewHerdrClient(path string) (*HerdrClient, error) {
 	_ = conn.Close()
 	return &HerdrClient{path: path, closed: make(chan struct{})}, nil
 }
+
+// The stall detector only ever holds the read-only projection — the compiler
+// enforces that this narrow interface stays satisfiable.
+var _ stallReader = (*HerdrClient)(nil)
 func (c *HerdrClient) nextID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()

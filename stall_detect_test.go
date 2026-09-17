@@ -1152,18 +1152,29 @@ func TestStallHubNoDataAlert(t *testing.T) {
 	_ = alerts
 }
 
-// AC10 — the detector source contains no write path to panes, batch values, or
-// quota numbers. This is the executable half of the code inspection; the file
-// itself is the other half.
+// AC10 — the detector source contains no write path to panes, batch values,
+// or quota numbers, and no route to them through a helper either. The scan
+// covers every stall*.go source file — a new helper file is the same write
+// path with a different name — and includes the generic herdr escape hatches
+// (Call, Prompt, the concrete client type), which are the only ways around
+// the stallReader interface.
 func TestStallNoMutationPaths(t *testing.T) {
-	for _, file := range []string{"stall_detect.go", "stall_store.go"} {
+	files, err := filepath.Glob("stall*.go")
+	if err != nil || len(files) == 0 {
+		t.Fatalf("stall sources not found: %v", err)
+	}
+	for _, file := range files {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
 		body, err := os.ReadFile(file)
 		if err != nil {
 			t.Fatal(err)
 		}
 		for _, banned := range []string{
-			"send_keys", "agent.prompt", "pane.prompt", "Process.Kill", ".Kill(",
-			"scopefuel", "quota_pool.update", "batch_", "SendMessage",
+			"send_keys", "sendKeys", "SendKeys", "agent.prompt", "pane.prompt",
+			"Process.Kill", ".Kill(", "scopefuel", "quota_pool.update", "batch_",
+			"SendMessage", "Prompt(", ".Call(", "HerdrClient",
 		} {
 			if strings.Contains(string(body), banned) {
 				t.Fatalf("%s contains forbidden write path %q", file, banned)
@@ -1375,9 +1386,21 @@ func TestStallDepsAreReadOnly(t *testing.T) {
 			t.Fatalf("stallDeps grew a non-whitelisted seam %q — every dep must be read-only or local-record", field.Name)
 		}
 	}
+	// The interface itself is the type-level guarantee: it may only ever
+	// name read methods. Adding Prompt/SendKeys/Call to it fails here even
+	// if no call site uses them yet.
+	reader := reflect.TypeOf((*stallReader)(nil)).Elem()
+	for i := 0; i < reader.NumMethod(); i++ {
+		switch reader.Method(i).Name {
+		case "AgentDetails", "ReadPane", "Close":
+		default:
+			t.Fatalf("stallReader grew a non-read method %q", reader.Method(i).Name)
+		}
+	}
 	// The daemon wiring may only hand the detector read methods. Adding a
 	// pane-write dep — or routing Prompt/send_keys through an existing one —
-	// fails this check.
+	// fails this check. Every method call on any receiver in the block is
+	// whitelisted, so renaming the client variable is not a bypass.
 	body, err := os.ReadFile("daemon.go")
 	if err != nil {
 		t.Fatal(err)
@@ -1391,14 +1414,20 @@ func TestStallDepsAreReadOnly(t *testing.T) {
 		t.Fatal("stallDeps wiring block unterminated")
 	}
 	block := string(body[start : start+end])
-	for _, banned := range []string{"send_keys", "sendKeys", "SendKeys", "agent.prompt", "Prompt(", "pane.input", "Write("} {
+	for _, banned := range []string{"send_keys", "sendKeys", "SendKeys", "agent.prompt", "Prompt(", "pane.input", "Write(", ".Call("} {
 		if strings.Contains(block, banned) {
 			t.Fatalf("daemon stallDeps wiring references %q", banned)
 		}
 	}
-	for _, call := range regexp.MustCompile(`c\.(\w+)\(`).FindAllStringSubmatch(block, -1) {
-		if call[1] != "AgentDetails" && call[1] != "ReadPane" && call[1] != "Close" {
-			t.Fatalf("stall wiring calls non-read herdr method %s", call[1])
+	methodWhitelist := map[string]bool{
+		// herdr reads through stallReader, the coverage seam, and the hub
+		// client's beat setter — none of which can express pane input.
+		"AgentDetails": true, "ReadPane": true, "Close": true, "subscribedSet": true,
+		"SetStallDetect": true,
+	}
+	for _, call := range regexp.MustCompile(`\.(\w+)\(`).FindAllStringSubmatch(block, -1) {
+		if !methodWhitelist[call[1]] {
+			t.Fatalf("stall wiring calls non-read method %s", call[1])
 		}
 	}
 }
