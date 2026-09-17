@@ -20,9 +20,12 @@ func TestHubUIAccessAndDataSchema(t *testing.T) {
 	}
 	operatorSecret := "r13-operator-secret-must-never-reach-browser"
 	nodeSecret := "r13-node-secret-must-never-reach-browser"
+	certs := chatTestCerts(t, chatTestSigningKey())
 	hub, err := NewHubServer(HubServerConfig{
 		Tokens: map[string]string{"operator": operatorSecret, "node-a": nodeSecret, "node-b": "r13-node-b-secret"},
 		Now:    func() time.Time { return now }, BurstPolicyPath: policyPath, UIAllowCFOnly: true,
+		CFAccessTeam: "chat-test", CFAccessAUD: chatTestAUD,
+		CFAccessCertsURL: certs.URL, CFAccessHTTPClient: certs.Client(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -64,10 +67,24 @@ func TestHubUIAccessAndDataSchema(t *testing.T) {
 		t.Fatalf("Cloudflare request without Access identity status=%d, want 404", cloudflareWithoutIdentityResponse.Code)
 	}
 
+	// Unsigned Cloudflare identity headers from a non-loopback peer prove
+	// nothing — any client can set them. This is the B4 mutant: re-accepting
+	// Cf-Ray + Cf-Access-Authenticated-User-Email alone flips this to 200.
+	forged := httptest.NewRequest(http.MethodGet, "/ui", nil)
+	forged.RemoteAddr = "198.51.100.25:4444"
+	forged.Header.Set("Cf-Ray", "fixture-ray")
+	forged.Header.Set("Cf-Access-Authenticated-User-Email", "operator@example.test")
+	forgedResponse := httptest.NewRecorder()
+	hub.Handler().ServeHTTP(forgedResponse, forged)
+	if forgedResponse.Code != http.StatusNotFound {
+		t.Fatalf("forged CF identity UI status=%d, want 404", forgedResponse.Code)
+	}
+
 	page := httptest.NewRequest(http.MethodGet, "/ui", nil)
 	page.RemoteAddr = "198.51.100.25:4444"
 	page.Header.Set("Cf-Ray", "fixture-ray")
 	page.Header.Set("Cf-Access-Authenticated-User-Email", "operator@example.test")
+	page.Header.Set("Cf-Access-Jwt-Assertion", chatTestToken(t))
 	pageResponse := httptest.NewRecorder()
 	hub.Handler().ServeHTTP(pageResponse, page)
 	if pageResponse.Code != http.StatusOK || !strings.Contains(pageResponse.Body.String(), "<th>Machine</th>") {
@@ -83,6 +100,7 @@ func TestHubUIAccessAndDataSchema(t *testing.T) {
 	dataRequest.RemoteAddr = "198.51.100.25:4444"
 	dataRequest.Header.Set("Cf-Ray", "fixture-ray")
 	dataRequest.Header.Set("Cf-Access-Authenticated-User-Email", "operator@example.test")
+	dataRequest.Header.Set("Cf-Access-Jwt-Assertion", chatTestToken(t))
 	dataResponse := httptest.NewRecorder()
 	hub.Handler().ServeHTTP(dataResponse, dataRequest)
 	if dataResponse.Code != http.StatusOK {

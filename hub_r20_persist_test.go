@@ -134,6 +134,7 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.nextID++
 			row = &handoffkeepRelayEvent{ID: f.nextID, Kind: asString(body["kind"]), JobID: asString(body["job_id"]),
 				Epoch: asInt(body["epoch"]), OwnerLane: asString(body["owner_lane"]), ReportPath: asString(body["report_path"]),
+				Question: asString(body["question"]), Machine: asString(body["machine"]), PaneID: asString(body["pane_id"]),
 				Reason: asString(body["reason"]), EventID: asString(body["event_id"]), Text: asString(body["text"]), Attempts: 1}
 			if f.ownerLane != "" {
 				row.OwnerLane = f.ownerLane

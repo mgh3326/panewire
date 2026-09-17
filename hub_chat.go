@@ -3,6 +3,7 @@ package panewire
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	_ "embed"
 	"encoding/json"
 	"errors"
@@ -12,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +42,19 @@ const (
 	hubChatRequestSlop   = 4096
 	hubChatOperatorName  = "operator"
 	hubChatTerminalState = "delivered"
+	// hubChatPageLimit is the store's maximum page size; tail fetches page
+	// through a window at this size rather than a single oldest-first page.
+	hubChatPageLimit = 1000
+	// hubChatTailWindow is the look-behind from the message high-water mark
+	// that /chat/data fetches each poll, so new rows stay visible no matter
+	// how large the table grows.
+	hubChatTailWindow = 512
+	// hubChatQuestionTailAge bounds the non-pending question tail; every
+	// pending question is always fetched regardless of age.
+	hubChatQuestionTailAge = 72 * time.Hour
+	// hubChatQuestionWalkPages bounds one fetch loop so a misbehaving store
+	// cannot pin a request in an unbounded page walk.
+	hubChatQuestionWalkPages = 8
 )
 
 var chatQuestionIDPattern = regexp.MustCompile(`^Q-[0-9]{8}-[0-9]{2,}$`)
@@ -79,7 +94,7 @@ type ChatQuestionUpsert struct {
 type ChatStore interface {
 	UpsertChatQuestion(ctx context.Context, in ChatQuestionUpsert) (ChatQuestion, bool, error)
 	TransitionChatQuestion(ctx context.Context, id, to string) (ChatQuestion, error)
-	ListChatQuestions(ctx context.Context, state string, limit int) ([]ChatQuestion, error)
+	ListChatQuestions(ctx context.Context, state, afterID string, limit int) ([]ChatQuestion, error)
 	CreateChatMessage(ctx context.Context, author, body string) (ChatMessage, error)
 	MarkChatMessageDelivered(ctx context.Context, id int64) (ChatMessage, error)
 	MarkChatMessageFailed(ctx context.Context, id int64) (ChatMessage, error)
@@ -198,11 +213,14 @@ func (c *handoffkeepChatStore) TransitionChatQuestion(ctx context.Context, id, t
 	return question, nil
 }
 
-func (c *handoffkeepChatStore) ListChatQuestions(ctx context.Context, state string, limit int) ([]ChatQuestion, error) {
+func (c *handoffkeepChatStore) ListChatQuestions(ctx context.Context, state, afterID string, limit int) ([]ChatQuestion, error) {
 	query := url.Values{}
 	query.Set("limit", strconv.Itoa(limit))
 	if state != "" {
 		query.Set("state", state)
+	}
+	if afterID != "" {
+		query.Set("after_id", afterID)
 	}
 	status, payload, err := c.do(ctx, http.MethodGet, c.endpoint("/v1/chat/questions")+"?"+query.Encode(), nil)
 	if err != nil {
@@ -318,10 +336,23 @@ var hubChatHTML string
 
 var hubChatTemplate = template.Must(template.New("hub-chat").Parse(hubChatHTML))
 
+// hubChatMessageView decorates a stored row with the hub-side retry context
+// the durable record does not carry: the target lane and the linked question.
+// The browser needs both so retry can rebuild the original attempt without
+// asking the operator to re-pick anything.
+type hubChatMessageView struct {
+	ChatMessage
+	Lane       string `json:"lane,omitempty"`
+	QuestionID string `json:"question_id,omitempty"`
+	// Cancelled distinguishes an operator close-out from a real delivery; the
+	// store records both as delivered, so the hub carries the distinction.
+	Cancelled bool `json:"cancelled,omitempty"`
+}
+
 type hubChatData struct {
-	SchemaVersion int            `json:"schema_version"`
-	Questions     []ChatQuestion `json:"questions"`
-	Messages      []ChatMessage  `json:"messages"`
+	SchemaVersion int                  `json:"schema_version"`
+	Questions     []ChatQuestion       `json:"questions"`
+	Messages      []hubChatMessageView `json:"messages"`
 }
 
 // recoverChatPanic confines a chat handler panic to its own request. The hub
@@ -353,8 +384,12 @@ func hubChatSameOrigin(request *http.Request) bool {
 	}
 }
 
+// authorizeChatUI applies the strict chat gate to every /chat endpoint: the
+// operator bearer token or a verified Cloudflare Access assertion. Loopback
+// and unsigned identity headers grant nothing here — this surface can inject
+// lane directives, and local processes are not trusted.
 func (h *HubServer) authorizeChatUI(writer http.ResponseWriter, request *http.Request) bool {
-	if !h.authorizeUI(request) {
+	if !h.authorizeChat(request) {
 		http.NotFound(writer, request)
 		return false
 	}
@@ -393,6 +428,18 @@ func (h *HubServer) writeChatStoreError(writer http.ResponseWriter, err error) {
 	writeHubJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "chat_unavailable"})
 }
 
+// writeChatListError is writeChatStoreError for list endpoints. A list route
+// has no row-level 404, so a 404 there means the handoffkeep build predates
+// the chat API — an absent store, not an absent row.
+func (h *HubServer) writeChatListError(writer http.ResponseWriter, err error) {
+	var httpErr *chatHTTPError
+	if errors.As(err, &httpErr) && httpErr.status == http.StatusNotFound {
+		writeHubJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "chat_unavailable"})
+		return
+	}
+	h.writeChatStoreError(writer, err)
+}
+
 func (h *HubServer) chatStoreOrUnavailable(writer http.ResponseWriter) ChatStore {
 	if h.chatStore == nil {
 		writeHubJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "chat_unavailable"})
@@ -424,23 +471,117 @@ func (h *HubServer) handleChatData(writer http.ResponseWriter, request *http.Req
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), hubChatStoreTimeout)
 	defer cancel()
-	questions, err := store.ListChatQuestions(ctx, "", hubChatListLimit)
+	questions, err := h.chatTailQuestions(ctx)
 	if err != nil {
-		h.writeChatStoreError(writer, err)
+		h.writeChatListError(writer, err)
 		return
 	}
-	messages, err := store.ListChatMessages(ctx, false, 0, hubChatListLimit)
+	messages, err := h.chatTailMessages(ctx)
 	if err != nil {
-		h.writeChatStoreError(writer, err)
+		h.writeChatListError(writer, err)
 		return
 	}
-	if questions == nil {
-		questions = []ChatQuestion{}
+	views := make([]hubChatMessageView, 0, len(messages))
+	h.chatMu.Lock()
+	for _, message := range messages {
+		_, cancelled := h.chatCancelled[message.ID]
+		views = append(views, hubChatMessageView{ChatMessage: message, Lane: h.chatLaneOf[message.ID], QuestionID: h.chatQuestionOf[message.ID], Cancelled: cancelled})
+	}
+	h.chatMu.Unlock()
+	writeHubJSON(writer, http.StatusOK, hubChatData{SchemaVersion: 1, Questions: questions, Messages: views})
+}
+
+// chatTailQuestions returns every pending question plus the recent tail of
+// resolved/withdrawn ones. Question ids carry their date (Q-YYYYMMDD-NN), so
+// the tail cursor is a dated after_id rather than an oldest-first page — the
+// fixed 200-row head window is what hid new questions forever once the table
+// grew past it.
+func (h *HubServer) chatTailQuestions(ctx context.Context) ([]ChatQuestion, error) {
+	store := h.chatStore
+	seen := make(map[string]ChatQuestion)
+	after := ""
+	for pages := 0; pages < hubChatQuestionWalkPages; pages++ {
+		page, err := store.ListChatQuestions(ctx, "pending", after, hubChatPageLimit)
+		if err != nil {
+			return nil, err
+		}
+		for _, question := range page {
+			seen[question.ID] = question
+			after = question.ID
+		}
+		if len(page) < hubChatPageLimit {
+			break
+		}
+		if pages == hubChatQuestionWalkPages-1 {
+			h.logger.Warn("chat pending question list exceeded the walk bound; oldest pending rows may be hidden")
+		}
+	}
+	after = "Q-" + h.now().UTC().Add(-hubChatQuestionTailAge).Format("20060102") + "-00"
+	for pages := 0; pages < hubChatQuestionWalkPages; pages++ {
+		page, err := store.ListChatQuestions(ctx, "", after, hubChatPageLimit)
+		if err != nil {
+			return nil, err
+		}
+		for _, question := range page {
+			if _, exists := seen[question.ID]; !exists {
+				seen[question.ID] = question
+			}
+			after = question.ID
+		}
+		if len(page) < hubChatPageLimit {
+			break
+		}
+	}
+	questions := make([]ChatQuestion, 0, len(seen))
+	for _, question := range seen {
+		questions = append(questions, question)
+	}
+	sort.Slice(questions, func(i, j int) bool { return questions[i].ID < questions[j].ID })
+	return questions, nil
+}
+
+// chatTailMessages returns the latest hubChatListLimit messages. The store
+// only offers an ascending id cursor, so the hub keeps a high-water mark and
+// reads the window just behind it; the mark is advanced to the newest id seen
+// so each poll stays a bounded fetch instead of a full table walk.
+func (h *HubServer) chatTailMessages(ctx context.Context) ([]ChatMessage, error) {
+	store := h.chatStore
+	h.chatMu.Lock()
+	highWater := h.chatMsgHighWater
+	h.chatMu.Unlock()
+	after := int64(0)
+	if highWater > hubChatTailWindow {
+		after = highWater - hubChatTailWindow
+	}
+	var messages []ChatMessage
+	for {
+		page, err := store.ListChatMessages(ctx, false, after, hubChatPageLimit)
+		if err != nil {
+			return nil, err
+		}
+		if len(page) == 0 {
+			break
+		}
+		messages = append(messages, page...)
+		after = page[len(page)-1].ID
+		if len(page) < hubChatPageLimit {
+			break
+		}
+	}
+	if after > highWater {
+		h.chatMu.Lock()
+		if after > h.chatMsgHighWater {
+			h.chatMsgHighWater = after
+		}
+		h.chatMu.Unlock()
+	}
+	if len(messages) > hubChatListLimit {
+		messages = messages[len(messages)-hubChatListLimit:]
 	}
 	if messages == nil {
 		messages = []ChatMessage{}
 	}
-	writeHubJSON(writer, http.StatusOK, hubChatData{SchemaVersion: 1, Questions: questions, Messages: messages})
+	return messages, nil
 }
 
 type hubChatMessageInput struct {
@@ -487,20 +628,25 @@ func (h *HubServer) handleChatMessageCreate(writer http.ResponseWriter, request 
 	}
 	h.chatMu.Lock()
 	h.chatPending[message.ID] = chatPendingMessage{Lane: input.Lane, Body: input.Body, QuestionID: input.QuestionID}
+	h.chatLaneOf[message.ID] = input.Lane
+	h.chatQuestionOf[message.ID] = input.QuestionID
 	h.chatMu.Unlock()
 	h.kickChatDispatcher()
 	writeHubJSON(writer, http.StatusCreated, message)
 }
 
 type hubChatMessageRetryInput struct {
-	Lane       string `json:"lane"`
+	Lane       string `json:"lane,omitempty"`
 	QuestionID string `json:"question_id,omitempty"`
 }
 
 // handleChatMessageRetry re-sends a failed message's body as a new store row.
 // handoffkeep's state machine makes failed a sink (stored → delivered|failed
 // only), so retrying in place is impossible; the new row is the fresh attempt
-// and the failed row remains as the permanent failure record.
+// and the failed row remains as the permanent failure record. The question
+// link belongs to the message, not to whatever the client happens to be
+// looking at: the hub's recorded link wins, and the client value is only a
+// fallback for rows written before this hub learned it.
 func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *http.Request) {
 	defer h.recoverChatPanic(writer)
 	if !h.authorizeChatUIPost(writer, request) {
@@ -520,7 +666,11 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
-	if !validReportRelayLaneName(input.Lane) || (input.QuestionID != "" && !chatQuestionIDPattern.MatchString(input.QuestionID)) {
+	if input.Lane != "" && !validReportRelayLaneName(input.Lane) {
+		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		return
+	}
+	if input.QuestionID != "" && !chatQuestionIDPattern.MatchString(input.QuestionID) {
 		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
@@ -539,13 +689,41 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_failed"})
 		return
 	}
+	// A failed row must have no live relay row: retrying one that is still
+	// undelivered would put the directive in the pane twice. Rows from before
+	// this invariant existed can carry both, so verify rather than assume.
+	live, err := h.liveChatRelayRows(ctx)
+	if err != nil {
+		h.writeChatListError(writer, err)
+		return
+	}
+	if _, queued := live[id]; queued {
+		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_queued"})
+		return
+	}
+	h.chatMu.Lock()
+	lane := h.chatLaneOf[id]
+	if lane == "" {
+		lane = input.Lane
+	}
+	questionID := input.QuestionID
+	if recorded := h.chatQuestionOf[id]; recorded != "" {
+		questionID = recorded
+	}
+	h.chatMu.Unlock()
+	if !validReportRelayLaneName(lane) {
+		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "lane_required"})
+		return
+	}
 	resent, err := store.CreateChatMessage(ctx, hubChatOperatorName, message.Body)
 	if err != nil {
 		h.writeChatStoreError(writer, err)
 		return
 	}
 	h.chatMu.Lock()
-	h.chatPending[resent.ID] = chatPendingMessage{Lane: input.Lane, Body: message.Body, QuestionID: input.QuestionID}
+	h.chatPending[resent.ID] = chatPendingMessage{Lane: lane, Body: message.Body, QuestionID: questionID}
+	h.chatLaneOf[resent.ID] = lane
+	h.chatQuestionOf[resent.ID] = questionID
 	h.chatMu.Unlock()
 	h.kickChatDispatcher()
 	writeHubJSON(writer, http.StatusCreated, resent)
@@ -593,6 +771,15 @@ func (h *HubServer) handleChatMessageCancel(writer http.ResponseWriter, request 
 		h.chatMu.Lock()
 		delete(h.chatPending, id)
 		h.chatMu.Unlock()
+		// Retire the durable relay row before closing out: otherwise replay
+		// would still inject the cancelled answer on the next node hello.
+		if live, err := h.liveChatRelayRows(ctx); err == nil {
+			if row, queued := live[id]; queued {
+				if err := h.handoffkeep.markDelivered(ctx, row.ID, "hub", "chat-cancel"); err != nil {
+					h.logger.Warn("cancelled chat message relay row was not retired", "id", id)
+				}
+			}
+		}
 		closed, err := store.MarkChatMessageDelivered(ctx, id)
 		if err != nil {
 			h.writeChatStoreError(writer, err)
@@ -604,6 +791,10 @@ func (h *HubServer) handleChatMessageCancel(writer http.ResponseWriter, request 
 			writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_terminal", "relay_state": closed.RelayState})
 			return
 		}
+		h.chatMu.Lock()
+		h.chatCancelled[id] = struct{}{}
+		h.chatMu.Unlock()
+		h.noteChatTerminal(id)
 		writeHubJSON(writer, http.StatusOK, closed)
 	}
 }
@@ -744,43 +935,133 @@ func (h *HubServer) drainChatOutbox(ctx context.Context) {
 	}
 }
 
-// failOrphanChatMessages fails stored rows the hub has no lane for. A hub that
-// restarted between create and relay lost the in-memory lane mapping; leaving
-// such a row in stored would display "전송 중" forever, so after a grace period
-// it becomes a visible failed row the operator can retry or cancel.
+// failOrphanChatMessages fails stored rows nothing will ever deliver: no
+// in-memory pending entry and no live (undelivered) relay row. A row whose
+// durable relay event still exists is queued, not orphaned — replay owns it.
+// The sweep walks from chatSweepCursor, which only advances past permanently
+// failed rows, so a growing failed backlog can never pin the sweep on the
+// oldest window.
 func (h *HubServer) failOrphanChatMessages(ctx context.Context) {
-	messages, err := h.chatStore.ListChatMessages(ctx, true, 0, hubChatListLimit)
+	live, err := h.liveChatRelayRows(ctx)
 	if err != nil {
-		h.logger.Warn("chat undelivered sweep could not read the store")
+		h.warnChatSweepOnce("chat orphan sweep paused: live relay rows unreadable")
 		return
 	}
-	for _, message := range messages {
-		if message.RelayState != "stored" {
-			continue
+	h.chatMu.Lock()
+	after := h.chatSweepCursor
+	h.chatMu.Unlock()
+	for {
+		messages, err := h.chatStore.ListChatMessages(ctx, true, after, hubChatPageLimit)
+		if err != nil {
+			h.warnChatSweepOnce("chat undelivered sweep could not read the store")
+			return
 		}
-		h.chatMu.Lock()
-		_, pending := h.chatPending[message.ID]
-		h.chatMu.Unlock()
-		if pending {
-			continue
+		for _, message := range messages {
+			if message.RelayState != "stored" {
+				// failed is permanent; the cursor never revisits it.
+				h.chatMu.Lock()
+				if message.ID > h.chatSweepCursor {
+					h.chatSweepCursor = message.ID
+				}
+				h.chatMu.Unlock()
+			} else {
+				h.chatMu.Lock()
+				_, pending := h.chatPending[message.ID]
+				h.chatMu.Unlock()
+				if pending {
+					continue
+				}
+				if _, queued := live[message.ID]; queued {
+					continue
+				}
+				if h.now().UTC().Sub(message.CreatedAt) < hubChatOrphanGrace {
+					continue
+				}
+				if _, err := h.chatStore.MarkChatMessageFailed(ctx, message.ID); err != nil {
+					h.logger.Warn("chat orphan message was not marked failed", "id", message.ID)
+					continue
+				}
+				h.logger.Warn("chat message had no delivery lane after restart; marked failed", "id", message.ID)
+			}
+			if message.ID > after {
+				after = message.ID
+			}
 		}
-		if h.now().UTC().Sub(message.CreatedAt) < hubChatOrphanGrace {
-			continue
+		if len(messages) < hubChatPageLimit {
+			break
 		}
-		if _, err := h.chatStore.MarkChatMessageFailed(ctx, message.ID); err != nil {
-			h.logger.Warn("chat orphan message was not marked failed", "id", message.ID)
-			continue
-		}
-		h.logger.Warn("chat message had no delivery lane after restart; marked failed", "id", message.ID)
 	}
+	h.chatMu.Lock()
+	h.chatSweepWarned = false
+	h.chatMu.Unlock()
+}
+
+// warnChatSweepOnce keeps a broken store from logging on every dispatch tick:
+// one warning per failing period, reset by the next completed sweep.
+func (h *HubServer) warnChatSweepOnce(message string) {
+	h.chatMu.Lock()
+	if h.chatSweepWarned {
+		h.chatMu.Unlock()
+		return
+	}
+	h.chatSweepWarned = true
+	h.chatMu.Unlock()
+	h.logger.Warn(message)
+}
+
+// liveChatRelayRows maps chat message id → its undelivered durable relay row.
+// The relay row is the only durable record that a chat directive is still
+// owed to a lane, so it is the sweep/cancel/retry source of truth.
+func (h *HubServer) liveChatRelayRows(ctx context.Context) (map[int64]handoffkeepRelayEvent, error) {
+	rows := make(map[int64]handoffkeepRelayEvent)
+	if h.handoffkeep == nil {
+		return rows, nil
+	}
+	var afterID int64
+	for {
+		pageStart := afterID
+		records, err := h.handoffkeep.listUndelivered(ctx, "", "lane.event", afterID, handoffkeepReplayLimit)
+		if err != nil {
+			return nil, err
+		}
+		for _, record := range records {
+			if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
+				if chatID, err := strconv.ParseInt(match[1], 10, 64); err == nil {
+					rows[chatID] = record
+				}
+			}
+			if record.ID > afterID {
+				afterID = record.ID
+			}
+		}
+		if len(records) < handoffkeepReplayLimit {
+			return rows, nil
+		}
+		if afterID <= pageStart {
+			return nil, errors.New("chat live relay cursor did not advance")
+		}
+	}
+}
+
+// chatRelayEventID derives the durable relay event id. The body hash keeps
+// regenerated stores honest: a fresh database that reuses message id 7 for a
+// different body cannot collide with the old chat-7 row and mark the wrong
+// directive delivered.
+var chatRelayEventPattern = regexp.MustCompile(`^chat-([0-9]+)-[0-9a-f]{8}$`)
+
+func chatRelayEventID(id int64, body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return fmt.Sprintf("chat-%d-%x", id, sum[:4])
 }
 
 // relayChatMessage performs the ordered send contract: the row is already
 // stored, so relay through the existing lane.event path, then mark delivered
-// only when the relay actually routed the directive. Every other outcome —
-// persist failure, no route, rejection — is a visible failed row.
+// only when the relay actually routed the directive — or already had. A
+// durable-but-uninjected row is queued, not failed: replay owns it and the
+// replay hook flips the chat row when the injection finally happens. Only
+// outcomes with no durable row (persist failure, oversized text) mark failed.
 func (h *HubServer) relayChatMessage(ctx context.Context, id int64, pending chatPendingMessage) {
-	eventID := fmt.Sprintf("chat-%d", id)
+	eventID := chatRelayEventID(id, pending.Body)
 	event := hubJobEventPayload{
 		JobID:     laneEventTransportID(pending.Lane, eventID),
 		Epoch:     1,
@@ -790,22 +1071,103 @@ func (h *HubServer) relayChatMessage(ctx context.Context, id int64, pending chat
 		Label:     "operator-chat",
 		Host:      "hub",
 		Reason:    "operator_chat",
+		// The question id rides the durable relay row so a replayed delivery
+		// can still resolve it after a hub restart emptied the in-memory maps.
+		Question: pending.QuestionID,
 	}
 	result := h.relayLaneEvent(event, nil)
-	if result.Routed || result.Duplicate {
+	switch {
+	case result.Routed || result.Duplicate || result.AlreadyDelivered:
 		if _, err := h.chatStore.MarkChatMessageDelivered(ctx, id); err != nil {
 			h.logger.Warn("chat message delivery was not recorded", "id", id)
 		}
+		h.noteChatTerminal(id)
 		if pending.QuestionID != "" {
 			if _, err := h.chatStore.TransitionChatQuestion(ctx, pending.QuestionID, "resolved"); err != nil {
 				h.logger.Warn("answered chat question was not resolved", "id", pending.QuestionID)
 			}
 		}
+	case result.PersistFailed || result.RejectedTooLong || result.ID == 0:
+		if _, err := h.chatStore.MarkChatMessageFailed(ctx, id); err != nil {
+			h.logger.Warn("chat message failure was not recorded", "id", id)
+		}
+	default:
+		// Persisted but not injected: the undelivered relay row is the queue.
+		// Leaving the chat row stored is what keeps "failed" honest — a failed
+		// row never has a live relay row, so it can never be injected later.
+	}
+}
+
+// noteChatTerminal drops the hub-side context for a row that reached its
+// terminal delivered state. Failed rows keep their lane/question entries so a
+// later retry can rebuild the attempt.
+func (h *HubServer) noteChatTerminal(id int64) {
+	h.chatMu.Lock()
+	delete(h.chatPending, id)
+	delete(h.chatQuestionOf, id)
+	delete(h.chatLaneOf, id)
+	h.chatMu.Unlock()
+}
+
+// noteChatRelayDelivered is the replay-complete hook: a queued chat directive
+// was just injected, so the chat row becomes delivered and its linked
+// question — carried on the durable relay row — is resolved.
+func (h *HubServer) noteChatRelayDelivered(id int64, question string) {
+	if h.chatStore == nil {
 		return
 	}
-	if _, err := h.chatStore.MarkChatMessageFailed(ctx, id); err != nil {
-		h.logger.Warn("chat message failure was not recorded", "id", id)
+	ctx, cancel := context.WithTimeout(context.Background(), hubChatStoreTimeout)
+	defer cancel()
+	delivered, err := h.chatStore.MarkChatMessageDelivered(ctx, id)
+	if err != nil || delivered.RelayState != hubChatTerminalState {
+		h.logger.Warn("chat message replayed delivery was not recorded", "id", id)
+		return
 	}
+	h.noteChatTerminal(id)
+	if question != "" {
+		if _, err := h.chatStore.TransitionChatQuestion(ctx, question, "resolved"); err != nil {
+			h.logger.Warn("answered chat question was not resolved", "id", question)
+		}
+	}
+}
+
+// chatReplayDisposition decides what replay does with a chat relay row.
+// "inject" while the chat row is still stored — or when no chat store is
+// configured at all, in which case the row is just an owed directive with no
+// chat state to contradict. "retire" when the store authoritatively shows the
+// row terminal (delivered covers cancel) or gone. "defer" when the store
+// cannot be read: the row stays queued for the next replay rather than being
+// injected on a guess or dropped on a transient error.
+func (h *HubServer) chatReplayDisposition(id int64) string {
+	if h.chatStore == nil {
+		return "inject"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hubChatStoreTimeout)
+	defer cancel()
+	message, found, err := h.chatStore.GetChatMessage(ctx, id)
+	if err != nil {
+		return "defer"
+	}
+	if !found || message.RelayState != "stored" {
+		return "retire"
+	}
+	return "inject"
+}
+
+// noteChatRelayExhausted marks a queued chat row failed when its durable
+// relay row has spent every replay attempt: nothing will inject it now, and
+// the operator should see the honest terminal state.
+func (h *HubServer) noteChatRelayExhausted(id int64) {
+	if h.chatStore == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hubChatStoreTimeout)
+	defer cancel()
+	if _, err := h.chatStore.MarkChatMessageFailed(ctx, id); err != nil {
+		h.logger.Warn("exhausted chat relay row was not marked failed", "id", id)
+		return
+	}
+	h.logger.Warn("chat relay row spent every replay attempt; marked failed", "id", id)
 }
 
 // chatRelayText builds the lane.event text. The relay contract forbids control
