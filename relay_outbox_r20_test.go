@@ -61,8 +61,8 @@ func r20LegacySchemaDB(t *testing.T, path string, seeds []relayOutboxKey) {
 	}
 	sentAt := time.Now().Add(-time.Hour).UnixMilli()
 	for _, key := range seeds {
-		if _, err := db.Exec(`INSERT INTO relay_sent(kind,job_id,epoch,report_path,reason,lane,event_id,sent_at) VALUES(?,?,?,?,?,'','',?)`,
-			key.Kind, key.JobID, int64(key.Epoch), key.ReportPath, key.Reason, sentAt); err != nil {
+		if _, err := db.Exec(`INSERT INTO relay_sent(kind,job_id,epoch,report_path,reason,lane,event_id,sent_at) VALUES(?,?,?,?,?,?,?,?)`,
+			key.Kind, key.JobID, int64(key.Epoch), key.ReportPath, key.Reason, key.Lane, key.EventID, sentAt); err != nil {
 			t.Fatal(err)
 		}
 	}

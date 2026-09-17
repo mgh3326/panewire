@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -623,13 +624,109 @@ func TestJobEventSuppressionWarnsOncePerFile(t *testing.T) {
 		}
 	}
 
-	// The second scan re-judges the files but re-warns nothing: the audit
-	// rows are already written, so suppression is loud exactly once.
-	if events := r20Node(inbox, store).jobCompletionEvents(); len(events) != 0 {
+	// A same-process rescan re-judges the files but re-warns nothing: the
+	// audit rows are already written, so suppression is loud exactly once.
+	if events := node.jobCompletionEvents(); len(events) != 0 {
 		t.Fatalf("a rescan offered %d suppressed events, want 0", len(events))
 	}
 	if len(warns) != 2 {
 		t.Fatalf("a rescan raised the warn count to %d, want it steady at 2", len(warns))
+	}
+
+	// A restart must stay just as quiet: the durable audit row, not process
+	// memory, is what suppresses the repeat warn. The restarted node gets
+	// the same warn hook - an unwatched restart could never show a re-warn,
+	// which is exactly the blind spot this assertion exists against.
+	restarted := r20Node(inbox, store)
+	restarted.warn = func(message string) { warns = append(warns, message) }
+	if events := restarted.jobCompletionEvents(); len(events) != 0 {
+		t.Fatalf("a restarted node offered %d suppressed events, want 0", len(events))
+	}
+	if len(warns) != 2 {
+		t.Fatalf("a restart raised the warn count to %d, want it steady at 2", len(warns))
+	}
+}
+
+// A node that only ever relayed lane events has no job.* history to migrate:
+// the rekey still runs for the lane row, but with zero job.* rows moved there
+// is no migration to date, so no stamp and no cutoff. Counting lane rows
+// toward the stamp would mint a cutoff that suppresses owed job.* files.
+func TestJobEventLaneOnlyRekeyEarnsNoStamp(t *testing.T) {
+	inbox := t.TempDir()
+	old := time.Now().Add(-time.Hour)
+	for index := 1; index <= 3; index++ {
+		r20WriteEvent(t, inbox, "job-laneonly", fmt.Sprintf("%05d-job.completed.json", index), relayEventIDBody, old)
+	}
+	store := r20MigratedStore(t, []relayOutboxKey{{Kind: "lane.event", Lane: "lane-a", EventID: "7"}})
+	defer store.Close()
+
+	var eventIDInPrimaryKey int
+	if err := store.db.QueryRow(`SELECT pk FROM pragma_table_info('relay_sent') WHERE name='event_id'`).Scan(&eventIDInPrimaryKey); err != nil {
+		t.Fatal(err)
+	}
+	if eventIDInPrimaryKey == 0 {
+		t.Fatal("the rekey did not run on the lane-only legacy database")
+	}
+	if migratedAt, ok, err := store.RelayEventIDMigrationAt(context.Background()); err != nil || ok {
+		t.Fatalf("a lane-only rekey reported a migration stamp %s(%v) err=%v, want none", migratedAt, ok, err)
+	}
+	if events := r20Node(inbox, store).jobCompletionEvents(); len(events) != 3 {
+		t.Fatalf("a lane-only-migrated store offered %d events, want all 3 backlog files", len(events))
+	}
+}
+
+// If the rekey's copy step fails - here a legacy table so old it lacks
+// persisted_at, which the INSERT...SELECT names - the migration must abort
+// loudly and leave relay_sent untouched. The previous code shadowed err in
+// the CREATE's if-scope, so a failed copy still reached DROP+RENAME+commit
+// and the populated legacy table was replaced by an empty one.
+func TestStoreRekeyCopyFailurePreservesLegacyRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "panewire.sqlite3")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The pre-persisted_at shape: five-field key, lane/event_id columns,
+	// no persisted_at column for the copy's SELECT to read.
+	if _, err := db.Exec(`CREATE TABLE relay_sent (
+	 kind TEXT NOT NULL, job_id TEXT NOT NULL, epoch INTEGER NOT NULL, report_path TEXT NOT NULL, reason TEXT NOT NULL,
+	 lane TEXT NOT NULL DEFAULT '', event_id TEXT NOT NULL DEFAULT '',
+	 sent_at INTEGER,
+	 PRIMARY KEY(kind, job_id, epoch, report_path, reason)
+)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO relay_sent(kind,job_id,epoch,report_path,reason,sent_at) VALUES('job.completed','job-kept',1,'report.md','',1234)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenStore(path)
+	if err == nil {
+		store.Close()
+		t.Fatal("OpenStore succeeded even though the rekey copy could not run")
+	}
+
+	check, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer check.Close()
+	var rows int
+	if err := check.QueryRow(`SELECT COUNT(*) FROM relay_sent WHERE job_id='job-kept'`).Scan(&rows); err != nil {
+		t.Fatalf("the legacy relay_sent table did not survive the failed migration: %v", err)
+	}
+	if rows != 1 {
+		t.Fatalf("the failed migration left %d legacy rows, want the 1 it started with", rows)
+	}
+	var eventIDInPrimaryKey int
+	if err := check.QueryRow(`SELECT pk FROM pragma_table_info('relay_sent') WHERE name='event_id'`).Scan(&eventIDInPrimaryKey); err != nil {
+		t.Fatal(err)
+	}
+	if eventIDInPrimaryKey != 0 {
+		t.Fatal("a failed copy still swapped in the rekeyed table")
 	}
 }
 

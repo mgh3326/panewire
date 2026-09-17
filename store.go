@@ -127,7 +127,10 @@ func OpenStore(path string) (*Store, error) {
 			db.Close()
 			return nil, err
 		}
-		if _, err := tx.Exec(`CREATE TABLE relay_sent_rekeyed (
+		// The outer err must see every failure: a shadowed one here let a
+		// failed copy fall through to DROP+RENAME+commit, silently replacing
+		// the populated legacy table with an empty rekeyed one.
+		if _, err = tx.Exec(`CREATE TABLE relay_sent_rekeyed (
 	 kind TEXT NOT NULL, job_id TEXT NOT NULL, epoch INTEGER NOT NULL, report_path TEXT NOT NULL, reason TEXT NOT NULL, lane TEXT NOT NULL DEFAULT '', event_id TEXT NOT NULL DEFAULT '',
 	 sent_at INTEGER, persisted_at INTEGER, suppressed_at INTEGER,
 	 PRIMARY KEY(kind, job_id, epoch, report_path, reason, event_id)
