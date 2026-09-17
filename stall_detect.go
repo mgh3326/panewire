@@ -1331,7 +1331,9 @@ func (m *stallDetectManager) readOnePane(ctx context.Context, job stallJobRow, a
 		m.cleanReads[job.PaneID] = 0
 	}
 	bannerSeen := false
+	present := make(map[string]bool, len(matches))
 	for _, match := range matches {
+		present[match.fingerprint] = true
 		if match.cause == stallCauseInputUnsubmitted {
 			bannerSeen = true
 		}
@@ -1360,6 +1362,15 @@ func (m *stallDetectManager) readOnePane(ctx context.Context, job stallJobRow, a
 			m.openIncident(ctx, job, match.cause, match, at, true, map[string]any{
 				"pane": job.PaneID, "matched_line": redactSecrets(match.line), "revision": evidence.Revision,
 			})
+		}
+	}
+	// A fingerprint absent from this read scrolled out of the buffer
+	// entirely. Its old watermark must not suppress a genuinely new
+	// identical line — a transient redraw that re-shows the same banner
+	// fires once more, a visible duplicate rather than a silent miss.
+	for fingerprint := range pane.Fingerprints {
+		if !present[fingerprint] {
+			delete(pane.Fingerprints, fingerprint)
 		}
 	}
 	if !bannerSeen {

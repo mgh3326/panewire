@@ -391,8 +391,10 @@ func (s *Store) markStallDeadlineExtApplied(ctx context.Context, jobID string, s
 
 // recordStallIncident inserts one incident keyed by (job, attempt, round,
 // cause, occurrence). It never updates an existing row — a second sighting of
-// the same cause is a new occurrence — and returns false when the row already
-// exists so restarts stay idempotent.
+// the same cause is a new occurrence. Restart idempotence comes from the
+// persisted per-pane fingerprints, not from this insert: occurrence is always
+// max+1, so INSERT OR IGNORE is a belt-and-suspenders guard that returns
+// false only if the key somehow collides.
 func (s *Store) recordStallIncident(ctx context.Context, row stallIncidentRow) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

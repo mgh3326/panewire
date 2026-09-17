@@ -305,11 +305,58 @@ func TestStallOverdueEvidenceBundle(t *testing.T) {
 	if evidence["summary"] != "[overdue] 확인 필요" {
 		t.Fatalf("summary=%v", evidence["summary"])
 	}
+	// The bundle is a closed set of measured fields — a verdict-shaped key
+	// like worker_state:"hung" must not be smuggled in (C1b).
+	overdueAllowed := map[string]bool{
+		"deadline_at": true, "deadline_source": true, "action_owner": true, "summary": true,
+		"cause_candidates": true, "last_file_activity": true, "observed_freshness_ms": true,
+		"process_cpu": true, "report_local": true, "report_remote": true,
+		"screen_excerpt": true, "observed_at": true,
+	}
+	for key := range evidence {
+		if !overdueAllowed[key] {
+			t.Fatalf("overdue evidence carries non-allowlisted key %q: %v", key, evidence)
+		}
+	}
 	blob := string(rows[0].Evidence)
 	for _, banned := range []string{"stalled", "stopped", "멈춤", "정지"} {
 		if strings.Contains(blob, banned) {
 			t.Fatalf("evidence asserts a stop via %q: %s", banned, blob)
 		}
+	}
+}
+
+// SHOULD-4 — once the old banner scrolled out of the buffer completely its
+// watermark must not suppress a genuinely new identical error: the second
+// sighting is occurrence two, not a silent miss.
+func TestStallScrolloutNewIdenticalError(t *testing.T) {
+	fx := newStallFixture(t, false)
+	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+	fx.reads["w1:p1"] = readEvidence{Text: "working\n", Revision: 1}
+	fx.scan()
+	fx.reads["w1:p1"] = readEvidence{Text: stallFixtureAuth + "\n", Revision: 2}
+	fx.advance(time.Minute)
+	fx.scan()
+	if rows := stallIncidentsFor(t, fx, "job-a"); len(rows) != 1 || rows[0].Cause != stallCauseAuthRefused {
+		t.Fatalf("first sighting missing: %+v", stallCauses(rows))
+	}
+	// The banner scrolls out of the buffer entirely — the fingerprint is
+	// absent from this read's matches, so the old watermark must drop.
+	fx.reads["w1:p1"] = readEvidence{Text: "fresh output\n", Revision: 3}
+	fx.advance(time.Minute)
+	fx.scan()
+	// A genuinely new identical failure is a new occurrence, not a miss.
+	fx.reads["w1:p1"] = readEvidence{Text: stallFixtureAuth + "\n", Revision: 4}
+	fx.advance(time.Minute)
+	fx.scan()
+	auth := 0
+	for _, row := range stallIncidentsFor(t, fx, "job-a") {
+		if row.Cause == stallCauseAuthRefused {
+			auth++
+		}
+	}
+	if auth != 2 {
+		t.Fatalf("post-scrollout identical error swallowed: want 2 auth rows, got %+v", stallCauses(stallIncidentsFor(t, fx, "job-a")))
 	}
 }
 
