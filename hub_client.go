@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -1140,7 +1141,10 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 // window may be relayed (a rolling restart's in-flight work is still fresh
 // news), everything older is recorded as suppressed and never offered. A
 // missing migration stamp or an unidentifiable file fails open, since a lost
-// notification is worse than a duplicate.
+// notification is worse than a duplicate - and a store that never migrated
+// has no stamp, so a recreated or relocated database suppresses nothing.
+// Every suppression is logged once, the first scan that retires the file:
+// silent loss is the failure mode this gate exists against.
 func (client *HubClient) suppressPreMigrationRelayEvent(job hubScannedRelayEvent, key relayOutboxKey) bool {
 	if client.outbox == nil || key.EventID == "" || job.Kind == "lane.event" || job.EventTime.IsZero() {
 		return false
@@ -1150,11 +1154,15 @@ func (client *HubClient) suppressPreMigrationRelayEvent(job hubScannedRelayEvent
 		client.warnMessage("relay migration stamp unavailable")
 		return false
 	}
-	if !ok || !job.EventTime.Before(migratedAt.Add(-relayMigrationGrace)) {
+	cutoff := migratedAt.Add(-relayMigrationGrace)
+	if !ok || !job.EventTime.Before(cutoff) {
 		return false
 	}
-	if err := client.outbox.RecordRelaySuppressed(context.Background(), key, client.nowUTC()); err != nil {
+	recorded, err := client.outbox.RecordRelaySuppressed(context.Background(), key, client.nowUTC())
+	if err != nil {
 		client.warnMessage("relay suppression record failed")
+	} else if recorded {
+		client.warnMessage(fmt.Sprintf("relay suppressed %s %s for %s: event file predates this node's migration cutoff %s", job.Kind, key.EventID, key.JobID, cutoff.Format(time.RFC3339)))
 	}
 	return true
 }
