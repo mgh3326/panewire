@@ -18,6 +18,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -53,22 +54,34 @@ func chatTestCerts(t *testing.T, key *rsa.PrivateKey) *httptest.Server {
 	return server
 }
 
-// chatSignJWT builds a synthetic Cf-Access-Jwt-Assertion: the same shape and
-// signature Cloudflare emits, so the verifier exercises its real code path.
-func chatSignJWT(t *testing.T, key *rsa.PrivateKey, aud string, exp time.Time) string {
+// chatSignJWTClaims builds a synthetic Cf-Access-Jwt-Assertion over arbitrary
+// claims: the same shape and signature Cloudflare emits, so the verifier
+// exercises its real code path.
+func chatSignJWTClaims(t *testing.T, key *rsa.PrivateKey, kid string, claims map[string]any) string {
 	t.Helper()
-	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"RS256","kid":"k1","typ":"JWT"}`))
-	claims, err := json.Marshal(map[string]any{"aud": []string{aud}, "exp": exp.Unix(), "iat": time.Now().Unix(), "sub": "op@example.test", "email": "op@example.test"})
+	headerJSON, err := json.Marshal(map[string]any{"alg": "RS256", "kid": kid, "typ": "JWT"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	payload := base64.RawURLEncoding.EncodeToString(claims)
+	header := base64.RawURLEncoding.EncodeToString(headerJSON)
+	payloadJSON, err := json.Marshal(claims)
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := base64.RawURLEncoding.EncodeToString(payloadJSON)
 	digest := sha256.Sum256([]byte(header + "." + payload))
 	signature, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, digest[:])
 	if err != nil {
 		t.Fatal(err)
 	}
 	return header + "." + payload + "." + base64.RawURLEncoding.EncodeToString(signature)
+}
+
+// chatSignJWT builds a well-formed assertion: correct audience, sane expiry,
+// and the iat/sub/email claims a real Cloudflare token carries.
+func chatSignJWT(t *testing.T, key *rsa.PrivateKey, aud string, exp time.Time) string {
+	t.Helper()
+	return chatSignJWTClaims(t, key, "k1", map[string]any{"aud": []string{aud}, "exp": exp.Unix(), "iat": time.Now().Unix(), "sub": "op@example.test", "email": "op@example.test"})
 }
 
 func chatTestToken(t *testing.T) string {
@@ -87,6 +100,9 @@ type fakeChatStore struct {
 	err       error
 	panicOn   string
 	calls     []string
+	// maxListLimit records the largest page size a ListChatMessages call
+	// asked for, so the page-size contract is pinned, not just the rows.
+	maxListLimit int
 }
 
 func newFakeChatStore() *fakeChatStore {
@@ -237,6 +253,9 @@ func (f *fakeChatStore) ListChatMessages(_ context.Context, undelivered bool, af
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if limit > f.maxListLimit {
+		f.maxListLimit = limit
+	}
 	out := []ChatMessage{}
 	for _, id := range f.order {
 		message := f.messages[id]
@@ -315,7 +334,19 @@ func chatTestHub(t *testing.T, lanes string, relay *handoffkeepRelayClient, stor
 	if err != nil {
 		t.Fatal(err)
 	}
+	chatWarmAccessKeys(t, hub)
 	return hub
+}
+
+// chatWarmAccessKeys synchronously fills the verifier cache so a test never
+// races the background refresh the verifier starts on construction.
+func chatWarmAccessKeys(t *testing.T, hub *HubServer) {
+	t.Helper()
+	if hub.cfAccess != nil {
+		if err := hub.cfAccess.refresh(); err != nil {
+			t.Fatalf("warm access keys: %v", err)
+		}
+	}
 }
 
 // chatUIRequest builds a browser-shaped request arriving through Cloudflare
@@ -475,11 +506,22 @@ func TestHubChatJWTRejections(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	key := chatTestSigningKey()
+	now := time.Now()
 	cases := map[string]string{
-		"bad_signature": chatSignJWT(t, otherKey, chatTestAUD, time.Now().Add(time.Hour)),
-		"wrong_aud":     chatSignJWT(t, chatTestSigningKey(), "other-app-aud", time.Now().Add(time.Hour)),
-		"expired":       chatSignJWT(t, chatTestSigningKey(), chatTestAUD, time.Now().Add(-time.Hour)),
+		"bad_signature": chatSignJWT(t, otherKey, chatTestAUD, now.Add(time.Hour)),
+		"wrong_aud":     chatSignJWT(t, key, "other-app-aud", now.Add(time.Hour)),
+		"expired":       chatSignJWT(t, key, chatTestAUD, now.Add(-time.Hour)),
 		"garbage":       "not.a.jwt",
+		// A token that is not yet valid, one issued by a different team, one
+		// with no iat, and one whose exp-iat span exceeds the platform
+		// maximum all fail closed — each check is a mutant target.
+		"future_nbf":  chatSignJWTClaims(t, key, "k1", map[string]any{"aud": []string{chatTestAUD}, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix(), "nbf": now.Add(time.Hour).Unix()}),
+		"foreign_iss": chatSignJWTClaims(t, key, "k1", map[string]any{"aud": []string{chatTestAUD}, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix(), "iss": "https://other.cloudflareaccess.com"}),
+		"missing_iat": chatSignJWTClaims(t, key, "k1", map[string]any{"aud": []string{chatTestAUD}, "exp": now.Add(time.Hour).Unix()}),
+		"long_lived":  chatSignJWTClaims(t, key, "k1", map[string]any{"aud": []string{chatTestAUD}, "exp": now.Add(90 * 24 * time.Hour).Unix(), "iat": now.Unix()}),
+		"unknown_kid": chatSignJWTClaims(t, key, "k9", map[string]any{"aud": []string{chatTestAUD}, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix()}),
+		"missing_kid": chatSignJWTClaims(t, key, "", map[string]any{"aud": []string{chatTestAUD}, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix()}),
 	}
 	for name, token := range cases {
 		request := httptest.NewRequest(http.MethodGet, "/chat/data", nil)
@@ -494,6 +536,13 @@ func TestHubChatJWTRejections(t *testing.T) {
 	valid.Header.Set("Cf-Access-Jwt-Assertion", chatTestToken(t))
 	if writer := chatServe(t, hub, valid); writer.Code != http.StatusOK {
 		t.Fatalf("valid assertion status=%d body=%q, want 200", writer.Code, writer.Body.String())
+	}
+	// Control: an assertion that does carry the team's issuer passes.
+	withIss := httptest.NewRequest(http.MethodGet, "/chat/data", nil)
+	withIss.RemoteAddr = "127.0.0.1:4444"
+	withIss.Header.Set("Cf-Access-Jwt-Assertion", chatSignJWTClaims(t, key, "k1", map[string]any{"aud": []string{chatTestAUD}, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix(), "iss": "https://team.cloudflareaccess.com"}))
+	if writer := chatServe(t, hub, withIss); writer.Code != http.StatusOK {
+		t.Fatalf("valid assertion with iss status=%d body=%q, want 200", writer.Code, writer.Body.String())
 	}
 }
 
@@ -1243,8 +1292,10 @@ func TestHubChatDataServesTail(t *testing.T) {
 	hub := chatTestHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, nil, store)
 	ctx := context.Background()
 
-	// 220 old rows — all beyond the 200-row head window.
-	for i := 0; i < 220; i++ {
+	// 1200 old rows — past the 200-row head window AND past a single
+	// maximum-size store page, so a single-page regression cannot reach the
+	// newest row either.
+	for i := 0; i < hubChatPageLimit+200; i++ {
 		if _, err := store.CreateChatMessage(ctx, "desk", fmt.Sprintf("옛 메시지 %d", i)); err != nil {
 			t.Fatal(err)
 		}
@@ -1307,6 +1358,12 @@ func TestHubChatDataServesTail(t *testing.T) {
 	}
 	if len(data.Messages) > hubChatListLimit {
 		t.Fatalf("/chat/data served %d messages, want at most %d", len(data.Messages), hubChatListLimit)
+	}
+	store.mu.Lock()
+	maxLimit := store.maxListLimit
+	store.mu.Unlock()
+	if maxLimit > hubChatPageLimit {
+		t.Fatalf("a ListChatMessages call asked for %d rows, above the %d-row page contract", maxLimit, hubChatPageLimit)
 	}
 }
 
@@ -1445,5 +1502,494 @@ func TestHubChatCancelledWithLiveRelayRowNeverInjects(t *testing.T) {
 	fake.mu.Unlock()
 	if liveUndelivered != 0 {
 		t.Fatalf("%d undelivered chat relay rows remain after cancelled-row replay", liveUndelivered)
+	}
+}
+
+// AC-B4-5 (a)+(b): the certs fetch is a background job, never the request
+// path. A valid cached key set keeps authorizing while fetches fail; an
+// expired cache with unreachable certs rejects — fail closed, never
+// fail open — and recovery arrives through the kicked background refresh.
+func TestHubChatJWTKeysOutageContract(t *testing.T) {
+	key := chatTestSigningKey()
+	jwk := map[string]any{
+		"kty": "RSA", "kid": "k1", "alg": "RS256", "use": "sig",
+		"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+		"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+	}
+	var down atomic.Bool
+	certs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"keys": []map[string]any{jwk}})
+	}))
+	t.Cleanup(certs.Close)
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens:          map[string]string{"operator": chatOperatorToken},
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{}}`),
+		UIAllowCFOnly:   true,
+		CFAccessTeam:    "team", CFAccessAUD: chatTestAUD,
+		CFAccessCertsURL:   certs.URL,
+		CFAccessHTTPClient: certs.Client(),
+		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+		ChatStore:          newFakeChatStore(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	chatWarmAccessKeys(t, hub)
+
+	authed := func() int {
+		request := httptest.NewRequest(http.MethodGet, "/chat/data", nil)
+		request.RemoteAddr = "127.0.0.1:4444"
+		request.Header.Set("Cf-Access-Jwt-Assertion", chatTestToken(t))
+		return chatServe(t, hub, request).Code
+	}
+
+	// (a) cache valid + fetch failing → the cached keys still authorize.
+	down.Store(true)
+	if err := hub.cfAccess.refresh(); err == nil {
+		t.Fatal("certs fetch unexpectedly succeeded during the outage")
+	}
+	if code := authed(); code != http.StatusOK {
+		t.Fatalf("valid cache during certs outage status=%d, want 200", code)
+	}
+
+	// (b) cache expired + fetch failing → reject, and stay rejected while
+	// the outage lasts (the kicked background refreshes keep failing).
+	hub.cfAccess.mu.Lock()
+	hub.cfAccess.fetched = hub.cfAccess.now().Add(-2 * hubCFAccessCertsTTL)
+	hub.cfAccess.mu.Unlock()
+	for i := 0; i < 3; i++ {
+		if code := authed(); code != http.StatusNotFound {
+			t.Fatalf("expired cache during certs outage status=%d, want 404", code)
+		}
+	}
+
+	// Recovery: certs return, the kicked background refresh lands the key
+	// set, and the same request authorizes again. The kick is rate-limited,
+	// so the wait budget covers a full kick interval plus fetch time.
+	down.Store(false)
+	deadline := time.Now().Add(10 * time.Second)
+	for authed() != http.StatusOK {
+		if time.Now().After(deadline) {
+			t.Fatal("background refresh did not restore access after the outage")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// AC-B4-5 (c): an in-flight certs fetch must never block a request. The
+// transport here parks inside the fetch until the gate opens; verify has to
+// answer (fail closed on an empty cache) without waiting for it.
+func TestHubChatJWTRefreshNeverBlocksRequest(t *testing.T) {
+	key := chatTestSigningKey()
+	document, err := json.Marshal(map[string]any{"keys": []map[string]any{{
+		"kty": "RSA", "kid": "k1", "alg": "RS256", "use": "sig",
+		"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+		"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gate := make(chan struct{})
+	gateOpen := false
+	defer func() {
+		if !gateOpen {
+			close(gate)
+		}
+	}()
+	verifier, err := newHubCFAccessVerifier("team", chatTestAUD, "http://127.0.0.1:1/certs",
+		&http.Client{Transport: hubRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+			<-gate
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(document)))}, nil
+		})}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/chat/data", nil)
+	request.Header.Set("Cf-Access-Jwt-Assertion", chatTestToken(t))
+
+	// The constructor kicked a refresh whose fetch is parked in the gate; the
+	// request still gets an immediate answer — rejected, fail closed.
+	result := make(chan bool, 1)
+	go func() { result <- verifier.verify(request) }()
+	select {
+	case ok := <-result:
+		if ok {
+			t.Fatal("verify passed with an empty key cache")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("verify blocked behind an in-flight certs fetch")
+	}
+
+	// Release the fetch: the background refresh lands the key set and the
+	// same assertion then verifies.
+	close(gate)
+	gateOpen = true
+	deadline := time.Now().Add(5 * time.Second)
+	for !verifier.verify(request) {
+		if time.Now().After(deadline) {
+			t.Fatal("refresh did not land the key set after the gate opened")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Regression from the live rig: relay rows written before the event-id body
+// hash existed carry plain chat-N ids. They must hit the same disposition
+// gate — a failed chat row with a live legacy-format row still never
+// injects, and the row is retired.
+func TestHubChatLegacyRelayRowNeverInjects(t *testing.T) {
+	fake, relay, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	store := newFakeChatStore()
+	hub := chatTestHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, relay, store)
+	ctx := context.Background()
+
+	if _, err := store.CreateChatMessage(ctx, "operator", "구포맷 지시"); err != nil {
+		t.Fatal(err)
+	}
+	// Persist a relay row in the pre-hash chat-N shape, unrouted.
+	result := hub.relayLaneEvent(hubJobEventPayload{
+		JobID: laneEventTransportID("lane-a", "chat-1"), Epoch: 1,
+		OwnerLane: "lane-a", EventID: "chat-1", Text: "[chat] 구포맷 지시",
+		Label: "operator-chat", Host: "hub", Reason: "operator_chat",
+	}, nil)
+	if result.ID == 0 || result.Routed {
+		t.Fatalf("legacy relay row result=%+v, want persisted-unrouted", result)
+	}
+	if _, err := store.MarkChatMessageFailed(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 4), persisted: make(chan hubRelayPersistedEvent, 4)}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: destination}
+	hub.replayUndeliveredLaneEvents(ctx)
+	if injected := drainRelays(destination); injected != 0 {
+		t.Fatalf("legacy chat-1 row injected %d directives for a failed message", injected)
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	for _, row := range fake.rows {
+		if row.EventID == "chat-1" && row.DeliveredAt == "" {
+			t.Fatal("legacy chat-1 relay row was not retired")
+		}
+	}
+}
+
+// M5 B2: one failed row, exactly one retry, exactly one directive. Two
+// concurrent retries serialize on chatRetryMu — the loser sees the durable
+// outcome of the winner and is refused, never minting a second directive.
+// Removing the chatRetriedFrom gate turns the 409 assertion red.
+func TestHubChatRetryInjectsOnce(t *testing.T) {
+	_, relay, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	store := newFakeChatStore()
+	hub := chatTestHub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, relay, store)
+	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: destination}
+	ctx := context.Background()
+
+	if writer := chatPostMessage(t, hub, `{"lane":"lane-a","body":"중복 금지 지시"}`); writer.Code != http.StatusCreated {
+		t.Fatal(writer.Body.String())
+	}
+	hub.handoffkeep = nil
+	hub.drainChatOutbox(ctx)
+	hub.handoffkeep = relay
+	if got := store.messageState(1); got != "failed" {
+		t.Fatalf("state=%q, want failed", got)
+	}
+
+	// Two retries in flight at once: one wins, the other is refused.
+	codes := make(chan int, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			codes <- chatServe(t, hub, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{}`)).Code
+		}()
+	}
+	created, conflicts := 0, 0
+	for i := 0; i < 2; i++ {
+		switch code := <-codes; code {
+		case http.StatusCreated:
+			created++
+		case http.StatusConflict:
+			conflicts++
+		default:
+			t.Fatalf("concurrent retry status=%d", code)
+		}
+	}
+	if created != 1 || conflicts != 1 {
+		t.Fatalf("concurrent retries created=%d conflicts=%d, want 1/1", created, conflicts)
+	}
+	hub.drainChatOutbox(ctx)
+	if injected := drainRelays(destination); injected != 1 {
+		t.Fatalf("double retry injected %d directives, want exactly 1", injected)
+	}
+	// A later, sequential retry is refused too — the failed source produced
+	// its one attempt already.
+	retry := chatServe(t, hub, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{}`))
+	if retry.Code != http.StatusConflict || !strings.Contains(retry.Body.String(), "chat_message_already_retried") {
+		t.Fatalf("second retry status=%d body=%q, want 409 chat_message_already_retried", retry.Code, retry.Body.String())
+	}
+	hub.drainChatOutbox(ctx)
+	if injected := drainRelays(destination); injected != 0 {
+		t.Fatalf("refused retry still injected %d directives", injected)
+	}
+	if got := store.messageState(2); got != "delivered" {
+		t.Fatalf("retried message state=%q, want delivered", got)
+	}
+}
+
+// M5 B3: a hub restart must not lose a failed row's routing. The durable
+// relay row carries the lane and question; the retried relay row carries the
+// chat-retry-of-N marker. A restarted hub therefore sends the retry to the
+// ORIGINAL lane — never to whatever the client claims — and refuses a second
+// retry even when the first was minted by a previous process.
+func TestHubChatRetryAfterRestartBindsOriginal(t *testing.T) {
+	fake, relay, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	store := newFakeChatStore()
+	lanes := `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"},"lane-b":{"machine":"host-a","pane":"w1:p9"}}}`
+	ctx := context.Background()
+
+	hub1 := chatTestHub(t, lanes, relay, store)
+	if writer := chatPostQuestion(t, hub1, chatOperatorToken, `{"id":"Q-20260917-40","lane":"lane-a","body":"재시작 전 질문"}`); writer.Code != http.StatusCreated {
+		t.Fatal(writer.Body.String())
+	}
+	if writer := chatPostMessage(t, hub1, `{"lane":"lane-a","body":"재시작 전 답","question_id":"Q-20260917-40"}`); writer.Code != http.StatusCreated {
+		t.Fatal(writer.Body.String())
+	}
+	hub1.drainChatOutbox(ctx) // persisted, unrouted — no node registered
+	if got := store.messageState(1); got != "stored" {
+		t.Fatalf("state=%q, want stored", got)
+	}
+	// Recreate the failed+live-row shape, then retire the row via replay.
+	if _, err := store.MarkChatMessageFailed(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	hub1.nodes["host-a"] = &hubNodeRecord{agent: &hubAgent{relays: make(chan hubRelayInjectEvent, 4), persisted: make(chan hubRelayPersistedEvent, 4)}}
+	hub1.replayUndeliveredLaneEvents(ctx)
+
+	// The restart: a brand-new hub over the same store sees none of hub1's
+	// in-memory maps. The client even names a different lane and question —
+	// the durable record must win.
+	hub2 := chatTestHub(t, lanes, relay, store)
+	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
+	hub2.nodes["host-a"] = &hubNodeRecord{agent: destination}
+	retry := chatServe(t, hub2, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{"lane":"lane-b","question_id":"Q-20260917-99"}`))
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("post-restart retry status=%d body=%q, want 201", retry.Code, retry.Body.String())
+	}
+	hub2.drainChatOutbox(ctx)
+	var directive hubRelayInjectEvent
+	select {
+	case directive = <-destination.relays:
+	default:
+		t.Fatal("restarted hub did not inject the retry")
+	}
+	if directive.Pane != "w1:p1" {
+		t.Fatalf("retry routed to pane %q, want w1:p1 (the original lane-a)", directive.Pane)
+	}
+	if !strings.HasSuffix(directive.Text, "[chat] 재시작 전 답") {
+		t.Fatalf("retry text=%q", directive.Text)
+	}
+	if got := store.messageState(2); got != "delivered" {
+		t.Fatalf("retried message state=%q, want delivered", got)
+	}
+	if got := store.questionState("Q-20260917-40"); got != "resolved" {
+		t.Fatalf("original question state=%q, want resolved", got)
+	}
+	if got := store.questionState("Q-20260917-99"); got != "" {
+		t.Fatalf("client-named question state=%q, want untouched", got)
+	}
+	// The retry marker rode the durable relay row.
+	fake.mu.Lock()
+	var markerSeen bool
+	for _, row := range fake.rows {
+		if row.Head == chatRetryMarker(1) {
+			markerSeen = true
+		}
+	}
+	fake.mu.Unlock()
+	if !markerSeen {
+		t.Fatal("the retried relay row lacks the durable chat-retry-of-1 marker")
+	}
+
+	// A second restart: the in-memory retried map is gone again, but the
+	// marker row still refuses the repeat — no second directive.
+	hub3 := chatTestHub(t, lanes, relay, store)
+	hub3.nodes["host-a"] = &hubNodeRecord{agent: destination}
+	retry = chatServe(t, hub3, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{"lane":"lane-b"}`))
+	if retry.Code != http.StatusConflict || !strings.Contains(retry.Body.String(), "chat_message_already_retried") {
+		t.Fatalf("post-restart second retry status=%d body=%q, want 409 chat_message_already_retried", retry.Code, retry.Body.String())
+	}
+	hub3.drainChatOutbox(ctx)
+	if injected := drainRelays(destination); injected != 0 {
+		t.Fatalf("second restart injected %d more directives", injected)
+	}
+}
+
+// The other half of the durable-link contract: a failed row whose relay row
+// was never persisted (handoffkeep was down at send time) has no durable
+// routing after a restart. The restarted hub refuses rather than trusting
+// the client-supplied lane.
+func TestHubChatRetryLinkLostRefused(t *testing.T) {
+	_, relay, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	store := newFakeChatStore()
+	lanes := `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`
+	ctx := context.Background()
+
+	hub1 := chatTestHub(t, lanes, relay, store)
+	if writer := chatPostMessage(t, hub1, `{"lane":"lane-a","body":"기록 없는 답"}`); writer.Code != http.StatusCreated {
+		t.Fatal(writer.Body.String())
+	}
+	hub1.handoffkeep = nil
+	hub1.drainChatOutbox(ctx) // persist failed — no relay row exists
+	hub1.handoffkeep = relay
+	if got := store.messageState(1); got != "failed" {
+		t.Fatalf("state=%q, want failed", got)
+	}
+
+	hub2 := chatTestHub(t, lanes, relay, store)
+	retry := chatServe(t, hub2, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{"lane":"lane-a"}`))
+	if retry.Code != http.StatusConflict || !strings.Contains(retry.Body.String(), "chat_message_link_lost") {
+		t.Fatalf("linkless retry status=%d body=%q, want 409 chat_message_link_lost", retry.Code, retry.Body.String())
+	}
+	// The in-memory map on the original process is the only place that can
+	// still retry it — before the restart it works.
+	retry = chatServe(t, hub1, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{}`))
+	if retry.Code != http.StatusCreated {
+		t.Fatalf("in-process retry status=%d body=%q, want 201", retry.Code, retry.Body.String())
+	}
+}
+
+// M2: an unauthenticated assertion naming an unknown kid must never trigger
+// a certs fetch — the kid arrives inside an unverified token, so letting it
+// spend network hands every unauthenticated caller a resource knob that can
+// stall valid requests. The mutant that kicks on any cache miss turns the
+// fetches==baseline assertion red.
+func TestHubChatJWTUnknownKidNeverFetches(t *testing.T) {
+	key := chatTestSigningKey()
+	document, err := json.Marshal(map[string]any{"keys": []map[string]any{{
+		"kty": "RSA", "kid": "k1", "alg": "RS256", "use": "sig",
+		"n": base64.RawURLEncoding.EncodeToString(key.N.Bytes()),
+		"e": base64.RawURLEncoding.EncodeToString(big.NewInt(int64(key.E)).Bytes()),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fetches atomic.Int64
+	verifier, err := newHubCFAccessVerifier("team", chatTestAUD, "http://127.0.0.1:1/certs",
+		&http.Client{Transport: hubRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+			fetches.Add(1)
+			return &http.Response{StatusCode: http.StatusOK, Status: "200 OK", Header: make(http.Header), Body: io.NopCloser(strings.NewReader(string(document)))}, nil
+		})}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifier.refresh(); err != nil {
+		t.Fatalf("warm refresh: %v", err)
+	}
+	// Wait out one kick interval so a mutant that kicks on every cache miss
+	// (the round-2 bug) cannot hide behind the rate limiter: its first
+	// unknown-kid request would schedule a real fetch and die below.
+	time.Sleep(hubCFAccessKickMinInterval + 500*time.Millisecond)
+	baseline := fetches.Load()
+
+	request := func(token string) *http.Request {
+		req := httptest.NewRequest(http.MethodGet, "/chat/data", nil)
+		req.Header.Set("Cf-Access-Jwt-Assertion", token)
+		return req
+	}
+	now := time.Now()
+	unknown := chatSignJWTClaims(t, key, "k-unknown", map[string]any{"aud": []string{chatTestAUD}, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix()})
+
+	var wg sync.WaitGroup
+	results := make(chan bool, 21)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- verifier.verify(request(unknown))
+		}()
+	}
+	results <- verifier.verify(request(chatTestToken(t)))
+	wg.Wait()
+	close(results)
+	validSeen := false
+	for ok := range results {
+		validSeen = validSeen || ok
+	}
+	if !validSeen {
+		t.Fatal("the valid cached-key assertion did not verify during the unknown-kid storm")
+	}
+	time.Sleep(150 * time.Millisecond) // a stray kick fetch would have landed
+	if got := fetches.Load(); got != baseline {
+		t.Fatalf("unknown-kid requests triggered %d extra certs fetches, want 0", got-baseline)
+	}
+}
+
+// M2: an expired cache may kick the background refresh, but request volume
+// cannot drive fetch volume — the kick is rate-limited. With the clock
+// frozen inside one interval, a request storm produces no fetch at all; one
+// interval later a single request schedules exactly one.
+func TestHubChatJWTExpiredCacheKickRateLimited(t *testing.T) {
+	var fetches atomic.Int64
+	var clock atomic.Int64
+	clock.Store(time.Now().UnixNano())
+	verifier, err := newHubCFAccessVerifier("team", chatTestAUD, "http://127.0.0.1:1/certs",
+		&http.Client{Transport: hubRoundTripperFunc(func(*http.Request) (*http.Response, error) {
+			fetches.Add(1)
+			return &http.Response{StatusCode: http.StatusInternalServerError, Status: "500", Header: make(http.Header), Body: io.NopCloser(strings.NewReader("down"))}, nil
+		})},
+		func() time.Time { return time.Unix(0, clock.Load()) },
+		slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for fetches.Load() < 1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	baseline := fetches.Load() // the constructor's kick, failed — cache empty
+
+	request := httptest.NewRequest(http.MethodGet, "/chat/data", nil)
+	request.Header.Set("Cf-Access-Jwt-Assertion", chatTestToken(t))
+	results := make(chan bool, 40)
+	for i := 0; i < 40; i++ {
+		go func() { results <- verifier.verify(request) }()
+	}
+	for i := 0; i < 40; i++ {
+		select {
+		case ok := <-results:
+			if ok {
+				t.Fatal("verify passed with an unreachable certs endpoint")
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("verify blocked during the kick storm")
+		}
+	}
+	if got := fetches.Load(); got != baseline {
+		t.Fatalf("40 requests inside one kick interval drove %d fetches, want %d", got, baseline)
+	}
+	// One interval later, exactly one request schedules one more fetch.
+	clock.Add(int64(hubCFAccessKickMinInterval) + int64(time.Second))
+	if verifier.verify(request) {
+		t.Fatal("verify passed during the outage")
+	}
+	deadline = time.Now().Add(2 * time.Second)
+	for fetches.Load() < baseline+1 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if got := fetches.Load(); got != baseline+1 {
+		t.Fatalf("post-interval kick drove %d fetches, want %d", got, baseline+1)
+	}
+	for i := 0; i < 40; i++ {
+		_ = verifier.verify(request)
+	}
+	if got := fetches.Load(); got != baseline+1 {
+		t.Fatalf("a second storm inside the interval drove %d fetches, want %d", got, baseline+1)
 	}
 }

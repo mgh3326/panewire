@@ -55,6 +55,9 @@ const (
 	// hubChatQuestionWalkPages bounds one fetch loop so a misbehaving store
 	// cannot pin a request in an unbounded page walk.
 	hubChatQuestionWalkPages = 8
+	// hubChatRelayScanPages bounds the durable relay-row walk a cold retry
+	// performs to recover a pre-restart row's lane/question link.
+	hubChatRelayScanPages = 20
 )
 
 var chatQuestionIDPattern = regexp.MustCompile(`^Q-[0-9]{8}-[0-9]{2,}$`)
@@ -324,11 +327,16 @@ func (c *handoffkeepChatStore) GetChatMessage(ctx context.Context, id int64) (Ch
 
 // chatPendingMessage is the hub's in-memory half of one outbound chat message:
 // the store row deliberately has no lane column, so the delivery target lives
-// here until the relay attempt settles.
+// here until the relay attempt settles — and on the durable relay row once it
+// persists, which is what cold retry recovery reads after a restart.
 type chatPendingMessage struct {
 	Lane       string
 	Body       string
 	QuestionID string
+	// RetryOf records the failed source row this message retries; the relay
+	// stamps it on the durable row so a later hub knows the source was
+	// already retried once.
+	RetryOf int64
 }
 
 //go:embed hub_chat.html
@@ -643,10 +651,17 @@ type hubChatMessageRetryInput struct {
 // handleChatMessageRetry re-sends a failed message's body as a new store row.
 // handoffkeep's state machine makes failed a sink (stored → delivered|failed
 // only), so retrying in place is impossible; the new row is the fresh attempt
-// and the failed row remains as the permanent failure record. The question
-// link belongs to the message, not to whatever the client happens to be
-// looking at: the hub's recorded link wins, and the client value is only a
-// fallback for rows written before this hub learned it.
+// and the failed row remains as the permanent failure record.
+//
+// Two invariants protect the pane. First, a failed row is retried at most
+// once: chatRetryMu serializes the decision, chatRetriedFrom covers this
+// process, and the retry's durable relay row carries a chat-retry-of-N marker
+// so a restarted hub recovers the same answer — a second retry is refused,
+// never a second directive. Second, the routing belongs to the message, not
+// the client: lane and question come from the hub's in-memory record or, for
+// rows written before this process started, from the durable relay row. What
+// the client sends is never consulted — trusting it is how a restarted hub
+// sent a retry to whatever lane the UI happened to have selected.
 func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *http.Request) {
 	defer h.recoverChatPanic(writer)
 	if !h.authorizeChatUIPost(writer, request) {
@@ -666,14 +681,6 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
-	if input.Lane != "" && !validReportRelayLaneName(input.Lane) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
-		return
-	}
-	if input.QuestionID != "" && !chatQuestionIDPattern.MatchString(input.QuestionID) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
-		return
-	}
 	ctx, cancel := context.WithTimeout(request.Context(), hubChatStoreTimeout)
 	defer cancel()
 	message, found, err := store.GetChatMessage(ctx, id)
@@ -689,30 +696,54 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_failed"})
 		return
 	}
-	// A failed row must have no live relay row: retrying one that is still
-	// undelivered would put the directive in the pane twice. Rows from before
-	// this invariant existed can carry both, so verify rather than assume.
-	live, err := h.liveChatRelayRows(ctx)
-	if err != nil {
-		h.writeChatListError(writer, err)
-		return
-	}
-	if _, queued := live[id]; queued {
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_queued"})
-		return
-	}
+	h.chatRetryMu.Lock()
+	defer h.chatRetryMu.Unlock()
 	h.chatMu.Lock()
 	lane := h.chatLaneOf[id]
-	if lane == "" {
-		lane = input.Lane
-	}
-	questionID := input.QuestionID
-	if recorded := h.chatQuestionOf[id]; recorded != "" {
-		questionID = recorded
-	}
+	questionID := h.chatQuestionOf[id]
+	retried := h.chatRetriedFrom[id] != 0
 	h.chatMu.Unlock()
+	if lane == "" {
+		// The row predates this process: recover its routing from the durable
+		// relay row, and learn whether an earlier hub already retried it.
+		link, err := h.chatRelayLinkFor(ctx, id, message.Body)
+		if err != nil {
+			h.writeChatListError(writer, err)
+			return
+		}
+		if link.Live {
+			writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_queued"})
+			return
+		}
+		if link.RetriedID != 0 {
+			h.chatMu.Lock()
+			h.chatRetriedFrom[id] = link.RetriedID
+			h.chatMu.Unlock()
+			retried = true
+		}
+		lane, questionID = link.Lane, link.QuestionID
+	} else {
+		// A failed row must have no live relay row: retrying one that is
+		// still undelivered would put the directive in the pane twice. Rows
+		// from before this invariant existed can carry both, so verify.
+		live, err := h.liveChatRelayRows(ctx)
+		if err != nil {
+			h.writeChatListError(writer, err)
+			return
+		}
+		if _, queued := live[id]; queued {
+			writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_queued"})
+			return
+		}
+	}
+	if retried {
+		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_already_retried"})
+		return
+	}
 	if !validReportRelayLaneName(lane) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "lane_required"})
+		// No durable relay row carries this row's routing (its relay row was
+		// pruned or never persisted): refuse rather than trust client input.
+		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_link_lost"})
 		return
 	}
 	resent, err := store.CreateChatMessage(ctx, hubChatOperatorName, message.Body)
@@ -721,7 +752,8 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 		return
 	}
 	h.chatMu.Lock()
-	h.chatPending[resent.ID] = chatPendingMessage{Lane: lane, Body: message.Body, QuestionID: questionID}
+	h.chatRetriedFrom[id] = resent.ID
+	h.chatPending[resent.ID] = chatPendingMessage{Lane: lane, Body: message.Body, QuestionID: questionID, RetryOf: id}
 	h.chatLaneOf[resent.ID] = lane
 	h.chatQuestionOf[resent.ID] = questionID
 	h.chatMu.Unlock()
@@ -1046,12 +1078,80 @@ func (h *HubServer) liveChatRelayRows(ctx context.Context) (map[int64]handoffkee
 // chatRelayEventID derives the durable relay event id. The body hash keeps
 // regenerated stores honest: a fresh database that reuses message id 7 for a
 // different body cannot collide with the old chat-7 row and mark the wrong
-// directive delivered.
-var chatRelayEventPattern = regexp.MustCompile(`^chat-([0-9]+)-[0-9a-f]{8}$`)
+// directive delivered. The hash suffix is optional in the pattern so rows
+// written before the hash existed (plain chat-7) still hit the replay
+// disposition gate instead of being injected blind.
+var chatRelayEventPattern = regexp.MustCompile(`^chat-([0-9]+)(-[0-9a-f]{8})?$`)
 
 func chatRelayEventID(id int64, body string) string {
 	sum := sha256.Sum256([]byte(body))
 	return fmt.Sprintf("chat-%d-%x", id, sum[:4])
+}
+
+// chatRetryMarker is stamped on the durable relay row a retry produces, so a
+// restarted hub can tell the failed source row already minted one attempt.
+func chatRetryMarker(id int64) string {
+	return fmt.Sprintf("chat-retry-of-%d", id)
+}
+
+// chatRelayLink is what the durable relay rows still know about a chat
+// message whose in-memory lane/question maps were lost to a restart.
+type chatRelayLink struct {
+	Lane       string
+	QuestionID string
+	// Live reports that the row's own relay row is still undelivered.
+	Live bool
+	// RetriedID is the message id a previous retry minted, or 0; a marker
+	// whose event id cannot be parsed still counts (-1).
+	RetriedID int64
+}
+
+// chatRelayLinkFor walks the durable relay rows for a message this process
+// never saw: the row's own relay record carries the recorded lane and
+// question, and a retry row's head marker proves the source was already
+// retried. The walk is bounded and happens only on cold retries — client
+// input is never a substitute.
+func (h *HubServer) chatRelayLinkFor(ctx context.Context, id int64, body string) (chatRelayLink, error) {
+	var link chatRelayLink
+	if h.handoffkeep == nil {
+		return link, nil
+	}
+	want := chatRelayEventID(id, body)
+	legacy := fmt.Sprintf("chat-%d", id)
+	marker := chatRetryMarker(id)
+	var afterID int64
+	for pages := 0; pages < hubChatRelayScanPages; pages++ {
+		pageStart := afterID
+		records, err := h.handoffkeep.listRelayEvents(ctx, "lane.event", afterID, handoffkeepReplayLimit)
+		if err != nil {
+			return link, err
+		}
+		for _, record := range records {
+			if record.EventID == want || record.EventID == legacy {
+				link.Lane = record.OwnerLane
+				link.QuestionID = record.Question
+				link.Live = record.DeliveredAt == ""
+			}
+			if record.Head == marker {
+				link.RetriedID = -1
+				if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
+					if retryID, err := strconv.ParseInt(match[1], 10, 64); err == nil {
+						link.RetriedID = retryID
+					}
+				}
+			}
+			if record.ID > afterID {
+				afterID = record.ID
+			}
+		}
+		if len(records) < handoffkeepReplayLimit {
+			return link, nil
+		}
+		if afterID <= pageStart {
+			return link, errors.New("chat relay link cursor did not advance")
+		}
+	}
+	return link, nil
 }
 
 // relayChatMessage performs the ordered send contract: the row is already
@@ -1074,6 +1174,11 @@ func (h *HubServer) relayChatMessage(ctx context.Context, id int64, pending chat
 		// The question id rides the durable relay row so a replayed delivery
 		// can still resolve it after a hub restart emptied the in-memory maps.
 		Question: pending.QuestionID,
+	}
+	if pending.RetryOf > 0 {
+		// The durable marker is what lets a restarted hub enforce
+		// one-retry-per-failed-row after the in-memory map is gone.
+		event.Head = chatRetryMarker(pending.RetryOf)
 	}
 	result := h.relayLaneEvent(event, nil)
 	switch {

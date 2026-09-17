@@ -30,6 +30,7 @@ func TestHubUIAccessAndDataSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	chatWarmAccessKeys(t, hub)
 	hub.connect("node-a", "r13-test", "127.0.0.1:4567", nil, true)
 	hub.recordUIEvent("burst", "up", "node-b", now)
 

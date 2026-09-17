@@ -32,7 +32,7 @@ async function post(url,body){let r=await fetch(url,{method:"POST",headers:{"Con
 function setTarget(lane,qid){q("#lane").value=lane;selectedQuestion=qid||"";q("#target").textContent=lane;q("#targetq").textContent=qid?("→ "+qid+" 에 답변"):""}
 async function resolveQ(id,to){try{await post("/chat/questions/"+encodeURIComponent(id)+"/transition",{to});load()}catch(e){q("#status").textContent="질문 전이 실패: "+e.message}}
 let msgById={};
-async function retryMsg(id){let m=msgById[id]||{},lane=m.lane||q("#lane").value.trim();if(!lane){q("#status").textContent="재전송할 레인을 먼저 선택하라";return}try{await post("/chat/messages/"+id+"/retry",{lane,question_id:m.question_id||""});load()}catch(e){q("#status").textContent="재전송 실패: "+e.message}}
+async function retryMsg(id){let m=msgById[id]||{};try{await post("/chat/messages/"+id+"/retry",{lane:m.lane||"",question_id:m.question_id||""});load()}catch(e){q("#status").textContent="재전송 실패: "+e.message}}
 async function cancelMsg(id){if(!confirm("이 메시지를 종결할까요? (stored → delivered, 보존 정리 대상이 됨)"))return;try{await post("/chat/messages/"+id+"/cancel",{});load()}catch(e){q("#status").textContent="취소 거부됨: "+e.message}}
 async function send(){let lane=q("#lane").value.trim(),body=q("#body").value;if(!lane||!body.trim()){q("#status").textContent="레인과 내용을 입력하라";return}try{await post("/chat/messages",{lane,body,question_id:selectedQuestion});q("#body").value="";selectedQuestion="";q("#targetq").textContent="";load()}catch(e){q("#status").textContent="전송 실패: "+e.message}}
 function renderQuestions(list){let root=q("#questions");root.replaceChildren();let pending=list.filter(x=>x.state==="pending"),rest=list.filter(x=>x.state!=="pending").slice(-20);let all=pending.concat(rest);

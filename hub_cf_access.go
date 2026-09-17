@@ -14,12 +14,28 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // hubCFAccessCertsTTL bounds how long a fetched Access key set is trusted
-// before a refresh; an unknown key id always forces one refresh attempt.
+// before it is considered stale.
 const hubCFAccessCertsTTL = time.Hour
+
+// hubCFAccessRefreshInterval is the proactive re-fetch cadence; it stays
+// well under the TTL so the cache normally refreshes before it expires.
+const hubCFAccessRefreshInterval = 30 * time.Minute
+
+// hubCFAccessKickMinInterval rate-limits request-driven refresh kicks: a
+// flood of unauthenticated requests with an expired cache can schedule at
+// most one certs fetch per interval.
+const hubCFAccessKickMinInterval = 2 * time.Second
+
+// hubCFAccessMaxTokenLifetime caps how long a single assertion may live:
+// a token whose exp sits far past its iat is rejected no matter how valid
+// the signature is. Cloudflare Access sessions cap at one month, so the
+// bound rejects forged-lifetime tokens without touching legitimate ones.
+const hubCFAccessMaxTokenLifetime = 31 * 24 * time.Hour
 
 var hubCFAccessTeamPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,62}[A-Za-z0-9])?$`)
 
@@ -31,12 +47,21 @@ var hubCFAccessTeamPattern = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9-]{0,62}
 type hubCFAccessVerifier struct {
 	certsURL string
 	aud      string
+	issuer   string
 	client   *http.Client
 	now      func() time.Time
 	logger   *slog.Logger
-	mu       sync.Mutex
+	mu       sync.RWMutex
 	keys     map[string]*rsa.PublicKey
 	fetched  time.Time
+	// kick (capacity 1) asks the background loop to refresh the key set.
+	// The request path never fetches itself: with no usable cached key a
+	// request is rejected (fail closed) while the refresh runs behind it.
+	kick     chan struct{}
+	loopOnce sync.Once
+	// lastKick throttles request-driven kicks to hubCFAccessKickMinInterval,
+	// so unauthenticated request volume cannot drive fetch volume.
+	lastKick atomic.Int64
 }
 
 func newHubCFAccessVerifier(team, aud, certsURL string, client *http.Client, now func() time.Time, logger *slog.Logger) (*hubCFAccessVerifier, error) {
@@ -58,7 +83,9 @@ func newHubCFAccessVerifier(team, aud, certsURL string, client *http.Client, now
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &hubCFAccessVerifier{certsURL: certsURL, aud: aud, client: client, now: now, logger: logger, keys: map[string]*rsa.PublicKey{}}, nil
+	verifier := &hubCFAccessVerifier{certsURL: certsURL, aud: aud, issuer: "https://" + team + ".cloudflareaccess.com", client: client, now: now, logger: logger, keys: map[string]*rsa.PublicKey{}, kick: make(chan struct{}, 1)}
+	verifier.kickRefresh()
+	return verifier, nil
 }
 
 // verify reports whether the request carries a Cf-Access-Jwt-Assertion whose
@@ -101,12 +128,23 @@ func (v *hubCFAccessVerifier) verify(request *http.Request) bool {
 		Aud json.RawMessage `json:"aud"`
 		Exp int64           `json:"exp"`
 		Nbf int64           `json:"nbf"`
+		Iat int64           `json:"iat"`
+		Iss string          `json:"iss"`
 	}
 	if json.Unmarshal(claimsJSON, &claims) != nil {
 		return false
 	}
 	now := v.now().Unix()
 	if claims.Exp == 0 || claims.Exp <= now || (claims.Nbf != 0 && claims.Nbf > now) {
+		return false
+	}
+	// An assertion naming a different team's issuer is not ours, and a token
+	// whose issue-to-expiry span exceeds the platform maximum is rejected no
+	// matter how far out its exp sits.
+	if claims.Iss != "" && claims.Iss != v.issuer {
+		return false
+	}
+	if claims.Iat == 0 || claims.Exp-claims.Iat > int64(hubCFAccessMaxTokenLifetime/time.Second) {
 		return false
 	}
 	return cfAccessAudienceMatches(claims.Aud, v.aud)
@@ -129,23 +167,66 @@ func cfAccessAudienceMatches(raw json.RawMessage, want string) bool {
 	return false
 }
 
+// keyFor serves only the cached key set — it never touches the network. A
+// missing or stale cache kicks a background refresh and reports failure, so
+// a certs outage or a slow certs endpoint can never block a request (and a
+// request is never let through unverified: fail closed).
 func (v *hubCFAccessVerifier) keyFor(kid string) *rsa.PublicKey {
-	v.mu.Lock()
-	defer v.mu.Unlock()
-	if key, ok := v.keys[kid]; ok && v.now().Sub(v.fetched) < hubCFAccessCertsTTL {
+	v.mu.RLock()
+	key, fresh := v.keys[kid], v.now().Sub(v.fetched) < hubCFAccessCertsTTL
+	v.mu.RUnlock()
+	if fresh && key != nil {
 		return key
 	}
-	if err := v.refreshLocked(); err != nil {
-		v.logger.Warn("Cloudflare Access key refresh failed")
-		return nil
+	if !fresh {
+		// Only an absent or expired cache may schedule a fetch. The kid
+		// arrives inside an unverified token, so an unknown kid on a fresh
+		// key set must not spend network — otherwise every unauthenticated
+		// caller holds a knob that stalls legitimate requests.
+		v.kickRefresh()
 	}
-	return v.keys[kid]
+	return nil
 }
 
-// refreshLocked replaces the cached key set from the team's certs endpoint.
-// The response is bounded and the client timeout-bounded; a failure keeps the
-// previous cache rather than clearing it.
-func (v *hubCFAccessVerifier) refreshLocked() error {
+// kickRefresh asks the background loop to re-fetch the certs document. It is
+// non-blocking — kicks collapse while a fetch is in flight — and rate-
+// limited, so request volume cannot drive fetch volume.
+func (v *hubCFAccessVerifier) kickRefresh() {
+	now := v.now().UnixNano()
+	for {
+		last := v.lastKick.Load()
+		if last != 0 && now-last < int64(hubCFAccessKickMinInterval) {
+			return
+		}
+		if v.lastKick.CompareAndSwap(last, now) {
+			break
+		}
+	}
+	v.loopOnce.Do(func() { go v.refreshLoop() })
+	select {
+	case v.kick <- struct{}{}:
+	default:
+	}
+}
+
+// refreshLoop owns every certs fetch: a periodic proactive refresh plus
+// on-demand kicks from keyFor for an absent or expired cache.
+func (v *hubCFAccessVerifier) refreshLoop() {
+	for {
+		select {
+		case <-v.kick:
+		case <-time.After(hubCFAccessRefreshInterval):
+		}
+		if err := v.refresh(); err != nil {
+			v.logger.Warn("Cloudflare Access key refresh failed", "error", err)
+		}
+	}
+}
+
+// refresh replaces the cached key set from the team's certs endpoint. The
+// fetch happens with no lock held; the cache is swapped only on success, so
+// a failed refresh keeps the previous keys.
+func (v *hubCFAccessVerifier) refresh() error {
 	request, err := http.NewRequestWithContext(context.Background(), http.MethodGet, v.certsURL, nil)
 	if err != nil {
 		return err
@@ -191,7 +272,9 @@ func (v *hubCFAccessVerifier) refreshLocked() error {
 	if len(keys) == 0 {
 		return errors.New("certs document carried no RSA keys")
 	}
+	v.mu.Lock()
 	v.keys = keys
 	v.fetched = v.now()
+	v.mu.Unlock()
 	return nil
 }
