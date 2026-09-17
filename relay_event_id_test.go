@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 )
@@ -287,12 +290,9 @@ func TestJobEventLegacyRowIsSuppressedNotAdopted(t *testing.T) {
 	inbox := t.TempDir()
 	old := time.Now().Add(-time.Hour)
 	r20WriteEvent(t, inbox, "job-legacy", "00001-job.completed.json", relayEventIDBody, old)
-	store := NewMemoryStore(t)
-	defer store.Close()
 	legacyKey := relayOutboxKey{Kind: "job.completed", JobID: "job-legacy", Epoch: 1, ReportPath: "report.md"}
-	if err := store.RecordRelaySent(context.Background(), legacyKey, old); err != nil {
-		t.Fatal(err)
-	}
+	store := r20MigratedStore(t, []relayOutboxKey{legacyKey})
+	defer store.Close()
 
 	node := r20Node(inbox, store)
 	if events := node.jobCompletionEvents(); len(events) != 0 {
@@ -337,7 +337,9 @@ func TestJobEventPreMigrationBacklogEmitsZero(t *testing.T) {
 			fake, client, closeServer := newFakeHandoffkeep(t)
 			defer closeServer()
 			hub, agent := r20t5Hub(t, relayEventIDLanes, client, 8)
-			store := NewMemoryStore(t)
+			// The node genuinely migrated: its database carried a legacy row
+			// the old binary wrote, so the rekey stamped the cutoff.
+			store := r20MigratedStore(t, []relayOutboxKey{{Kind: "job.completed", JobID: "job-backlog", Epoch: 1, ReportPath: "report.md"}})
 			defer store.Close()
 
 			events := r20Node(inbox, store).jobCompletionEvents()
@@ -372,7 +374,7 @@ func TestJobEventWithinMigrationGraceStillSends(t *testing.T) {
 	_, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
 	hub, agent := r20t5Hub(t, relayEventIDLanes, client, 8)
-	store := NewMemoryStore(t)
+	store := r20MigratedStore(t, []relayOutboxKey{{Kind: "job.completed", JobID: "job-grace", Epoch: 1, ReportPath: "report.md"}})
 	defer store.Close()
 
 	node := r20Node(inbox, store)
@@ -427,10 +429,11 @@ func TestJobEventMigrationCutoffIsPerNode(t *testing.T) {
 	// node's cutoff.
 	r20WriteEvent(t, inbox, "job-pernode", "00001-job.completed.json", relayEventIDBody, time.Now().Add(-30*time.Minute))
 
-	early := NewMemoryStore(t)
+	seed := []relayOutboxKey{{Kind: "job.completed", JobID: "job-pernode", Epoch: 1, ReportPath: "report.md"}}
+	early := r20MigratedStore(t, seed)
 	defer early.Close()
 	r20AgeMigrationStamp(t, early, time.Now().Add(-time.Hour))
-	late := NewMemoryStore(t)
+	late := r20MigratedStore(t, seed)
 	defer late.Close()
 
 	migratedEarly, okEarly, errEarly := early.RelayEventIDMigrationAt(context.Background())
@@ -450,6 +453,183 @@ func TestJobEventMigrationCutoffIsPerNode(t *testing.T) {
 	}
 	if got := relaySentSuppressedIDs(t, late, "job-pernode"); len(got) != 1 {
 		t.Fatalf("the late node recorded %v suppressed rows, want the one file", got)
+	}
+}
+
+// A store that never ran the rekey migration has no stamp and therefore no
+// cutoff: a fresh database - a new node, a recreated state.db, a relocated
+// --db path - must send every retained completion rather than suppressing it.
+// This is the inverse of the relaytest2 A2 reproduction
+// (TestR3_A2_DBRecreateSuppressesOwedCompletions): same fixture shape,
+// opposite assertion.
+func TestJobEventUnmigratedStoreNeverSuppresses(t *testing.T) {
+	inbox := t.TempDir()
+	old := time.Now().Add(-time.Hour)
+	for index := 1; index <= 5; index++ {
+		r20WriteEvent(t, inbox, "job-fresh", fmt.Sprintf("%05d-job.completed.json", index), relayEventIDBody, old.Add(time.Duration(index)*time.Minute))
+	}
+	store := NewMemoryStore(t)
+	defer store.Close()
+
+	if migratedAt, ok, err := store.RelayEventIDMigrationAt(context.Background()); err != nil || ok {
+		t.Fatalf("a fresh store reported a migration stamp %s(%v) err=%v, want none", migratedAt, ok, err)
+	}
+	events := r20Node(inbox, store).jobCompletionEvents()
+	if len(events) != 5 {
+		t.Fatalf("an unmigrated store offered %d of the backlog, want all 5", len(events))
+	}
+	if got := relaySentSuppressedIDs(t, store, "job-fresh"); len(got) != 0 {
+		t.Fatalf("an unmigrated store suppressed events: %v", got)
+	}
+}
+
+// Deleting state.db and letting the daemon recreate it - or pointing --db at
+// a new path - must not mint a migration stamp out of thin air. The recreated
+// database carries no relay history, so the rekey has nothing to move and the
+// cutoff never exists; every retained file is still owed and goes out.
+func TestJobEventRecreatedDatabaseDoesNotSuppress(t *testing.T) {
+	inbox := t.TempDir()
+	old := time.Now().Add(-time.Hour)
+	for index := 1; index <= 3; index++ {
+		r20WriteEvent(t, inbox, "job-recreated", fmt.Sprintf("%05d-job.completed.json", index), relayEventIDBody, old)
+	}
+	path := filepath.Join(t.TempDir(), "state.db")
+
+	first, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := os.Remove(path + suffix); err != nil && !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+	}
+	recreated, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer recreated.Close()
+
+	if migratedAt, ok, err := recreated.RelayEventIDMigrationAt(context.Background()); err != nil || ok {
+		t.Fatalf("a recreated database reported a migration stamp %s(%v) err=%v, want none", migratedAt, ok, err)
+	}
+	events := r20Node(inbox, recreated).jobCompletionEvents()
+	if len(events) != 3 {
+		t.Fatalf("a recreated database offered %d of the backlog, want all 3", len(events))
+	}
+	if got := relaySentSuppressedIDs(t, recreated, "job-recreated"); len(got) != 0 {
+		t.Fatalf("a recreated database suppressed events: %v", got)
+	}
+}
+
+// An old-schema database with no job.* rows to move still goes through the
+// rekey - the primary key changes - but earns no migration stamp: nothing the
+// old binary sent exists in it, so there is no backlog the cutoff must hold
+// back. Without the stamp, pre-"migration" files are simply offered.
+func TestJobEventRowlessRekeyEarnsNoStamp(t *testing.T) {
+	inbox := t.TempDir()
+	old := time.Now().Add(-time.Hour)
+	for index := 1; index <= 2; index++ {
+		r20WriteEvent(t, inbox, "job-rowless", fmt.Sprintf("%05d-job.completed.json", index), relayEventIDBody, old)
+	}
+	store := r20MigratedStore(t, nil)
+	defer store.Close()
+
+	var eventIDInPrimaryKey int
+	if err := store.db.QueryRow(`SELECT pk FROM pragma_table_info('relay_sent') WHERE name='event_id'`).Scan(&eventIDInPrimaryKey); err != nil {
+		t.Fatal(err)
+	}
+	if eventIDInPrimaryKey == 0 {
+		t.Fatal("the rekey did not run on the legacy-schema database")
+	}
+	if migratedAt, ok, err := store.RelayEventIDMigrationAt(context.Background()); err != nil || ok {
+		t.Fatalf("a rowless rekey reported a migration stamp %s(%v) err=%v, want none", migratedAt, ok, err)
+	}
+	if events := r20Node(inbox, store).jobCompletionEvents(); len(events) != 2 {
+		t.Fatalf("a rowless-migrated store offered %d events, want both backlog files", len(events))
+	}
+}
+
+// A real migration - a database carrying rows the old binary wrote - still
+// stamps event_id_since once, and that stamp is the suppression cutoff: the
+// pre-cutoff file is retired while the in-window one sends. Reopening the
+// same database keeps the original stamp instead of re-minting it.
+func TestJobEventRealMigrationStampsOnce(t *testing.T) {
+	inbox := t.TempDir()
+	r20WriteEvent(t, inbox, "job-migrated", "00001-job.completed.json", relayEventIDBody, time.Now().Add(-time.Hour))
+	r20WriteEvent(t, inbox, "job-migrated", "00002-job.completed.json", relayEventIDBody, time.Now().Add(-time.Minute))
+	seed := []relayOutboxKey{{Kind: "job.completed", JobID: "job-migrated", Epoch: 1, ReportPath: "report.md"}}
+	store := r20MigratedStore(t, seed)
+
+	stamp, ok, err := store.RelayEventIDMigrationAt(context.Background())
+	if err != nil || !ok {
+		t.Fatalf("a real migration left no stamp: %s(%v) err=%v", stamp, ok, err)
+	}
+	if since := time.Since(stamp); since > time.Minute {
+		t.Fatalf("the migration stamp is %s old, want approximately now", since)
+	}
+	events := r20Node(inbox, store).jobCompletionEvents()
+	if len(events) != 1 || events[0].relayKey.EventID != "00002-job.completed.json" {
+		t.Fatalf("a migrated node offered %+v, want only the in-window event", events)
+	}
+	if got := relaySentSuppressedIDs(t, store, "job-migrated"); len(got) != 1 || got[0] != "00001-job.completed.json" {
+		t.Fatalf("the migrated node suppressed %v, want the pre-cutoff file", got)
+	}
+
+	// Reopening must not move the stamp: the rekey branch no longer runs, so
+	// the recorded instant survives restarts verbatim.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := OpenStore(store.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	again, ok, err := reopened.RelayEventIDMigrationAt(context.Background())
+	if err != nil || !ok || !again.Equal(stamp) {
+		t.Fatalf("reopen changed the stamp: %s(%v) err=%v, want %s", again, ok, err, stamp)
+	}
+}
+
+// Every suppression lands as a warn line outside the database - one per file,
+// naming the event and the cutoff it fell behind - so a held-back completion
+// is never silent. A repeat scan warns nothing more: the audit row already
+// exists, and the file is done.
+func TestJobEventSuppressionWarnsOncePerFile(t *testing.T) {
+	inbox := t.TempDir()
+	old := time.Now().Add(-time.Hour)
+	r20WriteEvent(t, inbox, "job-warn", "00001-job.completed.json", relayEventIDBody, old)
+	r20WriteEvent(t, inbox, "job-warn", "00002-job.completed.json", relayEventIDBody, old.Add(time.Minute))
+	store := r20MigratedStore(t, []relayOutboxKey{{Kind: "job.completed", JobID: "job-warn", Epoch: 1, ReportPath: "report.md"}})
+	defer store.Close()
+
+	var warns []string
+	node := r20Node(inbox, store)
+	node.warn = func(message string) { warns = append(warns, message) }
+
+	if events := node.jobCompletionEvents(); len(events) != 0 {
+		t.Fatalf("a pre-cutoff backlog offered %d events, want 0", len(events))
+	}
+	if len(warns) != 2 {
+		t.Fatalf("suppression produced %d warn lines, want one per file: %v", len(warns), warns)
+	}
+	for index, name := range []string{"00001-job.completed.json", "00002-job.completed.json"} {
+		if !strings.Contains(warns[index], name) || !strings.Contains(warns[index], "migration cutoff") {
+			t.Fatalf("warn %d does not name the suppressed file and reason: %q", index, warns[index])
+		}
+	}
+
+	// The second scan re-judges the files but re-warns nothing: the audit
+	// rows are already written, so suppression is loud exactly once.
+	if events := r20Node(inbox, store).jobCompletionEvents(); len(events) != 0 {
+		t.Fatalf("a rescan offered %d suppressed events, want 0", len(events))
+	}
+	if len(warns) != 2 {
+		t.Fatalf("a rescan raised the warn count to %d, want it steady at 2", len(warns))
 	}
 }
 

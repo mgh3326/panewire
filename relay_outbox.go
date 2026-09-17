@@ -77,10 +77,13 @@ func (s *Store) relayOutboxArgs(key relayOutboxKey) []any {
 	return []any{key.Kind, key.JobID, int64(key.Epoch), key.ReportPath, key.Reason}
 }
 
-// RelayEventIDMigrationAt reports when this node's outbox first carried event
-// identity. It is the base of the deployment cutoff, which is per-node on
-// purpose: rollouts are sequential, so each node suppresses only the events
-// its own pre-migration binary could have left behind.
+// RelayEventIDMigrationAt reports when this node's outbox was rekeyed onto
+// event identity. The stamp exists only when that open actually carried
+// legacy job.* rows across - a fresh or jobless database records no migration,
+// and its absence means no cutoff: nothing an old binary sent needs
+// suppressing. It is per-node on purpose: rollouts are sequential, so each
+// node suppresses only the events its own pre-migration binary could have
+// left behind.
 func (s *Store) RelayEventIDMigrationAt(ctx context.Context) (time.Time, bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -222,14 +225,19 @@ func (s *Store) RecordRelayPersisted(ctx context.Context, key relayOutboxKey, at
 // row is the audit record that the file was seen and deliberately held back:
 // sent_at stays NULL because nothing was written, persisted_at stays NULL
 // because the hub never took it. A conflicting row - a send that somehow beat
-// the cutoff - is never clobbered.
-func (s *Store) RecordRelaySuppressed(ctx context.Context, key relayOutboxKey, at time.Time) error {
+// the cutoff - is never clobbered. It reports true only when the audit row
+// was newly written, so the caller can log each suppression exactly once.
+func (s *Store) RecordRelaySuppressed(ctx context.Context, key relayOutboxKey, at time.Time) (bool, error) {
 	if key.Kind == "lane.event" || key.EventID == "" {
-		return nil
+		return false, nil
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.ExecContext(ctx, `INSERT INTO relay_sent(kind,job_id,epoch,report_path,reason,lane,event_id,suppressed_at) VALUES(?,?,?,?,?,'',?,?)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO relay_sent(kind,job_id,epoch,report_path,reason,lane,event_id,suppressed_at) VALUES(?,?,?,?,?,'',?,?)
  ON CONFLICT DO NOTHING`, key.Kind, key.JobID, int64(key.Epoch), key.ReportPath, key.Reason, key.EventID, at.UnixMilli())
-	return err
+	if err != nil {
+		return false, err
+	}
+	inserted, _ := res.RowsAffected()
+	return inserted == 1, nil
 }
