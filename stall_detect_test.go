@@ -25,7 +25,15 @@ import (
 const (
 	stallFixtureLimit = `Error: [provider.auth_error] 403 {"error":{"type":"permission_error","message":"You've reached your 5-hour usage limit. It will reset at 12:00."}}`
 	stallFixtureAuth  = `■ Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.`
-	stallFixtureQueue = `Press Enter to send queued messages now`
+	// The real devin queued state is structural: a `── N queued ──` header
+	// at column zero, the queued message, then the instruction between the
+	// last two pure dividers — with its `❭` prefix intact.
+	stallFixtureQueue = `── 1 queued ──────────────────────────── ↑ edit · ↵ send now ──` + "\n" +
+		`○ <message>` + "\n" +
+		`────────────────────────────────────────────` + "\n" +
+		`❭ Press Enter to send queued messages now` + "\n" +
+		`────────────────────────────────────────────` + "\n" +
+		`SWE-2 High · <status line>` + "\n"
 )
 
 type stallFixture struct {
@@ -259,6 +267,70 @@ func TestStallUnsubmittedVersusSubmitted(t *testing.T) {
 	rows = stallIncidentsFor(t, fx, "job-a")
 	if len(rows) != 1 || rows[0].RecoveredAt.IsZero() {
 		t.Fatalf("submitted input did not recover the row: %+v", rows)
+	}
+}
+
+// W11 ⓐ — a marker quoted in scrollback is not a live signal. Every quoting
+// shape observed in the fleet — input-echo prefixes (devin ❭/○, claude ❯/>,
+// codex ›), prose, list items, and box-drawing lines — must record zero
+// incidents, because none of them can reach column zero or the composer
+// region. The fixture keeps only the harness UI markers; message bodies are
+// placeholders.
+func TestStallQuotedMarkersDoNotFire(t *testing.T) {
+	quoted := `working through the brief
+│ ` + "`Press Enter to send queued messages now`" + ` was the marker; the worker pane saw it │
+2. devin row: ` + "`○`" + ` waits · ` + "`❭`" + ` consumes · ` + "`Press Enter to send queued messages now`" + ` · echo ` + "`❭ <message>`" + `
+• the real banner shape: ── N queued ── ↑ edit · ↵ send now + ○ <message>
+❭ ` + stallFixtureLimit + `
+> ` + stallFixtureLimit + `
+› ` + stallFixtureLimit + `
+- ` + stallFixtureAuth + `
+│ ` + stallFixtureAuth + ` │
+a prose line mentions Error: [provider.auth_error] 403 usage limit inside a sentence
+────────────────────────
+│ ❭ Press Enter to send queued messages now; quoted │
+────────────────────────
+`
+	fx := newStallFixture(t, false)
+	claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+	fx.reads["w1:p1"] = readEvidence{Text: "clean start\n", Revision: 1}
+	fx.scan()
+	fx.reads["w1:p1"] = readEvidence{Text: quoted, Revision: 2}
+	for i := 0; i < 2; i++ {
+		fx.advance(time.Minute)
+		fx.scan()
+	}
+	if rows := stallIncidentsFor(t, fx, "job-a"); len(rows) != 0 {
+		t.Fatalf("quoted marker strings recorded incidents: %+v", stallCauses(rows))
+	}
+}
+
+// W11 ⓑ — the live states still fire: the devin queued banner is the header
+// plus the instruction between the last two dividers; limit and auth are
+// line-head lines inside the tail region.
+func TestStallLiveStatesStillFire(t *testing.T) {
+	for _, tc := range []struct {
+		name, text, cause string
+	}{
+		{"queued_banner", "agent thinking\n" + stallFixtureQueue, stallCauseInputUnsubmitted},
+		{"limit_tail_head", "output continues\n" + stallFixtureLimit + "\nstatus line\n", stallCauseLimitRefused},
+		{"auth_tail_head", "output continues\n" + stallFixtureAuth + "\nstatus line\n", stallCauseAuthRefused},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := newStallFixture(t, false)
+			claimJob(t, fx, "job-a", "w1:p1", nil, fx.now.Add(-time.Hour))
+			fx.reads["w1:p1"] = readEvidence{Text: "clean start\n", Revision: 1}
+			fx.scan()
+			fx.reads["w1:p1"] = readEvidence{Text: tc.text, Revision: 2}
+			for i := 0; i < 2; i++ {
+				fx.advance(time.Minute)
+				fx.scan()
+			}
+			rows := stallIncidentsFor(t, fx, "job-a")
+			if len(rows) != 1 || rows[0].Cause != tc.cause {
+				t.Fatalf("want one %s, got %+v", tc.cause, stallCauses(rows))
+			}
+		})
 	}
 }
 

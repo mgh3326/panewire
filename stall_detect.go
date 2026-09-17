@@ -40,6 +40,10 @@ const (
 	stallRepsFloor              = 30 * time.Minute
 	stallRepsCap                = 8 * time.Hour
 	stallTailAnchorLines        = 3
+	// stallErrorAnchorLines is the live-region window: a confirmed-error line
+	// only counts when it sits inside the last N non-empty lines, above the
+	// composer — scrollback citations of the same string do not.
+	stallErrorAnchorLines = 12
 	// stallUnreadableAfterReads is the consecutive read-failure streak that
 	// turns a pane's unobservability into a recorded gap and a degraded beat.
 	stallUnreadableAfterReads = 2
@@ -791,15 +795,19 @@ func (m *stallDetectManager) applyDeadlineExtensions(ctx context.Context, scan s
 }
 
 // stallPattern is a confirmed-error rule built exclusively from the real
-// on-screen strings. A match names only the observed text; it never asserts
-// what the worker is or is not doing.
+// on-screen strings, anchored by position: head pins the match to a line
+// that begins with the marker (echo and citation prefixes — `❭`, `>`, `›`,
+// `│`, `-`, list numbers — can never reach column zero), and the line must
+// sit inside the last stallErrorAnchorLines non-empty lines where current
+// output lives. A match names only the observed text; it never asserts what
+// the worker is or is not doing.
 var stallPatterns = []struct {
 	cause string
 	all   []string
+	head  []string
 }{
-	{stallCauseLimitRefused, []string{"provider.auth_error", "usage limit"}},
-	{stallCauseAuthRefused, []string{"access token could not be refreshed", "sign in again"}},
-	{stallCauseInputUnsubmitted, []string{"Press Enter to send queued messages now"}},
+	{stallCauseLimitRefused, []string{"provider.auth_error", "usage limit"}, []string{"Error:"}},
+	{stallCauseAuthRefused, []string{"access token could not be refreshed", "sign in again"}, []string{"■"}},
 }
 
 type stallMatch struct {
@@ -814,27 +822,30 @@ type stallMatch struct {
 	tail bool
 }
 
-// classifyScreen returns the patterns visible in this read. It deliberately
-// takes no agent status: the contract distrusts status strings, so the
-// unsubmitted/submitted-input distinction is made from read persistence,
-// not from what the pane claims to be doing.
+// classifyScreen returns the patterns visible in this read, position-anchored.
+// It deliberately takes no agent status: the contract distrusts status
+// strings, so the unsubmitted/submitted-input distinction is made from read
+// persistence, not from what the pane claims to be doing.
 func classifyScreen(text string) []stallMatch {
 	if text == "" {
 		return nil
 	}
 	lines := strings.Split(text, "\n")
-	// Index of the first line inside the tail anchor region: the last
-	// stallTailAnchorLines non-empty lines of the buffer.
-	tailStart := len(lines)
-	for i, nonEmpty := len(lines)-1, 0; i >= 0; i-- {
+	// tailStart / liveStart index the last stallTailAnchorLines /
+	// stallErrorAnchorLines non-empty lines of the buffer.
+	tailStart, liveStart := len(lines), len(lines)
+	for i, tailN, liveN := len(lines)-1, 0, 0; i >= 0; i-- {
 		if strings.TrimSpace(lines[i]) == "" {
 			continue
 		}
-		nonEmpty++
-		tailStart = i
-		if nonEmpty >= stallTailAnchorLines {
-			break
+		if liveN < stallErrorAnchorLines {
+			liveStart = i
 		}
+		if tailN < stallTailAnchorLines {
+			tailStart = i
+		}
+		liveN++
+		tailN++
 	}
 	var matches []stallMatch
 	for _, pattern := range stallPatterns {
@@ -852,9 +863,25 @@ func classifyScreen(text string) []stallMatch {
 			if !matched {
 				continue
 			}
+			trimmed := strings.TrimSpace(line)
+			if len(pattern.head) > 0 {
+				headed := false
+				for _, prefix := range pattern.head {
+					if strings.HasPrefix(trimmed, prefix) {
+						headed = true
+						break
+					}
+				}
+				if !headed {
+					continue
+				}
+			}
+			if index < liveStart {
+				continue
+			}
 			count++
 			if first == "" {
-				first = strings.TrimSpace(line)
+				first = trimmed
 			}
 			if index >= tailStart {
 				inTail = true
@@ -866,7 +893,54 @@ func classifyScreen(text string) []stallMatch {
 		sum := sha256.Sum256([]byte(pattern.cause + "\x00" + first))
 		matches = append(matches, stallMatch{cause: pattern.cause, fingerprint: hex.EncodeToString(sum[:8]), count: count, line: first, tail: inTail})
 	}
+	if count, line := devinQueuedBanner(lines); count > 0 {
+		sum := sha256.Sum256([]byte(stallCauseInputUnsubmitted + "\x00" + line))
+		matches = append(matches, stallMatch{cause: stallCauseInputUnsubmitted, fingerprint: hex.EncodeToString(sum[:8]), count: count, line: line, tail: true})
+	}
 	return matches
+}
+
+// devinQueuedBanner reports a live devin queued-composer state, anchored by
+// structure rather than by the string alone: a `── N queued ──… send now ──`
+// header at line head AND the send instruction sitting strictly between the
+// last two pure divider lines — the composer region. The real instruction
+// keeps its `❭` input prefix, so the prefix is allowed, not excluded; what
+// quotes cannot forge is the header at column zero plus the position between
+// the final dividers.
+func devinQueuedBanner(lines []string) (int64, string) {
+	header := false
+	for _, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "──") && strings.Contains(trimmed, "queued") && strings.Contains(trimmed, "send now") {
+			header = true
+			break
+		}
+	}
+	if !header {
+		return 0, ""
+	}
+	var dividers []int
+	for i, line := range lines {
+		if strings.Contains(line, "─") && strings.Trim(line, " \t─") == "" {
+			dividers = append(dividers, i)
+		}
+	}
+	if len(dividers) < 2 {
+		return 0, ""
+	}
+	start, end := dividers[len(dividers)-2], dividers[len(dividers)-1]
+	var count int64
+	var first string
+	for i := start + 1; i < end; i++ {
+		trimmed := strings.TrimPrefix(strings.TrimSpace(lines[i]), "❭ ")
+		if trimmed == "Press Enter to send queued messages now" {
+			count++
+			if first == "" {
+				first = trimmed
+			}
+		}
+	}
+	return count, first
 }
 
 // scan is one detector cycle: journal refresh → superseded → coverage →
