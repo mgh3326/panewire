@@ -232,6 +232,10 @@ type relayLaneEventResult struct {
 	Duplicate       bool
 	PersistFailed   bool
 	RejectedTooLong bool
+	// AlreadyDelivered separates "the durable row exists and was delivered
+	// before" from "the durable row exists and is still owed to a lane": the
+	// chat outbox treats the first as terminal and the second as queued.
+	AlreadyDelivered bool
 }
 
 // relayLaneEvent follows the R20 persistence cursor but has intentionally
@@ -323,7 +327,7 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 	}
 	if relayEventAlreadyDelivered(status, stored, event) {
 		h.broadcastRelayAlreadyDelivered("lane.event", event, stored)
-		return relayLaneEventResult{ID: stored.ID}
+		return relayLaneEventResult{ID: stored.ID, AlreadyDelivered: true}
 	}
 	if route.Sink {
 		if err := h.handoffkeep.markDelivered(context.Background(), stored.ID, "sink", "sink:"+event.OwnerLane); err != nil {
@@ -343,6 +347,20 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnrouted(event)
 		return relayLaneEventResult{ID: stored.ID}
+	}
+	if match := chatRelayEventPattern.FindStringSubmatch(event.EventID); match != nil {
+		// A chat row can leave "stored" while this relay is in flight — the
+		// operator cancelled it, or a concurrent path closed it. The store is
+		// consulted once more at the last moment so a cancelled directive can
+		// never be injected after the cancel answered. On a store read error
+		// the row stays queued for replay rather than being injected blind.
+		if chatID, err := strconv.ParseInt(match[1], 10, 64); err == nil && h.chatReplayDisposition(chatID) != "inject" {
+			if err := h.handoffkeep.markDelivered(context.Background(), stored.ID, "hub", "chat-terminal"); err != nil {
+				h.logger.Warn("terminal chat relay row was not retired", "event_id", stored.ID)
+			}
+			h.forgetRelayEvent(key)
+			return relayLaneEventResult{ID: stored.ID}
+		}
 	}
 	if !h.injectLaneRelayEvent(event, route, target, stored.ID, key) {
 		return relayLaneEventResult{ID: stored.ID}
@@ -876,8 +894,31 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 	if record.DeliveredAt != "" {
 		return
 	}
+	if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
+		// The chat store is the truth the operator saw: only a stored row may
+		// still be injected. Failed and delivered (cancelled) rows — and rows
+		// the store no longer knows — retire their relay row instead. Rows
+		// from before this invariant existed can still pair a terminal chat
+		// row with a live relay row; this gate is what keeps them dead.
+		if chatID, err := strconv.ParseInt(match[1], 10, 64); err == nil {
+			switch h.chatReplayDisposition(chatID) {
+			case "retire":
+				if err := h.handoffkeep.markDelivered(context.Background(), record.ID, "hub", "chat-terminal"); err != nil {
+					h.logger.Warn("terminal chat relay row was not retired", "event_id", record.ID)
+				}
+				return
+			case "defer":
+				return
+			}
+		}
+	}
 	if record.Attempts >= relayReplayMaxAttempts {
 		h.broadcastRelayReplayExhausted(record)
+		if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
+			if chatID, err := strconv.ParseInt(match[1], 10, 64); err == nil {
+				h.noteChatRelayExhausted(chatID)
+			}
+		}
 		return
 	}
 	key := relayEventDedupeKey(record.Kind, event)
@@ -913,6 +954,13 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 			return
 		}
 		h.armRelayAckEvent(record.ID, event.JobID)
+		// A queued chat directive just made it to the destination channel:
+		// flip the chat row to delivered and resolve its linked question.
+		if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
+			if chatID, err := strconv.ParseInt(match[1], 10, 64); err == nil {
+				h.noteChatRelayDelivered(chatID, record.Question)
+			}
+		}
 	} else if !h.injectRelayEvent(record.Kind, event, route, agent, nil, record.ID, key) {
 		return
 	}

@@ -72,15 +72,22 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case r.Method == http.MethodGet:
 		f.mu.Lock()
-		pending := append([]handoffkeepRelayEvent(nil), f.undelivere...)
-		if len(pending) == 0 {
-			for _, row := range f.rows {
-				if row.DeliveredAt == "" {
-					pending = append(pending, *row)
+		query := r.URL.Query()
+		var pending []handoffkeepRelayEvent
+		if query.Get("undelivered") != "" {
+			pending = append(pending, f.undelivere...)
+			if len(pending) == 0 {
+				for _, row := range f.rows {
+					if row.DeliveredAt == "" {
+						pending = append(pending, *row)
+					}
 				}
 			}
+		} else {
+			for _, row := range f.rows {
+				pending = append(pending, *row)
+			}
 		}
-		query := r.URL.Query()
 		kind := query.Get("kind")
 		lane := query.Get("lane")
 		afterID, _ := strconv.ParseInt(query.Get("after_id"), 10, 64)
@@ -134,6 +141,7 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.nextID++
 			row = &handoffkeepRelayEvent{ID: f.nextID, Kind: asString(body["kind"]), JobID: asString(body["job_id"]),
 				Epoch: asInt(body["epoch"]), OwnerLane: asString(body["owner_lane"]), ReportPath: asString(body["report_path"]),
+				Question: asString(body["question"]), Machine: asString(body["machine"]), PaneID: asString(body["pane_id"]), Head: asString(body["head"]),
 				Reason: asString(body["reason"]), EventID: asString(body["event_id"]), Text: asString(body["text"]), Attempts: 1}
 			if f.ownerLane != "" {
 				row.OwnerLane = f.ownerLane
