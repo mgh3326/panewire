@@ -33,12 +33,12 @@ const (
 )
 
 const (
-	stallNotifyShadow    = "shadow"   // recorded, never sent — rollout step 1
-	stallNotifyPending   = "pending"  // owed to the lane, not yet attempted
-	stallNotifySent      = "sent"     // emit accepted locally; receipt unproven
-	stallNotifyAcked     = "acked"    // relay persisted by the hub
-	stallNotifyNoLane    = "no_lane"  // no valid lane existed to notify
-	stallNotifyExhausted = "lapsed"   // grace expired while still unacknowledged
+	stallNotifyShadow    = "shadow"  // recorded, never sent — rollout step 1
+	stallNotifyPending   = "pending" // owed to the lane, not yet attempted
+	stallNotifySent      = "sent"    // emit accepted locally; receipt unproven
+	stallNotifyAcked     = "acked"   // relay persisted by the hub
+	stallNotifyNoLane    = "no_lane" // no valid lane existed to notify
+	stallNotifyExhausted = "lapsed"  // grace expired while still unacknowledged
 )
 
 // stallMS and stallTime keep zero times zero: UnixMilli on the zero time is a
@@ -83,18 +83,18 @@ type stallJobRow struct {
 }
 
 type stallIncidentRow struct {
-	JobID        string
-	Attempt      int64
-	Round        int64
-	Cause        string
-	Occurrence   int64
-	PaneID       string
-	Observable   bool
-	FirstSeenAt  time.Time
-	LastSeenAt   time.Time
-	RecoveredAt  time.Time
-	Evidence     json.RawMessage
-	NotifyState  string
+	JobID       string
+	Attempt     int64
+	Round       int64
+	Cause       string
+	Occurrence  int64
+	PaneID      string
+	Observable  bool
+	FirstSeenAt time.Time
+	LastSeenAt  time.Time
+	RecoveredAt time.Time
+	Evidence    json.RawMessage
+	NotifyState string
 }
 
 // incidentKey is the durable five-field identity of one incident row.
@@ -149,14 +149,14 @@ type stallReportRow struct {
 // deliberately two-scan: a single sighting during a spawn/resubscribe window
 // proves nothing about ownership.
 type stallUnownedRow struct {
-	ProcKey        string
-	PID            int64
-	PPID           int64
-	CWD            string
-	StartedAt      time.Time
-	FirstSeenAt    time.Time
-	Confirmations  int64
-	Recorded       bool
+	ProcKey       string
+	PID           int64
+	PPID          int64
+	CWD           string
+	StartedAt     time.Time
+	FirstSeenAt   time.Time
+	Confirmations int64
+	Recorded      bool
 }
 
 func stallDetectMigrate(db *sql.DB) error {
@@ -574,7 +574,7 @@ func (s *Store) upsertStallPane(ctx context.Context, row stallPaneRow) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.ExecContext(ctx, `INSERT INTO stall_panes(pane_id,job_id,attempt,workspace_id,cwd,harness,last_revision,last_read_at,last_read_ok,baseline_done,fingerprints_json,first_seen_at,spawn_recent,subscribed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err = s.db.ExecContext(ctx, `INSERT INTO stall_panes(pane_id,job_id,attempt,workspace_id,cwd,harness,last_revision,last_read_at,last_read_ok,baseline_done,fingerprints_json,first_seen_at,spawn_recent,subscribed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	 ON CONFLICT(pane_id) DO UPDATE SET
 	  job_id=excluded.job_id, attempt=excluded.attempt,
 	  workspace_id=CASE WHEN excluded.workspace_id<>'' THEN excluded.workspace_id ELSE workspace_id END,

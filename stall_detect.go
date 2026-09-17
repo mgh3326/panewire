@@ -97,18 +97,18 @@ func (cfg StallDetectConfig) harnessAllowed(family string) bool {
 // stallDeps are the side-effecting seams. Production wiring dials herdr per
 // call the way the heartbeat hooks do; fixtures replace every one of them.
 type stallDeps struct {
-	listAgents   func(context.Context) ([]paneIdentity, error)
-	readPane     func(context.Context, string) (readEvidence, error)
-	subscribed   func() (map[string]bool, time.Time)
-	resubscribe  func()
-	worktree     func(context.Context, string) string
-	procs        func(context.Context) ([]stallProc, error)
-	procCWD      func(context.Context, int64) (string, error)
-	writeRecord  func(string, emitRecord) (string, error)
-	enqueue      func(hubScannedRelayEvent) bool
-	upload       func(context.Context, string, []byte) error
+	listAgents    func(context.Context) ([]paneIdentity, error)
+	readPane      func(context.Context, string) (readEvidence, error)
+	subscribed    func() (map[string]bool, time.Time)
+	resubscribe   func()
+	worktree      func(context.Context, string) string
+	procs         func(context.Context) ([]stallProc, error)
+	procCWD       func(context.Context, int64) (string, error)
+	writeRecord   func(string, emitRecord) (string, error)
+	enqueue       func(hubScannedRelayEvent) bool
+	upload        func(context.Context, string, []byte) error
 	lanePersisted func(context.Context, string, string) (bool, error)
-	now          func() time.Time
+	now           func() time.Time
 }
 
 type stallDetectManager struct {
@@ -161,7 +161,7 @@ func newStallDetectManager(store *Store, inboxRoot string, cfg StallDetectConfig
 	return &stallDetectManager{
 		cfg: cfg, store: store, inboxRoot: inboxRoot,
 		reportDir: filepath.Join(inboxRoot, "jobs"),
-		deps: deps, logger: logger,
+		deps:      deps, logger: logger,
 		wake: make(chan string, 64), wakePending: make(map[string]struct{}),
 		procCWDCache: make(map[int64]string),
 	}, nil
@@ -512,6 +512,13 @@ func (m *stallDetectManager) refreshJob(ctx context.Context, scan stallJobScan, 
 		row.WorkspaceID = spawn.WorkspaceID
 		row.Profile = spawn.Profile
 		row.SpawnedAt = spawn.At
+		if index < len(scan.Spawns)-1 {
+			// A later spawn supersedes this attempt: only the newest attempt
+			// of a job may still be live, so the older row closes instead of
+			// racing the new attempt's reads and deadline.
+			row.Terminal = true
+			row.TerminalKind = "superseded"
+		}
 		m.resolveDeadline(&row, scan, all)
 		if err := m.store.upsertStallJob(ctx, row); err != nil {
 			return err
@@ -871,6 +878,12 @@ func (m *stallDetectManager) readOnePane(ctx context.Context, job stallJobRow, a
 	m.readFailures = 0
 	if !found {
 		pane = stallPaneRow{PaneID: job.PaneID, Fingerprints: map[string]int64{}, FirstSeenAt: at}
+	} else if pane.JobID != job.JobID || pane.Attempt != job.Attempt {
+		// A reused pane's fingerprints belong to the previous attempt. A new
+		// attempt is a new attach: the first read baselines again so a banner
+		// left over in scrollback is not a new sighting of the old one.
+		pane.BaselineDone = false
+		pane.Fingerprints = map[string]int64{}
 	}
 	pane.JobID, pane.Attempt = job.JobID, job.Attempt
 	pane.WorkspaceID = agent.WorkspaceID
@@ -1086,9 +1099,9 @@ func (m *stallDetectManager) sendNotification(ctx context.Context, row *stallNot
 		return
 	}
 	m.deps.enqueue(hubScannedRelayEvent{
-		Kind: "lane.event",
+		Kind:         "lane.event",
 		HubActiveJob: HubActiveJob{JobID: laneEventTransportID(row.Lane, row.EventID), Epoch: 1, OwnerLane: row.Lane},
-		PaneID: incident.PaneID, EventID: row.EventID, Text: text,
+		PaneID:       incident.PaneID, EventID: row.EventID, Text: text,
 	})
 	row.Attempts++
 	row.NotifiedAt = at
@@ -1267,9 +1280,9 @@ func stallLastFileActivity(inboxRoot string, job stallJobRow) time.Time {
 
 // stallProc is one harness-process observation for the [unowned] scan.
 type stallProc struct {
-	PID, PPID  int64
-	StartedAt  time.Time
-	Name, CWD  string
+	PID, PPID int64
+	StartedAt time.Time
+	Name, CWD string
 }
 
 var stallHarnessNames = map[string]bool{
