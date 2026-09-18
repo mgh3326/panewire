@@ -234,7 +234,7 @@ func TestStallRepeatedErrorIsNewOccurrence(t *testing.T) {
 // banner must hold across a second read to be recorded as unsubmitted input,
 // and two advancing clean reads recover it.
 func TestStallUnsubmittedVersusSubmitted(t *testing.T) {
-	if matches := classifyScreen(stallFixtureQueue + "\n"); len(matches) != 1 || matches[0].cause != stallCauseInputUnsubmitted {
+	if matches := classifyScreen(stallFixtureQueue+"\n", "devin"); len(matches) != 1 || matches[0].cause != stallCauseInputUnsubmitted {
 		t.Fatalf("queue banner did not classify: %+v", matches)
 	}
 	fx := newStallFixture(t, false)

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -310,7 +311,11 @@ type stallJobScan struct {
 	TerminalSeq    int64
 	TerminalPos    int64
 	LastEventAt    time.Time
-	ReportPath     string
+	// Rejections names every journal path this scan refused to open — a
+	// symlinked component, a non-regular entry, an oversize record. A
+	// refusal is a recorded observation, never a silent skip.
+	Rejections  []stallJournalRejection
+	ReportPath  string
 	// ReportKind names what ReportPath holds: "path" for a local file,
 	// "doc_key" for a handoffkeep document key, "" when nothing resolves.
 	ReportKind  string
@@ -364,14 +369,14 @@ func (e stallInboxEvent) eventKind() string {
 	return e.Event
 }
 
-func (e stallInboxEvent) eventTime(name, dir string) time.Time {
+// eventTime falls back to the journal file's own Lstat mtime when the
+// record carries no parseable created_at — the caller passes the FileInfo
+// it already obtained without following links, so this never stats a path.
+func (e stallInboxEvent) eventTime(info os.FileInfo) time.Time {
 	if parsed, err := time.Parse(time.RFC3339, e.CreatedAt); err == nil {
 		return parsed.UTC()
 	}
-	if info, err := os.Stat(filepath.Join(dir, name)); err == nil {
-		return info.ModTime().UTC()
-	}
-	return time.Time{}
+	return info.ModTime().UTC()
 }
 
 func stallPayloadString(payload map[string]json.RawMessage, keys ...string) string {
@@ -467,19 +472,122 @@ var stallTerminalKinds = map[string]bool{
 	"worker.complete": true,
 }
 
+// stallJournalRejection is one journal path the scanner refused to open —
+// a symlinked component, a non-regular entry, or an oversize record. Path
+// is relative to the job dir (".", "events", or "events/<name>"); Reason
+// names why the entry was refused.
+type stallJournalRejection struct {
+	Path   string
+	Reason string
+}
+
+const (
+	stallRejectJobdirSymlink  = "jobdir_symlink"
+	stallRejectEventsStat     = "events_dir_not_inspectable"
+	stallRejectEventsSymlink  = "events_dir_symlink"
+	stallRejectEventsNotDir   = "events_dir_not_directory"
+	stallRejectEventsList     = "events_dir_not_listable"
+	stallRejectFileStat       = "event_file_not_inspectable"
+	stallRejectFileSymlink    = "event_file_symlink"
+	stallRejectFileNotRegular = "event_file_not_regular"
+	stallRejectFileOversize   = "event_file_oversize"
+)
+
+// stallJournalMaxEventBytes bounds one journal record. The cap is checked
+// from the Lstat before any open, so an oversize file is never read.
+const stallJournalMaxEventBytes = 16 << 10
+
+// stallJobdirRefusal inspects one jobs/<job> entry with Lstat — the path
+// component itself is never followed. A symlinked job directory is a
+// refusal (its whole journal lives outside jobs/); anything that is not a
+// directory at all is not a job and is skipped without a refusal.
+func stallJobdirRefusal(path string) (info os.FileInfo, reason string) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, ""
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, stallRejectJobdirSymlink
+	}
+	if !info.IsDir() {
+		return nil, ""
+	}
+	return info, ""
+}
+
+// stallEventsDirRefusal inspects the events component of a job dir with
+// Lstat before anything lists it. "" means the path may be opened —
+// including when it simply does not exist, because a job without a journal
+// yet is not a refusal.
+func stallEventsDirRefusal(eventsDir string) string {
+	info, err := os.Lstat(eventsDir)
+	switch {
+	case err != nil && os.IsNotExist(err):
+		return ""
+	case err != nil:
+		return stallRejectEventsStat
+	case info.Mode()&os.ModeSymlink != 0:
+		return stallRejectEventsSymlink
+	case !info.IsDir():
+		return stallRejectEventsNotDir
+	}
+	return ""
+}
+
+// stallJournalFileRefusal inspects one journal file with Lstat before any
+// open: symlinks and non-regular files (fifo, device, socket, directory)
+// are refused, and so is a record already over the byte cap. "" means the
+// file may be opened; the returned FileInfo is the link-free stat.
+func stallJournalFileRefusal(path string) (os.FileInfo, string) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, stallRejectFileStat
+	}
+	switch {
+	case info.Mode()&os.ModeSymlink != 0:
+		return nil, stallRejectFileSymlink
+	case !info.Mode().IsRegular():
+		return nil, stallRejectFileNotRegular
+	case info.Size() > stallJournalMaxEventBytes:
+		return nil, stallRejectFileOversize
+	}
+	return info, ""
+}
+
+// readBoundedJournalFile reads one verified-regular journal record through
+// the byte cap.
+func readBoundedJournalFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	return io.ReadAll(io.LimitReader(f, stallJournalMaxEventBytes+1))
+}
+
 // scanStallJobs reads each job's event journal into the detector's view.
 // File contents are metadata only; no event body is ever executed.
 func scanStallJobs(inboxRoot string) []stallJobScan {
-	entries, err := os.ReadDir(filepath.Join(inboxRoot, "jobs"))
+	jobsDir := filepath.Join(inboxRoot, "jobs")
+	entries, err := os.ReadDir(jobsDir)
 	if err != nil {
 		return nil
 	}
 	var jobs []stallJobScan
 	for _, entry := range entries {
-		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
+		if !hubJobIDPattern.MatchString(entry.Name()) {
 			continue
 		}
-		if job, ok := scanStallJobEvents(filepath.Join(inboxRoot, "jobs", entry.Name(), "events"), entry.Name()); ok {
+		jobPath := filepath.Join(jobsDir, entry.Name())
+		info, reason := stallJobdirRefusal(jobPath)
+		if reason != "" {
+			jobs = append(jobs, stallJobScan{JobID: entry.Name(), Rejections: []stallJournalRejection{{Path: ".", Reason: reason}}})
+			continue
+		}
+		if info == nil {
+			continue
+		}
+		if job, ok := scanStallJobEvents(filepath.Join(jobPath, "events"), entry.Name()); ok {
 			jobs = append(jobs, job)
 		}
 	}
@@ -487,25 +595,43 @@ func scanStallJobs(inboxRoot string) []stallJobScan {
 }
 
 func scanStallJobEvents(eventsDir, jobID string) (stallJobScan, bool) {
+	job := stallJobScan{JobID: jobID}
+	if reason := stallEventsDirRefusal(eventsDir); reason != "" {
+		job.Rejections = append(job.Rejections, stallJournalRejection{Path: "events", Reason: reason})
+		return job, true
+	}
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
-		return stallJobScan{}, false
+		if os.IsNotExist(err) {
+			return stallJobScan{}, false
+		}
+		job.Rejections = append(job.Rejections, stallJournalRejection{Path: "events", Reason: stallRejectEventsList})
+		return job, true
 	}
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
-	job := stallJobScan{JobID: jobID}
 	for index, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+		if !strings.HasSuffix(entry.Name(), ".json") {
 			continue
 		}
-		contents, err := os.ReadFile(filepath.Join(eventsDir, entry.Name()))
-		if err != nil || len(contents) > 16<<10 {
+		path := filepath.Join(eventsDir, entry.Name())
+		info, reason := stallJournalFileRefusal(path)
+		if reason != "" {
+			job.Rejections = append(job.Rejections, stallJournalRejection{Path: "events/" + entry.Name(), Reason: reason})
+			continue
+		}
+		contents, err := readBoundedJournalFile(path)
+		if err != nil {
+			continue
+		}
+		if len(contents) > stallJournalMaxEventBytes {
+			job.Rejections = append(job.Rejections, stallJournalRejection{Path: "events/" + entry.Name(), Reason: stallRejectFileOversize})
 			continue
 		}
 		var event stallInboxEvent
 		if json.Unmarshal(contents, &event) != nil {
 			continue
 		}
-		at := event.eventTime(entry.Name(), eventsDir)
+		at := event.eventTime(info)
 		if at.After(job.LastEventAt) {
 			job.LastEventAt = at
 		}
@@ -557,7 +683,7 @@ func scanStallJobEvents(eventsDir, jobID string) (stallJobScan, bool) {
 			}
 		}
 	}
-	if job.ClaimedAt.IsZero() && len(job.Spawns) == 0 {
+	if job.ClaimedAt.IsZero() && len(job.Spawns) == 0 && len(job.Rejections) == 0 {
 		return stallJobScan{}, false
 	}
 	return job, true
@@ -654,20 +780,31 @@ func (m *stallDetectManager) scanJobs() []stallJobScan {
 	}
 	var jobs []stallJobScan
 	for _, entry := range entries {
-		if !entry.IsDir() || !hubJobIDPattern.MatchString(entry.Name()) {
+		if !hubJobIDPattern.MatchString(entry.Name()) {
 			continue
 		}
-		eventsDir := filepath.Join(jobsDir, entry.Name(), "events")
-		info, err := os.Stat(eventsDir)
+		jobPath := filepath.Join(jobsDir, entry.Name())
+		info, reason := stallJobdirRefusal(jobPath)
+		if reason != "" {
+			jobs = append(jobs, stallJobScan{JobID: entry.Name(), Rejections: []stallJournalRejection{{Path: ".", Reason: reason}}})
+			continue
+		}
+		if info == nil {
+			continue
+		}
+		eventsDir := filepath.Join(jobPath, "events")
+		// Lstat, not Stat: the cache's change signal is the events entry
+		// itself — a symlink's own mtime — never whatever it points at.
+		evInfo, err := os.Lstat(eventsDir)
 		if err == nil {
-			if cached, ok := m.scanCache[entry.Name()]; ok && cached.modTime.Equal(info.ModTime()) {
+			if cached, ok := m.scanCache[entry.Name()]; ok && cached.modTime.Equal(evInfo.ModTime()) {
 				jobs = append(jobs, cached.scan)
 				continue
 			}
 		}
 		if job, ok := scanStallJobEvents(eventsDir, entry.Name()); ok {
 			if err == nil {
-				m.scanCache[entry.Name()] = stallJobScanCache{modTime: info.ModTime(), scan: job}
+				m.scanCache[entry.Name()] = stallJobScanCache{modTime: evInfo.ModTime(), scan: job}
 			}
 			jobs = append(jobs, job)
 		}
@@ -700,9 +837,17 @@ func (m *stallDetectManager) refreshJob(ctx context.Context, scan stallJobScan, 
 		ReportPath: scan.ReportPath, ReportKind: scan.ReportKind,
 	}
 	if len(scan.Spawns) == 0 {
+		if scan.ClaimedAt.IsZero() {
+			// A scan that produced only refusals becomes no job row — the
+			// rejected journal never entered job state — but the refusal
+			// itself is still a recorded observation.
+			m.recordJournalRejections(ctx, scan)
+			return nil
+		}
 		row := base
 		row.Attempt, row.Round = 0, 0
 		m.resolveDeadline(&row, scan, all)
+		m.recordJournalRejections(ctx, scan)
 		return m.store.upsertStallJob(ctx, row)
 	}
 	for index, spawn := range scan.Spawns {
@@ -736,7 +881,34 @@ func (m *stallDetectManager) refreshJob(ctx context.Context, scan stallJobScan, 
 			return err
 		}
 	}
+	m.recordJournalRejections(ctx, scan)
 	return m.applyDeadlineExtensions(ctx, scan)
+}
+
+// recordJournalRejections folds a scan's refusals into the incident table.
+// The row lives on the job scope (attempt 0, round 0): a refusal is a
+// property of the journal, not of one attempt. One open row covers a
+// persisting refusal — the evidence names every refused path and its
+// reason, so a boundary violation can never pass as a silent skip. A
+// journal that reads cleanly on a later scan recovers the row.
+func (m *stallDetectManager) recordJournalRejections(ctx context.Context, scan stallJobScan) {
+	at := m.deps.now().UTC()
+	if len(scan.Rejections) == 0 {
+		_ = m.store.recoverStallIncidents(ctx, scan.JobID, 0, 0, []string{stallCauseJournalRefused}, at)
+		return
+	}
+	if open, err := m.openCauseExists(ctx, stallJobRow{JobID: scan.JobID}, stallCauseJournalRefused); err != nil || open {
+		return
+	}
+	rejections := make([]map[string]string, 0, len(scan.Rejections))
+	reasons := make([]string, 0, len(scan.Rejections))
+	for _, rej := range scan.Rejections {
+		rejections = append(rejections, map[string]string{"path": rej.Path, "reason": rej.Reason})
+		reasons = append(reasons, rej.Reason)
+	}
+	m.openIncident(ctx, stallJobRow{JobID: scan.JobID}, stallCauseJournalRefused,
+		stallMatch{line: "journal refused before open: " + strings.Join(reasons, ",")}, at, true,
+		map[string]any{"rejections": rejections})
 }
 
 func (m *stallDetectManager) resolveDeadline(row *stallJobRow, scan stallJobScan, all []stallJobScan) {
@@ -838,8 +1010,11 @@ type stallMatch struct {
 // classifyScreen returns the patterns visible in this read, position-anchored.
 // It deliberately takes no agent status: the contract distrusts status
 // strings, so the unsubmitted/submitted-input distinction is made from read
-// persistence, not from what the pane claims to be doing.
-func classifyScreen(text string) []stallMatch {
+// persistence, not from what the pane claims to be doing. The harness gates
+// only the devin queued-composer rule — the devin banner is a devin UI
+// element, so the identical bytes on another harness's pane are a pasted
+// capture. Every other pattern stays harness-agnostic.
+func classifyScreen(text, harness string) []stallMatch {
 	if text == "" {
 		return nil
 	}
@@ -906,9 +1081,13 @@ func classifyScreen(text string) []stallMatch {
 		sum := sha256.Sum256([]byte(pattern.cause + "\x00" + first))
 		matches = append(matches, stallMatch{cause: pattern.cause, fingerprint: hex.EncodeToString(sum[:8]), count: count, line: first, tail: inTail})
 	}
-	if count, line := devinQueuedBanner(lines); count > 0 {
-		sum := sha256.Sum256([]byte(stallCauseInputUnsubmitted + "\x00" + line))
-		matches = append(matches, stallMatch{cause: stallCauseInputUnsubmitted, fingerprint: hex.EncodeToString(sum[:8]), count: count, line: line, tail: true})
+	if strings.EqualFold(harness, "devin") {
+		// Whole-field equality on the reported harness — an empty or
+		// non-devin harness never reaches the devin banner rule.
+		if count, line := devinQueuedBanner(lines); count > 0 {
+			sum := sha256.Sum256([]byte(stallCauseInputUnsubmitted + "\x00" + line))
+			matches = append(matches, stallMatch{cause: stallCauseInputUnsubmitted, fingerprint: hex.EncodeToString(sum[:8]), count: count, line: line, tail: true})
+		}
 	}
 	return matches
 }
@@ -1346,7 +1525,7 @@ func (m *stallDetectManager) readOnePane(ctx context.Context, job stallJobRow, a
 	if pane.Fingerprints == nil {
 		pane.Fingerprints = map[string]int64{}
 	}
-	matches := classifyScreen(evidence.Text)
+	matches := classifyScreen(evidence.Text, agent.Harness)
 	if !pane.BaselineDone {
 		// The first read after attach is baseline: matching lines are old
 		// scrollback until proven new. Two exceptions keep a real current
@@ -1756,10 +1935,14 @@ func (m *stallDetectManager) overdueEvidence(ctx context.Context, job stallJobRo
 func stallLastFileActivity(inboxRoot string, job stallJobRow, lstat func(string) (os.FileInfo, error)) time.Time {
 	var latest time.Time
 	eventsDir := filepath.Join(inboxRoot, "jobs", job.JobID, "events")
-	if entries, err := os.ReadDir(eventsDir); err == nil {
-		for _, entry := range entries {
-			if info, err := entry.Info(); err == nil && info.ModTime().After(latest) {
-				latest = info.ModTime()
+	// Same boundary as the journal scan: a symlinked or non-directory
+	// events dir is never listed.
+	if info, err := os.Lstat(eventsDir); err == nil && info.Mode()&os.ModeSymlink == 0 && info.IsDir() {
+		if entries, err := os.ReadDir(eventsDir); err == nil {
+			for _, entry := range entries {
+				if info, err := entry.Info(); err == nil && info.ModTime().After(latest) {
+					latest = info.ModTime()
+				}
 			}
 		}
 	}

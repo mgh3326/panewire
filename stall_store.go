@@ -27,6 +27,7 @@ const (
 	stallCauseSuperseded       = "superseded"
 	stallCauseStartupSuspect   = "startup_block_suspect"
 	stallCauseUnreadable       = "unreadable"
+	stallCauseJournalRefused   = "journal_refused"
 )
 
 const (
