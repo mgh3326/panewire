@@ -173,7 +173,7 @@ publish an explicit target list:
 panewire update publish --hub-url https://hub.example.invalid \
   --hub-token-env /etc/panewire/operator.env --version r19b \
   --url https://github.com/org/panewire/releases/download/r19b/panewire_darwin_arm64 \
-  --sha256 <asset-sha256> --machines company-m1,desktop
+  --sha256 <asset-sha256> --machines company-m1,machine-b
 ```
 
 Nodes accept only GitHub release URLs: `github.com` plus the GitHub release
