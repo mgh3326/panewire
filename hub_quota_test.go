@@ -484,7 +484,10 @@ func TestPlaceQuotaAdapterClassificationAndLocalDenyPrecedence(t *testing.T) {
 			if err := os.WriteFile(tokenPath, []byte("HUB_MACHINE_ID=operator\nHUB_TOKEN="+quotaOperatorToken+"\n"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			hubURL := "http://fixture.invalid"
+			// The credentialled hub boundary admits only loopback test origins;
+			// the fixture transport answers before any dial, so the discard
+			// port keeps the transport-error case identical to a real one.
+			hubURL := "http://127.0.0.1:9"
 			client := &http.Client{Transport: quotaRoundTripFunc(func(*http.Request) (*http.Response, error) {
 				return nil, context.DeadlineExceeded
 			})}
