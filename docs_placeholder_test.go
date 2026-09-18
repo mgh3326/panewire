@@ -20,18 +20,28 @@ import (
 // localhost/loopback, the documented CGNAT example 100.64.0.1, and the
 // synthetic pane pair w1:p1/w1:p2.
 //
-// What this check cannot see: bare machine aliases with no dot (mac-a vs a
-// real enrolled ID are indistinguishable tokens) and hosts on TLDs omitted
-// from docFlaggedTLDs. Those remain review responsibilities.
+// What this check cannot see: bare machine aliases with no dot, single-label
+// hostnames, and hosts on TLDs omitted from docFlaggedTLDs. Those classes are
+// not detectable by token shape and are caught at the operator-side merge
+// gate outside this repository; this test owns only the generic literal
+// classes above.
 
-// docAllowedHostSuffixes are the only flagged-TLD hosts permitted in docs.
-// Each entry exists because a legitimate public reference needs it:
+// docAllowedHostSuffixes stays a suffix match on purpose: example.com and
+// example.dev are documentation placeholder domains (RFC 2606 reserves the
+// former; the latter is this repo's convention on a real TLD), so any
+// *.example.com or *.example.dev token is by definition a placeholder.
 var docAllowedHostSuffixes = []string{
-	"example.com",           // RFC 2606 documentation domain
-	"example.dev",           // conventional placeholder on a real TLD
-	"github.com",            // public forge: module path and release URLs
-	"githubusercontent.com", // GitHub release-asset redirect host
-	"modernc.org",           // Go module path for the sqlite driver
+	"example.com",
+	"example.dev",
+}
+
+// docAllowedHostsExact permits exactly the public hosts docs legitimately
+// reference. Subdomains are NOT implied — a real operational subdomain such
+// as a tenant host under one of these parents must fail.
+var docAllowedHostsExact = map[string]bool{
+	"github.com":                    true, // public forge: module path and release URLs
+	"objects.githubusercontent.com": true, // GitHub release-asset redirect host
+	"modernc.org":                   true, // Go module path for the sqlite driver
 }
 
 // docAllowedPaneIDs is the synthetic window:pane pair used by the lane docs.
@@ -80,12 +90,15 @@ var docFlaggedTLDs = map[string]bool{
 var (
 	// Dotted token possibly containing an <angle-bracket> placeholder label.
 	docHostTokenPattern = regexp.MustCompile(`[a-zA-Z0-9_<>-]+(\.[a-zA-Z0-9_<>-]+)+`)
-	docUsersPathPattern = regexp.MustCompile(`/Users/[A-Za-z0-9_.-]+`)
+	docHomePathPattern  = regexp.MustCompile(`/(Users|home)/[A-Za-z0-9_.-]+`)
 	docTailnetIPPattern = regexp.MustCompile(`\b100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]{1,3}\.[0-9]{1,3}\b`)
 	docPaneIDPattern    = regexp.MustCompile(`\bw[0-9A-Za-z]+:p[0-9]+\b`)
 )
 
 func docHostAllowed(token string) bool {
+	if docAllowedHostsExact[token] {
+		return true
+	}
 	for _, suffix := range docAllowedHostSuffixes {
 		if token == suffix || strings.HasSuffix(token, "."+suffix) {
 			return true
@@ -98,7 +111,7 @@ func docHostAllowed(token string) bool {
 func scanDocText(text string) []string {
 	var findings []string
 	for i, line := range strings.Split(text, "\n") {
-		for _, m := range docUsersPathPattern.FindAllString(line, -1) {
+		for _, m := range docHomePathPattern.FindAllString(line, -1) {
 			findings = append(findings, fmt.Sprintf("line %d: home path %q — use ~ or $HOME", i+1, m))
 		}
 		for _, m := range docTailnetIPPattern.FindAllString(line, -1) {
@@ -172,7 +185,11 @@ func TestDocLiteralScannerRules(t *testing.T) {
 		"db.corp",                             // internal pseudo-TLD
 		"nas.home",                            // internal pseudo-TLD
 		"realteam.cloudflareaccess.com",       // real subdomain of an allowed-<placeholder> service
+		"tenant.github.com",                   // subdomain of an exact-allowed host is not implied
+		"tenant.modernc.org",                  // subdomain of an exact-allowed host is not implied
+		"tenant.githubusercontent.com",        // subdomain of an exact-allowed host is not implied
 		"/Users/someone/.config/panewire/env", // macOS home path
+		"/home/verifier/.config/panewire/env", // Linux operator home path
 		"100.100.23.7",                        // tailnet-range IP that is not the doc example
 		"w16:p3",                              // real-shaped pane id
 		"wB:p7",                               // real-shaped pane id
