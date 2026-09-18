@@ -174,6 +174,10 @@ func TestHubOperatorSuccessMatrix(t *testing.T) {
 			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
 				return runBurstCLIWithDeps([]string{"show", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
 			}},
+		{name: "sessions find", wantMethod: http.MethodGet, wantPath: "/v1/nodes", wantCode: ExitOK,
+			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
+				return runSessionsCLI([]string{"find", "label-x", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
+			}},
 		{name: "update publish", wantMethod: http.MethodPost, wantPath: "/v1/update", wantCode: ExitOK,
 			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
 				return runUpdateCLI([]string{"publish", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv, "--version", "v1.2.3", "--sha256", strings.Repeat("ab", 32), "--url", "https://github.com/mgh3326/panewire/releases/download/v1.2.3/panewire", "--machines", "machine-a"}, stdout, stderr, deps)
@@ -224,6 +228,9 @@ func TestHubOperatorRejectsEveryRedirect(t *testing.T) {
 	}{
 		{name: "GET", path: "/v1/nodes", run: func(t *testing.T, hubURL string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
 			return runHubStatusCLI([]string{"--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
+		}},
+		{name: "GET sessions find", path: "/v1/nodes", run: func(t *testing.T, hubURL string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
+			return runSessionsCLI([]string{"find", "label-x", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
 		}},
 		{name: "PUT", path: "/v1/lanes/lane-a", run: func(t *testing.T, hubURL string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
 			return runLanesCLI([]string{"add", "lane-a", "--machine", "machine-a", "--pane", "w1:p1", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
@@ -322,6 +329,7 @@ func TestHubOperatorCLISourceNeverUsesDefaultClient(t *testing.T) {
 	for _, file := range []string{
 		"hub_operator_client.go", "hub_cli.go", "lanes_cli.go",
 		"placement_cli.go", "burst.go", "hub_r19_cli.go",
+		"sessions_find.go",
 	} {
 		data, err := os.ReadFile(file)
 		if err != nil {
