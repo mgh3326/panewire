@@ -14,6 +14,8 @@ const (
 	hubAlertReasonDisconnected  = "disconnected"
 	hubAlertReasonStale         = "stale"
 	hubAlertReasonCheckFailed   = "check_failed"
+	hubAlertReasonNoData        = "no_data"
+	hubAlertReasonStallDegraded = "stall_degraded"
 	hubAlertNoCheck             = "none"
 	hubFailoverPhaseDown        = "down"
 	hubFailoverPhaseUp          = "up"
@@ -137,8 +139,71 @@ func (h *HubServer) observeHeartbeatAlerts(machineID string, heartbeat hubHeartb
 		}
 		notifications = append(notifications, h.observeHubAlertLocked(now, key, false, time.Time{}, hubAlertReasonCheckFailed, state.check, 0)...)
 	}
+	notifications = append(notifications, h.observeStallBeatLocked(now, machineID, heartbeat.StallDetect)...)
 	h.mu.Unlock()
 	h.dispatchHubNotifications(notifications)
+}
+
+// observeStallBeatLocked is the hub's no-data watch on the node detector. The
+// contract has two failure shapes: the field disappears from a node that was
+// reporting it, or beat_ms stops advancing across heartbeats. A node that
+// never sent the field is left alone — absence is only a problem after the
+// node has announced the detector exists.
+func (h *HubServer) observeStallBeatLocked(now time.Time, machineID string, beat *hubStallBeatPayload) []hubNotification {
+	key := "stall:" + machineID
+	state := h.stallBeats[machineID]
+	if state == nil {
+		state = &hubStallBeatState{}
+		h.stallBeats[machineID] = state
+	}
+	problem := false
+	reason := hubAlertReasonNoData
+	var problemSince time.Time
+	if beat == nil {
+		if state.seen {
+			problem = true
+			problemSince = state.lastAdvance
+		}
+	} else {
+		if beat.Degraded || beat.Panes == nil {
+			// The node is heartbeating but the scan could not observe —
+			// a failed agent.list surfaces here instead of pretending an
+			// empty pane set. Distinct from no_data: the detector is alive
+			// and blind, not silent.
+			problem = true
+			reason = hubAlertReasonStallDegraded
+			if state.degradedSince.IsZero() {
+				state.degradedSince = now
+			}
+			problemSince = state.degradedSince
+		} else {
+			state.degradedSince = time.Time{}
+		}
+		if !state.seen || beat.BeatMS > state.lastBeatMS {
+			state.seen = true
+			state.lastBeatMS = beat.BeatMS
+			state.lastAdvance = now
+		}
+		if beat.IntervalMS > 0 {
+			state.intervalMS = beat.IntervalMS
+		}
+		// A beat that does not advance for three advertised intervals — with
+		// a 90-second floor for very short poll configs — means the scan loop
+		// is no longer producing observations.
+		threshold := 3 * time.Duration(state.intervalMS) * time.Millisecond
+		if floor := 90 * time.Second; threshold < floor {
+			threshold = floor
+		}
+		if state.seen && now.Sub(state.lastAdvance) > threshold {
+			problem = true
+			reason = hubAlertReasonNoData
+			problemSince = state.lastAdvance
+		}
+	}
+	if problemSince.IsZero() {
+		problemSince = now
+	}
+	return h.observeHubAlertLocked(now, key, problem, problemSince, reason, hubAlertNoCheck, 0)
 }
 
 // observeHubAlertLocked applies the shared two-observation debounce.  For a
@@ -239,6 +304,9 @@ func hubAlertMachineID(key string) string {
 	if machineID, found := strings.CutPrefix(key, "node:"); found {
 		return machineID
 	}
+	if machineID, found := strings.CutPrefix(key, "stall:"); found {
+		return machineID
+	}
 	if remainder, found := strings.CutPrefix(key, "check:"); found {
 		machineID, _, _ := strings.Cut(remainder, ":")
 		return machineID
@@ -320,7 +388,7 @@ func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 }
 
 func validHubAlertReason(reason string) bool {
-	return reason == hubAlertReasonDisconnected || reason == hubAlertReasonStale || reason == hubAlertReasonCheckFailed
+	return reason == hubAlertReasonDisconnected || reason == hubAlertReasonStale || reason == hubAlertReasonCheckFailed || reason == hubAlertReasonNoData || reason == hubAlertReasonStallDegraded
 }
 
 func formatHubAlert(alert HubAlert) string {

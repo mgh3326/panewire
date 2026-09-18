@@ -163,6 +163,8 @@ type HubClient struct {
 	relayRecvSeq      int64 // assigned synchronously by the hub read loop.
 	idleWakeMu        sync.Mutex
 	idleWake          *idleWakeManager
+	stallBeatMu       sync.Mutex
+	stallBeat         func() *hubStallBeatPayload
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -892,6 +894,11 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	holdsActive := client.burstHoldsActive
 	client.burstMu.Unlock()
 	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HoldsActive: holdsActive}
+	if provider := client.stallBeatProvider(); provider != nil {
+		if beat := provider(); beat != nil {
+			heartbeat.StallDetect = beat
+		}
+	}
 	collectLoad := client.hostLoadCollector
 	if collectLoad == nil {
 		collectLoad = collectHubHostLoad
@@ -935,6 +942,21 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	heartbeat.SnapshotStatus = hubSnapshotStatusOK
 	payload := marshalHubHeartbeatWithSessions(heartbeat, states)
 	return hubClientEvent{Kind: "heartbeat", Payload: payload}
+}
+
+// SetStallDetect registers the detector's beat provider. When it is nil the
+// heartbeat carries no stall_detect field, which is how the hub knows this
+// node never ran the detector rather than the detector having stopped.
+func (client *HubClient) SetStallDetect(provider func() *hubStallBeatPayload) {
+	client.stallBeatMu.Lock()
+	client.stallBeat = provider
+	client.stallBeatMu.Unlock()
+}
+
+func (client *HubClient) stallBeatProvider() func() *hubStallBeatPayload {
+	client.stallBeatMu.Lock()
+	defer client.stallBeatMu.Unlock()
+	return client.stallBeat
 }
 
 func hubJobCompletionPayload(jobID string, epoch uint64) json.RawMessage {

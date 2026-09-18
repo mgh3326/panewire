@@ -28,6 +28,7 @@ type Config struct {
 	Logging                                    LoggingConfig
 	Stage2                                     Stage2Config
 	Hub                                        HubDaemonConfig
+	StallDetect                                StallDetectConfig
 	Store                                      *Store
 	SchemaCommand                              []string
 	Logger                                     *slog.Logger
@@ -43,11 +44,15 @@ type Daemon struct {
 	cancel     context.CancelFunc
 	herdr      *HerdrClient
 	idleWake   *idleWakeManager
+	stall      *stallDetectManager
 	caps       GuardResult
 	eventDone  chan struct{}
 	idleDone   chan struct{}
 	stage2Done chan struct{}
 	hubDone    chan struct{}
+	stallDone  chan struct{}
+	resub      chan struct{}
+	subscribed map[string]bool
 	mu         sync.Mutex
 }
 
@@ -110,6 +115,56 @@ func (d *Daemon) Start(ctx context.Context) error {
 			return err
 		}
 	}
+	if d.cfg.StallDetect.Enabled && d.cfg.HerdrSocket != "" && os.Getenv("PANEWIRE_STALL_DETECT") != "off" {
+		stallRoot := d.cfg.InboxRoot
+		if d.cfg.Hub.Client != nil && d.cfg.Hub.Client.jobsInboxRoot != "" {
+			stallRoot = d.cfg.Hub.Client.jobsInboxRoot
+		}
+		if stallRoot == "" {
+			stallRoot = defaultInboxRoot()
+		}
+		d.resub = make(chan struct{}, 1)
+		socket := d.cfg.HerdrSocket
+		// Every herdr handle the detector touches is a stallReader: the
+		// interface has no input methods, so the wiring cannot express one.
+		dial := func() (stallReader, error) { return NewHerdrClient(socket) }
+		deps := stallDeps{
+			listAgents: func(ctx context.Context) ([]paneIdentity, error) {
+				c, err := dial()
+				if err != nil {
+					return nil, err
+				}
+				defer c.Close()
+				return c.AgentDetails(ctx)
+			},
+			readPane: func(ctx context.Context, pane string) (readEvidence, error) {
+				c, err := dial()
+				if err != nil {
+					return readEvidence{}, err
+				}
+				defer c.Close()
+				return c.ReadPane(ctx, pane)
+			},
+			subscribed: func() (map[string]bool, time.Time) { return d.subscribedSet() },
+			resubscribe: func() {
+				select {
+				case d.resub <- struct{}{}:
+				default:
+				}
+			},
+		}
+		if d.cfg.Hub.Client != nil {
+			deps.enqueue = d.cfg.Hub.Client.EnqueueRelayEvent
+		}
+		manager, err := newStallDetectManager(d.store, stallRoot, d.cfg.StallDetect, deps, d.cfg.Logger)
+		if err != nil {
+			return err
+		}
+		d.stall = manager
+		if d.cfg.Hub.Client != nil {
+			d.cfg.Hub.Client.SetStallDetect(manager.StallBeat)
+		}
+	}
 	path := d.cfg.SocketPath
 	if path == "" {
 		path = defaultSocketPath()
@@ -126,7 +181,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	runCtx, cancel := context.WithCancel(ctx)
 	d.cancel = cancel
 	go d.serve(runCtx)
-	if d.cfg.HerdrSocket != "" && (guard.Events || d.idleWake != nil) {
+	if d.cfg.HerdrSocket != "" && (guard.Events || d.idleWake != nil || d.stall != nil) {
 		d.eventDone = make(chan struct{})
 		go func() {
 			defer close(d.eventDone)
@@ -152,6 +207,13 @@ func (d *Daemon) Start(ctx context.Context) error {
 		go func() {
 			defer close(d.hubDone)
 			d.cfg.Hub.Client.Run(runCtx)
+		}()
+	}
+	if d.stall != nil {
+		d.stallDone = make(chan struct{})
+		go func() {
+			defer close(d.stallDone)
+			d.stall.Run(runCtx)
 		}()
 	}
 	return nil
@@ -262,7 +324,7 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 			}
 			client = connected
 		}
-		events, err := client.Subscribe(ctx)
+		events, panes, err := client.Subscribe(ctx)
 		if err != nil {
 			d.cfg.Logger.Warn("herdr subscribe failed", "error", err)
 			d.clearHerdrClient(client)
@@ -275,6 +337,9 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 			}
 			continue
 		}
+		// The subscribe response is the coverage proof the stall detector
+		// diffs against: panes listed here are the ones this stream watches.
+		d.setSubscribedPanes(panes)
 		if d.idleWake != nil {
 			d.observeIdleWakeSnapshot(ctx, client)
 			d.idleWake.Tick(ctx, time.Now().UTC())
@@ -299,10 +364,20 @@ func (d *Daemon) eventLoop(ctx context.Context) {
 						d.cfg.Logger.Warn("idle-wake observation rejected")
 					}
 				}
+				// output_matched is a wake signal only: the payload carries no
+				// text, so the detector classifies on its own bounded read.
+				if d.stall != nil && (ev.Kind == "pane.output_matched" || ev.Kind == "pane_output_changed") {
+					d.stall.Wake(ev.PaneID)
+				}
 			case at := <-settle:
 				d.idleWake.Tick(ctx, at.UTC())
 			case <-poll:
 				d.observeIdleWakeSnapshot(ctx, client)
+			case <-d.resub:
+				// The detector saw a tracked pane outside the covered set.
+				// Cycling the stream re-runs Subscribe against the fresh
+				// agent.list, which is also the reconnect coverage proof.
+				streamOpen = false
 			}
 		}
 		d.clearHerdrClient(client)
@@ -378,8 +453,35 @@ func (d *Daemon) clearHerdrClient(client *HerdrClient) {
 	if d.herdr == client {
 		d.herdr = nil
 	}
+	// A dropped stream proves nothing about coverage; the next Subscribe
+	// re-establishes the set. Until then the detector must not read the old
+	// one as current.
+	d.subscribed = nil
 	d.mu.Unlock()
 	_ = client.Close()
+}
+
+func (d *Daemon) setSubscribedPanes(panes []string) {
+	set := make(map[string]bool, len(panes))
+	for _, pane := range panes {
+		set[pane] = true
+	}
+	d.mu.Lock()
+	d.subscribed = set
+	d.mu.Unlock()
+}
+
+func (d *Daemon) subscribedSet() (map[string]bool, time.Time) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.subscribed == nil {
+		return nil, time.Time{}
+	}
+	set := make(map[string]bool, len(d.subscribed))
+	for pane := range d.subscribed {
+		set[pane] = true
+	}
+	return set, time.Now().UTC()
 }
 
 func (d *Daemon) idleWakeRetryLoop(ctx context.Context) {
@@ -558,6 +660,10 @@ func (d *Daemon) Stop() error {
 	if d.hubDone != nil {
 		<-d.hubDone
 		d.hubDone = nil
+	}
+	if d.stallDone != nil {
+		<-d.stallDone
+		d.stallDone = nil
 	}
 	if d.listener != nil {
 		_ = d.listener.Close()
