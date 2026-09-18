@@ -14,7 +14,7 @@ active.
   "consecutive": 3,
   "wake_via": "rpi",
   "wake_mac": "02:1a:2b:3c:4d:5e",
-  "target_machine": "desktop",
+  "target_machine": "machine-b",
   "idle_minutes": 30,
   "cooldown_minutes": 20
 }
@@ -46,7 +46,7 @@ panewire burst show --hub-url https://hub.example --hub-token-env /etc/panewire/
 Run the RPi node with `--burst-wake-mac 02:1a:2b:3c:4d:5e`, matching the
 policy, or its existing paired `--failover-wake-on` and
 `--failover-wake-mac` flags; the latter MAC is shared for burst wake. Existing
-failover's paired-flag rejection remains in force. Run the desktop node with `--burst-poweroff-allowed` only after
+failover's paired-flag rejection remains in force. Run the `machine-b` node with `--burst-poweroff-allowed` only after
 passwordless `sudo -n /usr/sbin/poweroff` has been deliberately configured.
 It is off by default. Hub Telegram notifications are one line per up/down
 event and contain only phase and measurements.
