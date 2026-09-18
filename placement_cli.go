@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -32,12 +33,20 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		fmt.Fprintln(stderr, "place rejected: invalid operator token env")
 		return ExitConditionInvalid
 	}
-	endpoint, err := hubHTTPSEndpoint(*hubURL, "/v1/placement", deps.AllowInsecureForTests)
+	var cf hubCFAccessEnv
+	if *cfPath != "" {
+		cf, err = loadHubCFAccessEnv(*cfPath)
+		if err != nil {
+			fmt.Fprintln(stderr, "place rejected: invalid Cloudflare Access env")
+			return ExitConditionInvalid
+		}
+	}
+	client, err := newHubOperatorClient(*hubURL, env.Token, cf, deps, 15*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "place rejected: invalid hub URL")
 		return ExitConditionInvalid
 	}
-	query := endpoint.Query()
+	query := url.Values{}
 	query.Set("class", *class)
 	if *cwd != "" {
 		query.Set("cwd", *cwd)
@@ -48,31 +57,9 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if *accountFP != "" {
 		query.Set("account_fp", *accountFP)
 	}
-	endpoint.RawQuery = query.Encode()
-	var cf hubCFAccessEnv
-	if *cfPath != "" {
-		cf, err = loadHubCFAccessEnv(*cfPath)
-		if err != nil {
-			fmt.Fprintln(stderr, "place rejected: invalid Cloudflare Access env")
-			return ExitConditionInvalid
-		}
-	}
-	client := deps.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return ExitInternal
-	}
-	req.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
-	if cf.ClientID != "" {
-		req.Header.Set("CF-Access-Client-Id", cf.ClientID)
-		req.Header.Set("CF-Access-Client-Secret", cf.ClientSecret)
-	}
-	response, err := client.Do(req)
+	response, err := client.do(ctx, http.MethodGet, "/v1/placement", query, nil)
 	if err != nil {
 		fmt.Fprintln(stderr, "place unavailable")
 		return ExitDaemonUnavailable

@@ -92,31 +92,14 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		path += "/" + options.Lane
 		method = http.MethodDelete
 	}
-	endpoint, err := hubHTTPSEndpoint(options.HubURL, path, deps.AllowInsecureForTests)
+	client, err := newHubOperatorClient(options.HubURL, env.Token, cfAccess, deps, lanesCLIRequestTimeout)
 	if err != nil {
 		fmt.Fprintln(stderr, "lanes rejected: invalid hub URL")
 		return ExitConditionInvalid
 	}
-	client := deps.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), lanesCLIRequestTimeout)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), requestBody)
-	if err != nil {
-		fmt.Fprintln(stderr, "lanes unavailable")
-		return ExitInternal
-	}
-	request.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
-	if requestBody != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	if cfAccess.ClientID != "" {
-		request.Header.Set("CF-Access-Client-Id", cfAccess.ClientID)
-		request.Header.Set("CF-Access-Client-Secret", cfAccess.ClientSecret)
-	}
-	response, err := client.Do(request)
+	response, err := client.do(ctx, method, path, nil, requestBody)
 	if err != nil {
 		fmt.Fprintln(stderr, "lanes unavailable")
 		return ExitInternal

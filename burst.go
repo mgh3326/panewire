@@ -136,7 +136,7 @@ func runBurstCLIWithDeps(args []string, stdout, stderr io.Writer, deps hubCLIDep
 			return ExitUsage
 		}
 		if *hubURL != "" {
-			return runBurstShowLive(*hubURL, *tokenEnv, *cfEnv, stdout, stderr)
+			return runBurstShowLive(*hubURL, *tokenEnv, *cfEnv, stdout, stderr, deps)
 		}
 		policy, _, err := LoadBurstPolicy(*path)
 		if err != nil {
@@ -205,6 +205,14 @@ func runBurstOnDemandCLI(args []string, stdout, stderr io.Writer, deps hubCLIDep
 		fmt.Fprintln(stderr, "burst rejected: invalid operator token env")
 		return ExitConditionInvalid
 	}
+	var cf hubCFAccessEnv
+	if *cfPath != "" {
+		cf, err = loadHubCFAccessEnv(*cfPath)
+		if err != nil {
+			fmt.Fprintln(stderr, "burst rejected: invalid Cloudflare Access env")
+			return ExitConditionInvalid
+		}
+	}
 	endpointPath, method := "/v1/burst/holds", http.MethodGet
 	var body io.Reader
 	if args[0] == "request" {
@@ -221,34 +229,14 @@ func runBurstOnDemandCLI(args []string, stdout, stderr io.Writer, deps hubCLIDep
 		}{*leaseID})
 		endpointPath, method, body = "/v1/burst/release", http.MethodPost, bytes.NewReader(encoded)
 	}
-	endpoint, err := hubHTTPSEndpoint(*hubURL, endpointPath, deps.AllowInsecureForTests)
+	client, err := newHubOperatorClient(*hubURL, env.Token, cf, deps, *timeout+2*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "burst rejected: invalid hub URL")
 		return ExitConditionInvalid
 	}
-	client := deps.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout+2*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
-	if err != nil {
-		return ExitInternal
-	}
-	request.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	if *cfPath != "" {
-		cf, cfErr := loadHubCFAccessEnv(*cfPath)
-		if cfErr != nil {
-			return ExitConditionInvalid
-		}
-		request.Header.Set("CF-Access-Client-Id", cf.ClientID)
-		request.Header.Set("CF-Access-Client-Secret", cf.ClientSecret)
-	}
-	response, err := client.Do(request)
+	response, err := client.do(ctx, method, endpointPath, nil, body)
 	if err != nil {
 		fmt.Fprintln(stderr, "burst unavailable")
 		return ExitTimeout
@@ -267,32 +255,28 @@ func runBurstOnDemandCLI(args []string, stdout, stderr io.Writer, deps hubCLIDep
 	return ExitOK
 }
 
-func runBurstShowLive(rawURL, tokenPath, cfPath string, stdout, stderr io.Writer) int {
+func runBurstShowLive(rawURL, tokenPath, cfPath string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	env, err := loadHubTokenEnv(tokenPath)
 	if err != nil || env.MachineID != hubOperatorMachineID {
 		fmt.Fprintln(stderr, "burst show rejected: invalid operator token env")
 		return ExitConditionInvalid
 	}
-	endpoint, err := hubHTTPSEndpoint(rawURL, "/v1/burst", false)
-	if err != nil {
-		fmt.Fprintln(stderr, "burst show rejected: invalid hub URL")
-		return ExitConditionInvalid
-	}
-	request, err := http.NewRequest(http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		return ExitInternal
-	}
-	request.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
+	var cf hubCFAccessEnv
 	if cfPath != "" {
-		cf, err := loadHubCFAccessEnv(cfPath)
+		cf, err = loadHubCFAccessEnv(cfPath)
 		if err != nil {
 			fmt.Fprintln(stderr, "burst show rejected: invalid Cloudflare Access env")
 			return ExitConditionInvalid
 		}
-		request.Header.Set("CF-Access-Client-Id", cf.ClientID)
-		request.Header.Set("CF-Access-Client-Secret", cf.ClientSecret)
 	}
-	response, err := http.DefaultClient.Do(request)
+	client, err := newHubOperatorClient(rawURL, env.Token, cf, deps, 15*time.Second)
+	if err != nil {
+		fmt.Fprintln(stderr, "burst show rejected: invalid hub URL")
+		return ExitConditionInvalid
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	response, err := client.do(ctx, http.MethodGet, "/v1/burst", nil, nil)
 	if err != nil {
 		fmt.Fprintln(stderr, "burst show unavailable")
 		return ExitInternal

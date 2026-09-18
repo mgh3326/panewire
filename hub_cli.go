@@ -500,28 +500,14 @@ func runHubStatusCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) i
 			return ExitConditionInvalid
 		}
 	}
-	endpoint, err := hubHTTPSEndpoint(*hubURL, "/v1/nodes", deps.AllowInsecureForTests)
+	client, err := newHubOperatorClient(*hubURL, env.Token, cfAccess, deps, 15*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "hub-status rejected: invalid hub URL")
 		return ExitConditionInvalid
 	}
-	client := deps.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		fmt.Fprintln(stderr, "hub-status unavailable")
-		return ExitInternal
-	}
-	request.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
-	if cfAccess.ClientID != "" {
-		request.Header.Set("CF-Access-Client-Id", cfAccess.ClientID)
-		request.Header.Set("CF-Access-Client-Secret", cfAccess.ClientSecret)
-	}
-	response, err := client.Do(request)
+	response, err := client.do(ctx, http.MethodGet, "/v1/nodes", nil, nil)
 	if err != nil {
 		fmt.Fprintln(stderr, "hub-status unavailable")
 		return ExitInternal
@@ -540,26 +526,6 @@ func runHubStatusCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) i
 	}
 	renderHubStatus(stdout, body.Nodes)
 	return ExitOK
-}
-
-func hubHTTPSEndpoint(raw, endpoint string, allowInsecureForTests bool) (*url.URL, error) {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return nil, errors.New("invalid hub URL")
-	}
-	switch parsed.Scheme {
-	case "https", "wss":
-		parsed.Scheme = "https"
-	case "http", "ws":
-		if !allowInsecureForTests {
-			return nil, errors.New("invalid hub URL")
-		}
-		parsed.Scheme = "http"
-	default:
-		return nil, errors.New("invalid hub URL")
-	}
-	parsed.Path = endpoint
-	return parsed, nil
 }
 
 func validHubStatusNodes(nodes []HubNode) bool {
@@ -633,35 +599,19 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		}{*jobID, *to})
 		path, method, body = "/v1/jobs/reassign", http.MethodPost, bytes.NewReader(encoded)
 	}
-	endpoint, err := hubHTTPSEndpoint(*hubURL, path, deps.AllowInsecureForTests)
+	client, err := newHubOperatorClient(*hubURL, env.Token, cfAccess, deps, 15*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "jobs rejected: invalid hub URL")
 		return ExitConditionInvalid
 	}
+	var query url.Values
 	if args[0] == "jobs" && *machine != "" {
-		query := endpoint.Query()
+		query = url.Values{}
 		query.Set("machine", *machine)
-		endpoint.RawQuery = query.Encode()
-	}
-	client := deps.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
-	if err != nil {
-		return ExitInternal
-	}
-	request.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	if cfAccess.ClientID != "" {
-		request.Header.Set("CF-Access-Client-Id", cfAccess.ClientID)
-		request.Header.Set("CF-Access-Client-Secret", cfAccess.ClientSecret)
-	}
-	response, err := client.Do(request)
+	response, err := client.do(ctx, method, path, query, body)
 	if err != nil {
 		fmt.Fprintln(stderr, "jobs unavailable")
 		return ExitInternal
