@@ -18,6 +18,7 @@ const (
 	ExitDaemonUnavailable = 4
 	ExitConditionInvalid  = 5
 	ExitDeliveryFailure   = 6
+	ExitPartial           = 7
 	ExitInternal          = 70
 )
 

@@ -201,6 +201,55 @@ panewire hub-status \
 `hub-status` uses the same optional Access env format and sends its two values
 only as headers on the HTTPS request.
 
+### Operator session find
+
+`panewire sessions find` locates sessions by canonical agent name across the
+session snapshots that nodes already publish through `/v1/nodes`. It issues
+exactly one authenticated `GET /v1/nodes` through the same credentialled
+client as `hub-status` — the same origin pinning, redirect refusal, and
+bounded body — and never reads panes, prompts, or terminal output itself.
+
+```sh
+panewire sessions find <label> \
+  --hub-url https://hub.example.invalid \
+  --hub-token-env /safe/operator/hub-operator.env \
+  --hub-cf-env /safe/operator/hub-cf-access.env
+```
+
+The search key is `agent_name` — the canonical agent identity nodes copy
+byte-for-byte from `agent.list.name`. Matching is exact by default;
+`--contains` opts into substring matching. Neither mode ever searches
+`display_label` (tab-join display context) or the legacy `label` field, and a
+session without an agent name can never match. `--machine <machine-id>`
+narrows the lookup to one hub-returned node and fails when the response does
+not contain it. `--json` renders the typed result (`query`, `scope`,
+`fetched_at`, `matches`, `coverage`, `outcome`) for automation; the default
+renderer is a human-readable table of the same data.
+
+Each match row separates identity from display context: `agent_name` is the
+canonical key, `display_label` is tab-derived display text, `label` is the
+legacy field kept for compatibility, and `label_source` records its
+provenance as `agent_name`, `tab_label`, or `missing`. Sessions with no
+agent name stay visible as per-node `unnamed` counts in `coverage` so an
+empty match list is never mistaken for an empty fleet.
+
+The result is scoped to `hub_returned_nodes`: it describes only the nodes the
+hub returned for this request, never a fleet-wide guarantee. `coverage`
+counts how many of those snapshots are trustworthy and carries one of six
+per-node states: `UNOBSERVED` (no snapshot reported), `COLLECTOR_UNAVAILABLE`
+(the node's collector reported `unavailable`), `OBSERVED_EMPTY` (a fresh,
+complete, empty session list), `INVALID_SNAPSHOT` (a malformed or
+contract-violating snapshot), `STALE` (a disconnected node, stale flag, or a
+`received_at` older than 120 s or in the future), or `PARTIAL` (a truncated
+snapshot that may hide matches).
+
+The `outcome` is `FOUND` or `NO_MATCH` only when every returned node is fully
+observed; a `NO_MATCH` therefore means "no returned node reported this
+label", not "the label exists nowhere". Any coverage gap produces `PARTIAL`
+with a nonzero exit (7), and found matches are still listed alongside the
+uncertainty. Transport, decode, and credential failures produce `ERROR` with
+the existing nonzero boundaries.
+
 `--hub-accepting` is optional and defaults to false. It is only a node
 self-report shown by `/v1/nodes` and `hub-status`; it does not create a job
 API or mutate a running connection. Remove or add it and restart/reconnect the

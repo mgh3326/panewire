@@ -362,6 +362,7 @@ func loadHubCFAccessEnv(path string) (hubCFAccessEnv, error) {
 type hubCLIDeps struct {
 	HTTPClient            *http.Client
 	AllowInsecureForTests bool
+	Now                   func() time.Time
 }
 
 // runHubEmitCLI sends one display-only note as an authenticated node and
