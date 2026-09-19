@@ -29,9 +29,34 @@ func t443Deps(server *httptest.Server) hubCLIDeps {
 	return deps
 }
 
-// t443Session builds one synthetic HubSession wire object. Fixture identity is
-// fully synthetic: pane/machine/label strings never mirror a real session.
-func t443Session(pane, workspace, label, status string) string {
+// t443Session builds one synthetic named-agent HubSession wire object: the
+// agent name doubles as the label with label_source=agent_name. Fixture
+// identity is fully synthetic: pane/machine/name strings never mirror a real
+// session.
+func t443Session(pane, workspace, agentName, status string) string {
+	return t443SessionProvenance(pane, workspace, agentName, agentName, "agent_name", "", status)
+}
+
+// t443SessionProvenance builds a session carrying the additive provenance
+// fields explicitly so every mixed wire shape stays expressible. Empty
+// agentName/labelSource/displayLabel omit the key entirely.
+func t443SessionProvenance(pane, workspace, agentName, label, labelSource, displayLabel, status string) string {
+	object := fmt.Sprintf(`{"pane_id":%q,"workspace_id":%q,"label":%q,"status":%q,"revision":1,"state_change_seq":1`, pane, workspace, label, status)
+	if agentName != "" {
+		object += fmt.Sprintf(`,"agent_name":%q`, agentName)
+	}
+	if labelSource != "" {
+		object += fmt.Sprintf(`,"label_source":%q`, labelSource)
+	}
+	if displayLabel != "" {
+		object += fmt.Sprintf(`,"display_label":%q`, displayLabel)
+	}
+	return object + "}"
+}
+
+// t443SessionLegacy builds a pre-additive payload row: no agent_name, no
+// label_source, no display_label. It must still decode and stay unmatchable.
+func t443SessionLegacy(pane, workspace, label, status string) string {
 	return fmt.Sprintf(`{"pane_id":%q,"workspace_id":%q,"label":%q,"status":%q,"revision":1,"state_change_seq":1}`, pane, workspace, label, status)
 }
 
@@ -175,6 +200,9 @@ func TestSessionsFindExactDefaultAndContains(t *testing.T) {
 	}
 	if result.Matches[0].Machine != "node-a" || result.Matches[1].Machine != "node-c" {
 		t.Fatalf("exact find kept a substring-only label or lost a duplicate: %+v", result.Matches)
+	}
+	if result.Matches[0].AgentName != "label-hit" || result.Matches[0].LabelSource != "agent_name" {
+		t.Fatalf("match lost canonical identity/provenance: %+v", result.Matches[0])
 	}
 	if result.Query.Match != "exact" {
 		t.Fatalf("query.match=%q want exact", result.Query.Match)
@@ -584,7 +612,7 @@ func TestSessionsFindRendererParity(t *testing.T) {
 	result := t443Result(t, jsonOut)
 	for _, want := range []string{
 		"outcome\tPARTIAL", "expected=2", "observed=1", "missing=1",
-		"match\tnode-b\tw1:p1\tws-a\tlabel-hit\tidle",
+		"match\tnode-b\tw1:p1\tws-a\tagent_name=label-hit\tlabel=label-hit\tlabel_source=agent_name\tdisplay_label=-\tstatus=idle",
 		"node\tnode-a\tcovered=false\tstate=UNOBSERVED",
 	} {
 		if !strings.Contains(human, want) {

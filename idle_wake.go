@@ -36,8 +36,12 @@ const (
 // HerdrAgentState is the bounded subset of agent.list used by idle-wake.
 type HerdrAgentState struct {
 	PaneID, WorkspaceID, Label, Status string
-	Revision, SourceStateChangeSeq     int64
-	InteractiveReady                   *bool
+	// AgentName is the raw agent.list name — the only canonical agent
+	// identity. DisplayLabel is the tab.list join result; both stay separate
+	// from the legacy mixed-provenance Label.
+	AgentName, DisplayLabel        string
+	Revision, SourceStateChangeSeq int64
+	InteractiveReady               *bool
 	// Authoritative is true for an agent.list snapshot. Only a snapshot may
 	// declare that herdr's revision or state-change namespace moved backwards;
 	// an older event racing a newer snapshot is ignored instead.

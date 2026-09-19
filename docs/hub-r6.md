@@ -203,11 +203,11 @@ only as headers on the HTTPS request.
 
 ### Operator session find
 
-`panewire sessions find` locates sessions by label across the session
-snapshots that nodes already publish through `/v1/nodes`. It issues exactly
-one authenticated `GET /v1/nodes` through the same credentialled client as
-`hub-status` — the same origin pinning, redirect refusal, and bounded body —
-and never reads panes, prompts, or terminal output itself.
+`panewire sessions find` locates sessions by canonical agent name across the
+session snapshots that nodes already publish through `/v1/nodes`. It issues
+exactly one authenticated `GET /v1/nodes` through the same credentialled
+client as `hub-status` — the same origin pinning, redirect refusal, and
+bounded body — and never reads panes, prompts, or terminal output itself.
 
 ```sh
 panewire sessions find <label> \
@@ -216,12 +216,22 @@ panewire sessions find <label> \
   --hub-cf-env /safe/operator/hub-cf-access.env
 ```
 
-Label matching is exact by default; `--contains` opts into substring
-matching. `--machine <machine-id>` narrows the lookup to one hub-returned
-node and fails when the response does not contain it. `--json` renders the
-typed result (`query`, `scope`, `fetched_at`, `matches`, `coverage`,
-`outcome`) for automation; the default renderer is a human-readable table of
-the same data.
+The search key is `agent_name` — the canonical agent identity nodes copy
+byte-for-byte from `agent.list.name`. Matching is exact by default;
+`--contains` opts into substring matching. Neither mode ever searches
+`display_label` (tab-join display context) or the legacy `label` field, and a
+session without an agent name can never match. `--machine <machine-id>`
+narrows the lookup to one hub-returned node and fails when the response does
+not contain it. `--json` renders the typed result (`query`, `scope`,
+`fetched_at`, `matches`, `coverage`, `outcome`) for automation; the default
+renderer is a human-readable table of the same data.
+
+Each match row separates identity from display context: `agent_name` is the
+canonical key, `display_label` is tab-derived display text, `label` is the
+legacy field kept for compatibility, and `label_source` records its
+provenance as `agent_name`, `tab_label`, or `missing`. Sessions with no
+agent name stay visible as per-node `unnamed` counts in `coverage` so an
+empty match list is never mistaken for an empty fleet.
 
 The result is scoped to `hub_returned_nodes`: it describes only the nodes the
 hub returned for this request, never a fleet-wide guarantee. `coverage`

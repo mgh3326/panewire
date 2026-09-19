@@ -33,6 +33,7 @@ func NewHerdrClient(path string) (*HerdrClient, error) {
 // The stall detector only ever holds the read-only projection — the compiler
 // enforces that this narrow interface stays satisfiable.
 var _ stallReader = (*HerdrClient)(nil)
+
 func (c *HerdrClient) nextID() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -138,13 +139,14 @@ func (c *HerdrClient) AgentStates(ctx context.Context) ([]HerdrAgentState, error
 	states := make([]HerdrAgentState, 0, len(listed.Agents))
 	for _, raw := range listed.Agents {
 		pane := identityFromMap(raw)
+		displayLabel := labels[pane.TabID]
 		if pane.Label == "" {
-			pane.Label = labels[pane.TabID]
+			pane.Label = displayLabel
 		}
 		if !validIdleWakePane(pane.PaneID) || !validObservedAgentStatus(pane.Status) {
 			continue
 		}
-		states = append(states, HerdrAgentState{PaneID: pane.PaneID, WorkspaceID: pane.WorkspaceID, Label: pane.Label, Status: pane.Status, Revision: pane.Revision, SourceStateChangeSeq: pane.StateChangeSeq, InteractiveReady: pane.InteractiveReady, Authoritative: true})
+		states = append(states, HerdrAgentState{PaneID: pane.PaneID, WorkspaceID: pane.WorkspaceID, Label: pane.Label, AgentName: pane.Name, DisplayLabel: displayLabel, Status: pane.Status, Revision: pane.Revision, SourceStateChangeSeq: pane.StateChangeSeq, InteractiveReady: pane.InteractiveReady, Authoritative: true})
 	}
 	return states, nil
 }

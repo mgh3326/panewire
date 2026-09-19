@@ -23,12 +23,30 @@ const (
 	hubSessionSnapshotTimeout = 2 * time.Second
 )
 
+// Closed label-provenance vocabulary. agent.list records carry mixed label
+// provenance — some panes report the herdr agent name, others a tab/display
+// or stale label — so the wire marks which class produced each session's
+// label instead of letting consumers guess.
+const (
+	hubLabelSourceAgentName = "agent_name"
+	hubLabelSourceTabLabel  = "tab_label"
+	hubLabelSourceMissing   = "missing"
+)
+
 // HubSession is the allowlisted, metadata-only view of one local herdr agent.
 // It intentionally has no prompt, transcript, terminal, path, or UUID field.
+// AgentName is the only canonical agent identity: it is copied byte-for-byte
+// from a non-empty agent.list name and is never inferred from any display
+// field. Label keeps its legacy display role with its provenance declared by
+// LabelSource; DisplayLabel carries only the tab.list join. Both are display
+// context, never identity.
 type HubSession struct {
 	PaneID           string `json:"pane_id"`
 	WorkspaceID      string `json:"workspace_id"`
 	Label            string `json:"label"`
+	AgentName        string `json:"agent_name,omitempty"`
+	LabelSource      string `json:"label_source,omitempty"`
+	DisplayLabel     string `json:"display_label,omitempty"`
 	Status           string `json:"status"`
 	InteractiveReady *bool  `json:"interactive_ready,omitempty"`
 	Revision         int64  `json:"revision"`
@@ -59,15 +77,19 @@ func hubSessionSnapshotsFromStates(states []HerdrAgentState) []HubSession {
 		if !validIdleWakePane(state.PaneID) || !validObservedAgentStatus(state.Status) || state.Revision < 0 || state.SourceStateChangeSeq < 0 {
 			continue
 		}
-		sessions = append(sessions, HubSession{
+		session := HubSession{
 			PaneID:           state.PaneID,
 			WorkspaceID:      normalizedIdleWakeMetadata(state.WorkspaceID),
 			Label:            normalizedIdleWakeMetadata(state.Label),
+			AgentName:        normalizedIdleWakeMetadata(state.AgentName),
+			DisplayLabel:     normalizedIdleWakeMetadata(state.DisplayLabel),
 			Status:           state.Status,
 			InteractiveReady: cloneBool(state.InteractiveReady),
 			Revision:         state.Revision,
 			StateChangeSeq:   state.SourceStateChangeSeq,
-		})
+		}
+		session.LabelSource = hubSessionLabelSource(session.Label, session.AgentName)
+		sessions = append(sessions, session)
 	}
 	sort.Slice(sessions, func(i, j int) bool {
 		left, right := sessions[i], sessions[j]
@@ -92,6 +114,40 @@ func hubSessionSnapshotsFromStates(states []HerdrAgentState) []HubSession {
 		return boolValue(left.InteractiveReady) < boolValue(right.InteractiveReady)
 	})
 	return sessions
+}
+
+// hubSessionLabelSource classifies what the populated label value actually
+// is. A label equal to the agent name is the name itself; any other non-empty
+// label is display-class (tab/display or stale metadata); an empty label has
+// no provenance. The check runs on normalized values so a dropped-overlong
+// name cannot flip the class.
+func hubSessionLabelSource(label, agentName string) string {
+	switch {
+	case label == "":
+		return hubLabelSourceMissing
+	case agentName != "" && label == agentName:
+		return hubLabelSourceAgentName
+	default:
+		return hubLabelSourceTabLabel
+	}
+}
+
+// validHubSessionLabelSource gates the provenance marker. Empty stays valid
+// for pre-additive payloads; a present value must be inside the closed
+// vocabulary and consistent with the label/agent_name pair it describes.
+func validHubSessionLabelSource(session HubSession) bool {
+	switch session.LabelSource {
+	case "":
+		return true
+	case hubLabelSourceMissing:
+		return session.Label == ""
+	case hubLabelSourceAgentName:
+		return session.AgentName != "" && session.Label == session.AgentName
+	case hubLabelSourceTabLabel:
+		return session.Label != "" && session.Label != session.AgentName
+	default:
+		return false
+	}
 }
 
 func boolValue(value *bool) int {
@@ -178,12 +234,13 @@ func decodeHubSessionSnapshots(raw []byte) ([]HubSession, bool) {
 	sessions := make([]HubSession, 0, len(rows))
 	seen := make(map[string]struct{}, len(rows))
 	for _, fields := range rows {
-		if len(fields) < 6 || len(fields) > 7 {
+		if len(fields) < 6 || len(fields) > 10 {
 			return nil, false
 		}
 		for name := range fields {
 			switch name {
-			case "pane_id", "workspace_id", "label", "status", "interactive_ready", "revision", "state_change_seq":
+			case "pane_id", "workspace_id", "label", "status", "interactive_ready", "revision", "state_change_seq",
+				"agent_name", "label_source", "display_label":
 			default:
 				return nil, false
 			}
@@ -194,8 +251,10 @@ func decodeHubSessionSnapshots(raw []byte) ([]HubSession, bool) {
 				return nil, false
 			}
 		}
-		if rawReady, exists := fields["interactive_ready"]; exists && bytes.Equal(bytes.TrimSpace(rawReady), []byte("null")) {
-			return nil, false
+		for _, name := range []string{"interactive_ready", "agent_name", "label_source", "display_label"} {
+			if rawValue, exists := fields[name]; exists && bytes.Equal(bytes.TrimSpace(rawValue), []byte("null")) {
+				return nil, false
+			}
 		}
 		encoded, err := json.Marshal(fields)
 		if err != nil {
@@ -215,7 +274,7 @@ func decodeHubSessionSnapshots(raw []byte) ([]HubSession, bool) {
 }
 
 func validHubSession(session HubSession) bool {
-	return validIdleWakePane(session.PaneID) && validIdleWakeMetadata(session.WorkspaceID) && validIdleWakeMetadata(session.Label) && validObservedAgentStatus(session.Status) && session.Revision >= 0 && session.StateChangeSeq >= 0
+	return validIdleWakePane(session.PaneID) && validIdleWakeMetadata(session.WorkspaceID) && validIdleWakeMetadata(session.Label) && validIdleWakeMetadata(session.AgentName) && validIdleWakeMetadata(session.DisplayLabel) && validHubSessionLabelSource(session) && validObservedAgentStatus(session.Status) && session.Revision >= 0 && session.StateChangeSeq >= 0
 }
 
 func marshalHubHeartbeatForWire(heartbeat hubHeartbeatPayload) ([]byte, bool) {

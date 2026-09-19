@@ -86,7 +86,10 @@ type sessionsFindMatch struct {
 	Machine          string `json:"machine"`
 	PaneID           string `json:"pane_id"`
 	WorkspaceID      string `json:"workspace_id"`
-	Label            string `json:"label"`
+	AgentName        string `json:"agent_name"`
+	Label            string `json:"label,omitempty"`
+	LabelSource      string `json:"label_source,omitempty"`
+	DisplayLabel     string `json:"display_label,omitempty"`
 	Status           string `json:"status"`
 	InteractiveReady *bool  `json:"interactive_ready,omitempty"`
 	Fresh            bool   `json:"fresh"`
@@ -100,6 +103,7 @@ type sessionsFindNodeCoverage struct {
 	State    string `json:"state,omitempty"`
 	Reason   string `json:"reason,omitempty"`
 	Sessions *int   `json:"sessions,omitempty"`
+	Unnamed  int    `json:"unnamed,omitempty"`
 	LastSeen string `json:"last_seen,omitempty"`
 }
 
@@ -424,6 +428,11 @@ func buildSessionsFindResult(query sessionsFindQuery, nodes []sessionsFindNodeWi
 		if observation.decodable && observation.sessions != nil {
 			count := len(observation.sessions)
 			entry.Sessions = &count
+			for _, session := range observation.sessions {
+				if session.AgentName == "" {
+					entry.Unnamed++
+				}
+			}
 		}
 		if observation.hasSeen {
 			entry.LastSeen = observation.lastSeen.UTC().Format(time.RFC3339)
@@ -445,14 +454,17 @@ func buildSessionsFindResult(query sessionsFindQuery, nodes []sessionsFindNodeWi
 			coverage.Observed++
 		}
 		for _, session := range observation.sessions {
-			if !sessionsFindLabelMatches(session.Label, query) {
+			if !sessionsFindLabelMatches(session.AgentName, query) {
 				continue
 			}
 			match := sessionsFindMatch{
 				Machine:          observation.machine,
 				PaneID:           session.PaneID,
 				WorkspaceID:      session.WorkspaceID,
+				AgentName:        session.AgentName,
 				Label:            session.Label,
+				LabelSource:      session.LabelSource,
+				DisplayLabel:     session.DisplayLabel,
 				Status:           session.Status,
 				InteractiveReady: cloneBool(session.InteractiveReady),
 				Fresh:            observation.covered || observation.state == sessionsFindStatePartial,
@@ -478,6 +490,9 @@ func buildSessionsFindResult(query sessionsFindQuery, nodes []sessionsFindNodeWi
 		}
 		if left.WorkspaceID != right.WorkspaceID {
 			return left.WorkspaceID < right.WorkspaceID
+		}
+		if left.AgentName != right.AgentName {
+			return left.AgentName < right.AgentName
 		}
 		if left.Label != right.Label {
 			return left.Label < right.Label
@@ -510,11 +525,18 @@ func buildSessionsFindResult(query sessionsFindQuery, nodes []sessionsFindNodeWi
 	return result
 }
 
-func sessionsFindLabelMatches(candidate string, query sessionsFindQuery) bool {
-	if query.Match == "contains" {
-		return strings.Contains(candidate, query.Label)
+// sessionsFindLabelMatches compares the query against the session's agent
+// name only — the canonical identity. Display labels and the legacy mixed
+// label are output context and can never produce a match; a session with no
+// agent name stays unmatchable under both modes.
+func sessionsFindLabelMatches(agentName string, query sessionsFindQuery) bool {
+	if agentName == "" {
+		return false
 	}
-	return candidate == query.Label
+	if query.Match == "contains" {
+		return strings.Contains(agentName, query.Label)
+	}
+	return agentName == query.Label
 }
 
 func renderSessionsFindResult(writer io.Writer, result sessionsFindResult, jsonOut bool) {
@@ -551,8 +573,8 @@ func renderSessionsFindResult(writer io.Writer, result sessionsFindResult, jsonO
 		if lastSeen == "" {
 			lastSeen = "-"
 		}
-		fmt.Fprintf(writer, "node\t%s\tcovered=%t\tstate=%s\treason=%s\tsessions=%s\tlast_seen=%s\n",
-			node.Machine, node.Covered, state, reason, sessions, lastSeen)
+		fmt.Fprintf(writer, "node\t%s\tcovered=%t\tstate=%s\treason=%s\tsessions=%s\tunnamed=%d\tlast_seen=%s\n",
+			node.Machine, node.Covered, state, reason, sessions, node.Unnamed, lastSeen)
 	}
 	fmt.Fprintf(writer, "matches\t%d\n", len(result.Matches))
 	for _, match := range result.Matches {
@@ -564,8 +586,20 @@ func renderSessionsFindResult(writer io.Writer, result sessionsFindResult, jsonO
 		if lastSeen == "" {
 			lastSeen = "-"
 		}
-		fmt.Fprintf(writer, "match\t%s\t%s\t%s\t%s\t%s\tfresh=%t\tlast_seen=%s\tsnapshot_state=%s\n",
-			match.Machine, match.PaneID, match.WorkspaceID, match.Label, match.Status, match.Fresh, lastSeen, state)
+		label := match.Label
+		if label == "" {
+			label = "-"
+		}
+		labelSource := match.LabelSource
+		if labelSource == "" {
+			labelSource = "-"
+		}
+		displayLabel := match.DisplayLabel
+		if displayLabel == "" {
+			displayLabel = "-"
+		}
+		fmt.Fprintf(writer, "match\t%s\t%s\t%s\tagent_name=%s\tlabel=%s\tlabel_source=%s\tdisplay_label=%s\tstatus=%s\tfresh=%t\tlast_seen=%s\tsnapshot_state=%s\n",
+			match.Machine, match.PaneID, match.WorkspaceID, match.AgentName, label, labelSource, displayLabel, match.Status, match.Fresh, lastSeen, state)
 	}
 	switch result.Outcome {
 	case sessionsFindOutcomeNoMatch:
