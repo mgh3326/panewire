@@ -146,7 +146,7 @@ func (f task547FakeDevin) install(t *testing.T) func() []string {
 			}
 		}
 	}
-	script.WriteString("  [ -f \"$d/$phase.$5\" ] && cat \"$d/$phase.$5\" ;;\n")
+	script.WriteString("  if [ -f \"$d/$phase.$5\" ]; then cat \"$d/$phase.$5\"; fi ;;\n")
 	script.WriteString("esac\n")
 	installFakeHerdr(t, dir, script.String())
 	return func() []string {
