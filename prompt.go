@@ -458,14 +458,19 @@ func classifySubmissionEvidence(harness, screen, marker string) (string, string)
 	return "unproven", "none"
 }
 
-// devinQueueBannerRE matches devin's queue header, captured live as
-// "── 2 queued ── ↑ edit · ↵ send now". The composer hint "Press Enter to send
-// queued messages now" is the other half of the same state; either one means
-// devin is holding at least one message it has not submitted yet.
-var devinQueueBannerRE = regexp.MustCompile(`─+\s*\d+\s+queued\s*─+`)
+// devinQueueBannerRE matches devin's queue header line, captured live as
+// "── 1 queued ── ↑ edit · ↵ send now ──". It is anchored to the start of a
+// line so a transcript row quoting the text ("❭ ... 2 queued ...") does not
+// match. The composer hint "Press Enter to send queued messages now" is the
+// other half of the same state, and counts only inside the live composer.
+// Either one means devin holds at least one message it has not submitted.
+var devinQueueBannerRE = regexp.MustCompile(`(?m)^[ \t]*─+[ \t]*\d+[ \t]+queued\b`)
 
 func devinQueued(screen string) bool {
-	return strings.Contains(screen, "send queued messages now") || devinQueueBannerRE.MatchString(screen)
+	if region, ok := composerRegion(screen); ok && strings.Contains(region, "send queued messages now") {
+		return true
+	}
+	return devinQueueBannerRE.MatchString(screen)
 }
 
 // devinSubmission orders devin's rules so that a message that is only in

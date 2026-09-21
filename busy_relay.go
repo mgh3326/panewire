@@ -433,7 +433,8 @@ func (manager *relayBusyManager) retryOrDropWithin(item relayHeld, maxAttempts i
 
 // inject runs one relay inject and returns its three-way result. The legacy
 // bool seam maps to delivered/retryable only.
-func (manager *relayBusyManager) inject(ctx context.Context, pane, text string) relayInjectResult {
+func (manager *relayBusyManager) inject(ctx context.Context, group []relayHeld, text string) relayInjectResult {
+	pane := group[0].Pane
 	if inject := manager.client.relayInject; inject != nil {
 		if inject(ctx, pane, text) {
 			return relayInjectResult{Outcome: relayInjectDelivered}
@@ -444,7 +445,13 @@ func (manager *relayBusyManager) inject(ctx context.Context, pane, text string) 
 	if verdict == nil {
 		verdict = defaultHubRelayInjectVerdict
 	}
-	return verdict(ctx, pane, text)
+	var members []string
+	if len(group) > 1 {
+		for _, item := range group {
+			members = append(members, item.Text)
+		}
+	}
+	return verdict(ctx, pane, text, members)
 }
 
 // stopWithoutRetry ends a held item whose message may already be in the pane
@@ -740,7 +747,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		group = live
 		text := relayBatchText(group, expired, now)
 		ctx, cancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
-		result := manager.inject(ctx, group[0].Pane, text)
+		result := manager.inject(ctx, group, text)
 		cancel()
 		switch result.Outcome {
 		case relayInjectRetryable:

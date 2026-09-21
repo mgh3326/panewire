@@ -116,8 +116,10 @@ func TestTask547DevinRelayMarkerSkipsBoilerplate(t *testing.T) {
 // chosen by phase (before prompt, after prompt, after the return keypress)
 // and by read source. Every call is logged as "cmd" or "read:<source>".
 type task547FakeDevin struct {
-	before, afterSend, afterReturn map[string]string // source -> screen
+	before, afterSend, afterReturn map[string]string // source -> screen ("10" is the claude/codex read)
 	failRead                       string            // phase whose reads fail
+	failPrompt                     bool              // herdr rejects the prompt
+	getBefore, getAfter            string            // agent reported before / after the prompt (default devin)
 }
 
 func (f task547FakeDevin) install(t *testing.T) func() []string {
@@ -128,8 +130,19 @@ func (f task547FakeDevin) install(t *testing.T) func() []string {
 	script.WriteString("#!/bin/sh\nd=" + shellQuote(dir) + "\n")
 	script.WriteString("phase=before\n[ -f \"$d/sent\" ] && phase=afterSend\n[ -f \"$d/returned\" ] && phase=afterReturn\n")
 	script.WriteString("case \"$2\" in\n")
-	script.WriteString("get) echo get >> \"$d/calls.log\"; echo '{\"result\":{\"agent\":{\"agent\":\"devin\"}}}' ;;\n")
-	script.WriteString("prompt) echo prompt >> \"$d/calls.log\"; touch \"$d/sent\" ;;\n")
+	getBefore, getAfter := f.getBefore, f.getAfter
+	if getBefore == "" {
+		getBefore = "devin"
+	}
+	if getAfter == "" {
+		getAfter = getBefore
+	}
+	script.WriteString("get) echo get >> \"$d/calls.log\"; if [ -f \"$d/sent\" ]; then a=" + shellQuote(getAfter) + "; else a=" + shellQuote(getBefore) + "; fi; echo \"{\\\"result\\\":{\\\"agent\\\":{\\\"agent\\\":\\\"$a\\\"}}}\" ;;\n")
+	if f.failPrompt {
+		script.WriteString("prompt) echo prompt >> \"$d/calls.log\"; exit 1 ;;\n")
+	} else {
+		script.WriteString("prompt) echo prompt >> \"$d/calls.log\"; touch \"$d/sent\" ;;\n")
+	}
 	script.WriteString("send-keys) echo send-keys >> \"$d/calls.log\"; touch \"$d/returned\" ;;\n")
 	script.WriteString("read) echo \"read:$5\" >> \"$d/calls.log\"\n")
 	if f.failRead != "" {
@@ -188,7 +201,7 @@ func TestTask547DevinPresendMarkerBlocksAnyInject(t *testing.T) {
 	for name, fake := range cases {
 		t.Run(name, func(t *testing.T) {
 			calls := fake.install(t)
-			result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText)
+			result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
 			if result.Outcome != relayInjectMaybeInPane || !strings.HasPrefix(result.Evidence, "presend:") {
 				t.Fatalf("result=%+v, want maybe_in_pane with presend evidence", result)
 			}
@@ -207,7 +220,7 @@ func TestTask547DevinStillQueuedAfterReturnIsMaybeInPane(t *testing.T) {
 		afterSend:   task547Both(task547QueuedScreen(task547RelayText)),
 		afterReturn: task547Both(task547QueuedScreen(task547RelayText)),
 	}.install(t)
-	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText)
+	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
 	if result.Outcome != relayInjectMaybeInPane {
 		t.Fatalf("still-queued devin message result=%+v, want maybe_in_pane", result)
 	}
@@ -234,14 +247,15 @@ func TestTask547DevinVerdicts(t *testing.T) {
 		{"echo right after send is delivered", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547SubmittedScreen(task547RelayText))}, relayInjectDelivered, "visible:marker_echo", 0},
 		{"queued then echoed after one return is delivered", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547QueuedScreen(task547RelayText)), afterReturn: task547Both(task547SubmittedScreen(task547RelayText))}, relayInjectDelivered, "after_return:visible:marker_echo", 1},
 		{"queued then gone everywhere after return may be in pane", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547QueuedScreen(task547RelayText)), afterReturn: task547Both(task547IdleScreen)}, relayInjectMaybeInPane, "after_return:visible+recent-unwrapped:none", 1},
-		{"never seen after send is retryable", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547IdleScreen)}, relayInjectRetryable, "visible+recent-unwrapped:none", 0},
+		{"never seen after an accepted send may be in pane", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547IdleScreen)}, relayInjectMaybeInPane, "postsend:visible+recent-unwrapped:none", 0},
+		{"send rejected by herdr is retryable", task547FakeDevin{before: task547Both(task547IdleScreen), failPrompt: true}, relayInjectRetryable, "prompt_failed", 0},
 		{"unreadable after send may be in pane", task547FakeDevin{before: task547Both(task547IdleScreen), failRead: "afterSend"}, relayInjectMaybeInPane, "postsend:read_failed", 0},
 		{"unreadable before send is not typed", task547FakeDevin{failRead: "before"}, relayInjectMaybeInPane, "presend:read_failed", 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := tc.fake.install(t)
-			result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText)
+			result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
 			if result.Outcome != tc.want || !strings.Contains(result.Evidence, tc.evidence) || result.Harness != "devin" {
 				t.Fatalf("result=%+v, want outcome %d with evidence containing %q", result, tc.want, tc.evidence)
 			}
@@ -254,7 +268,7 @@ func TestTask547DevinVerdicts(t *testing.T) {
 
 // task547RelayRun drives one held relay item through the busy manager with a
 // verdict seam and returns the events and the number of inject calls.
-func task547RelayRun(t *testing.T, verdict func(context.Context, string, string) relayInjectResult) (*int, *HubClient, chan hubClientEvent) {
+func task547RelayRun(t *testing.T, verdict func(context.Context, string, string, []string) relayInjectResult) (*int, *HubClient, chan hubClientEvent) {
 	t.Helper()
 	r27GuardInbox(t)
 	gate := make(chan struct{})
@@ -263,9 +277,9 @@ func task547RelayRun(t *testing.T, verdict func(context.Context, string, string)
 	t.Cleanup(func() { store.Close() })
 	injects := 0
 	events := make(chan hubClientEvent, 64)
-	client := &HubClient{outbox: store, relayCommand: fake.run, relayInjectVerdict: func(ctx context.Context, pane, text string) relayInjectResult {
+	client := &HubClient{outbox: store, relayCommand: fake.run, relayInjectVerdict: func(ctx context.Context, pane, text string, members []string) relayInjectResult {
 		injects++
-		return verdict(ctx, pane, text)
+		return verdict(ctx, pane, text, members)
 	}}
 	client.setRelayEmitter(func(event hubClientEvent) { events <- event })
 	client.relayBusyManager().restore(t.Context())
@@ -278,7 +292,7 @@ func task547RelayRun(t *testing.T, verdict func(context.Context, string, string)
 
 // Mutant (b): a devin inject that keeps failing is re-injected at most once.
 func TestTask547DevinRetryableIsReinjectedAtMostOnce(t *testing.T) {
-	injects, client, events := task547RelayRun(t, func(context.Context, string, string) relayInjectResult {
+	injects, client, events := task547RelayRun(t, func(context.Context, string, string, []string) relayInjectResult {
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: "devin", Evidence: "visible+recent-unwrapped:none"}
 	})
 	unconfirmed := r27Await(t, events, "relay.unconfirmed")
@@ -296,7 +310,7 @@ func TestTask547DevinRetryableIsReinjectedAtMostOnce(t *testing.T) {
 
 // claude/codex keep relayMaxInjectAttempts; #547 does not change their cap.
 func TestTask547ClaudeRetryCapUnchanged(t *testing.T) {
-	injects, _, events := task547RelayRun(t, func(context.Context, string, string) relayInjectResult {
+	injects, _, events := task547RelayRun(t, func(context.Context, string, string, []string) relayInjectResult {
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: "claude"}
 	})
 	unconfirmed := r27Await(t, events, "relay.unconfirmed")
@@ -312,7 +326,7 @@ func TestTask547ClaudeRetryCapUnchanged(t *testing.T) {
 // Mutant (b): may-be-in-pane is never re-injected. The row is removed, the
 // hub is told why, and no second inject follows.
 func TestTask547DevinMaybeInPaneIsNeverReinjected(t *testing.T) {
-	injects, client, events := task547RelayRun(t, func(context.Context, string, string) relayInjectResult {
+	injects, client, events := task547RelayRun(t, func(context.Context, string, string, []string) relayInjectResult {
 		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: "devin", Evidence: "visible:devin_queue_banner after_return:visible:devin_queue_banner"}
 	})
 	unconfirmed := r27Await(t, events, "relay.unconfirmed")
@@ -333,26 +347,23 @@ func TestTask547DevinMaybeInPaneIsNeverReinjected(t *testing.T) {
 	}
 }
 
-// C2 end to end: the first send is not seen in time (render lag), so it is
-// retryable; by the retry the message has landed, and the presend check stops
-// the second prompt. One prompt total, relay reported unconfirmed with cause.
-func TestTask547DevinLateLandingIsNotTypedTwice(t *testing.T) {
+// C2 end to end: herdr rejects the first send after typing part of it, so
+// the attempt is retryable; the retry's presend check finds the text and does
+// not type it again. One prompt total, relay reported unconfirmed with cause.
+func TestTask547DevinPartialSendIsNotTypedTwice(t *testing.T) {
 	dir := t.TempDir()
 	landed := filepath.Join(dir, "landed")
 	script := "#!/bin/sh\ncase \"$2\" in\n" +
 		"get) echo '{\"result\":{\"agent\":{\"agent\":\"devin\"}}}' ;;\n" +
-		"prompt) echo prompt >> " + shellQuote(filepath.Join(dir, "calls.log")) + " ;;\n" +
-		"read) if [ -f " + shellQuote(landed) + " ]; then printf '%s' " + shellQuote(task547SubmittedScreen(task547RelayText)) + "; else printf '%s' " + shellQuote(task547IdleScreen) + "; fi ;;\n" +
+		"prompt) echo prompt >> " + shellQuote(filepath.Join(dir, "calls.log")) + "; touch " + shellQuote(landed) + "; exit 1 ;;\n" +
+		"read) if [ -f " + shellQuote(landed) + " ]; then printf '%s' " + shellQuote("────\n❭ "+task547RelayText+"\n────\n") + "; else printf '%s' " + shellQuote(task547IdleScreen) + "; fi ;;\n" +
 		"esac\n"
 	installFakeHerdr(t, dir, script)
-	injects, _, events := task547RelayRun(t, func(ctx context.Context, pane, text string) relayInjectResult {
-		result := defaultHubRelayInjectVerdict(ctx, pane, text)
-		// The render catches up after the first verification read.
-		_ = os.WriteFile(landed, nil, 0600)
-		return result
+	injects, _, events := task547RelayRun(t, func(ctx context.Context, pane, text string, members []string) relayInjectResult {
+		return defaultHubRelayInjectVerdict(ctx, pane, text, members)
 	})
 	first := r27Await(t, events, "relay.unconfirmed")
-	if !strings.Contains(string(first.Payload), "visible+recent-unwrapped:none") {
+	if !strings.Contains(string(first.Payload), `"reason":"prompt_failed"`) {
 		t.Fatalf("first unconfirmed=%s", first.Payload)
 	}
 	second := r27Await(t, events, "relay.unconfirmed")
@@ -363,5 +374,95 @@ func TestTask547DevinLateLandingIsNotTypedTwice(t *testing.T) {
 	b, _ := os.ReadFile(filepath.Join(dir, "calls.log"))
 	if prompts := strings.Count(string(b), "prompt"); prompts != 1 || *injects != 2 {
 		t.Fatalf("prompts=%d injects=%d, want 1 prompt over 2 attempts", prompts, *injects)
+	}
+}
+
+// tester BLOCKER 1 (real devin pane, 6,046-byte event): a long message scrolls
+// its head out of every read window. Its tail still identifies it, and an
+// accepted send with no sign of the message is never retried.
+func TestTask547DevinLongMessageIsNeverTypedTwice(t *testing.T) {
+	long := "(같은 내용이 두 번 보이면 재실행 금지) [event] t547-scroll :: SCROLL-WINDOW head " + strings.Repeat("x", 3000) + " LONG-TAIL-END-547"
+	tailOnly := "  " + strings.Repeat("x", 120) + " LONG-TAIL-END-547\n⠋ Thinking 1s\n────\n❭ Guide Devin while it works\n────\n"
+
+	t.Run("tail visible after send is delivered", func(t *testing.T) {
+		calls := task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(tailOnly)}.install(t)
+		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", long, nil)
+		if result.Outcome != relayInjectDelivered || !strings.Contains(result.Evidence, "marker_echo") {
+			t.Fatalf("result=%+v, want delivered on the tail echo", result)
+		}
+		if got := calls(); task547Count(got, "prompt") != 1 {
+			t.Fatalf("calls=%q", got)
+		}
+	})
+	t.Run("nothing visible after send is not retryable", func(t *testing.T) {
+		task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547IdleScreen)}.install(t)
+		if result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", long, nil); result.Outcome != relayInjectMaybeInPane {
+			t.Fatalf("result=%+v, want maybe_in_pane", result)
+		}
+	})
+	t.Run("replay with only the tail on screen is not typed", func(t *testing.T) {
+		calls := task547FakeDevin{before: map[string]string{"visible": task547IdleScreen, "recent-unwrapped": tailOnly}}.install(t)
+		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", long, nil)
+		if result.Outcome != relayInjectMaybeInPane || result.Evidence != "presend:recent-unwrapped:marker_present" {
+			t.Fatalf("result=%+v", result)
+		}
+		if got := calls(); task547Count(got, "prompt") != 0 {
+			t.Fatalf("typed a message whose tail is on screen: %q", got)
+		}
+	})
+}
+
+// tester BLOCKER 2: a batch whose later member is already in the pane is not
+// typed, even though the batch text starts with a different member.
+func TestTask547DevinBatchMemberAlreadyPresentBlocksBatch(t *testing.T) {
+	first := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: first-unique-message"
+	second := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: second-already-present-message"
+	batch := relayBatchText([]relayHeld{{Text: first}, {Text: second}}, false, time.Now())
+	calls := task547FakeDevin{before: map[string]string{"visible": task547IdleScreen, "recent-unwrapped": task547SubmittedScreen(second)}}.install(t)
+	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", batch, []string{first, second})
+	if result.Outcome != relayInjectMaybeInPane || !strings.HasPrefix(result.Evidence, "presend:") {
+		t.Fatalf("result=%+v, want presend maybe_in_pane", result)
+	}
+	if got := calls(); task547Count(got, "prompt") != 0 {
+		t.Fatalf("batch typed although a member is in the pane: %q", got)
+	}
+}
+
+// tester BLOCKER 3: a submitted transcript row quoting devin's hint or header
+// is not a queue.
+func TestTask547DevinQuotedQueueTextIsNotAQueue(t *testing.T) {
+	quoted := "(같은 내용이 두 번 보이면 재실행 금지) [event] b534 :: quoted UI text: Press Enter to send queued messages now and ── 2 queued ── banner"
+	screen := task547SubmittedScreen(quoted)
+	if result := classifySubmission("devin", screen, devinRelayMarker(quoted)); result != "marker_observed" {
+		t.Fatalf("quoted queue text classified %s, want marker_observed", result)
+	}
+	calls := task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(screen)}.install(t)
+	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", quoted, nil)
+	if result.Outcome != relayInjectDelivered {
+		t.Fatalf("result=%+v, want delivered", result)
+	}
+	if got := calls(); task547Count(got, "send-keys") != 0 {
+		t.Fatalf("pressed return on a submitted pane: %q", got)
+	}
+	// The tester's live capture of the real header still counts.
+	live := "── 1 queued ──────────── ↑ edit · ↵ send now ──\n○ [event] x :: y\n────\n❭ Press Enter to send queued messages now\n────\n"
+	if !devinQueued(live) || !devinQueued("○ m\n── 1 queued ── ↑ edit · ↵ send now ──\n") {
+		t.Fatal("live devin queue header no longer recognised")
+	}
+}
+
+// tester BLOCKER 4: the harness is read before the send; if the pane's agent
+// changes while the inject runs, the verdict proves nothing.
+func TestTask547HarnessChangeDuringInjectIsMaybeInPane(t *testing.T) {
+	calls := task547FakeDevin{
+		getBefore: "claude", getAfter: "devin",
+		afterSend: map[string]string{"10": task547QueuedScreen(task547RelayText)},
+	}.install(t)
+	result := defaultHubRelayInjectVerdict(context.Background(), "pane", task547RelayText, nil)
+	if result.Outcome != relayInjectMaybeInPane || result.Evidence != "harness_changed:claude->devin" {
+		t.Fatalf("result=%+v, want maybe_in_pane harness_changed", result)
+	}
+	if got := calls(); task547Count(got, "get") != 2 {
+		t.Fatalf("calls=%q, want the harness read before and after", got)
 	}
 }

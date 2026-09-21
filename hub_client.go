@@ -128,7 +128,7 @@ type HubClient struct {
 	wait                 HubWait
 	warn                 func(string)
 	relayInject          func(context.Context, string, string) bool
-	relayInjectVerdict   func(context.Context, string, string) relayInjectResult // #547 three-way fixture seam; relayInject wins when set
+	relayInjectVerdict   func(context.Context, string, string, []string) relayInjectResult // #547 three-way fixture seam; relayInject wins when set
 	hostLoadCollector    func(context.Context) (HubHostLoad, error)
 	hostMemoryCollector  func(context.Context) (*HubHostMemory, error)
 	quotaCollector       func(context.Context) (*HubQuotaSnapshot, error)
@@ -523,7 +523,7 @@ type hubOutboundMessage struct {
 }
 
 func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
-	return defaultHubRelayInjectVerdict(ctx, pane, text).Outcome == relayInjectDelivered
+	return defaultHubRelayInjectVerdict(ctx, pane, text, nil).Outcome == relayInjectDelivered
 }
 
 // relayInjectOutcome is the three-way result of one relay inject (#547,
@@ -534,8 +534,9 @@ type relayInjectOutcome int
 
 const (
 	relayInjectDelivered relayInjectOutcome = iota
-	// relayInjectRetryable: the message is proven absent from the pane, so
-	// injecting it again cannot duplicate it.
+	// relayInjectRetryable: the send did not put the message in the pane as
+	// far as the harness's rules can tell. For devin that means herdr
+	// rejected the send; its next attempt still checks the pane first.
 	relayInjectRetryable
 	// relayInjectMaybeInPane: the message may already be in the pane
 	// (composer, queue, or transcript). Never inject it again.
@@ -550,10 +551,27 @@ type relayInjectResult struct {
 	Evidence string
 }
 
-func defaultHubRelayInjectVerdict(ctx context.Context, pane, text string) relayInjectResult {
+// defaultHubRelayInjectVerdict injects text into pane. members are the texts
+// of the held items batched into text (nil for a direct inject); the devin
+// path checks each one before typing.
+func defaultHubRelayInjectVerdict(ctx context.Context, pane, text string, members []string) relayInjectResult {
 	harness := relayInjectHarness(ctx, pane)
+	result := relayInjectForHarness(ctx, pane, harness, text, members)
+	if result.Outcome == relayInjectMaybeInPane {
+		return result
+	}
+	// The harness was read before the send so devin could take its own path.
+	// If the pane's agent changed while this inject ran, the verdict was
+	// made with the wrong harness's rules and proves nothing.
+	if after := relayInjectHarness(ctx, pane); harness != "" && after != "" && !strings.EqualFold(after, harness) {
+		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: after, Evidence: "harness_changed:" + harness + "->" + after}
+	}
+	return result
+}
+
+func relayInjectForHarness(ctx context.Context, pane, harness, text string, members []string) relayInjectResult {
 	if strings.EqualFold(harness, "devin") {
-		return devinRelayInject(ctx, pane, text)
+		return devinRelayInject(ctx, pane, text, members)
 	}
 	if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness}
@@ -665,27 +683,62 @@ var relayBoilerplateRE = regexp.MustCompile(`^\s*(?:\(같은 내용이 두 번 �
 
 const devinRelayMarkerRunes = 48
 
-// devinRelayMarker is the part of a relay text that identifies the message:
-// the text after the boilerplate, e.g. "[event] <lane> :: <text>".
-func devinRelayMarker(text string) string {
+func stripRelayBoilerplate(text string) string {
 	body := strings.TrimSpace(text)
 	for {
 		stripped := relayBoilerplateRE.ReplaceAllString(body, "")
 		if stripped == body {
-			break
+			return body
 		}
 		body = stripped
 	}
-	runes := []rune(body)
+}
+
+// devinRelayMarker is the part of a relay text that identifies the message:
+// the text after the boilerplate, e.g. "[event] <lane> :: <text>".
+func devinRelayMarker(text string) string {
+	runes := []rune(stripRelayBoilerplate(text))
 	if len(runes) > devinRelayMarkerRunes {
 		runes = runes[:devinRelayMarkerRunes]
 	}
 	return string(runes)
 }
 
-// devinRelayReadLines covers devin's queue rows, its queue banner, the
-// two-divider composer and the most recent transcript rows.
-const devinRelayReadLines = "40"
+// devinRelayTailMarker is the end of a relay text. A long message scrolls its
+// head out of any read window while its tail stays at the bottom, next to
+// devin's composer.
+func devinRelayTailMarker(text string) string {
+	runes := []rune(stripRelayBoilerplate(text))
+	if len(runes) > devinRelayMarkerRunes {
+		runes = runes[len(runes)-devinRelayMarkerRunes:]
+	}
+	return strings.TrimSpace(string(runes))
+}
+
+// devinRelayMarkers is every marker that identifies text or one of the batch
+// members folded into it: head and tail of each. Any one of them on screen
+// means that message may already be in the pane.
+func devinRelayMarkers(text string, members []string) []string {
+	var markers []string
+	seen := map[string]bool{}
+	for _, value := range append([]string{text}, members...) {
+		for _, marker := range []string{devinRelayMarker(value), devinRelayTailMarker(value)} {
+			if marker != "" && !seen[marker] {
+				seen[marker] = true
+				markers = append(markers, marker)
+			}
+		}
+	}
+	return markers
+}
+
+// devin verification reads: the visible screen for the queue banner and the
+// composer, and a long recent-unwrapped window for the transcript, which a
+// single long message can fill by itself.
+const (
+	devinRelayVisibleLines   = "60"
+	devinRelayUnwrappedLines = "400"
+)
 
 // devinPaneRead is one devin verification read: the visible screen (queue
 // banner and composer) and recent-unwrapped (the transcript, unsplit by line
@@ -695,41 +748,42 @@ type devinPaneRead struct {
 }
 
 func readDevinPane(ctx context.Context, pane string) (devinPaneRead, error) {
-	visible, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", devinRelayReadLines).Output()
+	visible, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", devinRelayVisibleLines).Output()
 	if err != nil {
 		return devinPaneRead{}, err
 	}
-	unwrapped, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", devinRelayReadLines).Output()
+	unwrapped, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", devinRelayUnwrappedLines).Output()
 	if err != nil {
 		return devinPaneRead{}, err
 	}
 	return devinPaneRead{visible: string(visible), unwrapped: string(unwrapped)}, nil
 }
 
-// classify folds the two sources into one result. A message still in the
+// classify folds sources and markers into one result. A message still in the
 // composer or queue in either source outranks a transcript echo in either.
-func (read devinPaneRead) classify(marker string) (string, string) {
+func (read devinPaneRead) classify(markers []string) (string, string) {
 	sources := []struct{ name, text string }{{"visible", read.visible}, {"recent-unwrapped", read.unwrapped}}
 	for _, want := range []string{"composer_residue", "queued", "marker_observed"} {
 		for _, source := range sources {
-			if result, rule := devinSubmission(source.text, marker); result == want {
-				return result, source.name + ":" + rule
+			for _, marker := range markers {
+				if result, rule := devinSubmission(source.text, marker); result == want {
+					return result, source.name + ":" + rule
+				}
 			}
 		}
 	}
 	return "unproven", "visible+recent-unwrapped:none"
 }
 
-// markerSource names the first source that shows marker anywhere, or "".
-func (read devinPaneRead) markerSource(marker string) string {
-	if marker == "" {
-		return ""
-	}
-	if strings.Contains(compactWhitespace(read.visible), compactWhitespace(marker)) {
-		return "visible"
-	}
-	if strings.Contains(compactWhitespace(read.unwrapped), compactWhitespace(marker)) {
-		return "recent-unwrapped"
+// markerSource names the first source that shows any marker, or "".
+func (read devinPaneRead) markerSource(markers []string) string {
+	for _, source := range []struct{ name, text string }{{"visible", read.visible}, {"recent-unwrapped", read.unwrapped}} {
+		compact := compactWhitespace(source.text)
+		for _, marker := range markers {
+			if strings.Contains(compact, compactWhitespace(marker)) {
+				return source.name
+			}
+		}
 	}
 	return ""
 }
@@ -738,18 +792,21 @@ func (read devinPaneRead) markerSource(marker string) string {
 // that may already be in the pane:
 //
 //   - Before sending, the visible screen (queue rows, composer) and the
-//     recent-unwrapped transcript must both lack the marker. This runs on
-//     every attempt, not only local retries, because the hub replays an
-//     undelivered row to the node as a fresh message.
-//   - After sending, residue or a queue banner gets exactly one return
-//     keypress. If the message is then still held, or has vanished from every
-//     source, it may be in the pane: relayInjectMaybeInPane, never a retry.
-//   - Only a send whose reads never showed the marker at all is retryable,
-//     and busy_relay.go caps devin at one re-inject.
-func devinRelayInject(ctx context.Context, pane, text string) relayInjectResult {
-	marker := devinRelayMarker(text)
+//     recent-unwrapped transcript must lack every marker of the text and of
+//     each batch member. This runs on every attempt, not only local
+//     retries, because the hub replays an undelivered row to the node as a
+//     fresh message.
+//   - Once herdr has accepted the text it is in the pane somewhere. Only a
+//     transcript echo proves it submitted; residue or a queue banner gets
+//     exactly one return keypress; anything short of an echo after that --
+//     including no sign of it at all, which is what a message scrolled past
+//     the read window looks like -- is relayInjectMaybeInPane, never a retry.
+//   - Only a send herdr rejected is retryable, and busy_relay.go caps devin
+//     at one re-inject; the next attempt's presend check still runs first.
+func devinRelayInject(ctx context.Context, pane, text string, members []string) relayInjectResult {
+	markers := devinRelayMarkers(text, members)
 	result := relayInjectResult{Harness: "devin"}
-	if marker == "" {
+	if len(markers) == 0 {
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, "presend:empty_marker"
 		return result
 	}
@@ -758,7 +815,7 @@ func devinRelayInject(ctx context.Context, pane, text string) relayInjectResult 
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, "presend:read_failed"
 		return result
 	}
-	if source := before.markerSource(marker); source != "" {
+	if source := before.markerSource(markers); source != "" {
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, "presend:"+source+":marker_present"
 		return result
 	}
@@ -773,13 +830,13 @@ func devinRelayInject(ctx context.Context, pane, text string) relayInjectResult 
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, "postsend:read_failed"
 		return result
 	}
-	state, evidence := after.classify(marker)
+	state, evidence := after.classify(markers)
 	switch state {
 	case "marker_observed":
 		result.Outcome, result.Evidence = relayInjectDelivered, evidence
 		return result
 	case "unproven":
-		result.Outcome, result.Evidence = relayInjectRetryable, evidence
+		result.Outcome, result.Evidence = relayInjectMaybeInPane, "postsend:"+evidence
 		return result
 	}
 	// composer_residue or queued: devin's own hint says Enter submits a queued
@@ -793,7 +850,7 @@ func devinRelayInject(ctx context.Context, pane, text string) relayInjectResult 
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" after_return:read_failed"
 		return result
 	}
-	state, afterEvidence := after.classify(marker)
+	state, afterEvidence := after.classify(markers)
 	if state == "marker_observed" {
 		result.Outcome, result.Evidence = relayInjectDelivered, evidence+" after_return:"+afterEvidence
 		return result
