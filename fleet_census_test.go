@@ -416,6 +416,20 @@ func t501ViewViaHerdr(t *testing.T, agents map[string]map[string]string, tabs []
 	return view
 }
 
+// t501Python311Plus reports whether the reference's python3 is ≥3.11, where
+// fromisoformat was liberalised (any 1–6-digit fraction, bare Z). The census
+// parser pins the ≤3.10 grammar the fleet's own interpreter implements, so
+// version-sensitive fixture jobs (j-frac1) must be excluded on a newer
+// python3 — there the vendored reference itself judges differently.
+func t501Python311Plus(t *testing.T) bool {
+	t.Helper()
+	out, err := exec.Command("python3", "-c", "import sys; print(sys.version_info >= (3, 11))").Output()
+	if err != nil {
+		t.Skip("python3 unavailable")
+	}
+	return strings.TrimSpace(string(out)) == "True"
+}
+
 // t501RunReference executes the vendored wrk ae1f544 reap dry-run against the
 // fixture inbox and stub herdr, returning job → verdict/reason pairs.
 func t501RunReference(t *testing.T, jobsRoot string, agents map[string]map[string]string, tabs []any, tabListFails bool, graceSeconds string) map[string][2]string {
@@ -503,6 +517,10 @@ func t501CensusVerdicts(t *testing.T, jobsRoot string, view fleetCensusLocalView
 // assertion failure, not a panic.
 func TestFleetCensusReapEquivalence(t *testing.T) {
 	jobs := t501StandardInbox()
+	if t501Python311Plus(t) {
+		// j-frac1 is only a divergence on the ≤3.10 grammar the fleet runs.
+		delete(jobs, "j-frac1")
+	}
 	// A directory that is not a jobs entry and a job dir without events.
 	root := t501WriteJobsInbox(t, jobs)
 	if err := os.MkdirAll(filepath.Join(root, "j-noevents"), 0o755); err != nil {
@@ -558,7 +576,11 @@ func TestFleetCensusReapEquivalence(t *testing.T) {
 // tab list unreadable: every candidate that reaches the tab gate must land
 // on tab-count-unknown on both sides.
 func TestFleetCensusReapEquivalenceTabListDown(t *testing.T) {
-	root := t501WriteJobsInbox(t, t501StandardInbox())
+	jobs := t501StandardInbox()
+	if t501Python311Plus(t) {
+		delete(jobs, "j-frac1")
+	}
+	root := t501WriteJobsInbox(t, jobs)
 	agents := t501StandardAgents()
 	reference := t501RunReference(t, root, agents, t501StandardTabs(), true, "600")
 	view := t501ViewViaHerdr(t, agents, t501StandardTabs(), true)
