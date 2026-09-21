@@ -39,6 +39,12 @@ func NewMemoryStore(t interface{ TempDir() string }) *Store {
 	}
 	return s
 }
+func storeHasColumn(db *sql.DB, table, column string) bool {
+	var name string
+	err := db.QueryRow(`SELECT name FROM pragma_table_info(?) WHERE name=?`, table, column).Scan(&name)
+	return err == nil && name == column
+}
+
 func OpenStore(path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("empty sqlite path")
@@ -81,19 +87,93 @@ func OpenStore(path string) (*Store, error) {
 	// to replay every retained event because the marker lived in memory only.
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS relay_sent (
 	 kind TEXT NOT NULL, job_id TEXT NOT NULL, epoch INTEGER NOT NULL, report_path TEXT NOT NULL, reason TEXT NOT NULL, lane TEXT NOT NULL DEFAULT '', event_id TEXT NOT NULL DEFAULT '',
-	 sent_at INTEGER, persisted_at INTEGER,
-	 PRIMARY KEY(kind, job_id, epoch, report_path, reason)
+	 sent_at INTEGER, persisted_at INTEGER, suppressed_at INTEGER,
+	 PRIMARY KEY(kind, job_id, epoch, report_path, reason, event_id)
 )`); err != nil {
 		db.Close()
 		return nil, err
 	}
 	// R21 adds a direct-address key beside the historic five-field job key.
-	// SQLite cannot extend the existing primary key, so the new partial unique
-	// index is the authoritative lane.event key while the old primary key stays
-	// byte-for-byte intact for job.* rows.
+	// The producer's event identity is now part of the job.* key as well: five
+	// shared fields cannot tell a resend of one completion from the same job's
+	// next round, which is how later rounds were silently discarded. SQLite
+	// cannot extend a primary key in place, so an existing table is rebuilt
+	// row-for-row; rows written before event_id existed keep the empty string
+	// and stay inert - the per-node migration cutoff suppresses their event
+	// files before they reach the send gate.
 	_, _ = db.Exec(`ALTER TABLE relay_sent ADD COLUMN lane TEXT NOT NULL DEFAULT ''`)
 	_, _ = db.Exec(`ALTER TABLE relay_sent ADD COLUMN event_id TEXT NOT NULL DEFAULT ''`)
+	// relay_meta holds this node's migration stamp; it is created before the
+	// rekey so the migration can record itself in the same transaction.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS relay_meta (
+	 key TEXT PRIMARY KEY, value INTEGER NOT NULL
+)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	var eventIDInPrimaryKey int
+	if err := db.QueryRow(`SELECT pk FROM pragma_table_info('relay_sent') WHERE name='event_id'`).Scan(&eventIDInPrimaryKey); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if eventIDInPrimaryKey == 0 {
+		tx, err := db.Begin()
+		if err != nil {
+			db.Close()
+			return nil, err
+		}
+		// Only a rekey that actually carried legacy job.* rows earns the
+		// migration stamp. A fresh or rowless database has no migration to
+		// date: the old binary demonstrably never relayed a job event from
+		// it, so stamping one would mint a cutoff out of nothing and
+		// permanently suppress completions that were still owed.
+		var legacyJobRows int
+		if err := tx.QueryRow(`SELECT COUNT(*) FROM relay_sent WHERE kind<>'lane.event'`).Scan(&legacyJobRows); err != nil {
+			tx.Rollback()
+			db.Close()
+			return nil, err
+		}
+		// The outer err must see every failure: a shadowed one here let a
+		// failed copy fall through to DROP+RENAME+commit, silently replacing
+		// the populated legacy table with an empty rekeyed one.
+		if _, err = tx.Exec(`CREATE TABLE relay_sent_rekeyed (
+	 kind TEXT NOT NULL, job_id TEXT NOT NULL, epoch INTEGER NOT NULL, report_path TEXT NOT NULL, reason TEXT NOT NULL, lane TEXT NOT NULL DEFAULT '', event_id TEXT NOT NULL DEFAULT '',
+	 sent_at INTEGER, persisted_at INTEGER, suppressed_at INTEGER,
+	 PRIMARY KEY(kind, job_id, epoch, report_path, reason, event_id)
+)`); err == nil {
+			_, err = tx.Exec(`INSERT INTO relay_sent_rekeyed SELECT kind,job_id,epoch,report_path,reason,lane,event_id,sent_at,persisted_at,NULL FROM relay_sent`)
+		}
+		if err == nil {
+			_, err = tx.Exec(`DROP TABLE relay_sent`)
+		}
+		if err == nil {
+			_, err = tx.Exec(`ALTER TABLE relay_sent_rekeyed RENAME TO relay_sent`)
+		}
+		// The instant this node's outbox was rekeyed onto event identity is
+		// the base of its deployment cutoff. It is per-node because rollouts
+		// are sequential: a global constant would suppress ordinary
+		// completions on the nodes that migrate last. INSERT OR IGNORE keeps
+		// the first - and truest - stamp.
+		if err == nil && legacyJobRows > 0 {
+			_, err = tx.Exec(`INSERT OR IGNORE INTO relay_meta(key,value) VALUES('event_id_since',?)`, time.Now().UnixMilli())
+		}
+		if err != nil {
+			tx.Rollback()
+			db.Close()
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	// Covers databases already rekeyed by a build that predates the column.
+	_, _ = db.Exec(`ALTER TABLE relay_sent ADD COLUMN suppressed_at INTEGER`)
 	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS relay_sent_lane_event_idempotency ON relay_sent(lane,event_id) WHERE kind='lane.event'`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS relay_sent_job_event_idempotency ON relay_sent(kind,job_id,event_id) WHERE kind<>'lane.event' AND event_id<>''`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -114,6 +194,17 @@ func OpenStore(path string) (*Store, error) {
 	_, _ = db.Exec(`ALTER TABLE relay_held ADD COLUMN edited INTEGER NOT NULL DEFAULT 0`)
 	// #264 D1: bounds the inject-retry rearm loop across a store round-trip.
 	_, _ = db.Exec(`ALTER TABLE relay_held ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`)
+	// #449: lease is the pane-occupant identity captured when the row was held.
+	// Rows from before this column exist carry '', which the release gate
+	// treats as unverifiable — never as a match. Unlike the columns above the
+	// presence check is explicit so a real ALTER failure (not "already there")
+	// cannot be swallowed silently.
+	if !storeHasColumn(db, "relay_held", "lease") {
+		if _, err := db.Exec(`ALTER TABLE relay_held ADD COLUMN lease TEXT NOT NULL DEFAULT ''`); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS relay_held_pane_recv_seq ON relay_held(pane,recv_seq)`); err != nil {
 		db.Close()
 		return nil, err
@@ -163,6 +254,10 @@ func OpenStore(path string) (*Store, error) {
 		return nil, err
 	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS idle_wake_candidates_due ON idle_wake_candidates(decision,settled_at,due_at)`); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := stallDetectMigrate(db); err != nil {
 		db.Close()
 		return nil, err
 	}

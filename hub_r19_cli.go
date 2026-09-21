@@ -2,12 +2,14 @@ package panewire
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
+	"time"
 )
 
 // runUpdateCLI is deliberately a narrow publisher: it can only issue the
@@ -20,6 +22,7 @@ func runUpdateCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int 
 	flags.SetOutput(io.Discard)
 	hubURL := flags.String("hub-url", "", "HTTPS hub URL")
 	tokenEnv := flags.String("hub-token-env", "", "operator token env")
+	cfEnv := flags.String("hub-cf-env", "", "optional mode-0600 CF_ACCESS_CLIENT_ID/CF_ACCESS_CLIENT_SECRET env file")
 	version := flags.String("version", "", "release version")
 	sha := flags.String("sha256", "", "asset SHA-256")
 	assetURL := flags.String("url", "", "HTTPS release asset URL")
@@ -32,8 +35,17 @@ func runUpdateCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int 
 		fmt.Fprintln(stderr, "update rejected: invalid operator token env")
 		return ExitConditionInvalid
 	}
-	endpoint, err := hubHTTPSEndpoint(*hubURL, "/v1/update", deps.AllowInsecureForTests)
+	var cfAccess hubCFAccessEnv
+	if *cfEnv != "" {
+		cfAccess, err = loadHubCFAccessEnv(*cfEnv)
+		if err != nil {
+			fmt.Fprintln(stderr, "update rejected: invalid Cloudflare Access env")
+			return ExitConditionInvalid
+		}
+	}
+	client, err := newHubOperatorClient(*hubURL, env.Token, cfAccess, deps, 15*time.Second)
 	if err != nil {
+		fmt.Fprintln(stderr, "update rejected: invalid hub URL")
 		return ExitConditionInvalid
 	}
 	request := struct {
@@ -43,13 +55,9 @@ func runUpdateCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int 
 		Machines []string `json:"machines"`
 	}{*version, *sha, *assetURL, strings.Split(*machines, ",")}
 	body, _ := json.Marshal(request)
-	httpRequest, _ := http.NewRequest(http.MethodPost, endpoint.String(), bytes.NewReader(body))
-	httpRequest.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
-	client := deps.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
-	response, err := client.Do(httpRequest)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	response, err := client.do(ctx, http.MethodPost, "/v1/update", nil, bytes.NewReader(body))
 	if err != nil {
 		fmt.Fprintln(stderr, "update unavailable")
 		return ExitInternal
@@ -59,6 +67,6 @@ func runUpdateCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int 
 		fmt.Fprintln(stderr, "update rejected")
 		return ExitConditionInvalid
 	}
-	_, _ = io.Copy(stdout, response.Body)
+	_, _ = io.Copy(stdout, io.LimitReader(response.Body, 64<<10))
 	return ExitOK
 }

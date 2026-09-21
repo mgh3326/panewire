@@ -64,6 +64,12 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "lanes" {
 		return runLanesCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
+	if args[0] == "lanes-audit" {
+		return runLanesAuditCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
+	if args[0] == "sessions" {
+		return runSessionsCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
 	if args[0] == "relay" {
 		return runRelayCLI(args[1:], os.Stdout, os.Stderr)
 	}
@@ -76,7 +82,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	fs := flag.NewFlagSet("panewire wait", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	file := fs.String("file", "", "file path")
-	agent := fs.String("agent", "", "agent target")
+	agent := fs.String("agent", "", "agent target (name, label, or pane_id)")
 	status := fs.String("status", "", "agent status")
 	settle := fs.Duration("settle", 0, "settle duration")
 	timeout := fs.Duration("timeout", 0, "overall timeout")
@@ -430,6 +436,10 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	burstWakeMAC := fs.String("burst-wake-mac", "", "Wake-on-LAN MAC for hub burst events (defaults to failover MAC when configured)")
 	burstPoweroffAllowed := fs.Bool("burst-poweroff-allowed", false, "allow authenticated hub burst down events to run sudo -n /usr/sbin/poweroff")
 	checksConfig := fs.String("checks-config", "", "explicit local hub check JSON configuration")
+	stallDetect := fs.Bool("stall-detect", false, "observe worker panes for stalls; records only")
+	stallNotify := fs.Bool("stall-detect-notify", false, "emit lane notifications for stall incidents (default off: shadow)")
+	stallHarness := fs.String("stall-detect-harness", "devin", "comma-separated harness families to observe (empty = all)")
+	stallPoll := fs.Duration("stall-detect-poll", defaultStallPollInterval, "periodic pane read interval")
 	if fs.Parse(args) != nil {
 		return nil, ExitUsage, fmt.Errorf("invalid daemon flags")
 	}
@@ -455,6 +465,18 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		Logging:         LoggingConfig{StorePromptBody: *storeBody},
 		SchemaCommand:   deps.SchemaCommand,
 		Logger:          deps.Logger,
+	}
+	if *stallDetect {
+		var harnesses []string
+		for _, family := range strings.Split(*stallHarness, ",") {
+			if family = strings.TrimSpace(family); family != "" {
+				harnesses = append(harnesses, family)
+			}
+		}
+		if *stallPoll <= 0 {
+			return nil, ExitConditionInvalid, fmt.Errorf("stall-detect poll interval must be positive")
+		}
+		cfg.StallDetect = StallDetectConfig{Enabled: true, Notify: *stallNotify, Harnesses: harnesses, PollInterval: *stallPoll}
 	}
 	var hubClient *HubClient
 	if hubFlagsProvided(args) {

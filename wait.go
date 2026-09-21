@@ -18,6 +18,7 @@ const (
 	ExitDaemonUnavailable = 4
 	ExitConditionInvalid  = 5
 	ExitDeliveryFailure   = 6
+	ExitPartial           = 7
 	ExitInternal          = 70
 )
 
@@ -90,29 +91,52 @@ type AgentWaitResult struct {
 	SettleResets   int
 }
 
+// WaitAgent resolves target through the same resolver as prompt --to
+// (#497), then pins the wait on pane_id + agent_session rather than the
+// name: a rename mid-wait cannot sever the observation, while an agent
+// leaving the pane or a different session occupying it fails the wait
+// instead of silently watching the wrong occupant.
 func WaitAgent(ctx context.Context, client *HerdrClient, target, status string, settle, timeout time.Duration) (AgentWaitResult, error) {
 	if !validStatus(status) || settle < 0 {
 		return AgentWaitResult{}, &codedError{ExitConditionInvalid, fmt.Errorf("invalid agent wait condition")}
 	}
 	deadlineCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	result, err := client.Call(deadlineCtx, "agent.list", map[string]any{})
+	pane, err := resolveTarget(deadlineCtx, client, target)
+	if err != nil {
+		return AgentWaitResult{}, err
+	}
+	if pane.PaneID == "" {
+		return AgentWaitResult{}, &codedError{ExitConditionInvalid, fmt.Errorf("agent target %q resolved without pane_id", target)}
+	}
+	paneID, session := pane.PaneID, pane.AgentSession
+	current := pane.Status
+	events, _, err := client.Subscribe(deadlineCtx)
 	if err != nil {
 		return AgentWaitResult{}, &codedError{ExitDaemonUnavailable, err}
 	}
-	current, paneID, ok := snapshotStatus(result, target)
-	if !ok {
-		return AgentWaitResult{}, &codedError{ExitConditionInvalid, fmt.Errorf("agent target not found: %s", target)}
-	}
-	events, err := client.Subscribe(deadlineCtx)
-	if err != nil {
-		return AgentWaitResult{}, &codedError{ExitDaemonUnavailable, err}
+	// sameOccupant re-proves the pane still holds the resolved agent instance.
+	// A herdr too old to report agent_session can only prove occupancy.
+	sameOccupant := func() error {
+		occupantSession, occupied, occErr := paneOccupant(deadlineCtx, client, paneID)
+		if occErr != nil {
+			return &codedError{ExitDaemonUnavailable, occErr}
+		}
+		if !occupied {
+			return &codedError{ExitConditionInvalid, fmt.Errorf("agent target gone: pane %s has no agent", paneID)}
+		}
+		if session != "" && occupantSession != "" && occupantSession != session {
+			return &codedError{ExitConditionInvalid, fmt.Errorf("agent target replaced: pane %s holds a different agent_session", paneID)}
+		}
+		return nil
 	}
 	started := time.Time{}
 	resets := 0
 	if current == status {
 		started = time.Now()
 	}
+	occupantTick := time.NewTicker(time.Second)
+	defer occupantTick.Stop()
 	for {
 		if !started.IsZero() && time.Since(started) >= settle {
 			return AgentWaitResult{target, status, resets}, nil
@@ -120,11 +144,18 @@ func WaitAgent(ctx context.Context, client *HerdrClient, target, status string, 
 		select {
 		case <-deadlineCtx.Done():
 			return AgentWaitResult{}, timeoutError()
+		case <-occupantTick.C:
+			if err := sameOccupant(); err != nil {
+				return AgentWaitResult{}, err
+			}
 		case ev, ok := <-events:
 			if !ok {
 				return AgentWaitResult{}, &codedError{ExitDaemonUnavailable, fmt.Errorf("herdr event connection closed")}
 			}
 			if ev.PaneID == paneID && ev.AgentStatus != "" {
+				if err := sameOccupant(); err != nil {
+					return AgentWaitResult{}, err
+				}
 				if ev.AgentStatus == status {
 					if started.IsZero() {
 						started = time.Now()
@@ -155,22 +186,4 @@ func minDuration(a, b time.Duration) time.Duration {
 		return a
 	}
 	return b
-}
-func snapshotStatus(raw json.RawMessage, target string) (string, string, bool) {
-	var top struct {
-		Agents []map[string]any `json:"agents"`
-	}
-	if json.Unmarshal(raw, &top) != nil {
-		return "", "", false
-	}
-	for _, a := range top.Agents {
-		n, _ := a["agent"].(string)
-		name, _ := a["name"].(string)
-		if n == target || name == target {
-			st, _ := a["agent_status"].(string)
-			pane, _ := a["pane_id"].(string)
-			return st, pane, true
-		}
-	}
-	return "", "", false
 }

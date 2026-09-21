@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -26,6 +27,59 @@ func r20WriteEvent(t *testing.T, inbox, jobID, name, contents string, mtime time
 		}
 	}
 	return path
+}
+
+// r20AgeMigrationStamp places the store's event-identity migration stamp.
+// Only an open that rekeyed legacy job.* rows stamps itself, so fixtures that
+// need a node which migrated at a known time place the stamp explicitly.
+func r20AgeMigrationStamp(t *testing.T, store *Store, at time.Time) {
+	t.Helper()
+	if _, err := store.db.Exec(`INSERT OR REPLACE INTO relay_meta(key,value) VALUES('event_id_since',?)`, at.UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// r20LegacySchemaDB writes a database file the way the pre-event_id binary
+// left it: relay_sent with the five-field primary key and the R21 lane and
+// event_id columns, seeded with the given job.* rows (unkeyed, sent long
+// ago). Reopening it through OpenStore performs the rekey migration for
+// real - the only open that earns the event_id_since stamp.
+func r20LegacySchemaDB(t *testing.T, path string, seeds []relayOutboxKey) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE relay_sent (
+	 kind TEXT NOT NULL, job_id TEXT NOT NULL, epoch INTEGER NOT NULL, report_path TEXT NOT NULL, reason TEXT NOT NULL,
+	 lane TEXT NOT NULL DEFAULT '', event_id TEXT NOT NULL DEFAULT '',
+	 sent_at INTEGER, persisted_at INTEGER,
+	 PRIMARY KEY(kind, job_id, epoch, report_path, reason)
+)`); err != nil {
+		t.Fatal(err)
+	}
+	sentAt := time.Now().Add(-time.Hour).UnixMilli()
+	for _, key := range seeds {
+		if _, err := db.Exec(`INSERT INTO relay_sent(kind,job_id,epoch,report_path,reason,lane,event_id,sent_at) VALUES(?,?,?,?,?,?,?,?)`,
+			key.Kind, key.JobID, int64(key.Epoch), key.ReportPath, key.Reason, key.Lane, key.EventID, sentAt); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// r20MigratedStore opens a store over a database the old binary actually
+// wrote: the rekey runs on open and stamps event_id_since, exactly the state
+// a node is in right after deploying the keyed-outbox build.
+func r20MigratedStore(t *testing.T, seeds []relayOutboxKey) *Store {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "panewire.sqlite3")
+	r20LegacySchemaDB(t, path, seeds)
+	store, err := OpenStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return store
 }
 
 func r20Node(inbox string, store *Store) *HubClient {
@@ -59,14 +113,14 @@ func TestR20OutboxSurvivesNodeRestart(t *testing.T) {
 		t.Fatalf("first process sent %d events, want 2", len(events))
 	}
 	// The hub confirms only one of the two.
-	first.recordRelayPersisted(hubOutboundMessage{Type: "relay.persisted", JobID: "r20-persisted", Kind: "job.completed", Epoch: 1, ReportPath: "a.md", EventID: 5})
+	first.recordRelayPersisted(hubOutboundMessage{Type: "relay.persisted", JobID: "r20-persisted", Kind: "job.completed", Epoch: 1, ReportPath: "a.md", EventID: 5, ProducerEventID: "00001-job.completed.json"})
 
 	// A restart is a fresh client over the same SQLite file. Age both rows out
 	// of the retry backoff so persisted_at is the only thing separating them.
 	aged := time.Now().Add(-2 * relayOutboxBackoff)
 	for _, key := range []relayOutboxKey{
-		{Kind: "job.completed", JobID: "r20-persisted", Epoch: 1, ReportPath: "a.md"},
-		{Kind: "job.completed", JobID: "r20-pending", Epoch: 1, ReportPath: "b.md"},
+		{Kind: "job.completed", JobID: "r20-persisted", Epoch: 1, ReportPath: "a.md", EventID: "00001-job.completed.json"},
+		{Kind: "job.completed", JobID: "r20-pending", Epoch: 1, ReportPath: "b.md", EventID: "00001-job.completed.json"},
 	} {
 		if err := store.RecordRelaySent(context.Background(), key, aged); err != nil {
 			t.Fatal(err)
@@ -107,7 +161,7 @@ func TestR20OutboxBacksOffWithinSixtySeconds(t *testing.T) {
 	if events := r20Sent(r20Node(inbox, store)); len(events) != 0 {
 		t.Fatalf("a fresh attempt inside the backoff window resent %d events", len(events))
 	}
-	if err := store.RecordRelaySent(context.Background(), relayOutboxKey{Kind: "job.completed", JobID: "r20-backoff", Epoch: 1, ReportPath: "a.md"}, time.Now().Add(-2*relayOutboxBackoff)); err != nil {
+	if err := store.RecordRelaySent(context.Background(), relayOutboxKey{Kind: "job.completed", JobID: "r20-backoff", Epoch: 1, ReportPath: "a.md", EventID: "00001-job.completed.json"}, time.Now().Add(-2*relayOutboxBackoff)); err != nil {
 		t.Fatal(err)
 	}
 	if events := r20Sent(r20Node(inbox, store)); len(events) != 1 {
@@ -120,6 +174,9 @@ func TestR20OutboxScanKeepsTwentyFourHourWindow(t *testing.T) {
 	inbox := t.TempDir()
 	store := NewMemoryStore(t)
 	defer store.Close()
+	// This node migrated two days ago, so the deployment cutoff sits well
+	// behind the fixture files and cannot swallow them.
+	r20AgeMigrationStamp(t, store, time.Now().Add(-48*time.Hour))
 	// created_at is absent, so the scan falls back to the file's mtime.
 	const body = `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"REPORT","report_last_line":"done"}`
 	r20WriteEvent(t, inbox, "r20-fresh", "00001-job.completed.json", strings.Replace(body, "REPORT", "fresh.md", 1), time.Now().Add(-23*time.Hour))

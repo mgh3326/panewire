@@ -6,7 +6,7 @@ path asks the hub to send its normal `burst` up event through the policy's
 returns a lease.
 
 ```sh
-panewire burst request --target desktop --hold 30m --reason pg-backup-secondary \
+panewire burst request --target machine-b --hold 30m --reason pg-backup-secondary \
   --hub-url https://hub.example --hub-token-env ~/.config/panewire/operator.env
 panewire burst holds --hub-url https://hub.example --hub-token-env ~/.config/panewire/operator.env
 panewire burst release --lease-id hold-... --hub-url https://hub.example --hub-token-env ~/.config/panewire/operator.env

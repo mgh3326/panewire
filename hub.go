@@ -71,9 +71,19 @@ type HubServerConfig struct {
 	PrometheusBasicUser string
 	PrometheusBasicPass string
 	// UIAllowCFOnly deliberately requires an explicit operator opt-in before
-	// serving the browser UI. UI requests must then originate on loopback or
-	// include the identity header injected by Cloudflare Access.
+	// serving the browser UI. Read-only UI requests must then originate on
+	// loopback or carry a verified Cloudflare Access assertion.
 	UIAllowCFOnly bool
+	// CFAccessTeam and CFAccessAUD enable verification of the signed
+	// Cf-Access-Jwt-Assertion header Cloudflare Access adds to requests that
+	// cleared an Access application. Both must be set together; the browser
+	// write surfaces require a verified assertion or an operator token.
+	// CFAccessCertsURL overrides the derived team certs endpoint and
+	// CFAccessHTTPClient overrides the fetch client; both exist for tests.
+	CFAccessTeam       string
+	CFAccessAUD        string
+	CFAccessCertsURL   string
+	CFAccessHTTPClient *http.Client
 	// ReportRelayPath is an operator-owned route file. It is never sent to nodes.
 	ReportRelayPath string
 	// UpdateConfirmationTimeout bounds how long a published version may wait
@@ -86,6 +96,10 @@ type HubServerConfig struct {
 	// handoffkeep is the durable relay-event store. It is package-private so the
 	// hub's public configuration keeps no credential-bearing field.
 	handoffkeep *handoffkeepRelayClient
+	// ChatStore is the durable operator-chat store. It is package-private for
+	// the same reason as handoffkeep. A nil store disables the chat endpoints
+	// (503); the hub and the relay paths run regardless.
+	ChatStore ChatStore
 }
 
 // HubNode is the deliberately small presence view returned to authenticated
@@ -338,6 +352,7 @@ type HubServer struct {
 	unfencedCompletions              uint64
 	startedAt                        time.Time
 	uiAllowCFOnly                    bool
+	cfAccess                         *hubCFAccessVerifier
 	uiEvents                         []hubUIEvent
 	jobs                             map[string]*hubJobRecord
 	pendingRevocations               map[string]map[string]hubJobRevokedEvent
@@ -368,15 +383,42 @@ type HubServer struct {
 	controlPlaneLanesLastFailure     string
 	// relayDedupe is an active injection claim. lanePersisted keeps the durable
 	// row ID while that claim is deliberately released between lane retries.
-	relayDedupe                 map[string]int64
-	relayHeld                   map[int64]hubRelayHeldProjection
-	relayCancelled              map[int64]struct{}
-	relayCancelledOrder         lruIndex[int64]
-	lanePersisted               map[string]int64
-	lanePersistedOrder          lruIndex[string]
-	replayExhausted             map[int64]struct{}
-	replayExhaustedOrder        lruIndex[int64]
-	handoffkeep                 *handoffkeepRelayClient
+	relayDedupe          map[string]int64
+	relayHeld            map[int64]hubRelayHeldProjection
+	relayCancelled       map[int64]struct{}
+	relayCancelledOrder  lruIndex[int64]
+	lanePersisted        map[string]int64
+	lanePersistedOrder   lruIndex[string]
+	replayExhausted      map[int64]struct{}
+	replayExhaustedOrder lruIndex[int64]
+	handoffkeep          *handoffkeepRelayClient
+	chatStore            ChatStore
+	chatKick             chan struct{}
+	chatMu               sync.Mutex
+	chatPending          map[int64]chatPendingMessage
+	// chatQuestionOf and chatLaneOf preserve a message's question link and
+	// lane so retry and replay-complete can re-associate without trusting
+	// client input. Entries live until the row is delivered or the process
+	// exits; failed rows keep theirs so retry can rebuild the link.
+	chatQuestionOf map[int64]string
+	chatLaneOf     map[int64]string
+	// chatCancelled marks rows closed by cancel. The store's only terminal
+	// state is delivered, so without this flag a cancelled row displays as a
+	// real delivery; the flag is hub-memory and lasts until restart.
+	chatCancelled map[int64]struct{}
+	// chatRetryMu serializes one full retry decision — link recovery, live
+	// relay check, new row — so two concurrent retries of the same failed
+	// row cannot both mint a directive. chatRetriedFrom maps a failed source
+	// id to the retry row it produced; after a restart the same information
+	// is recovered from the durable retry marker on the retry's relay row.
+	chatRetryMu     sync.Mutex
+	chatRetriedFrom map[int64]int64
+	// chatSweepCursor is the highest permanently-failed message id the orphan
+	// sweep has consumed, so a growing failed backlog cannot pin the sweep on
+	// the oldest rows. chatMsgHighWater positions the /chat/data tail window.
+	chatSweepCursor             int64
+	chatMsgHighWater            int64
+	chatSweepWarned             bool
 	unpersistedRelayEvents      uint64
 	replayExhaustedEvents       uint64
 	alreadyDeliveredRelayEvents uint64
@@ -386,6 +428,18 @@ type HubServer struct {
 	spawnRecords                map[string]*hubSpawnRecord
 	expectedVersion             map[string]hubExpectedVersion
 	updateConfirmationTimeout   time.Duration
+	stallBeats                  map[string]*hubStallBeatState
+}
+
+// hubStallBeatState is the hub's half of the detector no-data contract. It
+// records the last advancing beat and when the hub saw it advance, so a
+// frozen beat_ms and a vanished field are both observable problems.
+type hubStallBeatState struct {
+	seen          bool
+	lastBeatMS    int64
+	lastAdvance   time.Time
+	intervalMS    int64
+	degradedSince time.Time
 }
 
 type hubExpectedVersion struct {
@@ -475,6 +529,17 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if err != nil {
 		return nil, errors.New("hub accepting overrides are invalid")
 	}
+	var cfAccess *hubCFAccessVerifier
+	if (config.CFAccessTeam == "") != (config.CFAccessAUD == "") {
+		return nil, errors.New("hub Cloudflare Access configuration is invalid")
+	}
+	if config.CFAccessTeam != "" {
+		verifier, err := newHubCFAccessVerifier(config.CFAccessTeam, config.CFAccessAUD, config.CFAccessCertsURL, config.CFAccessHTTPClient, config.Now, config.Logger)
+		if err != nil {
+			return nil, err
+		}
+		cfAccess = verifier
+	}
 	controlPlaneLanes := make(map[string]struct{}, len(config.ControlPlaneLanes))
 	for _, lane := range config.ControlPlaneLanes {
 		if !laneNamePattern.MatchString(lane) {
@@ -513,7 +578,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout,
+		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatQuestionOf: make(map[int64]string), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, stallBeats: make(map[string]*hubStallBeatState),
 	}, nil
 }
 
@@ -542,6 +607,13 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /healthz", h.handleHealthz)
 	mux.HandleFunc("GET /ui", h.handleUI)
 	mux.HandleFunc("GET /ui/data.json", h.handleUIData)
+	mux.HandleFunc("GET /chat", h.handleChat)
+	mux.HandleFunc("GET /chat/data", h.handleChatData)
+	mux.HandleFunc("POST /chat/messages", h.handleChatMessageCreate)
+	mux.HandleFunc("POST /chat/messages/{id}/retry", h.handleChatMessageRetry)
+	mux.HandleFunc("POST /chat/messages/{id}/cancel", h.handleChatMessageCancel)
+	mux.HandleFunc("POST /chat/questions/{id}/transition", h.handleChatQuestionTransition)
+	mux.HandleFunc("POST /v1/chat/questions", h.handleChatQuestionUpsert)
 	mux.HandleFunc("GET /v1/nodes", h.handleNodes)
 	mux.HandleFunc("GET /v1/lanes", h.handleLanes)
 	mux.HandleFunc("PUT /v1/lanes/{lane}", h.handlePutLane)
@@ -646,19 +718,22 @@ func (h *HubServer) handleUIData(writer http.ResponseWriter, request *http.Reque
 	_ = json.NewEncoder(writer).Encode(h.uiData())
 }
 
-// authorizeUI intentionally does not trust forwarded-address headers. A
-// Cloudflare-routed request is accepted only when Access injected an identity;
-// loopback is reserved for a truly local request with no Cloudflare headers.
+// authorizeUI gates the read-only /ui surface. It deliberately does not trust
+// forwarded-address or unsigned identity headers — any client can set them. A
+// request is trusted when it carries a Cf-Access-Jwt-Assertion that verifies
+// against the configured Access team (signature, audience, expiry), or when
+// the peer is genuinely loopback — where a request presenting Cloudflare
+// routing headers must also carry the Access identity header, because that is
+// how the same-host cloudflared connector arrives. Non-loopback peers without
+// a verified assertion are always denied; unsigned identity headers never
+// grant anything. Loopback is only a read gate: it trusts that same-host
+// processes may observe hub status. State-changing surfaces never use this
+// gate — see authorizeChat.
 func (h *HubServer) authorizeUI(request *http.Request) bool {
 	if !h.uiAllowCFOnly {
 		return false
 	}
-	accessIdentity := strings.TrimSpace(request.Header.Get("Cf-Access-Authenticated-User-Email")) != ""
-	cloudflareRouted := strings.TrimSpace(request.Header.Get("Cf-Ray")) != "" || strings.TrimSpace(request.Header.Get("Cf-Connecting-Ip")) != ""
-	if cloudflareRouted {
-		return accessIdentity
-	}
-	if accessIdentity {
+	if h.cfAccess != nil && h.cfAccess.verify(request) {
 		return true
 	}
 	host, _, err := net.SplitHostPort(request.RemoteAddr)
@@ -666,7 +741,24 @@ func (h *HubServer) authorizeUI(request *http.Request) bool {
 		host = request.RemoteAddr
 	}
 	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	if ip == nil || !ip.IsLoopback() {
+		return false
+	}
+	accessIdentity := strings.TrimSpace(request.Header.Get("Cf-Access-Authenticated-User-Email")) != ""
+	cloudflareRouted := strings.TrimSpace(request.Header.Get("Cf-Ray")) != "" || strings.TrimSpace(request.Header.Get("Cf-Connecting-Ip")) != ""
+	if cloudflareRouted {
+		return accessIdentity
+	}
+	return true
+}
+
+// authorizeChat gates the operator-chat surface, which includes state changes
+// that inject lane directives. Unlike the read-only /ui gate it never trusts
+// the transport: loopback alone is not proof, because local processes are not
+// trusted. A request must present either the operator bearer token or a
+// verified Cf-Access-Jwt-Assertion.
+func (h *HubServer) authorizeChat(request *http.Request) bool {
+	return h.authorizeOperator(request) || (h.cfAccess != nil && h.cfAccess.verify(request))
 }
 
 func (h *HubServer) uiData() hubUIData {
@@ -1115,6 +1207,19 @@ type hubHeartbeatPayload struct {
 	Sessions       *[]HubSession             `json:"sessions,omitempty"`
 	SnapshotStatus string                    `json:"snapshot_status,omitempty"`
 	Truncated      bool                      `json:"truncated,omitempty"`
+	StallDetect    *hubStallBeatPayload      `json:"stall_detect,omitempty"`
+}
+
+// hubStallBeatPayload is the node detector's no-data contract. beat_ms is the
+// last completed scan; the hub alerts when it stops advancing or the field
+// vanishes from a node that was previously reporting it. panes is nullable on
+// purpose: null (or degraded=true) means the cycle could not observe, which
+// is a degraded signal — never to be read as "zero panes seen".
+type hubStallBeatPayload struct {
+	BeatMS     int64 `json:"beat_ms"`
+	IntervalMS int64 `json:"interval_ms"`
+	Panes      *int  `json:"panes"`
+	Degraded   bool  `json:"degraded"`
 }
 
 type hubNotePayload struct {
@@ -1147,7 +1252,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "sessions" && name != "snapshot_status" && name != "truncated" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1224,6 +1329,22 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.Quota = quota
+	}
+	if rawStall, exists := fields["stall_detect"]; exists {
+		var stallFields map[string]json.RawMessage
+		if json.Unmarshal(rawStall, &stallFields) != nil || len(stallFields) != 4 {
+			return hubHeartbeatPayload{}, false
+		}
+		for _, name := range []string{"beat_ms", "interval_ms", "panes", "degraded"} {
+			if _, exists := stallFields[name]; !exists {
+				return hubHeartbeatPayload{}, false
+			}
+		}
+		var beat hubStallBeatPayload
+		if json.Unmarshal(rawStall, &beat) != nil || beat.BeatMS < 0 || beat.IntervalMS < 0 || (beat.Panes != nil && *beat.Panes < 0) {
+			return hubHeartbeatPayload{}, false
+		}
+		heartbeat.StallDetect = &beat
 	}
 	rawSnapshotStatus, hasSnapshotStatus := fields["snapshot_status"]
 	if hasSnapshotStatus {
@@ -1788,6 +1909,10 @@ func (h *HubServer) Sweep() {
 // RunMaintenance keeps the testable state transition separate from a real
 // ticker. It returns promptly when the containing HTTP server is shutting down.
 func (h *HubServer) RunMaintenance(ctx context.Context) {
+	// The chat outbox worker runs beside the relay maintenance loop. It is
+	// inert without a configured chat store and never shares h.mu across a
+	// network call.
+	go h.runChatDispatcher(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever
 	// Postgres still holds as undelivered predates this process.
 	h.replayUndeliveredRelayEvents(ctx)

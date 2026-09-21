@@ -87,6 +87,7 @@ type hubServerCLIDeps struct {
 	TelegramBaseURL       string
 	AllowInsecureForTests bool
 	HandoffkeepHTTPClient *http.Client
+	ChatHTTPClient        *http.Client
 	Now                   func() time.Time
 }
 
@@ -106,6 +107,9 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	burstPolicyPath := flags.String("burst-policy", "", "explicit regular JSON burst policy file (hot-reloaded)")
 	placementPolicyPath := flags.String("placement-policy", "/etc/panewire/placement.json", "operator-owned JSON placement policy (hot-reloaded)")
 	uiAllowCFOnly := flags.Bool("ui-allow-cf-only", false, "serve /ui only to Cloudflare Access identities or loopback clients")
+	cfAccessTeam := flags.String("cf-access-team", "", "Cloudflare Access team name for Cf-Access-Jwt-Assertion verification (requires --cf-access-aud)")
+	cfAccessAUD := flags.String("cf-access-aud", "", "Cloudflare Access application AUD tag for Cf-Access-Jwt-Assertion verification (requires --cf-access-team)")
+	cfAccessCertsURL := flags.String("cf-access-certs-url", "", "override the derived https://<team>.cloudflareaccess.com certs endpoint (staging/tests)")
 	lanesPath := flags.String("lanes", "/etc/panewire/lanes.json", "operator-owned lane routing JSON (hot-reloaded)")
 	// The default is empty, not /etc/panewire/control-plane-lanes.json: the
 	// authority guard is fail-closed, so defaulting to a path would block every
@@ -114,6 +118,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	reportRelayPath := flags.String("report-relay-routes", "", "deprecated alias for --lanes")
 	acceptingOverridesPath := flags.String("accepting-overrides", "", "optional accepting override JSON (updated by operator POST)")
 	handoffkeepEnvPath := flags.String("handoffkeep-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file enabling durable relay events")
+	chatEnvPath := flags.String("chat-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file for the operator chat store (defaults to --handoffkeep-env)")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return nil, "", ExitUsage, errors.New("invalid hub flags")
 	}
@@ -183,7 +188,26 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			return nil, "", ExitConditionInvalid, errors.New("hub handoffkeep configuration is invalid")
 		}
 	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, ReportRelayPath: routePath, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep})
+	// The chat store defaults to the relay handoffkeep but is a separate client
+	// with its own pool, so a chat outage and a relay outage stay independent.
+	// --chat-env splits the failure domain explicitly ahead of any later
+	// storage separation.
+	var chatStore ChatStore
+	chatEnv := *chatEnvPath
+	if chatEnv == "" {
+		chatEnv = *handoffkeepEnvPath
+	}
+	if chatEnv != "" {
+		env, err := loadHubHandoffkeepEnv(chatEnv)
+		if err != nil {
+			return nil, "", ExitConditionInvalid, errors.New("hub chat store env is invalid")
+		}
+		chatStore, err = newHandoffkeepChatStore(env, deps.ChatHTTPClient)
+		if err != nil {
+			return nil, "", ExitConditionInvalid, errors.New("hub chat store configuration is invalid")
+		}
+	}
+	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep, ChatStore: chatStore})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}
@@ -338,6 +362,7 @@ func loadHubCFAccessEnv(path string) (hubCFAccessEnv, error) {
 type hubCLIDeps struct {
 	HTTPClient            *http.Client
 	AllowInsecureForTests bool
+	Now                   func() time.Time
 }
 
 // runHubEmitCLI sends one display-only note as an authenticated node and
@@ -476,28 +501,14 @@ func runHubStatusCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) i
 			return ExitConditionInvalid
 		}
 	}
-	endpoint, err := hubHTTPSEndpoint(*hubURL, "/v1/nodes", deps.AllowInsecureForTests)
+	client, err := newHubOperatorClient(*hubURL, env.Token, cfAccess, deps, 15*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "hub-status rejected: invalid hub URL")
 		return ExitConditionInvalid
 	}
-	client := deps.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint.String(), nil)
-	if err != nil {
-		fmt.Fprintln(stderr, "hub-status unavailable")
-		return ExitInternal
-	}
-	request.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
-	if cfAccess.ClientID != "" {
-		request.Header.Set("CF-Access-Client-Id", cfAccess.ClientID)
-		request.Header.Set("CF-Access-Client-Secret", cfAccess.ClientSecret)
-	}
-	response, err := client.Do(request)
+	response, err := client.do(ctx, http.MethodGet, "/v1/nodes", nil, nil)
 	if err != nil {
 		fmt.Fprintln(stderr, "hub-status unavailable")
 		return ExitInternal
@@ -516,26 +527,6 @@ func runHubStatusCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) i
 	}
 	renderHubStatus(stdout, body.Nodes)
 	return ExitOK
-}
-
-func hubHTTPSEndpoint(raw, endpoint string, allowInsecureForTests bool) (*url.URL, error) {
-	parsed, err := url.Parse(raw)
-	if err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
-		return nil, errors.New("invalid hub URL")
-	}
-	switch parsed.Scheme {
-	case "https", "wss":
-		parsed.Scheme = "https"
-	case "http", "ws":
-		if !allowInsecureForTests {
-			return nil, errors.New("invalid hub URL")
-		}
-		parsed.Scheme = "http"
-	default:
-		return nil, errors.New("invalid hub URL")
-	}
-	parsed.Path = endpoint
-	return parsed, nil
 }
 
 func validHubStatusNodes(nodes []HubNode) bool {
@@ -609,35 +600,19 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		}{*jobID, *to})
 		path, method, body = "/v1/jobs/reassign", http.MethodPost, bytes.NewReader(encoded)
 	}
-	endpoint, err := hubHTTPSEndpoint(*hubURL, path, deps.AllowInsecureForTests)
+	client, err := newHubOperatorClient(*hubURL, env.Token, cfAccess, deps, 15*time.Second)
 	if err != nil {
 		fmt.Fprintln(stderr, "jobs rejected: invalid hub URL")
 		return ExitConditionInvalid
 	}
+	var query url.Values
 	if args[0] == "jobs" && *machine != "" {
-		query := endpoint.Query()
+		query = url.Values{}
 		query.Set("machine", *machine)
-		endpoint.RawQuery = query.Encode()
-	}
-	client := deps.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	request, err := http.NewRequestWithContext(ctx, method, endpoint.String(), body)
-	if err != nil {
-		return ExitInternal
-	}
-	request.Header.Set(hubAuthorizationHeader, "Bearer "+env.Token)
-	if body != nil {
-		request.Header.Set("Content-Type", "application/json")
-	}
-	if cfAccess.ClientID != "" {
-		request.Header.Set("CF-Access-Client-Id", cfAccess.ClientID)
-		request.Header.Set("CF-Access-Client-Secret", cfAccess.ClientSecret)
-	}
-	response, err := client.Do(request)
+	response, err := client.do(ctx, method, path, query, body)
 	if err != nil {
 		fmt.Fprintln(stderr, "jobs unavailable")
 		return ExitInternal

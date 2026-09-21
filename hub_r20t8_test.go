@@ -65,11 +65,23 @@ func r20t8OwnerLane(row r20t8SnapshotRow) string {
 	return "lane-destination"
 }
 
+// r20t8EventFileNames reproduces the file names r20t8SeedInbox gives each
+// row's event: a per-job sequence, then the kind. The name is the event's
+// relay identity, so fixtures that seed durable rows need it.
+func r20t8EventFileNames(rows []r20t8SnapshotRow) []string {
+	names := make([]string, len(rows))
+	sequence := map[string]int{}
+	for index, row := range rows {
+		sequence[row.JobID]++
+		names[index] = strconv.Itoa(sequence[row.JobID]) + "-" + row.Kind + ".json"
+	}
+	return names
+}
+
 func r20t8SeedInbox(t *testing.T, inbox string, rows []r20t8SnapshotRow) {
 	t.Helper()
-	sequence := map[string]int{}
-	for _, row := range rows {
-		sequence[row.JobID]++
+	names := r20t8EventFileNames(rows)
+	for index, row := range rows {
 		record := map[string]any{
 			"type": row.Kind, "epoch": row.Epoch, "owner_lane": r20t8OwnerLane(row),
 			"agent_label": "lane-source", "label": "lane-source", "host": "host-a",
@@ -82,18 +94,24 @@ func r20t8SeedInbox(t *testing.T, inbox string, rows []r20t8SnapshotRow) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		r20WriteEvent(t, inbox, row.JobID, strconv.Itoa(sequence[row.JobID])+"-"+row.Kind+".json", string(contents), time.Time{})
+		r20WriteEvent(t, inbox, row.JobID, names[index], string(contents), time.Time{})
 	}
 }
 
-func r20t8SeedOutbox(t *testing.T, store *Store, rows []r20t8SnapshotRow) {
+// Each seeded row carries its event file's identity, which is the shape every
+// row takes once the producing binary keys sends by event. The name map comes
+// from the caller because a subset of rows keeps the sequence numbers of the
+// full journal.
+func r20t8SeedOutbox(t *testing.T, store *Store, rows []r20t8SnapshotRow, nameOf map[r20t8SnapshotRow]string) {
 	t.Helper()
 	for _, row := range rows {
-		if err := store.RecordRelaySent(context.Background(), row.key(), row.SentAt); err != nil {
+		key := row.key()
+		key.EventID = nameOf[row]
+		if err := store.RecordRelaySent(context.Background(), key, row.SentAt); err != nil {
 			t.Fatal(err)
 		}
 		if row.Persisted {
-			if err := store.RecordRelayPersisted(context.Background(), row.key(), row.SentAt.Add(time.Millisecond)); err != nil {
+			if err := store.RecordRelayPersisted(context.Background(), key, row.SentAt.Add(time.Millisecond)); err != nil {
 				t.Fatal(err)
 			}
 		}
@@ -279,12 +297,17 @@ func TestR20T8TwoNodeSnapshotAcknowledgesOnlySender(t *testing.T) {
 
 	inbox := t.TempDir()
 	r20t8SeedInbox(t, inbox, rows)
+	names := r20t8EventFileNames(rows)
+	nameOf := map[r20t8SnapshotRow]string{}
+	for index, row := range rows {
+		nameOf[row] = names[index]
+	}
 	sourceStore := NewMemoryStore(t)
 	defer sourceStore.Close()
-	r20t8SeedOutbox(t, sourceStore, rows)
+	r20t8SeedOutbox(t, sourceStore, rows, nameOf)
 	destinationStore := NewMemoryStore(t)
 	defer destinationStore.Close()
-	r20t8SeedOutbox(t, destinationStore, stuck) // Actual destination twins.
+	r20t8SeedOutbox(t, destinationStore, stuck, nameOf) // Actual destination twins.
 	destination := r20t7Node(inbox, destinationStore, latest.Add(time.Hour))
 
 	sourceRowsBefore := r20t8OutboxRows(t, sourceStore)
@@ -304,7 +327,7 @@ func TestR20T8TwoNodeSnapshotAcknowledgesOnlySender(t *testing.T) {
 		injections += drainRelays(destinationAgent)
 		destinationAcks := drainPersisted(destinationAgent)
 		for _, ack := range destinationAcks {
-			destination.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID})
+			destination.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID, ProducerEventID: ack.ProducerEventID})
 		}
 		if len(destinationAcks) != 0 {
 			t.Fatalf("destination received relay.persisted for sender event: %+v", destinationAcks)
@@ -314,7 +337,7 @@ func TestR20T8TwoNodeSnapshotAcknowledgesOnlySender(t *testing.T) {
 			t.Fatalf("source relay.persisted=%+v for key=%+v", acks, event.relayKey)
 		}
 		for _, ack := range acks {
-			source.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID})
+			source.recordRelayPersisted(hubOutboundMessage{Type: ack.Type, JobID: ack.JobID, Kind: ack.Kind, Epoch: ack.Epoch, ReportPath: ack.ReportPath, Reason: ack.Reason, EventID: ack.EventID, ProducerEventID: ack.ProducerEventID})
 		}
 		source.commitRelaySent(event)
 	}
@@ -328,7 +351,9 @@ func TestR20T8TwoNodeSnapshotAcknowledgesOnlySender(t *testing.T) {
 		t.Fatalf("destination relay_sent rows grew from %d to %d", destinationRowsBefore, got)
 	}
 	for _, row := range stuck {
-		state, err := destinationStore.RelayOutboxState(context.Background(), row.key())
+		key := row.key()
+		key.EventID = nameOf[row]
+		state, err := destinationStore.RelayOutboxState(context.Background(), key)
 		if err != nil || !state.Found || state.Persisted {
 			t.Fatalf("destination twin for %s/%s state=%+v err=%v, want unpersisted", row.Kind, row.JobID, state, err)
 		}
