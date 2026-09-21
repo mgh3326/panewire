@@ -37,6 +37,10 @@ type expectFields struct {
 type readEvidence struct {
 	Text     string
 	Revision int64
+	// Source and Rule record which read and which classifySubmission rule
+	// produced the final submission result (#547 AC5); pollSubmission fills
+	// them, readPane leaves them empty.
+	Source, Rule string
 }
 
 var pasteChipRE = regexp.MustCompile(`\[Pasted text #[^\]]+\]`)
@@ -183,6 +187,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 		return finishPrompt(ctx, store, d, &codedError{code, postErr})
 	}
 	d.SubmissionResult = submission
+	d.SubmissionEvidence = submissionEvidence(post)
 	d.EvidenceRevision = post.Revision
 	if post.Revision == 0 {
 		d.EvidenceRevision = sendPane.Revision
@@ -408,20 +413,103 @@ func expectFailures(e expectFields, p paneIdentity, recent string) []string {
 	}
 	return failed
 }
+
+// devin shares claude's fixed two-divider composer layout (verified live on
+// 2026-09-16 across devin's idle, working, and queued screens), so its residue
+// check uses the same composerRegion: it locates the live input row by position
+// (between the last two divider lines) instead of by matching one of devin's
+// several placeholder strings ("Ask Devin to build features...", "Guide Devin
+// while it works", "Press Enter to send queued messages now"), which sidesteps
+// the open unknown of whether those strings are stable across devin CLI
+// versions. A placeholder-text rule (marker absent from screen == unproven,
+// placeholder absent == residue) was tried first and rejected: a live capture
+// showed devin's idle placeholder stays absent for the entire multi-second
+// "Thinking"/"Running tools" duration of a real turn, so that rule would
+// misclassify an already-submitted, still-processing prompt as
+// composer_residue for the whole turn -- not just the brief post-submit
+// render-lag window -- which would make the relay's return-once re-read land
+// on composer_residue again and report unconfirmed, driving a hub retry that
+// re-injects into the still-live pane.
 func classifySubmission(harness, screen, marker string) string {
+	result, _ := classifySubmissionEvidence(harness, screen, marker)
+	return result
+}
+
+// classifySubmissionEvidence is classifySubmission plus the name of the rule
+// that decided it, so a caller can record why a delivery was judged the way
+// it was (#547 AC5). The claude and codex arms are unchanged; devin has its
+// own arm (see devinSubmission).
+func classifySubmissionEvidence(harness, screen, marker string) (string, string) {
 	if pasteChipRE.MatchString(screen) {
-		return "composer_residue"
+		return "composer_residue", "paste_chip"
+	}
+	if strings.EqualFold(harness, "devin") {
+		return devinSubmission(screen, marker)
 	}
 	if strings.EqualFold(harness, "claude") && claudeComposerContains(screen, marker) {
-		return "composer_residue"
+		return "composer_residue", "composer_divider"
 	}
 	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex")) && strings.Contains(screen, "Press up to edit queued messages") && !pasteChipRE.MatchString(screen) {
-		return "queued"
+		return "queued", "queued_banner"
 	}
 	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex")) && marker != "" && strings.Contains(screen, marker) {
-		return "marker_observed"
+		return "marker_observed", "marker_echo"
 	}
-	return "unproven"
+	return "unproven", "none"
+}
+
+// devinQueueBannerRE matches devin's queue header line, captured live as
+// "── 1 queued ── ↑ edit · ↵ send now ──". devin draws it at column 0, while
+// every continuation line of a transcript echo is indented, so a submitted
+// message whose body contains a header-shaped line cannot match. The composer
+// hint "Press Enter to send queued messages now" is the other half of the
+// same state, and counts only inside the live composer.
+var devinQueueBannerRE = regexp.MustCompile(`^─+[ \t]*\d+[ \t]+queued\b`)
+
+// devinQueued reports whether devin holds at least one message it has not
+// submitted: the composer hint, or a column-0 queue header that sits below
+// the last transcript echo ("❭ ...") and above the composer.
+func devinQueued(screen string) bool {
+	if region, ok := composerRegionWith(screen, isDevinDividerLine); ok && strings.Contains(region, "send queued messages now") {
+		return true
+	}
+	lines := strings.Split(screen, "\n")
+	end := len(lines)
+	if start, ok := composerStartWith(lines, isDevinDividerLine); ok {
+		end = start
+	}
+	for i := end - 1; i >= 0; i-- {
+		if strings.HasPrefix(lines[i], "❭") {
+			return false
+		}
+		if devinQueueBannerRE.MatchString(lines[i]) {
+			return true
+		}
+	}
+	return false
+}
+
+// devinSubmission orders devin's rules so that a message that is only in
+// devin's queue can never read as submitted: residue in the composer first,
+// then the queue banner, and only then the transcript echo. Its queued row
+// ("○ <message>") carries the marker too, which is why the banner has to win
+// over the echo. Marker matching ignores whitespace because a wrapped screen
+// can split the marker across lines.
+func devinSubmission(screen, marker string) (string, string) {
+	if region, ok := composerRegionWith(screen, isDevinDividerLine); ok && marker != "" && strings.Contains(compactWhitespace(region), compactWhitespace(marker)) {
+		return "composer_residue", "composer_divider"
+	}
+	if devinQueued(screen) {
+		return "queued", "devin_queue_banner"
+	}
+	if marker != "" && strings.Contains(compactWhitespace(screen), compactWhitespace(marker)) {
+		return "marker_observed", "marker_echo"
+	}
+	return "unproven", "none"
+}
+
+func compactWhitespace(value string) string {
+	return strings.Join(strings.Fields(value), "")
 }
 
 // Claude echoes submitted prompts in the transcript with a leading ❯. Only
@@ -431,19 +519,55 @@ func claudeComposerContains(screen, marker string) bool {
 	if marker == "" {
 		return false
 	}
+	region, ok := composerRegion(screen)
+	return ok && strings.Contains(region, marker)
+}
+
+// composerRegion returns the text between the final two divider lines --
+// claude's live composer, and devin's, whose layout is the same.
+func composerRegion(screen string) (string, bool) {
+	return composerRegionWith(screen, isDividerLine)
+}
+
+func composerRegionWith(screen string, isDivider func(string) bool) (string, bool) {
 	lines := strings.Split(screen, "\n")
+	start, ok := composerStartWith(lines, isDivider)
+	if !ok {
+		return "", false
+	}
+	end := start + 1
+	for end < len(lines) && !isDivider(lines[end]) {
+		end++
+	}
+	return strings.Join(lines[start+1:end], "\n"), true
+}
+
+// composerStartWith is the index of the second-to-last divider line, the top
+// edge of the live composer.
+func composerStartWith(lines []string, isDivider func(string) bool) (int, bool) {
 	dividers := make([]int, 0, 2)
 	for i, line := range lines {
-		if strings.Contains(line, "─") && strings.Trim(line, " \t─") == "" {
+		if isDivider(line) {
 			dividers = append(dividers, i)
 		}
 	}
 	if len(dividers) < 2 {
-		return false
+		return 0, false
 	}
-	start, end := dividers[len(dividers)-2], dividers[len(dividers)-1]
-	return strings.Contains(strings.Join(lines[start+1:end], "\n"), marker)
+	return dividers[len(dividers)-2], true
 }
+
+func isDividerLine(line string) bool {
+	return strings.Contains(line, "─") && strings.Trim(line, " \t─") == ""
+}
+
+// isDevinDividerLine also accepts devin's decorated composer top edge,
+// captured live as "──────── (bypass permissions on) ─". Its long leading run
+// of ─ tells it apart from the queue header, which starts "── 1 queued".
+func isDevinDividerLine(line string) bool {
+	return isDividerLine(line) || strings.HasPrefix(strings.TrimSpace(line), strings.Repeat("─", 8))
+}
+
 func toolReceipt(harness, screen, marker string, evidenceRevision, sendRevision int64) bool {
 	if evidenceRevision <= sendRevision || marker == "" || !strings.Contains(screen, marker) {
 		return false
@@ -461,9 +585,11 @@ func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, marker 
 	var last readEvidence
 	lastResult := "unproven"
 	for {
-		post, err := readPane(ctx, c, p, "recent_unwrapped")
+		source := "recent_unwrapped"
+		post, err := readPane(ctx, c, p, source)
 		if err == nil && post.Text == "" {
-			post, err = readPane(ctx, c, p, "visible")
+			source = "visible"
+			post, err = readPane(ctx, c, p, source)
 		}
 		if err != nil {
 			if ctx.Err() != nil {
@@ -471,8 +597,9 @@ func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, marker 
 			}
 			return last, "unproven", err
 		}
+		result, rule := classifySubmissionEvidence(p.Harness, post.Text, marker)
+		post.Source, post.Rule = source, rule
 		last = post
-		result := classifySubmission(p.Harness, post.Text, marker)
 		lastResult = result
 		if result == "marker_observed" || result == "submitted" || result == "queued" {
 			return post, result, nil
@@ -489,6 +616,15 @@ func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, marker 
 		case <-timer.C:
 		}
 	}
+}
+
+// submissionEvidence is the deliveries-row record of how a submission was
+// judged: which read source, then which classifySubmission rule.
+func submissionEvidence(post readEvidence) string {
+	if post.Source == "" {
+		return ""
+	}
+	return post.Source + ":" + post.Rule
 }
 
 func correlationID(sender, target, path, hash, uptake string) string {

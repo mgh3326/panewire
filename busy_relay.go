@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -25,6 +26,9 @@ const (
 	// manager forever; once hit, the held row is dropped explicitly instead
 	// of rotting past its policy's max_wait.
 	relayMaxInjectAttempts = 3
+	// relayDevinMaxInjectAttempts is devin's cap (#547): the first inject
+	// plus at most one re-inject. claude/codex keep relayMaxInjectAttempts.
+	relayDevinMaxInjectAttempts = 2
 )
 
 type relayCommandRunner func(context.Context, ...string) ([]byte, error)
@@ -407,6 +411,10 @@ func (manager *relayBusyManager) hold(parent context.Context, item relayHeld, re
 // as "the previous wait" -- reusing it here would cancel the retry before
 // it starts.
 func (manager *relayBusyManager) retryOrDrop(item relayHeld) {
+	manager.retryOrDropWithin(item, relayMaxInjectAttempts)
+}
+
+func (manager *relayBusyManager) retryOrDropWithin(item relayHeld, maxAttempts int) {
 	if item.EventID == 0 || item.Lane == "" {
 		return
 	}
@@ -415,12 +423,64 @@ func (manager *relayBusyManager) retryOrDrop(item relayHeld) {
 		_, _ = store.DeleteRelayHeld(ctx, item.EventID)
 	}
 	item.Attempts++
-	if item.Attempts >= relayMaxInjectAttempts {
+	if item.Attempts >= maxAttempts {
 		manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: "inject_failed_max_attempts"})
 		return
 	}
 	item.HeldSince = manager.client.relayNow()
 	manager.hold(ctx, item, "retry")
+}
+
+// inject runs one relay inject and returns its three-way result. The legacy
+// bool seam maps to delivered/retryable only.
+func (manager *relayBusyManager) inject(ctx context.Context, group []relayHeld, text string) relayInjectResult {
+	pane := group[0].Pane
+	if inject := manager.client.relayInject; inject != nil {
+		if inject(ctx, pane, text) {
+			return relayInjectResult{Outcome: relayInjectDelivered}
+		}
+		return relayInjectResult{Outcome: relayInjectRetryable}
+	}
+	verdict := manager.client.relayInjectVerdict
+	if verdict == nil {
+		verdict = defaultHubRelayInjectVerdict
+	}
+	var members []string
+	if len(group) > 1 {
+		for _, item := range group {
+			members = append(members, item.Text)
+		}
+	}
+	return verdict(ctx, pane, text, members)
+}
+
+// stopWithoutRetry ends a held item whose message may already be in the pane
+// (#547): re-injecting it could duplicate it, so the row is removed without a
+// rearm. relay.dropped clears the hub's held projection; the hub's durable
+// row stays undelivered, and a later hub replay meets devinRelayInject's
+// presend check before anything is typed.
+func (manager *relayBusyManager) stopWithoutRetry(item relayHeld) {
+	if item.EventID == 0 || item.Lane == "" {
+		return
+	}
+	if store := manager.client.relayStore(); store != nil {
+		_, _ = store.DeleteRelayHeld(context.Background(), item.EventID)
+	}
+	manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: "maybe_in_pane"})
+}
+
+// relayAckReason keeps a reason inside the hub's relay ack bounds: one line,
+// at most 240 bytes.
+func relayAckReason(reason string) string {
+	reason = strings.Join(strings.Fields(reason), " ")
+	if len(reason) <= 240 {
+		return reason
+	}
+	cut := 240
+	for cut > 0 && !utf8.RuneStart(reason[cut]) {
+		cut--
+	}
+	return reason[:cut]
 }
 
 func (manager *relayBusyManager) recoverExisting(parent context.Context, item relayHeld) {
@@ -686,19 +746,33 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		}
 		group = live
 		text := relayBatchText(group, expired, now)
-		inject := manager.client.relayInject
-		if inject == nil {
-			inject = defaultHubRelayInject
-		}
 		ctx, cancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
-		success := inject(ctx, group[0].Pane, text)
+		result := manager.inject(ctx, group, text)
 		cancel()
-		if !success {
+		switch result.Outcome {
+		case relayInjectRetryable:
+			maxAttempts := relayMaxInjectAttempts
+			if strings.EqualFold(result.Harness, "devin") {
+				maxAttempts = relayDevinMaxInjectAttempts
+			}
 			for _, item := range group {
-				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, OriginalEventID: item.EventID})
-				manager.retryOrDrop(item)
+				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(result.Evidence), OriginalEventID: item.EventID})
+				manager.retryOrDropWithin(item, maxAttempts)
 			}
 			continue
+		case relayInjectMaybeInPane:
+			for _, item := range group {
+				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane " + result.Evidence), OriginalEventID: item.EventID})
+				manager.stopWithoutRetry(item)
+			}
+			continue
+		}
+		// delivered, or queued: devin accepted the message into its queue
+		// and submits it when its turn ends (verified live, #547). Neither is
+		// retried; the reason says which.
+		reason := result.Evidence
+		if result.Outcome == relayInjectQueued {
+			reason = "queued " + reason
 		}
 		if len(group) > 1 {
 			ids := make([]int64, 0, len(group))
@@ -713,7 +787,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			}
 			released := relayReleasedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, FinalText: text, Edited: item.Edited, OriginalEventID: item.EventID}
 			manager.emit("relay.released", released)
-			manager.emit("relay.delivered", relayAckPayload{JobID: item.JobID, Pane: item.Pane, FinalText: text, Edited: item.Edited, OriginalEventID: item.EventID})
+			manager.emit("relay.delivered", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(reason), FinalText: text, Edited: item.Edited, OriginalEventID: item.EventID})
 		}
 	}
 }
