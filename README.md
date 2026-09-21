@@ -233,3 +233,35 @@ upload, the `OK` line, the exit status and the `emit-failures.log` /
 `panewire job probe` prints `panewire-job/1`. wrk hands the three commands over
 only on that exact answer and otherwise keeps its own path, so wrk and panewire
 can be deployed in either order.
+
+### Owner close (`panewire job close`)
+
+```sh
+panewire job close JOB --lane LANE --outcome completed|abandoned|superseded --reason TEXT [--operator-override]
+```
+
+A job whose worker ended without `wrk done` has no terminal event, so no
+reaper ever selects its pane. The lane that owns the job declares it ended
+here. The command writes exactly one flat `job.revoked` record into
+`jobs/JOB/events/` — a kind already in wrk reap's terminal set, the census and
+stall-detector terminal sets and the node's active-job scan, so no hub or
+handoffkeep kind changes. It does not emit, call the hub, upload a document or
+touch herdr: the pane is closed later by `wrk reap`, whose grace runs from the
+record's `created_at`. `job.completed` is not used because the node relays
+those files to the owner lane.
+
+- **Ownership**: `--lane` must be byte-equal to `owner_lane` of the newest
+  `job.claim`/`job.reclaim` (no trimming, case folding or partial match). An
+  unreadable claim file, a claim without an owner, or a terminal event already
+  standing after the latest claim refuses the close (exit 5). Another lane's
+  job closes only with `--operator-override`, recorded as `override: operator`
+  next to the real `owner_lane` and the caller's `closed_by`.
+- **Record**: `kind, job_id, owner_lane, closed_by, outcome, reason,
+  [override], source: "panewire job close", host, created_at, epoch`. It has no
+  `pane_id`/`tab_id` — the spawn receipt stays the only source of the pane to
+  close. `outcome` keeps completed, abandoned and superseded apart for any
+  count; the hub's own revocation (`{"type":"job.revoked",...}`) has neither
+  `source` nor `outcome`.
+- **Concurrency**: the check, the sequence choice and the publish run under the
+  job's `.wrk-events.lock` (the lock `job.completed` writers take), and the
+  record lands by hard link, which never replaces an existing name.

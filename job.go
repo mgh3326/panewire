@@ -52,7 +52,7 @@ type jobCLI struct {
 
 func runJobCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	if len(args) == 0 {
-		fmt.Fprintln(stderr, "usage: panewire job probe|done|escalate|joined ...")
+		fmt.Fprintln(stderr, "usage: panewire job probe|done|escalate|joined|close ...")
 		return ExitUsage
 	}
 	socket := cfg.SocketPath
@@ -73,8 +73,10 @@ func runJobCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		return c.escalate(args[1:])
 	case "joined":
 		return c.joined(args[1:])
+	case "close":
+		return c.close(args[1:])
 	}
-	fmt.Fprintln(stderr, "usage: panewire job probe|done|escalate|joined ...")
+	fmt.Fprintln(stderr, "usage: panewire job probe|done|escalate|joined|close ...")
 	return ExitUsage
 }
 
