@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 	"unicode"
+	"unicode/utf8"
 )
 
 // fleet-census answers "what panes are up, who spawned them, and are they
@@ -83,6 +84,7 @@ const (
 const (
 	fleetCensusDetailRemoteJobUnknown = "job-record-remote-unavailable"
 	fleetCensusDetailStaleSnapshot    = "snapshot-stale"
+	fleetCensusDetailInvalidSnapshot  = "snapshot-invalid"
 	fleetCensusDetailPartialSnapshot  = "snapshot-truncated"
 	fleetCensusDetailNoAgent          = "no-agent-on-pane"
 )
@@ -282,13 +284,19 @@ func readFleetCensusLocal(ctx context.Context, client *HerdrClient) (fleetCensus
 	}
 	if rawTabs, err := client.Call(ctx, "tab.list", map[string]any{}); err == nil {
 		var tabList struct {
-			Tabs []map[string]any `json:"tabs"`
+			Tabs []json.RawMessage `json:"tabs"`
 		}
 		if json.Unmarshal(rawTabs, &tabList) == nil {
 			view.tabsOK = true
 			view.tabs = make(map[string]*int, len(tabList.Tabs))
-			for _, entry := range tabList.Tabs {
-				id := aString(entry, "tab_id")
+			for _, rawTab := range tabList.Tabs {
+				var entry map[string]json.RawMessage
+				// wrk skips non-object rows entirely rather than rejecting
+				// the whole list.
+				if json.Unmarshal(rawTab, &entry) != nil || entry == nil {
+					continue
+				}
+				id := fleetCensusString(entry["tab_id"])
 				if id == "" {
 					continue
 				}
@@ -298,24 +306,29 @@ func readFleetCensusLocal(ctx context.Context, client *HerdrClient) (fleetCensus
 					view.tabs[id] = nil
 					continue
 				}
-				// pane_count must be a plain integer; anything else (absent,
-				// string, bool) is wrk's "?" and keeps the tab unknown.
-				switch value := entry["pane_count"].(type) {
-				case float64:
-					count := int(value)
-					if float64(count) == value {
-						view.tabs[id] = &count
-					} else {
-						view.tabs[id] = nil
-					}
-				default:
-					view.tabs[id] = nil
-				}
+				view.tabs[id] = fleetCensusPaneCount(entry["pane_count"])
 			}
 		}
 	}
 	sort.Slice(view.panes, func(i, j int) bool { return view.panes[i].PaneID < view.panes[j].PaneID })
 	return view, nil
+}
+
+// fleetCensusPaneCount mirrors wrk's `isinstance(count, int) and not
+// isinstance(count, bool)`: only a plain JSON integer token counts — 1.0,
+// 1e0, true, "1", null and missing are all "?" (unknown), never shared.
+// json.Number preserves the literal so 1 and 1.0 stay distinct.
+func fleetCensusPaneCount(raw json.RawMessage) *int {
+	var number json.Number
+	if json.Unmarshal(raw, &number) != nil {
+		return nil
+	}
+	value, err := strconv.ParseInt(number.String(), 10, 64)
+	if err != nil {
+		return nil
+	}
+	count := int(value)
+	return &count
 }
 
 // fleetCensusJobScan is the per-job result of walking jobs/<id>/events in
@@ -341,25 +354,91 @@ type fleetCensusJobScan struct {
 	tab          string
 }
 
-// fleetCensusMoment mirrors wrk's moment_of: created_at (or payload.at) parsed
-// as ISO-8601, falling back to the file mtime on blank or unparseable values.
+// fleetCensusMoment mirrors wrk's moment_of: created_at (or payload.at)
+// stripped, every Z replaced by +00:00, then parsed exactly as Python's
+// datetime.fromisoformat (pre-3.11 strictness: HH:MM seconds optional,
+// fractional seconds exactly 3 or 6 digits, naive means local time), falling
+// back to the file mtime on blank or unparseable values.
 func fleetCensusMoment(value string, fallback time.Time) time.Time {
-	text := strings.TrimSpace(value)
+	text := strings.ReplaceAll(strings.TrimSpace(value), "Z", "+00:00")
 	if text == "" {
 		return fallback
 	}
-	// fromisoformat also accepts a space separator; normalize it so both
-	// parsers see the same instants.
-	if parsed, err := time.Parse(time.RFC3339Nano, strings.Replace(text, " ", "T", 1)); err == nil {
-		return parsed
-	}
-	if parsed, err := time.ParseInLocation("2006-01-02T15:04:05", text, time.Local); err == nil {
-		return parsed
-	}
-	if parsed, err := time.ParseInLocation("2006-01-02 15:04:05", text, time.Local); err == nil {
+	if parsed, ok := fleetCensusParseISO8601(text); ok {
 		return parsed
 	}
 	return fallback
+}
+
+// fleetCensusISO8601 is datetime.fromisoformat's grammar for the Python
+// versions wrk runs on: a mandatory date, an optional time behind any single
+// separator character, and an optional ±HH:MM[:SS[.ffffff]] offset. Seconds
+// may be omitted; the seconds fraction must be exactly 3 or 6 digits.
+var fleetCensusISO8601 = regexp.MustCompile(`(?s)^(\d{4})-(\d{2})-(\d{2})(?:.(\d{2}):(\d{2})(?::(\d{2})(?:[\.,](\d{3}|\d{6}))?)?([+-]\d{2}:\d{2}(?::\d{2}(?:[\.,]\d{3}|\d{6})?)?)?)?$`)
+
+var fleetCensusISOOffset = regexp.MustCompile(`^([+-])(\d{2}):(\d{2})(?::(\d{2})(?:[\.,]\d{3}|\d{6})?)?$`)
+
+func fleetCensusParseISO8601(text string) (time.Time, bool) {
+	match := fleetCensusISO8601.FindStringSubmatch(text)
+	if match == nil {
+		return time.Time{}, false
+	}
+	year, _ := strconv.Atoi(match[1])
+	month, _ := strconv.Atoi(match[2])
+	day, _ := strconv.Atoi(match[3])
+	hour, minute, second, nanos := 0, 0, 0, 0
+	location := time.Local
+	if match[4] != "" {
+		hour, _ = strconv.Atoi(match[4])
+		minute, _ = strconv.Atoi(match[5])
+		if match[6] != "" {
+			second, _ = strconv.Atoi(match[6])
+		}
+		if match[7] != "" {
+			fraction, _ := strconv.Atoi(match[7])
+			if len(match[7]) == 3 {
+				nanos = fraction * int(time.Millisecond)
+			} else {
+				nanos = fraction * int(time.Microsecond)
+			}
+		}
+		if match[8] != "" {
+			offset, ok := fleetCensusParseISOOffset(match[8])
+			if !ok {
+				return time.Time{}, false
+			}
+			location = time.FixedZone("", offset)
+		}
+	}
+	if year < 1 || month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || minute > 59 || second > 59 {
+		return time.Time{}, false
+	}
+	parsed := time.Date(year, time.Month(month), day, hour, minute, second, nanos, location)
+	if parsed.Day() != day { // time.Date normalizes impossible dates; Python raises
+		return time.Time{}, false
+	}
+	return parsed, true
+}
+
+func fleetCensusParseISOOffset(text string) (int, bool) {
+	match := fleetCensusISOOffset.FindStringSubmatch(text)
+	if match == nil {
+		return 0, false
+	}
+	hour, _ := strconv.Atoi(match[2])
+	minute, _ := strconv.Atoi(match[3])
+	second := 0
+	if match[4] != "" {
+		second, _ = strconv.Atoi(match[4])
+	}
+	if hour > 23 || minute > 59 || second > 59 {
+		return 0, false
+	}
+	offset := hour*3600 + minute*60 + second
+	if match[1] == "-" {
+		offset = -offset
+	}
+	return offset, true
 }
 
 // scanFleetCensusJobs replays wrk reap_candidates over the jobs root. Event
@@ -404,6 +483,12 @@ func scanFleetCensusJobs(root string) ([]fleetCensusJobScan, bool) {
 			path := filepath.Join(eventsDir, name)
 			raw, err := os.ReadFile(path)
 			if err != nil {
+				continue
+			}
+			// wrk decodes each file as strict UTF-8 (open(encoding="utf-8")):
+			// invalid bytes fail the whole file in Python while Go's json
+			// would happily parse them, so validity is checked explicitly.
+			if !utf8.Valid(raw) {
 				continue
 			}
 			var document map[string]json.RawMessage
@@ -509,8 +594,12 @@ func fleetCensusMomentField(values ...json.RawMessage) string {
 	return ""
 }
 
+// fleetCensusHasSpace mirrors Python's str.isspace, which is Unicode
+// White_Space plus the C0 separators \x1c–\x1f that unicode.IsSpace misses.
 func fleetCensusHasSpace(value string) bool {
-	return strings.IndexFunc(value, unicode.IsSpace) >= 0
+	return strings.IndexFunc(value, func(r rune) bool {
+		return unicode.IsSpace(r) || (r >= 0x1c && r <= 0x1f)
+	}) >= 0
 }
 
 // fleetCensusJobVerdict applies the wrk reap pipeline to one scanned job
@@ -538,20 +627,29 @@ func fleetCensusJobVerdict(scan fleetCensusJobScan, view fleetCensusLocalView, g
 	if age < int64(grace.Seconds()) {
 		return fleetCensusVerdictSilent, fleetCensusReasonWithinGrace, age
 	}
-	if scan.malformed || fleetCensusHasSpace(scan.jobID) || fleetCensusHasSpace(scan.ownerLane) || fleetCensusHasSpace(scan.pane) || fleetCensusHasSpace(scan.tab) {
+	// wrk prints "-" for empty fields in its candidate line and reap_cmd reads
+	// a literal "-" pane back as the malformed-record marker.
+	if scan.malformed || scan.pane == "-" || fleetCensusHasSpace(scan.jobID) || fleetCensusHasSpace(scan.ownerLane) || fleetCensusHasSpace(scan.pane) || fleetCensusHasSpace(scan.tab) {
 		return fleetCensusVerdictSkip, fleetCensusReasonMalformed, age
 	}
 	agent, live := view.agents[scan.pane]
 	if !live {
 		return fleetCensusVerdictSkip, "pane-unresolved(err:agent_not_found)", age
 	}
-	if agent.Status == "" {
+	// wrk's probe compares status.strip(): a whitespace-only status is a
+	// parse failure, not an unrecognised status.
+	status := strings.TrimSpace(agent.Status)
+	if status == "" {
 		return fleetCensusVerdictSkip, "pane-unresolved(err:parse)", age
 	}
-	if agent.Status != "idle" && agent.Status != "done" {
-		return fleetCensusVerdictSkip, "status=" + agent.Status, age
+	if status != "idle" && status != "done" {
+		return fleetCensusVerdictSkip, "status=" + status, age
 	}
 	tab := scan.tab
+	if tab == "-" {
+		// "-" is wrk's printed placeholder for an empty tab field.
+		tab = ""
+	}
 	if tab == "" {
 		tab = agent.TabID
 	}
@@ -698,6 +796,9 @@ func fleetCensusRemotePaneRow(machine string, session HubSession, fresh bool, sn
 	if !fresh {
 		row.Class = fleetCensusClassUnobservable
 		row.Detail = fleetCensusDetailStaleSnapshot
+		if snapshotState == sessionsFindStateInvalidSnapshot {
+			row.Detail = fleetCensusDetailInvalidSnapshot
+		}
 	} else if job, known := hubJobsByPane[machine+"\x00"+session.PaneID]; known {
 		row.JobID = job.JobID
 		row.JobIDs = []string{job.JobID}
@@ -717,6 +818,10 @@ func fleetCensusRemotePaneRow(machine string, session HubSession, fresh bool, sn
 		}
 		if job.Role == "builder" || job.Role == "captain" {
 			row.Class = fleetCensusClassBuilder
+		} else if row.TerminalKind != "" {
+			// A terminal last event is terminal-but-not-proven-reapable: the
+			// reap gates (tab counts, live pane status) only exist locally.
+			row.Class = fleetCensusClassTerminalHeld
 		} else {
 			row.Class = fleetCensusClassNoTerminalEvent
 		}
@@ -837,9 +942,22 @@ func buildFleetCensusResult(options fleetCensusOptions, machineID string, view f
 					row.AgeSeconds = &age
 				}
 				verdict, reason := jobVerdicts[primary.jobID], jobReasons[primary.jobID]
+				// reapable is judged per job but closes the pane's whole tab:
+				// when any linked job would-close — not only the current
+				// occupant — the pane itself is reapable (A-4).
+				var reapableBy []string
+				for _, job := range linked {
+					if jobVerdicts[job.jobID] == fleetCensusVerdictWouldClose {
+						reapableBy = append(reapableBy, job.jobID)
+					}
+				}
 				switch {
-				case verdict == fleetCensusVerdictWouldClose:
+				case len(reapableBy) > 0:
 					row.Class = fleetCensusClassReapable
+					if verdict != fleetCensusVerdictWouldClose {
+						sort.Strings(reapableBy)
+						row.Detail = "reapable-by=" + strings.Join(reapableBy, ",")
+					}
 				case reason == fleetCensusReasonBuilderRole:
 					row.Class = fleetCensusClassBuilder
 				case reason == fleetCensusReasonNoTerminal:
@@ -938,8 +1056,17 @@ func buildFleetCensusResult(options fleetCensusOptions, machineID string, view f
 	// Remote nodes: reuse the sessions-find classification so the coverage
 	// vocabulary is identical. Panes are emitted only from snapshots that
 	// decoded; stale nodes surface their rows flagged unfresh instead of
-	// silently counting them as absent.
+	// silently counting them as absent. The hub keys nodes by machine, so a
+	// repeated machine_id is one node listed twice — its first entry stands
+	// for the whole machine rather than doubling rows and coverage.
+	seenMachines := make(map[string]bool, len(nodes))
+	duplicates := 0
 	for _, node := range nodes {
+		if seenMachines[node.MachineID] {
+			duplicates++
+			continue
+		}
+		seenMachines[node.MachineID] = true
 		observation := classifySessionsFindNode(node, now)
 		entry := fleetCensusNodeCoverage{Machine: node.MachineID, Source: "hub", Covered: observation.covered, State: observation.state, Reason: observation.reason}
 		if observation.decodable && observation.sessions != nil {
@@ -959,20 +1086,29 @@ func buildFleetCensusResult(options fleetCensusOptions, machineID string, view f
 	if nodesRejected != "" {
 		result.Coverage.Reasons = append(result.Coverage.Reasons, nodesRejected)
 	}
+	if duplicates > 0 {
+		result.Coverage.Reasons = append(result.Coverage.Reasons, "duplicate-node-entries")
+	}
 
 	// Lane verdicts reuse the lanes-audit judgement whole: dead only on a
 	// fresh, complete, decodable snapshot of the lane's machine. The local
 	// node's hub snapshot stays in the audit input — it is the only
-	// observation of this machine when herdr is down — but a successful
-	// direct herdr observation overrides it for local lanes: pane.list is
-	// complete and fresh by construction.
+	// observation of this machine when herdr is down — but a complete direct
+	// herdr observation overrides it for local lanes. The override needs
+	// pane.list specifically: without it view.panes holds only live agents,
+	// and an agent-less pane would be misreported as provably dead.
 	if lanes != nil {
 		var audit lanesAuditResult
 		if nodesRejected != "" {
 			audit = buildLanesAuditNodesRejected(lanes, nodesRejected, now)
 		} else {
 			auditNodes := make([]lanesAuditNodeWire, 0, len(nodes)+1)
+			auditSeen := make(map[string]bool, len(nodes)+1)
 			for _, node := range nodes {
+				if auditSeen[node.MachineID] {
+					continue
+				}
+				auditSeen[node.MachineID] = true
 				auditNodes = append(auditNodes, lanesAuditNodeWire{MachineID: node.MachineID, State: node.State, SessionSnapshot: node.SessionSnapshot})
 			}
 			if localHubNode != nil {
@@ -980,7 +1116,7 @@ func buildFleetCensusResult(options fleetCensusOptions, machineID string, view f
 			}
 			audit = buildLanesAuditResult(lanes, auditNodes, now)
 		}
-		if localOK {
+		if localOK && view.paneListOK {
 			localPanes := make(map[string]bool, len(view.panes))
 			for _, pane := range view.panes {
 				localPanes[pane.PaneID] = true

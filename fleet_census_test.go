@@ -3,6 +3,7 @@ package panewire
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -46,6 +47,20 @@ func t501JobEvent(t *testing.T, root, job, name string, document map[string]any)
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dir, name), append(raw, '\n'), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// t501RawJobEvent writes pre-encoded bytes so a fixture can carry content
+// json.Marshal could never emit — e.g. invalid UTF-8, which Python's strict
+// decoder rejects (skipping the file) while Go's json would parse it.
+func t501RawJobEvent(t *testing.T, root, job, name string, body []byte) {
+	t.Helper()
+	dir := filepath.Join(root, job, "events")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), body, 0o600); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -198,6 +213,74 @@ func t501StandardInbox() map[string][]map[string]any {
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p1 x", "tab_id": "w1:t18"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
+		// \x1f is a Python isspace() char but not a Go unicode.IsSpace one:
+		// malformed on both sides only if the check matches Python.
+		"j-c0space": {
+			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p21\x1f", "tab_id": "w1:t21"}),
+			t501FlatEvent("job.completed", old, nil),
+		},
+		// "-" is wrk's printed empty-field placeholder: a literal "-" pane is
+		// malformed-record, a literal "-" tab falls back to the probe's tab.
+		"j-dash-pane": {
+			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "-", "tab_id": "w1:t20"}),
+			t501FlatEvent("job.completed", old, nil),
+		},
+		"j-dash-tab": {
+			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p19", "tab_id": "-"}),
+			t501FlatEvent("job.completed", old, nil),
+		},
+		// Python ≤3.10 fromisoformat accepts HH:MM without seconds and bare
+		// dates — both are old enough to reap here.
+		"j-noseconds": {
+			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p22", "tab_id": "w1:t22"}),
+			t501FlatEvent("job.completed", t501Now.Add(-2*time.Hour).UTC().Format("2006-01-02T15:04Z"), nil),
+		},
+		"j-dateonly": {
+			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p23", "tab_id": "w1:t23"}),
+			t501FlatEvent("job.completed", t501Now.Add(-48*time.Hour).UTC().Format("2006-01-02"), nil),
+		},
+		// A one-digit fraction is unparseable to pre-3.11 fromisoformat:
+		// moment_of falls back to the fresh file mtime, so the job stays
+		// within grace — Go's RFC3339Nano would wrongly accept it.
+		"j-frac1": {
+			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p24", "tab_id": "w1:t24"}),
+			t501FlatEvent("job.completed", t501Now.Add(-2*time.Hour).UTC().Format("2006-01-02T15:04:05.5Z"), nil),
+		},
+		// pane_count float/bool literals are Python non-ints: "?" — unknown.
+		"j-tabfloat": {
+			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p26", "tab_id": "w1:t26"}),
+			t501FlatEvent("job.completed", old, nil),
+		},
+		"j-tabexp": {
+			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p27", "tab_id": "w1:t27"}),
+			t501FlatEvent("job.completed", old, nil),
+		},
+		"j-tabbool": {
+			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p28", "tab_id": "w1:t28"}),
+			t501FlatEvent("job.completed", old, nil),
+		},
+		// A whitespace-only agent status is a probe parse failure for wrk
+		// (status.strip() is empty), not a "status= " mismatch.
+		"j-blankstatus": {
+			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p29", "tab_id": "w1:t29"}),
+			t501FlatEvent("job.completed", old, nil),
+		},
+		// Duplicate tab rows make the count untrustworthy in wrk.
+		"j-tabdup": {
+			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p30", "tab_id": "w1:t30"}),
+			t501FlatEvent("job.completed", old, nil),
+		},
+		// Two jobs name one pane: the older job is terminal and reapable, the
+		// newer job has no terminal event. wrk would-close the tab — the pane
+		// classification must surface that even though the current occupant
+		// (newest spawn) is not the reapable job.
+		"j-old": {
+			t501FlatEvent("job.spawned", t501Now.Add(-3*time.Hour).UTC().Format(time.RFC3339), map[string]any{"pane_id": "w1:p18", "tab_id": "w1:t18"}),
+			t501FlatEvent("job.completed", old, nil),
+		},
+		"j-new": {
+			t501FlatEvent("job.spawned", t501Fresh(), map[string]any{"pane_id": "w1:p18", "tab_id": "w1:t18"}),
+		},
 		// Job dir without an events dir at all (covered by t501ExtraDirs).
 	}
 }
@@ -221,80 +304,121 @@ func t501StandardAgents() map[string]map[string]string {
 		"w1:p15": {"status": "idle", "tab_id": "w1:t15"},
 		"w1:p16": {"status": "idle", "tab_id": "w1:t16b"},
 		"w1:p17": {"status": "idle", "tab_id": "w1:t17"},
+		"w1:p18": {"status": "idle", "tab_id": "w1:t18"},
+		"w1:p19": {"status": "idle", "tab_id": "w1:t19"},
+		"w1:p22": {"status": "idle", "tab_id": "w1:t22"},
+		"w1:p23": {"status": "idle", "tab_id": "w1:t23"},
+		"w1:p24": {"status": "idle", "tab_id": "w1:t24"},
+		"w1:p25": {"status": "idle", "tab_id": "w1:t25"},
+		"w1:p26": {"status": "idle", "tab_id": "w1:t26"},
+		"w1:p27": {"status": "idle", "tab_id": "w1:t27"},
+		"w1:p28": {"status": "idle", "tab_id": "w1:t28"},
+		"w1:p29": {"status": " ", "tab_id": "w1:t29"},
+		"w1:p30": {"status": "idle", "tab_id": "w1:t30"},
 	}
 }
 
-func t501StandardTabs() []map[string]any {
-	return []map[string]any{
-		{"tab_id": "w1:t1", "pane_count": 1},
-		{"tab_id": "w1:t2", "pane_count": 1},
-		{"tab_id": "w1:t3", "pane_count": 2},
-		{"tab_id": "w1:t4old", "pane_count": 1},
-		{"tab_id": "w1:t4new", "pane_count": 1},
-		{"tab_id": "w1:t6", "pane_count": 1},
-		{"tab_id": "w1:t7", "pane_count": 1},
-		{"tab_id": "w1:t8", "pane_count": 1},
-		{"tab_id": "w1:t8b", "pane_count": 1},
-		{"tab_id": "w1:t9", "pane_count": 1},
-		{"tab_id": "w1:t10", "pane_count": 1},
-		{"tab_id": "w1:t12", "pane_count": "?"},
-		{"tab_id": "w1:t13", "pane_count": 1},
-		{"tab_id": "w1:t14", "pane_count": 0},
-		{"tab_id": "w1:t15", "pane_count": 1},
-		{"tab_id": "w1:t16a", "pane_count": 1},
-		{"tab_id": "w1:t16b", "pane_count": 1},
-		{"tab_id": "w1:t17", "pane_count": 1},
-		{"tab_id": "w1:t18", "pane_count": 1},
+// t501StandardTabs is served verbatim to both sides — the reference stub
+// hands it to Python and the socket stub re-marshals it — so pane_count
+// keeps its exact JSON literal. json.RawMessage values keep float/bool
+// spellings (1.0, 1e0, true) that a typed Go value would lose, and the bare
+// "junk" element exercises wrk's per-row skip of non-object tabs.
+func t501StandardTabs() []any {
+	return []any{
+		map[string]any{"tab_id": "w1:t1", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t2", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t3", "pane_count": 2},
+		map[string]any{"tab_id": "w1:t4old", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t4new", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t6", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t7", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t8", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t8b", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t9", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t10", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t12", "pane_count": "?"},
+		map[string]any{"tab_id": "w1:t13", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t14", "pane_count": 0},
+		map[string]any{"tab_id": "w1:t15", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t16a", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t16b", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t17", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t18", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t19", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t20", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t22", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t23", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t24", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t25", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t26", "pane_count": json.RawMessage("1.0")},
+		map[string]any{"tab_id": "w1:t27", "pane_count": json.RawMessage("1e0")},
+		map[string]any{"tab_id": "w1:t28", "pane_count": json.RawMessage("true")},
+		map[string]any{"tab_id": "w1:t29", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t30", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t30", "pane_count": 1}, // duplicate row: count unknowable
+		"junk", // non-object element: wrk skips it per-row
 	}
 }
 
-// t501ViewFromSpec builds the census local observation from the same fixture
-// values the stub herdr serves to the reference script.
-func t501ViewFromSpec(agents map[string]map[string]string, tabs []map[string]any, tabsOK bool) fleetCensusLocalView {
-	view := fleetCensusLocalView{
-		agents:     map[string]fleetCensusPaneObs{},
-		paneListOK: true,
-		tabsOK:     tabsOK,
-	}
+// t501LocalResults renders the fixture spec as the three socket responses
+// readFleetCensusLocal consumes — the same data the CLI stub serves wrk.
+// Panes whose spec carries an error exist in neither list (their agent get
+// fails on the wrk side, which agent.list absence mirrors).
+func t501LocalResults(agents map[string]map[string]string, tabs []any) map[string]any {
+	agentRows := []any{}
+	paneRows := []any{}
 	for pane, spec := range agents {
-		obs := fleetCensusPaneObs{PaneID: pane, Status: spec["status"], TabID: spec["tab_id"], HasAgent: true, AgentName: spec["name"], Harness: spec["harness"]}
-		view.agents[pane] = obs
-		view.panes = append(view.panes, obs)
-	}
-	if tabsOK {
-		view.tabs = map[string]*int{}
-		for _, tab := range tabs {
-			id, _ := tab["tab_id"].(string)
-			if id == "" {
-				continue
-			}
-			if _, dup := view.tabs[id]; dup {
-				view.tabs[id] = nil
-				continue
-			}
-			switch value := tab["pane_count"].(type) {
-			case int:
-				count := value
-				view.tabs[id] = &count
-			case float64:
-				count := int(value)
-				if float64(count) == value {
-					view.tabs[id] = &count
-				} else {
-					view.tabs[id] = nil
-				}
-			default:
-				view.tabs[id] = nil
-			}
+		if spec["error"] != "" {
+			continue
 		}
+		entry := map[string]any{"pane_id": pane}
+		if spec["tab_id"] != "" {
+			entry["tab_id"] = spec["tab_id"]
+		}
+		if spec["status"] != "" {
+			entry["agent_status"] = spec["status"]
+		}
+		if spec["name"] != "" {
+			entry["name"] = spec["name"]
+		}
+		if spec["harness"] != "" {
+			entry["agent"] = spec["harness"]
+		}
+		agentRows = append(agentRows, entry)
+		paneRows = append(paneRows, map[string]any{"pane_id": pane, "tab_id": spec["tab_id"], "agent_status": spec["status"]})
 	}
-	sort.Slice(view.panes, func(i, j int) bool { return view.panes[i].PaneID < view.panes[j].PaneID })
+	return map[string]any{
+		"agent.list": map[string]any{"agents": agentRows},
+		"pane.list":  map[string]any{"panes": paneRows},
+		"tab.list":   map[string]any{"tabs": tabs},
+	}
+}
+
+// t501ViewViaHerdr runs the REAL readFleetCensusLocal decode over the socket
+// stub — the equivalence harness must not rebuild the view by hand, or the
+// production parse gates (duplicate rows, float counts) go untested.
+func t501ViewViaHerdr(t *testing.T, agents map[string]map[string]string, tabs []any, tabListFails bool) fleetCensusLocalView {
+	t.Helper()
+	failures := map[string]bool{}
+	if tabListFails {
+		failures["tab.list"] = true
+	}
+	server := t501NewHerdr(t, t501LocalResults(agents, tabs), failures)
+	client, err := NewHerdrClient(server.path)
+	if err != nil {
+		t.Fatalf("stub herdr dial: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+	view, err := readFleetCensusLocal(context.Background(), client)
+	if err != nil {
+		t.Fatalf("readFleetCensusLocal: %v", err)
+	}
 	return view
 }
 
 // t501RunReference executes the vendored wrk ae1f544 reap dry-run against the
 // fixture inbox and stub herdr, returning job → verdict/reason pairs.
-func t501RunReference(t *testing.T, jobsRoot string, agents map[string]map[string]string, tabs []map[string]any, tabListFails bool, graceSeconds string) map[string][2]string {
+func t501RunReference(t *testing.T, jobsRoot string, agents map[string]map[string]string, tabs []any, tabListFails bool, graceSeconds string) map[string][2]string {
 	t.Helper()
 	if _, err := exec.LookPath("python3"); err != nil {
 		t.Skip("python3 unavailable")
@@ -387,11 +511,15 @@ func TestFleetCensusReapEquivalence(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "stray-file"), []byte("x"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	// An event file with invalid UTF-8: Python's strict decode skips it, so
+	// j-badutf8 has no terminal event on either side — Go must not parse it.
+	t501JobEvent(t, root, "j-badutf8", "00001-job.spawned.json", map[string]any{"kind": "job.spawned", "pane_id": "w1:p25", "tab_id": "w1:t25"})
+	t501RawJobEvent(t, root, "j-badutf8", "00002-job.completed.json", []byte(`{"kind":"job.completed","at":"`+t501OldEnough()+`","bad":"`+"\xff\xfe"+`"}`))
 	agents := t501StandardAgents()
 	tabs := t501StandardTabs()
 
 	reference := t501RunReference(t, root, agents, tabs, false, "600")
-	view := t501ViewFromSpec(agents, tabs, true)
+	view := t501ViewViaHerdr(t, agents, tabs, false)
 	census := t501CensusVerdicts(t, root, view, 10*time.Minute)
 
 	for job, pair := range census {
@@ -433,7 +561,7 @@ func TestFleetCensusReapEquivalenceTabListDown(t *testing.T) {
 	root := t501WriteJobsInbox(t, t501StandardInbox())
 	agents := t501StandardAgents()
 	reference := t501RunReference(t, root, agents, t501StandardTabs(), true, "600")
-	view := t501ViewFromSpec(agents, t501StandardTabs(), false)
+	view := t501ViewViaHerdr(t, agents, t501StandardTabs(), true)
 	census := t501CensusVerdicts(t, root, view, 10*time.Minute)
 	for job, pair := range census {
 		want, listed := reference[job]
@@ -462,18 +590,40 @@ func TestFleetCensusReapEquivalenceTabListDown(t *testing.T) {
 // terminal-state skips → terminal-held, revived → no-terminal-event.
 func TestFleetCensusReapEquivalenceClasses(t *testing.T) {
 	root := t501WriteJobsInbox(t, t501StandardInbox())
-	view := t501ViewFromSpec(t501StandardAgents(), t501StandardTabs(), true)
+	view := t501ViewViaHerdr(t, t501StandardAgents(), t501StandardTabs(), false)
 	result := buildFleetCensusResult(fleetCensusOptions{grace: 10 * time.Minute}, "machine-local", view, true, true, mustScans(t, root), nil, nil, nil, "", false, t501Now)
 	classByJob := map[string]string{}
 	paneClass := map[string]string{}
+	paneRow := map[string]fleetCensusPaneRow{}
 	for _, pane := range result.Panes {
 		paneClass[pane.PaneID] = pane.Class
+		paneRow[pane.PaneID] = pane
 	}
 	for _, job := range result.Jobs {
 		classByJob[job.JobID] = job.Verdict
 	}
 	if paneClass["w1:p1"] != fleetCensusClassReapable {
 		t.Errorf("w1:p1 class=%s want reapable", paneClass["w1:p1"])
+	}
+	// B1: w1:p18 is named by j-old (terminal, would-close) and j-new (alive,
+	// newer spawn = the displayed occupant). wrk would close the tab for
+	// j-old, so the pane itself is reapable — classified by the strongest
+	// linked verdict, not the primary job's. The detail and job_id together
+	// kill the oldest-first primary mutant too.
+	row18, listed := paneRow["w1:p18"]
+	if !listed || row18.Class != fleetCensusClassReapable || row18.Detail != "reapable-by=j-old" {
+		t.Errorf("w1:p18 row=%+v want reapable reapable-by=j-old", row18)
+	}
+	if row18.JobID != "j-new" || row18.TerminalKind != "" {
+		t.Errorf("w1:p18 primary=%+v want job_id=j-new with no terminal", row18)
+	}
+	if classByJob["j-old"] != fleetCensusVerdictWouldClose || classByJob["j-new"] != fleetCensusVerdictSilent {
+		t.Errorf("j-old=%s j-new=%s", classByJob["j-old"], classByJob["j-new"])
+	}
+	for _, pane := range []string{"w1:p19", "w1:p22", "w1:p23"} {
+		if paneClass[pane] != fleetCensusClassReapable {
+			t.Errorf("%s class=%s want reapable", pane, paneClass[pane])
+		}
 	}
 	if paneClass["w1:p8"] != fleetCensusClassBuilder || paneClass["w1:p8b"] != fleetCensusClassBuilder {
 		t.Errorf("builder classes: w1:p8=%s w1:p8b=%s", paneClass["w1:p8"], paneClass["w1:p8b"])
@@ -527,7 +677,14 @@ type t501HerdrServer struct {
 
 func t501NewHerdr(t *testing.T, results map[string]any, errors map[string]bool) *t501HerdrServer {
 	t.Helper()
-	listener, err := net.Listen("unix", filepath.Join(t.TempDir(), "herdr.sock"))
+	// unix sockets cap sun_path near 104 bytes — t.TempDir() under the macOS
+	// per-test folder name can exceed it, so the socket lives in short /tmp.
+	dir, err := os.MkdirTemp("/tmp", "t501")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	listener, err := net.Listen("unix", filepath.Join(dir, "h.sock"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -968,6 +1125,76 @@ func TestFleetCensusLocalHubMerge(t *testing.T) {
 	}
 	if localEntry == nil || localEntry.Source != "local+hub" || localEntry.HubState == "" {
 		t.Fatalf("local entry=%+v", localEntry)
+	}
+}
+
+// TestFleetCensusPaneListDownLaneIndeterminate pins B2: when pane.list fails
+// the pane set is agents-only, so an agent-less pane is invisible — the local
+// lane override must not run on that partial set and report the lane dead.
+func TestFleetCensusPaneListDownLaneIndeterminate(t *testing.T) {
+	view := fleetCensusLocalView{
+		agents: map[string]fleetCensusPaneObs{"w1:p1": {PaneID: "w1:p1", Status: "idle", HasAgent: true}},
+		panes:  []fleetCensusPaneObs{{PaneID: "w1:p1", Status: "idle", HasAgent: true}},
+		// paneListOK false: pane.list failed, so agent-less panes are unseen.
+		paneListOK: false,
+		tabsOK:     true,
+		tabs:       map[string]*int{},
+	}
+	lanes := []hubLaneProjection{{Lane: "lane-x", Machine: "machine-local", Pane: "w1:p2"}}
+	result := buildFleetCensusResult(fleetCensusOptions{grace: time.Minute, hubURL: "https://h"}, "machine-local", view, true, true, nil, nil, nil, lanes, "", false, t501Now)
+	for _, lane := range result.Lanes {
+		if lane.Verdict == lanesAuditVerdictDead {
+			t.Fatalf("lane reported dead on a partial pane list: %+v", lane)
+		}
+	}
+	for _, issue := range result.LaneIssues {
+		if issue.Kind == "lane-pane-missing" {
+			t.Fatalf("unobserved agent-less pane reported missing: %+v", issue)
+		}
+	}
+}
+
+// TestFleetCensusJobsInboxUnavailable pins that an unreadable jobs inbox is
+// an observation gap — never an empty inbox: panes become unobservable and
+// the coverage reasons name the gap.
+func TestFleetCensusJobsInboxUnavailable(t *testing.T) {
+	view := fleetCensusLocalView{
+		agents:     map[string]fleetCensusPaneObs{"w1:p1": {PaneID: "w1:p1", Status: "idle", HasAgent: true}},
+		panes:      []fleetCensusPaneObs{{PaneID: "w1:p1", Status: "idle", HasAgent: true}},
+		paneListOK: true,
+		tabsOK:     true,
+		tabs:       map[string]*int{},
+	}
+	result := buildFleetCensusResult(fleetCensusOptions{grace: time.Minute}, "machine-local", view, true, false, nil, nil, nil, nil, "", false, t501Now)
+	if len(result.Panes) != 1 || result.Panes[0].Class != fleetCensusClassUnobservable || result.Panes[0].Detail != "jobs-inbox-unavailable" {
+		t.Fatalf("pane on unreadable inbox=%+v", result.Panes)
+	}
+	found := false
+	for _, reason := range result.Coverage.Reasons {
+		if reason == "jobs-inbox-unavailable" {
+			found = true
+		}
+	}
+	if !found || result.Outcome != fleetCensusOutcomePartial {
+		t.Fatalf("coverage=%+v outcome=%s", result.Coverage, result.Outcome)
+	}
+}
+
+// TestFleetCensusRemoteTerminalClass pins S4: a hub-reported terminal last
+// event classifies the remote pane terminal-held, not no-terminal-event.
+func TestFleetCensusRemoteTerminalClass(t *testing.T) {
+	fresh := t501Now.Add(-10 * time.Second)
+	nodes := []sessionsFindNodeWire{
+		{MachineID: "machine-remote", State: "connected", SessionSnapshot: json.RawMessage(t501Snapshot(hubSnapshotStatusOK, "["+t501SessionRow("w2:p1", "rem-1", "idle")+"]", fresh, false, false))},
+	}
+	hubJobs := []hubConsoleJob{{Machine: "machine-remote", JobID: "j-remote", OwnerLane: "lane-r", Pane: "w2:p1", Role: "worker", StartedAt: t501OldEnough(), LastEventKind: "job.completed", LastEventAt: t501OldEnough()}}
+	result := buildFleetCensusResult(fleetCensusOptions{grace: time.Minute, hubURL: "https://h"}, "machine-local", fleetCensusLocalView{}, false, true, nil, nodes, hubJobs, nil, "", false, t501Now)
+	if len(result.Panes) != 1 {
+		t.Fatalf("panes=%v", result.Panes)
+	}
+	row := result.Panes[0]
+	if row.TerminalKind != "job.completed" || row.Class != fleetCensusClassTerminalHeld {
+		t.Fatalf("remote terminal row=%+v want terminal-held", row)
 	}
 }
 
