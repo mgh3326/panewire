@@ -1,0 +1,17 @@
+== step ["done" "jw+odd" "--report" "@ROOT@/reports/report.md"] rc=0
+-- stdout
+OK job=jw+odd report=@ROOT@/reports/report.md
+-- stderr
+<cmd>: warning: handoffkeep not found; report document not uploaded (job=jw+odd)
+<cmd>: warning: panewire emit failed (rc=2 job=jw+odd kind=job.completed); relay event left as file only
+== file inbox/jobs/jw+odd/.wrk-events.lock mode=0644
+== file inbox/jobs/jw+odd/emit-failures.log mode=0644
+<TS> kind=job.completed rc=2
+== file inbox/jobs/jw+odd/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jw+odd", "kind": "job.claim", "payload": {"agent_label": "jw-label", "owner_lane": "owner-lane", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jw+odd/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jw+odd", "kind": "job.spawned", "payload": {"label": "jw+odd", "owner_lane": "x", "pane_id": "w3:p7"}, "seq": 2}
+== file inbox/jobs/jw+odd/events/00003-job.completed.json mode=0600
+{"kind":"job.completed","job_id":"jw+odd","owner_lane":"owner-lane","label":"jw-label","pane_id":"w3:p7","host":"fixture-host","report_path":"@ROOT@/reports/report.md","report_last_line":"job id outside the relay pattern ","epoch":1,"report_sha256":"f04e212644e9cdd01ea98674816615125b43ef1ab6733403e5d4609a27ae4bf3"}
+== file reports/report.md mode=0644
+job id outside the relay pattern

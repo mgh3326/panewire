@@ -219,3 +219,17 @@ the source of truth, with the prior flat event shape retained for compatibility.
 The default `PANEWIRE_JOB_ACTIVE_MAX_AGE` is **72h**; see
 [the job resilience contract](docs/jobs-resilience.md#node-inbox-event-contract)
 for the event-field table and selection rules.
+
+### Completion commands (`panewire job`)
+
+`panewire job done|escalate|joined` is the Go form of `wrk done|escalate|joined`
+and takes the same arguments. It leaves the same bytes behind as the wrk path —
+the event record, the `panewire emit` socket request, the handoffkeep report
+upload, the `OK` line, the exit status and the `emit-failures.log` /
+`completion-suppressed.log` lines — pinned by
+[testdata/job_golden](testdata/job_golden) (generated from wrk only; see
+`job_golden_test.go`). Relay text is still normalized once, on the node.
+
+`panewire job probe` prints `panewire-job/1`. wrk hands the three commands over
+only on that exact answer and otherwise keeps its own path, so wrk and panewire
+can be deployed in either order.

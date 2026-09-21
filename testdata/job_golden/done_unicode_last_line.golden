@@ -1,0 +1,28 @@
+== step ["done" "jw" "--report" "@ROOT@/reports/report.md"] rc=0
+-- stdout
+OK job=jw report=@ROOT@/reports/report.md
+-- stderr
+== file handoffkeep.log mode=0644
+doc
+put
+--key
+reports/jw/report.md
+--kind
+report
+--job
+jw
+--file
+@ROOT@/reports/report.md
+--
+== file inbox/jobs/jw/.wrk-events.lock mode=0644
+== file inbox/jobs/jw/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jw", "kind": "job.claim", "payload": {"agent_label": "jw-label", "owner_lane": "owner-lane", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jw/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jw", "kind": "job.spawned", "payload": {"label": "jw", "owner_lane": "x", "pane_id": "w3:p7"}, "seq": 2}
+== file inbox/jobs/jw/events/00003-job.completed.json mode=0600
+{"kind":"job.completed","job_id":"jw","owner_lane":"owner-lane","label":"jw-label","pane_id":"w3:p7","host":"fixture-host","report_path":"@ROOT@/reports/report.md","report_last_line":"\uc644\ub8cc \ubcf4\uace0 \ud83d\ude80 \ud55c\uae00\u00b7\uc774\ubaa8\uc9c0 \"\ub530\uc634\ud45c\" \\\uc5ed\uc2ac\ub798\uc2dc\\ \ub05d  doc:reports/jw/report.md","epoch":1,"report_sha256":"dc3e9c820dd958163b143ba6d51b47db4b372864221430a0b31606dd6352316d"}
+== file reports/report.md mode=0644
+x
+완료 보고 🚀 한글·이모지 "따옴표" \역슬래시\ 끝
+== socket
+{"op":"emit","timeout_ms":2000,"kind":"job.completed","job_id":"jw","epoch":1,"owner_lane":"owner-lane","agent_label":"jw-label","label":"jw-label","host":"fixture-host","pane_id":"w3:p7","report_path":"@ROOT@/reports/report.md","report_last_line":"완료 보고 🚀 한글·이모지 \"따옴표\" \\역슬래시\\ 끝  doc:reports/jw/report.md","inbox_root":"@ROOT@/inbox"}

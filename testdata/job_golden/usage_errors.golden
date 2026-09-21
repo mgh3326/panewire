@@ -1,0 +1,67 @@
+== step ["done"] rc=2
+-- stdout
+-- stderr
+<cmd>: done requires a job id
+== step ["done" "-x"] rc=2
+-- stdout
+-- stderr
+<cmd>: done requires a job id
+== step ["done" "jw" "--report"] rc=2
+-- stdout
+-- stderr
+<cmd>: --report requires a path
+== step ["done" "jw" "--bogus"] rc=2
+-- stdout
+-- stderr
+<cmd>: unknown done option '--bogus'
+== step ["done" "nojob" "--report" "@ROOT@/reports/missing.md"] rc=2
+-- stdout
+-- stderr
+<cmd>: done cannot find job.claim/job.spawned metadata: nojob
+== step ["done" "jw" "--report" "@ROOT@/reports/missing.md"] rc=2
+-- stdout
+-- stderr
+<cmd>: done requires an existing --report or report*.md in the job directory
+== step ["escalate" "jw" "--question" "worker is not a builder"] rc=2
+-- stdout
+-- stderr
+<cmd>: jw is not a builder claim with a parent lane (legacy captain alias is accepted)
+== step ["escalate" "jb"] rc=2
+-- stdout
+-- stderr
+<cmd>: escalate requires --question
+== step ["escalate" "jb" "--question" "q" "--report" "@ROOT@/reports/missing.md"] rc=2
+-- stdout
+-- stderr
+<cmd>: escalate requires an existing --report
+== step ["joined" "jb" "--pr" "u" "--head" "h"] rc=2
+-- stdout
+-- stderr
+<cmd>: joined requires --pr, --head and an existing --report
+== step ["joined" "jb" "--pr" "" "--head" "h" "--report" "@ROOT@/reports/x.md"] rc=2
+-- stdout
+-- stderr
+<cmd>: --pr requires a URL
+== step ["escalate" "-h"] rc=0
+-- stdout
+Usage: wrk escalate JOB --question TEXT [--report PATH]
+
+Write a builder escalation record and relay it to the parent lane.
+
+Options:
+  --question TEXT    required escalation question
+  --report PATH      optional existing report to attach and upload as a document
+  -h, --help         show this usage
+-- stderr
+== step ["escalate" "--help" "extra"] rc=2
+-- stdout
+-- stderr
+<cmd>: unexpected argument 'extra'
+== file inbox/jobs/jb/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jb", "kind": "job.claim", "payload": {"agent_label": "jb-label", "owner_lane": "builder-lane", "parent_lane": "parent-lane", "role": "builder", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jb/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jb", "kind": "job.spawned", "payload": {"label": "jb", "owner_lane": "x", "pane_id": "w4:p2"}, "seq": 2}
+== file inbox/jobs/jw/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jw", "kind": "job.claim", "payload": {"agent_label": "jw-label", "owner_lane": "owner-lane", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jw/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jw", "kind": "job.spawned", "payload": {"label": "jw", "owner_lane": "x", "pane_id": "w3:p7"}, "seq": 2}

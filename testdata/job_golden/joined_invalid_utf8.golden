@@ -1,0 +1,12 @@
+== step ["joined" "jb" "--pr" "https://example.invalid/pr/5" "--head" "f00d" "--report" "@ROOT@/reports/report.md"] rc=1
+-- stdout
+-- stderr
+<cmd>: warning: handoffkeep not found; report document not uploaded (job=jb)
+tr: Illegal byte sequence
+== file inbox/jobs/jb/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jb", "kind": "job.claim", "payload": {"agent_label": "jb-label", "owner_lane": "builder-lane", "parent_lane": "parent-lane", "role": "builder", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jb/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jb", "kind": "job.spawned", "payload": {"label": "jb", "owner_lane": "x", "pane_id": "w4:p2"}, "seq": 2}
+== file reports/report.md mode=0644
+x
+앞부분 ok �� 뒤 ä

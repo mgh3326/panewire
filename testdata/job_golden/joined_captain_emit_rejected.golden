@@ -1,0 +1,18 @@
+== step ["joined" "jc" "--pr" "https://example.invalid/pr/3" "--head" "abc123" "--report" "@ROOT@/reports/report.md"] rc=0
+-- stdout
+OK job=jc owner_lane=builder-lane kind=job.joined pr=https://example.invalid/pr/3 head=abc123 report=@ROOT@/reports/report.md
+-- stderr
+<cmd>: warning: handoffkeep not found; report document not uploaded (job=jc)
+<cmd>: warning: panewire emit failed (rc=2 job=jc kind=job.joined); relay event left as file only
+== file inbox/jobs/jc/emit-failures.log mode=0644
+<TS> kind=job.joined rc=2
+== file inbox/jobs/jc/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jc", "kind": "job.claim", "payload": {"agent_label": "jb-label", "owner_lane": "builder-lane", "parent_lane": "parent-lane", "role": "captain", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jc/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jc", "kind": "job.spawned", "payload": {"label": "jc", "owner_lane": "x", "pane_id": "w4:p2"}, "seq": 2}
+== file inbox/jobs/jc/events/00003-job.joined.json mode=0600
+{"kind":"job.joined","job_id":"jc","owner_lane":"builder-lane","label":"jb-label","pane_id":"w4:p2","host":"fixture-host","report_path":"@ROOT@/reports/report.md","report_last_line":"captain joined ","reason":"captain joined PR","parent_lane":"parent-lane","epoch":1,"pr":"https://example.invalid/pr/3","head":"abc123"}
+== file reports/report.md mode=0644
+captain joined
+== socket
+{"op":"emit","timeout_ms":2000,"kind":"job.joined","job_id":"jc","epoch":1,"owner_lane":"builder-lane","agent_label":"jb-label","label":"jb-label","host":"fixture-host","pane_id":"w4:p2","report_path":"@ROOT@/reports/report.md","report_last_line":"captain joined ","reason":"captain joined PR","pr":"https://example.invalid/pr/3","head":"abc123","inbox_root":"@ROOT@/inbox"}

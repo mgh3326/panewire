@@ -1,0 +1,18 @@
+== step ["done" "jw"] rc=0
+-- stdout
+OK job=jw report=@ROOT@/inbox/jobs/jw/report-2.md
+-- stderr
+<cmd>: warning: handoffkeep not found; report document not uploaded (job=jw)
+== file inbox/jobs/jw/.wrk-events.lock mode=0644
+== file inbox/jobs/jw/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jw", "kind": "job.claim", "payload": {"agent_label": "jw-label", "owner_lane": "owner-lane", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jw/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jw", "kind": "job.spawned", "payload": {"label": "jw", "owner_lane": "x", "pane_id": "w3:p7"}, "seq": 2}
+== file inbox/jobs/jw/events/00003-job.completed.json mode=0600
+{"kind":"job.completed","job_id":"jw","owner_lane":"owner-lane","label":"jw-label","pane_id":"w3:p7","host":"fixture-host","report_path":"@ROOT@/inbox/jobs/jw/report-2.md","report_last_line":"discovered report line ","epoch":1,"report_sha256":"90942d4a805164a0ded5a3f2ee191a63e11bd0c856b30d3294c8a47fa0dfc670"}
+== file inbox/jobs/jw/report-1.md mode=0644
+older
+== file inbox/jobs/jw/report-2.md mode=0644
+discovered report line
+== socket
+{"op":"emit","timeout_ms":2000,"kind":"job.completed","job_id":"jw","epoch":1,"owner_lane":"owner-lane","agent_label":"jw-label","label":"jw-label","host":"fixture-host","pane_id":"w3:p7","report_path":"@ROOT@/inbox/jobs/jw/report-2.md","report_last_line":"discovered report line ","inbox_root":"@ROOT@/inbox"}

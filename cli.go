@@ -79,6 +79,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "emit" {
 		return runEmitCLI(args[1:], os.Stdout, os.Stderr, cfg)
 	}
+	if args[0] == "job" {
+		return runJobCLI(args[1:], os.Stdout, os.Stderr, cfg)
+	}
 	if args[0] != "wait" {
 		return ExitUsage
 	}
