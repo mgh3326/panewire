@@ -1,0 +1,692 @@
+[
+ {
+  "name": "done_basic",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "first\nfinal line\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_discover_report",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "inbox/jobs/jw/report-1.md": "older\n",
+   "inbox/jobs/jw/report-2.md": "discovered report line\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw"
+   ]
+  ]
+ },
+ {
+  "name": "done_relative_report",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "relative path report\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_upload_ok",
+  "host_dependent": false,
+  "handoffkeep": "ok",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "uploaded report line\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_upload_fail",
+  "host_dependent": false,
+  "handoffkeep": "fail",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "upload fails here\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_unicode_last_line",
+  "host_dependent": false,
+  "handoffkeep": "ok",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "x\n완료 보고 🚀 한글·이모지 \"따옴표\" \\역슬래시\\ 끝\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_long_ascii_with_suffix",
+  "host_dependent": false,
+  "handoffkeep": "ok",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "x\nlong ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_long_ascii_no_suffix",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "x\nlong ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line long ascii line\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_crlf_no_trailing_newline",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "a\r\nlast\rline no newline"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_blank_last_line",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "first\n\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_empty_report",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": ""
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_duplicate_suppressed",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "same report twice\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ],
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_emit_rejected",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "reject",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "rejected by daemon\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_socket_absent",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "absent",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "no daemon\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_job_id_outside_relay_pattern",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw+odd/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw+odd\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw+odd/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw+odd\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw+odd\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "job id outside the relay pattern\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw+odd",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "done_reclaim_metadata",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jr/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jr\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"old-label\", \"owner_lane\": \"old-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jr/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jr\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jr\", \"owner_lane\": \"x\", \"pane_id\": \"w1:p1\"}, \"seq\": 2}\n",
+   "inbox/jobs/jr/events/00003-job.reclaim.json": "{\"created_at\": \"2026-09-21T00:00:02+00:00\", \"job_id\": \"jr\", \"kind\": \"job.reclaim\", \"payload\": {\"agent_label\": \"ignored\", \"label\": null, \"owner_lane\": \"new-lane\"}, \"seq\": 3}\n",
+   "inbox/jobs/jr/events/00004-job.reclaim.json": "{\"created_at\": \"2026-09-21T00:00:03+00:00\", \"job_id\": \"jr\", \"kind\": \"job.reclaim\", \"payload\": {\"agent_label\": \"new-label\", \"owner_lane\": \"new-lane\", \"pane_id\": \"w2:p5\"}, \"seq\": 4}\n",
+   "inbox/jobs/jr/events/notes.txt": "not json\n",
+   "reports/report.md": "reclaimed\n"
+  },
+  "steps": [
+   [
+    "done",
+    "jr",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "escalate_no_report",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jb/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jb\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"builder\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jb/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jb\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jb\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n"
+  },
+  "steps": [
+   [
+    "escalate",
+    "jb",
+    "--question",
+    "need parent decision"
+   ]
+  ]
+ },
+ {
+  "name": "escalate_long_unicode_question",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jb/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jb\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"builder\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jb/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jb\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jb\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n"
+  },
+  "steps": [
+   [
+    "escalate",
+    "jb",
+    "--question",
+    "질문 🤔 needs \"decision\"\ton\\path 질문 🤔 needs \"decision\"\ton\\path 질문 🤔 needs \"decision\"\ton\\path 질문 🤔 needs \"decision\"\ton\\path 질문 🤔 needs \"decision\"\ton\\path 질문 🤔 needs \"decision\"\ton\\path 질문 🤔 needs \"decision\"\ton\\path 질문 🤔 needs \"decision\"\ton\\path 질문 🤔 needs \"decision\"\ton\\path 질문 🤔 needs \"decision\"\ton\\path 질문 🤔 needs \"decision\"\ton\\path 질문 🤔 needs \"decision\"\ton\\path \n두번째 줄 끝"
+   ]
+  ]
+ },
+ {
+  "name": "escalate_with_report_upload",
+  "host_dependent": false,
+  "handoffkeep": "ok",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jb/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jb\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"builder\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jb/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jb\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jb\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n",
+   "reports/report.md": "escalation context line\n"
+  },
+  "steps": [
+   [
+    "escalate",
+    "jb",
+    "--question",
+    "see report",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "escalate_captain_role",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jc/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jc\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"captain\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jc/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jc\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jc\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n"
+  },
+  "steps": [
+   [
+    "escalate",
+    "jc",
+    "--question",
+    "legacy captain asks"
+   ]
+  ]
+ },
+ {
+  "name": "escalate_two_questions",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jb/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jb\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"builder\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jb/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jb\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jb\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n"
+  },
+  "steps": [
+   [
+    "escalate",
+    "jb",
+    "--question",
+    "first"
+   ],
+   [
+    "escalate",
+    "jb",
+    "--question",
+    "second"
+   ]
+  ]
+ },
+ {
+  "name": "joined_basic",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jb/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jb\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"builder\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jb/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jb\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jb\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n",
+   "reports/report.md": "joined report terminal line\n"
+  },
+  "steps": [
+   [
+    "joined",
+    "jb",
+    "--pr",
+    "https://example.invalid/pr/1",
+    "--head",
+    "deadbeef",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "joined_upload_ok",
+  "host_dependent": false,
+  "handoffkeep": "ok",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jb/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jb\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"builder\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jb/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jb\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jb\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n",
+   "reports/report.md": "joined with upload\n"
+  },
+  "steps": [
+   [
+    "joined",
+    "jb",
+    "--pr",
+    "https://example.invalid/pr/2",
+    "--head",
+    "cafef00d",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "joined_captain_emit_rejected",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "reject",
+  "files": {
+   "inbox/jobs/jc/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jc\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"captain\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jc/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jc\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jc\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n",
+   "reports/report.md": "captain joined\n"
+  },
+  "steps": [
+   [
+    "joined",
+    "jc",
+    "--pr",
+    "https://example.invalid/pr/3",
+    "--head",
+    "abc123",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "usage_errors",
+  "host_dependent": false,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "inbox/jobs/jb/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jb\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"builder\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jb/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jb\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jb\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n"
+  },
+  "steps": [
+   [
+    "done"
+   ],
+   [
+    "done",
+    "-x"
+   ],
+   [
+    "done",
+    "jw",
+    "--report"
+   ],
+   [
+    "done",
+    "jw",
+    "--bogus"
+   ],
+   [
+    "done",
+    "nojob",
+    "--report",
+    "@ROOT@/reports/missing.md"
+   ],
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/missing.md"
+   ],
+   [
+    "escalate",
+    "jw",
+    "--question",
+    "worker is not a builder"
+   ],
+   [
+    "escalate",
+    "jb"
+   ],
+   [
+    "escalate",
+    "jb",
+    "--question",
+    "q",
+    "--report",
+    "@ROOT@/reports/missing.md"
+   ],
+   [
+    "joined",
+    "jb",
+    "--pr",
+    "u",
+    "--head",
+    "h"
+   ],
+   [
+    "joined",
+    "jb",
+    "--pr",
+    "",
+    "--head",
+    "h",
+    "--report",
+    "@ROOT@/reports/x.md"
+   ],
+   [
+    "escalate",
+    "-h"
+   ],
+   [
+    "escalate",
+    "--help",
+    "extra"
+   ]
+  ]
+ },
+ {
+  "name": "joined_long_unicode_with_suffix",
+  "host_dependent": true,
+  "handoffkeep": "ok",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jb/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jb\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"builder\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jb/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jb\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jb\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n",
+   "reports/report.md": "x\n가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 \n"
+  },
+  "steps": [
+   [
+    "joined",
+    "jb",
+    "--pr",
+    "https://example.invalid/pr/4",
+    "--head",
+    "beef",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ],
+  "env": {
+   "LC_ALL": "en_US.UTF-8"
+  }
+ },
+ {
+  "name": "done_long_unicode",
+  "host_dependent": true,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "x\n가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 \n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ],
+  "env": {
+   "LC_ALL": "en_US.UTF-8"
+  }
+ },
+ {
+  "name": "done_long_unicode_c_locale",
+  "host_dependent": true,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n",
+   "reports/report.md": "x\n가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 가나다라마바사아자차카타파하 🧪 \n"
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ],
+  "env": {
+   "LC_ALL": "C"
+  }
+ },
+ {
+  "name": "done_invalid_utf8",
+  "host_dependent": true,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "env": {
+   "LC_ALL": "en_US.UTF-8"
+  },
+  "files": {
+   "inbox/jobs/jw/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jw\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jw-label\", \"owner_lane\": \"owner-lane\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jw/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jw\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jw\", \"owner_lane\": \"x\", \"pane_id\": \"w3:p7\"}, \"seq\": 2}\n"
+  },
+  "files_base64": {
+   "reports/report.md": "eArslZ7rtoDrtoQgb2sg//4g65KkIMOkCg=="
+  },
+  "steps": [
+   [
+    "done",
+    "jw",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ },
+ {
+  "name": "joined_invalid_utf8",
+  "host_dependent": true,
+  "handoffkeep": "absent",
+  "socket": "ok",
+  "env": {
+   "LC_ALL": "en_US.UTF-8"
+  },
+  "files": {
+   "inbox/jobs/jb/events/00001-job.claim.json": "{\"created_at\": \"2026-09-21T00:00:00+00:00\", \"job_id\": \"jb\", \"kind\": \"job.claim\", \"payload\": {\"agent_label\": \"jb-label\", \"owner_lane\": \"builder-lane\", \"parent_lane\": \"parent-lane\", \"role\": \"builder\", \"t_level\": \"T2\"}, \"seq\": 1}\n",
+   "inbox/jobs/jb/events/00002-job.spawned.json": "{\"created_at\": \"2026-09-21T00:00:01+00:00\", \"job_id\": \"jb\", \"kind\": \"job.spawned\", \"payload\": {\"label\": \"jb\", \"owner_lane\": \"x\", \"pane_id\": \"w4:p2\"}, \"seq\": 2}\n"
+  },
+  "files_base64": {
+   "reports/report.md": "eArslZ7rtoDrtoQgb2sg//4g65KkIMOkCg=="
+  },
+  "steps": [
+   [
+    "joined",
+    "jb",
+    "--pr",
+    "https://example.invalid/pr/5",
+    "--head",
+    "f00d",
+    "--report",
+    "@ROOT@/reports/report.md"
+   ]
+  ]
+ }
+]

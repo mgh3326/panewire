@@ -1,0 +1,24 @@
+== step ["done" "jw" "--report" "@ROOT@/reports/report.md"] rc=0
+-- stdout
+OK job=jw report=@ROOT@/reports/report.md
+-- stderr
+<cmd>: warning: handoffkeep not found; report document not uploaded (job=jw)
+== step ["done" "jw" "--report" "@ROOT@/reports/report.md"] rc=0
+-- stdout
+OK job=jw report=@ROOT@/reports/report.md
+-- stderr
+<cmd>: warning: handoffkeep not found; report document not uploaded (job=jw)
+<cmd>: warning: job.completed already recorded for this report; suppressed duplicate (job=jw)
+== file inbox/jobs/jw/.wrk-events.lock mode=0644
+== file inbox/jobs/jw/completion-suppressed.log mode=0644
+<TS> suppressed-duplicate report=@ROOT@/reports/report.md
+== file inbox/jobs/jw/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jw", "kind": "job.claim", "payload": {"agent_label": "jw-label", "owner_lane": "owner-lane", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jw/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jw", "kind": "job.spawned", "payload": {"label": "jw", "owner_lane": "x", "pane_id": "w3:p7"}, "seq": 2}
+== file inbox/jobs/jw/events/00003-job.completed.json mode=0600
+{"kind":"job.completed","job_id":"jw","owner_lane":"owner-lane","label":"jw-label","pane_id":"w3:p7","host":"fixture-host","report_path":"@ROOT@/reports/report.md","report_last_line":"same report twice ","epoch":1,"report_sha256":"0bd1e3466a341f6a514663a69709540841dc611fb8068de1bc64e3ee26a6f5ba"}
+== file reports/report.md mode=0644
+same report twice
+== socket
+{"op":"emit","timeout_ms":2000,"kind":"job.completed","job_id":"jw","epoch":1,"owner_lane":"owner-lane","agent_label":"jw-label","label":"jw-label","host":"fixture-host","pane_id":"w3:p7","report_path":"@ROOT@/reports/report.md","report_last_line":"same report twice ","inbox_root":"@ROOT@/inbox"}

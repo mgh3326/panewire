@@ -134,29 +134,41 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		}
 		return reportEmitPushResult(stderr, pushEmitRecord(socket, record, root, *timeout))
 	}
-	if *job == "" || !hubJobIDPattern.MatchString(*job) {
-		return ExitUsage
-	}
-	// A completion is meaningless without the report it announces. An escalation
-	// or a join carries its own question in the event file, so an empty report is
-	// the normal shape there and the event file stands in for the report path.
-	if *report == "" && !relayEventPathFallbackKinds[*kind] {
-		return ExitUsage
-	}
-	if *epoch == 0 {
-		// The node scanner normalizes a missing epoch to 1; write what it reads
-		// so the dedupe key is identical on both sides.
-		*epoch = 1
-	}
 	record := emitRecord{
 		Type: *kind, JobID: *job, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		AgentLabel: *label, OwnerLane: *ownerLane, Label: *label, Host: *host, ReportPath: *report,
 		ReportLastLine: *reportLastLine, Reason: *reason, Question: *question, PR: *pr, Head: *head, PaneID: *pane,
 	}
+	socket := cfg.SocketPath
+	if socket == "" {
+		socket = socketPathFromEnv()
+	}
+	return emitJobRecord(record, emitInboxRoot(*inboxRoot), socket, *timeout, stderr)
+}
+
+// emitJobRecord is the job.* half of `panewire emit` after flag parsing. It is
+// shared with `panewire job`, so the event file reuse, the relay key and the
+// socket request are produced by one piece of code whichever command asked:
+// the outbox key is what goes on the wire (docs/r20-relay-persistence.md), and
+// two builders of that request are how two keys for one event would appear.
+func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration, stderr io.Writer) int {
+	if record.JobID == "" || !hubJobIDPattern.MatchString(record.JobID) {
+		return ExitUsage
+	}
+	// A completion is meaningless without the report it announces. An escalation
+	// or a join carries its own question in the event file, so an empty report is
+	// the normal shape there and the event file stands in for the report path.
+	if record.ReportPath == "" && !relayEventPathFallbackKinds[record.Type] {
+		return ExitUsage
+	}
+	if record.Epoch == 0 {
+		// The node scanner normalizes a missing epoch to 1; write what it reads
+		// so the dedupe key is identical on both sides.
+		record.Epoch = 1
+	}
 	if !hubAgentLabelPattern.MatchString(record.AgentLabel) {
 		record.AgentLabel = ""
 	}
-	root := emitInboxRoot(*inboxRoot)
 	// The file lands before the socket call: a dead daemon must never cost the
 	// record, and the node outbox is what picks it up afterwards.
 	eventPath, err := writeEmitRecord(root, record)
@@ -174,14 +186,10 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	if record.ReportPath == "" && relayEventPathFallbackKinds[record.Type] {
 		record.ReportPath = eventPath
 	}
-	socket := cfg.SocketPath
-	if socket == "" {
-		socket = socketPathFromEnv()
-	}
 	// The push carries the namespace the file was written in. A daemon that
 	// watches a different root refuses it, so a run against a temporary inbox
 	// root cannot reach the operator's live relay outbox.
-	return reportEmitPushResult(stderr, pushEmitRecord(socket, record, root, *timeout))
+	return reportEmitPushResult(stderr, pushEmitRecord(socket, record, root, timeout))
 }
 
 // writeEmitRecord recognizes a byte-for-byte equivalent relay record already

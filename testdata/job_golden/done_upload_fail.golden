@@ -1,0 +1,28 @@
+== step ["done" "jw" "--report" "@ROOT@/reports/report.md"] rc=0
+-- stdout
+OK job=jw report=@ROOT@/reports/report.md
+-- stderr
+<cmd>: warning: handoffkeep document upload failed (rc=1 job=jw); continuing without document link
+== file handoffkeep.log mode=0644
+doc
+put
+--key
+reports/jw/report.md
+--kind
+report
+--job
+jw
+--file
+@ROOT@/reports/report.md
+--
+== file inbox/jobs/jw/.wrk-events.lock mode=0644
+== file inbox/jobs/jw/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jw", "kind": "job.claim", "payload": {"agent_label": "jw-label", "owner_lane": "owner-lane", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jw/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jw", "kind": "job.spawned", "payload": {"label": "jw", "owner_lane": "x", "pane_id": "w3:p7"}, "seq": 2}
+== file inbox/jobs/jw/events/00003-job.completed.json mode=0600
+{"kind":"job.completed","job_id":"jw","owner_lane":"owner-lane","label":"jw-label","pane_id":"w3:p7","host":"fixture-host","report_path":"@ROOT@/reports/report.md","report_last_line":"upload fails here ","epoch":1,"report_sha256":"3426702715566646f5f286ced3c8cca30de7f2742cfcea32bbf2580e6c4f0eb2"}
+== file reports/report.md mode=0644
+upload fails here
+== socket
+{"op":"emit","timeout_ms":2000,"kind":"job.completed","job_id":"jw","epoch":1,"owner_lane":"owner-lane","agent_label":"jw-label","label":"jw-label","host":"fixture-host","pane_id":"w3:p7","report_path":"@ROOT@/reports/report.md","report_last_line":"upload fails here ","inbox_root":"@ROOT@/inbox"}

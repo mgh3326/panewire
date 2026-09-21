@@ -1,0 +1,27 @@
+== step ["done" "jw" "--report" "@ROOT@/reports/report.md"] rc=0
+-- stdout
+OK job=jw report=@ROOT@/reports/report.md
+-- stderr
+== file handoffkeep.log mode=0644
+doc
+put
+--key
+reports/jw/report.md
+--kind
+report
+--job
+jw
+--file
+@ROOT@/reports/report.md
+--
+== file inbox/jobs/jw/.wrk-events.lock mode=0644
+== file inbox/jobs/jw/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jw", "kind": "job.claim", "payload": {"agent_label": "jw-label", "owner_lane": "owner-lane", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jw/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jw", "kind": "job.spawned", "payload": {"label": "jw", "owner_lane": "x", "pane_id": "w3:p7"}, "seq": 2}
+== file inbox/jobs/jw/events/00003-job.completed.json mode=0600
+{"kind":"job.completed","job_id":"jw","owner_lane":"owner-lane","label":"jw-label","pane_id":"w3:p7","host":"fixture-host","report_path":"@ROOT@/reports/report.md","report_last_line":"uploaded report line  doc:reports/jw/report.md","epoch":1,"report_sha256":"0a019d23ec77e84f9863857f7a6b9e34d880eb9f8c1d3da636ec844af0280b1d"}
+== file reports/report.md mode=0644
+uploaded report line
+== socket
+{"op":"emit","timeout_ms":2000,"kind":"job.completed","job_id":"jw","epoch":1,"owner_lane":"owner-lane","agent_label":"jw-label","label":"jw-label","host":"fixture-host","pane_id":"w3:p7","report_path":"@ROOT@/reports/report.md","report_last_line":"uploaded report line  doc:reports/jw/report.md","inbox_root":"@ROOT@/inbox"}

@@ -1,0 +1,22 @@
+== step ["done" "jr" "--report" "@ROOT@/reports/report.md"] rc=0
+-- stdout
+OK job=jr report=@ROOT@/reports/report.md
+-- stderr
+<cmd>: warning: handoffkeep not found; report document not uploaded (job=jr)
+== file inbox/jobs/jr/.wrk-events.lock mode=0644
+== file inbox/jobs/jr/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jr", "kind": "job.claim", "payload": {"agent_label": "old-label", "owner_lane": "old-lane", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jr/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jr", "kind": "job.spawned", "payload": {"label": "jr", "owner_lane": "x", "pane_id": "w1:p1"}, "seq": 2}
+== file inbox/jobs/jr/events/00003-job.reclaim.json mode=0644
+{"created_at": "2026-09-21T00:00:02+00:00", "job_id": "jr", "kind": "job.reclaim", "payload": {"agent_label": "ignored", "label": null, "owner_lane": "new-lane"}, "seq": 3}
+== file inbox/jobs/jr/events/00004-job.reclaim.json mode=0644
+{"created_at": "2026-09-21T00:00:03+00:00", "job_id": "jr", "kind": "job.reclaim", "payload": {"agent_label": "new-label", "owner_lane": "new-lane", "pane_id": "w2:p5"}, "seq": 4}
+== file inbox/jobs/jr/events/00005-job.completed.json mode=0600
+{"kind":"job.completed","job_id":"jr","owner_lane":"new-lane","label":"new-label","pane_id":"w2:p5","host":"fixture-host","report_path":"@ROOT@/reports/report.md","report_last_line":"reclaimed ","epoch":1,"report_sha256":"460f3284daa0f5fa319e9dd727f17795452081be88973a24b026cd600db4276b"}
+== file inbox/jobs/jr/events/notes.txt mode=0644
+not json
+== file reports/report.md mode=0644
+reclaimed
+== socket
+{"op":"emit","timeout_ms":2000,"kind":"job.completed","job_id":"jr","epoch":1,"owner_lane":"new-lane","agent_label":"new-label","label":"new-label","host":"fixture-host","pane_id":"w2:p5","report_path":"@ROOT@/reports/report.md","report_last_line":"reclaimed ","inbox_root":"@ROOT@/inbox"}
