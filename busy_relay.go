@@ -87,6 +87,100 @@ func relayWaitTimedOut(raw []byte) bool {
 	return json.Unmarshal(raw, &response) == nil && response.Error.Code == "timeout"
 }
 
+// relayAgentNotFound is the definitive-absence answer: herdr itself says no
+// agent occupies the pane. Other command failures (dead socket, timeout,
+// malformed output) prove nothing and are handled as unverifiable instead.
+func relayAgentNotFound(raw []byte) bool {
+	var response struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	return json.Unmarshal(raw, &response) == nil && response.Error.Code == "agent_not_found"
+}
+
+// relayOccupant is the agent-instance identity a held lease binds to. Only
+// fields stable for the life of one occupant belong here: revision,
+// state_change_seq, cwd, and terminal_title all move while the same agent
+// keeps running, so they can never be part of an equality check.
+type relayOccupant struct {
+	Pane      string
+	Agent     string
+	Session   string
+	Name      string
+	Terminal  string
+	Workspace string
+}
+
+// key serializes the occupant into the stored lease string. An occupant with
+// no discriminating field at all (older herdr without agent_session, no
+// registered name, no terminal id) cannot prove sameness later, so it keys
+// to ” and is handled like a pre-lease row rather than as a match.
+func (occupant relayOccupant) key() string {
+	if occupant.Session == "" && occupant.Name == "" && occupant.Terminal == "" {
+		return ""
+	}
+	return occupant.Agent + "\x00" + occupant.Session + "\x00" + occupant.Name + "\x00" + occupant.Terminal + "\x00" + occupant.Workspace
+}
+
+func parseRelayAgentOccupant(raw []byte) (relayOccupant, bool) {
+	var response struct {
+		Result struct {
+			Type  string `json:"type"`
+			Agent *struct {
+				PaneID       string `json:"pane_id"`
+				Agent        string `json:"agent"`
+				Name         string `json:"name"`
+				TerminalID   string `json:"terminal_id"`
+				WorkspaceID  string `json:"workspace_id"`
+				AgentSession *struct {
+					Value string `json:"value"`
+				} `json:"agent_session"`
+			} `json:"agent"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(raw, &response) != nil || response.Result.Agent == nil {
+		return relayOccupant{}, false
+	}
+	// Any valid JSON used to parse "ok" with an all-zero occupant, which the
+	// caller then read as a real occupant and expired rows as
+	// pane_occupant_changed. A reply is only an agent_info when it says so —
+	// or, for older herdr builds without the type field, when it at least
+	// names a pane. Everything else is unreadable, not evidence.
+	agent := response.Result.Agent
+	if response.Result.Type != "agent_info" && agent.PaneID == "" {
+		return relayOccupant{}, false
+	}
+	occupant := relayOccupant{Pane: agent.PaneID, Agent: agent.Agent, Name: agent.Name, Terminal: agent.TerminalID, Workspace: agent.WorkspaceID}
+	if agent.AgentSession != nil {
+		occupant.Session = agent.AgentSession.Value
+	}
+	return occupant, true
+}
+
+// relayHeldLeaseStale is the fail-closed membership judgement for one held
+// row. The occupant probe outcome is three-valued: a pane herdr reports as
+// agent_not_found is definitively stale, and only a present occupant can
+// satisfy the lease. A pre-lease row (”) can still prove membership from
+// the fleet's agent-name convention — the occupant's registered name equals
+// the lane — and is expired when even that is absent. Nothing here counts
+// failures; every verdict names the membership evidence it rested on.
+func relayHeldLeaseStale(item relayHeld, occupant relayOccupant, occupantKnown bool) (bool, string) {
+	if !occupantKnown {
+		return true, "pane_occupant_gone"
+	}
+	if item.Lease == "" {
+		if occupant.Name != "" && occupant.Name == item.Lane {
+			return false, ""
+		}
+		return true, "lease_unverifiable"
+	}
+	if occupant.key() != item.Lease {
+		return true, "pane_occupant_changed"
+	}
+	return false, ""
+}
+
 type relayHeldPayload struct {
 	EventID       int64  `json:"event_id"`
 	JobID         string `json:"job_id"`
@@ -132,15 +226,34 @@ type relayBusyManager struct {
 	mu     sync.Mutex
 	held   map[string][]relayHeld
 	waits  map[string]context.CancelFunc
+	// lanePane is the newest route observation each inject directive carries:
+	// the hub re-resolves lanes.json for every relay, so the (lane, pane) an
+	// inject names is authoritative for its arrival instant. A held row whose
+	// lane is later observed on a different pane is stale membership evidence
+	// even while the old pane's occupant is unchanged.
+	lanePane map[string]string
 }
 
 func (client *HubClient) relayBusyManager() *relayBusyManager {
 	client.busyRelayMu.Lock()
 	defer client.busyRelayMu.Unlock()
 	if client.busyRelay == nil {
-		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc)}
+		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc), lanePane: make(map[string]string)}
 	}
 	return client.busyRelay
+}
+
+func (manager *relayBusyManager) noteLaneRoute(lane, pane string) {
+	manager.mu.Lock()
+	manager.lanePane[lane] = pane
+	manager.mu.Unlock()
+}
+
+func (manager *relayBusyManager) observedLanePane(lane string) (string, bool) {
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	pane, known := manager.lanePane[lane]
+	return pane, known
 }
 
 func (client *HubClient) relayRunner() relayCommandRunner {
@@ -188,6 +301,13 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 	if message.Pane == relayCancelledPane {
 		return
 	}
+	// Every lane-carrying inject is a fresh route observation — including
+	// replays that resolve to a different pane after a re-route. Recording it
+	// before the dedupe path returns early is what lets a later release judge
+	// the old row stale instead of re-confirming it.
+	if message.Lane != "" {
+		manager.noteLaneRoute(message.Lane, message.Pane)
+	}
 	if message.EventID > 0 && message.Lane != "" {
 		if existing, found, err := manager.client.relayHeldByKey(parent, message.Lane, message.EventID); err == nil && found {
 			manager.recoverExisting(parent, existing)
@@ -217,6 +337,11 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 		return
 	}
 	held := relayHeld{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name, MaxWait: policy.MaxWait, RecvSeq: message.RecvSeq, fresh: true}
+	// The lease rides the same agent get that proved the pane busy — no extra
+	// probe is needed to bind the row to the occupant instance it waited on.
+	if occupant, ok := parseRelayAgentOccupant(output); ok && occupant.Pane == message.Pane {
+		held.Lease = occupant.key()
+	}
 	manager.hold(parent, held, status)
 }
 
@@ -397,7 +522,99 @@ func (manager *relayBusyManager) release(parent context.Context, pane string, ex
 	manager.mu.Unlock()
 	// The state transition is serialized above, but prompt itself must not hold
 	// the manager-wide map lock: another pane's read-loop work stays independent.
-	manager.deliver(parent, items, expired)
+	manager.deliver(parent, manager.filterDeliverableHeld(parent, items), expired)
+}
+
+// filterDeliverableHeld is the fail-closed lease gate between a finished wait
+// and the inject. A held row is a lease on (lane, pane, occupant-at-hold) —
+// all three membership signals are re-checked here because each can break
+// while the row sits:
+//   - the lane was since observed on a different pane (lane_rerouted);
+//   - herdr reports no agent on the pane at all (pane_occupant_gone);
+//   - the occupant is not the instance the lease names (pane_occupant_changed),
+//     or a pre-lease row cannot even prove membership from the agent's
+//     registered name (lease_unverifiable).
+//
+// Expiry is the explicit default disposition — never silent reinjection, never
+// rebinding to the new pane: the row is deleted and reported on the existing
+// relay.dropped channel, while the durable handoffkeep record stays
+// undelivered so hub replay can still reach the lane's current route. A pane
+// whose occupant cannot be read is not stale evidence, so an unverifiable
+// probe (dead socket, malformed output, missing runner) goes through
+// retryOrDrop's bounded rearm instead of expiring the row on a transient
+// failure.
+func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, items []relayHeld) []relayHeld {
+	var keep []relayHeld
+	var survivors []relayHeld
+	for _, item := range items {
+		if manager.laneRerouted(item) {
+			manager.expireHeldLease(parent, item, "lane_rerouted")
+			continue
+		}
+		survivors = append(survivors, item)
+	}
+	if len(survivors) == 0 {
+		return keep
+	}
+	pane := survivors[0].Pane
+	var occupant relayOccupant
+	occupantKnown, unverifiable := false, false
+	runner := manager.client.relayRunner()
+	if runner == nil {
+		unverifiable = true
+	} else {
+		getContext, cancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
+		output, err := runner(getContext, "agent", "get", pane)
+		cancel()
+		switch {
+		case err == nil:
+			parsed := false
+			occupant, parsed = parseRelayAgentOccupant(output)
+			// A get that answers for a different pane than asked is not
+			// evidence about this one — count it as unreadable, not absent.
+			if parsed && (occupant.Pane == "" || occupant.Pane == pane) {
+				occupantKnown = true
+			} else {
+				unverifiable = true
+			}
+		case relayAgentNotFound(output):
+			// Definitive absence: the pane no longer hosts any agent.
+		default:
+			unverifiable = true
+		}
+	}
+	for _, item := range survivors {
+		if unverifiable {
+			manager.retryOrDrop(item)
+			continue
+		}
+		if stale, reason := relayHeldLeaseStale(item, occupant, occupantKnown); stale {
+			manager.expireHeldLease(parent, item, reason)
+			continue
+		}
+		keep = append(keep, item)
+	}
+	return keep
+}
+
+// laneRerouted reports whether the lane a held row is bound to has since been
+// observed on a different pane. It is the shared membership check both the
+// release filter and the deliver-time recheck use, so a reroute observed
+// between the two cannot slip an item to its stale pane.
+func (manager *relayBusyManager) laneRerouted(item relayHeld) bool {
+	observed, known := manager.observedLanePane(item.Lane)
+	return known && observed != item.Pane
+}
+
+// expireHeldLease ends a stale lease: the local row is deleted and the drop is
+// reported so the hub projection and operator feed show the row leaving held
+// for a named reason. The durable event is deliberately untouched — expiring
+// the lease is not delivering it, and replay still owes it to the lane.
+func (manager *relayBusyManager) expireHeldLease(parent context.Context, item relayHeld, reason string) {
+	if store := manager.client.relayStore(); store != nil {
+		_, _ = store.DeleteRelayHeld(parent, item.EventID)
+	}
+	manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: reason})
 }
 
 func relayBatchText(items []relayHeld, expired bool, now time.Time) string {
@@ -452,6 +669,22 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 	sort.SliceStable(items, func(i, j int) bool { return items[i].RecvSeq < items[j].RecvSeq })
 	now := manager.client.relayNow()
 	for _, group := range relayBatchGroups(items, expired, now) {
+		// The route observation can move between the release filter and this
+		// inject — a "now" delivery skips the filter entirely. Re-check each
+		// item's lane immediately before prompting so a reroute observed in
+		// the gap still fails closed instead of reaching the stale pane.
+		var live []relayHeld
+		for _, item := range group {
+			if manager.laneRerouted(item) {
+				manager.expireHeldLease(parent, item, "lane_rerouted")
+				continue
+			}
+			live = append(live, item)
+		}
+		if len(live) == 0 {
+			continue
+		}
+		group = live
 		text := relayBatchText(group, expired, now)
 		inject := manager.client.relayInject
 		if inject == nil {

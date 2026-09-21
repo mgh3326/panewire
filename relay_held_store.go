@@ -17,6 +17,11 @@ type relayHeld struct {
 	Edited                                 bool
 	fresh                                  bool // precise local receipt time, never persisted.
 	Attempts                               int  // #264 D1 inject-retry count, persisted so it survives the store round-trip a rearm makes.
+	// Lease is #449's occupant identity captured from the same agent get that
+	// decided the hold. The release gate compares it against the pane's
+	// occupant at delivery time; '' marks a row no hold-time identity exists
+	// for and is never treated as a match.
+	Lease string
 }
 
 func (s *Store) InsertRelayHeld(ctx context.Context, held relayHeld) (bool, error) {
@@ -35,9 +40,9 @@ func (s *Store) InsertRelayHeld(ctx context.Context, held relayHeld) (bool, erro
 			return false, err
 		}
 	}
-	result, err := tx.ExecContext(ctx, `INSERT INTO relay_held(pane,lane,event_id,job_id,text,held_since,deliver_policy,max_wait,recv_seq,edited,attempts)
-VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(lane,event_id) DO NOTHING`, held.Pane, held.Lane, held.EventID, held.JobID, held.Text,
-		held.HeldSince.UnixMilli(), held.DeliverPolicy, held.MaxWait.Milliseconds(), next, boolInt(held.Edited), held.Attempts)
+	result, err := tx.ExecContext(ctx, `INSERT INTO relay_held(pane,lane,event_id,job_id,text,held_since,deliver_policy,max_wait,recv_seq,edited,attempts,lease)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(lane,event_id) DO NOTHING`, held.Pane, held.Lane, held.EventID, held.JobID, held.Text,
+		held.HeldSince.UnixMilli(), held.DeliverPolicy, held.MaxWait.Milliseconds(), next, boolInt(held.Edited), held.Attempts, held.Lease)
 	if err != nil {
 		return false, err
 	}
@@ -51,7 +56,7 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(lane,event_id) DO NOTHING`, held.Pane,
 func (s *Store) RelayHeldForPane(ctx context.Context, pane string) ([]relayHeld, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT pane,lane,event_id,job_id,text,held_since,deliver_policy,max_wait,recv_seq,edited,attempts
+	rows, err := s.db.QueryContext(ctx, `SELECT pane,lane,event_id,job_id,text,held_since,deliver_policy,max_wait,recv_seq,edited,attempts,lease
 FROM relay_held WHERE pane=? ORDER BY recv_seq`, pane)
 	if err != nil {
 		return nil, err
@@ -63,7 +68,7 @@ FROM relay_held WHERE pane=? ORDER BY recv_seq`, pane)
 func (s *Store) RelayHeldAll(ctx context.Context) ([]relayHeld, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.QueryContext(ctx, `SELECT pane,lane,event_id,job_id,text,held_since,deliver_policy,max_wait,recv_seq,edited,attempts
+	rows, err := s.db.QueryContext(ctx, `SELECT pane,lane,event_id,job_id,text,held_since,deliver_policy,max_wait,recv_seq,edited,attempts,lease
 FROM relay_held ORDER BY pane,recv_seq`)
 	if err != nil {
 		return nil, err
@@ -78,8 +83,8 @@ func (s *Store) RelayHeldByKey(ctx context.Context, lane string, eventID int64) 
 	var item relayHeld
 	var heldSince, maxWait int64
 	var edited int
-	err := s.db.QueryRowContext(ctx, `SELECT pane,lane,event_id,job_id,text,held_since,deliver_policy,max_wait,recv_seq,edited,attempts
-FROM relay_held WHERE lane=? AND event_id=?`, lane, eventID).Scan(&item.Pane, &item.Lane, &item.EventID, &item.JobID, &item.Text, &heldSince, &item.DeliverPolicy, &maxWait, &item.RecvSeq, &edited, &item.Attempts)
+	err := s.db.QueryRowContext(ctx, `SELECT pane,lane,event_id,job_id,text,held_since,deliver_policy,max_wait,recv_seq,edited,attempts,lease
+FROM relay_held WHERE lane=? AND event_id=?`, lane, eventID).Scan(&item.Pane, &item.Lane, &item.EventID, &item.JobID, &item.Text, &heldSince, &item.DeliverPolicy, &maxWait, &item.RecvSeq, &edited, &item.Attempts, &item.Lease)
 	if err == sql.ErrNoRows {
 		return relayHeld{}, false, nil
 	}
@@ -96,7 +101,7 @@ func scanRelayHeld(rows *sql.Rows) ([]relayHeld, error) {
 		var item relayHeld
 		var heldSince, maxWait int64
 		var edited int
-		if err := rows.Scan(&item.Pane, &item.Lane, &item.EventID, &item.JobID, &item.Text, &heldSince, &item.DeliverPolicy, &maxWait, &item.RecvSeq, &edited, &item.Attempts); err != nil {
+		if err := rows.Scan(&item.Pane, &item.Lane, &item.EventID, &item.JobID, &item.Text, &heldSince, &item.DeliverPolicy, &maxWait, &item.RecvSeq, &edited, &item.Attempts, &item.Lease); err != nil {
 			return nil, err
 		}
 		item.HeldSince = time.UnixMilli(heldSince)

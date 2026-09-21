@@ -113,14 +113,24 @@ func (h *HubServer) releaseRelayHeld(machine string, released relayReleasedPaylo
 // consumeRelayDropped removes the held projection for a node's own explicit
 // drop (#264 D1). Unlike releaseRelayHeld/consumeRelayCancelled it never
 // races an operator action on the same row, so it only needs to guard
-// against a stale report from a machine that no longer owns the row.
+// against a stale report from a machine that no longer owns the row. The
+// same ownership checks cover the pending ack entry: a drop may only retire
+// a window bound to this machine and pane.
 func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayload) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if held, exists := h.relayHeld[dropped.OriginalEventID]; exists && held.Machine != machine {
+	if held, exists := h.relayHeld[dropped.OriginalEventID]; exists && (held.Machine != machine || held.Pane != dropped.Pane) {
+		return false
+	}
+	key := relayPendingKey(dropped.OriginalEventID, dropped.JobID)
+	if pending, exists := h.r19a.relayPending[key]; exists && (pending.machine != machine || pending.pane != dropped.Pane) {
 		return false
 	}
 	delete(h.relayHeld, dropped.OriginalEventID)
+	// A dropped lease will never emit relay.released, so its ack window would
+	// otherwise sit held=true forever. The durable row is deliberately left
+	// undelivered; replay re-registers a fresh pending entry when it retries.
+	h.cancelRelayPendingLocked(dropped.OriginalEventID, dropped.JobID)
 	return true
 }
 
