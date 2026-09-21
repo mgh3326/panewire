@@ -48,6 +48,7 @@ type jobGoldenCase struct {
 	Socket        string            `json:"socket"`       // ok | reject | absent
 	Files         map[string]string `json:"files"`        // relative path -> content
 	FilesBase64   map[string]string `json:"files_base64"` // relative path -> content that is not valid UTF-8
+	ReadOnly      []string          `json:"read_only"`    // relative directories made 0555 before the steps
 	Steps         [][]string        `json:"steps"`
 }
 
@@ -152,6 +153,13 @@ func jobGoldenWorkspace(t *testing.T, c jobGoldenCase) (string, map[string]strin
 		if err := os.WriteFile(path, files[name], 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+	for _, name := range c.ReadOnly {
+		path := filepath.Join(root, name)
+		if err := os.Chmod(path, 0o555); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(path, 0o755) })
 	}
 	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
 		t.Fatal(err)

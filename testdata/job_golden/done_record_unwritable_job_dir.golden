@@ -1,0 +1,14 @@
+== step ["done" "jw" "--report" "@ROOT@/reports/report.md"] rc=1
+-- stdout
+-- stderr
+<cmd>: warning: handoffkeep not found; report document not uploaded (job=jw)
+Traceback (most recent call last):
+  File "<stdin>", line 20, in <module>
+PermissionError: [Errno 13] Permission denied: '@ROOT@/inbox/jobs/jw/.wrk-events.lock'
+== file inbox/jobs/jw/events/00001-job.claim.json mode=0644
+{"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jw", "kind": "job.claim", "payload": {"agent_label": "jw-label", "owner_lane": "owner-lane", "t_level": "T2"}, "seq": 1}
+== file inbox/jobs/jw/events/00002-job.spawned.json mode=0644
+{"created_at": "2026-09-21T00:00:01+00:00", "job_id": "jw", "kind": "job.spawned", "payload": {"label": "jw", "owner_lane": "x", "pane_id": "w3:p7"}, "seq": 2}
+== file reports/report.md mode=0644
+first
+final line

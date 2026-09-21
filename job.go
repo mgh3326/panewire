@@ -145,6 +145,12 @@ func (c *jobCLI) done(args []string) int {
 	suffix := c.uploadReportDocument(job, report)
 	host := jobHost()
 	status := c.completionEvent(jobsRoot, job, owner, label, pane, host, report, suffix)
+	if status == "failed" {
+		// wrk's `completion_status="$(completion_event ...)"` carries the
+		// failing script's status out of the substitution, and `set -e` ends
+		// the command there: no notification, no OK line.
+		return 1
+	}
 	if status == "duplicate" {
 		jobNoteDuplicateCompletion(jobsRoot, job, report, c.now())
 		c.warn("job.completed already recorded for this report; suppressed duplicate (job=%s)", job)
@@ -647,10 +653,8 @@ func (c *jobCLI) hostPipeline(text []byte, script string) (string, int) {
 }
 
 // completionEvent mirrors wrk's completion_event for job.completed and
-// returns "created", "duplicate" or "failed". wrk runs it inside command
-// substitution without errexit: a failure writes no record, yet `done`
-// still notifies and prints OK, so the caller treats "failed" like
-// "created".
+// returns "created", "duplicate" or "failed". "failed" is every case in which
+// wrk's Python exits non-zero; it has written no record by then.
 func (c *jobCLI) completionEvent(jobsRoot, job, owner, label, pane, host, report, suffix string) string {
 	eventsDir := jobsRoot + "/" + job + "/events"
 	if err := os.MkdirAll(eventsDir, 0o777); err != nil {
