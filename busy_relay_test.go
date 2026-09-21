@@ -828,6 +828,30 @@ func TestR449PreLeaseRowsFallBackToNameMembership(t *testing.T) {
 			t.Fatalf("prompts=%q", got)
 		}
 	})
+
+	// The held row this issue exists for (real id16936) is a pre-#449 row and
+	// therefore carries no lease. This is the dead-pane leg of that shape: an
+	// empty lease is not "nothing to compare" — a definitively absent occupant
+	// still expires it fail-closed.
+	t.Run("dead pane expires leaseless row", func(t *testing.T) {
+		fake := &r27FakeHerdr{t: t, waitStatus: "idle", started: make(chan struct{}, 1)}
+		fake.r27SetGet(r27Fixture(t, "agent-get-not-found.json"), errors.New("exit status 1"))
+		store := NewMemoryStore(t)
+		defer store.Close()
+		client, prompts, events := r27Node(t, store, fake)
+		inserted, err := store.InsertRelayHeld(t.Context(), relayHeld{Pane: "fixture-pane", Lane: "lane-a", EventID: 613, JobID: "relay-job-613", Text: "legacy row", HeldSince: time.Now(), DeliverPolicy: "idle", MaxWait: time.Second})
+		if err != nil || !inserted {
+			t.Fatalf("seed inserted=%t err=%v", inserted, err)
+		}
+		client.relayBusyManager().release(t.Context(), "fixture-pane", false)
+		dropped := r449DroppedReason(t, events)
+		if dropped.Reason != "pane_occupant_gone" {
+			t.Fatalf("dropped=%+v", dropped)
+		}
+		if got := *prompts; len(got) != 0 {
+			t.Fatalf("prompts=%q", got)
+		}
+	})
 }
 
 func TestR449LegalExtremes(t *testing.T) {
