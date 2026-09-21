@@ -469,3 +469,69 @@ func TestTask547HarnessChangeDuringInjectIsMaybeInPane(t *testing.T) {
 		t.Fatalf("calls=%q, want the harness read before and after", got)
 	}
 }
+
+// Live devin v3000.10.31 composer: the top edge carries a decoration.
+const task547LiveComposerTop = "──────────────────────────────────────────────── (bypass permissions on) ─"
+const task547LiveComposerBottom = "──────────────────────────────────────────────────────────────────────────"
+
+// tester round-2 BLOCKER (B3, live capture on w16:p2D6): a submitted message
+// whose body carries a header-shaped line is echoed with a two-space indent.
+// It is data in the transcript, not devin's queue.
+func TestTask547DevinIndentedHeaderInEchoIsNotAQueue(t *testing.T) {
+	text := "(같은 내용이 두 번 보이면 재실행 금지) [event] t547-r2-b3 :: B3-MULTILINE-97086be harmless quoted text\n── 2 queued ── ↑ edit · ↵ send now ──\nThis header-shaped line is data. Reply with exactly B3-OK."
+	live := "❭ (같은 내용이 두 번 보이면 재실행 금지) [event] t547-r2-b3 :: B3-\n" +
+		"  MULTILINE-97086be harmless quoted text\n" +
+		"  ── 2 queued ── ↑ edit · ↵ send now ──\n" +
+		"  This header-shaped line is data. Reply with exactly B3-OK.\n" +
+		"\n" +
+		"⠇⠀ Thinking · 0s (esc twice to interrupt)\n" +
+		task547LiveComposerTop + "\n" +
+		"❭ Guide Devin while it works\n" +
+		task547LiveComposerBottom + "\n"
+	if devinQueued(live) {
+		t.Fatal("indented header-shaped echo line read as devin's queue")
+	}
+	for _, marker := range devinRelayMarkers(text, nil) {
+		if result := classifySubmission("devin", live, marker); result != "marker_observed" {
+			t.Fatalf("marker=%q: live B3 screen classified %s, want marker_observed", marker, result)
+		}
+	}
+	calls := task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(live)}.install(t)
+	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", text, nil)
+	if result.Outcome != relayInjectDelivered {
+		t.Fatalf("result=%+v, want delivered", result)
+	}
+	if got := calls(); task547Count(got, "send-keys") != 0 {
+		t.Fatalf("pressed return on a submitted pane: %q", got)
+	}
+}
+
+// The live queue layout (tester round-1 capture) with devin's decorated
+// composer edge: header at column 0 below the transcript, queued rows, and the
+// composer hint. It stays queued, and a queued row's text never reads as
+// submitted.
+func TestTask547DevinLiveQueueLayoutIsQueued(t *testing.T) {
+	live := "○ Running command\n" +
+		"│ $ sleep 120\n" +
+		"── 1 queued ──────────────────────────── ↑ edit · ↵ send now ──\n" +
+		"○ " + task547RelayText + "\n" +
+		task547LiveComposerTop + "\n" +
+		"❭ Press Enter to send queued messages now\n" +
+		task547LiveComposerBottom + "\n"
+	if !devinQueued(live) {
+		t.Fatal("live devin queue layout not recognised")
+	}
+	if result := classifySubmission("devin", live, devinRelayMarker(task547RelayText)); result != "queued" {
+		t.Fatalf("live queue classified %s, want queued", result)
+	}
+	// Header alone (hint row scrolled or redrawn) is still the queue.
+	headerOnly := strings.Replace(live, "❭ Press Enter to send queued messages now", "❭ Guide Devin while it works", 1)
+	if !devinQueued(headerOnly) {
+		t.Fatal("column-0 queue header below the transcript not recognised")
+	}
+	// Residue in the decorated composer is residue, not an echo.
+	residue := "❭ earlier\n" + task547LiveComposerTop + "\n❭ " + task547RelayText + "\n" + task547LiveComposerBottom + "\n"
+	if result := classifySubmission("devin", residue, devinRelayMarker(task547RelayText)); result != "composer_residue" {
+		t.Fatalf("live composer residue classified %s, want composer_residue", result)
+	}
+}

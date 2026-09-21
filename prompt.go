@@ -459,18 +459,34 @@ func classifySubmissionEvidence(harness, screen, marker string) (string, string)
 }
 
 // devinQueueBannerRE matches devin's queue header line, captured live as
-// "── 1 queued ── ↑ edit · ↵ send now ──". It is anchored to the start of a
-// line so a transcript row quoting the text ("❭ ... 2 queued ...") does not
-// match. The composer hint "Press Enter to send queued messages now" is the
-// other half of the same state, and counts only inside the live composer.
-// Either one means devin holds at least one message it has not submitted.
-var devinQueueBannerRE = regexp.MustCompile(`(?m)^[ \t]*─+[ \t]*\d+[ \t]+queued\b`)
+// "── 1 queued ── ↑ edit · ↵ send now ──". devin draws it at column 0, while
+// every continuation line of a transcript echo is indented, so a submitted
+// message whose body contains a header-shaped line cannot match. The composer
+// hint "Press Enter to send queued messages now" is the other half of the
+// same state, and counts only inside the live composer.
+var devinQueueBannerRE = regexp.MustCompile(`^─+[ \t]*\d+[ \t]+queued\b`)
 
+// devinQueued reports whether devin holds at least one message it has not
+// submitted: the composer hint, or a column-0 queue header that sits below
+// the last transcript echo ("❭ ...") and above the composer.
 func devinQueued(screen string) bool {
-	if region, ok := composerRegion(screen); ok && strings.Contains(region, "send queued messages now") {
+	if region, ok := composerRegionWith(screen, isDevinDividerLine); ok && strings.Contains(region, "send queued messages now") {
 		return true
 	}
-	return devinQueueBannerRE.MatchString(screen)
+	lines := strings.Split(screen, "\n")
+	end := len(lines)
+	if start, ok := composerStartWith(lines, isDevinDividerLine); ok {
+		end = start
+	}
+	for i := end - 1; i >= 0; i-- {
+		if strings.HasPrefix(lines[i], "❭") {
+			return false
+		}
+		if devinQueueBannerRE.MatchString(lines[i]) {
+			return true
+		}
+	}
+	return false
 }
 
 // devinSubmission orders devin's rules so that a message that is only in
@@ -480,7 +496,7 @@ func devinQueued(screen string) bool {
 // over the echo. Marker matching ignores whitespace because a wrapped screen
 // can split the marker across lines.
 func devinSubmission(screen, marker string) (string, string) {
-	if region, ok := composerRegion(screen); ok && marker != "" && strings.Contains(compactWhitespace(region), compactWhitespace(marker)) {
+	if region, ok := composerRegionWith(screen, isDevinDividerLine); ok && marker != "" && strings.Contains(compactWhitespace(region), compactWhitespace(marker)) {
 		return "composer_residue", "composer_divider"
 	}
 	if devinQueued(screen) {
@@ -510,18 +526,46 @@ func claudeComposerContains(screen, marker string) bool {
 // composerRegion returns the text between the final two divider lines --
 // claude's live composer, and devin's, whose layout is the same.
 func composerRegion(screen string) (string, bool) {
+	return composerRegionWith(screen, isDividerLine)
+}
+
+func composerRegionWith(screen string, isDivider func(string) bool) (string, bool) {
 	lines := strings.Split(screen, "\n")
+	start, ok := composerStartWith(lines, isDivider)
+	if !ok {
+		return "", false
+	}
+	end := start + 1
+	for end < len(lines) && !isDivider(lines[end]) {
+		end++
+	}
+	return strings.Join(lines[start+1:end], "\n"), true
+}
+
+// composerStartWith is the index of the second-to-last divider line, the top
+// edge of the live composer.
+func composerStartWith(lines []string, isDivider func(string) bool) (int, bool) {
 	dividers := make([]int, 0, 2)
 	for i, line := range lines {
-		if strings.Contains(line, "─") && strings.Trim(line, " \t─") == "" {
+		if isDivider(line) {
 			dividers = append(dividers, i)
 		}
 	}
 	if len(dividers) < 2 {
-		return "", false
+		return 0, false
 	}
-	start, end := dividers[len(dividers)-2], dividers[len(dividers)-1]
-	return strings.Join(lines[start+1:end], "\n"), true
+	return dividers[len(dividers)-2], true
+}
+
+func isDividerLine(line string) bool {
+	return strings.Contains(line, "─") && strings.Trim(line, " \t─") == ""
+}
+
+// isDevinDividerLine also accepts devin's decorated composer top edge,
+// captured live as "──────── (bypass permissions on) ─". Its long leading run
+// of ─ tells it apart from the queue header, which starts "── 1 queued".
+func isDevinDividerLine(line string) bool {
+	return isDividerLine(line) || strings.HasPrefix(strings.TrimSpace(line), strings.Repeat("─", 8))
 }
 
 func toolReceipt(harness, screen, marker string, evidenceRevision, sendRevision int64) bool {
