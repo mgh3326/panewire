@@ -413,13 +413,16 @@ func TestTask547DevinLongMessageIsNeverTypedTwice(t *testing.T) {
 }
 
 // tester BLOCKER 2: a batch whose later member is already in the pane is not
-// typed, even though the batch text starts with a different member.
+// typed, even though the batch text starts and ends with other members.
 func TestTask547DevinBatchMemberAlreadyPresentBlocksBatch(t *testing.T) {
 	first := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: first-unique-message"
 	second := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: second-already-present-message"
-	batch := relayBatchText([]relayHeld{{Text: first}, {Text: second}}, false, time.Now())
+	third := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: third-unique-message"
+	// The present member sits in the middle: neither the batch head nor the
+	// batch tail covers it.
+	batch := relayBatchText([]relayHeld{{Text: first}, {Text: second}, {Text: third}}, false, time.Now())
 	calls := task547FakeDevin{before: map[string]string{"visible": task547IdleScreen, "recent-unwrapped": task547SubmittedScreen(second)}}.install(t)
-	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", batch, []string{first, second})
+	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", batch, []string{first, second, third})
 	if result.Outcome != relayInjectMaybeInPane || !strings.HasPrefix(result.Evidence, "presend:") {
 		t.Fatalf("result=%+v, want presend maybe_in_pane", result)
 	}
