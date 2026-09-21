@@ -951,7 +951,7 @@ func TestR449LegalExtremes(t *testing.T) {
 }
 
 func TestR449HubDroppedClearsProjectionAndPendingAck(t *testing.T) {
-	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "host-a": "node"}})
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "host-a": "node", "host-b": "node"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -977,6 +977,27 @@ func TestR449HubDroppedClearsProjectionAndPendingAck(t *testing.T) {
 	if _, valid := parseHubInbound(wire); !valid {
 		t.Fatalf("parseHubInbound rejected %s", wire)
 	}
+	// A drop from a different machine — or naming a different pane — must not
+	// retire another node's projection or ack window.
+	for _, sender := range []string{"host-b", "host-a"} {
+		forged := wire
+		if sender == "host-a" {
+			forgedPayload, _ := json.Marshal(relayDroppedPayload{JobID: "relay-job-640", Pane: "fixture-pane-9", Lane: "lane-a", OriginalEventID: 640, Reason: "lane_rerouted"})
+			forged, _ = json.Marshal(struct {
+				Type    string          `json:"type"`
+				Kind    string          `json:"kind"`
+				Payload json.RawMessage `json:"payload"`
+			}{Type: "event", Kind: "relay.dropped", Payload: forgedPayload})
+		}
+		hub.handleAgentMessage(sender, "fixture", agent, forged)
+		hub.mu.Lock()
+		_, heldExists := hub.relayHeld[640]
+		_, pendingExists := hub.r19a.relayPending[key]
+		hub.mu.Unlock()
+		if !heldExists || !pendingExists {
+			t.Fatalf("forged drop from %s cleared held=%t pending=%t", sender, heldExists, pendingExists)
+		}
+	}
 	hub.handleAgentMessage("host-a", "fixture", agent, wire)
 	hub.mu.Lock()
 	_, heldExists := hub.relayHeld[640]
@@ -984,6 +1005,35 @@ func TestR449HubDroppedClearsProjectionAndPendingAck(t *testing.T) {
 	hub.mu.Unlock()
 	if heldExists || pendingExists {
 		t.Fatalf("drop left held=%t pending=%t", heldExists, pendingExists)
+	}
+}
+
+// A reroute observed between the release filter and the inject itself must
+// still fail closed: deliver() re-checks each item's lane immediately before
+// prompting, which also covers the "now" path that never enters the filter.
+func TestR449DeliverRechecksRouteBeforeInject(t *testing.T) {
+	r27GuardInbox(t)
+	fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", started: make(chan struct{}, 1)}
+	store := NewMemoryStore(t)
+	defer store.Close()
+	client, prompts, events := r27Node(t, store, fake)
+	manager := client.relayBusyManager()
+	item := relayHeld{Pane: "fixture-pane", Lane: "lane-a", EventID: 650, JobID: "relay-job-650", Text: "raced text", HeldSince: time.Now(), DeliverPolicy: "idle", MaxWait: time.Second}
+	inserted, err := store.InsertRelayHeld(t.Context(), item)
+	if err != nil || !inserted {
+		t.Fatalf("seed inserted=%t err=%v", inserted, err)
+	}
+	manager.noteLaneRoute("lane-a", "fixture-pane-2")
+	manager.deliver(t.Context(), []relayHeld{item}, false)
+	dropped := r449DroppedReason(t, events)
+	if dropped.Reason != "lane_rerouted" || dropped.OriginalEventID != 650 {
+		t.Fatalf("dropped=%+v", dropped)
+	}
+	if got := *prompts; len(got) != 0 {
+		t.Fatalf("rerouted item prompted=%q", got)
+	}
+	if rows, err := store.RelayHeldForPane(t.Context(), "fixture-pane"); err != nil || len(rows) != 0 {
+		t.Fatalf("rows=%+v err=%v", rows, err)
 	}
 }
 

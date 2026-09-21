@@ -39,6 +39,12 @@ func NewMemoryStore(t interface{ TempDir() string }) *Store {
 	}
 	return s
 }
+func storeHasColumn(db *sql.DB, table, column string) bool {
+	var name string
+	err := db.QueryRow(`SELECT name FROM pragma_table_info(?) WHERE name=?`, table, column).Scan(&name)
+	return err == nil && name == column
+}
+
 func OpenStore(path string) (*Store, error) {
 	if path == "" {
 		return nil, fmt.Errorf("empty sqlite path")
@@ -190,8 +196,15 @@ func OpenStore(path string) (*Store, error) {
 	_, _ = db.Exec(`ALTER TABLE relay_held ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`)
 	// #449: lease is the pane-occupant identity captured when the row was held.
 	// Rows from before this column exist carry '', which the release gate
-	// treats as unverifiable — never as a match.
-	_, _ = db.Exec(`ALTER TABLE relay_held ADD COLUMN lease TEXT NOT NULL DEFAULT ''`)
+	// treats as unverifiable — never as a match. Unlike the columns above the
+	// presence check is explicit so a real ALTER failure (not "already there")
+	// cannot be swallowed silently.
+	if !storeHasColumn(db, "relay_held", "lease") {
+		if _, err := db.Exec(`ALTER TABLE relay_held ADD COLUMN lease TEXT NOT NULL DEFAULT ''`); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS relay_held_pane_recv_seq ON relay_held(pane,recv_seq)`); err != nil {
 		db.Close()
 		return nil, err

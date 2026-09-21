@@ -127,7 +127,7 @@ func parseRelayAgentOccupant(raw []byte) (relayOccupant, bool) {
 	var response struct {
 		Result struct {
 			Type  string `json:"type"`
-			Agent struct {
+			Agent *struct {
 				PaneID       string `json:"pane_id"`
 				Agent        string `json:"agent"`
 				Name         string `json:"name"`
@@ -139,7 +139,7 @@ func parseRelayAgentOccupant(raw []byte) (relayOccupant, bool) {
 			} `json:"agent"`
 		} `json:"result"`
 	}
-	if json.Unmarshal(raw, &response) != nil {
+	if json.Unmarshal(raw, &response) != nil || response.Result.Agent == nil {
 		return relayOccupant{}, false
 	}
 	// Any valid JSON used to parse "ok" with an all-zero occupant, which the
@@ -147,12 +147,13 @@ func parseRelayAgentOccupant(raw []byte) (relayOccupant, bool) {
 	// pane_occupant_changed. A reply is only an agent_info when it says so —
 	// or, for older herdr builds without the type field, when it at least
 	// names a pane. Everything else is unreadable, not evidence.
-	if response.Result.Type != "agent_info" && response.Result.Agent.PaneID == "" {
+	agent := response.Result.Agent
+	if response.Result.Type != "agent_info" && agent.PaneID == "" {
 		return relayOccupant{}, false
 	}
-	occupant := relayOccupant{Pane: response.Result.Agent.PaneID, Agent: response.Result.Agent.Agent, Name: response.Result.Agent.Name, Terminal: response.Result.Agent.TerminalID, Workspace: response.Result.Agent.WorkspaceID}
-	if response.Result.Agent.AgentSession != nil {
-		occupant.Session = response.Result.Agent.AgentSession.Value
+	occupant := relayOccupant{Pane: agent.PaneID, Agent: agent.Agent, Name: agent.Name, Terminal: agent.TerminalID, Workspace: agent.WorkspaceID}
+	if agent.AgentSession != nil {
+		occupant.Session = agent.AgentSession.Value
 	}
 	return occupant, true
 }
@@ -546,7 +547,7 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 	var keep []relayHeld
 	var survivors []relayHeld
 	for _, item := range items {
-		if observed, known := manager.observedLanePane(item.Lane); known && observed != item.Pane {
+		if manager.laneRerouted(item) {
 			manager.expireHeldLease(parent, item, "lane_rerouted")
 			continue
 		}
@@ -594,6 +595,15 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 		keep = append(keep, item)
 	}
 	return keep
+}
+
+// laneRerouted reports whether the lane a held row is bound to has since been
+// observed on a different pane. It is the shared membership check both the
+// release filter and the deliver-time recheck use, so a reroute observed
+// between the two cannot slip an item to its stale pane.
+func (manager *relayBusyManager) laneRerouted(item relayHeld) bool {
+	observed, known := manager.observedLanePane(item.Lane)
+	return known && observed != item.Pane
 }
 
 // expireHeldLease ends a stale lease: the local row is deleted and the drop is
@@ -659,6 +669,22 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 	sort.SliceStable(items, func(i, j int) bool { return items[i].RecvSeq < items[j].RecvSeq })
 	now := manager.client.relayNow()
 	for _, group := range relayBatchGroups(items, expired, now) {
+		// The route observation can move between the release filter and this
+		// inject — a "now" delivery skips the filter entirely. Re-check each
+		// item's lane immediately before prompting so a reroute observed in
+		// the gap still fails closed instead of reaching the stale pane.
+		var live []relayHeld
+		for _, item := range group {
+			if manager.laneRerouted(item) {
+				manager.expireHeldLease(parent, item, "lane_rerouted")
+				continue
+			}
+			live = append(live, item)
+		}
+		if len(live) == 0 {
+			continue
+		}
+		group = live
 		text := relayBatchText(group, expired, now)
 		inject := manager.client.relayInject
 		if inject == nil {
