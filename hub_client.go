@@ -541,6 +541,11 @@ const (
 	// relayInjectMaybeInPane: the message may already be in the pane
 	// (composer, queue, or transcript). Never inject it again.
 	relayInjectMaybeInPane
+	// relayInjectQueued: devin accepted the message into its queue while it
+	// was busy (or its state could not be read). No return keypress -- that
+	// would cut the running turn -- and no retry: devin submits its queue
+	// when the turn ends.
+	relayInjectQueued
 )
 
 type relayInjectResult struct {
@@ -841,6 +846,15 @@ func devinRelayInject(ctx context.Context, pane, text string, members []string) 
 	}
 	// composer_residue or queued: devin's own hint says Enter submits a queued
 	// message now, and Enter submits composer text. One keypress, never more.
+	// For a queue, Enter on a busy devin interrupts the running command, so
+	// it is sent only when the pane is proven idle; otherwise the message
+	// stays queued for devin to submit at the end of its turn.
+	if state == "queued" {
+		if busy := devinBusy(ctx, pane, after); busy != "" {
+			result.Outcome, result.Evidence = relayInjectQueued, evidence+" busy:"+busy
+			return result
+		}
+	}
 	if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" return_failed"
 		return result
@@ -857,6 +871,74 @@ func devinRelayInject(ctx context.Context, pane, text string, members []string) 
 	}
 	result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" after_return:"+afterEvidence
 	return result
+}
+
+// devinSpinnerRE matches devin's activity line, captured live as
+// "⢀⣀ Running tools · 12s (esc twice to interrupt)" and
+// "⣄⠀ Thinking · 5s (esc twice to interrupt)": one to three braille glyphs,
+// a word, then an elapsed time. devin's idle logo is braille too, but as a
+// longer run with no elapsed time.
+var devinSpinnerRE = regexp.MustCompile(`^[\x{2800}-\x{28FF}]{1,3}\s+\pL[\pL ]*·\s*\d+[smh]`)
+
+// devinBusy names why the pane must be treated as working, or returns "" when
+// it is proven idle. It is conservative: an unreadable status counts as busy.
+// Evidence, in order: herdr's agent_status, then -- because devin's status
+// can read done during a long turn -- a spinner line or the working
+// placeholder between the last transcript echo and the composer, in either
+// source (a long queue can push the spinner out of the visible screen).
+func devinBusy(ctx context.Context, pane string, read devinPaneRead) string {
+	status, ok := relayAgentStatus(ctx, pane)
+	if !ok {
+		return "status_unknown"
+	}
+	if strings.EqualFold(status, "working") {
+		return "agent_status_working"
+	}
+	for _, source := range []struct{ name, text string }{{"visible", read.visible}, {"recent-unwrapped", read.unwrapped}} {
+		if strings.TrimSpace(source.text) == "" {
+			return source.name + ":empty"
+		}
+		if why := devinActivity(source.text); why != "" {
+			return source.name + ":" + why
+		}
+	}
+	return ""
+}
+
+// devinActivity looks between the last transcript echo and the composer.
+func devinActivity(screen string) string {
+	lines := strings.Split(screen, "\n")
+	end := len(lines)
+	if start, ok := composerStartWith(lines, isDevinDividerLine); ok {
+		if region, _ := composerRegionWith(screen, isDevinDividerLine); strings.Contains(region, "Guide Devin while it works") {
+			return "working_placeholder"
+		}
+		end = start
+	}
+	for i := end - 1; i >= 0 && !strings.HasPrefix(lines[i], "❭"); i-- {
+		if devinSpinnerRE.MatchString(strings.TrimSpace(lines[i])) || strings.Contains(compactWhitespace(lines[i]), "(esctwicetointerrupt)") {
+			return "spinner"
+		}
+	}
+	return ""
+}
+
+func relayAgentStatus(ctx context.Context, pane string) (string, bool) {
+	out, err := exec.CommandContext(ctx, "herdr", "agent", "get", pane).Output()
+	if err != nil {
+		return "", false
+	}
+	var response struct {
+		Result struct {
+			Agent struct {
+				Status string `json:"agent_status"`
+			} `json:"agent"`
+		} `json:"result"`
+	}
+	if json.Unmarshal(out, &response) != nil || response.Result.Agent.Status == "" {
+		return "", false
+	}
+	return response.Result.Agent.Status, true
 }
 
 // serve runs the node side of one hub session. A preference switch replaces the

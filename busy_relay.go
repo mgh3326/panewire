@@ -767,6 +767,13 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			}
 			continue
 		}
+		// delivered, or queued: devin accepted the message into its queue
+		// and submits it when its turn ends (verified live, #547). Neither is
+		// retried; the reason says which.
+		reason := result.Evidence
+		if result.Outcome == relayInjectQueued {
+			reason = "queued " + reason
+		}
 		if len(group) > 1 {
 			ids := make([]int64, 0, len(group))
 			for _, item := range group {
@@ -780,7 +787,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			}
 			released := relayReleasedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, FinalText: text, Edited: item.Edited, OriginalEventID: item.EventID}
 			manager.emit("relay.released", released)
-			manager.emit("relay.delivered", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(result.Evidence), FinalText: text, Edited: item.Edited, OriginalEventID: item.EventID})
+			manager.emit("relay.delivered", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(reason), FinalText: text, Edited: item.Edited, OriginalEventID: item.EventID})
 		}
 	}
 }

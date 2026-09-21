@@ -120,6 +120,7 @@ type task547FakeDevin struct {
 	failRead                       string            // phase whose reads fail
 	failPrompt                     bool              // herdr rejects the prompt
 	getBefore, getAfter            string            // agent reported before / after the prompt (default devin)
+	status                         string            // agent_status reported by get (default idle; "-" omits it)
 }
 
 func (f task547FakeDevin) install(t *testing.T) func() []string {
@@ -137,7 +138,15 @@ func (f task547FakeDevin) install(t *testing.T) func() []string {
 	if getAfter == "" {
 		getAfter = getBefore
 	}
-	script.WriteString("get) echo get >> \"$d/calls.log\"; if [ -f \"$d/sent\" ]; then a=" + shellQuote(getAfter) + "; else a=" + shellQuote(getBefore) + "; fi; echo \"{\\\"result\\\":{\\\"agent\\\":{\\\"agent\\\":\\\"$a\\\"}}}\" ;;\n")
+	status := f.status
+	if status == "" {
+		status = "idle"
+	}
+	statusField := ""
+	if status != "-" {
+		statusField = ",\\\"agent_status\\\":\\\"" + status + "\\\""
+	}
+	script.WriteString("get) echo get >> \"$d/calls.log\"; if [ -f \"$d/sent\" ]; then a=" + shellQuote(getAfter) + "; else a=" + shellQuote(getBefore) + "; fi; echo \"{\\\"result\\\":{\\\"agent\\\":{\\\"agent\\\":\\\"$a\\\"" + statusField + "}}}\" ;;\n")
 	if f.failPrompt {
 		script.WriteString("prompt) echo prompt >> \"$d/calls.log\"; exit 1 ;;\n")
 	} else {
@@ -551,5 +560,105 @@ func task547Await(t *testing.T, events <-chan hubClientEvent, kind string) hubCl
 		case <-deadline:
 			t.Fatalf("timed out waiting for %s", kind)
 		}
+	}
+}
+
+// Live devin v3000.10.31 captures from the b547 probe pane (2026-09-22): a
+// message queued while "sleep 75" ran. The spinner sits right above the queue
+// header.
+func task547LiveBusyQueue(message string) string {
+	return "❭ Run the shell command: sleep 75 . Then reply with exactly DONE-1 and nothing else.\n\n" +
+		" ○ Running command\n │ $ sleep 75\n │ Timeout: 1m 30s\n\n" +
+		"⠉⠁ Running tools · 25s (esc twice to interrupt)\n" +
+		"── 1 queued ────────────────────────────────────────\n" +
+		"○ " + message + "\n" +
+		task547LiveComposerBottom + "\n" +
+		"❭ Press Enter to send queued messages now\n" +
+		task547LiveComposerBottom + "\n"
+}
+
+// The b534 shape: a queue left behind on an idle pane -- no spinner, the
+// turn is over.
+func task547IdleQueue(message string) string {
+	return "❭ earlier instruction\n\n DONE-1\n\n" +
+		"── 2 queued ── ↑ edit · ↵ send now ──\n" +
+		"○ " + message + "\n" +
+		task547LiveComposerTop + "\n" +
+		"❭ Press Enter to send queued messages now\n" +
+		task547LiveComposerBottom + "\n"
+}
+
+// director BOUNCE F-1/F-2: Enter on a busy devin's queue interrupts the
+// running command (seen live: "Canceled due to user interrupt"). Return is
+// sent only when the pane is proven idle; busy or unknown leaves the message
+// queued -- no keypress, no retry.
+func TestTask547DevinQueueReturnOnlyWhenIdle(t *testing.T) {
+	busy := task547LiveBusyQueue(task547RelayText)
+	spinnerless := strings.Replace(busy, "⠉⠁ Running tools · 25s (esc twice to interrupt)\n", "", 1)
+	cases := []struct {
+		name    string
+		fake    task547FakeDevin
+		want    relayInjectOutcome
+		returns int
+		busy    string
+	}{
+		{"working status, live busy queue: no return", task547FakeDevin{status: "working", before: task547Both(task547IdleScreen), afterSend: task547Both(busy)}, relayInjectQueued, 0, "busy:agent_status_working"},
+		{"status reads done mid-turn, spinner on screen: no return", task547FakeDevin{status: "done", before: task547Both(task547IdleScreen), afterSend: task547Both(busy)}, relayInjectQueued, 0, "busy:visible:spinner"},
+		{"spinner scrolled out of visible, still in recent-unwrapped: no return", task547FakeDevin{status: "idle", before: task547Both(task547IdleScreen), afterSend: map[string]string{"visible": spinnerless, "recent-unwrapped": busy}}, relayInjectQueued, 0, "busy:recent-unwrapped:spinner"},
+		{"status unreadable: no return", task547FakeDevin{status: "-", before: task547Both(task547IdleScreen), afterSend: task547Both(task547IdleQueue(task547RelayText))}, relayInjectQueued, 0, "busy:status_unknown"},
+		{"idle queue left behind (b534 shape): one return", task547FakeDevin{status: "idle", before: task547Both(task547IdleScreen), afterSend: task547Both(task547IdleQueue(task547RelayText)), afterReturn: task547Both(task547SubmittedScreen(task547RelayText))}, relayInjectDelivered, 1, "after_return:"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			calls := tc.fake.install(t)
+			result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
+			if result.Outcome != tc.want || !strings.Contains(result.Evidence, tc.busy) {
+				t.Fatalf("result=%+v, want outcome %d with evidence containing %q", result, tc.want, tc.busy)
+			}
+			got := calls()
+			if n := task547Count(got, "send-keys"); n != tc.returns {
+				t.Fatalf("return keypresses=%d, want %d (calls=%q)", n, tc.returns, got)
+			}
+			if n := task547Count(got, "prompt"); n != 1 {
+				t.Fatalf("prompts=%d, want 1", n)
+			}
+		})
+	}
+}
+
+func TestTask547DevinActivityRule(t *testing.T) {
+	cases := map[string]string{
+		task547LiveBusyQueue("m"): "spinner",
+		"❭ go\n\n⣄⠀ Thinking · 5s (esc twice to interrupt) · (195c · ctrl+o for details)\n" + task547LiveComposerTop + "\n❭ Guide Devin while it works\n" + task547LiveComposerBottom + "\n": "working_placeholder",
+		task547IdleQueue("m"): "",
+		// devin's idle banner logo is braille too; it is not a spinner.
+		"⠀⣴⣾⣶⡄⠀⠀⠀⠀\n⠀⠛⠿⠟⠻⣶⣾⣶⡄  Devin CLI\n⠀⣤⣶⣦⣴⠿⢿⠿⠃  v3000.10.31\n\n── 1 queued ──\n○ m\n" + task547LiveComposerTop + "\n❭ Press Enter to send queued messages now\n" + task547LiveComposerBottom + "\n": "",
+		// a narrow pane wraps the spinner line
+		"❭ go\n⠉⠁ Running tools · 25s (esc twice to\n  interrupt)\n── 1 queued ──\n○ m\n" + task547LiveComposerBottom + "\n❭ Press Enter to send queued messages now\n" + task547LiveComposerBottom + "\n": "spinner",
+	}
+	for screen, want := range cases {
+		if got := devinActivity(screen); got != want {
+			t.Fatalf("devinActivity=%q, want %q for\n%s", got, want, screen)
+		}
+	}
+}
+
+// A queued result is accepted, not retried: relay.delivered carries the
+// reason, the held row is gone, and nothing is injected again.
+func TestTask547DevinQueuedIsAcceptedWithoutRetry(t *testing.T) {
+	injects, client, events := task547RelayRun(t, func(context.Context, string, string, []string) relayInjectResult {
+		return relayInjectResult{Outcome: relayInjectQueued, Harness: "devin", Evidence: "visible:devin_queue_banner busy:agent_status_working"}
+	})
+	delivered := task547Await(t, events, "relay.delivered")
+	var ack relayAckPayload
+	if err := json.Unmarshal(delivered.Payload, &ack); err != nil || ack.Reason != "queued visible:devin_queue_banner busy:agent_status_working" {
+		t.Fatalf("relay.delivered=%s err=%v", delivered.Payload, err)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if *injects != 1 {
+		t.Fatalf("queued message injected %d times, want 1", *injects)
+	}
+	if items, err := client.relayStore().RelayHeldForPane(t.Context(), "fixture-pane"); err != nil || len(items) != 0 {
+		t.Fatalf("queued item still held: %+v err=%v", items, err)
 	}
 }

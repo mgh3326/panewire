@@ -186,8 +186,10 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 	t.Run("devin queue clears after return with marker evidence, verification reports success", func(t *testing.T) {
 		dir := t.TempDir()
 		marker := filepath.Join(dir, "returned")
+		// An idle pane: since #547 the one return keypress on a devin queue
+		// is sent only when the pane is proven idle.
 		script := "#!/bin/sh\ncase \"$2\" in\n" +
-			"get) echo '{\"result\":{\"agent\":{\"agent\":\"devin\"}}}' ;;\n" +
+			"get) echo '{\"result\":{\"agent\":{\"agent\":\"devin\",\"agent_status\":\"idle\"}}}' ;;\n" +
 			"read) if [ -f \"" + marker + "\" ]; then echo 'do the thing'; else echo '── 1 queued ── send now'; fi ;;\n" +
 			"send-keys) touch \"" + marker + "\" ;;\n" +
 			"esac\n"
