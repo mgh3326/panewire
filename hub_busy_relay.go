@@ -121,6 +121,10 @@ func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayl
 		return false
 	}
 	delete(h.relayHeld, dropped.OriginalEventID)
+	// A dropped lease will never emit relay.released, so its ack window would
+	// otherwise sit held=true forever. The durable row is deliberately left
+	// undelivered; replay re-registers a fresh pending entry when it retries.
+	h.cancelRelayPendingLocked(dropped.OriginalEventID, dropped.JobID)
 	return true
 }
 

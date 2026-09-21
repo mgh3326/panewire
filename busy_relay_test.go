@@ -100,13 +100,14 @@ func TestR27HeldProjectionEditCancelAPIs(t *testing.T) {
 func (fake *r27FakeHerdr) run(ctx context.Context, args ...string) ([]byte, error) {
 	fake.mu.Lock()
 	fake.calls = append(fake.calls, append([]string(nil), args...))
+	getOutput, getErr, getStatus := fake.getOutput, fake.getErr, fake.getStatus
 	fake.mu.Unlock()
 	if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
-		output := fake.getOutput
+		output := getOutput
 		if output == nil {
-			output = r27Fixture(fake.t, "agent-get-"+fake.getStatus+".json")
+			output = r27Fixture(fake.t, "agent-get-"+getStatus+".json")
 		}
-		return output, fake.getErr
+		return r27RewritePane(output, args[2]), getErr
 	}
 	if len(args) >= 2 && args[0] == "agent" && args[1] == "wait" {
 		select {
@@ -136,6 +137,45 @@ func r27Fixture(t *testing.T, name string) []byte {
 		t.Fatal(err)
 	}
 	return value
+}
+
+// r27RewritePane stamps the queried pane into a captured agent_info reply —
+// real herdr always answers for the pane it was asked about, while the
+// committed fixtures all carry w1:p1. Error envelopes carry no pane and pass
+// through untouched.
+func r27RewritePane(raw []byte, pane string) []byte {
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(raw, &doc) != nil {
+		return raw
+	}
+	var result map[string]json.RawMessage
+	if json.Unmarshal(doc["result"], &result) != nil {
+		return raw
+	}
+	var agent map[string]json.RawMessage
+	if json.Unmarshal(result["agent"], &agent) != nil || agent == nil {
+		return raw
+	}
+	encoded, _ := json.Marshal(pane)
+	agent["pane_id"] = encoded
+	agentDoc, _ := json.Marshal(agent)
+	result["agent"] = agentDoc
+	resultDoc, _ := json.Marshal(result)
+	doc["result"] = resultDoc
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return raw
+	}
+	return out
+}
+
+// r27SetGet swaps the reply the next agent get returns, under the fake's lock
+// so a release-gate probe running on the wait goroutine sees a consistent
+// answer.
+func (fake *r27FakeHerdr) r27SetGet(output []byte, err error) {
+	fake.mu.Lock()
+	fake.getOutput, fake.getErr = output, err
+	fake.mu.Unlock()
 }
 
 func (fake *r27FakeHerdr) count(command string) int {
@@ -242,7 +282,9 @@ func TestR27BusyRelaySixPathsUseFixtureHerdr(t *testing.T) {
 		if strings.Join(wait, "|") != strings.Join(want, "|") {
 			t.Fatalf("wait argv=%q want=%q", wait, want)
 		}
-		if fake.count("get") != 1 {
+		// One get decides the hold; the release gate runs exactly one more to
+		// re-verify the lease occupant before injecting.
+		if fake.count("get") != 2 {
 			t.Fatalf("agent get polled %d times", fake.count("get"))
 		}
 	})
@@ -542,6 +584,372 @@ func TestR27IsolationAndInboxGuards(t *testing.T) {
 	// This deliberately fails if a test forgets the explicit command seam.
 	if (&HubClient{relayInject: func(context.Context, string, string) bool { return true }}).relayRunner() != nil {
 		t.Fatal("R27 isolation guard: fixture client would contact real herdr")
+	}
+}
+
+// r449Directive is r27Directive with the route coordinates made explicit: a
+// route change is exactly an inject naming the same lane on a different pane.
+func r449Directive(id int64, lane, pane, text, policy string) hubOutboundMessage {
+	return hubOutboundMessage{Type: "relay.inject", Kind: "lane.event", JobID: "relay-job-" + strconv.FormatInt(id, 10), Pane: pane, Lane: lane, EventID: id, Text: text, DeliverPolicy: policy}
+}
+
+// r449OccupantGet builds an agent_info reply from the committed fixture with
+// occupant fields rewritten, so tests can hold a lease on one instance and
+// then answer the release probe with another. The pane stamp still comes from
+// r27RewritePane when the fake serves it.
+func r449OccupantGet(t *testing.T, status string, mutate func(agent map[string]json.RawMessage)) []byte {
+	t.Helper()
+	raw := r27Fixture(t, "agent-get-"+status+".json")
+	var doc map[string]json.RawMessage
+	if json.Unmarshal(raw, &doc) != nil {
+		t.Fatalf("fixture %s not json", status)
+	}
+	var result map[string]json.RawMessage
+	if json.Unmarshal(doc["result"], &result) != nil {
+		t.Fatalf("fixture %s has no result", status)
+	}
+	var agent map[string]json.RawMessage
+	if json.Unmarshal(result["agent"], &agent) != nil || agent == nil {
+		t.Fatalf("fixture %s has no agent", status)
+	}
+	mutate(agent)
+	agentDoc, _ := json.Marshal(agent)
+	result["agent"] = agentDoc
+	resultDoc, _ := json.Marshal(result)
+	doc["result"] = resultDoc
+	out, err := json.Marshal(doc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
+}
+
+func r449SetSession(session string) func(agent map[string]json.RawMessage) {
+	return func(agent map[string]json.RawMessage) {
+		encoded, _ := json.Marshal(map[string]string{"agent": "claude", "kind": "id", "source": "herdr:claude", "value": session})
+		agent["agent_session"] = encoded
+	}
+}
+
+// r449DroppedReason awaits a relay.dropped event and decodes it through the
+// same hub-side parser the wire path uses, so the reason contract is checked
+// end to end rather than against a string the node happens to emit.
+func r449DroppedReason(t *testing.T, events <-chan hubClientEvent) relayDroppedPayload {
+	t.Helper()
+	event := r27Await(t, events, "relay.dropped")
+	dropped, valid := decodeRelayDroppedPayload(event.Payload)
+	if !valid {
+		t.Fatalf("dropped payload rejected by hub parser: %s", event.Payload)
+	}
+	return dropped
+}
+
+func TestR449ReusedPaneNewOccupantNeverReceivesHeldText(t *testing.T) {
+	r27GuardInbox(t)
+	gate := make(chan struct{})
+	fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 3)}
+	store := NewMemoryStore(t)
+	defer store.Close()
+	client, prompts, events := r27Node(t, store, fake)
+	client.relayBusyManager().offer(t.Context(), r27Directive(601, "to the first agent", "idle"))
+	r27Await(t, events, "relay.held")
+	r27WaitStarted(t, fake)
+	held, err := store.RelayHeldForPane(t.Context(), "fixture-pane")
+	if err != nil || len(held) != 1 || held[0].Lease == "" {
+		t.Fatalf("held rows=%+v err=%v want one leased row", held, err)
+	}
+	// Same pane id, same registered name, same terminal — but a new agent
+	// session now occupies it. Pane-string equality alone would deliver.
+	fake.r27SetGet(r449OccupantGet(t, "idle", func(agent map[string]json.RawMessage) {
+		r449SetSession("different-session-value")(agent)
+	}), nil)
+	close(gate)
+	dropped := r449DroppedReason(t, events)
+	if dropped.Reason != "pane_occupant_changed" || dropped.OriginalEventID != 601 {
+		t.Fatalf("dropped=%+v", dropped)
+	}
+	if got := *prompts; len(got) != 0 {
+		t.Fatalf("reused pane prompted=%q", got)
+	}
+	if held, err := store.RelayHeldForPane(t.Context(), "fixture-pane"); err != nil || len(held) != 0 {
+		t.Fatalf("expired lease rows=%+v err=%v", held, err)
+	}
+}
+
+func TestR449LaneRerouteExpiresStaleHeld(t *testing.T) {
+	r27GuardInbox(t)
+	gate := make(chan struct{})
+	fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 3)}
+	store := NewMemoryStore(t)
+	defer store.Close()
+	client, prompts, events := r27Node(t, store, fake)
+	client.relayBusyManager().offer(t.Context(), r449Directive(602, "lane-a", "fixture-pane", "bound to old pane", "idle"))
+	r27Await(t, events, "relay.held")
+	r27WaitStarted(t, fake)
+	// The hub re-resolved lane-a to a different pane and injected there —
+	// that directive is the node's newest route observation for the lane.
+	client.relayBusyManager().offer(t.Context(), r449Directive(603, "lane-a", "fixture-pane-2", "fresh text", "now"))
+	close(gate)
+	dropped := r449DroppedReason(t, events)
+	if dropped.Reason != "lane_rerouted" || dropped.OriginalEventID != 602 {
+		t.Fatalf("dropped=%+v", dropped)
+	}
+	got := *prompts
+	if len(got) != 1 || got[0] != "fixture-pane-2\x00fresh text" {
+		t.Fatalf("prompts=%q want only the rerouted pane's own delivery", got)
+	}
+	if held, err := store.RelayHeldForPane(t.Context(), "fixture-pane"); err != nil || len(held) != 0 {
+		t.Fatalf("stale rows=%+v err=%v", held, err)
+	}
+}
+
+func TestR449UnchangedRouteAndOccupantDelivers(t *testing.T) {
+	r27GuardInbox(t)
+	gate := make(chan struct{})
+	fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 3)}
+	store := NewMemoryStore(t)
+	defer store.Close()
+	client, prompts, events := r27Node(t, store, fake)
+	client.relayBusyManager().offer(t.Context(), r27Directive(604, "still mine", "idle"))
+	r27Await(t, events, "relay.held")
+	r27WaitStarted(t, fake)
+	held, err := store.RelayHeldForPane(t.Context(), "fixture-pane")
+	if err != nil || len(held) != 1 || held[0].Lease == "" {
+		t.Fatalf("held rows=%+v err=%v want one leased row", held, err)
+	}
+	close(gate)
+	r27Await(t, events, "relay.released")
+	r27Await(t, events, "relay.delivered")
+	if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "still mine") {
+		t.Fatalf("prompts=%q", got)
+	}
+}
+
+func TestR449DeadPaneOccupantGone(t *testing.T) {
+	r27GuardInbox(t)
+	gate := make(chan struct{})
+	fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 3)}
+	store := NewMemoryStore(t)
+	defer store.Close()
+	client, prompts, events := r27Node(t, store, fake)
+	client.relayBusyManager().offer(t.Context(), r27Directive(605, "to a dying pane", "idle"))
+	r27Await(t, events, "relay.held")
+	r27WaitStarted(t, fake)
+	// herdr's definitive absence answer — the pane no longer hosts an agent.
+	fake.r27SetGet(r27Fixture(t, "agent-get-not-found.json"), errors.New("exit status 1"))
+	close(gate)
+	dropped := r449DroppedReason(t, events)
+	if dropped.Reason != "pane_occupant_gone" || dropped.OriginalEventID != 605 {
+		t.Fatalf("dropped=%+v", dropped)
+	}
+	if got := *prompts; len(got) != 0 {
+		t.Fatalf("dead pane prompted=%q", got)
+	}
+}
+
+func TestR449UnverifiableProbeRearmsRatherThanExpires(t *testing.T) {
+	r27GuardInbox(t)
+	gate := make(chan struct{})
+	fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 8)}
+	store := NewMemoryStore(t)
+	defer store.Close()
+	client, prompts, events := r27Node(t, store, fake)
+	client.relayBusyManager().offer(t.Context(), r27Directive(606, "probe keeps failing", "idle"))
+	r27Await(t, events, "relay.held")
+	r27WaitStarted(t, fake)
+	// A dead socket is not stale evidence: the lease gate must not expire on
+	// it. It runs the bounded rearm instead, which is why the row ends as an
+	// inject-failure drop and never as a lease verdict.
+	fake.r27SetGet([]byte("dial unix /missing/herdr.sock: no such file"), errors.New("exit status 1"))
+	close(gate)
+	dropped := r449DroppedReason(t, events)
+	if dropped.Reason != "inject_failed_max_attempts" || dropped.OriginalEventID != 606 {
+		t.Fatalf("dropped=%+v want bounded inject retry exhaustion", dropped)
+	}
+	if got := *prompts; len(got) != 0 {
+		t.Fatalf("unverifiable pane prompted=%q", got)
+	}
+}
+
+func TestR449PreLeaseRowsFallBackToNameMembership(t *testing.T) {
+	r27GuardInbox(t)
+	seed := func(t *testing.T, lane string, eventID int64) (*HubClient, *[]string, chan hubClientEvent, *Store) {
+		fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", started: make(chan struct{}, 1)}
+		store := NewMemoryStore(t)
+		client, prompts, events := r27Node(t, store, fake)
+		inserted, err := store.InsertRelayHeld(t.Context(), relayHeld{Pane: "fixture-pane", Lane: lane, EventID: eventID, JobID: "relay-job-" + strconv.FormatInt(eventID, 10), Text: "legacy row", HeldSince: time.Now(), DeliverPolicy: "idle", MaxWait: time.Second})
+		if err != nil || !inserted {
+			t.Fatalf("seed inserted=%t err=%v", inserted, err)
+		}
+		return client, prompts, events, store
+	}
+
+	t.Run("name match still delivers", func(t *testing.T) {
+		client, prompts, events, store := seed(t, "lane-a", 610)
+		defer store.Close()
+		client.relayBusyManager().release(t.Context(), "fixture-pane", false)
+		r27Await(t, events, "relay.delivered")
+		if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "legacy row") {
+			t.Fatalf("prompts=%q", got)
+		}
+	})
+
+	t.Run("name mismatch expires unverifiable", func(t *testing.T) {
+		client, prompts, events, store := seed(t, "lane-b", 611)
+		defer store.Close()
+		client.relayBusyManager().release(t.Context(), "fixture-pane", false)
+		dropped := r449DroppedReason(t, events)
+		if dropped.Reason != "lease_unverifiable" {
+			t.Fatalf("dropped=%+v", dropped)
+		}
+		if got := *prompts; len(got) != 0 {
+			t.Fatalf("prompts=%q", got)
+		}
+	})
+
+	t.Run("unnamed occupant expires unverifiable", func(t *testing.T) {
+		fake := &r27FakeHerdr{t: t, waitStatus: "idle", started: make(chan struct{}, 1)}
+		fake.r27SetGet(r449OccupantGet(t, "idle", func(agent map[string]json.RawMessage) {
+			delete(agent, "name")
+		}), nil)
+		store := NewMemoryStore(t)
+		defer store.Close()
+		client, prompts, events := r27Node(t, store, fake)
+		inserted, err := store.InsertRelayHeld(t.Context(), relayHeld{Pane: "fixture-pane", Lane: "lane-a", EventID: 612, JobID: "relay-job-612", Text: "legacy row", HeldSince: time.Now(), DeliverPolicy: "idle", MaxWait: time.Second})
+		if err != nil || !inserted {
+			t.Fatalf("seed inserted=%t err=%v", inserted, err)
+		}
+		client.relayBusyManager().release(t.Context(), "fixture-pane", false)
+		dropped := r449DroppedReason(t, events)
+		if dropped.Reason != "lease_unverifiable" {
+			t.Fatalf("dropped=%+v", dropped)
+		}
+		if got := *prompts; len(got) != 0 {
+			t.Fatalf("prompts=%q", got)
+		}
+	})
+}
+
+func TestR449LegalExtremes(t *testing.T) {
+	r27GuardInbox(t)
+	t.Run("zero held rows probes nothing", func(t *testing.T) {
+		fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", started: make(chan struct{}, 1)}
+		store := NewMemoryStore(t)
+		defer store.Close()
+		client, prompts, _ := r27Node(t, store, fake)
+		client.relayBusyManager().release(t.Context(), "fixture-pane", false)
+		if rows, err := store.RelayHeldForPane(t.Context(), "fixture-pane"); err != nil || len(rows) != 0 || fake.count("get") != 0 || len(*prompts) != 0 {
+			t.Fatalf("rows=%d get=%d prompts=%d err=%v", len(rows), fake.count("get"), len(*prompts), err)
+		}
+	})
+
+	t.Run("route moved twice expires on newest observation", func(t *testing.T) {
+		gate := make(chan struct{})
+		fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 3)}
+		store := NewMemoryStore(t)
+		defer store.Close()
+		client, prompts, events := r27Node(t, store, fake)
+		client.relayBusyManager().offer(t.Context(), r449Directive(620, "lane-a", "fixture-pane", "oldest binding", "idle"))
+		r27Await(t, events, "relay.held")
+		r27WaitStarted(t, fake)
+		client.relayBusyManager().offer(t.Context(), r449Directive(621, "lane-a", "fixture-pane-2", "hop one", "now"))
+		client.relayBusyManager().offer(t.Context(), r449Directive(622, "lane-a", "fixture-pane-3", "hop two", "now"))
+		close(gate)
+		dropped := r449DroppedReason(t, events)
+		if dropped.Reason != "lane_rerouted" || dropped.OriginalEventID != 620 {
+			t.Fatalf("dropped=%+v", dropped)
+		}
+		got := *prompts
+		if len(got) != 2 || got[0] != "fixture-pane-2\x00hop one" || got[1] != "fixture-pane-3\x00hop two" {
+			t.Fatalf("prompts=%q want only the two live-route deliveries", got)
+		}
+	})
+
+	t.Run("route back to same pane still checks occupant", func(t *testing.T) {
+		gate := make(chan struct{})
+		fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 4)}
+		store := NewMemoryStore(t)
+		defer store.Close()
+		client, prompts, events := r27Node(t, store, fake)
+		client.relayBusyManager().offer(t.Context(), r27Directive(623, "first occupant's text", "idle"))
+		r27Await(t, events, "relay.held")
+		r27WaitStarted(t, fake)
+		// Route happens to resolve to the same pane id again — but a new
+		// session occupies it now, and the second row leases to that session.
+		fake.r27SetGet(r449OccupantGet(t, "working", r449SetSession("second-session")), nil)
+		client.relayBusyManager().offer(t.Context(), r27Directive(624, "second occupant's text", "idle"))
+		r27Await(t, events, "relay.held")
+		fake.r27SetGet(r449OccupantGet(t, "idle", r449SetSession("second-session")), nil)
+		close(gate)
+		dropped := r449DroppedReason(t, events)
+		if dropped.Reason != "pane_occupant_changed" || dropped.OriginalEventID != 623 {
+			t.Fatalf("dropped=%+v", dropped)
+		}
+		r27Await(t, events, "relay.delivered")
+		got := *prompts
+		if len(got) != 1 || !strings.Contains(got[0], "second occupant's text") || strings.Contains(got[0], "first occupant") {
+			t.Fatalf("prompts=%q want only the live occupant's delivery", got)
+		}
+	})
+
+	t.Run("unregistered lane falls back to lease check", func(t *testing.T) {
+		fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", started: make(chan struct{}, 1)}
+		store := NewMemoryStore(t)
+		defer store.Close()
+		client, prompts, events := r27Node(t, store, fake)
+		// No inject for this lane was ever observed, so there is no route
+		// evidence; the row must stand on its occupant lease alone.
+		occupant := r449OccupantGet(t, "idle", func(agent map[string]json.RawMessage) {})
+		parsed, ok := parseRelayAgentOccupant(r27RewritePane(occupant, "fixture-pane"))
+		if !ok {
+			t.Fatal("fixture occupant did not parse")
+		}
+		inserted, err := store.InsertRelayHeld(t.Context(), relayHeld{Pane: "fixture-pane", Lane: "lane-ghost", EventID: 630, JobID: "relay-job-630", Text: "no route observation", HeldSince: time.Now(), DeliverPolicy: "idle", MaxWait: time.Second, Lease: parsed.key()})
+		if err != nil || !inserted {
+			t.Fatalf("seed inserted=%t err=%v", inserted, err)
+		}
+		client.relayBusyManager().release(t.Context(), "fixture-pane", false)
+		r27Await(t, events, "relay.delivered")
+		if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "no route observation") {
+			t.Fatalf("prompts=%q", got)
+		}
+	})
+}
+
+func TestR449HubDroppedClearsProjectionAndPendingAck(t *testing.T) {
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "host-a": "node"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	agent := &hubAgent{}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: agent}
+	key := relayPendingKey(640, "relay-job-640")
+	hub.mu.Lock()
+	hub.relayHeld[640] = hubRelayHeldProjection{ID: 640, Lane: "lane-a", Pane: "fixture-pane", Machine: "host-a", JobID: "relay-job-640"}
+	hub.r19a.relayPending[key] = relayPending{machine: "host-a", pane: "fixture-pane", eventID: 640, kind: "lane.event", held: true}
+	hub.mu.Unlock()
+	payload, err := json.Marshal(relayDroppedPayload{JobID: "relay-job-640", Pane: "fixture-pane", Lane: "lane-a", OriginalEventID: 640, Reason: "lane_rerouted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	wire, err := json.Marshal(struct {
+		Type    string          `json:"type"`
+		Kind    string          `json:"kind"`
+		Payload json.RawMessage `json:"payload"`
+	}{Type: "event", Kind: "relay.dropped", Payload: payload})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, valid := parseHubInbound(wire); !valid {
+		t.Fatalf("parseHubInbound rejected %s", wire)
+	}
+	hub.handleAgentMessage("host-a", "fixture", agent, wire)
+	hub.mu.Lock()
+	_, heldExists := hub.relayHeld[640]
+	_, pendingExists := hub.r19a.relayPending[key]
+	hub.mu.Unlock()
+	if heldExists || pendingExists {
+		t.Fatalf("drop left held=%t pending=%t", heldExists, pendingExists)
 	}
 }
 

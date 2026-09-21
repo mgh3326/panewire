@@ -188,6 +188,10 @@ func OpenStore(path string) (*Store, error) {
 	_, _ = db.Exec(`ALTER TABLE relay_held ADD COLUMN edited INTEGER NOT NULL DEFAULT 0`)
 	// #264 D1: bounds the inject-retry rearm loop across a store round-trip.
 	_, _ = db.Exec(`ALTER TABLE relay_held ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0`)
+	// #449: lease is the pane-occupant identity captured when the row was held.
+	// Rows from before this column exist carry '', which the release gate
+	// treats as unverifiable — never as a match.
+	_, _ = db.Exec(`ALTER TABLE relay_held ADD COLUMN lease TEXT NOT NULL DEFAULT ''`)
 	if _, err := db.Exec(`CREATE INDEX IF NOT EXISTS relay_held_pane_recv_seq ON relay_held(pane,recv_seq)`); err != nil {
 		db.Close()
 		return nil, err
