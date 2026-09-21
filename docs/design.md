@@ -129,7 +129,7 @@ panewire wait --agent TARGET --status STATUS --settle DURATION --timeout DURATIO
 | 인자 | 계약 |
 |---|---|
 | `--file PATH` | 파일이 존재하고 읽을 수 있는지 확인한다. 먼저 size/mtime이 `--settle` 동안 안정된 것을 확인하고, 성공 직전에 SHA-256을 한 번 계산한다. 파일 내용은 SQLite에 복사하지 않는다. |
-| `--agent TARGET` | herdr target을 유일하게 해석하고 해당 pane의 상태 이벤트를 기다린다. 이름 우선, pane/tab label은 유일할 때만 폴백한다. |
+| `--agent TARGET` | `prompt --to`와 동일한 해석기로 유일하게 해석한다: pane_id·name·label 정확 일치만. 복수 후보는 전부 표시하고 실패하며 자동 선택하지 않는다. 해석 후에는 pane_id+agent_session으로 점유자를 고정해 이름이 지워져도 대기가 끊기지 않고, 점유자가 사라지거나 다른 세션으로 바뀌면 실패한다. |
 | `--status STATUS` | agent wait에서 필수. herdr enum의 다섯 값만 허용한다. 파일 wait에서는 사용하면 usage error다. |
 | `--settle DURATION` | `0` 이상. 파일은 content/stat 안정, agent는 원하는 상태가 연속 유지된 시간을 뜻한다. 상태가 다른 값으로 바뀌면 settle clock을 초기화한다. |
 | `--timeout DURATION` | 전체 기한. 만료 시 exit 3이며 마지막 관찰값과 로그 ID를 출력한다. |
@@ -149,7 +149,7 @@ panewire prompt --from SENDER --to TARGET --file PATH [--uptake tool|status-tran
 | 인자 | 계약 |
 |---|---|
 | `--from SENDER` | 비어 있지 않은 provenance. 권고 형식은 `세션이름 (역할, pane_id)`이며, 모델명만으로 식별하지 않는다. 원문 prompt와 함께 로그에 남긴다. |
-| `--to TARGET` | agent 이름 우선, 없을 때 유일한 탭 라벨 폴백. 복수 후보, 부재, 현재 pane과 문맥 불일치는 전송하지 않는다. |
+| `--to TARGET` | `wait --agent`와 동일한 해석기: pane_id·name·label 정확 일치만. 복수 후보(전부 표시 후 실패), 부재, 현재 pane과 문맥 불일치는 전송하지 않는다. |
 | `--file PATH` | prompt 본문을 읽을 입력 파일. 파일은 전송의 원문 정본이며 SHA-256을 계산한다. 첫 metadata block에 수신자 identity를 기술하는 `expect:`를 포함해야 한다. |
 | `--uptake` | `status-transition` 또는 `tool`. 생략 시 제출 검증까지만 수행하며 uptake 성공을 주장하지 않는다. |
 

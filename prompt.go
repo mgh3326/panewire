@@ -25,9 +25,9 @@ type PromptResult struct {
 }
 
 type paneIdentity struct {
-	PaneID, WorkspaceID, TabID, Agent, Name, Label, Title, CWD, Harness, Status string
-	Revision, StateChangeSeq                                                    int64
-	InteractiveReady                                                            *bool
+	PaneID, WorkspaceID, TabID, Agent, Name, Label, Title, CWD, Harness, Status, AgentSession string
+	Revision, StateChangeSeq                                                                  int64
+	InteractiveReady                                                                          *bool
 }
 
 type expectFields struct {
@@ -83,7 +83,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	if !caps.Prompt || !caps.AgentRead {
 		return recordNewFailure(ctx, store, Delivery{DeliveryID: id, Sender: req.Sender, TargetInput: req.Target, SourcePath: req.Path, PromptSHA256: promptHash, RequestedAtMS: time.Now().UnixMilli(), PreflightResult: "ambiguous", ErrorCode: "daemon_unavailable"}, body, req.StorePromptBody, ExitDaemonUnavailable, "prompt capability unavailable")
 	}
-	pane, err := resolvePane(ctx, client, req.Target)
+	pane, err := resolveTarget(ctx, client, req.Target)
 	if err != nil {
 		if ctx.Err() != nil {
 			err = &codedError{ExitTimeout, fmt.Errorf("timeout resolving target")}
@@ -116,7 +116,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 
 	// Resolve again after the read. Revision drift is recorded; identity drift
 	// is a hard stop before the durable preflight commit/send boundary.
-	sendPane, err := resolvePane(ctx, client, req.Target)
+	sendPane, err := resolveTarget(ctx, client, req.Target)
 	if err != nil {
 		if ctx.Err() != nil {
 			err = &codedError{ExitTimeout, fmt.Errorf("timeout resolving target")}
@@ -296,47 +296,8 @@ func tabLabels(ctx context.Context, c *HerdrClient) map[string]string {
 	return labels
 }
 
-func resolvePane(ctx context.Context, c *HerdrClient, target string) (paneIdentity, error) {
-	raw, err := c.Call(ctx, "agent.list", map[string]any{})
-	if err != nil {
-		return paneIdentity{}, &codedError{ExitDaemonUnavailable, err}
-	}
-	var top struct {
-		Agents []map[string]any `json:"agents"`
-	}
-	if json.Unmarshal(raw, &top) != nil {
-		return paneIdentity{}, &codedError{ExitConditionInvalid, fmt.Errorf("invalid herdr agent list")}
-	}
-	labels := tabLabels(ctx, c)
-	var named, labeled []paneIdentity
-	for _, a := range top.Agents {
-		p := identityFromMap(a)
-		if p.Label == "" && p.TabID != "" {
-			p.Label = labels[p.TabID]
-		}
-		if p.Agent == target || p.Name == target {
-			named = append(named, p)
-		} else if p.Label == target || p.TabID == target || p.Title == target || aString(a, "tab_label") == target {
-			labeled = append(labeled, p)
-		}
-	}
-	if len(named) == 1 {
-		return named[0], nil
-	}
-	if len(named) > 1 {
-		return paneIdentity{}, &codedError{ExitConditionInvalid, fmt.Errorf("ambiguous agent target: %s", target)}
-	}
-	if len(labeled) == 1 {
-		return labeled[0], nil
-	}
-	if len(labeled) > 1 {
-		return paneIdentity{}, &codedError{ExitConditionInvalid, fmt.Errorf("ambiguous label target: %s", target)}
-	}
-	return paneIdentity{}, &codedError{ExitConditionInvalid, fmt.Errorf("agent target not found: %s", target)}
-}
-
 func identityFromMap(a map[string]any) paneIdentity {
-	return paneIdentity{PaneID: aString(a, "pane_id"), WorkspaceID: aString(a, "workspace_id"), TabID: firstString(a, "tab_id", "tab"), Agent: aString(a, "agent"), Name: aString(a, "name"), Label: firstString(a, "label", "tab_label", "display_agent"), Title: aString(a, "title"), CWD: firstString(a, "cwd", "workdir", "working_dir"), Harness: firstString(a, "harness", "harness_kind", "kind", "agent"), Status: aString(a, "agent_status"), Revision: aInt(a, "revision"), StateChangeSeq: aInt(a, "state_change_seq"), InteractiveReady: aBoolPtr(a, "interactive_ready")}
+	return paneIdentity{PaneID: aString(a, "pane_id"), WorkspaceID: aString(a, "workspace_id"), TabID: firstString(a, "tab_id", "tab"), Agent: aString(a, "agent"), Name: aString(a, "name"), Label: firstString(a, "label", "tab_label", "display_agent"), Title: aString(a, "title"), CWD: firstString(a, "cwd", "workdir", "working_dir"), Harness: firstString(a, "harness", "harness_kind", "kind", "agent"), Status: aString(a, "agent_status"), Revision: aInt(a, "revision"), StateChangeSeq: aInt(a, "state_change_seq"), InteractiveReady: aBoolPtr(a, "interactive_ready"), AgentSession: agentSessionValue(a["agent_session"])}
 }
 func aString(a map[string]any, key string) string { v, _ := a[key].(string); return v }
 func aBoolPtr(a map[string]any, key string) *bool {
