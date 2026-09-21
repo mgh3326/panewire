@@ -392,6 +392,98 @@ func TestLanesAuditCLIErrors(t *testing.T) {
 	}
 }
 
+// TestLanesAuditRejectsCorruptNodesBody pins the response-integrity guard:
+// a /v1/nodes body with trailing garbage, malformed JSON, or bytes past the
+// 1 MiB cap degrades every judged lane to indeterminate — never a verdict
+// computed from a partial read. Removing the trailing check or the size cap
+// must turn these assertions RED.
+func TestLanesAuditRejectsCorruptNodesBody(t *testing.T) {
+	tokenEnv, _ := t441Envs(t)
+	laneRow := `{"lane":"lane-a","machine":"machine-a","pane":"w1:p9","parent":"","sink":false}`
+	lanesBody := `{"lanes":[` + laneRow + `],"control_epoch":7}`
+	validNodes := `{"nodes":[{"machine_id":"machine-a","state":"connected","session_snapshot":` + t509FreshSnapshot("[]") + `}]}`
+	cases := []struct {
+		name       string
+		nodesBody  string
+		wantReason string
+	}{
+		{name: "trailing garbage", nodesBody: validNodes + `{"junk":`, wantReason: lanesAuditReasonNodesResponseBad},
+		{name: "trailing second envelope", nodesBody: validNodes + validNodes, wantReason: lanesAuditReasonNodesResponseBad},
+		{name: "malformed", nodesBody: `{"nodes":[`, wantReason: lanesAuditReasonNodesResponseBad},
+		{name: "oversize", nodesBody: `{"nodes":[],"pad":"` + strings.Repeat("x", lanesAuditResponseMaxBytes) + `"}`, wantReason: lanesAuditReasonNodesResponseBig},
+	}
+	for _, fixture := range cases {
+		t.Run(fixture.name, func(t *testing.T) {
+			server := t509HubFixture(t, nil, lanesBody, fixture.nodesBody)
+			defer server.Close()
+			var stdout, stderr bytes.Buffer
+			code := runLanesAuditCLI([]string{"--hub-url", server.URL, "--hub-token-env", tokenEnv, "--json"}, &stdout, &stderr, t509Deps(server))
+			if code != ExitPartial {
+				t.Fatalf("code=%d want=%d stdout=%q", code, ExitPartial, stdout.String())
+			}
+			var result lanesAuditResult
+			if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+				t.Fatalf("output not JSON: %v %q", err, stdout.String())
+			}
+			row := t509Verdicts(result)["lane-a"]
+			if row.Verdict != lanesAuditVerdictIndeterminate || row.Reason != fixture.wantReason {
+				t.Fatalf("rejected nodes body judged: %+v", row)
+			}
+			if result.Outcome != lanesAuditOutcomePartial {
+				t.Fatalf("outcome=%q", result.Outcome)
+			}
+		})
+	}
+}
+
+// TestLanesAuditRejectsCorruptLanesBody keeps the lanes side honest the only
+// way it can be: a rejected lane table yields no lanes to mark indeterminate,
+// so the command fails instead of showing a partial route set.
+func TestLanesAuditRejectsCorruptLanesBody(t *testing.T) {
+	tokenEnv, _ := t441Envs(t)
+	validLanes := `{"lanes":[{"lane":"lane-a","machine":"machine-a","pane":"w1:p1","parent":"","sink":false}],"control_epoch":7}`
+	cases := []struct {
+		name      string
+		lanesBody string
+	}{
+		{name: "trailing garbage", lanesBody: validLanes + `{"junk":`},
+		{name: "oversize", lanesBody: `{"lanes":[],"pad":"` + strings.Repeat("x", lanesAuditResponseMaxBytes) + `"}`},
+	}
+	for _, fixture := range cases {
+		t.Run(fixture.name, func(t *testing.T) {
+			server := t509HubFixture(t, nil, fixture.lanesBody, `{"nodes":[]}`)
+			defer server.Close()
+			var stdout, stderr bytes.Buffer
+			code := runLanesAuditCLI([]string{"--hub-url", server.URL, "--hub-token-env", tokenEnv, "--json"}, &stdout, &stderr, t509Deps(server))
+			if code == ExitOK || code == ExitPartial {
+				t.Fatalf("corrupt lanes body produced verdicts: code=%d stdout=%q", code, stdout.String())
+			}
+		})
+	}
+}
+
+// TestLanesAuditNodesRejectedBuilder covers the degraded renderer directly:
+// sink lanes stay skipped and a malformed lane projection keeps its own
+// more specific reason.
+func TestLanesAuditNodesRejectedBuilder(t *testing.T) {
+	lanes := []hubLaneProjection{
+		{Lane: "sink-a", Sink: true},
+		t509Lane("lane-a", "machine-a", "w1:p1"),
+		t509Lane("lane-inv", "Machine-A", "w1:p1"),
+	}
+	result := buildLanesAuditNodesRejected(lanes, lanesAuditReasonNodesResponseBad, t509Now)
+	if result.Outcome != lanesAuditOutcomePartial || result.Summary.SinkSkipped != 1 || result.Summary.Indeterminate != 2 {
+		t.Fatalf("result=%+v", result)
+	}
+	rows := t509Verdicts(result)
+	if rows["lane-a"].Reason != lanesAuditReasonNodesResponseBad {
+		t.Fatalf("row=%+v", rows["lane-a"])
+	}
+	if rows["lane-inv"].Reason != lanesAuditReasonLaneInvalid {
+		t.Fatalf("row=%+v", rows["lane-inv"])
+	}
+}
+
 func TestLanesAuditTextRender(t *testing.T) {
 	tokenEnv, _ := t441Envs(t)
 	nodesBody := `{"nodes":[{"machine_id":"machine-a","state":"connected","alert_class":"presence-only","accepting":false,"remote_meta":{},"session_snapshot":` + t509FreshSnapshot("["+t509Session("w1:p1")+"]") + `}]}`

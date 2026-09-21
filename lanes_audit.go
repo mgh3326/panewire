@@ -38,6 +38,8 @@ const (
 // that keeps the lane's pane membership unknowable from hub-held data alone.
 const (
 	lanesAuditReasonLaneInvalid        = "lane_projection_invalid"
+	lanesAuditReasonNodesResponseBad   = "nodes_response_invalid"
+	lanesAuditReasonNodesResponseBig   = "nodes_response_oversize"
 	lanesAuditReasonNodeNotReturned    = "node_not_returned"
 	lanesAuditReasonSnapshotMissing    = "snapshot_missing"
 	lanesAuditReasonSnapshotInvalid    = "snapshot_invalid"
@@ -54,6 +56,21 @@ const (
 	lanesAuditReasonSnapshotAgeExpired = "snapshot_age_exceeded"
 	lanesAuditReasonTruncated          = "truncated"
 )
+
+// lanesAuditResponseMaxBytes caps both hub response bodies. The reader pulls
+// one byte past the cap so an oversized body is detected, never silently
+// truncated — a cut /v1/nodes body could drop sessions and turn their lanes
+// into false dead verdicts.
+const lanesAuditResponseMaxBytes = 1 << 20
+
+var errLanesAuditResponseOversize = errors.New("hub response body exceeds limit")
+
+// lanesAuditLanesWire is the narrow /v1/lanes view this command needs: the
+// lane rows alone. Control fields are other commands' concern, and unknown
+// fields stay ignored so a hub-side additive change cannot break the audit.
+type lanesAuditLanesWire struct {
+	Lanes []hubLaneProjection `json:"lanes"`
+}
 
 // lanesAuditNodeWire is the narrow /v1/nodes row this command reads. Unknown
 // fields stay ignored so a hub-side additive change cannot flip a verdict.
@@ -278,6 +295,49 @@ func buildLanesAuditResult(lanes []hubLaneProjection, nodes []lanesAuditNodeWire
 	return result
 }
 
+// buildLanesAuditNodesRejected renders the audit when the /v1/nodes body was
+// rejected wholesale (oversize or unparseable): the lane table is intact, so
+// every non-sink lane is shown as indeterminate with the rejection reason.
+// Degrading this way is the point of the invariant — a corrupt observation
+// must never collapse into a confident alive/dead answer.
+func buildLanesAuditNodesRejected(lanes []hubLaneProjection, reason string, now time.Time) lanesAuditResult {
+	result := lanesAuditResult{
+		FetchedAt: now.UTC().Format(time.RFC3339),
+		Outcome:   lanesAuditOutcomePartial,
+		Lanes:     []lanesAuditLaneRow{},
+	}
+	for _, lane := range lanes {
+		if lane.Sink {
+			result.Summary.SinkSkipped++
+			continue
+		}
+		row := lanesAuditLaneRow{Lane: lane.Lane, Machine: lane.Machine, Pane: lane.Pane, Verdict: lanesAuditVerdictIndeterminate, Reason: reason}
+		if !validHubLaneProjection(lane) {
+			row.Reason = lanesAuditReasonLaneInvalid
+		}
+		result.Lanes = append(result.Lanes, row)
+		result.Summary.Lanes++
+		result.Summary.Indeterminate++
+	}
+	sort.Slice(result.Lanes, func(i, j int) bool { return result.Lanes[i].Lane < result.Lanes[j].Lane })
+	return result
+}
+
+// readLanesAuditResponse reads one hub response body under the size cap.
+// Bodies larger than the cap are rejected as a class of their own; anything
+// else the caller unmarshals whole, so trailing bytes after a valid envelope
+// fail decode instead of being silently dropped.
+func readLanesAuditResponse(body io.Reader) ([]byte, error) {
+	raw, err := io.ReadAll(io.LimitReader(body, lanesAuditResponseMaxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(raw) > lanesAuditResponseMaxBytes {
+		return nil, errLanesAuditResponseOversize
+	}
+	return raw, nil
+}
+
 func renderLanesAuditResult(writer io.Writer, result lanesAuditResult, jsonOut bool) {
 	if jsonOut {
 		encoded, _ := json.Marshal(result)
@@ -374,7 +434,10 @@ func parseLanesAuditArgs(args []string) (lanesAuditOptions, error) {
 // GET /v1/nodes — and renders the per-lane verdicts. It issues no other
 // request and contacts no node: both inputs are data the hub already holds.
 // The command is display-only; nothing about a lane, an event, or a file is
-// ever written.
+// ever written. A rejected /v1/nodes body degrades every lane to
+// indeterminate rather than failing the command — the lane table is still
+// worth showing. A rejected /v1/lanes body stays an error: indeterminate is
+// a per-lane verdict and there are no lanes to attach it to.
 func runLanesAuditCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	options, err := parseLanesAuditArgs(args)
 	if err != nil {
@@ -417,8 +480,12 @@ func runLanesAuditCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) 
 	if lanesResponse.StatusCode != http.StatusOK {
 		return fail(ExitDeliveryFailure, "lanes_status_"+fmt.Sprint(lanesResponse.StatusCode))
 	}
-	var lanesBody lanesEnvelope
-	if err := decodeLanesJSON(lanesResponse.Body, &lanesBody); err != nil {
+	lanesRaw, err := readLanesAuditResponse(lanesResponse.Body)
+	if err != nil {
+		return fail(ExitInternal, "lanes_body_rejected")
+	}
+	var lanesBody lanesAuditLanesWire
+	if json.Unmarshal(lanesRaw, &lanesBody) != nil {
 		return fail(ExitInternal, "lanes_decode_failed")
 	}
 	nodesResponse, err := client.do(ctx, http.MethodGet, "/v1/nodes", nil, nil)
@@ -429,11 +496,21 @@ func runLanesAuditCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) 
 	if nodesResponse.StatusCode != http.StatusOK {
 		return fail(ExitDeliveryFailure, "nodes_status_"+fmt.Sprint(nodesResponse.StatusCode))
 	}
+	nodesRaw, nodesErr := readLanesAuditResponse(nodesResponse.Body)
 	var nodesBody struct {
 		Nodes []lanesAuditNodeWire `json:"nodes"`
 	}
-	if json.NewDecoder(io.LimitReader(nodesResponse.Body, 1<<20)).Decode(&nodesBody) != nil {
-		return fail(ExitInternal, "nodes_decode_failed")
+	if nodesErr == nil && json.Unmarshal(nodesRaw, &nodesBody) != nil {
+		nodesErr = errors.New("nodes body rejected")
+	}
+	if nodesErr != nil {
+		reason := lanesAuditReasonNodesResponseBad
+		if errors.Is(nodesErr, errLanesAuditResponseOversize) {
+			reason = lanesAuditReasonNodesResponseBig
+		}
+		result = buildLanesAuditNodesRejected(lanesBody.Lanes, reason, now())
+		renderLanesAuditResult(stdout, result, options.jsonOut)
+		return ExitPartial
 	}
 	result = buildLanesAuditResult(lanesBody.Lanes, nodesBody.Nodes, now())
 	renderLanesAuditResult(stdout, result, options.jsonOut)

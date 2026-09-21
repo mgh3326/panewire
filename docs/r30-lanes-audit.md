@@ -33,6 +33,16 @@ it afterwards. `dead` therefore requires the observation to be *complete*:
 `truncated=false`, `received_at` present, not in the future, and within the
 120-second freshness bound `sessions find` uses.
 
+The same rule guards the transport itself. Both response bodies are read
+under a 1 MiB cap and must decode as exactly one JSON value — a valid
+envelope followed by trailing bytes is rejected, not clipped. A rejected
+`/v1/nodes` body degrades every judged lane to `indeterminate`
+(`nodes_response_invalid`, or `nodes_response_oversize` past the cap):
+dropping part of the node list would otherwise read as panes gone. A
+rejected `/v1/lanes` body stays a command error instead — `indeterminate`
+is a per-lane verdict and a corrupt lane table leaves no lanes to attach it
+to.
+
 The join is strict: only the node named by `lane.machine` decides, and only
 `pane_id` equality counts. The same pane id on another machine, or a label
 that echoes it, proves nothing. Sink lanes are skipped entirely and counted
