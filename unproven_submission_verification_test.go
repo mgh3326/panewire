@@ -82,6 +82,60 @@ func TestClassifySubmissionAllFourValues(t *testing.T) {
 			marker:  "",
 			want:    "unproven",
 		},
+		// devin fixtures below are literal screen strings captured live on
+		// 2026-09-16 from an idle devin CLI pane (w1M:p5, v3000.10.27,
+		// cwd=brewdial) via `herdr agent read --source visible`, plus the
+		// operator's own capture from hk:doc
+		// brief/2026-09-16/devin-submission-evidence. None are synthesized.
+		{
+			name:    "devin queued banner (operator capture) is queued",
+			harness: "devin",
+			screen:  "── 1 queued ──────────────────────────────────────── ↑ edit · ↵ send now ──\n○ hi\n─────────────────────\n❭ Press Enter to send queued messages now\n─────────────────────\nSWE-2 High",
+			marker:  "",
+			want:    "queued",
+		},
+		{
+			name:    "devin marker echoed above the composer (post-submit, idle placeholder returned) is marker_observed",
+			harness: "devin",
+			screen:  " Just let me know.\n\n─────────────────────\n❭ hi\n─────────────────────\n─────────────────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n─────────────────────\nSWE-2 High",
+			marker:  "hi",
+			want:    "marker_observed",
+		},
+		{
+			name:    "devin marker still between the last two dividers (submit-to-redraw transient, live-measured) is composer_residue",
+			harness: "devin",
+			screen:  " Just let me know.\n\n─────────────────────\n❭ observe test marker 1789535304\n─────────────────────\nSWE-2 High",
+			marker:  "observe test marker 1789",
+			want:    "composer_residue",
+		},
+		{
+			name:    "devin marker moved above the last two dividers once working starts (live-measured) is marker_observed",
+			harness: "devin",
+			screen:  "❭ observe test marker 1789535304\n\n⠇⠀ Thinking · 0s (esc twice to interrupt)\n─────────────────────\n❭ Guide Devin while it works\n─────────────────────\nSWE-2 High",
+			marker:  "observe test marker 1789",
+			want:    "marker_observed",
+		},
+		{
+			name:    "devin marker absent entirely, idle placeholder present, is unproven",
+			harness: "devin",
+			screen:  "─────────────────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n─────────────────────\nSWE-2 High",
+			marker:  "observe test marker 1789",
+			want:    "unproven",
+		},
+		{
+			// Live-captured 2026-09-16: submitting a second prompt while
+			// devin is still working on the first queues it, and the
+			// queued item's own text is echoed in the queue banner
+			// itself ("○ <text>") in the same screen the marker check
+			// would also match against -- so queued must be decided
+			// before marker_observed or this would wrongly report
+			// marker_observed for a message that has not been sent yet.
+			name:    "devin queued banner containing the marker itself still classifies queued, not marker_observed",
+			harness: "devin",
+			screen:  "❭ queuecheckA 1789535839\n\n⠀⣠ Thinking · 1s (esc twice to interrupt)\n── 1 queued ──────────────────────────────────────── ↑ edit · ↵ send now ──\n○ queuecheckB 1789535839\n─────────────────────\n❭ Press Enter to send queued messages now\n─────────────────────\nSWE-2 High",
+			marker:  "queuecheckB 1789535839",
+			want:    "queued",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -222,22 +276,25 @@ func TestRelayInjectVerifySubmissionQueuedArmUnchanged(t *testing.T) {
 
 // TestRelayInjectVerifySubmissionHarnessEvidenceMatrix is the closed
 // enumeration the 2026-09-16 rework requires: every harness family (claude,
-// codex, a harness with no submission-evidence path such as devin, and an
-// unrecognized/empty harness string) crossed with every classifySubmission
-// value it can actually reach, pinning both the delivered/unconfirmed result
-// and whether that result would drive a hub retry (busy_relay.go's
-// retryOrDrop fires on false; defaultHubRelayInject sends the prompt before
-// verifying, so a retry re-injects into a still-live pane -- see
-// hub_client.go's harnessHasSubmissionEvidence for why that distinction
-// exists).
+// codex, devin -- added this rework, no longer the no-evidence carve-out --
+// and an unrecognized/empty harness string, which keeps the carve-out)
+// crossed with every classifySubmission value it can actually reach, pinning
+// both the delivered/unconfirmed result and whether that result would drive
+// a hub retry (busy_relay.go's retryOrDrop fires on false;
+// defaultHubRelayInject sends the prompt before verifying, so a retry
+// re-injects into a still-live pane -- see hub_client.go's
+// harnessHasSubmissionEvidence for why that distinction exists).
 //
 // Reachability by harness (classifySubmission's own gating):
 //   - claude:  composer_residue (chip or divider-echo), queued, marker_observed, unproven
 //   - codex:   composer_residue (chip only), queued, marker_observed, unproven
-//   - devin:   composer_residue (chip only, and devin's real screen never emits
-//     one), unproven -- queued and marker_observed are unreachable
-//     (harness-gated)
-//   - other:   same as devin -- composer_residue (chip only), unproven
+//   - devin:   composer_residue (chip, or divider-echo via the same
+//     claudeComposerContains position check -- devin shares claude's fixed
+//     two-divider composer layout), queued ("send now"), marker_observed,
+//     unproven
+//   - other:   composer_residue (chip only), unproven -- queued and
+//     marker_observed stay unreachable (harness-gated); this is the
+//     remaining carve-out (e.g. grok, see harnessHasSubmissionEvidence)
 func TestRelayInjectVerifySubmissionHarnessEvidenceMatrix(t *testing.T) {
 	cases := []struct {
 		name       string
@@ -257,14 +314,17 @@ func TestRelayInjectVerifySubmissionHarnessEvidenceMatrix(t *testing.T) {
 		{"codex queued then still queued after return", "codex", []string{"Press up to edit queued messages", "Press up to edit queued messages"}, "queued", false, true},
 		{"codex composer_residue then unproven after return", "codex", []string{"[Pasted text #1]", "nothing relevant"}, "unproven", false, true},
 
-		// devin has no evidence path: queued/marker_observed are unreachable
-		// (harness-gated), so every real screen lands on unproven, and the
-		// carve-out reports delivered to avoid re-injecting into a live pane.
-		{"devin unproven direct (typical screen)", "devin", []string{"── 1 queued ── send now"}, "unproven", true, false},
-		{"devin unproven direct (marker text present but harness-gated)", "devin", []string{"one line"}, "unproven", true, false},
-		{"devin composer_residue then unproven after return (edge case)", "devin", []string{"[Pasted text #1]", "nothing relevant"}, "unproven", true, false},
+		// devin: added this rework (2026-09-16). It now has the same
+		// evidence path as claude/codex, so the carve-out no longer applies.
+		// Since #547 the hub relay sends devin through devinRelayInject,
+		// which decides retry vs may-be-in-pane itself; these rows pin only
+		// this function's result.
+		{"devin marker_observed direct", "devin", []string{"prefix one line suffix"}, "marker_observed", true, false},
+		{"devin unproven direct", "devin", []string{"nothing relevant"}, "unproven", false, true},
+		{"devin queued then still queued after return", "devin", []string{"── 1 queued ── send now", "── 1 queued ── send now"}, "queued", false, true},
+		{"devin composer_residue then unproven after return", "devin", []string{"[Pasted text #1]", "nothing relevant"}, "unproven", false, true},
 
-		// An unrecognized/empty harness string gets the same carve-out as devin.
+		// An unrecognized/empty harness string keeps the pre-devin carve-out.
 		{"unrecognized harness unproven direct", "some-future-harness", []string{"nothing relevant"}, "unproven", true, false},
 		{"empty harness unproven direct", "", []string{"nothing relevant"}, "unproven", true, false},
 	}
