@@ -64,6 +64,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "lanes" {
 		return runLanesCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
+	if args[0] == "lanes-audit" {
+		return runLanesAuditCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
 	if args[0] == "sessions" {
 		return runSessionsCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
