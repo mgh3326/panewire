@@ -12,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -127,6 +128,7 @@ type HubClient struct {
 	wait                 HubWait
 	warn                 func(string)
 	relayInject          func(context.Context, string, string) bool
+	relayInjectVerdict   func(context.Context, string, string) relayInjectResult // #547 three-way fixture seam; relayInject wins when set
 	hostLoadCollector    func(context.Context) (HubHostLoad, error)
 	hostMemoryCollector  func(context.Context) (*HubHostMemory, error)
 	quotaCollector       func(context.Context) (*HubQuotaSnapshot, error)
@@ -521,8 +523,40 @@ type hubOutboundMessage struct {
 }
 
 func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
+	return defaultHubRelayInjectVerdict(ctx, pane, text).Outcome == relayInjectDelivered
+}
+
+// relayInjectOutcome is the three-way result of one relay inject (#547,
+// hk:doc decision/2026-09-21/task547-esc-relay-contract). A bool could only
+// say delivered or retry, and a retry re-injects -- which duplicates the
+// message whenever it is in fact already sitting in the pane.
+type relayInjectOutcome int
+
+const (
+	relayInjectDelivered relayInjectOutcome = iota
+	// relayInjectRetryable: the message is proven absent from the pane, so
+	// injecting it again cannot duplicate it.
+	relayInjectRetryable
+	// relayInjectMaybeInPane: the message may already be in the pane
+	// (composer, queue, or transcript). Never inject it again.
+	relayInjectMaybeInPane
+)
+
+type relayInjectResult struct {
+	Outcome relayInjectOutcome
+	Harness string
+	// Evidence names the read source and rule behind Outcome. It is empty
+	// for claude/codex, whose relay events are unchanged by #547.
+	Evidence string
+}
+
+func defaultHubRelayInjectVerdict(ctx context.Context, pane, text string) relayInjectResult {
+	harness := relayInjectHarness(ctx, pane)
+	if strings.EqualFold(harness, "devin") {
+		return devinRelayInject(ctx, pane, text)
+	}
 	if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
-		return false
+		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness}
 	}
 	// #264 D2: verification used to gate solely on claude's "[Pasted text"
 	// composer chip, so any harness lacking that chip reported success on
@@ -530,8 +564,10 @@ func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
 	// classifier prompt.go's direct-prompt path already uses; reusing it
 	// here lets a non-claude harness (e.g. codex's "queued" composer state)
 	// fail verification instead of being reported delivered unconditionally.
-	harness := relayInjectHarness(ctx, pane)
-	return relayInjectVerifySubmission(ctx, pane, harness, text)
+	if relayInjectVerifySubmission(ctx, pane, harness, text) {
+		return relayInjectResult{Outcome: relayInjectDelivered, Harness: harness}
+	}
+	return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness}
 }
 
 func relayInjectHarness(ctx context.Context, pane string) string {
@@ -566,7 +602,8 @@ func relayInjectHarness(ctx context.Context, pane string) string {
 // in recent-unwrapped at all -- see 2026-09-14 fleet notes) can only ever
 // land on composer_residue (and only if it happens to emit claude's literal
 // paste-chip text, which most don't) or unproven. See the unproven carve-out
-// below for why that distinction matters.
+// below for why that distinction matters. The hub relay sends devin through
+// devinRelayInject (#547) instead, so it never reaches this carve-out there.
 func harnessHasSubmissionEvidence(harness string) bool {
 	return strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex") || strings.EqualFold(harness, "devin")
 }
@@ -618,6 +655,151 @@ func relayInjectVerifySubmission(ctx context.Context, pane, harness, text string
 		// unproven directly: same reasoning and same carve-out as above.
 		return !harnessHasSubmissionEvidence(harness)
 	}
+}
+
+// relayBoilerplateRE strips the fixed prefixes relay.go and busy_relay.go put
+// in front of every relay text. markerFor keeps the first 24 runes, and for a
+// relay text those are the same boilerplate on every message -- a devin
+// marker taken from them would match any earlier relay message on screen.
+var relayBoilerplateRE = regexp.MustCompile(`^\s*(?:\(같은 내용이 두 번 보이면 재실행 금지\)|\[대기 만료 \d+분\]|\[batch \d+건\]|1\))\s*`)
+
+const devinRelayMarkerRunes = 48
+
+// devinRelayMarker is the part of a relay text that identifies the message:
+// the text after the boilerplate, e.g. "[event] <lane> :: <text>".
+func devinRelayMarker(text string) string {
+	body := strings.TrimSpace(text)
+	for {
+		stripped := relayBoilerplateRE.ReplaceAllString(body, "")
+		if stripped == body {
+			break
+		}
+		body = stripped
+	}
+	runes := []rune(body)
+	if len(runes) > devinRelayMarkerRunes {
+		runes = runes[:devinRelayMarkerRunes]
+	}
+	return string(runes)
+}
+
+// devinRelayReadLines covers devin's queue rows, its queue banner, the
+// two-divider composer and the most recent transcript rows.
+const devinRelayReadLines = "40"
+
+// devinPaneRead is one devin verification read: the visible screen (queue
+// banner and composer) and recent-unwrapped (the transcript, unsplit by line
+// wrapping), classified together.
+type devinPaneRead struct {
+	visible, unwrapped string
+}
+
+func readDevinPane(ctx context.Context, pane string) (devinPaneRead, error) {
+	visible, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", devinRelayReadLines).Output()
+	if err != nil {
+		return devinPaneRead{}, err
+	}
+	unwrapped, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", devinRelayReadLines).Output()
+	if err != nil {
+		return devinPaneRead{}, err
+	}
+	return devinPaneRead{visible: string(visible), unwrapped: string(unwrapped)}, nil
+}
+
+// classify folds the two sources into one result. A message still in the
+// composer or queue in either source outranks a transcript echo in either.
+func (read devinPaneRead) classify(marker string) (string, string) {
+	sources := []struct{ name, text string }{{"visible", read.visible}, {"recent-unwrapped", read.unwrapped}}
+	for _, want := range []string{"composer_residue", "queued", "marker_observed"} {
+		for _, source := range sources {
+			if result, rule := devinSubmission(source.text, marker); result == want {
+				return result, source.name + ":" + rule
+			}
+		}
+	}
+	return "unproven", "visible+recent-unwrapped:none"
+}
+
+// markerSource names the first source that shows marker anywhere, or "".
+func (read devinPaneRead) markerSource(marker string) string {
+	if marker == "" {
+		return ""
+	}
+	if strings.Contains(compactWhitespace(read.visible), compactWhitespace(marker)) {
+		return "visible"
+	}
+	if strings.Contains(compactWhitespace(read.unwrapped), compactWhitespace(marker)) {
+		return "recent-unwrapped"
+	}
+	return ""
+}
+
+// devinRelayInject is the devin relay path (#547). It never types a message
+// that may already be in the pane:
+//
+//   - Before sending, the visible screen (queue rows, composer) and the
+//     recent-unwrapped transcript must both lack the marker. This runs on
+//     every attempt, not only local retries, because the hub replays an
+//     undelivered row to the node as a fresh message.
+//   - After sending, residue or a queue banner gets exactly one return
+//     keypress. If the message is then still held, or has vanished from every
+//     source, it may be in the pane: relayInjectMaybeInPane, never a retry.
+//   - Only a send whose reads never showed the marker at all is retryable,
+//     and busy_relay.go caps devin at one re-inject.
+func devinRelayInject(ctx context.Context, pane, text string) relayInjectResult {
+	marker := devinRelayMarker(text)
+	result := relayInjectResult{Harness: "devin"}
+	if marker == "" {
+		result.Outcome, result.Evidence = relayInjectMaybeInPane, "presend:empty_marker"
+		return result
+	}
+	before, err := readDevinPane(ctx, pane)
+	if err != nil {
+		result.Outcome, result.Evidence = relayInjectMaybeInPane, "presend:read_failed"
+		return result
+	}
+	if source := before.markerSource(marker); source != "" {
+		result.Outcome, result.Evidence = relayInjectMaybeInPane, "presend:"+source+":marker_present"
+		return result
+	}
+	if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
+		// herdr may have typed part of the text before failing; the next
+		// attempt's presend check decides whether a retry would duplicate it.
+		result.Outcome, result.Evidence = relayInjectRetryable, "prompt_failed"
+		return result
+	}
+	after, err := readDevinPane(ctx, pane)
+	if err != nil {
+		result.Outcome, result.Evidence = relayInjectMaybeInPane, "postsend:read_failed"
+		return result
+	}
+	state, evidence := after.classify(marker)
+	switch state {
+	case "marker_observed":
+		result.Outcome, result.Evidence = relayInjectDelivered, evidence
+		return result
+	case "unproven":
+		result.Outcome, result.Evidence = relayInjectRetryable, evidence
+		return result
+	}
+	// composer_residue or queued: devin's own hint says Enter submits a queued
+	// message now, and Enter submits composer text. One keypress, never more.
+	if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
+		result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" return_failed"
+		return result
+	}
+	after, err = readDevinPane(ctx, pane)
+	if err != nil {
+		result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" after_return:read_failed"
+		return result
+	}
+	state, afterEvidence := after.classify(marker)
+	if state == "marker_observed" {
+		result.Outcome, result.Evidence = relayInjectDelivered, evidence+" after_return:"+afterEvidence
+		return result
+	}
+	result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" after_return:"+afterEvidence
+	return result
 }
 
 // serve runs the node side of one hub session. A preference switch replaces the

@@ -315,9 +315,10 @@ func TestRelayInjectVerifySubmissionHarnessEvidenceMatrix(t *testing.T) {
 		{"codex composer_residue then unproven after return", "codex", []string{"[Pasted text #1]", "nothing relevant"}, "unproven", false, true},
 
 		// devin: added this rework (2026-09-16). It now has the same
-		// evidence path as claude/codex, so the carve-out no longer applies
-		// -- a queued or unproven read drives a retry instead of being
-		// reported delivered.
+		// evidence path as claude/codex, so the carve-out no longer applies.
+		// Since #547 the hub relay sends devin through devinRelayInject,
+		// which decides retry vs may-be-in-pane itself; these rows pin only
+		// this function's result.
 		{"devin marker_observed direct", "devin", []string{"prefix one line suffix"}, "marker_observed", true, false},
 		{"devin unproven direct", "devin", []string{"nothing relevant"}, "unproven", false, true},
 		{"devin queued then still queued after return", "devin", []string{"── 1 queued ── send now", "── 1 queued ── send now"}, "queued", false, true},

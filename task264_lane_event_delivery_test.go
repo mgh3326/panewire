@@ -165,7 +165,9 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 
 	// The other half of AC0's reversal: devin's own queue banner ("send
 	// now") is now real evidence, so a still-queued devin screen must not be
-	// reported delivered either -- mirrors the codex queued case above.
+	// reported delivered either -- mirrors the codex queued case above. Since
+	// #547 that result is may-be-in-pane (never re-injected), not a retry;
+	// see task547_devin_relay_test.go.
 	t.Run("devin queued state never confirms, verification reports failure", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeHerdr(t, dir, map[string]string{
