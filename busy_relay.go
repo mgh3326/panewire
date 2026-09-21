@@ -126,6 +126,7 @@ func (occupant relayOccupant) key() string {
 func parseRelayAgentOccupant(raw []byte) (relayOccupant, bool) {
 	var response struct {
 		Result struct {
+			Type  string `json:"type"`
 			Agent struct {
 				PaneID       string `json:"pane_id"`
 				Agent        string `json:"agent"`
@@ -139,6 +140,14 @@ func parseRelayAgentOccupant(raw []byte) (relayOccupant, bool) {
 		} `json:"result"`
 	}
 	if json.Unmarshal(raw, &response) != nil {
+		return relayOccupant{}, false
+	}
+	// Any valid JSON used to parse "ok" with an all-zero occupant, which the
+	// caller then read as a real occupant and expired rows as
+	// pane_occupant_changed. A reply is only an agent_info when it says so —
+	// or, for older herdr builds without the type field, when it at least
+	// names a pane. Everything else is unreadable, not evidence.
+	if response.Result.Type != "agent_info" && response.Result.Agent.PaneID == "" {
 		return relayOccupant{}, false
 	}
 	occupant := relayOccupant{Pane: response.Result.Agent.PaneID, Agent: response.Result.Agent.Agent, Name: response.Result.Agent.Name, Terminal: response.Result.Agent.TerminalID, Workspace: response.Result.Agent.WorkspaceID}

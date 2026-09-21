@@ -749,26 +749,36 @@ func TestR449DeadPaneOccupantGone(t *testing.T) {
 
 func TestR449UnverifiableProbeRearmsRatherThanExpires(t *testing.T) {
 	r27GuardInbox(t)
-	gate := make(chan struct{})
-	fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 8)}
-	store := NewMemoryStore(t)
-	defer store.Close()
-	client, prompts, events := r27Node(t, store, fake)
-	client.relayBusyManager().offer(t.Context(), r27Directive(606, "probe keeps failing", "idle"))
-	r27Await(t, events, "relay.held")
-	r27WaitStarted(t, fake)
+	rearmCycle := func(t *testing.T, eventID int64, getOutput []byte, getErr error) {
+		gate := make(chan struct{})
+		fake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "idle", waitGate: gate, started: make(chan struct{}, 8)}
+		store := NewMemoryStore(t)
+		defer store.Close()
+		client, prompts, events := r27Node(t, store, fake)
+		client.relayBusyManager().offer(t.Context(), r27Directive(eventID, "probe keeps failing", "idle"))
+		r27Await(t, events, "relay.held")
+		r27WaitStarted(t, fake)
+		fake.r27SetGet(getOutput, getErr)
+		close(gate)
+		dropped := r449DroppedReason(t, events)
+		if dropped.Reason != "inject_failed_max_attempts" || dropped.OriginalEventID != eventID {
+			t.Fatalf("dropped=%+v want bounded inject retry exhaustion", dropped)
+		}
+		if got := *prompts; len(got) != 0 {
+			t.Fatalf("unverifiable pane prompted=%q", got)
+		}
+	}
 	// A dead socket is not stale evidence: the lease gate must not expire on
 	// it. It runs the bounded rearm instead, which is why the row ends as an
 	// inject-failure drop and never as a lease verdict.
-	fake.r27SetGet([]byte("dial unix /missing/herdr.sock: no such file"), errors.New("exit status 1"))
-	close(gate)
-	dropped := r449DroppedReason(t, events)
-	if dropped.Reason != "inject_failed_max_attempts" || dropped.OriginalEventID != 606 {
-		t.Fatalf("dropped=%+v want bounded inject retry exhaustion", dropped)
-	}
-	if got := *prompts; len(got) != 0 {
-		t.Fatalf("unverifiable pane prompted=%q", got)
-	}
+	t.Run("dead socket rearms", func(t *testing.T) {
+		rearmCycle(t, 606, []byte("dial unix /missing/herdr.sock: no such file"), errors.New("exit status 1"))
+	})
+	// Valid JSON that is not an agent_info is equally unverifiable — it must
+	// not be mistaken for an occupant and expired as pane_occupant_changed.
+	t.Run("agentless json rearms", func(t *testing.T) {
+		rearmCycle(t, 607, []byte("{}"), nil)
+	})
 }
 
 func TestR449PreLeaseRowsFallBackToNameMembership(t *testing.T) {
