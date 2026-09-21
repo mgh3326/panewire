@@ -79,7 +79,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	fs := flag.NewFlagSet("panewire wait", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	file := fs.String("file", "", "file path")
-	agent := fs.String("agent", "", "agent target")
+	agent := fs.String("agent", "", "agent target (name, label, or pane_id)")
 	status := fs.String("status", "", "agent status")
 	settle := fs.Duration("settle", 0, "settle duration")
 	timeout := fs.Duration("timeout", 0, "overall timeout")
