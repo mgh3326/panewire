@@ -19,21 +19,29 @@ import (
 // PlacementPolicy is deliberately small and operator-owned. It selects a
 // local machine first, then considers spill targets in the listed order.
 type PlacementPolicy struct {
-	LocalMachine     string               `json:"local_machine"`
-	SpillTargets     []string             `json:"spill_targets"`
-	MaxActiveJobs    int                  `json:"max_active_jobs"`
-	LoadRatio        float64              `json:"load_ratio"`
-	WakeOnSpill      bool                 `json:"wake_on_spill"`
-	MemoryFreePctMin *float64             `json:"memory_free_pct_min,omitempty"`
-	SwapUsedMBMax    *float64             `json:"swap_used_mb_max,omitempty"`
-	QuotaExclude     []PlacementQuotaRule `json:"quota_exclude,omitempty"`
-	QuotaBoost       []PlacementQuotaRule `json:"quota_boost,omitempty"`
+	LocalMachine     string                           `json:"local_machine"`
+	SpillTargets     []string                         `json:"spill_targets"`
+	MaxActiveJobs    int                              `json:"max_active_jobs"`
+	LoadRatio        float64                          `json:"load_ratio"`
+	WakeOnSpill      bool                             `json:"wake_on_spill"`
+	MemoryFreePctMin *float64                         `json:"memory_free_pct_min,omitempty"`
+	SwapUsedMBMax    *float64                         `json:"swap_used_mb_max,omitempty"`
+	QuotaExclude     []PlacementQuotaRule             `json:"quota_exclude,omitempty"`
+	QuotaBoost       []PlacementQuotaRule             `json:"quota_boost,omitempty"`
+	Machines         map[string]PlacementMachineSlots `json:"machines,omitempty"`
 }
 
 type PlacementQuotaRule struct {
 	Pool      string `json:"pool"`
 	AccountFP string `json:"account_fp,omitempty"`
 	Until     string `json:"until,omitempty"`
+}
+
+// PlacementMachineSlots caps how many distinct tasks may hold active jobs on
+// one machine. A task is the owner_lane bundle: a builder job plus every
+// tester/worker job that builder spawned with itself as owner.
+type PlacementMachineSlots struct {
+	TaskSlots int `json:"task_slots"`
 }
 
 func DefaultPlacementPolicy() PlacementPolicy {
@@ -65,6 +73,11 @@ func (p PlacementPolicy) valid() bool {
 					return false
 				}
 			}
+		}
+	}
+	for machine, slots := range p.Machines {
+		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || slots.TaskSlots < 1 || slots.TaskSlots > 100 {
+			return false
 		}
 	}
 	return true
@@ -129,6 +142,8 @@ type PlacementCandidate struct {
 	LoadRatio     float64  `json:"load_ratio,omitempty"`
 	Throttled     bool     `json:"throttled"`
 	ActiveJobs    int      `json:"active_jobs"`
+	Tasks         int      `json:"tasks"`
+	TaskSlots     int      `json:"task_slots,omitempty"`
 	Connected     bool     `json:"connected"`
 	MetricsKnown  bool     `json:"metrics_known"`
 	MemoryFreePct *float64 `json:"memory_free_pct"`
@@ -139,6 +154,9 @@ type PlacementCandidate struct {
 	QuotaDecision string   `json:"quota_decision,omitempty"`
 	QuotaReason   string   `json:"quota_reason,omitempty"`
 	Reason        string   `json:"reason"`
+	// slotFull is wire-internal: a slot-full machine is filtered out of the
+	// candidates array before the response is encoded, so it never serializes.
+	slotFull bool
 }
 
 type PlacementQuotaDecision struct {
@@ -211,6 +229,27 @@ type placementCache struct {
 	at     time.Time
 	result PlacementResult
 }
+
+// placementTaskKey groups the active jobs of one task: a builder's claim
+// records owner_lane as its own lane, and the tester/worker jobs it spawns
+// carry that same lane as --owner. A job without an attributable owner —
+// empty, or the "default" sentinel wrk used before --owner was required —
+// cannot be grouped and conservatively counts as a task of its own.
+func placementTaskKey(job HubActiveJob) string {
+	if job.OwnerLane == "" || job.OwnerLane == "default" {
+		return "\x00job\x00" + job.JobID
+	}
+	return job.OwnerLane
+}
+
+func countPlacementTasks(jobs map[string]HubActiveJob) int {
+	tasks := make(map[string]struct{}, len(jobs))
+	for _, job := range jobs {
+		tasks[placementTaskKey(job)] = struct{}{}
+	}
+	return len(tasks)
+}
+
 type placementMetrics struct {
 	load      map[string]float64
 	throttled map[string]bool
@@ -276,6 +315,65 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 	result := h.placementWithQuota(r.Context(), class, r.URL.Query().Get("cwd"), pool, accountFP)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(result)
+}
+
+// PlacementSlotStatus is one machine's task-slot occupancy. TaskSlots is null
+// when the policy does not cap that machine.
+type PlacementSlotStatus struct {
+	Machine   string `json:"machine"`
+	TasksUsed int    `json:"tasks_used"`
+	TaskSlots *int   `json:"task_slots"`
+}
+
+type placementSlotsResult struct {
+	Machines     []PlacementSlotStatus `json:"machines"`
+	PolicyStatus string                `json:"policy_status"`
+	Asof         time.Time             `json:"asof"`
+}
+
+// handlePlacementSlots reports per-machine task-slot usage with the same
+// operator auth boundary as /v1/placement. It answers "which machine has room"
+// without running the placement decision.
+func (h *HubServer) handlePlacementSlots(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizeOperator(r) {
+		hubUnauthorized(w)
+		return
+	}
+	now := h.now().UTC()
+	h.mu.Lock()
+	h.reloadPlacementPolicyLocked()
+	policy := h.placementPolicy
+	if !policy.valid() {
+		policy = DefaultPlacementPolicy()
+	}
+	names := map[string]struct{}{policy.LocalMachine: {}}
+	for _, machine := range policy.SpillTargets {
+		names[machine] = struct{}{}
+	}
+	for machine := range policy.Machines {
+		names[machine] = struct{}{}
+	}
+	for machine := range h.nodes {
+		names[machine] = struct{}{}
+	}
+	views := make([]PlacementSlotStatus, 0, len(names))
+	for machine := range names {
+		tasks := 0
+		if record := h.nodes[machine]; record != nil {
+			tasks = countPlacementTasks(record.activeJobs)
+		}
+		var slots *int
+		if configured, exists := policy.Machines[machine]; exists {
+			value := configured.TaskSlots
+			slots = &value
+		}
+		views = append(views, PlacementSlotStatus{Machine: machine, TasksUsed: tasks, TaskSlots: slots})
+	}
+	status := h.placementPolicyStatus
+	h.mu.Unlock()
+	sort.Slice(views, func(i, j int) bool { return views[i].Machine < views[j].Machine })
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(placementSlotsResult{Machines: views, PolicyStatus: status, Asof: now})
 }
 
 func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementResult {
@@ -402,12 +500,14 @@ func (h *HubServer) makePlacementWithQuota(policy PlacementPolicy, metrics place
 	h.mu.Lock()
 	for _, machine := range machines {
 		record := h.nodes[machine]
-		connected, accepting, jobs := false, false, 0
+		connected, accepting, jobs, tasks := false, false, 0, 0
 		var memory *HubHostMemory
 		if record != nil {
-			connected, accepting, jobs = record.agent != nil && record.state == "connected", h.acceptingEffectiveLocked(machine, record.accepting), len(record.activeJobs)
+			connected, accepting, jobs, tasks = record.agent != nil && record.state == "connected", h.acceptingEffectiveLocked(machine, record.accepting), len(record.activeJobs), countPlacementTasks(record.activeJobs)
 			memory = cloneHubHostMemory(record.hostMemory)
 		}
+		taskSlots, slotCapped := policy.machineTaskSlots(machine)
+		slotFull := slotCapped && tasks >= taskSlots
 		holdsActive := h.holdsActiveLocked(machine, now)
 		burstReady := h.burstPolicyPath != "" && h.burstPolicy.TargetMachine == machine && h.burstState.UpCompleted
 		load, metricsKnown := metrics.load[machine]
@@ -430,6 +530,9 @@ func (h *HubServer) makePlacementWithQuota(policy PlacementPolicy, metrics place
 		}
 		if jobs >= policy.MaxActiveJobs {
 			reasons = append(reasons, "active_jobs>=max")
+		}
+		if slotFull {
+			reasons = append(reasons, "task_slots_full")
 		}
 		if holdsActive {
 			reasons = append(reasons, "hold_active")
@@ -487,7 +590,7 @@ func (h *HubServer) makePlacementWithQuota(policy PlacementPolicy, metrics place
 		if memory != nil {
 			freePct, swapUsedMB = cloneMemoryFloat(memory.FreePct), cloneMemoryFloat(memory.SwapUsedMB)
 		}
-		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, QuotaDecision: quotaDecision, QuotaReason: quotaReason, Reason: strings.Join(reasons, ",")})
+		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasks, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, QuotaDecision: quotaDecision, QuotaReason: quotaReason, Reason: strings.Join(reasons, ","), slotFull: slotFull})
 	}
 	h.mu.Unlock()
 	decision := policy.LocalMachine
@@ -506,9 +609,15 @@ func (h *HubServer) makePlacementWithQuota(policy PlacementPolicy, metrics place
 		}
 	}
 	// A disconnected spill target is still the actionable answer when wake is
-	// enabled; callers can observe that fact in its reason.
+	// enabled; callers can observe that fact in its reason. A slot-full target
+	// is not actionable: waking it cannot admit the task.
 	if decision == policy.LocalMachine && !placementUsable(candidates[0], policy, source) && policy.WakeOnSpill && len(candidates) > 1 {
-		decision = candidates[1].Machine
+		for _, candidate := range candidates[1:] {
+			if !candidate.slotFull {
+				decision = candidate.Machine
+				break
+			}
+		}
 	}
 	// Prometheus responding without a local load sample is not the same as a
 	// hub-only outage: never silently turn that unknown into a local decision.
@@ -516,6 +625,12 @@ func (h *HubServer) makePlacementWithQuota(policy PlacementPolicy, metrics place
 		decision = "unavailable"
 	}
 	if quota != nil && (quota.Decision == "deny" || quota.Decision == "unknown") {
+		decision = "unavailable"
+	}
+	// The capacity-pressure fallback above can still name the local machine
+	// even though it is unusable; a configured task-slot cap is an explicit
+	// exhaustion signal, so it must never survive as the decision.
+	if placementSlotFull(candidates, decision) {
 		decision = "unavailable"
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
@@ -526,14 +641,48 @@ func (h *HubServer) makePlacementWithQuota(policy PlacementPolicy, metrics place
 			reason = quota.Reason
 		}
 	}
+	// Only machines with a free task slot are candidates. wrk walks this list
+	// and may pick any eligible entry when the decision is unavailable, so a
+	// slot-full machine must not remain selectable here.
+	candidates = filterSlotFullCandidates(candidates)
+	if len(candidates) == 0 {
+		decision, reason = "unavailable", "task_slots_exhausted"
+	}
 	return PlacementResult{Decision: decision, Candidates: candidates, Source: source, Asof: now, Reason: reason, Quota: clonePlacementQuotaDecision(quota)}
+}
+
+func (p PlacementPolicy) machineTaskSlots(machine string) (int, bool) {
+	slots, exists := p.Machines[machine]
+	if !exists {
+		return 0, false
+	}
+	return slots.TaskSlots, true
+}
+
+func placementSlotFull(candidates []PlacementCandidate, machine string) bool {
+	for _, candidate := range candidates {
+		if candidate.Machine == machine {
+			return candidate.slotFull
+		}
+	}
+	return false
+}
+
+func filterSlotFullCandidates(candidates []PlacementCandidate) []PlacementCandidate {
+	kept := candidates[:0]
+	for _, candidate := range candidates {
+		if !candidate.slotFull {
+			kept = append(kept, candidate)
+		}
+	}
+	return kept
 }
 
 func placementUsable(candidate PlacementCandidate, policy PlacementPolicy, source string) bool {
 	if candidate.QuotaDecision == "deny" || candidate.QuotaDecision == "unknown" {
 		return false
 	}
-	if !candidate.Connected || strings.Contains(candidate.Reason, "not_accepting") || candidate.ActiveJobs >= policy.MaxActiveJobs {
+	if candidate.slotFull || !candidate.Connected || strings.Contains(candidate.Reason, "not_accepting") || candidate.ActiveJobs >= policy.MaxActiveJobs {
 		return false
 	}
 	if source == "prometheus" && !candidate.MetricsKnown {

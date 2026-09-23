@@ -60,7 +60,7 @@ func TestHubQuotaHeartbeatCompatibilityAndStrictValidation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	baseGolden := []byte(`{"decision":"host-a","candidates":[{"machine":"host-a","score":100,"throttled":false,"active_jobs":0,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"reason":"memory_unknown"}],"source":"hub-only","asof":"2026-09-09T06:00:00Z","policy_status":"current"}`)
+	baseGolden := []byte(`{"decision":"host-a","candidates":[{"machine":"host-a","score":100,"throttled":false,"active_jobs":0,"tasks":0,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"reason":"memory_unknown"}],"source":"hub-only","asof":"2026-09-09T06:00:00Z","policy_status":"current"}`)
 	if !bytes.Equal(before, baseGolden) {
 		t.Fatalf("legacy placement drifted beyond the required policy-status field: got=%s want=%s", before, baseGolden)
 	}
