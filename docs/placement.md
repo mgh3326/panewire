@@ -49,7 +49,10 @@ A machine whose task count reaches `task_slots` is removed from `candidates`
 entirely — it is never the decision, is skipped by the `wake_on_spill`
 shortcut, and is invisible to consumers that walk the candidate list. When
 every machine is full the response is explicit: `"decision": null`,
-`"candidates": []`, `"reason": "task_slots_exhausted"`. Surviving candidates
+`"candidates": []`, `"reason": "task_slots_exhausted"`. A narrower form —
+the decision machine is slot-full but other candidates remain — answers
+`"decision": null` with `"reason": "task_slots_full"` and a non-empty list.
+Surviving candidates
 for capped machines report `tasks` and `task_slots` so the counting is
 visible in the response itself; uncapped machines omit both fields so the
 wire stays byte-identical for deployments without a `machines` map.
