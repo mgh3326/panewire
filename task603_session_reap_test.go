@@ -331,6 +331,19 @@ func TestT603ReporterDefaultOff(t *testing.T) {
 	if got := sessionReapGrace("2h"); got != 2*time.Hour {
 		t.Errorf("grace 2h = %s", got)
 	}
+	// Beyond what the hub decoder accepts falls back instead of producing
+	// reports the hub would silently drop.
+	for value, want := range map[string]time.Duration{"30d": 30 * 24 * time.Hour, "31d": 10 * time.Minute, "45d": 10 * time.Minute, "-5m": 10 * time.Minute} {
+		if got := sessionReapGrace(value); got != want {
+			t.Errorf("grace %s = %s, want %s", value, got, want)
+		}
+	}
+	for _, grace := range []time.Duration{sessionReapGrace("30d"), sessionReapGrace("31d")} {
+		payload, _ := marshalSessionReapReport(SessionReapReport{Schema: 1, GeneratedAt: t603Now.Format(time.RFC3339), GraceSeconds: int64(grace / time.Second), Observed: true, JobsReadable: true, Rows: []SessionReapRow{}})
+		if _, valid := decodeSessionReapReport(payload); !valid {
+			t.Errorf("hub rejects a report with grace %s", grace)
+		}
+	}
 }
 
 // AC3: no pane-, tab-, or process-ending call anywhere in the session-reap

@@ -72,7 +72,7 @@ func decodeSessionReapReport(raw []byte) (SessionReapReport, bool) {
 	if _, err := time.Parse(time.RFC3339, report.GeneratedAt); err != nil {
 		return SessionReapReport{}, false
 	}
-	if json.Unmarshal(fields["grace_seconds"], &report.GraceSeconds) != nil || report.GraceSeconds < 0 || report.GraceSeconds > 30*24*3600 {
+	if json.Unmarshal(fields["grace_seconds"], &report.GraceSeconds) != nil || report.GraceSeconds < 0 || report.GraceSeconds > int64(sessionReapMaxGrace/time.Second) {
 		return SessionReapReport{}, false
 	}
 	if json.Unmarshal(fields["observed"], &report.Observed) != nil || json.Unmarshal(fields["jobs_readable"], &report.JobsReadable) != nil || json.Unmarshal(fields["truncated"], &report.Truncated) != nil {

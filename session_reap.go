@@ -370,14 +370,19 @@ func sessionReapReportInterval(value string) (time.Duration, bool) {
 	return interval, true
 }
 
+// sessionReapMaxGrace is the largest grace the hub decoder accepts
+// (grace_seconds <= 30 days). A node never sends a report the hub would drop.
+const sessionReapMaxGrace = 30 * 24 * time.Hour
+
 // sessionReapGrace reads the grace in wrk's duration grammar (600, 600s, 10m,
-// 2h, 1d) and falls back to wrk reap's 10m default.
+// 2h, 1d) and falls back to wrk reap's 10m default for anything unparseable,
+// negative, or beyond sessionReapMaxGrace.
 func sessionReapGrace(value string) time.Duration {
 	if strings.TrimSpace(value) == "" {
 		return fleetCensusDefaultGrace
 	}
 	grace, err := parseFleetCensusGrace(value)
-	if err != nil || grace < 0 {
+	if err != nil || grace < 0 || grace > sessionReapMaxGrace {
 		return fleetCensusDefaultGrace
 	}
 	return grace
