@@ -4,8 +4,8 @@
 # Everything between the ===== markers is vendored VERBATIM from
 # agent-skills commit ae1f544 (bin/wrk, PR #508): parse_duration_s,
 # reap_tab_pane_counts, reap_tab_verdict and herdr_agent_probe are copied
-# unmodified; reap_candidates is the agent-skills #603 revision (branch
-# task603-session-reap), which adds the protected `--keep` skip; reference_reap is the dry-run
+# unmodified; reap_candidates is from agent-skills commit 692b185 (PR #119,
+# #603), which adds the protected `--keep` skip; reference_reap is the dry-run
 # half of reap_cmd with the --apply branch deleted and --lane fixed empty.
 # This script can only print — it has no close/apply path and writes no
 # files — which makes it safe as the test oracle.
