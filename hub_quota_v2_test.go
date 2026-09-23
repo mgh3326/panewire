@@ -384,6 +384,25 @@ func TestQuotaV2StoreSurvivesRestartAndRejectsCorruption(t *testing.T) {
 		t.Fatalf("revision reused after restart: %d <= %d", again.BindingRevision, binding.BindingRevision)
 	}
 
+	loose := filepath.Join(t.TempDir(), "quota-v2.json")
+	if err := os.WriteFile(loose, []byte(`{"schema":"panewire.quota-v2-store/v1","last_revision":0,"bindings":[],"observations":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(loose, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	looseTokens := map[string]string{hubOperatorMachineID: quotaOperatorToken, "node-a": quotaNodeAToken}
+	if _, err := NewHubServer(HubServerConfig{Tokens: looseTokens, Now: clock.Now, QuotaV2StorePath: loose}); err == nil {
+		t.Fatal("store readable by other local users accepted")
+	}
+	link := filepath.Join(filepath.Dir(loose), "link.json")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewHubServer(HubServerConfig{Tokens: looseTokens, Now: clock.Now, QuotaV2StorePath: link}); err == nil {
+		t.Fatal("symlinked store accepted")
+	}
+
 	for name, content := range map[string]string{
 		"not json":       "{",
 		"wrong schema":   `{"schema":"other","last_revision":0,"bindings":[],"observations":[]}`,

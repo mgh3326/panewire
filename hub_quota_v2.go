@@ -143,10 +143,16 @@ func newHubQuotaV2Store(path string) (*hubQuotaV2Store, error) {
 	if path == "" {
 		return store, nil
 	}
-	raw, err := os.ReadFile(path)
+	info, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return store, nil
 	}
+	// Bindings and verifier receipts are not for other local users: an existing
+	// store must be a regular mode-0600 file, the same mode persistLocked writes.
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return nil, errors.New("quota v2 store must be a regular mode-0600 file")
+	}
+	raw, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
 	}
