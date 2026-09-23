@@ -107,6 +107,9 @@ func (d *Daemon) Start(ctx context.Context) error {
 			d.idleWake = manager
 			d.cfg.Hub.Client.SetIdleWakeManager(manager)
 		}
+		// Report-only and off unless PANEWIRE_SESSION_REAP_REPORT_INTERVAL
+		// is set: starting it is a new schedule that needs operator approval.
+		startSessionReapReporter(ctx, d.cfg.Hub.Client, d.cfg.HerdrSocket, idleRoot, d.cfg.Logger)
 	}
 	if d.cfg.InboxRoot != "" {
 		if w, err := NewInboxWatcher(d.cfg.InboxRoot, d.store); err == nil {

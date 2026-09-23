@@ -1,0 +1,257 @@
+{
+ "type": "tab_list",
+ "tabs": [
+  {
+   "tab_id": "w6:t1",
+   "workspace_id": "w6",
+   "number": 40,
+   "label": "architect-fable",
+   "focused": true,
+   "pane_count": 1,
+   "agent_status": "done"
+  },
+  {
+   "tab_id": "w6:t4",
+   "workspace_id": "w6",
+   "number": 212,
+   "label": "consult-stage3",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "unknown"
+  },
+  {
+   "tab_id": "w6:t2",
+   "workspace_id": "w6",
+   "number": 213,
+   "label": "director-opus",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "working"
+  },
+  {
+   "tab_id": "w6:t5",
+   "workspace_id": "w6",
+   "number": 220,
+   "label": "4",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "unknown"
+  },
+  {
+   "tab_id": "w6:t3",
+   "workspace_id": "w6",
+   "number": 221,
+   "label": "consult-projects",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w6:t6",
+   "workspace_id": "w6",
+   "number": 222,
+   "label": "6",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "unknown"
+  },
+  {
+   "tab_id": "w2:t5",
+   "workspace_id": "w2",
+   "number": 2433,
+   "label": "b538-search",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "unknown"
+  },
+  {
+   "tab_id": "w2:t6",
+   "workspace_id": "w2",
+   "number": 2434,
+   "label": "t537-verify",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "unknown"
+  },
+  {
+   "tab_id": "w2:t7",
+   "workspace_id": "w2",
+   "number": 2435,
+   "label": "b493-tester",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "unknown"
+  },
+  {
+   "tab_id": "w2:t8",
+   "workspace_id": "w2",
+   "number": 2543,
+   "label": "b587-mapper",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "unknown"
+  },
+  {
+   "tab_id": "w2:t2",
+   "workspace_id": "w2",
+   "number": 2555,
+   "label": "w598-verify-r2",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w2:t3",
+   "workspace_id": "w2",
+   "number": 2560,
+   "label": "b529-deploy-view",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w2:t1",
+   "workspace_id": "w2",
+   "number": 2575,
+   "label": "b597-grade-table",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "working"
+  },
+  {
+   "tab_id": "w2:t4",
+   "workspace_id": "w2",
+   "number": 2576,
+   "label": "b603-session-reap",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "working"
+  },
+  {
+   "tab_id": "w3:t1",
+   "workspace_id": "w3",
+   "number": 1,
+   "label": "1",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w3:t3",
+   "workspace_id": "w3",
+   "number": 4,
+   "label": "2",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "unknown"
+  },
+  {
+   "tab_id": "w3:t2",
+   "workspace_id": "w3",
+   "number": 5,
+   "label": "notes",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w4:t1",
+   "workspace_id": "w4",
+   "number": 2,
+   "label": "plane",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w5:t1",
+   "workspace_id": "w5",
+   "number": 1,
+   "label": "ask",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w5:t2",
+   "workspace_id": "w5",
+   "number": 3,
+   "label": "old",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w2:t25",
+   "workspace_id": "w2",
+   "number": 120,
+   "label": "t601-verify",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w2:t26",
+   "workspace_id": "w2",
+   "number": 121,
+   "label": "consult-arch",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "done"
+  },
+  {
+   "tab_id": "w2:t27",
+   "workspace_id": "w2",
+   "number": 122,
+   "label": "t590-verify-r2",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w2:t28",
+   "workspace_id": "w2",
+   "number": 123,
+   "label": "shell",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w2:t29",
+   "workspace_id": "w2",
+   "number": 124,
+   "label": "checker-2",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w2:t30",
+   "workspace_id": "w2",
+   "number": 125,
+   "label": "w595-b",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w2:t31",
+   "workspace_id": "w2",
+   "number": 126,
+   "label": "w596-x",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "idle"
+  },
+  {
+   "tab_id": "w2:t32",
+   "workspace_id": "w2",
+   "number": 127,
+   "label": "b599-merged",
+   "focused": false,
+   "pane_count": 1,
+   "agent_status": "done"
+  }
+ ]
+}

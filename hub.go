@@ -452,6 +452,8 @@ type HubServer struct {
 	// updateOverdueFlushes tracks background flushes (fixtures wait on it).
 	updateOverdueFlushes sync.WaitGroup
 	stallBeats           map[string]*hubStallBeatState
+	// sessionReap keeps the latest session-reap (#603) report per machine.
+	sessionReap map[string]*hubSessionReapRecord
 }
 
 // hubStallBeatState is the hub's half of the detector no-data contract. It
@@ -658,6 +660,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/quota", h.handleQuotaList)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
+	mux.HandleFunc("GET /v1/session-reap", h.handleSessionReap)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
@@ -1001,6 +1004,9 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 	}
 	if report, ok := parseHubQuotaReport(payload); ok {
 		h.resolveQuota(machineID, report)
+		return
+	}
+	if h.handleSessionReapMessage(machineID, agent, payload) {
 		return
 	}
 	hasHeartbeatQuota := hubInboundHeartbeatHasQuota(payload)

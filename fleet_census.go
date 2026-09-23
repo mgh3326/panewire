@@ -78,6 +78,8 @@ const (
 	fleetCensusReasonWithinGrace = "within-grace"
 	fleetCensusReasonReaped      = "already-reaped"
 	fleetCensusReasonNoPane      = "no-spawn-pane"
+	// wrk-literal: `wrk reap` prints `skip job=<id> reason=protected`.
+	fleetCensusReasonProtected = "protected"
 )
 
 // Non-local classification details.
@@ -352,6 +354,14 @@ type fleetCensusJobScan struct {
 	hasFirst     bool
 	pane         string
 	tab          string
+	// The fields below feed the #603 session-reap judgment (session_reap.go)
+	// and the protected skip. spawnLabel travels with spawnPane as part of the
+	// newest spawn receipt; claimLabel is the latest claim/reclaim agent_label;
+	// keep is sticky: a JSON true "keep" on any claim, reclaim, or spawn
+	// receipt marks the job protected for good.
+	spawnLabel string
+	claimLabel string
+	keep       bool
 }
 
 // fleetCensusMoment mirrors wrk's moment_of: created_at (or payload.at)
@@ -508,9 +518,13 @@ func scanFleetCensusJobs(root string) ([]fleetCensusJobScan, bool) {
 			if kind == "job.claim" || kind == "job.reclaim" {
 				scan.ownerLane = fleetCensusString(payload["owner_lane"])
 				scan.claimRole = fleetCensusString(payload["role"])
+				scan.claimLabel = fleetCensusString(payload["agent_label"])
 				if scan.claimRole == "builder" || scan.claimRole == "captain" {
 					scan.role = "builder"
 				}
+			}
+			if (kind == "job.claim" || kind == "job.reclaim" || kind == "job.spawned") && fleetCensusTrue(payload["keep"]) {
+				scan.keep = true
 			}
 			for _, key := range []string{"pane_id", "tab_id"} {
 				if value := fleetCensusString(payload[key]); value != "" {
@@ -534,6 +548,7 @@ func scanFleetCensusJobs(root string) ([]fleetCensusJobScan, bool) {
 				scan.sawSpawn = true
 				scan.spawnPane = fleetCensusString(payload["pane_id"])
 				scan.spawnTab = fleetCensusString(payload["tab_id"])
+				scan.spawnLabel = fleetCensusString(payload["label"])
 				scan.spawnAt = moment
 			}
 			if kind == "job.reaped" {
@@ -558,6 +573,12 @@ func scanFleetCensusJobs(root string) ([]fleetCensusJobScan, bool) {
 		scans = append(scans, scan)
 	}
 	return scans, true
+}
+
+// fleetCensusTrue mirrors wrk's `payload.get("keep") is True`: only the JSON
+// literal true counts — "true", 1, and every other truthy shape do not.
+func fleetCensusTrue(raw json.RawMessage) bool {
+	return strings.TrimSpace(string(raw)) == "true"
 }
 
 func fleetCensusString(raw json.RawMessage) string {
@@ -627,23 +648,37 @@ func fleetCensusJobVerdict(scan fleetCensusJobScan, view fleetCensusLocalView, g
 	if age < int64(grace.Seconds()) {
 		return fleetCensusVerdictSilent, fleetCensusReasonWithinGrace, age
 	}
+	// wrk reap skips a protected (`wrk spawn --keep`) job at exactly this
+	// point: after the grace gate, before the malformed-record check.
+	if scan.keep {
+		return fleetCensusVerdictSkip, fleetCensusReasonProtected, age
+	}
+	verdict, reason := fleetCensusPaneGates(scan, view)
+	return verdict, reason, age
+}
+
+// fleetCensusPaneGates is the herdr half of the wrk reap pipeline: record
+// integrity, pane resolution, status, tab resolution, tab match, and the
+// single-pane tab. The #603 session-reap judgment reuses it unchanged so the
+// two can never disagree about a pane.
+func fleetCensusPaneGates(scan fleetCensusJobScan, view fleetCensusLocalView) (string, string) {
 	// wrk prints "-" for empty fields in its candidate line and reap_cmd reads
 	// a literal "-" pane back as the malformed-record marker.
 	if scan.malformed || scan.pane == "-" || fleetCensusHasSpace(scan.jobID) || fleetCensusHasSpace(scan.ownerLane) || fleetCensusHasSpace(scan.pane) || fleetCensusHasSpace(scan.tab) {
-		return fleetCensusVerdictSkip, fleetCensusReasonMalformed, age
+		return fleetCensusVerdictSkip, fleetCensusReasonMalformed
 	}
 	agent, live := view.agents[scan.pane]
 	if !live {
-		return fleetCensusVerdictSkip, "pane-unresolved(err:agent_not_found)", age
+		return fleetCensusVerdictSkip, "pane-unresolved(err:agent_not_found)"
 	}
 	// wrk's probe compares status.strip(): a whitespace-only status is a
 	// parse failure, not an unrecognised status.
 	status := strings.TrimSpace(agent.Status)
 	if status == "" {
-		return fleetCensusVerdictSkip, "pane-unresolved(err:parse)", age
+		return fleetCensusVerdictSkip, "pane-unresolved(err:parse)"
 	}
 	if status != "idle" && status != "done" {
-		return fleetCensusVerdictSkip, "status=" + status, age
+		return fleetCensusVerdictSkip, "status=" + status
 	}
 	tab := scan.tab
 	if tab == "-" {
@@ -654,27 +689,27 @@ func fleetCensusJobVerdict(scan fleetCensusJobScan, view fleetCensusLocalView, g
 		tab = agent.TabID
 	}
 	if tab == "" {
-		return fleetCensusVerdictSkip, fleetCensusReasonTabResolved, age
+		return fleetCensusVerdictSkip, fleetCensusReasonTabResolved
 	}
 	if agent.TabID != "" && agent.TabID != tab {
-		return fleetCensusVerdictSkip, "tab-mismatch(pane-in=" + agent.TabID + ")", age
+		return fleetCensusVerdictSkip, "tab-mismatch(pane-in=" + agent.TabID + ")"
 	}
 	if !view.tabsOK {
-		return fleetCensusVerdictSkip, fleetCensusReasonTabUnknown, age
+		return fleetCensusVerdictSkip, fleetCensusReasonTabUnknown
 	}
 	count, listed := view.tabs[tab]
 	if !listed || count == nil {
-		return fleetCensusVerdictSkip, fleetCensusReasonTabUnknown, age
+		return fleetCensusVerdictSkip, fleetCensusReasonTabUnknown
 	}
 	// wrk's reap_tab_verdict: exactly one is single; more is shared:N; zero,
 	// negative, and every non-integer shape are unknown — never shared.
 	if *count > 1 {
-		return fleetCensusVerdictSkip, fmt.Sprintf("tab-shared(panes=%d)", *count), age
+		return fleetCensusVerdictSkip, fmt.Sprintf("tab-shared(panes=%d)", *count)
 	}
 	if *count != 1 {
-		return fleetCensusVerdictSkip, fleetCensusReasonTabUnknown, age
+		return fleetCensusVerdictSkip, fleetCensusReasonTabUnknown
 	}
-	return fleetCensusVerdictWouldClose, "", age
+	return fleetCensusVerdictWouldClose, ""
 }
 
 type fleetCensusPaneRow struct {
