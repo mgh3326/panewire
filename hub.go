@@ -93,8 +93,9 @@ type HubServerConfig struct {
 	// update publish may name; empty selects hubUpdateDefaultRepository.
 	UpdateRepository string
 	// UpdateOverdueLane names the lanes.json sink lane that receives one
-	// update.overdue row per (machine, version). Empty disables the row; a
-	// lane that is not a sink never receives it.
+	// update.overdue row per (machine, version). Empty selects the lanes.json
+	// sink lane when exactly one exists; a lane that is not a sink never
+	// receives it.
 	UpdateOverdueLane string
 	// RelayAckTimeout bounds the time an injected relay may remain silent.
 	RelayAckTimeout time.Duration
@@ -444,7 +445,11 @@ type HubServer struct {
 	// reported overdue for, so republishing the same version never repeats
 	// the notice.
 	updateOverdueNotified map[string]string
-	stallBeats            map[string]*hubStallBeatState
+	// updateOverduePending holds notices not yet durably recorded in the sink;
+	// every Sweep retries them until the row exists.
+	updateOverduePending map[string]*hubUpdateOverdue
+	updateOverdueFlushMu sync.Mutex
+	stallBeats           map[string]*hubStallBeatState
 }
 
 // hubStallBeatState is the hub's half of the detector no-data contract. It
@@ -600,7 +605,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatQuestionOf: make(map[int64]string), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, updateRepository: config.UpdateRepository, updateOverdueLane: config.UpdateOverdueLane, updateOverdueNotified: make(map[string]string), stallBeats: make(map[string]*hubStallBeatState),
+		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatQuestionOf: make(map[int64]string), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, updateRepository: config.UpdateRepository, updateOverdueLane: config.UpdateOverdueLane, updateOverdueNotified: make(map[string]string), updateOverduePending: make(map[string]*hubUpdateOverdue), stallBeats: make(map[string]*hubStallBeatState),
 	}, nil
 }
 
@@ -1913,14 +1918,11 @@ func (h *HubServer) Sweep() {
 	var failovers []hubFailoverEvent
 	h.mu.Lock()
 	h.sweepBurstHoldsLocked(now)
-	var overdue []hubUpdateOverdue
 	for machineID, expected := range h.expectedVersion {
 		if !now.Before(expected.deadline) {
 			delete(h.expectedVersion, machineID)
 			h.recordUIEventLocked("update", "unconfirmed", machineID, now)
-			if notice, due := h.updateOverdueLocked(machineID, expected, now); due {
-				overdue = append(overdue, notice)
-			}
+			h.updateOverdueLocked(machineID, expected, now)
 		}
 	}
 	for _, record := range h.nodes {
@@ -1939,9 +1941,7 @@ func (h *HubServer) Sweep() {
 		}
 	}
 	h.mu.Unlock()
-	for _, notice := range overdue {
-		h.emitUpdateOverdue(notice)
-	}
+	h.flushUpdateOverdue()
 	h.sweepOrphanedJobs(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)

@@ -474,17 +474,23 @@ func TestT574DaemonStartRollsBackAfterThreeFailedStarts(t *testing.T) {
 	}
 }
 
+// t574EarlyDeath is one daemon start that ends inside the probation window.
+func t574EarlyDeath(executable, version string) bool {
+	rolledBack, stop := hubUpdateStartup(executable, version, func(string) {})
+	stop()
+	return rolledBack
+}
+
 func TestT574ProbationBoundariesAndReset(t *testing.T) {
-	warn := func(string) {}
 	t.Run("two failures then hello resets", func(t *testing.T) {
 		_, executable := t574Probation(t, 0, true)
-		hubUpdateStartup(executable, t574Version, warn)
-		hubUpdateStartup(executable, t574Version, warn)
-		hubUpdateStartup(executable, t574Version, warn) // third start, which reaches the hub
+		t574EarlyDeath(executable, t574Version)
+		t574EarlyDeath(executable, t574Version)
+		t574EarlyDeath(executable, t574Version) // third start, which reaches the hub
 		client := &HubClient{executablePath: executable, version: t574Version}
 		client.confirmHubUpdate()
 		for i := 0; i < 5; i++ {
-			if hubUpdateStartup(executable, t574Version, warn) {
+			if t574EarlyDeath(executable, t574Version) {
 				t.Fatal("rolled back a version that reached the hub")
 			}
 		}
@@ -501,7 +507,7 @@ func TestT574ProbationBoundariesAndReset(t *testing.T) {
 	})
 	t.Run("running version differs drops state", func(t *testing.T) {
 		_, executable := t574Probation(t, 3, true)
-		if hubUpdateStartup(executable, t574OldVersion, warn) {
+		if t574EarlyDeath(executable, t574OldVersion) {
 			t.Fatal("rolled back while not running the probation version")
 		}
 		if _, err := os.Stat(hubUpdateStatePath(executable)); !os.IsNotExist(err) {
@@ -526,7 +532,7 @@ func TestT574ProbationBoundariesAndReset(t *testing.T) {
 				t.Fatal(err)
 			}
 			for i := 0; i < 3; i++ {
-				if hubUpdateStartup(executable, t574Version, warn) {
+				if t574EarlyDeath(executable, t574Version) {
 					t.Fatal("reported a rollback without a usable copy")
 				}
 			}
@@ -866,4 +872,216 @@ func TestT574NodePinsRepositoryAndRedirectChain(t *testing.T) {
 			}
 		})
 	}
+}
+
+// The node read loop pins the repository at decode time: a foreign-repository
+// instruction is dropped before dispatch (no download, no in-flight claim),
+// while the next pinned instruction on the same connection is applied.
+func TestT574ReadLoopDropsForeignRepositoryInstruction(t *testing.T) {
+	foreign := "https://github.com/evil/panewire/releases/download/v0.1.0/panewire_" + t574Version + "_linux_amd64"
+	raw := func(url string) []byte {
+		out, _ := json.Marshal(map[string]any{"type": "update.available", "version": t574Version, "sha256": t574SHA, "url": url})
+		return out
+	}
+	if _, ok := parseHubOutbound(raw(foreign)); ok {
+		t.Fatal("decoder accepted a foreign repository")
+	}
+	if _, ok := parseHubOutboundPinned(raw(foreign), "evil/panewire"); !ok {
+		t.Fatal("decoder refused the configured repository")
+	}
+	if _, ok := parseHubOutboundPinned(raw(t574ReleaseURL(t574Version)), "evil/panewire"); ok {
+		t.Fatal("decoder accepted the default repository under another pin")
+	}
+
+	_, executable := t574Install(t)
+	asset := hubTestSmokeAsset(t574Version)
+	digest := sha256.Sum256(asset)
+	var mu sync.Mutex
+	var downloaded []string
+	client := &http.Client{Transport: hubRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		mu.Lock()
+		downloaded = append(downloaded, request.URL.String())
+		mu.Unlock()
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(asset)), Request: request}, nil
+	})}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		conn, err := websocket.Accept(writer, request, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		for _, url := range []string{foreign, t574ReleaseURL(t574Version)} {
+			_ = wsjson.Write(request.Context(), conn, map[string]any{"type": "update.available", "version": t574Version, "sha256": hex.EncodeToString(digest[:]), "url": url})
+		}
+		for {
+			var message map[string]any
+			if wsjson.Read(request.Context(), conn, &message) != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	restarted := make(chan struct{}, 2)
+	node, err := NewHubClient(HubClientConfig{URL: r6WSURL(server.URL, ""), MachineID: "node-a", Token: "node-token", AllowInsecureForTests: true, PingInterval: time.Hour, PreferRetry: time.Hour, ExecutablePath: executable, UpdateHTTPClient: client, Restart: func() { restarted <- struct{}{} }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, _, err := websocket.Dial(t.Context(), node.endpoint, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go func() { _ = node.serve(ctx, conn) }()
+	select {
+	case <-restarted:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the pinned instruction after the foreign one was not applied")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(downloaded) != 1 || downloaded[0] != t574ReleaseURL(t574Version) {
+		t.Fatalf("downloads=%v, want only the pinned asset", downloaded)
+	}
+}
+
+// AC4's 60-second bound: a start that outlives the probation window is not an
+// early death. Long-lived runs without a hello (hub unreachable) followed by
+// planned restarts never roll back; only consecutive early deaths do.
+func TestT574ProbationWindowSeparatesEarlyDeathFromLongRuns(t *testing.T) {
+	previous := hubUpdateProbationWindow
+	hubUpdateProbationWindow = 150 * time.Millisecond
+	defer func() { hubUpdateProbationWindow = previous }()
+	starts := func(executable string) int {
+		state, _ := readHubUpdateState(executable)
+		return state.Starts
+	}
+	survive := func(t *testing.T, executable string) {
+		t.Helper()
+		rolledBack, stop := hubUpdateStartup(executable, t574Version, func(string) {})
+		defer stop() // the process ends only after the window
+		if rolledBack {
+			t.Fatal("rolled back a long-lived start")
+		}
+		r6EventuallyWithin(t, "window reset", 3*time.Second, func() bool { return starts(executable) == 0 })
+	}
+
+	t.Run("hub unreachable, long runs, planned restarts", func(t *testing.T) {
+		_, executable := t574Probation(t, 0, true)
+		for i := 0; i < 5; i++ {
+			survive(t, executable)
+		}
+		if got, _ := os.ReadFile(executable); string(got) != "new binary" {
+			t.Fatalf("executable=%q after long-lived restarts", got)
+		}
+		if _, found := readHubUpdateState(executable); !found {
+			t.Fatal("probation ended without a hello")
+		}
+	})
+	t.Run("a long run breaks the early-death streak", func(t *testing.T) {
+		_, executable := t574Probation(t, 0, true)
+		t574EarlyDeath(executable, t574Version)
+		t574EarlyDeath(executable, t574Version)
+		survive(t, executable)
+		for i := 0; i < hubUpdateRollbackAfter; i++ {
+			if t574EarlyDeath(executable, t574Version) {
+				t.Fatalf("rolled back after %d early deaths since the long run", i)
+			}
+		}
+		if !t574EarlyDeath(executable, t574Version) {
+			t.Fatal("three consecutive early deaths did not roll back")
+		}
+		if got, _ := os.ReadFile(executable); string(got) != "old binary" {
+			t.Fatalf("executable=%q", got)
+		}
+	})
+	t.Run("an early death is not rescued by the window", func(t *testing.T) {
+		_, executable := t574Probation(t, 0, true)
+		t574EarlyDeath(executable, t574Version)
+		time.Sleep(3 * hubUpdateProbationWindow)
+		if got := starts(executable); got != 1 {
+			t.Fatalf("a cancelled window reset the count: starts=%d", got)
+		}
+	})
+	t.Run("the window never recreates a record a hello removed", func(t *testing.T) {
+		_, executable := t574Probation(t, 0, true)
+		_, stop := hubUpdateStartup(executable, t574Version, func(string) {})
+		defer stop()
+		(&HubClient{executablePath: executable, version: t574Version}).confirmHubUpdate()
+		time.Sleep(3 * hubUpdateProbationWindow)
+		if _, err := os.Stat(hubUpdateStatePath(executable)); !os.IsNotExist(err) {
+			t.Fatalf("probation record reappeared: %v", err)
+		}
+	})
+}
+
+func r6EventuallyWithin(t *testing.T, label string, limit time.Duration, predicate func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(limit)
+	for time.Now().Before(deadline) {
+		if predicate() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("timed out waiting for %s", label)
+}
+
+// AC5 "exactly one" survives a failed sink write: the notice stays queued and
+// every Sweep retries it until the row exists, then stops.
+func TestT574OverdueRetriesUntilRecorded(t *testing.T) {
+	hub, fake, _, now := t574OverdueHub(t, `{"lanes":{"ops-sink":{"sink":true}}}`, "ops-sink")
+	fake.mu.Lock()
+	fake.status = http.StatusInternalServerError
+	fake.mu.Unlock()
+	hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
+	hub.Sweep()
+	hub.Sweep()
+	if rows := fake.rowCount(); rows != 0 {
+		t.Fatalf("rows while handoffkeep fails=%d", rows)
+	}
+	if attempts := len(t574OverdueRows(fake)); attempts != 2 {
+		t.Fatalf("attempts while failing=%d, want one per sweep", attempts)
+	}
+	fake.mu.Lock()
+	fake.status = http.StatusCreated
+	fake.mu.Unlock()
+	hub.Sweep()
+	if rows := fake.rowCount(); rows != 1 {
+		t.Fatalf("rows after recovery=%d, want 1", rows)
+	}
+	hub.Sweep()
+	hub.Sweep()
+	if attempts := len(t574OverdueRows(fake)); attempts != 3 || fake.rowCount() != 1 {
+		t.Fatalf("recorded notice retried: attempts=%d rows=%d", attempts, fake.rowCount())
+	}
+}
+
+// Without --update-overdue-lane the one sink lane in lanes.json is the
+// operator sink. With none (or several) the notice waits in the queue and is
+// delivered once exactly one sink lane is configured.
+func TestT574OverdueDefaultsToTheSoleSinkLane(t *testing.T) {
+	t.Run("sole sink", func(t *testing.T) {
+		hub, fake, _, now := t574OverdueHub(t, `{"lanes":{"ops-sink":{"sink":true},"lane-a":{"machine":"host-b","pane":"w1:p1"}}}`, "")
+		hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
+		hub.Sweep()
+		if rows := t574OverdueRows(fake); len(rows) != 1 || rows[0]["owner_lane"] != "ops-sink" {
+			t.Fatalf("rows=%v", rows)
+		}
+	})
+	t.Run("ambiguous then configured", func(t *testing.T) {
+		hub, fake, _, now := t574OverdueHub(t, `{"lanes":{"sink-a":{"sink":true},"sink-b":{"sink":true}}}`, "")
+		hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
+		hub.Sweep()
+		if got := fake.sequence(); len(got) != 0 {
+			t.Fatalf("ambiguous sinks were written: %v", got)
+		}
+		if err := os.WriteFile(hub.reportRelayPath, []byte(`{"lanes":{"sink-a":{"sink":true}}}`), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		hub.Sweep()
+		if rows := t574OverdueRows(fake); len(rows) != 1 || rows[0]["owner_lane"] != "sink-a" || fake.rowCount() != 1 {
+			t.Fatalf("rows after configuring one sink=%v", rows)
+		}
+	})
 }

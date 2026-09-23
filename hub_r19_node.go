@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -131,21 +132,6 @@ func parseHubReleaseURL(value, repository string) (hubReleaseAsset, bool) {
 func validHubUpdateURL(value, repository string) bool {
 	_, ok := parseHubReleaseURL(value, repository)
 	return ok
-}
-
-// validHubUpdateURLShape checks the release URL grammar with whichever
-// repository the path names. The node's decoder uses it; applyHubUpdate then
-// enforces the node's pinned repository before any download.
-func validHubUpdateURLShape(value, version string) bool {
-	u, err := url.Parse(value)
-	if err != nil {
-		return false
-	}
-	segments := strings.Split(u.Path, "/")
-	if len(segments) < 3 {
-		return false
-	}
-	return validHubUpdateURLForVersion(value, segments[1]+"/"+segments[2], version)
 }
 
 // validHubUpdateURLForVersion additionally requires the asset name to carry
@@ -273,11 +259,15 @@ func applyHubUpdate(ctx context.Context, httpClient *http.Client, executable str
 	}
 	// The probation record is written before the rename so a new binary that
 	// dies before it can write anything is still judged at its next start.
-	if err = writeHubUpdateState(executable, hubUpdateState{Version: update.Version, Backup: filepath.Base(backup)}); err != nil {
-		return errors.New("update unavailable")
+	hubUpdateStateMu.Lock()
+	err = writeHubUpdateState(executable, hubUpdateState{Version: update.Version, Backup: filepath.Base(backup)})
+	if err == nil {
+		if err = os.Rename(temporaryName, executable); err != nil {
+			_ = os.Remove(hubUpdateStatePath(executable))
+		}
 	}
-	if err = os.Rename(temporaryName, executable); err != nil {
-		_ = os.Remove(hubUpdateStatePath(executable))
+	hubUpdateStateMu.Unlock()
+	if err != nil {
 		return errors.New("update unavailable")
 	}
 	pruneHubUpdateBackups(executable, hubUpdateBackupsKept)
@@ -465,9 +455,19 @@ func hubUpdateExcludedMachine(machine string) bool {
 }
 
 // hubUpdateRollbackAfter is how many consecutive starts of a newly installed
-// version may end without a hub hello before the next start restores the
-// rollback copy.
+// version may die early without a hub hello before the next start restores
+// the rollback copy.
 const hubUpdateRollbackAfter = 3
+
+// hubUpdateProbationWindow is AC4's "died right after start" bound. A start
+// of the version under probation that is still alive this long after it began
+// was not an early death, so it ends the consecutive-failure streak even if
+// the hub was unreachable. (A variable only so fixtures need not wait 60s.)
+var hubUpdateProbationWindow = 60 * time.Second
+
+// hubUpdateStateMu serializes this process's reads and writes of the
+// probation record (startup, the window timer, and the hello confirmation).
+var hubUpdateStateMu sync.Mutex
 
 // hubUpdateState is the probation record applyHubUpdate leaves beside the
 // executable. Starts counts daemon starts of Version that have not (yet)
@@ -522,14 +522,43 @@ func writeHubUpdateState(executable string, state hubUpdateState) error {
 // daemon`, before flag parsing or any schema guard, because a process that
 // dies cannot restore itself: only the next start can. It reports true when it
 // restored the rollback copy; the caller then exits so launchd/systemd start
-// the restored executable.
-func hubUpdateStartup(executable, version string, warn func(string)) bool {
+// the restored executable. When it counts this start it also arms the
+// probation window; the returned stop cancels it and must run when the daemon
+// exits, so a process that ends inside the window stays counted.
+func hubUpdateStartup(executable, version string, warn func(string)) (bool, func()) {
 	if executable == "" {
 		var err error
 		if executable, err = os.Executable(); err != nil {
-			return false
+			return false, func() {}
 		}
 	}
+	hubUpdateStateMu.Lock()
+	defer hubUpdateStateMu.Unlock()
+	rolledBack, counted := judgeHubUpdateStartup(executable, version, warn)
+	if !counted {
+		return rolledBack, func() {}
+	}
+	timer := time.AfterFunc(hubUpdateProbationWindow, func() { survivedHubUpdateWindow(executable, version) })
+	return false, func() { timer.Stop() }
+}
+
+// survivedHubUpdateWindow resets the consecutive early-death count once this
+// start outlived the probation window. Probation itself continues until a
+// hello, so a later run of early deaths still rolls back.
+func survivedHubUpdateWindow(executable, version string) {
+	hubUpdateStateMu.Lock()
+	defer hubUpdateStateMu.Unlock()
+	state, found := readHubUpdateState(executable)
+	if !found || state.Version != version || state.RollbackUnavailable || state.Starts == 0 {
+		return
+	}
+	state.Starts = 0
+	_ = writeHubUpdateState(executable, state)
+}
+
+// judgeHubUpdateStartup reports whether it rolled back and whether it counted
+// this start as one more probation start.
+func judgeHubUpdateStartup(executable, version string, warn func(string)) (bool, bool) {
 	state, found := readHubUpdateState(executable)
 	if !found {
 		if _, err := os.Stat(hubUpdateStatePath(executable)); err == nil {
@@ -537,33 +566,34 @@ func hubUpdateStartup(executable, version string, warn func(string)) bool {
 			// block every later update.
 			_ = os.Remove(hubUpdateStatePath(executable))
 		}
-		return false
+		return false, false
 	}
 	if state.Version != version {
 		// The running executable is not the version under probation: the
 		// rename never happened, or someone replaced the file by hand.
 		_ = os.Remove(hubUpdateStatePath(executable))
-		return false
+		return false, false
 	}
 	if state.RollbackUnavailable {
-		return false
+		return false, false
 	}
 	if state.Starts < hubUpdateRollbackAfter {
 		state.Starts++
 		if err := writeHubUpdateState(executable, state); err != nil {
 			warn("hub update probation was not recorded")
+			return false, false
 		}
-		return false
+		return false, true
 	}
 	if err := restoreHubUpdateBackup(executable, state.Backup); err != nil {
 		warn("hub update rollback unavailable")
 		state.RollbackUnavailable = true
 		_ = writeHubUpdateState(executable, state)
-		return false
+		return false, false
 	}
 	_ = os.Remove(hubUpdateStatePath(executable))
 	warn("hub update rolled back to " + state.Backup)
-	return true
+	return true, false
 }
 
 // restoreHubUpdateBackup atomically puts the recorded rollback copy back at
@@ -604,6 +634,8 @@ func (client *HubClient) confirmHubUpdate() {
 			return
 		}
 	}
+	hubUpdateStateMu.Lock()
+	defer hubUpdateStateMu.Unlock()
 	if state, found := readHubUpdateState(executable); found && state.Version == client.version {
 		_ = os.Remove(hubUpdateStatePath(executable))
 	}

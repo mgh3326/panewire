@@ -231,33 +231,87 @@ type hubUpdateOverdue struct {
 	machine  string
 	version  string
 	deadline time.Time
+	attempts int
 }
 
 // updateOverdueLocked judges one expired expectation. A node that is not on
-// the published version is overdue; each (machine, version) pair is reported
-// once, however often that version is republished.
-func (h *HubServer) updateOverdueLocked(machineID string, expected hubExpectedVersion, now time.Time) (hubUpdateOverdue, bool) {
+// the published version is overdue; each (machine, version) pair is noticed
+// once, however often that version is republished. The notice is queued for
+// the sink until it is durably recorded (flushUpdateOverdue).
+func (h *HubServer) updateOverdueLocked(machineID string, expected hubExpectedVersion, now time.Time) {
 	if record := h.nodes[machineID]; record != nil && record.remoteMeta["version"] == expected.version {
-		return hubUpdateOverdue{}, false
+		return
 	}
 	if h.updateOverdueNotified[machineID] == expected.version {
-		return hubUpdateOverdue{}, false
+		return
 	}
 	h.updateOverdueNotified[machineID] = expected.version
 	h.recordUIEventLocked("update", "overdue", machineID, now)
 	h.lastNotes[machineID] = &HubLastNote{Text: "update overdue " + expected.version, ReceivedAt: now}
-	return hubUpdateOverdue{machine: machineID, version: expected.version, deadline: expected.deadline}, true
+	h.updateOverduePending[machineID+"\x00"+expected.version] = &hubUpdateOverdue{machine: machineID, version: expected.version, deadline: expected.deadline}
 }
 
-// emitUpdateOverdue writes the update.overdue row to the configured operator
-// sink lane. It never uses the Telegram notifier and never reaches a pane: a
-// lane that is not a sink is refused inside relayLaneEvent. The event id is
-// derived from (machine, version), so handoffkeep's first-writer-wins row also
-// dedupes across hub restarts.
-func (h *HubServer) emitUpdateOverdue(notice hubUpdateOverdue) {
-	lane := h.updateOverdueLane
-	if lane == "" {
-		return
+// flushUpdateOverdue tries every queued notice once. A notice leaves the
+// queue only when its sink row exists (created, or found already stored), so
+// a failed handoffkeep write, a missing sink lane, or a hub that is still
+// being configured delays the row rather than losing it.
+func (h *HubServer) flushUpdateOverdue() {
+	h.updateOverdueFlushMu.Lock()
+	defer h.updateOverdueFlushMu.Unlock()
+	h.mu.Lock()
+	pending := make(map[string]*hubUpdateOverdue, len(h.updateOverduePending))
+	for key, notice := range h.updateOverduePending {
+		pending[key] = notice
+	}
+	h.mu.Unlock()
+	for key, notice := range pending {
+		recorded := h.emitUpdateOverdue(*notice)
+		h.mu.Lock()
+		if recorded {
+			delete(h.updateOverduePending, key)
+		} else {
+			notice.attempts++
+		}
+		first := notice.attempts == 1
+		h.mu.Unlock()
+		if !recorded && first {
+			h.logger.Warn("update.overdue is not yet recorded in an operator sink lane; retrying each sweep", "machine", notice.machine, "version", notice.version)
+		}
+	}
+}
+
+// updateOverdueSinkLane is --update-overdue-lane when set, otherwise the one
+// sink lane in lanes.json. With no sink, or several and no flag, there is no
+// destination and the notice stays queued.
+func (h *HubServer) updateOverdueSinkLane() (string, bool) {
+	if h.updateOverdueLane != "" {
+		return h.updateOverdueLane, true
+	}
+	h.mu.Lock()
+	routes := loadReportRelayRoutes(h.reportRelayPath)
+	h.mu.Unlock()
+	sole := ""
+	for lane, route := range routes {
+		if !route.Sink {
+			continue
+		}
+		if sole != "" {
+			return "", false
+		}
+		sole = lane
+	}
+	return sole, sole != ""
+}
+
+// emitUpdateOverdue writes the update.overdue row to the operator sink lane
+// and reports whether the row now exists. It never uses the Telegram notifier
+// and never reaches a pane: a lane that is not a sink is refused inside
+// relayLaneEvent. The event id is derived from (machine, version), so
+// handoffkeep's first-writer-wins row also dedupes retries and hub restarts.
+func (h *HubServer) emitUpdateOverdue(notice hubUpdateOverdue) bool {
+	lane, found := h.updateOverdueSinkLane()
+	if !found {
+		return false
 	}
 	eventID := "update.overdue:" + notice.machine + ":" + notice.version
 	event := hubJobEventPayload{
@@ -272,7 +326,5 @@ func (h *HubServer) emitUpdateOverdue(notice hubUpdateOverdue) {
 		sinkOnly:  true,
 	}
 	result := h.relayLaneEvent(event, nil)
-	if !result.Routed && !result.Duplicate && !result.AlreadyDelivered {
-		h.logger.Warn("update.overdue was not recorded in its sink lane", "lane", lane, "machine", notice.machine)
-	}
+	return result.ID != 0 && (result.Routed || result.Duplicate || result.AlreadyDelivered)
 }

@@ -132,7 +132,9 @@ panewire hub-status --hub-url <hub HTTPS URL> --hub-token-env <token env> [--hub
 - `panewire daemon` 은 **기동 최초**(플래그 파싱·스키마 가드보다 앞)에 이를 판정한다:
   자기 버전 ≠ 기록 버전이면 기록을 지운다. 같으면 기동 횟수를 1 올린다.
   hub 에 hello 를 하면 기록을 지운다(카운터 리셋).
-- hello 없이 죽은 기동이 **3회 연속**이면 4번째 기동이 기록된 `.bak-<UTC>` 를 원자적으로 되돌려 놓고
+- 기동 뒤 **60초** 를 살아 있으면(hello 여부와 무관) 그 기동은 "기동 직후 죽음" 이 아니므로 기동 횟수를
+  0 으로 되돌린다 — hub 가 한동안 불통이어도 오래 정상 동작한 뒤의 계획 재시작은 되돌리기로 이어지지 않는다.
+- hello 없이 60초 안에 죽은 기동이 **3회 연속**이면 4번째 기동이 기록된 `.bak-<UTC>` 를 원자적으로 되돌려 놓고
   비0 종료한다 — launchd/systemd 가 옛 바이너리를 띄운다. `.bak` 은 지우지 않는다.
 - `.bak` 이 없으면 `rollback_unavailable` 로 표시하고 새 바이너리로 계속 돈다(오늘과 같은 동작) → 사람이 복구.
 
@@ -141,8 +143,10 @@ panewire hub-status --hub-url <hub HTTPS URL> --hub-token-env <token env> [--hub
 | 무엇 | 어디 | 기본 |
 |---|---|---|
 | 고정 레포 | `PANEWIRE_UPDATE_REPO` (hub·노드 프로세스 환경) | `mgh3326/panewire` |
-| overdue sink 레인 | hub `--update-overdue-lane <레인>`, 그 레인은 `lanes.json` 에서 `"sink": true` | 비어 있음(=행 없음, LAST_NOTE 만) |
+| overdue sink 레인 | hub `--update-overdue-lane <레인>`, 그 레인은 `lanes.json` 에서 `"sink": true` | 플래그가 없으면 `lanes.json` 의 sink 레인이 **정확히 1개**일 때 그 레인 |
 | 확인 마감 | hub 내부 `UpdateConfirmationTimeout` | 10분 |
 
 `update.overdue` 는 Telegram 알림(연결 끊김·stale 등)을 쓰지 않는다. sink 가 아닌 레인을 지정하면
-어느 pane 에도 주입되지 않고 기록도 남지 않는다.
+어느 pane 에도 주입되지 않는다. 행이 아직 기록되지 않은 통지(handoffkeep 실패, sink 레인 없음·여럿)는
+hub 가 sweep 마다 다시 시도하고, 행이 생기면 멈춘다 — (노드, 버전)당 행은 1개다(hub 재시작 뒤에도).
+대기 중인 통지는 hub 메모리에만 있으므로 hub 재시작 전에 기록되지 못한 통지는 사라진다(LAST_NOTE 도 마찬가지).

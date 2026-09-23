@@ -1007,7 +1007,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			if messageType != websocket.MessageText {
 				continue
 			}
-			message, ok := parseHubOutbound(payload)
+			message, ok := parseHubOutboundPinned(payload, client.updateRepository)
 			if !ok {
 				continue
 			}
@@ -1726,7 +1726,16 @@ func hubClientWireEvent(event hubClientEvent) struct {
 	}{Type: "event", Kind: event.Kind, Payload: event.Payload}
 }
 
+// parseHubOutbound decodes with the default update repository pin; the node
+// read loop uses parseHubOutboundPinned with its configured repository.
 func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
+	return parseHubOutboundPinned(payload, hubUpdateDefaultRepository)
+}
+
+// parseHubOutboundPinned drops an update.available whose URL is not the
+// pinned repository's release asset for the instructed version, so such an
+// instruction is never dispatched (applyHubUpdate checks the pin again).
+func parseHubOutboundPinned(payload []byte, updateRepository string) (hubOutboundMessage, bool) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(payload, &fields) != nil || fields == nil {
 		return hubOutboundMessage{}, false
@@ -1855,7 +1864,7 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 			return hubOutboundMessage{}, false
 		}
 	case "update.available":
-		if len(fields) != 4 || json.Unmarshal(fields["version"], &message.Version) != nil || json.Unmarshal(fields["sha256"], &message.SHA256) != nil || json.Unmarshal(fields["url"], &message.URL) != nil || !hubVersionPattern.MatchString(message.Version) || !validHubSHA256(message.SHA256) || !validHubUpdateURLShape(message.URL, message.Version) {
+		if len(fields) != 4 || json.Unmarshal(fields["version"], &message.Version) != nil || json.Unmarshal(fields["sha256"], &message.SHA256) != nil || json.Unmarshal(fields["url"], &message.URL) != nil || !hubVersionPattern.MatchString(message.Version) || !validHubSHA256(message.SHA256) || !validHubUpdateURLForVersion(message.URL, updateRepository, message.Version) {
 			return hubOutboundMessage{}, false
 		}
 	case "quota.request":

@@ -396,9 +396,12 @@ func runDaemonCLI(args []string) int {
 func runDaemonCLIWithDeps(args []string, deps daemonCLIDeps) int {
 	// Self-update rollback is judged before anything else a new binary could
 	// die on (flags, schema guard, sockets): see hubUpdateStartup.
-	if hubUpdateStartup(deps.ExecutablePath, deps.Version, func(message string) { fmt.Fprintln(os.Stderr, message) }) {
+	rolledBack, endProbationWindow := hubUpdateStartup(deps.ExecutablePath, deps.Version, func(message string) { fmt.Fprintln(os.Stderr, message) })
+	if rolledBack {
 		return ExitInternal
 	}
+	// Exiting inside the probation window keeps this start counted.
+	defer endProbationWindow()
 	d, code, err := newDaemonForCLI(args, deps)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon configuration rejected:", err)
