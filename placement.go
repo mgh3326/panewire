@@ -638,7 +638,8 @@ func (h *HubServer) makePlacementWithQuota(policy PlacementPolicy, metrics place
 	// The capacity-pressure fallback above can still name the local machine
 	// even though it is unusable; a configured task-slot cap is an explicit
 	// exhaustion signal, so it must never survive as the decision.
-	if placementSlotFull(candidates, decision) {
+	slotBlocked := placementSlotFull(candidates, decision)
+	if slotBlocked {
 		decision = "unavailable"
 	}
 	sort.SliceStable(candidates, func(i, j int) bool { return candidates[i].Score > candidates[j].Score })
@@ -647,6 +648,10 @@ func (h *HubServer) makePlacementWithQuota(policy PlacementPolicy, metrics place
 		reason = "unavailable"
 		if quota != nil && (quota.Decision == "deny" || quota.Decision == "unknown") {
 			reason = quota.Reason
+		} else if slotBlocked {
+			// The chosen machine hit its task cap but other candidates remain:
+			// distinct from task_slots_exhausted, which means none survived.
+			reason = "task_slots_full"
 		}
 	}
 	// Only machines with a free task slot are candidates. wrk walks this list

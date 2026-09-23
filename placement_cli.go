@@ -133,9 +133,9 @@ func validPlacementCLIResult(result PlacementResult, pool, accountFP string) boo
 	if quota.Decision == "deny" || quota.Decision == "unknown" {
 		return result.Decision == "unavailable"
 	}
-	// Slot exhaustion is the other legitimate unavailable answer: the quota
-	// allowed the pool but every configured machine is at its task cap.
-	return result.Decision != "unavailable" || result.Reason == "task_slots_exhausted"
+	// Slot pressure is the other legitimate unavailable answer: the quota
+	// allowed the pool but task caps rejected the decision machine.
+	return result.Decision != "unavailable" || result.Reason == "task_slots_exhausted" || result.Reason == "task_slots_full"
 }
 
 func renderPlacementExplain(w io.Writer, result PlacementResult) {

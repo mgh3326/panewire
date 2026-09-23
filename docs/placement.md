@@ -109,6 +109,12 @@ path does not exist at startup, the hub runs with `PlacementPolicyPath` empty â€
 in that state dropping a file later does nothing, because the hot-reload loop
 only watches a configured path. The procedure is therefore:
 
+0. **Upgrade `panewire` on every wrk host before enabling `machines`.**
+   Once any machine is capped, `/v1/placement` emits `tasks`/`task_slots`
+   on that machine's candidates, and pre-change CLIs reject the response
+   (`DisallowUnknownFields`) â€” wrk would read that as a rejected hub answer.
+   With no `machines` key the wire is unchanged, so writing the file early
+   is safe; the caps are what require the fleet upgrade.
 1. Write the draft to `/etc/panewire/placement.json` on the hub host
    (`root:panewire`-readable regular file, mode `0644`; it must not be a
    symlink).

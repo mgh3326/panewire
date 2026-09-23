@@ -148,6 +148,12 @@ func TestPlacementCLIValidatorQuotaAllowSlotExhausted(t *testing.T) {
 	if !validPlacementCLIResult(exhausted, "claude", "a1b2c3d4") {
 		t.Fatal("quota-allowed slots-exhausted response rejected as malformed")
 	}
+	localFull := exhausted
+	localFull.Reason = "task_slots_full"
+	localFull.Candidates = []PlacementCandidate{{Machine: "desktop", Reason: "disconnected"}}
+	if !validPlacementCLIResult(localFull, "claude", "a1b2c3d4") {
+		t.Fatal("quota-allowed slot-full-local response rejected as malformed")
+	}
 	bogus := exhausted
 	bogus.Reason = "other_reason"
 	if validPlacementCLIResult(bogus, "claude", "a1b2c3d4") {
@@ -241,6 +247,9 @@ func TestPlacementTaskSlotsLocalFullNeverDecision(t *testing.T) {
 	result := hub.placement(t.Context(), "worker", "repo-slots")
 	if result.Decision != "unavailable" {
 		t.Fatalf("slot-full local must not be the decision, got %q", result.Decision)
+	}
+	if result.Reason != "task_slots_full" {
+		t.Fatalf("reason=%q want task_slots_full", result.Reason)
 	}
 	if _, found := t607Candidate(result, "mac-work"); found {
 		t.Fatalf("slot-full mac-work leaked into candidates: %+v", result.Candidates)
