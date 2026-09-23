@@ -85,8 +85,8 @@ func TestPlacementTaskSlotsCountsOwnerLaneBundle(t *testing.T) {
 	if !found {
 		t.Fatalf("one task on a slots=2 machine was excluded: %+v", result)
 	}
-	if candidate.Tasks != 1 || candidate.TaskSlots != 2 {
-		t.Fatalf("tasks=%d slots=%d, want 1/2", candidate.Tasks, candidate.TaskSlots)
+	if candidate.Tasks == nil || *candidate.Tasks != 1 || candidate.TaskSlots != 2 {
+		t.Fatalf("tasks=%v slots=%d, want 1/2", candidate.Tasks, candidate.TaskSlots)
 	}
 }
 
@@ -162,8 +162,8 @@ func TestPlacementTaskSlotsAbsentPolicyIsNoop(t *testing.T) {
 	t607Task(hub, "desktop", 3, 1)
 	result := hub.placement(t.Context(), "worker", "repo-slots")
 	candidate, found := t607Candidate(result, "desktop")
-	if !found || candidate.Tasks != 3 || candidate.TaskSlots != 0 {
-		t.Fatalf("no machines map must not gate: %+v", result.Candidates)
+	if !found || candidate.Tasks != nil || candidate.TaskSlots != 0 {
+		t.Fatalf("no machines map must not gate or leak tasks/task_slots: %+v", result.Candidates)
 	}
 }
 
@@ -180,6 +180,88 @@ func TestPlacementTaskSlotsUnownedJobsCountIndividually(t *testing.T) {
 	result := hub.placement(t.Context(), "worker", "repo-slots")
 	if _, found := t607Candidate(result, "desktop"); found {
 		t.Fatalf("two unowned jobs should fill slots=2: %+v", result.Candidates)
+	}
+}
+
+// Two jobs that both carry the legacy "default" owner sentinel are two tasks:
+// "default" proves nothing about shared ownership. Mutant check: dropping the
+// sentinel special-case groups them into one task and this fails.
+func TestPlacementTaskSlotsDefaultSentinelCountsIndividually(t *testing.T) {
+	hub, _ := t607PolicyHub(t, map[string]PlacementMachineSlots{"desktop": {TaskSlots: 2}})
+	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
+	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
+	hub.observeActiveJobs("desktop", []HubActiveJob{
+		{JobID: "job-def-a", AgentLabel: "wrk", Epoch: 1, OwnerLane: "default"},
+		{JobID: "job-def-b", AgentLabel: "wrk", Epoch: 1, OwnerLane: "default"},
+	}, time.Now().UTC())
+	result := hub.placement(t.Context(), "worker", "repo-slots")
+	if _, found := t607Candidate(result, "desktop"); found {
+		t.Fatalf("two default-owner jobs should fill slots=2: %+v", result.Candidates)
+	}
+}
+
+// wake_on_spill may pick a disconnected spill to wake, but never a slot-full
+// one: it must skip a full spill and wake the next candidate. Mutant check:
+// reverting to `decision = candidates[1].Machine` returns the full machine.
+func TestPlacementTaskSlotsWakeSkipsFullSpill(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "placement.json")
+	policy := PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop", "mac-dev"}, MaxActiveJobs: 5, LoadRatio: .5, WakeOnSpill: true, Machines: map[string]PlacementMachineSlots{"desktop": {TaskSlots: 1}}}
+	data, err := json.Marshal(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "mac-work": r6NodeAToken, "desktop": r6NodeBToken}, PlacementPolicyPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Local absent (disconnected → unusable, no not_accepting so the local
+	// fallback survives to the wake branch); desktop connected but slot-full;
+	// mac-dev absent (disconnected → the wake candidate).
+	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
+	t607Task(hub, "desktop", 1, 1)
+	result := hub.placement(t.Context(), "worker", "repo-slots")
+	if result.Decision != "mac-dev" {
+		t.Fatalf("wake should skip slot-full desktop and pick mac-dev, got %q: %+v", result.Decision, result)
+	}
+}
+
+// The capacity-pressure fallback can keep the local machine as decision even
+// when it is slot-full; the final guard must turn that into unavailable and
+// drop the machine from candidates. Mutant check: deleting the
+// placementSlotFull guard makes this return decision=mac-work.
+func TestPlacementTaskSlotsLocalFullNeverDecision(t *testing.T) {
+	hub, _ := t607PolicyHub(t, map[string]PlacementMachineSlots{"mac-work": {TaskSlots: 1}})
+	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
+	t607Task(hub, "mac-work", 1, 1)
+	// desktop never connected: unusable, so the local fallback keeps mac-work
+	// as the raw decision until the slot-full guard rejects it.
+	result := hub.placement(t.Context(), "worker", "repo-slots")
+	if result.Decision != "unavailable" {
+		t.Fatalf("slot-full local must not be the decision, got %q", result.Decision)
+	}
+	if _, found := t607Candidate(result, "mac-work"); found {
+		t.Fatalf("slot-full mac-work leaked into candidates: %+v", result.Candidates)
+	}
+}
+
+// The 30s placement cache must not keep recommending a machine whose task
+// count just changed: observeActiveJobs invalidates it on any active-set
+// change, matching the memory-heartbeat precedent.
+func TestPlacementTaskSlotsCacheInvalidatesOnActiveJobs(t *testing.T) {
+	hub, _ := t607PolicyHub(t, map[string]PlacementMachineSlots{"mac-work": {TaskSlots: 1}, "desktop": {TaskSlots: 1}})
+	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
+	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
+	first := hub.placement(t.Context(), "worker", "repo-cache")
+	if first.Decision != "mac-work" {
+		t.Fatalf("baseline decision=%q want mac-work", first.Decision)
+	}
+	t607Task(hub, "mac-work", 1, 1)
+	second := hub.placement(t.Context(), "worker", "repo-cache")
+	if second.Decision != "desktop" {
+		t.Fatalf("stale cache served %q after mac-work filled", second.Decision)
 	}
 }
 

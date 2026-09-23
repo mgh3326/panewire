@@ -50,8 +50,9 @@ entirely — it is never the decision, is skipped by the `wake_on_spill`
 shortcut, and is invisible to consumers that walk the candidate list. When
 every machine is full the response is explicit: `"decision": null`,
 `"candidates": []`, `"reason": "task_slots_exhausted"`. Surviving candidates
-report `tasks` and `task_slots` so the counting is visible in the response
-itself.
+for capped machines report `tasks` and `task_slots` so the counting is
+visible in the response itself; uncapped machines omit both fields so the
+wire stays byte-identical for deployments without a `machines` map.
 
 `GET /v1/placement/slots` answers "which machine has room" without running a
 placement decision. It shares `/v1/placement`'s operator-token boundary
@@ -64,6 +65,13 @@ configured cap (`task_slots` is `null` when uncapped):
 
 The slot list covers the policy's `local_machine` + `spill_targets`, every
 `machines` entry, and every machine with a node record.
+
+Two counting edge cases are deliberate. Jobs spawned with `--owner
+<lane>` where the lane is a coordinator (e.g. `director-N` spawning workers
+directly) all share that lane, so they count as one task — the same rule as
+builder bundles. And the node heartbeat truncates its active-job list at 32
+entries, so `task_slots` values above 32 can never bind; keep configured caps
+at or below that.
 
 ## Draft NCP policy file (not deployed)
 

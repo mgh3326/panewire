@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"regexp"
 	"sort"
 	"strings"
@@ -228,6 +229,7 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		h.mu.Unlock()
 		return
 	}
+	previous := record.activeJobs
 	record.activeJobs = make(map[string]HubActiveJob, len(active))
 	for _, job := range active {
 		seen[job.JobID] = struct{}{}
@@ -255,6 +257,11 @@ func (h *HubServer) observeActiveJobs(machineID string, active []HubActiveJob, r
 		}
 		// Same owner and hub-issued epoch: only local metadata/liveness advances.
 		current.HubActiveJob, current.LastSeen = job, received
+	}
+	// The active-job set feeds placement admission (active_jobs, task slots);
+	// a changed set must not let the 30s cache keep answering on stale counts.
+	if !maps.Equal(previous, record.activeJobs) {
+		h.placementCache = placementCache{}
 	}
 	// A job absent after the node has reconnected is a local terminal-file
 	// observation. Inspect the durable-in-process job view rather than just the

@@ -137,12 +137,15 @@ func LoadPlacementPolicy(path string) (PlacementPolicy, time.Time, error) {
 }
 
 type PlacementCandidate struct {
-	Machine       string   `json:"machine"`
-	Score         float64  `json:"score"`
-	LoadRatio     float64  `json:"load_ratio,omitempty"`
-	Throttled     bool     `json:"throttled"`
-	ActiveJobs    int      `json:"active_jobs"`
-	Tasks         int      `json:"tasks"`
+	Machine    string  `json:"machine"`
+	Score      float64 `json:"score"`
+	LoadRatio  float64 `json:"load_ratio,omitempty"`
+	Throttled  bool    `json:"throttled"`
+	ActiveJobs int     `json:"active_jobs"`
+	// Tasks and TaskSlots serialize only for machines the policy caps;
+	// uncapped machines (and policies without machines) keep the legacy wire
+	// byte-identical so older CLI decoders do not reject the response.
+	Tasks         *int     `json:"tasks,omitempty"`
 	TaskSlots     int      `json:"task_slots,omitempty"`
 	Connected     bool     `json:"connected"`
 	MetricsKnown  bool     `json:"metrics_known"`
@@ -590,7 +593,12 @@ func (h *HubServer) makePlacementWithQuota(policy PlacementPolicy, metrics place
 		if memory != nil {
 			freePct, swapUsedMB = cloneMemoryFloat(memory.FreePct), cloneMemoryFloat(memory.SwapUsedMB)
 		}
-		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasks, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, QuotaDecision: quotaDecision, QuotaReason: quotaReason, Reason: strings.Join(reasons, ","), slotFull: slotFull})
+		var tasksField *int
+		if slotCapped {
+			tasksField = new(int)
+			*tasksField = tasks
+		}
+		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, QuotaDecision: quotaDecision, QuotaReason: quotaReason, Reason: strings.Join(reasons, ","), slotFull: slotFull})
 	}
 	h.mu.Unlock()
 	decision := policy.LocalMachine
