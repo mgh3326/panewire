@@ -449,6 +449,8 @@ type HubServer struct {
 	// every Sweep retries them until the row exists.
 	updateOverduePending map[string]*hubUpdateOverdue
 	updateOverdueFlushMu sync.Mutex
+	// updateOverdueFlushes tracks background flushes (fixtures wait on it).
+	updateOverdueFlushes sync.WaitGroup
 	stallBeats           map[string]*hubStallBeatState
 }
 
@@ -1941,7 +1943,7 @@ func (h *HubServer) Sweep() {
 		}
 	}
 	h.mu.Unlock()
-	h.flushUpdateOverdue()
+	h.startUpdateOverdueFlush()
 	h.sweepOrphanedJobs(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)

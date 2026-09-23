@@ -251,13 +251,32 @@ func (h *HubServer) updateOverdueLocked(machineID string, expected hubExpectedVe
 	h.updateOverduePending[machineID+"\x00"+expected.version] = &hubUpdateOverdue{machine: machineID, version: expected.version, deadline: expected.deadline}
 }
 
+// startUpdateOverdueFlush is Sweep's hook. The flush does handoffkeep HTTP
+// (up to a 10s timeout per notice), so it never runs on the Sweep goroutine:
+// keepalives, failover, and the rest of maintenance must not wait behind a
+// failing backlog. At most one flush runs at a time; a sweep that finds one
+// still running leaves the retry to a later sweep.
+func (h *HubServer) startUpdateOverdueFlush() {
+	h.mu.Lock()
+	empty := len(h.updateOverduePending) == 0
+	h.mu.Unlock()
+	if empty || !h.updateOverdueFlushMu.TryLock() {
+		return
+	}
+	h.updateOverdueFlushes.Add(1)
+	go func() {
+		defer h.updateOverdueFlushes.Done()
+		defer h.updateOverdueFlushMu.Unlock()
+		h.flushUpdateOverdue()
+	}()
+}
+
 // flushUpdateOverdue tries every queued notice once. A notice leaves the
 // queue only when its sink row exists (created, or found already stored), so
 // a failed handoffkeep write, a missing sink lane, or a hub that is still
-// being configured delays the row rather than losing it.
+// being configured delays the row rather than losing it. The caller holds
+// updateOverdueFlushMu.
 func (h *HubServer) flushUpdateOverdue() {
-	h.updateOverdueFlushMu.Lock()
-	defer h.updateOverdueFlushMu.Unlock()
 	h.mu.Lock()
 	pending := make(map[string]*hubUpdateOverdue, len(h.updateOverduePending))
 	for key, notice := range h.updateOverduePending {

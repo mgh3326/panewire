@@ -608,6 +608,13 @@ func t574OverdueHub(t *testing.T, lanes, overdueLane string) (*HubServer, *fakeH
 	return hub, fake, notifier, &now
 }
 
+// t574Sweep runs one Sweep and waits for the overdue flush it started, which
+// runs off the Sweep goroutine.
+func t574Sweep(hub *HubServer) {
+	hub.Sweep()
+	hub.updateOverdueFlushes.Wait()
+}
+
 func t574OverdueRows(fake *fakeHandoffkeep) []map[string]any {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
@@ -625,7 +632,7 @@ func t574OverdueRows(fake *fakeHandoffkeep) []map[string]any {
 func TestT574OverdueReachesSinkExactlyOnce(t *testing.T) {
 	hub, fake, notifier, now := t574OverdueHub(t, `{"lanes":{"ops-sink":{"sink":true}}}`, "ops-sink")
 	hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
-	hub.Sweep()
+	t574Sweep(hub)
 	rows := t574OverdueRows(fake)
 	if len(rows) != 1 || rows[0]["owner_lane"] != "ops-sink" || !strings.Contains(asString(rows[0]["text"]), "machine=node-a version="+t574Version) {
 		t.Fatalf("overdue rows=%v", rows)
@@ -644,11 +651,11 @@ func TestT574OverdueReachesSinkExactlyOnce(t *testing.T) {
 	}
 
 	// More sweeps, and republishing the same version, never repeat it.
-	hub.Sweep()
+	t574Sweep(hub)
 	*now = now.Add(time.Hour)
 	hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
-	hub.Sweep()
-	hub.Sweep()
+	t574Sweep(hub)
+	t574Sweep(hub)
 	if rows := t574OverdueRows(fake); len(rows) != 1 {
 		t.Fatalf("same machine and version notified %d times", len(rows))
 	}
@@ -670,7 +677,7 @@ func TestT574OverdueReachesSinkExactlyOnce(t *testing.T) {
 	}
 	hub.recordNote("node-a", "operator acknowledged", *now)
 	hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
-	hub.Sweep()
+	t574Sweep(hub)
 	if note := hub.Nodes()[0].LastNote; note == nil || note.Text != "operator acknowledged" || overdueEvents() != 1 {
 		t.Fatalf("repeat notice: LAST_NOTE=%+v overdue events=%d", note, overdueEvents())
 	}
@@ -682,13 +689,13 @@ func TestT574OverdueReachesSinkExactlyOnce(t *testing.T) {
 	}
 	restarted.nodes["node-a"] = &hubNodeRecord{machineID: "node-a", state: "disconnected", remoteMeta: map[string]string{"version": t574OldVersion}}
 	restarted.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
-	restarted.Sweep()
+	t574Sweep(restarted)
 	if rows := fake.rowCount(); rows != 1 {
 		t.Fatalf("durable sink rows after hub restart=%d, want 1", rows)
 	}
 	// A different version is a new notice.
 	hub.expectedVersion["node-a"] = hubExpectedVersion{version: "pw-def5678", deadline: *now}
-	hub.Sweep()
+	t574Sweep(hub)
 	if rows := fake.rowCount(); rows != 2 {
 		t.Fatalf("new version durable rows=%d, want 2", rows)
 	}
@@ -704,7 +711,7 @@ func TestT574OverdueOnlyForLaggingNodesAndOnlyToSinks(t *testing.T) {
 		hub, fake, _, now := t574OverdueHub(t, `{"lanes":{"ops-sink":{"sink":true}}}`, "ops-sink")
 		hub.nodes["node-a"].remoteMeta["version"] = t574Version
 		hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
-		hub.Sweep()
+		t574Sweep(hub)
 		if rows := t574OverdueRows(fake); len(rows) != 0 {
 			t.Fatalf("rows=%v", rows)
 		}
@@ -712,7 +719,7 @@ func TestT574OverdueOnlyForLaggingNodesAndOnlyToSinks(t *testing.T) {
 	t.Run("before the deadline nothing is sent", func(t *testing.T) {
 		hub, fake, _, now := t574OverdueHub(t, `{"lanes":{"ops-sink":{"sink":true}}}`, "ops-sink")
 		hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: now.Add(time.Second)}
-		hub.Sweep()
+		t574Sweep(hub)
 		if rows := t574OverdueRows(fake); len(rows) != 0 {
 			t.Fatalf("rows=%v", rows)
 		}
@@ -723,7 +730,7 @@ func TestT574OverdueOnlyForLaggingNodesAndOnlyToSinks(t *testing.T) {
 		// A fresh keepalive keeps Sweep from pinging this socketless agent.
 		hub.nodes["host-b"] = &hubNodeRecord{machineID: "host-b", agent: destination, state: "connected", lastPing: *now, lastKeepaliveSent: *now, remoteMeta: map[string]string{}}
 		hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
-		hub.Sweep()
+		t574Sweep(hub)
 		if got := fake.sequence(); len(got) != 0 {
 			t.Fatalf("handoffkeep calls=%v", got)
 		}
@@ -1035,8 +1042,8 @@ func TestT574OverdueRetriesUntilRecorded(t *testing.T) {
 	fake.status = http.StatusInternalServerError
 	fake.mu.Unlock()
 	hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
-	hub.Sweep()
-	hub.Sweep()
+	t574Sweep(hub)
+	t574Sweep(hub)
 	if rows := fake.rowCount(); rows != 0 {
 		t.Fatalf("rows while handoffkeep fails=%d", rows)
 	}
@@ -1046,12 +1053,12 @@ func TestT574OverdueRetriesUntilRecorded(t *testing.T) {
 	fake.mu.Lock()
 	fake.status = http.StatusCreated
 	fake.mu.Unlock()
-	hub.Sweep()
+	t574Sweep(hub)
 	if rows := fake.rowCount(); rows != 1 {
 		t.Fatalf("rows after recovery=%d, want 1", rows)
 	}
-	hub.Sweep()
-	hub.Sweep()
+	t574Sweep(hub)
+	t574Sweep(hub)
 	if attempts := len(t574OverdueRows(fake)); attempts != 3 || fake.rowCount() != 1 {
 		t.Fatalf("recorded notice retried: attempts=%d rows=%d", attempts, fake.rowCount())
 	}
@@ -1064,7 +1071,7 @@ func TestT574OverdueDefaultsToTheSoleSinkLane(t *testing.T) {
 	t.Run("sole sink", func(t *testing.T) {
 		hub, fake, _, now := t574OverdueHub(t, `{"lanes":{"ops-sink":{"sink":true},"lane-a":{"machine":"host-b","pane":"w1:p1"}}}`, "")
 		hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
-		hub.Sweep()
+		t574Sweep(hub)
 		if rows := t574OverdueRows(fake); len(rows) != 1 || rows[0]["owner_lane"] != "ops-sink" {
 			t.Fatalf("rows=%v", rows)
 		}
@@ -1072,16 +1079,78 @@ func TestT574OverdueDefaultsToTheSoleSinkLane(t *testing.T) {
 	t.Run("ambiguous then configured", func(t *testing.T) {
 		hub, fake, _, now := t574OverdueHub(t, `{"lanes":{"sink-a":{"sink":true},"sink-b":{"sink":true}}}`, "")
 		hub.expectedVersion["node-a"] = hubExpectedVersion{version: t574Version, deadline: *now}
-		hub.Sweep()
+		t574Sweep(hub)
 		if got := fake.sequence(); len(got) != 0 {
 			t.Fatalf("ambiguous sinks were written: %v", got)
 		}
 		if err := os.WriteFile(hub.reportRelayPath, []byte(`{"lanes":{"sink-a":{"sink":true}}}`), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		hub.Sweep()
+		t574Sweep(hub)
 		if rows := t574OverdueRows(fake); len(rows) != 1 || rows[0]["owner_lane"] != "sink-a" || fake.rowCount() != 1 {
 			t.Fatalf("rows after configuring one sink=%v", rows)
 		}
 	})
+}
+
+// A failing overdue backlog must not hold up maintenance: Sweep returns and
+// sends its keepalive ping at once while the retries run in the background,
+// on this sweep and on the next retry sweep alike.
+func TestT574OverdueBacklogNeverDelaysKeepalive(t *testing.T) {
+	const postDelay = 300 * time.Millisecond
+	slow := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		time.Sleep(postDelay)
+		http.Error(writer, `{"error":"boom"}`, http.StatusInternalServerError)
+	}))
+	defer slow.Close()
+	store, err := newHandoffkeepRelayClient(hubHandoffkeepEnv{URL: slow.URL, Token: "test-token"}, slow.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 23, 3, 0, 0, 0, time.UTC)
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens:          map[string]string{"operator": "op", "node-a": "node", "node-b": "node-b"},
+		Now:             func() time.Time { return now },
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{"ops-sink":{"sink":true}}}`),
+		AlertNodes:      map[string]struct{}{},
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		handoffkeep:     store,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, version := range []string{"pw-1111111", "pw-2222222", "pw-3333333"} {
+		machine := "lag-" + string(rune('a'+i))
+		hub.nodes[machine] = &hubNodeRecord{machineID: machine, state: "disconnected", remoteMeta: map[string]string{"version": t574OldVersion}}
+		hub.expectedVersion[machine] = hubExpectedVersion{version: version, deadline: now}
+	}
+	conn, received := t574WSPair(t)
+	hub.nodes["node-b"] = &hubNodeRecord{machineID: "node-b", agent: &hubAgent{conn: conn}, state: "connected", lastPing: now, remoteMeta: map[string]string{}}
+	for sweep := 1; sweep <= 2; sweep++ {
+		hub.mu.Lock()
+		hub.nodes["node-b"].lastKeepaliveSent = time.Time{}
+		hub.mu.Unlock()
+		started := time.Now()
+		hub.Sweep()
+		if elapsed := time.Since(started); elapsed >= postDelay {
+			t.Fatalf("sweep %d took %v behind the failing backlog", sweep, elapsed)
+		}
+		select {
+		case message := <-received:
+			if message["type"] != "ping" {
+				t.Fatalf("sweep %d first message=%v", sweep, message)
+			}
+			if elapsed := time.Since(started); elapsed >= postDelay {
+				t.Fatalf("sweep %d ping arrived after %v", sweep, elapsed)
+			}
+		case <-time.After(postDelay):
+			t.Fatalf("sweep %d sent no ping before one backlog POST could finish", sweep)
+		}
+		hub.updateOverdueFlushes.Wait()
+	}
+	hub.mu.Lock()
+	defer hub.mu.Unlock()
+	if len(hub.updateOverduePending) != 3 {
+		t.Fatalf("failing notices left the queue: %d pending", len(hub.updateOverduePending))
+	}
 }
