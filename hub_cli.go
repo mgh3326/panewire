@@ -119,7 +119,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	acceptingOverridesPath := flags.String("accepting-overrides", "", "optional accepting override JSON (updated by operator POST)")
 	handoffkeepEnvPath := flags.String("handoffkeep-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file enabling durable relay events")
 	chatEnvPath := flags.String("chat-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file for the operator chat store (defaults to --handoffkeep-env)")
-	quotaV2StorePath := flags.String("quota-v2-store", "", "optional mode-0600 JSON file keeping account-scoped quota v2 bindings and observations durable")
+	quotaV2StorePath := flags.String("quota-v2-store", "", "mode-0600 JSON file for account-scoped quota v2 bindings and observations; without it /v2/quota is closed (503)")
 	updateOverdueLane := flags.String("update-overdue-lane", "", "optional lanes.json sink lane that receives one update.overdue row per machine and version")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return nil, "", ExitUsage, errors.New("invalid hub flags")

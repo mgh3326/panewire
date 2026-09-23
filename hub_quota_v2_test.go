@@ -28,6 +28,9 @@ func (clock *quotaV2Clock) Now() time.Time { return clock.now }
 
 func newQuotaV2TestHub(t *testing.T, storePath string, clock *quotaV2Clock) *HubServer {
 	t.Helper()
+	if storePath == "" {
+		storePath = filepath.Join(t.TempDir(), "quota-v2.json")
+	}
 	tokens := map[string]string{hubOperatorMachineID: quotaOperatorToken, "node-a": quotaNodeAToken, "node-b": quotaNodeBToken}
 	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, Now: clock.Now, Logger: slog.Default(), QuotaV2StorePath: storePath})
 	if err != nil {
@@ -452,5 +455,48 @@ func TestQuotaV2BindingEnrollmentValidation(t *testing.T) {
 	}
 	if status, _ := quotaV2Do(t, hub, http.MethodDelete, "/v2/quota/bindings?machine_id=node-a&provider=claude&local_slot_ref="+quotaV2SlotA, "", quotaOperatorToken, nil); status != http.StatusNotFound {
 		t.Fatal("second delete did not 404")
+	}
+}
+
+// v2 opens only when it is safe: a durable store (bindings and revisions
+// survive restart) and a distinct bearer per principal. Otherwise every v2
+// route is closed before any role check; legacy routes keep working.
+func TestQuotaV2ClosedWithoutDurableStoreOrDistinctBearers(t *testing.T) {
+	clock := &quotaV2Clock{now: time.Date(2026, 9, 24, 1, 0, 0, 0, time.UTC)}
+	enroll := map[string]any{"account_ref": quotaV2Account, "provider": "claude", "machine_id": "node-a", "local_slot_ref": quotaV2SlotA, "entitlement_ref": "unknown", "identity_basis": "operator_attested", "valid_until": clock.now.Add(time.Hour).Format(time.RFC3339)}
+	cases := []struct {
+		name      string
+		tokens    map[string]string
+		storePath string
+		want      string
+	}{
+		{"no store path", map[string]string{hubOperatorMachineID: quotaOperatorToken, "node-a": quotaNodeAToken}, "", "store_not_configured"},
+		{"node shares operator secret", map[string]string{hubOperatorMachineID: quotaOperatorToken, "node-a": quotaOperatorToken}, filepath.Join(t.TempDir(), "s.json"), "bearer_not_distinct"},
+		{"nodes share a secret", map[string]string{hubOperatorMachineID: quotaOperatorToken, "node-a": quotaNodeAToken, "node-b": quotaNodeAToken}, filepath.Join(t.TempDir(), "s.json"), "bearer_not_distinct"},
+	}
+	for _, testCase := range cases {
+		hub, err := NewHubServer(HubServerConfig{Tokens: testCase.tokens, Now: clock.Now, QuotaV2StorePath: testCase.storePath})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, request := range []struct {
+			method, target, machine, token string
+			body                           any
+		}{
+			{http.MethodPut, "/v2/quota/bindings", "node-a", quotaOperatorToken, enroll},
+			{http.MethodPut, "/v2/quota/bindings", "", quotaOperatorToken, enroll},
+			{http.MethodGet, "/v2/quota/bindings", "", quotaOperatorToken, nil},
+			{http.MethodDelete, "/v2/quota/bindings?machine_id=node-a&provider=claude&local_slot_ref=" + quotaV2SlotA, "", quotaOperatorToken, nil},
+			{http.MethodPost, "/v2/quota/observations", "node-a", quotaNodeAToken, quotaV2Envelope("obs-c", "node-a", 1, quotaV2Account, clock.now, 1, 2, 3)},
+			{http.MethodGet, "/v2/quota/observations?provider=claude&account_ref=" + quotaV2Account, "", quotaOperatorToken, nil},
+		} {
+			status, body := quotaV2Do(t, hub, request.method, request.target, request.machine, request.token, request.body)
+			if status != http.StatusServiceUnavailable || !bytes.Contains(body, []byte(testCase.want)) {
+				t.Errorf("%s: %s %s -> %d %s", testCase.name, request.method, request.target, status, body)
+			}
+		}
+		if status, _ := quotaV2Do(t, hub, http.MethodGet, "/v1/quota", "", quotaOperatorToken, nil); status != http.StatusOK {
+			t.Errorf("%s: legacy /v1/quota affected: %d", testCase.name, status)
+		}
 	}
 }

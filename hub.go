@@ -101,8 +101,9 @@ type HubServerConfig struct {
 	RelayAckTimeout time.Duration
 	// AcceptingOverridesPath optionally makes operator acceptance choices durable.
 	AcceptingOverridesPath string
-	// QuotaV2StorePath optionally makes the account-scoped quota v2 store
-	// (bindings and observations, task #578) durable. Empty keeps it in memory.
+	// QuotaV2StorePath is the durable account-scoped quota v2 store (bindings
+	// and observations, task #578). Empty leaves every /v2/quota route closed
+	// (503): bindings and revisions must not vanish on restart.
 	QuotaV2StorePath string
 	// handoffkeep is the durable relay-event store. It is package-private so the
 	// hub's public configuration keeps no credential-bearing field.
@@ -562,7 +563,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if err != nil {
 		return nil, errors.New("hub accepting overrides are invalid")
 	}
-	quotaV2, err := newHubQuotaV2Store(config.QuotaV2StorePath)
+	quotaV2, err := newHubQuotaV2Store(config.QuotaV2StorePath, tokens)
 	if err != nil {
 		return nil, errors.New("hub quota v2 store is invalid")
 	}

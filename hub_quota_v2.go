@@ -127,7 +127,12 @@ type quotaV2StoreFile struct {
 // hubQuotaV2Store has its own lock so v2 traffic never contends with the
 // presence/relay state guarded by HubServer.mu.
 type hubQuotaV2Store struct {
-	mu           sync.Mutex
+	mu sync.Mutex
+	// unavailable, when set, closes every v2 route with 503: v2 needs a
+	// durable store (bindings and revisions must survive a restart) and a
+	// distinct bearer per principal (a shared secret would let a node act as
+	// the operator or as another node).
+	unavailable  string
 	path         string
 	lastRevision int64
 	bindings     []QuotaV2Binding
@@ -138,9 +143,19 @@ func quotaV2AccountKey(provider, accountRef string) string {
 	return provider + "\x00" + accountRef
 }
 
-func newHubQuotaV2Store(path string) (*hubQuotaV2Store, error) {
+func newHubQuotaV2Store(path string, tokens map[string]string) (*hubQuotaV2Store, error) {
 	store := &hubQuotaV2Store{path: path, observations: make(map[string][]QuotaV2Observation)}
+	secrets := make(map[string]struct{}, len(tokens))
+	for _, token := range tokens {
+		if _, duplicate := secrets[token]; duplicate {
+			store.unavailable = "bearer_not_distinct"
+		}
+		secrets[token] = struct{}{}
+	}
 	if path == "" {
+		if store.unavailable == "" {
+			store.unavailable = "store_not_configured"
+		}
 		return store, nil
 	}
 	info, err := os.Lstat(path)
@@ -526,8 +541,25 @@ func quotaV2Error(w http.ResponseWriter, status int, code string) {
 	writeQuotaV2JSON(w, status, map[string]string{"error": code})
 }
 
+// quotaV2Closed answers 503 before any authorization when v2 is not safely
+// configured, so no role check runs against a shared secret.
+func (h *HubServer) quotaV2Closed(w http.ResponseWriter) bool {
+	if h.quotaV2 == nil {
+		quotaV2Error(w, http.StatusServiceUnavailable, "store_not_configured")
+		return true
+	}
+	if h.quotaV2.unavailable != "" {
+		quotaV2Error(w, http.StatusServiceUnavailable, h.quotaV2.unavailable)
+		return true
+	}
+	return false
+}
+
 // handleQuotaV2BindingPut is the enrollment path: operator token only.
 func (h *HubServer) handleQuotaV2BindingPut(w http.ResponseWriter, r *http.Request) {
+	if h.quotaV2Closed(w) {
+		return
+	}
 	if !h.authorizeOperator(r) {
 		hubUnauthorized(w)
 		return
@@ -557,6 +589,9 @@ func (h *HubServer) handleQuotaV2BindingPut(w http.ResponseWriter, r *http.Reque
 }
 
 func (h *HubServer) handleQuotaV2BindingDelete(w http.ResponseWriter, r *http.Request) {
+	if h.quotaV2Closed(w) {
+		return
+	}
 	if !h.authorizeOperator(r) {
 		hubUnauthorized(w)
 		return
@@ -576,6 +611,9 @@ func (h *HubServer) handleQuotaV2BindingDelete(w http.ResponseWriter, r *http.Re
 // handleQuotaV2BindingList: the operator sees every binding; a node sees only
 // its own machine's bindings.
 func (h *HubServer) handleQuotaV2BindingList(w http.ResponseWriter, r *http.Request) {
+	if h.quotaV2Closed(w) {
+		return
+	}
 	var machineID *string
 	if !h.authorizeOperator(r) {
 		node, ok := h.authorizeAgent(r)
@@ -599,6 +637,9 @@ func (h *HubServer) handleQuotaV2BindingList(w http.ResponseWriter, r *http.Requ
 // handleQuotaV2ObservationPost accepts only node-authenticated automatic
 // observations. The operator token is not a node and cannot write here.
 func (h *HubServer) handleQuotaV2ObservationPost(w http.ResponseWriter, r *http.Request) {
+	if h.quotaV2Closed(w) {
+		return
+	}
 	machineID, ok := h.authorizeAgent(r)
 	if !ok {
 		hubUnauthorized(w)
@@ -629,6 +670,9 @@ func (h *HubServer) handleQuotaV2ObservationPost(w http.ResponseWriter, r *http.
 // handleQuotaV2ObservationList is a pure read. The operator may read any
 // account; a node may read only an account it currently holds a binding for.
 func (h *HubServer) handleQuotaV2ObservationList(w http.ResponseWriter, r *http.Request) {
+	if h.quotaV2Closed(w) {
+		return
+	}
 	query := r.URL.Query()
 	provider, accountRef := query.Get("provider"), query.Get("account_ref")
 	operator := h.authorizeOperator(r)
