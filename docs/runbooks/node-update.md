@@ -16,6 +16,11 @@
   URL 레포 고정(AC2)·교체 전 시험 기동(AC3)·되돌리기(AC4)는 **노드 코드**다. 첫 롤아웃에서
   새 바이너리를 내려받는 것은 보호 장치가 없는 **옛 노드 코드**이므로, 첫 회에는 레포 고정도
   시험 기동도 되돌리기도 없다. 첫 회는 반드시 카나리아 1대로 하고 §4 를 사람이 확인한 뒤에만 넓힌다.
+- **첫 회는 `update publish` 로 되지 않는다 — 손 설치(§0)다.** 옛 노드 코드는 리다이렉트를
+  `objects.githubusercontent.com` 으로만 따라가는데, GitHub release download 는 현재
+  다른 release-asset 호스트로 302 한다(2026-09-23 확인). 그래서 옛 노드는 자산을 받지 못하고
+  `update unavailable` 로 끝나며 재시작하지 않는다(실행 파일 불변). 이 코드를 가진 바이너리가
+  한 번 손으로 깔린 노드부터 §2 의 `update publish` 가 동작한다.
 
 ## 대상과 경계
 
@@ -23,7 +28,7 @@
 |---|---|---|
 | ncp (root) | **영구 제외** | `panewired.service` 와 `panewire-hub.service` 가 같은 실행 파일을 쓴다. 노드 갱신 = 모르는 사이의 hub 배포(BLOCK-3). hub·CLI·노드(자기 machine id 가 ncp 면 교체 거부) 3곳에서 거부. |
 | ncp-director (비root) | 현재 대상 아님 | 같은 실행 파일을 쓰는데 쓰기 권한이 없어 `update unavailable` 로 조용히 실패한다. 사용자 홈의 전용 바이너리로 옮기는 것은 별건 태스크. |
-| 그 외 노드 | 대상 | launchd `KeepAlive` 또는 systemd `Restart=always` 로 떠 있어야 한다 — 교체 뒤 재시작과 되돌리기 모두 그 재시작에 기대다. |
+| 그 외 노드 | 대상 | launchd `KeepAlive` 또는 systemd `Restart=always` 로 떠 있어야 한다 — 교체 뒤 재시작과 되돌리기 모두 그 재시작에 기댄다. |
 
 - 노드는 `https://github.com/<레포>/releases/download/<태그>/panewire_<버전>_<os>_<arch>` 에서
   **시작하는** 다운로드만 받는다. 리다이렉트는 GitHub 의 release-asset 저장소 호스트
@@ -35,6 +40,22 @@
   모두 이 값이다. hub 는 자산 이름의 버전이 `--version` 과 다르면 400 으로 거부한다.
 - 신뢰 경계: 이 레포에 태그를 밀 수 있는 사람은 전 노드에 코드를 넣을 수 있다. 운영자 토큰만으로는
   이 레포 Release 밖의 코드를 넣을 수 없다 — 단 이 레포의 **옛** 태그로 되돌리는 것은 막지 않는다.
+
+## 0. 첫 회 — 손 설치(노드당 1회, 운영자)
+
+§1 로 만든 첫 Release(이 코드가 들어간 것)를 각 노드에 한 번 손으로 깐다. 카나리아 1대 → §3·§4 확인 → 나머지 순서는 같다.
+
+```sh
+TAG=v<YYYYMMDD>.<n>; VERSION=pw-<sha7>; ASSET=panewire_${VERSION}_<os>_<arch>
+curl -fsSLO "https://github.com/mgh3326/panewire/releases/download/$TAG/$ASSET"
+curl -fsSLO "https://github.com/mgh3326/panewire/releases/download/$TAG/SHA256SUMS"
+grep " $ASSET\$" SHA256SUMS | shasum -a 256 -c -      # "$ASSET: OK" 가 아니면 멈춘다
+chmod 755 "$ASSET" && test "$(./"$ASSET" version)" = "$VERSION"
+# 실행 파일 옆에 옛 바이너리를 <실행 파일>.bak-<UTC> 로 남기고, 같은 폴더의 임시 이름으로 복사한 뒤 mv 로 교체,
+# 그다음 launchd/systemd 로 재시작한다. ncp·ncp-director 는 하지 않는다.
+```
+
+기대: §3 의 hub-status 에서 그 노드 `version=pw-<sha7>`. 손 설치 중 `update publish` 를 그 노드에 보내지 않는다.
 
 ## 1. 태그 → Release
 
