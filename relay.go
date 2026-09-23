@@ -284,6 +284,10 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 		return relayLaneEventResult{PersistFailed: true}
 	}
 	route, target, routed := h.resolveRelayRoute("lane.event", event)
+	if event.sinkOnly && !route.Sink {
+		h.forgetRelayEvent(key)
+		return relayLaneEventResult{}
+	}
 	if len(event.Text) > laneEventTextLimitSink || (!route.Sink && len(event.Text) > laneEventTextLimit) {
 		h.forgetRelayEvent(key)
 		h.broadcastRelayRejected(event, "text_too_long")

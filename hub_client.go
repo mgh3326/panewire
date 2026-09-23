@@ -30,27 +30,30 @@ type HubWait func(context.Context, time.Duration) error
 // channel. A zero config is never started by Daemon, preserving stage1/2's
 // historical behavior.
 type HubClientConfig struct {
-	URL                   string
-	URLs                  []string
-	MachineID             string
-	Token                 string
-	CFAccessClientID      string
-	CFAccessClientSecret  string
-	Accepting             bool
-	RelayInjectTimeout    time.Duration
-	JobsInboxRoot         string
-	FailoverWakeOn        string
-	FailoverWakeMAC       string
-	BurstWakeMAC          string
-	BurstPoweroffAllowed  bool
-	Checks                []HubCheck
-	Execute               HubCheckExecutor
-	PingInterval          time.Duration
-	InitialBackoff        time.Duration
-	MaxBackoff            time.Duration
-	PreferRetry           time.Duration
-	Version               string
-	UpdateHTTPClient      *http.Client
+	URL                  string
+	URLs                 []string
+	MachineID            string
+	Token                string
+	CFAccessClientID     string
+	CFAccessClientSecret string
+	Accepting            bool
+	RelayInjectTimeout   time.Duration
+	JobsInboxRoot        string
+	FailoverWakeOn       string
+	FailoverWakeMAC      string
+	BurstWakeMAC         string
+	BurstPoweroffAllowed bool
+	Checks               []HubCheck
+	Execute              HubCheckExecutor
+	PingInterval         time.Duration
+	InitialBackoff       time.Duration
+	MaxBackoff           time.Duration
+	PreferRetry          time.Duration
+	Version              string
+	UpdateHTTPClient     *http.Client
+	// UpdateRepository pins the GitHub owner/repo whose release assets this
+	// node installs; empty selects hubUpdateDefaultRepository.
+	UpdateRepository      string
 	ExecutablePath        string // fixture seam; production uses os.Executable.
 	Restart               func() // fixture seam; production exits for its supervisor.
 	AllowInsecureForTests bool
@@ -122,6 +125,7 @@ type HubClient struct {
 	preferRetry          time.Duration
 	version              string
 	updateHTTPClient     *http.Client
+	updateRepository     string
 	executablePath       string
 	restart              func()
 	dial                 HubDial
@@ -279,13 +283,16 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.Restart == nil {
 		config.Restart = func() { os.Exit(0) }
 	}
+	if config.UpdateRepository == "" {
+		config.UpdateRepository = hubUpdateDefaultRepository
+	}
 	return &HubClient{
 		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnSeen: make(map[string]struct{}), spawnTimeoutExtra: 60 * time.Second,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
 		r19a:   newR19aClientState(config),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
-		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version, updateHTTPClient: config.UpdateHTTPClient, executablePath: config.ExecutablePath, restart: config.Restart,
+		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version, updateHTTPClient: config.UpdateHTTPClient, updateRepository: config.UpdateRepository, executablePath: config.ExecutablePath, restart: config.Restart,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, quotaCollector: config.quotaCollector, sessionCollector: config.sessionCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
 	}, nil
 }
@@ -975,6 +982,9 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	}{Type: "hello", MachineID: client.machineID, Version: client.version, Accepting: client.accepting}); err != nil {
 		return nil, err
 	}
+	// A hello reached the hub: a version under update probation has proven it
+	// starts, so its consecutive-failure record is cleared.
+	client.confirmHubUpdate()
 	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
 	client.relayBusyManager().resume(ctx)
 	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
@@ -997,7 +1007,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			if messageType != websocket.MessageText {
 				continue
 			}
-			message, ok := parseHubOutbound(payload)
+			message, ok := parseHubOutboundPinned(payload, client.updateRepository)
 			if !ok {
 				continue
 			}
@@ -1062,7 +1072,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 					}
 					continue
 				}
-				go client.handleHubUpdate(message)
+				go client.handleHubUpdate(ctx, peer, message)
 			case "quota.request":
 				go client.handleHubQuota(ctx, peer, message)
 			case "job.spawn":
@@ -1716,7 +1726,16 @@ func hubClientWireEvent(event hubClientEvent) struct {
 	}{Type: "event", Kind: event.Kind, Payload: event.Payload}
 }
 
+// parseHubOutbound decodes with the default update repository pin; the node
+// read loop uses parseHubOutboundPinned with its configured repository.
 func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
+	return parseHubOutboundPinned(payload, hubUpdateDefaultRepository)
+}
+
+// parseHubOutboundPinned drops an update.available whose URL is not the
+// pinned repository's release asset for the instructed version, so such an
+// instruction is never dispatched (applyHubUpdate checks the pin again).
+func parseHubOutboundPinned(payload []byte, updateRepository string) (hubOutboundMessage, bool) {
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(payload, &fields) != nil || fields == nil {
 		return hubOutboundMessage{}, false
@@ -1845,7 +1864,7 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 			return hubOutboundMessage{}, false
 		}
 	case "update.available":
-		if len(fields) != 4 || json.Unmarshal(fields["version"], &message.Version) != nil || json.Unmarshal(fields["sha256"], &message.SHA256) != nil || json.Unmarshal(fields["url"], &message.URL) != nil || !hubVersionPattern.MatchString(message.Version) || !validHubSHA256(message.SHA256) || !validHubUpdateURL(message.URL) {
+		if len(fields) != 4 || json.Unmarshal(fields["version"], &message.Version) != nil || json.Unmarshal(fields["sha256"], &message.SHA256) != nil || json.Unmarshal(fields["url"], &message.URL) != nil || !hubVersionPattern.MatchString(message.Version) || !validHubSHA256(message.SHA256) || !validHubUpdateURLForVersion(message.URL, updateRepository, message.Version) {
 			return hubOutboundMessage{}, false
 		}
 	case "quota.request":

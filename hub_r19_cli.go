@@ -30,6 +30,15 @@ func runUpdateCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int 
 	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *hubURL == "" || *tokenEnv == "" || *version == "" || *sha == "" || *assetURL == "" || *machines == "" {
 		return ExitUsage
 	}
+	targets := strings.Split(*machines, ",")
+	for _, machine := range targets {
+		// The hub is the authority (BLOCK-3), but a hub deployed before this
+		// check existed does not refuse the NCP root node; refuse it here too.
+		if hubUpdateExcludedMachine(machine) {
+			fmt.Fprintln(stderr, "update rejected: excluded machine")
+			return ExitConditionInvalid
+		}
+	}
 	env, err := loadHubTokenEnv(*tokenEnv)
 	if err != nil || env.MachineID != hubOperatorMachineID {
 		fmt.Fprintln(stderr, "update rejected: invalid operator token env")
@@ -53,7 +62,7 @@ func runUpdateCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int 
 		SHA256   string   `json:"sha256"`
 		URL      string   `json:"url"`
 		Machines []string `json:"machines"`
-	}{*version, *sha, *assetURL, strings.Split(*machines, ",")}
+	}{*version, *sha, *assetURL, targets}
 	body, _ := json.Marshal(request)
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()

@@ -59,8 +59,18 @@ func (fn hubRoundTripperFunc) RoundTrip(request *http.Request) (*http.Response, 
 	return fn(request)
 }
 
+// hubTestSmokeAsset is a release-asset stand-in that passes the pre-rename
+// smoke run: `<asset> version` prints version and exits 0.
+func hubTestSmokeAsset(version string) []byte {
+	return []byte("#!/bin/sh\necho " + version + "\n")
+}
+
+func hubTestUpdate(url, sha, version string) hubUpdateRequest {
+	return hubUpdateRequest{URL: url, SHA256: sha, Version: version, Repository: hubUpdateDefaultRepository}
+}
+
 func TestR19UpdateChecksumFailureDoesNotReplace(t *testing.T) {
-	asset := []byte("new binary")
+	asset := hubTestSmokeAsset("r19b")
 	client := &http.Client{Transport: hubRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
 		if request.URL.Hostname() != "github.com" {
 			t.Fatalf("download host=%q", request.URL.Hostname())
@@ -71,8 +81,8 @@ func TestR19UpdateChecksumFailureDoesNotReplace(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old binary"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	url := "https://github.com/mgh3326/panewire/releases/download/r19b/panewire_darwin_arm64"
-	if err := applyHubUpdate(context.Background(), client, path, url, "0000000000000000000000000000000000000000000000000000000000000000"); err == nil {
+	url := "https://github.com/mgh3326/panewire/releases/download/r19b/panewire_r19b_darwin_arm64"
+	if err := applyHubUpdate(context.Background(), client, path, hubTestUpdate(url, "0000000000000000000000000000000000000000000000000000000000000000", "r19b")); err == nil {
 		t.Fatal("checksum mismatch accepted")
 	}
 	got, err := os.ReadFile(path)
@@ -80,7 +90,7 @@ func TestR19UpdateChecksumFailureDoesNotReplace(t *testing.T) {
 		t.Fatalf("binary changed: %q err=%v", got, err)
 	}
 	hash := sha256.Sum256(asset)
-	if err := applyHubUpdate(context.Background(), client, path, url, hex.EncodeToString(hash[:])); err != nil {
+	if err := applyHubUpdate(context.Background(), client, path, hubTestUpdate(url, hex.EncodeToString(hash[:]), "r19b")); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = os.ReadFile(path)
@@ -98,16 +108,16 @@ func TestR19UpdateChecksumFailureDoesNotReplace(t *testing.T) {
 }
 
 func TestR19UpdateURLAllowlistAndRedirectDowngrade(t *testing.T) {
-	for _, raw := range []string{
-		"https://github.com/mgh3326/panewire/releases/download/r19b/panewire_darwin_arm64",
-		"https://objects.githubusercontent.com/asset?X-Amz-Signature=fixture",
-	} {
-		if !validHubUpdateURL(raw) {
-			t.Fatalf("allowed URL rejected: %s", raw)
-		}
+	if !validHubUpdateURL("https://github.com/mgh3326/panewire/releases/download/r19b/panewire_r19b_darwin_arm64", hubUpdateDefaultRepository) {
+		t.Fatal("pinned release URL rejected")
 	}
-	if validHubUpdateURL("https://example.invalid/panewire_darwin_arm64") {
-		t.Fatal("non-GitHub update host accepted")
+	for _, raw := range []string{
+		"https://objects.githubusercontent.com/asset?X-Amz-Signature=fixture",
+		"https://example.invalid/panewire_darwin_arm64",
+	} {
+		if validHubUpdateURL(raw, hubUpdateDefaultRepository) {
+			t.Fatalf("non-release starting URL accepted: %s", raw)
+		}
 	}
 	path := filepath.Join(t.TempDir(), "panewire")
 	if err := os.WriteFile(path, []byte("old binary"), 0755); err != nil {
@@ -116,7 +126,7 @@ func TestR19UpdateURLAllowlistAndRedirectDowngrade(t *testing.T) {
 	client := &http.Client{Transport: hubRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": []string{"http://127.0.0.1/panewire"}}, Body: io.NopCloser(bytes.NewReader(nil)), Request: request}, nil
 	})}
-	err := applyHubUpdate(context.Background(), client, path, "https://github.com/mgh3326/panewire/releases/download/r19b/panewire_darwin_arm64", hex.EncodeToString(make([]byte, 32)))
+	err := applyHubUpdate(context.Background(), client, path, hubTestUpdate("https://github.com/mgh3326/panewire/releases/download/r19b/panewire_r19b_darwin_arm64", hex.EncodeToString(make([]byte, 32)), "r19b"))
 	if err == nil {
 		t.Fatal("HTTPS redirect downgrade accepted")
 	}
