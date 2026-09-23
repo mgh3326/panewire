@@ -1,0 +1,54 @@
+name: Release
+
+# A v* tag builds the four node binaries with the pw-<sha> version stamp and
+# attaches them, with SHA256SUMS, to the tag's GitHub Release. Nodes install
+# only assets from this repository's release download path (see
+# docs/runbooks/node-update.md); publishing to nodes stays a separate,
+# operator-run `panewire update publish`.
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      # Pinned to reviewed commits: this job holds contents: write and builds
+      # what every node installs, so a moved tag must not change it.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - run: go vet ./...
+      - run: go test ./...
+      - name: Check tag
+        env:
+          TAG: ${{ github.ref_name }}
+        # The tag is a path segment of the release URL the hub pins.
+        run: |
+          case "$TAG" in
+            "" | . | .. | *[!A-Za-z0-9._-]*) echo "tag '$TAG' is not a valid release path segment" >&2; exit 1 ;;
+          esac
+      - name: Build assets
+        id: build
+        run: echo "version=$(sh scripts/build-release.sh dist/release)" >> "$GITHUB_OUTPUT"
+      - name: Verify stamp and checksums
+        env:
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          case "$VERSION" in pw-???????) ;; *) echo "unexpected version '$VERSION'" >&2; exit 1 ;; esac
+          test "$("dist/release/panewire_${VERSION}_linux_amd64" version)" = "$VERSION"
+          (cd dist/release && sha256sum -c SHA256SUMS)
+          test "$(wc -l < dist/release/SHA256SUMS)" -eq 4
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ steps.build.outputs.version }}
+        run: |
+          gh release create "$TAG" dist/release/* --verify-tag --title "$TAG" \
+            --notes "panewire $VERSION — publish with: panewire update publish --version $VERSION --url https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG/panewire_${VERSION}_<os>_<arch> --sha256 <from SHA256SUMS> --machines <canary>"
