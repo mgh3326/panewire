@@ -89,7 +89,7 @@ func TestR19QuotaOutputBoundedByEncodedSize(t *testing.T) {
 // would download and rename against the same executable, leaving the surviving
 // version up to whichever finished last.
 func TestR19ConcurrentUpdateInstructionsApplyOnce(t *testing.T) {
-	asset := []byte("new binary")
+	asset := hubTestSmokeAsset("r19c")
 	digest := sha256.Sum256(asset)
 	executable := filepath.Join(t.TempDir(), "panewire")
 	if err := os.WriteFile(executable, []byte("old binary"), 0755); err != nil {
@@ -125,7 +125,7 @@ func TestR19ConcurrentUpdateInstructionsApplyOnce(t *testing.T) {
 			"type":    "update.available",
 			"version": "r19c",
 			"sha256":  hex.EncodeToString(digest[:]),
-			"url":     "https://github.com/mgh3326/panewire/releases/download/r19c/panewire_linux_amd64",
+			"url":     "https://github.com/mgh3326/panewire/releases/download/r19c/panewire_r19c_linux_amd64",
 		}
 		_ = wsjson.Write(request.Context(), conn, instruction)
 		_ = wsjson.Write(request.Context(), conn, instruction)
@@ -248,13 +248,13 @@ func TestR19UpdateBackupsArePruned(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	asset := []byte("new binary")
+	asset := hubTestSmokeAsset("r19c")
 	digest := sha256.Sum256(asset)
 	updateClient := &http.Client{Transport: hubRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
 		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(asset)), Request: request}, nil
 	})}
-	url := "https://github.com/mgh3326/panewire/releases/download/r19c/panewire_linux_amd64"
-	if err := applyHubUpdate(context.Background(), updateClient, executable, url, hex.EncodeToString(digest[:])); err != nil {
+	url := "https://github.com/mgh3326/panewire/releases/download/r19c/panewire_r19c_linux_amd64"
+	if err := applyHubUpdate(context.Background(), updateClient, executable, hubTestUpdate(url, hex.EncodeToString(digest[:]), "r19c")); err != nil {
 		t.Fatal(err)
 	}
 

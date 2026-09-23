@@ -89,6 +89,13 @@ type HubServerConfig struct {
 	// UpdateConfirmationTimeout bounds how long a published version may wait
 	// for the node's post-restart hello. Zero uses the ten-minute contract.
 	UpdateConfirmationTimeout time.Duration
+	// UpdateRepository pins the GitHub owner/repo whose release assets
+	// update publish may name; empty selects hubUpdateDefaultRepository.
+	UpdateRepository string
+	// UpdateOverdueLane names the lanes.json sink lane that receives one
+	// update.overdue row per (machine, version). Empty disables the row; a
+	// lane that is not a sink never receives it.
+	UpdateOverdueLane string
 	// RelayAckTimeout bounds the time an injected relay may remain silent.
 	RelayAckTimeout time.Duration
 	// AcceptingOverridesPath optionally makes operator acceptance choices durable.
@@ -235,6 +242,9 @@ type hubJobEventPayload struct {
 	PaneID         string    `json:"pane_id,omitempty"`
 	// Replay marks a record a node had already sent before it restarted.
 	Replay bool `json:"replay,omitempty"`
+	// sinkOnly is set by hub-originated operator notices: relayLaneEvent
+	// refuses them unless the lane resolves to a sink route.
+	sinkOnly bool
 }
 
 type relayAckPayload struct {
@@ -428,7 +438,13 @@ type HubServer struct {
 	spawnRecords                map[string]*hubSpawnRecord
 	expectedVersion             map[string]hubExpectedVersion
 	updateConfirmationTimeout   time.Duration
-	stallBeats                  map[string]*hubStallBeatState
+	updateRepository            string
+	updateOverdueLane           string
+	// updateOverdueNotified remembers the version each machine was last
+	// reported overdue for, so republishing the same version never repeats
+	// the notice.
+	updateOverdueNotified map[string]string
+	stallBeats            map[string]*hubStallBeatState
 }
 
 // hubStallBeatState is the hub's half of the detector no-data contract. It
@@ -496,6 +512,12 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	if config.UpdateConfirmationTimeout <= 0 {
 		config.UpdateConfirmationTimeout = 10 * time.Minute
+	}
+	if config.UpdateRepository == "" {
+		config.UpdateRepository = hubUpdateDefaultRepository
+	}
+	if config.UpdateOverdueLane != "" && !validReportRelayLaneName(config.UpdateOverdueLane) {
+		return nil, errors.New("update overdue lane is invalid")
 	}
 	var burstPolicy BurstPolicy
 	var burstPolicyModTime time.Time
@@ -578,7 +600,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatQuestionOf: make(map[int64]string), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, stallBeats: make(map[string]*hubStallBeatState),
+		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatQuestionOf: make(map[int64]string), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, updateRepository: config.UpdateRepository, updateOverdueLane: config.UpdateOverdueLane, updateOverdueNotified: make(map[string]string), stallBeats: make(map[string]*hubStallBeatState),
 	}, nil
 }
 
@@ -1020,6 +1042,16 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 		}
 		h.mu.Lock()
 		h.recordUIEventLocked("update", "busy", machineID, h.now().UTC())
+		h.mu.Unlock()
+	case "update.rejected":
+		if agent.transient || !h.touch(machineID, agent) {
+			h.countUnknownMessage()
+			return
+		}
+		now := h.now().UTC()
+		h.mu.Lock()
+		h.recordUIEventLocked("update", "rejected", machineID, now)
+		h.lastNotes[machineID] = &HubLastNote{Text: "update rejected(smoke) " + message.Version, ReceivedAt: now}
 		h.mu.Unlock()
 	case "event":
 		if !agent.transient && !h.touch(machineID, agent) {
@@ -1475,6 +1507,13 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 		if !allowed("type") {
 			return hubInbound{}, false
 		}
+	case "update.rejected":
+		// The node's smoke run refused the candidate before touching its
+		// executable. The vocabulary is closed: one reason, one version.
+		var reason string
+		if !allowed("type", "reason", "version") || json.Unmarshal(fields["reason"], &reason) != nil || reason != "smoke" || json.Unmarshal(fields["version"], &message.Version) != nil || !hubVersionPattern.MatchString(message.Version) {
+			return hubInbound{}, false
+		}
 	case "event":
 		if !allowed("type", "kind", "payload") || json.Unmarshal(fields["kind"], &message.Kind) != nil || message.Kind == "" {
 			return hubInbound{}, false
@@ -1874,10 +1913,14 @@ func (h *HubServer) Sweep() {
 	var failovers []hubFailoverEvent
 	h.mu.Lock()
 	h.sweepBurstHoldsLocked(now)
+	var overdue []hubUpdateOverdue
 	for machineID, expected := range h.expectedVersion {
 		if !now.Before(expected.deadline) {
 			delete(h.expectedVersion, machineID)
 			h.recordUIEventLocked("update", "unconfirmed", machineID, now)
+			if notice, due := h.updateOverdueLocked(machineID, expected, now); due {
+				overdue = append(overdue, notice)
+			}
 		}
 	}
 	for _, record := range h.nodes {
@@ -1896,6 +1939,9 @@ func (h *HubServer) Sweep() {
 		}
 	}
 	h.mu.Unlock()
+	for _, notice := range overdue {
+		h.emitUpdateOverdue(notice)
+	}
 	h.sweepOrphanedJobs(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)
