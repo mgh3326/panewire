@@ -106,7 +106,9 @@ func validPlacementCLIResult(result PlacementResult, pool, accountFP string) boo
 	if result.Decision != "unavailable" && !machineIDPattern.MatchString(result.Decision) {
 		return false
 	}
-	if len(result.Candidates) == 0 || len(result.Candidates) > 128 {
+	// An exhausted slot policy legitimately answers with zero candidates; only
+	// an unavailable decision may carry that shape.
+	if len(result.Candidates) > 128 || (len(result.Candidates) == 0 && result.Decision != "unavailable") {
 		return false
 	}
 	decisionFound := result.Decision == "unavailable"
@@ -128,10 +130,12 @@ func validPlacementCLIResult(result PlacementResult, pool, accountFP string) boo
 	if quota == nil || quota.Pool != pool || quota.AccountFP != accountFP || (quota.Decision != "allow" && quota.Decision != "boost" && quota.Decision != "deny" && quota.Decision != "unknown") || (quota.PolicyStatus != "default" && quota.PolicyStatus != "current" && quota.PolicyStatus != "stale" && quota.PolicyStatus != "invalid") {
 		return false
 	}
-	if (quota.Decision == "deny" || quota.Decision == "unknown") != (result.Decision == "unavailable") {
-		return false
+	if quota.Decision == "deny" || quota.Decision == "unknown" {
+		return result.Decision == "unavailable"
 	}
-	return true
+	// Slot pressure is the other legitimate unavailable answer: the quota
+	// allowed the pool but task caps rejected the decision machine.
+	return result.Decision != "unavailable" || result.Reason == "task_slots_exhausted" || result.Reason == "task_slots_full"
 }
 
 func renderPlacementExplain(w io.Writer, result PlacementResult) {

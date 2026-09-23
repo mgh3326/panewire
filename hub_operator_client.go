@@ -29,17 +29,18 @@ var (
 // operator request may target. Anything else — including a mutated request
 // URL reaching the transport — fails closed.
 var hubOperatorAPIPaths = map[string]bool{
-	"/v1/nodes":         true,
-	"/v1/jobs":          true,
-	"/v1/jobs/orphaned": true,
-	"/v1/jobs/reassign": true,
-	"/v1/lanes":         true,
-	"/v1/placement":     true,
-	"/v1/burst":         true,
-	"/v1/burst/request": true,
-	"/v1/burst/release": true,
-	"/v1/burst/holds":   true,
-	"/v1/update":        true,
+	"/v1/nodes":           true,
+	"/v1/jobs":            true,
+	"/v1/jobs/orphaned":   true,
+	"/v1/jobs/reassign":   true,
+	"/v1/lanes":           true,
+	"/v1/placement":       true,
+	"/v1/placement/slots": true,
+	"/v1/burst":           true,
+	"/v1/burst/request":   true,
+	"/v1/burst/release":   true,
+	"/v1/burst/holds":     true,
+	"/v1/update":          true,
 }
 
 func validHubOperatorAPIPath(path string) bool {

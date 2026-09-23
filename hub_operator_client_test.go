@@ -464,7 +464,7 @@ func TestHubOperatorAPIPathAdversaries(t *testing.T) {
 	}
 	for _, path := range []string{
 		"/v1/nodes", "/v1/jobs", "/v1/jobs/orphaned", "/v1/jobs/reassign",
-		"/v1/lanes", "/v1/lanes/lane-a", "/v1/placement",
+		"/v1/lanes", "/v1/lanes/lane-a", "/v1/placement", "/v1/placement/slots",
 		"/v1/burst", "/v1/burst/request", "/v1/burst/release", "/v1/burst/holds", "/v1/update",
 	} {
 		if !validHubOperatorAPIPath(path) {

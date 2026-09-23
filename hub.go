@@ -654,6 +654,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/burst/release", h.handleBurstRelease)
 	mux.HandleFunc("GET /v1/burst/holds", h.handleBurstHolds)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
+	mux.HandleFunc("GET /v1/placement/slots", h.handlePlacementSlots)
 	mux.HandleFunc("GET /v1/quota", h.handleQuotaList)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
