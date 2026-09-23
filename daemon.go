@@ -208,6 +208,14 @@ func (d *Daemon) Start(ctx context.Context) error {
 			defer close(d.hubDone)
 			d.cfg.Hub.Client.Run(runCtx)
 		}()
+		// Report-only and off unless PANEWIRE_SESSION_REAP_REPORT_INTERVAL
+		// is set: starting it is a new schedule that needs operator approval.
+		// It runs on runCtx so Stop ends it with the other loops.
+		reapRoot := d.cfg.Hub.Client.jobsInboxRoot
+		if reapRoot == "" {
+			reapRoot = d.cfg.InboxRoot
+		}
+		startSessionReapReporter(runCtx, d.cfg.Hub.Client, d.cfg.HerdrSocket, reapRoot, d.cfg.Logger)
 	}
 	if d.stall != nil {
 		d.stallDone = make(chan struct{})

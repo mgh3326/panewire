@@ -73,6 +73,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "fleet-census" {
 		return runFleetCensusCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
+	if args[0] == "session-reap" {
+		return runSessionReapCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
 	if args[0] == "relay" {
 		return runRelayCLI(args[1:], os.Stdout, os.Stderr)
 	}

@@ -114,6 +114,18 @@ func t501StandardInbox() map[string][]map[string]any {
 			t501EnvelopedEvent("job.spawned", "", map[string]any{"pane_id": "w1:p1", "tab_id": "w1:t1"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
+		// #603: a protected (`wrk spawn --keep`) finished job is skipped with
+		// reason=protected; only the JSON literal true protects.
+		"j-kept": {
+			t501EnvelopedEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "worker"}),
+			t501EnvelopedEvent("job.spawned", "", map[string]any{"pane_id": "w1:p60", "tab_id": "w1:t60", "keep": true}),
+			t501FlatEvent("job.completed", old, nil),
+		},
+		"j-kept-string": {
+			t501EnvelopedEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "worker"}),
+			t501EnvelopedEvent("job.spawned", "", map[string]any{"pane_id": "w1:p61", "tab_id": "w1:t61", "keep": "true"}),
+			t501FlatEvent("job.completed", old, nil),
+		},
 		// Terminal then claim again: revived, must never reap.
 		"j-revived": {
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p2", "tab_id": "w1:t2"}),
@@ -289,6 +301,8 @@ func t501StandardInbox() map[string][]map[string]any {
 func t501StandardAgents() map[string]map[string]string {
 	return map[string]map[string]string{
 		"w1:p1":  {"status": "idle", "tab_id": "w1:t1"},
+		"w1:p60": {"status": "idle", "tab_id": "w1:t60"},
+		"w1:p61": {"status": "idle", "tab_id": "w1:t61"},
 		"w1:p2":  {"status": "idle", "tab_id": "w1:t2"},
 		"w1:p3":  {"status": "idle", "tab_id": "w1:t3"},
 		"w1:p4":  {"status": "idle", "tab_id": "w1:t4new"},
@@ -326,6 +340,8 @@ func t501StandardAgents() map[string]map[string]string {
 func t501StandardTabs() []any {
 	return []any{
 		map[string]any{"tab_id": "w1:t1", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t60", "pane_count": 1},
+		map[string]any{"tab_id": "w1:t61", "pane_count": 1},
 		map[string]any{"tab_id": "w1:t2", "pane_count": 1},
 		map[string]any{"tab_id": "w1:t3", "pane_count": 2},
 		map[string]any{"tab_id": "w1:t4old", "pane_count": 1},
@@ -565,6 +581,16 @@ func TestFleetCensusReapEquivalence(t *testing.T) {
 	for job, want := range reference {
 		if _, seen := census[job]; !seen {
 			t.Errorf("job %s: wrk=%v but census has no row", job, want)
+		}
+	}
+	// #603: equivalence alone would also pass if both sides ignored the
+	// marker, so pin the protected verdict on both sides.
+	for side, verdicts := range map[string]map[string][2]string{"wrk": reference, "census": census} {
+		if got := verdicts["j-kept"]; got != [2]string{"skip", fleetCensusReasonProtected} {
+			t.Errorf("%s j-kept = %v, want skip/protected", side, got)
+		}
+		if got := verdicts["j-kept-string"]; got[0] != "would-close" {
+			t.Errorf("%s j-kept-string = %v, want would-close (only JSON true protects)", side, got)
 		}
 	}
 	if t.Failed() {
