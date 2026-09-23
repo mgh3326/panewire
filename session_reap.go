@@ -231,6 +231,14 @@ func sessionReapJudgePane(agent fleetCensusPaneObs, linked, scans []fleetCensusJ
 	if job.keep {
 		return held(job, fleetCensusReasonProtected)
 	}
+	// The latest claim role must be in wrk's vocabulary before the sticky
+	// builder marking is consulted: a builder later reclaimed as a resident
+	// (or with no role) is held, never routed to the builder task gate.
+	switch job.claimRole {
+	case "worker", "builder", "captain":
+	default:
+		return held(job, sessionReapReasonProtectedRole)
+	}
 	switch {
 	case job.role == "builder":
 		if job.reaped {
@@ -243,7 +251,7 @@ func sessionReapJudgePane(agent fleetCensusPaneObs, linked, scans []fleetCensusJ
 		row := sessionReapBaseRow(agent, job, now)
 		row.Class = sessionReapClassBuilderTaskGate
 		return row
-	case job.claimRole == "worker":
+	default:
 		verdict, reason, _ := fleetCensusJobVerdict(job, view, grace, now)
 		if verdict != fleetCensusVerdictWouldClose {
 			return held(job, reason)
@@ -251,8 +259,6 @@ func sessionReapJudgePane(agent fleetCensusPaneObs, linked, scans []fleetCensusJ
 		row := sessionReapBaseRow(agent, job, now)
 		row.Class = sessionReapClassCandidate
 		return row
-	default:
-		return held(job, sessionReapReasonProtectedRole)
 	}
 }
 

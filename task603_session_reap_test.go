@@ -589,3 +589,30 @@ func TestT603CLI(t *testing.T) {
 		}
 	}
 }
+
+// A builder later reclaimed with a role outside wrk's vocabulary (or none)
+// is held as protected-role: the latest role is checked before the sticky
+// builder marking can route the pane to the builder task gate.
+func TestT603LatestRoleOutsideVocabularyBeatsStickyBuilder(t *testing.T) {
+	for _, latest := range []string{"resident", ""} {
+		reclaim := t603Claim("704-b", "b704", latest, "2026-09-23T09:30:00Z", false)
+		reclaim["kind"] = "job.reclaim"
+		jobs := map[string][]map[string]any{"704-b": {
+			t603Claim("704-b", "b704", "builder", "2026-09-23T09:00:00Z", false),
+			reclaim,
+			t603Spawned("704-b", "b704", "w1:p1", "w1:t1", "2026-09-23T10:00:00Z"),
+		}}
+		rows := t603Judge(t, jobs, t603View([4]string{"w1:p1", "w1:t1", "b704", "idle"}), 10*time.Minute, t603Now)
+		if row := rows["w1:p1"]; row.Class != sessionReapClassHeld || row.Reason != sessionReapReasonProtectedRole {
+			t.Fatalf("latest role %q: row = %+v", latest, row)
+		}
+	}
+	// Control: a builder reclaimed as captain (the legacy alias) still
+	// reaches the builder task gate.
+	reclaim := t603Claim("704-b", "b704", "captain", "2026-09-23T09:30:00Z", false)
+	reclaim["kind"] = "job.reclaim"
+	jobs := map[string][]map[string]any{"704-b": {t603Claim("704-b", "b704", "builder", "2026-09-23T09:00:00Z", false), reclaim, t603Spawned("704-b", "b704", "w1:p1", "w1:t1", "2026-09-23T10:00:00Z")}}
+	if row := t603Judge(t, jobs, t603View([4]string{"w1:p1", "w1:t1", "b704", "idle"}), 10*time.Minute, t603Now)["w1:p1"]; row.Class != sessionReapClassBuilderTaskGate {
+		t.Fatalf("captain control row = %+v", row)
+	}
+}
