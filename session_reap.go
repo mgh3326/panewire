@@ -55,6 +55,8 @@ const (
 	sessionReapReasonLabelReused   = "label-reused"
 	sessionReapReasonPaneAmbiguous = "pane-ambiguous"
 	sessionReapReasonProtectedRole = "protected-role"
+	// An event file of the job could not be read, so a revive may be hidden.
+	sessionReapReasonRecordUnreadable = "record-unreadable"
 	// A held reason that the wire grammar cannot carry (a wrk reason quoting
 	// an unusual tab id) is replaced, never dropped.
 	sessionReapReasonUnrepresentable = "reason-unrepresentable"
@@ -214,8 +216,19 @@ func sessionReapJudgePane(agent fleetCensusPaneObs, linked, scans []fleetCensusJ
 		return held(newest, sessionReapReasonPaneAmbiguous)
 	}
 	job := matched[0]
+	// Another job's receipt for this pane that is as new or newer means the
+	// pane was handed to someone else after this job; the name alone cannot
+	// say which one is on it now.
+	for _, other := range linked {
+		if other.jobID != job.jobID && !other.spawnAt.Before(job.spawnAt) {
+			return held(job, sessionReapReasonPaneAmbiguous)
+		}
+	}
 	if job.claimLabel != job.spawnLabel {
 		return held(job, sessionReapReasonLabelConflict)
+	}
+	if job.unreadable {
+		return held(job, sessionReapReasonRecordUnreadable)
 	}
 	// A later claim under the same label that never wrote a spawn receipt may
 	// be the session that now occupies this pane (herdr reuses pane ids across

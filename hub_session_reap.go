@@ -264,10 +264,17 @@ func downgradeSessionReapRows(node *HubSessionReapNode, routes map[string]report
 			reason = sessionReapReasonLanesUnreadable
 		} else {
 			for lane, route := range routes {
-				if !route.Sink && route.Machine == node.MachineID && route.Pane == row.PaneID && lane != row.AgentName {
-					reason = sessionReapReasonLaneRoute
-					break
+				if route.Sink || route.Machine != node.MachineID || route.Pane != row.PaneID {
+					continue
 				}
+				// Only a builder's own lane (lane name == its agent name) may
+				// route to its pane. A worker pane that any lane routes to is
+				// a session someone relies on, whatever the lane is called.
+				if row.Class == sessionReapClassBuilderTaskGate && lane == row.AgentName {
+					continue
+				}
+				reason = sessionReapReasonLaneRoute
+				break
 			}
 		}
 		if reason == "" {

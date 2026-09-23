@@ -362,6 +362,11 @@ type fleetCensusJobScan struct {
 	spawnLabel string
 	claimLabel string
 	keep       bool
+	// unreadable marks a job with an event file wrk would skip (read error,
+	// invalid UTF-8, or not a JSON object). The wrk-equivalent verdict skips
+	// it exactly like wrk; the session-reap judgment holds the job instead,
+	// since the skipped event may have been a revive.
+	unreadable bool
 }
 
 // fleetCensusMoment mirrors wrk's moment_of: created_at (or payload.at)
@@ -493,16 +498,19 @@ func scanFleetCensusJobs(root string) ([]fleetCensusJobScan, bool) {
 			path := filepath.Join(eventsDir, name)
 			raw, err := os.ReadFile(path)
 			if err != nil {
+				scan.unreadable = true
 				continue
 			}
 			// wrk decodes each file as strict UTF-8 (open(encoding="utf-8")):
 			// invalid bytes fail the whole file in Python while Go's json
 			// would happily parse them, so validity is checked explicitly.
 			if !utf8.Valid(raw) {
+				scan.unreadable = true
 				continue
 			}
 			var document map[string]json.RawMessage
 			if json.Unmarshal(raw, &document) != nil {
+				scan.unreadable = true
 				continue
 			}
 			payload := document

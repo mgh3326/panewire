@@ -616,3 +616,72 @@ func TestT603LatestRoleOutsideVocabularyBeatsStickyBuilder(t *testing.T) {
 		t.Fatalf("captain control row = %+v", row)
 	}
 }
+
+// Round-2 counterexamples from the independent verification (all reproduced
+// as assertion failures on f70d0c6). Each has a control proving the hold is
+// caused by the case itself.
+
+// A newer receipt from another job on the same pane: the name still matches
+// the older, finished job, but the pane was handed on.
+func TestT603NewerReceiptOnPaneHolds(t *testing.T) {
+	jobs := map[string][]map[string]any{
+		"801-old": {t603Claim("801-old", "t801", "worker", "2026-09-23T09:00:00Z", false), t603Spawned("801-old", "t801", "w1:p1", "w1:t1", "2026-09-23T09:00:00Z"), t603Completed("801-old", "t801", "w1:p1", "2026-09-23T10:00:00Z")},
+		"802-new": {t603Claim("802-new", "t802", "worker", "2026-09-23T11:00:00Z", false), t603Spawned("802-new", "t802", "w1:p1", "w1:t1", "2026-09-23T11:00:00Z")},
+	}
+	view := t603View([4]string{"w1:p1", "w1:t1", "t801", "idle"})
+	if row := t603Judge(t, jobs, view, 10*time.Minute, t603Now)["w1:p1"]; row.Class != sessionReapClassHeld || row.Reason != sessionReapReasonPaneAmbiguous {
+		t.Fatalf("row = %+v", row)
+	}
+	delete(jobs, "802-new")
+	if row := t603Judge(t, jobs, view, 10*time.Minute, t603Now)["w1:p1"]; row.Class != sessionReapClassCandidate {
+		t.Fatalf("control row = %+v", row)
+	}
+	// An older receipt from another job does not hold the newest owner.
+	jobs["800-older"] = []map[string]any{t603Claim("800-older", "t800", "worker", "2026-09-23T08:00:00Z", false), t603Spawned("800-older", "t800", "w1:p1", "w1:t1", "2026-09-23T08:00:00Z"), t603Completed("800-older", "t800", "w1:p1", "2026-09-23T08:30:00Z")}
+	if row := t603Judge(t, jobs, view, 10*time.Minute, t603Now)["w1:p1"]; row.Class != sessionReapClassCandidate || row.JobID != "801-old" {
+		t.Fatalf("older-receipt control row = %+v", row)
+	}
+}
+
+// An event file wrk would skip (here: not JSON) may have been a revive, so
+// the job is held rather than judged on the events that did parse.
+func TestT603UnreadableEventHolds(t *testing.T) {
+	jobs := map[string][]map[string]any{
+		"803-w": {t603Claim("803-w", "t803", "worker", "2026-09-23T09:00:00Z", false), t603Spawned("803-w", "t803", "w1:p1", "w1:t1", "2026-09-23T09:00:00Z"), t603Completed("803-w", "t803", "w1:p1", "2026-09-23T10:00:00Z")},
+	}
+	root := t603Inbox(t, jobs)
+	view := t603View([4]string{"w1:p1", "w1:t1", "t803", "idle"})
+	judge := func() SessionReapRow {
+		scans, ok := scanFleetCensusJobs(root)
+		if !ok {
+			t.Fatal("inbox unreadable")
+		}
+		rows, _ := judgeSessionReap(scans, view, 10*time.Minute, t603Now)
+		return t603RowsByPane(rows)["w1:p1"]
+	}
+	if row := judge(); row.Class != sessionReapClassCandidate {
+		t.Fatalf("control row = %+v", row)
+	}
+	t501RawJobEvent(t, root, "803-w", "00004-job.reclaim.json", []byte(`{"kind":"job.reclaim","payload":{"agent_label":"t803"`))
+	if row := judge(); row.Class != sessionReapClassHeld || row.Reason != sessionReapReasonRecordUnreadable {
+		t.Fatalf("row = %+v", row)
+	}
+}
+
+// A lane named like the worker's agent still marks the pane as one someone
+// routes to; only a builder's own lane is exempt.
+func TestT603HubWorkerRoutedByAnyLaneHolds(t *testing.T) {
+	report, _ := t603FixtureReport(t)
+	hub, agent := t603Hub(t, `{"lanes":{"t601-verify":{"machine":"node-a","pane":"w2:p25"},"operator-desk":{"machine":"node-a","pane":"w6:p3"}}}`)
+	hub.handleAgentMessage("node-a", "127.0.0.1", agent, t603Envelope(t, report))
+	_, nodes := t603GetSessionReap(t, hub, "op-token")
+	if len(nodes) != 1 {
+		t.Fatalf("nodes = %+v", nodes)
+	}
+	if row := t603RowsByPane(nodes[0].Report.Rows)["w2:p25"]; row.Class != sessionReapClassHeld || row.Reason != sessionReapReasonLaneRoute {
+		t.Fatalf("worker routed by a same-named lane = %+v", row)
+	}
+	if summary := nodes[0].Report.Summary; summary.Candidate != 0 {
+		t.Fatalf("summary = %+v", summary)
+	}
+}

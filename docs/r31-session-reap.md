@@ -23,11 +23,12 @@ arbiter/wrk inbox under `jobs/<id>/events`.
 | live agent pane that no job's newest `job.spawned` receipt names | human session. It is only counted (`summary.no_job`), never a row |
 | herdr `agent.list` name is empty | `held` / `label-unknown` |
 | receipt `label` ≠ agent name | `held` / `label-mismatch` |
-| two or more jobs match both pane and name | `held` / `pane-ambiguous` |
+| two or more jobs match both pane and name, or another job's receipt for the pane is as new or newer than the matched one | `held` / `pane-ambiguous` |
 | claim `agent_label` ≠ receipt `label` | `held` / `label-conflict` |
 | a later receiptless, unfinished claim reuses the label | `held` / `label-reused` |
+| an event file of the job cannot be read (read error, invalid UTF-8, not JSON) — it may have been a revive | `held` / `record-unreadable` |
 | `"keep": true` on any claim, reclaim, or receipt (`wrk spawn --keep`) | `held` / `protected` |
-| claim role outside `worker` / `builder` / `captain` | `held` / `protected-role` |
+| latest claim role outside `worker` / `builder` / `captain`, checked before the sticky builder marking | `held` / `protected-role` |
 | worker (testers are workers) | `candidate` only when `wrk reap` dry-run would close it; otherwise `held` with wrk's reason |
 | builder (or legacy captain) whose pane passes the same pane gates | `builder-task-gate`. It is never a candidate at the node |
 
@@ -59,9 +60,11 @@ and it has been in that state for longer than the report's grace.
 
 When serving `GET /v1/session-reap`, the hub may only move rows *down*:
 
-- a non-held row whose pane is the route of some other non-sink lane in the
-  hub's lanes file becomes `held` / `lane-route`. This covers resident
-  sessions such as a director or checker lane.
+- a non-held row whose pane is the route of a non-sink lane in the hub's
+  lanes file becomes `held` / `lane-route`. This covers resident sessions
+  such as a director or checker lane. The only exemption is a builder's own
+  lane (lane name equal to its agent name) routing to a `builder-task-gate`
+  row; a worker candidate is held whatever the lane is called.
 - when the lanes file cannot be read, every non-held row becomes `held` /
   `lanes-unreadable`.
 
@@ -116,7 +119,7 @@ be enabled without the operator's approval.
 | env (node) | meaning |
 |---|---|
 | `PANEWIRE_SESSION_REAP_REPORT_INTERVAL` | Go duration such as `15m`. Unset, empty, `off`, zero, negative, or unparseable means off. Values below `1m` are raised to `1m`. |
-| `PANEWIRE_SESSION_REAP_GRACE` | wrk duration grammar (`600`, `600s`, `10m`, `2h`, `1d`). The default is `10m`, the same as `wrk reap`. |
+| `PANEWIRE_SESSION_REAP_GRACE` | wrk duration grammar (`600`, `600s`, `10m`, `2h`, `1d`). The default is `10m`, the same as `wrk reap`. A value beyond `30d` (the largest the hub accepts) falls back to `10m`. |
 
 `panewire session-reap [--json] [--grace D] [--jobs-root P] [--herdr-socket S]`
 prints the same judgment once, locally. It sends nothing and runs no
