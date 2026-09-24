@@ -23,7 +23,7 @@ import (
 var quotaV2SharedFixtures = map[string]string{
 	"quota-v2-contract-r3.json": "904f80ffebd941b87021c65a25e3bdfc99b45990f031b7c93decd4d4a7c35490",
 	"quota-v2-wire-r3.json":     "efdbf028a29fa3dc64a637fbe925aac5c3c389a79a08fe9b60fe52875f1ea02c",
-	"quota-v2-parity-r3.json":   "7f8fbfc0ee3a1253599819b81a2a620340a67060a56473031943c2a1c8c09a83",
+	"quota-v2-parity-r3.json":   "5c21150ce5d755456c83c93b17feaac8278bc2d59dbc04b969754a1b5d010e74",
 }
 
 func quotaV2Fixture(t *testing.T, name string) []byte {
@@ -277,5 +277,53 @@ func TestQuotaV2ClockSkewWidensFutureAndNarrowsWindow(t *testing.T) {
 	}
 	if _, err := NewHubServer(HubServerConfig{Tokens: tokens, Now: clock.Now, QuotaV2StorePath: filepath.Join(t.TempDir(), "s.json"), QuotaV2ClockSkew: -time.Second}); err == nil {
 		t.Fatal("negative Δ_hub accepted")
+	}
+}
+
+// §2: text is UTF-8 and never repaired. encoding/json would turn a lone
+// surrogate escape or an invalid UTF-8 byte into U+FFFD; the hub rejects both.
+func TestQuotaV2RejectsTextItWouldHaveToRepair(t *testing.T) {
+	for raw, lone := range map[string]bool{
+		`{"a":"😀"}`:                   false,
+		`{"a":"\\ud800"}`:             false,
+		`{"a":"x\\😀"}`:                false,
+		`{"a":"é\n"}`:                 false,
+		`{"a":"\ud800"}`:              true,
+		`{"a":"\udc00"}`:              true,
+		`{"a":"\ud800\ud800"}`:        true,
+		`{"a":"\ud800x"}`:             true,
+		`{"a":"\ud800\n"}`:            true,
+		`{"a":"\ude00\ud83d"}`:        true,
+		`{"\ud800":1}`:                true,
+		`{"a":"\\\ud800"}`:            true,
+		`{"a":"\ud800","b":"\udc00"}`: true,
+		`{"a":["\ud800","\udc00"]}`:   true,
+	} {
+		if got := quotaV2LoneSurrogate([]byte(raw)); got != lone {
+			t.Errorf("%s: lone=%v, want %v", raw, got, lone)
+		}
+	}
+
+	clock := &quotaV2Clock{now: time.Date(2026, 9, 24, 1, 0, 0, 0, time.UTC)}
+	hub := newQuotaV2TestHub(t, "", clock)
+	binding := quotaV2Bind(t, hub, "node-a", quotaV2SlotA, quotaV2Account, "", clock.now.Add(time.Hour))
+	clock.now = clock.now.Add(time.Minute)
+	data, err := json.Marshal(quotaV2Envelope("obs-utf8", "node-a", binding.BindingRevision, quotaV2Account, clock.now, 1, 2, 3))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string][]byte{
+		"invalid UTF-8 byte in label":    bytes.Replace(data, []byte(`"label":"5h"`), []byte("\"label\":\"5h\xff\""), 1),
+		"lone surrogate escape in label": bytes.Replace(data, []byte(`"label":"5h"`), []byte(`"label":"5h\ud800"`), 1),
+	} {
+		if bytes.Equal(body, data) {
+			t.Fatalf("%s: substitution did not apply", name)
+		}
+		if status, response := quotaV2Do(t, hub, http.MethodPost, "/v2/quota/observations", "node-a", quotaNodeAToken, body); status != http.StatusBadRequest {
+			t.Errorf("%s: status=%d body=%s", name, status, response)
+		}
+	}
+	if status, response := quotaV2Do(t, hub, http.MethodPost, "/v2/quota/observations", "node-a", quotaNodeAToken, data); status != http.StatusCreated {
+		t.Fatalf("clean envelope rejected: %d %s", status, response)
 	}
 }

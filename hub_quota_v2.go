@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -372,10 +373,62 @@ func quotaV2Keys(raw json.RawMessage, fields map[string]bool) (map[string]json.R
 	return object, true
 }
 
-// decodeQuotaV2Observation reads one envelope in the given form (§2): the key
-// sets first, then a strict typed decode, then the field rules.
+// quotaV2LoneSurrogate reports a \u escape of a UTF-16 surrogate that is not
+// part of a high+low pair. encoding/json would silently turn it into U+FFFD;
+// §2 text is UTF-8 and is never repaired, so such a body is rejected instead.
+func quotaV2LoneSurrogate(raw []byte) bool {
+	inString, pendingHigh := false, false
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		if !inString {
+			inString = c == '"'
+			continue
+		}
+		if c != '\\' || i+1 >= len(raw) || raw[i+1] != 'u' {
+			if pendingHigh {
+				return true
+			}
+			if c == '"' {
+				inString = false
+			} else if c == '\\' {
+				i++ // a two-character escape such as \" or \\
+			}
+			continue
+		}
+		if i+5 >= len(raw) {
+			return false // truncated escape: the decoder rejects it
+		}
+		code, err := strconv.ParseUint(string(raw[i+2:i+6]), 16, 16)
+		if err != nil {
+			return false // bad hex: the decoder rejects it
+		}
+		i += 5
+		switch {
+		case code >= 0xD800 && code <= 0xDBFF:
+			if pendingHigh {
+				return true
+			}
+			pendingHigh = true
+		case code >= 0xDC00 && code <= 0xDFFF:
+			if !pendingHigh {
+				return true
+			}
+			pendingHigh = false
+		case pendingHigh:
+			return true
+		}
+	}
+	return pendingHigh
+}
+
+// decodeQuotaV2Observation reads one envelope in the given form (§2): the raw
+// text (UTF-8, no lone surrogate escape), the key sets, then a strict typed
+// decode, then the field rules.
 func decodeQuotaV2Observation(raw []byte, form string) (QuotaV2Observation, error) {
 	invalid := errors.New("invalid envelope")
+	if !utf8.Valid(raw) || quotaV2LoneSurrogate(raw) {
+		return QuotaV2Observation{}, invalid
+	}
 	object, ok := quotaV2Keys(raw, quotaV2EnvelopeFields)
 	if !ok {
 		return QuotaV2Observation{}, invalid
