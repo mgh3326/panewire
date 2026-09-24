@@ -110,18 +110,25 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 	// to report delivered even with no marker echo -- that is precisely the
 	// "unproven reported as delivered" defect R1 fixed (a real relay message
 	// went missing for 11 hours because of it). Real marker evidence in the
-	// post-return screen is required now.
-	t.Run("codex queue clears after return with marker evidence, verification reports success", func(t *testing.T) {
+	// post-return screen is required now. #626: codex no longer gets that
+	// return at all -- its composer cannot be located on screen, so nothing
+	// proves the keypress would submit only this text -- and the withheld
+	// return is may-be-in-pane, never a re-inject.
+	t.Run("codex queued withholds the return and is not re-injected", func(t *testing.T) {
 		dir := t.TempDir()
-		marker := filepath.Join(dir, "returned")
-		script := "#!/bin/sh\ncase \"$2\" in\n" +
+		log := filepath.Join(dir, "calls")
+		script := "#!/bin/sh\necho \"$2\" >> \"" + log + "\"\ncase \"$2\" in\n" +
 			"get) echo '{\"result\":{\"agent\":{\"agent\":\"codex\"}}}' ;;\n" +
-			"read) if [ -f \"" + marker + "\" ]; then echo 'do the thing'; else echo 'Press up to edit queued messages'; fi ;;\n" +
-			"send-keys) touch \"" + marker + "\" ;;\n" +
+			"read) echo 'Press up to edit queued messages' ;;\n" +
 			"esac\n"
 		installFakeHerdr(t, dir, script)
-		if !defaultHubRelayInject(context.Background(), "codex-pane", "do the thing") {
-			t.Fatal("codex message echoed the marker after return, but injection reported failure")
+		result := defaultHubRelayInjectVerdict(context.Background(), "codex-pane", "do the thing", nil)
+		if result.Outcome != relayInjectMaybeInPane {
+			t.Fatalf("codex queued: outcome=%v evidence=%q, want maybe-in-pane", result.Outcome, result.Evidence)
+		}
+		calls, _ := os.ReadFile(log)
+		if strings.Contains(string(calls), "send-keys") {
+			t.Fatalf("codex queued: return sent: %q", calls)
 		}
 	})
 
@@ -185,12 +192,18 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 	// marker-evidence case above.
 	t.Run("devin queue clears after return with marker evidence, verification reports success", func(t *testing.T) {
 		dir := t.TempDir()
+		prompted := filepath.Join(dir, "prompted")
 		marker := filepath.Join(dir, "returned")
 		// An idle pane: since #547 the one return keypress on a devin queue
-		// is sent only when the pane is proven idle.
+		// is sent only when the pane is proven idle. The queued screen is the
+		// live capture in TestClassifySubmissionAllFourValues; since #626 the
+		// keypress also needs the composer to hold only devin's queue hint.
+		queued := "── 1 queued ──────────────────────────────────────── ↑ edit · ↵ send now ──\n○ do the thing\n─────────────────────\n❭ Press Enter to send queued messages now\n─────────────────────\nSWE-2 High"
+		idle := "─────────────────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n─────────────────────\nSWE-2 High"
 		script := "#!/bin/sh\ncase \"$2\" in\n" +
 			"get) echo '{\"result\":{\"agent\":{\"agent\":\"devin\",\"agent_status\":\"idle\"}}}' ;;\n" +
-			"read) if [ -f \"" + marker + "\" ]; then echo 'do the thing'; else echo '── 1 queued ── send now'; fi ;;\n" +
+			"prompt) touch \"" + prompted + "\" ;;\n" +
+			"read) if [ -f \"" + marker + "\" ]; then echo '❭ do the thing'; elif [ -f \"" + prompted + "\" ]; then printf '%s\\n' \"" + queued + "\"; else printf '%s\\n' \"" + idle + "\"; fi ;;\n" +
 			"send-keys) touch \"" + marker + "\" ;;\n" +
 			"esac\n"
 		installFakeHerdr(t, dir, script)

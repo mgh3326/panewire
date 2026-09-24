@@ -146,7 +146,7 @@ func TestR18RelaySubmissionVerificationReturnsOnceThenUnconfirmed(t *testing.T) 
 	dir := t.TempDir()
 	log := filepath.Join(dir, "herdr.log")
 	binary := filepath.Join(dir, "herdr")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho \"$2\" >>\"$R18_HERDR_LOG\"\ncase \"$2\" in get) echo '{\"result\":{\"agent\":{\"agent\":\"claude\"}}}' ;; read) echo '[Pasted text #1]' ;; esac\n"), 0700); err != nil {
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho \"$2\" >>\"$R18_HERDR_LOG\"\ncase \"$2\" in get) echo '{\"result\":{\"agent\":{\"agent\":\"claude\"}}}' ;; read) printf '%s\\n' '───────' '❯ [Pasted text #1 +3 lines]' '───────' ;; esac\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("R18_HERDR_LOG", log)
