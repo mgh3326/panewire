@@ -406,7 +406,7 @@ func parseLanesAuditArgs(args []string) (lanesAuditOptions, error) {
 			}
 			seen[name] = true
 			if !hasValue {
-				if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") {
+				if index+1 >= len(args) {
 					return options, errors.New("lanes-audit flag value is required")
 				}
 				index++
@@ -441,6 +441,9 @@ func parseLanesAuditArgs(args []string) (lanesAuditOptions, error) {
 func runLanesAuditCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	options, err := parseLanesAuditArgs(args)
 	if err != nil {
+		if missingHubCLIFlagValue(args, lanesAuditValueFlags, lanesAuditKnownFlags) {
+			return writeHubCLIUsage(stderr, "lanes-audit: flag value is required", lanesAuditUsage)
+		}
 		return writeHubCLIUsage(stderr, "lanes-audit: "+err.Error(), lanesAuditUsage)
 	}
 	now := time.Now

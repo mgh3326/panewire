@@ -149,7 +149,7 @@ func parseFleetCensusArgs(args []string) (fleetCensusOptions, error) {
 			}
 			seen[name] = true
 			if !hasValue {
-				if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") {
+				if index+1 >= len(args) {
 					return options, errors.New("fleet-census flag value is required")
 				}
 				index++
@@ -1445,6 +1445,9 @@ func fleetCensusMachineID(options fleetCensusOptions) string {
 func runFleetCensusCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	options, err := parseFleetCensusArgs(args)
 	if err != nil {
+		if missingHubCLIFlagValue(args, fleetCensusValueFlags, fleetCensusKnownFlags) {
+			return writeHubCLIUsage(stderr, "fleet-census: flag value is required", fleetCensusUsage)
+		}
 		return writeHubCLIUsage(stderr, "fleet-census: "+err.Error(), fleetCensusUsage)
 	}
 	now := time.Now

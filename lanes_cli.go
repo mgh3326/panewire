@@ -39,9 +39,15 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	}
 	options, err := parseLanesCLI(args)
 	if err != nil {
+		if missingHubCLIFlagValue(args, lanesValueFlags, lanesKnownFlags) {
+			return writeHubCLIUsage(stderr, "lanes: lanes flag value is required", lanesUsage)
+		}
 		return writeHubCLIUsage(stderr, "lanes: "+err.Error(), lanesUsage)
 	}
 	if options.HubURL == "" || options.TokenEnv == "" {
+		if missingHubCLIFlagValue(args, lanesValueFlags, lanesKnownFlags) {
+			return writeHubCLIUsage(stderr, "lanes: lanes flag value is required", lanesUsage)
+		}
 		return writeHubCLIUsage(stderr, "lanes: --hub-url and --hub-token-env are required", lanesUsage)
 	}
 	if !laneNamePattern.MatchString(options.Lane) && options.Command != "ls" {
@@ -272,7 +278,7 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 			}
 			options.seen[name] = true
 			if !hasValue {
-				if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") {
+				if index+1 >= len(args) {
 					return lanesCLIOptions{}, errors.New("lanes flag value is required")
 				}
 				index++

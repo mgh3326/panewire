@@ -291,7 +291,7 @@ func parseSessionsFindArgs(args []string) (sessionsFindOptions, error) {
 			}
 			seen[name] = true
 			if !hasValue {
-				if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") {
+				if index+1 >= len(args) {
 					return options, errors.New("sessions flag value is required")
 				}
 				index++
@@ -328,6 +328,9 @@ func runSessionsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) in
 func runSessionsFindCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	options, err := parseSessionsFindArgs(args)
 	if err != nil {
+		if missingHubCLIFlagValue(args, sessionsValueFlags, sessionsKnownFlags) {
+			return writeHubCLIUsage(stderr, "sessions find: flag value is required", sessionsUsage)
+		}
 		return writeHubCLIUsage(stderr, "sessions find: "+err.Error(), sessionsUsage)
 	}
 	if !validIdleWakeMetadata(options.label) {
