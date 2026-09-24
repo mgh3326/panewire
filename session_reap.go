@@ -492,8 +492,10 @@ func parseSessionReapCLIArgs(args []string) (sessionReapCLIOptions, error) {
 func runSessionReapCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	options, err := parseSessionReapCLIArgs(args)
 	if err != nil {
-		fmt.Fprintln(stderr, "session-reap:", err)
-		return ExitUsage
+		if missingHubCLIFlagValue(args, sessionReapValueFlags, sessionReapKnownFlags) {
+			return writeHubCLIUsage(stderr, "session-reap: flag value is required", sessionReapUsage)
+		}
+		return writeHubCLIUsage(stderr, "session-reap: "+err.Error(), sessionReapUsage)
 	}
 	now := time.Now
 	if deps.Now != nil {

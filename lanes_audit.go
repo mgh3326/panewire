@@ -441,7 +441,10 @@ func parseLanesAuditArgs(args []string) (lanesAuditOptions, error) {
 func runLanesAuditCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	options, err := parseLanesAuditArgs(args)
 	if err != nil {
-		return ExitUsage
+		if missingHubCLIFlagValue(args, lanesAuditValueFlags, lanesAuditKnownFlags) {
+			return writeHubCLIUsage(stderr, "lanes-audit: flag value is required", lanesAuditUsage)
+		}
+		return writeHubCLIUsage(stderr, "lanes-audit: "+err.Error(), lanesAuditUsage)
 	}
 	now := time.Now
 	if deps.Now != nil {

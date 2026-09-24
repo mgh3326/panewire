@@ -1445,7 +1445,10 @@ func fleetCensusMachineID(options fleetCensusOptions) string {
 func runFleetCensusCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	options, err := parseFleetCensusArgs(args)
 	if err != nil {
-		return ExitUsage
+		if missingHubCLIFlagValue(args, fleetCensusValueFlags, fleetCensusKnownFlags) {
+			return writeHubCLIUsage(stderr, "fleet-census: flag value is required", fleetCensusUsage)
+		}
+		return writeHubCLIUsage(stderr, "fleet-census: "+err.Error(), fleetCensusUsage)
 	}
 	now := time.Now
 	if deps.Now != nil {
