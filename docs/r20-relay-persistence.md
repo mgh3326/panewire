@@ -115,6 +115,31 @@ Two things spend an attempt, and both record it the same way: a startup replay
 that queued an injection, and an injection the node never acknowledged
 (`relay.unconfirmed`).
 
+**A delivery is recorded even after its ack window is gone (#650).** The
+window that matches `relay.delivered` to a row lives in hub memory. A
+`relay.unconfirmed` retires it before the node's retry lands, an expiry drops
+it, and a hub restart loses all of them. A `relay.delivered` that matches no
+window is therefore checked against the row itself: its `original_event_id`
+names the row, its `job_id` must be that row's transport id, and it must come
+from the row's destination or the owner lane's current route. If all three
+hold, the hub sets `delivered_at`. Otherwise it is counted as an unknown
+message, as before.
+
+**Replay retires rows that must not reach a pane (#650).** Before a replay
+spends an attempt, the hub closes these rows. Each gets a `delivered_to` of
+`hub/replay-retired:<reason>` and a `relay.replay_retired` broadcast
+`{"event_id":…,"kind":…,"lane":…,"source_event_id":…,"reason":…}`:
+
+- an idle-wake whose pane is no lane's pane in the lanes file any more,
+  because the lane was removed or moved to another pane (`lane_gone`). If the
+  lanes file cannot be read, no row is retired for this reason;
+- an idle-wake whose `changed_at` is more than 30 minutes old (`stale`);
+- any other row whose handoffkeep `received_at` is more than 24 hours old,
+  which is the node outbox's own default bound (`stale`). A row with no
+  `received_at` is never aged out.
+
+Chat rows keep the chat store as their only authority and skip this gate.
+
 **handoffkeep exposes no endpoint that sets `attempts`.** The hub therefore
 re-POSTs the row it already stored: the idempotency key collides, handoffkeep
 answers 200 with `attempts + 1`, the row itself is unchanged (first-writer-wins,

@@ -128,6 +128,9 @@ type handoffkeepRelayEvent struct {
 	// DeliveredAt is read only by the startup replay gate. It arrives as JSON
 	// null for an undelivered row, which decodes to the empty string.
 	DeliveredAt string `json:"delivered_at"`
+	// ReceivedAt is handoffkeep's own insert time. Only the replay age gate
+	// reads it; a row that lacks it has no provable age and is never aged out.
+	ReceivedAt string `json:"received_at,omitempty"`
 }
 
 func (c *handoffkeepRelayClient) endpoint(path string) string {
@@ -236,6 +239,23 @@ func (c *handoffkeepRelayClient) listUndelivered(ctx context.Context, lane, kind
 		return nil, errors.New("handoffkeep returned an unusable relay event list")
 	}
 	return result.Events, nil
+}
+
+// relayEvent reads the one row with this id, in any delivery state. The
+// listing cursor is exclusive and ordered by id, so a one-row page after
+// id-1 is exactly that row or proof it does not exist.
+func (c *handoffkeepRelayClient) relayEvent(ctx context.Context, id int64) (handoffkeepRelayEvent, bool, error) {
+	if id < 1 {
+		return handoffkeepRelayEvent{}, false, errors.New("handoffkeep relay event id is invalid")
+	}
+	records, err := c.listRelayEvents(ctx, "", id-1, 1)
+	if err != nil {
+		return handoffkeepRelayEvent{}, false, err
+	}
+	if len(records) != 1 || records[0].ID != id {
+		return handoffkeepRelayEvent{}, false, nil
+	}
+	return records[0], true, nil
 }
 
 // listRelayEvents reads one cursor page of durable relay rows regardless of
