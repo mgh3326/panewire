@@ -602,7 +602,10 @@ func relayInjectForHarness(ctx context.Context, pane, harness, text string, memb
 		// Same fail-closed shape as devin's presend:read_failed.
 		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "presend:unproven:read_failed"}
 	}
-	presendQueued := relayQueuedBanner(harness, presend.visible)
+	// A failed visible read leaves the presend banner state unknown, which
+	// counts as "already queued" -- the postsend banner then proves nothing
+	// either (tester N-r2-3).
+	presendQueued := !presend.visibleOK || relayQueuedBanner(harness, presend.visible)
 	switch result, rule := relayClassifyReads(harness, presend, text, members, false, presendQueued); result {
 	case "marker_observed":
 		return relayInjectResult{Outcome: relayInjectDelivered, Harness: harness, Evidence: "presend:" + rule}
@@ -744,16 +747,17 @@ const (
 )
 
 // relayPaneReads pairs the two read sources; anyOK reports whether at least
-// one answered, so a dead herdr is told apart from an empty pane.
+// one answered, so a dead herdr is told apart from an empty pane, and
+// visibleOK marks whether the banner/composer source answered at all.
 type relayPaneReads struct {
 	visible, unwrapped string
-	anyOK              bool
+	anyOK, visibleOK   bool
 }
 
 func relayReadPane(ctx context.Context, pane string) relayPaneReads {
 	var reads relayPaneReads
 	if out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", relayVerifyVisibleLines).Output(); err == nil {
-		reads.visible, reads.anyOK = string(out), true
+		reads.visible, reads.anyOK, reads.visibleOK = string(out), true, true
 	}
 	if out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", relayVerifyUnwrappedLines).Output(); err == nil {
 		reads.unwrapped, reads.anyOK = string(out), true
@@ -790,39 +794,40 @@ func relayQueuedBanner(harness, screen string) bool {
 	return false
 }
 
-// relayTextPresent reports whether compacted text holds evidence of this
-// specific message: the whole stripped body when the echo shows all of it,
-// or both the head and the tail marker when a long echo is elided in the
-// middle. One 48-rune fragment is not identity -- every idle-wake to the
-// same lane shares the head marker and same-path reports share the tail,
-// so head-OR-tail presence would close a different message's row as
-// delivered (#683 tester B1).
-func relayTextPresent(compacted, text string) bool {
+// relayEchoContains reports whether text's stripped body appears in screen
+// ending at a line boundary. Identity needs the whole body: rounds of one
+// job share both 48-rune markers (same label and host give the same head,
+// the same report path the same tail; only the middle differs), and a bare
+// substring match lets a shorter message hide inside a longer echo that
+// merely contains it (chat prefix containment) -- both measured by the
+// #683 tester as permanent-loss bugs. Matching per line-ending also
+// handles a wrapped echo, whose body spans several physical lines.
+func relayEchoContains(screen, text string) bool {
 	body := compactWhitespace(stripRelayBoilerplate(text))
 	if body == "" {
 		return false
 	}
-	if strings.Contains(compacted, body) {
-		return true
+	lines := strings.Split(screen, "\n")
+	for end := range lines {
+		acc := ""
+		for start := end; start >= 0 && len(acc) < len(body); start-- {
+			acc = compactWhitespace(lines[start]) + acc
+		}
+		if strings.HasSuffix(acc, body) {
+			return true
+		}
 	}
-	head, tail := compactWhitespace(devinRelayMarker(text)), compactWhitespace(devinRelayTailMarker(text))
-	if head == "" || head == tail {
-		return false
-	}
-	// Both ends, in order: the head must precede the tail so two different
-	// echoes cannot combine into a match.
-	headAt := strings.Index(compacted, head)
-	return headAt >= 0 && strings.Contains(compacted[headAt+len(head):], tail)
+	return false
 }
 
 // relayTranscriptEchoes names the first source whose transcript -- the read
 // with the composer region cut away, because recent-unwrapped can carry the
 // live composer rows (#683 tester S3) -- holds echo evidence of text.
 func relayTranscriptEchoes(harness string, reads relayPaneReads, text string) string {
-	if relayTextPresent(compactWhitespace(promptTranscript(harness, reads.visible)), text) {
+	if relayEchoContains(promptTranscript(harness, reads.visible), text) {
 		return "visible"
 	}
-	if relayTextPresent(compactWhitespace(promptTranscript(harness, reads.unwrapped)), text) {
+	if relayEchoContains(promptTranscript(harness, reads.unwrapped), text) {
 		return "recent-unwrapped"
 	}
 	return ""
@@ -840,9 +845,10 @@ func relayTranscriptEchoes(harness string, reads relayPaneReads, text string) st
 //     ever costs a withheld return, never a delivery claim -- or a chip
 //     floats on a screen whose composer cannot be located;
 //   - queued (postSend only): the harness's queue banner newly appeared;
-//   - marker_observed: echo evidence of the text itself (full body or both
-//     end markers) in the visible transcript above the composer, or in the
-//     recent-unwrapped transcript;
+//   - marker_observed: the text's whole stripped body echoed in the visible
+//     transcript above the composer or in the recent-unwrapped transcript,
+//     ending at a line boundary (fragments are shared between messages and
+//     prove nothing -- #683 tester B1');
 //   - member_present (presend only): no echo of the batch text, but a batch
 //     member is on the pane -- part of the batch may have landed by another
 //     route, so the batch is neither pasted nor claimed;
@@ -930,8 +936,10 @@ func relayVerifyOutcome(ctx context.Context, pane, harness, text, before, prefix
 			return maybe("return_failed")
 		}
 		// A banner already up on the residue screen is an older queue, so it
-		// keeps excluding the queued rule for the post-return reads.
-		presendQueued = presendQueued || relayQueuedBanner(harness, reads.visible)
+		// keeps excluding the queued rule for the post-return reads; a
+		// failed residue-screen read leaves that state unknown, which
+		// excludes it too.
+		presendQueued = presendQueued || !reads.visibleOK || relayQueuedBanner(harness, reads.visible)
 		reads = relayReadPane(ctx, pane)
 		prefix += "after_return:"
 		result, rule = relayClassifyReads(harness, reads, text, members, true, presendQueued)

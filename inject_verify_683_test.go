@@ -164,6 +164,76 @@ func TestTask683SharedHeadMarkerIsTyped(t *testing.T) {
 	}
 }
 
+// #683 tester B1': two rounds of one job share the head AND the tail
+// marker -- same label and host give the same head, the same report path
+// gives the same tail; only the middle differs. Echo identity is the whole
+// body ending at a line boundary, so the earlier round's echo must not
+// close the later round: it is typed and delivered on its own echo.
+func TestTask683SameJobRoundsAreTyped(t *testing.T) {
+	roundA := "(같은 내용이 두 번 보이면 재실행 금지) [report] b618-decision-requests (home-desktop) :: VERDICT: BLOCKER @3def3e3 -> jobs/618-decision-requests-20260924-1610/report.md"
+	roundB := "(같은 내용이 두 번 보이면 재실행 금지) [report] b618-decision-requests (home-desktop) :: VERDICT: PASS @de41e7a -> jobs/618-decision-requests-20260924-1610/report.md"
+	if devinRelayMarker(roundA) != devinRelayMarker(roundB) || devinRelayTailMarker(roundA) != devinRelayTailMarker(roundB) {
+		t.Fatal("fixture drifted: same-job rounds must share head and tail markers")
+	}
+	pre := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+roundA), task683Filler("later", 30)...), "❯")
+	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+roundA), "\n")
+	post := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+roundB), task683Filler("post", 40)...), "❯")
+	postTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+roundB), "\n")
+	_, calls := task683FakeHerdr(t, "claude",
+		[]string{pre, post},
+		[]string{preTranscript, postTranscript})
+	result := defaultHubRelayInjectVerdict(context.Background(), "wB:pD8", roundB, nil)
+	if result.Outcome != relayInjectDelivered || strings.HasPrefix(result.Evidence, "presend:") {
+		t.Fatalf("result=%+v, want the later round typed and delivered on its own echo", result)
+	}
+	if got := calls(); task683Count(got, "prompt") != 1 {
+		t.Fatalf("later job round sharing both markers was not typed: %q", got)
+	}
+}
+
+// #683 tester B1', containment arm: a shorter message whose body is a
+// substring inside a longer earlier echo must not be claimed delivered --
+// the body has to end where a line ends.
+func TestTask683ContainedPrefixIsNotDelivered(t *testing.T) {
+	long := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] go ahead with round 3 once the tester PASSes"
+	short := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] go ahead"
+	pre := task626Claude(append(append([]string{}, task626Transcript...), "❯ "+long), "❯")
+	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+long), "\n")
+	post := task626Claude(append(append([]string{}, task626Transcript...), "❯ "+short), "❯")
+	_, calls := task683FakeHerdr(t, "claude",
+		[]string{pre, post},
+		[]string{preTranscript, post})
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", short, nil)
+	if result.Outcome != relayInjectDelivered || strings.HasPrefix(result.Evidence, "presend:") {
+		t.Fatalf("result=%+v, want the contained-prefix message typed and delivered on its own echo", result)
+	}
+	if got := calls(); task683Count(got, "prompt") != 1 {
+		t.Fatalf("message contained inside a longer echo was not typed: %q", got)
+	}
+}
+
+// #683 tester B1', batch arm: a replay batch whose later member already has
+// an echo on the pane must not claim the batch delivered from that member's
+// echo -- the member's presence holds the batch as may-be-in-pane (part of
+// it may have landed by another route) and nothing is typed.
+func TestTask683BatchWithMemberEchoIsHeldNotClaimed(t *testing.T) {
+	memberB := "(같은 내용이 두 번 보이면 재실행 금지) [event] director-1 :: {\"kind\":\"idle-wake\",\"pane\":\"w16:p1\",\"state_change_seq\":1}"
+	memberC := "(같은 내용이 두 번 보이면 재실행 금지) [event] director-1 :: {\"kind\":\"idle-wake\",\"pane\":\"w16:p7\",\"state_change_seq\":9}"
+	batch := "[batch 2건] 1) " + memberB + " 2) " + memberC
+	pre := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+memberC), task683Filler("later", 30)...), "❯")
+	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+memberC), "\n")
+	_, calls := task683FakeHerdr(t, "claude",
+		[]string{pre},
+		[]string{preTranscript})
+	result := defaultHubRelayInjectVerdict(context.Background(), "wB:pD8", batch, []string{memberB, memberC})
+	if result.Outcome != relayInjectMaybeInPane || !strings.Contains(result.Evidence, "member_echo") {
+		t.Fatalf("result=%+v, want presend may-be-in-pane on the member echo", result)
+	}
+	if got := calls(); task683Count(got, "prompt") != 0 {
+		t.Fatalf("batch typed although a member's echo is on the pane: %q", got)
+	}
+}
+
 // #683 tester S1: a queue banner that was already up before the paste
 // belongs to an older queue and cannot prove this message joined it. With
 // no echo of the text either, the verdict is may-be-in-pane -- never a

@@ -254,7 +254,7 @@ func TestRelayInjectVerifySubmissionComposerResidueThenUnprovenIsNotDelivered(t 
 // Only a proven marker_observed classification reports delivered, on the
 // direct path.
 func TestRelayInjectVerifySubmissionMarkerObservedDirectIsDelivered(t *testing.T) {
-	_, calls := unprovenSetupHerdr(t, []string{"prefix one line suffix"})
+	_, calls := unprovenSetupHerdr(t, []string{"earlier output\n❯ one line"})
 	if !relayInjectVerifySubmission(context.Background(), "test-pane", "claude", "one line") {
 		t.Fatal("marker_observed submission (no return pressed) reported unconfirmed")
 	}
@@ -267,7 +267,7 @@ func TestRelayInjectVerifySubmissionMarkerObservedDirectIsDelivered(t *testing.T
 // first read, followed by a proven marker_observed re-read, must still
 // report delivered after the fix.
 func TestRelayInjectVerifySubmissionComposerResidueThenMarkerObservedIsDelivered(t *testing.T) {
-	_, calls := unprovenSetupHerdr(t, []string{unprovenClaudeChip, "prefix one line suffix"})
+	_, calls := unprovenSetupHerdr(t, []string{unprovenClaudeChip, "earlier output\n❯ one line"})
 	if relayInjectVerify(context.Background(), "test-pane", "claude", "one line", unprovenClaudeEmpty).Outcome != relayInjectDelivered {
 		t.Fatal("marker_observed submission after one return keypress reported unconfirmed")
 	}
@@ -365,7 +365,7 @@ func TestRelayInjectVerifySubmissionHarnessEvidenceMatrix(t *testing.T) {
 		reads   []string // visible and recent-unwrapped alternate per call
 		want    relayInjectOutcome
 	}{
-		{"claude marker_observed direct", "claude", []string{"prefix one line suffix"}, relayInjectDelivered},
+		{"claude marker_observed direct", "claude", []string{"earlier output\n❯ one line"}, relayInjectDelivered},
 		{"claude unproven direct, composer seen empty", "claude", []string{"nothing relevant\n" + unprovenClaudeEmpty}, relayInjectMaybeInPane},
 		{"claude unproven direct, no composer on screen", "claude", []string{"nothing relevant"}, relayInjectMaybeInPane},
 		{"claude queued is landed without a return", "claude", []string{unprovenClaudeQueued}, relayInjectQueued},
@@ -382,7 +382,7 @@ func TestRelayInjectVerifySubmissionHarnessEvidenceMatrix(t *testing.T) {
 		// devin: added in the 2026-09-16 rework. Since #547 the hub relay
 		// sends devin through devinRelayInject, which decides retry vs
 		// may-be-in-pane itself; these rows pin only this function's result.
-		{"devin marker_observed direct", "devin", []string{"prefix one line suffix"}, relayInjectDelivered},
+		{"devin marker_observed direct", "devin", []string{"earlier output\n❭ one line"}, relayInjectDelivered},
 		{"devin unproven direct", "devin", []string{"nothing relevant"}, relayInjectMaybeInPane},
 		{"devin queued is landed without a return", "devin", []string{unprovenDevinQueued}, relayInjectQueued},
 		{"devin composer_residue then unproven after return", "devin", []string{unprovenDevinResidue, "", "nothing relevant"}, relayInjectMaybeInPane},
