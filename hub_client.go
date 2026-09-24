@@ -598,6 +598,12 @@ func relayInjectForHarness(ctx context.Context, pane, harness, text string, memb
 	// return-once rule: a chip seen afterwards is provably this inject's
 	// own only if this read had no chip.
 	presend := relayReadPane(ctx, pane)
+	if !presend.anyOK {
+		// Both reads failed: nothing about the pane is known, and typing
+		// blind is exactly how a replay of a maybe-in-pane row duplicates.
+		// Same fail-closed shape as devin's presend:read_failed.
+		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "presend:unproven:read_failed"}
+	}
 	switch result, rule := relayClassifyReads(harness, presend, textMarkers, allMarkers, false); result {
 	case "marker_observed":
 		return relayInjectResult{Outcome: relayInjectDelivered, Harness: harness, Evidence: "presend:" + rule}
