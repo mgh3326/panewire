@@ -128,6 +128,11 @@ type handoffkeepRelayEvent struct {
 	// DeliveredAt is read only by the startup replay gate. It arrives as JSON
 	// null for an undelivered row, which decodes to the empty string.
 	DeliveredAt string `json:"delivered_at"`
+	// DeliveredTo is handoffkeep's delivered_to ("machine/pane"). A row the
+	// replay gate already retired carries hub/replay-retired:<reason> here;
+	// the hub reads it so a row that still lists as undelivered is not
+	// retired and announced a second time (#658).
+	DeliveredTo string `json:"delivered_to"`
 	// ReceivedAt is handoffkeep's own insert time. Only the replay age gate
 	// reads it; a row that lacks it has no provable age and is never aged out.
 	ReceivedAt string `json:"received_at,omitempty"`
