@@ -11,6 +11,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode"
 )
 
 type PromptRequest struct {
@@ -689,9 +690,9 @@ func promptTailMarker(body string) string {
 }
 
 // classifyPromptSubmission is the direct-prompt classifier (#646). It keeps
-// classifySubmissionEvidence's residue and queued rules and tightens the one
-// that reports a submission, which there only asks whether the marker is
-// anywhere on screen. That answer is wrong in two real cases:
+// classifySubmissionEvidence's queued rules and replaces the one that reports
+// a submission, which there only asks whether the marker is anywhere on
+// screen. That answer is wrong in real cases:
 //
 //   - the marker is in the composer, but the composer was not found or the
 //     wrong lines were taken for it -- a brief with a line of ─ in it moves
@@ -700,30 +701,40 @@ func promptTailMarker(body string) string {
 //     brief are its boilerplate header, which every relay message and most
 //     briefs start with (fixture f5-pre: #623's delta brief).
 //
-// So for claude the composer must be located, its top line must carry the
-// ❯ prompt, and it must not hold either marker; and for every harness the
-// echo must be new since pre, the preflight read. The tail marker is also
-// accepted, so a brief taller than the read window can still be proven.
+// So the composer must be located (promptComposer; unlocated proves
+// nothing), this call's text in it is residue, and a submission needs the
+// brief's tail echoed as new output since pre, the preflight read -- and its
+// head too while the head is still in the transcript. The tail identifies
+// the brief where the head is shared boilerplate, and it stays on screen
+// when a brief taller than the read window scrolls its head out. Residue is
+// judged before the echo, and a paste chip only after it: a chip that
+// appears once this call's text has been echoed is someone else's.
 func classifyPromptSubmission(harness, pre, screen, body string) (string, string) {
 	head, tail := markerFor(body), promptTailMarker(body)
 	result, rule := classifySubmissionEvidence(harness, screen, head)
-	if result == "composer_residue" || result == "queued" || !harnessHasSubmissionEvidence(harness) {
+	if result == "queued" || !harnessHasSubmissionEvidence(harness) {
 		return result, rule
 	}
-	if strings.EqualFold(harness, "claude") {
-		region, ok := claudePromptComposer(screen)
-		if !ok {
-			return "unproven", "composer_unlocated"
+	lines := strings.Split(screen, "\n")
+	top, end, ok := promptComposer(harness, lines)
+	if !ok {
+		return "unproven", "composer_unlocated"
+	}
+	composer := compactWhitespace(strings.Join(lines[top:end], "\n"))
+	if strings.Contains(composer, compactWhitespace(head)) || strings.Contains(composer, compactWhitespace(tail)) {
+		return "composer_residue", "composer_divider"
+	}
+	transcript := strings.Join(lines[:top], "\n")
+	if promptFreshEcho(harness, pre, transcript, tail) {
+		if promptFreshEcho(harness, pre, transcript, head) {
+			return "marker_observed", "marker_echo"
 		}
-		if compact := compactWhitespace(region); strings.Contains(compact, compactWhitespace(head)) || strings.Contains(compact, compactWhitespace(tail)) {
-			return "composer_residue", "composer_divider"
+		if !strings.Contains(compactWhitespace(transcript), compactWhitespace(head)) {
+			return "marker_observed", "marker_echo_tail"
 		}
 	}
-	if promptFreshEcho(harness, pre, screen, head) {
-		return "marker_observed", "marker_echo"
-	}
-	if promptFreshEcho(harness, pre, screen, tail) {
-		return "marker_observed", "marker_echo_tail"
+	if result == "composer_residue" {
+		return result, rule
 	}
 	if result == "marker_observed" {
 		return "unproven", "marker_stale"
@@ -731,83 +742,84 @@ func classifyPromptSubmission(harness, pre, screen, body string) (string, string
 	return "unproven", "none"
 }
 
-// claudePromptComposer is claude's live composer: the lines between its top
-// edge (see claudeComposerTop) and the last divider line.
-func claudePromptComposer(screen string) (string, bool) {
-	lines := strings.Split(screen, "\n")
-	top, bottom, ok := claudeComposerTop(lines)
-	if !ok {
-		return "", false
-	}
-	return strings.Join(lines[top+1:bottom], "\n"), true
-}
-
-// claudeComposerTop finds claude's composer as the last divider line whose
-// next non-blank line starts with the ❯ prompt, above the last divider line.
-// composerRegion takes the second-to-last divider instead, which a pending
-// brief with a line of ─ in it supplies itself: the region then starts inside
-// the brief and its first lines read as transcript (fixture f3).
-func claudeComposerTop(lines []string) (top, bottom int, ok bool) {
-	var dividers []int
-	for i, line := range lines {
-		if isDividerLine(line) {
-			dividers = append(dividers, i)
+// promptComposer locates the live composer in lines: [top, end) is the
+// composer and what is drawn under it, and lines[:top] is the transcript,
+// where a submitted prompt is echoed. Every edge is found at column 0,
+// because every line of text inside a composer or an echo is prefixed
+// (the ❯/❭/› prompt, or a two-space continuation indent): a brief's own
+// "────" or "❯ ..." lines cannot pose as an edge.
+//
+//   - claude and devin draw the composer between two divider lines, the
+//     top one followed by the ❯ (claude) or ❭ (devin) prompt;
+//   - codex draws no divider; its composer is the last line starting
+//     with the › prompt, down to the footer. An echo starts with › too,
+//     but a new composer is always drawn below it.
+//
+// Other harnesses have no locatable composer.
+func promptComposer(harness string, lines []string) (top, end int, ok bool) {
+	isEdge, glyph := isDividerLine, "❯"
+	switch {
+	case strings.EqualFold(harness, "claude"):
+	case strings.EqualFold(harness, "devin"):
+		isEdge, glyph = isDevinDividerLine, "❭"
+	case strings.EqualFold(harness, "codex"):
+		for i := len(lines) - 1; i >= 0; i-- {
+			if strings.HasPrefix(lines[i], "›") {
+				return i, len(lines), true
+			}
 		}
-	}
-	if len(dividers) < 2 {
+		return 0, 0, false
+	default:
 		return 0, 0, false
 	}
-	bottom = dividers[len(dividers)-1]
-	for k := len(dividers) - 2; k >= 0; k-- {
-		for i := dividers[k] + 1; i < bottom; i++ {
-			if line := strings.TrimSpace(lines[i]); line != "" {
-				if strings.HasPrefix(line, "❯") {
-					return dividers[k], bottom, true
-				}
-				break
-			}
+	var edges []int
+	for i, line := range lines {
+		if line != "" && !unicode.IsSpace([]rune(line)[0]) && isEdge(line) {
+			edges = append(edges, i)
+		}
+	}
+	if len(edges) < 2 {
+		return 0, 0, false
+	}
+	top, bottom := edges[len(edges)-2], edges[len(edges)-1]
+	for i := top + 1; i < bottom; i++ {
+		if strings.TrimSpace(lines[i]) != "" {
+			return top, bottom, strings.HasPrefix(lines[i], glyph)
 		}
 	}
 	return 0, 0, false
-}
-
-// promptTranscript is screen without its live composer and what is under it:
-// the part where a submitted prompt is echoed. codex and unknown harnesses
-// draw no locatable composer, so their whole screen counts.
-func promptTranscript(harness, screen string) string {
-	lines := strings.Split(screen, "\n")
-	switch {
-	case strings.EqualFold(harness, "claude"):
-		if top, _, ok := claudeComposerTop(lines); ok {
-			return strings.Join(lines[:top], "\n")
-		}
-	case strings.EqualFold(harness, "devin"):
-		if start, ok := composerStartWith(lines, isDevinDividerLine); ok {
-			return strings.Join(lines[:start], "\n")
-		}
-	}
-	return screen
 }
 
 // promptAnchorMinRunes keeps a short or blank last line (a lone ⏺) from
 // serving as the anchor: it would be found again in almost any new output.
 const promptAnchorMinRunes = 12
 
-// promptFreshEcho reports whether marker is echoed in screen's transcript as
-// new output since pre, the preflight read of the same source. Either the
-// marker occurs more often than it did in pre, or it occurs after pre's last
-// transcript lines (the anchor). The anchor covers an old echo scrolling out
-// of the window while the new one scrolls in, which leaves the count equal.
-// A missing anchor proves nothing: the window may have moved past it, or it
-// was a spinner line that has since changed. Whitespace is ignored because
-// claude indents and hard-wraps the lines it echoes.
-func promptFreshEcho(harness, pre, screen, marker string) bool {
+// promptTranscript is screen above its live composer (see promptComposer),
+// or all of it when no composer is located.
+func promptTranscript(harness, screen string) string {
+	lines := strings.Split(screen, "\n")
+	if top, _, ok := promptComposer(harness, lines); ok {
+		return strings.Join(lines[:top], "\n")
+	}
+	return screen
+}
+
+// promptFreshEcho reports whether marker is echoed in transcript -- the part
+// of the current screen above its composer -- as new output since pre, the
+// preflight read of the same source. Either the marker occurs more often
+// than in pre's transcript, or it occurs after pre's last transcript lines
+// (the anchor). The anchor covers an old echo scrolling out of the window
+// while the new one scrolls in, which leaves the count equal. A missing
+// anchor proves nothing: the window may have moved past it, or it was a
+// spinner line that has since changed. Whitespace is ignored because claude
+// indents and hard-wraps the lines it echoes.
+func promptFreshEcho(harness, pre, transcript, marker string) bool {
 	m := compactWhitespace(marker)
 	if m == "" {
 		return false
 	}
 	before := promptTranscript(harness, pre)
-	after := compactWhitespace(promptTranscript(harness, screen))
+	after := compactWhitespace(transcript)
 	if strings.Count(after, m) > strings.Count(compactWhitespace(before), m) {
 		return true
 	}

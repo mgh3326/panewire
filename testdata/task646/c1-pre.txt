@@ -1,0 +1,17 @@
+user@host ~/work/repro % codex
+
+╭──────────────────────────────────────────────────────╮
+│ >_ OpenAI Codex (v0.156.1)                           │
+│                                                      │
+│ model:     GPT-6-Sol xhigh   /model to change        │
+│ directory: ~/work/repro │
+╰──────────────────────────────────────────────────────╯
+
+  Tip: New Use /fast to enable our fastest inference with increased plan usage.
+
+⚠ Heads up, you have less than 50% of your 5h limit left. Run /status for a breakdown.
+
+
+› Ask Codex to do anything
+
+  GPT-6-Sol xhigh · ~/work/repro  ⚠ 1 warning · f2 to view

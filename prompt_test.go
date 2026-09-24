@@ -40,8 +40,8 @@ func TestPromptCodexPositiveAndNegativeMatchers(t *testing.T) {
 		name, screen string
 		want         int
 	}{
-		{"positive receipt", "• Ran R2-MARKER\n", panewire.ExitOK},
-		{"negative unrelated receipt", "• Ran unrelated command\n", panewire.ExitDeliveryFailure},
+		{"positive receipt", "• Ran R2-MARKER\n" + promptCodexComposer, panewire.ExitOK},
+		{"negative unrelated receipt", "• Ran unrelated command\n" + promptCodexComposer, panewire.ExitDeliveryFailure},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -167,7 +167,7 @@ func TestPromptKimiAndAgyHaveNoPositiveMatcher(t *testing.T) {
 func TestPromptToolUptakeRequiresHarnessReceiptAndRevision(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
-	configurePromptFixture(fixture, "codex", "• Ran R2-MARKER\n")
+	configurePromptFixture(fixture, "codex", "• Ran R2-MARKER\n"+promptCodexComposer)
 	d, _ := startPromptDaemon(t, fixture)
 	defer d.Stop()
 	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--uptake", "tool"}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
@@ -176,7 +176,7 @@ func TestPromptToolUptakeRequiresHarnessReceiptAndRevision(t *testing.T) {
 
 	fixture2 := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture2.Close()
-	configurePromptFixture(fixture2, "codex", "• Ran unrelated command\n")
+	configurePromptFixture(fixture2, "codex", "• Ran unrelated command\n"+promptCodexComposer)
 	d2, _ := startPromptDaemon(t, fixture2)
 	defer d2.Stop()
 	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--uptake", "tool"}, panewire.CLIConfig{SocketPath: dSocket(d2)}); got != panewire.ExitDeliveryFailure {
@@ -472,6 +472,11 @@ func TestPromptDaemonUnavailableStillAuditsRequest(t *testing.T) {
 // claude read has that composer, and without it a marker on screen could be
 // the pending prompt itself (#646).
 const promptEchoScreen = "assistant saw R2-MARKER\n────\n❯\n────\nstatus\n"
+
+// promptCodexComposer is the bottom of a real codex screen: its composer, the
+// last line starting with ›, then the footer. A codex screen without it is
+// not one a real read returns (#646).
+const promptCodexComposer = "\n› Ask Codex to do anything\n\n  GPT-6-Sol xhigh · ~/work · Context 18% used\n"
 
 func promptFixtureSchema(events bool) string {
 	methods := `[` +

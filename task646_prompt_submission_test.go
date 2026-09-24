@@ -107,8 +107,9 @@ func TestTask646FixturePremises(t *testing.T) {
 	if region, _ := composerRegion(divider.screen); strings.Contains(region, task646Header) {
 		t.Fatal("f3: composerRegion should have been misled to the in-brief divider")
 	}
-	if region, ok := claudePromptComposer(divider.screen); !ok || !strings.Contains(region, task646Header) {
-		t.Fatalf("f3: claude's composer is the one under ❯, holding the whole brief; got %q ok=%v", region, ok)
+	lines := strings.Split(divider.screen, "\n")
+	if top, end, ok := promptComposer("claude", lines); !ok || !strings.Contains(strings.Join(lines[top:end], "\n"), task646Header) {
+		t.Fatalf("f3: claude's composer is the one under ❯, holding the whole brief; ok=%v", ok)
 	}
 	stale := cases["stale_header_before_render"]
 	if !strings.Contains(stale.pre, task646Header) || strings.Contains(stale.pre, "run F5") {
@@ -185,7 +186,7 @@ func TestTask646BriefEndingInDividerIsResidue(t *testing.T) {
 	composer := "❯ " + task646Header + "\n  F3b brief\n  ────────────────\n  short tail"
 	pre := task646Read(t, "f3-pre.txt")
 	lines := strings.Split(pre, "\n")
-	top, bottom, ok := claudeComposerTop(lines)
+	top, bottom, ok := promptComposer("claude", lines)
 	if !ok {
 		t.Fatal("premise: f3-pre has a composer")
 	}
@@ -195,5 +196,37 @@ func TestTask646BriefEndingInDividerIsResidue(t *testing.T) {
 	}
 	if got, _ := classifyPromptSubmission("claude", pre, screen, body); got != "composer_residue" {
 		t.Fatalf("got %s, want composer_residue", got)
+	}
+}
+
+// Real codex screens (codex-cli, GPT-6-Sol, 2026-09-24): text pasted with no
+// Enter sits on codex's input line -- the last line starting with › -- in full
+// (c1) or as codex's own chip (c2). Neither is a submission.
+func TestTask646RealCodexInputLineIsNotSubmitted(t *testing.T) {
+	pre := task646Read(t, "c1-pre.txt")
+	c1 := task646Header + "\ncomms-contract: v1\nC1 codex residue — do not submit."
+	if base, _ := classifySubmissionEvidence("codex", task646Read(t, "c1-codex-residue.txt"), markerFor(c1)); base != "marker_observed" {
+		t.Fatalf("premise: pre-#646 verdict on c1 %s, want marker_observed", base)
+	}
+	if got, rule := classifyPromptSubmission("codex", pre, task646Read(t, "c1-codex-residue.txt"), c1); got != "composer_residue" {
+		t.Fatalf("c1: got %s/%s, want composer_residue", got, rule)
+	}
+	if got, rule := classifyPromptSubmission("codex", pre, task646Read(t, "c2-codex-chip-residue.txt"), task646Body(t, "C2")); got == "marker_observed" {
+		t.Fatalf("c2: codex chip reported submitted (%s)", rule)
+	}
+}
+
+// Fleet briefs share endings as well as the header (this ending is longer
+// than the tail marker). A new message from
+// someone else that ends like this brief is not this brief's echo while the
+// brief's head is on screen only in an older message.
+func TestTask646ForeignMessageSharingTheTailIsNotProof(t *testing.T) {
+	ending := "완료 시 wrk done 으로 알리고 보고서 경로를 적어라. 승인 대기 없이 검증을 끝내라. pane 에 질문 금지."
+	body := task646Header + "\nthis call's brief, still pending somewhere\n" + ending
+	composer := "────\n❯\n────\nstatus\n"
+	pre := "❯ " + task646Header + "\n  an older brief\n  " + ending + "\n⏺ done\n✻ Worked for 3s · done 오후 3:12\n" + composer
+	post := "❯ " + task646Header + "\n  an older brief\n  " + ending + "\n⏺ done\n✻ Worked for 3s · done 오후 3:12\n❯ another sender's note\n  " + ending + "\n" + composer
+	if got, rule := classifyPromptSubmission("claude", pre, post, body); got == "marker_observed" {
+		t.Fatalf("a foreign message sharing the tail proved the brief (%s)", rule)
 	}
 }

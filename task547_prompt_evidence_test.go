@@ -17,7 +17,7 @@ func TestTask547PromptRecordsSubmissionEvidence(t *testing.T) {
 		{"devin queued only", "devin", devinQueued, "queued", "recent_unwrapped:devin_queue_banner"},
 		{"devin submitted", "devin", devinSubmitted, "marker_observed", "recent_unwrapped:marker_echo"},
 		{"claude queued", "claude", "Press up to edit queued messages\n", "queued", "recent_unwrapped:queued_banner"},
-		{"codex echo", "codex", "R2-MARKER\n", "marker_observed", "recent_unwrapped:marker_echo"},
+		{"codex echo", "codex", "› R2-MARKER\n\n• Working (1s)\n" + promptCodexComposer, "marker_observed", "recent_unwrapped:marker_echo"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
