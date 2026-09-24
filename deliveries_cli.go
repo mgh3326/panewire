@@ -62,6 +62,14 @@ func runDeliveriesCLI(args []string, stdout, stderr io.Writer) int {
 		return ExitDaemonUnavailable
 	}
 	defer store.Close()
+	// A database the daemon has not yet migrated lacks the newer columns
+	// GetDelivery reads; say so rather than fail on, or skip, every row.
+	for _, column := range []string{"delivery_id", "error_detail", "submission_evidence"} {
+		if !storeHasColumn(store.db, "deliveries", column) {
+			fmt.Fprintf(stderr, "deliveries: %s has no deliveries.%s column; it predates this panewire -- start this version's daemon on it once to migrate\n", path, column)
+			return ExitConditionInvalid
+		}
+	}
 	ctx := context.Background()
 	if sub == "list" {
 		return listDeliveries(ctx, store, *to, *limit, stdout, stderr)
@@ -103,8 +111,12 @@ func listDeliveries(ctx context.Context, store *Store, to string, limit int, std
 	fmt.Fprintln(stdout, "DELIVERY\tREQUESTED_AT\tSENDER\tTARGET\tPANE\tSUBMISSION\tEVIDENCE\tUPTAKE\tERROR")
 	for _, id := range ids {
 		d, ok, err := store.GetDelivery(ctx, id)
-		if err != nil || !ok {
-			continue
+		if err != nil {
+			fmt.Fprintf(stderr, "deliveries unavailable: %s: %v\n", id, err)
+			return ExitInternal
+		}
+		if !ok {
+			continue // deleted since the id query
 		}
 		uptake := d.UptakeResult
 		if d.UptakeMode != "" {

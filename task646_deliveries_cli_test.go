@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"bytes"
+	"database/sql"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -69,5 +70,37 @@ func TestTask646DeliveriesShowAndList(t *testing.T) {
 	}
 	if _, err := os.Stat(missing); err == nil {
 		t.Fatal("a missing database must not be created")
+	}
+}
+
+// A database created before the error_detail and submission_evidence columns,
+// not yet migrated by a daemon of this version: show and list both name the
+// missing column instead of failing on (show) or silently dropping (list)
+// every row. CodeRabbit on #83.
+func TestTask646DeliveriesOnUnmigratedDatabase(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.sqlite3")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		`CREATE TABLE deliveries (delivery_id TEXT PRIMARY KEY, requested_at_ms INTEGER, completed_at_ms INTEGER, sender TEXT NOT NULL DEFAULT '',
+ target_input TEXT NOT NULL DEFAULT '', resolved_pane_id TEXT, resolved_workspace_id TEXT, source_path TEXT NOT NULL DEFAULT '',
+ prompt_sha256 TEXT NOT NULL DEFAULT '', body_stored INTEGER NOT NULL DEFAULT 0, preflight_revision INTEGER,
+ send_revision INTEGER, preflight_read_sha256 TEXT, preflight_result TEXT NOT NULL DEFAULT '', herdr_acceptance TEXT,
+ submission_result TEXT, uptake_mode TEXT, uptake_result TEXT, evidence_revision INTEGER, error_code TEXT)`,
+		`INSERT INTO deliveries (delivery_id, requested_at_ms, sender, target_input) VALUES ('legacy-1', 1000, 's', 't')`,
+	} {
+		if _, err := db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = db.Close()
+	for _, args := range [][]string{{"show", "legacy-1"}, {"list"}} {
+		var out, errOut bytes.Buffer
+		code := runDeliveriesCLI(append(args, "--db", path), &out, &errOut)
+		if code != ExitConditionInvalid || !strings.Contains(errOut.String(), "deliveries.error_detail") {
+			t.Fatalf("%v: exit=%d stderr=%q stdout=%q, want %d naming the missing column", args, code, errOut.String(), out.String(), ExitConditionInvalid)
+		}
 	}
 }
