@@ -14,9 +14,11 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
-// Account-scoped quota v2 (task #578, stage 1). This is an additive store next
+// Account-scoped quota v2 (task #578). The wire and hub rules follow contract
+// quota-v2.r3 (hk review/2026-09-24/578-contract-r3.1, §2 and §7). This is an additive store next
 // to the legacy machine-keyed quota surfaces (heartbeat R29 nodeQuota and the
 // R19 /v1/quota/{machine} cache). Nothing here reads or writes legacy state and
 // nothing in the legacy paths reads v2 state: there is no automatic mixing.
@@ -28,15 +30,16 @@ import (
 // manual entries.
 const (
 	quotaV2ObservationSchema  = "quota-observation/v2"
+	quotaV2ContractRev        = "quota-v2.r3"
 	quotaV2BindingsSchema     = "quota-bindings/v2"
 	quotaV2ObservationsSchema = "quota-observations/v2"
-	quotaV2StoreSchema        = "panewire.quota-v2-store/v1"
+	quotaV2StoreSchema        = "panewire.quota-v2-store/v2" // v2: contract quota-v2.r3 envelopes
 
+	// The body cap is a transport limit, not an envelope rule: the envelope
+	// has no bucket-count limit (§2), so the hub adds none.
 	quotaV2MaxBodyBytes              = 64 << 10
-	quotaV2MaxBuckets                = 64
 	quotaV2MaxBindings               = 1024
 	quotaV2MaxObservationsPerAccount = 128
-	quotaV2MaxFutureSkew             = 5 * time.Minute
 	quotaV2MaxBindingValidity        = 30 * 24 * time.Hour
 )
 
@@ -45,11 +48,37 @@ var (
 	// paths and tokens outright instead of trying to recognise them.
 	quotaV2AccountRefPattern = regexp.MustCompile(`^acct_[0-9a-z]{8,40}$`)
 	quotaV2RefPattern        = regexp.MustCompile(`^[a-z0-9][a-z0-9._:-]{0,127}$`)
+	quotaV2ProviderPattern   = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,63}$`)
+	quotaV2MachinePattern    = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{0,62}$`)
 	quotaV2VersionPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+/:-]{0,127}$`)
-	quotaV2InstancePattern   = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:+-]{0,63}$`)
-	quotaV2Statuses          = map[string]bool{"success": true, "partial": true, "rate_limited": true, "auth_error": true, "parse_error": true, "transport_error": true}
-	quotaV2Horizons          = map[string]bool{"now": true, "week": true, "month": true}
-	quotaV2IdentityBases     = map[string]bool{"operator_attested": true, "provider_subject_verified": true}
+	quotaV2WindowPattern     = regexp.MustCompile(`^(?:[a-z0-9][a-z0-9._-]{0,31}|\?)$`)
+	quotaV2InstancePattern   = regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ$`)
+	// RFC3339 with an explicit offset (hh ≤ 23, mm ≤ 59); the same text rule as scopefuel.
+	quotaV2TimePattern   = regexp.MustCompile(`^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$`)
+	quotaV2Statuses      = map[string]bool{"success": true, "partial": true, "rate_limited": true, "auth_error": true, "parse_error": true, "transport_error": true}
+	quotaV2Horizons      = map[string]bool{"now": true, "week": true, "month": true}
+	quotaV2ScopeKinds    = map[string]bool{"account": true, "model": true, "group": true}
+	quotaV2IdentityBases = map[string]bool{"operator_attested": true, "provider_subject_verified": true}
+	// §4.3 error_ref values; the part before ":" must equal status.
+	quotaV2ErrorRefs = map[string]bool{
+		"rate_limited:http_429": true, "auth_error:http_401": true, "auth_error:http_403": true,
+		"transport_error:http_5xx": true, "transport_error:network": true, "transport_error:timeout": true,
+		"parse_error:http_4xx": true, "parse_error:schema": true, "parse_error:required_missing": true,
+		"parse_error:duplicate_limit": true, "parse_error:outcome_missing": true, "parse_error:http_unexpected": true,
+		"partial:required_missing": true,
+	}
+	// §2.0: every field is required; only these may hold null.
+	quotaV2EnvelopeFields = map[string]bool{
+		"schema": false, "contract_rev": false, "observation_id": false, "provider": false, "account_ref": false,
+		"entitlement_ref": false, "source_machine": false, "source_slot_ref": false, "source_binding_revision": false,
+		"collector_version": false, "measured_at": false, "received_at": true, "status": false, "error_ref": true,
+		"unshared_limit_count": false, "buckets": false, "lease_epoch": true,
+	}
+	quotaV2BucketFields = map[string]bool{
+		"limit_id": false, "label": true, "scope": false, "horizon": false, "window": false,
+		"window_instance": false, "used_pct": true, "reset_at": true, "observed_at": true,
+	}
+	quotaV2ScopeFields = map[string]bool{"kind": false, "ref": true}
 )
 
 type QuotaV2Scope struct {
@@ -69,23 +98,27 @@ type QuotaV2Bucket struct {
 	ObservedAt     *string      `json:"observed_at"`
 }
 
-// QuotaV2Observation is the quota-observation/v2 envelope. measured_at is the
-// time the value was observed at the provider; received_at is stamped by the
-// hub and never replaces it.
+// QuotaV2Observation is the quota-observation/v2 envelope (§2). measured_at is
+// when the provider response completed; received_at is stamped by the hub and
+// never replaces it. The POST form carries received_at null; the stored form
+// (hub store and GET) carries it non-null.
 type QuotaV2Observation struct {
 	Schema                string          `json:"schema"`
+	ContractRev           string          `json:"contract_rev"`
 	ObservationID         string          `json:"observation_id"`
 	Provider              string          `json:"provider"`
 	AccountRef            string          `json:"account_ref"`
 	EntitlementRef        string          `json:"entitlement_ref"`
 	SourceMachine         string          `json:"source_machine"`
+	SourceSlotRef         string          `json:"source_slot_ref"`
 	SourceBindingRevision int64           `json:"source_binding_revision"`
 	CollectorVersion      string          `json:"collector_version"`
 	MeasuredAt            string          `json:"measured_at"`
 	ReceivedAt            *string         `json:"received_at"`
 	Status                string          `json:"status"`
-	Buckets               []QuotaV2Bucket `json:"buckets"`
 	ErrorRef              *string         `json:"error_ref"`
+	UnsharedLimitCount    int64           `json:"unshared_limit_count"`
+	Buckets               []QuotaV2Bucket `json:"buckets"`
 	LeaseEpoch            *int64          `json:"lease_epoch"`
 }
 
@@ -134,17 +167,27 @@ type hubQuotaV2Store struct {
 	// the operator or as another node).
 	unavailable  string
 	path         string
+	clockSkew    time.Duration // Δ_hub (§7.2, §7.3)
 	lastRevision int64
 	bindings     []QuotaV2Binding
 	observations map[string][]QuotaV2Observation
+}
+
+// quotaV2StoreLoad reads observations raw so the stored form is checked with
+// the same key-set rule as a POST (§2.0), not with Go's lenient decoding.
+type quotaV2StoreLoad struct {
+	Schema       string            `json:"schema"`
+	LastRevision int64             `json:"last_revision"`
+	Bindings     []QuotaV2Binding  `json:"bindings"`
+	Observations []json.RawMessage `json:"observations"`
 }
 
 func quotaV2AccountKey(provider, accountRef string) string {
 	return provider + "\x00" + accountRef
 }
 
-func newHubQuotaV2Store(path string, tokens map[string]string) (*hubQuotaV2Store, error) {
-	store := &hubQuotaV2Store{path: path, observations: make(map[string][]QuotaV2Observation)}
+func newHubQuotaV2Store(path string, tokens map[string]string, clockSkew time.Duration) (*hubQuotaV2Store, error) {
+	store := &hubQuotaV2Store{path: path, clockSkew: clockSkew, observations: make(map[string][]QuotaV2Observation)}
 	secrets := make(map[string]struct{}, len(tokens))
 	for _, token := range tokens {
 		if _, duplicate := secrets[token]; duplicate {
@@ -171,7 +214,7 @@ func newHubQuotaV2Store(path string, tokens map[string]string) (*hubQuotaV2Store
 	if err != nil {
 		return nil, err
 	}
-	var file quotaV2StoreFile
+	var file quotaV2StoreLoad
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&file) != nil || file.Schema != quotaV2StoreSchema || file.LastRevision < 0 {
@@ -189,8 +232,10 @@ func newHubQuotaV2Store(path string, tokens map[string]string) (*hubQuotaV2Store
 		seen[key] = struct{}{}
 	}
 	ids := make(map[string]struct{}, len(file.Observations))
-	for _, observation := range file.Observations {
-		if validateQuotaV2Envelope(observation) != nil || observation.ReceivedAt == nil || !validQuotaV2Time(*observation.ReceivedAt) {
+	for _, rawObservation := range file.Observations {
+		// §7.7: stored observations are the stored form with received_at set.
+		observation, err := decodeQuotaV2Observation(rawObservation, quotaV2FormStored)
+		if err != nil || observation.ReceivedAt == nil {
 			return nil, errors.New("quota v2 store is invalid")
 		}
 		if _, duplicate := ids[observation.ObservationID]; duplicate {
@@ -254,13 +299,44 @@ func (store *hubQuotaV2Store) persistLocked(lastRevision int64, bindings []Quota
 	return os.Rename(name, store.path)
 }
 
+// quotaV2Time parses RFC3339 with an explicit offset, with the same text and
+// range rule as scopefuel's parse_time: ASCII, offset hh ≤ 23 and mm ≤ 59, and
+// a year 1..9999 both as written and in UTC.
+func quotaV2Time(value string) (time.Time, bool) {
+	if !quotaV2TimePattern.MatchString(value) || strings.HasPrefix(value, "0000") {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return time.Time{}, false
+	}
+	if year := parsed.UTC().Year(); year < 1 || year > 9999 {
+		return time.Time{}, false
+	}
+	return parsed, true
+}
+
 func validQuotaV2Time(value string) bool {
-	_, err := time.Parse(time.RFC3339, value)
-	return err == nil
+	_, ok := quotaV2Time(value)
+	return ok
 }
 
 func validQuotaV2Text(value *string, limit int) bool {
 	return value == nil || (*value != "" && len(*value) <= limit && !strings.ContainsAny(*value, "\x00\r\n\t"))
+}
+
+// quotaV2Label is the §2 text rule for label and scope.ref: UTF-8, 1..128
+// bytes, no C0, DEL or C1 control character. Nothing is truncated or repaired.
+func quotaV2Label(value string) bool {
+	if value == "" || len(value) > 128 || !utf8.ValidString(value) {
+		return false
+	}
+	for _, r := range value {
+		if r <= 0x1F || r == 0x7F || (r >= 0x80 && r <= 0x9F) {
+			return false
+		}
+	}
+	return true
 }
 
 func validQuotaV2StoredBinding(binding QuotaV2Binding) bool {
@@ -275,64 +351,124 @@ func validQuotaV2StoredBinding(binding QuotaV2Binding) bool {
 		validQuotaV2Text(binding.VerifierReceipt, 256) && validQuotaV2Text(binding.Label, 64)
 }
 
-// validateQuotaV2Envelope checks shape only. Identity and authority checks
-// happen against the binding registry in recordObservation.
-func validateQuotaV2Envelope(observation QuotaV2Observation) error {
-	if observation.Schema != quotaV2ObservationSchema ||
+const (
+	quotaV2FormPost   = "post"
+	quotaV2FormStored = "stored"
+)
+
+// quotaV2Keys checks one JSON object against a §2 field table: exactly these
+// keys, and null only where the table allows it (absent is not null).
+func quotaV2Keys(raw json.RawMessage, fields map[string]bool) (map[string]json.RawMessage, bool) {
+	var object map[string]json.RawMessage
+	if json.Unmarshal(raw, &object) != nil || object == nil || len(object) != len(fields) {
+		return nil, false
+	}
+	for key, value := range object {
+		nullable, known := fields[key]
+		if !known || (!nullable && bytes.Equal(bytes.TrimSpace(value), []byte("null"))) {
+			return nil, false
+		}
+	}
+	return object, true
+}
+
+// decodeQuotaV2Observation reads one envelope in the given form (§2): the key
+// sets first, then a strict typed decode, then the field rules.
+func decodeQuotaV2Observation(raw []byte, form string) (QuotaV2Observation, error) {
+	invalid := errors.New("invalid envelope")
+	object, ok := quotaV2Keys(raw, quotaV2EnvelopeFields)
+	if !ok {
+		return QuotaV2Observation{}, invalid
+	}
+	var buckets []json.RawMessage
+	if json.Unmarshal(object["buckets"], &buckets) != nil || buckets == nil {
+		return QuotaV2Observation{}, invalid
+	}
+	for _, bucket := range buckets {
+		fields, ok := quotaV2Keys(bucket, quotaV2BucketFields)
+		if !ok {
+			return QuotaV2Observation{}, invalid
+		}
+		if _, ok := quotaV2Keys(fields["scope"], quotaV2ScopeFields); !ok {
+			return QuotaV2Observation{}, invalid
+		}
+	}
+	var observation QuotaV2Observation
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&observation) != nil {
+		return QuotaV2Observation{}, invalid
+	}
+	if err := validateQuotaV2Envelope(observation, form); err != nil {
+		return QuotaV2Observation{}, err
+	}
+	return observation, nil
+}
+
+// validateQuotaV2Envelope checks the §2 field rules of a decoded envelope.
+// Identity and authority checks happen against the binding registry in
+// recordObservation.
+func validateQuotaV2Envelope(observation QuotaV2Observation, form string) error {
+	invalid := errors.New("invalid envelope")
+	measuredAt, measuredOK := quotaV2Time(observation.MeasuredAt)
+	if observation.Schema != quotaV2ObservationSchema || observation.ContractRev != quotaV2ContractRev ||
 		!quotaV2RefPattern.MatchString(observation.ObservationID) ||
-		!hubQuotaPoolPattern.MatchString(observation.Provider) ||
+		!quotaV2ProviderPattern.MatchString(observation.Provider) ||
 		!quotaV2AccountRefPattern.MatchString(observation.AccountRef) ||
 		!quotaV2RefPattern.MatchString(observation.EntitlementRef) ||
-		!machineIDPattern.MatchString(observation.SourceMachine) ||
-		observation.SourceBindingRevision <= 0 ||
+		!quotaV2MachinePattern.MatchString(observation.SourceMachine) ||
+		!quotaV2RefPattern.MatchString(observation.SourceSlotRef) ||
+		observation.SourceBindingRevision < 1 ||
 		!quotaV2VersionPattern.MatchString(observation.CollectorVersion) ||
-		!validQuotaV2Time(observation.MeasuredAt) ||
-		!quotaV2Statuses[observation.Status] ||
-		observation.Buckets == nil || len(observation.Buckets) > quotaV2MaxBuckets {
-		return errors.New("invalid envelope")
+		!measuredOK || !quotaV2Statuses[observation.Status] ||
+		observation.UnsharedLimitCount < 0 || observation.LeaseEpoch != nil || observation.Buckets == nil {
+		return invalid
 	}
-	if observation.ReceivedAt != nil && !validQuotaV2Time(*observation.ReceivedAt) {
-		return errors.New("invalid envelope")
+	switch {
+	case form == quotaV2FormPost && observation.ReceivedAt != nil:
+		return invalid
+	case observation.ReceivedAt != nil && !validQuotaV2Time(*observation.ReceivedAt):
+		return invalid
 	}
-	if observation.ErrorRef != nil && !quotaV2RefPattern.MatchString(*observation.ErrorRef) {
-		return errors.New("invalid envelope")
-	}
-	if observation.LeaseEpoch != nil && *observation.LeaseEpoch <= 0 {
-		return errors.New("invalid envelope")
+	if observation.Status == "success" {
+		if observation.ErrorRef != nil {
+			return invalid
+		}
+	} else if observation.ErrorRef == nil || !quotaV2ErrorRefs[*observation.ErrorRef] ||
+		strings.SplitN(*observation.ErrorRef, ":", 2)[0] != observation.Status {
+		return invalid
 	}
 	measuring := observation.Status == "success" || observation.Status == "partial"
 	if measuring != (len(observation.Buckets) > 0) {
 		// A failed probe carries no values: its last success is a separate,
 		// earlier observation and is never re-stamped by the failure.
-		return errors.New("invalid envelope")
+		return invalid
 	}
 	// The key is limit_id, not (provider, account, window): an account-wide 7d
 	// limit and a model 7d limit coexist in one envelope (legacy R29 rejects
 	// that shape as a duplicate; v2 must not).
 	limits := make(map[string]struct{}, len(observation.Buckets))
 	for _, bucket := range observation.Buckets {
-		if !quotaV2RefPattern.MatchString(bucket.LimitID) || !validQuotaV2Text(bucket.Label, 128) ||
-			!quotaV2Horizons[bucket.Horizon] || !hubQuotaWindowPattern.MatchString(bucket.Window) ||
-			!quotaV2InstancePattern.MatchString(bucket.WindowInstance) {
+		if !quotaV2RefPattern.MatchString(bucket.LimitID) || (bucket.Label != nil && !quotaV2Label(*bucket.Label)) ||
+			!quotaV2Horizons[bucket.Horizon] || !quotaV2WindowPattern.MatchString(bucket.Window) ||
+			!quotaV2ScopeKinds[bucket.Scope.Kind] || (bucket.Scope.Kind == "account") != (bucket.Scope.Ref == nil) ||
+			(bucket.Scope.Ref != nil && !quotaV2Label(*bucket.Scope.Ref)) {
 			return errors.New("invalid bucket")
 		}
-		switch bucket.Scope.Kind {
-		case "account":
-			if bucket.Scope.Ref != nil {
-				return errors.New("invalid bucket")
-			}
-		case "model", "group":
-			if bucket.Scope.Ref == nil || !validQuotaV2Text(bucket.Scope.Ref, 128) {
-				return errors.New("invalid bucket")
-			}
-		default:
+		if bucket.WindowInstance != "unknown" && (!quotaV2InstancePattern.MatchString(bucket.WindowInstance) || !validQuotaV2Time(bucket.WindowInstance)) {
 			return errors.New("invalid bucket")
 		}
 		if bucket.UsedPct != nil && (math.IsNaN(*bucket.UsedPct) || math.IsInf(*bucket.UsedPct, 0) || *bucket.UsedPct < 0 || *bucket.UsedPct > 100) {
 			return errors.New("invalid bucket")
 		}
-		if (bucket.ResetAt != nil && !validQuotaV2Time(*bucket.ResetAt)) || (bucket.ObservedAt != nil && !validQuotaV2Time(*bucket.ObservedAt)) {
+		if bucket.ResetAt != nil && !validQuotaV2Time(*bucket.ResetAt) {
 			return errors.New("invalid bucket")
+		}
+		if bucket.ObservedAt != nil {
+			observedAt, ok := quotaV2Time(*bucket.ObservedAt)
+			if !ok || observedAt.After(measuredAt) {
+				return errors.New("invalid bucket")
+			}
 		}
 		if _, duplicate := limits[bucket.LimitID]; duplicate {
 			return errors.New("duplicate limit_id")
@@ -342,14 +478,36 @@ func validateQuotaV2Envelope(observation QuotaV2Observation) error {
 	return nil
 }
 
+// quotaV2Times is TS(o) (§5.3): measured_at and every non-null observed_at.
+func quotaV2Times(observation QuotaV2Observation) []time.Time {
+	measuredAt, _ := quotaV2Time(observation.MeasuredAt)
+	times := []time.Time{measuredAt}
+	for _, bucket := range observation.Buckets {
+		if bucket.ObservedAt != nil {
+			observedAt, _ := quotaV2Time(*bucket.ObservedAt)
+			times = append(times, observedAt)
+		}
+	}
+	return times
+}
+
+// bindingWindow is a binding's effect window [valid_from, valid_until), with
+// valid_from = verified_at (§5.4).
+func bindingWindow(binding QuotaV2Binding) (time.Time, time.Time, bool) {
+	validFrom, fromOK := quotaV2Time(binding.VerifiedAt)
+	validUntil, untilOK := quotaV2Time(binding.ValidUntil)
+	return validFrom, validUntil, fromOK && untilOK && validFrom.Before(validUntil)
+}
+
+// bindingFor lists the machine's bindings for the account that are current at now.
 func (store *hubQuotaV2Store) bindingFor(machineID, provider, accountRef string, now time.Time) []QuotaV2Binding {
 	out := []QuotaV2Binding{}
 	for _, binding := range store.bindings {
 		if binding.MachineID != machineID || binding.Provider != provider || binding.AccountRef != accountRef {
 			continue
 		}
-		validUntil, err := time.Parse(time.RFC3339, binding.ValidUntil)
-		if err != nil || !now.Before(validUntil) {
+		validFrom, validUntil, ok := bindingWindow(binding)
+		if !ok || now.Before(validFrom) || !now.Before(validUntil) {
 			continue
 		}
 		out = append(out, binding)
@@ -410,37 +568,46 @@ func (store *hubQuotaV2Store) deleteBinding(machineID, provider, slot string) (b
 
 var (
 	errQuotaV2Forbidden = errors.New("forbidden")
+	errQuotaV2Window    = errors.New("outside binding window")
 	errQuotaV2Conflict  = errors.New("conflict")
 	errQuotaV2Invalid   = errors.New("invalid")
+	errQuotaV2Future    = errors.New("future")
 )
 
-// recordObservation appends one automatic observation. The authenticated node
-// may write only through its own binding that is current right now: machine,
-// provider, account_ref, entitlement and the exact binding revision must all
-// match, and the value must have been measured after that binding began.
+// recordObservation appends one automatic observation, checking in the §7.5
+// order after the POST form: future (§7.3) → source machine → a current
+// binding of this exact slot (§7.1) → every time inside that binding's window
+// widened by Δ_hub (§7.2) → observation_id idempotency.
 func (store *hubQuotaV2Store) recordObservation(machineID string, observation QuotaV2Observation, now time.Time) (QuotaV2Observation, bool, error) {
-	if validateQuotaV2Envelope(observation) != nil || observation.ReceivedAt != nil {
+	if validateQuotaV2Envelope(observation, quotaV2FormPost) != nil {
 		return QuotaV2Observation{}, false, errQuotaV2Invalid
 	}
-	measuredAt, _ := time.Parse(time.RFC3339, observation.MeasuredAt)
-	if measuredAt.After(now.Add(quotaV2MaxFutureSkew)) {
-		return QuotaV2Observation{}, false, errQuotaV2Invalid
+	times := quotaV2Times(observation)
+	for _, t := range times {
+		if t.Add(-store.clockSkew).After(now) { // t = now is accepted
+			return QuotaV2Observation{}, false, errQuotaV2Future
+		}
 	}
 	if observation.SourceMachine != machineID {
 		return QuotaV2Observation{}, false, errQuotaV2Forbidden
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
-	authorized := false
+	var matched *QuotaV2Binding
 	for _, binding := range store.bindingFor(machineID, observation.Provider, observation.AccountRef, now) {
-		verifiedAt, _ := time.Parse(time.RFC3339, binding.VerifiedAt)
-		if binding.BindingRevision == observation.SourceBindingRevision && binding.EntitlementRef == observation.EntitlementRef && !measuredAt.Before(verifiedAt) {
-			authorized = true
+		if binding.LocalSlotRef == observation.SourceSlotRef && binding.BindingRevision == observation.SourceBindingRevision && binding.EntitlementRef == observation.EntitlementRef {
+			matched = &binding
 			break
 		}
 	}
-	if !authorized {
+	if matched == nil {
 		return QuotaV2Observation{}, false, errQuotaV2Forbidden
+	}
+	validFrom, validUntil, _ := bindingWindow(*matched)
+	for _, t := range times {
+		if t.Add(-store.clockSkew).Before(validFrom) || !t.Add(store.clockSkew).Before(validUntil) {
+			return QuotaV2Observation{}, false, errQuotaV2Window
+		}
 	}
 	key := quotaV2AccountKey(observation.Provider, observation.AccountRef)
 	for _, rows := range store.observations {
@@ -508,8 +675,8 @@ func (store *hubQuotaV2Store) listObservations(provider, accountRef string) []Qu
 	defer store.mu.Unlock()
 	rows := append([]QuotaV2Observation{}, store.observations[quotaV2AccountKey(provider, accountRef)]...)
 	sort.SliceStable(rows, func(i, j int) bool {
-		left, _ := time.Parse(time.RFC3339, rows[i].MeasuredAt)
-		right, _ := time.Parse(time.RFC3339, rows[j].MeasuredAt)
+		left, _ := quotaV2Time(rows[i].MeasuredAt)
+		right, _ := quotaV2Time(rows[j].MeasuredAt)
 		return left.Before(right)
 	})
 	return rows
@@ -645,8 +812,13 @@ func (h *HubServer) handleQuotaV2ObservationPost(w http.ResponseWriter, r *http.
 		hubUnauthorized(w)
 		return
 	}
-	var observation QuotaV2Observation
-	if !decodeQuotaV2Body(r, &observation) {
+	raw, err := io.ReadAll(io.LimitReader(r.Body, quotaV2MaxBodyBytes+1))
+	if err != nil || len(raw) > quotaV2MaxBodyBytes {
+		quotaV2Error(w, http.StatusBadRequest, "invalid_envelope")
+		return
+	}
+	observation, err := decodeQuotaV2Observation(raw, quotaV2FormPost)
+	if err != nil {
 		quotaV2Error(w, http.StatusBadRequest, "invalid_envelope")
 		return
 	}
@@ -654,8 +826,12 @@ func (h *HubServer) handleQuotaV2ObservationPost(w http.ResponseWriter, r *http.
 	switch {
 	case errors.Is(err, errQuotaV2Invalid):
 		quotaV2Error(w, http.StatusBadRequest, "invalid_envelope")
+	case errors.Is(err, errQuotaV2Future):
+		quotaV2Error(w, http.StatusBadRequest, "measured_in_future")
 	case errors.Is(err, errQuotaV2Forbidden):
 		quotaV2Error(w, http.StatusForbidden, "binding_mismatch")
+	case errors.Is(err, errQuotaV2Window):
+		quotaV2Error(w, http.StatusForbidden, "outside_binding_window")
 	case errors.Is(err, errQuotaV2Conflict):
 		quotaV2Error(w, http.StatusConflict, "observation_id_conflict")
 	case err != nil:

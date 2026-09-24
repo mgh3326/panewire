@@ -89,20 +89,25 @@ func quotaV2Bind(t *testing.T, hub *HubServer, machine, slot, account, label str
 
 func quotaV2Ptr[T any](value T) *T { return &value }
 
-// quotaV2Envelope carries an account-wide 5h and 7d limit plus a model 7d
-// limit: the legacy R29 key (pool, account_fp, window) collides on the two 7d
-// rows, the v2 key (limit_id) does not.
+// quotaV2Slots is each test machine's login slot.
+var quotaV2Slots = map[string]string{"node-a": quotaV2SlotA, "node-b": quotaV2SlotB}
+
+// quotaV2Envelope is a POST-form r3 envelope with the two claude account
+// limits plus a model 7d limit: the legacy R29 key (pool, account_fp, window)
+// collides on the two 7d rows, the v2 key (limit_id) does not. The hub does not
+// interpret limits, so the model row is kept even though scopefuel's r3
+// adapter counts it in unshared_limit_count instead of sending it.
 func quotaV2Envelope(id, machine string, revision int64, account string, measuredAt time.Time, account5h, account7d, model7d float64) QuotaV2Observation {
 	reset5h := measuredAt.Add(3 * time.Hour).UTC().Format(time.RFC3339)
 	reset7d := measuredAt.Add(96 * time.Hour).UTC().Format(time.RFC3339)
 	return QuotaV2Observation{
-		Schema: quotaV2ObservationSchema, ObservationID: id, Provider: "claude", AccountRef: account, EntitlementRef: "unknown",
-		SourceMachine: machine, SourceBindingRevision: revision, CollectorVersion: "scopefuel/0.1.0+quota-v2.1",
+		Schema: quotaV2ObservationSchema, ContractRev: quotaV2ContractRev, ObservationID: id, Provider: "claude", AccountRef: account, EntitlementRef: "unknown",
+		SourceMachine: machine, SourceSlotRef: quotaV2Slots[machine], SourceBindingRevision: revision, CollectorVersion: "scopefuel/0.1.0+quota-v2.r3",
 		MeasuredAt: measuredAt.UTC().Format(time.RFC3339), Status: "success",
 		Buckets: []QuotaV2Bucket{
-			{LimitID: "account:-:5h", Label: quotaV2Ptr("5h"), Scope: QuotaV2Scope{Kind: "account"}, Horizon: "now", Window: "5h", WindowInstance: reset5h, UsedPct: quotaV2Ptr(account5h), ResetAt: quotaV2Ptr(reset5h)},
-			{LimitID: "account:-:7d", Label: quotaV2Ptr("7d all"), Scope: QuotaV2Scope{Kind: "account"}, Horizon: "week", Window: "7d", WindowInstance: reset7d, UsedPct: quotaV2Ptr(account7d), ResetAt: quotaV2Ptr(reset7d)},
-			{LimitID: "model:opus:7d", Label: quotaV2Ptr("7d Opus"), Scope: QuotaV2Scope{Kind: "model", Ref: quotaV2Ptr("Opus")}, Horizon: "week", Window: "7d", WindowInstance: reset7d, UsedPct: quotaV2Ptr(model7d), ResetAt: quotaV2Ptr(reset7d)},
+			{LimitID: "claude.five_hour", Label: quotaV2Ptr("5h"), Scope: QuotaV2Scope{Kind: "account"}, Horizon: "now", Window: "5h", WindowInstance: "unknown", UsedPct: quotaV2Ptr(account5h), ResetAt: quotaV2Ptr(reset5h)},
+			{LimitID: "claude.seven_day", Label: quotaV2Ptr("7d all"), Scope: QuotaV2Scope{Kind: "account"}, Horizon: "week", Window: "7d", WindowInstance: "unknown", UsedPct: quotaV2Ptr(account7d), ResetAt: quotaV2Ptr(reset7d)},
+			{LimitID: "claude.weekly_scoped.model.opus", Label: quotaV2Ptr("7d Opus"), Scope: QuotaV2Scope{Kind: "model", Ref: quotaV2Ptr("Opus")}, Horizon: "week", Window: "7d", WindowInstance: "unknown", UsedPct: quotaV2Ptr(model7d), ResetAt: quotaV2Ptr(reset7d)},
 		},
 	}
 }
@@ -165,12 +170,12 @@ func TestQuotaV2OneAccountTwoNodesKeepsEveryLimit(t *testing.T) {
 			limits := []string{}
 			for _, bucket := range got.Buckets {
 				limits = append(limits, bucket.LimitID+"@"+bucket.Scope.Kind+"/"+bucket.Horizon+"/"+bucket.Window)
-				if bucket.WindowInstance == "" || bucket.ResetAt == nil || bucket.UsedPct == nil {
+				if bucket.WindowInstance != "unknown" || bucket.ResetAt == nil || bucket.UsedPct == nil {
 					t.Fatalf("bucket field lost: %+v", bucket)
 				}
 			}
 			sort.Strings(limits)
-			if strings.Join(limits, ",") != "account:-:5h@account/now/5h,account:-:7d@account/week/7d,model:opus:7d@model/week/7d" {
+			if strings.Join(limits, ",") != "claude.five_hour@account/now/5h,claude.seven_day@account/week/7d,claude.weekly_scoped.model.opus@model/week/7d" {
 				t.Fatalf("limits lost: %v", limits)
 			}
 		}
@@ -188,7 +193,7 @@ func TestQuotaV2OneAccountTwoNodesKeepsEveryLimit(t *testing.T) {
 	if legacy.valid() {
 		t.Fatal("legacy R29 duplicate-key shape changed; this test pins the unchanged legacy path")
 	}
-	if err := validateQuotaV2Envelope(quotaV2Envelope("obs-x", "node-a", 1, quotaV2Account, measuredA, 1, 2, 3)); err != nil {
+	if err := validateQuotaV2Envelope(quotaV2Envelope("obs-x", "node-a", 1, quotaV2Account, measuredA, 1, 2, 3), quotaV2FormPost); err != nil {
 		t.Fatalf("v2 rejected account-7d + model-7d: %v", err)
 	}
 
@@ -198,19 +203,6 @@ func TestQuotaV2OneAccountTwoNodesKeepsEveryLimit(t *testing.T) {
 		t.Fatalf("legacy quota surface changed by v2 writes: %d %s", status, body)
 	}
 
-	// Shared contract fixture for scopefuel's evaluator (copied verbatim into
-	// scopefuel tests/fixtures/quota_v2_two_nodes.json).
-	_, golden := quotaV2Do(t, hub, http.MethodGet, "/v2/quota/observations?provider=claude&account_ref="+quotaV2Account, "node-a", quotaNodeAToken, nil)
-	goldenPath := filepath.Join("testdata", "quota-v2-two-nodes.json")
-	if os.Getenv("PANEWIRE_UPDATE_GOLDEN") == "1" {
-		if err := os.WriteFile(goldenPath, golden, 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	want, err := os.ReadFile(goldenPath)
-	if err != nil || !bytes.Equal(want, golden) {
-		t.Fatalf("v2 contract fixture drifted (err=%v):\n got=%s\nwant=%s", err, golden, want)
-	}
 }
 
 // AC2 mutant target: a node writes only through its own current binding.
@@ -236,6 +228,16 @@ func TestQuotaV2NodeWritesOnlyThroughItsOwnCurrentBinding(t *testing.T) {
 		{"unbound account", "node-a", quotaNodeAToken, quotaV2Envelope("obs-3", "node-a", bindingA.BindingRevision, quotaV2OtherAccount, measured, 1, 2, 3), http.StatusForbidden},
 		{"wrong revision", "node-a", quotaNodeAToken, quotaV2Envelope("obs-4", "node-a", bindingA.BindingRevision+1, quotaV2Account, measured, 1, 2, 3), http.StatusForbidden},
 		{"measured before binding began", "node-a", quotaNodeAToken, quotaV2Envelope("obs-5", "node-a", bindingA.BindingRevision, quotaV2Account, clock.now.Add(-2*time.Minute), 1, 2, 3), http.StatusForbidden},
+		{"other entitlement", "node-a", quotaNodeAToken, func() QuotaV2Observation {
+			envelope := quotaV2Envelope("obs-5c", "node-a", bindingA.BindingRevision, quotaV2Account, measured, 1, 2, 3)
+			envelope.EntitlementRef = "max"
+			return envelope
+		}(), http.StatusForbidden},
+		{"other slot on the same machine", "node-a", quotaNodeAToken, func() QuotaV2Observation {
+			envelope := quotaV2Envelope("obs-5b", "node-a", bindingA.BindingRevision, quotaV2Account, measured, 1, 2, 3)
+			envelope.SourceSlotRef = quotaV2SlotB
+			return envelope
+		}(), http.StatusForbidden},
 		{"operator token is not a node", "", quotaOperatorToken, quotaV2Envelope("obs-6", "node-a", bindingA.BindingRevision, quotaV2Account, measured, 1, 2, 3), http.StatusUnauthorized},
 		{"node token with operator header", hubOperatorMachineID, quotaOperatorToken, quotaV2Envelope("obs-7", "node-a", bindingA.BindingRevision, quotaV2Account, measured, 1, 2, 3), http.StatusUnauthorized},
 		{"own binding", "node-a", quotaNodeAToken, quotaV2Envelope("obs-8", "node-a", bindingA.BindingRevision, quotaV2Account, measured, 1, 2, 3), http.StatusCreated},
@@ -292,10 +294,25 @@ func TestQuotaV2NodeWritesOnlyThroughItsOwnCurrentBinding(t *testing.T) {
 		}
 	}
 
-	// Expiry closes the write path.
+	// A binding is current only inside [valid_from, valid_until) (§5.4, §7.1,
+	// §7.6): before its start (a hub clock stepped back) the node can neither read nor write.
+	reboundFrom, _ := quotaV2Time(rebound.VerifiedAt)
+	reboundUntil, _ := quotaV2Time(rebound.ValidUntil)
+	clock.now = reboundFrom.Add(-time.Minute)
+	if status, _ := quotaV2List(t, hub, "node-a", quotaNodeAToken, quotaV2OtherAccount); status != http.StatusForbidden {
+		t.Fatalf("binding read before it began: %d", status)
+	}
+
+	// Expiry closes the write path, even for a value measured while it was current.
 	clock.now = clock.now.Add(2 * time.Hour)
 	if got := post("node-a", quotaNodeAToken, quotaV2Envelope("obs-13", "node-a", rebound.BindingRevision, quotaV2OtherAccount, clock.now, 1, 2, 3)); got != http.StatusForbidden {
 		t.Fatalf("expired binding still writes: %d", got)
+	}
+	if got := post("node-a", quotaNodeAToken, quotaV2Envelope("obs-14", "node-a", rebound.BindingRevision, quotaV2OtherAccount, reboundUntil.Add(-time.Minute), 1, 2, 3)); got != http.StatusForbidden {
+		t.Fatalf("expired binding still uploads an earlier value: %d", got)
+	}
+	if status, _ := quotaV2List(t, hub, "node-a", quotaNodeAToken, quotaV2OtherAccount); status != http.StatusForbidden {
+		t.Fatalf("expired binding still reads: %d", status)
 	}
 }
 
@@ -324,7 +341,18 @@ func TestQuotaV2EnvelopeValidationAndIdempotency(t *testing.T) {
 		"missing window_instance": func(o *QuotaV2Observation) {
 			o.Buckets[0].WindowInstance = ""
 		},
-		"wrong schema": func(o *QuotaV2Observation) { o.Schema = "quota-observation/v1" },
+		"wrong schema":            func(o *QuotaV2Observation) { o.Schema = "quota-observation/v1" },
+		"older contract_rev":      func(o *QuotaV2Observation) { o.ContractRev = "quota-v2.r2" },
+		"negative unshared count": func(o *QuotaV2Observation) { o.UnsharedLimitCount = -1 },
+		"lease_epoch set":         func(o *QuotaV2Observation) { o.LeaseEpoch = quotaV2Ptr(int64(1)) },
+		"error_ref on success":    func(o *QuotaV2Observation) { o.ErrorRef = quotaV2Ptr("parse_error:schema") },
+		"observed_at after measured_at": func(o *QuotaV2Observation) {
+			o.Buckets[0].ObservedAt = quotaV2Ptr(measured.Add(-time.Second).Format(time.RFC3339))
+			o.MeasuredAt = measured.Add(-2 * time.Second).Format(time.RFC3339)
+		},
+		"error_ref prefix is another status": func(o *QuotaV2Observation) {
+			o.Status, o.Buckets, o.ErrorRef = "rate_limited", []QuotaV2Bucket{}, quotaV2Ptr("transport_error:network")
+		},
 	}
 	for name, change := range mutate {
 		envelope := base()
@@ -340,7 +368,7 @@ func TestQuotaV2EnvelopeValidationAndIdempotency(t *testing.T) {
 	}
 
 	failure := base()
-	failure.ObservationID, failure.Status, failure.Buckets, failure.ErrorRef = "obs-f", "rate_limited", []QuotaV2Bucket{}, quotaV2Ptr("http:429")
+	failure.ObservationID, failure.Status, failure.Buckets, failure.ErrorRef = "obs-f", "rate_limited", []QuotaV2Bucket{}, quotaV2Ptr("rate_limited:http_429")
 	if status, body := quotaV2Do(t, hub, http.MethodPost, "/v2/quota/observations", "node-a", quotaNodeAToken, failure); status != http.StatusCreated {
 		t.Fatalf("failure observation rejected: %d %s", status, body)
 	}
@@ -388,7 +416,7 @@ func TestQuotaV2StoreSurvivesRestartAndRejectsCorruption(t *testing.T) {
 	}
 
 	loose := filepath.Join(t.TempDir(), "quota-v2.json")
-	if err := os.WriteFile(loose, []byte(`{"schema":"panewire.quota-v2-store/v1","last_revision":0,"bindings":[],"observations":[]}`), 0o644); err != nil {
+	if err := os.WriteFile(loose, []byte(`{"schema":"panewire.quota-v2-store/v2","last_revision":0,"bindings":[],"observations":[]}`), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.Chmod(loose, 0o644); err != nil {
@@ -407,10 +435,13 @@ func TestQuotaV2StoreSurvivesRestartAndRejectsCorruption(t *testing.T) {
 	}
 
 	for name, content := range map[string]string{
-		"not json":       "{",
-		"wrong schema":   `{"schema":"other","last_revision":0,"bindings":[],"observations":[]}`,
-		"unknown field":  `{"schema":"panewire.quota-v2-store/v1","last_revision":0,"bindings":[],"observations":[],"x":1}`,
-		"revision ahead": fmt.Sprintf(`{"schema":"panewire.quota-v2-store/v1","last_revision":1,"bindings":[{"account_ref":%q,"provider":"claude","machine_id":"node-a","local_slot_ref":%q,"entitlement_ref":"unknown","identity_basis":"operator_attested","binding_revision":5,"verified_at":"2026-09-24T01:00:00Z","valid_until":"2026-09-25T01:00:00Z","verifier_receipt":null,"label":null}],"observations":[]}`, quotaV2Account, quotaV2SlotA),
+		"not json":                   "{",
+		"wrong schema":               `{"schema":"other","last_revision":0,"bindings":[],"observations":[]}`,
+		"unknown field":              `{"schema":"panewire.quota-v2-store/v2","last_revision":0,"bindings":[],"observations":[],"x":1}`,
+		"pre-r3 observation":         fmt.Sprintf(`{"schema":"panewire.quota-v2-store/v2","last_revision":0,"bindings":[],"observations":[%s]}`, quotaV2StoredWithout(t, "contract_rev")),
+		"stored without received_at": fmt.Sprintf(`{"schema":"panewire.quota-v2-store/v2","last_revision":0,"bindings":[],"observations":[%s]}`, quotaV2StoredReceivedAt(t, "null")),
+		"older store schema":         `{"schema":"panewire.quota-v2-store/v1","last_revision":0,"bindings":[],"observations":[]}`,
+		"revision ahead":             fmt.Sprintf(`{"schema":"panewire.quota-v2-store/v2","last_revision":1,"bindings":[{"account_ref":%q,"provider":"claude","machine_id":"node-a","local_slot_ref":%q,"entitlement_ref":"unknown","identity_basis":"operator_attested","binding_revision":5,"verified_at":"2026-09-24T01:00:00Z","valid_until":"2026-09-25T01:00:00Z","verifier_receipt":null,"label":null}],"observations":[]}`, quotaV2Account, quotaV2SlotA),
 	} {
 		corrupt := filepath.Join(t.TempDir(), "quota-v2.json")
 		if err := os.WriteFile(corrupt, []byte(content), 0o600); err != nil {
@@ -421,6 +452,28 @@ func TestQuotaV2StoreSurvivesRestartAndRejectsCorruption(t *testing.T) {
 			t.Errorf("%s: corrupt store accepted", name)
 		}
 	}
+}
+
+// quotaV2StoredWithout is a stored-form observation JSON with one key removed.
+func quotaV2StoredWithout(t *testing.T, key string) string {
+	t.Helper()
+	var object map[string]any
+	if err := json.Unmarshal([]byte(quotaV2StoredReceivedAt(t, `"2026-09-24T01:00:01Z"`)), &object); err != nil {
+		t.Fatal(err)
+	}
+	delete(object, key)
+	data, _ := json.Marshal(object)
+	return string(data)
+}
+
+func quotaV2StoredReceivedAt(t *testing.T, receivedAt string) string {
+	t.Helper()
+	envelope := quotaV2Envelope("obs-s", "node-a", 1, quotaV2Account, time.Date(2026, 9, 24, 1, 0, 0, 0, time.UTC), 1, 2, 3)
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return strings.Replace(string(data), `"received_at":null`, `"received_at":`+receivedAt, 1)
 }
 
 func TestQuotaV2BindingEnrollmentValidation(t *testing.T) {

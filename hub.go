@@ -105,6 +105,11 @@ type HubServerConfig struct {
 	// and observations, task #578). Empty leaves every /v2/quota route closed
 	// (503): bindings and revisions must not vanish on restart.
 	QuotaV2StorePath string
+	// QuotaV2ClockSkew is Δ_hub (contract quota-v2.r3 §7.2/§7.3): the bound on
+	// node-vs-hub clock error used when checking an observation's times. Zero
+	// (the default) means node times are taken as exact; a node clock ahead of
+	// the hub is then rejected, which is the intended fail-closed behaviour.
+	QuotaV2ClockSkew time.Duration
 	// handoffkeep is the durable relay-event store. It is package-private so the
 	// hub's public configuration keeps no credential-bearing field.
 	handoffkeep *handoffkeepRelayClient
@@ -563,7 +568,10 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if err != nil {
 		return nil, errors.New("hub accepting overrides are invalid")
 	}
-	quotaV2, err := newHubQuotaV2Store(config.QuotaV2StorePath, tokens)
+	if config.QuotaV2ClockSkew < 0 {
+		return nil, errors.New("hub quota v2 clock skew must not be negative")
+	}
+	quotaV2, err := newHubQuotaV2Store(config.QuotaV2StorePath, tokens, config.QuotaV2ClockSkew)
 	if err != nil {
 		return nil, errors.New("hub quota v2 store is invalid")
 	}
