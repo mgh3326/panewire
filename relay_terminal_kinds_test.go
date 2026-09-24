@@ -332,15 +332,17 @@ func TestT507OldHubShapedReceiptIsHarmless(t *testing.T) {
 	}
 }
 
-// Old-handoffkeep compatibility: a schema that predates the CHECK migration
-// rejects the new kinds. The existing contract handles that rejection —
-// relay.unpersisted broadcast, no injection, and the dedupe key released so
-// the node's retry is not swallowed. Deploy order is documented in
-// docs/r20-relay-persistence.md; this pins the failure shape.
+// Old-handoffkeep compatibility: a handoffkeep that predates the new kinds
+// rejects them — on the deployed schema the app-level relayEventKinds
+// allowlist answers 400 invalid_context before the CHECK is ever reached.
+// The existing contract handles any non-2xx rejection — relay.unpersisted
+// broadcast, no injection, and the dedupe key released so the node's retry is
+// not swallowed. Deploy order is documented in docs/r20-relay-persistence.md;
+// this pins the failure shape.
 func TestT507OldHandoffkeepRejectsNewKindsVisibly(t *testing.T) {
 	fake, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
-	fake.status = http.StatusUnprocessableEntity // the CHECK constraint's reply
+	fake.status = http.StatusBadRequest // the old allowlist's invalid_context reply
 	hub, agent := r20t5Hub(t, t507Lanes, client, 8)
 	events := r20t5Subscribe(t, hub)
 
@@ -368,13 +370,64 @@ func TestT507OldHandoffkeepRejectsNewKindsVisibly(t *testing.T) {
 		t.Fatalf("an unpersisted row was acknowledged: %+v", acknowledgements)
 	}
 	if unpersisted := events("relay.unpersisted"); len(unpersisted) != 1 {
-		t.Fatalf("the CHECK rejection was not observable: relay.unpersisted=%d", len(unpersisted))
+		t.Fatalf("the old-handoffkeep rejection was not observable: relay.unpersisted=%d", len(unpersisted))
 	}
 	hub.mu.Lock()
 	_, blocked := hub.relayDedupe[relayEventDedupeKey("job.lost", hubJobEventPayload{JobID: "t507-oldkeep", Epoch: 1, OwnerLane: "lane-w", Label: "lane-w", Host: "host-a", ReportPath: queued[0].relayKey.ReportPath, Reason: "timeout"})]
 	hub.mu.Unlock()
 	if blocked {
-		t.Fatal("a CHECK rejection left the dedupe key behind: the node's retry would be swallowed")
+		t.Fatal("an old-handoffkeep rejection left the dedupe key behind: the node's retry would be swallowed")
+	}
+}
+
+// F2: a `panewire emit --kind job.revoked` file must be terminal for the
+// consumers that read the "kind" key — wrk reap's document["kind"], the
+// in-repo scanJobCloseState, and the fleet census — not only for the scanner
+// (which accepts "type" too). This pins both: the emitted file carries
+// "kind", and a real consumer marks the job closed on it. A job.lost file is
+// the control: relayable but never terminal.
+func TestT507EmittedRevokedFileIsTerminalForKindReaders(t *testing.T) {
+	inbox := t.TempDir()
+	path, err := writeEmitRecord(inbox, emitRecord{
+		Type: "job.revoked", JobID: "t507-kindkey", Epoch: 1,
+		OwnerLane: "lane-w", Reason: "declared", CreatedAt: "2026-09-24T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]json.RawMessage
+	if json.Unmarshal(contents, &document) != nil {
+		t.Fatal("emitted record is not JSON")
+	}
+	var kind string
+	if err := json.Unmarshal(document["kind"], &kind); err != nil || kind != "job.revoked" {
+		t.Fatalf("emitted file lacks kind=job.revoked: %s", contents)
+	}
+	state, err := scanJobCloseState(filepath.Dir(path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.terminal != filepath.Base(path) {
+		t.Fatalf("scanJobCloseState terminal=%q, want %s", state.terminal, filepath.Base(path))
+	}
+
+	lostPath, err := writeEmitRecord(inbox, emitRecord{
+		Type: "job.lost", JobID: "t507-kindkey-lost", Epoch: 1,
+		OwnerLane: "lane-w", Reason: "timeout", CreatedAt: "2026-09-24T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	lostState, err := scanJobCloseState(filepath.Dir(lostPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lostState.terminal != "" {
+		t.Fatalf("a job.lost file marked terminal=%q", lostState.terminal)
 	}
 }
 

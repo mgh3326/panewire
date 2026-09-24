@@ -84,7 +84,12 @@ func defaultInboxRoot() string {
 // emitRecord is the flat local event form hubInboxEvent already reads. The
 // file is the offline fallback, so it must stay readable without the daemon.
 type emitRecord struct {
-	Type           string `json:"type"`
+	Type string `json:"type"`
+	// Kind carries the same value as Type under the key wrk reap
+	// (document["kind"]), scanJobCloseState and the fleet census read, so an
+	// emitted terminal kind is terminal for every consumer, not only the
+	// scanner. Readers that decode emitRecord itself still see Type.
+	Kind           string `json:"kind,omitempty"`
 	JobID          string `json:"job_id"`
 	Epoch          uint64 `json:"epoch"`
 	CreatedAt      string `json:"created_at"`
@@ -232,6 +237,7 @@ func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration
 // different metadata is an explicit conflict: silently reusing its file would
 // discard a real event.
 func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
+	record.Kind = record.Type
 	eventsDir := filepath.Join(inboxRoot, "jobs", record.JobID, "events")
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
 		return "", err
@@ -310,6 +316,7 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 // direct (owner_lane,event_id) pair, so duplicates are an error rather than
 // the silent job.* file reuse contract.
 func writeLaneEmitRecord(inboxRoot string, record emitRecord) (string, error) {
+	record.Kind = record.Type
 	eventsDir := filepath.Join(inboxRoot, "events-lane")
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
 		return "", err

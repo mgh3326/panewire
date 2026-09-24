@@ -157,11 +157,28 @@ path, so one event cannot key two different outbox rows.
   inbound parse and counted in `unknown_messages`. No injection, no
   handoffkeep call, no job record — harmless but invisible to the operator,
   which is why the hub ships before the nodes that produce the new kinds.
-- **New hub, old handoffkeep:** the `relay_events` CHECK constraint lives in
-  the handoffkeep repository and must name the new kinds **before** nodes that
-  produce them deploy. An old schema rejects the POST; the hub then broadcasts
-  `relay.unpersisted`, sends no acknowledgement, and the node retries within
-  its normal outbox bounds — observable, never silently lost.
+- **New hub, old handoffkeep:** the kind allowlist lives in the handoffkeep
+  repository and must name the new kinds **before** nodes that produce them
+  deploy. An old handoffkeep rejects the POST — on the deployed schema the
+  app-level `relayEventKinds` allowlist answers `400 invalid_context` before
+  the `relay_events` CHECK constraint is even reached. Any non-2xx reply takes
+  the same path: the hub broadcasts `relay.unpersisted`, sends no
+  acknowledgement, and the node retries within its normal outbox bounds —
+  observable, never silently lost.
+- **The handoffkeep migration is four places, not one.** Widening only the
+  CHECK constraint is not enough; a resend must still collide with the row it
+  already wrote. All four must name the new kinds:
+  1. the app-level `relayEventKinds` allowlist (rejects with
+     `400 invalid_context` first);
+  2. the `relay_events` CHECK constraint;
+  3. the `relay_events_idempotency` partial unique index
+     (`WHERE kind IN (...)`);
+  4. the insert's `ON CONFLICT` predicate (same `WHERE kind IN (...)`).
+  If (3)/(4) stay on the old three kinds, every hub resend — reacknowledge,
+  attempt bump, or post-restart replay — inserts a **new** row instead of
+  colliding, and each new row is undelivered, so startup replay can inject the
+  same note again. That change is a separate-repository task; it is
+  documented here so the rollout cannot widen the CHECK alone.
 - **No retrospective publication:** only event files inside the node outbox's
   24h window (and inside the event-identity migration cutoff) are ever
   offered. Widening the kind set does not replay history.
@@ -288,6 +305,12 @@ and then calls `emit`, and that path has to work. A daemon that is not running
 is **not** an error: `emit` prints
 `emit: panewired unavailable; event recorded to file only` to stderr and exits
 0, leaving the record for the node outbox to pick up.
+
+An emitted file carries the kind under both `"type"` and `"kind"` keys: the
+scanner accepts either, but wrk reap (`document["kind"]`), `scanJobCloseState`,
+and the fleet census read `"kind"` only. Emitting both is what makes
+`emit --kind job.revoked` terminal for every consumer, not only the relay
+path.
 
 Example lane file (identifiers only — never real addresses, panes, or tokens):
 
