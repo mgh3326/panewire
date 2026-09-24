@@ -1,0 +1,637 @@
+{
+ "type": "pane_list",
+ "panes": [
+  {
+   "pane_id": "w6:p1",
+   "terminal_id": "term_40705057571057",
+   "workspace_id": "w6",
+   "tab_id": "w6:t1",
+   "focused": true,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "done",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-718028339465"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 0,
+    "viewport_rows": 54
+   },
+   "revision": 6
+  },
+  {
+   "pane_id": "w6:p4",
+   "terminal_id": "term_05141108190814",
+   "workspace_id": "w6",
+   "tab_id": "w6:t4",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "unknown",
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 0,
+    "viewport_rows": 54
+   },
+   "revision": 1
+  },
+  {
+   "pane_id": "w6:p2",
+   "terminal_id": "term_28894444810197",
+   "workspace_id": "w6",
+   "tab_id": "w6:t2",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "working",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-060205345023"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 5848,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w6:p5",
+   "terminal_id": "term_78882041422159",
+   "workspace_id": "w6",
+   "tab_id": "w6:t5",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "unknown",
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 0,
+    "viewport_rows": 54
+   },
+   "revision": 1
+  },
+  {
+   "pane_id": "w6:p3",
+   "terminal_id": "term_37639836827855",
+   "workspace_id": "w6",
+   "tab_id": "w6:t3",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-750090061608"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 242,
+    "viewport_rows": 54
+   },
+   "revision": 4
+  },
+  {
+   "pane_id": "w6:p6",
+   "terminal_id": "term_27763627531860",
+   "workspace_id": "w6",
+   "tab_id": "w6:t6",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "unknown",
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 0,
+    "viewport_rows": 54
+   },
+   "revision": 1
+  },
+  {
+   "pane_id": "w2:p5",
+   "terminal_id": "term_35002513219436",
+   "workspace_id": "w2",
+   "tab_id": "w2:t5",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "unknown",
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 0,
+    "viewport_rows": 54
+   },
+   "revision": 1
+  },
+  {
+   "pane_id": "w2:p6",
+   "terminal_id": "term_54909302953310",
+   "workspace_id": "w2",
+   "tab_id": "w2:t6",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "unknown",
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 0,
+    "viewport_rows": 54
+   },
+   "revision": 1
+  },
+  {
+   "pane_id": "w2:p7",
+   "terminal_id": "term_66361662256107",
+   "workspace_id": "w2",
+   "tab_id": "w2:t7",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "unknown",
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 0,
+    "viewport_rows": 54
+   },
+   "revision": 1
+  },
+  {
+   "pane_id": "w2:p8",
+   "terminal_id": "term_95082148056966",
+   "workspace_id": "w2",
+   "tab_id": "w2:t8",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "unknown",
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 0,
+    "viewport_rows": 54
+   },
+   "revision": 1
+  },
+  {
+   "pane_id": "w2:p2",
+   "terminal_id": "term_58062845688520",
+   "workspace_id": "w2",
+   "tab_id": "w2:t2",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-728451564262"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 982,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w2:p3",
+   "terminal_id": "term_69677240326947",
+   "workspace_id": "w2",
+   "tab_id": "w2:t3",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "devin",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 7157,
+    "viewport_rows": 54
+   },
+   "revision": 5
+  },
+  {
+   "pane_id": "w2:p1",
+   "terminal_id": "term_04401421607923",
+   "workspace_id": "w2",
+   "tab_id": "w2:t1",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "devin",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "working",
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 4735,
+    "viewport_rows": 54
+   },
+   "revision": 5
+  },
+  {
+   "pane_id": "w2:p4",
+   "terminal_id": "term_87704121686241",
+   "workspace_id": "w2",
+   "tab_id": "w2:t4",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "working",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-964083999704"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 157,
+    "viewport_rows": 54
+   },
+   "revision": 4
+  },
+  {
+   "pane_id": "w3:p1",
+   "terminal_id": "term_98968220411558",
+   "workspace_id": "w3",
+   "tab_id": "w3:t1",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-459809318298"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 698,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w3:p3",
+   "terminal_id": "term_40209735785094",
+   "workspace_id": "w3",
+   "tab_id": "w3:t3",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "unknown",
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 0,
+    "viewport_rows": 54
+   },
+   "revision": 1
+  },
+  {
+   "pane_id": "w3:p2",
+   "terminal_id": "term_71787269377222",
+   "workspace_id": "w3",
+   "tab_id": "w3:t2",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-881977250027"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 1167,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w4:p1",
+   "terminal_id": "term_12070098255699",
+   "workspace_id": "w4",
+   "tab_id": "w4:t1",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-292203431020"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 830,
+    "viewport_rows": 54
+   },
+   "revision": 2
+  },
+  {
+   "pane_id": "w5:p1",
+   "terminal_id": "term_47316218422609",
+   "workspace_id": "w5",
+   "tab_id": "w5:t1",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-140618754458"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 1577,
+    "viewport_rows": 54
+   },
+   "revision": 2
+  },
+  {
+   "pane_id": "w5:p2",
+   "terminal_id": "term_76770086807073",
+   "workspace_id": "w5",
+   "tab_id": "w5:t2",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-359942392094"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 982,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w2:p25",
+   "terminal_id": "term_09426261898238",
+   "workspace_id": "w2",
+   "tab_id": "w2:t25",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-728451564262"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 982,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w2:p26",
+   "terminal_id": "term_07396485245050",
+   "workspace_id": "w2",
+   "tab_id": "w2:t26",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "done",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-728451564262"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 982,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w2:p27",
+   "terminal_id": "term_40484337750348",
+   "workspace_id": "w2",
+   "tab_id": "w2:t27",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-728451564262"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 982,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w2:p28",
+   "terminal_id": "term_20379351411076",
+   "workspace_id": "w2",
+   "tab_id": "w2:t28",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-728451564262"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 982,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w2:p29",
+   "terminal_id": "term_46018106586682",
+   "workspace_id": "w2",
+   "tab_id": "w2:t29",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-728451564262"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 982,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w2:p30",
+   "terminal_id": "term_14137937441365",
+   "workspace_id": "w2",
+   "tab_id": "w2:t30",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-728451564262"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 982,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w2:p31",
+   "terminal_id": "term_15889750544500",
+   "workspace_id": "w2",
+   "tab_id": "w2:t31",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "idle",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-728451564262"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 982,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  },
+  {
+   "pane_id": "w2:p32",
+   "terminal_id": "term_19809486563140",
+   "workspace_id": "w2",
+   "tab_id": "w2:t32",
+   "focused": false,
+   "cwd": "/home/operator/work/repo-a",
+   "foreground_cwd": "/home/operator/work/repo-a",
+   "agent": "claude",
+   "terminal_title": "✳ task session",
+   "terminal_title_stripped": "task session",
+   "agent_status": "done",
+   "agent_session": {
+    "source": "herdr:claude",
+    "agent": "claude",
+    "kind": "id",
+    "value": "00000000-0000-4000-8000-728451564262"
+   },
+   "scroll": {
+    "offset_from_bottom": 0,
+    "max_offset_from_bottom": 982,
+    "viewport_rows": 54
+   },
+   "revision": 3
+  }
+ ]
+}

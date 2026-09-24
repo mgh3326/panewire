@@ -462,6 +462,8 @@ type HubServer struct {
 	// updateOverdueFlushes tracks background flushes (fixtures wait on it).
 	updateOverdueFlushes sync.WaitGroup
 	stallBeats           map[string]*hubStallBeatState
+	// sessionReap keeps the latest session-reap (#603) report per machine.
+	sessionReap map[string]*hubSessionReapRecord
 }
 
 // hubStallBeatState is the hub's half of the detector no-data contract. It
@@ -675,6 +677,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/quota", h.handleQuotaList)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
+	mux.HandleFunc("GET /v1/session-reap", h.handleSessionReap)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
@@ -1025,6 +1028,9 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 		h.resolveQuota(machineID, report)
 		return
 	}
+	if h.handleSessionReapMessage(machineID, agent, payload) {
+		return
+	}
 	hasHeartbeatQuota := hubInboundHeartbeatHasQuota(payload)
 	message, ok := parseHubInbound(payload)
 	if !ok {
@@ -1142,7 +1148,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.relayJobCompletionFrom(machineID, completion)
 		}
-		if message.Kind == "job.escalate" || message.Kind == "job.joined" {
+		if message.Kind == "job.escalate" || message.Kind == "job.joined" || relayTerminalSignalKinds[message.Kind] {
 			event, truncated, valid := decodeHubJobEscalationPayloadDetailed(message.Payload)
 			if !valid {
 				h.countUnknownMessage()
@@ -1153,6 +1159,16 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			if event.Replay {
 				h.logger.Info("relay record replayed after node restart", "job", event.JobID, "kind", message.Kind, "node", machineID)
+			}
+			if message.Kind == "job.revoked" {
+				// A node-reported revocation is terminal for the job record
+				// under the same epoch fencing as a completion — without it the
+				// console would keep a closed job "active" forever. The relay
+				// itself runs either way; job.lost is not terminal and never
+				// takes this branch.
+				if !h.observeJobRevocation(machineID, event, received) {
+					h.lateRegisterJobCompletion(machineID, event, received)
+				}
 			}
 			h.relayJobEventFrom(machineID, message.Kind, event)
 		}
@@ -1569,7 +1585,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
-		if message.Kind == "job.escalate" || message.Kind == "job.joined" {
+		if message.Kind == "job.escalate" || message.Kind == "job.joined" || relayTerminalSignalKinds[message.Kind] {
 			if _, valid := decodeHubJobEscalationPayload(rawPayload); !valid {
 				return hubInbound{}, false
 			}
@@ -1623,7 +1639,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "lane.event", "idle-wake.route.request", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched", "relay.dropped":
+	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "job.lost", "job.revoked", "lane.event", "idle-wake.route.request", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched", "relay.dropped":
 		return true
 	}
 	return false

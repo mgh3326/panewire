@@ -208,6 +208,14 @@ func (d *Daemon) Start(ctx context.Context) error {
 			defer close(d.hubDone)
 			d.cfg.Hub.Client.Run(runCtx)
 		}()
+		// Report-only and off unless PANEWIRE_SESSION_REAP_REPORT_INTERVAL
+		// is set: starting it is a new schedule that needs operator approval.
+		// It runs on runCtx so Stop ends it with the other loops.
+		reapRoot := d.cfg.Hub.Client.jobsInboxRoot
+		if reapRoot == "" {
+			reapRoot = d.cfg.InboxRoot
+		}
+		startSessionReapReporter(runCtx, d.cfg.Hub.Client, d.cfg.HerdrSocket, reapRoot, d.cfg.Logger)
 	}
 	if d.stall != nil {
 		d.stallDone = make(chan struct{})
@@ -744,6 +752,10 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		}
 	} else if !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
+	} else if relayTerminalSignalKinds[req.Kind] && (req.Reason == "" || !validReportRelayLaneName(req.OwnerLane)) {
+		// Same rule as emitJobRecord: a terminal signal that cannot state why
+		// or name its owner lane is refused before it enters the outbox.
+		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if !d.emitNamespaceMatches(req.InboxRoot) {
 		local := d.emitNamespaceRoot()
@@ -774,6 +786,14 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		// name the same outbox row. The file's timestamp feeds the deployment
 		// cutoff the scan applies.
 		event.EventID, event.EventTime = emitJobEventFileID(d.emitNamespaceRoot(), req, epoch)
+		// A terminal signal's absent report — empty or the sentinel's
+		// /dev/null — resolves to the same durable event file the scanner
+		// substitutes; otherwise a direct push and the scan would key one
+		// event two ways and deliver it twice.
+		event.ReportPath = relaySignalReportPath(req.Kind, event.ReportPath)
+		if relayTerminalSignalKinds[req.Kind] && event.ReportPath == "" && event.EventID != "" {
+			event.ReportPath = filepath.Join(d.emitNamespaceRoot(), "jobs", req.JobID, "events", event.EventID)
+		}
 	}
 	d.cfg.Hub.Client.EnqueueRelayEvent(event)
 	return nil

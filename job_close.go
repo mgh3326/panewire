@@ -23,13 +23,16 @@ import (
 // grace, then reap.
 //
 // The kind is job.revoked, already in every terminal set (wrk reap's TERMINAL,
-// fleetCensusTerminalKinds, stallTerminalKinds, the node's active-job scan),
-// so no hub kind or handoffkeep CHECK changes. job.completed is deliberately
-// not used: the node's relay scanner forwards job.completed files to the
-// owner lane, which would turn a quiet declaration into a pane injection. The
-// hub's own revocation writes {"type":"job.revoked",job_id,epoch}; a
-// declaration carries "kind" (the key reap reads) plus source, closed_by and
-// outcome, so the two stay distinguishable.
+// fleetCensusTerminalKinds, stallTerminalKinds, the node's active-job scan).
+// Since #507 the relay scanner also forwards it: the record always carries a
+// reason and an owner lane, so the declaration reaches the owner lane's parent
+// pane and a durable handoffkeep row — the expressiveness gap #507 closed.
+// job.completed is still deliberately not used: its payload carries no reason
+// and its relay text reads as a report, not a revocation. The hub's own
+// revocation writes {"type":"job.revoked",job_id,epoch} — no reason, no owner
+// lane — which is exactly what keeps that hub→node marker out of the node→hub
+// relay direction; a declaration carries "kind" (the key reap reads) plus
+// source, closed_by and outcome, so the two stay distinguishable.
 //
 // None of this touches done/escalate/joined: their writers and wire stay
 // byte-identical to wrk (testdata/job_golden).

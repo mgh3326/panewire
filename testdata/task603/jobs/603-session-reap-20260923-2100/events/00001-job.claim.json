@@ -1,0 +1,1 @@
+{"created_at": "2026-09-23T10:00:00+00:00", "job_id": "603-session-reap-20260923-2100", "kind": "job.claim", "payload": {"agent_label": "b603-session-reap", "owner_lane": "b603-session-reap", "parent_lane": "director-1", "role": "builder", "t_level": "T2"}, "seq": 1}

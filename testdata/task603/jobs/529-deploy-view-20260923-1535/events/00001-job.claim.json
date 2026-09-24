@@ -1,0 +1,1 @@
+{"created_at": "2026-09-23T10:00:00+00:00", "job_id": "529-deploy-view-20260923-1535", "kind": "job.claim", "payload": {"agent_label": "b529-deploy-view", "owner_lane": "b529-deploy-view", "parent_lane": "director-1", "role": "builder", "t_level": "T1"}, "seq": 1}

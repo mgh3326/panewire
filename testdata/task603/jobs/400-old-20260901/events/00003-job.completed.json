@@ -1,0 +1,1 @@
+{"kind":"job.completed","job_id":"400-old-20260901","owner_lane":"b400-builder","label":"w400-old","pane_id":"w6:p1","host":"node-a","report_path":"/home/operator/work/herdr-inbox/jobs/400-old-20260901/report.md","report_last_line":"done","epoch":1,"report_sha256":"0000000000000000000000000000000000000000000000000000000000000000","created_at":"2026-09-01T01:00:00+00:00"}

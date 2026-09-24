@@ -3,8 +3,9 @@
 #
 # Everything between the ===== markers is vendored VERBATIM from
 # agent-skills commit ae1f544 (bin/wrk, PR #508): parse_duration_s,
-# reap_candidates, reap_tab_pane_counts, reap_tab_verdict and
-# herdr_agent_probe are copied unmodified; reference_reap is the dry-run
+# reap_tab_pane_counts, reap_tab_verdict and herdr_agent_probe are copied
+# unmodified; reap_candidates is from agent-skills commit 692b185 (PR #119,
+# #603), which adds the protected `--keep` skip; reference_reap is the dry-run
 # half of reap_cmd with the --apply branch deleted and --lane fixed empty.
 # This script can only print — it has no close/apply path and writes no
 # files — which makes it safe as the test oracle.
@@ -78,6 +79,7 @@ for job in jobs:
     terminal_at = None
     revived = False
     reaped = False
+    keep = False
     try:
         names = sorted(os.listdir(events_dir))
     except OSError:
@@ -121,6 +123,10 @@ for job in jobs:
             spawned_tab = payload.get("tab_id") if isinstance(payload.get("tab_id"), str) else ""
         if kind == "job.reaped":
             reaped = True
+        # 보호 표시(`wrk spawn --keep`, #603)는 누적이다: claim·reclaim·spawn 영수증 중
+        # 하나라도 JSON true 를 남겼으면 그 잡의 pane 은 닫지 않는다.
+        if kind in ("job.claim", "job.reclaim", "job.spawned") and payload.get("keep") is True:
+            keep = True
         if kind in REVIVE and terminal_at is not None:
             terminal_at = None
             revived = True
@@ -154,6 +160,11 @@ for job in jobs:
         continue
     age = int(now - terminal_at)
     if age < grace:
+        continue
+    # 보호된 잡은 유예를 넘겨 원래라면 닫혔을 때만 이유를 남기고 건너뛴다. 유예 안이거나
+    # 종료 전인 잡은 위에서 지금처럼 조용히 빠진다.
+    if keep:
+        print(job.split()[0] if job.split() else job, "-", "-", "-", age, "protected", sep="\t")
         continue
     # 어떤 필드에도 공백이 있어서는 안 된다. 있으면 그 잡의 증거가 깨진 것이고,
     # 회수는 추측하지 않는다 — pane 을 자리표시자로 내보내 skip 으로 남긴다.
