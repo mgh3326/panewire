@@ -94,16 +94,18 @@ func TestTask264InjectFailureThenSuccessDeliversWithoutSticking(t *testing.T) {
 // -- a harness string that is not "claude" -- and shows the classifier
 // distinguishes an unresolved queue from an actually-submitted prompt.
 func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
-	// #683: a queued banner is accepted as landed -- the harness's own queue
-	// submits the message when the turn ends. It is neither a failure nor a
-	// return-keypress candidate.
+	// #683: a queued banner that newly appears after the paste is accepted
+	// as landed -- the harness's own queue submits the message when the turn
+	// ends. It is neither a failure nor a return-keypress candidate.
 	t.Run("codex queued state is landed, not a failure", func(t *testing.T) {
 		dir := t.TempDir()
-		writeFakeHerdr(t, dir, map[string]string{
-			"get":       `{"result":{"agent":{"agent":"codex"}}}`,
-			"read":      "Press up to edit queued messages",
-			"send-keys": "",
-		})
+		prompted := filepath.Join(dir, "prompted")
+		script := "#!/bin/sh\ncase \"$2\" in\n" +
+			"get) echo '{\"result\":{\"agent\":{\"agent\":\"codex\"}}}' ;;\n" +
+			"prompt) touch \"" + prompted + "\" ;;\n" +
+			"read) if [ -f \"" + prompted + "\" ]; then echo 'Press up to edit queued messages'; else echo 'codex working'; fi ;;\n" +
+			"esac\n"
+		installFakeHerdr(t, dir, script)
 		if !defaultHubRelayInject(context.Background(), "codex-pane", "do the thing") {
 			t.Fatal("codex message accepted into the queue, but injection reported failure")
 		}
@@ -115,9 +117,11 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 	t.Run("codex queued is landed without a return", func(t *testing.T) {
 		dir := t.TempDir()
 		log := filepath.Join(dir, "calls")
+		prompted := filepath.Join(dir, "prompted")
 		script := "#!/bin/sh\necho \"$2\" >> \"" + log + "\"\ncase \"$2\" in\n" +
 			"get) echo '{\"result\":{\"agent\":{\"agent\":\"codex\"}}}' ;;\n" +
-			"read) echo 'Press up to edit queued messages' ;;\n" +
+			"prompt) touch \"" + prompted + "\" ;;\n" +
+			"read) if [ -f \"" + prompted + "\" ]; then echo 'Press up to edit queued messages'; else echo 'codex working'; fi ;;\n" +
 			"esac\n"
 		installFakeHerdr(t, dir, script)
 		result := defaultHubRelayInjectVerdict(context.Background(), "codex-pane", "do the thing", nil)
@@ -130,22 +134,25 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 		}
 	})
 
-	// The other codex queue shape: a banner that persists because the pane is
-	// busy. Still landed, still no keypress.
-	t.Run("codex persistent queue banner is landed without a return", func(t *testing.T) {
+	// #683 tester S1: a banner that was already up before the paste belongs
+	// to an older queue and proves nothing about this message -- with no
+	// echo of the text either, the verdict is may-be-in-pane, never a
+	// delivered claim, and still no keypress.
+	t.Run("codex pre-existing queue banner is not proof of landing", func(t *testing.T) {
 		dir := t.TempDir()
-		marker := filepath.Join(dir, "returned")
-		script := "#!/bin/sh\ncase \"$2\" in\n" +
+		log := filepath.Join(dir, "calls")
+		script := "#!/bin/sh\necho \"$2\" >> \"" + log + "\"\ncase \"$2\" in\n" +
 			"get) echo '{\"result\":{\"agent\":{\"agent\":\"codex\"}}}' ;;\n" +
-			"read) if [ -f \"" + marker + "\" ]; then echo 'agent is thinking'; else echo 'Press up to edit queued messages'; fi ;;\n" +
-			"send-keys) touch \"" + marker + "\" ;;\n" +
+			"read) echo 'Press up to edit queued messages' ;;\n" +
 			"esac\n"
 		installFakeHerdr(t, dir, script)
-		if !defaultHubRelayInject(context.Background(), "codex-pane", "do the thing") {
-			t.Fatal("codex message accepted into the queue, but injection reported failure")
+		result := defaultHubRelayInjectVerdict(context.Background(), "codex-pane", "do the thing", nil)
+		if result.Outcome != relayInjectMaybeInPane {
+			t.Fatalf("codex pre-existing banner: outcome=%v evidence=%q, want maybe_in_pane", result.Outcome, result.Evidence)
 		}
-		if _, err := os.Stat(marker); !os.IsNotExist(err) {
-			t.Fatalf("queued codex message earned a return keypress: err=%v", err)
+		calls, _ := os.ReadFile(log)
+		if strings.Contains(string(calls), "send-keys") {
+			t.Fatalf("codex unresolved queue earned a return keypress: %q", calls)
 		}
 	})
 
@@ -173,14 +180,20 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 	// The other half of AC0's reversal: devin's own queue banner ("send
 	// now") is real evidence -- since #547 a still-queued devin screen is
 	// relayInjectQueued and reported delivered, never retried; see
-	// task547_devin_relay_test.go.
+	// task547_devin_relay_test.go. Since #683 the banner alone is not
+	// enough: the queue must show this message's own text, because a banner
+	// belonging to an older queue proves nothing (tester S1).
 	t.Run("devin queued state is landed, not a failure", func(t *testing.T) {
 		dir := t.TempDir()
-		writeFakeHerdr(t, dir, map[string]string{
-			"get":       `{"result":{"agent":{"agent":"devin"}}}`,
-			"read":      "── 1 queued ── send now",
-			"send-keys": "",
-		})
+		prompted := filepath.Join(dir, "prompted")
+		queued := "⠋ Thinking 12m04s\n○ do the thing\n── 1 queued ── ↑ edit · ↵ send now\n─────────────────────\n❭ Press Enter to send queued messages now\n─────────────────────\nSWE-2 High"
+		idle := "─────────────────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n─────────────────────\nSWE-2 High"
+		script := "#!/bin/sh\ncase \"$2\" in\n" +
+			"get) echo '{\"result\":{\"agent\":{\"agent\":\"devin\",\"agent_status\":\"working\"}}}' ;;\n" +
+			"prompt) touch \"" + prompted + "\" ;;\n" +
+			"read) if [ -f \"" + prompted + "\" ]; then printf '%s\\n' \"" + queued + "\"; else printf '%s\\n' \"" + idle + "\"; fi ;;\n" +
+			"esac\n"
+		installFakeHerdr(t, dir, script)
 		if !defaultHubRelayInject(context.Background(), "devin-pane", "do the thing") {
 			t.Fatal("devin message accepted into the queue, but injection reported failure")
 		}
