@@ -349,7 +349,7 @@ func (h *HubServer) observeJobCompletion(machineID string, completion hubJobEven
 // observeJobRevocation is the revocation analogue of observeJobCompletion: a
 // node-reported job.revoked is terminal for the job record under the same
 // epoch fencing. A cancelled job did not come back, so no job.recovered event
-// is queued — the console feed gets a job.revoked event instead.
+// is queued — the console feed records a revoked entry on the first close.
 func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayload, received time.Time) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -357,8 +357,14 @@ func (h *HubServer) observeJobRevocation(machineID string, event hubJobEventPayl
 	if job == nil || job.Epoch != event.Epoch || job.Node != machineID {
 		return false
 	}
+	alreadyClosed := job.Completed
 	job.Completed, job.Orphaned, job.LastSeen = true, false, received
-	h.queueJobEventLocked("job.revoked", hubJobEventPayload{JobID: event.JobID, Node: machineID, Epoch: event.Epoch, LastSeen: received})
+	if !alreadyClosed {
+		// handleAgentMessage already broadcasts the raw node event, so only
+		// the console feed entry is recorded here — and only on the first
+		// close, since a resend reaches this before relay dedupe drops it.
+		h.recordUIEventWithJobLocked("job", "revoked", machineID, event.JobID, received)
+	}
 	return true
 }
 

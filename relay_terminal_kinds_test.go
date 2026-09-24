@@ -468,4 +468,22 @@ func TestT507DaemonRefusesUnderspecifiedSignal(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("a well-formed signal was not queued")
 	}
+
+	// A direct push spelling "no report" as /dev/null must resolve to the same
+	// durable event file the scanner substitutes — one event, one outbox key.
+	r20t7WriteEvent(t, inbox, "t507-d4", "00001-job.lost.json",
+		`{"kind":"job.lost","job_id":"t507-d4","owner_lane":"lane-w","host":"host-a","epoch":1,"reason":"timeout"}`)
+	push := localRequest{Op: "emit", Kind: "job.lost", JobID: "t507-d4", ReportPath: "/dev/null", InboxRoot: inbox, Reason: "timeout", OwnerLane: "lane-w", Host: "host-a"}
+	if err := daemon.emitRelayEvent(push); err != nil {
+		t.Fatalf("a /dev/null signal was refused: %v", err)
+	}
+	select {
+	case event := <-node.events:
+		want := filepath.Join(inbox, "jobs", "t507-d4", "events", "00001-job.lost.json")
+		if event.relayKey.ReportPath != want {
+			t.Fatalf("the push keyed the report as %q, want the event file %q — one event, two keys", event.relayKey.ReportPath, want)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("the /dev/null signal was not queued")
+	}
 }
