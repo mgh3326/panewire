@@ -198,27 +198,52 @@ func task547Both(screen string) map[string]string {
 	return map[string]string{"visible": screen, "recent-unwrapped": screen}
 }
 
-// Mutant (c) and AC2: when any source already shows the message, nothing is
-// typed -- not on a local retry and not on a hub replay, which reaches the
-// node as a fresh message.
-func TestTask547DevinPresendMarkerBlocksAnyInject(t *testing.T) {
-	cases := map[string]task547FakeDevin{
-		"transcript echo in recent-unwrapped only": {before: map[string]string{"visible": task547IdleScreen, "recent-unwrapped": task547SubmittedScreen(task547RelayText)}},
-		"queued row in visible only":               {before: map[string]string{"visible": task547QueuedScreen(task547RelayText), "recent-unwrapped": task547IdleScreen}},
-		"residue in visible composer only":         {before: map[string]string{"visible": "────\n❭ " + task547RelayText + "\n────\n", "recent-unwrapped": task547IdleScreen}},
-	}
-	for name, fake := range cases {
-		t.Run(name, func(t *testing.T) {
-			calls := fake.install(t)
-			result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
-			if result.Outcome != relayInjectMaybeInPane || !strings.HasPrefix(result.Evidence, "presend:") {
-				t.Fatalf("result=%+v, want maybe_in_pane with presend evidence", result)
-			}
-			if got := calls(); task547Count(got, "prompt") != 0 || task547Count(got, "send-keys") != 0 {
-				t.Fatalf("typed into a pane that already holds the message: %q", got)
-			}
-		})
-	}
+// #683 round 4 (directive): presend transcript or queue evidence no longer
+// withholds the paste -- the 48-rune marker fragment is shared between
+// messages, and a hold on it strands the row silently where a duplicate
+// stays observable. A replay therefore types again and delivers on the
+// postsend echo. Only composer residue still preempts the paste, and the
+// residue path's one guarded return submits the pending copy.
+func TestTask547DevinPresendEchoStillTypes(t *testing.T) {
+	t.Run("transcript echo in recent-unwrapped only", func(t *testing.T) {
+		calls := task547FakeDevin{
+			before:    map[string]string{"visible": task547IdleScreen, "recent-unwrapped": task547SubmittedScreen(task547RelayText)},
+			afterSend: task547Both(task547SubmittedScreen(task547RelayText)),
+		}.install(t)
+		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
+		if result.Outcome != relayInjectDelivered {
+			t.Fatalf("result=%+v, want delivered on the postsend echo", result)
+		}
+		if got := calls(); task547Count(got, "prompt") != 1 || task547Count(got, "send-keys") != 0 {
+			t.Fatalf("a transcript echo must not withhold the paste: %q", got)
+		}
+	})
+	t.Run("queued row in visible only", func(t *testing.T) {
+		calls := task547FakeDevin{
+			before:    map[string]string{"visible": task547QueuedScreen(task547RelayText), "recent-unwrapped": task547IdleScreen},
+			afterSend: task547Both(task547SubmittedScreen(task547RelayText)),
+		}.install(t)
+		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
+		if result.Outcome != relayInjectDelivered {
+			t.Fatalf("result=%+v, want delivered on the postsend echo", result)
+		}
+		if got := calls(); task547Count(got, "prompt") != 1 {
+			t.Fatalf("a queued row must not withhold the paste: %q", got)
+		}
+	})
+	t.Run("residue in visible composer only", func(t *testing.T) {
+		calls := task547FakeDevin{
+			before:      map[string]string{"visible": "────\n❭ " + task547RelayText + "\n────\n", "recent-unwrapped": task547IdleScreen},
+			afterReturn: task547Both(task547SubmittedScreen(task547RelayText)),
+		}.install(t)
+		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
+		if result.Outcome != relayInjectDelivered {
+			t.Fatalf("result=%+v, want the pending paste submitted and delivered", result)
+		}
+		if got := calls(); task547Count(got, "prompt") != 0 || task547Count(got, "send-keys") != 1 {
+			t.Fatalf("composer residue: want no paste, one guarded return: %q", got)
+		}
+	})
 }
 
 // AC4②, mutant (b): queued, one return keypress, still queued -> the message
@@ -357,8 +382,9 @@ func TestTask547DevinMaybeInPaneIsNeverReinjected(t *testing.T) {
 }
 
 // C2 end to end: herdr rejects the first send after typing part of it, so
-// the attempt is retryable; the retry's presend check finds the text and does
-// not type it again. One prompt total, relay reported unconfirmed with cause.
+// the attempt is retryable; the retry's presend check finds the partial
+// paste in the composer and does not type it again. One prompt total, relay
+// reported unconfirmed with cause.
 func TestTask547DevinPartialSendIsNotTypedTwice(t *testing.T) {
 	dir := t.TempDir()
 	landed := filepath.Join(dir, "landed")
@@ -376,8 +402,8 @@ func TestTask547DevinPartialSendIsNotTypedTwice(t *testing.T) {
 		t.Fatalf("first unconfirmed=%s", first.Payload)
 	}
 	second := task547Await(t, events, "relay.unconfirmed")
-	if !strings.Contains(string(second.Payload), "maybe_in_pane presend:") {
-		t.Fatalf("second unconfirmed=%s, want presend maybe_in_pane", second.Payload)
+	if !strings.Contains(string(second.Payload), "maybe_in_pane") || !strings.Contains(string(second.Payload), "composer") {
+		t.Fatalf("second unconfirmed=%s, want maybe_in_pane on the composer residue", second.Payload)
 	}
 	task547Await(t, events, "relay.dropped")
 	b, _ := os.ReadFile(filepath.Join(dir, "calls.log"))
@@ -389,7 +415,7 @@ func TestTask547DevinPartialSendIsNotTypedTwice(t *testing.T) {
 // tester BLOCKER 1 (real devin pane, 6,046-byte event): a long message scrolls
 // its head out of every read window. Its tail still identifies it, and an
 // accepted send with no sign of the message is never retried.
-func TestTask547DevinLongMessageIsNeverTypedTwice(t *testing.T) {
+func TestTask547DevinLongMessageEcho(t *testing.T) {
 	long := "(같은 내용이 두 번 보이면 재실행 금지) [event] t547-scroll :: SCROLL-WINDOW head " + strings.Repeat("x", 3000) + " LONG-TAIL-END-547"
 	tailOnly := "  " + strings.Repeat("x", 120) + " LONG-TAIL-END-547\n⠋ Thinking 1s\n────\n❭ Guide Devin while it works\n────\n"
 
@@ -409,34 +435,44 @@ func TestTask547DevinLongMessageIsNeverTypedTwice(t *testing.T) {
 			t.Fatalf("result=%+v, want maybe_in_pane", result)
 		}
 	})
-	t.Run("replay with only the tail on screen is not typed", func(t *testing.T) {
-		calls := task547FakeDevin{before: map[string]string{"visible": task547IdleScreen, "recent-unwrapped": tailOnly}}.install(t)
+	// #683 round 4: a transcript tail no longer withholds the paste -- the
+	// shared fragment is not identity. The replay types again and the
+	// postsend tail echo delivers it.
+	t.Run("replay with only the tail on screen is typed and delivered", func(t *testing.T) {
+		calls := task547FakeDevin{
+			before:    map[string]string{"visible": task547IdleScreen, "recent-unwrapped": tailOnly},
+			afterSend: map[string]string{"visible": task547IdleScreen, "recent-unwrapped": tailOnly},
+		}.install(t)
 		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", long, nil)
-		if result.Outcome != relayInjectMaybeInPane || result.Evidence != "presend:recent-unwrapped:marker_present" {
-			t.Fatalf("result=%+v", result)
+		if result.Outcome != relayInjectDelivered || !strings.Contains(result.Evidence, "marker_echo") {
+			t.Fatalf("result=%+v, want delivered on the postsend tail echo", result)
 		}
-		if got := calls(); task547Count(got, "prompt") != 0 {
-			t.Fatalf("typed a message whose tail is on screen: %q", got)
+		if got := calls(); task547Count(got, "prompt") != 1 {
+			t.Fatalf("a transcript tail must not withhold the paste: %q", got)
 		}
 	})
 }
 
-// tester BLOCKER 2: a batch whose later member is already in the pane is not
-// typed, even though the batch text starts and ends with other members.
-func TestTask547DevinBatchMemberAlreadyPresentBlocksBatch(t *testing.T) {
+// #683 round 4, batch arm: a member's echo no longer withholds the batch
+// paste -- presend transcript evidence is the silent-loss family the
+// directive removed. The batch is typed and its own echo delivers it.
+func TestTask547DevinBatchMemberEchoDoesNotBlockBatch(t *testing.T) {
 	first := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: first-unique-message"
 	second := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: second-already-present-message"
 	third := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: third-unique-message"
 	// The present member sits in the middle: neither the batch head nor the
 	// batch tail covers it.
 	batch := relayBatchText([]relayHeld{{Text: first}, {Text: second}, {Text: third}}, false, time.Now())
-	calls := task547FakeDevin{before: map[string]string{"visible": task547IdleScreen, "recent-unwrapped": task547SubmittedScreen(second)}}.install(t)
+	calls := task547FakeDevin{
+		before:    map[string]string{"visible": task547IdleScreen, "recent-unwrapped": task547SubmittedScreen(second)},
+		afterSend: task547Both(task547SubmittedScreen(batch)),
+	}.install(t)
 	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", batch, []string{first, second, third})
-	if result.Outcome != relayInjectMaybeInPane || !strings.HasPrefix(result.Evidence, "presend:") {
-		t.Fatalf("result=%+v, want presend maybe_in_pane", result)
+	if result.Outcome != relayInjectDelivered {
+		t.Fatalf("result=%+v, want delivered on the postsend batch echo", result)
 	}
-	if got := calls(); task547Count(got, "prompt") != 0 {
-		t.Fatalf("batch typed although a member is in the pane: %q", got)
+	if got := calls(); task547Count(got, "prompt") != 1 {
+		t.Fatalf("a member's echo must not withhold the batch paste: %q", got)
 	}
 }
 
