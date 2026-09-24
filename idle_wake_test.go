@@ -940,13 +940,13 @@ func TestIdleWakeAdversarialLabelRemainsDataAtShellBoundary(t *testing.T) {
 	if !validLaneEventText(text) || strings.ContainsAny(text, "\r\n\x00") || !strings.Contains(text, "$(touch") {
 		t.Fatalf("lane text did not preserve escaped data safely: %q", text)
 	}
-	// The fake herdr's "read" case cats a file holding the exact submission
-	// marker (rather than embedding the adversarial text in the shell script
-	// itself) so classifySubmission can prove marker_observed -- required for
+	// The fake herdr's "read" case cats a file holding the exact submitted
+	// text (rather than embedding the adversarial text in the shell script
+	// itself) so verification can prove marker_observed -- required for
 	// defaultHubRelayInject to report delivered now that an unproven
 	// classification is no longer treated as delivered.
 	markerFile := filepath.Join(dir, "marker.txt")
-	if err := os.WriteFile(markerFile, []byte(markerFor(text)), 0600); err != nil {
+	if err := os.WriteFile(markerFile, []byte(text), 0600); err != nil {
 		t.Fatal(err)
 	}
 	script := filepath.Join(dir, "herdr")

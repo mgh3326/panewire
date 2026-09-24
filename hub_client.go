@@ -530,7 +530,8 @@ type hubOutboundMessage struct {
 }
 
 func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
-	return defaultHubRelayInjectVerdict(ctx, pane, text, nil).Outcome == relayInjectDelivered
+	outcome := defaultHubRelayInjectVerdict(ctx, pane, text, nil).Outcome
+	return outcome == relayInjectDelivered || outcome == relayInjectQueued
 }
 
 // relayInjectOutcome is the three-way result of one relay inject (#547,
@@ -541,25 +542,28 @@ type relayInjectOutcome int
 
 const (
 	relayInjectDelivered relayInjectOutcome = iota
-	// relayInjectRetryable: the send did not put the message in the pane as
-	// far as the harness's rules can tell. For devin that means herdr
-	// rejected the send; its next attempt still checks the pane first.
+	// relayInjectRetryable: herdr rejected the send, so nothing was typed
+	// and re-injecting cannot duplicate. A verdict the verification reads
+	// cannot prove is never retryable -- the text may already be in the
+	// pane (#683).
 	relayInjectRetryable
 	// relayInjectMaybeInPane: the message may already be in the pane
 	// (composer, queue, or transcript). Never inject it again.
 	relayInjectMaybeInPane
-	// relayInjectQueued: devin accepted the message into its queue while it
-	// was busy (or its state could not be read). No return keypress -- that
-	// would cut the running turn -- and no retry: devin submits its queue
-	// when the turn ends.
+	// relayInjectQueued: the harness accepted the message into its
+	// submit-later queue while it was busy -- claude and codex show their
+	// queue banner, devin its own queue state. No return keypress -- that
+	// would cut the running turn -- and no retry: the harness submits its
+	// queue when the turn ends.
 	relayInjectQueued
 )
 
 type relayInjectResult struct {
 	Outcome relayInjectOutcome
 	Harness string
-	// Evidence names the read source and rule behind Outcome. It is empty
-	// for claude/codex, whose relay events are unchanged by #547.
+	// Evidence names the read source and rule behind Outcome
+	// ("recent-unwrapped:marker_echo", "queued_banner", ...), prefixed by
+	// the phase that produced it ("presend:", "after_return:").
 	Evidence string
 }
 
@@ -585,20 +589,41 @@ func relayInjectForHarness(ctx context.Context, pane, harness, text string, memb
 	if strings.EqualFold(harness, "devin") {
 		return devinRelayInject(ctx, pane, text, members)
 	}
-	// #626: the composer as it was before this paste. Only it can show that
-	// a paste chip seen afterwards is this inject's own. A failed read
-	// leaves it empty, which proves nothing.
-	before, _ := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", relayComposerReadLines).Output()
-	if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
-		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness}
+	// #683: read the pane before typing, on every attempt. The visible read
+	// doubles as the #626 'before' snapshot for the return-once rule: a
+	// chip seen afterwards is provably this inject's own only if this read
+	// had no chip. Transcript evidence here never withholds the paste --
+	// three tester rounds each found a silent-loss variant in presend
+	// identity matching (shared head fragment, shared head+tail, wrap
+	// boundary), and the round-4 directive trades a duplicate for a silent
+	// drop. A replay of an already-landed row therefore types again and is
+	// proven by the postsend echo; what presend still checks is only the
+	// composer, where a pending paste would be mangled by a second one.
+	presend := relayReadPane(ctx, pane)
+	if !presend.anyOK {
+		// Both reads failed: nothing about the pane is known, and typing
+		// blind is exactly how a replay of a maybe-in-pane row duplicates.
+		// Same fail-closed shape as devin's presend:read_failed.
+		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "presend:unproven:read_failed"}
 	}
-	// #264 D2: verification used to gate solely on claude's "[Pasted text"
-	// composer chip, so any harness lacking that chip reported success on
-	// err==nil alone. classifySubmission is the same harness-aware
-	// classifier prompt.go's direct-prompt path already uses; reusing it
-	// here lets a non-claude harness (e.g. codex's "queued" composer state)
-	// fail verification instead of being reported delivered unconditionally.
-	return relayInjectVerify(ctx, pane, harness, text, string(before))
+	// A failed visible read leaves the presend banner state unknown, which
+	// counts as "already queued" -- the postsend banner then proves nothing
+	// either (tester N-r2-3).
+	presendQueued := !presend.visibleOK || relayQueuedBanner(harness, presend.visible)
+	if result, _ := relayClassifyReads(harness, presend, text, members, false, presendQueued); result == "composer_residue" {
+		// An earlier attempt's paste may still be sitting in the composer.
+		// The return-once contract submits it only when the composer
+		// provably holds nothing but this text; with no earlier read a
+		// paste chip is unowned and never earns a keypress.
+		return relayVerifyOutcome(ctx, pane, harness, text, "", "presend:", presendQueued, presend, members)
+	}
+	if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
+		// herdr may have typed part of the text before failing; the next
+		// attempt's presend check decides whether a retry would duplicate
+		// it.
+		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness, Evidence: "prompt_failed"}
+	}
+	return relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, relayReadPane(ctx, pane), members)
 }
 
 func relayInjectHarness(ctx context.Context, pane string) string {
@@ -646,11 +671,6 @@ var relayComposerSoleChipRE = regexp.MustCompile(`^\[Pastedtext#\d+(?:\+\d+lines
 // devinComposerQueueHint is devin's composer while it holds a queued message,
 // captured live (see devinQueued); Enter there sends the whole queue.
 const devinComposerQueueHint = "Press Enter to send queued messages now"
-
-// relayComposerReadLines is how far back a composer read reaches: far enough
-// that a composer taller than the 10-line classification read still shows
-// its top divider.
-const relayComposerReadLines = "60"
 
 // relayComposer returns the live composer's text for harness, without the
 // prompt glyph and with whitespace removed, and whether it was located.
@@ -715,110 +735,346 @@ func relayComposerReturnSafe(harness, screen, text, before string) (bool, string
 	return false, "composer_foreign"
 }
 
-// relayComposerHeld reads a taller window than the classification read and
-// names why pane's composer may still hold text, or returns "" when claude's
-// composer is seen empty. An unproven verdict is retried by re-injecting, and
-// a re-inject pastes after whatever the composer holds -- possibly this same
-// text, pending in a composer too tall for the 10-line read to show (#626).
-// So for claude only a located, empty composer allows the retry; a failed
-// read or a composer taller than the window proves nothing. Other harnesses
-// draw no locatable composer and keep the #264 R1 retry ("" always).
-func relayComposerHeld(ctx context.Context, pane, harness string) string {
-	if !strings.EqualFold(harness, "claude") {
-		return ""
+// relayVerifyVisibleLines / relayVerifyUnwrappedLines are the two read
+// windows a claude/codex verification consults (#683): the visible screen
+// for the composer and the queue banner, and recent-unwrapped for a
+// transcript echo that a busy pane has already scrolled past the visible
+// window -- the #650 AC3 false negative was exactly such an echo.
+const (
+	relayVerifyVisibleLines   = "60"
+	relayVerifyUnwrappedLines = "400"
+)
+
+// relayPaneReads pairs the two read sources; anyOK reports whether at least
+// one answered, so a dead herdr is told apart from an empty pane, and
+// visibleOK marks whether the banner/composer source answered at all.
+type relayPaneReads struct {
+	visible, unwrapped string
+	anyOK, visibleOK   bool
+}
+
+func relayReadPane(ctx context.Context, pane string) relayPaneReads {
+	var reads relayPaneReads
+	if out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", relayVerifyVisibleLines).Output(); err == nil {
+		reads.visible, reads.anyOK, reads.visibleOK = string(out), true, true
 	}
-	out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", relayComposerReadLines).Output()
-	if err != nil {
-		return "composer_unread"
+	if out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", relayVerifyUnwrappedLines).Output(); err == nil {
+		reads.unwrapped, reads.anyOK = string(out), true
 	}
-	content, ok := relayComposer(harness, string(out))
+	return reads
+}
+
+// relayContainsMarker reports whether compacted text holds any marker.
+// Whitespace is ignored because a wrapped screen can split the marker
+// across lines.
+func relayContainsMarker(compacted string, markers []string) bool {
+	for _, marker := range markers {
+		if marker != "" && strings.Contains(compacted, compactWhitespace(marker)) {
+			return true
+		}
+	}
+	return false
+}
+
+// relayQueuedBanner is the documented "accepted into the submit-later
+// queue" evidence for the relay (#683): claude's "Press up to edit queued
+// messages" banner, codex's "Messages to be submitted after next tool
+// call", and devin's queue state. Landing in the harness's own queue means
+// the message was delivered to it -- the harness submits the queue itself
+// when the turn ends -- and it never earns a return keypress.
+func relayQueuedBanner(harness, screen string) bool {
+	switch {
+	case strings.EqualFold(harness, "claude"), strings.EqualFold(harness, "codex"):
+		return strings.Contains(screen, "Press up to edit queued messages") ||
+			strings.Contains(screen, "Messages to be submitted after next tool call")
+	case strings.EqualFold(harness, "devin"):
+		return devinQueued(screen)
+	}
+	return false
+}
+
+// relayNormalizeEcho renders text the way claude's echo renderer does, for
+// comparison: whitespace compacted and the paired inline markdown
+// delimiters removed (**…**, `…`, *…*, ~~…~~, and _…_ outside words --
+// those vanish from the drawn echo; 42% of real job.completed texts carry
+// them, per the #683 tester's live capture M1). Lone or intraword
+// delimiters stay, because claude draws them literally and deleting them
+// collapses different texts into each other (tester N1: "wait 5~10 min"
+// vs "wait 510 min", "max_retries" vs "maxretries", "2*3" vs "23").
+func relayNormalizeEcho(s string) string {
+	return compactWhitespace(stripEchoDelims(s))
+}
+
+// stripEchoDelims removes paired occurrences of the inline markdown
+// delimiter tokens, longest first so ** and ~~ and __ are seen before
+// their halves.
+func stripEchoDelims(s string) string {
+	for _, d := range []string{"**", "~~", "__", "`", "*", "_"} {
+		s = stripEchoDelimPairs(s, d)
+	}
+	return s
+}
+
+// stripEchoDelimPairs drops each open/close pair of d; an unpaired
+// leftover renders literally and stays.
+func stripEchoDelimPairs(s, d string) string {
+	for {
+		i := echoDelimAt(s, d, 0)
+		if i < 0 {
+			return s
+		}
+		j := echoDelimAt(s, d, i+len(d))
+		if j < 0 {
+			return s
+		}
+		s = s[:i] + s[i+len(d):j] + s[j+len(d):]
+	}
+}
+
+// echoDelimAt finds the next index of delimiter d at or after from. A _
+// token with word bytes on both sides renders literally inside words
+// (max_retries keeps its underscores), and a single * next to another *
+// belongs to a ** run, which is handled as its own token.
+func echoDelimAt(s, d string, from int) int {
+	for {
+		i := strings.Index(s[from:], d)
+		if i < 0 {
+			return -1
+		}
+		i += from
+		var left, right byte
+		if i > 0 {
+			left = s[i-1]
+		}
+		if i+len(d) < len(s) {
+			right = s[i+len(d)]
+		}
+		switch d {
+		case "_", "__":
+			if isASCIIWordByte(left) && isASCIIWordByte(right) {
+				from = i + 1
+				continue
+			}
+		case "*":
+			if left == '*' || right == '*' {
+				from = i + 1
+				continue
+			}
+		}
+		return i
+	}
+}
+
+func isASCIIWordByte(b byte) bool {
+	return b == '_' || '0' <= b && b <= '9' || 'a' <= b && b <= 'z' || 'A' <= b && b <= 'Z'
+}
+
+// relayTranscriptBlocks splits a transcript into logical rows. Claude
+// draws a prompt echo as hard physical rows -- the ❯ row at column 0,
+// then wrap continuations indented two columns -- and herdr's
+// recent-unwrapped read returns those same physical rows (it unwraps
+// scrollback splits, not the echo's drawing; proven live on w1:p56 by the
+// #683 delta tester). Matching therefore looks at the whole block: a
+// column-0 row plus the two-space-indented rows beneath it, ending at the
+// next blank or non-continuation row. A body that ends at a wrap break
+// mid-echo is an interior point of the block, not a line end (tester
+// B1”: "stop the lane" inside the wrapped "stop the lane and wait…"),
+// and the glyph check the earlier fix used was incomplete because a
+// continuation row can itself start with a transcript glyph. Rows
+// indented deeper than two spaces are detail, not a wrap -- they start a
+// block of their own rather than hiding the row above (the tester's D4
+// right-aligned status overlay). Merging an indented non-wrap row into
+// the block above only ever hides a match -- the safe direction.
+func relayTranscriptBlocks(screen string) []string {
+	var blocks []string
+	cur := ""
+	flush := func() {
+		if cur != "" {
+			blocks = append(blocks, cur)
+			cur = ""
+		}
+	}
+	for _, line := range strings.Split(screen, "\n") {
+		switch {
+		case strings.TrimSpace(line) == "":
+			flush()
+		case strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") && cur != "":
+			// Exactly two spaces of indent: a wrap continuation aligned
+			// under the ❯ / ⏺ row above it.
+			cur += line
+		default:
+			flush()
+			cur = line
+		}
+	}
+	flush()
+	return blocks
+}
+
+// relayEchoContains reports whether text's stripped body appears in screen
+// ending at a block boundary. Identity needs the whole body: rounds of one
+// job share both 48-rune markers (same label and host give the same head,
+// the same report path the same tail; only the middle differs), and a bare
+// substring match lets a shorter message hide inside a longer echo that
+// merely contains it (#683 tester B1').
+func relayEchoContains(screen, text string) bool {
+	body := relayNormalizeEcho(stripRelayBoilerplate(text))
+	if body == "" {
+		return false
+	}
+	for _, block := range relayTranscriptBlocks(screen) {
+		if strings.HasSuffix(relayNormalizeEcho(block), body) {
+			return true
+		}
+	}
+	return false
+}
+
+// relayTranscriptEchoes names the first source whose transcript -- the read
+// with the composer region cut away, because recent-unwrapped can carry the
+// live composer rows (#683 tester S3) -- holds echo evidence of text.
+func relayTranscriptEchoes(harness string, reads relayPaneReads, text string) string {
+	if relayEchoContains(promptTranscript(harness, reads.visible), text) {
+		return "visible"
+	}
+	if relayEchoContains(promptTranscript(harness, reads.unwrapped), text) {
+		return "recent-unwrapped"
+	}
+	return ""
+}
+
+// relayClassifyReads folds the two read sources into one submission
+// classification. postSend says the reads were taken after this inject's
+// paste and presendQueued says a queue banner was already showing then:
+// only a banner that newly appeared proves this message joined the queue,
+// because a pre-existing banner belongs to an older queue (#683 tester S1).
+// Rules, in order:
+//
+//   - composer_residue: the located composer holds a paste chip or a
+//     fragment of the text -- any fragment counts, because residue only
+//     ever costs a withheld return, never a delivery claim -- or a chip
+//     floats on a screen whose composer cannot be located;
+//   - queued (postSend only): the harness's queue banner newly appeared;
+//   - marker_observed: the text's whole stripped body echoed in the visible
+//     transcript above the composer or in the recent-unwrapped transcript,
+//     ending at a transcript block boundary (fragments are shared between
+//     messages and prove nothing -- #683 tester B1');
+//   - unproven.
+//
+// presend callers ignore every result but composer_residue: transcript
+// evidence before the paste is exactly the silent-loss family the round-4
+// directive removed, so a batch member's echo there no longer holds the
+// batch either.
+func relayClassifyReads(harness string, reads relayPaneReads, text string, members []string, postSend, presendQueued bool) (string, string) {
+	if composer, ok := relayComposer(harness, reads.visible); ok {
+		if strings.Contains(composer, "[Pastedtext#") {
+			return "composer_residue", "composer_divider"
+		}
+		for _, value := range append([]string{text}, members...) {
+			if relayContainsMarker(composer, devinRelayMarkers(value, nil)) {
+				return "composer_residue", "composer_divider"
+			}
+		}
+	} else if pasteChipRE.MatchString(reads.visible) {
+		return "composer_residue", "paste_chip"
+	}
+	if postSend && !presendQueued && relayQueuedBanner(harness, reads.visible) {
+		return "queued", "queued_banner"
+	}
+	if source := relayTranscriptEchoes(harness, reads, text); source != "" {
+		return "marker_observed", source + ":marker_echo"
+	}
+	return "unproven", "none"
+}
+
+// relayComposerState names what the visible read showed of the composer for
+// unproven evidence: text still pending in it, an empty composer, or no
+// located composer at all (a composer taller than the window, or a harness
+// that draws none).
+func relayComposerState(harness, visible string) string {
+	content, ok := relayComposer(harness, visible)
 	switch {
 	case !ok:
 		return "composer_unlocated"
 	case content != "":
 		return "composer_pending"
 	}
-	return ""
+	return "composer_empty"
+}
+
+// relayUnproven is the #683 policy: an undecidable verdict after herdr
+// accepted the send is maybe-in-pane, never a re-inject. The durable relay
+// row stays undelivered, and a hub replay -- which meets the presend check
+// before anything is typed -- is the late-delivery path. A harness with no
+// submission-evidence path at all keeps the #264 D2 AC0 carve-out:
+// delivered on no negative evidence (e.g. grok, which exposes no prompt in
+// recent-unwrapped -- see 2026-09-14 fleet notes).
+func relayUnproven(harness string, reads relayPaneReads, prefix string) relayInjectResult {
+	if !reads.anyOK {
+		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: prefix + "unproven:read_failed"}
+	}
+	if !harnessHasSubmissionEvidence(harness) {
+		return relayInjectResult{Outcome: relayInjectDelivered, Harness: harness}
+	}
+	return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: prefix + "unproven:" + relayComposerState(harness, reads.visible)}
+}
+
+// relayVerifyOutcome maps one verification round to an inject outcome,
+// spending the single return keypress the #626 contract permits on a
+// composer_residue result and verifying once more after it. presendQueued
+// records whether a queue banner was already showing before this inject's
+// paste; prefix namespaces the evidence ("presend:", "after_return:").
+func relayVerifyOutcome(ctx context.Context, pane, harness, text, before, prefix string, presendQueued bool, reads relayPaneReads, members []string) relayInjectResult {
+	maybe := func(evidence string) relayInjectResult {
+		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: prefix + evidence}
+	}
+	result, rule := relayClassifyReads(harness, reads, text, members, true, presendQueued)
+	if result == "composer_residue" {
+		// The relay-handoff contract permits exactly one return, and only
+		// when the live composer provably holds nothing but this inject's
+		// text -- the keypress submits whatever the composer holds. A
+		// withheld return is may-be-in-pane, never a re-inject.
+		if safe, why := relayComposerReturnSafe(harness, reads.visible, text, before); !safe {
+			return maybe("return_withheld:" + why)
+		}
+		if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
+			return maybe("return_failed")
+		}
+		// A banner already up on the residue screen is an older queue, so it
+		// keeps excluding the queued rule for the post-return reads; a
+		// failed residue-screen read leaves that state unknown, which
+		// excludes it too.
+		presendQueued = presendQueued || !reads.visibleOK || relayQueuedBanner(harness, reads.visible)
+		reads = relayReadPane(ctx, pane)
+		prefix += "after_return:"
+		result, rule = relayClassifyReads(harness, reads, text, members, true, presendQueued)
+	}
+	switch result {
+	case "marker_observed":
+		return relayInjectResult{Outcome: relayInjectDelivered, Harness: harness, Evidence: prefix + rule}
+	case "queued":
+		return relayInjectResult{Outcome: relayInjectQueued, Harness: harness, Evidence: prefix + rule}
+	case "composer_residue":
+		// The one return did not clear it; another keypress is never sent.
+		return maybe(rule)
+	}
+	return relayUnproven(harness, reads, prefix)
 }
 
 // relayInjectVerifySubmission is relayInjectVerify with no pre-paste read,
 // so a paste chip on screen never counts as this inject's own.
 func relayInjectVerifySubmission(ctx context.Context, pane, harness, text string) bool {
-	return relayInjectVerify(ctx, pane, harness, text, "").Outcome == relayInjectDelivered
+	outcome := relayInjectVerify(ctx, pane, harness, text, "").Outcome
+	return outcome == relayInjectDelivered || outcome == relayInjectQueued
 }
 
 // relayInjectVerify verifies a claude/codex relay inject that herdr already
-// accepted; before is the screen read just before the paste. It is
-// delivered on proof, relayInjectMaybeInPane when the return was withheld or
-// the text may still be pending in the composer (#626), and retryable
-// otherwise -- the pre-#626 bool's false.
+// accepted; before is the visible screen read just before the paste. It is
+// delivered on echo or queue proof, and relayInjectMaybeInPane whenever the
+// reads cannot prove what happened (#683) -- the text may already be in the
+// pane, so an undecidable verdict is never a re-inject.
 func relayInjectVerify(ctx context.Context, pane, harness, text, before string) relayInjectResult {
-	delivered := relayInjectResult{Outcome: relayInjectDelivered, Harness: harness}
-	unconfirmed := relayInjectResult{Outcome: relayInjectRetryable, Harness: harness}
-	// An unproven verdict is a retry only once the composer is seen empty.
-	unproven := func() relayInjectResult {
-		if held := relayComposerHeld(ctx, pane, harness); held != "" {
-			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "unproven:" + held}
-		}
-		return unconfirmed
-	}
-	out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", "10").Output()
-	if err != nil {
-		return unconfirmed
-	}
-	marker := markerFor(text)
-	switch classifySubmission(harness, string(out), marker) {
-	case "composer_residue", "queued":
-		// The relay-handoff contract permits exactly one return only when the
-		// classifier proves the prompt has not left the composer/queue yet,
-		// and only when that return cannot submit text this inject did not
-		// type. A withheld return is not retried: the text may be sitting in
-		// that composer, and a re-inject would paste after the foreign text.
-		if safe, rule := relayComposerReturnSafe(harness, string(out), text, before); !safe {
-			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "return_withheld:" + rule}
-		}
-		if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
-			return unconfirmed
-		}
-		out, err = exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", "10").Output()
-		if err != nil {
-			return unconfirmed
-		}
-		switch classifySubmission(harness, string(out), marker) {
-		case "composer_residue", "queued":
-			return unconfirmed
-		case "marker_observed":
-			return delivered
-		default:
-			// unproven: the submission was neither proven delivered nor proven
-			// still stuck in the composer/queue. For a harness that can
-			// actually produce marker_observed (claude/codex/devin), report
-			// false so the hub retries/holds instead of retiring the message
-			// as delivered -- that was #264/R1's fix for an 11-hour message
-			// loss. For a harness with no submission-evidence path at all
-			// (#264 D2 AC0, e.g. grok: classifySubmission gates queued and
-			// marker_observed on harness in {claude, codex, devin}, so it can
-			// never land on anything but unproven here), a false report
-			// retries via busy_relay.go's retryOrDrop, and
-			// defaultHubRelayInject sends the prompt before verifying -- so
-			// the retry re-injects into a still-live pane, which is worse
-			// than the silent loss R1 fixed. Keep the pre-R1 behavior for
-			// such a harness (report delivered on no negative evidence)
-			// until it gets its own evidence path; that is tracked as a
-			// separate followup, not this fix's scope.
-			if harnessHasSubmissionEvidence(harness) {
-				return unproven()
-			}
-			return delivered
-		}
-	case "marker_observed":
-		return delivered
-	}
-	// unproven directly: same reasoning and same carve-out as above.
-	if harnessHasSubmissionEvidence(harness) {
-		return unproven()
-	}
-	return delivered
+	return relayVerifyOutcome(ctx, pane, harness, text, before, "", relayQueuedBanner(harness, before), relayReadPane(ctx, pane), nil)
 }
 
 // relayBoilerplateRE strips the fixed prefixes relay.go and busy_relay.go put
@@ -905,15 +1161,46 @@ func readDevinPane(ctx context.Context, pane string) (devinPaneRead, error) {
 	return devinPaneRead{visible: string(visible), unwrapped: string(unwrapped)}, nil
 }
 
-// classify folds sources and markers into one result. A message still in the
-// composer or queue in either source outranks a transcript echo in either.
-func (read devinPaneRead) classify(markers []string) (string, string) {
+// classify folds sources and texts into one result, ordering devin's rules
+// so a message only in devin's queue never reads as submitted: residue in a
+// located composer first, then the queue state, and only then a transcript
+// echo. Residue and echo count on any fragment of a text (a long devin
+// echo can scroll its head out of the window while the tail stays). The
+// queue arm additionally needs a fragment of one of the texts on the
+// screen -- a foreign or pre-existing queue without it proves nothing
+// (#683 S1). Echoes are matched on the transcript with the composer cut,
+// because recent-unwrapped can carry the live composer rows (#683 S3).
+func (read devinPaneRead) classify(texts []string) (string, string) {
 	sources := []struct{ name, text string }{{"visible", read.visible}, {"recent-unwrapped", read.unwrapped}}
-	for _, want := range []string{"composer_residue", "queued", "marker_observed"} {
-		for _, source := range sources {
-			for _, marker := range markers {
-				if result, rule := devinSubmission(source.text, marker); result == want {
-					return result, source.name + ":" + rule
+	for _, source := range sources {
+		region, ok := composerRegionWith(source.text, isDevinDividerLine)
+		if !ok {
+			continue
+		}
+		compact := compactWhitespace(region)
+		for _, text := range texts {
+			if relayContainsMarker(compact, devinRelayMarkers(text, nil)) {
+				return "composer_residue", source.name + ":composer_divider"
+			}
+		}
+	}
+	for _, source := range sources {
+		if !devinQueued(source.text) {
+			continue
+		}
+		compact := compactWhitespace(source.text)
+		for _, text := range texts {
+			if relayContainsMarker(compact, devinRelayMarkers(text, nil)) {
+				return "queued", source.name + ":devin_queue_banner"
+			}
+		}
+	}
+	for _, source := range sources {
+		transcript := relayNormalizeEcho(promptTranscript("devin", source.text))
+		for _, text := range texts {
+			for _, marker := range devinRelayMarkers(text, nil) {
+				if marker != "" && strings.Contains(transcript, relayNormalizeEcho(marker)) {
+					return "marker_observed", source.name + ":marker_echo"
 				}
 			}
 		}
@@ -921,35 +1208,31 @@ func (read devinPaneRead) classify(markers []string) (string, string) {
 	return "unproven", "visible+recent-unwrapped:none"
 }
 
-// markerSource names the first source that shows any marker, or "".
-func (read devinPaneRead) markerSource(markers []string) string {
-	for _, source := range []struct{ name, text string }{{"visible", read.visible}, {"recent-unwrapped", read.unwrapped}} {
-		compact := compactWhitespace(source.text)
-		for _, marker := range markers {
-			if strings.Contains(compact, compactWhitespace(marker)) {
-				return source.name
-			}
-		}
-	}
-	return ""
+// devinComposerHolds reports whether devin's composer region (the rows
+// between the dividers, including the ❭ input line) holds any marker of
+// the texts. It is the one presend check that still withholds a paste.
+func devinComposerHolds(visible string, markers []string) bool {
+	region, ok := composerRegionWith(visible, isDevinDividerLine)
+	return ok && relayContainsMarker(compactWhitespace(region), markers)
 }
 
-// devinRelayInject is the devin relay path (#547). It never types a message
-// that may already be in the pane:
+// devinRelayInject is the devin relay path (#547).
 //
-//   - Before sending, the visible screen (queue rows, composer) and the
-//     recent-unwrapped transcript must lack every marker of the text and of
-//     each batch member. This runs on every attempt, not only local
-//     retries, because the hub replays an undelivered row to the node as a
-//     fresh message.
+//   - Before sending, only the composer is checked: residue there would be
+//     mangled by a second paste. A marker in the transcript or the queue no
+//     longer withholds the paste -- the 48-rune fragment is shared between
+//     messages and a hold on it strands the row silently (#683 round 4: a
+//     retyped duplicate stays observable, a silent drop does not).
 //   - Once herdr has accepted the text it is in the pane somewhere. Only a
 //     transcript echo proves it submitted; residue or a queue banner gets
 //     exactly one return keypress; anything short of an echo after that --
 //     including no sign of it at all, which is what a message scrolled past
 //     the read window looks like -- is relayInjectMaybeInPane, never a retry.
 //   - Only a send herdr rejected is retryable, and busy_relay.go caps devin
-//     at one re-inject; the next attempt's presend check still runs first.
+//     at one re-inject; the next attempt's presend composer check still
+//     runs first.
 func devinRelayInject(ctx context.Context, pane, text string, members []string) relayInjectResult {
+	texts := append([]string{text}, members...)
 	markers := devinRelayMarkers(text, members)
 	result := relayInjectResult{Harness: "devin"}
 	if len(markers) == 0 {
@@ -961,22 +1244,29 @@ func devinRelayInject(ctx context.Context, pane, text string, members []string) 
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, "presend:read_failed"
 		return result
 	}
-	if source := before.markerSource(markers); source != "" {
-		result.Outcome, result.Evidence = relayInjectMaybeInPane, "presend:"+source+":marker_present"
-		return result
+	// #683 round 4: a marker in the transcript or the queue no longer
+	// withholds the paste. The 48-rune fragment is not identity -- every
+	// idle-wake to one lane shares the head -- and a hold on a shared
+	// fragment strands the row silently, while a retyped duplicate stays
+	// observable. Only composer residue still preempts the paste: typing
+	// into a composer that already holds this text would mangle the
+	// pending copy, so the residue path below submits or holds it instead.
+	after := before
+	if !devinComposerHolds(before.visible, markers) {
+		if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
+			// herdr may have typed part of the text before failing; the next
+			// attempt's composer check decides whether a retry would
+			// duplicate it.
+			result.Outcome, result.Evidence = relayInjectRetryable, "prompt_failed"
+			return result
+		}
+		after, err = readDevinPane(ctx, pane)
+		if err != nil {
+			result.Outcome, result.Evidence = relayInjectMaybeInPane, "postsend:read_failed"
+			return result
+		}
 	}
-	if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
-		// herdr may have typed part of the text before failing; the next
-		// attempt's presend check decides whether a retry would duplicate it.
-		result.Outcome, result.Evidence = relayInjectRetryable, "prompt_failed"
-		return result
-	}
-	after, err := readDevinPane(ctx, pane)
-	if err != nil {
-		result.Outcome, result.Evidence = relayInjectMaybeInPane, "postsend:read_failed"
-		return result
-	}
-	state, evidence := after.classify(markers)
+	state, evidence := after.classify(texts)
 	switch state {
 	case "marker_observed":
 		result.Outcome, result.Evidence = relayInjectDelivered, evidence
@@ -1012,7 +1302,7 @@ func devinRelayInject(ctx context.Context, pane, text string, members []string) 
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" after_return:read_failed"
 		return result
 	}
-	state, afterEvidence := after.classify(markers)
+	state, afterEvidence := after.classify(texts)
 	if state == "marker_observed" {
 		result.Outcome, result.Evidence = relayInjectDelivered, evidence+" after_return:"+afterEvidence
 		return result
