@@ -137,6 +137,70 @@ func TestTask683ReplayOfLandedRowNeverTypes(t *testing.T) {
 	}
 }
 
+// #683 tester B1: head and tail fragments are not identity -- every
+// idle-wake to one lane shares the 48-rune head marker, and same-path
+// reports share the tail. A presend read that shows only a *different*
+// message's echo must not claim this row delivered without typing: the
+// new message is pasted, and its own echo delivers it.
+func TestTask683SharedHeadMarkerIsTyped(t *testing.T) {
+	wakeA := "(같은 내용이 두 번 보이면 재실행 금지) [event] director-1 :: {\"kind\":\"idle-wake\",\"pane\":\"w16:p1\",\"changed_at\":\"2026-09-24T19:35:59.581Z\",\"state_change_seq\":1}"
+	wakeB := "(같은 내용이 두 번 보이면 재실행 금지) [event] director-1 :: {\"kind\":\"idle-wake\",\"pane\":\"w16:p7\",\"changed_at\":\"2026-09-24T19:37:29.581Z\",\"state_change_seq\":9}"
+	if devinRelayMarker(wakeA) != devinRelayMarker(wakeB) {
+		t.Fatal("fixture drifted: the two wakes must share the head marker")
+	}
+	pre := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+wakeA), task683Filler("later", 30)...), "❯")
+	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+wakeA), "\n")
+	post := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+wakeB), task683Filler("post", 40)...), "❯")
+	postTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+wakeB), "\n")
+	_, calls := task683FakeHerdr(t, "claude",
+		[]string{pre, post},
+		[]string{preTranscript, postTranscript})
+	result := defaultHubRelayInjectVerdict(context.Background(), "wB:pD8", wakeB, nil)
+	if result.Outcome != relayInjectDelivered || result.Evidence == "" || strings.HasPrefix(result.Evidence, "presend:") {
+		t.Fatalf("result=%+v, want delivered on the new message's own echo", result)
+	}
+	if got := calls(); task683Count(got, "prompt") != 1 {
+		t.Fatalf("different message sharing the head marker was not typed: %q", got)
+	}
+}
+
+// #683 tester S1: a queue banner that was already up before the paste
+// belongs to an older queue and cannot prove this message joined it. With
+// no echo of the text either, the verdict is may-be-in-pane -- never a
+// delivered claim.
+func TestTask683PreExistingBannerIsNotProof(t *testing.T) {
+	banner := task626Claude([]string{"Press up to edit queued messages"}, "❯")
+	_, calls := task683FakeHerdr(t, "claude",
+		[]string{banner, banner},
+		[]string{task626TranscriptOnly})
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
+	if result.Outcome != relayInjectMaybeInPane {
+		t.Fatalf("result=%+v, want maybe_in_pane on a pre-existing banner", result)
+	}
+	if got := calls(); task683Count(got, "prompt") != 1 || task683Count(got, "send-keys") != 0 {
+		t.Fatalf("herdr calls = %q, want one prompt and no keypress", got)
+	}
+}
+
+// #683 tester S3: recent-unwrapped carries the live composer too, so text
+// still pending there must not count as transcript echo. Both sources get
+// the composer cut before markers are matched.
+func TestTask683ComposerInUnwrappedIsNotEcho(t *testing.T) {
+	pending := "❯ earlier turn\n" + task626Divider + "\n❯ " + task626Text + "\n" + task626Divider + "\n⏵⏵ bypass permissions"
+	echo := "❯ " + task626Text
+	post := task626Claude(append(append([]string{}, task626Transcript...), echo), "❯")
+	_, calls := task683FakeHerdr(t, "claude",
+		[]string{task626ClaudeEmpty, post},
+		[]string{pending, post})
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
+	if result.Outcome != relayInjectDelivered || !strings.HasPrefix(result.Evidence, "visible:") {
+		t.Fatalf("result=%+v, want postsend visible:marker_echo (composer text must not count presend)", result)
+	}
+	if got := calls(); task683Count(got, "prompt") != 1 {
+		t.Fatalf("pending composer text claimed as echo, prompt skipped: %q", got)
+	}
+}
+
 // AC1/AC4: the harness's documented queue banner is landed -- the queue
 // submits the message itself when the turn ends. One prompt, no keypress,
 // reported delivered with the queued reason.
