@@ -227,7 +227,13 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 				}
 				continue
 			}
-			if kind != "job.completed" && kind != "job.completion" && kind != "job.escalate" && kind != "job.joined" {
+			if kind == "job.completion" {
+				kind = "job.completed"
+			}
+			// The relay kind set is emitRelayKinds — one closed set read by the
+			// producer and the scanner alike. lane.event lives in the
+			// events-lane namespace and is scanned by its own reader below.
+			if !emitRelayKinds[kind] || kind == "lane.event" {
 				continue
 			}
 			agentLabel := event.agentLabel()
@@ -238,13 +244,19 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 			if epoch == 0 {
 				epoch = 1
 			}
-			if (kind == "job.escalate" || kind == "job.joined") && event.reason() == "" {
+			// Every relayed job.* kind except a completion states why. This is
+			// also the echo guard: the hub's own revocation marker carries no
+			// reason, so a hub→node job.revoked is never relayed back.
+			if kind != "job.completed" && event.reason() == "" {
 				continue
 			}
-			if kind == "job.completion" {
-				kind = "job.completed"
+			// A terminal signal without a routable owner lane can never be
+			// delivered — emitting it would only stamp an outbox row the hub's
+			// relayJobEventFrom drops unanswered.
+			if relayTerminalSignalKinds[kind] && !validReportRelayLaneName(event.ownerLane()) {
+				continue
 			}
-			reportPath := event.reportPath()
+			reportPath := relaySignalReportPath(kind, event.reportPath())
 			if relayEventPathFallbackKinds[kind] && reportPath == "" {
 				// The event is the durable full-question record when no separate
 				// report exists. The hub payload must point operators back to it,

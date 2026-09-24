@@ -1443,7 +1443,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 	}
 	payload := hubJobCompletionPayloadForJob(job.HubActiveJob, job.EventID, replay)
-	if job.Kind == "job.escalate" || job.Kind == "job.joined" {
+	if job.Kind == "job.escalate" || job.Kind == "job.joined" || relayTerminalSignalKinds[job.Kind] {
 		payload, _ = json.Marshal(struct {
 			JobID          string `json:"job_id"`
 			Epoch          uint64 `json:"epoch"`

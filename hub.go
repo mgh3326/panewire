@@ -1126,7 +1126,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.relayJobCompletionFrom(machineID, completion)
 		}
-		if message.Kind == "job.escalate" || message.Kind == "job.joined" {
+		if message.Kind == "job.escalate" || message.Kind == "job.joined" || relayTerminalSignalKinds[message.Kind] {
 			event, truncated, valid := decodeHubJobEscalationPayloadDetailed(message.Payload)
 			if !valid {
 				h.countUnknownMessage()
@@ -1137,6 +1137,16 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			if event.Replay {
 				h.logger.Info("relay record replayed after node restart", "job", event.JobID, "kind", message.Kind, "node", machineID)
+			}
+			if message.Kind == "job.revoked" {
+				// A node-reported revocation is terminal for the job record
+				// under the same epoch fencing as a completion — without it the
+				// console would keep a closed job "active" forever. The relay
+				// itself runs either way; job.lost is not terminal and never
+				// takes this branch.
+				if !h.observeJobRevocation(machineID, event, received) {
+					h.lateRegisterJobCompletion(machineID, event, received)
+				}
 			}
 			h.relayJobEventFrom(machineID, message.Kind, event)
 		}
@@ -1553,7 +1563,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
-		if message.Kind == "job.escalate" || message.Kind == "job.joined" {
+		if message.Kind == "job.escalate" || message.Kind == "job.joined" || relayTerminalSignalKinds[message.Kind] {
 			if _, valid := decodeHubJobEscalationPayload(rawPayload); !valid {
 				return hubInbound{}, false
 			}
@@ -1607,7 +1617,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "lane.event", "idle-wake.route.request", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched", "relay.dropped":
+	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "job.lost", "job.revoked", "lane.event", "idle-wake.route.request", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched", "relay.dropped":
 		return true
 	}
 	return false

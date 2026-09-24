@@ -121,6 +121,51 @@ answers 200 with `attempts + 1`, the row itself is unchanged (first-writer-wins,
 below), and `delivered_at` is not touched by that path. The contract is
 unchanged; this is the counter it already had.
 
+## The relay kind set
+
+`emitRelayKinds` in `emit.go` is the single location of the closed set: the
+CLI validator, the daemon emit gate, and the node scanner all read that map.
+The set's relationship to wrk's `TERMINAL` (agent-skills `wrk`, currently
+`{job.completed, job.joined, job.revoked}`):
+
+| kind | wrk TERMINAL | route | terminal for the hub job record |
+|---|---|---|---|
+| `job.completed` | yes | owner lane | yes |
+| `job.joined` | yes | owner lane's parent | no — wrk-terminal, hub record unchanged |
+| `job.revoked` | yes | owner lane's parent | yes |
+| `job.lost` | **no** | owner lane | **no** — a lost job may still complete |
+| `job.escalate` | no | owner lane's parent | no |
+| `lane.event` | n/a | named lane | no |
+
+Every relayed `job.*` kind except `job.completed` must carry a non-empty
+`reason`, and `job.lost`/`job.revoked` additionally require a routable
+`owner_lane`; a record that cannot state why or name its lane is refused at
+emit, at the daemon gate, and at the scanner. That requirement doubles as the
+echo guard: the hub's own revocation marker (`writeHubRevocation`) carries
+only `type`/`job_id`/`epoch`, so a hub→node `job.revoked` is never relayed
+back — only the owner-declared record (`panewire job close`, which writes
+`kind`/`owner_lane`/`reason`) is.
+
+`job.lost` writes `report_path` empty (or `/dev/null`, which is normalized to
+empty). Like `job.escalate`/`job.joined`, the durable event file then stands
+in for the report path — the same substitution on the emit path and the scan
+path, so one event cannot key two different outbox rows.
+
+### Version skew
+
+- **Old hub, new node:** a kind outside `knownHubEventKind` is rejected by the
+  inbound parse and counted in `unknown_messages`. No injection, no
+  handoffkeep call, no job record — harmless but invisible to the operator,
+  which is why the hub ships before the nodes that produce the new kinds.
+- **New hub, old handoffkeep:** the `relay_events` CHECK constraint lives in
+  the handoffkeep repository and must name the new kinds **before** nodes that
+  produce them deploy. An old schema rejects the POST; the hub then broadcasts
+  `relay.unpersisted`, sends no acknowledgement, and the node retries within
+  its normal outbox bounds — observable, never silently lost.
+- **No retrospective publication:** only event files inside the node outbox's
+  24h window (and inside the event-identity migration cutoff) are ever
+  offered. Widening the kind set does not replay history.
+
 ## Node outbox
 
 The node keeps `relay_sent(kind, job_id, epoch, report_path, reason, sent_at,
@@ -221,9 +266,12 @@ panewire emit --kind job.completed --job <job_id> --report <path>
 ```
 
 The inbox root comes from `--inbox-root`, else `PANEWIRE_INBOX_ROOT`, else the
-daemon's default data directory. `--kind` must be `job.completed`,
-`job.escalate`, or `job.joined`; a missing `--job` or `--report` is a usage
-error.
+daemon's default data directory. `--kind` must be one of the relay kinds:
+`job.completed`, `job.escalate`, `job.joined`, `job.lost`, `job.revoked`, or
+`lane.event`. A missing `--job` is a usage error; `--report` is required for
+`job.completed`, while the self-record kinds (`job.escalate`, `job.joined`,
+`job.lost`, `job.revoked`) fall back to their own event file — and
+`job.lost`/`job.revoked` additionally require `--reason` and `--owner-lane`.
 
 The push carries the inbox root the file was written in, and a daemon relaying
 from a different root refuses it. Redirecting `--inbox-root` alone does not

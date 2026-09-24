@@ -752,6 +752,10 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		}
 	} else if !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
+	} else if relayTerminalSignalKinds[req.Kind] && (req.Reason == "" || !validReportRelayLaneName(req.OwnerLane)) {
+		// Same rule as emitJobRecord: a terminal signal that cannot state why
+		// or name its owner lane is refused before it enters the outbox.
+		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if !d.emitNamespaceMatches(req.InboxRoot) {
 		local := d.emitNamespaceRoot()

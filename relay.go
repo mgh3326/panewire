@@ -139,6 +139,13 @@ func relayTextForKind(kind string, event hubJobEventPayload) string {
 		head := truncateRelayText(event.Head, 9)
 		return boundRelayText("[joined] "+truncateRelayText(event.Label, 120)+" :: PR "+truncateRelayText(event.PR, 120)+" @ "+head+" → ", event.ReportPath)
 	}
+	if kind == "job.lost" || kind == "job.revoked" {
+		tag := "[lost] "
+		if kind == "job.revoked" {
+			tag = "[revoked] "
+		}
+		return boundRelayText(tag+truncateRelayText(event.Label, 64)+" ("+truncateRelayText(event.Host, 64)+") :: "+truncateRelayText(event.Reason, 200)+" → ", event.ReportPath)
+	}
 	return completedRelayText(event)
 }
 
@@ -591,7 +598,10 @@ func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (re
 	defer h.mu.Unlock()
 	routes := loadReportRelayRoutes(h.reportRelayPath)
 	route, exists := routes[event.OwnerLane]
-	if exists && (kind == "job.escalate" || kind == "job.joined") {
+	// Escalation, join and revocation are upward reports: they reach the owner
+	// lane's parent, the way a builder's joined reaches its director. job.lost
+	// is an observation for the owner itself and stays on the owner route.
+	if exists && (kind == "job.escalate" || kind == "job.joined" || kind == "job.revoked") {
 		parent, parentExists := routes[route.Parent]
 		if route.Parent == "" || !parentExists {
 			exists = false
