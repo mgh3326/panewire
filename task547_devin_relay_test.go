@@ -468,7 +468,7 @@ func TestTask547DevinQuotedQueueTextIsNotAQueue(t *testing.T) {
 func TestTask547HarnessChangeDuringInjectIsMaybeInPane(t *testing.T) {
 	calls := task547FakeDevin{
 		getBefore: "claude", getAfter: "devin",
-		afterSend: map[string]string{"10": task547QueuedScreen(task547RelayText)},
+		afterSend: task547Both(task547QueuedScreen(task547RelayText)),
 	}.install(t)
 	result := defaultHubRelayInjectVerdict(context.Background(), "pane", task547RelayText, nil)
 	if result.Outcome != relayInjectMaybeInPane || result.Evidence != "harness_changed:claude->devin" {

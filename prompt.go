@@ -452,7 +452,7 @@ func classifySubmissionEvidence(harness, screen, marker string) (string, string)
 	if strings.EqualFold(harness, "claude") && claudeComposerContains(screen, marker) {
 		return "composer_residue", "composer_divider"
 	}
-	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex")) && strings.Contains(screen, "Press up to edit queued messages") && !pasteChipRE.MatchString(screen) {
+	if relayQueuedBanner(harness, screen) && !pasteChipRE.MatchString(screen) {
 		return "queued", "queued_banner"
 	}
 	if (strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex")) && marker != "" && strings.Contains(screen, marker) {
