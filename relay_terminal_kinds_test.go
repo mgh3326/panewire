@@ -3,6 +3,7 @@ package panewire
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -428,6 +429,60 @@ func TestT507EmittedRevokedFileIsTerminalForKindReaders(t *testing.T) {
 	}
 	if lostState.terminal != "" {
 		t.Fatalf("a job.lost file marked terminal=%q", lostState.terminal)
+	}
+}
+
+// F6: job.lost is an observation kind — a second lost that differs by
+// metadata (a different pane observing the loss, a lost→recover→lost cycle)
+// is a distinct event. The scanner keys each event by its own file, so emit
+// must give it one instead of refusing on the shared pre-file key. A
+// byte-identical retry still reuses the first file, and job.revoked stays
+// strict — a second declaration is a conflict, not a new event.
+func TestT507EmitDistinctLostObservationsGetOwnFiles(t *testing.T) {
+	inbox := t.TempDir()
+	first := emitRecord{
+		Type: "job.lost", JobID: "t507-f6", Epoch: 1, OwnerLane: "lane-w",
+		Reason: "timeout", Host: "host-a", PaneID: "w1:p1", CreatedAt: "2026-09-24T00:00:00Z",
+	}
+	p1, err := writeEmitRecord(inbox, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1b, err := writeEmitRecord(inbox, first)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p1b != p1 {
+		t.Fatalf("identical retry wrote %s, want reuse of %s", p1b, p1)
+	}
+
+	second := first
+	second.PaneID = "w1:p2"
+	second.CreatedAt = "2026-09-24T00:05:00Z"
+	p2, err := writeEmitRecord(inbox, second)
+	if err != nil {
+		t.Fatalf("a distinct job.lost observation was refused: %v", err)
+	}
+	if p2 == p1 {
+		t.Fatal("a distinct job.lost observation reused the first file")
+	}
+
+	store := NewMemoryStore(t)
+	defer store.Close()
+	if offered := r20Node(inbox, store).jobCompletionEvents(); len(offered) != 2 {
+		t.Fatalf("two lost files offered=%d, want 2", len(offered))
+	}
+
+	revoked := emitRecord{
+		Type: "job.revoked", JobID: "t507-f6r", Epoch: 1, OwnerLane: "lane-w",
+		Reason: "declared", Host: "host-a", PaneID: "w1:p1",
+	}
+	if _, err := writeEmitRecord(inbox, revoked); err != nil {
+		t.Fatal(err)
+	}
+	revoked.PaneID = "w1:p2"
+	if _, err := writeEmitRecord(inbox, revoked); !errors.Is(err, errEmitDuplicateOutboxKey) {
+		t.Fatalf("a second job.revoked err=%v, want duplicate outbox key", err)
 	}
 }
 

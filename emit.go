@@ -266,6 +266,16 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		if record.Type == "job.escalate" && record.ReportPath == "" && existing.question != record.Question {
 			continue
 		}
+		// job.lost is an observation, not a one-shot declaration: a job can be
+		// lost, recover, and be lost again, and two panes can each observe a
+		// loss. The scanner keys each event by its own file, so a second lost
+		// that differs by metadata is a distinct event and needs its own file;
+		// only a byte-identical observation reuses the first. job.revoked,
+		// job.joined and job.completed stay strict — a second declaration of
+		// either is a conflict, not a new event.
+		if record.Type == "job.lost" && !existing.matches(record) {
+			continue
+		}
 		if existing.matches(record) {
 			return filepath.Join(eventsDir, entry.Name()), nil
 		}
