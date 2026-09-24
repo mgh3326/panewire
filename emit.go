@@ -16,9 +16,35 @@ import (
 	"unicode/utf8"
 )
 
-// emitRelayKinds is the closed set of relay record kinds. It matches both the
-// node scanner and handoffkeep's own CHECK constraint.
-var emitRelayKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "lane.event": true}
+// emitRelayKinds is the closed set of relay record kinds, and the node
+// scanner reads this same map — the set lives in exactly one place. It covers
+// wrk's terminal set (job.completed, job.joined, job.revoked) plus the
+// job.lost sentinel observation, which is relayed but deliberately not
+// terminal: a lost job may still complete. handoffkeep's own relay_events
+// CHECK constraint must name these kinds before nodes that can produce them
+// deploy; an older handoffkeep rejects the append and the hub reports
+// relay.unpersisted (docs/r20-relay-persistence.md).
+var emitRelayKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "job.lost": true, "job.revoked": true, "lane.event": true}
+
+// relayTerminalSignalKinds are the relay kinds whose record is a terminal
+// signal rather than a report: they must state why (the hub decode requires a
+// non-empty reason) and name a routable owner lane. The owner-lane rule is
+// also the echo guard — the hub's own revocation marker carries neither
+// field, so a hub→node job.revoked can never be relayed back.
+var relayTerminalSignalKinds = map[string]bool{"job.lost": true, "job.revoked": true}
+
+// relaySignalReportPath treats the sentinel's empty-report spelling as absent.
+// wrk writes report_path=/dev/null when a lost job produced no report; for
+// the self-record kinds the durable event file is the better pointer, so emit,
+// the dedupe reader, and the scanner all normalize through this one helper —
+// a key built from different spellings of "no report" is how one event would
+// arrive twice.
+func relaySignalReportPath(kind, path string) string {
+	if relayTerminalSignalKinds[kind] && path == "/dev/null" {
+		return ""
+	}
+	return path
+}
 
 const (
 	laneEventTextLimit     = 2048
@@ -37,7 +63,7 @@ var errEmitDuplicateOutboxKey = errors.New("duplicate outbox key")
 // record when no separate report exists. `panewire emit` and the node scanner
 // both consult this map: if only one of them substituted the event path, the
 // same event would carry two different report paths and so two dedupe keys.
-var relayEventPathFallbackKinds = map[string]bool{"job.escalate": true, "job.joined": true}
+var relayEventPathFallbackKinds = map[string]bool{"job.escalate": true, "job.joined": true, "job.lost": true, "job.revoked": true}
 
 // emitInboxRoot resolves the same namespace the daemon watches, so an event a
 // worker writes is the event the node later scans.
@@ -58,7 +84,12 @@ func defaultInboxRoot() string {
 // emitRecord is the flat local event form hubInboxEvent already reads. The
 // file is the offline fallback, so it must stay readable without the daemon.
 type emitRecord struct {
-	Type           string `json:"type"`
+	Type string `json:"type"`
+	// Kind carries the same value as Type under the key wrk reap
+	// (document["kind"]), scanJobCloseState and the fleet census read, so an
+	// emitted terminal kind is terminal for every consumer, not only the
+	// scanner. Readers that decode emitRecord itself still see Type.
+	Kind           string `json:"kind,omitempty"`
 	JobID          string `json:"job_id"`
 	Epoch          uint64 `json:"epoch"`
 	CreatedAt      string `json:"created_at"`
@@ -81,7 +112,7 @@ type emitRecord struct {
 func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	fs := flag.NewFlagSet("panewire emit", flag.ContinueOnError)
 	fs.SetOutput(stderr)
-	kind := fs.String("kind", "", "job.completed | job.escalate | job.joined | lane.event")
+	kind := fs.String("kind", "", "job.completed | job.escalate | job.joined | job.lost | job.revoked | lane.event")
 	job := fs.String("job", "", "job id")
 	lane := fs.String("lane", "", "direct destination lane for lane.event")
 	eventID := fs.String("event-id", "", "producer event id for lane.event")
@@ -155,6 +186,14 @@ func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration
 	if record.JobID == "" || !hubJobIDPattern.MatchString(record.JobID) {
 		return ExitUsage
 	}
+	record.ReportPath = relaySignalReportPath(record.Type, record.ReportPath)
+	// A terminal signal must state why and name a routable owner lane. The hub
+	// decode rejects a missing reason, and a missing lane can never resolve a
+	// route — producing either record would only stamp an outbox row no
+	// acknowledgement can ever retire.
+	if relayTerminalSignalKinds[record.Type] && (record.Reason == "" || !validReportRelayLaneName(record.OwnerLane)) {
+		return ExitUsage
+	}
 	// A completion is meaningless without the report it announces. An escalation
 	// or a join carries its own question in the event file, so an empty report is
 	// the normal shape there and the event file stands in for the report path.
@@ -198,6 +237,7 @@ func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration
 // different metadata is an explicit conflict: silently reusing its file would
 // discard a real event.
 func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
+	record.Kind = record.Type
 	eventsDir := filepath.Join(inboxRoot, "jobs", record.JobID, "events")
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
 		return "", err
@@ -224,6 +264,18 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		// own event-file path. Different questions must therefore receive
 		// separate files, even though the pre-file key is the same.
 		if record.Type == "job.escalate" && record.ReportPath == "" && existing.question != record.Question {
+			continue
+		}
+		// job.lost is an observation, not a declaration: two panes can each
+		// observe a loss, and the scanner keys each event by its own file. A
+		// second lost differing on the compared fields (matches ignores
+		// created_at/agent_label) is a distinct event and needs its own file.
+		// One identical on the compared fields is indistinguishable from a
+		// retry and reuses the first — a same-pane re-loss folds too, since
+		// emit has no producer event id to tell it apart. job.revoked,
+		// job.joined and job.completed stay strict — a second record under
+		// the same key is a conflict, not a new event.
+		if record.Type == "job.lost" && !existing.matches(record) {
 			continue
 		}
 		if existing.matches(record) {
@@ -276,6 +328,7 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 // direct (owner_lane,event_id) pair, so duplicates are an error rather than
 // the silent job.* file reuse contract.
 func writeLaneEmitRecord(inboxRoot string, record emitRecord) (string, error) {
+	record.Kind = record.Type
 	eventsDir := filepath.Join(inboxRoot, "events-lane")
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
 		return "", err
@@ -512,15 +565,16 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 	if epoch == 0 {
 		epoch = 1
 	}
+	reportPath := relaySignalReportPath(kind, event.reportPath())
 	return emitDedupeRecord{
-		key:            relayEventOutboxKey(kind, jobID, epoch, event.reportPath(), event.reason()),
+		key:            relayEventOutboxKey(kind, jobID, epoch, reportPath, event.reason()),
 		kind:           kind,
 		createdAt:      event.CreatedAt,
 		epoch:          epoch,
 		ownerLane:      event.ownerLane(),
 		label:          event.label(),
 		host:           event.host(),
-		reportPath:     event.reportPath(),
+		reportPath:     reportPath,
 		reportLastLine: event.reportLastLine(),
 		reason:         event.reason(),
 		question:       event.question(),
@@ -543,7 +597,7 @@ func emitJobEventFileID(inboxRoot string, req localRequest, epoch uint64) (strin
 	}
 	record := emitRecord{
 		Type: req.Kind, JobID: req.JobID, Epoch: epoch, OwnerLane: req.OwnerLane,
-		Label: req.Label, Host: req.Host, ReportPath: req.ReportPath,
+		Label: req.Label, Host: req.Host, ReportPath: relaySignalReportPath(req.Kind, req.ReportPath),
 		ReportLastLine: req.ReportLastLine, Reason: req.Reason, Question: req.Question,
 		PR: req.PR, Head: req.Head, PaneID: req.PaneID,
 	}
