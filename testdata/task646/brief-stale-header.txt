@@ -1,0 +1,36 @@
+expect: name=t646-repro
+(같은 내용이 두 번 보이면 재실행 금지)
+comms-contract: v1
+This is a panewire test message (run 15). Reply with exactly: ack-15 — and nothing else. Do not use any tools.
+filler line 1 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 2 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 3 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 4 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 5 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 6 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 7 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 8 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 9 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 10 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 11 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 12 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 13 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 14 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 15 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 16 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 17 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 18 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 19 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 20 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 21 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 22 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 23 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 24 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 25 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 26 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 27 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 28 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 29 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 30 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 31 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+filler line 32 of run 15: lorem ipsum dolor sit amet, consectetur adipiscing elit.

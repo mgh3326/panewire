@@ -1,0 +1,80 @@
+  (ack-12). I haven't used any tools.
+
+✻ Cogitated for 2s · done 오후 3:15
+
+❯ F4 setup: use the Bash tool to run exactly: sleep 20 — then reply with the word done.
+
+⏺ Bash(sleep 20)
+  ⎿  (No output)
+  ⎿  Allowed by auto mode classifier
+
+❯ (같은 내용이 두 번 보이면 재실행 금지)
+  comms-contract: v1
+  F4 queued message — reply with ack-F4.
+
+⏺ done
+
+  ack-F4
+
+✻ Sautéed for 27s · done 오후 3:17
+
+❯ (같은 내용이 두 번 보이면 재실행 금지)
+  comms-contract: v1
+  This is a panewire test message (run F5). Reply with exactly: ack-15 — and nothing else. Do not use any tools.
+  filler line 1 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 2 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 3 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 4 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 5 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 6 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 7 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 8 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 9 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 10 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 11 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 12 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 13 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 14 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 15 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 16 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 17 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 18 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 19 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 20 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 21 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 22 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 23 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 24 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 25 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 26 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 27 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 28 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 29 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 30 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 31 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+  filler line 32 of run F5: lorem ipsum dolor sit amet, consectetur adipiscing elit.
+
+⏺ Run F5 came in as a paste only, with no typed text from you, so I haven't sent an ack.
+
+  This paste has a mismatch. It's labelled run F5, but it asks for ack-15, not ack-F5. That label points back to run 15, which I also saw earlier as a
+  paste and didn't ack. Apart from the run label, this paste is new content, not a repeat of run 15.
+
+  Tally so far:
+  - Pasted, not acked: runs 01–11, 13–17 and F5.
+  - Typed, acked:
+    - Run 12 (ack-12).
+    - The F4 setup: I ran sleep 20, which completed normally, and replied done.
+    - The F4 message queued mid-turn (ack-F4).
+
+  I didn't use any tools for this one.
+
+✻ Cooked for 4s · done 오후 3:17
+
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+❯ 
+──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+  [Opus 5.5 (1M context)] │ cwd │ ⏱️  9m
+  Context █░░░░░░░░░ 8% │ Usage █░░░░░░░░░ 9% (resets in 4h 3m) | Weekly ████░░░░░░ 36% (resets in 2d 2h)
+  1 CLAUDE.md | 1 MCPs | 1 hooks
+  ✓ Bash ×1
+  ⏵⏵ auto mode on (shift+tab to cycle) · ← 3 agents

@@ -101,8 +101,10 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 		}
 		return recordFailureForRequest(ctx, store, id, req, promptHash, body, req.StorePromptBody, "ambiguous", err)
 	}
+	pre.Source = "recent_unwrapped"
 	if pre.Text == "" {
 		pre, err = readPane(ctx, client, pane, "visible")
+		pre.Source = "visible"
 		if err != nil {
 			if ctx.Err() != nil {
 				err = &codedError{ExitTimeout, fmt.Errorf("timeout reading target")}
@@ -177,7 +179,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 		return finishPrompt(ctx, store, d, &codedError{code, fmt.Errorf("herdr prompt rejected: %w", err)})
 	}
 
-	post, submission, postErr := pollSubmission(ctx, client, pane, markerFor(body))
+	post, submission, postErr := pollSubmission(ctx, client, pane, body, pre)
 	if postErr != nil {
 		d.SubmissionResult = "unproven"
 		code := ExitDeliveryFailure
@@ -581,14 +583,37 @@ func toolReceipt(harness, screen, marker string, evidenceRevision, sendRevision 
 	return false
 }
 
-func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, marker string) (readEvidence, string, error) {
+// promptReturnSettle is how long a direct prompt's own text must stay in the
+// composer before pollSubmission sends its one return (#646). herdr writes
+// the paste and its Enter as one ordered submission, and a claude pane
+// renders the echo about 0.4s later, so text still in the composer after
+// this long is an Enter the harness dropped, not a render in progress.
+const promptReturnSettle = 600 * time.Millisecond
+
+// promptReturnRecheck is the time a return must leave for the reads that
+// prove it; with less, the call would report residue for text it submitted.
+const promptReturnRecheck = 500 * time.Millisecond
+
+// pollSubmission reads pane until the prompt's submission is proven, it is
+// queued, or ctx ends, and returns the last read and its classification.
+// pre is the preflight read: a marker counts as echoed only when it is new
+// since then (see promptFreshEcho). Residue of this call's own text gets one
+// return keypress, and only when the composer holds nothing but that text
+// (#646, the #626 part B rule).
+func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, body string, pre readEvidence) (readEvidence, string, error) {
 	var last readEvidence
 	lastResult := "unproven"
+	first, second := "recent_unwrapped", "visible"
+	if pre.Source == "visible" {
+		first, second = second, first
+	}
+	var residueSince time.Time
+	returnAttempted, returnRule := false, ""
 	for {
-		source := "recent_unwrapped"
+		source := first
 		post, err := readPane(ctx, c, p, source)
 		if err == nil && post.Text == "" {
-			source = "visible"
+			source = second
 			post, err = readPane(ctx, c, p, source)
 		}
 		if err != nil {
@@ -597,7 +622,15 @@ func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, marker 
 			}
 			return last, "unproven", err
 		}
-		result, rule := classifySubmissionEvidence(p.Harness, post.Text, marker)
+		result, rule := classifyPromptSubmission(p.Harness, pre.Text, post.Text, body)
+		if result == "marker_observed" && source != pre.Source {
+			// The two reads cover different windows, so a marker that is
+			// only above the preflight window would read as new.
+			result, rule = "unproven", "marker_unanchored"
+		}
+		if returnRule != "" {
+			rule += "+return_once:" + returnRule
+		}
 		post.Source, post.Rule = source, rule
 		last = post
 		lastResult = result
@@ -606,6 +639,22 @@ func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, marker 
 		}
 		// composer_residue is expected during the paste→submit transition;
 		// retain it as the possible final result but keep polling for proof.
+		if result != "composer_residue" {
+			residueSince = time.Time{}
+		} else if residueSince.IsZero() {
+			residueSince = time.Now()
+		} else if !returnAttempted && time.Since(residueSince) >= promptReturnSettle && promptBudgetLeft(ctx) >= promptReturnRecheck {
+			if safe, why := relayComposerReturnSafe(p.Harness, post.Text, body, pre.Text); safe && (why == "composer_self" || why == "composer_self_chip") {
+				returnAttempted = true
+				target := p.PaneID
+				if target == "" {
+					target = p.Agent
+				}
+				if _, err := c.Call(ctx, "agent.send_keys", map[string]any{"target": target, "keys": []string{"return"}}); err == nil {
+					returnRule = why
+				}
+			}
+		}
 		timer := time.NewTimer(200 * time.Millisecond)
 		select {
 		case <-ctx.Done():
@@ -616,6 +665,178 @@ func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, marker 
 		case <-timer.C:
 		}
 	}
+}
+
+func promptBudgetLeft(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return promptReturnRecheck
+	}
+	return time.Until(deadline)
+}
+
+// promptTailMarkerRunes is the length of the tail marker. A brief longer than
+// the read window scrolls its head (and markerFor's marker) out of the
+// window by the first read, while its tail stays next to the composer.
+const promptTailMarkerRunes = 48
+
+func promptTailMarker(body string) string {
+	r := []rune(strings.TrimSpace(body))
+	if len(r) > promptTailMarkerRunes {
+		r = r[len(r)-promptTailMarkerRunes:]
+	}
+	return strings.TrimSpace(string(r))
+}
+
+// classifyPromptSubmission is the direct-prompt classifier (#646). It keeps
+// classifySubmissionEvidence's residue and queued rules and tightens the one
+// that reports a submission, which there only asks whether the marker is
+// anywhere on screen. That answer is wrong in two real cases:
+//
+//   - the marker is in the composer, but the composer was not found or the
+//     wrong lines were taken for it -- a brief with a line of ─ in it moves
+//     composerRegion to that line (fixture f3);
+//   - the marker is an earlier message's. markerFor's 24 runes of a fleet
+//     brief are its boilerplate header, which every relay message and most
+//     briefs start with (fixture f5-pre: #623's delta brief).
+//
+// So for claude the composer must be located, its top line must carry the
+// ❯ prompt, and it must not hold either marker; and for every harness the
+// echo must be new since pre, the preflight read. The tail marker is also
+// accepted, so a brief taller than the read window can still be proven.
+func classifyPromptSubmission(harness, pre, screen, body string) (string, string) {
+	head, tail := markerFor(body), promptTailMarker(body)
+	result, rule := classifySubmissionEvidence(harness, screen, head)
+	if result == "composer_residue" || result == "queued" || !harnessHasSubmissionEvidence(harness) {
+		return result, rule
+	}
+	if strings.EqualFold(harness, "claude") {
+		region, ok := claudePromptComposer(screen)
+		if !ok {
+			return "unproven", "composer_unlocated"
+		}
+		if compact := compactWhitespace(region); strings.Contains(compact, compactWhitespace(head)) || strings.Contains(compact, compactWhitespace(tail)) {
+			return "composer_residue", "composer_divider"
+		}
+	}
+	if promptFreshEcho(harness, pre, screen, head) {
+		return "marker_observed", "marker_echo"
+	}
+	if promptFreshEcho(harness, pre, screen, tail) {
+		return "marker_observed", "marker_echo_tail"
+	}
+	if result == "marker_observed" {
+		return "unproven", "marker_stale"
+	}
+	return "unproven", "none"
+}
+
+// claudePromptComposer is claude's live composer: the lines between its top
+// edge (see claudeComposerTop) and the last divider line.
+func claudePromptComposer(screen string) (string, bool) {
+	lines := strings.Split(screen, "\n")
+	top, bottom, ok := claudeComposerTop(lines)
+	if !ok {
+		return "", false
+	}
+	return strings.Join(lines[top+1:bottom], "\n"), true
+}
+
+// claudeComposerTop finds claude's composer as the last divider line whose
+// next non-blank line starts with the ❯ prompt, above the last divider line.
+// composerRegion takes the second-to-last divider instead, which a pending
+// brief with a line of ─ in it supplies itself: the region then starts inside
+// the brief and its first lines read as transcript (fixture f3).
+func claudeComposerTop(lines []string) (top, bottom int, ok bool) {
+	var dividers []int
+	for i, line := range lines {
+		if isDividerLine(line) {
+			dividers = append(dividers, i)
+		}
+	}
+	if len(dividers) < 2 {
+		return 0, 0, false
+	}
+	bottom = dividers[len(dividers)-1]
+	for k := len(dividers) - 2; k >= 0; k-- {
+		for i := dividers[k] + 1; i < bottom; i++ {
+			if line := strings.TrimSpace(lines[i]); line != "" {
+				if strings.HasPrefix(line, "❯") {
+					return dividers[k], bottom, true
+				}
+				break
+			}
+		}
+	}
+	return 0, 0, false
+}
+
+// promptTranscript is screen without its live composer and what is under it:
+// the part where a submitted prompt is echoed. codex and unknown harnesses
+// draw no locatable composer, so their whole screen counts.
+func promptTranscript(harness, screen string) string {
+	lines := strings.Split(screen, "\n")
+	switch {
+	case strings.EqualFold(harness, "claude"):
+		if top, _, ok := claudeComposerTop(lines); ok {
+			return strings.Join(lines[:top], "\n")
+		}
+	case strings.EqualFold(harness, "devin"):
+		if start, ok := composerStartWith(lines, isDevinDividerLine); ok {
+			return strings.Join(lines[:start], "\n")
+		}
+	}
+	return screen
+}
+
+// promptAnchorMinRunes keeps a short or blank last line (a lone ⏺) from
+// serving as the anchor: it would be found again in almost any new output.
+const promptAnchorMinRunes = 12
+
+// promptFreshEcho reports whether marker is echoed in screen's transcript as
+// new output since pre, the preflight read of the same source. Either the
+// marker occurs more often than it did in pre, or it occurs after pre's last
+// transcript lines (the anchor). The anchor covers an old echo scrolling out
+// of the window while the new one scrolls in, which leaves the count equal.
+// A missing anchor proves nothing: the window may have moved past it, or it
+// was a spinner line that has since changed. Whitespace is ignored because
+// claude indents and hard-wraps the lines it echoes.
+func promptFreshEcho(harness, pre, screen, marker string) bool {
+	m := compactWhitespace(marker)
+	if m == "" {
+		return false
+	}
+	before := promptTranscript(harness, pre)
+	after := compactWhitespace(promptTranscript(harness, screen))
+	if strings.Count(after, m) > strings.Count(compactWhitespace(before), m) {
+		return true
+	}
+	anchor := promptAnchor(before)
+	if anchor == "" {
+		return false
+	}
+	i := strings.LastIndex(after, anchor)
+	return i >= 0 && strings.Contains(after[i+len(anchor):], m)
+}
+
+// promptAnchor is the compacted last non-blank lines of transcript, as many
+// of the final three as it takes to reach promptAnchorMinRunes.
+func promptAnchor(transcript string) string {
+	lines := strings.Split(transcript, "\n")
+	anchor := ""
+	taken := 0
+	for i := len(lines) - 1; i >= 0 && taken < 3; i-- {
+		line := compactWhitespace(lines[i])
+		if line == "" {
+			continue
+		}
+		anchor = line + anchor
+		taken++
+		if len([]rune(anchor)) >= promptAnchorMinRunes {
+			return anchor
+		}
+	}
+	return ""
 }
 
 // submissionEvidence is the deliveries-row record of how a submission was
