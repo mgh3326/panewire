@@ -146,7 +146,9 @@ func TestR18RelaySubmissionVerificationReturnsOnceThenUnconfirmed(t *testing.T) 
 	dir := t.TempDir()
 	log := filepath.Join(dir, "herdr.log")
 	binary := filepath.Join(dir, "herdr")
-	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho \"$2\" >>\"$R18_HERDR_LOG\"\ncase \"$2\" in get) echo '{\"result\":{\"agent\":{\"agent\":\"claude\"}}}' ;; read) printf '%s\\n' '───────' '❯ [Pasted text #1 +3 lines]' '───────' ;; esac\n"), 0700); err != nil {
+	// Before the paste the composer is empty; after it, it holds the chip.
+	prompted := filepath.Join(dir, "prompted")
+	if err := os.WriteFile(binary, []byte("#!/bin/sh\necho \"$2\" >>\"$R18_HERDR_LOG\"\ncase \"$2\" in get) echo '{\"result\":{\"agent\":{\"agent\":\"claude\"}}}' ;; prompt) touch \""+prompted+"\" ;; read) if [ -f \""+prompted+"\" ]; then printf '%s\\n' '───────' '❯ [Pasted text #1 +3 lines]' '───────'; else printf '%s\\n' '───────' '❯' '───────'; fi ;; esac\n"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("R18_HERDR_LOG", log)
@@ -161,8 +163,8 @@ func TestR18RelaySubmissionVerificationReturnsOnceThenUnconfirmed(t *testing.T) 
 	// #547 looks the harness up before the prompt (devin needs a presend
 	// check) and again after, to catch an agent change mid-inject; agent get
 	// is read-only, so claude still gets one prompt, one return keypress and
-	// two reads.
-	if got := strings.Fields(string(b)); strings.Join(got, ",") != "get,prompt,read,send-keys,read,get" {
+	// two reads, plus (#626) the pre-paste read that shows the chip is its own.
+	if got := strings.Fields(string(b)); strings.Join(got, ",") != "get,read,prompt,read,send-keys,read,get" {
 		t.Fatalf("submission verification removed or repeated: %q", b)
 	}
 }

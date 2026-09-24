@@ -585,6 +585,10 @@ func relayInjectForHarness(ctx context.Context, pane, harness, text string, memb
 	if strings.EqualFold(harness, "devin") {
 		return devinRelayInject(ctx, pane, text, members)
 	}
+	// #626: the composer as it was before this paste. Only it can show that
+	// a paste chip seen afterwards is this inject's own. A failed read
+	// leaves it empty, which proves nothing.
+	before, _ := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", relayComposerReadLines).Output()
 	if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness}
 	}
@@ -594,7 +598,7 @@ func relayInjectForHarness(ctx context.Context, pane, harness, text string, memb
 	// classifier prompt.go's direct-prompt path already uses; reusing it
 	// here lets a non-claude harness (e.g. codex's "queued" composer state)
 	// fail verification instead of being reported delivered unconditionally.
-	return relayInjectVerify(ctx, pane, harness, text)
+	return relayInjectVerify(ctx, pane, harness, text, string(before))
 }
 
 func relayInjectHarness(ctx context.Context, pane string) string {
@@ -640,58 +644,113 @@ func harnessHasSubmissionEvidence(harness string) bool {
 var relayComposerSoleChipRE = regexp.MustCompile(`^\[Pastedtext#\d+(?:\+\d+lines?)?\]$`)
 
 // devinComposerQueueHint is devin's composer while it holds a queued message,
-// captured live (see devinQueued); Enter there sends the queue, not a draft.
+// captured live (see devinQueued); Enter there sends the whole queue.
 const devinComposerQueueHint = "Press Enter to send queued messages now"
 
-// relayComposerReturnSafe reports whether one return keypress on screen can
-// only submit what this inject typed (#626, hk:doc
-// task/2026-09-24/phantom-suggestion-submitted). A composer is not
-// necessarily empty before an inject: a Claude Code prompt suggestion or an
-// unsent draft reads as plain composer text in herdr agent read, and herdr's
-// paste lands after whatever is there. So return is allowed only when the
-// live composer is located and holds nothing, exactly text (ignoring
-// whitespace, which wrapping and continuation indents change), a single
-// paste chip, or -- devin only -- its queue hint. Anything else, including a
-// composer that cannot be located (codex draws no divider, and its
-// placeholder is plain text too), withholds the return. The rule names are
-// the evidence recorded with the outcome.
-func relayComposerReturnSafe(harness, screen, text string) (bool, string) {
+// relayComposerReadLines is how far back a composer read reaches: far enough
+// that a composer taller than the 10-line classification read still shows
+// its top divider.
+const relayComposerReadLines = "60"
+
+// relayComposer returns the live composer's text for harness, without the
+// prompt glyph and with whitespace removed, and whether it was located.
+// Only claude and devin draw a composer between two dividers; codex draws
+// none and its placeholder is plain text, so its composer is never located.
+func relayComposer(harness, screen string) (string, bool) {
 	isDivider, glyph := isDividerLine, "❯"
 	switch {
 	case strings.EqualFold(harness, "claude"):
 	case strings.EqualFold(harness, "devin"):
 		isDivider, glyph = isDevinDividerLine, "❭"
 	default:
-		return false, "composer_unlocated"
+		return "", false
 	}
 	region, ok := composerRegionWith(screen, isDivider)
 	if !ok {
+		return "", false
+	}
+	return strings.TrimPrefix(compactWhitespace(region), glyph), true
+}
+
+// relayComposerReturnSafe reports whether one return keypress on screen can
+// only submit what this inject typed (#626, hk:doc
+// task/2026-09-24/phantom-suggestion-submitted). A composer is not
+// necessarily empty before an inject: a Claude Code prompt suggestion or an
+// unsent draft reads as plain composer text in herdr agent read, and herdr's
+// paste lands after it. So return is allowed only when the live composer is
+// located and holds:
+//
+//   - nothing;
+//   - exactly text, ignoring whitespace, which wrapping and continuation
+//     indents change;
+//   - a single paste chip, but only if before -- the screen read just before
+//     the paste -- shows a located composer with no chip: a chip hides its
+//     content, so only its absence beforehand proves it is this inject's;
+//   - devin only: its queue hint, but only if before shows no queue: the
+//     keypress sends every queued message, not just this one.
+//
+// Anything else, including a composer that cannot be located, withholds the
+// return. The rule names are the evidence recorded with the outcome.
+func relayComposerReturnSafe(harness, screen, text, before string) (bool, string) {
+	content, ok := relayComposer(harness, screen)
+	if !ok {
 		return false, "composer_unlocated"
 	}
-	content := strings.TrimPrefix(compactWhitespace(region), glyph)
 	switch {
 	case content == "":
 		return true, "composer_empty"
 	case content == compactWhitespace(text):
 		return true, "composer_self"
 	case relayComposerSoleChipRE.MatchString(content):
+		if prior, ok := relayComposer(harness, before); !ok || strings.Contains(prior, "[Pastedtext#") {
+			return false, "composer_chip_unowned"
+		}
 		return true, "composer_self_chip"
 	case strings.EqualFold(harness, "devin") && content == compactWhitespace(devinComposerQueueHint):
+		if _, ok := relayComposer(harness, before); !ok || devinQueued(before) {
+			return false, "composer_queue_unowned"
+		}
 		return true, "composer_queue_hint"
 	}
 	return false, "composer_foreign"
 }
 
+// relayComposerPending reads a taller window than the classification read and
+// reports whether pane's located composer still holds text. An unproven
+// verdict is retried by re-injecting, and a re-inject pastes after whatever
+// the composer holds -- possibly this same text, pending in a composer too
+// tall for the 10-line read to show (#626).
+func relayComposerPending(ctx context.Context, pane, harness string) bool {
+	out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", relayComposerReadLines).Output()
+	if err != nil {
+		return false
+	}
+	content, ok := relayComposer(harness, string(out))
+	return ok && content != ""
+}
+
+// relayInjectVerifySubmission is relayInjectVerify with no pre-paste read,
+// so a paste chip on screen never counts as this inject's own.
 func relayInjectVerifySubmission(ctx context.Context, pane, harness, text string) bool {
-	return relayInjectVerify(ctx, pane, harness, text).Outcome == relayInjectDelivered
+	return relayInjectVerify(ctx, pane, harness, text, "").Outcome == relayInjectDelivered
 }
 
 // relayInjectVerify verifies a claude/codex relay inject that herdr already
-// accepted: delivered on proof, relayInjectMaybeInPane when the return was
-// withheld (#626), and retryable otherwise -- the pre-#626 bool's false.
-func relayInjectVerify(ctx context.Context, pane, harness, text string) relayInjectResult {
+// accepted; before is the screen read just before the paste. It is
+// delivered on proof, relayInjectMaybeInPane when the return was withheld or
+// the text may still be pending in the composer (#626), and retryable
+// otherwise -- the pre-#626 bool's false.
+func relayInjectVerify(ctx context.Context, pane, harness, text, before string) relayInjectResult {
 	delivered := relayInjectResult{Outcome: relayInjectDelivered, Harness: harness}
 	unconfirmed := relayInjectResult{Outcome: relayInjectRetryable, Harness: harness}
+	// An unproven verdict is a retry only once the composer is seen empty
+	// or cannot be located at all.
+	unproven := func() relayInjectResult {
+		if relayComposerPending(ctx, pane, harness) {
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "unproven:composer_pending"}
+		}
+		return unconfirmed
+	}
 	out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", "10").Output()
 	if err != nil {
 		return unconfirmed
@@ -704,7 +763,7 @@ func relayInjectVerify(ctx context.Context, pane, harness, text string) relayInj
 		// and only when that return cannot submit text this inject did not
 		// type. A withheld return is not retried: the text may be sitting in
 		// that composer, and a re-inject would paste after the foreign text.
-		if safe, rule := relayComposerReturnSafe(harness, string(out), text); !safe {
+		if safe, rule := relayComposerReturnSafe(harness, string(out), text, before); !safe {
 			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "return_withheld:" + rule}
 		}
 		if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
@@ -737,7 +796,7 @@ func relayInjectVerify(ctx context.Context, pane, harness, text string) relayInj
 			// until it gets its own evidence path; that is tracked as a
 			// separate followup, not this fix's scope.
 			if harnessHasSubmissionEvidence(harness) {
-				return unconfirmed
+				return unproven()
 			}
 			return delivered
 		}
@@ -746,7 +805,7 @@ func relayInjectVerify(ctx context.Context, pane, harness, text string) relayInj
 	}
 	// unproven directly: same reasoning and same carve-out as above.
 	if harnessHasSubmissionEvidence(harness) {
-		return unconfirmed
+		return unproven()
 	}
 	return delivered
 }
@@ -926,9 +985,10 @@ func devinRelayInject(ctx context.Context, pane, text string, members []string) 
 			return result
 		}
 	}
-	// #626: the keypress submits whatever is in the composer, so it is sent
-	// only when that is this text, nothing, or the queue hint.
-	if safe, rule := relayComposerReturnSafe("devin", after.visible, text); !safe {
+	// #626: the keypress submits whatever is in the composer (or, on the
+	// queue hint, the whole queue), so it is sent only when that can be
+	// nothing but this text; before is the presend read.
+	if safe, rule := relayComposerReturnSafe("devin", after.visible, text, before.visible); !safe {
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, evidence+" return_withheld:"+rule
 		return result
 	}
