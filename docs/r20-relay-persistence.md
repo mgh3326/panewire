@@ -304,10 +304,11 @@ file — the socket push still happens, since `wrk` writes the event file itself
 and then calls `emit`, and that path has to work. The pre-file key shares
 (kind, job, epoch, empty report, reason) across events the scanner later keys
 by their own file, so identity is refined per kind: `job.escalate` separates
-by `question`, `job.lost` separates by any metadata difference (a second loss
-observation is a distinct event), while a byte-identical record reuses the
-existing file. `job.completed`, `job.joined` and `job.revoked` are one-shot
-declarations — a second record under the same key is a conflict and is
+by `question`, `job.lost` separates by the compared record fields (everything
+but `created_at`/`agent_label`), while a record identical on those fields
+reuses the existing file — emit cannot tell a same-pane re-loss from a retry
+without a producer-supplied event id. `job.completed`, `job.joined` and
+`job.revoked` keep one record per key: a second record under the same key is
 refused with `emit: duplicate outbox key`. A daemon that is not running
 is **not** an error: `emit` prints
 `emit: panewired unavailable; event recorded to file only` to stderr and exits
