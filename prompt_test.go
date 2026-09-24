@@ -14,7 +14,7 @@ func TestPromptClaudePositiveAndNegativeMatchers(t *testing.T) {
 		name, screen string
 		want         int
 	}{
-		{"positive marker", "assistant saw R2-MARKER\n", panewire.ExitOK},
+		{"positive marker", promptEchoScreen, panewire.ExitOK},
 		{"negative composer chip", "❯ R2-MARKER\n[Pasted text #1 +2 lines]\n", panewire.ExitDeliveryFailure},
 	}
 	for _, tc := range tests {
@@ -40,8 +40,8 @@ func TestPromptCodexPositiveAndNegativeMatchers(t *testing.T) {
 		name, screen string
 		want         int
 	}{
-		{"positive receipt", "• Ran R2-MARKER\n", panewire.ExitOK},
-		{"negative unrelated receipt", "• Ran unrelated command\n", panewire.ExitDeliveryFailure},
+		{"positive receipt", "• Ran R2-MARKER\n" + promptCodexComposer, panewire.ExitOK},
+		{"negative unrelated receipt", "• Ran unrelated command\n" + promptCodexComposer, panewire.ExitDeliveryFailure},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -167,7 +167,7 @@ func TestPromptKimiAndAgyHaveNoPositiveMatcher(t *testing.T) {
 func TestPromptToolUptakeRequiresHarnessReceiptAndRevision(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
-	configurePromptFixture(fixture, "codex", "• Ran R2-MARKER\n")
+	configurePromptFixture(fixture, "codex", "• Ran R2-MARKER\n"+promptCodexComposer)
 	d, _ := startPromptDaemon(t, fixture)
 	defer d.Stop()
 	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--uptake", "tool"}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitOK {
@@ -176,7 +176,7 @@ func TestPromptToolUptakeRequiresHarnessReceiptAndRevision(t *testing.T) {
 
 	fixture2 := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture2.Close()
-	configurePromptFixture(fixture2, "codex", "• Ran unrelated command\n")
+	configurePromptFixture(fixture2, "codex", "• Ran unrelated command\n"+promptCodexComposer)
 	d2, _ := startPromptDaemon(t, fixture2)
 	defer d2.Stop()
 	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--uptake", "tool"}, panewire.CLIConfig{SocketPath: dSocket(d2)}); got != panewire.ExitDeliveryFailure {
@@ -187,7 +187,7 @@ func TestPromptToolUptakeRequiresHarnessReceiptAndRevision(t *testing.T) {
 func TestPromptStatusTransitionNeedsIdleToWorking(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(true))
 	defer fixture.Close()
-	configurePromptFixture(fixture, "claude", "assistant saw R2-MARKER\n")
+	configurePromptFixture(fixture, "claude", promptEchoScreen)
 	fixture.On("agent.prompt", func() any {
 		go func() {
 			// The event is emitted only after the prompt request is observed.
@@ -206,7 +206,7 @@ func TestPromptStatusTransitionNeedsIdleToWorking(t *testing.T) {
 	fixture2.On("agent.list", func() any {
 		return map[string]any{"agents": []any{map[string]any{"agent": "orch", "name": "orch", "label": "orch", "harness": "claude", "pane_id": "p1", "workspace_id": "w1", "cwd": "/work", "revision": 10, "agent_status": "working"}}}
 	})
-	fixture2.On("agent.read", func() any { return map[string]any{"text": "assistant saw R2-MARKER\n", "revision": 10} })
+	fixture2.On("agent.read", func() any { return map[string]any{"text": promptEchoScreen, "revision": 10} })
 	fixture2.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
 	d2, _ := startPromptDaemonWithSchema(t, fixture2, promptFixtureSchema(true))
 	defer d2.Stop()
@@ -248,7 +248,7 @@ func TestPromptResolvesUnnamedAgentByRealTabListLabel(t *testing.T) {
 		if reads <= 1 {
 			return map[string]any{"text": "idle pane\n", "revision": 10}
 		}
-		return map[string]any{"text": "assistant saw R2-MARKER\n", "revision": 11}
+		return map[string]any{"text": promptEchoScreen, "revision": 11}
 	})
 	fixture.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
 	d, _ := startPromptDaemon(t, fixture)
@@ -265,7 +265,7 @@ func TestPromptResolvesUnnamedAgentByRealTabListLabel(t *testing.T) {
 func TestPromptExpectMismatchDoesNotCallHerdrPrompt(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
-	configurePromptFixture(fixture, "claude", "assistant saw R2-MARKER\n")
+	configurePromptFixture(fixture, "claude", promptEchoScreen)
 	d, db := startPromptDaemon(t, fixture)
 	defer d.Stop()
 	path := filepath.Join(t.TempDir(), "prompt.md")
@@ -287,7 +287,7 @@ func TestPromptExpectMismatchDoesNotCallHerdrPrompt(t *testing.T) {
 func TestPromptMismatchIsNotDedupedAfterExpectCorrection(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
-	configurePromptFixture(fixture, "claude", "assistant saw R2-MARKER\n")
+	configurePromptFixture(fixture, "claude", promptEchoScreen)
 	d, _ := startPromptDaemon(t, fixture)
 	defer d.Stop()
 	path := filepath.Join(t.TempDir(), "prompt.md")
@@ -312,7 +312,7 @@ func TestPromptMismatchIsNotDedupedAfterExpectCorrection(t *testing.T) {
 func TestPromptMissingTargetDoesNotCallHerdrPrompt(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
-	configurePromptFixture(fixture, "claude", "assistant saw R2-MARKER\n")
+	configurePromptFixture(fixture, "claude", promptEchoScreen)
 	d, _ := startPromptDaemon(t, fixture)
 	defer d.Stop()
 	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "missing", "--file", promptFile(t)}, panewire.CLIConfig{SocketPath: dSocket(d)}); got != panewire.ExitConditionInvalid {
@@ -326,7 +326,7 @@ func TestPromptMissingTargetDoesNotCallHerdrPrompt(t *testing.T) {
 func TestPromptRetryDoesNotInjectTwice(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
-	configurePromptFixture(fixture, "claude", "assistant saw R2-MARKER\n")
+	configurePromptFixture(fixture, "claude", promptEchoScreen)
 	d, _ := startPromptDaemon(t, fixture)
 	defer d.Stop()
 	args := []string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t)}
@@ -354,7 +354,7 @@ func TestPromptLabelFallbackAndRevisionDriftAreRecorded(t *testing.T) {
 		if reads == 1 {
 			return map[string]any{"text": "idle pane\n", "revision": 10}
 		}
-		return map[string]any{"text": "assistant saw R2-MARKER\n", "revision": 11}
+		return map[string]any{"text": promptEchoScreen, "revision": 11}
 	})
 	d, db := startPromptDaemon(t, fixture)
 	defer d.Stop()
@@ -419,7 +419,7 @@ func TestPromptIdentityChangeAndAmbiguousLabelAreFailClosed(t *testing.T) {
 func TestPromptPrivacyBodyOptInOnly(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture.Close()
-	configurePromptFixture(fixture, "claude", "assistant saw R2-MARKER\n")
+	configurePromptFixture(fixture, "claude", promptEchoScreen)
 	d, db := startPromptDaemon(t, fixture)
 	defer d.Stop()
 	path := promptFile(t)
@@ -439,7 +439,7 @@ func TestPromptPrivacyBodyOptInOnly(t *testing.T) {
 
 	fixture2 := newHerdrFixture(t, promptFixtureSchema(false))
 	defer fixture2.Close()
-	configurePromptFixture(fixture2, "claude", "assistant saw R2-MARKER\n")
+	configurePromptFixture(fixture2, "claude", promptEchoScreen)
 	d2, db2 := startPromptDaemon(t, fixture2)
 	defer d2.Stop()
 	if got := panewire.RunCLI([]string{"prompt", "--from", "sender", "--to", "orch", "--file", promptFile(t), "--store-prompt-body"}, panewire.CLIConfig{SocketPath: dSocket(d2)}); got != panewire.ExitOK {
@@ -467,6 +467,17 @@ func TestPromptDaemonUnavailableStillAuditsRequest(t *testing.T) {
 	}
 }
 
+// promptEchoScreen is a claude screen after a submitted prompt: the echo in
+// the transcript and an empty composer between its two dividers. Every real
+// claude read has that composer, and without it a marker on screen could be
+// the pending prompt itself (#646).
+const promptEchoScreen = "assistant saw R2-MARKER\n────\n❯\n────\nstatus\n"
+
+// promptCodexComposer is the bottom of a real codex screen: its composer, the
+// last line starting with ›, then the footer. A codex screen without it is
+// not one a real read returns (#646).
+const promptCodexComposer = "\n› Ask Codex to do anything\n\n  GPT-6-Sol xhigh · ~/work · Context 18% used\n"
+
 func promptFixtureSchema(events bool) string {
 	methods := `[` +
 		`"agent.read","agent.prompt","agent.list"`
@@ -484,10 +495,10 @@ func configurePromptFixture(f *herdrFixture, harness, screen string) {
 	f.On("agent.list", func() any {
 		return map[string]any{"agents": []any{map[string]any{"agent": "orch", "name": "orch", "label": "orch", "harness": harness, "pane_id": "p1", "workspace_id": "w1", "cwd": "/work", "revision": 10, "agent_status": "idle"}}}
 	})
-	reads := 0
+	// The pane shows screen only once a prompt was sent: a preflight read,
+	// including a retry's, sees the idle pane.
 	f.On("agent.read", func() any {
-		reads++
-		if reads <= 1 {
+		if f.Requests("agent.prompt") == 0 {
 			return map[string]any{"text": "idle pane\n", "revision": 10}
 		}
 		return map[string]any{"text": screen, "revision": 11}
@@ -508,7 +519,7 @@ func configurePromptFixturePolling(f *herdrFixture) {
 		case 2:
 			return map[string]any{"text": "renderer has not painted marker yet\n", "revision": 10}
 		default:
-			return map[string]any{"text": "assistant saw R2-MARKER\n", "revision": 11}
+			return map[string]any{"text": promptEchoScreen, "revision": 11}
 		}
 	})
 	f.On("agent.prompt", func() any { return map[string]any{"accepted": true} })

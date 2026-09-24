@@ -349,7 +349,7 @@ func TestPromptResolvesPaneIDTarget(t *testing.T) {
 		if reads == 1 {
 			return map[string]any{"text": "idle pane\n", "revision": 10}
 		}
-		return map[string]any{"text": "assistant saw R2-MARKER\n", "revision": 11}
+		return map[string]any{"text": promptEchoScreen, "revision": 11}
 	})
 	fixture.On("agent.prompt", func() any { return map[string]any{"accepted": true} })
 	d, db := startPromptDaemon(t, fixture)
