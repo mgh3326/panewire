@@ -956,9 +956,19 @@ func decodeIdleWakeRelayText(text string) (idleWakeRelayText, bool) {
 	return idleWakeRelayText{Pane: wake.Pane, ChangedAt: changedAt}, true
 }
 
+// relayReplayRetiredMarker is the delivered_to prefix retireRelayReplay
+// writes. A row that still arrives in the undelivered listing with the marker
+// already on it was retired by an earlier replay: retiring it again only
+// repeats the write, the info log and the operator broadcast (#658).
+const relayReplayRetiredMarker = relayReplayRetiredMachine + "/" + relayReplayRetiredPane
+
 // retireRelayReplay closes a row the replay gate refused, so no later restart
 // lists it again, and puts the reason on the operator feed.
 func (h *HubServer) retireRelayReplay(record handoffkeepRelayEvent, reason string) {
+	if strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
+		h.logger.Debug("relay replay row already retired", "event_id", record.ID, "lane", record.OwnerLane, "delivered_to", record.DeliveredTo)
+		return
+	}
 	if err := h.handoffkeep.markDelivered(context.Background(), record.ID, relayReplayRetiredMachine, relayReplayRetiredPane+reason); err != nil {
 		h.logger.Warn("retired relay replay was not recorded", "event_id", record.ID, "reason", reason)
 		return

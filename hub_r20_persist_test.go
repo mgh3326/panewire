@@ -37,6 +37,11 @@ type fakeHandoffkeep struct {
 	// deliveredStatus, when set, is the reply to every /delivered POST, and
 	// a non-200 closes nothing.
 	deliveredStatus int
+	// retiredMarkerStaysUndelivered models the #658 production anomaly: a
+	// /delivered POST whose pane is replay-retired:* persists delivered_to
+	// but the row keeps arriving in the undelivered listing, so the next
+	// node hello re-retires it.
+	retiredMarkerStaysUndelivered bool
 	// observe runs at the start of every request, before any reply, so a test
 	// can inspect hub state at the exact moment handoffkeep is called.
 	observe func(method, path string)
@@ -84,7 +89,14 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				// A seeded row closed since (delivered or retired) leaves
 				// the undelivered listing, as handoffkeep's own does.
 				if row := f.rows[fakeHandoffkeepStoredKey(seeded)]; row == nil || row.DeliveredAt == "" {
-					pending = append(pending, seeded)
+					listed := seeded
+					if row != nil {
+						// The durable row is the listing's source of truth:
+						// a marker written after seeding (delivered_to) is
+						// on it, not on the seed.
+						listed.DeliveredAt, listed.DeliveredTo = row.DeliveredAt, row.DeliveredTo
+					}
+					pending = append(pending, listed)
 				}
 			}
 			if len(f.undelivere) == 0 {
@@ -133,11 +145,14 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.mu.Lock()
 			for _, row := range f.rows {
 				if row.ID == id {
-					row.DeliveredAt = "2026-09-05T00:00:00Z"
+					row.DeliveredTo = asString(body["machine"]) + "/" + asString(body["pane"])
+					if !(f.retiredMarkerStaysUndelivered && strings.HasPrefix(asString(body["pane"]), "replay-retired:")) {
+						row.DeliveredAt = "2026-09-05T00:00:00Z"
+					}
 					if f.deliveredTo == nil {
 						f.deliveredTo = map[int64]string{}
 					}
-					f.deliveredTo[id] = asString(body["machine"]) + "/" + asString(body["pane"])
+					f.deliveredTo[id] = row.DeliveredTo
 					break
 				}
 			}
