@@ -811,7 +811,8 @@ func (h *HubServer) persistRelayEventRecord(kind string, event hubJobEventPayloa
 
 // markRelayEventDelivered closes the loop on a node's relay.delivered. A
 // failure here is operator signal only; it must never stall the relay path.
-func (h *HubServer) markRelayEventDelivered(pending relayPending) {
+// It reports whether delivered_at was written (or there is no durable row).
+func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 	// Cleanup belongs to the successful relay.delivered acknowledgement, not
 	// to handoffkeep. Pre-R20 deployments still need bounded local state.
 	h.mu.Lock()
@@ -821,11 +822,156 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) {
 	}
 	h.mu.Unlock()
 	if h.handoffkeep == nil || pending.eventID == 0 {
-		return
+		return true
 	}
 	if err := h.handoffkeep.markDelivered(context.Background(), pending.eventID, pending.machine, pending.pane); err != nil {
 		h.logger.Warn("relay delivery was not recorded", "event_id", pending.eventID, "machine", pending.machine)
+		return false
 	}
+	return true
+}
+
+// recordLateRelayDelivery records a relay.delivered that no longer matches an
+// ack window (#650). The window is memory only: a relay.unconfirmed consumes
+// it before the node's retry lands, an expiry drops it, and a hub restart
+// loses all of them. Discarding the ack in those cases left delivered_at NULL
+// on rows the pane had already shown, and every restart replayed them. The
+// row itself is the authority for whether this node may close it: the ack
+// must name the row's transport id and arrive from the row's destination or
+// the owner lane's current route.
+func (h *HubServer) recordLateRelayDelivery(machineID string, ack relayAckPayload) bool {
+	if h.handoffkeep == nil || ack.OriginalEventID < 1 {
+		return false
+	}
+	record, found, err := h.handoffkeep.relayEvent(context.Background(), ack.OriginalEventID)
+	if err != nil {
+		h.logger.Warn("late relay delivery could not be checked", "event_id", ack.OriginalEventID, "machine", machineID)
+		return false
+	}
+	if !found {
+		return false
+	}
+	event := relayEventFromRecord(record)
+	if event.JobID != ack.JobID {
+		return false
+	}
+	route, _, _ := h.resolveRelayRoute(record.Kind, event)
+	fromRow := record.Machine == machineID && record.PaneID == ack.Pane
+	fromRoute := !route.Sink && route.Machine == machineID && route.Pane == ack.Pane
+	if !fromRow && !fromRoute {
+		return false
+	}
+	if record.DeliveredAt != "" {
+		return true
+	}
+	// Only a durable write accepts the ack: a rejected one leaves the row
+	// undelivered, and broadcasting it as delivered would hide that.
+	return h.markRelayEventDelivered(relayPending{machine: machineID, pane: ack.Pane, eventID: record.ID, kind: record.Kind, event: event})
+}
+
+// relayEventFromRecord rebuilds the relay payload a durable row stands for.
+func relayEventFromRecord(record handoffkeepRelayEvent) hubJobEventPayload {
+	event := hubJobEventPayload{
+		JobID: record.JobID, Epoch: uint64(record.Epoch), OwnerLane: record.OwnerLane,
+		ReportPath: record.ReportPath, ReportLastLine: record.ReportLastLine,
+		Question: record.Question, PR: record.PR, Head: record.Head, Reason: record.Reason, PaneID: record.PaneID, EventID: record.EventID, Text: record.Text,
+	}
+	if record.Kind == "lane.event" {
+		event.JobID = laneEventTransportID(record.OwnerLane, record.EventID)
+	}
+	return event
+}
+
+const (
+	// relayReplayMaxAge matches the node outbox's default bound
+	// (defaultRelayOutboxMaxAge): a node stops offering an event after a day,
+	// and the hub stops re-injecting one after the same day.
+	relayReplayMaxAge = defaultRelayOutboxMaxAge
+	// idleWakeReplayMaxAge bounds an idle-wake replay. It reports one pane
+	// state at one instant; half an hour later the owner has to look at the
+	// pane anyway, and a replayed wake reads as a new transition (#650).
+	idleWakeReplayMaxAge = 30 * time.Minute
+	// relayReplayRetiredMachine and the pane prefix below are the
+	// delivered_to handoffkeep keeps for a retired row, so the audit record
+	// names why it was closed without reaching a pane.
+	relayReplayRetiredMachine = "hub"
+	relayReplayRetiredPane    = "replay-retired:"
+)
+
+// relayReplayRetireReason is the replay gate for rows that must not reach a
+// pane after a restart or node hello (#650), or "" when the row may replay.
+// An idle-wake is retired when its subject pane is no lane's pane any more
+// (the lane was removed, or moved to another pane) or it is older than
+// idleWakeReplayMaxAge; any other row when it is older than relayReplayMaxAge.
+// A lanes file that cannot be read proves nothing about lanes, so it never
+// retires a row on lane grounds.
+func (h *HubServer) relayReplayRetireReason(record handoffkeepRelayEvent) string {
+	now := h.now().UTC()
+	if record.Kind == "lane.event" {
+		if wake, ok := decodeIdleWakeRelayText(record.Text); ok {
+			if routes, err := loadReportRelayRoutesResult(h.reportRelayPath); err == nil && routes != nil && !idleWakePaneHasLane(routes, wake.Pane) {
+				return "lane_gone"
+			}
+			if now.Sub(wake.ChangedAt) > idleWakeReplayMaxAge {
+				return "stale"
+			}
+			return ""
+		}
+	}
+	if received, err := time.Parse(time.RFC3339Nano, record.ReceivedAt); err == nil && now.Sub(received) > relayReplayMaxAge {
+		return "stale"
+	}
+	return ""
+}
+
+func idleWakePaneHasLane(routes map[string]reportRelayRoute, pane string) bool {
+	for _, route := range routes {
+		if !route.Sink && route.Pane == pane {
+			return true
+		}
+	}
+	return false
+}
+
+type idleWakeRelayText struct {
+	Pane      string
+	ChangedAt time.Time
+}
+
+// decodeIdleWakeRelayText reads the subject of the text idleWakeRouteText
+// wrote. Anything else is not an idle-wake and keeps the general gate.
+func decodeIdleWakeRelayText(text string) (idleWakeRelayText, bool) {
+	var wake struct {
+		Kind      string `json:"kind"`
+		Pane      string `json:"pane"`
+		ChangedAt string `json:"changed_at"`
+	}
+	if json.Unmarshal([]byte(text), &wake) != nil || wake.Kind != "idle-wake" || !validIdleWakePane(wake.Pane) {
+		return idleWakeRelayText{}, false
+	}
+	changedAt, ok := canonicalIdleWakeTime(wake.ChangedAt)
+	if !ok {
+		return idleWakeRelayText{}, false
+	}
+	return idleWakeRelayText{Pane: wake.Pane, ChangedAt: changedAt}, true
+}
+
+// retireRelayReplay closes a row the replay gate refused, so no later restart
+// lists it again, and puts the reason on the operator feed.
+func (h *HubServer) retireRelayReplay(record handoffkeepRelayEvent, reason string) {
+	if err := h.handoffkeep.markDelivered(context.Background(), record.ID, relayReplayRetiredMachine, relayReplayRetiredPane+reason); err != nil {
+		h.logger.Warn("retired relay replay was not recorded", "event_id", record.ID, "reason", reason)
+		return
+	}
+	h.logger.Info("relay replay retired", "event_id", record.ID, "kind", record.Kind, "lane", record.OwnerLane, "reason", reason)
+	payload, _ := json.Marshal(struct {
+		EventID  int64  `json:"event_id"`
+		Kind     string `json:"kind"`
+		Lane     string `json:"lane"`
+		SourceID string `json:"source_event_id,omitempty"`
+		Reason   string `json:"reason"`
+	}{EventID: record.ID, Kind: record.Kind, Lane: record.OwnerLane, SourceID: record.EventID, Reason: reason})
+	h.broadcast(hubEvent{Kind: "relay.replay_retired", Payload: payload, Received: h.now().UTC()})
 }
 
 // replayUndeliveredRelayEvents re-routes what Postgres still holds as
@@ -891,14 +1037,7 @@ func (h *HubServer) replayUndeliveredLaneEvents(ctx context.Context) {
 }
 
 func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
-	event := hubJobEventPayload{
-		JobID: record.JobID, Epoch: uint64(record.Epoch), OwnerLane: record.OwnerLane,
-		ReportPath: record.ReportPath, ReportLastLine: record.ReportLastLine,
-		Question: record.Question, PR: record.PR, Head: record.Head, Reason: record.Reason, PaneID: record.PaneID, EventID: record.EventID, Text: record.Text,
-	}
-	if record.Kind == "lane.event" {
-		event.JobID = laneEventTransportID(record.OwnerLane, record.EventID)
-	}
+	event := relayEventFromRecord(record)
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
 	}
@@ -925,6 +1064,11 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 				return
 			}
 		}
+	} else if reason := h.relayReplayRetireReason(record); reason != "" {
+		// Chat rows keep the chat store as their only authority; every other
+		// row passes the #650 gate before it can spend an attempt.
+		h.retireRelayReplay(record, reason)
+		return
 	}
 	if record.Attempts >= relayReplayMaxAttempts {
 		h.broadcastRelayReplayExhausted(record)

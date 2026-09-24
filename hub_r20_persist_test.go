@@ -32,6 +32,11 @@ type fakeHandoffkeep struct {
 	rows       map[string]*handoffkeepRelayEvent
 	ownerLane  string
 	undelivere []handoffkeepRelayEvent
+	// deliveredTo is handoffkeep's delivered_to for each closed row.
+	deliveredTo map[int64]string
+	// deliveredStatus, when set, is the reply to every /delivered POST, and
+	// a non-200 closes nothing.
+	deliveredStatus int
 	// observe runs at the start of every request, before any reply, so a test
 	// can inspect hub state at the exact moment handoffkeep is called.
 	observe func(method, path string)
@@ -75,8 +80,14 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		query := r.URL.Query()
 		var pending []handoffkeepRelayEvent
 		if query.Get("undelivered") != "" {
-			pending = append(pending, f.undelivere...)
-			if len(pending) == 0 {
+			for _, seeded := range f.undelivere {
+				// A seeded row closed since (delivered or retired) leaves
+				// the undelivered listing, as handoffkeep's own does.
+				if row := f.rows[fakeHandoffkeepStoredKey(seeded)]; row == nil || row.DeliveredAt == "" {
+					pending = append(pending, seeded)
+				}
+			}
+			if len(f.undelivere) == 0 {
 				for _, row := range f.rows {
 					if row.DeliveredAt == "" {
 						pending = append(pending, *row)
@@ -110,12 +121,23 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": pending})
 	case strings.HasSuffix(r.URL.Path, "/delivered"):
+		f.mu.Lock()
+		deliveredStatus := f.deliveredStatus
+		f.mu.Unlock()
+		if deliveredStatus != 0 && deliveredStatus != http.StatusOK {
+			w.WriteHeader(deliveredStatus)
+			return
+		}
 		idText := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/relay/events/"), "/delivered")
 		if id, err := strconv.ParseInt(idText, 10, 64); err == nil {
 			f.mu.Lock()
 			for _, row := range f.rows {
 				if row.ID == id {
 					row.DeliveredAt = "2026-09-05T00:00:00Z"
+					if f.deliveredTo == nil {
+						f.deliveredTo = map[int64]string{}
+					}
+					f.deliveredTo[id] = asString(body["machine"]) + "/" + asString(body["pane"])
 					break
 				}
 			}

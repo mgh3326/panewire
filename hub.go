@@ -1197,10 +1197,14 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			pending, acknowledged := h.acknowledgeRelayPending(machineID, ack)
 			if !acknowledged {
-				h.countUnknownMessage()
-				return
-			}
-			if message.Kind == "relay.delivered" {
+				// #650: the ack window is memory only. A delivery that outlived
+				// it (unconfirmed first, a restart, a late ack) is still a
+				// delivery, and handoffkeep must hear it or replay re-sends it.
+				if message.Kind != "relay.delivered" || !h.recordLateRelayDelivery(machineID, ack) {
+					h.countUnknownMessage()
+					return
+				}
+			} else if message.Kind == "relay.delivered" {
 				h.markRelayEventDelivered(pending)
 			}
 		}
