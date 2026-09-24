@@ -752,6 +752,10 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		}
 	} else if !hubJobIDPattern.MatchString(req.JobID) || req.ReportPath == "" {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
+	} else if relayTerminalSignalKinds[req.Kind] && (req.Reason == "" || !validReportRelayLaneName(req.OwnerLane)) {
+		// Same rule as emitJobRecord: a terminal signal that cannot state why
+		// or name its owner lane is refused before it enters the outbox.
+		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if !d.emitNamespaceMatches(req.InboxRoot) {
 		local := d.emitNamespaceRoot()
@@ -782,6 +786,14 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		// name the same outbox row. The file's timestamp feeds the deployment
 		// cutoff the scan applies.
 		event.EventID, event.EventTime = emitJobEventFileID(d.emitNamespaceRoot(), req, epoch)
+		// A terminal signal's absent report — empty or the sentinel's
+		// /dev/null — resolves to the same durable event file the scanner
+		// substitutes; otherwise a direct push and the scan would key one
+		// event two ways and deliver it twice.
+		event.ReportPath = relaySignalReportPath(req.Kind, event.ReportPath)
+		if relayTerminalSignalKinds[req.Kind] && event.ReportPath == "" && event.EventID != "" {
+			event.ReportPath = filepath.Join(d.emitNamespaceRoot(), "jobs", req.JobID, "events", event.EventID)
+		}
 	}
 	d.cfg.Hub.Client.EnqueueRelayEvent(event)
 	return nil

@@ -121,6 +121,68 @@ answers 200 with `attempts + 1`, the row itself is unchanged (first-writer-wins,
 below), and `delivered_at` is not touched by that path. The contract is
 unchanged; this is the counter it already had.
 
+## The relay kind set
+
+`emitRelayKinds` in `emit.go` is the single location of the closed set: the
+CLI validator, the daemon emit gate, and the node scanner all read that map.
+The set's relationship to wrk's `TERMINAL` (agent-skills `wrk`, currently
+`{job.completed, job.joined, job.revoked}`):
+
+| kind | wrk TERMINAL | route | terminal for the hub job record |
+|---|---|---|---|
+| `job.completed` | yes | owner lane | yes |
+| `job.joined` | yes | owner lane's parent | no — wrk-terminal, hub record unchanged |
+| `job.revoked` | yes | owner lane's parent | yes |
+| `job.lost` | **no** | owner lane | **no** — a lost job may still complete |
+| `job.escalate` | no | owner lane's parent | no |
+| `lane.event` | n/a | named lane | no |
+
+Every relayed `job.*` kind except `job.completed` must carry a non-empty
+`reason`, and `job.lost`/`job.revoked` additionally require a routable
+`owner_lane`; a record that cannot state why or name its lane is refused at
+emit, at the daemon gate, and at the scanner. That requirement doubles as the
+echo guard: the hub's own revocation marker (`writeHubRevocation`) carries
+only `type`/`job_id`/`epoch`, so a hub→node `job.revoked` is never relayed
+back — only the owner-declared record (`panewire job close`, which writes
+`kind`/`owner_lane`/`reason`) is.
+
+`job.lost` writes `report_path` empty (or `/dev/null`, which is normalized to
+empty). Like `job.escalate`/`job.joined`, the durable event file then stands
+in for the report path — the same substitution on the emit path and the scan
+path, so one event cannot key two different outbox rows.
+
+### Version skew
+
+- **Old hub, new node:** a kind outside `knownHubEventKind` is rejected by the
+  inbound parse and counted in `unknown_messages`. No injection, no
+  handoffkeep call, no job record — harmless but invisible to the operator,
+  which is why the hub ships before the nodes that produce the new kinds.
+- **New hub, old handoffkeep:** the kind allowlist lives in the handoffkeep
+  repository and must name the new kinds **before** nodes that produce them
+  deploy. An old handoffkeep rejects the POST — on the deployed schema the
+  app-level `relayEventKinds` allowlist answers `400 invalid_context` before
+  the `relay_events` CHECK constraint is even reached. Any non-2xx reply takes
+  the same path: the hub broadcasts `relay.unpersisted`, sends no
+  acknowledgement, and the node retries within its normal outbox bounds —
+  observable, never silently lost.
+- **The handoffkeep migration is four places, not one.** Widening only the
+  CHECK constraint is not enough; a resend must still collide with the row it
+  already wrote. All four must name the new kinds:
+  1. the app-level `relayEventKinds` allowlist (rejects with
+     `400 invalid_context` first);
+  2. the `relay_events` CHECK constraint;
+  3. the `relay_events_idempotency` partial unique index
+     (`WHERE kind IN (...)`);
+  4. the insert's `ON CONFLICT` predicate (same `WHERE kind IN (...)`).
+  If (3)/(4) stay on the old three kinds, every hub resend — reacknowledge,
+  attempt bump, or post-restart replay — inserts a **new** row instead of
+  colliding, and each new row is undelivered, so startup replay can inject the
+  same note again. That change is a separate-repository task; it is
+  documented here so the rollout cannot widen the CHECK alone.
+- **No retrospective publication:** only event files inside the node outbox's
+  24h window (and inside the event-identity migration cutoff) are ever
+  offered. Widening the kind set does not replay history.
+
 ## Node outbox
 
 The node keeps `relay_sent(kind, job_id, epoch, report_path, reason, sent_at,
@@ -221,9 +283,12 @@ panewire emit --kind job.completed --job <job_id> --report <path>
 ```
 
 The inbox root comes from `--inbox-root`, else `PANEWIRE_INBOX_ROOT`, else the
-daemon's default data directory. `--kind` must be `job.completed`,
-`job.escalate`, or `job.joined`; a missing `--job` or `--report` is a usage
-error.
+daemon's default data directory. `--kind` must be one of the relay kinds:
+`job.completed`, `job.escalate`, `job.joined`, `job.lost`, `job.revoked`, or
+`lane.event`. A missing `--job` is a usage error; `--report` is required for
+`job.completed`, while the self-record kinds (`job.escalate`, `job.joined`,
+`job.lost`, `job.revoked`) fall back to their own event file — and
+`job.lost`/`job.revoked` additionally require `--reason` and `--owner-lane`.
 
 The push carries the inbox root the file was written in, and a daemon relaying
 from a different root refuses it. Redirecting `--inbox-root` alone does not
@@ -235,11 +300,25 @@ error for the caller — the event file is durable in the namespace it chose, an
 
 The file is written first and the socket is called second. A record whose
 dedupe key already exists in `jobs/<job_id>/events/` does not produce a second
-file, but the socket push still happens — `wrk` writes the event file itself
-and then calls `emit`, and that path has to work. A daemon that is not running
+file — the socket push still happens, since `wrk` writes the event file itself
+and then calls `emit`, and that path has to work. The pre-file key shares
+(kind, job, epoch, empty report, reason) across events the scanner later keys
+by their own file, so identity is refined per kind: `job.escalate` separates
+by `question`, `job.lost` separates by the compared record fields (everything
+but `created_at`/`agent_label`), while a record identical on those fields
+reuses the existing file — emit cannot tell a same-pane re-loss from a retry
+without a producer-supplied event id. `job.completed`, `job.joined` and
+`job.revoked` keep one record per key: a second record under the same key is
+refused with `emit: duplicate outbox key`. A daemon that is not running
 is **not** an error: `emit` prints
 `emit: panewired unavailable; event recorded to file only` to stderr and exits
 0, leaving the record for the node outbox to pick up.
+
+An emitted file carries the kind under both `"type"` and `"kind"` keys: the
+scanner accepts either, but wrk reap (`document["kind"]`), `scanJobCloseState`,
+and the fleet census read `"kind"` only. Emitting both is what makes
+`emit --kind job.revoked` terminal for every consumer, not only the relay
+path.
 
 Example lane file (identifiers only — never real addresses, panes, or tokens):
 
