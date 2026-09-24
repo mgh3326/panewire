@@ -234,6 +234,61 @@ func TestTask683BatchWithMemberEchoIsHeldNotClaimed(t *testing.T) {
 	}
 }
 
+// #683 tester M1: claude renders markdown in the drawn echo -- **…** and
+// `…` vanish -- so the echo is not byte-equal to the typed text. 42% of
+// real job.completed texts carry markdown; echo matching normalizes both
+// sides so a landed report still reads as delivered.
+func TestTask683MarkdownEchoIsDelivered(t *testing.T) {
+	text := "(같은 내용이 두 번 보이면 재실행 금지) [report] b672-sgov (home-desktop) :: **Status:** PR #2096 is ready at `696bf48` -> jobs/672-sgov-20260924-2340/report.md"
+	rendered := "❯ (같은 내용이 두 번 보이면 재실행 금지) [report] b672-sgov (home-desktop) :: Status: PR #2096 is ready at 696bf48 -> jobs/672-sgov-20260924-2340/report.md"
+	pre := task626Claude(append(append(append([]string{}, task626Transcript...), rendered), task683Filler("post", 40)...), "❯")
+	_, calls := task683FakeHerdr(t, "claude",
+		[]string{pre},
+		[]string{task626TranscriptOnly})
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil)
+	if result.Outcome != relayInjectDelivered || result.Evidence != "presend:visible:marker_echo" {
+		t.Fatalf("result=%+v, want delivered presend:visible:marker_echo on the markdown-rendered echo", result)
+	}
+	if got := calls(); task683Count(got, "prompt") != 0 {
+		t.Fatalf("landed markdown text re-typed because the echo lost its delimiters: %q", got)
+	}
+}
+
+// #683 tester B1'': the line boundary that anchors an echo is a *logical*
+// line, and the visible read is physical rows. When a longer earlier echo
+// word-wraps exactly after a shorter message's body, that body sits at a
+// physical line end mid-echo -- indented continuation rows have to be
+// joined before matching or the shorter message is claimed delivered
+// without typing.
+func TestTask683WrapBoundaryPrefixIsTyped(t *testing.T) {
+	long := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane and wait for my review before merging"
+	short := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane"
+	wrapped := []string{
+		"❯ (같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane",
+		"  and wait for my review before merging",
+	}
+	pre := task626Claude(append(append([]string{}, task626Transcript...), wrapped...), "❯")
+	if !relayEchoContains(promptTranscript("claude", pre), long, true) {
+		t.Fatal("the wrapped echo does not match its own text")
+	}
+	if relayEchoContains(promptTranscript("claude", pre), short, true) {
+		t.Fatal("the wrap-break prefix matched inside the longer wrapped echo")
+	}
+	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+long), "\n")
+	post := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+short), task683Filler("post", 40)...), "❯")
+	postTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+short), "\n")
+	_, calls := task683FakeHerdr(t, "claude",
+		[]string{pre, post},
+		[]string{preTranscript, postTranscript})
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", short, nil)
+	if result.Outcome != relayInjectDelivered || strings.HasPrefix(result.Evidence, "presend:") {
+		t.Fatalf("result=%+v, want the wrap-boundary prefix typed and delivered on its own echo", result)
+	}
+	if got := calls(); task683Count(got, "prompt") != 1 {
+		t.Fatalf("message ending at a wrap break of a longer echo was not typed: %q", got)
+	}
+}
+
 // #683 tester S1: a queue banner that was already up before the paste
 // belongs to an older queue and cannot prove this message joined it. With
 // no echo of the text either, the verdict is may-be-in-pane -- never a
