@@ -794,26 +794,66 @@ func relayQueuedBanner(harness, screen string) bool {
 	return false
 }
 
+// relayNormalizeEcho compacts whitespace and drops the inline markdown
+// delimiters claude's echo renderer removes (proven live: **…** and `…`
+// vanish from the drawn echo; *…*, _…_ and ~~…~~ are the same family).
+// Normalizing both sides keeps the comparison honest for the relay texts
+// that carry markdown -- 42% of real job.completed texts, per the #683
+// tester's live capture (M1). Two texts differing only in delimiters
+// collapse to one; acceptable, they render identically on the pane.
+func relayNormalizeEcho(s string) string {
+	return strings.Map(func(r rune) rune {
+		switch r {
+		case '*', '`', '_', '~':
+			return -1
+		}
+		return r
+	}, compactWhitespace(s))
+}
+
+// relayWrapContinuation reports whether line is a word-wrap continuation of
+// the row above it: indented, with no leading transcript row glyph. An
+// indented non-glyph transcript row is indistinguishable from a wrap, and
+// the false flag only ever merges a real row into the previous one, which
+// withholds a delivered claim rather than inventing one.
+func relayWrapContinuation(line string) bool {
+	trimmed := strings.TrimLeft(line, " ")
+	if trimmed == "" || trimmed == line {
+		return false
+	}
+	for _, glyph := range []string{"❯", "❭", "○", "⏺", "─", "✻", "⏵", "│", "·", "›", "●", "◆"} {
+		if strings.HasPrefix(trimmed, glyph) {
+			return false
+		}
+	}
+	return true
+}
+
 // relayEchoContains reports whether text's stripped body appears in screen
 // ending at a line boundary. Identity needs the whole body: rounds of one
 // job share both 48-rune markers (same label and host give the same head,
 // the same report path the same tail; only the middle differs), and a bare
 // substring match lets a shorter message hide inside a longer echo that
-// merely contains it (chat prefix containment) -- both measured by the
-// #683 tester as permanent-loss bugs. Matching per line-ending also
-// handles a wrapped echo, whose body spans several physical lines.
-func relayEchoContains(screen, text string) bool {
-	body := compactWhitespace(stripRelayBoilerplate(text))
+// merely contains it (#683 tester B1'). joinWraps folds indented
+// continuation rows into their parent line first: the visible read is
+// physical rows, and without it a body ending at a wrap break counts as a
+// line end even though that echo keeps going (tester B1''). The
+// recent-unwrapped source is already logical lines and is never joined.
+func relayEchoContains(screen, text string, joinWraps bool) bool {
+	body := relayNormalizeEcho(stripRelayBoilerplate(text))
 	if body == "" {
 		return false
 	}
-	lines := strings.Split(screen, "\n")
-	for end := range lines {
-		acc := ""
-		for start := end; start >= 0 && len(acc) < len(body); start-- {
-			acc = compactWhitespace(lines[start]) + acc
+	var lines []string
+	for _, line := range strings.Split(screen, "\n") {
+		if joinWraps && len(lines) > 0 && relayWrapContinuation(line) {
+			lines[len(lines)-1] += line
+			continue
 		}
-		if strings.HasSuffix(acc, body) {
+		lines = append(lines, line)
+	}
+	for _, line := range lines {
+		if strings.HasSuffix(relayNormalizeEcho(line), body) {
 			return true
 		}
 	}
@@ -824,10 +864,10 @@ func relayEchoContains(screen, text string) bool {
 // with the composer region cut away, because recent-unwrapped can carry the
 // live composer rows (#683 tester S3) -- holds echo evidence of text.
 func relayTranscriptEchoes(harness string, reads relayPaneReads, text string) string {
-	if relayEchoContains(promptTranscript(harness, reads.visible), text) {
+	if relayEchoContains(promptTranscript(harness, reads.visible), text, true) {
 		return "visible"
 	}
-	if relayEchoContains(promptTranscript(harness, reads.unwrapped), text) {
+	if relayEchoContains(promptTranscript(harness, reads.unwrapped), text, false) {
 		return "recent-unwrapped"
 	}
 	return ""
@@ -1091,10 +1131,12 @@ func (read devinPaneRead) classify(texts []string) (string, string) {
 		}
 	}
 	for _, source := range sources {
-		transcript := compactWhitespace(promptTranscript("devin", source.text))
+		transcript := relayNormalizeEcho(promptTranscript("devin", source.text))
 		for _, text := range texts {
-			if relayContainsMarker(transcript, devinRelayMarkers(text, nil)) {
-				return "marker_observed", source.name + ":marker_echo"
+			for _, marker := range devinRelayMarkers(text, nil) {
+				if marker != "" && strings.Contains(transcript, relayNormalizeEcho(marker)) {
+					return "marker_observed", source.name + ":marker_echo"
+				}
 			}
 		}
 	}
