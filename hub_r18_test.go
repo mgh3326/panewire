@@ -161,10 +161,11 @@ func TestR18RelaySubmissionVerificationReturnsOnceThenUnconfirmed(t *testing.T) 
 		t.Fatal(err)
 	}
 	// #547 looks the harness up before the prompt (devin needs a presend
-	// check) and again after, to catch an agent change mid-inject; agent get
-	// is read-only, so claude still gets one prompt, one return keypress and
-	// two reads, plus (#626) the pre-paste read that shows the chip is its own.
-	if got := strings.Fields(string(b)); strings.Join(got, ",") != "get,read,prompt,read,send-keys,read,get" {
+	// check); #683 reads the pane twice per check -- the visible window and
+	// the recent-unwrapped transcript -- both before the prompt and after
+	// each send. The second chip read earns no keypress (the chip is already
+	// on screen, so it is unowned) and the verdict is may-be-in-pane.
+	if got := strings.Fields(string(b)); strings.Join(got, ",") != "get,read,read,prompt,read,read,send-keys,read,read" {
 		t.Fatalf("submission verification removed or repeated: %q", b)
 	}
 }

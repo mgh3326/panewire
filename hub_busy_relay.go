@@ -24,7 +24,11 @@ type hubRelayHeldProjection struct {
 
 func decodeRelayHeldPayload(raw []byte) (relayHeldPayload, bool) {
 	var value relayHeldPayload
-	if json.Unmarshal(raw, &value) != nil || value.EventID < 1 || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !hubAgentLabelPattern.MatchString(value.Lane) || (value.Reason != "working" && value.Reason != "blocked" && value.Reason != "restored") || len(value.Preview) > 240 || !validRelayDeliver(value.DeliverPolicy) {
+	// Reasons are the busy_relay.go reportHeld call sites: the pane status
+	// that held it (working/blocked), a restored row after a node restart,
+	// and retryOrDropWithin's retry re-arm (#683: that one used to be
+	// rejected, so retries were invisible in the held projection).
+	if json.Unmarshal(raw, &value) != nil || value.EventID < 1 || !hubJobIDPattern.MatchString(value.JobID) || value.Pane == "" || value.Pane == relayCancelledPane || len(value.Pane) > 128 || !hubAgentLabelPattern.MatchString(value.Lane) || (value.Reason != "working" && value.Reason != "blocked" && value.Reason != "restored" && value.Reason != "retry") || len(value.Preview) > 240 || !validRelayDeliver(value.DeliverPolicy) {
 		return relayHeldPayload{}, false
 	}
 	if _, err := time.Parse(time.RFC3339Nano, value.HeldSince); err != nil {

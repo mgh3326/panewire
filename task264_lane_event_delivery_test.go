@@ -94,27 +94,25 @@ func TestTask264InjectFailureThenSuccessDeliversWithoutSticking(t *testing.T) {
 // -- a harness string that is not "claude" -- and shows the classifier
 // distinguishes an unresolved queue from an actually-submitted prompt.
 func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
-	t.Run("codex queued state never confirms, verification reports failure", func(t *testing.T) {
+	// #683: a queued banner is accepted as landed -- the harness's own queue
+	// submits the message when the turn ends. It is neither a failure nor a
+	// return-keypress candidate.
+	t.Run("codex queued state is landed, not a failure", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeHerdr(t, dir, map[string]string{
 			"get":       `{"result":{"agent":{"agent":"codex"}}}`,
 			"read":      "Press up to edit queued messages",
 			"send-keys": "",
 		})
-		if defaultHubRelayInject(context.Background(), "codex-pane", "do the thing") {
-			t.Fatal("codex message still shown queued after return, but injection reported delivered")
+		if !defaultHubRelayInject(context.Background(), "codex-pane", "do the thing") {
+			t.Fatal("codex message accepted into the queue, but injection reported failure")
 		}
 	})
 
-	// R1: a queue banner clearing after the return keypress used to be enough
-	// to report delivered even with no marker echo -- that is precisely the
-	// "unproven reported as delivered" defect R1 fixed (a real relay message
-	// went missing for 11 hours because of it). Real marker evidence in the
-	// post-return screen is required now. #626: codex no longer gets that
-	// return at all -- its composer cannot be located on screen, so nothing
-	// proves the keypress would submit only this text -- and the withheld
-	// return is may-be-in-pane, never a re-inject.
-	t.Run("codex queued withholds the return and is not re-injected", func(t *testing.T) {
+	// #683: the queued verdict is relayInjectQueued -- the message was
+	// accepted by the harness and is never re-injected; no return keypress
+	// is sent either (the queue submits itself).
+	t.Run("codex queued is landed without a return", func(t *testing.T) {
 		dir := t.TempDir()
 		log := filepath.Join(dir, "calls")
 		script := "#!/bin/sh\necho \"$2\" >> \"" + log + "\"\ncase \"$2\" in\n" +
@@ -123,8 +121,8 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 			"esac\n"
 		installFakeHerdr(t, dir, script)
 		result := defaultHubRelayInjectVerdict(context.Background(), "codex-pane", "do the thing", nil)
-		if result.Outcome != relayInjectMaybeInPane {
-			t.Fatalf("codex queued: outcome=%v evidence=%q, want maybe-in-pane", result.Outcome, result.Evidence)
+		if result.Outcome != relayInjectQueued {
+			t.Fatalf("codex queued: outcome=%v evidence=%q, want queued", result.Outcome, result.Evidence)
 		}
 		calls, _ := os.ReadFile(log)
 		if strings.Contains(string(calls), "send-keys") {
@@ -132,10 +130,9 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 		}
 	})
 
-	// R1: a queue banner clearing after return with no marker evidence at all
-	// is unproven, not delivered -- the same defect as above, just without a
-	// marker ever appearing.
-	t.Run("codex queue clears after return without marker evidence, verification reports failure", func(t *testing.T) {
+	// The other codex queue shape: a banner that persists because the pane is
+	// busy. Still landed, still no keypress.
+	t.Run("codex persistent queue banner is landed without a return", func(t *testing.T) {
 		dir := t.TempDir()
 		marker := filepath.Join(dir, "returned")
 		script := "#!/bin/sh\ncase \"$2\" in\n" +
@@ -144,8 +141,11 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 			"send-keys) touch \"" + marker + "\" ;;\n" +
 			"esac\n"
 		installFakeHerdr(t, dir, script)
-		if defaultHubRelayInject(context.Background(), "codex-pane", "do the thing") {
-			t.Fatal("codex message cleared the queue after return with no marker evidence, but injection reported delivered")
+		if !defaultHubRelayInject(context.Background(), "codex-pane", "do the thing") {
+			t.Fatal("codex message accepted into the queue, but injection reported failure")
+		}
+		if _, err := os.Stat(marker); !os.IsNotExist(err) {
+			t.Fatalf("queued codex message earned a return keypress: err=%v", err)
 		}
 	})
 
@@ -171,26 +171,24 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 	})
 
 	// The other half of AC0's reversal: devin's own queue banner ("send
-	// now") is now real evidence, so a still-queued devin screen must not be
-	// reported delivered either -- mirrors the codex queued case above. Since
-	// #547 that result is may-be-in-pane (never re-injected), not a retry;
-	// see task547_devin_relay_test.go.
-	t.Run("devin queued state never confirms, verification reports failure", func(t *testing.T) {
+	// now") is real evidence -- since #547 a still-queued devin screen is
+	// relayInjectQueued and reported delivered, never retried; see
+	// task547_devin_relay_test.go.
+	t.Run("devin queued state is landed, not a failure", func(t *testing.T) {
 		dir := t.TempDir()
 		writeFakeHerdr(t, dir, map[string]string{
 			"get":       `{"result":{"agent":{"agent":"devin"}}}`,
 			"read":      "── 1 queued ── send now",
 			"send-keys": "",
 		})
-		if defaultHubRelayInject(context.Background(), "devin-pane", "do the thing") {
-			t.Fatal("devin message still shown queued after return, but injection reported delivered")
+		if !defaultHubRelayInject(context.Background(), "devin-pane", "do the thing") {
+			t.Fatal("devin message accepted into the queue, but injection reported failure")
 		}
 	})
 
-	// And the positive case: once devin's own marker echo appears after the
-	// return keypress, injection must report delivered -- mirrors the codex
-	// marker-evidence case above.
-	t.Run("devin queue clears after return with marker evidence, verification reports success", func(t *testing.T) {
+	// The queue lands the message before any keypress: the postsend read
+	// already shows devin's queue banner, which #683 accepts as landed.
+	t.Run("devin queue banner accepts the message, verification reports success", func(t *testing.T) {
 		dir := t.TempDir()
 		prompted := filepath.Join(dir, "prompted")
 		marker := filepath.Join(dir, "returned")
