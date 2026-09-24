@@ -346,9 +346,13 @@ func TestRelayInjectVerifySubmissionHarnessEvidenceMatrix(t *testing.T) {
 		wouldRetry bool   // !wantResult: whether the hub would retry/re-inject
 	}{
 		{"claude marker_observed direct", "claude", []string{"prefix one line suffix"}, "marker_observed", true, false},
-		{"claude unproven direct", "claude", []string{"nothing relevant"}, "unproven", false, true},
+		{"claude unproven direct, composer seen empty", "claude", []string{"nothing relevant\n" + unprovenClaudeEmpty}, "unproven", false, true},
+		// #626: for claude an unproven verdict retries only once its composer
+		// is seen empty; a screen with no composer proves nothing.
+		{"claude unproven direct, no composer on screen", "claude", []string{"nothing relevant"}, "unproven", false, false},
 		{"claude queued then still queued after return", "claude", []string{unprovenClaudeQueued, unprovenClaudeQueued}, "queued", false, true},
-		{"claude composer_residue then unproven after return", "claude", []string{unprovenClaudeChip, "nothing relevant"}, "unproven", false, true},
+		{"claude composer_residue then unproven after return", "claude", []string{unprovenClaudeChip, "nothing relevant\n" + unprovenClaudeEmpty}, "unproven", false, true},
+		{"claude composer_residue then no composer after return", "claude", []string{unprovenClaudeChip, "nothing relevant"}, "unproven", false, false},
 
 		{"codex marker_observed direct", "codex", []string{"one line"}, "marker_observed", true, false},
 		{"codex unproven direct", "codex", []string{"nothing relevant"}, "unproven", false, true},

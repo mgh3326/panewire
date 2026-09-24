@@ -185,6 +185,18 @@ func TestTask626PendingTallComposerIsNotRetried(t *testing.T) {
 	if got := calls(); got != "get,read,prompt,read,read" {
 		t.Fatalf("herdr calls = %q, want get,read,prompt,read,read", got)
 	}
+	// Taller than the 60-line window too, or a failed wider read: neither
+	// shows the composer empty, so neither is a retry.
+	for i := 0; i < 70; i++ {
+		composer = append(composer, fmt.Sprintf("  more pending line %d", i))
+	}
+	calls = task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, task626Claude(task626Transcript, composer...)})
+	if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil); result.Outcome != relayInjectMaybeInPane || result.Evidence != "unproven:composer_unlocated" {
+		t.Fatalf("composer over 60 lines: result=%+v, want maybe-in-pane unproven:composer_unlocated", result)
+	}
+	if got := calls(); got != "get,read,prompt,read,read" {
+		t.Fatalf("herdr calls = %q", got)
+	}
 	// Unproven with the composer seen empty is still a retry (#264 R1).
 	calls = task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, "nothing relevant", task626ClaudeEmpty})
 	if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil); result.Outcome != relayInjectRetryable {
@@ -192,6 +204,22 @@ func TestTask626PendingTallComposerIsNotRetried(t *testing.T) {
 	}
 	if got := calls(); got != "get,read,prompt,read,read,get" {
 		t.Fatalf("herdr calls = %q", got)
+	}
+}
+
+// A wider read that fails proves nothing either.
+func TestTask626FailedPendingReadIsNotRetried(t *testing.T) {
+	dir := t.TempDir()
+	count := filepath.Join(dir, "count")
+	tenLines := strings.Join([]string{"  continuation line 5", "  continuation line 6", task626Divider, "  ⏵⏵ bypass permissions on"}, "\n")
+	script := "#!/bin/sh\ncase \"$2\" in\n" +
+		"get) echo '{\"result\":{\"agent\":{\"agent\":\"claude\"}}}' ;;\n" +
+		"read) n=$(cat \"" + count + "\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"" + count + "\"\n" +
+		"  case $n in 1) printf '%b\\n' \"" + strings.ReplaceAll(task626ClaudeEmpty, "\n", "\\n") + "\" ;; 2) printf '%b\\n' \"" + strings.ReplaceAll(tenLines, "\n", "\\n") + "\" ;; *) exit 1 ;; esac ;;\n" +
+		"esac\n"
+	installFakeHerdr(t, dir, script)
+	if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil); result.Outcome != relayInjectMaybeInPane || result.Evidence != "unproven:composer_unread" {
+		t.Fatalf("result=%+v, want maybe-in-pane unproven:composer_unread", result)
 	}
 }
 

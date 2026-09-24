@@ -715,18 +715,30 @@ func relayComposerReturnSafe(harness, screen, text, before string) (bool, string
 	return false, "composer_foreign"
 }
 
-// relayComposerPending reads a taller window than the classification read and
-// reports whether pane's located composer still holds text. An unproven
-// verdict is retried by re-injecting, and a re-inject pastes after whatever
-// the composer holds -- possibly this same text, pending in a composer too
-// tall for the 10-line read to show (#626).
-func relayComposerPending(ctx context.Context, pane, harness string) bool {
+// relayComposerHeld reads a taller window than the classification read and
+// names why pane's composer may still hold text, or returns "" when claude's
+// composer is seen empty. An unproven verdict is retried by re-injecting, and
+// a re-inject pastes after whatever the composer holds -- possibly this same
+// text, pending in a composer too tall for the 10-line read to show (#626).
+// So for claude only a located, empty composer allows the retry; a failed
+// read or a composer taller than the window proves nothing. Other harnesses
+// draw no locatable composer and keep the #264 R1 retry ("" always).
+func relayComposerHeld(ctx context.Context, pane, harness string) string {
+	if !strings.EqualFold(harness, "claude") {
+		return ""
+	}
 	out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--lines", relayComposerReadLines).Output()
 	if err != nil {
-		return false
+		return "composer_unread"
 	}
 	content, ok := relayComposer(harness, string(out))
-	return ok && content != ""
+	switch {
+	case !ok:
+		return "composer_unlocated"
+	case content != "":
+		return "composer_pending"
+	}
+	return ""
 }
 
 // relayInjectVerifySubmission is relayInjectVerify with no pre-paste read,
@@ -743,11 +755,10 @@ func relayInjectVerifySubmission(ctx context.Context, pane, harness, text string
 func relayInjectVerify(ctx context.Context, pane, harness, text, before string) relayInjectResult {
 	delivered := relayInjectResult{Outcome: relayInjectDelivered, Harness: harness}
 	unconfirmed := relayInjectResult{Outcome: relayInjectRetryable, Harness: harness}
-	// An unproven verdict is a retry only once the composer is seen empty
-	// or cannot be located at all.
+	// An unproven verdict is a retry only once the composer is seen empty.
 	unproven := func() relayInjectResult {
-		if relayComposerPending(ctx, pane, harness) {
-			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "unproven:composer_pending"}
+		if held := relayComposerHeld(ctx, pane, harness); held != "" {
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "unproven:" + held}
 		}
 		return unconfirmed
 	}
