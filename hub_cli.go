@@ -571,7 +571,7 @@ func renderHubStatus(writer io.Writer, nodes []HubNode) {
 
 func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if len(args) == 0 || (args[0] != "jobs" && args[0] != "orphaned" && args[0] != "reassign") {
-		return ExitUsage
+		return writeHubCLIUsage(stderr, "jobs: expected jobs, orphaned, or reassign subcommand", jobsUsage)
 	}
 	flags := flag.NewFlagSet("panewire jobs "+args[0], flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -581,8 +581,26 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	jobID := flags.String("job-id", "", "orphaned job ID")
 	to := flags.String("to", "", "destination node identity")
 	machine := flags.String("machine", "", "filter active jobs by machine identity")
-	if flags.Parse(args[1:]) != nil || flags.NArg() != 0 || *hubURL == "" || *tokenEnvPath == "" || (args[0] == "reassign" && (*jobID == "" || *to == "")) || (args[0] == "jobs" && *machine != "" && !machineIDPattern.MatchString(*machine)) {
-		return ExitUsage
+	if err := flags.Parse(args[1:]); err != nil {
+		reason := "jobs: invalid flag value"
+		if strings.HasPrefix(err.Error(), "flag provided but not defined:") {
+			reason = "jobs: unknown flag"
+		} else if strings.HasPrefix(err.Error(), "flag needs an argument:") {
+			reason = "jobs: flag value is required"
+		}
+		return writeHubCLIUsage(stderr, reason, jobsUsage)
+	}
+	if flags.NArg() != 0 {
+		return writeHubCLIUsage(stderr, "jobs: unexpected positional argument", jobsUsage)
+	}
+	if *hubURL == "" || *tokenEnvPath == "" {
+		return writeHubCLIUsage(stderr, "jobs: --hub-url and --hub-token-env are required", jobsUsage)
+	}
+	if args[0] == "reassign" && (*jobID == "" || *to == "") {
+		return writeHubCLIUsage(stderr, "jobs reassign: --job-id and --to are required", jobsUsage)
+	}
+	if args[0] == "jobs" && *machine != "" && !machineIDPattern.MatchString(*machine) {
+		return writeHubCLIUsage(stderr, "jobs: invalid --machine", jobsUsage)
 	}
 	env, err := loadHubTokenEnv(*tokenEnvPath)
 	if err != nil || env.MachineID != hubOperatorMachineID {

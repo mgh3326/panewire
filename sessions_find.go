@@ -291,7 +291,7 @@ func parseSessionsFindArgs(args []string) (sessionsFindOptions, error) {
 			}
 			seen[name] = true
 			if !hasValue {
-				if index+1 >= len(args) {
+				if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") {
 					return options, errors.New("sessions flag value is required")
 				}
 				index++
@@ -320,18 +320,21 @@ func parseSessionsFindArgs(args []string) (sessionsFindOptions, error) {
 
 func runSessionsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if len(args) == 0 || args[0] != "find" {
-		return ExitUsage
+		return writeHubCLIUsage(stderr, "sessions: expected find subcommand", sessionsUsage)
 	}
 	return runSessionsFindCLI(args[1:], stdout, stderr, deps)
 }
 
 func runSessionsFindCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	options, err := parseSessionsFindArgs(args)
-	if err != nil || !validIdleWakeMetadata(options.label) {
-		return ExitUsage
+	if err != nil {
+		return writeHubCLIUsage(stderr, "sessions find: "+err.Error(), sessionsUsage)
+	}
+	if !validIdleWakeMetadata(options.label) {
+		return writeHubCLIUsage(stderr, "sessions find: invalid label", sessionsUsage)
 	}
 	if options.machine != "" && !machineIDPattern.MatchString(options.machine) {
-		return ExitUsage
+		return writeHubCLIUsage(stderr, "sessions find: invalid --machine", sessionsUsage)
 	}
 	now := time.Now
 	if deps.Now != nil {

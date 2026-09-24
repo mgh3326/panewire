@@ -462,7 +462,7 @@ func parseSessionReapCLIArgs(args []string) (sessionReapCLIOptions, error) {
 			}
 		case "--grace", "--jobs-root", "--herdr-socket":
 			if !hasValue {
-				if index+1 >= len(args) {
+				if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") {
 					return options, errors.New("session-reap flag value is required")
 				}
 				index++
@@ -492,8 +492,7 @@ func parseSessionReapCLIArgs(args []string) (sessionReapCLIOptions, error) {
 func runSessionReapCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	options, err := parseSessionReapCLIArgs(args)
 	if err != nil {
-		fmt.Fprintln(stderr, "session-reap:", err)
-		return ExitUsage
+		return writeHubCLIUsage(stderr, "session-reap: "+err.Error(), sessionReapUsage)
 	}
 	now := time.Now
 	if deps.Now != nil {

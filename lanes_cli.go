@@ -33,12 +33,16 @@ type lanesCLIOptions struct {
 }
 
 func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
+	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
+		fmt.Fprintln(stdout, lanesUsage)
+		return ExitOK
+	}
 	options, err := parseLanesCLI(args)
 	if err != nil {
-		return ExitUsage
+		return writeHubCLIUsage(stderr, "lanes: "+err.Error(), lanesUsage)
 	}
 	if options.HubURL == "" || options.TokenEnv == "" {
-		return ExitUsage
+		return writeHubCLIUsage(stderr, "lanes: --hub-url and --hub-token-env are required", lanesUsage)
 	}
 	if !laneNamePattern.MatchString(options.Lane) && options.Command != "ls" {
 		fmt.Fprintln(stderr, "lanes rejected: invalid lane")
@@ -214,7 +218,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 			return ExitConditionInvalid
 		}
 	default:
-		return ExitUsage
+		return writeHubCLIUsage(stderr, "lanes: unknown command", lanesUsage)
 	}
 }
 
@@ -224,7 +228,14 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 	}
 	options := lanesCLIOptions{Command: args[0], seen: make(map[string]bool)}
 	if options.Command != "add" && options.Command != "rm" && options.Command != "ls" && options.Command != "self-check" {
-		return lanesCLIOptions{}, errors.New("unknown lanes command")
+		switch options.Command {
+		case "list":
+			return lanesCLIOptions{}, errors.New("unknown lanes command: list; did you mean ls?")
+		case "remove":
+			return lanesCLIOptions{}, errors.New("unknown lanes command: remove; did you mean rm?")
+		default:
+			return lanesCLIOptions{}, errors.New("unknown lanes command")
+		}
 	}
 	positionals := make([]string, 0, 1)
 	for index := 1; index < len(args); index++ {
@@ -261,7 +272,7 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 			}
 			options.seen[name] = true
 			if !hasValue {
-				if index+1 >= len(args) {
+				if index+1 >= len(args) || strings.HasPrefix(args[index+1], "--") {
 					return lanesCLIOptions{}, errors.New("lanes flag value is required")
 				}
 				index++
