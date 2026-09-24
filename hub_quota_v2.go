@@ -629,8 +629,9 @@ var (
 
 // recordObservation appends one automatic observation, checking in the §7.5
 // order after the POST form: future (§7.3) → source machine → a current
-// binding of this exact slot (§7.1) → every time inside that binding's window
-// widened by Δ_hub (§7.2) → observation_id idempotency.
+// binding of this exact slot (§7.1) → every time t with [t−Δ_hub, t+Δ_hub]
+// inside that binding's window, i.e. t in [valid_from+Δ_hub, valid_until−Δ_hub)
+// (§7.2) → observation_id idempotency.
 func (store *hubQuotaV2Store) recordObservation(machineID string, observation QuotaV2Observation, now time.Time) (QuotaV2Observation, bool, error) {
 	if validateQuotaV2Envelope(observation, quotaV2FormPost) != nil {
 		return QuotaV2Observation{}, false, errQuotaV2Invalid
