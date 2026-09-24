@@ -34,6 +34,9 @@ type fakeHandoffkeep struct {
 	undelivere []handoffkeepRelayEvent
 	// deliveredTo is handoffkeep's delivered_to for each closed row.
 	deliveredTo map[int64]string
+	// deliveredStatus, when set, is the reply to every /delivered POST, and
+	// a non-200 closes nothing.
+	deliveredStatus int
 	// observe runs at the start of every request, before any reply, so a test
 	// can inspect hub state at the exact moment handoffkeep is called.
 	observe func(method, path string)
@@ -118,6 +121,13 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"events": pending})
 	case strings.HasSuffix(r.URL.Path, "/delivered"):
+		f.mu.Lock()
+		deliveredStatus := f.deliveredStatus
+		f.mu.Unlock()
+		if deliveredStatus != 0 && deliveredStatus != http.StatusOK {
+			w.WriteHeader(deliveredStatus)
+			return
+		}
 		idText := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/relay/events/"), "/delivered")
 		if id, err := strconv.ParseInt(idText, 10, 64); err == nil {
 			f.mu.Lock()

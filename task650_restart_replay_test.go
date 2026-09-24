@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -216,8 +217,15 @@ func TestT650LateAckMustMatchTheRow(t *testing.T) {
 		{"other job", "host-a", relayAckPayload{JobID: laneEventTransportID(t650Director, "someone-else"), Pane: directive.Pane, OriginalEventID: directive.EventID}},
 		{"unknown row", "host-a", relayAckPayload{JobID: directive.JobID, Pane: directive.Pane, OriginalEventID: directive.EventID + 50}},
 	} {
+		// Each node speaks on its own connection, so the sender's agent goes
+		// with its machine id — otherwise the hub rejects it before the row
+		// check is ever reached.
+		sender := director
+		if forged.machine == "host-b" {
+			sender = workerNode
+		}
 		before := hub.unknownMessages
-		t650Send(t, hub, forged.machine, director, "relay.delivered", forged.ack)
+		t650Send(t, hub, forged.machine, sender, "relay.delivered", forged.ack)
 		if got := fake.deliveredToFor(directive.EventID); got != "" {
 			t.Fatalf("%s: a mismatched late ack closed the row (delivered_to=%q)", forged.name, got)
 		}
@@ -228,6 +236,49 @@ func TestT650LateAckMustMatchTheRow(t *testing.T) {
 	t650Send(t, hub, "host-a", director, "relay.delivered", relayAckPayload{JobID: directive.JobID, Pane: directive.Pane, OriginalEventID: directive.EventID})
 	if got := fake.deliveredToFor(directive.EventID); got != "host-a/wB:pD8" {
 		t.Fatalf("the matching late ack did not close the row: delivered_to=%q", got)
+	}
+	// A closed row still only takes a re-ack from where it was sent.
+	before := hub.unknownMessages
+	t650Send(t, hub, "host-b", workerNode, "relay.delivered", relayAckPayload{JobID: directive.JobID, Pane: directive.Pane, OriginalEventID: directive.EventID})
+	if hub.unknownMessages != before+1 {
+		t.Fatalf("a re-ack of a delivered row from another machine was accepted: unknown_messages=%d, want %d", hub.unknownMessages, before+1)
+	}
+	t650Send(t, hub, "host-a", director, "relay.delivered", relayAckPayload{JobID: directive.JobID, Pane: directive.Pane, OriginalEventID: directive.EventID})
+	if hub.unknownMessages != before+1 {
+		t.Fatal("an idempotent re-ack from the row's destination was counted as unknown")
+	}
+}
+
+// A late ack is accepted only once handoffkeep has recorded it: a rejected
+// write leaves the row undelivered, so the ack must not read as delivered.
+func TestT650LateAckIsAcceptedOnlyWhenRecorded(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	hub := r20Hub(t, t650Lanes(t650Workers(1)), client, nil)
+	director, workerNode := t650Attach(hub)
+	events := r20t5Subscribe(t, hub)
+	directive := t650Inject(t, hub, workerNode, director, t650Wake("w16:p1", "b1", 1, time.Now().UTC().Truncate(time.Millisecond)))
+	t650Send(t, hub, "host-a", director, "relay.unconfirmed", relayAckPayload{JobID: directive.JobID, Pane: directive.Pane, OriginalEventID: directive.EventID})
+	ack := relayAckPayload{JobID: directive.JobID, Pane: directive.Pane, OriginalEventID: directive.EventID}
+
+	fake.mu.Lock()
+	fake.deliveredStatus = http.StatusInternalServerError
+	fake.mu.Unlock()
+	before := hub.unknownMessages
+	t650Send(t, hub, "host-a", director, "relay.delivered", ack)
+	if got := fake.deliveredToFor(directive.EventID); got != "" {
+		t.Fatalf("delivered_to=%q after a rejected write", got)
+	}
+	if hub.unknownMessages != before+1 || len(events("relay.delivered")) != 0 {
+		t.Fatalf("an unrecorded late ack was accepted: unknown_messages=%d (want %d) relay.delivered broadcasts=%d", hub.unknownMessages, before+1, len(events("relay.delivered")))
+	}
+
+	fake.mu.Lock()
+	fake.deliveredStatus = 0
+	fake.mu.Unlock()
+	t650Send(t, hub, "host-a", director, "relay.delivered", ack)
+	if got := fake.deliveredToFor(directive.EventID); got != "host-a/wB:pD8" || len(events("relay.delivered")) != 1 {
+		t.Fatalf("the retried late ack: delivered_to=%q relay.delivered broadcasts=%d, want recorded and broadcast once", got, len(events("relay.delivered")))
 	}
 }
 

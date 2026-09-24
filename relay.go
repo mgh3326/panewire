@@ -811,7 +811,8 @@ func (h *HubServer) persistRelayEventRecord(kind string, event hubJobEventPayloa
 
 // markRelayEventDelivered closes the loop on a node's relay.delivered. A
 // failure here is operator signal only; it must never stall the relay path.
-func (h *HubServer) markRelayEventDelivered(pending relayPending) {
+// It reports whether delivered_at was written (or there is no durable row).
+func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 	// Cleanup belongs to the successful relay.delivered acknowledgement, not
 	// to handoffkeep. Pre-R20 deployments still need bounded local state.
 	h.mu.Lock()
@@ -821,11 +822,13 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) {
 	}
 	h.mu.Unlock()
 	if h.handoffkeep == nil || pending.eventID == 0 {
-		return
+		return true
 	}
 	if err := h.handoffkeep.markDelivered(context.Background(), pending.eventID, pending.machine, pending.pane); err != nil {
 		h.logger.Warn("relay delivery was not recorded", "event_id", pending.eventID, "machine", pending.machine)
+		return false
 	}
+	return true
 }
 
 // recordLateRelayDelivery records a relay.delivered that no longer matches an
@@ -852,17 +855,18 @@ func (h *HubServer) recordLateRelayDelivery(machineID string, ack relayAckPayloa
 	if event.JobID != ack.JobID {
 		return false
 	}
-	if record.DeliveredAt != "" {
-		return true
-	}
 	route, _, _ := h.resolveRelayRoute(record.Kind, event)
 	fromRow := record.Machine == machineID && record.PaneID == ack.Pane
 	fromRoute := !route.Sink && route.Machine == machineID && route.Pane == ack.Pane
 	if !fromRow && !fromRoute {
 		return false
 	}
-	h.markRelayEventDelivered(relayPending{machine: machineID, pane: ack.Pane, eventID: record.ID, kind: record.Kind, event: event})
-	return true
+	if record.DeliveredAt != "" {
+		return true
+	}
+	// Only a durable write accepts the ack: a rejected one leaves the row
+	// undelivered, and broadcasting it as delivered would hide that.
+	return h.markRelayEventDelivered(relayPending{machine: machineID, pane: ack.Pane, eventID: record.ID, kind: record.Kind, event: event})
 }
 
 // relayEventFromRecord rebuilds the relay payload a durable row stands for.
