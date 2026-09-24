@@ -411,6 +411,11 @@ type HubServer struct {
 	lanePersistedOrder   lruIndex[string]
 	replayExhausted      map[int64]struct{}
 	replayExhaustedOrder lruIndex[int64]
+	// replayRetired remembers durable rows this process already retired, so
+	// overlapping replays — the startup replay and one per node hello —
+	// cannot announce the same retire twice (#658).
+	replayRetired      map[int64]struct{}
+	replayRetiredOrder lruIndex[int64]
 	handoffkeep          *handoffkeepRelayClient
 	chatStore            ChatStore
 	chatKick             chan struct{}
@@ -1874,6 +1879,40 @@ func (h *HubServer) countReplayExhaustedEvent(eventID int64) bool {
 	h.replayExhausted[eventID] = struct{}{}
 	h.replayExhaustedEvents++
 	return true
+}
+
+// claimReplayRetire marks a durable row as retired by this process. The
+// startup replay and every node-hello replay run concurrently, and each lists
+// the same rows before any retire lands — without the claim every one of them
+// marked, logged and broadcast the same retire (#658). A held claim survives a
+// successful retire: a row the undelivered listing somehow returns again was
+// already announced. The bounded set mirrors replayExhausted; eviction can
+// only repeat an operator broadcast, never re-deliver.
+func (h *HubServer) claimReplayRetire(eventID int64) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, already := h.replayRetired[eventID]; already {
+		h.replayRetiredOrder.touch(eventID, relayReplayRetiredMaxEntries)
+		return false
+	}
+	if h.replayRetired == nil {
+		h.replayRetired = make(map[int64]struct{})
+	}
+	_, evicted, overflowed := h.replayRetiredOrder.touch(eventID, relayReplayRetiredMaxEntries)
+	if overflowed {
+		delete(h.replayRetired, evicted)
+	}
+	h.replayRetired[eventID] = struct{}{}
+	return true
+}
+
+// releaseReplayRetire frees a claim whose retire write was rejected, so the
+// next replay retries it instead of dropping the row.
+func (h *HubServer) releaseReplayRetire(eventID int64) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.replayRetired, eventID)
+	h.replayRetiredOrder.forget(eventID)
 }
 
 // ReplayExhaustedEventCount exists for local monitoring and tests.

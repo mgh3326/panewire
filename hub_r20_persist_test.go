@@ -37,10 +37,13 @@ type fakeHandoffkeep struct {
 	// deliveredStatus, when set, is the reply to every /delivered POST, and
 	// a non-200 closes nothing.
 	deliveredStatus int
-	// retiredMarkerStaysUndelivered models the #658 production anomaly: a
-	// /delivered POST whose pane is replay-retired:* persists delivered_to
-	// but the row keeps arriving in the undelivered listing, so the next
-	// node hello re-retires it.
+	// retiredMarkerStaysUndelivered models a listed row that already carries
+	// the retire marker: a /delivered POST whose pane is replay-retired:*
+	// persists delivered_to but leaves delivered_at unset, so the row keeps
+	// arriving in the undelivered listing. Current handoffkeep writes both
+	// columns together and never produces this state; the flag exists so the
+	// hub-side marker guard is exercised against a server whose retire write
+	// the listing does not observe (#658).
 	retiredMarkerStaysUndelivered bool
 	// observe runs at the start of every request, before any reply, so a test
 	// can inspect hub state at the exact moment handoffkeep is called.
