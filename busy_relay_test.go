@@ -20,16 +20,17 @@ import (
 // shapes, so tests exercise the production parser without ever invoking a
 // workstation's herdr binary.
 type r27FakeHerdr struct {
-	t          *testing.T
-	getStatus  string
-	getOutput  []byte
-	getErr     error
-	getGate    chan struct{}
-	waitStatus string
-	waitGate   chan struct{}
-	started    chan struct{}
-	mu         sync.Mutex
-	calls      [][]string
+	t               *testing.T
+	getStatus       string
+	getStatusByPane map[string]string
+	getOutput       []byte
+	getErr          error
+	getGate         chan struct{}
+	waitStatus      string
+	waitGate        chan struct{}
+	started         chan struct{}
+	mu              sync.Mutex
+	calls           [][]string
 }
 
 func TestR27HeldProjectionEditCancelAPIs(t *testing.T) {
@@ -101,7 +102,7 @@ func TestR27HeldProjectionEditCancelAPIs(t *testing.T) {
 func (fake *r27FakeHerdr) run(ctx context.Context, args ...string) ([]byte, error) {
 	fake.mu.Lock()
 	fake.calls = append(fake.calls, append([]string(nil), args...))
-	getOutput, getErr, getStatus := fake.getOutput, fake.getErr, fake.getStatus
+	getOutput, getErr, getStatus, getStatusByPane := fake.getOutput, fake.getErr, fake.getStatus, fake.getStatusByPane
 	fake.mu.Unlock()
 	if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
 		if fake.getGate != nil {
@@ -110,6 +111,9 @@ func (fake *r27FakeHerdr) run(ctx context.Context, args ...string) ([]byte, erro
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			}
+		}
+		if status, ok := getStatusByPane[args[2]]; ok {
+			getStatus = status
 		}
 		output := getOutput
 		if output == nil {

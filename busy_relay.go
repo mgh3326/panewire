@@ -368,17 +368,49 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 	}
 	if identified {
 		if existing, found, err := manager.client.relayHeldByKey(parent, message.Lane, message.EventID); err == nil && found {
-			// The queued row is the same local delivery, not another
-			// prompt — but a resend disagreeing with the row's payload or
-			// destination is a recorded mismatch, the same fail-open rule
-			// the delivered record applies.
-			if mode != relayDedupeOff && (existing.Pane != message.Pane || existing.Text != message.Text) {
+			if mode != relayDedupeOff && message.Pane != "" && existing.Pane != relayCancelledPane && existing.Pane != message.Pane {
+				// A resend bound to a different pane means the lane's
+				// route moved after this row was queued — the
+				// noteLaneRoute above already recorded it. Folding this
+				// copy into the stale row would strand the event on a
+				// pane the lane no longer uses (the row would expire as
+				// lane_rerouted at its release anyway and replay then
+				// has only the 30-minute freshness window), so the
+				// stale lease is retired now and this copy delivers
+				// itself through the normal path: probe, hold with a
+				// fresh lease on the current pane, or land immediately.
 				manager.dedupeMismatch.Add(1)
 				manager.journalDedupe(parent, "mismatch", message)
-				manager.client.warnMessage(fmt.Sprintf("relay dedupe mismatch: lane=%s event_id=%d pane=%s resend disagrees with the queued row; delivering", message.Lane, message.EventID, message.Pane))
+				manager.client.warnMessage(fmt.Sprintf("relay dedupe mismatch: lane=%s event_id=%d resend targets pane=%s but the queued row sits on %s; retiring the stale lease and delivering this copy", message.Lane, message.EventID, message.Pane, existing.Pane))
+				manager.expireHeldLease(parent, existing, "lane_rerouted")
+				manager.mu.Lock()
+				if queued := manager.held[existing.Pane]; queued != nil {
+					kept := queued[:0]
+					for _, other := range queued {
+						if other.EventID != existing.EventID {
+							kept = append(kept, other)
+						}
+					}
+					manager.held[existing.Pane] = kept
+				}
+				manager.mu.Unlock()
+				manager.arm(parent, existing.Pane)
+			} else {
+				// The queued row is the same local delivery, not
+				// another prompt — but a resend disagreeing with
+				// the row's payload is a recorded mismatch, the
+				// same fail-open rule the delivered record
+				// applies. The queued row's text wins: an
+				// operator edit (relay.edit) is never overridden
+				// by a replay carrying the original payload.
+				if mode != relayDedupeOff && existing.Text != message.Text {
+					manager.dedupeMismatch.Add(1)
+					manager.journalDedupe(parent, "mismatch", message)
+					manager.client.warnMessage(fmt.Sprintf("relay dedupe mismatch: lane=%s event_id=%d pane=%s resend payload disagrees with the queued row; keeping the queued row", message.Lane, message.EventID, message.Pane))
+				}
+				manager.recoverExisting(parent, existing)
+				return
 			}
-			manager.recoverExisting(parent, existing)
-			return
 		}
 	}
 	policy, valid := parseRelayDeliveryPolicy(message.DeliverPolicy)
