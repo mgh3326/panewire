@@ -7,7 +7,7 @@ package panewire
 // every overlapping replay announced the same retire. The retire path now
 // claims the row under h.mu before marking and keeps the claim after success,
 // so one row is retired and announced exactly once; a delivered_to marker
-// check covers any listing that still returns a marked row.
+// check in replayRelayEvent covers any listing that still returns a marked row.
 
 import (
 	"bytes"
@@ -130,5 +130,76 @@ func TestT658ConcurrentReplaysRetireOncePerRow(t *testing.T) {
 	}
 	if got := len(events("relay.replay_retired")); got != len(rows) {
 		t.Fatalf("relay.replay_retired broadcasts=%d after two overlapping replays, want %d", got, len(rows))
+	}
+}
+
+func TestT679RetireClaimReleasedWhenMarkDeliveredFails(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	var logs bytes.Buffer
+	hub := r20Hub(t, t650Lanes(t650Workers(1)), client, &logs)
+	events := r20t5Subscribe(t, hub)
+	stale := time.Now().UTC().Add(-(relayReplayMaxAge + time.Hour)).Format(time.RFC3339Nano)
+	eventID := "t679-retire-write-retry"
+	fake.seedUndelivered(handoffkeepRelayEvent{ID: 41, Kind: "lane.event", JobID: laneEventTransportID(t650Director, eventID), Epoch: 1, OwnerLane: t650Director, EventID: eventID, Text: "[consult-done] advice ready", ReceivedAt: stale})
+
+	fake.mu.Lock()
+	fake.deliveredStatus = http.StatusInternalServerError
+	fake.mu.Unlock()
+	hub.replayUndeliveredLaneEvents(context.Background())
+	if got := strings.Count(logs.String(), `msg="retired relay replay was not recorded"`); got != 1 {
+		t.Fatalf("failed-retire warning logs=%d, want 1", got)
+	}
+	if got := strings.Count(logs.String(), `msg="relay replay retired"`); got != 0 {
+		t.Fatalf("retire info logs after failed write=%d, want 0", got)
+	}
+	if got := fake.count(http.MethodPost, "/v1/relay/events/41/delivered"); got != 1 {
+		t.Fatalf("retire POSTs after failed write=%d, want 1", got)
+	}
+
+	fake.mu.Lock()
+	fake.deliveredStatus = 0
+	fake.mu.Unlock()
+	hub.replayUndeliveredLaneEvents(context.Background())
+	hub.replayUndeliveredLaneEvents(context.Background())
+
+	if got := strings.Count(logs.String(), `msg="relay replay retired"`); got != 1 {
+		t.Fatalf("retire info logs after retry=%d, want 1", got)
+	}
+	if got := fake.count(http.MethodPost, "/v1/relay/events/41/delivered"); got != 2 {
+		t.Fatalf("retire POSTs after retry and another hello=%d, want 2", got)
+	}
+	if got := fake.deliveredToFor(41); got != "hub/replay-retired:stale" {
+		t.Fatalf("delivered_to=%q after successful retry, want hub/replay-retired:stale", got)
+	}
+	if got := len(events("relay.replay_retired")); got != 1 {
+		t.Fatalf("relay.replay_retired broadcasts=%d after retry, want 1", got)
+	}
+}
+
+func TestT679ReplaySkipsMarkedRowBeforeAttemptGate(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	var logs bytes.Buffer
+	hub := r20Hub(t, t650Lanes(t650Workers(1)), client, &logs)
+	events := r20t5Subscribe(t, hub)
+	eventID := "t679-already-retired"
+	marker := relayReplayRetiredMarker + "stale"
+	fake.seedUndelivered(handoffkeepRelayEvent{
+		ID: 42, Kind: "lane.event", JobID: laneEventTransportID(t650Director, eventID), Epoch: 1,
+		OwnerLane: t650Director, EventID: eventID, Text: "[consult-done] advice ready",
+		DeliveredTo: marker, Attempts: relayReplayMaxAttempts,
+	})
+
+	hub.replayUndeliveredLaneEvents(context.Background())
+
+	if got := fake.count(http.MethodPost, "/v1/relay/events/42/delivered"); got != 0 {
+		t.Fatalf("marked row retire POSTs=%d, want 0", got)
+	}
+	if got := strings.Count(logs.String(), `msg="relay replay retired"`); got != 0 {
+		t.Fatalf("marked row retire info logs=%d, want 0", got)
+	}
+	if got := len(events("relay.replay_retired")) + len(events("relay.replay_exhausted")); got != 0 {
+		t.Fatalf("marked row broadcasts=%d, want 0", got)
 	}
 }
