@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -93,7 +94,10 @@ func TestR725ResendAfterDeliverySuppressesOnce(t *testing.T) {
 		t.Fatalf("prompts=%q", got)
 	}
 	acks := r725DeliveredReasons(t, events, 2)
-	if acks[1].Reason != "dedupe_suppressed" || acks[1].OriginalEventID != 72501 {
+	// The re-ack carries the row's own coordinates — JobID, Pane and
+	// OriginalEventID are what the hub's pending-window and late-delivery
+	// paths match against, so a wrong one leaves the durable row open.
+	if acks[1].Reason != "dedupe_suppressed" || acks[1].OriginalEventID != 72501 || acks[1].JobID != directive.JobID || acks[1].Pane != directive.Pane {
 		t.Fatalf("re-ack=%+v", acks[1])
 	}
 	counts := manager.RelayDedupeCounts()
@@ -106,8 +110,9 @@ func TestR725ResendAfterDeliverySuppressesOnce(t *testing.T) {
 	}
 }
 
-// Two copies of one inject racing offer() meet the in-flight claim: only the
-// winner prompts; the loser is a recorded duplicate.
+// Two copies of one inject racing offer() meet the in-flight claim: the
+// loser waits for the winner's verdict, finds the delivered record, and is
+// a recorded duplicate — one prompt, one suppression, one inject attempt.
 func TestR725ConcurrentSameIdentityDeliversOnce(t *testing.T) {
 	r27GuardInbox(t)
 	t.Setenv("PANEWIRE_RELAY_DEDUPE", "apply")
@@ -142,9 +147,22 @@ func TestR725ConcurrentSameIdentityDeliversOnce(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("first offer never reached inject")
 	}
-	manager.offer(t.Context(), directive)
+	repeat := make(chan struct{})
+	go func() {
+		defer close(repeat)
+		manager.offer(t.Context(), directive)
+	}()
+	// The repeat must still be parked while the winner is inside inject: a
+	// verdict returned now would be a guess, and a wrong guess suppresses a
+	// delivery whose original may still fail.
+	select {
+	case <-repeat:
+		t.Fatal("concurrent repeat resolved before the first delivery did")
+	case <-time.After(50 * time.Millisecond):
+	}
 	close(gate)
 	<-done
+	<-repeat
 	if got := *prompts; len(got) != 1 {
 		t.Fatalf("prompts=%q", got)
 	}
@@ -156,6 +174,126 @@ func TestR725ConcurrentSameIdentityDeliversOnce(t *testing.T) {
 	}
 	if counts := manager.RelayDedupeCounts(); counts.Suppressed != 1 {
 		t.Fatalf("counts=%+v", counts)
+	}
+}
+
+// A concurrent repeat is not a verdict on its own — it waits for the
+// in-flight delivery's outcome. If that outcome is lane_rerouted (the route
+// the repeat itself just updated), the repeat is the retry that still lands
+// the event on the new pane; suppressing it would lose the delivery.
+func TestR725InflightRepeatReroutedPaneStillDelivers(t *testing.T) {
+	r27GuardInbox(t)
+	t.Setenv("PANEWIRE_RELAY_DEDUPE", "apply")
+	getGate := make(chan struct{})
+	fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", getGate: getGate, started: make(chan struct{}, 4)}
+	store := NewMemoryStore(t)
+	defer store.Close()
+	client, prompts, events := r27Node(t, store, fake)
+	manager := client.relayBusyManager()
+	first := make(chan struct{})
+	go func() {
+		defer close(first)
+		manager.offer(t.Context(), r725Directive(72590, "lane-a", "pane-old", "done body"))
+	}()
+	deadline := time.After(2 * time.Second)
+	for fake.count("get") < 1 {
+		select {
+		case <-deadline:
+			t.Fatal("first offer never reached the pane probe")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	second := make(chan struct{})
+	go func() {
+		defer close(second)
+		manager.offer(t.Context(), r725Directive(72590, "lane-a", "pane-new", "done body"))
+	}()
+	for {
+		observed, known := manager.observedLanePane("lane-a")
+		if known && observed == "pane-new" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the rerouted repeat never observed its route")
+		default:
+			time.Sleep(time.Millisecond)
+		}
+	}
+	close(getGate)
+	<-first
+	<-second
+	// The first copy dies as lane_rerouted and records nothing; the repeat
+	// is the sole delivery and must land on the new pane.
+	if got := *prompts; len(got) != 1 || !strings.HasPrefix(got[0], "pane-new") {
+		t.Fatalf("prompts=%q", got)
+	}
+	if counts := manager.RelayDedupeCounts(); counts.Suppressed != 0 {
+		t.Fatalf("the surviving delivery was counted as a suppression: %+v", counts)
+	}
+	r27Await(t, events, "relay.dropped")
+}
+
+// The mismatch clause at the in-flight window: a concurrent repeat whose
+// payload — or destination — differs from the winner's waits for the
+// landing, then is counted as a mismatch and delivered, never suppressed.
+func TestR725InflightRepeatMismatchStillDelivers(t *testing.T) {
+	r27GuardInbox(t)
+	t.Setenv("PANEWIRE_RELAY_DEDUPE", "apply")
+	for _, sub := range []struct {
+		name      string
+		pane      string
+		text      string
+		wantPanes []string
+	}{
+		{name: "changed payload", pane: "fixture-pane", text: "v2 text", wantPanes: []string{"fixture-pane", "fixture-pane"}},
+		{name: "rerouted pane", pane: "pane-new", text: "done body", wantPanes: []string{"fixture-pane", "pane-new"}},
+	} {
+		t.Run(sub.name, func(t *testing.T) {
+			entered := make(chan struct{})
+			gate := make(chan struct{})
+			var once sync.Once
+			fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", started: make(chan struct{}, 4)}
+			store := NewMemoryStore(t)
+			defer store.Close()
+			client, prompts, _ := r725Node(t, store, fake, func(context.Context, string, string) bool {
+				once.Do(func() { close(entered) })
+				<-gate
+				return true
+			})
+			manager := client.relayBusyManager()
+			first := make(chan struct{})
+			go func() {
+				defer close(first)
+				manager.offer(t.Context(), r725Directive(72591, "lane-a", "fixture-pane", "done body"))
+			}()
+			select {
+			case <-entered:
+			case <-time.After(time.Second):
+				t.Fatal("first offer never reached inject")
+			}
+			second := make(chan struct{})
+			go func() {
+				defer close(second)
+				manager.offer(t.Context(), r725Directive(72591, "lane-a", sub.pane, sub.text))
+			}()
+			close(gate)
+			<-first
+			<-second
+			if got := *prompts; len(got) != 2 {
+				t.Fatalf("prompts=%q", got)
+			} else {
+				for index, pane := range sub.wantPanes {
+					if !strings.HasPrefix(got[index], pane+"\x00") {
+						t.Fatalf("prompts=%q", got)
+					}
+				}
+			}
+			if counts := manager.RelayDedupeCounts(); counts.Mismatch != 1 || counts.Suppressed != 0 {
+				t.Fatalf("counts=%+v", counts)
+			}
+		})
 	}
 }
 
@@ -188,20 +326,18 @@ func TestR725DeliveredRecordSurvivesClientRestart(t *testing.T) {
 }
 
 // The crash window the contract names: the delivery was recorded and the
-// held-row delete never ran, so both rows exist at boot. Apply retires the
-// stale lease and closes the durable row; shadow counts and restores as
-// before.
+// held-row delete never ran, so both rows exist at boot. The reconcile runs
+// at resume() — the first point where the emitter exists, matching the
+// daemon's SetRelayOutbox → hello order. Apply retires the stale lease and
+// closes the durable row; shadow counts and restores as before.
 func TestR725RestoreReconcilesHeldRowAlreadyDelivered(t *testing.T) {
 	r27GuardInbox(t)
-	seed := func(t *testing.T, store *Store) {
+	seed := func(t *testing.T, store *Store, text string) {
 		t.Helper()
-		item := relayHeld{Pane: "fixture-pane", Lane: "lane-a", EventID: 72504, JobID: "relay-job-72504", Text: "crash window", HeldSince: time.Now(), DeliverPolicy: "idle", RecvSeq: 1}
+		item := relayHeld{Pane: "fixture-pane", Lane: "lane-a", EventID: 72504, JobID: "relay-job-72504", Text: text, HeldSince: time.Now(), DeliverPolicy: "idle", RecvSeq: 1}
 		inserted, err := store.InsertRelayHeld(t.Context(), item)
 		if err != nil || !inserted {
 			t.Fatalf("seed held inserted=%t err=%v", inserted, err)
-		}
-		if err := store.RecordRelayDelivered(t.Context(), "lane-a", 72504, "fixture-pane", relayPayloadFingerprint(item.Text), time.Now()); err != nil {
-			t.Fatalf("seed delivered err=%v", err)
 		}
 	}
 	t.Run("apply retires the stale held row", func(t *testing.T) {
@@ -209,8 +345,12 @@ func TestR725RestoreReconcilesHeldRowAlreadyDelivered(t *testing.T) {
 		fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", started: make(chan struct{}, 1)}
 		store := NewMemoryStore(t)
 		defer store.Close()
-		seed(t, store)
+		seed(t, store, "crash window")
+		if err := store.RecordRelayDelivered(t.Context(), "lane-a", 72504, "fixture-pane", relayPayloadFingerprint("crash window"), time.Now()); err != nil {
+			t.Fatalf("seed delivered err=%v", err)
+		}
 		client, prompts, events := r27Node(t, store, fake)
+		client.relayBusyManager().resume(t.Context())
 		if got := *prompts; len(got) != 0 {
 			t.Fatalf("restored prompt=%q", got)
 		}
@@ -226,15 +366,37 @@ func TestR725RestoreReconcilesHeldRowAlreadyDelivered(t *testing.T) {
 	})
 	t.Run("shadow restores but counts", func(t *testing.T) {
 		t.Setenv("PANEWIRE_RELAY_DEDUPE", "shadow")
-		fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", started: make(chan struct{}, 1)}
+		fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", waitGate: make(chan struct{}), started: make(chan struct{}, 1)}
 		store := NewMemoryStore(t)
 		defer store.Close()
-		seed(t, store)
+		seed(t, store, "crash window")
+		if err := store.RecordRelayDelivered(t.Context(), "lane-a", 72504, "fixture-pane", relayPayloadFingerprint("crash window"), time.Now()); err != nil {
+			t.Fatalf("seed delivered err=%v", err)
+		}
 		client, _, _ := r27Node(t, store, fake)
+		client.relayBusyManager().resume(t.Context())
 		if rows, err := store.RelayHeldForPane(t.Context(), "fixture-pane"); err != nil || len(rows) != 1 {
 			t.Fatalf("shadow restore changed held rows=%+v err=%v", rows, err)
 		}
 		if counts := client.relayBusyManager().RelayDedupeCounts(); counts.WouldSuppress != 1 || counts.Suppressed != 0 {
+			t.Fatalf("counts=%+v", counts)
+		}
+	})
+	t.Run("restored row disagreeing with its record is a kept mismatch", func(t *testing.T) {
+		t.Setenv("PANEWIRE_RELAY_DEDUPE", "apply")
+		fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", waitGate: make(chan struct{}), started: make(chan struct{}, 1)}
+		store := NewMemoryStore(t)
+		defer store.Close()
+		seed(t, store, "edited held text")
+		if err := store.RecordRelayDelivered(t.Context(), "lane-a", 72504, "fixture-pane", relayPayloadFingerprint("different delivered text"), time.Now()); err != nil {
+			t.Fatalf("seed delivered err=%v", err)
+		}
+		client, _, _ := r27Node(t, store, fake)
+		client.relayBusyManager().resume(t.Context())
+		if rows, err := store.RelayHeldForPane(t.Context(), "fixture-pane"); err != nil || len(rows) != 1 {
+			t.Fatalf("mismatched held row was dropped: rows=%+v err=%v", rows, err)
+		}
+		if counts := client.relayBusyManager().RelayDedupeCounts(); counts.Mismatch != 1 || counts.Suppressed != 0 {
 			t.Fatalf("counts=%+v", counts)
 		}
 	})
@@ -256,7 +418,9 @@ func TestR725ConsecutiveDoneEventsBothDeliver(t *testing.T) {
 	if got := *prompts; len(got) != 2 {
 		t.Fatalf("prompts=%q", got)
 	}
-	if counts := manager.RelayDedupeCounts(); counts.Suppressed != 0 || counts.WouldSuppress != 0 {
+	// A lookup key that dropped the event id would read round A's record
+	// while offering round B: the texts differ, so the tell is Mismatch.
+	if counts := manager.RelayDedupeCounts(); counts.Suppressed != 0 || counts.WouldSuppress != 0 || counts.Mismatch != 0 {
 		t.Fatalf("counts=%+v", counts)
 	}
 }
@@ -276,7 +440,7 @@ func TestR725OutOfOrderDistinctIDsBothDeliver(t *testing.T) {
 	if got := *prompts; len(got) != 2 {
 		t.Fatalf("prompts=%q", got)
 	}
-	if counts := manager.RelayDedupeCounts(); counts.Suppressed != 0 {
+	if counts := manager.RelayDedupeCounts(); counts.Suppressed != 0 || counts.Mismatch != 0 {
 		t.Fatalf("counts=%+v", counts)
 	}
 }
@@ -314,13 +478,16 @@ func TestR725DedupeKeyScopesPerReceivingLane(t *testing.T) {
 	defer store.Close()
 	client, prompts, _ := r27Node(t, store, fake)
 	manager := client.relayBusyManager()
-	manager.offer(t.Context(), r725Directive(72540, "lane-a", "fixture-pane", "to lane a"))
-	manager.offer(t.Context(), r725Directive(72540, "lane-b", "fixture-pane", "to lane b"))
-	manager.offer(t.Context(), r725Directive(72540, "lane-a", "fixture-pane", "to lane a"))
+	// Identical payload on both lanes: a lookup that dropped the lane half
+	// of the key would find lane-a's record a perfect match and swallow
+	// lane-b's copy — the fingerprint must not get a chance to mask it.
+	manager.offer(t.Context(), r725Directive(72540, "lane-a", "fixture-pane", "same body"))
+	manager.offer(t.Context(), r725Directive(72540, "lane-b", "fixture-pane", "same body"))
+	manager.offer(t.Context(), r725Directive(72540, "lane-a", "fixture-pane", "same body"))
 	if got := *prompts; len(got) != 2 {
 		t.Fatalf("prompts=%q", got)
 	}
-	if counts := manager.RelayDedupeCounts(); counts.Suppressed != 1 {
+	if counts := manager.RelayDedupeCounts(); counts.Suppressed != 1 || counts.Mismatch != 0 {
 		t.Fatalf("counts=%+v", counts)
 	}
 }
@@ -535,5 +702,129 @@ func TestR725HubDistinctIdentitiesAndRestartReplay(t *testing.T) {
 	_, restartedDirector := t650Restart(t, lanes, client)
 	if resent := drainRelays(restartedDirector); resent != 0 {
 		t.Fatalf("hub restart re-sent %d of %d acknowledged idle-wakes, want 0", resent, len(directives))
+	}
+}
+
+// "off" is the escape hatch: no gate, no suppression, every copy delivered —
+// identical to the code before the feature existed.
+func TestR725OffModeDeliversEveryCopy(t *testing.T) {
+	r27GuardInbox(t)
+	t.Setenv("PANEWIRE_RELAY_DEDUPE", "off")
+	fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", started: make(chan struct{}, 4)}
+	store := NewMemoryStore(t)
+	defer store.Close()
+	client, prompts, _ := r27Node(t, store, fake)
+	manager := client.relayBusyManager()
+	directive := r725Directive(72580, "lane-a", "fixture-pane", "off mode")
+	manager.offer(t.Context(), directive)
+	manager.offer(t.Context(), directive)
+	if got := *prompts; len(got) != 2 {
+		t.Fatalf("off mode suppressed a delivery: prompts=%q", got)
+	}
+	if counts := manager.RelayDedupeCounts(); counts.Suppressed != 0 || counts.WouldSuppress != 0 || counts.Mismatch != 0 || counts.Unknown != 0 {
+		t.Fatalf("off mode touched the dedupe counters: %+v", counts)
+	}
+}
+
+// The ordering inside deliver() is the crash contract: the delivered record
+// must exist before the ack leaves — the record is what a restart consults,
+// so an ack first would let a crash produce an unanswerable replay.
+func TestR725DeliveredAckOnlyAfterRecord(t *testing.T) {
+	r27GuardInbox(t)
+	t.Setenv("PANEWIRE_RELAY_DEDUPE", "apply")
+	fake := &r27FakeHerdr{t: t, getStatus: "idle", waitStatus: "idle", started: make(chan struct{}, 2)}
+	store := NewMemoryStore(t)
+	defer store.Close()
+	prompts := new([]string)
+	events := make(chan hubClientEvent, 32)
+	var ackedBeforeRecord atomic.Bool
+	client := &HubClient{outbox: store, relayCommand: fake.run, relayInject: func(_ context.Context, pane, text string) bool {
+		*prompts = append(*prompts, pane+"\x00"+text)
+		return true
+	}}
+	client.setRelayEmitter(func(event hubClientEvent) {
+		if event.Kind == "relay.delivered" {
+			if _, found, err := store.RelayDeliveredByKey(t.Context(), "lane-a", 72581); err == nil && !found {
+				ackedBeforeRecord.Store(true)
+			}
+		}
+		events <- event
+	})
+	client.relayBusyManager().restore(t.Context())
+	client.relayBusyManager().offer(t.Context(), r725Directive(72581, "lane-a", "fixture-pane", "ordering"))
+	if got := *prompts; len(got) != 1 {
+		t.Fatalf("prompts=%q", got)
+	}
+	r27Await(t, events, "relay.delivered")
+	if ackedBeforeRecord.Load() {
+		t.Fatal("relay.delivered was emitted before the delivered record existed")
+	}
+}
+
+// Store invariants the dedupe gate depends on: first-writer-wins (a repeat
+// delivery never rewrites the pane's original record) and pruning bounded
+// by relayDeliveredMaxAge (a fresh record is never vacuumed away).
+func TestR725DeliveredRecordStoreInvariants(t *testing.T) {
+	store := NewMemoryStore(t)
+	defer store.Close()
+	now := time.Now()
+	if err := store.RecordRelayDelivered(t.Context(), "lane-a", 72582, "pane-first", "sha-first", now); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordRelayDelivered(t.Context(), "lane-a", 72582, "pane-second", "sha-second", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	record, found, err := store.RelayDeliveredByKey(t.Context(), "lane-a", 72582)
+	if err != nil || !found || record.Pane != "pane-first" || record.PayloadSHA != "sha-first" {
+		t.Fatalf("first-writer-wins broken: record=%+v found=%t err=%v", record, found, err)
+	}
+	if err := store.RecordRelayDelivered(t.Context(), "lane-a", 72583, "pane-old", "sha-old", now.Add(-relayDeliveredMaxAge-time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RecordRelayDelivered(t.Context(), "lane-a", 72584, "pane-new", "sha-new", now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, err := store.RelayDeliveredByKey(t.Context(), "lane-a", 72583); err != nil || found {
+		t.Fatalf("stale record survived pruning: found=%t err=%v", found, err)
+	}
+	for _, id := range []int64{72582, 72584} {
+		if _, found, err := store.RelayDeliveredByKey(t.Context(), "lane-a", id); err != nil || !found {
+			t.Fatalf("fresh record %d pruned: found=%t err=%v", id, found, err)
+		}
+	}
+}
+
+// Hub side, durable-duplicate corner: a restarted hub holds no in-memory
+// claim, so the resend reaches the POST — handoffkeep answers 200 with the
+// original row, and a changed body must surface as a counted mismatch while
+// the durable text is what gets injected.
+func TestR725HubPostConflictCountsMismatch(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	lanes := `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`
+	hub := r20Hub(t, lanes, client, nil)
+	source := &hubAgent{persisted: make(chan hubRelayPersistedEvent, 4)}
+	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 4)}
+	hub.nodes["host-a"] = &hubNodeRecord{agent: destination}
+	hub.relayLaneEvent(hubJobEventPayload{JobID: "t-1", OwnerLane: "lane-a", EventID: "iw-7", Text: "original"}, source)
+	if drainRelays(destination) != 1 {
+		t.Fatal("first event not injected")
+	}
+	restarted := r20Hub(t, lanes, client, nil)
+	restarted.nodes["host-a"] = &hubNodeRecord{agent: destination}
+	restarted.relayLaneEvent(hubJobEventPayload{JobID: "t-2", OwnerLane: "lane-a", EventID: "iw-7", Text: "changed"}, source)
+	if restarted.RelayPayloadMismatchCount() != 1 {
+		t.Fatalf("post-conflict mismatches=%d", restarted.RelayPayloadMismatchCount())
+	}
+	if fake.rowCount() != 1 {
+		t.Fatalf("the duplicate created a second durable row: rows=%d", fake.rowCount())
+	}
+	select {
+	case directive := <-destination.relays:
+		if !strings.Contains(directive.Text, "original") || strings.Contains(directive.Text, "changed") {
+			t.Fatalf("injected text=%q, want the durable row's body", directive.Text)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("the durable duplicate was not re-injected")
 	}
 }

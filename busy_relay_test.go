@@ -24,6 +24,7 @@ type r27FakeHerdr struct {
 	getStatus  string
 	getOutput  []byte
 	getErr     error
+	getGate    chan struct{}
 	waitStatus string
 	waitGate   chan struct{}
 	started    chan struct{}
@@ -103,6 +104,13 @@ func (fake *r27FakeHerdr) run(ctx context.Context, args ...string) ([]byte, erro
 	getOutput, getErr, getStatus := fake.getOutput, fake.getErr, fake.getStatus
 	fake.mu.Unlock()
 	if len(args) >= 2 && args[0] == "agent" && args[1] == "get" {
+		if fake.getGate != nil {
+			select {
+			case <-fake.getGate:
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
 		output := getOutput
 		if output == nil {
 			output = r27Fixture(fake.t, "agent-get-"+getStatus+".json")

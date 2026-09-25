@@ -123,38 +123,29 @@ func (manager *relayBusyManager) relayDeliveredIdentity(parent context.Context, 
 
 // claimDedupeInFlight serializes concurrent arrivals of the same identity.
 // offer() runs on a goroutine per inject, so two copies can race the durable
-// check before either has recorded anything. The loser is itself a duplicate
-// arrival; the winner owns the outcome and its own reporting.
-func (manager *relayBusyManager) claimDedupeInFlight(lane string, eventID int64) (string, bool) {
+// check before either has recorded anything. A copy that loses the race is
+// not itself a verdict: it waits on the returned channel until the winner's
+// outcome is decided, then re-evaluates the delivered record — whether this
+// copy is a duplicate depends on whether the first one actually landed.
+func (manager *relayBusyManager) claimDedupeInFlight(lane string, eventID int64) (<-chan struct{}, bool) {
 	key := relayDedupeClaimKey(lane, eventID)
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
-	if _, exists := manager.dedupeInFlight[key]; exists {
-		return key, false
+	if done, taken := manager.dedupeInFlight[key]; taken {
+		return done, false
 	}
-	manager.dedupeInFlight[key] = struct{}{}
-	return key, true
+	manager.dedupeInFlight[key] = make(chan struct{})
+	return nil, true
 }
 
-func (manager *relayBusyManager) releaseDedupeInFlight(key string) {
+func (manager *relayBusyManager) releaseDedupeInFlight(lane string, eventID int64) {
+	key := relayDedupeClaimKey(lane, eventID)
 	manager.mu.Lock()
-	delete(manager.dedupeInFlight, key)
-	manager.mu.Unlock()
-}
-
-// noteDedupeInFlightRepeat records a concurrent duplicate arrival. In apply
-// mode the caller drops it; in shadow it is delivered as before so the count
-// measures what apply would change.
-func (manager *relayBusyManager) noteDedupeInFlightRepeat(parent context.Context, message hubOutboundMessage, mode relayDedupeMode) {
-	if mode.applies() {
-		manager.dedupeSuppressed.Add(1)
-		manager.journalDedupe(parent, "suppressed_inflight", message)
-		manager.client.warnMessage(fmt.Sprintf("relay dedupe suppressed: lane=%s event_id=%d pane=%s arrived concurrently with its own delivery", message.Lane, message.EventID, message.Pane))
-		return
+	if done, taken := manager.dedupeInFlight[key]; taken {
+		delete(manager.dedupeInFlight, key)
+		close(done)
 	}
-	manager.dedupeWouldSuppress.Add(1)
-	manager.journalDedupe(parent, "would_suppress_inflight", message)
-	manager.client.warnMessage(fmt.Sprintf("relay dedupe shadow: lane=%s event_id=%d pane=%s arrived concurrently with its own delivery; delivering", message.Lane, message.EventID, message.Pane))
+	manager.mu.Unlock()
 }
 
 // noteDedupeUnknown covers the contract's legacy clause: an inject whose
