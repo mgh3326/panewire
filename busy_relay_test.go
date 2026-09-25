@@ -297,7 +297,7 @@ func TestR27BusyRelaySixPathsUseFixtureHerdr(t *testing.T) {
 		client.relayBusyManager().offer(t.Context(), r27Directive(103, "deadline note", "max_wait=1"))
 		r27Await(t, events, "relay.held")
 		r27Await(t, events, "relay.released")
-		if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "[대기 만료 0분] deadline note") {
+		if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "[대기 만료 0분]") || !strings.Contains(got[0], "deadline note") {
 			t.Fatalf("prompts=%q", got)
 		}
 	})
@@ -375,7 +375,9 @@ func TestR27BusyRelaySixPathsUseFixtureHerdr(t *testing.T) {
 		if released != 2 || len(delivered) != 2 || !strings.Contains(string(delivered[0].Payload), `"original_event_id":106`) || !strings.Contains(string(delivered[1].Payload), `"original_event_id":107`) {
 			t.Fatalf("batch released=%d deliveries=%+v", released, delivered)
 		}
-		if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "1) first 2) second") {
+		if got := *prompts; len(got) != 1 ||
+			!strings.Contains(got[0], relayNonce(relayHeld{EventID: 106})+" first") ||
+			!strings.Contains(got[0], relayNonce(relayHeld{EventID: 107})+" second") {
 			t.Fatalf("prompts=%q", got)
 		}
 	})
@@ -695,7 +697,7 @@ func TestR449LaneRerouteExpiresStaleHeld(t *testing.T) {
 		t.Fatalf("dropped=%+v", dropped)
 	}
 	got := *prompts
-	if len(got) != 1 || got[0] != "fixture-pane-2\x00fresh text" {
+	if len(got) != 1 || got[0] != "fixture-pane-2\x00"+task687Text(603, "fresh text") {
 		t.Fatalf("prompts=%q want only the rerouted pane's own delivery", got)
 	}
 	if held, err := store.RelayHeldForPane(t.Context(), "fixture-pane"); err != nil || len(held) != 0 {
@@ -894,7 +896,7 @@ func TestR449LegalExtremes(t *testing.T) {
 			t.Fatalf("dropped=%+v", dropped)
 		}
 		got := *prompts
-		if len(got) != 2 || got[0] != "fixture-pane-2\x00hop one" || got[1] != "fixture-pane-3\x00hop two" {
+		if len(got) != 2 || got[0] != "fixture-pane-2\x00"+task687Text(621, "hop one") || got[1] != "fixture-pane-3\x00"+task687Text(622, "hop two") {
 			t.Fatalf("prompts=%q want only the two live-route deliveries", got)
 		}
 	})

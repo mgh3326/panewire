@@ -16,8 +16,12 @@ import (
 // out of the 10-line classification read on a busy pane; busy_relay then
 // retried and the pane showed the text up to relayMaxInjectAttempts times.
 // Verification now reads the visible window plus the recent-unwrapped
-// transcript, accepts the harness queue banner as landed, and treats every
-// undecidable verdict as may-be-in-pane -- never a re-inject.
+// transcript, accepts the harness queue banner when its nonce shows, and
+// treats every undecidable verdict as may-be-in-pane -- never a re-inject.
+//
+// #687: proof is a per-row nonce token, not the rendered text. These tests
+// inject the composed, nonce-bearing text (what deliver() sends) and the
+// fake panes echo it the way claude does.
 
 // task683FakeHerdr installs a herdr stand-in whose "agent read" answer is
 // chosen by the --source flag: the visible list serves --source visible
@@ -74,7 +78,7 @@ func task683Count(calls []string, want string) int {
 
 // task683Filler draws busy-turn output rows. ⏺ rows sit at column 0 in the
 // live transcript (indented rows are wrap continuations or nested detail,
-// which merge into the block above them for echo matching).
+// which merge into the block above them for nonce matching).
 func task683Filler(prefix string, n int) []string {
 	lines := make([]string, 0, n)
 	for i := 0; i < n; i++ {
@@ -84,22 +88,22 @@ func task683Filler(prefix string, n int) []string {
 }
 
 // AC1/AC4: the injected text scrolled past the old 10-line read while the
-// pane stayed busy. The widened reads still find it -- once inside the
-// 60-line visible window, once only inside the 400-line recent-unwrapped
-// transcript -- and the inject is delivered with exactly one prompt. With
-// the old single 10-line read this goes unproven, so restoring that read
-// turns the test RED.
+// pane stayed busy. The widened reads still find the nonce -- once inside
+// the 60-line visible window, once only inside the 400-line
+// recent-unwrapped transcript -- and the inject is delivered with exactly
+// one prompt.
 func TestTask683ScrolledMarkerIsDeliveredOnce(t *testing.T) {
-	echo := "❯ " + task626Text
+	text := task687Text(68301, task626Text)
+	echo := "❯ " + text
 	t.Run("inside the widened visible read", func(t *testing.T) {
 		post := task626Claude(append(append(append([]string{}, task626Transcript...), echo), task683Filler("post", 40)...), "❯")
 		postTranscript := strings.Join(append(append([]string{}, task626Transcript...), echo), "\n")
 		_, calls := task683FakeHerdr(t, "claude",
 			[]string{task626ClaudeEmpty, post},
 			[]string{task626TranscriptOnly, postTranscript})
-		result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
-		if result.Outcome != relayInjectDelivered || result.Evidence != "visible:marker_echo" {
-			t.Fatalf("result=%+v, want delivered visible:marker_echo", result)
+		result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil)
+		if result.Outcome != relayInjectDelivered || result.Evidence != "visible+recent-unwrapped:nonce_echo" {
+			t.Fatalf("result=%+v, want delivered visible+recent-unwrapped:nonce_echo", result)
 		}
 		if got := calls(); task683Count(got, "prompt") != 1 || task683Count(got, "send-keys") != 0 {
 			t.Fatalf("herdr calls = %q, want one prompt and no keypress", got)
@@ -111,9 +115,9 @@ func TestTask683ScrolledMarkerIsDeliveredOnce(t *testing.T) {
 		_, calls := task683FakeHerdr(t, "claude",
 			[]string{task626ClaudeEmpty, post},
 			[]string{task626TranscriptOnly, postTranscript})
-		result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
-		if result.Outcome != relayInjectDelivered || result.Evidence != "recent-unwrapped:marker_echo" {
-			t.Fatalf("result=%+v, want delivered recent-unwrapped:marker_echo", result)
+		result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil)
+		if result.Outcome != relayInjectDelivered || result.Evidence != "recent-unwrapped:nonce_echo" {
+			t.Fatalf("result=%+v, want delivered recent-unwrapped:nonce_echo", result)
 		}
 		if got := calls(); task683Count(got, "prompt") != 1 || task683Count(got, "send-keys") != 0 {
 			t.Fatalf("herdr calls = %q, want one prompt and no keypress", got)
@@ -122,21 +126,21 @@ func TestTask683ScrolledMarkerIsDeliveredOnce(t *testing.T) {
 }
 
 // Round-4 directive: there is no presend deliver-without-typing path. A
-// hub replay of a row whose text already landed pastes it again -- a
+// hub replay of a row whose nonce already landed pastes it again -- a
 // visible duplicate is accepted, because every presend identity rule the
-// testers probed produced a silent-loss variant (shared head fragment,
-// shared head+tail, wrap boundary) -- and the postsend echo still proves
-// delivery. Mutant: re-adding a presend echo skip turns this RED --
-// prompts drops to 0.
+// testers probed produced a silent-loss variant -- and the postsend nonce
+// still proves delivery. Mutant: re-adding a presend echo skip turns this
+// RED -- prompts drops to 0.
 func TestTask683ReplayOfLandedRowTypesAgain(t *testing.T) {
-	echo := "❯ " + task626Text
+	text := task687Text(68302, task626Text)
+	echo := "❯ " + text
 	post := task626Claude(append(append(append([]string{}, task626Transcript...), echo), task683Filler("post", 40)...), "❯")
 	_, calls := task683FakeHerdr(t, "claude",
 		[]string{post, post},
 		[]string{task626TranscriptOnly})
-	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
-	if result.Outcome != relayInjectDelivered || result.Evidence != "visible:marker_echo" {
-		t.Fatalf("result=%+v, want delivered on the postsend echo, never a presend claim", result)
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil)
+	if result.Outcome != relayInjectDelivered || result.Evidence != "visible:nonce_echo" {
+		t.Fatalf("result=%+v, want delivered on the postsend nonce, never a presend claim", result)
 	}
 	if got := calls(); task683Count(got, "prompt") != 1 || task683Count(got, "send-keys") != 0 {
 		t.Fatalf("a replay must still type exactly once: %q", got)
@@ -144,16 +148,13 @@ func TestTask683ReplayOfLandedRowTypesAgain(t *testing.T) {
 }
 
 // #683 tester B1: head and tail fragments are not identity -- every
-// idle-wake to one lane shares the 48-rune head marker, and same-path
-// reports share the tail. A presend read that shows only a *different*
-// message's echo must not claim this row delivered without typing: the
-// new message is pasted, and its own echo delivers it.
+// idle-wake to one lane shares the head, and same-path reports share the
+// tail. Under #687 the distinguishing token is the nonce: a presend read
+// that shows only a *different* row's echo must not claim this row -- the
+// new message is pasted, and its own nonce delivers it.
 func TestTask683SharedHeadMarkerIsTyped(t *testing.T) {
-	wakeA := "(같은 내용이 두 번 보이면 재실행 금지) [event] director-1 :: {\"kind\":\"idle-wake\",\"pane\":\"w16:p1\",\"changed_at\":\"2026-09-24T19:35:59.581Z\",\"state_change_seq\":1}"
-	wakeB := "(같은 내용이 두 번 보이면 재실행 금지) [event] director-1 :: {\"kind\":\"idle-wake\",\"pane\":\"w16:p7\",\"changed_at\":\"2026-09-24T19:37:29.581Z\",\"state_change_seq\":9}"
-	if devinRelayMarker(wakeA) != devinRelayMarker(wakeB) {
-		t.Fatal("fixture drifted: the two wakes must share the head marker")
-	}
+	wakeA := task687Text(18057, "(같은 내용이 두 번 보이면 재실행 금지) [event] director-1 :: {\"kind\":\"idle-wake\",\"pane\":\"w16:p1\",\"changed_at\":\"2026-09-24T19:35:59.581Z\",\"state_change_seq\":1}")
+	wakeB := task687Text(18074, "(같은 내용이 두 번 보이면 재실행 금지) [event] director-1 :: {\"kind\":\"idle-wake\",\"pane\":\"w16:p7\",\"changed_at\":\"2026-09-24T19:37:29.581Z\",\"state_change_seq\":9}")
 	pre := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+wakeA), task683Filler("later", 30)...), "❯")
 	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+wakeA), "\n")
 	post := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+wakeB), task683Filler("post", 40)...), "❯")
@@ -163,24 +164,20 @@ func TestTask683SharedHeadMarkerIsTyped(t *testing.T) {
 		[]string{preTranscript, postTranscript})
 	result := defaultHubRelayInjectVerdict(context.Background(), "wB:pD8", wakeB, nil)
 	if result.Outcome != relayInjectDelivered || result.Evidence == "" || strings.HasPrefix(result.Evidence, "presend:") {
-		t.Fatalf("result=%+v, want delivered on the new message's own echo", result)
+		t.Fatalf("result=%+v, want delivered on the new message's own nonce", result)
 	}
 	if got := calls(); task683Count(got, "prompt") != 1 {
-		t.Fatalf("different message sharing the head marker was not typed: %q", got)
+		t.Fatalf("different message sharing the head fragment was not typed: %q", got)
 	}
 }
 
 // #683 tester B1': two rounds of one job share the head AND the tail
-// marker -- same label and host give the same head, the same report path
-// gives the same tail; only the middle differs. Echo identity is the whole
-// body ending at a line boundary, so the earlier round's echo must not
-// close the later round: it is typed and delivered on its own echo.
+// fragment -- same label and host give the same head, the same report path
+// gives the same tail; only the middle differs. The nonce distinguishes
+// them: the earlier round's echo never closes the later round.
 func TestTask683SameJobRoundsAreTyped(t *testing.T) {
-	roundA := "(같은 내용이 두 번 보이면 재실행 금지) [report] b618-decision-requests (home-desktop) :: VERDICT: BLOCKER @3def3e3 -> jobs/618-decision-requests-20260924-1610/report.md"
-	roundB := "(같은 내용이 두 번 보이면 재실행 금지) [report] b618-decision-requests (home-desktop) :: VERDICT: PASS @de41e7a -> jobs/618-decision-requests-20260924-1610/report.md"
-	if devinRelayMarker(roundA) != devinRelayMarker(roundB) || devinRelayTailMarker(roundA) != devinRelayTailMarker(roundB) {
-		t.Fatal("fixture drifted: same-job rounds must share head and tail markers")
-	}
+	roundA := task687Text(68401, "(같은 내용이 두 번 보이면 재실행 금지) [report] b618-decision-requests (home-desktop) :: VERDICT: BLOCKER @3def3e3 -> jobs/618-decision-requests-20260924-1610/report.md")
+	roundB := task687Text(68402, "(같은 내용이 두 번 보이면 재실행 금지) [report] b618-decision-requests (home-desktop) :: VERDICT: PASS @de41e7a -> jobs/618-decision-requests-20260924-1610/report.md")
 	pre := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+roundA), task683Filler("later", 30)...), "❯")
 	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+roundA), "\n")
 	post := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+roundB), task683Filler("post", 40)...), "❯")
@@ -190,19 +187,19 @@ func TestTask683SameJobRoundsAreTyped(t *testing.T) {
 		[]string{preTranscript, postTranscript})
 	result := defaultHubRelayInjectVerdict(context.Background(), "wB:pD8", roundB, nil)
 	if result.Outcome != relayInjectDelivered || strings.HasPrefix(result.Evidence, "presend:") {
-		t.Fatalf("result=%+v, want the later round typed and delivered on its own echo", result)
+		t.Fatalf("result=%+v, want the later round typed and delivered on its own nonce", result)
 	}
 	if got := calls(); task683Count(got, "prompt") != 1 {
-		t.Fatalf("later job round sharing both markers was not typed: %q", got)
+		t.Fatalf("later job round sharing both fragments was not typed: %q", got)
 	}
 }
 
 // #683 tester B1', containment arm: a shorter message whose body is a
 // substring inside a longer earlier echo must not be claimed delivered --
-// the body has to end where a line ends.
+// and under #687 its own nonce is the only thing that proves it.
 func TestTask683ContainedPrefixIsNotDelivered(t *testing.T) {
-	long := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] go ahead with round 3 once the tester PASSes"
-	short := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] go ahead"
+	long := task687Text(68501, "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] go ahead with round 3 once the tester PASSes")
+	short := task687Text(68502, "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] go ahead")
 	pre := task626Claude(append(append([]string{}, task626Transcript...), "❯ "+long), "❯")
 	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+long), "\n")
 	post := task626Claude(append(append([]string{}, task626Transcript...), "❯ "+short), "❯")
@@ -211,23 +208,26 @@ func TestTask683ContainedPrefixIsNotDelivered(t *testing.T) {
 		[]string{preTranscript, post})
 	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", short, nil)
 	if result.Outcome != relayInjectDelivered || strings.HasPrefix(result.Evidence, "presend:") {
-		t.Fatalf("result=%+v, want the contained-prefix message typed and delivered on its own echo", result)
+		t.Fatalf("result=%+v, want the contained-prefix message typed and delivered on its own nonce", result)
 	}
 	if got := calls(); task683Count(got, "prompt") != 1 {
 		t.Fatalf("message contained inside a longer echo was not typed: %q", got)
 	}
 }
 
-// Round-4 directive, batch arm: a replay batch whose later member already
-// has an echo on the pane is typed anyway -- presend member evidence was
-// the same silent-loss family -- and the batch's own postsend echo is what
+// Round-4 directive, batch arm: a replay batch whose later member's text
+// already echoes on the pane is typed anyway -- presend evidence was the
+// silent-loss family -- and the batch's own postsend nonce echo is what
 // delivers it.
 func TestTask683BatchWithMemberEchoIsTyped(t *testing.T) {
 	memberB := "(같은 내용이 두 번 보이면 재실행 금지) [event] director-1 :: {\"kind\":\"idle-wake\",\"pane\":\"w16:p1\",\"state_change_seq\":1}"
 	memberC := "(같은 내용이 두 번 보이면 재실행 금지) [event] director-1 :: {\"kind\":\"idle-wake\",\"pane\":\"w16:p7\",\"state_change_seq\":9}"
-	batch := "[batch 2건] 1) " + memberB + " 2) " + memberC
-	pre := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+memberC), task683Filler("later", 30)...), "❯")
-	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+memberC), "\n")
+	batch := relayBatchText([]relayHeld{{EventID: 68601, Text: memberB}, {EventID: 68602, Text: memberC}}, false, time.Now())
+	// The pane already echoes member C's text -- from an earlier solo
+	// delivery, so under a different nonce.
+	earlierC := task687Text(68001, memberC)
+	pre := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+earlierC), task683Filler("later", 30)...), "❯")
+	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+earlierC), "\n")
 	post := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+batch), task683Filler("post", 40)...), "❯")
 	postTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+batch), "\n")
 	_, calls := task683FakeHerdr(t, "claude",
@@ -235,71 +235,54 @@ func TestTask683BatchWithMemberEchoIsTyped(t *testing.T) {
 		[]string{preTranscript, postTranscript})
 	result := defaultHubRelayInjectVerdict(context.Background(), "wB:pD8", batch, []string{memberB, memberC})
 	if result.Outcome != relayInjectDelivered || strings.HasPrefix(result.Evidence, "presend:") {
-		t.Fatalf("result=%+v, want the batch typed and delivered on its own postsend echo", result)
+		t.Fatalf("result=%+v, want the batch typed and delivered on its own postsend nonce echo", result)
 	}
 	if got := calls(); task683Count(got, "prompt") != 1 {
 		t.Fatalf("batch was not typed: %q", got)
 	}
+	if len(result.Proven) != 2 {
+		t.Fatalf("batch proven=%v, want both member nonces", result.Proven)
+	}
 }
 
 // #683 tester M1: claude renders markdown in the drawn echo -- **…** and
-// `…` vanish -- so the echo is not byte-equal to the typed text. 42% of
-// real job.completed texts carry markdown; echo matching normalizes paired
-// delimiters on both sides so a landed report still reads as delivered.
-// The message is typed even though a rendered echo is already on the pane.
+// `…` vanish -- so the echo is not byte-equal to the typed text. The nonce
+// has no markdown-significant bytes, so a rendered echo still carries it.
 func TestTask683MarkdownEchoIsDelivered(t *testing.T) {
-	text := "(같은 내용이 두 번 보이면 재실행 금지) [report] b672-sgov (home-desktop) :: **Status:** PR #2096 is ready at `696bf48` -> jobs/672-sgov-20260924-2340/report.md"
-	rendered := "❯ (같은 내용이 두 번 보이면 재실행 금지) [report] b672-sgov (home-desktop) :: Status: PR #2096 is ready at 696bf48 -> jobs/672-sgov-20260924-2340/report.md"
+	text := task687Text(68721, "(같은 내용이 두 번 보이면 재실행 금지) [report] b672-sgov (home-desktop) :: **Status:** PR #2096 is ready at `696bf48` -> jobs/672-sgov-20260924-2340/report.md")
+	rendered := "❯ " + relayNonce(relayHeld{EventID: 68721}) + " (같은 내용이 두 번 보이면 재실행 금지) [report] b672-sgov (home-desktop) :: Status: PR #2096 is ready at 696bf48 -> jobs/672-sgov-20260924-2340/report.md"
 	post := task626Claude(append(append(append([]string{}, task626Transcript...), rendered), task683Filler("post", 40)...), "❯")
 	postTranscript := strings.Join(append(append([]string{}, task626Transcript...), rendered), "\n")
 	_, calls := task683FakeHerdr(t, "claude",
 		[]string{task626ClaudeEmpty, post},
 		[]string{task626TranscriptOnly, postTranscript})
 	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil)
-	if result.Outcome != relayInjectDelivered || result.Evidence != "visible:marker_echo" {
-		t.Fatalf("result=%+v, want delivered visible:marker_echo on the markdown-rendered echo", result)
+	if result.Outcome != relayInjectDelivered || result.Evidence != "visible+recent-unwrapped:nonce_echo" {
+		t.Fatalf("result=%+v, want delivered visible+recent-unwrapped:nonce_echo on the markdown-rendered echo", result)
 	}
 	if got := calls(); task683Count(got, "prompt") != 1 {
 		t.Fatalf("markdown text was not typed: %q", got)
 	}
 }
 
-// #683 tester B1”: the line boundary that anchors an echo is a logical
-// row -- a column-0 row plus the indented continuation rows beneath it --
-// and both read sources return physical rows (proven live: recent-
-// unwrapped carries the same hard wraps as visible). When a longer earlier
-// echo word-wraps exactly after a shorter message's body, that body sits
-// at a physical row end mid-echo -- the block has to be joined before
-// matching, on either source, or the shorter message is claimed delivered
-// without typing. The glyph check the earlier fix used was incomplete:
-// continuation rows can themselves start with a transcript glyph.
+// #683 tester B1”: a wrapped echo is physical rows -- the prompt row plus
+// two-space-indented continuations -- in both read sources. Under #687 a
+// shorter message ending at a wrap break inside a longer echo is a foreign
+// row: its nonce is absent, so it is typed and proven by its own nonce.
 func TestTask683WrapBoundaryPrefixIsTyped(t *testing.T) {
-	long := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane and wait for my review before merging"
-	short := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane"
+	long := task687Text(68801, "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane and wait for my review before merging")
+	short := task687Text(68802, "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane")
+	longNonce := relayNoncesIn(long)[0]
 	wrapped := []string{
-		"❯ (같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane",
+		"❯ " + longNonce + " (같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane",
 		"  and wait for my review before merging",
 	}
 	pre := task626Claude(append(append([]string{}, task626Transcript...), wrapped...), "❯")
-	if !relayEchoContains(promptTranscript("claude", pre), long) {
-		t.Fatal("the wrapped echo does not match its own text")
+	if !relayNoncePresent(promptTranscript("claude", pre), longNonce) {
+		t.Fatal("the wrapped echo does not carry its own nonce")
 	}
-	if relayEchoContains(promptTranscript("claude", pre), short) {
-		t.Fatal("the wrap-break prefix matched inside the longer wrapped echo")
-	}
-	// A continuation row that happens to begin with a transcript glyph
-	// (·) is still a wrap row: it merges, and the prefix still misses.
-	longGlyph := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane · and wait for my review before merging"
-	wrappedGlyph := []string{
-		"❯ (같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane",
-		"  · and wait for my review before merging",
-	}
-	preGlyph := task626Claude(append(append([]string{}, task626Transcript...), wrappedGlyph...), "❯")
-	if !relayEchoContains(promptTranscript("claude", preGlyph), longGlyph) {
-		t.Fatal("the glyph-led wrapped echo does not match its own text")
-	}
-	if relayEchoContains(promptTranscript("claude", preGlyph), short) {
-		t.Fatal("the wrap-break prefix matched inside the glyph-led wrapped echo")
+	if relayNoncePresent(promptTranscript("claude", pre), relayNonce(relayHeld{EventID: 68802})) {
+		t.Fatal("a different row's nonce matched the wrapped echo")
 	}
 	post := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+short), task683Filler("post", 40)...), "❯")
 	postTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+short), "\n")
@@ -308,7 +291,7 @@ func TestTask683WrapBoundaryPrefixIsTyped(t *testing.T) {
 		[]string{task626TranscriptOnly, postTranscript})
 	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", short, nil)
 	if result.Outcome != relayInjectDelivered || strings.HasPrefix(result.Evidence, "presend:") {
-		t.Fatalf("result=%+v, want the wrap-boundary prefix typed and delivered on its own echo", result)
+		t.Fatalf("result=%+v, want the wrap-boundary row typed and delivered on its own nonce", result)
 	}
 	if got := calls(); task683Count(got, "prompt") != 1 {
 		t.Fatalf("message ending at a wrap break of a longer echo was not typed: %q", got)
@@ -316,60 +299,60 @@ func TestTask683WrapBoundaryPrefixIsTyped(t *testing.T) {
 }
 
 // #683 delta tester M2: a wrapped echo in the recent-unwrapped read is
-// physical rows too, so the block join applies there as well -- otherwise
-// a real multi-row echo scrolls into unproven.
+// physical rows too; a nonce hard-broken across the wrap rejoins through
+// the block join.
 func TestTask683WrappedEchoInUnwrappedIsDelivered(t *testing.T) {
-	long := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane and wait for my review before merging"
+	text := task687Text(68901, "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane and wait for my review before merging")
+	nonce := relayNonce(relayHeld{EventID: 68901})
 	wrappedPost := strings.Join(append(append([]string{}, task626Transcript...),
-		"❯ (같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane",
+		"❯ "+nonce[:4],
+		"  "+nonce[4:]+" (같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane",
 		"  and wait for my review before merging"), "\n")
 	_, calls := task683FakeHerdr(t, "claude",
 		[]string{task626ClaudeEmpty, task626ClaudeEmpty},
 		[]string{task626TranscriptOnly, wrappedPost})
-	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", long, nil)
-	if result.Outcome != relayInjectDelivered || result.Evidence != "recent-unwrapped:marker_echo" {
-		t.Fatalf("result=%+v, want delivered recent-unwrapped:marker_echo on the wrapped echo", result)
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil)
+	if result.Outcome != relayInjectDelivered || result.Evidence != "recent-unwrapped:nonce_echo" {
+		t.Fatalf("result=%+v, want delivered recent-unwrapped:nonce_echo on the wrap-split nonce", result)
 	}
 	if got := calls(); task683Count(got, "prompt") != 1 {
 		t.Fatalf("calls=%q", got)
 	}
 }
 
-// #683 delta tester N1: unpaired delimiters are literal content, not
-// markdown -- claude draws "5~10" and "max_retries" as-is. A text that
-// differs from an on-screen echo only by those characters is a different
-// message: it is typed, and while only the other text's echo shows, the
-// verdict is may-be-in-pane, not delivered.
+// #683 delta tester N1: a text that differs from an on-screen echo only by
+// literal delimiters is a different message. Under #687 the rows differ by
+// nonce regardless; the row whose nonce never lands is may-be-in-pane.
 func TestTask683LiteralDelimitersAreIdentity(t *testing.T) {
-	onPane := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] wait 5~10 min before retrying max_retries"
-	other := "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] wait 510 min before retrying maxretries"
+	onPane := task687Text(68011, "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] wait 5~10 min before retrying max_retries")
+	other := task687Text(68012, "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] wait 510 min before retrying maxretries")
 	pre := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+onPane), task683Filler("later", 30)...), "❯")
 	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+onPane), "\n")
-	if relayEchoContains(promptTranscript("claude", pre), other) {
-		t.Fatal("a literal-delimiter-different text matched the echo")
+	if relayNoncePresent(promptTranscript("claude", pre), relayNonce(relayHeld{EventID: 68012})) {
+		t.Fatal("the other row's nonce matched the on-pane echo")
 	}
 	_, calls := task683FakeHerdr(t, "claude",
 		[]string{pre, pre},
 		[]string{preTranscript, preTranscript})
 	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", other, nil)
 	if result.Outcome != relayInjectMaybeInPane || strings.HasPrefix(result.Evidence, "presend:") {
-		t.Fatalf("result=%+v, want the different text typed and left may-be-in-pane", result)
+		t.Fatalf("result=%+v, want the different row typed and left may-be-in-pane", result)
 	}
 	if got := calls(); task683Count(got, "prompt") != 1 {
-		t.Fatalf("text differing only by literal delimiters was not typed: %q", got)
+		t.Fatalf("row differing only by literal delimiters was not typed: %q", got)
 	}
 }
 
 // #683 tester S1: a queue banner that was already up before the paste
 // belongs to an older queue and cannot prove this message joined it. With
-// no echo of the text either, the verdict is may-be-in-pane -- never a
-// delivered claim.
+// no nonce of this row on the pane either, the verdict is may-be-in-pane.
 func TestTask683PreExistingBannerIsNotProof(t *testing.T) {
+	text := task687Text(68021, task626Text)
 	banner := task626Claude([]string{"Press up to edit queued messages"}, "❯")
 	_, calls := task683FakeHerdr(t, "claude",
 		[]string{banner, banner},
 		[]string{task626TranscriptOnly})
-	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil)
 	if result.Outcome != relayInjectMaybeInPane {
 		t.Fatalf("result=%+v, want maybe_in_pane on a pre-existing banner", result)
 	}
@@ -378,34 +361,38 @@ func TestTask683PreExistingBannerIsNotProof(t *testing.T) {
 	}
 }
 
-// #683 tester S3: recent-unwrapped carries the live composer too, so text
-// still pending there must not count as transcript echo. Both sources get
-// the composer cut before markers are matched.
+// #683 tester S3: recent-unwrapped carries the live composer too, so a
+// nonce still pending there must not count as transcript echo. Both sources
+// get the composer cut before nonces are matched.
 func TestTask683ComposerInUnwrappedIsNotEcho(t *testing.T) {
-	pending := "❯ earlier turn\n" + task626Divider + "\n❯ " + task626Text + "\n" + task626Divider + "\n⏵⏵ bypass permissions"
-	echo := "❯ " + task626Text
+	text := task687Text(68031, task626Text)
+	pending := "❯ earlier turn\n" + task626Divider + "\n❯ " + text + "\n" + task626Divider + "\n⏵⏵ bypass permissions"
+	echo := "❯ " + text
 	post := task626Claude(append(append([]string{}, task626Transcript...), echo), "❯")
 	_, calls := task683FakeHerdr(t, "claude",
 		[]string{task626ClaudeEmpty, post},
 		[]string{pending, post})
-	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
-	if result.Outcome != relayInjectDelivered || !strings.HasPrefix(result.Evidence, "visible:") {
-		t.Fatalf("result=%+v, want postsend visible:marker_echo (composer text must not count presend)", result)
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil)
+	if result.Outcome != relayInjectDelivered || !strings.HasPrefix(result.Evidence, "visible") {
+		t.Fatalf("result=%+v, want postsend visible nonce_echo (composer text must not count presend)", result)
 	}
 	if got := calls(); task683Count(got, "prompt") != 1 {
-		t.Fatalf("pending composer text claimed as echo, prompt skipped: %q", got)
+		t.Fatalf("pending composer nonce claimed as echo, prompt skipped: %q", got)
 	}
 }
 
-// AC1/AC4: the harness's documented queue banner is landed -- the queue
-// submits the message itself when the turn ends. One prompt, no keypress,
-// reported delivered with the queued reason.
+// AC1/AC4: the harness's documented queue banner plus the message's nonce
+// on the transcript is landed -- the queue submits the message itself when
+// the turn ends. One prompt, no keypress, reported delivered with the
+// queued reason. #687: the banner alone is not enough (the queued-chip
+// rule), so the nonce must show.
 func TestTask683QueuedBannerIsLanded(t *testing.T) {
-	queued := task626Claude([]string{"Press up to edit queued messages", ""}, task626Phantom)
+	text := task687Text(68041, task626Text)
+	queued := task626Claude([]string{"❯ " + text, "Press up to edit queued messages", ""}, task626Phantom)
 	_, calls := task683FakeHerdr(t, "claude",
 		[]string{task626ClaudeEmpty, queued},
 		[]string{task626TranscriptOnly})
-	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil)
 	if result.Outcome != relayInjectQueued || result.Evidence != "queued_banner" {
 		t.Fatalf("result=%+v, want queued queued_banner", result)
 	}
@@ -414,9 +401,9 @@ func TestTask683QueuedBannerIsLanded(t *testing.T) {
 	}
 	// The codex queue wording lands the same way.
 	_, calls = task683FakeHerdr(t, "codex",
-		[]string{"codex pane\n", "Messages to be submitted after next tool call\n"},
+		[]string{"codex pane\n", "Messages to be submitted after next tool call\n❯ " + text + "\n"},
 		nil)
-	result = defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
+	result = defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil)
 	if result.Outcome != relayInjectQueued || result.Evidence != "queued_banner" {
 		t.Fatalf("codex result=%+v, want queued queued_banner", result)
 	}
@@ -425,7 +412,7 @@ func TestTask683QueuedBannerIsLanded(t *testing.T) {
 	}
 }
 
-// AC2/AC4: an undecidable pane -- reads answer, nothing about the text is
+// AC2/AC4: an undecidable pane -- reads answer, no nonce of this row is
 // visible -- stops after one prompt. deliver() reports it unconfirmed and
 // drops the local row with reason maybe_in_pane instead of re-arming for a
 // retry; the durable hub row stays undelivered for a later replay. Restoring
@@ -494,7 +481,7 @@ func TestTask683UnreadablePresendNeverTypes(t *testing.T) {
 		"read) exit 1 ;;\n" +
 		"esac\n"
 	installFakeHerdr(t, dir, script)
-	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task687Text(68051, task626Text), nil)
 	if result.Outcome != relayInjectMaybeInPane || result.Evidence != "presend:unproven:read_failed" {
 		t.Fatalf("result=%+v, want maybe-in-pane presend:unproven:read_failed", result)
 	}
@@ -516,7 +503,7 @@ func TestTask683RejectedPromptStaysRetryable(t *testing.T) {
 		"read) printf '%s\\n' '" + task626Divider + "' '❯' '" + task626Divider + "' ;;\n" +
 		"esac\n"
 	installFakeHerdr(t, dir, script)
-	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task687Text(68061, task626Text), nil)
 	if result.Outcome != relayInjectRetryable || result.Evidence != "prompt_failed" {
 		t.Fatalf("result=%+v, want retryable prompt_failed", result)
 	}

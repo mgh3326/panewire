@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,61 @@ import (
 // decision/2026-09-21/task547-esc-relay-contract).
 
 const task547RelayText = "(같은 내용이 두 번 보이면 재실행 금지) [event] b534 :: review the migration plan and report"
+
+// task547InjectText is the nonce-bearing text deliver() injects for one held
+// row whose body is task547RelayText (#687).
+var task547InjectText = task687Text(54700, task547RelayText)
+
+// The devinRelayMarker helpers below served the pre-#687 fragment-echo
+// design. #687 moved row proof to the nonce token, so production no longer
+// calls them; they remain here because the devinSubmission classifier tests
+// below still pin the marker-based rules of classifySubmission (the pw
+// prompt path in prompt.go).
+
+var relayBoilerplateRE = regexp.MustCompile(`^\s*(?:\(같은 내용이 두 번 보이면 재실행 금지\)|\[대기 만료 \d+분\]|\[batch \d+건\]|1\))\s*`)
+
+const devinRelayMarkerRunes = 48
+
+func stripRelayBoilerplate(text string) string {
+	body := strings.TrimSpace(text)
+	for {
+		stripped := relayBoilerplateRE.ReplaceAllString(body, "")
+		if stripped == body {
+			return body
+		}
+		body = stripped
+	}
+}
+
+func devinRelayMarker(text string) string {
+	runes := []rune(stripRelayBoilerplate(text))
+	if len(runes) > devinRelayMarkerRunes {
+		runes = runes[:devinRelayMarkerRunes]
+	}
+	return string(runes)
+}
+
+func devinRelayTailMarker(text string) string {
+	runes := []rune(stripRelayBoilerplate(text))
+	if len(runes) > devinRelayMarkerRunes {
+		runes = runes[len(runes)-devinRelayMarkerRunes:]
+	}
+	return strings.TrimSpace(string(runes))
+}
+
+func devinRelayMarkers(text string, members []string) []string {
+	var markers []string
+	seen := map[string]bool{}
+	for _, value := range append([]string{text}, members...) {
+		for _, marker := range []string{devinRelayMarker(value), devinRelayTailMarker(value)} {
+			if marker != "" && !seen[marker] {
+				seen[marker] = true
+				markers = append(markers, marker)
+			}
+		}
+	}
+	return markers
+}
 
 // task547QueuedScreen is the shape director-1 observed on the b534 devin pane
 // on 2026-09-21 18:3x: two relay messages held in devin's queue, the queue
@@ -204,15 +260,18 @@ func task547Both(screen string) map[string]string {
 // stays observable. A replay therefore types again and delivers on the
 // postsend echo. Only composer residue still preempts the paste, and the
 // residue path's one guarded return submits the pending copy.
+// #687: presend transcript or queue evidence still never withholds the
+// paste -- under nonce identity a replay simply types the same token again.
+// What presend still checks is only the composer.
 func TestTask547DevinPresendEchoStillTypes(t *testing.T) {
 	t.Run("transcript echo in recent-unwrapped only", func(t *testing.T) {
 		calls := task547FakeDevin{
-			before:    map[string]string{"visible": task547IdleScreen, "recent-unwrapped": task547SubmittedScreen(task547RelayText)},
-			afterSend: task547Both(task547SubmittedScreen(task547RelayText)),
+			before:    map[string]string{"visible": task547IdleScreen, "recent-unwrapped": task547SubmittedScreen(task547InjectText)},
+			afterSend: task547Both(task547SubmittedScreen(task547InjectText)),
 		}.install(t)
-		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
+		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547InjectText, nil)
 		if result.Outcome != relayInjectDelivered {
-			t.Fatalf("result=%+v, want delivered on the postsend echo", result)
+			t.Fatalf("result=%+v, want delivered on the postsend nonce echo", result)
 		}
 		if got := calls(); task547Count(got, "prompt") != 1 || task547Count(got, "send-keys") != 0 {
 			t.Fatalf("a transcript echo must not withhold the paste: %q", got)
@@ -220,12 +279,12 @@ func TestTask547DevinPresendEchoStillTypes(t *testing.T) {
 	})
 	t.Run("queued row in visible only", func(t *testing.T) {
 		calls := task547FakeDevin{
-			before:    map[string]string{"visible": task547QueuedScreen(task547RelayText), "recent-unwrapped": task547IdleScreen},
-			afterSend: task547Both(task547SubmittedScreen(task547RelayText)),
+			before:    map[string]string{"visible": task547QueuedScreen(task547InjectText), "recent-unwrapped": task547IdleScreen},
+			afterSend: task547Both(task547SubmittedScreen(task547InjectText)),
 		}.install(t)
-		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
+		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547InjectText, nil)
 		if result.Outcome != relayInjectDelivered {
-			t.Fatalf("result=%+v, want delivered on the postsend echo", result)
+			t.Fatalf("result=%+v, want delivered on the postsend nonce echo", result)
 		}
 		if got := calls(); task547Count(got, "prompt") != 1 {
 			t.Fatalf("a queued row must not withhold the paste: %q", got)
@@ -233,10 +292,10 @@ func TestTask547DevinPresendEchoStillTypes(t *testing.T) {
 	})
 	t.Run("residue in visible composer only", func(t *testing.T) {
 		calls := task547FakeDevin{
-			before:      map[string]string{"visible": "────\n❭ " + task547RelayText + "\n────\n", "recent-unwrapped": task547IdleScreen},
-			afterReturn: task547Both(task547SubmittedScreen(task547RelayText)),
+			before:      map[string]string{"visible": "────\n❭ " + task547InjectText + "\n────\n", "recent-unwrapped": task547IdleScreen},
+			afterReturn: task547Both(task547SubmittedScreen(task547InjectText)),
 		}.install(t)
-		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
+		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547InjectText, nil)
 		if result.Outcome != relayInjectDelivered {
 			t.Fatalf("result=%+v, want the pending paste submitted and delivered", result)
 		}
@@ -251,10 +310,10 @@ func TestTask547DevinPresendEchoStillTypes(t *testing.T) {
 func TestTask547DevinStillQueuedAfterReturnIsMaybeInPane(t *testing.T) {
 	calls := task547FakeDevin{
 		before:      task547Both(task547IdleScreen),
-		afterSend:   task547Both(task547QueuedScreen(task547RelayText)),
-		afterReturn: task547Both(task547QueuedScreen(task547RelayText)),
+		afterSend:   task547Both(task547QueuedScreen(task547InjectText)),
+		afterReturn: task547Both(task547QueuedScreen(task547InjectText)),
 	}.install(t)
-	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
+	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547InjectText, nil)
 	if result.Outcome != relayInjectMaybeInPane {
 		t.Fatalf("still-queued devin message result=%+v, want maybe_in_pane", result)
 	}
@@ -278,9 +337,9 @@ func TestTask547DevinVerdicts(t *testing.T) {
 		evidence     string
 		returnsCount int
 	}{
-		{"echo right after send is delivered", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547SubmittedScreen(task547RelayText))}, relayInjectDelivered, "visible:marker_echo", 0},
-		{"queued then echoed after one return is delivered", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547QueuedScreen(task547RelayText)), afterReturn: task547Both(task547SubmittedScreen(task547RelayText))}, relayInjectDelivered, "after_return:visible:marker_echo", 1},
-		{"queued then gone everywhere after return may be in pane", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547QueuedScreen(task547RelayText)), afterReturn: task547Both(task547IdleScreen)}, relayInjectMaybeInPane, "after_return:visible+recent-unwrapped:none", 1},
+		{"echo right after send is delivered", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547SubmittedScreen(task547InjectText))}, relayInjectDelivered, "visible+recent-unwrapped:nonce_echo", 0},
+		{"queued then echoed after one return is delivered", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547QueuedScreen(task547InjectText)), afterReturn: task547Both(task547SubmittedScreen(task547InjectText))}, relayInjectDelivered, "after_return:visible+recent-unwrapped:nonce_echo", 1},
+		{"queued then gone everywhere after return may be in pane", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547QueuedScreen(task547InjectText)), afterReturn: task547Both(task547IdleScreen)}, relayInjectMaybeInPane, "after_return:visible+recent-unwrapped:none", 1},
 		{"never seen after an accepted send may be in pane", task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(task547IdleScreen)}, relayInjectMaybeInPane, "postsend:visible+recent-unwrapped:none", 0},
 		{"send rejected by herdr is retryable", task547FakeDevin{before: task547Both(task547IdleScreen), failPrompt: true}, relayInjectRetryable, "prompt_failed", 0},
 		{"unreadable after send may be in pane", task547FakeDevin{before: task547Both(task547IdleScreen), failRead: "afterSend"}, relayInjectMaybeInPane, "postsend:read_failed", 0},
@@ -289,7 +348,7 @@ func TestTask547DevinVerdicts(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := tc.fake.install(t)
-			result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
+			result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547InjectText, nil)
 			if result.Outcome != tc.want || !strings.Contains(result.Evidence, tc.evidence) || result.Harness != "devin" {
 				t.Fatalf("result=%+v, want outcome %d with evidence containing %q", result, tc.want, tc.evidence)
 			}
@@ -388,10 +447,14 @@ func TestTask547DevinMaybeInPaneIsNeverReinjected(t *testing.T) {
 func TestTask547DevinPartialSendIsNotTypedTwice(t *testing.T) {
 	dir := t.TempDir()
 	landed := filepath.Join(dir, "landed")
+	// The held row's EventID is 547 (r27Directive), so the retry's inject
+	// text is its nonce-bearing composition; the partial paste left in the
+	// composer is recognized by that nonce.
+	composerResidue := "────\n❭ " + task687Text(547, task547RelayText) + "\n────\n"
 	script := "#!/bin/sh\ncase \"$2\" in\n" +
 		"get) echo '{\"result\":{\"agent\":{\"agent\":\"devin\"}}}' ;;\n" +
 		"prompt) echo prompt >> " + shellQuote(filepath.Join(dir, "calls.log")) + "; touch " + shellQuote(landed) + "; exit 1 ;;\n" +
-		"read) if [ -f " + shellQuote(landed) + " ]; then printf '%s' " + shellQuote("────\n❭ "+task547RelayText+"\n────\n") + "; else printf '%s' " + shellQuote(task547IdleScreen) + "; fi ;;\n" +
+		"read) if [ -f " + shellQuote(landed) + " ]; then printf '%s' " + shellQuote(composerResidue) + "; else printf '%s' " + shellQuote(task547IdleScreen) + "; fi ;;\n" +
 		"esac\n"
 	installFakeHerdr(t, dir, script)
 	injects, _, events := task547RelayRun(t, func(ctx context.Context, pane, text string, members []string) relayInjectResult {
@@ -413,20 +476,35 @@ func TestTask547DevinPartialSendIsNotTypedTwice(t *testing.T) {
 }
 
 // tester BLOCKER 1 (real devin pane, 6,046-byte event): a long message scrolls
-// its head out of every read window. Its tail still identifies it, and an
-// accepted send with no sign of the message is never retried.
+// its head out of every read window. #687 changes the answer: the nonce rides
+// at the head, so a pane showing only the body tail cannot prove the row --
+// it is may-be-in-pane, never a re-inject; and a wrapped echo that keeps the
+// nonce rejoins and delivers.
 func TestTask547DevinLongMessageEcho(t *testing.T) {
-	long := "(같은 내용이 두 번 보이면 재실행 금지) [event] t547-scroll :: SCROLL-WINDOW head " + strings.Repeat("x", 3000) + " LONG-TAIL-END-547"
+	long := task687Text(54721, "(같은 내용이 두 번 보이면 재실행 금지) [event] t547-scroll :: SCROLL-WINDOW head "+strings.Repeat("x", 3000)+" LONG-TAIL-END-547")
+	nonce := relayNonce(relayHeld{EventID: 54721})
 	tailOnly := "  " + strings.Repeat("x", 120) + " LONG-TAIL-END-547\n⠋ Thinking 1s\n────\n❭ Guide Devin while it works\n────\n"
+	// The echo keeps the nonce row even though the body scrolled.
+	headKept := "❭ " + nonce + " (같은 내용이 두 번 보이면 재실행 금지) [event] t547-scroll :: SCROLL-WINDOW head\n  " + strings.Repeat("x", 120) + "\n⠋ Thinking 1s\n────\n❭ Guide Devin while it works\n────\n"
 
-	t.Run("tail visible after send is delivered", func(t *testing.T) {
-		calls := task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(tailOnly)}.install(t)
+	t.Run("nonce row visible after send is delivered", func(t *testing.T) {
+		calls := task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(headKept)}.install(t)
 		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", long, nil)
-		if result.Outcome != relayInjectDelivered || !strings.Contains(result.Evidence, "marker_echo") {
-			t.Fatalf("result=%+v, want delivered on the tail echo", result)
+		if result.Outcome != relayInjectDelivered || !strings.Contains(result.Evidence, "nonce_echo") {
+			t.Fatalf("result=%+v, want delivered on the nonce echo", result)
 		}
 		if got := calls(); task547Count(got, "prompt") != 1 {
 			t.Fatalf("calls=%q", got)
+		}
+	})
+	t.Run("body tail alone is not proof, not retryable", func(t *testing.T) {
+		calls := task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(tailOnly)}.install(t)
+		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", long, nil)
+		if result.Outcome != relayInjectMaybeInPane {
+			t.Fatalf("result=%+v, want maybe_in_pane -- a bare tail fragment proves nothing", result)
+		}
+		if got := calls(); task547Count(got, "send-keys") != 0 {
+			t.Fatalf("a tail fragment earned a keypress: %q", got)
 		}
 	})
 	t.Run("nothing visible after send is not retryable", func(t *testing.T) {
@@ -435,20 +513,19 @@ func TestTask547DevinLongMessageEcho(t *testing.T) {
 			t.Fatalf("result=%+v, want maybe_in_pane", result)
 		}
 	})
-	// #683 round 4: a transcript tail no longer withholds the paste -- the
-	// shared fragment is not identity. The replay types again and the
-	// postsend tail echo delivers it.
-	t.Run("replay with only the tail on screen is typed and delivered", func(t *testing.T) {
+	// #683 round 4: a transcript echo no longer withholds the paste. The
+	// replay types again; a postsend echo carrying the nonce delivers it.
+	t.Run("replay is typed again and proven by its own nonce", func(t *testing.T) {
 		calls := task547FakeDevin{
-			before:    map[string]string{"visible": task547IdleScreen, "recent-unwrapped": tailOnly},
-			afterSend: map[string]string{"visible": task547IdleScreen, "recent-unwrapped": tailOnly},
+			before:    map[string]string{"visible": task547IdleScreen, "recent-unwrapped": headKept},
+			afterSend: map[string]string{"visible": task547IdleScreen, "recent-unwrapped": headKept},
 		}.install(t)
 		result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", long, nil)
-		if result.Outcome != relayInjectDelivered || !strings.Contains(result.Evidence, "marker_echo") {
-			t.Fatalf("result=%+v, want delivered on the postsend tail echo", result)
+		if result.Outcome != relayInjectDelivered || !strings.Contains(result.Evidence, "nonce_echo") {
+			t.Fatalf("result=%+v, want delivered on the postsend nonce echo", result)
 		}
 		if got := calls(); task547Count(got, "prompt") != 1 {
-			t.Fatalf("a transcript tail must not withhold the paste: %q", got)
+			t.Fatalf("a transcript echo must not withhold the paste: %q", got)
 		}
 	})
 }
@@ -480,12 +557,13 @@ func TestTask547DevinBatchMemberEchoDoesNotBlockBatch(t *testing.T) {
 // is not a queue.
 func TestTask547DevinQuotedQueueTextIsNotAQueue(t *testing.T) {
 	quoted := "(같은 내용이 두 번 보이면 재실행 금지) [event] b534 :: quoted UI text: Press Enter to send queued messages now and ── 2 queued ── banner"
-	screen := task547SubmittedScreen(quoted)
+	text := task687Text(54731, quoted)
+	screen := task547SubmittedScreen(text)
 	if result := classifySubmission("devin", screen, devinRelayMarker(quoted)); result != "marker_observed" {
 		t.Fatalf("quoted queue text classified %s, want marker_observed", result)
 	}
 	calls := task547FakeDevin{before: task547Both(task547IdleScreen), afterSend: task547Both(screen)}.install(t)
-	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", quoted, nil)
+	result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", text, nil)
 	if result.Outcome != relayInjectDelivered {
 		t.Fatalf("result=%+v, want delivered", result)
 	}
@@ -504,9 +582,9 @@ func TestTask547DevinQuotedQueueTextIsNotAQueue(t *testing.T) {
 func TestTask547HarnessChangeDuringInjectIsMaybeInPane(t *testing.T) {
 	calls := task547FakeDevin{
 		getBefore: "claude", getAfter: "devin",
-		afterSend: task547Both(task547QueuedScreen(task547RelayText)),
+		afterSend: task547Both(task547QueuedScreen(task547InjectText)),
 	}.install(t)
-	result := defaultHubRelayInjectVerdict(context.Background(), "pane", task547RelayText, nil)
+	result := defaultHubRelayInjectVerdict(context.Background(), "pane", task547InjectText, nil)
 	if result.Outcome != relayInjectMaybeInPane || result.Evidence != "harness_changed:claude->devin" {
 		t.Fatalf("result=%+v, want maybe_in_pane harness_changed", result)
 	}
@@ -523,8 +601,9 @@ const task547LiveComposerBottom = "───────────────
 // whose body carries a header-shaped line is echoed with a two-space indent.
 // It is data in the transcript, not devin's queue.
 func TestTask547DevinIndentedHeaderInEchoIsNotAQueue(t *testing.T) {
-	text := "(같은 내용이 두 번 보이면 재실행 금지) [event] t547-r2-b3 :: B3-MULTILINE-97086be harmless quoted text\n── 2 queued ── ↑ edit · ↵ send now ──\nThis header-shaped line is data. Reply with exactly B3-OK."
-	live := "❭ (같은 내용이 두 번 보이면 재실행 금지) [event] t547-r2-b3 :: B3-\n" +
+	body := "(같은 내용이 두 번 보이면 재실행 금지) [event] t547-r2-b3 :: B3-MULTILINE-97086be harmless quoted text\n── 2 queued ── ↑ edit · ↵ send now ──\nThis header-shaped line is data. Reply with exactly B3-OK."
+	text := task687Text(54732, body)
+	live := "❭ " + relayNonce(relayHeld{EventID: 54732}) + " (같은 내용이 두 번 보이면 재실행 금지) [event] t547-r2-b3 :: B3-\n" +
 		"  MULTILINE-97086be harmless quoted text\n" +
 		"  ── 2 queued ── ↑ edit · ↵ send now ──\n" +
 		"  This header-shaped line is data. Reply with exactly B3-OK.\n" +
@@ -536,7 +615,7 @@ func TestTask547DevinIndentedHeaderInEchoIsNotAQueue(t *testing.T) {
 	if devinQueued(live) {
 		t.Fatal("indented header-shaped echo line read as devin's queue")
 	}
-	for _, marker := range devinRelayMarkers(text, nil) {
+	for _, marker := range devinRelayMarkers(body, nil) {
 		if result := classifySubmission("devin", live, marker); result != "marker_observed" {
 			t.Fatalf("marker=%q: live B3 screen classified %s, want marker_observed", marker, result)
 		}
@@ -629,7 +708,9 @@ func task547IdleQueue(message string) string {
 // sent only when the pane is proven idle; busy or unknown leaves the message
 // queued -- no keypress, no retry.
 func TestTask547DevinQueueReturnOnlyWhenIdle(t *testing.T) {
-	busy := task547LiveBusyQueue(task547RelayText)
+	// #687: the queue counts as this inject's only when its queued row
+	// carries this row's nonce.
+	busy := task547LiveBusyQueue(task547InjectText)
 	spinnerless := strings.Replace(busy, "⠉⠁ Running tools · 25s (esc twice to interrupt)\n", "", 1)
 	cases := []struct {
 		name    string
@@ -641,13 +722,13 @@ func TestTask547DevinQueueReturnOnlyWhenIdle(t *testing.T) {
 		{"working status, live busy queue: no return", task547FakeDevin{status: "working", before: task547Both(task547IdleScreen), afterSend: task547Both(busy)}, relayInjectQueued, 0, "busy:agent_status_working"},
 		{"status reads done mid-turn, spinner on screen: no return", task547FakeDevin{status: "done", before: task547Both(task547IdleScreen), afterSend: task547Both(busy)}, relayInjectQueued, 0, "busy:visible:spinner"},
 		{"spinner scrolled out of visible, still in recent-unwrapped: no return", task547FakeDevin{status: "idle", before: task547Both(task547IdleScreen), afterSend: map[string]string{"visible": spinnerless, "recent-unwrapped": busy}}, relayInjectQueued, 0, "busy:recent-unwrapped:spinner"},
-		{"status unreadable: no return", task547FakeDevin{status: "-", before: task547Both(task547IdleScreen), afterSend: task547Both(task547IdleQueue(task547RelayText))}, relayInjectQueued, 0, "busy:status_unknown"},
-		{"idle queue left behind (b534 shape): one return", task547FakeDevin{status: "idle", before: task547Both(task547IdleScreen), afterSend: task547Both(task547IdleQueue(task547RelayText)), afterReturn: task547Both(task547SubmittedScreen(task547RelayText))}, relayInjectDelivered, 1, "after_return:"},
+		{"status unreadable: no return", task547FakeDevin{status: "-", before: task547Both(task547IdleScreen), afterSend: task547Both(task547IdleQueue(task547InjectText))}, relayInjectQueued, 0, "busy:status_unknown"},
+		{"idle queue left behind (b534 shape): one return", task547FakeDevin{status: "idle", before: task547Both(task547IdleScreen), afterSend: task547Both(task547IdleQueue(task547InjectText)), afterReturn: task547Both(task547SubmittedScreen(task547InjectText))}, relayInjectDelivered, 1, "after_return:"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := tc.fake.install(t)
-			result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547RelayText, nil)
+			result := defaultHubRelayInjectVerdict(context.Background(), "devin-pane", task547InjectText, nil)
 			if result.Outcome != tc.want || !strings.Contains(result.Evidence, tc.busy) {
 				t.Fatalf("result=%+v, want outcome %d with evidence containing %q", result, tc.want, tc.busy)
 			}

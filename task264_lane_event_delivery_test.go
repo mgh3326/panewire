@@ -100,13 +100,14 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 	t.Run("codex queued state is landed, not a failure", func(t *testing.T) {
 		dir := t.TempDir()
 		prompted := filepath.Join(dir, "prompted")
+		text := task687Text(26401, "do the thing")
 		script := "#!/bin/sh\ncase \"$2\" in\n" +
 			"get) echo '{\"result\":{\"agent\":{\"agent\":\"codex\"}}}' ;;\n" +
 			"prompt) touch \"" + prompted + "\" ;;\n" +
-			"read) if [ -f \"" + prompted + "\" ]; then echo 'Press up to edit queued messages'; else echo 'codex working'; fi ;;\n" +
+			"read) if [ -f \"" + prompted + "\" ]; then printf '%s\\n' 'Press up to edit queued messages' '" + text + "'; else echo 'codex working'; fi ;;\n" +
 			"esac\n"
 		installFakeHerdr(t, dir, script)
-		if !defaultHubRelayInject(context.Background(), "codex-pane", "do the thing") {
+		if !defaultHubRelayInject(context.Background(), "codex-pane", text) {
 			t.Fatal("codex message accepted into the queue, but injection reported failure")
 		}
 	})
@@ -118,13 +119,14 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 		dir := t.TempDir()
 		log := filepath.Join(dir, "calls")
 		prompted := filepath.Join(dir, "prompted")
+		text := task687Text(26402, "do the thing")
 		script := "#!/bin/sh\necho \"$2\" >> \"" + log + "\"\ncase \"$2\" in\n" +
 			"get) echo '{\"result\":{\"agent\":{\"agent\":\"codex\"}}}' ;;\n" +
 			"prompt) touch \"" + prompted + "\" ;;\n" +
-			"read) if [ -f \"" + prompted + "\" ]; then echo 'Press up to edit queued messages'; else echo 'codex working'; fi ;;\n" +
+			"read) if [ -f \"" + prompted + "\" ]; then printf '%s\\n' 'Press up to edit queued messages' '" + text + "'; else echo 'codex working'; fi ;;\n" +
 			"esac\n"
 		installFakeHerdr(t, dir, script)
-		result := defaultHubRelayInjectVerdict(context.Background(), "codex-pane", "do the thing", nil)
+		result := defaultHubRelayInjectVerdict(context.Background(), "codex-pane", text, nil)
 		if result.Outcome != relayInjectQueued {
 			t.Fatalf("codex queued: outcome=%v evidence=%q, want queued", result.Outcome, result.Evidence)
 		}
@@ -186,7 +188,8 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 	t.Run("devin queued state is landed, not a failure", func(t *testing.T) {
 		dir := t.TempDir()
 		prompted := filepath.Join(dir, "prompted")
-		queued := "⠋ Thinking 12m04s\n○ do the thing\n── 1 queued ── ↑ edit · ↵ send now\n─────────────────────\n❭ Press Enter to send queued messages now\n─────────────────────\nSWE-2 High"
+		text := task687Text(26403, "do the thing")
+		queued := "⠋ Thinking 12m04s\n○ " + text + "\n── 1 queued ── ↑ edit · ↵ send now\n─────────────────────\n❭ Press Enter to send queued messages now\n─────────────────────\nSWE-2 High"
 		idle := "─────────────────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n─────────────────────\nSWE-2 High"
 		script := "#!/bin/sh\ncase \"$2\" in\n" +
 			"get) echo '{\"result\":{\"agent\":{\"agent\":\"devin\",\"agent_status\":\"working\"}}}' ;;\n" +
@@ -194,7 +197,7 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 			"read) if [ -f \"" + prompted + "\" ]; then printf '%s\\n' \"" + queued + "\"; else printf '%s\\n' \"" + idle + "\"; fi ;;\n" +
 			"esac\n"
 		installFakeHerdr(t, dir, script)
-		if !defaultHubRelayInject(context.Background(), "devin-pane", "do the thing") {
+		if !defaultHubRelayInject(context.Background(), "devin-pane", text) {
 			t.Fatal("devin message accepted into the queue, but injection reported failure")
 		}
 	})
@@ -209,17 +212,18 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 		// is sent only when the pane is proven idle. The queued screen is the
 		// live capture in TestClassifySubmissionAllFourValues; since #626 the
 		// keypress also needs the composer to hold only devin's queue hint.
-		queued := "── 1 queued ──────────────────────────────────────── ↑ edit · ↵ send now ──\n○ do the thing\n─────────────────────\n❭ Press Enter to send queued messages now\n─────────────────────\nSWE-2 High"
+		text := task687Text(26404, "do the thing")
+		queued := "── 1 queued ──────────────────────────────────────── ↑ edit · ↵ send now ──\n○ " + text + "\n─────────────────────\n❭ Press Enter to send queued messages now\n─────────────────────\nSWE-2 High"
 		idle := "─────────────────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n─────────────────────\nSWE-2 High"
 		script := "#!/bin/sh\ncase \"$2\" in\n" +
 			"get) echo '{\"result\":{\"agent\":{\"agent\":\"devin\",\"agent_status\":\"idle\"}}}' ;;\n" +
 			"prompt) touch \"" + prompted + "\" ;;\n" +
-			"read) if [ -f \"" + marker + "\" ]; then echo '❭ do the thing'; elif [ -f \"" + prompted + "\" ]; then printf '%s\\n' \"" + queued + "\"; else printf '%s\\n' \"" + idle + "\"; fi ;;\n" +
+			"read) if [ -f \"" + marker + "\" ]; then echo '❭ " + text + "'; elif [ -f \"" + prompted + "\" ]; then printf '%s\\n' \"" + queued + "\"; else printf '%s\\n' \"" + idle + "\"; fi ;;\n" +
 			"send-keys) touch \"" + marker + "\" ;;\n" +
 			"esac\n"
 		installFakeHerdr(t, dir, script)
-		if !defaultHubRelayInject(context.Background(), "devin-pane", "do the thing") {
-			t.Fatal("devin message echoed the marker after return, but injection reported failure")
+		if !defaultHubRelayInject(context.Background(), "devin-pane", text) {
+			t.Fatal("devin message echoed the nonce after return, but injection reported failure")
 		}
 	})
 }

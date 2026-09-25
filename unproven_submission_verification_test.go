@@ -251,12 +251,12 @@ func TestRelayInjectVerifySubmissionComposerResidueThenUnprovenIsNotDelivered(t 
 	}
 }
 
-// Only a proven marker_observed classification reports delivered, on the
-// direct path.
+// Only a proven nonce echo reports delivered, on the direct path.
 func TestRelayInjectVerifySubmissionMarkerObservedDirectIsDelivered(t *testing.T) {
-	_, calls := unprovenSetupHerdr(t, []string{"earlier output\n❯ one line"})
-	if !relayInjectVerifySubmission(context.Background(), "test-pane", "claude", "one line") {
-		t.Fatal("marker_observed submission (no return pressed) reported unconfirmed")
+	text := task687Text(9001, "one line")
+	_, calls := unprovenSetupHerdr(t, []string{"earlier output\n❯ " + text})
+	if !relayInjectVerifySubmission(context.Background(), "test-pane", "claude", text) {
+		t.Fatal("nonce echo submission (no return pressed) reported unconfirmed")
 	}
 	if got := calls(); strings.Join(got, ",") != "read,read" {
 		t.Fatalf("unexpected herdr calls: %q", got)
@@ -264,12 +264,13 @@ func TestRelayInjectVerifySubmissionMarkerObservedDirectIsDelivered(t *testing.T
 }
 
 // Regression guard for the return-once contract: composer_residue on the
-// first read, followed by a proven marker_observed re-read, must still
+// first read, followed by a proven nonce echo re-read, must still
 // report delivered after the fix.
 func TestRelayInjectVerifySubmissionComposerResidueThenMarkerObservedIsDelivered(t *testing.T) {
-	_, calls := unprovenSetupHerdr(t, []string{unprovenClaudeChip, "earlier output\n❯ one line"})
-	if relayInjectVerify(context.Background(), "test-pane", "claude", "one line", unprovenClaudeEmpty).Outcome != relayInjectDelivered {
-		t.Fatal("marker_observed submission after one return keypress reported unconfirmed")
+	text := task687Text(9002, "one line")
+	_, calls := unprovenSetupHerdr(t, []string{unprovenClaudeChip, "earlier output\n❯ " + text})
+	if relayInjectVerify(context.Background(), "test-pane", "claude", text, unprovenClaudeEmpty).Outcome != relayInjectDelivered {
+		t.Fatal("nonce echo submission after one return keypress reported unconfirmed")
 	}
 	if got := calls(); strings.Join(got, ",") != "read,read,send-keys,read,read" {
 		t.Fatalf("unexpected herdr calls: %q", got)
@@ -291,10 +292,13 @@ func TestRelayInjectVerifySubmissionComposerResidueArmUnchanged(t *testing.T) {
 
 // #683: the queued arm changed polarity -- the banner is accepted as landed
 // (the harness's own queue submits it when the turn ends), and it earns no
-// return keypress at all.
+// return keypress at all. #687: the queued row's nonce must be on the
+// transcript for the banner to count.
 func TestRelayInjectVerifySubmissionQueuedArmUnchanged(t *testing.T) {
-	_, calls := unprovenSetupHerdr(t, []string{unprovenClaudeQueued, unprovenClaudeQueued})
-	result := relayInjectVerify(context.Background(), "test-pane", "claude", "one line", "")
+	text := task687Text(9003, "one line")
+	queued := "❯ " + text + "\n" + unprovenClaudeQueued
+	_, calls := unprovenSetupHerdr(t, []string{queued, queued})
+	result := relayInjectVerify(context.Background(), "test-pane", "claude", text, "")
 	if result.Outcome != relayInjectQueued {
 		t.Fatalf("queued submission: result=%+v, want queued (landed)", result)
 	}
@@ -319,10 +323,11 @@ func TestRelayInjectVerifySubmissionCodexWithholdsReturn(t *testing.T) {
 	}
 	// codex's own queue evidence -- the documented banner and the
 	// "submitted after next tool call" note -- counts as landed, without a
-	// return keypress.
+	// return keypress. #687: the nonce must be on the transcript too.
+	text := task687Text(9004, "one line")
 	for _, banner := range []string{"Press up to edit queued messages", "• Messages to be submitted after next tool call"} {
-		_, calls := unprovenSetupHerdr(t, []string{banner + "\n\n› Ask Codex to do anything\n"})
-		result := relayInjectVerify(context.Background(), "test-pane", "codex", "one line", "")
+		_, calls := unprovenSetupHerdr(t, []string{banner + "\n\n❯ " + text + "\n› Ask Codex to do anything\n"})
+		result := relayInjectVerify(context.Background(), "test-pane", "codex", text, "")
 		if result.Outcome != relayInjectQueued || result.Evidence != "queued_banner" {
 			t.Fatalf("banner %q: result=%+v, want queued", banner, result)
 		}
@@ -359,22 +364,25 @@ func TestRelayInjectVerifySubmissionCodexWithholdsReturn(t *testing.T) {
 // relayInjectMaybeInPane -- busy_relay.go never re-injects it. Only a send
 // herdr rejected is retryable now (see relayInjectForHarness).
 func TestRelayInjectVerifySubmissionHarnessEvidenceMatrix(t *testing.T) {
+	// #687: proof is the injected text's own nonce, so every landed screen
+	// shows the nonce-bearing relay text; banner-only screens are unproven.
+	text := task687Text(9100, "one line")
 	cases := []struct {
 		name    string
 		harness string
 		reads   []string // visible and recent-unwrapped alternate per call
 		want    relayInjectOutcome
 	}{
-		{"claude marker_observed direct", "claude", []string{"earlier output\n❯ one line"}, relayInjectDelivered},
+		{"claude marker_observed direct", "claude", []string{"earlier output\n❯ " + text}, relayInjectDelivered},
 		{"claude unproven direct, composer seen empty", "claude", []string{"nothing relevant\n" + unprovenClaudeEmpty}, relayInjectMaybeInPane},
 		{"claude unproven direct, no composer on screen", "claude", []string{"nothing relevant"}, relayInjectMaybeInPane},
-		{"claude queued is landed without a return", "claude", []string{unprovenClaudeQueued}, relayInjectQueued},
+		{"claude queued is landed without a return", "claude", []string{"❯ " + text + "\n" + unprovenClaudeQueued}, relayInjectQueued},
 		{"claude composer_residue then unproven after return", "claude", []string{unprovenClaudeChip, "", "nothing relevant\n" + unprovenClaudeEmpty}, relayInjectMaybeInPane},
 		{"claude composer_residue then no composer after return", "claude", []string{unprovenClaudeChip, "", "nothing relevant"}, relayInjectMaybeInPane},
 
-		{"codex marker_observed direct", "codex", []string{"one line"}, relayInjectDelivered},
+		{"codex marker_observed direct", "codex", []string{text}, relayInjectDelivered},
 		{"codex unproven direct", "codex", []string{"nothing relevant"}, relayInjectMaybeInPane},
-		{"codex queued is landed without a return", "codex", []string{"Press up to edit queued messages"}, relayInjectQueued},
+		{"codex queued is landed without a return", "codex", []string{"Press up to edit queued messages\n❯ " + text}, relayInjectQueued},
 		// #626: codex's return is withheld (no located composer); the result
 		// is may-be-in-pane, which busy_relay.go never re-injects.
 		{"codex composer_residue, return withheld", "codex", []string{"[Pasted text #1]"}, relayInjectMaybeInPane},
@@ -382,13 +390,14 @@ func TestRelayInjectVerifySubmissionHarnessEvidenceMatrix(t *testing.T) {
 		// devin: added in the 2026-09-16 rework. Since #547 the hub relay
 		// sends devin through devinRelayInject, which decides retry vs
 		// may-be-in-pane itself; these rows pin only this function's result.
-		{"devin marker_observed direct", "devin", []string{"earlier output\n❭ one line"}, relayInjectDelivered},
+		{"devin marker_observed direct", "devin", []string{"earlier output\n❭ " + text}, relayInjectDelivered},
 		{"devin unproven direct", "devin", []string{"nothing relevant"}, relayInjectMaybeInPane},
-		{"devin queued is landed without a return", "devin", []string{unprovenDevinQueued}, relayInjectQueued},
+		{"devin queued is landed without a return", "devin", []string{strings.Replace(unprovenDevinQueued, "○ hi", "○ "+text, 1)}, relayInjectQueued},
 		{"devin composer_residue then unproven after return", "devin", []string{unprovenDevinResidue, "", "nothing relevant"}, relayInjectMaybeInPane},
 		// The queue evidence outranks the foreign draft in the composer: the
-		// banner means this inject's send was accepted into the queue.
-		{"devin queued over a foreign draft is landed", "devin", []string{unprovenDevinQueuedDraft}, relayInjectQueued},
+		// banner means this inject's send was accepted into the queue, and
+		// the queued row carries this inject's nonce.
+		{"devin queued over a foreign draft is landed", "devin", []string{strings.Replace(unprovenDevinQueuedDraft, "○ hi", "○ "+text, 1)}, relayInjectQueued},
 
 		// An unrecognized/empty harness string keeps the no-evidence
 		// carve-out: unproven reports delivered.
@@ -402,7 +411,7 @@ func TestRelayInjectVerifySubmissionHarnessEvidenceMatrix(t *testing.T) {
 			if tc.harness == "devin" {
 				before = "─────────────────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n─────────────────────\nSWE-2 High"
 			}
-			result := relayInjectVerify(context.Background(), "test-pane", tc.harness, "one line", before)
+			result := relayInjectVerify(context.Background(), "test-pane", tc.harness, text, before)
 			if result.Outcome != tc.want {
 				t.Fatalf("harness=%q reads=%v: result=%+v, want outcome %d", tc.harness, tc.reads, result, tc.want)
 			}
