@@ -212,6 +212,21 @@ func OpenStore(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	// #725: relay_delivered is the node's durable answer to "did this pane
+	// already receive this relay event". event_id is handoffkeep's row id,
+	// which the lane.event idempotency index pins 1:1 to (owner_lane,
+	// producer event_id), so the pair (lane, event_id) is the canonical
+	// event identity the dedupe contract names. The row is written only
+	// after the inject verdict proves the text reached the pane; a payload
+	// or destination fingerprint mismatch is recorded, never suppressed.
+	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS relay_delivered (
+	 lane TEXT NOT NULL, event_id INTEGER NOT NULL, pane TEXT NOT NULL,
+	 payload_sha TEXT NOT NULL, delivered_at INTEGER NOT NULL,
+	 PRIMARY KEY(lane,event_id)
+	)`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	// ROB-1353 keeps its observation sequence and settle candidates in the
 	// node journal.  These tables are deliberately separate from relay_sent:
 	// observation is not durable delivery, and only the existing R21 outbox may

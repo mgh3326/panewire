@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os/exec"
 	"slices"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -237,13 +239,22 @@ type relayBusyManager struct {
 	// lane is later observed on a different pane is stale membership evidence
 	// even while the old pane's occupant is unchanged.
 	lanePane map[string]string
+	// dedupeInFlight holds one (lane, event_id) claim per offer() currently
+	// between arrival and its resting state — the window the relay_held row
+	// or the relay_delivered record has not covered yet. #725's counters are
+	// the shadow/apply operator surface.
+	dedupeInFlight      map[string]struct{}
+	dedupeSuppressed    atomic.Uint64
+	dedupeWouldSuppress atomic.Uint64
+	dedupeMismatch      atomic.Uint64
+	dedupeUnknown       atomic.Uint64
 }
 
 func (client *HubClient) relayBusyManager() *relayBusyManager {
 	client.busyRelayMu.Lock()
 	defer client.busyRelayMu.Unlock()
 	if client.busyRelay == nil {
-		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc), lanePane: make(map[string]string)}
+		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc), lanePane: make(map[string]string), dedupeInFlight: make(map[string]struct{})}
 	}
 	return client.busyRelay
 }
@@ -313,7 +324,30 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 	if message.Lane != "" {
 		manager.noteLaneRoute(message.Lane, message.Pane)
 	}
-	if message.EventID > 0 && message.Lane != "" {
+	// #725: the durable dedupe gate runs before the queue check. A row that
+	// is both delivered and still held is the crash-window leftover the
+	// delivered record must win over. An inject with no verifiable identity
+	// is delivered and counted, never suppressed under a manufactured key.
+	identified := message.EventID > 0 && message.Lane != ""
+	mode := relayDedupeModeFromEnv()
+	if mode != relayDedupeOff {
+		if !identified {
+			manager.noteDedupeUnknown(parent, message)
+		} else {
+			if manager.relayDeliveredIdentity(parent, message, mode) {
+				return
+			}
+			if key, claimed := manager.claimDedupeInFlight(message.Lane, message.EventID); !claimed {
+				manager.noteDedupeInFlightRepeat(parent, message, mode)
+				if mode.applies() {
+					return
+				}
+			} else {
+				defer manager.releaseDedupeInFlight(key)
+			}
+		}
+	}
+	if identified {
 		if existing, found, err := manager.client.relayHeldByKey(parent, message.Lane, message.EventID); err == nil && found {
 			manager.recoverExisting(parent, existing)
 			return
@@ -808,6 +842,16 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		}
 		for _, item := range landed {
 			if store := manager.client.relayStore(); store != nil && item.EventID != 0 {
+				// #725: the delivered record is written while the held row
+				// still exists and before the ack leaves — a crash in this
+				// gap must produce a replayed duplicate the dedupe gate can
+				// answer, never a lost event or an orphaned held row. A
+				// record failure is logged but never stalls delivery.
+				if item.Lane != "" {
+					if err := store.RecordRelayDelivered(parent, item.Lane, item.EventID, item.Pane, relayPayloadFingerprint(item.Text), now); err != nil {
+						manager.client.warnMessage("relay delivery was not recorded for dedupe")
+					}
+				}
 				_, _ = store.DeleteRelayHeld(parent, item.EventID)
 			}
 			// final_text is the row's own text, not the nonce-prefixed
@@ -894,10 +938,34 @@ func (manager *relayBusyManager) restore(ctx context.Context) {
 	}
 	byPane := make(map[string][]relayHeld)
 	var maxRecvSeq int64
+	mode := relayDedupeModeFromEnv()
 	for _, item := range items {
 		if item.Pane == relayCancelledPane {
 			_, _ = store.DeleteRelayHeld(ctx, item.EventID)
 			continue
+		}
+		// #725: a row that is both held and delivered means the process died
+		// between the delivery record and the held-row delete. Re-arming it
+		// would re-inject a note the pane already has. Apply drops the stale
+		// lease and re-acknowledges; shadow counts it and restores as before.
+		if mode != relayDedupeOff && item.Lane != "" {
+			if previous, found, err := store.RelayDeliveredByKey(ctx, item.Lane, item.EventID); err == nil && found {
+				if previous.Pane != item.Pane || previous.PayloadSHA != relayPayloadFingerprint(item.Text) {
+					manager.dedupeMismatch.Add(1)
+					manager.journalDedupe(ctx, "mismatch", hubOutboundMessage{Kind: "lane.event", JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, EventID: item.EventID})
+				} else if mode.applies() {
+					manager.dedupeSuppressed.Add(1)
+					manager.journalDedupe(ctx, "suppressed_restore", hubOutboundMessage{Kind: "lane.event", JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, EventID: item.EventID})
+					manager.client.warnMessage(fmt.Sprintf("relay dedupe suppressed restored held row: lane=%s event_id=%d was already delivered", item.Lane, item.EventID))
+					_, _ = store.DeleteRelayHeld(ctx, item.EventID)
+					manager.emit("relay.released", relayReleasedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, FinalText: item.Text, Edited: item.Edited, OriginalEventID: item.EventID})
+					manager.emit("relay.delivered", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: "dedupe_suppressed", OriginalEventID: item.EventID})
+					continue
+				} else {
+					manager.dedupeWouldSuppress.Add(1)
+					manager.journalDedupe(ctx, "would_suppress_restore", hubOutboundMessage{Kind: "lane.event", JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, EventID: item.EventID})
+				}
+			}
 		}
 		if item.RecvSeq > maxRecvSeq {
 			maxRecvSeq = item.RecvSeq
