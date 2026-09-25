@@ -967,7 +967,7 @@ const relayReplayRetiredMarker = relayReplayRetiredMachine + "/" + relayReplayRe
 // retireRelayReplay closes a row the replay gate refused, so no later restart
 // lists it again, and puts the reason on the operator feed.
 func (h *HubServer) retireRelayReplay(record handoffkeepRelayEvent, reason string) {
-	if strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || !h.claimReplayRetire(record.ID) {
+	if !h.claimReplayRetire(record.ID) {
 		h.logger.Debug("relay replay row already retired", "event_id", record.ID, "lane", record.OwnerLane, "delivered_to", record.DeliveredTo)
 		return
 	}
@@ -1058,6 +1058,9 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 	// row that has been delivered, or has already spent its attempts, is the
 	// difference between a replay and a re-injection storm on every restart.
 	if record.DeliveredAt != "" {
+		return
+	}
+	if strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) {
 		return
 	}
 	if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
