@@ -802,7 +802,7 @@ func relayQueuedBanner(harness, screen string) bool {
 // match -- never a substring -- is the only proof of THIS row.
 
 // relayNonce is the bracketed proof token embedded in the injected text:
-// "[r" + decimal event id + a two-symbol check + "]". The check folds the
+// "[r" + decimal event id + a four-symbol check + "]". The check folds the
 // event id AND the text, because handoffkeep folds later job.* rounds into
 // the first round's durable row -- different texts then share one event id,
 // and an id-only nonce would let an earlier round's echo "prove" a folded
@@ -827,9 +827,12 @@ func relayNonce(item relayHeld) string {
 
 const relayNonceAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
 
-// relayNonceCheck is the two-symbol base36 suffix folded from the event id
+// relayNonceCheck is the four-symbol base36 suffix folded from the event id
 // and the text, so folded rounds sharing one durable row still get distinct
-// nonces when their texts differ.
+// nonces when their texts differ. Four symbols (~1.68M values) keep the
+// residual collision chance negligible -- a two-symbol check left ~0.1
+// expected colliding pairs across the real folded corpus, and a collision
+// resurrects the shared-nonce false proof for that pair (PR 87 CodeRabbit).
 func relayNonceCheck(id int64, text string) string {
 	h := fnv.New32a()
 	var buf [8]byte
@@ -838,7 +841,7 @@ func relayNonceCheck(id int64, text string) string {
 	h.Write([]byte{0})
 	h.Write([]byte(text))
 	v := h.Sum32()
-	return string([]byte{relayNonceAlphabet[v%36], relayNonceAlphabet[(v/36)%36]})
+	return relayNonceBase36(uint64(v), 4)
 }
 
 func relayNonceBase36(v uint64, width int) string {

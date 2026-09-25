@@ -49,7 +49,7 @@ func TestTask687NonceFormat(t *testing.T) {
 		if strings.ContainsAny(nonce, "_*`~^\\") {
 			t.Fatalf("event %d: nonce %q carries a markdown-significant byte", id, nonce)
 		}
-		if len(nonce) > 24 {
+		if len(nonce) > 28 {
 			t.Fatalf("event %d: nonce %q too long to stay whole inside a wrap row", id, nonce)
 		}
 		if got := relayNonce(relayHeld{EventID: id}); got != nonce {
