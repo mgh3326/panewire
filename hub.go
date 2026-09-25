@@ -403,12 +403,17 @@ type HubServer struct {
 	controlPlaneLanesLastFailure     string
 	// relayDedupe is an active injection claim. lanePersisted keeps the durable
 	// row ID while that claim is deliberately released between lane retries.
-	relayDedupe          map[string]int64
-	relayHeld            map[int64]hubRelayHeldProjection
-	relayCancelled       map[int64]struct{}
-	relayCancelledOrder  lruIndex[int64]
-	lanePersisted        map[string]int64
-	lanePersistedOrder   lruIndex[string]
+	relayDedupe         map[string]int64
+	relayHeld           map[int64]hubRelayHeldProjection
+	relayCancelled      map[int64]struct{}
+	relayCancelledOrder lruIndex[int64]
+	lanePersisted       map[string]int64
+	lanePersistedOrder  lruIndex[string]
+	// laneEventSHA remembers the durable payload fingerprint behind each
+	// lane.event dedupe key, so a resend under a different body is recorded
+	// as a mismatch even on paths that never reach a second POST (#725).
+	laneEventSHA         map[string]string
+	laneEventSHAOrder    lruIndex[string]
 	replayExhausted      map[int64]struct{}
 	replayExhaustedOrder lruIndex[int64]
 	// replayRetired remembers durable rows this process already retired, so
@@ -447,6 +452,7 @@ type HubServer struct {
 	unpersistedRelayEvents      uint64
 	replayExhaustedEvents       uint64
 	alreadyDeliveredRelayEvents uint64
+	relayPayloadMismatches      uint64
 	quotaCache                  map[string]hubQuotaCacheEntry
 	quotaWaiters                map[string]chan hubQuotaResult
 	quotaCacheTTL               time.Duration
@@ -631,7 +637,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatQuestionOf: make(map[int64]string), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, updateRepository: config.UpdateRepository, updateOverdueLane: config.UpdateOverdueLane, updateOverdueNotified: make(map[string]string), updateOverduePending: make(map[string]*hubUpdateOverdue), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2,
+		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatQuestionOf: make(map[int64]string), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, updateRepository: config.UpdateRepository, updateOverdueLane: config.UpdateOverdueLane, updateOverdueNotified: make(map[string]string), updateOverduePending: make(map[string]*hubUpdateOverdue), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2,
 	}, nil
 }
 
@@ -717,10 +723,11 @@ type hubUIData struct {
 }
 
 type hubUIHub struct {
-	Version             string `json:"version"`
-	UptimeMS            int64  `json:"uptime_ms"`
-	UnknownMessages     uint64 `json:"unknown_messages"`
-	UnfencedCompletions uint64 `json:"unfenced_completions"`
+	Version                string `json:"version"`
+	UptimeMS               int64  `json:"uptime_ms"`
+	UnknownMessages        uint64 `json:"unknown_messages"`
+	UnfencedCompletions    uint64 `json:"unfenced_completions"`
+	RelayPayloadMismatches uint64 `json:"relay_payload_mismatches"`
 }
 
 type hubUINode struct {
@@ -850,7 +857,7 @@ func (h *HubServer) uiData() hubUIData {
 		uptime = 0
 	}
 	state := *h.burstState
-	return hubUIData{SchemaVersion: 1, Hub: hubUIHub{Version: hubVersion, UptimeMS: uptime.Milliseconds(), UnknownMessages: h.unknownMessages, UnfencedCompletions: h.unfencedCompletions}, Nodes: nodes, Burst: hubUIBurst{Configured: h.burstPolicyPath != "", Policy: policy, SourceRuns: state.SourceRuns, LastLoad: state.LastLoad, LastUp: state.LastUp, LastDown: state.LastDown, UpCompleted: state.UpCompleted, IdleSince: state.IdleSince}, Events: events}
+	return hubUIData{SchemaVersion: 1, Hub: hubUIHub{Version: hubVersion, UptimeMS: uptime.Milliseconds(), UnknownMessages: h.unknownMessages, UnfencedCompletions: h.unfencedCompletions, RelayPayloadMismatches: h.relayPayloadMismatches}, Nodes: nodes, Burst: hubUIBurst{Configured: h.burstPolicyPath != "", Policy: policy, SourceRuns: state.SourceRuns, LastLoad: state.LastLoad, LastUp: state.LastUp, LastDown: state.LastDown, UpCompleted: state.UpCompleted, IdleSince: state.IdleSince}, Events: events}
 }
 
 func (h *HubServer) handleBurst(writer http.ResponseWriter, request *http.Request) {
@@ -1927,6 +1934,22 @@ func (h *HubServer) UnpersistedRelayEventCount() uint64 {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.unpersistedRelayEvents
+}
+
+// countRelayPayloadMismatch records a lane.event resend whose body disagrees
+// with the durable row's — the one case where dedupe would otherwise hide a
+// payload change behind a shared identity (#725).
+func (h *HubServer) countRelayPayloadMismatch() {
+	h.mu.Lock()
+	h.relayPayloadMismatches++
+	h.mu.Unlock()
+}
+
+// RelayPayloadMismatchCount exists for local monitoring and tests.
+func (h *HubServer) RelayPayloadMismatchCount() uint64 {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.relayPayloadMismatches
 }
 
 // UnfencedCompletionCount exists for local monitoring and tests.

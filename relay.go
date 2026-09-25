@@ -258,11 +258,16 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 	}
 	key := relayEventDedupeKey("lane.event", event)
 	h.mu.Lock()
+	persistedSHA := h.laneEventSHALocked(key)
 	if persistedID := h.lanePersistedIDLocked(key); persistedID != 0 {
 		h.mu.Unlock()
 		// The hub already owns the durable row. A source retry is an ACK-loss
 		// recovery, not another delivery attempt, so it must not re-POST and
-		// consume the delivery budget.
+		// consume the delivery budget. The one thing it must still do is say
+		// when the resent body disagrees with the row that stands (#725): a
+		// same-identity different-payload arrival is a mismatch, not a quiet
+		// duplicate.
+		h.noteLaneEventPayloadMismatch(event, persistedSHA)
 		if !ingress {
 			h.queueLaneRelayPersisted(event, sender, persistedID)
 			return relayLaneEventResult{ID: persistedID}
@@ -275,6 +280,7 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 	}
 	h.mu.Unlock()
 	if duplicate {
+		h.noteLaneEventPayloadMismatch(event, persistedSHA)
 		if ingress {
 			// A concurrent request can see a claim before the first POST has
 			// learned its durable id. It is still a duplicate; a retry can name
@@ -313,6 +319,13 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnpersisted("lane.event", event)
 		return relayLaneEventResult{PersistFailed: true}
+	}
+	// #725: the durable text now names this identity for the rest of the
+	// process, so every future resend can be compared against it — including
+	// the resends that never reach a second POST.
+	h.rememberLaneEventSHA(key, stored.Text)
+	if status == http.StatusOK && stored.Text != event.Text {
+		h.noteLaneEventPayloadMismatch(event, relayPayloadFingerprint(stored.Text))
 	}
 	if ingress && status == http.StatusOK {
 		// A restarted hub discovers a durable duplicate only after its first
@@ -531,6 +544,51 @@ func (h *HubServer) lanePersistedIDLocked(key string) int64 {
 		h.lanePersistedOrder.touch(key, lanePersistedMaxEntries)
 	}
 	return persistedID
+}
+
+// laneEventSHALocked returns the durable payload fingerprint recorded for a
+// lane.event dedupe key, or "" while the durable row's text is still unknown
+// (a first POST in flight). The map survives the lifecycle cleanups around it
+// — delivery forgets lanePersisted but must not forget the fingerprint,
+// because the resend that needs comparing is the post-delivery one.
+func (h *HubServer) laneEventSHALocked(key string) string {
+	sha := h.laneEventSHA[key]
+	if sha != "" {
+		h.laneEventSHAOrder.touch(key, lanePersistedMaxEntries)
+	}
+	return sha
+}
+
+func (h *HubServer) rememberLaneEventSHA(key, text string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.laneEventSHA == nil {
+		h.laneEventSHA = make(map[string]string)
+	}
+	_, evicted, overflowed := h.laneEventSHAOrder.touch(key, lanePersistedMaxEntries)
+	if overflowed {
+		// Eviction can only lose a future mismatch observation; dedupe and
+		// delivery never depend on the fingerprint's presence.
+		delete(h.laneEventSHA, evicted)
+	}
+	h.laneEventSHA[key] = relayPayloadFingerprint(text)
+}
+
+// noteLaneEventPayloadMismatch is the contract's mismatch clause: the same
+// (lane, event_id) arriving with a different payload is recorded and
+// broadcast, never silently absorbed into the durable duplicate path.
+func (h *HubServer) noteLaneEventPayloadMismatch(event hubJobEventPayload, storedSHA string) {
+	if storedSHA == "" || relayPayloadFingerprint(event.Text) == storedSHA {
+		return
+	}
+	h.countRelayPayloadMismatch()
+	h.logger.Warn("lane.event resent with a different payload; durable row still wins", "lane", event.OwnerLane, "event_id", event.EventID)
+	payload, _ := json.Marshal(struct {
+		Lane    string `json:"lane"`
+		EventID string `json:"event_id"`
+		Reason  string `json:"reason"`
+	}{Lane: event.OwnerLane, EventID: event.EventID, Reason: "payload_mismatch"})
+	h.broadcast(hubEvent{Kind: "relay.mismatch", Payload: payload, Received: h.now().UTC()})
 }
 
 func (h *HubServer) rememberLanePersistedLocked(key string, eventID int64) {
@@ -1098,6 +1156,7 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 	key := relayEventDedupeKey(record.Kind, event)
 	if record.Kind == "lane.event" {
 		h.rememberLanePersisted(key, record.ID)
+		h.rememberLaneEventSHA(key, record.Text)
 	}
 	h.mu.Lock()
 	if _, exists := h.relayDedupe[key]; exists {
