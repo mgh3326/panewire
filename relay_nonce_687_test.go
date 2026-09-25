@@ -68,6 +68,26 @@ func TestTask687NonceFormat(t *testing.T) {
 	}
 }
 
+// Tester F1: handoffkeep folds later job.* rounds into the first round's
+// durable row, so different texts can share one event id. The check folds
+// the text in, so a folded round with new text gets a new nonce -- an
+// earlier round's echo can no longer "prove" it. A replay of the same
+// message still derives the same token.
+func TestTask687FoldedRoundsGetDistinctNonces(t *testing.T) {
+	r1 := relayNonce(relayHeld{EventID: 101, Text: "VERDICT: FAIL"})
+	r2 := relayNonce(relayHeld{EventID: 101, Text: "VERDICT: PASS @ae3f2c7"})
+	r3 := relayNonce(relayHeld{EventID: 101, Text: "VERDICT: PASS @5120d3a"})
+	if r1 == r2 || r2 == r3 || r1 == r3 {
+		t.Fatalf("folded rounds share a nonce: %q %q %q", r1, r2, r3)
+	}
+	if r1 != relayNonce(relayHeld{EventID: 101, Text: "VERDICT: FAIL"}) {
+		t.Fatal("same id+text nonce is not stable across calls")
+	}
+	if !strings.HasPrefix(r1, "[r101") || !strings.HasPrefix(r2, "[r101") {
+		t.Fatalf("nonce digit prefix must still carry the event id: %q %q", r1, r2)
+	}
+}
+
 // AC1: extraction pulls only the bracketed nonce tokens out of a composed
 // text -- bracketed boilerplate and ordinary words are not nonces.
 func TestTask687NonceExtraction(t *testing.T) {
@@ -83,7 +103,7 @@ func TestTask687NonceExtraction(t *testing.T) {
 	// it echoes with the rest, so proving it is harmless.
 	withQuoted := relayBatchText([]relayHeld{{EventID: 204, Text: "see [r9999zz] for details"}}, false, time.Now())
 	got := relayNoncesIn(withQuoted)
-	if len(got) != 2 || got[0] != relayNonce(relayHeld{EventID: 204}) || got[1] != "[r9999zz]" {
+	if len(got) != 2 || got[0] != relayNonce(relayHeld{EventID: 204, Text: "see [r9999zz] for details"}) || got[1] != "[r9999zz]" {
 		t.Fatalf("quoted nonce not extracted in order: %v", got)
 	}
 }
@@ -410,7 +430,7 @@ func TestTask687DevinFragmentIsNotProof(t *testing.T) {
 	later := task687Text(7002, body)
 	// The fragment that used to satisfy the check: the shared head of an
 	// identical earlier message, no nonce of ours anywhere.
-	fragment := strings.TrimPrefix(earlier, relayNonce(relayHeld{EventID: 7001})+" ")
+	fragment := strings.TrimPrefix(earlier, relayNonce(relayHeld{EventID: 7001, Text: body})+" ")
 	calls := task547FakeDevin{
 		before:    task547Both(task547IdleScreen),
 		afterSend: task547Both(task547SubmittedScreen(fragment)),

@@ -250,7 +250,7 @@ func TestTask683BatchWithMemberEchoIsTyped(t *testing.T) {
 // has no markdown-significant bytes, so a rendered echo still carries it.
 func TestTask683MarkdownEchoIsDelivered(t *testing.T) {
 	text := task687Text(68721, "(같은 내용이 두 번 보이면 재실행 금지) [report] b672-sgov (home-desktop) :: **Status:** PR #2096 is ready at `696bf48` -> jobs/672-sgov-20260924-2340/report.md")
-	rendered := "❯ " + relayNonce(relayHeld{EventID: 68721}) + " (같은 내용이 두 번 보이면 재실행 금지) [report] b672-sgov (home-desktop) :: Status: PR #2096 is ready at 696bf48 -> jobs/672-sgov-20260924-2340/report.md"
+	rendered := "❯ " + relayNoncesIn(text)[0] + " (같은 내용이 두 번 보이면 재실행 금지) [report] b672-sgov (home-desktop) :: Status: PR #2096 is ready at 696bf48 -> jobs/672-sgov-20260924-2340/report.md"
 	post := task626Claude(append(append(append([]string{}, task626Transcript...), rendered), task683Filler("post", 40)...), "❯")
 	postTranscript := strings.Join(append(append([]string{}, task626Transcript...), rendered), "\n")
 	_, calls := task683FakeHerdr(t, "claude",
@@ -281,7 +281,7 @@ func TestTask683WrapBoundaryPrefixIsTyped(t *testing.T) {
 	if !relayNoncePresent(promptTranscript("claude", pre), longNonce) {
 		t.Fatal("the wrapped echo does not carry its own nonce")
 	}
-	if relayNoncePresent(promptTranscript("claude", pre), relayNonce(relayHeld{EventID: 68802})) {
+	if relayNoncePresent(promptTranscript("claude", pre), relayNoncesIn(short)[0]) {
 		t.Fatal("a different row's nonce matched the wrapped echo")
 	}
 	post := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+short), task683Filler("post", 40)...), "❯")
@@ -303,7 +303,7 @@ func TestTask683WrapBoundaryPrefixIsTyped(t *testing.T) {
 // the block join.
 func TestTask683WrappedEchoInUnwrappedIsDelivered(t *testing.T) {
 	text := task687Text(68901, "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane and wait for my review before merging")
-	nonce := relayNonce(relayHeld{EventID: 68901})
+	nonce := relayNoncesIn(text)[0]
 	wrappedPost := strings.Join(append(append([]string{}, task626Transcript...),
 		"❯ "+nonce[:4],
 		"  "+nonce[4:]+" (같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] stop the lane",
@@ -328,7 +328,7 @@ func TestTask683LiteralDelimitersAreIdentity(t *testing.T) {
 	other := task687Text(68012, "(같은 내용이 두 번 보이면 재실행 금지) [event] b683-inject-verify :: [chat] wait 510 min before retrying maxretries")
 	pre := task626Claude(append(append(append([]string{}, task626Transcript...), "❯ "+onPane), task683Filler("later", 30)...), "❯")
 	preTranscript := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+onPane), "\n")
-	if relayNoncePresent(promptTranscript("claude", pre), relayNonce(relayHeld{EventID: 68012})) {
+	if relayNoncePresent(promptTranscript("claude", pre), relayNoncesIn(other)[0]) {
 		t.Fatal("the other row's nonce matched the on-pane echo")
 	}
 	_, calls := task683FakeHerdr(t, "claude",

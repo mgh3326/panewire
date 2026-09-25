@@ -416,11 +416,11 @@ type HubServer struct {
 	// cannot announce the same retire twice (#658).
 	replayRetired      map[int64]struct{}
 	replayRetiredOrder lruIndex[int64]
-	handoffkeep          *handoffkeepRelayClient
-	chatStore            ChatStore
-	chatKick             chan struct{}
-	chatMu               sync.Mutex
-	chatPending          map[int64]chatPendingMessage
+	handoffkeep        *handoffkeepRelayClient
+	chatStore          ChatStore
+	chatKick           chan struct{}
+	chatMu             sync.Mutex
+	chatPending        map[int64]chatPendingMessage
 	// chatQuestionOf and chatLaneOf preserve a message's question link and
 	// lane so retry and replay-complete can re-associate without trusting
 	// client input. Entries live until the row is delivered or the process

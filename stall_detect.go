@@ -209,7 +209,7 @@ func newStallDetectManager(store *Store, inboxRoot string, cfg StallDetectConfig
 	}
 	return &stallDetectManager{
 		cfg: cfg, store: store, inboxRoot: inboxRoot,
-		deps:      deps, logger: logger,
+		deps: deps, logger: logger,
 		wake: make(chan string, 64), wakePending: make(map[string]struct{}),
 		procCWDCache: make(map[int64]string),
 		unsubStreak:  make(map[string]int), cleanReads: make(map[string]int),
@@ -308,17 +308,17 @@ type stallJobScan struct {
 	// journal contains same-seq terminal+spawn pairs (a respawn flushed in
 	// the same batch as the loss), and filename order is the only
 	// deterministic key inside a tie.
-	TerminalSeq    int64
-	TerminalPos    int64
-	LastEventAt    time.Time
+	TerminalSeq int64
+	TerminalPos int64
+	LastEventAt time.Time
 	// Rejections names every journal path this scan refused to open — a
 	// symlinked component, a non-regular entry, an oversize record. A
 	// refusal is a recorded observation, never a silent skip.
-	Rejections  []stallJournalRejection
-	ReportPath  string
+	Rejections []stallJournalRejection
+	ReportPath string
 	// ReportKind names what ReportPath holds: "path" for a local file,
 	// "doc_key" for a handoffkeep document key, "" when nothing resolves.
-	ReportKind  string
+	ReportKind string
 }
 
 type stallSpawnScan struct {
@@ -347,12 +347,12 @@ type stallDeadlineExt struct {
 // does not carry. The generic payload map keeps this scanner forward-tolerant:
 // unknown payload keys are ignored, never executed.
 type stallInboxEvent struct {
-	Type       string                     `json:"type"`
-	Kind       string                     `json:"kind"`
-	Event      string                     `json:"event"`
-	CreatedAt  string                     `json:"created_at"`
-	Epoch      uint64                     `json:"epoch"`
-	ReportPath string                     `json:"report_path"`
+	Type       string `json:"type"`
+	Kind       string `json:"kind"`
+	Event      string `json:"event"`
+	CreatedAt  string `json:"created_at"`
+	Epoch      uint64 `json:"epoch"`
+	ReportPath string `json:"report_path"`
 	// Report is the wrk-era completion record's report field (worker.complete
 	// carries it at the top level, relative to the job directory).
 	Report  string                     `json:"report"`

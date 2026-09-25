@@ -264,7 +264,7 @@ func TestTask626NormalInjectStillSubmits(t *testing.T) {
 		}
 	})
 	t.Run("own text in the composer, one return, then echo", func(t *testing.T) {
-		residue := task626Claude(task626Transcript, "❯ "+relayNonce(relayHeld{EventID: 62600})+" (같은 내용이 두 번 보이면 재실행 금지) [report]", "  t312-verify :: round 3 ready")
+		residue := task626Claude(task626Transcript, "❯ "+relayNoncesIn(task626InjectText)[0]+" (같은 내용이 두 번 보이면 재실행 금지) [report]", "  t312-verify :: round 3 ready")
 		calls := task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, task626TranscriptOnly, residue, task626TranscriptOnly, echo, echoUnwrapped})
 		if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil); result.Outcome != relayInjectDelivered {
 			t.Fatalf("result=%+v, want delivered", result)

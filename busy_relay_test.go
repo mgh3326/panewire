@@ -376,8 +376,8 @@ func TestR27BusyRelaySixPathsUseFixtureHerdr(t *testing.T) {
 			t.Fatalf("batch released=%d deliveries=%+v", released, delivered)
 		}
 		if got := *prompts; len(got) != 1 ||
-			!strings.Contains(got[0], relayNonce(relayHeld{EventID: 106})+" first") ||
-			!strings.Contains(got[0], relayNonce(relayHeld{EventID: 107})+" second") {
+			!strings.Contains(got[0], relayNonce(relayHeld{EventID: 106, Text: "first"})+" first") ||
+			!strings.Contains(got[0], relayNonce(relayHeld{EventID: 107, Text: "second"})+" second") {
 			t.Fatalf("prompts=%q", got)
 		}
 	})

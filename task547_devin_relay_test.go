@@ -482,7 +482,7 @@ func TestTask547DevinPartialSendIsNotTypedTwice(t *testing.T) {
 // nonce rejoins and delivers.
 func TestTask547DevinLongMessageEcho(t *testing.T) {
 	long := task687Text(54721, "(같은 내용이 두 번 보이면 재실행 금지) [event] t547-scroll :: SCROLL-WINDOW head "+strings.Repeat("x", 3000)+" LONG-TAIL-END-547")
-	nonce := relayNonce(relayHeld{EventID: 54721})
+	nonce := relayNoncesIn(long)[0]
 	tailOnly := "  " + strings.Repeat("x", 120) + " LONG-TAIL-END-547\n⠋ Thinking 1s\n────\n❭ Guide Devin while it works\n────\n"
 	// The echo keeps the nonce row even though the body scrolled.
 	headKept := "❭ " + nonce + " (같은 내용이 두 번 보이면 재실행 금지) [event] t547-scroll :: SCROLL-WINDOW head\n  " + strings.Repeat("x", 120) + "\n⠋ Thinking 1s\n────\n❭ Guide Devin while it works\n────\n"
@@ -603,7 +603,7 @@ const task547LiveComposerBottom = "───────────────
 func TestTask547DevinIndentedHeaderInEchoIsNotAQueue(t *testing.T) {
 	body := "(같은 내용이 두 번 보이면 재실행 금지) [event] t547-r2-b3 :: B3-MULTILINE-97086be harmless quoted text\n── 2 queued ── ↑ edit · ↵ send now ──\nThis header-shaped line is data. Reply with exactly B3-OK."
 	text := task687Text(54732, body)
-	live := "❭ " + relayNonce(relayHeld{EventID: 54732}) + " (같은 내용이 두 번 보이면 재실행 금지) [event] t547-r2-b3 :: B3-\n" +
+	live := "❭ " + relayNoncesIn(text)[0] + " (같은 내용이 두 번 보이면 재실행 금지) [event] t547-r2-b3 :: B3-\n" +
 		"  MULTILINE-97086be harmless quoted text\n" +
 		"  ── 2 queued ── ↑ edit · ↵ send now ──\n" +
 		"  This header-shaped line is data. Reply with exactly B3-OK.\n" +

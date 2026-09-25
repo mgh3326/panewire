@@ -802,15 +802,19 @@ func relayQueuedBanner(harness, screen string) bool {
 // match -- never a substring -- is the only proof of THIS row.
 
 // relayNonce is the bracketed proof token embedded in the injected text:
-// "[r" + decimal event id + a two-symbol check + "]". The check keeps a
-// neighbouring token from accidentally being this row's nonce, and the
-// digit after r keeps the token space disjoint from ordinary bracketed
-// words like [report] or [event]. Rows with no durable event id
-// (fire-and-forget injects) derive the token from the text itself --
-// identical content is indistinguishable on a pane anyway.
+// "[r" + decimal event id + a two-symbol check + "]". The check folds the
+// event id AND the text, because handoffkeep folds later job.* rounds into
+// the first round's durable row -- different texts then share one event id,
+// and an id-only nonce would let an earlier round's echo "prove" a folded
+// round that was typed but never landed (the #687 tester's F1). A replay
+// of the same message still types the same token. The digit after r keeps
+// the token space disjoint from ordinary bracketed words like [report] or
+// [event]. Rows with no durable event id (fire-and-forget injects) derive
+// the token from the text itself -- identical content is indistinguishable
+// on a pane anyway.
 func relayNonce(item relayHeld) string {
 	if item.EventID > 0 {
-		return "[r" + strconv.FormatInt(item.EventID, 10) + relayNonceCheck(item.EventID) + "]"
+		return "[r" + strconv.FormatInt(item.EventID, 10) + relayNonceCheck(item.EventID, item.Text) + "]"
 	}
 	h := fnv.New64a()
 	h.Write([]byte(item.Lane))
@@ -823,12 +827,16 @@ func relayNonce(item relayHeld) string {
 
 const relayNonceAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz"
 
-// relayNonceCheck is the two-symbol base36 suffix folded from the event id.
-func relayNonceCheck(id int64) string {
+// relayNonceCheck is the two-symbol base36 suffix folded from the event id
+// and the text, so folded rounds sharing one durable row still get distinct
+// nonces when their texts differ.
+func relayNonceCheck(id int64, text string) string {
 	h := fnv.New32a()
 	var buf [8]byte
 	binary.LittleEndian.PutUint64(buf[:], uint64(id))
 	h.Write(buf[:])
+	h.Write([]byte{0})
+	h.Write([]byte(text))
 	v := h.Sum32()
 	return string([]byte{relayNonceAlphabet[v%36], relayNonceAlphabet[(v/36)%36]})
 }
