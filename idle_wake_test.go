@@ -940,13 +940,15 @@ func TestIdleWakeAdversarialLabelRemainsDataAtShellBoundary(t *testing.T) {
 	if !validLaneEventText(text) || strings.ContainsAny(text, "\r\n\x00") || !strings.Contains(text, "$(touch") {
 		t.Fatalf("lane text did not preserve escaped data safely: %q", text)
 	}
-	// The fake herdr's "read" case cats a file holding the exact submission
-	// marker (rather than embedding the adversarial text in the shell script
-	// itself) so classifySubmission can prove marker_observed -- required for
+	// The fake herdr's "read" case cats a file holding the exact submitted
+	// text (rather than embedding the adversarial text in the shell script
+	// itself) so verification can prove the nonce echo -- required for
 	// defaultHubRelayInject to report delivered now that an unproven
-	// classification is no longer treated as delivered.
+	// classification is no longer treated as delivered. The injected text is
+	// the composed nonce-bearing relay text.
+	inject := task687Text(26499, text)
 	markerFile := filepath.Join(dir, "marker.txt")
-	if err := os.WriteFile(markerFile, []byte(markerFor(text)), 0600); err != nil {
+	if err := os.WriteFile(markerFile, []byte("❯ "+inject), 0600); err != nil {
 		t.Fatal(err)
 	}
 	script := filepath.Join(dir, "herdr")
@@ -960,7 +962,7 @@ func TestIdleWakeAdversarialLabelRemainsDataAtShellBoundary(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
-	if !defaultHubRelayInject(context.Background(), "workspace:owner", text) {
+	if !defaultHubRelayInject(context.Background(), "workspace:owner", inject) {
 		t.Fatal("synthetic herdr fixture rejected the data argument")
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {

@@ -39,8 +39,16 @@ var task626Transcript = []string{
 
 const task626Text = "(같은 내용이 두 번 보이면 재실행 금지) [report] t312-verify :: round 3 ready"
 
+// task626InjectText is the nonce-bearing composed text deliver() injects for
+// one held row whose body is task626Text (#687).
+var task626InjectText = task687Text(62600, task626Text)
+
 // task626ClaudeEmpty is claude's empty composer, the usual pre-paste read.
 var task626ClaudeEmpty = task626Claude(task626Transcript, "❯")
+
+// task626TranscriptOnly is the transcript without a composer -- what the
+// recent-unwrapped source shows for a text that was never submitted.
+var task626TranscriptOnly = strings.Join(task626Transcript, "\n")
 
 // devin screens: its idle composer, the live queue capture, and a queue that
 // already holds someone else's message.
@@ -130,84 +138,98 @@ func task626FakeHerdr(t *testing.T, harness string, reads []string) func() strin
 }
 
 // The suggestion-in-composer cases: every one of them got a return keypress
-// before #626. None may now, and none may be re-injected either. Each read
-// list starts with the pre-paste read.
+// before #626. None may now, and none may be re-injected either. Since #683
+// each inject's reads are a presend visible/recent-unwrapped pair before the
+// prompt and a postsend pair after it, so each list is
+// {presend visible, presend unwrapped, postsend visible, postsend
+// unwrapped}.
 func TestTask626ForeignComposerGetsNoReturn(t *testing.T) {
 	chipEcho := append(append([]string{}, task626Transcript...), "❯ [Pasted text #1 +40 lines]", "")
 	foreignChip := task626Claude(task626Transcript, "❯ [Pasted text #1 +5 lines]")
 	cases := []struct {
-		name  string
-		reads []string
-		wants string
+		name    string
+		reads   []string
+		outcome relayInjectOutcome
+		wants   string
 	}{
-		// A paste chip anywhere on screen classifies composer_residue, even
-		// when the composer itself holds only the suggestion.
-		{"chip outside the composer, suggestion inside", []string{task626Claude(chipEcho, task626Phantom), task626Claude(chipEcho, task626Phantom)}, "return_withheld:composer_foreign"},
-		// herdr pasted after a draft and its Enter did not take: the marker is
-		// in the composer, next to text this inject did not type.
-		{"paste appended to a draft", []string{task626Claude(task626Transcript, task626Phantom), task626Claude(task626Transcript, task626Phantom+" "+task626Text)}, "return_withheld:composer_foreign"},
-		// claude was busy and queued the text; the composer still shows a draft.
-		{"queued with a draft in the composer", []string{task626ClaudeEmpty, task626Claude([]string{"Press up to edit queued messages", ""}, task626Phantom)}, "return_withheld:composer_foreign"},
-		// Someone else's paste chip sat in the composer before the paste, and
-		// the read right after the paste still shows only that chip.
-		{"a foreign chip that was there before the paste", []string{foreignChip, foreignChip}, "return_withheld:composer_chip_unowned"},
+		// A paste chip in the transcript is not this inject's pending paste;
+		// the composer holds only the suggestion. Nothing proves the text
+		// landed, and a composer holding other text means it may be queued
+		// behind it.
+		{"chip outside the composer, suggestion inside", []string{task626Claude(chipEcho, task626Phantom), "", task626Claude(chipEcho, task626Phantom)}, relayInjectMaybeInPane, "unproven:composer_pending"},
+		// herdr pasted after a draft and its Enter did not take: this
+		// inject's nonce-bearing text is in the composer, next to text it
+		// did not type.
+		{"paste appended to a draft", []string{task626Claude(task626Transcript, task626Phantom), "", task626Claude(task626Transcript, task626Phantom+" "+task626InjectText)}, relayInjectMaybeInPane, "return_withheld:composer_foreign"},
+		// claude was busy and queued the text; the composer still shows a
+		// draft. #683: the queue banner is landed -- the harness's queue
+		// submits the message itself. #687: the banner counts only with
+		// this row's nonce on the transcript.
+		{"queued with a draft in the composer", []string{task626ClaudeEmpty, "", task626Claude([]string{"Press up to edit queued messages", "❯ " + task626InjectText, ""}, task626Phantom)}, relayInjectQueued, "queued_banner"},
+		// Someone else's paste chip sat in the composer before this inject
+		// ran at all: the presend read already shows it, so nothing is
+		// pasted and the unowned chip earns no keypress.
+		{"a foreign chip that was there before the paste", []string{foreignChip, ""}, relayInjectMaybeInPane, "presend:return_withheld:composer_chip_unowned"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := task626FakeHerdr(t, "claude", tc.reads)
-			result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
-			if result.Outcome != relayInjectMaybeInPane || result.Evidence != tc.wants {
-				t.Fatalf("result=%+v, want maybe-in-pane %q", result, tc.wants)
+			result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626InjectText, nil)
+			if result.Outcome != tc.outcome || result.Evidence != tc.wants {
+				t.Fatalf("result=%+v, want outcome %d %q", result, tc.outcome, tc.wants)
 			}
-			// maybe-in-pane returns before the second harness lookup.
-			if got := calls(); got != "get,read,prompt,read" {
-				t.Fatalf("herdr calls = %q, want get,read,prompt,read (no send-keys)", got)
+			if got := calls(); strings.Contains(got, "send-keys") {
+				t.Fatalf("return sent: %q", got)
 			}
 		})
 	}
 }
 
-// A composer taller than the 10-line classification read: the text is still
-// pending in it, the read shows neither its top divider nor the marker, and
-// the verdict is unproven. That must not be a retry -- a re-inject would
-// paste after the pending text.
+// A composer taller than the old 10-line classification read: the text is
+// still pending in it, and the verdict is never a retry -- a re-inject
+// would paste after the pending text. Since #683 the 60-line visible read
+// locates a moderately tall composer and proves the residue itself; past
+// the window it is unproven, which is still may-be-in-pane, not a retry.
 func TestTask626PendingTallComposerIsNotRetried(t *testing.T) {
-	composer := []string{"❯ " + task626Text}
+	composer := []string{"❯ " + task626InjectText}
 	for i := 0; i < 14; i++ {
 		composer = append(composer, fmt.Sprintf("  continuation line %d of the same pending text", i))
 	}
 	tall := task626Claude(task626Transcript, composer...)
-	calls := task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, tall})
-	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil)
-	if result.Outcome != relayInjectMaybeInPane || result.Evidence != "unproven:composer_pending" {
-		t.Fatalf("result=%+v, want maybe-in-pane unproven:composer_pending", result)
+	calls := task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, "", tall, task626TranscriptOnly})
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626InjectText, nil)
+	if result.Outcome != relayInjectMaybeInPane || result.Evidence != "return_withheld:composer_foreign" {
+		t.Fatalf("result=%+v, want maybe-in-pane return_withheld:composer_foreign", result)
 	}
-	if got := calls(); got != "get,read,prompt,read,read" {
-		t.Fatalf("herdr calls = %q, want get,read,prompt,read,read", got)
+	if got := calls(); got != "get,read,read,prompt,read,read" {
+		t.Fatalf("herdr calls = %q, want get,read,read,prompt,read,read", got)
 	}
-	// Taller than the 60-line window too, or a failed wider read: neither
-	// shows the composer empty, so neither is a retry.
+	// Taller than the 60-line window too: the visible read cannot locate the
+	// composer, and the unwrapped transcript -- which never carries a pending
+	// composer -- does not echo the text. Still not a retry.
 	for i := 0; i < 70; i++ {
 		composer = append(composer, fmt.Sprintf("  more pending line %d", i))
 	}
-	calls = task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, task626Claude(task626Transcript, composer...)})
+	calls = task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, "", task626Claude(task626Transcript, composer...), task626TranscriptOnly})
 	if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil); result.Outcome != relayInjectMaybeInPane || result.Evidence != "unproven:composer_unlocated" {
 		t.Fatalf("composer over 60 lines: result=%+v, want maybe-in-pane unproven:composer_unlocated", result)
 	}
-	if got := calls(); got != "get,read,prompt,read,read" {
+	if got := calls(); got != "get,read,read,prompt,read,read" {
 		t.Fatalf("herdr calls = %q", got)
 	}
-	// Unproven with the composer seen empty is still a retry (#264 R1).
-	calls = task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, "nothing relevant", task626ClaudeEmpty})
-	if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil); result.Outcome != relayInjectRetryable {
-		t.Fatalf("empty composer: result=%+v, want retryable", result)
+	// #683: unproven with the composer seen empty is also may-be-in-pane --
+	// the text may have been submitted and scrolled past both reads, so the
+	// durable row stays undelivered for a hub replay instead of re-injecting.
+	calls = task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, "", task626ClaudeEmpty, task626TranscriptOnly})
+	if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil); result.Outcome != relayInjectMaybeInPane || result.Evidence != "unproven:composer_empty" {
+		t.Fatalf("empty composer: result=%+v, want maybe-in-pane unproven:composer_empty", result)
 	}
-	if got := calls(); got != "get,read,prompt,read,read,get" {
+	if got := calls(); got != "get,read,read,prompt,read,read" {
 		t.Fatalf("herdr calls = %q", got)
 	}
 }
 
-// A wider read that fails proves nothing either.
+// A postsend read that fails proves nothing either.
 func TestTask626FailedPendingReadIsNotRetried(t *testing.T) {
 	dir := t.TempDir()
 	count := filepath.Join(dir, "count")
@@ -218,8 +240,8 @@ func TestTask626FailedPendingReadIsNotRetried(t *testing.T) {
 		"  case $n in 1) printf '%b\\n' \"" + strings.ReplaceAll(task626ClaudeEmpty, "\n", "\\n") + "\" ;; 2) printf '%b\\n' \"" + strings.ReplaceAll(tenLines, "\n", "\\n") + "\" ;; *) exit 1 ;; esac ;;\n" +
 		"esac\n"
 	installFakeHerdr(t, dir, script)
-	if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil); result.Outcome != relayInjectMaybeInPane || result.Evidence != "unproven:composer_unread" {
-		t.Fatalf("result=%+v, want maybe-in-pane unproven:composer_unread", result)
+	if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil); result.Outcome != relayInjectMaybeInPane || result.Evidence != "unproven:read_failed" {
+		t.Fatalf("result=%+v, want maybe-in-pane unproven:read_failed", result)
 	}
 }
 
@@ -227,33 +249,37 @@ func TestTask626FailedPendingReadIsNotRetried(t *testing.T) {
 // composer that still holds only this text (herdr's Enter not rendered yet)
 // gets exactly one return.
 func TestTask626NormalInjectStillSubmits(t *testing.T) {
-	echo := task626Claude(append(append([]string{}, task626Transcript...), "❯ "+task626Text, "", "⏺ Reading the report."), "❯")
+	// #687: the pane proves the row by echoing its nonce; the injected text
+	// is the composed nonce-bearing text.
+	text := task626InjectText
+	echo := task626Claude(append(append([]string{}, task626Transcript...), "❯ "+text, "", "⏺ Reading the report."), "❯")
+	echoUnwrapped := strings.Join(append(append([]string{}, task626Transcript...), "❯ "+text), "\n")
 	t.Run("echo, no keypress", func(t *testing.T) {
-		calls := task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, echo})
-		if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil); result.Outcome != relayInjectDelivered {
+		calls := task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, task626TranscriptOnly, echo, echoUnwrapped})
+		if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil); result.Outcome != relayInjectDelivered {
 			t.Fatalf("result=%+v, want delivered", result)
 		}
-		if got := calls(); got != "get,read,prompt,read,get" {
+		if got := calls(); got != "get,read,read,prompt,read,read,get" {
 			t.Fatalf("herdr calls = %q", got)
 		}
 	})
 	t.Run("own text in the composer, one return, then echo", func(t *testing.T) {
-		residue := task626Claude(task626Transcript, "❯ (같은 내용이 두 번 보이면 재실행 금지) [report]", "  t312-verify :: round 3 ready")
-		calls := task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, residue, echo})
-		if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil); result.Outcome != relayInjectDelivered {
+		residue := task626Claude(task626Transcript, "❯ "+relayNoncesIn(task626InjectText)[0]+" (같은 내용이 두 번 보이면 재실행 금지) [report]", "  t312-verify :: round 3 ready")
+		calls := task626FakeHerdr(t, "claude", []string{task626ClaudeEmpty, task626TranscriptOnly, residue, task626TranscriptOnly, echo, echoUnwrapped})
+		if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil); result.Outcome != relayInjectDelivered {
 			t.Fatalf("result=%+v, want delivered", result)
 		}
-		if got := calls(); got != "get,read,prompt,read,send-keys,read,get" {
+		if got := calls(); got != "get,read,read,prompt,read,read,send-keys,read,read,get" {
 			t.Fatalf("herdr calls = %q", got)
 		}
 	})
 	t.Run("own paste chip in the composer, one return, then echo", func(t *testing.T) {
 		chip := task626Claude(task626Transcript, "❯ [Pasted text #1 +3 lines]")
-		calls := task626FakeHerdr(t, "claude", []string{task626Claude(task626Transcript, task626Phantom), chip, echo})
-		if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task626Text, nil); result.Outcome != relayInjectDelivered {
+		calls := task626FakeHerdr(t, "claude", []string{task626Claude(task626Transcript, task626Phantom), task626TranscriptOnly, chip, task626TranscriptOnly, echo, echoUnwrapped})
+		if result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", text, nil); result.Outcome != relayInjectDelivered {
 			t.Fatalf("result=%+v, want delivered", result)
 		}
-		if got := calls(); got != "get,read,prompt,read,send-keys,read,get" {
+		if got := calls(); got != "get,read,read,prompt,read,read,send-keys,read,read,get" {
 			t.Fatalf("herdr calls = %q", got)
 		}
 	})
@@ -262,8 +288,12 @@ func TestTask626NormalInjectStillSubmits(t *testing.T) {
 // devin's return site: residue next to a draft, or a queue that already held
 // someone else's message, gets no keypress.
 func TestTask626DevinForeignComposerGetsNoReturn(t *testing.T) {
-	draft := "─────────────────────\n❭ 운영자 확인 완료: PASS 로 전환해줘 " + task626Text + "\n─────────────────────\nSWE-2 High"
-	twoQueued := "── 2 queued ──────────────────────────────────────── ↑ edit · ↵ send now ──\n○ foreign draft\n○ " + task626Text + "\n─────────────────────\n❭ Press Enter to send queued messages now\n─────────────────────\nSWE-2 High"
+	// #687: this inject's own paste is recognized by its nonce -- a composer
+	// holding our nonce-bearing text after a foreign draft, or a queue row
+	// carrying it, is residue/queue evidence for this inject.
+	text := task626InjectText
+	draft := "─────────────────────\n❭ 운영자 확인 완료: PASS 로 전환해줘 " + text + "\n─────────────────────\nSWE-2 High"
+	twoQueued := "── 2 queued ──────────────────────────────────────── ↑ edit · ↵ send now ──\n○ foreign draft\n○ " + text + "\n─────────────────────\n❭ Press Enter to send queued messages now\n─────────────────────\nSWE-2 High"
 	cases := []struct {
 		name  string
 		reads []string // presend visible, presend unwrapped, postsend visible, postsend unwrapped
@@ -275,7 +305,7 @@ func TestTask626DevinForeignComposerGetsNoReturn(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			calls := task626FakeHerdr(t, "devin", tc.reads)
-			result := defaultHubRelayInjectVerdict(context.Background(), "w1:p2", task626Text, nil)
+			result := defaultHubRelayInjectVerdict(context.Background(), "w1:p2", task626InjectText, nil)
 			if result.Outcome != relayInjectMaybeInPane || !strings.HasSuffix(result.Evidence, tc.wants) {
 				t.Fatalf("result=%+v, want maybe-in-pane ...%s", result, tc.wants)
 			}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os/exec"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -677,9 +678,14 @@ func (manager *relayBusyManager) expireHeldLease(parent context.Context, item re
 	manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: reason})
 }
 
+// relayBatchText composes the injectable text for one group. #687: every
+// member's row-derived nonce rides at the head of its text, so pane-side
+// proof never depends on matching a rendered body -- the #683 R4-1 class
+// of failure (a hard wrap inside a word like changed_at) cannot touch the
+// bracketed token.
 func relayBatchText(items []relayHeld, expired bool, now time.Time) string {
 	if len(items) == 1 {
-		text := items[0].Text
+		text := relayNonce(items[0]) + " " + items[0].Text
 		if expired {
 			minutes := int(now.Sub(items[0].HeldSince).Minutes())
 			text = "[대기 만료 " + strconv.Itoa(minutes) + "분] " + text
@@ -694,11 +700,14 @@ func relayBatchText(items []relayHeld, expired bool, now time.Time) string {
 		builder.WriteString(" ")
 		builder.WriteString(strconv.Itoa(index + 1))
 		builder.WriteString(") ")
+
 		if expired {
 			builder.WriteString("[대기 만료 ")
 			builder.WriteString(strconv.Itoa(int(now.Sub(item.HeldSince).Minutes())))
 			builder.WriteString("분] ")
 		}
+		builder.WriteString(relayNonce(item))
+		builder.WriteString(" ")
 		builder.WriteString(item.Text)
 	}
 	return builder.String()
@@ -774,20 +783,39 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		if result.Outcome == relayInjectQueued {
 			reason = "queued " + reason
 		}
-		if len(group) > 1 {
-			ids := make([]int64, 0, len(group))
-			for _, item := range group {
+		// #687: a batch is delivered per member, on each member's own nonce.
+		// A verdict that names no proven nonces (a fixture stub, or the
+		// no-submission-evidence carve-out) applies to the whole group; a
+		// member whose own nonce was not seen is unconfirmed, not delivered.
+		proven := func(item relayHeld) bool {
+			return result.Proven == nil || slices.Contains(result.Proven, relayNonce(item))
+		}
+		var landed []relayHeld
+		for _, item := range group {
+			if !proven(item) {
+				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane nonce_missing " + result.Evidence), OriginalEventID: item.EventID})
+				manager.stopWithoutRetry(item)
+				continue
+			}
+			landed = append(landed, item)
+		}
+		if len(landed) > 1 {
+			ids := make([]int64, 0, len(landed))
+			for _, item := range landed {
 				ids = append(ids, item.EventID)
 			}
-			manager.emit("relay.batched", relayBatchedPayload{Pane: group[0].Pane, Lane: group[0].Lane, EventIDs: ids})
+			manager.emit("relay.batched", relayBatchedPayload{Pane: landed[0].Pane, Lane: landed[0].Lane, EventIDs: ids})
 		}
-		for _, item := range group {
+		for _, item := range landed {
 			if store := manager.client.relayStore(); store != nil && item.EventID != 0 {
 				_, _ = store.DeleteRelayHeld(parent, item.EventID)
 			}
-			released := relayReleasedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, FinalText: text, Edited: item.Edited, OriginalEventID: item.EventID}
+			// final_text is the row's own text, not the nonce-prefixed
+			// batch blob that was typed: #687 delivers per member, and the
+			// row text is what the 24KiB wire bound was validated against.
+			released := relayReleasedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, FinalText: item.Text, Edited: item.Edited, OriginalEventID: item.EventID}
 			manager.emit("relay.released", released)
-			manager.emit("relay.delivered", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(reason), FinalText: text, Edited: item.Edited, OriginalEventID: item.EventID})
+			manager.emit("relay.delivered", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(reason), FinalText: item.Text, Edited: item.Edited, OriginalEventID: item.EventID})
 		}
 	}
 }
