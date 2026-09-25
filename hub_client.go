@@ -610,16 +610,17 @@ func relayInjectForHarness(ctx context.Context, pane, harness, text string, memb
 	// proven by the postsend nonce; what presend still checks is only the
 	// composer, where a pending paste would be mangled by a second one.
 	presend := relayReadPane(ctx, pane)
-	if !presend.anyOK {
-		// Both reads failed: nothing about the pane is known, and typing
-		// blind is exactly how a replay of a maybe-in-pane row duplicates.
-		// Same fail-closed shape as devin's presend:read_failed.
+	if !presend.visibleOK {
+		// The composer is located only in the visible read, so without it
+		// the one presend check cannot run -- and typing blind is exactly
+		// how a pending paste gets a second copy pasted on top of it
+		// (PR 87 CodeRabbit). Same fail-closed shape as devin's
+		// presend:read_failed.
 		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "presend:unproven:read_failed"}
 	}
-	// A failed visible read leaves the presend banner state unknown, which
-	// counts as "already queued" -- the postsend banner then proves nothing
-	// either (tester N-r2-3).
-	presendQueued := !presend.visibleOK || relayQueuedBanner(harness, presend.visible)
+	// A queue banner already up before this paste is an older queue, so it
+	// excludes the queued rule for the postsend reads (tester N-r2-3).
+	presendQueued := relayQueuedBanner(harness, presend.visible)
 	if result, _, _ := relayClassifyReads(harness, presend, text, false, presendQueued); result == "composer_residue" {
 		// An earlier attempt's paste may still be sitting in the composer.
 		// The return-once contract submits it only when the composer

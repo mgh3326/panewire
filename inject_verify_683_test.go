@@ -491,6 +491,28 @@ func TestTask683UnreadablePresendNeverTypes(t *testing.T) {
 	}
 }
 
+// The composer is located only in the visible read, so a presend with the
+// visible read down -- even when recent-unwrapped still answers -- cannot
+// rule out a pending paste, and typing blind could paste a second copy on
+// top of it. Fail closed, same shape as both reads failing.
+func TestTask687VisibleDownPresendNeverTypes(t *testing.T) {
+	dir := t.TempDir()
+	log := filepath.Join(dir, "calls")
+	script := "#!/bin/sh\necho \"$2\" >> \"" + log + "\"\ncase \"$2\" in\n" +
+		"get) echo '{\"result\":{\"agent\":{\"agent\":\"claude\"}}}' ;;\n" +
+		"read) case \" $*\" in *recent-unwrapped*) echo '❯ unrelated transcript' ;; *) exit 1 ;; esac ;;\n" +
+		"esac\n"
+	installFakeHerdr(t, dir, script)
+	result := defaultHubRelayInjectVerdict(context.Background(), "w1:p1", task687Text(68052, task626Text), nil)
+	if result.Outcome != relayInjectMaybeInPane || result.Evidence != "presend:unproven:read_failed" {
+		t.Fatalf("result=%+v, want maybe-in-pane presend:unproven:read_failed", result)
+	}
+	b, _ := os.ReadFile(log)
+	if strings.Contains(string(b), "prompt") {
+		t.Fatalf("typed with the composer unreadable: %s", b)
+	}
+}
+
 // A prompt herdr rejected is the one failure that stays retryable: nothing
 // was typed, so re-injecting cannot duplicate. deliver() re-arms with
 // reason retry, which the hub's decodeRelayHeldPayload must accept (AC3).
