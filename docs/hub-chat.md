@@ -6,6 +6,8 @@ The hub serves one operator-desk conversation. It reads desk messages and questi
 
 Set --chat-desk-lane to the destination lane when --chat-env or --handoffkeep-env enables the chat store. The lane must be explicit and valid; hub startup fails when it is absent. Keep this value aligned with the desk question lane and the lanes route file. A question with a different lane or conversation is rejected before a reply is stored. The hub never reads live settings to infer the destination. --chat-env is an optional separate mode-0600 handoffkeep credential file; it defaults to --handoffkeep-env. The chat client has its own five-second timeout and connection pool.
 
+Question ownership checks use handoffkeep GET /v1/chat/questions/{id}. This direct lookup retains old questions even when they are outside the hub's recent question page; the list endpoint's after_id cursor requires a complete Q ID.
+
 Deploy the extended handoffkeep chat API before this hub version. An older store can reject the new request fields or return a message without conversation, source, event, and relation data. The hub reports chat_store_incompatible instead of accepting a write that loses links. Older hub and hook clients can continue to use the new store's legacy behavior. During the interval before the new hook deploys, desk questions from the old hook appear as standalone question cards; no desk message body is inferred.
 
 ## Browser API

@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -203,10 +204,20 @@ func TestHubChatPhase1OldStoreFailsExplicitly(t *testing.T) {
 
 func TestHubChatPhase1QuestionLookupHandlesVariableWidthIDs(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.URL.Query().Get("after_id") != "Q-20260928-" {
-			t.Errorf("lookup cursor=%q", request.URL.Query().Get("after_id"))
+		if request.Method != http.MethodGet || request.Header.Get("Authorization") != "Bearer test-token" || request.URL.RawQuery != "" {
+			t.Errorf("lookup request=%s %s auth=%q", request.Method, request.URL.String(), request.Header.Get("Authorization"))
 		}
-		_, _ = writer.Write([]byte(`{"questions":[{"id":"Q-20260928-001","conversation_id":"operator-desk","lane":"lane-a","body":"other"},{"id":"Q-20260928-01","conversation_id":"operator-desk","lane":"lane-a","body":"wanted"}]}`))
+		switch request.URL.Path {
+		case "/v1/chat/questions/Q-20260928-01":
+			_, _ = writer.Write([]byte(`{"id":"Q-20260928-01","conversation_id":"operator-desk","lane":"lane-a","body":"wanted"}`))
+		case "/v1/chat/questions/Q-20260928-02":
+			writer.WriteHeader(http.StatusNotFound)
+		case "/v1/chat/questions/Q-20260928-03":
+			_, _ = writer.Write([]byte(`{"id":"Q-20260928-04","conversation_id":"operator-desk","lane":"lane-a","body":"wrong"}`))
+		default:
+			t.Errorf("unexpected lookup path=%s", request.URL.Path)
+			writer.WriteHeader(http.StatusNotFound)
+		}
 	}))
 	defer server.Close()
 	store, err := newHandoffkeepChatStore(hubHandoffkeepEnv{URL: server.URL, Token: "test-token"}, server.Client())
@@ -216,5 +227,13 @@ func TestHubChatPhase1QuestionLookupHandlesVariableWidthIDs(t *testing.T) {
 	question, found, err := store.GetChatQuestion(context.Background(), "Q-20260928-01")
 	if err != nil || !found || question.Body != "wanted" {
 		t.Fatalf("question=%+v found=%v err=%v", question, found, err)
+	}
+	_, found, err = store.GetChatQuestion(context.Background(), "Q-20260928-02")
+	if err != nil || found {
+		t.Fatalf("missing question found=%v err=%v", found, err)
+	}
+	_, found, err = store.GetChatQuestion(context.Background(), "Q-20260928-03")
+	if !errors.Is(err, errChatStoreIncompatible) || found {
+		t.Fatalf("mismatched response found=%v err=%v", found, err)
 	}
 }

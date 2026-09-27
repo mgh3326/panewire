@@ -283,29 +283,21 @@ func (c *handoffkeepChatStore) ListChatQuestions(ctx context.Context, state, aft
 }
 
 func (c *handoffkeepChatStore) GetChatQuestion(ctx context.Context, id string) (ChatQuestion, bool, error) {
-	// There is no single-question GET in the shared contract. Walk this
-	// question's date instead of guessing a lexical predecessor: IDs with
-	// extra digits can sort between a truncated prefix and the target.
-	after := id[:11]
-	for pageNumber := 0; pageNumber < hubChatQuestionWalkPages; pageNumber++ {
-		page, err := c.ListChatQuestions(ctx, "", after, hubChatPageLimit)
-		if err != nil {
-			return ChatQuestion{}, false, err
-		}
-		for _, question := range page {
-			if question.ID == id {
-				return question, true, nil
-			}
-			if question.ID > id {
-				return ChatQuestion{}, false, nil
-			}
-			after = question.ID
-		}
-		if len(page) < hubChatPageLimit {
-			return ChatQuestion{}, false, nil
-		}
+	status, payload, err := c.do(ctx, http.MethodGet, c.endpoint("/v1/chat/questions/"+url.PathEscape(id)), nil)
+	if err != nil {
+		return ChatQuestion{}, false, err
 	}
-	return ChatQuestion{}, false, errors.New("chat question lookup exceeded page bound")
+	if status == http.StatusNotFound {
+		return ChatQuestion{}, false, nil
+	}
+	if status != http.StatusOK {
+		return ChatQuestion{}, false, chatStoreStatusError("question get", status)
+	}
+	var question ChatQuestion
+	if json.Unmarshal(payload, &question) != nil || question.ID != id || question.ConversationID != hubChatConversationID {
+		return ChatQuestion{}, false, errChatStoreIncompatible
+	}
+	return question, true, nil
 }
 
 func (c *handoffkeepChatStore) CreateChatMessageExtended(ctx context.Context, in ChatMessageCreate) (ChatMessage, bool, error) {
