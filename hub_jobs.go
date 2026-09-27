@@ -432,12 +432,27 @@ func (h *HubServer) orphanedJobs() []hubJobEventPayload {
 // operator registry and the orphan view. The caller must hold h.mu.
 func (h *HubServer) activeJobRecordsLocked() []*hubJobRecord {
 	active := make([]*hubJobRecord, 0, len(h.jobs))
+	now := h.now()
 	for _, job := range h.jobs {
-		if !job.Completed {
-			active = append(active, job)
+		if job.Completed || h.jobRecordStaleLocked(job, now) {
+			continue
 		}
+		active = append(active, job)
 	}
 	return active
+}
+
+// jobRecordStaleLocked reports whether a never-ended job has gone stale
+// (#770): its node stopped heartbeating it — a pane-dead job leaves the
+// node's local scan — and the last hub-side observation is older than
+// hubJobStaleAge. Orphaned jobs are never stale: a lost node is a distinct,
+// visible state the operator must still see and reassign. The record is
+// retained; it is only omitted from the active set.
+func (h *HubServer) jobRecordStaleLocked(job *hubJobRecord, now time.Time) bool {
+	if job.Completed || job.Orphaned || job.LastSeen.IsZero() {
+		return false
+	}
+	return now.Sub(job.LastSeen) >= hubJobStaleAge()
 }
 
 type hubConsoleJob struct {

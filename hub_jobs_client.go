@@ -24,6 +24,21 @@ func hubJobActiveMaxAge() time.Duration {
 	return defaultHubJobActiveMaxAge
 }
 
+const defaultHubJobStaleAge = 24 * time.Hour
+
+// hubJobStaleAge is the "silent and pane-absent" threshold for stale jobs
+// (#770): a job record that carries no terminal event only counts as active
+// while something still vouches for it — a live pane at the node, or a fresh
+// LastSeen at the hub. PANEWIRE_JOB_STALE_AGE accepts a Go duration and
+// defaults to 24h; it is deliberately shorter than hubJobActiveMaxAge, which
+// bounds replay of records that still have a live pane behind them.
+func hubJobStaleAge() time.Duration {
+	if value, err := time.ParseDuration(os.Getenv("PANEWIRE_JOB_STALE_AGE")); err == nil && value > 0 {
+		return value
+	}
+	return defaultHubJobStaleAge
+}
+
 type hubScannedJob struct {
 	job       HubActiveJob
 	lastEvent time.Time
@@ -504,6 +519,13 @@ func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 		}
 	}
 	if !validHubActiveJob(active) || claimTime.Before(time.Now().Add(-hubJobActiveMaxAge())) {
+		return hubScannedJob{}, false
+	}
+	// #770: a job that never recorded a pane has no liveness cross-check at
+	// all — a pane-named job is dropped by filterActiveJobsByPane the moment
+	// its pane dies, but a paneless claim only has event freshness. Past the
+	// stale age it leaves the active set; the local records are untouched.
+	if paneID == "" && !lastEvent.IsZero() && lastEvent.Before(time.Now().Add(-hubJobStaleAge())) {
 		return hubScannedJob{}, false
 	}
 	active.Pane = paneID
