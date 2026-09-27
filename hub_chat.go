@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -37,11 +38,12 @@ const (
 	// chat backend can never exhaust the hub's sockets.
 	hubChatMaxConnsPerHost = 8
 	// hubChatMaxBodyBytes mirrors handoffkeep's store.MaxBytes.
-	hubChatMaxBodyBytes  = 64 << 10
-	hubChatListLimit     = 200
-	hubChatRequestSlop   = 4096
-	hubChatOperatorName  = "operator"
-	hubChatTerminalState = "delivered"
+	hubChatMaxBodyBytes   = 64 << 10
+	hubChatListLimit      = 200
+	hubChatRequestSlop    = 4096
+	hubChatOperatorName   = "operator"
+	hubChatConversationID = "operator-desk"
+	hubChatTerminalState  = "delivered"
 	// hubChatPageLimit is the store's maximum page size; tail fetches page
 	// through a window at this size rather than a single oldest-first page.
 	hubChatPageLimit = 1000
@@ -61,35 +63,61 @@ const (
 )
 
 var chatQuestionIDPattern = regexp.MustCompile(`^Q-[0-9]{8}-[0-9]{2,}$`)
+var errChatStoreIncompatible = errors.New("chat store does not support the extended chat contract")
 
 // ChatQuestion is handoffkeep's durable desk question, mirrored field for field.
 type ChatQuestion struct {
-	ID         string     `json:"id"`
-	Lane       string     `json:"lane"`
-	Body       string     `json:"body"`
-	State      string     `json:"state"`
-	CreatedAt  time.Time  `json:"created_at"`
-	UpdatedAt  time.Time  `json:"updated_at"`
-	ResolvedAt *time.Time `json:"resolved_at"`
+	ID             string     `json:"id"`
+	ConversationID string     `json:"conversation_id"`
+	Lane           string     `json:"lane"`
+	Body           string     `json:"body"`
+	State          string     `json:"state"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+	ResolvedAt     *time.Time `json:"resolved_at"`
 }
 
 // ChatMessage is handoffkeep's durable operator/desk message, mirrored field
 // for field. Messages deliberately carry no lane: the delivery target is a
 // property of the relay attempt, not of the record.
 type ChatMessage struct {
-	ID          int64      `json:"id"`
-	Author      string     `json:"author"`
-	Body        string     `json:"body"`
-	RelayState  string     `json:"relay_state"`
-	CreatedAt   time.Time  `json:"created_at"`
-	DeliveredAt *time.Time `json:"delivered_at"`
+	ID                int64                  `json:"id"`
+	ConversationID    string                 `json:"conversation_id"`
+	Author            string                 `json:"author"`
+	Body              string                 `json:"body"`
+	SourceChannel     string                 `json:"source_channel"`
+	OriginEventID     string                 `json:"origin_event_id"`
+	OriginTimestamp   time.Time              `json:"origin_timestamp"`
+	QuestionRelations []ChatQuestionRelation `json:"question_relations"`
+	RelayState        string                 `json:"relay_state"`
+	CreatedAt         time.Time              `json:"created_at"`
+	DeliveredAt       *time.Time             `json:"delivered_at"`
+}
+
+type ChatQuestionRelation struct {
+	QuestionID   string `json:"question_id"`
+	RelationKind string `json:"relation_kind"`
+	QuestionText string `json:"question_text"`
+}
+
+type ChatMessageCreate struct {
+	ConversationID       string               `json:"conversation_id"`
+	Author               string               `json:"author"`
+	Body                 string               `json:"body"`
+	SourceChannel        string               `json:"source_channel"`
+	OriginEventID        string               `json:"origin_event_id"`
+	OriginTimestamp      time.Time            `json:"origin_timestamp"`
+	Questions            []ChatQuestionUpsert `json:"questions"`
+	QuestionIDs          []string             `json:"question_ids"`
+	ProcessedQuestionIDs []string             `json:"processed_question_ids"`
 }
 
 // ChatQuestionUpsert is the producer's question write. The id is the upsert key.
 type ChatQuestionUpsert struct {
-	ID   string `json:"id"`
-	Lane string `json:"lane"`
-	Body string `json:"body"`
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	Lane           string `json:"lane"`
+	Body           string `json:"body"`
 }
 
 // ChatStore hides chat persistence behind an interface so the storage backend
@@ -98,7 +126,9 @@ type ChatStore interface {
 	UpsertChatQuestion(ctx context.Context, in ChatQuestionUpsert) (ChatQuestion, bool, error)
 	TransitionChatQuestion(ctx context.Context, id, to string) (ChatQuestion, error)
 	ListChatQuestions(ctx context.Context, state, afterID string, limit int) ([]ChatQuestion, error)
+	GetChatQuestion(ctx context.Context, id string) (ChatQuestion, bool, error)
 	CreateChatMessage(ctx context.Context, author, body string) (ChatMessage, error)
+	CreateChatMessageExtended(ctx context.Context, in ChatMessageCreate) (ChatMessage, bool, error)
 	MarkChatMessageDelivered(ctx context.Context, id int64) (ChatMessage, error)
 	MarkChatMessageFailed(ctx context.Context, id int64) (ChatMessage, error)
 	ListChatMessages(ctx context.Context, undelivered bool, afterID int64, limit int) ([]ChatMessage, error)
@@ -192,6 +222,9 @@ func (c *handoffkeepChatStore) UpsertChatQuestion(ctx context.Context, in ChatQu
 	if json.Unmarshal(payload, &question) != nil || question.ID == "" {
 		return ChatQuestion{}, false, errors.New("chat store returned an unusable question")
 	}
+	if question.ConversationID == "" {
+		return ChatQuestion{}, false, errChatStoreIncompatible
+	}
 	return question, status == http.StatusCreated, nil
 }
 
@@ -212,6 +245,9 @@ func (c *handoffkeepChatStore) TransitionChatQuestion(ctx context.Context, id, t
 	var question ChatQuestion
 	if json.Unmarshal(payload, &question) != nil || question.ID == "" {
 		return ChatQuestion{}, errors.New("chat store returned an unusable question")
+	}
+	if question.ConversationID == "" {
+		return ChatQuestion{}, errChatStoreIncompatible
 	}
 	return question, nil
 }
@@ -238,7 +274,82 @@ func (c *handoffkeepChatStore) ListChatQuestions(ctx context.Context, state, aft
 	if json.Unmarshal(payload, &result) != nil {
 		return nil, errors.New("chat store returned an unusable question list")
 	}
+	for _, question := range result.Questions {
+		if question.ConversationID == "" {
+			return nil, errChatStoreIncompatible
+		}
+	}
 	return result.Questions, nil
+}
+
+func (c *handoffkeepChatStore) GetChatQuestion(ctx context.Context, id string) (ChatQuestion, bool, error) {
+	// There is no single-question GET in the shared contract. Walk this
+	// question's date instead of guessing a lexical predecessor: IDs with
+	// extra digits can sort between a truncated prefix and the target.
+	after := id[:11]
+	for pageNumber := 0; pageNumber < hubChatQuestionWalkPages; pageNumber++ {
+		page, err := c.ListChatQuestions(ctx, "", after, hubChatPageLimit)
+		if err != nil {
+			return ChatQuestion{}, false, err
+		}
+		for _, question := range page {
+			if question.ID == id {
+				return question, true, nil
+			}
+			if question.ID > id {
+				return ChatQuestion{}, false, nil
+			}
+			after = question.ID
+		}
+		if len(page) < hubChatPageLimit {
+			return ChatQuestion{}, false, nil
+		}
+	}
+	return ChatQuestion{}, false, errors.New("chat question lookup exceeded page bound")
+}
+
+func (c *handoffkeepChatStore) CreateChatMessageExtended(ctx context.Context, in ChatMessageCreate) (ChatMessage, bool, error) {
+	if in.Questions == nil {
+		in.Questions = []ChatQuestionUpsert{}
+	}
+	if in.QuestionIDs == nil {
+		in.QuestionIDs = []string{}
+	}
+	if in.ProcessedQuestionIDs == nil {
+		in.ProcessedQuestionIDs = []string{}
+	}
+	in.QuestionIDs = slices.Clone(in.QuestionIDs)
+	sort.Strings(in.QuestionIDs)
+	body, err := json.Marshal(in)
+	if err != nil {
+		return ChatMessage{}, false, errors.New("chat store request encoding failed")
+	}
+	if len(body) > hubChatMaxBodyBytes {
+		return ChatMessage{}, false, chatStoreStatusError("message create", http.StatusBadRequest)
+	}
+	status, payload, err := c.do(ctx, http.MethodPost, c.endpoint("/v1/chat/messages"), body)
+	if err != nil {
+		return ChatMessage{}, false, err
+	}
+	if status != http.StatusCreated && status != http.StatusOK {
+		if status == http.StatusBadRequest || status == http.StatusNotFound {
+			return ChatMessage{}, false, errChatStoreIncompatible
+		}
+		return ChatMessage{}, false, chatStoreStatusError("message create", status)
+	}
+	var message ChatMessage
+	if json.Unmarshal(payload, &message) != nil || message.ID < 1 || message.ConversationID != in.ConversationID || message.SourceChannel != in.SourceChannel || message.OriginEventID != in.OriginEventID {
+		return ChatMessage{}, false, errChatStoreIncompatible
+	}
+	if len(message.QuestionRelations) != len(in.QuestionIDs) {
+		return ChatMessage{}, false, errChatStoreIncompatible
+	}
+	for i, id := range in.QuestionIDs {
+		if message.QuestionRelations[i].QuestionID != id || message.QuestionRelations[i].RelationKind != "reply" || message.QuestionRelations[i].QuestionText == "" {
+			return ChatMessage{}, false, errChatStoreIncompatible
+		}
+	}
+	return message, status == http.StatusCreated, nil
 }
 
 func (c *handoffkeepChatStore) CreateChatMessage(ctx context.Context, author, body string) (ChatMessage, error) {
@@ -308,6 +419,11 @@ func (c *handoffkeepChatStore) ListChatMessages(ctx context.Context, undelivered
 	if json.Unmarshal(payload, &result) != nil {
 		return nil, errors.New("chat store returned an unusable message list")
 	}
+	for _, message := range result.Messages {
+		if message.ConversationID == "" || message.SourceChannel == "" {
+			return nil, errChatStoreIncompatible
+		}
+	}
 	return result.Messages, nil
 }
 
@@ -330,9 +446,9 @@ func (c *handoffkeepChatStore) GetChatMessage(ctx context.Context, id int64) (Ch
 // here until the relay attempt settles — and on the durable relay row once it
 // persists, which is what cold retry recovery reads after a restart.
 type chatPendingMessage struct {
-	Lane       string
-	Body       string
-	QuestionID string
+	Lane        string
+	Body        string
+	QuestionIDs []string
 	// RetryOf records the failed source row this message retries; the relay
 	// stamps it on the durable row so a later hub knows the source was
 	// already retried once.
@@ -345,13 +461,10 @@ var hubChatHTML string
 var hubChatTemplate = template.Must(template.New("hub-chat").Parse(hubChatHTML))
 
 // hubChatMessageView decorates a stored row with the hub-side retry context
-// the durable record does not carry: the target lane and the linked question.
-// The browser needs both so retry can rebuild the original attempt without
-// asking the operator to re-pick anything.
+// the durable message does not carry: the target lane and cancellation flag.
 type hubChatMessageView struct {
 	ChatMessage
-	Lane       string `json:"lane,omitempty"`
-	QuestionID string `json:"question_id,omitempty"`
+	Lane string `json:"lane,omitempty"`
 	// Cancelled distinguishes an operator close-out from a real delivery; the
 	// store records both as delivered, so the hub carries the distinction.
 	Cancelled bool `json:"cancelled,omitempty"`
@@ -419,6 +532,10 @@ func (h *HubServer) authorizeChatUIPost(writer http.ResponseWriter, request *htt
 // 400/404/409 keep their meaning, anything else upstream is 502, and an
 // unreachable store is 503.
 func (h *HubServer) writeChatStoreError(writer http.ResponseWriter, err error) {
+	if errors.Is(err, errChatStoreIncompatible) {
+		writeHubJSON(writer, http.StatusBadGateway, map[string]string{"error": "chat_store_incompatible"})
+		return
+	}
 	var httpErr *chatHTTPError
 	if errors.As(err, &httpErr) {
 		switch httpErr.status {
@@ -492,11 +609,14 @@ func (h *HubServer) handleChatData(writer http.ResponseWriter, request *http.Req
 	views := make([]hubChatMessageView, 0, len(messages))
 	h.chatMu.Lock()
 	for _, message := range messages {
+		if message.ConversationID != "" && message.ConversationID != hubChatConversationID {
+			continue
+		}
 		_, cancelled := h.chatCancelled[message.ID]
-		views = append(views, hubChatMessageView{ChatMessage: message, Lane: h.chatLaneOf[message.ID], QuestionID: h.chatQuestionOf[message.ID], Cancelled: cancelled})
+		views = append(views, hubChatMessageView{ChatMessage: message, Lane: h.chatLaneOf[message.ID], Cancelled: cancelled})
 	}
 	h.chatMu.Unlock()
-	writeHubJSON(writer, http.StatusOK, hubChatData{SchemaVersion: 1, Questions: questions, Messages: views})
+	writeHubJSON(writer, http.StatusOK, hubChatData{SchemaVersion: 2, Questions: questions, Messages: views})
 }
 
 // chatTailQuestions returns every pending question plus the recent tail of
@@ -514,8 +634,11 @@ func (h *HubServer) chatTailQuestions(ctx context.Context) ([]ChatQuestion, erro
 			return nil, err
 		}
 		for _, question := range page {
-			seen[question.ID] = question
 			after = question.ID
+			if question.ConversationID != "" && question.ConversationID != hubChatConversationID {
+				continue
+			}
+			seen[question.ID] = question
 		}
 		if len(page) < hubChatPageLimit {
 			break
@@ -531,10 +654,13 @@ func (h *HubServer) chatTailQuestions(ctx context.Context) ([]ChatQuestion, erro
 			return nil, err
 		}
 		for _, question := range page {
+			after = question.ID
+			if question.ConversationID != "" && question.ConversationID != hubChatConversationID {
+				continue
+			}
 			if _, exists := seen[question.ID]; !exists {
 				seen[question.ID] = question
 			}
-			after = question.ID
 		}
 		if len(page) < hubChatPageLimit {
 			break
@@ -570,7 +696,11 @@ func (h *HubServer) chatTailMessages(ctx context.Context) ([]ChatMessage, error)
 		if len(page) == 0 {
 			break
 		}
-		messages = append(messages, page...)
+		for _, message := range page {
+			if message.ConversationID == "" || message.ConversationID == hubChatConversationID {
+				messages = append(messages, message)
+			}
+		}
 		after = page[len(page)-1].ID
 		if len(page) < hubChatPageLimit {
 			break
@@ -593,9 +723,24 @@ func (h *HubServer) chatTailMessages(ctx context.Context) ([]ChatMessage, error)
 }
 
 type hubChatMessageInput struct {
-	Lane       string `json:"lane"`
-	Body       string `json:"body"`
-	QuestionID string `json:"question_id,omitempty"`
+	ConversationID string   `json:"conversation_id"`
+	Lane           *string  `json:"lane,omitempty"`
+	Body           string   `json:"body"`
+	QuestionIDs    []string `json:"question_ids"`
+	QuestionID     string   `json:"question_id,omitempty"`
+	OriginEventID  string   `json:"origin_event_id"`
+}
+
+var chatOriginEventIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
+
+func chatReplyIDs(relations []ChatQuestionRelation) []string {
+	ids := make([]string, 0, len(relations))
+	for _, relation := range relations {
+		if relation.RelationKind == "reply" {
+			ids = append(ids, relation.QuestionID)
+		}
+	}
+	return ids
 }
 
 func validChatMessageBody(body string) bool {
@@ -619,33 +764,75 @@ func (h *HubServer) handleChatMessageCreate(writer http.ResponseWriter, request 
 		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
-	if !validReportRelayLaneName(input.Lane) || !validChatMessageBody(input.Body) {
+	if input.ConversationID != hubChatConversationID || !validChatMessageBody(input.Body) || !chatOriginEventIDPattern.MatchString(input.OriginEventID) || !validReportRelayLaneName(h.chatDeskLane) {
 		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
-	if input.QuestionID != "" && !chatQuestionIDPattern.MatchString(input.QuestionID) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+	if input.Lane != nil && *input.Lane != h.chatDeskLane {
+		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_lane_conflict"})
 		return
+	}
+	if input.QuestionID != "" {
+		if len(input.QuestionIDs) != 0 {
+			writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			return
+		}
+		input.QuestionIDs = []string{input.QuestionID}
+	}
+	if input.QuestionIDs == nil {
+		input.QuestionIDs = []string{}
+	}
+	seen := make(map[string]struct{}, len(input.QuestionIDs))
+	relationBytes := 0
+	for _, id := range input.QuestionIDs {
+		relationBytes += len(id) + 1
+		if !chatQuestionIDPattern.MatchString(id) || len(id) > 64 || len(seen) >= 32 || relationBytes > 900 {
+			writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			return
+		}
+		if _, duplicate := seen[id]; duplicate {
+			writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			return
+		}
+		seen[id] = struct{}{}
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), hubChatStoreTimeout)
 	defer cancel()
-	message, err := store.CreateChatMessage(ctx, hubChatOperatorName, input.Body)
+	// Ownership checks are after decode and before insertion. The browser
+	// cannot pick a route by supplying a question from another desk lane.
+	for _, id := range input.QuestionIDs {
+		question, found, err := store.GetChatQuestion(ctx, id)
+		if err != nil {
+			h.writeChatStoreError(writer, err)
+			return
+		}
+		if !found || question.ConversationID != hubChatConversationID || question.Lane != h.chatDeskLane {
+			writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_question_ownership"})
+			return
+		}
+	}
+	message, created, err := store.CreateChatMessageExtended(ctx, ChatMessageCreate{ConversationID: hubChatConversationID, Author: hubChatOperatorName, Body: input.Body, SourceChannel: "web", OriginEventID: input.OriginEventID, OriginTimestamp: h.now().UTC(), QuestionIDs: input.QuestionIDs})
 	if err != nil {
 		h.writeChatStoreError(writer, err)
 		return
 	}
+	if !created {
+		writeHubJSON(writer, http.StatusOK, message)
+		return
+	}
 	h.chatMu.Lock()
-	h.chatPending[message.ID] = chatPendingMessage{Lane: input.Lane, Body: input.Body, QuestionID: input.QuestionID}
-	h.chatLaneOf[message.ID] = input.Lane
-	h.chatQuestionOf[message.ID] = input.QuestionID
+	h.chatPending[message.ID] = chatPendingMessage{Lane: h.chatDeskLane, Body: input.Body, QuestionIDs: chatReplyIDs(message.QuestionRelations)}
+	h.chatLaneOf[message.ID] = h.chatDeskLane
 	h.chatMu.Unlock()
 	h.kickChatDispatcher()
 	writeHubJSON(writer, http.StatusCreated, message)
 }
 
 type hubChatMessageRetryInput struct {
-	Lane       string `json:"lane,omitempty"`
-	QuestionID string `json:"question_id,omitempty"`
+	ConversationID *string  `json:"conversation_id,omitempty"`
+	Lane           *string  `json:"lane,omitempty"`
+	QuestionIDs    []string `json:"question_ids,omitempty"`
+	QuestionID     *string  `json:"question_id,omitempty"`
 }
 
 // handleChatMessageRetry re-sends a failed message's body as a new store row.
@@ -656,10 +843,11 @@ type hubChatMessageRetryInput struct {
 // Two invariants protect the pane. First, a failed row is retried at most
 // once: chatRetryMu serializes the decision, chatRetriedFrom covers this
 // process, and the retry's durable relay row carries a chat-retry-of-N marker
-// so a restarted hub recovers the same answer — a second retry is refused,
-// never a second directive. Second, the routing belongs to the message, not
-// the client: lane and question come from the hub's in-memory record or, for
-// rows written before this process started, from the durable relay row. What
+// so a restarted hub recovers the same answer — a second retry returns that
+// row, never a second directive. Second, the routing belongs to the message, not
+// the client: lane comes from the hub's in-memory record or, for rows written
+// before this process started, from the durable relay row. Relations come
+// from the stored message. What
 // the client sends is never consulted — trusting it is how a restarted hub
 // sent a retry to whatever lane the UI happened to have selected.
 func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *http.Request) {
@@ -696,12 +884,17 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_failed"})
 		return
 	}
+	ids := chatReplyIDs(message.QuestionRelations)
+	if message.Author != hubChatOperatorName || message.ConversationID != hubChatConversationID || (input.ConversationID != nil && *input.ConversationID != message.ConversationID) || (input.Lane != nil && *input.Lane != h.chatDeskLane) || (input.QuestionID != nil && (len(ids) != 1 || *input.QuestionID != ids[0])) || (input.QuestionIDs != nil && !slices.Equal(input.QuestionIDs, ids)) {
+		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_retry_conflict"})
+		return
+	}
 	h.chatRetryMu.Lock()
 	defer h.chatRetryMu.Unlock()
 	h.chatMu.Lock()
 	lane := h.chatLaneOf[id]
-	questionID := h.chatQuestionOf[id]
-	retried := h.chatRetriedFrom[id] != 0
+	retriedID := h.chatRetriedFrom[id]
+	retried := retriedID != 0
 	h.chatMu.Unlock()
 	if lane == "" {
 		// The row predates this process: recover its routing from the durable
@@ -720,8 +913,9 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 			h.chatRetriedFrom[id] = link.RetriedID
 			h.chatMu.Unlock()
 			retried = true
+			retriedID = link.RetriedID
 		}
-		lane, questionID = link.Lane, link.QuestionID
+		lane = link.Lane
 	} else {
 		// A failed row must have no live relay row: retrying one that is
 		// still undelivered would put the directive in the pane twice. Rows
@@ -737,6 +931,17 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 		}
 	}
 	if retried {
+		if retriedID > 0 {
+			prior, found, err := store.GetChatMessage(ctx, retriedID)
+			if err != nil {
+				h.writeChatStoreError(writer, err)
+				return
+			}
+			if found {
+				writeHubJSON(writer, http.StatusOK, prior)
+				return
+			}
+		}
 		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_already_retried"})
 		return
 	}
@@ -746,16 +951,22 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_link_lost"})
 		return
 	}
-	resent, err := store.CreateChatMessage(ctx, hubChatOperatorName, message.Body)
+	if message.OriginTimestamp.IsZero() {
+		message.OriginTimestamp = message.CreatedAt
+	}
+	resent, created, err := store.CreateChatMessageExtended(ctx, ChatMessageCreate{ConversationID: message.ConversationID, Author: hubChatOperatorName, Body: message.Body, SourceChannel: "web", OriginEventID: chatRetryOriginEventID(id), OriginTimestamp: message.OriginTimestamp, QuestionIDs: ids})
 	if err != nil {
 		h.writeChatStoreError(writer, err)
 		return
 	}
+	if !created {
+		writeHubJSON(writer, http.StatusOK, resent)
+		return
+	}
 	h.chatMu.Lock()
 	h.chatRetriedFrom[id] = resent.ID
-	h.chatPending[resent.ID] = chatPendingMessage{Lane: lane, Body: message.Body, QuestionID: questionID, RetryOf: id}
+	h.chatPending[resent.ID] = chatPendingMessage{Lane: lane, Body: message.Body, QuestionIDs: ids, RetryOf: id}
 	h.chatLaneOf[resent.ID] = lane
-	h.chatQuestionOf[resent.ID] = questionID
 	h.chatMu.Unlock()
 	h.kickChatDispatcher()
 	writeHubJSON(writer, http.StatusCreated, resent)
@@ -791,6 +1002,10 @@ func (h *HubServer) handleChatMessageCancel(writer http.ResponseWriter, request 
 	}
 	if !found {
 		writeHubJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	}
+	if message.Author != hubChatOperatorName || message.RelayState == "not_sent" {
+		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_operator"})
 		return
 	}
 	switch message.RelayState {
@@ -860,6 +1075,19 @@ func (h *HubServer) handleChatQuestionTransition(writer http.ResponseWriter, req
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), hubChatStoreTimeout)
 	defer cancel()
+	current, found, err := store.GetChatQuestion(ctx, id)
+	if err != nil {
+		h.writeChatStoreError(writer, err)
+		return
+	}
+	if !found {
+		writeHubJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
+		return
+	}
+	if current.ConversationID != hubChatConversationID || current.Lane != h.chatDeskLane {
+		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_question_ownership"})
+		return
+	}
 	question, err := store.TransitionChatQuestion(ctx, id, input.To)
 	if err != nil {
 		h.writeChatStoreError(writer, err)
@@ -885,7 +1113,10 @@ func (h *HubServer) handleChatQuestionUpsert(writer http.ResponseWriter, request
 		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
-	if !chatQuestionIDPattern.MatchString(input.ID) || !validReportRelayLaneName(input.Lane) || input.Body == "" || len(input.Body) > hubChatMaxBodyBytes {
+	if input.ConversationID == "" {
+		input.ConversationID = hubChatConversationID
+	}
+	if input.ConversationID != hubChatConversationID || !chatQuestionIDPattern.MatchString(input.ID) || input.Lane != h.chatDeskLane || input.Body == "" || len(input.Body) > hubChatMaxBodyBytes {
 		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
@@ -990,6 +1221,12 @@ func (h *HubServer) failOrphanChatMessages(ctx context.Context) {
 		}
 		for _, message := range messages {
 			if message.RelayState != "stored" {
+				if message.RelayState == "not_sent" {
+					if message.ID > after {
+						after = message.ID
+					}
+					continue
+				}
 				// failed is permanent; the cursor never revisits it.
 				h.chatMu.Lock()
 				if message.ID > h.chatSweepCursor {
@@ -1094,11 +1331,16 @@ func chatRetryMarker(id int64) string {
 	return fmt.Sprintf("chat-retry-of-%d", id)
 }
 
+// A browser event ID must begin with an alphanumeric character. This
+// internal prefix keeps deterministic retry keys outside that namespace.
+func chatRetryOriginEventID(id int64) string {
+	return "_" + chatRetryMarker(id)
+}
+
 // chatRelayLink is what the durable relay rows still know about a chat
-// message whose in-memory lane/question maps were lost to a restart.
+// message whose in-memory lane map was lost to a restart.
 type chatRelayLink struct {
-	Lane       string
-	QuestionID string
+	Lane string
 	// Live reports that the row's own relay row is still undelivered.
 	Live bool
 	// RetriedID is the message id a previous retry minted, or 0; a marker
@@ -1129,7 +1371,6 @@ func (h *HubServer) chatRelayLinkFor(ctx context.Context, id int64, body string)
 		for _, record := range records {
 			if record.EventID == want || record.EventID == legacy {
 				link.Lane = record.OwnerLane
-				link.QuestionID = record.Question
 				link.Live = record.DeliveredAt == ""
 			}
 			if record.Head == marker {
@@ -1167,13 +1408,12 @@ func (h *HubServer) relayChatMessage(ctx context.Context, id int64, pending chat
 		Epoch:     1,
 		OwnerLane: pending.Lane,
 		EventID:   eventID,
-		Text:      chatRelayText(id, pending.Body),
+		Text:      chatRelayText(id, pending.QuestionIDs, pending.Body),
 		Label:     "operator-chat",
 		Host:      "hub",
 		Reason:    "operator_chat",
-		// The question id rides the durable relay row so a replayed delivery
-		// can still resolve it after a hub restart emptied the in-memory maps.
-		Question: pending.QuestionID,
+		// Question IDs ride the durable relay row for reconstruction and audit.
+		Question: strings.Join(pending.QuestionIDs, ","),
 	}
 	if pending.RetryOf > 0 {
 		// The durable marker is what lets a restarted hub enforce
@@ -1182,16 +1422,11 @@ func (h *HubServer) relayChatMessage(ctx context.Context, id int64, pending chat
 	}
 	result := h.relayLaneEvent(event, nil)
 	switch {
-	case result.Routed || result.Duplicate || result.AlreadyDelivered:
+	case result.Routed || result.AlreadyDelivered:
 		if _, err := h.chatStore.MarkChatMessageDelivered(ctx, id); err != nil {
 			h.logger.Warn("chat message delivery was not recorded", "id", id)
 		}
 		h.noteChatTerminal(id)
-		if pending.QuestionID != "" {
-			if _, err := h.chatStore.TransitionChatQuestion(ctx, pending.QuestionID, "resolved"); err != nil {
-				h.logger.Warn("answered chat question was not resolved", "id", pending.QuestionID)
-			}
-		}
 	case result.PersistFailed || result.RejectedTooLong || result.ID == 0:
 		if _, err := h.chatStore.MarkChatMessageFailed(ctx, id); err != nil {
 			h.logger.Warn("chat message failure was not recorded", "id", id)
@@ -1204,20 +1439,19 @@ func (h *HubServer) relayChatMessage(ctx context.Context, id int64, pending chat
 }
 
 // noteChatTerminal drops the hub-side context for a row that reached its
-// terminal delivered state. Failed rows keep their lane/question entries so a
-// later retry can rebuild the attempt.
+// terminal delivered state. Failed rows keep their lane entry so a later
+// retry can rebuild the attempt.
 func (h *HubServer) noteChatTerminal(id int64) {
 	h.chatMu.Lock()
 	delete(h.chatPending, id)
-	delete(h.chatQuestionOf, id)
 	delete(h.chatLaneOf, id)
 	h.chatMu.Unlock()
 }
 
 // noteChatRelayDelivered is the replay-complete hook: a queued chat directive
-// was just injected, so the chat row becomes delivered and its linked
-// question — carried on the durable relay row — is resolved.
-func (h *HubServer) noteChatRelayDelivered(id int64, question string) {
+// was just injected, so the chat row becomes delivered. Questions remain
+// pending until a desk processed event or operator transition resolves them.
+func (h *HubServer) noteChatRelayDelivered(id int64, _ string) {
 	if h.chatStore == nil {
 		return
 	}
@@ -1229,11 +1463,6 @@ func (h *HubServer) noteChatRelayDelivered(id int64, question string) {
 		return
 	}
 	h.noteChatTerminal(id)
-	if question != "" {
-		if _, err := h.chatStore.TransitionChatQuestion(ctx, question, "resolved"); err != nil {
-			h.logger.Warn("answered chat question was not resolved", "id", question)
-		}
-	}
 }
 
 // chatReplayDisposition decides what replay does with a chat relay row.
@@ -1253,7 +1482,7 @@ func (h *HubServer) chatReplayDisposition(id int64) string {
 	if err != nil {
 		return "defer"
 	}
-	if !found || message.RelayState != "stored" {
+	if !found || message.Author != hubChatOperatorName || message.RelayState != "stored" {
 		return "retire"
 	}
 	return "inject"
@@ -1280,12 +1509,20 @@ func (h *HubServer) noteChatRelayExhausted(id int64) {
 // always in the store. A body that would exceed the non-sink 2048-byte lane
 // limit is replaced by a reference line — the lane reads the full text from
 // handoffkeep instead of a silently truncated answer.
-func chatRelayText(id int64, body string) string {
-	full := "[chat] " + sanitizeChatRelayText(body)
-	if len(full) > laneEventTextLimit {
-		return fmt.Sprintf("[chat] 긴 메시지 id=%d", id)
+func chatRelayText(id int64, questionIDs []string, body string) string {
+	prefix := fmt.Sprintf("[chat] message=%d", id)
+	if len(questionIDs) != 0 {
+		prefix += " reply_to=" + strings.Join(questionIDs, ",")
 	}
-	return full
+	full := prefix + " " + sanitizeChatRelayText(body)
+	if len(full) <= laneEventTextLimit {
+		return full
+	}
+	reference := prefix + " body=store"
+	if len(reference) <= laneEventTextLimit {
+		return reference
+	}
+	return fmt.Sprintf("[chat] message=%d reply_to=store body=store", id)
 }
 
 func sanitizeChatRelayText(body string) string {

@@ -1188,7 +1188,7 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 		}
 		h.armRelayAckEvent(record.ID, event.JobID)
 		// A queued chat directive just made it to the destination channel:
-		// flip the chat row to delivered and resolve its linked question.
+		// mark the message delivered. Question resolution is explicit only.
 		if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
 			if chatID, err := strconv.ParseInt(match[1], 10, 64); err == nil {
 				h.noteChatRelayDelivered(chatID, record.Question)
