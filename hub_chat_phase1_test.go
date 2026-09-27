@@ -212,8 +212,12 @@ func TestHubChatPhase1QuestionLookupHandlesVariableWidthIDs(t *testing.T) {
 			_, _ = writer.Write([]byte(`{"id":"Q-20260928-01","conversation_id":"operator-desk","lane":"lane-a","body":"wanted"}`))
 		case "/v1/chat/questions/Q-20260928-02":
 			writer.WriteHeader(http.StatusNotFound)
+			_, _ = writer.Write([]byte(`{"error":"chat_question_not_found"}`))
 		case "/v1/chat/questions/Q-20260928-03":
 			_, _ = writer.Write([]byte(`{"id":"Q-20260928-04","conversation_id":"operator-desk","lane":"lane-a","body":"wrong"}`))
+		case "/v1/chat/questions/Q-20260928-04":
+			writer.WriteHeader(http.StatusNotFound)
+			_, _ = writer.Write([]byte("404 page not found"))
 		default:
 			t.Errorf("unexpected lookup path=%s", request.URL.Path)
 			writer.WriteHeader(http.StatusNotFound)
@@ -235,5 +239,9 @@ func TestHubChatPhase1QuestionLookupHandlesVariableWidthIDs(t *testing.T) {
 	_, found, err = store.GetChatQuestion(context.Background(), "Q-20260928-03")
 	if !errors.Is(err, errChatStoreIncompatible) || found {
 		t.Fatalf("mismatched response found=%v err=%v", found, err)
+	}
+	_, found, err = store.GetChatQuestion(context.Background(), "Q-20260928-04")
+	if !errors.Is(err, errChatStoreIncompatible) || found {
+		t.Fatalf("old route response found=%v err=%v", found, err)
 	}
 }

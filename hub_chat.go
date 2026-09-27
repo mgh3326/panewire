@@ -288,6 +288,12 @@ func (c *handoffkeepChatStore) GetChatQuestion(ctx context.Context, id string) (
 		return ChatQuestion{}, false, err
 	}
 	if status == http.StatusNotFound {
+		var missing struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal(payload, &missing) != nil || missing.Error != "chat_question_not_found" {
+			return ChatQuestion{}, false, errChatStoreIncompatible
+		}
 		return ChatQuestion{}, false, nil
 	}
 	if status != http.StatusOK {
