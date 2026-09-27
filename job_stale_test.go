@@ -26,12 +26,18 @@ func TestJobStaleLocalScanDropsPanelessSilentJob(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// Paneless and silent since 2020: no terminal, no pane to cross-check, no
-	// fresh event. This is the 104-task-less-active-jobs shape.
+	// Paneless and silent past the stale age: no terminal, no pane to
+	// cross-check, no fresh event. This is the 104-task-less-active-jobs
+	// shape. Timestamps sit between hubJobStaleAge and hubJobActiveMaxAge —
+	// older than 72h would exit at the claim-age gate and never reach the
+	// paneless stale filter, making this assertion vacuous (CodeRabbit).
+	now := time.Now().UTC()
+	staleClaim := now.Add(-2 * time.Hour).Format(time.RFC3339)
+	staleProgress := now.Add(-90 * time.Minute).Format(time.RFC3339)
 	write("job-stale-paneless", "00001-job.claimed.json",
-		`{"type":"job.claimed","created_at":"2020-01-01T00:00:00Z","agent_label":"wrk-a","owner_lane":"lane-a","epoch":1}`)
+		`{"type":"job.claimed","created_at":"`+staleClaim+`","agent_label":"wrk-a","owner_lane":"lane-a","epoch":1}`)
 	write("job-stale-paneless", "00002-job.progress.json",
-		`{"type":"job.progress","created_at":"2020-01-01T00:05:00Z"}`)
+		`{"type":"job.progress","created_at":"`+staleProgress+`"}`)
 	// Paneless but still emitting: fresh events keep it active.
 	write("job-fresh-paneless", "00001-job.claimed.json",
 		`{"type":"job.claimed","created_at":"`+time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)+`","agent_label":"wrk-b","owner_lane":"lane-a","epoch":1}`)
