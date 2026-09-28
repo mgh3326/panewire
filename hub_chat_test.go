@@ -16,6 +16,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -103,10 +105,11 @@ type fakeChatStore struct {
 	// maxListLimit records the largest page size a ListChatMessages call
 	// asked for, so the page-size contract is pinned, not just the rows.
 	maxListLimit int
+	events       map[string]int64
 }
 
 func newFakeChatStore() *fakeChatStore {
-	return &fakeChatStore{questions: map[string]*ChatQuestion{}, messages: map[int64]*ChatMessage{}, nextMsgID: 1}
+	return &fakeChatStore{questions: map[string]*ChatQuestion{}, messages: map[int64]*ChatMessage{}, nextMsgID: 1, events: map[string]int64{}}
 }
 
 func (f *fakeChatStore) fail(method string) error {
@@ -134,7 +137,10 @@ func (f *fakeChatStore) UpsertChatQuestion(_ context.Context, in ChatQuestionUps
 		existing.Lane, existing.Body, existing.UpdatedAt = in.Lane, in.Body, now
 		return *existing, false, nil
 	}
-	question := &ChatQuestion{ID: in.ID, Lane: in.Lane, Body: in.Body, State: "pending", CreatedAt: now, UpdatedAt: now}
+	if in.ConversationID == "" {
+		in.ConversationID = hubChatConversationID
+	}
+	question := &ChatQuestion{ID: in.ID, ConversationID: in.ConversationID, Lane: in.Lane, Body: in.Body, State: "pending", CreatedAt: now, UpdatedAt: now}
 	f.questions[in.ID] = question
 	return *question, true, nil
 }
@@ -203,11 +209,56 @@ func (f *fakeChatStore) CreateChatMessage(_ context.Context, author, body string
 	if (author != "operator" && author != "desk") || body == "" {
 		return ChatMessage{}, &chatHTTPError{op: "message create", status: http.StatusBadRequest}
 	}
-	message := &ChatMessage{ID: f.nextMsgID, Author: author, Body: body, RelayState: "stored", CreatedAt: time.Now().UTC()}
+	message := &ChatMessage{ID: f.nextMsgID, ConversationID: hubChatConversationID, Author: author, Body: body, SourceChannel: "legacy", RelayState: "stored", CreatedAt: time.Now().UTC()}
 	f.nextMsgID++
 	f.messages[message.ID] = message
 	f.order = append(f.order, message.ID)
 	return *message, nil
+}
+
+func (f *fakeChatStore) GetChatQuestion(_ context.Context, id string) (ChatQuestion, bool, error) {
+	if err := f.fail("GetChatQuestion"); err != nil {
+		return ChatQuestion{}, false, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	question, ok := f.questions[id]
+	if !ok {
+		return ChatQuestion{}, false, nil
+	}
+	return *question, true, nil
+}
+
+func (f *fakeChatStore) CreateChatMessageExtended(_ context.Context, in ChatMessageCreate) (ChatMessage, bool, error) {
+	if err := f.fail("CreateChatMessageExtended"); err != nil {
+		return ChatMessage{}, false, err
+	}
+	in.QuestionIDs = slices.Clone(in.QuestionIDs)
+	sort.Strings(in.QuestionIDs)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := in.ConversationID + ":" + in.SourceChannel + ":" + in.OriginEventID
+	if id, ok := f.events[key]; ok {
+		old := *f.messages[id]
+		if old.Body != in.Body || old.Author != in.Author || !slices.Equal(chatReplyIDs(old.QuestionRelations), in.QuestionIDs) {
+			return ChatMessage{}, false, &chatHTTPError{op: "message create", status: http.StatusConflict}
+		}
+		return old, false, nil
+	}
+	relations := make([]ChatQuestionRelation, 0, len(in.QuestionIDs))
+	for _, id := range in.QuestionIDs {
+		question, ok := f.questions[id]
+		if !ok || question.ConversationID != in.ConversationID {
+			return ChatMessage{}, false, &chatHTTPError{op: "message create", status: http.StatusConflict}
+		}
+		relations = append(relations, ChatQuestionRelation{QuestionID: id, RelationKind: "reply", QuestionText: question.Body})
+	}
+	message := &ChatMessage{ID: f.nextMsgID, ConversationID: in.ConversationID, Author: in.Author, Body: in.Body, SourceChannel: in.SourceChannel, OriginEventID: in.OriginEventID, OriginTimestamp: in.OriginTimestamp, QuestionRelations: relations, RelayState: "stored", CreatedAt: time.Now().UTC()}
+	f.nextMsgID++
+	f.messages[message.ID] = message
+	f.order = append(f.order, message.ID)
+	f.events[key] = message.ID
+	return *message, true, nil
 }
 
 func (f *fakeChatStore) MarkChatMessageDelivered(_ context.Context, id int64) (ChatMessage, error) {
@@ -330,6 +381,7 @@ func chatTestHub(t *testing.T, lanes string, relay *handoffkeepRelayClient, stor
 		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
 		handoffkeep:        relay,
 		ChatStore:          store,
+		ChatDeskLane:       "lane-a",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -378,8 +430,23 @@ func chatServe(t *testing.T, hub *HubServer, request *http.Request) *httptest.Re
 
 func chatPostMessage(t *testing.T, hub *HubServer, body string) *httptest.ResponseRecorder {
 	t.Helper()
+	var input map[string]any
+	if json.Unmarshal([]byte(body), &input) == nil {
+		if _, ok := input["conversation_id"]; !ok {
+			input["conversation_id"] = hubChatConversationID
+		}
+		if _, ok := input["origin_event_id"]; !ok {
+			input["origin_event_id"] = fmt.Sprintf("test-%d", chatTestEventID.Add(1))
+		}
+		encoded, err := json.Marshal(input)
+		if err == nil {
+			body = string(encoded)
+		}
+	}
 	return chatServe(t, hub, chatUIRequest(t, http.MethodPost, "/chat/messages", body))
 }
+
+var chatTestEventID atomic.Int64
 
 func chatDecodeMessage(t *testing.T, writer *httptest.ResponseRecorder) ChatMessage {
 	t.Helper()
@@ -458,7 +525,7 @@ func TestHubChatPageRequiresUIAuth(t *testing.T) {
 // red.
 func TestHubChatWriteRejectsForgedIdentity(t *testing.T) {
 	hub := chatTestHub(t, `{"lanes":{}}`, nil, newFakeChatStore())
-	body := `{"lane":"lane-a","body":"rm -rf /"}`
+	body := `{"conversation_id":"operator-desk","lane":"lane-a","body":"rm -rf /","origin_event_id":"auth-control"}`
 
 	// The reported attack: tailnet peer, forged email header, nothing else.
 	forged := httptest.NewRequest(http.MethodPost, "/chat/messages", strings.NewReader(body))
@@ -549,7 +616,7 @@ func TestHubChatJWTRejections(t *testing.T) {
 // AC2: cookie/identity-authenticated POSTs reject cross-origin callers.
 func TestHubChatMessageCSRF(t *testing.T) {
 	hub := chatTestHub(t, `{"lanes":{}}`, nil, newFakeChatStore())
-	body := `{"lane":"lane-a","body":"hello"}`
+	body := `{"conversation_id":"operator-desk","lane":"lane-a","body":"hello","origin_event_id":"csrf-control"}`
 
 	crossOrigin := chatUIRequest(t, http.MethodPost, "/chat/messages", body)
 	crossOrigin.Header.Set("Origin", "https://evil.example")
@@ -643,7 +710,7 @@ func TestHubChatNoSecretsInBrowserSurface(t *testing.T) {
 
 // AC5: the full send flow is observable step by step — stored first, then the
 // lane receives the [chat]-prefixed directive, then the row turns delivered
-// and the answered question resolves.
+// while the question remains pending for explicit processing.
 func TestHubChatAnswerDeliveredFlow(t *testing.T) {
 	fake, relay, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
@@ -673,7 +740,7 @@ func TestHubChatAnswerDeliveredFlow(t *testing.T) {
 
 	select {
 	case directive := <-destination.relays:
-		want := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: [chat] 응 해라"
+		want := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: [chat] message=1 reply_to=Q-20260917-03 응 해라"
 		if directive.Type != "relay.inject" || directive.Kind != "lane.event" || directive.Pane != "w1:p1" || directive.Text != want {
 			t.Fatalf("directive=%+v want text=%q", directive, want)
 		}
@@ -686,8 +753,8 @@ func TestHubChatAnswerDeliveredFlow(t *testing.T) {
 	if store.message(1).DeliveredAt == nil {
 		t.Fatal("delivered message has no delivered_at")
 	}
-	if got := store.questionState("Q-20260917-03"); got != "resolved" {
-		t.Fatalf("question state=%q, want resolved", got)
+	if got := store.questionState("Q-20260917-03"); got != "pending" {
+		t.Fatalf("question state=%q, want pending", got)
 	}
 	fake.mu.Lock()
 	var relayedText, relayedEventID string
@@ -698,7 +765,7 @@ func TestHubChatAnswerDeliveredFlow(t *testing.T) {
 		}
 	}
 	fake.mu.Unlock()
-	if relayedText != "[chat] 응 해라" || relayedEventID != chatRelayEventID(1, "응 해라") {
+	if relayedText != "[chat] message=1 reply_to=Q-20260917-03 응 해라" || relayedEventID != chatRelayEventID(1, "응 해라") {
 		t.Fatalf("handoffkeep relay row text=%q event_id=%q", relayedText, relayedEventID)
 	}
 }
@@ -721,7 +788,7 @@ func TestHubChatLongMessageReference(t *testing.T) {
 	hub.drainChatOutbox(context.Background())
 	select {
 	case directive := <-destination.relays:
-		want := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: [chat] 긴 메시지 id=1"
+		want := "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: [chat] message=1 body=store"
 		if directive.Text != want {
 			t.Fatalf("directive.Text=%q, want reference %q", directive.Text, want)
 		}
@@ -732,14 +799,14 @@ func TestHubChatLongMessageReference(t *testing.T) {
 		t.Fatalf("stored body len=%d state=%q", len(got.Body), got.RelayState)
 	}
 
-	exactBody := strings.Repeat("b", 2041) // "[chat] "+body = exactly 2048 bytes
+	exactBody := strings.Repeat("b", laneEventTextLimit-len("[chat] message=2 "))
 	if writer := chatPostMessage(t, hub, fmt.Sprintf(`{"lane":"lane-a","body":%q}`, exactBody)); writer.Code != http.StatusCreated {
 		t.Fatal(writer.Body.String())
 	}
 	hub.drainChatOutbox(context.Background())
 	select {
 	case directive := <-destination.relays:
-		if directive.Text != "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: [chat] "+exactBody {
+		if directive.Text != "(같은 내용이 두 번 보이면 재실행 금지) [event] lane-a :: [chat] message=2 "+exactBody {
 			t.Fatalf("2048-byte answer was not sent inline: %.80q", directive.Text)
 		}
 	default:
@@ -755,7 +822,7 @@ func TestHubChatLongMessageReference(t *testing.T) {
 	hub.drainChatOutbox(context.Background())
 	select {
 	case directive := <-destination.relays:
-		if !strings.HasSuffix(directive.Text, "[chat] 첫 줄 둘째 줄 탭") || strings.ContainsAny(directive.Text, "\n\t") {
+		if !strings.HasSuffix(directive.Text, "[chat] message=3 첫 줄 둘째 줄 탭") || strings.ContainsAny(directive.Text, "\n\t") {
 			t.Fatalf("directive.Text=%q", directive.Text)
 		}
 	default:
@@ -820,7 +887,7 @@ func TestHubChatPanicIsolation(t *testing.T) {
 		t.Fatalf("panicking /chat/data status=%d body=%q, want 500 chat_internal", writer.Code, writer.Body.String())
 	}
 	store.mu.Lock()
-	store.panicOn = "CreateChatMessage"
+	store.panicOn = "CreateChatMessageExtended"
 	store.mu.Unlock()
 	if writer := chatPostMessage(t, hub, `{"lane":"lane-a","body":"x"}`); writer.Code != http.StatusInternalServerError {
 		t.Fatalf("panicking create status=%d, want 500", writer.Code)
@@ -851,7 +918,7 @@ func TestHubChatFailedRetryCancel(t *testing.T) {
 	hub.nodes["host-a"] = &hubNodeRecord{agent: destination}
 
 	// The UI keeps the failed state loud: styling, retry, and cancel hooks.
-	for _, hook := range []string{"전송 실패", "재전송", "취소", ".msg.failed", `relay_state==="failed"`} {
+	for _, hook := range []string{"전송 실패", "재전송", "취소", ".entry.failed", `relay_state==="failed"`} {
 		if !strings.Contains(hubChatHTML, hook) {
 			t.Fatalf("hub_chat.html lacks the %q failed-state hook", hook)
 		}
@@ -893,7 +960,7 @@ func TestHubChatFailedRetryCancel(t *testing.T) {
 	}
 	select {
 	case directive := <-destination.relays:
-		if !strings.HasSuffix(directive.Text, "[chat] 안녕") {
+		if !strings.HasSuffix(directive.Text, "[chat] message=2 안녕") {
 			t.Fatalf("retried directive text=%q", directive.Text)
 		}
 	default:
@@ -1032,7 +1099,7 @@ func TestHubChatDispatcherKick(t *testing.T) {
 	})
 	select {
 	case directive := <-destination.relays:
-		if !strings.HasSuffix(directive.Text, "[chat] 킥으로 전달") {
+		if !strings.HasSuffix(directive.Text, "[chat] message=1 킥으로 전달") {
 			t.Fatalf("directive=%q", directive.Text)
 		}
 	default:
@@ -1051,7 +1118,10 @@ func TestHubChatCLIWiring(t *testing.T) {
 	if err := writeFile0600(hkEnv, "HANDOFFKEEP_URL=http://127.0.0.1:18080\nHANDOFFKEEP_TOKEN=hk-token\n"); err != nil {
 		t.Fatal(err)
 	}
-	hub, _, code, err := newHubServerForCLI([]string{"--hub-auth", authPath, "--handoffkeep-env", hkEnv}, nil)
+	if _, _, code, err := newHubServerForCLI([]string{"--hub-auth", authPath, "--handoffkeep-env", hkEnv}, nil); err == nil || code != ExitConditionInvalid {
+		t.Fatalf("chat without desk lane code=%d err=%v, want explicit startup error", code, err)
+	}
+	hub, _, code, err := newHubServerForCLI([]string{"--hub-auth", authPath, "--handoffkeep-env", hkEnv, "--chat-desk-lane", "lane-a"}, nil)
 	if err != nil || code != ExitOK {
 		t.Fatalf("hub with handoffkeep env: code=%d err=%v", code, err)
 	}
@@ -1069,7 +1139,7 @@ func TestHubChatCLIWiring(t *testing.T) {
 	if err := writeFile0600(chatEnv, "HANDOFFKEEP_URL=http://127.0.0.1:1\nHANDOFFKEEP_TOKEN=chat-token\n"); err != nil {
 		t.Fatal(err)
 	}
-	split, _, code, err := newHubServerForCLI([]string{"--hub-auth", authPath, "--handoffkeep-env", hkEnv, "--chat-env", chatEnv}, nil)
+	split, _, code, err := newHubServerForCLI([]string{"--hub-auth", authPath, "--handoffkeep-env", hkEnv, "--chat-env", chatEnv, "--chat-desk-lane", "lane-a"}, nil)
 	if err != nil || code != ExitOK {
 		t.Fatalf("split hub: code=%d err=%v", code, err)
 	}
@@ -1086,7 +1156,7 @@ func writeFile0600(path, contents string) error {
 // B2: a send that persists but cannot be injected stays stored — the durable
 // relay row is the queue, and replay owns it. When the node registers, the
 // row is injected exactly once and the chat row flips to delivered; the
-// question link rides the relay row and resolves too. Reverting the fix
+// question link rides the relay row while remaining pending. Reverting the fix
 // (marking the unrouted send failed) turns the stored assertion red, and the
 // row would then be injected while displaying "전송 실패".
 func TestHubChatQueuedThenReplayedOnNodeRegister(t *testing.T) {
@@ -1114,7 +1184,7 @@ func TestHubChatQueuedThenReplayedOnNodeRegister(t *testing.T) {
 	}
 
 	// The node registers: replay injects the durable row exactly once, the
-	// chat row turns delivered, and the linked question resolves.
+	// chat row turns delivered, and the linked question remains pending.
 	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 4), persisted: make(chan hubRelayPersistedEvent, 4)}
 	hub.nodes["host-a"] = &hubNodeRecord{agent: destination}
 	hub.replayUndeliveredLaneEvents(ctx)
@@ -1125,8 +1195,8 @@ func TestHubChatQueuedThenReplayedOnNodeRegister(t *testing.T) {
 	if got := store.messageState(1); got != "delivered" {
 		t.Fatalf("replayed message state=%q, want delivered", got)
 	}
-	if got := store.questionState("Q-20260917-10"); got != "resolved" {
-		t.Fatalf("linked question state=%q, want resolved", got)
+	if got := store.questionState("Q-20260917-10"); got != "pending" {
+		t.Fatalf("linked question state=%q, want pending", got)
 	}
 	// A second replay must not inject again.
 	hub.replayUndeliveredLaneEvents(ctx)
@@ -1234,11 +1304,9 @@ func TestHubChatFailedWithLiveRelayRowNeverInjects(t *testing.T) {
 	}
 }
 
-// B3: retry resolves the question the original message answered — the hub's
-// recorded link wins over whatever the client happens to have selected, and
-// over an empty field. The C2 mutant (dropping QuestionID) and a client-
-// wins mutant both turn these assertions red.
-func TestHubChatRetryResolvesOriginalQuestion(t *testing.T) {
+// B3: retry retains the original question IDs while neither delivery
+// resolves them nor client input chooses a replacement.
+func TestHubChatRetryPreservesOriginalQuestion(t *testing.T) {
 	_, relay, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
 	store := newFakeChatStore()
@@ -1265,10 +1333,8 @@ func TestHubChatRetryResolvesOriginalQuestion(t *testing.T) {
 	if got := store.questionState("Q-20260917-20"); got != "pending" {
 		t.Fatalf("original question state=%q, want pending", got)
 	}
-	// The operator has a different question selected; the retry names the
-	// wrong id and even a different (unroutable) lane on the wire — the hub's
-	// recorded link must win on both.
-	retry := chatServe(t, hub, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{"lane":"lane-b","question_id":"Q-20260917-21"}`))
+	// The retry supplies no route or relation; the stored answer owns both.
+	retry := chatServe(t, hub, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{}`))
 	if retry.Code != http.StatusCreated {
 		t.Fatalf("retry status=%d body=%q", retry.Code, retry.Body.String())
 	}
@@ -1276,8 +1342,8 @@ func TestHubChatRetryResolvesOriginalQuestion(t *testing.T) {
 	if got := store.messageState(2); got != "delivered" {
 		t.Fatalf("retried message state=%q, want delivered", got)
 	}
-	if got := store.questionState("Q-20260917-20"); got != "resolved" {
-		t.Fatalf("original question state=%q, want resolved", got)
+	if got := store.questionState("Q-20260917-20"); got != "pending" {
+		t.Fatalf("original question state=%q, want pending", got)
 	}
 	if got := store.questionState("Q-20260917-21"); got != "pending" {
 		t.Fatalf("unrelated question state=%q, want pending (never resolved by this retry)", got)
@@ -1534,6 +1600,7 @@ func TestHubChatJWTKeysOutageContract(t *testing.T) {
 		CFAccessHTTPClient: certs.Client(),
 		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
 		ChatStore:          newFakeChatStore(),
+		ChatDeskLane:       "lane-a",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1679,9 +1746,8 @@ func TestHubChatLegacyRelayRowNeverInjects(t *testing.T) {
 }
 
 // M5 B2: one failed row, exactly one retry, exactly one directive. Two
-// concurrent retries serialize on chatRetryMu — the loser sees the durable
-// outcome of the winner and is refused, never minting a second directive.
-// Removing the chatRetriedFrom gate turns the 409 assertion red.
+// concurrent retries serialize on chatRetryMu — the second sees the durable
+// outcome of the first and returns it without minting another directive.
 func TestHubChatRetryInjectsOnce(t *testing.T) {
 	_, relay, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
@@ -1701,36 +1767,35 @@ func TestHubChatRetryInjectsOnce(t *testing.T) {
 		t.Fatalf("state=%q, want failed", got)
 	}
 
-	// Two retries in flight at once: one wins, the other is refused.
+	// Two retries in flight at once: one creates the row, the other replays it.
 	codes := make(chan int, 2)
 	for i := 0; i < 2; i++ {
 		go func() {
 			codes <- chatServe(t, hub, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{}`)).Code
 		}()
 	}
-	created, conflicts := 0, 0
+	created, replays := 0, 0
 	for i := 0; i < 2; i++ {
 		switch code := <-codes; code {
 		case http.StatusCreated:
 			created++
-		case http.StatusConflict:
-			conflicts++
+		case http.StatusOK:
+			replays++
 		default:
 			t.Fatalf("concurrent retry status=%d", code)
 		}
 	}
-	if created != 1 || conflicts != 1 {
-		t.Fatalf("concurrent retries created=%d conflicts=%d, want 1/1", created, conflicts)
+	if created != 1 || replays != 1 {
+		t.Fatalf("concurrent retries created=%d replays=%d, want 1/1", created, replays)
 	}
 	hub.drainChatOutbox(ctx)
 	if injected := drainRelays(destination); injected != 1 {
 		t.Fatalf("double retry injected %d directives, want exactly 1", injected)
 	}
-	// A later, sequential retry is refused too — the failed source produced
-	// its one attempt already.
+	// A later retry returns the same row without another directive.
 	retry := chatServe(t, hub, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{}`))
-	if retry.Code != http.StatusConflict || !strings.Contains(retry.Body.String(), "chat_message_already_retried") {
-		t.Fatalf("second retry status=%d body=%q, want 409 chat_message_already_retried", retry.Code, retry.Body.String())
+	if retry.Code != http.StatusOK || chatDecodeMessage(t, retry).ID != 2 {
+		t.Fatalf("second retry status=%d body=%q, want the original retry row", retry.Code, retry.Body.String())
 	}
 	hub.drainChatOutbox(ctx)
 	if injected := drainRelays(destination); injected != 0 {
@@ -1772,12 +1837,11 @@ func TestHubChatRetryAfterRestartBindsOriginal(t *testing.T) {
 	hub1.replayUndeliveredLaneEvents(ctx)
 
 	// The restart: a brand-new hub over the same store sees none of hub1's
-	// in-memory maps. The client even names a different lane and question —
-	// the durable record must win.
+	// in-memory maps. The durable record still owns the route and relations.
 	hub2 := chatTestHub(t, lanes, relay, store)
 	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
 	hub2.nodes["host-a"] = &hubNodeRecord{agent: destination}
-	retry := chatServe(t, hub2, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{"lane":"lane-b","question_id":"Q-20260917-99"}`))
+	retry := chatServe(t, hub2, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{}`))
 	if retry.Code != http.StatusCreated {
 		t.Fatalf("post-restart retry status=%d body=%q, want 201", retry.Code, retry.Body.String())
 	}
@@ -1791,14 +1855,14 @@ func TestHubChatRetryAfterRestartBindsOriginal(t *testing.T) {
 	if directive.Pane != "w1:p1" {
 		t.Fatalf("retry routed to pane %q, want w1:p1 (the original lane-a)", directive.Pane)
 	}
-	if !strings.HasSuffix(directive.Text, "[chat] 재시작 전 답") {
+	if !strings.HasSuffix(directive.Text, "[chat] message=2 reply_to=Q-20260917-40 재시작 전 답") {
 		t.Fatalf("retry text=%q", directive.Text)
 	}
 	if got := store.messageState(2); got != "delivered" {
 		t.Fatalf("retried message state=%q, want delivered", got)
 	}
-	if got := store.questionState("Q-20260917-40"); got != "resolved" {
-		t.Fatalf("original question state=%q, want resolved", got)
+	if got := store.questionState("Q-20260917-40"); got != "pending" {
+		t.Fatalf("original question state=%q, want pending", got)
 	}
 	if got := store.questionState("Q-20260917-99"); got != "" {
 		t.Fatalf("client-named question state=%q, want untouched", got)
@@ -1817,12 +1881,12 @@ func TestHubChatRetryAfterRestartBindsOriginal(t *testing.T) {
 	}
 
 	// A second restart: the in-memory retried map is gone again, but the
-	// marker row still refuses the repeat — no second directive.
+	// marker row returns the original retry — no second directive.
 	hub3 := chatTestHub(t, lanes, relay, store)
 	hub3.nodes["host-a"] = &hubNodeRecord{agent: destination}
-	retry = chatServe(t, hub3, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{"lane":"lane-b"}`))
-	if retry.Code != http.StatusConflict || !strings.Contains(retry.Body.String(), "chat_message_already_retried") {
-		t.Fatalf("post-restart second retry status=%d body=%q, want 409 chat_message_already_retried", retry.Code, retry.Body.String())
+	retry = chatServe(t, hub3, chatUIRequest(t, http.MethodPost, "/chat/messages/1/retry", `{}`))
+	if retry.Code != http.StatusOK || chatDecodeMessage(t, retry).ID != 2 {
+		t.Fatalf("post-restart second retry status=%d body=%q, want original retry", retry.Code, retry.Body.String())
 	}
 	hub3.drainChatOutbox(ctx)
 	if injected := drainRelays(destination); injected != 0 {

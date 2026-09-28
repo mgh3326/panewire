@@ -638,7 +638,7 @@ func TestR20HandoffkeepEnvIsMode0600AndErrorsCarryNoToken(t *testing.T) {
 	if err := os.WriteFile(authFile, []byte("HUB_TOKEN_operator=op\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	hub, _, code, err := newHubServerForCLI([]string{"--hub-auth", authFile, "--handoffkeep-env", good}, slog.Default())
+	hub, _, code, err := newHubServerForCLI([]string{"--hub-auth", authFile, "--handoffkeep-env", good, "--chat-desk-lane", "lane-a"}, slog.Default())
 	if hub == nil || code != ExitOK || err != nil || hub.handoffkeep == nil {
 		t.Fatalf("hub=%v code=%d err=%v", hub != nil, code, err)
 	}

@@ -439,6 +439,9 @@ func TestT507EmittedRevokedFileIsTerminalForKindReaders(t *testing.T) {
 // byte-identical retry still reuses the first file, and job.revoked stays
 // strict — a second declaration is a conflict, not a new event.
 func TestT507EmitDistinctLostObservationsGetOwnFiles(t *testing.T) {
+	// This fixture has a fixed 2026-09-24 timestamp; keep this test about
+	// distinct outbox observations rather than the production 72-hour window.
+	t.Setenv("PANEWIRE_JOB_ACTIVE_MAX_AGE", "2000000h")
 	inbox := t.TempDir()
 	first := emitRecord{
 		Type: "job.lost", JobID: "t507-f6", Epoch: 1, OwnerLane: "lane-w",
@@ -491,6 +494,9 @@ func TestT507EmitDistinctLostObservationsGetOwnFiles(t *testing.T) {
 // be offered as job.lost with the claim's agent label and the event file as
 // its report path.
 func TestT507Task603FixtureLostIsOffered(t *testing.T) {
+	// The archived fixture is intentionally fixed in time; its shape, not
+	// its age, is the contract under test here.
+	t.Setenv("PANEWIRE_JOB_ACTIVE_MAX_AGE", "2000000h")
 	const fixtureJob = "529-deploy-view-20260923-1535"
 	fixtureFile := filepath.Join("testdata", "task603", "jobs", fixtureJob, "events", "00006-job.lost.json")
 	if _, err := os.Stat(fixtureFile); err != nil {
