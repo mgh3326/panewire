@@ -955,6 +955,16 @@ const (
 	// names why it was closed without reaching a pane.
 	relayReplayRetiredMachine = "hub"
 	relayReplayRetiredPane    = "replay-retired:"
+	// relayLaneStallAge is the age at which an undelivered relay row on a lane
+	// with active work counts as a lane stall. Half an hour matches the
+	// idle-wake replay bound: past it, a queued row is a delivery gap the
+	// operator should see, not in-flight work.
+	relayLaneStallAge = 30 * time.Minute
+	// relayReplaySourceStartup / relayReplaySourceHello name the two triggers
+	// that re-inject a durable row: the once-at-startup replay and the replay
+	// a node hello runs.
+	relayReplaySourceStartup = "startup"
+	relayReplaySourceHello   = "hello"
 )
 
 // relayReplayRetireReason is the replay gate for rows that must not reach a
@@ -1060,7 +1070,7 @@ func (h *HubServer) replayUndeliveredRelayEvents(ctx context.Context) {
 			return
 		}
 		for _, record := range records {
-			h.replayRelayEvent(record)
+			h.replayRelayEvent(record, relayReplaySourceStartup)
 			if record.ID > afterID {
 				afterID = record.ID
 			}
@@ -1092,7 +1102,7 @@ func (h *HubServer) replayUndeliveredLaneEvents(ctx context.Context) {
 			return
 		}
 		for _, record := range records {
-			h.replayRelayEvent(record)
+			h.replayRelayEvent(record, relayReplaySourceHello)
 			if record.ID > afterID {
 				afterID = record.ID
 			}
@@ -1107,7 +1117,7 @@ func (h *HubServer) replayUndeliveredLaneEvents(ctx context.Context) {
 	}
 }
 
-func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
+func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent, source string) {
 	event := relayEventFromRecord(record)
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
@@ -1199,5 +1209,28 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent) {
 	}
 	// The replay just spent an attempt. Recording it is what makes the gate
 	// above converge instead of replaying the same row after every restart.
-	h.bumpRelayEventAttempts(record.Kind, event, route)
+	attempts, recorded := h.bumpRelayEventAttempts(record.Kind, event, route)
+	if !recorded {
+		attempts = record.Attempts + 1
+	}
+	h.broadcastRelayReplayInjected(record, route, attempts, source)
+}
+
+// broadcastRelayReplayInjected announces a re-injection the replay actually
+// queued — after the retire/exhausted/dedupe/route gates, never before them.
+// The feed already names every refusal shape; a successful replay was the one
+// silent path, so a restart could first-deliver rows nobody saw waiting.
+func (h *HubServer) broadcastRelayReplayInjected(record handoffkeepRelayEvent, route reportRelayRoute, attempts int, source string) {
+	h.logger.Info("relay replay injected", "event_id", record.ID, "kind", record.Kind, "lane", record.OwnerLane, "machine", route.Machine, "pane", route.Pane, "attempts", attempts, "source", source)
+	payload, _ := json.Marshal(struct {
+		EventID    int64  `json:"event_id"`
+		Kind       string `json:"kind"`
+		Lane       string `json:"lane"`
+		Machine    string `json:"machine"`
+		Pane       string `json:"pane"`
+		Attempts   int    `json:"attempts"`
+		ReceivedAt string `json:"received_at"`
+		Source     string `json:"source"`
+	}{EventID: record.ID, Kind: record.Kind, Lane: record.OwnerLane, Machine: route.Machine, Pane: route.Pane, Attempts: attempts, ReceivedAt: record.ReceivedAt, Source: source})
+	h.broadcast(hubEvent{Kind: "relay.replay_injected", Payload: payload, Received: h.now().UTC()})
 }

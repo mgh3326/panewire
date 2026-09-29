@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -123,11 +124,26 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	quotaV2StorePath := flags.String("quota-v2-store", "", "mode-0600 JSON file for account-scoped quota v2 bindings and observations; without it /v2/quota is closed (503)")
 	quotaV2ClockSkew := flags.Duration("quota-v2-clock-skew", 0, "Δ_hub: bound on node-vs-hub clock error for quota v2 observation times (default 0: node times must not be ahead of the hub)")
 	updateOverdueLane := flags.String("update-overdue-lane", "", "optional lanes.json sink lane that receives one update.overdue row per machine and version")
+	logFilePath := flags.String("log-file", "", "optional hub log file, appended with mode 0640; stderr/journal output is unchanged")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return nil, "", ExitUsage, errors.New("invalid hub flags")
 	}
 	if *authPath == "" {
 		return nil, "", ExitUsage, errors.New("hub auth file is required")
+	}
+	var logFile *os.File
+	if *logFilePath != "" {
+		var err error
+		logFile, err = openHubLogFile(*logFilePath)
+		if err != nil {
+			return nil, "", ExitConditionInvalid, fmt.Errorf("hub log file is invalid: %s", hubLogFileErrorClass(err))
+		}
+		defer func() {
+			if logFile != nil {
+				_ = logFile.Close()
+			}
+		}()
+		logger = slog.New(hubLogTeeHandler{primary: logger.Handler(), file: slog.NewTextHandler(logFile, nil)})
 	}
 	if len(listens) == 0 {
 		listens = append(listens, "127.0.0.1:9377")
@@ -226,6 +242,8 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}
+	hub.logFile = logFile
+	logFile = nil
 	hub.logAuthorityLaneProtection()
 	return hub, address, ExitOK, nil
 }
@@ -266,6 +284,67 @@ func hubListenAddresses(args []string) ([]string, error) {
 	return addresses, nil
 }
 
+// openHubLogFile opens the --log-file sink. The mode is forced on every open,
+// not only at creation, so a pre-existing permissive file is tightened rather
+// than quietly kept world-readable.
+func openHubLogFile(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o640)
+	if err != nil {
+		return nil, err
+	}
+	if err := file.Chmod(0o640); err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
+// hubLogFileErrorClass names why a --log-file open failed — the class of
+// error an operator needs (permission problem vs missing path) without
+// echoing the configured path into the startup rejection.
+func hubLogFileErrorClass(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "path does not exist"
+	case errors.Is(err, fs.ErrPermission):
+		return "permission denied"
+	default:
+		return "cannot open or adjust"
+	}
+}
+
+// hubLogTeeHandler mirrors every record to the hub's normal handler and to
+// the --log-file handler, so the file never changes what stderr/journal see.
+type hubLogTeeHandler struct {
+	primary slog.Handler
+	file    slog.Handler
+}
+
+func (t hubLogTeeHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	return t.primary.Enabled(ctx, level) || t.file.Enabled(ctx, level)
+}
+
+func (t hubLogTeeHandler) Handle(ctx context.Context, record slog.Record) error {
+	var err error
+	if t.primary.Enabled(ctx, record.Level) {
+		err = t.primary.Handle(ctx, record)
+	}
+	if t.file.Enabled(ctx, record.Level) {
+		if fileErr := t.file.Handle(ctx, record); err == nil {
+			err = fileErr
+		}
+	}
+	return err
+}
+
+func (t hubLogTeeHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return hubLogTeeHandler{primary: t.primary.WithAttrs(attrs), file: t.file.WithAttrs(attrs)}
+}
+
+func (t hubLogTeeHandler) WithGroup(name string) slog.Handler {
+	return hubLogTeeHandler{primary: t.primary.WithGroup(name), file: t.file.WithGroup(name)}
+}
+
 func parseHubAlertNodes(raw string, tokens map[string]string) (map[string]struct{}, error) {
 	if strings.TrimSpace(raw) == "" {
 		return nil, errors.New("alert nodes are required when the flag is set")
@@ -293,6 +372,7 @@ func runHubCLI(args []string) int {
 		fmt.Fprintln(os.Stderr, "hub configuration rejected:", err)
 		return code
 	}
+	defer func() { _ = hub.Close() }()
 	addresses, err := hubListenAddresses(args)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hub configuration rejected:", err)

@@ -16,6 +16,7 @@ const (
 	hubAlertReasonCheckFailed   = "check_failed"
 	hubAlertReasonNoData        = "no_data"
 	hubAlertReasonStallDegraded = "stall_degraded"
+	hubAlertReasonLaneStalled   = "lane_stalled"
 	hubAlertNoCheck             = "none"
 	hubFailoverPhaseDown        = "down"
 	hubFailoverPhaseUp          = "up"
@@ -307,6 +308,11 @@ func hubAlertMachineID(key string) string {
 	if machineID, found := strings.CutPrefix(key, "stall:"); found {
 		return machineID
 	}
+	if lane, found := strings.CutPrefix(key, "lane-stall:"); found {
+		// A lane, not a machine, is the subject of this alert; MachineID is
+		// the only identifier field HubAlert carries.
+		return lane
+	}
 	if remainder, found := strings.CutPrefix(key, "check:"); found {
 		machineID, _, _ := strings.Cut(remainder, ":")
 		return machineID
@@ -388,7 +394,7 @@ func (h *HubServer) dispatchHubNotifications(notifications []hubNotification) {
 }
 
 func validHubAlertReason(reason string) bool {
-	return reason == hubAlertReasonDisconnected || reason == hubAlertReasonStale || reason == hubAlertReasonCheckFailed || reason == hubAlertReasonNoData || reason == hubAlertReasonStallDegraded
+	return reason == hubAlertReasonDisconnected || reason == hubAlertReasonStale || reason == hubAlertReasonCheckFailed || reason == hubAlertReasonNoData || reason == hubAlertReasonStallDegraded || reason == hubAlertReasonLaneStalled
 }
 
 func formatHubAlert(alert HubAlert) string {

@@ -140,6 +140,34 @@ spends an attempt, the hub closes these rows. Each gets a `delivered_to` of
 
 Chat rows keep the chat store as their only authority and skip this gate.
 
+**A successful replay is announced too (#961).** Once a re-injection has
+cleared every gate — the delivered and retired rows, the chat gate, the age
+gates, `attempts < 3`, dedupe, route resolution, and the sink rejection —
+and the directive is queued and the attempt recorded, the hub logs one Info
+line and broadcasts `relay.replay_injected` with
+`{"event_id":…,"kind":…,"lane":…,"machine":…,"pane":…,"attempts":…,"received_at":…,"source":…}`.
+`attempts` is the count after that replay's own bump, and `source` is
+`startup` for the once-at-boot replay or `hello` for the replay a node
+registration runs. Before this broadcast the feed named every refusal
+(`relay.replay_retired`, `relay.replay_exhausted`, `relay.unrouted`) but
+never a success, so a restart that first-delivered rows that had sat for an
+hour was invisible until the panes showed them.
+
+**A stalled lane now has an alarm (#961).** Each maintenance sweep evaluates
+every non-sink lane: when the oldest undelivered durable row for it — not
+retired, `attempts` still below the replay bound — is older than 30 minutes
+(`relayLaneStallAge`) **and** the lane has active work (it is an active
+job's `owner_lane`, or the parent of one, in the nodes' active-jobs view),
+the hub broadcasts `relay.lane_stalled` with
+`{"lane":…,"oldest_event_id":…,"oldest_received_at":…,"undelivered_count":…,"active_jobs":…}`,
+logs one Warn per stall episode, and routes the alert through the standard
+dampening (key `lane-stall:<lane>`, check `relay.lane_stalled`, the same
+grace and observation counts as the other hub alerts) so the notifier sends
+one incident and a recovery when the backlog clears. A lane with no active
+work is never stalled, and a handoffkeep read error neither starts nor ends
+an episode. Neither event changes delivery: nothing is re-injected,
+rerouted, or retired by the alarm — it observes and tells.
+
 **handoffkeep exposes no endpoint that sets `attempts`.** The hub therefore
 re-POSTs the row it already stored: the idempotency key collides, handoffkeep
 answers 200 with `attempts + 1`, the row itself is unchanged (first-writer-wins,

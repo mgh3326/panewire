@@ -97,6 +97,16 @@ machine ID, reason, check name, and the operator line
 `REBOOT/UNLOCK NEEDED — fleet on <machine> is dead until a human acts`; recovery
 and check messages retain their existing fields without that line.
 
+`--log-file PATH` is optional. When set, every hub log record is also
+appended to that file. The hub opens it `O_APPEND|O_CREATE` and forces mode
+`0640` at every startup — a pre-existing permissive file is tightened rather
+than kept world-readable — and an unwritable path rejects hub startup.
+Stderr (the journald stream under systemd) is unchanged byte-for-byte, and
+the logger never prints token values, so the file carries none either. The
+flag exists for hosts where the journal is root-only and a non-root
+operator still needs the hub's own words; the two desk-side access options
+are in [docs/runbooks/hub-log-access.md](runbooks/hub-log-access.md).
+
 ## Protocol
 
 The WebSocket envelope is closed JSON. A node first sends:
