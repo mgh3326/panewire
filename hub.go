@@ -482,6 +482,15 @@ type HubServer struct {
 	updateOverdueFlushMu      sync.Mutex
 	updateOverdueFlushClosing bool
 	updateOverdueFlushes      sync.WaitGroup
+	// closeCtx is cancelled by Close before it waits on
+	// updateOverdueFlushes, so an in-flight flush sees it inside its
+	// handoffkeep write and between notices — the wait is then bounded by
+	// the cancellation, not by K x handoffkeepTimeout. Only the
+	// update-overdue path consumes it; every other relay keeps
+	// context.Background(). The pair is assigned once in NewHubServer, so
+	// the flush goroutine reads it without a lock.
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already
@@ -667,11 +676,12 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 			controlPlaneLanesLastFailure = ""
 		}
 	}
+	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &HubServer{
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, updateRepository: config.UpdateRepository, updateOverdueLane: config.UpdateOverdueLane, updateOverdueNotified: make(map[string]string), updateOverduePending: make(map[string]*hubUpdateOverdue), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2,
+		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, updateRepository: config.UpdateRepository, updateOverdueLane: config.UpdateOverdueLane, updateOverdueNotified: make(map[string]string), updateOverduePending: make(map[string]*hubUpdateOverdue), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2, closeCtx: closeCtx, closeCancel: closeCancel,
 	}, nil
 }
 
@@ -695,10 +705,12 @@ func validHubToken(token string) bool {
 
 // Close bars new lane-stall runs and update-overdue flushes, waits out any
 // in flight (each still logs), then releases the optional --log-file sink.
-// It is safe for concurrent and repeated calls: closeMu serializes the body
-// so the file is closed exactly once and every call after the first returns
-// nil. The hub serves for the process lifetime, so this is for the CLI
-// shutdown path and tests that stop a hub.
+// The wait is bounded by cancellation: closeCtx is cancelled before either
+// wait, so a flush parked on a hung handoffkeep ends with the hub instead of
+// costing K x handoffkeepTimeout. It is safe for concurrent and repeated
+// calls: closeMu serializes the body so the file is closed exactly once and
+// every call after the first returns nil. The hub serves for the process
+// lifetime, so this is for the CLI shutdown path and tests that stop a hub.
 func (h *HubServer) Close() error {
 	h.closeMu.Lock()
 	defer h.closeMu.Unlock()
@@ -706,6 +718,13 @@ func (h *HubServer) Close() error {
 		return nil
 	}
 	h.closed = true
+	// The signal must precede the waits: updateOverdueFlushClosing is set
+	// under the mutex the flush itself holds for life, so an in-flight flush
+	// can never observe it — closeCtx is what reaches it, both between
+	// notices and inside the in-flight handoffkeep write.
+	if h.closeCancel != nil {
+		h.closeCancel()
+	}
 	// The mutex is held for a run's whole life, so taking it here waits the
 	// run out; the flag it then leaves set keeps every later TryLock from
 	// counting a fresh run against the WaitGroup after Close has begun.
@@ -716,7 +735,9 @@ func (h *HubServer) Close() error {
 	// The same shape for the overdue flush: the flag set under
 	// updateOverdueFlushMu bars every later launch between TryLock and Add,
 	// and the WaitGroup drains a flush already in flight before the log file
-	// can close under it.
+	// can close under it. The cancellation above is what bounds that drain;
+	// the mutex alone would leave Close waiting K x handoffkeepTimeout on a
+	// hung sink.
 	h.updateOverdueFlushMu.Lock()
 	h.updateOverdueFlushClosing = true
 	h.updateOverdueFlushMu.Unlock()

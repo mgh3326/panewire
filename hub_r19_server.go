@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -275,16 +276,30 @@ func (h *HubServer) startUpdateOverdueFlush() {
 	go func() {
 		defer h.updateOverdueFlushes.Done()
 		defer h.updateOverdueFlushMu.Unlock()
-		h.flushUpdateOverdue()
+		h.flushUpdateOverdue(h.closeContext())
 	}()
+}
+
+// closeContext is the context only the update-overdue flush consumes: Close
+// cancels it so a flush parked on a hung sink ends with the hub. A zero-value
+// HubServer has none and falls back to context.Background, the same fallback
+// laneStallBaseContext uses for a hub that never ran maintenance.
+func (h *HubServer) closeContext() context.Context {
+	if h.closeCtx == nil {
+		return context.Background()
+	}
+	return h.closeCtx
 }
 
 // flushUpdateOverdue tries every queued notice once. A notice leaves the
 // queue only when its sink row exists (created, or found already stored), so
 // a failed handoffkeep write, a missing sink lane, or a hub that is still
-// being configured delays the row rather than losing it. The caller holds
-// updateOverdueFlushMu.
-func (h *HubServer) flushUpdateOverdue() {
+// being configured delays the row rather than losing it. Once ctx ends the
+// loop stops between notices, and a write cancelled mid-flight neither spends
+// the notice's attempt counter nor raises the first-attempt Warn: the queue
+// is in memory, so abandoning a close-cancelled write loses nothing a restart
+// would not have lost anyway. The caller holds updateOverdueFlushMu.
+func (h *HubServer) flushUpdateOverdue(ctx context.Context) {
 	h.mu.Lock()
 	pending := make(map[string]*hubUpdateOverdue, len(h.updateOverduePending))
 	for key, notice := range h.updateOverduePending {
@@ -292,11 +307,14 @@ func (h *HubServer) flushUpdateOverdue() {
 	}
 	h.mu.Unlock()
 	for key, notice := range pending {
-		recorded := h.emitUpdateOverdue(*notice)
+		if ctx.Err() != nil {
+			return
+		}
+		recorded := h.emitUpdateOverdue(ctx, *notice)
 		h.mu.Lock()
 		if recorded {
 			delete(h.updateOverduePending, key)
-		} else {
+		} else if ctx.Err() == nil {
 			notice.attempts++
 		}
 		first := notice.attempts == 1
@@ -333,9 +351,11 @@ func (h *HubServer) updateOverdueSinkLane() (string, bool) {
 // emitUpdateOverdue writes the update.overdue row to the operator sink lane
 // and reports whether the row now exists. It never uses the Telegram notifier
 // and never reaches a pane: a lane that is not a sink is refused inside
-// relayLaneEvent. The event id is derived from (machine, version), so
+// relayLaneEventContext. The event id is derived from (machine, version), so
 // handoffkeep's first-writer-wins row also dedupes retries and hub restarts.
-func (h *HubServer) emitUpdateOverdue(notice hubUpdateOverdue) bool {
+// The ctx is the flush's close context, so a Close racing the write cancels
+// it rather than waiting out handoffkeepTimeout.
+func (h *HubServer) emitUpdateOverdue(ctx context.Context, notice hubUpdateOverdue) bool {
 	lane, found := h.updateOverdueSinkLane()
 	if !found {
 		return false
@@ -352,6 +372,6 @@ func (h *HubServer) emitUpdateOverdue(notice hubUpdateOverdue) bool {
 		Reason:    "update_overdue",
 		sinkOnly:  true,
 	}
-	result := h.relayLaneEvent(event, nil)
+	result := h.relayLaneEventContext(ctx, event, nil)
 	return result.ID != 0 && (result.Routed || result.Duplicate || result.AlreadyDelivered)
 }
