@@ -255,12 +255,20 @@ func (h *HubServer) updateOverdueLocked(machineID string, expected hubExpectedVe
 // (up to a 10s timeout per notice), so it never runs on the Sweep goroutine:
 // keepalives, failover, and the rest of maintenance must not wait behind a
 // failing backlog. At most one flush runs at a time; a sweep that finds one
-// still running leaves the retry to a later sweep.
+// still running leaves the retry to a later sweep. Once Close has begun no
+// flush launches at all.
 func (h *HubServer) startUpdateOverdueFlush() {
 	h.mu.Lock()
 	empty := len(h.updateOverduePending) == 0
 	h.mu.Unlock()
 	if empty || !h.updateOverdueFlushMu.TryLock() {
+		return
+	}
+	// The check sits between TryLock and the WaitGroup Add so a launch racing
+	// Close either holds the mutex before it (Close waits the flush out) or
+	// observes updateOverdueFlushClosing and never counts against Wait.
+	if h.updateOverdueFlushClosing {
+		h.updateOverdueFlushMu.Unlock()
 		return
 	}
 	h.updateOverdueFlushes.Add(1)

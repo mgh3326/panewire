@@ -26,8 +26,12 @@ type laneStallObservation struct {
 	oldestEventID    int64
 	oldestReceivedAt string
 	undelivered      int
-	heldCount        int
-	activeJobs       int
+	// undeliveredIDs are the durable row ids consider counted, so the held
+	// annotation can intersect relayHeld with this observation's backlog
+	// instead of crediting rows it refused to count.
+	undeliveredIDs map[int64]struct{}
+	heldCount      int
+	activeJobs     int
 }
 
 // consider folds one listed row into the observation. Retired rows and rows
@@ -38,6 +42,10 @@ func (o *laneStallObservation) consider(record handoffkeepRelayEvent, now time.T
 		return
 	}
 	o.undelivered++
+	if o.undeliveredIDs == nil {
+		o.undeliveredIDs = make(map[int64]struct{})
+	}
+	o.undeliveredIDs[record.ID] = struct{}{}
 	received, err := time.Parse(time.RFC3339Nano, record.ReceivedAt)
 	if err != nil {
 		// A row with no provable age counts against the backlog but can never
@@ -133,7 +141,11 @@ func (h *HubServer) sweepLaneStalls(ctx context.Context, now time.Time) {
 		notifications = append(notifications, h.observeHubAlertLocked(now, key, obs.stalled, obs.problemSince, hubAlertReasonLaneStalled, "relay.lane_stalled", h.gracePeriod)...)
 		state = h.alerts[key]
 		activated := state != nil && state.active && !wasActive
-		obs.heldCount = h.laneHeldCountLocked(lane)
+		if activated {
+			// The held count exists only to annotate the activation; a
+			// non-activating observation never pays the relayHeld scan.
+			obs.heldCount = h.laneHeldCountLocked(obs)
+		}
 		if laneStallAlertInactive(state) {
 			// Nothing is open, owed, or half-accumulated: drop the entry so
 			// an ephemeral lane does not stay a candidate forever. An open
@@ -152,14 +164,20 @@ func (h *HubServer) sweepLaneStalls(ctx context.Context, now time.Time) {
 	h.dispatchHubNotifications(notifications)
 }
 
-// laneHeldCountLocked counts the lane's undelivered rows currently held for a
-// busy pane — present in the h.relayHeld projection. Held rows still count
+// laneHeldCountLocked counts how many of the undelivered rows this
+// observation counted for the lane are also held for a busy pane — present in
+// the h.relayHeld projection keyed by durable row id. Held rows still count
 // toward the stall; the number only annotates the alarm so an operator can
-// tell "nothing is listening" from "a pane is busy". The caller holds mu.
-func (h *HubServer) laneHeldCountLocked(lane string) int {
+// tell "nothing is listening" from "a pane is busy". Intersecting with the
+// counted set keeps held_count <= undelivered_count even when relayHeld still
+// holds rows since retired or out of attempts. The caller holds mu.
+func (h *HubServer) laneHeldCountLocked(obs laneStallObservation) int {
+	if h.laneHeldCountProbe != nil {
+		h.laneHeldCountProbe()
+	}
 	count := 0
-	for _, held := range h.relayHeld {
-		if held.Lane == lane {
+	for id := range obs.undeliveredIDs {
+		if held, exists := h.relayHeld[id]; exists && held.Lane == obs.lane {
 			count++
 		}
 	}
