@@ -428,3 +428,60 @@ func TestT987LaneStallHeldCountAnnotatesAlarm(t *testing.T) {
 		t.Fatalf("the Warn line lacks held_count:\n%s", logBuf.String())
 	}
 }
+
+// ---- adopted tester tests (#987 verify, #998 follow-up) -------------------
+
+// t987ObserveAt drives one lane-stall run stamped at now, so a test controls
+// the observation clock while the hub's own clock stays fixed.
+func t987ObserveAt(hub *HubServer, now time.Time) {
+	hub.startLaneStallSweep(now)
+	hub.laneStallSweeps.Wait()
+}
+
+// Adopted from the #987 tester's TestTester987GraceClockSurvivesOldestRowTurnover
+// (its MT4 mutant survived the round-1 suite). Invariant: the grace clock
+// (badSince) of a not-yet-active episode survives an observation whose oldest
+// row turned over, so the episode activates on the schedule the first stale
+// row set — the term laneStallAlertInactive must keep.
+func TestT987TesterGraceClockSurvivesOldestRowTurnover(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	base := time.Date(2026, 9, 29, 12, 0, 0, 0, time.UTC)
+	notifier := &task198Notifier{}
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens:          map[string]string{"operator": "op", "host-a": "node-a"},
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`),
+		Notifier:        notifier,
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		Now:             func() time.Time { return base },
+		GracePeriod:     relayLaneStallAge + 30*time.Minute,
+		handoffkeep:     client,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t961ActiveNode(hub, "host-a", HubActiveJob{JobID: "tester987-grace", OwnerLane: "lane-a"})
+	events := r20t5Subscribe(t, hub)
+	fake.seedUndelivered(
+		t961LaneRow(1, "lane-a", "tester987-g1", base.Add(-50*time.Minute).Format(time.RFC3339Nano), 1),
+		t961LaneRow(2, "lane-a", "tester987-g2", base.Add(-35*time.Minute).Format(time.RFC3339Nano), 1),
+	)
+
+	t987ObserveAt(hub, base) // 50m into a 60m grace: no bad run yet
+	if state := t987LaneStallEntry(hub, "lane-a"); state == nil {
+		t.Fatal("a dampened observation in grace left no entry to keep its clock")
+	} else if state.active {
+		t.Fatal("activated inside the grace period")
+	}
+	if err := client.markDelivered(context.Background(), 1, "host-a", "w1:p1"); err != nil {
+		t.Fatal(err)
+	}
+	t987ObserveAt(hub, base.Add(15*time.Minute)) // grace from row 1: 65m → bad run 1
+	t987ObserveAt(hub, base.Add(16*time.Minute)) // bad run 2 → activation
+	if state := t987LaneStallEntry(hub, "lane-a"); state == nil || !state.active {
+		t.Fatalf("the episode did not activate on the first row's grace clock (alerts=%+v)", notifier.Alerts())
+	}
+	if got := len(t961StallBroadcasts(events)); got != 1 {
+		t.Fatalf("relay.lane_stalled broadcasts=%d, want 1", got)
+	}
+}

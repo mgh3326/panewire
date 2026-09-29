@@ -473,9 +473,15 @@ type HubServer struct {
 	// updateOverduePending holds notices not yet durably recorded in the sink;
 	// every Sweep retries them until the row exists.
 	updateOverduePending map[string]*hubUpdateOverdue
-	updateOverdueFlushMu sync.Mutex
-	// updateOverdueFlushes tracks background flushes (fixtures wait on it).
-	updateOverdueFlushes sync.WaitGroup
+	// updateOverdueFlushMu is TryLock'd so at most one flush runs and is held
+	// for the flush's whole life: once Close has taken it and set
+	// updateOverdueFlushClosing, no new flush can start and any in-flight one
+	// is already over — the same shape laneStallMu/laneStallClosing use.
+	// updateOverdueFlushes lets Close (and fixtures) wait the in-flight flush
+	// out before the log file closes under it.
+	updateOverdueFlushMu      sync.Mutex
+	updateOverdueFlushClosing bool
+	updateOverdueFlushes      sync.WaitGroup
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already
@@ -484,12 +490,20 @@ type HubServer struct {
 	laneStallMu      sync.Mutex
 	laneStallClosing bool
 	laneStallSweeps  sync.WaitGroup
+	// laneHeldCountProbe is a test hook laneHeldCountLocked fires once per
+	// scan, so a test can tell the count ran only on an activating
+	// observation.
+	laneHeldCountProbe func()
 	// maintenanceCtx is the RunMaintenance context each lane-stall run
 	// derives its budget from, so SIGTERM shortens an in-flight observation.
 	// It stays nil when only tests drive Sweep, which then falls back to
 	// context.Background. Guarded by mu.
 	maintenanceCtx context.Context
-	stallBeats     map[string]*hubStallBeatState
+	// closeMu serializes Close so concurrent callers cannot race the logFile
+	// handoff; closed makes every call after the first return nil at once.
+	closeMu    sync.Mutex
+	closed     bool
+	stallBeats map[string]*hubStallBeatState
 	// sessionReap keeps the latest session-reap (#603) report per machine.
 	sessionReap map[string]*hubSessionReapRecord
 }
@@ -679,11 +693,19 @@ func validHubToken(token string) bool {
 	return token != "" && len(token) <= 512 && !strings.ContainsAny(token, "\x00\r\n\t ")
 }
 
-// Close bars new lane-stall runs, waits out an in-flight observation (it
-// still logs), then releases the optional --log-file sink. The hub serves for
-// the process lifetime, so this is for the CLI shutdown path and tests that
-// stop a hub.
+// Close bars new lane-stall runs and update-overdue flushes, waits out any
+// in flight (each still logs), then releases the optional --log-file sink.
+// It is safe for concurrent and repeated calls: closeMu serializes the body
+// so the file is closed exactly once and every call after the first returns
+// nil. The hub serves for the process lifetime, so this is for the CLI
+// shutdown path and tests that stop a hub.
 func (h *HubServer) Close() error {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	if h.closed {
+		return nil
+	}
+	h.closed = true
 	// The mutex is held for a run's whole life, so taking it here waits the
 	// run out; the flag it then leaves set keeps every later TryLock from
 	// counting a fresh run against the WaitGroup after Close has begun.
@@ -691,6 +713,14 @@ func (h *HubServer) Close() error {
 	h.laneStallClosing = true
 	h.laneStallMu.Unlock()
 	h.laneStallSweeps.Wait()
+	// The same shape for the overdue flush: the flag set under
+	// updateOverdueFlushMu bars every later launch between TryLock and Add,
+	// and the WaitGroup drains a flush already in flight before the log file
+	// can close under it.
+	h.updateOverdueFlushMu.Lock()
+	h.updateOverdueFlushClosing = true
+	h.updateOverdueFlushMu.Unlock()
+	h.updateOverdueFlushes.Wait()
 	if h.logFile == nil {
 		return nil
 	}
