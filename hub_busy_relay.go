@@ -83,7 +83,10 @@ func (h *HubServer) rememberRelayHeld(machine string, held relayHeldPayload) boo
 	}
 	h.relayHeld[held.EventID] = hubRelayHeldProjection{ID: held.EventID, Lane: held.Lane, Pane: held.Pane, Machine: machine, Preview: held.Preview, HeldSince: held.HeldSince, DeliverPolicy: held.DeliverPolicy, JobID: held.JobID}
 	key := relayPendingKey(held.EventID, held.JobID)
-	if pending, exists := h.r19a.relayPending[key]; exists && pending.machine == machine && pending.pane == held.Pane {
+	// #989: a lane re-pointed between register and hold leaves the node
+	// holding the row on a different pane than the window was armed for.
+	// The machine is still the entitlement; the pane is a detail.
+	if pending, exists := h.r19a.relayPending[key]; exists && pending.machine == machine {
 		pending.held = true
 		h.r19a.relayPending[key] = pending
 	}
@@ -102,7 +105,9 @@ func (h *HubServer) releaseRelayHeld(machine string, released relayReleasedPaylo
 	if !exists && !pendingExists {
 		return false
 	}
-	if pendingExists && (pending.machine != machine || pending.pane != released.Pane) {
+	// The releasing pane may differ from the window's armed pane when the
+	// lane moved mid-hold (#989); the machine is the entitlement.
+	if pendingExists && pending.machine != machine {
 		return false
 	}
 	delete(h.relayHeld, released.OriginalEventID)
@@ -119,7 +124,9 @@ func (h *HubServer) releaseRelayHeld(machine string, released relayReleasedPaylo
 // races an operator action on the same row, so it only needs to guard
 // against a stale report from a machine that no longer owns the row. The
 // same ownership checks cover the pending ack entry: a drop may only retire
-// a window bound to this machine and pane.
+// a window bound to this machine and pane — the pane is part of the lease
+// the node itself reported, so a drop naming another pane is inconsistent
+// with its own held report, not with a lane move (#989).
 func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayload) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()

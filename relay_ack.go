@@ -144,17 +144,34 @@ func (h *HubServer) acknowledgeRelayPending(machineID string, ack relayAckPayloa
 		key = relayPendingKey(0, ack.JobID)
 		pending, exists = h.r19a.relayPending[key]
 		if !exists {
+			// A legacy ack carries no durable id. The job scan prefers the
+			// pending whose pane the ack still names so two live windows for
+			// one job on different panes never trade acks; only then does a
+			// machine match alone suffice.
 			for candidate, value := range h.r19a.relayPending {
-				if value.event.JobID == ack.JobID {
+				if value.event.JobID == ack.JobID && value.machine == machineID && value.pane == ack.Pane {
 					key, pending, exists = candidate, value, true
 					break
 				}
 			}
+			if !exists {
+				for candidate, value := range h.r19a.relayPending {
+					if value.event.JobID == ack.JobID && value.machine == machineID {
+						key, pending, exists = candidate, value, true
+						break
+					}
+				}
+			}
 		}
 	}
-	if exists && pending.machine == machineID && pending.pane == ack.Pane {
-		delete(h.r19a.relayPending, key)
-		return pending, true
+	if !exists || pending.machine != machineID {
+		return relayPending{}, false
 	}
-	return relayPending{}, false
+	// The pane an ack reports is where the node actually delivered. A lane
+	// re-pointed between inject and ack (#989) must not strand the row: the
+	// pane is a destination detail, the machine is the entitlement, so the
+	// ack claims the row under the pane it truly reached.
+	delete(h.r19a.relayPending, key)
+	pending.pane = ack.Pane
+	return pending, true
 }

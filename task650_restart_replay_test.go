@@ -213,7 +213,6 @@ func TestT650LateAckMustMatchTheRow(t *testing.T) {
 		ack     relayAckPayload
 	}{
 		{"other machine", "host-b", relayAckPayload{JobID: directive.JobID, Pane: directive.Pane, OriginalEventID: directive.EventID}},
-		{"other pane", "host-a", relayAckPayload{JobID: directive.JobID, Pane: "wB:p99", OriginalEventID: directive.EventID}},
 		{"other job", "host-a", relayAckPayload{JobID: laneEventTransportID(t650Director, "someone-else"), Pane: directive.Pane, OriginalEventID: directive.EventID}},
 		{"unknown row", "host-a", relayAckPayload{JobID: directive.JobID, Pane: directive.Pane, OriginalEventID: directive.EventID + 50}},
 	} {
@@ -233,9 +232,13 @@ func TestT650LateAckMustMatchTheRow(t *testing.T) {
 			t.Fatalf("%s: unknown_messages=%d, want %d", forged.name, hub.unknownMessages, before+1)
 		}
 	}
-	t650Send(t, hub, "host-a", director, "relay.delivered", relayAckPayload{JobID: directive.JobID, Pane: directive.Pane, OriginalEventID: directive.EventID})
-	if got := fake.deliveredToFor(directive.EventID); got != "host-a/wB:pD8" {
-		t.Fatalf("the matching late ack did not close the row: delivered_to=%q", got)
+	// #989: the pane is where the node actually delivered, not an
+	// entitlement — a lane re-pointed between inject and ack must not strand
+	// the row, so a same-machine ack naming another pane still closes it and
+	// records the pane the pane truly saw.
+	t650Send(t, hub, "host-a", director, "relay.delivered", relayAckPayload{JobID: directive.JobID, Pane: "wB:p99", OriginalEventID: directive.EventID})
+	if got := fake.deliveredToFor(directive.EventID); got != "host-a/wB:p99" {
+		t.Fatalf("a same-machine ack on a moved pane did not close the row: delivered_to=%q, want host-a/wB:p99", got)
 	}
 	// A closed row still only takes a re-ack from where it was sent.
 	before := hub.unknownMessages

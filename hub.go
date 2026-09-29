@@ -1070,6 +1070,16 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 	hasHeartbeatQuota := hubInboundHeartbeatHasQuota(payload)
 	message, ok := parseHubInbound(payload)
 	if !ok {
+		// An undecodable relay ack would otherwise be counted like any other
+		// unknown message; it is a delivery report the hub failed to read, so
+		// name it (#989).
+		var envelope struct {
+			Type string `json:"type"`
+			Kind string `json:"kind"`
+		}
+		if json.Unmarshal(payload, &envelope) == nil && envelope.Type == "event" && (envelope.Kind == "relay.delivered" || envelope.Kind == "relay.unconfirmed") {
+			h.logger.Warn("relay ack could not be decoded", "machine", machineID, "kind", envelope.Kind)
+		}
 		if hasHeartbeatQuota {
 			h.recordRejectedHubQuota(machineID, agent, h.now().UTC())
 		}
@@ -1126,6 +1136,14 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 		h.lastNotes[machineID] = &HubLastNote{Text: "update rejected(smoke) " + message.Version, ReceivedAt: now}
 		h.mu.Unlock()
 	case "event":
+		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
+			// A relay ack carries the machine's word about what its pane
+			// showed, not connection state: a report arriving on a superseded
+			// connection is still this row's answer, and the entitlement
+			// checks inside already bind it to this machine (#989).
+			h.handleRelayAck(machineID, message)
+			return
+		}
 		if !agent.transient && !h.touch(machineID, agent) {
 			h.countUnknownMessage()
 			return
@@ -1225,25 +1243,6 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			resolution := h.resolveIdleWakeOwner(machineID, request.Pane)
 			agent.queueIdleWakeRoute(idleWakeRouteDecision(request, resolution))
 		}
-		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
-			ack, valid := decodeRelayAckPayload(message.Payload)
-			if !valid {
-				h.countUnknownMessage()
-				return
-			}
-			pending, acknowledged := h.acknowledgeRelayPending(machineID, ack)
-			if !acknowledged {
-				// #650: the ack window is memory only. A delivery that outlived
-				// it (unconfirmed first, a restart, a late ack) is still a
-				// delivery, and handoffkeep must hear it or replay re-sends it.
-				if message.Kind != "relay.delivered" || !h.recordLateRelayDelivery(machineID, ack) {
-					h.countUnknownMessage()
-					return
-				}
-			} else if message.Kind == "relay.delivered" {
-				h.markRelayEventDelivered(pending)
-			}
-		}
 		if message.Kind == "relay.held" {
 			held, valid := decodeRelayHeldPayload(message.Payload)
 			if !valid || !h.rememberRelayHeld(machineID, held) {
@@ -1301,6 +1300,48 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 	default:
 		h.countUnknownMessage()
 	}
+}
+
+// handleRelayAck consumes one node's delivery report. It runs above the
+// connection's touch gate: the ack window is memory only (#650), so a
+// relay.delivered that misses it still closes the durable row through
+// recordLateRelayDelivery. Every delivered ack the hub cannot record leaves
+// a WARN naming the reason — a silent drop is how #989's pane-mismatch rows
+// stayed undelivered and replayed at every restart.
+func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
+	received := h.now().UTC()
+	ack, valid := decodeRelayAckPayload(message.Payload)
+	if !valid {
+		h.logger.Warn("relay ack could not be decoded", "machine", machineID, "kind", message.Kind)
+		h.countUnknownMessage()
+		return
+	}
+	pending, acknowledged := h.acknowledgeRelayPending(machineID, ack)
+	if !acknowledged {
+		// A delivery that outlived its window (unconfirmed first, a restart,
+		// a late ack) is still a delivery, and handoffkeep must hear it or
+		// replay re-sends it.
+		if message.Kind != "relay.delivered" || !h.recordLateRelayDelivery(machineID, ack) {
+			if message.Kind == "relay.unconfirmed" {
+				h.logger.Warn("relay unconfirmed report matched no live window", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "reason", ack.Reason)
+			}
+			h.countUnknownMessage()
+			return
+		}
+	} else if message.Kind == "relay.delivered" {
+		if !h.markRelayEventDelivered(pending) {
+			// The window is spent but the durable write failed; the row is
+			// still undelivered, and claiming it in the feed would hide that.
+			h.countUnknownMessage()
+			return
+		}
+	} else {
+		// An unconfirmed report retires the attempt it answered; the durable
+		// row stays undelivered for replay. Logging it keeps a dropped-ack
+		// diagnosis greppable.
+		h.logger.Warn("relay delivery unconfirmed", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "event_id", pending.eventID, "reason", ack.Reason)
+	}
+	h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: received})
 }
 
 type hubInbound struct {
