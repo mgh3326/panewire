@@ -252,6 +252,16 @@ type relayLaneEventResult struct {
 // A nil sender is the authenticated HTTP ingress: it uses the same durable
 // and injection machinery, but has no producer node to acknowledge.
 func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) relayLaneEventResult {
+	return h.relayLaneEventContext(context.Background(), event, sender)
+}
+
+// relayLaneEventContext is relayLaneEvent with a caller context governing its
+// handoffkeep writes. The update-overdue flush is the only caller: it passes
+// the close context so Close cancels a sink write stuck on a hung
+// handoffkeep. Every other caller comes through relayLaneEvent above and
+// keeps the unchanged context.Background() behaviour — hub shutdown never
+// cancels a lane-event relay it does not own.
+func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEventPayload, sender *hubAgent) relayLaneEventResult {
 	ingress := sender == nil
 	if event.OwnerLane == "" || event.EventID == "" || event.Text == "" {
 		return relayLaneEventResult{}
@@ -313,9 +323,14 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 		// the durable source record; the resolved route remains injection-only.
 		persistRoute = reportRelayRoute{Machine: event.Host, Pane: ""}
 	}
-	stored, status, persisted := h.persistRelayEventRecord("lane.event", event, persistRoute)
+	stored, status, persisted := h.persistRelayEventRecord(ctx, "lane.event", event, persistRoute)
 	if !persisted {
-		h.logger.Error("lane.event persistence failed; handoffkeep schema v7 must be deployed before this hub", "lane", event.OwnerLane, "producer_event_id", event.EventID, "status", status)
+		if ctx.Err() == nil {
+			// A write abandoned because Close cancelled the caller's context
+			// is not a schema failure; the honest signal stays in the Warn
+			// inside persistRelayEventRecord.
+			h.logger.Error("lane.event persistence failed; handoffkeep schema v7 must be deployed before this hub", "lane", event.OwnerLane, "producer_event_id", event.EventID, "status", status)
+		}
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnpersisted("lane.event", event)
 		return relayLaneEventResult{PersistFailed: true}
@@ -355,7 +370,7 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 		return relayLaneEventResult{ID: stored.ID, AlreadyDelivered: true}
 	}
 	if route.Sink {
-		if err := h.handoffkeep.markDelivered(context.Background(), stored.ID, "sink", "sink:"+event.OwnerLane); err != nil {
+		if err := h.handoffkeep.markDelivered(ctx, stored.ID, "sink", "sink:"+event.OwnerLane); err != nil {
 			h.logger.Warn("sink relay delivery was not recorded", "event_id", stored.ID, "lane", event.OwnerLane)
 			// The durable row remains undelivered for operator observation, but a
 			// sink never falls back to a pane injection.
@@ -380,7 +395,7 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 		// never be injected after the cancel answered. On a store read error
 		// the row stays queued for replay rather than being injected blind.
 		if chatID, err := strconv.ParseInt(match[1], 10, 64); err == nil && h.chatReplayDisposition(chatID) != "inject" {
-			if err := h.handoffkeep.markDelivered(context.Background(), stored.ID, "hub", "chat-terminal"); err != nil {
+			if err := h.handoffkeep.markDelivered(ctx, stored.ID, "hub", "chat-terminal"); err != nil {
 				h.logger.Warn("terminal chat relay row was not retired", "event_id", stored.ID)
 			}
 			h.forgetRelayEvent(key)
@@ -440,7 +455,7 @@ func (h *HubServer) relayJobEventFrom(senderMachine, kind string, event hubJobEv
 		h.broadcastRelayUnrouted(event)
 		return
 	}
-	stored, status, persisted := h.persistRelayEventRecord(kind, event, route)
+	stored, status, persisted := h.persistRelayEventRecord(context.Background(), kind, event, route)
 	if !persisted {
 		// The event must stay resendable: the node still holds it, and its
 		// next attempt has to survive this hub's in-memory dedupe.
@@ -838,18 +853,21 @@ func (h *HubServer) recordRelayAttempt(pending relayPending) {
 // 201 (new row) and 200 (the existing row for this idempotency key) are both
 // success, so a resend is acknowledged exactly like a first send.
 func (h *HubServer) persistRelayEvent(kind string, event hubJobEventPayload, route reportRelayRoute) (int64, bool) {
-	stored, _, persisted := h.persistRelayEventRecord(kind, event, route)
+	stored, _, persisted := h.persistRelayEventRecord(context.Background(), kind, event, route)
 	return stored.ID, persisted
 }
 
 // persistRelayEventRecord returns handoffkeep's own row and reply status
 // alongside the id, because the id alone cannot tell a first write from a row
-// the parent pane already received.
-func (h *HubServer) persistRelayEventRecord(kind string, event hubJobEventPayload, route reportRelayRoute) (handoffkeepRelayEvent, int, bool) {
+// the parent pane already received. The ctx belongs to the caller: every
+// ordinary relay passes context.Background and is untouched by hub Close;
+// only the update-overdue flush passes the close context it is required to
+// answer.
+func (h *HubServer) persistRelayEventRecord(ctx context.Context, kind string, event hubJobEventPayload, route reportRelayRoute) (handoffkeepRelayEvent, int, bool) {
 	if h.handoffkeep == nil {
 		return handoffkeepRelayEvent{}, 0, true
 	}
-	stored, status, err := h.handoffkeep.appendEvent(context.Background(), h.relayEventRequest(kind, event, route))
+	stored, status, err := h.handoffkeep.appendEvent(ctx, h.relayEventRequest(kind, event, route))
 	if err != nil {
 		h.logger.Warn("relay event was not persisted", "job", event.JobID, "kind", kind, "status", status)
 		return handoffkeepRelayEvent{}, status, false

@@ -121,9 +121,11 @@ func (g *t998GatedFlushHK) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // AC3: a stream of startUpdateOverdueFlush calls racing Close under -race.
-// An in-flight flush is waited out, no flush starts once Close has begun
-// (counted as POSTs reaching the fake after the log file closed), and no
-// record is written to the closed file.
+// Close cancels the in-flight flush's handoffkeep write instead of waiting
+// the gate out, so it returns promptly; the flush goroutine is still drained
+// before the log file closes, no flush starts once Close has begun (counted
+// as POSTs reaching the fake after the log file closed), and no record is
+// written to the closed file.
 func TestT998UpdateOverdueFlushRacesClose(t *testing.T) {
 	fake := &fakeHandoffkeep{nextID: 100, status: http.StatusCreated, rows: map[string]*handoffkeepRelayEvent{}}
 	var logFileClosed atomic.Bool
@@ -131,6 +133,11 @@ func TestT998UpdateOverdueFlushRacesClose(t *testing.T) {
 	gated := &t998GatedFlushHK{fake: fake, release: make(chan struct{}), started: make(chan struct{}), closed: &logFileClosed, late: &latePosts, total: &totalPosts}
 	server := httptest.NewServer(gated)
 	t.Cleanup(server.Close)
+	// A RED run must fail fast, not hang in server.Close on the parked
+	// handler: registered after the server, this cleanup runs first and
+	// releases the gate on any failure path (#998 tester NICE-2).
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(gated.release) }) })
 	client, err := newHandoffkeepRelayClient(hubHandoffkeepEnv{URL: server.URL, Token: "test-token"}, server.Client())
 	if err != nil {
 		t.Fatal(err)
@@ -170,15 +177,18 @@ func TestT998UpdateOverdueFlushRacesClose(t *testing.T) {
 			}
 		}()
 	}
+	// The parked write is cancelled by Close, so Close returns promptly even
+	// though the gate is never released inside the test; the bound is what a
+	// regression (a flush deaf to the close signal) would blow through.
 	select {
 	case err := <-closed:
-		t.Fatalf("Close returned %v while a flush was in flight", err)
-	case <-time.After(200 * time.Millisecond):
+		if err != nil {
+			t.Fatalf("Close=%v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return once the in-flight flush was cancelled")
 	}
-	close(gated.release)
-	if err := <-closed; err != nil {
-		t.Fatalf("Close=%v", err)
-	}
+	releaseOnce.Do(func() { close(gated.release) })
 	logFileClosed.Store(true)
 	wg.Wait()
 
