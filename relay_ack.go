@@ -164,7 +164,11 @@ func (h *HubServer) acknowledgeRelayPending(machineID string, ack relayAckPayloa
 			}
 		}
 	}
-	if !exists || pending.machine != machineID {
+	// The id-keyed lookup never compared jobs, so an ack whose id names
+	// this row but whose job_id names another event would close it. The
+	// window keeps the job binding the late path keeps; a mismatch falls
+	// through to recordLateRelayDelivery, which re-checks it.
+	if !exists || pending.machine != machineID || (ack.JobID != "" && pending.event.JobID != ack.JobID) {
 		return relayPending{}, false
 	}
 	// The pane an ack reports is where the node actually delivered. A lane
