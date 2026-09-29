@@ -502,3 +502,254 @@ func TestLanesAuditTextRender(t *testing.T) {
 		}
 	}
 }
+
+// t959SiblingPairs adapts --sibling A=B strings to the builder's variadic
+// pair form so table rows read like the CLI flag.
+func t959SiblingPairs(pairs ...string) [][2]string {
+	parsed := make([][2]string, 0, len(pairs))
+	for _, pair := range pairs {
+		left, right, _ := strings.Cut(pair, "=")
+		parsed = append(parsed, [2]string{left, right})
+	}
+	return parsed
+}
+
+// TestLanesAuditSiblingSessionMismatch pins the --sibling check: a dead lane
+// whose pane provably lives on a sibling daemon of the same host stays dead
+// but is annotated reason=session_mismatch sibling=<B>. The check never
+// rescues a verdict — dead stays dead, alive and indeterminate never gain a
+// sibling — and an incomplete sibling observation is skipped rather than
+// guessed.
+func TestLanesAuditSiblingSessionMismatch(t *testing.T) {
+	present := t509Session("w1:p1")
+	other := t509Session("w2:p7")
+	cases := []struct {
+		name        string
+		lane        hubLaneProjection
+		nodes       []lanesAuditNodeWire
+		siblings    [][2]string
+		wantVerdict string
+		wantReason  string
+		wantSibling string
+	}{
+		{name: "pane on sibling reports session_mismatch",
+			lane: t509Lane("lane-a", "machine-a", "w1:p1"),
+			nodes: []lanesAuditNodeWire{
+				t509Node("machine-a", "connected", t509FreshSnapshot("[]")),
+				t509Node("machine-b", "connected", t509FreshSnapshot("["+present+"]")),
+			},
+			siblings:    t959SiblingPairs("machine-a=machine-b"),
+			wantVerdict: lanesAuditVerdictDead, wantReason: lanesAuditReasonSessionMismatch, wantSibling: "machine-b"},
+		{name: "no sibling flag leaves bare dead verdict",
+			lane: t509Lane("lane-a", "machine-a", "w1:p1"),
+			nodes: []lanesAuditNodeWire{
+				t509Node("machine-a", "connected", t509FreshSnapshot("[]")),
+				t509Node("machine-b", "connected", t509FreshSnapshot("["+present+"]")),
+			},
+			wantVerdict: lanesAuditVerdictDead},
+		{name: "pair order is irrelevant",
+			lane: t509Lane("lane-a", "machine-a", "w1:p1"),
+			nodes: []lanesAuditNodeWire{
+				t509Node("machine-a", "connected", t509FreshSnapshot("[]")),
+				t509Node("machine-b", "connected", t509FreshSnapshot("["+present+"]")),
+			},
+			siblings:    t959SiblingPairs("machine-b=machine-a"),
+			wantVerdict: lanesAuditVerdictDead, wantReason: lanesAuditReasonSessionMismatch, wantSibling: "machine-b"},
+		{name: "sibling group is transitive",
+			lane: t509Lane("lane-a", "machine-a", "w1:p1"),
+			nodes: []lanesAuditNodeWire{
+				t509Node("machine-a", "connected", t509FreshSnapshot("[]")),
+				t509Node("machine-b", "connected", t509FreshSnapshot("["+other+"]")),
+				t509Node("machine-c", "connected", t509FreshSnapshot("["+present+"]")),
+			},
+			siblings:    t959SiblingPairs("machine-a=machine-b", "machine-b=machine-c"),
+			wantVerdict: lanesAuditVerdictDead, wantReason: lanesAuditReasonSessionMismatch, wantSibling: "machine-c"},
+		{name: "sorted sibling order wins when several match",
+			lane: t509Lane("lane-a", "machine-a", "w1:p1"),
+			nodes: []lanesAuditNodeWire{
+				t509Node("machine-a", "connected", t509FreshSnapshot("[]")),
+				t509Node("machine-b", "connected", t509FreshSnapshot("["+present+"]")),
+				t509Node("machine-c", "connected", t509FreshSnapshot("["+present+"]")),
+			},
+			siblings:    t959SiblingPairs("machine-c=machine-a", "machine-b=machine-a"),
+			wantVerdict: lanesAuditVerdictDead, wantReason: lanesAuditReasonSessionMismatch, wantSibling: "machine-b"},
+		{name: "incomplete sibling observation never counts",
+			lane: t509Lane("lane-a", "machine-a", "w1:p1"),
+			nodes: []lanesAuditNodeWire{
+				t509Node("machine-a", "connected", t509FreshSnapshot("[]")),
+				t509Node("machine-b", "stale", t509FreshSnapshot("["+present+"]")),
+			},
+			siblings:    t959SiblingPairs("machine-a=machine-b"),
+			wantVerdict: lanesAuditVerdictDead},
+		{name: "truncated sibling observation never counts",
+			lane: t509Lane("lane-a", "machine-a", "w1:p1"),
+			nodes: []lanesAuditNodeWire{
+				t509Node("machine-a", "connected", t509FreshSnapshot("[]")),
+				t509Node("machine-b", "connected", t509Snapshot(hubSnapshotStatusOK, true, false, t509Now.Add(-10*time.Second), "["+present+"]")),
+			},
+			siblings:    t959SiblingPairs("machine-a=machine-b"),
+			wantVerdict: lanesAuditVerdictDead},
+		{name: "sibling absent from nodes never counts",
+			lane:        t509Lane("lane-a", "machine-a", "w1:p1"),
+			nodes:       []lanesAuditNodeWire{t509Node("machine-a", "connected", t509FreshSnapshot("[]"))},
+			siblings:    t959SiblingPairs("machine-a=machine-b"),
+			wantVerdict: lanesAuditVerdictDead},
+		{name: "pane absent from sibling too",
+			lane: t509Lane("lane-a", "machine-a", "w1:p1"),
+			nodes: []lanesAuditNodeWire{
+				t509Node("machine-a", "connected", t509FreshSnapshot("[]")),
+				t509Node("machine-b", "connected", t509FreshSnapshot("["+other+"]")),
+			},
+			siblings:    t959SiblingPairs("machine-a=machine-b"),
+			wantVerdict: lanesAuditVerdictDead},
+		{name: "alive on own machine never gains sibling",
+			lane: t509Lane("lane-a", "machine-a", "w1:p1"),
+			nodes: []lanesAuditNodeWire{
+				t509Node("machine-a", "connected", t509FreshSnapshot("["+present+"]")),
+				t509Node("machine-b", "connected", t509FreshSnapshot("["+present+"]")),
+			},
+			siblings:    t959SiblingPairs("machine-a=machine-b"),
+			wantVerdict: lanesAuditVerdictAlive},
+		{name: "indeterminate observation never gains sibling",
+			lane: t509Lane("lane-a", "machine-a", "w1:p1"),
+			nodes: []lanesAuditNodeWire{
+				t509Node("machine-a", "connected", t509Snapshot(hubSnapshotStatusOK, false, true, t509Now.Add(-10*time.Second), "[]")),
+				t509Node("machine-b", "connected", t509FreshSnapshot("["+present+"]")),
+			},
+			siblings:    t959SiblingPairs("machine-a=machine-b"),
+			wantVerdict: lanesAuditVerdictIndeterminate, wantReason: lanesAuditReasonSnapshotStale},
+		{name: "machine outside every sibling group is unchecked",
+			lane: t509Lane("lane-c", "machine-c", "w1:p1"),
+			nodes: []lanesAuditNodeWire{
+				t509Node("machine-b", "connected", t509FreshSnapshot("["+present+"]")),
+				t509Node("machine-c", "connected", t509FreshSnapshot("[]")),
+			},
+			siblings:    t959SiblingPairs("machine-a=machine-b"),
+			wantVerdict: lanesAuditVerdictDead},
+	}
+	for _, fixture := range cases {
+		t.Run(fixture.name, func(t *testing.T) {
+			result := buildLanesAuditResult([]hubLaneProjection{fixture.lane}, fixture.nodes, t509Now, fixture.siblings...)
+			row, ok := t509Verdicts(result)[fixture.lane.Lane]
+			if !ok {
+				t.Fatalf("lane %q missing from result", fixture.lane.Lane)
+			}
+			if row.Verdict != fixture.wantVerdict {
+				t.Fatalf("verdict=%q want=%q row=%+v", row.Verdict, fixture.wantVerdict, row)
+			}
+			if row.Reason != fixture.wantReason {
+				t.Fatalf("reason=%q want=%q row=%+v", row.Reason, fixture.wantReason, row)
+			}
+			if row.Sibling != fixture.wantSibling {
+				t.Fatalf("sibling=%q want=%q row=%+v", row.Sibling, fixture.wantSibling, row)
+			}
+		})
+	}
+}
+
+// TestLanesAuditSiblingGoldenUnchanged pins the flagless output byte-for-byte
+// against what the pre-change command produced for this exact fixture (the
+// lane whose pane lives on machine-b would gain sibling fields under
+// --sibling, which makes the fixture the sharpest regression shape). The
+// golden literals below were generated by running this fixture through the
+// pre-change code at origin/main (8182c7c). Any byte of drift — a renamed
+// column, an always-present sibling key, a default pair applied without the
+// flag — must fail this test.
+func TestLanesAuditSiblingGoldenUnchanged(t *testing.T) {
+	tokenEnv, _ := t441Envs(t)
+	nodesBody := `{"nodes":[{"machine_id":"machine-a","state":"connected","alert_class":"presence-only","accepting":false,"remote_meta":{},"session_snapshot":` + t509FreshSnapshot("[]") + `},{"machine_id":"machine-b","state":"connected","alert_class":"presence-only","accepting":false,"remote_meta":{},"session_snapshot":` + t509FreshSnapshot("["+t509Session("w1:p1")+"]") + `}]}`
+	lanesBody := `{"lanes":[{"lane":"lane-a","machine":"machine-a","pane":"w1:p1","parent":"","sink":false}],"control_epoch":7}`
+	server := t509HubFixture(t, nil, lanesBody, nodesBody)
+	defer server.Close()
+	wantText := "fetched_at\t2026-09-21T12:00:00Z\n" +
+		"outcome\tdead_lanes\n" +
+		"summary\tlanes=1\tsink_skipped=0\talive=0\tdead=1\tindeterminate=0\n" +
+		"lane\tlane-a\tmachine-a\tw1:p1\tverdict=dead\treason=-\tnode_state=connected\tlast_seen=2026-09-21T11:59:50Z\n"
+	wantJSON := `{"fetched_at":"2026-09-21T12:00:00Z","outcome":"dead_lanes","lanes":[{"lane":"lane-a","machine":"machine-a","pane":"w1:p1","verdict":"dead","node_state":"connected","last_seen":"2026-09-21T11:59:50Z"}],"summary":{"lanes":1,"sink_skipped":0,"alive":0,"dead":1,"indeterminate":0}}` + "\n"
+	var stdout, stderr bytes.Buffer
+	code := runLanesAuditCLI([]string{"--hub-url", server.URL, "--hub-token-env", tokenEnv}, &stdout, &stderr, t509Deps(server))
+	if code != ExitOK {
+		t.Fatalf("text code=%d stderr=%q", code, stderr.String())
+	}
+	if stdout.String() != wantText {
+		t.Fatalf("text output drifted from pre-change bytes:\n got %q\nwant %q", stdout.String(), wantText)
+	}
+	stdout.Reset()
+	code = runLanesAuditCLI([]string{"--hub-url", server.URL, "--hub-token-env", tokenEnv, "--json"}, &stdout, &stderr, t509Deps(server))
+	if code != ExitOK {
+		t.Fatalf("json code=%d stderr=%q", code, stderr.String())
+	}
+	if stdout.String() != wantJSON {
+		t.Fatalf("json output drifted from pre-change bytes:\n got %q\nwant %q", stdout.String(), wantJSON)
+	}
+}
+
+// TestLanesAuditCLISiblingEndToEnd proves the flag reaches the rendered
+// output on both surfaces: the text row gains a trailing sibling=<B> column
+// and the JSON row gains the sibling key, while the verdict stays dead.
+func TestLanesAuditCLISiblingEndToEnd(t *testing.T) {
+	tokenEnv, _ := t441Envs(t)
+	nodesBody := `{"nodes":[{"machine_id":"machine-a","state":"connected","alert_class":"presence-only","accepting":false,"remote_meta":{},"session_snapshot":` + t509FreshSnapshot("[]") + `},{"machine_id":"machine-b","state":"connected","alert_class":"presence-only","accepting":false,"remote_meta":{},"session_snapshot":` + t509FreshSnapshot("["+t509Session("w1:p1")+"]") + `}]}`
+	lanesBody := `{"lanes":[{"lane":"lane-a","machine":"machine-a","pane":"w1:p1","parent":"","sink":false}],"control_epoch":7}`
+	server := t509HubFixture(t, nil, lanesBody, nodesBody)
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	code := runLanesAuditCLI([]string{"--hub-url", server.URL, "--hub-token-env", tokenEnv, "--sibling", "machine-a=machine-b"}, &stdout, &stderr, t509Deps(server))
+	if code != ExitOK {
+		t.Fatalf("text code=%d stderr=%q", code, stderr.String())
+	}
+	for _, want := range []string{"verdict=dead\treason=session_mismatch", "sibling=machine-b"} {
+		if !strings.Contains(stdout.String(), want) {
+			t.Fatalf("text output missing %q:\n%s", want, stdout.String())
+		}
+	}
+	stdout.Reset()
+	code = runLanesAuditCLI([]string{"--hub-url", server.URL, "--hub-token-env", tokenEnv, "--sibling=machine-a=machine-b", "--json"}, &stdout, &stderr, t509Deps(server))
+	if code != ExitOK {
+		t.Fatalf("json code=%d stderr=%q", code, stderr.String())
+	}
+	var result lanesAuditResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &result); err != nil {
+		t.Fatalf("output not JSON: %v %q", err, stdout.String())
+	}
+	row := t509Verdicts(result)["lane-a"]
+	if row.Verdict != lanesAuditVerdictDead || row.Reason != lanesAuditReasonSessionMismatch || row.Sibling != "machine-b" {
+		t.Fatalf("row=%+v", row)
+	}
+	if !strings.Contains(stdout.String(), `"sibling":"machine-b"`) {
+		t.Fatalf("json output missing sibling key: %q", stdout.String())
+	}
+}
+
+// TestLanesAuditSiblingFlagUsage covers the option's edges: the usage path
+// advertises --sibling, and malformed values — no '=', an empty side, a
+// self-pair, or a side that is not a machine id — exit with the usage code
+// and a message instead of reaching the hub.
+func TestLanesAuditSiblingFlagUsage(t *testing.T) {
+	tokenEnv, _ := t441Envs(t)
+	server := t509HubFixture(t, nil, `{"lanes":[]}`, `{"nodes":[]}`)
+	defer server.Close()
+	var stdout, stderr bytes.Buffer
+	code := runLanesAuditCLI([]string{"--bogus"}, &stdout, &stderr, t509Deps(server))
+	if code != ExitUsage || !strings.Contains(stderr.String(), "--sibling") {
+		t.Fatalf("usage path lost --sibling: code=%d stderr=%q", code, stderr.String())
+	}
+	for _, args := range [][]string{
+		{"--sibling", "machine-a", "--hub-url", server.URL, "--hub-token-env", tokenEnv},
+		{"--sibling=machine-a", "--hub-url", server.URL, "--hub-token-env", tokenEnv},
+		{"--sibling", "=machine-b", "--hub-url", server.URL, "--hub-token-env", tokenEnv},
+		{"--sibling=machine-a=", "--hub-url", server.URL, "--hub-token-env", tokenEnv},
+		{"--sibling", "machine-a=machine-a", "--hub-url", server.URL, "--hub-token-env", tokenEnv},
+		{"--sibling=Machine-A=machine-b", "--hub-url", server.URL, "--hub-token-env", tokenEnv},
+		{"--sibling", "machine-a=machine-b=machine-c", "--hub-url", server.URL, "--hub-token-env", tokenEnv},
+	} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := runLanesAuditCLI(args, &stdout, &stderr, t509Deps(server)); code != ExitUsage {
+			t.Fatalf("args=%v code=%d want usage", args, code)
+		}
+		if !strings.Contains(stderr.String(), "--sibling") {
+			t.Fatalf("args=%v stderr missing usage with --sibling: %q", args, stderr.String())
+		}
+	}
+}

@@ -22,7 +22,7 @@ const jobsUsage = `Usage:
 const sessionsUsage = "Usage: panewire sessions find LABEL [--contains] [--machine MACHINE] [--json] " + hubCredentialUsage
 const fleetCensusUsage = "Usage: panewire fleet-census [--json] [--grace D] [--jobs-root PATH] [--herdr-socket PATH] [--machine-id ID] [--node-env FILE] [" + hubCredentialUsage + "]"
 const sessionReapUsage = "Usage: panewire session-reap [--json] [--grace D] [--jobs-root PATH] [--herdr-socket PATH]"
-const lanesAuditUsage = "Usage: panewire lanes-audit [--json] " + hubCredentialUsage
+const lanesAuditUsage = "Usage: panewire lanes-audit [--json] [--sibling A=B] " + hubCredentialUsage
 
 var (
 	lanesValueFlags       = hubCLIFlagSet("--hub-url --hub-token-env --hub-cf-env --machine --pane --parent --lane --expect-machine --expect-pane --expect-epoch")
@@ -33,8 +33,8 @@ var (
 	fleetCensusKnownFlags = hubCLIFlagSet("--json --grace --jobs-root --herdr-socket --machine-id --node-env --hub-url --hub-token-env --hub-cf-env")
 	sessionReapValueFlags = hubCLIFlagSet("--grace --jobs-root --herdr-socket")
 	sessionReapKnownFlags = hubCLIFlagSet("--json --grace --jobs-root --herdr-socket")
-	lanesAuditValueFlags  = hubCLIFlagSet("--hub-url --hub-token-env --hub-cf-env")
-	lanesAuditKnownFlags  = hubCLIFlagSet("--json --hub-url --hub-token-env --hub-cf-env")
+	lanesAuditValueFlags  = hubCLIFlagSet("--hub-url --hub-token-env --hub-cf-env --sibling")
+	lanesAuditKnownFlags  = hubCLIFlagSet("--json --hub-url --hub-token-env --hub-cf-env --sibling")
 )
 
 func hubCLIFlagSet(names string) map[string]bool {
