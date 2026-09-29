@@ -824,8 +824,10 @@ func (h *HubServer) bumpRelayEventAttempts(kind string, event hubJobEventPayload
 
 // recordRelayAttempt is the ack-timeout half of the same counter: an injection
 // nobody confirmed is a spent attempt, and the startup replay gate reads it.
+// The idempotency POST needs no row id: a window opened before the durable id
+// was assigned still spends the row's attempt.
 func (h *HubServer) recordRelayAttempt(pending relayPending) {
-	if h.handoffkeep == nil || pending.eventID == 0 || pending.kind == "" {
+	if h.handoffkeep == nil || pending.kind == "" {
 		return
 	}
 	h.bumpRelayEventAttempts(pending.kind, pending.event, reportRelayRoute{Machine: pending.machine, Pane: pending.pane})
@@ -872,6 +874,19 @@ func (h *HubServer) persistRelayEventRecord(kind string, event hubJobEventPayloa
 // failure here is operator signal only; it must never stall the relay path.
 // It reports whether delivered_at was written (or there is no durable row).
 func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
+	if pending.eventID == 0 && pending.kind != "" {
+		// #989: an inject that left before its durable id was assigned still
+		// owns the row it was persisted as. The dedupe maps keep that binding
+		// until this acknowledgement retires it, so the ack can still name
+		// the row the node never saw numbered.
+		key := relayEventDedupeKey(pending.kind, pending.event)
+		h.mu.Lock()
+		pending.eventID = h.lanePersisted[key]
+		if pending.eventID == 0 {
+			pending.eventID = h.relayDedupe[key]
+		}
+		h.mu.Unlock()
+	}
 	// Cleanup belongs to the successful relay.delivered acknowledgement, not
 	// to handoffkeep. Pre-R20 deployments still need bounded local state.
 	h.mu.Lock()
@@ -880,7 +895,17 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 		h.forgetLanePersistedLocked(relayEventDedupeKey("lane.event", pending.event))
 	}
 	h.mu.Unlock()
-	if h.handoffkeep == nil || pending.eventID == 0 {
+	if h.handoffkeep == nil {
+		return true
+	}
+	if pending.eventID == 0 {
+		// A bare pre-R20 pending has no row to name. For every persisted kind
+		// the maps above should have answered; when they cannot, say so
+		// instead of letting the row stay undelivered silently.
+		if pending.kind != "" {
+			h.logger.Warn("relay delivery acknowledged but the durable row could not be named", "job", pending.event.JobID, "kind", pending.kind, "machine", pending.machine, "pane", pending.pane)
+			return false
+		}
 		return true
 	}
 	if err := h.handoffkeep.markDelivered(context.Background(), pending.eventID, pending.machine, pending.pane); err != nil {
@@ -896,28 +921,59 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 // loses all of them. Discarding the ack in those cases left delivered_at NULL
 // on rows the pane had already shown, and every restart replayed them. The
 // row itself is the authority for whether this node may close it: the ack
-// must name the row's transport id and arrive from the row's destination or
-// the owner lane's current route.
+// must name the row (by durable id, or by the lane.event transport id its
+// job_id echoes) and arrive from a machine the row was ever routed to — the
+// pane a node reports is where the inject actually landed, and a lane
+// re-pointed between forward and ack must not strand the row (#989). Every
+// rejection leaves a WARN naming the reason.
 func (h *HubServer) recordLateRelayDelivery(machineID string, ack relayAckPayload) bool {
-	if h.handoffkeep == nil || ack.OriginalEventID < 1 {
+	if h.handoffkeep == nil {
 		return false
 	}
-	record, found, err := h.handoffkeep.relayEvent(context.Background(), ack.OriginalEventID)
-	if err != nil {
-		h.logger.Warn("late relay delivery could not be checked", "event_id", ack.OriginalEventID, "machine", machineID)
-		return false
-	}
-	if !found {
-		return false
+	var record handoffkeepRelayEvent
+	var found bool
+	if ack.OriginalEventID >= 1 {
+		var err error
+		record, found, err = h.handoffkeep.relayEvent(context.Background(), ack.OriginalEventID)
+		if err != nil {
+			h.logger.Warn("late relay delivery could not be checked", "event_id", ack.OriginalEventID, "machine", machineID)
+			return false
+		}
+		if !found {
+			h.logger.Warn("relay delivery ack named an unknown durable row", "event_id", ack.OriginalEventID, "job", ack.JobID, "machine", machineID, "pane", ack.Pane)
+			return false
+		}
+	} else {
+		// The inject left before its durable id was known, so the ack's
+		// original_event_id is empty. For lane.event rows the transport id
+		// still names exactly one row; other kinds cannot be bound to a row
+		// from an id-less ack at all.
+		var err error
+		record, found, err = h.relayEventByTransportID(context.Background(), ack.JobID)
+		if err != nil {
+			h.logger.Warn("late relay delivery could not be resolved", "job", ack.JobID, "machine", machineID)
+			return false
+		}
+		if !found {
+			h.logger.Warn("relay delivery ack resolved to no durable row", "job", ack.JobID, "machine", machineID, "pane", ack.Pane)
+			return false
+		}
 	}
 	event := relayEventFromRecord(record)
-	if event.JobID != ack.JobID {
+	if ack.JobID != event.JobID && ack.JobID != record.JobID {
+		// The ack claims a different event than the row stores. For lane.event
+		// rows the transport id is the (lane, event_id) binding — accepting it
+		// is what lets a re-pointed lane still close its own row.
+		h.logger.Warn("relay delivery ack job mismatch", "event_id", record.ID, "ack_job", ack.JobID, "row_job", record.JobID, "machine", machineID, "pane", ack.Pane)
 		return false
 	}
 	route, _, _ := h.resolveRelayRoute(record.Kind, event)
-	fromRow := record.Machine == machineID && record.PaneID == ack.Pane
-	fromRoute := !route.Sink && route.Machine == machineID && route.Pane == ack.Pane
-	if !fromRow && !fromRoute {
+	// Only the machine is an entitlement. The pane the node delivered to is
+	// where its inject named at the time; the row's stored pane is the first
+	// route's and is never updated, and the current route may have moved
+	// again. A pane difference alone must not drop the ack.
+	if record.Machine != machineID && (route.Sink || route.Machine != machineID) {
+		h.logger.Warn("relay delivery ack from a machine the row was not routed to", "event_id", record.ID, "ack_machine", machineID, "row_machine", record.Machine, "route_machine", route.Machine, "ack_pane", ack.Pane)
 		return false
 	}
 	if record.DeliveredAt != "" {
@@ -926,6 +982,34 @@ func (h *HubServer) recordLateRelayDelivery(machineID string, ack relayAckPayloa
 	// Only a durable write accepts the ack: a rejected one leaves the row
 	// undelivered, and broadcasting it as delivered would hide that.
 	return h.markRelayEventDelivered(relayPending{machine: machineID, pane: ack.Pane, eventID: record.ID, kind: record.Kind, event: event})
+}
+
+// relayEventByTransportID resolves a lane.event row for an ack that carries
+// no durable row id: the row's stored job_id is the transport id the inject
+// echoed back.
+func (h *HubServer) relayEventByTransportID(ctx context.Context, jobID string) (handoffkeepRelayEvent, bool, error) {
+	var afterID int64
+	for {
+		pageStart := afterID
+		records, err := h.handoffkeep.listRelayEvents(ctx, "lane.event", afterID, handoffkeepReplayLimit)
+		if err != nil {
+			return handoffkeepRelayEvent{}, false, err
+		}
+		for _, record := range records {
+			if record.JobID == jobID || laneEventTransportID(record.OwnerLane, record.EventID) == jobID {
+				return record, true, nil
+			}
+			if record.ID > afterID {
+				afterID = record.ID
+			}
+		}
+		if len(records) < handoffkeepReplayLimit {
+			return handoffkeepRelayEvent{}, false, nil
+		}
+		if afterID <= pageStart {
+			return handoffkeepRelayEvent{}, false, nil
+		}
+	}
 }
 
 // relayEventFromRecord rebuilds the relay payload a durable row stands for.

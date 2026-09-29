@@ -911,8 +911,17 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 					if err := store.RecordRelayDelivered(parent, item.Lane, item.EventID, item.Pane, relayPayloadFingerprint(item.Text), now); err != nil {
 						manager.client.warnMessage("relay delivery was not recorded for dedupe")
 					}
+				} else {
+					// #989: a delivered item that cannot name its row must not
+					// pass silently — this skip is what left panes shown but
+					// relay_delivered empty.
+					manager.client.warnMessage(fmt.Sprintf("relay delivery was not recorded for dedupe: no lane identity (event_id=%d pane=%s)", item.EventID, item.Pane))
 				}
 				_, _ = store.DeleteRelayHeld(parent, item.EventID)
+			} else if item.EventID == 0 {
+				manager.client.warnMessage(fmt.Sprintf("relay delivery was not recorded for dedupe: inject carried no durable event id (lane=%q pane=%s)", item.Lane, item.Pane))
+			} else {
+				manager.client.warnMessage("relay delivery was not recorded for dedupe: no relay store")
 			}
 			// final_text is the row's own text, not the nonce-prefixed
 			// batch blob that was typed: #687 delivers per member, and the
