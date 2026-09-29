@@ -15,7 +15,8 @@ const laneStallSweepBudget = 20 * time.Second
 
 // laneStallObservation is one sweep's view of a single lane: every undelivered
 // durable row that still counts against it (not retired, attempts below the
-// replay bound), the oldest such row, and how many active jobs make the lane
+// replay bound), the oldest such row, how many of those rows sit in the held
+// projection waiting on a busy pane, and how many active jobs make the lane
 // "in use". A lane without active work is never stalled.
 type laneStallObservation struct {
 	lane             string
@@ -25,6 +26,7 @@ type laneStallObservation struct {
 	oldestEventID    int64
 	oldestReceivedAt string
 	undelivered      int
+	heldCount        int
 	activeJobs       int
 }
 
@@ -65,14 +67,34 @@ func (h *HubServer) startLaneStallSweep(now time.Time) {
 	if !h.laneStallMu.TryLock() {
 		return
 	}
+	// The check sits between TryLock and the WaitGroup Add so a launch racing
+	// Close either holds the mutex before it (Close waits the run out) or
+	// observes laneStallClosing and never counts against Wait.
+	if h.laneStallClosing {
+		h.laneStallMu.Unlock()
+		return
+	}
 	h.laneStallSweeps.Add(1)
 	go func() {
 		defer h.laneStallSweeps.Done()
 		defer h.laneStallMu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), laneStallSweepBudget)
+		ctx, cancel := context.WithTimeout(h.laneStallBaseContext(), laneStallSweepBudget)
 		defer cancel()
 		h.sweepLaneStalls(ctx, now)
 	}()
+}
+
+// laneStallBaseContext anchors a run's budget to the RunMaintenance context
+// so SIGTERM shortens an in-flight observation. A hub that never ran
+// maintenance — unit tests driving Sweep directly — falls back to
+// context.Background.
+func (h *HubServer) laneStallBaseContext() context.Context {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.maintenanceCtx != nil {
+		return h.maintenanceCtx
+	}
+	return context.Background()
 }
 
 // sweepLaneStalls is the background half of the lane-stall alarm. A non-sink
@@ -111,15 +133,45 @@ func (h *HubServer) sweepLaneStalls(ctx context.Context, now time.Time) {
 		notifications = append(notifications, h.observeHubAlertLocked(now, key, obs.stalled, obs.problemSince, hubAlertReasonLaneStalled, "relay.lane_stalled", h.gracePeriod)...)
 		state = h.alerts[key]
 		activated := state != nil && state.active && !wasActive
+		obs.heldCount = h.laneHeldCountLocked(lane)
+		if laneStallAlertInactive(state) {
+			// Nothing is open, owed, or half-accumulated: drop the entry so
+			// an ephemeral lane does not stay a candidate forever. An open
+			// episode or an unproduced recovery keeps its entry — the
+			// recovery notification's dispatch still needs it.
+			delete(h.alerts, key)
+		}
 		h.mu.Unlock()
 		if activated {
 			// One Warn and one broadcast per stall episode, at the moment the
 			// dampened alert activates.
-			h.logger.Warn("relay lane stalled", "lane", obs.lane, "oldest_event_id", obs.oldestEventID, "oldest_received_at", obs.oldestReceivedAt, "undelivered_count", obs.undelivered, "active_jobs", obs.activeJobs)
+			h.logger.Warn("relay lane stalled", "lane", obs.lane, "oldest_event_id", obs.oldestEventID, "oldest_received_at", obs.oldestReceivedAt, "undelivered_count", obs.undelivered, "held_count", obs.heldCount, "active_jobs", obs.activeJobs)
 			h.broadcastLaneStalled(obs)
 		}
 	}
 	h.dispatchHubNotifications(notifications)
+}
+
+// laneHeldCountLocked counts the lane's undelivered rows currently held for a
+// busy pane — present in the h.relayHeld projection. Held rows still count
+// toward the stall; the number only annotates the alarm so an operator can
+// tell "nothing is listening" from "a pane is busy". The caller holds mu.
+func (h *HubServer) laneHeldCountLocked(lane string) int {
+	count := 0
+	for _, held := range h.relayHeld {
+		if held.Lane == lane {
+			count++
+		}
+	}
+	return count
+}
+
+// laneStallAlertInactive reports whether a lane-stall entry carries nothing
+// worth keeping: no open episode, no recovery owed or already queued for
+// dispatch, and no debounce progress a fresh entry would lose.
+func laneStallAlertInactive(state *hubAlertState) bool {
+	return state != nil && !state.active && !state.recoveryNeeded && !state.recoveryPending &&
+		state.badRuns == 0 && state.badSince.IsZero() && state.clearRuns == 0
 }
 
 // laneStallCandidates enumerates the lanes a stall could ever be declared for:
@@ -211,7 +263,8 @@ func (h *HubServer) broadcastLaneStalled(obs laneStallObservation) {
 		OldestEventID    int64  `json:"oldest_event_id"`
 		OldestReceivedAt string `json:"oldest_received_at"`
 		UndeliveredCount int    `json:"undelivered_count"`
+		HeldCount        int    `json:"held_count"`
 		ActiveJobs       int    `json:"active_jobs"`
-	}{Lane: obs.lane, OldestEventID: obs.oldestEventID, OldestReceivedAt: obs.oldestReceivedAt, UndeliveredCount: obs.undelivered, ActiveJobs: obs.activeJobs})
+	}{Lane: obs.lane, OldestEventID: obs.oldestEventID, OldestReceivedAt: obs.oldestReceivedAt, UndeliveredCount: obs.undelivered, HeldCount: obs.heldCount, ActiveJobs: obs.activeJobs})
 	h.broadcast(hubEvent{Kind: "relay.lane_stalled", Payload: payload, Received: h.now().UTC()})
 }

@@ -476,11 +476,20 @@ type HubServer struct {
 	updateOverdueFlushMu sync.Mutex
 	// updateOverdueFlushes tracks background flushes (fixtures wait on it).
 	updateOverdueFlushes sync.WaitGroup
-	// laneStallMu is TryLock'd so at most one lane-stall observation runs;
-	// laneStallSweeps lets Close wait out an in-flight run (fixtures too).
-	laneStallMu     sync.Mutex
-	laneStallSweeps sync.WaitGroup
-	stallBeats      map[string]*hubStallBeatState
+	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
+	// is held for the run's whole life: once Close has taken it and set
+	// laneStallClosing, no new run can start and any in-flight one is already
+	// over. laneStallSweeps lets Close wait out an in-flight run (fixtures
+	// too).
+	laneStallMu      sync.Mutex
+	laneStallClosing bool
+	laneStallSweeps  sync.WaitGroup
+	// maintenanceCtx is the RunMaintenance context each lane-stall run
+	// derives its budget from, so SIGTERM shortens an in-flight observation.
+	// It stays nil when only tests drive Sweep, which then falls back to
+	// context.Background. Guarded by mu.
+	maintenanceCtx context.Context
+	stallBeats     map[string]*hubStallBeatState
 	// sessionReap keeps the latest session-reap (#603) report per machine.
 	sessionReap map[string]*hubSessionReapRecord
 }
@@ -670,10 +679,17 @@ func validHubToken(token string) bool {
 	return token != "" && len(token) <= 512 && !strings.ContainsAny(token, "\x00\r\n\t ")
 }
 
-// Close waits out an in-flight lane-stall observation (it still logs), then
-// releases the optional --log-file sink. The hub serves for the process
-// lifetime, so this is for the CLI shutdown path and tests that stop a hub.
+// Close bars new lane-stall runs, waits out an in-flight observation (it
+// still logs), then releases the optional --log-file sink. The hub serves for
+// the process lifetime, so this is for the CLI shutdown path and tests that
+// stop a hub.
 func (h *HubServer) Close() error {
+	// The mutex is held for a run's whole life, so taking it here waits the
+	// run out; the flag it then leaves set keeps every later TryLock from
+	// counting a fresh run against the WaitGroup after Close has begun.
+	h.laneStallMu.Lock()
+	h.laneStallClosing = true
+	h.laneStallMu.Unlock()
 	h.laneStallSweeps.Wait()
 	if h.logFile == nil {
 		return nil
@@ -2128,6 +2144,12 @@ func (h *HubServer) Sweep() {
 // RunMaintenance keeps the testable state transition separate from a real
 // ticker. It returns promptly when the containing HTTP server is shutting down.
 func (h *HubServer) RunMaintenance(ctx context.Context) {
+	// The lane-stall runs Sweep launches derive their budget from this
+	// context, so SIGTERM shortens an in-flight observation instead of
+	// leaving Close to wait out the whole sweep budget.
+	h.mu.Lock()
+	h.maintenanceCtx = ctx
+	h.mu.Unlock()
 	// The chat outbox worker runs beside the relay maintenance loop. It is
 	// inert without a configured chat store and never shares h.mu across a
 	// network call.
