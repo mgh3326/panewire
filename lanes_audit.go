@@ -57,6 +57,15 @@ const (
 	lanesAuditReasonTruncated          = "truncated"
 )
 
+// lanesAuditReasonSessionMismatch is the one reason that rides on a dead
+// verdict rather than an indeterminate one. It fires only under an explicit
+// --sibling pair when the dead lane's pane is proven present on a sibling
+// daemon of the same physical host: the pane is alive, but the lane points
+// at the other herdr session's machine id. The verdict stays dead — the
+// lane's own machine still does not carry the pane — so the three-value
+// vocabulary is untouched.
+const lanesAuditReasonSessionMismatch = "session_mismatch"
+
 // lanesAuditResponseMaxBytes caps both hub response bodies. The reader pulls
 // one byte past the cap so an oversized body is detected, never silently
 // truncated — a cut /v1/nodes body could drop sessions and turn their lanes
@@ -107,6 +116,7 @@ type lanesAuditLaneRow struct {
 	Pane      string `json:"pane"`
 	Verdict   string `json:"verdict"`
 	Reason    string `json:"reason,omitempty"`
+	Sibling   string `json:"sibling,omitempty"`
 	NodeState string `json:"node_state,omitempty"`
 	LastSeen  string `json:"last_seen,omitempty"`
 }
@@ -223,11 +233,89 @@ func decodeLanesAuditSessions(raw json.RawMessage) ([]HubSession, bool) {
 	return sessions, true
 }
 
+// lanesAuditSiblings maps a machine id to the sorted machine ids of the other
+// daemons sharing its physical host. Built once from the --sibling pairs; an
+// empty or nil index disables the sibling check entirely.
+type lanesAuditSiblings map[string][]string
+
+// lanesAuditSiblingIndex expands the --sibling A=B pairs into per-machine
+// sorted sibling lists. Pairs are symmetric and transitive within one group:
+// A=B and B=C put all of A, B, C on each other's lists. Sorted member lists
+// keep the reported sibling deterministic when several could match.
+func lanesAuditSiblingIndex(pairs [][2]string) lanesAuditSiblings {
+	adjacency := make(map[string]map[string]bool)
+	for _, pair := range pairs {
+		for _, side := range pair {
+			if adjacency[side] == nil {
+				adjacency[side] = make(map[string]bool)
+			}
+		}
+		adjacency[pair[0]][pair[1]] = true
+		adjacency[pair[1]][pair[0]] = true
+	}
+	index := make(lanesAuditSiblings)
+	seen := make(map[string]bool)
+	for start := range adjacency {
+		if seen[start] {
+			continue
+		}
+		var group []string
+		queue := []string{start}
+		seen[start] = true
+		for len(queue) > 0 {
+			member := queue[0]
+			queue = queue[1:]
+			group = append(group, member)
+			for next := range adjacency[member] {
+				if !seen[next] {
+					seen[next] = true
+					queue = append(queue, next)
+				}
+			}
+		}
+		sort.Strings(group)
+		for _, member := range group {
+			others := make([]string, 0, len(group)-1)
+			for _, candidate := range group {
+				if candidate != member {
+					others = append(others, candidate)
+				}
+			}
+			index[member] = others
+		}
+	}
+	return index
+}
+
+// auditLaneSiblingHit reports the first sibling machine (sorted order) whose
+// own complete observation contains the dead lane's pane. A sibling that is
+// absent from /v1/nodes or whose observation is incomplete is skipped:
+// session_mismatch must name the daemon the hub's data actually proves the
+// pane lives on, never a guess.
+func auditLaneSiblingHit(lane hubLaneProjection, nodes map[string]lanesAuditNodeWire, candidates []string, now time.Time) string {
+	for _, candidate := range candidates {
+		node, returned := nodes[candidate]
+		if !returned {
+			continue
+		}
+		observation := classifyLanesAuditNode(node, now)
+		if !observation.usable {
+			continue
+		}
+		for _, session := range observation.sessions {
+			if session.PaneID == lane.Pane {
+				return candidate
+			}
+		}
+	}
+	return ""
+}
+
 // auditLane judges one lane against the hub's node rows. The verdict compares
 // lane.Pane against sessions[].pane_id of the node named by lane.Machine
 // only — a pane with the same id on a different machine proves nothing. Sink
 // lanes never reach this function: the builder skips them before judging.
-func auditLane(lane hubLaneProjection, nodes map[string]lanesAuditNodeWire, now time.Time) lanesAuditLaneRow {
+func auditLane(lane hubLaneProjection, nodes map[string]lanesAuditNodeWire, siblings lanesAuditSiblings, now time.Time) lanesAuditLaneRow {
 	row := lanesAuditLaneRow{Lane: lane.Lane, Machine: lane.Machine, Pane: lane.Pane, Verdict: lanesAuditVerdictIndeterminate}
 	if !validHubLaneProjection(lane) {
 		row.Reason = lanesAuditReasonLaneInvalid
@@ -254,10 +342,14 @@ func auditLane(lane hubLaneProjection, nodes map[string]lanesAuditNodeWire, now 
 		}
 	}
 	row.Verdict = lanesAuditVerdictDead
+	if sibling := auditLaneSiblingHit(lane, nodes, siblings[lane.Machine], now); sibling != "" {
+		row.Reason = lanesAuditReasonSessionMismatch
+		row.Sibling = sibling
+	}
 	return row
 }
 
-func buildLanesAuditResult(lanes []hubLaneProjection, nodes []lanesAuditNodeWire, now time.Time) lanesAuditResult {
+func buildLanesAuditResult(lanes []hubLaneProjection, nodes []lanesAuditNodeWire, now time.Time, siblingPairs ...[2]string) lanesAuditResult {
 	result := lanesAuditResult{
 		FetchedAt: now.UTC().Format(time.RFC3339),
 		Lanes:     []lanesAuditLaneRow{},
@@ -266,12 +358,13 @@ func buildLanesAuditResult(lanes []hubLaneProjection, nodes []lanesAuditNodeWire
 	for _, node := range nodes {
 		byMachine[node.MachineID] = node
 	}
+	siblings := lanesAuditSiblingIndex(siblingPairs)
 	for _, lane := range lanes {
 		if lane.Sink {
 			result.Summary.SinkSkipped++
 			continue
 		}
-		row := auditLane(lane, byMachine, now)
+		row := auditLane(lane, byMachine, siblings, now)
 		result.Lanes = append(result.Lanes, row)
 		result.Summary.Lanes++
 		switch row.Verdict {
@@ -362,8 +455,12 @@ func renderLanesAuditResult(writer io.Writer, result lanesAuditResult, jsonOut b
 		if lastSeen == "" {
 			lastSeen = "-"
 		}
-		fmt.Fprintf(writer, "lane\t%s\t%s\t%s\tverdict=%s\treason=%s\tnode_state=%s\tlast_seen=%s\n",
+		fmt.Fprintf(writer, "lane\t%s\t%s\t%s\tverdict=%s\treason=%s\tnode_state=%s\tlast_seen=%s",
 			row.Lane, row.Machine, row.Pane, row.Verdict, reason, nodeState, lastSeen)
+		if row.Sibling != "" {
+			fmt.Fprintf(writer, "\tsibling=%s", row.Sibling)
+		}
+		fmt.Fprintln(writer)
 	}
 }
 
@@ -372,6 +469,19 @@ type lanesAuditOptions struct {
 	tokenEnv string
 	cfEnv    string
 	jsonOut  bool
+	siblings [][2]string
+}
+
+// parseLanesAuditSibling validates one --sibling A=B value. Both sides are
+// machine ids of daemons sharing one physical host, so each must parse as a
+// machine id and the two must differ — a self-pair declares no sibling.
+func parseLanesAuditSibling(value string) ([2]string, error) {
+	left, right, found := strings.Cut(value, "=")
+	if !found || left == "" || right == "" || left == right ||
+		!machineIDPattern.MatchString(left) || !machineIDPattern.MatchString(right) {
+		return [2]string{}, errors.New("invalid lanes-audit sibling value")
+	}
+	return [2]string{left, right}, nil
 }
 
 func parseLanesAuditArgs(args []string) (lanesAuditOptions, error) {
@@ -420,6 +530,22 @@ func parseLanesAuditArgs(args []string) (lanesAuditOptions, error) {
 			case "--hub-cf-env":
 				options.cfEnv = value
 			}
+		case "--sibling":
+			// Repeatable by design: each pair names two machine ids of
+			// daemons on one physical host, and several pairs may declare
+			// several hosts (or one transitive group).
+			if !hasValue {
+				if index+1 >= len(args) {
+					return options, errors.New("lanes-audit flag value is required")
+				}
+				index++
+				value = args[index]
+			}
+			pair, err := parseLanesAuditSibling(value)
+			if err != nil {
+				return options, err
+			}
+			options.siblings = append(options.siblings, pair)
 		default:
 			return options, errors.New("unknown lanes-audit flag")
 		}
@@ -515,7 +641,7 @@ func runLanesAuditCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) 
 		renderLanesAuditResult(stdout, result, options.jsonOut)
 		return ExitPartial
 	}
-	result = buildLanesAuditResult(lanesBody.Lanes, nodesBody.Nodes, now())
+	result = buildLanesAuditResult(lanesBody.Lanes, nodesBody.Nodes, now(), options.siblings...)
 	renderLanesAuditResult(stdout, result, options.jsonOut)
 	if result.Outcome == lanesAuditOutcomePartial {
 		return ExitPartial

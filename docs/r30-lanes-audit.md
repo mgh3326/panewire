@@ -48,17 +48,41 @@ The join is strict: only the node named by `lane.machine` decides, and only
 that echoes it, proves nothing. Sink lanes are skipped entirely and counted
 in `summary.sink_skipped` — they carry no pane by design.
 
+## Sibling daemons
+
+Some hosts run more than one panewire daemon — one per herdr session — and
+each registers under its own machine id. The current pair is
+`mac-work=mac-work-default` on the operator's M1 (see
+[the M1 runbook](runbooks/m1-default-session.md)). A lane registered with
+the wrong one of the two ids is a special kind of `dead`: the pane is alive
+on the sibling daemon, but the lane's own machine id still does not carry
+it.
+
+`--sibling A=B` (repeatable) declares that machine ids `A` and `B` are
+daemons on one physical host; order is irrelevant and pairs are transitive
+within a group (`A=B` plus `B=C` siblings all of `A`, `B`, `C`). When a
+lane reads `dead` on `A` *and* sibling `B` has a complete observation that
+contains the pane, the row keeps `verdict=dead` but carries
+`reason=session_mismatch` and a `sibling=<B>` field (JSON key `sibling`,
+trailing text column). The verdict vocabulary stays exactly three values —
+`session_mismatch` annotates a dead lane, it never rescues one. If the
+sibling's observation is incomplete, or absent, or does not contain the
+pane, the row is a plain `dead` with `reason=-`: the audit names only what
+hub-held data proves. Without `--sibling` the output is unchanged
+byte-for-byte.
+
 ## Output and exit
 
 ```sh
-panewire lanes-audit --hub-url https://hub.example.invalid --hub-token-env /etc/panewire/operator.env [--hub-cf-env f] [--json]
+panewire lanes-audit --hub-url https://hub.example.invalid --hub-token-env /etc/panewire/operator.env [--hub-cf-env f] [--sibling A=B] [--json]
 ```
 
 Default output is the tab-delimited operator format (`fetched_at`,
 `outcome`, `summary`, one `lane` row per judged lane with `verdict`,
-`reason`, `node_state`, `last_seen`); `--json` emits the same structure as
-one JSON object. `outcome` is `ok` (all judged, none dead), `dead_lanes`
-(all judged, at least one dead), or `partial` (at least one indeterminate).
+`reason`, `node_state`, `last_seen`, and `sibling` when a sibling hit
+occurs); `--json` emits the same structure as one JSON object. `outcome`
+is `ok` (all judged, none dead), `dead_lanes` (all judged, at least one
+dead), or `partial` (at least one indeterminate).
 
 Exit codes: `0` when every non-sink lane received a verdict (dead lanes are
 a finding, not a command failure), `7` (`ExitPartial`) when any lane is
