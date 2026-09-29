@@ -947,7 +947,14 @@ func (h *HubServer) recordLateRelayDelivery(machineID string, ack relayAckPayloa
 		// The inject left before its durable id was known, so the ack's
 		// original_event_id is empty. For lane.event rows the transport id
 		// still names exactly one row; other kinds cannot be bound to a row
-		// from an id-less ack at all.
+		// from an id-less ack at all. The transport id always carries the
+		// lane-event- prefix, so any other job_id can never match a row —
+		// and the full-history scan must never run for one inside the
+		// socket read loop.
+		if !strings.HasPrefix(ack.JobID, "lane-event-") {
+			h.logger.Warn("relay delivery ack resolved to no durable row", "job", ack.JobID, "machine", machineID, "pane", ack.Pane)
+			return false
+		}
 		var err error
 		record, found, err = h.relayEventByTransportID(context.Background(), ack.JobID)
 		if err != nil {

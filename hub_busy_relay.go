@@ -85,9 +85,12 @@ func (h *HubServer) rememberRelayHeld(machine string, held relayHeldPayload) boo
 	key := relayPendingKey(held.EventID, held.JobID)
 	// #989: a lane re-pointed between register and hold leaves the node
 	// holding the row on a different pane than the window was armed for.
-	// The machine is still the entitlement; the pane is a detail.
+	// The machine is still the entitlement; the pane is a detail — but the
+	// window must follow the pane the node actually holds, because the
+	// node's own relay.dropped is pane-checked in consumeRelayDropped.
 	if pending, exists := h.r19a.relayPending[key]; exists && pending.machine == machine {
 		pending.held = true
+		pending.pane = held.Pane
 		h.r19a.relayPending[key] = pending
 	}
 	return true
