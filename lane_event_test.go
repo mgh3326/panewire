@@ -271,19 +271,23 @@ func TestLaneEventReplayFiltersKindAndAdvancesCursor(t *testing.T) {
 		t.Fatalf("lane events behind 200 older rows injected=%d", injections)
 	}
 	queries := fake.queries("/v1/relay/events")
-	if len(queries) != 2 {
+	// Two identical cursor walks now run: the #1002 unconfirmed-mark scan
+	// and the replay walk it precedes.
+	if len(queries) != 4 {
 		t.Fatalf("replay pages=%d queries=%v", len(queries), queries)
 	}
-	first, err := url.ParseQuery(queries[0])
-	if err != nil {
-		t.Fatal(err)
+	parsed := make([]url.Values, 4)
+	for i, raw := range queries {
+		values, err := url.ParseQuery(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parsed[i] = values
 	}
-	second, err := url.ParseQuery(queries[1])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if first.Get("kind") != "lane.event" || first.Get("after_id") != "" || second.Get("kind") != "lane.event" || second.Get("after_id") != "400" {
-		t.Fatalf("replay did not use advancing lane cursor: first=%q second=%q", queries[0], queries[1])
+	for i, wantAfter := range []string{"", "400", "", "400"} {
+		if parsed[i].Get("kind") != "lane.event" || parsed[i].Get("after_id") != wantAfter {
+			t.Fatalf("replay cursor query %d: %q", i, queries[i])
+		}
 	}
 }
 

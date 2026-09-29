@@ -1383,30 +1383,37 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 		h.countUnknownMessage()
 		return
 	}
+	if message.Kind == "relay.unconfirmed" {
+		// The durable mark must land before the live window is retired
+		// (#1002): a crash between the two cannot lose it, and a repeated
+		// report simply collides with the marker row already written.
+		key, pending, acknowledged := h.peekRelayPending(machineID, ack)
+		if !acknowledged {
+			h.logger.Warn("relay unconfirmed report matched no live window", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "reason", ack.Reason)
+			h.countUnknownMessage()
+			return
+		}
+		h.markRelayEventUnconfirmed(pending)
+		h.consumeRelayPending(key)
+		// Logging it keeps a dropped-ack diagnosis greppable.
+		h.logger.Warn("relay delivery unconfirmed", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "event_id", pending.eventID, "reason", ack.Reason)
+		h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: received})
+		return
+	}
 	pending, acknowledged := h.acknowledgeRelayPending(machineID, ack)
 	if !acknowledged {
 		// A delivery that outlived its window (unconfirmed first, a restart,
 		// a late ack) is still a delivery, and handoffkeep must hear it or
 		// replay re-sends it.
-		if message.Kind != "relay.delivered" || !h.recordLateRelayDelivery(machineID, ack) {
-			if message.Kind == "relay.unconfirmed" {
-				h.logger.Warn("relay unconfirmed report matched no live window", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "reason", ack.Reason)
-			}
+		if !h.recordLateRelayDelivery(machineID, ack) {
 			h.countUnknownMessage()
 			return
 		}
-	} else if message.Kind == "relay.delivered" {
-		if !h.markRelayEventDelivered(pending) {
-			// The window is spent but the durable write failed; the row is
-			// still undelivered, and claiming it in the feed would hide that.
-			h.countUnknownMessage()
-			return
-		}
-	} else {
-		// An unconfirmed report retires the attempt it answered; the durable
-		// row stays undelivered for replay. Logging it keeps a dropped-ack
-		// diagnosis greppable.
-		h.logger.Warn("relay delivery unconfirmed", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "event_id", pending.eventID, "reason", ack.Reason)
+	} else if !h.markRelayEventDelivered(pending) {
+		// The window is spent but the durable write failed; the row is
+		// still undelivered, and claiming it in the feed would hide that.
+		h.countUnknownMessage()
+		return
 	}
 	h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: received})
 }
