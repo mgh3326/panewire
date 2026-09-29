@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -359,6 +360,9 @@ type HubServer struct {
 	alertObservations int
 	notifier          HubNotifier
 	logger            *slog.Logger
+	// logFile is the optional --log-file sink; the hub owns it once the CLI
+	// constructor succeeds and Close releases it.
+	logFile *os.File
 
 	mu                               sync.Mutex
 	nodes                            map[string]*hubNodeRecord
@@ -660,6 +664,17 @@ func (h *HubServer) watchesAlerts(machineID string) bool {
 
 func validHubToken(token string) bool {
 	return token != "" && len(token) <= 512 && !strings.ContainsAny(token, "\x00\r\n\t ")
+}
+
+// Close releases the optional --log-file sink. The hub serves for the process
+// lifetime, so this is for the CLI shutdown path and tests that stop a hub.
+func (h *HubServer) Close() error {
+	if h.logFile == nil {
+		return nil
+	}
+	file := h.logFile
+	h.logFile = nil
+	return file.Close()
 }
 
 // Handler exposes the v1 hub endpoints. The caller is responsible for
@@ -2053,6 +2068,7 @@ func (h *HubServer) Sweep() {
 	h.mu.Unlock()
 	h.startUpdateOverdueFlush()
 	h.sweepOrphanedJobs(now)
+	h.sweepLaneStalls(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)
 	}

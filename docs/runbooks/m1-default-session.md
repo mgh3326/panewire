@@ -20,7 +20,7 @@ the end is the source of truth for "is it still like this".
 | launchd label | `dev.panewire.panewired` | `dev.panewire.panewired-default` |
 | herdr session | fleet session | default session (operator's company-work) |
 | `--db` | `~/Library/Application Support/panewire/panewire.sqlite3` | own db, e.g. `~/Library/Application Support/panewire/panewire-default.sqlite3` |
-| `--hub-jobs-root` | fleet inbox jobs root (`~/work/herdr-inbox`) | own jobs root for the default session |
+| `--hub-jobs-root` | shared inbox root (`~/work/herdr-inbox`) | **same** shared inbox root (`~/work/herdr-inbox`) — `wrk emit` rejects a mismatched inbox root |
 | `--hub-accepting` | set → `hub-status` `ACCEPTING=true` | omitted → `ACCEPTING=false` |
 | lanes (2026-09-29) | fleet lanes | `work-kairos` → pane `w3:p1G` (no parent), `work-builder-2` → pane `wR:pA` (parent `work-kairos`) |
 
@@ -29,11 +29,14 @@ Both daemons reported version `pw-bb64078` at 2026-09-29 04:56Z.
 The reference plist in the repo,
 [deploy/dev.panewire.panewired.plist](../../deploy/dev.panewire.panewired.plist),
 describes the fleet daemon only. The default-session daemon is a second
-plist derived from it with a different `Label`, a different `--db`, its own
-`--hub-jobs-root`, the **default session's** `--herdr-socket`, and no
+plist derived from it with a different `Label`, a different `--db`, the
+**default session's** `--herdr-socket`, and no
 `--hub-accepting` (a non-accepting node still heartbeats, still reports its
 session snapshot, and still receives lane events — it is just never offered
-jobs).
+jobs). Its `--hub-jobs-root` is the **same** `~/work/herdr-inbox` as the
+fleet daemon's: both daemons read the one shared jobs root, and `wrk emit`
+rejects a mismatched inbox root rather than writing a second tree. Only the
+`--db` and the launchd logs are per-daemon.
 
 ## Registering a lane
 
@@ -99,6 +102,16 @@ not route to a pane in the machine id it names — and the fix is to
 re-register the lane against the sibling id (or move the pane), not to
 treat it as healthy. See [r30-lanes-audit](../r30-lanes-audit.md).
 
+The sibling match itself is on **pane id only**: `auditLaneSiblingHit`
+compares `session.PaneID` to the lane's pane and never checks the sibling
+session's label or agent. An unrelated pane in the sibling daemon's
+snapshot can share the same `w*:p*` id — herdr reassigns ids freely — so
+before re-registering against the sibling id the desk must confirm the
+sibling pane is the intended session, not a same-id stranger. Confirm the
+sibling pane's label/agent in that daemon's own snapshot with
+`panewire sessions find <label> --machine mac-work-default`, or compare the
+audit row's pane against `hub-status` output for the sibling machine id.
+
 ## What breaks when the M1 orchestrator (herdr) restarts
 
 - **Pane ids are reassigned.** herdr does not preserve `w*:p*` ids across a
@@ -134,8 +147,9 @@ launchctl list | grep panewire
 # expect BOTH: dev.panewire.panewired  and  dev.panewire.panewired-default
 
 ps -eo pid,command | grep '[p]anewire daemon'
-# expect two processes with DIFFERENT --herdr-socket, --db and
-# --hub-jobs-root values, and --hub-accepting only on the mac-work one.
+# expect two processes with DIFFERENT --herdr-socket and --db values, the
+# SAME --hub-jobs-root (~/work/herdr-inbox — shared, not per-daemon), and
+# --hub-accepting only on the mac-work one.
 # Redact --hub-token-env/--hub-cf-env paths when pasting output anywhere.
 ```
 

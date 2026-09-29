@@ -386,7 +386,7 @@ func TestR20T5ReplaySkipsDeliveredRows(t *testing.T) {
 	_, client, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
 	hub, agent := r20t5Hub(t, r20t5OneLane, client, 4)
-	hub.replayRelayEvent(handoffkeepRelayEvent{ID: 51, Kind: "job.completed", JobID: "r20t5-done", Epoch: 1, OwnerLane: "lane-a", ReportPath: "done.md", DeliveredAt: "2026-09-05T00:00:00Z"})
+	hub.replayRelayEvent(handoffkeepRelayEvent{ID: 51, Kind: "job.completed", JobID: "r20t5-done", Epoch: 1, OwnerLane: "lane-a", ReportPath: "done.md", DeliveredAt: "2026-09-05T00:00:00Z"}, relayReplaySourceStartup)
 	if injected := drainRelays(agent); injected != 0 {
 		t.Fatalf("a delivered row was re-injected %d times", injected)
 	}
