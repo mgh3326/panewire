@@ -21,6 +21,21 @@ const (
 	// re-injected across hub restarts. Without it a row whose destination
 	// never acknowledges is re-injected on every startup, forever.
 	relayReplayMaxAttempts = 3
+	// relayUnconfirmedMarkLane is the owner_lane of the durable marker rows
+	// a relay.unconfirmed leaves behind (#1002). The slash is load-bearing:
+	// the value matches neither hubAgentLabelPattern nor laneNamePattern, so
+	// no producer event and no lanes-file entry can ever name it, and no
+	// marker row can ever resolve a route or count as a lane's backlog.
+	relayUnconfirmedMarkLane = "hub/unconfirmed"
+	// relayUnconfirmedMarkEventPrefix prefixes a marker row's event_id. The
+	// rest of the value is the durable id of the row it marks.
+	relayUnconfirmedMarkEventPrefix = "unconfirmed-mark-"
+	// relayUnconfirmedRetireReason is the replay-retired suffix stamped on a
+	// marked row once its one labelled replay has been attempted.
+	relayUnconfirmedRetireReason = "unconfirmed"
+	// relayUnconfirmedMarkRetireReason retires a marker row whose original
+	// row is already closed, exhausted, or gone.
+	relayUnconfirmedMarkRetireReason = "unconfirmed-mark"
 )
 
 type hubHandoffkeepEnv struct {
@@ -136,6 +151,10 @@ type handoffkeepRelayEvent struct {
 	// ReceivedAt is handoffkeep's own insert time. Only the replay age gate
 	// reads it; a row that lacks it has no provable age and is never aged out.
 	ReceivedAt string `json:"received_at,omitempty"`
+	// EventTime is the event's own timestamp from the original POST. The
+	// #1002 unconfirmed replay label reads it to name the first send; a row
+	// written without one falls back to ReceivedAt.
+	EventTime string `json:"event_time,omitempty"`
 }
 
 func (c *handoffkeepRelayClient) endpoint(path string) string {

@@ -140,6 +140,38 @@ spends an attempt, the hub closes these rows. Each gets a `delivered_to` of
 
 Chat rows keep the chat store as their only authority and skip this gate.
 
+**An unproven pane submission is replayed at most once (#1002).** A
+`relay.unconfirmed` report that matches a live window still retires the
+window, but first writes a durable marker: a `lane.event` row on the
+`hub/unconfirmed` lane — a name that can match neither a real lane nor an
+agent label, so it can never be routed or counted as producer backlog — with
+`event_id` `unconfirmed-mark-<row id>`. The contract offers no column to set
+on an existing row: a duplicate POST updates only `attempts`, and `/delivered`
+would remove the row from the undelivered listing before its one replay and
+would burn the first-write-wins `delivered_to` a late proof needs. The marker
+row, not the original, therefore carries the mark, and the marked row stays an
+ordinary undelivered row so a late `relay.delivered` still closes it under the
+real machine/pane.
+
+On startup and on the node-registration replay the hub collects the live
+markers from the `lane.event` undelivered listing, then walks the pages as
+before. A marked row gets exactly one replay whose pane text is prefixed
+`[replayed after hub restart - first sent <original time in KST> - may be a
+duplicate, do not re-run]` — the original send named by the row's `event_time`
+(`received_at` for older rows) — and is retired immediately after the inject
+is attempted, `delivered_to` `hub/replay-retired:unconfirmed`, whatever the
+replay's outcome: delivered, unconfirmed again, held, or failed. The spent
+marker then retires with `hub/replay-retired:unconfirmed-mark`; a marker
+whose original is already delivered, exhausted, or gone retires on sight, and
+a marked replay that never clears the pre-queue gates (chat store, age,
+attempts, route) leaves the mark pending for a later trigger. Every other row
+class — never-attempted, held, exhausted, chat, sink — replays exactly as
+before.
+
+The lane-stall observation counts a marked row as ordinary backlog until its
+one replay retires it — bounded by the next restart, never forever. The
+marker row itself is on an unroutable lane and never counts.
+
 **A successful replay is announced too (#961).** Once a re-injection has
 cleared every gate — the delivered and retired rows, the chat gate, the age
 gates, `attempts < 3`, dedupe, route resolution, and the sink rejection —

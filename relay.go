@@ -1170,28 +1170,7 @@ func (h *HubServer) replayUndeliveredRelayEvents(ctx context.Context) {
 	if h.handoffkeep == nil {
 		return
 	}
-	var afterID int64
-	for {
-		pageStart := afterID
-		records, err := h.handoffkeep.listUndelivered(ctx, "", "", afterID, handoffkeepReplayLimit)
-		if err != nil {
-			h.logger.Warn("undelivered relay events could not be read at startup")
-			return
-		}
-		for _, record := range records {
-			h.replayRelayEvent(record, relayReplaySourceStartup)
-			if record.ID > afterID {
-				afterID = record.ID
-			}
-		}
-		if len(records) < handoffkeepReplayLimit {
-			return
-		}
-		if afterID <= pageStart {
-			h.logger.Warn("undelivered relay replay cursor did not advance", "after_id", pageStart)
-			return
-		}
-	}
+	h.replayUndeliveredRelayRows(ctx, "", relayReplaySourceStartup, "undelivered relay events could not be read at startup")
 }
 
 // replayUndeliveredLaneEvents runs after a node hello. A lanes.json edit has
@@ -1202,16 +1181,38 @@ func (h *HubServer) replayUndeliveredLaneEvents(ctx context.Context) {
 	if h.handoffkeep == nil {
 		return
 	}
+	h.replayUndeliveredRelayRows(ctx, "lane.event", relayReplaySourceHello, "undelivered lane events could not be read after node registration")
+}
+
+// replayUndeliveredRelayRows is the shared listing walk for the startup and
+// hello replays. It first collects the live unconfirmed marks (#1002), then
+// walks the undelivered pages: marker rows settle, marked rows get their one
+// labelled replay, and every other row takes the ordinary replay unchanged.
+// A mark scan failure aborts the walk rather than letting a marked row fall
+// through to the unbounded ordinary replay.
+func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source, warnText string) {
+	marks, err := h.unconfirmedMarkOrigins(ctx)
+	if err != nil {
+		h.logger.Warn("undelivered unconfirmed marks could not be read", "source", source)
+		return
+	}
 	var afterID int64
 	for {
 		pageStart := afterID
-		records, err := h.handoffkeep.listUndelivered(ctx, "", "lane.event", afterID, handoffkeepReplayLimit)
+		records, err := h.handoffkeep.listUndelivered(ctx, "", kind, afterID, handoffkeepReplayLimit)
 		if err != nil {
-			h.logger.Warn("undelivered lane events could not be read after node registration")
+			h.logger.Warn(warnText)
 			return
 		}
 		for _, record := range records {
-			h.replayRelayEvent(record, relayReplaySourceHello)
+			switch {
+			case isUnconfirmedMarkRecord(record):
+				h.settleUnconfirmedMarker(ctx, record)
+			case marks[record.ID]:
+				h.replayMarkedUnconfirmed(ctx, record, source)
+			default:
+				h.replayRelayEvent(record, source)
+			}
 			if record.ID > afterID {
 				afterID = record.ID
 			}
@@ -1220,7 +1221,7 @@ func (h *HubServer) replayUndeliveredLaneEvents(ctx context.Context) {
 			return
 		}
 		if afterID <= pageStart {
-			h.logger.Warn("undelivered lane replay cursor did not advance", "after_id", pageStart)
+			h.logger.Warn("undelivered relay replay cursor did not advance", "after_id", pageStart)
 			return
 		}
 	}

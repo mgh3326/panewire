@@ -138,6 +138,23 @@ func (h *HubServer) acknowledgeRelay(machineID string, ack relayAckPayload) bool
 func (h *HubServer) acknowledgeRelayPending(machineID string, ack relayAckPayload) (relayPending, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	key, pending, exists := h.findRelayPendingLocked(machineID, ack)
+	if !exists {
+		return relayPending{}, false
+	}
+	// The pane an ack reports is where the node actually delivered. A lane
+	// re-pointed between inject and ack (#989) must not strand the row: the
+	// pane is a destination detail, the machine is the entitlement, so the
+	// ack claims the row under the pane it truly reached.
+	delete(h.r19a.relayPending, key)
+	pending.pane = ack.Pane
+	return pending, true
+}
+
+// findRelayPendingLocked resolves the live window an ack binds to without
+// retiring it. The unconfirmed path peeks first so the durable mark lands
+// while the window is still live (#1002).
+func (h *HubServer) findRelayPendingLocked(machineID string, ack relayAckPayload) (string, relayPending, bool) {
 	key := relayPendingKey(ack.OriginalEventID, ack.JobID)
 	pending, exists := h.r19a.relayPending[key]
 	if !exists && ack.OriginalEventID == 0 {
@@ -169,13 +186,25 @@ func (h *HubServer) acknowledgeRelayPending(machineID string, ack relayAckPayloa
 	// window keeps the job binding the late path keeps; a mismatch falls
 	// through to recordLateRelayDelivery, which re-checks it.
 	if !exists || pending.machine != machineID || (ack.JobID != "" && pending.event.JobID != ack.JobID) {
-		return relayPending{}, false
+		return "", relayPending{}, false
 	}
-	// The pane an ack reports is where the node actually delivered. A lane
-	// re-pointed between inject and ack (#989) must not strand the row: the
-	// pane is a destination detail, the machine is the entitlement, so the
-	// ack claims the row under the pane it truly reached.
-	delete(h.r19a.relayPending, key)
 	pending.pane = ack.Pane
-	return pending, true
+	return key, pending, true
+}
+
+// peekRelayPending resolves the window an unconfirmed report binds to and
+// keeps it live until its caller has written the durable mark.
+func (h *HubServer) peekRelayPending(machineID string, ack relayAckPayload) (string, relayPending, bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.findRelayPendingLocked(machineID, ack)
+}
+
+// consumeRelayPending retires the window a peek resolved, once the durable
+// mark is on record. A window whose mark write failed stays consumed by its
+// caller's choice; the row then keeps today's replay behaviour.
+func (h *HubServer) consumeRelayPending(key string) {
+	h.mu.Lock()
+	delete(h.r19a.relayPending, key)
+	h.mu.Unlock()
 }

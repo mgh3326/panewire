@@ -180,9 +180,9 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			f.nextID++
 			row = &handoffkeepRelayEvent{ID: f.nextID, Kind: asString(body["kind"]), JobID: asString(body["job_id"]),
-				Epoch: asInt(body["epoch"]), OwnerLane: asString(body["owner_lane"]), ReportPath: asString(body["report_path"]),
-				Question: asString(body["question"]), Machine: asString(body["machine"]), PaneID: asString(body["pane_id"]), Head: asString(body["head"]),
-				Reason: asString(body["reason"]), EventID: asString(body["event_id"]), Text: asString(body["text"]), Attempts: 1}
+				Epoch: asInt(body["epoch"]), OwnerLane: asString(body["owner_lane"]), ReportPath: asString(body["report_path"]), ReportLastLine: asString(body["report_last_line"]),
+				Question: asString(body["question"]), Machine: asString(body["machine"]), PaneID: asString(body["pane_id"]), Head: asString(body["head"]), PR: asString(body["pr"]),
+				Reason: asString(body["reason"]), EventID: asString(body["event_id"]), Text: asString(body["text"]), EventTime: asString(body["event_time"]), Attempts: 1}
 			if f.ownerLane != "" {
 				row.OwnerLane = f.ownerLane
 			}
@@ -540,19 +540,28 @@ func TestR20StartupReplayAdvancesDurableCursor(t *testing.T) {
 		t.Fatalf("startup replay injections=%d", injections)
 	}
 	queries := fake.queries("/v1/relay/events")
-	if len(queries) != 2 {
+	// The first page is the #1002 unconfirmed-mark scan (kind=lane.event);
+	// the replay walk itself still advances the durable cursor after it.
+	if len(queries) != 3 {
 		t.Fatalf("startup replay pages=%d queries=%v", len(queries), queries)
 	}
-	first, err := url.ParseQuery(queries[0])
+	marks, err := url.ParseQuery(queries[0])
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := url.ParseQuery(queries[1])
+	if marks.Get("kind") != "lane.event" {
+		t.Fatalf("unconfirmed mark scan did not filter to lane.event: %q", queries[0])
+	}
+	first, err := url.ParseQuery(queries[1])
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := url.ParseQuery(queries[2])
 	if err != nil {
 		t.Fatal(err)
 	}
 	if first.Get("after_id") != "" || second.Get("after_id") != strconv.Itoa(handoffkeepReplayLimit) {
-		t.Fatalf("startup cursor did not advance: first=%q second=%q", queries[0], queries[1])
+		t.Fatalf("startup cursor did not advance: first=%q second=%q", queries[1], queries[2])
 	}
 }
 
