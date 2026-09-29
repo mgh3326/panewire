@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// laneStallSweepBudget bounds one background lane-stall run end to end. The
+// per-request client timeout still applies; the budget additionally caps the
+// number of pages and lanes a degraded handoffkeep can stretch over.
+const laneStallSweepBudget = 20 * time.Second
+
 // laneStallObservation is one sweep's view of a single lane: every undelivered
 // durable row that still counts against it (not retired, attempts below the
 // replay bound), the oldest such row, and how many active jobs make the lane
@@ -47,24 +52,50 @@ func (o *laneStallObservation) consider(record handoffkeepRelayEvent, now time.T
 	}
 }
 
-// sweepLaneStalls is the maintenance-loop half of the lane-stall alarm. A
-// non-sink lane is stalled when an undelivered relay row for it is older than
-// relayLaneStallAge AND the lane has active work — it is an active job's
-// owner lane or the parent of one in the nodes' active-jobs view. The alarm
-// observes and tells: it never re-injects, reroutes, or retires a row itself.
-func (h *HubServer) sweepLaneStalls(now time.Time) {
+// startLaneStallSweep is Sweep's hook. The observation does handoffkeep HTTP
+// (a 10s client timeout per page over 200-row pages), so it never runs on the
+// Sweep goroutine: failover broadcasts, alert dispatch and keepalive pings
+// must not wait behind a slow or hung durable store — the same reason
+// startUpdateOverdueFlush runs off this path. At most one run is in flight;
+// a sweep that finds one running skips, leaving the next tick to retry.
+func (h *HubServer) startLaneStallSweep(now time.Time) {
 	if h.handoffkeep == nil {
 		return
 	}
+	if !h.laneStallMu.TryLock() {
+		return
+	}
+	h.laneStallSweeps.Add(1)
+	go func() {
+		defer h.laneStallSweeps.Done()
+		defer h.laneStallMu.Unlock()
+		ctx, cancel := context.WithTimeout(context.Background(), laneStallSweepBudget)
+		defer cancel()
+		h.sweepLaneStalls(ctx, now)
+	}()
+}
+
+// sweepLaneStalls is the background half of the lane-stall alarm. A non-sink
+// lane is stalled when an undelivered relay row for it is older than
+// relayLaneStallAge AND the lane has active work — it is an active job's
+// owner lane or the parent of one in the nodes' active-jobs view. The alarm
+// observes and tells: it never re-injects, reroutes, or retires a row itself.
+func (h *HubServer) sweepLaneStalls(ctx context.Context, now time.Time) {
 	routes := loadReportRelayRoutes(h.reportRelayPath)
 	var notifications []hubNotification
 	for _, lane := range h.laneStallCandidates(routes) {
+		if ctx.Err() != nil {
+			// Budget spent: lanes not yet evaluated are unobserved — the same
+			// neutral rule as a read error, so an exhausted run neither opens
+			// nor closes an episode.
+			break
+		}
 		jobs := h.laneActiveJobCount(lane, routes)
 		// A lane without active work is never stalled — that answer is a
 		// definite observation, not a skipped check, so it can end an episode.
 		obs := laneStallObservation{lane: lane, observed: true, activeJobs: jobs}
 		if jobs > 0 {
-			obs = h.observeLaneUndelivered(lane, now)
+			obs = h.observeLaneUndelivered(ctx, lane, now)
 			obs.activeJobs = jobs
 		}
 		if !obs.observed {
@@ -142,15 +173,15 @@ func (h *HubServer) laneActiveJobCount(lane string, routes map[string]reportRela
 	return count
 }
 
-// observeLaneUndelivered reads the lane's durable backlog. A read error leaves
-// the observation empty and unobserved so a transient failure cannot declare
-// or end an episode.
-func (h *HubServer) observeLaneUndelivered(lane string, now time.Time) laneStallObservation {
+// observeLaneUndelivered reads the lane's durable backlog. A read error —
+// including budget exhaustion mid-page — leaves the observation empty and
+// unobserved so a transient failure cannot declare or end an episode.
+func (h *HubServer) observeLaneUndelivered(ctx context.Context, lane string, now time.Time) laneStallObservation {
 	obs := laneStallObservation{lane: lane}
 	var afterID int64
 	for {
 		pageStart := afterID
-		records, err := h.handoffkeep.listUndelivered(context.Background(), lane, "", afterID, handoffkeepReplayLimit)
+		records, err := h.handoffkeep.listUndelivered(ctx, lane, "", afterID, handoffkeepReplayLimit)
 		if err != nil {
 			h.logger.Warn("lane stall check could not read undelivered relay events", "lane", lane)
 			return laneStallObservation{lane: lane}

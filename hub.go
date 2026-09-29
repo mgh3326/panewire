@@ -476,7 +476,11 @@ type HubServer struct {
 	updateOverdueFlushMu sync.Mutex
 	// updateOverdueFlushes tracks background flushes (fixtures wait on it).
 	updateOverdueFlushes sync.WaitGroup
-	stallBeats           map[string]*hubStallBeatState
+	// laneStallMu is TryLock'd so at most one lane-stall observation runs;
+	// laneStallSweeps lets Close wait out an in-flight run (fixtures too).
+	laneStallMu     sync.Mutex
+	laneStallSweeps sync.WaitGroup
+	stallBeats      map[string]*hubStallBeatState
 	// sessionReap keeps the latest session-reap (#603) report per machine.
 	sessionReap map[string]*hubSessionReapRecord
 }
@@ -666,9 +670,11 @@ func validHubToken(token string) bool {
 	return token != "" && len(token) <= 512 && !strings.ContainsAny(token, "\x00\r\n\t ")
 }
 
-// Close releases the optional --log-file sink. The hub serves for the process
+// Close waits out an in-flight lane-stall observation (it still logs), then
+// releases the optional --log-file sink. The hub serves for the process
 // lifetime, so this is for the CLI shutdown path and tests that stop a hub.
 func (h *HubServer) Close() error {
+	h.laneStallSweeps.Wait()
 	if h.logFile == nil {
 		return nil
 	}
@@ -2068,7 +2074,7 @@ func (h *HubServer) Sweep() {
 	h.mu.Unlock()
 	h.startUpdateOverdueFlush()
 	h.sweepOrphanedJobs(now)
-	h.sweepLaneStalls(now)
+	h.startLaneStallSweep(now)
 	for _, failover := range failovers {
 		h.broadcastFailover(failover)
 	}

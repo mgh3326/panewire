@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -135,7 +136,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 		var err error
 		logFile, err = openHubLogFile(*logFilePath)
 		if err != nil {
-			return nil, "", ExitConditionInvalid, errors.New("hub log file is invalid")
+			return nil, "", ExitConditionInvalid, fmt.Errorf("hub log file is invalid: %s", hubLogFileErrorClass(err))
 		}
 		defer func() {
 			if logFile != nil {
@@ -296,6 +297,20 @@ func openHubLogFile(path string) (*os.File, error) {
 		return nil, err
 	}
 	return file, nil
+}
+
+// hubLogFileErrorClass names why a --log-file open failed — the class of
+// error an operator needs (permission problem vs missing path) without
+// echoing the configured path into the startup rejection.
+func hubLogFileErrorClass(err error) string {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return "path does not exist"
+	case errors.Is(err, fs.ErrPermission):
+		return "permission denied"
+	default:
+		return "cannot open or adjust"
+	}
 }
 
 // hubLogTeeHandler mirrors every record to the hub's normal handler and to

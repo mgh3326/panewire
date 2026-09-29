@@ -27,11 +27,20 @@ Point the hub at a group-readable file. The flag appends to (or creates) the
 file and forces mode `0640` on every startup, so the file is group-readable
 and never world-readable even if it was created permissively before.
 
-1. Create the directory and group-owned file:
+**The hub's own service user must own the file and the directory.** The hub
+opens the file `O_WRONLY` and re-applies `0640` with `chmod` at every start;
+both require the hub user to own the file — a group member cannot write it
+and a non-owner cannot chmod it, so a root-owned file makes the hub reject
+startup (`hub log file is invalid: permission denied`) and `Restart=always`
+crash-loops the unit. The examples below assume the documented `panewire`
+service account; substitute the actual hub user if the unit differs.
+
+1. Create the directory and file owned by the hub user, grouped to the
+   operator group:
 
    ```sh
-   sudo install -d -o root -g <operator-group> -m 0750 /var/log/panewire
-   sudo install -o root -g <operator-group> -m 0640 /dev/null /var/log/panewire/hub.log
+   sudo install -d -o panewire -g <operator-group> -m 0750 /var/log/panewire
+   sudo install -o panewire -g <operator-group> -m 0640 /dev/null /var/log/panewire/hub.log
    ```
 
 2. Add `--log-file /var/log/panewire/hub.log` to the `ExecStart` of
@@ -42,9 +51,13 @@ and never world-readable even if it was created permissively before.
 
 Notes:
 
-- The hub forces `0640` on each start, so a manual `chmod` or a permissive
-  pre-existing file does not silently widen access; it also means a stray
-  `umask` can never make the file world-readable.
+- `0640` is re-tightened at every hub start — a permissive pre-existing
+  file is corrected on the next restart, but a manual `chmod 0644` on the
+  live file stays in effect until then; the hub does not watch the mode
+  while running.
+- The hub holds the file descriptor open from startup to shutdown and never
+  reopens it, so a rename-based logrotate would leave the hub writing to the
+  rotated inode. Use `copytruncate`, or restart the unit to reopen.
 - Stderr/journald output is unchanged byte-for-byte — the file is a copy,
   not a redirect, so journald remains the authority for timestamps and
   unit metadata.
@@ -52,5 +65,5 @@ Notes:
   contains none. It can still be handed to an operator as-is.
 - If the path is unwritable the hub refuses to start rather than dropping
   the copy silently — check `journalctl -u panewire-hub.service` (as root or
-  via option A) for the rejection line.
-- logrotate or equivalent is a desk concern; the hub only ever appends.
+  via option A) for the rejection line, which names the error class
+  (permission denied vs path missing) without echoing secrets.
