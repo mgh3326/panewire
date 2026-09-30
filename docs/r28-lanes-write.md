@@ -19,19 +19,21 @@ node credential is refused by every other operator route.
 
 A node-scoped request is refused with `403` and `{"error":
 "lane_machine_mismatch"}` whenever it would touch a lane that is not its own
-machine's: a PUT whose `machine` differs; a PUT that would replace another
-machine's lane; a PUT naming a `parent` on another machine or a `standby`
-machine other than its own; a PUT creating a name another machine's lane
-already names as its parent (the parent chain routes that lane's
-escalations, so the dangling name is not claimable); any `sink: true` write
-(a sink has no machine and can never belong to a node); and a DELETE of a
-lane that is absent, owned by another machine, or still named as the parent
-of another machine's lane — missing and foreign rows share one refusal so a
-node cannot probe which it was, and a node can never orphan or redirect
-another machine's upward reports. A malformed body answers the same `400`
-whatever the lane, so a node PUT is not an existence oracle. A lane
-configured as an authority lane is refused the same `403` unless the node
-already owns it — only then does the request reveal the `409
+machine's: a PUT whose `machine` is any value but the node's own id —
+foreign, route-only, or unknown, all identical; a PUT that would replace
+another machine's lane; a PUT naming a `parent` that is missing or on
+another machine (the two are the same refusal) or a `standby` machine other
+than its own; a PUT creating a name another machine's reports already route
+through — a lane, including a sink, that names it parent, or a live job on
+another machine whose owner lane is that name; any `sink: true` write (a
+sink has no machine and can never belong to a node); and a DELETE of a lane
+that is absent, owned by another machine, or still referenced as the parent
+or owner lane of another machine's rows and jobs — missing and foreign rows
+share one refusal so a node cannot probe which it was, and a node can never
+orphan or redirect another machine's reports. A malformed body answers the
+same `400` whatever the lane, so a node PUT is not an existence oracle. A
+lane configured as an authority lane is refused the same `403` unless the
+node already owns it — only then does the request reveal the `409
 authority_lane_direct_write` guard.
 
 ### Register or replace a lane
@@ -141,9 +143,10 @@ hub commands. `--hub-token-env` names a mode-0600 file holding
 request. An operator file (`HUB_MACHINE_ID=operator`) sends no machine
 header and behaves exactly as before. A node file sees and manages only the
 lanes routed to that machine id: `ls` lists just those lanes, `add` is
-refused unless `--machine` equals it, `--parent` names a lane on it, and the
-new name is not already the parent of another machine's lane, and `rm`
-removes only its own lanes that no foreign lane parents. `self-check` reads
+refused unless `--machine` equals it, `--parent` names an existing lane on
+it, and the new name is not already the parent or owner lane of another
+machine's rows and jobs, and `rm` removes only its own lanes that no foreign
+machine still references. `self-check` reads
 the control-plane fields a node-filtered response never carries, so it keeps
 requiring an operator file and refuses a node file before any request.
 

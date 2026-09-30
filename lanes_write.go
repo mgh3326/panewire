@@ -219,35 +219,28 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 var errLaneRequestInvalid = errors.New("lane request is invalid")
 var errAuthorityLaneDirectWrite = errors.New("authority lane direct write is disabled")
 
-// nodeLaneWriteScope decides whether a node-authenticated write stays inside
-// the machine its credential owns. Every refusal returns the one error, so a
-// node cannot distinguish a missing lane, another machine's lane, or an
-// operator-only field from the answer it gets. The requested machine must
-// equal the node's, an existing row must already belong to the node (no
-// adopting or overwriting another machine's lane), and the parent and standby
-// destinations must stay on the node's own lanes and machine. A sink route
-// has no machine and can never belong to a node. A brand-new row must also
-// not take a name another machine's lane already names as its parent: the
-// parent chain is how that lane's escalations route, so claiming the name
-// would redirect reports that are not the node's.
-func nodeLaneWriteScope(nodeMachine, lane string, body hubLaneWriteRequest, existing reportRelayRoute, exists bool, routes map[string]reportRelayRoute) error {
+// nodeLaneFieldScope decides field-level scope for a node-authenticated write
+// before request validation. The body machine and the standby machine may
+// only be the node's own, so every other value — a foreign machine, a machine
+// that exists only in some route, or an unknown one — answers the same
+// refusal. A sink route has no machine and can never belong to a node. The
+// parent must be a lane on the node's machine: its shape errors keep the
+// shared 400, while an existing foreign parent and a missing one are the same
+// 403, so the field cannot reveal which lanes exist.
+func nodeLaneFieldScope(nodeMachine, lane string, body hubLaneWriteRequest, routes map[string]reportRelayRoute) error {
 	if body.Sink || body.Machine != nodeMachine {
 		return errLaneMachineMismatch
 	}
-	if exists && existing.Machine != nodeMachine {
-		return errLaneMachineMismatch
-	}
-	if !exists && laneHasForeignChild(routes, lane, nodeMachine) {
+	if body.standbyPresent && body.Standby != nil && body.Standby.Machine != nodeMachine {
 		return errLaneMachineMismatch
 	}
 	if body.Parent != "" {
-		parent, found := routes[body.Parent]
-		if !found || parent.Machine != nodeMachine {
+		if !validReportRelayLaneName(body.Parent) || body.Parent == lane {
+			return errLaneRequestInvalid
+		}
+		if parent, found := routes[body.Parent]; !found || parent.Machine != nodeMachine {
 			return errLaneMachineMismatch
 		}
-	}
-	if body.standbyPresent && body.Standby != nil && body.Standby.Machine != nodeMachine {
-		return errLaneMachineMismatch
 	}
 	return nil
 }
@@ -263,6 +256,35 @@ func laneHasForeignChild(routes map[string]reportRelayRoute, lane, nodeMachine s
 		}
 	}
 	return false
+}
+
+// laneHasForeignJob reports whether any node other than the caller's machine
+// has an active job whose owner lane is the lane. Job reports resolve their
+// route by owner lane name (resolveRelayRoute), so taking or dropping the
+// name redirects reports that belong to another machine. Callers run inside
+// the lanes file lock; this takes h.mu the way controlPlaneAuthorityDecision
+// does.
+func (h *HubServer) laneHasForeignJob(lane, nodeMachine string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for machine, record := range h.nodes {
+		if machine == nodeMachine || record == nil {
+			continue
+		}
+		for _, job := range record.activeJobs {
+			if job.OwnerLane == lane {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// laneHasForeignReference joins the two ways a lane name already carries a
+// foreign machine's reports: a route that parents to it and a live job that
+// reports to it.
+func (h *HubServer) laneHasForeignReference(routes map[string]reportRelayRoute, lane, nodeMachine string) bool {
+	return laneHasForeignChild(routes, lane, nodeMachine) || h.laneHasForeignJob(lane, nodeMachine)
 }
 
 func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine string) (hubLaneProjection, bool, error) {
@@ -287,19 +309,34 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 		}
 		existing, exists := snapshot.Routes[lane]
 		if nodeMachine != "" {
-			// For a node the request is validated before the scope check: the
-			// same 400 answers a malformed body whatever the lane, so a PUT is
-			// not an existence oracle for foreign names.
-			if err := validateLaneWriteRequest(h, lane, body, snapshot.Routes); err != nil {
+			// Field scope runs before validation so the machine, standby and
+			// parent fields answer identically for a foreign, a missing and
+			// an owned lane.
+			if err := nodeLaneFieldScope(nodeMachine, lane, body, snapshot.Routes); err != nil {
 				return err
 			}
-			// The scope check precedes the authority decision: only a lane the
-			// node already owns may reveal that it is protected. A foreign or
-			// missing authority name returns the same refusal as any other
-			// write the node may not make.
-			if err := nodeLaneWriteScope(nodeMachine, lane, body, existing, exists, snapshot.Routes); err != nil {
+			// The remaining fields validate before the row-scope checks below:
+			// the same 400 answers a malformed body whatever the lane, so a
+			// PUT is not an existence oracle. The node parent check already
+			// ran as scope, so validation sees the parent field cleared.
+			remaining := body
+			remaining.Parent = ""
+			if err := validateLaneWriteRequest(h, lane, remaining, snapshot.Routes); err != nil {
 				return err
 			}
+			// Row scope: an existing row must already belong to the node, and
+			// a new row may take no name another machine's reports already
+			// route through — neither a lane that names it parent nor a live
+			// job that reports to it.
+			if exists && existing.Machine != nodeMachine {
+				return errLaneMachineMismatch
+			}
+			if !exists && h.laneHasForeignReference(snapshot.Routes, lane, nodeMachine) {
+				return errLaneMachineMismatch
+			}
+			// Only a lane the node already owns may reveal that it is
+			// protected. A foreign or missing authority name returns the same
+			// refusal as any other write the node may not make.
 			if err := h.controlPlaneAuthorityDecision(lane); err != nil {
 				if errors.Is(err, errAuthorityLaneDirectWrite) && !(exists && existing.Machine == nodeMachine) {
 					return errLaneMachineMismatch
@@ -359,10 +396,11 @@ func (h *HubServer) deleteLane(lane, nodeMachine string) error {
 		if nodeMachine != "" {
 			// One refusal for missing and foreign lanes alike: a node cannot
 			// probe which it was. The authority guard still applies to a lane
-			// the node owns. A lane foreign rows still name as their parent is
-			// refused the same way: removing it strands their escalations and
+			// the node owns. A lane a foreign machine still routes through —
+			// a route that names it parent or a live job that reports to it —
+			// is refused the same way: removing it strands those reports and
 			// frees the name for another node to claim.
-			if !exists || route.Machine != nodeMachine || laneHasForeignChild(snapshot.Routes, lane, nodeMachine) {
+			if !exists || route.Machine != nodeMachine || h.laneHasForeignReference(snapshot.Routes, lane, nodeMachine) {
 				return errLaneMachineMismatch
 			}
 			if err := h.controlPlaneAuthorityDecision(lane); err != nil {
