@@ -69,7 +69,13 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		return ExitConditionInvalid
 	}
 	env, err := loadHubTokenEnv(options.TokenEnv)
-	if err != nil || env.MachineID != hubOperatorMachineID {
+	if err != nil {
+		fmt.Fprintln(stderr, "lanes rejected: invalid hub token env")
+		return ExitConditionInvalid
+	}
+	// self-check consumes the control-plane fields a node-filtered response
+	// never carries, so it keeps the operator-only credential rule.
+	if options.Command == "self-check" && env.MachineID != hubOperatorMachineID {
 		fmt.Fprintln(stderr, "lanes rejected: invalid operator token env")
 		return ExitConditionInvalid
 	}
@@ -106,6 +112,11 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if err != nil {
 		fmt.Fprintln(stderr, "lanes rejected: invalid hub URL")
 		return ExitConditionInvalid
+	}
+	// Only a node credential carries the machine-id header; with an operator
+	// file the request stays byte-identical to before.
+	if env.MachineID != hubOperatorMachineID {
+		client.machineID = env.MachineID
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), lanesCLIRequestTimeout)
 	defer cancel()

@@ -12,7 +12,15 @@ const lanesUsage = `Usage:
   panewire lanes ls ` + hubCredentialUsage + `
   panewire lanes add LANE --machine MACHINE --pane PANE [--parent LANE] [--sink] ` + hubCredentialUsage + `
   panewire lanes rm LANE ` + hubCredentialUsage + `
-  panewire lanes self-check --lane LANE --expect-machine MACHINE --expect-pane PANE --expect-epoch N ` + hubCredentialUsage
+  panewire lanes self-check --lane LANE --expect-machine MACHINE --expect-pane PANE --expect-epoch N ` + hubCredentialUsage + `
+
+--hub-token-env names a mode-0600 file with HUB_MACHINE_ID and HUB_TOKEN. An
+operator file (HUB_MACHINE_ID=operator) sees and manages every lane. A node
+file sees and manages only the lanes routed to its own machine id: ls lists
+just those lanes, add is refused unless --machine equals it, --parent names an
+existing lane on it, and the new name is not referenced by another machine's
+lanes or jobs, and rm removes only its own lanes no foreign machine
+references. self-check requires an operator file.`
 
 const jobsUsage = `Usage:
   panewire jobs jobs [--machine MACHINE] ` + hubCredentialUsage + `

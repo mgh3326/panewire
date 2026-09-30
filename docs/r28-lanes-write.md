@@ -1,22 +1,46 @@
 # R28 lanes write API and CLI
 
-R28 adds operator-only lane registration and removal beside the R25
-projection. The hub reads and writes its configured `ReportRelayPath` (the
-`--lanes` file in the hub CLI). `GET /v1/lanes` remains hot-reloaded and its
-entries contain exactly `lane`, `machine`, `pane`, `parent`, and `sink`.
-Internal route fields such as `deliver` and `protected` are never projected.
+R28 adds lane registration and removal beside the R25 projection. The hub
+reads and writes its configured `ReportRelayPath` (the `--lanes` file in the
+hub CLI). `GET /v1/lanes` remains hot-reloaded and its entries contain exactly
+`lane`, `machine`, `pane`, `parent`, `sink`, and `standby` (omitted when
+empty). Internal route fields such as `deliver` and `protected` are never
+projected.
 
 ## HTTP contract
 
-All write routes require the operator Bearer credential. A node credential,
-missing credential, malformed credential, or wrong credential receives the
-existing `401` response with `WWW-Authenticate: Bearer`.
+Every lane route accepts the operator Bearer credential, which keeps the full
+surface. The three lane routes also accept a node credential — the node
+bearer plus the `X-Panewire-Machine-ID` header naming that node — scoped to
+the lanes that machine owns. A missing credential, malformed credential,
+wrong credential, or a machine-id header that does not match the bearer's
+node receives the existing `401` response with `WWW-Authenticate: Bearer`. A
+node credential is refused by every other operator route.
+
+A node-scoped request is refused with `403` and `{"error":
+"lane_machine_mismatch"}` whenever it would touch a lane that is not its own
+machine's: a PUT whose `machine` is any value but the node's own id —
+foreign, route-only, or unknown, all identical; a PUT that would replace
+another machine's lane; a PUT naming a `parent` that is missing or on
+another machine (the two are the same refusal) or a `standby` machine other
+than its own; a PUT creating a name another machine's reports already route
+through — a lane, including a sink, that names it parent, or a live job on
+another machine whose owner lane is that name; any `sink: true` write (a
+sink has no machine and can never belong to a node); and a DELETE of a lane
+that is absent, owned by another machine, or still referenced as the parent
+or owner lane of another machine's rows and jobs — missing and foreign rows
+share one refusal so a node cannot probe which it was, and a node can never
+orphan or redirect another machine's reports. A malformed body answers the
+same `400` whatever the lane, so a node PUT is not an existence oracle. A
+lane configured as an authority lane is refused the same `403` unless the
+node already owns it — only then does the request reveal the `409
+authority_lane_direct_write` guard.
 
 ### Register or replace a lane
 
 ```http
 PUT /v1/lanes/<lane>
-Authorization: Bearer <operator-token>
+Authorization: Bearer <token>
 Content-Type: application/json
 ```
 
@@ -38,7 +62,7 @@ When `sink` is true, the existing loader rule wins: transport fields are
 normalized to empty values and the route is durable-only. The CLI still
 requires `--machine` and `--pane` to keep its command shape uniform.
 
-The response is the R25 five-field projection. A new lane returns `201`; an
+The response is the R25 projection. A new lane returns `201`; an
 existing lane replacement returns `200`.
 
 ```json
@@ -55,7 +79,7 @@ failed safe replacement returns `500` with `lanes_unconfigured`,
 
 ```http
 DELETE /v1/lanes/<lane>
-Authorization: Bearer <operator-token>
+Authorization: Bearer <token>
 ```
 
 Successful removal returns `200`:
@@ -64,7 +88,9 @@ Successful removal returns `200`:
 {"lane":"<lane>","removed":true}
 ```
 
-An absent lane returns `404` with `{"error":"lane_not_found"}`. A route
+An absent lane returns `404` with `{"error":"lane_not_found"}` for the
+operator; a node credential instead receives the `403`
+`lane_machine_mismatch` refusal described above. A route
 whose internal file entry has `"protected":true` returns `409` with
 `{"error":"lane_protected"}`. The protected response leaves the original
 file byte-identical. The write API has no field that can set or clear
@@ -110,16 +136,27 @@ not accepted in the PUT schema and is not present in GET or write responses.
 
 ## CLI
 
-The operator commands use the same credential and endpoint conventions as
-the other hub commands:
+The commands use the same credential and endpoint conventions as the other
+hub commands. `--hub-token-env` names a mode-0600 file holding
+`HUB_MACHINE_ID` and `HUB_TOKEN`; with a node file the CLI sends
+`HUB_MACHINE_ID` as the `X-Panewire-Machine-ID` header on every lane
+request. An operator file (`HUB_MACHINE_ID=operator`) sends no machine
+header and behaves exactly as before. A node file sees and manages only the
+lanes routed to that machine id: `ls` lists just those lanes, `add` is
+refused unless `--machine` equals it, `--parent` names an existing lane on
+it, and the new name is not already the parent or owner lane of another
+machine's rows and jobs, and `rm` removes only its own lanes that no foreign
+machine still references. `self-check` reads
+the control-plane fields a node-filtered response never carries, so it keeps
+requiring an operator file and refuses a node file before any request.
 
 ```sh
 panewire lanes add <lane> --machine <machine> --pane <wN:pN> [--parent <lane>] [--sink] \
-  --hub-url <https-hub-url> --hub-token-env <operator-env> [--hub-cf-env <access-env>]
+  --hub-url <https-hub-url> --hub-token-env <token-env> [--hub-cf-env <access-env>]
 panewire lanes rm <lane> \
-  --hub-url <https-hub-url> --hub-token-env <operator-env> [--hub-cf-env <access-env>]
+  --hub-url <https-hub-url> --hub-token-env <token-env> [--hub-cf-env <access-env>]
 panewire lanes ls \
-  --hub-url <https-hub-url> --hub-token-env <operator-env> [--hub-cf-env <access-env>]
+  --hub-url <https-hub-url> --hub-token-env <token-env> [--hub-cf-env <access-env>]
 ```
 
 Flags may follow the positional lane. `add` uses PUT, `rm` uses DELETE, and

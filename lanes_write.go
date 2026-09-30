@@ -32,6 +32,7 @@ var (
 	errLanesWriteFailed       = errors.New("lanes file write failed")
 	errLaneNotFound           = errors.New("lane was not found")
 	errLaneProtected          = errors.New("lane is protected")
+	errLaneMachineMismatch    = errors.New("lane machine does not match the authenticated node")
 )
 
 type hubLaneWriteRequest struct {
@@ -119,8 +120,21 @@ type lanesWriteOps struct {
 	remove       func(path string) error
 }
 
+// authorizeLanesCaller authenticates a /v1/lanes request. The operator
+// bearer keeps the whole surface and reports an empty machine id. Otherwise
+// the request must satisfy authorizeAgent — the node bearer plus the matching
+// X-Panewire-Machine-ID header — and the returned machine id scopes every
+// route lookup to lanes that machine owns.
+func (h *HubServer) authorizeLanesCaller(request *http.Request) (nodeMachine string, ok bool) {
+	if h.authorizeOperator(request) {
+		return "", true
+	}
+	return h.authorizeAgent(request)
+}
+
 func (h *HubServer) handlePutLane(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
+	nodeMachine, ok := h.authorizeLanesCaller(request)
+	if !ok {
 		hubUnauthorized(writer)
 		return
 	}
@@ -142,8 +156,12 @@ func (h *HubServer) handlePutLane(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 
-	projection, created, err := h.putLane(lane, body)
+	projection, created, err := h.putLane(lane, body, nodeMachine)
 	if err != nil {
+		if errors.Is(err, errLaneMachineMismatch) {
+			writeLaneJSONError(writer, http.StatusForbidden, "lane_machine_mismatch")
+			return
+		}
 		if errors.Is(err, errLaneRequestInvalid) {
 			writeLaneJSONError(writer, http.StatusBadRequest, "invalid_lane_request")
 			return
@@ -167,7 +185,8 @@ func (h *HubServer) handlePutLane(writer http.ResponseWriter, request *http.Requ
 }
 
 func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
+	nodeMachine, ok := h.authorizeLanesCaller(request)
+	if !ok {
 		hubUnauthorized(writer)
 		return
 	}
@@ -176,8 +195,10 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 		writeLaneJSONError(writer, http.StatusBadRequest, "invalid_lane")
 		return
 	}
-	if err := h.deleteLane(lane); err != nil {
+	if err := h.deleteLane(lane, nodeMachine); err != nil {
 		switch {
+		case errors.Is(err, errLaneMachineMismatch):
+			writeLaneJSONError(writer, http.StatusForbidden, "lane_machine_mismatch")
 		case errors.Is(err, errAuthorityLaneDirectWrite):
 			writeAuthorityLaneError(writer, "authority_lane_direct_write")
 		case errors.Is(err, errAuthorityLanePolicyUnavailable):
@@ -198,27 +219,144 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 var errLaneRequestInvalid = errors.New("lane request is invalid")
 var errAuthorityLaneDirectWrite = errors.New("authority lane direct write is disabled")
 
-func (h *HubServer) putLane(lane string, body hubLaneWriteRequest) (hubLaneProjection, bool, error) {
+// nodeLaneFieldScope decides field-level scope for a node-authenticated write
+// before request validation. The body machine and the standby machine may
+// only be the node's own, so every other value — a foreign machine, a machine
+// that exists only in some route, or an unknown one — answers the same
+// refusal. A sink route has no machine and can never belong to a node. The
+// parent must be a lane on the node's machine: its shape errors keep the
+// shared 400, while an existing foreign parent and a missing one are the same
+// 403, so the field cannot reveal which lanes exist.
+func nodeLaneFieldScope(nodeMachine, lane string, body hubLaneWriteRequest, routes map[string]reportRelayRoute) error {
+	if body.Sink || body.Machine != nodeMachine {
+		return errLaneMachineMismatch
+	}
+	if body.standbyPresent && body.Standby != nil && body.Standby.Machine != nodeMachine {
+		return errLaneMachineMismatch
+	}
+	if body.Parent != "" {
+		if !validReportRelayLaneName(body.Parent) || body.Parent == lane {
+			return errLaneRequestInvalid
+		}
+		if parent, found := routes[body.Parent]; !found || parent.Machine != nodeMachine {
+			return errLaneMachineMismatch
+		}
+	}
+	return nil
+}
+
+// laneHasForeignChild reports whether any route owned by a machine other than
+// the node's — including a sink, which belongs to no machine — names lane as
+// its parent. Deleting or re-creating that name would orphan or redirect the
+// foreign lane's upward reports.
+func laneHasForeignChild(routes map[string]reportRelayRoute, lane, nodeMachine string) bool {
+	for _, route := range routes {
+		if route.Parent == lane && route.Machine != nodeMachine {
+			return true
+		}
+	}
+	return false
+}
+
+// laneHasForeignJob reports whether any machine other than the caller's has
+// a live job whose owner lane is the lane. Job reports resolve their route
+// by owner lane name (resolveRelayRoute), so taking or dropping the name
+// redirects reports that belong to another machine. The h.jobs scan covers
+// the reconnect window: connect() empties a node's activeJobs until its
+// first heartbeat while its still-running jobs stay registered in h.jobs.
+// Callers run inside the lanes file lock; this takes h.mu the way
+// controlPlaneAuthorityDecision does.
+func (h *HubServer) laneHasForeignJob(lane, nodeMachine string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for machine, record := range h.nodes {
+		if machine == nodeMachine || record == nil {
+			continue
+		}
+		for _, job := range record.activeJobs {
+			if job.OwnerLane == lane {
+				return true
+			}
+		}
+	}
+	for _, job := range h.jobs {
+		if job == nil || job.Completed || job.Node == nodeMachine {
+			continue
+		}
+		if job.OwnerLane == lane {
+			return true
+		}
+	}
+	return false
+}
+
+// laneHasForeignReference joins the two ways a lane name already carries a
+// foreign machine's reports: a route that parents to it and a live job that
+// reports to it.
+func (h *HubServer) laneHasForeignReference(routes map[string]reportRelayRoute, lane, nodeMachine string) bool {
+	return laneHasForeignChild(routes, lane, nodeMachine) || h.laneHasForeignJob(lane, nodeMachine)
+}
+
+func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine string) (hubLaneProjection, bool, error) {
 	if h.reportRelayPath == "" {
 		return hubLaneProjection{}, false, errLanesWriteUnconfigured
 	}
 	var projection hubLaneProjection
 	var created bool
 	err := withLanesFileLock(h.reportRelayPath, func() error {
-		// The authority decision comes from hub configuration, never from the
-		// lanes file, so it is answered before the source is read. Deciding
-		// after the read would let a malformed lanes file report lanes_invalid
-		// for a write this hub refuses outright.
-		if err := h.controlPlaneAuthorityDecision(lane); err != nil {
-			return err
+		if nodeMachine == "" {
+			// The authority decision comes from hub configuration, never from
+			// the lanes file, so it is answered before the source is read.
+			// Deciding after the read would let a malformed lanes file report
+			// lanes_invalid for a write this hub refuses outright.
+			if err := h.controlPlaneAuthorityDecision(lane); err != nil {
+				return err
+			}
 		}
 		snapshot, err := readLanesFileForWrite(h.reportRelayPath)
 		if err != nil {
 			return err
 		}
 		existing, exists := snapshot.Routes[lane]
-		if err := validateLaneWriteRequest(h, lane, body, snapshot.Routes); err != nil {
-			return err
+		if nodeMachine != "" {
+			// Field scope runs before validation so the machine, standby and
+			// parent fields answer identically for a foreign, a missing and
+			// an owned lane.
+			if err := nodeLaneFieldScope(nodeMachine, lane, body, snapshot.Routes); err != nil {
+				return err
+			}
+			// The remaining fields validate before the row-scope checks below:
+			// the same 400 answers a malformed body whatever the lane, so a
+			// PUT is not an existence oracle. The node parent check already
+			// ran as scope, so validation sees the parent field cleared.
+			remaining := body
+			remaining.Parent = ""
+			if err := validateLaneWriteRequest(h, lane, remaining, snapshot.Routes); err != nil {
+				return err
+			}
+			// Row scope: an existing row must already belong to the node, and
+			// a new row may take no name another machine's reports already
+			// route through — neither a lane that names it parent nor a live
+			// job that reports to it.
+			if exists && existing.Machine != nodeMachine {
+				return errLaneMachineMismatch
+			}
+			if !exists && h.laneHasForeignReference(snapshot.Routes, lane, nodeMachine) {
+				return errLaneMachineMismatch
+			}
+			// Only a lane the node already owns may reveal that it is
+			// protected. A foreign or missing authority name returns the same
+			// refusal as any other write the node may not make.
+			if err := h.controlPlaneAuthorityDecision(lane); err != nil {
+				if errors.Is(err, errAuthorityLaneDirectWrite) && !(exists && existing.Machine == nodeMachine) {
+					return errLaneMachineMismatch
+				}
+				return err
+			}
+		} else {
+			if err := validateLaneWriteRequest(h, lane, body, snapshot.Routes); err != nil {
+				return err
+			}
 		}
 		route := reportRelayRoute{Machine: body.Machine, Pane: body.Pane, Parent: body.Parent, Deliver: existing.Deliver, Protected: existing.Protected, Standby: existing.Standby}
 		// Failover swaps only machine/pane; preserve an omitted standby so a later
@@ -250,19 +388,35 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest) (hubLaneProje
 	return projection, created, nil
 }
 
-func (h *HubServer) deleteLane(lane string) error {
+func (h *HubServer) deleteLane(lane, nodeMachine string) error {
 	if h.reportRelayPath == "" {
 		return errLanesWriteUnconfigured
 	}
 	err := withLanesFileLock(h.reportRelayPath, func() error {
-		if err := h.controlPlaneAuthorityDecision(lane); err != nil {
-			return err
+		if nodeMachine == "" {
+			if err := h.controlPlaneAuthorityDecision(lane); err != nil {
+				return err
+			}
 		}
 		snapshot, err := readLanesFileForWrite(h.reportRelayPath)
 		if err != nil {
 			return err
 		}
 		route, exists := snapshot.Routes[lane]
+		if nodeMachine != "" {
+			// One refusal for missing and foreign lanes alike: a node cannot
+			// probe which it was. The authority guard still applies to a lane
+			// the node owns. A lane a foreign machine still routes through —
+			// a route that names it parent or a live job that reports to it —
+			// is refused the same way: removing it strands those reports and
+			// frees the name for another node to claim.
+			if !exists || route.Machine != nodeMachine || h.laneHasForeignReference(snapshot.Routes, lane, nodeMachine) {
+				return errLaneMachineMismatch
+			}
+			if err := h.controlPlaneAuthorityDecision(lane); err != nil {
+				return err
+			}
+		}
 		if !exists {
 			return errLaneNotFound
 		}

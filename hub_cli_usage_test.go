@@ -113,7 +113,7 @@ func TestLanesInvalidTokenFileDoesNotExposeContents(t *testing.T) {
 	if rc := runLanesCLI([]string{"ls", "--hub-url", "https://hub.invalid", "--hub-token-env", path}, &stdout, &stderr, hubCLIDeps{}); rc != ExitConditionInvalid {
 		t.Fatalf("rc=%d stdout=%q stderr=%q", rc, stdout.String(), stderr.String())
 	}
-	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "invalid operator token env") || strings.Contains(stderr.String(), secret) {
+	if stdout.Len() != 0 || !strings.Contains(stderr.String(), "invalid hub token env") || strings.Contains(stderr.String(), secret) {
 		t.Fatalf("stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
