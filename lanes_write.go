@@ -32,6 +32,7 @@ var (
 	errLanesWriteFailed       = errors.New("lanes file write failed")
 	errLaneNotFound           = errors.New("lane was not found")
 	errLaneProtected          = errors.New("lane is protected")
+	errLaneMachineMismatch    = errors.New("lane machine does not match the authenticated node")
 )
 
 type hubLaneWriteRequest struct {
@@ -119,8 +120,21 @@ type lanesWriteOps struct {
 	remove       func(path string) error
 }
 
+// authorizeLanesCaller authenticates a /v1/lanes request. The operator
+// bearer keeps the whole surface and reports an empty machine id. Otherwise
+// the request must satisfy authorizeAgent — the node bearer plus the matching
+// X-Panewire-Machine-ID header — and the returned machine id scopes every
+// route lookup to lanes that machine owns.
+func (h *HubServer) authorizeLanesCaller(request *http.Request) (nodeMachine string, ok bool) {
+	if h.authorizeOperator(request) {
+		return "", true
+	}
+	return h.authorizeAgent(request)
+}
+
 func (h *HubServer) handlePutLane(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
+	nodeMachine, ok := h.authorizeLanesCaller(request)
+	if !ok {
 		hubUnauthorized(writer)
 		return
 	}
@@ -142,8 +156,12 @@ func (h *HubServer) handlePutLane(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 
-	projection, created, err := h.putLane(lane, body)
+	projection, created, err := h.putLane(lane, body, nodeMachine)
 	if err != nil {
+		if errors.Is(err, errLaneMachineMismatch) {
+			writeLaneJSONError(writer, http.StatusForbidden, "lane_machine_mismatch")
+			return
+		}
 		if errors.Is(err, errLaneRequestInvalid) {
 			writeLaneJSONError(writer, http.StatusBadRequest, "invalid_lane_request")
 			return
@@ -167,7 +185,8 @@ func (h *HubServer) handlePutLane(writer http.ResponseWriter, request *http.Requ
 }
 
 func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
+	nodeMachine, ok := h.authorizeLanesCaller(request)
+	if !ok {
 		hubUnauthorized(writer)
 		return
 	}
@@ -176,8 +195,10 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 		writeLaneJSONError(writer, http.StatusBadRequest, "invalid_lane")
 		return
 	}
-	if err := h.deleteLane(lane); err != nil {
+	if err := h.deleteLane(lane, nodeMachine); err != nil {
 		switch {
+		case errors.Is(err, errLaneMachineMismatch):
+			writeLaneJSONError(writer, http.StatusForbidden, "lane_machine_mismatch")
 		case errors.Is(err, errAuthorityLaneDirectWrite):
 			writeAuthorityLaneError(writer, "authority_lane_direct_write")
 		case errors.Is(err, errAuthorityLanePolicyUnavailable):
@@ -198,25 +219,64 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 var errLaneRequestInvalid = errors.New("lane request is invalid")
 var errAuthorityLaneDirectWrite = errors.New("authority lane direct write is disabled")
 
-func (h *HubServer) putLane(lane string, body hubLaneWriteRequest) (hubLaneProjection, bool, error) {
+// nodeLaneWriteScope decides whether a node-authenticated write stays inside
+// the machine its credential owns. Every refusal returns the one error, so a
+// node cannot distinguish a missing lane, another machine's lane, or an
+// operator-only field from the answer it gets. The requested machine must
+// equal the node's, an existing row must already belong to the node (no
+// adopting or overwriting another machine's lane), and the parent and standby
+// destinations must stay on the node's own lanes and machine. A sink route
+// has no machine and can never belong to a node.
+func nodeLaneWriteScope(nodeMachine string, body hubLaneWriteRequest, existing reportRelayRoute, exists bool, routes map[string]reportRelayRoute) error {
+	if body.Sink || body.Machine != nodeMachine {
+		return errLaneMachineMismatch
+	}
+	if exists && existing.Machine != nodeMachine {
+		return errLaneMachineMismatch
+	}
+	if body.Parent != "" {
+		parent, found := routes[body.Parent]
+		if !found || parent.Machine != nodeMachine {
+			return errLaneMachineMismatch
+		}
+	}
+	if body.standbyPresent && body.Standby != nil && body.Standby.Machine != nodeMachine {
+		return errLaneMachineMismatch
+	}
+	return nil
+}
+
+func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine string) (hubLaneProjection, bool, error) {
 	if h.reportRelayPath == "" {
 		return hubLaneProjection{}, false, errLanesWriteUnconfigured
 	}
 	var projection hubLaneProjection
 	var created bool
 	err := withLanesFileLock(h.reportRelayPath, func() error {
-		// The authority decision comes from hub configuration, never from the
-		// lanes file, so it is answered before the source is read. Deciding
-		// after the read would let a malformed lanes file report lanes_invalid
-		// for a write this hub refuses outright.
-		if err := h.controlPlaneAuthorityDecision(lane); err != nil {
-			return err
+		if nodeMachine == "" {
+			// The authority decision comes from hub configuration, never from
+			// the lanes file, so it is answered before the source is read.
+			// Deciding after the read would let a malformed lanes file report
+			// lanes_invalid for a write this hub refuses outright.
+			if err := h.controlPlaneAuthorityDecision(lane); err != nil {
+				return err
+			}
 		}
 		snapshot, err := readLanesFileForWrite(h.reportRelayPath)
 		if err != nil {
 			return err
 		}
 		existing, exists := snapshot.Routes[lane]
+		if nodeMachine != "" {
+			// The node scope check precedes the authority decision: only a
+			// lane the node already owns may reveal that it is protected.
+			if err := nodeLaneWriteScope(nodeMachine, body, existing, exists, snapshot.Routes); err != nil {
+				return err
+			}
+			if err := h.controlPlaneAuthorityDecision(lane); err != nil {
+				return err
+			}
+		}
 		if err := validateLaneWriteRequest(h, lane, body, snapshot.Routes); err != nil {
 			return err
 		}
@@ -250,19 +310,32 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest) (hubLaneProje
 	return projection, created, nil
 }
 
-func (h *HubServer) deleteLane(lane string) error {
+func (h *HubServer) deleteLane(lane, nodeMachine string) error {
 	if h.reportRelayPath == "" {
 		return errLanesWriteUnconfigured
 	}
 	err := withLanesFileLock(h.reportRelayPath, func() error {
-		if err := h.controlPlaneAuthorityDecision(lane); err != nil {
-			return err
+		if nodeMachine == "" {
+			if err := h.controlPlaneAuthorityDecision(lane); err != nil {
+				return err
+			}
 		}
 		snapshot, err := readLanesFileForWrite(h.reportRelayPath)
 		if err != nil {
 			return err
 		}
 		route, exists := snapshot.Routes[lane]
+		if nodeMachine != "" {
+			// One refusal for missing and foreign lanes alike: a node cannot
+			// probe which it was. The authority guard still applies to a lane
+			// the node owns.
+			if !exists || route.Machine != nodeMachine {
+				return errLaneMachineMismatch
+			}
+			if err := h.controlPlaneAuthorityDecision(lane); err != nil {
+				return err
+			}
+		}
 		if !exists {
 			return errLaneNotFound
 		}

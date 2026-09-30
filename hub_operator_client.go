@@ -151,6 +151,10 @@ type hubOperatorClient struct {
 	client *http.Client
 	token  string
 	cf     hubCFAccessEnv
+	// machineID is the optional X-Panewire-Machine-ID header value. The lanes
+	// commands set it from the token env's HUB_MACHINE_ID so a node token
+	// authenticates as its machine; it is inert for an operator credential.
+	machineID string
 }
 
 // newHubOperatorClient validates the hub URL and binds the operator
@@ -207,6 +211,9 @@ func (client *hubOperatorClient) buildRequest(ctx context.Context, method, apiPa
 	}
 	request = request.WithContext(context.WithValue(request.Context(), hubExpectedURLContextKey{}, request.URL.String()))
 	request.Header.Set(hubAuthorizationHeader, "Bearer "+client.token)
+	if client.machineID != "" {
+		request.Header.Set(hubMachineIDHeader, client.machineID)
+	}
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}

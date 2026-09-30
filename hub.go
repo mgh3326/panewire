@@ -1049,7 +1049,8 @@ type hubLaneProjection struct {
 }
 
 func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
+	nodeMachine, ok := h.authorizeLanesCaller(request)
+	if !ok {
 		hubUnauthorized(writer)
 		return
 	}
@@ -1064,6 +1065,9 @@ func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Reques
 	}
 	lanes := make([]hubLaneProjection, 0, len(routes))
 	for lane, route := range routes {
+		if nodeMachine != "" && route.Machine != nodeMachine {
+			continue
+		}
 		lanes = append(lanes, hubLaneProjection{
 			Lane: lane, Machine: route.Machine, Pane: route.Pane, Parent: route.Parent, Sink: route.Sink, Standby: route.Standby,
 		})
@@ -1071,6 +1075,14 @@ func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Reques
 	sort.Slice(lanes, func(i, j int) bool {
 		return lanes[i].Lane < lanes[j].Lane
 	})
+	if nodeMachine != "" {
+		// A node's envelope carries only its own machine's lanes and none of
+		// the control-plane transfer fields the operator envelope has.
+		_ = json.NewEncoder(writer).Encode(struct {
+			Lanes []hubLaneProjection `json:"lanes"`
+		}{Lanes: lanes})
+		return
+	}
 	_ = json.NewEncoder(writer).Encode(struct {
 		Lanes                   []hubLaneProjection `json:"lanes"`
 		ControlEpoch            uint64              `json:"control_epoch"`

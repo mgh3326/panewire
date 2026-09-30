@@ -47,9 +47,10 @@ HUB_TOKEN_machine-b=replace-with-machine-b-token
 
 `operator` is reserved: `HUB_TOKEN_operator` authenticates `/v1/nodes`,
 `/v1/events`, and `panewire hub-status`. Each other key is a node machine ID
-for `/v1/agent`; its token cannot authenticate operator endpoints. Tokens are
-issued by an operator editing this file. There is no enrollment or token
-minting endpoint.
+for `/v1/agent`; its token also authenticates `/v1/lanes` scoped to that
+machine's own lanes, and cannot authenticate any other operator endpoint.
+Tokens are issued by an operator editing this file. There is no enrollment
+or token minting endpoint.
 
 `--alert-nodes` is optional. When omitted, every authenticated node is
 `watched`, preserving the R7 behavior. When supplied, it is a comma-separated
