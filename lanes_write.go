@@ -258,12 +258,14 @@ func laneHasForeignChild(routes map[string]reportRelayRoute, lane, nodeMachine s
 	return false
 }
 
-// laneHasForeignJob reports whether any node other than the caller's machine
-// has an active job whose owner lane is the lane. Job reports resolve their
-// route by owner lane name (resolveRelayRoute), so taking or dropping the
-// name redirects reports that belong to another machine. Callers run inside
-// the lanes file lock; this takes h.mu the way controlPlaneAuthorityDecision
-// does.
+// laneHasForeignJob reports whether any machine other than the caller's has
+// a live job whose owner lane is the lane. Job reports resolve their route
+// by owner lane name (resolveRelayRoute), so taking or dropping the name
+// redirects reports that belong to another machine. The h.jobs scan covers
+// the reconnect window: connect() empties a node's activeJobs until its
+// first heartbeat while its still-running jobs stay registered in h.jobs.
+// Callers run inside the lanes file lock; this takes h.mu the way
+// controlPlaneAuthorityDecision does.
 func (h *HubServer) laneHasForeignJob(lane, nodeMachine string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -275,6 +277,14 @@ func (h *HubServer) laneHasForeignJob(lane, nodeMachine string) bool {
 			if job.OwnerLane == lane {
 				return true
 			}
+		}
+	}
+	for _, job := range h.jobs {
+		if job == nil || job.Completed || job.Node == nodeMachine {
+			continue
+		}
+		if job.OwnerLane == lane {
+			return true
 		}
 	}
 	return false

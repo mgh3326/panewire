@@ -292,6 +292,53 @@ func TestLanesNodeCannotDeleteForeignJobsOwnerLane(t *testing.T) {
 	lanesNodeForbidden(t, lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-c", "fixture-node-c-token", "machine-c", `{"machine":"machine-c","pane":"w3:p3"}`), "third node claim of freed job-referenced name")
 }
 
+// B3 regression: a reconnecting node's record starts with an empty
+// activeJobs until its first heartbeat, while its live jobs stay registered
+// in h.jobs — a foreign node still may not claim or delete the lane names
+// those jobs report to.
+func TestLanesNodeReconnectWindowForeignJobs(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	lanesProjectionWrite(t, path, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"},"lane-c":{"machine":"machine-c","pane":"w3:p1"}}}`)
+	hub := lanesNodeHub(t, path, func(config *HubServerConfig) {
+		config.Tokens["machine-c"] = "fixture-node-c-token"
+	})
+	// machine-b just reconnected: its record is fresh with no heartbeat yet
+	// (activeJobs empty), while its still-running jobs sit in h.jobs.
+	hub.nodes["machine-b"] = &hubNodeRecord{machineID: "machine-b", state: "connected", activeJobs: map[string]HubActiveJob{}}
+	hub.jobs["jb-live"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "jb-live", AgentLabel: "wrk-b", Epoch: 1, OwnerLane: "lane-x"}, Node: "machine-b"}
+	hub.jobs["jb-live2"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "jb-live2", AgentLabel: "wrk-b", Epoch: 1, OwnerLane: "lane-c"}, Node: "machine-b"}
+
+	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-x", `{"machine":"machine-a","pane":"w1:p5"}`), "node claim during owner reconnect window")
+	if _, created := lanesNodeFile(t, path)["lane-x"]; created {
+		t.Fatal("node created a lane a reconnecting machine's live job reports to")
+	}
+	lanesNodeForbidden(t, lanesNodeRequest(t, hub, http.MethodDelete, "/v1/lanes/lane-c", "fixture-node-c-token", "machine-c", ""), "node delete during job-owner reconnect window")
+	if routes := lanesNodeFile(t, path); routes["lane-c"].Machine != "machine-c" {
+		t.Fatalf("lane-c changed: %+v", routes["lane-c"])
+	}
+	// A completed job no longer protects the name.
+	hub.jobs["jb-live"].Completed = true
+	if writer := lanesNodePut(t, hub, "lane-x", `{"machine":"machine-a","pane":"w1:p5"}`); writer.Code != http.StatusCreated {
+		t.Fatalf("claim after job completed status=%d body=%s", writer.Code, writer.Body.String())
+	}
+}
+
+// S7: the caller's own jobs never count as foreign — a node may claim its
+// own job's owner lane.
+func TestLanesNodeClaimsOwnJobsOwnerLane(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	lanesProjectionWrite(t, path, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"}}}`)
+	hub := lanesNodeHub(t, path, nil)
+	hub.nodes["machine-a"] = &hubNodeRecord{machineID: "machine-a", state: "connected", activeJobs: map[string]HubActiveJob{
+		"jb-a": {JobID: "jb-a", OwnerLane: "lane-own"},
+	}}
+	hub.jobs["jb-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "jb-a", AgentLabel: "wrk-a", Epoch: 1, OwnerLane: "lane-own"}, Node: "machine-a"}
+
+	if writer := lanesNodePut(t, hub, "lane-own", `{"machine":"machine-a","pane":"w1:p7"}`); writer.Code != http.StatusCreated {
+		t.Fatalf("own job owner lane claim status=%d body=%s", writer.Code, writer.Body.String())
+	}
+}
+
 // S6: a sink child is foreign like any other machine's row — it blocks the
 // node delete of the lane it parents to, and a sink's dangling parent is not
 // claimable by a node.
