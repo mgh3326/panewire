@@ -17,8 +17,9 @@ const lanesUsage = `Usage:
 --hub-token-env names a mode-0600 file with HUB_MACHINE_ID and HUB_TOKEN. An
 operator file (HUB_MACHINE_ID=operator) sees and manages every lane. A node
 file sees and manages only the lanes routed to its own machine id: ls lists
-just those lanes, add is refused unless --machine equals it and --parent names
-a lane on it, and rm removes only its own lanes. self-check requires an
+just those lanes, add is refused unless --machine equals it, --parent names a
+lane on it, and the new name is not another machine lane's parent, and rm
+removes only its own lanes no foreign lane parents. self-check requires an
 operator file.`
 
 const jobsUsage = `Usage:

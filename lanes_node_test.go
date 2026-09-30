@@ -108,7 +108,16 @@ func TestLanesNodeWriteScope(t *testing.T) {
 	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-sink", `{"machine":"machine-a","pane":"w1:p5"}`), "node overwrite of a sink lane")
 	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-new-sink", `{"machine":"machine-a","pane":"w1:p6","sink":true}`), "node sink create")
 	lanesNodeForbidden(t, lanesNodeDelete(t, hub, "lane-b"), "node delete of machine-b lane")
+	lanesNodeForbidden(t, lanesNodeDelete(t, hub, "lane-sink"), "node delete of sink lane")
 	lanesNodeForbidden(t, lanesNodeDelete(t, hub, "lane-missing"), "node delete of missing lane")
+
+	// A malformed body is the same 400 whatever the lane, so a node PUT is
+	// not an existence oracle for foreign names.
+	foreign := lanesNodePut(t, hub, "lane-b", `{"machine":"machine-a","pane":"bad pane"}`)
+	missing := lanesNodePut(t, hub, "lane-missing", `{"machine":"machine-a","pane":"bad pane"}`)
+	if foreign.Code != http.StatusBadRequest || missing.Code != http.StatusBadRequest || foreign.Body.String() != missing.Body.String() {
+		t.Fatalf("oracle foreign status=%d body=%s missing status=%d body=%s", foreign.Code, foreign.Body.String(), missing.Code, missing.Body.String())
+	}
 
 	// The refused writes left every foreign row byte-identical.
 	routes := lanesNodeFile(t, path)
@@ -128,25 +137,29 @@ func TestLanesNodeWriteScope(t *testing.T) {
 // the node owns.
 func TestLanesNodeWriteParentStandbyAndAuthority(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lanes.json")
-	lanesProjectionWrite(t, path, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"},"lane-b":{"machine":"machine-b","pane":"w9:p9"},"lane-authority":{"machine":"machine-a","pane":"w1:p7"},"lane-sink":{"sink":true}}}`)
+	lanesProjectionWrite(t, path, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"},"lane-b":{"machine":"machine-b","pane":"w9:p9"},"lane-authority":{"machine":"machine-a","pane":"w1:p7"},"lane-authority-b":{"machine":"machine-b","pane":"w9:p7"},"lane-sink":{"sink":true}}}`)
 	hub := lanesNodeHub(t, path, func(config *HubServerConfig) {
-		config.ControlPlaneLanes = []string{"lane-authority"}
+		config.ControlPlaneLanes = []string{"lane-authority", "lane-authority-b", "lane-authority-gone"}
 	})
 
 	if writer := lanesNodePut(t, hub, "lane-child", `{"machine":"machine-a","pane":"w1:p2","parent":"lane-a"}`); writer.Code != http.StatusCreated {
 		t.Fatalf("own parent status=%d body=%s", writer.Code, writer.Body.String())
 	}
 	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-child2", `{"machine":"machine-a","pane":"w1:p3","parent":"lane-b"}`), "foreign-machine parent")
-	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-child3", `{"machine":"machine-a","pane":"w1:p4","parent":"lane-missing"}`), "missing parent")
+	// A missing parent is a plain validation error — the same 400 the
+	// operator gets — while an existing foreign parent is the scope refusal.
+	writer := lanesNodePut(t, hub, "lane-child3", `{"machine":"machine-a","pane":"w1:p4","parent":"lane-missing"}`)
+	if writer.Code != http.StatusBadRequest || writer.Body.String() != `{"error":"invalid_lane_request"}`+"\n" {
+		t.Fatalf("missing parent status=%d body=%s", writer.Code, writer.Body.String())
+	}
 	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-child4", `{"machine":"machine-a","pane":"w1:p5","parent":"lane-sink"}`), "sink parent")
 	if writer := lanesNodePut(t, hub, "lane-standby", `{"machine":"machine-a","pane":"w1:p6","standby":{"machine":"machine-a","pane":"w1:p8"}}`); writer.Code != http.StatusCreated {
 		t.Fatalf("own standby status=%d body=%s", writer.Code, writer.Body.String())
 	}
 	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-standby2", `{"machine":"machine-a","pane":"w1:p6","standby":{"machine":"machine-b","pane":"w9:p8"}}`), "foreign-machine standby")
 
-	// An authority lane on the node's own machine stays operator-managed;
-	// the foreign lane reports only the scope refusal, never its protection.
-	writer := lanesNodePut(t, hub, "lane-authority", `{"machine":"machine-a","pane":"w1:p9"}`)
+	// An authority lane on the node's own machine stays operator-managed.
+	writer = lanesNodePut(t, hub, "lane-authority", `{"machine":"machine-a","pane":"w1:p9"}`)
 	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"authority_lane_direct_write","use":"POST /v1/control-plane/transfer"}`+"\n" {
 		t.Fatalf("own authority lane status=%d body=%s", writer.Code, writer.Body.String())
 	}
@@ -154,6 +167,64 @@ func TestLanesNodeWriteParentStandbyAndAuthority(t *testing.T) {
 	if writer.Code != http.StatusConflict || writer.Body.String() != `{"error":"authority_lane_direct_write","use":"POST /v1/control-plane/transfer"}`+"\n" {
 		t.Fatalf("own authority delete status=%d body=%s", writer.Code, writer.Body.String())
 	}
+	// A foreign or missing authority name reports only the scope refusal —
+	// its configured protection stays hidden from a node that does not own it.
+	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-authority-b", `{"machine":"machine-a","pane":"w1:p9"}`), "node PUT foreign authority lane")
+	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-authority-gone", `{"machine":"machine-a","pane":"w1:p9"}`), "node PUT missing authority lane")
+	lanesNodeForbidden(t, lanesNodeDelete(t, hub, "lane-authority-b"), "node DELETE foreign authority lane")
+	lanesNodeForbidden(t, lanesNodeDelete(t, hub, "lane-authority-gone"), "node DELETE missing authority lane")
+}
+
+// B1a regression: a node may not claim a lane name that another machine's
+// lane already names as its parent — the parent chain routes that lane's
+// escalations, so claiming the dangling name would redirect them.
+func TestLanesNodeCannotAdoptForeignLanesDanglingParent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	lanesProjectionWrite(t, path, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"},"lane-b":{"machine":"machine-b","pane":"w9:p9","parent":"lane-dir"},"lane-ownchild":{"machine":"machine-a","pane":"w1:p2","parent":"lane-own-dir"}}}`)
+	hub := lanesNodeHub(t, path, nil)
+
+	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-dir", `{"machine":"machine-a","pane":"w1:p5"}`), "node claim of machine-b's dangling parent")
+	if routes := lanesNodeFile(t, path); routes["lane-b"].Parent != "lane-dir" {
+		if _, created := routes["lane-dir"]; created {
+			t.Fatal("node created a lane foreign rows parent to")
+		}
+		t.Fatalf("lane-b changed: %+v", routes["lane-b"])
+	}
+	// A name only the node's own machine references stays claimable.
+	if writer := lanesNodePut(t, hub, "lane-own-dir", `{"machine":"machine-a","pane":"w1:p6"}`); writer.Code != http.StatusCreated {
+		t.Fatalf("node claim of own-machine dangling parent status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	// The operator keeps its current behavior.
+	if writer := lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-dir", lanesNodeOperatorToken, "", `{"machine":"machine-a","pane":"w1:p7"}`); writer.Code != http.StatusCreated {
+		t.Fatalf("operator claim status=%d body=%s", writer.Code, writer.Body.String())
+	}
+}
+
+// B1b regression: a node may not delete a lane another machine's lane names
+// as its parent — that orphans the foreign lane's escalations and frees the
+// name for any node to claim.
+func TestLanesNodeCannotOrphanForeignChild(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	lanesProjectionWrite(t, path, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"},"lane-b":{"machine":"machine-b","pane":"w9:p9","parent":"lane-a"},"lane-c":{"machine":"machine-c","pane":"w3:p1"},"lane-own":{"machine":"machine-a","pane":"w1:p3"},"lane-ownchild":{"machine":"machine-a","pane":"w1:p4","parent":"lane-own"}}}`)
+	hub := lanesNodeHub(t, path, func(config *HubServerConfig) {
+		config.Tokens["machine-c"] = "fixture-node-c-token"
+	})
+
+	lanesNodeForbidden(t, lanesNodeDelete(t, hub, "lane-a"), "node delete of lane with a foreign child")
+	if routes := lanesNodeFile(t, path); routes["lane-a"].Machine != "machine-a" {
+		t.Fatalf("lane-a changed: %+v", routes["lane-a"])
+	}
+	// A lane only the node's own rows name as parent deletes freely.
+	if writer := lanesNodeDelete(t, hub, "lane-own"); writer.Code != http.StatusOK {
+		t.Fatalf("node delete of lane with only own children status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	// The operator may still remove it (unchanged) — and the freed name is
+	// claimable by neither the old owner nor a third node.
+	if writer := lanesNodeRequest(t, hub, http.MethodDelete, "/v1/lanes/lane-a", lanesNodeOperatorToken, "", ""); writer.Code != http.StatusOK {
+		t.Fatalf("operator delete status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-a", `{"machine":"machine-a","pane":"w1:p5"}`), "node re-claim of freed foreign-parent name")
+	lanesNodeForbidden(t, lanesNodeRequest(t, hub, http.MethodPut, "/v1/lanes/lane-a", "fixture-node-c-token", "machine-c", `{"machine":"machine-c","pane":"w3:p3"}`), "third node claim of freed foreign-parent name")
 }
 
 // AC1 operator side: nothing about the operator write path changed.
@@ -429,9 +500,10 @@ func TestLanesCLINodeTokenEndToEnd(t *testing.T) {
 		t.Fatalf("operator rm code=%d stdout=%q", code, out)
 	}
 
-	// Every lanes request carried the machine id from its token file. The
-	// refused self-check never reaches the hub: five node requests, three
-	// operator requests.
+	// Every node lanes request carried the machine id from its token file.
+	// The refused self-check never reaches the hub: five node requests, three
+	// operator requests. Operator requests send no machine header at all —
+	// byte-identical to main.
 	if len(machineHeaderSeen) != 8 {
 		t.Fatalf("machine header seen=%v", machineHeaderSeen)
 	}
@@ -441,7 +513,7 @@ func TestLanesCLINodeTokenEndToEnd(t *testing.T) {
 		}
 	}
 	for _, seen := range machineHeaderSeen[5:] {
-		if seen != hubOperatorMachineID {
+		if seen != "" {
 			t.Fatalf("operator header=%q", seen)
 		}
 	}

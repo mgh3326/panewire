@@ -152,8 +152,8 @@ type hubOperatorClient struct {
 	token  string
 	cf     hubCFAccessEnv
 	// machineID is the optional X-Panewire-Machine-ID header value. The lanes
-	// commands set it from the token env's HUB_MACHINE_ID so a node token
-	// authenticates as its machine; it is inert for an operator credential.
+	// commands set it from a node token env's HUB_MACHINE_ID so a node token
+	// authenticates as its machine; an operator env leaves it unset.
 	machineID string
 }
 

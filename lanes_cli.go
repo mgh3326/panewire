@@ -113,7 +113,11 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		fmt.Fprintln(stderr, "lanes rejected: invalid hub URL")
 		return ExitConditionInvalid
 	}
-	client.machineID = env.MachineID
+	// Only a node credential carries the machine-id header; with an operator
+	// file the request stays byte-identical to before.
+	if env.MachineID != hubOperatorMachineID {
+		client.machineID = env.MachineID
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), lanesCLIRequestTimeout)
 	defer cancel()
 	response, err := client.do(ctx, method, path, nil, requestBody)

@@ -19,13 +19,20 @@ node credential is refused by every other operator route.
 
 A node-scoped request is refused with `403` and `{"error":
 "lane_machine_mismatch"}` whenever it would touch a lane that is not its own
-machine's: a PUT whose `machine` differs, a PUT that would replace another
-machine's lane, a PUT naming a `parent` on another machine or a `standby`
-machine other than its own, any `sink: true` write (a sink has no machine and
-can never belong to a node), and a DELETE of a lane that is absent or owned
-by another machine — the two share one refusal so a node cannot probe which
-it was. The authority-lane write guard applies unchanged to a lane the node
-owns.
+machine's: a PUT whose `machine` differs; a PUT that would replace another
+machine's lane; a PUT naming a `parent` on another machine or a `standby`
+machine other than its own; a PUT creating a name another machine's lane
+already names as its parent (the parent chain routes that lane's
+escalations, so the dangling name is not claimable); any `sink: true` write
+(a sink has no machine and can never belong to a node); and a DELETE of a
+lane that is absent, owned by another machine, or still named as the parent
+of another machine's lane — missing and foreign rows share one refusal so a
+node cannot probe which it was, and a node can never orphan or redirect
+another machine's upward reports. A malformed body answers the same `400`
+whatever the lane, so a node PUT is not an existence oracle. A lane
+configured as an authority lane is refused the same `403` unless the node
+already owns it — only then does the request reveal the `409
+authority_lane_direct_write` guard.
 
 ### Register or replace a lane
 
@@ -129,13 +136,15 @@ not accepted in the PUT schema and is not present in GET or write responses.
 
 The commands use the same credential and endpoint conventions as the other
 hub commands. `--hub-token-env` names a mode-0600 file holding
-`HUB_MACHINE_ID` and `HUB_TOKEN`; the CLI sends `HUB_MACHINE_ID` as the
-`X-Panewire-Machine-ID` header on every lane request. An operator file
-(`HUB_MACHINE_ID=operator`) behaves exactly as before. A node file sees and
-manages only the lanes routed to that machine id: `ls` lists just those
-lanes, `add` is refused unless `--machine` equals it and `--parent` names a
-lane on it, and `rm` removes only its own lanes. `self-check` reads the
-control-plane fields a node-filtered response never carries, so it keeps
+`HUB_MACHINE_ID` and `HUB_TOKEN`; with a node file the CLI sends
+`HUB_MACHINE_ID` as the `X-Panewire-Machine-ID` header on every lane
+request. An operator file (`HUB_MACHINE_ID=operator`) sends no machine
+header and behaves exactly as before. A node file sees and manages only the
+lanes routed to that machine id: `ls` lists just those lanes, `add` is
+refused unless `--machine` equals it, `--parent` names a lane on it, and the
+new name is not already the parent of another machine's lane, and `rm`
+removes only its own lanes that no foreign lane parents. `self-check` reads
+the control-plane fields a node-filtered response never carries, so it keeps
 requiring an operator file and refuses a node file before any request.
 
 ```sh
