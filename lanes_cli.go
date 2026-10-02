@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -130,7 +131,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	switch options.Command {
 	case "add":
 		if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
-			return lanesCLIStatus(stderr, response.StatusCode)
+			return lanesCLIStatus(stderr, response)
 		}
 		var result hubLaneProjection
 		if err := decodeLanesJSON(response.Body, &result); err != nil || !validHubLaneWriteProjection(result) || result.Lane != options.Lane {
@@ -141,7 +142,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		return ExitOK
 	case "rm":
 		if response.StatusCode != http.StatusOK {
-			return lanesCLIStatus(stderr, response.StatusCode)
+			return lanesCLIStatus(stderr, response)
 		}
 		var result hubLaneDeleteResponse
 		if err := decodeLanesJSON(response.Body, &result); err != nil || result.Lane != options.Lane || !result.Removed {
@@ -152,7 +153,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		return ExitOK
 	case "ls":
 		if response.StatusCode != http.StatusOK {
-			return lanesCLIStatus(stderr, response.StatusCode)
+			return lanesCLIStatus(stderr, response)
 		}
 		var result lanesEnvelope
 		if err := decodeLanesJSON(response.Body, &result); err != nil {
@@ -173,7 +174,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		return ExitOK
 	case "self-check":
 		if response.StatusCode != http.StatusOK {
-			return lanesCLIStatus(stderr, response.StatusCode)
+			return lanesCLIStatus(stderr, response)
 		}
 		var result lanesEnvelope
 		if err := decodeLanesJSON(response.Body, &result); err != nil {
@@ -360,13 +361,54 @@ type lanesEnvelope struct {
 	AuthorityLaneProtection string              `json:"authority_lane_protection"`
 }
 
-func lanesCLIStatus(stderr io.Writer, status int) int {
-	if status >= 400 && status < 500 {
-		fmt.Fprintln(stderr, "lanes rejected by hub")
+var lanesErrorCodePattern = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
+
+// lanesCLIStatus prints the hub refusal with its error code when the response
+// body carries one, so a lane_quota_exceeded or lanes_file_full reads
+// differently from a generic rejection — and differently again from a
+// transport failure.
+func lanesCLIStatus(stderr io.Writer, response *http.Response) int {
+	var body struct {
+		Error string `json:"error"`
+		Use   string `json:"use"`
+	}
+	_ = json.NewDecoder(io.LimitReader(response.Body, lanesWriteRequestMaxBytes)).Decode(&body)
+	code := body.Error
+	if !lanesErrorCodePattern.MatchString(code) {
+		code = ""
+	}
+	detail := code
+	if use := lanesPrintableHint(body.Use); use != "" {
+		detail += " (use: " + use + ")"
+	}
+	if response.StatusCode >= 400 && response.StatusCode < 500 {
+		if detail != "" {
+			fmt.Fprintf(stderr, "lanes rejected by hub: %s\n", detail)
+		} else {
+			fmt.Fprintln(stderr, "lanes rejected by hub")
+		}
 		return ExitConditionInvalid
 	}
-	fmt.Fprintln(stderr, "lanes unavailable")
+	if detail != "" {
+		fmt.Fprintf(stderr, "lanes unavailable: %s\n", detail)
+	} else {
+		fmt.Fprintln(stderr, "lanes unavailable")
+	}
 	return ExitInternal
+}
+
+// lanesPrintableHint caps an echo of hub guidance at one printable-ASCII run:
+// the response came off the wire, so nothing outside that alphabet reaches
+// the terminal.
+func lanesPrintableHint(use string) string {
+	var builder strings.Builder
+	for _, r := range use {
+		if r < 0x20 || r > 0x7e || builder.Len() >= 160 {
+			break
+		}
+		builder.WriteRune(r)
+	}
+	return builder.String()
 }
 
 func decodeLanesJSON(reader io.Reader, target any) error {
