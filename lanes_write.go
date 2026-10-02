@@ -469,6 +469,13 @@ func (h *HubServer) deleteLane(lane, nodeMachine string) error {
 		if err != nil {
 			return err
 		}
+		// Same reserve rule as PUT: a delete can only grow the file when the
+		// bytes on disk were not written by encodeLanesFile (a compact
+		// hand-edited file re-encodes larger), and even that edge must not
+		// spend the operator headroom.
+		if nodeMachine != "" && len(contents) > lanesNodeFileMaxBytes && len(contents) > len(snapshot.Bytes) {
+			return errLanesFileFull
+		}
 		return h.replaceLanesFile(h.reportRelayPath, snapshot, contents, lanesBackupNow(h))
 	})
 	if err != nil {

@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -243,6 +244,64 @@ func TestLanesWriteFileFullIsNamedRefusal(t *testing.T) {
 	// The file is not wedged: deletes still shrink it.
 	if writer := lanesNodeRequest(t, hub, http.MethodDelete, "/v1/lanes/f-000000", lanesNodeOperatorToken, "", ""); writer.Code != http.StatusOK {
 		t.Fatalf("operator delete at full file status=%d body=%s", writer.Code, writer.Body.String())
+	}
+}
+
+// A node DELETE of its own row normally shrinks the file, but when the file
+// on disk is compact hand-edited JSON the canonical re-encode is larger —
+// and that growth must not spend the operator reserve either. The operator
+// is exempt: its delete of the same row proceeds.
+func TestLanesNodeDeleteCannotSpendOperatorReserve(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	routes := map[string]reportRelayRoute{
+		"lane-a": {Machine: "machine-a", Pane: "w1:p1"},
+	}
+	encodedAfterDelete := func() []byte {
+		candidate := make(map[string]reportRelayRoute, len(routes))
+		for name, route := range routes {
+			if name != "lane-a" {
+				candidate[name] = route
+			}
+		}
+		contents, err := encodeLanesFile(lanesFileSnapshot{Routes: candidate})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return contents
+	}
+	var compact, encoded []byte
+	for index := 0; ; index++ {
+		if index > 8192 {
+			t.Fatal("could not reach the reserve band with compact rows")
+		}
+		compact, _ = json.Marshal(struct {
+			Lanes map[string]reportRelayRoute `json:"lanes"`
+		}{Lanes: routes})
+		encoded = encodedAfterDelete()
+		if len(encoded) > lanesNodeFileMaxBytes {
+			break
+		}
+		routes[fmt.Sprintf("f-%05d", index)] = reportRelayRoute{Machine: "machine-b", Pane: "w9:p9"}
+	}
+	if len(encoded) > lanesFileMaxBytes || len(encoded) <= len(compact) {
+		t.Fatalf("fixture outside the reserve band: compact=%d encoded-after-delete=%d node=%d max=%d",
+			len(compact), len(encoded), lanesNodeFileMaxBytes, lanesFileMaxBytes)
+	}
+	lanesProjectionWrite(t, path, string(compact))
+	hub := lanesNodeHub(t, path, nil)
+	before := lanesNodeFileBytes(t, path)
+
+	writer := lanesNodeDelete(t, hub, "lane-a")
+	if writer.Code != http.StatusRequestEntityTooLarge || writer.Body.String() != `{"error":"lanes_file_full"}`+"\n" {
+		t.Fatalf("node delete re-encode into reserve status=%d body=%s want 413 lanes_file_full", writer.Code, writer.Body.String())
+	}
+	if after := lanesNodeFileBytes(t, path); !reflect.DeepEqual(after, before) {
+		t.Fatal("reserve-refused node delete changed the lanes file")
+	}
+	// The operator is not bounded by the node reserve: the same delete —
+	// still under lanesFileMaxBytes — succeeds.
+	if writer := lanesNodeRequest(t, hub, http.MethodDelete, "/v1/lanes/lane-a", lanesNodeOperatorToken, "", ""); writer.Code != http.StatusOK {
+		t.Fatalf("operator delete of the same row status=%d body=%s", writer.Code, writer.Body.String())
 	}
 }
 
