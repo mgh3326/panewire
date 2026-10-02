@@ -196,10 +196,11 @@ func TestLanesNodeCannotAdoptForeignLanesDanglingParent(t *testing.T) {
 	hub := lanesNodeHub(t, path, nil)
 
 	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-dir", `{"machine":"machine-a","pane":"w1:p5"}`), "node claim of machine-b's dangling parent")
-	if routes := lanesNodeFile(t, path); routes["lane-b"].Parent != "lane-dir" {
-		if _, created := routes["lane-dir"]; created {
-			t.Fatal("node created a lane foreign rows parent to")
-		}
+	routes := lanesNodeFile(t, path)
+	if _, created := routes["lane-dir"]; created {
+		t.Fatal("node created a lane foreign rows parent to")
+	}
+	if routes["lane-b"].Parent != "lane-dir" {
 		t.Fatalf("lane-b changed: %+v", routes["lane-b"])
 	}
 	// A name only the node's own machine references stays claimable.

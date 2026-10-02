@@ -218,6 +218,10 @@ func (h *HubServer) handleControlPlaneTransfer(writer http.ResponseWriter, reque
 			writeLaneJSONError(writer, transferError.status, transferError.code)
 			return
 		}
+		if errors.Is(err, errLanesFileFull) {
+			writeLaneJSONError(writer, http.StatusRequestEntityTooLarge, "lanes_file_full")
+			return
+		}
 		writeLanesWriteError(writer, err)
 		return
 	}
@@ -415,7 +419,11 @@ func (h *HubServer) transferControlPlane(request controlPlaneTransferRequest, fi
 		if len(snapshot.Control.History) > controlPlaneHistoryMaxEntries {
 			snapshot.Control.History = append([]controlPlaneHistoryRecord(nil), snapshot.Control.History[len(snapshot.Control.History)-controlPlaneHistoryMaxEntries:]...)
 		}
-		return h.replaceLanesFile(h.reportRelayPath, snapshot, now)
+		contents, err := encodeLanesFile(snapshot)
+		if err != nil {
+			return err
+		}
+		return h.replaceLanesFile(h.reportRelayPath, snapshot, contents, now)
 	})
 	if err != nil {
 		return controlPlaneTransferResponse{}, err

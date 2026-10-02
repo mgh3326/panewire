@@ -70,10 +70,26 @@ existing lane replacement returns `200`.
 ```
 
 Validation errors return `400` with one of the stable error values
-`invalid_lane` or `invalid_lane_request`. An empty configured path, an
-unreadable configured file, a malformed or oversized current file, or a
-failed safe replacement returns `500` with `lanes_unconfigured`,
-`lanes_invalid`, or `lanes_write_failed` as appropriate.
+`invalid_lane` or `invalid_lane_request`.
+
+Two quotas keep one node token from filling the shared file and blocking
+every other machine. A node credential may own at most
+`--lanes-node-row-cap` rows (default 64), counted by the `machine` field the
+node scope already enforces; a PUT that would create a row beyond the cap
+returns `429` with `{"error":"lane_quota_exceeded"}`, while updating a row
+the node already owns stays allowed at the cap. A node write may also never
+grow the file past `lanesFileMaxBytes` minus an 8 KiB operator reserve, so a
+node PUT that would push it over that line returns `413` with
+`{"error":"lanes_file_full"}`; a write that does not enlarge the file is
+unaffected, so a node already past the line can still shrink back under it.
+Finally, any write whose serialized result would exceed the 64 KiB file
+limit — operator or node — returns `413` with `lanes_file_full` rather than
+a `500`, and the current file is left byte-identical in every refusal.
+
+An empty configured path, an unreadable configured file, a malformed or
+oversized current file, or a failed safe replacement returns `500` with
+`lanes_unconfigured`, `lanes_invalid`, or `lanes_write_failed` as
+appropriate.
 
 ### Remove a lane
 
@@ -170,3 +186,6 @@ Each command prints stable JSON. `add` prints the five-field lane object,
 R25 envelope `{"lanes":[...]}`. Usage errors return `ExitUsage`, rejected
 identifiers or hub `4xx` responses return `ExitConditionInvalid`, and
 transport, malformed response, or hub `5xx` failures return `ExitInternal`.
+When the hub's refusal body carries an error code the command names it —
+`lanes rejected by hub: lane_quota_exceeded` or `lanes_file_full` — and an
+authority refusal also echoes its `use` hint.

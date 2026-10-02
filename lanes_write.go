@@ -21,6 +21,17 @@ const (
 	lanesFileMaxBytes         = 64 << 10
 	lanesWriteRequestMaxBytes = 8 << 10
 	lanesBackupsKept          = 10
+	// lanesNodeFileReserveBytes is the tail of the lanes file that only
+	// operator writes may grow into: a node write never leaves the file
+	// larger than lanesNodeFileMaxBytes, so one node token can never consume
+	// the space operator administration needs.
+	lanesNodeFileReserveBytes = 8 << 10
+	lanesNodeFileMaxBytes     = lanesFileMaxBytes - lanesNodeFileReserveBytes
+	// defaultLanesNodeRowCap bounds the lane rows one node credential may
+	// own. Sixty-four rows is far above the pane count one machine hosts,
+	// yet even all-maximum-length fields keep a node's footprint under half
+	// the node byte budget.
+	defaultLanesNodeRowCap = 64
 )
 
 var (
@@ -30,6 +41,8 @@ var (
 	errLanesWriteUnconfigured = errors.New("lanes path is not configured")
 	errLanesWriteInvalid      = errors.New("lanes file is invalid")
 	errLanesWriteFailed       = errors.New("lanes file write failed")
+	errLanesFileFull          = errors.New("lanes file is full")
+	errLaneQuotaExceeded      = errors.New("node lane quota is exhausted")
 	errLaneNotFound           = errors.New("lane was not found")
 	errLaneProtected          = errors.New("lane is protected")
 	errLaneMachineMismatch    = errors.New("lane machine does not match the authenticated node")
@@ -174,6 +187,14 @@ func (h *HubServer) handlePutLane(writer http.ResponseWriter, request *http.Requ
 			writeAuthorityLaneError(writer, "authority_lane_policy_unavailable")
 			return
 		}
+		if errors.Is(err, errLaneQuotaExceeded) {
+			writeLaneJSONError(writer, http.StatusTooManyRequests, "lane_quota_exceeded")
+			return
+		}
+		if errors.Is(err, errLanesFileFull) {
+			writeLaneJSONError(writer, http.StatusRequestEntityTooLarge, "lanes_file_full")
+			return
+		}
 		writeLanesWriteError(writer, err)
 		return
 	}
@@ -207,6 +228,8 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 			writeLaneJSONError(writer, http.StatusNotFound, "lane_not_found")
 		case errors.Is(err, errLaneProtected):
 			writeLaneJSONError(writer, http.StatusConflict, "lane_protected")
+		case errors.Is(err, errLanesFileFull):
+			writeLaneJSONError(writer, http.StatusRequestEntityTooLarge, "lanes_file_full")
 		default:
 			writeLanesWriteError(writer, err)
 		}
@@ -370,11 +393,29 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 			route.Pane = ""
 			route.Standby = nil
 		}
+		// The quota checks run only after every scope, validation and
+		// authority decision above: a write that reaches this line was
+		// otherwise valid, so the refusal reveals nothing about foreign or
+		// authority names. Updating a row the node already owns is allowed at
+		// the cap — the cap bounds creates, not maintenance of existing rows.
+		if nodeMachine != "" && !exists && countMachineLanes(snapshot.Routes, nodeMachine) >= h.lanesNodeRowCap {
+			return errLaneQuotaExceeded
+		}
 		if snapshot.Routes == nil {
 			snapshot.Routes = make(map[string]reportRelayRoute)
 		}
 		snapshot.Routes[lane] = route
-		if err := h.replaceLanesFile(h.reportRelayPath, snapshot, lanesBackupNow(h)); err != nil {
+		contents, err := encodeLanesFile(snapshot)
+		if err != nil {
+			return err
+		}
+		// A node write may never grow the shared file into the operator
+		// reserve. One that does not enlarge the file is unaffected, so a
+		// node already past the line can still shrink its rows back under it.
+		if nodeMachine != "" && len(contents) > lanesNodeFileMaxBytes && len(contents) > len(snapshot.Bytes) {
+			return errLanesFileFull
+		}
+		if err := h.replaceLanesFile(h.reportRelayPath, snapshot, contents, lanesBackupNow(h)); err != nil {
 			return err
 		}
 		created = !exists
@@ -424,7 +465,11 @@ func (h *HubServer) deleteLane(lane, nodeMachine string) error {
 			return errLaneProtected
 		}
 		delete(snapshot.Routes, lane)
-		return h.replaceLanesFile(h.reportRelayPath, snapshot, lanesBackupNow(h))
+		contents, err := encodeLanesFile(snapshot)
+		if err != nil {
+			return err
+		}
+		return h.replaceLanesFile(h.reportRelayPath, snapshot, contents, lanesBackupNow(h))
 	})
 	if err != nil {
 		return err
@@ -478,6 +523,20 @@ func validateLaneWriteRequest(h *HubServer, lane string, body hubLaneWriteReques
 
 func validLanePane(pane string) bool {
 	return pane != "" && len(pane) <= 128 && lanePanePattern.MatchString(pane)
+}
+
+// countMachineLanes counts the rows one machine owns — the same machine
+// field the node scope checks enforce — so the cap sees exactly the rows a
+// node could have written itself. A sink has no machine and counts for no
+// one.
+func countMachineLanes(routes map[string]reportRelayRoute, machine string) int {
+	count := 0
+	for _, route := range routes {
+		if route.Machine == machine {
+			count++
+		}
+	}
+	return count
 }
 
 func (h *HubServer) knownLaneMachine(machine string, routes map[string]reportRelayRoute) bool {
@@ -637,7 +696,9 @@ func withLanesFileLock(path string, operation func() error) error {
 	return nil
 }
 
-func (h *HubServer) replaceLanesFile(path string, snapshot lanesFileSnapshot, now time.Time) error {
+// encodeLanesFile serializes the route set exactly the way replaceLanesFile
+// persists it, so a size check sees the same bytes the file would contain.
+func encodeLanesFile(snapshot lanesFileSnapshot) ([]byte, error) {
 	var control *lanesFileControl
 	if snapshot.Control.shouldPersist() {
 		copied := snapshot.Control
@@ -648,11 +709,16 @@ func (h *HubServer) replaceLanesFile(path string, snapshot lanesFileSnapshot, no
 		Control *lanesFileControl           `json:"control,omitempty"`
 	}{Lanes: snapshot.Routes, Control: control}, "", "  ")
 	if err != nil {
-		return fmt.Errorf("%w: encode lanes file: %v", errLanesWriteFailed, err)
+		return nil, fmt.Errorf("%w: encode lanes file: %v", errLanesWriteFailed, err)
 	}
-	contents = append(contents, '\n')
+	return append(contents, '\n'), nil
+}
+
+func (h *HubServer) replaceLanesFile(path string, snapshot lanesFileSnapshot, contents []byte, now time.Time) error {
+	// A write whose result would not fit is a refusal, not a malfunction:
+	// the caller is over its budget and the current file stays untouched.
 	if len(contents) > lanesFileMaxBytes {
-		return errLanesWriteInvalid
+		return errLanesFileFull
 	}
 	if snapshot.Exists {
 		createBackup := h.lanesWriteOps.createBackup
