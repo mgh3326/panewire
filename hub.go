@@ -87,6 +87,10 @@ type HubServerConfig struct {
 	CFAccessHTTPClient *http.Client
 	// ReportRelayPath is an operator-owned route file. It is never sent to nodes.
 	ReportRelayPath string
+	// LanesNodeRowCap bounds how many lane rows one node credential may own —
+	// routes whose machine equals the node's machine id. Zero selects
+	// defaultLanesNodeRowCap; a negative value is rejected.
+	LanesNodeRowCap int
 	// UpdateConfirmationTimeout bounds how long a published version may wait
 	// for the node's post-restart hello. Zero uses the ten-minute contract.
 	UpdateConfirmationTimeout time.Duration
@@ -398,6 +402,7 @@ type HubServer struct {
 	placementCache                   placementCache
 	r19a                             r19aHubState
 	reportRelayPath                  string
+	lanesNodeRowCap                  int
 	lanesWriteOps                    lanesWriteOps
 	controlReadiness                 func(controlPlaneTransferRequest, map[string]reportRelayRoute) []controlPlaneReadinessCheck
 	controlPlaneLanesPath            string
@@ -627,6 +632,12 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if config.QuotaV2ClockSkew < 0 {
 		return nil, errors.New("hub quota v2 clock skew must not be negative")
 	}
+	if config.LanesNodeRowCap < 0 {
+		return nil, errors.New("hub lanes node row cap is invalid")
+	}
+	if config.LanesNodeRowCap == 0 {
+		config.LanesNodeRowCap = defaultLanesNodeRowCap
+	}
 	quotaV2, err := newHubQuotaV2Store(config.QuotaV2StorePath, tokens, config.QuotaV2ClockSkew)
 	if err != nil {
 		return nil, errors.New("hub quota v2 store is invalid")
@@ -681,7 +692,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, updateRepository: config.UpdateRepository, updateOverdueLane: config.UpdateOverdueLane, updateOverdueNotified: make(map[string]string), updateOverduePending: make(map[string]*hubUpdateOverdue), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2, closeCtx: closeCtx, closeCancel: closeCancel,
+		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, updateRepository: config.UpdateRepository, updateOverdueLane: config.UpdateOverdueLane, updateOverdueNotified: make(map[string]string), updateOverduePending: make(map[string]*hubUpdateOverdue), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2, closeCtx: closeCtx, closeCancel: closeCancel,
 	}, nil
 }
 

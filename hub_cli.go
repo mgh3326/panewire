@@ -112,6 +112,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	cfAccessAUD := flags.String("cf-access-aud", "", "Cloudflare Access application AUD tag for Cf-Access-Jwt-Assertion verification (requires --cf-access-team)")
 	cfAccessCertsURL := flags.String("cf-access-certs-url", "", "override the derived https://<team>.cloudflareaccess.com certs endpoint (staging/tests)")
 	lanesPath := flags.String("lanes", "/etc/panewire/lanes.json", "operator-owned lane routing JSON (hot-reloaded)")
+	lanesNodeRowCap := flags.Int("lanes-node-row-cap", defaultLanesNodeRowCap, "maximum lane rows one node credential may own in the --lanes file")
 	// The default is empty, not /etc/panewire/control-plane-lanes.json: the
 	// authority guard is fail-closed, so defaulting to a path would block every
 	// lane write on each existing deployment that does not have the file yet.
@@ -158,6 +159,9 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	}
 	if *quotaV2ClockSkew < 0 {
 		return nil, "", ExitConditionInvalid, errors.New("hub quota v2 clock skew must not be negative")
+	}
+	if *lanesNodeRowCap < 0 {
+		return nil, "", ExitConditionInvalid, errors.New("hub lanes node row cap must not be negative")
 	}
 	if *gracePeriod <= 0 {
 		return nil, "", ExitConditionInvalid, errors.New("hub grace period must be positive")
@@ -238,7 +242,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 		logger.Warn("PANEWIRE_UPDATE_REPO is invalid; update publish is disabled")
 		updateRepository = hubUpdateRepositoryDisabled
 	}
-	hub, err := NewHubServer(HubServerConfig{UpdateRepository: updateRepository, UpdateOverdueLane: *updateOverdueLane, Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, QuotaV2StorePath: *quotaV2StorePath, QuotaV2ClockSkew: *quotaV2ClockSkew, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
+	hub, err := NewHubServer(HubServerConfig{UpdateRepository: updateRepository, UpdateOverdueLane: *updateOverdueLane, Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, QuotaV2StorePath: *quotaV2StorePath, QuotaV2ClockSkew: *quotaV2ClockSkew, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}
