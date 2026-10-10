@@ -80,18 +80,3 @@ func loadAssistantTargets(path string) (map[string]assistantTarget, error) {
 	}
 	return targets, nil
 }
-
-// lookup resolves one opaque id. An unknown id fails closed with a named
-// error; the mapped lane or conversation is the only value a caller can
-// ever reach.
-func (s *assistantServer) lookupTarget(id string) (assistantTarget, error) {
-	targets, err := loadAssistantTargets(s.targetsPath)
-	if err != nil {
-		return assistantTarget{}, errAssistantTargetsInvalid
-	}
-	target, ok := targets[id]
-	if !ok {
-		return assistantTarget{}, errAssistantUnknownTarget
-	}
-	return target, nil
-}

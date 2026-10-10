@@ -15,7 +15,7 @@ called; nothing is delivered unless you call. Missing a poll means missing a
 deadline. A deadline passing is never consent.
 
 There is no subscription, no SSE stream, no callback. The poll tool returns a
-snapshot keyed by <stable id>:<revision> with the handoffkeep server_time so
+snapshot keyed by `<stable id>:<revision>` with the handoffkeep server_time so
 the consumer can dedupe and drop stale items; liveness is the consumer's
 responsibility.
 
@@ -28,10 +28,14 @@ outbox mark-sent. PR-3 adds the write surface.
   caller references a target only by the opaque id; unknown ids fail closed.
   No lane, URL, route or shell string is ever accepted as input.
 - pending_list — every open decision request and pending chat question from
-  handoffkeep GET /v1/assistant/pending, each with stable id
-  (dr-<task>-<revision>, or the Q id), revision, human_only, status and the
-  server clock. Merged or dropped tasks never appear — filtered upstream and
-  again at this trust boundary. The response carries
+  handoffkeep GET /v1/assistant/pending that falls inside the targets
+  allowlist, each with stable id (`dr-<task>-<revision>`, or the Q id),
+  revision, human_only, status and the server clock. A decision request on
+  an unmapped lane and a question outside every mapped lane or conversation
+  never appear — the same scope pending_detail and progress enforce; a
+  mapped conversation target keeps exposing that conversation's questions.
+  Merged or dropped tasks never appear — filtered upstream and again at
+  this trust boundary. The response carries
   chat_questions_at_cap=true when the question list sits at handoffkeep's
   1000-row cap, meaning the list may be truncated.
 - pending_detail — one open item by stable id. Only items still open on an
@@ -45,9 +49,12 @@ outbox mark-sent. PR-3 adds the write surface.
   closed vocabulary accepted, delivered, in-progress, decision-pending,
   done, failed, derived only from handoffkeep fields (task state, decision
   resolution, relay delivered_at/delivered_to/attempts, outbox
-  sent_at/hub_row_id where visible) with the receipts that justify it. A
-  relay row that is only persisted is never done; a delivered_to value
-  counts as delivery only when it names a real <machine>/<pane> — the
+  sent_at/hub_row_id where visible) with the receipts that justify it. For a
+  lane or conversation target only unanswered items count as
+  decision-pending: an answered-but-pending question follows the same
+  notice chain a request id reports, folded across the target's answered
+  set. A relay row that is only persisted is never done; a delivered_to value
+  counts as delivery only when it names a real `<machine>/<pane>` — the
   retired, cancelled and chat-terminal stamps and the sink stamp all report
   failed, with sink/* additionally carrying reason sink_lane. A view that
   reaches its read bound (a full tasks page, a capped pending or outbox
@@ -67,9 +74,9 @@ binding the hub's verifier deliberately lacks.
 
 Tool failures return named errors (unknown_target, request_not_found,
 targets_file_invalid, invalid_arguments, hk_unreachable,
-hk_rejected_http_*). Resolution text, receipt text and resolver identity
+hk_rejected_http_*, hk_response_*). Resolution text, receipt text and resolver identity
 are human-channel data: the resolution receipt carries only kind, responder
-and resolved_at. No error string, tool result, log line or redirect ever
+and at. No error string, tool result, log line or redirect ever
 carries a token, a CF secret, URL userinfo or a redirect Location.
 
 ## Server-side configuration
@@ -119,7 +126,7 @@ GET only, each retained for exactly one job:
   carries server_time (pending_detail borrows its clock).
 - /v1/assistant/outbox — the unsent-notice receipt for the assistant answer
   chain.
-- /v1/tasks/{id} — resolve a dr-<task>-<revision> id to its task so the
+- /v1/tasks/{id} — resolve a `dr-<task>-<revision>` id to its task so the
   lane can be checked against the allowlist (progress) and the open-item
   rule enforced (pending_detail).
 - /v1/tasks?lane=… — the lane live-task check inside progress(target).

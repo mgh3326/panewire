@@ -34,6 +34,7 @@ func (e *assistantHKError) Error() string { return e.name }
 var (
 	errAssistantHKUnreachable = &assistantHKError{name: "hk_unreachable"}
 	errAssistantHKInvalid     = &assistantHKError{name: "hk_response_invalid"}
+	errAssistantHKTruncated   = &assistantHKError{name: "hk_response_truncated"}
 )
 
 func hkRejectedError(status int) error {
@@ -87,7 +88,13 @@ func (c *assistantHK) get(ctx context.Context, path string, query url.Values) (i
 		return 0, nil, errAssistantHKUnreachable
 	}
 	defer response.Body.Close()
-	payload, _ := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+	// One byte past the cap proves the body fit: a cut read or an oversized
+	// body is an unreliable response and gets its own named error — never
+	// partial payload text.
+	payload, err := io.ReadAll(io.LimitReader(response.Body, (1<<20)+1))
+	if err != nil || len(payload) > 1<<20 {
+		return response.StatusCode, nil, errAssistantHKTruncated
+	}
 	return response.StatusCode, payload, nil
 }
 

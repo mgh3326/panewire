@@ -1344,6 +1344,21 @@ func TestAssistantScopeClosedR2(t *testing.T) {
 		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
 		Disposition     json.RawMessage           `json:"disposition,omitempty"`
 	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-91-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
+	// The pending snapshot carries an in-scope item plus one out-of-scope
+	// decision request and one out-of-scope question.
+	hk.pending = assistantPending{
+		ServerTime: now,
+		DecisionRequests: []assistantPendingDecision{
+			{TaskID: 80, Lane: "lane-a", State: "needs_decision", Title: "in scope",
+				Request: assistantDecisionRequest{ID: "dr-80-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}},
+			{TaskID: 90, Lane: "lane-b", State: "needs_decision", Title: "out of scope",
+				Request: assistantDecisionRequest{ID: "dr-90-4", Revision: 4, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}},
+		},
+		ChatQuestions: []assistantChatQuestion{
+			{ID: "Q-20261010-20", ConversationID: "other-desk", Lane: "lane-b", State: "pending", Revision: 1},
+			{ID: "Q-20261010-21", ConversationID: "operator-desk", Lane: "lane-a", State: "pending", Revision: 1},
+		},
+	}
 	srv, _ := assistantTestServer(t, hk, nil)
 
 	// Missing and out-of-scope ids answer identically — no existence oracle.
@@ -1372,6 +1387,44 @@ func TestAssistantScopeClosedR2(t *testing.T) {
 	for _, err := range []string{missing, outOfScope} {
 		if strings.Contains(err, "not_current") || strings.Contains(err, "dr-90") {
 			t.Fatalf("error leaks current/existence detail: %q", err)
+		}
+	}
+
+	// pending_list and poll are scoped by the same allowlist as the by-id
+	// reads: unmapped lanes and conversations never surface, mapped items
+	// still do.
+	listed := assistantCall(t, srv, assistantTestBerryToken, "pending_list", nil)
+	if listed.isError {
+		t.Fatalf("pending_list error: %s", listed.text)
+	}
+	listIDs := map[string]bool{}
+	for _, raw := range listed.decoded["items"].([]any) {
+		item, _ := raw.(map[string]any)
+		listIDs[item["id"].(string)] = true
+	}
+	for _, id := range []string{"dr-80-1", "Q-20261010-21"} {
+		if !listIDs[id] {
+			t.Fatalf("in-scope item %s missing from pending_list: %v", id, listIDs)
+		}
+	}
+	for _, id := range []string{"dr-90-4", "Q-20261010-20"} {
+		if listIDs[id] {
+			t.Fatalf("out-of-scope item %s surfaced in pending_list: %v", id, listIDs)
+		}
+	}
+	polled := assistantCall(t, srv, assistantTestBerryToken, "poll", nil)
+	if polled.isError {
+		t.Fatalf("poll error: %s", polled.text)
+	}
+	pollItems, _ := polled.decoded["items"].(map[string]any)
+	for _, key := range []string{"dr-80-1:1", "Q-20261010-21:1"} {
+		if _, ok := pollItems[key]; !ok {
+			t.Fatalf("in-scope key %s missing from poll: %v", key, pollItems)
+		}
+	}
+	for _, key := range []string{"dr-90-4:4", "Q-20261010-20:1"} {
+		if _, ok := pollItems[key]; ok {
+			t.Fatalf("out-of-scope key %s surfaced in poll: %v", key, pollItems)
 		}
 	}
 
@@ -1603,5 +1656,194 @@ func TestAssistantPanicRecoveryR2(t *testing.T) {
 	}
 	if !strings.Contains(logs.String(), "internal_error") {
 		t.Fatalf("panic not audit logged: %s", logs.String())
+	}
+}
+
+// Round-3 N2: a dr id whose task number is below 1 names no task — it fails
+// closed locally with the same generic request_not_found every other
+// missing id answers, and it must never reach handoffkeep.
+func TestAssistantZeroTaskIDR3(t *testing.T) {
+	hk := newFakeAssistantHK(t)
+	srv, _ := assistantTestServer(t, hk, nil)
+	for _, id := range []string{"dr-0-1", "dr-00-1", "dr-0-7"} {
+		if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": id}); got != "request_not_found" {
+			t.Fatalf("%s detail error=%q, want request_not_found", id, got)
+		}
+		if got := assistantCallError(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": id}); got != "request_not_found" {
+			t.Fatalf("%s progress error=%q, want request_not_found", id, got)
+		}
+	}
+	if calls := hk.requestLog(); len(calls) != 0 {
+		t.Fatalf("malformed ids reached handoffkeep: %v", calls)
+	}
+	// Byte-identical to a plain missing id — no separate error class.
+	hk = newFakeAssistantHK(t)
+	srv, _ = assistantTestServer(t, hk, nil)
+	zero := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-0-1"})
+	missing := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-999-1"})
+	if zero != missing {
+		t.Fatalf("zero-id oracle split: zero=%q missing=%q", zero, missing)
+	}
+	if len(hk.requestLog()) != 1 {
+		// The missing-id lookup costs one hk GET; the zero id must cost none.
+		t.Fatalf("zero id was not local-only: %v", hk.requestLog())
+	}
+}
+
+// Round-3 N3: a target aggregate counts only unanswered pending items as
+// decision-pending — an answered-but-pending question follows the same
+// outbox → relay → delivered chain as progress(request_id), folded across
+// the target's answered set.
+func TestAssistantAnsweredAggregateR3(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	answeredID := int64(61)
+	answeredQ := assistantChatQuestion{ID: "Q-20261010-60", ConversationID: "operator-desk", Lane: "lane-a", State: "pending", Revision: 2, AnswerMessageID: &answeredID}
+
+	// The P5 shape: the lane's and the conversation's only pending item is
+	// an answered question whose notice still sits in the outbox — the
+	// aggregate reports the chain state, not decision-pending.
+	hk := newFakeAssistantHK(t)
+	hk.pending = assistantPending{ServerTime: now, ChatQuestions: []assistantChatQuestion{answeredQ}}
+	hk.outbox = []assistantOutboxRow{{ID: 61, Kind: "chat_answer", TargetLane: "lane-a", EventID: "Q-20261010-60-rev2-answered", CreatedAt: now}}
+	srv, _ := assistantTestServer(t, hk, nil)
+	for _, target := range []string{"ops", "desk"} {
+		result := assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": target})
+		if result.isError || result.decoded["state"] != "accepted" {
+			t.Fatalf("target %s answered-only state=%v, want accepted; %s", target, result.decoded["state"], result.text)
+		}
+		receipts, _ := result.decoded["receipts"].(map[string]any)
+		answered, _ := receipts["answered"].([]any)
+		if len(answered) != 1 {
+			t.Fatalf("target %s answered receipts=%v, want one verdict", target, receipts)
+		}
+	}
+
+	// Delivered relay row: the lane aggregate reports delivered (its
+	// terminal-history verdict), the conversation reports done.
+	hk.outbox = nil
+	hk.relays = []handoffkeepRelayEvent{{ID: 62, Kind: "lane.event", OwnerLane: "lane-a", EventID: "Q-20261010-60-rev2-answered", Attempts: 1, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: "host-a/w1:p1"}}
+	result := assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": "ops"})
+	if result.decoded["state"] != "delivered" {
+		t.Fatalf("lane answered+delivered state=%v, want delivered; receipts=%v", result.decoded["state"], result.decoded["receipts"])
+	}
+	result = assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": "desk"})
+	if result.decoded["state"] != "done" {
+		t.Fatalf("conversation answered+delivered state=%v, want done; receipts=%v", result.decoded["state"], result.decoded["receipts"])
+	}
+
+	// An undelivered persisted row keeps the aggregate in-progress — never
+	// done — and a sink stamp folds to failed with sink_lane.
+	hk.relays = []handoffkeepRelayEvent{{ID: 63, Kind: "lane.event", OwnerLane: "lane-a", EventID: "Q-20261010-60-rev2-answered", Attempts: 1}}
+	for _, target := range []string{"ops", "desk"} {
+		result = assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": target})
+		if result.decoded["state"] != "in-progress" {
+			t.Fatalf("target %s answered+persisted state=%v, want in-progress", target, result.decoded["state"])
+		}
+	}
+	hk.relays[0].DeliveredAt = now.Format(time.RFC3339Nano)
+	hk.relays[0].DeliveredTo = "sink/sink:lane-a"
+	for _, target := range []string{"ops", "desk"} {
+		result = assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": target})
+		if result.decoded["state"] != "failed" {
+			t.Fatalf("target %s answered+sink state=%v, want failed", target, result.decoded["state"])
+		}
+	}
+
+	// An unanswered sibling still reports decision-pending — answered work
+	// never masks live pending work.
+	hk.pending.ChatQuestions = append(hk.pending.ChatQuestions, assistantChatQuestion{ID: "Q-20261010-61", ConversationID: "operator-desk", Lane: "lane-a", State: "pending", Revision: 1})
+	for _, target := range []string{"ops", "desk"} {
+		result = assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": target})
+		if result.decoded["state"] != "decision-pending" {
+			t.Fatalf("target %s mixed pending state=%v, want decision-pending", target, result.decoded["state"])
+		}
+	}
+}
+
+// Round-3 N4: regression tests for the mutants the checker proved could be
+// removed silently — each asserts the behavior that pins the clause.
+func TestAssistantMutantGapsR3(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// C4: a capped outbox can hide the lane's owed notice — a full page of
+	// other-lane rows must report in-progress with view_truncated, never a
+	// settled verdict.
+	hk := newFakeAssistantHK(t)
+	for i := int64(1); i <= assistantOutboxLimit; i++ {
+		hk.outbox = append(hk.outbox, assistantOutboxRow{ID: i, Kind: "chat_answer", TargetLane: "lane-z", EventID: "ev-other", CreatedAt: now})
+	}
+	hk.relays = []handoffkeepRelayEvent{{ID: 64, Kind: "lane.event", OwnerLane: "lane-a", EventID: "ev-ok", Attempts: 1, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: "host-a/w1:p1"}}
+	srv, _ := assistantTestServer(t, hk, nil)
+	result := assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": "ops"})
+	if result.decoded["state"] != "in-progress" {
+		t.Fatalf("capped outbox state=%v, want in-progress; receipts=%v", result.decoded["state"], result.decoded["receipts"])
+	}
+	receipts, _ := result.decoded["receipts"].(map[string]any)
+	if receipts["reason"] != "view_truncated" {
+		t.Fatalf("capped outbox reason=%v, want view_truncated", receipts["reason"])
+	}
+
+	// C5: the pending-cap check guards lane targets too, not only
+	// conversation targets — a capped question list on other lanes cannot
+	// prove lane-a has nothing pending.
+	hk = newFakeAssistantHK(t)
+	pending := assistantPending{ServerTime: now}
+	for i := 0; i < assistantChatCap; i++ {
+		pending.ChatQuestions = append(pending.ChatQuestions, assistantChatQuestion{
+			ID: fmt.Sprintf("Q-20261111-%02d", i%100), ConversationID: "other-desk",
+			Lane: "other-lane", State: "pending", Revision: 1,
+		})
+	}
+	hk.pending = pending
+	hk.relays = []handoffkeepRelayEvent{{ID: 65, Kind: "lane.event", OwnerLane: "lane-a", EventID: "ev-ok", Attempts: 1, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: "host-a/w1:p1"}}
+	srv, _ = assistantTestServer(t, hk, nil)
+	result = assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": "ops"})
+	if result.decoded["state"] != "in-progress" {
+		t.Fatalf("lane pending-cap state=%v, want in-progress; receipts=%v", result.decoded["state"], result.decoded["receipts"])
+	}
+	receipts, _ = result.decoded["receipts"].(map[string]any)
+	if receipts["reason"] != "view_truncated" {
+		t.Fatalf("lane pending-cap reason=%v, want view_truncated", receipts["reason"])
+	}
+
+	// C9: a resolved in-scope request is not an open item — detail fails
+	// closed rather than answering with a settled request.
+	hk = newFakeAssistantHK(t)
+	hk.seedTask(assistantTask{ID: 83, Lane: "lane-a", State: "needs_decision", Title: "resolved", Refs: struct {
+		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
+		Disposition     json.RawMessage           `json:"disposition,omitempty"`
+	}{DecisionRequest: &assistantDecisionRequest{
+		ID: "dr-83-1", Revision: 1, Status: "answered", Question: "q", DefaultAction: "wait",
+		RequestedBy: "wrk", RequestedAt: now,
+		Resolution: &assistantDecisionResolution{Kind: "answered", Responder: "operator", At: now},
+	}}})
+	srv, _ = assistantTestServer(t, hk, nil)
+	if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-83-1"}); got != "request_not_found" {
+		t.Fatalf("resolved in-scope detail error=%q, want request_not_found", got)
+	}
+
+	// C13: a stale id on an in-scope task answers the same generic
+	// request_not_found — the live request id is never echoed.
+	hk.seedTask(assistantTask{ID: 84, Lane: "lane-a", State: "needs_decision", Title: "current", Refs: struct {
+		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
+		Disposition     json.RawMessage           `json:"disposition,omitempty"`
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-84-2", Revision: 2, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
+	if got := assistantCallError(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": "dr-84-1"}); got != "request_not_found" {
+		t.Fatalf("stale in-scope progress error=%q, want request_not_found", got)
+	} else if strings.Contains(got, "dr-84-2") {
+		t.Fatalf("error echoes the live request id: %q", got)
+	}
+
+	// C15: the detail clock borrow fails closed — a pending snapshot that
+	// errors does not produce a detail answer with a zero server_time.
+	hk = newFakeAssistantHK(t)
+	hk.seedTask(assistantTask{ID: 85, Lane: "lane-a", State: "needs_decision", Title: "open", Refs: struct {
+		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
+		Disposition     json.RawMessage           `json:"disposition,omitempty"`
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-85-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
+	hk.statusFor["/v1/assistant/pending"] = http.StatusInternalServerError
+	srv, _ = assistantTestServer(t, hk, nil)
+	if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-85-1"}); got != "hk_rejected_http_500" {
+		t.Fatalf("failed clock borrow error=%q, want hk_rejected_http_500", got)
 	}
 }

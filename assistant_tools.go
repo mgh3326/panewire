@@ -141,7 +141,7 @@ func (s *assistantServer) callAssistantTool(ctx context.Context, name string, ar
 		if err := decodeAssistantArgs(args, &in); err != nil {
 			return nil, err
 		}
-		return s.toolPendingList(ctx)
+		return s.toolPendingList(ctx, targets)
 	case "pending_detail":
 		var in struct {
 			ID string `json:"id"`
@@ -164,7 +164,7 @@ func (s *assistantServer) callAssistantTool(ctx context.Context, name string, ar
 		if err := decodeAssistantArgs(args, &in); err != nil {
 			return nil, err
 		}
-		return s.toolPoll(ctx)
+		return s.toolPoll(ctx, targets)
 	default:
 		return nil, errAssistantInvalidArgs
 	}
@@ -231,13 +231,15 @@ type assistantPendingItem struct {
 	Body           string                    `json:"body,omitempty"`
 	ConversationID string                    `json:"conversation_id,omitempty"`
 	DueAt          *time.Time                `json:"due_at,omitempty"`
-	RequestedAt    time.Time                 `json:"requested_at,omitempty"`
+	RequestedAt    time.Time                 `json:"requested_at,omitzero"`
 	RequestedBy    string                    `json:"requested_by,omitempty"`
-	CreatedAt      time.Time                 `json:"created_at,omitempty"`
-	UpdatedAt      time.Time                 `json:"updated_at,omitempty"`
+	CreatedAt      time.Time                 `json:"created_at,omitzero"`
+	UpdatedAt      time.Time                 `json:"updated_at,omitzero"`
 	Options        *assistantDecisionOptions `json:"options,omitempty"`
-	// ServerTime is the handoffkeep clock at list time; detail reads take the
-	// direct GET path and carry no list snapshot, so it stays nil there.
+	// ServerTime is the handoffkeep clock: the pending snapshot stamps it
+	// inline, and detail reads borrow the same snapshot clock after their
+	// scope checks — the single-object GETs carry no server_time of their
+	// own.
 	ServerTime *time.Time `json:"server_time,omitempty"`
 }
 
@@ -251,12 +253,14 @@ var assistantTerminalTaskStates = map[string]bool{"merged": true, "dropped": tru
 // Terminal tasks are filtered here too — not because hk is expected to send
 // them (its SQL already excludes them) but because this binary is the trust
 // boundary: a merged or dropped task must never appear no matter what the
-// upstream payload says.
-func pendingItems(pending assistantPending) []assistantPendingItem {
+// upstream payload says. The scope filter applies the same allowlist the
+// by-id tools enforce: a decision request on an unmapped lane and a
+// question outside every mapped lane and conversation never appear.
+func pendingItems(pending assistantPending, scope assistantTargetScope) []assistantPendingItem {
 	serverTime := pending.ServerTime
 	items := make([]assistantPendingItem, 0, len(pending.DecisionRequests)+len(pending.ChatQuestions))
 	for _, d := range pending.DecisionRequests {
-		if assistantTerminalTaskStates[d.State] {
+		if assistantTerminalTaskStates[d.State] || !scope.laneAllowed(d.Lane) {
 			continue
 		}
 		items = append(items, assistantPendingItem{
@@ -279,6 +283,9 @@ func pendingItems(pending assistantPending) []assistantPendingItem {
 		})
 	}
 	for _, q := range pending.ChatQuestions {
+		if !scope.questionAllowed(q) {
+			continue
+		}
 		items = append(items, assistantChatItem(q, &serverTime))
 	}
 	return items
@@ -314,12 +321,12 @@ func pendingViewTruncated(pending assistantPending) bool {
 	return len(pending.ChatQuestions) >= assistantChatCap
 }
 
-func (s *assistantServer) toolPendingList(ctx context.Context) (any, error) {
+func (s *assistantServer) toolPendingList(ctx context.Context, targets map[string]assistantTarget) (any, error) {
 	pending, err := s.hk.pending(ctx)
 	if err != nil {
 		return nil, err
 	}
-	items := pendingItems(pending)
+	items := pendingItems(pending, scopeForTargets(targets))
 	return map[string]any{
 		"server_time":           pending.ServerTime,
 		"items":                 items,
@@ -341,6 +348,11 @@ func (s *assistantServer) toolPendingDetail(ctx context.Context, id string, targ
 	scope := scopeForTargets(targets)
 	if match := assistantRequestIDPattern.FindStringSubmatch(id); match != nil {
 		taskID, _ := strconv.ParseInt(match[1], 10, 64)
+		if taskID < 1 {
+			// dr-0-* names no task — fail closed locally with the same
+			// generic not_found every missing id answers.
+			return nil, errAssistantRequestNotFound
+		}
 		return s.pendingDetailRequest(ctx, id, taskID, scope)
 	}
 	if assistantQuestionIDPattern.MatchString(id) {
@@ -599,6 +611,9 @@ func (s *assistantServer) progressRequest(ctx context.Context, requestID string,
 	scope := scopeForTargets(targets)
 	if match := assistantRequestIDPattern.FindStringSubmatch(requestID); match != nil {
 		taskID, _ := strconv.ParseInt(match[1], 10, 64)
+		if taskID < 1 {
+			return nil, errAssistantRequestNotFound
+		}
 		return s.progressDecisionRequest(ctx, requestID, taskID, scope)
 	}
 	if assistantQuestionIDPattern.MatchString(requestID) {
@@ -787,6 +802,46 @@ func (s *assistantServer) progressQuestion(ctx context.Context, questionID strin
 	}
 }
 
+// foldAnsweredChains runs the durable answer chain — the same outbox →
+// relay → delivered evidence progress(request_id) follows — for each
+// answered pending item and folds the per-item states into one aggregate.
+// A failed chain wins; otherwise the least-advanced outstanding stage
+// stands (accepted before in-progress before done), so the aggregate is
+// done only when every chain proved delivery. Per-item verdicts land in
+// receipts["answered"].
+func (s *assistantServer) foldAnsweredChains(ctx context.Context, items []assistantPendingItem, receipts map[string]any) (string, error) {
+	rank := map[string]int{
+		assistantStateFailed:     0,
+		assistantStateAccepted:   1,
+		assistantStateInProgress: 2,
+		assistantStateDelivered:  3,
+		assistantStateDone:       4,
+	}
+	aggregate := assistantStateDone
+	var verdicts []map[string]any
+	for _, item := range items {
+		itemReceipts := map[string]any{
+			"id":              item.ID,
+			"revision":        item.Revision,
+			"kind":            item.Kind,
+			"lane":            item.Lane,
+			"conversation_id": item.ConversationID,
+		}
+		result, err := s.progressRelayNotice(ctx, item.ID, item.Lane, chatAnsweredEventID(item.ID, item.Revision), itemReceipts)
+		if err != nil {
+			return "", err
+		}
+		decoded, _ := result.(map[string]any)
+		state, _ := decoded["state"].(string)
+		verdicts = append(verdicts, map[string]any{"key": item.Key, "state": state, "receipts": decoded["receipts"]})
+		if r, ok := rank[state]; ok && r < rank[aggregate] {
+			aggregate = state
+		}
+	}
+	receipts["answered"] = verdicts
+	return aggregate, nil
+}
+
 // progressTarget resolves an opaque target id and reports the lane's (or
 // conversation's) aggregate state: decision-pending > failed > in-progress >
 // delivered > done.
@@ -795,21 +850,31 @@ func (s *assistantServer) progressTarget(ctx context.Context, targetID string, t
 	if !ok {
 		return nil, errAssistantUnknownTarget
 	}
+	scope := scopeForTargets(targets)
 	if target.Kind == "conversation" {
-		return s.progressConversation(ctx, target)
+		return s.progressConversation(ctx, target, scope)
 	}
-	return s.progressLane(ctx, target)
+	return s.progressLane(ctx, target, scope)
 }
 
-func (s *assistantServer) progressLane(ctx context.Context, target assistantTarget) (any, error) {
+func (s *assistantServer) progressLane(ctx context.Context, target assistantTarget, scope assistantTargetScope) (any, error) {
 	receipts := map[string]any{"target": map[string]any{"id": target.ID, "kind": target.Kind, "lane": target.Lane}}
 	pending, err := s.hk.pending(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var pendingKeys []string
-	for _, item := range pendingItems(pending) {
-		if item.Lane == target.Lane {
+	var answeredItems []assistantPendingItem
+	for _, item := range pendingItems(pending, scope) {
+		if item.Lane != target.Lane {
+			continue
+		}
+		// Only unanswered work is decision-pending: an item that already
+		// carries an assistant answer follows the outbox/relay notice
+		// chain like progress(request_id) does, folded below.
+		if item.Answered {
+			answeredItems = append(answeredItems, item)
+		} else {
 			pendingKeys = append(pendingKeys, item.Key)
 		}
 	}
@@ -838,6 +903,17 @@ func (s *assistantServer) progressLane(ctx context.Context, target assistantTarg
 		receipts["relay_rows"] = exhaustedRows
 		receipts["reason"] = "relay_exhausted"
 		return map[string]any{"target": target.ID, "state": assistantStateFailed, "receipts": receipts}, nil
+	}
+	if len(answeredItems) > 0 {
+		state, err := s.foldAnsweredChains(ctx, answeredItems, receipts)
+		if err != nil {
+			return nil, err
+		}
+		if state != assistantStateDone {
+			// The least-advanced outstanding chain is the lane's answer —
+			// provable current work preempts a settled-history verdict.
+			return map[string]any{"target": target.ID, "state": state, "receipts": receipts}, nil
+		}
 	}
 	outboxRows, err := s.hk.outbox(ctx, assistantOutboxLimit)
 	if err != nil {
@@ -921,15 +997,21 @@ func (s *assistantServer) progressLane(ctx context.Context, target assistantTarg
 	return map[string]any{"target": target.ID, "state": assistantStateDone, "receipts": receipts}, nil
 }
 
-func (s *assistantServer) progressConversation(ctx context.Context, target assistantTarget) (any, error) {
+func (s *assistantServer) progressConversation(ctx context.Context, target assistantTarget, scope assistantTargetScope) (any, error) {
 	receipts := map[string]any{"target": map[string]any{"id": target.ID, "kind": target.Kind, "conversation": target.Conversation}}
 	pending, err := s.hk.pending(ctx)
 	if err != nil {
 		return nil, err
 	}
 	var pendingKeys []string
-	for _, item := range pendingItems(pending) {
-		if item.Kind == "chat_question" && item.ConversationID == target.Conversation {
+	var answeredItems []assistantPendingItem
+	for _, item := range pendingItems(pending, scope) {
+		if item.Kind != "chat_question" || item.ConversationID != target.Conversation {
+			continue
+		}
+		if item.Answered {
+			answeredItems = append(answeredItems, item)
+		} else {
 			pendingKeys = append(pendingKeys, item.Key)
 		}
 	}
@@ -941,19 +1023,26 @@ func (s *assistantServer) progressConversation(ctx context.Context, target assis
 		receipts["reason"] = "view_truncated"
 		return map[string]any{"target": target.ID, "state": assistantStateInProgress, "receipts": receipts}, nil
 	}
+	if len(answeredItems) > 0 {
+		state, err := s.foldAnsweredChains(ctx, answeredItems, receipts)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"target": target.ID, "state": state, "receipts": receipts}, nil
+	}
 	return map[string]any{"target": target.ID, "state": assistantStateDone, "receipts": receipts}, nil
 }
 
 // toolPoll is the dedupe snapshot: the pending set keyed by <id>:<revision>
 // with the hk server clock. The consumer, not the server, owns liveness —
 // see assistantPollContract.
-func (s *assistantServer) toolPoll(ctx context.Context) (any, error) {
+func (s *assistantServer) toolPoll(ctx context.Context, targets map[string]assistantTarget) (any, error) {
 	pending, err := s.hk.pending(ctx)
 	if err != nil {
 		return nil, err
 	}
 	items := map[string]any{}
-	for _, item := range pendingItems(pending) {
+	for _, item := range pendingItems(pending, scopeForTargets(targets)) {
 		items[item.Key] = map[string]any{
 			"id":         item.ID,
 			"kind":       item.Kind,
