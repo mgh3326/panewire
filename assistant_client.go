@@ -380,8 +380,14 @@ func (c *assistantHK) task(ctx context.Context, id int64) (assistantTask, bool, 
 
 // tasksForLane pages the lane's tasks with after_id until a short page —
 // the single-page fetch used before could only prove a lane quiet by luck
-// on a mature lane (PR-2 carry-forward). truncated reports whether the page
-// bound was reached with the last page still full.
+// on a mature lane (PR-2 carry-forward). after_id is sent on every page,
+// including after_id=0 on the first: handoffkeep only walks the
+// id-ordered ListTasksPage path when the parameter is present — a page
+// without it is priority-ordered, and the biggest id on that page is not
+// a safe cursor for the next (a live low-priority task could sit behind a
+// page of merged high-priority rows and be skipped entirely). truncated
+// reports whether the page bound was reached with the last page still
+// full.
 func (c *assistantHK) tasksForLane(ctx context.Context, lane string) ([]assistantTask, bool, error) {
 	var out []assistantTask
 	var afterID int64
@@ -389,9 +395,7 @@ func (c *assistantHK) tasksForLane(ctx context.Context, lane string) ([]assistan
 		query := url.Values{}
 		query.Set("lane", lane)
 		query.Set("limit", strconv.Itoa(assistantTasksPageLimit))
-		if afterID > 0 {
-			query.Set("after_id", strconv.FormatInt(afterID, 10))
-		}
+		query.Set("after_id", strconv.FormatInt(afterID, 10))
 		status, payload, _, err := c.get(ctx, "/v1/tasks", query)
 		if err != nil {
 			return nil, false, err

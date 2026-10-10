@@ -37,6 +37,13 @@ type fakeAssistantHub struct {
 	posts    int
 	nextID   int64
 	rows     map[string]*fakeHubRow
+	// dedupe is the relay dedupe map, claimed under mu before the row is
+	// stored: key → 0 while the claim is in flight, key → the row id once
+	// persisted — the real relayLaneEventContext claim window.
+	dedupe map[string]int64
+	// creates counts 201 stores per event id — the wire proof that a raced
+	// second POST never mints a second durable row.
+	creates map[string]int
 	// Injection knobs:
 	//   inFlightIDs    — these event ids answer 409 {"id":0} and store nothing
 	//   rejectEventIDs — these event ids answer the given status, store nothing
@@ -61,6 +68,8 @@ func newFakeAssistantHub(t *testing.T) *fakeAssistantHub {
 		t:              t,
 		nextID:         9000,
 		rows:           map[string]*fakeHubRow{},
+		dedupe:         map[string]int64{},
+		creates:        map[string]int{},
 		inFlightIDs:    map[string]bool{},
 		rejectEventIDs: map[string]int{},
 	}
@@ -102,8 +111,10 @@ func (h *fakeAssistantHub) serve(w http.ResponseWriter, r *http.Request) {
 	}
 	reject, rejected := h.rejectEventIDs[input.EventID]
 	inFlight := h.inFlightIDs[input.EventID]
-	key := input.Lane + "\x00" + input.EventID
-	old := h.rows[key]
+	kill := h.killAfterStore
+	if kill {
+		h.killAfterStore = false
+	}
 	h.mu.Unlock()
 	if fail != 0 {
 		w.WriteHeader(fail)
@@ -122,11 +133,6 @@ func (h *fakeAssistantHub) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"duplicate_event_id","id":0}`))
 		return
 	}
-	if old != nil {
-		w.WriteHeader(http.StatusConflict)
-		_, _ = w.Write([]byte(fmt.Sprintf(`{"error":"duplicate_event_id","id":%d}`, old.id)))
-		return
-	}
 	// The real ingress validates kind, lane shape, event id and text before
 	// storing — the fake applies the same gates so a text the hub would
 	// refuse is caught here, not asserted away.
@@ -140,14 +146,28 @@ func (h *fakeAssistantHub) serve(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"error":"text_too_long"}`))
 		return
 	}
+	// The dedupe claim happens under the same lock as the store — a
+	// concurrent POST of the same event id sees the claim while the first
+	// request still owns it and answers 409 with id 0, exactly the real
+	// relayLaneEventContext window.
+	key := input.Lane + "\x00" + input.EventID
+	h.mu.Lock()
+	knownID, duplicate := h.dedupe[key]
+	if !duplicate {
+		h.dedupe[key] = 0
+	}
+	h.mu.Unlock()
+	if duplicate {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"error":"duplicate_event_id","id":%d}`, knownID)))
+		return
+	}
 	h.mu.Lock()
 	h.nextID++
 	row := &fakeHubRow{id: h.nextID, lane: input.Lane, eventID: input.EventID, text: input.Text, label: input.Label}
 	h.rows[key] = row
-	kill := h.killAfterStore
-	if kill {
-		h.killAfterStore = false
-	}
+	h.dedupe[key] = row.id
+	h.creates[input.EventID]++
 	h.mu.Unlock()
 	if h.hk != nil {
 		h.hk.mu.Lock()
@@ -186,6 +206,14 @@ func (h *fakeAssistantHub) rowFor(lane, eventID string) *fakeHubRow {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.rows[lane+"\x00"+eventID]
+}
+
+// createsFor reports how many 201 stores one event id produced — racing
+// drainers must always yield exactly 1.
+func (h *fakeAssistantHub) createsFor(eventID string) int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.creates[eventID]
 }
 
 func (h *fakeAssistantHub) postCount() int {
@@ -308,11 +336,9 @@ func TestAssistantWritesFlagAC1(t *testing.T) {
 			{"off", assistantWritesOff},
 			{"false", assistantWritesOff},
 			{"no", assistantWritesOff},
-			{" ", assistantWritesOff},
 			{"answer", assistantWritesAnswer},
 			{"deliver", assistantWritesDeliver},
 			{"all", assistantWritesAll},
-			{" ALL ", assistantWritesAll},
 		}
 		for _, tc := range cases {
 			var useHub *fakeAssistantHub
@@ -327,8 +353,11 @@ func TestAssistantWritesFlagAC1(t *testing.T) {
 				t.Fatalf("flag %q: writes=%d, want %d", tc.flag, cfg.Writes, tc.want)
 			}
 		}
-		// An unrecognized value refuses startup even with the hub pair set.
-		for _, bad := range []string{"1", "yes", "answers", "answer,deliver", "read", "on"} {
+		// An unrecognized value — a typo, a case variant, or padding that
+		// survives quoting — refuses startup even with the hub pair set
+		// (amendment E). The env parser trims unquoted values, so the only
+		// padding that can reach the switch is a quoted one.
+		for _, bad := range []string{"1", "yes", "answers", "answer,deliver", "read", "on", "ALL", "Answer", "OFF", `" answer "`, `" all"`} {
 			if _, err := loadAssistantConfig(assistantFullConfig(t, hk, hub, bad)); err == nil {
 				t.Fatalf("flag %q accepted, want refusal", bad)
 			}
@@ -357,6 +386,26 @@ func TestAssistantWritesFlagAC1(t *testing.T) {
 		// Reads behave exactly as before.
 		if got := assistantCall(t, srv, assistantTestBerryToken, "targets", nil); got.isError {
 			t.Fatalf("read tool failed on a writes-off binary: %s", got.text)
+		}
+	})
+
+	t.Run("off ignores a configured hub pair entirely", func(t *testing.T) {
+		// Mutant M2: writes off must wire no hub client and no drainer even
+		// when the operator left the pair in the config — the credential is
+		// never turned into a usable client.
+		hk := newFakeAssistantHK(t)
+		hub := newFakeAssistantHub(t)
+		srv, _ := assistantWriteServer(t, hk, hub, assistantWritesOff, nil)
+		if srv.hub != nil || srv.drainKick != nil || srv.limiter != nil {
+			t.Fatal("writes-off server wired a hub client, kick or limiter")
+		}
+		hk.seedOutbox("decision_answered", "lane-a", "dr-90-1-answered", "[via berry] dr-90-1 answered go: x")
+		srv.drainNow(context.Background())
+		if hub.postCount() != 0 {
+			t.Fatalf("writes-off drain posted %d events, want 0", hub.postCount())
+		}
+		if marks, _ := hk.markCounts(); marks != 0 {
+			t.Fatalf("writes-off drain marked %d rows, want 0", marks)
 		}
 	})
 
@@ -800,8 +849,22 @@ func TestAssistantDeliverAC4(t *testing.T) {
 		{"long key", map[string]any{"target": "ops", "idempotency_key": strings.Repeat("k", 65), "text": "x"}, "invalid_arguments"},
 		{"colon key", map[string]any{"target": "ops", "idempotency_key": "key:123456", "text": "x"}, "invalid_arguments"},
 		{"leading bracket text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "[director-1] do x"}, "invalid_arguments"},
+		// The leading-bracket rule holds on the trimmed text — padding or
+		// the fullwidth glyph must not sneak a forged tag past it.
+		{"padded leading bracket", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "  [director-1] do x"}, "invalid_arguments"},
+		{"leading fullwidth bracket", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "［director-1］ do x"}, "invalid_arguments"},
+		{"padded fullwidth bracket", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "  ［director-1］ do x"}, "invalid_arguments"},
 		{"newline text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "line1\nline2"}, "invalid_arguments"},
 		{"control text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\x01b"}, "invalid_arguments"},
+		{"c1 nel text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\u0085b"}, "invalid_arguments"},
+		{"c1 high text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\u009fb"}, "invalid_arguments"},
+		// Unicode format characters (category Cf) smuggle invisible or
+		// reordered glyphs into a pane — every one rejects.
+		{"zwsp text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\u200bb"}, "invalid_arguments"},
+		{"word joiner text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\u2060b"}, "invalid_arguments"},
+		{"bom text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\ufeffb"}, "invalid_arguments"},
+		{"bidi override text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\u202eb"}, "invalid_arguments"},
+		{"leading zwsp tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u200b[director-1] do x"}, "invalid_arguments"},
 		{"empty text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "   "}, "invalid_arguments"},
 		{"overlong text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": strings.Repeat("x", assistantDeliverTextMaxBytes+1)}, "text_too_long"},
 	} {
@@ -833,6 +896,9 @@ func TestAssistantDeliverAC4(t *testing.T) {
 	hub.mu.Lock()
 	hub.nextID++
 	hub.rows["lane-a\x00berry:ops:k78901234"] = &fakeHubRow{id: hub.nextID, lane: "lane-a", eventID: "berry:ops:k78901234", text: "[via berry] foreign", label: "panewire-assistant"}
+	// A foreign row carries its dedupe entry — the persisted id is what a
+	// replaying POST learns from the 409.
+	hub.dedupe["lane-a\x00berry:ops:k78901234"] = hub.nextID
 	unverifiedID := hub.nextID
 	hub.mu.Unlock()
 	unv := assistantCall(t, srv, assistantTestBerryToken, "deliver",
@@ -995,20 +1061,22 @@ func TestAssistantDrainerAC5(t *testing.T) {
 		srv2, _ := assistantWriteServer(t, hk, hub, assistantWritesAll, nil)
 		hk.seedOutbox("decision_answered", "lane-a", "dr-16-1-answered", "[via berry] dr-16-1 answered go: x")
 		var wg sync.WaitGroup
-		var s1, s2 map[string]int64
 		wg.Add(2)
-		go func() { defer wg.Done(); s1 = srv.drainNow(context.Background()) }()
-		go func() { defer wg.Done(); s2 = srv2.drainNow(context.Background()) }()
+		go func() { defer wg.Done(); srv.drainNow(context.Background()) }()
+		go func() { defer wg.Done(); srv2.drainNow(context.Background()) }()
 		wg.Wait()
-		if hub.rowCount() != 1 {
-			t.Fatalf("racing drainers stored %d hub rows, want exactly 1", hub.rowCount())
+		// The dedupe claim serializes the posts: exactly one 201 create
+		// reaches the store; the loser answers 409 — id 0 inside the claim
+		// window, the stored id after — and never mints a second row.
+		if hub.rowCount() != 1 || hub.createsFor("dr-16-1-answered") != 1 {
+			t.Fatalf("rows=%d creates=%d, want exactly one 201", hub.rowCount(), hub.createsFor("dr-16-1-answered"))
 		}
 		marks, conflicts := hk.markCounts()
 		if marks < 1 || conflicts != 0 {
 			t.Fatalf("marks=%d conflicts=%d, want marks>=1 conflicts=0", marks, conflicts)
 		}
-		if unsent(hk) != 0 || len(s1)+len(s2) != 2 {
-			t.Fatalf("race outcome: s1=%v s2=%v unsent=%d", s1, s2, unsent(hk))
+		if unsent(hk) != 0 {
+			t.Fatalf("unsent=%d, want 0", unsent(hk))
 		}
 	})
 
@@ -1213,12 +1281,19 @@ func TestAssistantRateLimitAC12(t *testing.T) {
 	if first.isError {
 		t.Fatalf("burst-allowing first write: %s", first.text)
 	}
+	// Settle the answer's owed notice synchronously so the hub baseline is
+	// fixed: after this pass every later pass sees an empty unsent list.
+	srv.drainNow(context.Background())
 	before := len(hk.requestLog())
+	hubPosts := hub.postCount()
 	if got := assistantCallError(t, srv, assistantTestBerryToken, "deliver", map[string]any{"target": "ops", "idempotency_key": "k12345678", "text": "x"}); got != "rate_limited" {
 		t.Fatalf("limited write: %q", got)
 	}
 	if got := len(hk.requestLog()); got != before {
 		t.Fatalf("rate-limited call reached upstream: %d new requests", got-before)
+	}
+	if got := hub.postCount(); got != hubPosts {
+		t.Fatalf("rate-limited deliver reached the hub: %d new posts", got-hubPosts)
 	}
 
 	// The bucket is per-identity, not global.
@@ -1326,6 +1401,10 @@ func TestAssistantFoldPrecedencePR3(t *testing.T) {
 			return "sink stamp"
 		case "in-progress":
 			return "live relay"
+		case "missing":
+			// No outbox row, no relay row — in-progress with
+			// reason notice_row_not_visible.
+			return "no rows"
 		}
 		return ""
 	}
@@ -1340,6 +1419,13 @@ func TestAssistantFoldPrecedencePR3(t *testing.T) {
 		{"done and done is delivered", []string{"done", "done"}, "delivered", ""},
 		{"accepted beats in-progress", []string{"in-progress", "accepted"}, "accepted", ""},
 		{"in-progress beats done", []string{"done", "in-progress"}, "in-progress", ""},
+		// MINOR-3: the top-level reason belongs to the chain that wins the
+		// fold — the accepted chain carries none, so the losing chain's
+		// notice_row_not_visible must never surface, in either order.
+		{"winner without reason clears the loser's reason", []string{"missing", "accepted"}, "accepted", ""},
+		{"same chains reversed keep the same verdict", []string{"accepted", "missing"}, "accepted", ""},
+		{"winner's reason survives in either order", []string{"missing", "failed"}, "failed", "sink_lane"},
+		{"winner's reason survives reversed", []string{"failed", "missing"}, "failed", "sink_lane"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1359,6 +1445,8 @@ func TestAssistantFoldPrecedencePR3(t *testing.T) {
 				case "live relay":
 					hk.relays = append(hk.relays, handoffkeepRelayEvent{ID: int64(900 + i), Kind: "lane.event",
 						OwnerLane: "lane-a", EventID: eventID, Attempts: 1})
+				case "no rows":
+					// Nothing seeded — the matcher finds no evidence.
 				}
 			}
 			hk.pending = pending
@@ -1596,5 +1684,32 @@ func TestAssistantTasksPagingPR3(t *testing.T) {
 	receipts, _ = result.decoded["receipts"].(map[string]any)
 	if receipts["reason"] != "view_truncated" {
 		t.Fatalf("scan-bound reason=%v, want view_truncated", receipts["reason"])
+	}
+}
+
+// The checker's ordering probe (MINOR-1): handoffkeep only takes the
+// id-ordered ListTasksPage path when after_id is present — a page-one
+// request without it answers priority DESC first, so a full page of
+// merged priority-1 rows hides a live priority-0 task AND leaves an id
+// cursor that skips it forever; the lane misreports done. Sending
+// after_id=0 from page one keeps every page id-ordered.
+func TestAssistantTasksOrderingPR3(t *testing.T) {
+	hk := newFakeAssistantHK(t)
+	for i := int64(0); i < assistantTasksPageLimit; i++ {
+		hk.seedTaskPri(assistantTask{ID: 1001 + i, Lane: "lane-a", State: "merged"}, 1)
+	}
+	hk.seedTaskPri(assistantTask{ID: 5, Lane: "lane-a", State: "queued"}, 0)
+	srv, _ := assistantTestServer(t, hk, nil)
+	result := assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": "ops"})
+	if result.isError {
+		t.Fatalf("progress: %s", result.text)
+	}
+	if result.decoded["state"] != "in-progress" {
+		t.Fatalf("state=%v, want in-progress — the live priority-0 task must not hide behind a page of merged priority-1 rows", result.decoded["state"])
+	}
+	receipts, _ := result.decoded["receipts"].(map[string]any)
+	tasks, _ := receipts["tasks"].([]any)
+	if len(tasks) != 1 {
+		t.Fatalf("live tasks=%v, want the one queued row", tasks)
 	}
 }

@@ -71,12 +71,14 @@ asynchronously through the outbox drainer.
 
 ### Write tools (listed only when enabled)
 
-PANEWIRE_ASSISTANT_WRITES selects the enabled subset: `answer` lists
-answer_decision + answer_question, `deliver` lists deliver, `all` lists
-all three, and anything else (including unset) lists none. A tool not in
-the set is absent from tools/list and a call to it fails closed with
-writes_disabled before the targets file is even read. Write calls are
-rate-limited per caller identity (token bucket; see configuration).
+PANEWIRE_ASSISTANT_WRITES selects the enabled subset — exact values
+only: `answer` lists answer_decision + answer_question, `deliver` lists
+deliver, `all` lists all three; `0`, `false`, `no`, `off` or unset
+select none. Anything else — a typo, a case variant, quoted padding —
+refuses startup. A tool not in the set is absent from tools/list and a
+call to it fails closed with writes_disabled before the targets file is
+even read. Write calls are rate-limited per caller identity (token
+bucket; see configuration).
 
 - answer_decision — apply the operator's answer to one open decision
   request. Input: `request_id` (dr-<task>-<revision> exactly as
@@ -104,14 +106,19 @@ rate-limited per caller identity (token bucket; see configuration).
   POST /v1/chat/messages with source_channel=assistant, author operator
   and the expected-revision compare-and-swap — never through the hub chat
   route and never as source_channel web. A CAS race answers the same
-  stale_revision; a same-origin replay dedupes to `duplicate: true`. The
-  deterministic notice event id is `<question-id>-rev<revision>-answered`.
+  stale_revision. A sequential same-origin replay observes the held slot
+  on the pre-read and answers question_slot_taken; `duplicate: true` is
+  only the upstream endpoint's verdict on a replay its own dedupe window
+  still sees racing. The deterministic notice event id is
+  `<question-id>-rev<revision>-answered`.
 - deliver — inject one instruction into a target's operator-mapped lane as
   a hub lane.event. Input: `target` (an opaque id from the targets file),
   `idempotency_key` (`^[A-Za-z0-9._-]{8,64}$`), `text` (trimmed non-empty,
-  ≤2036 bytes, valid UTF-8, no control characters — no newlines — and
-  never starting with `[`, so a forged tag cannot ride the prefix; over-
-  or mis-shaped text is rejected, never truncated). The lane comes only
+  ≤2036 bytes, valid UTF-8, no control characters — no newlines — and no
+  Unicode format characters (category Cf: zero-width spaces, word
+  joiners, BOM, bidi overrides); the first non-space rune may be neither
+  `[` nor its fullwidth `［`, so a forged tag cannot ride the prefix in
+  either glyph; over- or mis-shaped text is rejected, never truncated). The lane comes only
   from the targets file: a lane target delivers to its own lane, a
   conversation target to its mapped `deliver_lane`. The event id is
   `berry:<target>:<key>` — deterministic, never random, never time-based —
@@ -188,10 +195,13 @@ One mode-0600 env file (-config):
   followed.
 - PANEWIRE_ASSISTANT_HUB_URL / _TOKEN — the hub operator credential the
   deliver tool and the drainer post lane.events with; required together
-  or neither. Without them the binary still serves reads and answers
-  (the drainer and deliver are inert) — writes that enable deliver or
-  leave rows owed need the pair.
-- PANEWIRE_ASSISTANT_WRITES — off/answer/deliver/all; unset means off.
+  or neither. With any enabled write value (answer, deliver or all) the
+  pair is mandatory — startup is refused without it. With writes off the
+  pair may be absent, or present and entirely unused (no hub client is
+  built and no drainer starts).
+- PANEWIRE_ASSISTANT_WRITES — exact values only: `answer`, `deliver`,
+  `all`, or off via `0`/`false`/`no`/`off`/unset; anything else refuses
+  startup.
 - PANEWIRE_ASSISTANT_DRAIN_INTERVAL — drain period, default 30s, bounded
   1s–1h.
 - PANEWIRE_ASSISTANT_WRITE_RATE_PER_MIN — sustained write limit per
@@ -292,3 +302,20 @@ handoffkeep notification_outbox (drained by this binary) is their only
 lane notice. The chat page renders them labelled 어시스턴트 with an
 assistant badge instead of the operator delivery state. Human operator
 and desk chat behavior is unchanged.
+
+## Trust boundary notes
+
+- hk follow-up: chatQuestionUpsert should clear answer_message_id when
+  body or lane changes.
+- The drainer relays every unsent notification_outbox row it can read —
+  rows written by any handoffkeep-token holder are posted to lanes with
+  this binary's hub token and the panewire-assistant label. The token
+  pair is the whole trust boundary; anyone who can write the outbox can
+  speak to a lane through it.
+- Mapping the operator-desk conversation in the targets file lets
+  answer_question answer every lane's question that desk sees — scope
+  it to the conversations the operator actually wants answerable.
+- PR-4 precondition: human_only must be set on merge, deploy and spend
+  decision requests in handoffkeep before PANEWIRE_ASSISTANT_WRITES is
+  turned on — otherwise those requests are answerable through
+  answer_decision.

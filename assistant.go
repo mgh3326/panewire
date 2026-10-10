@@ -86,7 +86,7 @@ type assistantConfig struct {
 	// Writes is the write-tool set: assistantWritesOff (default) lists no
 	// write tool and answers writes_disabled; assistantWritesAnswer enables
 	// the two answer tools and the drainer; assistantWritesDeliver enables
-	// deliver alone; assistantWritesAll enables all three.
+	// deliver and the drainer; assistantWritesAll enables all three.
 	Writes int
 	// DrainInterval is the outbox drainer's base period (±25% jitter);
 	// defaults to 30 s.
@@ -155,7 +155,9 @@ func loadAssistantConfig(path string) (assistantConfig, error) {
 			}
 		}
 	}
-	switch flag := strings.ToLower(strings.TrimSpace(values["PANEWIRE_ASSISTANT_WRITES"])); flag {
+	// Exact values only (amendment E): a typo, case variant or padded value
+	// must refuse startup, never silently degrade to a different set.
+	switch flag := values["PANEWIRE_ASSISTANT_WRITES"]; flag {
 	case "", "0", "false", "no", "off":
 		cfg.Writes = assistantWritesOff
 	case "answer":

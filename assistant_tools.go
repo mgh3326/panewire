@@ -998,7 +998,12 @@ func (s *assistantServer) foldAnsweredChains(ctx context.Context, items []assist
 		return "", err
 	}
 	aggregate := assistantStateDone
-	var reason string
+	// The top-level reason belongs to the chain that determines the
+	// winning state — never a stale reason carried over from a losing one.
+	// winKey breaks ties at the winning rank by smallest item key so the
+	// pick is identical for every order handoffkeep may list the items in.
+	winKey := ""
+	reason := ""
 	var verdicts []map[string]any
 	for _, item := range items {
 		itemReceipts := map[string]any{
@@ -1013,11 +1018,14 @@ func (s *assistantServer) foldAnsweredChains(ctx context.Context, items []assist
 			return "", err
 		}
 		verdicts = append(verdicts, map[string]any{"key": item.Key, "state": state, "receipts": itemReceipts})
-		if r, ok := rank[state]; ok && r < rank[aggregate] {
+		r, ok := rank[state]
+		if !ok {
+			continue
+		}
+		if r < rank[aggregate] || (r == rank[aggregate] && (winKey == "" || item.Key < winKey)) {
 			aggregate = state
-			if itemReason, _ := itemReceipts["reason"].(string); itemReason != "" {
-				reason = itemReason
-			}
+			winKey = item.Key
+			reason, _ = itemReceipts["reason"].(string)
 		}
 	}
 	receipts["answered"] = verdicts

@@ -46,6 +46,15 @@ type fakeAssistantHK struct {
 	cfHeaders [][2]string
 	pending   assistantPending
 	tasks     map[int64]assistantTask
+	// taskMeta carries the columns /v1/tasks orders by but does not emit —
+	// without after_id hk answers priority DESC, created_at ASC, id ASC;
+	// with after_id present (even 0) it answers id > after, id ASC. The
+	// fake must reproduce both paths or a paging regression (page one sent
+	// without after_id) goes invisible.
+	taskMeta map[int64]struct {
+		priority, seq int64
+	}
+	taskSeq   int64
 	questions map[string]assistantChatQuestion
 	outbox    []assistantOutboxRow
 	relays    []handoffkeepRelayEvent
@@ -88,6 +97,7 @@ func newFakeAssistantHK(t *testing.T) *fakeAssistantHK {
 	f := &fakeAssistantHK{
 		t:               t,
 		tasks:           map[int64]assistantTask{},
+		taskMeta:        map[int64]struct{ priority, seq int64 }{},
 		questions:       map[string]assistantChatQuestion{},
 		statusFor:       map[string]int{},
 		statusOnceFor:   map[string]int{},
@@ -201,16 +211,36 @@ func (f *fakeAssistantHK) serve(w http.ResponseWriter, r *http.Request) {
 	case path == "/v1/tasks":
 		lane := r.URL.Query().Get("lane")
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		_, hasAfter := r.URL.Query()["after_id"]
 		afterID, _ := strconv.ParseInt(r.URL.Query().Get("after_id"), 10, 64)
 		f.mu.Lock()
 		var tasks []assistantTask
 		for _, task := range f.tasks {
-			if (lane == "" || task.Lane == lane) && task.ID > afterID {
-				tasks = append(tasks, task)
+			if lane != "" && task.Lane != lane {
+				continue
 			}
+			if hasAfter && task.ID <= afterID {
+				continue
+			}
+			tasks = append(tasks, task)
+		}
+		if hasAfter {
+			// ListTasksPage: strictly id-ordered.
+			sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
+		} else {
+			// The default list: priority DESC, created_at ASC, id ASC.
+			sort.Slice(tasks, func(i, j int) bool {
+				mi, mj := f.taskMeta[tasks[i].ID], f.taskMeta[tasks[j].ID]
+				if mi.priority != mj.priority {
+					return mi.priority > mj.priority
+				}
+				if mi.seq != mj.seq {
+					return mi.seq < mj.seq
+				}
+				return tasks[i].ID < tasks[j].ID
+			})
 		}
 		f.mu.Unlock()
-		sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
 		if limit > 0 && len(tasks) > limit {
 			tasks = tasks[:limit]
 		}
@@ -579,8 +609,18 @@ func (f *fakeAssistantHK) cfHeaderLog() [][2]string {
 }
 
 func (f *fakeAssistantHK) seedTask(task assistantTask) {
+	f.seedTaskPri(task, 0)
+}
+
+// seedTaskPri seeds a task with the priority column handoffkeep orders by —
+// the real default list is priority DESC, created_at ASC, id ASC, so a
+// live priority-0 task can sit behind a full page of priority-1 merged
+// rows on a request that omits after_id.
+func (f *fakeAssistantHK) seedTaskPri(task assistantTask, priority int64) {
 	f.mu.Lock()
 	f.tasks[task.ID] = task
+	f.taskMeta[task.ID] = struct{ priority, seq int64 }{priority, f.taskSeq}
+	f.taskSeq++
 	f.mu.Unlock()
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -327,8 +328,11 @@ func validAssistantWriteText(text string, maxBytes int, required bool) error {
 // validDeliverText is the strict lane-injection gate (amendment 1B): reject,
 // never truncate. The trimmed text must be non-empty, at most 2036 bytes,
 // valid UTF-8, free of every control character the hub rejects — no
-// newlines — and must not start with '[', so a forged tag like
-// "[director-1]" can never ride the [via berry] prefix into a pane.
+// newlines — and no Unicode format character (category Cf: ZWSP, word
+// joiner, BOM, bidi overrides) that could smuggle invisible or reordered
+// text into a pane. It must not start with '[' or the fullwidth '［', so a
+// forged tag like "[director-1]" can never ride the [via berry] prefix
+// into a pane in either glyph.
 func validDeliverText(text string) error {
 	if text == "" {
 		return errAssistantInvalidArgs
@@ -340,11 +344,11 @@ func validDeliverText(text string) error {
 		return errAssistantInvalidArgs
 	}
 	for _, r := range text {
-		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) || unicode.Is(unicode.Cf, r) {
 			return errAssistantInvalidArgs
 		}
 	}
-	if strings.HasPrefix(text, "[") {
+	if first, _ := utf8.DecodeRuneInString(text); first == '[' || first == '［' {
 		return errAssistantInvalidArgs
 	}
 	return nil
