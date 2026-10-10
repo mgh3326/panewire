@@ -1214,9 +1214,14 @@ func (h *HubServer) drainChatOutbox(ctx context.Context) {
 // failOrphanChatMessages fails stored rows nothing will ever deliver: no
 // in-memory pending entry and no live (undelivered) relay row. A row whose
 // durable relay event still exists is queued, not orphaned — replay owns it.
-// The sweep walks from chatSweepCursor, which only advances past permanently
-// failed rows, so a growing failed backlog can never pin the sweep on the
-// oldest window.
+// The sweep walks from chatSweepCursor under the settled-prefix rule
+// (MINOR-7): the cursor may advance past a row only while every stored row
+// seen before it this pass is permanently settled — an assistant row (the
+// hk outbox owns its notice), a not_sent row, or a row this pass failed. A
+// stored web row still inside its grace window is NOT settled, so the
+// cursor stops at it: exempt assistant rows behind it stop being re-read
+// once the prefix ahead of them resolves, yet the graced row itself is
+// still revisited and marked failed once its grace expires.
 func (h *HubServer) failOrphanChatMessages(ctx context.Context) {
 	live, err := h.liveChatRelayRows(ctx)
 	if err != nil {
@@ -1225,7 +1230,9 @@ func (h *HubServer) failOrphanChatMessages(ctx context.Context) {
 	}
 	h.chatMu.Lock()
 	after := h.chatSweepCursor
+	settled := h.chatSweepCursor
 	h.chatMu.Unlock()
+	prefixOpen := true
 	for {
 		messages, err := h.chatStore.ListChatMessages(ctx, true, after, hubChatPageLimit)
 		if err != nil {
@@ -1233,19 +1240,14 @@ func (h *HubServer) failOrphanChatMessages(ctx context.Context) {
 			return
 		}
 		for _, message := range messages {
+			if message.ID > after {
+				after = message.ID
+			}
+			rowSettled := false
 			if message.RelayState != "stored" {
-				if message.RelayState == "not_sent" {
-					if message.ID > after {
-						after = message.ID
-					}
-					continue
-				}
-				// failed is permanent; the cursor never revisits it.
-				h.chatMu.Lock()
-				if message.ID > h.chatSweepCursor {
-					h.chatSweepCursor = message.ID
-				}
-				h.chatMu.Unlock()
+				// not_sent and failed rows are permanently settled — the
+				// former was never attempted, the latter can never change.
+				rowSettled = true
 			} else {
 				// Assistant-channel rows are never the hub's to deliver: the
 				// handoffkeep notification_outbox drain (MGH-36) is their only
@@ -1253,31 +1255,31 @@ func (h *HubServer) failOrphanChatMessages(ctx context.Context) {
 				// entry and no relay row forever, which is exactly the orphan
 				// shape — exempt it or the sweep would lie about it failing.
 				if message.SourceChannel == "assistant" {
-					if message.ID > after {
-						after = message.ID
+					rowSettled = true
+				} else {
+					h.chatMu.Lock()
+					_, pending := h.chatPending[message.ID]
+					h.chatMu.Unlock()
+					_, queued := live[message.ID]
+					inGrace := h.now().UTC().Sub(message.CreatedAt) < hubChatOrphanGrace
+					if pending || queued || inGrace {
+						// Still owned by someone — unsettled: it stays in
+						// the walk until its owner resolves it or its grace
+						// expires and the next pass fails it.
+					} else if _, err := h.chatStore.MarkChatMessageFailed(ctx, message.ID); err != nil {
+						h.logger.Warn("chat orphan message was not marked failed", "id", message.ID)
+					} else {
+						h.logger.Warn("chat message had no delivery lane after restart; marked failed", "id", message.ID)
+						rowSettled = true
 					}
-					continue
 				}
-				h.chatMu.Lock()
-				_, pending := h.chatPending[message.ID]
-				h.chatMu.Unlock()
-				if pending {
-					continue
-				}
-				if _, queued := live[message.ID]; queued {
-					continue
-				}
-				if h.now().UTC().Sub(message.CreatedAt) < hubChatOrphanGrace {
-					continue
-				}
-				if _, err := h.chatStore.MarkChatMessageFailed(ctx, message.ID); err != nil {
-					h.logger.Warn("chat orphan message was not marked failed", "id", message.ID)
-					continue
-				}
-				h.logger.Warn("chat message had no delivery lane after restart; marked failed", "id", message.ID)
 			}
-			if message.ID > after {
-				after = message.ID
+			if rowSettled {
+				if prefixOpen && message.ID > settled {
+					settled = message.ID
+				}
+			} else {
+				prefixOpen = false
 			}
 		}
 		if len(messages) < hubChatPageLimit {
@@ -1285,6 +1287,9 @@ func (h *HubServer) failOrphanChatMessages(ctx context.Context) {
 		}
 	}
 	h.chatMu.Lock()
+	if settled > h.chatSweepCursor {
+		h.chatSweepCursor = settled
+	}
 	h.chatSweepWarned = false
 	h.chatMu.Unlock()
 }

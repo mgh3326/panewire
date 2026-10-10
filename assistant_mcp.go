@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 )
 
 // The MCP surface is JSON-RPC 2.0 over streamable HTTP, mirroring
@@ -129,14 +130,14 @@ func (s *assistantServer) dispatchRPC(ctx context.Context, identity string, requ
 			"protocolVersion": version,
 			"capabilities":    map[string]any{"tools": map[string]any{}},
 			"serverInfo":      map[string]any{"name": "panewire-assistant", "version": "v0"},
-			"instructions":    assistantPollContract + " Read tools only: targets, pending_list, pending_detail, progress, poll.",
+			"instructions":    s.instructions(),
 		}, nil
 	case "ping":
 		s.logAudit(identity, "ping", "-", "-", "ok")
 		return map[string]any{}, nil
 	case "tools/list":
 		s.logAudit(identity, "tools/list", "-", "-", "ok")
-		return map[string]any{"tools": assistantToolList()}, nil
+		return map[string]any{"tools": assistantToolList(s.writes)}, nil
 	case "tools/call":
 		return s.dispatchToolCall(ctx, identity, request.Params)
 	default:
@@ -172,10 +173,16 @@ func (s *assistantServer) dispatchToolCall(ctx context.Context, identity string,
 		return nil, &assistantRPCError{Code: rpcInvalidParams, Message: "unknown_tool"}
 	}
 	subject = toolSubject(call.Name, call.Arguments)
-	result, toolErr := s.callAssistantTool(ctx, call.Name, call.Arguments)
+	result, toolErr := s.callAssistantTool(ctx, identity, call.Name, call.Arguments)
 	if toolErr != nil {
 		s.logAudit(identity, "tools/call", call.Name, subject, toolErr.Error())
-		text, _ := json.Marshal(map[string]string{"error": toolErr.Error()})
+		errObject := map[string]any{"error": toolErr.Error()}
+		if withDetail, ok := toolErr.(*assistantDetailError); ok {
+			for k, v := range withDetail.detail {
+				errObject[k] = v
+			}
+		}
+		text, _ := json.Marshal(errObject)
 		return map[string]any{
 			"content": []map[string]any{{"type": "text", "text": string(text)}},
 			"isError": true,
@@ -190,6 +197,23 @@ func (s *assistantServer) dispatchToolCall(ctx context.Context, identity string,
 		"content": []map[string]any{{"type": "text", "text": string(text)}},
 		"isError": false,
 	}, nil
+}
+
+// instructions is the initialize reply's surface description: the no-push
+// contract verbatim, the read tools always, and the enabled write tools by
+// name so a caller never has to guess which half of the flag is on.
+func (s *assistantServer) instructions() string {
+	out := assistantPollContract + " Read tools: targets, pending_list, pending_detail, progress, poll."
+	var writeNames []string
+	for _, tool := range assistantWriteToolList() {
+		if name, _ := tool["name"].(string); s.writeEnabled(name) {
+			writeNames = append(writeNames, name)
+		}
+	}
+	if len(writeNames) == 0 {
+		return out
+	}
+	return out + " Write tools enabled: " + strings.Join(writeNames, ", ") + ". A write call on a tool not listed answers writes_disabled. Write results carry the outbox event id; delivery is confirmed through progress, never assumed."
 }
 
 // toolSubject pulls the one audit-safe identifier out of a call's arguments —

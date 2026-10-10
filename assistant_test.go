@@ -20,6 +20,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // Planted secrets for AC7: every failure path is exercised and then the
@@ -45,6 +46,15 @@ type fakeAssistantHK struct {
 	cfHeaders [][2]string
 	pending   assistantPending
 	tasks     map[int64]assistantTask
+	// taskMeta carries the columns /v1/tasks orders by but does not emit —
+	// without after_id hk answers priority DESC, created_at ASC, id ASC;
+	// with after_id present (even 0) it answers id > after, id ASC. The
+	// fake must reproduce both paths or a paging regression (page one sent
+	// without after_id) goes invisible.
+	taskMeta map[int64]struct {
+		priority, seq int64
+	}
+	taskSeq   int64
 	questions map[string]assistantChatQuestion
 	outbox    []assistantOutboxRow
 	relays    []handoffkeepRelayEvent
@@ -52,15 +62,51 @@ type fakeAssistantHK struct {
 	statusFor  map[string]int
 	bodyFor    map[string]string
 	failNonGET bool
+	// stripDate serves a garbage Date header on every response, forcing the
+	// client's detail-clock fallback path (the extra pending-snapshot GET).
+	stripDate bool
+	// PR-3 write state: posted bodies per path (attribution assertions),
+	// the chat-message dedupe table, and the mark-sent counters the race
+	// test asserts on.
+	postBodies    map[string][]string
+	nextMessageID int64
+	chatMessages  map[string]*fakeChatMessage
+	marks         int
+	markConflicts int
+	killMarkSent  bool
+	statusOnceFor map[string]int
+	// conflictOnceFor makes the next request to the named path answer 409
+	// carrying {"error":<name>} once — the raced-CAS window where the
+	// pre-read saw a free answer slot but hk's own CAS rejected the post.
+	conflictOnceFor map[string]string
+	outboxNextID    int64
+	relayNextID     int64
+}
+
+// fakeChatMessage is the dedupe record handoffkeep keeps per
+// (conversation_id, source_channel, origin_event_id): the semantic fields a
+// replay must byte-match, plus the assigned message id.
+type fakeChatMessage struct {
+	id         int64
+	author     string
+	body       string
+	answersKey string
 }
 
 func newFakeAssistantHK(t *testing.T) *fakeAssistantHK {
 	f := &fakeAssistantHK{
-		t:         t,
-		tasks:     map[int64]assistantTask{},
-		questions: map[string]assistantChatQuestion{},
-		statusFor: map[string]int{},
-		bodyFor:   map[string]string{},
+		t:               t,
+		tasks:           map[int64]assistantTask{},
+		taskMeta:        map[int64]struct{ priority, seq int64 }{},
+		questions:       map[string]assistantChatQuestion{},
+		statusFor:       map[string]int{},
+		statusOnceFor:   map[string]int{},
+		conflictOnceFor: map[string]string{},
+		bodyFor:         map[string]string{},
+		postBodies:      map[string][]string{},
+		chatMessages:    map[string]*fakeChatMessage{},
+		nextMessageID:   500,
+		relayNextID:     1000,
 	}
 	f.server = httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(f.server.Close)
@@ -72,13 +118,68 @@ func (f *fakeAssistantHK) serve(w http.ResponseWriter, r *http.Request) {
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
 	f.cfHeaders = append(f.cfHeaders, [2]string{r.Header.Get("Cf-Access-Client-Id"), r.Header.Get("Cf-Access-Client-Secret")})
 	fail := f.failNonGET
+	strip := f.stripDate
 	f.mu.Unlock()
+	if strip {
+		// An unparsable Date behaves exactly like a missing one: the client's
+		// clock borrow gets a zero time and must pay the snapshot GET.
+		w.Header().Set("Date", "not-a-date")
+	}
 	if fail && r.Method != http.MethodGet {
 		f.t.Errorf("assistant client issued non-GET request: %s %s", r.Method, r.URL.Path)
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	path := r.URL.Path
+	var rawBody []byte
+	if r.Method == http.MethodPost || r.Method == http.MethodPut {
+		rawBody, _ = io.ReadAll(r.Body)
+		f.mu.Lock()
+		f.postBodies[r.Method+" "+path] = append(f.postBodies[r.Method+" "+path], string(rawBody))
+		f.mu.Unlock()
+	}
+	f.mu.Lock()
+	onceStatus, onceOverride := f.statusOnceFor[path]
+	if onceOverride {
+		delete(f.statusOnceFor, path)
+	}
+	killMark := f.killMarkSent && path == "/v1/assistant/outbox/sent"
+	if onceOverride {
+		killMark = false
+	}
+	f.mu.Unlock()
+	// A one-shot transport failure on mark-sent: the row stays unsent
+	// because the client can prove nothing about a connection that died.
+	if killMark {
+		f.mu.Lock()
+		f.killMarkSent = false
+		f.mu.Unlock()
+		if hj, ok := w.(http.Hijacker); ok {
+			conn, _, err := hj.Hijack()
+			if err == nil {
+				_ = conn.Close()
+				return
+			}
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	if onceOverride {
+		w.WriteHeader(onceStatus)
+		_, _ = w.Write([]byte(`{"error":"injected"}`))
+		return
+	}
+	f.mu.Lock()
+	conflictName, conflictOnce := f.conflictOnceFor[path]
+	if conflictOnce {
+		delete(f.conflictOnceFor, path)
+	}
+	f.mu.Unlock()
+	if conflictOnce {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(fmt.Sprintf(`{"error":%q}`, conflictName)))
+		return
+	}
 	f.mu.Lock()
 	status, overriddenStatus := f.statusFor[path]
 	body, overriddenBody := f.bodyFor[path]
@@ -96,22 +197,50 @@ func (f *fakeAssistantHK) serve(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
+	case path == "/v1/assistant/decisions/resolve" && r.Method == http.MethodPost:
+		f.serveResolve(w, rawBody)
+	case path == "/v1/chat/messages" && r.Method == http.MethodPost:
+		f.serveChatMessage(w, rawBody)
+	case path == "/v1/assistant/outbox/sent" && r.Method == http.MethodPost:
+		f.serveMarkSent(w, rawBody)
 	case path == "/v1/assistant/pending":
 		f.writeJSON(w, f.snapshotPending())
 	case path == "/v1/assistant/outbox":
-		f.writeJSON(w, map[string]any{"notifications": f.snapshotOutbox()})
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		f.writeJSON(w, map[string]any{"notifications": f.snapshotOutbox(limit)})
 	case path == "/v1/tasks":
 		lane := r.URL.Query().Get("lane")
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+		_, hasAfter := r.URL.Query()["after_id"]
+		afterID, _ := strconv.ParseInt(r.URL.Query().Get("after_id"), 10, 64)
 		f.mu.Lock()
 		var tasks []assistantTask
 		for _, task := range f.tasks {
-			if lane == "" || task.Lane == lane {
-				tasks = append(tasks, task)
+			if lane != "" && task.Lane != lane {
+				continue
 			}
+			if hasAfter && task.ID <= afterID {
+				continue
+			}
+			tasks = append(tasks, task)
+		}
+		if hasAfter {
+			// ListTasksPage: strictly id-ordered.
+			sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
+		} else {
+			// The default list: priority DESC, created_at ASC, id ASC.
+			sort.Slice(tasks, func(i, j int) bool {
+				mi, mj := f.taskMeta[tasks[i].ID], f.taskMeta[tasks[j].ID]
+				if mi.priority != mj.priority {
+					return mi.priority > mj.priority
+				}
+				if mi.seq != mj.seq {
+					return mi.seq < mj.seq
+				}
+				return tasks[i].ID < tasks[j].ID
+			})
 		}
 		f.mu.Unlock()
-		sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
 		if limit > 0 && len(tasks) > limit {
 			tasks = tasks[:limit]
 		}
@@ -188,7 +317,278 @@ func (f *fakeAssistantHK) snapshotPending() assistantPending {
 	return out
 }
 
-func (f *fakeAssistantHK) snapshotOutbox() []assistantOutboxRow {
+func (f *fakeAssistantHK) snapshotOutbox(limit int) []assistantOutboxRow {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	// handoffkeep's outbox endpoint returns only UNSENT rows, oldest first —
+	// a sent row leaves the view even though the fake keeps it for
+	// assertions.
+	var unsent []assistantOutboxRow
+	for _, row := range f.outbox {
+		if row.SentAt == nil {
+			unsent = append(unsent, row)
+		}
+	}
+	if limit > 0 && len(unsent) > limit {
+		unsent = unsent[:limit]
+	}
+	return unsent
+}
+
+func (f *fakeAssistantHK) nextOutboxID() int64 {
+	f.outboxNextID++
+	return f.outboxNextID
+}
+
+// seedOutbox appends one owed outbox row with a fake id assigned.
+// seedOutboxSent plants an outbox row already marked sent with the given hub
+// row id — the racing-drainer state where another pass finished first.
+func (f *fakeAssistantHK) seedOutboxSent(kind, lane, eventID, text string, hubRowID int64) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	now := time.Now().UTC()
+	f.outbox = append(f.outbox, assistantOutboxRow{
+		ID: f.nextOutboxID(), Kind: kind, TargetLane: lane,
+		EventID: eventID, Text: text,
+		CreatedAt: now.Add(-time.Minute), SentAt: &now, HubRowID: &hubRowID,
+	})
+}
+
+func (f *fakeAssistantHK) seedOutbox(kind, lane, eventID, text string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.outbox = append(f.outbox, assistantOutboxRow{ID: f.nextOutboxID(), Kind: kind, TargetLane: lane, EventID: eventID, Text: text, CreatedAt: time.Now().UTC()})
+}
+
+// serveResolve models hk's ResolveDecisionRequestAssistant against the
+// seeded task rows: same ordering, same error names, same outbox write,
+// and the duplicate replay only for a byte-identical answer.
+func (f *fakeAssistantHK) serveResolve(w http.ResponseWriter, rawBody []byte) {
+	var input struct {
+		RequestID string `json:"request_id"`
+		Kind      string `json:"kind,omitempty"`
+		Option    string `json:"option,omitempty"`
+		Text      string `json:"text,omitempty"`
+		// responder and by are decoded but never read, exactly like hk.
+		Responder string `json:"responder,omitempty"`
+		By        string `json:"by,omitempty"`
+	}
+	if json.Unmarshal(rawBody, &input) != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_context"}`))
+		return
+	}
+	match := assistantRequestIDPattern.FindStringSubmatch(input.RequestID)
+	if match == nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_decision_request"}`))
+		return
+	}
+	taskID, _ := strconv.ParseInt(match[1], 10, 64)
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	task, ok := f.tasks[taskID]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not_found"}`))
+		return
+	}
+	request := task.Refs.DecisionRequest
+	if request == nil || request.ID != input.RequestID {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"decision_request_stale"}`))
+		return
+	}
+	if request.Status != "open" {
+		if request.Resolution != nil && request.Resolution.Kind == "answered" && request.Resolution.Option == input.Option && request.Resolution.Text == input.Text {
+			f.writeJSON(w, map[string]any{"task": task, "request": *request, "duplicate": true})
+			return
+		}
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"decision_request_resolved"}`))
+		return
+	}
+	if task.State == "merged" || task.State == "dropped" {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"task_terminal"}`))
+		return
+	}
+	if len(task.Refs.Disposition) > 0 {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"disposition_operator_only"}`))
+		return
+	}
+	if request.HumanOnly {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"decision_request_human_only"}`))
+		return
+	}
+	now := time.Now().UTC()
+	resolved := *request
+	resolved.Status = "answered"
+	resolved.Resolution = &assistantDecisionResolution{Kind: "answered", Option: input.Option, Text: input.Text, Responder: "operator-via-berry", By: "berry-mcp", At: now}
+	task.Refs.DecisionRequest = &resolved
+	f.tasks[taskID] = task
+	head := "[via berry] " + resolved.ID + " answered"
+	if input.Option != "" {
+		head += " " + input.Option
+	}
+	if input.Text != "" {
+		head += ": "
+	}
+	f.outbox = append(f.outbox, assistantOutboxRow{
+		ID: f.nextOutboxID(), Kind: "decision_answered", TargetLane: task.Lane,
+		EventID: resolved.ID + "-answered", Text: assistantFakeLaneText(head, input.Text), CreatedAt: now,
+	})
+	f.writeJSON(w, map[string]any{"task": task, "request": resolved, "duplicate": false})
+}
+
+// serveChatMessage models hk's PostChatMessage for the assistant answer
+// shape: the same (conversation, channel, origin) dedupe, the same
+// state+revision+empty-slot CAS, the same outbox row in the write.
+func (f *fakeAssistantHK) serveChatMessage(w http.ResponseWriter, rawBody []byte) {
+	var input struct {
+		ConversationID string `json:"conversation_id"`
+		Author         string `json:"author"`
+		Body           string `json:"body"`
+		SourceChannel  string `json:"source_channel"`
+		OriginEventID  string `json:"origin_event_id"`
+		Answers        []struct {
+			QuestionID string `json:"question_id"`
+			Revision   int    `json:"revision"`
+		} `json:"answers"`
+	}
+	if json.Unmarshal(rawBody, &input) != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_context"}`))
+		return
+	}
+	if input.Author != "operator" || input.SourceChannel != "assistant" || input.Body == "" || input.OriginEventID == "" || len(input.Answers) != 1 || input.Answers[0].Revision < 1 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_context"}`))
+		return
+	}
+	answer := input.Answers[0]
+	answersKey := answer.QuestionID + ":" + strconv.Itoa(answer.Revision)
+	key := input.ConversationID + "\x1f" + input.SourceChannel + "\x1f" + input.OriginEventID
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if old, ok := f.chatMessages[key]; ok {
+		if old.author != input.Author || old.body != input.Body || old.answersKey != answersKey {
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"chat_message_conflict"}`))
+			return
+		}
+		f.writeJSON(w, map[string]any{"id": old.id})
+		return
+	}
+	q, ok := f.questions[answer.QuestionID]
+	if !ok {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not_found"}`))
+		return
+	}
+	if q.ConversationID != input.ConversationID {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"chat_conversation_conflict"}`))
+		return
+	}
+	if q.State != "pending" || q.Revision != answer.Revision || q.AnswerMessageID != nil {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"chat_question_stale"}`))
+		return
+	}
+	f.nextMessageID++
+	messageID := f.nextMessageID
+	q.AnswerMessageID = &messageID
+	q.UpdatedAt = time.Now().UTC()
+	f.questions[answer.QuestionID] = q
+	f.chatMessages[key] = &fakeChatMessage{id: messageID, author: input.Author, body: input.Body, answersKey: answersKey}
+	f.outbox = append(f.outbox, assistantOutboxRow{
+		ID: f.nextOutboxID(), Kind: "chat_answer", TargetLane: q.Lane,
+		EventID:   chatAnsweredEventID(answer.QuestionID, answer.Revision),
+		Text:      assistantFakeLaneText("[via berry] "+answer.QuestionID+" answered: ", input.Body),
+		CreatedAt: q.UpdatedAt,
+	})
+	w.WriteHeader(http.StatusCreated)
+	_ = json.NewEncoder(w).Encode(map[string]any{"id": messageID})
+}
+
+// serveMarkSent models hk's MarkNotificationSent exactly: an unsent row
+// takes the hub id once, a repeated mark with the same id is the idempotent
+// 200, a different id is the conflict, an unknown event is 404.
+func (f *fakeAssistantHK) serveMarkSent(w http.ResponseWriter, rawBody []byte) {
+	var input struct {
+		EventID  string `json:"event_id"`
+		HubRowID int64  `json:"hub_row_id"`
+	}
+	if json.Unmarshal(rawBody, &input) != nil || input.HubRowID < 1 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_context"}`))
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.outbox {
+		row := &f.outbox[i]
+		if row.EventID != input.EventID {
+			continue
+		}
+		if row.SentAt != nil {
+			if row.HubRowID != nil && *row.HubRowID == input.HubRowID {
+				f.marks++
+				f.writeJSON(w, row)
+				return
+			}
+			f.markConflicts++
+			w.WriteHeader(http.StatusConflict)
+			_, _ = w.Write([]byte(`{"error":"notification_outbox_conflict"}`))
+			return
+		}
+		now := time.Now().UTC()
+		row.SentAt = &now
+		row.HubRowID = &input.HubRowID
+		f.marks++
+		f.writeJSON(w, row)
+		return
+	}
+	w.WriteHeader(http.StatusNotFound)
+	_, _ = w.Write([]byte(`{"error":"not_found"}`))
+}
+
+// assistantFakeLaneText mirrors hk's assistantLaneText re-cap so fake
+// outbox rows carry the same text shape the real store writes.
+func assistantFakeLaneText(prefix, body string) string {
+	text := prefix + body
+	if len(text) <= 2048 {
+		return text
+	}
+	keep := 2048 - len(prefix) - len("…")
+	if keep < 0 {
+		keep = 0
+	}
+	if len(body) > keep {
+		body = body[:keep]
+	}
+	for len(body) > 0 && !utf8.ValidString(body) {
+		body = body[:len(body)-1]
+	}
+	return prefix + body + "…"
+}
+
+func (f *fakeAssistantHK) postedBodies(path string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string{}, f.postBodies[path]...)
+}
+
+func (f *fakeAssistantHK) markCounts() (marks, conflicts int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.marks, f.markConflicts
+}
+
+func (f *fakeAssistantHK) outboxRows() []assistantOutboxRow {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]assistantOutboxRow{}, f.outbox...)
@@ -209,8 +609,18 @@ func (f *fakeAssistantHK) cfHeaderLog() [][2]string {
 }
 
 func (f *fakeAssistantHK) seedTask(task assistantTask) {
+	f.seedTaskPri(task, 0)
+}
+
+// seedTaskPri seeds a task with the priority column handoffkeep orders by —
+// the real default list is priority DESC, created_at ASC, id ASC, so a
+// live priority-0 task can sit behind a full page of priority-1 merged
+// rows on a request that omits after_id.
+func (f *fakeAssistantHK) seedTaskPri(task assistantTask, priority int64) {
 	f.mu.Lock()
 	f.tasks[task.ID] = task
+	f.taskMeta[task.ID] = struct{ priority, seq int64 }{priority, f.taskSeq}
+	f.taskSeq++
 	f.mu.Unlock()
 }
 
@@ -1186,10 +1596,15 @@ func TestAssistantRouteSurface(t *testing.T) {
 	}
 }
 
-// Fix-round MAJOR-1: a relay row is delivered only when delivered_to names a
-// real <machine>/<pane>. Every other stamp — retired, cancelled, chat-*, sink
-// — is failed with the stamp as the receipt, and sink additionally carries
-// reason sink_lane. Berry must never be told done for a sink.
+// Fix-round MAJOR-1 + PR-3 N1: a relay row is delivered only when
+// delivered_to names a real <machine>/<pane> under the loader's accepted
+// set — a machine id minus the reserved pseudo-machines (hub, sink,
+// resolve) and any non-empty ≤128-byte pane minus the cancelled sentinel.
+// Pane *shape* no longer judges: the lanes loader accepts any non-empty
+// short pane, so m1/xterm is a real delivery while host-a/ and a 129-byte
+// pane are not. Every other stamp — retired, cancelled, chat-*, resolve,
+// sink — is failed with the stamp as the receipt, and sink additionally
+// carries reason sink_lane. Berry must never be told done for a sink.
 func TestAssistantDeliveryStampsR2(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	resolvedTask := func(id int64) assistantTask {
@@ -1208,14 +1623,19 @@ func TestAssistantDeliveryStampsR2(t *testing.T) {
 		reason      string
 	}{
 		{"real pane is done", "host-a/w1:p1", "done", ""},
+		{"loader-accepted non-shaped pane is done", "host-a/xterm", "done", ""},
+		{"loader-accepted workspace pane is done", "m1/workspace:pane-1", "done", ""},
 		{"retired stamp", "hub/replay-retired:stale", "failed", "non_delivery_stamp"},
 		{"retired reason stamp", "hub/replay-retired:unconfirmed", "failed", "non_delivery_stamp"},
 		{"cancelled stamp", "m1/cancelled", "failed", "non_delivery_stamp"},
 		{"chat-terminal stamp", "hub/chat-terminal", "failed", "non_delivery_stamp"},
 		{"chat-cancel stamp", "hub/chat-cancel", "failed", "non_delivery_stamp"},
+		{"resolve stamp", "resolve/mgh", "failed", "non_delivery_stamp"},
 		{"sink stamp", "sink/sink:lane-a", "failed", "sink_lane"},
 		{"bare machine is not a delivery", "host-a", "failed", "non_delivery_stamp"},
-		{"non-pane suffix is not a delivery", "host-a/xterm", "failed", "non_delivery_stamp"},
+		{"empty pane is not a delivery", "host-a/", "failed", "non_delivery_stamp"},
+		{"over-long pane is not a delivery", "host-a/" + strings.Repeat("p", 129), "failed", "non_delivery_stamp"},
+		{"invalid machine is not a delivery", "HOST_A/w1:p1", "failed", "non_delivery_stamp"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			hk := newFakeAssistantHK(t)
@@ -1259,8 +1679,9 @@ func TestAssistantDeliveryStampsR2(t *testing.T) {
 func TestAssistantTruncatedViewsR2(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 
-	// A lane whose tasks page fills the limit can hide a live task past the
-	// cap — the checker's claimed-1001 scenario. done is unprovable.
+	// A lane whose tasks page fills the limit no longer guesses at the tail:
+	// the walk pages by after_id and finds the live task past the cap —
+	// the checker's claimed-1001 scenario now names the task it found.
 	hk := newFakeAssistantHK(t)
 	for i := int64(1); i <= assistantTasksPageLimit; i++ {
 		hk.seedTask(assistantTask{ID: i, Lane: "lane-a", State: "merged", Title: "old"})
@@ -1272,8 +1693,13 @@ func TestAssistantTruncatedViewsR2(t *testing.T) {
 		t.Fatalf("full tasks page state=%v, want in-progress", result.decoded["state"])
 	}
 	receipts, _ := result.decoded["receipts"].(map[string]any)
-	if receipts["reason"] != "view_truncated" {
-		t.Fatalf("reason=%v, want view_truncated", receipts["reason"])
+	tasks, _ := receipts["tasks"].([]any)
+	if len(tasks) != 1 {
+		t.Fatalf("paged tasks=%v, want the one live row past the old cap", tasks)
+	}
+	first, _ := tasks[0].(map[string]any)
+	if first["id"] != float64(assistantTasksPageLimit+1) {
+		t.Fatalf("paged task id=%v, want %d", first["id"], assistantTasksPageLimit+1)
 	}
 
 	// A relay walk that reaches its bound cannot prove the tail is quiet.
@@ -1834,8 +2260,11 @@ func TestAssistantMutantGapsR3(t *testing.T) {
 		t.Fatalf("error echoes the live request id: %q", got)
 	}
 
-	// C15: the detail clock borrow fails closed — a pending snapshot that
-	// errors does not produce a detail answer with a zero server_time.
+	// C15: the detail clock borrow prefers the response's own HTTP Date —
+	// a broken pending snapshot cannot fail a detail whose task GET carried
+	// a parseable Date (PR-2 carry-forward). The fallback path still fails
+	// closed: an unparsable Date plus a broken snapshot is a named error,
+	// never a detail answer with a zero server_time.
 	hk = newFakeAssistantHK(t)
 	hk.seedTask(assistantTask{ID: 85, Lane: "lane-a", State: "needs_decision", Title: "open", Refs: struct {
 		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
@@ -1843,6 +2272,16 @@ func TestAssistantMutantGapsR3(t *testing.T) {
 	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-85-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
 	hk.statusFor["/v1/assistant/pending"] = http.StatusInternalServerError
 	srv, _ = assistantTestServer(t, hk, nil)
+	detail := assistantCall(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-85-1"})
+	if detail.isError || detail.decoded["pending"] != true || detail.decoded["server_time"] == nil {
+		t.Fatalf("date-clocked detail: isError=%v decoded=%v", detail.isError, detail.decoded)
+	}
+	for _, call := range hk.requestLog() {
+		if call == "GET /v1/assistant/pending" {
+			t.Fatalf("date-clocked detail paid the snapshot GET anyway: %v", hk.requestLog())
+		}
+	}
+	hk.stripDate = true
 	if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-85-1"}); got != "hk_rejected_http_500" {
 		t.Fatalf("failed clock borrow error=%q, want hk_rejected_http_500", got)
 	}

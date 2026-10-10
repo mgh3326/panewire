@@ -21,7 +21,12 @@ type assistantTarget struct {
 	Kind         string `json:"kind"` // "lane" or "conversation"
 	Lane         string `json:"lane,omitempty"`
 	Conversation string `json:"conversation,omitempty"`
-	Description  string `json:"description,omitempty"`
+	// DeliverLane is the operator-mapped lane a deliver call posts to. Lane
+	// targets deliver to their own lane; conversation targets carry no lane
+	// of their own, so deliver_lane is the only way they are deliverable —
+	// and the only way a conversation's lane is ever revealed to a write.
+	DeliverLane string `json:"deliver_lane,omitempty"`
+	Description string `json:"description,omitempty"`
 }
 
 // assistantTargetsFile is the on-disk schema.
@@ -30,6 +35,7 @@ type assistantTargetsFile struct {
 		Kind         string `json:"kind"`
 		Lane         string `json:"lane,omitempty"`
 		Conversation string `json:"conversation,omitempty"`
+		DeliverLane  string `json:"deliver_lane,omitempty"`
 		Description  string `json:"description,omitempty"`
 	} `json:"targets"`
 }
@@ -60,15 +66,21 @@ func loadAssistantTargets(path string) (map[string]assistantTarget, error) {
 		if !assistantTargetIDPattern.MatchString(id) {
 			return nil, configError("targets file holds an invalid target id")
 		}
-		target := assistantTarget{ID: id, Kind: entry.Kind, Lane: entry.Lane, Conversation: entry.Conversation, Description: entry.Description}
+		target := assistantTarget{ID: id, Kind: entry.Kind, Lane: entry.Lane, Conversation: entry.Conversation, DeliverLane: entry.DeliverLane, Description: entry.Description}
 		switch entry.Kind {
 		case "lane":
-			if !validReportRelayLaneName(entry.Lane) || entry.Conversation != "" {
+			if !validReportRelayLaneName(entry.Lane) || entry.Conversation != "" || entry.DeliverLane != "" {
 				return nil, configError("targets file holds an invalid lane target")
 			}
 		case "conversation":
 			if !assistantConversationPattern.MatchString(entry.Conversation) || entry.Lane != "" {
 				return nil, configError("targets file holds an invalid conversation target")
+			}
+			// The hub ingress accepts only the agent-label lane spelling;
+			// an unpostable deliver_lane is a config error, not a runtime
+			// surprise.
+			if entry.DeliverLane != "" && !hubAgentLabelPattern.MatchString(entry.DeliverLane) {
+				return nil, configError("targets file holds an invalid conversation deliver lane")
 			}
 		default:
 			return nil, configError("targets file holds an unknown target kind")

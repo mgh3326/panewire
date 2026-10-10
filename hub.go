@@ -452,9 +452,11 @@ type HubServer struct {
 	// is recovered from the durable retry marker on the retry's relay row.
 	chatRetryMu     sync.Mutex
 	chatRetriedFrom map[int64]int64
-	// chatSweepCursor is the highest permanently-failed message id the orphan
-	// sweep has consumed, so a growing failed backlog cannot pin the sweep on
-	// the oldest rows. chatMsgHighWater positions the /chat/data tail window.
+	// chatSweepCursor is the settled-prefix watermark the orphan sweep has
+	// consumed: the highest message id below which every stored row was
+	// permanently settled (assistant, not_sent, failed, or failed during
+	// the pass), so a growing backlog cannot pin the sweep on the oldest
+	// rows. chatMsgHighWater positions the /chat/data tail window.
 	chatSweepCursor             int64
 	chatMsgHighWater            int64
 	chatSweepWarned             bool

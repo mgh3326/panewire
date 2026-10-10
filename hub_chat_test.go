@@ -105,7 +105,11 @@ type fakeChatStore struct {
 	// maxListLimit records the largest page size a ListChatMessages call
 	// asked for, so the page-size contract is pinned, not just the rows.
 	maxListLimit int
-	events       map[string]int64
+	// listAfters records the afterID each undelivered ListChatMessages call
+	// ran with — the MINOR-7 surface that proves the sweep stops re-reading
+	// the consumed prefix.
+	listAfters []int64
+	events     map[string]int64
 }
 
 func newFakeChatStore() *fakeChatStore {
@@ -306,6 +310,9 @@ func (f *fakeChatStore) ListChatMessages(_ context.Context, undelivered bool, af
 	defer f.mu.Unlock()
 	if limit > f.maxListLimit {
 		f.maxListLimit = limit
+	}
+	if undelivered {
+		f.listAfters = append(f.listAfters, afterID)
 	}
 	out := []ChatMessage{}
 	for _, id := range f.order {
@@ -1461,12 +1468,14 @@ func TestHubChatOrphanSweepSeesTail(t *testing.T) {
 	if got := store.messageState(orphan.ID); got != "failed" {
 		t.Fatalf("orphan beyond the old head window state=%q, want failed", got)
 	}
-	// The cursor keeps the sweep from re-reading the consumed backlog.
+	// The cursor keeps the sweep from re-reading the consumed backlog —
+	// under the settled-prefix rule the orphan this pass failed is part of
+	// the consumed prefix too, so the watermark covers it.
 	hub.chatMu.Lock()
 	cursor := hub.chatSweepCursor
 	hub.chatMu.Unlock()
-	if cursor != 250 {
-		t.Fatalf("sweep cursor=%d, want 250 (the consumed failed backlog)", cursor)
+	if cursor != orphan.ID {
+		t.Fatalf("sweep cursor=%d, want %d (the consumed backlog plus the just-failed orphan)", cursor, orphan.ID)
 	}
 }
 
