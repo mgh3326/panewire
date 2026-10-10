@@ -36,10 +36,21 @@ var (
 	errAssistantRequestNotFound = toolError("request_not_found")
 )
 
-// The five read tools of PR-2. There is no write tool and no parameter that
-// accepts a lane, URL, route or shell string — the only identifiers a caller
-// may supply are opaque target ids and hk-shaped request ids.
-func assistantToolList() []map[string]any {
+// The five read tools of PR-2 plus — gated by the writes set — the three
+// write tools of PR-3. No parameter accepts a lane, URL, route or shell
+// string: the only identifiers a caller may supply are opaque target ids,
+// hk-shaped request ids and the bounded write inputs.
+func assistantToolList(writes int) []map[string]any {
+	tools := assistantReadToolList()
+	for _, tool := range assistantWriteToolList() {
+		if name, _ := tool["name"].(string); assistantWriteSetIncludes(writes, name) {
+			tools = append(tools, tool)
+		}
+	}
+	return tools
+}
+
+func assistantReadToolList() []map[string]any {
 	noArgs := map[string]any{"type": "object", "properties": map[string]any{}, "additionalProperties": false}
 	return []map[string]any{
 		{
@@ -99,8 +110,11 @@ func assistantToolList() []map[string]any {
 	}
 }
 
+// assistantToolKnown reports whether the name is a registered tool — read
+// or write — regardless of the writes flag, so a disabled write tool
+// answers writes_disabled instead of unknown_tool.
 func assistantToolKnown(name string) bool {
-	for _, tool := range assistantToolList() {
+	for _, tool := range append(assistantReadToolList(), assistantWriteToolList()...) {
 		if tool["name"] == name {
 			return true
 		}
@@ -120,11 +134,27 @@ func decodeAssistantArgs(raw json.RawMessage, v any) error {
 	return nil
 }
 
-// callAssistantTool loads and validates the targets file before any tool
-// runs: the file is the root of the closed surface, so when it fails its
-// mode, symlink or content checks every tool — not just the target-taking
-// ones — fails closed with targets_file_invalid.
-func (s *assistantServer) callAssistantTool(ctx context.Context, name string, args json.RawMessage) (any, error) {
+// callAssistantTool gates disabled writes first — a write call on a
+// tool outside the enabled set fails closed with writes_disabled before
+// the targets file is even touched — then loads and validates the targets
+// file before any tool runs: the file is the root of the closed surface,
+// so when it fails its mode, symlink or content checks every tool fails
+// closed with targets_file_invalid.
+func (s *assistantServer) callAssistantTool(ctx context.Context, identity, name string, args json.RawMessage) (any, error) {
+	if assistantToolIsWrite(name) {
+		// A write tool outside the enabled set fails closed before any
+		// request — the flag is a set, so an answer-only binary answers
+		// writes_disabled to deliver too, never unknown_tool.
+		if !s.writeEnabled(name) {
+			return nil, errAssistantWritesDisabled
+		}
+		// The per-identity write limit sits ahead of every upstream call:
+		// a leaked credential cannot flood panes or the outbox faster
+		// than the bucket allows (amendment 1E).
+		if s.limiter != nil && !s.limiter.allow(identity) {
+			return nil, errAssistantRateLimited
+		}
+	}
 	targets, err := loadAssistantTargets(s.targetsPath)
 	if err != nil {
 		return nil, errAssistantTargetsInvalid
@@ -165,6 +195,36 @@ func (s *assistantServer) callAssistantTool(ctx context.Context, name string, ar
 			return nil, err
 		}
 		return s.toolPoll(ctx, targets)
+	case "answer_decision":
+		var in struct {
+			RequestID string `json:"request_id"`
+			Option    string `json:"option,omitempty"`
+			Text      string `json:"text,omitempty"`
+		}
+		if err := decodeAssistantArgs(args, &in); err != nil {
+			return nil, err
+		}
+		return s.toolAnswerDecision(ctx, identity, in.RequestID, in.Option, in.Text, targets)
+	case "answer_question":
+		var in struct {
+			ID       string `json:"id"`
+			Revision int    `json:"revision"`
+			Text     string `json:"text"`
+		}
+		if err := decodeAssistantArgs(args, &in); err != nil {
+			return nil, err
+		}
+		return s.toolAnswerQuestion(ctx, identity, in.ID, in.Revision, in.Text, targets)
+	case "deliver":
+		var in struct {
+			Target         string `json:"target"`
+			IdempotencyKey string `json:"idempotency_key"`
+			Text           string `json:"text"`
+		}
+		if err := decodeAssistantArgs(args, &in); err != nil {
+			return nil, err
+		}
+		return s.toolDeliver(ctx, identity, in.Target, in.IdempotencyKey, in.Text, targets)
 	default:
 		return nil, errAssistantInvalidArgs
 	}
@@ -371,8 +431,20 @@ func (s *assistantServer) serverTime(ctx context.Context) (time.Time, error) {
 	return pending.ServerTime, nil
 }
 
+// detailClock is the detail answer's server time: the response's own HTTP
+// Date when the upstream sent a parseable one, and only then the extra
+// pending-snapshot GET the single-object endpoints otherwise cost (PR-2
+// carry-forward). A missing or unparsable Date fails over, never silently
+// into a zero clock.
+func (s *assistantServer) detailClock(ctx context.Context, date time.Time) (time.Time, error) {
+	if !date.IsZero() {
+		return date, nil
+	}
+	return s.serverTime(ctx)
+}
+
 func (s *assistantServer) pendingDetailRequest(ctx context.Context, id string, taskID int64, scope assistantTargetScope) (any, error) {
-	task, found, err := s.hk.task(ctx, taskID)
+	task, found, clock, err := s.hk.task(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -383,7 +455,7 @@ func (s *assistantServer) pendingDetailRequest(ctx context.Context, id string, t
 	if current == nil || current.ID != id || current.Status != "open" {
 		return nil, errAssistantRequestNotFound
 	}
-	serverTime, err := s.serverTime(ctx)
+	serverTime, err := s.detailClock(ctx, clock)
 	if err != nil {
 		return nil, err
 	}
@@ -413,7 +485,7 @@ func (s *assistantServer) pendingDetailRequest(ctx context.Context, id string, t
 }
 
 func (s *assistantServer) pendingDetailQuestion(ctx context.Context, id string, scope assistantTargetScope) (any, error) {
-	q, found, err := s.hk.chatQuestion(ctx, id)
+	q, found, clock, err := s.hk.chatQuestion(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -423,7 +495,7 @@ func (s *assistantServer) pendingDetailQuestion(ctx context.Context, id string, 
 	if !found || !scope.questionAllowed(q) || q.State != "pending" {
 		return nil, errAssistantRequestNotFound
 	}
-	serverTime, err := s.serverTime(ctx)
+	serverTime, err := s.detailClock(ctx, clock)
 	if err != nil {
 		return nil, err
 	}
@@ -452,6 +524,10 @@ const (
 	assistantRelayScanPages = 8
 	assistantRelayPageSize  = 500
 	assistantTasksPageLimit = 1000
+	// assistantTasksScanPages bounds the after_id task walk: mature lanes
+	// page past the single-page cap instead of declaring view_truncated,
+	// but an unbounded list still cannot prove a lane quiet.
+	assistantTasksScanPages = 5
 	assistantOutboxLimit    = 1000
 )
 
@@ -466,12 +542,13 @@ const (
 	relayRowStamped          // every other stamp — retired, cancelled, chat-*
 )
 
-// classifyRelayRow allowlists the real delivery form. Only a delivered_to of
-// the shape <machine>/<lane pane>, with the machine passing machineIDPattern
-// and the pane passing lanePanePattern and neither half being a reserved
-// pseudo-name, is a delivery: hub/replay-retired:*, hub/chat-* and
-// */cancelled all fail the pane check, sink/* fails it too and additionally
-// gets its own class because a sink must never report done.
+// classifyRelayRow allowlists the real delivery form (N1): a delivered_to
+// stamp is a delivery only when it names <machine>/<pane> where the machine
+// is a loader-accepted machine id minus the reserved pseudo-machines and
+// the pane is any loader-accepted pane value minus the one non-delivery
+// sentinel. Anything else — hub/replay-retired:*, hub/chat-*,
+// resolve/<by>, */cancelled — is a stamp, not a delivery; sink/* gets its
+// own class because a sink must never report done.
 func classifyRelayRow(row handoffkeepRelayEvent) int {
 	if row.DeliveredAt == "" {
 		if row.Attempts >= relayReplayMaxAttempts {
@@ -488,15 +565,26 @@ func classifyRelayRow(row handoffkeepRelayEvent) int {
 	return relayRowDelivered
 }
 
+// relayReservedMachines are the machine ids delivered_to uses for stamps
+// that are not deliveries: the hub's own housekeeping stamps, the sink, and
+// the hk resolve route's <by> stamp.
+var relayReservedMachines = map[string]bool{"hub": true, "sink": true, "resolve": true}
+
+// relayDeliveredToTarget accepts the loader's full pane set (any non-empty
+// value up to 128 bytes — parseReportRelayRoutes requires nothing more),
+// minus "cancelled", the one pane value a lanes file can hold that is a
+// non-delivery sentinel. Judging by pane *shape* was N1: it read stamps
+// like m1/workspace:pane-1 — a real pane outside lanePanePattern — as
+// non-deliveries.
 func relayDeliveredToTarget(deliveredTo string) bool {
 	machine, pane, found := strings.Cut(deliveredTo, "/")
 	if !found {
 		return false
 	}
-	if machine == "hub" || machine == "sink" {
+	if relayReservedMachines[machine] {
 		return false
 	}
-	return machineIDPattern.MatchString(machine) && lanePanePattern.MatchString(pane)
+	return machineIDPattern.MatchString(machine) && pane != "" && len(pane) <= 128 && pane != relayCancelledPane
 }
 
 // relayRowState maps a row class onto the closed vocabulary: live and
@@ -651,7 +739,7 @@ func decisionReceipts(task assistantTask, request *assistantDecisionRequest) map
 }
 
 func (s *assistantServer) progressDecisionRequest(ctx context.Context, requestID string, taskID int64, scope assistantTargetScope) (any, error) {
-	task, found, err := s.hk.task(ctx, taskID)
+	task, found, _, err := s.hk.task(ctx, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -682,69 +770,154 @@ func (s *assistantServer) progressDecisionRequest(ctx context.Context, requestID
 	if current.Resolution == nil || current.Resolution.Kind != "answered" || current.Resolution.Responder != assistantResponderName {
 		return map[string]any{"request_id": requestID, "state": assistantStateDone, "receipts": receipts}, nil
 	}
-	return s.progressRelayNotice(ctx, requestID, task.Lane, requestID+"-answered", receipts)
+	return s.progressRelayNotice(ctx, requestID, task.Lane, noticeMatcher(requestID, "decision_request"), receipts)
+}
+
+// noticeMatcher returns the event-id matcher for one item's notice chain.
+// A decision request's event is exactly dr-…-answered. A chat question's
+// family is Q-…-rev<n>-answered for any n: the answer's event id is pinned
+// at answer time, but an edited question keeps its answer slot while the
+// revision moves (hk F6), so the current revision can name an event that
+// was never written — the stored chain for this item is still that one
+// answer's chain.
+func noticeMatcher(itemID, kind string) func(string) bool {
+	if kind == "chat_question" {
+		prefix := itemID + "-rev"
+		return func(eventID string) bool {
+			if !strings.HasPrefix(eventID, prefix) {
+				return false
+			}
+			rev, ok := strings.CutSuffix(eventID[len(prefix):], "-answered")
+			if !ok {
+				return false
+			}
+			n, err := strconv.Atoi(rev)
+			return err == nil && n > 0
+		}
+	}
+	eventID := itemID + "-answered"
+	return func(candidate string) bool {
+		return candidate == eventID
+	}
 }
 
 // progressRelayNotice is the shared assistant-answer chain for resolved
-// decision requests and answered chat questions: the relay row decides done,
-// failed or in-progress under the delivery rules, the unsent outbox row is
-// the accepted receipt, and a row the walk cannot see is honest in-progress —
-// never done.
-func (s *assistantServer) progressRelayNotice(ctx context.Context, requestID, lane, eventID string, receipts map[string]any) (any, error) {
-	if lane != "" {
-		row, exists, truncated, err := s.findRelayRow(ctx, lane, eventID)
-		if err != nil {
-			return nil, err
-		}
-		if truncated {
-			receipts["truncated"] = true
-		}
-		if exists {
-			receipts["relay"] = relayRowReceipt(row)
-			state, reason := relayRowState(row)
-			if reason != "" {
-				receipts["reason"] = reason
-			}
-			return map[string]any{"request_id": requestID, "state": state, "receipts": receipts}, nil
-		}
-		rows, err := s.hk.outbox(ctx, assistantOutboxLimit)
-		if err != nil {
-			return nil, err
-		}
-		for _, outbox := range rows {
-			if outbox.EventID == eventID {
-				receipts["outbox"] = outboxReceipt(outbox)
-				return map[string]any{"request_id": requestID, "state": assistantStateAccepted, "receipts": receipts}, nil
-			}
-		}
-		if truncated || len(rows) >= assistantOutboxLimit {
-			receipts["reason"] = "view_truncated"
-			return map[string]any{"request_id": requestID, "state": assistantStateInProgress, "receipts": receipts}, nil
-		}
-		// The resolution is committed and no notice row is visible yet —
-		// the PR-3 drain has not run or has not reached this row. That is
-		// honest in-progress, not done.
-		receipts["reason"] = "notice_row_not_visible"
-		return map[string]any{"request_id": requestID, "state": assistantStateInProgress, "receipts": receipts}, nil
-	}
-	// A conversation-scoped question may carry no lane at all: the outbox is
-	// the only place its notice can appear, so that is the whole chain.
+// decision requests and answered chat questions: the unsent outbox row is
+// the accepted receipt, the durable relay row decides done, failed or
+// in-progress under the delivery rules, and a row the walk cannot see is
+// honest in-progress — never done.
+func (s *assistantServer) progressRelayNotice(ctx context.Context, requestID, lane string, match func(string) bool, receipts map[string]any) (any, error) {
 	rows, err := s.hk.outbox(ctx, assistantOutboxLimit)
 	if err != nil {
 		return nil, err
 	}
-	for _, outbox := range rows {
-		if outbox.EventID == eventID {
-			receipts["outbox"] = outboxReceipt(outbox)
-			return map[string]any{"request_id": requestID, "state": assistantStateAccepted, "receipts": receipts}, nil
+	state, err := s.noticeVerdict(ctx, lane, match, rows, receipts)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"request_id": requestID, "state": state, "receipts": receipts}, nil
+}
+
+// noticeVerdict evaluates one item's notice chain against an
+// already-fetched unsent outbox view — the fold pays one outbox read per
+// call instead of one per answered item (R3-4). The unsent view is checked
+// first: an owed row is the honest state even when an older revision's
+// relay row already delivered (the edited-question chain). A matching
+// relay row then decides the verdict; no row anywhere is in-progress with
+// a reason, never a silent done.
+func (s *assistantServer) noticeVerdict(ctx context.Context, lane string, match func(string) bool, unsentRows []assistantOutboxRow, receipts map[string]any) (string, error) {
+	var owed *assistantOutboxRow
+	for i := range unsentRows {
+		row := &unsentRows[i]
+		if !match(row.EventID) {
+			continue
+		}
+		if lane != "" && row.TargetLane != lane {
+			continue
+		}
+		if owed == nil || row.EventID > owed.EventID {
+			owed = row
 		}
 	}
-	if len(rows) >= assistantOutboxLimit {
-		receipts["reason"] = "view_truncated"
-	} else {
-		receipts["reason"] = "notice_row_not_visible"
+	if owed != nil {
+		receipts["outbox"] = outboxReceipt(*owed)
+		return assistantStateAccepted, nil
 	}
-	return map[string]any{"request_id": requestID, "state": assistantStateInProgress, "receipts": receipts}, nil
+	if lane == "" {
+		// A conversation-scoped question may carry no lane at all: the
+		// outbox is the only place its notice can appear, so that is the
+		// whole chain.
+		if len(unsentRows) >= assistantOutboxLimit {
+			receipts["reason"] = "view_truncated"
+		} else {
+			receipts["reason"] = "notice_row_not_visible"
+		}
+		return assistantStateInProgress, nil
+	}
+	row, exists, truncated, err := s.findRelayRowMatch(ctx, lane, match)
+	if err != nil {
+		return "", err
+	}
+	if truncated {
+		receipts["truncated"] = true
+	}
+	if exists {
+		receipts["relay"] = relayRowReceipt(row)
+		state, reason := relayRowState(row)
+		if reason != "" {
+			receipts["reason"] = reason
+		}
+		return state, nil
+	}
+	if truncated || len(unsentRows) >= assistantOutboxLimit {
+		receipts["reason"] = "view_truncated"
+		return assistantStateInProgress, nil
+	}
+	// The resolution is committed and no notice row is visible yet — the
+	// drain has not run or has not reached this row. That is honest
+	// in-progress, not done.
+	receipts["reason"] = "notice_row_not_visible"
+	return assistantStateInProgress, nil
+}
+
+// findRelayRowMatch locates the newest durable relay row whose event id the
+// matcher accepts. The undelivered scan runs first because live rows are
+// the common case and that set is small; the full walk covers stamped
+// rows. truncated reports whether either walk hit its page bound — a miss
+// under truncation is not proof the row does not exist.
+func (s *assistantServer) findRelayRowMatch(ctx context.Context, lane string, match func(string) bool) (handoffkeepRelayEvent, bool, bool, error) {
+	undelivered, undeliveredTruncated, err := s.scanRelayLane(ctx, lane, true)
+	if err != nil {
+		return handoffkeepRelayEvent{}, false, false, err
+	}
+	var newest *handoffkeepRelayEvent
+	for i := range undelivered {
+		if !match(undelivered[i].EventID) {
+			continue
+		}
+		if newest == nil || undelivered[i].ID > newest.ID {
+			newest = &undelivered[i]
+		}
+	}
+	if newest != nil {
+		return *newest, true, undeliveredTruncated, nil
+	}
+	rows, stampedTruncated, err := s.scanRelayLane(ctx, lane, false)
+	if err != nil {
+		return handoffkeepRelayEvent{}, false, false, err
+	}
+	for i := range rows {
+		if !match(rows[i].EventID) {
+			continue
+		}
+		if newest == nil || rows[i].ID > newest.ID {
+			newest = &rows[i]
+		}
+	}
+	if newest != nil {
+		return *newest, true, undeliveredTruncated || stampedTruncated, nil
+	}
+	return handoffkeepRelayEvent{}, false, undeliveredTruncated || stampedTruncated, nil
 }
 
 // assistantResponderName is the responder handoffkeep pins onto assistant-path
@@ -776,7 +949,7 @@ func questionReceipt(q assistantChatQuestion) map[string]any {
 // chain for <question id>-rev<revision>-answered under the same delivery
 // rules as a decision request.
 func (s *assistantServer) progressQuestion(ctx context.Context, questionID string, scope assistantTargetScope) (any, error) {
-	q, found, err := s.hk.chatQuestion(ctx, questionID)
+	q, found, _, err := s.hk.chatQuestion(ctx, questionID)
 	if err != nil {
 		return nil, err
 	}
@@ -785,7 +958,7 @@ func (s *assistantServer) progressQuestion(ctx context.Context, questionID strin
 	}
 	receipts := questionReceipt(q)
 	if q.AnswerMessageID != nil {
-		return s.progressRelayNotice(ctx, questionID, q.Lane, chatAnsweredEventID(q.ID, q.Revision), receipts)
+		return s.progressRelayNotice(ctx, questionID, q.Lane, noticeMatcher(q.ID, "chat_question"), receipts)
 	}
 	switch q.State {
 	case "pending":
@@ -807,8 +980,11 @@ func (s *assistantServer) progressQuestion(ctx context.Context, questionID strin
 // answered pending item and folds the per-item states into one aggregate.
 // A failed chain wins; otherwise the least-advanced outstanding stage
 // stands (accepted before in-progress before done), so the aggregate is
-// done only when every chain proved delivery. Per-item verdicts land in
-// receipts["answered"].
+// done only when every chain proved delivery. The unsent outbox is fetched
+// once per call, not once per item (R3-4); per-item verdicts land in
+// receipts["answered"] carrying receipts only — never an answer body —
+// and the winning item's reason is raised to the top level when the fold
+// reports failed or in-progress.
 func (s *assistantServer) foldAnsweredChains(ctx context.Context, items []assistantPendingItem, receipts map[string]any) (string, error) {
 	rank := map[string]int{
 		assistantStateFailed:     0,
@@ -817,7 +993,12 @@ func (s *assistantServer) foldAnsweredChains(ctx context.Context, items []assist
 		assistantStateDelivered:  3,
 		assistantStateDone:       4,
 	}
+	unsentRows, err := s.hk.outbox(ctx, assistantOutboxLimit)
+	if err != nil {
+		return "", err
+	}
 	aggregate := assistantStateDone
+	var reason string
 	var verdicts []map[string]any
 	for _, item := range items {
 		itemReceipts := map[string]any{
@@ -827,18 +1008,22 @@ func (s *assistantServer) foldAnsweredChains(ctx context.Context, items []assist
 			"lane":            item.Lane,
 			"conversation_id": item.ConversationID,
 		}
-		result, err := s.progressRelayNotice(ctx, item.ID, item.Lane, chatAnsweredEventID(item.ID, item.Revision), itemReceipts)
+		state, err := s.noticeVerdict(ctx, item.Lane, noticeMatcher(item.ID, item.Kind), unsentRows, itemReceipts)
 		if err != nil {
 			return "", err
 		}
-		decoded, _ := result.(map[string]any)
-		state, _ := decoded["state"].(string)
-		verdicts = append(verdicts, map[string]any{"key": item.Key, "state": state, "receipts": decoded["receipts"]})
+		verdicts = append(verdicts, map[string]any{"key": item.Key, "state": state, "receipts": itemReceipts})
 		if r, ok := rank[state]; ok && r < rank[aggregate] {
 			aggregate = state
+			if itemReason, _ := itemReceipts["reason"].(string); itemReason != "" {
+				reason = itemReason
+			}
 		}
 	}
 	receipts["answered"] = verdicts
+	if reason != "" {
+		receipts["reason"] = reason
+	}
 	return aggregate, nil
 }
 
@@ -939,13 +1124,13 @@ func (s *assistantServer) progressLane(ctx context.Context, target assistantTarg
 		receipts["reason"] = "view_truncated"
 		return map[string]any{"target": target.ID, "state": assistantStateInProgress, "receipts": receipts}, nil
 	}
-	tasks, err := s.hk.tasksForLane(ctx, target.Lane)
+	tasks, tasksTruncated, err := s.hk.tasksForLane(ctx, target.Lane)
 	if err != nil {
 		return nil, err
 	}
-	if len(tasks) >= assistantTasksPageLimit {
-		// A full tasks page can hide live rows past the cap — settled is
-		// unprovable from here.
+	if tasksTruncated {
+		// The task walk hit its page bound — live rows past the bound can
+		// hide, so settled is unprovable from here.
 		receipts["reason"] = "view_truncated"
 		return map[string]any{"target": target.ID, "state": assistantStateInProgress, "receipts": receipts}, nil
 	}
@@ -1054,5 +1239,10 @@ func (s *assistantServer) toolPoll(ctx context.Context, targets map[string]assis
 			"due_at":     item.DueAt,
 		}
 	}
-	return map[string]any{"server_time": pending.ServerTime, "items": items}, nil
+	return map[string]any{
+		"server_time":           pending.ServerTime,
+		"items":                 items,
+		"chat_questions_at_cap": len(pending.ChatQuestions) >= assistantChatCap,
+		"chat_questions_cap":    assistantChatCap,
+	}, nil
 }

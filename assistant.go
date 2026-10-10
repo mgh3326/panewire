@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"context"
 	"crypto/sha256"
 	"crypto/subtle"
 	"errors"
@@ -10,19 +11,24 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// The panewire-assistant binary (MGH-36 PR-2) is the thin external surface
-// that lets the berry assistant read decision state over MCP. It holds no
-// durable state of its own: every read is proxied to handoffkeep at call
-// time, so the process can be killed and restarted at any moment without
-// losing or duplicating anything. All operator credentials live only in
-// server-side mode-0600 files; callers authenticate with a dedicated bearer
-// token and, when configured, a Cloudflare Access service token whose
-// common_name must be on an allowlist (the hub's verifier cannot be reused:
-// it has no identity binding).
+// The panewire-assistant binary (MGH-36) is the thin external surface that
+// lets the berry assistant read decision state and — only when the
+// operator flips the writes flag — apply answers and deliver lane text over
+// MCP. It holds no durable state of its own: every read is proxied to
+// handoffkeep at call time and every owed lane notice lives in
+// handoffkeep's notification outbox, so the process can be killed and
+// restarted at any moment without losing or duplicating anything. All
+// operator credentials live only in server-side mode-0600 files; callers
+// authenticate with a dedicated bearer token and, when configured, a
+// Cloudflare Access service token whose common_name must be on an
+// allowlist (the hub's verifier cannot be reused: it has no identity
+// binding).
 
 const (
 	// assistantDefaultListen keeps the binary loopback-only by default; an
@@ -30,8 +36,32 @@ const (
 	assistantDefaultListen = "127.0.0.1:9471"
 	// assistantMaxRequestBytes bounds one JSON-RPC request body.
 	assistantMaxRequestBytes = 256 << 10
-	// assistantHKTimeout bounds one upstream handoffkeep read.
+	// assistantHKTimeout bounds one upstream call — hk or hub, read or
+	// write.
 	assistantHKTimeout = 10 * time.Second
+	// assistantDrainIntervalDefault is the outbox drainer's base period;
+	// each pass actually fires at interval ±25% jitter.
+	assistantDrainIntervalDefault = 30 * time.Second
+	assistantDrainIntervalMin     = time.Second
+	assistantDrainIntervalMax     = time.Hour
+	// assistantDrainPassTimeout bounds one drain pass (well under the 60s
+	// WriteTimeout).
+	assistantDrainPassTimeout = 30 * time.Second
+	// assistantWriteRateDefaults are the per-identity write limit:
+	// writes/min steady rate and the burst the token bucket holds.
+	assistantWriteRatePerMinDefault = 10
+	assistantWriteBurstDefault      = 5
+)
+
+// The writes flag is a set, not a bool (brief amendment 1): the operator
+// can run answers without the free-text injection tool, or deliver without
+// answers. Exact values only — a typo refuses startup rather than silently
+// landing on a different surface.
+const (
+	assistantWritesOff = iota
+	assistantWritesAnswer
+	assistantWritesDeliver
+	assistantWritesAll
 )
 
 // assistantConfig is the parsed server-side configuration. Every byte of it
@@ -48,10 +78,23 @@ type assistantConfig struct {
 	// to requests against the configured URL (note 1200).
 	HKCFID     string
 	HKCFSecret string
-	// HubURL and HubToken are reserved for the PR-3 outbox drain. PR-2
-	// validates their shape but never dials them.
+	// HubURL and HubToken are the hub operator credential for the write
+	// surface: POST /v1/relay/events for deliver and the outbox drainer.
+	// Writes refuse to start without them.
 	HubURL   string
 	HubToken string
+	// Writes is the write-tool set: assistantWritesOff (default) lists no
+	// write tool and answers writes_disabled; assistantWritesAnswer enables
+	// the two answer tools and the drainer; assistantWritesDeliver enables
+	// deliver alone; assistantWritesAll enables all three.
+	Writes int
+	// DrainInterval is the outbox drainer's base period (±25% jitter);
+	// defaults to 30 s.
+	DrainInterval time.Duration
+	// WriteRatePerMin and WriteBurst are the per-identity write rate
+	// limit; defaults 10/min, burst 5.
+	WriteRatePerMin int
+	WriteBurst      int
 	// TokenFile is the berry-facing bearer token file (mode 0600).
 	TokenFile string
 	// TargetsFile is the operator-edited opaque-target mapping (mode 0600).
@@ -87,19 +130,22 @@ func loadAssistantConfig(path string) (assistantConfig, error) {
 		return assistantConfig{}, configError("config file must be a regular mode-0600 file")
 	}
 	cfg := assistantConfig{
-		Listen:      strings.TrimSpace(values["PANEWIRE_ASSISTANT_LISTEN"]),
-		HKURL:       values["HANDOFFKEEP_URL"],
-		HKToken:     values["HANDOFFKEEP_TOKEN"],
-		HKCFID:      strings.TrimSpace(values["HANDOFFKEEP_CF_ACCESS_CLIENT_ID"]),
-		HKCFSecret:  strings.TrimSpace(values["HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET"]),
-		HubURL:      values["PANEWIRE_ASSISTANT_HUB_URL"],
-		HubToken:    values["PANEWIRE_ASSISTANT_HUB_TOKEN"],
-		TokenFile:   strings.TrimSpace(values["PANEWIRE_ASSISTANT_TOKEN_FILE"]),
-		TargetsFile: strings.TrimSpace(values["PANEWIRE_ASSISTANT_TARGETS_FILE"]),
-		ClientName:  strings.TrimSpace(values["PANEWIRE_ASSISTANT_CLIENT_NAME"]),
-		CFTeam:      strings.TrimSpace(values["PANEWIRE_ASSISTANT_CF_TEAM"]),
-		CFAUD:       strings.TrimSpace(values["PANEWIRE_ASSISTANT_CF_AUD"]),
-		CFCertsURL:  strings.TrimSpace(values["PANEWIRE_ASSISTANT_CF_CERTS_URL"]),
+		Listen:          strings.TrimSpace(values["PANEWIRE_ASSISTANT_LISTEN"]),
+		HKURL:           values["HANDOFFKEEP_URL"],
+		HKToken:         values["HANDOFFKEEP_TOKEN"],
+		HKCFID:          strings.TrimSpace(values["HANDOFFKEEP_CF_ACCESS_CLIENT_ID"]),
+		HKCFSecret:      strings.TrimSpace(values["HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET"]),
+		HubURL:          values["PANEWIRE_ASSISTANT_HUB_URL"],
+		HubToken:        values["PANEWIRE_ASSISTANT_HUB_TOKEN"],
+		DrainInterval:   assistantDrainIntervalDefault,
+		WriteRatePerMin: assistantWriteRatePerMinDefault,
+		WriteBurst:      assistantWriteBurstDefault,
+		TokenFile:       strings.TrimSpace(values["PANEWIRE_ASSISTANT_TOKEN_FILE"]),
+		TargetsFile:     strings.TrimSpace(values["PANEWIRE_ASSISTANT_TARGETS_FILE"]),
+		ClientName:      strings.TrimSpace(values["PANEWIRE_ASSISTANT_CLIENT_NAME"]),
+		CFTeam:          strings.TrimSpace(values["PANEWIRE_ASSISTANT_CF_TEAM"]),
+		CFAUD:           strings.TrimSpace(values["PANEWIRE_ASSISTANT_CF_AUD"]),
+		CFCertsURL:      strings.TrimSpace(values["PANEWIRE_ASSISTANT_CF_CERTS_URL"]),
 	}
 	if names := strings.TrimSpace(values["PANEWIRE_ASSISTANT_CF_SERVICE_NAMES"]); names != "" {
 		for _, name := range strings.Split(names, ",") {
@@ -108,6 +154,39 @@ func loadAssistantConfig(path string) (assistantConfig, error) {
 				cfg.CFServiceNames = append(cfg.CFServiceNames, name)
 			}
 		}
+	}
+	switch flag := strings.ToLower(strings.TrimSpace(values["PANEWIRE_ASSISTANT_WRITES"])); flag {
+	case "", "0", "false", "no", "off":
+		cfg.Writes = assistantWritesOff
+	case "answer":
+		cfg.Writes = assistantWritesAnswer
+	case "deliver":
+		cfg.Writes = assistantWritesDeliver
+	case "all":
+		cfg.Writes = assistantWritesAll
+	default:
+		return assistantConfig{}, configError("assistant writes flag must be answer, deliver or all")
+	}
+	if raw := strings.TrimSpace(values["PANEWIRE_ASSISTANT_DRAIN_INTERVAL"]); raw != "" {
+		interval, err := time.ParseDuration(raw)
+		if err != nil {
+			return assistantConfig{}, configError("assistant drain interval is not a duration")
+		}
+		cfg.DrainInterval = interval
+	}
+	if raw := strings.TrimSpace(values["PANEWIRE_ASSISTANT_WRITE_RATE_PER_MIN"]); raw != "" {
+		rate, err := strconv.Atoi(raw)
+		if err != nil || rate < 1 {
+			return assistantConfig{}, configError("assistant write rate per minute is not a positive number")
+		}
+		cfg.WriteRatePerMin = rate
+	}
+	if raw := strings.TrimSpace(values["PANEWIRE_ASSISTANT_WRITE_BURST"]); raw != "" {
+		burst, err := strconv.Atoi(raw)
+		if err != nil || burst < 1 {
+			return assistantConfig{}, configError("assistant write burst is not a positive number")
+		}
+		cfg.WriteBurst = burst
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = assistantDefaultListen
@@ -130,13 +209,24 @@ func (c assistantConfig) validate() error {
 	if (c.HKCFID == "") != (c.HKCFSecret == "") {
 		return configError("cf access client id and secret must be set together")
 	}
-	// The hub pair is likewise all-or-nothing; PR-2 never dials it but a half
-	// written credential must still refuse startup rather than sit loaded.
+	// The hub pair is likewise all-or-nothing. With writes enabled it is
+	// required outright: a write-enabled binary without a hub credential
+	// could apply answers whose lane notices it can never send, which is
+	// worse than refusing to run.
 	if (c.HubURL == "") != (c.HubToken == "") {
 		return configError("hub url and token must be set together")
 	}
 	if c.HubURL != "" && (!validHandoffkeepBaseURL(c.HubURL) || !validHandoffkeepToken(c.HubToken)) {
 		return configError("hub url or token invalid")
+	}
+	if c.Writes != assistantWritesOff && (c.HubURL == "" || c.HubToken == "") {
+		return configError("assistant writes require the hub url and token")
+	}
+	// A zero interval means "unset" for a struct built outside the config
+	// loader (the loader always writes the default); an explicit value is
+	// bounded so a typo cannot spin or freeze the drain loop.
+	if c.DrainInterval != 0 && (c.DrainInterval < assistantDrainIntervalMin || c.DrainInterval > assistantDrainIntervalMax) {
+		return configError("assistant drain interval out of range")
 	}
 	if c.TokenFile == "" || c.TargetsFile == "" {
 		return configError("token file and targets file are required")
@@ -181,8 +271,10 @@ func loadAssistantBearer(path string) ([32]byte, error) {
 	return sha256.Sum256([]byte(token)), nil
 }
 
-// assistantServer is the whole runtime: auth, the targets map path, the
-// read-only hk client and the audit log. It keeps no durable state.
+// assistantServer is the whole runtime: auth, the targets map path, the hk
+// and (when writes are enabled) hub clients, the outbox drainer state and
+// the audit log. It keeps no durable state — the outbox lives in
+// handoffkeep.
 type assistantServer struct {
 	tokenHash   [32]byte
 	cf          *assistantCFVerifier
@@ -191,14 +283,29 @@ type assistantServer struct {
 	clientName  string
 	audit       *slog.Logger
 	httpClient  *http.Client
+	// writes is the enabled write-tool set; hub exists exactly when any
+	// write tool is on.
+	writes int
+	hub    *assistantHub
+	// drainInterval is the periodic pass base period. passMu serializes
+	// drain passes; drainKick (buffer 1) carries the async pass a write
+	// tool kicks so at most one pass runs and one more waits.
+	drainInterval time.Duration
+	passMu        sync.Mutex
+	drainKick     chan struct{}
+	// limiter is the per-identity write rate limit (default 10/min,
+	// burst 5): a leaked credential cannot flood lanes faster than this.
+	limiter *writeRateLimiter
 }
 
 type assistantServerDeps struct {
-	// HKHTTPClient and CFHTTPClient are test seams; production leaves them
-	// nil. Logger receives the audit stream; nil defaults to stderr.
-	HKHTTPClient *http.Client
-	CFHTTPClient *http.Client
-	Logger       *slog.Logger
+	// HKHTTPClient, HubHTTPClient and CFHTTPClient are test seams;
+	// production leaves them nil. Logger receives the audit stream; nil
+	// defaults to stderr.
+	HKHTTPClient  *http.Client
+	HubHTTPClient *http.Client
+	CFHTTPClient  *http.Client
+	Logger        *slog.Logger
 }
 
 func newAssistantServer(cfg assistantConfig, deps assistantServerDeps) (*assistantServer, error) {
@@ -219,6 +326,24 @@ func newAssistantServer(cfg assistantConfig, deps assistantServerDeps) (*assista
 	if err != nil {
 		return nil, err
 	}
+	var hub *assistantHub
+	var drainKick chan struct{}
+	var limiter *writeRateLimiter
+	if cfg.Writes != assistantWritesOff {
+		hub, err = newAssistantHub(cfg.HubURL, cfg.HubToken, deps.HubHTTPClient)
+		if err != nil {
+			return nil, err
+		}
+		drainKick = make(chan struct{}, 1)
+		ratePerMin, burst := cfg.WriteRatePerMin, cfg.WriteBurst
+		if ratePerMin <= 0 {
+			ratePerMin = assistantWriteRatePerMinDefault
+		}
+		if burst <= 0 {
+			burst = assistantWriteBurstDefault
+		}
+		limiter = newWriteRateLimiter(ratePerMin, burst)
+	}
 	var cf *assistantCFVerifier
 	if cfg.CFTeam != "" {
 		cf, err = newAssistantCFVerifier(cfg.CFTeam, cfg.CFAUD, cfg.CFCertsURL, cfg.CFServiceNames, deps.CFHTTPClient)
@@ -230,14 +355,29 @@ func newAssistantServer(cfg assistantConfig, deps assistantServerDeps) (*assista
 	if logger == nil {
 		logger = slog.New(slog.NewJSONHandler(os.Stderr, nil))
 	}
+	drainInterval := cfg.DrainInterval
+	if drainInterval == 0 {
+		drainInterval = assistantDrainIntervalDefault
+	}
 	return &assistantServer{
-		tokenHash:   tokenHash,
-		cf:          cf,
-		hk:          hk,
-		targetsPath: cfg.TargetsFile,
-		clientName:  cfg.ClientName,
-		audit:       logger,
+		tokenHash:     tokenHash,
+		cf:            cf,
+		hk:            hk,
+		targetsPath:   cfg.TargetsFile,
+		clientName:    cfg.ClientName,
+		audit:         logger,
+		writes:        cfg.Writes,
+		hub:           hub,
+		drainInterval: drainInterval,
+		drainKick:     drainKick,
+		limiter:       limiter,
 	}, nil
+}
+
+// writeEnabled reports whether the named write tool is in the enabled set.
+// Read tools are never gated here — they answer for every flag value.
+func (s *assistantServer) writeEnabled(tool string) bool {
+	return assistantWriteSetIncludes(s.writes, tool)
 }
 
 // authenticate enforces the bearer on every request and, when configured, the
@@ -347,6 +487,12 @@ func RunAssistantServer(args []string, stderr io.Writer) int {
 		return 1
 	}
 	server.logAudit("-", "startup", "-", "-", "listening "+listener.Addr().String())
+	if server.hub != nil {
+		// The outbox drainer runs for the process lifetime: one pass at
+		// startup (a predecessor's crash leaves owed rows), then one per
+		// jittered interval.
+		go server.drainLoop(context.Background())
+	}
 	httpServer := &http.Server{
 		Handler:           server,
 		ReadHeaderTimeout: 10 * time.Second,
