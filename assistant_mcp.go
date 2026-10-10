@@ -48,6 +48,7 @@ const (
 	rpcInvalidRequest = -32600
 	rpcMethodNotFound = -32601
 	rpcInvalidParams  = -32602
+	rpcInternalError  = -32603
 )
 
 // serveMCP handles one authenticated POST. Requests are bounded and the
@@ -101,7 +102,17 @@ func writeAssistantJSON(w http.ResponseWriter, status int, v any) {
 // dispatchRPC routes one request. Protocol-level failures come back as
 // JSON-RPC errors; tool-level failures come back inside the CallToolResult
 // with isError so a model reads them as tool output, never as transport.
-func (s *assistantServer) dispatchRPC(ctx context.Context, identity string, request *assistantRPCRequest) (any, *assistantRPCError) {
+func (s *assistantServer) dispatchRPC(ctx context.Context, identity string, request *assistantRPCRequest) (result any, rpcErr *assistantRPCError) {
+	// Belt under the tool-call recover: a panic anywhere in dispatch still
+	// answers a named JSON-RPC error and lands in the audit log, never a
+	// dropped connection with a stack in stderr.
+	defer func() {
+		if recover() != nil {
+			s.logAudit(identity, request.Method, "-", "-", "internal_error")
+			result = nil
+			rpcErr = &assistantRPCError{Code: rpcInternalError, Message: "internal_error"}
+		}
+	}()
 	switch request.Method {
 	case "initialize":
 		s.logAudit(identity, "initialize", "-", "-", "ok")
@@ -134,20 +145,33 @@ func (s *assistantServer) dispatchRPC(ctx context.Context, identity string, requ
 	}
 }
 
-func (s *assistantServer) dispatchToolCall(ctx context.Context, identity string, params json.RawMessage) (any, *assistantRPCError) {
+func (s *assistantServer) dispatchToolCall(ctx context.Context, identity string, params json.RawMessage) (result any, rpcErr *assistantRPCError) {
 	var call struct {
 		Name      string          `json:"name"`
 		Arguments json.RawMessage `json:"arguments"`
 	}
+	toolName := "-"
+	subject := "-"
+	// A panic inside a tool must never leak: the caller sees a named
+	// JSON-RPC error and the audit log records the failure — the panic text
+	// stays out of both (and out of the response entirely).
+	defer func() {
+		if recover() != nil {
+			s.logAudit(identity, "tools/call", toolName, subject, "internal_error")
+			result = nil
+			rpcErr = &assistantRPCError{Code: rpcInternalError, Message: "internal_error"}
+		}
+	}()
 	if err := json.Unmarshal(params, &call); err != nil || call.Name == "" {
 		s.logAudit(identity, "tools/call", "-", "-", "invalid_params")
 		return nil, &assistantRPCError{Code: rpcInvalidParams, Message: "invalid_params"}
 	}
+	toolName = call.Name
 	if !assistantToolKnown(call.Name) {
 		s.logAudit(identity, "tools/call", call.Name, "-", "unknown_tool")
 		return nil, &assistantRPCError{Code: rpcInvalidParams, Message: "unknown_tool"}
 	}
-	subject := toolSubject(call.Name, call.Arguments)
+	subject = toolSubject(call.Name, call.Arguments)
 	result, toolErr := s.callAssistantTool(ctx, call.Name, call.Arguments)
 	if toolErr != nil {
 		s.logAudit(identity, "tools/call", call.Name, subject, toolErr.Error())

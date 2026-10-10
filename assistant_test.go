@@ -2,6 +2,9 @@ package panewire
 
 import (
 	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -39,6 +42,7 @@ type fakeAssistantHK struct {
 
 	mu        sync.Mutex
 	requests  []string
+	cfHeaders [][2]string
 	pending   assistantPending
 	tasks     map[int64]assistantTask
 	questions map[string]assistantChatQuestion
@@ -66,6 +70,7 @@ func newFakeAssistantHK(t *testing.T) *fakeAssistantHK {
 func (f *fakeAssistantHK) serve(w http.ResponseWriter, r *http.Request) {
 	f.mu.Lock()
 	f.requests = append(f.requests, r.Method+" "+r.URL.Path)
+	f.cfHeaders = append(f.cfHeaders, [2]string{r.Header.Get("Cf-Access-Client-Id"), r.Header.Get("Cf-Access-Client-Secret")})
 	fail := f.failNonGET
 	f.mu.Unlock()
 	if fail && r.Method != http.MethodGet {
@@ -97,6 +102,7 @@ func (f *fakeAssistantHK) serve(w http.ResponseWriter, r *http.Request) {
 		f.writeJSON(w, map[string]any{"notifications": f.snapshotOutbox()})
 	case path == "/v1/tasks":
 		lane := r.URL.Query().Get("lane")
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		f.mu.Lock()
 		var tasks []assistantTask
 		for _, task := range f.tasks {
@@ -106,6 +112,9 @@ func (f *fakeAssistantHK) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		f.mu.Unlock()
 		sort.Slice(tasks, func(i, j int) bool { return tasks[i].ID < tasks[j].ID })
+		if limit > 0 && len(tasks) > limit {
+			tasks = tasks[:limit]
+		}
 		f.writeJSON(w, map[string]any{"tasks": tasks})
 	case strings.HasPrefix(path, "/v1/tasks/"):
 		id, _ := strconv.ParseInt(strings.TrimPrefix(path, "/v1/tasks/"), 10, 64)
@@ -189,6 +198,14 @@ func (f *fakeAssistantHK) requestLog() []string {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return append([]string{}, f.requests...)
+}
+
+// cfHeaderLog returns the CF-Access-Client-{Id,Secret} header pair each
+// request carried — the M12 assertion surface for the outbound CF path.
+func (f *fakeAssistantHK) cfHeaderLog() [][2]string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([][2]string{}, f.cfHeaders...)
 }
 
 func (f *fakeAssistantHK) seedTask(task assistantTask) {
@@ -648,17 +665,21 @@ func TestAssistantPendingAC4(t *testing.T) {
 	if detail.isError || detail.decoded["pending"] != true {
 		t.Fatalf("detail pending=%v err=%v", detail.decoded["pending"], detail.text)
 	}
-	// A superseded revision fails closed naming the live id.
+	// A superseded revision fails closed with the same generic not_found as a
+	// missing id — the live id is never echoed.
 	hk.seedTask(assistantTask{ID: 45, Lane: "lane-a", State: "needs_decision", Refs: struct {
 		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
 		Disposition     json.RawMessage           `json:"disposition,omitempty"`
 	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-45-2", Revision: 2, Status: "open", Question: "newer", DefaultAction: "wait", RequestedBy: "wrk-a", RequestedAt: now}}})
-	if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-45-1"}); !strings.HasPrefix(got, "request_not_current") {
+	if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-45-1"}); got != "request_not_found" {
 		t.Fatalf("superseded detail error=%q", got)
 	}
 	// Detail on a pending question and on a nonexistent id.
 	if detail := assistantCall(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "Q-20261010-01"}); detail.isError || detail.decoded["pending"] != true {
 		t.Fatalf("question detail pending=%v err=%v", detail.decoded["pending"], detail.text)
+	}
+	if detail := assistantCall(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "Q-20261010-01"}); detail.decoded["server_time"] == nil {
+		t.Fatalf("question detail lacks server_time: %v", detail.decoded)
 	}
 	if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "Q-20261010-99"}); got != "request_not_found" {
 		t.Fatalf("missing question error=%q", got)
@@ -666,11 +687,11 @@ func TestAssistantPendingAC4(t *testing.T) {
 	if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "whatever"}); got != "request_not_found" {
 		t.Fatalf("unparseable id error=%q", got)
 	}
-	// A settled item reports pending:false with its current state, not a
-	// stale pending answer.
+	// A settled item is not an open item: detail fails closed with the same
+	// generic not_found rather than reporting pending:false.
 	hk.seedQuestion(assistantChatQuestion{ID: "Q-20261010-02", ConversationID: "operator-desk", Lane: "lane-a", Body: "old", State: "resolved", Revision: 3, CreatedAt: now, UpdatedAt: now})
-	if detail := assistantCall(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "Q-20261010-02"}); detail.isError || detail.decoded["pending"] != false {
-		t.Fatalf("settled question detail=%v err=%s", detail.decoded["pending"], detail.text)
+	if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "Q-20261010-02"}); got != "request_not_found" {
+		t.Fatalf("settled question detail error=%q, want request_not_found", got)
 	}
 }
 
@@ -727,21 +748,69 @@ func TestAssistantProgressAC5(t *testing.T) {
 		{name: "assistant answer with no notice row yet is in-progress", requestID: "dr-10-1",
 			task: ptrTask(mkTask(10, "needs_decision", resolvedReq("dr-10-1", 1, "answered", "operator-via-berry"))),
 			want: "in-progress"},
+		// Stamps are set together with delivered_at by markDelivered — the
+		// real store shape for retired, cancelled, chat-terminal and sink
+		// rows. None of them may report done.
+		{name: "retired stamp is failed", requestID: "dr-11-1",
+			task:   ptrTask(mkTask(11, "needs_decision", resolvedReq("dr-11-1", 1, "answered", "operator-via-berry"))),
+			relays: []handoffkeepRelayEvent{{ID: 53, Kind: "lane.event", OwnerLane: "lane-a", EventID: "dr-11-1-answered", Attempts: 2, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: "hub/replay-retired:stale"}},
+			want:   "failed", reason: "non_delivery_stamp"},
+		{name: "cancelled stamp is failed", requestID: "dr-12-1",
+			task:   ptrTask(mkTask(12, "needs_decision", resolvedReq("dr-12-1", 1, "answered", "operator-via-berry"))),
+			relays: []handoffkeepRelayEvent{{ID: 54, Kind: "lane.event", OwnerLane: "lane-a", EventID: "dr-12-1-answered", Attempts: 1, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: "m1/cancelled"}},
+			want:   "failed", reason: "non_delivery_stamp"},
+		{name: "chat-terminal stamp is failed", requestID: "dr-13-1",
+			task:   ptrTask(mkTask(13, "needs_decision", resolvedReq("dr-13-1", 1, "answered", "operator-via-berry"))),
+			relays: []handoffkeepRelayEvent{{ID: 55, Kind: "lane.event", OwnerLane: "lane-a", EventID: "dr-13-1-answered", Attempts: 1, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: "hub/chat-terminal"}},
+			want:   "failed", reason: "non_delivery_stamp"},
+		{name: "sink stamp is failed with sink_lane", requestID: "dr-14-1",
+			task:   ptrTask(mkTask(14, "needs_decision", resolvedReq("dr-14-1", 1, "answered", "operator-via-berry"))),
+			relays: []handoffkeepRelayEvent{{ID: 56, Kind: "lane.event", OwnerLane: "lane-a", EventID: "dr-14-1-answered", Attempts: 1, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: "sink/sink:lane-a"}},
+			want:   "failed", reason: "sink_lane"},
 		{name: "pending question is decision-pending", requestID: "Q-20261010-05",
 			question: &assistantChatQuestion{ID: "Q-20261010-05", ConversationID: "operator-desk", Lane: "lane-a", State: "pending", Revision: 1},
 			want:     "decision-pending"},
 		{name: "question resolved by human is done", requestID: "Q-20261010-06",
 			question: &assistantChatQuestion{ID: "Q-20261010-06", ConversationID: "operator-desk", Lane: "lane-a", State: "resolved", Revision: 1},
 			want:     "done"},
-		{name: "question answered by assistant with outbox is accepted", requestID: "Q-20261010-07",
+		// The real PR-1 shape: the answer CAS sets answer_message_id and
+		// leaves state pending — an answered pending question follows the
+		// outbox/relay chain, it is not decision-pending.
+		{name: "answered pending question with outbox is accepted", requestID: "Q-20261010-07",
 			question: func() *assistantChatQuestion {
 				id := int64(77)
-				q := &assistantChatQuestion{ID: "Q-20261010-07", ConversationID: "operator-desk", Lane: "lane-a", State: "resolved", Revision: 4}
+				q := &assistantChatQuestion{ID: "Q-20261010-07", ConversationID: "operator-desk", Lane: "lane-a", State: "pending", Revision: 4}
 				q.AnswerMessageID = &id
 				return q
 			}(),
 			outbox: []assistantOutboxRow{{ID: 12, Kind: "chat_answer", TargetLane: "lane-a", EventID: "Q-20261010-07-rev4-answered", CreatedAt: now}},
 			want:   "accepted"},
+		{name: "answered pending question with delivered relay is done", requestID: "Q-20261010-09",
+			question: func() *assistantChatQuestion {
+				id := int64(78)
+				q := &assistantChatQuestion{ID: "Q-20261010-09", ConversationID: "operator-desk", Lane: "lane-a", State: "pending", Revision: 2}
+				q.AnswerMessageID = &id
+				return q
+			}(),
+			relays: []handoffkeepRelayEvent{{ID: 57, Kind: "lane.event", OwnerLane: "lane-a", EventID: "Q-20261010-09-rev2-answered", Attempts: 1, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: "host-a/w1:p1"}},
+			want:   "done"},
+		{name: "answered pending question with no notice row is in-progress", requestID: "Q-20261010-10",
+			question: func() *assistantChatQuestion {
+				id := int64(79)
+				q := &assistantChatQuestion{ID: "Q-20261010-10", ConversationID: "operator-desk", Lane: "lane-a", State: "pending", Revision: 1}
+				q.AnswerMessageID = &id
+				return q
+			}(),
+			want: "in-progress", reason: "notice_row_not_visible"},
+		{name: "answered pending question with sink stamp is failed", requestID: "Q-20261010-11",
+			question: func() *assistantChatQuestion {
+				id := int64(80)
+				q := &assistantChatQuestion{ID: "Q-20261010-11", ConversationID: "operator-desk", Lane: "lane-a", State: "pending", Revision: 1}
+				q.AnswerMessageID = &id
+				return q
+			}(),
+			relays: []handoffkeepRelayEvent{{ID: 58, Kind: "lane.event", OwnerLane: "lane-a", EventID: "Q-20261010-11-rev1-answered", Attempts: 1, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: "sink/sink:lane-a"}},
+			want:   "failed", reason: "sink_lane"},
 		{name: "withdrawn question is failed", requestID: "Q-20261010-08",
 			question: &assistantChatQuestion{ID: "Q-20261010-08", ConversationID: "operator-desk", Lane: "lane-a", State: "withdrawn", Revision: 1},
 			want:     "failed", reason: "question_withdrawn"},
@@ -1114,5 +1183,425 @@ func TestAssistantRouteSurface(t *testing.T) {
 		if writer.Code != tc.want {
 			t.Fatalf("%s %s authed status=%d, want %d", tc.method, tc.path, writer.Code, tc.want)
 		}
+	}
+}
+
+// Fix-round MAJOR-1: a relay row is delivered only when delivered_to names a
+// real <machine>/<pane>. Every other stamp — retired, cancelled, chat-*, sink
+// — is failed with the stamp as the receipt, and sink additionally carries
+// reason sink_lane. Berry must never be told done for a sink.
+func TestAssistantDeliveryStampsR2(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	resolvedTask := func(id int64) assistantTask {
+		task := assistantTask{ID: id, Lane: "lane-a", Title: "t", State: "needs_decision"}
+		task.Refs.DecisionRequest = &assistantDecisionRequest{
+			ID: fmt.Sprintf("dr-%d-1", id), Revision: 1, Status: "answered", Question: "q",
+			DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now,
+			Resolution: &assistantDecisionResolution{Kind: "answered", Responder: "operator-via-berry", At: now},
+		}
+		return task
+	}
+	for _, tc := range []struct {
+		name        string
+		deliveredTo string
+		want        string
+		reason      string
+	}{
+		{"real pane is done", "host-a/w1:p1", "done", ""},
+		{"retired stamp", "hub/replay-retired:stale", "failed", "non_delivery_stamp"},
+		{"retired reason stamp", "hub/replay-retired:unconfirmed", "failed", "non_delivery_stamp"},
+		{"cancelled stamp", "m1/cancelled", "failed", "non_delivery_stamp"},
+		{"chat-terminal stamp", "hub/chat-terminal", "failed", "non_delivery_stamp"},
+		{"chat-cancel stamp", "hub/chat-cancel", "failed", "non_delivery_stamp"},
+		{"sink stamp", "sink/sink:lane-a", "failed", "sink_lane"},
+		{"bare machine is not a delivery", "host-a", "failed", "non_delivery_stamp"},
+		{"non-pane suffix is not a delivery", "host-a/xterm", "failed", "non_delivery_stamp"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			hk := newFakeAssistantHK(t)
+			hk.seedTask(resolvedTask(70))
+			hk.relays = []handoffkeepRelayEvent{{ID: 70, Kind: "lane.event", OwnerLane: "lane-a", EventID: "dr-70-1-answered", Attempts: 1, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: tc.deliveredTo}}
+			srv, _ := assistantTestServer(t, hk, nil)
+			result := assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": "dr-70-1"})
+			if result.decoded["state"] != tc.want {
+				t.Fatalf("state=%v, want %q (receipts=%v)", result.decoded["state"], tc.want, result.decoded["receipts"])
+			}
+			receipts, _ := result.decoded["receipts"].(map[string]any)
+			if tc.reason != "" && receipts["reason"] != tc.reason {
+				t.Fatalf("reason=%v, want %q", receipts["reason"], tc.reason)
+			}
+			// The stamp itself is the receipt.
+			relay, _ := receipts["relay"].(map[string]any)
+			if tc.want == "failed" && relay["delivered_to"] != tc.deliveredTo {
+				t.Fatalf("stamp not carried as receipt: %v", receipts)
+			}
+			// Lane aggregate on a lane whose only evidence is the stamped
+			// row: the same stamp is the newest row → same verdict.
+			hkLane := newFakeAssistantHK(t)
+			hkLane.relays = []handoffkeepRelayEvent{{ID: 70, Kind: "lane.event", OwnerLane: "lane-a", EventID: "dr-70-1-answered", Attempts: 1, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: tc.deliveredTo}}
+			srvLane, _ := assistantTestServer(t, hkLane, nil)
+			lane := assistantCall(t, srvLane, assistantTestBerryToken, "progress", map[string]any{"target": "ops"})
+			wantLane := tc.want
+			if tc.want == "done" {
+				wantLane = "delivered"
+			}
+			if lane.decoded["state"] != wantLane {
+				t.Fatalf("lane state=%v, want %q", lane.decoded["state"], wantLane)
+			}
+		})
+	}
+}
+
+// Fix-round MAJOR-2 + MINOR-1: a truncated view can never produce done or
+// delivered — a tasks page at its limit, a relay walk at its bound, a capped
+// pending list or a capped outbox all report in-progress with reason
+// view_truncated.
+func TestAssistantTruncatedViewsR2(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+
+	// A lane whose tasks page fills the limit can hide a live task past the
+	// cap — the checker's claimed-1001 scenario. done is unprovable.
+	hk := newFakeAssistantHK(t)
+	for i := int64(1); i <= assistantTasksPageLimit; i++ {
+		hk.seedTask(assistantTask{ID: i, Lane: "lane-a", State: "merged", Title: "old"})
+	}
+	hk.seedTask(assistantTask{ID: assistantTasksPageLimit + 1, Lane: "lane-a", State: "claimed", Title: "live past the cap"})
+	srv, _ := assistantTestServer(t, hk, nil)
+	result := assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": "ops"})
+	if result.decoded["state"] != "in-progress" {
+		t.Fatalf("full tasks page state=%v, want in-progress", result.decoded["state"])
+	}
+	receipts, _ := result.decoded["receipts"].(map[string]any)
+	if receipts["reason"] != "view_truncated" {
+		t.Fatalf("reason=%v, want view_truncated", receipts["reason"])
+	}
+
+	// A relay walk that reaches its bound cannot prove the tail is quiet.
+	hk = newFakeAssistantHK(t)
+	for i := int64(1); i <= assistantRelayScanPages*assistantRelayPageSize; i++ {
+		hk.relays = append(hk.relays, handoffkeepRelayEvent{
+			ID: i, Kind: "lane.event", OwnerLane: "lane-a", EventID: "ev-old",
+			Attempts: 1, DeliveredAt: now.Format(time.RFC3339Nano), DeliveredTo: "host-a/w1:p1",
+		})
+	}
+	srv, _ = assistantTestServer(t, hk, nil)
+	result = assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": "ops"})
+	if result.decoded["state"] != "in-progress" {
+		t.Fatalf("bounded relay walk state=%v, want in-progress", result.decoded["state"])
+	}
+	receipts, _ = result.decoded["receipts"].(map[string]any)
+	if receipts["reason"] != "view_truncated" {
+		t.Fatalf("relay-walk reason=%v, want view_truncated", receipts["reason"])
+	}
+
+	// One row under the bound is still provable delivered.
+	hk.relays = hk.relays[:1]
+	result = assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": "ops"})
+	if result.decoded["state"] != "delivered" {
+		t.Fatalf("complete relay view state=%v, want delivered", result.decoded["state"])
+	}
+
+	// A capped pending list cannot prove a conversation has nothing pending.
+	hk = newFakeAssistantHK(t)
+	pending := assistantPending{ServerTime: now}
+	for i := 0; i < assistantChatCap; i++ {
+		pending.ChatQuestions = append(pending.ChatQuestions, assistantChatQuestion{
+			ID: fmt.Sprintf("Q-20261010-%02d", i%100), ConversationID: "other-desk",
+			Lane: "other-lane", State: "pending", Revision: 1,
+		})
+	}
+	hk.pending = pending
+	srv, _ = assistantTestServer(t, hk, nil)
+	result = assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": "desk"})
+	if result.decoded["state"] != "in-progress" {
+		t.Fatalf("capped pending list state=%v, want in-progress", result.decoded["state"])
+	}
+	receipts, _ = result.decoded["receipts"].(map[string]any)
+	if receipts["reason"] != "view_truncated" {
+		t.Fatalf("pending-cap reason=%v, want view_truncated", receipts["reason"])
+	}
+}
+
+// Fix-round MAJOR-3 + MINOR-6: every by-id read is scoped to the allowlist —
+// an out-of-scope id answers the same generic request_not_found as a missing
+// one, an invalid targets file fails every tool closed, and resolution text
+// or resolver identity never leaves the binary.
+func TestAssistantScopeClosedR2(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	hk := newFakeAssistantHK(t)
+	// In-scope task on lane-a (mapped by "ops"), out-of-scope on lane-b (unmapped).
+	hk.seedTask(assistantTask{ID: 80, Lane: "lane-a", State: "needs_decision", Title: "in scope", Refs: struct {
+		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
+		Disposition     json.RawMessage           `json:"disposition,omitempty"`
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-80-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
+	hk.seedTask(assistantTask{ID: 90, Lane: "lane-b", State: "needs_decision", Title: "out of scope", Refs: struct {
+		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
+		Disposition     json.RawMessage           `json:"disposition,omitempty"`
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-90-4", Revision: 4, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
+	hk.seedQuestion(assistantChatQuestion{ID: "Q-20261010-20", ConversationID: "other-desk", Lane: "lane-b", State: "pending", Revision: 1})
+	// A merged task whose lane is mapped: still not an open item.
+	hk.seedTask(assistantTask{ID: 91, Lane: "lane-a", State: "merged", Title: "gone", Refs: struct {
+		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
+		Disposition     json.RawMessage           `json:"disposition,omitempty"`
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-91-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
+	srv, _ := assistantTestServer(t, hk, nil)
+
+	// Missing and out-of-scope ids answer identically — no existence oracle.
+	missing := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-999-1"})
+	outOfScope := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-90-4"})
+	if missing != "request_not_found" || outOfScope != missing {
+		t.Fatalf("detail oracle split: missing=%q out-of-scope=%q", missing, outOfScope)
+	}
+	if got := assistantCallError(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": "dr-90-4"}); got != "request_not_found" {
+		t.Fatalf("out-of-scope progress error=%q", got)
+	}
+	if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "Q-20261010-20"}); got != "request_not_found" {
+		t.Fatalf("out-of-scope question detail error=%q", got)
+	}
+	if got := assistantCallError(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": "Q-20261010-20"}); got != "request_not_found" {
+		t.Fatalf("out-of-scope question progress error=%q", got)
+	}
+	// Merged, dropped and stale ids are the same not_found — never
+	// request_not_current and never a detail leak.
+	if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-91-1"}); got != "request_not_found" {
+		t.Fatalf("merged-task detail error=%q", got)
+	}
+	if got := assistantCallError(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": "dr-90-1"}); got != "request_not_found" {
+		t.Fatalf("stale out-of-scope progress error=%q", got)
+	}
+	for _, err := range []string{missing, outOfScope} {
+		if strings.Contains(err, "not_current") || strings.Contains(err, "dr-90") {
+			t.Fatalf("error leaks current/existence detail: %q", err)
+		}
+	}
+
+	// An invalid targets file fails every tool closed — not only the
+	// target-taking ones.
+	targetsPath := srv.targetsPath
+	if err := os.Chmod(targetsPath, 0644); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		tool string
+		args map[string]any
+	}{
+		{"targets", nil},
+		{"pending_list", nil},
+		{"pending_detail", map[string]any{"id": "dr-80-1"}},
+		{"progress", map[string]any{"target": "ops"}},
+		{"progress", map[string]any{"request_id": "dr-80-1"}},
+		{"poll", nil},
+	} {
+		if got := assistantCallError(t, srv, assistantTestBerryToken, tc.tool, tc.args); got != "targets_file_invalid" {
+			t.Fatalf("%s under chmod-0644 targets: error=%q, want targets_file_invalid", tc.tool, got)
+		}
+	}
+	if err := os.Chmod(targetsPath, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Resolution text, receipt text and resolver identity never leave —
+	// kind, responder and resolved_at are the whole resolution receipt.
+	hk.seedTask(assistantTask{ID: 92, Lane: "lane-a", State: "needs_decision", Title: "resolved", Refs: struct {
+		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
+		Disposition     json.RawMessage           `json:"disposition,omitempty"`
+	}{DecisionRequest: &assistantDecisionRequest{
+		ID: "dr-92-1", Revision: 1, Status: "answered", Question: "q", DefaultAction: "wait",
+		RequestedBy: "wrk", RequestedAt: now,
+		Resolution: &assistantDecisionResolution{Kind: "answered", Option: "go", Text: "PLANTED-RESOLUTION-TEXT", Receipt: "PLANTED-RECEIPT", Responder: "operator", By: "PLANTED-BY", At: now},
+	}}})
+	result := assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": "dr-92-1"})
+	if result.isError {
+		t.Fatalf("resolved progress error: %s", result.text)
+	}
+	for _, secret := range []string{"PLANTED-RESOLUTION-TEXT", "PLANTED-RECEIPT", "PLANTED-BY"} {
+		if strings.Contains(result.text, secret) {
+			t.Fatalf("resolution field %q leaked: %s", secret, result.text)
+		}
+	}
+	receipts, _ := result.decoded["receipts"].(map[string]any)
+	resolution, _ := receipts["resolution"].(map[string]any)
+	if resolution["kind"] != "answered" || resolution["responder"] != "operator" || resolution["at"] == nil {
+		t.Fatalf("resolution receipt missing kind/responder/at: %v", resolution)
+	}
+	if len(resolution) != 3 {
+		t.Fatalf("resolution receipt carries extra fields: %v", resolution)
+	}
+}
+
+// Fix-round MAJOR-4: the real PR-1 chain — a question whose answer CAS set
+// answer_message_id while leaving state pending is answered, and its
+// progress is the outbox/relay notice chain, not decision-pending.
+func TestAssistantAnswerChainR2(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	answeredID := int64(55)
+
+	// pending + answer_message_id + unsent outbox row → accepted.
+	hk := newFakeAssistantHK(t)
+	hk.seedQuestion(assistantChatQuestion{ID: "Q-20261010-30", ConversationID: "operator-desk", Lane: "lane-a", State: "pending", Revision: 3, AnswerMessageID: &answeredID})
+	hk.outbox = []assistantOutboxRow{{ID: 31, Kind: "chat_answer", TargetLane: "lane-a", EventID: "Q-20261010-30-rev3-answered", CreatedAt: now}}
+	srv, _ := assistantTestServer(t, hk, nil)
+	result := assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": "Q-20261010-30"})
+	if result.decoded["state"] != "accepted" {
+		t.Fatalf("answered+pending+outbox state=%v, want accepted", result.decoded["state"])
+	}
+
+	// The same question with a persisted-but-undelivered relay row is
+	// in-progress; delivered to a real pane is done.
+	hk.relays = []handoffkeepRelayEvent{{ID: 32, Kind: "lane.event", OwnerLane: "lane-a", EventID: "Q-20261010-30-rev3-answered", Attempts: 1}}
+	hk.outbox = nil
+	result = assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": "Q-20261010-30"})
+	if result.decoded["state"] != "in-progress" {
+		t.Fatalf("answered+pending+persisted state=%v, want in-progress", result.decoded["state"])
+	}
+	hk.relays[0].DeliveredAt = now.Format(time.RFC3339Nano)
+	hk.relays[0].DeliveredTo = "host-a/w1:p1"
+	result = assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": "Q-20261010-30"})
+	if result.decoded["state"] != "done" {
+		t.Fatalf("answered+pending+delivered state=%v, want done", result.decoded["state"])
+	}
+
+	// pending_list and poll items carry the answered flag so the consumer
+	// knows the question already has an assistant answer.
+	hk.pending = assistantPending{ServerTime: now, ChatQuestions: []assistantChatQuestion{
+		{ID: "Q-20261010-30", ConversationID: "operator-desk", Lane: "lane-a", State: "pending", Revision: 3, AnswerMessageID: &answeredID},
+		{ID: "Q-20261010-31", ConversationID: "operator-desk", Lane: "lane-a", State: "pending", Revision: 1},
+	}}
+	listed := assistantCall(t, srv, assistantTestBerryToken, "pending_list", nil)
+	items, _ := listed.decoded["items"].([]any)
+	flagged := map[string]any{}
+	for _, raw := range items {
+		item, _ := raw.(map[string]any)
+		flagged[item["id"].(string)] = item["answered"]
+	}
+	if flagged["Q-20261010-30"] != true || flagged["Q-20261010-31"] != false {
+		t.Fatalf("answered flags=%v", flagged)
+	}
+	polled := assistantCall(t, srv, assistantTestBerryToken, "poll", nil)
+	pollItems, _ := polled.decoded["items"].(map[string]any)
+	row, _ := pollItems["Q-20261010-30:3"].(map[string]any)
+	if row["answered"] != true {
+		t.Fatalf("poll item lacks answered=true: %v", row)
+	}
+}
+
+// Fix-round MINOR-3 (M6): every claim the CF verifier checks must actually be
+// enforced — expired, not-yet-valid, wrong-audience and wrongly-signed
+// assertions are all refused at 401 even with a valid bearer.
+func TestAssistantCFClaimsR2(t *testing.T) {
+	hk := newFakeAssistantHK(t)
+	certs := chatTestCerts(t, chatTestSigningKey())
+	srv, _ := assistantTestServer(t, hk, func(cfg *assistantConfig) {
+		cfg.CFTeam = "team"
+		cfg.CFAUD = assistantTestAUD
+		cfg.CFCertsURL = certs.URL
+		cfg.CFServiceNames = []string{"berry.svc"}
+	})
+	call := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`
+	serve := func(jwt string) *httptest.ResponseRecorder {
+		request := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(call))
+		request.Header.Set("Authorization", "Bearer "+assistantTestBerryToken)
+		request.Header.Set("Cf-Access-Jwt-Assertion", jwt)
+		writer := httptest.NewRecorder()
+		srv.ServeHTTP(writer, request)
+		return writer
+	}
+	now := time.Now()
+	sign := func(claims map[string]any) string {
+		return chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+	}
+	base := func() map[string]any {
+		return map[string]any{"aud": []string{assistantTestAUD}, "exp": now.Add(time.Hour).Unix(), "iat": now.Unix(), "common_name": "berry.svc"}
+	}
+
+	expired := base()
+	expired["exp"] = now.Add(-time.Hour).Unix()
+	if w := serve(sign(expired)); w.Code != http.StatusUnauthorized {
+		t.Fatalf("expired JWT status=%d, want 401", w.Code)
+	}
+	notYet := base()
+	notYet["nbf"] = now.Add(time.Hour).Unix()
+	if w := serve(sign(notYet)); w.Code != http.StatusUnauthorized {
+		t.Fatalf("future-nbf JWT status=%d, want 401", w.Code)
+	}
+	wrongAud := base()
+	wrongAud["aud"] = []string{"someone-else"}
+	if w := serve(sign(wrongAud)); w.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong-aud JWT status=%d, want 401", w.Code)
+	}
+	// A token signed by an unknown key fails signature verification even
+	// though every claim is right.
+	otherKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	forged := chatSignJWTClaims(t, otherKey, "k1", base())
+	if w := serve(forged); w.Code != http.StatusUnauthorized {
+		t.Fatalf("forged-signature JWT status=%d, want 401", w.Code)
+	}
+	if w := serve(sign(base())); w.Code != http.StatusOK {
+		t.Fatalf("valid JWT status=%d, want 200", w.Code)
+	}
+}
+
+// Fix-round MINOR-3 (M12): when the hk CF pair is configured the outbound
+// client stamps both Access headers on every handoffkeep call; with no pair
+// configured it stamps neither.
+func TestAssistantOutboundCFHeadersR2(t *testing.T) {
+	hk := newFakeAssistantHK(t)
+	hk.pending = assistantFixturePending(time.Now().UTC())
+	srv, _ := assistantTestServer(t, hk, func(cfg *assistantConfig) {
+		cfg.HKCFID = assistantTestCFID
+		cfg.HKCFSecret = assistantTestCFSecret
+	})
+	assistantCall(t, srv, assistantTestBerryToken, "pending_list", nil)
+	assistantCall(t, srv, assistantTestBerryToken, "poll", nil)
+	headers := hk.cfHeaderLog()
+	if len(headers) == 0 {
+		t.Fatal("no hk requests recorded")
+	}
+	for i, pair := range headers {
+		if pair[0] != assistantTestCFID || pair[1] != assistantTestCFSecret {
+			t.Fatalf("request %d missing CF headers: id=%q secret=%q", i, pair[0], pair[1])
+		}
+	}
+
+	hk2 := newFakeAssistantHK(t)
+	hk2.pending = assistantFixturePending(time.Now().UTC())
+	srv2, _ := assistantTestServer(t, hk2, nil)
+	assistantCall(t, srv2, assistantTestBerryToken, "pending_list", nil)
+	for i, pair := range hk2.cfHeaderLog() {
+		if pair[0] != "" || pair[1] != "" {
+			t.Fatalf("unconfigured request %d carried CF headers: %v", i, pair)
+		}
+	}
+}
+
+// Fix-round MINOR-5: a panic inside a tool is caught, audit-logged as
+// internal_error, and answered with a named JSON-RPC error — the panic text
+// leaves through neither channel.
+func TestAssistantPanicRecoveryR2(t *testing.T) {
+	dir := t.TempDir()
+	targetsFile := writeMode0600(t, dir, "targets.json", assistantTestTargets)
+	logs := &bytes.Buffer{}
+	// A server with no hk client panics inside the tool on first use — a
+	// stand-in for any in-tool panic.
+	srv := &assistantServer{
+		targetsPath: targetsFile,
+		audit:       slog.New(slog.NewJSONHandler(logs, nil)),
+	}
+	params, _ := json.Marshal(map[string]any{"name": "pending_list", "arguments": map[string]any{}})
+	result, rpcErr := srv.dispatchToolCall(context.Background(), "berry-test", params)
+	if result != nil || rpcErr == nil {
+		t.Fatalf("panic result=%v rpcErr=%v", result, rpcErr)
+	}
+	if rpcErr.Code != rpcInternalError || rpcErr.Message != "internal_error" {
+		t.Fatalf("panic rpc error=%v, want -32603 internal_error", rpcErr)
+	}
+	if strings.Contains(rpcErr.Message, "nil pointer") || strings.Contains(rpcErr.Message, "panic") {
+		t.Fatalf("panic text leaked into rpc error: %q", rpcErr.Message)
+	}
+	if !strings.Contains(logs.String(), "internal_error") {
+		t.Fatalf("panic not audit logged: %s", logs.String())
 	}
 }

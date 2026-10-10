@@ -162,3 +162,39 @@ func TestHubChatAssistantRowRetryCancelRefused(t *testing.T) {
 		t.Fatalf("/chat page lacks the assistant label")
 	}
 }
+
+// Fix-round MINOR-3 (M5): the assistant exemption is exactly
+// source_channel=assistant — a real web-channel operator row still fails the
+// orphan sweep outside its grace window, so a mutant widening the exemption
+// to web rows is caught.
+func TestHubChatWebRowStillOrphanFailsR2(t *testing.T) {
+	store := newFakeChatStore()
+	hub := chatTestHub(t, `{"lanes":{}}`, nil, store)
+	ctx := context.Background()
+
+	web, _, err := store.CreateChatMessageExtended(ctx, ChatMessageCreate{
+		ConversationID:  hubChatConversationID,
+		Author:          "operator",
+		Body:            "web operator row",
+		SourceChannel:   "web",
+		OriginEventID:   "web-1",
+		OriginTimestamp: time.Now().UTC(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	assistant := seedAssistantChatRow(t, store, "assistant control")
+	store.mu.Lock()
+	old := time.Now().UTC().Add(-time.Hour)
+	store.messages[web.ID].CreatedAt = old
+	store.messages[assistant.ID].CreatedAt = old
+	store.mu.Unlock()
+
+	hub.drainChatOutbox(ctx)
+	if got := store.messageState(web.ID); got != "failed" {
+		t.Fatalf("web row state=%q, want failed — the exemption must not cover web", got)
+	}
+	if got := store.messageState(assistant.ID); got != "stored" {
+		t.Fatalf("assistant control row state=%q, want stored", got)
+	}
+}
