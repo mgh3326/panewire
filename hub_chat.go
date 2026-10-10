@@ -65,16 +65,20 @@ const (
 var chatQuestionIDPattern = regexp.MustCompile(`^Q-[0-9]{8}-[0-9]{2,}$`)
 var errChatStoreIncompatible = errors.New("chat store does not support the extended chat contract")
 
-// ChatQuestion is handoffkeep's durable desk question, mirrored field for field.
+// ChatQuestion is handoffkeep's durable desk question, mirrored field for
+// field (v17: revision is the assistant answer's CAS token, and
+// answer_message_id names the one accepted assistant-channel answer).
 type ChatQuestion struct {
-	ID             string     `json:"id"`
-	ConversationID string     `json:"conversation_id"`
-	Lane           string     `json:"lane"`
-	Body           string     `json:"body"`
-	State          string     `json:"state"`
-	CreatedAt      time.Time  `json:"created_at"`
-	UpdatedAt      time.Time  `json:"updated_at"`
-	ResolvedAt     *time.Time `json:"resolved_at"`
+	ID              string     `json:"id"`
+	ConversationID  string     `json:"conversation_id"`
+	Lane            string     `json:"lane"`
+	Body            string     `json:"body"`
+	State           string     `json:"state"`
+	Revision        int        `json:"revision"`
+	AnswerMessageID *int64     `json:"answer_message_id"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
+	ResolvedAt      *time.Time `json:"resolved_at"`
 }
 
 // ChatMessage is handoffkeep's durable operator/desk message, mirrored field
@@ -878,6 +882,14 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 		writeHubJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	}
+	// Assistant-channel rows are not the hub's to redeliver: retry would mint
+	// a second notice channel next to the notification_outbox. The channel
+	// check precedes the state check so an assistant row never reports as an
+	// ordinary not-failed operator message.
+	if message.SourceChannel == "assistant" {
+		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_operator"})
+		return
+	}
 	if message.RelayState != "failed" {
 		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_failed"})
 		return
@@ -1002,7 +1014,10 @@ func (h *HubServer) handleChatMessageCancel(writer http.ResponseWriter, request 
 		writeHubJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	}
-	if message.Author != hubChatOperatorName || message.RelayState == "not_sent" {
+	// Assistant-channel rows are closed by the outbox drain, not by the
+	// operator console — cancel is refused rather than hiding a notice the
+	// hub does not own.
+	if message.Author != hubChatOperatorName || message.RelayState == "not_sent" || message.SourceChannel == "assistant" {
 		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_operator"})
 		return
 	}
@@ -1232,6 +1247,17 @@ func (h *HubServer) failOrphanChatMessages(ctx context.Context) {
 				}
 				h.chatMu.Unlock()
 			} else {
+				// Assistant-channel rows are never the hub's to deliver: the
+				// handoffkeep notification_outbox drain (MGH-36) is their only
+				// lane notice. An assistant row sits stored with no pending
+				// entry and no relay row forever, which is exactly the orphan
+				// shape — exempt it or the sweep would lie about it failing.
+				if message.SourceChannel == "assistant" {
+					if message.ID > after {
+						after = message.ID
+					}
+					continue
+				}
 				h.chatMu.Lock()
 				_, pending := h.chatPending[message.ID]
 				h.chatMu.Unlock()
@@ -1480,7 +1506,10 @@ func (h *HubServer) chatReplayDisposition(id int64) string {
 	if err != nil {
 		return "defer"
 	}
-	if !found || message.Author != hubChatOperatorName || message.RelayState != "stored" {
+	// Assistant-channel rows keep the single-notice-channel rule: their lane
+	// notice is the handoffkeep notification_outbox, never a chat-* relay row.
+	// A chat-* row that names one is retired, never injected.
+	if !found || message.Author != hubChatOperatorName || message.SourceChannel == "assistant" || message.RelayState != "stored" {
 		return "retire"
 	}
 	return "inject"
