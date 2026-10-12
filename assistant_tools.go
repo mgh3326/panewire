@@ -197,24 +197,29 @@ func (s *assistantServer) callAssistantTool(ctx context.Context, identity, name 
 		return s.toolPoll(ctx, targets)
 	case "answer_decision":
 		var in struct {
-			RequestID string `json:"request_id"`
-			Option    string `json:"option,omitempty"`
-			Text      string `json:"text,omitempty"`
+			RequestID     string `json:"request_id"`
+			Option        string `json:"option,omitempty"`
+			Text          string `json:"text,omitempty"`
+			Provenance    string `json:"provenance,omitempty"`
+			OperatorQuote string `json:"operator_quote,omitempty"`
+			DecisionRef   string `json:"decision_ref,omitempty"`
 		}
 		if err := decodeAssistantArgs(args, &in); err != nil {
 			return nil, err
 		}
-		return s.toolAnswerDecision(ctx, identity, in.RequestID, in.Option, in.Text, targets)
+		return s.toolAnswerDecision(ctx, identity, in.RequestID, in.Option, in.Text, in.Provenance, in.OperatorQuote, in.DecisionRef, targets)
 	case "answer_question":
 		var in struct {
-			ID       string `json:"id"`
-			Revision int    `json:"revision"`
-			Text     string `json:"text"`
+			ID            string `json:"id"`
+			Revision      int    `json:"revision"`
+			Text          string `json:"text"`
+			Provenance    string `json:"provenance,omitempty"`
+			OperatorQuote string `json:"operator_quote,omitempty"`
 		}
 		if err := decodeAssistantArgs(args, &in); err != nil {
 			return nil, err
 		}
-		return s.toolAnswerQuestion(ctx, identity, in.ID, in.Revision, in.Text, targets)
+		return s.toolAnswerQuestion(ctx, identity, in.ID, in.Revision, in.Text, in.Provenance, in.OperatorQuote, targets)
 	case "deliver":
 		var in struct {
 			Target         string `json:"target"`

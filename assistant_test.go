@@ -65,6 +65,10 @@ type fakeAssistantHK struct {
 	// stripDate serves a garbage Date header on every response, forcing the
 	// client's detail-clock fallback path (the extra pending-snapshot GET).
 	stripDate bool
+	// latency, when set, is slept before any request is answered — injected
+	// upstream delay so a test can prove an outcome does not depend on wall
+	// time.
+	latency time.Duration
 	// PR-3 write state: posted bodies per path (attribution assertions),
 	// the chat-message dedupe table, and the mark-sent counters the race
 	// test asserts on.
@@ -85,12 +89,15 @@ type fakeAssistantHK struct {
 
 // fakeChatMessage is the dedupe record handoffkeep keeps per
 // (conversation_id, source_channel, origin_event_id): the semantic fields a
-// replay must byte-match, plus the assigned message id.
+// replay must byte-match, plus the assigned message id and the PR-4
+// provenance fields recorded on the answer message.
 type fakeChatMessage struct {
 	id         int64
 	author     string
 	body       string
 	answersKey string
+	provenance string
+	quote      string
 }
 
 func newFakeAssistantHK(t *testing.T) *fakeAssistantHK {
@@ -119,7 +126,11 @@ func (f *fakeAssistantHK) serve(w http.ResponseWriter, r *http.Request) {
 	f.cfHeaders = append(f.cfHeaders, [2]string{r.Header.Get("Cf-Access-Client-Id"), r.Header.Get("Cf-Access-Client-Secret")})
 	fail := f.failNonGET
 	strip := f.stripDate
+	latency := f.latency
 	f.mu.Unlock()
+	if latency > 0 {
+		time.Sleep(latency)
+	}
 	if strip {
 		// An unparsable Date behaves exactly like a missing one: the client's
 		// clock borrow gets a zero time and must pay the snapshot GET.
@@ -363,6 +374,16 @@ func (f *fakeAssistantHK) seedOutbox(kind, lane, eventID, text string) {
 // serveResolve models hk's ResolveDecisionRequestAssistant against the
 // seeded task rows: same ordering, same error names, same outbox write,
 // and the duplicate replay only for a byte-identical answer.
+// effectiveProvenance is the contract's normalization: an absent claim is
+// assistant_judgement, and an operator_decided claim without a non-empty
+// verbatim quote cannot stand and degrades to assistant_judgement.
+func effectiveProvenance(provenance, quote string) string {
+	if provenance == "operator_decided" && strings.TrimSpace(quote) != "" {
+		return "operator_decided"
+	}
+	return "assistant_judgement"
+}
+
 func (f *fakeAssistantHK) serveResolve(w http.ResponseWriter, rawBody []byte) {
 	var input struct {
 		RequestID string `json:"request_id"`
@@ -372,6 +393,10 @@ func (f *fakeAssistantHK) serveResolve(w http.ResponseWriter, rawBody []byte) {
 		// responder and by are decoded but never read, exactly like hk.
 		Responder string `json:"responder,omitempty"`
 		By        string `json:"by,omitempty"`
+		// PR-4 provenance fields.
+		Provenance    string `json:"provenance,omitempty"`
+		OperatorQuote string `json:"operator_quote,omitempty"`
+		DecisionRef   string `json:"decision_ref,omitempty"`
 	}
 	if json.Unmarshal(rawBody, &input) != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -399,8 +424,10 @@ func (f *fakeAssistantHK) serveResolve(w http.ResponseWriter, rawBody []byte) {
 		_, _ = w.Write([]byte(`{"error":"decision_request_stale"}`))
 		return
 	}
+	effective := effectiveProvenance(input.Provenance, input.OperatorQuote)
 	if request.Status != "open" {
-		if request.Resolution != nil && request.Resolution.Kind == "answered" && request.Resolution.Option == input.Option && request.Resolution.Text == input.Text {
+		if request.Resolution != nil && request.Resolution.Kind == "answered" && request.Resolution.Option == input.Option && request.Resolution.Text == input.Text &&
+			request.Resolution.Provenance == effective && request.Resolution.OperatorQuote == input.OperatorQuote && request.Resolution.DecisionRef == input.DecisionRef {
 			f.writeJSON(w, map[string]any{"task": task, "request": *request, "duplicate": true})
 			return
 		}
@@ -418,15 +445,41 @@ func (f *fakeAssistantHK) serveResolve(w http.ResponseWriter, rawBody []byte) {
 		_, _ = w.Write([]byte(`{"error":"disposition_operator_only"}`))
 		return
 	}
-	if request.HumanOnly {
+	// PR-4 contract: provenance is the closed vocabulary; an oversized
+	// quote is the same 400. A decision_ref that names another request —
+	// or is absent while the caller claims operator_decided — is the 409.
+	if input.Provenance != "" && input.Provenance != "assistant_judgement" && input.Provenance != "operator_decided" {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_provenance"}`))
+		return
+	}
+	if len(input.OperatorQuote) > 2000 {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_provenance"}`))
+		return
+	}
+	if input.DecisionRef != request.ID && (input.DecisionRef != "" || effective == "operator_decided") {
 		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"error":"provenance_ref_mismatch"}`))
+		return
+	}
+	if request.HumanOnly && effective != "operator_decided" {
+		w.WriteHeader(http.StatusConflict)
+		if input.Provenance == "operator_decided" {
+			_, _ = w.Write([]byte(`{"error":"decision_request_human_only","reason":"no_operator_quote"}`))
+			return
+		}
 		_, _ = w.Write([]byte(`{"error":"decision_request_human_only"}`))
 		return
+	}
+	decidedBy := "assistant"
+	if effective == "operator_decided" {
+		decidedBy = "operator"
 	}
 	now := time.Now().UTC()
 	resolved := *request
 	resolved.Status = "answered"
-	resolved.Resolution = &assistantDecisionResolution{Kind: "answered", Option: input.Option, Text: input.Text, Responder: "operator-via-berry", By: "berry-mcp", At: now}
+	resolved.Resolution = &assistantDecisionResolution{Kind: "answered", Option: input.Option, Text: input.Text, Responder: "operator-via-berry", By: "berry-mcp", At: now, Provenance: effective, OperatorQuote: input.OperatorQuote, DecisionRef: input.DecisionRef, DecidedBy: decidedBy}
 	task.Refs.DecisionRequest = &resolved
 	f.tasks[taskID] = task
 	head := "[via berry] " + resolved.ID + " answered"
@@ -457,6 +510,9 @@ func (f *fakeAssistantHK) serveChatMessage(w http.ResponseWriter, rawBody []byte
 			QuestionID string `json:"question_id"`
 			Revision   int    `json:"revision"`
 		} `json:"answers"`
+		// PR-4 provenance fields, recorded on the answer message.
+		Provenance    string `json:"provenance,omitempty"`
+		OperatorQuote string `json:"operator_quote,omitempty"`
 	}
 	if json.Unmarshal(rawBody, &input) != nil {
 		w.WriteHeader(http.StatusBadRequest)
@@ -503,7 +559,7 @@ func (f *fakeAssistantHK) serveChatMessage(w http.ResponseWriter, rawBody []byte
 	q.AnswerMessageID = &messageID
 	q.UpdatedAt = time.Now().UTC()
 	f.questions[answer.QuestionID] = q
-	f.chatMessages[key] = &fakeChatMessage{id: messageID, author: input.Author, body: input.Body, answersKey: answersKey}
+	f.chatMessages[key] = &fakeChatMessage{id: messageID, author: input.Author, body: input.Body, answersKey: answersKey, provenance: input.Provenance, quote: input.OperatorQuote}
 	f.outbox = append(f.outbox, assistantOutboxRow{
 		ID: f.nextOutboxID(), Kind: "chat_answer", TargetLane: q.Lane,
 		EventID:   chatAnsweredEventID(answer.QuestionID, answer.Revision),
