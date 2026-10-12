@@ -35,6 +35,11 @@ type assistantCFVerifier struct {
 	keys        map[string]*rsa.PublicKey
 	fetchedAt   time.Time
 	lastUnknown time.Time
+
+	// now, when set, is the clock for Access-user exp/nbf. Production
+	// leaves it nil. Tests freeze it so a one-second boundary cannot
+	// flake. It does not add leeway.
+	now func() time.Time
 }
 
 const (
@@ -287,6 +292,16 @@ func (v *assistantCFVerifier) keyLookup(ctx context.Context, kid string) (*rsa.P
 	return nil, "unknown_kid"
 }
 
+// accessUserNow is the Access-user exp/nbf instant in unix seconds.
+// The comparison itself has no leeway: exp == now is expired, and
+// nbf == now+1 is not yet valid.
+func (v *assistantCFVerifier) accessUserNow() int64 {
+	if v.now != nil {
+		return v.now().Unix()
+	}
+	return time.Now().Unix()
+}
+
 // authenticateAccessUser verifies a user Cf-Access-Jwt-Assertion. The
 // returned reason is empty on success. It is an audit token only — the
 // HTTP response stays the generic unauthorized error. Caller-supplied
@@ -348,7 +363,7 @@ func (v *assistantCFVerifier) authenticateAccessUser(r *http.Request) (assistant
 	// grammar as cfAccessAudienceMatches. Recorded on the audit line even
 	// when a later check rejects the token.
 	principal.Audiences = cfAccessAudiences(claims.Aud)
-	now := time.Now().Unix()
+	now := v.accessUserNow()
 	if claims.Exp == 0 || claims.Exp <= now {
 		return principal, "expired"
 	}
