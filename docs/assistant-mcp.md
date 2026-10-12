@@ -265,19 +265,15 @@ proof of which product holds the token.
 
 #### Example config
 
-These values are an example for the dots app. The binary does not
-special-case the team or the AUD. The issuer is
-`https://<team>.cloudflareaccess.com`.
+The binary does not special-case the team or the AUD. The issuer shape
+is `https://<team>.cloudflareaccess.com`. Public markdown cannot repeat
+a live issuer host (`TestDocsContainNoOperationalLiterals` rejects
+host-shaped tokens in every `.md` file). The concrete dots values —
+issuer, AUD, and protected-resource path — are in the example config
+`docs/assistant-access-user.example`, which this binary does not read.
 
-```
-PANEWIRE_ASSISTANT_AUTH_MODE=access-user
-PANEWIRE_ASSISTANT_CF_TEAM=mgh3326
-PANEWIRE_ASSISTANT_CF_AUD=f405a0dce64192eff061a4a0acef6a145242fd94684f39d547c5e6f7a59012fb
-PANEWIRE_ASSISTANT_CF_CERTS_URL=https://mgh3326.cloudflareaccess.com/cdn-cgi/access/certs
-PANEWIRE_ASSISTANT_CF_SUBJECTS=<operator sub>
-```
-
-Issuer for that team: `https://mgh3326.cloudflareaccess.com`.
+The dots AUD is
+`f405a0dce64192eff061a4a0acef6a145242fd94684f39d547c5e6f7a59012fb`.
 
 Protected-resource path, served by Cloudflare Access and not by this
 binary: `/.well-known/cloudflare-access-protected-resource/mcp`.
