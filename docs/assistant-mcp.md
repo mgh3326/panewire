@@ -95,9 +95,24 @@ bucket; see configuration).
   decision_request_human_only; a disposition item answers
   disposition_operator_only; a request resolved differently answers
   decision_request_resolved. The returned `event_id` is the deterministic
-  `<request-id>-answered` the lane notice will carry.
+  `<request-id>-answered` the lane notice will carry. Optional provenance
+  fields (the PR-4 contract): `provenance` is `assistant_judgement` (the
+  default) or `operator_decided` — any other value answers
+  invalid_arguments. `operator_decided` relays the operator's exact
+  verbatim words for this decision: `operator_quote` carries them and
+  `decision_ref` must equal `request_id` exactly — a missing or different
+  ref is refused as provenance_ref_mismatch before any handoffkeep call.
+  The fields cross to handoffkeep unchanged and a quote is never
+  synthesized. handoffkeep treats operator_decided without a non-empty
+  quote as assistant_judgement, so on a human_only request that answer
+  form replies decision_request_human_only with reason no_operator_quote;
+  with a quote and a matching ref even a human_only request resolves and
+  is recorded decided_by=operator.
 - answer_question — answer one pending chat question. Input: `id` (the Q
-  id), `revision` (the expected revision), `text` (≤4096 bytes). The
+  id), `revision` (the expected revision), `text` (≤4096 bytes) — the
+  request body to handoffkeep is exactly this pre-PR-4 field set; the
+  contract's amendment 1 keeps provenance out of the chat path entirely
+  (the chat endpoint rejects unknown fields). The
   question row is pre-read first: an already-held answer slot answers
   question_slot_taken (the slot is single-use — do not retry), a
   non-pending or out-of-scope question answers request_not_found, a
@@ -115,10 +130,19 @@ bucket; see configuration).
   a hub lane.event. Input: `target` (an opaque id from the targets file),
   `idempotency_key` (`^[A-Za-z0-9._-]{8,64}$`), `text` (trimmed non-empty,
   ≤2036 bytes, valid UTF-8, no control characters — no newlines — and no
-  Unicode format characters (category Cf: zero-width spaces, word
-  joiners, BOM, bidi overrides); the first non-space rune may be neither
-  `[` nor its fullwidth `［`, so a forged tag cannot ride the prefix in
-  either glyph; over- or mis-shaped text is rejected, never truncated). The lane comes only
+  invisible runes: no Unicode format characters (category Cf — zero-width
+  spaces, word joiners, ZWJ/ZWNJ, Mongolian vowel separators, BOM, bidi
+  overrides), no default-ignorable code points (combining grapheme joiner,
+  Hangul fillers, tag characters) and no variation selectors — an
+  emoji+VS16 pair such as ❤️ is refused too. The first rune of the
+  trimmed text is checked directly, nothing skipped: it may be neither a
+  combining mark (category M), a conjoining Hangul jamo of
+  Hangul_Syllable_Type V or T (U+1160..U+11FF, U+D7B0..U+D7C6,
+  U+D7CB..U+D7FB — invisible when uncomposed) nor a blank-glyph rune
+  (U+2800, U+1D159, U+303F, U+13441, U+13442), and neither `[` nor its
+  fullwidth `［`, so a forged tag
+  cannot ride the prefix in either glyph; over- or mis-shaped text is
+  rejected, never truncated). The lane comes only
   from the targets file: a lane target delivers to its own lane, a
   conversation target to its mapped `deliver_lane`. The event id is
   `berry:<target>:<key>` — deterministic, never random, never time-based —
@@ -362,8 +386,11 @@ verified principal there. `audiences` is every aud value from the token.
 Every write attempt
 additionally logs the tool,
 subject id, idempotency key or event id, revision, outcome class, hub row
-id and a sha-256/8 text hash — never the text itself, a token or an
-upstream URL.
+id and a sha-256/8 text hash; answer_decision calls also log the
+provenance — a vocabulary value verbatim, anything else as the fixed token `invalid`,
+never the caller-supplied string — and the operator quote's length and
+sha-256/8 — never the text or the quote itself, a token or an upstream
+URL.
 
 ## Targets file
 
@@ -453,6 +480,10 @@ and desk chat behavior is unchanged.
 - Mapping the operator-desk conversation in the targets file lets
   answer_question answer every lane's question that desk sees — scope
   it to the conversations the operator actually wants answerable.
+- The provenance quote is as strong as the bearer credential:
+  handoffkeep records operator_quote verbatim but cannot prove the words
+  were the operator's. Audit keeps only length and sha8, so a leaked
+  credential could still write a fabricated operator_decided claim.
 - PR-4 precondition: human_only must be set on merge, deploy and spend
   decision requests in handoffkeep before PANEWIRE_ASSISTANT_WRITES is
   turned on — otherwise those requests are answerable through

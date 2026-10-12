@@ -11,10 +11,12 @@ import (
 	"net/http/httptest"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -618,6 +620,246 @@ func TestAssistantAnswerDecisionAC2(t *testing.T) {
 	}
 }
 
+// PR-4b (contract design/2026-10-12/mgh36-pr4-provenance-contract): the
+// answer tools carry provenance. operator_decided with a verbatim quote and
+// a decision_ref equal to request_id crosses to hk unchanged and is
+// recorded decided_by=operator; a missing or different ref is refused as
+// provenance_ref_mismatch before a single upstream call; an empty quote
+// forwards unchanged and hk degrades the claim to assistant_judgement;
+// every new hk error maps to its name; and the planted quote never appears
+// in audit or logs — only its length and sha8.
+func TestAssistantProvenancePR4(t *testing.T) {
+	hk := newFakeAssistantHK(t)
+	hub := newFakeAssistantHub(t)
+	hub.hk = hk
+	srv, logs := assistantWriteServer(t, hk, hub, assistantWritesAnswer, nil)
+
+	resolveBodies := func() []string { return hk.postedBodies("POST /v1/assistant/decisions/resolve") }
+	resolution := func(taskID int64) *assistantDecisionResolution {
+		hk.mu.Lock()
+		defer hk.mu.Unlock()
+		return hk.tasks[taskID].Refs.DecisionRequest.Resolution
+	}
+
+	// operator_decided with quote and matching ref: all three fields cross
+	// unchanged and the recorded answer is decided_by=operator.
+	const plantedQuote = "the operator's verbatim words PLANTQUOTE-4b0f — ship it now"
+	const plantedProv = "PLANTPROV-9e2c the operator said ship it"
+	requestID := seedDecisionTask(hk, 60, 1, nil)
+	res := assistantCall(t, srv, assistantTestBerryToken, "answer_decision", map[string]any{
+		"request_id": requestID, "option": "go", "text": "as decided",
+		"provenance": "operator_decided", "operator_quote": plantedQuote, "decision_ref": requestID})
+	if res.isError {
+		t.Fatalf("operator_decided answer: %s", res.text)
+	}
+	if strings.Contains(res.text, plantedQuote) {
+		t.Fatalf("tool result echoed the quote: %s", res.text)
+	}
+	bodies := resolveBodies()
+	if len(bodies) != 1 {
+		t.Fatalf("resolve posts=%d, want 1", len(bodies))
+	}
+	var posted map[string]any
+	if err := json.Unmarshal([]byte(bodies[0]), &posted); err != nil {
+		t.Fatal(err)
+	}
+	if posted["provenance"] != "operator_decided" || posted["operator_quote"] != plantedQuote || posted["decision_ref"] != requestID {
+		t.Fatalf("provenance fields not forwarded unchanged: %s", bodies[0])
+	}
+	if got := resolution(60); got == nil || got.DecidedBy != "operator" || got.Provenance != "operator_decided" ||
+		got.OperatorQuote != plantedQuote || got.DecisionRef != requestID {
+		t.Fatalf("recorded resolution=%+v", got)
+	}
+
+	// The identical replay is the duplicate success — the sameResolution
+	// compare includes provenance, quote and ref.
+	dup := assistantCall(t, srv, assistantTestBerryToken, "answer_decision", map[string]any{
+		"request_id": requestID, "option": "go", "text": "as decided",
+		"provenance": "operator_decided", "operator_quote": plantedQuote, "decision_ref": requestID})
+	if dup.isError || dup.decoded["duplicate"] != true {
+		t.Fatalf("provenance replay: %+v", dup)
+	}
+
+	// A decision_ref that names another request — or none while claiming
+	// operator_decided — is refused before a single upstream call.
+	mismatchID := seedDecisionTask(hk, 61, 1, nil)
+	before := len(hk.requestLog())
+	for name, args := range map[string]map[string]any{
+		"different ref":         {"request_id": mismatchID, "option": "go", "provenance": "operator_decided", "operator_quote": "x", "decision_ref": "dr-60-1"},
+		"missing ref":           {"request_id": mismatchID, "option": "go", "provenance": "operator_decided", "operator_quote": "x"},
+		"ref mismatch no claim": {"request_id": mismatchID, "option": "go", "decision_ref": "dr-60-1"},
+	} {
+		if got := assistantCallError(t, srv, assistantTestBerryToken, "answer_decision", args); got != "provenance_ref_mismatch" {
+			t.Fatalf("%s: %q, want provenance_ref_mismatch", name, got)
+		}
+	}
+	if got := len(hk.requestLog()); got != before {
+		t.Fatalf("ref mismatch reached upstream: %d new requests", got-before)
+	}
+
+	// A provenance value outside the vocabulary is invalid_arguments —
+	// again before any upstream call — and the audit line records the
+	// fixed token invalid, never the caller value (MINOR-2: caller free
+	// text, quote text included, must not ride the provenance field into
+	// the audit log). On answer_question the same call is invalid at the
+	// args decode instead — A3 removed the field from the tool entirely.
+	for _, tool := range []string{"answer_decision", "answer_question"} {
+		args := map[string]any{"provenance": plantedProv}
+		if tool == "answer_decision" {
+			args["request_id"] = mismatchID
+			args["option"] = "go"
+		} else {
+			args["id"] = "Q-20261010-70"
+			args["revision"] = 1
+			args["text"] = "x"
+		}
+		before = len(hk.requestLog())
+		if got := assistantCallError(t, srv, assistantTestBerryToken, tool, args); got != "invalid_arguments" {
+			t.Fatalf("%s invalid provenance: %q", tool, got)
+		}
+		if got := len(hk.requestLog()); got != before {
+			t.Fatalf("%s invalid provenance reached upstream: %d new requests", tool, got-before)
+		}
+	}
+
+	// An empty quote forwards unchanged and hk degrades the claim to
+	// assistant_judgement — the contract's stated behavior, so the resolve
+	// succeeds and is recorded decided_by=assistant.
+	emptyQuoteID := seedDecisionTask(hk, 62, 1, nil)
+	emptyRes := assistantCall(t, srv, assistantTestBerryToken, "answer_decision", map[string]any{
+		"request_id": emptyQuoteID, "option": "go",
+		"provenance": "operator_decided", "decision_ref": emptyQuoteID})
+	if emptyRes.isError {
+		t.Fatalf("empty-quote claim: %s", emptyRes.text)
+	}
+	if got := resolution(62); got == nil || got.DecidedBy != "assistant" || got.Provenance != "assistant_judgement" {
+		t.Fatalf("empty-quote resolution=%+v, want decided_by=assistant", got)
+	}
+
+	// human_only accepts only an operator_decided answer with a quote and a
+	// matching ref: the bare claim without a quote is refused with reason
+	// no_operator_quote; with quote and ref it resolves decided_by=operator.
+	humanID := seedDecisionTask(hk, 63, 1, func(task *assistantTask) {
+		task.Refs.DecisionRequest.HumanOnly = true
+	})
+	if got := assistantCallError(t, srv, assistantTestBerryToken, "answer_decision",
+		map[string]any{"request_id": humanID, "option": "go"}); got != "decision_request_human_only" {
+		t.Fatalf("human_only bare: %q", got)
+	}
+	noQuote := assistantCall(t, srv, assistantTestBerryToken, "answer_decision", map[string]any{
+		"request_id": humanID, "option": "go",
+		"provenance": "operator_decided", "decision_ref": humanID})
+	if !noQuote.isError {
+		t.Fatalf("human_only no-quote claim: %s", noQuote.text)
+	}
+	var noQuoteErr struct {
+		Error  string `json:"error"`
+		Reason string `json:"reason"`
+	}
+	if err := json.Unmarshal([]byte(noQuote.text), &noQuoteErr); err != nil {
+		t.Fatal(err)
+	}
+	if noQuoteErr.Error != "decision_request_human_only" || noQuoteErr.Reason != "no_operator_quote" {
+		t.Fatalf("human_only no-quote error=%s", noQuote.text)
+	}
+	humanRes := assistantCall(t, srv, assistantTestBerryToken, "answer_decision", map[string]any{
+		"request_id": humanID, "option": "go",
+		"provenance": "operator_decided", "operator_quote": "operator said: approved", "decision_ref": humanID})
+	if humanRes.isError {
+		t.Fatalf("human_only operator answer: %s", humanRes.text)
+	}
+	if got := resolution(63); got == nil || got.DecidedBy != "operator" {
+		t.Fatalf("human_only resolution=%+v, want decided_by=operator", got)
+	}
+
+	// The hk provenance errors map to their names. conflictOnceFor is the
+	// raced upstream rejection the local check cannot see.
+	errMapID := seedDecisionTask(hk, 64, 1, nil)
+	for _, upstreamErr := range []string{"provenance_ref_mismatch", "invalid_provenance"} {
+		hk.mu.Lock()
+		hk.conflictOnceFor["/v1/assistant/decisions/resolve"] = upstreamErr
+		hk.mu.Unlock()
+		if got := assistantCallError(t, srv, assistantTestBerryToken, "answer_decision", map[string]any{
+			"request_id": errMapID, "option": "go",
+			"provenance": "operator_decided", "operator_quote": "x", "decision_ref": errMapID}); got != upstreamErr {
+			t.Fatalf("upstream %s mapped to %q", upstreamErr, got)
+		}
+	}
+
+	// A bare answer sends no provenance keys at all — nothing is defaulted
+	// onto the wire — and is recorded decided_by=assistant.
+	plainID := seedDecisionTask(hk, 65, 1, nil)
+	plain := assistantCall(t, srv, assistantTestBerryToken, "answer_decision",
+		map[string]any{"request_id": plainID, "option": "go"})
+	if plain.isError {
+		t.Fatalf("bare answer: %s", plain.text)
+	}
+	var plainPosted map[string]any
+	plainBodies := resolveBodies()
+	if err := json.Unmarshal([]byte(plainBodies[len(plainBodies)-1]), &plainPosted); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"provenance", "operator_quote", "decision_ref"} {
+		if _, present := plainPosted[key]; present {
+			t.Fatalf("bare answer sent %q: %s", key, plainBodies[len(plainBodies)-1])
+		}
+	}
+	if got := resolution(65); got == nil || got.DecidedBy != "assistant" || got.Provenance != "assistant_judgement" {
+		t.Fatalf("bare resolution=%+v, want decided_by=assistant", got)
+	}
+
+	// Contract amendment 1 item A3: answer_question carries NO provenance
+	// fields — hk's chat endpoint rejects unknown fields, and the request
+	// body is exactly the pre-PR-4 field set (the fake 400s if either key
+	// appears; this asserts the keys, not just the absence of the pair).
+	now := time.Now().UTC()
+	hk.seedQuestion(assistantChatQuestion{ID: "Q-20261010-70", ConversationID: "operator-desk", Lane: "lane-a",
+		Body: "?", State: "pending", Revision: 1, CreatedAt: now, UpdatedAt: now})
+	qres := assistantCall(t, srv, assistantTestBerryToken, "answer_question", map[string]any{
+		"id": "Q-20261010-70", "revision": 1, "text": "pane 7"})
+	if qres.isError {
+		t.Fatalf("answer_question: %s", qres.text)
+	}
+	var chatPosted map[string]any
+	chatBodies := hk.postedBodies("POST /v1/chat/messages")
+	if len(chatBodies) != 1 {
+		t.Fatalf("chat posts=%d, want 1", len(chatBodies))
+	}
+	if err := json.Unmarshal([]byte(chatBodies[0]), &chatPosted); err != nil {
+		t.Fatal(err)
+	}
+	wantKeys := map[string]bool{"conversation_id": true, "author": true, "body": true,
+		"source_channel": true, "origin_event_id": true, "answers": true}
+	for key := range chatPosted {
+		if !wantKeys[key] {
+			t.Fatalf("answer_question sent unexpected field %q: %s", key, chatBodies[0])
+		}
+	}
+	if len(chatPosted) != len(wantKeys) {
+		t.Fatalf("answer_question body missing fields: %s", chatBodies[0])
+	}
+
+	// The planted quote never reaches audit or logs — provenance, quote
+	// length and sha8 do.
+	audit := logs.String()
+	if strings.Contains(audit, plantedQuote) || strings.Contains(audit, "PLANTQUOTE") {
+		t.Fatalf("audit leaked the operator quote:\n%s", audit)
+	}
+	for _, needle := range []string{
+		`"provenance":"operator_decided"`,
+		`"quote_len":` + strconv.Itoa(len(plantedQuote)),
+		`"quote_sha8":"` + textSHA8(plantedQuote) + `"`,
+		`"provenance":"invalid"`,
+	} {
+		if !strings.Contains(audit, needle) {
+			t.Fatalf("audit missing %s:\n%s", needle, audit)
+		}
+	}
+	if strings.Contains(audit, plantedProv) || strings.Contains(audit, "PLANTPROV") {
+		t.Fatalf("audit echoed the raw out-of-vocabulary provenance:\n%s", audit)
+	}
+}
+
 // AC3: answer_question — the pre-read drives the verdict: a held answer
 // slot is question_slot_taken (not stale), a revision gap is stale_revision
 // carrying the current revision, the post runs hk's assistant-channel CAS
@@ -772,7 +1014,11 @@ func TestAssistantDeliverAC4(t *testing.T) {
 	hk := newFakeAssistantHK(t)
 	hub := newFakeAssistantHub(t)
 	hub.hk = hk
-	srv, logs := assistantWriteServer(t, hk, hub, assistantWritesDeliver, nil)
+	// The reject table fires one tool call per row — every call takes a
+	// limiter token, so the burst must exceed the table size.
+	srv, logs := assistantWriteServer(t, hk, hub, assistantWritesDeliver, func(c *assistantConfig) {
+		c.WriteBurst = 200
+	})
 
 	result := assistantCall(t, srv, assistantTestBerryToken, "deliver",
 		map[string]any{"target": "ops", "idempotency_key": "k12345678", "text": "restart the lane"})
@@ -865,6 +1111,44 @@ func TestAssistantDeliverAC4(t *testing.T) {
 		{"bom text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\ufeffb"}, "invalid_arguments"},
 		{"bidi override text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\u202eb"}, "invalid_arguments"},
 		{"leading zwsp tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u200b[director-1] do x"}, "invalid_arguments"},
+		// PR-4b: the Cf net is wider than the four named runes — every
+		// format character rejects, mid-text or leading.
+		{"zwj mid-text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\u200db"}, "invalid_arguments"},
+		{"zwj leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u200d[director-1] do x"}, "invalid_arguments"},
+		{"mongolian vowel separator", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\u180eb"}, "invalid_arguments"},
+		// Default-ignorable code points that are NOT category Cf — the
+		// class the old check missed entirely.
+		{"combining grapheme joiner", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\u034fb"}, "invalid_arguments"},
+		{"hangul filler mid-text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\u3164b"}, "invalid_arguments"},
+		{"hangul filler leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u3164[director-1] do x"}, "invalid_arguments"},
+		{"halfwidth hangul filler", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\uffa0b"}, "invalid_arguments"},
+		// Variation selectors reject anywhere — no exception, not even
+		// directly after a pictographic base: an emoji+VS16 pair like ❤️
+		// (U+2764 U+FE0F) is refused rather than special-cased, keeping the
+		// rule "every invisible rune rejects" total and testable.
+		{"vs16 mid-text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\ufe0fb"}, "invalid_arguments"},
+		{"vs16 leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\ufe0f[director-1] do x"}, "invalid_arguments"},
+		{"emoji vs16 pair", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "❤️"}, "invalid_arguments"},
+		{"variation selector supplement", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "a\U000e0100b"}, "invalid_arguments"},
+		// The first-rune check skips nothing: a leading combining mark
+		// (category M — invisible over nothing) and the braille blank
+		// U+2800 (renders blank) both reject.
+		{"braille blank leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u2800[director-1] do x"}, "invalid_arguments"},
+		{"combining mark leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u0301[director-1] do x"}, "invalid_arguments"},
+		{"combining mark first", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u0301x"}, "invalid_arguments"},
+		// PR-4b round 2 (t1458-verify MINOR-1): the conjoining Hangul jamo of
+		// Hangul_Syllable_Type V or T take no terminal cell uncomposed, so a
+		// leading one is invisible — and the remaining blank-glyph runes.
+		{"hangul V jamo leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u1161[director-1] do x"}, "invalid_arguments"},
+		{"hangul T jamo leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u11a8x"}, "invalid_arguments"},
+		{"hangul V ext jamo leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\ud7b0x"}, "invalid_arguments"},
+		{"hangul T ext jamo leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\ud7cbx"}, "invalid_arguments"},
+		{"null notehead leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\U0001d159[director-1] do x"}, "invalid_arguments"},
+		{"half fill space leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u303f[director-1] do x"}, "invalid_arguments"},
+		{"egyptian full blank leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\U00013441[director-1] do x"}, "invalid_arguments"},
+		{"egyptian half blank leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\U00013442x"}, "invalid_arguments"},
+		{"hangul T jamo last leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u11ffx"}, "invalid_arguments"},
+		{"hangul T ext last leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\ud7fbx"}, "invalid_arguments"},
 		{"empty text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "   "}, "invalid_arguments"},
 		{"overlong text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": strings.Repeat("x", assistantDeliverTextMaxBytes+1)}, "text_too_long"},
 	} {
@@ -881,6 +1165,14 @@ func TestAssistantDeliverAC4(t *testing.T) {
 		map[string]any{"target": "ops", "idempotency_key": "k56789012", "text": strings.Repeat("y", assistantDeliverTextMaxBytes)})
 	if atCap.isError {
 		t.Fatalf("at-cap text rejected: %s", atCap.text)
+	}
+
+	// Mid-text V/T jamo stay accepted — only the FIRST rune is checked, and
+	// NFD Korean composes them legitimately (U+1112 is the visible L jamo).
+	nfd := assistantCall(t, srv, assistantTestBerryToken, "deliver",
+		map[string]any{"target": "ops", "idempotency_key": "k67890124", "text": "한글 NFD"})
+	if nfd.isError {
+		t.Fatalf("nfd hangul rejected: %s", nfd.text)
 	}
 
 	// The 409-with-id-0 in-flight window.
@@ -1267,6 +1559,12 @@ func TestAssistantWriteSecretsAC8(t *testing.T) {
 }
 
 // AC12: the per-identity write limiter gates ahead of every upstream call.
+// The limiter clock is frozen and hk carries an injected 300 ms latency, so
+// no wall-clock delay between the first write and the limited one can refill
+// the bucket — the rate_limited verdict is the limiter's, not a timer's
+// (N-MINOR-2: under the live clock the burst write plus the drain pass spent
+// more than the 60/min refill interval inside the test, hiding whether the
+// second call was gated by the bucket or refilled by elapsed time).
 func TestAssistantRateLimitAC12(t *testing.T) {
 	hk := newFakeAssistantHK(t)
 	hub := newFakeAssistantHub(t)
@@ -1275,6 +1573,11 @@ func TestAssistantRateLimitAC12(t *testing.T) {
 		c.WriteRatePerMin = 60
 		c.WriteBurst = 1
 	})
+	frozen := time.Now()
+	srv.limiter.now = func() time.Time { return frozen }
+	hk.mu.Lock()
+	hk.latency = 300 * time.Millisecond
+	hk.mu.Unlock()
 	seedDecisionTask(hk, 42, 3, nil)
 
 	first := assistantCall(t, srv, assistantTestBerryToken, "answer_decision", map[string]any{"request_id": "dr-42-3", "option": "go"})
@@ -1296,8 +1599,9 @@ func TestAssistantRateLimitAC12(t *testing.T) {
 		t.Fatalf("rate-limited deliver reached the hub: %d new posts", got-hubPosts)
 	}
 
-	// The bucket is per-identity, not global.
+	// The bucket is per-identity, not global — same frozen clock.
 	limiter := newWriteRateLimiter(60, 1)
+	limiter.now = func() time.Time { return frozen }
 	if !limiter.allow("a") || limiter.allow("a") || !limiter.allow("b") {
 		t.Fatal("limiter not per-identity")
 	}
@@ -1473,6 +1777,47 @@ func TestAssistantFoldPrecedencePR3(t *testing.T) {
 				if strings.Contains(string(raw), banned) {
 					t.Fatalf("verdict receipts carry %s: %s", banned, raw)
 				}
+			}
+		})
+	}
+}
+
+// N-MINOR-3 (PR-4b): at a fold tie on the winning rank — two failed chains
+// with competing reasons, one sink_lane and one non_delivery_stamp — the
+// smallest item key decides the top-level reason. The item keys are fixed
+// to the reasons (the sink chain always holds the smaller key) while the
+// pending list order flips, so both orders must produce the same verdict:
+// failed / sink_lane.
+func TestAssistantFoldTieBreakPR4(t *testing.T) {
+	kinds := map[string]struct{ qid, deliveredTo string }{
+		"sink":  {"Q-20261212-01", "sink/sink:lane-a"},
+		"stamp": {"Q-20261212-02", "resolve/mgh"},
+	}
+	for _, order := range [][]string{{"sink", "stamp"}, {"stamp", "sink"}} {
+		t.Run(strings.Join(order, "-first"), func(t *testing.T) {
+			hk := newFakeAssistantHK(t)
+			pending := assistantPending{ServerTime: time.Now().UTC()}
+			for i, kind := range order {
+				spec := kinds[kind]
+				pending.ChatQuestions = append(pending.ChatQuestions, answeredQuestion(spec.qid, 1, int64(800+i)))
+				hk.relays = append(hk.relays, deliveredRelayRow(int64(950+i), spec.qid+"-rev1-answered", spec.deliveredTo))
+			}
+			hk.pending = pending
+			srv, _ := assistantTestServer(t, hk, nil)
+			result := assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"target": "ops"})
+			if result.isError {
+				t.Fatalf("progress: %s", result.text)
+			}
+			if result.decoded["state"] != "failed" {
+				t.Fatalf("folded state=%v, want failed; receipts=%v", result.decoded["state"], result.decoded["receipts"])
+			}
+			receipts, _ := result.decoded["receipts"].(map[string]any)
+			if reason, _ := receipts["reason"].(string); reason != "sink_lane" {
+				t.Fatalf("order %v: top-level reason=%q, want sink_lane — the smaller item key wins the tie", order, reason)
+			}
+			verdicts, _ := receipts["answered"].([]any)
+			if len(verdicts) != 2 {
+				t.Fatalf("verdicts=%v, want 2", verdicts)
 			}
 		})
 	}
@@ -1711,5 +2056,67 @@ func TestAssistantTasksOrderingPR3(t *testing.T) {
 	tasks, _ := receipts["tasks"].([]any)
 	if len(tasks) != 1 {
 		t.Fatalf("live tasks=%v, want the one queued row", tasks)
+	}
+}
+
+// TestAssistantDeliverRuneSweepPR4 keeps the t1458-verify probe as a
+// test: every Unicode scalar value as the leading rune of deliverable
+// text (surrogates skipped, which JSON can never carry). A rune that
+// survives validDeliverText in the leading position while belonging to a
+// banned class — category Cf, category M, default-ignorable code point,
+// variation selector, conjoining Hangul V/T jamo, or the named blank set
+// — is a failure.
+func TestAssistantDeliverRuneSweepPR4(t *testing.T) {
+	// The oracle is independent of the production helpers: the expected
+	// V/T jamo ranges and the blank set are written out here (the derived
+	// Hangul_Syllable_Type ranges verbatim) so a narrowed production check
+	// cannot narrow the oracle with it — the t1458-verify MINOR-A mutants
+	// that shrank each range must now die against this set.
+	vtJamo := func(r rune) bool {
+		return (r >= 0x1160 && r <= 0x11FF) || // V U+1160..U+11A7 and T U+11A8..U+11FF
+			(r >= 0xD7B0 && r <= 0xD7C6) || // V extended-B
+			(r >= 0xD7CB && r <= 0xD7FB) // T extended
+	}
+	wantBlank := map[rune]bool{0x2800: true, 0x1D159: true, 0x303F: true, 0x13441: true, 0x13442: true}
+	banned := func(r rune) bool {
+		return unicode.Is(unicode.Cf, r) || unicode.Is(unicode.M, r) ||
+			unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) ||
+			unicode.Is(unicode.Variation_Selector, r) ||
+			vtJamo(r) || wantBlank[r]
+	}
+	// Boundary rows pin both sides of each range: every range edge and the
+	// blank set rejects as the first rune; the adjacent non-members just
+	// outside each range stay accepted (over-widening fails too).
+	for _, r := range []rune{0x1160, 0x11A7, 0x11A8, 0x11FF, 0xD7B0, 0xD7C6, 0xD7CB, 0xD7FB, 0x2800, 0x1D159, 0x303F, 0x13441, 0x13442} {
+		if err := validDeliverText(string(r) + "x"); err == nil {
+			t.Errorf("boundary rune %U accepted as first rune", r)
+		}
+	}
+	for _, r := range []rune{0x115E, 0x1200, 0xD7AF, 0xD7C7, 0xD7FC} {
+		if err := validDeliverText(string(r) + "x"); err != nil {
+			t.Errorf("just-outside rune %U rejected as first rune: %v", r, err)
+		}
+	}
+	var bad []string
+	for r := rune(0); r <= 0x10FFFF; r++ {
+		if r >= 0xD800 && r <= 0xDFFF {
+			continue
+		}
+		text := string(r) + "x"
+		if validDeliverText(text) != nil {
+			continue
+		}
+		if first, _ := utf8.DecodeRuneInString(strings.TrimSpace(text)); first != r {
+			continue // trimmed away — the rune never actually led
+		}
+		if banned(r) {
+			bad = append(bad, fmt.Sprintf("%U", r))
+			if len(bad) >= 64 {
+				break
+			}
+		}
+	}
+	if len(bad) > 0 {
+		t.Fatalf("banned-class leading runes still accepted: %s", strings.Join(bad, " "))
 	}
 }
