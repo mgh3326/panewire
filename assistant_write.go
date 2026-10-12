@@ -65,7 +65,26 @@ var (
 	errAssistantInvalidAnswer       = toolError("invalid_answer")
 	errAssistantRateLimited         = toolError("rate_limited")
 	errAssistantSlotTaken           = toolError("question_slot_taken")
+	// errAssistantProvenanceRefMismatch is the local verdict for a
+	// decision_ref that does not equal request_id — the same name
+	// handoffkeep answers a mismatched or missing ref with (PR-4 contract).
+	errAssistantProvenanceRefMismatch = toolError("provenance_ref_mismatch")
 )
+
+// The assistant answer provenance vocabulary (PR-4 contract): absent or
+// assistant_judgement records the call as the assistant's own judgement;
+// operator_decided is only ever valid carrying the operator's verbatim
+// words and the exact request id.
+const (
+	assistantProvenanceOperator  = "operator_decided"
+	assistantProvenanceAssistant = "assistant_judgement"
+)
+
+// validAssistantProvenance is the closed provenance vocabulary: anything
+// outside it is a caller error refused before any upstream call.
+func validAssistantProvenance(provenance string) bool {
+	return provenance == "" || provenance == assistantProvenanceAssistant || provenance == assistantProvenanceOperator
+}
 
 // assistantDetailError is a named tool error carrying extra value-free
 // fields for the error object — the current revision on stale_revision,
@@ -134,13 +153,25 @@ func assistantWriteToolList() []map[string]any {
 				"human_only request answers decision_request_human_only; a disposition item answers " +
 				"disposition_operator_only; a request already resolved differently answers " +
 				"decision_request_resolved, while the identical replay is a duplicate success with no " +
-				"new effect. A lane notice drains asynchronously through the outbox drainer.",
+				"new effect. A lane notice drains asynchronously through the outbox drainer. " +
+				"Provenance: the default (absent or \"assistant_judgement\") records the answer as the " +
+				"assistant's own judgement; \"operator_decided\" is only for relaying the operator's " +
+				"exact verbatim words for this decision — it must carry operator_quote (the verbatim " +
+				"quote) and decision_ref equal to request_id, and a missing or different ref is refused " +
+				"as provenance_ref_mismatch before any upstream call. A human_only request accepts only " +
+				"an operator_decided answer with a non-empty quote and a matching ref; operator_decided " +
+				"without a quote degrades to assistant_judgement upstream (on a human_only request that " +
+				"answers decision_request_human_only with reason no_operator_quote). The quote is " +
+				"forwarded, never synthesized, and never logged.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"request_id": map[string]any{"type": "string"},
-					"option":     map[string]any{"type": "string"},
-					"text":       map[string]any{"type": "string"},
+					"request_id":     map[string]any{"type": "string"},
+					"option":         map[string]any{"type": "string"},
+					"text":           map[string]any{"type": "string"},
+					"provenance":     map[string]any{"type": "string", "enum": []string{"operator_decided", "assistant_judgement"}},
+					"operator_quote": map[string]any{"type": "string"},
+					"decision_ref":   map[string]any{"type": "string"},
 				},
 				"required":             []string{"request_id"},
 				"additionalProperties": false,
@@ -155,8 +186,8 @@ func assistantWriteToolList() []map[string]any {
 				"source_channel web. A question that already holds an assistant answer answers " +
 				"question_slot_taken (the slot is single-use; do not retry), a moved revision answers " +
 				"stale_revision with the current revision, and missing or out-of-scope ids answer the " +
-				"same generic request_not_found as the read tools. A lane notice drains asynchronously " +
-				"through the outbox drainer.",
+				"same generic request_not_found as the read tools. A lane notice drains " +
+				"asynchronously through the outbox drainer.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -173,8 +204,12 @@ func assistantWriteToolList() []map[string]any {
 			"description": "Deliver one instruction to a target's operator-mapped lane as a hub lane.event: " +
 				"the opaque target id, a caller idempotency key (^[A-Za-z0-9._-]{8,64}$) and the " +
 				"instruction text — at most 2036 bytes, valid UTF-8, no control characters (no " +
-				"newlines), trimmed non-empty, and never starting with '[' so a forged [tag] cannot " +
-				"be built. The event id is berry:<target>:<key> — deterministic, never random, never " +
+				"newlines), trimmed non-empty, no invisible runes (format characters, " +
+				"default-ignorables, variation selectors — an emoji+VS16 pair like ❤️ is refused " +
+				"too), and a first rune that is never '[', its fullwidth '［', a combining mark, " +
+				"a conjoining Hangul V or T jamo, or a blank-glyph rune (U+2800, U+1D159, U+303F, " +
+				"U+13441, U+13442), " +
+				"so a forged [tag] cannot be built. The event id is berry:<target>:<key> — deterministic, never random, never " +
 				"time-based — the text is posted prefixed [via berry], and the lane comes only from " +
 				"the targets file (a conversation target posts to its deliver_lane). The same key " +
 				"with the same text is a duplicate success; the same key with different text answers " +
@@ -268,8 +303,12 @@ func textSHA8(text string) string {
 // logAuditWrite is the write-attempt audit line (amendment E): identity,
 // tool, the request or target id, the idempotency key or event id, the
 // revision, the outcome class and the hub row id — plus the text's sha8.
-// Never the text itself, a token or an upstream URL.
-func (s *assistantServer) logAuditWrite(identity, tool, subject, key, eventID string, revision int, outcome string, hubRowID int64, sha8 string) {
+// For answer tools it additionally records the provenance and the operator
+// quote's length and sha8 — never the text or the quote itself, a token or
+// an upstream URL. A provenance outside the closed vocabulary is caller
+// free text (quote text could be pasted into the wrong field), so it logs
+// as the fixed token "invalid", never the caller value.
+func (s *assistantServer) logAuditWrite(identity, tool, subject, key, eventID string, revision int, outcome string, hubRowID int64, sha8, provenance string, quoteLen int, quoteSHA8 string) {
 	if len(subject) > 160 {
 		subject = subject[:160]
 	}
@@ -279,7 +318,17 @@ func (s *assistantServer) logAuditWrite(identity, tool, subject, key, eventID st
 	if len(eventID) > 160 {
 		eventID = eventID[:160]
 	}
-	s.audit.Info("assistant_write", "identity", identity, "tool", tool, "subject", subject, "idempotency_key", key, "event_id", eventID, "revision", revision, "outcome", outcome, "hub_row_id", hubRowID, "text_sha8", sha8)
+	if provenance != "" && !validAssistantProvenance(provenance) {
+		provenance = "invalid"
+	}
+	if len(provenance) > 32 {
+		provenance = provenance[:32]
+	}
+	attrs := []any{"identity", identity, "tool", tool, "subject", subject, "idempotency_key", key, "event_id", eventID, "revision", revision, "outcome", outcome, "hub_row_id", hubRowID, "text_sha8", sha8}
+	if provenance != "" {
+		attrs = append(attrs, "provenance", provenance, "quote_len", quoteLen, "quote_sha8", quoteSHA8)
+	}
+	s.audit.Info("assistant_write", attrs...)
 }
 
 // --- Shared helpers ------------------------------------------------------
@@ -298,6 +347,15 @@ func mapAssistantWriteError(status int, payload []byte, overrides map[string]err
 		switch name {
 		case "not_found", "task_terminal":
 			return errAssistantRequestNotFound
+		case "decision_request_human_only":
+			// The PR-4 contract adds reason=no_operator_quote when an
+			// operator_decided claim failed for want of a verbatim quote —
+			// carry the token so the caller learns which leg failed. The
+			// reason is value-free and never quotes input.
+			if reason := apiErrorReason(payload); reason == "no_operator_quote" {
+				return &assistantDetailError{name: name, detail: map[string]any{"reason": reason}}
+			}
+			return &assistantUpstreamError{name: name}
 		}
 		return &assistantUpstreamError{name: name}
 	}
@@ -328,11 +386,19 @@ func validAssistantWriteText(text string, maxBytes int, required bool) error {
 // validDeliverText is the strict lane-injection gate (amendment 1B): reject,
 // never truncate. The trimmed text must be non-empty, at most 2036 bytes,
 // valid UTF-8, free of every control character the hub rejects — no
-// newlines — and no Unicode format character (category Cf: ZWSP, word
-// joiner, BOM, bidi overrides) that could smuggle invisible or reordered
-// text into a pane. It must not start with '[' or the fullwidth '［', so a
-// forged tag like "[director-1]" can never ride the [via berry] prefix
-// into a pane in either glyph.
+// newlines — and free of every invisible rune class: Unicode format
+// characters (category Cf: ZWSP, word joiner, BOM, bidi overrides),
+// default-ignorable code points (combining grapheme joiner, Hangul
+// fillers) and variation selectors — an emoji+VS16 sequence such as ❤️ is
+// refused too. The first rune is checked directly — nothing is skipped to
+// reach a "visible" rune: it may not be a combining mark (category M), a
+// conjoining Hangul jamo of Hangul_Syllable_Type V or T (U+1160..U+11FF,
+// U+D7B0..U+D7C6, U+D7CB..U+D7FB — invisible when uncomposed) or a
+// blank-glyph rune (assistantDeliverLeadingBlankRunes: U+2800, U+1D159,
+// U+303F, U+13441, U+13442), and never '[' or the fullwidth '［', so a
+// forged tag like
+// "[director-1]" can never ride the [via berry] prefix into a pane in
+// either glyph.
 func validDeliverText(text string) error {
 	if text == "" {
 		return errAssistantInvalidArgs
@@ -344,30 +410,74 @@ func validDeliverText(text string) error {
 		return errAssistantInvalidArgs
 	}
 	for _, r := range text {
-		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) || unicode.Is(unicode.Cf, r) {
+		if r <= 0x1f || (r >= 0x7f && r <= 0x9f) || unicode.Is(unicode.Cf, r) ||
+			unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) || unicode.Is(unicode.Variation_Selector, r) {
 			return errAssistantInvalidArgs
 		}
 	}
-	if first, _ := utf8.DecodeRuneInString(text); first == '[' || first == '［' {
+	if first, _ := utf8.DecodeRuneInString(text); first == '[' || first == '［' ||
+		unicode.Is(unicode.M, first) || assistantHangulVTJamo(first) || assistantDeliverLeadingBlankRunes[first] {
 		return errAssistantInvalidArgs
 	}
 	return nil
+}
+
+// assistantHangulVTJamo reports the zero-width conjoining Hangul jamo —
+// Hangul_Syllable_Type V (U+1160..U+11A7 and U+D7B0..U+D7C6) and T
+// (U+11A8..U+11FF and U+D7CB..U+D7FB). Uncomposed a V or T jamo takes no
+// terminal cell, so a leading one is invisible and a "[director-1]" tag
+// can sit after it as if it were the first visible rune. Go's stdlib has
+// no Hangul_Syllable_Type table; the ranges are the derived property
+// values verbatim.
+func assistantHangulVTJamo(r rune) bool {
+	return (r >= 0x1160 && r <= 0x11FF) ||
+		(r >= 0xD7B0 && r <= 0xD7C6) ||
+		(r >= 0xD7CB && r <= 0xD7FB)
+}
+
+// assistantDeliverLeadingBlankRunes is the named set of blank-glyph runes
+// refused as the first rune of deliverable text — shared by
+// validDeliverText and the all-runes sweep test so the set is defined
+// once: the braille blank, the musical null notehead and the ideographic
+// half-fill space, the wcwidth-0/blank survivors the t1458-verify sweep
+// found outside every other rejected class.
+var assistantDeliverLeadingBlankRunes = map[rune]bool{
+	'\u2800':     true, // braille blank
+	'\U0001d159': true, // musical symbol null notehead
+	'\u303f':     true, // ideographic half fill space
+	'\U00013441': true, // egyptian hieroglyph full blank
+	'\U00013442': true, // egyptian hieroglyph half blank
 }
 
 // --- answer_decision -----------------------------------------------------
 
 // toolAnswerDecision applies the operator's answer to an open decision
 // request through handoffkeep's assistant resolve route only. The caller
-// names request id, option and text; attribution never crosses (the request
-// struct has no field that could carry it).
-func (s *assistantServer) toolAnswerDecision(ctx context.Context, identity, requestID, option, text string, targets map[string]assistantTarget) (result any, err error) {
+// names request id, option, text and optionally a provenance claim: the
+// default (absent or assistant_judgement) is the assistant's own
+// judgement; operator_decided claims the operator's verbatim words and is
+// only valid carrying operator_quote and a decision_ref equal to
+// request_id — a missing or different ref is refused before any upstream
+// call so a quote for one decision can never answer another. The fields
+// cross to handoffkeep unchanged; a quote is never synthesized.
+// Attribution never crosses (the request struct has no field that could
+// carry it).
+func (s *assistantServer) toolAnswerDecision(ctx context.Context, identity, requestID, option, text, provenance, operatorQuote, decisionRef string, targets map[string]assistantTarget) (result any, err error) {
 	resultClass := "internal_error"
 	eventID := requestID + "-answered"
+	effectiveProvenance := provenance
+	if effectiveProvenance == "" {
+		effectiveProvenance = assistantProvenanceAssistant
+	}
 	defer func() {
 		if err != nil {
 			resultClass = err.Error()
 		}
-		s.logAuditWrite(identity, "answer_decision", requestID, "", eventID, 0, resultClass, 0, textSHA8(text))
+		quoteSHA8 := ""
+		if operatorQuote != "" {
+			quoteSHA8 = textSHA8(operatorQuote)
+		}
+		s.logAuditWrite(identity, "answer_decision", requestID, "", eventID, 0, resultClass, 0, textSHA8(text), effectiveProvenance, len(operatorQuote), quoteSHA8)
 	}()
 	match := assistantRequestIDPattern.FindStringSubmatch(requestID)
 	if match == nil {
@@ -376,6 +486,15 @@ func (s *assistantServer) toolAnswerDecision(ctx context.Context, identity, requ
 	taskID, _ := strconv.ParseInt(match[1], 10, 64)
 	if taskID < 1 {
 		return nil, errAssistantRequestNotFound
+	}
+	if !validAssistantProvenance(provenance) {
+		return nil, errAssistantInvalidArgs
+	}
+	// The ref binds the quote to exactly this request id — checked before
+	// any upstream call so a quote for another decision or revision can
+	// never be spent here.
+	if decisionRef != requestID && (decisionRef != "" || provenance == assistantProvenanceOperator) {
+		return nil, errAssistantProvenanceRefMismatch
 	}
 	if option != "" && !assistantOptionKeyPattern.MatchString(option) {
 		return nil, errAssistantInvalidArgs
@@ -394,7 +513,7 @@ func (s *assistantServer) toolAnswerDecision(ctx context.Context, identity, requ
 	if !found || !scope.laneAllowed(task.Lane) || assistantTerminalTaskStates[task.State] {
 		return nil, errAssistantRequestNotFound
 	}
-	status, payload, err := s.hk.resolveAssistant(ctx, requestID, option, text)
+	status, payload, err := s.hk.resolveAssistant(ctx, requestID, option, text, provenance, operatorQuote, decisionRef)
 	if err != nil {
 		return nil, err
 	}
@@ -425,11 +544,15 @@ func (s *assistantServer) toolAnswerDecision(ctx context.Context, identity, requ
 // toolAnswerQuestion posts one assistant answer through handoffkeep's
 // assistant channel — POST /v1/chat/messages with source_channel=assistant
 // and author operator under the expected-revision CAS. The hub chat route
-// is never touched: it hardcodes web attribution. The question row is
-// pre-read (amendment 1D): an already-held answer slot is question_slot_taken
-// — distinct from stale, it tells the caller the slot is single-use — a
-// non-pending state is the generic not_found, and a revision mismatch is
-// stale_revision carrying the current revision.
+// is never touched: it hardcodes web attribution. The contract's
+// amendment 1 item A3 removes provenance from this path: hk's chat
+// endpoint rejects unknown fields, so the request body is exactly the
+// pre-PR-4 field set — schema, args decode and the wire post all carry
+// neither provenance nor operator_quote. The question row is pre-read
+// (amendment 1D): an already-held answer slot is
+// question_slot_taken — distinct from stale, it tells the caller the slot
+// is single-use — a non-pending state is the generic not_found, and a
+// revision mismatch is stale_revision carrying the current revision.
 func (s *assistantServer) toolAnswerQuestion(ctx context.Context, identity, questionID string, revision int, text string, targets map[string]assistantTarget) (result any, err error) {
 	resultClass := "internal_error"
 	eventID := chatAnsweredEventID(questionID, revision)
@@ -437,7 +560,7 @@ func (s *assistantServer) toolAnswerQuestion(ctx context.Context, identity, ques
 		if err != nil {
 			resultClass = err.Error()
 		}
-		s.logAuditWrite(identity, "answer_question", questionID, "", eventID, revision, resultClass, 0, textSHA8(text))
+		s.logAuditWrite(identity, "answer_question", questionID, "", eventID, revision, resultClass, 0, textSHA8(text), "", 0, "")
 	}()
 	if !assistantQuestionIDPattern.MatchString(questionID) {
 		return nil, errAssistantRequestNotFound
@@ -548,7 +671,7 @@ func (s *assistantServer) toolDeliver(ctx context.Context, identity, targetID, k
 		if err != nil {
 			resultClass = err.Error()
 		}
-		s.logAuditWrite(identity, "deliver", targetID, key, eventID, 0, resultClass, hubRow, sha8)
+		s.logAuditWrite(identity, "deliver", targetID, key, eventID, 0, resultClass, hubRow, sha8, "", 0, "")
 	}()
 	target, ok := targets[targetID]
 	if !ok {
@@ -693,25 +816,25 @@ func (s *assistantServer) drainRow(ctx context.Context, row assistantOutboxRow, 
 	sha8 := textSHA8(text)
 	id, _, err := s.hub.postRelayEvent(ctx, row.TargetLane, row.EventID, text, assistantHubLabel)
 	if err != nil {
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "hub_error:"+err.Error(), 0, sha8)
+		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "hub_error:"+err.Error(), 0, sha8, "", 0, "")
 		return
 	}
 	if id < 1 {
 		// The standing rule: a 409 racing an in-flight claim, or any reply
 		// whose id is 0 or missing, is NEVER sent — the row stays owed and
 		// the next pass retries with the same event id.
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "receipt_missing", 0, sha8)
+		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "receipt_missing", 0, sha8, "", 0, "")
 		return
 	}
 	status, payload, err := s.hk.outboxMarkSent(ctx, row.EventID, id)
 	if err != nil {
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "hk_error:"+err.Error(), id, sha8)
+		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "hk_error:"+err.Error(), id, sha8, "", 0, "")
 		return
 	}
 	switch {
 	case status == http.StatusOK:
 		sent[row.EventID] = id
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "sent", id, sha8)
+		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "sent", id, sha8, "", 0, "")
 	case status == http.StatusConflict:
 		// notification_outbox_conflict: a racing drain already marked this
 		// row with a different hub id — the row is sent, just not by this
@@ -721,9 +844,9 @@ func (s *assistantServer) drainRow(ctx context.Context, row assistantOutboxRow, 
 	case status == http.StatusNotFound:
 		// The outbox row vanished between the list and the mark — nothing
 		// remains owed.
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "row_gone", id, sha8)
+		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "row_gone", id, sha8, "", 0, "")
 	default:
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "hk_error:"+mapAssistantWriteError(status, payload, nil).Error(), id, sha8)
+		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "hk_error:"+mapAssistantWriteError(status, payload, nil).Error(), id, sha8, "", 0, "")
 	}
 }
 

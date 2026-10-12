@@ -105,6 +105,20 @@ func apiErrorRaw(payload []byte) string {
 	return out.Error
 }
 
+// apiErrorReason reads the optional value-free reason token of an upstream
+// error body (the PR-4 contract's reason=no_operator_quote on
+// decision_request_human_only). Only a clean identifier crosses; anything
+// else is dropped.
+func apiErrorReason(payload []byte) string {
+	var out struct {
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal(payload, &out) != nil || !assistantErrorNamePattern.MatchString(out.Reason) {
+		return ""
+	}
+	return out.Reason
+}
+
 func newAssistantUpstream(prefix, rawURL, token, cfID, cfSecret string, client *http.Client) (*assistantUpstream, error) {
 	label := "handoffkeep"
 	if prefix == "hub" {
@@ -219,6 +233,13 @@ type assistantDecisionResolution struct {
 	Responder string    `json:"responder,omitempty"`
 	By        string    `json:"by"`
 	At        time.Time `json:"at"`
+	// PR-4 provenance fields (hk 1459): the recorded claim, the verbatim
+	// operator quote, the request id it is bound to, and who decided —
+	// "operator" for operator_decided, "assistant" otherwise.
+	Provenance    string `json:"provenance,omitempty"`
+	OperatorQuote string `json:"operator_quote,omitempty"`
+	DecisionRef   string `json:"decision_ref,omitempty"`
+	DecidedBy     string `json:"decided_by,omitempty"`
 }
 
 type assistantDecisionRequest struct {
@@ -458,17 +479,23 @@ func (c *assistantHK) relayEvents(ctx context.Context, lane string, undelivered 
 // /v1/assistant/decisions/resolve accepts from this binary. There is no
 // kind, responder or by field — handoffkeep pins kind=answered, responder
 // operator-via-berry and by=<token identity> itself, so caller attribution
-// can never reach the wire through this client.
+// can never reach the wire through this client. The PR-4 provenance fields
+// cross unchanged exactly as the caller sent them: provenance (absent =
+// assistant_judgement), the verbatim operator quote, and the decision_ref
+// the quote is bound to.
 type assistantResolveRequest struct {
-	RequestID string `json:"request_id"`
-	Option    string `json:"option,omitempty"`
-	Text      string `json:"text,omitempty"`
+	RequestID     string `json:"request_id"`
+	Option        string `json:"option,omitempty"`
+	Text          string `json:"text,omitempty"`
+	Provenance    string `json:"provenance,omitempty"`
+	OperatorQuote string `json:"operator_quote,omitempty"`
+	DecisionRef   string `json:"decision_ref,omitempty"`
 }
 
 // resolveAssistant posts one assistant answer. The caller maps the status
 // and the error token; the body is never surfaced.
-func (c *assistantHK) resolveAssistant(ctx context.Context, requestID, option, text string) (int, []byte, error) {
-	status, payload, _, err := c.post(ctx, "/v1/assistant/decisions/resolve", assistantResolveRequest{RequestID: requestID, Option: option, Text: text})
+func (c *assistantHK) resolveAssistant(ctx context.Context, requestID, option, text, provenance, operatorQuote, decisionRef string) (int, []byte, error) {
+	status, payload, _, err := c.post(ctx, "/v1/assistant/decisions/resolve", assistantResolveRequest{RequestID: requestID, Option: option, Text: text, Provenance: provenance, OperatorQuote: operatorQuote, DecisionRef: decisionRef})
 	return status, payload, err
 }
 
