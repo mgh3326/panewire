@@ -27,6 +27,7 @@ type assistantCFVerifier struct {
 	aud      string
 	issuer   string
 	allowed  map[string]struct{}
+	subjects map[string]struct{}
 	client   *http.Client
 
 	mu          sync.Mutex
@@ -124,6 +125,9 @@ func (v *assistantCFVerifier) authenticate(r *http.Request) (string, bool) {
 	if claims.Exp == 0 || claims.Exp <= now || (claims.Nbf != 0 && claims.Nbf > now) {
 		return "", false
 	}
+	// Service mode only. An empty iss is still accepted here so existing
+	// service-token assertions keep working. Access-user mode does not use
+	// this function; authenticateAccessUser requires a non-empty iss.
 	if claims.Iss != "" && claims.Iss != v.issuer {
 		return "", false
 	}
@@ -230,4 +234,147 @@ func (v *assistantCFVerifier) refresh(ctx context.Context) error {
 	v.fetchedAt = time.Now()
 	v.mu.Unlock()
 	return nil
+}
+
+// newAssistantAccessUserVerifier builds the Access-user gate. The JWKS URL
+// is required (no team default) and subjects is the allowlist of stable
+// subs. Email is not a key. Service-token common_name values are not
+// consulted.
+func newAssistantAccessUserVerifier(team, aud, certsURL string, subjects []string, client *http.Client) (*assistantCFVerifier, error) {
+	if !hubCFAccessTeamPattern.MatchString(team) || aud == "" || len(aud) > 256 {
+		return nil, configError("cf access configuration is invalid")
+	}
+	if certsURL == "" || !validHandoffkeepBaseURL(certsURL) {
+		return nil, configError("access-user mode requires jwks url")
+	}
+	allowedSubs := make(map[string]struct{}, len(subjects))
+	for _, sub := range subjects {
+		sub = strings.TrimSpace(sub)
+		if sub != "" {
+			allowedSubs[sub] = struct{}{}
+		}
+	}
+	if len(allowedSubs) == 0 {
+		return nil, configError("access-user mode requires subject allowlist")
+	}
+	if client == nil {
+		client = &http.Client{Timeout: 5 * time.Second}
+	}
+	return &assistantCFVerifier{
+		certsURL: certsURL,
+		aud:      aud,
+		issuer:   "https://" + team + ".cloudflareaccess.com",
+		subjects: allowedSubs,
+		client:   client,
+		keys:     map[string]*rsa.PublicKey{},
+	}, nil
+}
+
+// keyLookup resolves a kid and distinguishes a fresh JWKS that simply
+// lacks the kid from a fetch that produced nothing usable. Both deny.
+func (v *assistantCFVerifier) keyLookup(ctx context.Context, kid string) (*rsa.PublicKey, string) {
+	key := v.keyFor(ctx, kid)
+	if key != nil {
+		return key, ""
+	}
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	fresh := len(v.keys) > 0 && time.Since(v.fetchedAt) < assistantCFCertsTTL
+	if !fresh {
+		return nil, "jwks_unavailable"
+	}
+	return nil, "unknown_kid"
+}
+
+// authenticateAccessUser verifies a user Cf-Access-Jwt-Assertion. The
+// returned reason is empty on success. It is an audit token only — the
+// HTTP response stays the generic unauthorized error. Caller-supplied
+// identity headers are never read. The allowlist key is sub, never email.
+// An empty sub is the service-token shape and is rejected even when
+// common_name is set. exp/nbf use the same strict comparison as service
+// mode (no added leeway).
+func (v *assistantCFVerifier) authenticateAccessUser(r *http.Request) (assistantPrincipal, string) {
+	principal := assistantPrincipal{Mode: assistantAuthModeAccessUser}
+	token := strings.TrimSpace(r.Header.Get("Cf-Access-Jwt-Assertion"))
+	if token == "" {
+		return principal, "assertion_missing"
+	}
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		return principal, "assertion_malformed"
+	}
+	headerJSON, err := base64.RawURLEncoding.DecodeString(parts[0])
+	if err != nil {
+		return principal, "assertion_malformed"
+	}
+	var header struct {
+		Alg string `json:"alg"`
+		Kid string `json:"kid"`
+	}
+	if json.Unmarshal(headerJSON, &header) != nil || header.Alg != "RS256" || header.Kid == "" {
+		return principal, "assertion_malformed"
+	}
+	key, keyReason := v.keyLookup(r.Context(), header.Kid)
+	if key == nil {
+		return principal, keyReason
+	}
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	if err != nil {
+		return principal, "assertion_malformed"
+	}
+	digest := sha256.Sum256([]byte(parts[0] + "." + parts[1]))
+	if rsa.VerifyPKCS1v15(key, crypto.SHA256, digest[:], signature) != nil {
+		return principal, "bad_signature"
+	}
+	claimsJSON, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return principal, "assertion_malformed"
+	}
+	var claims struct {
+		Aud        json.RawMessage `json:"aud"`
+		Exp        int64           `json:"exp"`
+		Nbf        int64           `json:"nbf"`
+		Iat        int64           `json:"iat"`
+		Iss        string          `json:"iss"`
+		Sub        string          `json:"sub"`
+		Email      string          `json:"email"`
+		CommonName string          `json:"common_name"`
+	}
+	if json.Unmarshal(claimsJSON, &claims) != nil {
+		return principal, "assertion_malformed"
+	}
+	now := time.Now().Unix()
+	if claims.Exp == 0 || claims.Exp <= now {
+		return principal, "expired"
+	}
+	if claims.Nbf != 0 && claims.Nbf > now {
+		return principal, "not_yet_valid"
+	}
+	// Issuer is required. An empty iss is not "unspecified, so skip" —
+	// that hole is service mode only (authenticate, above).
+	if claims.Iss == "" {
+		return principal, "iss_missing"
+	}
+	if claims.Iss != v.issuer {
+		principal.Iss = claims.Iss
+		return principal, "iss_mismatch"
+	}
+	principal.Iss = claims.Iss
+	if claims.Iat == 0 || claims.Exp-claims.Iat > int64(hubCFAccessMaxTokenLifetime/time.Second) {
+		return principal, "lifetime"
+	}
+	if !cfAccessAudienceMatches(claims.Aud, v.aud) {
+		return principal, "aud_mismatch"
+	}
+	sub := strings.TrimSpace(claims.Sub)
+	principal.Sub = sub
+	principal.Email = strings.TrimSpace(claims.Email)
+	if sub == "" {
+		return principal, "service_token"
+	}
+	if _, ok := v.subjects[sub]; !ok {
+		return principal, "subject_not_allowlisted"
+	}
+	principal.Label = "access-user|" + claims.Iss + "|" + sub
+	return principal, ""
 }
