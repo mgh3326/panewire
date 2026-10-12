@@ -207,9 +207,11 @@ func TestAccessUserAssertionOutcomes(t *testing.T) {
 					t.Fatal("tool output contains the assertion")
 				}
 				line := auditWithResult(t, logs, "ok")
-				if line["auth_mode"] != assistantAuthModeAccessUser || line["iss"] != accessUserIssuer || line["sub"] != accessUserSub || line["email"] != accessUserEmail {
+				if line["auth_mode"] != assistantAuthModeAccessUser || line["iss"] != accessUserIssuer || line["sub"] != accessUserSub || line["issuer"] != accessUserIssuer || line["email"] != accessUserEmail {
 					t.Fatalf("principal audit=%v", line)
 				}
+				assertAudiences(t, line, []string{assistantTestAUD})
+				assertStructuredPrincipal(t, line, []string{assistantTestAUD})
 				if identity, _ := line["identity"].(string); identity != "access-user|"+accessUserIssuer+"|"+accessUserSub || strings.Contains(identity, accessUserEmail) {
 					t.Fatalf("identity key=%q", identity)
 				}
@@ -588,97 +590,260 @@ func TestAccessUserNoPathBypasses(t *testing.T) {
 	assertNoHK(t, hk)
 }
 
-// The principal is on the write audit line and is not added to either hk body.
+// AC5: a successful read audits the structured principal. Access-user
+// writes do not run, so the principal is not posted to hk.
 func TestAccessUserPrincipalAuditedNotSentToHK(t *testing.T) {
 	hk := newFakeAssistantHK(t)
+	hk.failNonGET = true
 	hub := newFakeAssistantHub(t)
-	hub.hk = hk
 	certs := chatTestCerts(t, chatTestSigningKey())
-	srv, logs := assistantWriteServer(t, hk, hub, assistantWritesAnswer, func(cfg *assistantConfig) {
+	srv, logs := assistantWriteServer(t, hk, hub, assistantWritesAll, func(cfg *assistantConfig) {
 		cfg.AuthMode = assistantAuthModeAccessUser
 		cfg.CFTeam = "team"
 		cfg.CFAUD = assistantTestAUD
 		cfg.CFCertsURL = certs.URL
 		cfg.CFSubjects = []string{accessUserSub}
 	})
-	requestID := seedDecisionTask(hk, 42, 1, nil)
 	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
-	decision := accessUserTool(t, srv, jwt, "answer_decision", map[string]any{"request_id": requestID, "option": "A", "text": "ship it"})
-	if decision.isError || decision.httpCode != http.StatusOK {
-		t.Fatalf("answer_decision: code=%d err=%v text=%s", decision.httpCode, decision.isError, decision.text)
+	read := accessUserTool(t, srv, jwt, "pending_list", map[string]any{})
+	if read.isError || read.httpCode != http.StatusOK {
+		t.Fatalf("pending_list: code=%d err=%v text=%s", read.httpCode, read.isError, read.text)
 	}
-	bodies := hk.postedBodies("POST /v1/assistant/decisions/resolve")
-	if len(bodies) != 1 {
-		t.Fatalf("resolve posts=%v", bodies)
+	line := auditWithResult(t, logs, "ok")
+	if line["auth_mode"] != assistantAuthModeAccessUser || line["issuer"] != accessUserIssuer || line["iss"] != accessUserIssuer || line["sub"] != accessUserSub || line["email"] != accessUserEmail {
+		t.Fatalf("read audit principal=%v", line)
 	}
-	assertNoPrincipalOnWire(t, bodies[0])
-	var resolve map[string]any
-	if err := json.Unmarshal([]byte(bodies[0]), &resolve); err != nil {
-		t.Fatal(err)
+	assertAudiences(t, line, []string{assistantTestAUD})
+	assertStructuredPrincipal(t, line, []string{assistantTestAUD})
+	if line["subject"] == accessUserSub {
+		t.Fatal("tool subject field was overwritten by the principal subject")
 	}
-	for key := range resolve {
-		switch key {
-		case "request_id", "option", "text":
-		default:
-			t.Fatalf("resolve body gained field %s: %s", key, bodies[0])
+	for _, call := range hk.requestLog() {
+		if strings.Contains(call, accessUserIssuer) || strings.Contains(call, accessUserSub) || strings.Contains(call, accessUserEmail) {
+			t.Fatalf("principal on hk request: %s", call)
 		}
 	}
-	writeLine := auditMessage(t, logs, "assistant_write", "answer_decision")
-	if writeLine["auth_mode"] != assistantAuthModeAccessUser || writeLine["iss"] != accessUserIssuer || writeLine["sub"] != accessUserSub || writeLine["email"] != accessUserEmail {
-		t.Fatalf("write audit principal=%v", writeLine)
+	if len(hk.postedBodies("POST /v1/assistant/decisions/resolve")) != 0 || len(hk.postedBodies("POST /v1/chat/messages")) != 0 {
+		t.Fatal("access-user write posted to hk")
 	}
+	if hub.postCount() != 0 {
+		t.Fatalf("hub posts=%d", hub.postCount())
+	}
+	for _, tool := range []string{"answer_decision", "answer_question", "deliver"} {
+		got := accessUserTool(t, srv, jwt, tool, map[string]any{})
+		if !got.isError || !strings.Contains(got.text, `"error":"writes_blocked_access_user"`) {
+			t.Fatalf("%s: code=%d err=%v text=%s", tool, got.httpCode, got.isError, got.text)
+		}
+	}
+	if len(hk.postedBodies("POST /v1/assistant/decisions/resolve")) != 0 || hub.postCount() != 0 {
+		t.Fatal("blocked write reached hk or hub")
+	}
+}
 
-	now := time.Now().UTC()
-	hk.seedQuestion(assistantChatQuestion{ID: "Q-20261012-70", ConversationID: "operator-desk", Lane: "lane-a", Body: "?", State: "pending", Revision: 1, CreatedAt: now, UpdatedAt: now})
-	question := accessUserTool(t, srv, jwt, "answer_question", map[string]any{"id": "Q-20261012-70", "revision": 1, "text": "the lane stays"})
-	if question.isError || question.httpCode != http.StatusOK {
-		t.Fatalf("answer_question: code=%d err=%v text=%s", question.httpCode, question.isError, question.text)
+func assertStructuredPrincipal(t *testing.T, line map[string]any, audiences []string) {
+	t.Helper()
+	principal, ok := line["principal"].(map[string]any)
+	if !ok {
+		t.Fatalf("principal=%T %v", line["principal"], line["principal"])
 	}
-	chatBodies := hk.postedBodies("POST /v1/chat/messages")
-	if len(chatBodies) != 1 {
-		t.Fatalf("chat posts=%v", chatBodies)
+	if principal["mode"] != assistantAuthModeAccessUser || principal["issuer"] != accessUserIssuer || principal["subject"] != accessUserSub || principal["email"] != accessUserEmail {
+		t.Fatalf("structured principal=%v", principal)
 	}
-	assertNoPrincipalOnWire(t, chatBodies[0])
-	var chat map[string]any
-	if err := json.Unmarshal([]byte(chatBodies[0]), &chat); err != nil {
-		t.Fatal(err)
+	assertAudiences(t, principal, audiences)
+}
+
+func assertAudiences(t *testing.T, line map[string]any, want []string) {
+	t.Helper()
+	raw, ok := line["audiences"].([]any)
+	if !ok || len(raw) != len(want) {
+		t.Fatalf("audiences=%v want %v", line["audiences"], want)
 	}
-	if chat["author"] != "operator" {
-		t.Fatalf("author=%v, want pinned operator", chat["author"])
-	}
-	for _, forbidden := range []string{"provenance", "operator_quote", "iss", "sub", "email", "auth_mode"} {
-		if _, ok := chat[forbidden]; ok {
-			t.Fatalf("chat body contains %s: %s", forbidden, chatBodies[0])
+	for i := range want {
+		got, _ := raw[i].(string)
+		if got != want[i] {
+			t.Fatalf("audiences=%v want %v", raw, want)
 		}
 	}
 }
 
-func assertNoPrincipalOnWire(t *testing.T, body string) {
+func accessUserRPC(srv *assistantServer, jwt, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, "/mcp", strings.NewReader(body))
+	if jwt != "" {
+		req.Header.Set("Cf-Access-Jwt-Assertion", jwt)
+	}
+	writer := httptest.NewRecorder()
+	srv.ServeHTTP(writer, req)
+	return writer
+}
+
+func accessUserListedTools(t *testing.T, srv *assistantServer, jwt string) []string {
 	t.Helper()
-	for _, plant := range []string{accessUserIssuer, accessUserSub, accessUserEmail, "access-user|"} {
-		if strings.Contains(body, plant) {
-			t.Fatalf("principal %q sent to hk: %s", plant, body)
-		}
+	writer := accessUserRPC(srv, jwt, `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`)
+	if writer.Code != http.StatusOK {
+		t.Fatalf("tools/list status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	var response struct {
+		Result struct {
+			Tools []struct {
+				Name string `json:"name"`
+			} `json:"tools"`
+		} `json:"result"`
+	}
+	if err := json.Unmarshal(writer.Body.Bytes(), &response); err != nil {
+		t.Fatalf("tools/list: %v body=%s", err, writer.Body.String())
+	}
+	names := make([]string, 0, len(response.Result.Tools))
+	for _, tool := range response.Result.Tools {
+		names = append(names, tool.Name)
+	}
+	return names
+}
+
+// Audiences on the principal are every aud value from the token. A second
+// value is kept beside the one that matched. A JSON string aud is one value.
+func TestAccessUserAudiencesKeepEveryValue(t *testing.T) {
+	now := time.Now()
+	hk := newFakeAssistantHK(t)
+	srv, logs := accessUserServer(t, hk, []string{accessUserSub}, nil)
+	claims := accessUserBaseClaims(now)
+	claims["aud"] = []string{"extra-aud-value", assistantTestAUD}
+	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+	writer := accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
+	if writer.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	line := auditWithResult(t, logs, "ok")
+	assertAudiences(t, line, []string{"extra-aud-value", assistantTestAUD})
+	assertStructuredPrincipal(t, line, []string{"extra-aud-value", assistantTestAUD})
+	if identity, _ := line["identity"].(string); strings.Contains(identity, "extra-aud-value") || strings.Contains(identity, accessUserEmail) {
+		t.Fatalf("identity key absorbed audience or email: %q", identity)
+	}
+
+	logs.Reset()
+	claims["aud"] = assistantTestAUD
+	jwt = chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+	writer = accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
+	if writer.Code != http.StatusOK {
+		t.Fatalf("string aud status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	stringLine := auditWithResult(t, logs, "ok")
+	assertAudiences(t, stringLine, []string{assistantTestAUD})
+	assertStructuredPrincipal(t, stringLine, []string{assistantTestAUD})
+
+	logs.Reset()
+	claims["aud"] = []string{"other-a", "other-b"}
+	jwt = chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+	writer = accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
+	assertGenericUnauthorized(t, writer)
+	mismatch := auditWithResult(t, logs, "aud_mismatch")
+	assertAudiences(t, mismatch, []string{"other-a", "other-b"})
+	assertStructuredPrincipal(t, mismatch, []string{"other-a", "other-b"})
+}
+
+// A valid assertion alone reaches initialize and a read tool. No bearer
+// and no extra identity header is required.
+func TestAccessUserMCPHandshake(t *testing.T) {
+	hk := newFakeAssistantHK(t)
+	hub := newFakeAssistantHub(t)
+	certs := chatTestCerts(t, chatTestSigningKey())
+	srv, _ := assistantWriteServer(t, hk, hub, assistantWritesAll, func(cfg *assistantConfig) {
+		cfg.AuthMode = assistantAuthModeAccessUser
+		cfg.CFTeam = "team"
+		cfg.CFAUD = assistantTestAUD
+		cfg.CFCertsURL = certs.URL
+		cfg.CFSubjects = []string{accessUserSub}
+	})
+	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
+	init := accessUserRPC(srv, jwt, `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}`)
+	if init.Code != http.StatusOK {
+		t.Fatalf("initialize status=%d body=%s", init.Code, init.Body.String())
+	}
+	if strings.Contains(init.Body.String(), "Write tools enabled") || strings.Contains(init.Body.String(), "answer_decision") || strings.Contains(init.Body.String(), "answer_question") {
+		t.Fatalf("initialize advertised a write tool: %s", init.Body.String())
+	}
+	if !strings.Contains(init.Body.String(), "pending_list") {
+		t.Fatalf("initialize omitted read tools: %s", init.Body.String())
+	}
+	want := []string{"targets", "pending_list", "pending_detail", "progress", "poll"}
+	got := accessUserListedTools(t, srv, jwt)
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("tools/list=%v, want %v", got, want)
+	}
+	read := accessUserTool(t, srv, jwt, "targets", map[string]any{})
+	if read.isError || read.httpCode != http.StatusOK {
+		t.Fatalf("targets: code=%d err=%v text=%s", read.httpCode, read.isError, read.text)
+	}
+	if len(hk.requestLog()) != 0 {
+		t.Fatalf("targets reached hk: %v", hk.requestLog())
 	}
 }
 
-func auditMessage(t *testing.T, logs *bytes.Buffer, msg, tool string) map[string]any {
-	t.Helper()
-	for _, line := range strings.Split(logs.String(), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		var decoded map[string]any
-		if err := json.Unmarshal([]byte(line), &decoded); err != nil {
-			t.Fatal(err)
-		}
-		if decoded["msg"] == msg && decoded["tool"] == tool {
-			return decoded
+// AC8 and mutant (f). The legal writes value `all` is on. Literal `1` is
+// not a flag value and is refused by the existing loader test. With the
+// block removed, write tools are listed and these calls reach hk or hub.
+func TestMutantAccessUserWriteBlockRemoved(t *testing.T) {
+	hkHits := 0
+	hkBomb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hkHits++
+		t.Errorf("hk called: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "hk called", http.StatusInternalServerError)
+	}))
+	t.Cleanup(hkBomb.Close)
+	hubHits := 0
+	hubBomb := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hubHits++
+		t.Errorf("hub called: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "hub called", http.StatusInternalServerError)
+	}))
+	t.Cleanup(hubBomb.Close)
+	hk := newFakeAssistantHK(t)
+	hub := newFakeAssistantHub(t)
+	certs := chatTestCerts(t, chatTestSigningKey())
+	srv, _ := assistantWriteServer(t, hk, hub, assistantWritesAll, func(cfg *assistantConfig) {
+		cfg.AuthMode = assistantAuthModeAccessUser
+		cfg.CFTeam = "team"
+		cfg.CFAUD = assistantTestAUD
+		cfg.CFCertsURL = certs.URL
+		cfg.CFSubjects = []string{accessUserSub}
+		cfg.HKURL = hkBomb.URL
+		cfg.HubURL = hubBomb.URL
+	})
+	if srv.writes != assistantWritesAll {
+		t.Fatalf("writes set=%d, want all", srv.writes)
+	}
+	if srv.hub != nil || srv.drainKick != nil || srv.limiter != nil {
+		t.Fatal("access-user wired the hub drainer")
+	}
+	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
+	got := accessUserListedTools(t, srv, jwt)
+	for _, name := range got {
+		if name == "answer_decision" || name == "answer_question" || name == "deliver" {
+			t.Fatalf("write tool listed: %v", got)
 		}
 	}
-	t.Fatalf("no audit msg=%s tool=%s in %s", msg, tool, logs.String())
-	return nil
+	if strings.Join(got, ",") != "targets,pending_list,pending_detail,progress,poll" {
+		t.Fatalf("tools/list=%v", got)
+	}
+	calls := []struct {
+		name string
+		args map[string]any
+	}{
+		{"answer_decision", map[string]any{"request_id": "dr-1-1", "option": "A", "text": "ship it"}},
+		{"answer_question", map[string]any{"id": "Q-20261012-70", "revision": 1, "text": "the lane stays"}},
+		{"deliver", map[string]any{"target": "ops", "text": "lane notice", "idempotency_key": "idem-key-1"}},
+	}
+	for _, call := range calls {
+		result := accessUserTool(t, srv, jwt, call.name, call.args)
+		if result.httpCode != http.StatusOK || !result.isError || !strings.Contains(result.text, `"error":"writes_blocked_access_user"`) {
+			t.Fatalf("%s: code=%d err=%v text=%s", call.name, result.httpCode, result.isError, result.text)
+		}
+	}
+	if hkHits != 0 || hubHits != 0 {
+		t.Fatalf("upstream calls hk=%d hub=%d", hkHits, hubHits)
+	}
+	if len(hk.requestLog()) != 0 || hub.postCount() != 0 {
+		t.Fatalf("stand-in fakes were called hk=%v hub=%d", hk.requestLog(), hub.postCount())
+	}
 }
 
 func accessUserTool(t *testing.T, srv *assistantServer, jwt, tool string, args map[string]any) assistantToolResult {

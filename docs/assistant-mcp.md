@@ -191,39 +191,96 @@ The assertion must verify as follows. The signature is checked against
 the configured team JWKS. `iss` is required and must equal
 `https://<team>.cloudflareaccess.com` exactly — an empty issuer is
 rejected (`iss_missing`), and a different issuer is rejected
-(`iss_mismatch`). `aud` must be this assistant's application AUD.
+(`iss_mismatch`). `aud` must include this assistant's application AUD.
 `exp` and `nbf` use the same strict comparison as the service verifier
-(no added leeway). The stable principal is `(iss, sub)`. `sub` must be
-on `PANEWIRE_ASSISTANT_CF_SUBJECTS`. Email is display only and is never
-the allowlist key. A service-token assertion (empty `sub`, `common_name`
-set) is rejected. Caller-supplied identity headers
+(no added leeway). The stable principal is `(issuer, subject)`. `sub`
+must be on `PANEWIRE_ASSISTANT_CF_SUBJECTS`. Email is display only and
+is never the allowlist key. A service-token assertion (empty `sub`,
+`common_name` set) is rejected. Caller-supplied identity headers
 (`Cf-Access-Authenticated-User-Email`, `Cf-Access-Authenticated-User-Id`,
-and anything else the client can set) are ignored.
+and anything else the client can set) are ignored. The profile is not
+taken from a query parameter, `clientInfo`, `User-Agent`, a tool
+argument, or an `X-Client-*` header.
 
-Every tool call's audit line carries `auth_mode`, `iss`, `sub`, and
-`email` (display). The rate-limit and identity key is
-`access-user|<iss>|<sub>` and does not contain the email. Rejections
-record a distinct reason on that audit line (`iss_missing`,
-`iss_mismatch`, `aud_mismatch`, `expired`, `not_yet_valid`,
-`bad_signature`, `unknown_kid`, `subject_not_allowlisted`,
-`service_token`, `assertion_missing`, `jwks_unavailable`) and return the
-generic `{"error":"unauthorized"}` to the caller. A JWKS fetch failure
-denies the request. No log line, error, or tool result contains the
-bearer, the assertion, or the JWKS body.
+On success the verifier returns a structured principal that request
+handling can read:
 
-The verified principal is not forwarded to handoffkeep. The resolve body
-accepts `by` and `responder` only so an old client does not 400, and hk
-never reads them. The chat answer body has no principal field (`author`
-stays the pinned `operator`). Inventing a field would be rejected by
-hk's unknown-field check, so the principal stays on the local audit line
-until hk grows a field for it.
+- `mode` — `access-user`
+- `issuer` — the verified `iss`
+- `subject` — the verified `sub`
+- `audiences` — every `aud` value from the token, whether `aud` was a
+  string or a list, not only the value that matched this assistant
+- `email` — display only
+
+The auth audit line records that principal as a `principal` object
+(`mode`, `issuer`, `subject`, `audiences`, `email`). The line's
+`subject` field stays the tool's target or request id, so the two do
+not share a key. The line also records flat `auth_mode`, `issuer`,
+`audiences`, `iss`, `sub`, and `email`. The rate-limit and identity key is
+`access-user|<issuer>|<subject>` and contains neither the email nor the
+audiences. Rejections record a distinct reason on that audit line
+(`iss_missing`, `iss_mismatch`, `aud_mismatch`, `expired`,
+`not_yet_valid`, `bad_signature`, `unknown_kid`,
+`subject_not_allowlisted`, `service_token`, `assertion_missing`,
+`jwks_unavailable`) and return the generic `{"error":"unauthorized"}`
+to the caller. A JWKS fetch failure denies the request. No log line,
+error, or tool result contains the bearer, the assertion, or the JWKS
+body.
+
+Access-user does not forward that principal to handoffkeep. Write calls
+do not run in this mode, so there is no resolve body and no chat body
+to attach it to. Bearer and service writes still do not add a principal
+field: hk has no field that stores one, and an unknown field is rejected.
 
 Access-user startup refuses, with a named error, when the team domain,
 AUD, JWKS URL, or subject allowlist is missing. The JWKS URL is not
 defaulted in this mode.
 
-Writes stay off. This mode does not enable them. Nothing here turns
-`PANEWIRE_ASSISTANT_WRITES` on.
+Writes are forcibly blocked in this mode. `answer`, `deliver`, and `all`
+do not list `answer_decision`, `answer_question`, or `deliver`, and
+initialize does not advertise them. A call to any of those tools returns
+`writes_blocked_access_user` before the targets file is read and before
+any handoffkeep or hub call. The hub client and the outbox drainer are
+not started. Bearer and service modes keep today's write behaviour,
+including `writes_disabled` for a tool outside the configured set. The
+literal flag value `1` is not legal and still refuses startup
+(`assistant writes flag must be answer, deliver or all`). This mode does
+not enable writes. Profiles, tool families, a policy engine, and an
+OAuth server are later work; this principal is the input they will use.
+
+#### Origin paths
+
+The origin serves `POST /mcp` only. That path is the MCP handshake
+(`initialize`, `ping`, `tools/list`) and the tool calls. A request that
+carries a valid `Cf-Access-Jwt-Assertion` and no `Authorization` header
+and no extra identity header reaches `initialize` and the read tools.
+
+`GET /mcp` and `DELETE /mcp` answer 405. Every other path answers 404.
+Every request is authenticated first. There is no health check and no
+unauthenticated route. This binary does not serve
+`/.well-known/cloudflare-access-protected-resource/mcp`. Cloudflare
+Access serves that metadata in front of the origin. The path is client
+discovery at the edge. It is not an authorization input, and it is not
+proof of which product holds the token.
+
+#### Example config
+
+These values are an example for the dots app. The binary does not
+special-case the team or the AUD. The issuer is
+`https://<team>.cloudflareaccess.com`.
+
+```
+PANEWIRE_ASSISTANT_AUTH_MODE=access-user
+PANEWIRE_ASSISTANT_CF_TEAM=mgh3326
+PANEWIRE_ASSISTANT_CF_AUD=f405a0dce64192eff061a4a0acef6a145242fd94684f39d547c5e6f7a59012fb
+PANEWIRE_ASSISTANT_CF_CERTS_URL=https://mgh3326.cloudflareaccess.com/cdn-cgi/access/certs
+PANEWIRE_ASSISTANT_CF_SUBJECTS=<operator sub>
+```
+
+Issuer for that team: `https://mgh3326.cloudflareaccess.com`.
+
+Protected-resource path, served by Cloudflare Access and not by this
+binary: `/.well-known/cloudflare-access-protected-resource/mcp`.
 
 #### Operator console steps (later, not part of this change)
 
@@ -238,7 +295,8 @@ Never reuse the hub's Access application.
 6. Set the access-token lifetime to 15 minutes.
 
 Tool failures return named errors (unknown_target, request_not_found,
-targets_file_invalid, invalid_arguments, writes_disabled, rate_limited,
+targets_file_invalid, invalid_arguments, writes_disabled,
+writes_blocked_access_user, rate_limited,
 hk_unreachable, hk_rejected_http_*, hk_response_*, plus the write names
 above). Resolution text, receipt text and resolver identity are
 human-channel data: the resolution receipt carries only kind, responder
@@ -260,9 +318,12 @@ One mode-0600 env file (-config):
 - PANEWIRE_ASSISTANT_HUB_URL / _TOKEN — the hub operator credential the
   deliver tool and the drainer post lane.events with; required together
   or neither. With any enabled write value (answer, deliver or all) the
-  pair is mandatory — startup is refused without it. With writes off the
-  pair may be absent, or present and entirely unused (no hub client is
-  built and no drainer starts).
+  pair is mandatory — startup is refused without it, including in
+  access-user mode. With writes off the pair may be absent, or present
+  and entirely unused (no hub client is built and no drainer starts).
+  In access-user mode the pair may be required by that check and is
+  still unused: the hub client is not built and the drainer does not
+  start, and write calls return writes_blocked_access_user.
 - PANEWIRE_ASSISTANT_WRITES — exact values only: `answer`, `deliver`,
   `all`, or off via `0`/`false`/`no`/`off`/unset; anything else refuses
   startup.
@@ -298,9 +359,11 @@ One mode-0600 env file (-config):
   (`access-user mode requires subject allowlist`). Ignored unless the
   mode is `access-user`.
 
-Every request is audit-logged (identity, auth_mode, iss, sub, email
-display, RPC/tool, target or request id, result). Access-user tool
-calls carry the verified principal there. Every write attempt
+Every request is audit-logged (identity, auth_mode, the principal
+object, issuer, audiences, iss, sub, email display, RPC/tool, target or
+request id in `subject`, result). Access-user tool calls carry the
+verified principal there. `audiences` is every aud value from the token.
+Every write attempt
 additionally logs the tool,
 subject id, idempotency key or event id, revision, outcome class, hub row
 id and a sha-256/8 text hash — never the text itself, a token or an

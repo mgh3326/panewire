@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/rsa"
@@ -343,6 +344,10 @@ func (v *assistantCFVerifier) authenticateAccessUser(r *http.Request) (assistant
 	if json.Unmarshal(claimsJSON, &claims) != nil {
 		return principal, "assertion_malformed"
 	}
+	// Every aud value, not only the one that matched. Same string-or-list
+	// grammar as cfAccessAudienceMatches. Recorded on the audit line even
+	// when a later check rejects the token.
+	principal.Audiences = cfAccessAudiences(claims.Aud)
 	now := time.Now().Unix()
 	if claims.Exp == 0 || claims.Exp <= now {
 		return principal, "expired"
@@ -356,19 +361,22 @@ func (v *assistantCFVerifier) authenticateAccessUser(r *http.Request) (assistant
 		return principal, "iss_missing"
 	}
 	if claims.Iss != v.issuer {
-		principal.Iss = claims.Iss
+		principal.Issuer = claims.Iss
 		return principal, "iss_mismatch"
 	}
-	principal.Iss = claims.Iss
+	principal.Issuer = claims.Iss
 	if claims.Iat == 0 || claims.Exp-claims.Iat > int64(hubCFAccessMaxTokenLifetime/time.Second) {
 		return principal, "lifetime"
 	}
+	// Presented subject and email are recorded before the aud and allowlist
+	// checks so a rejection still shows who the token named. They do not
+	// authorize the request.
+	sub := strings.TrimSpace(claims.Sub)
+	principal.Subject = sub
+	principal.Email = strings.TrimSpace(claims.Email)
 	if !cfAccessAudienceMatches(claims.Aud, v.aud) {
 		return principal, "aud_mismatch"
 	}
-	sub := strings.TrimSpace(claims.Sub)
-	principal.Sub = sub
-	principal.Email = strings.TrimSpace(claims.Email)
 	if sub == "" {
 		return principal, "service_token"
 	}
@@ -377,4 +385,22 @@ func (v *assistantCFVerifier) authenticateAccessUser(r *http.Request) (assistant
 	}
 	principal.Label = "access-user|" + claims.Iss + "|" + sub
 	return principal, ""
+}
+
+// cfAccessAudiences returns every aud value using the same grammar as
+// cfAccessAudienceMatches: a JSON string is one value, a JSON array is
+// every element. Anything else is an empty list.
+func cfAccessAudiences(raw json.RawMessage) []string {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		return []string{}
+	}
+	var single string
+	if json.Unmarshal(raw, &single) == nil {
+		return []string{single}
+	}
+	var list []string
+	if json.Unmarshal(raw, &list) != nil || list == nil {
+		return []string{}
+	}
+	return list
 }

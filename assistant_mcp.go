@@ -138,7 +138,7 @@ func (s *assistantServer) dispatchRPC(ctx context.Context, identity string, requ
 		return map[string]any{}, nil
 	case "tools/list":
 		s.logAudit(ctx, identity, "tools/list", "-", "-", "ok")
-		return map[string]any{"tools": assistantToolList(s.writes)}, nil
+		return map[string]any{"tools": s.listedTools()}, nil
 	case "tools/call":
 		return s.dispatchToolCall(ctx, identity, request.Params)
 	default:
@@ -200,11 +200,24 @@ func (s *assistantServer) dispatchToolCall(ctx context.Context, identity string,
 	}, nil
 }
 
+// listedTools is the tools/list payload. Access-user omits write tools
+// even when the writes set is on. Bearer and service use the set as before.
+func (s *assistantServer) listedTools() []map[string]any {
+	if accessUserWritesBlocked(s.authMode) {
+		return assistantReadToolList()
+	}
+	return assistantToolList(s.writes)
+}
+
 // instructions is the initialize reply's surface description: the no-push
 // contract verbatim, the read tools always, and the enabled write tools by
 // name so a caller never has to guess which half of the flag is on.
+// Access-user does not advertise write tools.
 func (s *assistantServer) instructions() string {
 	out := assistantPollContract + " Read tools: targets, pending_list, pending_detail, progress, poll."
+	if accessUserWritesBlocked(s.authMode) {
+		return out
+	}
 	var writeNames []string
 	for _, tool := range assistantWriteToolList() {
 		if name, _ := tool["name"].(string); s.writeEnabled(name) {

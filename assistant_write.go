@@ -57,14 +57,15 @@ var (
 )
 
 var (
-	errAssistantWritesDisabled      = toolError("writes_disabled")
-	errAssistantUndeliverable       = toolError("target_not_deliverable")
-	errAssistantTextTooLong         = toolError("text_too_long")
-	errAssistantIdempotencyConflict = toolError("idempotency_conflict")
-	errAssistantInFlightRetry       = toolError("in_flight_retry")
-	errAssistantInvalidAnswer       = toolError("invalid_answer")
-	errAssistantRateLimited         = toolError("rate_limited")
-	errAssistantSlotTaken           = toolError("question_slot_taken")
+	errAssistantWritesDisabled          = toolError("writes_disabled")
+	errAssistantWritesBlockedAccessUser = toolError("writes_blocked_access_user")
+	errAssistantUndeliverable           = toolError("target_not_deliverable")
+	errAssistantTextTooLong             = toolError("text_too_long")
+	errAssistantIdempotencyConflict     = toolError("idempotency_conflict")
+	errAssistantInFlightRetry           = toolError("in_flight_retry")
+	errAssistantInvalidAnswer           = toolError("invalid_answer")
+	errAssistantRateLimited             = toolError("rate_limited")
+	errAssistantSlotTaken               = toolError("question_slot_taken")
 )
 
 // assistantDetailError is a named tool error carrying extra value-free
@@ -283,8 +284,11 @@ func (s *assistantServer) logAuditWrite(ctx context.Context, identity, tool, sub
 	s.audit.Info("assistant_write",
 		"identity", identity,
 		"auth_mode", p.Mode,
-		"iss", p.Iss,
-		"sub", p.Sub,
+		"principal", assistantAuditPrincipal(p),
+		"issuer", p.Issuer,
+		"audiences", assistantAuditAudiences(p.Audiences),
+		"iss", p.Issuer,
+		"sub", p.Subject,
 		"email", assistantAuditEmail(p.Email),
 		"tool", tool,
 		"subject", subject,
@@ -373,10 +377,11 @@ func validDeliverText(text string) error {
 
 // toolAnswerDecision applies the operator's answer to an open decision
 // request through handoffkeep's assistant resolve route only. The caller
-// names request id, option and text. The verified Access principal is
-// recorded on the local audit line only: hk accepts by and responder on
-// this route but never reads them, and it has no field that stores the
-// principal, so this call does not add one.
+// names request id, option and text. Access-user mode never reaches this
+// function. Bearer and service modes record the principal on the local
+// audit line only: hk accepts by and responder on this route but never
+// reads them, and it has no field that stores the principal, so this call
+// does not add one.
 func (s *assistantServer) toolAnswerDecision(ctx context.Context, identity, requestID, option, text string, targets map[string]assistantTarget) (result any, err error) {
 	resultClass := "internal_error"
 	eventID := requestID + "-answered"
@@ -486,8 +491,9 @@ func (s *assistantServer) toolAnswerQuestion(ctx context.Context, identity, ques
 	// identical answer dedupes into the same row; a retried different
 	// answer is an idempotency conflict, never a second message.
 	origin := "berry-answer-" + questionID + "-rev" + strconv.Itoa(revision)
-	// Same rule as answer_decision: the chat body has no principal field
-	// (author stays the pinned operator). The principal stays in the audit.
+	// Same rule as answer_decision: Access-user never reaches this call.
+	// The chat body has no principal field (author stays the pinned
+	// operator). Bearer and service modes keep the principal in the audit.
 	status, payload, err := s.hk.postAssistantChatAnswer(ctx, q.ConversationID, questionID, revision, text, origin)
 	if err != nil {
 		return nil, err

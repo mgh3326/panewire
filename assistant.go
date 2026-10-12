@@ -379,15 +379,18 @@ func loadAssistantBearer(path string) ([32]byte, error) {
 	return sha256.Sum256([]byte(token)), nil
 }
 
-// assistantPrincipal is the verified caller. Label is the audit and
-// rate-limit key. Email is display only and is never part of Label.
-// Mode is bearer, service, or access-user.
+// assistantPrincipal is the verified caller. Later profile code reads this
+// value; it is not a display name. Issuer and Subject are the stable key.
+// Audiences is every aud value from the token, not only the one that
+// matched this assistant. Email is display only and is never part of
+// Label. Label is the audit and rate-limit key.
 type assistantPrincipal struct {
-	Mode  string
-	Iss   string
-	Sub   string
-	Email string
-	Label string
+	Mode      string
+	Issuer    string
+	Subject   string
+	Audiences []string
+	Email     string
+	Label     string
 }
 
 type assistantPrincipalKey struct{}
@@ -407,6 +410,35 @@ func assistantAuditEmail(email string) string {
 		return email[:254]
 	}
 	return email
+}
+
+// assistantAuditAudiences logs a slice on every line, including the empty
+// one, so a missing audience list is [] and not an omitted field.
+func assistantAuditAudiences(audiences []string) []string {
+	if audiences == nil {
+		return []string{}
+	}
+	return audiences
+}
+
+// assistantAuditPrincipal is the structured caller recorded on each audit
+// line. It is the same value request handling already holds.
+func assistantAuditPrincipal(p assistantPrincipal) map[string]any {
+	return map[string]any{
+		"mode":      p.Mode,
+		"issuer":    p.Issuer,
+		"subject":   p.Subject,
+		"audiences": assistantAuditAudiences(p.Audiences),
+		"email":     assistantAuditEmail(p.Email),
+	}
+}
+
+// accessUserWritesBlocked is the single seam that keeps writes off in
+// Access-user mode. Profile enforcement is later work. List, call, and
+// hub-drainer wiring all consult it, so removing the check re-opens the
+// three together. The configured writes set is left as the operator set it.
+func accessUserWritesBlocked(mode string) bool {
+	return mode == assistantAuthModeAccessUser
 }
 
 // assistantServer is the whole runtime: auth, the targets map path, the hk
@@ -484,7 +516,9 @@ func newAssistantServer(cfg assistantConfig, deps assistantServerDeps) (*assista
 	var hub *assistantHub
 	var drainKick chan struct{}
 	var limiter *writeRateLimiter
-	if cfg.Writes != assistantWritesOff {
+	// Access-user keeps the writes flag visible and still refuses to build
+	// the hub client or the drainer. Bearer and service modes are unchanged.
+	if cfg.Writes != assistantWritesOff && !accessUserWritesBlocked(mode) {
 		hub, err = newAssistantHub(cfg.HubURL, cfg.HubToken, deps.HubHTTPClient)
 		if err != nil {
 			return nil, err
@@ -631,11 +665,17 @@ func (s *assistantServer) logAudit(ctx context.Context, identity, rpc, tool, sub
 		subject = subject[:160]
 	}
 	p := assistantPrincipalFrom(ctx)
+	// "subject" on this line is the tool's target or request id. The
+	// verified principal's subject lives on principal.subject so the two
+	// cannot overwrite each other.
 	s.audit.Info("assistant_request",
 		"identity", identity,
 		"auth_mode", p.Mode,
-		"iss", p.Iss,
-		"sub", p.Sub,
+		"principal", assistantAuditPrincipal(p),
+		"issuer", p.Issuer,
+		"audiences", assistantAuditAudiences(p.Audiences),
+		"iss", p.Issuer,
+		"sub", p.Subject,
 		"email", assistantAuditEmail(p.Email),
 		"rpc", rpc,
 		"tool", tool,
