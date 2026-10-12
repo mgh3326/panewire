@@ -211,8 +211,9 @@ func assistantWriteToolList() []map[string]any {
 				"instruction text — at most 2036 bytes, valid UTF-8, no control characters (no " +
 				"newlines), trimmed non-empty, no invisible runes (format characters, " +
 				"default-ignorables, variation selectors — an emoji+VS16 pair like ❤️ is refused " +
-				"too), and a first rune that is never '[', its fullwidth '［', a combining mark or " +
-				"the braille blank U+2800, so a forged [tag] cannot be built. The event id is berry:<target>:<key> — deterministic, never random, never " +
+				"too), and a first rune that is never '[', its fullwidth '［', a combining mark, " +
+				"a conjoining Hangul V or T jamo, or a blank-glyph rune (U+2800, U+1D159, U+303F), " +
+				"so a forged [tag] cannot be built. The event id is berry:<target>:<key> — deterministic, never random, never " +
 				"time-based — the text is posted prefixed [via berry], and the lane comes only from " +
 				"the targets file (a conversation target posts to its deliver_lane). The same key " +
 				"with the same text is a duplicate success; the same key with different text answers " +
@@ -308,7 +309,9 @@ func textSHA8(text string) string {
 // revision, the outcome class and the hub row id — plus the text's sha8.
 // For answer tools it additionally records the provenance and the operator
 // quote's length and sha8 — never the text or the quote itself, a token or
-// an upstream URL.
+// an upstream URL. A provenance outside the closed vocabulary is caller
+// free text (quote text could be pasted into the wrong field), so it logs
+// as the fixed token "invalid", never the caller value.
 func (s *assistantServer) logAuditWrite(identity, tool, subject, key, eventID string, revision int, outcome string, hubRowID int64, sha8, provenance string, quoteLen int, quoteSHA8 string) {
 	if len(subject) > 160 {
 		subject = subject[:160]
@@ -318,6 +321,9 @@ func (s *assistantServer) logAuditWrite(identity, tool, subject, key, eventID st
 	}
 	if len(eventID) > 160 {
 		eventID = eventID[:160]
+	}
+	if provenance != "" && !validAssistantProvenance(provenance) {
+		provenance = "invalid"
 	}
 	if len(provenance) > 32 {
 		provenance = provenance[:32]
@@ -388,12 +394,14 @@ func validAssistantWriteText(text string, maxBytes int, required bool) error {
 // characters (category Cf: ZWSP, word joiner, BOM, bidi overrides),
 // default-ignorable code points (combining grapheme joiner, Hangul
 // fillers) and variation selectors — an emoji+VS16 sequence such as ❤️ is
-// refused too. Nothing invisible may smuggle or reshape what a pane shows.
-// The first rune is checked directly — nothing is skipped to reach a
-// "visible" rune: it may not be a combining mark (category M) or the
-// braille blank U+2800, both of which render invisibly, and never '[' or
-// the fullwidth '［', so a forged tag like "[director-1]" can never ride
-// the [via berry] prefix into a pane in either glyph.
+// refused too. The first rune is checked directly — nothing is skipped to
+// reach a "visible" rune: it may not be a combining mark (category M), a
+// conjoining Hangul jamo of Hangul_Syllable_Type V or T (U+1160..U+11FF,
+// U+D7B0..U+D7C6, U+D7CB..U+D7FB — invisible when uncomposed) or a
+// blank-glyph rune (assistantDeliverLeadingBlankRunes: U+2800, U+1D159,
+// U+303F), and never '[' or the fullwidth '［', so a forged tag like
+// "[director-1]" can never ride the [via berry] prefix into a pane in
+// either glyph.
 func validDeliverText(text string) error {
 	if text == "" {
 		return errAssistantInvalidArgs
@@ -411,10 +419,35 @@ func validDeliverText(text string) error {
 		}
 	}
 	if first, _ := utf8.DecodeRuneInString(text); first == '[' || first == '［' ||
-		first == '\u2800' || unicode.Is(unicode.M, first) {
+		unicode.Is(unicode.M, first) || assistantHangulVTJamo(first) || assistantDeliverLeadingBlankRunes[first] {
 		return errAssistantInvalidArgs
 	}
 	return nil
+}
+
+// assistantHangulVTJamo reports the zero-width conjoining Hangul jamo —
+// Hangul_Syllable_Type V (U+1160..U+11A7 and U+D7B0..U+D7C6) and T
+// (U+11A8..U+11FF and U+D7CB..U+D7FB). Uncomposed a V or T jamo takes no
+// terminal cell, so a leading one is invisible and a "[director-1]" tag
+// can sit after it as if it were the first visible rune. Go's stdlib has
+// no Hangul_Syllable_Type table; the ranges are the derived property
+// values verbatim.
+func assistantHangulVTJamo(r rune) bool {
+	return (r >= 0x1160 && r <= 0x11FF) ||
+		(r >= 0xD7B0 && r <= 0xD7C6) ||
+		(r >= 0xD7CB && r <= 0xD7FB)
+}
+
+// assistantDeliverLeadingBlankRunes is the named set of blank-glyph runes
+// refused as the first rune of deliverable text — shared by
+// validDeliverText and the all-runes sweep test so the set is defined
+// once: the braille blank, the musical null notehead and the ideographic
+// half-fill space, the wcwidth-0/blank survivors the t1458-verify sweep
+// found outside every other rejected class.
+var assistantDeliverLeadingBlankRunes = map[rune]bool{
+	'\u2800':     true,
+	'\U0001d159': true,
+	'\u303f':     true,
 }
 
 // --- answer_decision -----------------------------------------------------

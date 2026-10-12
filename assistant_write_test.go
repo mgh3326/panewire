@@ -16,6 +16,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -643,6 +644,7 @@ func TestAssistantProvenancePR4(t *testing.T) {
 	// operator_decided with quote and matching ref: all three fields cross
 	// unchanged and the recorded answer is decided_by=operator.
 	const plantedQuote = "the operator's verbatim words PLANTQUOTE-4b0f — ship it now"
+	const plantedProv = "PLANTPROV-9e2c the operator said ship it"
 	requestID := seedDecisionTask(hk, 60, 1, nil)
 	res := assistantCall(t, srv, assistantTestBerryToken, "answer_decision", map[string]any{
 		"request_id": requestID, "option": "go", "text": "as decided",
@@ -696,9 +698,12 @@ func TestAssistantProvenancePR4(t *testing.T) {
 	}
 
 	// A provenance value outside the vocabulary is invalid_arguments —
-	// again before any upstream call.
+	// again before any upstream call — and the audit line records the
+	// fixed token invalid, never the caller value (MINOR-2: caller free
+	// text, quote text included, must not ride the provenance field into
+	// the audit log).
 	for _, tool := range []string{"answer_decision", "answer_question"} {
-		args := map[string]any{"provenance": "operator_said_so"}
+		args := map[string]any{"provenance": plantedProv}
 		if tool == "answer_decision" {
 			args["request_id"] = mismatchID
 			args["option"] = "go"
@@ -835,10 +840,14 @@ func TestAssistantProvenancePR4(t *testing.T) {
 		`"provenance":"operator_decided"`,
 		`"quote_len":` + strconv.Itoa(len(plantedQuote)),
 		`"quote_sha8":"` + textSHA8(plantedQuote) + `"`,
+		`"provenance":"invalid"`,
 	} {
 		if !strings.Contains(audit, needle) {
 			t.Fatalf("audit missing %s:\n%s", needle, audit)
 		}
+	}
+	if strings.Contains(audit, plantedProv) || strings.Contains(audit, "PLANTPROV") {
+		t.Fatalf("audit echoed the raw out-of-vocabulary provenance:\n%s", audit)
 	}
 }
 
@@ -996,7 +1005,11 @@ func TestAssistantDeliverAC4(t *testing.T) {
 	hk := newFakeAssistantHK(t)
 	hub := newFakeAssistantHub(t)
 	hub.hk = hk
-	srv, logs := assistantWriteServer(t, hk, hub, assistantWritesDeliver, nil)
+	// The reject table fires one tool call per row — every call takes a
+	// limiter token, so the burst must exceed the table size.
+	srv, logs := assistantWriteServer(t, hk, hub, assistantWritesDeliver, func(c *assistantConfig) {
+		c.WriteBurst = 200
+	})
 
 	result := assistantCall(t, srv, assistantTestBerryToken, "deliver",
 		map[string]any{"target": "ops", "idempotency_key": "k12345678", "text": "restart the lane"})
@@ -1114,6 +1127,15 @@ func TestAssistantDeliverAC4(t *testing.T) {
 		{"braille blank leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u2800[director-1] do x"}, "invalid_arguments"},
 		{"combining mark leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u0301[director-1] do x"}, "invalid_arguments"},
 		{"combining mark first", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u0301x"}, "invalid_arguments"},
+		// PR-4b round 2 (t1458-verify MINOR-1): the conjoining Hangul jamo of
+		// Hangul_Syllable_Type V or T take no terminal cell uncomposed, so a
+		// leading one is invisible — and the remaining blank-glyph runes.
+		{"hangul V jamo leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u1161[director-1] do x"}, "invalid_arguments"},
+		{"hangul T jamo leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u11a8x"}, "invalid_arguments"},
+		{"hangul V ext jamo leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\ud7b0x"}, "invalid_arguments"},
+		{"hangul T ext jamo leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\ud7cbx"}, "invalid_arguments"},
+		{"null notehead leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\U0001d159[director-1] do x"}, "invalid_arguments"},
+		{"half fill space leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u303f[director-1] do x"}, "invalid_arguments"},
 		{"empty text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "   "}, "invalid_arguments"},
 		{"overlong text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": strings.Repeat("x", assistantDeliverTextMaxBytes+1)}, "text_too_long"},
 	} {
@@ -1130,6 +1152,14 @@ func TestAssistantDeliverAC4(t *testing.T) {
 		map[string]any{"target": "ops", "idempotency_key": "k56789012", "text": strings.Repeat("y", assistantDeliverTextMaxBytes)})
 	if atCap.isError {
 		t.Fatalf("at-cap text rejected: %s", atCap.text)
+	}
+
+	// Mid-text V/T jamo stay accepted — only the FIRST rune is checked, and
+	// NFD Korean composes them legitimately (U+1112 is the visible L jamo).
+	nfd := assistantCall(t, srv, assistantTestBerryToken, "deliver",
+		map[string]any{"target": "ops", "idempotency_key": "k67890124", "text": "한글 NFD"})
+	if nfd.isError {
+		t.Fatalf("nfd hangul rejected: %s", nfd.text)
 	}
 
 	// The 409-with-id-0 in-flight window.
@@ -2013,5 +2043,43 @@ func TestAssistantTasksOrderingPR3(t *testing.T) {
 	tasks, _ := receipts["tasks"].([]any)
 	if len(tasks) != 1 {
 		t.Fatalf("live tasks=%v, want the one queued row", tasks)
+	}
+}
+
+// TestAssistantDeliverRuneSweepPR4 keeps the t1458-verify probe as a
+// test: every Unicode scalar value as the leading rune of deliverable
+// text (surrogates skipped, which JSON can never carry). A rune that
+// survives validDeliverText in the leading position while belonging to a
+// banned class — category Cf, category M, default-ignorable code point,
+// variation selector, conjoining Hangul V/T jamo, or the named blank set
+// — is a failure.
+func TestAssistantDeliverRuneSweepPR4(t *testing.T) {
+	banned := func(r rune) bool {
+		return unicode.Is(unicode.Cf, r) || unicode.Is(unicode.M, r) ||
+			unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) ||
+			unicode.Is(unicode.Variation_Selector, r) ||
+			assistantHangulVTJamo(r) || assistantDeliverLeadingBlankRunes[r]
+	}
+	var bad []string
+	for r := rune(0); r <= 0x10FFFF; r++ {
+		if r >= 0xD800 && r <= 0xDFFF {
+			continue
+		}
+		text := string(r) + "x"
+		if validDeliverText(text) != nil {
+			continue
+		}
+		if first, _ := utf8.DecodeRuneInString(strings.TrimSpace(text)); first != r {
+			continue // trimmed away — the rune never actually led
+		}
+		if banned(r) {
+			bad = append(bad, fmt.Sprintf("%U", r))
+			if len(bad) >= 64 {
+				break
+			}
+		}
+	}
+	if len(bad) > 0 {
+		t.Fatalf("banned-class leading runes still accepted: %s", strings.Join(bad, " "))
 	}
 }

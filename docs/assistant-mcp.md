@@ -136,8 +136,10 @@ bucket; see configuration).
   Hangul fillers, tag characters) and no variation selectors — an
   emoji+VS16 pair such as ❤️ is refused too. The first rune of the
   trimmed text is checked directly, nothing skipped: it may be neither a
-  combining mark (category M) nor the braille blank U+2800 — both render
-  invisibly — and neither `[` nor its fullwidth `［`, so a forged tag
+  combining mark (category M), a conjoining Hangul jamo of
+  Hangul_Syllable_Type V or T (U+1160..U+11FF, U+D7B0..U+D7C6,
+  U+D7CB..U+D7FB — invisible when uncomposed) nor a blank-glyph rune
+  (U+2800, U+1D159, U+303F), and neither `[` nor its fullwidth `［`, so a forged tag
   cannot ride the prefix in either glyph; over- or mis-shaped text is
   rejected, never truncated). The lane comes only
   from the targets file: a lane target delivers to its own lane, a
@@ -245,9 +247,11 @@ One mode-0600 env file (-config):
 Every request is audit-logged (service identity, RPC/tool, target or
 request id, result). Every write attempt additionally logs the tool,
 subject id, idempotency key or event id, revision, outcome class, hub row
-id and a sha-256/8 text hash; answer calls also log the provenance and
-the operator quote's length and sha-256/8 — never the text or the quote
-itself, a token or an upstream URL.
+id and a sha-256/8 text hash; answer calls also log the provenance —
+a vocabulary value verbatim, anything else as the fixed token `invalid`,
+never the caller-supplied string — and the operator quote's length and
+sha-256/8 — never the text or the quote itself, a token or an upstream
+URL.
 
 ## Targets file
 
