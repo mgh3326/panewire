@@ -8,8 +8,11 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -588,6 +591,104 @@ func TestAccessUserNoPathBypasses(t *testing.T) {
 		t.Fatalf("authed healthz status=%d, want 404", authedWrongPath.Code)
 	}
 	assertNoHK(t, hk)
+}
+
+// The Access protected-resource path is served at the edge. The origin
+// must not block it with 401 and must not shadow it with a metadata body.
+func TestAccessUserWellKnownPathDoesNotShadow(t *testing.T) {
+	const planted = "PLANT-WELLKNOWN-ASSERTION-1470"
+	wellKnown := "/.well-known/cloudflare-access-protected-resource/mcp"
+	jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", accessUserBaseClaims(time.Now()))
+	assertNotShadowed := func(writer *httptest.ResponseRecorder) {
+		t.Helper()
+		if writer.Code != http.StatusNotFound {
+			t.Fatalf("status=%d body=%q, want 404", writer.Code, writer.Body.String())
+		}
+		if writer.Body.String() != `{"error":"not_found"}` {
+			t.Fatalf("body=%q, want not_found", writer.Body.String())
+		}
+		if writer.Header().Get("WWW-Authenticate") != "" {
+			t.Fatalf("WWW-Authenticate=%q, origin must not publish discovery", writer.Header().Get("WWW-Authenticate"))
+		}
+		for _, forbidden := range []string{"authorization_servers", "resource_metadata", "team_domain", "protected"} {
+			if strings.Contains(writer.Body.String(), forbidden) {
+				t.Fatalf("metadata field %q in %q", forbidden, writer.Body.String())
+			}
+		}
+	}
+
+	hk := newFakeAssistantHK(t)
+	hk.failNonGET = true
+	certsHit := 0
+	certs := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		certsHit++
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(certs.Close)
+	srv, logs := accessUserServerWithCerts(t, hk, certs.URL, []string{accessUserSub}, nil)
+	assertNotShadowed(accessUserPost(srv, http.MethodGet, wellKnown, "", "", nil))
+	assertNotShadowed(accessUserPost(srv, http.MethodPost, wellKnown, jwt, "", nil))
+	assertNotShadowed(accessUserPost(srv, http.MethodGet, wellKnown+"/", planted, "", nil))
+	if certsHit != 0 {
+		t.Fatalf("origin fetched JWKS %d times for the well-known path", certsHit)
+	}
+	assertNoHK(t, hk)
+	if strings.Contains(logs.String(), jwt) || strings.Contains(logs.String(), planted) {
+		t.Fatal("well-known path logged an assertion")
+	}
+	neighbour := accessUserPost(srv, http.MethodGet, "/.well-known/cloudflare-access-protected-resource/other", "", "", nil)
+	assertGenericUnauthorized(t, neighbour)
+
+	bearerHK := newFakeAssistantHK(t)
+	bearer, _ := assistantTestServer(t, bearerHK, nil)
+	writer := httptest.NewRecorder()
+	bearer.ServeHTTP(writer, httptest.NewRequest(http.MethodGet, wellKnown, nil))
+	assertNotShadowed(writer)
+	assertNoHK(t, bearerHK)
+
+	// The exemption is this path only. A valid user assertion still reaches the read tools.
+	readHK := newFakeAssistantHK(t)
+	readSrv, _ := accessUserServer(t, readHK, []string{accessUserSub}, nil)
+	assertNotShadowed(accessUserPost(readSrv, http.MethodGet, wellKnown, jwt, "", nil))
+	assertNoHK(t, readHK)
+	ok := accessUserPost(readSrv, http.MethodPost, "/mcp", jwt, "", nil)
+	if ok.Code != http.StatusOK {
+		t.Fatalf("mcp status=%d body=%q", ok.Code, ok.Body.String())
+	}
+}
+
+// Live edge names stay in the example file. Go never special-cases them.
+func TestAccessUserEdgeNamesStayOutOfGo(t *testing.T) {
+	forbidden := []string{
+		"mgh3326" + ".cloudflareaccess.com",
+		"dots-mcp" + ".robinco.dev",
+		"f405a0dce64192eff061a4a0acef6a14" + "5242fd94684f39d547c5e6f7a59012fb",
+	}
+	err := filepath.WalkDir(".", func(name string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() && d.Name() == ".git" {
+			return filepath.SkipDir
+		}
+		if d.IsDir() || !strings.HasSuffix(name, ".go") {
+			return nil
+		}
+		body, err := os.ReadFile(name)
+		if err != nil {
+			return err
+		}
+		text := string(body)
+		for _, token := range forbidden {
+			if strings.Contains(text, token) {
+				t.Errorf("%s contains %q", name, token)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 }
 
 // AC5: a successful read audits the structured principal. Access-user

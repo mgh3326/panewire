@@ -280,12 +280,20 @@ carries a valid `Cf-Access-Jwt-Assertion` and no `Authorization` header
 and no extra identity header reaches `initialize` and the read tools.
 
 `GET /mcp` and `DELETE /mcp` answer 405. Every other path answers 404.
-Every request is authenticated first. There is no health check and no
-unauthenticated route. This binary does not serve
-`/.well-known/cloudflare-access-protected-resource/mcp`. Cloudflare
-Access serves that metadata in front of the origin. The path is client
-discovery at the edge. It is not an authorization input, and it is not
-proof of which product holds the token.
+There is no health check. Every request is authenticated first, except
+the protected-resource path below.
+
+The exception is `/.well-known/cloudflare-access-protected-resource/mcp`.
+Cloudflare Access serves that metadata at the edge, in front of the
+origin, for the public hostname. The origin does not authenticate that
+path and does not write a metadata body: an unauthenticated request that
+reaches the origin answers 404 `{"error":"not_found"}`, with no
+`WWW-Authenticate` header. A 401 would block discovery. A metadata
+document would shadow the edge. The path is client discovery at the
+edge. It is not an authorization input, and it is not proof of which
+product holds the token. The public hostname (Access and Managed OAuth
+at the edge) and the tunnel ingress (this process's listen address,
+`127.0.0.1:9471`) are recorded in the example config, not here.
 
 #### Example config
 
@@ -293,8 +301,10 @@ The binary does not special-case the team or the AUD. The issuer shape
 is `https://<team>.cloudflareaccess.com`. Public markdown cannot repeat
 a live issuer host (`TestDocsContainNoOperationalLiterals` rejects
 host-shaped tokens in every `.md` file). The concrete dots values —
-issuer, AUD, and protected-resource path — are in the example config
+public hostname, issuer, AUD, ingress, and protected-resource path —
+are in the example config
 `docs/assistant-access-user.example`, which this binary does not read.
+The hostname and the issuer host are only in that file.
 
 The dots AUD is
 `f405a0dce64192eff061a4a0acef6a145242fd94684f39d547c5e6f7a59012fb`.

@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -613,9 +614,25 @@ func (s *assistantServer) authenticate(r *http.Request) (assistantPrincipal, str
 	return assistantPrincipal{Mode: assistantAuthModeBearer, Label: s.clientName}, "", true
 }
 
+// assistantAccessProtectedResourcePath is the metadata URL Cloudflare
+// Access serves at the edge. The origin does not know the team, the
+// issuer, or the AUD. It only refuses to answer this path: a 401 would
+// block discovery, and a metadata body would shadow the edge document.
+func assistantAccessProtectedResourcePath(p string) bool {
+	return path.Clean(p) == "/.well-known/cloudflare-access-protected-resource/mcp"
+}
+
 // ServeHTTP applies auth to every request, then the MCP route table. There
-// is deliberately no unauthenticated surface at all — not even a healthz.
+// is no health check. The one path that is not authenticated is the Access
+// protected-resource path, and that path is not served.
 func (s *assistantServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if assistantAccessProtectedResourcePath(r.URL.Path) {
+		s.logAudit(r.Context(), "-", r.Method+" "+r.URL.Path, "-", "-", "not_found")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not_found"}`))
+		return
+	}
 	principal, reason, ok := s.authenticate(r)
 	r = r.WithContext(withAssistantPrincipal(r.Context(), principal))
 	if !ok {
