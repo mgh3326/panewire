@@ -701,7 +701,8 @@ func TestAssistantProvenancePR4(t *testing.T) {
 	// again before any upstream call — and the audit line records the
 	// fixed token invalid, never the caller value (MINOR-2: caller free
 	// text, quote text included, must not ride the provenance field into
-	// the audit log).
+	// the audit log). On answer_question the same call is invalid at the
+	// args decode instead — A3 removed the field from the tool entirely.
 	for _, tool := range []string{"answer_decision", "answer_question"} {
 		args := map[string]any{"provenance": plantedProv}
 		if tool == "answer_decision" {
@@ -807,16 +808,17 @@ func TestAssistantProvenancePR4(t *testing.T) {
 		t.Fatalf("bare resolution=%+v, want decided_by=assistant", got)
 	}
 
-	// answer_question forwards provenance and operator_quote unchanged —
-	// recorded on the answer message, no gate effect.
+	// Contract amendment 1 item A3: answer_question carries NO provenance
+	// fields — hk's chat endpoint rejects unknown fields, and the request
+	// body is exactly the pre-PR-4 field set (the fake 400s if either key
+	// appears; this asserts the keys, not just the absence of the pair).
 	now := time.Now().UTC()
 	hk.seedQuestion(assistantChatQuestion{ID: "Q-20261010-70", ConversationID: "operator-desk", Lane: "lane-a",
 		Body: "?", State: "pending", Revision: 1, CreatedAt: now, UpdatedAt: now})
 	qres := assistantCall(t, srv, assistantTestBerryToken, "answer_question", map[string]any{
-		"id": "Q-20261010-70", "revision": 1, "text": "pane 7",
-		"provenance": "operator_decided", "operator_quote": plantedQuote})
+		"id": "Q-20261010-70", "revision": 1, "text": "pane 7"})
 	if qres.isError {
-		t.Fatalf("answer_question provenance: %s", qres.text)
+		t.Fatalf("answer_question: %s", qres.text)
 	}
 	var chatPosted map[string]any
 	chatBodies := hk.postedBodies("POST /v1/chat/messages")
@@ -826,8 +828,15 @@ func TestAssistantProvenancePR4(t *testing.T) {
 	if err := json.Unmarshal([]byte(chatBodies[0]), &chatPosted); err != nil {
 		t.Fatal(err)
 	}
-	if chatPosted["provenance"] != "operator_decided" || chatPosted["operator_quote"] != plantedQuote {
-		t.Fatalf("answer_question did not forward provenance: %s", chatBodies[0])
+	wantKeys := map[string]bool{"conversation_id": true, "author": true, "body": true,
+		"source_channel": true, "origin_event_id": true, "answers": true}
+	for key := range chatPosted {
+		if !wantKeys[key] {
+			t.Fatalf("answer_question sent unexpected field %q: %s", key, chatBodies[0])
+		}
+	}
+	if len(chatPosted) != len(wantKeys) {
+		t.Fatalf("answer_question body missing fields: %s", chatBodies[0])
 	}
 
 	// The planted quote never reaches audit or logs — provenance, quote
@@ -1136,6 +1145,10 @@ func TestAssistantDeliverAC4(t *testing.T) {
 		{"hangul T ext jamo leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\ud7cbx"}, "invalid_arguments"},
 		{"null notehead leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\U0001d159[director-1] do x"}, "invalid_arguments"},
 		{"half fill space leading tag", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u303f[director-1] do x"}, "invalid_arguments"},
+		{"egyptian full blank leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\U00013441[director-1] do x"}, "invalid_arguments"},
+		{"egyptian half blank leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\U00013442x"}, "invalid_arguments"},
+		{"hangul T jamo last leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\u11ffx"}, "invalid_arguments"},
+		{"hangul T ext last leading", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "\ud7fbx"}, "invalid_arguments"},
 		{"empty text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": "   "}, "invalid_arguments"},
 		{"overlong text", map[string]any{"target": "ops", "idempotency_key": "k45678901", "text": strings.Repeat("x", assistantDeliverTextMaxBytes+1)}, "text_too_long"},
 	} {
@@ -2054,11 +2067,35 @@ func TestAssistantTasksOrderingPR3(t *testing.T) {
 // variation selector, conjoining Hangul V/T jamo, or the named blank set
 // — is a failure.
 func TestAssistantDeliverRuneSweepPR4(t *testing.T) {
+	// The oracle is independent of the production helpers: the expected
+	// V/T jamo ranges and the blank set are written out here (the derived
+	// Hangul_Syllable_Type ranges verbatim) so a narrowed production check
+	// cannot narrow the oracle with it — the t1458-verify MINOR-A mutants
+	// that shrank each range must now die against this set.
+	vtJamo := func(r rune) bool {
+		return (r >= 0x1160 && r <= 0x11FF) || // V U+1160..U+11A7 and T U+11A8..U+11FF
+			(r >= 0xD7B0 && r <= 0xD7C6) || // V extended-B
+			(r >= 0xD7CB && r <= 0xD7FB) // T extended
+	}
+	wantBlank := map[rune]bool{0x2800: true, 0x1D159: true, 0x303F: true, 0x13441: true, 0x13442: true}
 	banned := func(r rune) bool {
 		return unicode.Is(unicode.Cf, r) || unicode.Is(unicode.M, r) ||
 			unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) ||
 			unicode.Is(unicode.Variation_Selector, r) ||
-			assistantHangulVTJamo(r) || assistantDeliverLeadingBlankRunes[r]
+			vtJamo(r) || wantBlank[r]
+	}
+	// Boundary rows pin both sides of each range: every range edge and the
+	// blank set rejects as the first rune; the adjacent non-members just
+	// outside each range stay accepted (over-widening fails too).
+	for _, r := range []rune{0x1160, 0x11A7, 0x11A8, 0x11FF, 0xD7B0, 0xD7C6, 0xD7CB, 0xD7FB, 0x2800, 0x1D159, 0x303F, 0x13441, 0x13442} {
+		if err := validDeliverText(string(r) + "x"); err == nil {
+			t.Errorf("boundary rune %U accepted as first rune", r)
+		}
+	}
+	for _, r := range []rune{0x115E, 0x1200, 0xD7AF, 0xD7C7, 0xD7FC} {
+		if err := validDeliverText(string(r) + "x"); err != nil {
+			t.Errorf("just-outside rune %U rejected as first rune: %v", r, err)
+		}
 	}
 	var bad []string
 	for r := rune(0); r <= 0x10FFFF; r++ {

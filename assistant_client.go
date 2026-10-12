@@ -510,10 +510,6 @@ type assistantChatAnswerPost struct {
 	SourceChannel  string                   `json:"source_channel"`
 	OriginEventID  string                   `json:"origin_event_id"`
 	Answers        []assistantChatCASAnswer `json:"answers"`
-	// PR-4 provenance fields, forwarded unchanged and recorded on the
-	// answer message (no gate effect — chat questions have no human_only).
-	Provenance    string `json:"provenance,omitempty"`
-	OperatorQuote string `json:"operator_quote,omitempty"`
 }
 
 type assistantChatCASAnswer struct {
@@ -524,7 +520,7 @@ type assistantChatCASAnswer struct {
 // postAssistantChatAnswer posts one assistant answer through POST
 // /v1/chat/messages — handoffkeep's assistant channel, never the hub chat
 // route and never source_channel web.
-func (c *assistantHK) postAssistantChatAnswer(ctx context.Context, conversationID, questionID string, revision int, body, originEventID, provenance, operatorQuote string) (int, []byte, error) {
+func (c *assistantHK) postAssistantChatAnswer(ctx context.Context, conversationID, questionID string, revision int, body, originEventID string) (int, []byte, error) {
 	status, payload, _, err := c.post(ctx, "/v1/chat/messages", assistantChatAnswerPost{
 		ConversationID: conversationID,
 		Author:         "operator",
@@ -532,8 +528,6 @@ func (c *assistantHK) postAssistantChatAnswer(ctx context.Context, conversationI
 		SourceChannel:  "assistant",
 		OriginEventID:  originEventID,
 		Answers:        []assistantChatCASAnswer{{QuestionID: questionID, Revision: revision}},
-		Provenance:     provenance,
-		OperatorQuote:  operatorQuote,
 	})
 	return status, payload, err
 }

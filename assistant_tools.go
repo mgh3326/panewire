@@ -210,16 +210,14 @@ func (s *assistantServer) callAssistantTool(ctx context.Context, identity, name 
 		return s.toolAnswerDecision(ctx, identity, in.RequestID, in.Option, in.Text, in.Provenance, in.OperatorQuote, in.DecisionRef, targets)
 	case "answer_question":
 		var in struct {
-			ID            string `json:"id"`
-			Revision      int    `json:"revision"`
-			Text          string `json:"text"`
-			Provenance    string `json:"provenance,omitempty"`
-			OperatorQuote string `json:"operator_quote,omitempty"`
+			ID       string `json:"id"`
+			Revision int    `json:"revision"`
+			Text     string `json:"text"`
 		}
 		if err := decodeAssistantArgs(args, &in); err != nil {
 			return nil, err
 		}
-		return s.toolAnswerQuestion(ctx, identity, in.ID, in.Revision, in.Text, in.Provenance, in.OperatorQuote, targets)
+		return s.toolAnswerQuestion(ctx, identity, in.ID, in.Revision, in.Text, targets)
 	case "deliver":
 		var in struct {
 			Target         string `json:"target"`

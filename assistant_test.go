@@ -89,15 +89,12 @@ type fakeAssistantHK struct {
 
 // fakeChatMessage is the dedupe record handoffkeep keeps per
 // (conversation_id, source_channel, origin_event_id): the semantic fields a
-// replay must byte-match, plus the assigned message id and the PR-4
-// provenance fields recorded on the answer message.
+// replay must byte-match, plus the assigned message id.
 type fakeChatMessage struct {
 	id         int64
 	author     string
 	body       string
 	answersKey string
-	provenance string
-	quote      string
 }
 
 func newFakeAssistantHK(t *testing.T) *fakeAssistantHK {
@@ -510,11 +507,16 @@ func (f *fakeAssistantHK) serveChatMessage(w http.ResponseWriter, rawBody []byte
 			QuestionID string `json:"question_id"`
 			Revision   int    `json:"revision"`
 		} `json:"answers"`
-		// PR-4 provenance fields, recorded on the answer message.
-		Provenance    string `json:"provenance,omitempty"`
-		OperatorQuote string `json:"operator_quote,omitempty"`
 	}
 	if json.Unmarshal(rawBody, &input) != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"error":"invalid_context"}`))
+		return
+	}
+	// Contract amendment 1 item A3: the chat endpoint rejects unknown
+	// fields — the assistant answer body carries neither provenance nor
+	// operator_quote, so a caller still sending them is a 400.
+	if bytes.Contains(rawBody, []byte(`"provenance"`)) || bytes.Contains(rawBody, []byte(`"operator_quote"`)) {
 		w.WriteHeader(http.StatusBadRequest)
 		_, _ = w.Write([]byte(`{"error":"invalid_context"}`))
 		return
@@ -559,7 +561,7 @@ func (f *fakeAssistantHK) serveChatMessage(w http.ResponseWriter, rawBody []byte
 	q.AnswerMessageID = &messageID
 	q.UpdatedAt = time.Now().UTC()
 	f.questions[answer.QuestionID] = q
-	f.chatMessages[key] = &fakeChatMessage{id: messageID, author: input.Author, body: input.Body, answersKey: answersKey, provenance: input.Provenance, quote: input.OperatorQuote}
+	f.chatMessages[key] = &fakeChatMessage{id: messageID, author: input.Author, body: input.Body, answersKey: answersKey}
 	f.outbox = append(f.outbox, assistantOutboxRow{
 		ID: f.nextOutboxID(), Kind: "chat_answer", TargetLane: q.Lane,
 		EventID:   chatAnsweredEventID(answer.QuestionID, answer.Revision),

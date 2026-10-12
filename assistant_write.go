@@ -186,19 +186,14 @@ func assistantWriteToolList() []map[string]any {
 				"source_channel web. A question that already holds an assistant answer answers " +
 				"question_slot_taken (the slot is single-use; do not retry), a moved revision answers " +
 				"stale_revision with the current revision, and missing or out-of-scope ids answer the " +
-				"same generic request_not_found as the read tools. Optional provenance and " +
-				"operator_quote fields are forwarded to handoffkeep unchanged and recorded on the " +
-				"answer message — a quote is never synthesized — and carry no gate effect (chat " +
-				"questions have no human_only). A lane notice drains asynchronously " +
-				"through the outbox drainer.",
+				"same generic request_not_found as the read tools. A lane notice drains " +
+				"asynchronously through the outbox drainer.",
 			"inputSchema": map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"id":             map[string]any{"type": "string"},
-					"revision":       map[string]any{"type": "integer"},
-					"text":           map[string]any{"type": "string"},
-					"provenance":     map[string]any{"type": "string", "enum": []string{"operator_decided", "assistant_judgement"}},
-					"operator_quote": map[string]any{"type": "string"},
+					"id":       map[string]any{"type": "string"},
+					"revision": map[string]any{"type": "integer"},
+					"text":     map[string]any{"type": "string"},
 				},
 				"required":             []string{"id", "revision", "text"},
 				"additionalProperties": false,
@@ -212,7 +207,8 @@ func assistantWriteToolList() []map[string]any {
 				"newlines), trimmed non-empty, no invisible runes (format characters, " +
 				"default-ignorables, variation selectors — an emoji+VS16 pair like ❤️ is refused " +
 				"too), and a first rune that is never '[', its fullwidth '［', a combining mark, " +
-				"a conjoining Hangul V or T jamo, or a blank-glyph rune (U+2800, U+1D159, U+303F), " +
+				"a conjoining Hangul V or T jamo, or a blank-glyph rune (U+2800, U+1D159, U+303F, " +
+				"U+13441, U+13442), " +
 				"so a forged [tag] cannot be built. The event id is berry:<target>:<key> — deterministic, never random, never " +
 				"time-based — the text is posted prefixed [via berry], and the lane comes only from " +
 				"the targets file (a conversation target posts to its deliver_lane). The same key " +
@@ -399,7 +395,8 @@ func validAssistantWriteText(text string, maxBytes int, required bool) error {
 // conjoining Hangul jamo of Hangul_Syllable_Type V or T (U+1160..U+11FF,
 // U+D7B0..U+D7C6, U+D7CB..U+D7FB — invisible when uncomposed) or a
 // blank-glyph rune (assistantDeliverLeadingBlankRunes: U+2800, U+1D159,
-// U+303F), and never '[' or the fullwidth '［', so a forged tag like
+// U+303F, U+13441, U+13442), and never '[' or the fullwidth '［', so a
+// forged tag like
 // "[director-1]" can never ride the [via berry] prefix into a pane in
 // either glyph.
 func validDeliverText(text string) error {
@@ -445,9 +442,11 @@ func assistantHangulVTJamo(r rune) bool {
 // half-fill space, the wcwidth-0/blank survivors the t1458-verify sweep
 // found outside every other rejected class.
 var assistantDeliverLeadingBlankRunes = map[rune]bool{
-	'\u2800':     true,
-	'\U0001d159': true,
-	'\u303f':     true,
+	'\u2800':     true, // braille blank
+	'\U0001d159': true, // musical symbol null notehead
+	'\u303f':     true, // ideographic half fill space
+	'\U00013441': true, // egyptian hieroglyph full blank
+	'\U00013442': true, // egyptian hieroglyph half blank
 }
 
 // --- answer_decision -----------------------------------------------------
@@ -545,36 +544,26 @@ func (s *assistantServer) toolAnswerDecision(ctx context.Context, identity, requ
 // toolAnswerQuestion posts one assistant answer through handoffkeep's
 // assistant channel — POST /v1/chat/messages with source_channel=assistant
 // and author operator under the expected-revision CAS. The hub chat route
-// is never touched: it hardcodes web attribution. The optional provenance
-// and operator_quote fields cross to handoffkeep unchanged and are
-// recorded on the answer message — a quote is never synthesized and the
-// fields carry no gate effect (chat questions have no human_only). The
-// question row is pre-read (amendment 1D): an already-held answer slot is
+// is never touched: it hardcodes web attribution. The contract's
+// amendment 1 item A3 removes provenance from this path: hk's chat
+// endpoint rejects unknown fields, so the request body is exactly the
+// pre-PR-4 field set — schema, args decode and the wire post all carry
+// neither provenance nor operator_quote. The question row is pre-read
+// (amendment 1D): an already-held answer slot is
 // question_slot_taken — distinct from stale, it tells the caller the slot
 // is single-use — a non-pending state is the generic not_found, and a
 // revision mismatch is stale_revision carrying the current revision.
-func (s *assistantServer) toolAnswerQuestion(ctx context.Context, identity, questionID string, revision int, text, provenance, operatorQuote string, targets map[string]assistantTarget) (result any, err error) {
+func (s *assistantServer) toolAnswerQuestion(ctx context.Context, identity, questionID string, revision int, text string, targets map[string]assistantTarget) (result any, err error) {
 	resultClass := "internal_error"
 	eventID := chatAnsweredEventID(questionID, revision)
-	effectiveProvenance := provenance
-	if effectiveProvenance == "" {
-		effectiveProvenance = assistantProvenanceAssistant
-	}
 	defer func() {
 		if err != nil {
 			resultClass = err.Error()
 		}
-		quoteSHA8 := ""
-		if operatorQuote != "" {
-			quoteSHA8 = textSHA8(operatorQuote)
-		}
-		s.logAuditWrite(identity, "answer_question", questionID, "", eventID, revision, resultClass, 0, textSHA8(text), effectiveProvenance, len(operatorQuote), quoteSHA8)
+		s.logAuditWrite(identity, "answer_question", questionID, "", eventID, revision, resultClass, 0, textSHA8(text), "", 0, "")
 	}()
 	if !assistantQuestionIDPattern.MatchString(questionID) {
 		return nil, errAssistantRequestNotFound
-	}
-	if !validAssistantProvenance(provenance) {
-		return nil, errAssistantInvalidArgs
 	}
 	if revision < 1 || revision > 1<<20 {
 		return nil, errAssistantInvalidArgs
@@ -603,7 +592,7 @@ func (s *assistantServer) toolAnswerQuestion(ctx context.Context, identity, ques
 	// identical answer dedupes into the same row; a retried different
 	// answer is an idempotency conflict, never a second message.
 	origin := "berry-answer-" + questionID + "-rev" + strconv.Itoa(revision)
-	status, payload, err := s.hk.postAssistantChatAnswer(ctx, q.ConversationID, questionID, revision, text, origin, provenance, operatorQuote)
+	status, payload, err := s.hk.postAssistantChatAnswer(ctx, q.ConversationID, questionID, revision, text, origin)
 	if err != nil {
 		return nil, err
 	}
