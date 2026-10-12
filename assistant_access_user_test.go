@@ -236,6 +236,58 @@ func TestAccessUserAssertionOutcomes(t *testing.T) {
 	}
 }
 
+// Access-user exp/nbf leeway is zero. The rows are the configured skew
+// and one second past it. A 60s leeway on the comparisons accepts the
+// rejected rows.
+func TestAccessUserExpNbfBoundary(t *testing.T) {
+	const skew = int64(0)
+	frozen := time.Unix(1_700_000_000, 0).UTC()
+	now := frozen.Unix()
+	cases := []struct {
+		name   string
+		expOff int64
+		nbf    int64
+		setNbf bool
+		reason string
+	}{
+		{name: "exp at skew", expOff: -skew, reason: "expired"},
+		{name: "exp one second past skew", expOff: -skew - 1, reason: "expired"},
+		{name: "exp one second inside skew", expOff: -skew + 1},
+		{name: "nbf at skew", expOff: 3600, nbf: now + skew, setNbf: true},
+		{name: "nbf one second past skew", expOff: 3600, nbf: now + skew + 1, setNbf: true, reason: "not_yet_valid"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hk := newFakeAssistantHK(t)
+			srv, logs := accessUserServer(t, hk, []string{accessUserSub}, nil)
+			if srv.cf == nil {
+				t.Fatal("access-user verifier missing")
+			}
+			srv.cf.now = func() time.Time { return frozen }
+			claims := accessUserBaseClaims(frozen)
+			claims["exp"] = now + tc.expOff
+			if tc.setNbf {
+				claims["nbf"] = tc.nbf
+			}
+			jwt := chatSignJWTClaims(t, chatTestSigningKey(), "k1", claims)
+			writer := accessUserPost(srv, http.MethodPost, "/mcp", jwt, "", nil)
+			if tc.reason == "" {
+				if writer.Code != http.StatusOK {
+					t.Fatalf("status=%d body=%s", writer.Code, writer.Body.String())
+				}
+				auditWithResult(t, logs, "ok")
+				return
+			}
+			assertGenericUnauthorized(t, writer)
+			if strings.Contains(writer.Body.String(), tc.reason) {
+				t.Fatalf("reason %s leaked to the caller", tc.reason)
+			}
+			auditWithResult(t, logs, tc.reason)
+			assertNoHK(t, hk)
+		})
+	}
+}
+
 // Mutant (a): an empty iss must not be accepted again in Access-user mode.
 func TestMutantAccessUserEmptyIssRejected(t *testing.T) {
 	now := time.Now()
