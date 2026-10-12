@@ -1,0 +1,12 @@
+# Example only. The assistant binary does not read this file.
+# Public markdown cannot repeat the issuer host or the public hostname.
+PANEWIRE_ASSISTANT_AUTH_MODE=access-user
+PANEWIRE_ASSISTANT_CF_TEAM=mgh3326
+PANEWIRE_ASSISTANT_CF_AUD=f405a0dce64192eff061a4a0acef6a145242fd94684f39d547c5e6f7a59012fb
+PANEWIRE_ASSISTANT_CF_CERTS_URL=https://mgh3326.cloudflareaccess.com/cdn-cgi/access/certs
+PANEWIRE_ASSISTANT_CF_SUBJECTS=<operator sub>
+# issuer: https://mgh3326.cloudflareaccess.com
+# public hostname, Access and Managed OAuth at the edge: dots-mcp.robinco.dev
+# tunnel ingress: http://127.0.0.1:9471
+# protected-resource path, served by Cloudflare Access, not this binary:
+# /.well-known/cloudflare-access-protected-resource/mcp

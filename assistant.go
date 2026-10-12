@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,11 +25,12 @@ import (
 // handoffkeep at call time and every owed lane notice lives in
 // handoffkeep's notification outbox, so the process can be killed and
 // restarted at any moment without losing or duplicating anything. All
-// operator credentials live only in server-side mode-0600 files; callers
-// authenticate with a dedicated bearer token and, when configured, a
+// operator credentials live only in server-side mode-0600 files. Bearer
+// mode authenticates with a dedicated bearer token. Service mode adds a
 // Cloudflare Access service token whose common_name must be on an
 // allowlist (the hub's verifier cannot be reused: it has no identity
-// binding).
+// binding). Access-user mode instead requires a verified user assertion
+// and does not accept the bearer.
 
 const (
 	// assistantDefaultListen keeps the binary loopback-only by default; an
@@ -62,6 +64,15 @@ const (
 	assistantWritesAnswer
 	assistantWritesDeliver
 	assistantWritesAll
+)
+
+// Auth modes. Empty in the config file keeps today's inference (a
+// configured service gate is service mode, otherwise bearer). The
+// access-user spelling is exact: any other text refuses startup.
+const (
+	assistantAuthModeBearer     = "bearer"
+	assistantAuthModeService    = "service"
+	assistantAuthModeAccessUser = "access-user"
 )
 
 // assistantConfig is the parsed server-side configuration. Every byte of it
@@ -109,8 +120,15 @@ type assistantConfig struct {
 	CFTeam         string
 	CFAUD          string
 	CFServiceNames []string
-	// CFCertsURL is a test-only override for the Access JWKS document.
+	// CFCertsURL is the Access JWKS document. Optional in service mode
+	// (the team default is used); required in access-user mode.
 	CFCertsURL string
+	// AuthMode is bearer, service, or access-user. Empty keeps the
+	// inference described above.
+	AuthMode string
+	// CFSubjects is the access-user allowlist of stable subs. The
+	// principal key is (issuer, sub). Email is never an entry.
+	CFSubjects []string
 }
 
 // assistantConfigError is a startup refusal. The text names the failed
@@ -152,6 +170,17 @@ func loadAssistantConfig(path string) (assistantConfig, error) {
 			name = strings.TrimSpace(name)
 			if name != "" {
 				cfg.CFServiceNames = append(cfg.CFServiceNames, name)
+			}
+		}
+	}
+	// Exact spelling, already trimmed by the env loader. A case variant
+	// or unknown word refuses in validate; it is not folded to a mode.
+	cfg.AuthMode = values["PANEWIRE_ASSISTANT_AUTH_MODE"]
+	if subs := values["PANEWIRE_ASSISTANT_CF_SUBJECTS"]; subs != "" {
+		for _, sub := range strings.Split(subs, ",") {
+			sub = strings.TrimSpace(sub)
+			if sub != "" {
+				cfg.CFSubjects = append(cfg.CFSubjects, sub)
 			}
 		}
 	}
@@ -230,24 +259,102 @@ func (c assistantConfig) validate() error {
 	if c.DrainInterval != 0 && (c.DrainInterval < assistantDrainIntervalMin || c.DrainInterval > assistantDrainIntervalMax) {
 		return configError("assistant drain interval out of range")
 	}
-	if c.TokenFile == "" || c.TargetsFile == "" {
-		return configError("token file and targets file are required")
-	}
 	if _, _, err := net.SplitHostPort(c.Listen); err != nil {
 		return configError("listen address must be host:port")
 	}
+	switch c.AuthMode {
+	case assistantAuthModeAccessUser:
+		return c.validateAccessUser()
+	case assistantAuthModeBearer:
+		return c.validateBearerMode()
+	case assistantAuthModeService:
+		return c.validateServiceMode()
+	case "":
+		return c.validateLegacyAuth()
+	default:
+		return configError("auth mode unknown")
+	}
+}
+
+func (c assistantConfig) accessConfigPresent() bool {
+	return c.CFTeam != "" || c.CFAUD != "" || len(c.CFServiceNames) != 0 || c.CFCertsURL != "" || len(c.CFSubjects) != 0
+}
+
+func (c assistantConfig) validateBearerMode() error {
+	if c.TokenFile == "" || c.TargetsFile == "" {
+		return configError("token file and targets file are required")
+	}
+	if c.accessConfigPresent() {
+		return configError("bearer mode rejects access gate")
+	}
+	return nil
+}
+
+func (c assistantConfig) validateServiceMode() error {
+	if c.TokenFile == "" || c.TargetsFile == "" {
+		return configError("token file and targets file are required")
+	}
+	if len(c.CFSubjects) != 0 {
+		return configError("service mode rejects subject allowlist")
+	}
+	return c.validateServiceGate()
+}
+
+// validateLegacyAuth is the pre-mode config: no mode key, service gate
+// when the CF triple is complete, bearer otherwise.
+func (c assistantConfig) validateLegacyAuth() error {
+	if c.TokenFile == "" || c.TargetsFile == "" {
+		return configError("token file and targets file are required")
+	}
+	if len(c.CFSubjects) != 0 {
+		return configError("subject allowlist requires access-user mode")
+	}
+	if c.CFTeam != "" || c.CFAUD != "" || len(c.CFServiceNames) != 0 || c.CFCertsURL != "" {
+		return c.validateServiceGate()
+	}
+	return nil
+}
+
+func (c assistantConfig) validateServiceGate() error {
 	// The inbound Access gate is all-or-nothing and service-name bound: an
 	// enabled gate without an allowlist would verify any Access identity,
 	// which is exactly the hub verifier's weakness this binary must not copy.
-	cfConfigured := c.CFTeam != "" || c.CFAUD != "" || len(c.CFServiceNames) != 0 || c.CFCertsURL != ""
-	if cfConfigured && (c.CFTeam == "" || c.CFAUD == "" || len(c.CFServiceNames) == 0) {
+	if c.CFTeam == "" || c.CFAUD == "" || len(c.CFServiceNames) == 0 {
 		return configError("cf access gate requires team, aud and service names together")
 	}
-	if cfConfigured && !hubCFAccessTeamPattern.MatchString(c.CFTeam) {
+	if !hubCFAccessTeamPattern.MatchString(c.CFTeam) {
 		return configError("cf access team invalid")
 	}
-	if cfConfigured && c.CFCertsURL != "" && !validHandoffkeepBaseURL(c.CFCertsURL) {
+	if c.CFCertsURL != "" && !validHandoffkeepBaseURL(c.CFCertsURL) {
 		return configError("cf access certs url invalid")
+	}
+	return nil
+}
+
+func (c assistantConfig) validateAccessUser() error {
+	if c.TargetsFile == "" {
+		return configError("targets file is required")
+	}
+	if c.CFTeam == "" {
+		return configError("access-user mode requires team domain")
+	}
+	if !hubCFAccessTeamPattern.MatchString(c.CFTeam) {
+		return configError("cf access team invalid")
+	}
+	if c.CFAUD == "" {
+		return configError("access-user mode requires aud")
+	}
+	if len(c.CFAUD) > 256 {
+		return configError("cf access configuration is invalid")
+	}
+	if c.CFCertsURL == "" {
+		return configError("access-user mode requires jwks url")
+	}
+	if !validHandoffkeepBaseURL(c.CFCertsURL) {
+		return configError("cf access certs url invalid")
+	}
+	if len(c.CFSubjects) == 0 {
+		return configError("access-user mode requires subject allowlist")
 	}
 	return nil
 }
@@ -273,12 +380,75 @@ func loadAssistantBearer(path string) ([32]byte, error) {
 	return sha256.Sum256([]byte(token)), nil
 }
 
+// assistantPrincipal is the verified caller. Later profile code reads this
+// value; it is not a display name. Issuer and Subject are the stable key.
+// Audiences is every aud value from the token, not only the one that
+// matched this assistant. Email is display only and is never part of
+// Label. Label is the audit and rate-limit key.
+type assistantPrincipal struct {
+	Mode      string
+	Issuer    string
+	Subject   string
+	Audiences []string
+	Email     string
+	Label     string
+}
+
+type assistantPrincipalKey struct{}
+
+func withAssistantPrincipal(ctx context.Context, p assistantPrincipal) context.Context {
+	return context.WithValue(ctx, assistantPrincipalKey{}, p)
+}
+
+func assistantPrincipalFrom(ctx context.Context) assistantPrincipal {
+	p, _ := ctx.Value(assistantPrincipalKey{}).(assistantPrincipal)
+	return p
+}
+
+func assistantAuditEmail(email string) string {
+	email = strings.TrimSpace(email)
+	if len(email) > 254 {
+		return email[:254]
+	}
+	return email
+}
+
+// assistantAuditAudiences logs a slice on every line, including the empty
+// one, so a missing audience list is [] and not an omitted field.
+func assistantAuditAudiences(audiences []string) []string {
+	if audiences == nil {
+		return []string{}
+	}
+	return audiences
+}
+
+// assistantAuditPrincipal is the structured caller recorded on each audit
+// line. It is the same value request handling already holds.
+func assistantAuditPrincipal(p assistantPrincipal) map[string]any {
+	return map[string]any{
+		"mode":      p.Mode,
+		"issuer":    p.Issuer,
+		"subject":   p.Subject,
+		"audiences": assistantAuditAudiences(p.Audiences),
+		"email":     assistantAuditEmail(p.Email),
+	}
+}
+
+// accessUserWritesBlocked is the single seam that keeps writes off in
+// Access-user mode. Profile enforcement is later work. List, call, and
+// hub-drainer wiring all consult it, so removing the check re-opens the
+// three together. The configured writes set is left as the operator set it.
+func accessUserWritesBlocked(mode string) bool {
+	return mode == assistantAuthModeAccessUser
+}
+
 // assistantServer is the whole runtime: auth, the targets map path, the hk
 // and (when writes are enabled) hub clients, the outbox drainer state and
 // the audit log. It keeps no durable state — the outbox lives in
 // handoffkeep.
 type assistantServer struct {
 	tokenHash   [32]byte
+	authMode    string
 	cf          *assistantCFVerifier
 	hk          *assistantHK
 	targetsPath string
@@ -314,9 +484,25 @@ func newAssistantServer(cfg assistantConfig, deps assistantServerDeps) (*assista
 	if err := cfg.validate(); err != nil {
 		return nil, err
 	}
-	tokenHash, err := loadAssistantBearer(cfg.TokenFile)
-	if err != nil {
-		return nil, err
+	mode := cfg.AuthMode
+	if mode == "" {
+		if cfg.CFTeam != "" {
+			mode = assistantAuthModeService
+		} else {
+			mode = assistantAuthModeBearer
+		}
+	}
+	var tokenHash [32]byte
+	// Access-user does not require a bearer file. A file that is present
+	// is still loaded so a malformed file refuses startup, and so the
+	// hash exists for tests that kill a bearer-fallback mutant. The
+	// request path below never compares it in this mode.
+	if mode != assistantAuthModeAccessUser || cfg.TokenFile != "" {
+		var err error
+		tokenHash, err = loadAssistantBearer(cfg.TokenFile)
+		if err != nil {
+			return nil, err
+		}
 	}
 	// The targets file is validated at startup — a bad mode or schema refuses
 	// the binary — and re-validated on every targets read so an edit (or a
@@ -331,7 +517,9 @@ func newAssistantServer(cfg assistantConfig, deps assistantServerDeps) (*assista
 	var hub *assistantHub
 	var drainKick chan struct{}
 	var limiter *writeRateLimiter
-	if cfg.Writes != assistantWritesOff {
+	// Access-user keeps the writes flag visible and still refuses to build
+	// the hub client or the drainer. Bearer and service modes are unchanged.
+	if cfg.Writes != assistantWritesOff && !accessUserWritesBlocked(mode) {
 		hub, err = newAssistantHub(cfg.HubURL, cfg.HubToken, deps.HubHTTPClient)
 		if err != nil {
 			return nil, err
@@ -347,11 +535,20 @@ func newAssistantServer(cfg assistantConfig, deps assistantServerDeps) (*assista
 		limiter = newWriteRateLimiter(ratePerMin, burst)
 	}
 	var cf *assistantCFVerifier
-	if cfg.CFTeam != "" {
+	switch mode {
+	case assistantAuthModeService:
 		cf, err = newAssistantCFVerifier(cfg.CFTeam, cfg.CFAUD, cfg.CFCertsURL, cfg.CFServiceNames, deps.CFHTTPClient)
 		if err != nil {
 			return nil, err
 		}
+	case assistantAuthModeAccessUser:
+		cf, err = newAssistantAccessUserVerifier(cfg.CFTeam, cfg.CFAUD, cfg.CFCertsURL, cfg.CFSubjects, deps.CFHTTPClient)
+		if err != nil {
+			return nil, err
+		}
+	case assistantAuthModeBearer:
+	default:
+		return nil, configError("auth mode unknown")
 	}
 	logger := deps.Logger
 	if logger == nil {
@@ -363,6 +560,7 @@ func newAssistantServer(cfg assistantConfig, deps assistantServerDeps) (*assista
 	}
 	return &assistantServer{
 		tokenHash:     tokenHash,
+		authMode:      mode,
 		cf:            cf,
 		hk:            hk,
 		targetsPath:   cfg.TargetsFile,
@@ -382,43 +580,77 @@ func (s *assistantServer) writeEnabled(tool string) bool {
 	return assistantWriteSetIncludes(s.writes, tool)
 }
 
-// authenticate enforces the bearer on every request and, when configured, the
-// Cloudflare Access service-token gate on top of it. It returns the audit
-// identity — service:<common_name> for a bound Access identity, the
-// configured client name for bearer-only.
-func (s *assistantServer) authenticate(r *http.Request) (string, bool) {
+// authenticate reports the verified principal. Access-user mode never
+// consults the bearer: a valid bearer is not a fallback, and a missing
+// bearer is not a failure when the user assertion verifies. Bearer and
+// service modes still require the bearer exactly as before.
+func (s *assistantServer) authenticate(r *http.Request) (assistantPrincipal, string, bool) {
+	if s.authMode == assistantAuthModeAccessUser {
+		if s.cf == nil {
+			return assistantPrincipal{Mode: s.authMode}, "jwks_unavailable", false
+		}
+		principal, reason := s.cf.authenticateAccessUser(r)
+		if reason != "" {
+			return principal, reason, false
+		}
+		return principal, "", true
+	}
 	header := strings.TrimSpace(r.Header.Get("Authorization"))
 	token, found := strings.CutPrefix(header, "Bearer ")
 	if !found {
-		return "", false
+		return assistantPrincipal{Mode: s.authMode}, "", false
 	}
 	sum := sha256.Sum256([]byte(strings.TrimSpace(token)))
 	if subtle.ConstantTimeCompare(sum[:], s.tokenHash[:]) != 1 {
-		return "", false
+		return assistantPrincipal{Mode: s.authMode}, "", false
 	}
 	if s.cf != nil {
 		identity, ok := s.cf.authenticate(r)
 		if !ok {
-			return "", false
+			return assistantPrincipal{Mode: assistantAuthModeService}, "", false
 		}
-		return identity, true
+		return assistantPrincipal{Mode: assistantAuthModeService, Label: identity}, "", true
 	}
-	return s.clientName, true
+	return assistantPrincipal{Mode: assistantAuthModeBearer, Label: s.clientName}, "", true
+}
+
+// assistantAccessProtectedResourcePath is the metadata URL Cloudflare
+// Access serves at the edge. The origin does not know the team, the
+// issuer, or the AUD. It only refuses to answer this path: a 401 would
+// block discovery, and a metadata body would shadow the edge document.
+func assistantAccessProtectedResourcePath(p string) bool {
+	return path.Clean(p) == "/.well-known/cloudflare-access-protected-resource/mcp"
 }
 
 // ServeHTTP applies auth to every request, then the MCP route table. There
-// is deliberately no unauthenticated surface at all — not even a healthz.
+// is no health check. The one path that is not authenticated is the Access
+// protected-resource path, and that path is not served.
 func (s *assistantServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	identity, ok := s.authenticate(r)
+	if assistantAccessProtectedResourcePath(r.URL.Path) {
+		s.logAudit(r.Context(), "-", r.Method+" "+r.URL.Path, "-", "-", "not_found")
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":"not_found"}`))
+		return
+	}
+	principal, reason, ok := s.authenticate(r)
+	r = r.WithContext(withAssistantPrincipal(r.Context(), principal))
 	if !ok {
-		s.logAudit("-", r.Method+" "+r.URL.Path, "-", "-", "unauthorized")
+		// The caller always sees the same generic error. Access-user
+		// failures record a distinct reason on the audit line only.
+		result := "unauthorized"
+		if reason != "" {
+			result = reason
+		}
+		s.logAudit(r.Context(), "-", r.Method+" "+r.URL.Path, "-", "-", result)
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
 		return
 	}
+	identity := principal.Label
 	if r.URL.Path != "/mcp" {
-		s.logAudit(identity, r.Method+" "+r.URL.Path, "-", "-", "not_found")
+		s.logAudit(r.Context(), identity, r.Method+" "+r.URL.Path, "-", "-", "not_found")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusNotFound)
 		_, _ = w.Write([]byte(`{"error":"not_found"}`))
@@ -427,14 +659,14 @@ func (s *assistantServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet || r.Method == http.MethodDelete {
 		// Streamable HTTP GET/DELETE manage optional server streams and
 		// sessions; this stateless server has neither (spec-legal 405).
-		s.logAudit(identity, r.Method+" /mcp", "-", "-", "method_not_allowed")
+		s.logAudit(r.Context(), identity, r.Method+" /mcp", "-", "-", "method_not_allowed")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		_, _ = w.Write([]byte(`{"error":"method_not_allowed"}`))
 		return
 	}
 	if r.Method != http.MethodPost {
-		s.logAudit(identity, r.Method+" /mcp", "-", "-", "method_not_allowed")
+		s.logAudit(r.Context(), identity, r.Method+" /mcp", "-", "-", "method_not_allowed")
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		_, _ = w.Write([]byte(`{"error":"method_not_allowed"}`))
@@ -445,11 +677,28 @@ func (s *assistantServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // logAudit writes one audit line per request/tool call. It logs only parsed,
 // whitelisted fields: never headers, never bodies, never the token.
-func (s *assistantServer) logAudit(identity, rpc, tool, subject, result string) {
+func (s *assistantServer) logAudit(ctx context.Context, identity, rpc, tool, subject, result string) {
 	if len(subject) > 160 {
 		subject = subject[:160]
 	}
-	s.audit.Info("assistant_request", "identity", identity, "rpc", rpc, "tool", tool, "subject", subject, "result", result)
+	p := assistantPrincipalFrom(ctx)
+	// "subject" on this line is the tool's target or request id. The
+	// verified principal's subject lives on principal.subject so the two
+	// cannot overwrite each other.
+	s.audit.Info("assistant_request",
+		"identity", identity,
+		"auth_mode", p.Mode,
+		"principal", assistantAuditPrincipal(p),
+		"issuer", p.Issuer,
+		"audiences", assistantAuditAudiences(p.Audiences),
+		"iss", p.Issuer,
+		"sub", p.Subject,
+		"email", assistantAuditEmail(p.Email),
+		"rpc", rpc,
+		"tool", tool,
+		"subject", subject,
+		"result", result,
+	)
 }
 
 // RunAssistantServer is the binary entry path used by cmd/panewire-assistant:
@@ -488,7 +737,7 @@ func RunAssistantServer(args []string, stderr io.Writer) int {
 		fmt.Fprintln(stderr, "panewire-assistant: listen failed")
 		return 1
 	}
-	server.logAudit("-", "startup", "-", "-", "listening "+listener.Addr().String())
+	server.logAudit(context.Background(), "-", "startup", "-", "-", "listening "+listener.Addr().String())
 	if server.hub != nil {
 		// The outbox drainer runs for the process lifetime: one pass at
 		// startup (a predecessor's crash leaves owed rows), then one per

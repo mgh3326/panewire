@@ -190,15 +190,143 @@ re-post a no-op.
 
 ## Caller-facing identity and errors
 
-Every request needs the berry bearer token (Authorization: Bearer …),
-read from a mode-0600 file and compared in constant time. When the
-optional Cloudflare Access gate is configured, a verified Access JWT is
-additionally required and its common_name must be on the configured
-service-name allowlist — the signature alone never suffices, which is the
-identity binding the hub's verifier deliberately lacks.
+`PANEWIRE_ASSISTANT_AUTH_MODE` selects the credential. The exact values
+are `bearer`, `service`, and `access-user`. Unset keeps today's
+inference: a configured service gate is service mode, otherwise bearer.
+Any other spelling refuses startup (`auth mode unknown`).
+
+Bearer mode requires `Authorization: Bearer …`, read from a mode-0600
+file and compared in constant time. Service mode requires that bearer
+and, additionally, a verified Access JWT whose `common_name` is on the
+configured service-name allowlist — the signature alone never suffices,
+which is the identity binding the hub's verifier deliberately lacks.
+An empty `iss` is still accepted in service mode, matching assertions
+minted before issuer enforcement.
+
+### Access-user mode
+
+Config value: `access-user`. This is the Cloudflare Managed OAuth (Beta)
+path for GPT Dots. The only credential is a verified
+`Cf-Access-Jwt-Assertion`. The static bearer is not required and is not
+a fallback: a request with a valid bearer and a missing or invalid
+assertion is rejected, and a valid assertion with no bearer is allowed.
+
+The assertion must verify as follows. The signature is checked against
+the configured team JWKS. `iss` is required and must equal
+`https://<team>.cloudflareaccess.com` exactly — an empty issuer is
+rejected (`iss_missing`), and a different issuer is rejected
+(`iss_mismatch`). `aud` must include this assistant's application AUD.
+`exp` and `nbf` use the same strict comparison as the service verifier
+(no added leeway). The stable principal is `(issuer, subject)`. `sub`
+must be on `PANEWIRE_ASSISTANT_CF_SUBJECTS`. Email is display only and
+is never the allowlist key. A service-token assertion (empty `sub`,
+`common_name` set) is rejected. Caller-supplied identity headers
+(`Cf-Access-Authenticated-User-Email`, `Cf-Access-Authenticated-User-Id`,
+and anything else the client can set) are ignored. The profile is not
+taken from a query parameter, `clientInfo`, `User-Agent`, a tool
+argument, or an `X-Client-*` header.
+
+On success the verifier returns a structured principal that request
+handling can read:
+
+- `mode` — `access-user`
+- `issuer` — the verified `iss`
+- `subject` — the verified `sub`
+- `audiences` — every `aud` value from the token, whether `aud` was a
+  string or a list, not only the value that matched this assistant
+- `email` — display only
+
+The auth audit line records that principal as a `principal` object
+(`mode`, `issuer`, `subject`, `audiences`, `email`). The line's
+`subject` field stays the tool's target or request id, so the two do
+not share a key. The line also records flat `auth_mode`, `issuer`,
+`audiences`, `iss`, `sub`, and `email`. The rate-limit and identity key is
+`access-user|<issuer>|<subject>` and contains neither the email nor the
+audiences. Rejections record a distinct reason on that audit line
+(`iss_missing`, `iss_mismatch`, `aud_mismatch`, `expired`,
+`not_yet_valid`, `bad_signature`, `unknown_kid`,
+`subject_not_allowlisted`, `service_token`, `assertion_missing`,
+`jwks_unavailable`) and return the generic `{"error":"unauthorized"}`
+to the caller. A JWKS fetch failure denies the request. No log line,
+error, or tool result contains the bearer, the assertion, or the JWKS
+body.
+
+Access-user does not forward that principal to handoffkeep. Write calls
+do not run in this mode, so there is no resolve body and no chat body
+to attach it to. Bearer and service writes still do not add a principal
+field: hk has no field that stores one, and an unknown field is rejected.
+
+Access-user startup refuses, with a named error, when the team domain,
+AUD, JWKS URL, or subject allowlist is missing. The JWKS URL is not
+defaulted in this mode.
+
+Writes are forcibly blocked in this mode. `answer`, `deliver`, and `all`
+do not list `answer_decision`, `answer_question`, or `deliver`, and
+initialize does not advertise them. A call to any of those tools returns
+`writes_blocked_access_user` before the targets file is read and before
+any handoffkeep or hub call. The hub client and the outbox drainer are
+not started. Bearer and service modes keep today's write behaviour,
+including `writes_disabled` for a tool outside the configured set. The
+literal flag value `1` is not legal and still refuses startup
+(`assistant writes flag must be answer, deliver or all`). This mode does
+not enable writes. Profiles, tool families, a policy engine, and an
+OAuth server are later work; this principal is the input they will use.
+
+#### Origin paths
+
+The origin serves `POST /mcp` only. That path is the MCP handshake
+(`initialize`, `ping`, `tools/list`) and the tool calls. A request that
+carries a valid `Cf-Access-Jwt-Assertion` and no `Authorization` header
+and no extra identity header reaches `initialize` and the read tools.
+
+`GET /mcp` and `DELETE /mcp` answer 405. Every other path answers 404.
+There is no health check. Every request is authenticated first, except
+the protected-resource path below.
+
+The exception is `/.well-known/cloudflare-access-protected-resource/mcp`.
+Cloudflare Access serves that metadata at the edge, in front of the
+origin, for the public hostname. The origin does not authenticate that
+path and does not write a metadata body: an unauthenticated request that
+reaches the origin answers 404 `{"error":"not_found"}`, with no
+`WWW-Authenticate` header. A 401 would block discovery. A metadata
+document would shadow the edge. The path is client discovery at the
+edge. It is not an authorization input, and it is not proof of which
+product holds the token. The public hostname (Access and Managed OAuth
+at the edge) and the tunnel ingress (this process's listen address,
+`127.0.0.1:9471`) are recorded in the example config, not here.
+
+#### Example config
+
+The binary does not special-case the team or the AUD. The issuer shape
+is `https://<team>.cloudflareaccess.com`. Public markdown cannot repeat
+a live issuer host (`TestDocsContainNoOperationalLiterals` rejects
+host-shaped tokens in every `.md` file). The concrete dots values —
+public hostname, issuer, AUD, ingress, and protected-resource path —
+are in the example config
+`docs/assistant-access-user.example`, which this binary does not read.
+The hostname and the issuer host are only in that file.
+
+The dots AUD is
+`f405a0dce64192eff061a4a0acef6a145242fd94684f39d547c5e6f7a59012fb`.
+
+Protected-resource path, served by Cloudflare Access and not by this
+binary: `/.well-known/cloudflare-access-protected-resource/mcp`.
+
+#### Operator console steps (later, not part of this change)
+
+Do these in the Cloudflare dashboard after this binary is deployed.
+Never reuse the hub's Access application.
+
+1. Create a new Public DNS application for this assistant only.
+2. Attach an operator-only Allow policy.
+3. In the application's advanced settings, turn Managed OAuth on.
+4. Turn localhost and loopback OAuth clients off.
+5. Set the redirect URI to the ChatGPT callback only.
+6. Set the access-token lifetime to 15 minutes.
 
 Tool failures return named errors (unknown_target, request_not_found,
-targets_file_invalid, invalid_arguments, writes_disabled, rate_limited,
+targets_file_invalid, invalid_arguments, writes_disabled,
+writes_blocked_access_user, rate_limited,
 hk_unreachable, hk_rejected_http_*, hk_response_*, plus the write names
 above). Resolution text, receipt text and resolver identity are
 human-channel data: the resolution receipt carries only kind, responder
@@ -220,9 +348,12 @@ One mode-0600 env file (-config):
 - PANEWIRE_ASSISTANT_HUB_URL / _TOKEN — the hub operator credential the
   deliver tool and the drainer post lane.events with; required together
   or neither. With any enabled write value (answer, deliver or all) the
-  pair is mandatory — startup is refused without it. With writes off the
-  pair may be absent, or present and entirely unused (no hub client is
-  built and no drainer starts).
+  pair is mandatory — startup is refused without it, including in
+  access-user mode. With writes off the pair may be absent, or present
+  and entirely unused (no hub client is built and no drainer starts).
+  In access-user mode the pair may be required by that check and is
+  still unused: the hub client is not built and the drainer does not
+  start, and write calls return writes_blocked_access_user.
 - PANEWIRE_ASSISTANT_WRITES — exact values only: `answer`, `deliver`,
   `all`, or off via `0`/`false`/`no`/`off`/unset; anything else refuses
   startup.
@@ -231,22 +362,39 @@ One mode-0600 env file (-config):
 - PANEWIRE_ASSISTANT_WRITE_RATE_PER_MIN — sustained write limit per
   caller identity, default 10.
 - PANEWIRE_ASSISTANT_WRITE_BURST — per-identity burst, default 5.
+- PANEWIRE_ASSISTANT_AUTH_MODE — exact values `bearer`, `service`,
+  `access-user`, or unset (inferred). Anything else refuses startup
+  with `auth mode unknown`.
 - PANEWIRE_ASSISTANT_TOKEN_FILE — the berry bearer token file (mode
-  0600). The token is read once at startup and held hashed in memory, so
-  rotating it requires a process restart (the binary is stateless;
-  restart is free).
+  0600), required in bearer and service modes. Not required in
+  access-user mode; a file that is present is checked and then ignored
+  for authorization. The token is read once at startup and held hashed
+  in memory, so rotating it requires a process restart (the binary is
+  stateless; restart is free).
 - PANEWIRE_ASSISTANT_TARGETS_FILE — the targets mapping (mode 0600); see
   below.
 - PANEWIRE_ASSISTANT_LISTEN — bind address; default 127.0.0.1:9471.
 - PANEWIRE_ASSISTANT_CLIENT_NAME — audit label for bearer-only requests.
 - PANEWIRE_ASSISTANT_CF_TEAM, PANEWIRE_ASSISTANT_CF_AUD,
-  PANEWIRE_ASSISTANT_CF_SERVICE_NAMES — the optional inbound Access
-  gate; all-or-nothing, comma-separated common_name allowlist.
-- PANEWIRE_ASSISTANT_CF_CERTS_URL — optional certs endpoint override for
-  the inbound Access verifier.
+  PANEWIRE_ASSISTANT_CF_SERVICE_NAMES — the service-mode Access gate;
+  all-or-nothing, comma-separated common_name allowlist. In access-user
+  mode the team and AUD are required and the service-name list is not
+  consulted.
+- PANEWIRE_ASSISTANT_CF_CERTS_URL — JWKS URL. Optional override in
+  service mode (the team default is used when unset). Required in
+  access-user mode (`access-user mode requires jwks url` when missing).
+- PANEWIRE_ASSISTANT_CF_SUBJECTS — access-user allowlist of stable
+  `sub` values, comma-separated. The principal key is `(iss, sub)`.
+  Email is not an entry. Empty refuses startup
+  (`access-user mode requires subject allowlist`). Ignored unless the
+  mode is `access-user`.
 
-Every request is audit-logged (service identity, RPC/tool, target or
-request id, result). Every write attempt additionally logs the tool,
+Every request is audit-logged (identity, auth_mode, the principal
+object, issuer, audiences, iss, sub, email display, RPC/tool, target or
+request id in `subject`, result). Access-user tool calls carry the
+verified principal there. `audiences` is every aud value from the token.
+Every write attempt
+additionally logs the tool,
 subject id, idempotency key or event id, revision, outcome class, hub row
 id and a sha-256/8 text hash; answer_decision calls also log the
 provenance — a vocabulary value verbatim, anything else as the fixed token `invalid`,

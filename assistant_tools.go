@@ -142,6 +142,12 @@ func decodeAssistantArgs(raw json.RawMessage, v any) error {
 // closed with targets_file_invalid.
 func (s *assistantServer) callAssistantTool(ctx context.Context, identity, name string, args json.RawMessage) (any, error) {
 	if assistantToolIsWrite(name) {
+		// Access-user fails closed before the writes-set check, the targets
+		// file, and any hk or hub call. The named error is not writes_disabled:
+		// the flag may be on, and the block is what stops the call.
+		if accessUserWritesBlocked(s.authMode) {
+			return nil, errAssistantWritesBlockedAccessUser
+		}
 		// A write tool outside the enabled set fails closed before any
 		// request — the flag is a set, so an answer-only binary answers
 		// writes_disabled to deliver too, never unknown_tool.

@@ -57,14 +57,15 @@ var (
 )
 
 var (
-	errAssistantWritesDisabled      = toolError("writes_disabled")
-	errAssistantUndeliverable       = toolError("target_not_deliverable")
-	errAssistantTextTooLong         = toolError("text_too_long")
-	errAssistantIdempotencyConflict = toolError("idempotency_conflict")
-	errAssistantInFlightRetry       = toolError("in_flight_retry")
-	errAssistantInvalidAnswer       = toolError("invalid_answer")
-	errAssistantRateLimited         = toolError("rate_limited")
-	errAssistantSlotTaken           = toolError("question_slot_taken")
+	errAssistantWritesDisabled          = toolError("writes_disabled")
+	errAssistantWritesBlockedAccessUser = toolError("writes_blocked_access_user")
+	errAssistantUndeliverable           = toolError("target_not_deliverable")
+	errAssistantTextTooLong             = toolError("text_too_long")
+	errAssistantIdempotencyConflict     = toolError("idempotency_conflict")
+	errAssistantInFlightRetry           = toolError("in_flight_retry")
+	errAssistantInvalidAnswer           = toolError("invalid_answer")
+	errAssistantRateLimited             = toolError("rate_limited")
+	errAssistantSlotTaken               = toolError("question_slot_taken")
 	// errAssistantProvenanceRefMismatch is the local verdict for a
 	// decision_ref that does not equal request_id — the same name
 	// handoffkeep answers a mismatched or missing ref with (PR-4 contract).
@@ -307,8 +308,9 @@ func textSHA8(text string) string {
 // quote's length and sha8 — never the text or the quote itself, a token or
 // an upstream URL. A provenance outside the closed vocabulary is caller
 // free text (quote text could be pasted into the wrong field), so it logs
-// as the fixed token "invalid", never the caller value.
-func (s *assistantServer) logAuditWrite(identity, tool, subject, key, eventID string, revision int, outcome string, hubRowID int64, sha8, provenance string, quoteLen int, quoteSHA8 string) {
+// as the fixed token "invalid", never the caller value. The verified
+// principal is read from the request context and stays on this line.
+func (s *assistantServer) logAuditWrite(ctx context.Context, identity, tool, subject, key, eventID string, revision int, outcome string, hubRowID int64, sha8, provenance string, quoteLen int, quoteSHA8 string) {
 	if len(subject) > 160 {
 		subject = subject[:160]
 	}
@@ -324,7 +326,25 @@ func (s *assistantServer) logAuditWrite(identity, tool, subject, key, eventID st
 	if len(provenance) > 32 {
 		provenance = provenance[:32]
 	}
-	attrs := []any{"identity", identity, "tool", tool, "subject", subject, "idempotency_key", key, "event_id", eventID, "revision", revision, "outcome", outcome, "hub_row_id", hubRowID, "text_sha8", sha8}
+	p := assistantPrincipalFrom(ctx)
+	attrs := []any{
+		"identity", identity,
+		"auth_mode", p.Mode,
+		"principal", assistantAuditPrincipal(p),
+		"issuer", p.Issuer,
+		"audiences", assistantAuditAudiences(p.Audiences),
+		"iss", p.Issuer,
+		"sub", p.Subject,
+		"email", assistantAuditEmail(p.Email),
+		"tool", tool,
+		"subject", subject,
+		"idempotency_key", key,
+		"event_id", eventID,
+		"revision", revision,
+		"outcome", outcome,
+		"hub_row_id", hubRowID,
+		"text_sha8", sha8,
+	}
 	if provenance != "" {
 		attrs = append(attrs, "provenance", provenance, "quote_len", quoteLen, "quote_sha8", quoteSHA8)
 	}
@@ -461,7 +481,7 @@ var assistantDeliverLeadingBlankRunes = map[rune]bool{
 // call so a quote for one decision can never answer another. The fields
 // cross to handoffkeep unchanged; a quote is never synthesized.
 // Attribution never crosses (the request struct has no field that could
-// carry it).
+// carry it). Access-user mode never reaches this function.
 func (s *assistantServer) toolAnswerDecision(ctx context.Context, identity, requestID, option, text, provenance, operatorQuote, decisionRef string, targets map[string]assistantTarget) (result any, err error) {
 	resultClass := "internal_error"
 	eventID := requestID + "-answered"
@@ -477,7 +497,7 @@ func (s *assistantServer) toolAnswerDecision(ctx context.Context, identity, requ
 		if operatorQuote != "" {
 			quoteSHA8 = textSHA8(operatorQuote)
 		}
-		s.logAuditWrite(identity, "answer_decision", requestID, "", eventID, 0, resultClass, 0, textSHA8(text), effectiveProvenance, len(operatorQuote), quoteSHA8)
+		s.logAuditWrite(ctx, identity, "answer_decision", requestID, "", eventID, 0, resultClass, 0, textSHA8(text), effectiveProvenance, len(operatorQuote), quoteSHA8)
 	}()
 	match := assistantRequestIDPattern.FindStringSubmatch(requestID)
 	if match == nil {
@@ -560,7 +580,7 @@ func (s *assistantServer) toolAnswerQuestion(ctx context.Context, identity, ques
 		if err != nil {
 			resultClass = err.Error()
 		}
-		s.logAuditWrite(identity, "answer_question", questionID, "", eventID, revision, resultClass, 0, textSHA8(text), "", 0, "")
+		s.logAuditWrite(ctx, identity, "answer_question", questionID, "", eventID, revision, resultClass, 0, textSHA8(text), "", 0, "")
 	}()
 	if !assistantQuestionIDPattern.MatchString(questionID) {
 		return nil, errAssistantRequestNotFound
@@ -592,6 +612,9 @@ func (s *assistantServer) toolAnswerQuestion(ctx context.Context, identity, ques
 	// identical answer dedupes into the same row; a retried different
 	// answer is an idempotency conflict, never a second message.
 	origin := "berry-answer-" + questionID + "-rev" + strconv.Itoa(revision)
+	// Same rule as answer_decision: Access-user never reaches this call.
+	// The chat body has no principal field (author stays the pinned
+	// operator). Bearer and service modes keep the principal in the audit.
 	status, payload, err := s.hk.postAssistantChatAnswer(ctx, q.ConversationID, questionID, revision, text, origin)
 	if err != nil {
 		return nil, err
@@ -671,7 +694,7 @@ func (s *assistantServer) toolDeliver(ctx context.Context, identity, targetID, k
 		if err != nil {
 			resultClass = err.Error()
 		}
-		s.logAuditWrite(identity, "deliver", targetID, key, eventID, 0, resultClass, hubRow, sha8, "", 0, "")
+		s.logAuditWrite(ctx, identity, "deliver", targetID, key, eventID, 0, resultClass, hubRow, sha8, "", 0, "")
 	}()
 	target, ok := targets[targetID]
 	if !ok {
@@ -778,14 +801,14 @@ func (s *assistantServer) drainPass(ctx context.Context) (sent map[string]int64)
 	sent = map[string]int64{}
 	defer func() {
 		if recover() != nil {
-			s.logAudit("-", "drain", "drain", "-", "drain_panic")
+			s.logAudit(ctx, "-", "drain", "drain", "-", "drain_panic")
 		}
 	}()
 	seen := map[string]bool{}
 	for {
 		rows, err := s.hk.outbox(ctx, assistantOutboxLimit)
 		if err != nil {
-			s.logAudit("-", "drain", "drain", "-", "outbox_read:"+err.Error())
+			s.logAudit(ctx, "-", "drain", "drain", "-", "outbox_read:"+err.Error())
 			return sent
 		}
 		fresh := 0
@@ -816,25 +839,25 @@ func (s *assistantServer) drainRow(ctx context.Context, row assistantOutboxRow, 
 	sha8 := textSHA8(text)
 	id, _, err := s.hub.postRelayEvent(ctx, row.TargetLane, row.EventID, text, assistantHubLabel)
 	if err != nil {
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "hub_error:"+err.Error(), 0, sha8, "", 0, "")
+		s.logAuditWrite(ctx, "drainer", "drain", row.TargetLane, "", row.EventID, 0, "hub_error:"+err.Error(), 0, sha8, "", 0, "")
 		return
 	}
 	if id < 1 {
 		// The standing rule: a 409 racing an in-flight claim, or any reply
 		// whose id is 0 or missing, is NEVER sent — the row stays owed and
 		// the next pass retries with the same event id.
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "receipt_missing", 0, sha8, "", 0, "")
+		s.logAuditWrite(ctx, "drainer", "drain", row.TargetLane, "", row.EventID, 0, "receipt_missing", 0, sha8, "", 0, "")
 		return
 	}
 	status, payload, err := s.hk.outboxMarkSent(ctx, row.EventID, id)
 	if err != nil {
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "hk_error:"+err.Error(), id, sha8, "", 0, "")
+		s.logAuditWrite(ctx, "drainer", "drain", row.TargetLane, "", row.EventID, 0, "hk_error:"+err.Error(), id, sha8, "", 0, "")
 		return
 	}
 	switch {
 	case status == http.StatusOK:
 		sent[row.EventID] = id
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "sent", id, sha8, "", 0, "")
+		s.logAuditWrite(ctx, "drainer", "drain", row.TargetLane, "", row.EventID, 0, "sent", id, sha8, "", 0, "")
 	case status == http.StatusConflict:
 		// notification_outbox_conflict: a racing drain already marked this
 		// row with a different hub id — the row is sent, just not by this
@@ -844,9 +867,9 @@ func (s *assistantServer) drainRow(ctx context.Context, row assistantOutboxRow, 
 	case status == http.StatusNotFound:
 		// The outbox row vanished between the list and the mark — nothing
 		// remains owed.
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "row_gone", id, sha8, "", 0, "")
+		s.logAuditWrite(ctx, "drainer", "drain", row.TargetLane, "", row.EventID, 0, "row_gone", id, sha8, "", 0, "")
 	default:
-		s.logAuditWrite("drainer", "drain", row.TargetLane, "", row.EventID, 0, "hk_error:"+mapAssistantWriteError(status, payload, nil).Error(), id, sha8, "", 0, "")
+		s.logAuditWrite(ctx, "drainer", "drain", row.TargetLane, "", row.EventID, 0, "hk_error:"+mapAssistantWriteError(status, payload, nil).Error(), id, sha8, "", 0, "")
 	}
 }
 

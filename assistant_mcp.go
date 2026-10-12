@@ -55,27 +55,28 @@ const (
 // serveMCP handles one authenticated POST. Requests are bounded and the
 // response is a single JSON-RPC message — never an SSE stream.
 func (s *assistantServer) serveMCP(w http.ResponseWriter, r *http.Request, identity string) {
+	ctx := r.Context()
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, assistantMaxRequestBytes))
 	if err != nil {
-		s.logAudit(identity, "parse", "-", "-", "request_too_large")
+		s.logAudit(ctx, identity, "parse", "-", "-", "request_too_large")
 		s.writeRPCError(w, nil, rpcInvalidRequest, "request_too_large")
 		return
 	}
 	var request assistantRPCRequest
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	if err := decoder.Decode(&request); err != nil {
-		s.logAudit(identity, "parse", "-", "-", "parse_error")
+		s.logAudit(ctx, identity, "parse", "-", "-", "parse_error")
 		s.writeRPCError(w, nil, rpcParseError, "parse_error")
 		return
 	}
 	if request.JSONRPC != "2.0" {
-		s.logAudit(identity, "dispatch", "-", "-", "invalid_request")
+		s.logAudit(ctx, identity, "dispatch", "-", "-", "invalid_request")
 		s.writeRPCError(w, request.ID, rpcInvalidRequest, "invalid_request")
 		return
 	}
 	// Notifications carry no id and get no response body — 202 ends them.
 	if len(request.ID) == 0 || string(request.ID) == "null" {
-		s.logAudit(identity, request.Method, "-", "-", "notified")
+		s.logAudit(ctx, identity, request.Method, "-", "-", "notified")
 		w.WriteHeader(http.StatusAccepted)
 		return
 	}
@@ -109,14 +110,14 @@ func (s *assistantServer) dispatchRPC(ctx context.Context, identity string, requ
 	// dropped connection with a stack in stderr.
 	defer func() {
 		if recover() != nil {
-			s.logAudit(identity, request.Method, "-", "-", "internal_error")
+			s.logAudit(ctx, identity, request.Method, "-", "-", "internal_error")
 			result = nil
 			rpcErr = &assistantRPCError{Code: rpcInternalError, Message: "internal_error"}
 		}
 	}()
 	switch request.Method {
 	case "initialize":
-		s.logAudit(identity, "initialize", "-", "-", "ok")
+		s.logAudit(ctx, identity, "initialize", "-", "-", "ok")
 		// Negotiation: echo the client's version when it offers one — the
 		// server speaks the same surface regardless.
 		version := assistantProtocolVersion
@@ -133,15 +134,15 @@ func (s *assistantServer) dispatchRPC(ctx context.Context, identity string, requ
 			"instructions":    s.instructions(),
 		}, nil
 	case "ping":
-		s.logAudit(identity, "ping", "-", "-", "ok")
+		s.logAudit(ctx, identity, "ping", "-", "-", "ok")
 		return map[string]any{}, nil
 	case "tools/list":
-		s.logAudit(identity, "tools/list", "-", "-", "ok")
-		return map[string]any{"tools": assistantToolList(s.writes)}, nil
+		s.logAudit(ctx, identity, "tools/list", "-", "-", "ok")
+		return map[string]any{"tools": s.listedTools()}, nil
 	case "tools/call":
 		return s.dispatchToolCall(ctx, identity, request.Params)
 	default:
-		s.logAudit(identity, request.Method, "-", "-", "method_not_found")
+		s.logAudit(ctx, identity, request.Method, "-", "-", "method_not_found")
 		return nil, &assistantRPCError{Code: rpcMethodNotFound, Message: "method_not_found"}
 	}
 }
@@ -158,24 +159,24 @@ func (s *assistantServer) dispatchToolCall(ctx context.Context, identity string,
 	// stays out of both (and out of the response entirely).
 	defer func() {
 		if recover() != nil {
-			s.logAudit(identity, "tools/call", toolName, subject, "internal_error")
+			s.logAudit(ctx, identity, "tools/call", toolName, subject, "internal_error")
 			result = nil
 			rpcErr = &assistantRPCError{Code: rpcInternalError, Message: "internal_error"}
 		}
 	}()
 	if err := json.Unmarshal(params, &call); err != nil || call.Name == "" {
-		s.logAudit(identity, "tools/call", "-", "-", "invalid_params")
+		s.logAudit(ctx, identity, "tools/call", "-", "-", "invalid_params")
 		return nil, &assistantRPCError{Code: rpcInvalidParams, Message: "invalid_params"}
 	}
 	toolName = call.Name
 	if !assistantToolKnown(call.Name) {
-		s.logAudit(identity, "tools/call", call.Name, "-", "unknown_tool")
+		s.logAudit(ctx, identity, "tools/call", call.Name, "-", "unknown_tool")
 		return nil, &assistantRPCError{Code: rpcInvalidParams, Message: "unknown_tool"}
 	}
 	subject = toolSubject(call.Name, call.Arguments)
 	result, toolErr := s.callAssistantTool(ctx, identity, call.Name, call.Arguments)
 	if toolErr != nil {
-		s.logAudit(identity, "tools/call", call.Name, subject, toolErr.Error())
+		s.logAudit(ctx, identity, "tools/call", call.Name, subject, toolErr.Error())
 		errObject := map[string]any{"error": toolErr.Error()}
 		if withDetail, ok := toolErr.(*assistantDetailError); ok {
 			for k, v := range withDetail.detail {
@@ -188,7 +189,7 @@ func (s *assistantServer) dispatchToolCall(ctx context.Context, identity string,
 			"isError": true,
 		}, nil
 	}
-	s.logAudit(identity, "tools/call", call.Name, subject, "ok")
+	s.logAudit(ctx, identity, "tools/call", call.Name, subject, "ok")
 	text, err := json.Marshal(result)
 	if err != nil {
 		return nil, &assistantRPCError{Code: rpcInvalidParams, Message: "internal"}
@@ -199,11 +200,24 @@ func (s *assistantServer) dispatchToolCall(ctx context.Context, identity string,
 	}, nil
 }
 
+// listedTools is the tools/list payload. Access-user omits write tools
+// even when the writes set is on. Bearer and service use the set as before.
+func (s *assistantServer) listedTools() []map[string]any {
+	if accessUserWritesBlocked(s.authMode) {
+		return assistantReadToolList()
+	}
+	return assistantToolList(s.writes)
+}
+
 // instructions is the initialize reply's surface description: the no-push
 // contract verbatim, the read tools always, and the enabled write tools by
 // name so a caller never has to guess which half of the flag is on.
+// Access-user does not advertise write tools.
 func (s *assistantServer) instructions() string {
 	out := assistantPollContract + " Read tools: targets, pending_list, pending_detail, progress, poll."
+	if accessUserWritesBlocked(s.authMode) {
+		return out
+	}
 	var writeNames []string
 	for _, tool := range assistantWriteToolList() {
 		if name, _ := tool["name"].(string); s.writeEnabled(name) {
