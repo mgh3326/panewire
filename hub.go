@@ -1411,14 +1411,20 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 	if message.Kind == "relay.unconfirmed" {
 		// The durable mark must land before the live window is retired
 		// (#1002): a crash between the two cannot lose it, and a repeated
-		// report simply collides with the marker row already written.
+		// report simply collides with the marker row already written. When
+		// the mark write fails the window is kept instead of consumed
+		// (#1034): it still ends by ack, a repeated report, or the ack
+		// timeout, like any other live window — consuming it here would
+		// silently demote the row to the unlabelled ordinary replay.
 		key, pending, acknowledged := h.peekRelayPending(machineID, ack)
 		if !acknowledged {
 			h.logger.Warn("relay unconfirmed report matched no live window", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "reason", ack.Reason)
 			h.countUnknownMessage()
 			return
 		}
-		h.markRelayEventUnconfirmed(pending)
+		if !h.markRelayEventUnconfirmed(pending) {
+			return
+		}
 		h.consumeRelayPending(key)
 		// Logging it keeps a dropped-ack diagnosis greppable.
 		h.logger.Warn("relay delivery unconfirmed", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "event_id", pending.eventID, "reason", ack.Reason)

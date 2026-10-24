@@ -140,7 +140,7 @@ spends an attempt, the hub closes these rows. Each gets a `delivered_to` of
 
 Chat rows keep the chat store as their only authority and skip this gate.
 
-**An unproven pane submission is replayed at most once (#1002).** A
+**An unproven pane submission is replayed at most once (#1002, #1034).** A
 `relay.unconfirmed` report that matches a live window still retires the
 window, but first writes a durable marker: a `lane.event` row on the
 `hub/unconfirmed` lane — a name that can match neither a real lane nor an
@@ -151,26 +151,36 @@ would remove the row from the undelivered listing before its one replay and
 would burn the first-write-wins `delivered_to` a late proof needs. The marker
 row, not the original, therefore carries the mark, and the marked row stays an
 ordinary undelivered row so a late `relay.delivered` still closes it under the
-real machine/pane.
+real machine/pane. If the marker write itself fails the window is kept, not
+retired: a repeated report retries the mark, and the ack timeout decides
+otherwise, exactly as for any other live window.
 
 On startup and on the node-registration replay the hub collects the live
 markers from the `lane.event` undelivered listing, then walks the pages as
-before. A marked row gets exactly one replay whose pane text is prefixed
+before. A marked row gets **at most one** replay whose pane text is prefixed
 `[replayed after hub restart - first sent <original time in KST> - may be a
 duplicate, do not re-run]` — the original send named by the row's `event_time`
-(`received_at` for older rows) — and is retired immediately after the inject
-is attempted, `delivered_to` `hub/replay-retired:unconfirmed`, whatever the
-replay's outcome: delivered, unconfirmed again, held, or failed. The spent
-marker then retires with `hub/replay-retired:unconfirmed-mark`; a marker
-whose original is already delivered, exhausted, or gone retires on sight, and
-a marked replay that never clears the pre-queue gates (chat store, age,
-attempts, route) leaves the mark pending for a later trigger. Every other row
-class — never-attempted, held, exhausted, chat, sink — replays exactly as
-before.
+(`received_at` for older rows) — and no labelled copy is ever queued until
+the durable retire for that row has already succeeded. Once the listed row
+clears the pre-queue gates (chat store, age, attempts, dedupe, route) the
+walk re-reads it — a listing page is stale the moment it is taken — and a
+row that is delivered, retired, or gone is left to its marker rather than
+injected. Only then is the retire written, `delivered_to`
+`hub/replay-retired:unconfirmed`. A failed retire spends nothing: the mark
+stays pending and the next trigger retries the whole sequence, so a store
+that keeps refusing the write defers the replay instead of repeating it
+every restart. When the retire lands but the injection queue refuses the
+directive, the one replay is spent without reaching a pane — the hub
+broadcasts `relay.unrouted` and logs one warning naming the row, and never
+re-marks it. The spent marker then retires with
+`hub/replay-retired:unconfirmed-mark`; a marker whose original is already
+delivered, exhausted, or gone retires on sight. Every other row class —
+never-attempted, held, exhausted, chat, sink — replays exactly as before.
 
 The lane-stall observation counts a marked row as ordinary backlog until its
-one replay retires it — bounded by the next restart, never forever. The
-marker row itself is on an unroutable lane and never counts.
+one replay retires it — bounded by the next trigger that can route the row,
+never forever. The marker row itself is on an unroutable lane and never
+counts.
 
 **A successful replay is announced too (#961).** Once a re-injection has
 cleared every gate — the delivered and retired rows, the chat gate, the age

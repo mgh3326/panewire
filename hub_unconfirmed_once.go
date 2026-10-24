@@ -72,10 +72,16 @@ func relayUnconfirmedLabel(record handoffkeepRelayEvent) string {
 // markRelayEventUnconfirmed writes the durable marker for the row a live
 // ack window names, before the window itself is retired: a hub crash between
 // the two steps loses nothing — the mark is already durable, and the still-
-// live window simply marks idempotently on a repeated report.
-func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) {
+// live window simply marks idempotently on a repeated report. It reports
+// whether the window may be retired: true once the mark is durable and also
+// when there is nothing to mark (no durable row, an unknown row, an already
+// delivered row, or no store at all — the window's old outcome). Only a mark
+// that was needed and could not be written returns false, and the handler
+// then keeps the window so a repeated report — or the ack timeout — decides,
+// like any other live window (#1034).
+func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) bool {
 	if h.handoffkeep == nil {
-		return
+		return true
 	}
 	ctx := context.Background()
 	eventID := pending.eventID
@@ -97,21 +103,24 @@ func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) {
 	}
 	if eventID == 0 {
 		h.logger.Warn("relay unconfirmed named no durable row", "job", pending.event.JobID, "kind", pending.kind, "machine", pending.machine, "pane", pending.pane)
-		return
+		return true
 	}
 	record, found, err := h.handoffkeep.relayEvent(ctx, eventID)
 	if err != nil {
+		// The read cannot tell whether a mark is needed, so nothing durable
+		// was written: the window is kept for a repeated report, like a
+		// failed marker POST.
 		h.logger.Warn("relay unconfirmed mark could not be read", "event_id", eventID)
-		return
+		return false
 	}
 	if !found {
 		h.logger.Warn("relay unconfirmed named an unknown durable row", "event_id", eventID)
-		return
+		return true
 	}
 	if record.DeliveredAt != "" {
 		// The row already closed — typically the second unconfirmed on a row
 		// the one labelled replay just retired. There is nothing to mark.
-		return
+		return true
 	}
 	markID := unconfirmedMarkEventID(record.ID)
 	mark := hubJobEventPayload{
@@ -123,9 +132,10 @@ func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) {
 	}
 	if _, _, persisted := h.persistRelayEventRecord(ctx, "lane.event", mark, reportRelayRoute{}); !persisted {
 		h.logger.Warn("relay unconfirmed mark was not persisted", "event_id", record.ID)
-		return
+		return false
 	}
 	h.logger.Info("relay row marked unconfirmed for one labelled replay", "event_id", record.ID, "kind", record.Kind, "lane", record.OwnerLane, "job", record.JobID)
+	return true
 }
 
 // unconfirmedMarkOrigins walks the undelivered listing once and returns the
@@ -160,12 +170,18 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (map[int64]bool,
 }
 
 // replayMarkedUnconfirmed gives a marked row its one labelled replay. The
-// gates ahead of the queue match replayRelayEvent exactly; the difference is
-// the label on the directive text and the retire that follows the queue:
-// once the replay is attempted the row closes whatever its outcome, so no
-// later restart can inject it. A refusal before the queue (chat store, age,
-// attempts, route) leaves the mark pending for a later trigger.
+// gates ahead of the queue match replayRelayEvent exactly; the differences
+// are the label on the directive text and the write order at the end: the
+// durable retire is spent BEFORE any copy is queued, so a failed retire
+// defers the replay to the next trigger instead of repeating it every
+// restart, and a crash or queue failure between the retire and the queue
+// can never leave the row open for another labelled inject (#1034). The
+// rule is: no labelled copy is ever queued unless the durable retire for
+// that row has already succeeded.
 func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffkeepRelayEvent, source string) {
+	if h.handoffkeep == nil {
+		return
+	}
 	event := relayEventFromRecord(record)
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
@@ -216,20 +232,45 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 		h.broadcastRelayUnrouted(event)
 		return
 	}
+	// The listing page is stale the moment it is read: another walk — or a
+	// late delivery — may have closed this row since, and an ack timeout may
+	// have released the dedupe claim it held. The row is re-read before its
+	// one replay is spent; delivered, retired, or gone all end the replay
+	// here instead of in a pane (#1034).
+	latest, found, err := h.handoffkeep.relayEvent(ctx, record.ID)
+	if err != nil {
+		h.forgetRelayEvent(key)
+		h.logger.Warn("unconfirmed replay could not re-read its row", "event_id", record.ID)
+		return
+	}
+	if !found || latest.DeliveredAt != "" || strings.HasPrefix(latest.DeliveredTo, relayReplayRetiredMarker) {
+		h.forgetRelayEvent(key)
+		return
+	}
+	// Spend before inject: the retire write is what bounds the row to one
+	// labelled replay, so it must be durable before any copy is queued. A
+	// failed retire spends nothing — the claim and any ack registration are
+	// released exactly as the queue-failure path releases them, the mark
+	// stays pending, and the next trigger retries the whole sequence.
+	if err := h.handoffkeep.markDelivered(ctx, record.ID, relayReplayRetiredMachine, relayReplayRetiredPane+relayUnconfirmedRetireReason); err != nil {
+		h.forgetRelayEvent(key)
+		h.forgetRelayAckEvent(record.ID, event.JobID)
+		h.logger.Warn("unconfirmed replay could not retire its row", "event_id", record.ID)
+		return
+	}
 	h.registerRelayAckEvent(record.Kind, event, route.Machine, route.Pane, record.ID)
 	directive := relayInjectDirective(record.Kind, event, route, record.ID)
 	directive.Text = relayUnconfirmedLabel(record) + directive.Text
 	if !agent.queueRelay(directive) {
 		h.forgetRelayEvent(key)
 		h.forgetRelayAckEvent(record.ID, event.JobID)
+		// The durable retire already spent the one replay, so nothing may be
+		// queued now and no later trigger may inject it.
+		h.logger.Warn("unconfirmed replay was retired but never queued", "event_id", record.ID, "machine", route.Machine, "pane", route.Pane)
 		h.broadcastRelayUnrouted(event)
 		return
 	}
 	h.armRelayAckEvent(record.ID, event.JobID)
-	// The one replay is spent the moment it is attempted: delivered,
-	// unconfirmed again, held, or failed, the row closes now and no later
-	// restart can inject it.
-	h.retireReplayedUnconfirmed(record)
 	if record.Kind == "lane.event" {
 		if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
 			if chatID, err := strconv.ParseInt(match[1], 10, 64); err == nil {
@@ -243,18 +284,6 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 	}
 	h.logger.Info("relay unconfirmed replay injected", "event_id", record.ID, "kind", record.Kind, "lane", record.OwnerLane, "machine", route.Machine, "pane", route.Pane, "first_sent", firstSent, "source", source)
 	h.broadcastRelayReplayInjected(record, route, record.Attempts, source)
-}
-
-// retireReplayedUnconfirmed closes the marked row after its one replay under
-// the same delivered_to retire scheme other retired rows use. A failed write
-// leaves the row pending and the next trigger retries it.
-func (h *HubServer) retireReplayedUnconfirmed(record handoffkeepRelayEvent) {
-	if h.handoffkeep == nil {
-		return
-	}
-	if err := h.handoffkeep.markDelivered(context.Background(), record.ID, relayReplayRetiredMachine, relayReplayRetiredPane+relayUnconfirmedRetireReason); err != nil {
-		h.logger.Warn("unconfirmed replay could not retire its row", "event_id", record.ID)
-	}
 }
 
 // settleUnconfirmedMarker keeps a marker alive only while the row it names
