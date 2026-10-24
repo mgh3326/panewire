@@ -45,6 +45,12 @@ type fakeHandoffkeep struct {
 	// owner_lane equals it — e.g. the hub/unconfirmed marker lane, to make
 	// only the marker write fail (#1034).
 	failPostOwnerLane string
+	// failGetKind, when set, fails GET /v1/relay/events listings whose kind
+	// query equals it and that are not the undelivered listing — the
+	// transport-id lookup the unconfirmed mark makes through
+	// listRelayEvents, while the by-id re-read (no kind) and the undelivered
+	// listing still succeed (#1034).
+	failGetKind string
 	// retiredMarkerStaysUndelivered models a listed row that already carries
 	// the retire marker: a /delivered POST whose pane is replay-retired:*
 	// persists delivered_to but leaves delivered_at unset, so the row keeps
@@ -102,6 +108,12 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet:
 		f.mu.Lock()
 		query := r.URL.Query()
+		if f.failGetKind != "" && query.Get("kind") == f.failGetKind && query.Get("undelivered") == "" {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"boom"}`)
+			return
+		}
 		var pending []handoffkeepRelayEvent
 		if query.Get("undelivered") != "" {
 			for _, seeded := range f.undelivere {

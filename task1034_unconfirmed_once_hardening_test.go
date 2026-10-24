@@ -436,6 +436,73 @@ func TestT1034FailedMarkKeepsWindowAndRemarksOnce(t *testing.T) {
 	}
 }
 
+// N2, transport-id path: an id-less lane.event window still names its row
+// through the transport id, so the marker lookup runs listRelayEvents. A
+// failed lookup is not "no row" — the window is kept for a retry, exactly
+// like a failed marker POST. Restoring the old err==nil&&found shape lets
+// the error fall through to the nothing-to-mark outcome and consumes the
+// window: the mutant this test exists to catch.
+func TestT1034TransportLookupFailureKeepsWindow(t *testing.T) {
+	rig := t1002Start(t)
+	directive := rig.sendLaneEvent("ev-1034-tx", "tx body")
+	transportID := directive.JobID
+
+	// Reshape the live window into the pre-id form T989 exercises: the
+	// durable id is gone from the window and from every dedupe map, so the
+	// report must resolve the row by its transport id.
+	event := relayEventFromRecord(rig.row(directive.EventID))
+	rig.hub.forgetRelayAckEvent(directive.EventID, transportID)
+	key := relayEventDedupeKey("lane.event", event)
+	rig.hub.forgetRelayEvent(key)
+	rig.hub.mu.Lock()
+	rig.hub.forgetLanePersistedLocked(key)
+	rig.hub.mu.Unlock()
+	rig.hub.registerRelayAckEvent("lane.event", event, "host-a", directive.Pane, 0)
+	rig.hub.armRelayAckEvent(0, transportID)
+	pendingKey := relayPendingKey(0, transportID)
+
+	rig.fake.mu.Lock()
+	rig.fake.failGetKind = "lane.event"
+	rig.fake.mu.Unlock()
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.unconfirmed", relayAckPayload{JobID: transportID, Pane: directive.Pane, Reason: "maybe_in_pane"})
+
+	rig.hub.mu.Lock()
+	_, live := rig.hub.r19a.relayPending[pendingKey]
+	rig.hub.mu.Unlock()
+	if !live {
+		t.Fatal("a failed transport-id lookup consumed the live window")
+	}
+	if markers := rig.markers(); len(markers) != 0 {
+		t.Fatalf("a failed lookup still wrote a marker: %+v", markers)
+	}
+	if got := rig.logs.count("relay unconfirmed transport lookup failed"); got != 1 {
+		t.Fatalf("lookup-failure warnings=%d, want 1: %s", got, rig.logs.String())
+	}
+	if got := rig.logs.count("relay delivery unconfirmed"); got != 0 {
+		t.Fatalf("the kept-window report logged %d consumed-window warnings, want 0", got)
+	}
+	if got := rig.logs.count("relay unconfirmed named no durable row"); got != 0 {
+		t.Fatalf("the failed lookup fell through to the no-row outcome %d times, want 0", got)
+	}
+
+	// The repeated report resolves the row by transport id, marks it once,
+	// and retires the window as usual.
+	rig.fake.mu.Lock()
+	rig.fake.failGetKind = ""
+	rig.fake.mu.Unlock()
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.unconfirmed", relayAckPayload{JobID: transportID, Pane: directive.Pane, Reason: "maybe_in_pane"})
+	rig.hub.mu.Lock()
+	_, live = rig.hub.r19a.relayPending[pendingKey]
+	rig.hub.mu.Unlock()
+	if live {
+		t.Fatal("a successful re-mark left the live window registered")
+	}
+	markers := rig.markers()
+	if len(markers) != 1 || markers[0].EventID != unconfirmedMarkEventID(directive.EventID) || markers[0].DeliveredAt != "" {
+		t.Fatalf("markers after the re-mark: %+v, want one live marker", markers)
+	}
+}
+
 // Fake parity: /delivered is first-write-wins like the real store — a
 // second /delivered keeps the first delivered_to and still answers 200.
 func TestT1034DeliveredFirstWriteWins(t *testing.T) {

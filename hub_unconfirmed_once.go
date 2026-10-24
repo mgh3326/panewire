@@ -96,8 +96,16 @@ func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) bool {
 	}
 	if eventID == 0 && pending.kind == "lane.event" {
 		// An id-less lane window still names its row through the transport id
-		// the injection carried, exactly like the late-delivery path.
-		if record, found, err := h.relayEventByTransportID(ctx, pending.event.JobID); err == nil && found {
+		// the injection carried, exactly like the late-delivery path. A lookup
+		// error is not "no row": the mark cannot be proven unneeded, so the
+		// window is kept like a failed marker POST and only a clean found=false
+		// falls through to the nothing-to-mark outcome (#1034).
+		record, found, err := h.relayEventByTransportID(ctx, pending.event.JobID)
+		if err != nil {
+			h.logger.Warn("relay unconfirmed transport lookup failed", "job", pending.event.JobID)
+			return false
+		}
+		if found {
 			eventID = record.ID
 		}
 	}

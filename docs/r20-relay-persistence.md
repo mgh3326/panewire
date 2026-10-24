@@ -151,9 +151,11 @@ would remove the row from the undelivered listing before its one replay and
 would burn the first-write-wins `delivered_to` a late proof needs. The marker
 row, not the original, therefore carries the mark, and the marked row stays an
 ordinary undelivered row so a late `relay.delivered` still closes it under the
-real machine/pane. If the marker write itself fails the window is kept, not
-retired: a repeated report retries the mark, and the ack timeout decides
-otherwise, exactly as for any other live window.
+real machine/pane. If the marker write itself fails — or a read the mark
+needs errors, the row it names or the transport-id lookup an id-less window
+still requires — the window is kept, not retired: a repeated report retries
+the mark, and the ack timeout decides otherwise, exactly as for any other
+live window.
 
 On startup and on the node-registration replay the hub collects the live
 markers from the `lane.event` undelivered listing, then walks the pages as
