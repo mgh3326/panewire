@@ -22,6 +22,10 @@ jobs:
           cache: true
       - run: go vet ./...
       - run: go test ./...
+      # The full -race suite stays red on a pre-existing hk 1243 bytes.Buffer
+      # race in the r20t5 10ms-timer tests, so the unconfirmed-replay races
+      # (#1002/#1034) get their own -race pin on both OSes.
+      - run: go test -race -count=3 -run 'T1002|T1034' .
       - run: sh -n deploy/alloy/install-linux.sh deploy/alloy/run-alloy.sh
       # gitleaks is installed through Homebrew, which only the macOS runner has.
       - if: runner.os == 'macOS'

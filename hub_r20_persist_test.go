@@ -37,6 +37,20 @@ type fakeHandoffkeep struct {
 	// deliveredStatus, when set, is the reply to every /delivered POST, and
 	// a non-200 closes nothing.
 	deliveredStatus int
+	// deliveredFailIDs fails /delivered for the named row ids only, so a
+	// test can make one row's retire write fail while every other write to
+	// the store succeeds (#1034).
+	deliveredFailIDs map[int64]bool
+	// failPostOwnerLane, when set, fails POST /v1/relay/events whose body
+	// owner_lane equals it — e.g. the hub/unconfirmed marker lane, to make
+	// only the marker write fail (#1034).
+	failPostOwnerLane string
+	// failGetKind, when set, fails GET /v1/relay/events listings whose kind
+	// query equals it and that are not the undelivered listing — the
+	// transport-id lookup the unconfirmed mark makes through
+	// listRelayEvents, while the by-id re-read (no kind) and the undelivered
+	// listing still succeed (#1034).
+	failGetKind string
 	// retiredMarkerStaysUndelivered models a listed row that already carries
 	// the retire marker: a /delivered POST whose pane is replay-retired:*
 	// persists delivered_to but leaves delivered_at unset, so the row keeps
@@ -48,6 +62,10 @@ type fakeHandoffkeep struct {
 	// observe runs at the start of every request, before any reply, so a test
 	// can inspect hub state at the exact moment handoffkeep is called.
 	observe func(method, path string)
+	// observeQuery runs right after observe and additionally sees the raw
+	// query string, so a test can gate calls that differ only in the query
+	// — an undelivered listing page versus a one-row re-read (#1034).
+	observeQuery func(method, path, rawQuery string)
 }
 
 type fakeHandoffkeepCall struct {
@@ -78,14 +96,24 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.calls = append(f.calls, fakeHandoffkeepCall{Method: r.Method, Path: r.URL.Path, Query: r.URL.RawQuery, Body: body})
 	status := f.status
 	observe := f.observe
+	observeQuery := f.observeQuery
 	f.mu.Unlock()
 	if observe != nil {
 		observe(r.Method, r.URL.Path)
+	}
+	if observeQuery != nil {
+		observeQuery(r.Method, r.URL.Path, r.URL.RawQuery)
 	}
 	switch {
 	case r.Method == http.MethodGet:
 		f.mu.Lock()
 		query := r.URL.Query()
+		if f.failGetKind != "" && query.Get("kind") == f.failGetKind && query.Get("undelivered") == "" {
+			f.mu.Unlock()
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"error":"boom"}`)
+			return
+		}
 		var pending []handoffkeepRelayEvent
 		if query.Get("undelivered") != "" {
 			for _, seeded := range f.undelivere {
@@ -138,24 +166,35 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case strings.HasSuffix(r.URL.Path, "/delivered"):
 		f.mu.Lock()
 		deliveredStatus := f.deliveredStatus
+		failIDs := f.deliveredFailIDs
 		f.mu.Unlock()
+		idText := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/relay/events/"), "/delivered")
+		id, idErr := strconv.ParseInt(idText, 10, 64)
 		if deliveredStatus != 0 && deliveredStatus != http.StatusOK {
 			w.WriteHeader(deliveredStatus)
 			return
 		}
-		idText := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/relay/events/"), "/delivered")
-		if id, err := strconv.ParseInt(idText, 10, 64); err == nil {
+		if idErr == nil && failIDs[id] {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if idErr == nil {
 			f.mu.Lock()
 			for _, row := range f.rows {
 				if row.ID == id {
-					row.DeliveredTo = asString(body["machine"]) + "/" + asString(body["pane"])
-					if !(f.retiredMarkerStaysUndelivered && strings.HasPrefix(asString(body["pane"]), "replay-retired:")) {
-						row.DeliveredAt = "2026-09-05T00:00:00Z"
+					// First-write-wins like the real store: a row that is
+					// already delivered keeps its first delivered_to and
+					// delivered_at; the second /delivered still answers 200.
+					if row.DeliveredAt == "" {
+						row.DeliveredTo = asString(body["machine"]) + "/" + asString(body["pane"])
+						if !(f.retiredMarkerStaysUndelivered && strings.HasPrefix(asString(body["pane"]), "replay-retired:")) {
+							row.DeliveredAt = "2026-09-05T00:00:00Z"
+						}
+						if f.deliveredTo == nil {
+							f.deliveredTo = map[int64]string{}
+						}
+						f.deliveredTo[id] = row.DeliveredTo
 					}
-					if f.deliveredTo == nil {
-						f.deliveredTo = map[int64]string{}
-					}
-					f.deliveredTo[id] = row.DeliveredTo
 					break
 				}
 			}
@@ -166,6 +205,14 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	default:
 		if status != http.StatusCreated && status != http.StatusOK {
 			w.WriteHeader(status)
+			_, _ = io.WriteString(w, `{"error":"boom"}`)
+			return
+		}
+		f.mu.Lock()
+		failLane := f.failPostOwnerLane
+		f.mu.Unlock()
+		if failLane != "" && asString(body["owner_lane"]) == failLane {
+			w.WriteHeader(http.StatusInternalServerError)
 			_, _ = io.WriteString(w, `{"error":"boom"}`)
 			return
 		}
