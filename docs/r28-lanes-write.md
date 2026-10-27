@@ -21,8 +21,9 @@ A node-scoped request is refused with `403` and `{"error":
 "lane_machine_mismatch"}` whenever it would touch a lane that is not its own
 machine's: a PUT whose `machine` is any value but the node's own id —
 foreign, route-only, or unknown, all identical; a PUT that would replace
-another machine's lane; a PUT naming a `parent` that is missing or on
-another machine (the two are the same refusal) or a `standby` machine other
+another machine's lane; a PUT naming a `parent` that is missing or is a
+sink — the parent is only a routing pointer, so an existing non-sink lane
+on any machine is accepted — or a `standby` machine other
 than its own; a PUT creating a name another machine's reports already route
 through — a lane, including a sink, that names it parent, or a live job on
 another machine whose owner lane is that name; any `sink: true` write (a
@@ -159,8 +160,8 @@ hub commands. `--hub-token-env` names a mode-0600 file holding
 request. An operator file (`HUB_MACHINE_ID=operator`) sends no machine
 header and behaves exactly as before. A node file sees and manages only the
 lanes routed to that machine id: `ls` lists just those lanes, `add` is
-refused unless `--machine` equals it, `--parent` names an existing lane on
-it, and the new name is not already the parent or owner lane of another
+refused unless `--machine` equals it, `--parent` names an existing non-sink
+lane on any machine, and the new name is not already the parent or owner lane of another
 machine's rows and jobs, and `rm` removes only its own lanes that no foreign
 machine still references. `self-check` reads
 the control-plane fields a node-filtered response never carries, so it keeps
