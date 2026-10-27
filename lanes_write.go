@@ -247,9 +247,10 @@ var errAuthorityLaneDirectWrite = errors.New("authority lane direct write is dis
 // only be the node's own, so every other value — a foreign machine, a machine
 // that exists only in some route, or an unknown one — answers the same
 // refusal. A sink route has no machine and can never belong to a node. The
-// parent must be a lane on the node's machine: its shape errors keep the
-// shared 400, while an existing foreign parent and a missing one are the same
-// 403, so the field cannot reveal which lanes exist.
+// parent is only a routing pointer: it may name an existing lane on any
+// machine, but a missing parent and a sink parent (a terminal row with no
+// machine to route through) keep the shared 403, while the parent's shape
+// errors keep the shared 400.
 func nodeLaneFieldScope(nodeMachine, lane string, body hubLaneWriteRequest, routes map[string]reportRelayRoute) error {
 	if body.Sink || body.Machine != nodeMachine {
 		return errLaneMachineMismatch
@@ -261,7 +262,7 @@ func nodeLaneFieldScope(nodeMachine, lane string, body hubLaneWriteRequest, rout
 		if !validReportRelayLaneName(body.Parent) || body.Parent == lane {
 			return errLaneRequestInvalid
 		}
-		if parent, found := routes[body.Parent]; !found || parent.Machine != nodeMachine {
+		if parent, found := routes[body.Parent]; !found || parent.Sink {
 			return errLaneMachineMismatch
 		}
 	}

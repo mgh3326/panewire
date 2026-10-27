@@ -119,7 +119,7 @@ func TestLanesNodeWriteScope(t *testing.T) {
 		t.Fatalf("oracle foreign status=%d body=%s missing status=%d body=%s", foreign.Code, foreign.Body.String(), missing.Code, missing.Body.String())
 	}
 	// The scoped fields answer identically too: a machine that only appears
-	// in some route, an entirely unknown machine, a foreign parent and a
+	// in some route, an entirely unknown machine, a sink parent and a
 	// missing one, and foreign or unknown standby machines all take the one
 	// refusal, so none of them reveals which lanes exist.
 	for _, body := range []string{
@@ -147,9 +147,9 @@ func TestLanesNodeWriteScope(t *testing.T) {
 	}
 }
 
-// AC1 continued: parent must be a lane on the node's own machine, standby may
-// not target another machine, and the authority guard still applies to a lane
-// the node owns.
+// AC1 continued: the parent is a routing pointer that may name an existing
+// lane on any machine, standby may not target another machine, and the
+// authority guard still applies to a lane the node owns.
 func TestLanesNodeWriteParentStandbyAndAuthority(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "lanes.json")
 	lanesProjectionWrite(t, path, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"},"lane-b":{"machine":"machine-b","pane":"w9:p9"},"lane-authority":{"machine":"machine-a","pane":"w1:p7"},"lane-authority-b":{"machine":"machine-b","pane":"w9:p7"},"lane-sink":{"sink":true}}}`)
@@ -160,9 +160,12 @@ func TestLanesNodeWriteParentStandbyAndAuthority(t *testing.T) {
 	if writer := lanesNodePut(t, hub, "lane-child", `{"machine":"machine-a","pane":"w1:p2","parent":"lane-a"}`); writer.Code != http.StatusCreated {
 		t.Fatalf("own parent status=%d body=%s", writer.Code, writer.Body.String())
 	}
-	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-child2", `{"machine":"machine-a","pane":"w1:p3","parent":"lane-b"}`), "foreign-machine parent")
-	// A missing parent and a foreign one are the same refusal — the parent
-	// field cannot reveal which lanes exist.
+	// A parent on another machine is only a routing pointer and is accepted.
+	if writer := lanesNodePut(t, hub, "lane-child2", `{"machine":"machine-a","pane":"w1:p3","parent":"lane-b"}`); writer.Code != http.StatusCreated {
+		t.Fatalf("foreign-machine parent status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	// A missing parent is still refused, and a sink parent too — a sink has
+	// no machine to route through.
 	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-child3", `{"machine":"machine-a","pane":"w1:p4","parent":"lane-missing"}`), "missing parent")
 	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-child4", `{"machine":"machine-a","pane":"w1:p5","parent":"lane-sink"}`), "sink parent")
 	if writer := lanesNodePut(t, hub, "lane-standby", `{"machine":"machine-a","pane":"w1:p6","standby":{"machine":"machine-a","pane":"w1:p8"}}`); writer.Code != http.StatusCreated {
@@ -185,6 +188,41 @@ func TestLanesNodeWriteParentStandbyAndAuthority(t *testing.T) {
 	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-authority-gone", `{"machine":"machine-a","pane":"w1:p9"}`), "node PUT missing authority lane")
 	lanesNodeForbidden(t, lanesNodeDelete(t, hub, "lane-authority-b"), "node DELETE foreign authority lane")
 	lanesNodeForbidden(t, lanesNodeDelete(t, hub, "lane-authority-gone"), "node DELETE missing authority lane")
+}
+
+// hk 2176: a node PUT may name a parent lane that exists on another machine —
+// the parent is only a routing pointer. The own-machine scope, the missing
+// parent refusal, and the delete scope are unchanged.
+func TestLanesNodeCrossMachineParent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "lanes.json")
+	lanesProjectionWrite(t, path, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"},"lane-dir":{"machine":"machine-b","pane":"w9:p9"}}}`)
+	hub := lanesNodeHub(t, path, nil)
+
+	// A cross-machine existing parent is accepted, and the lane routes
+	// through it.
+	writer := lanesNodePut(t, hub, "lane-child", `{"machine":"machine-a","pane":"w1:p2","parent":"lane-dir"}`)
+	if writer.Code != http.StatusCreated || !strings.Contains(writer.Body.String(), `"parent":"lane-dir"`) {
+		t.Fatalf("cross-machine parent status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	list := lanesNodeRequest(t, hub, http.MethodGet, "/v1/lanes", lanesNodeAToken, "machine-a", "")
+	if list.Code != http.StatusOK || !strings.Contains(list.Body.String(), `"lane":"lane-child","machine":"machine-a","pane":"w1:p2","parent":"lane-dir"`) {
+		t.Fatalf("node ls status=%d body=%s", list.Code, list.Body.String())
+	}
+	// The own-machine rule is unchanged even with a valid cross-machine
+	// parent: naming another machine is still the same refusal.
+	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-child2", `{"machine":"machine-b","pane":"w9:p2","parent":"lane-dir"}`), "cross-machine parent with foreign machine")
+	// A missing parent is still refused.
+	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-child3", `{"machine":"machine-a","pane":"w1:p3","parent":"lane-nope"}`), "missing parent")
+	// DELETE of another machine's lane is still refused — including the
+	// lane the node now routes through.
+	lanesNodeForbidden(t, lanesNodeDelete(t, hub, "lane-dir"), "node delete of foreign parent lane")
+	// DELETE of the node's own lane that parents cross-machine is allowed.
+	if writer := lanesNodeDelete(t, hub, "lane-child"); writer.Code != http.StatusOK {
+		t.Fatalf("node delete of own cross-parented lane status=%d body=%s", writer.Code, writer.Body.String())
+	}
+	if _, exists := lanesNodeFile(t, path)["lane-child"]; exists {
+		t.Fatal("node delete did not remove its cross-parented lane")
+	}
 }
 
 // B1a regression: a node may not claim a lane name that another machine's
