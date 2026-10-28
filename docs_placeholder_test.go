@@ -39,6 +39,7 @@ var docAllowedHostSuffixes = []string{
 // reference. Subdomains are NOT implied — a real operational subdomain such
 // as a tenant host under one of these parents must fail.
 var docAllowedHostsExact = map[string]bool{
+	"code.claude.com":               true, // public Claude Code statusLine/hook documentation
 	"github.com":                    true, // public forge: module path and release URLs
 	"objects.githubusercontent.com": true, // GitHub release-asset redirect host
 	"modernc.org":                   true, // Go module path for the sqlite driver
@@ -186,6 +187,7 @@ func TestDocLiteralScannerRules(t *testing.T) {
 		"nas.home",                            // internal pseudo-TLD
 		"realteam.cloudflareaccess.com",       // real subdomain of an allowed-<placeholder> service
 		"tenant.github.com",                   // subdomain of an exact-allowed host is not implied
+		"tenant.code.claude.com",              // public docs host does not allow tenant subdomains
 		"tenant.modernc.org",                  // subdomain of an exact-allowed host is not implied
 		"tenant.githubusercontent.com",        // subdomain of an exact-allowed host is not implied
 		"/Users/someone/.config/panewire/env", // macOS home path
@@ -208,6 +210,7 @@ func TestDocLiteralScannerRules(t *testing.T) {
 		"github.com/mgh3326/panewire/cmd/panewire@latest",
 		"objects.githubusercontent.com",
 		"modernc.org/sqlite",
+		"https://code.claude.com/docs/en/hooks",
 		"127.0.0.1:9377",
 		"localhost",
 		docAllowedTailnetIP,

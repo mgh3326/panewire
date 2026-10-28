@@ -82,7 +82,11 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		return result, false
 	}
 	if sender != nil {
-		h.queueRelayPersisted(kind, *event, sender, item.ID)
+		if kind == "lane.event" {
+			h.queueLaneRelayPersisted(*event, sender, item.ID)
+		} else {
+			h.queueRelayPersisted(kind, *event, sender, item.ID)
+		}
 	}
 	return relayLaneEventResult{ID: item.ID, Routed: true, Machine: "inbox", Duplicate: !item.Fresh}, true
 }

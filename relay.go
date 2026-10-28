@@ -267,6 +267,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		return relayLaneEventResult{}
 	}
 	if len(event.Text) > laneEventTextLimitSink || (len(event.Text) > laneEventTextLimit && !loadReportRelayRoutes(h.reportRelayPath)[event.OwnerLane].Sink) {
+		h.broadcastRelayRejected(event, "text_too_long")
 		return relayLaneEventResult{RejectedTooLong: true}
 	}
 	if result, handled := h.receiveInbox("lane.event", &event, sender, false); handled {

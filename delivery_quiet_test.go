@@ -498,3 +498,53 @@ func TestQuietDigestArrivalWindowAndParentPolicy(t *testing.T) {
 		t.Fatal(c)
 	}
 }
+
+// Check the actual closed wire shape and node journal, not only the hub's
+// queue length: a lane acknowledgement without Lane is silently rejected by
+// both old and new node decoders, leaving a quiet event's outbox unretired.
+func TestQuietProducerAcknowledgementRetiresOutbox(t *testing.T) {
+	for _, tc := range []struct{ kind, class, window string }{{"lane.event", "inbox", "0s"}, {"lane.event", "interrupt", "2s"}, {"job.completed", "inbox", "0s"}} {
+		t.Run(tc.kind+tc.class+tc.window, func(t *testing.T) {
+			now := time.Now()
+			policyPath := filepath.Join(t.TempDir(), "policy.yaml")
+			raw := strings.Replace(string(defaultDeliveryPolicy), "digest_window: 0s", "digest_window: "+tc.window, 1)
+			if err := os.WriteFile(policyPath, []byte(raw), 0600); err != nil {
+				t.Fatal(err)
+			}
+			h, agent := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), policyPath, nil, &now)
+			e := quietEvent("ack-test", "action?")
+			e.DeliveryClass = tc.class
+			if tc.kind != "lane.event" {
+				e.JobID = "j1"
+				e.ReportPath = "report.md"
+			}
+			if tc.kind == "lane.event" {
+				h.relayLaneEvent(e, agent)
+			} else {
+				h.relayJobEventFrom("host-a", tc.kind, e)
+			}
+			select {
+			case ack := <-agent.persisted:
+				raw, err := json.Marshal(ack)
+				if err != nil {
+					t.Fatal(err)
+				}
+				parsed, ok := parseHubOutbound(raw)
+				if !ok {
+					t.Fatalf("node rejected ACK: %s", raw)
+				}
+				store := NewMemoryStore(t)
+				defer store.Close()
+				node := &HubClient{outbox: store}
+				node.recordRelayPersisted(parsed)
+				key := relayOutboxKey{Kind: tc.kind, JobID: e.JobID, Epoch: e.Epoch, ReportPath: e.ReportPath, Reason: e.Reason, Lane: e.OwnerLane, EventID: e.EventID}
+				state, err := store.RelayOutboxState(context.Background(), key)
+				if err != nil || !state.Persisted {
+					t.Fatalf("outbox not persisted: %+v %v", state, err)
+				}
+			default:
+				t.Fatal("no producer ACK")
+			}
+		})
+	}
+}
