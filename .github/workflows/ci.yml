@@ -4,11 +4,27 @@ on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact ref (sha) to check out; empty means the event default
+        required: false
+        default: ''
+        type: string
+      suite:
+        description: Which suites to run (all, test)
+        required: false
+        default: all
+        type: string
+
+permissions:
+  contents: read
 
 jobs:
   test:
     # The process-group kill and reaping behaviour the R19 quota path depends on
     # differs between Darwin and Linux, so both are exercised.
+    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     strategy:
       fail-fast: false
       matrix:
@@ -16,6 +32,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
       - uses: actions/setup-go@v5
         with:
           go-version: '1.27.x'
@@ -30,3 +48,21 @@ jobs:
       # gitleaks is installed through Homebrew, which only the macOS runner has.
       - if: runner.os == 'macOS'
         run: brew install gitleaks && gitleaks git --no-banner --config .gitleaks.toml
+
+  ci-ok:
+    # Aggregate gate check: PR CI reports a check run named ci-ok. On
+    # dispatches, a partial suite must not mint an exact 'ci-ok' check run.
+    name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}
+    runs-on: ubuntu-latest
+    needs: [test]
+    if: always()
+    steps:
+      - name: Check required jobs
+        env:
+          TEST_RESULT: ${{ needs.test.result }}
+          SUITE: ${{ inputs.suite || 'all' }}
+        run: |
+          if [ "$TEST_RESULT" != success ]; then
+            echo "test job did not succeed: $TEST_RESULT"
+            exit 1
+          fi
