@@ -56,9 +56,6 @@ func (fn hubRoundTripperFunc) RoundTrip(request *http.Request) (*http.Response, 
 	return fn(request)
 }
 
-// hubTestSmokeAsset is a release-asset stand-in that passes the pre-rename
-// smoke run: `<asset> version` prints version and exits 0.
-
 func TestR19QuotaOutputAndEnvironmentAreBounded(t *testing.T) {
 	if got := hubScopefuelEnvironment([]string{"PATH=/bin", "HOME=/tmp/home", "HUB_TOKEN=secret", "CF_ACCESS_CLIENT_SECRET=secret", "CODEX_HOME=/tmp/codex"}); len(got) != 3 {
 		t.Fatalf("allowlisted environment=%q", got)

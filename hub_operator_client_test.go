@@ -318,7 +318,7 @@ func TestHubOperatorClientIsDedicated(t *testing.T) {
 func TestHubOperatorCLISourceNeverUsesDefaultClient(t *testing.T) {
 	for _, file := range []string{
 		"hub_operator_client.go", "hub_cli.go", "lanes_cli.go",
-		"placement_cli.go", "burst.go", "hub_r19_cli.go",
+		"placement_cli.go", "burst.go",
 		"fleet_census_find.go",
 	} {
 		data, err := os.ReadFile(file)

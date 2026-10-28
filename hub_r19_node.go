@@ -2,7 +2,6 @@ package panewire
 
 import (
 	"context"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -28,13 +27,6 @@ const (
 )
 
 func validHubRequestID(value string) bool { return hubRequestIDPattern.MatchString(value) }
-func validHubSHA256(value string) bool {
-	if len(value) != 64 {
-		return false
-	}
-	_, err := hex.DecodeString(value)
-	return err == nil
-}
 
 func (client *HubClient) handleHubQuota(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
 	command, err := exec.LookPath("scopefuel")

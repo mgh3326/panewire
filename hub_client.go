@@ -502,9 +502,6 @@ type hubOutboundMessage struct {
 	IdleWakeEventID string
 	Eligible        bool
 	RequestID       string
-	URL             string
-	SHA256          string
-	Version         string
 	CWDKey          string
 	BriefInline     string
 	Args            []string

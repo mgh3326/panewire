@@ -79,18 +79,6 @@ func TestR19QuotaOutputBoundedByEncodedSize(t *testing.T) {
 	}
 }
 
-// TestR19ConcurrentUpdateInstructionsApplyOnce drives two update.available
-// messages through the real node read loop. Without an in-flight guard both
-// would download and rename against the same executable, leaving the surviving
-// version up to whichever finished last.
-
-// TestR19UpdateBusyIsAFirstClassInboundMessage keeps the node's reply out of the
-// hub's unknown-message counter and visible to an operator.
-
-// TestR19UpdateBackupsArePruned bounds the rollback copies kept beside the
-// executable. Each one is a full binary, so an unpruned series fills the
-// install directory in proportion to how often the node updates.
-
 // TestR19PreferenceSwitchesDoNotNest walks the node up five preferred endpoints
 // in one session. Each switch used to be a recursive serve call, so the
 // abandoned frame kept its ping ticker, its preference ticker, and its stack

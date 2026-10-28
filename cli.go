@@ -224,7 +224,6 @@ type daemonCLIDeps struct {
 	SchemaCommand         []string
 	Logger                *slog.Logger
 	Version               string
-	ExecutablePath        string // fixture seam; production uses os.Executable.
 }
 
 func runDaemonCLI(args []string) int {
