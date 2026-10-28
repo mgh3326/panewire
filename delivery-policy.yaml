@@ -1,0 +1,31 @@
+# First matching rule wins. Lane rules precede these defaults.
+# Explicit emit --deliver interrupt|inbox always wins.
+default: interrupt
+deadlines:
+  inbox: 30m
+  interrupt: 0s
+# Off by default; e.g. 2s combines interrupts for each receiving lane.
+digest_window: 0s
+rules:
+  - match: '(?i)BLOCKER|decision[ _-]?(request|required|needed)|action[ _-]?(required|needed|now)|needs? (an? )?(action|decision)|결정.*(요청|필요)|차단'
+    class: interrupt
+  - match: '[?？]|(?i)direct question|질문'
+    class: interrupt
+  - kind: job.escalate
+    class: interrupt
+  - kind: job.lost
+    class: interrupt
+  - kind: job.revoked
+    class: interrupt
+  - replay: true
+    class: inbox
+  - kind: job.completed
+    class: inbox
+  - kind: job.joined
+    class: inbox
+  - match: '(?i)\bdone\s*\||\bFYI\b|\back\b|\backnowledged\b|install[ _-]?(done|complete)|installed|merged.*(please )?install|설치.*완료|확인했습니다'
+    class: inbox
+  - match: '(?i)info([ _-]alert)?|quota|replayed after hub restart|"kind"\s*:\s*"idle-wake"|알림'
+    class: inbox
+# Override any field per receiving lane. Rules fall through to global rules.
+lanes: {}

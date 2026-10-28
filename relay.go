@@ -266,6 +266,12 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 	if event.OwnerLane == "" || event.EventID == "" || event.Text == "" {
 		return relayLaneEventResult{}
 	}
+	if len(event.Text) > laneEventTextLimitSink || (len(event.Text) > laneEventTextLimit && !loadReportRelayRoutes(h.reportRelayPath)[event.OwnerLane].Sink) {
+		return relayLaneEventResult{RejectedTooLong: true}
+	}
+	if result, handled := h.receiveInbox("lane.event", &event, sender, false); handled {
+		return result
+	}
 	key := relayEventDedupeKey("lane.event", event)
 	h.mu.Lock()
 	persistedSHA := h.laneEventSHALocked(key)
@@ -431,6 +437,9 @@ func (h *HubServer) relayJobEvent(kind string, event hubJobEventPayload) {
 
 func (h *HubServer) relayJobEventFrom(senderMachine, kind string, event hubJobEventPayload) {
 	if event.OwnerLane == "" || event.JobID == "" {
+		return
+	}
+	if _, handled := h.receiveInbox(kind, &event, h.relayPersistedAgent(senderMachine, nil), false); handled {
 		return
 	}
 	key := relayEventDedupeKey(kind, event)
@@ -1228,6 +1237,9 @@ func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source
 }
 
 func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent, source string) {
+	if h.replayInbox(record) {
+		return
+	}
 	event := relayEventFromRecord(record)
 	if event.OwnerLane == "" || event.JobID == "" {
 		return

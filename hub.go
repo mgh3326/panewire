@@ -36,7 +36,10 @@ var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // operator credential is the HUB_TOKEN_operator entry; agent credentials use
 // their own stable machine ID entries.
 type HubServerConfig struct {
-	Tokens map[string]string
+	// CLI defaults to the embedded receiving-lane policy and a durable hub DB.
+	DeliveryPolicyPath string
+	InboxStorePath     string
+	Tokens             map[string]string
 	// ControlPlaneLanesPath names the operator-owned JSON file listing the
 	// authority lane bundle, hot-reloaded like the placement policy. It is the
 	// production path: which lanes carry authority is deployment configuration,
@@ -233,6 +236,8 @@ type hubJobReassignment struct {
 }
 
 type hubJobEventPayload struct {
+	DeliveryClass string `json:"delivery_class,omitempty"`
+	noDigest      bool
 	// lane.event uses these relay-only fields. It deliberately never enters
 	// the hub's job registration paths despite sharing the delivery envelope.
 	EventID        string    `json:"event_id,omitempty"`
@@ -354,6 +359,7 @@ type hubSubscriptionMessage struct {
 // HubServer is an in-memory presence and event relay. It deliberately owns no
 // file relay, durable queue, command dispatcher, or credentials after startup.
 type HubServer struct {
+	inbox             *hubInbox
 	tokens            map[string]string
 	alertNodes        map[string]struct{}
 	now               func() time.Time
@@ -689,8 +695,13 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 			controlPlaneLanesLastFailure = ""
 		}
 	}
+	inbox, err := newHubInbox(config.DeliveryPolicyPath, config.InboxStorePath)
+	if err != nil {
+		return nil, err
+	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	return &HubServer{
+		inbox:  inbox,
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
@@ -755,6 +766,11 @@ func (h *HubServer) Close() error {
 	h.updateOverdueFlushClosing = true
 	h.updateOverdueFlushMu.Unlock()
 	h.updateOverdueFlushes.Wait()
+	if h.inbox != nil {
+		h.inbox.flushMu.Lock()
+		_ = h.inbox.store.db.Close()
+		h.inbox.flushMu.Unlock()
+	}
 	if h.logFile == nil {
 		return nil
 	}
@@ -797,6 +813,10 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)
+	mux.HandleFunc("GET /v1/inbox", h.handleInboxList)
+	mux.HandleFunc("GET /v1/inbox/count", h.handleInboxCount)
+	mux.HandleFunc("POST /v1/inbox/{id}/read", h.handleInboxRead)
+	mux.HandleFunc("POST /v1/inbox/ack", h.handleInboxAck)
 	mux.HandleFunc("GET /v1/relay/held", h.handleRelayHeld)
 	mux.HandleFunc("PATCH /v1/relay/events/{id}", h.handleRelayHeldEdit)
 	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
@@ -2243,6 +2263,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	// inert without a configured chat store and never shares h.mu across a
 	// network call.
 	go h.runChatDispatcher(ctx)
+	go h.runInbox(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever
 	// Postgres still holds as undelivered predates this process.
 	h.replayUndeliveredRelayEvents(ctx)
