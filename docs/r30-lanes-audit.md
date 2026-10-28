@@ -31,7 +31,7 @@ lane deleted on a transient-outage reading loses every escalation routed to
 it afterwards. `dead` therefore requires the observation to be *complete*:
 `snapshot_status=ok`, node `state=connected`, `stale=false`,
 `truncated=false`, `received_at` present, not in the future, and within the
-120-second freshness bound `sessions find` uses.
+120-second freshness bound `fleet-census find` uses.
 
 The same rule guards the transport itself. Both response bodies are read
 under a 1 MiB cap and must decode as exactly one JSON value — a valid

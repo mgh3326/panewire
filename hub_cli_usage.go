@@ -27,8 +27,8 @@ const jobsUsage = `Usage:
   panewire jobs orphaned ` + hubCredentialUsage + `
   panewire jobs reassign --job-id JOB --to MACHINE ` + hubCredentialUsage
 
-const sessionsUsage = "Usage: panewire sessions find LABEL [--contains] [--machine MACHINE] [--json] " + hubCredentialUsage
-const fleetCensusUsage = "Usage: panewire fleet-census [--json] [--grace D] [--jobs-root PATH] [--herdr-socket PATH] [--machine-id ID] [--node-env FILE] [" + hubCredentialUsage + "]"
+const fleetCensusFindUsage = "Usage: panewire fleet-census find LABEL [--contains] [--machine MACHINE] [--json] " + hubCredentialUsage
+const fleetCensusUsage = "Usage: panewire fleet-census [--json] [--grace D] [--jobs-root PATH] [--herdr-socket PATH] [--machine-id ID] [--node-env FILE] [" + hubCredentialUsage + "]\n" + fleetCensusFindUsage
 const sessionReapUsage = "Usage: panewire session-reap [--json] [--grace D] [--jobs-root PATH] [--herdr-socket PATH]"
 const lanesAuditUsage = "Usage: panewire lanes-audit [--json] [--sibling A=B] " + hubCredentialUsage
 

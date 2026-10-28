@@ -553,7 +553,6 @@ func TestLanesNodeTokenRouteTable(t *testing.T) {
 		{name: "relay held delete", method: http.MethodDelete, path: "/v1/relay/events/1", nodeWant: []int{401}, opWant: 409},
 		{name: "spawn", method: http.MethodPost, path: "/v1/spawn", body: `{}`, nodeWant: []int{401}, opWant: 400},
 		{name: "spawn status", method: http.MethodGet, path: "/v1/spawn/12345678-1234-4123-8123-123456789abc", nodeWant: []int{401}, opWant: 404},
-		{name: "update publish", method: http.MethodPost, path: "/v1/update", body: `{}`, nodeWant: []int{401}, opWant: 400},
 		{name: "per-machine quota get", method: http.MethodGet, path: "/v1/quota/machine-a", nodeWant: []int{401}, opWant: 404},
 		{name: "per-machine quota request", method: http.MethodPost, path: "/v1/quota/machine-a", body: `{}`, nodeWant: []int{401}, opWant: 503},
 		{name: "chat question upsert", method: http.MethodPost, path: "/v1/chat/questions", body: `{}`, nodeWant: []int{401}, opWant: 503},

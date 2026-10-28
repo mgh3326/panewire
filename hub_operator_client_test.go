@@ -101,9 +101,6 @@ func t441HubFixture(t *testing.T, recorded chan<- t441RecordedRequest) *httptest
 			_, _ = writer.Write([]byte(`{"released":true}`))
 		case "GET /v1/burst/holds":
 			_, _ = writer.Write([]byte(`{"holds":[]}`))
-		case "POST /v1/update":
-			writer.WriteHeader(http.StatusAccepted)
-			_, _ = writer.Write([]byte(`{"accepted":true}`))
 		default:
 			writer.WriteHeader(http.StatusNotFound)
 		}
@@ -174,13 +171,9 @@ func TestHubOperatorSuccessMatrix(t *testing.T) {
 			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
 				return runBurstCLIWithDeps([]string{"show", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
 			}},
-		{name: "sessions find", wantMethod: http.MethodGet, wantPath: "/v1/nodes", wantCode: ExitOK,
+		{name: "fleet-census find", wantMethod: http.MethodGet, wantPath: "/v1/nodes", wantCode: ExitOK,
 			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
-				return runSessionsCLI([]string{"find", "label-x", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
-			}},
-		{name: "update publish", wantMethod: http.MethodPost, wantPath: "/v1/update", wantCode: ExitOK,
-			run: func(t *testing.T, hubURL, tokenEnv, cfEnv string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
-				return runUpdateCLI([]string{"publish", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv, "--version", "v1.2.3", "--sha256", strings.Repeat("ab", 32), "--url", "https://github.com/mgh3326/panewire/releases/download/v1.2.3/panewire", "--machines", "machine-a"}, stdout, stderr, deps)
+				return runFleetCensusFindCLI([]string{"find", "label-x", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
 			}},
 	}
 	for _, fixture := range cases {
@@ -229,17 +222,14 @@ func TestHubOperatorRejectsEveryRedirect(t *testing.T) {
 		{name: "GET", path: "/v1/nodes", run: func(t *testing.T, hubURL string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
 			return runHubStatusCLI([]string{"--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
 		}},
-		{name: "GET sessions find", path: "/v1/nodes", run: func(t *testing.T, hubURL string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
-			return runSessionsCLI([]string{"find", "label-x", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
+		{name: "GET fleet-census find", path: "/v1/nodes", run: func(t *testing.T, hubURL string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
+			return runFleetCensusFindCLI([]string{"find", "label-x", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
 		}},
 		{name: "PUT", path: "/v1/lanes/lane-a", run: func(t *testing.T, hubURL string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
 			return runLanesCLI([]string{"add", "lane-a", "--machine", "machine-a", "--pane", "w1:p1", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
 		}},
 		{name: "DELETE", path: "/v1/lanes/lane-a", run: func(t *testing.T, hubURL string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
 			return runLanesCLI([]string{"rm", "lane-a", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, stdout, stderr, deps)
-		}},
-		{name: "POST", path: "/v1/update", run: func(t *testing.T, hubURL string, deps hubCLIDeps, stdout, stderr *bytes.Buffer) int {
-			return runUpdateCLI([]string{"publish", "--hub-url", hubURL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv, "--version", "v1.2.3", "--sha256", strings.Repeat("ab", 32), "--url", "https://github.com/mgh3326/panewire/releases/download/v1.2.3/panewire", "--machines", "machine-a"}, stdout, stderr, deps)
 		}},
 	}
 	for _, status := range []int{http.StatusMovedPermanently, http.StatusFound, http.StatusSeeOther, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
@@ -328,8 +318,8 @@ func TestHubOperatorClientIsDedicated(t *testing.T) {
 func TestHubOperatorCLISourceNeverUsesDefaultClient(t *testing.T) {
 	for _, file := range []string{
 		"hub_operator_client.go", "hub_cli.go", "lanes_cli.go",
-		"placement_cli.go", "burst.go", "hub_r19_cli.go",
-		"sessions_find.go",
+		"placement_cli.go", "burst.go",
+		"fleet_census_find.go",
 	} {
 		data, err := os.ReadFile(file)
 		if err != nil {
@@ -465,7 +455,7 @@ func TestHubOperatorAPIPathAdversaries(t *testing.T) {
 	for _, path := range []string{
 		"/v1/nodes", "/v1/jobs", "/v1/jobs/orphaned", "/v1/jobs/reassign",
 		"/v1/lanes", "/v1/lanes/lane-a", "/v1/placement", "/v1/placement/slots",
-		"/v1/burst", "/v1/burst/request", "/v1/burst/release", "/v1/burst/holds", "/v1/update",
+		"/v1/burst", "/v1/burst/request", "/v1/burst/release", "/v1/burst/holds",
 	} {
 		if !validHubOperatorAPIPath(path) {
 			t.Fatalf("fixed API path %q rejected", path)
@@ -688,7 +678,7 @@ func TestHubOperatorCredentialsOnlyAfterValidation(t *testing.T) {
 }
 
 // TestHubOperatorReadsStayBounded is a body-level bound check on the raw
-// copy paths (burst show, update publish): an oversized response is capped
+// copy paths (burst show): an oversized response is capped
 // instead of streamed without limit.
 func TestHubOperatorReadsStayBounded(t *testing.T) {
 	tokenEnv, _ := t441Envs(t)
@@ -705,11 +695,6 @@ func TestHubOperatorReadsStayBounded(t *testing.T) {
 	code := runBurstCLIWithDeps([]string{"show", "--hub-url", server.URL, "--hub-token-env", tokenEnv}, &stdout, &stderr, t441Deps(server))
 	if code != ExitOK || int64(stdout.Len()) > 64<<10 {
 		t.Fatalf("burst show unbounded read: code=%d bytes=%d", code, stdout.Len())
-	}
-	stdout.Reset()
-	code = runUpdateCLI([]string{"publish", "--hub-url", server.URL, "--hub-token-env", tokenEnv, "--version", "v1.2.3", "--sha256", strings.Repeat("ab", 32), "--url", "https://github.com/mgh3326/panewire/releases/download/v1.2.3/panewire", "--machines", "machine-a"}, &stdout, &stderr, t441Deps(server))
-	if code != ExitOK || int64(stdout.Len()) > 64<<10 {
-		t.Fatalf("update publish unbounded read: code=%d bytes=%d", code, stdout.Len())
 	}
 	t441AssertNoCredentialLeak(t, stdout.String(), stderr.String(), "")
 }

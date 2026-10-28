@@ -312,15 +312,15 @@ func parseSessionsFindArgs(args []string) (sessionsFindOptions, error) {
 		}
 	}
 	if len(positionals) != 1 || positionals[0] == "" || options.hubURL == "" || options.tokenEnv == "" {
-		return options, errors.New("sessions find requires exactly one label and hub credentials")
+		return options, errors.New("fleet-census find requires exactly one label and hub credentials")
 	}
 	options.label = positionals[0]
 	return options, nil
 }
 
-func runSessionsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
+func runFleetCensusFindCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if len(args) == 0 || args[0] != "find" {
-		return writeHubCLIUsage(stderr, "sessions: expected find subcommand", sessionsUsage)
+		return writeHubCLIUsage(stderr, "fleet-census find: expected find subcommand", fleetCensusFindUsage)
 	}
 	return runSessionsFindCLI(args[1:], stdout, stderr, deps)
 }
@@ -329,15 +329,15 @@ func runSessionsFindCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps
 	options, err := parseSessionsFindArgs(args)
 	if err != nil {
 		if missingHubCLIFlagValue(args, sessionsValueFlags, sessionsKnownFlags) {
-			return writeHubCLIUsage(stderr, "sessions find: flag value is required", sessionsUsage)
+			return writeHubCLIUsage(stderr, "fleet-census find: flag value is required", fleetCensusFindUsage)
 		}
-		return writeHubCLIUsage(stderr, "sessions find: "+err.Error(), sessionsUsage)
+		return writeHubCLIUsage(stderr, "fleet-census find: "+err.Error(), fleetCensusFindUsage)
 	}
 	if !validIdleWakeMetadata(options.label) {
-		return writeHubCLIUsage(stderr, "sessions find: invalid label", sessionsUsage)
+		return writeHubCLIUsage(stderr, "fleet-census find: invalid label", fleetCensusFindUsage)
 	}
 	if options.machine != "" && !machineIDPattern.MatchString(options.machine) {
-		return writeHubCLIUsage(stderr, "sessions find: invalid --machine", sessionsUsage)
+		return writeHubCLIUsage(stderr, "fleet-census find: invalid --machine", fleetCensusFindUsage)
 	}
 	now := time.Now
 	if deps.Now != nil {
@@ -357,7 +357,7 @@ func runSessionsFindCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps
 		result.Outcome = sessionsFindOutcomeError
 		result.Coverage.Reasons = []string{reason}
 		renderSessionsFindResult(stdout, result, options.jsonOut)
-		fmt.Fprintln(stderr, "sessions find failed:", reason)
+		fmt.Fprintln(stderr, "fleet-census find failed:", reason)
 		return code
 	}
 	env, err := loadHubTokenEnv(options.tokenEnv)

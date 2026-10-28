@@ -214,14 +214,14 @@ only as headers on the HTTPS request.
 
 ### Operator session find
 
-`panewire sessions find` locates sessions by canonical agent name across the
+`panewire fleet-census find` locates sessions by canonical agent name across the
 session snapshots that nodes already publish through `/v1/nodes`. It issues
 exactly one authenticated `GET /v1/nodes` through the same credentialled
 client as `hub-status` — the same origin pinning, redirect refusal, and
 bounded body — and never reads panes, prompts, or terminal output itself.
 
 ```sh
-panewire sessions find <label> \
+panewire fleet-census find <label> \
   --hub-url https://hub.example.invalid \
   --hub-token-env /safe/operator/hub-operator.env \
   --hub-cf-env /safe/operator/hub-cf-access.env

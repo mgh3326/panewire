@@ -4,9 +4,7 @@
 #
 # <version> is pw-<first 7 hex of HEAD>, the form hub-status already shows
 # (pw-05667f4). It is stamped with -X main.version, named in every asset, and is
-# the string `update publish --version` must carry: the hub requires the asset
-# name to contain it and the node's pre-rename smoke run requires `version` to
-# print it. dist-version.sh validates it against the hub version pattern.
+# verified by release tooling before rollout.
 #
 # PANEWIRE_RELEASE_TARGETS overrides the target list (tests build a subset).
 # Prints the version on stdout.
