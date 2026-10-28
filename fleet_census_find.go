@@ -320,7 +320,7 @@ func parseSessionsFindArgs(args []string) (sessionsFindOptions, error) {
 
 func runFleetCensusFindCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if len(args) == 0 || args[0] != "find" {
-		return writeHubCLIUsage(stderr, "sessions: expected find subcommand", fleetCensusFindUsage)
+		return writeHubCLIUsage(stderr, "fleet-census find: expected find subcommand", fleetCensusFindUsage)
 	}
 	return runSessionsFindCLI(args[1:], stdout, stderr, deps)
 }

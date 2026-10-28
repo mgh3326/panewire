@@ -173,6 +173,9 @@ func TestSessionsFindDispatchUsage(t *testing.T) {
 			if code == ExitOK {
 				t.Fatalf("%s succeeded: stdout=%q", fixture.name, stdout.String())
 			}
+			if (len(args) == 0 || args[0] != "find") && !strings.Contains(stderr.String(), "fleet-census find: expected find subcommand") {
+				t.Fatalf("%s reported the wrong command: stderr=%q", fixture.name, stderr.String())
+			}
 		})
 	}
 }

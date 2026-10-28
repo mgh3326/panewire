@@ -81,14 +81,12 @@ R2: prompt target safety, verified submission/uptake, privacy-preserving deliver
 ## R8 hub: presence, checks, and notification
 
 `panewire hub` is the optional, always-on live channel for presence and
-operator event push. It is deliberately **not** the durable transport:
+operator event push.
 
-- Supabase remains the stage 2 file relay and the offline recipient buffer.
 - The hub evaluates node presence and local heartbeat checks, and can send
   optional Telegram incident/recovery notification.
-- The hub is useful only while both sides are connected. Its process restart or
-  outage loses no stage 1/2 state, and `panewired` retries it as a non-blocking
-  side channel.
+- The hub is useful only while both sides are connected. `panewired` retries
+  the connection as a non-blocking side channel.
 
 ### Transport: outbound-only nodes, tailnet + Cloudflare
 

@@ -109,7 +109,7 @@ snapshot can share the same `w*:p*` id — herdr reassigns ids freely — so
 before re-registering against the sibling id the desk must confirm the
 sibling pane is the intended session, not a same-id stranger. Confirm the
 sibling pane's label/agent in that daemon's own snapshot with
-`panewire fleet-census find <label>`, or compare the
+`panewire fleet-census find <label> --machine <sibling-machine-id>`, or compare the
 audit row's pane against `hub-status` output for the sibling machine id.
 
 ## What breaks when the M1 orchestrator (herdr) restarts
