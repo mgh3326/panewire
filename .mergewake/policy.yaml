@@ -1,0 +1,16 @@
+version: 1
+enabled: false
+required_checks:
+  - 'test (ubuntu-latest)'
+  - 'test (macos-latest)'
+blocking:
+  - paths: ['session_reap.go', 'hub_session_reap.go', 'job.go', 'job_close.go', '*prune*.go']
+    reason: Session reaping can destroy live session state before a revert.
+  - paths: ['deploy/**', 'provision/**']
+    reason: Service installation and database provisioning or teardown change persistent systems before a revert.
+  - paths: ['hub.go', 'hub_*auth*.go', 'hub_*access*.go', 'hub_operator*.go', 'hub_security*.go', 'assistant_client.go', 'assistant_cf.go', 'hub_cf_access.go', 'hub_client.go', 'hub_operator_client.go', 'hub_jobs_client.go', 'hub_handoffkeep.go', 'hub_quota_v2.go', 'assistant.go', 'assistant_mcp.go', 'assistant_write.go', 'lanes_write.go', 'stage2/adapters/supabase/**']
+    reason: Hub and operator authentication changes can disclose tokens or admit writes immediately.
+  - paths: ['.github/workflows/**']
+    reason: Workflow changes can execute privileged automation before a revert.
+  - paths: ['.mergewake/**']
+    reason: Policy changes can authorize irreversible automation before a revert.
