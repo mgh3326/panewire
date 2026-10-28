@@ -11,7 +11,7 @@ import (
 // resolveTarget is the single pane-target resolver for `prompt --to` and
 // `wait --agent` (#497): the same input string resolves to the same pane from
 // either command. Matching is exact-only — partial match is deliberately not
-// offered here (`sessions find --contains` covers fleet search), so the
+// offered here (`fleet-census find --contains` covers fleet search), so the
 // not-found error says "exact" rather than reading as "does not exist".
 //
 // Two precedence tiers mirror wrk find's contract (name before tab label):

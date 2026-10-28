@@ -120,7 +120,7 @@ func t443Run(t *testing.T, server *httptest.Server, args ...string) (int, string
 	var stdout, stderr bytes.Buffer
 	full := append([]string{"find"}, args...)
 	full = append(full, "--hub-url", server.URL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv)
-	code := runSessionsCLI(full, &stdout, &stderr, t443Deps(server))
+	code := runFleetCensusFindCLI(full, &stdout, &stderr, t443Deps(server))
 	return code, stdout.String(), stderr.String()
 }
 
@@ -169,7 +169,7 @@ func TestSessionsFindDispatchUsage(t *testing.T) {
 			if len(args) > 0 && args[0] == "find" && cfEnv != "" {
 				args = append(args, "--hub-cf-env", cfEnv)
 			}
-			code := runSessionsCLI(args, &stdout, &stderr, t443Deps(server))
+			code := runFleetCensusFindCLI(args, &stdout, &stderr, t443Deps(server))
 			if code == ExitOK {
 				t.Fatalf("%s succeeded: stdout=%q", fixture.name, stdout.String())
 			}
@@ -547,7 +547,7 @@ func TestSessionsFindExactlyOneRequest(t *testing.T) {
 			}))
 			defer server.Close()
 			var stdout, stderr bytes.Buffer
-			code := runSessionsCLI([]string{"find", "label-x", "--json", "--hub-url", server.URL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, &stdout, &stderr, t443Deps(server))
+			code := runFleetCensusFindCLI([]string{"find", "label-x", "--json", "--hub-url", server.URL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, &stdout, &stderr, t443Deps(server))
 			if code == ExitOK || atomic.LoadInt64(&hits) != 1 {
 				t.Fatalf("status=%d code=%d requests=%d: a retry or second GET happened", status, code, hits)
 			}
@@ -571,7 +571,7 @@ func TestSessionsFindExactlyOneRequest(t *testing.T) {
 		}))
 		defer redirector.Close()
 		var stdout, stderr bytes.Buffer
-		code := runSessionsCLI([]string{"find", "label-x", "--hub-url", redirector.URL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, &stdout, &stderr, t443Deps(redirector))
+		code := runFleetCensusFindCLI([]string{"find", "label-x", "--hub-url", redirector.URL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, &stdout, &stderr, t443Deps(redirector))
 		if code == ExitOK || atomic.LoadInt64(&targetHits) != 0 || atomic.LoadInt64(&redirectorHits) != 1 {
 			t.Fatalf("redirect followed: code=%d redirector=%d target=%d", code, redirectorHits, targetHits)
 		}
@@ -585,7 +585,7 @@ func TestSessionsFindExactlyOneRequest(t *testing.T) {
 		}))
 		defer server.Close()
 		var stdout, stderr bytes.Buffer
-		code := runSessionsCLI([]string{"find", "label-x", "--hub-url", server.URL, "--hub-token-env", tokenEnv}, &stdout, &stderr, t443Deps(server))
+		code := runFleetCensusFindCLI([]string{"find", "label-x", "--hub-url", server.URL, "--hub-token-env", tokenEnv}, &stdout, &stderr, t443Deps(server))
 		if code == ExitOK || atomic.LoadInt64(&hits) != 1 {
 			t.Fatalf("malformed body: code=%d requests=%d", code, hits)
 		}
@@ -656,14 +656,14 @@ func TestSessionsFindDuplicateLabelsDeterministic(t *testing.T) {
 // credential host/loader, never names client_kind or a raw cwd field, and its
 // output carries neither fixture secrets nor sensitive paths.
 func TestSessionsFindSourceAndOutputBoundaries(t *testing.T) {
-	data, err := os.ReadFile("sessions_find.go")
+	data, err := os.ReadFile("fleet_census_find.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	source := string(data)
 	for _, required := range []string{"newHubOperatorClient(", ".do(ctx, http.MethodGet, \"/v1/nodes\""} {
 		if !strings.Contains(source, required) {
-			t.Fatalf("sessions find bypasses the common credentialled client: missing %q", required)
+			t.Fatalf("fleet-census find bypasses the common credentialled client: missing %q", required)
 		}
 	}
 	for _, banned := range []string{
@@ -671,7 +671,7 @@ func TestSessionsFindSourceAndOutputBoundaries(t *testing.T) {
 		"client_kind", `"cwd"`, "loadMode0600Env(",
 	} {
 		if strings.Contains(source, banned) {
-			t.Fatalf("sessions find introduces %q outside the shared boundary", banned)
+			t.Fatalf("fleet-census find introduces %q outside the shared boundary", banned)
 		}
 	}
 	body := t443NodesBody(t443Node("node-a", "connected", t443FreshSnapshot("["+t443Session("w1:p1", "ws-a", "label-hit", "idle")+"]")))
@@ -679,7 +679,7 @@ func TestSessionsFindSourceAndOutputBoundaries(t *testing.T) {
 	defer server.Close()
 	var stdout, stderr bytes.Buffer
 	tokenEnv, cfEnv := t441Envs(t)
-	code := runSessionsCLI([]string{"find", "label-hit", "--json", "--hub-url", server.URL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, &stdout, &stderr, t443Deps(server))
+	code := runFleetCensusFindCLI([]string{"find", "label-hit", "--json", "--hub-url", server.URL, "--hub-token-env", tokenEnv, "--hub-cf-env", cfEnv}, &stdout, &stderr, t443Deps(server))
 	if code != ExitOK {
 		t.Fatalf("code=%d stderr=%q", code, stderr.String())
 	}

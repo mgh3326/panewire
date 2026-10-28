@@ -255,12 +255,8 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 	return h.relayLaneEventContext(context.Background(), event, sender)
 }
 
-// relayLaneEventContext is relayLaneEvent with a caller context governing its
-// handoffkeep writes. The update-overdue flush is the only caller: it passes
-// the close context so Close cancels a sink write stuck on a hung
-// handoffkeep. Every other caller comes through relayLaneEvent above and
-// keeps the unchanged context.Background() behaviour — hub shutdown never
-// cancels a lane-event relay it does not own.
+// relayLaneEventContext governs the durable writes with the caller context.
+// Ordinary relays use context.Background so hub shutdown leaves delivery intact.
 func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEventPayload, sender *hubAgent) relayLaneEventResult {
 	ingress := sender == nil
 	if event.OwnerLane == "" || event.EventID == "" || event.Text == "" {
@@ -860,9 +856,7 @@ func (h *HubServer) persistRelayEvent(kind string, event hubJobEventPayload, rou
 // persistRelayEventRecord returns handoffkeep's own row and reply status
 // alongside the id, because the id alone cannot tell a first write from a row
 // the parent pane already received. The ctx belongs to the caller: every
-// ordinary relay passes context.Background and is untouched by hub Close;
-// only the update-overdue flush passes the close context it is required to
-// answer.
+// ordinary relay passes context.Background and is untouched by hub Close.
 func (h *HubServer) persistRelayEventRecord(ctx context.Context, kind string, event hubJobEventPayload, route reportRelayRoute) (handoffkeepRelayEvent, int, bool) {
 	if h.handoffkeep == nil {
 		return handoffkeepRelayEvent{}, 0, true

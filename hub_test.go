@@ -434,7 +434,7 @@ func TestR6HubClientReconnectBackoffWithoutSleep(t *testing.T) {
 	}
 }
 
-func TestR6HubUnavailableDoesNotBlockStage1OrStage2(t *testing.T) {
+func TestR6HubUnavailableDoesNotBlockStage1(t *testing.T) {
 	root := t.TempDir()
 	shortRoot, err := os.MkdirTemp("/tmp", "pw-r6-")
 	if err != nil {
@@ -461,16 +461,12 @@ func TestR6HubUnavailableDoesNotBlockStage1OrStage2(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	probe := &r6Stage2Probe{published: make(chan struct{}, 1), received: make(chan struct{}, 1)}
 	daemon := NewDaemon(Config{
 		Store:         store,
 		SocketPath:    filepath.Join(shortRoot, "daemon.sock"),
 		SchemaCommand: []string{"false"},
 		Logger:        slog.New(slog.NewTextHandler(io.Discard, nil)),
 		Hub:           HubDaemonConfig{Enabled: true, Client: client},
-		Stage2: Stage2Config{
-			Enabled: true, PollInterval: time.Hour, Publisher: probe, Receiver: probe,
-		},
 	})
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -478,16 +474,6 @@ func TestR6HubUnavailableDoesNotBlockStage1OrStage2(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer daemon.Stop()
-	select {
-	case <-probe.published:
-	case <-time.After(time.Second):
-		t.Fatal("stage2 publisher did not run while hub was unavailable")
-	}
-	select {
-	case <-probe.received:
-	case <-time.After(time.Second):
-		t.Fatal("stage2 receiver did not run while hub was unavailable")
-	}
 	path := filepath.Join(root, "stage1-ready.txt")
 	if err := os.WriteFile(path, []byte("fixture"), 0600); err != nil {
 		t.Fatal(err)
@@ -533,27 +519,6 @@ func r6ReadHubEvent(t *testing.T, subscriber *websocket.Conn, wantKind string) r
 		t.Fatalf("event kind=%q, want %q (%+v)", event.Kind, wantKind, event)
 	}
 	return event
-}
-
-type r6Stage2Probe struct {
-	published chan struct{}
-	received  chan struct{}
-}
-
-func (probe *r6Stage2Probe) PublishPending(context.Context) error {
-	select {
-	case probe.published <- struct{}{}:
-	default:
-	}
-	return nil
-}
-
-func (probe *r6Stage2Probe) PollOnce(context.Context) error {
-	select {
-	case probe.received <- struct{}{}:
-	default:
-	}
-	return nil
 }
 
 type r6NodeWire struct {

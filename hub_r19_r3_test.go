@@ -3,24 +3,19 @@ package panewire
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/coder/websocket"
-	"github.com/coder/websocket/wsjson"
 )
 
 // scopefuelEmitting writes a fixture scopefuel that prints exactly body.
@@ -88,210 +83,13 @@ func TestR19QuotaOutputBoundedByEncodedSize(t *testing.T) {
 // messages through the real node read loop. Without an in-flight guard both
 // would download and rename against the same executable, leaving the surviving
 // version up to whichever finished last.
-func TestR19ConcurrentUpdateInstructionsApplyOnce(t *testing.T) {
-	asset := hubTestSmokeAsset("r19c")
-	digest := sha256.Sum256(asset)
-	executable := filepath.Join(t.TempDir(), "panewire")
-	if err := os.WriteFile(executable, []byte("old binary"), 0755); err != nil {
-		t.Fatal(err)
-	}
-
-	var mu sync.Mutex
-	requests := 0
-	firstRequest := make(chan struct{}, 4)
-	release := make(chan struct{})
-	updateClient := &http.Client{Transport: hubRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
-		mu.Lock()
-		requests++
-		mu.Unlock()
-		firstRequest <- struct{}{}
-		// Hold the download open long enough for the second instruction to be
-		// read and answered while this one is still in flight.
-		select {
-		case <-release:
-		case <-time.After(5 * time.Second):
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(asset)), Request: request}, nil
-	})}
-
-	busy := make(chan struct{}, 8)
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		conn, err := websocket.Accept(writer, request, nil)
-		if err != nil {
-			return
-		}
-		defer conn.CloseNow()
-		instruction := map[string]any{
-			"type":    "update.available",
-			"version": "r19c",
-			"sha256":  hex.EncodeToString(digest[:]),
-			"url":     "https://github.com/mgh3326/panewire/releases/download/r19c/panewire_r19c_linux_amd64",
-		}
-		_ = wsjson.Write(request.Context(), conn, instruction)
-		_ = wsjson.Write(request.Context(), conn, instruction)
-		for {
-			var message map[string]any
-			if wsjson.Read(request.Context(), conn, &message) != nil {
-				return
-			}
-			if message["type"] == "update.busy" {
-				select {
-				case busy <- struct{}{}:
-				default:
-				}
-			}
-		}
-	}))
-	defer server.Close()
-
-	restarted := make(chan struct{}, 4)
-	client, err := NewHubClient(HubClientConfig{
-		URL: r6WSURL(server.URL, ""), MachineID: "node-a", Token: "node-token", AllowInsecureForTests: true,
-		PingInterval: time.Hour, PreferRetry: time.Hour, ExecutablePath: executable, UpdateHTTPClient: updateClient,
-		Restart: func() { restarted <- struct{}{} },
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	conn, _, err := websocket.Dial(t.Context(), client.endpoint, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	served := make(chan error, 1)
-	go func() { served <- client.serve(ctx, conn) }()
-
-	select {
-	case <-firstRequest:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the first update instruction never started a download")
-	}
-	answeredBusy := false
-	select {
-	case <-busy:
-		answeredBusy = true
-	case <-time.After(3 * time.Second):
-	}
-	close(release)
-	select {
-	case <-restarted:
-	case <-time.After(5 * time.Second):
-		t.Fatal("the admitted update never completed")
-	}
-	// Give a second, unguarded download the chance to be counted before the
-	// assertion reads the counter.
-	time.Sleep(300 * time.Millisecond)
-
-	mu.Lock()
-	total := requests
-	mu.Unlock()
-	if total != 1 {
-		t.Fatalf("concurrent update.available instructions produced %d downloads, want 1", total)
-	}
-	if !answeredBusy {
-		t.Fatal("the declined update instruction was not answered with update.busy")
-	}
-
-	// The guard admits one update at a time, not one update ever. A guard that
-	// is never released would decline every later instruction for the life of
-	// the process, which looks identical to correct behaviour above.
-	if !client.beginHubUpdate() {
-		t.Fatal("the in-flight guard was not released after the update completed")
-	}
-	client.endHubUpdate()
-	installed, readErr := os.ReadFile(executable)
-	if readErr != nil || string(installed) != string(asset) {
-		t.Fatalf("executable=%q err=%v", installed, readErr)
-	}
-	backups, globErr := filepath.Glob(executable + ".bak-*")
-	if globErr != nil || len(backups) != 1 {
-		t.Fatalf("one applied update left backups=%v err=%v", backupNames(backups), globErr)
-	}
-	cancel()
-	select {
-	case <-served:
-	case <-time.After(5 * time.Second):
-		t.Fatal("client did not stop")
-	}
-}
 
 // TestR19UpdateBusyIsAFirstClassInboundMessage keeps the node's reply out of the
 // hub's unknown-message counter and visible to an operator.
-func TestR19UpdateBusyIsAFirstClassInboundMessage(t *testing.T) {
-	if _, ok := parseHubInbound([]byte(`{"type":"update.busy"}`)); !ok {
-		t.Fatal("update.busy rejected by the hub parser")
-	}
-	if _, ok := parseHubInbound([]byte(`{"type":"update.busy","version":"r19c"}`)); ok {
-		t.Fatal("update.busy carrier field accepted")
-	}
-}
 
 // TestR19UpdateBackupsArePruned bounds the rollback copies kept beside the
 // executable. Each one is a full binary, so an unpruned series fills the
 // install directory in proportion to how often the node updates.
-func TestR19UpdateBackupsArePruned(t *testing.T) {
-	directory := t.TempDir()
-	executable := filepath.Join(directory, "panewire")
-	if err := os.WriteFile(executable, []byte("old binary"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	stale := []string{"20200101T000000Z", "20200102T000000Z", "20200103T000000Z", "20200104T000000Z"}
-	for _, timestamp := range stale {
-		if err := os.WriteFile(executable+".bak-"+timestamp, []byte(timestamp), 0755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	// An unrelated sibling must survive: pruning is scoped to this executable's
-	// own rollback copies.
-	if err := os.WriteFile(filepath.Join(directory, "other.bak-20200101T000000Z"), []byte("other"), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	asset := hubTestSmokeAsset("r19c")
-	digest := sha256.Sum256(asset)
-	updateClient := &http.Client{Transport: hubRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(asset)), Request: request}, nil
-	})}
-	url := "https://github.com/mgh3326/panewire/releases/download/r19c/panewire_r19c_linux_amd64"
-	if err := applyHubUpdate(context.Background(), updateClient, executable, hubTestUpdate(url, hex.EncodeToString(digest[:]), "r19c")); err != nil {
-		t.Fatal(err)
-	}
-
-	backups, globErr := filepath.Glob(executable + ".bak-*")
-	if globErr != nil {
-		t.Fatal(globErr)
-	}
-	if len(backups) != hubUpdateBackupsKept {
-		t.Fatalf("backups=%v, want %d retained", backupNames(backups), hubUpdateBackupsKept)
-	}
-	sort.Strings(backups)
-	// The newest stale copy and the one this update just wrote are what remain.
-	if filepath.Base(backups[0]) != "panewire.bak-"+stale[len(stale)-1] {
-		t.Fatalf("pruning removed the newest copies: %v", backupNames(backups))
-	}
-	newest, readErr := os.ReadFile(backups[1])
-	if readErr != nil || string(newest) != "old binary" {
-		t.Fatalf("rollback copy=%q err=%v", newest, readErr)
-	}
-	if _, err := os.Stat(filepath.Join(directory, "other.bak-20200101T000000Z")); err != nil {
-		t.Fatalf("pruning removed an unrelated sibling: %v", err)
-	}
-	// Below the retention count nothing is removed.
-	pruneHubUpdateBackups(executable, hubUpdateBackupsKept)
-	if remaining, _ := filepath.Glob(executable + ".bak-*"); len(remaining) != hubUpdateBackupsKept {
-		t.Fatalf("a second prune removed retained copies: %v", backupNames(remaining))
-	}
-}
-
-func backupNames(paths []string) []string {
-	names := make([]string, 0, len(paths))
-	for _, path := range paths {
-		names = append(names, filepath.Base(path))
-	}
-	sort.Strings(names)
-	return names
-}
 
 // TestR19PreferenceSwitchesDoNotNest walks the node up five preferred endpoints
 // in one session. Each switch used to be a recursive serve call, so the
