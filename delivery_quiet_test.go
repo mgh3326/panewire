@@ -82,8 +82,18 @@ func quietHub(t *testing.T, path, policy string, hk *handoffkeepRelayClient, now
 		t.Fatal(err)
 	}
 	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 20), persisted: make(chan hubRelayPersistedEvent, 20)}
-	h.nodes["host-a"] = &hubNodeRecord{agent: agent}
-	h.nodes["host-b"] = &hubNodeRecord{agent: agent}
+	// The default fixture reports every routed pane as a busy claude session:
+	// supported, and not idle, so inbox-class events exercise deferral. Tests
+	// of the delivery-timing rules swap the snapshot before relaying.
+	snapshot := func(panes ...string) *hubSessionSnapshotRecord {
+		sessions := make([]HubSession, 0, len(panes))
+		for _, pane := range panes {
+			sessions = append(sessions, HubSession{PaneID: pane, Status: "working", Harness: "claude"})
+		}
+		return &hubSessionSnapshotRecord{sessions: sessions, snapshotStatus: hubSnapshotStatusOK, receivedAt: *now}
+	}
+	h.nodes["host-a"] = &hubNodeRecord{machineID: "host-a", state: "connected", agent: agent, sessionSnapshot: snapshot("w1:p1", "w1:p2")}
+	h.nodes["host-b"] = &hubNodeRecord{machineID: "host-b", state: "connected", agent: agent, sessionSnapshot: snapshot("w2:p1")}
 	t.Cleanup(func() { h.Close() })
 	return h, agent
 }
@@ -499,9 +509,14 @@ func TestQuietDigestArrivalWindowAndParentPolicy(t *testing.T) {
 	h, agent := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", nil, &now)
 	e := hubJobEventPayload{JobID: "j1", Epoch: 1, OwnerLane: "child", ReportPath: "report.md"}
 	h.relayJobEventFrom("host-a", "job.joined", e)
+	// job.joined reports a completion to the owner lane's parent, so it never
+	// defers: the store keeps an interrupt-class record (read, no digest) and
+	// the parent's pane is injected straight away. With no handoffkeep the
+	// inject gets no durable id, so no persisted acknowledgement is owed.
 	c, _ := h.inbox.store.counts("lane-b")
-	if c["lane-b"] != 1 || len(agent.relays) != 0 || len(agent.persisted) != 1 {
-		t.Fatal(c)
+	items, _ := h.inbox.store.list("lane-b", false)
+	if c["lane-b"] != 0 || len(items) != 1 || items[0].Class != "interrupt" || len(agent.relays) != 1 || len(agent.persisted) != 0 {
+		t.Fatal(c, items, len(agent.relays), len(agent.persisted))
 	}
 }
 
@@ -509,7 +524,9 @@ func TestQuietDigestArrivalWindowAndParentPolicy(t *testing.T) {
 // queue length: a lane acknowledgement without Lane is silently rejected by
 // both old and new node decoders, leaving a quiet event's outbox unretired.
 func TestQuietProducerAcknowledgementRetiresOutbox(t *testing.T) {
-	for _, tc := range []struct{ kind, class, window string }{{"lane.event", "inbox", "0s"}, {"lane.event", "interrupt", "2s"}, {"job.completed", "inbox", "0s"}} {
+	// job.completed cannot stand in for an explicit-inbox job event any more:
+	// owned completions promote to immediate before the inbox sees them.
+	for _, tc := range []struct{ kind, class, window string }{{"lane.event", "inbox", "0s"}, {"lane.event", "interrupt", "2s"}, {"job.escalate", "inbox", "0s"}} {
 		t.Run(tc.kind+tc.class+tc.window, func(t *testing.T) {
 			now := time.Now()
 			policyPath := filepath.Join(t.TempDir(), "policy.yaml")

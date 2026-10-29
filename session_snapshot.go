@@ -41,12 +41,15 @@ const (
 // LabelSource; DisplayLabel carries only the tab.list join. Both are display
 // context, never identity.
 type HubSession struct {
-	PaneID           string `json:"pane_id"`
-	WorkspaceID      string `json:"workspace_id"`
-	Label            string `json:"label"`
-	AgentName        string `json:"agent_name,omitempty"`
-	LabelSource      string `json:"label_source,omitempty"`
-	DisplayLabel     string `json:"display_label,omitempty"`
+	PaneID       string `json:"pane_id"`
+	WorkspaceID  string `json:"workspace_id"`
+	Label        string `json:"label"`
+	AgentName    string `json:"agent_name,omitempty"`
+	LabelSource  string `json:"label_source,omitempty"`
+	DisplayLabel string `json:"display_label,omitempty"`
+	// Harness is the pane's reported agent CLI — optional because pre-additive
+	// nodes do not send it; absent means unreported, never supported.
+	Harness          string `json:"harness,omitempty"`
 	Status           string `json:"status"`
 	InteractiveReady *bool  `json:"interactive_ready,omitempty"`
 	Revision         int64  `json:"revision"`
@@ -83,6 +86,7 @@ func hubSessionSnapshotsFromStates(states []HerdrAgentState) []HubSession {
 			Label:            normalizedIdleWakeMetadata(state.Label),
 			AgentName:        normalizedIdleWakeMetadata(state.AgentName),
 			DisplayLabel:     normalizedIdleWakeMetadata(state.DisplayLabel),
+			Harness:          normalizedIdleWakeMetadata(state.Harness),
 			Status:           state.Status,
 			InteractiveReady: cloneBool(state.InteractiveReady),
 			Revision:         state.Revision,
@@ -234,13 +238,13 @@ func decodeHubSessionSnapshots(raw []byte) ([]HubSession, bool) {
 	sessions := make([]HubSession, 0, len(rows))
 	seen := make(map[string]struct{}, len(rows))
 	for _, fields := range rows {
-		if len(fields) < 6 || len(fields) > 10 {
+		if len(fields) < 6 || len(fields) > 11 {
 			return nil, false
 		}
 		for name := range fields {
 			switch name {
 			case "pane_id", "workspace_id", "label", "status", "interactive_ready", "revision", "state_change_seq",
-				"agent_name", "label_source", "display_label":
+				"agent_name", "label_source", "display_label", "harness":
 			default:
 				return nil, false
 			}
@@ -251,7 +255,7 @@ func decodeHubSessionSnapshots(raw []byte) ([]HubSession, bool) {
 				return nil, false
 			}
 		}
-		for _, name := range []string{"interactive_ready", "agent_name", "label_source", "display_label"} {
+		for _, name := range []string{"interactive_ready", "agent_name", "label_source", "display_label", "harness"} {
 			if rawValue, exists := fields[name]; exists && bytes.Equal(bytes.TrimSpace(rawValue), []byte("null")) {
 				return nil, false
 			}
@@ -274,7 +278,7 @@ func decodeHubSessionSnapshots(raw []byte) ([]HubSession, bool) {
 }
 
 func validHubSession(session HubSession) bool {
-	return validIdleWakePane(session.PaneID) && validIdleWakeMetadata(session.WorkspaceID) && validIdleWakeMetadata(session.Label) && validIdleWakeMetadata(session.AgentName) && validIdleWakeMetadata(session.DisplayLabel) && validHubSessionLabelSource(session) && validObservedAgentStatus(session.Status) && session.Revision >= 0 && session.StateChangeSeq >= 0
+	return validIdleWakePane(session.PaneID) && validIdleWakeMetadata(session.WorkspaceID) && validIdleWakeMetadata(session.Label) && validIdleWakeMetadata(session.AgentName) && validIdleWakeMetadata(session.DisplayLabel) && validIdleWakeMetadata(session.Harness) && validHubSessionLabelSource(session) && validObservedAgentStatus(session.Status) && session.Revision >= 0 && session.StateChangeSeq >= 0
 }
 
 func marshalHubHeartbeatForWire(heartbeat hubHeartbeatPayload) ([]byte, bool) {
