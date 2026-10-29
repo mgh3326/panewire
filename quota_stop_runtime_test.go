@@ -127,3 +127,20 @@ func TestQuotaStopPolicyCacheAndExclusions(t *testing.T) {
 		t.Fatal("missing policy accepted")
 	}
 }
+
+func TestQuotaStopGuardRejectsDialogBeforePrompt(t *testing.T) {
+	for _, harness := range []string{"claude", "devin"} {
+		t.Run(harness, func(t *testing.T) {
+			_, calls := unprovenSetupHerdr(t, []string{"You've hit your weekly limit · resets Nov 1, 2am\nChoose an option: upgrade or wait"})
+			result := relayInjectForHarnessGuarded(context.Background(), "fake-pane", harness, "continue [r0000000]", nil, func(string) bool { return false })
+			if result.Outcome != relayInjectMaybeInPane || !strings.Contains(result.Evidence, "guard_rejected") {
+				t.Fatalf("result=%+v", result)
+			}
+			for _, call := range calls() {
+				if call == "prompt" || call == "send-keys" {
+					t.Fatalf("unexpected fake herdr call %q", call)
+				}
+			}
+		})
+	}
+}

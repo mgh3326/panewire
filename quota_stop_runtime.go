@@ -49,7 +49,11 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 		if (pool == "devin-free" && harness != "devin") || (pool == "claude" && harness != "claude") || (pool == "codex" && harness != "codex") {
 			return relayInjectResult{Outcome: relayInjectMaybeInPane, Evidence: "harness_changed"}
 		}
-		return relayInjectForHarness(ctx, pane, harness, text, nil)
+		return relayInjectForHarnessGuarded(ctx, pane, harness, text, nil, func(screen string) bool {
+			stop, ok := classifyQuotaStop(screen, time.Now(), time.Local)
+			_, composerOK := relayComposer(harness, screen)
+			return ok && stop.Pool == pool && !stop.Choice && composerOK
+		})
 	}
 	return q, nil
 }
