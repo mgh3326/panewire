@@ -168,11 +168,15 @@ type hubNodeRecord struct {
 	stateSince        time.Time
 	remoteMeta        map[string]string
 	state             string
-	agent             *hubAgent
-	activeJobs        map[string]HubActiveJob
-	hostLoad          *HubHostLoad
-	hostMemory        *HubHostMemory
-	sessionSnapshot   *hubSessionSnapshotRecord
+	// lastHeartbeat is the last authenticated liveness proof: the hello that
+	// created the session and each successfully decoded heartbeat event. Wake
+	// confirmation keys on it, not on the looser "any message touched" state.
+	lastHeartbeat   time.Time
+	agent           *hubAgent
+	activeJobs      map[string]HubActiveJob
+	hostLoad        *HubHostLoad
+	hostMemory      *HubHostMemory
+	sessionSnapshot *hubSessionSnapshotRecord
 }
 
 type hubAgent struct {
@@ -1206,6 +1210,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.mu.Lock()
 			if record := h.nodes[machineID]; record != nil && record.agent == agent {
+				record.lastHeartbeat = received
 				record.hostLoad = cloneHubHostLoad(heartbeat.HostLoad)
 				if !equalHubHostMemory(record.hostMemory, heartbeat.HostMemory) {
 					record.hostMemory = cloneHubHostMemory(heartbeat.HostMemory)
@@ -1796,7 +1801,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	h.nodes[machineID] = &hubNodeRecord{
 		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now,
 		remoteMeta: map[string]string{"version": version, "remote_addr": remoteAddr},
-		state:      "connected", stateSince: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
+		state:      "connected", stateSince: now, lastHeartbeat: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
 	}
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
@@ -2264,9 +2269,10 @@ func (agent *hubAgent) writeBursts(ctx context.Context) {
 	}
 }
 
-// queueWake drops the event rather than blocking the request path when a
-// waker node is slow; a slow waker is disconnected exactly like a slow burst
-// target.
+// queueWake drops the event rather than blocking the request path or closing
+// the shared agent connection when a waker node is slow; requestNodeWake
+// redispatches on its slow cadence, so a dropped event is recovered without
+// disturbing the failover/burst/relay streams on the same connection.
 func (agent *hubAgent) queueWake(event hubWakeRequestEvent) {
 	if agent == nil || agent.wakes == nil {
 		return
@@ -2274,9 +2280,6 @@ func (agent *hubAgent) queueWake(event hubWakeRequestEvent) {
 	select {
 	case agent.wakes <- event:
 	default:
-		if agent.conn != nil {
-			_ = agent.conn.Close(websocket.StatusPolicyViolation, "slow")
-		}
 	}
 }
 

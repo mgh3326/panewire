@@ -352,11 +352,18 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		hubClient = configuredHub
 		cfg.Hub = HubDaemonConfig{Enabled: true, Client: hubClient}
 	}
+	if *idleShutdown < 0 {
+		return nil, ExitConditionInvalid, fmt.Errorf("idle shutdown duration must not be negative")
+	}
 	if *idleShutdown > 0 {
 		// The shutdown decision must be able to reach operator-desk, so the
-		// feature only runs on a hub-connected node.
+		// feature only runs on a hub-connected node, and the pane probes it
+		// gates on need herdr.
 		if !hubFlagsProvided(args) {
 			return nil, ExitConditionInvalid, fmt.Errorf("idle shutdown requires --hub-url and --hub-token-env")
+		}
+		if *herdr == "" {
+			return nil, ExitConditionInvalid, fmt.Errorf("idle shutdown requires --herdr-socket")
 		}
 		command := strings.Fields(*idleShutdownCommand)
 		if len(command) == 0 {

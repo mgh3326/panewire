@@ -183,12 +183,20 @@ func (h *HubServer) reloadWakeConfigLocked() {
 	h.wakeTargets, h.wakeConfigModTime = targets, modTime
 }
 
+// wakeHeartbeatFreshLocked bounds "already awake" by heartbeat recency: a
+// state of connected with a heartbeat older than three keepalive intervals is
+// a dead connection the sweep has not reaped yet, so the wake proceeds.
+func (h *HubServer) wakeHeartbeatFreshLocked(record *hubNodeRecord, now time.Time) bool {
+	return !record.lastHeartbeat.IsZero() && now.Sub(record.lastHeartbeat) <= 3*h.keepaliveInterval
+}
+
 // requestNodeWake asks the configured waker node to emit one magic packet for
-// the target, then waits for the target's own authenticated heartbeat to mark
-// it connected. Packet delivery itself is confirmed only by that heartbeat;
-// the event is redispatched on a slow cadence because UDP loss is ordinary.
+// the target, then waits for the target's own authenticated heartbeat to
+// return after the dispatch began. Packet delivery itself is confirmed only
+// by that heartbeat; the event is redispatched on a slow cadence because UDP
+// loss is ordinary.
 func (h *HubServer) requestNodeWake(ctx context.Context, machine string) (hubWakeResult, string) {
-	now := h.now().UTC()
+	started := h.now().UTC()
 	h.mu.Lock()
 	h.reloadWakeConfigLocked()
 	target, known := h.wakeTargets[machine]
@@ -196,7 +204,7 @@ func (h *HubServer) requestNodeWake(ctx context.Context, machine string) (hubWak
 		h.mu.Unlock()
 		return hubWakeResult{}, "unknown_target"
 	}
-	if record := h.nodes[machine]; record != nil && record.agent != nil && record.state == "connected" {
+	if record := h.nodes[machine]; record != nil && record.agent != nil && record.state == "connected" && h.wakeHeartbeatFreshLocked(record, started) {
 		h.mu.Unlock()
 		return hubWakeResult{Machine: machine, Via: target.Via, State: "connected", AlreadyConnected: true}, ""
 	}
@@ -207,8 +215,7 @@ func (h *HubServer) requestNodeWake(ctx context.Context, machine string) (hubWak
 	}
 	agent := waker.agent
 	h.mu.Unlock()
-	agent.queueWake(hubWakeRequestEvent{Type: "wake", Machine: machine, EmittedAt: now})
-	started := h.now()
+	agent.queueWake(hubWakeRequestEvent{Type: "wake", Machine: machine, EmittedAt: started})
 	tick := time.NewTicker(hubWakeConfirmationPoll)
 	defer tick.Stop()
 	redispatch := time.NewTicker(hubWakeRedispatch)
@@ -216,7 +223,7 @@ func (h *HubServer) requestNodeWake(ctx context.Context, machine string) (hubWak
 	for {
 		h.mu.Lock()
 		record := h.nodes[machine]
-		up := record != nil && record.agent != nil && record.state == "connected"
+		up := record != nil && record.agent != nil && record.state == "connected" && !record.lastHeartbeat.Before(started)
 		h.mu.Unlock()
 		if up {
 			return hubWakeResult{Machine: machine, Via: target.Via, State: "connected", WaitedMS: h.now().Sub(started).Milliseconds()}, ""
@@ -242,7 +249,7 @@ func (h *HubServer) handleNodeWake(writer http.ResponseWriter, request *http.Req
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 4096))
 	decoder.DisallowUnknownFields()
-	if decoder.Decode(&body) != nil || !machineIDPattern.MatchString(body.Machine) || body.Machine == hubOperatorMachineID {
+	if decoder.Decode(&body) != nil || decoder.Decode(&struct{}{}) != io.EOF || !machineIDPattern.MatchString(body.Machine) || body.Machine == hubOperatorMachineID {
 		http.Error(writer, "invalid wake request", http.StatusBadRequest)
 		return
 	}

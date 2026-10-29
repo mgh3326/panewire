@@ -225,7 +225,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 			shutdownRoot = d.cfg.InboxRoot
 		}
 		if shutdownRoot == "" {
-			shutdownRoot = defaultInboxRoot()
+			shutdownRoot = emitInboxRoot("")
 		}
 		panesAlive := hubPanesAliveHook(d.cfg.HerdrSocket)
 		manager := newIdleShutdownManager(d.cfg.IdleShutdown, shutdownRoot, idleShutdownDeps{
@@ -258,6 +258,9 @@ func idleShutdownJobLeases(root string, panesAlive panesAliveFunc, ctx context.C
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
+		return nil, err
+	}
+	if _, err := os.ReadDir(jobsDir); err != nil {
 		return nil, err
 	}
 	return scanHubActiveJobsWithPanes(ctx, root, panesAlive), nil

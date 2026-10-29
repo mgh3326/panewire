@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
 
 type idleShutdownFixture struct {
+	mu          sync.Mutex
 	sessions    []HerdrAgentState
 	sessionsErr error
 	jobs        []HubActiveJob
@@ -37,6 +39,8 @@ func (fake *idleShutdownFixture) deps() idleShutdownDeps {
 			return append([]HerdrAgentState(nil), fake.sessions...), fake.sessionsErr
 		},
 		jobLeases: func(context.Context) ([]HubActiveJob, error) {
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
 			return append([]HubActiveJob(nil), fake.jobs...), fake.jobsErr
 		},
 		procs: func(context.Context) ([]string, error) {
@@ -202,6 +206,27 @@ func TestIdleShutdownCommandFailureRestartsWindow(t *testing.T) {
 	}
 }
 
+func TestIdleShutdownPostSettleBlockAborts(t *testing.T) {
+	start := time.Date(2026, 9, 5, 9, 0, 0, 0, time.UTC)
+	fake := &idleShutdownFixture{procs: []string{"/usr/bin/sleep 5"}, now: start}
+	manager := newIdleShutdownFixture(t, fake)
+	manager.cfg.NotifySettle = time.Second
+	manager.tick(context.Background())
+	fake.now = start.Add(30 * time.Minute)
+	// Work appears during the settle window: the commit emits the decision
+	// record but the final probe vetoes the command itself.
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		fake.mu.Lock()
+		fake.jobs = []HubActiveJob{{JobID: "job-a"}}
+		fake.mu.Unlock()
+	}()
+	manager.tick(context.Background())
+	if fake.shutdowns != 0 || len(fake.enqueued) == 0 {
+		t.Fatalf("post-settle blocker did not veto: shutdowns=%d enqueued=%d", fake.shutdowns, len(fake.enqueued))
+	}
+}
+
 func TestIdleShutdownLaneEventShape(t *testing.T) {
 	start := time.Date(2026, 9, 5, 8, 0, 0, 0, time.UTC)
 	fake := &idleShutdownFixture{procs: []string{"/usr/bin/sleep 5"}, now: start}
@@ -227,12 +252,13 @@ func TestIdleShutdownLaneEventShape(t *testing.T) {
 
 func TestIdleShutdownRunnerProc(t *testing.T) {
 	for line, want := range map[string]bool{
-		"/opt/runner/bin/Runner.Worker run": true,
-		"Runner.Worker":                     true,
-		"vim Runner.Worker.log":             false,
-		"/usr/bin/SomeRunner.Worker":        false,
-		"Runner.Listener":                   false,
-		"":                                  false,
+		"/opt/runner/bin/Runner.Worker run":         true,
+		"/opt/actions runner/bin/Runner.Worker run": true,
+		"Runner.Worker":              true,
+		"vim Runner.Worker.log":      false,
+		"/usr/bin/SomeRunner.Worker": false,
+		"Runner.Listener":            false,
+		"":                           false,
 	} {
 		if got := idleShutdownRunnerProc(line); got != want {
 			t.Fatalf("%q got=%t want=%t", line, got, want)
@@ -268,7 +294,7 @@ func TestDaemonIdleShutdownFlagValidation(t *testing.T) {
 	if err := os.WriteFile(envPath, []byte("HUB_MACHINE_ID=node-b\nHUB_TOKEN="+r6NodeBToken+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	hub := []string{"--socket", filepath.Join(root, "daemon.sock"), "--hub-url", "ws://fixture.invalid", "--hub-token-env", envPath}
+	hub := []string{"--socket", filepath.Join(root, "daemon.sock"), "--herdr-socket", filepath.Join(root, "herdr.sock"), "--hub-url", "ws://fixture.invalid", "--hub-token-env", envPath}
 	deps := daemonCLIDeps{AllowInsecureForTests: true}
 	// 0 is off and needs no other flags.
 	daemon, code, err := newDaemonForCLI([]string{"--socket", filepath.Join(root, "off.sock"), "--idle-shutdown", "0"}, deps)
@@ -277,6 +303,8 @@ func TestDaemonIdleShutdownFlagValidation(t *testing.T) {
 	}
 	for name, args := range map[string][]string{
 		"enabled no hub":     {"--idle-shutdown", "30m", "--idle-shutdown-command", "fixture poweroff"},
+		"enabled no herdr":   {"--socket", filepath.Join(root, "n.sock"), "--hub-url", "ws://fixture.invalid", "--hub-token-env", envPath, "--idle-shutdown", "30m", "--idle-shutdown-command", "fixture poweroff"},
+		"negative duration":  {"--idle-shutdown", "-30m"},
 		"enabled no command": append(append([]string{}, hub...), "--idle-shutdown", "30m"),
 		"bad lane":           append(append([]string{}, hub...), "--idle-shutdown", "30m", "--idle-shutdown-command", "fixture poweroff", "--idle-shutdown-lane", "BAD LANE"),
 		"bad poll":           append(append([]string{}, hub...), "--idle-shutdown", "30m", "--idle-shutdown-command", "fixture poweroff", "--idle-shutdown-poll", "0"),

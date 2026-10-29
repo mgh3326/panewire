@@ -218,10 +218,17 @@ func (m *idleShutdownManager) blockedReason(ctx context.Context) string {
 }
 
 // idleShutdownRunnerProc identifies the GitHub Actions worker by the basename
-// of its argv[0]; a CI job running under Runner.Worker keeps the machine up.
+// of any argv token: an install path containing spaces splits argv[0] across
+// fields, so only checking the first field would miss it. A stray
+// "Runner.Worker" token (e.g. a user grepping for it) merely keeps the
+// machine awake — the safe direction.
 func idleShutdownRunnerProc(line string) bool {
-	fields := strings.Fields(line)
-	return len(fields) > 0 && filepath.Base(fields[0]) == "Runner.Worker"
+	for _, field := range strings.Fields(line) {
+		if filepath.Base(field) == "Runner.Worker" {
+			return true
+		}
+	}
+	return false
 }
 
 // decide emits the single durable lane.event, waits the notify settle, then
@@ -258,13 +265,27 @@ func (m *idleShutdownManager) decide(ctx context.Context, at time.Time, idleFor 
 		case <-timer.C:
 		}
 	}
+	// The settle gave the lane event time to leave; it also opened a window
+	// for work to start, so the conditions are probed one last time before the
+	// irreversible step.
+	if blocker := m.blockedReason(ctx); blocker != "" {
+		m.log.Warn("idle-shutdown aborted after settle", "reason", blocker)
+		m.mu.Lock()
+		m.committed = false
+		m.idleSince = time.Time{}
+		m.lastBlock = blocker
+		m.mu.Unlock()
+		return
+	}
 	if err := m.deps.shutdown(ctx); err != nil {
 		m.log.Error("idle-shutdown command failed", "error", err)
 		// A refused command restarts the idle window so the node tries again
-		// only after another full quiet stretch, never in a tight loop.
+		// only after another full quiet stretch, never in a tight loop. The
+		// window restarts at the clock read after the command returned, not at
+		// the decision, so a long-running failure cannot re-commit at once.
 		m.mu.Lock()
 		m.committed = false
-		m.idleSince = at
+		m.idleSince = m.deps.now()
 		m.mu.Unlock()
 		return
 	}

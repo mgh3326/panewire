@@ -209,13 +209,59 @@ func TestHubNodeWakeAuthAndFailures(t *testing.T) {
 	if response.StatusCode != http.StatusOK || !result.AlreadyConnected {
 		t.Fatalf("already-connected status=%d result=%+v", response.StatusCode, result)
 	}
-	// Malformed bodies stay 400.
-	for _, body := range []string{`{"machine":"desktop","timeout":"nope"}`, `{"machine":"desktop","argv":["sh"]}`, `{"machine":"operator"}`} {
+	// Malformed bodies stay 400, including trailing JSON after a valid value.
+	for _, body := range []string{`{"machine":"desktop","timeout":"nope"}`, `{"machine":"desktop","argv":["sh"]}`, `{"machine":"operator"}`, `{"machine":"unlisted"}{"machine":"desktop"}`} {
 		response = post(r6OperatorToken, body)
 		_ = response.Body.Close()
 		if response.StatusCode != http.StatusBadRequest {
 			t.Fatalf("body %s status=%d", body, response.StatusCode)
 		}
+	}
+}
+
+// A node record in "connected" state with no heartbeat inside three keepalive
+// intervals is a dead connection, not proof of life: the hub still dispatches.
+func TestHubNodeWakeStaleHeartbeatStillDispatches(t *testing.T) {
+	now := time.Date(2026, 9, 5, 4, 30, 0, 0, time.UTC)
+	hub := nodeWakeHub(t, &now)
+	waker := &hubAgent{wakes: make(chan hubWakeRequestEvent, 2)}
+	hub.connect("rpi", "nw", "fixture", waker, false)
+	hub.connect("desktop", "nw", "fixture", &hubAgent{}, false)
+	// The desktop's last heartbeat is far older than 3*keepaliveInterval.
+	now = now.Add(4 * time.Hour)
+	server := httptest.NewServer(hub.Handler())
+	defer server.Close()
+	done := make(chan *http.Response, 1)
+	go func() {
+		request, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/nodes/wake", bytes.NewReader([]byte(`{"machine":"desktop","timeout":"5s"}`)))
+		request.Header.Set(hubAuthorizationHeader, "Bearer "+r6OperatorToken)
+		response, _ := server.Client().Do(request)
+		done <- response
+	}()
+	select {
+	case event := <-waker.wakes:
+		if event.Machine != "desktop" {
+			t.Fatalf("unexpected wake event: %+v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stale heartbeat was treated as already-connected")
+	}
+	// A fresh heartbeat from the returning node completes the wake. Setting
+	// lastHeartbeat under the lock stands in for a decoded heartbeat frame.
+	hub.mu.Lock()
+	hub.nodes["desktop"].lastHeartbeat = now
+	hub.mu.Unlock()
+	var response *http.Response
+	select {
+	case response = <-done:
+	case <-time.After(time.Second):
+		t.Fatal("fresh heartbeat did not confirm the wake")
+	}
+	defer response.Body.Close()
+	var result hubWakeResult
+	_ = json.NewDecoder(response.Body).Decode(&result)
+	if response.StatusCode != http.StatusOK || result.AlreadyConnected {
+		t.Fatalf("stale-then-fresh wake status=%d result=%+v", response.StatusCode, result)
 	}
 }
 
