@@ -639,6 +639,7 @@ func (d *Daemon) serve(ctx context.Context) {
 
 type localRequest struct {
 	DeliveryClass string `json:"delivery_class,omitempty"`
+	NotifyType    string `json:"notify_type,omitempty"`
 	Op            string `json:"op"`
 	Path          string `json:"path,omitempty"`
 	Target        string `json:"target,omitempty"`
@@ -842,7 +843,7 @@ func sameLocalPath(left, right string) bool {
 // immediate queue. A hub that is absent or disconnected is not an error: the
 // event file is durable and the node outbox retries from it.
 func (d *Daemon) emitRelayEvent(req localRequest) error {
-	if !emitRelayKinds[req.Kind] || !validDeliveryClass(req.DeliveryClass) {
+	if !emitRelayKinds[req.Kind] || !validDeliveryClass(req.DeliveryClass) || !validNotifyType(req.NotifyType) {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if req.Kind == "lane.event" {
@@ -869,7 +870,7 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		return &codedError{ExitDaemonUnavailable, fmt.Errorf("hub client unavailable")}
 	}
 	event := hubScannedRelayEvent{
-		DeliveryClass: req.DeliveryClass, Kind: req.Kind,
+		DeliveryClass: req.DeliveryClass, NotifyType: req.NotifyType, Kind: req.Kind,
 		HubActiveJob: HubActiveJob{
 			JobID: req.JobID, Epoch: epoch, AgentLabel: req.AgentLabel, OwnerLane: req.OwnerLane,
 			Label: req.Label, Host: req.Host, ReportPath: req.ReportPath, ReportLastLine: req.ReportLastLine,

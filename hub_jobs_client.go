@@ -163,6 +163,7 @@ func scanHubCompletedJobs(inboxRoot string) []HubActiveJob {
 
 type hubScannedRelayEvent struct {
 	DeliveryClass string
+	NotifyType    string
 	Kind          string
 	HubActiveJob
 	Reason    string
@@ -282,7 +283,7 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 			// The event file name is the job event's durable identity: it is
 			// unique per emission, stable across node restarts, and shared by
 			// `panewire emit`, which derives the same value for its file.
-			events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name(), EventTime: eventTime})
+			events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name(), EventTime: eventTime})
 		}
 	}
 	sort.Slice(events, func(i, j int) bool {
@@ -334,7 +335,7 @@ func scanHubLaneEventsWithin(inboxRoot string, maxAge time.Duration) []hubScanne
 		if epoch == 0 {
 			epoch = 1
 		}
-		out = append(out, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated()})
+		out = append(out, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated()})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].OwnerLane == out[j].OwnerLane {
@@ -389,6 +390,7 @@ func scanHubJobCompletion(eventsDir, jobID string) (HubActiveJob, bool) {
 // retaining the older flat form emitted by existing wrk done installations.
 type hubInboxEvent struct {
 	DeliveryClass  string `json:"delivery_class,omitempty"`
+	NotifyType     string `json:"notify_type,omitempty"`
 	Type           string `json:"type"`
 	Kind           string `json:"kind"`
 	Event          string `json:"event"`
@@ -458,9 +460,15 @@ func (e hubInboxEvent) head() string     { return firstHubValue(e.Head, e.Payloa
 func (e hubInboxEvent) paneID() string   { return firstHubValue(e.PaneID, e.Payload.PaneID) }
 func (e hubInboxEvent) role() string     { return firstHubValue(e.Role, e.Payload.Role) }
 func (e hubInboxEvent) tLevel() string   { return firstHubValue(e.TLevel, e.Payload.TLevel) }
-func (e hubInboxEvent) eventID() string  { return e.EventID }
-func (e hubInboxEvent) text() string     { return e.Text }
-func (e hubInboxEvent) truncated() bool  { return e.Truncated }
+func (e hubInboxEvent) notifyType() string {
+	if !validNotifyType(e.NotifyType) {
+		return ""
+	}
+	return e.NotifyType
+}
+func (e hubInboxEvent) eventID() string { return e.EventID }
+func (e hubInboxEvent) text() string    { return e.Text }
+func (e hubInboxEvent) truncated() bool { return e.Truncated }
 func (e hubInboxEvent) eventTime(entry os.DirEntry, eventsDir string) time.Time {
 	if parsed, err := time.Parse(time.RFC3339, e.CreatedAt); err == nil {
 		return parsed

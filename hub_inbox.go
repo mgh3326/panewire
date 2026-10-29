@@ -16,6 +16,9 @@ import (
 type hubInbox struct {
 	store  *laneInboxStore
 	policy *deliveryPolicy
+	// waiters bounds concurrent /v1/inbox/wait long-polls. Acquired before
+	// the handler loop and released when it returns.
+	waiters chan struct{}
 	// flushMu serializes one flush pass and owns every field below it;
 	// Close takes it to wait out an in-flight pass before closing the store.
 	flushMu sync.Mutex
@@ -36,6 +39,12 @@ const (
 	// sink costs one attempt per minute, not several per second.
 	inboxFlushBackoffBase = time.Second
 	inboxFlushBackoffMax  = time.Minute
+
+	// hubInboxWaitMaxWait bounds one /v1/inbox/wait long-poll; the CLI
+	// re-issues the request for longer --timeout values. hubInboxWaitMaxWaiters
+	// bounds concurrent waiters so stalled readers cannot pin hub connections.
+	hubInboxWaitMaxWait    = 60 * time.Second
+	hubInboxWaitMaxWaiters = 64
 )
 
 func defaultHubInboxPath() string {
@@ -61,7 +70,7 @@ func newHubInbox(policyPath, storePath string) (*hubInbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &hubInbox{store: store, policy: policy}, nil
+	return &hubInbox{store: store, policy: policy, waiters: make(chan struct{}, hubInboxWaitMaxWaiters)}, nil
 }
 
 // prepareInbox runs once before the hub starts accepting events. Maintenance
@@ -362,6 +371,84 @@ func (h *HubServer) handleInboxRead(w http.ResponseWriter, r *http.Request) {
 	}
 	writeHubJSON(w, 200, item)
 }
+
+// handleInboxWait is the bounded long-poll counterpart of handleInboxList: it
+// answers with the lane's oldest unread inbox item as soon as one exists, or a
+// null item once the client-supplied wait runs out. It holds the same
+// authentication as the other /v1 inbox routes — node credentials must name an
+// owned lane, an operator token may wait on any lane.
+func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
+	if !h.authorizeInbox(w, r) {
+		return
+	}
+	lane := r.URL.Query().Get("lane")
+	if !validReportRelayLaneName(lane) {
+		writeHubJSON(w, http.StatusBadRequest, map[string]string{"error": "lane_required"})
+		return
+	}
+	waitFor := hubInboxWaitMaxWait
+	if raw := r.URL.Query().Get("timeout"); raw != "" {
+		parsed, err := time.ParseDuration(raw)
+		if err != nil || parsed <= 0 {
+			writeHubJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_timeout"})
+			return
+		}
+		waitFor = parsed
+	}
+	if waitFor > hubInboxWaitMaxWait {
+		waitFor = hubInboxWaitMaxWait
+	}
+	// A lane that already has an unread item answers without taking a waiter
+	// slot — the cap bounds only requests that actually block.
+	item, err := h.inbox.store.firstUnread(r.Context(), lane)
+	if err != nil {
+		writeHubJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_unavailable"})
+		return
+	}
+	if item != nil {
+		writeHubJSON(w, http.StatusOK, map[string]any{"item": item})
+		return
+	}
+	select {
+	case h.inbox.waiters <- struct{}{}:
+		defer func() { <-h.inbox.waiters }()
+	default:
+		writeHubJSON(w, http.StatusTooManyRequests, map[string]string{"error": "waiters_full"})
+		return
+	}
+	deadline := time.Now().Add(waitFor)
+	for {
+		// Register for the next insert before checking, so a put that lands
+		// between the check and the select still wakes this waiter.
+		wake := h.inbox.store.waitChan()
+		item, err := h.inbox.store.firstUnread(r.Context(), lane)
+		if err != nil {
+			writeHubJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_unavailable"})
+			return
+		}
+		if item != nil {
+			writeHubJSON(w, http.StatusOK, map[string]any{"item": item})
+			return
+		}
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			writeHubJSON(w, http.StatusOK, map[string]any{"item": nil})
+			return
+		}
+		timer := time.NewTimer(remaining)
+		select {
+		case <-wake:
+		case <-r.Context().Done():
+		case <-h.closeCtx.Done():
+		case <-timer.C:
+		}
+		timer.Stop()
+		if r.Context().Err() != nil || h.closeCtx.Err() != nil {
+			return
+		}
+	}
+}
+
 func (h *HubServer) handleInboxAck(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeInbox(w, r) {
 		return
