@@ -368,7 +368,6 @@ func TestTask268AC6SessionCapByteLimitAndDeterministicTruncation(t *testing.T) {
 		Status:         "alive",
 		Checks:         map[string]HubCheckStatus{},
 		LoadError:      "synthetic host load unavailable",
-		Quota:          unavailableHubQuotaSnapshot(),
 		SnapshotStatus: hubSnapshotStatusOK,
 	}, sortedStates)
 	if !bytes.Equal(event.Payload, secondPayload) {

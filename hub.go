@@ -376,7 +376,6 @@ type HubServer struct {
 
 	mu                               sync.Mutex
 	nodes                            map[string]*hubNodeRecord
-	nodeQuota                        map[string]*hubQuotaRecord
 	lastNotes                        map[string]*HubLastNote
 	subscribers                      map[*hubEventSubscriber]struct{}
 	alerts                           map[string]*hubAlertState
@@ -473,9 +472,6 @@ type HubServer struct {
 	replayExhaustedEvents       uint64
 	alreadyDeliveredRelayEvents uint64
 	relayPayloadMismatches      uint64
-	quotaCache                  map[string]hubQuotaCacheEntry
-	quotaWaiters                map[string]chan hubQuotaResult
-	quotaCacheTTL               time.Duration
 	spawnRecords                map[string]*hubSpawnRecord
 	quotaV2                     *hubQuotaV2Store
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
@@ -682,7 +678,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2, closeCtx: closeCtx, closeCancel: closeCancel,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2, closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.prepareInbox()
 	return hub, nil
@@ -769,7 +765,6 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/burst/holds", h.handleBurstHolds)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
 	mux.HandleFunc("GET /v1/placement/slots", h.handlePlacementSlots)
-	mux.HandleFunc("GET /v1/quota", h.handleQuotaList)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("GET /v1/session-reap", h.handleSessionReap)
@@ -787,8 +782,6 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
 	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
-	mux.HandleFunc("GET /v1/quota/{machine}", h.handleQuotaGet)
-	mux.HandleFunc("POST /v1/quota/{machine}", h.handleQuotaRequest)
 	mux.HandleFunc("GET /v2/quota/bindings", h.handleQuotaV2BindingList)
 	mux.HandleFunc("PUT /v2/quota/bindings", h.handleQuotaV2BindingPut)
 	mux.HandleFunc("DELETE /v2/quota/bindings", h.handleQuotaV2BindingDelete)
@@ -1137,14 +1130,9 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 		h.resolveSpawn(machineID, result)
 		return
 	}
-	if report, ok := parseHubQuotaReport(payload); ok {
-		h.resolveQuota(machineID, report)
-		return
-	}
 	if h.handleSessionReapMessage(machineID, agent, payload) {
 		return
 	}
-	hasHeartbeatQuota := hubInboundHeartbeatHasQuota(payload)
 	message, ok := parseHubInbound(payload)
 	if !ok {
 		// An undecodable relay ack would otherwise be counted like any other
@@ -1156,9 +1144,6 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 		}
 		if json.Unmarshal(payload, &envelope) == nil && envelope.Type == "event" && (envelope.Kind == "relay.delivered" || envelope.Kind == "relay.unconfirmed") {
 			h.logger.Warn("relay ack could not be decoded", "machine", machineID, "kind", envelope.Kind)
-		}
-		if hasHeartbeatQuota {
-			h.recordRejectedHubQuota(machineID, agent, h.now().UTC())
 		}
 		h.countUnknownMessage()
 		return
@@ -1218,7 +1203,6 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 					record.hostMemory = cloneHubHostMemory(heartbeat.HostMemory)
 					h.placementCache = placementCache{}
 				}
-				h.recordHubQuotaLocked(machineID, heartbeat.Quota, received)
 				if heartbeat.SnapshotStatus != "" {
 					record.sessionSnapshot = hubSessionSnapshotRecordFromHeartbeat(heartbeat, received)
 				}
@@ -1429,7 +1413,6 @@ type hubHeartbeatPayload struct {
 	HostLoad       *HubHostLoad              `json:"host_load,omitempty"`
 	LoadError      string                    `json:"load_error,omitempty"`
 	HostMemory     *HubHostMemory            `json:"host_memory,omitempty"`
-	Quota          *HubQuotaSnapshot         `json:"quota,omitempty"`
 	ActiveJobs     []HubActiveJob            `json:"active_jobs,omitempty"`
 	HoldsActive    bool                      `json:"holds_active,omitempty"`
 	Sessions       *[]HubSession             `json:"sessions,omitempty"`
@@ -1551,13 +1534,8 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		}
 		heartbeat.HostMemory = &memory
 	}
-	if rawQuota, exists := fields["quota"]; exists {
-		quota, valid := decodeHubQuotaSnapshot(rawQuota)
-		if !valid {
-			return hubHeartbeatPayload{}, false
-		}
-		heartbeat.Quota = quota
-	}
+	// A retired node still sends "quota"; the name stays admitted so the
+	// heartbeat is accepted, and the value is dropped unread.
 	if rawStall, exists := fields["stall_detect"]; exists {
 		var stallFields map[string]json.RawMessage
 		if json.Unmarshal(rawStall, &stallFields) != nil || len(stallFields) != 4 {

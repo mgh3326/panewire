@@ -181,26 +181,10 @@ func TestQuotaV2OneAccountTwoNodesKeepsEveryLimit(t *testing.T) {
 		}
 	}
 
-	// Legacy R29 regression shape (hub_quota.go duplicate key): the same two 7d
-	// limits as legacy rows collide on (pool, account_fp, window) and the whole
-	// legacy snapshot is rejected. That legacy behaviour is left as is; v2 is
-	// the path that keeps both.
-	collected := measuredA.UTC().Format(time.RFC3339)
-	legacy := HubQuotaSnapshot{Status: hubQuotaStatusOK, CollectedAt: &collected, Pools: []HubQuotaPool{
-		{Pool: "claude", AccountFP: "a1b2c3d4", Window: "7d", UsedPct: quotaV2Ptr(40.0), Source: "cloud"},
-		{Pool: "claude", AccountFP: "a1b2c3d4", Window: "7d", UsedPct: quotaV2Ptr(55.0), Source: "cloud"},
-	}}
-	if legacy.valid() {
-		t.Fatal("legacy R29 duplicate-key shape changed; this test pins the unchanged legacy path")
-	}
+	// The retired R29 heartbeat-quota path is gone entirely; v2 is the path
+	// that keeps an account-7d and a model-7d limit side by side.
 	if err := validateQuotaV2Envelope(quotaV2Envelope("obs-x", "node-a", 1, quotaV2Account, measuredA, 1, 2, 3), quotaV2FormPost); err != nil {
 		t.Fatalf("v2 rejected account-7d + model-7d: %v", err)
-	}
-
-	// No automatic mixing: the legacy list is untouched by v2 writes.
-	status, body = quotaV2Do(t, hub, http.MethodGet, "/v1/quota", "", quotaOperatorToken, nil)
-	if status != http.StatusOK || !bytes.Contains(body, []byte(`"machine_id":"node-a","state":"unknown","latest":null,"last_good":null`)) {
-		t.Fatalf("legacy quota surface changed by v2 writes: %d %s", status, body)
 	}
 
 }
@@ -547,9 +531,6 @@ func TestQuotaV2ClosedWithoutDurableStoreOrDistinctBearers(t *testing.T) {
 			if status != http.StatusServiceUnavailable || !bytes.Contains(body, []byte(testCase.want)) {
 				t.Errorf("%s: %s %s -> %d %s", testCase.name, request.method, request.target, status, body)
 			}
-		}
-		if status, _ := quotaV2Do(t, hub, http.MethodGet, "/v1/quota", "", quotaOperatorToken, nil); status != http.StatusOK {
-			t.Errorf("%s: legacy /v1/quota affected: %d", testCase.name, status)
 		}
 	}
 }
