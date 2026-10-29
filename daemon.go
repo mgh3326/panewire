@@ -526,15 +526,16 @@ func (d *Daemon) serve(ctx context.Context) {
 }
 
 type localRequest struct {
-	Op        string `json:"op"`
-	Path      string `json:"path,omitempty"`
-	Target    string `json:"target,omitempty"`
-	Sender    string `json:"sender,omitempty"`
-	Uptake    string `json:"uptake,omitempty"`
-	StoreBody bool   `json:"store_body,omitempty"`
-	Status    string `json:"status,omitempty"`
-	SettleMS  int64  `json:"settle_ms,omitempty"`
-	TimeoutMS int64  `json:"timeout_ms,omitempty"`
+	DeliveryClass string `json:"delivery_class,omitempty"`
+	Op            string `json:"op"`
+	Path          string `json:"path,omitempty"`
+	Target        string `json:"target,omitempty"`
+	Sender        string `json:"sender,omitempty"`
+	Uptake        string `json:"uptake,omitempty"`
+	StoreBody     bool   `json:"store_body,omitempty"`
+	Status        string `json:"status,omitempty"`
+	SettleMS      int64  `json:"settle_ms,omitempty"`
+	TimeoutMS     int64  `json:"timeout_ms,omitempty"`
 	// The fields below belong to the R20 emit op. The names above are the
 	// established wait/prompt request contract and must not be renamed.
 	Kind           string `json:"kind,omitempty"`
@@ -725,7 +726,7 @@ func sameLocalPath(left, right string) bool {
 // immediate queue. A hub that is absent or disconnected is not an error: the
 // event file is durable and the node outbox retries from it.
 func (d *Daemon) emitRelayEvent(req localRequest) error {
-	if !emitRelayKinds[req.Kind] {
+	if !emitRelayKinds[req.Kind] || !validDeliveryClass(req.DeliveryClass) {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if req.Kind == "lane.event" {
@@ -752,7 +753,7 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		return &codedError{ExitDaemonUnavailable, fmt.Errorf("hub client unavailable")}
 	}
 	event := hubScannedRelayEvent{
-		Kind: req.Kind,
+		DeliveryClass: req.DeliveryClass, Kind: req.Kind,
 		HubActiveJob: HubActiveJob{
 			JobID: req.JobID, Epoch: epoch, AgentLabel: req.AgentLabel, OwnerLane: req.OwnerLane,
 			Label: req.Label, Host: req.Host, ReportPath: req.ReportPath, ReportLastLine: req.ReportLastLine,

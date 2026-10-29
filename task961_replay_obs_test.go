@@ -835,6 +835,8 @@ func TestT961TesterNoSecretReachesLogFile(t *testing.T) {
 	lanesPath := r20LanesFile(t, `{"lanes":{"director-1":{"machine":"host-a","pane":"w1:p1"}}}`)
 	logPath := filepath.Join(dir, "hub.log")
 	hub, _, code, err := newHubServerForCLI([]string{
+		// This fixture specifically exercises legacy replay-injection logs.
+		"--delivery-policy", "off", "--inbox-store", filepath.Join(dir, "inbox.sqlite3"),
 		"--hub-auth", t961tAuth(t, dir), "--handoffkeep-env", hkEnv, "--chat-desk-lane", "director-1", "--lanes", lanesPath, "--log-file", logPath,
 		"--cf-access-team", "t961tester", "--cf-access-aud", "t961tester-aud", "--cf-access-certs-url", certs.URL + "/certs",
 	}, slog.New(slog.NewTextHandler(io.Discard, &slog.HandlerOptions{Level: slog.LevelDebug})))

@@ -36,7 +36,10 @@ var hubVersionPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
 // operator credential is the HUB_TOKEN_operator entry; agent credentials use
 // their own stable machine ID entries.
 type HubServerConfig struct {
-	Tokens map[string]string
+	// CLI defaults to the embedded receiving-lane policy and a durable hub DB.
+	DeliveryPolicyPath string
+	InboxStorePath     string
+	Tokens             map[string]string
 	// ControlPlaneLanesPath names the operator-owned JSON file listing the
 	// authority lane bundle, hot-reloaded like the placement policy. It is the
 	// production path: which lanes carry authority is deployment configuration,
@@ -223,6 +226,8 @@ type hubJobReassignment struct {
 }
 
 type hubJobEventPayload struct {
+	DeliveryClass string `json:"delivery_class,omitempty"`
+	noDigest      bool
 	// lane.event uses these relay-only fields. It deliberately never enters
 	// the hub's job registration paths despite sharing the delivery envelope.
 	EventID        string    `json:"event_id,omitempty"`
@@ -344,6 +349,7 @@ type hubSubscriptionMessage struct {
 // HubServer is an in-memory presence and event relay. It deliberately owns no
 // file relay, durable queue, command dispatcher, or credentials after startup.
 type HubServer struct {
+	inbox             *hubInbox
 	tokens            map[string]string
 	alertNodes        map[string]struct{}
 	now               func() time.Time
@@ -476,6 +482,14 @@ type HubServer struct {
 	// It stays nil when only tests drive Sweep, which then falls back to
 	// context.Background. Guarded by mu.
 	maintenanceCtx context.Context
+	// closeCtx is cancelled by Close before it waits out an in-flight inbox
+	// flush, so a flush parked inside its handoffkeep write sees it between
+	// batches — the wait is then bounded by the cancellation, not by
+	// handoffkeepTimeout. Only the inbox digest path consumes it; every
+	// other relay keeps context.Background(). The pair is assigned once in
+	// NewHubServer, so the flush goroutine reads it without a lock.
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
 	// closeMu serializes Close so concurrent callers cannot race the logFile
 	// handoff; closed makes every call after the first return nil at once.
 	closeMu    sync.Mutex
@@ -636,12 +650,20 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 			controlPlaneLanesLastFailure = ""
 		}
 	}
-	return &HubServer{
+	inbox, err := newHubInbox(config.DeliveryPolicyPath, config.InboxStorePath)
+	if err != nil {
+		return nil, err
+	}
+	closeCtx, closeCancel := context.WithCancel(context.Background())
+	hub := &HubServer{
+		inbox:  inbox,
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2,
-	}, nil
+		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2, closeCtx: closeCtx, closeCancel: closeCancel,
+	}
+	hub.prepareInbox()
+	return hub, nil
 }
 
 func (h *HubServer) alertClass(machineID string) string {
@@ -671,6 +693,13 @@ func (h *HubServer) Close() error {
 		return nil
 	}
 	h.closed = true
+	// The signal must precede the waits: an in-flight inbox flush holds
+	// flushMu for life and can never observe a closing flag — closeCtx is
+	// what reaches it, both between batches and inside the in-flight
+	// handoffkeep write.
+	if h.closeCancel != nil {
+		h.closeCancel()
+	}
 	// The mutex is held for a run's whole life, so taking it here waits the
 	// run out; the flag it then leaves set keeps every later TryLock from
 	// counting a fresh run against the WaitGroup after Close has begun.
@@ -678,6 +707,11 @@ func (h *HubServer) Close() error {
 	h.laneStallClosing = true
 	h.laneStallMu.Unlock()
 	h.laneStallSweeps.Wait()
+	if h.inbox != nil {
+		h.inbox.flushMu.Lock()
+		_ = h.inbox.store.db.Close()
+		h.inbox.flushMu.Unlock()
+	}
 	if h.logFile == nil {
 		return nil
 	}
@@ -720,6 +754,10 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/agent", h.handleAgent)
 	mux.HandleFunc("GET /v1/events", h.handleEvents)
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)
+	mux.HandleFunc("GET /v1/inbox", h.handleInboxList)
+	mux.HandleFunc("GET /v1/inbox/count", h.handleInboxCount)
+	mux.HandleFunc("POST /v1/inbox/{id}/read", h.handleInboxRead)
+	mux.HandleFunc("POST /v1/inbox/ack", h.handleInboxAck)
 	mux.HandleFunc("GET /v1/relay/held", h.handleRelayHeld)
 	mux.HandleFunc("PATCH /v1/relay/events/{id}", h.handleRelayHeldEdit)
 	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
@@ -2124,6 +2162,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	// inert without a configured chat store and never shares h.mu across a
 	// network call.
 	go h.runChatDispatcher(ctx)
+	go h.runInbox(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever
 	// Postgres still holds as undelivered predates this process.
 	h.replayUndeliveredRelayEvents(ctx)

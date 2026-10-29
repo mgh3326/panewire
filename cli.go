@@ -22,7 +22,7 @@ type CLIConfig struct{ SocketPath string }
 func RunCLI(args []string, cfg CLIConfig) int {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Usage: panewire COMMAND [arguments]")
-		fmt.Fprintln(os.Stdout, "Commands: daemon, hub, hub-status, hub-emit, burst, place, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, job, wait, version")
+		fmt.Fprintln(os.Stdout, "Commands: daemon, hub, hub-status, hub-emit, burst, place, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, inbox, job, wait, version")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, lanesUsage)
 		return ExitOK
@@ -65,6 +65,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if args[0] == "relay" {
 		return runRelayCLI(args[1:], os.Stdout, os.Stderr)
+	}
+	if args[0] == "inbox" {
+		return runInboxCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
 	if args[0] == "emit" {
 		return runEmitCLI(args[1:], os.Stdout, os.Stderr, cfg)

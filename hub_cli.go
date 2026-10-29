@@ -122,6 +122,15 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	handoffkeepEnvPath := flags.String("handoffkeep-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file enabling durable relay events")
 	chatEnvPath := flags.String("chat-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file for the operator chat store (defaults to --handoffkeep-env)")
 	chatDeskLane := flags.String("chat-desk-lane", "", "fixed destination lane for operator chat; required when chat store is enabled")
+	// PANEWIRE_DELIVERY_POLICY is the env-var kill switch equal to the flag:
+	// "off" restores pre-policy pane delivery without editing the unit's
+	// arguments. An explicit --delivery-policy always wins.
+	deliveryPolicyDefault := os.Getenv("PANEWIRE_DELIVERY_POLICY")
+	if deliveryPolicyDefault == "" {
+		deliveryPolicyDefault = "default"
+	}
+	deliveryPolicyPath := flags.String("delivery-policy", deliveryPolicyDefault, "default embedded YAML, YAML file, or off to disable the inbox (env PANEWIRE_DELIVERY_POLICY)")
+	inboxStorePath := flags.String("inbox-store", defaultHubInboxPath(), "durable hub inbox SQLite file; empty disables the inbox")
 	quotaV2StorePath := flags.String("quota-v2-store", "", "mode-0600 JSON file for account-scoped quota v2 bindings and observations; without it /v2/quota is closed (503)")
 	quotaV2ClockSkew := flags.Duration("quota-v2-clock-skew", 0, "Δ_hub: bound on node-vs-hub clock error for quota v2 observation times (default 0: node times must not be ahead of the hub)")
 	logFilePath := flags.String("log-file", "", "optional hub log file, appended with mode 0640; stderr/journal output is unchanged")
@@ -236,7 +245,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if chatStore != nil && !validReportRelayLaneName(*chatDeskLane) {
 		return nil, "", ExitConditionInvalid, errors.New("hub chat desk lane is required and must be valid")
 	}
-	hub, err := NewHubServer(HubServerConfig{Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, QuotaV2StorePath: *quotaV2StorePath, QuotaV2ClockSkew: *quotaV2ClockSkew, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
+	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, QuotaV2StorePath: *quotaV2StorePath, QuotaV2ClockSkew: *quotaV2ClockSkew, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}

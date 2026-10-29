@@ -1852,6 +1852,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			Truncated bool   `json:"truncated,omitempty"`
 			Replay    bool   `json:"replay,omitempty"`
 		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay})
+		payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 	}
 	payload := hubJobCompletionPayloadForJob(job.HubActiveJob, job.EventID, replay)
@@ -1874,6 +1875,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			Replay         bool   `json:"replay,omitempty"`
 		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Question, job.PR, job.Head, job.PaneID, job.EventID, replay})
 	}
+	payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 }
 

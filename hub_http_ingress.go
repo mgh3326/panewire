@@ -15,13 +15,14 @@ const hubRelayIngressMaxBodyBytes = 64 << 10
 // payload: an operator names a lane directly and there is no producer node to
 // acknowledge after handoffkeep accepts the durable row.
 type hubRelayIngressRequest struct {
-	Kind    string `json:"kind"`
-	Lane    string `json:"lane"`
-	EventID string `json:"event_id"`
-	Text    string `json:"text"`
-	Label   string `json:"label"`
-	Host    string `json:"host"`
-	Deliver string `json:"deliver,omitempty"`
+	DeliveryClass string `json:"delivery_class,omitempty"`
+	Kind          string `json:"kind"`
+	Lane          string `json:"lane"`
+	EventID       string `json:"event_id"`
+	Text          string `json:"text"`
+	Label         string `json:"label"`
+	Host          string `json:"host"`
+	Deliver       string `json:"deliver,omitempty"`
 }
 
 type hubRelayIngressResponse struct {
@@ -56,7 +57,7 @@ func decodeHubRelayIngressRequest(writer http.ResponseWriter, request *http.Requ
 	if !machineIDPattern.MatchString(body.Host) {
 		return hubRelayIngressRequest{}, false
 	}
-	if body.Deliver != "" && !validRelayDeliver(body.Deliver) {
+	if !validDeliveryClass(body.DeliveryClass) || (body.Deliver != "" && !validRelayDeliver(body.Deliver)) {
 		return hubRelayIngressRequest{}, false
 	}
 	return body, true
@@ -88,6 +89,7 @@ func (h *HubServer) handleRelayIngress(writer http.ResponseWriter, request *http
 		Host:          body.Host,
 		Reason:        "http_ingress:" + body.Label,
 		DeliverPolicy: body.Deliver,
+		DeliveryClass: body.DeliveryClass,
 	}
 	result := h.relayLaneEvent(event, nil)
 	if result.RejectedTooLong {
