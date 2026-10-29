@@ -34,6 +34,14 @@ var hubNotifyTypes = map[string]bool{"decision": true, "order": true, "ready": t
 // overrides individual entries under types:; the rest stay built in.
 var defaultNotifyTypeClasses = map[string]string{"decision": "interrupt", "order": "interrupt", "ready": "interrupt", "report": "inbox", "ack": "inbox", "info": "inbox"}
 
+// defaultInboxAgentSupport is the built-in receiving-CLI capability map: only
+// harnesses whose agent can background-wait on `panewire inbox wait` are
+// listed supported. The policy file's agents: block overrides individual
+// entries — flipping one CLI is a one-line change.
+var defaultInboxAgentSupport = map[string]string{"claude": "supported"}
+
+var hubAgentCLIPattern = regexp.MustCompile(`^[0-9A-Za-z_.-]{1,64}$`)
+
 func validNotifyType(value string) bool {
 	return value == "" || hubNotifyTypes[value]
 }
@@ -58,8 +66,12 @@ type deliveryLanePolicy struct {
 
 type deliveryPolicy struct {
 	deliveryLanePolicy `yaml:",inline"`
-	Lanes              map[string]deliveryLanePolicy `yaml:"lanes"`
-	legacy             bool
+	// Agents maps the receiving pane's reported agent CLI (harness) to
+	// supported|unsupported. Receivers without a supported entry — unknown,
+	// unlisted, or unreported harnesses — get no inbox deferral.
+	Agents map[string]string             `yaml:"agents"`
+	Lanes  map[string]deliveryLanePolicy `yaml:"lanes"`
+	legacy bool
 }
 
 func validDeliveryClass(class string) bool {
@@ -156,7 +168,8 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 		return nil, err
 	}
 	// The built-in type map always applies; a policy file overrides
-	// individual entries under types:.
+	// individual entries under types:. agents: merges the same way over the
+	// built-in support map.
 	types := make(map[string]string, len(defaultNotifyTypeClasses)+len(p.Types))
 	for name, class := range defaultNotifyTypeClasses {
 		types[name] = class
@@ -165,6 +178,19 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 		types[name] = class
 	}
 	p.Types = types
+	for cli, support := range p.Agents {
+		if !hubAgentCLIPattern.MatchString(cli) || (support != "supported" && support != "unsupported") {
+			return nil, fmt.Errorf("invalid agents entry")
+		}
+	}
+	agents := make(map[string]string, len(defaultInboxAgentSupport)+len(p.Agents))
+	for cli, support := range defaultInboxAgentSupport {
+		agents[cli] = support
+	}
+	for cli, support := range p.Agents {
+		agents[cli] = support
+	}
+	p.Agents = agents
 	for lane, l := range p.Lanes {
 		if !validReportRelayLaneName(lane) {
 			return nil, fmt.Errorf("invalid policy lane")
@@ -223,6 +249,13 @@ func (p *deliveryPolicy) classify(lane, kind string, e hubJobEventPayload, repla
 		return local.Default
 	}
 	return p.Default
+}
+
+// agentSupported reports whether the receiving pane's reported CLI is allowed
+// inbox deferral. Absent entries are unsupported — a CLI must be named
+// supported to opt into the type/owner/idle timing rules.
+func (p *deliveryPolicy) agentSupported(cli string) bool {
+	return p.Agents[cli] == "supported"
 }
 
 // typeClass resolves a declared notification type through the receiving

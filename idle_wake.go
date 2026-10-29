@@ -38,10 +38,12 @@ type HerdrAgentState struct {
 	PaneID, WorkspaceID, Label, Status string
 	// AgentName is the raw agent.list name — the only canonical agent
 	// identity. DisplayLabel is the tab.list join result; both stay separate
-	// from the legacy mixed-provenance Label.
-	AgentName, DisplayLabel        string
-	Revision, SourceStateChangeSeq int64
-	InteractiveReady               *bool
+	// from the legacy mixed-provenance Label. Harness is the pane's reported
+	// agent CLI (claude, codex, ...) — the value the hub's agents: policy
+	// block keys on.
+	AgentName, DisplayLabel, Harness string
+	Revision, SourceStateChangeSeq   int64
+	InteractiveReady                 *bool
 	// Authoritative is true for an agent.list snapshot. Only a snapshot may
 	// declare that herdr's revision or state-change namespace moved backwards;
 	// an older event racing a newer snapshot is ignored instead.

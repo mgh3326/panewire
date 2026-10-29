@@ -16,6 +16,13 @@ types:
   report: inbox
   ack: inbox
   info: inbox
+# Per-CLI inbox capability for the receiving pane's agent (the harness the
+# node reports for the lane's pane). Receivers without a supported entry —
+# unknown or unreported harnesses included — get every event immediately with
+# no inbox deferral; supported receivers use the type/owner/idle timing rules.
+# This entry mirrors the built-in default; flipping one CLI is a one-line edit.
+agents:
+  claude: supported
 rules:
   # Whole-word, case-insensitive must-act tags. READYING and ESCAPE do not match.
   - tags: [BLOCKER, READY, ESC, BOUNCE, URGENT, needs_decision]

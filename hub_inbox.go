@@ -109,6 +109,9 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	}
 	lane := h.receivingLane(kind, *event)
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
+	if class == "inbox" && h.inboxImmediate(lane, kind) {
+		class = "interrupt"
+	}
 	deadline, window := h.inbox.policy.timing(lane, class)
 	if event.noDigest || h.inbox.policy.mustAct(lane, *event) || chatRelayEventPattern.MatchString(event.EventID) {
 		window = 0
@@ -136,6 +139,63 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		}
 	}
 	return relayLaneEventResult{ID: item.ID, Routed: true, Machine: "inbox", Duplicate: !item.Fresh}, true
+}
+
+// receiverInboxState is the hub's view of the receiving lane's pane, taken
+// from the lanes file and the node's latest heartbeat session snapshot.
+// supported is true only when a fresh, complete snapshot reports the pane's
+// CLI and the agents: policy marks that CLI supported; idle is true only for
+// a positively idle/done status. Anything less — no route, no connected node,
+// stale or truncated state, or a pane the node does not report — leaves both
+// false: unknown is never treated as idle and never earns deferral.
+type receiverInboxState struct {
+	supported bool
+	idle      bool
+}
+
+func (h *HubServer) receiverInboxState(lane string) receiverInboxState {
+	route, ok := loadReportRelayRoutes(h.reportRelayPath)[lane]
+	if !ok || route.Pane == "" {
+		return receiverInboxState{}
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	node := h.nodes[route.Machine]
+	if node == nil || node.state != "connected" {
+		return receiverInboxState{}
+	}
+	snap := node.sessionSnapshot
+	if snap == nil || snap.snapshotStatus != hubSnapshotStatusOK || snap.truncated {
+		return receiverInboxState{}
+	}
+	now := h.now()
+	if snap.receivedAt.After(now) || now.Sub(snap.receivedAt) > sessionsFindSnapshotMaxAge {
+		return receiverInboxState{}
+	}
+	for _, session := range snap.sessions {
+		if session.PaneID == route.Pane {
+			return receiverInboxState{supported: h.inbox.policy.agentSupported(session.Harness), idle: eligibleIdleWakeStatus(session.Status)}
+		}
+	}
+	return receiverInboxState{}
+}
+
+// inboxImmediate promotes an inbox-class event to immediate delivery when the
+// receiving lane owns the completed job, when its pane cannot serve the inbox
+// itself — an unsupported, unknown, or unreported agent CLI — or when a
+// supported receiver is known idle. Everything else waits for the deadline
+// digest, the safety net for supported receivers that are busy or whose
+// reported status is unknown.
+func (h *HubServer) inboxImmediate(lane, kind string) bool {
+	if kind == "job.completed" || kind == "job.joined" {
+		// receivingLane guarantees the recipient is the job's owner lane or
+		// its parent — a completion the receiver owns never defers. Lanes
+		// that merely observe a completion learn about it through events
+		// that keep their own class.
+		return true
+	}
+	state := h.receiverInboxState(lane)
+	return !state.supported || state.idle
 }
 
 // replayInbox runs before either the ordinary replay or the once-only
