@@ -316,8 +316,7 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := h.placementWithQuota(r.Context(), class, r.URL.Query().Get("cwd"), pool, accountFP)
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(result)
+	writeJSON(w, http.StatusOK, result)
 }
 
 // PlacementSlotStatus is one machine's task-slot occupancy. TaskSlots is null
@@ -375,8 +374,7 @@ func (h *HubServer) handlePlacementSlots(w http.ResponseWriter, r *http.Request)
 	status := h.placementPolicyStatus
 	h.mu.Unlock()
 	sort.Slice(views, func(i, j int) bool { return views[i].Machine < views[j].Machine })
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(placementSlotsResult{Machines: views, PolicyStatus: status, Asof: now})
+	writeJSON(w, http.StatusOK, placementSlotsResult{Machines: views, PolicyStatus: status, Asof: now})
 }
 
 func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementResult {

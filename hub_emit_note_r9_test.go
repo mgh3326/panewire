@@ -38,7 +38,7 @@ func TestR9HubEmitIsTransientAndRetainsNoteAcrossReconnect(t *testing.T) {
 	daemon := r6DialAgent(t, server.URL, "node-b", r6NodeBToken)
 	defer daemon.Close(websocket.StatusNormalClosure, "")
 	r6Write(t, daemon, map[string]any{"type": "hello", "machine_id": "node-b", "version": "daemon-r9"})
-	r6Eventually(t, "daemon presence", func() bool {
+	eventually(t, time.Second, "daemon presence", func() bool {
 		return r6NodeState(r6Nodes(t, server), "node-b") == "connected"
 	})
 	before := r9Node(t, hub.Nodes(), "node-b")
@@ -55,7 +55,7 @@ func TestR9HubEmitIsTransientAndRetainsNoteAcrossReconnect(t *testing.T) {
 
 	events := r6DialEvents(t, server.URL)
 	defer events.Close(websocket.StatusNormalClosure, "")
-	r6Eventually(t, "event subscriber registration", func() bool {
+	eventually(t, time.Second, "event subscriber registration", func() bool {
 		hub.mu.Lock()
 		defer hub.mu.Unlock()
 		return len(hub.subscribers) == 1
@@ -96,13 +96,13 @@ func TestR9HubEmitIsTransientAndRetainsNoteAcrossReconnect(t *testing.T) {
 	if err := daemon.Close(websocket.StatusNormalClosure, "reconnect fixture"); err != nil {
 		t.Fatal(err)
 	}
-	r6Eventually(t, "daemon disconnect", func() bool {
+	eventually(t, time.Second, "daemon disconnect", func() bool {
 		return r6NodeState(r6Nodes(t, server), "node-b") == "disconnected"
 	})
 	reconnected := r6DialAgent(t, server.URL, "node-b", r6NodeBToken)
 	defer reconnected.Close(websocket.StatusNormalClosure, "")
 	r6Write(t, reconnected, map[string]any{"type": "hello", "machine_id": "node-b", "version": "daemon-r9-reconnect"})
-	r6Eventually(t, "daemon reconnect", func() bool {
+	eventually(t, time.Second, "daemon reconnect", func() bool {
 		return r6NodeState(r6Nodes(t, server), "node-b") == "connected"
 	})
 	afterReconnect := r9Node(t, hub.Nodes(), "node-b")

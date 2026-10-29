@@ -588,22 +588,5 @@ func writeHubRevocation(inboxRoot string, revoked hubJobRevokedEvent) error {
 		return err
 	}
 	path := filepath.Join(eventsDir, fmt.Sprintf("%05d-job.revoked.json", highest+1))
-	temporary, err := os.CreateTemp(eventsDir, ".revocation-*")
-	if err != nil {
-		return err
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if err := temporary.Chmod(0600); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(contents); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, path)
+	return replaceFileAtomically(path, ".revocation-*", contents, 0600)
 }

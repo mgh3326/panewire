@@ -387,6 +387,9 @@ func TestJobGolden(t *testing.T) {
 			if c.HostDependent && runtime.GOOS != "darwin" {
 				t.Skip("non-ASCII shaping follows the host's tr/cut; golden produced on darwin")
 			}
+			if len(c.ReadOnly) > 0 && os.Geteuid() == 0 {
+				t.Skip("root ignores directory permissions, so a read-only case cannot fail as recorded")
+			}
 			want, err := os.ReadFile(jobGoldenPath(c.Name))
 			if err != nil {
 				t.Fatal(err)

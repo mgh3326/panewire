@@ -408,7 +408,7 @@ func assistantPrincipalFrom(ctx context.Context) assistantPrincipal {
 func assistantAuditEmail(email string) string {
 	email = strings.TrimSpace(email)
 	if len(email) > 254 {
-		return email[:254]
+		return utf8PrefixWithin(email, 254)
 	}
 	return email
 }
@@ -678,9 +678,7 @@ func (s *assistantServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // logAudit writes one audit line per request/tool call. It logs only parsed,
 // whitelisted fields: never headers, never bodies, never the token.
 func (s *assistantServer) logAudit(ctx context.Context, identity, rpc, tool, subject, result string) {
-	if len(subject) > 160 {
-		subject = subject[:160]
-	}
+	subject = utf8PrefixWithin(subject, 160)
 	p := assistantPrincipalFrom(ctx)
 	// "subject" on this line is the tool's target or request id. The
 	// verified principal's subject lives on principal.subject so the two

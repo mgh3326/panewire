@@ -160,7 +160,7 @@ func TestR19eCompletionBeforeAnyHeartbeatIsRelayed(t *testing.T) {
 	if directive.Pane != "w1:p1" || directive.Text == "" {
 		t.Fatalf("relay directive=%+v", directive)
 	}
-	r6Eventually(t, "unfenced completion counted", func() bool { return f.hub.UnfencedCompletionCount() == 1 })
+	eventually(t, time.Second, "unfenced completion counted", func() bool { return f.hub.UnfencedCompletionCount() == 1 })
 	if count := f.hub.UnknownMessageCount(); count != 0 {
 		t.Fatalf("unfenced completion was counted as an unknown message: %d", count)
 	}
@@ -183,7 +183,7 @@ func TestR19eCompletionBeforeAnyHeartbeatIsRelayed(t *testing.T) {
 func TestR19eRestartFirstBundleRelaysCompletion(t *testing.T) {
 	f := newR19eFixture(t)
 	stop := f.connectWorker(t)
-	r6Eventually(t, "worker connected", func() bool {
+	eventually(t, time.Second, "worker connected", func() bool {
 		f.hub.mu.Lock()
 		defer f.hub.mu.Unlock()
 		return f.hub.nodes[r19eWorkerNode] != nil && f.hub.nodes[r19eWorkerNode].state == "connected"

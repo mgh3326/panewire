@@ -32,11 +32,11 @@ func TestR7PresenceGraceMustElapseBeforeIncidentAndRecovers(t *testing.T) {
 
 	node := r6DialAgent(t, hubHTTP.URL, "node-a", r6NodeAToken)
 	r6Write(t, node, map[string]any{"type": "hello", "machine_id": "node-a", "version": "r7-a"})
-	r6Eventually(t, "node connected", func() bool { return r6NodeState(r6Nodes(t, hubHTTP), "node-a") == "connected" })
+	eventually(t, time.Second, "node connected", func() bool { return r6NodeState(r6Nodes(t, hubHTTP), "node-a") == "connected" })
 	if err := node.Close(websocket.StatusNormalClosure, "fixture disconnect"); err != nil {
 		t.Fatal(err)
 	}
-	r6Eventually(t, "node disconnected", func() bool { return r6NodeState(r6Nodes(t, hubHTTP), "node-a") == "disconnected" })
+	eventually(t, time.Second, "node disconnected", func() bool { return r6NodeState(r6Nodes(t, hubHTTP), "node-a") == "disconnected" })
 
 	// This assertion is intentionally before the grace boundary: a mutation
 	// that sends immediately on disconnect makes this test fail.
@@ -52,7 +52,7 @@ func TestR7PresenceGraceMustElapseBeforeIncidentAndRecovers(t *testing.T) {
 	}
 	clock = clock.Add(time.Second)
 	hub.Sweep() // second post-grace observation
-	r7Eventually(t, "presence incident", func() bool { return len(capture.Messages()) == 1 })
+	eventually(t, time.Second, "presence incident", func() bool { return len(capture.Messages()) == 1 })
 	const incidentText = "machine: node-a\nreason: disconnected\ncheck: none\nREBOOT/UNLOCK NEEDED — fleet on node-a is dead until a human acts"
 	if got := capture.Messages()[0].Text; got != incidentText {
 		t.Fatalf("incident text=%q", got)
@@ -64,7 +64,7 @@ func TestR7PresenceGraceMustElapseBeforeIncidentAndRecovers(t *testing.T) {
 	}
 	clock = clock.Add(time.Second)
 	hub.Sweep() // successful initial delivery is the reminder clock
-	r7Eventually(t, "presence reminder", func() bool { return len(capture.Messages()) == 2 })
+	eventually(t, time.Second, "presence reminder", func() bool { return len(capture.Messages()) == 2 })
 	if got := capture.Messages()[1].Text; got != incidentText {
 		t.Fatalf("reminder text=%q", got)
 	}
@@ -76,7 +76,7 @@ func TestR7PresenceGraceMustElapseBeforeIncidentAndRecovers(t *testing.T) {
 	node = r6DialAgent(t, hubHTTP.URL, "node-a", r6NodeAToken)
 	defer node.Close(websocket.StatusNormalClosure, "")
 	r6Write(t, node, map[string]any{"type": "hello", "machine_id": "node-a", "version": "r7-a"})
-	r6Eventually(t, "node reconnected", func() bool { return r6NodeState(r6Nodes(t, hubHTTP), "node-a") == "connected" })
+	eventually(t, time.Second, "node reconnected", func() bool { return r6NodeState(r6Nodes(t, hubHTTP), "node-a") == "connected" })
 	clock = clock.Add(time.Second)
 	hub.Sweep()
 	if got := len(capture.Messages()); got != 2 {
@@ -89,7 +89,7 @@ func TestR7PresenceGraceMustElapseBeforeIncidentAndRecovers(t *testing.T) {
 	}
 	clock = clock.Add(time.Second)
 	hub.Sweep()
-	r7Eventually(t, "presence recovery", func() bool { return len(capture.Messages()) == 3 })
+	eventually(t, time.Second, "presence recovery", func() bool { return len(capture.Messages()) == 3 })
 	if got := capture.Messages()[2].Text; got != "machine: node-a\nreason: recovered_disconnected\ncheck: none" {
 		t.Fatalf("recovery text=%q", got)
 	}
@@ -342,7 +342,7 @@ func TestR7HubCheckAlertsArePerCheckAndFlapSuppressed(t *testing.T) {
 	}
 	r7Heartbeat(t, hub, agent, HubCheckFail)
 	r7Heartbeat(t, hub, agent, HubCheckFail)
-	r7Eventually(t, "check incident", func() bool { return len(capture.Messages()) == 1 })
+	eventually(t, time.Second, "check incident", func() bool { return len(capture.Messages()) == 1 })
 	if got := capture.Messages()[0].Text; got != "machine: node-a\nreason: check_failed\ncheck: service" {
 		t.Fatalf("check incident text=%q", got)
 	}
@@ -357,7 +357,7 @@ func TestR7HubCheckAlertsArePerCheckAndFlapSuppressed(t *testing.T) {
 	}
 	r7Heartbeat(t, hub, agent, HubCheckOK)
 	r7Heartbeat(t, hub, agent, HubCheckOK)
-	r7Eventually(t, "check recovery", func() bool { return len(capture.Messages()) == 2 })
+	eventually(t, time.Second, "check recovery", func() bool { return len(capture.Messages()) == 2 })
 	if got := capture.Messages()[1].Text; got != "machine: node-a\nreason: recovered_check_failed\ncheck: service" {
 		t.Fatalf("check recovery text=%q", got)
 	}
@@ -409,7 +409,7 @@ func TestR7HubNodeFlapNeedsTwoConsecutiveObservations(t *testing.T) {
 	hub.Sweep()
 	clock = clock.Add(time.Second)
 	hub.Sweep()
-	r7Eventually(t, "stable presence incident", func() bool { return len(capture.Messages()) == 1 })
+	eventually(t, time.Second, "stable presence incident", func() bool { return len(capture.Messages()) == 1 })
 }
 
 func TestR7HubClientChecksConfigOnlyPublishesClosedResults(t *testing.T) {
@@ -565,16 +565,4 @@ func r7HubServer(t *testing.T, now func() time.Time, notifier HubNotifier) (*Hub
 		t.Fatal(err)
 	}
 	return hub, httptest.NewServer(hub.Handler())
-}
-
-func r7Eventually(t *testing.T, label string, condition func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if condition() {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", label)
 }

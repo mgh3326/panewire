@@ -804,24 +804,8 @@ func writeJobRecord(eventsDir, kind string, fields []jobField) error {
 		}
 	}
 	body.WriteString("}\n")
-	temporary, err := os.CreateTemp(eventsDir, ".completion-")
-	if err != nil {
-		return err
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if _, err := temporary.Write(body.Bytes()); err != nil {
-		_ = temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	if err := os.Chmod(name, 0o600); err != nil {
-		return err
-	}
 	next := new(big.Int).Add(highest, big.NewInt(1))
-	return os.Rename(name, filepath.Join(eventsDir, fmt.Sprintf("%05s-%s.json", next.String(), kind)))
+	return replaceFileAtomically(filepath.Join(eventsDir, fmt.Sprintf("%05s-%s.json", next.String(), kind)), ".completion-", body.Bytes(), 0o600)
 }
 
 // pythonInt accepts what Python's int() accepts from an ASCII string: outer

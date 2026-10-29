@@ -43,7 +43,7 @@ func TestHubR105AgentStreamReceivesFixedFailoverEvent(t *testing.T) {
 	watched := r6DialAgent(t, server.URL, "node-a", r6NodeAToken)
 	defer watched.Close(websocket.StatusNormalClosure, "")
 	r6Write(t, watched, map[string]any{"type": "hello", "machine_id": "node-a", "version": "r10.5-watched"})
-	r6Eventually(t, "agent stream fixtures", func() bool { return len(r6Nodes(t, server)) == 2 })
+	eventually(t, time.Second, "agent stream fixtures", func() bool { return len(r6Nodes(t, server)) == 2 })
 
 	clock = clock.Add(time.Second)
 	hub.Sweep() // stale

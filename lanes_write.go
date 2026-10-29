@@ -235,8 +235,7 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 		}
 		return
 	}
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(hubLaneDeleteResponse{Lane: lane, Removed: true})
+	writeJSON(writer, http.StatusOK, hubLaneDeleteResponse{Lane: lane, Removed: true})
 }
 
 var errLaneRequestInvalid = errors.New("lane request is invalid")
@@ -571,9 +570,7 @@ func (h *HubServer) broadcastLanesChanged(lane, operation string) {
 }
 
 func writeLaneJSONError(writer http.ResponseWriter, status int, code string) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(struct {
+	writeJSON(writer, status, struct {
 		Error string `json:"error"`
 	}{Error: code})
 }
@@ -592,9 +589,7 @@ var authorityLaneErrorGuidance = map[string]string{
 
 // writeAuthorityLaneError adds a "use" field beside the unchanged "error" key.
 func writeAuthorityLaneError(writer http.ResponseWriter, code string) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(http.StatusConflict)
-	_ = json.NewEncoder(writer).Encode(struct {
+	writeJSON(writer, http.StatusConflict, struct {
 		Error string `json:"error"`
 		Use   string `json:"use"`
 	}{Error: code, Use: authorityLaneErrorGuidance[code]})
@@ -781,13 +776,7 @@ func (h *HubServer) replaceLanesFile(path string, snapshot lanesFileSnapshot, co
 		return fmt.Errorf("%w: rename lanes temp: %v", errLanesWriteFailed, err)
 	}
 	removeTemporary = false
-	// Directory sync is best effort across the supported filesystems. The
-	// rename above is the visibility boundary; a directory fsync failure must
-	// not turn a successfully replaced, parseable file into a reported failure.
-	if directoryFile, err := os.Open(directory); err == nil {
-		_ = directoryFile.Sync()
-		_ = directoryFile.Close()
-	}
+	syncDirectoryBestEffort(directory)
 	return nil
 }
 

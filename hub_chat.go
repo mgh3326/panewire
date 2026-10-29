@@ -483,7 +483,7 @@ type hubChatData struct {
 func (h *HubServer) recoverChatPanic(writer http.ResponseWriter) {
 	if recovered := recover(); recovered != nil {
 		h.logger.Error("chat handler panic", "panic", recovered)
-		writeHubJSON(writer, http.StatusInternalServerError, map[string]string{"error": "chat_internal"})
+		writeJSON(writer, http.StatusInternalServerError, map[string]string{"error": "chat_internal"})
 	}
 }
 
@@ -524,7 +524,7 @@ func (h *HubServer) authorizeChatUIPost(writer http.ResponseWriter, request *htt
 		return false
 	}
 	if !hubChatSameOrigin(request) {
-		writeHubJSON(writer, http.StatusForbidden, map[string]string{"error": "cross_origin"})
+		writeJSON(writer, http.StatusForbidden, map[string]string{"error": "cross_origin"})
 		return false
 	}
 	return true
@@ -535,24 +535,24 @@ func (h *HubServer) authorizeChatUIPost(writer http.ResponseWriter, request *htt
 // unreachable store is 503.
 func (h *HubServer) writeChatStoreError(writer http.ResponseWriter, err error) {
 	if errors.Is(err, errChatStoreIncompatible) {
-		writeHubJSON(writer, http.StatusBadGateway, map[string]string{"error": "chat_store_incompatible"})
+		writeJSON(writer, http.StatusBadGateway, map[string]string{"error": "chat_store_incompatible"})
 		return
 	}
 	var httpErr *chatHTTPError
 	if errors.As(err, &httpErr) {
 		switch httpErr.status {
 		case http.StatusBadRequest:
-			writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		case http.StatusNotFound:
-			writeHubJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
+			writeJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
 		case http.StatusConflict:
-			writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_conflict"})
+			writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_conflict"})
 		default:
-			writeHubJSON(writer, http.StatusBadGateway, map[string]string{"error": "chat_store_rejected"})
+			writeJSON(writer, http.StatusBadGateway, map[string]string{"error": "chat_store_rejected"})
 		}
 		return
 	}
-	writeHubJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "chat_unavailable"})
+	writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "chat_unavailable"})
 }
 
 // writeChatListError is writeChatStoreError for list endpoints. A list route
@@ -561,7 +561,7 @@ func (h *HubServer) writeChatStoreError(writer http.ResponseWriter, err error) {
 func (h *HubServer) writeChatListError(writer http.ResponseWriter, err error) {
 	var httpErr *chatHTTPError
 	if errors.As(err, &httpErr) && httpErr.status == http.StatusNotFound {
-		writeHubJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "chat_unavailable"})
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "chat_unavailable"})
 		return
 	}
 	h.writeChatStoreError(writer, err)
@@ -569,7 +569,7 @@ func (h *HubServer) writeChatListError(writer http.ResponseWriter, err error) {
 
 func (h *HubServer) chatStoreOrUnavailable(writer http.ResponseWriter) ChatStore {
 	if h.chatStore == nil {
-		writeHubJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "chat_unavailable"})
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "chat_unavailable"})
 		return nil
 	}
 	return h.chatStore
@@ -618,7 +618,7 @@ func (h *HubServer) handleChatData(writer http.ResponseWriter, request *http.Req
 		views = append(views, hubChatMessageView{ChatMessage: message, Lane: h.chatLaneOf[message.ID], Cancelled: cancelled})
 	}
 	h.chatMu.Unlock()
-	writeHubJSON(writer, http.StatusOK, hubChatData{SchemaVersion: 2, Questions: questions, Messages: views})
+	writeJSON(writer, http.StatusOK, hubChatData{SchemaVersion: 2, Questions: questions, Messages: views})
 }
 
 // chatTailQuestions returns every pending question plus the recent tail of
@@ -763,20 +763,20 @@ func (h *HubServer) handleChatMessageCreate(writer http.ResponseWriter, request 
 	}
 	var input hubChatMessageInput
 	if !decodeHubJSON(writer, request, hubChatMaxBodyBytes+hubChatRequestSlop, &input) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	if input.ConversationID != hubChatConversationID || !validChatMessageBody(input.Body) || !chatOriginEventIDPattern.MatchString(input.OriginEventID) || !validReportRelayLaneName(h.chatDeskLane) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	if input.Lane != nil && *input.Lane != h.chatDeskLane {
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_lane_conflict"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_lane_conflict"})
 		return
 	}
 	if input.QuestionID != "" {
 		if len(input.QuestionIDs) != 0 {
-			writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 			return
 		}
 		input.QuestionIDs = []string{input.QuestionID}
@@ -789,11 +789,11 @@ func (h *HubServer) handleChatMessageCreate(writer http.ResponseWriter, request 
 	for _, id := range input.QuestionIDs {
 		relationBytes += len(id) + 1
 		if !chatQuestionIDPattern.MatchString(id) || len(id) > 64 || len(seen) >= 32 || relationBytes > 900 {
-			writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 			return
 		}
 		if _, duplicate := seen[id]; duplicate {
-			writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 			return
 		}
 		seen[id] = struct{}{}
@@ -809,7 +809,7 @@ func (h *HubServer) handleChatMessageCreate(writer http.ResponseWriter, request 
 			return
 		}
 		if !found || question.ConversationID != hubChatConversationID || question.Lane != h.chatDeskLane {
-			writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_question_ownership"})
+			writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_question_ownership"})
 			return
 		}
 	}
@@ -819,7 +819,7 @@ func (h *HubServer) handleChatMessageCreate(writer http.ResponseWriter, request 
 		return
 	}
 	if !created {
-		writeHubJSON(writer, http.StatusOK, message)
+		writeJSON(writer, http.StatusOK, message)
 		return
 	}
 	h.chatMu.Lock()
@@ -827,7 +827,7 @@ func (h *HubServer) handleChatMessageCreate(writer http.ResponseWriter, request 
 	h.chatLaneOf[message.ID] = h.chatDeskLane
 	h.chatMu.Unlock()
 	h.kickChatDispatcher()
-	writeHubJSON(writer, http.StatusCreated, message)
+	writeJSON(writer, http.StatusCreated, message)
 }
 
 type hubChatMessageRetryInput struct {
@@ -863,12 +863,12 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 	}
 	id, err := strconv.ParseInt(request.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	var input hubChatMessageRetryInput
 	if !decodeHubJSON(writer, request, hubChatRequestSlop, &input) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), hubChatStoreTimeout)
@@ -879,7 +879,7 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 		return
 	}
 	if !found {
-		writeHubJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	}
 	// Assistant-channel rows are not the hub's to redeliver: retry would mint
@@ -887,16 +887,16 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 	// check precedes the state check so an assistant row never reports as an
 	// ordinary not-failed operator message.
 	if message.SourceChannel == "assistant" {
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_operator"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_operator"})
 		return
 	}
 	if message.RelayState != "failed" {
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_failed"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_failed"})
 		return
 	}
 	ids := chatReplyIDs(message.QuestionRelations)
 	if message.Author != hubChatOperatorName || message.ConversationID != hubChatConversationID || (input.ConversationID != nil && *input.ConversationID != message.ConversationID) || (input.Lane != nil && *input.Lane != h.chatDeskLane) || (input.QuestionID != nil && (len(ids) != 1 || *input.QuestionID != ids[0])) || (input.QuestionIDs != nil && !slices.Equal(input.QuestionIDs, ids)) {
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_retry_conflict"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_retry_conflict"})
 		return
 	}
 	h.chatRetryMu.Lock()
@@ -915,7 +915,7 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 			return
 		}
 		if link.Live {
-			writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_queued"})
+			writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_queued"})
 			return
 		}
 		if link.RetriedID != 0 {
@@ -936,7 +936,7 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 			return
 		}
 		if _, queued := live[id]; queued {
-			writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_queued"})
+			writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_queued"})
 			return
 		}
 	}
@@ -948,17 +948,17 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 				return
 			}
 			if found {
-				writeHubJSON(writer, http.StatusOK, prior)
+				writeJSON(writer, http.StatusOK, prior)
 				return
 			}
 		}
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_already_retried"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_already_retried"})
 		return
 	}
 	if !validReportRelayLaneName(lane) {
 		// No durable relay row carries this row's routing (its relay row was
 		// pruned or never persisted): refuse rather than trust client input.
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_link_lost"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_link_lost"})
 		return
 	}
 	if message.OriginTimestamp.IsZero() {
@@ -970,7 +970,7 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 		return
 	}
 	if !created {
-		writeHubJSON(writer, http.StatusOK, resent)
+		writeJSON(writer, http.StatusOK, resent)
 		return
 	}
 	h.chatMu.Lock()
@@ -979,7 +979,7 @@ func (h *HubServer) handleChatMessageRetry(writer http.ResponseWriter, request *
 	h.chatLaneOf[resent.ID] = lane
 	h.chatMu.Unlock()
 	h.kickChatDispatcher()
-	writeHubJSON(writer, http.StatusCreated, resent)
+	writeJSON(writer, http.StatusCreated, resent)
 }
 
 // handleChatMessageCancel closes out a message without sending it. handoffkeep
@@ -1000,7 +1000,7 @@ func (h *HubServer) handleChatMessageCancel(writer http.ResponseWriter, request 
 	}
 	id, err := strconv.ParseInt(request.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), hubChatStoreTimeout)
@@ -1011,22 +1011,22 @@ func (h *HubServer) handleChatMessageCancel(writer http.ResponseWriter, request 
 		return
 	}
 	if !found {
-		writeHubJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	}
 	// Assistant-channel rows are closed by the outbox drain, not by the
 	// operator console — cancel is refused rather than hiding a notice the
 	// hub does not own.
 	if message.Author != hubChatOperatorName || message.RelayState == "not_sent" || message.SourceChannel == "assistant" {
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_operator"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_not_operator"})
 		return
 	}
 	switch message.RelayState {
 	case "delivered":
 		// Already terminal; cancel is idempotent.
-		writeHubJSON(writer, http.StatusOK, message)
+		writeJSON(writer, http.StatusOK, message)
 	case "failed":
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_terminal", "relay_state": "failed"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_terminal", "relay_state": "failed"})
 	default: // stored
 		h.chatMu.Lock()
 		delete(h.chatPending, id)
@@ -1048,14 +1048,14 @@ func (h *HubServer) handleChatMessageCancel(writer http.ResponseWriter, request 
 		if closed.RelayState != hubChatTerminalState {
 			// The store is the authority: if the row raced to another state
 			// (the dispatcher delivered or failed it first), report that truth.
-			writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_terminal", "relay_state": closed.RelayState})
+			writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_message_terminal", "relay_state": closed.RelayState})
 			return
 		}
 		h.chatMu.Lock()
 		h.chatCancelled[id] = struct{}{}
 		h.chatMu.Unlock()
 		h.noteChatTerminal(id)
-		writeHubJSON(writer, http.StatusOK, closed)
+		writeJSON(writer, http.StatusOK, closed)
 	}
 }
 
@@ -1074,16 +1074,16 @@ func (h *HubServer) handleChatQuestionTransition(writer http.ResponseWriter, req
 	}
 	id := request.PathValue("id")
 	if !chatQuestionIDPattern.MatchString(id) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	var input hubChatQuestionTransitionInput
 	if !decodeHubJSON(writer, request, hubChatRequestSlop, &input) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	if input.To != "resolved" && input.To != "withdrawn" {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), hubChatStoreTimeout)
@@ -1094,11 +1094,11 @@ func (h *HubServer) handleChatQuestionTransition(writer http.ResponseWriter, req
 		return
 	}
 	if !found {
-		writeHubJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	}
 	if current.ConversationID != hubChatConversationID || current.Lane != h.chatDeskLane {
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "chat_question_ownership"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "chat_question_ownership"})
 		return
 	}
 	question, err := store.TransitionChatQuestion(ctx, id, input.To)
@@ -1106,7 +1106,7 @@ func (h *HubServer) handleChatQuestionTransition(writer http.ResponseWriter, req
 		h.writeChatStoreError(writer, err)
 		return
 	}
-	writeHubJSON(writer, http.StatusOK, question)
+	writeJSON(writer, http.StatusOK, question)
 }
 
 // handleChatQuestionUpsert is the desk-session hook path. It is operator-token
@@ -1123,14 +1123,14 @@ func (h *HubServer) handleChatQuestionUpsert(writer http.ResponseWriter, request
 	}
 	var input ChatQuestionUpsert
 	if !decodeHubJSON(writer, request, hubChatMaxBodyBytes+hubChatRequestSlop, &input) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	if input.ConversationID == "" {
 		input.ConversationID = hubChatConversationID
 	}
 	if input.ConversationID != hubChatConversationID || !chatQuestionIDPattern.MatchString(input.ID) || input.Lane != h.chatDeskLane || input.Body == "" || len(input.Body) > hubChatMaxBodyBytes {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), hubChatStoreTimeout)
@@ -1144,7 +1144,7 @@ func (h *HubServer) handleChatQuestionUpsert(writer http.ResponseWriter, request
 	if created {
 		status = http.StatusCreated
 	}
-	writeHubJSON(writer, status, question)
+	writeJSON(writer, status, question)
 }
 
 func (h *HubServer) kickChatDispatcher() {

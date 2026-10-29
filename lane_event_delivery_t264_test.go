@@ -182,7 +182,7 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 	// The other half of AC0's reversal: devin's own queue banner ("send
 	// now") is real evidence -- since #547 a still-queued devin screen is
 	// relayInjectQueued and reported delivered, never retried; see
-	// task547_devin_relay_test.go. Since #683 the banner alone is not
+	// relay_devin_t547_test.go. Since #683 the banner alone is not
 	// enough: the queue must show this message's own text, because a banner
 	// belonging to an older queue proves nothing (tester S1).
 	t.Run("devin queued state is landed, not a failure", func(t *testing.T) {

@@ -85,20 +85,14 @@ func (s *assistantServer) serveMCP(w http.ResponseWriter, r *http.Request, ident
 		s.writeRPCError(w, request.ID, rpcErr.Code, rpcErr.Message)
 		return
 	}
-	writeAssistantJSON(w, http.StatusOK, assistantRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: result})
+	writeJSON(w, http.StatusOK, assistantRPCResponse{JSONRPC: "2.0", ID: request.ID, Result: result})
 }
 
 func (s *assistantServer) writeRPCError(w http.ResponseWriter, id json.RawMessage, code int, message string) {
 	if id == nil {
 		id = json.RawMessage("null")
 	}
-	writeAssistantJSON(w, http.StatusOK, assistantRPCResponse{JSONRPC: "2.0", ID: id, Error: &assistantRPCError{Code: code, Message: message}})
-}
-
-func writeAssistantJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(v)
+	writeJSON(w, http.StatusOK, assistantRPCResponse{JSONRPC: "2.0", ID: id, Error: &assistantRPCError{Code: code, Message: message}})
 }
 
 // dispatchRPC routes one request. Protocol-level failures come back as

@@ -195,12 +195,18 @@ func TestT22ReplayExhaustedAnnouncedOnceAcrossHellos(t *testing.T) {
 	seen := r20t5Subscribe(t, hub)
 	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 1)}
 	hub.connect("host-a", "test", "test-remote", agent, true)
-	waitForT22(t, func() bool { return len(fake.queries("/v1/relay/events")) >= 1 })
-	if exhausted := seen("relay.replay_exhausted"); len(exhausted) != 1 {
+	// Wait on the broadcast itself: the replay query lands before the hub
+	// announces the exhausted row, so polling the query alone races it.
+	var exhausted []json.RawMessage
+	eventually(t, time.Second, "first hello relay.replay_exhausted", func() bool {
+		exhausted = seen("relay.replay_exhausted")
+		return len(exhausted) >= 1
+	})
+	if len(exhausted) != 1 {
 		t.Fatalf("first hello relay.replay_exhausted broadcasts=%d, want 1", len(exhausted))
 	}
 	hub.connect("host-a", "test", "test-remote", agent, true)
-	waitForT22(t, func() bool { return len(fake.queries("/v1/relay/events")) >= 2 })
+	eventually(t, time.Second, "second hello replay query", func() bool { return len(fake.queries("/v1/relay/events")) >= 2 })
 	if exhausted := seen("relay.replay_exhausted"); len(exhausted) != 1 {
 		t.Fatalf("two hellos relay.replay_exhausted broadcasts=%d, want 1", len(exhausted))
 	}
@@ -230,16 +236,5 @@ func TestT22ReplayExhaustedRememberedSetUsesLRUCap(t *testing.T) {
 	hub.mu.Unlock()
 	if length > relayReplayExhaustedMaxEntries || !firstPresent || evictedPresent {
 		t.Fatalf("replay exhausted set entries=%d first_present=%t expected_eviction_present=%t", length, firstPresent, evictedPresent)
-	}
-}
-
-func waitForT22(t *testing.T, ready func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for !ready() {
-		if time.Now().After(deadline) {
-			t.Fatal("timed out waiting for local fixture")
-		}
-		time.Sleep(5 * time.Millisecond)
 	}
 }

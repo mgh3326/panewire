@@ -158,7 +158,7 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 	}
 	var body hubSpawnRequest
 	if !decodeHubJSON(writer, request, hubSpawnMaxBodyBytes, &body) || !validHubSpawnRequest(body) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 
@@ -168,13 +168,13 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 	if existing := h.spawnRecords[body.RequestID]; existing != nil {
 		response := h.spawnRecordResponse(existing)
 		h.mu.Unlock()
-		writeHubJSON(writer, http.StatusConflict, response)
+		writeJSON(writer, http.StatusConflict, response)
 		return
 	}
 	record := h.nodes[body.Machine]
 	if record == nil || record.agent == nil || record.state != "connected" || !h.acceptingEffectiveLocked(body.Machine, record.accepting) {
 		h.mu.Unlock()
-		writeHubJSON(writer, http.StatusServiceUnavailable, h.spawnUnavailableResponse(body.Machine))
+		writeJSON(writer, http.StatusServiceUnavailable, h.spawnUnavailableResponse(body.Machine))
 		return
 	}
 	entry := &hubSpawnRecord{request: body, status: "pending", created: now, waiter: make(chan hubSpawnResult, 1)}
@@ -194,7 +194,7 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 		h.mu.Lock()
 		delete(h.spawnRecords, body.RequestID)
 		h.mu.Unlock()
-		writeHubJSON(writer, http.StatusServiceUnavailable, h.spawnUnavailableResponse(body.Machine))
+		writeJSON(writer, http.StatusServiceUnavailable, h.spawnUnavailableResponse(body.Machine))
 		return
 	}
 	h.broadcastSpawnRequested(body)
@@ -202,15 +202,15 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 	select {
 	case result := <-entry.waiter:
 		if result.CompletedAt != nil {
-			writeHubJSON(writer, http.StatusOK, result)
+			writeJSON(writer, http.StatusOK, result)
 			return
 		}
-		writeHubJSON(writer, http.StatusOK, struct {
+		writeJSON(writer, http.StatusOK, struct {
 			RequestID string `json:"request_id"`
 			Status    string `json:"status"`
 		}{RequestID: body.RequestID, Status: "lost"})
 	case <-time.After(time.Duration(body.WaitSeconds) * time.Second):
-		writeHubJSON(writer, http.StatusGatewayTimeout, struct {
+		writeJSON(writer, http.StatusGatewayTimeout, struct {
 			RequestID string `json:"request_id"`
 			Status    string `json:"status"`
 		}{RequestID: body.RequestID, Status: "pending"})
@@ -224,7 +224,7 @@ func (h *HubServer) handleSpawnGet(writer http.ResponseWriter, request *http.Req
 	}
 	requestID := request.PathValue("request_id")
 	if !validHubSpawnRequestID(requestID) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	h.mu.Lock()
@@ -232,12 +232,12 @@ func (h *HubServer) handleSpawnGet(writer http.ResponseWriter, request *http.Req
 	record := h.spawnRecords[requestID]
 	if record == nil {
 		h.mu.Unlock()
-		writeHubJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
+		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	}
 	response := h.spawnRecordResponse(record)
 	h.mu.Unlock()
-	writeHubJSON(writer, http.StatusOK, response)
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func (h *HubServer) resolveSpawn(machine string, result hubSpawnResult) {

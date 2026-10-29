@@ -8,7 +8,6 @@ import (
 	"sort"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 var (
@@ -50,21 +49,6 @@ func normalizeHubActiveJobMetadata(job *HubActiveJob) {
 			job.LastEventAt = ""
 		}
 	}
-}
-
-const hubRelayPayloadTextLimit = 240
-
-// truncateHubRelayPayloadText applies the character (rather than byte) bound
-// used by the relay record contract. Newlines in a question are display text,
-// not a record separator, so callers may opt into normalization for it.
-func truncateHubRelayPayloadText(value string, normalizeNewlines bool) (string, bool) {
-	if normalizeNewlines {
-		value = strings.NewReplacer("\r\n", " ", "\r", " ", "\n", " ").Replace(value)
-	}
-	if utf8.RuneCountInString(value) <= hubRelayPayloadTextLimit {
-		return value, false
-	}
-	return string([]rune(value)[:hubRelayPayloadTextLimit]), true
 }
 
 func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {

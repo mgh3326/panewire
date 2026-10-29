@@ -37,7 +37,7 @@ func TestHubR10FailoverEventsFollowWatchedPresenceStateMachine(t *testing.T) {
 	presenceOnly := r6DialAgent(t, server.URL, "node-b", r6NodeBToken)
 	defer presenceOnly.Close(websocket.StatusNormalClosure, "")
 	r6Write(t, presenceOnly, map[string]any{"type": "hello", "machine_id": "node-b", "version": "r10-presence-only"})
-	r6Eventually(t, "presence-only node", func() bool { return r6NodeState(r6Nodes(t, server), "node-b") == "connected" })
+	eventually(t, time.Second, "presence-only node", func() bool { return r6NodeState(r6Nodes(t, server), "node-b") == "connected" })
 	quiet := r6DialEvents(t, server.URL)
 	clock = clock.Add(time.Second)
 	hub.Sweep() // stale
@@ -53,7 +53,7 @@ func TestHubR10FailoverEventsFollowWatchedPresenceStateMachine(t *testing.T) {
 	watched := r6DialAgent(t, server.URL, "node-a", r6NodeAToken)
 	defer watched.Close(websocket.StatusNormalClosure, "")
 	r6Write(t, watched, map[string]any{"type": "hello", "machine_id": "node-a", "version": "r10-watched"})
-	r6Eventually(t, "watched node", func() bool { return r6NodeState(r6Nodes(t, server), "node-a") == "connected" })
+	eventually(t, time.Second, "watched node", func() bool { return r6NodeState(r6Nodes(t, server), "node-a") == "connected" })
 	clock = clock.Add(time.Second)
 	hub.Sweep() // stale
 	clock = clock.Add(2 * time.Second)
@@ -65,7 +65,7 @@ func TestHubR10FailoverEventsFollowWatchedPresenceStateMachine(t *testing.T) {
 	}
 
 	r6Write(t, watched, map[string]any{"type": "ping"})
-	r6Eventually(t, "watched node recovered", func() bool { return r6NodeState(r6Nodes(t, server), "node-a") == "connected" })
+	eventually(t, time.Second, "watched node recovered", func() bool { return r6NodeState(r6Nodes(t, server), "node-a") == "connected" })
 	hub.Sweep() // first clear observation
 	clock = clock.Add(500 * time.Millisecond)
 	hub.Sweep() // second clear observation
@@ -113,7 +113,7 @@ func TestHubR10AcceptingFlagAppearsInNodesAndStatus(t *testing.T) {
 	defaultNode := r6DialAgent(t, server.URL, "node-b", r6NodeBToken)
 	defer defaultNode.Close(websocket.StatusNormalClosure, "")
 	r6Write(t, defaultNode, map[string]any{"type": "hello", "machine_id": "node-b", "version": "r10-default"})
-	r6Eventually(t, "accepting and default nodes", func() bool {
+	eventually(t, time.Second, "accepting and default nodes", func() bool {
 		nodes := r6Nodes(t, server)
 		return len(nodes) == 2 && r10NodeAccepting(nodes, "node-a") && !r10NodeAccepting(nodes, "node-b")
 	})

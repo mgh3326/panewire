@@ -225,8 +225,7 @@ func (h *HubServer) handleControlPlaneTransfer(writer http.ResponseWriter, reque
 		writeLanesWriteError(writer, err)
 		return
 	}
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(response)
+	writeJSON(writer, http.StatusOK, response)
 }
 
 func validateControlPlaneTransferRequest(request controlPlaneTransferRequest) string {

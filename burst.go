@@ -11,7 +11,6 @@ import (
 	"net"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -82,20 +81,7 @@ func writeBurstPolicy(path string, policy BurstPolicy) error {
 	if err != nil {
 		return errors.New("burst policy encoding failed")
 	}
-	directory := filepath.Dir(path)
-	temporary, err := os.CreateTemp(directory, ".burst-policy-")
-	if err != nil {
-		return errors.New("burst policy write failed")
-	}
-	temporaryName := temporary.Name()
-	defer os.Remove(temporaryName)
-	if err := temporary.Chmod(info.Mode().Perm()); err == nil {
-		_, err = temporary.Write(append(data, '\n'))
-	}
-	if closeErr := temporary.Close(); err == nil {
-		err = closeErr
-	}
-	if err != nil || os.Rename(temporaryName, path) != nil {
+	if err := replaceFileAtomically(path, ".burst-policy-", append(data, '\n'), info.Mode().Perm()); err != nil {
 		return errors.New("burst policy write failed")
 	}
 	return nil

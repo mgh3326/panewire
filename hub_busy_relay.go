@@ -177,7 +177,7 @@ func (h *HubServer) handleRelayHeld(writer http.ResponseWriter, request *http.Re
 	}
 	lane := request.URL.Query().Get("lane")
 	if lane != "" && !hubAgentLabelPattern.MatchString(lane) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_lane"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_lane"})
 		return
 	}
 	h.mu.Lock()
@@ -189,7 +189,7 @@ func (h *HubServer) handleRelayHeld(writer http.ResponseWriter, request *http.Re
 	}
 	h.mu.Unlock()
 	sort.Slice(held, func(i, j int) bool { return held[i].ID < held[j].ID })
-	writeHubJSON(writer, http.StatusOK, struct {
+	writeJSON(writer, http.StatusOK, struct {
 		Held []hubRelayHeldProjection `json:"held"`
 	}{Held: held})
 }
@@ -201,21 +201,21 @@ func (h *HubServer) handleRelayHeldEdit(writer http.ResponseWriter, request *htt
 	}
 	id, valid := parseRelayHeldID(request)
 	if !valid {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_event"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_event"})
 		return
 	}
 	var body struct {
 		Text string `json:"text"`
 	}
 	if !decodeHubJSON(writer, request, hubRelayIngressMaxBodyBytes, &body) || !validRelayFinalText(body.Text) {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	if !h.queueRelayHeldControl(id, hubRelayInjectEvent{Type: "relay.edit", EventID: id, Text: body.Text}) {
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "not_held"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "not_held"})
 		return
 	}
-	writeHubJSON(writer, http.StatusOK, map[string]any{"id": id})
+	writeJSON(writer, http.StatusOK, map[string]any{"id": id})
 }
 
 func (h *HubServer) handleRelayHeldDelete(writer http.ResponseWriter, request *http.Request) {
@@ -225,20 +225,20 @@ func (h *HubServer) handleRelayHeldDelete(writer http.ResponseWriter, request *h
 	}
 	id, valid := parseRelayHeldID(request)
 	if !valid {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_event"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_event"})
 		return
 	}
 	h.mu.Lock()
 	held, exists := h.relayHeld[id]
 	if !exists {
 		h.mu.Unlock()
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "not_held"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "not_held"})
 		return
 	}
 	record := h.nodes[held.Machine]
 	if record == nil || record.agent == nil || !record.agent.queueRelay(hubRelayInjectEvent{Type: "relay.cancel", EventID: id}) {
 		h.mu.Unlock()
-		writeHubJSON(writer, http.StatusConflict, map[string]string{"error": "node_unavailable"})
+		writeJSON(writer, http.StatusConflict, map[string]string{"error": "node_unavailable"})
 		return
 	}
 	delete(h.relayHeld, id)

@@ -244,8 +244,7 @@ func (h *HubServer) handleSessionReap(writer http.ResponseWriter, request *http.
 		downgradeSessionReapRows(&nodes[index], routes, lanesErr != nil)
 	}
 	sort.Slice(nodes, func(i, j int) bool { return nodes[i].MachineID < nodes[j].MachineID })
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(struct {
+	writeJSON(writer, http.StatusOK, struct {
 		Nodes []HubSessionReapNode `json:"nodes"`
 	}{Nodes: nodes})
 }

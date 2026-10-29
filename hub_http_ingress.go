@@ -64,12 +64,6 @@ func decodeHubRelayIngressRequest(writer http.ResponseWriter, request *http.Requ
 	return body, true
 }
 
-func writeHubJSON(writer http.ResponseWriter, status int, value any) {
-	writer.Header().Set("Content-Type", "application/json")
-	writer.WriteHeader(status)
-	_ = json.NewEncoder(writer).Encode(value)
-}
-
 func (h *HubServer) handleRelayIngress(writer http.ResponseWriter, request *http.Request) {
 	if !h.authorizeOperator(request) {
 		hubUnauthorized(writer)
@@ -77,7 +71,7 @@ func (h *HubServer) handleRelayIngress(writer http.ResponseWriter, request *http
 	}
 	body, valid := decodeHubRelayIngressRequest(writer, request)
 	if !valid {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
 	event := hubJobEventPayload{
@@ -95,22 +89,22 @@ func (h *HubServer) handleRelayIngress(writer http.ResponseWriter, request *http
 	}
 	result := h.relayLaneEvent(event, nil)
 	if result.RejectedTooLong {
-		writeHubJSON(writer, http.StatusBadRequest, map[string]string{"error": "text_too_long"})
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "text_too_long"})
 		return
 	}
 	if result.PersistFailed {
-		writeHubJSON(writer, http.StatusBadGateway, map[string]string{"error": "persist_failed"})
+		writeJSON(writer, http.StatusBadGateway, map[string]string{"error": "persist_failed"})
 		return
 	}
 	if result.Duplicate {
-		writeHubJSON(writer, http.StatusConflict, struct {
+		writeJSON(writer, http.StatusConflict, struct {
 			Error string `json:"error"`
 			ID    int64  `json:"id"`
 		}{Error: "duplicate_event_id", ID: result.ID})
 		return
 	}
 	h.broadcastRelayHTTPIngress(body, result.Routed)
-	writeHubJSON(writer, http.StatusCreated, hubRelayIngressResponse{ID: result.ID, EventID: body.EventID, Lane: body.Lane, Routed: result.Routed, Machine: result.Machine})
+	writeJSON(writer, http.StatusCreated, hubRelayIngressResponse{ID: result.ID, EventID: body.EventID, Lane: body.Lane, Routed: result.Routed, Machine: result.Machine})
 }
 
 func (h *HubServer) broadcastRelayHTTPIngress(request hubRelayIngressRequest, routed bool) {

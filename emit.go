@@ -291,37 +291,9 @@ func writeEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	temporary, err := os.CreateTemp(eventsDir, ".emit-*")
-	if err != nil {
-		return "", err
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if err := temporary.Chmod(0600); err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
-	if _, err := temporary.Write(contents); err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
-	if err := temporary.Close(); err != nil {
-		return "", err
-	}
 	final := filepath.Join(eventsDir, fmt.Sprintf("%05d-%s.json", highest+1, record.Type))
-	if err := os.Rename(name, final); err != nil {
+	if err := replaceFileAtomically(final, ".emit-*", contents, 0600); err != nil {
 		return "", err
-	}
-	// Directory sync is best effort across the supported filesystems. The
-	// rename above is the visibility boundary; a directory fsync failure must
-	// not turn a successfully replaced, parseable file into a reported failure.
-	if directoryFile, err := os.Open(eventsDir); err == nil {
-		_ = directoryFile.Sync()
-		_ = directoryFile.Close()
 	}
 	return final, nil
 }
@@ -359,27 +331,11 @@ func writeLaneEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	temporary, err := os.CreateTemp(eventsDir, ".emit-*")
+	name, err := writeSyncedTemporaryFile(eventsDir, ".emit-*", contents, 0600)
 	if err != nil {
 		return "", err
 	}
-	name := temporary.Name()
 	defer os.Remove(name)
-	if err := temporary.Chmod(0600); err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
-	if _, err := temporary.Write(contents); err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
-	if err := temporary.Sync(); err != nil {
-		_ = temporary.Close()
-		return "", err
-	}
-	if err := temporary.Close(); err != nil {
-		return "", err
-	}
 	for {
 		highest++
 		final := filepath.Join(eventsDir, fmt.Sprintf("%05d-lane.event.json", highest))
@@ -389,14 +345,7 @@ func writeLaneEmitRecord(inboxRoot string, record emitRecord) (string, error) {
 		// durable lane event. A collision is either this key's duplicate or a
 		// different producer that won the sequence, in which case try the next.
 		if err := os.Link(name, final); err == nil {
-			// Directory sync is best effort across the supported filesystems.
-			// The link above is the visibility boundary; a directory fsync
-			// failure must not turn a successfully published file into a
-			// reported failure.
-			if directoryFile, err := os.Open(eventsDir); err == nil {
-				_ = directoryFile.Sync()
-				_ = directoryFile.Close()
-			}
+			syncDirectoryBestEffort(eventsDir)
 			return final, nil
 		} else if !errors.Is(err, os.ErrExist) {
 			return "", err
@@ -489,26 +438,6 @@ func validLaneRelayText(value string) bool {
 		}
 	}
 	return true
-}
-
-// truncateLaneEventText is the only truncation point for lane.event text.
-// It runs on the producer node before the file, outbox key, and wire payload
-// are made; the hub only validates this final form so acknowledgements cannot
-// name a different record after a restart.
-func truncateLaneEventText(value string) (string, bool) {
-	return truncateLaneEventTextAtLimit(value, laneEventTextLimit)
-}
-
-func truncateLaneEventTextAtLimit(value string, limit int) (string, bool) {
-	if len(value) <= limit {
-		return value, false
-	}
-	const marker = "[truncated]"
-	textLimit := limit - len(marker)
-	for textLimit > 0 && !utf8.ValidString(value[:textLimit]) {
-		textLimit--
-	}
-	return value[:textLimit] + marker, true
 }
 
 type emitDedupeRecord struct {
