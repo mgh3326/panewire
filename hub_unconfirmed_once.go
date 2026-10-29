@@ -187,6 +187,9 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (map[int64]bool,
 // rule is: no labelled copy is ever queued unless the durable retire for
 // that row has already succeeded.
 func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffkeepRelayEvent, source string) {
+	if h.replayInbox(record) {
+		return
+	}
 	if h.handoffkeep == nil {
 		return
 	}

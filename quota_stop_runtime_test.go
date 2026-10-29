@@ -230,3 +230,69 @@ func TestQuotaStopDeduplicatesPaneAndReset(t *testing.T) {
 		t.Fatalf("decisions=%d err=%v", n, err)
 	}
 }
+
+func TestQuotaStopReadTimeoutRecordsHandover(t *testing.T) {
+	store := NewMemoryStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	root := t.TempDir()
+	events := filepath.Join(root, "jobs", "job-active", "events")
+	if err := os.MkdirAll(events, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	for name, body := range map[string]string{
+		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + stamp + `","agent_label":"worker-synthetic","owner_lane":"owner","epoch":1}`,
+		"00002-job.spawned.json": `{"type":"job.spawned","created_at":"` + stamp + `","pane_id":"workspace:pane-1"}`} {
+		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q, err := newQuotaStopManager(store, root, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	q.read = func(ctx context.Context, _ string) (string, error) { <-ctx.Done(); return "", ctx.Err() }
+	q.observeBounded(context.Background(), idleWakeCandidate{EventID: "wake-timeout", PaneID: "workspace:pane-1", Label: "worker-synthetic"}, time.Now())
+	var decision, reason, reset string
+	if err := store.db.QueryRow(`SELECT decision,reason,reset FROM quota_stop_decisions WHERE event_id='wake-timeout'`).Scan(&decision, &reason, &reset); err != nil || decision != "handover" || reason != "screen_read_timeout" || reset != "unknown" {
+		t.Fatalf("decision=%s reason=%s reset=%s err=%v", decision, reason, reset, err)
+	}
+}
+
+func TestQuotaStopUnknownResetDedupExpires(t *testing.T) {
+	store := NewMemoryStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	q, err := newQuotaStopManager(store, t.TempDir(), false, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		id    string
+		at    time.Time
+		reset string
+	}{
+		{"a", start, "unknown"}, {"b", start.Add(20 * time.Minute), "unknown"}, {"c", start.Add(time.Hour), "unknown"},
+		{"d", start, "2026-10-29T03:00:00Z"}, {"e", start.Add(time.Hour), "2026-10-29T03:00:00Z"},
+	} {
+		if _, err := store.db.Exec(`INSERT INTO quota_stop_decisions(event_id,job,pane,label,created) VALUES(?,?,?,?,?)`, tc.id, "job", "pane", "worker", tc.at.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+		q.recordDecision(context.Background(), idleWakeCandidate{EventID: tc.id, PaneID: "pane"}, tc.at, "claude", tc.reset, "handover", "unknown", "", 0)
+	}
+	var n int
+	if err := store.db.QueryRow(`SELECT count(*) FROM quota_stop_decisions WHERE decision<>'' AND reset='unknown'`).Scan(&n); err != nil || n != 2 {
+		t.Fatalf("unknown count=%d err=%v", n, err)
+	}
+	if err := store.db.QueryRow(`SELECT count(*) FROM quota_stop_decisions WHERE decision<>'' AND reset<>'unknown'`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("known count=%d err=%v", n, err)
+	}
+}
+
+func TestQuotaStopAndWakeTargetFlagsRemainHubFlags(t *testing.T) {
+	for _, flag := range []string{"--quota-stop-act", "--wake-targets"} {
+		if !hubFlagsProvided([]string{flag}) {
+			t.Errorf("%s was lost in merge", flag)
+		}
+	}
+}

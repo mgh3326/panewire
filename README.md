@@ -4,6 +4,10 @@ Panewire is a local daemon and CLI for watching agent panes, waiting on stable s
 
 ## Lane routing
 
+The hub defaults informational events to a durable per-lane inbox. See
+[quiet delivery](docs/quiet-delivery.md) for `emit --deliver`, inbox commands,
+policy overrides, digest windows, and display-only Claude Code examples.
+
 The hub can relay terminal and escalation records to a small hierarchy of
 operator-owned lanes. Start it with `--lanes /etc/panewire/lanes.json`; the
 file is reloaded for every relay decision. `job.completed` goes to its

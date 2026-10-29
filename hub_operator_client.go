@@ -29,7 +29,11 @@ var (
 // operator request may target. Anything else — including a mutated request
 // URL reaching the transport — fails closed.
 var hubOperatorAPIPaths = map[string]bool{
+	"/v1/inbox":           true,
+	"/v1/inbox/count":     true,
+	"/v1/inbox/ack":       true,
 	"/v1/nodes":           true,
+	"/v1/nodes/wake":      true,
 	"/v1/jobs":            true,
 	"/v1/jobs/orphaned":   true,
 	"/v1/jobs/reassign":   true,
@@ -45,6 +49,12 @@ var hubOperatorAPIPaths = map[string]bool{
 func validHubOperatorAPIPath(path string) bool {
 	if hubOperatorAPIPaths[path] {
 		return true
+	}
+	if id, found := strings.CutPrefix(path, "/v1/inbox/"); found {
+		if id, ok := strings.CutSuffix(id, "/read"); ok {
+			n, err := strconv.ParseInt(id, 10, 64)
+			return err == nil && n > 0 && strconv.FormatInt(n, 10) == id
+		}
 	}
 	if lane, found := strings.CutPrefix(path, "/v1/lanes/"); found {
 		return laneNamePattern.MatchString(lane)

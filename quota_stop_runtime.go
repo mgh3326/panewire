@@ -182,6 +182,16 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	screen, err := q.read(readCtx, c.PaneID)
 	cancel()
 	if err != nil {
+		// A wake is already reserved and cannot be replayed safely. Record a
+		// conservative handover using a fresh DB context, including when the
+		// read exhausted the observation deadline.
+		reason := "screen_read_failed"
+		if ctx.Err() != nil || readCtx.Err() == context.DeadlineExceeded {
+			reason = "screen_read_timeout"
+		}
+		dbCtx, done := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+		defer done()
+		q.recordDecision(dbCtx, c, now, "unknown", "unknown", "handover", reason, "", 0)
 		return
 	}
 	stop, ok := classifyQuotaStop(screen, now, time.Local)
@@ -208,13 +218,21 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 		sum := sha256.Sum256([]byte(c.EventID))
 		due = stop.Reset.Add(time.Duration(1+int(sum[0])%5) * time.Second).UnixMilli()
 	}
+	q.recordDecision(dbCtx, c, now, stop.Pool, reset, decision, reason, policy.ResumeText, due)
+}
+
+// recordDecision deduplicates known resets exactly; unknown resets are scoped
+// to an hour so a later independent stop on a reused pane is still reported.
+func (q *quotaStopManager) recordDecision(ctx context.Context, c idleWakeCandidate, now time.Time, pool, reset, decision, reason, resume string, due int64) {
 	q.store.mu.Lock()
-	// The first observed stop owns this pane/reset; later wake IDs do not
-	// create duplicate waits or handovers for the same stop.
-	_, err = q.store.db.ExecContext(dbCtx, `UPDATE quota_stop_decisions SET pool=?,reset=?,decision=?,reason=?,resume_text=?,due=?,action_recorded=? WHERE event_id=? AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.pane=? AND d.reset=? AND d.decision<>'' AND d.event_id<>?)`, stop.Pool, reset, decision, reason, policy.ResumeText, due, boolInt(!q.act), c.EventID, c.PaneID, reset, c.EventID)
+	result, err := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET pool=?,reset=?,decision=?,reason=?,resume_text=?,due=?,action_recorded=? WHERE event_id=? AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.pane=? AND d.reset=? AND d.decision<>'' AND d.event_id<>? AND (? <> 'unknown' OR d.created / 3600000 = ?))`, pool, reset, decision, reason, resume, due, boolInt(!q.act), c.EventID, c.PaneID, reset, c.EventID, reset, now.UnixMilli()/3600000)
 	q.store.mu.Unlock()
-	if err == nil {
-		q.logger.Info("quota-stop decision", "job", job.JobID, "pane", c.PaneID, "pool", stop.Pool, "reset", reset, "decision", decision, "reason", reason, "shadow", !q.act)
+	if err != nil {
+		q.logger.Warn("quota-stop decision was not recorded", "error", err)
+		return
+	}
+	if n, _ := result.RowsAffected(); n != 0 {
+		q.logger.Info("quota-stop decision", "pane", c.PaneID, "pool", pool, "reset", reset, "decision", decision, "reason", reason, "shadow", !q.act)
 	}
 }
 func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettle bool) {

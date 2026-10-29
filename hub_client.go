@@ -34,19 +34,23 @@ type HubWait func(context.Context, time.Duration) error
 // channel. A zero config is never started by Daemon, preserving stage1/2's
 // historical behavior.
 type HubClientConfig struct {
-	URL                   string
-	URLs                  []string
-	MachineID             string
-	Token                 string
-	CFAccessClientID      string
-	CFAccessClientSecret  string
-	Accepting             bool
-	RelayInjectTimeout    time.Duration
-	JobsInboxRoot         string
-	FailoverWakeOn        string
-	FailoverWakeMAC       string
-	BurstWakeMAC          string
-	BurstPoweroffAllowed  bool
+	URL                  string
+	URLs                 []string
+	MachineID            string
+	Token                string
+	CFAccessClientID     string
+	CFAccessClientSecret string
+	Accepting            bool
+	RelayInjectTimeout   time.Duration
+	JobsInboxRoot        string
+	FailoverWakeOn       string
+	FailoverWakeMAC      string
+	BurstWakeMAC         string
+	BurstPoweroffAllowed bool
+	// WakeTargetsPath is the waker node's own JSON allowlist: which target
+	// machines a hub wake event may select, and each target's MAC plus UDP
+	// broadcast destination. The wire event carries none of these values.
+	WakeTargetsPath       string
 	Checks                []HubCheck
 	Execute               HubCheckExecutor
 	PingInterval          time.Duration
@@ -115,6 +119,9 @@ type HubClient struct {
 	burstPoweroff        func(context.Context) error
 	burstMu              sync.Mutex
 	burstSeen            map[string]time.Time
+	wakeTargets          map[string]NodeWakeTarget
+	wakeMu               sync.Mutex
+	wakeSeen             map[string]time.Time
 	checks               []HubCheck
 	execute              HubCheckExecutor
 	pingInterval         time.Duration
@@ -217,6 +224,14 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 			return nil, errors.New("hub client configuration is invalid")
 		}
 	}
+	var wakeTargets map[string]NodeWakeTarget
+	if config.WakeTargetsPath != "" {
+		targets, wakeErr := LoadNodeWakeConfig(config.WakeTargetsPath)
+		if wakeErr != nil {
+			return nil, errors.New("hub client configuration is invalid")
+		}
+		wakeTargets = targets
+	}
 	wakeDestination := hubFailoverWakeBroadcastAddress
 	if config.failoverWakeDestination != "" {
 		address, resolveErr := net.ResolveUDPAddr("udp4", config.failoverWakeDestination)
@@ -273,6 +288,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnSeen: make(map[string]struct{}), spawnTimeoutExtra: 60 * time.Second,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
+		wakeTargets: wakeTargets, wakeSeen: make(map[string]time.Time),
 		r19a:   newR19aClientState(config),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version,
@@ -1472,6 +1488,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				client.handleHubFailover(ctx, message)
 			case "burst":
 				client.handleHubBurst(ctx, message)
+			case "wake":
+				client.handleHubWake(ctx, message)
 			case "job.revoked":
 				if err := writeHubRevocation(client.jobsInboxRoot, hubJobRevokedEvent{Type: message.Type, JobID: message.JobID, Epoch: message.Epoch}); err != nil {
 					client.warn("job revocation local write unavailable")
@@ -1867,6 +1885,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			Truncated bool   `json:"truncated,omitempty"`
 			Replay    bool   `json:"replay,omitempty"`
 		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay})
+		payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 	}
 	payload := hubJobCompletionPayloadForJob(job.HubActiveJob, job.EventID, replay)
@@ -1889,6 +1908,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			Replay         bool   `json:"replay,omitempty"`
 		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Question, job.PR, job.Head, job.PaneID, job.EventID, replay})
 	}
+	payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 }
 
@@ -2202,6 +2222,11 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		}
 	case "burst.holds":
 		if len(fields) != 2 || json.Unmarshal(fields["holds_active"], &message.HoldsActive) != nil {
+			return hubOutboundMessage{}, false
+		}
+	case "wake":
+		var emittedAt string
+		if len(fields) != 3 || json.Unmarshal(fields["machine"], &message.Machine) != nil || json.Unmarshal(fields["emitted_at"], &emittedAt) != nil || !parseHubFailoverEmittedAt(emittedAt, &message.EmittedAt) || !machineIDPattern.MatchString(message.Machine) {
 			return hubOutboundMessage{}, false
 		}
 	case "relay.inject":
