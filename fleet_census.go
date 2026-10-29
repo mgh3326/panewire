@@ -1443,6 +1443,9 @@ func fleetCensusMachineID(options fleetCensusOptions) string {
 // read methods (agent.list, pane.list, tab.list), issues only GETs to the hub,
 // and walks the jobs inbox without opening a single file for writing.
 func runFleetCensusCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
+	if len(args) > 0 && args[0] == "find" {
+		return runFleetCensusFindCLI(args, stdout, stderr, deps)
+	}
 	options, err := parseFleetCensusArgs(args)
 	if err != nil {
 		if missingHubCLIFlagValue(args, fleetCensusValueFlags, fleetCensusKnownFlags) {

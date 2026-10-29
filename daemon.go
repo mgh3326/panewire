@@ -26,7 +26,6 @@ type Config struct {
 	StorePromptBody                            bool
 	IdleWakeSettle                             time.Duration
 	Logging                                    LoggingConfig
-	Stage2                                     Stage2Config
 	Hub                                        HubDaemonConfig
 	StallDetect                                StallDetectConfig
 	Store                                      *Store
@@ -48,7 +47,6 @@ type Daemon struct {
 	caps       GuardResult
 	eventDone  chan struct{}
 	idleDone   chan struct{}
-	stage2Done chan struct{}
 	hubDone    chan struct{}
 	stallDone  chan struct{}
 	resub      chan struct{}
@@ -193,13 +191,6 @@ func (d *Daemon) Start(ctx context.Context) error {
 		go func() {
 			defer close(d.idleDone)
 			d.idleWakeRetryLoop(runCtx)
-		}()
-	}
-	if d.cfg.Stage2.Enabled {
-		d.stage2Done = make(chan struct{})
-		go func() {
-			defer close(d.stage2Done)
-			d.stage2Loop(runCtx)
 		}()
 	}
 	if d.cfg.Hub.Enabled && d.cfg.Hub.Client != nil {
@@ -662,10 +653,6 @@ func (d *Daemon) Stop() error {
 		<-d.idleDone
 		d.idleDone = nil
 	}
-	if d.stage2Done != nil {
-		<-d.stage2Done
-		d.stage2Done = nil
-	}
 	if d.hubDone != nil {
 		<-d.hubDone
 		d.hubDone = nil
@@ -680,17 +667,12 @@ func (d *Daemon) Stop() error {
 	if d.cfg.SocketPath != "" {
 		_ = os.Remove(d.cfg.SocketPath)
 	}
-	var stage2Err error
-	if d.cfg.Stage2.Close != nil {
-		stage2Err = d.cfg.Stage2.Close()
-		d.cfg.Stage2.Close = nil
-	}
 	if d.store != nil {
 		if err := d.store.Close(); err != nil {
 			return err
 		}
 	}
-	return stage2Err
+	return nil
 }
 func (d *Daemon) SocketPath() string {
 	if d.cfg.SocketPath != "" {

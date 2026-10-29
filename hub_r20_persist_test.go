@@ -51,6 +51,10 @@ type fakeHandoffkeep struct {
 	// listRelayEvents, while the by-id re-read (no kind) and the undelivered
 	// listing still succeed (#1034).
 	failGetKind string
+	// getLaneEventStatus, when set, is the reply to GET /v1/relay/events
+	// queries filtering kind=lane.event — the contract probe the inbox
+	// flush runs at startup. It answers before any listing logic.
+	getLaneEventStatus int
 	// retiredMarkerStaysUndelivered models a listed row that already carries
 	// the retire marker: a /delivered POST whose pane is replay-retired:*
 	// persists delivered_to but leaves delivered_at unset, so the row keeps
@@ -108,6 +112,11 @@ func (f *fakeHandoffkeep) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodGet:
 		f.mu.Lock()
 		query := r.URL.Query()
+		if f.getLaneEventStatus != 0 && query.Get("kind") == "lane.event" {
+			f.mu.Unlock()
+			w.WriteHeader(f.getLaneEventStatus)
+			return
+		}
 		if f.failGetKind != "" && query.Get("kind") == f.failGetKind && query.Get("undelivered") == "" {
 			f.mu.Unlock()
 			w.WriteHeader(http.StatusInternalServerError)

@@ -3,10 +3,7 @@ package panewire
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
-	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -57,83 +54,6 @@ type hubRoundTripperFunc func(*http.Request) (*http.Response, error)
 
 func (fn hubRoundTripperFunc) RoundTrip(request *http.Request) (*http.Response, error) {
 	return fn(request)
-}
-
-// hubTestSmokeAsset is a release-asset stand-in that passes the pre-rename
-// smoke run: `<asset> version` prints version and exits 0.
-func hubTestSmokeAsset(version string) []byte {
-	return []byte("#!/bin/sh\necho " + version + "\n")
-}
-
-func hubTestUpdate(url, sha, version string) hubUpdateRequest {
-	return hubUpdateRequest{URL: url, SHA256: sha, Version: version, Repository: hubUpdateDefaultRepository}
-}
-
-func TestR19UpdateChecksumFailureDoesNotReplace(t *testing.T) {
-	asset := hubTestSmokeAsset("r19b")
-	client := &http.Client{Transport: hubRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
-		if request.URL.Hostname() != "github.com" {
-			t.Fatalf("download host=%q", request.URL.Hostname())
-		}
-		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(bytes.NewReader(asset)), Request: request}, nil
-	})}
-	path := filepath.Join(t.TempDir(), "panewire")
-	if err := os.WriteFile(path, []byte("old binary"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	url := "https://github.com/mgh3326/panewire/releases/download/r19b/panewire_r19b_darwin_arm64"
-	if err := applyHubUpdate(context.Background(), client, path, hubTestUpdate(url, "0000000000000000000000000000000000000000000000000000000000000000", "r19b")); err == nil {
-		t.Fatal("checksum mismatch accepted")
-	}
-	got, err := os.ReadFile(path)
-	if err != nil || string(got) != "old binary" {
-		t.Fatalf("binary changed: %q err=%v", got, err)
-	}
-	hash := sha256.Sum256(asset)
-	if err := applyHubUpdate(context.Background(), client, path, hubTestUpdate(url, hex.EncodeToString(hash[:]), "r19b")); err != nil {
-		t.Fatal(err)
-	}
-	got, _ = os.ReadFile(path)
-	if string(got) != string(asset) {
-		t.Fatalf("got %q", got)
-	}
-	backups, globErr := filepath.Glob(path + ".bak-*")
-	if globErr != nil || len(backups) != 1 {
-		t.Fatalf("backups=%v err=%v", backups, globErr)
-	}
-	previous, readErr := os.ReadFile(backups[0])
-	if readErr != nil || string(previous) != "old binary" {
-		t.Fatalf("backup=%q err=%v", previous, readErr)
-	}
-}
-
-func TestR19UpdateURLAllowlistAndRedirectDowngrade(t *testing.T) {
-	if !validHubUpdateURL("https://github.com/mgh3326/panewire/releases/download/r19b/panewire_r19b_darwin_arm64", hubUpdateDefaultRepository) {
-		t.Fatal("pinned release URL rejected")
-	}
-	for _, raw := range []string{
-		"https://objects.githubusercontent.com/asset?X-Amz-Signature=fixture",
-		"https://example.invalid/panewire_darwin_arm64",
-	} {
-		if validHubUpdateURL(raw, hubUpdateDefaultRepository) {
-			t.Fatalf("non-release starting URL accepted: %s", raw)
-		}
-	}
-	path := filepath.Join(t.TempDir(), "panewire")
-	if err := os.WriteFile(path, []byte("old binary"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	client := &http.Client{Transport: hubRoundTripperFunc(func(request *http.Request) (*http.Response, error) {
-		return &http.Response{StatusCode: http.StatusFound, Header: http.Header{"Location": []string{"http://127.0.0.1/panewire"}}, Body: io.NopCloser(bytes.NewReader(nil)), Request: request}, nil
-	})}
-	err := applyHubUpdate(context.Background(), client, path, hubTestUpdate("https://github.com/mgh3326/panewire/releases/download/r19b/panewire_r19b_darwin_arm64", hex.EncodeToString(make([]byte, 32)), "r19b"))
-	if err == nil {
-		t.Fatal("HTTPS redirect downgrade accepted")
-	}
-	got, readErr := os.ReadFile(path)
-	if readErr != nil || string(got) != "old binary" {
-		t.Fatalf("original was changed: %q err=%v", got, readErr)
-	}
 }
 
 func TestR19QuotaOutputAndEnvironmentAreBounded(t *testing.T) {
@@ -255,31 +175,4 @@ func hubTestProcessState(pid int) (string, bool) {
 		return "", false
 	}
 	return fields[0], true
-}
-
-func TestR19ExpectedVersionConfirmationAndTimeout(t *testing.T) {
-	now := time.Date(2026, 9, 4, 16, 0, 0, 0, time.UTC)
-	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "operator-token", "node-a": "node-token"}, Now: func() time.Time { return now }, UpdateConfirmationTimeout: time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
-	hub.expectedVersion["node-a"] = hubExpectedVersion{version: "r19c", deadline: now.Add(time.Minute)}
-	hub.connect("node-a", "r19c", "127.0.0.1:1", &hubAgent{}, false)
-	confirmed := false
-	for _, event := range hub.uiEvents {
-		confirmed = confirmed || (event.Kind == "update" && event.Phase == "succeeded")
-	}
-	if _, waiting := hub.expectedVersion["node-a"]; waiting || !confirmed {
-		t.Fatalf("success confirmation missing: %+v", hub.uiEvents)
-	}
-	hub.expectedVersion["node-a"] = hubExpectedVersion{version: "r19d", deadline: now}
-	hub.nodes["node-a"].agent = nil // confirmation timeout is independent of a live socket.
-	hub.Sweep()
-	unconfirmed := false
-	for _, event := range hub.uiEvents {
-		unconfirmed = unconfirmed || (event.Kind == "update" && event.Phase == "unconfirmed")
-	}
-	if _, waiting := hub.expectedVersion["node-a"]; waiting || !unconfirmed {
-		t.Fatalf("timeout confirmation missing: %+v", hub.uiEvents)
-	}
 }

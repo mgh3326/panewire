@@ -65,8 +65,7 @@ func (o *laneStallObservation) consider(record handoffkeepRelayEvent, now time.T
 // startLaneStallSweep is Sweep's hook. The observation does handoffkeep HTTP
 // (a 10s client timeout per page over 200-row pages), so it never runs on the
 // Sweep goroutine: failover broadcasts, alert dispatch and keepalive pings
-// must not wait behind a slow or hung durable store — the same reason
-// startUpdateOverdueFlush runs off this path. At most one run is in flight;
+// must not wait behind a slow or hung durable store. At most one run is in flight;
 // a sweep that finds one running skips, leaving the next tick to retry.
 func (h *HubServer) startLaneStallSweep(now time.Time) {
 	if h.handoffkeep == nil {

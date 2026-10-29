@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -246,28 +245,16 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 				items = items[:end]
 			}
 			id := "quiet-digest-" + uuid.NewString()
-			prefix := fmt.Sprintf("%d interrupt events", len(items))
+			// The digest is one line — a count and the inbox pointer — so it
+			// always satisfies the lane.event text contract (no control
+			// bytes, far under the length cap) and never breaks receivers.
+			// Full originals stay in the store, readable by `inbox list`.
+			text := fmt.Sprintf("%d interrupt events | lane %s | panewire inbox list --lane %s", len(items), lane, lane)
 			column := "digest_batch"
 			if escalation {
-				prefix = fmt.Sprintf("%d unread inbox items", len(items))
+				text = fmt.Sprintf("%d unread inbox items | lane %s | panewire inbox list --lane %s", len(items), lane, lane)
 				column = "escalation_batch"
 			}
-			text := prefix + ":"
-			// Bound the turn, preserving every full original in the hub inbox.
-			for _, i := range items {
-				summary := relayTextForKind(i.Kind, i.Event)
-				if i.Kind == "lane.event" {
-					summary = i.Event.Text
-				}
-				summary = strings.Join(strings.Fields(summary), " ")
-				line := fmt.Sprintf("\n#%d %s", i.ID, truncateRelayText(summary, 180))
-				if len(text)+len(line) > 1700 {
-					text += "\n… more items in panewire inbox list --lane " + lane
-					break
-				}
-				text += line
-			}
-			text += "\nFull items: panewire inbox read <id>"
 			if _, err := tx.Exec(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,?,?)`, id, lane, text); err != nil {
 				return err
 			}

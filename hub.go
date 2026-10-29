@@ -94,21 +94,11 @@ type HubServerConfig struct {
 	// routes whose machine equals the node's machine id. Zero selects
 	// defaultLanesNodeRowCap; a negative value is rejected.
 	LanesNodeRowCap int
-	// UpdateConfirmationTimeout bounds how long a published version may wait
-	// for the node's post-restart hello. Zero uses the ten-minute contract.
-	UpdateConfirmationTimeout time.Duration
-	// UpdateRepository pins the GitHub owner/repo whose release assets
-	// update publish may name; empty selects hubUpdateDefaultRepository.
-	UpdateRepository string
-	// UpdateOverdueLane names the lanes.json sink lane that receives one
-	// update.overdue row per (machine, version). Empty selects the lanes.json
-	// sink lane when exactly one exists; a lane that is not a sink never
-	// receives it.
-	UpdateOverdueLane string
 	// RelayAckTimeout bounds the time an injected relay may remain silent.
 	RelayAckTimeout time.Duration
 	// AcceptingOverridesPath optionally makes operator acceptance choices durable.
 	AcceptingOverridesPath string
+	// TODO: retire quota v2 only after the scopefuel v2 shadow ends.
 	// QuotaV2StorePath is the durable account-scoped quota v2 store (bindings
 	// and observations, task #578). Empty leaves every /v2/quota route closed
 	// (503): bindings and revisions must not vanish on restart.
@@ -474,36 +464,7 @@ type HubServer struct {
 	quotaWaiters                map[string]chan hubQuotaResult
 	quotaCacheTTL               time.Duration
 	spawnRecords                map[string]*hubSpawnRecord
-	expectedVersion             map[string]hubExpectedVersion
 	quotaV2                     *hubQuotaV2Store
-	updateConfirmationTimeout   time.Duration
-	updateRepository            string
-	updateOverdueLane           string
-	// updateOverdueNotified remembers the version each machine was last
-	// reported overdue for, so republishing the same version never repeats
-	// the notice.
-	updateOverdueNotified map[string]string
-	// updateOverduePending holds notices not yet durably recorded in the sink;
-	// every Sweep retries them until the row exists.
-	updateOverduePending map[string]*hubUpdateOverdue
-	// updateOverdueFlushMu is TryLock'd so at most one flush runs and is held
-	// for the flush's whole life: once Close has taken it and set
-	// updateOverdueFlushClosing, no new flush can start and any in-flight one
-	// is already over — the same shape laneStallMu/laneStallClosing use.
-	// updateOverdueFlushes lets Close (and fixtures) wait the in-flight flush
-	// out before the log file closes under it.
-	updateOverdueFlushMu      sync.Mutex
-	updateOverdueFlushClosing bool
-	updateOverdueFlushes      sync.WaitGroup
-	// closeCtx is cancelled by Close before it waits on
-	// updateOverdueFlushes, so an in-flight flush sees it inside its
-	// handoffkeep write and between notices — the wait is then bounded by
-	// the cancellation, not by K x handoffkeepTimeout. Only the
-	// update-overdue path consumes it; every other relay keeps
-	// context.Background(). The pair is assigned once in NewHubServer, so
-	// the flush goroutine reads it without a lock.
-	closeCtx    context.Context
-	closeCancel context.CancelFunc
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already
@@ -521,6 +482,14 @@ type HubServer struct {
 	// It stays nil when only tests drive Sweep, which then falls back to
 	// context.Background. Guarded by mu.
 	maintenanceCtx context.Context
+	// closeCtx is cancelled by Close before it waits out an in-flight inbox
+	// flush, so a flush parked inside its handoffkeep write sees it between
+	// batches — the wait is then bounded by the cancellation, not by
+	// handoffkeepTimeout. Only the inbox digest path consumes it; every
+	// other relay keeps context.Background(). The pair is assigned once in
+	// NewHubServer, so the flush goroutine reads it without a lock.
+	closeCtx    context.Context
+	closeCancel context.CancelFunc
 	// closeMu serializes Close so concurrent callers cannot race the logFile
 	// handoff; closed makes every call after the first return nil at once.
 	closeMu    sync.Mutex
@@ -539,11 +508,6 @@ type hubStallBeatState struct {
 	lastAdvance   time.Time
 	intervalMS    int64
 	degradedSince time.Time
-}
-
-type hubExpectedVersion struct {
-	version  string
-	deadline time.Time
 }
 
 // NewHubServer validates a complete static-token configuration. Tokens remain
@@ -595,15 +559,6 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	if config.OrphanGrace <= 0 {
 		config.OrphanGrace = config.GracePeriod
-	}
-	if config.UpdateConfirmationTimeout <= 0 {
-		config.UpdateConfirmationTimeout = 10 * time.Minute
-	}
-	if config.UpdateRepository == "" {
-		config.UpdateRepository = hubUpdateDefaultRepository
-	}
-	if config.UpdateOverdueLane != "" && !validReportRelayLaneName(config.UpdateOverdueLane) {
-		return nil, errors.New("update overdue lane is invalid")
 	}
 	var burstPolicy BurstPolicy
 	var burstPolicyModTime time.Time
@@ -705,7 +660,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), expectedVersion: make(map[string]hubExpectedVersion), updateConfirmationTimeout: config.UpdateConfirmationTimeout, updateRepository: config.UpdateRepository, updateOverdueLane: config.UpdateOverdueLane, updateOverdueNotified: make(map[string]string), updateOverduePending: make(map[string]*hubUpdateOverdue), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2, closeCtx: closeCtx, closeCancel: closeCancel,
+		nodes: make(map[string]*hubNodeRecord), nodeQuota: make(map[string]*hubQuotaRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, quotaCache: make(map[string]hubQuotaCacheEntry), quotaWaiters: make(map[string]chan hubQuotaResult), quotaCacheTTL: hubQuotaCacheTTL(), spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2, closeCtx: closeCtx, closeCancel: closeCancel,
 	}, nil
 }
 
@@ -727,14 +682,8 @@ func validHubToken(token string) bool {
 	return token != "" && len(token) <= 512 && !strings.ContainsAny(token, "\x00\r\n\t ")
 }
 
-// Close bars new lane-stall runs and update-overdue flushes, waits out any
-// in flight (each still logs), then releases the optional --log-file sink.
-// The wait is bounded by cancellation: closeCtx is cancelled before either
-// wait, so a flush parked on a hung handoffkeep ends with the hub instead of
-// costing K x handoffkeepTimeout. It is safe for concurrent and repeated
-// calls: closeMu serializes the body so the file is closed exactly once and
-// every call after the first returns nil. The hub serves for the process
-// lifetime, so this is for the CLI shutdown path and tests that stop a hub.
+// Close bars new lane-stall runs, waits for in-flight runs, and releases the
+// optional log sink. closeMu makes concurrent and repeated calls safe.
 func (h *HubServer) Close() error {
 	h.closeMu.Lock()
 	defer h.closeMu.Unlock()
@@ -742,10 +691,10 @@ func (h *HubServer) Close() error {
 		return nil
 	}
 	h.closed = true
-	// The signal must precede the waits: updateOverdueFlushClosing is set
-	// under the mutex the flush itself holds for life, so an in-flight flush
-	// can never observe it — closeCtx is what reaches it, both between
-	// notices and inside the in-flight handoffkeep write.
+	// The signal must precede the waits: an in-flight inbox flush holds
+	// flushMu for life and can never observe a closing flag — closeCtx is
+	// what reaches it, both between batches and inside the in-flight
+	// handoffkeep write.
 	if h.closeCancel != nil {
 		h.closeCancel()
 	}
@@ -756,16 +705,6 @@ func (h *HubServer) Close() error {
 	h.laneStallClosing = true
 	h.laneStallMu.Unlock()
 	h.laneStallSweeps.Wait()
-	// The same shape for the overdue flush: the flag set under
-	// updateOverdueFlushMu bars every later launch between TryLock and Add,
-	// and the WaitGroup drains a flush already in flight before the log file
-	// can close under it. The cancellation above is what bounds that drain;
-	// the mutex alone would leave Close waiting K x handoffkeepTimeout on a
-	// hung sink.
-	h.updateOverdueFlushMu.Lock()
-	h.updateOverdueFlushClosing = true
-	h.updateOverdueFlushMu.Unlock()
-	h.updateOverdueFlushes.Wait()
 	if h.inbox != nil {
 		h.inbox.flushMu.Lock()
 		_ = h.inbox.store.db.Close()
@@ -822,7 +761,6 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
 	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
-	mux.HandleFunc("POST /v1/update", h.handleUpdatePublish)
 	mux.HandleFunc("GET /v1/quota/{machine}", h.handleQuotaGet)
 	mux.HandleFunc("POST /v1/quota/{machine}", h.handleQuotaRequest)
 	mux.HandleFunc("GET /v2/quota/bindings", h.handleQuotaV2BindingList)
@@ -1225,28 +1163,6 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 		if message.Type == "ping" {
 			_ = agent.writeJSON(hubOutbound{Type: "pong"})
 		}
-	case "update.busy":
-		// The node already had a self-update running and declined this one.
-		// Recording it keeps the published version's expectation pending until
-		// its own deadline rather than silently waiting on a restart that the
-		// node was never going to perform for this instruction.
-		if agent.transient || !h.touch(machineID, agent) {
-			h.countUnknownMessage()
-			return
-		}
-		h.mu.Lock()
-		h.recordUIEventLocked("update", "busy", machineID, h.now().UTC())
-		h.mu.Unlock()
-	case "update.rejected":
-		if agent.transient || !h.touch(machineID, agent) {
-			h.countUnknownMessage()
-			return
-		}
-		now := h.now().UTC()
-		h.mu.Lock()
-		h.recordUIEventLocked("update", "rejected", machineID, now)
-		h.lastNotes[machineID] = &HubLastNote{Text: "update rejected(smoke) " + message.Version, ReceivedAt: now}
-		h.mu.Unlock()
 	case "event":
 		if message.Kind == "relay.delivered" || message.Kind == "relay.unconfirmed" {
 			// A relay ack carries the machine's word about what its pane
@@ -1755,15 +1671,8 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 		if rawAccepting, exists := fields["accepting"]; exists && json.Unmarshal(rawAccepting, &message.Accepting) != nil {
 			return hubInbound{}, false
 		}
-	case "ping", "pong", "update.busy":
+	case "ping", "pong":
 		if !allowed("type") {
-			return hubInbound{}, false
-		}
-	case "update.rejected":
-		// The node's smoke run refused the candidate before touching its
-		// executable. The vocabulary is closed: one reason, one version.
-		var reason string
-		if !allowed("type", "reason", "version") || json.Unmarshal(fields["reason"], &reason) != nil || reason != "smoke" || json.Unmarshal(fields["version"], &message.Version) != nil || !hubVersionPattern.MatchString(message.Version) {
 			return hubInbound{}, false
 		}
 	case "event":
@@ -1869,10 +1778,6 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		state:      "connected", stateSince: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
 	}
 	h.placementCache = placementCache{}
-	if expected, waiting := h.expectedVersion[machineID]; waiting && version == expected.version {
-		delete(h.expectedVersion, machineID)
-		h.recordUIEventLocked("update", "succeeded", machineID, now)
-	}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
 	if h.burstPolicyPath != "" && machineID == h.burstPolicy.TargetMachine && accepting && !h.burstState.LastUp.IsZero() {
 		h.burstState.UpCompleted = true
@@ -2215,13 +2120,6 @@ func (h *HubServer) Sweep() {
 	var failovers []hubFailoverEvent
 	h.mu.Lock()
 	h.sweepBurstHoldsLocked(now)
-	for machineID, expected := range h.expectedVersion {
-		if !now.Before(expected.deadline) {
-			delete(h.expectedVersion, machineID)
-			h.recordUIEventLocked("update", "unconfirmed", machineID, now)
-			h.updateOverdueLocked(machineID, expected, now)
-		}
-	}
 	for _, record := range h.nodes {
 		if record.agent != nil && now.Sub(record.lastPing) >= h.staleAfter && record.state != "stale" {
 			record.state = "stale"
@@ -2238,7 +2136,6 @@ func (h *HubServer) Sweep() {
 		}
 	}
 	h.mu.Unlock()
-	h.startUpdateOverdueFlush()
 	h.sweepOrphanedJobs(now)
 	h.startLaneStallSweep(now)
 	for _, failover := range failovers {

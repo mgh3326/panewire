@@ -205,7 +205,9 @@ func TestQuietEscalationAndDigest(t *testing.T) {
 			if err != nil || len(batches) != tc.want {
 				t.Fatal(batches, err)
 			}
-			if tc.want > 0 && (!strings.Contains(batches[0].Text, "3 ") || !strings.Contains(batches[0].Text, "#3")) {
+			// The digest is one line — a count and the inbox pointer — so it
+			// always satisfies the lane.event text contract.
+			if tc.want > 0 && (!strings.Contains(batches[0].Text, "3 ") || strings.Contains(batches[0].Text, "\n") || !validLaneEventText(batches[0].Text)) {
 				t.Fatal(batches[0])
 			}
 		})
@@ -307,6 +309,8 @@ func TestQuietDigestHubHandoffAndRetry(t *testing.T) {
 	fake.mu.Lock()
 	fake.status = 201
 	fake.mu.Unlock()
+	// The failed pass opened a backoff window; the retry waits it out.
+	now = now.Add(inboxFlushBackoffBase)
 	h.flushInbox()
 	h.flushInbox()
 	if len(agent.relays) != 1 {
@@ -546,5 +550,252 @@ func TestQuietProducerAcknowledgementRetiresOutbox(t *testing.T) {
 				t.Fatal("no producer ACK")
 			}
 		})
+	}
+}
+
+// Every must-act signal the shipped policy knows still interrupts; a stray
+// informational word inside the same message can no longer steal it.
+func TestQuietMustActWholeWordPolicy(t *testing.T) {
+	p, err := loadDeliveryPolicy("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ name, kind, text string }{
+		{"BLOCKER", "lane.event", "[desk] BLOCKER | disk full"},
+		{"READY", "lane.event", "[job] READY | abc123 | report.md"},
+		{"ESC", "lane.event", "[desk] ESC | needs the operator"},
+		{"BOUNCE", "lane.event", "[checker] BOUNCE | missing test"},
+		{"URGENT", "lane.event", "URGENT: deploy is broken"},
+		{"needs_decision", "lane.event", "needs_decision: pick option A or B"},
+		{"must-act beats info substring", "lane.event", "ESC: info needed for deploy"},
+		{"must-act beats quota substring", "lane.event", "URGENT: quota nearly exhausted"},
+		{"decision request", "lane.event", "decision request: choose a plan"},
+		{"action required", "lane.event", "host alert: action required"},
+		{"needs a decision", "lane.event", "needs a decision on rollout"},
+		{"question", "lane.event", "Can you review this?"},
+		{"korean question", "lane.event", "이 방법으로 진행할까요？"},
+		{"escalate kind", "job.escalate", "pick a path"},
+		{"lost kind", "job.lost", "node gone"},
+		{"revoked kind", "job.revoked", "access revoked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := p.classify("lane-a", tc.kind, hubJobEventPayload{Text: tc.text}, false); got != "interrupt" {
+				t.Fatalf("must-act %q classified %s", tc.text, got)
+			}
+		})
+	}
+	// A strict inbox-default view isolates rule hits from the fallback:
+	// look-alikes must not trip the whole-word tags.
+	p.Default = "inbox"
+	for _, text := range []string{"READYING the fleet", "ESCAPE plan drafted", "BLOCKERED pipe cleared", "unready review", "escorted out", "bounced twice", "urgency noted"} {
+		if got := p.classify("lane-a", "lane.event", hubJobEventPayload{Text: text}, false); got != "inbox" {
+			t.Fatalf("look-alike %q matched a must-act rule (%s)", text, got)
+		}
+	}
+	for _, text := range []string{"READY | abc123 | done", "ESC | operator now", "BLOCKER | stopped"} {
+		if got := p.classify("lane-a", "lane.event", hubJobEventPayload{Text: text}, false); got != "interrupt" {
+			t.Fatalf("tag %q not delivered under strict default", text)
+		}
+	}
+	if _, err := parseDeliveryPolicy([]byte("default: interrupt\nrules: [{tags: ['has space '], class: inbox}]")); err == nil {
+		t.Fatal("tag with a non-word edge accepted")
+	}
+}
+
+// A failed flush pass must not spin: attempts happen once per growing backoff
+// window, and a contract-level rejection stops them entirely.
+func TestQuietDigestPersistenceBackoff(t *testing.T) {
+	fake, hk, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	now := time.Now()
+	policyPath := filepath.Join(t.TempDir(), "delivery.yaml")
+	raw := strings.Replace(string(defaultDeliveryPolicy), "digest_window: 0s", "digest_window: 2s", 1)
+	if err := os.WriteFile(policyPath, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, agent := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), policyPath, hk, &now)
+	for i := 0; i < 3; i++ {
+		h.relayLaneEvent(quietEvent(fmt.Sprint(i), "question?"), agent)
+	}
+	now = now.Add(3 * time.Second)
+	posts := func() int {
+		fake.mu.Lock()
+		defer fake.mu.Unlock()
+		n := 0
+		for _, c := range fake.calls {
+			if c.Method == http.MethodPost && c.Path == "/v1/relay/events" {
+				n++
+			}
+		}
+		return n
+	}
+	fake.mu.Lock()
+	fake.status = http.StatusServiceUnavailable
+	fake.mu.Unlock()
+	h.flushInbox()
+	if posts() != 1 || h.InboxFlushFailureCount() != 1 {
+		t.Fatalf("first failure posts=%d failures=%d", posts(), h.InboxFlushFailureCount())
+	}
+	// Inside the backoff window a tick makes no handoffkeep call at all.
+	for i := 0; i < 10; i++ {
+		h.flushInbox()
+	}
+	if posts() != 1 {
+		t.Fatalf("backoff window made %d posts", posts())
+	}
+	// Six simulated minutes of 100ms ticks stay bounded: attempts at +1s,
+	// +3s, +7s, +15s, +31s then one per capped 60s window — a dozen at most,
+	// not the per-second storm this loop used to be.
+	for i := 0; i < 3600; i++ {
+		now = now.Add(100 * time.Millisecond)
+		h.flushInbox()
+	}
+	if got := posts(); got > 12 {
+		t.Fatalf("six minutes of failures made %d persist attempts", got)
+	} else if got < 4 {
+		t.Fatalf("backoff swallowed legitimate retries: %d posts", got)
+	}
+	// Recovery resets the schedule: the next pass sends immediately.
+	fake.mu.Lock()
+	fake.status = http.StatusCreated
+	fake.mu.Unlock()
+	now = now.Add(inboxFlushBackoffMax)
+	h.flushInbox()
+	if len(agent.relays) != 1 || h.inbox.failures != 0 {
+		t.Fatalf("recovery relays=%d failures=%d", len(agent.relays), h.inbox.failures)
+	}
+}
+
+// A 400-class contract rejection disables digest persistence for the process:
+// the single loud decision replaces the retry storm, and the batch stays
+// durable for a fixed handoffkeep.
+func TestQuietDigestContractErrorDisables(t *testing.T) {
+	fake, hk, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	now := time.Now()
+	policyPath := filepath.Join(t.TempDir(), "delivery.yaml")
+	raw := strings.Replace(string(defaultDeliveryPolicy), "digest_window: 0s", "digest_window: 2s", 1)
+	if err := os.WriteFile(policyPath, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h, agent := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), policyPath, hk, &now)
+	for i := 0; i < 2; i++ {
+		h.relayLaneEvent(quietEvent(fmt.Sprint(i), "question?"), agent)
+	}
+	now = now.Add(3 * time.Second)
+	fake.mu.Lock()
+	fake.status = http.StatusBadRequest
+	fake.mu.Unlock()
+	h.flushInbox()
+	if !h.inboxDigestDisabled() {
+		t.Fatal("contract rejection did not disable digest persistence")
+	}
+	fake.mu.Lock()
+	fake.status = http.StatusCreated
+	fake.calls = nil
+	fake.mu.Unlock()
+	now = now.Add(time.Hour)
+	for i := 0; i < 5; i++ {
+		h.flushInbox()
+	}
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	if len(fake.calls) != 0 {
+		t.Fatalf("disabled flush still called handoffkeep %d times", len(fake.calls))
+	}
+	batches, err := h.inbox.store.pendingBatches()
+	if err != nil || len(batches) != 1 {
+		t.Fatalf("durable batch lost: %v %v", batches, err)
+	}
+}
+
+// The startup probe reads the contract instead of writing it: a pre-v7
+// handoffkeep answers the kind filter with a 4xx and the flush stands down
+// before it can loop. Anything inconclusive leaves the bounded retry path.
+func TestQuietInboxContractProbe(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		status       int
+		wantDisabled bool
+	}{
+		{"capable", 0, false},
+		{"schema gap", http.StatusBadRequest, true},
+		{"route missing", http.StatusNotFound, true},
+		{"outage", http.StatusServiceUnavailable, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake, hk, closeServer := newFakeHandoffkeep(t)
+			defer closeServer()
+			if tc.status != 0 {
+				fake.mu.Lock()
+				fake.getLaneEventStatus = tc.status
+				fake.mu.Unlock()
+			}
+			now := time.Now()
+			h, _ := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", hk, &now)
+			h.probeInboxRelayContract(context.Background())
+			if h.inboxDigestDisabled() != tc.wantDisabled {
+				t.Fatalf("persistDisabled=%v want %v", h.inboxDigestDisabled(), tc.wantDisabled)
+			}
+			h.flushInbox()
+			if tc.wantDisabled {
+				fake.mu.Lock()
+				defer fake.mu.Unlock()
+				for _, c := range fake.calls {
+					if c.Method == http.MethodPost {
+						t.Fatal("disabled flush persisted")
+					}
+				}
+			}
+		})
+	}
+	// runInbox probes once before its first tick.
+	fake, hk, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	fake.mu.Lock()
+	fake.getLaneEventStatus = http.StatusBadRequest
+	fake.mu.Unlock()
+	now := time.Now()
+	h, _ := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", hk, &now)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go h.runInbox(ctx)
+	deadline := time.Now().Add(5 * time.Second)
+	for !h.inboxDigestDisabled() && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if !h.inboxDigestDisabled() {
+		t.Fatal("runInbox did not probe the contract")
+	}
+}
+
+// PANEWIRE_DELIVERY_POLICY=off is the env-var kill switch equivalent to the
+// flag; an explicit --delivery-policy always wins over it.
+func TestQuietDeliveryPolicyEnvKillSwitch(t *testing.T) {
+	auth := filepath.Join(t.TempDir(), "auth.env")
+	if err := os.WriteFile(auth, []byte("HUB_TOKEN_operator=op\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct{ env, want string }{{"off", "interrupt"}, {"default", "inbox"}} {
+		t.Run(tc.env, func(t *testing.T) {
+			t.Setenv("PANEWIRE_DELIVERY_POLICY", tc.env)
+			h, _, code, err := newHubServerForCLI([]string{"--hub-auth", auth, "--inbox-store", filepath.Join(t.TempDir(), "inbox.sqlite3")}, nil)
+			if err != nil || code != ExitOK {
+				t.Fatal(code, err)
+			}
+			defer h.Close()
+			if got := h.inbox.policy.classify("lane-a", "lane.event", quietEvent("x", "FYI"), false); got != tc.want {
+				t.Fatal(got, tc.want)
+			}
+		})
+	}
+	t.Setenv("PANEWIRE_DELIVERY_POLICY", "off")
+	h, _, code, err := newHubServerForCLI([]string{"--hub-auth", auth, "--delivery-policy", "default", "--inbox-store", filepath.Join(t.TempDir(), "inbox.sqlite3")}, nil)
+	if err != nil || code != ExitOK {
+		t.Fatal(code, err)
+	}
+	defer h.Close()
+	if got := h.inbox.policy.classify("lane-a", "lane.event", quietEvent("x", "FYI"), false); got != "inbox" {
+		t.Fatal("explicit flag lost to env", got)
 	}
 }

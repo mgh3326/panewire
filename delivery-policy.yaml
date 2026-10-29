@@ -7,7 +7,11 @@ deadlines:
 # Off by default; e.g. 2s combines interrupts for each receiving lane.
 digest_window: 0s
 rules:
-  - match: '(?i)BLOCKER|decision[ _-]?(request|required|needed)|action[ _-]?(required|needed|now)|needs? (an? )?(action|decision)|결정.*(요청|필요)|차단'
+  # Whole-word, case-sensitive must-act tags: only the deliberate
+  # conventions interrupt. READYING and ESCAPE do not match.
+  - tags: [BLOCKER, READY, ESC, BOUNCE, URGENT, needs_decision]
+    class: interrupt
+  - match: '(?i)\bdecision[ _-]?(request|required|needed)\b|\baction[ _-]?(required|needed|now)\b|\bneeds? (an? )?(action|decision)\b|결정.*(요청|필요)|차단'
     class: interrupt
   - match: '[?？]|(?i)direct question|질문'
     class: interrupt
@@ -23,9 +27,11 @@ rules:
     class: inbox
   - kind: job.joined
     class: inbox
-  - match: '(?i)\bdone\s*\||\bFYI\b|\back\b|\backnowledged\b|install[ _-]?(done|complete)|installed|merged.*(please )?install|설치.*완료|확인했습니다'
+  # Informational signals are whole-word too, so a stray "info" inside a
+  # must-act message can no longer pull it into the inbox.
+  - match: '(?i)\bdone\s*\||\bFYI\b|\back\b|\backnowledged\b|\binstall[ _-]?(done|complete)\b|\binstalled\b|\bmerged\b.*\b(please[ _-])?install\b|설치.*완료|확인했습니다'
     class: inbox
-  - match: '(?i)info([ _-]alert)?|quota|replayed after hub restart|"kind"\s*:\s*"idle-wake"|알림'
+  - match: '(?i)\binfo([ _-]alert)?\b|\bquota\b|\breplayed after hub restart\b|"kind"\s*:\s*"idle-wake"|알림'
     class: inbox
 # Override any field per receiving lane. Rules fall through to global rules.
 lanes: {}

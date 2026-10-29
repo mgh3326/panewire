@@ -12,14 +12,9 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
-
-	"github.com/mgh3326/panewire/stage2/adapters/supabase"
-	"github.com/mgh3326/panewire/stage2/adapters/wrkgate"
-	"github.com/mgh3326/panewire/stage2/core"
 )
 
 type CLIConfig struct{ SocketPath string }
@@ -27,7 +22,7 @@ type CLIConfig struct{ SocketPath string }
 func RunCLI(args []string, cfg CLIConfig) int {
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Usage: panewire COMMAND [arguments]")
-		fmt.Fprintln(os.Stdout, "Commands: daemon, hub, hub-status, hub-emit, update, burst, place, prompt, deliveries, submit, outbox, jobs, lanes, lanes-audit, sessions, fleet-census, session-reap, relay, emit, inbox, job, wait, enroll-machine, smoke-supabase, version")
+		fmt.Fprintln(os.Stdout, "Commands: daemon, hub, hub-status, hub-emit, burst, place, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, inbox, job, wait, version")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, lanesUsage)
 		return ExitOK
@@ -35,20 +30,11 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if len(args) == 0 {
 		return ExitUsage
 	}
-	if args[0] == "enroll-machine" {
-		return runEnrollMachineCLI(args[1:], os.Stdout, os.Stderr, enrollDeps{})
-	}
-	if args[0] == "smoke-supabase" {
-		return runSmokeSupabaseCLI(args[1:], os.Stdout, os.Stderr, smokeDeps{})
-	}
 	if args[0] == "hub-status" {
 		return runHubStatusCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
 	if args[0] == "hub-emit" {
 		return runHubEmitCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
-	}
-	if args[0] == "update" {
-		return runUpdateCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
 	if args[0] == "burst" {
 		return runBurstCLI(args[1:], os.Stdout, os.Stderr)
@@ -62,12 +48,6 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if args[0] == "deliveries" {
 		return runDeliveriesCLI(args[1:], os.Stdout, os.Stderr)
 	}
-	if args[0] == "submit" {
-		return runSubmitCLI(args[1:])
-	}
-	if args[0] == "outbox" {
-		return runOutboxCLI(args[1:])
-	}
 	if args[0] == "jobs" {
 		return runJobsCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
@@ -76,9 +56,6 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if args[0] == "lanes-audit" {
 		return runLanesAuditCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
-	}
-	if args[0] == "sessions" {
-		return runSessionsCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
 	if args[0] == "fleet-census" {
 		return runFleetCensusCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
@@ -160,158 +137,6 @@ func RunCLI(args []string, cfg CLIConfig) int {
 		if cached, _ := result["cached"].(bool); cached {
 			fmt.Fprintln(os.Stderr, "cached delivery; no prompt reinjected")
 		}
-	}
-	return ExitOK
-}
-
-// runSubmitCLI only durably records a stage2 outbox row. Publishing remains
-// the explicit default-off daemon loop, so this command never opens a remote
-// connection or loads a credential file.
-func runSubmitCLI(args []string) int {
-	return runSubmitCLIWithWriters(args, os.Stdout, os.Stderr)
-}
-
-func runSubmitCLIWithWriters(args []string, stdout, stderr io.Writer) int {
-	fs := flag.NewFlagSet("panewire submit", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dbPath := fs.String("db", "", "stage2 metadata SQLite path")
-	file := fs.String("file", "", "canonical source file")
-	from := fs.String("from-machine", "", "stable source machine identity")
-	destinationMachine := fs.String("destination-machine", "", "stable destination machine identity (legacy long form)")
-	to := fs.String("to", "", "stable destination machine identity")
-	namespace := fs.String("namespace", "inbox", "approved destination inbox namespace")
-	legacyLogicalPath := fs.String("logical-path", "", "normalized namespace-relative path (legacy long form)")
-	logicalPath := fs.String("path", "", "normalized namespace-relative path")
-	classification := fs.String("classification", string(core.ClassificationPersonalNonCompany), "public or personal_non_company")
-	kind := fs.String("kind", string(core.MessageKindInbox), "inbox.delivery or workflow.completion")
-	correlationID := fs.String("correlation-id", "", "original message ID for a workflow completion")
-	causationID := fs.String("causation-id", "", "terminal outcome for a workflow completion")
-	expiresAt := fs.String("expires-at", "", "RFC3339 UTC expiry (default 72h)")
-	policy := fs.String("policy-version", "stage2-allowlist-v1", "classification policy version")
-	requestWrk := fs.Bool("request-wrk", false, "request only the receiving wrk admission gate")
-	wrkLabel := fs.String("wrk-label", "", "receiving spawn-policy label (required with --request-wrk)")
-	if err := fs.Parse(args); err != nil {
-		return ExitUsage
-	}
-	destination, err := singleFlagValue(*destinationMachine, *to, "destination machine")
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return ExitConditionInvalid
-	}
-	logical, err := singleFlagValue(*legacyLogicalPath, *logicalPath, "logical path")
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return ExitConditionInvalid
-	}
-	if *dbPath == "" || *file == "" || *from == "" || destination == "" || *namespace == "" || logical == "" {
-		return ExitUsage
-	}
-	if !machineIDPattern.MatchString(*from) || !machineIDPattern.MatchString(destination) {
-		fmt.Fprintln(stderr, "submit rejected: machine IDs must be stable lowercase identifiers")
-		return ExitConditionInvalid
-	}
-	if *classification != string(core.ClassificationPublic) && *classification != string(core.ClassificationPersonalNonCompany) {
-		fmt.Fprintln(stderr, "submit rejected: classification must be public or personal_non_company")
-		return ExitConditionInvalid
-	}
-	messageKind := core.MessageKind(*kind)
-	if messageKind != core.MessageKindInbox && messageKind != core.MessageKindCompletion {
-		fmt.Fprintln(stderr, "submit rejected: unsupported message kind")
-		return ExitConditionInvalid
-	}
-	if messageKind == core.MessageKindCompletion && (*correlationID == "" || *causationID == "") {
-		fmt.Fprintln(stderr, "submit rejected: workflow completion requires correlation-id and causation-id")
-		return ExitConditionInvalid
-	}
-	if *requestWrk && *wrkLabel == "" {
-		fmt.Fprintln(stderr, "submit rejected: --request-wrk requires --wrk-label")
-		return ExitConditionInvalid
-	}
-	if !*requestWrk && *wrkLabel != "" {
-		fmt.Fprintln(stderr, "submit rejected: --wrk-label requires --request-wrk")
-		return ExitConditionInvalid
-	}
-	var expiry time.Time
-	if *expiresAt != "" {
-		expiry, err = time.Parse(time.RFC3339, *expiresAt)
-		if err != nil {
-			return ExitConditionInvalid
-		}
-	}
-	store, err := core.OpenMetadataStore(*dbPath)
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return ExitInternal
-	}
-	defer store.Close()
-	sender := &core.Sender{Store: store}
-	record, err := sender.Submit(context.Background(), core.Submission{
-		SourcePath:     *file,
-		Source:         core.Identity{MachineID: *from},
-		Destination:    core.Destination{MachineID: destination, InboxNamespace: *namespace, LogicalPath: logical},
-		Classification: core.Classification(*classification),
-		PolicyVersion:  *policy,
-		MessageKind:    messageKind,
-		CorrelationID:  *correlationID,
-		CausationID:    *causationID,
-		ExpiresAt:      expiry,
-		Spawn:          core.Spawn{Requested: *requestWrk, Label: *wrkLabel},
-	})
-	if err != nil {
-		fmt.Fprintln(stderr, err)
-		return ExitConditionInvalid
-	}
-	fmt.Fprintln(stdout, record.MessageID)
-	return ExitOK
-}
-
-func singleFlagValue(legacy, concise, label string) (string, error) {
-	if legacy != "" && concise != "" && legacy != concise {
-		return "", fmt.Errorf("submit rejected: conflicting %s flags", label)
-	}
-	if concise != "" {
-		return concise, nil
-	}
-	return legacy, nil
-}
-
-func runOutboxCLI(args []string) int {
-	return runOutboxCLIWithWriters(args, os.Stdout, os.Stderr)
-}
-
-func runOutboxCLIWithWriters(args []string, stdout, stderr io.Writer) int {
-	if len(args) == 0 || args[0] != "list" {
-		return ExitUsage
-	}
-	fs := flag.NewFlagSet("panewire outbox list", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	dbPath := fs.String("db", "", "stage2 metadata SQLite path")
-	state := fs.String("state", "", "optional SUBMITTED, PUBLISHED, COMPLETED, or EXPIRED filter")
-	if err := fs.Parse(args[1:]); err != nil {
-		return ExitUsage
-	}
-	if *dbPath == "" {
-		return ExitUsage
-	}
-	filter := core.OutboxState(*state)
-	if filter != "" && filter != core.OutboxSubmitted && filter != core.OutboxPublished && filter != core.OutboxCompleted && filter != core.OutboxExpired {
-		fmt.Fprintln(stderr, "outbox rejected: unknown state filter")
-		return ExitConditionInvalid
-	}
-	store, err := core.OpenMetadataStore(*dbPath)
-	if err != nil {
-		fmt.Fprintln(stderr, "outbox unavailable")
-		return ExitInternal
-	}
-	defer store.Close()
-	records, err := store.ListOutbox(context.Background(), filter)
-	if err != nil {
-		fmt.Fprintln(stderr, "outbox unavailable")
-		return ExitInternal
-	}
-	fmt.Fprintln(stdout, "MESSAGE_ID\tDESTINATION\tLOGICAL_PATH\tSTATE\tATTEMPTS\tUPDATED_AT")
-	for _, record := range records {
-		fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%d\t%s\n", record.MessageID, record.DestinationMachineID, record.LogicalPath, record.State, record.Attempts, record.UpdatedAt.UTC().Format(time.RFC3339))
 	}
 	return ExitOK
 }
@@ -402,7 +227,6 @@ type daemonCLIDeps struct {
 	SchemaCommand         []string
 	Logger                *slog.Logger
 	Version               string
-	ExecutablePath        string // fixture seam; production uses os.Executable.
 }
 
 func runDaemonCLI(args []string) int {
@@ -410,14 +234,6 @@ func runDaemonCLI(args []string) int {
 }
 
 func runDaemonCLIWithDeps(args []string, deps daemonCLIDeps) int {
-	// Self-update rollback is judged before anything else a new binary could
-	// die on (flags, schema guard, sockets): see hubUpdateStartup.
-	rolledBack, endProbationWindow := hubUpdateStartup(deps.ExecutablePath, deps.Version, func(message string) { fmt.Fprintln(os.Stderr, message) })
-	if rolledBack {
-		return ExitInternal
-	}
-	// Exiting inside the probation window keeps this start counted.
-	defer endProbationWindow()
 	d, code, err := newDaemonForCLI(args, deps)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "daemon configuration rejected:", err)
@@ -448,13 +264,6 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	db := fs.String("db", "", "SQLite path")
 	inbox := fs.String("inbox-root", "", "inbox root")
 	storeBody := fs.Bool("store-prompt-body", false, "opt in to storing prompt bodies")
-	stage2ClientEnv := fs.String("stage2-client-env", "", "explicit mode-0600 enrolled client env")
-	stage2InboxRoot := fs.String("stage2-inbox-root", "", "stage2 logical-path namespace root")
-	stage2DB := fs.String("stage2-db", "", "stage2 metadata SQLite path (defaults to --db or a sibling of stage2 inbox)")
-	stage2Namespace := fs.String("stage2-namespace", "inbox", "approved stage2 inbox namespace name")
-	stage2Poll := fs.Duration("stage2-poll", 30*time.Second, "stage2 publish/claim poll interval")
-	stage2WrkGate := fs.Bool("stage2-wrk-gate", false, "attach the wrk admission gate for spawn requests")
-	stage2SpawnPolicy := fs.String("stage2-spawn-policy", "", "receiving-machine JSON policy for wrk spawn context")
 	var hubURLs hubURLValues
 	fs.Var(&hubURLs, "hub-url", "repeatable optional WSS hub base URL (first is preferred)")
 	hubTokenEnv := fs.String("hub-token-env", "", "optional mode-0600 HUB_MACHINE_ID/HUB_TOKEN env file")
@@ -533,31 +342,6 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 		hubClient = configuredHub
 		cfg.Hub = HubDaemonConfig{Enabled: true, Client: hubClient}
 	}
-	stage2Requested := stage2FlagsProvided(args)
-	if stage2Requested {
-		if *stage2ClientEnv == "" || *stage2InboxRoot == "" {
-			return nil, ExitConditionInvalid, fmt.Errorf("stage2 requires both --stage2-client-env and --stage2-inbox-root")
-		}
-		if *stage2Poll <= 0 {
-			return nil, ExitConditionInvalid, fmt.Errorf("stage2 poll interval must be positive")
-		}
-		if *stage2SpawnPolicy != "" && !*stage2WrkGate {
-			return nil, ExitConditionInvalid, fmt.Errorf("--stage2-spawn-policy requires --stage2-wrk-gate")
-		}
-		stage2, resolvedInbox, err := buildStage2DaemonConfig(*stage2ClientEnv, *stage2InboxRoot, *stage2DB, *db, *stage2Namespace, *stage2Poll, *stage2WrkGate, *stage2SpawnPolicy, deps)
-		if err != nil {
-			return nil, ExitConditionInvalid, err
-		}
-		if *inbox != "" {
-			legacyInbox, err := filepath.Abs(*inbox)
-			if err != nil || legacyInbox != resolvedInbox {
-				_ = stage2.Close()
-				return nil, ExitConditionInvalid, fmt.Errorf("--inbox-root must match --stage2-inbox-root when stage2 is enabled")
-			}
-		}
-		cfg.InboxRoot = resolvedInbox
-		cfg.Stage2 = stage2
-	}
 	if hubClient != nil && hubClient.jobsInboxRoot == "" {
 		// Reuse the daemon's already-authorized local inbox when available; the
 		// explicit hub flag remains useful for a dedicated jobs tree.
@@ -580,20 +364,6 @@ func (values *hubURLValues) Set(raw string) error {
 	return nil
 }
 
-func stage2FlagsProvided(args []string) bool {
-	for _, name := range []string{
-		"stage2-client-env", "stage2-inbox-root", "stage2-db", "stage2-namespace", "stage2-poll", "stage2-wrk-gate", "stage2-spawn-policy",
-	} {
-		flagName := "--" + name
-		for _, arg := range args {
-			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {
-				return true
-			}
-		}
-	}
-	return false
-}
-
 func hubFlagsProvided(args []string) bool {
 	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "checks-config"} {
 		flagName := "--" + name
@@ -606,88 +376,6 @@ func hubFlagsProvided(args []string) bool {
 	return false
 }
 
-func loadStage2ClientEnv(path string) (clientCredentialEnv, error) {
-	values, err := loadMode0600Env(path)
-	if err != nil {
-		return clientCredentialEnv{}, fmt.Errorf("stage2 client env must be a regular mode-0600 file")
-	}
-	credential := clientCredentialEnv{
-		URL:            values["PANEWIRE_SUPABASE_URL"],
-		MachineID:      values["PANEWIRE_MACHINE_ID"],
-		AccessToken:    values["PANEWIRE_SUPABASE_ACCESS_TOKEN"],
-		RefreshToken:   values["PANEWIRE_SUPABASE_REFRESH_TOKEN"],
-		PublishableKey: values["PANEWIRE_SUPABASE_PUBLISHABLE_KEY"],
-	}
-	if credential.URL == "" || credential.AccessToken == "" || credential.RefreshToken == "" || credential.PublishableKey == "" || !machineIDPattern.MatchString(credential.MachineID) {
-		return clientCredentialEnv{}, fmt.Errorf("stage2 client env is missing required enrolled values")
-	}
-	return credential, nil
-}
-
-func buildStage2DaemonConfig(clientEnvPath, inboxRoot, explicitMetadataDB, stage1DB, namespace string, poll time.Duration, wrkGateEnabled bool, spawnPolicyPath string, deps daemonCLIDeps) (Stage2Config, string, error) {
-	credential, err := loadStage2ClientEnv(clientEnvPath)
-	if err != nil {
-		return Stage2Config{}, "", err
-	}
-	if namespace == "" || strings.ContainsAny(namespace, "/\\\x00") {
-		return Stage2Config{}, "", fmt.Errorf("stage2 namespace is invalid")
-	}
-	resolvedInbox, err := filepath.Abs(inboxRoot)
-	if err != nil {
-		return Stage2Config{}, "", fmt.Errorf("resolve stage2 inbox root")
-	}
-	metadataDB := explicitMetadataDB
-	if metadataDB == "" {
-		metadataDB = stage1DB
-	}
-	if metadataDB == "" {
-		metadataDB = filepath.Join(filepath.Dir(resolvedInbox), ".panewire-stage2.sqlite3")
-	}
-	metadata, err := core.OpenMetadataStore(metadataDB)
-	if err != nil {
-		return Stage2Config{}, "", fmt.Errorf("open stage2 metadata store")
-	}
-	closeMetadata := func() error { return metadata.Close() }
-	adapter, err := supabase.New(supabase.Config{
-		BaseURL:               credential.URL,
-		AccessToken:           credential.AccessToken,
-		RefreshToken:          credential.RefreshToken,
-		APIKey:                credential.PublishableKey,
-		ClientEnvPath:         clientEnvPath,
-		Logger:                deps.Logger,
-		HTTPClient:            deps.HTTPClient,
-		AllowInsecureForTests: deps.AllowInsecureForTests,
-	})
-	if err != nil {
-		_ = closeMetadata()
-		return Stage2Config{}, "", fmt.Errorf("configure stage2 Supabase adapter")
-	}
-	var gate core.Gate
-	if wrkGateEnabled {
-		gate = wrkgate.New(wrkgate.Config{SpawnPolicyPath: spawnPolicyPath})
-	}
-	stagingRoot := filepath.Join(filepath.Dir(resolvedInbox), "."+filepath.Base(resolvedInbox)+"-stage2-staging")
-	receiver, err := core.NewReceiver(core.ReceiverConfig{
-		MachineID:   credential.MachineID,
-		Namespaces:  map[string]string{namespace: resolvedInbox},
-		InboxRoot:   resolvedInbox,
-		StagingRoot: stagingRoot,
-		Store:       metadata,
-		Transport:   adapter,
-		Gate:        gate,
-	})
-	if err != nil {
-		_ = closeMetadata()
-		return Stage2Config{}, "", fmt.Errorf("configure stage2 receiver")
-	}
-	return Stage2Config{
-		Enabled:      true,
-		Publisher:    &core.Sender{Store: metadata, Transport: adapter},
-		Receiver:     receiver,
-		PollInterval: poll,
-		Close:        closeMetadata,
-	}, resolvedInbox, nil
-}
 func joinArgs(a []string) string { return strings.Join(a, " ") }
 
 var _ = joinArgs

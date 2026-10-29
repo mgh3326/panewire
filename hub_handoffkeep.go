@@ -230,6 +230,23 @@ func (c *handoffkeepRelayClient) markDelivered(ctx context.Context, id int64, ma
 	return nil
 }
 
+// checkLaneEventContract probes whether the server accepts lane.event relay
+// traffic — handoffkeep schema v7 — without writing a durable row. Servers old
+// enough to predate lane.event reject the kind filter itself with a 4xx; a
+// server that accepts it answers 200. The hub reads the status only; the page
+// body is irrelevant at limit=1.
+func (c *handoffkeepRelayClient) checkLaneEventContract(ctx context.Context) (int, error) {
+	status, _, err := c.do(ctx, http.MethodGet, c.endpoint("/v1/relay/events")+"?kind=lane.event&limit=1", nil)
+	return status, err
+}
+
+// handoffkeepContractError reports whether a status is a permanent rejection
+// of the lane.event relay contract — a schema gap or an invalid event shape —
+// rather than a transient outage or an authentication problem worth retrying.
+func handoffkeepContractError(status int) bool {
+	return status == http.StatusBadRequest || status == http.StatusNotFound
+}
+
 // listUndelivered reads one durable cursor page. kind is optional for legacy
 // startup replay; lane.event registration replay always supplies it so older
 // job rows cannot hide a directly addressed notification behind the page cap.

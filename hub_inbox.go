@@ -16,8 +16,29 @@ import (
 type hubInbox struct {
 	store   *laneInboxStore
 	policy  *deliveryPolicy
+	// flushMu serializes one flush pass and owns every field below it;
+	// Close takes it to wait out an in-flight pass before closing the store.
 	flushMu sync.Mutex
+	// failures counts consecutive failed flush passes and nextAttempt holds
+	// the backoff gate they set, so a broken sink costs one attempt per
+	// growing window instead of one per tick. persistDisabled latches a
+	// contract-level rejection (a 400/404 from handoffkeep): digest
+	// delivery cannot succeed again this process, so the flush stops
+	// entirely — the items themselves stay durable in the store.
+	failures        int
+	nextAttempt     time.Time
+	persistDisabled bool
+	// flushFailures counts failed flush passes for monitoring and tests.
+	flushFailures uint64
 }
+
+const (
+	// inboxFlushBackoffBase and Max bound the digest flush's retry rhythm:
+	// 1s, 2s, 4s … doubling to a 60s cap. At the cap a permanently broken
+	// sink costs one attempt per minute, not several per second.
+	inboxFlushBackoffBase = time.Second
+	inboxFlushBackoffMax  = time.Minute
+)
 
 func defaultHubInboxPath() string {
 	root, err := os.UserConfigDir()
@@ -115,6 +136,7 @@ func (h *HubServer) runInbox(ctx context.Context) {
 	if h.inbox == nil {
 		return
 	}
+	h.probeInboxRelayContract(ctx)
 	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -129,21 +151,86 @@ func (h *HubServer) runInbox(ctx context.Context) {
 	}
 }
 
+// probeInboxRelayContract checks once, before the first flush, whether the
+// configured handoffkeep can serve lane.event relay traffic (its schema v7
+// contract). A contract-level rejection latches digest delivery off for this
+// process with a single loud line: the hub then delivers normally and the
+// stored items wait for a fixed handoffkeep plus a restart. A transient
+// failure leaves the flush to discover capability on its own bounded
+// schedule, so a handoffkeep that is merely down at boot is not condemned.
+func (h *HubServer) probeInboxRelayContract(ctx context.Context) {
+	if h.handoffkeep == nil {
+		return
+	}
+	status, err := h.handoffkeep.checkLaneEventContract(ctx)
+	if err != nil || !handoffkeepContractError(status) {
+		return
+	}
+	h.inbox.flushMu.Lock()
+	h.inbox.persistDisabled = true
+	h.inbox.flushMu.Unlock()
+	h.logger.Error("inbox digest delivery disabled: handoffkeep lacks the lane.event relay contract (schema v7); upgrade handoffkeep and restart the hub to enable digests", "status", status)
+}
+
+// noteInboxFlushResult applies the bounded retry schedule at the end of a
+// flush pass: the caller holds flushMu. A clean pass reopens the gate at
+// once; a failed one logs once, doubles the delay to the cap, and sets the
+// earliest time another pass may start.
+func (h *HubServer) noteInboxFlushResult(failed bool) {
+	if !failed {
+		h.inbox.failures = 0
+		h.inbox.nextAttempt = time.Time{}
+		return
+	}
+	h.inbox.flushFailures++
+	h.inbox.failures++
+	delay := inboxFlushBackoffBase << min(h.inbox.failures-1, 6)
+	if delay > inboxFlushBackoffMax {
+		delay = inboxFlushBackoffMax
+	}
+	h.inbox.nextAttempt = h.now().Add(delay)
+}
+
+// InboxFlushFailureCount exists for local monitoring and tests.
+func (h *HubServer) InboxFlushFailureCount() uint64 {
+	if h.inbox == nil {
+		return 0
+	}
+	h.inbox.flushMu.Lock()
+	defer h.inbox.flushMu.Unlock()
+	return h.inbox.flushFailures
+}
+
+// inboxDigestDisabled reports whether a contract rejection has latched digest
+// delivery off for this process.
+func (h *HubServer) inboxDigestDisabled() bool {
+	if h.inbox == nil {
+		return false
+	}
+	h.inbox.flushMu.Lock()
+	defer h.inbox.flushMu.Unlock()
+	return h.inbox.persistDisabled
+}
+
 func (h *HubServer) flushInbox() {
 	if h.inbox == nil || !h.inbox.flushMu.TryLock() {
 		return
 	}
 	defer h.inbox.flushMu.Unlock()
-	if h.closeCtx.Err() != nil {
+	if h.inbox.persistDisabled || h.closeCtx.Err() != nil || h.now().Before(h.inbox.nextAttempt) {
 		return
 	}
+	failed := false
+	defer func() { h.noteInboxFlushResult(failed) }()
 	if err := h.inbox.store.makeBatches(h.now().UTC()); err != nil {
 		h.logger.Error("inbox batching failed")
+		failed = true
 		return
 	}
 	batches, err := h.inbox.store.pendingBatches()
 	if err != nil {
 		h.logger.Error("inbox batch listing failed")
+		failed = true
 		return
 	}
 	for _, b := range batches {
@@ -158,7 +245,20 @@ func (h *HubServer) flushInbox() {
 			if _, err := h.inbox.store.db.Exec(`UPDATE lane_inbox_batches SET sent=1 WHERE id=?`, b.ID); err != nil {
 				h.logger.Error("inbox batch handoff recording failed")
 			}
+			continue
 		}
+		if !result.PersistFailed {
+			continue
+		}
+		failed = true
+		if handoffkeepContractError(result.PersistStatus) {
+			h.inbox.persistDisabled = true
+			h.logger.Error("inbox digest delivery disabled: handoffkeep rejected the lane.event relay contract (schema v7); upgrade handoffkeep and restart the hub to enable digests", "status", result.PersistStatus)
+		}
+		// One failed persistence attempt ends the pass: whatever made this
+		// batch fail applies to the rest, so the pass — and its one error —
+		// happens at most once per backoff window.
+		return
 	}
 }
 

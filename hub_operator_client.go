@@ -43,7 +43,6 @@ var hubOperatorAPIPaths = map[string]bool{
 	"/v1/burst/request":   true,
 	"/v1/burst/release":   true,
 	"/v1/burst/holds":     true,
-	"/v1/update":          true,
 }
 
 func validHubOperatorAPIPath(path string) bool {

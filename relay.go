@@ -239,6 +239,10 @@ type relayLaneEventResult struct {
 	Machine         string
 	Duplicate       bool
 	PersistFailed   bool
+	// PersistStatus is handoffkeep's HTTP status on a PersistFailed durable
+	// write, so callers can tell a contract rejection (4xx) from a transient
+	// outage. Zero covers transport failures and a nil handoffkeep.
+	PersistStatus   int
 	RejectedTooLong bool
 	// AlreadyDelivered separates "the durable row exists and was delivered
 	// before" from "the durable row exists and is still owed to a lane": the
@@ -255,12 +259,10 @@ func (h *HubServer) relayLaneEvent(event hubJobEventPayload, sender *hubAgent) r
 	return h.relayLaneEventContext(context.Background(), event, sender)
 }
 
-// relayLaneEventContext is relayLaneEvent with a caller context governing its
-// handoffkeep writes. The update-overdue flush is the only caller: it passes
-// the close context so Close cancels a sink write stuck on a hung
-// handoffkeep. Every other caller comes through relayLaneEvent above and
-// keeps the unchanged context.Background() behaviour — hub shutdown never
-// cancels a lane-event relay it does not own.
+// relayLaneEventContext governs the durable writes with the caller context.
+// Ordinary relays use context.Background so hub shutdown leaves delivery
+// intact; the inbox digest flush passes the close context so Close cancels a
+// sink write stuck on a hung handoffkeep.
 func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEventPayload, sender *hubAgent) relayLaneEventResult {
 	ingress := sender == nil
 	if event.OwnerLane == "" || event.EventID == "" || event.Text == "" {
@@ -334,13 +336,15 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 	if !persisted {
 		if ctx.Err() == nil {
 			// A write abandoned because Close cancelled the caller's context
-			// is not a schema failure; the honest signal stays in the Warn
-			// inside persistRelayEventRecord.
-			h.logger.Error("lane.event persistence failed; handoffkeep schema v7 must be deployed before this hub", "lane", event.OwnerLane, "producer_event_id", event.EventID, "status", status)
+			// is not a contract failure; the honest signal stays in the Warn
+			// inside persistRelayEventRecord. A 4xx means handoffkeep cannot
+			// accept the lane.event contract at all — e.g. a schema older
+			// than v7 — or the event itself violates it.
+			h.logger.Error("lane.event persistence failed; verify handoffkeep schema v7 and the lane.event text contract", "lane", event.OwnerLane, "producer_event_id", event.EventID, "status", status)
 		}
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnpersisted("lane.event", event)
-		return relayLaneEventResult{PersistFailed: true}
+		return relayLaneEventResult{PersistFailed: true, PersistStatus: status}
 	}
 	// #725: the durable text now names this identity for the rest of the
 	// process, so every future resend can be compared against it — including
@@ -869,10 +873,9 @@ func (h *HubServer) persistRelayEvent(kind string, event hubJobEventPayload, rou
 
 // persistRelayEventRecord returns handoffkeep's own row and reply status
 // alongside the id, because the id alone cannot tell a first write from a row
-// the parent pane already received. The ctx belongs to the caller: every
-// ordinary relay passes context.Background and is untouched by hub Close;
-// only the update-overdue flush passes the close context it is required to
-// answer.
+// the parent pane already received. The ctx belongs to the caller: ordinary
+// relays pass context.Background and are untouched by hub Close; the inbox
+// digest flush passes the close context it is required to answer.
 func (h *HubServer) persistRelayEventRecord(ctx context.Context, kind string, event hubJobEventPayload, route reportRelayRoute) (handoffkeepRelayEvent, int, bool) {
 	if h.handoffkeep == nil {
 		return handoffkeepRelayEvent{}, 0, true

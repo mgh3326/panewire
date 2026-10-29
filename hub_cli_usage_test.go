@@ -129,10 +129,10 @@ func TestOtherHubCLIUsageErrorsExplainSyntax(t *testing.T) {
 		{"jobs missing command", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runJobsCLI(a, o, e, d) }, nil, "panewire jobs jobs"},
 		{"jobs unknown flag", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runJobsCLI(a, o, e, d) }, []string{"jobs", "--wrong"}, "panewire jobs jobs"},
 		{"jobs required flags", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runJobsCLI(a, o, e, d) }, []string{"jobs"}, "panewire jobs jobs"},
-		{"sessions missing command", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runSessionsCLI(a, o, e, d) }, nil, "panewire sessions find"},
-		{"sessions missing label", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runSessionsCLI(a, o, e, d) }, []string{"find"}, "panewire sessions find"},
-		{"sessions invalid machine", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runSessionsCLI(a, o, e, d) }, []string{"find", "label", "--hub-url", "https://hub.invalid", "--hub-token-env", "/tmp/token", "--machine", "BAD!"}, "panewire sessions find"},
-		{"sessions missing value before flag", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runSessionsCLI(a, o, e, d) }, []string{"find", "label", "--hub-url", "--hub-token-env", "/tmp/token"}, "panewire sessions find"},
+		{"sessions missing command", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusFindCLI(a, o, e, d) }, nil, "panewire fleet-census find"},
+		{"sessions missing label", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusFindCLI(a, o, e, d) }, []string{"find"}, "panewire fleet-census find"},
+		{"sessions invalid machine", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusFindCLI(a, o, e, d) }, []string{"find", "label", "--hub-url", "https://hub.invalid", "--hub-token-env", "/tmp/token", "--machine", "BAD!"}, "panewire fleet-census find"},
+		{"sessions missing value before flag", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusFindCLI(a, o, e, d) }, []string{"find", "label", "--hub-url", "--hub-token-env", "/tmp/token"}, "panewire fleet-census find"},
 		{"fleet unknown flag", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusCLI(a, o, e, d) }, []string{"--wrong"}, "panewire fleet-census"},
 		{"fleet missing value", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusCLI(a, o, e, d) }, []string{"--grace"}, "panewire fleet-census"},
 		{"fleet missing value before flag", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusCLI(a, o, e, d) }, []string{"--grace", "--json"}, "panewire fleet-census"},
@@ -162,7 +162,7 @@ func TestHubCLIMissingValueBeforeFlagDiagnostic(t *testing.T) {
 		run  func([]string, *bytes.Buffer, *bytes.Buffer, hubCLIDeps) int
 		args []string
 	}{
-		{"sessions", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runSessionsCLI(a, o, e, d) }, []string{"find", "label", "--hub-url", "--hub-token-env", "/tmp/token"}},
+		{"sessions", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusFindCLI(a, o, e, d) }, []string{"find", "label", "--hub-url", "--hub-token-env", "/tmp/token"}},
 		{"fleet-census", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runFleetCensusCLI(a, o, e, d) }, []string{"--grace", "--json"}},
 		{"session-reap", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runSessionReapCLI(a, o, e, d) }, []string{"--grace", "--json"}},
 		{"lanes-audit", func(a []string, o, e *bytes.Buffer, d hubCLIDeps) int { return runLanesAuditCLI(a, o, e, d) }, []string{"--hub-url", "--hub-token-env", "/tmp/token"}},

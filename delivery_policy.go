@@ -16,12 +16,19 @@ import (
 //go:embed delivery-policy.yaml
 var defaultDeliveryPolicy []byte
 
+// deliveryTagShape keeps a tag's edges on word characters so the compiled
+// \b…\b boundary means whole-word; interior punctuation like "needs_decision"
+// stays legal.
+var deliveryTagShape = regexp.MustCompile(`^[0-9A-Za-z_](?:.*[0-9A-Za-z_])?$`)
+
 type deliveryRule struct {
-	Match  string `yaml:"match"`
-	Kind   string `yaml:"kind"`
-	Replay bool   `yaml:"replay"`
-	Class  string `yaml:"class"`
+	Match  string   `yaml:"match"`
+	Tags   []string `yaml:"tags"`
+	Kind   string   `yaml:"kind"`
+	Replay bool     `yaml:"replay"`
+	Class  string   `yaml:"class"`
 	re     *regexp.Regexp
+	tags   []*regexp.Regexp
 }
 
 type deliveryLanePolicy struct {
@@ -92,7 +99,7 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 		}
 		for i := range l.Rules {
 			r := &l.Rules[i]
-			if r.Class == "" || !validDeliveryClass(r.Class) || (r.Kind == "" && r.Match == "" && !r.Replay) {
+			if r.Class == "" || !validDeliveryClass(r.Class) || (r.Kind == "" && r.Match == "" && len(r.Tags) == 0 && !r.Replay) {
 				return fmt.Errorf("invalid delivery rule")
 			}
 			if r.Kind != "" && !emitRelayKinds[r.Kind] {
@@ -104,6 +111,20 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 				if err != nil {
 					return err
 				}
+			}
+			for _, tag := range r.Tags {
+				// Tags are whole-word, case-sensitive literals: READY never
+				// matches READYING and ESC never matches ESCAPE, so the
+				// must-act vocabulary cannot be set off by look-alikes.
+				// Word-char edges are what \b needs to mean that.
+				if !deliveryTagShape.MatchString(tag) {
+					return fmt.Errorf("invalid delivery tag")
+				}
+				re, err := regexp.Compile(`\b` + regexp.QuoteMeta(tag) + `\b`)
+				if err != nil {
+					return err
+				}
+				r.tags = append(r.tags, re)
 			}
 		}
 		return nil
@@ -142,6 +163,16 @@ func (p *deliveryPolicy) classify(lane, kind string, e hubJobEventPayload, repla
 				continue
 			}
 			if r.re != nil && !r.re.MatchString(text) {
+				continue
+			}
+			tagged := len(r.tags) == 0
+			for _, tag := range r.tags {
+				if tag.MatchString(text) {
+					tagged = true
+					break
+				}
+			}
+			if !tagged {
 				continue
 			}
 			return r.Class

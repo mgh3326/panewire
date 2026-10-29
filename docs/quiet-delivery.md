@@ -30,7 +30,8 @@ declarative instructions. Escalation, joined and revoked job events use the
 
 | Signal | Default class |
 | --- | --- |
-| BLOCKER, decision request, action required/needed/now | interrupt |
+| BLOCKER, READY, ESC, BOUNCE, URGENT, needs_decision tags | interrupt |
+| decision request/required/needed, action required/needed/now | interrupt |
 | Direct question (`?`, `？`, question/질문) | interrupt |
 | job.escalate, job.lost, job.revoked | interrupt |
 | Replay without an already saved decision | inbox |
@@ -40,13 +41,26 @@ declarative instructions. Escalation, joined and revoked job events use the
 | Info alert, quota notice, idle-wake | inbox |
 | Unmatched message | interrupt |
 
+Must-act vocabulary uses the `tags:` rule form: whole-word, case-sensitive
+literals compiled as `\bTAG\b`. `READY` never matches `READYING`, `ESC` never
+matches `ESCAPE`, and lowercase spellings are not tags — they fall to the
+default, which still injects them under the shipped `interrupt` fallback.
+Text `match:` rules are raw regexes for phrase shapes (questions, Korean,
+multi-word phrases); the shipped informational patterns are whole-word
+bounded too, so a stray `info` inside a must-act message cannot route it to
+the inbox. `kind:` stays an exact match against the closed event-kind set.
+
 Action/question rules precede informational rules; an FYI containing a BLOCKER
 therefore interrupts. This is heuristic text classification, not semantic intent
 recognition. Explicit overrides remove ambiguity. A saved decision wins over a
 changed retry body, replay flag or later policy edit.
 
 `--delivery-policy default` uses the embedded file. A filesystem YAML path loads
-an operator-owned copy at startup. Invalid policy or an unavailable store prevents
+an operator-owned copy at startup. `PANEWIRE_DELIVERY_POLICY` supplies the same
+value from the environment — `PANEWIRE_DELIVERY_POLICY=off` is the kill switch
+that restores pre-policy pane delivery without editing service arguments; an
+explicit `--delivery-policy` flag always wins over the environment variable.
+Invalid policy or an unavailable store prevents
 hub startup; a runtime storage failure leaves the producer unacknowledged. YAML
 has strict keys, checked classes/regexps/durations, and one document. Per-lane
 example:
@@ -101,11 +115,26 @@ imported. A pre-upgrade active pane submission cannot be recalled.
 An unread item past its deadline is claimed once into one short per-lane
 interrupt digest. Reading/acking before the claim suppresses escalation. The
 claim and outgoing digest are one SQLite transaction. Restart retries the same
-batch ID. Digest text has item IDs and bounded summaries; full originals remain
-readable. An item is never escalated into another batch, although the existing
-relay transport may retry an unconfirmed submission as before. Later unread
-items can cause a later digest. Escalations use the existing handoffkeep relay;
-during a handoffkeep outage their durable batches wait and retry.
+batch ID. The digest is a single line — a count and the inbox pointer — which
+always satisfies the lane.event text contract (no control bytes, far under
+the length cap); full originals remain readable by `inbox list`. An item is
+never escalated into another batch, although the existing relay transport may
+retry an unconfirmed submission as before. Later unread items can cause a
+later digest. Escalations use the existing handoffkeep relay; during a
+handoffkeep outage their durable batches wait and retry.
+
+That retry is deliberately slow: a failed flush pass doubles its backoff from
+1s to a 60s cap, makes at most one persist attempt per window, and counts the
+failures (`InboxFlushFailureCount`). A contract-level rejection — HTTP 400 or
+404, the signature of a handoffkeep older than schema v7 or of an event the
+contract rejects — latches digest persistence off for the process with one
+loud log line instead of looping; stored items stay durable and every other
+delivery path continues normally. Fixing handoffkeep and restarting the hub
+re-enables digests. At startup `runInbox` first probes the contract with a
+read-only `GET /v1/relay/events?kind=lane.event&limit=1`: a 4xx there means a
+pre-v7 handoffkeep and disables digests before the first tick; an
+inconclusive answer (outage, auth failure) leaves the bounded retry path to
+discover capability itself.
 
 When enabled, interrupt batching uses the same transactional outbox: arrivals
 for one receiving lane within the oldest item's window become one turn. A

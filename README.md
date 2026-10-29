@@ -78,54 +78,6 @@ Prompt files begin with recipient metadata such as `expect: name=orch-mock cwd=/
 
 The CLI never falls back to herdr directly. If the daemon socket is absent it exits 4. `PANEWIRE_SOCKET` is available for tests and non-default local installations.
 
-## Stage 2 offline R1
-
-`panewire submit` writes a metadata-only stage 2 outbox record; it does not
-open a remote connection or load a credential file. The stage 2 publisher and
-receiver loop is an explicit `Stage2.Enabled` daemon configuration gate and is
-off by default, so the existing launchd invocation remains a stage 1 daemon.
-
-```sh
-panewire submit --db /safe/local/stage2.sqlite3 --file ./brief.md \
-  --from-machine sender --destination-machine receiver --namespace jobs \
-  --logical-path jobs/example/brief.md --classification personal_non_company
-```
-
-The R1 implementation is fixture-only: its Supabase adapter is exercised
-against an in-process HTTP fake. Live Supabase credentials and smoke testing
-are intentionally deferred to R2.
-
-### Credential rotation and optional receiving `wrk` gate
-
-When a stage 2 daemon refreshes a Supabase session, it atomically rewrites the
-access and refresh-token values in its explicit `--stage2-client-env` file. The
-replacement is a mode-0600 temporary file in the same directory followed by a
-rename, so another mode-0600 env consumer such as `smoke-supabase` sees either
-the complete old file or the complete new file, never a partial file. The
-daemon continues with its in-memory credentials if that rewrite fails, but it
-logs a warning; repair the file before restarting the daemon. A smoke command
-reads its env at startup and does not itself persist a refresh, so restart the
-smoke command if a concurrently running daemon rotates the shared credentials.
-
-Remote spawning remains disabled unless the receiving daemon is started with
-`--stage2-wrk-gate` and a local `--stage2-spawn-policy` file. A sender may send
-only a request and label:
-
-```sh
-panewire submit ... --request-wrk --wrk-label rob1330-task
-```
-
-The receiver owns the launch context. Its plain JSON policy maps allowed label
-prefixes to the local model, workspace, tier, and absolute working directory:
-
-```json
-{"rules":[{"label_prefix":"rob1330-","model":"codex-terra","workspace":"workers","t":"T1","cwd":"/safe/local/work"}]}
-```
-
-The materialized logical inbox path is supplied to `wrk` as `-p`; no sender
-field can choose the model, workspace, tier, or CWD. A missing `wrk`, absent or
-invalid policy, or unmatched label is terminal and fail-closed.
-
 ## Status
 
 R2: prompt target safety, verified submission/uptake, privacy-preserving delivery audit, schema guard, events, inbox watcher, and wait. Live prompt smoke remains prohibited in the fixture test job; use an operator-approved scratch pane separately.
@@ -133,14 +85,12 @@ R2: prompt target safety, verified submission/uptake, privacy-preserving deliver
 ## R8 hub: presence, checks, and notification
 
 `panewire hub` is the optional, always-on live channel for presence and
-operator event push. It is deliberately **not** the durable transport:
+operator event push.
 
-- Supabase remains the stage 2 file relay and the offline recipient buffer.
 - The hub evaluates node presence and local heartbeat checks, and can send
   optional Telegram incident/recovery notification.
-- The hub is useful only while both sides are connected. Its process restart or
-  outage loses no stage 1/2 state, and `panewired` retries it as a non-blocking
-  side channel.
+- The hub is useful only while both sides are connected. `panewired` retries
+  the connection as a non-blocking side channel.
 
 ### Transport: outbound-only nodes, tailnet + Cloudflare
 
@@ -166,36 +116,6 @@ panewire daemon --hub-url wss://100.64.0.1:9377 --hub-url wss://hub.example.inva
 It attempts URLs in order, backs off only after all fail, and every
 `HUB_PREFER_RETRY` (default `10m`) probes a higher-priority route before
 switching. Cloudflare Access headers apply only to non-tailnet URLs.
-
-### Self-update runbook
-
-Build and attach a release asset named `panewire_<goos>_<goarch>` (for example
-`panewire_darwin_arm64`) to a GitHub Release, calculate its SHA-256, then
-publish an explicit target list:
-
-```sh
-panewire update publish --hub-url https://hub.example.invalid \
-  --hub-token-env /etc/panewire/operator.env --version r19b \
-  --url https://github.com/org/panewire/releases/download/r19b/panewire_darwin_arm64 \
-  --sha256 <asset-sha256> --machines company-m1,machine-b
-```
-
-Nodes accept only GitHub release URLs: `github.com` plus the GitHub release
-asset redirect host `objects.githubusercontent.com`. Redirects must remain
-HTTPS, stay on that allowlist, and are limited to three hops. Nodes verify
-SHA-256 before changing anything, retain the prior binary as
-`.bak-<timestamp>`, then atomically rename the verified replacement over the
-existing executable. Only the two newest `.bak-<timestamp>` copies are kept;
-older ones are removed after a successful replacement. One self-update runs at
-a time: a second `update.available` arriving while one is in flight is declined
-with `update.busy` and recorded as an `update`/`busy` event. Their supervisor
-must restart them: launchd needs
-`KeepAlive=true`; systemd needs `Restart=always`. Publishing records the
-expected version per target: only a later hello with that exact version emits
-`update.succeeded`; no matching hello within ten minutes emits
-`update.unconfirmed`. Release builds inject this version with
-`-ldflags "-X main.version=<tag>"`, and `panewire version` prints it. Update or
-download verification failures leave the existing binary untouched.
 
 Quota is on-demand rather than a 60-second poll: `POST /v1/quota/<machine>`
 asks the connected GUI-session node to execute `scopefuel --json` once and
