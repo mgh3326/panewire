@@ -143,14 +143,14 @@ func TestHubNodeWakeDispatchAndConfirm(t *testing.T) {
 		if event.Type != "wake" || event.Machine != "desktop" || event.EmittedAt.IsZero() {
 			t.Fatalf("unexpected wake event: %+v", event)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("request did not dispatch to the configured waker")
 	}
 	hub.connect("desktop", "nw", "fixture", &hubAgent{}, false)
 	var response *http.Response
 	select {
 	case response = <-done:
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("request did not await target heartbeat")
 	}
 	defer response.Body.Close()
@@ -243,7 +243,7 @@ func TestHubNodeWakeStaleHeartbeatStillDispatches(t *testing.T) {
 		if event.Machine != "desktop" {
 			t.Fatalf("unexpected wake event: %+v", event)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("stale heartbeat was treated as already-connected")
 	}
 	// A fresh heartbeat from the returning node completes the wake. Setting
@@ -254,7 +254,7 @@ func TestHubNodeWakeStaleHeartbeatStillDispatches(t *testing.T) {
 	var response *http.Response
 	select {
 	case response = <-done:
-	case <-time.After(time.Second):
+	case <-time.After(3 * time.Second):
 		t.Fatal("fresh heartbeat did not confirm the wake")
 	}
 	defer response.Body.Close()

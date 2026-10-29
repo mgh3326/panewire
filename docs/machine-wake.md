@@ -84,10 +84,18 @@ panewire daemon ... --idle-shutdown 30m \
 Shutdown requires **all** of these to hold for the whole window:
 
 - no herdr agent pane is `working` or `blocked`;
-- no herdr pane is `idle` while bound to an active job lease;
-- no active job leases in the node's `jobs/*/events` inbox;
-- no GitHub Actions runner — no process whose argv[0] basename is
-  `Runner.Worker`;
+- no herdr pane reports a status other than `idle`/`done` — `unknown`, an
+  empty status, or a status this build does not recognise blocks (the probe
+  uses `AgentStatesAll`, which keeps unclassifiable panes instead of
+  dropping them);
+- no `idle`/`done` pane is bound to an active job lease;
+- no active job leases in the node's `jobs/*/events` inbox — the arbiter
+  job records wrk and runtug write through emit under the shared inbox
+  root. A job directory whose events cannot be listed, read, or parsed
+  counts as a lease;
+- no GitHub Actions runner — no process whose argv basename is
+  `Runner.Worker` (matched over all argv fields, so an install path
+  containing spaces is still detected);
 - no interactive login sessions (`who` is empty);
 - no keep-awake marker at `~/.config/panewire/keep-awake` (override with
   `--idle-shutdown-keep-awake`).
@@ -96,7 +104,8 @@ Any probe failure counts as busy — a node that cannot see its own state must
 not power itself off. Once the decision is made the manager logs it, writes
 exactly one durable `lane.event` (`{"kind":"idle_shutdown","machine":...,
 "idle_seconds":...}`) to `--idle-shutdown-lane` (default `operator-desk`)
-through the normal events-lane relay, waits 2s for the event to leave, then
+through the normal events-lane relay — with one retry when the record write
+fails — waits 2s for the event to leave, re-probes every condition, then
 runs the configured command as a structured argv — never a shell line. A
 failed command restarts the idle window; it never retries in a tight loop. A
 committed decision fires at most once per daemon run.

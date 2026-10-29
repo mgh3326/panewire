@@ -154,7 +154,7 @@ const (
 	hubWakeDefaultTimeout   = 120 * time.Second
 	hubWakeMaxTimeout       = 10 * time.Minute
 	hubWakeRedispatch       = 15 * time.Second
-	hubWakeConfirmationPoll = 20 * time.Millisecond
+	hubWakeConfirmationPoll = 500 * time.Millisecond
 )
 
 type hubWakeResult struct {

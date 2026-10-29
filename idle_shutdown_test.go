@@ -27,6 +27,8 @@ type idleShutdownFixture struct {
 	shutdownErr error
 	shutdowns   int
 	writeErr    error
+	failWrites  int
+	writeCalls  int
 	records     []emitRecord
 	enqueued    []hubScannedRelayEvent
 	now         time.Time
@@ -51,8 +53,12 @@ func (fake *idleShutdownFixture) deps() idleShutdownDeps {
 		},
 		keepAwake: func() bool { return fake.keepAwake },
 		writeRecord: func(root string, record emitRecord) (string, error) {
+			fake.writeCalls++
 			if fake.writeErr != nil {
 				return "", fake.writeErr
+			}
+			if fake.writeCalls <= fake.failWrites {
+				return "", errors.New("transient write failure")
 			}
 			fake.records = append(fake.records, record)
 			return filepath.Join(root, "events-lane", record.EventID+".json"), nil
@@ -86,6 +92,13 @@ func TestIdleShutdownBlockedReasons(t *testing.T) {
 		"idle done pane": func(f *idleShutdownFixture) {
 			f.sessions = []HerdrAgentState{{PaneID: "p1", Status: "done"}, {PaneID: "p2", Status: "idle"}}
 		},
+		"unknown pane":      func(f *idleShutdownFixture) { f.sessions = []HerdrAgentState{{PaneID: "p1", Status: "unknown"}} },
+		"unrecognised pane": func(f *idleShutdownFixture) { f.sessions = []HerdrAgentState{{PaneID: "p1", Status: "frobnicate"}} },
+		"empty pane status": func(f *idleShutdownFixture) { f.sessions = []HerdrAgentState{{PaneID: "p1"}} },
+		"done holding job": func(f *idleShutdownFixture) {
+			f.sessions = []HerdrAgentState{{PaneID: "p1", Status: "done"}}
+			f.jobs = []HubActiveJob{{JobID: "job-a", Pane: "p1"}}
+		},
 		"idle holding job": func(f *idleShutdownFixture) {
 			f.sessions = []HerdrAgentState{{PaneID: "p1", Status: "idle"}}
 			f.jobs = []HubActiveJob{{JobID: "job-a", Pane: "p1"}}
@@ -114,6 +127,10 @@ func TestIdleShutdownBlockedReasons(t *testing.T) {
 			"working pane":      "pane_active",
 			"blocked pane":      "pane_active",
 			"idle done pane":    "",
+			"unknown pane":      "pane_unknown",
+			"unrecognised pane": "pane_unknown",
+			"empty pane status": "pane_unknown",
+			"done holding job":  "pane_holding_job",
 			"idle holding job":  "pane_holding_job",
 			"idle holding name": "pane_holding_job",
 			"sessions error":    "sessions_unavailable",
@@ -317,5 +334,102 @@ func TestDaemonIdleShutdownFlagValidation(t *testing.T) {
 	daemon, code, err = newDaemonForCLI(append(append([]string{}, hub...), "--idle-shutdown", "30m", "--idle-shutdown-command", "sudo -n /usr/sbin/poweroff", "--idle-shutdown-keep-awake", filepath.Join(root, "marker")), deps)
 	if err != nil || code != ExitOK || !daemon.cfg.IdleShutdown.Enabled || len(daemon.cfg.IdleShutdown.Command) != 3 || daemon.cfg.IdleShutdown.KeepAwakePath != filepath.Join(root, "marker") {
 		t.Fatalf("valid idle shutdown config: code=%d err=%v cfg=%+v", code, err, daemon.cfg.IdleShutdown)
+	}
+}
+
+// A transient record-write failure gets exactly one retry before the node
+// accepts the gap and proceeds; the retry success still reaches the relay.
+func TestIdleShutdownEmitRetry(t *testing.T) {
+	start := time.Date(2026, 9, 5, 9, 30, 0, 0, time.UTC)
+	fake := &idleShutdownFixture{procs: []string{"/usr/bin/sleep 5"}, now: start, failWrites: 1}
+	manager := newIdleShutdownFixture(t, fake)
+	manager.tick(context.Background())
+	fake.now = start.Add(30 * time.Minute)
+	manager.tick(context.Background())
+	if fake.writeCalls != 2 || len(fake.records) != 1 || len(fake.enqueued) != 1 || fake.shutdowns != 1 {
+		t.Fatalf("emit retry: writeCalls=%d records=%d enqueued=%d shutdowns=%d", fake.writeCalls, len(fake.records), len(fake.enqueued), fake.shutdowns)
+	}
+}
+
+// Unreadable or unparsable job event records have unknown lease state: they
+// count as an active lease instead of vanishing from the scan.
+func TestIdleShutdownJobLeasesUnreadable(t *testing.T) {
+	root := t.TempDir()
+	// Legible but unclaimed: parseable JSON, no claim events -> no lease.
+	legible := filepath.Join(root, "jobs", "job-legible", "events")
+	if err := os.MkdirAll(legible, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legible, "1-note.json"), []byte(`{"kind":"note"}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	leases, err := idleShutdownJobLeases(root, nil, context.Background())
+	if err != nil || len(leases) != 0 {
+		t.Fatalf("legible jobs: leases=%v err=%v", leases, err)
+	}
+	// Unparsable event JSON inside a job dir -> synthetic lease.
+	bad := filepath.Join(root, "jobs", "job-bad", "events")
+	if err := os.MkdirAll(bad, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bad, "2-broken.json"), []byte(`{truncated`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	leases, err = idleShutdownJobLeases(root, nil, context.Background())
+	if err != nil || len(leases) != 1 || leases[0].JobID != "job-bad" {
+		t.Fatalf("unparsable events: leases=%v err=%v", leases, err)
+	}
+	// A job dir with no readable events dir at all -> synthetic lease.
+	if err := os.MkdirAll(filepath.Join(root, "jobs", "job-noevents"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	leases, err = idleShutdownJobLeases(root, nil, context.Background())
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("missing events dir: leases=%v err=%v", leases, err)
+	}
+	// An existing but unreadable events dir -> synthetic lease.
+	sealed := filepath.Join(root, "jobs", "job-sealed", "events")
+	if err := os.MkdirAll(sealed, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(sealed, 0000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(sealed, 0700) })
+	leases, err = idleShutdownJobLeases(root, nil, context.Background())
+	if err != nil || len(leases) != 1 {
+		t.Fatalf("unreadable events dir: leases=%v err=%v", leases, err)
+	}
+}
+
+// agent.list entries herdr reports but this build cannot classify must reach
+// the idle-shutdown probe as "unknown" rather than disappearing.
+func TestHerdrAgentStatesAllKeepsUnclassifiable(t *testing.T) {
+	agents := []map[string]any{
+		{"pane_id": "ws:p1", "workspace_id": "ws", "name": "ok", "agent_status": "idle", "revision": 1, "state_change_seq": 1},
+		{"pane_id": "ws:p2", "workspace_id": "ws", "name": "odd", "agent_status": "frobnicate", "revision": 2, "state_change_seq": 2},
+		{"pane_id": "ws:p3\ninvalid", "workspace_id": "ws", "name": "bad", "agent_status": "idle", "revision": 3, "state_change_seq": 3},
+	}
+	socket := task268HerdrAgentListSocket(t, agents)
+	herdr, err := NewHerdrClient(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strict, err := herdr.AgentStates(context.Background())
+	if err != nil || len(strict) != 1 {
+		t.Fatalf("AgentStates kept unclassifiable entries: states=%+v err=%v", strict, err)
+	}
+	herdr.Close()
+	herdr, err = NewHerdrClient(socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	all, err := herdr.AgentStatesAll(context.Background())
+	herdr.Close()
+	if err != nil || len(all) != 3 {
+		t.Fatalf("AgentStatesAll dropped entries: states=%+v err=%v", all, err)
+	}
+	if all[0].Status != "idle" || all[1].Status != "unknown" || all[1].PaneID != "ws:p2" || all[2].Status != "unknown" {
+		t.Fatalf("AgentStatesAll classification: %+v", all)
 	}
 }

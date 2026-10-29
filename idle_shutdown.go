@@ -175,12 +175,16 @@ func (m *idleShutdownManager) blockedReason(ctx context.Context) string {
 		}
 	}
 	for _, session := range sessions {
+		// Fail-safe rule: only a positively-idle observation clears. "idle"
+		// and "done" are the states herdr can prove carry no work; "working"
+		// and "blocked" are visibly busy; "unknown", an empty status, or a
+		// status this build does not recognise is not proof of idleness.
 		switch session.Status {
 		case "working", "blocked":
 			return "pane_active"
-		}
-		if session.Status != "idle" {
-			continue
+		case "idle", "done":
+		default:
+			return "pane_unknown"
 		}
 		if _, busy := held[session.PaneID]; busy {
 			return "pane_holding_job"
@@ -244,8 +248,14 @@ func (m *idleShutdownManager) decide(ctx context.Context, at time.Time, idleFor 
 	textBytes, _ := json.Marshal(body)
 	text := string(textBytes)
 	record := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: at.Format(time.RFC3339), OwnerLane: m.cfg.Lane, EventID: eventID, Text: text}
-	if _, err := m.deps.writeRecord(m.inboxRoot, record); err != nil {
-		m.log.Error("idle-shutdown lane event write failed", "error", err)
+	// One retry before accepting the gap: the durable record is the only
+	// notice the desk gets before this machine powers off.
+	_, writeErr := m.deps.writeRecord(m.inboxRoot, record)
+	if writeErr != nil {
+		_, writeErr = m.deps.writeRecord(m.inboxRoot, record)
+	}
+	if writeErr != nil {
+		m.log.Error("idle-shutdown lane event write failed", "error", writeErr)
 	} else if m.deps.enqueue != nil {
 		m.deps.enqueue(hubScannedRelayEvent{
 			Kind:         "lane.event",
