@@ -21,8 +21,8 @@ type hubInbox struct {
 	flushMu sync.Mutex
 	// failures counts consecutive failed flush passes and nextAttempt holds
 	// the backoff gate they set, so a broken sink costs one attempt per
-	// growing window instead of one per tick. Only the startup contract probe
-	// can latch persistDisabled; an individual bad batch is quarantined.
+	// growing window instead of one per tick. Only startup checks can latch
+	// persistDisabled; an individual bad batch is quarantined.
 	failures        int
 	nextAttempt     time.Time
 	persistDisabled bool
@@ -61,11 +61,24 @@ func newHubInbox(policyPath, storePath string) (*hubInbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := store.recoverMustAct(policy); err != nil {
-		store.db.Close()
-		return nil, err
-	}
 	return &hubInbox{store: store, policy: policy}, nil
+}
+
+// prepareInbox runs once before the hub starts accepting events. Maintenance
+// failures disable only digests; ordinary relay delivery, especially must-act
+// interrupts, must remain available while the store needs repair.
+func (h *HubServer) prepareInbox() {
+	if h.inbox == nil {
+		return
+	}
+	err := h.inbox.store.quarantineInvalidBatches()
+	if err == nil {
+		err = h.inbox.store.recoverMustAct(h.inbox.policy)
+	}
+	if err != nil {
+		h.inbox.persistDisabled = true
+		h.logger.Error("inbox digest delivery disabled: startup recovery failed; fix the inbox store and restart the hub", "error", err)
+	}
 }
 
 func (h *HubServer) receivingLane(kind string, e hubJobEventPayload) string {
@@ -163,7 +176,7 @@ func (h *HubServer) runInbox(ctx context.Context) {
 // failure leaves the flush to discover capability on its own bounded
 // schedule, so a handoffkeep that is merely down at boot is not condemned.
 func (h *HubServer) probeInboxRelayContract(ctx context.Context) {
-	if h.handoffkeep == nil {
+	if h.handoffkeep == nil || h.inboxDigestDisabled() {
 		return
 	}
 	status, err := h.handoffkeep.checkLaneEventContract(ctx)
@@ -256,6 +269,8 @@ func (h *HubServer) flushInbox() {
 		if result.ID > 0 && !result.PersistFailed {
 			if _, err := h.inbox.store.db.Exec(`UPDATE lane_inbox_batches SET sent=1 WHERE id=?`, b.ID); err != nil {
 				h.logger.Error("inbox batch handoff recording failed")
+				failed = true
+				return
 			}
 			continue
 		}

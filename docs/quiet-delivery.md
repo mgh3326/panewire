@@ -150,12 +150,20 @@ in `lane_inbox_batch_quarantine`; their originals remain in
 entire pending queue is scanned to quarantine legacy multiline batches before
 sending. Authentication failures (401/403), retryable request failures
 (408/425/429), transport errors, and server outages retain bounded backoff.
+Failure to mark an accepted batch sent also stops the pass and uses this
+backoff, with one error log per failed window. The stable relay identity
+prevents another injection while the local sent marker is retried.
 
-Only the startup read-only contract probe
-(`GET /v1/relay/events?kind=lane.event&limit=1`) can latch all digest delivery off:
-HTTP 400/404 indicates an unsupported kind filter or missing route. The hub logs
-once; stored items wait for a compatible handoffkeep and a hub restart. An
-inconclusive probe leaves the bounded retry path active. Individual rejected
+Only startup checks can latch all digest delivery off. A quarantine/recovery
+write failure logs one loud error and disables digests while the hub continues
+serving ordinary relay traffic, including must-act interrupts. Fix the inbox
+store and restart to retry startup maintenance. Invalid policy or a store that
+cannot be opened/initialized still prevents startup.
+
+The read-only contract probe (`GET /v1/relay/events?kind=lane.event&limit=1`)
+also disables digests on HTTP 400/404 indicating an unsupported kind filter or
+missing route. Stored items wait for a compatible handoffkeep and a hub restart.
+An inconclusive probe leaves the bounded retry path active. Individual rejected
 batches never disable other digests.
 
 When enabled, interrupt batching uses the same transactional outbox: arrivals

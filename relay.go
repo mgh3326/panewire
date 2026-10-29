@@ -336,7 +336,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 	if !persisted {
 		if ctx.Err() == nil {
 			// A rejected write describes this event, not server capability.
-			// Only the read-only startup probe can disable all digests.
+			// Only startup checks can disable all digests.
 			h.logger.Error("lane.event persistence failed", "lane", event.OwnerLane, "producer_event_id", event.EventID, "status", status)
 		}
 		h.forgetRelayEvent(key)

@@ -1,9 +1,11 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +13,133 @@ import (
 	"testing"
 	"time"
 )
+
+func TestQuietMarkSentFailureBackoff(t *testing.T) {
+	fake, hk, closeServer := newFakeHandoffkeep(t)
+	defer closeServer()
+	now := time.Now()
+	h, agent := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", hk, &now)
+	var logs bytes.Buffer
+	h.logger = slog.New(slog.NewTextHandler(&logs, nil))
+	// A fixture trigger fails only the mark-sent write. RAISE(FAIL) preserves
+	// the trigger's attempt counter, letting us measure actual write attempts.
+	for _, q := range []string{
+		`INSERT INTO lane_inbox_batches(id,lane,text) VALUES('first','lane-a','first digest'),('second','lane-a','second digest')`,
+		`CREATE TABLE mark_sent_attempts(batch_id TEXT)`,
+		`CREATE TRIGGER fail_mark_sent BEFORE UPDATE OF sent ON lane_inbox_batches BEGIN
+ INSERT INTO mark_sent_attempts(batch_id) VALUES(OLD.id);
+ SELECT RAISE(FAIL, 'fixture mark-sent failure'); END`,
+	} {
+		if _, err := h.inbox.store.db.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	attempts := func() int {
+		t.Helper()
+		var n int
+		if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM mark_sent_attempts`).Scan(&n); err != nil {
+			t.Fatal(err)
+		}
+		return n
+	}
+	h.flushInbox()
+	if attempts() != 1 || h.InboxFlushFailureCount() != 1 || len(agent.relays) != 1 {
+		t.Fatalf("first failure: attempts=%d failures=%d relays=%d", attempts(), h.InboxFlushFailureCount(), len(agent.relays))
+	}
+	for i := 0; i < 10; i++ {
+		h.flushInbox()
+	}
+	if attempts() != 1 {
+		t.Fatal("mark-sent write retried inside backoff window")
+	}
+	for i := 0; i < 3600; i++ {
+		now = now.Add(100 * time.Millisecond)
+		h.flushInbox()
+	}
+	n := attempts()
+	if n < 4 || n > 12 || h.InboxFlushFailureCount() != uint64(n) || strings.Count(logs.String(), "inbox batch handoff recording failed") != n {
+		t.Fatalf("unbounded retries/logs: attempts=%d failures=%d logs=%s", n, h.InboxFlushFailureCount(), logs.String())
+	}
+	fake.mu.Lock()
+	posts := len(fake.stored)
+	fake.mu.Unlock()
+	if posts != 1 || len(agent.relays) != 1 {
+		t.Fatal("failed handoff recording continued to later batches or reinjected the batch")
+	}
+	if _, err := h.inbox.store.db.Exec(`DROP TRIGGER fail_mark_sent`); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(inboxFlushBackoffMax)
+	h.flushInbox()
+	batches, err := h.inbox.store.pendingBatches()
+	if err != nil || len(batches) != 0 || h.inbox.failures != 0 || len(agent.relays) != 2 {
+		t.Fatalf("recovery: batches=%v failures=%d relays=%d err=%v", batches, h.inbox.failures, len(agent.relays), err)
+	}
+}
+
+func TestQuietStartupMaintenanceFailureKeepsInterrupts(t *testing.T) {
+	for _, stage := range []string{"quarantine", "recovery"} {
+		t.Run(stage, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+			s, err := openLaneInboxStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.db.Close()
+			now := time.Now()
+			if stage == "quarantine" {
+				if _, err := s.db.Exec(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES('legacy','lane-a','old'||char(10)||'digest')`); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.db.Exec(`CREATE TRIGGER fail_startup BEFORE INSERT ON lane_inbox_batch_quarantine BEGIN SELECT RAISE(FAIL, 'fixture quarantine failure'); END`); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				if _, err := s.put("misfiled", "lane-a", "lane.event", "inbox", quietEvent("misfiled", "Blocker: FYI"), now, 0, 0); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := s.db.Exec(`CREATE TRIGGER fail_startup BEFORE UPDATE OF due_at ON lane_inbox BEGIN SELECT RAISE(FAIL, 'fixture recovery failure'); END`); err != nil {
+					t.Fatal(err)
+				}
+			}
+			s.db.Close()
+			fake, hk, closeServer := newFakeHandoffkeep(t)
+			defer closeServer()
+			var logs bytes.Buffer
+			h, err := NewHubServer(HubServerConfig{
+				Tokens:             map[string]string{"operator": "op", "host-a": "node"},
+				ReportRelayPath:    r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`),
+				DeliveryPolicyPath: "default", InboxStorePath: path, handoffkeep: hk,
+				Now: func() time.Time { return now }, Logger: slog.New(slog.NewTextHandler(&logs, nil)),
+			})
+			if err != nil {
+				t.Fatal("maintenance failure prevented startup", err)
+			}
+			defer h.Close()
+			if !h.inboxDigestDisabled() || strings.Count(logs.String(), "inbox digest delivery disabled: startup recovery failed") != 1 {
+				t.Fatal("startup failure was not loudly latched", logs.String())
+			}
+			agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 2), persisted: make(chan hubRelayPersistedEvent, 2)}
+			h.nodes["host-a"] = &hubNodeRecord{agent: agent}
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			h.runInbox(ctx)
+			for i := 0; i < 10; i++ {
+				h.flushInbox()
+			}
+			e := quietEvent("new-must-act", "Blocker: merged, install broken")
+			e.DeliveryClass = "inbox"
+			if r := h.relayLaneEvent(e, agent); r.ID == 0 || r.PersistFailed || len(agent.relays) != 1 || len(agent.persisted) != 1 {
+				t.Fatalf("startup failure blocked must-act delivery: %+v", r)
+			}
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			if len(fake.calls) != 1 || len(fake.stored) != 1 || fake.stored[0].EventID != e.EventID {
+				t.Fatal("disabled startup retried maintenance or sent a digest", fake.calls)
+			}
+		})
+	}
+}
 
 func TestQuietLegacyBatchQuarantine(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")

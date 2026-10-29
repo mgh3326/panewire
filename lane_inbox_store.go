@@ -97,14 +97,7 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 			return nil, err
 		}
 	}
-	s := &laneInboxStore{db: db}
-	// Scan the entire old queue, not just the first pending page. Round-1
-	// multiline batches must be inert before the first startup flush.
-	if err := s.quarantineInvalidBatches(); err != nil {
-		db.Close()
-		return nil, err
-	}
-	return s, nil
+	return &laneInboxStore{db: db}, nil
 }
 
 func (s *laneInboxStore) quarantineBatch(id, reason string) error {
