@@ -19,7 +19,7 @@ func TestClassifyQuotaStop(t *testing.T) {
 		{"You've hit your weekly limit · resets Nov 1, 2am\nChoose an option: wait or upgrade", "claude", time.Date(2026, 10, 31, 17, 0, 0, 0, time.UTC), true},
 		{"quota exceeded; try again at 12:39 PM", "codex", time.Date(2026, 10, 29, 3, 39, 0, 0, time.UTC), false},
 		{"You've hit your session limit · resets unknown", "claude", time.Time{}, false},
-		{"usage limit: try again at unknown", "codex", time.Time{}, false},
+		{"You've hit your usage limit. Please try again at unknown", "codex", time.Time{}, false},
 	}
 	for i, path := range []string{"testdata/quota-stop/devin.txt", "testdata/quota-stop/claude.txt", "testdata/quota-stop/codex.txt"} {
 		b, err := os.ReadFile(path)
@@ -77,5 +77,27 @@ func TestQuotaStopOverflowAndEmptyUrgency(t *testing.T) {
 	p, ok := parseQuotaPolicy(doc)
 	if !ok || len(p.Urgent) != 0 {
 		t.Fatalf("policy=%+v ok=%v", p, ok)
+	}
+}
+
+func TestQuotaStopLastActivityAndExplicitZone(t *testing.T) {
+	now := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	for _, path := range []string{"testdata/quota-stop/code-negative.txt", "testdata/quota-stop/old-negative.txt"} {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got, ok := classifyQuotaStop(string(b), now, time.UTC); ok {
+			t.Errorf("%s classified %+v", path, got)
+		}
+	}
+	text := "You've hit your weekly limit · resets Nov 1, 2am (Asia/Seoul)"
+	got, ok := classifyQuotaStop(text, now, time.UTC)
+	if !ok || !got.Reset.Equal(time.Date(2026, 10, 31, 17, 0, 0, 0, time.UTC)) {
+		t.Fatalf("zone=%+v ok=%v", got, ok)
+	}
+	unknown, _ := classifyQuotaStop("You've hit your weekly limit · resets Nov 1, 2am (Mars/Olympus)", now, time.UTC)
+	if !unknown.Reset.IsZero() {
+		t.Fatalf("unknown zone=%v", unknown.Reset)
 	}
 }

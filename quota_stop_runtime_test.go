@@ -75,12 +75,8 @@ func TestQuotaStopWakeShadowAndResume(t *testing.T) {
 			rig.observe("working", 1, rig.now)
 			rig.observe("blocked", 2, rig.now.Add(time.Second))
 			rig.manager.Tick(context.Background(), rig.now.Add(3*time.Second))
-			if len(rig.requests) != 1 {
-				t.Fatalf("requests=%d", len(rig.requests))
-			}
-			rig.route(0, "owner")
-			if len(rig.emitted) != 0 {
-				t.Fatalf("blocked wake emitted ordinary owner notification: %+v", rig.emitted)
+			if len(rig.requests) != 0 || len(rig.emitted) != 0 {
+				t.Fatalf("blocked affected idle wake requests=%d emitted=%d", len(rig.requests), len(rig.emitted))
 			}
 			rig.manager.Tick(context.Background(), rig.now.Add(4*time.Second))
 			rig.manager.Tick(context.Background(), rig.now.Add(40*time.Second))
@@ -99,10 +95,10 @@ func TestQuotaStopWakeShadowAndResume(t *testing.T) {
 				rig.observe("working", 3, rig.now)
 				rig.observe("idle", 4, rig.now.Add(time.Second))
 				rig.manager.Tick(context.Background(), rig.now.Add(3*time.Second))
-				if len(rig.requests) != 2 {
+				if len(rig.requests) != 1 {
 					t.Fatalf("requests=%d", len(rig.requests))
 				}
-				rig.route(1, "owner")
+				rig.route(0, "owner")
 				rig.manager.Tick(context.Background(), rig.now.Add(4*time.Second))
 				rig.manager.Tick(context.Background(), rig.now.Add(5*time.Second))
 				if sends != 1 || handovers != 1 || records != 2 {
@@ -114,7 +110,7 @@ func TestQuotaStopWakeShadowAndResume(t *testing.T) {
 }
 
 func TestQuotaStopPolicyCacheAndExclusions(t *testing.T) {
-	for _, s := range []string{"", "operator-desk", "abc-integrator", "director-1", "fleet-tooling-one", "consult-one"} {
+	for _, s := range []string{"", "operator-desk", "abc-integrator", "director", "director-1", "fleet-tooling-one", "consult", "consult-one"} {
 		if !quotaExcluded(s) {
 			t.Errorf("not excluded %q", s)
 		}
@@ -145,5 +141,92 @@ func TestQuotaStopGuardRejectsDialogBeforePrompt(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestQuotaStopBlockedKeepsIdleCancellation(t *testing.T) {
+	rig := newIdleWakeTestRig(t, 5*time.Second)
+	q, err := newQuotaStopManager(rig.store, rig.manager.inboxRoot, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rig.manager.quota = q
+	rig.observe("working", 1, rig.now)
+	rig.observe("idle", 2, rig.now.Add(time.Second))
+	rig.observe("blocked", 3, rig.now.Add(2*time.Second))
+	rig.manager.Tick(context.Background(), rig.now.Add(10*time.Second))
+	if len(rig.requests) != 0 {
+		t.Fatalf("idle flap routed: %+v", rig.requests)
+	}
+}
+
+func TestQuotaStopOutboxBackoffIsPerRow(t *testing.T) {
+	store := NewMemoryStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	root := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(root, []byte("x"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	q, err := newQuotaStopManager(store, root, true, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	q.command = func(context.Context, ...string) ([]byte, error) { calls++; return nil, os.ErrNotExist }
+	now := time.Now().UTC()
+	for _, id := range []string{"a", "b"} {
+		if _, err := store.db.Exec(`INSERT INTO quota_stop_decisions(event_id,job,pane,label,pool,reset,decision,reason,created) VALUES(?,?,?,?,?,?,?,?,?)`, id, "job-"+id, "pane-"+id, "worker", "codex", "unknown", "handover", "urgent", now.UnixMilli()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q.tick(context.Background(), now, false)
+	q.tick(context.Background(), now.Add(time.Second), false)
+	q.tick(context.Background(), now.Add(2*time.Second), false)
+	if calls != 2 {
+		t.Fatalf("hk calls=%d, want one per row", calls)
+	}
+	var backed int
+	if err := store.db.QueryRow(`SELECT count(*) FROM quota_stop_decisions WHERE hk_retry>0 AND action_retry>0`).Scan(&backed); err != nil || backed != 2 {
+		t.Fatalf("backed=%d err=%v", backed, err)
+	}
+}
+
+func TestQuotaStopDeduplicatesPaneAndReset(t *testing.T) {
+	store := NewMemoryStore(t)
+	t.Cleanup(func() { _ = store.Close() })
+	root := t.TempDir()
+	events := filepath.Join(root, "jobs", "job-active", "events")
+	if err := os.MkdirAll(events, 0700); err != nil {
+		t.Fatal(err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339)
+	for name, body := range map[string]string{
+		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + stamp + `","agent_label":"worker-synthetic","owner_lane":"owner","epoch":1}`,
+		"00002-job.spawned.json": `{"type":"job.spawned","created_at":"` + stamp + `","pane_id":"workspace:pane-1"}`} {
+		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	q, err := newQuotaStopManager(store, root, false, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	reset := now.Add(time.Hour).Format("15:04")
+	q.read = func(context.Context, string) (string, error) {
+		return "You've hit your usage limit. Please try again at " + reset + " UTC", nil
+	}
+	q.command = func(_ context.Context, args ...string) ([]byte, error) {
+		if args[0] == "doc" {
+			return json.Marshal(map[string]string{"body": "## Values\n- default_expected: 1d\n- urgent_priorities: [1, 2]\n- max_waits: 1\n- resume_text: \"continue\"\n"})
+		}
+		return []byte(`{"tasks":[{"priority":3,"refs":{"job_id":"job-active"}}]}`), nil
+	}
+	for _, id := range []string{"wake-one", "wake-two"} {
+		q.observeBounded(context.Background(), idleWakeCandidate{EventID: id, PaneID: "workspace:pane-1", Label: "worker-synthetic"}, now)
+	}
+	var n int
+	if err := store.db.QueryRow(`SELECT count(*) FROM quota_stop_decisions WHERE decision<>''`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("decisions=%d err=%v", n, err)
 	}
 }

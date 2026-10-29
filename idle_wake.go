@@ -146,7 +146,7 @@ func normalizedIdleWakeMetadata(value string) string {
 }
 
 func eligibleIdleWakeStatus(status string) bool {
-	return status == "idle" || status == "done" || status == "blocked"
+	return status == "idle" || status == "done"
 }
 
 func validObservedAgentStatus(status string) bool {
@@ -360,6 +360,12 @@ func (m *idleWakeManager) Observe(ctx context.Context, observation HerdrAgentSta
 			return err
 		}
 	}
+	if m.quota != nil && !upstreamReset && observation.Status == "blocked" {
+		eventID := "quota-blocked:" + idleWakeEventID(namespace, observation.PaneID, sequence)
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO quota_blocked_wakes(event_id,pane_id,workspace_id,label,state_change_seq,changed_at,due_at) VALUES(?,?,?,?,?,?,?)`, eventID, observation.PaneID, workspace, label, int64(sequence), at.UnixMilli(), at.Add(m.settle).UnixMilli()); err != nil {
+			return err
+		}
+	}
 	_, err = tx.ExecContext(ctx, `UPDATE idle_wake_panes SET workspace_id=?,label=?,agent_status=?,state_change_seq=?,upstream_revision=?,upstream_state_change_seq=?,upstream_generation=?,changed_at=? WHERE pane_id=?`, workspace, label, observation.Status, int64(sequence), nextRevision, nextSourceSequence, generation, at.UnixMilli(), observation.PaneID)
 	if err != nil {
 		return err
@@ -456,7 +462,7 @@ func (s *Store) idleWakeCandidatesReady(ctx context.Context, now time.Time, adva
 		// has supplied a current observation in this process.
 		if _, err = tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET settled_at=due_at
 		 WHERE decision='' AND settled_at IS NULL AND due_at<=? AND EXISTS (
-		  SELECT 1 FROM idle_wake_panes p WHERE p.pane_id=idle_wake_candidates.pane_id AND p.agent_status IN ('idle','done','blocked')
+		  SELECT 1 FROM idle_wake_panes p WHERE p.pane_id=idle_wake_candidates.pane_id AND p.agent_status IN ('idle','done')
 		 )`, now.UnixMilli()); err != nil {
 			return nil, err
 		}
@@ -614,7 +620,7 @@ func (m *idleWakeManager) tick(ctx context.Context, at time.Time, advanceSettle 
 	}
 	m.materializeAssigned(ctx, at)
 	if m.quota != nil {
-		m.quota.tick(ctx, at)
+		m.quota.tick(ctx, at, advanceSettle)
 	}
 }
 
@@ -682,15 +688,7 @@ func (m *idleWakeManager) materializeAssigned(ctx context.Context, at time.Time)
 	}
 	for _, candidate := range candidates {
 		if m.quota != nil {
-			m.quota.observe(ctx, candidate, at)
-		}
-		// Blocked wakes exist only to inspect quota; keep ordinary blocked
-		// states out of the existing idle/done owner-notification stream.
-		if candidate.Status == "blocked" {
-			if err := m.store.markIdleWakeMaterialized(ctx, candidate.EventID, at); err != nil {
-				m.logger.Warn("blocked quota wake was not recorded")
-			}
-			continue
+			m.quota.observeBounded(ctx, candidate, at)
 		}
 		record := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: candidate.ChangedAt.UTC().Format(time.RFC3339Nano), OwnerLane: candidate.OwnerLane, Label: candidate.Label, PaneID: candidate.PaneID, EventID: candidate.EventID, Text: candidate.Text}
 		if _, err := m.writeRecord(m.inboxRoot, record); err != nil {
