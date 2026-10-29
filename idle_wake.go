@@ -684,6 +684,14 @@ func (m *idleWakeManager) materializeAssigned(ctx context.Context, at time.Time)
 		if m.quota != nil {
 			m.quota.observe(ctx, candidate, at)
 		}
+		// Blocked wakes exist only to inspect quota; keep ordinary blocked
+		// states out of the existing idle/done owner-notification stream.
+		if candidate.Status == "blocked" {
+			if err := m.store.markIdleWakeMaterialized(ctx, candidate.EventID, at); err != nil {
+				m.logger.Warn("blocked quota wake was not recorded")
+			}
+			continue
+		}
 		record := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: candidate.ChangedAt.UTC().Format(time.RFC3339Nano), OwnerLane: candidate.OwnerLane, Label: candidate.Label, PaneID: candidate.PaneID, EventID: candidate.EventID, Text: candidate.Text}
 		if _, err := m.writeRecord(m.inboxRoot, record); err != nil {
 			m.logger.Warn("idle-wake durable event file unavailable")

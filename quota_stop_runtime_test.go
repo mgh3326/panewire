@@ -79,6 +79,9 @@ func TestQuotaStopWakeShadowAndResume(t *testing.T) {
 				t.Fatalf("requests=%d", len(rig.requests))
 			}
 			rig.route(0, "owner")
+			if len(rig.emitted) != 0 {
+				t.Fatalf("blocked wake emitted ordinary owner notification: %+v", rig.emitted)
+			}
 			rig.manager.Tick(context.Background(), rig.now.Add(4*time.Second))
 			rig.manager.Tick(context.Background(), rig.now.Add(40*time.Second))
 			rig.manager.Tick(context.Background(), rig.now.Add(41*time.Second))

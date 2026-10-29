@@ -61,3 +61,21 @@ func TestQuotaPolicyAndDecision(t *testing.T) {
 		t.Fatal("unsafe policy accepted")
 	}
 }
+
+func TestQuotaStopOverflowAndEmptyUrgency(t *testing.T) {
+	now := time.Date(2026, 10, 29, 0, 0, 0, 0, time.UTC)
+	stop, ok := classifyQuotaStop("Reached free model rate limit reset in 2000000000 hours", now, time.UTC)
+	if !ok || !stop.Reset.IsZero() {
+		t.Fatalf("overflow stop=%+v ok=%v", stop, ok)
+	}
+	doc := `## Values
+- default_expected: 1d
+- urgent_priorities: []
+- max_waits: 1
+- resume_text: "continue"
+`
+	p, ok := parseQuotaPolicy(doc)
+	if !ok || len(p.Urgent) != 0 {
+		t.Fatalf("policy=%+v ok=%v", p, ok)
+	}
+}

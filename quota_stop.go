@@ -52,7 +52,9 @@ func classifyQuotaStop(screen string, now time.Time, local *time.Location) (quot
 			if strings.HasPrefix(strings.ToLower(m[2]), "hour") {
 				unit = time.Hour
 			}
-			out.Reset = now.Add(time.Duration(n) * unit).UTC()
+			if n <= int64((1<<63-1)/unit) {
+				out.Reset = now.Add(time.Duration(n) * unit).UTC()
+			}
 			return out, true
 		}
 	}
@@ -172,12 +174,15 @@ func parseQuotaPolicy(body string) (quotaPolicy, bool) {
 		return p, false
 	}
 	p.Urgent = map[int]bool{}
-	for _, item := range strings.Split(strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]"), ",") {
-		n, err := strconv.Atoi(strings.TrimSpace(item))
-		if err != nil || n < 1 {
-			return quotaPolicy{}, false
+	inner := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(raw, "["), "]"))
+	if inner != "" {
+		for _, item := range strings.Split(inner, ",") {
+			n, err := strconv.Atoi(strings.TrimSpace(item))
+			if err != nil || n < 1 {
+				return quotaPolicy{}, false
+			}
+			p.Urgent[n] = true
 		}
-		p.Urgent[n] = true
 	}
 	n, err := strconv.Atoi(values["max_waits"])
 	if err != nil || n < 0 || n > 1 {
