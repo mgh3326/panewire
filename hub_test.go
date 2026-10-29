@@ -237,7 +237,7 @@ func TestR6HubPresenceDisconnectAndStaleRecovery(t *testing.T) {
 	defer nodeB.Close(websocket.StatusNormalClosure, "")
 	r6Write(t, nodeA, map[string]any{"type": "hello", "machine_id": "node-a", "version": "r6-a"})
 	r6Write(t, nodeB, map[string]any{"type": "hello", "machine_id": "node-b", "version": "r6-b"})
-	r6Eventually(t, "both nodes connected", func() bool {
+	eventually(t, time.Second, "both nodes connected", func() bool {
 		nodes := r6Nodes(t, server)
 		return len(nodes) == 2 && r6NodeState(nodes, "node-a") == "connected" && r6NodeState(nodes, "node-b") == "connected"
 	})
@@ -248,7 +248,7 @@ func TestR6HubPresenceDisconnectAndStaleRecovery(t *testing.T) {
 	if err := nodeB.Close(websocket.StatusNormalClosure, "fixture disconnect"); err != nil {
 		t.Fatal(err)
 	}
-	r6Eventually(t, "node-b immediately disconnected", func() bool {
+	eventually(t, time.Second, "node-b immediately disconnected", func() bool {
 		return r6NodeState(r6Nodes(t, server), "node-b") == "disconnected"
 	})
 
@@ -258,7 +258,7 @@ func TestR6HubPresenceDisconnectAndStaleRecovery(t *testing.T) {
 		t.Fatalf("node-a state=%q, want stale after 30s without keepalive", state)
 	}
 	r6Write(t, nodeA, map[string]any{"type": "ping"})
-	r6Eventually(t, "node-a recovered", func() bool {
+	eventually(t, time.Second, "node-a recovered", func() bool {
 		return r6NodeState(r6Nodes(t, server), "node-a") == "connected"
 	})
 	if got := r6NodeLastPingMS(r6Nodes(t, server), "node-a"); got != 0 {
@@ -273,7 +273,7 @@ func TestR6HubEventFanoutAndClosedVocabulary(t *testing.T) {
 	node := r6DialAgent(t, server.URL, "node-a", r6NodeAToken)
 	defer node.Close(websocket.StatusNormalClosure, "")
 	r6Write(t, node, map[string]any{"type": "hello", "machine_id": "node-a", "version": "r6-a", "ignored": true})
-	r6Eventually(t, "unknown hello field counted", func() bool { return hub.UnknownMessageCount() == 1 })
+	eventually(t, time.Second, "unknown hello field counted", func() bool { return hub.UnknownMessageCount() == 1 })
 	if got := hub.UnknownMessageCount(); got != 1 {
 		t.Fatalf("unknown field count=%d, want 1", got)
 	}
@@ -281,14 +281,14 @@ func TestR6HubEventFanoutAndClosedVocabulary(t *testing.T) {
 		t.Fatal("hello with an unknown field must be ignored, not accepted")
 	}
 	r6Write(t, node, map[string]any{"type": "hello", "machine_id": "node-a", "version": "r6-a"})
-	r6Eventually(t, "node connected after valid hello", func() bool { return r6NodeState(r6Nodes(t, server), "node-a") == "connected" })
+	eventually(t, time.Second, "node connected after valid hello", func() bool { return r6NodeState(r6Nodes(t, server), "node-a") == "connected" })
 
 	first := r6DialEvents(t, server.URL)
 	defer first.Close(websocket.StatusNormalClosure, "")
 	second := r6DialEvents(t, server.URL)
 	defer second.Close(websocket.StatusNormalClosure, "")
 	r6Write(t, node, map[string]any{"type": "event", "kind": "not-a-kind", "payload": map[string]any{"message": "ignored"}})
-	r6Eventually(t, "unknown event kind counted", func() bool { return hub.UnknownMessageCount() == 2 })
+	eventually(t, time.Second, "unknown event kind counted", func() bool { return hub.UnknownMessageCount() == 2 })
 	if got := hub.UnknownMessageCount(); got != 2 {
 		t.Fatalf("unknown kind count=%d, want 2", got)
 	}
@@ -338,7 +338,7 @@ func TestR6HubAuthFileLoopbackAndStatusCLI(t *testing.T) {
 	node := r6DialAgent(t, server.URL, "node-a", r6NodeAToken)
 	defer node.Close(websocket.StatusNormalClosure, "")
 	r6Write(t, node, map[string]any{"type": "hello", "machine_id": "node-a", "version": "r6-a"})
-	r6Eventually(t, "hub-status fixture node", func() bool { return r6NodeState(r6Nodes(t, server), "node-a") == "connected" })
+	eventually(t, time.Second, "hub-status fixture node", func() bool { return r6NodeState(r6Nodes(t, server), "node-a") == "connected" })
 
 	operatorEnv := filepath.Join(root, "operator.env")
 	if err := os.WriteFile(operatorEnv, []byte("HUB_MACHINE_ID=operator\nHUB_TOKEN="+r6OperatorToken+"\n"), 0600); err != nil {
@@ -635,16 +635,4 @@ func r6NodeLastPingMS(nodes []r6NodeWire, machineID string) int64 {
 
 func r6WSURL(baseURL, endpoint string) string {
 	return "ws" + strings.TrimPrefix(baseURL, "http") + endpoint
-}
-
-func r6Eventually(t *testing.T, label string, predicate func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		if predicate() {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", label)
 }

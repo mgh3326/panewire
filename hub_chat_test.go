@@ -1101,7 +1101,7 @@ func TestHubChatDispatcherKick(t *testing.T) {
 	if writer := chatPostMessage(t, hub, `{"lane":"lane-a","body":"킥으로 전달"}`); writer.Code != http.StatusCreated {
 		t.Fatal(writer.Body.String())
 	}
-	r6Eventually(t, "chat message delivered via dispatcher kick", func() bool {
+	eventually(t, time.Second, "chat message delivered via dispatcher kick", func() bool {
 		return store.messageState(1) == "delivered"
 	})
 	select {

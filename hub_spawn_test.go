@@ -568,10 +568,10 @@ wait`)
 			t.Fatal(err)
 		}
 		deadline := time.Now().Add(time.Second)
-		for process.Signal(syscall.Signal(0)) == nil && time.Now().Before(deadline) {
+		for processRunning(process, pid) && time.Now().Before(deadline) {
 			time.Sleep(10 * time.Millisecond)
 		}
-		if err := process.Signal(syscall.Signal(0)); err == nil {
+		if processRunning(process, pid) {
 			t.Fatalf("timed-out process group left child %d alive", pid)
 		}
 	})
@@ -660,4 +660,22 @@ printf 'OK pane=pane-a model=m label=l status=s landed=y job=job-a quota_record=
 	if entries := strings.Fields(string(t14WaitFile(t, ledger))); strings.Join(entries, ",") != "begin,end,begin,end" {
 		t.Fatalf("spawns overlapped or duplicate ran: %v", entries)
 	}
+}
+
+// processRunning reports whether pid is alive and not a zombie. The killed
+// child is reparented to pid 1, and a container init that never reaps leaves
+// it as a zombie that still answers signal 0.
+func processRunning(process *os.Process, pid int) bool {
+	if process.Signal(syscall.Signal(0)) != nil {
+		return false
+	}
+	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return true
+	}
+	// The state field follows the parenthesised command name.
+	if end := bytes.LastIndexByte(stat, ')'); end >= 0 && end+2 < len(stat) {
+		return stat[end+2] != 'Z'
+	}
+	return true
 }
