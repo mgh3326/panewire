@@ -289,16 +289,21 @@ func TestInboxWaitEndpoint(t *testing.T) {
 			}
 		})
 	}
-	// The waiter cap refuses additional long-polls rather than queueing them.
+	// The waiter cap refuses additional long-polls rather than queueing them —
+	// but a lane that already has an unread item is answered without a slot.
 	for i := 0; i < hubInboxWaitMaxWaiters; i++ {
 		h.inbox.waiters <- struct{}{}
 	}
 	w = inboxWaitRequest(t, h, "/v1/inbox/wait?lane=lane-a", "op", "")
+	full := inboxWaitRequest(t, h, "/v1/inbox/wait?lane=lane-c", "op", "")
 	for i := 0; i < hubInboxWaitMaxWaiters; i++ {
 		<-h.inbox.waiters
 	}
-	if w.Code != 429 {
-		t.Fatalf("code=%d body=%s", w.Code, w.Body.String())
+	if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &body) != nil || body.Item == nil {
+		t.Fatalf("cap should not hide an existing item: code=%d body=%s", w.Code, w.Body.String())
+	}
+	if full.Code != 429 {
+		t.Fatalf("code=%d body=%s", full.Code, full.Body.String())
 	}
 }
 

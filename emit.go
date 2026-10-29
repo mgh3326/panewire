@@ -513,6 +513,7 @@ func truncateLaneEventTextAtLimit(value string, limit int) (string, bool) {
 
 type emitDedupeRecord struct {
 	deliveryClass  string
+	notifyType     string
 	key            string
 	kind           string
 	createdAt      string
@@ -533,7 +534,7 @@ type emitDedupeRecord struct {
 // write time, while older wrk records do not carry AgentLabel; neither changes
 // the relay event wrk asks emit to notify immediately.
 func (existing emitDedupeRecord) matches(record emitRecord) bool {
-	return existing.kind == record.Type && existing.deliveryClass == record.DeliveryClass &&
+	return existing.kind == record.Type && existing.deliveryClass == record.DeliveryClass && existing.notifyType == record.NotifyType &&
 		existing.epoch == record.Epoch &&
 		existing.ownerLane == record.OwnerLane &&
 		existing.label == record.Label &&
@@ -573,6 +574,7 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 	reportPath := relaySignalReportPath(kind, event.reportPath())
 	return emitDedupeRecord{
 		deliveryClass:  event.DeliveryClass,
+		notifyType:     event.notifyType(),
 		key:            relayEventOutboxKey(kind, jobID, epoch, reportPath, event.reason()),
 		kind:           kind,
 		createdAt:      event.CreatedAt,
@@ -602,7 +604,7 @@ func emitJobEventFileID(inboxRoot string, req localRequest, epoch uint64) (strin
 		return "", time.Time{}
 	}
 	record := emitRecord{
-		Type: req.Kind, JobID: req.JobID, Epoch: epoch, OwnerLane: req.OwnerLane,
+		Type: req.Kind, NotifyType: req.NotifyType, JobID: req.JobID, Epoch: epoch, OwnerLane: req.OwnerLane,
 		Label: req.Label, Host: req.Host, ReportPath: relaySignalReportPath(req.Kind, req.ReportPath),
 		ReportLastLine: req.ReportLastLine, Reason: req.Reason, Question: req.Question,
 		PR: req.PR, Head: req.Head, PaneID: req.PaneID,

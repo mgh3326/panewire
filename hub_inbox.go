@@ -398,6 +398,17 @@ func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
 	if waitFor > hubInboxWaitMaxWait {
 		waitFor = hubInboxWaitMaxWait
 	}
+	// A lane that already has an unread item answers without taking a waiter
+	// slot — the cap bounds only requests that actually block.
+	item, err := h.inbox.store.firstUnread(r.Context(), lane)
+	if err != nil {
+		writeHubJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_unavailable"})
+		return
+	}
+	if item != nil {
+		writeHubJSON(w, http.StatusOK, map[string]any{"item": item})
+		return
+	}
 	select {
 	case h.inbox.waiters <- struct{}{}:
 		defer func() { <-h.inbox.waiters }()
@@ -410,7 +421,7 @@ func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
 		// Register for the next insert before checking, so a put that lands
 		// between the check and the select still wakes this waiter.
 		wake := h.inbox.store.waitChan()
-		item, err := h.inbox.store.firstUnread(lane)
+		item, err := h.inbox.store.firstUnread(r.Context(), lane)
 		if err != nil {
 			writeHubJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_unavailable"})
 			return

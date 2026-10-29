@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -229,8 +230,8 @@ func (s *laneInboxStore) waitChan() chan struct{} {
 
 // firstUnread returns the oldest still-unread inbox item for one lane, or nil
 // when the lane has none.
-func (s *laneInboxStore) firstUnread(lane string) (*laneInboxItem, error) {
-	item, err := scanLaneInbox(s.db.QueryRow(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE lane=? AND class='inbox' AND read_at=0 ORDER BY id LIMIT 1`, lane))
+func (s *laneInboxStore) firstUnread(ctx context.Context, lane string) (*laneInboxItem, error) {
+	item, err := scanLaneInbox(s.db.QueryRowContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE lane=? AND class='inbox' AND read_at=0 ORDER BY id LIMIT 1`, lane))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}

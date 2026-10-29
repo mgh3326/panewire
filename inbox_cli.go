@@ -128,7 +128,13 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if command == "wait" {
 		// The long-poll holds one request open for up to a full server wait;
 		// give the HTTP client the whole CLI deadline plus one server bound.
-		clientTimeout = timeout + hubInboxWaitMaxWait + 15*time.Second
+		// Clamp the sum so a huge --timeout cannot overflow into a negative
+		// duration.
+		const waitSlack = hubInboxWaitMaxWait + 15*time.Second
+		clientTimeout = time.Duration(1<<63 - 1)
+		if timeout <= time.Duration(1<<63-1)-waitSlack {
+			clientTimeout = timeout + waitSlack
+		}
 	}
 	client, err := newHubOperatorClient(hubURL, env.Token, cf, deps, clientTimeout)
 	if err != nil {
@@ -286,7 +292,14 @@ func runInboxWait(client *hubOperatorClient, stdout, stderr io.Writer, lane stri
 		var body struct {
 			Item *laneInboxItem `json:"item"`
 		}
-		if readErr != nil || !json.Valid(raw) || json.Unmarshal(raw, &body) != nil {
+		var fields map[string]json.RawMessage
+		if readErr != nil || !json.Valid(raw) || json.Unmarshal(raw, &body) != nil || json.Unmarshal(raw, &fields) != nil {
+			fmt.Fprintln(stderr, "inbox: invalid hub response")
+			return ExitInternal
+		}
+		// A 200 without the item key is not a timeout answer — explicit null
+		// means keep waiting, anything else means the hub speaks another shape.
+		if _, ok := fields["item"]; !ok {
 			fmt.Fprintln(stderr, "inbox: invalid hub response")
 			return ExitInternal
 		}
