@@ -106,6 +106,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	gracePeriod := flags.Duration("hub-grace", defaultHubGracePeriod, "continuous disconnected/stale grace period")
 	alertNodesCSV := flags.String("alert-nodes", "", "comma-separated authenticated machine IDs to alert on")
 	burstPolicyPath := flags.String("burst-policy", "", "explicit regular JSON burst policy file (hot-reloaded)")
+	wakeConfigPath := flags.String("wake-config", "", "operator-owned JSON wake routing file for `panewire node wake` (hot-reloaded)")
 	placementPolicyPath := flags.String("placement-policy", "/etc/panewire/placement.json", "operator-owned JSON placement policy (hot-reloaded)")
 	uiAllowCFOnly := flags.Bool("ui-allow-cf-only", false, "serve /ui only to Cloudflare Access identities or loopback clients")
 	cfAccessTeam := flags.String("cf-access-team", "", "Cloudflare Access team name for Cf-Access-Jwt-Assertion verification (requires --cf-access-aud)")
@@ -245,7 +246,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if chatStore != nil && !validReportRelayLaneName(*chatDeskLane) {
 		return nil, "", ExitConditionInvalid, errors.New("hub chat desk lane is required and must be valid")
 	}
-	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, QuotaV2StorePath: *quotaV2StorePath, QuotaV2ClockSkew: *quotaV2ClockSkew, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
+	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, WakeConfigPath: *wakeConfigPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, QuotaV2StorePath: *quotaV2StorePath, QuotaV2ClockSkew: *quotaV2ClockSkew, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth configuration is invalid")
 	}
@@ -549,10 +550,10 @@ func hubEmitTextProvided(flags *flag.FlagSet) bool {
 }
 
 func buildHubDaemonClient(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, accepting bool, failoverWakeOn, failoverWakeMAC string, deps daemonCLIDeps) (*HubClient, error) {
-	return buildHubDaemonClientWithBurst(rawURL, tokenEnvPath, cfEnvPath, checks, accepting, failoverWakeOn, failoverWakeMAC, "", false, deps)
+	return buildHubDaemonClientWithBurst(rawURL, tokenEnvPath, cfEnvPath, checks, accepting, failoverWakeOn, failoverWakeMAC, "", false, "", deps)
 }
 
-func buildHubDaemonClientWithBurst(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, accepting bool, failoverWakeOn, failoverWakeMAC, burstWakeMAC string, burstPoweroffAllowed bool, deps daemonCLIDeps) (*HubClient, error) {
+func buildHubDaemonClientWithBurst(rawURL, tokenEnvPath, cfEnvPath string, checks []HubCheck, accepting bool, failoverWakeOn, failoverWakeMAC, burstWakeMAC string, burstPoweroffAllowed bool, wakeTargetsPath string, deps daemonCLIDeps) (*HubClient, error) {
 	env, err := loadHubTokenEnv(tokenEnvPath)
 	if err != nil || env.MachineID == hubOperatorMachineID {
 		return nil, errors.New("hub token env must contain a node credential")
@@ -570,7 +571,7 @@ func buildHubDaemonClientWithBurst(rawURL, tokenEnvPath, cfEnvPath string, check
 	}
 	client, err := NewHubClient(HubClientConfig{
 		URL: rawURL, MachineID: env.MachineID, Token: env.Token, CFAccessClientID: cfAccess.ClientID, CFAccessClientSecret: cfAccess.ClientSecret, Accepting: accepting,
-		FailoverWakeOn: failoverWakeOn, FailoverWakeMAC: failoverWakeMAC, BurstWakeMAC: burstWakeMAC, BurstPoweroffAllowed: burstPoweroffAllowed, Checks: checks,
+		FailoverWakeOn: failoverWakeOn, FailoverWakeMAC: failoverWakeMAC, BurstWakeMAC: burstWakeMAC, BurstPoweroffAllowed: burstPoweroffAllowed, WakeTargetsPath: wakeTargetsPath, Checks: checks,
 		Version:               deps.Version,
 		AllowInsecureForTests: deps.AllowInsecureForTests,
 		Warn:                  func(message string) { logger.Warn(message) },

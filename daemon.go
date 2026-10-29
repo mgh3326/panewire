@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -27,6 +28,7 @@ type Config struct {
 	IdleWakeSettle                             time.Duration
 	Logging                                    LoggingConfig
 	Hub                                        HubDaemonConfig
+	IdleShutdown                               IdleShutdownConfig
 	StallDetect                                StallDetectConfig
 	Store                                      *Store
 	SchemaCommand                              []string
@@ -37,21 +39,23 @@ type LoggingConfig struct {
 	StorePromptBody bool
 }
 type Daemon struct {
-	cfg        Config
-	store      *Store
-	listener   net.Listener
-	cancel     context.CancelFunc
-	herdr      *HerdrClient
-	idleWake   *idleWakeManager
-	stall      *stallDetectManager
-	caps       GuardResult
-	eventDone  chan struct{}
-	idleDone   chan struct{}
-	hubDone    chan struct{}
-	stallDone  chan struct{}
-	resub      chan struct{}
-	subscribed map[string]bool
-	mu         sync.Mutex
+	cfg          Config
+	store        *Store
+	listener     net.Listener
+	cancel       context.CancelFunc
+	herdr        *HerdrClient
+	idleWake     *idleWakeManager
+	stall        *stallDetectManager
+	idleShutdown *idleShutdownManager
+	caps         GuardResult
+	eventDone    chan struct{}
+	idleDone     chan struct{}
+	hubDone      chan struct{}
+	stallDone    chan struct{}
+	shutdownDone chan struct{}
+	resub        chan struct{}
+	subscribed   map[string]bool
+	mu           sync.Mutex
 }
 
 func NewDaemon(cfg Config) *Daemon {
@@ -215,7 +219,48 @@ func (d *Daemon) Start(ctx context.Context) error {
 			d.stall.Run(runCtx)
 		}()
 	}
+	if d.cfg.IdleShutdown.Enabled && d.cfg.Hub.Client != nil {
+		shutdownRoot := d.cfg.Hub.Client.jobsInboxRoot
+		if shutdownRoot == "" {
+			shutdownRoot = d.cfg.InboxRoot
+		}
+		if shutdownRoot == "" {
+			shutdownRoot = defaultInboxRoot()
+		}
+		panesAlive := hubPanesAliveHook(d.cfg.HerdrSocket)
+		manager := newIdleShutdownManager(d.cfg.IdleShutdown, shutdownRoot, idleShutdownDeps{
+			machineID: d.cfg.Hub.Client.machineID,
+			sessions:  hubSessionSnapshotHook(d.cfg.HerdrSocket),
+			jobLeases: func(ctx context.Context) ([]HubActiveJob, error) {
+				return idleShutdownJobLeases(shutdownRoot, panesAlive, ctx)
+			},
+			enqueue: d.cfg.Hub.Client.EnqueueRelayEvent,
+		}, d.cfg.Logger)
+		d.idleShutdown = manager
+		d.shutdownDone = make(chan struct{})
+		go func() {
+			defer close(d.shutdownDone)
+			manager.Run(runCtx)
+		}()
+	}
 	return nil
+}
+
+// idleShutdownJobLeases treats the node's jobs/*/events tree as the wrk/runtug
+// lease record. A jobs tree that exists but cannot be listed is a blocker,
+// never a clearance; a tree that does not exist simply holds no leases.
+func idleShutdownJobLeases(root string, panesAlive panesAliveFunc, ctx context.Context) ([]HubActiveJob, error) {
+	if root == "" {
+		return nil, errors.New("inbox root unset")
+	}
+	jobsDir := filepath.Join(root, "jobs")
+	if _, err := os.Stat(jobsDir); err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return scanHubActiveJobsWithPanes(ctx, root, panesAlive), nil
 }
 
 // hubPanesAliveHook dials herdr per scan the way wait.agent and prompt do: the
@@ -660,6 +705,10 @@ func (d *Daemon) Stop() error {
 	if d.stallDone != nil {
 		<-d.stallDone
 		d.stallDone = nil
+	}
+	if d.shutdownDone != nil {
+		<-d.shutdownDone
+		d.shutdownDone = nil
 	}
 	if d.listener != nil {
 		_ = d.listener.Close()
