@@ -1006,8 +1006,11 @@ func (h *HubServer) handleReassignJob(writer http.ResponseWriter, request *http.
 	writeJSON(writer, http.StatusOK, result)
 }
 
+// handleHealthz keeps the pre-consolidation wire bytes: a literal backslash-n
+// and no WriteHeader. Do not route it through writeJSON; see hub_healthz_test.go.
 func (h *HubServer) handleHealthz(writer http.ResponseWriter, _ *http.Request) {
-	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
+	writer.Header().Set("Content-Type", "application/json")
+	_, _ = writer.Write([]byte(`{"status":"ok"}\n`))
 }
 
 func (h *HubServer) handleNodes(writer http.ResponseWriter, request *http.Request) {
