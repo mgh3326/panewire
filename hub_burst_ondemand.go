@@ -223,8 +223,7 @@ func (h *HubServer) handleBurstRelease(w http.ResponseWriter, r *http.Request) {
 	if record != nil {
 		h.sendHeartbeatDirectives(copy.Target, record.agent)
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(copy)
+	writeJSON(w, http.StatusOK, copy)
 }
 
 func (h *HubServer) handleBurstHolds(w http.ResponseWriter, r *http.Request) {
@@ -232,8 +231,7 @@ func (h *HubServer) handleBurstHolds(w http.ResponseWriter, r *http.Request) {
 		hubUnauthorized(w)
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(struct {
+	writeJSON(w, http.StatusOK, struct {
 		Holds []hubBurstHold `json:"holds"`
 	}{h.burstHolds()})
 }

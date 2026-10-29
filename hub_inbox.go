@@ -382,7 +382,7 @@ func (h *HubServer) authorizeInbox(w http.ResponseWriter, r *http.Request) bool 
 		}
 	}
 	if h.inbox == nil {
-		writeHubJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_disabled"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_disabled"})
 		return false
 	}
 	return true
@@ -395,10 +395,10 @@ func (h *HubServer) handleInboxList(w http.ResponseWriter, r *http.Request) {
 	lane := r.URL.Query().Get("lane")
 	items, err := h.inbox.store.list(lane, r.URL.Query().Get("unread") == "true")
 	if err != nil {
-		writeHubJSON(w, 503, map[string]string{"error": "inbox_unavailable"})
+		writeJSON(w, 503, map[string]string{"error": "inbox_unavailable"})
 		return
 	}
-	writeHubJSON(w, 200, items)
+	writeJSON(w, 200, items)
 }
 func (h *HubServer) handleInboxCount(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeInbox(w, r) {
@@ -406,10 +406,10 @@ func (h *HubServer) handleInboxCount(w http.ResponseWriter, r *http.Request) {
 	}
 	counts, err := h.inbox.store.counts(r.URL.Query().Get("lane"))
 	if err != nil {
-		writeHubJSON(w, 503, map[string]string{"error": "inbox_unavailable"})
+		writeJSON(w, 503, map[string]string{"error": "inbox_unavailable"})
 		return
 	}
-	writeHubJSON(w, 200, counts)
+	writeJSON(w, 200, counts)
 }
 func (h *HubServer) handleInboxRead(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeInbox(w, r) {
@@ -417,19 +417,19 @@ func (h *HubServer) handleInboxRead(w http.ResponseWriter, r *http.Request) {
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
-		writeHubJSON(w, 400, map[string]string{"error": "invalid_id"})
+		writeJSON(w, 400, map[string]string{"error": "invalid_id"})
 		return
 	}
 	item, err := h.inbox.store.read(id, r.URL.Query().Get("lane"), h.now().UTC())
 	if errors.Is(err, sql.ErrNoRows) {
-		writeHubJSON(w, 404, map[string]string{"error": "not_found"})
+		writeJSON(w, 404, map[string]string{"error": "not_found"})
 		return
 	}
 	if err != nil {
-		writeHubJSON(w, 503, map[string]string{"error": "inbox_unavailable"})
+		writeJSON(w, 503, map[string]string{"error": "inbox_unavailable"})
 		return
 	}
-	writeHubJSON(w, 200, item)
+	writeJSON(w, 200, item)
 }
 
 // handleInboxWait is the bounded long-poll counterpart of handleInboxList: it
@@ -443,14 +443,14 @@ func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
 	}
 	lane := r.URL.Query().Get("lane")
 	if !validReportRelayLaneName(lane) {
-		writeHubJSON(w, http.StatusBadRequest, map[string]string{"error": "lane_required"})
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "lane_required"})
 		return
 	}
 	waitFor := hubInboxWaitMaxWait
 	if raw := r.URL.Query().Get("timeout"); raw != "" {
 		parsed, err := time.ParseDuration(raw)
 		if err != nil || parsed <= 0 {
-			writeHubJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_timeout"})
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_timeout"})
 			return
 		}
 		waitFor = parsed
@@ -462,18 +462,18 @@ func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
 	// slot — the cap bounds only requests that actually block.
 	item, err := h.inbox.store.firstUnread(r.Context(), lane)
 	if err != nil {
-		writeHubJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_unavailable"})
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_unavailable"})
 		return
 	}
 	if item != nil {
-		writeHubJSON(w, http.StatusOK, map[string]any{"item": item})
+		writeJSON(w, http.StatusOK, map[string]any{"item": item})
 		return
 	}
 	select {
 	case h.inbox.waiters <- struct{}{}:
 		defer func() { <-h.inbox.waiters }()
 	default:
-		writeHubJSON(w, http.StatusTooManyRequests, map[string]string{"error": "waiters_full"})
+		writeJSON(w, http.StatusTooManyRequests, map[string]string{"error": "waiters_full"})
 		return
 	}
 	deadline := time.Now().Add(waitFor)
@@ -483,16 +483,16 @@ func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
 		wake := h.inbox.store.waitChan()
 		item, err := h.inbox.store.firstUnread(r.Context(), lane)
 		if err != nil {
-			writeHubJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_unavailable"})
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_unavailable"})
 			return
 		}
 		if item != nil {
-			writeHubJSON(w, http.StatusOK, map[string]any{"item": item})
+			writeJSON(w, http.StatusOK, map[string]any{"item": item})
 			return
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {
-			writeHubJSON(w, http.StatusOK, map[string]any{"item": nil})
+			writeJSON(w, http.StatusOK, map[string]any{"item": nil})
 			return
 		}
 		timer := time.NewTimer(remaining)
@@ -519,20 +519,20 @@ func (h *HubServer) handleInboxAck(w http.ResponseWriter, r *http.Request) {
 		Lane string `json:"lane"`
 	}
 	if !decodeHubJSON(w, r, 4096, &b) || (!b.All && b.ID < 1) || (b.All && b.ID != 0) {
-		writeHubJSON(w, 400, map[string]string{"error": "invalid_request"})
+		writeJSON(w, 400, map[string]string{"error": "invalid_request"})
 		return
 	}
 	if lane := r.URL.Query().Get("lane"); lane != "" {
 		if b.Lane != "" && b.Lane != lane {
-			writeHubJSON(w, 400, map[string]string{"error": "lane_mismatch"})
+			writeJSON(w, 400, map[string]string{"error": "lane_mismatch"})
 			return
 		}
 		b.Lane = lane
 	}
 	n, err := h.inbox.store.ack(b.ID, b.Lane, b.All, h.now().UTC())
 	if err != nil {
-		writeHubJSON(w, 503, map[string]string{"error": "inbox_unavailable"})
+		writeJSON(w, 503, map[string]string{"error": "inbox_unavailable"})
 		return
 	}
-	writeHubJSON(w, 200, map[string]int64{"acked": n})
+	writeJSON(w, 200, map[string]int64{"acked": n})
 }

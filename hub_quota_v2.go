@@ -8,7 +8,6 @@ import (
 	"math"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -276,28 +275,7 @@ func (store *hubQuotaV2Store) persistLocked(lastRevision int64, bindings []Quota
 	if err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(store.path), ".quota-v2-*.tmp")
-	if err != nil {
-		return err
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if err := temporary.Chmod(0o600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Sync(); err != nil {
-		temporary.Close()
-		return err
-	}
-	if err := temporary.Close(); err != nil {
-		return err
-	}
-	return os.Rename(name, store.path)
+	return replaceFileAtomically(store.path, ".quota-v2-*.tmp", data, 0o600)
 }
 
 // quotaV2Time parses RFC3339 with an explicit offset, with the same text and
@@ -752,14 +730,8 @@ func decodeQuotaV2Body(r *http.Request, target any) bool {
 	return decoder.Decode(&extra) == io.EOF
 }
 
-func writeQuotaV2JSON(w http.ResponseWriter, status int, body any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(body)
-}
-
 func quotaV2Error(w http.ResponseWriter, status int, code string) {
-	writeQuotaV2JSON(w, status, map[string]string{"error": code})
+	writeJSON(w, status, map[string]string{"error": code})
 }
 
 // quotaV2Closed answers 503 before any authorization when v2 is not safely
@@ -806,7 +778,7 @@ func (h *HubServer) handleQuotaV2BindingPut(w http.ResponseWriter, r *http.Reque
 		quotaV2Error(w, http.StatusServiceUnavailable, "store_unavailable")
 		return
 	}
-	writeQuotaV2JSON(w, http.StatusOK, binding)
+	writeJSON(w, http.StatusOK, binding)
 }
 
 func (h *HubServer) handleQuotaV2BindingDelete(w http.ResponseWriter, r *http.Request) {
@@ -848,7 +820,7 @@ func (h *HubServer) handleQuotaV2BindingList(w http.ResponseWriter, r *http.Requ
 	if machineID != nil {
 		filter = *machineID
 	}
-	writeQuotaV2JSON(w, http.StatusOK, struct {
+	writeJSON(w, http.StatusOK, struct {
 		Schema    string           `json:"schema"`
 		MachineID *string          `json:"machine_id"`
 		Bindings  []QuotaV2Binding `json:"bindings"`
@@ -891,9 +863,9 @@ func (h *HubServer) handleQuotaV2ObservationPost(w http.ResponseWriter, r *http.
 	case err != nil:
 		quotaV2Error(w, http.StatusServiceUnavailable, "store_unavailable")
 	case created:
-		writeQuotaV2JSON(w, http.StatusCreated, stored)
+		writeJSON(w, http.StatusCreated, stored)
 	default:
-		writeQuotaV2JSON(w, http.StatusOK, stored)
+		writeJSON(w, http.StatusOK, stored)
 	}
 }
 
@@ -922,7 +894,7 @@ func (h *HubServer) handleQuotaV2ObservationList(w http.ResponseWriter, r *http.
 		quotaV2Error(w, http.StatusForbidden, "binding_mismatch")
 		return
 	}
-	writeQuotaV2JSON(w, http.StatusOK, struct {
+	writeJSON(w, http.StatusOK, struct {
 		Schema       string               `json:"schema"`
 		Provider     string               `json:"provider"`
 		AccountRef   string               `json:"account_ref"`

@@ -331,27 +331,17 @@ func publishJobCloseRecord(eventsDir, name string, record jobCloseRecord) (bool,
 		return false, err
 	}
 	body = append(body, '\n')
-	temporary, err := os.CreateTemp(eventsDir, ".close-")
+	temporaryName, err := writeSyncedTemporaryFile(eventsDir, ".close-", body, 0o600)
 	if err != nil {
 		return false, err
 	}
-	temporaryName := temporary.Name()
 	defer os.Remove(temporaryName)
-	if _, err := temporary.Write(body); err != nil {
-		_ = temporary.Close()
-		return false, err
-	}
-	if err := temporary.Close(); err != nil {
-		return false, err
-	}
-	if err := os.Chmod(temporaryName, 0o600); err != nil {
-		return false, err
-	}
 	if err := os.Link(temporaryName, filepath.Join(eventsDir, name)); err != nil {
 		if errors.Is(err, os.ErrExist) {
 			return false, nil
 		}
 		return false, err
 	}
+	syncDirectoryBestEffort(eventsDir)
 	return true, nil
 }

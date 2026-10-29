@@ -311,21 +311,13 @@ func textSHA8(text string) string {
 // as the fixed token "invalid", never the caller value. The verified
 // principal is read from the request context and stays on this line.
 func (s *assistantServer) logAuditWrite(ctx context.Context, identity, tool, subject, key, eventID string, revision int, outcome string, hubRowID int64, sha8, provenance string, quoteLen int, quoteSHA8 string) {
-	if len(subject) > 160 {
-		subject = subject[:160]
-	}
-	if len(key) > 80 {
-		key = key[:80]
-	}
-	if len(eventID) > 160 {
-		eventID = eventID[:160]
-	}
+	subject = utf8PrefixWithin(subject, 160)
+	key = utf8PrefixWithin(key, 80)
+	eventID = utf8PrefixWithin(eventID, 160)
 	if provenance != "" && !validAssistantProvenance(provenance) {
 		provenance = "invalid"
 	}
-	if len(provenance) > 32 {
-		provenance = provenance[:32]
-	}
+	provenance = utf8PrefixWithin(provenance, 32)
 	p := assistantPrincipalFrom(ctx)
 	attrs := []any{
 		"identity", identity,
@@ -954,20 +946,4 @@ func sanitizeLaneText(text string) string {
 		}
 	}
 	return capLaneText(b.String())
-}
-
-// capLaneText is the hk assistantLaneText re-cap shape: text over the
-// lane-event byte limit is cut at a UTF-8 boundary so the result plus the
-// ellipsis marker fits, then the "…" is appended — and only ever appended
-// when something was actually cut.
-func capLaneText(text string) string {
-	if len(text) <= laneEventTextLimit {
-		return text
-	}
-	keep := laneEventTextLimit - len("…")
-	cut := text[:keep]
-	for len(cut) > 0 && !utf8.ValidString(cut) {
-		cut = cut[:len(cut)-1]
-	}
-	return cut + "…"
 }

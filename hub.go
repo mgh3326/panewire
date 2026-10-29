@@ -862,8 +862,7 @@ func (h *HubServer) handleUIData(writer http.ResponseWriter, request *http.Reque
 		return
 	}
 	writer.Header().Set("Cache-Control", "no-store")
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(h.uiData())
+	writeJSON(writer, http.StatusOK, h.uiData())
 }
 
 // authorizeUI gates the read-only /ui surface. It deliberately does not trust
@@ -947,8 +946,7 @@ func (h *HubServer) handleBurst(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	policy, state, configured := h.burstStatus()
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(struct {
+	writeJSON(writer, http.StatusOK, struct {
 		Configured  bool        `json:"configured"`
 		Policy      BurstPolicy `json:"policy,omitempty"`
 		SourceRuns  int         `json:"source_runs"`
@@ -965,8 +963,7 @@ func (h *HubServer) handleOrphanedJobs(writer http.ResponseWriter, request *http
 		hubUnauthorized(writer)
 		return
 	}
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(struct {
+	writeJSON(writer, http.StatusOK, struct {
 		Jobs []hubJobEventPayload `json:"jobs"`
 	}{Jobs: h.orphanedJobs()})
 }
@@ -981,8 +978,7 @@ func (h *HubServer) handleJobs(writer http.ResponseWriter, request *http.Request
 		http.Error(writer, "invalid machine", http.StatusBadRequest)
 		return
 	}
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(struct {
+	writeJSON(writer, http.StatusOK, struct {
 		Jobs []hubConsoleJob `json:"jobs"`
 	}{Jobs: h.activeConsoleJobs(machine)})
 }
@@ -1007,13 +1003,11 @@ func (h *HubServer) handleReassignJob(writer http.ResponseWriter, request *http.
 		http.Error(writer, "job reassignment rejected", http.StatusConflict)
 		return
 	}
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(result)
+	writeJSON(writer, http.StatusOK, result)
 }
 
 func (h *HubServer) handleHealthz(writer http.ResponseWriter, _ *http.Request) {
-	writer.Header().Set("Content-Type", "application/json")
-	_, _ = writer.Write([]byte(`{"status":"ok"}\n`))
+	writeJSON(writer, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *HubServer) handleNodes(writer http.ResponseWriter, request *http.Request) {
@@ -1021,8 +1015,7 @@ func (h *HubServer) handleNodes(writer http.ResponseWriter, request *http.Reques
 		hubUnauthorized(writer)
 		return
 	}
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(struct {
+	writeJSON(writer, http.StatusOK, struct {
 		Nodes []HubNode `json:"nodes"`
 	}{Nodes: h.Nodes()})
 }

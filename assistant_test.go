@@ -307,8 +307,7 @@ func (f *fakeAssistantHK) serve(w http.ResponseWriter, r *http.Request) {
 }
 
 func (f *fakeAssistantHK) writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
+	writeJSON(w, http.StatusOK, v)
 }
 
 func (f *fakeAssistantHK) snapshotPending() assistantPending {

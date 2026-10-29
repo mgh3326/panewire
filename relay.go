@@ -9,7 +9,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 )
 
 const (
@@ -171,24 +170,12 @@ func escalationRelayText(event hubJobEventPayload) string {
 
 func completedRelayText(completion hubJobEventPayload) string {
 	line := strings.ReplaceAll(strings.ReplaceAll(completion.ReportLastLine, "\n", " "), "\r", " ")
-	if len(line) > 240 {
-		line = line[:240]
-	}
+	line = truncateRelayText(line, 240)
 	reason := ""
 	if completion.Reason != "" {
 		reason = " [reason: " + completion.Reason + "]"
 	}
 	return "(같은 내용이 두 번 보이면 재실행 금지) [report] " + completion.Label + " (" + completion.Host + ")" + reason + " :: " + line + " → " + completion.ReportPath
-}
-
-func truncateRelayText(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	for limit > 0 && !utf8.ValidString(value[:limit]) {
-		limit--
-	}
-	return value[:limit]
 }
 
 // boundRelayText protects the websocket note contract while keeping the

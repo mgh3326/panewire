@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"path/filepath"
 )
 
 const acceptingOverrideAuto = "auto"
@@ -73,20 +72,7 @@ func (h *HubServer) persistAcceptingOverridesLocked(next map[string]string) erro
 	if err != nil {
 		return err
 	}
-	temporary, err := os.CreateTemp(filepath.Dir(h.r19a.acceptingOverridesPath), ".accepting-overrides-*")
-	if err != nil {
-		return err
-	}
-	name := temporary.Name()
-	defer os.Remove(name)
-	if err := temporary.Chmod(0600); err != nil {
-		temporary.Close()
-		return err
-	}
-	if _, err := temporary.Write(append(b, '\n')); err != nil || temporary.Close() != nil {
-		return errors.New("write override file")
-	}
-	return os.Rename(name, h.r19a.acceptingOverridesPath)
+	return replaceFileAtomically(h.r19a.acceptingOverridesPath, ".accepting-overrides-*", append(b, '\n'), 0600)
 }
 
 func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request *http.Request) {
@@ -127,8 +113,7 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 	}
 	h.placementCache = placementCache{}
 	h.mu.Unlock()
-	writer.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(writer).Encode(struct {
+	writeJSON(writer, http.StatusOK, struct {
 		Machine   string `json:"machine"`
 		Mode      string `json:"mode"`
 		Effective bool   `json:"accepting_effective"`
