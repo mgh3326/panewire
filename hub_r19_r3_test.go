@@ -1,14 +1,10 @@
 package panewire
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 	"sync"
@@ -17,67 +13,6 @@ import (
 
 	"github.com/coder/websocket"
 )
-
-// scopefuelEmitting writes a fixture scopefuel that prints exactly body.
-func scopefuelEmitting(t *testing.T, body []byte) string {
-	t.Helper()
-	directory := t.TempDir()
-	payload := filepath.Join(directory, "payload")
-	if err := os.WriteFile(payload, body, 0644); err != nil {
-		t.Fatal(err)
-	}
-	command := filepath.Join(directory, "scopefuel")
-	if err := os.WriteFile(command, []byte("#!/bin/sh\ncat "+payload+"\n"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	return command
-}
-
-// TestR19QuotaOutputBoundedByEncodedSize pins the bound on the side that
-// matters. A 16 KiB stdout is within the raw cap, but JSON escaping doubles
-// quotes and newlines and sextuples control bytes, so the same output can still
-// exceed the 32 KiB message the hub is willing to read; such a report must be
-// refused at the node rather than silently closing the connection.
-func TestR19QuotaOutputBoundedByEncodedSize(t *testing.T) {
-	for _, testCase := range []struct {
-		name string
-		fill byte
-	}{
-		{"quote", '"'},
-		{"newline", '\n'},
-		{"control", 0x01},
-	} {
-		t.Run(testCase.name, func(t *testing.T) {
-			body := bytes.Repeat([]byte{testCase.fill}, hubQuotaOutputLimit)
-			if encoded := hubQuotaEncodedSize(body); encoded <= hubQuotaEncodedLimit {
-				t.Fatalf("fixture does not exercise the encoded bound: encoded=%d", encoded)
-			}
-			out, err := runHubScopefuel(context.Background(), scopefuelEmitting(t, body))
-			if err == nil || err.Error() != "output_too_large" {
-				t.Fatalf("raw=%d error=%v, want output_too_large", len(body), err)
-			}
-			if len(out) != 0 {
-				t.Fatalf("rejected report still returned %d bytes", len(out))
-			}
-		})
-	}
-	// The encoded bound must not shrink the documented raw allowance for
-	// ordinary output: 16 KiB that needs no escaping still passes.
-	plain := bytes.Repeat([]byte{'a'}, hubQuotaOutputLimit)
-	out, err := runHubScopefuel(context.Background(), scopefuelEmitting(t, plain))
-	if err != nil || len(out) != hubQuotaOutputLimit {
-		t.Fatalf("unescaped %d bytes rejected: len=%d err=%v", hubQuotaOutputLimit, len(out), err)
-	}
-	// Whatever passes must fit the hub's message limit once wrapped.
-	report, marshalErr := json.Marshal(struct {
-		Type      string `json:"type"`
-		RequestID string `json:"request_id"`
-		Payload   string `json:"payload"`
-	}{"quota.report", strings.Repeat("r", 96), string(out)})
-	if marshalErr != nil || len(report) > hubMaxMessageBytes {
-		t.Fatalf("accepted report does not fit the protocol limit: len=%d limit=%d err=%v", len(report), hubMaxMessageBytes, marshalErr)
-	}
-}
 
 // TestR19PreferenceSwitchesDoNotNest walks the node up five preferred endpoints
 // in one session. Each switch used to be a recursive serve call, so the
