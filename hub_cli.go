@@ -129,8 +129,8 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if deliveryPolicyDefault == "" {
 		deliveryPolicyDefault = "default"
 	}
-	deliveryPolicyPath := flags.String("delivery-policy", deliveryPolicyDefault, "default embedded YAML, YAML file, or off for legacy classification (env PANEWIRE_DELIVERY_POLICY)")
-	inboxStorePath := flags.String("inbox-store", defaultHubInboxPath(), "durable hub inbox SQLite file")
+	deliveryPolicyPath := flags.String("delivery-policy", deliveryPolicyDefault, "default embedded YAML, YAML file, or off to disable the inbox (env PANEWIRE_DELIVERY_POLICY)")
+	inboxStorePath := flags.String("inbox-store", defaultHubInboxPath(), "durable hub inbox SQLite file; empty disables the inbox")
 	quotaV2StorePath := flags.String("quota-v2-store", "", "mode-0600 JSON file for account-scoped quota v2 bindings and observations; without it /v2/quota is closed (503)")
 	quotaV2ClockSkew := flags.Duration("quota-v2-clock-skew", 0, "Δ_hub: bound on node-vs-hub clock error for quota v2 observation times (default 0: node times must not be ahead of the hub)")
 	logFilePath := flags.String("log-file", "", "optional hub log file, appended with mode 0640; stderr/journal output is unchanged")

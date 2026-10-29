@@ -21,6 +21,9 @@ var defaultDeliveryPolicy []byte
 // stays legal.
 var deliveryTagShape = regexp.MustCompile(`^[0-9A-Za-z_](?:.*[0-9A-Za-z_])?$`)
 
+// These safety tags cannot be demoted by a custom inbox policy or an emitter.
+var mustActDeliveryTags = regexp.MustCompile(`(?i)\b(?:BLOCKER|READY|ESC|BOUNCE|URGENT|needs_decision)\b`)
+
 type deliveryRule struct {
 	Match  string   `yaml:"match"`
 	Tags   []string `yaml:"tags"`
@@ -113,14 +116,14 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 				}
 			}
 			for _, tag := range r.Tags {
-				// Tags are whole-word, case-sensitive literals: READY never
+				// Tags are whole-word, case-insensitive literals: READY never
 				// matches READYING and ESC never matches ESCAPE, so the
 				// must-act vocabulary cannot be set off by look-alikes.
 				// Word-char edges are what \b needs to mean that.
 				if !deliveryTagShape.MatchString(tag) {
 					return fmt.Errorf("invalid delivery tag")
 				}
-				re, err := regexp.Compile(`\b` + regexp.QuoteMeta(tag) + `\b`)
+				re, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(tag) + `\b`)
 				if err != nil {
 					return err
 				}
@@ -145,15 +148,18 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 }
 
 func (p *deliveryPolicy) classify(lane, kind string, e hubJobEventPayload, replay bool) string {
+	if p.legacy || p.mustAct(lane, e) {
+		return "interrupt"
+	}
 	if e.DeliveryClass != "" {
 		return e.DeliveryClass
 	}
 	// Operator chat is an intentional turn, including declarative instructions.
-	if chatRelayEventPattern.MatchString(e.EventID) || p.legacy {
+	if chatRelayEventPattern.MatchString(e.EventID) {
 		return "interrupt"
 	}
 	local := p.Lanes[lane]
-	text := e.Text + "\n" + e.ReportLastLine + "\n" + e.Question + "\n" + e.Reason
+	text := deliveryEventText(e)
 	for _, rules := range [][]deliveryRule{local.Rules, p.Rules} {
 		for _, r := range rules {
 			if r.Kind != "" && r.Kind != kind {
@@ -182,6 +188,32 @@ func (p *deliveryPolicy) classify(lane, kind string, e hubJobEventPayload, repla
 		return local.Default
 	}
 	return p.Default
+}
+
+func deliveryEventText(e hubJobEventPayload) string {
+	return e.Text + "\n" + e.ReportLastLine + "\n" + e.Question + "\n" + e.Reason
+}
+
+func (p *deliveryPolicy) mustAct(lane string, e hubJobEventPayload) bool {
+	text := deliveryEventText(e)
+	if mustActDeliveryTags.MatchString(text) {
+		return true
+	}
+	// Additional interrupt tags in either scope also outrank all inbox rules,
+	// even when another rule would otherwise match first.
+	for _, rules := range [][]deliveryRule{p.Lanes[lane].Rules, p.Rules} {
+		for _, rule := range rules {
+			if rule.Class != "interrupt" {
+				continue
+			}
+			for _, tag := range rule.tags {
+				if tag.MatchString(text) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (p *deliveryPolicy) timing(lane, class string) (deadline, window time.Duration) {

@@ -26,7 +26,7 @@ func TestQuietClassification(t *testing.T) {
 		name, kind, text, explicit, want string
 		replay                           bool
 	}{
-		{"completion", "lane.event", "[worker] done | PR ready", "", "inbox", false},
+		{"completion", "lane.event", "[worker] done | PR posted", "", "inbox", false},
 		{"job completion", "job.completed", "VERDICT: DONE", "", "inbox", false},
 		{"FYI", "lane.event", "FYI new build available", "", "inbox", false},
 		{"ack", "lane.event", "[desk] ack | received", "", "inbox", false},
@@ -42,7 +42,7 @@ func TestQuietClassification(t *testing.T) {
 		{"Korean question", "lane.event", "이 방법으로 진행할까요？", "", "interrupt", false},
 		{"escalation", "job.escalate", "pick a path", "", "interrupt", false},
 		{"unknown action", "lane.event", "host disk failed", "", "interrupt", false},
-		{"explicit inbox", "lane.event", "BLOCKER?", "inbox", "inbox", false},
+		{"must-act beats explicit inbox", "lane.event", "BLOCKER?", "inbox", "interrupt", false},
 		{"explicit interrupt", "lane.event", "[worker] done | ready", "interrupt", "interrupt", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -52,11 +52,11 @@ func TestQuietClassification(t *testing.T) {
 			}
 		})
 	}
-	local, err := parseDeliveryPolicy([]byte("default: interrupt\ndeadlines: {inbox: 30m}\ndigest_window: 0s\nrules: []\nlanes:\n  lane-a:\n    deadlines: {inbox: 5m}\n    digest_window: 2s\n    rules:\n      - match: urgent\n        class: inbox\n"))
+	local, err := parseDeliveryPolicy([]byte("default: interrupt\ndeadlines: {inbox: 30m}\ndigest_window: 0s\nrules: []\nlanes:\n  lane-a:\n    deadlines: {inbox: 5m}\n    digest_window: 2s\n    rules:\n      - match: notice\n        class: inbox\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if local.classify("lane-a", "lane.event", hubJobEventPayload{Text: "urgent"}, false) != "inbox" {
+	if local.classify("lane-a", "lane.event", hubJobEventPayload{Text: "notice"}, false) != "inbox" {
 		t.Fatal("lane rule not applied")
 	}
 	d, w := local.timing("lane-a", "inbox")
@@ -89,53 +89,49 @@ func quietHub(t *testing.T, path, policy string, hk *handoffkeepRelayClient, now
 }
 
 func TestQuietInboxStorageAndRestart(t *testing.T) {
-	for _, policy := range []string{"default", "off"} {
-		t.Run(policy, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "inbox.sqlite3")
-			now := time.Now().UTC()
-			h, agent := quietHub(t, path, policy, nil, &now)
-			event := quietEvent("one", "[worker] done | ready")
-			event.DeliveryClass = "inbox"
-			r := h.relayLaneEvent(event, agent)
-			if r.ID == 0 || r.PersistFailed || len(agent.relays) != 0 || len(agent.persisted) != 1 {
-				t.Fatalf("result=%+v relays=%d persisted=%d", r, len(agent.relays), len(agent.persisted))
-			}
-			h.relayLaneEvent(event, agent)
-			counts, err := h.inbox.store.counts("lane-a")
-			if err != nil || counts["lane-a"] != 1 {
-				t.Fatal(counts, err)
-			}
-			h.Close()
-			h2, agent2 := quietHub(t, path, "off", nil, &now)
-			// A new explicit class or a rollback policy cannot reclassify this identity.
-			event.DeliveryClass = "interrupt"
-			event.Text = "changed retry?"
-			h2.relayLaneEvent(event, agent2)
-			items, err := h2.inbox.store.list("lane-a", true)
-			if err != nil || len(items) != 1 || items[0].Event.Text != "[worker] done | ready" {
-				t.Fatal(items, err)
-			}
-			if len(agent2.relays) != 0 {
-				t.Fatal("inbox retry injected")
-			}
-			if _, err := h2.inbox.store.read(r.ID, "lane-a", now); err != nil {
-				t.Fatal(err)
-			}
-			counts, _ = h2.inbox.store.counts("lane-a")
-			if counts["lane-a"] != 0 {
-				t.Fatal(counts)
-			}
-			if n, err := h2.inbox.store.ack(r.ID, "lane-b", false, now); err != nil || n != 0 {
-				t.Fatal(n, err)
-			}
-			if n, err := h2.inbox.store.ack(0, "lane-a", true, now); err != nil || n != 1 {
-				t.Fatal(n, err)
-			}
-			info, _ := os.Stat(path)
-			if info.Mode().Perm() != 0600 {
-				t.Fatal(info.Mode())
-			}
-		})
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	now := time.Now().UTC()
+	h, agent := quietHub(t, path, "default", nil, &now)
+	event := quietEvent("one", "[worker] done | report posted")
+	event.DeliveryClass = "inbox"
+	r := h.relayLaneEvent(event, agent)
+	if r.ID == 0 || r.PersistFailed || len(agent.relays) != 0 || len(agent.persisted) != 1 {
+		t.Fatalf("result=%+v relays=%d persisted=%d", r, len(agent.relays), len(agent.persisted))
+	}
+	h.relayLaneEvent(event, agent)
+	counts, err := h.inbox.store.counts("lane-a")
+	if err != nil || counts["lane-a"] != 1 {
+		t.Fatal(counts, err)
+	}
+	h.Close()
+	h2, agent2 := quietHub(t, path, "default", nil, &now)
+	// A new explicit class or changed retry body cannot reclassify this identity.
+	event.DeliveryClass = "interrupt"
+	event.Text = "changed retry?"
+	h2.relayLaneEvent(event, agent2)
+	items, err := h2.inbox.store.list("lane-a", true)
+	if err != nil || len(items) != 1 || items[0].Event.Text != "[worker] done | report posted" {
+		t.Fatal(items, err)
+	}
+	if len(agent2.relays) != 0 {
+		t.Fatal("inbox retry injected")
+	}
+	if _, err := h2.inbox.store.read(r.ID, "lane-a", now); err != nil {
+		t.Fatal(err)
+	}
+	counts, _ = h2.inbox.store.counts("lane-a")
+	if counts["lane-a"] != 0 {
+		t.Fatal(counts)
+	}
+	if n, err := h2.inbox.store.ack(r.ID, "lane-b", false, now); err != nil || n != 0 {
+		t.Fatal(n, err)
+	}
+	if n, err := h2.inbox.store.ack(0, "lane-a", true, now); err != nil || n != 1 {
+		t.Fatal(n, err)
+	}
+	info, _ := os.Stat(path)
+	if info.Mode().Perm() != 0600 {
+		t.Fatal(info.Mode())
 	}
 }
 
@@ -264,7 +260,7 @@ func TestQuietReplayHandling(t *testing.T) {
 				t.Fatal("replay injected")
 			}
 			h.Close()
-			h2, a2 := quietHub(t, path, "off", hk, &now)
+			h2, a2 := quietHub(t, path, "default", hk, &now)
 			replay(h2)
 			if len(a2.relays) != 0 {
 				t.Fatal("replay injected after restart")
@@ -457,6 +453,12 @@ func TestQuietCLIDefaultPolicyEnabled(t *testing.T) {
 				t.Fatal(code, err)
 			}
 			defer h.Close()
+			if tc.policy == "off" {
+				if h.inbox != nil {
+					t.Fatal("off opened the inbox")
+				}
+				return
+			}
 			if h.inbox == nil {
 				t.Fatal("default inbox disabled")
 			}
@@ -603,7 +605,7 @@ func TestQuietMustActWholeWordPolicy(t *testing.T) {
 }
 
 // A failed flush pass must not spin: attempts happen once per growing backoff
-// window, and a contract-level rejection stops them entirely.
+// window; individual permanent rejections are quarantined separately.
 func TestQuietDigestPersistenceBackoff(t *testing.T) {
 	fake, hk, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
@@ -663,49 +665,6 @@ func TestQuietDigestPersistenceBackoff(t *testing.T) {
 	h.flushInbox()
 	if len(agent.relays) != 1 || h.inbox.failures != 0 {
 		t.Fatalf("recovery relays=%d failures=%d", len(agent.relays), h.inbox.failures)
-	}
-}
-
-// A 400-class contract rejection disables digest persistence for the process:
-// the single loud decision replaces the retry storm, and the batch stays
-// durable for a fixed handoffkeep.
-func TestQuietDigestContractErrorDisables(t *testing.T) {
-	fake, hk, closeServer := newFakeHandoffkeep(t)
-	defer closeServer()
-	now := time.Now()
-	policyPath := filepath.Join(t.TempDir(), "delivery.yaml")
-	raw := strings.Replace(string(defaultDeliveryPolicy), "digest_window: 0s", "digest_window: 2s", 1)
-	if err := os.WriteFile(policyPath, []byte(raw), 0600); err != nil {
-		t.Fatal(err)
-	}
-	h, agent := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), policyPath, hk, &now)
-	for i := 0; i < 2; i++ {
-		h.relayLaneEvent(quietEvent(fmt.Sprint(i), "question?"), agent)
-	}
-	now = now.Add(3 * time.Second)
-	fake.mu.Lock()
-	fake.status = http.StatusBadRequest
-	fake.mu.Unlock()
-	h.flushInbox()
-	if !h.inboxDigestDisabled() {
-		t.Fatal("contract rejection did not disable digest persistence")
-	}
-	fake.mu.Lock()
-	fake.status = http.StatusCreated
-	fake.calls = nil
-	fake.mu.Unlock()
-	now = now.Add(time.Hour)
-	for i := 0; i < 5; i++ {
-		h.flushInbox()
-	}
-	fake.mu.Lock()
-	defer fake.mu.Unlock()
-	if len(fake.calls) != 0 {
-		t.Fatalf("disabled flush still called handoffkeep %d times", len(fake.calls))
-	}
-	batches, err := h.inbox.store.pendingBatches()
-	if err != nil || len(batches) != 1 {
-		t.Fatalf("durable batch lost: %v %v", batches, err)
 	}
 }
 
@@ -779,11 +738,21 @@ func TestQuietDeliveryPolicyEnvKillSwitch(t *testing.T) {
 	for _, tc := range []struct{ env, want string }{{"off", "interrupt"}, {"default", "inbox"}} {
 		t.Run(tc.env, func(t *testing.T) {
 			t.Setenv("PANEWIRE_DELIVERY_POLICY", tc.env)
-			h, _, code, err := newHubServerForCLI([]string{"--hub-auth", auth, "--inbox-store", filepath.Join(t.TempDir(), "inbox.sqlite3")}, nil)
+			path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+			h, _, code, err := newHubServerForCLI([]string{"--hub-auth", auth, "--inbox-store", path}, nil)
 			if err != nil || code != ExitOK {
 				t.Fatal(code, err)
 			}
 			defer h.Close()
+			if tc.env == "off" {
+				if h.inbox != nil {
+					t.Fatal("off opened the inbox")
+				}
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatal("env kill switch touched inbox path", err)
+				}
+				return
+			}
 			if got := h.inbox.policy.classify("lane-a", "lane.event", quietEvent("x", "FYI"), false); got != tc.want {
 				t.Fatal(got, tc.want)
 			}

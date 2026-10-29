@@ -43,6 +43,19 @@ type laneInboxBatch struct {
 	Text string
 }
 
+func (b laneInboxBatch) invalidReason() string {
+	if len(b.Text) > laneEventTextLimit {
+		return "lane.event text exceeds 2048 bytes"
+	}
+	if !validLaneEventText(b.Text) {
+		return "lane.event text is empty, invalid UTF-8, or contains control characters"
+	}
+	if !validLaneEventID(b.ID) || !hubAgentLabelPattern.MatchString(b.Lane) {
+		return "invalid lane.event batch identity or lane"
+	}
+	return ""
+}
+
 func openLaneInboxStore(path string) (*laneInboxStore, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
@@ -77,13 +90,88 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		`CREATE INDEX IF NOT EXISTS lane_inbox_due ON lane_inbox(due_at) WHERE class='inbox' AND read_at=0 AND escalation_batch=''`,
 		`CREATE INDEX IF NOT EXISTS lane_inbox_digest ON lane_inbox(lane,digest_at) WHERE digest_at>0 AND digest_batch=''`,
 		`CREATE TABLE IF NOT EXISTS lane_inbox_batches (id TEXT PRIMARY KEY, lane TEXT NOT NULL, text TEXT NOT NULL, sent INTEGER NOT NULL DEFAULT 0)`,
+		`CREATE TABLE IF NOT EXISTS lane_inbox_batch_quarantine (batch_id TEXT PRIMARY KEY, reason TEXT NOT NULL)`,
 	} {
 		if _, err := db.Exec(q); err != nil {
 			db.Close()
 			return nil, err
 		}
 	}
-	return &laneInboxStore{db: db}, nil
+	s := &laneInboxStore{db: db}
+	// Scan the entire old queue, not just the first pending page. Round-1
+	// multiline batches must be inert before the first startup flush.
+	if err := s.quarantineInvalidBatches(); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return s, nil
+}
+
+func (s *laneInboxStore) quarantineBatch(id, reason string) error {
+	_, err := s.db.Exec(`INSERT INTO lane_inbox_batch_quarantine(batch_id,reason) VALUES(?,?) ON CONFLICT(batch_id) DO NOTHING`, id, reason)
+	return err
+}
+
+func (s *laneInboxStore) quarantineInvalidBatches() error {
+	rows, err := s.db.Query(`SELECT id,lane,text FROM lane_inbox_batches WHERE sent=0 AND id NOT IN (SELECT batch_id FROM lane_inbox_batch_quarantine)`)
+	if err != nil {
+		return err
+	}
+	var invalid []laneInboxBatch
+	for rows.Next() {
+		var b laneInboxBatch
+		if err := rows.Scan(&b.ID, &b.Lane, &b.Text); err != nil {
+			rows.Close()
+			return err
+		}
+		if b.invalidReason() != "" {
+			invalid = append(invalid, b)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, b := range invalid {
+		if err := s.quarantineBatch(b.ID, b.invalidReason()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// recoverMustAct scans all unread originals at startup, including rows without
+// a deadline and rows claimed by a quarantined legacy batch. A valid existing
+// escalation claim stays intact, so restart cannot escalate an item twice.
+func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
+	rows, err := s.db.Query(`SELECT ` + laneInboxColumns + ` FROM lane_inbox WHERE class='inbox' AND read_at=0 AND (escalation_batch='' OR escalation_batch IN (SELECT batch_id FROM lane_inbox_batch_quarantine))`)
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		i, err := scanLaneInbox(rows)
+		if err != nil {
+			rows.Close()
+			return err
+		}
+		if policy.mustAct(i.Lane, i.Event) {
+			ids = append(ids, i.ID)
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, id := range ids {
+		// Any positive timestamp in the past makes it immediately eligible.
+		if _, err := s.db.Exec(`UPDATE lane_inbox SET due_at=1,escalation_batch='' WHERE id=?`, id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch`
@@ -269,7 +357,7 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 }
 
 func (s *laneInboxStore) pendingBatches() ([]laneInboxBatch, error) {
-	rows, err := s.db.Query(`SELECT id,lane,text FROM lane_inbox_batches WHERE sent=0 ORDER BY rowid LIMIT 100`)
+	rows, err := s.db.Query(`SELECT id,lane,text FROM lane_inbox_batches WHERE sent=0 AND id NOT IN (SELECT batch_id FROM lane_inbox_batch_quarantine) ORDER BY rowid LIMIT 100`)
 	if err != nil {
 		return nil, err
 	}

@@ -234,11 +234,11 @@ func (h *HubServer) relayJobCompletionFrom(senderMachine string, completion hubJ
 // relayLaneEventResult is the HTTP ingress view of the existing lane-event
 // relay state machine. Node callers intentionally ignore it.
 type relayLaneEventResult struct {
-	ID              int64
-	Routed          bool
-	Machine         string
-	Duplicate       bool
-	PersistFailed   bool
+	ID            int64
+	Routed        bool
+	Machine       string
+	Duplicate     bool
+	PersistFailed bool
 	// PersistStatus is handoffkeep's HTTP status on a PersistFailed durable
 	// write, so callers can tell a contract rejection (4xx) from a transient
 	// outage. Zero covers transport failures and a nil handoffkeep.
@@ -335,12 +335,9 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 	stored, status, persisted := h.persistRelayEventRecord(ctx, "lane.event", event, persistRoute)
 	if !persisted {
 		if ctx.Err() == nil {
-			// A write abandoned because Close cancelled the caller's context
-			// is not a contract failure; the honest signal stays in the Warn
-			// inside persistRelayEventRecord. A 4xx means handoffkeep cannot
-			// accept the lane.event contract at all — e.g. a schema older
-			// than v7 — or the event itself violates it.
-			h.logger.Error("lane.event persistence failed; verify handoffkeep schema v7 and the lane.event text contract", "lane", event.OwnerLane, "producer_event_id", event.EventID, "status", status)
+			// A rejected write describes this event, not server capability.
+			// Only the read-only startup probe can disable all digests.
+			h.logger.Error("lane.event persistence failed", "lane", event.OwnerLane, "producer_event_id", event.EventID, "status", status)
 		}
 		h.forgetRelayEvent(key)
 		h.broadcastRelayUnpersisted("lane.event", event)

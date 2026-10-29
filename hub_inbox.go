@@ -14,17 +14,15 @@ import (
 )
 
 type hubInbox struct {
-	store   *laneInboxStore
-	policy  *deliveryPolicy
+	store  *laneInboxStore
+	policy *deliveryPolicy
 	// flushMu serializes one flush pass and owns every field below it;
 	// Close takes it to wait out an in-flight pass before closing the store.
 	flushMu sync.Mutex
 	// failures counts consecutive failed flush passes and nextAttempt holds
 	// the backoff gate they set, so a broken sink costs one attempt per
-	// growing window instead of one per tick. persistDisabled latches a
-	// contract-level rejection (a 400/404 from handoffkeep): digest
-	// delivery cannot succeed again this process, so the flush stops
-	// entirely — the items themselves stay durable in the store.
+	// growing window instead of one per tick. Only the startup contract probe
+	// can latch persistDisabled; an individual bad batch is quarantined.
 	failures        int
 	nextAttempt     time.Time
 	persistDisabled bool
@@ -49,14 +47,11 @@ func defaultHubInboxPath() string {
 }
 
 func newHubInbox(policyPath, storePath string) (*hubInbox, error) {
-	if policyPath == "" && storePath == "" {
+	if policyPath == "off" || storePath == "" {
 		return nil, nil
-	} // embedded callers may retain the legacy contract
+	} // The kill switch never opens or modifies the inbox database.
 	if policyPath == "" {
 		policyPath = "default"
-	}
-	if storePath == "" {
-		return nil, fmt.Errorf("inbox store path is required")
 	}
 	policy, err := loadDeliveryPolicy(policyPath)
 	if err != nil {
@@ -64,6 +59,10 @@ func newHubInbox(policyPath, storePath string) (*hubInbox, error) {
 	}
 	store, err := openLaneInboxStore(storePath)
 	if err != nil {
+		return nil, err
+	}
+	if err := store.recoverMustAct(policy); err != nil {
+		store.db.Close()
 		return nil, err
 	}
 	return &hubInbox{store: store, policy: policy}, nil
@@ -80,8 +79,8 @@ func (h *HubServer) receivingLane(kind string, e hubJobEventPayload) string {
 }
 
 // receiveInbox returns handled=true only after durable ownership, or on a
-// storage error (which must never fall through to pane injection). Direct
-// interrupts retain the existing handoffkeep and node receipt machinery.
+// storage error for an inbox-class event. Interrupts fail open to the existing
+// handoffkeep and node receipt machinery.
 func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender *hubAgent, replay bool) (result relayLaneEventResult, handled bool) {
 	if h.inbox == nil || event.sinkOnly {
 		return result, false
@@ -89,11 +88,16 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	lane := h.receivingLane(kind, *event)
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
 	deadline, window := h.inbox.policy.timing(lane, class)
-	if event.noDigest || chatRelayEventPattern.MatchString(event.EventID) {
+	if event.noDigest || h.inbox.policy.mustAct(lane, *event) || chatRelayEventPattern.MatchString(event.EventID) {
 		window = 0
 	}
 	item, err := h.inbox.store.put(relayEventDedupeKey(kind, *event), lane, kind, class, *event, h.now().UTC(), deadline, window)
 	if err != nil {
+		if class == "interrupt" {
+			event.DeliveryClass = class
+			h.logger.Error("interrupt inbox persistence failed; continuing relay delivery", "kind", kind, "lane", lane)
+			return result, false
+		}
 		h.logger.Error("inbox persistence failed; event remains unacknowledged", "kind", kind, "lane", lane)
 		return relayLaneEventResult{PersistFailed: true}, true
 	}
@@ -237,6 +241,14 @@ func (h *HubServer) flushInbox() {
 		if h.closeCtx.Err() != nil {
 			return
 		}
+		if reason := b.invalidReason(); reason != "" {
+			if err := h.inbox.store.quarantineBatch(b.ID, reason); err != nil {
+				h.logger.Error("inbox batch quarantine failed")
+				failed = true
+				return
+			}
+			continue
+		}
 		event := hubJobEventPayload{JobID: laneEventTransportID(b.Lane, b.ID), Epoch: 1, OwnerLane: b.Lane, EventID: b.ID, Text: b.Text, DeliveryClass: "interrupt", DeliverPolicy: "now", noDigest: true}
 		result := h.relayLaneEventContext(h.closeCtx, event, nil)
 		// Handoffkeep now owns the stable batch identity, including an unrouted
@@ -250,16 +262,29 @@ func (h *HubServer) flushInbox() {
 		if !result.PersistFailed {
 			continue
 		}
-		failed = true
-		if handoffkeepContractError(result.PersistStatus) {
-			h.inbox.persistDisabled = true
-			h.logger.Error("inbox digest delivery disabled: handoffkeep rejected the lane.event relay contract (schema v7); upgrade handoffkeep and restart the hub to enable digests", "status", result.PersistStatus)
+		if inboxBatchPermanentlyRejected(result.PersistStatus) {
+			reason := fmt.Sprintf("handoffkeep permanently rejected batch: HTTP %d", result.PersistStatus)
+			if err := h.inbox.store.quarantineBatch(b.ID, reason); err != nil {
+				h.logger.Error("inbox batch quarantine failed")
+				failed = true
+				return
+			}
+			continue
 		}
+		failed = true
 		// One failed persistence attempt ends the pass: whatever made this
 		// batch fail applies to the rest, so the pass — and its one error —
 		// happens at most once per backoff window.
 		return
 	}
+}
+
+func inboxBatchPermanentlyRejected(status int) bool {
+	// Auth/configuration failures and retryable request failures apply to the
+	// sink, not the batch's contents. Preserve those batches and back off.
+	return status >= 400 && status < 500 && status != http.StatusUnauthorized &&
+		status != http.StatusForbidden && status != http.StatusRequestTimeout &&
+		status != http.StatusTooEarly && status != http.StatusTooManyRequests
 }
 
 func (h *HubServer) authorizeInbox(w http.ResponseWriter, r *http.Request) bool {

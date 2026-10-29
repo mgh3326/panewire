@@ -1,5 +1,5 @@
-# First matching rule wins. Lane rules precede these defaults.
-# Explicit emit --deliver interrupt|inbox always wins.
+# Must-act tags always interrupt, ahead of explicit class and all inbox rules.
+# Otherwise explicit class wins, then the first lane/global rule.
 default: interrupt
 deadlines:
   inbox: 30m
@@ -7,8 +7,7 @@ deadlines:
 # Off by default; e.g. 2s combines interrupts for each receiving lane.
 digest_window: 0s
 rules:
-  # Whole-word, case-sensitive must-act tags: only the deliberate
-  # conventions interrupt. READYING and ESCAPE do not match.
+  # Whole-word, case-insensitive must-act tags. READYING and ESCAPE do not match.
   - tags: [BLOCKER, READY, ESC, BOUNCE, URGENT, needs_decision]
     class: interrupt
   - match: '(?i)\bdecision[ _-]?(request|required|needed)\b|\baction[ _-]?(required|needed|now)\b|\bneeds? (an? )?(action|decision)\b|결정.*(요청|필요)|차단'

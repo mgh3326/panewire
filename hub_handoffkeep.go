@@ -240,9 +240,8 @@ func (c *handoffkeepRelayClient) checkLaneEventContract(ctx context.Context) (in
 	return status, err
 }
 
-// handoffkeepContractError reports whether a status is a permanent rejection
-// of the lane.event relay contract — a schema gap or an invalid event shape —
-// rather than a transient outage or an authentication problem worth retrying.
+// handoffkeepContractError is only for the read-only startup capability probe:
+// an unsupported kind filter or missing route indicates a contract gap.
 func handoffkeepContractError(status int) bool {
 	return status == http.StatusBadRequest || status == http.StatusNotFound
 }

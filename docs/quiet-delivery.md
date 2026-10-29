@@ -6,7 +6,7 @@ injection and verification path. Nothing is installed by this document.
 
 ```sh
 panewire emit --kind lane.event --lane desk --event-id build-ready \
-  --deliver inbox --text '[build] done | report ready'
+  --deliver inbox --text '[build] done | report posted'
 panewire emit --kind lane.event --lane desk --event-id need-decision \
   --deliver interrupt --text 'Decision required: choose the release'
 ```
@@ -23,9 +23,10 @@ until that node upgrades.
 
 ## Policy
 
-First match wins, with lane rules ahead of global rules. Explicit class always
-wins. Messages originating in the operator chat UI remain interrupts, including
-declarative instructions. Escalation, joined and revoked job events use the
+Must-act tags always interrupt, ahead of explicit class, replay, and every inbox
+rule. Otherwise explicit class wins, then the first matching rule, with lane
+rules ahead of global rules. Messages originating in the operator chat UI remain
+interrupts, including declarative instructions. Escalation, joined and revoked job events use the
 **receiving parent lane's** policy and inbox, following existing routing.
 
 | Signal | Default class |
@@ -41,10 +42,10 @@ declarative instructions. Escalation, joined and revoked job events use the
 | Info alert, quota notice, idle-wake | inbox |
 | Unmatched message | interrupt |
 
-Must-act vocabulary uses the `tags:` rule form: whole-word, case-sensitive
-literals compiled as `\bTAG\b`. `READY` never matches `READYING`, `ESC` never
-matches `ESCAPE`, and lowercase spellings are not tags — they fall to the
-default, which still injects them under the shipped `interrupt` fallback.
+Must-act vocabulary uses whole-word, case-insensitive literals compiled as
+`(?i)\bTAG\b`. `Ready` interrupts; `READYING` and `ESCAPE` do not match.
+The six tags above are always active, including with custom policies. Additional
+`tags:` on interrupt rules in either scope have the same priority.
 Text `match:` rules are raw regexes for phrase shapes (questions, Korean,
 multi-word phrases); the shipped informational patterns are whole-word
 bounded too, so a stray `info` inside a must-act message cannot route it to
@@ -52,17 +53,19 @@ the inbox. `kind:` stays an exact match against the closed event-kind set.
 
 Action/question rules precede informational rules; an FYI containing a BLOCKER
 therefore interrupts. This is heuristic text classification, not semantic intent
-recognition. Explicit overrides remove ambiguity. A saved decision wins over a
-changed retry body, replay flag or later policy edit.
+recognition. Explicit overrides apply when no must-act tag is present. A saved
+decision wins over a changed retry body, replay flag or later policy edit;
+startup recovery escalates previously misfiled unread must-act originals once.
 
 `--delivery-policy default` uses the embedded file. A filesystem YAML path loads
 an operator-owned copy at startup. `PANEWIRE_DELIVERY_POLICY` supplies the same
 value from the environment — `PANEWIRE_DELIVERY_POLICY=off` is the kill switch
 that restores pre-policy pane delivery without editing service arguments; an
 explicit `--delivery-policy` flag always wins over the environment variable.
-Invalid policy or an unavailable store prevents
-hub startup; a runtime storage failure leaves the producer unacknowledged. YAML
-has strict keys, checked classes/regexps/durations, and one document. Per-lane
+With the inbox enabled, invalid policy or an unavailable store prevents
+hub startup. A runtime storage failure leaves inbox-class events unacknowledged;
+interrupt-class events fall through to the normal durable relay and injection
+path. YAML has strict keys, checked classes/regexps/durations, and one document. Per-lane
 example:
 
 ```yaml
@@ -83,10 +86,18 @@ lanes:
 
 A deadline of `0s` disables escalation for that class. Digest windows must be
 `0s` (off, the default) through `1m`. Policy changes require a hub restart; they
-apply only to newly accepted identities. `--delivery-policy off` restores legacy
-classification for new unspecified events, still honors explicit classes and
-keeps previously stored inbox items quiet. It also disables new interrupt
-batching. Already queued digests/escalations continue draining.
+apply only to newly accepted identities, except startup must-act recovery.
+`--delivery-policy off` or `PANEWIRE_DELIVERY_POLICY=off` completely disables the
+inbox, exactly like `--inbox-store=`: no database open, put, startup recovery,
+flush, or escalation. Every event uses the existing relay delivery path, even
+with `delivery_class=inbox`. Stored items and queued batches remain untouched
+until the inbox is enabled again.
+
+For a full rollback to a pre-feature hub binary, account for its strict payload
+field allowlist: it rejects `delivery_class`. Stop using explicit `--deliver`
+and ensure queued node payloads omit that field before reverting the hub. The
+kill switch on the upgraded hub accepts those payloads and requires no node
+rollback. Preserve the inbox database and its WAL during either rollback.
 
 ## Durability and replay
 
@@ -123,24 +134,34 @@ retry an unconfirmed submission as before. Later unread items can cause a
 later digest. Escalations use the existing handoffkeep relay; during a
 handoffkeep outage their durable batches wait and retry.
 
+At startup the hub scans all unread inbox originals for must-act tags, including
+rows misfiled by older versions and rows with disabled deadlines. It makes them
+immediately eligible for escalation. Existing valid escalation claims survive
+restart; claims on quarantined legacy batches can be recovered into a valid
+single-line batch.
+
 That retry is deliberately slow: a failed flush pass doubles its backoff from
-1s to a 60s cap, makes at most one persist attempt per window, and counts the
-failures (`InboxFlushFailureCount`). A contract-level rejection — HTTP 400 or
-404, the signature of a handoffkeep older than schema v7 or of an event the
-contract rejects — latches digest persistence off for the process with one
-loud log line instead of looping; stored items stay durable and every other
-delivery path continues normally. Fixing handoffkeep and restarting the hub
-re-enables digests. At startup `runInbox` first probes the contract with a
-read-only `GET /v1/relay/events?kind=lane.event&limit=1`: a 4xx there means a
-pre-v7 handoffkeep and disables digests before the first tick; an
-inconclusive answer (outage, auth failure) leaves the bounded retry path to
-discover capability itself.
+1s to a 60s cap, stops after the first transient failure per window, and counts
+failed passes (`InboxFlushFailureCount`). Every batch is validated before sending:
+single-line, valid UTF-8, at most 2048 bytes, and no control characters. Invalid
+batches and permanent per-batch HTTP 4xx rejections are quarantined with a reason
+in `lane_inbox_batch_quarantine`; their originals remain in
+`lane_inbox_batches`. The flush continues with later batches. At startup the
+entire pending queue is scanned to quarantine legacy multiline batches before
+sending. Authentication failures (401/403), retryable request failures
+(408/425/429), transport errors, and server outages retain bounded backoff.
+
+Only the startup read-only contract probe
+(`GET /v1/relay/events?kind=lane.event&limit=1`) can latch all digest delivery off:
+HTTP 400/404 indicates an unsupported kind filter or missing route. The hub logs
+once; stored items wait for a compatible handoffkeep and a hub restart. An
+inconclusive probe leaves the bounded retry path active. Individual rejected
+batches never disable other digests.
 
 When enabled, interrupt batching uses the same transactional outbox: arrivals
 for one receiving lane within the oldest item's window become one turn. A
-single item is also delayed by that window. Chat UI turns bypass batching. The
-flush runs every 100ms; a batch is never sent early. Long batches abbreviate
-summaries to the existing lane text bound, with originals available by ID.
+single item is also delayed by that window. Must-act tags and chat UI turns
+bypass batching. The flush runs every 100ms; a batch is never sent early.
 
 ## Inbox commands and API
 
