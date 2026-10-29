@@ -6,28 +6,46 @@ injection and verification path. Nothing is installed by this document.
 
 ```sh
 panewire emit --kind lane.event --lane desk --event-id build-ready \
-  --deliver inbox --text '[build] done | report posted'
+  --deliver inbox --type report --text '[build] done | report posted'
 panewire emit --kind lane.event --lane desk --event-id need-decision \
-  --deliver interrupt --text 'Decision required: choose the release'
+  --deliver interrupt --type decision --text 'Decision required: choose the release'
 ```
 
-The optional `delivery_class` travels through event files, the immediate local
-socket request, scanner, node outbox and hub ingress. `--deliver` selects this
-class for **all emit kinds**. The existing JSON `deliver` field remains the
+The optional `delivery_class` and sender-declared `notify_type` travel through
+event files, the immediate local socket request, scanner, node outbox and hub
+ingress. `--deliver` selects the class for **all emit kinds** and `--type`
+declares one of `decision | order | ready | report | ack | info`; an unknown
+value is a usage error. The existing JSON `deliver` field remains the
 separate node timing policy (`idle`, `now`, `max_wait=...`). No new field is sent
 in `relay.inject`; old daemons accept exactly their existing envelope. Missing
-classes from old emitters/daemons are classified at the upgraded hub. An old
-hub does not understand explicit classes: upgrade the hub first, then nodes and
-emitters. An old daemon drops the explicit override, so only hub policy applies
+classes or types from old emitters/daemons are classified at the upgraded hub. An old
+hub does not understand explicit classes or types: upgrade the hub first, then nodes and
+emitters. An old daemon drops the explicit overrides, so only hub policy applies
 until that node upgrades.
 
 ## Policy
 
-Must-act tags always interrupt, ahead of explicit class, replay, and every inbox
-rule. Otherwise explicit class wins, then the first matching rule, with lane
+Must-act tags always interrupt, ahead of explicit class, the declared type,
+replay, and every inbox rule. Otherwise explicit class wins, then the `types:`
+map resolves a declared `--type` (decision/order/ready → interrupt;
+report/ack/info → inbox, all overridable globally or per lane), then the first
+matching rule, with lane
 rules ahead of global rules. Messages originating in the operator chat UI remain
 interrupts, including declarative instructions. Escalation, joined and revoked job events use the
 **receiving parent lane's** policy and inbox, following existing routing.
+
+Inbox-class events deliver **immediately** instead of waiting for the deadline
+when the receiving lane owns the completed job — `job.completed` to the owner
+lane and `job.joined` to the owner lane's parent — when the receiving pane's
+reported agent CLI is not `supported` under `agents:` (unknown or unreported
+counts as unsupported), or when a supported pane is known idle/done by a fresh
+heartbeat session snapshot. Unknown state is never treated as idle. Everything
+else keeps the deadline digest as its safety net.
+
+```yaml
+agents:
+  claude: supported   # built-in default; every other CLI defaults unsupported
+```
 
 | Signal | Default class |
 | --- | --- |
@@ -184,6 +202,7 @@ panewire inbox read 123 --lane desk
 panewire inbox ack 123 --lane desk
 panewire inbox ack --all --lane desk
 panewire inbox count --lane desk
+panewire inbox wait --lane desk --timeout 10m
 panewire inbox list --json
 panewire inbox count --json
 ```
@@ -192,12 +211,24 @@ List is newest first, capped at 500 items, and includes the saved class; `--unre
 filters unread inbox-class items. Read marks read. Ack marks read and acknowledged;
 neither removes the record. Interrupt originals appear in unfiltered lists for
 inspection, but do not increase the unread inbox count. A read/ack is a hub write.
+`wait` blocks until an unread item exists for the lane, prints it like `read`,
+and exits 0; on timeout it prints nothing and exits 3. It is the wake primitive
+an agent can run in the background instead of being typed into.
+
+`read <id>` and `ack <id>` name one stored item. For operator tokens an ambient
+`PANEWIRE_LANE` does not scope them — only an explicit `--lane` does — so a
+mismatched ambient lane cannot hide an existing item behind a 404.
 
 The authenticated API is `GET /v1/inbox?lane=L&unread=true`,
-`GET /v1/inbox/count?lane=L`, `POST /v1/inbox/{id}/read?lane=L`, and
+`GET /v1/inbox/count?lane=L`, `GET /v1/inbox/wait?lane=L&timeout=D`,
+`POST /v1/inbox/{id}/read?lane=L`, and
 `POST /v1/inbox/ack?lane=L` with `{ "id": 123 }` or
-`{ "all": true, "lane": "L" }`. Node tokens require an explicit lane currently
-owned by that node, including read and ack operations. Operator tokens may list
+`{ "all": true, "lane": "L" }`. The wait endpoint is a bounded long-poll: it
+answers `{"item": {...}}` as soon as the lane has an unread inbox item or
+`{"item": null}` once the wait runs out, holds at most 60 seconds per request
+(the CLI re-issues it for longer `--timeout` values), and refuses beyond 64
+concurrent waiters with HTTP 429. Node tokens require an explicit lane currently
+owned by that node, including read, wait, and ack operations. Operator tokens may list
 or ack across lanes. The count path uses a partial index, reads no message body,
 and neither reads nor acknowledges items. A zero count for a specified lane is
 returned explicitly. Hub failures display as unavailable, never as zero.
