@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -664,18 +666,50 @@ printf 'OK pane=pane-a model=m label=l status=s landed=y job=job-a quota_record=
 
 // processRunning reports whether pid is alive and not a zombie. The killed
 // child is reparented to pid 1, and a container init that never reaps leaves
-// it as a zombie that still answers signal 0.
+// it as a zombie that still answers signal 0; an unreaped child of ours does
+// the same until Wait.
 func processRunning(process *os.Process, pid int) bool {
 	if process.Signal(syscall.Signal(0)) != nil {
 		return false
 	}
-	stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return true
+	return !processZombie(pid)
+}
+
+// processZombie reports whether pid is in the zombie state. Linux exposes the
+// state in /proc; macOS has no /proc, so it asks ps. An unreadable state reads
+// as not a zombie, so a broken probe makes the caller wait out its deadline
+// and fail, instead of passing vacuously.
+func processZombie(pid int) bool {
+	if runtime.GOOS == "linux" {
+		stat, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+		if err != nil {
+			return false
+		}
+		// The state field follows the parenthesised command name.
+		if end := bytes.LastIndexByte(stat, ')'); end >= 0 && end+2 < len(stat) {
+			return stat[end+2] == 'Z'
+		}
+		return false
 	}
-	// The state field follows the parenthesised command name.
-	if end := bytes.LastIndexByte(stat, ')'); end >= 0 && end+2 < len(stat) {
-		return stat[end+2] != 'Z'
+	out, err := exec.Command("ps", "-o", "stat=", "-p", strconv.Itoa(pid)).Output()
+	return err == nil && bytes.HasPrefix(bytes.TrimSpace(out), []byte("Z"))
+}
+
+func TestProcessRunningIgnoresUnreapedKilledChild(t *testing.T) {
+	cmd := exec.Command("sleep", "30")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
 	}
-	return true
+	t.Cleanup(func() { _ = cmd.Wait() })
+	pid := cmd.Process.Pid
+	if !processRunning(cmd.Process, pid) {
+		t.Fatal("live child reported as not running")
+	}
+	if err := cmd.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	// Our own child stays a zombie until Wait, which is the case under test.
+	eventually(t, 5*time.Second, "killed unreaped child to stop counting as running", func() bool {
+		return !processRunning(cmd.Process, pid)
+	})
 }
