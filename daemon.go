@@ -25,6 +25,7 @@ type Config struct {
 	SocketPath, HerdrSocket, DBPath, InboxRoot string
 	StorePromptBody                            bool
 	IdleWakeSettle                             time.Duration
+	QuotaStopAct                               bool
 	Logging                                    LoggingConfig
 	Hub                                        HubDaemonConfig
 	StallDetect                                StallDetectConfig
@@ -102,6 +103,11 @@ func (d *Daemon) Start(ctx context.Context) error {
 			if err != nil {
 				return err
 			}
+			manager.quota, err = newQuotaStopManager(d.store, idleRoot, d.cfg.QuotaStopAct, d.cfg.Logger)
+			if err != nil {
+				return err
+			}
+			manager.quota.enqueue = manager.enqueue
 			d.idleWake = manager
 			d.cfg.Hub.Client.SetIdleWakeManager(manager)
 		}

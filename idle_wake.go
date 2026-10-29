@@ -86,6 +86,7 @@ type idleWakeManager struct {
 	enqueue     func(hubScannedRelayEvent) bool
 	writeRecord func(string, emitRecord) (string, error)
 	logger      *slog.Logger
+	quota       *quotaStopManager
 	// suppressCounts/suppressWindowStart tally suppressed idle-wake
 	// candidates by decision_reason for the periodic aggregate log in
 	// flushSuppressionLogLocked. Guarded by mu.
@@ -144,7 +145,9 @@ func normalizedIdleWakeMetadata(value string) string {
 	return value
 }
 
-func eligibleIdleWakeStatus(status string) bool { return status == "idle" || status == "done" }
+func eligibleIdleWakeStatus(status string) bool {
+	return status == "idle" || status == "done" || status == "blocked"
+}
 
 func validObservedAgentStatus(status string) bool {
 	switch status {
@@ -453,7 +456,7 @@ func (s *Store) idleWakeCandidatesReady(ctx context.Context, now time.Time, adva
 		// has supplied a current observation in this process.
 		if _, err = tx.ExecContext(ctx, `UPDATE idle_wake_candidates SET settled_at=due_at
 		 WHERE decision='' AND settled_at IS NULL AND due_at<=? AND EXISTS (
-		  SELECT 1 FROM idle_wake_panes p WHERE p.pane_id=idle_wake_candidates.pane_id AND p.agent_status IN ('idle','done')
+		  SELECT 1 FROM idle_wake_panes p WHERE p.pane_id=idle_wake_candidates.pane_id AND p.agent_status IN ('idle','done','blocked')
 		 )`, now.UnixMilli()); err != nil {
 			return nil, err
 		}
@@ -610,6 +613,9 @@ func (m *idleWakeManager) tick(ctx context.Context, at time.Time, advanceSettle 
 		}
 	}
 	m.materializeAssigned(ctx, at)
+	if m.quota != nil {
+		m.quota.tick(ctx, at)
+	}
 }
 
 func (m *idleWakeManager) ApplyRoute(ctx context.Context, decision hubIdleWakeRouteEvent) {
@@ -675,6 +681,9 @@ func (m *idleWakeManager) materializeAssigned(ctx context.Context, at time.Time)
 		return
 	}
 	for _, candidate := range candidates {
+		if m.quota != nil {
+			m.quota.observe(ctx, candidate, at)
+		}
 		record := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: candidate.ChangedAt.UTC().Format(time.RFC3339Nano), OwnerLane: candidate.OwnerLane, Label: candidate.Label, PaneID: candidate.PaneID, EventID: candidate.EventID, Text: candidate.Text}
 		if _, err := m.writeRecord(m.inboxRoot, record); err != nil {
 			m.logger.Warn("idle-wake durable event file unavailable")
