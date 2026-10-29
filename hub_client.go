@@ -588,8 +588,12 @@ func defaultHubRelayInjectVerdict(ctx context.Context, pane, text string, member
 }
 
 func relayInjectForHarness(ctx context.Context, pane, harness, text string, members []string) relayInjectResult {
+	return relayInjectForHarnessGuarded(ctx, pane, harness, text, members, nil)
+}
+
+func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text string, members []string, guard func(string) bool) relayInjectResult {
 	if strings.EqualFold(harness, "devin") {
-		return devinRelayInject(ctx, pane, text, members)
+		return devinRelayInjectGuarded(ctx, pane, text, members, guard)
 	}
 	// #683: read the pane before typing, on every attempt. The visible read
 	// doubles as the #626 'before' snapshot for the return-once rule: a
@@ -609,6 +613,9 @@ func relayInjectForHarness(ctx context.Context, pane, harness, text string, memb
 		// (PR 87 CodeRabbit). Same fail-closed shape as devin's
 		// presend:read_failed.
 		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "presend:unproven:read_failed"}
+	}
+	if guard != nil && !guard(presend.visible) {
+		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "presend:guard_rejected"}
 	}
 	// A queue banner already up before this paste is an older queue, so it
 	// excludes the queued rule for the postsend reads (tester N-r2-3).
@@ -1254,6 +1261,10 @@ func devinComposerHolds(visible, text string, nonces []string) bool {
 //     at one re-inject; the next attempt's presend composer check still
 //     runs first.
 func devinRelayInject(ctx context.Context, pane, text string, members []string) relayInjectResult {
+	return devinRelayInjectGuarded(ctx, pane, text, members, nil)
+}
+
+func devinRelayInjectGuarded(ctx context.Context, pane, text string, members []string, guard func(string) bool) relayInjectResult {
 	nonces := relayNoncesIn(text)
 	result := relayInjectResult{Harness: "devin"}
 	if len(nonces) == 0 {
@@ -1263,6 +1274,10 @@ func devinRelayInject(ctx context.Context, pane, text string, members []string) 
 	before, err := readDevinPane(ctx, pane)
 	if err != nil {
 		result.Outcome, result.Evidence = relayInjectMaybeInPane, "presend:read_failed"
+		return result
+	}
+	if guard != nil && !guard(before.visible) {
+		result.Outcome, result.Evidence = relayInjectMaybeInPane, "presend:guard_rejected"
 		return result
 	}
 	after := before

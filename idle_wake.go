@@ -86,6 +86,7 @@ type idleWakeManager struct {
 	enqueue     func(hubScannedRelayEvent) bool
 	writeRecord func(string, emitRecord) (string, error)
 	logger      *slog.Logger
+	quota       *quotaStopManager
 	// suppressCounts/suppressWindowStart tally suppressed idle-wake
 	// candidates by decision_reason for the periodic aggregate log in
 	// flushSuppressionLogLocked. Guarded by mu.
@@ -144,7 +145,9 @@ func normalizedIdleWakeMetadata(value string) string {
 	return value
 }
 
-func eligibleIdleWakeStatus(status string) bool { return status == "idle" || status == "done" }
+func eligibleIdleWakeStatus(status string) bool {
+	return status == "idle" || status == "done"
+}
 
 func validObservedAgentStatus(status string) bool {
 	switch status {
@@ -354,6 +357,12 @@ func (m *idleWakeManager) Observe(ctx context.Context, observation HerdrAgentSta
 		due := at.Add(m.settle)
 		eventID := idleWakeEventID(namespace, observation.PaneID, sequence)
 		if _, err = tx.ExecContext(ctx, `INSERT INTO idle_wake_candidates(pane_id,state_change_seq,workspace_id,label,agent_status,changed_at,due_at,event_id) VALUES(?,?,?,?,?,?,?,?)`, observation.PaneID, int64(sequence), workspace, label, observation.Status, at.UnixMilli(), due.UnixMilli(), eventID); err != nil {
+			return err
+		}
+	}
+	if m.quota != nil && !upstreamReset && observation.Status == "blocked" {
+		eventID := "quota-blocked:" + idleWakeEventID(namespace, observation.PaneID, sequence)
+		if _, err = tx.ExecContext(ctx, `INSERT OR IGNORE INTO quota_blocked_wakes(event_id,pane_id,workspace_id,label,state_change_seq,changed_at,due_at) VALUES(?,?,?,?,?,?,?)`, eventID, observation.PaneID, workspace, label, int64(sequence), at.UnixMilli(), at.Add(m.settle).UnixMilli()); err != nil {
 			return err
 		}
 	}
@@ -610,6 +619,9 @@ func (m *idleWakeManager) tick(ctx context.Context, at time.Time, advanceSettle 
 		}
 	}
 	m.materializeAssigned(ctx, at)
+	if m.quota != nil {
+		m.quota.tick(ctx, at, advanceSettle)
+	}
 }
 
 func (m *idleWakeManager) ApplyRoute(ctx context.Context, decision hubIdleWakeRouteEvent) {
@@ -675,6 +687,9 @@ func (m *idleWakeManager) materializeAssigned(ctx context.Context, at time.Time)
 		return
 	}
 	for _, candidate := range candidates {
+		if m.quota != nil {
+			m.quota.observeBounded(ctx, candidate, at)
+		}
 		record := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: candidate.ChangedAt.UTC().Format(time.RFC3339Nano), OwnerLane: candidate.OwnerLane, Label: candidate.Label, PaneID: candidate.PaneID, EventID: candidate.EventID, Text: candidate.Text}
 		if _, err := m.writeRecord(m.inboxRoot, record); err != nil {
 			m.logger.Warn("idle-wake durable event file unavailable")

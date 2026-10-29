@@ -1,0 +1,4 @@
+func retry() {
+    log.Printf("Reached free model rate limit reset in 29 seconds")
+    // try again at 12:39 PM after usage limit
+}
