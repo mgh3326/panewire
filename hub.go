@@ -236,6 +236,7 @@ type hubJobReassignment struct {
 
 type hubJobEventPayload struct {
 	DeliveryClass string `json:"delivery_class,omitempty"`
+	NotifyType    string `json:"notify_type,omitempty"`
 	noDigest      bool
 	// lane.event uses these relay-only fields. It deliberately never enters
 	// the hub's job registration paths despite sharing the delivery envelope.
@@ -778,6 +779,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/relay/events", h.handleRelayIngress)
 	mux.HandleFunc("GET /v1/inbox", h.handleInboxList)
 	mux.HandleFunc("GET /v1/inbox/count", h.handleInboxCount)
+	mux.HandleFunc("GET /v1/inbox/wait", h.handleInboxWait)
 	mux.HandleFunc("POST /v1/inbox/{id}/read", h.handleInboxRead)
 	mux.HandleFunc("POST /v1/inbox/ack", h.handleInboxAck)
 	mux.HandleFunc("GET /v1/relay/held", h.handleRelayHeld)

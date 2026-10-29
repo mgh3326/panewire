@@ -31,6 +31,7 @@ var (
 var hubOperatorAPIPaths = map[string]bool{
 	"/v1/inbox":           true,
 	"/v1/inbox/count":     true,
+	"/v1/inbox/wait":      true,
 	"/v1/inbox/ack":       true,
 	"/v1/nodes":           true,
 	"/v1/nodes/wake":      true,

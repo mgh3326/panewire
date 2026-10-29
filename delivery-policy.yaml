@@ -6,6 +6,16 @@ deadlines:
   interrupt: 0s
 # Off by default; e.g. 2s combines interrupts for each receiving lane.
 digest_window: 0s
+# Sender-declared notification types (--type), resolved ahead of the regex
+# rules below. These entries mirror the built-in defaults; a policy file may
+# override individual keys globally or per lane.
+types:
+  decision: interrupt
+  order: interrupt
+  ready: interrupt
+  report: inbox
+  ack: inbox
+  info: inbox
 rules:
   # Whole-word, case-insensitive must-act tags. READYING and ESCAPE do not match.
   - tags: [BLOCKER, READY, ESC, BOUNCE, URGENT, needs_decision]

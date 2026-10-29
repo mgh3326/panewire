@@ -24,6 +24,20 @@ var deliveryTagShape = regexp.MustCompile(`^[0-9A-Za-z_](?:.*[0-9A-Za-z_])?$`)
 // These safety tags cannot be demoted by a custom inbox policy or an emitter.
 var mustActDeliveryTags = regexp.MustCompile(`(?i)\b(?:BLOCKER|READY|ESC|BOUNCE|URGENT|needs_decision)\b`)
 
+// hubNotifyTypes is the closed vocabulary a producer declares with
+// `panewire emit --type`. The same set validates the wire field and the keys
+// of a policy's types: block, so a type that cannot be declared can never be
+// configured.
+var hubNotifyTypes = map[string]bool{"decision": true, "order": true, "ready": true, "report": true, "ack": true, "info": true}
+
+// defaultNotifyTypeClasses is the built-in type→class map. A policy file
+// overrides individual entries under types:; the rest stay built in.
+var defaultNotifyTypeClasses = map[string]string{"decision": "interrupt", "order": "interrupt", "ready": "interrupt", "report": "inbox", "ack": "inbox", "info": "inbox"}
+
+func validNotifyType(value string) bool {
+	return value == "" || hubNotifyTypes[value]
+}
+
 type deliveryRule struct {
 	Match  string   `yaml:"match"`
 	Tags   []string `yaml:"tags"`
@@ -38,6 +52,7 @@ type deliveryLanePolicy struct {
 	Default      string            `yaml:"default"`
 	Deadlines    map[string]string `yaml:"deadlines"`
 	DigestWindow string            `yaml:"digest_window"`
+	Types        map[string]string `yaml:"types"`
 	Rules        []deliveryRule    `yaml:"rules"`
 }
 
@@ -100,6 +115,11 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 				return fmt.Errorf("invalid class deadline")
 			}
 		}
+		for name, class := range l.Types {
+			if !hubNotifyTypes[name] || (class != "inbox" && class != "interrupt") {
+				return fmt.Errorf("invalid type map entry")
+			}
+		}
 		for i := range l.Rules {
 			r := &l.Rules[i]
 			if r.Class == "" || !validDeliveryClass(r.Class) || (r.Kind == "" && r.Match == "" && len(r.Tags) == 0 && !r.Replay) {
@@ -135,6 +155,16 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 	if err := validate(&p.deliveryLanePolicy); err != nil {
 		return nil, err
 	}
+	// The built-in type map always applies; a policy file overrides
+	// individual entries under types:.
+	types := make(map[string]string, len(defaultNotifyTypeClasses)+len(p.Types))
+	for name, class := range defaultNotifyTypeClasses {
+		types[name] = class
+	}
+	for name, class := range p.Types {
+		types[name] = class
+	}
+	p.Types = types
 	for lane, l := range p.Lanes {
 		if !validReportRelayLaneName(lane) {
 			return nil, fmt.Errorf("invalid policy lane")
@@ -153,6 +183,11 @@ func (p *deliveryPolicy) classify(lane, kind string, e hubJobEventPayload, repla
 	}
 	if e.DeliveryClass != "" {
 		return e.DeliveryClass
+	}
+	// A sender-declared type beats every prose heuristic: chat panes and the
+	// regex rules only ever see untyped events.
+	if class := p.typeClass(lane, e.NotifyType); class != "" {
+		return class
 	}
 	// Operator chat is an intentional turn, including declarative instructions.
 	if chatRelayEventPattern.MatchString(e.EventID) {
@@ -188,6 +223,21 @@ func (p *deliveryPolicy) classify(lane, kind string, e hubJobEventPayload, repla
 		return local.Default
 	}
 	return p.Default
+}
+
+// typeClass resolves a declared notification type through the receiving
+// lane's types: override first, then the policy-wide map (built-ins merged).
+// An empty or unmapped type falls through to the rule set.
+func (p *deliveryPolicy) typeClass(lane, notifyType string) string {
+	if notifyType == "" {
+		return ""
+	}
+	if local, ok := p.Lanes[lane]; ok {
+		if class, ok := local.Types[notifyType]; ok {
+			return class
+		}
+	}
+	return p.Types[notifyType]
 }
 
 func deliveryEventText(e hubJobEventPayload) string {
@@ -235,18 +285,34 @@ func (p *deliveryPolicy) timing(lane, class string) (deadline, window time.Durat
 
 // Keep the legacy envelope byte-for-byte when the optional class is absent.
 func relayPayloadDeliveryClass(payload []byte, class string) []byte {
-	if class == "" {
+	return relayPayloadOptionalString(payload, "delivery_class", class)
+}
+
+// relayPayloadNotifyType adds the optional sender-declared notification type
+// with the same byte-for-byte legacy envelope rule as the delivery class.
+func relayPayloadNotifyType(payload []byte, notifyType string) []byte {
+	return relayPayloadOptionalString(payload, "notify_type", notifyType)
+}
+
+func relayPayloadOptionalString(payload []byte, key, value string) []byte {
+	if value == "" {
 		return payload
 	}
 	var fields map[string]json.RawMessage
 	if json.Unmarshal(payload, &fields) != nil {
 		return payload
 	}
-	fields["delivery_class"], _ = json.Marshal(class)
+	fields[key], _ = json.Marshal(value)
 	raw, _ := json.Marshal(fields)
 	return raw
 }
+
 func decodeDeliveryClass(fields map[string]json.RawMessage, event *hubJobEventPayload) bool {
 	raw, ok := fields["delivery_class"]
 	return !ok || (json.Unmarshal(raw, &event.DeliveryClass) == nil && validDeliveryClass(event.DeliveryClass))
+}
+
+func decodeNotifyType(fields map[string]json.RawMessage, event *hubJobEventPayload) bool {
+	raw, ok := fields["notify_type"]
+	return !ok || (json.Unmarshal(raw, &event.NotifyType) == nil && validNotifyType(event.NotifyType))
 }

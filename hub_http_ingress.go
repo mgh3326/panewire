@@ -16,6 +16,7 @@ const hubRelayIngressMaxBodyBytes = 64 << 10
 // acknowledge after handoffkeep accepts the durable row.
 type hubRelayIngressRequest struct {
 	DeliveryClass string `json:"delivery_class,omitempty"`
+	NotifyType    string `json:"notify_type,omitempty"`
 	Kind          string `json:"kind"`
 	Lane          string `json:"lane"`
 	EventID       string `json:"event_id"`
@@ -57,7 +58,7 @@ func decodeHubRelayIngressRequest(writer http.ResponseWriter, request *http.Requ
 	if !machineIDPattern.MatchString(body.Host) {
 		return hubRelayIngressRequest{}, false
 	}
-	if !validDeliveryClass(body.DeliveryClass) || (body.Deliver != "" && !validRelayDeliver(body.Deliver)) {
+	if !validDeliveryClass(body.DeliveryClass) || !validNotifyType(body.NotifyType) || (body.Deliver != "" && !validRelayDeliver(body.Deliver)) {
 		return hubRelayIngressRequest{}, false
 	}
 	return body, true
@@ -90,6 +91,7 @@ func (h *HubServer) handleRelayIngress(writer http.ResponseWriter, request *http
 		Reason:        "http_ingress:" + body.Label,
 		DeliverPolicy: body.Deliver,
 		DeliveryClass: body.DeliveryClass,
+		NotifyType:    body.NotifyType,
 	}
 	result := h.relayLaneEvent(event, nil)
 	if result.RejectedTooLong {

@@ -3,6 +3,7 @@ package panewire
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -19,6 +20,9 @@ import (
 type laneInboxStore struct {
 	db *sql.DB
 	mu sync.Mutex
+	// notify is closed and replaced when a new inbox-class item lands, waking
+	// every long-poll waiter so they re-check for unread work.
+	notify chan struct{}
 }
 
 type laneInboxItem struct {
@@ -97,7 +101,7 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 			return nil, err
 		}
 	}
-	return &laneInboxStore{db: db}, nil
+	return &laneInboxStore{db: db, notify: make(chan struct{})}, nil
 }
 
 func (s *laneInboxStore) quarantineBatch(id, reason string) error {
@@ -207,7 +211,33 @@ func (s *laneInboxStore) put(key, lane, kind, class string, e hubJobEventPayload
 	item, err := scanLaneInbox(s.db.QueryRow(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`, key))
 	n, _ := insert.RowsAffected()
 	item.Fresh = n == 1
+	if n == 1 && class == "inbox" {
+		close(s.notify)
+		s.notify = make(chan struct{})
+	}
 	return item, err
+}
+
+// waitChan returns the channel closed by the next inbox-class insert. A waiter
+// must take it before re-checking unread state so an insert that lands between
+// the check and the select still wakes it.
+func (s *laneInboxStore) waitChan() chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.notify
+}
+
+// firstUnread returns the oldest still-unread inbox item for one lane, or nil
+// when the lane has none.
+func (s *laneInboxStore) firstUnread(lane string) (*laneInboxItem, error) {
+	item, err := scanLaneInbox(s.db.QueryRow(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE lane=? AND class='inbox' AND read_at=0 ORDER BY id LIMIT 1`, lane))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &item, nil
 }
 
 func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error) {
