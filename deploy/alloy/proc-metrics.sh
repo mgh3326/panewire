@@ -137,6 +137,8 @@ END {
 	for (i = 1; i <= count; i++) printf "namedprocess_namegroup_num_procs{groupname=\"%s\"} %d\n", order[i], gprocs[order[i]] > prom
 }'
 
+# State first: if the second rename fails, the next run still continues from the
+# newer totals, so the published counter never goes backwards.
 mv "$tmp_state" "$state"
 mv "$tmp_prom" "$prom"
 published=1

@@ -101,8 +101,16 @@ func TestAlloyLinuxProcessMetricsAreAllowlisted(t *testing.T) {
 			t.Errorf("config.linux.alloy missing %s", required)
 		}
 	}
-	scrape := text[strings.Index(text, "prometheus.scrape \"procs\""):]
-	scrape = scrape[:strings.Index(scrape, "}")]
+	start := strings.Index(text, "prometheus.scrape \"procs\"")
+	if start < 0 {
+		t.Fatal("config.linux.alloy missing the process scrape")
+	}
+	scrape := text[start:]
+	end := strings.Index(scrape, "}")
+	if end < 0 {
+		t.Fatal("process scrape block is not closed")
+	}
+	scrape = scrape[:end]
 	if !strings.Contains(scrape, "forward_to = [prometheus.relabel.procs.receiver]") || strings.Contains(scrape, "remote_write") {
 		t.Errorf("process scrape must forward through the allowlist relabel, got:\n%s", scrape)
 	}

@@ -98,7 +98,8 @@ The process exporter reads `/proc`, which darwin lacks, so
 `proc-metrics.sh` builds the same families from one `ps -axo pcpu=,rss=,comm=`
 sample and writes `proc-metrics.prom` into the textfile directory every 30
 seconds (temp file + rename, so the collector never reads a partial file).
-`ps` only gives a CPU rate, so the CPU counter is that rate integrated over
+`ps` only gives a CPU rate (the kernel's smoothed recent `%cpu`, which lags
+sudden changes), so the CPU counter is that rate integrated over
 the time since the previous run (kept in `.proc-metrics.state`); gaps over two
 minutes, such as a sleeping laptop, are not integrated. Treat it as an
 estimate, good for ranking programs, not for billing CPU seconds.
