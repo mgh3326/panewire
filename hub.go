@@ -1908,14 +1908,20 @@ func (h *HubServer) broadcastSubscriptionMessage(message hubSubscriptionMessage)
 	}
 }
 
-// authorizeAgent admits nodes only: a service credential never opens the
-// node websocket or acts as a node anywhere else.
+// authorizeAgent admits nodes only: services are not in the node token map,
+// so a service credential never opens the node websocket or acts as a node
+// anywhere else. It stays independent of the operator check, as before
+// scopes existed, so a node is admitted on its own token whatever that is.
 func (h *HubServer) authorizeAgent(request *http.Request) (string, bool) {
-	caller := h.authenticate(request)
-	if caller.kind != hubCallerNode {
+	machineID := strings.TrimSpace(request.Header.Get(hubMachineIDHeader))
+	if machineID == hubOperatorMachineID || !machineIDPattern.MatchString(machineID) {
 		return "", false
 	}
-	return caller.id, true
+	expected, exists := h.currentAuth().tokens[machineID]
+	if !exists || !hubTokenMatches(expected, hubRequestBearerToken(request)) {
+		return "", false
+	}
+	return machineID, true
 }
 
 func (h *HubServer) authorizeOperator(request *http.Request) bool {

@@ -218,6 +218,26 @@ func TestHubAuthServiceIsNeverANode(t *testing.T) {
 	}
 }
 
+// TestHubAuthNodeSharingOperatorToken keeps the pre-scope rule that a node is
+// admitted on its own token even when an auth file gives it the operator's.
+func TestHubAuthNodeSharingOperatorToken(t *testing.T) {
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens:          map[string]string{"operator": pw2OperatorToken, "node-a": pw2OperatorToken},
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"node-a","pane":"w1:p1"}}}`),
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(hub.Handler())
+	defer server.Close()
+	node := r6DialAgent(t, server.URL, "node-a", pw2OperatorToken)
+	node.CloseNow()
+	if status, _ := (pw2Caller{"node", "node-a", pw2OperatorToken}).do(t, server, "GET", "/v1/lanes", ""); status != http.StatusOK {
+		t.Fatalf("node lanes status %d", status)
+	}
+}
+
 func TestHubAuthConfigRejects(t *testing.T) {
 	base := "HUB_TOKEN_operator=" + pw2OperatorToken + "\nHUB_TOKEN_node-a=" + pw2NodeAToken + "\n"
 	service := "HUB_TOKEN_svc-a=" + pw2ServiceToken("svc-a") + "\n"
