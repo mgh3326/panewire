@@ -131,6 +131,12 @@ closed WebSocket vocabulary, and the NCP/systemd + tunnel deployment runbook.
 [docs/runbooks/hub-log-access.md](docs/runbooks/hub-log-access.md) covers how a
 non-root operator reads hub logs on NCP.
 
+Operator tools reach a node's herdr panes and git worktrees through the hub
+instead of ssh: `GET /v1/nodes/agents` lists every node's agents, and
+`POST /v1/nodes/{machine}/command` runs one of a closed set of ops
+(`pane.close` closes only an exact re-read match). See
+[docs/node-commands.md](docs/node-commands.md).
+
 ## Hub job inbox compatibility
 
 For node job heartbeats, the local inbox contract is the arbiter envelope as
