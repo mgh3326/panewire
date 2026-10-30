@@ -169,8 +169,9 @@ func (h *HubServer) resolveNodeCommand(machine string, agent *hubAgent, result h
 	pending.done <- result
 }
 
-func (h *HubServer) loseNodeCommands(agent *hubAgent) {
-	h.mu.Lock()
+// loseNodeCommandsLocked removes agent's pending commands; the caller holds
+// h.mu and wakes them with wakeLostNodeCommands after releasing it.
+func (h *HubServer) loseNodeCommandsLocked(agent *hubAgent) []*hubNodeCommandPending {
 	var lost []*hubNodeCommandPending
 	for requestID, pending := range h.nodeCommands {
 		if pending.agent == agent {
@@ -178,7 +179,10 @@ func (h *HubServer) loseNodeCommands(agent *hubAgent) {
 			lost = append(lost, pending)
 		}
 	}
-	h.mu.Unlock()
+	return lost
+}
+
+func wakeLostNodeCommands(lost []*hubNodeCommandPending) {
 	for _, pending := range lost {
 		pending.done <- hubNodeCommandResult{Op: pending.op, Error: "node_lost"}
 	}

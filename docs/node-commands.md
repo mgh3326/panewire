@@ -82,8 +82,14 @@ must treat pane usage as unknown. A failed agent list answers
 ### `pane.close`
 
 `args: {pane_id, name, agent_status, cwd}` — the caller's snapshot of the
-pane. The node re-reads `herdr agent list` and closes the pane only when a
-row with that `pane_id` still has exactly that name, status and cwd:
+pane; `agent_status` must be `idle` or `done`, the only states a close is
+for. herdr has no conditional close, so the node re-reads `herdr agent list`
+twice, two seconds apart, and closes only when both reads show a row with
+that `pane_id` and exactly that name, status and cwd, and — where herdr
+reports it — the same `state_change_seq`, so a pane that went to work and
+came back idle in between also survives. The second read immediately
+precedes `herdr pane close`; the gap left between them is the same one the
+ssh reap path has between its re-read and its close.
 
 | `outcome` | Meaning |
 | --- | --- |
@@ -125,9 +131,11 @@ checkout, or a path git cannot read is null). Otherwise:
 {"worktree":{"path":"/work/repo.feat","branch":"feat/x","head":"<sha>","origin_url":"https://github.com/owner/name.git","common":"/work/repo/.git"}}
 ```
 
-`branch` is empty on a detached HEAD. URL userinfo is dropped from
-`origin_url` on the node, so a token embedded in an https remote never leaves
-it.
+`branch` is empty on a detached HEAD. Credentials are dropped from
+`origin_url` on the node: a URL remote loses its userinfo, query and
+fragment, and an scp-style remote (`[user[:secret]@]host:path`) loses
+everything up to its last `@` before the first `/`, so a token embedded in
+either form never leaves it.
 
 ## Wire
 

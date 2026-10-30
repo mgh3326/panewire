@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -137,7 +138,7 @@ func TestNodeCommandPaneCloseExactMatch(t *testing.T) {
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			fake := &nodeFakeHerdr{agents: []string{nodeAgentList(test.listed)}}
-			result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run}, nodeCommandPaneClose, expected)
+			result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}, nodeCommandPaneClose, expected)
 			if code != "" || result["outcome"] != test.outcome {
 				t.Fatalf("result=%v code=%q", result, code)
 			}
@@ -149,7 +150,7 @@ func TestNodeCommandPaneCloseExactMatch(t *testing.T) {
 	}
 
 	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"))}, closeErr: errors.New("close failed")}
-	if _, code := nodeRun(t, &HubClient{nodeHerdr: fake.run}, nodeCommandPaneClose, expected); code != "close_failed" {
+	if _, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}, nodeCommandPaneClose, expected); code != "close_failed" {
 		t.Fatalf("failed close code=%q", code)
 	}
 	for _, bad := range []map[string]any{
@@ -158,6 +159,8 @@ func TestNodeCommandPaneCloseExactMatch(t *testing.T) {
 		{"pane_id": "w1 p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a"},
 		{"pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "work/a"},
 		{"pane_id": "w1:p1", "name": "job-a", "cwd": "/work/a"},
+		{"pane_id": "w1:p1", "name": "job-a", "agent_status": "working", "cwd": "/work/a"},
+		{"pane_id": "w1:p1", "name": "job-a", "agent_status": "blocked", "cwd": "/work/a"},
 	} {
 		fake := &nodeFakeHerdr{agents: []string{nodeAgentList()}}
 		if _, code := nodeRun(t, &HubClient{nodeHerdr: fake.run}, nodeCommandPaneClose, bad); code != "invalid_args" || len(fake.calls) != 0 {
@@ -294,7 +297,13 @@ func TestNodeCommandWorktreeInspect(t *testing.T) {
 	}
 	for raw, want := range map[string]string{
 		"https://user:tok@example.invalid/owner/name.git?token=abc#frag": "https://example.invalid/owner/name.git",
-		"git@example.invalid:owner/name.git":                             "git@example.invalid:owner/name.git",
+		"git@example.invalid:owner/name.git":                             "example.invalid:owner/name.git",
+		"token@example.invalid:owner/name.git":                           "example.invalid:owner/name.git",
+		"user:secret@example.invalid:owner/name.git":                     "example.invalid:owner/name.git",
+		"a@b:c@example.invalid:owner/name.git":                           "example.invalid:owner/name.git",
+		"example.invalid:owner/name.git":                                 "example.invalid:owner/name.git",
+		"/srv/git/name.git":                                              "/srv/git/name.git",
+		"../repos/x@y/name.git":                                          "../repos/x@y/name.git",
 	} {
 		if got := redactNodeOriginURL(raw); got != want {
 			t.Fatalf("redact %q = %q, want %q", raw, got, want)
@@ -471,5 +480,62 @@ func TestNodeCommandArgsRequireEveryField(t *testing.T) {
 	client := &HubClient{nodeHerdr: (&nodeFakeHerdr{}).run}
 	if _, code := client.runNodeCommand(t.Context(), nodeCommandPaneCapture, encode(map[string]any{"pane_id": "w1:p1", "name": "job-a", "cwd": "/work/a"})); code != "invalid_args" {
 		t.Fatalf("node accepted capture without merged_after/write: %q", code)
+	}
+}
+
+func nodeAgentSeqJSON(pane, status string, seq int) string {
+	return `{"pane_id":"` + pane + `","name":"job-a","agent_status":"` + status + `","cwd":"/work/a","state_change_seq":` + strconv.Itoa(seq) + `}`
+}
+
+// TestNodeCommandPaneCloseSettles pins the close guard herdr cannot give
+// atomically: two matching re-reads a settle interval apart, the second
+// immediately before the close, with an unchanged state_change_seq.
+func TestNodeCommandPaneCloseSettles(t *testing.T) {
+	expected := map[string]any{"pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a"}
+	cases := []struct {
+		name    string
+		reads   []string
+		outcome string
+	}{
+		{"steady", []string{nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 5)), nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 5))}, nodePaneClosed},
+		{"no seq reported", []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"))}, nodePaneClosed},
+		{"went back to work", []string{nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 5)), nodeAgentList(nodeAgentSeqJSON("w1:p1", "working", 6))}, nodePaneChanged},
+		{"bounced back to idle", []string{nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 5)), nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 7))}, nodePaneChanged},
+		{"gone during settle", []string{nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 5)), nodeAgentList()}, nodePaneGone},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			fake := &nodeFakeHerdr{agents: test.reads}
+			settle := 40 * time.Millisecond
+			started := time.Now()
+			result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: settle}, nodeCommandPaneClose, expected)
+			if code != "" || result["outcome"] != test.outcome {
+				t.Fatalf("result=%v code=%q", result, code)
+			}
+			if elapsed := time.Since(started); elapsed < settle {
+				t.Fatalf("closed after %v, before the %v settle", elapsed, settle)
+			}
+			fake.mu.Lock()
+			defer fake.mu.Unlock()
+			var sequence []string
+			for _, call := range fake.calls {
+				sequence = append(sequence, strings.Join(call[:2], " "))
+			}
+			want := "agent list,agent list"
+			if test.outcome == nodePaneClosed {
+				want += ",pane close"
+			}
+			if strings.Join(sequence, ",") != want {
+				t.Fatalf("herdr calls %v, want %s", sequence, want)
+			}
+		})
+	}
+
+	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 5))}}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	raw, _ := json.Marshal(expected)
+	if _, code := (&HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Hour}).runNodeCommand(ctx, nodeCommandPaneClose, raw); code != "herdr_failed" || fake.called("pane", "close") != 0 {
+		t.Fatalf("cancelled settle code=%q calls=%v", code, fake.calls)
 	}
 }

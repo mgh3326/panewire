@@ -1806,10 +1806,21 @@ func (h *HubServer) recordNote(machineID, text string, received time.Time) {
 	h.lastNotes[machineID] = &HubLastNote{Text: text, ReceivedAt: received}
 }
 
+// disconnect marks the record disconnected and fails the agent's pending
+// spawns and node commands in one critical section, so no new request can
+// observe the dying agent and attach a command after the sweep. Waiters are
+// woken after the lock is released.
 func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
-	h.loseSpawns(machineID, agent)
-	h.loseNodeCommands(agent)
 	h.mu.Lock()
+	var spawnWaiters []chan hubSpawnResult
+	if record := h.nodes[machineID]; record != nil && record.agent == agent {
+		spawnWaiters = h.loseSpawnsLocked(machineID)
+	}
+	lost := h.loseNodeCommandsLocked(agent)
+	defer func() {
+		wakeLostSpawns(spawnWaiters)
+		wakeLostNodeCommands(lost)
+	}()
 	defer h.mu.Unlock()
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {
 		record.agent = nil
