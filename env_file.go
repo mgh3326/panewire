@@ -10,6 +10,11 @@ import (
 	"strings"
 )
 
+// envFileMaxBytes bounds a mode-0600 env file. A larger file is rejected
+// rather than read up to the bound: a silently dropped tail can change what
+// the file grants (a hub auth file losing a HUB_SCOPES_ line, for one).
+const envFileMaxBytes = 1 << 20
+
 func loadMode0600Env(path string) (map[string]string, error) {
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0600 {
@@ -21,7 +26,8 @@ func loadMode0600Env(path string) (map[string]string, error) {
 	}
 	defer file.Close()
 	values := map[string]string{}
-	scanner := bufio.NewScanner(io.LimitReader(file, 1<<20))
+	limited := &io.LimitedReader{R: file, N: envFileMaxBytes + 1}
+	scanner := bufio.NewScanner(limited)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -45,6 +51,9 @@ func loadMode0600Env(path string) (map[string]string, error) {
 	}
 	if err := scanner.Err(); err != nil {
 		return nil, errors.New("read env file")
+	}
+	if limited.N == 0 {
+		return nil, errors.New("env file is too large")
 	}
 	return values, nil
 }

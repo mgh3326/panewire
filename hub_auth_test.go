@@ -410,3 +410,116 @@ func TestHubTokenMintScript(t *testing.T) {
 		t.Fatalf("node mint: err=%v", err)
 	}
 }
+
+// TestHubAuthFileOverReadLimit: a file over the env reader's bound is refused
+// whole, at startup and on reload, instead of loading without its tail — a
+// dropped HUB_SCOPES_ line would otherwise turn a service into a node.
+func TestHubAuthFileOverReadLimit(t *testing.T) {
+	base := "HUB_TOKEN_operator=" + pw2OperatorToken + "\nHUB_TOKEN_node-a=" + pw2NodeAToken + "\nHUB_TOKEN_svc-a=" + pw2ServiceToken("svc-a") + "\n"
+	padding := strings.Repeat("#"+strings.Repeat("x", 1023)+"\n", envFileMaxBytes/1024)
+	oversized := base + padding + "HUB_SCOPES_svc-a=nodes.agents.read\n"
+	path := filepath.Join(t.TempDir(), "hub-auth.env")
+	pw2WriteAuth(t, path, oversized, 0600)
+	if _, err := loadHubAuthConfig(path); err == nil {
+		t.Fatal("an auth file over the read limit loaded")
+	}
+
+	pw2WriteAuth(t, path, base+"HUB_SCOPES_svc-a=nodes.agents.read\n", 0600)
+	logs := &pw2LockedBuffer{}
+	_, server := pw2Hub(t, map[string]string{"svc-a": "nodes.agents.read"}, path, logs)
+	service := pw2Caller{"svc-a", "svc-a", pw2ServiceToken("svc-a")}
+	pw2WriteAuth(t, path, oversized, 0600)
+	if status, _ := service.do(t, server, "GET", "/v1/nodes", ""); status != http.StatusOK {
+		t.Fatalf("service after oversized reload: status %d", status)
+	}
+	headers := make(http.Header)
+	headers.Set(hubMachineIDHeader, "svc-a")
+	headers.Set(hubAuthorizationHeader, "Bearer "+pw2ServiceToken("svc-a"))
+	if connection, _, err := websocket.Dial(t.Context(), r6WSURL(server.URL, "/v1/agent"), &websocket.DialOptions{HTTPHeader: headers}); err == nil {
+		connection.CloseNow()
+		t.Fatal("service became a node through an oversized auth file")
+	}
+	if !strings.Contains(logs.String(), "hub auth reload failed") {
+		t.Fatal("oversized reload raised no alert")
+	}
+}
+
+// TestHubAuthInPlaceRewriteReloads: rotating a token in place with the same
+// length and the old mtime restored still reloads (the change time moves).
+func TestHubAuthInPlaceRewriteReloads(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub-auth.env")
+	base := "HUB_TOKEN_operator=" + pw2OperatorToken + "\nHUB_TOKEN_node-a=" + pw2NodeAToken + "\nHUB_TOKEN_node-b=" + pw2NodeBToken + "\n"
+	oldToken, newToken := pw2ServiceToken("svc-a"), pw2ServiceToken("svc-z")
+	pw2WriteAuth(t, path, base+"HUB_TOKEN_svc-a="+oldToken+"\nHUB_SCOPES_svc-a=nodes.agents.read\n", 0600)
+	_, server := pw2Hub(t, map[string]string{"svc-a": "nodes.agents.read"}, path, nil)
+	if status, _ := (pw2Caller{"old", "svc-a", oldToken}).do(t, server, "GET", "/v1/nodes", ""); status != http.StatusOK {
+		t.Fatalf("old token before rotation: %d", status)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(base+"HUB_TOKEN_svc-a="+newToken+"\nHUB_SCOPES_svc-a=nodes.agents.read\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatalf("fixture did not keep inode, size and mtime: err=%v", err)
+	}
+	if status, _ := (pw2Caller{"old", "svc-a", oldToken}).do(t, server, "GET", "/v1/nodes", ""); status != http.StatusUnauthorized {
+		t.Fatalf("rotated-out token still accepted: %d", status)
+	}
+	if status, _ := (pw2Caller{"new", "svc-a", newToken}).do(t, server, "GET", "/v1/nodes", ""); status != http.StatusOK {
+		t.Fatalf("rotated-in token: %d", status)
+	}
+}
+
+// TestHubAuthReloadKeepsAlertNodesNodes: a reload that would make a watched
+// node a service keeps the previous set.
+func TestHubAuthReloadKeepsAlertNodesNodes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub-auth.env")
+	base := "HUB_TOKEN_operator=" + pw2OperatorToken + "\nHUB_TOKEN_node-a=" + pw2NodeAToken + "\n"
+	pw2WriteAuth(t, path, base, 0600)
+	logs := &pw2LockedBuffer{}
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens:          map[string]string{"operator": pw2OperatorToken, "node-a": pw2NodeAToken},
+		AuthPath:        path,
+		AlertNodes:      map[string]struct{}{"node-a": {}},
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"node-a","pane":"w1:p1"}}}`),
+		Logger:          slog.New(slog.NewTextHandler(logs, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(hub.Handler())
+	defer server.Close()
+	node := pw2Caller{"node-a", "node-a", pw2NodeAToken}
+	pw2WriteAuth(t, path, base+"HUB_SCOPES_node-a=nodes.agents.read\n", 0600)
+	if status, _ := node.do(t, server, "GET", "/v1/lanes", ""); status != http.StatusOK {
+		t.Fatalf("watched node lost node access on reload: %d", status)
+	}
+	if status, _ := node.do(t, server, "GET", "/v1/nodes", ""); status != http.StatusUnauthorized {
+		t.Fatalf("watched node gained a service scope: %d", status)
+	}
+	if !strings.Contains(logs.String(), "alert_node_scoped") {
+		t.Fatal("refused reload raised no alert")
+	}
+	// Removing the watched node's lines is a revocation and still loads.
+	pw2WriteAuth(t, path, "HUB_TOKEN_operator="+pw2OperatorToken+"\n", 0600)
+	if status, _ := node.do(t, server, "GET", "/v1/lanes", ""); status != http.StatusUnauthorized {
+		t.Fatalf("revoked watched node: %d", status)
+	}
+}
+
+// TestHubAuthWakeTimeoutBeforeScope: a malformed wake body answers 400 to any
+// authenticated caller, before the scope check.
+func TestHubAuthWakeTimeoutBeforeScope(t *testing.T) {
+	_, server := pw2Hub(t, map[string]string{"svc-none": "inbox.read:lane-z"}, "", nil)
+	status, _ := (pw2Caller{"svc-none", "svc-none", pw2ServiceToken("svc-none")}).do(t, server, "POST", "/v1/nodes/wake", `{"machine":"node-a","timeout":"bogus"}`)
+	if status != http.StatusBadRequest {
+		t.Fatalf("invalid wake timeout: status %d, want 400", status)
+	}
+}

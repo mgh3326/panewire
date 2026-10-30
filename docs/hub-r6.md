@@ -47,8 +47,8 @@ HUB_TOKEN_machine-b=replace-with-machine-b-token
 ```
 
 `operator` is reserved: `HUB_TOKEN_operator` authenticates `/v1/nodes`,
-`/v1/events`, and `panewire hub-status`. Each other key is a node machine ID
-for `/v1/agent`; its token also authenticates `/v1/lanes` scoped to that
+`/v1/events`, and `panewire hub-status`. Each other `HUB_TOKEN_<id>` key
+without a `HUB_SCOPES_<id>` line is a node machine ID for `/v1/agent`; its token also authenticates `/v1/lanes` scoped to that
 machine's own lanes, and cannot authenticate any other operator endpoint.
 Tokens are issued by an operator editing this file (`deploy/hub-token-mint.sh`
 generates one); the hub reloads it when it changes. There is no enrollment

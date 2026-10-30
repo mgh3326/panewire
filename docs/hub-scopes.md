@@ -19,8 +19,9 @@ HUB_SCOPES_<client>=<scope>[,<scope>...]   # makes <client> a service
   (`GET /v1/agent`), write lanes, count as a known machine, or be an alert node.
 - A client **without** one is a node, with its rules unchanged.
 - `operator` keeps full access. A scopes line for `operator`, a scopes line
-  without a matching token, a malformed or unknown scope, and a service token
-  that equals any other client's token each refuse the whole file.
+  without a matching token, a malformed or unknown scope, a service token
+  that equals any other client's token, and a file over 1 MiB each refuse the
+  whole file.
 
 The service sends the same headers a node does: `X-Panewire-Machine-ID: <client>`
 and `Authorization: Bearer <token>`. The client env file is
@@ -40,8 +41,10 @@ name one lane.
 | `inbox.read:<lane>` | `GET /v1/inbox`, `/v1/inbox/count`, `/v1/inbox/wait` and `POST /v1/inbox/{id}/read` with `?lane=<lane>` |
 | `inbox.ack:<lane>` | `POST /v1/inbox/ack` with `?lane=<lane>` |
 
-Every other route stays operator-only (or node-only for the websocket and a
-node's own lanes). A service whose scopes do not cover a request gets
+Every other route keeps the authentication it had: operator-only, node-only
+for the websocket and a node's own lanes, CF Access where the UI and chat
+accept it, and none for `GET /healthz`. A service credential satisfies none
+of them. A service whose scopes do not cover a request gets
 `403 {"error":"scope_forbidden"}`, so its client can report a scope error
 rather than an empty result. An unknown or wrong credential still gets `401`.
 On the routes whose resource is in the body (node command, spawn, wake) the
@@ -57,10 +60,13 @@ HUB_SCOPES_svc-mergewake=nodes.agents.read,node.command:agents.list@*,node.comma
 ## Reload
 
 The hub re-reads the auth file when it changes on disk (checked on each
-authenticated request). A file that no longer loads — wrong mode, a symlink,
+authenticated request; a change is any difference in inode, mode, size,
+mtime or change time). A file that no longer loads — wrong mode, a symlink,
 a parse or scope error, a missing operator token — keeps the previous
 credentials and logs one `hub auth reload failed` error per bad version.
-Removing a client's lines revokes its token on the next request; a node
+A reload that would turn an `--alert-nodes` node into a service is refused
+the same way (restart the hub with a new list instead). Removing a client's
+lines revokes its token on the next request; a node
 websocket that is already open stays open until it reconnects.
 
 ## Mint, rotate, revoke

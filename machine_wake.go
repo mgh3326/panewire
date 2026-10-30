@@ -253,10 +253,6 @@ func (h *HubServer) handleNodeWake(writer http.ResponseWriter, request *http.Req
 		http.Error(writer, "invalid wake request", http.StatusBadRequest)
 		return
 	}
-	if access := h.authorize(request, hubScopeWake, body.Machine); access != hubAccessGranted {
-		writeHubAccessDenied(writer, access)
-		return
-	}
 	timeout := hubWakeDefaultTimeout
 	if body.Timeout != "" {
 		parsed, err := time.ParseDuration(body.Timeout)
@@ -265,6 +261,10 @@ func (h *HubServer) handleNodeWake(writer http.ResponseWriter, request *http.Req
 			return
 		}
 		timeout = parsed
+	}
+	if access := h.authorize(request, hubScopeWake, body.Machine); access != hubAccessGranted {
+		writeHubAccessDenied(writer, access)
+		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), timeout)
 	defer cancel()

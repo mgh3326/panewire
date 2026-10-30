@@ -215,9 +215,11 @@ func (h *HubServer) currentAuth() *hubAuthSet {
 }
 
 func (h *HubServer) reloadAuth() {
+	// The stat runs outside authMu so a slow filesystem delays each request by
+	// its own stat instead of queueing every request behind one.
+	info, err := os.Lstat(h.authPath)
 	h.authMu.Lock()
 	defer h.authMu.Unlock()
-	info, err := os.Lstat(h.authPath)
 	if err != nil {
 		h.recordAuthReloadFailure(nil, "unreadable")
 		return
@@ -231,14 +233,23 @@ func (h *HubServer) reloadAuth() {
 		h.recordAuthReloadFailure(info, "invalid")
 		return
 	}
+	// Alert nodes are fixed at startup; one cannot become a service by reload
+	// (it would keep a presence record and raise node-down alerts). Removing
+	// its lines outright is still a revocation and loads.
+	for machine := range h.alertNodes {
+		if _, service := set.services[machine]; service {
+			h.recordAuthReloadFailure(info, "alert_node_scoped")
+			return
+		}
+	}
 	h.auth.Store(&set)
 	h.authObserved, h.authFailed = info, nil
 	h.logger.Info("hub auth reloaded", "nodes", len(set.tokens)-1, "services", len(set.services))
 }
 
 // recordAuthReloadFailure logs once per failing file version. The observed
-// version is not advanced: a repaired file that shares the bad one's mtime
-// still differs as a file (rename) or in size, and reloads.
+// version is not advanced, so any later write — which moves the change time
+// sameHubAuthFile compares — reloads.
 func (h *HubServer) recordAuthReloadFailure(info os.FileInfo, failure string) {
 	if info == nil && h.authFailedMissing {
 		return
@@ -247,8 +258,12 @@ func (h *HubServer) recordAuthReloadFailure(info os.FileInfo, failure string) {
 	h.logger.Error("hub auth reload failed; keeping the previous credentials", "alert", true, "failure", failure)
 }
 
+// sameHubAuthFile treats the file as unchanged only when its identity, mode,
+// size, mtime and change time all match. The change time is set by the
+// kernel on every write or chmod and cannot be restored from userspace, so an
+// in-place rewrite that keeps the size and restores the mtime still reloads.
 func sameHubAuthFile(previous, current os.FileInfo) bool {
-	return previous != nil && os.SameFile(previous, current) && previous.ModTime().Equal(current.ModTime()) && previous.Size() == current.Size() && previous.Mode() == current.Mode()
+	return previous != nil && os.SameFile(previous, current) && previous.ModTime().Equal(current.ModTime()) && previous.Size() == current.Size() && previous.Mode() == current.Mode() && hubFileChangeTime(previous) == hubFileChangeTime(current)
 }
 
 // authenticate identifies the caller. The operator bearer needs no machine
