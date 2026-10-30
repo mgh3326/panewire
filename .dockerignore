@@ -1,0 +1,10 @@
+# .git is intentionally NOT listed: go build stamps vcs.revision from it.
+.env
+.env.*
+*.env
+/bin/
+/dist/
+/panewire
+**/*.test
+**/*.out
+coverage.*
