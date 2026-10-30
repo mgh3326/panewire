@@ -84,7 +84,10 @@ Request:
 
 ## B. node — `job.spawn` reception
 
-- Node configuration `~/.config/panewire/spawn.json`:
+- Node configuration `~/.config/panewire/spawn.json` — optional
+  `runtug_path` pins the runtug binary where the daemon's minimal PATH
+  (launchd/systemd) does not find it; resolution order is `runtug_path`,
+  then `~/.local/bin/runtug`, then PATH (`runtug_missing` when none):
 
   ```json
   {"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true}

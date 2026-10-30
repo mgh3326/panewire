@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -712,4 +713,43 @@ func TestProcessRunningIgnoresUnreapedKilledChild(t *testing.T) {
 	eventually(t, 5*time.Second, "killed unreaped child to stop counting as running", func() bool {
 		return !processRunning(cmd.Process, pid)
 	})
+}
+
+func TestHubSpawnRuntugPathResolution(t *testing.T) {
+	lookup := func(good map[string]bool) func(string) (string, error) {
+		return func(name string) (string, error) {
+			if good[name] {
+				return "/usr/local/bin/" + name, nil
+			}
+			return "", errors.New("not found")
+		}
+	}
+	stat := func(existing ...string) func(string) bool {
+		set := map[string]bool{}
+		for _, p := range existing {
+			set[p] = true
+		}
+		return func(path string) bool { return set[path] }
+	}
+	for _, tc := range []struct {
+		name       string
+		configured string
+		existing   []string
+		onPath     bool
+		want       string
+	}{
+		{"configured wins", "/opt/tools/runtug", []string{"/opt/tools/runtug"}, true, "/opt/tools/runtug"},
+		{"configured missing is fatal", "/opt/tools/runtug", nil, true, ""},
+		{"home bin fallback", "", []string{"/h/.local/bin/runtug"}, true, "/h/.local/bin/runtug"},
+		{"home bin beats PATH", "", []string{"/h/.local/bin/runtug"}, true, "/h/.local/bin/runtug"},
+		{"PATH fallback", "", nil, true, "/usr/local/bin/runtug"},
+		{"nothing found", "", nil, false, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := hubSpawnRuntugPath(tc.configured, "/h", stat(tc.existing...), lookup(map[string]bool{"runtug": tc.onPath}))
+			if got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
+			}
+		})
+	}
 }
