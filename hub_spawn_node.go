@@ -101,6 +101,12 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.RC, result.Error = 2, "spawn_disabled"
 		return result
 	}
+	// The retired spawner is gone; a node without runtug is not spawn-capable,
+	// so refuse the same way an unconfigured node does instead of failing at exec.
+	if _, err := exec.LookPath("runtug"); err != nil {
+		result.RC, result.Error = 2, "spawn_disabled"
+		return result
+	}
 	cwd, found := config.CWDMap[message.CWDKey]
 	if !found {
 		result.RC, result.Error = 2, "cwd_unmapped"
@@ -248,15 +254,9 @@ const hubSpawnOverrideReason = "hub-directed"
 func runHubSpawnCommand(ctx context.Context, cwd, briefPath, workspace, session string, args []string) (*hubSpawnOutput, error) {
 	argv := []string{"spawn", "-c", cwd, "-p", briefPath, "--host", "local", "-w", workspace}
 	argv = append(argv, args...)
-	// Only an actual flag position counts: an allowed option may legitimately
-	// carry the same text as its value.
-	callerOverride := false
-	for index := 0; index+1 < len(args); index += 2 {
-		callerOverride = callerOverride || args[index] == "--override-reason"
-	}
-	if !callerOverride {
-		argv = append(argv, "--override-reason", hubSpawnOverrideReason)
-	}
+	// The node owns the reason for pinning the host; callers cannot supply
+	// --override-reason (it is not in the hub's args allowlist).
+	argv = append(argv, "--override-reason", hubSpawnOverrideReason)
 	command := exec.CommandContext(ctx, "runtug", argv...)
 	command.Env = hubSpawnEnvironment(os.Environ(), session)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
