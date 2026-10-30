@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -180,31 +181,50 @@ type PlacementCandidate struct {
 	slotFull bool
 }
 
+// PlacementQuotaDecision survives on the wire only: a new hub emits an
+// `allow` stub when a caller still asks for a pool, so a pre-change
+// `panewire place` keeps accepting the response during the rolling upgrade.
+type PlacementQuotaDecision struct {
+	Pool         string `json:"pool"`
+	AccountFP    string `json:"account_fp,omitempty"`
+	Decision     string `json:"decision"`
+	Reason       string `json:"reason"`
+	PolicyStatus string `json:"policy_status"`
+}
+
+// Legacy selector patterns kept for the compat stub's parameter check.
+var (
+	hubQuotaPoolPattern      = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,63}$`)
+	hubQuotaAccountFPPattern = regexp.MustCompile(`^[0-9a-f]{8}$`)
+)
+
 type PlacementResult struct {
-	Decision     string               `json:"decision"`
-	Candidates   []PlacementCandidate `json:"candidates"`
-	Source       string               `json:"source"`
-	Asof         time.Time            `json:"asof"`
-	PolicyStatus string               `json:"policy_status"`
-	Reason       string               `json:"reason,omitempty"`
+	Decision     string                  `json:"decision"`
+	Candidates   []PlacementCandidate    `json:"candidates"`
+	Source       string                  `json:"source"`
+	Asof         time.Time               `json:"asof"`
+	PolicyStatus string                  `json:"policy_status"`
+	Reason       string                  `json:"reason,omitempty"`
+	Quota        *PlacementQuotaDecision `json:"quota,omitempty"`
 }
 
 // MarshalJSON keeps the internal unavailable sentinel useful to callers while
 // presenting the API contract's null decision to external clients.
 func (r PlacementResult) MarshalJSON() ([]byte, error) {
 	type wirePlacementResult struct {
-		Decision     *string              `json:"decision"`
-		Candidates   []PlacementCandidate `json:"candidates"`
-		Source       string               `json:"source"`
-		Asof         time.Time            `json:"asof"`
-		PolicyStatus string               `json:"policy_status"`
-		Reason       string               `json:"reason,omitempty"`
+		Decision     *string                 `json:"decision"`
+		Candidates   []PlacementCandidate    `json:"candidates"`
+		Source       string                  `json:"source"`
+		Asof         time.Time               `json:"asof"`
+		PolicyStatus string                  `json:"policy_status"`
+		Reason       string                  `json:"reason,omitempty"`
+		Quota        *PlacementQuotaDecision `json:"quota,omitempty"`
 	}
 	var decision *string
 	if r.Decision != "unavailable" {
 		decision = &r.Decision
 	}
-	return json.Marshal(wirePlacementResult{Decision: decision, Candidates: r.Candidates, Source: r.Source, Asof: r.Asof, PolicyStatus: r.PolicyStatus, Reason: r.Reason})
+	return json.Marshal(wirePlacementResult{Decision: decision, Candidates: r.Candidates, Source: r.Source, Asof: r.Asof, PolicyStatus: r.PolicyStatus, Reason: r.Reason, Quota: r.Quota})
 }
 
 func (r *PlacementResult) UnmarshalJSON(data []byte) error {
@@ -295,6 +315,9 @@ func (h *HubServer) reloadPlacementPolicyLocked() {
 		h.setPlacementPolicyFailureLocked("invalid")
 		return
 	}
+	if len(policy.QuotaExclude)+len(policy.QuotaBoost) > 0 {
+		h.logger.Warn("placement policy quota rules are ignored; remove quota_exclude/quota_boost", "quota_exclude", len(policy.QuotaExclude), "quota_boost", len(policy.QuotaBoost))
+	}
 	h.placementPolicy, h.placementPolicyModTime = policy, modTime
 	h.placementPolicyObservedModTime = modTime
 	h.placementPolicyLoaded = true
@@ -326,7 +349,17 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid placement class", http.StatusBadRequest)
 		return
 	}
+	// The retired quota selector stays answerable for one release: an old
+	// caller still sends it, so the response carries an allow stub.
+	pool, accountFP := r.URL.Query().Get("pool"), r.URL.Query().Get("account_fp")
+	if (pool == "" && accountFP != "") || (pool != "" && !hubQuotaPoolPattern.MatchString(pool)) || (accountFP != "" && !hubQuotaAccountFPPattern.MatchString(accountFP)) {
+		http.Error(w, "invalid quota selector", http.StatusBadRequest)
+		return
+	}
 	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"))
+	if pool != "" {
+		result.Quota = &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "allow", Reason: "quota_allowed", PolicyStatus: result.PolicyStatus}
+	}
 	writeJSON(w, http.StatusOK, result)
 }
 
