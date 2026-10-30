@@ -26,6 +26,7 @@ loki.write "cloud" {
 // config.linux.alloy.
 prometheus.exporter.unix "node" {
 	enable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_ENABLE_COLLECTORS"), "[]"))
+	disable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_DISABLE_COLLECTORS"), "[]"))
 
 	textfile {
 		directory          = sys.env("FLEET_TEXTFILE_DIR")
