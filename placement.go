@@ -373,6 +373,8 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 	// wake. Plain placement (no pool) is unaffected and keeps the warn log.
 	if pool != "" {
 		h.mu.Lock()
+		// Reload first so a desk edit removing the rules is honored at once.
+		h.reloadPlacementPolicyLocked()
 		rulesPresent := len(h.placementPolicy.QuotaExclude)+len(h.placementPolicy.QuotaBoost) > 0
 		policyStatus := h.placementPolicyStatus
 		h.mu.Unlock()
@@ -689,6 +691,11 @@ func filterSlotFullCandidates(candidates []PlacementCandidate) []PlacementCandid
 
 func placementUsable(candidate PlacementCandidate, policy PlacementPolicy, source string) bool {
 	if candidate.slotFull || !candidate.Connected || strings.Contains(candidate.Reason, "not_accepting") || candidate.ActiveJobs >= policy.MaxActiveJobs {
+		return false
+	}
+	// A candidate decoded from an old hub may still carry its quota verdict;
+	// deny and unknown are never usable here either.
+	if candidate.QuotaDecision != nil && *candidate.QuotaDecision != "allow" && *candidate.QuotaDecision != "boost" && *candidate.QuotaDecision != "" {
 		return false
 	}
 	if source == "prometheus" && !candidate.MetricsKnown {
