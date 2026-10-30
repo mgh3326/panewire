@@ -82,27 +82,29 @@ func loadHubAuthConfig(path string) (hubAuthSet, error) {
 }
 
 // readHubAuthFile returns the raw HUB_TOKEN_<id> and HUB_SCOPES_<id> lines.
-// Any other key is invalid. Errors never reflect a token or a scope value.
+// Any other key, or a key given twice, is invalid: a repeated line would
+// otherwise let the last one silently replace a token or widen a scope set.
+// Errors never reflect a token or a scope value.
 func readHubAuthFile(path string) (tokens, scopes map[string]string, err error) {
-	values, err := loadMode0600Env(path)
+	entries, err := loadMode0600EnvEntries(path)
 	if err != nil {
 		return nil, nil, errors.New("hub auth file must be a regular mode-0600 file")
 	}
-	tokens = make(map[string]string, len(values))
+	tokens = make(map[string]string, len(entries))
 	scopes = map[string]string{}
-	for key, value := range values {
-		if id, found := strings.CutPrefix(key, "HUB_TOKEN_"); found {
-			if !machineIDPattern.MatchString(id) || !validHubToken(value) {
+	for _, entry := range entries {
+		if id, found := strings.CutPrefix(entry.key, "HUB_TOKEN_"); found {
+			if _, repeated := tokens[id]; repeated || !machineIDPattern.MatchString(id) || !validHubToken(entry.value) {
 				return nil, nil, errors.New("hub auth file is invalid")
 			}
-			tokens[id] = value
+			tokens[id] = entry.value
 			continue
 		}
-		if id, found := strings.CutPrefix(key, "HUB_SCOPES_"); found {
-			if !machineIDPattern.MatchString(id) {
+		if id, found := strings.CutPrefix(entry.key, "HUB_SCOPES_"); found {
+			if _, repeated := scopes[id]; repeated || !machineIDPattern.MatchString(id) {
 				return nil, nil, errors.New("hub auth file is invalid")
 			}
-			scopes[id] = value
+			scopes[id] = entry.value
 			continue
 		}
 		return nil, nil, errors.New("hub auth file is invalid")

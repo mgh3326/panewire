@@ -254,6 +254,11 @@ func TestHubAuthConfigRejects(t *testing.T) {
 		"empty line":           base + service + "HUB_SCOPES_svc-a=\n",
 		"shared token":         base + "HUB_TOKEN_svc-a=" + pw2NodeAToken + "\nHUB_SCOPES_svc-a=nodes.agents.read\n",
 		"other key":            base + "HUB_GRANT_svc-a=x\n",
+		"repeated node token":  base + "HUB_TOKEN_node-a=" + pw2NodeBToken + "\n",
+		"repeated same token":  base + "HUB_TOKEN_node-a=" + pw2NodeAToken + "\n",
+		"repeated operator":    base + "HUB_TOKEN_operator=" + pw2NodeBToken + "\n",
+		"repeated via export":  base + "export HUB_TOKEN_node-a=" + pw2NodeBToken + "\n",
+		"repeated scopes":      base + service + "HUB_SCOPES_svc-a=nodes.agents.read\nHUB_SCOPES_svc-a=spawn@*\n",
 	}
 	for name, body := range cases {
 		path := filepath.Join(t.TempDir(), "hub-auth.env")
@@ -590,4 +595,25 @@ func TestHubAuthReloadClosesRevokedNodeWebsocket(t *testing.T) {
 		t.Fatalf("unregistered socket with a rotated token stayed open: %v", err)
 	}
 	eventually(t, 5*time.Second, "rotated node disconnected", func() bool { return state("node-b") == "disconnected" })
+}
+
+// TestHubAuthReloadRefusesRepeatedKeys: a reload whose file repeats a scopes
+// line keeps the previous set rather than taking the last, wider line.
+func TestHubAuthReloadRefusesRepeatedKeys(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub-auth.env")
+	base := "HUB_TOKEN_operator=" + pw2OperatorToken + "\nHUB_TOKEN_node-a=" + pw2NodeAToken + "\nHUB_TOKEN_node-b=" + pw2NodeBToken + "\nHUB_TOKEN_svc-a=" + pw2ServiceToken("svc-a") + "\n"
+	pw2WriteAuth(t, path, base+"HUB_SCOPES_svc-a=inbox.read:lane-a\n", 0600)
+	logs := &pw2LockedBuffer{}
+	_, server := pw2Hub(t, map[string]string{"svc-a": "inbox.read:lane-a"}, path, logs)
+	service := pw2Caller{"svc", "svc-a", pw2ServiceToken("svc-a")}
+	if status, _ := service.do(t, server, "GET", "/v1/nodes", ""); status != http.StatusForbidden {
+		t.Fatalf("before reload: %d", status)
+	}
+	pw2WriteAuth(t, path, base+"HUB_SCOPES_svc-a=inbox.read:lane-a\nHUB_SCOPES_svc-a=nodes.agents.read\n", 0600)
+	if status, _ := service.do(t, server, "GET", "/v1/nodes", ""); status != http.StatusForbidden {
+		t.Fatalf("repeated scopes line widened the service: %d", status)
+	}
+	if !strings.Contains(logs.String(), "hub auth reload failed") {
+		t.Fatal("refused reload raised no alert")
+	}
 }
