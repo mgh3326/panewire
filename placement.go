@@ -29,6 +29,10 @@ type PlacementPolicy struct {
 	QuotaExclude     []PlacementQuotaRule             `json:"quota_exclude,omitempty"`
 	QuotaBoost       []PlacementQuotaRule             `json:"quota_boost,omitempty"`
 	Machines         map[string]PlacementMachineSlots `json:"machines,omitempty"`
+	// Power is an optional relative speed weight per machine (100 = the
+	// strongest host). A machine without an entry weighs defaultPlacementPower.
+	// See docs/placement.md for how the weights are measured.
+	Power map[string]float64 `json:"power,omitempty"`
 }
 
 type PlacementQuotaRule struct {
@@ -43,6 +47,14 @@ type PlacementQuotaRule struct {
 type PlacementMachineSlots struct {
 	TaskSlots int `json:"task_slots"`
 }
+
+const (
+	defaultPlacementPower = 100.0
+	maxPlacementPower     = 10000.0
+	// placementSparePowerBonus is the score a fully idle machine of power 100
+	// earns; it only has to break ties between otherwise equal candidates.
+	placementSparePowerBonus = 5.0
+)
 
 func DefaultPlacementPolicy() PlacementPolicy {
 	return PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop"}, MaxActiveJobs: 5, LoadRatio: 0.5, MemoryFreePctMin: memoryFloat(30), SwapUsedMBMax: memoryFloat(1536)}
@@ -80,7 +92,30 @@ func (p PlacementPolicy) valid() bool {
 			return false
 		}
 	}
+	for machine, power := range p.Power {
+		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || !(power > 0 && power <= maxPlacementPower) {
+			return false
+		}
+	}
 	return true
+}
+
+// power returns the machine's relative speed weight; a missing entry is 100.
+func (p PlacementPolicy) power(machine string) float64 {
+	if power, exists := p.Power[machine]; exists {
+		return power
+	}
+	return defaultPlacementPower
+}
+
+// placementScoreBase is the load-and-jobs part of a candidate's score. Each
+// active job costs 10 points on a power-100 host and proportionally more on a
+// weaker one; an idle machine earns a bonus in proportion to its spare power
+// so stronger idle hosts win ties. A weak host stays eligible: it is ranked
+// lower, never filtered. load is a busy fraction and is clamped for the bonus.
+func placementScoreBase(load float64, jobs int, power float64) float64 {
+	spare := power * (1 - math.Min(math.Max(load, 0), 1))
+	return 100.0 - load*100 - float64(jobs)*10*defaultPlacementPower/power + placementSparePowerBonus*spare/defaultPlacementPower
 }
 
 func (p PlacementPolicy) memoryFreePctMin() float64 {
@@ -252,6 +287,12 @@ func countPlacementTasks(jobs map[string]HubActiveJob) int {
 	}
 	return len(tasks)
 }
+
+// placementCPUBusyQuery is the busy fraction (0..1) per machine: one minus the
+// idle rate over five minutes, averaged over that machine's cpus. Unlike
+// node_load5 it does not count blocked threads, which on macOS can push the
+// load average far above the core count on a host that is barely busy.
+const placementCPUBusyQuery = `clamp(1 - avg by (machine_id) (rate(node_cpu_seconds_total{mode="idle"}[5m])), 0, 1)`
 
 type placementMetrics struct {
 	load      map[string]float64
@@ -560,7 +601,7 @@ func (h *HubServer) makePlacementWithQuota(policy PlacementPolicy, metrics place
 		if len(reasons) == 0 {
 			reasons = append(reasons, "available")
 		}
-		score := 100.0 - load*100 - float64(jobs)*10
+		score := placementScoreBase(load, jobs, policy.power(machine))
 		if !connected {
 			score -= 1000
 		}
@@ -715,7 +756,7 @@ func (h *HubServer) fetchPlacementMetrics(ctx context.Context) (placementMetrics
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
-	queries := []string{"avg by (machine_id) (avg_over_time(node_load5[5m])) / on (machine_id) count by (machine_id) (count by (machine_id, cpu) (node_cpu_seconds_total))", "min by (machine_id) (min_over_time(node_thermal_cpu_speed_limit_ratio[5m]))"}
+	queries := []string{placementCPUBusyQuery, "min by (machine_id) (min_over_time(node_thermal_cpu_speed_limit_ratio[5m]))"}
 	values := make([]map[string]float64, len(queries))
 	for i, query := range queries {
 		got, err := prometheusVector(ctx, client, rawURL, query, bearer, user, pass)

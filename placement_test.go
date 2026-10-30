@@ -94,22 +94,6 @@ func TestPlacementEmptyLoadIsUnknownNotLocal(t *testing.T) {
 	t.Fatalf("missing unknown reason: %+v", got.Candidates)
 }
 
-func TestPlacementLoadQueryAggregatesMachineID(t *testing.T) {
-	var query string
-	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.Contains(r.URL.Query().Get("query"), "node_load5") {
-			query = r.URL.Query().Get("query")
-		}
-		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": []any{}}})
-	}))
-	defer prom.Close()
-	hub := placementHub(t, prom.URL)
-	_, _ = hub.fetchPlacementMetrics(t.Context())
-	if !strings.Contains(query, "avg by (machine_id)") || !strings.Contains(query, "/ on (machine_id)") {
-		t.Fatalf("load query does not normalize labels: %q", query)
-	}
-}
-
 func TestPlacementOperatorAuthentication(t *testing.T) {
 	hub := placementHub(t, "")
 	recorder := httptest.NewRecorder()
