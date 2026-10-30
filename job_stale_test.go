@@ -35,12 +35,12 @@ func TestJobStaleLocalScanDropsPanelessSilentJob(t *testing.T) {
 	staleClaim := now.Add(-2 * time.Hour).Format(time.RFC3339)
 	staleProgress := now.Add(-90 * time.Minute).Format(time.RFC3339)
 	write("job-stale-paneless", "00001-job.claimed.json",
-		`{"type":"job.claimed","created_at":"`+staleClaim+`","agent_label":"wrk-a","owner_lane":"lane-a","epoch":1}`)
+		`{"type":"job.claimed","created_at":"`+staleClaim+`","agent_label":"agent-a","owner_lane":"lane-a","epoch":1}`)
 	write("job-stale-paneless", "00002-job.progress.json",
 		`{"type":"job.progress","created_at":"`+staleProgress+`"}`)
 	// Paneless but still emitting: fresh events keep it active.
 	write("job-fresh-paneless", "00001-job.claimed.json",
-		`{"type":"job.claimed","created_at":"`+time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)+`","agent_label":"wrk-b","owner_lane":"lane-a","epoch":1}`)
+		`{"type":"job.claimed","created_at":"`+time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)+`","agent_label":"agent-b","owner_lane":"lane-a","epoch":1}`)
 
 	jobs := scanHubActiveJobs(root)
 	ids := make(map[string]bool, len(jobs))
@@ -72,8 +72,8 @@ func TestJobStaleHubRegistryDropsSilentRecord(t *testing.T) {
 	}
 	agent := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "t770", "fixture", agent, false)
-	stale := HubActiveJob{JobID: "job-stale", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 1}
-	live := HubActiveJob{JobID: "job-live", AgentLabel: "wrk-b", LastEventSeq: 1, Epoch: 1}
+	stale := HubActiveJob{JobID: "job-stale", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}
+	live := HubActiveJob{JobID: "job-live", AgentLabel: "agent-b", LastEventSeq: 1, Epoch: 1}
 	hub.observeActiveJobs("node-a", []HubActiveJob{stale, live}, clock)
 
 	clock = clock.Add(31 * time.Second)
@@ -124,7 +124,7 @@ func TestJobStaleHubRegistryNeverDropsOrphan(t *testing.T) {
 	}
 	agent := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "t770", "fixture", agent, false)
-	job := HubActiveJob{JobID: "job-orphan", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 1}
+	job := HubActiveJob{JobID: "job-orphan", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}
 	hub.observeActiveJobs("node-a", []HubActiveJob{job}, clock)
 	hub.disconnect("node-a", agent)
 	clock = clock.Add(2 * time.Second)
@@ -156,8 +156,8 @@ func TestJobStaleAgeEnvOverride(t *testing.T) {
 	}
 }
 
-// The wrk-side half of AC5 lives in bin/wrk's prune dry-run; here we only pin
-// that the marker wrk prune writes is one the local replay already treats as
+// The spawner-side half of AC5 lives in the retired pruner's dry-run; here we only pin
+// that the marker the pruner writes is one the local replay already treats as
 // an end — a job.revoked record removes the job from the active scan.
 func TestJobRevokedMarkerLeavesActiveScan(t *testing.T) {
 	root := t.TempDir()
@@ -171,12 +171,12 @@ func TestJobRevokedMarkerLeavesActiveScan(t *testing.T) {
 		}
 	}
 	write("00001-job.claimed.json",
-		`{"type":"job.claimed","created_at":"`+time.Now().UTC().Format(time.RFC3339)+`","agent_label":"wrk-a","owner_lane":"lane-a","epoch":1}`)
+		`{"type":"job.claimed","created_at":"`+time.Now().UTC().Format(time.RFC3339)+`","agent_label":"agent-a","owner_lane":"lane-a","epoch":1}`)
 	if jobs := scanHubActiveJobs(root); len(jobs) != 1 {
 		t.Fatalf("claimed job must scan active before the marker: %+v", jobs)
 	}
 	write("00002-job.revoked.json",
-		`{"type":"job.revoked","created_at":"`+time.Now().UTC().Format(time.RFC3339)+`","job_id":"job-marked","outcome":"abandoned","reason":"stale: silent, pane absent","source":"wrk prune"}`)
+		`{"type":"job.revoked","created_at":"`+time.Now().UTC().Format(time.RFC3339)+`","job_id":"job-marked","outcome":"abandoned","reason":"stale: silent, pane absent","source":"legacy prune"}`)
 	if jobs := scanHubActiveJobs(root); len(jobs) != 0 {
 		t.Fatalf("the prune end declaration must remove the job from active replay: %+v", jobs)
 	}

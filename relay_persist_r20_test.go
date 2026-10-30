@@ -403,7 +403,7 @@ func TestR20EmitToDeliveredCursorInOrder(t *testing.T) {
 
 	// A worker emits: the file lands first, then the daemon queue carries it.
 	inbox := t.TempDir()
-	if code := runEmitCLI([]string{"--kind", "job.completed", "--job", "r20-cursor", "--report", "report.md", "--owner-lane", "lane-a", "--label", "wrk-a", "--host", "host-a", "--report-last-line", "VERDICT: DONE", "--inbox-root", inbox}, io.Discard, io.Discard, CLIConfig{SocketPath: filepath.Join(t.TempDir(), "absent.sock")}); code != ExitOK {
+	if code := runEmitCLI([]string{"--kind", "job.completed", "--job", "r20-cursor", "--report", "report.md", "--owner-lane", "lane-a", "--label", "agent-a", "--host", "host-a", "--report-last-line", "VERDICT: DONE", "--inbox-root", inbox}, io.Discard, io.Discard, CLIConfig{SocketPath: filepath.Join(t.TempDir(), "absent.sock")}); code != ExitOK {
 		t.Fatalf("emit code=%d", code)
 	}
 	node := &HubClient{jobsInboxRoot: inbox, completedJobs: map[string]uint64{}, completedReports: map[string]struct{}{}, assignedJobs: map[string]uint64{}, events: make(chan hubClientEvent, 4)}
@@ -492,7 +492,7 @@ func TestR20PersistFailureSkipsInject(t *testing.T) {
 	subscriber := &hubEventSubscriber{ctx: ctx, cancel: cancel, messages: make(chan hubSubscriptionMessage, 4)}
 	hub.subscribers[subscriber] = struct{}{}
 
-	hub.relayJobCompletion(hubJobEventPayload{JobID: "r20-fail", Epoch: 1, OwnerLane: "lane-a", Label: "wrk-a", Host: "host-a", ReportPath: "report.md", ReportLastLine: "done"})
+	hub.relayJobCompletion(hubJobEventPayload{JobID: "r20-fail", Epoch: 1, OwnerLane: "lane-a", Label: "agent-a", Host: "host-a", ReportPath: "report.md", ReportLastLine: "done"})
 
 	select {
 	case directive := <-agent.relays:
@@ -629,7 +629,7 @@ func TestR20WithoutHandoffkeepEnvNoCallsAndStillInjects(t *testing.T) {
 	hub := r20Hub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, nil, nil)
 	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 4), persisted: make(chan hubRelayPersistedEvent, 4)}
 	hub.nodes["host-a"] = &hubNodeRecord{agent: agent}
-	hub.relayJobCompletion(hubJobEventPayload{JobID: "r20-compat", Epoch: 1, OwnerLane: "lane-a", Label: "wrk-a", Host: "host-a", ReportPath: "report.md", ReportLastLine: "done"})
+	hub.relayJobCompletion(hubJobEventPayload{JobID: "r20-compat", Epoch: 1, OwnerLane: "lane-a", Label: "agent-a", Host: "host-a", ReportPath: "report.md", ReportLastLine: "done"})
 	select {
 	case <-agent.relays:
 	case <-time.After(time.Second):
@@ -658,7 +658,7 @@ func TestR20OwnerLaneMismatchOnDuplicateWarnsOnce(t *testing.T) {
 	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, 4), persisted: make(chan hubRelayPersistedEvent, 4)}
 	hub.nodes["host-a"] = &hubNodeRecord{agent: agent}
 
-	hub.relayJobCompletion(hubJobEventPayload{JobID: "r20-lane", Epoch: 1, OwnerLane: "lane-a", Label: "wrk-a", Host: "host-a", ReportPath: "report.md", ReportLastLine: "done"})
+	hub.relayJobCompletion(hubJobEventPayload{JobID: "r20-lane", Epoch: 1, OwnerLane: "lane-a", Label: "agent-a", Host: "host-a", ReportPath: "report.md", ReportLastLine: "done"})
 
 	select {
 	case directive := <-agent.relays:

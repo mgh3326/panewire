@@ -14,7 +14,7 @@ import (
 )
 
 // `panewire job close` is the owner's end-of-job declaration (#502 E-1). A
-// worker that finished without `wrk done` leaves no terminal event, so no
+// worker that finished without `panewire job done` leaves no terminal event, so no
 // reaper ever picks its pane up; the lane that owns the job closes it here.
 //
 // The declaration is one flat record and nothing else: no emit, no hub call,
@@ -22,7 +22,7 @@ import (
 // reap's grace runs from this record's created_at — declare, wait out the
 // grace, then reap.
 //
-// The kind is job.revoked, already in every terminal set (wrk reap's TERMINAL,
+// The kind is job.revoked, already in every terminal set (the reap contract's TERMINAL,
 // fleetCensusTerminalKinds, stallTerminalKinds, the node's active-job scan).
 // Since #507 the relay scanner also forwards it: the record always carries a
 // reason and an owner lane, so the declaration reaches the owner lane's parent
@@ -35,7 +35,7 @@ import (
 // source, closed_by and outcome, so the two stay distinguishable.
 //
 // None of this touches done/escalate/joined: their writers and wire stay
-// byte-identical to wrk (testdata/job_golden).
+// pinned by testdata/job_golden.
 
 const (
 	jobCloseKind   = "job.revoked"
@@ -56,7 +56,7 @@ const (
 // abandoned job as a completed one.
 var jobCloseOutcomes = map[string]bool{"completed": true, "abandoned": true, "superseded": true}
 
-// jobCloseTerminalKinds and jobCloseReviveKinds are wrk reap's TERMINAL and
+// jobCloseTerminalKinds and jobCloseReviveKinds are the reap contract's TERMINAL and
 // REVIVE sets: a job whose latest claim is followed by a terminal event is
 // already closed; a claim/spawn after a terminal revives it.
 var (
@@ -67,7 +67,7 @@ var (
 const jobCloseHelp = `Usage: panewire job close JOB --lane LANE --outcome completed|abandoned|superseded --reason TEXT [--operator-override]
 
 Declare JOB ended on behalf of its owner lane. Writes one job.revoked record
-into the job's events directory; the pane is not touched (wrk reap closes it
+into the job's events directory; the pane is not touched (the reaper closes it
 after its grace).
 
 Options:
@@ -198,7 +198,7 @@ type jobCloseState struct {
 	unreadClaim string // a claim/reclaim file that could not be read or parsed
 }
 
-// scanJobCloseState walks the events in name order — the order wrk reap and
+// scanJobCloseState walks the events in name order — the order the reaper and
 // completion metadata use — and keeps the newest claim's owner_lane. A claim
 // file that cannot be read is fatal to the ownership check: skipping it would
 // let an older claim decide.

@@ -42,7 +42,7 @@ The first usable slice is deliberately small:
 
 The file inbox and pane injection remain the system of record. panewire automates the surrounding watching, checking, waiting, and recording procedures; it does not turn session-to-session coordination into server communication.
 
-Spawning remains the responsibility of `wrk`, including scopefuel gating, arbiter decisions, and landed verification. panewire is a messaging and monitoring layer for sessions that are already alive.
+Spawning is the responsibility of `runtug`; panewire is a messaging and monitoring layer for sessions that are already alive.
 
 See [docs/design.md](docs/design.md) for the complete contract and acceptance criteria.
 
@@ -117,16 +117,9 @@ It attempts URLs in order, backs off only after all fail, and every
 `HUB_PREFER_RETRY` (default `10m`) probes a higher-priority route before
 switching. Cloudflare Access headers apply only to non-tailnet URLs.
 
-Quota is on-demand rather than a 60-second poll: `POST /v1/quota/<machine>`
-asks the connected GUI-session node to execute `scopefuel --json` once and
-caches its result for `QUOTA_CACHE_TTL` (default `5m`). Stdout is limited to
-16 KiB, and to 24 KiB once JSON-escaped so the report always fits the 32 KiB
-protocol message; a result over either bound is discarded with
-`output_too_large`. A timeout kills the command's complete process group. The child environment is rebuilt
-from the allowlist `PATH`, `HOME`, `USER`, `LANG`, `CODEX_HOME`, and
-`CLAUDE_CONFIG_DIR`. The last two are scopefuel's documented credential
-location overrides; hub tokens, Cloudflare headers, and all other daemon
-environment values are never inherited.
+Quota collection at the hub is retired: nodes no longer run a quota tool
+and a legacy hub's `quota.request` is answered `unsupported` so a
+mixed-version pair completes the round trip instead of timing out.
 
 By default every authenticated node is watched for presence and heartbeat-check
 alerts. Pass `--alert-nodes machine-a,machine-b` on the hub to limit alerts to
@@ -148,17 +141,16 @@ for the event-field table and selection rules.
 
 ### Completion commands (`panewire job`)
 
-`panewire job done|escalate|joined` is the Go form of `wrk done|escalate|joined`
-and takes the same arguments. It leaves the same bytes behind as the wrk path —
-the event record, the `panewire emit` socket request, the handoffkeep report
-upload, the `OK` line, the exit status and the `emit-failures.log` /
-`completion-suppressed.log` lines — pinned by
-[testdata/job_golden](testdata/job_golden) (generated from wrk only; see
-`job_golden_test.go`). Relay text is still normalized once, on the node.
+`panewire job done|escalate|joined` owns the job record contract once held
+by the retired spawner, and takes the same arguments. It leaves the
+contract's bytes behind — the event record, the `panewire emit` socket
+request, the handoffkeep report upload, the `OK` line, the exit status and
+the `emit-failures.log` / `completion-suppressed.log` lines — pinned by
+[testdata/job_golden](testdata/job_golden) (see `job_golden_test.go`). Relay
+text is still normalized once, on the node.
 
-`panewire job probe` prints `panewire-job/1`. wrk hands the three commands over
-only on that exact answer and otherwise keeps its own path, so wrk and panewire
-can be deployed in either order.
+`panewire job probe` prints `panewire-job/1`, the delegation answer a caller
+can probe before handing the three commands over.
 
 ### Owner close (`panewire job close`)
 
@@ -166,13 +158,13 @@ can be deployed in either order.
 panewire job close JOB --lane LANE --outcome completed|abandoned|superseded --reason TEXT [--operator-override]
 ```
 
-A job whose worker ended without `wrk done` has no terminal event, so no
+A job whose worker ended without `panewire job done` has no terminal event, so no
 reaper ever selects its pane. The lane that owns the job declares it ended
 here. The command writes exactly one flat `job.revoked` record into
-`jobs/JOB/events/` — a kind already in wrk reap's terminal set, the census and
+`jobs/JOB/events/` — a kind already in the reap terminal set, the census and
 stall-detector terminal sets and the node's active-job scan, so no hub or
 handoffkeep kind changes. It does not emit, call the hub, upload a document or
-touch herdr: the pane is closed later by `wrk reap`, whose grace runs from the
+touch herdr: the pane is closed later by the reaper, whose grace runs from the
 record's `created_at`. `job.completed` is not used because the node relays
 those files to the owner lane.
 

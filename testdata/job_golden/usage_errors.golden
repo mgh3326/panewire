@@ -44,7 +44,7 @@
 <cmd>: --pr requires a URL
 == step ["escalate" "-h"] rc=0
 -- stdout
-Usage: wrk escalate JOB --question TEXT [--report PATH]
+Usage: panewire job escalate JOB --question TEXT [--report PATH]
 
 Write a builder escalation record and relay it to the parent lane.
 

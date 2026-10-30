@@ -44,8 +44,9 @@ leave the old code for a cleanup PR rather than copying its pattern.
 - Tests must pass on macOS and Linux, as a normal user and as root, and with
   `-count=N`. Skip a case only for a real environment limit, with the reason
   in the `t.Skip` message.
-- Golden files under `testdata/job_golden` come from `wrk`, never from
-  `panewire job`; see `job_golden_test.go`.
+- Golden files under `testdata/job_golden` are the frozen job record
+  contract once produced by the retired spawner; a change that alters any
+  byte updates the golden in the same commit. See `job_golden_test.go`.
 
 ## Before pushing
 

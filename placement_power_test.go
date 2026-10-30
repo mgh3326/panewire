@@ -53,7 +53,7 @@ func placementPowerHub(t *testing.T, promURL string, policy PlacementPolicy) *Hu
 func placementPowerJobs(machine string, count int) []HubActiveJob {
 	jobs := make([]HubActiveJob, count)
 	for i := range jobs {
-		jobs[i] = HubActiveJob{JobID: "job-" + machine + string(rune('a'+i)), AgentLabel: "wrk", Epoch: 1, OwnerLane: "owner-" + string(rune('a'+i))}
+		jobs[i] = HubActiveJob{JobID: "job-" + machine + string(rune('a'+i)), AgentLabel: "agent", Epoch: 1, OwnerLane: "owner-" + string(rune('a'+i))}
 	}
 	return jobs
 }

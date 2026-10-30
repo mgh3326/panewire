@@ -12,20 +12,18 @@ import (
 	"time"
 )
 
-// runPlaceCLI is the intentionally thin operator client used by wrk. A
+// runPlaceCLI is the intentionally thin operator client used by runtug. A
 // successful hub-only answer is still a successful placement decision.
 func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	flags := flag.NewFlagSet("panewire place", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	class := flags.String("class", "", "worker or verifier")
 	cwd := flags.String("cwd", "", "repository key (metadata only)")
-	pool := flags.String("pool", "", "scopefuel-reported pool")
-	accountFP := flags.String("account-fp", "", "optional sha8 account selector")
 	explain := flags.Bool("explain", false, "render candidates as a table")
 	hubURL := flags.String("hub-url", "", "HTTPS hub base URL")
 	tokenPath := flags.String("hub-token-env", "", "mode-0600 operator HUB_MACHINE_ID/HUB_TOKEN env file")
 	cfPath := flags.String("hub-cf-env", "", "optional mode-0600 CF Access env file")
-	if flags.Parse(args) != nil || flags.NArg() != 0 || (*class != "worker" && *class != "verifier") || len(*cwd) > 256 || strings.ContainsAny(*cwd, "\r\n\x00") || (*pool == "" && *accountFP != "") || (*pool != "" && !hubQuotaPoolPattern.MatchString(*pool)) || (*accountFP != "" && !hubQuotaAccountFPPattern.MatchString(*accountFP)) || *hubURL == "" || *tokenPath == "" {
+	if flags.Parse(args) != nil || flags.NArg() != 0 || (*class != "worker" && *class != "verifier") || len(*cwd) > 256 || strings.ContainsAny(*cwd, "\r\n\x00") || *hubURL == "" || *tokenPath == "" {
 		return ExitUsage
 	}
 	env, err := loadHubTokenEnv(*tokenPath)
@@ -50,12 +48,6 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	query.Set("class", *class)
 	if *cwd != "" {
 		query.Set("cwd", *cwd)
-	}
-	if *pool != "" {
-		query.Set("pool", *pool)
-	}
-	if *accountFP != "" {
-		query.Set("account_fp", *accountFP)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
@@ -83,7 +75,7 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		return ExitInternal
 	}
 	var result PlacementResult
-	if json.Unmarshal(body, &result) != nil || !validPlacementCLIResult(result, *pool, *accountFP) {
+	if json.Unmarshal(body, &result) != nil || !validPlacementCLIResult(result) {
 		fmt.Fprintln(stderr, "place rejected: malformed hub response")
 		return ExitInternal
 	}
@@ -99,7 +91,7 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	return ExitOK
 }
 
-func validPlacementCLIResult(result PlacementResult, pool, accountFP string) bool {
+func validPlacementCLIResult(result PlacementResult) bool {
 	if result.Source != "prometheus" && result.Source != "hub-only" {
 		return false
 	}
@@ -120,29 +112,11 @@ func validPlacementCLIResult(result PlacementResult, pool, accountFP string) boo
 			decisionFound = true
 		}
 	}
-	if !decisionFound {
-		return false
-	}
-	if pool == "" {
-		return result.Quota == nil
-	}
-	quota := result.Quota
-	if quota == nil || quota.Pool != pool || quota.AccountFP != accountFP || (quota.Decision != "allow" && quota.Decision != "boost" && quota.Decision != "deny" && quota.Decision != "unknown") || (quota.PolicyStatus != "default" && quota.PolicyStatus != "current" && quota.PolicyStatus != "stale" && quota.PolicyStatus != "invalid") {
-		return false
-	}
-	if quota.Decision == "deny" || quota.Decision == "unknown" {
-		return result.Decision == "unavailable"
-	}
-	// Slot pressure is the other legitimate unavailable answer: the quota
-	// allowed the pool but task caps rejected the decision machine.
-	return result.Decision != "unavailable" || result.Reason == "task_slots_exhausted" || result.Reason == "task_slots_full"
+	return decisionFound
 }
 
 func renderPlacementExplain(w io.Writer, result PlacementResult) {
 	fmt.Fprintf(w, "DECISION\t%s\nSOURCE\t%s\nASOF\t%s\n", result.Decision, result.Source, result.Asof.UTC().Format(time.RFC3339))
-	if result.Quota != nil {
-		fmt.Fprintf(w, "QUOTA\t%s\t%s\t%s\n", result.Quota.Decision, result.Quota.PolicyStatus, result.Quota.Reason)
-	}
 	fmt.Fprintln(w, "MACHINE\tSCORE\tLOAD_RATIO\tTHROTTLED\tACTIVE_JOBS\tCONNECTED\tREASON")
 	for _, candidate := range result.Candidates {
 		fmt.Fprintf(w, "%s\t%.2f\t%.2f\t%t\t%d\t%t\t%s\n", candidate.Machine, candidate.Score, candidate.LoadRatio, candidate.Throttled, candidate.ActiveJobs, candidate.Connected, candidate.Reason)

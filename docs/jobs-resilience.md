@@ -2,7 +2,7 @@
 
 This is an operator-assist path for jobs whose authoritative state remains the
 local `jobs/<id>/events/` files and the corresponding pane injection. The hub
-does not dispatch work, carry a brief, or bypass `wrk`.
+does not dispatch work, carry a brief, or bypass the spawner.
 
 ## Node heartbeat
 
@@ -25,7 +25,7 @@ sent.
 ### Node inbox event contract
 
 The node treats the arbiter event envelope as canonical. The older flat form
-remains accepted only for compatibility with existing `wrk done` writers.
+remains accepted only for compatibility with existing `done` writers.
 Top-level metadata takes precedence when both forms provide a value.
 
 | Form | Required event discriminator | Metadata read by node |
@@ -54,8 +54,8 @@ First inspect candidates using an operator token:
 panewire jobs orphaned --hub-url https://hub.example --hub-token-env ~/.config/panewire/operator.env
 ```
 
-The dispatcher remains the separate orch/wrk worker. After it has selected a
-safe receiving node and submits through that node's ordinary `wrk` admission
+The dispatcher remains the separate orch worker. After it has selected a
+safe receiving node and submits through that node's ordinary admission
 gate, record the decision at the hub:
 
 ```sh
@@ -68,7 +68,7 @@ retains every prior owner in its in-memory fence history; a heartbeat cannot
 raise its own epoch or retake ownership. While a fenced predecessor is online,
 or after it reconnects and heartbeats, the hub retries `job.revoked` until that
 node confirms its local marker write. Its daemon then writes
-`NNNNN-job.revoked.json` locally. The wrk-side hook owns the resulting pane
+`NNNNN-job.revoked.json` locally. The spawner-side hook owns the resulting pane
 message:
 
 `[REVOKED — 다른 노드에 재배정됨, 즉시 중단·push 금지]`
@@ -94,5 +94,5 @@ redispatch until a later durable reconstruction design is deployed.
 
 Worker briefs should explicitly say: **push a `wip:` commit every 30 minutes,
 and before any risky step.** This gives a redispatched worker a bounded,
-inspectable resume point; it does not change the `wrk` gate or make the hub a
+inspectable resume point; it does not change the spawn gate or make the hub a
 source of truth.

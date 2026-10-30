@@ -222,13 +222,13 @@ unchanged; this is the counter it already had.
 
 `emitRelayKinds` in `emit.go` is the single location of the closed set: the
 CLI validator, the daemon emit gate, and the node scanner all read that map.
-The set's relationship to wrk's `TERMINAL` (agent-skills `wrk`, currently
+The set's relationship to the shared `TERMINAL` set (the reap contract,
 `{job.completed, job.joined, job.revoked}`):
 
-| kind | wrk TERMINAL | route | terminal for the hub job record |
+| kind | reap TERMINAL | route | terminal for the hub job record |
 |---|---|---|---|
 | `job.completed` | yes | owner lane | yes |
-| `job.joined` | yes | owner lane's parent | no — wrk-terminal, hub record unchanged |
+| `job.joined` | yes | owner lane's parent | no — reap-terminal, hub record unchanged |
 | `job.revoked` | yes | owner lane's parent | yes |
 | `job.lost` | **no** | owner lane | **no** — a lost job may still complete |
 | `job.escalate` | no | owner lane's parent | no |
@@ -397,7 +397,7 @@ error for the caller — the event file is durable in the namespace it chose, an
 
 The file is written first and the socket is called second. A record whose
 dedupe key already exists in `jobs/<job_id>/events/` does not produce a second
-file — the socket push still happens, since `wrk` writes the event file itself
+file — the socket push still happens, since the writer records the event file itself
 and then calls `emit`, and that path has to work. The pre-file key shares
 (kind, job, epoch, empty report, reason) across events the scanner later keys
 by their own file, so identity is refined per kind: `job.escalate` separates
@@ -412,7 +412,7 @@ is **not** an error: `emit` prints
 0, leaving the record for the node outbox to pick up.
 
 An emitted file carries the kind under both `"type"` and `"kind"` keys: the
-scanner accepts either, but wrk reap (`document["kind"]`), `scanJobCloseState`,
+scanner accepts either, but the reap reader (`document["kind"]`), `scanJobCloseState`,
 and the fleet census read `"kind"` only. Emitting both is what makes
 `emit --kind job.revoked` terminal for every consumer, not only the relay
 path.

@@ -72,6 +72,7 @@ func validHubSpawnArgs(args []string) bool {
 	}
 	allowed := map[string]struct{}{
 		"-m": {}, "-w": {}, "-l": {}, "--t": {}, "--effort": {}, "--job": {}, "--owner": {}, "--report": {}, "--role": {}, "--lane": {}, "--parent": {}, "-L": {},
+		"--task": {}, "--parent-job": {}, "--tags": {}, "--urgency": {}, "--override-reason": {},
 	}
 	for index := 0; index < len(args); index += 2 {
 		if _, found := allowed[args[index]]; !found || !hubSpawnArgValuePattern.MatchString(args[index+1]) {

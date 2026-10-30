@@ -5,12 +5,10 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io/fs"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -20,22 +18,12 @@ import (
 	"testing"
 )
 
-// The job golden files are the observable result of running each case through
-// wrk's own done/escalate/joined (agent-skills bin/wrk, legacy path) with a
-// real `panewire emit`. `panewire job` must reproduce them byte for byte: the
-// event records, the socket request, the handoffkeep call, the OK lines, the
-// exit statuses and the failure logs.
-//
-// Regenerating them runs wrk only - the Go path can never write its own
-// expectation:
-//
-//	PANEWIRE_JOB_GOLDEN_WRK=/path/to/agent-skills/bin/wrk go test -run TestJobGolden -update-job-golden
-//
-// With PANEWIRE_JOB_GOLDEN_WRK set (and no -update-job-golden) every case also
-// runs through that wrk live and both paths are compared with each other and
-// with the golden file. PANEWIRE_JOB_GOLDEN_DELEGATE=1 lets that wrk delegate
-// to the freshly built panewire instead of forcing its legacy path.
-var updateJobGolden = flag.Bool("update-job-golden", false, "rewrite testdata/job_golden from the wrk named by PANEWIRE_JOB_GOLDEN_WRK")
+// The job golden files are the frozen record contract for
+// done/escalate/joined: the event records, the socket request, the
+// handoffkeep call, the OK lines, the exit statuses and the failure logs.
+// They were produced once by the retired spawner the command replaced and are
+// now maintained by hand; a change that alters any byte must update the
+// golden in the same commit.
 
 type jobGoldenCase struct {
 	Name string `json:"name"`
@@ -233,7 +221,7 @@ func jobGoldenDump(t *testing.T, root string, steps []string, socketLines []stri
 	return strings.ReplaceAll(out.String(), root, "@ROOT@")
 }
 
-var jobGoldenStderrPrefix = regexp.MustCompile(`(?m)^(wrk|panewire job): `)
+var jobGoldenStderrPrefix = regexp.MustCompile(`(?m)^panewire job: `)
 
 func jobGoldenStep(step []string, stdout, stderr []byte, rc int) string {
 	errText := jobGoldenStderrPrefix.ReplaceAll(stderr, []byte("<cmd>: "))
@@ -281,60 +269,6 @@ func runJobGoldenGo(t *testing.T, c jobGoldenCase) string {
 	return jobGoldenDump(t, root, steps, lines)
 }
 
-// runJobGoldenWrk runs a case through wrk with a real panewire binary.
-func runJobGoldenWrk(t *testing.T, c jobGoldenCase, wrk, panewire string, delegate bool) string {
-	root, env := jobGoldenWorkspace(t, c)
-	var server *jobFakeSocket
-	if c.Socket != "absent" {
-		server = startJobFakeSocket(t, env["PANEWIRE_SOCKET"], c.Socket)
-	}
-	env["PANEWIRE_BIN"] = panewire
-	if !delegate {
-		env["WRK_JOB_DELEGATE"] = "0"
-	}
-	var steps []string
-	for _, step := range c.Steps {
-		args := make([]string, len(step))
-		for i, arg := range step {
-			args[i] = strings.ReplaceAll(arg, "@ROOT@", root)
-		}
-		command := exec.Command(wrk, args...)
-		command.Dir = root
-		command.Env = os.Environ()
-		for key, value := range env {
-			command.Env = append(command.Env, key+"="+value)
-		}
-		var stdout, stderr bytes.Buffer
-		command.Stdout, command.Stderr = &stdout, &stderr
-		rc := 0
-		if err := command.Run(); err != nil {
-			exitErr, ok := err.(*exec.ExitError)
-			if !ok {
-				t.Fatalf("%s: %v", c.Name, err)
-			}
-			rc = exitErr.ExitCode()
-		}
-		steps = append(steps, jobGoldenStep(step, stdout.Bytes(), stderr.Bytes(), rc))
-	}
-	var lines []string
-	if server != nil {
-		lines = server.stop()
-	}
-	return jobGoldenDump(t, root, steps, lines)
-}
-
-func buildJobGoldenPanewire(t *testing.T) string {
-	t.Helper()
-	directory := t.TempDir()
-	binary := filepath.Join(directory, "panewire")
-	command := exec.Command("go", "build", "-o", binary, "./cmd/panewire")
-	command.Stderr = os.Stderr
-	if err := command.Run(); err != nil {
-		t.Fatalf("build panewire: %v", err)
-	}
-	return binary
-}
-
 func jobGoldenPath(name string) string {
 	return filepath.Join("testdata", "job_golden", name+".golden")
 }
@@ -362,28 +296,8 @@ func jobGoldenComparable(dump string) string {
 
 func TestJobGolden(t *testing.T) {
 	cases := loadJobGoldenCases(t)
-	wrk := os.Getenv("PANEWIRE_JOB_GOLDEN_WRK")
-	if *updateJobGolden && wrk == "" {
-		t.Fatal("-update-job-golden needs PANEWIRE_JOB_GOLDEN_WRK: the golden files come from wrk, never from panewire job")
-	}
-	var panewire string
-	if wrk != "" {
-		panewire = buildJobGoldenPanewire(t)
-	}
 	for _, c := range cases {
 		t.Run(c.Name, func(t *testing.T) {
-			if wrk != "" {
-				legacy := runJobGoldenWrk(t, c, wrk, panewire, os.Getenv("PANEWIRE_JOB_GOLDEN_DELEGATE") == "1")
-				if *updateJobGolden {
-					if err := os.WriteFile(jobGoldenPath(c.Name), []byte(legacy), 0o644); err != nil {
-						t.Fatal(err)
-					}
-				}
-				got := runJobGoldenGo(t, c)
-				if jobGoldenComparable(got) != jobGoldenComparable(legacy) {
-					t.Errorf("panewire job differs from live wrk\n--- wrk\n%s\n--- panewire job\n%s", legacy, got)
-				}
-			}
 			if c.HostDependent && runtime.GOOS != "darwin" {
 				t.Skip("non-ASCII shaping follows the host's tr/cut; golden produced on darwin")
 			}
@@ -396,7 +310,7 @@ func TestJobGolden(t *testing.T) {
 			}
 			got := runJobGoldenGo(t, c)
 			if jobGoldenComparable(got) != jobGoldenComparable(string(want)) {
-				t.Errorf("panewire job differs from golden %s\n--- golden (wrk)\n%s\n--- panewire job\n%s", jobGoldenPath(c.Name), want, got)
+				t.Errorf("panewire job differs from golden %s\n--- golden\n%s\n--- panewire job\n%s", jobGoldenPath(c.Name), want, got)
 			}
 		})
 	}

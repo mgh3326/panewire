@@ -2295,6 +2295,8 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 			return hubOutboundMessage{}, false
 		}
 	case "quota.request":
+		// "scopefuel" is the retired quota tool's wire spelling; a legacy hub
+		// still sends it, so the name stays admitted for one release.
 		var tool string
 		if len(fields) != 3 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["tool"], &tool) != nil || !validHubRequestID(message.RequestID) || tool != "scopefuel" {
 			return hubOutboundMessage{}, false

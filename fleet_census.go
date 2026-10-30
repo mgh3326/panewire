@@ -25,18 +25,18 @@ import (
 //
 // The pane classification vocabulary is closed at six values:
 //
-//	reapable           the pane's job would appear in `wrk reap` dry-run's
+//	reapable           the pane's job would appear in the reap dry-run's
 //	                   would-close set (verified against the ae1f544 rules:
 //	                   revived-job refusal, newest spawn receipt taken as one
 //	                   unit, tab-mismatch, single-pane tab confirmed by a fresh
 //	                   tab list, malformed-record skip)
 //	builder            the job's claim role accumulated builder|captain, which
-//	                   wrk reap excludes unless --include-builders is passed
+//	                   the reaper excludes unless builders are included
 //	no-terminal-event  a job record exists but has no effective terminal event
 //	                   (detail=reclaimed-after-terminal marks a job that was
 //	                   claimed again after finishing)
 //	terminal-held      a terminal event exists but a reap condition is unmet;
-//	                   detail carries the same reason string wrk would print
+//	                   detail carries the same reason string the reaper would print
 //	no-job-record      no job's newest spawn receipt names this pane
 //	unobservable       the inputs needed to judge this pane were not observable
 //	                   (stale/untrusted snapshot, remote job registry absent)
@@ -55,30 +55,30 @@ const (
 	fleetCensusOutcomeError   = "error"
 )
 
-// Job verdicts mirror `wrk reap` dry-run output. "would-close" is the set A-4
-// pins; "skip" reasons reuse wrk's own strings where wrk prints one, and a
-// census-only label where wrk drops the job silently.
+// Job verdicts mirror the reap dry-run output. "would-close" is the set A-4
+// pins; "skip" reasons reuse the reaper's own strings where it prints one, and a
+// census-only label where the reaper drops the job silently.
 const (
 	fleetCensusVerdictWouldClose = "would-close"
 	fleetCensusVerdictSkip       = "skip"
 	fleetCensusVerdictSilent     = "not-candidate"
 )
 
-// Skip reasons that wrk prints verbatim, plus census labels for the skips wrk
-// makes silently. The wrk-literal reasons must stay byte-identical: the
+// Skip reasons the reaper prints verbatim, plus census labels for the skips it
+// makes silently. The literal reasons must stay byte-identical: the
 // equivalence fixture compares them.
 const (
 	fleetCensusReasonReclaimed   = "reclaimed-after-terminal"
 	fleetCensusReasonMalformed   = "malformed-record"
 	fleetCensusReasonTabUnknown  = "tab-count-unknown"
 	fleetCensusReasonTabResolved = "tab-unresolved"
-	// census-only labels for wrk's silent drops
+	// census-only labels for the reaper's silent drops
 	fleetCensusReasonNoTerminal  = "no-terminal-event"
 	fleetCensusReasonBuilderRole = "builder-role"
 	fleetCensusReasonWithinGrace = "within-grace"
 	fleetCensusReasonReaped      = "already-reaped"
 	fleetCensusReasonNoPane      = "no-spawn-pane"
-	// wrk-literal: `wrk reap` prints `skip job=<id> reason=protected`.
+	// reference-literal: the reaper prints `skip job=<id> reason=protected`.
 	fleetCensusReasonProtected = "protected"
 )
 
@@ -193,7 +193,7 @@ func parseFleetCensusArgs(args []string) (fleetCensusOptions, error) {
 	return options, nil
 }
 
-// parseFleetCensusGrace mirrors wrk's parse_duration_s: digits plus an
+// parseFleetCensusGrace mirrors the contract's parse_duration_s: digits plus an
 // optional s/m/h/d suffix. Unknown formats fail rather than falling to zero.
 func parseFleetCensusGrace(value string) (time.Duration, error) {
 	match := fleetCensusGracePattern.FindStringSubmatch(strings.TrimSpace(value))
@@ -221,9 +221,9 @@ type fleetCensusPaneObs struct {
 }
 
 // fleetCensusLocalView is one consistent local observation: live agents
-// (agent.list, wrk's probe source), every pane (pane.list), and tab pane
-// counts (tab.list, wrk's shared-tab gate). Tabs==nil means tab.list could
-// not be read, which is exactly wrk's empty tab-count path: every tab verdict
+// (agent.list, the probe source), every pane (pane.list), and tab pane
+// counts (tab.list, the shared-tab gate). Tabs==nil means tab.list could
+// not be read, which is exactly the empty tab-count path: every tab verdict
 // becomes unknown.
 type fleetCensusLocalView struct {
 	agents     map[string]fleetCensusPaneObs
@@ -234,9 +234,9 @@ type fleetCensusLocalView struct {
 }
 
 // readFleetCensusLocal performs the three read-only herdr calls. agent.list
-// failure means the local node is unobservable (wrk could not probe either).
+// failure means the local node is unobservable (the probe could not run either).
 // pane.list failure degrades the row set to live agents and is recorded;
-// tab.list failure only degrades the shared-tab gate, same as wrk.
+// tab.list failure only degrades the shared-tab gate, same as the reference.
 func readFleetCensusLocal(ctx context.Context, client *HerdrClient) (fleetCensusLocalView, error) {
 	var view fleetCensusLocalView
 	raw, err := client.Call(ctx, "agent.list", map[string]any{})
@@ -293,7 +293,7 @@ func readFleetCensusLocal(ctx context.Context, client *HerdrClient) (fleetCensus
 			view.tabs = make(map[string]*int, len(tabList.Tabs))
 			for _, rawTab := range tabList.Tabs {
 				var entry map[string]json.RawMessage
-				// wrk skips non-object rows entirely rather than rejecting
+				// the reference skips non-object rows entirely rather than rejecting
 				// the whole list.
 				if json.Unmarshal(rawTab, &entry) != nil || entry == nil {
 					continue
@@ -303,7 +303,7 @@ func readFleetCensusLocal(ctx context.Context, client *HerdrClient) (fleetCensus
 					continue
 				}
 				if _, duplicate := view.tabs[id]; duplicate {
-					// The same tab listed twice is wrk's multi-row case: the
+					// The same tab listed twice is the multi-row case: the
 					// count cannot be trusted, so the verdict is unknown.
 					view.tabs[id] = nil
 					continue
@@ -316,7 +316,7 @@ func readFleetCensusLocal(ctx context.Context, client *HerdrClient) (fleetCensus
 	return view, nil
 }
 
-// fleetCensusPaneCount mirrors wrk's `isinstance(count, int) and not
+// fleetCensusPaneCount mirrors the contract's `isinstance(count, int) and not
 // isinstance(count, bool)`: only a plain JSON integer token counts — 1.0,
 // 1e0, true, "1", null and missing are all "?" (unknown), never shared.
 // json.Number preserves the literal so 1 and 1.0 stay distinct.
@@ -334,7 +334,7 @@ func fleetCensusPaneCount(raw json.RawMessage) *int {
 }
 
 // fleetCensusJobScan is the per-job result of walking jobs/<id>/events in
-// filename order — the same inputs wrk reap_candidates consumes.
+// filename order — the same inputs the reap candidate scan consumes.
 type fleetCensusJobScan struct {
 	jobID        string
 	ownerLane    string
@@ -362,14 +362,14 @@ type fleetCensusJobScan struct {
 	spawnLabel string
 	claimLabel string
 	keep       bool
-	// unreadable marks a job with an event file wrk would skip (read error,
-	// invalid UTF-8, or not a JSON object). The wrk-equivalent verdict skips
-	// it exactly like wrk; the session-reap judgment holds the job instead,
+	// unreadable marks a job with an event file the reaper would skip (read error,
+	// invalid UTF-8, or not a JSON object). The reference-equivalent verdict skips
+	// it exactly like the reference; the session-reap judgment holds the job instead,
 	// since the skipped event may have been a revive.
 	unreadable bool
 }
 
-// fleetCensusMoment mirrors wrk's moment_of: created_at (or payload.at)
+// fleetCensusMoment mirrors the contract's moment_of: created_at (or payload.at)
 // stripped, every Z replaced by +00:00, then parsed exactly as Python's
 // datetime.fromisoformat (pre-3.11 strictness: HH:MM seconds optional,
 // fractional seconds exactly 3 or 6 digits, naive means local time), falling
@@ -386,7 +386,7 @@ func fleetCensusMoment(value string, fallback time.Time) time.Time {
 }
 
 // fleetCensusISO8601 is datetime.fromisoformat's grammar for the Python
-// versions wrk runs on: a mandatory date, an optional time behind any single
+// versions the contract runs on: a mandatory date, an optional time behind any single
 // separator character, and an optional ±HH:MM[:SS[.ffffff]] offset. Seconds
 // may be omitted; the seconds fraction must be exactly 3 or 6 digits.
 var fleetCensusISO8601 = regexp.MustCompile(`(?s)^(\d{4})-(\d{2})-(\d{2})(?:.(\d{2}):(\d{2})(?::(\d{2})(?:[\.,](\d{3}|\d{6}))?)?([+-]\d{2}:\d{2}(?::\d{2}(?:[\.,]\d{3}|\d{6})?)?)?)?$`)
@@ -456,7 +456,7 @@ func fleetCensusParseISOOffset(text string) (int, bool) {
 	return offset, true
 }
 
-// scanFleetCensusJobs replays wrk reap_candidates over the jobs root. Event
+// scanFleetCensusJobs replays the reap candidate scan over the jobs root. Event
 // order is the sorted filename order; payload defaults to the document itself
 // for flat records; the newest job.spawned receipt supplies pane and tab as
 // one unit; claim/reclaim ownership is latest-wins and builder|captain role
@@ -501,7 +501,7 @@ func scanFleetCensusJobs(root string) ([]fleetCensusJobScan, bool) {
 				scan.unreadable = true
 				continue
 			}
-			// wrk decodes each file as strict UTF-8 (open(encoding="utf-8")):
+			// the contract decodes each file as strict UTF-8 (open(encoding="utf-8")):
 			// invalid bytes fail the whole file in Python while Go's json
 			// would happily parse them, so validity is checked explicitly.
 			if !utf8.Valid(raw) {
@@ -583,7 +583,7 @@ func scanFleetCensusJobs(root string) ([]fleetCensusJobScan, bool) {
 	return scans, true
 }
 
-// fleetCensusTrue mirrors wrk's `payload.get("keep") is True`: only the JSON
+// fleetCensusTrue mirrors the contract's `payload.get("keep") is True`: only the JSON
 // literal true counts — "true", 1, and every other truthy shape do not.
 func fleetCensusTrue(raw json.RawMessage) bool {
 	return strings.TrimSpace(string(raw)) == "true"
@@ -597,9 +597,9 @@ func fleetCensusString(raw json.RawMessage) string {
 	return value
 }
 
-// fleetCensusMomentField mirrors wrk's `created_at or payload.at`: the first
+// fleetCensusMomentField mirrors the contract's `created_at or payload.at`: the first
 // field wins when it is a non-empty string, and a truthy non-string value
-// (a number, true, an object) also wins — wrk's moment_of then cannot parse
+// (a number, true, an object) also wins — moment_of then cannot parse
 // it and lands on the mtime fallback. Only absent/null/empty fields defer to
 // the next.
 func fleetCensusMomentField(values ...json.RawMessage) string {
@@ -631,7 +631,7 @@ func fleetCensusHasSpace(value string) bool {
 	}) >= 0
 }
 
-// fleetCensusJobVerdict applies the wrk reap pipeline to one scanned job
+// fleetCensusJobVerdict applies the reap pipeline to one scanned job
 // against one local observation. Verdict precedence matches reap_cmd's loop:
 // record filters first (reaped, pane-less, builder role, terminal state,
 // grace, malformed), then the herdr probes (pane resolution, status, tab
@@ -656,7 +656,7 @@ func fleetCensusJobVerdict(scan fleetCensusJobScan, view fleetCensusLocalView, g
 	if age < int64(grace.Seconds()) {
 		return fleetCensusVerdictSilent, fleetCensusReasonWithinGrace, age
 	}
-	// wrk reap skips a protected (`wrk spawn --keep`) job at exactly this
+	// the reaper skips a protected (`runtug spawn --keep`) job at exactly this
 	// point: after the grace gate, before the malformed-record check.
 	if scan.keep {
 		return fleetCensusVerdictSkip, fleetCensusReasonProtected, age
@@ -665,12 +665,12 @@ func fleetCensusJobVerdict(scan fleetCensusJobScan, view fleetCensusLocalView, g
 	return verdict, reason, age
 }
 
-// fleetCensusPaneGates is the herdr half of the wrk reap pipeline: record
+// fleetCensusPaneGates is the herdr half of the reap pipeline: record
 // integrity, pane resolution, status, tab resolution, tab match, and the
 // single-pane tab. The #603 session-reap judgment reuses it unchanged so the
 // two can never disagree about a pane.
 func fleetCensusPaneGates(scan fleetCensusJobScan, view fleetCensusLocalView) (string, string) {
-	// wrk prints "-" for empty fields in its candidate line and reap_cmd reads
+	// the reaper prints "-" for empty fields in its candidate line and reap_cmd reads
 	// a literal "-" pane back as the malformed-record marker.
 	if scan.malformed || scan.pane == "-" || fleetCensusHasSpace(scan.jobID) || fleetCensusHasSpace(scan.ownerLane) || fleetCensusHasSpace(scan.pane) || fleetCensusHasSpace(scan.tab) {
 		return fleetCensusVerdictSkip, fleetCensusReasonMalformed
@@ -679,7 +679,7 @@ func fleetCensusPaneGates(scan fleetCensusJobScan, view fleetCensusLocalView) (s
 	if !live {
 		return fleetCensusVerdictSkip, "pane-unresolved(err:agent_not_found)"
 	}
-	// wrk's probe compares status.strip(): a whitespace-only status is a
+	// the probe compares status.strip(): a whitespace-only status is a
 	// parse failure, not an unrecognised status.
 	status := strings.TrimSpace(agent.Status)
 	if status == "" {
@@ -690,7 +690,7 @@ func fleetCensusPaneGates(scan fleetCensusJobScan, view fleetCensusLocalView) (s
 	}
 	tab := scan.tab
 	if tab == "-" {
-		// "-" is wrk's printed placeholder for an empty tab field.
+		// "-" is the printed placeholder for an empty tab field.
 		tab = ""
 	}
 	if tab == "" {
@@ -709,7 +709,7 @@ func fleetCensusPaneGates(scan fleetCensusJobScan, view fleetCensusLocalView) (s
 	if !listed || count == nil {
 		return fleetCensusVerdictSkip, fleetCensusReasonTabUnknown
 	}
-	// wrk's reap_tab_verdict: exactly one is single; more is shared:N; zero,
+	// reap_tab_verdict: exactly one is single; more is shared:N; zero,
 	// negative, and every non-integer shape are unknown — never shared.
 	if *count > 1 {
 		return fleetCensusVerdictSkip, fmt.Sprintf("tab-shared(panes=%d)", *count)
@@ -910,8 +910,8 @@ func buildFleetCensusResult(options fleetCensusOptions, machineID string, view f
 	result.Coverage.Nodes = []fleetCensusNodeCoverage{}
 	laneIndex := fleetCensusLaneIndex(lanes)
 
-	// Job verdicts (wrk reap equivalence) run on the local observation only:
-	// wrk itself is a local-only tool, so "reapable" is only ever asserted for
+	// Job verdicts (reap equivalence) run on the local observation only:
+	// the reaper is a local-only tool, so "reapable" is only ever asserted for
 	// this machine.
 	jobVerdicts := make(map[string]string, len(scans))
 	jobReasons := make(map[string]string, len(scans))

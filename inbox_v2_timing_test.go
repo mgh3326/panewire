@@ -28,7 +28,7 @@ func TestOwnerCompletionPromotes(t *testing.T) {
 
 	// Owner completion: job.completed to the owner lane is immediate even
 	// though its class is inbox.
-	e := hubJobEventPayload{JobID: "job-1", Epoch: 1, OwnerLane: "lane-a", Label: "wrk", Host: "host-a", ReportPath: "report.md", ReportLastLine: "VERDICT: DONE"}
+	e := hubJobEventPayload{JobID: "job-1", Epoch: 1, OwnerLane: "lane-a", Label: "agent", Host: "host-a", ReportPath: "report.md", ReportLastLine: "VERDICT: DONE"}
 	h.relayJobEventFrom("host-a", "job.completed", e)
 	if len(agent.relays) != 1 {
 		t.Fatal("owned completion deferred")
@@ -44,7 +44,7 @@ func TestOwnerCompletionPromotes(t *testing.T) {
 
 	// Parent completion: job.joined reports the worker's join to the owner's
 	// parent lane — also a completion the receiver owns.
-	e2 := hubJobEventPayload{JobID: "job-2", Epoch: 1, OwnerLane: "child", Label: "wrk", Host: "host-a", ReportPath: "report.md"}
+	e2 := hubJobEventPayload{JobID: "job-2", Epoch: 1, OwnerLane: "child", Label: "agent", Host: "host-a", ReportPath: "report.md"}
 	h.relayJobEventFrom("host-a", "job.joined", e2)
 	if len(agent.relays) != 2 {
 		t.Fatal("parent join deferred")

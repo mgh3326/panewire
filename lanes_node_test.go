@@ -344,8 +344,8 @@ func TestLanesNodeReconnectWindowForeignJobs(t *testing.T) {
 	// machine-b just reconnected: its record is fresh with no heartbeat yet
 	// (activeJobs empty), while its still-running jobs sit in h.jobs.
 	hub.nodes["machine-b"] = &hubNodeRecord{machineID: "machine-b", state: "connected", activeJobs: map[string]HubActiveJob{}}
-	hub.jobs["jb-live"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "jb-live", AgentLabel: "wrk-b", Epoch: 1, OwnerLane: "lane-x"}, Node: "machine-b"}
-	hub.jobs["jb-live2"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "jb-live2", AgentLabel: "wrk-b", Epoch: 1, OwnerLane: "lane-c"}, Node: "machine-b"}
+	hub.jobs["jb-live"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "jb-live", AgentLabel: "agent-b", Epoch: 1, OwnerLane: "lane-x"}, Node: "machine-b"}
+	hub.jobs["jb-live2"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "jb-live2", AgentLabel: "agent-b", Epoch: 1, OwnerLane: "lane-c"}, Node: "machine-b"}
 
 	lanesNodeForbidden(t, lanesNodePut(t, hub, "lane-x", `{"machine":"machine-a","pane":"w1:p5"}`), "node claim during owner reconnect window")
 	if _, created := lanesNodeFile(t, path)["lane-x"]; created {
@@ -371,7 +371,7 @@ func TestLanesNodeClaimsOwnJobsOwnerLane(t *testing.T) {
 	hub.nodes["machine-a"] = &hubNodeRecord{machineID: "machine-a", state: "connected", activeJobs: map[string]HubActiveJob{
 		"jb-a": {JobID: "jb-a", OwnerLane: "lane-own"},
 	}}
-	hub.jobs["jb-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "jb-a", AgentLabel: "wrk-a", Epoch: 1, OwnerLane: "lane-own"}, Node: "machine-a"}
+	hub.jobs["jb-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "jb-a", AgentLabel: "agent-a", Epoch: 1, OwnerLane: "lane-own"}, Node: "machine-a"}
 
 	if writer := lanesNodePut(t, hub, "lane-own", `{"machine":"machine-a","pane":"w1:p7"}`); writer.Code != http.StatusCreated {
 		t.Fatalf("own job owner lane claim status=%d body=%s", writer.Code, writer.Body.String())
@@ -504,15 +504,12 @@ func TestLanesNodeHeaderSpoofing(t *testing.T) {
 }
 
 // AC3: a node token gets 401/403 on every operator route. The operator token
-// behaves exactly as on main. The only exceptions are the routes that already
-// accepted nodes on main — the /v1/agent websocket and the quota v2
-// node-scoped views — plus the three lanes routes this task opens with a
-// machine scope.
+// behaves exactly as on main. The only exception on main is the /v1/agent
+// websocket; this task adds the three lanes routes with a machine scope.
 func TestLanesNodeTokenRouteTable(t *testing.T) {
 	lanesPath := filepath.Join(t.TempDir(), "lanes.json")
 	lanesProjectionWrite(t, lanesPath, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"},"lane-b":{"machine":"machine-b","pane":"w9:p9"}}}`)
 	hub := lanesNodeHub(t, lanesPath, func(config *HubServerConfig) {
-		config.QuotaV2StorePath = filepath.Join(t.TempDir(), "quota-v2.json")
 	})
 
 	for _, test := range []struct {
@@ -557,12 +554,10 @@ func TestLanesNodeTokenRouteTable(t *testing.T) {
 		{name: "retired per-machine quota request", method: http.MethodPost, path: "/v1/quota/machine-a", body: `{}`, nodeWant: []int{404}, opWant: 404},
 		{name: "chat question upsert", method: http.MethodPost, path: "/v1/chat/questions", body: `{}`, nodeWant: []int{401}, opWant: 503},
 
-		{name: "quota v2 binding put", method: http.MethodPut, path: "/v2/quota/bindings", body: `{}`, nodeWant: []int{401}, opWant: 400},
-		{name: "quota v2 binding delete", method: http.MethodDelete, path: "/v2/quota/bindings?machine_id=machine-a&provider=claude&local_slot_ref=slot-x", nodeWant: []int{401}, opWant: 404},
-		// Pre-existing shared and node routes, unchanged by this task.
-		{name: "quota v2 bindings list already node-scoped", method: http.MethodGet, path: "/v2/quota/bindings", nodeWant: []int{200}, opWant: 200},
-		{name: "quota v2 observations list needs a binding", method: http.MethodGet, path: "/v2/quota/observations?provider=claude&account_ref=acct_fixture1", nodeWant: []int{403}, opWant: 200},
-		{name: "quota v2 observations post is node-only", method: http.MethodPost, path: "/v2/quota/observations", body: `{}`, nodeWant: []int{400}, opWant: 401},
+		{name: "quota v2 bindings route is gone", method: http.MethodGet, path: "/v2/quota/bindings", nodeWant: []int{404}, opWant: 404},
+		{name: "quota v2 binding put route is gone", method: http.MethodPut, path: "/v2/quota/bindings", body: `{}`, nodeWant: []int{404}, opWant: 404},
+		{name: "quota v2 observations route is gone", method: http.MethodGet, path: "/v2/quota/observations", nodeWant: []int{404}, opWant: 404},
+		{name: "quota v2 observations post route is gone", method: http.MethodPost, path: "/v2/quota/observations", body: `{}`, nodeWant: []int{404}, opWant: 404},
 		{name: "agent websocket is the node route", method: http.MethodGet, path: "/v1/agent", nodeWant: []int{200, 400, 426}, opWant: 401},
 
 		// The browser surfaces are gated by authorizeUI/authorizeChat (operator

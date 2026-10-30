@@ -124,3 +124,42 @@ func t22EmitSocket(t *testing.T, respond func(localRequest) localResponse) strin
 	}()
 	return socket
 }
+
+func TestEmitValidationFailuresNameTheFlag(t *testing.T) {
+	cases := func(inbox string) []struct {
+		name string
+		args []string
+		want string
+	} {
+		return []struct {
+			name string
+			args []string
+			want string
+		}{
+			{"kind", []string{"--kind", "bogus", "--inbox-root", inbox}, "emit: invalid --kind bogus\n"},
+			{"type", []string{"--kind", "lane.event", "--lane", "lane-a", "--event-id", "e1", "--text", "x", "--type", "not-a-type", "--inbox-root", inbox}, "emit: invalid --type not-a-type\n"},
+			{"deliver", []string{"--kind", "lane.event", "--lane", "lane-a", "--event-id", "e1", "--text", "x", "--deliver", "carrier-pigeon", "--inbox-root", inbox}, "emit: invalid --deliver carrier-pigeon\n"},
+			{"lane", []string{"--kind", "lane.event", "--lane", "bad lane", "--event-id", "e1", "--text", "x", "--inbox-root", inbox}, "emit: invalid --lane bad lane\n"},
+			{"text", []string{"--kind", "lane.event", "--lane", "lane-a", "--event-id", "e1", "--inbox-root", inbox}, "emit: invalid --text\n"},
+			{"job", []string{"--kind", "job.completed", "--job", "", "--report", "r.md", "--inbox-root", inbox}, "emit: invalid --job \n"},
+			{"report", []string{"--kind", "job.completed", "--job", "job-a", "--inbox-root", inbox}, "emit: --report is required\n"},
+			{"signal", []string{"--kind", "job.revoked", "--job", "job-a", "--inbox-root", inbox}, "emit: terminal kind requires --reason and a routable --owner-lane\n"},
+		}
+	}
+	inbox := t.TempDir()
+	for _, tc := range cases(inbox) {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			code := runEmitCLI(tc.args, &bytes.Buffer{}, &stderr, CLIConfig{SocketPath: filepath.Join(t.TempDir(), "absent.sock")})
+			if code != ExitUsage {
+				t.Fatalf("code=%d, want ExitUsage", code)
+			}
+			if stderr.String() != tc.want {
+				t.Fatalf("stderr=%q, want %q", stderr.String(), tc.want)
+			}
+			if entries, err := os.ReadDir(filepath.Join(inbox, "events-lane")); err == nil && len(entries) != 0 {
+				t.Fatalf("rejected emit still wrote %v", entries)
+			}
+		})
+	}
+}

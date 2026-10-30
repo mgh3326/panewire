@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -194,7 +195,7 @@ func (output *hubSpawnOutput) parseLine() {
 	output.pane, output.jobID = pane, jobID
 }
 
-// parseHubSpawnOK follows wrk's stable OK line rather than guessing from a
+// parseHubSpawnOK follows runtug's stable OK line rather than guessing from a
 // human-facing transcript. Missing keys remain empty by contract.
 func parseHubSpawnOK(raw []byte) (pane, jobID string) {
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -240,10 +241,18 @@ func hubSpawnEnvironment(environment []string, session string) []string {
 	return append(filtered, "HERDR_SESSION="+session)
 }
 
+// hubSpawnOverrideReason records why runtug's model/host auto-selection was
+// bypassed: the hub directed this spawn at this node. runtug requires the
+// reason whenever -m or --host is explicit, and --host local always is.
+const hubSpawnOverrideReason = "hub-directed"
+
 func runHubSpawnCommand(ctx context.Context, cwd, briefPath, workspace, session string, args []string) (*hubSpawnOutput, error) {
 	argv := []string{"spawn", "-c", cwd, "-p", briefPath, "--host", "local", "-w", workspace}
 	argv = append(argv, args...)
-	command := exec.CommandContext(ctx, "wrk", argv...)
+	if !slices.Contains(args, "--override-reason") {
+		argv = append(argv, "--override-reason", hubSpawnOverrideReason)
+	}
+	command := exec.CommandContext(ctx, "runtug", argv...)
 	command.Env = hubSpawnEnvironment(os.Environ(), session)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.WaitDelay = time.Second

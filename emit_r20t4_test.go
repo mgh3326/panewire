@@ -110,7 +110,7 @@ func TestR20T4EscalateWithoutReportPushesScannerIdenticalPath(t *testing.T) {
 		t.Fatalf("event files=%v", names)
 	}
 	eventPath := filepath.Join(inbox, "jobs", "r20t4-esc", "events", names[0])
-	// AC3: the file format is unchanged, so wrk and emit stay one producer.
+	// AC3: the file format is unchanged, so external writers and emit stay one producer.
 	if reportPath, present := r20t4EventFileReportPath(t, eventPath); reportPath != "" || present {
 		t.Fatalf("the event file gained a report_path %q (present=%t)", reportPath, present)
 	}
@@ -189,7 +189,7 @@ func TestR20T4EscalateWithReportIsNotSubstituted(t *testing.T) {
 	}
 }
 
-// TK6/AC6: joined follows escalate on both sides. In practice wrk joined always
+// TK6/AC6: joined follows escalate on both sides. In practice a joined always
 // carries a report; this pins that the coherence fix leaves that case alone.
 func TestR20T4JoinedMatchesScannerWithAndWithoutReport(t *testing.T) {
 	inbox := t.TempDir()

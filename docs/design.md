@@ -32,7 +32,7 @@ R0의 정식 산출물은 공개 레포와 이 문서다. 구현은 포함하지
 
 | 산문 절차 | 사람이 하던 일 | 요구사항으로의 연결 |
 |---|---|---|
-| `relay-handoff` §2 대상 검증 | `wrk find`로 이름을 조회하고, 없으면 탭 라벨을 폴백하며, 후보 pane의 cwd와 화면 마지막 줄까지 읽어 직전 작업(KR/US/crypto·역할)이 맞는지 확인 | `prompt`는 이름을 맹신하지 않고 유일한 target을 해석하며, 전송 전 pane read 증거와 revision을 남겨야 한다. 모호하거나 맥락이 맞지 않으면 보내지 않는다. |
+| `relay-handoff` §2 대상 검증 | 이름을 조회하고, 없으면 탭 라벨을 폴백하며, 후보 pane의 cwd와 화면 마지막 줄까지 읽어 직전 작업(KR/US/crypto·역할)이 맞는지 확인 | `prompt`는 이름을 맹신하지 않고 유일한 target을 해석하며, 전송 전 pane read 증거와 revision을 남겨야 한다. 모호하거나 맥락이 맞지 않으면 보내지 않는다. |
 | `relay-handoff` §3 주입·제출 검증 | prompt 접수 응답을 전달 증거로 보지 않고, read 화면에서 제출 여부를 확인한다. `[Pasted text #N +M lines]` 칩 또는 컴포저 잔존은 미제출 증거이며, `Press up to edit queued messages`와 칩 없음은 제출 증거다. idle→working 전이는 보조적인 정상 제출 신호다. | `prompt`는 주입 결과와 제출 증거를 별도 상태로 기록하고, 증거가 없으면 성공을 보고하지 않는다. 이미 working이면 상태 전이를 증거로 재사용하지 않는다. |
 | `ask-session` §3 파일 대기 계약 | 답변 파일의 출현을 완료의 정본으로 삼고, `agent.wait --status idle`은 보조 신호로만 사용한다. 상태 플랩 때문에 pane 상태만으로 완료를 판정하지 않는다. | `wait --file`은 파일 출현을 정본으로 삼고, `--settle`은 파일이 출현한 뒤 내용/mtime이 안정된 시간을 검증한다. `wait --agent`는 상태 전이를 이벤트로 받되 settle 동안 안정된 상태를 요구한다. |
 
@@ -49,7 +49,7 @@ R0의 정식 산출물은 공개 레포와 이 문서다. 구현은 포함하지
 
 ### 명시적 비목표
 
-- **스폰은 wrk의 단일 진입점으로 남는다.** scopefuel 게이트, arbiter, landed 검증, worktree 준비는 wrk의 책임이며 panewire는 재현하거나 우회하지 않는다. 훗날 wrk가 panewire 검증 라이브러리를 import하는 것은 가능하지만, 세션 생성 진입점을 둘로 만들지 않는다.
+- **스폰은 runtug의 단일 진입점으로 남는다.** 쿼터 게이트, landed 검증, worktree 준비는 runtug의 책임이며 panewire는 재현하거나 우회하지 않는다. 세션 생성 진입점을 둘로 만들지 않는다.
 - 머신 간 전송, NATS, 중앙 서버, 계정·권한 서비스는 설계하지 않는다.
 - notify, 웹 UI, herdr-remote 대체는 설계 대상이 아니다.
 - panewire는 inbox 파일이나 pane transcript를 정본으로 교체하지 않는다.
@@ -283,7 +283,7 @@ herdr socket이 끊겼다가 재연결될 때도 subscription을 다시 열기 �
 
 ### 가짜 herdr socket fixture
 
-wrk 테스트 하네스의 전례처럼 Unix socket fixture를 사용한다. fixture는 schema 응답과 JSON request/response, subscription event timing을 결정적으로 재생한다. 실제 herdr를 실행하지 않아도 다음을 검증한다.
+선행 테스트 하네스의 전례처럼 Unix socket fixture를 사용한다. fixture는 schema 응답과 JSON request/response, subscription event timing을 결정적으로 재생한다. 실제 herdr를 실행하지 않아도 다음을 검증한다.
 
 - unique name, missing name→unique label fallback, ambiguous label, pane id 변경.
 - preflight read의 `recent_unwrapped`와 빈 read→`visible` fallback.

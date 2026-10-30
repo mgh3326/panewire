@@ -470,7 +470,7 @@ func TestAssistantWritesFlagAC1(t *testing.T) {
 func seedDecisionTask(hk *fakeAssistantHK, taskID int64, revision int, mutate func(*assistantTask)) string {
 	requestID := fmt.Sprintf("dr-%d-%d", taskID, revision)
 	task := assistantTask{ID: taskID, Lane: "lane-a", Title: "work", State: "needs_decision"}
-	task.Refs.DecisionRequest = &assistantDecisionRequest{ID: requestID, Revision: revision, Status: "open", Question: "go?", DefaultAction: "wait", RequestedBy: "wrk-a", RequestedAt: time.Now().UTC()}
+	task.Refs.DecisionRequest = &assistantDecisionRequest{ID: requestID, Revision: revision, Status: "open", Question: "go?", DefaultAction: "wait", RequestedBy: "agent-a", RequestedAt: time.Now().UTC()}
 	if mutate != nil {
 		mutate(&task)
 	}

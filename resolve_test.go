@@ -14,7 +14,7 @@ import (
 
 // waitFixtureClient builds a herdr fixture serving one fleet and returns a
 // connected client. agents/tabs are the exact payloads agent.list/tab.list
-// answer with, so the wrk oracle below and the resolver see the same fleet.
+// answer with, so the reference oracle below and the resolver see the same fleet.
 func waitFixtureClient(t *testing.T, agents []any, tabs []any) (*herdrFixture, *panewire.HerdrClient) {
 	t.Helper()
 	fixture := newHerdrFixture(t, fixtureSchema(true, true))
@@ -176,12 +176,12 @@ func TestAgentWaitFailsWhenPaneOccupantGone(t *testing.T) {
 	}
 }
 
-// wrkFindOracle is a Go port of bin/wrk find_cmd's matching (agent-skills
+// legacyFindOracle is a Go port of the retired finder's matching (the
 // repo, intentionally unmodified for #448): exact name match deduped by
 // pane_id first, then exact tab-label match via tab.list deduped the same
 // way. It returns the surviving pane ids — 0 means "no exact name or label
-// match", 1 resolves, >1 is the ambiguous refusal wrk find exits 1 on.
-func wrkFindOracle(agents []map[string]any, tabs []map[string]any, target string) []string {
+// match", 1 resolves, >1 is the ambiguous refusal the legacy finder exits 1 on.
+func legacyFindOracle(agents []map[string]any, tabs []map[string]any, target string) []string {
 	uniquePanes := func(items []map[string]any) []string {
 		seen := map[string]bool{}
 		var out []string
@@ -220,13 +220,13 @@ func wrkFindOracle(agents []map[string]any, tabs []map[string]any, target string
 	return uniquePanes(labeled)
 }
 
-// AC-5 (option ②, test-pinned equivalence): on wrk find's input domain —
+// AC-5 (option ②, test-pinned equivalence): on the legacy finder's input domain —
 // exact names and exact tab labels — the unified resolver must produce the
-// same result as wrk find's algorithm, including the name-beats-label tier,
-// pane_id dedupe, the ambiguous refusal, and the not-found failure. wrk
+// same result as the legacy algorithm, including the name-beats-label tier,
+// pane_id dedupe, the ambiguous refusal, and the not-found failure. The legacy
 // name-sync's taken-set is the same name lookup: a label is "taken" exactly
 // when some agent name equals it, which is the resolver's identity tier.
-func TestWrkFindEquivalenceOnSharedDomain(t *testing.T) {
+func TestLegacyFindEquivalenceOnSharedDomain(t *testing.T) {
 	agents := []map[string]any{
 		{"agent": "claude", "name": "solo", "pane_id": "p1", "tab_id": "t1", "agent_status": "idle", "agent_session": sessionField("s1")},
 		{"agent": "codex", "name": "dup-name", "pane_id": "p2", "tab_id": "t2", "agent_status": "idle", "agent_session": sessionField("s2")},
@@ -238,7 +238,7 @@ func TestWrkFindEquivalenceOnSharedDomain(t *testing.T) {
 		{"agent": "claude", "name": "dupe-row", "pane_id": "p8", "tab_id": "t8", "agent_status": "idle", "agent_session": sessionField("s8")},
 		{"agent": "claude", "name": "dupe-row", "pane_id": "p8", "tab_id": "t8", "agent_status": "idle", "agent_session": sessionField("s8")},
 		{"agent": "codex", "name": "other", "pane_id": "p9", "tab_id": "t9", "agent_status": "working", "agent_session": sessionField("s9")},
-		// record label and tab.list label disagree: wrk reads tab.list only,
+		// record label and tab.list label disagree: the contract reads tab.list only,
 		// so "tab-drift" must still resolve while "rec-label" is extension.
 		{"agent": "claude", "name": "drift", "label": "rec-label", "pane_id": "p10", "tab_id": "t10", "agent_status": "idle", "agent_session": sessionField("s10")},
 	}
@@ -261,14 +261,14 @@ func TestWrkFindEquivalenceOnSharedDomain(t *testing.T) {
 
 	cases := []struct {
 		input       string
-		wantPanes   []string // wrk oracle result; nil means "no exact match"
+		wantPanes   []string // oracle result; nil means "no exact match"
 		waitStatus  string   // status the single resolved pane reports
 		wantAmbig   bool
 		wantMissing bool
 	}{
 		{input: "solo", wantPanes: []string{"p1"}, waitStatus: "idle"},
 		{input: "lab-single", wantPanes: []string{"p5"}, waitStatus: "working"},
-		// name-beats-label: "shared" is A4's name and t9's label. wrk resolves
+		// name-beats-label: "shared" is A4's name and t9's label. The contract resolves
 		// the name tier only; if the resolver wrongly picked the label pane
 		// (status working), waiting for idle would hang instead of succeeding.
 		{input: "shared", wantPanes: []string{"p4"}, waitStatus: "idle"},
@@ -277,12 +277,12 @@ func TestWrkFindEquivalenceOnSharedDomain(t *testing.T) {
 		{input: "dup-name", wantPanes: []string{"p2", "p3"}, waitStatus: "idle", wantAmbig: true},
 		{input: "lab-dup", wantPanes: []string{"p6", "p7"}, waitStatus: "idle", wantAmbig: true},
 		// tab.list label wins even when the agent record carries a different
-		// label field — wrk only ever reads tab.list.
+		// label field — the contract only ever reads tab.list.
 		{input: "tab-drift", wantPanes: []string{"p10"}, waitStatus: "idle"},
 		{input: "ghost-target", wantPanes: nil, waitStatus: "idle", wantMissing: true},
 	}
 	for _, tc := range cases {
-		oracle := wrkFindOracle(agents, tabs, tc.input)
+		oracle := legacyFindOracle(agents, tabs, tc.input)
 		if len(oracle) != len(tc.wantPanes) {
 			t.Fatalf("input %q: oracle=%v want %v — test fixture drifted", tc.input, oracle, tc.wantPanes)
 		}
@@ -303,18 +303,18 @@ func TestWrkFindEquivalenceOnSharedDomain(t *testing.T) {
 			}
 		default:
 			if err != nil {
-				t.Fatalf("input %q: resolver diverged from wrk (want pane %v): %v", tc.input, tc.wantPanes, err)
+				t.Fatalf("input %q: resolver diverged from reference (want pane %v): %v", tc.input, tc.wantPanes, err)
 			}
 		}
 	}
 }
 
-// AC-5 boundary, pinned honestly: panewire resolves inputs outside wrk's
+// AC-5 boundary, pinned honestly: panewire resolves inputs outside the legacy
 // name/label domain (pane_id here; tab_id, title, harness name are the other
-// extension keys). wrk find reports those as "no exact name or label match" —
+// extension keys). The legacy finder reported those as "no exact name or label match" —
 // a truthful narrower contract, not a contradictory answer. This test exists
 // so the superset boundary is fixed, not accidental.
-func TestWrkExtensionDomainResolvesPaneID(t *testing.T) {
+func TestLegacyExtensionDomainResolvesPaneID(t *testing.T) {
 	agents := []map[string]any{
 		{"agent": "claude", "name": "lane-a", "pane_id": "w1:p1", "tab_id": "w1:t1", "agent_status": "idle", "agent_session": sessionField("s1")},
 	}
@@ -323,7 +323,7 @@ func TestWrkExtensionDomainResolvesPaneID(t *testing.T) {
 		agentAny = append(agentAny, a)
 	}
 	_, client := waitFixtureClient(t, agentAny, nil)
-	if oracle := wrkFindOracle(agents, nil, "w1:p1"); len(oracle) != 0 {
+	if oracle := legacyFindOracle(agents, nil, "w1:p1"); len(oracle) != 0 {
 		t.Fatalf("oracle should not resolve pane_id input, got %v", oracle)
 	}
 	if _, err := panewire.WaitAgent(context.Background(), client, "w1:p1", "idle", 0, 2*time.Second); err != nil {

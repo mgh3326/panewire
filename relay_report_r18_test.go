@@ -88,7 +88,7 @@ func TestR18EnvelopeHeartbeatThenFlatCompletionRelays(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+now+`","job_id":"job-20260101-0000","kind":"job.claim","payload":{"agent_label":"wrk-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+now+`","job_id":"job-20260101-0000","kind":"job.claim","payload":{"agent_label":"agent-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	routes := filepath.Join(t.TempDir(), "routes.json")
@@ -110,7 +110,7 @@ func TestR18EnvelopeHeartbeatThenFlatCompletionRelays(t *testing.T) {
 	if h.jobs["job-20260101-0000"] == nil {
 		t.Fatal("hub did not register envelope job")
 	}
-	if err := os.WriteFile(filepath.Join(dir, "00002-job.completed.json"), []byte(`{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"report.md","report_last_line":"VERDICT: DONE"}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "00002-job.completed.json"), []byte(`{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"agent-a","host":"host-a","report_path":"report.md","report_last_line":"VERDICT: DONE"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	events := client.jobCompletionEvents()

@@ -221,7 +221,7 @@ func TestTask646RealCodexInputLineIsNotSubmitted(t *testing.T) {
 // someone else that ends like this brief is not this brief's echo while the
 // brief's head is on screen only in an older message.
 func TestTask646ForeignMessageSharingTheTailIsNotProof(t *testing.T) {
-	ending := "완료 시 wrk done 으로 알리고 보고서 경로를 적어라. 승인 대기 없이 검증을 끝내라. pane 에 질문 금지."
+	ending := "완료 시 job done 으로 알리고 보고서 경로를 적어라. 승인 대기 없이 검증을 끝내라. pane 에 질문 금지."
 	body := task646Header + "\nthis call's brief, still pending somewhere\n" + ending
 	composer := "────\n❯\n────\nstatus\n"
 	pre := "❯ " + task646Header + "\n  an older brief\n  " + ending + "\n⏺ done\n✻ Worked for 3s · done 오후 3:12\n" + composer
