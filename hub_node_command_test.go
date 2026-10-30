@@ -299,7 +299,7 @@ func TestHubNodeCommandDisconnectSweepsAndUnpublishes(t *testing.T) {
 	hub.mu.Unlock()
 	hub.disconnect("machine-a", agent)
 	hub.mu.Lock()
-	_, state := hub.nodeCommandStateLocked("machine-a")
+	_, state := hub.nodeCommandTargetLocked("machine-a")
 	pending := len(hub.nodeCommands)
 	hub.mu.Unlock()
 	if state != "disconnected" || pending != 0 {
@@ -310,5 +310,36 @@ func TestHubNodeCommandDisconnectSweepsAndUnpublishes(t *testing.T) {
 	}
 	if status, _, contents := t14HTTP(t, http.MethodPost, nodeCommandURL(server, "machine-a"), t14OperatorToken, map[string]any{"op": "agents.list"}); status != http.StatusServiceUnavailable || nodeCommandDecode(t, contents)["error"] != "node_unavailable" {
 		t.Fatalf("command after disconnect status=%d body=%s", status, contents)
+	}
+}
+
+// TestHubNodeCommandLiveNonConnectedStates: availability is the live
+// connection, not the presence label — a stale (late heartbeat) or
+// not-accepting node still takes commands and reports its real state.
+func TestHubNodeCommandLiveNonConnectedStates(t *testing.T) {
+	hub, server := t14Hub(t)
+	hub.nodeAgentsWait = 2 * time.Second
+	connection := t14Node(t, hub, server, false)
+	hub.mu.Lock()
+	hub.nodes["machine-a"].state = "stale"
+	hub.mu.Unlock()
+
+	results := t14HTTPAsync(t, http.MethodPost, nodeCommandURL(server, "machine-a"), t14OperatorToken, nodeCommandCloseBody)
+	nodeCommandReplyTo(t, connection, nodeCommandRead(t, connection), map[string]any{"result": map[string]any{"outcome": "closed"}})
+	if result := t14Result(t, results); result.status != http.StatusOK || !strings.Contains(string(result.body), `"outcome":"closed"`) {
+		t.Fatalf("stale node command status=%d body=%s", result.status, result.body)
+	}
+
+	results = t14HTTPAsync(t, http.MethodGet, server.URL+"/v1/nodes/agents", t14OperatorToken, nil)
+	nodeCommandReplyTo(t, connection, nodeCommandRead(t, connection), map[string]any{"result": map[string]any{"agents": []any{}, "panes": []any{}, "panes_ok": true}})
+	result := t14Result(t, results)
+	var body struct {
+		Nodes []hubNodeAgentsRow `json:"nodes"`
+	}
+	if err := json.Unmarshal(result.body, &body); err != nil || len(body.Nodes) != 1 {
+		t.Fatalf("body=%s err=%v", result.body, err)
+	}
+	if row := body.Nodes[0]; row.State != "stale" || row.Error != "" || row.Agents == nil {
+		t.Fatalf("stale node row=%+v", row)
 	}
 }

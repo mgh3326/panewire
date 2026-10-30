@@ -58,8 +58,11 @@ reaches the node. The hub waits up to 30 seconds:
 | 503 | `{...,"error":"node_lost"}` | The node disconnected while the hub waited. |
 | 504 | `{...,"error":"node_timeout"}` | No answer in time; a late answer is dropped. |
 
-Commands do not require the node to be `accepting`: reaping a draining node
-is the common case.
+A command needs only a live connection to the node. It does not require
+`accepting` or a `connected` presence label: a draining node, or a `stale`
+one whose heartbeat is late, still takes commands — reaping a draining node
+is the common case — and the `state` the hub reports is that presence label.
+A connection that has died unnoticed answers `node_lost` or `node_timeout`.
 
 ## Ops
 
@@ -125,7 +128,10 @@ and honoured. Read or write failures answer `capture_failed`.
 
 `args: {cwd}`. Returns `{"worktree":null}` unless `cwd` is inside a linked git
 worktree (an ordinary directory, a bare repository, a clone's canonical
-checkout, or a path git cannot read is null). Otherwise:
+checkout, or a path git cannot read is null). The node asks git for absolute
+paths (`rev-parse --path-format=absolute`, git 2.31 or later) rather than
+resolving a relative common dir itself; an older git reads as null.
+Otherwise:
 
 ```json
 {"worktree":{"path":"/work/repo.feat","branch":"feat/x","head":"<sha>","origin_url":"https://github.com/owner/name.git","common":"/work/repo/.git"}}

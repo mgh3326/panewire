@@ -505,7 +505,11 @@ func (client *HubClient) nodePaneCapture(ctx context.Context, args nodePaneCaptu
 // not one — an ordinary directory, a bare repo, a clone's canonical checkout,
 // or one git cannot read — reports a null worktree.
 func nodeWorktreeInspect(ctx context.Context, git relayCommandRunner, cwd string) nodeWorktreeInspectResult {
-	output, err := git(ctx, "-C", cwd, "rev-parse", "--absolute-git-dir", "--git-common-dir", "--show-toplevel")
+	// --path-format=absolute (git 2.31+) makes git resolve the common dir
+	// itself: a relative one is relative to different bases depending on
+	// git version and on how the worktree's commondir is recorded. An older
+	// git rejects the option, which reads as not-a-worktree, never a guess.
+	output, err := git(ctx, "-C", cwd, "rev-parse", "--path-format=absolute", "--absolute-git-dir", "--git-common-dir", "--show-toplevel")
 	if err != nil {
 		return nodeWorktreeInspectResult{}
 	}
@@ -514,9 +518,8 @@ func nodeWorktreeInspect(ctx context.Context, git relayCommandRunner, cwd string
 		return nodeWorktreeInspectResult{}
 	}
 	gitDir, common, top := lines[0], lines[1], lines[2]
-	if !filepath.IsAbs(common) {
-		// git prints a relative common dir against the directory it ran in.
-		common = filepath.Join(cwd, common)
+	if !filepath.IsAbs(gitDir) || !filepath.IsAbs(common) || !filepath.IsAbs(top) {
+		return nodeWorktreeInspectResult{}
 	}
 	// A linked worktree keeps its git dir under <main>/.git/worktrees; the
 	// canonical checkout's git dir is the common dir itself.

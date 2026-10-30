@@ -91,38 +91,46 @@ func parseHubNodeCommandResult(raw []byte) (hubNodeCommandResult, bool) {
 	return result, true
 }
 
-// nodeCommandStateLocked names why a machine cannot take a command, or "" when
-// it can. Commands do not require accepting: reaping a draining node is the
-// common case.
-func (h *HubServer) nodeCommandStateLocked(machine string) (*hubAgent, string) {
+// nodeCommandTargetLocked returns the machine's live agent, or nil when there
+// is no connection to send on, together with the presence state to report,
+// which is never empty. Availability is the live connection alone: a node
+// that is stale (late heartbeat) or not accepting work still takes commands —
+// reaping a draining node is the common case — and its state is reported as
+// is. A dead connection that the hub has not yet noticed answers node_lost or
+// node_timeout, never a silent success.
+func (h *HubServer) nodeCommandTargetLocked(machine string) (*hubAgent, string) {
 	record := h.nodes[machine]
 	switch {
 	case record == nil:
 		return nil, "disconnected"
-	case record.agent != nil && record.state == "connected":
-		return record.agent, ""
+	case record.agent != nil:
+		state := record.state
+		if state == "" {
+			state = "connected"
+		}
+		return record.agent, state
 	case record.state == "" || record.state == "connected":
-		// A record without a usable connection always names a state, so a
-		// nil agent can never read as available.
+		// No connection means not connected, whatever the record says.
 		return nil, "disconnected"
 	}
 	return nil, record.state
 }
 
-// sendNodeCommand registers and sends one command. A non-empty state means the
-// node was unavailable and nothing was sent.
-func (h *HubServer) sendNodeCommand(machine, op string, args json.RawMessage) (*hubNodeCommandPending, string, string) {
+// sendNodeCommand registers and sends one command and returns the node's
+// state. sent is false when the node had no live connection and nothing was
+// sent.
+func (h *HubServer) sendNodeCommand(machine, op string, args json.RawMessage) (pending *hubNodeCommandPending, requestID, state string, sent bool) {
 	h.mu.Lock()
-	agent, state := h.nodeCommandStateLocked(machine)
-	if state != "" {
+	agent, state := h.nodeCommandTargetLocked(machine)
+	if agent == nil {
 		h.mu.Unlock()
-		return nil, "", state
+		return nil, "", state, false
 	}
 	if h.nodeCommands == nil {
 		h.nodeCommands = make(map[string]*hubNodeCommandPending)
 	}
-	requestID := newHubNodeCommandID()
-	pending := &hubNodeCommandPending{machine: machine, agent: agent, op: op, done: make(chan hubNodeCommandResult, 1)}
+	requestID = newHubNodeCommandID()
+	pending = &hubNodeCommandPending{machine: machine, agent: agent, op: op, done: make(chan hubNodeCommandResult, 1)}
 	h.nodeCommands[requestID] = pending
 	h.mu.Unlock()
 	message := struct {
@@ -133,9 +141,9 @@ func (h *HubServer) sendNodeCommand(machine, op string, args json.RawMessage) (*
 	}{Type: "node.command", RequestID: requestID, Op: op, Args: args}
 	if err := agent.writeJSON(message); err != nil {
 		h.forgetNodeCommand(requestID)
-		return nil, "", "disconnected"
+		return nil, "", "disconnected", false
 	}
-	return pending, requestID, ""
+	return pending, requestID, state, true
 }
 
 func (h *HubServer) forgetNodeCommand(requestID string) {
@@ -206,8 +214,8 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
-	pending, requestID, state := h.sendNodeCommand(machine, body.Op, body.Args)
-	if state != "" {
+	pending, requestID, state, sent := h.sendNodeCommand(machine, body.Op, body.Args)
+	if !sent {
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "node_unavailable", "state": state})
 		return
 	}
@@ -259,10 +267,10 @@ func (h *HubServer) handleNodesAgents(writer http.ResponseWriter, request *http.
 	rows := make([]hubNodeAgentsRow, len(machines))
 	waits := make([]inflight, len(machines))
 	for index, machine := range machines {
-		rows[index] = hubNodeAgentsRow{MachineID: machine, State: "connected"}
-		pending, requestID, state := h.sendNodeCommand(machine, nodeCommandAgentsList, json.RawMessage("{}"))
-		if state != "" {
-			rows[index].State, rows[index].Error = state, "node_unavailable"
+		pending, requestID, state, sent := h.sendNodeCommand(machine, nodeCommandAgentsList, json.RawMessage("{}"))
+		rows[index] = hubNodeAgentsRow{MachineID: machine, State: state}
+		if !sent {
+			rows[index].Error = "node_unavailable"
 			continue
 		}
 		waits[index] = inflight{pending: pending, requestID: requestID}

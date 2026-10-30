@@ -286,14 +286,18 @@ func TestNodeCommandWorktreeInspect(t *testing.T) {
 	if result, _ := nodeRun(t, client, nodeCommandWorktreeInspect, map[string]any{"cwd": sub}); result["worktree"].(map[string]any)["common"] != filepath.Join(main, ".git") || result["worktree"].(map[string]any)["path"] != linked {
 		t.Fatalf("subdirectory worktree=%v", result["worktree"])
 	}
+	// git is asked for absolute paths; a relative answer (an older git that
+	// ignored the request, or a stub) is never resolved by guessing a base.
+	var asked []string
 	relative := nodeWorktreeInspect(t.Context(), func(_ context.Context, args ...string) ([]byte, error) {
-		if args[2] == "rev-parse" && len(args) == 6 {
+		if args[2] == "rev-parse" && len(args) == 7 {
+			asked = args
 			return []byte("/w/repo/.git/worktrees/x\n../../repo/.git\n/w/x\n"), nil
 		}
 		return nil, errors.New("not needed")
 	}, "/w/x/a/b")
-	if relative.Worktree == nil || relative.Worktree.Common != "/w/x/repo/.git" {
-		t.Fatalf("relative common dir must resolve against cwd: %+v", relative.Worktree)
+	if relative.Worktree != nil || strings.Join(asked, " ") != "-C /w/x/a/b rev-parse --path-format=absolute --absolute-git-dir --git-common-dir --show-toplevel" {
+		t.Fatalf("relative common dir must not be guessed: %+v asked=%v", relative.Worktree, asked)
 	}
 	for raw, want := range map[string]string{
 		"https://user:tok@example.invalid/owner/name.git?token=abc#frag": "https://example.invalid/owner/name.git",
