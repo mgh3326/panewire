@@ -645,3 +645,49 @@ func TestHubAuthReloadRefusesRepeatedKeys(t *testing.T) {
 		t.Fatal("refused reload raised no alert")
 	}
 }
+
+// TestHubAuthIdleReloadClosesRevokedNodeWebsocket: with no HTTP request at
+// all, the maintenance tick notices a rotated node token and closes the
+// socket that opened with the old one.
+func TestHubAuthIdleReloadClosesRevokedNodeWebsocket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub-auth.env")
+	pw2WriteAuth(t, path, "HUB_TOKEN_operator="+pw2OperatorToken+"\nHUB_TOKEN_node-a="+pw2NodeAToken+"\n", 0600)
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens:            map[string]string{"operator": pw2OperatorToken, "node-a": pw2NodeAToken},
+		AuthPath:          path,
+		ReportRelayPath:   r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"node-a","pane":"w1:p1"}}}`),
+		Logger:            slog.New(slog.NewTextHandler(io.Discard, nil)),
+		KeepaliveInterval: 5 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := httptest.NewServer(hub.Handler())
+	defer server.Close()
+	maintenanceCtx, cancel := context.WithCancel(context.Background())
+	maintenanceDone := make(chan struct{})
+	go func() { hub.RunMaintenance(maintenanceCtx); close(maintenanceDone) }()
+	defer func() { cancel(); <-maintenanceDone }()
+
+	node := r6DialAgent(t, server.URL, "node-a", pw2NodeAToken)
+	defer node.CloseNow()
+	r6Write(t, node, map[string]any{"type": "hello", "machine_id": "node-a", "version": "pw2-a"})
+	eventually(t, 5*time.Second, "node connected", func() bool {
+		nodes := hub.Nodes()
+		return len(nodes) == 1 && nodes[0].State == "connected"
+	})
+	pw2WriteAuth(t, path, "HUB_TOKEN_operator="+pw2OperatorToken+"\nHUB_TOKEN_node-a="+pw2NodeAToken+"-rotated\n", 0600)
+	readContext, cancelRead := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancelRead()
+	// The tick also sends keepalive pings; read past them to the close.
+	for {
+		_, _, err := node.Read(readContext)
+		if err == nil {
+			continue
+		}
+		if websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+			t.Fatalf("idle hub kept a rotated node websocket open: %v", err)
+		}
+		break
+	}
+}

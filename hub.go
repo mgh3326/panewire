@@ -2227,6 +2227,10 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 			return
 		case <-ticker.C:
 			h.Sweep()
+			// An idle hub serves no authenticated request to notice an auth
+			// file change, so the tick checks it too: a revoked node token's
+			// websocket closes within one interval without HTTP traffic.
+			h.currentAuth()
 		}
 	}
 }

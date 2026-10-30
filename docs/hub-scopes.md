@@ -60,8 +60,9 @@ HUB_SCOPES_svc-mergewake=nodes.agents.read,node.command:agents.list@*,node.comma
 ## Reload
 
 The hub re-reads the auth file when it changes on disk (checked on each
-authenticated request; a change is any difference in inode, mode, size,
-mtime or change time). A file that no longer loads — wrong mode, a symlink,
+authenticated request and on each maintenance tick, every keepalive
+interval — 10 s by default — so an idle hub notices too; a change is any
+difference in inode, mode, size, mtime or change time). A file that no longer loads — wrong mode, a symlink,
 a parse or scope error, a missing operator token — keeps the previous
 credentials and logs one `hub auth reload failed` error per bad version.
 A reload that would turn an `--alert-nodes` node into a service is refused
