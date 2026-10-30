@@ -142,7 +142,8 @@ BEGIN {
 	sub(/ +$/, "", name)
 	name = substr(name, 1, 32)
 	if (name == "") name = "unknown"
-	if (name == "other") name = "other_"
+	# "other" is the fold-in group; keep every real name one-to-one off it.
+	if (name ~ /^other_*$/) name = name "_"
 	delta = 0
 	if (!rebaseline) {
 		if (pid in prev_cpu && prev_name[pid] == name && used >= prev_cpu[pid]) delta = used - prev_cpu[pid]

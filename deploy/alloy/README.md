@@ -124,15 +124,17 @@ rename, and a failed run removes it rather than leaving stale gauges.
      `proc-metrics.timer.example` as `proc-metrics.service` / `.timer` in
      `/etc/systemd/system`, fill in the paths, and
      `systemctl enable --now proc-metrics.timer`. Needs procps `ps` (any
-     distribution's default).
+     distribution's default). The service user must see every process; with
+     `/proc` mounted `hidepid=1|2` it sees only its own and the gauges
+     undercount without any error.
 
 ### Series budget
 
 The free Grafana Cloud tier allows 10k active series for the whole account.
 Each run keeps the top 15 groups by CPU used in the interval (only groups that
 used CPU) and the top 15 by resident memory as their own series, and sums
-everything else into `groupname="other"` (a process literally named `other` is
-renamed `other_`). That is at most 30 named groups + `other` = 31 groups x 3
+everything else into `groupname="other"` (a process literally named `other`, or
+`other_` and so on, gets one more underscore). That is at most 30 named groups + `other` = 31 groups x 3
 series = **93 series per host**, independent of how many programs run. Seven
 hosts: 7 x ~90 = **~630 series, about 6% of the tier**. A group that leaves the
 top set and returns restarts its counter from zero, which `rate()` handles as a

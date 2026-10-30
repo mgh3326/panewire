@@ -313,3 +313,16 @@ func TestProcMetricsUnitExamples(t *testing.T) {
 		t.Error("timer example must fire every 30 seconds")
 	}
 }
+
+func TestProcMetricsScriptKeepsOtherNamesOffTheFoldGroup(t *testing.T) {
+	series := procMetricsSeries(t, runProcMetrics(t, t.TempDir(),
+		procLine(10, 1, "0:01", 100, "/bin/other")+procLine(11, 1, "0:01", 200, "/bin/other_")+procLine(12, 1, "0:01", 400, "/bin/plain"), 1000))
+	for group, want := range map[string]string{"other_": "1", "other__": "1", "plain": "1"} {
+		if got := series[fmt.Sprintf(`namedprocess_namegroup_num_procs{groupname=%q}`, group)]; got != want {
+			t.Errorf("num_procs for %s = %q, want %s", group, got, want)
+		}
+	}
+	if _, ok := series[`namedprocess_namegroup_num_procs{groupname="other"}`]; ok {
+		t.Error("only the fold-in group may be called other, and nothing was folded")
+	}
+}
