@@ -317,7 +317,7 @@ func (h *HubServer) reloadPlacementPolicyLocked() {
 		h.setPlacementPolicyFailureLocked("invalid")
 		return
 	}
-	if len(policy.QuotaExclude)+len(policy.QuotaBoost) > 0 {
+	if len(policy.QuotaExclude)+len(policy.QuotaBoost) > 0 && h.logger != nil {
 		h.logger.Warn("placement policy quota rules are ignored; remove quota_exclude/quota_boost", "quota_exclude", len(policy.QuotaExclude), "quota_boost", len(policy.QuotaBoost))
 	}
 	h.placementPolicy, h.placementPolicyModTime = policy, modTime

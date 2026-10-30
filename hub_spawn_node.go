@@ -101,15 +101,15 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.RC, result.Error = 2, "spawn_disabled"
 		return result
 	}
+	cwd, found := config.CWDMap[message.CWDKey]
+	if !found {
+		result.RC, result.Error = 2, "cwd_unmapped"
+		return result
+	}
 	// The retired spawner is gone; a node without runtug is not spawn-capable,
 	// so refuse the same way an unconfigured node does instead of failing at exec.
 	if _, err := exec.LookPath("runtug"); err != nil {
 		result.RC, result.Error = 2, "spawn_disabled"
-		return result
-	}
-	cwd, found := config.CWDMap[message.CWDKey]
-	if !found {
-		result.RC, result.Error = 2, "cwd_unmapped"
 		return result
 	}
 
