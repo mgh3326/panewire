@@ -23,7 +23,8 @@ loki.write "cloud" {
 // ["textfile"]; unset means no extra collectors. Thermal needs hardware CPU
 // power status and errors every scrape on Macs without it, so it stays off
 // by default. Enabling "textfile" also requires FLEET_TEXTFILE_DIR, as in
-// config.linux.alloy.
+// config.linux.alloy. Per-process CPU and memory arrive through that textfile
+// directory from proc-metrics.sh (macOS has no /proc for the process exporter).
 prometheus.exporter.unix "node" {
 	enable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_ENABLE_COLLECTORS"), "[]"))
 	disable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_DISABLE_COLLECTORS"), "[]"))
