@@ -367,21 +367,25 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid quota selector", http.StatusBadRequest)
 		return
 	}
-	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"))
+	// A policy that still carries now-inert quota rules cannot honestly
+	// answer a quota selector, so it fails closed until the desk removes
+	// them — checked before placement() so the refusal triggers no spill
+	// wake. Plain placement (no pool) is unaffected and keeps the warn log.
 	if pool != "" {
-		// An old caller validating the quota object: a policy that still
-		// carries now-inert quota rules cannot honestly answer allow, so
-		// the selector fails closed until the desk removes them. Plain
-		// placement (no pool) is unaffected and keeps the warn log.
-		quota := &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "allow", Reason: "quota_allowed", PolicyStatus: result.PolicyStatus}
 		h.mu.Lock()
 		rulesPresent := len(h.placementPolicy.QuotaExclude)+len(h.placementPolicy.QuotaBoost) > 0
+		policyStatus := h.placementPolicyStatus
 		h.mu.Unlock()
 		if rulesPresent {
-			quota.Decision, quota.Reason = "unknown", "quota_policy_invalid"
-			result.Decision, result.Reason = "unavailable", "quota_policy_invalid"
+			result := PlacementResult{Decision: "unavailable", Reason: "quota_policy_invalid", PolicyStatus: policyStatus}
+			result.Quota = &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "unknown", Reason: "quota_policy_invalid", PolicyStatus: policyStatus}
+			writeJSON(w, http.StatusOK, result)
+			return
 		}
-		result.Quota = quota
+	}
+	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"))
+	if pool != "" {
+		result.Quota = &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "allow", Reason: "quota_allowed", PolicyStatus: result.PolicyStatus}
 	}
 	writeJSON(w, http.StatusOK, result)
 }

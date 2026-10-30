@@ -140,9 +140,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return nil, "", ExitUsage, errors.New("invalid hub flags")
 	}
-	if *quotaV2StorePath != "" || *quotaV2ClockSkew != 0 {
-		logger.Warn("deprecated hub flags ignored; remove from the unit", "flag", "--quota-v2-store/--quota-v2-clock-skew", "store", *quotaV2StorePath)
-	}
+	deprecatedQuotaV2 := *quotaV2StorePath != "" || *quotaV2ClockSkew != 0
 	if *authPath == "" {
 		return nil, "", ExitUsage, errors.New("hub auth file is required")
 	}
@@ -159,6 +157,10 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 			}
 		}()
 		logger = slog.New(hubLogTeeHandler{primary: logger.Handler(), file: slog.NewTextHandler(logFile, nil)})
+	}
+	// Warn after the log-file tee is installed so it lands in both sinks.
+	if deprecatedQuotaV2 {
+		logger.Warn("deprecated hub flags ignored; remove from the unit", "flag", "--quota-v2-store/--quota-v2-clock-skew", "store", *quotaV2StorePath)
 	}
 	if len(listens) == 0 {
 		listens = append(listens, "127.0.0.1:9377")
