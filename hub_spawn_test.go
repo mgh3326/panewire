@@ -446,6 +446,9 @@ func t14FakeRuntug(t *testing.T, script string) {
 	if err := os.Chmod(path, 0700); err != nil {
 		t.Fatal(err)
 	}
+	// HOME must not leak the developer's real ~/.local/bin/runtug, which the
+	// resolver prefers over PATH.
+	t.Setenv("HOME", t.TempDir())
 	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
 }
 

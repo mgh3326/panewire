@@ -257,8 +257,10 @@ func hubSpawnEnvironment(environment []string, session string) []string {
 // fallback), then the conventional ~/.local/bin install, then PATH.
 func hubSpawnRuntugPath(configured, home string, isExecutable func(string) bool, lookPath func(string) (string, error)) string {
 	if configured != "" {
-		if isExecutable(configured) {
-			return configured
+		// Abs anchors a relative configured path so exec does not silently
+		// fall back to PATH for a name with no separator.
+		if absolute, err := filepath.Abs(configured); err == nil && isExecutable(absolute) {
+			return absolute
 		}
 		return ""
 	}
