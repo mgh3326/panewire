@@ -27,10 +27,11 @@ type PlacementPolicy struct {
 	WakeOnSpill      bool     `json:"wake_on_spill"`
 	MemoryFreePctMin *float64 `json:"memory_free_pct_min,omitempty"`
 	SwapUsedMBMax    *float64 `json:"swap_used_mb_max,omitempty"`
-	// QuotaExclude and QuotaBoost are retired. They stay decodable only so a
-	// stale policy file produces a readable invalid-policy failure rather
-	// than an unknown-field one: valid() rejects a policy that still names
-	// them, so the desk must remove the rules deliberately.
+	// QuotaExclude and QuotaBoost are retired and never evaluated, but they
+	// stay decoded so a stale policy file still loads: reload logs a warning
+	// and /v1/placement fails closed for any caller that still asks for the
+	// quota judgment while the inert rules remain. Remove them once every
+	// desk config is clean.
 	QuotaExclude []json.RawMessage                `json:"quota_exclude,omitempty"`
 	QuotaBoost   []json.RawMessage                `json:"quota_boost,omitempty"`
 	Machines     map[string]PlacementMachineSlots `json:"machines,omitempty"`
@@ -62,9 +63,6 @@ func DefaultPlacementPolicy() PlacementPolicy {
 func (p PlacementPolicy) valid() bool {
 	if !machineIDPattern.MatchString(p.LocalMachine) || p.LocalMachine == hubOperatorMachineID || p.MaxActiveJobs < 1 || p.MaxActiveJobs > 10000 || p.LoadRatio <= 0 || p.LoadRatio > 100 ||
 		!validOptionalMemoryFloat(p.MemoryFreePctMin, 0, 100) || !validOptionalMemoryFloat(p.SwapUsedMBMax, 0, math.Inf(1)) {
-		return false
-	}
-	if len(p.QuotaExclude)+len(p.QuotaBoost) > 0 {
 		return false
 	}
 	seen := map[string]struct{}{p.LocalMachine: {}}
