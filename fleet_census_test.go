@@ -20,7 +20,7 @@ import (
 )
 
 // t501Now is the fixture clock: pinned to real now so fixture ages agree on
-// both sides of the equivalence comparison — wrk reads the wall clock, the
+// both sides of the equivalence comparison — the reference reads the wall clock, the
 // census reads deps.Now.
 var t501Now = time.Now().UTC().Truncate(time.Second)
 
@@ -34,7 +34,7 @@ func t501Deps(server *httptest.Server) hubCLIDeps {
 	return deps
 }
 
-// t501JobEvent writes one flat inbox event record (the shape wrk itself
+// t501JobEvent writes one flat inbox event record (the shape the job writers
 // writes) or, when envelope is true, a {"payload": {...}} envelope.
 func t501JobEvent(t *testing.T, root, job, name string, document map[string]any) {
 	t.Helper()
@@ -114,7 +114,7 @@ func t501StandardInbox() map[string][]map[string]any {
 			t501EnvelopedEvent("job.spawned", "", map[string]any{"pane_id": "w1:p1", "tab_id": "w1:t1"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
-		// #603: a protected (`wrk spawn --keep`) finished job is skipped with
+		// #603: a protected (`runtug spawn --keep`) finished job is skipped with
 		// reason=protected; only the JSON literal true protects.
 		"j-kept": {
 			t501EnvelopedEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "worker"}),
@@ -186,7 +186,7 @@ func t501StandardInbox() map[string][]map[string]any {
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p11", "tab_id": "w1:t11"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
-		// Non-integer pane_count is wrk's "?": unknown, never shared.
+		// Non-integer pane_count is "?": unknown, never shared.
 		"j-tabcountq": {
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p12", "tab_id": "w1:t12"}),
 			t501FlatEvent("job.completed", old, nil),
@@ -216,7 +216,7 @@ func t501StandardInbox() map[string][]map[string]any {
 			t501FlatEvent("job.completed", old, nil),
 		},
 		// No spawn receipt: pane_id/tab_id from a flat completed event still
-		// identify the job's pane (wrk accumulates payload fields).
+		// identify the job's pane (the contract accumulates payload fields).
 		"j-nospawn": {
 			t501FlatEvent("job.completed", old, map[string]any{"pane_id": "w1:p17", "tab_id": "w1:t17"}),
 		},
@@ -231,7 +231,7 @@ func t501StandardInbox() map[string][]map[string]any {
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p21\x1f", "tab_id": "w1:t21"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
-		// "-" is wrk's printed empty-field placeholder: a literal "-" pane is
+		// "-" is the printed empty-field placeholder: a literal "-" pane is
 		// malformed-record, a literal "-" tab falls back to the probe's tab.
 		"j-dash-pane": {
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "-", "tab_id": "w1:t20"}),
@@ -271,19 +271,19 @@ func t501StandardInbox() map[string][]map[string]any {
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p28", "tab_id": "w1:t28"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
-		// A whitespace-only agent status is a probe parse failure for wrk
+		// A whitespace-only agent status is a probe parse failure for the reference
 		// (status.strip() is empty), not a "status= " mismatch.
 		"j-blankstatus": {
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p29", "tab_id": "w1:t29"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
-		// Duplicate tab rows make the count untrustworthy in wrk.
+		// Duplicate tab rows make the count untrustworthy in the reference.
 		"j-tabdup": {
 			t501FlatEvent("job.spawned", "", map[string]any{"pane_id": "w1:p30", "tab_id": "w1:t30"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
 		// Two jobs name one pane: the older job is terminal and reapable, the
-		// newer job has no terminal event. wrk would-close the tab — the pane
+		// newer job has no terminal event. The reference would close the tab — the pane
 		// classification must surface that even though the current occupant
 		// (newest spawn) is not the reapable job.
 		"j-old": {
@@ -336,7 +336,7 @@ func t501StandardAgents() map[string]map[string]string {
 // hands it to Python and the socket stub re-marshals it — so pane_count
 // keeps its exact JSON literal. json.RawMessage values keep float/bool
 // spellings (1.0, 1e0, true) that a typed Go value would lose, and the bare
-// "junk" element exercises wrk's per-row skip of non-object tabs.
+// "junk" element exercises the reference's per-row skip of non-object tabs.
 func t501StandardTabs() []any {
 	return []any{
 		map[string]any{"tab_id": "w1:t1", "pane_count": 1},
@@ -372,14 +372,14 @@ func t501StandardTabs() []any {
 		map[string]any{"tab_id": "w1:t29", "pane_count": 1},
 		map[string]any{"tab_id": "w1:t30", "pane_count": 1},
 		map[string]any{"tab_id": "w1:t30", "pane_count": 1}, // duplicate row: count unknowable
-		"junk", // non-object element: wrk skips it per-row
+		"junk", // non-object element: the reference skips it per-row
 	}
 }
 
 // t501LocalResults renders the fixture spec as the three socket responses
-// readFleetCensusLocal consumes — the same data the CLI stub serves wrk.
+// readFleetCensusLocal consumes — the same data the CLI stub serves the reaper.
 // Panes whose spec carries an error exist in neither list (their agent get
-// fails on the wrk side, which agent.list absence mirrors).
+// fails on the reference side, which agent.list absence mirrors).
 func t501LocalResults(agents map[string]map[string]string, tabs []any) map[string]any {
 	agentRows := []any{}
 	paneRows := []any{}
@@ -446,7 +446,7 @@ func t501Python311Plus(t *testing.T) bool {
 	return strings.TrimSpace(string(out)) == "True"
 }
 
-// t501RunReference executes the vendored wrk ae1f544 reap dry-run against the
+// t501RunReference executes the vendored reap dry-run reference against the
 // fixture inbox and stub herdr, returning job → verdict/reason pairs.
 func t501RunReference(t *testing.T, jobsRoot string, agents map[string]map[string]string, tabs []any, tabListFails bool, graceSeconds string) map[string][2]string {
 	t.Helper()
@@ -527,9 +527,9 @@ func t501CensusVerdicts(t *testing.T, jobsRoot string, view fleetCensusLocalView
 }
 
 // TestFleetCensusReapEquivalence pins A-4: on one shared fixture the census
-// verdict for every job equals the vendored wrk ae1f544 dry-run verdict —
+// verdict for every job equals the vendored dry-run verdict —
 // would-close for would-close, the same reason for every printed skip, and
-// silence for the jobs wrk drops without a line. A mismatch anywhere is an
+// silence for the jobs the reference drops without a line. A mismatch anywhere is an
 // assertion failure, not a panic.
 func TestFleetCensusReapEquivalence(t *testing.T) {
 	jobs := t501StandardInbox()
@@ -562,30 +562,30 @@ func TestFleetCensusReapEquivalence(t *testing.T) {
 		switch gotVerdict {
 		case fleetCensusVerdictWouldClose:
 			if !listed || want[0] != "would-close" {
-				t.Errorf("job %s: census=would-close, wrk=%v", job, want)
+				t.Errorf("job %s: census=would-close, reference=%v", job, want)
 			}
 		case fleetCensusVerdictSkip:
 			if !listed || want[0] != "skip" {
-				t.Errorf("job %s: census=skip(%s), wrk=%v", job, gotReason, want)
+				t.Errorf("job %s: census=skip(%s), reference=%v", job, gotReason, want)
 				continue
 			}
 			if want[1] != gotReason {
-				t.Errorf("job %s: census reason %q != wrk %q", job, gotReason, want[1])
+				t.Errorf("job %s: census reason %q != reference %q", job, gotReason, want[1])
 			}
 		default:
 			if listed {
-				t.Errorf("job %s: census silent, wrk=%v", job, want)
+				t.Errorf("job %s: census silent, reference=%v", job, want)
 			}
 		}
 	}
 	for job, want := range reference {
 		if _, seen := census[job]; !seen {
-			t.Errorf("job %s: wrk=%v but census has no row", job, want)
+			t.Errorf("job %s: reference=%v but census has no row", job, want)
 		}
 	}
 	// #603: equivalence alone would also pass if both sides ignored the
 	// marker, so pin the protected verdict on both sides.
-	for side, verdicts := range map[string]map[string][2]string{"wrk": reference, "census": census} {
+	for side, verdicts := range map[string]map[string][2]string{"agent": reference, "census": census} {
 		if got := verdicts["j-kept"]; got != [2]string{"skip", fleetCensusReasonProtected} {
 			t.Errorf("%s j-kept = %v, want skip/protected", side, got)
 		}
@@ -616,15 +616,15 @@ func TestFleetCensusReapEquivalenceTabListDown(t *testing.T) {
 		switch pair[0] {
 		case fleetCensusVerdictWouldClose:
 			if !listed || want[0] != "would-close" {
-				t.Errorf("job %s: census=would-close, wrk=%v", job, want)
+				t.Errorf("job %s: census=would-close, reference=%v", job, want)
 			}
 		case fleetCensusVerdictSkip:
 			if !listed || want[0] != "skip" || want[1] != pair[1] {
-				t.Errorf("job %s: census=skip(%s), wrk=%v", job, pair[1], want)
+				t.Errorf("job %s: census=skip(%s), reference=%v", job, pair[1], want)
 			}
 		default:
 			if listed {
-				t.Errorf("job %s: census silent, wrk=%v", job, want)
+				t.Errorf("job %s: census silent, reference=%v", job, want)
 			}
 		}
 	}
@@ -654,7 +654,7 @@ func TestFleetCensusReapEquivalenceClasses(t *testing.T) {
 		t.Errorf("w1:p1 class=%s want reapable", paneClass["w1:p1"])
 	}
 	// B1: w1:p18 is named by j-old (terminal, would-close) and j-new (alive,
-	// newer spawn = the displayed occupant). wrk would close the tab for
+	// newer spawn = the displayed occupant). The reference would close the tab for
 	// j-old, so the pane itself is reapable — classified by the strongest
 	// linked verdict, not the primary job's. The detail and job_id together
 	// kill the oldest-first primary mutant too.

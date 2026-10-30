@@ -18,7 +18,10 @@ type hubSpawnConfig struct {
 	CWDMap       map[string]string `json:"cwd_map"`
 	Workspace    string            `json:"workspace"`
 	HERDRSession string            `json:"herdr_session"`
-	Enabled      bool              `json:"enabled"`
+	// RuntugPath is an optional explicit path to the runtug binary for hosts
+	// where the daemon's minimal PATH (launchd/systemd) does not include it.
+	RuntugPath string `json:"runtug_path,omitempty"`
+	Enabled    bool   `json:"enabled"`
 }
 
 func defaultHubSpawnConfigPath(path string) string {
@@ -106,6 +109,15 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.RC, result.Error = 2, "cwd_unmapped"
 		return result
 	}
+	// The retired spawner is gone; a node without runtug is not spawn-capable.
+	// The daemon's PATH is minimal under launchd/systemd, so the binary is
+	// resolved through config, then ~/.local/bin, then PATH.
+	home, _ := os.UserHomeDir()
+	runtugPath := hubSpawnRuntugPath(config.RuntugPath, home, hubSpawnExecutable, exec.LookPath)
+	if runtugPath == "" {
+		result.RC, result.Error = 2, "runtug_missing"
+		return result
+	}
 
 	temporary, err := os.CreateTemp("", "panewire-spawn-*")
 	if err != nil {
@@ -132,7 +144,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	}
 	runContext, cancel := context.WithTimeout(parent, time.Duration(message.WaitSeconds)*time.Second+extra)
 	defer cancel()
-	output, runErr := runHubSpawnCommand(runContext, cwd, temporaryName, config.Workspace, config.HERDRSession, message.Args)
+	output, runErr := runHubSpawnCommand(runContext, runtugPath, cwd, temporaryName, config.Workspace, config.HERDRSession, message.Args)
 	result.StdoutTail = output.tailString()
 	result.Pane, result.JobID = output.pane, output.jobID
 	if runErr == nil {
@@ -194,7 +206,7 @@ func (output *hubSpawnOutput) parseLine() {
 	output.pane, output.jobID = pane, jobID
 }
 
-// parseHubSpawnOK follows wrk's stable OK line rather than guessing from a
+// parseHubSpawnOK follows runtug's stable OK line rather than guessing from a
 // human-facing transcript. Missing keys remain empty by contract.
 func parseHubSpawnOK(raw []byte) (pane, jobID string) {
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -240,10 +252,47 @@ func hubSpawnEnvironment(environment []string, session string) []string {
 	return append(filtered, "HERDR_SESSION="+session)
 }
 
-func runHubSpawnCommand(ctx context.Context, cwd, briefPath, workspace, session string, args []string) (*hubSpawnOutput, error) {
+// hubSpawnRuntugPath resolves the runtug binary: an explicit config path
+// (authoritative — a configured-but-missing path is a misconfiguration, not a
+// fallback), then the conventional ~/.local/bin install, then PATH.
+func hubSpawnRuntugPath(configured, home string, isExecutable func(string) bool, lookPath func(string) (string, error)) string {
+	if configured != "" {
+		// Abs anchors a relative configured path so exec does not silently
+		// fall back to PATH for a name with no separator.
+		if absolute, err := filepath.Abs(configured); err == nil && isExecutable(absolute) {
+			return absolute
+		}
+		return ""
+	}
+	if home != "" {
+		candidate := filepath.Join(home, ".local", "bin", "runtug")
+		if isExecutable(candidate) {
+			return candidate
+		}
+	}
+	if path, err := lookPath("runtug"); err == nil {
+		return path
+	}
+	return ""
+}
+
+func hubSpawnExecutable(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
+}
+
+// hubSpawnOverrideReason records why runtug's model/host auto-selection was
+// bypassed: the hub directed this spawn at this node. runtug requires the
+// reason whenever -m or --host is explicit, and --host local always is.
+const hubSpawnOverrideReason = "hub-directed"
+
+func runHubSpawnCommand(ctx context.Context, runtugPath, cwd, briefPath, workspace, session string, args []string) (*hubSpawnOutput, error) {
 	argv := []string{"spawn", "-c", cwd, "-p", briefPath, "--host", "local", "-w", workspace}
 	argv = append(argv, args...)
-	command := exec.CommandContext(ctx, "wrk", argv...)
+	// The node owns the reason for pinning the host; callers cannot supply
+	// --override-reason (it is not in the hub's args allowlist).
+	argv = append(argv, "--override-reason", hubSpawnOverrideReason)
+	command := exec.CommandContext(ctx, runtugPath, argv...)
 	command.Env = hubSpawnEnvironment(os.Environ(), session)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.WaitDelay = time.Second

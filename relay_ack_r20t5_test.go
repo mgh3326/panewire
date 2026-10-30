@@ -21,7 +21,7 @@ func r20t5Hub(t *testing.T, lanes string, client *handoffkeepRelayClient, relayD
 const r20t5OneLane = `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`
 
 func r20t5Event(jobID, reason string) hubJobEventPayload {
-	return hubJobEventPayload{JobID: jobID, Epoch: 1, OwnerLane: "lane-a", Label: "wrk-a", Host: "host-a", ReportPath: "report.md", ReportLastLine: "done", Reason: reason}
+	return hubJobEventPayload{JobID: jobID, Epoch: 1, OwnerLane: "lane-a", Label: "agent-a", Host: "host-a", ReportPath: "report.md", ReportLastLine: "done", Reason: reason}
 }
 
 // drainRelays reports how many injections are queued and empties the channel.
@@ -95,7 +95,7 @@ func TestR20T5NodeRestartsResendOnceAndStopWithPersistedAt(t *testing.T) {
 	inbox := t.TempDir()
 	store := NewMemoryStore(t)
 	defer store.Close()
-	r20WriteEvent(t, inbox, "r20t5-restart", "00001-job.completed.json", `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"a.md","report_last_line":"done"}`, time.Time{})
+	r20WriteEvent(t, inbox, "r20t5-restart", "00001-job.completed.json", `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"agent-a","host":"host-a","report_path":"a.md","report_last_line":"done"}`, time.Time{})
 	key := relayOutboxKey{Kind: "job.completed", JobID: "r20t5-restart", Epoch: 1, ReportPath: "a.md", EventID: "00001-job.completed.json"}
 
 	// The first send is the one that got lost: the hub persisted and injected,

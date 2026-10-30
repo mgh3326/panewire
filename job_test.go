@@ -16,7 +16,7 @@ func TestJobProbeAnswersTheDelegationToken(t *testing.T) {
 	if rc := runJobCLI([]string{"probe"}, &stdout, &stderr, CLIConfig{}); rc != ExitOK {
 		t.Fatalf("probe rc=%d stderr=%q", rc, stderr.String())
 	}
-	// wrk delegates only on this exact line; anything else keeps its own path.
+	// a delegating caller keys off this exact line; anything else keeps its own path.
 	if stdout.String() != "panewire-job/1\n" {
 		t.Fatalf("probe stdout = %q", stdout.String())
 	}

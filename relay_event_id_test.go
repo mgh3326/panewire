@@ -59,7 +59,7 @@ func relaySentUnpersistedCount(t *testing.T, store *Store, jobID string) int {
 
 const relayEventIDLanes = `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`
 
-const relayEventIDBody = `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"report.md","report_last_line":"done"}`
+const relayEventIDBody = `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"agent-a","host":"host-a","report_path":"report.md","report_last_line":"done"}`
 
 // Three completion rounds for one job share the five historic key fields. Each
 // must still produce its own outbox row and its own pane notification, and a
@@ -741,7 +741,7 @@ func TestJobEventEmitPushDerivesTheEventFileIdentity(t *testing.T) {
 	daemon := NewDaemon(Config{InboxRoot: inbox, Hub: HubDaemonConfig{Enabled: true, Client: node}})
 
 	r20WriteEvent(t, inbox, "job-emit", "00001-job.completed.json", relayEventIDBody, time.Time{})
-	err := daemon.emitRelayEvent(localRequest{Op: "emit", Kind: "job.completed", JobID: "job-emit", Epoch: 1, OwnerLane: "lane-a", Label: "wrk-a", Host: "host-a", ReportPath: "report.md", ReportLastLine: "done", InboxRoot: inbox, TimeoutMS: 1000})
+	err := daemon.emitRelayEvent(localRequest{Op: "emit", Kind: "job.completed", JobID: "job-emit", Epoch: 1, OwnerLane: "lane-a", Label: "agent-a", Host: "host-a", ReportPath: "report.md", ReportLastLine: "done", InboxRoot: inbox, TimeoutMS: 1000})
 	if err != nil {
 		t.Fatalf("emitRelayEvent err=%v", err)
 	}

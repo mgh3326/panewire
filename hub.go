@@ -102,16 +102,6 @@ type HubServerConfig struct {
 	RelayAckTimeout time.Duration
 	// AcceptingOverridesPath optionally makes operator acceptance choices durable.
 	AcceptingOverridesPath string
-	// TODO: retire quota v2 only after the scopefuel v2 shadow ends.
-	// QuotaV2StorePath is the durable account-scoped quota v2 store (bindings
-	// and observations, task #578). Empty leaves every /v2/quota route closed
-	// (503): bindings and revisions must not vanish on restart.
-	QuotaV2StorePath string
-	// QuotaV2ClockSkew is Δ_hub (contract quota-v2.r3 §7.2/§7.3): the bound on
-	// node-vs-hub clock error used when checking an observation's times. Zero
-	// (the default) means node times are taken as exact; a node clock ahead of
-	// the hub is then rejected, which is the intended fail-closed behaviour.
-	QuotaV2ClockSkew time.Duration
 	// handoffkeep is the durable relay-event store. It is package-private so the
 	// hub's public configuration keeps no credential-bearing field.
 	handoffkeep *handoffkeepRelayClient
@@ -473,7 +463,6 @@ type HubServer struct {
 	alreadyDeliveredRelayEvents uint64
 	relayPayloadMismatches      uint64
 	spawnRecords                map[string]*hubSpawnRecord
-	quotaV2                     *hubQuotaV2Store
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already
@@ -610,18 +599,11 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if err != nil {
 		return nil, errors.New("hub accepting overrides are invalid")
 	}
-	if config.QuotaV2ClockSkew < 0 {
-		return nil, errors.New("hub quota v2 clock skew must not be negative")
-	}
 	if config.LanesNodeRowCap < 0 {
 		return nil, errors.New("hub lanes node row cap is invalid")
 	}
 	if config.LanesNodeRowCap == 0 {
 		config.LanesNodeRowCap = defaultLanesNodeRowCap
-	}
-	quotaV2, err := newHubQuotaV2Store(config.QuotaV2StorePath, tokens, config.QuotaV2ClockSkew)
-	if err != nil {
-		return nil, errors.New("hub quota v2 store is invalid")
 	}
 	var cfAccess *hubCFAccessVerifier
 	if (config.CFAccessTeam == "") != (config.CFAccessAUD == "") {
@@ -678,7 +660,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
-		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), quotaV2: quotaV2, closeCtx: closeCtx, closeCancel: closeCancel,
+		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.prepareInbox()
 	return hub, nil
@@ -764,6 +746,13 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/burst/release", h.handleBurstRelease)
 	mux.HandleFunc("GET /v1/burst/holds", h.handleBurstHolds)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
+	// One-release tombstone: legacy producers still hit these during the
+	// upgrade window; answer a structured 503 instead of a bare 404.
+	mux.HandleFunc("GET /v2/quota/bindings", h.handleQuotaV2Gone)
+	mux.HandleFunc("PUT /v2/quota/bindings", h.handleQuotaV2Gone)
+	mux.HandleFunc("DELETE /v2/quota/bindings", h.handleQuotaV2Gone)
+	mux.HandleFunc("GET /v2/quota/observations", h.handleQuotaV2Gone)
+	mux.HandleFunc("POST /v2/quota/observations", h.handleQuotaV2Gone)
 	mux.HandleFunc("GET /v1/placement/slots", h.handlePlacementSlots)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
@@ -782,11 +771,6 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
 	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
-	mux.HandleFunc("GET /v2/quota/bindings", h.handleQuotaV2BindingList)
-	mux.HandleFunc("PUT /v2/quota/bindings", h.handleQuotaV2BindingPut)
-	mux.HandleFunc("DELETE /v2/quota/bindings", h.handleQuotaV2BindingDelete)
-	mux.HandleFunc("GET /v2/quota/observations", h.handleQuotaV2ObservationList)
-	mux.HandleFunc("POST /v2/quota/observations", h.handleQuotaV2ObservationPost)
 	return mux
 }
 

@@ -17,9 +17,10 @@ command itself.
 >
 > - 검증: `request_id` uuid, `machine` `^[a-z0-9-]{1,32}$`, `cwd_key`
 >   `^[a-z0-9._-]{1,64}$`, `brief.inline` 필수(비어 있으면 400; **v0는
->   inline만** — handoffkeep 문서 키는 후속), `args`는 **wrk 플래그
+>   inline만** — handoffkeep 문서 키는 후속), `args`는 **runtug 플래그
 >   allowlist**만(`-m -w -l --t --effort --job --owner --report --role --lane
->   --parent -L --job-dup-ok 금지`), 각 값 `^[A-Za-z0-9._:/@-]{1,200}$`
+>   --parent -L --task --parent-job --tags --urgency`), 각 값
+>   `^[A-Za-z0-9._:/@-]{1,200}$` 단 `--tags`만 쉼표 목록(최대 16개) 허용
 >   (공백·셸 메타문자 거부), `wait_seconds` 1..300.
 > - 처리: 대상 노드가 connected **and** accepting_effective 아니면 503
 >   `{"error":"node_unavailable","state":...}`. `request_id` 중복이면
@@ -38,11 +39,12 @@ command itself.
 >   `{"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true}`.
 >   `enabled` 기본 false(파일 부재 = 거부 `spawn_disabled`), `cwd_key` 미등록
 >   = 거부 `cwd_unmapped` — 거부도 `job.spawn.result{rc:2, error}`로 회신.
-> - 실행: 브리프를 `mktemp`(0600)에 쓰고 `env HERDR_SESSION=<s> wrk spawn
->   -c <cwd> -p <tmp> --host local -w <workspace> <args...>`를 **argv로**(셸
+> - 실행: 브리프를 `mktemp`(0600)에 쓰고 `env HERDR_SESSION=<s> runtug spawn
+>   -c <cwd> -p <tmp> --host local -w <workspace> <args...>
+>   --override-reason hub-directed`를 **argv로**(셸
 >   문자열 금지), 타임아웃 `wait_seconds+60`, 종료 후 tmp 삭제.
 >   `stdout_tail` 4KiB. 결과 메시지 `job.spawn.result{request_id, rc, job_id,
->   pane, stdout_tail}` — job_id/pane은 wrk OK 라인 파싱.
+>   pane, stdout_tail}` — job_id/pane은 runtug OK 라인 파싱.
 > - 동시성: 노드당 동시 spawn 실행 1(큐잉), 같은 request_id 재수신은 무시(멱등).
 
 ## A. hub — `POST /v1/spawn` (operator token)
@@ -59,9 +61,11 @@ Request:
 - Validation: `request_id` uuid, `machine` `^[a-z0-9-]{1,32}$`, `cwd_key`
   `^[a-z0-9._-]{1,64}$`, `brief.inline` required (empty is 400; **v0 is
   inline only** — handoffkeep document keys are follow-up), `args` accepts
-  **only wrk flags** (`-m -w -l --t --effort --job --owner --report --role
-  --lane --parent -L`; `--job-dup-ok` is forbidden), each value
-  `^[A-Za-z0-9._:/@-]{1,200}$` (spaces and shell metacharacters rejected),
+  **only runtug flags** (`-m -w -l --t --effort --job --owner --report --role
+  --lane --parent -L --task --parent-job --tags --urgency`), each value
+  `^[A-Za-z0-9._:/@-]{1,200}$` — except `--tags`, a comma list of up to 16
+  entries, all within the 200-char bound — (spaces and shell metacharacters
+  rejected),
   and `wait_seconds` is 1..300.
 - Processing: if the target node is not connected **or** not
   `accepting_effective`, return 503
@@ -80,7 +84,12 @@ Request:
 
 ## B. node — `job.spawn` reception
 
-- Node configuration `~/.config/panewire/spawn.json`:
+- Node configuration `~/.config/panewire/spawn.json` — optional
+  `runtug_path` pins the runtug binary where the daemon's minimal PATH
+  (launchd/systemd) does not find it. A set `runtug_path` is authoritative:
+  a non-executable value rejects with `runtug_missing` and no fallback runs.
+  When it is unset, the order is `~/.local/bin/runtug`, then PATH
+  (`runtug_missing` when none):
 
   ```json
   {"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true}
@@ -90,12 +99,12 @@ Request:
   unmapped `cwd_key` rejects with `cwd_unmapped`. Rejections also reply as
   `job.spawn.result{rc:2, error}`.
 - Execution: write the brief to a `mktemp` file (0600), then execute
-  `env HERDR_SESSION=<s> wrk spawn -c <cwd> -p <tmp> --host local -w <workspace> <args...>`
+  `env HERDR_SESSION=<s> runtug spawn -c <cwd> -p <tmp> --host local -w <workspace> <args...> --override-reason hub-directed`
   as argv (never a shell string). The timeout is `wait_seconds+60`; remove the
   temporary file afterwards. `stdout_tail` is at most 4 KiB.
 - Result message:
   `job.spawn.result{request_id, rc, job_id, pane, stdout_tail}`. Parse
-  `job_id` and `pane` from the same `wrk` OK-line rule:
+  `job_id` and `pane` from the same `runtug` OK-line rule:
 
   ```text
   OK pane=<pane> model=<m> label=<l> status=<s> landed=<y|n> job=<job-id> quota_record=<...>

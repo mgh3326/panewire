@@ -107,7 +107,7 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 	return event, valid
 }
 
-// decodeHubJobEscalationPayload is the flat record contract written by wrk
+// decodeHubJobEscalationPayload is the flat record contract written by the retired spawner
 // and captains. It deliberately reuses completion metadata and adds a compact
 // operator-readable reason; it is not a command channel.
 func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {

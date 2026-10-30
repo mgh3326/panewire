@@ -1,6 +1,10 @@
 #!/bin/sh
 set -eu
 
+# The R1 suite lives in the stage-2 tree, where the gate feature is still
+# named wrk; the manifest must match that suite's test name until the
+# stage-2 branch does its own rename. (The name is scanned outside the
+# expected list so no apostrophe lands inside the command substitution.)
 expected="$(printf '%s\n' \
   TestR1DestinationMismatch \
   TestR1LogicalPathTraversalRejected \

@@ -57,7 +57,7 @@ func TestR20EmitWithoutDaemonKeepsFileAndExitsOK(t *testing.T) {
 }
 
 // TE5: a second notification for the same durable event writes no second file
-// but still reaches the socket. This is wrk's file-first immediate-notify
+// but still reaches the socket. This is the file-first immediate-notify
 // contract, not a conflict.
 func TestR20EmitRecordedEventStillPushes(t *testing.T) {
 	inbox := t.TempDir()

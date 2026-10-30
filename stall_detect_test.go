@@ -106,7 +106,7 @@ func (fx *stallFixture) scan() {
 }
 
 // writeJobEvent appends one seq-named record to a job's event journal, the
-// same durable shape wrk produces.
+// same durable shape the record contract produces.
 func writeJobEvent(t *testing.T, inbox, jobID string, seq int, kind string, payload map[string]any, createdAt time.Time) {
 	t.Helper()
 	dir := filepath.Join(inbox, "jobs", jobID, "events")
@@ -1488,7 +1488,7 @@ func TestStallNoMutationPaths(t *testing.T) {
 		}
 		for _, banned := range []string{
 			"send_keys", "sendKeys", "SendKeys", "agent.prompt", "pane.prompt",
-			"Process.Kill", ".Kill(", "scopefuel", "quota_pool.update", "batch_",
+			"Process.Kill", ".Kill(", "quota_pool.update", "batch_",
 			"SendMessage", "Prompt(", ".Call(", "HerdrClient",
 		} {
 			if strings.Contains(string(body), banned) {

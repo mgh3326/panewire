@@ -132,12 +132,15 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	}
 	deliveryPolicyPath := flags.String("delivery-policy", deliveryPolicyDefault, "default embedded YAML, YAML file, or off to disable the inbox (env PANEWIRE_DELIVERY_POLICY)")
 	inboxStorePath := flags.String("inbox-store", defaultHubInboxPath(), "durable hub inbox SQLite file; empty disables the inbox")
-	quotaV2StorePath := flags.String("quota-v2-store", "", "mode-0600 JSON file for account-scoped quota v2 bindings and observations; without it /v2/quota is closed (503)")
-	quotaV2ClockSkew := flags.Duration("quota-v2-clock-skew", 0, "Δ_hub: bound on node-vs-hub clock error for quota v2 observation times (default 0: node times must not be ahead of the hub)")
 	logFilePath := flags.String("log-file", "", "optional hub log file, appended with mode 0640; stderr/journal output is unchanged")
+	// Retired for one release: existing hub units still pass these; the v2
+	// quota shadow store is gone and both values are ignored.
+	quotaV2StorePath := flags.String("quota-v2-store", "", "deprecated, ignored")
+	quotaV2ClockSkew := flags.Duration("quota-v2-clock-skew", 0, "deprecated, ignored")
 	if flags.Parse(args) != nil || flags.NArg() != 0 {
 		return nil, "", ExitUsage, errors.New("invalid hub flags")
 	}
+	deprecatedQuotaV2 := *quotaV2StorePath != "" || *quotaV2ClockSkew != 0
 	if *authPath == "" {
 		return nil, "", ExitUsage, errors.New("hub auth file is required")
 	}
@@ -155,6 +158,10 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 		}()
 		logger = slog.New(hubLogTeeHandler{primary: logger.Handler(), file: slog.NewTextHandler(logFile, nil)})
 	}
+	// Warn after the log-file tee is installed so it lands in both sinks.
+	if deprecatedQuotaV2 {
+		logger.Warn("deprecated hub flags ignored; remove from the unit", "flag", "--quota-v2-store/--quota-v2-clock-skew", "store", *quotaV2StorePath)
+	}
 	if len(listens) == 0 {
 		listens = append(listens, "127.0.0.1:9377")
 	}
@@ -165,9 +172,6 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	tokens, err := loadHubAuthFile(*authPath)
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth file is invalid")
-	}
-	if *quotaV2ClockSkew < 0 {
-		return nil, "", ExitConditionInvalid, errors.New("hub quota v2 clock skew must not be negative")
 	}
 	if *lanesNodeRowCap < 0 {
 		return nil, "", ExitConditionInvalid, errors.New("hub lanes node row cap must not be negative")
@@ -246,7 +250,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if chatStore != nil && !validReportRelayLaneName(*chatDeskLane) {
 		return nil, "", ExitConditionInvalid, errors.New("hub chat desk lane is required and must be valid")
 	}
-	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, WakeConfigPath: *wakeConfigPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, QuotaV2StorePath: *quotaV2StorePath, QuotaV2ClockSkew: *quotaV2ClockSkew, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
+	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, WakeConfigPath: *wakeConfigPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, fmt.Errorf("hub configuration is invalid: %w", err)
 	}

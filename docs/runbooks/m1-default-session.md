@@ -20,7 +20,7 @@ the end is the source of truth for "is it still like this".
 | launchd label | `dev.panewire.panewired` | `dev.panewire.panewired-default` |
 | herdr session | fleet session | default session (operator's company-work) |
 | `--db` | `~/Library/Application Support/panewire/panewire.sqlite3` | own db, e.g. `~/Library/Application Support/panewire/panewire-default.sqlite3` |
-| `--hub-jobs-root` | shared inbox root (`~/work/herdr-inbox`) | **same** shared inbox root (`~/work/herdr-inbox`) — `wrk emit` rejects a mismatched inbox root |
+| `--hub-jobs-root` | shared inbox root (`~/work/herdr-inbox`) | **same** shared inbox root (`~/work/herdr-inbox`) — `panewire emit` rejects a mismatched inbox root |
 | `--hub-accepting` | set → `hub-status` `ACCEPTING=true` | omitted → `ACCEPTING=false` |
 | lanes (2026-09-29) | fleet lanes | `work-kairos` → pane `w3:p1G` (no parent), `work-builder-2` → pane `wR:pA` (parent `work-kairos`) |
 
@@ -34,7 +34,7 @@ plist derived from it with a different `Label`, a different `--db`, the
 `--hub-accepting` (a non-accepting node still heartbeats, still reports its
 session snapshot, and still receives lane events — it is just never offered
 jobs). Its `--hub-jobs-root` is the **same** `~/work/herdr-inbox` as the
-fleet daemon's: both daemons read the one shared jobs root, and `wrk emit`
+fleet daemon's: both daemons read the one shared jobs root, and `panewire emit`
 rejects a mismatched inbox root rather than writing a second tree. Only the
 `--db` and the launchd logs are per-daemon.
 

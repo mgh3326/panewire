@@ -22,7 +22,7 @@ import (
 // pane.list and tab.list capture: every key and value type is as observed
 // (human sessions carry no "name" key at all), only paths, UUIDs, titles and
 // ids were replaced. The jobs inbox reuses the observed event shapes: arbiter
-// envelopes for claim/quota/spawn receipts and wrk's flat completed/joined/
+// envelopes for claim/quota/spawn receipts and the flat completed/joined/
 // lost records.
 
 var t603Now = time.Date(2026, 9, 23, 13, 0, 0, 0, time.UTC)
@@ -196,7 +196,7 @@ func t603Judge(t *testing.T, jobs map[string][]map[string]any, view fleetCensusL
 	return t603RowsByPane(rows)
 }
 
-// AC2: the grace boundary is wrk's `age < grace`. One second short of the
+// AC2: the grace boundary is `age < grace`. One second short of the
 // grace holds the pane; exactly the grace makes it a candidate.
 func TestT603GraceBoundary(t *testing.T) {
 	grace := 10 * time.Minute
@@ -241,7 +241,7 @@ func TestT603LabelReusedHolds(t *testing.T) {
 	}
 }
 
-// keep is sticky and only a JSON true counts, mirroring wrk's `is True`.
+// keep is sticky and only a JSON true counts, mirroring the `is True` contract.
 func TestT603KeepMarker(t *testing.T) {
 	for _, test := range []struct {
 		name  string
@@ -261,7 +261,7 @@ func TestT603KeepMarker(t *testing.T) {
 			}
 		})
 	}
-	// A kept builder is held too; builders never reach the reused wrk
+	// A kept builder is held too; builders never reach the reused reap
 	// pipeline, so this is the judgment's own keep gate.
 	builderClaim := t603Claim("703-b", "b703", "builder", "2026-09-23T09:00:00Z", false)
 	builderSpawn := t603Spawned("703-b", "b703", "w1:p2", "w1:t2", "2026-09-23T09:00:00Z")
@@ -590,7 +590,7 @@ func TestT603CLI(t *testing.T) {
 	}
 }
 
-// A builder later reclaimed with a role outside wrk's vocabulary (or none)
+// A builder later reclaimed with a role outside the vocabulary (or none)
 // is held as protected-role: the latest role is checked before the sticky
 // builder marking can route the pane to the builder task gate.
 func TestT603LatestRoleOutsideVocabularyBeatsStickyBuilder(t *testing.T) {
@@ -643,7 +643,7 @@ func TestT603NewerReceiptOnPaneHolds(t *testing.T) {
 	}
 }
 
-// An event file wrk would skip (here: not JSON) may have been a revive, so
+// An event file the reaper would skip (here: not JSON) may have been a revive, so
 // the job is held rather than judged on the events that did parse.
 func TestT603UnreadableEventHolds(t *testing.T) {
 	jobs := map[string][]map[string]any{

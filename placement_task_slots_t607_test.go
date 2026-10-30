@@ -34,13 +34,13 @@ func t607PolicyHub(t *testing.T, machines map[string]PlacementMachineSlots) (*Hu
 
 // t607Task writes count distinct owner_lane task groups onto a machine. Each
 // group is a builder job plus a tester job sharing the group owner_lane,
-// matching the wrk --lane/--owner claim contract.
+// matching the --lane/--owner claim contract.
 func t607Task(hub *HubServer, machine string, groups, jobsPerGroup int) {
 	jobs := make([]HubActiveJob, 0, groups*jobsPerGroup)
 	for g := 0; g < groups; g++ {
 		owner := "b-owner-" + string(rune('a'+g))
 		for j := 0; j < jobsPerGroup; j++ {
-			jobs = append(jobs, HubActiveJob{JobID: "job-" + machine + "-" + string(rune('a'+g)) + string(rune('0'+j)), AgentLabel: "wrk", Epoch: 1, OwnerLane: owner})
+			jobs = append(jobs, HubActiveJob{JobID: "job-" + machine + "-" + string(rune('a'+g)) + string(rune('0'+j)), AgentLabel: "agent", Epoch: 1, OwnerLane: owner})
 		}
 	}
 	hub.observeActiveJobs(machine, jobs, time.Now().UTC())
@@ -130,34 +130,8 @@ func TestPlacementTaskSlotsExhaustedResponse(t *testing.T) {
 	if result.Decision != "unavailable" || len(result.Candidates) != 0 || result.Reason != "task_slots_exhausted" {
 		t.Fatalf("decoded=%+v", result)
 	}
-	if !validPlacementCLIResult(result, "", "") {
+	if !validPlacementCLIResult(result) {
 		t.Fatal("CLI validator rejected a legitimate exhausted response")
-	}
-}
-
-// A quota-allowed pool can still be slot-exhausted: the validator must accept
-// unavailable+task_slots_exhausted under an allow/boost quota, while an
-// unavailable decision under allow with any other reason stays malformed.
-func TestPlacementCLIValidatorQuotaAllowSlotExhausted(t *testing.T) {
-	exhausted := PlacementResult{
-		Decision: "unavailable",
-		Source:   "hub-only",
-		Reason:   "task_slots_exhausted",
-		Quota:    &PlacementQuotaDecision{Pool: "claude", AccountFP: "a1b2c3d4", Decision: "allow", Reason: "quota_allowed", PolicyStatus: "current"},
-	}
-	if !validPlacementCLIResult(exhausted, "claude", "a1b2c3d4") {
-		t.Fatal("quota-allowed slots-exhausted response rejected as malformed")
-	}
-	localFull := exhausted
-	localFull.Reason = "task_slots_full"
-	localFull.Candidates = []PlacementCandidate{{Machine: "desktop", Reason: "disconnected"}}
-	if !validPlacementCLIResult(localFull, "claude", "a1b2c3d4") {
-		t.Fatal("quota-allowed slot-full-local response rejected as malformed")
-	}
-	bogus := exhausted
-	bogus.Reason = "other_reason"
-	if validPlacementCLIResult(bogus, "claude", "a1b2c3d4") {
-		t.Fatal("unavailable under quota allow without slot exhaustion accepted")
 	}
 }
 
@@ -180,8 +154,8 @@ func TestPlacementTaskSlotsUnownedJobsCountIndividually(t *testing.T) {
 	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
 	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
 	hub.observeActiveJobs("desktop", []HubActiveJob{
-		{JobID: "job-loose-a", AgentLabel: "wrk", Epoch: 1},
-		{JobID: "job-loose-b", AgentLabel: "wrk", Epoch: 1, OwnerLane: "default"},
+		{JobID: "job-loose-a", AgentLabel: "agent", Epoch: 1},
+		{JobID: "job-loose-b", AgentLabel: "agent", Epoch: 1, OwnerLane: "default"},
 	}, time.Now().UTC())
 	result := hub.placement(t.Context(), "worker", "repo-slots")
 	if _, found := t607Candidate(result, "desktop"); found {
@@ -197,8 +171,8 @@ func TestPlacementTaskSlotsDefaultSentinelCountsIndividually(t *testing.T) {
 	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
 	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
 	hub.observeActiveJobs("desktop", []HubActiveJob{
-		{JobID: "job-def-a", AgentLabel: "wrk", Epoch: 1, OwnerLane: "default"},
-		{JobID: "job-def-b", AgentLabel: "wrk", Epoch: 1, OwnerLane: "default"},
+		{JobID: "job-def-a", AgentLabel: "agent", Epoch: 1, OwnerLane: "default"},
+		{JobID: "job-def-b", AgentLabel: "agent", Epoch: 1, OwnerLane: "default"},
 	}, time.Now().UTC())
 	result := hub.placement(t.Context(), "worker", "repo-slots")
 	if _, found := t607Candidate(result, "desktop"); found {
@@ -280,8 +254,8 @@ func TestPlacementTaskSlotsCrossMachineTester(t *testing.T) {
 	hub, _ := t607PolicyHub(t, map[string]PlacementMachineSlots{"desktop": {TaskSlots: 1}})
 	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
 	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
-	hub.observeActiveJobs("mac-work", []HubActiveJob{{JobID: "job-builder", AgentLabel: "wrk", Epoch: 1, OwnerLane: "b-x"}}, time.Now().UTC())
-	hub.observeActiveJobs("desktop", []HubActiveJob{{JobID: "job-tester", AgentLabel: "wrk", Epoch: 1, OwnerLane: "b-x"}}, time.Now().UTC())
+	hub.observeActiveJobs("mac-work", []HubActiveJob{{JobID: "job-builder", AgentLabel: "agent", Epoch: 1, OwnerLane: "b-x"}}, time.Now().UTC())
+	hub.observeActiveJobs("desktop", []HubActiveJob{{JobID: "job-tester", AgentLabel: "agent", Epoch: 1, OwnerLane: "b-x"}}, time.Now().UTC())
 	result := hub.placement(t.Context(), "worker", "repo-slots")
 	if _, found := t607Candidate(result, "desktop"); found {
 		t.Fatalf("remote tester should fill desktop's slot: %+v", result.Candidates)

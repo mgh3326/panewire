@@ -23,6 +23,7 @@ var (
 	hubSpawnMachinePattern   = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 	hubSpawnCWDKeyPattern    = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
 	hubSpawnArgValuePattern  = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,200}$`)
+	hubSpawnTagsValuePattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+){0,15}$`)
 )
 
 type hubSpawnBrief struct {
@@ -72,9 +73,16 @@ func validHubSpawnArgs(args []string) bool {
 	}
 	allowed := map[string]struct{}{
 		"-m": {}, "-w": {}, "-l": {}, "--t": {}, "--effort": {}, "--job": {}, "--owner": {}, "--report": {}, "--role": {}, "--lane": {}, "--parent": {}, "-L": {},
+		"--task": {}, "--parent-job": {}, "--tags": {}, "--urgency": {},
 	}
 	for index := 0; index < len(args); index += 2 {
-		if _, found := allowed[args[index]]; !found || !hubSpawnArgValuePattern.MatchString(args[index+1]) {
+		pattern := hubSpawnArgValuePattern
+		if args[index] == "--tags" {
+			// --tags is a comma list; every other flag keeps the no-comma set.
+			pattern = hubSpawnTagsValuePattern
+		}
+		// The 200-char cap binds every value, tags included.
+		if _, found := allowed[args[index]]; !found || len(args[index+1]) > 200 || !pattern.MatchString(args[index+1]) {
 			return false
 		}
 	}

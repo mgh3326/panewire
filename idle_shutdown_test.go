@@ -104,8 +104,8 @@ func TestIdleShutdownBlockedReasons(t *testing.T) {
 			f.jobs = []HubActiveJob{{JobID: "job-a", Pane: "p1"}}
 		},
 		"idle holding name": func(f *idleShutdownFixture) {
-			f.sessions = []HerdrAgentState{{PaneID: "p1", Status: "idle", AgentName: "wrk-a"}}
-			f.jobs = []HubActiveJob{{JobID: "job-a", AgentLabel: "wrk-a"}}
+			f.sessions = []HerdrAgentState{{PaneID: "p1", Status: "idle", AgentName: "agent-a"}}
+			f.jobs = []HubActiveJob{{JobID: "job-a", AgentLabel: "agent-a"}}
 		},
 		"sessions error": func(f *idleShutdownFixture) { f.sessionsErr = errors.New("herdr down") },
 		"jobs error":     func(f *idleShutdownFixture) { f.jobsErr = errors.New("inbox gone") },

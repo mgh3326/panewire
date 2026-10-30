@@ -14,13 +14,13 @@ import (
 // offered here (`fleet-census find --contains` covers fleet search), so the
 // not-found error says "exact" rather than reading as "does not exist".
 //
-// Two precedence tiers mirror wrk find's contract (name before tab label):
+// Two precedence tiers mirror the shared find contract (name before tab label):
 // tier 1 identity fields (pane_id, agent, name), tier 2 label fields (tab
 // label, tab_id, title). Candidates dedupe by pane_id — two agent rows on one
 // pane are one target. More than one distinct pane in a tier is ambiguous:
 // every candidate is listed and resolution fails; nothing is auto-selected.
-// Inputs outside wrk's name/label domain (pane_id, tab_id, title, harness
-// name) are panewire extensions wrk find reports as "no exact name or label
+// Inputs outside the shared name/label domain (pane_id, tab_id, title, harness
+// name) are panewire extensions the legacy finder reported as "no exact name or label
 // match".
 func resolveTarget(ctx context.Context, c *HerdrClient, target string) (paneIdentity, error) {
 	raw, err := c.Call(ctx, "agent.list", map[string]any{})
@@ -37,7 +37,7 @@ func resolveTarget(ctx context.Context, c *HerdrClient, target string) (paneIden
 	var identity, labeled []paneIdentity
 	for _, a := range top.Agents {
 		p := identityFromMap(a)
-		// displayLabel is the tab.list label, wrk find's only label source.
+		// displayLabel is the tab.list label, the find contract's only label source.
 		// It is matched on its own so a record label cannot shadow it.
 		displayLabel := labels[p.TabID]
 		if p.Label == "" {

@@ -40,7 +40,7 @@ func TestPlacementPrometheusPolicyBranches(t *testing.T) {
 			}
 			jobs := make([]HubActiveJob, tc.localJobs)
 			for i := range jobs {
-				jobs[i] = HubActiveJob{JobID: "job-" + string(rune('a'+i)), AgentLabel: "wrk", Epoch: 1}
+				jobs[i] = HubActiveJob{JobID: "job-" + string(rune('a'+i)), AgentLabel: "agent", Epoch: 1}
 			}
 			hub.observeActiveJobs("mac-work", jobs, time.Now().UTC())
 			got := hub.placement(t.Context(), "worker", "repo")
@@ -171,4 +171,27 @@ func placementPromServer(t *testing.T, load, thermal float64, calls *atomic.Int3
 
 func formatPlacementValue(value float64) string {
 	return strings.TrimRight(strings.TrimRight(fmt.Sprintf("%.4f", value), "0"), ".")
+}
+
+func TestPlaceCLISelectorValidation(t *testing.T) {
+	tokenPath := filepath.Join(t.TempDir(), "operator.env")
+	if err := os.WriteFile(tokenPath, []byte("HUB_MACHINE_ID=operator\nHUB_TOKEN="+r6OperatorToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	base := []string{"--class", "worker", "--hub-url", "http://127.0.0.1:1", "--hub-token-env", tokenPath}
+	for _, tc := range []struct {
+		name string
+		args []string
+	}{
+		{"account-fp without pool", []string{"--account-fp", "a1b2c3d4"}},
+		{"bad pool format", []string{"--pool", "BAD POOL"}},
+		{"bad account-fp format", []string{"--pool", "claude", "--account-fp", "xyz"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var output, stderr bytes.Buffer
+			if code := runPlaceCLI(append(base, tc.args...), &output, &stderr, hubCLIDeps{}); code != ExitUsage {
+				t.Fatalf("code=%d, want ExitUsage", code)
+			}
+		})
+	}
 }

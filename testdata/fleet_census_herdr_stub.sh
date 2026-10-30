@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Fixture herdr for the fleet-census reap-equivalence test. Answers exactly
-# the two reads wrk reap performs — `agent get <pane>` and `tab list` — from
+# the two reads the reap reference performs — `agent get <pane>` and `tab list` — from
 # the JSON document named by STUB_HERDR_FIXTURE:
 #
 #   {"agents": {"w1:p1": {"status": "idle", "tab_id": "w1:t1"},
@@ -9,7 +9,7 @@
 #    "tabs": [{"tab_id": "w1:t1", "pane_count": 1}]}
 #
 # Error envelopes go to stderr with exit 1, matching real herdr's contract
-# (wrk merges the streams when probing). pane_count values pass through
+# (the reaper merges the streams when probing). pane_count values pass through
 # unmodified so the fixture can express "?", true, missing, and duplicate
 # tab rows.
 set -uo pipefail
