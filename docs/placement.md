@@ -7,8 +7,8 @@ a brief, a path, a token, or a command to a node.
 
 The hub first reads the operator-owned `/etc/panewire/placement.json` (or the
 path passed to `panewire hub --placement-policy`) and uses its local machine
-first. A local candidate spills only when its recent five-minute load ratio is
-at least `load_ratio`, thermal speed limit is below one, or active heartbeat
+first. A local candidate spills only when its recent five-minute CPU busy
+fraction is at least `load_ratio`, thermal speed limit is below one, or active heartbeat
 jobs reach `max_active_jobs`. `spill_targets` are considered in policy order.
 
 ```json
@@ -76,6 +76,36 @@ builder bundles. And the node heartbeat truncates its active-job list at 32
 entries, so `task_slots` values above 32 can never bind; keep configured caps
 at or below that.
 
+## Machine power weights
+
+`power` is optional and maps a machine id to a relative speed weight, greater
+than 0 and at most 10000. 100 is the strongest host; a machine without an
+entry weighs 100, so a policy without `power` ranks machines purely on load
+and active jobs. It is a separate top-level map (not part of `machines`) so a
+weight never implies a task-slot cap.
+
+```json
+{"power": {"host-a": 100, "host-b": 79, "host-c": 8}}
+```
+
+**How to measure.** Run the same all-cores CPU benchmark on every host — for
+example `openssl speed -multi <cores> rsa2048` and read signatures per second
+— then set each weight to `100 * host_rate / strongest_rate`. Use all cores:
+the weight is the host's total capacity, not its per-core speed. Re-measure
+when hardware changes; a rounded value is fine.
+
+Power changes two terms of the candidate score, `100 - busy*100 - jobs*10*100/power`
+plus a spare-power bonus:
+
+- each active job costs `10 * 100 / power` points, so a job weighs five times
+  as much on a power-20 host as on a power-100 host;
+- an idle machine earns `5 * power * (1 - busy) / 100` points, so a stronger
+  idle host wins ties.
+
+Low-power hosts are ranked lower, never filtered out. The `decision` field
+still follows policy order (`local_machine`, then `spill_targets`) among
+usable machines; power shapes `score` and therefore the order of `candidates`.
+
 ## Draft NCP policy file (not deployed)
 
 The production hub (`panewire-hub.service` on NCP) currently runs with no
@@ -138,9 +168,16 @@ fail-open, so older nodes and individual unavailable measurements keep the
 existing placement behavior.
 
 The hub queries `PANEWIRE_PROM_URL`'s `/api/v1/query` endpoint with the
-five-minute node load ratio and thermal speed-limit PromQL queries. Load is
-aggregated by `machine_id` before CPU-count division, so remote-write scrape
-labels such as `instance` and `job` cannot break vector matching. Set either `PANEWIRE_PROM_BEARER` or
+five-minute CPU busy fraction and thermal speed-limit PromQL queries. The
+busy fraction is `1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))`
+averaged over the machine's cpus and aggregated by `machine_id`, so
+remote-write scrape labels such as `instance` and `job` cannot break vector
+matching. It replaces `node_load5` / cores: the macOS load average counts
+blocked threads and can read several times the core count on a host that is
+barely busy. The `cpu` node-exporter collector must stay enabled on every
+host (see `ALLOY_DISABLE_COLLECTORS` in `deploy/alloy/README.md`); the
+`load_ratio` field of a candidate and the `load_ratio` threshold are both this
+busy fraction. Set either `PANEWIRE_PROM_BEARER` or
 `PANEWIRE_PROM_BASIC_USER`/`PANEWIRE_PROM_BASIC_PASS` outside the repository.
 Prometheus samples must have `machine_id`. A missing load sample is explicitly
 `load_unknown`: it cannot select the local machine; if no safe spill candidate
