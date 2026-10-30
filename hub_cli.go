@@ -26,29 +26,14 @@ import (
 )
 
 // loadHubAuthFile accepts the intentionally small server-side token format:
-// HUB_TOKEN_operator plus one HUB_TOKEN_<machine_id> for each node. It shares
-// the repository's no-symlink, exact-mode-0600 reader and never reflects a
-// token value in an error.
+// HUB_TOKEN_operator, one HUB_TOKEN_<id> for each node or service, and a
+// HUB_SCOPES_<id> line for each service (docs/hub-scopes.md). It shares the
+// repository's no-symlink, exact-mode-0600 reader and never reflects a token
+// value in an error. The map holds every token, services included; the hub
+// tells the two apart through the scopes loadHubAuthConfig parses.
 func loadHubAuthFile(path string) (map[string]string, error) {
-	values, err := loadMode0600Env(path)
-	if err != nil {
-		return nil, errors.New("hub auth file must be a regular mode-0600 file")
-	}
-	tokens := make(map[string]string, len(values))
-	for key, token := range values {
-		machineID, found := strings.CutPrefix(key, "HUB_TOKEN_")
-		if !found || !machineIDPattern.MatchString(machineID) || !validHubToken(token) {
-			return nil, errors.New("hub auth file is invalid")
-		}
-		if _, exists := tokens[machineID]; exists {
-			return nil, errors.New("hub auth file is invalid")
-		}
-		tokens[machineID] = token
-	}
-	if !validHubToken(tokens[hubOperatorMachineID]) {
-		return nil, errors.New("hub auth file is missing the operator token")
-	}
-	return tokens, nil
+	tokens, _, err := readHubAuthFile(path)
+	return tokens, err
 }
 
 func hubListenAddress(raw string) (string, error) {
@@ -169,7 +154,11 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if err != nil {
 		return nil, "", ExitConditionInvalid, err
 	}
-	tokens, err := loadHubAuthFile(*authPath)
+	tokens, scopes, err := readHubAuthFile(*authPath)
+	if err != nil {
+		return nil, "", ExitConditionInvalid, errors.New("hub auth file is invalid")
+	}
+	authSet, err := newHubAuthSet(tokens, scopes)
 	if err != nil {
 		return nil, "", ExitConditionInvalid, errors.New("hub auth file is invalid")
 	}
@@ -191,7 +180,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 		}
 	})
 	if alertNodesSet {
-		alertNodes, err = parseHubAlertNodes(*alertNodesCSV, tokens)
+		alertNodes, err = parseHubAlertNodes(*alertNodesCSV, authSet.tokens)
 		if err != nil {
 			return nil, "", ExitConditionInvalid, errors.New("hub alert nodes are invalid")
 		}
@@ -250,7 +239,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if chatStore != nil && !validReportRelayLaneName(*chatDeskLane) {
 		return nil, "", ExitConditionInvalid, errors.New("hub chat desk lane is required and must be valid")
 	}
-	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, WakeConfigPath: *wakeConfigPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
+	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, Tokens: tokens, Scopes: scopes, AuthPath: *authPath, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, WakeConfigPath: *wakeConfigPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, fmt.Errorf("hub configuration is invalid: %w", err)
 	}

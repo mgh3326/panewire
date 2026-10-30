@@ -12,7 +12,9 @@ out may re-issue, and every acting op re-checks on the node.
 
 ## Trust boundary
 
-Both endpoints require the operator token. Nodes need no extra opt-in: the
+Both endpoints require the operator token, or a service token whose scopes
+cover the call (`nodes.agents.read`, `node.command:<op>@<machine>`; see
+[hub-scopes.md](hub-scopes.md)). Nodes need no extra opt-in: the
 hub can already type into any pane through `relay.inject`, and every op
 here is narrower than that. Each op is a closed shape; no op runs a shell,
 and no op takes a caller-chosen file path to write.

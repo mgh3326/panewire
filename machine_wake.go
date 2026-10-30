@@ -239,7 +239,7 @@ func (h *HubServer) requestNodeWake(ctx context.Context, machine string) (hubWak
 }
 
 func (h *HubServer) handleNodeWake(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
+	if !h.authenticateScoped(request) {
 		hubUnauthorized(writer)
 		return
 	}
@@ -261,6 +261,10 @@ func (h *HubServer) handleNodeWake(writer http.ResponseWriter, request *http.Req
 			return
 		}
 		timeout = parsed
+	}
+	if access := h.authorize(request, hubScopeWake, body.Machine); access != hubAccessGranted {
+		writeHubAccessDenied(writer, access)
+		return
 	}
 	ctx, cancel := context.WithTimeout(request.Context(), timeout)
 	defer cancel()

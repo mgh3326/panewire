@@ -160,13 +160,17 @@ func (h *HubServer) spawnUnavailableResponse(machine string) any {
 }
 
 func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
+	if !h.authenticateScoped(request) {
 		hubUnauthorized(writer)
 		return
 	}
 	var body hubSpawnRequest
 	if !decodeHubJSON(writer, request, hubSpawnMaxBodyBytes, &body) || !validHubSpawnRequest(body) {
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		return
+	}
+	if access := h.authorize(request, hubScopeSpawn, body.Machine); access != hubAccessGranted {
+		writeHubAccessDenied(writer, access)
 		return
 	}
 
@@ -226,7 +230,7 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 }
 
 func (h *HubServer) handleSpawnGet(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
+	if !h.authenticateScoped(request) {
 		hubUnauthorized(writer)
 		return
 	}
@@ -243,8 +247,14 @@ func (h *HubServer) handleSpawnGet(writer http.ResponseWriter, request *http.Req
 		writeJSON(writer, http.StatusNotFound, map[string]string{"error": "not_found"})
 		return
 	}
-	response := h.spawnRecordResponse(record)
+	response, machine := h.spawnRecordResponse(record), record.request.Machine
 	h.mu.Unlock()
+	// The record's machine is the resource, so it is checked after the
+	// lookup; an unknown id answers 404 to any operator or service.
+	if access := h.authorize(request, hubScopeSpawn, machine); access != hubAccessGranted {
+		writeHubAccessDenied(writer, access)
+		return
+	}
 	writeJSON(writer, http.StatusOK, response)
 }
 

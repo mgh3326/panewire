@@ -37,7 +37,8 @@ panewire hub \
 ```
 
 `--hub-auth` is an explicit regular file with mode `0600` (not a symlink). Its
-only non-comment entries are static node tokens:
+non-comment entries are static node tokens (and, for services,
+`HUB_SCOPES_<client>` lines — see [hub-scopes.md](hub-scopes.md)):
 
 ```sh
 HUB_TOKEN_operator=replace-with-operator-token
@@ -46,10 +47,11 @@ HUB_TOKEN_machine-b=replace-with-machine-b-token
 ```
 
 `operator` is reserved: `HUB_TOKEN_operator` authenticates `/v1/nodes`,
-`/v1/events`, and `panewire hub-status`. Each other key is a node machine ID
-for `/v1/agent`; its token also authenticates `/v1/lanes` scoped to that
+`/v1/events`, and `panewire hub-status`. Each other `HUB_TOKEN_<id>` key
+without a `HUB_SCOPES_<id>` line is a node machine ID for `/v1/agent`; its token also authenticates `/v1/lanes` scoped to that
 machine's own lanes, and cannot authenticate any other operator endpoint.
-Tokens are issued by an operator editing this file. There is no enrollment
+Tokens are issued by an operator editing this file (`deploy/hub-token-mint.sh`
+generates one); the hub reloads it when it changes. There is no enrollment
 or token minting endpoint.
 
 `--alert-nodes` is optional. When omitted, every authenticated node is

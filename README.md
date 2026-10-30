@@ -135,7 +135,9 @@ Operator tools reach a node's herdr panes and git worktrees through the hub
 instead of ssh: `GET /v1/nodes/agents` lists every node's agents, and
 `POST /v1/nodes/{machine}/command` runs one of a closed set of ops
 (`pane.close` closes only an exact re-read match). See
-[docs/node-commands.md](docs/node-commands.md).
+[docs/node-commands.md](docs/node-commands.md). A service such as the reaper
+uses its own scoped token instead of the operator's; see
+[docs/hub-scopes.md](docs/hub-scopes.md).
 
 ## Hub job inbox compatibility
 

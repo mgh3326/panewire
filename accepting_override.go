@@ -91,7 +91,7 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 		return
 	}
 	h.mu.Lock()
-	if _, known := h.tokens[machine]; !known {
+	if _, known := h.auth.Load().tokens[machine]; !known {
 		h.mu.Unlock()
 		http.Error(writer, "unknown node", http.StatusNotFound)
 		return
