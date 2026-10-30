@@ -63,7 +63,9 @@ is the common case.
 
 ## Ops
 
-All validation is shared by hub and node. `pane_id` is
+All validation is shared by hub and node. Every listed argument is required
+and must not be null — a zero value such as `write:false` or
+`merged_after:0` has to be stated, never implied by omission. `pane_id` is
 `^[A-Za-z0-9._:-]{1,128}$`; `name` is a single safe path segment (no `/`,
 `\`, `..`, whitespace, or leading `-` / `.`); `cwd` is an absolute path.
 
@@ -99,14 +101,19 @@ mergewake reap applies over ssh:
 
 | `outcome` | `saved` | Meaning |
 | --- | --- | --- |
-| `not-a-job` | — | The job directory does not exist: the fleet did not spawn this pane. Nothing is written. |
-| `report` | `<dir>/report.md` | `report.md` exists and its mtime is strictly later than `merged_after` (unix seconds; 0 means never). |
+| `not-a-job` | — | The job directory does not exist, or is a symlink rather than a real directory: the fleet did not spawn this pane. Nothing is written. |
+| `report` | `<dir>/report.md` | `report.md` is a regular file (not a symlink) whose mtime is strictly later than `merged_after` (unix seconds; 0 means never). |
 | `would-screen` | `<dir>/pane-screen.txt` | `write:false`: where the screen would go. Nothing is read or written. |
 | `screen` | `<dir>/pane-screen.txt` | The pane, re-read and still matching `name` and `cwd`, had its `herdr pane read` output written there atomically, mode 0600. |
 | `pane-changed` / `pane-gone` | — | The pane no longer matches; nothing is written. |
 
 `<inbox>` is the node daemon's jobs inbox root; a node without one answers
-`jobs_root_unset`. Read or write failures answer `capture_failed`.
+`jobs_root_unset`. Every read and write goes through an `os.Root` opened on
+`<inbox>/jobs`, so no symlink at or below the job directory can lead outside
+it; the screen is written to an `O_EXCL|O_NOFOLLOW` temporary file and
+renamed over `pane-screen.txt`, which replaces a symlink there instead of
+writing through it. A symlink above `<inbox>/jobs` is operator-provisioned
+and honoured. Read or write failures answer `capture_failed`.
 
 ### `worktree.inspect`
 

@@ -340,3 +340,136 @@ func TestNodeCommandWireParsing(t *testing.T) {
 		t.Fatalf("result=%+v ok=%v", result, ok)
 	}
 }
+
+// TestNodeCommandPaneCaptureStaysInsideJobs pins the jobs-root confinement:
+// no symlink at the job dir, report.md or pane-screen.txt can make capture
+// read a foreign report or write outside <inbox>/jobs.
+func TestNodeCommandPaneCaptureStaysInsideJobs(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	inbox := filepath.Join(base, "inbox")
+	outside := filepath.Join(base, "outside")
+	for _, dir := range []string{filepath.Join(inbox, "jobs", "job-a"), outside} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	victim := filepath.Join(outside, "pane-screen.txt")
+	foreignReport := filepath.Join(outside, "report.md")
+	for _, path := range []string{victim, foreignReport} {
+		if err := os.WriteFile(path, []byte("outside"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	listed := func(name string) *nodeFakeHerdr {
+		return &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", name, "done", "/work/a"))}, read: "screen\n"}
+	}
+	capture := func(root string, fake *nodeFakeHerdr, name string, mergedAfter int64, write bool) (map[string]any, string) {
+		return nodeRun(t, &HubClient{jobsInboxRoot: root, nodeHerdr: fake.run}, nodeCommandPaneCapture, map[string]any{"pane_id": "w1:p1", "name": name, "cwd": "/work/a", "merged_after": mergedAfter, "write": write})
+	}
+	assertOutsideUntouched := func() {
+		t.Helper()
+		for _, path := range []string{victim, foreignReport} {
+			if contents, err := os.ReadFile(path); err != nil || string(contents) != "outside" {
+				t.Fatalf("%s changed: %q %v", path, contents, err)
+			}
+		}
+		if entries, _ := os.ReadDir(outside); len(entries) != 2 {
+			t.Fatalf("capture created files outside jobs: %v", entries)
+		}
+	}
+
+	// A symlinked job dir is not a fleet job, whatever it points at.
+	if err := os.Symlink(outside, filepath.Join(inbox, "jobs", "job-link")); err != nil {
+		t.Fatal(err)
+	}
+	fake := listed("job-link")
+	if result, code := capture(inbox, fake, "job-link", 1, true); code != "" || result["outcome"] != nodeCaptureNotAJob || len(fake.calls) != 0 {
+		t.Fatalf("symlinked job dir result=%v code=%q calls=%v", result, code, fake.calls)
+	}
+	assertOutsideUntouched()
+
+	// A symlinked report.md never counts as the job's fresh report.
+	if err := os.Symlink(foreignReport, filepath.Join(inbox, "jobs", "job-a", "report.md")); err != nil {
+		t.Fatal(err)
+	}
+	if result, _ := capture(inbox, listed("job-a"), "job-a", 1, false); result["outcome"] != nodeCaptureWould {
+		t.Fatalf("symlinked report result=%v", result)
+	}
+
+	// A pane-screen.txt symlink is replaced, never written through.
+	screen := filepath.Join(inbox, "jobs", "job-a", nodeCaptureScreenTxt)
+	if err := os.Symlink(victim, screen); err != nil {
+		t.Fatal(err)
+	}
+	fake = listed("job-a")
+	if result, code := capture(inbox, fake, "job-a", 1, true); code != "" || result["outcome"] != nodeCaptureScreen || result["saved"] != screen {
+		t.Fatalf("screen result=%v code=%q", result, code)
+	}
+	assertOutsideUntouched()
+	info, err := os.Lstat(screen)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		t.Fatalf("pane-screen.txt mode=%v err=%v", info.Mode(), err)
+	}
+	if contents, _ := os.ReadFile(screen); string(contents) != "screen\n" {
+		t.Fatalf("pane-screen.txt=%q", contents)
+	}
+	if entries, _ := os.ReadDir(filepath.Dir(screen)); len(entries) != 2 {
+		t.Fatalf("temporary file left behind: %v", entries)
+	}
+
+	// An operator-provisioned symlink above the jobs root is still honoured.
+	linkedInbox := filepath.Join(base, "inbox-link")
+	if err := os.Symlink(inbox, linkedInbox); err != nil {
+		t.Fatal(err)
+	}
+	if result, code := capture(linkedInbox, listed("job-a"), "job-a", 0, true); code != "" || result["outcome"] != nodeCaptureScreen {
+		t.Fatalf("symlinked inbox result=%v code=%q", result, code)
+	}
+	assertOutsideUntouched()
+}
+
+func TestNodeCommandArgsRequireEveryField(t *testing.T) {
+	full := map[string]any{"pane_id": "w1:p1", "name": "job-a", "cwd": "/work/a", "merged_after": 0, "write": false}
+	encode := func(value any) json.RawMessage {
+		raw, err := json.Marshal(value)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return raw
+	}
+	if _, valid := decodeNodeCommandArgs(nodeCommandPaneCapture, encode(full)); !valid {
+		t.Fatal("complete capture args rejected")
+	}
+	for field := range full {
+		missing := map[string]any{}
+		nulled := map[string]any{}
+		for key, value := range full {
+			nulled[key] = value
+			if key != field {
+				missing[key] = value
+			}
+		}
+		nulled[field] = nil
+		for label, args := range map[string]map[string]any{"missing": missing, "null": nulled} {
+			if _, valid := decodeNodeCommandArgs(nodeCommandPaneCapture, encode(args)); valid {
+				t.Fatalf("%s %s accepted", label, field)
+			}
+		}
+	}
+	for op, raw := range map[string]string{
+		nodeCommandAgentsList:      `null`,
+		nodeCommandPaneClose:       `{"pane_id":"w1:p1","name":"job-a","agent_status":"idle"}`,
+		nodeCommandWorktreeInspect: `{}`,
+	} {
+		if _, valid := decodeNodeCommandArgs(op, json.RawMessage(raw)); valid {
+			t.Fatalf("%s accepted %s", op, raw)
+		}
+	}
+	client := &HubClient{nodeHerdr: (&nodeFakeHerdr{}).run}
+	if _, code := client.runNodeCommand(t.Context(), nodeCommandPaneCapture, encode(map[string]any{"pane_id": "w1:p1", "name": "job-a", "cwd": "/work/a"})); code != "invalid_args" {
+		t.Fatalf("node accepted capture without merged_after/write: %q", code)
+	}
+}
