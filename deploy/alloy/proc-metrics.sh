@@ -65,6 +65,9 @@ chmod 0600 "$tmp_state"
 # shellcheck disable=SC2086 # PROC_METRICS_PS may carry arguments
 sample="$($ps_cmd -axo pcpu=,rss=,comm=)"
 printf '%s\n' "$sample" | awk -v now="$now" -v state="$state" -v prom="$tmp_prom" -v newstate="$tmp_state" '
+# Marks the top `limit` groups by one metric in keep[]. The extra parameters
+# after the blank gap are awk locals: `taken` is fresh on every call, so the cpu
+# and rss passes each rank over all groups and keep[] is just their union.
 function pick(metric, limit, needpositive,    k, name, best, bestv, taken) {
 	for (k = 0; k < limit; k++) {
 		best = ""
