@@ -21,7 +21,10 @@ loki.write "cloud" {
 // opt-in per host through ALLOY_ENABLE_COLLECTORS as a JSON list. Hosts that
 // enable "textfile" must also set FLEET_TEXTFILE_DIR; the unix exporter then
 // exposes *.prom files from that directory as metrics (app gauges such as
-// session and quota counters). Both unset means no extra collectors.
+// session and quota counters) and the per-process CPU/memory file written by
+// proc-metrics.sh. The Alloy process exporter is deliberately not used: it
+// cannot cap the number of series (see README). Both unset means no extra
+// collectors.
 prometheus.exporter.unix "node" {
 	enable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_ENABLE_COLLECTORS"), "[]"))
 	disable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_DISABLE_COLLECTORS"), "[]"))
@@ -54,51 +57,6 @@ prometheus.remote_write "fleet" {
 prometheus.scrape "node" {
 	targets    = discovery.relabel.node.output
 	forward_to = [prometheus.remote_write.fleet.receiver]
-}
-
-// Per-process CPU and memory, grouped by process name (kernel command name,
-// at most 15 bytes) so one program's workers sum into a single series set.
-// cmdline ".+" skips kernel threads. Only three metric families leave the
-// host -- CPU seconds, resident memory, process count -- because the free
-// Grafana Cloud tier allows 10k active series for the whole account. See
-// README "Process metrics" for the series budget and why Linux is not capped
-// to a top-N here.
-prometheus.exporter.process "procs" {
-	track_children      = false
-	gather_smaps        = false
-	remove_empty_groups = true
-
-	matcher {
-		name    = "{{.Comm}}"
-		cmdline = [".+"]
-	}
-}
-
-discovery.relabel "procs" {
-	targets = prometheus.exporter.process.procs.targets
-
-	rule {
-		target_label = "machine_id"
-		replacement  = sys.env("MACHINE_ID")
-	}
-}
-
-// Allowlist, not a denylist: anything the exporter adds later stays local.
-// Rows are "<__name__>;<memtype>"; only the resident memory type is kept.
-// Relabel regexes are fully anchored, so "up;" cannot match a name ending in "up".
-prometheus.relabel "procs" {
-	forward_to = [prometheus.remote_write.fleet.receiver]
-
-	rule {
-		source_labels = ["__name__", "memtype"]
-		regex         = "up;|namedprocess_namegroup_(cpu_seconds_total|num_procs);|namedprocess_namegroup_memory_bytes;resident"
-		action        = "keep"
-	}
-}
-
-prometheus.scrape "procs" {
-	targets    = discovery.relabel.procs.output
-	forward_to = [prometheus.relabel.procs.receiver]
 }
 
 // systemd journal (units, kernel, sshd, timers)

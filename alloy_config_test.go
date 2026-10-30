@@ -80,54 +80,25 @@ func TestAlloyConfigValidates(t *testing.T) {
 	}
 }
 
-// The free Grafana Cloud tier allows 10k active series for the whole account,
-// so the process exporter may only forward three metric families, and only
-// through the allowlist relabel.
-func TestAlloyLinuxProcessMetricsAreAllowlisted(t *testing.T) {
-	contents, err := os.ReadFile("deploy/alloy/config.linux.alloy")
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := string(contents)
-	for _, required := range []string{
-		"prometheus.exporter.process \"procs\"",
-		"\"{{.Comm}}\"",
-		"track_children      = false",
-		"prometheus.relabel \"procs\"",
-		"action        = \"keep\"",
-		`regex         = "up;|namedprocess_namegroup_(cpu_seconds_total|num_procs);|namedprocess_namegroup_memory_bytes;resident"`,
-	} {
-		if !strings.Contains(text, required) {
-			t.Errorf("config.linux.alloy missing %s", required)
+// The free Grafana Cloud tier allows 10k active series for the whole account.
+// Alloy's process exporter cannot cap its groups (measured fleet hosts have
+// 148-239 distinct process names), so per-process metrics come only from the
+// capped proc-metrics.sh textfile, and no config may run the exporter.
+func TestAlloyConfigsDoNotRunTheUncappedProcessExporter(t *testing.T) {
+	for _, config := range []string{"deploy/alloy/config.linux.alloy", "deploy/alloy/config.mac.alloy"} {
+		contents, err := os.ReadFile(config)
+		if err != nil {
+			t.Fatal(err)
 		}
-	}
-	start := strings.Index(text, "prometheus.scrape \"procs\"")
-	if start < 0 {
-		t.Fatal("config.linux.alloy missing the process scrape")
-	}
-	scrape := text[start:]
-	end := strings.Index(scrape, "}")
-	if end < 0 {
-		t.Fatal("process scrape block is not closed")
-	}
-	scrape = scrape[:end]
-	if !strings.Contains(scrape, "forward_to = [prometheus.relabel.procs.receiver]") || strings.Contains(scrape, "remote_write") {
-		t.Errorf("process scrape must forward through the allowlist relabel, got:\n%s", scrape)
-	}
-	// Every namedprocess_* name in the file belongs to the kept set; a
-	// denylist-style rule would name other families.
-	for _, name := range regexp.MustCompile(`namedprocess_namegroup_[a-z_]+`).FindAllString(text, -1) {
-		switch name {
-		case "namedprocess_namegroup_cpu_seconds_total", "namedprocess_namegroup_num_procs", "namedprocess_namegroup_memory_bytes":
-		default:
-			t.Errorf("unexpected process metric %s in config.linux.alloy", name)
+		text := string(contents)
+		if strings.Contains(text, "prometheus.exporter.process") {
+			t.Errorf("%s must not run prometheus.exporter.process; use proc-metrics.sh", config)
 		}
-	}
-	mac, err := os.ReadFile("deploy/alloy/config.mac.alloy")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(mac), "prometheus.exporter.process") {
-		t.Error("process exporter needs /proc and must not be configured on macOS; use proc-metrics.sh")
+		if names := regexp.MustCompile(`namedprocess_namegroup_[a-z_]+`).FindAllString(text, -1); len(names) > 0 {
+			t.Errorf("%s names process metrics %v; they belong to proc-metrics.sh", config, names)
+		}
+		if !strings.Contains(text, "textfile {") || !strings.Contains(text, `sys.env("FLEET_TEXTFILE_DIR")`) {
+			t.Errorf("%s must read the textfile directory that proc-metrics.sh writes", config)
+		}
 	}
 }

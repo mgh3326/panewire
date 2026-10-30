@@ -1,0 +1,10 @@
+[Unit]
+Description=Per-process CPU and memory textfile for Alloy
+
+[Service]
+Type=oneshot
+# Same directory as FLEET_TEXTFILE_DIR in Alloy's EnvironmentFile. The user
+# must be able to write it; Alloy only needs to read it.
+Environment=FLEET_TEXTFILE_DIR=/ABSOLUTE/PATH/TO/TEXTFILE_DIR
+ExecStart=/ABSOLUTE/PATH/TO/proc-metrics.sh
+User=alloy
