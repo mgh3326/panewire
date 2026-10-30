@@ -85,6 +85,7 @@ discovery.relabel "procs" {
 
 // Allowlist, not a denylist: anything the exporter adds later stays local.
 // Rows are "<__name__>;<memtype>"; only the resident memory type is kept.
+// Relabel regexes are fully anchored, so "up;" cannot match a name ending in "up".
 prometheus.relabel "procs" {
 	forward_to = [prometheus.remote_write.fleet.receiver]
 
