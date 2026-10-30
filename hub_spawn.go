@@ -81,7 +81,8 @@ func validHubSpawnArgs(args []string) bool {
 			// --tags is a comma list; every other flag keeps the no-comma set.
 			pattern = hubSpawnTagsValuePattern
 		}
-		if _, found := allowed[args[index]]; !found || !pattern.MatchString(args[index+1]) {
+		// The 200-char cap binds every value, tags included.
+		if _, found := allowed[args[index]]; !found || len(args[index+1]) > 200 || !pattern.MatchString(args[index+1]) {
 			return false
 		}
 	}
