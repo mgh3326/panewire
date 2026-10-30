@@ -17,12 +17,16 @@ loki.write "cloud" {
 }
 
 // node_exporter-compatible host metrics for hub placement. MACHINE_ID is an
-// EnvironmentFile contract, not a literal host label. Hosts that set
-// FLEET_TEXTFILE_DIR expose *.prom files from that directory as metrics
-// (app gauges such as session and quota counters); unset means disabled.
+// EnvironmentFile contract, not a literal host label. Extra collectors are
+// opt-in per host through ALLOY_ENABLE_COLLECTORS as a JSON list. Hosts that
+// enable "textfile" must also set FLEET_TEXTFILE_DIR; the unix exporter then
+// exposes *.prom files from that directory as metrics (app gauges such as
+// session and quota counters). Both unset means no extra collectors.
 prometheus.exporter.unix "node" {
+	enable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_ENABLE_COLLECTORS"), "[]"))
+
 	textfile {
-		directory          = sys.env("FLEET_TEXTFILE_DIR")
+		directory = sys.env("FLEET_TEXTFILE_DIR")
 	}
 }
 

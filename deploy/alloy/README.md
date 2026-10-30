@@ -16,12 +16,14 @@ platform's Alloy systemd EnvironmentFile. macOS receives the same variables
 through the user launchd plist; start from `mac.plist.example` and keep the
 resulting plist outside this repository.
 
-Two optional variables tune collection per host:
+Two optional variables tune collection per host. The Linux installer copies
+them into the EnvironmentFile when they are set in its environment; on macOS
+they belong in the private plist's `EnvironmentVariables`.
 
 | Variable | Effect | Default |
 | --- | --- | --- |
-| `FLEET_TEXTFILE_DIR` | Directory of `*.prom` files scraped by the unix exporter's textfile collector (app gauges such as session and quota counters). | unset → textfile collection disabled |
-| `ALLOY_ENABLE_COLLECTORS` | JSON list of extra unix-exporter collectors, e.g. `["thermal"]`. Thermal needs hardware CPU power status; hosts without it log an error per scrape, so it is opt-in. | unset → `[]` |
+| `ALLOY_ENABLE_COLLECTORS` | JSON list of extra unix-exporter collectors, e.g. `["thermal"]` or `["textfile"]`. Thermal needs hardware CPU power status; hosts without it log an error per scrape, so it is opt-in. | unset → `[]` (no extra collectors) |
+| `FLEET_TEXTFILE_DIR` | Directory of `*.prom` files scraped when `"textfile"` is in `ALLOY_ENABLE_COLLECTORS` (app gauges such as session and quota counters). Required when enabling textfile. | unset |
 
 ## Install
 

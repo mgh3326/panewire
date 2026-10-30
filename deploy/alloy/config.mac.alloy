@@ -19,10 +19,11 @@ loki.write "cloud" {
 // Node metrics are sent to the hosted Prometheus remote-write endpoint, never
 // Loki. The host identity is injected by launchd so a copied config cannot
 // silently report itself as another machine. Extra collectors are opt-in per
-// host through ALLOY_ENABLE_COLLECTORS as a JSON list (e.g. ["thermal"]);
-// unset means no extra collectors. Some Macs expose no CPU power status and
-// the thermal collector errors every scrape there, so it stays off by
-// default. FLEET_TEXTFILE_DIR works as in config.linux.alloy.
+// host through ALLOY_ENABLE_COLLECTORS as a JSON list, e.g. ["thermal"] or
+// ["textfile"]; unset means no extra collectors. Thermal needs hardware CPU
+// power status and errors every scrape on Macs without it, so it stays off
+// by default. Enabling "textfile" also requires FLEET_TEXTFILE_DIR, as in
+// config.linux.alloy.
 prometheus.exporter.unix "node" {
 	enable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_ENABLE_COLLECTORS"), "[]"))
 

@@ -20,8 +20,6 @@
     <string>__PROM_REMOTE_WRITE_USER__</string>
     <key>PROM_REMOTE_WRITE_TOKEN</key>
     <string>__PROM_REMOTE_WRITE_TOKEN__</string>
-    <key>FLEET_TEXTFILE_DIR</key>
-    <string>__FLEET_TEXTFILE_DIR__</string>
     <key>LOKI_URL</key>
     <string>__LOKI_URL__</string>
     <key>LOKI_USER</key>
