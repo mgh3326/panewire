@@ -481,7 +481,7 @@ func (h *HubServer) reassignJob(jobID, to string) (hubJobEventPayload, bool) {
 		h.mu.Unlock()
 		return hubJobEventPayload{}, false
 	}
-	if _, knownNode := h.tokens[to]; !knownNode {
+	if _, knownNode := h.auth.Load().tokens[to]; !knownNode {
 		h.mu.Unlock()
 		return hubJobEventPayload{}, false
 	}

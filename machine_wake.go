@@ -239,7 +239,7 @@ func (h *HubServer) requestNodeWake(ctx context.Context, machine string) (hubWak
 }
 
 func (h *HubServer) handleNodeWake(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
+	if !h.authenticateScoped(request) {
 		hubUnauthorized(writer)
 		return
 	}
@@ -251,6 +251,10 @@ func (h *HubServer) handleNodeWake(writer http.ResponseWriter, request *http.Req
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&body) != nil || decoder.Decode(&struct{}{}) != io.EOF || !machineIDPattern.MatchString(body.Machine) || body.Machine == hubOperatorMachineID {
 		http.Error(writer, "invalid wake request", http.StatusBadRequest)
+		return
+	}
+	if access := h.authorize(request, hubScopeWake, body.Machine); access != hubAccessGranted {
+		writeHubAccessDenied(writer, access)
 		return
 	}
 	timeout := hubWakeDefaultTimeout

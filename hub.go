@@ -15,6 +15,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -40,6 +41,11 @@ type HubServerConfig struct {
 	DeliveryPolicyPath string
 	InboxStorePath     string
 	Tokens             map[string]string
+	// Scopes holds the raw HUB_SCOPES_<client> lines: a client listed here is
+	// a service (docs/hub-scopes.md), not a node. AuthPath, when set, names
+	// the auth file the hub hot-reloads both maps from.
+	Scopes   map[string]string
+	AuthPath string
 	// ControlPlaneLanesPath names the operator-owned JSON file listing the
 	// authority lane bundle, hot-reloaded like the placement policy. It is the
 	// production path: which lanes carry authority is deployment configuration,
@@ -349,8 +355,15 @@ type hubSubscriptionMessage struct {
 // HubServer is an in-memory presence and event relay. It deliberately owns no
 // file relay, durable queue, command dispatcher, or credentials after startup.
 type HubServer struct {
-	inbox             *hubInbox
-	tokens            map[string]string
+	inbox *hubInbox
+	// auth is swapped whole on an auth-file reload; read it through
+	// currentAuth on authentication paths and auth.Load() elsewhere.
+	auth              atomic.Pointer[hubAuthSet]
+	authPath          string
+	authMu            sync.Mutex
+	authObserved      os.FileInfo
+	authFailed        os.FileInfo
+	authFailedMissing bool
 	alertNodes        map[string]struct{}
 	now               func() time.Time
 	staleAfter        time.Duration
@@ -530,6 +543,10 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	if !validHubToken(tokens[hubOperatorMachineID]) {
 		return nil, errors.New("hub operator token is required")
 	}
+	authSet, err := newHubAuthSet(tokens, config.Scopes)
+	if err != nil {
+		return nil, errors.New("hub token configuration is invalid")
+	}
 	var alertNodes map[string]struct{}
 	if config.AlertNodes != nil {
 		alertNodes = make(map[string]struct{}, len(config.AlertNodes))
@@ -537,7 +554,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 			if machineID == hubOperatorMachineID || !machineIDPattern.MatchString(machineID) {
 				return nil, errors.New("hub alert node configuration is invalid")
 			}
-			if _, exists := tokens[machineID]; !exists {
+			if _, exists := authSet.tokens[machineID]; !exists {
 				return nil, errors.New("hub alert node configuration is invalid")
 			}
 			alertNodes[machineID] = struct{}{}
@@ -659,12 +676,13 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
-		inbox:  inbox,
-		tokens: tokens, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
+		inbox:    inbox,
+		authPath: config.AuthPath, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
+	hub.auth.Store(&authSet)
 	hub.prepareInbox()
 	return hub, nil
 }
@@ -1003,8 +1021,8 @@ func (h *HubServer) handleHealthz(writer http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *HubServer) handleNodes(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
-		hubUnauthorized(writer)
+	if access := h.authorize(request, hubScopeNodesAgentsRead, ""); access != hubAccessGranted {
+		writeHubAccessDenied(writer, access)
 		return
 	}
 	writeJSON(writer, http.StatusOK, struct {
@@ -1890,20 +1908,18 @@ func (h *HubServer) broadcastSubscriptionMessage(message hubSubscriptionMessage)
 	}
 }
 
+// authorizeAgent admits nodes only: a service credential never opens the
+// node websocket or acts as a node anywhere else.
 func (h *HubServer) authorizeAgent(request *http.Request) (string, bool) {
-	machineID := strings.TrimSpace(request.Header.Get(hubMachineIDHeader))
-	if machineID == hubOperatorMachineID || !machineIDPattern.MatchString(machineID) {
+	caller := h.authenticate(request)
+	if caller.kind != hubCallerNode {
 		return "", false
 	}
-	expected, exists := h.tokens[machineID]
-	if !exists || !hubTokenMatches(expected, hubRequestBearerToken(request)) {
-		return "", false
-	}
-	return machineID, true
+	return caller.id, true
 }
 
 func (h *HubServer) authorizeOperator(request *http.Request) bool {
-	return hubTokenMatches(h.tokens[hubOperatorMachineID], hubRequestBearerToken(request))
+	return h.authenticate(request).kind == hubCallerOperator
 }
 
 func hubTokenMatches(expected, received string) bool {

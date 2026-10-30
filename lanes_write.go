@@ -547,7 +547,7 @@ func countMachineLanes(routes map[string]reportRelayRoute, machine string) int {
 }
 
 func (h *HubServer) knownLaneMachine(machine string, routes map[string]reportRelayRoute) bool {
-	if _, configured := h.tokens[machine]; configured {
+	if _, configured := h.auth.Load().tokens[machine]; configured {
 		return machine != hubOperatorMachineID
 	}
 	for _, route := range routes {

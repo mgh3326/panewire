@@ -371,15 +371,13 @@ func inboxBatchPermanentlyRejected(status int) bool {
 		status != http.StatusTooEarly && status != http.StatusTooManyRequests
 }
 
-func (h *HubServer) authorizeInbox(w http.ResponseWriter, r *http.Request) bool {
-	if !h.authorizeOperator(r) {
-		machine, ok := h.authorizeAgent(r)
-		lane := r.URL.Query().Get("lane")
-		route, exists := loadReportRelayRoutes(h.reportRelayPath)[lane]
-		if !ok || lane == "" || !exists || route.Machine != machine {
-			hubUnauthorized(w)
-			return false
-		}
+// authorizeInbox checks scope (inbox.read or inbox.ack) for the ?lane= the
+// request names: any lane for the operator, a lane routed to the caller's own
+// machine for a node, the lane its scope names for a service.
+func (h *HubServer) authorizeInbox(w http.ResponseWriter, r *http.Request, scope string) bool {
+	if access := h.authorize(r, scope, r.URL.Query().Get("lane")); access != hubAccessGranted {
+		writeHubAccessDenied(w, access)
+		return false
 	}
 	if h.inbox == nil {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_disabled"})
@@ -389,7 +387,7 @@ func (h *HubServer) authorizeInbox(w http.ResponseWriter, r *http.Request) bool 
 }
 
 func (h *HubServer) handleInboxList(w http.ResponseWriter, r *http.Request) {
-	if !h.authorizeInbox(w, r) {
+	if !h.authorizeInbox(w, r, hubScopeInboxRead) {
 		return
 	}
 	lane := r.URL.Query().Get("lane")
@@ -401,7 +399,7 @@ func (h *HubServer) handleInboxList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, items)
 }
 func (h *HubServer) handleInboxCount(w http.ResponseWriter, r *http.Request) {
-	if !h.authorizeInbox(w, r) {
+	if !h.authorizeInbox(w, r, hubScopeInboxRead) {
 		return
 	}
 	counts, err := h.inbox.store.counts(r.URL.Query().Get("lane"))
@@ -412,7 +410,7 @@ func (h *HubServer) handleInboxCount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, counts)
 }
 func (h *HubServer) handleInboxRead(w http.ResponseWriter, r *http.Request) {
-	if !h.authorizeInbox(w, r) {
+	if !h.authorizeInbox(w, r, hubScopeInboxRead) {
 		return
 	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
@@ -438,7 +436,7 @@ func (h *HubServer) handleInboxRead(w http.ResponseWriter, r *http.Request) {
 // authentication as the other /v1 inbox routes — node credentials must name an
 // owned lane, an operator token may wait on any lane.
 func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
-	if !h.authorizeInbox(w, r) {
+	if !h.authorizeInbox(w, r, hubScopeInboxRead) {
 		return
 	}
 	lane := r.URL.Query().Get("lane")
@@ -510,7 +508,7 @@ func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HubServer) handleInboxAck(w http.ResponseWriter, r *http.Request) {
-	if !h.authorizeInbox(w, r) {
+	if !h.authorizeInbox(w, r, hubScopeInboxAck) {
 		return
 	}
 	var b struct {

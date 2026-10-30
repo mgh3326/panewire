@@ -223,8 +223,8 @@ func (h *HubServer) handleSessionReapMessage(machineID string, agent *hubAgent, 
 }
 
 func (h *HubServer) handleSessionReap(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
-		hubUnauthorized(writer)
+	if access := h.authorize(request, hubScopeNodesAgentsRead, ""); access != hubAccessGranted {
+		writeHubAccessDenied(writer, access)
 		return
 	}
 	routes, _, _, lanesErr := loadReportRelayRoutesAndControlResult(h.reportRelayPath)

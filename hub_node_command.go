@@ -197,7 +197,7 @@ func wakeLostNodeCommands(lost []*hubNodeCommandPending) {
 }
 
 func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
+	if !h.authenticateScoped(request) {
 		hubUnauthorized(writer)
 		return
 	}
@@ -212,6 +212,10 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 	}
 	if _, valid := decodeNodeCommandArgs(body.Op, body.Args); !valid {
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		return
+	}
+	if access := h.authorize(request, hubScopeNodeCommand+body.Op, machine); access != hubAccessGranted {
+		writeHubAccessDenied(writer, access)
 		return
 	}
 	pending, requestID, state, sent := h.sendNodeCommand(machine, body.Op, body.Args)
@@ -248,8 +252,8 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 // row per machine. A node that is down or does not answer in time keeps its
 // row with an error, so a caller never mistakes it for a node with no panes.
 func (h *HubServer) handleNodesAgents(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
-		hubUnauthorized(writer)
+	if access := h.authorize(request, hubScopeNodesAgentsRead, ""); access != hubAccessGranted {
+		writeHubAccessDenied(writer, access)
 		return
 	}
 	h.mu.Lock()

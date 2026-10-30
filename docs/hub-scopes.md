@@ -1,0 +1,84 @@
+# Hub service scopes
+
+A service — a tool that is neither the operator nor a node, such as the
+mergewake reaper — gets its own hub credential that can do only its job. The
+operator token stays with the operator.
+
+## Auth file
+
+The hub's `--hub-auth` file (mode `0600`, see [hub-r6.md](hub-r6.md)) takes
+one more line shape:
+
+```sh
+HUB_TOKEN_<client>=<token>                 # operator, node, or service
+HUB_SCOPES_<client>=<scope>[,<scope>...]   # makes <client> a service
+```
+
+- A client **with** a scopes line is a service. It gets exactly the listed
+  scopes, and it is never a node: it cannot open the node websocket
+  (`GET /v1/agent`), write lanes, count as a known machine, or be an alert node.
+- A client **without** one is a node, with its rules unchanged.
+- `operator` keeps full access. A scopes line for `operator`, a scopes line
+  without a matching token, a malformed or unknown scope, and a service token
+  that equals any other client's token each refuse the whole file.
+
+The service sends the same headers a node does: `X-Panewire-Machine-ID: <client>`
+and `Authorization: Bearer <token>`. The client env file is
+`HUB_MACHINE_ID=<client>` plus `HUB_TOKEN=<token>`.
+
+## Scopes
+
+Each scope names its resource. `@*` means any machine; lane scopes always
+name one lane.
+
+| Scope | Grants |
+| --- | --- |
+| `nodes.agents.read` | `GET /v1/nodes`, `GET /v1/nodes/agents`, `GET /v1/session-reap` |
+| `node.command:<op>@<machine>` or `@*` | `POST /v1/nodes/{machine}/command` with that op (`agents.list`, `pane.capture`, `pane.close`, `worktree.inspect`) |
+| `spawn@<machine>` or `@*` | `POST /v1/spawn` for that machine, and `GET /v1/spawn/{id}` for a request on it |
+| `wake@<machine>` or `@*` | `POST /v1/nodes/wake` for that machine |
+| `inbox.read:<lane>` | `GET /v1/inbox`, `/v1/inbox/count`, `/v1/inbox/wait` and `POST /v1/inbox/{id}/read` with `?lane=<lane>` |
+| `inbox.ack:<lane>` | `POST /v1/inbox/ack` with `?lane=<lane>` |
+
+Every other route stays operator-only (or node-only for the websocket and a
+node's own lanes). A service whose scopes do not cover a request gets
+`403 {"error":"scope_forbidden"}`, so its client can report a scope error
+rather than an empty result. An unknown or wrong credential still gets `401`.
+On the routes whose resource is in the body (node command, spawn, wake) the
+body is validated before the scope check, so a malformed request answers `400`.
+`GET /v1/spawn/{id}` answers `404` for an unknown id before the scope check.
+
+The `svc-mergewake` line for hub reap (operator decision D1: every machine):
+
+```sh
+HUB_SCOPES_svc-mergewake=nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*
+```
+
+## Reload
+
+The hub re-reads the auth file when it changes on disk (checked on each
+authenticated request). A file that no longer loads — wrong mode, a symlink,
+a parse or scope error, a missing operator token — keeps the previous
+credentials and logs one `hub auth reload failed` error per bad version.
+Removing a client's lines revokes its token on the next request; a node
+websocket that is already open stays open until it reconnects.
+
+## Mint, rotate, revoke
+
+On the hub VM:
+
+```sh
+deploy/hub-token-mint.sh svc-mergewake ./svc-mergewake.env \
+  'nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*'
+```
+
+The script generates a 256-bit random token, writes the client env file
+(mode `0600`, never overwritten) and prints the auth-file lines. Add them to
+the hub auth file and copy the env file to the client host. Without a scope
+argument it mints a node credential.
+
+- **Rotate:** mint a new client id, install it, then delete the old lines.
+- **Revoke:** delete the client's lines.
+
+Two-slot rotation, a client listing endpoint and hashed-at-rest tokens are
+deferred.
