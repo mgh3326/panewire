@@ -341,6 +341,11 @@ func (h *HubServer) setPlacementPolicyFailureLocked(failure string) {
 	}
 }
 
+// handleQuotaV2Gone is the retired /v2/quota shadow store's tombstone.
+func (h *HubServer) handleQuotaV2Gone(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "quota_v2_unsupported"})
+}
+
 func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeOperator(r) {
 		hubUnauthorized(w)

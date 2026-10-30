@@ -21,10 +21,11 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	cwd := flags.String("cwd", "", "repository key (metadata only)")
 	explain := flags.Bool("explain", false, "render candidates as a table")
 	// Retired for one release: placement quota is gone, but an older caller
-	// still passing the selector must get a placement answer, not a flag
-	// error. Both values are ignored and never sent to the hub.
-	_ = flags.String("pool", "", "deprecated, ignored")
-	_ = flags.String("account-fp", "", "deprecated, ignored")
+	// still passing the selector must not be a flag error. The values are
+	// forwarded so an old hub can evaluate them and a new hub can answer
+	// with the compat stub.
+	pool := flags.String("pool", "", "deprecated")
+	accountFP := flags.String("account-fp", "", "deprecated")
 	hubURL := flags.String("hub-url", "", "HTTPS hub base URL")
 	tokenPath := flags.String("hub-token-env", "", "mode-0600 operator HUB_MACHINE_ID/HUB_TOKEN env file")
 	cfPath := flags.String("hub-cf-env", "", "optional mode-0600 CF Access env file")
@@ -53,6 +54,12 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	query.Set("class", *class)
 	if *cwd != "" {
 		query.Set("cwd", *cwd)
+	}
+	if *pool != "" {
+		query.Set("pool", *pool)
+	}
+	if *accountFP != "" {
+		query.Set("account_fp", *accountFP)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
