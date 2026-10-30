@@ -27,11 +27,10 @@ type PlacementPolicy struct {
 	WakeOnSpill      bool     `json:"wake_on_spill"`
 	MemoryFreePctMin *float64 `json:"memory_free_pct_min,omitempty"`
 	SwapUsedMBMax    *float64 `json:"swap_used_mb_max,omitempty"`
-	// QuotaExclude and QuotaBoost are retired and never evaluated, but they
-	// stay decoded so a stale policy file still loads: reload logs a warning
-	// and /v1/placement fails closed for any caller that still asks for the
-	// quota judgment while the inert rules remain. Remove them once every
-	// desk config is clean.
+	// QuotaExclude and QuotaBoost are retired and never evaluated. They stay
+	// decodable so a stale policy file still loads: reload logs a warning and
+	// strips them, so the desk can remove the keys at leisure. Remove the
+	// fields once every desk config is clean.
 	QuotaExclude []json.RawMessage                `json:"quota_exclude,omitempty"`
 	QuotaBoost   []json.RawMessage                `json:"quota_boost,omitempty"`
 	Machines     map[string]PlacementMachineSlots `json:"machines,omitempty"`
@@ -321,8 +320,11 @@ func (h *HubServer) reloadPlacementPolicyLocked() {
 		h.setPlacementPolicyFailureLocked("invalid")
 		return
 	}
-	if len(policy.QuotaExclude)+len(policy.QuotaBoost) > 0 && h.logger != nil {
-		h.logger.Warn("placement policy quota rules are ignored; remove quota_exclude/quota_boost", "quota_exclude", len(policy.QuotaExclude), "quota_boost", len(policy.QuotaBoost))
+	if len(policy.QuotaExclude)+len(policy.QuotaBoost) > 0 {
+		if h.logger != nil {
+			h.logger.Warn("placement policy quota rules are retired; remove quota_exclude/quota_boost", "quota_exclude", len(policy.QuotaExclude), "quota_boost", len(policy.QuotaBoost))
+		}
+		policy.QuotaExclude, policy.QuotaBoost = nil, nil
 	}
 	h.placementPolicy, h.placementPolicyModTime = policy, modTime
 	h.placementPolicyObservedModTime = modTime
@@ -367,29 +369,11 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid quota selector", http.StatusBadRequest)
 		return
 	}
-	// A policy that still carries now-inert quota rules cannot honestly
-	// answer a quota selector, so it fails closed until the desk removes
-	// them — checked before placement() so the refusal triggers no spill
-	// wake. Plain placement (no pool) is unaffected and keeps the warn log.
-	if pool != "" {
-		h.mu.Lock()
-		// Reload first so a desk edit removing the rules is honored at once.
-		h.reloadPlacementPolicyLocked()
-		rulesPresent := len(h.placementPolicy.QuotaExclude)+len(h.placementPolicy.QuotaBoost) > 0
-		policyStatus := h.placementPolicyStatus
-		h.mu.Unlock()
-		if rulesPresent {
-			if h.logger != nil {
-				h.logger.Warn("placement refused: policy still names retired quota rules", "pool", pool)
-			}
-			result := PlacementResult{Decision: "unavailable", Reason: "quota_policy_invalid", PolicyStatus: policyStatus, Source: "hub-only", Asof: h.now().UTC()}
-			result.Quota = &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "unknown", Reason: "quota_policy_invalid", PolicyStatus: policyStatus}
-			writeJSON(w, http.StatusOK, result)
-			return
-		}
-	}
 	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"))
 	if pool != "" {
+		// An old caller validating the quota object gets a benign allow
+		// stub: quota is retired, and any stale rules were already logged
+		// and stripped on (re)load.
 		result.Quota = &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "allow", Reason: "quota_allowed", PolicyStatus: result.PolicyStatus}
 	}
 	writeJSON(w, http.StatusOK, result)
