@@ -55,8 +55,11 @@ func defaultHubInboxPath() string {
 	return filepath.Join(root, "panewire", "hub-inbox.sqlite3")
 }
 
-func newHubInbox(policyPath, storePath string) (*hubInbox, error) {
-	if policyPath == "off" || storePath == "" {
+// newHubInbox opens the Postgres store when databaseURL is set and the SQLite
+// file at storePath otherwise; an empty storePath disables only the SQLite
+// fallback.
+func newHubInbox(policyPath, storePath, databaseURL string) (*hubInbox, error) {
+	if policyPath == "off" || (storePath == "" && databaseURL == "") {
 		return nil, nil
 	} // The kill switch never opens or modifies the inbox database.
 	if policyPath == "" {
@@ -66,7 +69,12 @@ func newHubInbox(policyPath, storePath string) (*hubInbox, error) {
 	if err != nil {
 		return nil, err
 	}
-	store, err := openLaneInboxStore(storePath)
+	var store *laneInboxStore
+	if databaseURL != "" {
+		store, err = openLaneInboxStorePostgres(context.Background(), databaseURL)
+	} else {
+		store, err = openLaneInboxStore(storePath)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -336,7 +344,7 @@ func (h *HubServer) flushInbox() {
 		// Handoffkeep now owns the stable batch identity, including an unrouted
 		// batch. Its usual replay owns retries from here, without re-escalating.
 		if result.ID > 0 && !result.PersistFailed {
-			if _, err := h.inbox.store.db.Exec(`UPDATE lane_inbox_batches SET sent=1 WHERE id=?`, b.ID); err != nil {
+			if err := h.inbox.store.markBatchSent(b.ID); err != nil {
 				h.logger.Error("inbox batch handoff recording failed")
 				failed = true
 				return

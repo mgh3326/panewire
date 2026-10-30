@@ -466,8 +466,12 @@ func TestQuietKillSwitchBypassesStore(t *testing.T) {
 			}
 		})
 	}
-	// Even a path that cannot be opened is harmless when the policy is off.
-	if inbox, err := newHubInbox("off", t.TempDir()); err != nil || inbox != nil {
+	// Even a path or database URL that cannot be opened is harmless when the
+	// policy is off.
+	if inbox, err := newHubInbox("off", t.TempDir(), ""); err != nil || inbox != nil {
+		t.Fatal(inbox, err)
+	}
+	if inbox, err := newHubInbox("off", "", "postgres://inbox.invalid/db"); err != nil || inbox != nil {
 		t.Fatal(inbox, err)
 	}
 }

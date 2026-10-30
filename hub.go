@@ -39,7 +39,10 @@ type HubServerConfig struct {
 	// CLI defaults to the embedded receiving-lane policy and a durable hub DB.
 	DeliveryPolicyPath string
 	InboxStorePath     string
-	Tokens             map[string]string
+	// InboxDatabaseURL, when set, puts the inbox on Postgres instead of
+	// InboxStorePath. It is a credential: never log it.
+	InboxDatabaseURL string
+	Tokens           map[string]string
 	// ControlPlaneLanesPath names the operator-owned JSON file listing the
 	// authority lane bundle, hot-reloaded like the placement policy. It is the
 	// production path: which lanes carry authority is deployment configuration,
@@ -650,7 +653,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 			controlPlaneLanesLastFailure = ""
 		}
 	}
-	inbox, err := newHubInbox(config.DeliveryPolicyPath, config.InboxStorePath)
+	inbox, err := newHubInbox(config.DeliveryPolicyPath, config.InboxStorePath, config.InboxDatabaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -709,7 +712,7 @@ func (h *HubServer) Close() error {
 	h.laneStallSweeps.Wait()
 	if h.inbox != nil {
 		h.inbox.flushMu.Lock()
-		_ = h.inbox.store.db.Close()
+		_ = h.inbox.store.close()
 		h.inbox.flushMu.Unlock()
 	}
 	if h.logFile == nil {

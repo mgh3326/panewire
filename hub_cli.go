@@ -131,7 +131,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 		deliveryPolicyDefault = "default"
 	}
 	deliveryPolicyPath := flags.String("delivery-policy", deliveryPolicyDefault, "default embedded YAML, YAML file, or off to disable the inbox (env PANEWIRE_DELIVERY_POLICY)")
-	inboxStorePath := flags.String("inbox-store", defaultHubInboxPath(), "durable hub inbox SQLite file; empty disables the inbox")
+	inboxStorePath := flags.String("inbox-store", defaultHubInboxPath(), "durable hub inbox SQLite file, used when "+hubDatabaseURLEnv+" is unset; empty disables the inbox")
 	logFilePath := flags.String("log-file", "", "optional hub log file, appended with mode 0640; stderr/journal output is unchanged")
 	// Retired for one release: existing hub units still pass these; the v2
 	// quota shadow store is gone and both values are ignored.
@@ -250,7 +250,7 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	if chatStore != nil && !validReportRelayLaneName(*chatDeskLane) {
 		return nil, "", ExitConditionInvalid, errors.New("hub chat desk lane is required and must be valid")
 	}
-	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, WakeConfigPath: *wakeConfigPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
+	hub, err := NewHubServer(HubServerConfig{DeliveryPolicyPath: *deliveryPolicyPath, InboxStorePath: *inboxStorePath, InboxDatabaseURL: os.Getenv(hubDatabaseURLEnv), Tokens: tokens, AlertNodes: alertNodes, Now: deps.Now, GracePeriod: *gracePeriod, Notifier: notifier, Logger: logger, BurstPolicyPath: *burstPolicyPath, WakeConfigPath: *wakeConfigPath, PlacementPolicyPath: placementPath, PrometheusURL: os.Getenv("PANEWIRE_PROM_URL"), PrometheusBearer: os.Getenv("PANEWIRE_PROM_BEARER"), PrometheusBasicUser: os.Getenv("PANEWIRE_PROM_BASIC_USER"), PrometheusBasicPass: os.Getenv("PANEWIRE_PROM_BASIC_PASS"), UIAllowCFOnly: *uiAllowCFOnly, CFAccessTeam: *cfAccessTeam, CFAccessAUD: *cfAccessAUD, CFAccessCertsURL: *cfAccessCertsURL, CFAccessHTTPClient: deps.ChatHTTPClient, ReportRelayPath: routePath, LanesNodeRowCap: *lanesNodeRowCap, ControlPlaneLanesPath: *controlPlaneLanesPath, AcceptingOverridesPath: *acceptingOverridesPath, handoffkeep: handoffkeep, ChatStore: chatStore, ChatDeskLane: *chatDeskLane})
 	if err != nil {
 		return nil, "", ExitConditionInvalid, fmt.Errorf("hub configuration is invalid: %w", err)
 	}
@@ -379,6 +379,9 @@ func parseHubAlertNodes(raw string, tokens map[string]string) (map[string]struct
 }
 
 func runHubCLI(args []string) int {
+	if len(args) > 0 && args[0] == "migrate-sqlite" {
+		return runHubMigrateSQLite(context.Background(), args[1:], os.Getenv(hubDatabaseURLEnv), os.Stdout, os.Stderr)
+	}
 	hub, _, code, err := newHubServerForCLI(args, slog.Default())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hub configuration rejected:", err)

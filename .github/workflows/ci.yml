@@ -57,20 +57,60 @@ jobs:
       - if: runner.os == 'macOS'
         run: brew install gitleaks && gitleaks git --no-banner --config .gitleaks.toml
 
+  postgres:
+    # The hub inbox's Postgres backend (docs/hub-postgres.md). Service
+    # containers exist only on Linux runners, and hosts never run a database
+    # for tests, so this is the only place the Postgres half of the store
+    # contract runs. Trust auth keeps a password out of this public file.
+    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: panewire
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - name: store contract and migrate-sqlite on Postgres
+        env:
+          PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:5432/panewire?sslmode=disable
+        shell: bash
+        # A skip here would mean the Postgres half silently did not run.
+        run: |
+          go test -race -count=2 -v -run 'LaneInboxStore|HubServerOpensPostgresInbox|HubMigrateSQLite|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-test.log"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/postgres-test.log"; then
+            echo "a Postgres test skipped"; exit 1
+          fi
+
   ci-ok:
     # Aggregate gate check: PR CI reports a check run named ci-ok. On
     # dispatches, a partial suite must not mint an exact 'ci-ok' check run.
     name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [test, postgres]
     if: always()
     steps:
       - name: Check required jobs
         env:
           TEST_RESULT: ${{ needs.test.result }}
+          POSTGRES_RESULT: ${{ needs.postgres.result }}
           SUITE: ${{ inputs.suite || 'all' }}
         run: |
           if [ "$TEST_RESULT" != success ]; then
             echo "test job did not succeed: $TEST_RESULT"
+            exit 1
+          fi
+          if [ "$POSTGRES_RESULT" != success ]; then
+            echo "postgres job did not succeed: $POSTGRES_RESULT"
             exit 1
           fi

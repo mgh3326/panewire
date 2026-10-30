@@ -119,7 +119,9 @@ rollback. Preserve the inbox database and its WAL during either rollback.
 
 ## Durability and replay
 
-`--inbox-store PATH` chooses a private, persistent SQLite database on the hub.
+`--inbox-store PATH` chooses a private, persistent SQLite database on the hub;
+setting `PANEWIRE_HUB_DATABASE_URL` puts the same store on Postgres instead
+(see [hub inbox on Postgres](hub-postgres.md)).
 The default is `os.UserConfigDir()/panewire/hub-inbox.sqlite3` (on Linux normally
 `$HOME/.config/panewire/hub-inbox.sqlite3`). It uses WAL and FULL synchronous
 commits; the database is mode 0600. The hub stores full originals and the chosen
