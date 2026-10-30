@@ -26,6 +26,9 @@ const (
 	nodeCommandPaneClose       = "pane.close"
 	nodeCommandPaneCapture     = "pane.capture"
 	nodeCommandWorktreeInspect = "worktree.inspect"
+	nodeCommandWorktreePrepare = "worktree.prepare"
+	nodeCommandWorktreeRemove  = "worktree.remove"
+	nodeCommandQuotaRefresh    = "quota.refresh"
 
 	// nodeCommandMaxResultBytes keeps a reply under the hub's per-message read
 	// limit (hubMaxMessageBytes) with room for the envelope.
@@ -60,7 +63,8 @@ var (
 
 func knownNodeCommandOp(op string) bool {
 	switch op {
-	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandWorktreeInspect:
+	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandWorktreeInspect,
+		nodeCommandWorktreePrepare, nodeCommandWorktreeRemove, nodeCommandQuotaRefresh:
 		return true
 	}
 	return false
@@ -70,7 +74,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "result_too_large":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "result_too_large":
 		return true
 	}
 	return false
@@ -169,6 +173,9 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandPaneClose:       {"pane_id", "name", "agent_status", "cwd"},
 	nodeCommandPaneCapture:     {"pane_id", "name", "cwd", "merged_after", "write"},
 	nodeCommandWorktreeInspect: {"cwd"},
+	nodeCommandWorktreePrepare: {"origin", "mode", "branch", "sha", "fetch", "dir"},
+	nodeCommandWorktreeRemove:  {"cwd", "expect_head", "base", "regenerable"},
+	nodeCommandQuotaRefresh:    {"pool"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -207,6 +214,37 @@ func decodeNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandWorktreeInspect:
 		var args nodeWorktreeInspectArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeCommandPath(args.Cwd)
+	case nodeCommandWorktreePrepare:
+		var args nodeWorktreePrepareArgs
+		if !decodeNodeCommandStrict(raw, &args) {
+			return nil, false
+		}
+		if _, ok := nodeOriginRepo(args.Origin); !ok || !validNodeJobName(args.Dir) {
+			return nil, false
+		}
+		switch args.Mode {
+		case "branch":
+			// Branch mode tracks origin/<branch> and always fetches the
+			// whole remote, so fetch must be stated empty; sha only names
+			// the expected tip.
+			valid := validNodeRefName(args.Branch) && (args.Sha == "" || nodeShaPattern.MatchString(args.Sha)) && args.Fetch == ""
+			return args, valid
+		case "detached":
+			valid := args.Branch == "" && nodeShaPattern.MatchString(args.Sha) && validNodeFetchRef(args.Fetch)
+			return args, valid
+		}
+		return nil, false
+	case nodeCommandWorktreeRemove:
+		var args nodeWorktreeRemoveArgs
+		valid := decodeNodeCommandStrict(raw, &args) && validNodeCommandPath(args.Cwd) &&
+			nodeShaPattern.MatchString(args.ExpectHead) && validNodeRefName(args.Base) && args.Regenerable != nil
+		for _, glob := range args.Regenerable {
+			valid = valid && validNodeGlob(glob)
+		}
+		return args, valid
+	case nodeCommandQuotaRefresh:
+		var args nodeQuotaRefreshArgs
+		return args, decodeNodeCommandStrict(raw, &args) && nodeQuotaPoolPattern.MatchString(args.Pool)
 	}
 	return nil, false
 }
@@ -238,6 +276,44 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandWorktreeInspect:
 		var result nodeWorktreeInspectResult
 		valid = decodeNodeCommandStrict(raw, &result)
+		target = result
+	case nodeCommandWorktreePrepare:
+		var result nodeWorktreePrepareResult
+		if !decodeNodeCommandStrict(raw, &result) {
+			break
+		}
+		switch result.Outcome {
+		case nodePreparePrepared, nodePrepareReused:
+			valid = result.Worktree != nil
+		case nodeOutcomeBusy:
+			valid = result.RetryAfterS > 0 && result.Worktree == nil
+		case nodePrepareBranchElsewhere, nodePrepareShaMissing, nodePrepareOriginMismatch,
+			nodeOutcomeDirty, nodeOutcomeGitFailed, nodeOutcomeGitTooOld:
+			valid = result.Worktree == nil && result.RetryAfterS == 0
+		}
+		target = result
+	case nodeCommandWorktreeRemove:
+		var result nodeWorktreeRemoveResult
+		if !decodeNodeCommandStrict(raw, &result) {
+			break
+		}
+		switch result.Outcome {
+		case nodeRemoveRemoved:
+			valid = result.Worktree != nil && result.RetryAfterS == 0
+		case nodeOutcomeBusy:
+			valid = result.RetryAfterS > 0 && result.Worktree == nil && result.Files == nil
+		case nodeRemoveIgnoredFiles:
+			valid = len(result.Files) > 0 && result.Worktree == nil
+		case nodeRemoveWorktreeGone, nodeRemoveWorktreeChanged, nodeRemoveUnregistered,
+			nodeRemoveLocked, nodeRemoveDetached, nodeRemoveStatusCheckFailed,
+			nodeOutcomeDirty, nodeRemovePaneInUse, nodeRemovePaneScanFailed,
+			nodeRemoveUnmerged, nodeOutcomeGitFailed, nodeOutcomeGitTooOld:
+			valid = result.Worktree == nil && result.Files == nil && result.RetryAfterS == 0
+		}
+		target = result
+	case nodeCommandQuotaRefresh:
+		var result nodeQuotaRefreshResult
+		valid = decodeNodeCommandStrict(raw, &result) && result.Outcome == nodeQuotaRefreshed
 		target = result
 	}
 	if !valid {
@@ -313,6 +389,12 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		return client.nodePaneCapture(ctx, args)
 	case nodeWorktreeInspectArgs:
 		return nodeWorktreeInspect(ctx, client.nodeGitRunner(), args.Cwd), ""
+	case nodeWorktreePrepareArgs:
+		return client.nodeWorktreePrepare(ctx, args)
+	case nodeWorktreeRemoveArgs:
+		return client.nodeWorktreeRemove(ctx, args)
+	case nodeQuotaRefreshArgs:
+		return client.nodeQuotaRefresh(ctx, args)
 	}
 	return client.nodeAgentsList(ctx)
 }

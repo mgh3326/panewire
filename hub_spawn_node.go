@@ -21,7 +21,10 @@ type hubSpawnConfig struct {
 	// RuntugPath is an optional explicit path to the runtug binary for hosts
 	// where the daemon's minimal PATH (launchd/systemd) does not include it.
 	RuntugPath string `json:"runtug_path,omitempty"`
-	Enabled    bool   `json:"enabled"`
+	// WorkRoot is the node's git work root for worktree.prepare: clones live
+	// at <work_root>/<repo>. Node-local only; callers never supply it.
+	WorkRoot string `json:"work_root,omitempty"`
+	Enabled  bool   `json:"enabled"`
 }
 
 func defaultHubSpawnConfigPath(path string) string {
