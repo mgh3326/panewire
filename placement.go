@@ -358,12 +358,17 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 	}
 	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"))
 	if pool != "" {
-		// An old caller validating the quota object: when the policy still
-		// carries rules the placement already failed closed above, so the
-		// stub mirrors that refusal rather than claiming an allow.
+		// An old caller validating the quota object: a policy that still
+		// carries now-inert quota rules cannot honestly answer allow, so
+		// the selector fails closed until the desk removes them. Plain
+		// placement (no pool) is unaffected and keeps the warn log.
 		quota := &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "allow", Reason: "quota_allowed", PolicyStatus: result.PolicyStatus}
-		if result.Reason == "quota_policy_invalid" {
+		h.mu.Lock()
+		rulesPresent := len(h.placementPolicy.QuotaExclude)+len(h.placementPolicy.QuotaBoost) > 0
+		h.mu.Unlock()
+		if rulesPresent {
 			quota.Decision, quota.Reason = "unknown", "quota_policy_invalid"
+			result.Decision, result.Reason = "unavailable", "quota_policy_invalid"
 		}
 		result.Quota = quota
 	}
@@ -444,7 +449,6 @@ func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementR
 		policy = DefaultPlacementPolicy()
 	}
 	policyStatus := h.placementPolicyStatus
-	quotaRulesPresent := len(policy.QuotaExclude)+len(policy.QuotaBoost) > 0
 	h.mu.Unlock()
 
 	metrics, err := h.fetchPlacementMetrics(ctx)
@@ -455,9 +459,6 @@ func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementR
 	}
 	result := h.makePlacement(policy, metrics, source, now)
 	result.PolicyStatus = policyStatus
-	if quotaRulesPresent {
-		result.Decision, result.Reason = "unavailable", "quota_policy_invalid"
-	}
 	h.mu.Lock()
 	h.placementCache = placementCache{key: key, at: now, result: result}
 	h.mu.Unlock()
