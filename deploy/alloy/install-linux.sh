@@ -9,6 +9,8 @@ LOKI_ENV="${ALLOY_LOKI_ENV:-${2:-/tmp/alloy/loki.env}}"
 [ -n "$MACHINE_ID" ]
 [ -r "$LOKI_ENV" ]
 [ -n "${PROM_REMOTE_WRITE_URL:-}" ] || { echo "PROM_REMOTE_WRITE_URL is required" >&2; exit 2; }
+[ -n "${PROM_REMOTE_WRITE_USER:-}" ] || { echo "PROM_REMOTE_WRITE_USER is required" >&2; exit 2; }
+[ -n "${PROM_REMOTE_WRITE_TOKEN:-}" ] || { echo "PROM_REMOTE_WRITE_TOKEN is required" >&2; exit 2; }
 if command -v apt-get >/dev/null; then
   mkdir -p /etc/apt/keyrings; wget -q -O - https://apt.grafana.com/gpg.key | gpg --dearmor > /etc/apt/keyrings/grafana.gpg 2>/dev/null || true
   echo "deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://apt.grafana.com stable main" > /etc/apt/sources.list.d/grafana.list
@@ -32,7 +34,7 @@ install -m 644 /tmp/alloy/config.linux.alloy /etc/alloy/config.alloy
 [ -S /var/run/docker.sock ] || sed -i '/^\/\/ BEGIN docker containers$/,/^\/\/ END docker containers$/d' /etc/alloy/config.alloy
 # credentials + identity in the unit's EnvironmentFile (root-owned, alloy-readable via systemd)
 ENVF=/etc/default/alloy; [ -d /etc/sysconfig ] && ENVF=/etc/sysconfig/alloy
-{ echo "CUSTOM_ARGS="; echo "CONFIG_FILE=/etc/alloy/config.alloy"; echo "MACHINE_ID=$MACHINE_ID"; echo "PROM_REMOTE_WRITE_URL=$PROM_REMOTE_WRITE_URL"; cat "$LOKI_ENV"; } > "$ENVF"
+(umask 077; { echo "CUSTOM_ARGS="; echo "CONFIG_FILE=/etc/alloy/config.alloy"; cat "$LOKI_ENV"; echo "MACHINE_ID=$MACHINE_ID"; echo "PROM_REMOTE_WRITE_URL=$PROM_REMOTE_WRITE_URL"; echo "PROM_REMOTE_WRITE_USER=$PROM_REMOTE_WRITE_USER"; echo "PROM_REMOTE_WRITE_TOKEN=$PROM_REMOTE_WRITE_TOKEN"; [ -n "${FLEET_TEXTFILE_DIR:-}" ] && echo "FLEET_TEXTFILE_DIR=$FLEET_TEXTFILE_DIR"; [ -n "${ALLOY_ENABLE_COLLECTORS:-}" ] && echo "ALLOY_ENABLE_COLLECTORS=$ALLOY_ENABLE_COLLECTORS"; } > "$ENVF")
 chmod 600 "$ENVF"
 usermod -aG systemd-journal alloy 2>/dev/null || true
 getent group docker >/dev/null && usermod -aG docker alloy 2>/dev/null || true

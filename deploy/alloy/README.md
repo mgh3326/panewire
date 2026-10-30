@@ -1,18 +1,29 @@
 # Fleet Alloy log shipper
 
-This directory records fleet Alloy configurations. It sends logs to Loki and
-node_exporter-compatible host metrics to the private Prometheus remote-write
-receiver. Do not place a service URL, username, token, or a real launchd plist
-here.
+This directory records fleet Alloy configurations. It sends logs to Grafana
+Cloud Loki and node_exporter-compatible host metrics to a hosted Prometheus
+remote-write endpoint (Grafana Cloud) over basic auth. Do not place a service
+URL, username, token, instance id, hostname, or a real launchd plist here.
 
 ## Credentials
 
 Linux reads a repository-external `loki.env` containing `LOKI_URL`, `LOKI_USER`,
-and `LOKI_TOKEN`, and requires `PROM_REMOTE_WRITE_URL` in its environment. The
-installer writes those values plus `MACHINE_ID` into the platform's Alloy systemd
-EnvironmentFile. macOS receives all five variables through the user launchd
-plist; start from `mac.plist.example` and keep the resulting plist outside this
-repository.
+and `LOKI_TOKEN`, and requires `PROM_REMOTE_WRITE_URL`,
+`PROM_REMOTE_WRITE_USER`, and `PROM_REMOTE_WRITE_TOKEN` in its environment —
+the endpoint URL, the hosted metrics instance id, and a token with metrics
+write scope. The installer writes those values plus `MACHINE_ID` into the
+platform's Alloy systemd EnvironmentFile. macOS receives the same variables
+through the user launchd plist; start from `mac.plist.example` and keep the
+resulting plist outside this repository.
+
+Two optional variables tune collection per host. The Linux installer copies
+them into the EnvironmentFile when they are set in its environment; on macOS
+they belong in the private plist's `EnvironmentVariables`.
+
+| Variable | Effect | Default |
+| --- | --- | --- |
+| `ALLOY_ENABLE_COLLECTORS` | JSON list of extra unix-exporter collectors, e.g. `["thermal"]` or `["textfile"]`. Thermal needs hardware CPU power status; hosts without it log an error per scrape, so it is opt-in. | unset → `[]` (no extra collectors) |
+| `FLEET_TEXTFILE_DIR` | Directory of `*.prom` files scraped when `"textfile"` is in `ALLOY_ENABLE_COLLECTORS` (app gauges such as session and quota counters). Required when enabling textfile. | unset |
 
 ## Install
 
@@ -35,15 +46,16 @@ root-owned systemd EnvironmentFile.
 | RPi | APT, sudo | `sudo ALLOY_LOKI_ENV=/secure/loki.env ./install-linux.sh rpi-id` |
 | macOS personal | Homebrew, user launchd | Copy the plist example outside the repo, replace placeholders, then `launchctl bootstrap gui/$(id -u) /path/to/dev.alloy.fleet.plist`. |
 
-On macOS, install Alloy with `brew install alloy` and node_exporter with
-`brew install node_exporter`. Confirm the installed exporter exposes
-`node_thermal_cpu_speed_limit_ratio`, `node_thermal_zone_temp`, and
-`node_load5` (the thermal collector must be enabled; availability varies by
-hardware/OS). Set the plist's absolute configuration path and distinct
+On macOS, install Alloy with `brew install alloy`; the unix exporter inside
+Alloy replaces a separate node_exporter. Hosts that support thermal telemetry
+set `ALLOY_ENABLE_COLLECTORS=["thermal"]` in the plist and should confirm the
+exporter exposes `node_thermal_cpu_speed_limit_ratio`,
+`node_thermal_zone_temp`, and `node_load5`. Set the plist's absolute
+configuration path and distinct
 `MACHINE_ID` (for example `mac-b`, never an existing enrolled id by copy/paste), then
 keep that plist under the user's launchd management. Copy `run-alloy.sh` beside
-the private plist and use it as shown: it fails closed if either identity or
-Prometheus URL is missing.
+the private plist and use it as shown: it fails closed if identity or any
+`PROM_REMOTE_WRITE_*` variable is missing.
 
 ## Label contract
 
@@ -67,8 +79,8 @@ Labels not applicable to a source are absent. Queries should therefore scope by
   line. Use one assignment per line as in these configurations.
 * RPM Alloy units read `/etc/sysconfig/alloy`; it must contain both
   `CONFIG_FILE=/etc/alloy/config.alloy` and the credentials/identity/Prometheus
-  variables. The installer fails before writing if `MACHINE_ID` or
-  `PROM_REMOTE_WRITE_URL` is absent.
+  variables. The installer fails before writing if `MACHINE_ID` or any
+  `PROM_REMOTE_WRITE_*` variable is absent.
   The installer writes this. Debian-family systems use `/etc/default/alloy`.
 * On a host without `/var/run/docker.sock`, remove the configuration from
   `// BEGIN docker containers` through `// END docker containers` (inclusive).

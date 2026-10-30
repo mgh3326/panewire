@@ -41,7 +41,7 @@ func TestAlloyMetricLabelContract(t *testing.T) {
 			t.Fatal(err)
 		}
 		text := string(contents)
-		for _, required := range []string{"prometheus.exporter.unix", "prometheus.remote_write", "sys.env(\"MACHINE_ID\")", "sys.env(\"PROM_REMOTE_WRITE_URL\")"} {
+		for _, required := range []string{"prometheus.exporter.unix", "prometheus.remote_write", "sys.env(\"MACHINE_ID\")", "sys.env(\"PROM_REMOTE_WRITE_URL\")", "sys.env(\"PROM_REMOTE_WRITE_USER\")", "sys.env(\"PROM_REMOTE_WRITE_TOKEN\")"} {
 			if !strings.Contains(text, required) {
 				t.Fatalf("%s missing %s", config, required)
 			}
@@ -59,7 +59,7 @@ func TestAlloyMetricLabelContract(t *testing.T) {
 		t.Fatalf("mac launcher must reject missing machine ID: %v %s", err, output)
 	}
 	command := exec.Command("sh", checker, "true", "config")
-	command.Env = append(os.Environ(), "MACHINE_ID=test", "PROM_REMOTE_WRITE_URL=http://prom.example")
+	command.Env = append(os.Environ(), "MACHINE_ID=test", "PROM_REMOTE_WRITE_URL=http://prom.example", "PROM_REMOTE_WRITE_USER=user", "PROM_REMOTE_WRITE_TOKEN=token")
 	if output, err := command.CombinedOutput(); err != nil {
 		t.Fatalf("mac launcher rejected complete environment: %v %s", err, output)
 	}
