@@ -21,7 +21,10 @@ loki.write "cloud" {
 // opt-in per host through ALLOY_ENABLE_COLLECTORS as a JSON list. Hosts that
 // enable "textfile" must also set FLEET_TEXTFILE_DIR; the unix exporter then
 // exposes *.prom files from that directory as metrics (app gauges such as
-// session and quota counters). Both unset means no extra collectors.
+// session and quota counters) and the per-process CPU/memory file written by
+// proc-metrics.sh. The Alloy process exporter is deliberately not used: it
+// cannot cap the number of series (see README). Both unset means no extra
+// collectors.
 prometheus.exporter.unix "node" {
 	enable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_ENABLE_COLLECTORS"), "[]"))
 	disable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_DISABLE_COLLECTORS"), "[]"))

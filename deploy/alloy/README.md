@@ -58,6 +58,92 @@ keep that plist under the user's launchd management. Copy `run-alloy.sh` beside
 the private plist and use it as shown: it fails closed if identity or any
 `PROM_REMOTE_WRITE_*` variable is missing.
 
+## Process metrics
+
+Per-process CPU and memory answer "which program is slowing this host" when
+host-level node metrics (CPU %, disk, network) look unremarkable. Every host,
+Linux and macOS, runs the same script, `proc-metrics.sh`, which writes
+`proc-metrics.prom` into the textfile directory every 30 seconds. The unix
+exporter serves it, so the metrics need nothing beyond `"textfile"` in
+`ALLOY_ENABLE_COLLECTORS` and `FLEET_TEXTFILE_DIR` (see the table above). They
+are grouped by process name in the `groupname` label:
+
+| Metric | Meaning |
+| --- | --- |
+| `namedprocess_namegroup_cpu_seconds_total` | CPU time of the group |
+| `namedprocess_namegroup_memory_bytes{memtype="resident"}` | Resident memory of the group |
+| `namedprocess_namegroup_num_procs` | Processes in the group |
+
+Typical queries:
+
+```promql
+topk(5, sum by (machine_id, groupname) (rate(namedprocess_namegroup_cpu_seconds_total[5m])))
+topk(5, namedprocess_namegroup_memory_bytes{machine_id="HOST"})
+```
+
+`rate()` of the CPU counter is cores in use. Memory the groups do not account
+for (kernel "wired" memory on macOS) stays in the node metrics.
+
+### Why a script and not Alloy's process exporter
+
+`prometheus.exporter.process` has no way to cap the number of groups and
+Alloy's relabeling is stateless, so it cannot rank them either. Measured on the
+fleet, hosts run 148 to 239 distinct process names; at 4 series per group that
+is about 3,200 series for the Linux hosts alone, against a 10k limit for the
+whole account. The script caps every host instead, and macOS (which has no
+`/proc` for the exporter) needs it anyway. The exporter is not configured on
+any host; a test enforces that.
+
+### How it samples
+
+One `ps -o pid=,ppid=,time=,rss=,comm=` per run. Processes are summed by
+executable name (path stripped, 32 characters of `[A-Za-z0-9._ ()+@:-]`).
+Linux kernel threads (pid 2 and its children) are skipped.
+
+CPU is exact cumulative CPU time, not `ps %cpu` (a lifetime average on Linux and
+a smoothed value on macOS). The previous run's per-process totals live in
+`.proc-metrics.state`; the growth since then is the CPU used in the interval,
+and the per-group sums accumulate into the counter. A process first seen since
+the last run contributes all its CPU time; a reused pid starts over. CPU used
+between a process's last sample and its exit is not seen, so very short-lived
+processes (single `go build` steps, `sleep`) are undercounted; anything that
+lives across a 30 second sample is counted. A gap over two minutes, such as a
+sleeping laptop, only re-baselines. The textfile is replaced by temp file +
+rename, and a failed run removes it rather than leaving stale gauges.
+
+### Enable on a host
+
+1. In the Alloy environment (EnvironmentFile on Linux, plist on macOS) set
+   `ALLOY_ENABLE_COLLECTORS` to a list containing `"textfile"`, e.g.
+   `["textfile"]`, and `FLEET_TEXTFILE_DIR` to an existing directory the job
+   user can write and Alloy can read.
+2. Schedule the script with the same `FLEET_TEXTFILE_DIR`:
+   * macOS: copy `proc-metrics.plist.example` outside the repository, fill in
+     the paths, and `launchctl bootstrap gui/$(id -u) /path/to/dev.panewire.proc-metrics.plist`.
+   * Linux: install `proc-metrics.service.example` and
+     `proc-metrics.timer.example` as `proc-metrics.service` / `.timer` in
+     `/etc/systemd/system`, fill in the paths, and
+     `systemctl enable --now proc-metrics.timer`. Needs procps `ps` (any
+     distribution's default). The service user must see every process; with
+     `/proc` mounted `hidepid=1|2` it sees only its own and the gauges
+     undercount without any error.
+
+### Series budget
+
+The free Grafana Cloud tier allows 10k active series for the whole account.
+Each run keeps the top 15 groups by CPU used in the interval (only groups that
+used CPU) and the top 15 by resident memory as their own series, and sums
+everything else into `groupname="other"` (a process literally named `other`, or
+`other_` and so on, gets one more underscore). That is at most 30 named groups + `other` = 31 groups x 3
+series = **93 series per host**, independent of how many programs run. Seven
+hosts: 7 x ~90 = **~630 series, about 6% of the tier**. A group that leaves the
+top set and returns restarts its counter from zero, which `rate()` handles as a
+reset. Check the cap with:
+
+```promql
+count by (machine_id) (namedprocess_namegroup_num_procs) > 31
+```
+
 ## Label contract
 
 | Label | Meaning | Populated by |
@@ -90,6 +176,6 @@ Labels not applicable to a source are absent. Queries should therefore scope by
 
 ## Validation
 
-Run `sh -n install-linux.sh run-alloy.sh`, `gitleaks git --no-banner`, and `go test ./...`.
-The Go test invokes `alloy fmt` for both configurations when the `alloy` binary
+Run `sh -n install-linux.sh run-alloy.sh proc-metrics.sh`, `gitleaks git --no-banner`, and `go test ./...`.
+The Go tests run `alloy fmt` and `alloy validate` on both configurations when the `alloy` binary
 is available; otherwise it reports an explicit skip.
