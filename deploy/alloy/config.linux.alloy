@@ -17,8 +17,14 @@ loki.write "cloud" {
 }
 
 // node_exporter-compatible host metrics for hub placement. MACHINE_ID is an
-// EnvironmentFile contract, not a literal host label.
-prometheus.exporter.unix "node" { }
+// EnvironmentFile contract, not a literal host label. Hosts that set
+// FLEET_TEXTFILE_DIR expose *.prom files from that directory as metrics
+// (app gauges such as session and quota counters); unset means disabled.
+prometheus.exporter.unix "node" {
+	textfile {
+		directory          = sys.env("FLEET_TEXTFILE_DIR")
+	}
+}
 
 discovery.relabel "node" {
 	targets = prometheus.exporter.unix.node.targets
@@ -32,6 +38,11 @@ discovery.relabel "node" {
 prometheus.remote_write "fleet" {
 	endpoint {
 		url = sys.env("PROM_REMOTE_WRITE_URL")
+
+		basic_auth {
+			username = sys.env("PROM_REMOTE_WRITE_USER")
+			password = sys.env("PROM_REMOTE_WRITE_TOKEN")
+		}
 	}
 }
 
