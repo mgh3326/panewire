@@ -99,10 +99,14 @@ func (h *HubServer) nodeCommandStateLocked(machine string) (*hubAgent, string) {
 	switch {
 	case record == nil:
 		return nil, "disconnected"
-	case record.agent == nil || record.state != "connected":
-		return nil, record.state
+	case record.agent != nil && record.state == "connected":
+		return record.agent, ""
+	case record.state == "" || record.state == "connected":
+		// A record without a usable connection always names a state, so a
+		// nil agent can never read as available.
+		return nil, "disconnected"
 	}
-	return record.agent, ""
+	return nil, record.state
 }
 
 // sendNodeCommand registers and sends one command. A non-empty state means the

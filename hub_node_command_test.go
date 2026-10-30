@@ -99,6 +99,8 @@ func TestHubNodeCommandRejectsBeforeSending(t *testing.T) {
 		map[string]any{"op": "pane.close", "args": map[string]any{"pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a", "force": true}},
 		map[string]any{"op": "worktree.inspect", "args": map[string]any{"cwd": "relative"}},
 		map[string]any{"op": "agents.list", "extra": 1},
+		map[string]any{"op": "pane.capture", "args": map[string]any{"pane_id": "w1:p1", "name": "job-a", "cwd": "/work/a"}},
+		map[string]any{"op": "pane.capture", "args": map[string]any{"pane_id": "w1:p1", "name": "job-a", "cwd": "/work/a", "merged_after": 0, "write": nil}},
 	} {
 		if status, _, contents := t14HTTP(t, http.MethodPost, nodeCommandURL(server, "machine-a"), t14OperatorToken, body); status != http.StatusBadRequest {
 			t.Fatalf("body=%v status=%d response=%s", body, status, contents)
@@ -251,5 +253,34 @@ func TestNodeCommandEndToEnd(t *testing.T) {
 	status, _, contents = t14HTTP(t, http.MethodPost, nodeCommandURL(server, "machine-a"), t14OperatorToken, nodeCommandCloseBody)
 	if status != http.StatusOK || !strings.Contains(string(contents), `"outcome":"pane-changed"`) || fake.called("pane", "close") != 1 {
 		t.Fatalf("status=%d body=%s calls=%v", status, contents, fake.calls)
+	}
+}
+
+// TestHubNodeCommandStatelessRecordIsUnavailable: a node record with no state
+// and no connection must answer node_unavailable, never reach a nil agent.
+func TestHubNodeCommandStatelessRecordIsUnavailable(t *testing.T) {
+	hub, server := t14Hub(t)
+	hub.mu.Lock()
+	hub.nodes["machine-z"] = &hubNodeRecord{machineID: "machine-z"}
+	hub.nodes["machine-y"] = &hubNodeRecord{machineID: "machine-y", state: "connected"}
+	hub.mu.Unlock()
+	for _, machine := range []string{"machine-z", "machine-y"} {
+		status, _, contents := t14HTTP(t, http.MethodPost, nodeCommandURL(server, machine), t14OperatorToken, map[string]any{"op": "agents.list"})
+		body := nodeCommandDecode(t, contents)
+		if status != http.StatusServiceUnavailable || body["error"] != "node_unavailable" || body["state"] != "disconnected" {
+			t.Fatalf("%s status=%d body=%s", machine, status, contents)
+		}
+	}
+	status, _, contents := t14HTTP(t, http.MethodGet, server.URL+"/v1/nodes/agents", t14OperatorToken, nil)
+	var body struct {
+		Nodes []hubNodeAgentsRow `json:"nodes"`
+	}
+	if err := json.Unmarshal(contents, &body); err != nil || status != http.StatusOK || len(body.Nodes) != 2 {
+		t.Fatalf("status=%d body=%s err=%v", status, contents, err)
+	}
+	for _, row := range body.Nodes {
+		if row.State != "disconnected" || row.Error != "node_unavailable" {
+			t.Fatalf("row=%+v", row)
+		}
 	}
 }

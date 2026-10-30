@@ -156,9 +156,35 @@ func decodeNodeCommandStrict(raw []byte, target any) bool {
 	return decoder.Decode(&trailing) == io.EOF
 }
 
+// nodeCommandArgFields is each op's exact argument set. Every field is
+// required: a zero value such as write:false or merged_after:0 is a decision
+// the caller must state, never a default for an omitted field.
+var nodeCommandArgFields = map[string][]string{
+	nodeCommandAgentsList:      {},
+	nodeCommandPaneClose:       {"pane_id", "name", "agent_status", "cwd"},
+	nodeCommandPaneCapture:     {"pane_id", "name", "cwd", "merged_after", "write"},
+	nodeCommandWorktreeInspect: {"cwd"},
+}
+
+// nodeCommandHasFields reports whether raw is an object holding exactly the
+// named fields, none of them null.
+func nodeCommandHasFields(raw json.RawMessage, names []string) bool {
+	var fields map[string]json.RawMessage
+	if json.Unmarshal(raw, &fields) != nil || fields == nil || len(fields) != len(names) {
+		return false
+	}
+	for _, name := range names {
+		if value, found := fields[name]; !found || isJSONNull(value) {
+			return false
+		}
+	}
+	return true
+}
+
 // decodeNodeCommandArgs returns the typed, validated arguments for op.
 func decodeNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
-	if len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes {
+	names, known := nodeCommandArgFields[op]
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || !nodeCommandHasFields(raw, names) {
 		return nil, false
 	}
 	switch op {
@@ -366,17 +392,35 @@ func (client *HubClient) nodePaneCapture(ctx context.Context, args nodePaneCaptu
 	if client.jobsInboxRoot == "" {
 		return nil, "jobs_root_unset"
 	}
-	dir := filepath.Join(client.jobsInboxRoot, "jobs", args.Name)
-	info, err := os.Stat(dir)
+	// Every read and write below goes through an os.Root on the jobs
+	// directory, so no symlink — at the job dir, report.md, pane-screen.txt
+	// or anywhere between — can lead outside it. The job dir itself must be
+	// a real directory: a symlinked one is not something the fleet created.
+	jobsRoot := filepath.Join(client.jobsInboxRoot, "jobs")
+	jobs, err := os.OpenRoot(jobsRoot)
+	if errors.Is(err, os.ErrNotExist) {
+		return nodePaneCaptureResult{Outcome: nodeCaptureNotAJob}, ""
+	} else if err != nil {
+		return nil, "capture_failed"
+	}
+	defer jobs.Close()
+	info, err := jobs.Lstat(args.Name)
 	switch {
 	case errors.Is(err, os.ErrNotExist) || (err == nil && !info.IsDir()):
 		return nodePaneCaptureResult{Outcome: nodeCaptureNotAJob}, ""
 	case err != nil:
 		return nil, "capture_failed"
 	}
+	job, err := jobs.OpenRoot(args.Name)
+	if err != nil {
+		return nil, "capture_failed"
+	}
+	defer job.Close()
+	dir := filepath.Join(jobsRoot, args.Name)
 	report := filepath.Join(dir, "report.md")
 	if args.MergedAfter > 0 {
-		info, err := os.Stat(report)
+		// Lstat: a symlinked report.md is not the job's own report.
+		info, err := job.Lstat("report.md")
 		switch {
 		case err == nil && info.Mode().IsRegular() && info.ModTime().Unix() > args.MergedAfter:
 			return nodePaneCaptureResult{Outcome: nodeCaptureReport, Saved: report}, ""
@@ -401,7 +445,7 @@ func (client *HubClient) nodePaneCapture(ctx context.Context, args nodePaneCaptu
 	if err != nil {
 		return nil, "capture_failed"
 	}
-	if err := replaceFileAtomically(screen, ".pane-screen-*", output, 0600); err != nil {
+	if err := replaceFileAtomicallyInRoot(job, nodeCaptureScreenTxt, output, 0600); err != nil {
 		return nil, "capture_failed"
 	}
 	return nodePaneCaptureResult{Outcome: nodeCaptureScreen, Saved: screen}, ""
