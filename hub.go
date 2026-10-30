@@ -463,6 +463,9 @@ type HubServer struct {
 	alreadyDeliveredRelayEvents uint64
 	relayPayloadMismatches      uint64
 	spawnRecords                map[string]*hubSpawnRecord
+	nodeCommands                map[string]*hubNodeCommandPending
+	nodeCommandWait             time.Duration // fixture seam; zero is hubNodeCommandWait.
+	nodeAgentsWait              time.Duration // fixture seam; zero is hubNodeAgentsWait.
 	// laneStallMu is TryLock'd so at most one lane-stall observation runs and
 	// is held for the run's whole life: once Close has taken it and set
 	// laneStallClosing, no new run can start and any in-flight one is already
@@ -771,6 +774,8 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
 	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
+	mux.HandleFunc("GET /v1/nodes/agents", h.handleNodesAgents)
+	mux.HandleFunc("POST /v1/nodes/{machine}/command", h.handleNodeCommand)
 	return mux
 }
 
@@ -1108,6 +1113,10 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubAgent, payload []byte) {
 	if result, ok := parseHubSpawnResult(payload); ok {
 		h.resolveSpawn(machineID, result)
+		return
+	}
+	if result, ok := parseHubNodeCommandResult(payload); ok {
+		h.resolveNodeCommand(machineID, agent, result)
 		return
 	}
 	if h.handleSessionReapMessage(machineID, agent, payload) {
@@ -1799,6 +1808,7 @@ func (h *HubServer) recordNote(machineID, text string, received time.Time) {
 
 func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 	h.loseSpawns(machineID, agent)
+	h.loseNodeCommands(agent)
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {

@@ -158,6 +158,9 @@ type HubClient struct {
 	spawnSeenMu       sync.Mutex
 	spawnSeen         map[string]struct{}
 	spawnTimeoutExtra time.Duration // fixture seam; production is 60 seconds.
+	nodeCommandMu     sync.Mutex
+	nodeHerdr         relayCommandRunner // fixture seam for node commands; nil runs herdr.
+	nodeGit           relayCommandRunner // fixture seam for node commands; nil runs git.
 	busyRelayMu       sync.Mutex
 	busyRelay         *relayBusyManager
 	relayCommand      relayCommandRunner   // fixture seam for agent get/wait.
@@ -517,6 +520,8 @@ type hubOutboundMessage struct {
 	BriefInline     string
 	Args            []string
 	WaitSeconds     int
+	CommandOp       string
+	CommandArgs     json.RawMessage
 	RecvSeq         int64 // local read-loop order; never part of the wire shape.
 }
 
@@ -1517,6 +1522,8 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				go client.handleHubQuota(ctx, peer, message)
 			case "job.spawn":
 				go client.handleHubSpawn(ctx, peer, message)
+			case "node.command":
+				go client.handleNodeCommand(ctx, peer, message)
 			}
 		}
 	}()
@@ -2311,6 +2318,13 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		if !validHubSpawnRequest(hubSpawnRequest{RequestID: message.RequestID, Machine: "machine-a", CWDKey: message.CWDKey, Brief: brief, Args: message.Args, WaitSeconds: message.WaitSeconds}) {
 			return hubOutboundMessage{}, false
 		}
+	case "node.command":
+		// Arguments are validated per op when the command runs, so a bad one
+		// still answers invalid_args instead of leaving the hub to time out.
+		if len(fields) != 4 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || !validHubRequestID(message.RequestID) || json.Unmarshal(fields["op"], &message.CommandOp) != nil || !knownNodeCommandOp(message.CommandOp) || len(fields["args"]) == 0 {
+			return hubOutboundMessage{}, false
+		}
+		message.CommandArgs = append(json.RawMessage(nil), fields["args"]...)
 	default:
 		return hubOutboundMessage{}, false
 	}
