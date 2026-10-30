@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"os"
 	"strings"
+
+	"github.com/coder/websocket"
 )
 
 // Hub service scopes. A client with a HUB_SCOPES_<client> line in the hub
@@ -208,13 +210,16 @@ func hubGrantsAllow(grants []hubScopeGrant, scope, resource string) bool {
 // never lock every client out. Removing a client's lines revokes it on the
 // next request.
 func (h *HubServer) currentAuth() *hubAuthSet {
-	if h.authPath != "" {
-		h.reloadAuth()
+	if h.authPath != "" && h.reloadAuth() {
+		// Outside authMu: the sweep takes h.mu, and paths holding h.mu read
+		// the set with auth.Load() only.
+		h.closeRevokedAgents()
 	}
 	return h.auth.Load()
 }
 
-func (h *HubServer) reloadAuth() {
+// reloadAuth answers whether it stored a new auth set.
+func (h *HubServer) reloadAuth() bool {
 	// The stat runs outside authMu so a slow filesystem delays each request by
 	// its own stat instead of queueing every request behind one.
 	info, err := os.Lstat(h.authPath)
@@ -222,16 +227,16 @@ func (h *HubServer) reloadAuth() {
 	defer h.authMu.Unlock()
 	if err != nil {
 		h.recordAuthReloadFailure(nil, "unreadable")
-		return
+		return false
 	}
 	h.authFailedMissing = false
 	if sameHubAuthFile(h.authObserved, info) || sameHubAuthFile(h.authFailed, info) {
-		return
+		return false
 	}
 	set, err := loadHubAuthConfig(h.authPath)
 	if err != nil {
 		h.recordAuthReloadFailure(info, "invalid")
-		return
+		return false
 	}
 	// Alert nodes are fixed at startup; one cannot become a service by reload
 	// (it would keep a presence record and raise node-down alerts). Removing
@@ -239,12 +244,50 @@ func (h *HubServer) reloadAuth() {
 	for machine := range h.alertNodes {
 		if _, service := set.services[machine]; service {
 			h.recordAuthReloadFailure(info, "alert_node_scoped")
-			return
+			return false
 		}
 	}
 	h.auth.Store(&set)
 	h.authObserved, h.authFailed = info, nil
 	h.logger.Info("hub auth reloaded", "nodes", len(set.tokens)-1, "services", len(set.services))
+	return true
+}
+
+// agentCredentialCurrent answers whether the token a node websocket opened
+// with is still that machine's node token. A machine whose lines were
+// removed, whose token rotated, or that became a service fails it: a service
+// is never a node, not even on a socket opened before the reload.
+func (h *HubServer) agentCredentialCurrent(machineID string, agent *hubAgent) bool {
+	token, node := h.auth.Load().tokens[machineID]
+	return node && hubTokenMatches(token, agent.credential)
+}
+
+// closeRevokedAgents closes every registered node websocket whose credential
+// the current auth set no longer holds. Closing ends its read loop, which
+// disconnects the record as any dropped connection would.
+func (h *HubServer) closeRevokedAgents() {
+	var revoked []*hubAgent
+	var machines []string
+	h.mu.Lock()
+	for machineID, record := range h.nodes {
+		if record.agent != nil && !h.agentCredentialCurrent(machineID, record.agent) {
+			revoked = append(revoked, record.agent)
+			machines = append(machines, machineID)
+		}
+	}
+	h.mu.Unlock()
+	for index, agent := range revoked {
+		h.logger.Warn("hub closed a node websocket whose credential was revoked", "machine_id", machines[index])
+		go func(agent *hubAgent) { _ = agent.conn.Close(websocket.StatusPolicyViolation, "credential revoked") }(agent)
+	}
+}
+
+// closeRevokedAgent is the read loop's half of the sweep: it disconnects the
+// record before closing, so no push is routed to the socket meanwhile.
+func (h *HubServer) closeRevokedAgent(machineID string, agent *hubAgent) {
+	h.logger.Warn("hub closed a node websocket whose credential was revoked", "machine_id", machineID)
+	h.disconnect(machineID, agent)
+	_ = agent.conn.Close(websocket.StatusPolicyViolation, "credential revoked")
 }
 
 // recordAuthReloadFailure logs once per failing file version. The observed

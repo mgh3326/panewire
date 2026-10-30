@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"bytes"
+	"context"
 	"io"
 	"log/slog"
 	"net/http"
@@ -522,4 +523,68 @@ func TestHubAuthWakeTimeoutBeforeScope(t *testing.T) {
 	if status != http.StatusBadRequest {
 		t.Fatalf("invalid wake timeout: status %d, want 400", status)
 	}
+}
+
+// TestHubAuthReloadClosesRevokedNodeWebsocket: a reload that turns a
+// connected node into a service, or rotates a node token, closes the socket
+// opened with the old credential, so a service never keeps acting as a node.
+// Other nodes stay connected.
+func TestHubAuthReloadClosesRevokedNodeWebsocket(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hub-auth.env")
+	base := "HUB_TOKEN_operator=" + pw2OperatorToken + "\nHUB_TOKEN_node-b=" + pw2NodeBToken + "\n"
+	pw2WriteAuth(t, path, base+"HUB_TOKEN_node-a="+pw2NodeAToken+"\n", 0600)
+	logs := &pw2LockedBuffer{}
+	hub, server := pw2Hub(t, nil, path, logs)
+	operator := pw2Caller{"operator", "", pw2OperatorToken}
+	state := func(machine string) string {
+		for _, node := range hub.Nodes() {
+			if node.MachineID == machine {
+				return node.State
+			}
+		}
+		return ""
+	}
+	nodeA := r6DialAgent(t, server.URL, "node-a", pw2NodeAToken)
+	defer nodeA.CloseNow()
+	r6Write(t, nodeA, map[string]any{"type": "hello", "machine_id": "node-a", "version": "pw2-a"})
+	nodeB := r6DialAgent(t, server.URL, "node-b", pw2NodeBToken)
+	defer nodeB.CloseNow()
+	r6Write(t, nodeB, map[string]any{"type": "hello", "machine_id": "node-b", "version": "pw2-b"})
+	eventually(t, 5*time.Second, "both nodes connected", func() bool {
+		return state("node-a") == "connected" && state("node-b") == "connected"
+	})
+
+	pw2WriteAuth(t, path, base+"HUB_TOKEN_node-a="+pw2NodeAToken+"\nHUB_SCOPES_node-a=nodes.agents.read\n", 0600)
+	if status, _ := operator.do(t, server, "GET", "/v1/nodes", ""); status != http.StatusOK {
+		t.Fatalf("operator nodes status %d", status)
+	}
+	readContext, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if _, _, err := nodeA.Read(readContext); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		t.Fatalf("converted node websocket stayed open: %v", err)
+	}
+	eventually(t, 5*time.Second, "converted node disconnected", func() bool { return state("node-a") == "disconnected" })
+	if state("node-b") != "connected" {
+		t.Fatalf("unchanged node-b state %q", state("node-b"))
+	}
+	if !strings.Contains(logs.String(), "credential was revoked") || strings.Contains(logs.String(), pw2NodeAToken) {
+		t.Fatal("revocation close was not logged, or logged the token")
+	}
+
+	// A socket that has not registered yet is outside the reload sweep; its
+	// first message after a token rotation closes it before it registers.
+	pending := r6DialAgent(t, server.URL, "node-b", pw2NodeBToken)
+	defer pending.CloseNow()
+	pw2WriteAuth(t, path, "HUB_TOKEN_operator="+pw2OperatorToken+"\nHUB_TOKEN_node-b="+pw2NodeBToken+"-rotated\n", 0600)
+	if status, _ := operator.do(t, server, "GET", "/v1/nodes", ""); status != http.StatusOK {
+		t.Fatalf("operator nodes status %d", status)
+	}
+	if _, _, err := nodeB.Read(readContext); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		t.Fatalf("rotated node websocket stayed open: %v", err)
+	}
+	r6Write(t, pending, map[string]any{"type": "hello", "machine_id": "node-b", "version": "pw2-b"})
+	if _, _, err := pending.Read(readContext); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
+		t.Fatalf("unregistered socket with a rotated token stayed open: %v", err)
+	}
+	eventually(t, 5*time.Second, "rotated node disconnected", func() bool { return state("node-b") == "disconnected" })
 }

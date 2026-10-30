@@ -66,8 +66,10 @@ a parse or scope error, a missing operator token — keeps the previous
 credentials and logs one `hub auth reload failed` error per bad version.
 A reload that would turn an `--alert-nodes` node into a service is refused
 the same way (restart the hub with a new list instead). Removing a client's
-lines revokes its token on the next request; a node
-websocket that is already open stays open until it reconnects.
+lines revokes its token on the next request. A node websocket whose token
+the reload no longer holds as that machine's node token — lines removed,
+token rotated, or the client turned into a service — is closed
+(`1008 credential revoked`) and must reconnect with a current node token.
 
 ## Mint, rotate, revoke
 

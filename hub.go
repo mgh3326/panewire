@@ -176,7 +176,10 @@ type hubNodeRecord struct {
 }
 
 type hubAgent struct {
-	conn        *websocket.Conn
+	conn *websocket.Conn
+	// credential is the node token the websocket opened with; an auth reload
+	// that no longer maps the machine to it closes the socket.
+	credential  string
 	writeMu     sync.Mutex
 	transient   bool
 	failovers   chan hubFailoverEvent
@@ -1101,7 +1104,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), wakes: make(chan hubWakeRequestEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
+	agent := &hubAgent{conn: connection, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), wakes: make(chan hubWakeRequestEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
@@ -1120,11 +1123,22 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 			h.disconnect(machineID, agent)
 			return
 		}
+		// The check before a message refuses a revoked credential; the one
+		// after closes the gap where a reload lands between that check and a
+		// hello registering the agent, which the reload sweep cannot see yet.
+		if !h.agentCredentialCurrent(machineID, agent) {
+			h.closeRevokedAgent(machineID, agent)
+			return
+		}
 		if messageType != websocket.MessageText {
 			h.countUnknownMessage()
 			continue
 		}
 		h.handleAgentMessage(machineID, request.RemoteAddr, agent, payload)
+		if !h.agentCredentialCurrent(machineID, agent) {
+			h.closeRevokedAgent(machineID, agent)
+			return
+		}
 	}
 }
 
