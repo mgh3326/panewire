@@ -29,9 +29,11 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	hubURL := flags.String("hub-url", "", "HTTPS hub base URL")
 	tokenPath := flags.String("hub-token-env", "", "mode-0600 operator HUB_MACHINE_ID/HUB_TOKEN env file")
 	cfPath := flags.String("hub-cf-env", "", "optional mode-0600 CF Access env file")
-	// The selector is still forwarded to the hub, so its format stays checked.
+	// The selector is still forwarded to the hub, so its format and pairing
+	// (account_fp needs pool, as the hub's 400 contract requires) stay checked.
 	if flags.Parse(args) != nil || flags.NArg() != 0 || (*class != "worker" && *class != "verifier") || len(*cwd) > 256 || strings.ContainsAny(*cwd, "\r\n\x00") || *hubURL == "" || *tokenPath == "" ||
-		(*pool != "" && !hubQuotaPoolPattern.MatchString(*pool)) || (*accountFP != "" && !hubQuotaAccountFPPattern.MatchString(*accountFP)) {
+		(*pool != "" && !hubQuotaPoolPattern.MatchString(*pool)) || (*accountFP != "" && *pool == "") ||
+		(*accountFP != "" && !hubQuotaAccountFPPattern.MatchString(*accountFP)) {
 		return ExitUsage
 	}
 	env, err := loadHubTokenEnv(*tokenPath)
