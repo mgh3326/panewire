@@ -87,6 +87,7 @@ jobs:
         shell: bash
         # A skip here would mean the Postgres half silently did not run.
         run: |
+          set -o pipefail  # shell: bash already sets it; kept explicit for the tee
           go test -race -count=2 -v -run 'LaneInboxStore|HubServerOpensPostgresInbox|HubMigrateSQLite|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-test.log"
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/postgres-test.log"; then
             echo "a Postgres test skipped"; exit 1

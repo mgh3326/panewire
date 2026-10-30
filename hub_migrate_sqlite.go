@@ -7,7 +7,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
+	"path/filepath"
 	"reflect"
 	"sort"
 
@@ -143,7 +145,14 @@ func openHubInboxSQLiteReadOnly(path string) (*sql.DB, error) {
 	if !info.Mode().IsRegular() {
 		return nil, errors.New("not a regular file")
 	}
-	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro&_pragma=busy_timeout(5000)")
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	// Built as a URL so '?', '#' or '%' in a file name stay part of the path
+	// instead of truncating it or adding parameters.
+	uri := url.URL{Scheme: "file", Path: abs, RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}
+	db, err := sql.Open("sqlite", uri.String())
 	if err != nil {
 		return nil, err
 	}

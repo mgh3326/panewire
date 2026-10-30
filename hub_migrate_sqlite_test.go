@@ -91,6 +91,35 @@ func TestHubMigrateSQLiteDryRunReadsOnly(t *testing.T) {
 	}
 }
 
+func TestHubMigrateSQLiteSourcePathIsNotAURIFragment(t *testing.T) {
+	src := hubMigrateSQLiteSource(t)
+	dir := filepath.Join(t.TempDir(), "odd#dir")
+	if err := os.Mkdir(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "hub?mode=rwc&x=%41.sqlite3")
+	if err := os.Rename(src, path); err != nil {
+		t.Fatal(err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := runHubMigrateSQLite(context.Background(), []string{"--from", path}, "", &stdout, &stderr); code != ExitOK || !strings.Contains(stdout.String(), hubMigrateSQLiteSourceSummary) {
+		t.Fatalf("code = %d, stdout = %s, stderr = %s", code, stdout.String(), stderr.String())
+	}
+	// Only the source and the sidecars a WAL reader may create; a truncated
+	// URI would have opened (and created) a file named "hub".
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		switch strings.TrimPrefix(entry.Name(), filepath.Base(path)) {
+		case "", "-wal", "-shm":
+		default:
+			t.Fatalf("the open created %q", entry.Name())
+		}
+	}
+}
+
 func TestHubMigrateSQLiteRefusals(t *testing.T) {
 	path := hubMigrateSQLiteSource(t)
 	// A node store is SQLite but has none of the inbox tables.
