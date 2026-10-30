@@ -20,6 +20,11 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	class := flags.String("class", "", "worker or verifier")
 	cwd := flags.String("cwd", "", "repository key (metadata only)")
 	explain := flags.Bool("explain", false, "render candidates as a table")
+	// Retired for one release: placement quota is gone, but an older caller
+	// still passing the selector must get a placement answer, not a flag
+	// error. Both values are ignored and never sent to the hub.
+	_ = flags.String("pool", "", "deprecated, ignored")
+	_ = flags.String("account-fp", "", "deprecated, ignored")
 	hubURL := flags.String("hub-url", "", "HTTPS hub base URL")
 	tokenPath := flags.String("hub-token-env", "", "mode-0600 operator HUB_MACHINE_ID/HUB_TOKEN env file")
 	cfPath := flags.String("hub-cf-env", "", "optional mode-0600 CF Access env file")

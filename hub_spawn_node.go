@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -249,7 +248,13 @@ const hubSpawnOverrideReason = "hub-directed"
 func runHubSpawnCommand(ctx context.Context, cwd, briefPath, workspace, session string, args []string) (*hubSpawnOutput, error) {
 	argv := []string{"spawn", "-c", cwd, "-p", briefPath, "--host", "local", "-w", workspace}
 	argv = append(argv, args...)
-	if !slices.Contains(args, "--override-reason") {
+	// Only an actual flag position counts: an allowed option may legitimately
+	// carry the same text as its value.
+	callerOverride := false
+	for index := 0; index+1 < len(args); index += 2 {
+		callerOverride = callerOverride || args[index] == "--override-reason"
+	}
+	if !callerOverride {
 		argv = append(argv, "--override-reason", hubSpawnOverrideReason)
 	}
 	command := exec.CommandContext(ctx, "runtug", argv...)

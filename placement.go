@@ -19,14 +19,19 @@ import (
 // PlacementPolicy is deliberately small and operator-owned. It selects a
 // local machine first, then considers spill targets in the listed order.
 type PlacementPolicy struct {
-	LocalMachine     string                           `json:"local_machine"`
-	SpillTargets     []string                         `json:"spill_targets"`
-	MaxActiveJobs    int                              `json:"max_active_jobs"`
-	LoadRatio        float64                          `json:"load_ratio"`
-	WakeOnSpill      bool                             `json:"wake_on_spill"`
-	MemoryFreePctMin *float64                         `json:"memory_free_pct_min,omitempty"`
-	SwapUsedMBMax    *float64                         `json:"swap_used_mb_max,omitempty"`
-	Machines         map[string]PlacementMachineSlots `json:"machines,omitempty"`
+	LocalMachine     string   `json:"local_machine"`
+	SpillTargets     []string `json:"spill_targets"`
+	MaxActiveJobs    int      `json:"max_active_jobs"`
+	LoadRatio        float64  `json:"load_ratio"`
+	WakeOnSpill      bool     `json:"wake_on_spill"`
+	MemoryFreePctMin *float64 `json:"memory_free_pct_min,omitempty"`
+	SwapUsedMBMax    *float64 `json:"swap_used_mb_max,omitempty"`
+	// QuotaExclude and QuotaBoost are retired and ignored; they stay decodable
+	// for one release so an existing policy file still parses. A policy that
+	// names a pool is a config the desk must clean up — nothing reads it.
+	QuotaExclude []json.RawMessage                `json:"quota_exclude,omitempty"`
+	QuotaBoost   []json.RawMessage                `json:"quota_boost,omitempty"`
+	Machines     map[string]PlacementMachineSlots `json:"machines,omitempty"`
 	// Power is an optional relative speed weight per machine (100 = the
 	// strongest host). A machine without an entry weighs defaultPlacementPower.
 	// See docs/placement.md for how the weights are measured.
