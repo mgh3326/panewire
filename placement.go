@@ -358,7 +358,15 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 	}
 	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"))
 	if pool != "" {
-		result.Quota = &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "allow", Reason: "quota_allowed", PolicyStatus: result.PolicyStatus}
+		quota := &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "allow", Reason: "quota_allowed", PolicyStatus: result.PolicyStatus}
+		// A policy still carrying quota rules is not a clean "allow": the
+		// rules are now inert, so the selector fails closed until the desk
+		// removes them.
+		if h.placementHasQuotaRules() {
+			quota.Decision, quota.Reason = "unknown", "quota_policy_invalid"
+			result.Decision, result.Reason = "unavailable", "quota_policy_invalid"
+		}
+		result.Quota = quota
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -419,6 +427,14 @@ func (h *HubServer) handlePlacementSlots(w http.ResponseWriter, r *http.Request)
 	h.mu.Unlock()
 	sort.Slice(views, func(i, j int) bool { return views[i].Machine < views[j].Machine })
 	writeJSON(w, http.StatusOK, placementSlotsResult{Machines: views, PolicyStatus: status, Asof: now})
+}
+
+// placementHasQuotaRules reports whether the loaded policy still names the
+// retired quota rules. Call after a reload so the answer is current.
+func (h *HubServer) placementHasQuotaRules() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return len(h.placementPolicy.QuotaExclude)+len(h.placementPolicy.QuotaBoost) > 0
 }
 
 func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementResult {
