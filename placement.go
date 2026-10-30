@@ -210,6 +210,9 @@ func (r *PlacementResult) UnmarshalJSON(data []byte) error {
 		Asof         time.Time            `json:"asof"`
 		PolicyStatus string               `json:"policy_status"`
 		Reason       string               `json:"reason"`
+		// Quota keeps an old hub's quota object decodable during a rolling
+		// upgrade; the value is ignored. Drop it once every hub runs this build.
+		Quota json.RawMessage `json:"quota"`
 	}
 	var wire wirePlacementResult
 	decoder := json.NewDecoder(bytes.NewReader(data))
