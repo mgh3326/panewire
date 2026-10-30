@@ -1,8 +1,11 @@
 package panewire
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"os"
 	"path/filepath"
+	"syscall"
 )
 
 // Durable file publication is shared by every inbox, store, and policy
@@ -56,6 +59,47 @@ func replaceFileAtomically(path, pattern string, contents []byte, perm os.FileMo
 		return err
 	}
 	syncDirectoryBestEffort(filepath.Dir(path))
+	return nil
+}
+
+// replaceFileAtomicallyInRoot is replaceFileAtomically confined to root: name
+// is relative to root and nothing outside it can be reached through a
+// symlink. The temporary file is created O_EXCL|O_NOFOLLOW, and the rename
+// replaces a symlink at name rather than writing through it.
+func replaceFileAtomicallyInRoot(root *os.Root, name string, contents []byte, perm os.FileMode) error {
+	suffix := make([]byte, 8)
+	if _, err := rand.Read(suffix); err != nil {
+		return err
+	}
+	dir := filepath.Dir(name)
+	temporaryName := filepath.Join(dir, "."+filepath.Base(name)+"-"+hex.EncodeToString(suffix))
+	temporary, err := root.OpenFile(temporaryName, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, perm)
+	if err != nil {
+		return err
+	}
+	defer root.Remove(temporaryName)
+	if err := temporary.Chmod(perm); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if _, err := temporary.Write(contents); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return err
+	}
+	if err := temporary.Close(); err != nil {
+		return err
+	}
+	if err := root.Rename(temporaryName, name); err != nil {
+		return err
+	}
+	if directory, err := root.Open(dir); err == nil {
+		_ = directory.Sync()
+		_ = directory.Close()
+	}
 	return nil
 }
 

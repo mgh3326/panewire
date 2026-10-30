@@ -14,3 +14,7 @@ blocking:
     reason: Workflow changes can execute privileged automation before a revert.
   - paths: ['.mergewake/**']
     reason: Policy changes can authorize irreversible automation before a revert.
+review_gate:
+  land: graded
+fast_lane:
+  max_changed_lines: 50

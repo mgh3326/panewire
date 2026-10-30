@@ -269,12 +269,10 @@ func (h *HubServer) resolveSpawn(machine string, result hubSpawnResult) {
 	}
 }
 
-func (h *HubServer) loseSpawns(machine string, agent *hubAgent) {
-	h.mu.Lock()
-	if record := h.nodes[machine]; record == nil || record.agent != agent {
-		h.mu.Unlock()
-		return
-	}
+// loseSpawnsLocked marks machine's pending spawns lost and returns their
+// waiters for wakeLostSpawns once h.mu is released. The caller holds h.mu and
+// has checked the disconnecting agent is still the machine's current one.
+func (h *HubServer) loseSpawnsLocked(machine string) []chan hubSpawnResult {
 	var waiters []chan hubSpawnResult
 	for _, record := range h.spawnRecords {
 		if record.status == "pending" && record.request.Machine == machine {
@@ -282,7 +280,10 @@ func (h *HubServer) loseSpawns(machine string, agent *hubAgent) {
 			waiters = append(waiters, record.waiter)
 		}
 	}
-	h.mu.Unlock()
+	return waiters
+}
+
+func wakeLostSpawns(waiters []chan hubSpawnResult) {
 	for _, waiter := range waiters {
 		select {
 		case waiter <- hubSpawnResult{}:
