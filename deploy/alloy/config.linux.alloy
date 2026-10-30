@@ -24,6 +24,7 @@ loki.write "cloud" {
 // session and quota counters). Both unset means no extra collectors.
 prometheus.exporter.unix "node" {
 	enable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_ENABLE_COLLECTORS"), "[]"))
+	disable_collectors = encoding.from_json(coalesce(sys.env("ALLOY_DISABLE_COLLECTORS"), "[]"))
 
 	textfile {
 		directory = sys.env("FLEET_TEXTFILE_DIR")
