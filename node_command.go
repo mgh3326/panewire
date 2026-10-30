@@ -33,6 +33,9 @@ const (
 	nodeCommandMaxArgsBytes   = 16 << 10
 	nodeCommandRunTimeout     = 20 * time.Second
 	nodeCommandMaxPathBytes   = 4096
+	// nodePaneCloseSettle separates the two re-reads pane.close requires
+	// before it closes; see nodePaneClose.
+	nodePaneCloseSettle = 2 * time.Second
 )
 
 // Closed outcome vocabularies. pane.close mirrors mergewake reap's reclose
@@ -50,7 +53,9 @@ const (
 
 var (
 	nodeCommandPaneIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
-	nodeCommandStatusPattern = regexp.MustCompile(`^[a-z_-]{1,32}$`)
+	// pane.close only ever closes a finished pane: the expected status must
+	// be one of these, and the node re-reads it before closing.
+	nodePaneClosableStatus = map[string]bool{"idle": true, "done": true}
 )
 
 func knownNodeCommandOp(op string) bool {
@@ -193,7 +198,7 @@ func decodeNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		return args, decodeNodeCommandStrict(raw, &args)
 	case nodeCommandPaneClose:
 		var args nodePaneCloseArgs
-		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodeCommandStatusPattern.MatchString(args.AgentStatus) && validNodeCommandPath(args.Cwd)
+		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && nodePaneClosableStatus[args.AgentStatus] && validNodeCommandPath(args.Cwd)
 		return args, valid
 	case nodeCommandPaneCapture:
 		var args nodePaneCaptureArgs
@@ -312,21 +317,36 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 	return client.nodeAgentsList(ctx)
 }
 
-func nodeHerdrRows(output []byte, key string) ([]nodeAgentRow, error) {
+// nodeHerdrRow is a herdr list row plus the node-local fields pane.close
+// compares; StateChangeSeq is nil when herdr does not report it.
+type nodeHerdrRow struct {
+	nodeAgentRow
+	StateChangeSeq *int64 `json:"state_change_seq"`
+}
+
+func nodeHerdrRows(output []byte, key string) ([]nodeHerdrRow, error) {
 	var envelope struct {
 		Result map[string]json.RawMessage `json:"result"`
 	}
 	if err := json.Unmarshal(output, &envelope); err != nil {
 		return nil, err
 	}
-	var rows []nodeAgentRow
+	var rows []nodeHerdrRow
 	if err := json.Unmarshal(envelope.Result[key], &rows); err != nil || rows == nil {
 		return nil, errors.New("herdr list: missing " + key)
 	}
 	return rows, nil
 }
 
-func (client *HubClient) readNodeAgents(ctx context.Context) ([]nodeAgentRow, error) {
+func nodeAgentRows(rows []nodeHerdrRow) []nodeAgentRow {
+	out := make([]nodeAgentRow, len(rows))
+	for index, row := range rows {
+		out[index] = row.nodeAgentRow
+	}
+	return out
+}
+
+func (client *HubClient) readNodeAgents(ctx context.Context) ([]nodeHerdrRow, error) {
 	output, err := client.nodeHerdrRunner()(ctx, "agent", "list")
 	if err != nil {
 		return nil, err
@@ -339,9 +359,10 @@ func (client *HubClient) nodeAgentsList(ctx context.Context) (any, string) {
 	if err != nil {
 		return nil, "herdr_failed"
 	}
-	result := nodeAgentsListResult{Agents: agents}
+	result := nodeAgentsListResult{Agents: nodeAgentRows(agents)}
 	if output, err := client.nodeHerdrRunner()(ctx, "pane", "list"); err == nil {
-		if panes, err := nodeHerdrRows(output, "panes"); err == nil {
+		if rows, err := nodeHerdrRows(output, "panes"); err == nil {
+			panes := nodeAgentRows(rows)
 			for index := range panes {
 				// pane list carries a label, not the agent name.
 				panes[index].Name = ""
@@ -352,31 +373,60 @@ func (client *HubClient) nodeAgentsList(ctx context.Context) (any, string) {
 	return result, ""
 }
 
-// nodePaneMatch re-reads herdr and classifies the caller's expected pane.
-func (client *HubClient) nodePaneMatch(ctx context.Context, paneID, name, status, cwd string, checkStatus bool) (string, error) {
+// nodePaneMatch re-reads herdr and classifies the caller's expected pane; on
+// a match it also returns the row, for its state_change_seq.
+func (client *HubClient) nodePaneMatch(ctx context.Context, paneID, name, status, cwd string, checkStatus bool) (string, nodeHerdrRow, error) {
 	agents, err := client.readNodeAgents(ctx)
 	if err != nil {
-		return "", err
+		return "", nodeHerdrRow{}, err
 	}
 	for _, agent := range agents {
 		if agent.PaneID != paneID {
 			continue
 		}
 		if agent.Name != name || agent.Cwd != cwd || (checkStatus && agent.AgentStatus != status) {
-			return nodePaneChanged, nil
+			return nodePaneChanged, nodeHerdrRow{}, nil
 		}
-		return "", nil
+		return "", agent, nil
 	}
-	return nodePaneGone, nil
+	return nodePaneGone, nodeHerdrRow{}, nil
 }
 
+// nodePaneClose closes a pane only after two matching re-reads a settle
+// interval apart, the second immediately before the close. herdr has no
+// conditional close, so a pane can still go back to work between the last
+// read and `herdr pane close`; requiring the finished state to hold across
+// the interval — with an unchanged state_change_seq where herdr reports one,
+// so an idle→working→idle bounce also refuses — leaves only that read-to-
+// close gap, which is no wider than the ssh reap's re-read then close.
 func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseArgs) (any, string) {
-	outcome, err := client.nodePaneMatch(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true)
+	outcome, first, err := client.nodePaneMatch(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true)
 	if err != nil {
 		return nil, "herdr_failed"
 	}
 	if outcome != "" {
 		return nodePaneCloseResult{Outcome: outcome}, ""
+	}
+	settle := client.nodeCloseSettle
+	if settle == 0 {
+		settle = nodePaneCloseSettle
+	}
+	timer := time.NewTimer(settle)
+	select {
+	case <-timer.C:
+	case <-ctx.Done():
+		timer.Stop()
+		return nil, "herdr_failed"
+	}
+	outcome, second, err := client.nodePaneMatch(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true)
+	if err != nil {
+		return nil, "herdr_failed"
+	}
+	if outcome != "" {
+		return nodePaneCloseResult{Outcome: outcome}, ""
+	}
+	if first.StateChangeSeq != nil && second.StateChangeSeq != nil && *first.StateChangeSeq != *second.StateChangeSeq {
+		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
 	if _, err := client.nodeHerdrRunner()(ctx, "pane", "close", args.PaneID); err != nil {
 		return nil, "close_failed"
@@ -434,7 +484,7 @@ func (client *HubClient) nodePaneCapture(ctx context.Context, args nodePaneCaptu
 	}
 	// Status is not compared: an idle pane may report done by now, and the
 	// close that follows re-checks it anyway.
-	outcome, err := client.nodePaneMatch(ctx, args.PaneID, args.Name, "", args.Cwd, false)
+	outcome, _, err := client.nodePaneMatch(ctx, args.PaneID, args.Name, "", args.Cwd, false)
 	if err != nil {
 		return nil, "herdr_failed"
 	}
@@ -487,11 +537,19 @@ func nodeWorktreeInspect(ctx context.Context, git relayCommandRunner, cwd string
 }
 
 // redactNodeOriginURL drops URL userinfo, query and fragment so a credential
-// or signed token embedded in a remote URL never leaves the node; owner/name
-// matching needs only scheme, host and path. scp-style remotes carry no
-// secret.
+// or signed token embedded in a remote never leaves the node; owner/name
+// matching needs only host and path. An scp-style remote
+// ([user[:secret]@]host:path) loses everything up to its last '@' before
+// the first '/', which removes the user and any secret beside it.
 func redactNodeOriginURL(raw string) string {
 	if !strings.Contains(raw, "://") {
+		head := raw
+		if slash := strings.IndexByte(raw, '/'); slash >= 0 {
+			head = raw[:slash]
+		}
+		if at := strings.LastIndexByte(head, '@'); at >= 0 {
+			return raw[at+1:]
+		}
 		return raw
 	}
 	parsed, err := url.Parse(raw)

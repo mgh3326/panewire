@@ -220,6 +220,7 @@ func TestNodeCommandEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	client.nodeHerdr = fake.run
+	client.nodeCloseSettle = time.Millisecond
 	ctx, cancel := context.WithCancel(t.Context())
 	done := make(chan struct{})
 	go func() {
@@ -282,5 +283,32 @@ func TestHubNodeCommandStatelessRecordIsUnavailable(t *testing.T) {
 		if row.State != "disconnected" || row.Error != "node_unavailable" {
 			t.Fatalf("row=%+v", row)
 		}
+	}
+}
+
+// TestHubNodeCommandDisconnectSweepsAndUnpublishes: once disconnect returns,
+// the pending command has been failed node_lost and the record no longer
+// offers the agent, so a later command is refused instead of attaching to it.
+func TestHubNodeCommandDisconnectSweepsAndUnpublishes(t *testing.T) {
+	hub, server := t14Hub(t)
+	connection := t14Node(t, hub, server, true)
+	results := t14HTTPAsync(t, http.MethodPost, nodeCommandURL(server, "machine-a"), t14OperatorToken, map[string]any{"op": "agents.list"})
+	_ = nodeCommandRead(t, connection)
+	hub.mu.Lock()
+	agent := hub.nodes["machine-a"].agent
+	hub.mu.Unlock()
+	hub.disconnect("machine-a", agent)
+	hub.mu.Lock()
+	_, state := hub.nodeCommandStateLocked("machine-a")
+	pending := len(hub.nodeCommands)
+	hub.mu.Unlock()
+	if state != "disconnected" || pending != 0 {
+		t.Fatalf("after disconnect state=%q pending=%d", state, pending)
+	}
+	if result := t14Result(t, results); result.status != http.StatusServiceUnavailable || nodeCommandDecode(t, result.body)["error"] != "node_lost" {
+		t.Fatalf("status=%d body=%s", result.status, result.body)
+	}
+	if status, _, contents := t14HTTP(t, http.MethodPost, nodeCommandURL(server, "machine-a"), t14OperatorToken, map[string]any{"op": "agents.list"}); status != http.StatusServiceUnavailable || nodeCommandDecode(t, contents)["error"] != "node_unavailable" {
+		t.Fatalf("command after disconnect status=%d body=%s", status, contents)
 	}
 }
