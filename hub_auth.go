@@ -264,23 +264,32 @@ func (h *HubServer) agentCredentialCurrent(machineID string, agent *hubAgent) bo
 	return node && hubTokenMatches(token, agent.credential)
 }
 
-// closeRevokedAgents closes every registered node websocket whose credential
-// the current auth set no longer holds. Closing ends its read loop, which
-// disconnects the record as any dropped connection would.
+// closeRevokedAgents disconnects every registered node whose websocket
+// credential the current auth set no longer holds, in the same critical
+// section that finds it, so no dispatcher reading h.nodes can route new work
+// to it after the reload; then it closes the socket.
 func (h *HubServer) closeRevokedAgents() {
-	var revoked []*hubAgent
-	var machines []string
+	type revokedAgent struct {
+		machineID string
+		agent     *hubAgent
+	}
+	var revoked []revokedAgent
+	var spawnWaiters []chan hubSpawnResult
+	var lost []*hubNodeCommandPending
 	h.mu.Lock()
 	for machineID, record := range h.nodes {
-		if record.agent != nil && !h.agentCredentialCurrent(machineID, record.agent) {
-			revoked = append(revoked, record.agent)
-			machines = append(machines, machineID)
+		if agent := record.agent; agent != nil && !h.agentCredentialCurrent(machineID, agent) {
+			waiters, commands := h.disconnectLocked(machineID, agent)
+			spawnWaiters, lost = append(spawnWaiters, waiters...), append(lost, commands...)
+			revoked = append(revoked, revokedAgent{machineID, agent})
 		}
 	}
 	h.mu.Unlock()
-	for index, agent := range revoked {
-		h.logger.Warn("hub closed a node websocket whose credential was revoked", "machine_id", machines[index])
-		go func(agent *hubAgent) { _ = agent.conn.Close(websocket.StatusPolicyViolation, "credential revoked") }(agent)
+	wakeLostSpawns(spawnWaiters)
+	wakeLostNodeCommands(lost)
+	for _, entry := range revoked {
+		h.logger.Warn("hub closed a node websocket whose credential was revoked", "machine_id", entry.machineID)
+		go func(agent *hubAgent) { _ = agent.conn.Close(websocket.StatusPolicyViolation, "credential revoked") }(entry.agent)
 	}
 }
 

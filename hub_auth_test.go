@@ -468,15 +468,24 @@ func TestHubAuthInPlaceRewriteReloads(t *testing.T) {
 	if hubFileChangeTime(before) == 0 {
 		t.Skip("this platform reports no file change time, so an in-place rewrite that restores the mtime is not detectable")
 	}
-	if err := os.WriteFile(path, []byte(base+"HUB_TOKEN_svc-a="+newToken+"\nHUB_SCOPES_svc-a=nodes.agents.read\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
-		t.Fatal(err)
-	}
-	after, err := os.Stat(path)
-	if err != nil || !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
-		t.Fatalf("fixture did not keep inode, size and mtime: err=%v", err)
+	// A filesystem with coarse change times can stamp a rewrite in the same
+	// tick as the original; rewrite until the change time moves, which is the
+	// one field this case leaves the reload to detect.
+	var after os.FileInfo
+	eventually(t, 5*time.Second, "in-place rewrite moves the change time", func() bool {
+		if err := os.WriteFile(path, []byte(base+"HUB_TOKEN_svc-a="+newToken+"\nHUB_SCOPES_svc-a=nodes.agents.read\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chtimes(path, before.ModTime(), before.ModTime()); err != nil {
+			t.Fatal(err)
+		}
+		if after, err = os.Stat(path); err != nil {
+			t.Fatal(err)
+		}
+		return hubFileChangeTime(after) != hubFileChangeTime(before)
+	})
+	if !os.SameFile(before, after) || before.Size() != after.Size() || !before.ModTime().Equal(after.ModTime()) {
+		t.Fatal("fixture did not keep inode, size and mtime")
 	}
 	if status, _ := (pw2Caller{"old", "svc-a", oldToken}).do(t, server, "GET", "/v1/nodes", ""); status != http.StatusUnauthorized {
 		t.Fatalf("rotated-out token still accepted: %d", status)
@@ -566,12 +575,16 @@ func TestHubAuthReloadClosesRevokedNodeWebsocket(t *testing.T) {
 	if status, _ := operator.do(t, server, "GET", "/v1/nodes", ""); status != http.StatusOK {
 		t.Fatalf("operator nodes status %d", status)
 	}
+	// Disconnected by the time the reloading request returns, not when the
+	// socket's read loop notices the close: no dispatch can pick it after.
+	if got := state("node-a"); got != "disconnected" {
+		t.Fatalf("converted node still %q after the reload", got)
+	}
 	readContext, cancel := context.WithTimeout(t.Context(), 5*time.Second)
 	defer cancel()
 	if _, _, err := nodeA.Read(readContext); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
 		t.Fatalf("converted node websocket stayed open: %v", err)
 	}
-	eventually(t, 5*time.Second, "converted node disconnected", func() bool { return state("node-a") == "disconnected" })
 	if state("node-b") != "connected" {
 		t.Fatalf("unchanged node-b state %q", state("node-b"))
 	}
@@ -590,9 +603,24 @@ func TestHubAuthReloadClosesRevokedNodeWebsocket(t *testing.T) {
 	if _, _, err := nodeB.Read(readContext); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
 		t.Fatalf("rotated node websocket stayed open: %v", err)
 	}
+	presenceConnected := func() int {
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		count := 0
+		for _, event := range hub.uiEvents {
+			if event.Kind == "presence" && event.Phase == "connected" && event.MachineID == "node-b" {
+				count++
+			}
+		}
+		return count
+	}
+	connectedBefore := presenceConnected()
 	r6Write(t, pending, map[string]any{"type": "hello", "machine_id": "node-b", "version": "pw2-b"})
 	if _, _, err := pending.Read(readContext); websocket.CloseStatus(err) != websocket.StatusPolicyViolation {
 		t.Fatalf("unregistered socket with a rotated token stayed open: %v", err)
+	}
+	if presenceConnected() != connectedBefore {
+		t.Fatal("a hello on a revoked credential registered the node")
 	}
 	eventually(t, 5*time.Second, "rotated node disconnected", func() bool { return state("node-b") == "disconnected" })
 }

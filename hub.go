@@ -1844,16 +1844,20 @@ func (h *HubServer) recordNote(machineID, text string, received time.Time) {
 // woken after the lock is released.
 func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 	h.mu.Lock()
+	spawnWaiters, lost := h.disconnectLocked(machineID, agent)
+	h.mu.Unlock()
+	wakeLostSpawns(spawnWaiters)
+	wakeLostNodeCommands(lost)
+}
+
+// disconnectLocked is disconnect's critical section; the caller wakes the
+// returned waiters after releasing h.mu.
+func (h *HubServer) disconnectLocked(machineID string, agent *hubAgent) ([]chan hubSpawnResult, []*hubNodeCommandPending) {
 	var spawnWaiters []chan hubSpawnResult
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {
 		spawnWaiters = h.loseSpawnsLocked(machineID)
 	}
 	lost := h.loseNodeCommandsLocked(agent)
-	defer func() {
-		wakeLostSpawns(spawnWaiters)
-		wakeLostNodeCommands(lost)
-	}()
-	defer h.mu.Unlock()
 	if record := h.nodes[machineID]; record != nil && record.agent == agent {
 		record.agent = nil
 		now := h.now().UTC()
@@ -1864,6 +1868,7 @@ func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 		h.markBurstHoldsLostLocked(machineID)
 		h.recordUIEventLocked("presence", "disconnected", machineID, now)
 	}
+	return spawnWaiters, lost
 }
 
 func (h *HubServer) broadcast(event hubEvent) {
