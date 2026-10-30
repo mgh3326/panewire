@@ -818,12 +818,12 @@ func assistantFixturePending(now time.Time) assistantPending {
 		ServerTime: now,
 		DecisionRequests: []assistantPendingDecision{
 			{TaskID: 42, Lane: "lane-a", State: "needs_decision", Title: "ship the release",
-				Request: assistantDecisionRequest{ID: "dr-42-3", Revision: 3, Status: "open", Question: "ship?", DefaultAction: "wait", RequestedBy: "wrk-a", RequestedAt: now}},
+				Request: assistantDecisionRequest{ID: "dr-42-3", Revision: 3, Status: "open", Question: "ship?", DefaultAction: "wait", RequestedBy: "agent-a", RequestedAt: now}},
 			// Terminal tasks must never surface — even if upstream sends one.
 			{TaskID: 43, Lane: "lane-b", State: "merged", Title: "merged",
-				Request: assistantDecisionRequest{ID: "dr-43-1", Revision: 1, Status: "open", Question: "stale", DefaultAction: "wait", RequestedBy: "wrk-b", RequestedAt: now}},
+				Request: assistantDecisionRequest{ID: "dr-43-1", Revision: 1, Status: "open", Question: "stale", DefaultAction: "wait", RequestedBy: "agent-b", RequestedAt: now}},
 			{TaskID: 44, Lane: "lane-c", State: "dropped", Title: "dropped",
-				Request: assistantDecisionRequest{ID: "dr-44-1", Revision: 1, Status: "open", Question: "stale", HumanOnly: true, DefaultAction: "wait", RequestedBy: "wrk-b", RequestedAt: now}},
+				Request: assistantDecisionRequest{ID: "dr-44-1", Revision: 1, Status: "open", Question: "stale", HumanOnly: true, DefaultAction: "wait", RequestedBy: "agent-b", RequestedAt: now}},
 		},
 		ChatQuestions: []assistantChatQuestion{
 			{ID: "Q-20261010-01", ConversationID: "operator-desk", Lane: "lane-a", Body: "which lane?", State: "pending", Revision: 2, CreatedAt: now, UpdatedAt: now},
@@ -1086,7 +1086,7 @@ func TestAssistantPendingAC4(t *testing.T) {
 	hk.seedTask(assistantTask{ID: 42, Lane: "lane-a", Title: "ship the release", State: "needs_decision", Refs: struct {
 		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
 		Disposition     json.RawMessage           `json:"disposition,omitempty"`
-	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-42-3", Revision: 3, Status: "open", Question: "ship?", DefaultAction: "wait", RequestedBy: "wrk-a", RequestedAt: now}}})
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-42-3", Revision: 3, Status: "open", Question: "ship?", DefaultAction: "wait", RequestedBy: "agent-a", RequestedAt: now}}})
 	srv, _ := assistantTestServer(t, hk, nil)
 
 	listed := assistantCall(t, srv, assistantTestBerryToken, "pending_list", nil)
@@ -1137,7 +1137,7 @@ func TestAssistantPendingAC4(t *testing.T) {
 	hk.seedTask(assistantTask{ID: 45, Lane: "lane-a", State: "needs_decision", Refs: struct {
 		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
 		Disposition     json.RawMessage           `json:"disposition,omitempty"`
-	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-45-2", Revision: 2, Status: "open", Question: "newer", DefaultAction: "wait", RequestedBy: "wrk-a", RequestedAt: now}}})
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-45-2", Revision: 2, Status: "open", Question: "newer", DefaultAction: "wait", RequestedBy: "agent-a", RequestedAt: now}}})
 	if got := assistantCallError(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-45-1"}); got != "request_not_found" {
 		t.Fatalf("superseded detail error=%q", got)
 	}
@@ -1172,7 +1172,7 @@ func TestAssistantProgressAC5(t *testing.T) {
 		return task
 	}
 	openReq := func(id string, rev int) *assistantDecisionRequest {
-		return &assistantDecisionRequest{ID: id, Revision: rev, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}
+		return &assistantDecisionRequest{ID: id, Revision: rev, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "agent", RequestedAt: now}
 	}
 	resolvedReq := func(id string, rev int, kind, responder string) *assistantDecisionRequest {
 		r := openReq(id, rev)
@@ -1668,7 +1668,7 @@ func TestAssistantDeliveryStampsR2(t *testing.T) {
 		task := assistantTask{ID: id, Lane: "lane-a", Title: "t", State: "needs_decision"}
 		task.Refs.DecisionRequest = &assistantDecisionRequest{
 			ID: fmt.Sprintf("dr-%d-1", id), Revision: 1, Status: "answered", Question: "q",
-			DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now,
+			DefaultAction: "wait", RequestedBy: "agent", RequestedAt: now,
 			Resolution: &assistantDecisionResolution{Kind: "answered", Responder: "operator-via-berry", At: now},
 		}
 		return task
@@ -1816,26 +1816,26 @@ func TestAssistantScopeClosedR2(t *testing.T) {
 	hk.seedTask(assistantTask{ID: 80, Lane: "lane-a", State: "needs_decision", Title: "in scope", Refs: struct {
 		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
 		Disposition     json.RawMessage           `json:"disposition,omitempty"`
-	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-80-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-80-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "agent", RequestedAt: now}}})
 	hk.seedTask(assistantTask{ID: 90, Lane: "lane-b", State: "needs_decision", Title: "out of scope", Refs: struct {
 		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
 		Disposition     json.RawMessage           `json:"disposition,omitempty"`
-	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-90-4", Revision: 4, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-90-4", Revision: 4, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "agent", RequestedAt: now}}})
 	hk.seedQuestion(assistantChatQuestion{ID: "Q-20261010-20", ConversationID: "other-desk", Lane: "lane-b", State: "pending", Revision: 1})
 	// A merged task whose lane is mapped: still not an open item.
 	hk.seedTask(assistantTask{ID: 91, Lane: "lane-a", State: "merged", Title: "gone", Refs: struct {
 		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
 		Disposition     json.RawMessage           `json:"disposition,omitempty"`
-	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-91-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-91-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "agent", RequestedAt: now}}})
 	// The pending snapshot carries an in-scope item plus one out-of-scope
 	// decision request and one out-of-scope question.
 	hk.pending = assistantPending{
 		ServerTime: now,
 		DecisionRequests: []assistantPendingDecision{
 			{TaskID: 80, Lane: "lane-a", State: "needs_decision", Title: "in scope",
-				Request: assistantDecisionRequest{ID: "dr-80-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}},
+				Request: assistantDecisionRequest{ID: "dr-80-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "agent", RequestedAt: now}},
 			{TaskID: 90, Lane: "lane-b", State: "needs_decision", Title: "out of scope",
-				Request: assistantDecisionRequest{ID: "dr-90-4", Revision: 4, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}},
+				Request: assistantDecisionRequest{ID: "dr-90-4", Revision: 4, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "agent", RequestedAt: now}},
 		},
 		ChatQuestions: []assistantChatQuestion{
 			{ID: "Q-20261010-20", ConversationID: "other-desk", Lane: "lane-b", State: "pending", Revision: 1},
@@ -1943,7 +1943,7 @@ func TestAssistantScopeClosedR2(t *testing.T) {
 		Disposition     json.RawMessage           `json:"disposition,omitempty"`
 	}{DecisionRequest: &assistantDecisionRequest{
 		ID: "dr-92-1", Revision: 1, Status: "answered", Question: "q", DefaultAction: "wait",
-		RequestedBy: "wrk", RequestedAt: now,
+		RequestedBy: "agent", RequestedAt: now,
 		Resolution: &assistantDecisionResolution{Kind: "answered", Option: "go", Text: "PLANTED-RESOLUTION-TEXT", Receipt: "PLANTED-RECEIPT", Responder: "operator", By: "PLANTED-BY", At: now},
 	}}})
 	result := assistantCall(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": "dr-92-1"})
@@ -2297,7 +2297,7 @@ func TestAssistantMutantGapsR3(t *testing.T) {
 		Disposition     json.RawMessage           `json:"disposition,omitempty"`
 	}{DecisionRequest: &assistantDecisionRequest{
 		ID: "dr-83-1", Revision: 1, Status: "answered", Question: "q", DefaultAction: "wait",
-		RequestedBy: "wrk", RequestedAt: now,
+		RequestedBy: "agent", RequestedAt: now,
 		Resolution: &assistantDecisionResolution{Kind: "answered", Responder: "operator", At: now},
 	}}})
 	srv, _ = assistantTestServer(t, hk, nil)
@@ -2310,7 +2310,7 @@ func TestAssistantMutantGapsR3(t *testing.T) {
 	hk.seedTask(assistantTask{ID: 84, Lane: "lane-a", State: "needs_decision", Title: "current", Refs: struct {
 		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
 		Disposition     json.RawMessage           `json:"disposition,omitempty"`
-	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-84-2", Revision: 2, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-84-2", Revision: 2, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "agent", RequestedAt: now}}})
 	if got := assistantCallError(t, srv, assistantTestBerryToken, "progress", map[string]any{"request_id": "dr-84-1"}); got != "request_not_found" {
 		t.Fatalf("stale in-scope progress error=%q, want request_not_found", got)
 	} else if strings.Contains(got, "dr-84-2") {
@@ -2326,7 +2326,7 @@ func TestAssistantMutantGapsR3(t *testing.T) {
 	hk.seedTask(assistantTask{ID: 85, Lane: "lane-a", State: "needs_decision", Title: "open", Refs: struct {
 		DecisionRequest *assistantDecisionRequest `json:"decision_request,omitempty"`
 		Disposition     json.RawMessage           `json:"disposition,omitempty"`
-	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-85-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "wrk", RequestedAt: now}}})
+	}{DecisionRequest: &assistantDecisionRequest{ID: "dr-85-1", Revision: 1, Status: "open", Question: "q", DefaultAction: "wait", RequestedBy: "agent", RequestedAt: now}}})
 	hk.statusFor["/v1/assistant/pending"] = http.StatusInternalServerError
 	srv, _ = assistantTestServer(t, hk, nil)
 	detail := assistantCall(t, srv, assistantTestBerryToken, "pending_detail", map[string]any{"id": "dr-85-1"})

@@ -15,7 +15,7 @@ expected="$(printf '%s\n' \
   TestR1CompanyDataFailClosed \
   TestR1SecretRepoLeakGuard \
   TestR1SQLiteBodyAbsence \
-  TestR1WrkGateDenialNoBypass \
+  TestR1GateDenialNoBypass \
   TestR1ReverseCompletionIdempotent \
   TestR1AdapterContract \
   TestR1CoreNoSDKLeakage | sort)"

@@ -151,7 +151,7 @@ func TestBurstR16ClientAdoptsAssignedEpochAndHoldResponse(t *testing.T) {
 	if err := os.MkdirAll(events, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(events, "00001-job.claimed.json"), []byte(`{"type":"job.claimed","agent_label":"wrk-a","epoch":1}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(events, "00001-job.claimed.json"), []byte(`{"type":"job.claimed","agent_label":"agent-a","epoch":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	client := &HubClient{jobsInboxRoot: root, assignedJobs: map[string]uint64{"job-a": 2}, completedJobs: make(map[string]uint64), burstSeen: make(map[string]time.Time)}
@@ -175,7 +175,7 @@ func TestBurstR16ClientAdoptsAssignedEpochAndHoldResponse(t *testing.T) {
 	}
 	now := time.Date(2026, 9, 4, 3, 0, 0, 0, time.UTC)
 	hub := r16Hub(t, &now)
-	hub.jobs["job-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-a", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 2}, Node: "wake"}
+	hub.jobs["job-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-a", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 2}, Node: "wake"}
 	if !hub.observeJobCompletion("wake", completion, now) {
 		t.Fatal("hub rejected completion at assigned epoch")
 	}

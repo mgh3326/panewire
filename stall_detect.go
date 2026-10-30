@@ -353,7 +353,7 @@ type stallInboxEvent struct {
 	CreatedAt  string `json:"created_at"`
 	Epoch      uint64 `json:"epoch"`
 	ReportPath string `json:"report_path"`
-	// Report is the wrk-era completion record's report field (worker.complete
+	// Report is the legacy-era completion record's report field (worker.complete
 	// carries it at the top level, relative to the job directory).
 	Report  string                     `json:"report"`
 	Payload map[string]json.RawMessage `json:"payload"`
@@ -456,7 +456,7 @@ func stallFamily(pool, profile, harness string) string {
 //	job.reaped      87 events, 51 followed — paired job.lost bookkeeping
 //	job.revoked      3 events, followers are quota release only
 //	job.aborted      1 event,  followed by quota_pool.release.force only
-//	worker.complete  1 event,  nothing follows (wrk-era end record)
+//	worker.complete  1 event,  nothing follows (legacy-era end record)
 //
 // Explicitly NOT terminal — the journal proves work continues after them:
 //
@@ -699,7 +699,7 @@ const (
 )
 
 // stallNoteReportPattern finds `report=<token>` inside a free-text note. The
-// wrk-era journal records that carry no report_path field keep the reference
+// legacy-era journal records that carry no report_path field keep the reference
 // in payload.note in exactly this shape — and the token is not always a
 // path: the same note grammar also carries handoffkeep keys (`marker=` and
 // `hk:doc` companions show the family), so the token's shape decides.
@@ -708,7 +708,7 @@ var stallNoteReportPattern = regexp.MustCompile(`(?:^|\s)report=(\S+)`)
 // stallReportRefOf extracts the report reference a terminal event declares,
 // by shape, as a string. Sources in precedence order: the top-level
 // report_path field (the current panewire emit shape, 535 of 543 real
-// records), the wrk-era top-level report field (worker.complete),
+// records), the legacy-era top-level report field (worker.complete),
 // payload.report_path, then the `report=` token inside payload.note — free
 // text and therefore the weakest signal. The result is metadata for the job
 // row; nothing here resolves it against the filesystem. The only path the

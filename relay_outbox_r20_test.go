@@ -105,8 +105,8 @@ func TestR20OutboxSurvivesNodeRestart(t *testing.T) {
 	inbox := t.TempDir()
 	store := NewMemoryStore(t)
 	defer store.Close()
-	r20WriteEvent(t, inbox, "r20-persisted", "00001-job.completed.json", `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"a.md","report_last_line":"done"}`, time.Time{})
-	r20WriteEvent(t, inbox, "r20-pending", "00001-job.completed.json", `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"b.md","report_last_line":"done"}`, time.Time{})
+	r20WriteEvent(t, inbox, "r20-persisted", "00001-job.completed.json", `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"agent-a","host":"host-a","report_path":"a.md","report_last_line":"done"}`, time.Time{})
+	r20WriteEvent(t, inbox, "r20-pending", "00001-job.completed.json", `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"agent-a","host":"host-a","report_path":"b.md","report_last_line":"done"}`, time.Time{})
 
 	first := r20Node(inbox, store)
 	if events := first.jobCompletionEvents(); len(events) != 2 {
@@ -154,7 +154,7 @@ func TestR20OutboxBacksOffWithinSixtySeconds(t *testing.T) {
 	inbox := t.TempDir()
 	store := NewMemoryStore(t)
 	defer store.Close()
-	r20WriteEvent(t, inbox, "r20-backoff", "00001-job.completed.json", `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"a.md","report_last_line":"done"}`, time.Time{})
+	r20WriteEvent(t, inbox, "r20-backoff", "00001-job.completed.json", `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"agent-a","host":"host-a","report_path":"a.md","report_last_line":"done"}`, time.Time{})
 	if events := r20Sent(r20Node(inbox, store)); len(events) != 1 {
 		t.Fatalf("first send=%d", len(events))
 	}
@@ -178,7 +178,7 @@ func TestR20OutboxScanKeepsTwentyFourHourWindow(t *testing.T) {
 	// behind the fixture files and cannot swallow them.
 	r20AgeMigrationStamp(t, store, time.Now().Add(-48*time.Hour))
 	// created_at is absent, so the scan falls back to the file's mtime.
-	const body = `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"wrk-a","host":"host-a","report_path":"REPORT","report_last_line":"done"}`
+	const body = `{"type":"job.completed","epoch":1,"owner_lane":"lane-a","label":"agent-a","host":"host-a","report_path":"REPORT","report_last_line":"done"}`
 	r20WriteEvent(t, inbox, "r20-fresh", "00001-job.completed.json", strings.Replace(body, "REPORT", "fresh.md", 1), time.Now().Add(-23*time.Hour))
 	r20WriteEvent(t, inbox, "r20-stale", "00001-job.completed.json", strings.Replace(body, "REPORT", "stale.md", 1), time.Now().Add(-25*time.Hour))
 

@@ -21,25 +21,23 @@ import (
 	"unicode/utf8"
 )
 
-// `panewire job done|escalate|joined` is the Go form of `wrk done|escalate|
-// joined` (agent-skills bin/wrk). wrk keeps its own implementation and
-// delegates here only after `panewire job probe` answers with jobProbeToken, so
-// the two must stay interchangeable: every byte they leave behind - the event
+// `panewire job done|escalate|joined` owns the job record contract the
+// retired spawner used to implement: every byte left behind - the event
 // record, the socket request, the handoffkeep call, the OK line, the failure
-// logs - is pinned against the wrk path by testdata/job_golden.
+// logs - is pinned by testdata/job_golden.
 //
 // Nothing here normalizes relay text. The 240-rune bound, newline removal and
 // the empty job.completed reason are applied once, on the node, when the wire
 // form is built (relayEventWireForm / relayEventOutboxKeyFor). The only
-// shortening done here is wrk's own: the report's last line and the document
-// suffix, reproduced exactly as wrk computes them.
+// shortening done here is the record contract's own: the report's last line
+// and the document suffix, reproduced exactly as the contract computes them.
 const jobProbeToken = "panewire-job/1"
 
-// The shell utilities wrk runs are locale and platform dependent outside ASCII:
-// BSD tr and cut count characters and stop at an invalid byte in a UTF-8
-// locale, GNU ones count bytes. Rather than guess the host, text that is not
-// plain ASCII goes through the very pipeline wrk runs. jobBash is a variable
-// only so tests can point it at a specific shell.
+// The shell utilities the contract pipeline runs are locale and platform
+// dependent outside ASCII: BSD tr and cut count characters and stop at an
+// invalid byte in a UTF-8 locale, GNU ones count bytes. Rather than guess the
+// host, text that is not plain ASCII goes through the very same pipeline.
+// jobBash is a variable only so tests can point it at a specific shell.
 var jobBash = "bash"
 
 const jobEmitTimeout = 2 * time.Second
@@ -80,7 +78,7 @@ func runJobCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	return ExitUsage
 }
 
-// jobExit carries wrk's exit status out of a nested helper: `die` is 2, a
+// jobExit carries the command's exit status out of a nested helper: `die` is 2, a
 // failing pipeline under `set -e` is its own status.
 type jobExit struct {
 	code    int
@@ -134,7 +132,7 @@ func (c *jobCLI) done(args []string) int {
 	if err != nil {
 		return c.exit(jobDie("done cannot find job.claim/job.spawned metadata: %s", job))
 	}
-	// wrk reads five tab-separated fields into three names; pane_id is the
+	// The record contract reads five tab-separated fields into three names; pane_id is the
 	// third field exactly as `read` splits it.
 	read := bashReadTab(fields, 4)
 	owner, label, pane := read[0], read[1], read[2]
@@ -148,7 +146,7 @@ func (c *jobCLI) done(args []string) int {
 	host := jobHost()
 	status := c.completionEvent(jobsRoot, job, owner, label, pane, host, report, suffix)
 	if status == "failed" {
-		// wrk's `completion_status="$(completion_event ...)"` carries the
+		// The contract's `completion_status="$(completion_event ...)"` carries the
 		// failing script's status out of the substitution, and `set -e` ends
 		// the command there: no notification, no OK line.
 		return 1
@@ -165,7 +163,7 @@ func (c *jobCLI) done(args []string) int {
 	return ExitOK
 }
 
-const jobEscalateHelp = `Usage: wrk escalate JOB --question TEXT [--report PATH]
+const jobEscalateHelp = `Usage: panewire job escalate JOB --question TEXT [--report PATH]
 
 Write a builder escalation record and relay it to the parent lane.
 
@@ -289,9 +287,9 @@ func (c *jobCLI) joined(args []string) int {
 	return ExitOK
 }
 
-// jobJobsRoot mirrors wrk_jobs_root: ARBITER_INBOX_ROOT names the jobs
+// jobJobsRoot mirrors the shared jobs-root rule: ARBITER_INBOX_ROOT names the jobs
 // directory itself, and an empty value counts as unset (`${VAR:-default}`).
-// wrk only ever uses it through command substitution, which drops trailing
+// the caller only ever uses it through command substitution, which drops trailing
 // newlines.
 func jobJobsRoot() string {
 	root := os.Getenv("ARBITER_INBOX_ROOT")
@@ -304,7 +302,7 @@ func jobJobsRoot() string {
 // jobHost is `${HOSTNAME:-unknown}`. bash sets HOSTNAME only when the
 // environment does not already carry it, so an exported value wins, an
 // exported empty value becomes "unknown", and otherwise it is gethostname().
-// wrk passes its own value explicitly when it delegates.
+// the delegating tool passes its own value explicitly.
 func jobHost() string {
 	if value, ok := os.LookupEnv("HOSTNAME"); ok {
 		if value == "" {
@@ -344,10 +342,10 @@ func jobIsRegularFile(path string) bool {
 	return err == nil && info.Mode().IsRegular()
 }
 
-// jobCompletionMetadata mirrors wrk's completion_metadata: the newest
+// jobCompletionMetadata mirrors the contract's completion_metadata: the newest
 // job.claim/job.reclaim establishes ownership, any record's string pane_id
 // replaces the pane. It returns the five fields joined by tabs exactly as the
-// Python print produced them, for bashReadTab to split the way wrk's `read`
+// Python print produced them, for bashReadTab to split the way the contract's `read`
 // did. A file Python could not decode as UTF-8, or whose JSON or payload is
 // not an object, crashed that script; that is an error here too.
 func jobCompletionMetadata(eventsDir string) (string, error) {
@@ -539,12 +537,12 @@ func (c *jobCLI) uploadReportDocument(job, report string) string {
 	return suffix
 }
 
-// reportLastLine is wrk's
+// reportLastLine is the contract's
 //
 //	tail -n 1 REPORT | tr '\r\n' ' ' | cut -c1-240
 //
 // followed by append_document_suffix, taken through command substitution. The
-// status is the pipeline's under pipefail: wrk's builder commands run it
+// status is the pipeline's under pipefail: the builder commands run it
 // under `set -e`, so a failing tr or cut ends them before any record exists.
 func (c *jobCLI) reportLastLine(report, suffix string) (string, int) {
 	last, rc := "", 0
@@ -613,7 +611,7 @@ func (c *jobCLI) appendDocumentSuffix(last, suffix string) string {
 				shortened = shortened[:limit]
 			}
 		} else {
-			// wrk runs this cut inside its own command substitution, where
+			// the contract runs this cut inside its own command substitution, where
 			// errexit does not apply: its status never matters.
 			shortened, _ = c.hostPipeline([]byte(last), "cut -c1-"+strconv.Itoa(limit))
 		}
@@ -654,9 +652,9 @@ func (c *jobCLI) hostPipeline(text []byte, script string) (string, int) {
 	return strings.TrimRight(string(out), "\n"), rc
 }
 
-// completionEvent mirrors wrk's completion_event for job.completed and
+// completionEvent mirrors the contract's completion_event for job.completed and
 // returns "created", "duplicate" or "failed". "failed" is every case in which
-// wrk's Python exits non-zero; it has written no record by then.
+// the contract's Python exits non-zero; it has written no record by then.
 func (c *jobCLI) completionEvent(jobsRoot, job, owner, label, pane, host, report, suffix string) string {
 	eventsDir := jobsRoot + "/" + job + "/events"
 	if err := os.MkdirAll(eventsDir, 0o777); err != nil {
@@ -675,7 +673,7 @@ func (c *jobCLI) completionEvent(jobsRoot, job, owner, label, pane, host, report
 		return "failed"
 	}
 	defer lock.Close()
-	// The completion sentinel still writes through wrk; both take this lock
+	// Other completion writers take this same lock, so its name stays
 	// around the duplicate check and the write.
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		c.warn("completion record not written: %v", err)
@@ -734,7 +732,7 @@ func (c *jobCLI) completionEvent(jobsRoot, job, owner, label, pane, host, report
 	return "created"
 }
 
-// builderFlatEvent mirrors builder_flat_event. wrk calls it directly under
+// builderFlatEvent mirrors the contract's builder_flat_event, called directly under
 // `set -e`, so a failing last-line pipeline ends the command (with the
 // pipeline's status) before anything is written.
 func (c *jobCLI) builderFlatEvent(jobsRoot, job, owner, label, pane, parent, host, kind, report, suffix, reason, question, pr, head string) error {
@@ -771,7 +769,7 @@ type jobField struct {
 	value any // string or int
 }
 
-// writeJobRecord writes the record exactly as wrk's Python does:
+// writeJobRecord writes the record exactly as the contract does:
 // json.dump(record, separators=(',', ':')) plus a newline, mode 0600, named
 // one past the highest numeric prefix, landed by rename.
 func writeJobRecord(eventsDir, kind string, fields []jobField) error {
@@ -874,8 +872,8 @@ func pythonJSONString(value string) string {
 }
 
 // emit mirrors emit_relay_event: the same call `panewire emit` would make
-// with wrk's arguments, fail-open, with a failure marker line on any non-zero
-// status. The emit's own stderr was discarded by wrk and is here too.
+// with the contract's arguments, fail-open, with a failure marker line on any
+// non-zero status. The emit's own stderr is discarded here as it was there.
 func (c *jobCLI) emit(kind, jobsRoot, job, owner, label, pane, host, report, last, reason, question, pr, head string) {
 	record := emitRecord{
 		Type: kind, JobID: job, Epoch: 1, CreatedAt: c.now().UTC().Format(time.RFC3339),

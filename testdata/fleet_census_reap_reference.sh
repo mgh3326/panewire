@@ -2,7 +2,7 @@
 # Reference oracle for the fleet-census reap-equivalence test.
 #
 # Everything between the ===== markers is vendored VERBATIM from
-# agent-skills commit ae1f544 (bin/wrk, PR #508): parse_duration_s,
+# vendored from the retired spawner's reap dry-run: parse_duration_s,
 # reap_tab_pane_counts, reap_tab_verdict and herdr_agent_probe are copied
 # unmodified; reap_candidates is from agent-skills commit 692b185 (PR #119,
 # #603), which adds the protected `--keep` skip; reference_reap is the dry-run
@@ -17,9 +17,9 @@ set -euo pipefail
 
 HERDR="${HERDR_BIN:?HERDR_BIN must name the fixture herdr stub}"
 SENTINEL_GONE_CODES="agent_not_found pane_not_found tab_not_found terminal_not_found no_such_agent no_such_pane"
-wrk_jobs_root() { printf '%s\n' "${ARBITER_INBOX_ROOT:?ARBITER_INBOX_ROOT must name the fixture jobs root}"; }
+reap_jobs_root() { printf '%s\n' "${ARBITER_INBOX_ROOT:?ARBITER_INBOX_ROOT must name the fixture jobs root}"; }
 
-# ===== vendored from ae1f544 bin/wrk =====
+# ===== vendored reap reference =====
 parse_duration_s() {
   local value="$1"
   python3 - "$value" <<'PY'
@@ -123,7 +123,7 @@ for job in jobs:
             spawned_tab = payload.get("tab_id") if isinstance(payload.get("tab_id"), str) else ""
         if kind == "job.reaped":
             reaped = True
-        # 보호 표시(`wrk spawn --keep`, #603)는 누적이다: claim·reclaim·spawn 영수증 중
+        # 보호 표시(`runtug spawn --keep`, #603)는 누적이다: claim·reclaim·spawn 영수증 중
         # 하나라도 JSON true 를 남겼으면 그 잡의 pane 은 닫지 않는다.
         if kind in ("job.claim", "job.reclaim", "job.spawned") and payload.get("keep") is True:
             keep = True
@@ -138,7 +138,7 @@ for job in jobs:
                 fallback = now
             terminal_at = moment_of(document.get("created_at") or payload.get("at"), fallback)
     # 스폰 영수증이 pane/tab 의 정본이다. 완료 이벤트의 pane_id 를 그대로 믿으면
-    # be4dad1 이전 `wrk done` 이 남긴 오염 레코드("w1:p1\t\tworker")를 집는다 —
+    # 오염 레코드("w1:p1\t\tworker")를 집는다 —
     # 실 인박스에 23건 남아 있다.
     # 영수증이 하나라도 있으면 가장 늦은 영수증만 믿는다 — 그 영수증이 깨졌으면 앞선
     # 영수증이나 완료 이벤트의 값으로 되돌아가지 않고 malformed 로 건너뛴다.
@@ -288,7 +288,7 @@ PY
 # Dry-run half of reap_cmd: same loop, same skip reasons, apply removed.
 reference_reap() {
   local grace_s="$1" candidates
-  candidates="$(reap_candidates "$(wrk_jobs_root)" "" "$grace_s" "0")"
+  candidates="$(reap_candidates "$(reap_jobs_root)" "" "$grace_s" "0")"
   local tab_counts
   local job owner pane tab age note probe class token probe_tab verdict acted=0
   while IFS=$'\t' read -r job owner pane tab age note; do

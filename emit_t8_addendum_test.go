@@ -11,7 +11,7 @@ import (
 
 // TestT8EmitConflictingOutboxKeyFailsLoudly is the C1 RED guard: a same-key
 // record with differing non-key metadata must not be mistaken for a successful
-// notification. An identical wrk file followed by emit is covered separately:
+// notification. An identical externally written file followed by emit is covered separately:
 // it is the normal file-first path and must still push.
 func TestT8EmitConflictingOutboxKeyFailsLoudly(t *testing.T) {
 	inbox := t.TempDir()
@@ -37,11 +37,11 @@ func TestT8EmitConflictingOutboxKeyFailsLoudly(t *testing.T) {
 	}
 }
 
-// TestT8EmitWrkEscalationsRelayTwice writes the same flat records wrk writes
+// TestT8EmitSharedEscalationsRelayTwice writes the same flat records the job writers
 // before invoking emit. Fixed epoch plus distinct questions must produce two
 // immediate pushes and two downstream relay keys without changing the five
 // field job.* key.
-func TestT8EmitWrkEscalationsRelayTwice(t *testing.T) {
+func TestT8EmitSharedEscalationsRelayTwice(t *testing.T) {
 	inbox := t.TempDir()
 	pushes := &r20t4Pushes{}
 	socket := r20t4Socket(t, pushes.add)
@@ -116,10 +116,10 @@ func TestT8EmitWrkEscalationsRelayTwice(t *testing.T) {
 	}
 }
 
-// TestT8EmitWrkWrittenRelayRecordsPushImmediately keeps the exact production
+// TestT8EmitSharedWrittenRelayRecordsPushImmediately keeps the exact production
 // ordering: the durable event file exists first, then emit is invoked. Each
 // kind must remain quiet, successful, and immediately pushed.
-func TestT8EmitWrkWrittenRelayRecordsPushImmediately(t *testing.T) {
+func TestT8EmitSharedWrittenRelayRecordsPushImmediately(t *testing.T) {
 	inbox := t.TempDir()
 	pushes := &r20t4Pushes{}
 	socket := r20t4Socket(t, pushes.add)
@@ -127,9 +127,9 @@ func TestT8EmitWrkWrittenRelayRecordsPushImmediately(t *testing.T) {
 		kind, job, report, reason, question, pr, head string
 	}
 	cases := []relayCase{
-		{kind: "job.completed", job: "t8-wrk-done", report: "report.md"},
-		{kind: "job.escalate", job: "t8-wrk-escalate", reason: "needs review", question: "what changed?"},
-		{kind: "job.joined", job: "t8-wrk-joined", report: "joined.md", reason: "captain joined PR", pr: "https://example.invalid/pr/1", head: "deadbeef"},
+		{kind: "job.completed", job: "t8-shared-done", report: "report.md"},
+		{kind: "job.escalate", job: "t8-shared-escalate", reason: "needs review", question: "what changed?"},
+		{kind: "job.joined", job: "t8-shared-joined", report: "joined.md", reason: "captain joined PR", pr: "https://example.invalid/pr/1", head: "deadbeef"},
 	}
 	for _, tc := range cases {
 		contents, err := json.Marshal(map[string]any{

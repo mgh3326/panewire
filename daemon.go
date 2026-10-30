@@ -254,7 +254,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 }
 
 // idleShutdownJobLeases treats the node's jobs/<id>/events tree as the
-// wrk/runtug lease record: wrk claim and runtug job events are written under
+// Job lease record: claim and spawn events are written under
 // the shared inbox root by the emit path, which is exactly the tree
 // scanHubActiveJobsWithPanes reads. A jobs tree that exists but cannot be
 // listed is a blocker, never a clearance; a tree that does not exist simply

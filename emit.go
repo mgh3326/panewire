@@ -18,7 +18,7 @@ import (
 
 // emitRelayKinds is the closed set of relay record kinds, and the node
 // scanner reads this same map — the set lives in exactly one place. It covers
-// wrk's terminal set (job.completed, job.joined, job.revoked) plus the
+// the shared terminal set (job.completed, job.joined, job.revoked) plus the
 // job.lost sentinel observation, which is relayed but deliberately not
 // terminal: a lost job may still complete. handoffkeep's own relay_events
 // CHECK constraint must name these kinds before nodes that can produce them
@@ -34,7 +34,7 @@ var emitRelayKinds = map[string]bool{"job.completed": true, "job.escalate": true
 var relayTerminalSignalKinds = map[string]bool{"job.lost": true, "job.revoked": true}
 
 // relaySignalReportPath treats the sentinel's empty-report spelling as absent.
-// wrk writes report_path=/dev/null when a lost job produced no report; for
+// the sentinel writer records report_path=/dev/null when a lost job produced no report; for
 // the self-record kinds the durable event file is the better pointer, so emit,
 // the dedupe reader, and the scanner all normalize through this one helper —
 // a key built from different spellings of "no report" is how one event would
@@ -54,7 +54,7 @@ const (
 var errDuplicateLaneEventID = errors.New("duplicate lane event id")
 
 // errEmitDuplicateOutboxKey means an existing file has the same relay key but
-// represents different metadata. Unlike a wrk-written record followed by its
+// represents different metadata. Unlike an externally written record followed by its
 // immediate notification, that second record would be lost if treated as an
 // ordinary duplicate.
 var errEmitDuplicateOutboxKey = errors.New("duplicate outbox key")
@@ -87,7 +87,7 @@ type emitRecord struct {
 	DeliveryClass string `json:"delivery_class,omitempty"`
 	NotifyType    string `json:"notify_type,omitempty"`
 	Type          string `json:"type"`
-	// Kind carries the same value as Type under the key wrk reap
+	// Kind carries the same value as Type under the key the reap reader
 	// (document["kind"]), scanJobCloseState and the fleet census read, so an
 	// emitted terminal kind is terminal for every consumer, not only the
 	// scanner. Readers that decode emitRecord itself still see Type.
@@ -138,11 +138,35 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	if fs.Parse(args) != nil || fs.NArg() != 0 {
 		return ExitUsage
 	}
-	if !emitRelayKinds[*kind] || *timeout <= 0 || !validDeliveryClass(*deliver) || !validNotifyType(*notifyType) {
+	// Every rejection names its flag on stderr: a bare exit 2 after the event
+	// was already recorded reads as a delivery failure that never was.
+	if !emitRelayKinds[*kind] {
+		fmt.Fprintln(stderr, "emit: invalid --kind", *kind)
+		return ExitUsage
+	}
+	if *timeout <= 0 {
+		fmt.Fprintln(stderr, "emit: --timeout must be positive")
+		return ExitUsage
+	}
+	if !validDeliveryClass(*deliver) {
+		fmt.Fprintln(stderr, "emit: invalid --deliver", *deliver)
+		return ExitUsage
+	}
+	if !validNotifyType(*notifyType) {
+		fmt.Fprintln(stderr, "emit: invalid --type", *notifyType)
 		return ExitUsage
 	}
 	if *kind == "lane.event" {
-		if !hubAgentLabelPattern.MatchString(*lane) || !validLaneEventID(*eventID) || !validLaneEventText(*text) {
+		if !hubAgentLabelPattern.MatchString(*lane) {
+			fmt.Fprintln(stderr, "emit: invalid --lane", *lane)
+			return ExitUsage
+		}
+		if !validLaneEventID(*eventID) {
+			fmt.Fprintln(stderr, "emit: invalid --event-id")
+			return ExitUsage
+		}
+		if !validLaneEventText(*text) {
+			fmt.Fprintln(stderr, "emit: invalid --text")
 			return ExitUsage
 		}
 		limit := laneEventTextLimit
@@ -188,6 +212,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 // two builders of that request are how two keys for one event would appear.
 func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration, stderr io.Writer) int {
 	if record.JobID == "" || !hubJobIDPattern.MatchString(record.JobID) {
+		fmt.Fprintln(stderr, "emit: invalid --job", record.JobID)
 		return ExitUsage
 	}
 	record.ReportPath = relaySignalReportPath(record.Type, record.ReportPath)
@@ -196,12 +221,14 @@ func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration
 	// route — producing either record would only stamp an outbox row no
 	// acknowledgement can ever retire.
 	if relayTerminalSignalKinds[record.Type] && (record.Reason == "" || !validReportRelayLaneName(record.OwnerLane)) {
+		fmt.Fprintln(stderr, "emit: terminal kind requires --reason and a routable --owner-lane")
 		return ExitUsage
 	}
 	// A completion is meaningless without the report it announces. An escalation
 	// or a join carries its own question in the event file, so an empty report is
 	// the normal shape there and the event file stands in for the report path.
 	if record.ReportPath == "" && !relayEventPathFallbackKinds[record.Type] {
+		fmt.Fprintln(stderr, "emit: --report is required")
 		return ExitUsage
 	}
 	if record.Epoch == 0 {
@@ -236,7 +263,7 @@ func emitJobRecord(record emitRecord, root, socket string, timeout time.Duration
 }
 
 // writeEmitRecord recognizes a byte-for-byte equivalent relay record already
-// written by wrk as the durable half of the same event. It returns that path so
+// written by another producer as the durable half of the same event. It returns that path so
 // emit can still make the immediate socket notification. A same-key record with
 // different metadata is an explicit conflict: silently reusing its file would
 // discard a real event.
@@ -460,8 +487,8 @@ type emitDedupeRecord struct {
 }
 
 // matches intentionally omits CreatedAt and AgentLabel. CreatedAt is local
-// write time, while older wrk records do not carry AgentLabel; neither changes
-// the relay event wrk asks emit to notify immediately.
+// write time, while older records do not carry AgentLabel; neither changes
+// the relay event emit is asked to notify immediately.
 func (existing emitDedupeRecord) matches(record emitRecord) bool {
 	return existing.kind == record.Type && existing.deliveryClass == record.DeliveryClass && existing.notifyType == record.NotifyType &&
 		existing.epoch == record.Epoch &&

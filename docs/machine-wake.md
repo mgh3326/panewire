@@ -90,7 +90,7 @@ Shutdown requires **all** of these to hold for the whole window:
   dropping them);
 - no `idle`/`done` pane is bound to an active job lease;
 - no active job leases in the node's `jobs/*/events` inbox — the arbiter
-  job records wrk and runtug write through emit under the shared inbox
+  job records runtug and panewire job write through emit under the shared inbox
   root. A job directory whose events cannot be listed, read, or parsed
   counts as a lease;
 - no GitHub Actions runner — no process whose argv basename is

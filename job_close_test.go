@@ -154,7 +154,7 @@ func TestJobCloseOwnerWritesOneRevokedRecord(t *testing.T) {
 	f := newJobCloseFixture(t)
 	f.claim("j1", "00001-job.claim.json", "job.claim", "director-1")
 	f.spawned("j1", "00002-job.spawned.json", "w16:p28P", "w16:t9")
-	if rc := f.run("j1", "--lane", "director-1", "--outcome", "completed", "--reason", "merged as #69; worker never ran wrk done"); rc != ExitOK {
+	if rc := f.run("j1", "--lane", "director-1", "--outcome", "completed", "--reason", "merged as #69; worker never ran job done"); rc != ExitOK {
 		t.Fatalf("rc=%d stderr=%q", rc, f.stderr.String())
 	}
 	want := "OK job=j1 kind=job.revoked outcome=completed closed_by=director-1 owner_lane=director-1 record=00003-job.revoked.json\n"
@@ -166,7 +166,7 @@ func TestJobCloseOwnerWritesOneRevokedRecord(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantBody := `{"kind":"job.revoked","job_id":"j1","owner_lane":"director-1","closed_by":"director-1","outcome":"completed","reason":"merged as #69; worker never ran wrk done","source":"panewire job close","host":"fixture-host","created_at":"2026-09-22T01:02:03Z","epoch":1}` + "\n"
+	wantBody := `{"kind":"job.revoked","job_id":"j1","owner_lane":"director-1","closed_by":"director-1","outcome":"completed","reason":"merged as #69; worker never ran job done","source":"panewire job close","host":"fixture-host","created_at":"2026-09-22T01:02:03Z","epoch":1}` + "\n"
 	if string(contents) != wantBody {
 		t.Fatalf("record =\n%s\nwant\n%s", contents, wantBody)
 	}
@@ -402,8 +402,8 @@ func TestJobCloseTerminalState(t *testing.T) {
 	}
 }
 
-// AC3: the declaration closes nothing. The pane stays for wrk reap, which
-// (vendored reference, wrk ae1f544) sees the record as terminal and still
+// AC3: the declaration closes nothing. The pane stays for the reaper, which
+// (vendored reference) sees the record as terminal and still
 // honours its grace from the record's created_at.
 func TestJobCloseLeavesThePaneToReapAfterGrace(t *testing.T) {
 	f := newJobCloseFixture(t)

@@ -40,7 +40,7 @@ func TestPlacementPrometheusPolicyBranches(t *testing.T) {
 			}
 			jobs := make([]HubActiveJob, tc.localJobs)
 			for i := range jobs {
-				jobs[i] = HubActiveJob{JobID: "job-" + string(rune('a'+i)), AgentLabel: "wrk", Epoch: 1}
+				jobs[i] = HubActiveJob{JobID: "job-" + string(rune('a'+i)), AgentLabel: "agent", Epoch: 1}
 			}
 			hub.observeActiveJobs("mac-work", jobs, time.Now().UTC())
 			got := hub.placement(t.Context(), "worker", "repo")

@@ -32,10 +32,10 @@ import (
 //     must agree with the receipt. Any unknown or different value holds the
 //     pane (#595 R3: a name-only match closed a working session whose name
 //     was empty).
-//   - A protected job (`wrk spawn --keep`, sticky on any claim or receipt)
-//     and a claim role outside wrk's worker|builder|captain vocabulary are
+//   - A protected job (`runtug spawn --keep`, sticky on any claim or receipt)
+//     and a claim role outside the worker|builder|captain vocabulary are
 //     held.
-//   - A worker (testers are workers) is a candidate only when the wrk reap
+//   - A worker (testers are workers) is a candidate only when the reap
 //     pipeline would close it: fleetCensusJobVerdict, reused unchanged.
 //   - A builder is never a candidate here. When its pane passes the same pane
 //     gates it becomes builder-task-gate, and only the console, which owns
@@ -57,7 +57,7 @@ const (
 	sessionReapReasonProtectedRole = "protected-role"
 	// An event file of the job could not be read, so a revive may be hidden.
 	sessionReapReasonRecordUnreadable = "record-unreadable"
-	// A held reason that the wire grammar cannot carry (a wrk reason quoting
+	// A held reason that the wire grammar cannot carry (a reason quoting
 	// an unusual tab id) is replaced, never dropped.
 	sessionReapReasonUnrepresentable = "reason-unrepresentable"
 )
@@ -182,7 +182,7 @@ func sessionReapClassRank(class string) int {
 
 // sessionReapJudgePane decides one pane that at least one spawn receipt
 // names. The gate order is the contract: identity (label, ambiguity,
-// conflict, reuse) before protection before role before the reused wrk
+// conflict, reuse) before protection before role before the reused reap
 // pipeline, so no later gate can see a pane whose identity is unproven.
 func sessionReapJudgePane(agent fleetCensusPaneObs, linked, scans []fleetCensusJobScan, view fleetCensusLocalView, grace time.Duration, now time.Time) SessionReapRow {
 	held := func(scan fleetCensusJobScan, reason string) SessionReapRow {
@@ -244,7 +244,7 @@ func sessionReapJudgePane(agent fleetCensusPaneObs, linked, scans []fleetCensusJ
 	if job.keep {
 		return held(job, fleetCensusReasonProtected)
 	}
-	// The latest claim role must be in wrk's vocabulary before the sticky
+	// The latest claim role must be in the vocabulary before the sticky
 	// builder marking is consulted: a builder later reclaimed as a resident
 	// (or with no role) is held, never routed to the builder task gate.
 	switch job.claimRole {
@@ -290,7 +290,7 @@ func sessionReapBaseRow(agent fleetCensusPaneObs, scan fleetCensusJobScan, now t
 		row.OwnerLane = ""
 	}
 	if scan.role == "builder" {
-		// Builder role is sticky across claims, exactly as wrk reap reads it.
+		// Builder role is sticky across claims, exactly as the reaper reads it.
 		row.Role = "builder"
 	}
 	if !hubLastEventKindPattern.MatchString(row.Role) {
@@ -393,8 +393,8 @@ func sessionReapReportInterval(value string) (time.Duration, bool) {
 // (grace_seconds <= 30 days). A node never sends a report the hub would drop.
 const sessionReapMaxGrace = 30 * 24 * time.Hour
 
-// sessionReapGrace reads the grace in wrk's duration grammar (600, 600s, 10m,
-// 2h, 1d) and falls back to wrk reap's 10m default for anything unparseable,
+// sessionReapGrace reads the grace in the contract's duration grammar (600, 600s, 10m,
+// 2h, 1d) and falls back to the 10m default for anything unparseable,
 // negative, or beyond sessionReapMaxGrace.
 func sessionReapGrace(value string) time.Duration {
 	if strings.TrimSpace(value) == "" {

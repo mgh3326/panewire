@@ -20,7 +20,7 @@ func TestTask646DeliveriesShowAndList(t *testing.T) {
 	}
 	for i, d := range []Delivery{
 		{DeliveryID: "aaaa1111", Sender: "b623", TargetInput: "t623-verify", ResolvedPaneID: "w1:p5", RequestedAtMS: 1000, CompletedAtMS: 8557, PreflightResult: "passed", HerdrAcceptance: "accepted", SubmissionResult: "marker_observed", SubmissionEvidence: "recent_unwrapped:marker_echo", UptakeMode: "status-transition", UptakeResult: "confirmed"},
-		{DeliveryID: "aaaa2222", Sender: "wrk-spawn:x", TargetInput: "other", ResolvedPaneID: "w1:p6", RequestedAtMS: 2000, CompletedAtMS: 2500, PreflightResult: "passed", SubmissionResult: "unproven", ErrorCode: "delivery_failure"},
+		{DeliveryID: "aaaa2222", Sender: "agent-spawn:x", TargetInput: "other", ResolvedPaneID: "w1:p6", RequestedAtMS: 2000, CompletedAtMS: 2500, PreflightResult: "passed", SubmissionResult: "unproven", ErrorCode: "delivery_failure"},
 	} {
 		if ok, err := store.InsertDelivery(t.Context(), d, ""); err != nil || !ok {
 			t.Fatalf("insert %d: ok=%v err=%v", i, ok, err)

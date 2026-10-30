@@ -152,8 +152,8 @@ func r19eCompletion(t *testing.T, inbox, jobID, label string, at time.Time) {
 func TestR19eCompletionBeforeAnyHeartbeatIsRelayed(t *testing.T) {
 	f := newR19eFixture(t)
 	now := time.Now()
-	r19eClaim(t, f.inbox, "job-short", "wrk-short", now)
-	r19eCompletion(t, f.inbox, "job-short", "wrk-short", now)
+	r19eClaim(t, f.inbox, "job-short", "agent-short", now)
+	r19eCompletion(t, f.inbox, "job-short", "agent-short", now)
 
 	f.connectWorker(t)
 	directive := f.awaitRelay(t, "job-short")
@@ -169,7 +169,7 @@ func TestR19eCompletionBeforeAnyHeartbeatIsRelayed(t *testing.T) {
 	f.hub.mu.Lock()
 	record := f.hub.jobs["job-short"]
 	f.hub.mu.Unlock()
-	if record == nil || !record.Completed || record.AgentLabel != "wrk-short" || record.Node != r19eWorkerNode {
+	if record == nil || !record.Completed || record.AgentLabel != "agent-short" || record.Node != r19eWorkerNode {
 		t.Fatalf("late registration=%+v", record)
 	}
 	if _, ok := f.hub.reassignJob("job-short", r19eLaneNode); ok {
@@ -191,8 +191,8 @@ func TestR19eRestartFirstBundleRelaysCompletion(t *testing.T) {
 	stop()
 
 	now := time.Now()
-	r19eClaim(t, f.inbox, "job-restart", "wrk-restart", now)
-	r19eCompletion(t, f.inbox, "job-restart", "wrk-restart", now)
+	r19eClaim(t, f.inbox, "job-restart", "agent-restart", now)
+	r19eCompletion(t, f.inbox, "job-restart", "agent-restart", now)
 
 	f.connectWorker(t) // new connection, fresh client state: a node restart.
 	if directive := f.awaitRelay(t, "job-restart"); directive.Pane != "w1:p1" {
@@ -211,9 +211,9 @@ func TestR19eCompletionOutsideActiveScanCapIsRelayed(t *testing.T) {
 	// The target job is the oldest of 40, so it is ranked out of the 32-entry
 	// heartbeat window even before it completes.
 	target := "job-capped"
-	r19eClaim(t, f.inbox, target, "wrk-capped", now.Add(-40*time.Minute))
+	r19eClaim(t, f.inbox, target, "agent-capped", now.Add(-40*time.Minute))
 	for i := 0; i < 39; i++ {
-		r19eClaim(t, f.inbox, fmt.Sprintf("job-busy-%02d", i), fmt.Sprintf("wrk-busy-%02d", i), now.Add(-time.Duration(i)*time.Minute))
+		r19eClaim(t, f.inbox, fmt.Sprintf("job-busy-%02d", i), fmt.Sprintf("agent-busy-%02d", i), now.Add(-time.Duration(i)*time.Minute))
 	}
 	active := scanHubActiveJobs(f.inbox)
 	if len(active) != 32 {
@@ -224,7 +224,7 @@ func TestR19eCompletionOutsideActiveScanCapIsRelayed(t *testing.T) {
 			t.Fatal("fixture does not exercise the cap: target job is inside the heartbeat window")
 		}
 	}
-	r19eCompletion(t, f.inbox, target, "wrk-capped", now)
+	r19eCompletion(t, f.inbox, target, "agent-capped", now)
 
 	f.connectWorker(t)
 	if directive := f.awaitRelay(t, target); directive.Pane != "w1:p1" {
@@ -240,8 +240,8 @@ func TestR19eCompletionOutsideActiveScanCapIsRelayed(t *testing.T) {
 func TestR19eRestartResendIsDedupedNotReinjected(t *testing.T) {
 	f := newR19eFixture(t)
 	now := time.Now()
-	r19eClaim(t, f.inbox, "job-resend", "wrk-resend", now)
-	r19eCompletion(t, f.inbox, "job-resend", "wrk-resend", now)
+	r19eClaim(t, f.inbox, "job-resend", "agent-resend", now)
+	r19eCompletion(t, f.inbox, "job-resend", "agent-resend", now)
 
 	// Count job.completed as the hub observes it, so the assertion below runs
 	// only after the resent record has actually been processed.
@@ -304,7 +304,7 @@ func TestR19eEscalationRelayIsIndependentOfJobRegistration(t *testing.T) {
 	if len(hub.jobs) != 0 {
 		t.Fatalf("fixture registered a job: %+v", hub.jobs)
 	}
-	hub.relayJobEvent("job.escalate", hubJobEventPayload{JobID: "job-esc", Epoch: 7, OwnerLane: "lane-a", Label: "wrk", Host: "host-a", ReportPath: "/inbox/job-esc/report.md", Reason: "needs captain", Question: "which branch?"})
+	hub.relayJobEvent("job.escalate", hubJobEventPayload{JobID: "job-esc", Epoch: 7, OwnerLane: "lane-a", Label: "agent", Host: "host-a", ReportPath: "/inbox/job-esc/report.md", Reason: "needs captain", Question: "which branch?"})
 	select {
 	case directive := <-relays:
 		if directive.Pane != "w9:p9" {
@@ -323,13 +323,13 @@ func TestR19eLateRegistrationRejectsUnprovableEpoch(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC()
-	if hub.lateRegisterJobCompletion(r19eWorkerNode, hubJobEventPayload{JobID: "job-x", Epoch: 4, AgentLabel: "wrk"}, now) {
+	if hub.lateRegisterJobCompletion(r19eWorkerNode, hubJobEventPayload{JobID: "job-x", Epoch: 4, AgentLabel: "agent"}, now) {
 		t.Fatal("self-promoted epoch was late-registered")
 	}
 	if hub.lateRegisterJobCompletion(r19eWorkerNode, hubJobEventPayload{JobID: "job-x", Epoch: 1}, now) {
 		t.Fatal("completion without a claim label was late-registered")
 	}
-	if !hub.lateRegisterJobCompletion(r19eWorkerNode, hubJobEventPayload{JobID: "job-x", Epoch: 1, AgentLabel: "wrk"}, now) {
+	if !hub.lateRegisterJobCompletion(r19eWorkerNode, hubJobEventPayload{JobID: "job-x", Epoch: 1, AgentLabel: "agent"}, now) {
 		t.Fatal("valid late registration refused")
 	}
 	if hub.lateRegisterJobCompletion(r19eWorkerNode, hubJobEventPayload{JobID: "job-x", Epoch: 1, AgentLabel: "other"}, now) {
@@ -342,21 +342,21 @@ func TestR19eLateRegistrationRejectsUnprovableEpoch(t *testing.T) {
 func TestR19eTerminalRecordCarriesClaimLabel(t *testing.T) {
 	root := t.TempDir()
 	now := time.Now()
-	r19eClaim(t, root, "job-meta", "wrk-meta", now)
-	r19eCompletion(t, root, "job-meta", "wrk-meta", now)
+	r19eClaim(t, root, "job-meta", "agent-meta", now)
+	r19eCompletion(t, root, "job-meta", "agent-meta", now)
 	client := &HubClient{jobsInboxRoot: root, completedJobs: map[string]uint64{}, completedReports: map[string]struct{}{}, assignedJobs: map[string]uint64{}}
 	events := client.jobCompletionEvents()
 	if len(events) != 1 {
 		t.Fatalf("events=%+v", events)
 	}
 	completion, ok := decodeHubJobCompletionPayload(events[0].Payload)
-	if !ok || completion.AgentLabel != "wrk-meta" {
+	if !ok || completion.AgentLabel != "agent-meta" {
 		t.Fatalf("payload=%s ok=%v", events[0].Payload, ok)
 	}
 	if _, ok := decodeHubJobCompletionPayload([]byte(`{"job_id":"job-meta","epoch":1,"agent_label":"bad label"}`)); ok {
 		t.Fatal("malformed agent_label accepted")
 	}
-	if _, ok := decodeHubJobCompletionPayload([]byte(`{"job_id":"job-meta","epoch":1,"agent_labels":"wrk"}`)); ok {
+	if _, ok := decodeHubJobCompletionPayload([]byte(`{"job_id":"job-meta","epoch":1,"agent_labels":"agent"}`)); ok {
 		t.Fatal("unknown field accepted")
 	}
 }

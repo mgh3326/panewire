@@ -71,7 +71,7 @@ func TestT507ScannerOffersLostAndRevoked(t *testing.T) {
 	// The lost record carries no agent_label of its own — the claim is the
 	// node-local source for it, exactly as the real sentinel files read.
 	r20t7WriteEvent(t, inbox, "t507-lost", "00001-job.claim.json",
-		`{"kind":"job.claim","job_id":"t507-lost","payload":{"agent_label":"wrk-lost","owner_lane":"lane-w"},"seq":1}`)
+		`{"kind":"job.claim","job_id":"t507-lost","payload":{"agent_label":"agent-lost","owner_lane":"lane-w"},"seq":1}`)
 	r20t7WriteEvent(t, inbox, "t507-lost", "00002-job.lost.json",
 		`{"kind":"job.lost","job_id":"t507-lost","owner_lane":"lane-w","label":"lane-w","host":"host-a","report_path":"","epoch":1,"reason":"timeout"}`)
 	// The job.revoked record is the shape `panewire job close` writes: flat
@@ -97,8 +97,8 @@ func TestT507ScannerOffersLostAndRevoked(t *testing.T) {
 	if !ok || lostEvent.Reason != "timeout" || lostEvent.OwnerLane != "lane-w" {
 		t.Fatalf("job.lost payload=%s", lost.Payload)
 	}
-	if lostEvent.AgentLabel != "wrk-lost" {
-		t.Fatalf("job.lost agent_label=%q, want the claim's wrk-lost", lostEvent.AgentLabel)
+	if lostEvent.AgentLabel != "agent-lost" {
+		t.Fatalf("job.lost agent_label=%q, want the claim's agent-lost", lostEvent.AgentLabel)
 	}
 	lostFile := filepath.Join(inbox, "jobs", "t507-lost", "events", "00002-job.lost.json")
 	if lostEvent.ReportPath != lostFile {
@@ -128,7 +128,7 @@ func TestT507LostRelaysToOwnerPane(t *testing.T) {
 	store := NewMemoryStore(t)
 	defer store.Close()
 	r20t7WriteEvent(t, inbox, "t507-lost-relay", "00001-job.lost.json",
-		`{"kind":"job.lost","job_id":"t507-lost-relay","owner_lane":"lane-w","agent_label":"wrk-lost","label":"lane-w","host":"host-a","epoch":1,"reason":"sentinel: heartbeat silent"}`)
+		`{"kind":"job.lost","job_id":"t507-lost-relay","owner_lane":"lane-w","agent_label":"agent-lost","label":"lane-w","host":"host-a","epoch":1,"reason":"sentinel: heartbeat silent"}`)
 
 	node := r20Node(inbox, store)
 	events := node.jobCompletionEvents()
@@ -171,7 +171,7 @@ func TestT507RevokedRelaysToParentPaneAndClosesJob(t *testing.T) {
 	store := NewMemoryStore(t)
 	defer store.Close()
 	r20t7WriteEvent(t, inbox, "t507-rev-relay", "00001-job.revoked.json",
-		`{"kind":"job.revoked","job_id":"t507-rev-relay","owner_lane":"lane-cap","agent_label":"wrk-cap","label":"lane-cap","host":"host-a","epoch":1,"reason":"operator closed the task"}`)
+		`{"kind":"job.revoked","job_id":"t507-rev-relay","owner_lane":"lane-cap","agent_label":"agent-cap","label":"lane-cap","host":"host-a","epoch":1,"reason":"operator closed the task"}`)
 
 	node := r20Node(inbox, store)
 	events := node.jobCompletionEvents()
@@ -382,7 +382,7 @@ func TestT507OldHandoffkeepRejectsNewKindsVisibly(t *testing.T) {
 }
 
 // F2: a `panewire emit --kind job.revoked` file must be terminal for the
-// consumers that read the "kind" key — wrk reap's document["kind"], the
+// consumers that read the "kind" key — the reap reader's document["kind"], the
 // in-repo scanJobCloseState, and the fleet census — not only for the scanner
 // (which accepts "type" too). This pins both: the emitted file carries
 // "kind", and a real consumer marks the job closed on it. A job.lost file is
@@ -489,7 +489,7 @@ func TestT507EmitDistinctLostObservationsGetOwnFiles(t *testing.T) {
 	}
 }
 
-// Fixture AC: the real wrk sentinel file in testdata/task603 is the shape this
+// Fixture AC: the real sentinel file in testdata/task603 is the shape this
 // change exists for — flat kind, no report, reason+owner_lane present. It must
 // be offered as job.lost with the claim's agent label and the event file as
 // its report path.
@@ -511,7 +511,7 @@ func TestT507Task603FixtureLostIsOffered(t *testing.T) {
 		}
 	}
 	if offered == nil {
-		t.Fatal("the real wrk job.lost file was not offered")
+		t.Fatal("the real job.lost file was not offered")
 	}
 	if offered.Reason != "timeout" || offered.OwnerLane != "b529-deploy-view" {
 		t.Fatalf("offered=%+v", *offered)
@@ -524,7 +524,7 @@ func TestT507Task603FixtureLostIsOffered(t *testing.T) {
 	}
 }
 
-// The widened set is the whole contract: wrk TERMINAL {completed, joined,
+// The widened set is the whole contract: TERMINAL {completed, joined,
 // revoked} all relay, plus the escalate signal, plus the non-terminal lost
 // observation, plus lane.event. Removing either new kind turns the offer tests
 // above RED — that is the required mutant property.

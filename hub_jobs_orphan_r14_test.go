@@ -24,7 +24,7 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	}
 	old := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "r14", "fixture", old, false)
-	first := HubActiveJob{JobID: "recover-me", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 1}
+	first := HubActiveJob{JobID: "recover-me", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}
 	hub.observeActiveJobs("node-a", []HubActiveJob{first}, clock)
 	hub.disconnect("node-a", old)
 	clock = clock.Add(2*time.Second - time.Nanosecond)
@@ -61,7 +61,7 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 		t.Fatalf("reconnect completion did not recover orphan: %+v", hub.uiEvents)
 	}
 
-	second := HubActiveJob{JobID: "move-me", AgentLabel: "wrk-a", LastEventSeq: 2, Epoch: 1}
+	second := HubActiveJob{JobID: "move-me", AgentLabel: "agent-a", LastEventSeq: 2, Epoch: 1}
 	hub.connect("node-a", "r14", "fixture", old, false)
 	hub.observeActiveJobs("node-a", []HubActiveJob{second}, clock)
 	hub.disconnect("node-a", old)
@@ -84,7 +84,7 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	default:
 		t.Fatal("new owner was not sent hub-issued epoch")
 	}
-	hub.observeActiveJobs("node-b", []HubActiveJob{{JobID: second.JobID, AgentLabel: "wrk-b", LastEventSeq: 3, Epoch: 2}}, clock)
+	hub.observeActiveJobs("node-b", []HubActiveJob{{JobID: second.JobID, AgentLabel: "agent-b", LastEventSeq: 3, Epoch: 2}}, clock)
 	// New-owner metadata must never erase the predecessor fence.
 	if got := hub.jobs[second.JobID].FencedNodes["node-a"]; got != 2 {
 		t.Fatalf("new owner heartbeat erased A fence: %+v", hub.jobs[second.JobID])
@@ -92,7 +92,7 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	reconnected := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "r14", "fixture", reconnected, false)
 	hub.observeActiveJobs("node-a", []HubActiveJob{second}, clock)
-	hub.observeActiveJobs("node-a", []HubActiveJob{{JobID: second.JobID, AgentLabel: "wrk-a", LastEventSeq: 99, Epoch: 99}}, clock)
+	hub.observeActiveJobs("node-a", []HubActiveJob{{JobID: second.JobID, AgentLabel: "agent-a", LastEventSeq: 99, Epoch: 99}}, clock)
 	if job := hub.jobs[second.JobID]; job.Node != "node-b" || job.Epoch != 2 {
 		t.Fatalf("node self-promoted its epoch: %+v", job)
 	}
@@ -120,7 +120,7 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 
 	// A→B→A makes A the current owner again. The stale A epoch must be
 	// rejected by the epoch check itself, not merely by the node-owner check.
-	chain := HubActiveJob{JobID: "chain-me", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 1}
+	chain := HubActiveJob{JobID: "chain-me", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}
 	hub.connect("node-a", "r14", "fixture", old, false)
 	hub.observeActiveJobs("node-a", []HubActiveJob{chain}, clock)
 	hub.disconnect("node-a", old)
@@ -130,7 +130,7 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 		t.Fatal("A→B reassignment failed")
 	}
 	hub.connect("node-b", "r14", "fixture", newOwner, false)
-	hub.observeActiveJobs("node-b", []HubActiveJob{{JobID: chain.JobID, AgentLabel: "wrk-b", LastEventSeq: 2, Epoch: 2}}, clock)
+	hub.observeActiveJobs("node-b", []HubActiveJob{{JobID: chain.JobID, AgentLabel: "agent-b", LastEventSeq: 2, Epoch: 2}}, clock)
 	hub.disconnect("node-b", newOwner)
 	clock = clock.Add(2 * time.Second)
 	r14Sweep(hub)
@@ -143,7 +143,7 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 
 	// A→B→C preserves both historical fences, and B's N+1 completion remains
 	// rejected once C owns N+2.
-	third := HubActiveJob{JobID: "three-hop", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 1}
+	third := HubActiveJob{JobID: "three-hop", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}
 	hub.connect("node-a", "r14", "fixture", old, false)
 	hub.observeActiveJobs("node-a", []HubActiveJob{third}, clock)
 	hub.disconnect("node-a", old)
@@ -151,7 +151,7 @@ func TestHubR14OrphanRecoveryRedispatchAndEpochFence(t *testing.T) {
 	r14Sweep(hub)
 	_, _ = hub.reassignJob(third.JobID, "node-b")
 	hub.connect("node-b", "r14", "fixture", newOwner, false)
-	hub.observeActiveJobs("node-b", []HubActiveJob{{JobID: third.JobID, AgentLabel: "wrk-b", LastEventSeq: 2, Epoch: 2}}, clock)
+	hub.observeActiveJobs("node-b", []HubActiveJob{{JobID: third.JobID, AgentLabel: "agent-b", LastEventSeq: 2, Epoch: 2}}, clock)
 	hub.disconnect("node-b", newOwner)
 	clock = clock.Add(2 * time.Second)
 	r14Sweep(hub)
@@ -184,7 +184,7 @@ func TestHubR14ReassignImmediatelyDeliversAssignedEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	hub.jobs["immediate-assignment"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "immediate-assignment", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 1}, Node: "node-a", Orphaned: true, FencedNodes: make(map[string]uint64)}
+	hub.jobs["immediate-assignment"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "immediate-assignment", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}, Node: "node-a", Orphaned: true, FencedNodes: make(map[string]uint64)}
 	recipient := &hubAgent{assignments: make(chan hubJobAssignedEvent, 1)}
 	hub.connect("node-b", "r14", "fixture", recipient, false)
 	// Mutant M5b: deleting reassignJob's immediate queueAssignment leaves this
@@ -205,7 +205,7 @@ func TestHubR14ReassignImmediatelyDeliversAssignedEpoch(t *testing.T) {
 func TestHubR14HeartbeatJobMetadataIsBoundedAndBodyFree(t *testing.T) {
 	jobs := make([]HubActiveJob, 40)
 	for i := range jobs {
-		jobs[i] = HubActiveJob{JobID: fmt.Sprintf("job-%02d", i), AgentLabel: "wrk-a", LastEventSeq: uint64(i + 1), Epoch: 1}
+		jobs[i] = HubActiveJob{JobID: fmt.Sprintf("job-%02d", i), AgentLabel: "agent-a", LastEventSeq: uint64(i + 1), Epoch: 1}
 	}
 	payload, err := json.Marshal(hubHeartbeatPayload{Status: "alive", Checks: map[string]HubCheckStatus{}, ActiveJobs: jobs})
 	if err != nil {
@@ -218,7 +218,7 @@ func TestHubR14HeartbeatJobMetadataIsBoundedAndBodyFree(t *testing.T) {
 	if err != nil || func() bool { _, ok := decodeHubHeartbeatPayload(payload); return !ok }() {
 		t.Fatalf("valid 32-job envelope was rejected: err=%v", err)
 	}
-	if _, ok := decodeHubHeartbeatPayload([]byte(`{"status":"alive","checks":{},"active_jobs":[{"job_id":"job-a","agent_label":"wrk-a","last_event_seq":1,"epoch":1,"brief":"do not transport this"}]}`)); ok {
+	if _, ok := decodeHubHeartbeatPayload([]byte(`{"status":"alive","checks":{},"active_jobs":[{"job_id":"job-a","agent_label":"agent-a","last_event_seq":1,"epoch":1,"brief":"do not transport this"}]}`)); ok {
 		t.Fatal("brief body carrier was accepted")
 	}
 }
@@ -231,7 +231,7 @@ func TestHubR14JobEndpointsRequireOperator(t *testing.T) {
 	}
 	agent := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "r14", "fixture", agent, false)
-	hub.observeActiveJobs("node-a", []HubActiveJob{{JobID: "operator-gate", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 1}}, clock)
+	hub.observeActiveJobs("node-a", []HubActiveJob{{JobID: "operator-gate", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}}, clock)
 	hub.disconnect("node-a", agent)
 	clock = clock.Add(time.Second)
 	r14Sweep(hub)
@@ -280,7 +280,7 @@ func TestHubR14RevocationRetriesUntilLocalAck(t *testing.T) {
 	}
 	old := &hubAgent{revocations: make(chan hubJobRevokedEvent, 1)}
 	hub.connect("node-a", "r14", "fixture", old, false)
-	job := HubActiveJob{JobID: "retry-me", AgentLabel: "wrk-a", LastEventSeq: 1, Epoch: 1}
+	job := HubActiveJob{JobID: "retry-me", AgentLabel: "agent-a", LastEventSeq: 1, Epoch: 1}
 	hub.observeActiveJobs("node-a", []HubActiveJob{job}, clock)
 	hub.disconnect("node-a", old)
 	clock = clock.Add(time.Second)
@@ -320,11 +320,11 @@ func TestHubR14LocalScannerAndRevocationAreMetadataOnly(t *testing.T) {
 	if err := os.MkdirAll(events, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(events, "00001-job.claimed.json"), []byte(`{"type":"job.claimed","agent_label":"wrk-a","epoch":1,"push_sha":"abcdef1","brief":"secret brief text"}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(events, "00001-job.claimed.json"), []byte(`{"type":"job.claimed","agent_label":"agent-a","epoch":1,"push_sha":"abcdef1","brief":"secret brief text"}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	jobs := scanHubActiveJobs(root)
-	if len(jobs) != 1 || jobs[0].JobID != "job-a" || jobs[0].AgentLabel != "wrk-a" || strings.Contains(string(mustR14JSON(t, jobs)), "secret brief") {
+	if len(jobs) != 1 || jobs[0].JobID != "job-a" || jobs[0].AgentLabel != "agent-a" || strings.Contains(string(mustR14JSON(t, jobs)), "secret brief") {
 		t.Fatalf("scanner leaked or lost metadata: %+v", jobs)
 	}
 	if err := writeHubRevocation(root, hubJobRevokedEvent{Type: "job.revoked", JobID: "job-a", Epoch: 2}); err != nil {
@@ -359,24 +359,24 @@ func TestHubJobScannerReadsArbiterEnvelopeAndKeepsFlatCompatibility(t *testing.T
 		t.Fatal(err)
 	}
 	// This is the arbiter.record_event shape and key order, not a scanner-only fixture.
-	if err := os.WriteFile(filepath.Join(envelope, "00001-job.claim.json"), []byte(`{"created_at":"`+now+`","job_id":"job-20260101-0000","kind":"job.claim","payload":{"agent_label":"wrk-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(envelope, "00001-job.claim.json"), []byte(`{"created_at":"`+now+`","job_id":"job-20260101-0000","kind":"job.claim","payload":{"agent_label":"agent-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	jobs := scanHubActiveJobs(root)
-	if len(jobs) != 1 || jobs[0].AgentLabel != "wrk-a" || jobs[0].Epoch != 1 {
+	if len(jobs) != 1 || jobs[0].AgentLabel != "agent-a" || jobs[0].Epoch != 1 {
 		t.Fatalf("M1/M4: envelope claim was not active with default epoch 1: %+v", jobs)
 	}
 	flat := filepath.Join(root, "jobs", "job-flat", "events")
 	if err := os.MkdirAll(flat, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(flat, "00001-job.claimed.json"), []byte(`{"type":"job.claimed","agent_label":"wrk-a","epoch":1}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(flat, "00001-job.claimed.json"), []byte(`{"type":"job.claimed","agent_label":"agent-a","epoch":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if got := scanHubActiveJobs(root); len(got) != 2 {
 		t.Fatalf("flat compatibility claim disappeared: %+v", got)
 	}
-	if err := os.WriteFile(filepath.Join(envelope, "00002-job.completed.json"), []byte(`{"created_at":"`+now+`","job_id":"job-20260101-0000","kind":"job.completed","payload":{"agent_label":"wrk-a","owner_lane":"lane-a","label":"wrk-a","report_path":"report.md","report_last_line":"VERDICT: DONE","host":"host-a"},"seq":2}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(envelope, "00002-job.completed.json"), []byte(`{"created_at":"`+now+`","job_id":"job-20260101-0000","kind":"job.completed","payload":{"agent_label":"agent-a","owner_lane":"lane-a","label":"agent-a","report_path":"report.md","report_last_line":"VERDICT: DONE","host":"host-a"},"seq":2}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	completed := scanHubCompletedJobs(root)
@@ -397,7 +397,7 @@ func TestHubActiveScannerNewestFirstAndAgeCut(t *testing.T) {
 			t.Fatal(err)
 		}
 		// The last event is new, but the still-open claim is beyond the replay age.
-		if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+old+`","kind":"job.claim","payload":{"agent_label":"wrk-a"},"seq":1}`), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+old+`","kind":"job.claim","payload":{"agent_label":"agent-a"},"seq":1}`), 0600); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(filepath.Join(dir, "00002-note.json"), []byte(`{"created_at":"`+legacyLast+`","kind":"note","payload":{},"seq":2}`), 0600); err != nil {
@@ -410,7 +410,7 @@ func TestHubActiveScannerNewestFirstAndAgeCut(t *testing.T) {
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+fresh+`","kind":"job.claim","payload":{"agent_label":"wrk-a"},"seq":1}`), 0600); err != nil {
+		if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+fresh+`","kind":"job.claim","payload":{"agent_label":"agent-a"},"seq":1}`), 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -419,7 +419,7 @@ func TestHubActiveScannerNewestFirstAndAgeCut(t *testing.T) {
 		t.Fatal(err)
 	}
 	newest := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
-	if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+newest+`","job_id":"job-z-newest","kind":"job.claim","payload":{"agent_label":"wrk-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"created_at":"`+newest+`","job_id":"job-z-newest","kind":"job.claim","payload":{"agent_label":"agent-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	jobs := scanHubActiveJobs(root)

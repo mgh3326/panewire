@@ -387,7 +387,7 @@ func scanHubJobCompletion(eventsDir, jobID string) (HubActiveJob, bool) {
 }
 
 // hubInboxEvent accepts the arbiter envelope as the canonical form while
-// retaining the older flat form emitted by existing wrk done installations.
+// retaining the older flat form emitted by existing completion writers.
 type hubInboxEvent struct {
 	DeliveryClass  string `json:"delivery_class,omitempty"`
 	NotifyType     string `json:"notify_type,omitempty"`

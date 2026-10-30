@@ -16,7 +16,7 @@ if one appears.
 ## Who created the session decides
 
 A pane is judged by the job record that created it. That record is the
-arbiter/wrk inbox under `jobs/<id>/events`.
+shared inbox under `jobs/<id>/events`.
 
 | case | verdict |
 |---|---|
@@ -27,9 +27,9 @@ arbiter/wrk inbox under `jobs/<id>/events`.
 | claim `agent_label` ≠ receipt `label` | `held` / `label-conflict` |
 | a later receiptless, unfinished claim reuses the label | `held` / `label-reused` |
 | an event file of the job cannot be read (read error, invalid UTF-8, not JSON) — it may have been a revive | `held` / `record-unreadable` |
-| `"keep": true` on any claim, reclaim, or receipt (`wrk spawn --keep`) | `held` / `protected` |
+| `"keep": true` on any claim, reclaim, or receipt (`runtug spawn --keep`) | `held` / `protected` |
 | latest claim role outside `worker` / `builder` / `captain`, checked before the sticky builder marking | `held` / `protected-role` |
-| worker (testers are workers) | `candidate` only when `wrk reap` dry-run would close it; otherwise `held` with wrk's reason |
+| worker (testers are workers) | `candidate` only when the reap dry-run would close it; otherwise `held` with the reaper's reason |
 | builder (or legacy captain) whose pane passes the same pane gates | `builder-task-gate`. It is never a candidate at the node |
 
 The job-to-pane key is an **exact match on both `pane_id` and label**. The
@@ -39,7 +39,7 @@ once closed a working session whose name was empty; the pane_id check is
 what prevents that. If either value is unknown, the pane is held.
 
 The worker verdict is not re-implemented. It calls the fleet-census port of
-`wrk reap` (`fleetCensusJobVerdict`), whose equivalence with wrk is pinned by
+the reap (`fleetCensusJobVerdict`), whose equivalence with the vendored reference is pinned by
 a vendored-oracle test. The equivalence covers every gate:
 
 - terminal event (`job.completed`, `job.joined`, `job.revoked`)
@@ -119,7 +119,7 @@ be enabled without the operator's approval.
 | env (node) | meaning |
 |---|---|
 | `PANEWIRE_SESSION_REAP_REPORT_INTERVAL` | Go duration such as `15m`. Unset, empty, `off`, zero, negative, or unparseable means off. Values below `1m` are raised to `1m`. |
-| `PANEWIRE_SESSION_REAP_GRACE` | wrk duration grammar (`600`, `600s`, `10m`, `2h`, `1d`). The default is `10m`, the same as `wrk reap`. A value beyond `30d` (the largest the hub accepts) falls back to `10m`. |
+| `PANEWIRE_SESSION_REAP_GRACE` | the contract's duration grammar (`600`, `600s`, `10m`, `2h`, `1d`). The default is `10m`, the same as the reaper's. A value beyond `30d` (the largest the hub accepts) falls back to `10m`. |
 
 `panewire session-reap [--json] [--grace D] [--jobs-root P] [--herdr-socket S]`
 prints the same judgment once, locally. It sends nothing and runs no

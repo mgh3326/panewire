@@ -142,10 +142,10 @@ path does not exist at startup, the hub runs with `PlacementPolicyPath` empty �
 in that state dropping a file later does nothing, because the hot-reload loop
 only watches a configured path. The procedure is therefore:
 
-0. **Upgrade `panewire` on every wrk host before enabling `machines`.**
+0. **Upgrade `panewire` on every host before enabling `machines`.**
    Once any machine is capped, `/v1/placement` emits `tasks`/`task_slots`
    on that machine's candidates, and pre-change CLIs reject the response
-   (`DisallowUnknownFields`) — wrk would read that as a rejected hub answer.
+   (`DisallowUnknownFields`) — a caller would read that as a rejected hub answer.
    With no `machines` key the wire is unchanged, so writing the file early
    is safe; the caps are what require the fleet upgrade.
 1. Write the draft to `/etc/panewire/placement.json` on the hub host
@@ -198,7 +198,7 @@ hub starts the existing R16 on-demand burst request in the background with a
 short placement hold. The returned decision remains advisory: callers must
 wait for the target's normal authenticated heartbeat before assigning work.
 
-`wrk` invokes the stable CLI contract:
+`runtug` invokes the stable CLI contract:
 
 ```sh
 panewire place --class worker --cwd repo-key \

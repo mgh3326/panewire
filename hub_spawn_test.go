@@ -435,10 +435,10 @@ func t14SpawnConfig(t *testing.T, cwd string) string {
 	return path
 }
 
-func t14FakeWrk(t *testing.T, script string) {
+func t14FakeRuntug(t *testing.T, script string) {
 	t.Helper()
 	directory := t.TempDir()
-	path := filepath.Join(directory, "wrk")
+	path := filepath.Join(directory, "runtug")
 	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -476,7 +476,7 @@ func TestT14NodeAC9AC10AC13ArgvAndTemporary(t *testing.T) {
 	t.Setenv("T14_PARENT_FILE", parentPath)
 	t.Setenv("T14_RELEASE_FILE", releasePath)
 	t.Setenv("T14_SHELL_MARKER", markerPath)
-	t14FakeWrk(t, `printf '%s\000' "$@" > "$T14_ARGS_FILE"
+	t14FakeRuntug(t, `printf '%s\000' "$@" > "$T14_ARGS_FILE"
 printf '%s' "$HERDR_SESSION" > "$T14_SESSION_FILE"
 printf '%s' "$5" > "$T14_TEMPORARY_FILE"
 ps -o comm= -p "$PPID" > "$T14_PARENT_FILE"
@@ -503,7 +503,7 @@ printf 'OK pane=pane-a model=m label=l status=s landed=y job=job-a quota_record=
 		t.Fatalf("temporary remains after success: %v", err)
 	}
 	gotArgs := strings.Split(strings.TrimSuffix(string(t14WaitFile(t, argsPath)), "\x00"), "\x00")
-	wantArgs := append([]string{"spawn", "-c", root, "-p", temporary, "--host", "local", "-w", "worker"}, message.Args...)
+	wantArgs := append([]string{"spawn", "-c", root, "-p", temporary, "--host", "local", "-w", "worker"}, append(message.Args, "--override-reason", hubSpawnOverrideReason)...)
 	if strings.Join(gotArgs, "\x00") != strings.Join(wantArgs, "\x00") {
 		t.Fatalf("argv=%q want=%q", gotArgs, wantArgs)
 	}
@@ -511,7 +511,7 @@ printf 'OK pane=pane-a model=m label=l status=s landed=y job=job-a quota_record=
 		t.Fatalf("HERDR_SESSION=%q", session)
 	}
 	if parent := strings.TrimSpace(string(t14WaitFile(t, parentPath))); parent == "sh" {
-		t.Fatalf("wrk was invoked through a shell: parent=%q", parent)
+		t.Fatalf("runtug was invoked through a shell: parent=%q", parent)
 	}
 	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
 		t.Fatalf("shell metacharacter was expanded: %v", err)
@@ -529,7 +529,7 @@ func TestT14NodeAC10FailureAndAC11TimeoutCleanup(t *testing.T) {
 		root := t.TempDir()
 		temporaryPath := filepath.Join(root, "temporary")
 		t.Setenv("T14_TEMPORARY_FILE", temporaryPath)
-		t14FakeWrk(t, `printf '%s' "$5" > "$T14_TEMPORARY_FILE"
+		t14FakeRuntug(t, `printf '%s' "$5" > "$T14_TEMPORARY_FILE"
 exit 7`)
 		client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnTimeoutExtra: 20 * time.Millisecond}
 		result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(32), CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 1})
@@ -547,7 +547,7 @@ exit 7`)
 		childPath := filepath.Join(root, "child")
 		t.Setenv("T14_TEMPORARY_FILE", temporaryPath)
 		t.Setenv("T14_CHILD_FILE", childPath)
-		t14FakeWrk(t, `printf '%s' "$5" > "$T14_TEMPORARY_FILE"
+		t14FakeRuntug(t, `printf '%s' "$5" > "$T14_TEMPORARY_FILE"
 sleep 10 &
 printf '%s' "$!" > "$T14_CHILD_FILE"
 wait`)
@@ -599,7 +599,7 @@ func TestT14NodeAC12SerialAndIdempotent(t *testing.T) {
 	root := t.TempDir()
 	ledger := filepath.Join(root, "ledger")
 	t.Setenv("T14_LEDGER", ledger)
-	t14FakeWrk(t, `printf 'begin\n' >> "$T14_LEDGER"
+	t14FakeRuntug(t, `printf 'begin\n' >> "$T14_LEDGER"
 sleep 0.05
 printf 'end\n' >> "$T14_LEDGER"
 printf 'OK pane=pane-a model=m label=l status=s landed=y job=job-a quota_record=q\n'`)

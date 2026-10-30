@@ -22,14 +22,14 @@ func writeR20T6Job(t *testing.T, root, jobID, pane string, at time.Time) {
 		t.Fatal(err)
 	}
 	stamp := at.UTC().Format(time.RFC3339)
-	claim := fmt.Sprintf(`{"created_at":%q,"job_id":%q,"kind":"job.claim","payload":{"agent_label":"wrk-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`, stamp, jobID)
+	claim := fmt.Sprintf(`{"created_at":%q,"job_id":%q,"kind":"job.claim","payload":{"agent_label":"agent-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`, stamp, jobID)
 	if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(claim), 0600); err != nil {
 		t.Fatal(err)
 	}
 	if pane == "" {
 		return
 	}
-	spawned := fmt.Sprintf(`{"created_at":%q,"job_id":%q,"kind":"job.spawned","payload":{"label":"wrk-a","pane_id":%q,"profile":"profile-a","workspace":"w1"},"seq":2}`, stamp, jobID, pane)
+	spawned := fmt.Sprintf(`{"created_at":%q,"job_id":%q,"kind":"job.spawned","payload":{"label":"agent-a","pane_id":%q,"profile":"profile-a","workspace":"w1"},"seq":2}`, stamp, jobID, pane)
 	if err := os.WriteFile(filepath.Join(dir, "00002-job.spawned.json"), []byte(spawned), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestR20T6WireContractCarriesRuntimePaneOnly(t *testing.T) {
 	if strings.Contains(string(encoded), "pane_id") || !strings.Contains(string(encoded), `"pane":"pane-a"`) {
 		t.Fatalf("TL8: runtime pane contract=%s", encoded)
 	}
-	single, err := json.Marshal(HubActiveJob{JobID: "job-live", AgentLabel: "wrk-a", Epoch: 1})
+	single, err := json.Marshal(HubActiveJob{JobID: "job-live", AgentLabel: "agent-a", Epoch: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,20 +195,20 @@ func TestR20T6WireContractCarriesRuntimePaneOnly(t *testing.T) {
 	}
 }
 
-// TL10: pane extraction reads the shape wrk actually writes, nested payload
+// TL10: pane extraction reads the shape job writers actually write, nested payload
 // and the older flat form alike.
 func TestR20T6PaneExtractionReadsNestedAndFlatRecords(t *testing.T) {
 	root := t.TempDir()
 	stamp := time.Now().UTC().Format(time.RFC3339)
 	for _, shape := range []struct{ jobID, spawned string }{
-		{"job-nested", `{"created_at":"` + stamp + `","job_id":"job-nested","kind":"job.spawned","payload":{"label":"wrk-a","pane_id":"w1:pN","profile":"profile-a","workspace":"w1"},"seq":2}`},
-		{"job-flat", `{"created_at":"` + stamp + `","job_id":"job-flat","type":"job.spawned","pane_id":"w1:pF","label":"wrk-a"}`},
+		{"job-nested", `{"created_at":"` + stamp + `","job_id":"job-nested","kind":"job.spawned","payload":{"label":"agent-a","pane_id":"w1:pN","profile":"profile-a","workspace":"w1"},"seq":2}`},
+		{"job-flat", `{"created_at":"` + stamp + `","job_id":"job-flat","type":"job.spawned","pane_id":"w1:pF","label":"agent-a"}`},
 	} {
 		dir := filepath.Join(root, "jobs", shape.jobID, "events")
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
-		claim := `{"created_at":"` + stamp + `","job_id":"` + shape.jobID + `","kind":"job.claim","payload":{"agent_label":"wrk-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`
+		claim := `{"created_at":"` + stamp + `","job_id":"` + shape.jobID + `","kind":"job.claim","payload":{"agent_label":"agent-a","owner_lane":"lane-a","t_level":"T1"},"seq":1}`
 		if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(claim), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -239,10 +239,10 @@ func TestR20T6TerminalRecordClearsThePane(t *testing.T) {
 		t.Fatal(err)
 	}
 	records := []struct{ name, body string }{
-		{"00001-job.claim.json", `{"created_at":"` + stamp + `","kind":"job.claim","payload":{"agent_label":"wrk-a"},"seq":1}`},
+		{"00001-job.claim.json", `{"created_at":"` + stamp + `","kind":"job.claim","payload":{"agent_label":"agent-a"},"seq":1}`},
 		{"00002-job.spawned.json", `{"created_at":"` + stamp + `","kind":"job.spawned","payload":{"pane_id":"w1:pOld"},"seq":2}`},
 		{"00003-job.completed.json", `{"created_at":"` + stamp + `","kind":"job.completed","payload":{},"seq":3}`},
-		{"00004-job.claim.json", `{"created_at":"` + stamp + `","kind":"job.claim","payload":{"agent_label":"wrk-a"},"seq":4}`},
+		{"00004-job.claim.json", `{"created_at":"` + stamp + `","kind":"job.claim","payload":{"agent_label":"agent-a"},"seq":4}`},
 	}
 	for _, record := range records {
 		if err := os.WriteFile(filepath.Join(dir, record.name), []byte(record.body), 0600); err != nil {
@@ -265,7 +265,7 @@ func TestR20T6TerminalRecordClearsThePane(t *testing.T) {
 // The filter decision table, exercised without herdr.
 func TestR20T6FilterActiveJobsByPaneTable(t *testing.T) {
 	job := func(id, pane string) hubScannedJob {
-		return hubScannedJob{job: HubActiveJob{JobID: id, AgentLabel: "wrk-a", Epoch: 1}, paneID: pane}
+		return hubScannedJob{job: HubActiveJob{JobID: id, AgentLabel: "agent-a", Epoch: 1}, paneID: pane}
 	}
 	input := []hubScannedJob{job("job-dead", "w1:p1A"), job("job-live", "w1:p1B"), job("job-nopane", "")}
 	for _, testCase := range []struct {
