@@ -7,7 +7,7 @@ binaries from `scripts/build-release.sh`.
 | Event | What happens |
 |---|---|
 | pull request, manual run | build linux/amd64, smoke-test; nothing is pushed |
-| push to `main` | the same, then push linux/amd64 + linux/arm64 to this repository's GitHub Container Registry package, tagged with the full commit SHA and `main` |
+| push to `main` | the same, then a separate `publish` job — the only one holding `packages: write` — pushes linux/amd64 + linux/arm64 to this repository's GitHub Container Registry package (lowercased name), tagged with the full commit SHA and `main` |
 
 There is no deploy step; rolling a host onto the image is a separate,
 operator-run change.

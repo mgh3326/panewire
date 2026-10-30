@@ -7,29 +7,23 @@ on:
     branches: [main]
   pull_request:
   workflow_dispatch:
+# Only the publish job, which runs for pushes to main, holds packages: write;
+# pull request runs build with a read-only token.
 permissions:
   contents: read
-env:
-  IMAGE: ghcr.io/${{ github.repository }}
 jobs:
   image:
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
       - name: Version stamp
         id: version
         run: echo "version=pw-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
-      - name: Log in to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build linux/amd64 image (load)
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         env:
@@ -61,8 +55,28 @@ jobs:
           echo "$hub_out"
           [ "$code" -eq 2 ] || { echo "hub exit $code, want 2" >&2; exit 1; }
           echo "$hub_out" | grep -q 'hub auth file is required'
+
+  publish:
+    needs: image
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      - uses: docker/setup-buildx-action@e468171a9de216ec08956ac3ada2f0791b6bd435 # v3.11.1
+      # GHCR image names must be lowercase; github.repository keeps case.
+      - name: Image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      - name: Log in to GHCR
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build and push multi-arch image to GHCR
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         env:
           DOCKER_BUILD_RECORD_UPLOAD: "false"
@@ -70,8 +84,8 @@ jobs:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
-          build-args: PANEWIRE_VERSION=${{ steps.version.outputs.version }}
+          build-args: PANEWIRE_VERSION=${{ needs.image.outputs.version }}
           tags: |
-            ${{ env.IMAGE }}:${{ github.sha }}
-            ${{ env.IMAGE }}:main
+            ${{ steps.image.outputs.name }}:${{ github.sha }}
+            ${{ steps.image.outputs.name }}:main
           cache-from: type=gha
