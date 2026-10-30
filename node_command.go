@@ -421,7 +421,8 @@ func nodeWorktreeInspect(ctx context.Context, git relayCommandRunner, cwd string
 	}
 	gitDir, common, top := lines[0], lines[1], lines[2]
 	if !filepath.IsAbs(common) {
-		common = filepath.Join(top, common)
+		// git prints a relative common dir against the directory it ran in.
+		common = filepath.Join(cwd, common)
 	}
 	// A linked worktree keeps its git dir under <main>/.git/worktrees; the
 	// canonical checkout's git dir is the common dir itself.
@@ -441,8 +442,10 @@ func nodeWorktreeInspect(ctx context.Context, git relayCommandRunner, cwd string
 	return nodeWorktreeInspectResult{Worktree: worktree}
 }
 
-// redactNodeOriginURL drops URL userinfo so a token embedded in an https
-// remote never leaves the node. scp-style remotes carry no secret.
+// redactNodeOriginURL drops URL userinfo, query and fragment so a credential
+// or signed token embedded in a remote URL never leaves the node; owner/name
+// matching needs only scheme, host and path. scp-style remotes carry no
+// secret.
 func redactNodeOriginURL(raw string) string {
 	if !strings.Contains(raw, "://") {
 		return raw
@@ -452,5 +455,7 @@ func redactNodeOriginURL(raw string) string {
 		return ""
 	}
 	parsed.User = nil
+	parsed.RawQuery, parsed.ForceQuery = "", false
+	parsed.Fragment, parsed.RawFragment = "", ""
 	return parsed.String()
 }

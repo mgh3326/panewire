@@ -275,6 +275,31 @@ func TestNodeCommandWorktreeInspect(t *testing.T) {
 	if origin := worktree["origin_url"]; origin != "https://example.invalid/owner/name.git" {
 		t.Fatalf("origin userinfo must not leave the node: %v", origin)
 	}
+	// From a subdirectory a relative common dir still resolves correctly.
+	sub := filepath.Join(linked, "sub")
+	if err := os.Mkdir(sub, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if result, _ := nodeRun(t, client, nodeCommandWorktreeInspect, map[string]any{"cwd": sub}); result["worktree"].(map[string]any)["common"] != filepath.Join(main, ".git") || result["worktree"].(map[string]any)["path"] != linked {
+		t.Fatalf("subdirectory worktree=%v", result["worktree"])
+	}
+	relative := nodeWorktreeInspect(t.Context(), func(_ context.Context, args ...string) ([]byte, error) {
+		if args[2] == "rev-parse" && len(args) == 6 {
+			return []byte("/w/repo/.git/worktrees/x\n../../repo/.git\n/w/x\n"), nil
+		}
+		return nil, errors.New("not needed")
+	}, "/w/x/a/b")
+	if relative.Worktree == nil || relative.Worktree.Common != "/w/x/repo/.git" {
+		t.Fatalf("relative common dir must resolve against cwd: %+v", relative.Worktree)
+	}
+	for raw, want := range map[string]string{
+		"https://user:tok@example.invalid/owner/name.git?token=abc#frag": "https://example.invalid/owner/name.git",
+		"git@example.invalid:owner/name.git":                             "git@example.invalid:owner/name.git",
+	} {
+		if got := redactNodeOriginURL(raw); got != want {
+			t.Fatalf("redact %q = %q, want %q", raw, got, want)
+		}
+	}
 	for _, cwd := range []string{main, root, filepath.Join(root, "missing")} {
 		if result, code := nodeRun(t, client, nodeCommandWorktreeInspect, map[string]any{"cwd": cwd}); code != "" || result["worktree"] != nil {
 			t.Fatalf("cwd=%s result=%v code=%q", cwd, result, code)
