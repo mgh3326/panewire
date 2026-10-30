@@ -60,8 +60,7 @@ Request:
   `^[a-z0-9._-]{1,64}$`, `brief.inline` required (empty is 400; **v0 is
   inline only** — handoffkeep document keys are follow-up), `args` accepts
   **only runtug flags** (`-m -w -l --t --effort --job --owner --report --role
-  --lane --parent -L --task --parent-job --tags --urgency
-  --override-reason`), each value
+  --lane --parent -L --task --parent-job --tags --urgency`), each value
   `^[A-Za-z0-9._:/@-]{1,200}$` (spaces and shell metacharacters rejected),
   and `wait_seconds` is 1..300.
 - Processing: if the target node is not connected **or** not
