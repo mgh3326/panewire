@@ -379,7 +379,10 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 		policyStatus := h.placementPolicyStatus
 		h.mu.Unlock()
 		if rulesPresent {
-			result := PlacementResult{Decision: "unavailable", Reason: "quota_policy_invalid", PolicyStatus: policyStatus}
+			if h.logger != nil {
+				h.logger.Warn("placement refused: policy still names retired quota rules", "pool", pool)
+			}
+			result := PlacementResult{Decision: "unavailable", Reason: "quota_policy_invalid", PolicyStatus: policyStatus, Source: "hub-only", Asof: h.now().UTC()}
 			result.Quota = &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "unknown", Reason: "quota_policy_invalid", PolicyStatus: policyStatus}
 			writeJSON(w, http.StatusOK, result)
 			return
