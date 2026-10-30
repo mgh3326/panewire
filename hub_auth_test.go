@@ -460,6 +460,9 @@ func TestHubAuthInPlaceRewriteReloads(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if hubFileChangeTime(before) == 0 {
+		t.Skip("this platform reports no file change time, so an in-place rewrite that restores the mtime is not detectable")
+	}
 	if err := os.WriteFile(path, []byte(base+"HUB_TOKEN_svc-a="+newToken+"\nHUB_SCOPES_svc-a=nodes.agents.read\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
