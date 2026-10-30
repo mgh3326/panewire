@@ -9,18 +9,24 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 )
 
-// This is the hub's local durable queue, not the node's filesystem emit spool.
-// FULL synchronous commits precede producer ACKs. The database and its WAL
-// belong on persistent storage and must be backed up together using SQLite.
+// This is the hub's durable queue, not the node's filesystem emit spool.
+// Synchronous commits precede producer ACKs. The SQLite database and its WAL
+// belong on persistent storage and must be backed up together using SQLite;
+// the Postgres backend (lane_inbox_store_postgres.go) holds the same tables.
+// Both backends run the same statements through s.q, which only rebinds
+// placeholders, so one method set is the store contract for either.
 type laneInboxStore struct {
-	db *sql.DB
-	mu sync.Mutex
+	db      *sql.DB
+	dialect laneInboxDialect
+	mu      sync.Mutex
 	// notify is closed and replaced when a new inbox-class item lands, waking
 	// every long-poll waiter so they re-check for unread work.
 	notify chan struct{}
@@ -102,11 +108,45 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 			return nil, err
 		}
 	}
-	return &laneInboxStore{db: db, notify: make(chan struct{})}, nil
+	return &laneInboxStore{db: db, dialect: laneInboxSQLite, notify: make(chan struct{})}, nil
+}
+
+type laneInboxDialect int
+
+const (
+	laneInboxSQLite laneInboxDialect = iota
+	laneInboxPostgres
+)
+
+// q rebinds the store's ?-placeholders for the backend. No statement in this
+// store carries a literal '?', so a positional rewrite is exact.
+func (s *laneInboxStore) q(query string) string {
+	if s.dialect != laneInboxPostgres {
+		return query
+	}
+	var b strings.Builder
+	n := 0
+	for _, r := range query {
+		if r == '?' {
+			n++
+			b.WriteString("$" + strconv.Itoa(n))
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
+func (s *laneInboxStore) close() error { return s.db.Close() }
+
+// markBatchSent records that handoffkeep now owns a batch's identity.
+func (s *laneInboxStore) markBatchSent(id string) error {
+	_, err := s.db.Exec(s.q(`UPDATE lane_inbox_batches SET sent=1 WHERE id=?`), id)
+	return err
 }
 
 func (s *laneInboxStore) quarantineBatch(id, reason string) error {
-	_, err := s.db.Exec(`INSERT INTO lane_inbox_batch_quarantine(batch_id,reason) VALUES(?,?) ON CONFLICT(batch_id) DO NOTHING`, id, reason)
+	_, err := s.db.Exec(s.q(`INSERT INTO lane_inbox_batch_quarantine(batch_id,reason) VALUES(?,?) ON CONFLICT(batch_id) DO NOTHING`), id, reason)
 	return err
 }
 
@@ -165,7 +205,7 @@ func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
 	}
 	for _, id := range ids {
 		// Any positive timestamp in the past makes it immediately eligible.
-		if _, err := s.db.Exec(`UPDATE lane_inbox SET due_at=1,escalation_batch='' WHERE id=?`, id); err != nil {
+		if _, err := s.db.Exec(s.q(`UPDATE lane_inbox SET due_at=1,escalation_batch='' WHERE id=?`), id); err != nil {
 			return err
 		}
 	}
@@ -205,11 +245,11 @@ func (s *laneInboxStore) put(key, lane, kind, class string, e hubJobEventPayload
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	insert, err := s.db.Exec(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`, key, lane, kind, class, string(raw), now.UnixMilli(), read, due, digest)
+	insert, err := s.db.Exec(s.q(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`), key, lane, kind, class, string(raw), now.UnixMilli(), read, due, digest)
 	if err != nil {
 		return laneInboxItem{}, err
 	}
-	item, err := scanLaneInbox(s.db.QueryRow(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`, key))
+	item, err := scanLaneInbox(s.db.QueryRow(s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`), key))
 	n, _ := insert.RowsAffected()
 	item.Fresh = n == 1
 	if n == 1 && class == "inbox" {
@@ -231,7 +271,7 @@ func (s *laneInboxStore) waitChan() chan struct{} {
 // firstUnread returns the oldest still-unread inbox item for one lane, or nil
 // when the lane has none.
 func (s *laneInboxStore) firstUnread(ctx context.Context, lane string) (*laneInboxItem, error) {
-	item, err := scanLaneInbox(s.db.QueryRowContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE lane=? AND class='inbox' AND read_at=0 ORDER BY id LIMIT 1`, lane))
+	item, err := scanLaneInbox(s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE lane=? AND class='inbox' AND read_at=0 ORDER BY id LIMIT 1`), lane))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -247,7 +287,7 @@ func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error)
 		q += ` AND class='inbox' AND read_at=0`
 	}
 	q += ` ORDER BY id DESC LIMIT 500`
-	rows, err := s.db.Query(q, lane, lane)
+	rows, err := s.db.Query(s.q(q), lane, lane)
 	if err != nil {
 		return nil, err
 	}
@@ -264,14 +304,14 @@ func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error)
 }
 
 func (s *laneInboxStore) read(id int64, lane string, now time.Time) (laneInboxItem, error) {
-	if _, err := s.db.Exec(`UPDATE lane_inbox SET read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE id=? AND (?='' OR lane=?)`, now.UnixMilli(), id, lane, lane); err != nil {
+	if _, err := s.db.Exec(s.q(`UPDATE lane_inbox SET read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE id=? AND (?='' OR lane=?)`), now.UnixMilli(), id, lane, lane); err != nil {
 		return laneInboxItem{}, err
 	}
-	return scanLaneInbox(s.db.QueryRow(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE id=? AND (?='' OR lane=?)`, id, lane, lane))
+	return scanLaneInbox(s.db.QueryRow(s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE id=? AND (?='' OR lane=?)`), id, lane, lane))
 }
 
 func (s *laneInboxStore) ack(id int64, lane string, all bool, now time.Time) (int64, error) {
-	result, err := s.db.Exec(`UPDATE lane_inbox SET acked_at=?,read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE acked_at=0 AND ((? AND (?='' OR lane=?)) OR (NOT ? AND id=? AND (?='' OR lane=?)))`, now.UnixMilli(), now.UnixMilli(), all, lane, lane, all, id, lane, lane)
+	result, err := s.db.Exec(s.q(`UPDATE lane_inbox SET acked_at=?,read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE acked_at=0 AND ((? AND (?='' OR lane=?)) OR (NOT ? AND id=? AND (?='' OR lane=?)))`), now.UnixMilli(), now.UnixMilli(), all, lane, lane, all, id, lane, lane)
 	if err != nil {
 		return 0, err
 	}
@@ -279,7 +319,7 @@ func (s *laneInboxStore) ack(id int64, lane string, all bool, now time.Time) (in
 }
 
 func (s *laneInboxStore) counts(lane string) (map[string]int, error) {
-	rows, err := s.db.Query(`SELECT lane,count(*) FROM lane_inbox WHERE class='inbox' AND read_at=0 AND (?='' OR lane=?) GROUP BY lane`, lane, lane)
+	rows, err := s.db.Query(s.q(`SELECT lane,count(*) FROM lane_inbox WHERE class='inbox' AND read_at=0 AND (?='' OR lane=?) GROUP BY lane`), lane, lane)
 	if err != nil {
 		return nil, err
 	}
@@ -319,7 +359,7 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 		if escalation {
 			args = append(args, now.UnixMilli())
 		}
-		rows, err := tx.Query(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE `+filter+` ORDER BY id`, args...)
+		rows, err := tx.Query(s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE `+filter+` ORDER BY id`), args...)
 		if err != nil {
 			return err
 		}
@@ -367,11 +407,11 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 				text = fmt.Sprintf("%d unread inbox items | lane %s | panewire inbox list --lane %s", len(items), lane, lane)
 				column = "escalation_batch"
 			}
-			if _, err := tx.Exec(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,?,?)`, id, lane, text); err != nil {
+			if _, err := tx.Exec(s.q(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,?,?)`), id, lane, text); err != nil {
 				return err
 			}
 			for _, i := range items {
-				if _, err := tx.Exec(`UPDATE lane_inbox SET `+column+`=? WHERE id=?`, id, i.ID); err != nil {
+				if _, err := tx.Exec(s.q(`UPDATE lane_inbox SET `+column+`=? WHERE id=?`), id, i.ID); err != nil {
 					return err
 				}
 			}
@@ -381,7 +421,13 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 }
 
 func (s *laneInboxStore) pendingBatches() ([]laneInboxBatch, error) {
-	rows, err := s.db.Query(`SELECT id,lane,text FROM lane_inbox_batches WHERE sent=0 AND id NOT IN (SELECT batch_id FROM lane_inbox_batch_quarantine) ORDER BY rowid LIMIT 100`)
+	// Batches go out in creation order: SQLite's implicit rowid, or the
+	// identity column Postgres needs in its place.
+	order := "rowid"
+	if s.dialect == laneInboxPostgres {
+		order = "seq"
+	}
+	rows, err := s.db.Query(`SELECT id,lane,text FROM lane_inbox_batches WHERE sent=0 AND id NOT IN (SELECT batch_id FROM lane_inbox_batch_quarantine) ORDER BY ` + order + ` LIMIT 100`)
 	if err != nil {
 		return nil, err
 	}
