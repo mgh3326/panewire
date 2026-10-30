@@ -40,9 +40,20 @@ now="${PROC_METRICS_NOW:-$(date +%s)}"
 prom="$out_dir/proc-metrics.prom"
 state="$out_dir/.proc-metrics.state"
 
+# A run that does not finish removes the previous textfile: the collector
+# would keep serving its old gauges as if they were current, and a gap in the
+# series is the honest answer to a failed sample.
+tmp_prom=""
+tmp_state=""
+published=0
+cleanup() {
+	rm -f "$tmp_prom" "$tmp_state"
+	[ "$published" -eq 1 ] || rm -f "$prom"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
 tmp_prom="$(mktemp "$out_dir/.proc-metrics.prom.XXXXXX")"
 tmp_state="$(mktemp "$out_dir/.proc-metrics.state.XXXXXX")"
-trap 'rm -f "$tmp_prom" "$tmp_state"' EXIT HUP INT TERM
 # Final mode before any byte lands; mktemp creates 0600 and Alloy may run as
 # a different user than the launchd job.
 chmod 0644 "$tmp_prom"
@@ -52,16 +63,17 @@ chmod 0600 "$tmp_state"
 # shellcheck disable=SC2086 # PROC_METRICS_PS may carry arguments
 sample="$($ps_cmd -axo pcpu=,rss=,comm=)"
 printf '%s\n' "$sample" | awk -v now="$now" -v state="$state" -v prom="$tmp_prom" -v newstate="$tmp_state" '
-function pick(metric, limit, needpositive,    k, name, best, bestv) {
+function pick(metric, limit, needpositive,    k, name, best, bestv, taken) {
 	for (k = 0; k < limit; k++) {
 		best = ""
 		for (name in cpu) {
-			if (keep[name]) continue
+			if (taken[name]) continue
 			v = (metric == "cpu") ? cpu[name] : rss[name]
 			if (needpositive && v <= 0) continue
 			if (best == "" || v > bestv || (v == bestv && name < best)) { best = name; bestv = v }
 		}
 		if (best == "") return
+		taken[best] = 1
 		keep[best] = 1
 	}
 }
@@ -127,4 +139,4 @@ END {
 
 mv "$tmp_state" "$state"
 mv "$tmp_prom" "$prom"
-trap - EXIT HUP INT TERM
+published=1

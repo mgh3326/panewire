@@ -176,5 +176,5 @@ Labels not applicable to a source are absent. Queries should therefore scope by
 ## Validation
 
 Run `sh -n install-linux.sh run-alloy.sh proc-metrics.sh`, `gitleaks git --no-banner`, and `go test ./...`.
-The Go test invokes `alloy fmt` for both configurations when the `alloy` binary
+The Go tests run `alloy fmt` and `alloy validate` on both configurations when the `alloy` binary
 is available; otherwise it reports an explicit skip.

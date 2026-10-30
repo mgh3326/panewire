@@ -177,13 +177,9 @@ func TestProcMetricsScriptCPUCounterIsMonotonic(t *testing.T) {
 	}
 }
 
-func TestProcMetricsScriptFailsWhenPSFails(t *testing.T) {
+func TestProcMetricsScriptRemovesStaleTextfileWhenPSFails(t *testing.T) {
 	dir := t.TempDir()
 	runProcMetrics(t, dir, "1.0 100 /bin/a\n", 1000)
-	before, err := os.ReadFile(filepath.Join(dir, "proc-metrics.prom"))
-	if err != nil {
-		t.Fatal(err)
-	}
 	failing := filepath.Join(t.TempDir(), "failing-ps")
 	if err := os.WriteFile(failing, []byte("#!/bin/sh\nexit 1\n"), 0o700); err != nil {
 		t.Fatal(err)
@@ -193,9 +189,11 @@ func TestProcMetricsScriptFailsWhenPSFails(t *testing.T) {
 	if err := command.Run(); err == nil {
 		t.Fatal("script succeeded although ps failed")
 	}
-	after, err := os.ReadFile(filepath.Join(dir, "proc-metrics.prom"))
-	if err != nil || string(after) != string(before) {
-		t.Fatalf("previous textfile must survive a failed run: %v", err)
+	if _, err := os.Stat(filepath.Join(dir, "proc-metrics.prom")); !os.IsNotExist(err) {
+		t.Fatalf("a failed run must remove the stale textfile, stat err = %v", err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 1 || entries[0].Name() != ".proc-metrics.state" {
+		t.Fatalf("a failed run must leave only the previous state file: %v %v", entries, err)
 	}
 }
 
@@ -212,5 +210,21 @@ func TestProcMetricsPlistExample(t *testing.T) {
 		if !strings.Contains(text, required) {
 			t.Errorf("plist example missing %s", required)
 		}
+	}
+}
+
+// When the CPU and memory leaders are the same programs, the memory ranking
+// must still stop at 15 rather than reaching further down the list.
+func TestProcMetricsScriptTopNOverlap(t *testing.T) {
+	var lines []string
+	for i := 1; i <= 40; i++ {
+		lines = append(lines, fmt.Sprintf("%d.0 %d /bin/proc%02d", i, i*1000, i))
+	}
+	series := procMetricsSeries(t, runProcMetrics(t, t.TempDir(), strings.Join(lines, "\n")+"\n", 1000))
+	if len(series) != 16*3 {
+		t.Fatalf("got %d series, want 15 shared leaders + other = %d", len(series), 16*3)
+	}
+	if got := series[`namedprocess_namegroup_num_procs{groupname="other"}`]; got != "25" {
+		t.Errorf("other num_procs = %s, want 25", got)
 	}
 }
