@@ -750,6 +750,7 @@ func (h *HubServer) Handler() http.Handler {
 	// upgrade window; answer a structured 503 instead of a bare 404.
 	mux.HandleFunc("GET /v2/quota/bindings", h.handleQuotaV2Gone)
 	mux.HandleFunc("PUT /v2/quota/bindings", h.handleQuotaV2Gone)
+	mux.HandleFunc("DELETE /v2/quota/bindings", h.handleQuotaV2Gone)
 	mux.HandleFunc("GET /v2/quota/observations", h.handleQuotaV2Gone)
 	mux.HandleFunc("POST /v2/quota/observations", h.handleQuotaV2Gone)
 	mux.HandleFunc("GET /v1/placement/slots", h.handlePlacementSlots)

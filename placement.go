@@ -168,10 +168,14 @@ type PlacementCandidate struct {
 	// Tasks and TaskSlots serialize only for machines the policy caps;
 	// uncapped machines (and policies without machines) keep the legacy wire
 	// byte-identical so older CLI decoders do not reject the response.
-	Tasks         *int     `json:"tasks,omitempty"`
-	TaskSlots     int      `json:"task_slots,omitempty"`
-	Connected     bool     `json:"connected"`
-	MetricsKnown  bool     `json:"metrics_known"`
+	Tasks        *int `json:"tasks,omitempty"`
+	TaskSlots    int  `json:"task_slots,omitempty"`
+	Connected    bool `json:"connected"`
+	MetricsKnown bool `json:"metrics_known"`
+	// QuotaDecision/QuotaReason are retired; kept decodable (and unemitted
+	// when absent) so a new client still reads an old hub's candidates.
+	QuotaDecision *string  `json:"quota_decision,omitempty"`
+	QuotaReason   *string  `json:"quota_reason,omitempty"`
 	MemoryFreePct *float64 `json:"memory_free_pct"`
 	SwapUsedMB    *float64 `json:"swap_used_mb"`
 	MemoryKnown   bool     `json:"memory_known"`
