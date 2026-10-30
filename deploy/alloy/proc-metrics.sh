@@ -47,7 +47,9 @@ tmp_prom=""
 tmp_state=""
 published=0
 cleanup() {
-	rm -f "$tmp_prom" "$tmp_state"
+	# Empty until mktemp succeeds; never hand rm an empty operand.
+	if [ -n "$tmp_prom" ]; then rm -f "$tmp_prom"; fi
+	if [ -n "$tmp_state" ]; then rm -f "$tmp_state"; fi
 	[ "$published" -eq 1 ] || rm -f "$prom"
 }
 trap cleanup EXIT
