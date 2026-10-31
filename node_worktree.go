@@ -189,7 +189,8 @@ func nodeOriginRepo(raw string) (string, bool) {
 		return "", false
 	default:
 		i := strings.Index(u, ":")
-		if i < 0 || strings.Contains(u[:i], "/") {
+		// An empty host (":owner/repo") is a local path to git, not a remote.
+		if i <= 0 || strings.Contains(u[:i], "/") {
 			return "", false
 		}
 		seg := nodeOriginPathSegments(u[i+1:])
