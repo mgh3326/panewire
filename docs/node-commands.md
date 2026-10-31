@@ -202,7 +202,7 @@ resolved worktree path and common git dir are under the node's configured
 work root, it appears in `git worktree list`, is not locked, is not
 detached, is clean, every ignored file matches `regenerable`, the branch is
 merged into `origin/<base>` or fully pushed (both judged after a
-`git fetch --prune origin`; a local `base` ref is never proof, and a
+`git fetch --prune origin`, whose failure answers `git-failed`; a local `base` ref is never proof, and a
 `base` equal to the branch never counts), and — re-read immediately before
 removal — no pane is live in it. It then runs `git worktree remove` and
 `git branch -d`; never `--force` or `-D`.

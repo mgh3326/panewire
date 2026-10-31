@@ -608,7 +608,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		expected = strings.ToLower(originTip)
 	}
 	if _, err := git(ctx, "-C", clone, "show-ref", "--verify", "--quiet", "refs/heads/"+args.Branch); err == nil {
-		out, err := git(ctx, "-C", clone, "rev-parse", args.Branch)
+		out, err := git(ctx, "-C", clone, "rev-parse", "--verify", "refs/heads/"+args.Branch+"^{commit}")
 		if err != nil {
 			return nodeOutcomeGitFailed
 		}
@@ -758,7 +758,8 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	// origin/* refs are a cache: refresh them before they prove "merged" or
 	// "pushed", and fail closed when the remote cannot be read.
 	if _, err := git(ctx, "-C", main, "fetch", "--prune", "--no-tags", "origin"); err != nil {
-		return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnmerged}, ""
+		// Inconclusive, not a proven "unmerged": nothing is removed either way.
+		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
 	if !nodeBranchReleased(ctx, git, main, entry.Branch, args.Base) {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnmerged}, ""
