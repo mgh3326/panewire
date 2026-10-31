@@ -1611,6 +1611,14 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
 					return nil, err
 				}
+				// A repeated hello resets the hub's job and host state for
+				// this node; repeat that state at once, as the fallback does.
+				if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
+					return nil, err
+				}
+				if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+					return nil, err
+				}
 			}
 		case <-helloAck.C:
 			if acked {
