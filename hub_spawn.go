@@ -147,7 +147,7 @@ func validHubSpawnArgs(args []string) bool {
 		return false
 	}
 	allowed := map[string]struct{}{
-		"-m": {}, "-w": {}, "-l": {}, "--t": {}, "--effort": {}, "--job": {}, "--owner": {}, "--report": {}, "--role": {}, "--lane": {}, "--parent": {}, "-L": {},
+		"-m": {}, "-w": {}, "-l": {}, "--t": {}, "--effort": {}, "--job": {}, "--owner": {}, "--report": {}, "--report-relative": {}, "--role": {}, "--lane": {}, "--parent": {}, "-L": {},
 		"--task": {}, "--parent-job": {}, "--tags": {}, "--urgency": {}, "--builder-family": {}, "--builder-job": {},
 	}
 	for index := 0; index < len(args); index += 2 {
@@ -172,6 +172,11 @@ func validHubSpawnArgValue(flag, value string) bool {
 		return value == "anthropic" || value == "openai" || value == "google" || value == "xai" || value == "deepseek" || value == "meta" || value == "mistral" || value == "other"
 	case "--parent-job", "--builder-job":
 		return regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`).MatchString(value)
+	case "--report-relative":
+		// Relative to the node's own jobs root, which the caller cannot see:
+		// refuse absolute paths and empty, "." and ".." segments, the same
+		// shape rule brief.doc keys follow.
+		return validHubSpawnDocKey(value)
 	default:
 		return true
 	}

@@ -23,6 +23,9 @@ the document with its own handoffkeep client.
 >   `^[A-Za-z0-9._:/@-]{1,200}$` 단 `--tags`만 쉼표 목록(최대 16개) 허용
 >   (공백·셸 메타문자 거부), `--role`, `--builder-family`, `--parent-job`, `--builder-job` 값은 유효성
 >   검사를 거치며, `wait_seconds`는 1..300.
+> - `--report-relative`는 **노드의** jobs root 기준 상대 경로다. 절대 경로, 끝 `/`,
+>   빈 세그먼트·`.`·`..` 세그먼트는 400으로 거부하며, 노드는 다른 플래그처럼
+>   `runtug spawn`에 그대로 전달한다.
 > - `checkout`은 노드에서 `worktree.prepare`를 먼저 실행한다. 성공하면
 >   준비된 worktree에서 spawn하고, 거부되면 `rc:81` 및 준비 outcome을
 >   반환하며 spawn을 호출하지 않는다.
@@ -65,7 +68,7 @@ Request:
 - Validation: `request_id` uuid, `machine` `^[a-z0-9-]{1,32}$`, `cwd_key`
   `^[a-z0-9._-]{1,64}$`, exactly one nonempty `brief.inline` or `brief.doc`, optional `checkout`
   following the `worktree.prepare` grammar, and `args` accepts **only runtug
-  flags** (`-m -w -l --t --effort --job --owner --report --role --lane
+  flags** (`-m -w -l --t --effort --job --owner --report --report-relative --role --lane
   --parent -L --task --parent-job --builder-family --builder-job --tags
   --urgency`), each value
   `^[A-Za-z0-9._:/@-]{1,200}$` — except `--tags`, a comma list of up to 16
@@ -75,6 +78,11 @@ Request:
   `reviewer`, or `tester`; `--builder-family` accepts `anthropic`, `openai`,
   `google`, `xai`, `deepseek`, `meta`, `mistral`, or `other`; job values use
   `^[A-Za-z0-9._-]{1,128}$`.
+- `--report-relative` is a report path relative to the **node's** jobs root
+  (the caller cannot know the node's home). Absolute paths, a trailing slash
+  and empty, `.` and `..` segments are refused with 400. The node passes it
+  through to `runtug spawn` verbatim like the other flags. A hub without this
+  flag answers 400 `invalid_request` for the whole request.
 - `brief.doc` is the hk document key (for example,
   `briefs/<job>/brief.md`); the node fetches `GET /v1/documents/<key>` with
   its own handoffkeep credential. Keys must be under the node's configured
