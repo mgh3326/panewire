@@ -284,7 +284,8 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		}
 		switch result.Outcome {
 		case nodePreparePrepared, nodePrepareReused:
-			valid = result.Worktree != nil
+			// Success must name the commit it prepared; an unread HEAD is not success.
+			valid = result.Worktree != nil && result.Worktree.Head != ""
 		case nodeOutcomeBusy:
 			valid = result.RetryAfterS > 0 && result.Worktree == nil
 		case nodePrepareBranchElsewhere, nodePrepareShaMissing, nodePrepareOriginMismatch,

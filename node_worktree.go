@@ -191,7 +191,12 @@ func nodeOriginPathSegments(p string) []string {
 	p = strings.TrimSuffix(strings.Trim(p, "/"), ".git")
 	var out []string
 	for _, seg := range strings.Split(p, "/") {
-		if seg != "" && seg != "." && seg != ".." {
+		// A dot segment changes which repository the path names, so the
+		// identity check fails closed instead of normalizing it away.
+		if seg == "." || seg == ".." {
+			return nil
+		}
+		if seg != "" {
 			out = append(out, seg)
 		}
 	}

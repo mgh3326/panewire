@@ -291,6 +291,8 @@ func TestNodeWorktreePrepareArgsValidation(t *testing.T) {
 		"mode":         {"origin": fixture.origin, "mode": "weird", "branch": "", "sha": "", "fetch": "", "dir": "repo.job"},
 		"branch-fetch": {"origin": fixture.origin, "mode": "branch", "branch": "feat", "sha": "", "fetch": "refs/heads/feat", "dir": "repo.job"},
 		"bad-branch":   {"origin": fixture.origin, "mode": "branch", "branch": "feat..x", "sha": "", "fetch": "", "dir": "repo.job"},
+		"origin-dot":   {"origin": "https://example.invalid/fleet/../repo.git", "mode": "detached", "branch": "", "sha": fixture.feat, "fetch": "pull/1/head", "dir": "repo.job"},
+		"origin-path":  {"origin": "/srv/fleet/./repo", "mode": "detached", "branch": "", "sha": fixture.feat, "fetch": "pull/1/head", "dir": "repo.job"},
 	}
 	for name, args := range cases {
 		if _, code := nodeRun(t, client, nodeCommandWorktreePrepare, args); code != "invalid_args" {
@@ -574,5 +576,18 @@ func TestNodeQuotaRefresh(t *testing.T) {
 	}}
 	if _, code := nodeRun(t, failing, nodeCommandQuotaRefresh, map[string]any{"pool": "pool-a"}); code != "refresh_failed" {
 		t.Fatalf("failing refresh code=%q", code)
+	}
+}
+
+func TestNodeWorktreePrepareResultNeedsHead(t *testing.T) {
+	for _, outcome := range []string{nodePreparePrepared, nodePrepareReused} {
+		empty := json.RawMessage(`{"outcome":"` + outcome + `","worktree":{"path":"/w/repo.job","branch":"","head":"","origin_url":"","common":""}}`)
+		if _, valid := canonicalNodeCommandResult(nodeCommandWorktreePrepare, empty); valid {
+			t.Fatalf("%s with empty head must be rejected", outcome)
+		}
+		full := json.RawMessage(`{"outcome":"` + outcome + `","worktree":{"path":"/w/repo.job","branch":"","head":"` + strings.Repeat("a", 40) + `","origin_url":"","common":""}}`)
+		if _, valid := canonicalNodeCommandResult(nodeCommandWorktreePrepare, full); !valid {
+			t.Fatalf("%s with a head must stay valid", outcome)
+		}
 	}
 }
