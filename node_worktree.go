@@ -27,6 +27,7 @@ const (
 	nodeOutcomeDirty     = "dirty"
 	nodeOutcomeGitFailed = "git-failed"
 	nodeOutcomeGitTooOld = "git_too_old"
+	nodeOutcomeCancelled = "cancelled"
 
 	nodePreparePrepared        = "prepared"
 	nodePrepareReused          = "reused"
@@ -54,13 +55,15 @@ const (
 	nodeQuotaRefreshed = "refreshed"
 )
 
-var errNodeGitOpBusy = errors.New("git-op lock held")
+var (
+	errNodeGitOpBusy      = errors.New("git-op lock held")
+	errNodeGitOpCancelled = errors.New("git-op lock wait cancelled")
+)
 
 var (
 	nodeShaPattern       = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 	nodeFetchPullPattern = regexp.MustCompile(`^pull/[0-9]+/head$`)
 	nodeQuotaPoolPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	nodeControlChars     = strings.NewReplacer("\r", "", "\n", "", "\x00", "")
 	nodeGlobClass        = regexp.MustCompile(`\[[^\]]*\]`)
 )
 
@@ -103,11 +106,22 @@ type nodeQuotaRefreshResult struct {
 	Outcome string `json:"outcome"`
 }
 
+// nodeHasControlByte reports any ASCII control byte (< 0x20, or DEL): git's
+// check-ref-format refuses every one, and none belongs in an origin or glob.
+func nodeHasControlByte(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
+}
+
 // validNodeRefName mirrors git's check-ref-format rules for the argument
-// shapes these ops accept: no "..", "@{", whitespace or git's magic chars,
-// no segment leading with '.' or ending ".lock".
+// shapes these ops accept: no control bytes, "..", "@{", whitespace or git's
+// magic chars, no segment leading with '.' or ending ".lock".
 func validNodeRefName(name string) bool {
-	if name == "" || name == "@" || len(name) > 200 || name != nodeControlChars.Replace(name) {
+	if name == "" || name == "@" || len(name) > 200 || nodeHasControlByte(name) {
 		return false
 	}
 	if strings.HasPrefix(name, "/") || strings.HasSuffix(name, "/") || strings.HasSuffix(name, ".") ||
@@ -133,7 +147,7 @@ func validNodeFetchRef(fetch string) bool {
 }
 
 func validNodeGlob(glob string) bool {
-	if glob == "" || len(glob) > 128 || glob != nodeControlChars.Replace(glob) {
+	if glob == "" || len(glob) > 128 || nodeHasControlByte(glob) {
 		return false
 	}
 	// A pattern made only of wildcards ("*", "**", "*/?") would approve any
@@ -142,89 +156,116 @@ func validNodeGlob(glob string) bool {
 	return strings.Trim(nodeGlobClass.ReplaceAllString(glob, ""), "*?/") != ""
 }
 
-// nodeOriginRepo normalizes an origin argument (or a clone's own remote) to
-// "owner/repo" for the clone identity check. Any userinfo refuses the value:
-// URL userinfo, or an '@' in anything that is not an absolute local path.
-// URL and scp-style remotes need exactly owner/repo path segments; a local
-// clone source stands in with its last two.
+// nodeOriginRepo normalizes an origin argument to "owner/repo" for the clone
+// identity check. Any userinfo refuses the value: URL userinfo, or an '@' in
+// anything that is not an absolute local path. URL and scp-style remotes need
+// exactly owner/repo path segments; a local clone source stands in with its
+// last two.
 func nodeOriginRepo(raw string) (string, bool) {
+	// git clone receives the raw argument, so its control bytes are refused
+	// before trimming could hide a trailing one.
 	u := strings.TrimSpace(raw)
-	// A leading '-' would reach git as an option, never a repository.
-	if strings.HasPrefix(u, "-") {
+	if nodeHasControlByte(raw) || !nodeOriginShapeOK(u) {
 		return "", false
 	}
-	if u == "" || len(u) > 2048 || u != nodeControlChars.Replace(u) || strings.ContainsAny(u, " \t") {
-		return "", false
-	}
-	var p string
-	switch i := strings.Index(u, "://"); {
-	case i >= 0:
-		v, err := url.Parse(u)
-		// A query or fragment can carry a credential that git would persist
-		// in the clone's config; origins never need one.
-		if err != nil || v.User != nil || v.RawQuery != "" || v.ForceQuery || v.Fragment != "" || strings.Contains(u, "#") {
-			return "", false
-		}
-		switch v.Scheme {
-		case "http", "https", "ssh", "git":
-			if v.Host == "" {
-				return "", false
-			}
-		case "file":
-		default:
-			return "", false
-		}
-		seg := nodeOriginPathSegments(v.Path)
-		// A file:// origin is a local path: same last-two rule as an absolute
-		// path, so a clone made through file:// matches the plain-path origin.
-		if v.Scheme == "file" && len(seg) >= 2 {
-			seg = seg[len(seg)-2:]
-		}
-		if len(seg) != 2 {
-			return "", false
-		}
-		p = seg[0] + "/" + seg[1]
+	switch {
+	case strings.Contains(u, "://"):
+		return nodeURLOriginRepo(u)
 	case filepath.IsAbs(u):
 		seg := nodeOriginPathSegments(u)
 		if len(seg) < 2 {
 			return "", false
 		}
-		p = seg[len(seg)-2] + "/" + seg[len(seg)-1]
+		return seg[len(seg)-2] + "/" + seg[len(seg)-1], true
 	case strings.Contains(u, "@"):
 		return "", false
-	default:
-		i := strings.Index(u, ":")
-		// An empty host (":owner/repo") is a local path to git, not a remote.
-		if i <= 0 || strings.Contains(u[:i], "/") {
-			return "", false
-		}
-		seg := nodeOriginPathSegments(u[i+1:])
-		if len(seg) != 2 {
-			return "", false
-		}
-		p = seg[0] + "/" + seg[1]
 	}
-	return p, true
+	host, repoPath, ok := strings.Cut(u, ":")
+	if !ok {
+		return "", false
+	}
+	return nodeScpOriginRepo(host, repoPath)
 }
 
 // nodeCloneRemoteRepo reads owner/repo from a clone's own origin. Unlike a
 // caller-supplied origin, an existing clone may use the scp-style SSH form
-// user@host:owner/repo.git; its user part is dropped, never refused.
+// user@host:owner/repo.git; its user part is dropped, never refused. The
+// remote splits at its first ':' and only the host side can hold userinfo,
+// so an '@' in the repo path (host:owner/re@po.git) stays part of the path.
 func nodeCloneRemoteRepo(raw string) (string, bool) {
 	u := strings.TrimSpace(raw)
+	if !nodeOriginShapeOK(u) {
+		return "", false
+	}
 	if strings.Contains(u, "://") {
 		if v, err := url.Parse(u); err == nil && v.User != nil {
 			v.User = nil
 			u = v.String()
 		}
-	} else if !filepath.IsAbs(u) {
-		if at := strings.Index(u, "@"); at >= 0 {
-			if colon := strings.Index(u, ":"); colon > at && !strings.Contains(u[:colon], "/") {
-				u = u[at+1:]
-			}
-		}
+		return nodeURLOriginRepo(u)
 	}
-	return nodeOriginRepo(u)
+	if filepath.IsAbs(u) {
+		return nodeOriginRepo(u)
+	}
+	host, repoPath, ok := strings.Cut(u, ":")
+	if !ok {
+		return "", false
+	}
+	if at := strings.LastIndex(host, "@"); at >= 0 && !strings.Contains(host, "/") {
+		host = host[at+1:]
+	}
+	return nodeScpOriginRepo(host, repoPath)
+}
+
+// nodeOriginShapeOK is the check every origin form shares.
+func nodeOriginShapeOK(u string) bool {
+	// A leading '-' would reach git as an option, never a repository.
+	return u != "" && !strings.HasPrefix(u, "-") && len(u) <= 2048 && !nodeHasControlByte(u) && !strings.Contains(u, " ")
+}
+
+func nodeURLOriginRepo(u string) (string, bool) {
+	v, err := url.Parse(u)
+	// A query or fragment can carry a credential that git would persist in
+	// the clone's config; origins never need one.
+	if err != nil || v.User != nil || v.RawQuery != "" || v.ForceQuery || v.Fragment != "" || strings.Contains(u, "#") {
+		return "", false
+	}
+	switch v.Scheme {
+	case "http", "https", "ssh", "git":
+		if v.Host == "" {
+			return "", false
+		}
+	case "file":
+	default:
+		return "", false
+	}
+	seg := nodeOriginPathSegments(v.Path)
+	// A file:// origin is a local path: same last-two rule as an absolute
+	// path, so a clone made through file:// matches the plain-path origin.
+	if v.Scheme == "file" && len(seg) >= 2 {
+		seg = seg[len(seg)-2:]
+	}
+	if len(seg) != 2 {
+		return "", false
+	}
+	return seg[0] + "/" + seg[1], true
+}
+
+// nodeScpOriginRepo reads an scp-style host:owner/repo whose userinfo, if
+// any, is already gone.
+func nodeScpOriginRepo(host, repoPath string) (string, bool) {
+	// An empty host (":owner/repo") is a local path to git, and a
+	// one-character host is drive-letter shaped (C:owner/repo): a local path
+	// on Windows, never a remote worth trusting. A '/' before the colon
+	// makes the whole value a relative path.
+	if len(host) < 2 || strings.ContainsAny(host, "/@") {
+		return "", false
+	}
+	seg := nodeOriginPathSegments(repoPath)
+	if len(seg) != 2 {
+		return "", false
+	}
+	return seg[0] + "/" + seg[1], true
 }
 
 func nodeOriginPathSegments(p string) []string {
@@ -287,11 +328,16 @@ func (client *HubClient) nodePaceleverRunner() relayCommandRunner {
 }
 
 // acquireNodeGitOpLock polls the per-clone lock until it is taken, the wait
-// budget runs out, or the caller's context ends — the last two both report
-// busy so a retry is always legal.
+// budget runs out, or the caller's context ends. A wait that runs out — the
+// node's own budget or the run deadline — reports busy, so a retry is legal;
+// a cancelled caller reports errNodeGitOpCancelled, since nobody is left to
+// retry, and never takes the lock.
 func acquireNodeGitOpLock(ctx context.Context, path string, wait time.Duration) (func(), error) {
 	deadline := time.Now().Add(wait)
 	for {
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return nil, errNodeGitOpCancelled
+		}
 		release, err := tryNodeGitOpLock(path)
 		if err == nil {
 			return release, nil
@@ -306,6 +352,9 @@ func acquireNodeGitOpLock(ctx context.Context, path string, wait time.Duration) 
 		select {
 		case <-ctx.Done():
 			timer.Stop()
+			if errors.Is(ctx.Err(), context.Canceled) {
+				return nil, errNodeGitOpCancelled
+			}
 			return nil, errNodeGitOpBusy
 		case <-timer.C:
 		}
@@ -379,16 +428,39 @@ func nodeListWorktrees(ctx context.Context, git relayCommandRunner, main string)
 	return entries, nil
 }
 
-// nodeGitOpLockPath names the per-clone lock the same way for every op:
-// the clone directory with symlinks resolved (the work root exists even
-// before the clone does), so prepare and remove on one clone always take
-// one file even when the work root traverses a symlink.
-func nodeGitOpLockPath(clone string) string {
-	if resolved, err := filepath.EvalSymlinks(clone); err == nil {
-		// An existing clone, itself possibly a symlink, is named by its target.
-		return filepath.Clean(resolved) + ".git-op.lock"
+// nodeCanonicalClonePath is the one name prepare and remove give a clone:
+// its EvalSymlinks result. A clone that does not exist yet (prepare, before
+// cloning) is named through its resolved parent, which is what EvalSymlinks
+// returns once the directory exists. Any other resolution failure — a
+// dangling symlink, an unreadable path — is an error, never a fallback name,
+// so one clone can never be locked under two names.
+func nodeCanonicalClonePath(clone string) (string, error) {
+	clone = filepath.Clean(clone)
+	if _, err := os.Lstat(clone); errors.Is(err, os.ErrNotExist) {
+		parent, err := filepath.EvalSymlinks(filepath.Dir(clone))
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(parent, filepath.Base(clone)), nil
+	} else if err != nil {
+		return "", err
 	}
-	return filepath.Join(nodeResolvedPath(filepath.Dir(clone)), filepath.Base(clone)) + ".git-op.lock"
+	resolved, err := filepath.EvalSymlinks(clone)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+// nodeGitOpLockPath names the per-clone lock <canonical clone>.git-op.lock
+// for every op, so prepare and remove on one clone always take one file even
+// when the work root, or the clone itself, is a symlink.
+func nodeGitOpLockPath(clone string) (string, error) {
+	canonical, err := nodeCanonicalClonePath(clone)
+	if err != nil {
+		return "", err
+	}
+	return canonical + ".git-op.lock", nil
 }
 
 func nodeResolvedPath(path string) string {
@@ -527,11 +599,18 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 		// Refuse before the lock path resolves beside a target outside the root.
 		return nodeWorktreePrepareResult{Outcome: nodePrepareOriginMismatch}, ""
 	}
-	wait := client.nodeGitOpWait()
-	release, err := acquireNodeGitOpLock(ctx, nodeGitOpLockPath(clone), wait)
+	lockPath, err := nodeGitOpLockPath(clone)
 	if err != nil {
-		if errors.Is(err, errNodeGitOpBusy) {
+		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
+	}
+	wait := client.nodeGitOpWait()
+	release, err := acquireNodeGitOpLock(ctx, lockPath, wait)
+	if err != nil {
+		switch {
+		case errors.Is(err, errNodeGitOpBusy):
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeBusy, RetryAfterS: nodeGitOpRetryAfter(wait)}, ""
+		case errors.Is(err, errNodeGitOpCancelled):
+			return nodeWorktreePrepareResult{Outcome: nodeOutcomeCancelled}, ""
 		}
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
@@ -738,11 +817,18 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveWorktreeChanged}, ""
 	}
 	main := filepath.Dir(worktree.Common)
-	wait := client.nodeGitOpWait()
-	release, err := acquireNodeGitOpLock(ctx, nodeGitOpLockPath(main), wait)
+	lockPath, err := nodeGitOpLockPath(main)
 	if err != nil {
-		if errors.Is(err, errNodeGitOpBusy) {
+		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
+	}
+	wait := client.nodeGitOpWait()
+	release, err := acquireNodeGitOpLock(ctx, lockPath, wait)
+	if err != nil {
+		switch {
+		case errors.Is(err, errNodeGitOpBusy):
 			return nodeWorktreeRemoveResult{Outcome: nodeOutcomeBusy, RetryAfterS: nodeGitOpRetryAfter(wait)}, ""
+		case errors.Is(err, errNodeGitOpCancelled):
+			return nodeWorktreeRemoveResult{Outcome: nodeOutcomeCancelled}, ""
 		}
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
 	}

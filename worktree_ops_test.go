@@ -775,7 +775,7 @@ func TestNodeGitOpLockPathCanonical(t *testing.T) {
 	}
 	// prepare names the clone through the configured (symlinked) root;
 	// remove names it through git's resolved common dir parent.
-	if a, b := nodeGitOpLockPath(filepath.Join(link, "repo")), nodeGitOpLockPath(nodeResolvedPath(clone)); a != b {
+	if a, b := mustNodeGitOpLockPath(t, filepath.Join(link, "repo")), mustNodeGitOpLockPath(t, nodeResolvedPath(clone)); a != b {
 		t.Fatalf("lock paths differ: %s vs %s", a, b)
 	}
 	// A clone that is itself a symlink is named by its target from both sides.
@@ -786,11 +786,11 @@ func TestNodeGitOpLockPathCanonical(t *testing.T) {
 	if err := os.Symlink(target, filepath.Join(real, "linked")); err != nil {
 		t.Fatal(err)
 	}
-	if a, b := nodeGitOpLockPath(filepath.Join(link, "linked")), nodeGitOpLockPath(nodeResolvedPath(target)); a != b {
+	if a, b := mustNodeGitOpLockPath(t, filepath.Join(link, "linked")), mustNodeGitOpLockPath(t, nodeResolvedPath(target)); a != b {
 		t.Fatalf("symlinked clone lock paths differ: %s vs %s", a, b)
 	}
 	// Before the clone exists, the root is still resolved.
-	if a, b := nodeGitOpLockPath(filepath.Join(link, "fresh")), filepath.Join(nodeResolvedPath(real), "fresh")+".git-op.lock"; a != b {
+	if a, b := mustNodeGitOpLockPath(t, filepath.Join(link, "fresh")), filepath.Join(nodeResolvedPath(real), "fresh")+".git-op.lock"; a != b {
 		t.Fatalf("fresh lock path %s, want %s", a, b)
 	}
 }
