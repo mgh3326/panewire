@@ -136,7 +136,7 @@ func TestHostMemoryPartialMeasurementsAreRetained(t *testing.T) {
 
 func TestPlacementPolicyMemoryDefaultsAndOverrides(t *testing.T) {
 	legacy, err := ParsePlacementPolicy([]byte(`{"local_machine":"host-a","spill_targets":["host-b"],"max_active_jobs":10,"load_ratio":0.6}`))
-	if err != nil || !sameMemoryFloat(legacy.MemoryFreePctMin, 30) || !sameMemoryFloat(legacy.SwapUsedMBMax, 1536) {
+	if err != nil || !sameMemoryFloat(legacy.MemoryFreePctMin, 30) || !sameMemoryFloat(legacy.SwapUsedMBMax, 1536) || !sameMemoryFloat(legacy.SwapInPerSMax, 10) || !sameMemoryFloat(legacy.PSISomeAvg10Max, 1) || !sameMemoryFloat(legacy.PressureLevelMin, 1) || legacy.capacityWeight("host-a") != 1 {
 		t.Fatalf("legacy policy lost memory defaults: %+v err=%v", legacy, err)
 	}
 	explicit, err := ParsePlacementPolicy([]byte(`{"local_machine":"host-a","spill_targets":["host-b"],"max_active_jobs":10,"load_ratio":0.6,"memory_free_pct_min":0,"swap_used_mb_max":17}`))
@@ -145,6 +145,89 @@ func TestPlacementPolicyMemoryDefaultsAndOverrides(t *testing.T) {
 	}
 	if _, err := ParsePlacementPolicy([]byte(`{"local_machine":"host-a","max_active_jobs":10,"load_ratio":0.6,"memory_free_pct_min":100.1}`)); err == nil {
 		t.Fatal("out-of-range memory threshold was accepted")
+	}
+}
+
+func TestPlacementMemoryLiveSignalsAndLegacyFallback(t *testing.T) {
+	cases := []struct {
+		name      string
+		memory    *HubHostMemory
+		pressured bool
+	}{
+		{name: "sticky swap with quiet live signals", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), PSISomeAvg10: memoryFloat(.1), Pressure: memoryFloat(.1), Source: "proc_meminfo"}},
+		{name: "swap in rate", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(11), Pressure: memoryFloat(.1), Source: "proc_meminfo"}, pressured: true},
+		{name: "linux PSI", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), PSISomeAvg10: memoryFloat(1.1), Pressure: memoryFloat(1.1), Source: "proc_meminfo"}, pressured: true},
+		{name: "mac pressure warn", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), Pressure: memoryFloat(1), Source: "vm_stat"}, pressured: true},
+		{name: "legacy swap fallback", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), Source: "proc_meminfo"}, pressured: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := memoryPlacementHub(t, "host-a")
+			hub.nodes["host-a"].hostMemory = tc.memory
+			candidate := memoryCandidate(t, hub.makePlacement(memoryPlacementPolicy("host-a"), placementMetrics{}, "hub-only", time.Now()), "host-a")
+			if got := strings.Contains(candidate.Reason, "not_accepting(memory_pressure)"); got != tc.pressured {
+				t.Fatalf("pressure=%t candidate=%+v", got, candidate)
+			}
+		})
+	}
+}
+
+func TestPlacementCapacityWeightsRankCandidatesButDoNotOverrideRefusals(t *testing.T) {
+	hub := memoryPlacementHub(t, "host-a", "host-b")
+	policy := memoryPlacementPolicy("host-a", "host-b")
+	policy.CapacityWeight = map[string]float64{"host-a": 1, "host-b": 2}
+	result := hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now())
+	if result.Candidates[0].Machine != "host-b" || result.Candidates[0].CapacityWeight != 2 {
+		t.Fatalf("capacity weight did not rank idle candidate: %+v", result.Candidates)
+	}
+	hub.nodes["host-b"].accepting = false
+	policy.CapacityWeight["host-b"] = 10000
+	result = hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now())
+	if result.Decision != "host-a" {
+		t.Fatalf("weight overrode refusal: %+v", result)
+	}
+	for _, candidate := range result.Candidates {
+		if candidate.Machine == "host-b" && !strings.Contains(candidate.Reason, "not_accepting") {
+			t.Fatalf("refusal reason was lost: %+v", candidate)
+		}
+	}
+}
+
+func TestMemorySignalFixtureParsersAndUnavailableSources(t *testing.T) {
+	linuxVM := readMemoryFixture(t, "memory/linux-vmstat.txt")
+	if pages, ok := parseLinuxSwapInPages(string(linuxVM)); !ok || pages != 42 {
+		t.Fatalf("linux swap pages=%d ok=%t", pages, ok)
+	}
+	macVM := readMemoryFixture(t, "memory/macos-vm_stat.txt")
+	if pages, ok := parseDarwinSwapIns(string(macVM)); !ok || pages != 0 {
+		t.Fatalf("mac swap pages=%d ok=%t", pages, ok)
+	}
+	level := readMemoryFixture(t, "memory/macos-pressure-level.txt")
+	if pressure, ok := parseDarwinPressureLevel(string(level)); !ok || pressure != 1 {
+		t.Fatalf("mac pressure=%d ok=%t", pressure, ok)
+	}
+	linuxPSI := readMemoryFixture(t, "memory/linux-psi.txt")
+	linuxMemory, ok := parseLinuxHostMemory("MemTotal: 1000 kB\nMemAvailable: 850 kB\nSwapTotal: 5000 kB\nSwapFree: 100 kB\n", string(linuxPSI))
+	if !ok || !sameMemoryFloat(linuxMemory.Pressure, .25) {
+		t.Fatalf("linux pressure parse=%+v ok=%t", linuxMemory, ok)
+	}
+	macMemory, _ := parseDarwinMemoryPressure(string(readMemoryFixture(t, "memory/macos-memory_pressure.txt")))
+	setDarwinLiveMemory(&macMemory, string(macVM), string(level), true)
+	if !sameMemoryFloat(macMemory.Pressure, 1) || macMemory.SwapInPerS != nil {
+		t.Fatalf("mac live fields=%+v", macMemory)
+	}
+	var sampler swapInRateSampler
+	first := sampler.observe(42, time.Unix(100, 0))
+	second := sampler.observe(62, time.Unix(102, 0))
+	if first != nil || !sameMemoryFloat(second, 10) {
+		t.Fatalf("swap-in interval rate first=%v second=%v", first, second)
+	}
+	if got, err := collectLinuxHostMemory(func(string) ([]byte, error) { return nil, errors.New("fixture unreadable") }); err == nil || got != nil {
+		t.Fatalf("unreadable Linux sources produced telemetry: %+v err=%v", got, err)
+	}
+	mac, err := collectDarwinHostMemory(context.Background(), func(context.Context, ...string) ([]byte, error) { return nil, errors.New("fixture unreadable") })
+	if err == nil || mac != nil {
+		t.Fatalf("unreadable macOS sources produced telemetry: %+v err=%v", mac, err)
 	}
 }
 
@@ -228,7 +311,7 @@ func TestMemoryFieldsAreExposedByPlacementAndNodesAPIs(t *testing.T) {
 	}
 	agent := &hubAgent{}
 	hub.connect("host-a", "fixture", "fixture", agent, true)
-	payload := []byte(`{"type":"event","kind":"heartbeat","payload":{"status":"alive","host_memory":{"free_pct":50,"compressed_mb":null,"swap_used_mb":0,"psi_some_avg10":null,"source":"proc_meminfo"}}}`)
+	payload := []byte(`{"type":"event","kind":"heartbeat","payload":{"status":"alive","host_memory":{"free_pct":50,"compressed_mb":null,"swap_used_mb":0,"psi_some_avg10":0.1,"swap_in_per_s":0,"pressure":0.1,"source":"proc_meminfo"}}}`)
 	hub.handleAgentMessage("host-a", "fixture", agent, payload)
 
 	placementRequest := httptest.NewRequest(http.MethodGet, "/v1/placement?class=worker", nil)
@@ -244,7 +327,7 @@ func TestMemoryFieldsAreExposedByPlacementAndNodesAPIs(t *testing.T) {
 	if err := json.NewDecoder(placementResponse.Body).Decode(&placement); err != nil || len(placement.Candidates) != 1 {
 		t.Fatalf("placement response=%q err=%v", placementResponse.Body.String(), err)
 	}
-	for _, field := range []string{"memory_free_pct", "swap_used_mb", "memory_known"} {
+	for _, field := range []string{"memory_free_pct", "swap_used_mb", "swap_in_per_s", "pressure", "capacity_weight", "memory_known"} {
 		if _, exists := placement.Candidates[0][field]; !exists {
 			t.Fatalf("placement omitted %s: %s", field, placementResponse.Body.String())
 		}

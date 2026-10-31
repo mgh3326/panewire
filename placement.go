@@ -27,6 +27,9 @@ type PlacementPolicy struct {
 	WakeOnSpill      bool     `json:"wake_on_spill"`
 	MemoryFreePctMin *float64 `json:"memory_free_pct_min,omitempty"`
 	SwapUsedMBMax    *float64 `json:"swap_used_mb_max,omitempty"`
+	SwapInPerSMax    *float64 `json:"swap_in_per_s_max,omitempty"`
+	PSISomeAvg10Max  *float64 `json:"psi_some_avg10_max,omitempty"`
+	PressureLevelMin *float64 `json:"pressure_level_min,omitempty"`
 	// QuotaExclude and QuotaBoost are retired and never evaluated. They stay
 	// decodable so a stale policy file still loads: reload logs a warning and
 	// strips them, so the desk can remove the keys at leisure. Remove the
@@ -37,7 +40,8 @@ type PlacementPolicy struct {
 	// Power is an optional relative speed weight per machine (100 = the
 	// strongest host). A machine without an entry weighs defaultPlacementPower.
 	// See docs/placement.md for how the weights are measured.
-	Power map[string]float64 `json:"power,omitempty"`
+	Power          map[string]float64 `json:"power,omitempty"`
+	CapacityWeight map[string]float64 `json:"capacity_weight,omitempty"`
 }
 
 // PlacementMachineSlots caps how many distinct tasks may hold active jobs on
@@ -61,7 +65,8 @@ func DefaultPlacementPolicy() PlacementPolicy {
 
 func (p PlacementPolicy) valid() bool {
 	if !machineIDPattern.MatchString(p.LocalMachine) || p.LocalMachine == hubOperatorMachineID || p.MaxActiveJobs < 1 || p.MaxActiveJobs > 10000 || p.LoadRatio <= 0 || p.LoadRatio > 100 ||
-		!validOptionalMemoryFloat(p.MemoryFreePctMin, 0, 100) || !validOptionalMemoryFloat(p.SwapUsedMBMax, 0, math.Inf(1)) {
+		!validOptionalMemoryFloat(p.MemoryFreePctMin, 0, 100) || !validOptionalMemoryFloat(p.SwapUsedMBMax, 0, math.Inf(1)) ||
+		!validOptionalMemoryFloat(p.SwapInPerSMax, 0, math.Inf(1)) || !validOptionalMemoryFloat(p.PSISomeAvg10Max, 0, 100) || !validOptionalMemoryFloat(p.PressureLevelMin, 0, 2) {
 		return false
 	}
 	seen := map[string]struct{}{p.LocalMachine: {}}
@@ -84,7 +89,19 @@ func (p PlacementPolicy) valid() bool {
 			return false
 		}
 	}
+	for machine, weight := range p.CapacityWeight {
+		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || !(weight > 0 && weight <= 10000) {
+			return false
+		}
+	}
 	return true
+}
+
+func (p PlacementPolicy) capacityWeight(machine string) float64 {
+	if weight, exists := p.CapacityWeight[machine]; exists {
+		return weight
+	}
+	return 1
 }
 
 // power returns the machine's relative speed weight; a missing entry is 100.
@@ -119,12 +136,42 @@ func (p PlacementPolicy) swapUsedMBMax() float64 {
 	return *p.SwapUsedMBMax
 }
 
+func (p PlacementPolicy) swapInPerSMax() float64 {
+	if p.SwapInPerSMax == nil {
+		return 10
+	}
+	return *p.SwapInPerSMax
+}
+
+func (p PlacementPolicy) psiSomeAvg10Max() float64 {
+	if p.PSISomeAvg10Max == nil {
+		return 1
+	}
+	return *p.PSISomeAvg10Max
+}
+
+func (p PlacementPolicy) pressureLevelMin() float64 {
+	if p.PressureLevelMin == nil {
+		return 1
+	}
+	return *p.PressureLevelMin
+}
+
 func (p *PlacementPolicy) applyMemoryDefaults() {
 	if p.MemoryFreePctMin == nil {
 		p.MemoryFreePctMin = memoryFloat(30)
 	}
 	if p.SwapUsedMBMax == nil {
 		p.SwapUsedMBMax = memoryFloat(1536)
+	}
+	if p.SwapInPerSMax == nil {
+		p.SwapInPerSMax = memoryFloat(10)
+	}
+	if p.PSISomeAvg10Max == nil {
+		p.PSISomeAvg10Max = memoryFloat(1)
+	}
+	if p.PressureLevelMin == nil {
+		p.PressureLevelMin = memoryFloat(1)
 	}
 }
 
@@ -173,14 +220,17 @@ type PlacementCandidate struct {
 	MetricsKnown bool `json:"metrics_known"`
 	// QuotaDecision/QuotaReason are retired; kept decodable (and unemitted
 	// when absent) so a new client still reads an old hub's candidates.
-	QuotaDecision *string  `json:"quota_decision,omitempty"`
-	QuotaReason   *string  `json:"quota_reason,omitempty"`
-	MemoryFreePct *float64 `json:"memory_free_pct"`
-	SwapUsedMB    *float64 `json:"swap_used_mb"`
-	MemoryKnown   bool     `json:"memory_known"`
-	HoldsActive   bool     `json:"holds_active"`
-	BurstReady    bool     `json:"burst_ready"`
-	Reason        string   `json:"reason"`
+	QuotaDecision  *string  `json:"quota_decision,omitempty"`
+	QuotaReason    *string  `json:"quota_reason,omitempty"`
+	MemoryFreePct  *float64 `json:"memory_free_pct"`
+	SwapUsedMB     *float64 `json:"swap_used_mb"`
+	SwapInPerS     *float64 `json:"swap_in_per_s"`
+	Pressure       *float64 `json:"pressure"`
+	CapacityWeight float64  `json:"capacity_weight"`
+	MemoryKnown    bool     `json:"memory_known"`
+	HoldsActive    bool     `json:"holds_active"`
+	BurstReady     bool     `json:"burst_ready"`
+	Reason         string   `json:"reason"`
 	// slotFull is wire-internal: a slot-full machine is filtered out of the
 	// candidates array before the response is encoded, so it never serializes.
 	slotFull bool
@@ -549,9 +599,21 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 			reasons = append(reasons, "burst_ready")
 		}
 		memoryKnown := memory != nil && memory.FreePct != nil && memory.SwapUsedMB != nil
-		memoryPressure := memory != nil &&
-			(memory.FreePct != nil && *memory.FreePct < policy.memoryFreePctMin() ||
-				memory.SwapUsedMB != nil && *memory.SwapUsedMB > policy.swapUsedMBMax())
+		liveSignal := memory != nil && (memory.SwapInPerS != nil || memory.Pressure != nil || memory.PSISomeAvg10 != nil)
+		memoryPressure := memory != nil && memory.FreePct != nil && *memory.FreePct < policy.memoryFreePctMin()
+		if memory != nil && liveSignal {
+			memoryPressure = memoryPressure || memory.SwapInPerS != nil && *memory.SwapInPerS > policy.swapInPerSMax() ||
+				memory.PSISomeAvg10 != nil && *memory.PSISomeAvg10 > policy.psiSomeAvg10Max()
+			if memory.Pressure != nil {
+				if memory.Source == "proc_meminfo" {
+					memoryPressure = memoryPressure || *memory.Pressure > policy.psiSomeAvg10Max()
+				} else {
+					memoryPressure = memoryPressure || *memory.Pressure >= policy.pressureLevelMin()
+				}
+			}
+		} else if memory != nil {
+			memoryPressure = memoryPressure || memory.SwapUsedMB != nil && *memory.SwapUsedMB > policy.swapUsedMBMax()
+		}
 		if memoryPressure {
 			reasons = append(reasons, "not_accepting(memory_pressure)")
 		} else if !memoryKnown {
@@ -560,7 +622,8 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		if len(reasons) == 0 {
 			reasons = append(reasons, "available")
 		}
-		score := placementScoreBase(load, jobs, policy.power(machine))
+		capacityWeight := policy.capacityWeight(machine)
+		score := placementScoreBase(load, jobs, policy.power(machine)) * capacityWeight
 		if !connected {
 			score -= 1000
 		}
@@ -579,16 +642,17 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		if burstReady {
 			score += 5
 		}
-		var freePct, swapUsedMB *float64
+		var freePct, swapUsedMB, swapInPerS, pressure *float64
 		if memory != nil {
 			freePct, swapUsedMB = cloneMemoryFloat(memory.FreePct), cloneMemoryFloat(memory.SwapUsedMB)
+			swapInPerS, pressure = cloneMemoryFloat(memory.SwapInPerS), cloneMemoryFloat(memory.Pressure)
 		}
 		var tasksField *int
 		if slotCapped {
 			tasksField = new(int)
 			*tasksField = tasks
 		}
-		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ","), slotFull: slotFull})
+		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, SwapInPerS: swapInPerS, Pressure: pressure, CapacityWeight: capacityWeight, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ","), slotFull: slotFull})
 	}
 	h.mu.Unlock()
 	decision := policy.LocalMachine

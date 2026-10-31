@@ -1541,11 +1541,16 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 	}
 	if rawMemory, exists := fields["host_memory"]; exists {
 		var memoryFields map[string]json.RawMessage
-		if json.Unmarshal(rawMemory, &memoryFields) != nil || len(memoryFields) != 5 {
+		if json.Unmarshal(rawMemory, &memoryFields) != nil || len(memoryFields) < 5 || len(memoryFields) > 7 {
 			return hubHeartbeatPayload{}, false
 		}
 		for _, name := range []string{"free_pct", "compressed_mb", "swap_used_mb", "psi_some_avg10", "source"} {
 			if _, exists := memoryFields[name]; !exists {
+				return hubHeartbeatPayload{}, false
+			}
+		}
+		for name := range memoryFields {
+			if name != "free_pct" && name != "compressed_mb" && name != "swap_used_mb" && name != "psi_some_avg10" && name != "source" && name != "swap_in_per_s" && name != "pressure" {
 				return hubHeartbeatPayload{}, false
 			}
 		}
