@@ -55,6 +55,7 @@ func newNodeWorktreeFixture(t *testing.T) *nodeWorktreeFixture {
 	nodeGit(t, seed, "commit", "-q", "--allow-empty", "-m", "feat")
 	nodeGit(t, seed, "remote", "add", "origin", fixture.origin)
 	nodeGit(t, seed, "push", "-q", "origin", "main", "feat")
+	nodeGit(t, seed, "push", "-q", "origin", "main:refs/heads/other")
 	nodeGit(t, seed, "push", "-q", "origin", "feat:refs/pull/1/head")
 	fixture.main = nodeGit(t, seed, "rev-parse", "main")
 	fixture.feat = nodeGit(t, seed, "rev-parse", "feat")
@@ -187,6 +188,15 @@ func TestNodeWorktreePrepareBranch(t *testing.T) {
 	}
 	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, fixture.prepareArgs("branch", "main", "", "", "repo.feat")); result["outcome"] != nodePrepareBranchElsewhere {
 		t.Fatalf("dir on another branch outcome=%v", result["outcome"])
+	}
+
+	// With no local branch, origin/<branch> must still match a stated
+	// expected tip: a moved remote branch is refused, not tracked as-is.
+	if result, _ := nodeRun(t, client, nodeCommandWorktreePrepare, fixture.prepareArgs("branch", "other", fixture.feat, "", "repo.o1")); result["outcome"] != nodePrepareBranchElsewhere {
+		t.Fatalf("moved remote tip outcome=%v", result["outcome"])
+	}
+	if result, _ := nodeRun(t, client, nodeCommandWorktreePrepare, fixture.prepareArgs("branch", "other", fixture.main, "", "repo.o1")); result["outcome"] != nodePreparePrepared {
+		t.Fatalf("matching remote tip outcome=%v", result["outcome"])
 	}
 
 	// A local branch that points at another commit than the expected tip is

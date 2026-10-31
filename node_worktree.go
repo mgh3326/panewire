@@ -349,6 +349,9 @@ func nodeWorktreeClean(ctx context.Context, git relayCommandRunner, path string)
 	return strings.TrimSpace(string(out)) == "", nil
 }
 
+// nodeWorktreeIgnored lists every ignored path in the worktree; callers
+// must refuse on any the regenerable allowlist does not cover, so the list
+// is never truncated.
 func nodeWorktreeIgnored(ctx context.Context, git relayCommandRunner, path string) ([]string, error) {
 	out, err := git(ctx, "-C", path, "status", "--porcelain", "--ignored")
 	if err != nil {
@@ -356,7 +359,7 @@ func nodeWorktreeIgnored(ctx context.Context, git relayCommandRunner, path strin
 	}
 	var ignored []string
 	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "!! ") && len(ignored) < 64 {
+		if strings.HasPrefix(line, "!! ") {
 			ignored = append(ignored, strings.TrimSpace(line[3:]))
 		}
 	}
@@ -546,7 +549,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		}
 		return nodePreparePrepared
 	}
-	if originTip == "" {
+	if originTip == "" || !strings.EqualFold(originTip, expected) {
 		return nodePrepareBranchElsewhere
 	}
 	if _, err := git(ctx, "-C", clone, "worktree", "add", "-b", args.Branch, dir, "origin/"+args.Branch); err != nil {
@@ -671,8 +674,13 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	}
 	if len(unsafe) > 0 {
 		// `git worktree remove` deletes ignored files too; only expendable
-		// output the caller named may go with it.
-		return nodeWorktreeRemoveResult{Outcome: nodeRemoveIgnoredFiles, Files: unsafe}, ""
+		// output the caller named may go with it. files names the refusing
+		// paths, bounded only in what is reported — every path is checked.
+		reported := unsafe
+		if len(reported) > 64 {
+			reported = reported[:64]
+		}
+		return nodeWorktreeRemoveResult{Outcome: nodeRemoveIgnoredFiles, Files: reported}, ""
 	}
 	if !nodeBranchReleased(ctx, git, main, entry.Branch, args.Base) {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnmerged}, ""
