@@ -994,3 +994,23 @@ func TestHubSpawnRuntugPathResolution(t *testing.T) {
 		})
 	}
 }
+
+// A document brief that cannot be fetched refuses the spawn before any
+// checkout is prepared, so a failed fetch never leaves a worktree behind.
+func TestPW6DocFetchFailureSkipsCheckout(t *testing.T) {
+	root := t.TempDir()
+	config := filepath.Join(root, "spawn.json")
+	if err := os.WriteFile(config, []byte(`{"cwd_map":{"repo-a":"/old/cwd"},"workspace":"worker","herdr_session":"worker","enabled":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	prepared := 0
+	client := &HubClient{spawnConfigPath: config, spawnPrepare: func(context.Context, nodeWorktreePrepareArgs) (any, string) {
+		prepared++
+		return nil, "unexpected"
+	}}
+	result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(97), CWDKey: "repo-a", BriefDoc: "briefs/job.md", WaitSeconds: 1,
+		Checkout: &hubSpawnCheckout{Origin: "https://github.com/acme/repo.git", Mode: "branch", Branch: "feature/pw6", Dir: "repo-job"}})
+	if result.Error != "brief_doc_unavailable" || prepared != 0 {
+		t.Fatalf("result=%+v prepared=%d", result, prepared)
+	}
+}

@@ -135,6 +135,17 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	}
 	runContext, cancel := context.WithTimeout(parent, time.Duration(message.WaitSeconds)*time.Second+extra)
 	defer cancel()
+	// The brief is fetched before any checkout: a failed fetch must not leave
+	// a prepared worktree behind.
+	briefText := message.BriefInline
+	if message.BriefDoc != "" {
+		fetched, err := client.fetchHubSpawnBrief(runContext, config.HandoffkeepEnv, message.BriefDoc)
+		if err != nil || fetched == "" || !utf8.ValidString(fetched) || len([]byte(fetched)) > hubSpawnMaxBriefBytes {
+			result.RC, result.Error = 2, "brief_doc_unavailable"
+			return result
+		}
+		briefText = fetched
+	}
 	if message.Checkout != nil {
 		prepare := client.spawnPrepare
 		if prepare == nil {
@@ -177,15 +188,6 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		temporary.Close()
 		result.RC, result.Error = 1, "spawn_failed"
 		return result
-	}
-	briefText := message.BriefInline
-	if message.BriefDoc != "" {
-		briefText, err = client.fetchHubSpawnBrief(runContext, config.HandoffkeepEnv, message.BriefDoc)
-		if err != nil || briefText == "" || !utf8.ValidString(briefText) || len([]byte(briefText)) > hubSpawnMaxBriefBytes {
-			_ = temporary.Close()
-			result.RC, result.Error = 2, "brief_doc_unavailable"
-			return result
-		}
 	}
 	_, writeErr := io.WriteString(temporary, briefText)
 	closeErr := temporary.Close()
