@@ -539,6 +539,12 @@ func TestNodeWorktreeRemoveRefusals(t *testing.T) {
 		if result, _ := nodeRun(t, client, nodeCommandWorktreeRemove, fixture.removeArgs(dir, head, nil)); result["outcome"] != nodeRemoveUnmerged {
 			t.Fatalf("outcome=%v", result["outcome"])
 		}
+		// Naming the worktree's own branch as base proves nothing.
+		args := fixture.removeArgs(dir, head, nil)
+		args["base"] = nodeGit(t, dir, "rev-parse", "--abbrev-ref", "HEAD")
+		if result, _ := nodeRun(t, client, nodeCommandWorktreeRemove, args); result["outcome"] != nodeRemoveUnmerged {
+			t.Fatalf("base=branch outcome=%v", result["outcome"])
+		}
 	})
 
 	t.Run("pane-in-use", func(t *testing.T) {

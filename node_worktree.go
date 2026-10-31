@@ -455,8 +455,11 @@ func nodeRegenerable(globs []string, name string) bool {
 // nodeBranchReleased mirrors mergewake's Pushed: merged into the base ref
 // (remote-tracking first, then local) or fully pushed to an upstream.
 func nodeBranchReleased(ctx context.Context, git relayCommandRunner, main, branch, base string) bool {
-	for _, ref := range []string{"origin/" + base, base} {
-		if _, err := git(ctx, "-C", main, "merge-base", "--is-ancestor", branch, ref); err == nil {
+	// Merged means reachable from the remote base. A local ref proves
+	// nothing (it can be the branch itself), and a base naming the branch
+	// would make every branch look merged.
+	if base != branch {
+		if _, err := git(ctx, "-C", main, "merge-base", "--is-ancestor", branch, "origin/"+base); err == nil {
 			return true
 		}
 	}
