@@ -142,6 +142,10 @@ func validNodeGlob(glob string) bool {
 // clone source stands in with its last two.
 func nodeOriginRepo(raw string) (string, bool) {
 	u := strings.TrimSpace(raw)
+	// A leading '-' would reach git as an option, never a repository.
+	if strings.HasPrefix(u, "-") {
+		return "", false
+	}
 	if u == "" || len(u) > 2048 || u != nodeControlChars.Replace(u) || strings.ContainsAny(u, " \t") {
 		return "", false
 	}
@@ -512,7 +516,7 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 			return nodeWorktreePrepareResult{Outcome: nodePrepareOriginMismatch}, ""
 		}
 	case errors.Is(err, os.ErrNotExist):
-		if _, err := git(ctx, "clone", args.Origin, clone); err != nil {
+		if _, err := git(ctx, "clone", "--", args.Origin, clone); err != nil {
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 		}
 	default:

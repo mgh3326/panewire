@@ -325,6 +325,7 @@ func TestNodeWorktreePrepareArgsValidation(t *testing.T) {
 		"mode":         {"origin": fixture.origin, "mode": "weird", "branch": "", "sha": "", "fetch": "", "dir": "repo.job"},
 		"branch-fetch": {"origin": fixture.origin, "mode": "branch", "branch": "feat", "sha": "", "fetch": "refs/heads/feat", "dir": "repo.job"},
 		"bad-branch":   {"origin": fixture.origin, "mode": "branch", "branch": "feat..x", "sha": "", "fetch": "", "dir": "repo.job"},
+		"dash-origin":  {"origin": "-ucmd:a/b", "mode": "detached", "branch": "", "sha": fixture.feat, "fetch": "pull/1/head", "dir": "repo.job"},
 		"dir-is-clone": {"origin": fixture.origin, "mode": "branch", "branch": "feat", "sha": "", "fetch": "", "dir": "repo"},
 		"origin-dot":   {"origin": "https://example.invalid/fleet/../repo.git", "mode": "detached", "branch": "", "sha": fixture.feat, "fetch": "pull/1/head", "dir": "repo.job"},
 		"origin-path":  {"origin": "/srv/fleet/./repo", "mode": "detached", "branch": "", "sha": fixture.feat, "fetch": "pull/1/head", "dir": "repo.job"},
