@@ -188,6 +188,26 @@ func nodeOriginRepo(raw string) (string, bool) {
 	return p, true
 }
 
+// nodeCloneRemoteRepo reads owner/repo from a clone's own origin. Unlike a
+// caller-supplied origin, an existing clone may use the scp-style SSH form
+// user@host:owner/repo.git; its user part is dropped, never refused.
+func nodeCloneRemoteRepo(raw string) (string, bool) {
+	u := strings.TrimSpace(raw)
+	if strings.Contains(u, "://") {
+		if v, err := url.Parse(u); err == nil && v.User != nil {
+			v.User = nil
+			u = v.String()
+		}
+	} else if !filepath.IsAbs(u) {
+		if at := strings.Index(u, "@"); at >= 0 {
+			if colon := strings.Index(u, ":"); colon > at && !strings.Contains(u[:colon], "/") {
+				u = u[at+1:]
+			}
+		}
+	}
+	return nodeOriginRepo(u)
+}
+
 func nodeOriginPathSegments(p string) []string {
 	p = strings.TrimSuffix(strings.Trim(p, "/"), ".git")
 	var out []string
@@ -335,6 +355,14 @@ func nodeListWorktrees(ctx context.Context, git relayCommandRunner, main string)
 	return entries, nil
 }
 
+// nodeGitOpLockPath names the per-clone lock the same way for every op:
+// the clone directory with symlinks resolved (the work root exists even
+// before the clone does), so prepare and remove on one clone always take
+// one file even when the work root traverses a symlink.
+func nodeGitOpLockPath(clone string) string {
+	return filepath.Join(nodeResolvedPath(filepath.Dir(clone)), filepath.Base(clone)) + ".git-op.lock"
+}
+
 func nodeResolvedPath(path string) string {
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		return filepath.Clean(resolved)
@@ -453,7 +481,7 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	repo := ownerRepo[strings.IndexByte(ownerRepo, '/')+1:]
 	clone := filepath.Join(workRoot, repo)
 	wait := client.nodeGitOpWait()
-	release, err := acquireNodeGitOpLock(ctx, clone+".git-op.lock", wait)
+	release, err := acquireNodeGitOpLock(ctx, nodeGitOpLockPath(clone), wait)
 	if err != nil {
 		if errors.Is(err, errNodeGitOpBusy) {
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeBusy, RetryAfterS: nodeGitOpRetryAfter(wait)}, ""
@@ -471,7 +499,7 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 		if err != nil {
 			return nodeWorktreePrepareResult{Outcome: nodePrepareOriginMismatch}, ""
 		}
-		existing, ok := nodeOriginRepo(string(remote))
+		existing, ok := nodeCloneRemoteRepo(string(remote))
 		if !ok || !strings.EqualFold(existing, ownerRepo) {
 			return nodeWorktreePrepareResult{Outcome: nodePrepareOriginMismatch}, ""
 		}
@@ -494,6 +522,11 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	result := nodeWorktreePrepareResult{Outcome: outcome}
 	if outcome == nodePreparePrepared || outcome == nodePrepareReused {
 		result.Worktree = nodeWorktreeInspect(ctx, git, dir).Worktree
+		if result.Worktree == nil || result.Worktree.Head == "" {
+			// A success the hub would reject as malformed is reported as
+			// the failure it is; a retry answers reused.
+			return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
+		}
 	}
 	return result, ""
 }
@@ -646,7 +679,7 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	}
 	main := filepath.Dir(worktree.Common)
 	wait := client.nodeGitOpWait()
-	release, err := acquireNodeGitOpLock(ctx, main+".git-op.lock", wait)
+	release, err := acquireNodeGitOpLock(ctx, nodeGitOpLockPath(main), wait)
 	if err != nil {
 		if errors.Is(err, errNodeGitOpBusy) {
 			return nodeWorktreeRemoveResult{Outcome: nodeOutcomeBusy, RetryAfterS: nodeGitOpRetryAfter(wait)}, ""

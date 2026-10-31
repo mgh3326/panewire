@@ -713,3 +713,40 @@ func TestNodeWorktreePrepareResultNeedsHead(t *testing.T) {
 		}
 	}
 }
+
+func TestNodeCloneRemoteRepoAcceptsSSHForms(t *testing.T) {
+	for raw, want := range map[string]string{
+		"git@example.invalid:fleet/repo.git":       "fleet/repo",
+		"ssh://git@example.invalid/fleet/repo.git": "fleet/repo",
+		"https://example.invalid/fleet/repo.git":   "fleet/repo",
+	} {
+		if got, ok := nodeCloneRemoteRepo(raw); !ok || got != want {
+			t.Fatalf("%s: got %q %v", raw, got, ok)
+		}
+	}
+	// Caller-supplied origins keep refusing userinfo.
+	if _, ok := nodeOriginRepo("git@example.invalid:fleet/repo.git"); ok {
+		t.Fatal("caller origin with userinfo must stay refused")
+	}
+}
+
+func TestNodeGitOpLockPathCanonical(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "root-link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip(err)
+	}
+	clone := filepath.Join(real, "repo")
+	if err := os.MkdirAll(clone, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// prepare names the clone through the configured (symlinked) root;
+	// remove names it through git's resolved common dir parent.
+	if a, b := nodeGitOpLockPath(filepath.Join(link, "repo")), nodeGitOpLockPath(nodeResolvedPath(clone)); a != b {
+		t.Fatalf("lock paths differ: %s vs %s", a, b)
+	}
+	// Before the clone exists, the root is still resolved.
+	if a, b := nodeGitOpLockPath(filepath.Join(link, "fresh")), filepath.Join(nodeResolvedPath(real), "fresh")+".git-op.lock"; a != b {
+		t.Fatalf("fresh lock path %s, want %s", a, b)
+	}
+}
