@@ -201,9 +201,17 @@ worktree under the per-clone lock, then removes it only when all hold: the
 resolved worktree path and common git dir are under the node's configured
 work root, it appears in `git worktree list`, is not locked, is not
 detached, is clean, every ignored file matches `regenerable`, the branch is
-merged into `origin/<base>` (or `base`) or fully pushed, and — re-read
-immediately before removal — no pane is live in it. It then runs `git worktree remove`
-and `git branch -d`; never `--force` or `-D`.
+merged into `origin/<base>` or fully pushed (both judged after a
+`git fetch --prune origin`; a local `base` ref is never proof, and a
+`base` equal to the branch never counts), and — re-read immediately before
+removal — no pane is live in it. It then runs `git worktree remove` and
+`git branch -d`; never `--force` or `-D`.
+
+The per-clone lock is `flock` on macOS and Linux, released by the kernel
+when a holder dies. Other platforms use an exclusive-create file instead; a
+crashed holder leaves `<clone>.git-op.lock` behind and every op on that clone
+answers `busy`. Recovery: confirm no `panewire` process for that node is
+running a git op on the clone, then delete the lock file.
 
 | `outcome` | Meaning |
 | --- | --- |

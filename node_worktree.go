@@ -554,7 +554,7 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 // reuse only a worktree already on the branch, and refuse a local branch
 // that points at another commit instead of silently tracking it.
 func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommandRunner, clone, dir string, args nodeWorktreePrepareArgs) string {
-	if _, err := git(ctx, "-C", clone, "fetch", "origin"); err != nil {
+	if _, err := git(ctx, "-C", clone, "fetch", "--prune", "origin"); err != nil {
 		return nodeOutcomeGitFailed
 	}
 	if args.Sha != "" {
