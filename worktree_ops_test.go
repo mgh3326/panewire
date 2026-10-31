@@ -749,6 +749,12 @@ func TestNodeCloneRemoteRepoAcceptsSSHForms(t *testing.T) {
 	if _, ok := nodeOriginRepo("git@example.invalid:fleet/repo.git"); ok {
 		t.Fatal("caller origin with userinfo must stay refused")
 	}
+	// A query or fragment could carry a credential into the clone's config.
+	for _, raw := range []string{"https://example.invalid/fleet/repo.git?token=x", "https://example.invalid/fleet/repo.git?", "https://example.invalid/fleet/repo.git#x"} {
+		if _, ok := nodeOriginRepo(raw); ok {
+			t.Fatalf("%s must be refused", raw)
+		}
+	}
 }
 
 func TestNodeGitOpLockPathCanonical(t *testing.T) {
@@ -824,12 +830,12 @@ func TestNodeWorktreePrepareCloneSymlinkOutsideRoot(t *testing.T) {
 }
 
 func TestNodeRegenerableGlobRules(t *testing.T) {
-	for _, g := range []string{"*", "**", "*/?", "/*/"} {
+	for _, g := range []string{"*", "**", "*/?", "/*/", "[a-z]/", "*[0-9]*"} {
 		if validNodeGlob(g) {
 			t.Fatalf("%q must be invalid", g)
 		}
 	}
-	for _, g := range []string{"*.log", "node_modules", "build/*", "logs/"} {
+	for _, g := range []string{"*.log", "node_modules", "build/*", "logs/", "log[0-9]/"} {
 		if !validNodeGlob(g) {
 			t.Fatalf("%q must be valid", g)
 		}
@@ -846,5 +852,35 @@ func TestNodeRegenerableGlobRules(t *testing.T) {
 	}
 	if !nodeRegenerable([]string{"node_modules/"}, "node_modules/") {
 		t.Fatal("a directory glob must approve its directory entry")
+	}
+}
+
+// A bare clone (common dir not <clone>/.git) would name a different per-clone
+// lock than prepare; inspection already refuses it, before any lock.
+func TestNodeWorktreeRemoveRefusesNonStandardCommon(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	client := fixture.client()
+	cwd := filepath.Join(fixture.workRoot, "repo.job")
+	head := strings.Repeat("a", 40)
+	client.nodeGit = func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) == 1 && args[0] == "--version":
+			return []byte("git version 2.31.0\n"), nil
+		case len(args) == 7 && args[0] == "-C" && args[1] == cwd && args[2] == "rev-parse" && args[3] == "--path-format=absolute":
+			common := filepath.Join(fixture.workRoot, "repo")
+			gitDir := filepath.Join(common, "worktrees", "repo.job")
+			return []byte(gitDir + "\n" + common + "\n" + cwd + "\n"), nil
+		case len(args) == 5 && args[0] == "-C" && args[1] == cwd && args[2] == "branch" && args[3] == "--show-current":
+			return []byte("job/bare\n"), nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == cwd && args[2] == "rev-parse" && args[3] == "HEAD":
+			return []byte(head + "\n"), nil
+		case len(args) == 5 && args[0] == "-C" && args[1] == cwd && args[2] == "remote" && args[3] == "get-url" && args[4] == "origin":
+			return []byte(fixture.origin + "\n"), nil
+		}
+		return nil, errors.New("unexpected git argv")
+	}
+	result, code := nodeRun(t, client, nodeCommandWorktreeRemove, fixture.removeArgs(cwd, head, nil))
+	if code != "" || result["outcome"] != nodeRemoveWorktreeGone {
+		t.Fatalf("bare common must be refused, outcome=%v code=%q", result["outcome"], code)
 	}
 }

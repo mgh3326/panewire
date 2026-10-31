@@ -61,6 +61,7 @@ var (
 	nodeFetchPullPattern = regexp.MustCompile(`^pull/[0-9]+/head$`)
 	nodeQuotaPoolPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
 	nodeControlChars     = strings.NewReplacer("\r", "", "\n", "", "\x00", "")
+	nodeGlobClass        = regexp.MustCompile(`\[[^\]]*\]`)
 )
 
 type nodeWorktreePrepareArgs struct {
@@ -137,7 +138,8 @@ func validNodeGlob(glob string) bool {
 	}
 	// A pattern made only of wildcards ("*", "**", "*/?") would approve any
 	// ignored file for deletion; it must name something literal.
-	return strings.Trim(glob, "*?/") != ""
+	// Character classes ("[a-z]/") are wildcards too.
+	return strings.Trim(nodeGlobClass.ReplaceAllString(glob, ""), "*?/") != ""
 }
 
 // nodeOriginRepo normalizes an origin argument (or a clone's own remote) to
@@ -158,7 +160,9 @@ func nodeOriginRepo(raw string) (string, bool) {
 	switch i := strings.Index(u, "://"); {
 	case i >= 0:
 		v, err := url.Parse(u)
-		if err != nil || v.User != nil {
+		// A query or fragment can carry a credential that git would persist
+		// in the clone's config; origins never need one.
+		if err != nil || v.User != nil || v.RawQuery != "" || v.ForceQuery || v.Fragment != "" || strings.Contains(u, "#") {
 			return "", false
 		}
 		switch v.Scheme {

@@ -17,8 +17,19 @@ func tryNodeGitOpLock(path string) (func(), error) {
 	if err != nil {
 		return nil, err
 	}
-	return func() {
+	held, err := file.Stat()
+	if err != nil {
 		file.Close()
 		_ = os.Remove(path)
+		return nil, err
+	}
+	return func() {
+		// Unlink only our own file: another process may already hold a new
+		// lock at the same path. Close first; some platforms cannot remove
+		// an open file.
+		file.Close()
+		if current, err := os.Stat(path); err == nil && os.SameFile(held, current) {
+			_ = os.Remove(path)
+		}
 	}, nil
 }
