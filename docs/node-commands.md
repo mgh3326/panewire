@@ -209,7 +209,7 @@ detached, is clean, every ignored file matches `regenerable`, the branch is
 merged into `origin/<base>` or fully pushed to `origin/<branch>` (both judged after a
 `git fetch --prune origin`, whose failure answers `git-failed`; a local `base` ref is never proof, and a
 `base` equal to the branch never counts), and — re-read immediately before
-removal — no pane is live in it. It then runs `git worktree remove` and
+removal — no pane is live in it (the ignored-file scan and the pane check are the last reads; a non-pane process writing an ignored file between them and the removal is a residual window this op cannot fence). It then runs `git worktree remove` and
 `git branch -d`; never `--force` or `-D`.
 
 The per-clone lock is `flock` on macOS and Linux, released by the kernel
