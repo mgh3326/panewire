@@ -380,7 +380,18 @@ panewire emit --kind job.completed --job <job_id> --report <path>
 ```
 
 The inbox root comes from `--inbox-root`, else `PANEWIRE_INBOX_ROOT`, else the
-daemon's default data directory. `--kind` must be one of the relay kinds:
+per-OS default (`defaultInboxRoot` in `inbox_root.go`, which the daemon's own
+fallback also uses):
+
+| OS | default inbox root |
+|---|---|
+| macOS | `~/Library/Application Support/panewire/inbox` (the daemon data directory) |
+| Linux and others | `~/work/herdr-inbox` |
+
+Before this rule the macOS path was the default on every OS, so every emit on
+a Linux node without `PANEWIRE_INBOX_ROOT` was refused as a mismatch. An
+explicit `--inbox-root` or `PANEWIRE_INBOX_ROOT` still wins over the default.
+`--kind` must be one of the relay kinds:
 `job.completed`, `job.escalate`, `job.joined`, `job.lost`, `job.revoked`, or
 `lane.event`. A missing `--job` is a usage error; `--report` is required for
 `job.completed`, while the self-record kinds (`job.escalate`, `job.joined`,
@@ -391,9 +402,15 @@ The push carries the inbox root the file was written in, and a daemon relaying
 from a different root refuses it. Redirecting `--inbox-root` alone does not
 redirect the socket: without this guard a verification run against a scratch
 directory still reached the operator's live daemon, whose hub client then wrote
-a `relay_sent` row for it in the production journal. The refusal is not an
-error for the caller — the event file is durable in the namespace it chose, and
-`emit` reports `panewired unavailable; event recorded to file only`.
+a `relay_sent` row for it in the production journal. The event file stays
+durable in the namespace the caller chose; `emit` exits with the usage code and
+prints both roots, and the daemon logs the same pair as a warning:
+
+```
+emit: inbox root mismatch (daemon=<daemon's jobs root>, given=<emit's root>)
+```
+
+Make the two agree with `--inbox-root` or `PANEWIRE_INBOX_ROOT`.
 
 The file is written first and the socket is called second. A record whose
 dedupe key already exists in `jobs/<job_id>/events/` does not produce a second

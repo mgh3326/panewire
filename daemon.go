@@ -125,13 +125,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 		}
 	}
 	if d.cfg.StallDetect.Enabled && d.cfg.HerdrSocket != "" && os.Getenv("PANEWIRE_STALL_DETECT") != "off" {
-		stallRoot := d.cfg.InboxRoot
-		if d.cfg.Hub.Client != nil && d.cfg.Hub.Client.jobsInboxRoot != "" {
-			stallRoot = d.cfg.Hub.Client.jobsInboxRoot
-		}
-		if stallRoot == "" {
-			stallRoot = defaultInboxRoot()
-		}
+		stallRoot := d.stallInboxRoot()
 		d.resub = make(chan struct{}, 1)
 		socket := d.cfg.HerdrSocket
 		// Every herdr handle the detector touches is a stallReader: the
@@ -791,6 +785,19 @@ func (d *Daemon) Stop() error {
 	}
 	return nil
 }
+
+// stallInboxRoot is the inbox root the stall detector scans: the hub jobs
+// root, else --inbox-root, else the same per-OS default `panewire emit` uses.
+func (d *Daemon) stallInboxRoot() string {
+	if d.cfg.Hub.Client != nil && d.cfg.Hub.Client.jobsInboxRoot != "" {
+		return d.cfg.Hub.Client.jobsInboxRoot
+	}
+	if d.cfg.InboxRoot != "" {
+		return d.cfg.InboxRoot
+	}
+	return defaultInboxRoot()
+}
+
 func (d *Daemon) SocketPath() string {
 	if d.cfg.SocketPath != "" {
 		return d.cfg.SocketPath

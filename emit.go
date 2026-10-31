@@ -77,10 +77,6 @@ func emitInboxRoot(explicit string) string {
 	return defaultInboxRoot()
 }
 
-func defaultInboxRoot() string {
-	return filepath.Join(filepath.Dir(defaultSocketPath()), "inbox")
-}
-
 // emitRecord is the flat local event form hubInboxEvent already reads. The
 // file is the offline fallback, so it must stay readable without the daemon.
 type emitRecord struct {
