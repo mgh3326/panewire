@@ -117,6 +117,18 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.RC, result.Error = 2, "cwd_unmapped"
 		return result
 	}
+	// The document key is validated before any checkout or runtug lookup: a
+	// key outside the node's prefix is refused whatever else is configured.
+	if message.BriefDoc != "" {
+		prefix := config.BriefDocPrefix
+		if prefix == "" {
+			prefix = "briefs/"
+		}
+		if !strings.HasSuffix(prefix, "/") || !validHubSpawnDocKey(strings.TrimSuffix(prefix, "/")) || !strings.HasPrefix(message.BriefDoc, prefix) {
+			result.RC, result.Error = 2, "brief_doc_unavailable"
+			return result
+		}
+	}
 	extra := client.spawnTimeoutExtra
 	if extra == 0 {
 		extra = 60 * time.Second
@@ -168,14 +180,6 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	}
 	briefText := message.BriefInline
 	if message.BriefDoc != "" {
-		prefix := config.BriefDocPrefix
-		if prefix == "" {
-			prefix = "briefs/"
-		}
-		if !strings.HasSuffix(prefix, "/") || !validHubSpawnDocKey(strings.TrimSuffix(prefix, "/")) || !strings.HasPrefix(message.BriefDoc, prefix) {
-			result.RC, result.Error = 2, "brief_doc_unavailable"
-			return result
-		}
 		briefText, err = client.fetchHubSpawnBrief(runContext, config.HandoffkeepEnv, message.BriefDoc)
 		if err != nil || briefText == "" || !utf8.ValidString(briefText) || len([]byte(briefText)) > hubSpawnMaxBriefBytes {
 			_ = temporary.Close()
