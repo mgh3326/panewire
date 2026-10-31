@@ -17,8 +17,8 @@ omitted when unavailable; neither reports an invented zero.
 | `compressed_mb` | number or null | compressor measurement was unavailable | Darwin: compressor pages from `memory_pressure` or `vm_stat`; Linux: null because it has no macOS-compressor equivalent |
 | `swap_used_mb` | number or null | swap-use measurement was unavailable | Darwin: `sysctl -n vm.swapusage`; Linux: `/proc/meminfo` |
 | `psi_some_avg10` | number or null | pressure-stall metric is unavailable | Linux: `/proc/pressure/memory`; null on Darwin and on Linux systems without PSI |
-| `swap_in_per_s` | number or null | no sample interval or swap-in counter is unavailable | Linux: delta of `/proc/vmstat` `pswpin`; Darwin: delta of `Swapins` from `vm_stat` |
-| `pressure` | number or null | pressure signal is unavailable | Linux: PSI `some avg10` percent; Darwin: `kern.memorystatus_vm_pressure_level` (0 normal, 1 warn, 2 critical) |
+| `swap_in_per_s` | number or null | no sample interval or swap-in counter is unavailable | Linux: delta of `/proc/vmstat` `pswpin` pages; Darwin: delta of `Swapins` pages from `vm_stat` |
+| `pressure` | number or null | pressure signal is unavailable | Linux: PSI `some avg10` percent; Darwin: `kern.memorystatus_vm_pressure_level` normalized from kernel levels 1/2/4 to 0 normal, 1 warn, 2 critical |
 | `source` | string | never null | `memory_pressure`, `vm_stat`, or `proc_meminfo` |
 
 The hub rejects a present `host_memory` object with an unknown `source`, an
@@ -55,10 +55,12 @@ Because memory pressure follows the non-accepting path, `wake_on_spill` does
 not wake a disconnected spill target for memory pressure: the decision remains
 `unavailable`. Capacity-pressure spill behavior is unchanged.
 
-When any live field (`swap_in_per_s`, `pressure`, or `psi_some_avg10`) is
-present, swap used alone is ignored because it can remain high after pressure
-ends. If none is present, the hub uses the previous `swap_used_mb_max` rule,
-preserving behavior for older nodes. Missing signals otherwise remain fail-open.
+When either additive live field (`swap_in_per_s` or `pressure`) is present,
+swap used alone is ignored because it can remain high after pressure ends.
+Older Linux nodes may already send `psi_some_avg10`; that existing field alone
+does not disable the previous `swap_used_mb_max` fallback. Nodes with neither
+new field preserve the old behavior. Missing signals otherwise remain
+fail-open.
 
 ## Deployment order and compatibility
 

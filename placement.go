@@ -599,7 +599,7 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 			reasons = append(reasons, "burst_ready")
 		}
 		memoryKnown := memory != nil && memory.FreePct != nil && memory.SwapUsedMB != nil
-		liveSignal := memory != nil && (memory.SwapInPerS != nil || memory.Pressure != nil || memory.PSISomeAvg10 != nil)
+		liveSignal := memory != nil && (memory.SwapInPerS != nil || memory.Pressure != nil)
 		memoryPressure := memory != nil && memory.FreePct != nil && *memory.FreePct < policy.memoryFreePctMin()
 		if memory != nil && liveSignal {
 			memoryPressure = memoryPressure || memory.SwapInPerS != nil && *memory.SwapInPerS > policy.swapInPerSMax() ||

@@ -70,12 +70,16 @@ func (memory HubHostMemory) valid() bool {
 	if memory.Source != "memory_pressure" && memory.Source != "vm_stat" && memory.Source != "proc_meminfo" {
 		return false
 	}
+	pressureMax := 2.0
+	if memory.Source == "proc_meminfo" {
+		pressureMax = 100
+	}
 	return validOptionalMemoryFloat(memory.FreePct, 0, 100) &&
 		validOptionalMemoryFloat(memory.CompressedMB, 0, math.Inf(1)) &&
 		validOptionalMemoryFloat(memory.SwapUsedMB, 0, math.Inf(1)) &&
 		validOptionalMemoryFloat(memory.PSISomeAvg10, 0, 100) &&
 		validOptionalMemoryFloat(memory.SwapInPerS, 0, math.Inf(1)) &&
-		validOptionalMemoryFloat(memory.Pressure, 0, 100)
+		validOptionalMemoryFloat(memory.Pressure, 0, pressureMax)
 }
 
 func validOptionalMemoryFloat(value *float64, minimum, maximum float64) bool {
@@ -444,8 +448,16 @@ func parseDarwinSwapIns(vmstat string) (int64, bool) {
 }
 
 func parseDarwinPressureLevel(value string) (int, bool) {
-	level, err := strconv.Atoi(strings.TrimSpace(value))
-	return level, err == nil && level >= 0 && level <= 2
+	switch strings.TrimSpace(value) {
+	case "1": // memorystatus level: normal
+		return 0, true
+	case "2": // memorystatus level: warn
+		return 1, true
+	case "4": // memorystatus level: critical
+		return 2, true
+	default:
+		return 0, false
+	}
 }
 
 func parseDarwinMemoryPressure(output string) (HubHostMemory, bool) {

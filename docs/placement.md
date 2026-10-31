@@ -170,10 +170,11 @@ zero. A candidate is excluded when reported free memory is below the first
 threshold. Live `swap_in_per_s` above `swap_in_per_s_max` (default 10 pages per
 second), Linux `pressure`/`psi_some_avg10` above `psi_some_avg10_max` (default
 1 percent), or macOS `pressure` at or above `pressure_level_min` (default 1,
-warn) also excludes a candidate. If any live signal is present, sticky
+warn) also excludes a candidate. If either new live field is present, sticky
 `swap_used_mb` alone does not exclude it. If all live signals are absent, the
-hub preserves the older `swap_used_mb_max` rule (default 1536 MB). A low
-`free_pct` remains an exclusion in either case. Missing telemetry is fail-open.
+hub preserves the older `swap_used_mb_max` rule (default 1536 MB), including
+reports that contain only the legacy `psi_some_avg10` field. A low `free_pct`
+remains an exclusion in either case. Missing telemetry is fail-open.
 
 `capacity_weight` is an optional map from machine id to a positive relative
 capacity weight; it defaults to 1.0 per machine. The score multiplies the

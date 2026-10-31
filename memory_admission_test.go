@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -158,6 +159,7 @@ func TestPlacementMemoryLiveSignalsAndLegacyFallback(t *testing.T) {
 		{name: "swap in rate", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(11), Pressure: memoryFloat(.1), Source: "proc_meminfo"}, pressured: true},
 		{name: "linux PSI", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), PSISomeAvg10: memoryFloat(1.1), Pressure: memoryFloat(1.1), Source: "proc_meminfo"}, pressured: true},
 		{name: "mac pressure warn", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), Pressure: memoryFloat(1), Source: "vm_stat"}, pressured: true},
+		{name: "legacy PSI retains swap-used fallback", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), PSISomeAvg10: memoryFloat(.1), Source: "proc_meminfo"}, pressured: true},
 		{name: "legacy swap fallback", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), Source: "proc_meminfo"}, pressured: true},
 	}
 	for _, tc := range cases {
@@ -203,8 +205,12 @@ func TestMemorySignalFixtureParsersAndUnavailableSources(t *testing.T) {
 		t.Fatalf("mac swap pages=%d ok=%t", pages, ok)
 	}
 	level := readMemoryFixture(t, "memory/macos-pressure-level.txt")
-	if pressure, ok := parseDarwinPressureLevel(string(level)); !ok || pressure != 1 {
-		t.Fatalf("mac pressure=%d ok=%t", pressure, ok)
+	for _, tc := range []struct {
+		kernel, normalized int
+	}{{1, 0}, {2, 1}, {4, 2}} {
+		if pressure, ok := parseDarwinPressureLevel(strconv.Itoa(tc.kernel)); !ok || pressure != tc.normalized {
+			t.Fatalf("mac kernel pressure=%d normalized=%d ok=%t", tc.kernel, pressure, ok)
+		}
 	}
 	linuxPSI := readMemoryFixture(t, "memory/linux-psi.txt")
 	linuxMemory, ok := parseLinuxHostMemory("MemTotal: 1000 kB\nMemAvailable: 850 kB\nSwapTotal: 5000 kB\nSwapFree: 100 kB\n", string(linuxPSI))
