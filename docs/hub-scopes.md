@@ -57,6 +57,18 @@ The `svc-mergewake` line for hub reap (operator decision D1: every machine):
 HUB_SCOPES_svc-mergewake=nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*,node.command:worktree.remove@*
 ```
 
+An initiating runtug service needs `spawn@<machine>` for one destination, or
+`spawn@*` for every destination. The same grant authorizes POST and GET for
+spawn requests. For example:
+
+```sh
+HUB_SCOPES_svc-runtug=spawn@*
+```
+
+Operator authorization is unchanged. A service without a matching spawn grant
+gets `403 {"error":"scope_forbidden"}`; a grant for another machine does not
+authorize this request.
+
 ## Reload
 
 The hub re-reads the auth file when it changes on disk (checked on each

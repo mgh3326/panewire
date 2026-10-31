@@ -155,6 +155,7 @@ type HubClient struct {
 	sessionMu         sync.Mutex
 	spawnConfigPath   string
 	spawnMu           sync.Mutex
+	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
 	spawnSeenMu       sync.Mutex
 	spawnSeen         map[string]struct{}
 	spawnTimeoutExtra time.Duration // fixture seam; production is 60 seconds.
@@ -521,6 +522,8 @@ type hubOutboundMessage struct {
 	RequestID       string
 	CWDKey          string
 	BriefInline     string
+	BriefDoc        string
+	Checkout        *hubSpawnCheckout
 	Args            []string
 	WaitSeconds     int
 	CommandOp       string
@@ -2314,11 +2317,35 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 	case "job.spawn":
 		var brief hubSpawnBrief
 		var briefFields map[string]json.RawMessage
-		if len(fields) != 6 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || len(briefFields) != 1 || json.Unmarshal(briefFields["inline"], &brief.Inline) != nil || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
+		for name := range fields {
+			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" {
+				return hubOutboundMessage{}, false
+			}
+		}
+		if (len(fields) != 6 && len(fields) != 7) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
 			return hubOutboundMessage{}, false
 		}
+		if raw, ok := briefFields["inline"]; ok {
+			if json.Unmarshal(raw, &brief.Inline) != nil {
+				return hubOutboundMessage{}, false
+			}
+		} else if raw, ok := briefFields["doc"]; ok {
+			if json.Unmarshal(raw, &brief.Doc) != nil {
+				return hubOutboundMessage{}, false
+			}
+		} else {
+			return hubOutboundMessage{}, false
+		}
+		if raw, ok := fields["checkout"]; ok {
+			var checkout hubSpawnCheckout
+			if json.Unmarshal(raw, &checkout) != nil || !validHubSpawnCheckout(checkout) {
+				return hubOutboundMessage{}, false
+			}
+			message.Checkout = &checkout
+		}
 		message.BriefInline = brief.Inline
-		if !validHubSpawnRequest(hubSpawnRequest{RequestID: message.RequestID, Machine: "machine-a", CWDKey: message.CWDKey, Brief: brief, Args: message.Args, WaitSeconds: message.WaitSeconds}) {
+		message.BriefDoc = brief.Doc
+		if !validHubSpawnRequest(hubSpawnRequest{RequestID: message.RequestID, Machine: "machine-a", CWDKey: message.CWDKey, Brief: brief, Checkout: message.Checkout, Args: message.Args, WaitSeconds: message.WaitSeconds}) {
 			return hubOutboundMessage{}, false
 		}
 	case "node.command":

@@ -2,8 +2,10 @@ package panewire
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 	"unicode/utf8"
 )
@@ -27,16 +29,57 @@ var (
 )
 
 type hubSpawnBrief struct {
-	Inline string `json:"inline"`
+	Inline    string `json:"inline,omitempty"`
+	Doc       string `json:"doc,omitempty"`
+	hasInline bool
+	hasDoc    bool
+}
+
+func (brief *hubSpawnBrief) UnmarshalJSON(raw []byte) error {
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return err
+	}
+	if fields == nil {
+		return errors.New("invalid brief")
+	}
+	for key := range fields {
+		if key != "inline" && key != "doc" {
+			return errors.New("invalid brief")
+		}
+	}
+	if value, ok := fields["inline"]; ok {
+		brief.hasInline = true
+		if err := json.Unmarshal(value, &brief.Inline); err != nil {
+			return err
+		}
+	}
+	if value, ok := fields["doc"]; ok {
+		brief.hasDoc = true
+		if err := json.Unmarshal(value, &brief.Doc); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type hubSpawnCheckout struct {
+	Origin string `json:"origin"`
+	Mode   string `json:"mode"`
+	Branch string `json:"branch,omitempty"`
+	Sha    string `json:"sha,omitempty"`
+	Fetch  string `json:"fetch,omitempty"`
+	Dir    string `json:"dir"`
 }
 
 type hubSpawnRequest struct {
-	RequestID   string        `json:"request_id"`
-	Machine     string        `json:"machine"`
-	CWDKey      string        `json:"cwd_key"`
-	Brief       hubSpawnBrief `json:"brief"`
-	Args        []string      `json:"args"`
-	WaitSeconds int           `json:"wait_seconds"`
+	RequestID   string            `json:"request_id"`
+	Machine     string            `json:"machine"`
+	CWDKey      string            `json:"cwd_key"`
+	Brief       hubSpawnBrief     `json:"brief"`
+	Checkout    *hubSpawnCheckout `json:"checkout,omitempty"`
+	Args        []string          `json:"args"`
+	WaitSeconds int               `json:"wait_seconds"`
 }
 
 type hubSpawnResult struct {
@@ -61,10 +104,29 @@ type hubSpawnRecord struct {
 func validHubSpawnRequestID(value string) bool { return hubSpawnRequestIDPattern.MatchString(value) }
 
 func validHubSpawnRequest(request hubSpawnRequest) bool {
-	if request.Args == nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.Machine) || !hubSpawnCWDKeyPattern.MatchString(request.CWDKey) || request.WaitSeconds < 1 || request.WaitSeconds > 300 || request.Brief.Inline == "" || !utf8.ValidString(request.Brief.Inline) || len([]byte(request.Brief.Inline)) > hubSpawnMaxBriefBytes {
+	inline, doc := request.Brief.hasInline || request.Brief.Inline != "", request.Brief.hasDoc || request.Brief.Doc != ""
+	if request.Args == nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.Machine) || !hubSpawnCWDKeyPattern.MatchString(request.CWDKey) || request.WaitSeconds < 1 || request.WaitSeconds > 300 || inline == doc || inline && (request.Brief.Inline == "" || !utf8.ValidString(request.Brief.Inline) || len([]byte(request.Brief.Inline)) > hubSpawnMaxBriefBytes) || doc && (request.Brief.Doc == "" || !validHubSpawnDocKey(request.Brief.Doc)) {
 		return false
 	}
-	return validHubSpawnArgs(request.Args)
+	return validHubSpawnArgs(request.Args) && (request.Checkout == nil || validHubSpawnCheckout(*request.Checkout))
+}
+
+func validHubSpawnDocKey(key string) bool {
+	return len(key) > 0 && len(key) <= 200 && regexp.MustCompile(`^[A-Za-z0-9._/-]+$`).MatchString(key) && !strings.Contains(key, "..") && !strings.HasPrefix(key, "/") && !strings.HasSuffix(key, "/")
+}
+
+func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
+	if _, ok := nodeOriginRepo(checkout.Origin); !ok || !validNodeJobName(checkout.Dir) {
+		return false
+	}
+	switch checkout.Mode {
+	case "branch":
+		return validNodeRefName(checkout.Branch) && (checkout.Sha == "" || nodeShaPattern.MatchString(checkout.Sha)) && checkout.Fetch == ""
+	case "detached":
+		return checkout.Branch == "" && nodeShaPattern.MatchString(checkout.Sha) && validNodeFetchRef(checkout.Fetch)
+	default:
+		return false
+	}
 }
 
 func validHubSpawnArgs(args []string) bool {
@@ -73,7 +135,7 @@ func validHubSpawnArgs(args []string) bool {
 	}
 	allowed := map[string]struct{}{
 		"-m": {}, "-w": {}, "-l": {}, "--t": {}, "--effort": {}, "--job": {}, "--owner": {}, "--report": {}, "--role": {}, "--lane": {}, "--parent": {}, "-L": {},
-		"--task": {}, "--parent-job": {}, "--tags": {}, "--urgency": {},
+		"--task": {}, "--parent-job": {}, "--tags": {}, "--urgency": {}, "--builder-family": {}, "--builder-job": {},
 	}
 	for index := 0; index < len(args); index += 2 {
 		pattern := hubSpawnArgValuePattern
@@ -82,11 +144,24 @@ func validHubSpawnArgs(args []string) bool {
 			pattern = hubSpawnTagsValuePattern
 		}
 		// The 200-char cap binds every value, tags included.
-		if _, found := allowed[args[index]]; !found || len(args[index+1]) > 200 || !pattern.MatchString(args[index+1]) {
+		if _, found := allowed[args[index]]; !found || len(args[index+1]) > 200 || !pattern.MatchString(args[index+1]) || !validHubSpawnArgValue(args[index], args[index+1]) {
 			return false
 		}
 	}
 	return true
+}
+
+func validHubSpawnArgValue(flag, value string) bool {
+	switch flag {
+	case "--role":
+		return value == "worker" || value == "builder" || value == "reviewer" || value == "tester"
+	case "--builder-family":
+		return value == "anthropic" || value == "openai" || value == "google" || value == "xai" || value == "deepseek" || value == "meta" || value == "mistral" || value == "other"
+	case "--parent-job", "--builder-job":
+		return regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`).MatchString(value)
+	default:
+		return true
+	}
 }
 
 // parseHubSpawnResult is deliberately separate from parseHubInbound: a spawn
@@ -118,10 +193,10 @@ func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 
 func validHubSpawnResultError(value string) bool {
 	switch value {
-	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "timeout":
+	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "timeout", "brief_doc_unavailable":
 		return true
 	default:
-		return false
+		return strings.HasPrefix(value, "checkout_refused:") && len(value) <= 80 && regexp.MustCompile(`^checkout_refused:[a-z_-]+$`).MatchString(value)
 	}
 }
 
@@ -195,13 +270,14 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 	h.mu.Unlock()
 
 	message := struct {
-		Type        string        `json:"type"`
-		RequestID   string        `json:"request_id"`
-		CWDKey      string        `json:"cwd_key"`
-		Brief       hubSpawnBrief `json:"brief"`
-		Args        []string      `json:"args"`
-		WaitSeconds int           `json:"wait_seconds"`
-	}{Type: "job.spawn", RequestID: body.RequestID, CWDKey: body.CWDKey, Brief: body.Brief, Args: body.Args, WaitSeconds: body.WaitSeconds}
+		Type        string            `json:"type"`
+		RequestID   string            `json:"request_id"`
+		CWDKey      string            `json:"cwd_key"`
+		Brief       hubSpawnBrief     `json:"brief"`
+		Checkout    *hubSpawnCheckout `json:"checkout,omitempty"`
+		Args        []string          `json:"args"`
+		WaitSeconds int               `json:"wait_seconds"`
+	}{Type: "job.spawn", RequestID: body.RequestID, CWDKey: body.CWDKey, Brief: body.Brief, Checkout: body.Checkout, Args: body.Args, WaitSeconds: body.WaitSeconds}
 	if err := agent.writeJSON(message); err != nil {
 		h.mu.Lock()
 		delete(h.spawnRecords, body.RequestID)

@@ -244,6 +244,13 @@ func TestT14SpawnHTTPAC2Validation(t *testing.T) {
 		{"machine", func(body map[string]any) { body["machine"] = "Machine A" }},
 		{"cwd key", func(body map[string]any) { body["cwd_key"] = "repo/a" }},
 		{"empty inline", func(body map[string]any) { body["brief"] = map[string]any{"inline": ""} }},
+		{"both brief forms", func(body map[string]any) {
+			body["brief"] = map[string]any{"inline": "text", "doc": "briefs/job/brief.md"}
+		}},
+		{"both fields even if inline empty", func(body map[string]any) {
+			body["brief"] = map[string]any{"inline": "", "doc": "briefs/job/brief.md"}
+		}},
+		{"neither brief form", func(body map[string]any) { body["brief"] = map[string]any{} }},
 		{"wait zero", func(body map[string]any) { body["wait_seconds"] = 0 }},
 		{"wait over", func(body map[string]any) { body["wait_seconds"] = 301 }},
 		{"unknown flag", func(body map[string]any) { body["args"] = []string{"--job-dup-ok", "yes"} }},
@@ -263,6 +270,137 @@ func TestT14SpawnHTTPAC2Validation(t *testing.T) {
 				t.Fatalf("status=%d body=%s", status, response)
 			}
 		})
+	}
+}
+
+func TestPW6SpawnDocCheckoutRoundTrip(t *testing.T) {
+	hub, server := t14Hub(t)
+	node := t14Node(t, hub, server, true)
+	body := t14SpawnBody(t14RequestID(90))
+	body["brief"] = map[string]any{"doc": "briefs/job-90/brief.md"}
+	body["checkout"] = map[string]any{"origin": "https://github.com/acme/repo.git", "mode": "branch", "branch": "feature/pw6", "dir": "repo-job-90"}
+	response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawn", t14OperatorToken, body)
+	message := t14ReadNodeSpawn(t, node)
+	if message.BriefDoc != "briefs/job-90/brief.md" || message.BriefInline != "" || message.Checkout == nil || message.Checkout.Branch != "feature/pw6" {
+		t.Fatalf("spawn message=%+v", message)
+	}
+	t14WriteSpawnResult(t, node, message.RequestID, 0, "job-90", "pane-90", "ok", "")
+	result := t14Result(t, response)
+	if result.status != http.StatusOK || t14DecodeSpawn(t, result.body).RC != 0 {
+		t.Fatalf("response=%d %s", result.status, result.body)
+	}
+}
+
+func TestPW6InlineSpawnWireGolden(t *testing.T) {
+	hub, server := t14Hub(t)
+	node := t14Node(t, hub, server, true)
+	completed := time.Date(2026, 10, 31, 1, 2, 3, 0, time.UTC)
+	hub.now = func() time.Time { return completed }
+	requestBody := `{"request_id":"00000000-0000-4000-8000-000000000094","machine":"machine-a","cwd_key":"repo-a","brief":{"inline":"implement the scoped change"},"args":["-m","codex-terra","-w","worker","-l","label-a","--t","T1","--job","job-a","--owner","lane-a"],"wait_seconds":1}`
+	posted := make(chan t14HTTPResult, 1)
+	go func() {
+		req, _ := http.NewRequest(http.MethodPost, server.URL+"/v1/spawn", strings.NewReader(requestBody))
+		req.Header.Set(hubAuthorizationHeader, "Bearer "+t14OperatorToken)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			posted <- t14HTTPResult{status: -1, body: []byte(err.Error())}
+			return
+		}
+		defer resp.Body.Close()
+		data, _ := io.ReadAll(resp.Body)
+		posted <- t14HTTPResult{status: resp.StatusCode, body: data}
+	}()
+	_, raw, err := node.Read(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantNode := `{"type":"job.spawn","request_id":"00000000-0000-4000-8000-000000000094","cwd_key":"repo-a","brief":{"inline":"implement the scoped change"},"args":["-m","codex-terra","-w","worker","-l","label-a","--t","T1","--job","job-a","--owner","lane-a"],"wait_seconds":1}`
+	if string(raw) != wantNode+"\n" {
+		t.Fatalf("node request bytes=%s want=%s", raw, wantNode)
+	}
+	t14WriteSpawnResult(t, node, t14RequestID(94), 0, "job-a", "pane-a", "tail", "")
+	got := <-posted
+	wantResponse := `{"request_id":"00000000-0000-4000-8000-000000000094","machine":"machine-a","rc":0,"job_id":"job-a","pane":"pane-a","stdout_tail":"tail","completed_at":"2026-10-31T01:02:03Z"}` + "\n"
+	if got.status != http.StatusOK || string(got.body) != wantResponse {
+		t.Fatalf("response status=%d bytes=%s want=%s", got.status, got.body, wantResponse)
+	}
+}
+
+func TestPW6SpawnArgsValidation(t *testing.T) {
+	valid := []string{"--role", "reviewer", "--builder-family", "openai", "--parent-job", "parent-1", "--builder-job", "builder-1"}
+	if !validHubSpawnArgs(valid) {
+		t.Fatal("valid new spawn args rejected")
+	}
+	for _, args := range [][]string{{"--role", "root"}, {"--builder-family", "made-up"}, {"--parent-job", "../secret"}, {"--builder-job", "two words"}, {"--unknown", "value"}} {
+		if validHubSpawnArgs(args) {
+			t.Errorf("invalid args accepted: %q", args)
+		}
+	}
+}
+
+func TestPW6NodeFetchesBriefDocFromHandoffkeep(t *testing.T) {
+	const key = "briefs/job-93/brief.md"
+	hk := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet || r.URL.EscapedPath() != "/v1/documents/briefs/job-93/brief.md" || r.Header.Get("Authorization") != "Bearer node-hk-token" {
+			t.Errorf("handoffkeep request method=%s path=%s", r.Method, r.URL.EscapedPath())
+			http.Error(w, "bad request", http.StatusBadRequest)
+			return
+		}
+		_, _ = io.WriteString(w, `{"key":"briefs/job-93/brief.md","body":"document text from hk"}`)
+	}))
+	defer hk.Close()
+	root := t.TempDir()
+	hkEnv := filepath.Join(root, "hk.env")
+	if err := os.WriteFile(hkEnv, []byte("HANDOFFKEEP_URL="+hk.URL+"\nHANDOFFKEEP_TOKEN=node-hk-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "spawn.json")
+	configText := `{"cwd_map":{"repo-a":"/old/cwd"},"workspace":"worker","herdr_session":"worker","handoffkeep_env":"` + hkEnv + `","enabled":true}`
+	if err := os.WriteFile(config, []byte(configText), 0600); err != nil {
+		t.Fatal(err)
+	}
+	briefPath := filepath.Join(root, "brief")
+	t.Setenv("T14_BRIEF_FILE", briefPath)
+	t14FakeRuntug(t, "cat \"$5\" > \"$T14_BRIEF_FILE\"\nprintf 'OK pane=p job=j\\n'")
+	client := &HubClient{spawnConfigPath: config}
+	result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(93), CWDKey: "repo-a", BriefDoc: key, WaitSeconds: 1})
+	if result.RC != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	if got := string(t14WaitFile(t, briefPath)); got != "document text from hk" {
+		t.Fatalf("fetched brief=%q", got)
+	}
+}
+
+func TestPW6CheckoutRefusalSkipsSpawnAndPreparedCWD(t *testing.T) {
+	root := t.TempDir()
+	config := filepath.Join(root, "spawn.json")
+	if err := os.WriteFile(config, []byte(`{"cwd_map":{"repo-a":"/old/cwd"},"workspace":"worker","herdr_session":"worker","enabled":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	checkout := &hubSpawnCheckout{Origin: "https://github.com/acme/repo.git", Mode: "branch", Branch: "feature/pw6", Dir: "repo-job"}
+	for _, outcome := range []string{nodeOutcomeBusy, nodePrepareBranchElsewhere, nodePrepareShaMissing, nodePrepareOriginMismatch, nodeOutcomeDirty, nodeOutcomeGitFailed, nodeOutcomeGitTooOld, nodeRemoveLocked} {
+		client := &HubClient{spawnConfigPath: config, spawnPrepare: func(context.Context, nodeWorktreePrepareArgs) (any, string) {
+			return nodeWorktreePrepareResult{Outcome: outcome}, ""
+		}}
+		result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(91), CWDKey: "repo-a", BriefInline: "brief", Checkout: checkout, WaitSeconds: 1})
+		if result.RC != 81 || result.Error != "checkout_refused:"+outcome {
+			t.Errorf("outcome=%s result=%+v", outcome, result)
+		}
+	}
+	argsPath := filepath.Join(root, "args")
+	t.Setenv("T14_ARGS_FILE", argsPath)
+	t14FakeRuntug(t, "printf '%s\\000' \"$@\" > \"$T14_ARGS_FILE\"\nprintf 'OK pane=p job=j\\n'")
+	client := &HubClient{spawnConfigPath: config, spawnPrepare: func(context.Context, nodeWorktreePrepareArgs) (any, string) {
+		return nodeWorktreePrepareResult{Outcome: nodePreparePrepared, Worktree: &nodeWorktree{Path: filepath.Join(root, "prepared")}}, ""
+	}}
+	result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(92), CWDKey: "repo-a", BriefInline: "brief", Checkout: checkout, WaitSeconds: 1})
+	if result.RC != 0 {
+		t.Fatalf("result=%+v", result)
+	}
+	got := strings.Split(strings.TrimSuffix(string(t14WaitFile(t, argsPath)), "\x00"), "\x00")
+	if len(got) < 3 || got[1] != "-c" || got[2] != filepath.Join(root, "prepared") {
+		t.Fatalf("argv=%q", got)
 	}
 }
 

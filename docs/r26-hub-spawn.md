@@ -1,8 +1,8 @@
 # R26 hub-directed spawn
 
-This document quotes the T14 contract verbatim. The hub keeps request status
-only in memory, just like presence; it does not persist a brief or execute a
-command itself.
+The hub keeps request status only in memory, just like presence. It forwards
+a document key without fetching or storing brief text; the target node fetches
+the document with its own handoffkeep client.
 
 > A. hub — `POST /v1/spawn` (operator token)
 >
@@ -16,12 +16,16 @@ command itself.
 > ```
 >
 > - 검증: `request_id` uuid, `machine` `^[a-z0-9-]{1,32}$`, `cwd_key`
->   `^[a-z0-9._-]{1,64}$`, `brief.inline` 필수(비어 있으면 400; **v0는
->   inline만** — handoffkeep 문서 키는 후속), `args`는 **runtug 플래그
->   allowlist**만(`-m -w -l --t --effort --job --owner --report --role --lane
->   --parent -L --task --parent-job --tags --urgency`), 각 값
+>   `^[a-z0-9._-]{1,64}$`, inline/doc 중 정확히 하나(빈 값은 400), 선택적 `checkout`은
+>   `worktree.prepare` 문법, `args`는 **runtug 플래그 allowlist**만
+>   (`-m -w -l --t --effort --job --owner --report --role --lane --parent
+>   -L --task --parent-job --builder-family --builder-job --tags --urgency`), 각 값
 >   `^[A-Za-z0-9._:/@-]{1,200}$` 단 `--tags`만 쉼표 목록(최대 16개) 허용
->   (공백·셸 메타문자 거부), `wait_seconds` 1..300.
+>   (공백·셸 메타문자 거부), `--role`, `--builder-family`, `--parent-job`, `--builder-job` 값은 유효성
+>   검사를 거치며, `wait_seconds`는 1..300.
+> - `checkout`은 노드에서 `worktree.prepare`를 먼저 실행한다. 성공하면
+>   준비된 worktree에서 spawn하고, 거부되면 `rc:81` 및 준비 outcome을
+>   반환하며 spawn을 호출하지 않는다.
 > - 처리: 대상 노드가 connected **and** accepting_effective 아니면 503
 >   `{"error":"node_unavailable","state":...}`. `request_id` 중복이면
 >   409 + 기존 결과. 노드에 `job.spawn` 전송 후 `wait_seconds`까지
@@ -36,7 +40,7 @@ command itself.
 > B. 노드 — `job.spawn` 수신
 >
 > - 노드 설정 `~/.config/panewire/spawn.json`:
->   `{"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true}`.
+>   `{"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true,"handoffkeep_env":"/path/to/node-hk.env"}`.
 >   `enabled` 기본 false(파일 부재 = 거부 `spawn_disabled`), `cwd_key` 미등록
 >   = 거부 `cwd_unmapped` — 거부도 `job.spawn.result{rc:2, error}`로 회신.
 > - 실행: 브리프를 `mktemp`(0600)에 쓰고 `env HERDR_SESSION=<s> runtug spawn
@@ -59,14 +63,27 @@ Request:
 ```
 
 - Validation: `request_id` uuid, `machine` `^[a-z0-9-]{1,32}$`, `cwd_key`
-  `^[a-z0-9._-]{1,64}$`, `brief.inline` required (empty is 400; **v0 is
-  inline only** — handoffkeep document keys are follow-up), `args` accepts
-  **only runtug flags** (`-m -w -l --t --effort --job --owner --report --role
-  --lane --parent -L --task --parent-job --tags --urgency`), each value
+  `^[a-z0-9._-]{1,64}$`, exactly one nonempty `brief.inline` or `brief.doc`, optional `checkout`
+  following the `worktree.prepare` grammar, and `args` accepts **only runtug
+  flags** (`-m -w -l --t --effort --job --owner --report --role --lane
+  --parent -L --task --parent-job --builder-family --builder-job --tags
+  --urgency`), each value
   `^[A-Za-z0-9._:/@-]{1,200}$` — except `--tags`, a comma list of up to 16
   entries, all within the 200-char bound — (spaces and shell metacharacters
   rejected),
-  and `wait_seconds` is 1..300.
+  and `wait_seconds` is 1..300. `--role` accepts `worker`, `builder`,
+  `reviewer`, or `tester`; `--builder-family` accepts `anthropic`, `openai`,
+  `google`, `xai`, `deepseek`, `meta`, `mistral`, or `other`; job values use
+  `^[A-Za-z0-9._-]{1,128}$`.
+- `brief.doc` is the hk document key (for example,
+  `briefs/<job>/brief.md`); the node fetches `GET /v1/documents/<key>` with
+  its own handoffkeep credential. Inline callers keep the existing request
+  and response shapes.
+- A `checkout` runs node `worktree.prepare` first. The node spawns in the
+  prepared worktree. It accepts `{origin, mode, branch, sha, fetch, dir}` and
+  follows the same mode-specific rules as `worktree.prepare`. A refusal
+  returns `rc:81` with
+  `error:"checkout_refused:<outcome>"` and does not invoke runtug.
 - Processing: if the target node is not connected **or** not
   `accepting_effective`, return 503
   `{"error":"node_unavailable","state":...}`. A duplicate `request_id`
@@ -92,12 +109,18 @@ Request:
   (`runtug_missing` when none):
 
   ```json
-  {"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true}
+  {"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true,"handoffkeep_env":"/path/to/node-hk.env"}
   ```
 
   `enabled` defaults to false (no file rejects with `spawn_disabled`), and an
   unmapped `cwd_key` rejects with `cwd_unmapped`. Rejections also reply as
-  `job.spawn.result{rc:2, error}`.
+  `job.spawn.result{rc:2, error}`. The optional `handoffkeep_env` path names
+  a mode-0600 env file containing this node’s `HANDOFFKEEP_URL` and
+  `HANDOFFKEEP_TOKEN`; the node uses it to fetch `brief.doc`. The hub never
+  receives the document text.
+- A checkout runs `worktree.prepare` first; on success its returned path is
+  used as spawn `cwd`. Any refusal returns `rc:81` and its outcome without
+  invoking runtug.
 - Execution: write the brief to a `mktemp` file (0600), then execute
   `env HERDR_SESSION=<s> runtug spawn -c <cwd> -p <tmp> --host local -w <workspace> <args...> --override-reason hub-directed`
   as argv (never a shell string). The timeout is `wait_seconds+60`; remove the
@@ -119,4 +142,5 @@ Request:
 
 The injected configuration path is available through `HubClientConfig` for
 tests. The production default is the path above; no normal test reads it.
-`spawn.json` is operator-provisioned and is not deployed by this change.
+`spawn.json` and the node handoffkeep env file are operator-provisioned and
+are not deployed by this change.

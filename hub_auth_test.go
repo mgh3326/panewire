@@ -186,6 +186,26 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 	}
 }
 
+func TestPW6SpawnScopeIsMachineBound(t *testing.T) {
+	_, server := pw2Hub(t, map[string]string{"svc-machine": "spawn@node-a", "svc-no-spawn": "wake@*"}, "", nil)
+	body := `{"request_id":"00000000-0000-4000-8000-000000000095","machine":"node-a","cwd_key":"repo","brief":{"inline":"brief"},"args":[],"wait_seconds":1}`
+	allowed := pw2Caller{"svc-machine", "svc-machine", pw2ServiceToken("svc-machine")}
+	status, _ := allowed.do(t, server, http.MethodPost, "/v1/spawn", body)
+	if status != http.StatusServiceUnavailable {
+		t.Fatalf("matching machine status=%d, want 503 after authorization", status)
+	}
+	foreign := strings.Replace(body, `"machine":"node-a"`, `"machine":"node-b"`, 1)
+	status, response := allowed.do(t, server, http.MethodPost, "/v1/spawn", foreign)
+	if status != http.StatusForbidden || !strings.Contains(response, `"scope_forbidden"`) {
+		t.Fatalf("foreign machine status=%d body=%s", status, response)
+	}
+	noScope := pw2Caller{"svc-no-spawn", "svc-no-spawn", pw2ServiceToken("svc-no-spawn")}
+	status, response = noScope.do(t, server, http.MethodPost, "/v1/spawn", body)
+	if status != http.StatusForbidden || !strings.Contains(response, `"scope_forbidden"`) {
+		t.Fatalf("missing spawn scope status=%d body=%s", status, response)
+	}
+}
+
 // TestHubAuthServiceIsNeverANode covers the node-only surfaces: the agent
 // websocket and the lanes API.
 func TestHubAuthServiceIsNeverANode(t *testing.T) {
