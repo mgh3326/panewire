@@ -56,6 +56,10 @@ func t14WSURL(serverURL, path string) string {
 }
 
 func t14Node(t *testing.T, hub *HubServer, server *httptest.Server, accepting bool) *websocket.Conn {
+	return t14NodeWithSpawnV2(t, hub, server, accepting, true)
+}
+
+func t14NodeWithSpawnV2(t *testing.T, hub *HubServer, server *httptest.Server, accepting, spawnV2 bool) *websocket.Conn {
 	t.Helper()
 	headers := http.Header{}
 	headers.Set(hubMachineIDHeader, "machine-a")
@@ -65,7 +69,11 @@ func t14Node(t *testing.T, hub *HubServer, server *httptest.Server, accepting bo
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = connection.CloseNow() })
-	if err := wsjson.Write(t.Context(), connection, map[string]any{"type": "hello", "machine_id": "machine-a", "version": "t14", "accepting": accepting}); err != nil {
+	hello := map[string]any{"type": "hello", "machine_id": "machine-a", "version": "t14", "accepting": accepting}
+	if spawnV2 {
+		hello["capabilities"] = []string{"spawn_v2"}
+	}
+	if err := wsjson.Write(t.Context(), connection, hello); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(time.Second)
@@ -259,6 +267,9 @@ func TestT14SpawnHTTPAC2Validation(t *testing.T) {
 		{"brief too long", func(body map[string]any) {
 			body["brief"] = map[string]any{"inline": strings.Repeat("x", hubSpawnMaxBriefBytes+1)}
 		}},
+		{"doc traversal segment", func(body map[string]any) { body["brief"] = map[string]any{"doc": "briefs/../private.md"} }},
+		{"doc dot segment", func(body map[string]any) { body["brief"] = map[string]any{"doc": "briefs/./private.md"} }},
+		{"doc empty segment", func(body map[string]any) { body["brief"] = map[string]any{"doc": "briefs//private.md"} }},
 		{"unknown JSON field", func(body map[string]any) { body["extra"] = true }},
 	}
 	for _, test := range cases {
@@ -270,6 +281,92 @@ func TestT14SpawnHTTPAC2Validation(t *testing.T) {
 				t.Fatalf("status=%d body=%s", status, response)
 			}
 		})
+	}
+}
+
+func TestPW6OldNodeRejectsExtendedSpawnWithoutWaiting(t *testing.T) {
+	hub, server := t14Hub(t)
+	_ = t14NodeWithSpawnV2(t, hub, server, true, false)
+	requests := []map[string]any{
+		t14SpawnBody(t14RequestID(95)),
+		t14SpawnBody(t14RequestID(97)),
+	}
+	requests[0]["brief"] = map[string]any{"doc": "briefs/job/brief.md"}
+	requests[1]["checkout"] = map[string]any{"origin": "https://github.com/acme/repo.git", "mode": "branch", "branch": "feature/pw6", "dir": "repo-job"}
+	for _, body := range requests {
+		started := time.Now()
+		status, _, response := t14HTTP(t, http.MethodPost, server.URL+"/v1/spawn", t14OperatorToken, body)
+		if status != http.StatusServiceUnavailable || !bytes.Contains(response, []byte(`"error":"spawn_capability_required"`)) || time.Since(started) > 250*time.Millisecond {
+			t.Fatalf("old node response status=%d elapsed=%s body=%s", status, time.Since(started), response)
+		}
+	}
+}
+
+func TestPW6CheckoutValidationMatchesPrepareFetchModes(t *testing.T) {
+	base := hubSpawnCheckout{Origin: "https://github.com/acme/repo.git", Dir: "repo-job"}
+	branch := base
+	branch.Mode, branch.Branch = "branch", "feature/pw6"
+	if !validHubSpawnCheckout(branch) {
+		t.Fatal("branch prepare grammar rejected: branch fetch is empty and fetches origin itself")
+	}
+	branch.Fetch = "pull/12/head"
+	if validHubSpawnCheckout(branch) {
+		t.Fatal("branch prepare grammar accepted a caller fetch ref")
+	}
+	detached := base
+	detached.Mode, detached.Sha, detached.Fetch = "detached", strings.Repeat("a", 40), "pull/12/head"
+	if !validHubSpawnCheckout(detached) {
+		t.Fatal("detached prepare grammar rejected a valid required fetch ref")
+	}
+	detached.Fetch = ""
+	if validHubSpawnCheckout(detached) {
+		t.Fatal("detached prepare grammar accepted an empty fetch ref")
+	}
+	branch.Dir = "repo"
+	if validHubSpawnCheckout(branch) {
+		t.Fatal("checkout directory equal to clone name was accepted")
+	}
+}
+
+func TestPW6NodeRejectsUnknownCheckoutFields(t *testing.T) {
+	payload := []byte(`{"type":"job.spawn","request_id":"00000000-0000-4000-8000-000000000099","cwd_key":"repo-a","brief":{"inline":"brief"},"checkout":{"origin":"https://github.com/acme/repo.git","mode":"branch","branch":"feature/pw6","dir":"repo-job","sha_typo":"0000000000000000000000000000000000000000"},"args":["-m","model-a"],"wait_seconds":1}`)
+	if _, ok := parseHubOutbound(payload); ok {
+		t.Fatal("node accepted an unknown checkout key")
+	}
+}
+
+func TestPW6DocKeysStayUnderNodePrefix(t *testing.T) {
+	root := t.TempDir()
+	config := filepath.Join(root, "spawn.json")
+	if err := os.WriteFile(config, []byte(`{"cwd_map":{"repo-a":"/old/cwd"},"workspace":"worker","herdr_session":"worker","enabled":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{spawnConfigPath: config}
+	for _, key := range []string{"secrets/brief.md", "other/brief.md"} {
+		result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(96), CWDKey: "repo-a", BriefDoc: key, WaitSeconds: 1})
+		if result.Error != "brief_doc_unavailable" {
+			t.Errorf("key %q result=%+v", key, result)
+		}
+	}
+}
+
+func TestPW6CheckoutDeadlineCoversPreparation(t *testing.T) {
+	root := t.TempDir()
+	config := filepath.Join(root, "spawn.json")
+	if err := os.WriteFile(config, []byte(`{"cwd_map":{"repo-a":"/old/cwd"},"workspace":"worker","herdr_session":"worker","enabled":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	prepareSawDeadline := false
+	client := &HubClient{spawnConfigPath: config, spawnTimeoutExtra: -990 * time.Millisecond, spawnPrepare: func(ctx context.Context, _ nodeWorktreePrepareArgs) (any, string) {
+		_, prepareSawDeadline = ctx.Deadline()
+		<-ctx.Done()
+		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
+	}}
+	checkout := &hubSpawnCheckout{Origin: "https://github.com/acme/repo.git", Mode: "branch", Branch: "feature/pw6", Dir: "repo-job"}
+	started := time.Now()
+	result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(98), CWDKey: "repo-a", BriefInline: "brief", Checkout: checkout, WaitSeconds: 1})
+	if !prepareSawDeadline || time.Since(started) > 500*time.Millisecond || result.Error != "checkout_refused:"+nodeOutcomeGitFailed {
+		t.Fatalf("prepare deadline=%v elapsed=%s result=%+v", prepareSawDeadline, time.Since(started), result)
 	}
 }
 
@@ -346,12 +443,15 @@ func TestPW6NodeFetchesBriefDocFromHandoffkeep(t *testing.T) {
 			http.Error(w, "bad request", http.StatusBadRequest)
 			return
 		}
+		if r.URL.RawQuery != "" || r.URL.RawPath != "" {
+			t.Errorf("inherited URL path/query was not cleared: raw_path=%q query=%q", r.URL.RawPath, r.URL.RawQuery)
+		}
 		_, _ = io.WriteString(w, `{"key":"briefs/job-93/brief.md","body":"document text from hk"}`)
 	}))
 	defer hk.Close()
 	root := t.TempDir()
 	hkEnv := filepath.Join(root, "hk.env")
-	if err := os.WriteFile(hkEnv, []byte("HANDOFFKEEP_URL="+hk.URL+"\nHANDOFFKEEP_TOKEN=node-hk-token\n"), 0600); err != nil {
+	if err := os.WriteFile(hkEnv, []byte("HANDOFFKEEP_URL="+hk.URL+"?inherited=query\nHANDOFFKEEP_TOKEN=node-hk-token\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	config := filepath.Join(root, "spawn.json")

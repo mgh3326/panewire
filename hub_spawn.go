@@ -112,11 +112,24 @@ func validHubSpawnRequest(request hubSpawnRequest) bool {
 }
 
 func validHubSpawnDocKey(key string) bool {
-	return len(key) > 0 && len(key) <= 200 && regexp.MustCompile(`^[A-Za-z0-9._/-]+$`).MatchString(key) && !strings.Contains(key, "..") && !strings.HasPrefix(key, "/") && !strings.HasSuffix(key, "/")
+	if len(key) == 0 || len(key) > 200 || !regexp.MustCompile(`^[A-Za-z0-9._/-]+$`).MatchString(key) || strings.HasPrefix(key, "/") || strings.HasSuffix(key, "/") {
+		return false
+	}
+	for _, segment := range strings.Split(key, "/") {
+		if segment == "" || segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
 }
 
 func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
-	if _, ok := nodeOriginRepo(checkout.Origin); !ok || !validNodeJobName(checkout.Dir) {
+	ownerRepo, ok := nodeOriginRepo(checkout.Origin)
+	if !ok || !validNodeJobName(checkout.Dir) {
+		return false
+	}
+	repo := ownerRepo[strings.IndexByte(ownerRepo, '/')+1:]
+	if strings.EqualFold(checkout.Dir, repo) {
 		return false
 	}
 	switch checkout.Mode {
@@ -259,6 +272,11 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	record := h.nodes[body.Machine]
+	if record != nil && record.agent != nil && record.state == "connected" && (body.Checkout != nil || body.Brief.Doc != "") && !record.capabilities["spawn_v2"] {
+		h.mu.Unlock()
+		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "spawn_capability_required", "capability": "spawn_v2"})
+		return
+	}
 	if record == nil || record.agent == nil || record.state != "connected" || !h.acceptingEffectiveLocked(body.Machine, record.accepting) {
 		h.mu.Unlock()
 		writeJSON(writer, http.StatusServiceUnavailable, h.spawnUnavailableResponse(body.Machine))

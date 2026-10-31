@@ -1441,11 +1441,12 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
 	peer := &hubClientConnection{connection: connection}
 	if err := peer.write(ctx, struct {
-		Type      string `json:"type"`
-		MachineID string `json:"machine_id"`
-		Version   string `json:"version"`
-		Accepting bool   `json:"accepting,omitempty"`
-	}{Type: "hello", MachineID: client.machineID, Version: client.version, Accepting: client.accepting}); err != nil {
+		Type         string   `json:"type"`
+		MachineID    string   `json:"machine_id"`
+		Version      string   `json:"version"`
+		Accepting    bool     `json:"accepting,omitempty"`
+		Capabilities []string `json:"capabilities,omitempty"`
+	}{Type: "hello", MachineID: client.machineID, Version: client.version, Accepting: client.accepting, Capabilities: []string{"spawn_v2"}}); err != nil {
 		return nil, err
 	}
 	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
@@ -2338,7 +2339,7 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		}
 		if raw, ok := fields["checkout"]; ok {
 			var checkout hubSpawnCheckout
-			if json.Unmarshal(raw, &checkout) != nil || !validHubSpawnCheckout(checkout) {
+			if !decodeNodeCommandStrict(raw, &checkout) || !validHubSpawnCheckout(checkout) {
 				return hubOutboundMessage{}, false
 			}
 			message.Checkout = &checkout

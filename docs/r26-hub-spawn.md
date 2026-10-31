@@ -40,7 +40,7 @@ the document with its own handoffkeep client.
 > B. 노드 — `job.spawn` 수신
 >
 > - 노드 설정 `~/.config/panewire/spawn.json`:
->   `{"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true,"handoffkeep_env":"/path/to/node-hk.env"}`.
+>   `{"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true,"work_root":"/abs/work","handoffkeep_env":"/path/to/node-hk.env","brief_doc_prefix":"briefs/"}`.
 >   `enabled` 기본 false(파일 부재 = 거부 `spawn_disabled`), `cwd_key` 미등록
 >   = 거부 `cwd_unmapped` — 거부도 `job.spawn.result{rc:2, error}`로 회신.
 > - 실행: 브리프를 `mktemp`(0600)에 쓰고 `env HERDR_SESSION=<s> runtug spawn
@@ -77,8 +77,9 @@ Request:
   `^[A-Za-z0-9._-]{1,128}$`.
 - `brief.doc` is the hk document key (for example,
   `briefs/<job>/brief.md`); the node fetches `GET /v1/documents/<key>` with
-  its own handoffkeep credential. Inline callers keep the existing request
-  and response shapes.
+  its own handoffkeep credential. Keys must be under the node's configured
+  `brief_doc_prefix` (default `briefs/`), and empty, `.` and `..` path segments
+  are refused. Inline callers keep the existing request and response shapes.
 - A `checkout` runs node `worktree.prepare` first. The node spawns in the
   prepared worktree. It accepts `{origin, mode, branch, sha, fetch, dir}` and
   follows the same mode-specific rules as `worktree.prepare`. A refusal
@@ -89,6 +90,9 @@ Request:
   `{"error":"node_unavailable","state":...}`. A duplicate `request_id`
   returns 409 with its existing result. Send `job.spawn` to the node and wait
   up to `wait_seconds` for `job.spawn.result`.
+- Nodes advertise `spawn_v2` in their hello. Requests with `checkout` or
+  `brief.doc` to a connected node without that capability return 503 with
+  `error:"spawn_capability_required"` immediately.
 - Response: 200
   `{"request_id","machine","rc":0,"job_id":"…","pane":"…","stdout_tail":"<≤4KiB>","completed_at"}`.
   If the node has not replied, return 504
@@ -109,9 +113,13 @@ Request:
   (`runtug_missing` when none):
 
   ```json
-  {"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true,"handoffkeep_env":"/path/to/node-hk.env"}
+  {"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true,"work_root":"/abs/work","handoffkeep_env":"/path/to/node-hk.env","brief_doc_prefix":"briefs/"}
   ```
 
+  `work_root` is required for checkouts. `brief_doc_prefix` controls which hk
+  document keys the node may fetch; it defaults to `briefs/`. Nodes advertise
+  `spawn_v2` in hello when they support checkout and document briefs. The hub
+  refuses those requests to older nodes without waiting for a timeout.
   `enabled` defaults to false (no file rejects with `spawn_disabled`), and an
   unmapped `cwd_key` rejects with `cwd_unmapped`. Rejections also reply as
   `job.spawn.result{rc:2, error}`. The optional `handoffkeep_env` path names

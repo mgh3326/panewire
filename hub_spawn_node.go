@@ -27,6 +27,7 @@ type hubSpawnConfig struct {
 	// WorkRoot is the node's git work root for worktree.prepare: clones live
 	// at <work_root>/<repo>. Node-local only; callers never supply it.
 	WorkRoot       string `json:"work_root,omitempty"`
+	BriefDocPrefix string `json:"brief_doc_prefix,omitempty"`
 	HandoffkeepEnv string `json:"handoffkeep_env,omitempty"`
 	Enabled        bool   `json:"enabled"`
 }
@@ -116,12 +117,18 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.RC, result.Error = 2, "cwd_unmapped"
 		return result
 	}
+	extra := client.spawnTimeoutExtra
+	if extra == 0 {
+		extra = 60 * time.Second
+	}
+	runContext, cancel := context.WithTimeout(parent, time.Duration(message.WaitSeconds)*time.Second+extra)
+	defer cancel()
 	if message.Checkout != nil {
 		prepare := client.spawnPrepare
 		if prepare == nil {
 			prepare = client.nodeWorktreePrepare
 		}
-		prepared, code := prepare(parent, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir})
+		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir})
 		if code != "" {
 			result.RC, result.Error = 81, "checkout_refused:"+code
 			return result
@@ -161,7 +168,15 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	}
 	briefText := message.BriefInline
 	if message.BriefDoc != "" {
-		briefText, err = client.fetchHubSpawnBrief(parent, config.HandoffkeepEnv, message.BriefDoc)
+		prefix := config.BriefDocPrefix
+		if prefix == "" {
+			prefix = "briefs/"
+		}
+		if !strings.HasSuffix(prefix, "/") || !validHubSpawnDocKey(strings.TrimSuffix(prefix, "/")) || !strings.HasPrefix(message.BriefDoc, prefix) {
+			result.RC, result.Error = 2, "brief_doc_unavailable"
+			return result
+		}
+		briefText, err = client.fetchHubSpawnBrief(runContext, config.HandoffkeepEnv, message.BriefDoc)
 		if err != nil || briefText == "" || !utf8.ValidString(briefText) || len([]byte(briefText)) > hubSpawnMaxBriefBytes {
 			_ = temporary.Close()
 			result.RC, result.Error = 2, "brief_doc_unavailable"
@@ -175,12 +190,6 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		return result
 	}
 
-	extra := client.spawnTimeoutExtra
-	if extra == 0 {
-		extra = 60 * time.Second
-	}
-	runContext, cancel := context.WithTimeout(parent, time.Duration(message.WaitSeconds)*time.Second+extra)
-	defer cancel()
 	output, runErr := runHubSpawnCommand(runContext, runtugPath, cwd, temporaryName, config.Workspace, config.HERDRSession, message.Args)
 	result.StdoutTail = output.tailString()
 	result.Pane, result.JobID = output.pane, output.jobID
@@ -212,7 +221,12 @@ func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key st
 	if err != nil {
 		return "", errors.New("brief unavailable")
 	}
-	base.Path = strings.TrimSuffix(base.Path, "/") + "/v1/documents/" + key
+	base.Path = "/v1/documents/" + key
+	base.RawPath = ""
+	base.RawQuery = ""
+	base.ForceQuery = false
+	base.Fragment = ""
+	base.RawFragment = ""
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
 	if err != nil {
 		return "", errors.New("brief unavailable")
