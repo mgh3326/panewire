@@ -749,6 +749,12 @@ func TestNodeCloneRemoteRepoAcceptsSSHForms(t *testing.T) {
 	if _, ok := nodeOriginRepo("git@example.invalid:fleet/repo.git"); ok {
 		t.Fatal("caller origin with userinfo must stay refused")
 	}
+	// file:// takes the last two segments, like a plain absolute path.
+	for _, raw := range []string{"file:///srv/fleet/repo", "/srv/fleet/repo"} {
+		if got, ok := nodeOriginRepo(raw); !ok || got != "fleet/repo" {
+			t.Fatalf("%s: got %q %v", raw, got, ok)
+		}
+	}
 	// A query or fragment could carry a credential into the clone's config.
 	for _, raw := range []string{":fleet/repo", "https://example.invalid/fleet/repo.git?token=x", "https://example.invalid/fleet/repo.git?", "https://example.invalid/fleet/repo.git#x"} {
 		if _, ok := nodeOriginRepo(raw); ok {

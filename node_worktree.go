@@ -175,6 +175,11 @@ func nodeOriginRepo(raw string) (string, bool) {
 			return "", false
 		}
 		seg := nodeOriginPathSegments(v.Path)
+		// A file:// origin is a local path: same last-two rule as an absolute
+		// path, so a clone made through file:// matches the plain-path origin.
+		if v.Scheme == "file" && len(seg) >= 2 {
+			seg = seg[len(seg)-2:]
+		}
 		if len(seg) != 2 {
 			return "", false
 		}
