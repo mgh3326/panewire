@@ -325,6 +325,7 @@ func TestNodeWorktreePrepareArgsValidation(t *testing.T) {
 		"mode":         {"origin": fixture.origin, "mode": "weird", "branch": "", "sha": "", "fetch": "", "dir": "repo.job"},
 		"branch-fetch": {"origin": fixture.origin, "mode": "branch", "branch": "feat", "sha": "", "fetch": "refs/heads/feat", "dir": "repo.job"},
 		"bad-branch":   {"origin": fixture.origin, "mode": "branch", "branch": "feat..x", "sha": "", "fetch": "", "dir": "repo.job"},
+		"dir-is-clone": {"origin": fixture.origin, "mode": "branch", "branch": "feat", "sha": "", "fetch": "", "dir": "repo"},
 		"origin-dot":   {"origin": "https://example.invalid/fleet/../repo.git", "mode": "detached", "branch": "", "sha": fixture.feat, "fetch": "pull/1/head", "dir": "repo.job"},
 		"origin-path":  {"origin": "/srv/fleet/./repo", "mode": "detached", "branch": "", "sha": fixture.feat, "fetch": "pull/1/head", "dir": "repo.job"},
 	}
@@ -744,6 +745,17 @@ func TestNodeGitOpLockPathCanonical(t *testing.T) {
 	// remove names it through git's resolved common dir parent.
 	if a, b := nodeGitOpLockPath(filepath.Join(link, "repo")), nodeGitOpLockPath(nodeResolvedPath(clone)); a != b {
 		t.Fatalf("lock paths differ: %s vs %s", a, b)
+	}
+	// A clone that is itself a symlink is named by its target from both sides.
+	target := filepath.Join(t.TempDir(), "repo-real")
+	if err := os.MkdirAll(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(real, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	if a, b := nodeGitOpLockPath(filepath.Join(link, "linked")), nodeGitOpLockPath(nodeResolvedPath(target)); a != b {
+		t.Fatalf("symlinked clone lock paths differ: %s vs %s", a, b)
 	}
 	// Before the clone exists, the root is still resolved.
 	if a, b := nodeGitOpLockPath(filepath.Join(link, "fresh")), filepath.Join(nodeResolvedPath(real), "fresh")+".git-op.lock"; a != b {

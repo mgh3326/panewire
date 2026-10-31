@@ -360,6 +360,10 @@ func nodeListWorktrees(ctx context.Context, git relayCommandRunner, main string)
 // before the clone does), so prepare and remove on one clone always take
 // one file even when the work root traverses a symlink.
 func nodeGitOpLockPath(clone string) string {
+	if resolved, err := filepath.EvalSymlinks(clone); err == nil {
+		// An existing clone, itself possibly a symlink, is named by its target.
+		return filepath.Clean(resolved) + ".git-op.lock"
+	}
 	return filepath.Join(nodeResolvedPath(filepath.Dir(clone)), filepath.Base(clone)) + ".git-op.lock"
 }
 
@@ -480,6 +484,10 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	}
 	repo := ownerRepo[strings.IndexByte(ownerRepo, '/')+1:]
 	clone := filepath.Join(workRoot, repo)
+	if strings.EqualFold(args.Dir, repo) {
+		// The job worktree may never be the clone's own main worktree.
+		return nil, "invalid_args"
+	}
 	wait := client.nodeGitOpWait()
 	release, err := acquireNodeGitOpLock(ctx, nodeGitOpLockPath(clone), wait)
 	if err != nil {
