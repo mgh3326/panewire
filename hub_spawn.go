@@ -209,7 +209,7 @@ func validHubSpawnResultError(value string) bool {
 	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "timeout", "brief_doc_unavailable":
 		return true
 	default:
-		return strings.HasPrefix(value, "checkout_refused:") && len(value) <= 80 && regexp.MustCompile(`^checkout_refused:[a-z_-]+$`).MatchString(value)
+		return strings.HasPrefix(value, "checkout_refused:") && len(value) <= 80 && regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]+$`).MatchString(value)
 	}
 }
 

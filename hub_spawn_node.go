@@ -124,6 +124,10 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		if prefix == "" {
 			prefix = "briefs/"
 		}
+		// "briefs" and "briefs/" name the same prefix.
+		if !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
 		if !strings.HasSuffix(prefix, "/") || !validHubSpawnDocKey(strings.TrimSuffix(prefix, "/")) || !strings.HasPrefix(message.BriefDoc, prefix) {
 			result.RC, result.Error = 2, "brief_doc_unavailable"
 			return result

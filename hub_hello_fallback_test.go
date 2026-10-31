@@ -19,7 +19,8 @@ import (
 // unregistered node gets no pong — which is exactly how the real parser and
 // touch() behave.
 type helloFallbackHub struct {
-	strict bool
+	strict    bool
+	pongDelay time.Duration
 
 	mu         sync.Mutex
 	hellos     []map[string]any
@@ -52,6 +53,9 @@ func (hub *helloFallbackHub) serve(t *testing.T) *httptest.Server {
 				registered := hub.registered
 				hub.mu.Unlock()
 				if registered {
+					if hub.pongDelay > 0 {
+						<-time.After(hub.pongDelay)
+					}
 					_ = wsjson.Write(request.Context(), connection, map[string]any{"type": "pong"})
 				}
 			}
@@ -103,8 +107,10 @@ func TestHelloFallbackOldHubRegistersWithoutCapabilities(t *testing.T) {
 		return registered
 	})
 	hellos, _ := hub.snapshot()
-	if len(hellos) != 2 {
-		t.Fatalf("want one hello with capabilities and one fallback, got %d: %v", len(hellos), hellos)
+	// The pong to the fallback makes the node offer capabilities once more;
+	// the old hub drops that hello and keeps its record.
+	if len(hellos) < 2 || len(hellos) > 3 || (len(hellos) == 3 && !helloHasSpawnV2(hellos[2])) {
+		t.Fatalf("want a capabilities hello, one fallback and at most one capable retry, got %d: %v", len(hellos), hellos)
 	}
 	if !helloHasSpawnV2(hellos[0]) {
 		t.Fatalf("first hello must advertise spawn_v2: %v", hellos[0])
@@ -168,5 +174,22 @@ func TestHelloFallbackRealHubKeepsCapabilities(t *testing.T) {
 	hub.mu.Unlock()
 	if !stillCapable {
 		t.Fatal("a later fallback hello replaced the registered capabilities")
+	}
+}
+
+// A capable hub whose first pong is merely late must not be left with the
+// capability-free record: once the pong arrives, the node offers spawn_v2
+// again and the hub's last hello carries it.
+func TestHelloFallbackLatePongRestoresCapabilities(t *testing.T) {
+	hub := &helloFallbackHub{pongDelay: 300 * time.Millisecond}
+	runHelloFallbackNode(t, hub.serve(t), 100*time.Millisecond)
+
+	eventually(t, 5*time.Second, "node re-sent the capable hello", func() bool {
+		hellos, _ := hub.snapshot()
+		return len(hellos) >= 3
+	})
+	hellos, _ := hub.snapshot()
+	if _, present := hellos[1]["capabilities"]; present || !helloHasSpawnV2(hellos[0]) || !helloHasSpawnV2(hellos[len(hellos)-1]) {
+		t.Fatalf("want capable, fallback, then capable again: %v", hellos)
 	}
 }

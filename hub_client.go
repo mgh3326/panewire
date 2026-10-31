@@ -1580,7 +1580,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	defer ticker.Stop()
 	helloAck := time.NewTimer(client.helloAckTimeoutOrDefault())
 	defer helloAck.Stop()
-	helloRetried := false
+	helloRetried, acked, capsResent := false, false, false
 	prefer := time.NewTicker(client.preferRetry)
 	defer prefer.Stop()
 	type preferenceResult struct {
@@ -1600,8 +1600,23 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			return nil, err
 		case <-registered:
 			// Any pong proves the hub registered this node; stop waiting.
+			acked = true
 			helloAck.Stop()
+			if helloRetried && !capsResent {
+				// The pong may answer the first hello, merely late: the
+				// capability-free hello then replaced a capable record. Send
+				// the full hello once more; a hub that rejects capabilities
+				// drops it and keeps the record it already has.
+				capsResent = true
+				if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+					return nil, err
+				}
+			}
 		case <-helloAck.C:
+			if acked {
+				// The timer fired as the pong arrived; the hub registered us.
+				continue
+			}
 			if helloRetried {
 				// The capability-free hello went unanswered too, so the
 				// problem is not the capabilities field. Keep the session and
