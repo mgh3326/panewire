@@ -182,6 +182,7 @@ refused the same way. A missing clone is created with `git clone <origin>`.
 | `sha-missing` | The fetched ref does not resolve to `sha`, or the commit is not in the clone after fetching. |
 | `origin-mismatch` | The existing clone tracks a different owner/repo. |
 | `dirty` | The existing worktree at `dir` has uncommitted or untracked files. |
+| `locked` | The existing worktree at `dir` is locked (`git worktree lock`); it is never reused. |
 | `git-failed` | A git step failed. |
 | `git_too_old` | The node's git is older than 2.31, the floor `worktree.inspect` documents. |
 
@@ -201,7 +202,7 @@ worktree under the per-clone lock, then removes it only when all hold: the
 resolved worktree path and common git dir are under the node's configured
 work root, it appears in `git worktree list`, is not locked, is not
 detached, is clean, every ignored file matches `regenerable`, the branch is
-merged into `origin/<base>` or fully pushed (both judged after a
+merged into `origin/<base>` or fully pushed to `origin/<branch>` (both judged after a
 `git fetch --prune origin`, whose failure answers `git-failed`; a local `base` ref is never proof, and a
 `base` equal to the branch never counts), and — re-read immediately before
 removal — no pane is live in it. It then runs `git worktree remove` and

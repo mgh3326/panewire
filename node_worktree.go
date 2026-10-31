@@ -463,13 +463,10 @@ func nodeBranchReleased(ctx context.Context, git relayCommandRunner, main, branc
 			return true
 		}
 	}
-	for _, ref := range []string{branch + "@{upstream}", "origin/" + branch} {
-		out, err := git(ctx, "-C", main, "rev-list", "--count", "--left-right", branch+"..."+ref)
-		if err == nil && strings.TrimSpace(strings.SplitN(string(out), "\t", 2)[0]) == "0" {
-			return true
-		}
-	}
-	return false
+	// Pushed means origin has it: only the freshly fetched origin/<branch>
+	// counts, never an upstream that is local or on another remote.
+	out, err := git(ctx, "-C", main, "rev-list", "--count", "--left-right", branch+"...refs/remotes/origin/"+branch)
+	return err == nil && strings.TrimSpace(strings.SplitN(string(out), "\t", 2)[0]) == "0"
 }
 
 func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorktreePrepareArgs) (any, string) {
@@ -495,6 +492,10 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	if strings.EqualFold(args.Dir, repo) {
 		// The job worktree may never be the clone's own main worktree.
 		return nil, "invalid_args"
+	}
+	if _, err := os.Stat(clone); err == nil && !nodePathWithin(workRoot, clone) {
+		// Refuse before the lock path resolves beside a target outside the root.
+		return nodeWorktreePrepareResult{Outcome: nodePrepareOriginMismatch}, ""
 	}
 	wait := client.nodeGitOpWait()
 	release, err := acquireNodeGitOpLock(ctx, nodeGitOpLockPath(clone), wait)
@@ -576,7 +577,7 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 	}
 	if atDir != nil {
 		if atDir.Locked {
-			return nodeOutcomeDirty
+			return nodeRemoveLocked
 		}
 		if atDir.Branch != args.Branch {
 			return nodePrepareBranchElsewhere
@@ -657,7 +658,7 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayComma
 	}
 	if atDir != nil {
 		if atDir.Locked {
-			return nodeOutcomeDirty
+			return nodeRemoveLocked
 		}
 		head, err := nodeGitHead(ctx, git, dir)
 		if err != nil {
