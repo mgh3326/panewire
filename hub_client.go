@@ -75,6 +75,7 @@ type HubClientConfig struct {
 	// always uses the fixed broadcast destination below.
 	failoverWakeDestination string
 	burstPoweroff           func(context.Context) error // fixture seam; production is fixed sudo -n poweroff.
+	helloAckTimeout         time.Duration               // fixture seam; zero means defaultHubHelloAckTimeout.
 }
 
 // HubDaemonConfig keeps the optional hub process separate from the local
@@ -116,6 +117,7 @@ type HubClient struct {
 	burstWakeMAC         net.HardwareAddr
 	burstPoweroffAllowed bool
 	burstPoweroff        func(context.Context) error
+	helloAckTimeout      time.Duration
 	burstMu              sync.Mutex
 	burstSeen            map[string]time.Time
 	wakeTargets          map[string]NodeWakeTarget
@@ -155,6 +157,7 @@ type HubClient struct {
 	sessionMu         sync.Mutex
 	spawnConfigPath   string
 	spawnMu           sync.Mutex
+	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
 	spawnSeenMu       sync.Mutex
 	spawnSeen         map[string]struct{}
 	spawnTimeoutExtra time.Duration // fixture seam; production is 60 seconds.
@@ -285,10 +288,13 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 	if config.burstPoweroff == nil {
 		config.burstPoweroff = executeHubBurstPoweroff
 	}
+	if config.helloAckTimeout <= 0 {
+		config.helloAckTimeout = defaultHubHelloAckTimeout
+	}
 	return &HubClient{
 		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnSeen: make(map[string]struct{}), spawnTimeoutExtra: 60 * time.Second,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
-		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, burstSeen: make(map[string]time.Time),
+		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, helloAckTimeout: config.helloAckTimeout, burstSeen: make(map[string]time.Time),
 		wakeTargets: wakeTargets, wakeSeen: make(map[string]time.Time),
 		r19a:   newR19aClientState(config),
 		checks: cloneHubChecks(config.Checks), execute: config.Execute,
@@ -521,6 +527,8 @@ type hubOutboundMessage struct {
 	RequestID       string
 	CWDKey          string
 	BriefInline     string
+	BriefDoc        string
+	Checkout        *hubSpawnCheckout
 	Args            []string
 	WaitSeconds     int
 	CommandOp       string
@@ -1431,18 +1439,50 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 	}
 }
 
+// defaultHubHelloAckTimeout bounds how long a node waits for the hub to
+// answer the registration probe before it retries its hello without
+// capabilities.
+const defaultHubHelloAckTimeout = 5 * time.Second
+
+// hubSpawnCapabilities is what an upgraded node advertises in hello.
+var hubSpawnCapabilities = []string{"spawn_v2"}
+
+func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
+	if client.helloAckTimeout > 0 {
+		return client.helloAckTimeout
+	}
+	return defaultHubHelloAckTimeout
+}
+
+// writeHello sends the node hello followed by a ping. The ping is the
+// registration probe: the hub answers it only for a node whose hello it
+// accepted, so the pong is the hello's acknowledgement and an accepting hub
+// costs no extra wait. Capabilities are omitted from the wire when empty.
+func (client *HubClient) writeHello(ctx context.Context, peer *hubClientConnection, capabilities []string) error {
+	if err := peer.write(ctx, struct {
+		Type         string   `json:"type"`
+		MachineID    string   `json:"machine_id"`
+		Version      string   `json:"version"`
+		Accepting    bool     `json:"accepting,omitempty"`
+		Capabilities []string `json:"capabilities,omitempty"`
+	}{Type: "hello", MachineID: client.machineID, Version: client.version, Accepting: client.accepting, Capabilities: capabilities}); err != nil {
+		return err
+	}
+	return peer.write(ctx, hubOutbound{Type: "ping"})
+}
+
 // serveConnection returns a non-nil connection only when the caller should
 // continue the session on that already-open preferred endpoint; the superseded
 // connection has been closed by then.
 func (client *HubClient) serveConnection(ctx context.Context, connection *websocket.Conn) (*websocket.Conn, error) {
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
 	peer := &hubClientConnection{connection: connection}
-	if err := peer.write(ctx, struct {
-		Type      string `json:"type"`
-		MachineID string `json:"machine_id"`
-		Version   string `json:"version"`
-		Accepting bool   `json:"accepting,omitempty"`
-	}{Type: "hello", MachineID: client.machineID, Version: client.version, Accepting: client.accepting}); err != nil {
+	// The hello carries spawn_v2, and the ping that follows it is the
+	// registration probe: a hub only answers a ping from a registered node. A hub
+	// that does not know the capabilities field drops the whole hello (see
+	// docs/r26-hub-spawn.md "Rollout order and rollback"), so the hello ack timer below re-sends it
+	// without them rather than leaving this node off the fleet.
+	if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
 		return nil, err
 	}
 	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
@@ -1454,6 +1494,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 		return nil, err
 	}
 	readErrors := make(chan error, 1)
+	registered := make(chan struct{}, 1)
 	go func() {
 		for {
 			messageType, payload, err := connection.Read(ctx)
@@ -1479,6 +1520,11 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				continue
 			}
 			switch message.Type {
+			case "pong":
+				select {
+				case registered <- struct{}{}:
+				default:
+				}
 			case "ping":
 				if err := peer.write(ctx, hubOutbound{Type: "pong"}); err != nil {
 					select {
@@ -1532,6 +1578,9 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	}()
 	ticker := time.NewTicker(client.pingInterval)
 	defer ticker.Stop()
+	helloAck := time.NewTimer(client.helloAckTimeoutOrDefault())
+	defer helloAck.Stop()
+	helloRetried, acked, capsResent := false, false, false
 	prefer := time.NewTicker(client.preferRetry)
 	defer prefer.Stop()
 	type preferenceResult struct {
@@ -1549,6 +1598,54 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			return nil, ctx.Err()
 		case err := <-readErrors:
 			return nil, err
+		case <-registered:
+			// Any pong proves the hub registered this node; stop waiting.
+			acked = true
+			helloAck.Stop()
+			if helloRetried && !capsResent {
+				// The pong may answer the first hello, merely late: the
+				// capability-free hello then replaced a capable record. Send
+				// the full hello once more; a hub that rejects capabilities
+				// drops it and keeps the record it already has.
+				capsResent = true
+				if err := client.writeHello(ctx, peer, hubSpawnCapabilities); err != nil {
+					return nil, err
+				}
+				// A repeated hello resets the hub's job and host state for
+				// this node; repeat that state at once, as the fallback does.
+				if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
+					return nil, err
+				}
+				if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+					return nil, err
+				}
+			}
+		case <-helloAck.C:
+			if acked {
+				// The timer fired as the pong arrived; the hub registered us.
+				continue
+			}
+			if helloRetried {
+				// The capability-free hello went unanswered too, so the
+				// problem is not the capabilities field. Keep the session and
+				// its pings as before; the next reconnect starts over.
+				client.warn("hub did not acknowledge hello")
+				continue
+			}
+			helloRetried = true
+			client.warn("hub did not acknowledge hello with capabilities; retrying without them")
+			if err := client.writeHello(ctx, peer, nil); err != nil {
+				return nil, err
+			}
+			// A hub that dropped the hello also dropped the state written
+			// right behind it; repeat that state now that it can land.
+			if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
+				return nil, err
+			}
+			if err := client.writeRelayEvents(client.jobCompletionEvents(), peer.relayWriter(ctx)); err != nil {
+				return nil, err
+			}
+			helloAck.Reset(client.helloAckTimeoutOrDefault())
 		case event := <-client.events:
 			if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
 				client.releaseRelayEvents(event)
@@ -2314,11 +2411,35 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 	case "job.spawn":
 		var brief hubSpawnBrief
 		var briefFields map[string]json.RawMessage
-		if len(fields) != 6 || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || len(briefFields) != 1 || json.Unmarshal(briefFields["inline"], &brief.Inline) != nil || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
+		for name := range fields {
+			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" {
+				return hubOutboundMessage{}, false
+			}
+		}
+		if (len(fields) != 6 && len(fields) != 7) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
 			return hubOutboundMessage{}, false
 		}
+		if raw, ok := briefFields["inline"]; ok {
+			if json.Unmarshal(raw, &brief.Inline) != nil {
+				return hubOutboundMessage{}, false
+			}
+		} else if raw, ok := briefFields["doc"]; ok {
+			if json.Unmarshal(raw, &brief.Doc) != nil {
+				return hubOutboundMessage{}, false
+			}
+		} else {
+			return hubOutboundMessage{}, false
+		}
+		if raw, ok := fields["checkout"]; ok {
+			var checkout hubSpawnCheckout
+			if !decodeNodeCommandStrict(raw, &checkout) || !validHubSpawnCheckout(checkout) {
+				return hubOutboundMessage{}, false
+			}
+			message.Checkout = &checkout
+		}
 		message.BriefInline = brief.Inline
-		if !validHubSpawnRequest(hubSpawnRequest{RequestID: message.RequestID, Machine: "machine-a", CWDKey: message.CWDKey, Brief: brief, Args: message.Args, WaitSeconds: message.WaitSeconds}) {
+		message.BriefDoc = brief.Doc
+		if !validHubSpawnRequest(hubSpawnRequest{RequestID: message.RequestID, Machine: "machine-a", CWDKey: message.CWDKey, Brief: brief, Checkout: message.Checkout, Args: message.Args, WaitSeconds: message.WaitSeconds}) {
 			return hubOutboundMessage{}, false
 		}
 	case "node.command":
