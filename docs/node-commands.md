@@ -163,9 +163,10 @@ shape: `refs/heads/<branch>` or `pull/<n>/head`.
   pointing at a commit other than the expected tip all refuse. A missing
   local branch is created tracking `origin/<branch>`, which must exist.
 - `mode:"detached"` — `sha` and `fetch` are required and `branch` must be
-  stated empty. The node runs `git fetch origin <fetch>`, checks `sha`
-  exists, and runs `git worktree add --detach <dir> <sha>`. An existing
-  worktree is reused only when detached at exactly that commit and clean.
+  stated empty. The node runs `git fetch origin <fetch>`, requires the
+  fetched `FETCH_HEAD` to resolve to `sha`, and runs `git worktree add
+  --detach <dir> <sha>`. An existing worktree is reused only when detached
+  at exactly that commit and clean.
 
 A clone that already exists keeps its identity: a `git remote get-url
 origin` that decodes to a different `owner/repo` than the argument — a fork
@@ -178,7 +179,7 @@ refused the same way. A missing clone is created with `git clone <origin>`.
 | `reused` | The existing worktree at `dir` already matched. |
 | `busy` | Another git op holds the per-clone lock; `retry_after_s` is set. |
 | `branch-elsewhere` | The branch is checked out elsewhere, `dir` sits on another branch/commit, or the branch is not on origin where required. |
-| `sha-missing` | The commit named by `sha` is not in the clone after fetching. |
+| `sha-missing` | The fetched ref does not resolve to `sha`, or the commit is not in the clone after fetching. |
 | `origin-mismatch` | The existing clone tracks a different owner/repo. |
 | `dirty` | The existing worktree at `dir` has uncommitted or untracked files. |
 | `git-failed` | A git step failed. |
@@ -196,18 +197,20 @@ worktree, `expect_head` the 40-hex commit it must still be on, `base` the
 merged-into branch, and `regenerable` an allowlist of ignored paths that
 may be deleted with the worktree (a glob containing `/` matches the whole
 path, a slash-free one matches the last segment). The node re-resolves the
-worktree under the per-clone lock, then removes it only when all hold: it
-appears in `git worktree list`, is not locked, is not detached, is clean,
-every ignored file matches `regenerable`, the branch is merged into
-`origin/<base>` (or `base`) or fully pushed, and — re-read immediately
-before removal — no pane is live in it. It then runs `git worktree remove`
+worktree under the per-clone lock, then removes it only when all hold: the
+resolved worktree path and common git dir are under the node's configured
+work root, it appears in `git worktree list`, is not locked, is not
+detached, is clean, every ignored file matches `regenerable`, the branch is
+merged into `origin/<base>` (or `base`) or fully pushed, and — re-read
+immediately before removal — no pane is live in it. It then runs `git worktree remove`
 and `git branch -d`; never `--force` or `-D`.
 
 | `outcome` | Meaning |
 | --- | --- |
 | `removed` | Worktree removed and `git branch -d` attempted; `worktree` describes what was removed. |
 | `worktree-gone` | `cwd` is not a linked worktree. |
-| `worktree-changed` | HEAD differs from `expect_head`. |
+| `worktree-changed` | HEAD or common repository differs from the first inspection or `expect_head`. |
+| `outside-work-root` | The resolved worktree path or common git dir is outside the node's configured work root. |
 | `unregistered` | Resolves as a worktree but is not in `git worktree list`. |
 | `locked` | `git worktree lock` holds it. |
 | `detached` | Detached HEAD: no branch to delete. |

@@ -308,7 +308,8 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		case nodeRemoveWorktreeGone, nodeRemoveWorktreeChanged, nodeRemoveUnregistered,
 			nodeRemoveLocked, nodeRemoveDetached, nodeRemoveStatusCheckFailed,
 			nodeOutcomeDirty, nodeRemovePaneInUse, nodeRemovePaneScanFailed,
-			nodeRemoveUnmerged, nodeOutcomeGitFailed, nodeOutcomeGitTooOld:
+			nodeRemoveUnmerged, nodeRemoveOutsideWorkRoot, nodeOutcomeGitFailed,
+			nodeOutcomeGitTooOld:
 			valid = result.Worktree == nil && result.Files == nil && result.RetryAfterS == 0
 		}
 		target = result

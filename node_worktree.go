@@ -49,6 +49,7 @@ const (
 	nodeRemovePaneInUse         = "pane-in-use"
 	nodeRemovePaneScanFailed    = "pane-scan-failed"
 	nodeRemoveUnmerged          = "unmerged-or-unpushed"
+	nodeRemoveOutsideWorkRoot   = "outside-work-root"
 
 	nodeQuotaRefreshed = "refreshed"
 )
@@ -334,16 +335,26 @@ func nodeListWorktrees(ctx context.Context, git relayCommandRunner, main string)
 	return entries, nil
 }
 
+func nodeResolvedPath(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(resolved)
+	}
+	return filepath.Clean(path)
+}
+
 // nodeSamePath compares paths the way git prints them: symlinks resolved
 // when the filesystem allows it, clean-join equality otherwise.
 func nodeSamePath(a, b string) bool {
-	resolve := func(p string) string {
-		if r, err := filepath.EvalSymlinks(p); err == nil {
-			return r
-		}
-		return filepath.Clean(p)
-	}
-	return resolve(a) == resolve(b)
+	return nodeResolvedPath(a) == nodeResolvedPath(b)
+}
+
+func nodePathWithin(root, path string) bool {
+	rel, err := filepath.Rel(nodeResolvedPath(root), nodeResolvedPath(path))
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func nodeWorktreeWithinWorkRoot(workRoot string, worktree *nodeWorktree) bool {
+	return nodePathWithin(workRoot, worktree.Path) && nodePathWithin(workRoot, worktree.Common)
 }
 
 func nodeWorktreeClean(ctx context.Context, git relayCommandRunner, path string) (bool, error) {
@@ -572,6 +583,10 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayComma
 	if _, err := git(ctx, "-C", clone, "fetch", "origin", args.Fetch); err != nil {
 		return nodeOutcomeGitFailed
 	}
+	fetched, err := git(ctx, "-C", clone, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
+	if err != nil || !strings.EqualFold(strings.TrimSpace(string(fetched)), args.Sha) {
+		return nodePrepareShaMissing
+	}
 	if _, err := git(ctx, "-C", clone, "cat-file", "-e", args.Sha+"^{commit}"); err != nil {
 		return nodePrepareShaMissing
 	}
@@ -615,9 +630,16 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	} else if !ok {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitTooOld}, ""
 	}
+	workRoot, err := client.nodeWorkRoot()
+	if err != nil {
+		return nil, "work_root_unset"
+	}
 	worktree := nodeWorktreeInspect(ctx, git, args.Cwd).Worktree
 	if worktree == nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveWorktreeGone}, ""
+	}
+	if !nodeWorktreeWithinWorkRoot(workRoot, worktree) {
+		return nodeWorktreeRemoveResult{Outcome: nodeRemoveOutsideWorkRoot}, ""
 	}
 	if !strings.EqualFold(worktree.Head, args.ExpectHead) {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveWorktreeChanged}, ""
@@ -639,9 +661,17 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	if worktree == nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveWorktreeGone}, ""
 	}
+	if !nodeWorktreeWithinWorkRoot(workRoot, worktree) {
+		return nodeWorktreeRemoveResult{Outcome: nodeRemoveOutsideWorkRoot}, ""
+	}
 	if !strings.EqualFold(worktree.Head, args.ExpectHead) {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveWorktreeChanged}, ""
 	}
+	currentMain := filepath.Dir(worktree.Common)
+	if !nodeSamePath(main, currentMain) {
+		return nodeWorktreeRemoveResult{Outcome: nodeRemoveWorktreeChanged}, ""
+	}
+	main = currentMain
 	entries, err := nodeListWorktrees(ctx, git, main)
 	if err != nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
@@ -722,10 +752,8 @@ func (client *HubClient) nodePaneInUse(ctx context.Context, path string) (bool, 
 	if err != nil {
 		return false, err
 	}
-	clean := filepath.Clean(path)
 	for _, pane := range panes {
-		cwd := filepath.Clean(pane.Cwd)
-		if cwd == clean || strings.HasPrefix(cwd, clean+string(filepath.Separator)) {
+		if nodePathWithin(path, pane.Cwd) {
 			return true, nil
 		}
 	}

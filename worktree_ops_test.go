@@ -157,6 +157,11 @@ func TestNodeWorktreePrepareDetached(t *testing.T) {
 	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, badFetch); result["outcome"] != nodeOutcomeGitFailed {
 		t.Fatalf("unfetchable ref outcome=%v", result["outcome"])
 	}
+
+	mismatchedFetch := fixture.prepareArgs("detached", "", fixture.main, "refs/heads/feat", "repo.mismatch")
+	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, mismatchedFetch); result["outcome"] != nodePrepareShaMissing {
+		t.Fatalf("fetched-ref mismatch outcome=%v", result["outcome"])
+	}
 }
 
 func TestNodeWorktreePrepareBranch(t *testing.T) {
@@ -251,25 +256,54 @@ func TestNodeWorktreePrepareLock(t *testing.T) {
 	// prepares, the other reuses — never git-failed.
 	client.nodeGitLockWait = 10 * time.Second
 	parallel := fixture.prepareArgs("detached", "", fixture.feat, "pull/1/head", "repo.pair")
+	type runResult struct {
+		outcome any
+		code    string
+		err     error
+	}
+	run := func() runResult {
+		raw, err := json.Marshal(parallel)
+		if err != nil {
+			return runResult{err: err}
+		}
+		result, code := client.runNodeCommand(context.Background(), nodeCommandWorktreePrepare, raw)
+		if code != "" {
+			return runResult{code: code}
+		}
+		encoded, err := json.Marshal(result)
+		if err != nil {
+			return runResult{err: err}
+		}
+		canonical, valid := canonicalNodeCommandResult(nodeCommandWorktreePrepare, encoded)
+		if !valid {
+			return runResult{err: errors.New("result outside the documented shape")}
+		}
+		var decoded map[string]any
+		if err := json.Unmarshal(canonical, &decoded); err != nil {
+			return runResult{err: err}
+		}
+		return runResult{outcome: decoded["outcome"]}
+	}
 	var wg sync.WaitGroup
-	outcomes := make(chan any, 2)
+	results := make(chan runResult, 2)
 	for i := 0; i < 2; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			result, code := nodeRun(t, client, nodeCommandWorktreePrepare, parallel)
-			if code != "" {
-				outcomes <- "error:" + code
-				return
-			}
-			outcomes <- result["outcome"]
+			results <- run()
 		}()
 	}
 	wg.Wait()
-	close(outcomes)
-	for outcome := range outcomes {
-		if outcome != nodePreparePrepared && outcome != nodePrepareReused {
-			t.Fatalf("concurrent prepare outcome=%v", outcome)
+	close(results)
+	for result := range results {
+		if result.err != nil {
+			t.Fatal(result.err)
+		}
+		if result.code != "" {
+			t.Fatalf("concurrent prepare code=%q", result.code)
+		}
+		if result.outcome != nodePreparePrepared && result.outcome != nodePrepareReused {
+			t.Fatalf("concurrent prepare outcome=%v", result.outcome)
 		}
 	}
 }
@@ -403,6 +437,32 @@ func TestNodeWorktreeRemoveRefusals(t *testing.T) {
 		}
 	})
 
+	t.Run("outside-work-root", func(t *testing.T) {
+		fixture, client := newFixture(t)
+		dir := filepath.Join(fixture.root, "repo.outside")
+		nodeGit(t, fixture.clone, "worktree", "add", "-q", "-b", "job/outside", dir, "main")
+		head := nodeGit(t, dir, "rev-parse", "HEAD")
+		before := nodeGit(t, fixture.clone, "worktree", "list", "--porcelain")
+		if result, _ := nodeRun(t, client, nodeCommandWorktreeRemove, fixture.removeArgs(dir, head, nil)); result["outcome"] != nodeRemoveOutsideWorkRoot {
+			t.Fatalf("outcome=%v", result["outcome"])
+		}
+		if after := nodeGit(t, fixture.clone, "worktree", "list", "--porcelain"); after != before {
+			t.Fatalf("worktree list changed after refusal\nbefore: %s\nafter: %s", before, after)
+		}
+	})
+
+	t.Run("common-outside-work-root", func(t *testing.T) {
+		fixture, client := newFixture(t)
+		foreign := filepath.Join(fixture.root, "foreign")
+		nodeGit(t, fixture.root, "clone", "-q", fixture.origin, foreign)
+		dir := filepath.Join(fixture.workRoot, "repo.foreign-job")
+		nodeGit(t, foreign, "worktree", "add", "-q", "-b", "job/foreign", dir, "main")
+		head := nodeGit(t, dir, "rev-parse", "HEAD")
+		if result, _ := nodeRun(t, client, nodeCommandWorktreeRemove, fixture.removeArgs(dir, head, nil)); result["outcome"] != nodeRemoveOutsideWorkRoot {
+			t.Fatalf("outcome=%v", result["outcome"])
+		}
+	})
+
 	t.Run("unregistered", func(t *testing.T) {
 		fixture, client := newFixture(t)
 		// Moving the worktree leaves the clone's metadata pointing at the
@@ -488,6 +548,34 @@ func TestNodeWorktreeRemoveRefusals(t *testing.T) {
 		}
 	})
 
+	t.Run("pane-in-use-resolved", func(t *testing.T) {
+		fixture := newNodeWorktreeFixture(t)
+		linked := filepath.Join(fixture.root, "work-link")
+		if err := os.Symlink(fixture.workRoot, linked); err != nil {
+			t.Fatal(err)
+		}
+		fixture.workRoot = linked
+		fixture.clone = filepath.Join(linked, "repo")
+		contents, err := json.Marshal(map[string]any{"work_root": linked, "enabled": false})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(fixture.config, contents, 0600); err != nil {
+			t.Fatal(err)
+		}
+		fixture.cloneRepo(t)
+		client := fixture.client()
+		dir, head := fixture.addWorktree(t, "linked")
+		resolved, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixture.herdr.panes = `{"result":{"panes":[{"pane_id":"w1:p10","cwd":` + strconv.Quote(resolved) + `,"agent_status":"idle"}]}}`
+		if result, _ := nodeRun(t, client, nodeCommandWorktreeRemove, fixture.removeArgs(dir, head, nil)); result["outcome"] != nodeRemovePaneInUse {
+			t.Fatalf("outcome=%v", result["outcome"])
+		}
+	})
+
 	t.Run("pane-scan-failed", func(t *testing.T) {
 		fixture, client := newFixture(t)
 		dir, head := fixture.addWorktree(t, "scan")
@@ -510,6 +598,40 @@ func TestNodeWorktreeRemoveRefusals(t *testing.T) {
 			t.Fatalf("outcome=%v", result["outcome"])
 		}
 	})
+}
+
+func TestNodeWorktreeRemoveChangedCommon(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	client := fixture.client()
+	cwd := filepath.Join(fixture.workRoot, "repo.job")
+	head := strings.Repeat("a", 40)
+	inspections := 0
+	client.nodeGit = func(_ context.Context, args ...string) ([]byte, error) {
+		switch {
+		case len(args) == 1 && args[0] == "--version":
+			return []byte("git version 2.31.0\n"), nil
+		case len(args) == 7 && args[0] == "-C" && args[1] == cwd && args[2] == "rev-parse" && args[3] == "--path-format=absolute":
+			inspections++
+			clone := filepath.Join(fixture.workRoot, "repo")
+			if inspections == 2 {
+				clone = filepath.Join(fixture.workRoot, "other")
+			}
+			common := filepath.Join(clone, ".git")
+			gitDir := filepath.Join(common, "worktrees", "repo.job")
+			return []byte(gitDir + "\n" + common + "\n" + cwd + "\n"), nil
+		case len(args) == 5 && args[0] == "-C" && args[1] == cwd && args[2] == "branch" && args[3] == "--show-current":
+			return []byte("job/changed\n"), nil
+		case len(args) == 4 && args[0] == "-C" && args[1] == cwd && args[2] == "rev-parse" && args[3] == "HEAD":
+			return []byte(head + "\n"), nil
+		case len(args) == 5 && args[0] == "-C" && args[1] == cwd && args[2] == "remote" && args[3] == "get-url" && args[4] == "origin":
+			return []byte(fixture.origin + "\n"), nil
+		}
+		return nil, errors.New("unexpected git argv")
+	}
+	result, code := nodeRun(t, client, nodeCommandWorktreeRemove, fixture.removeArgs(cwd, head, nil))
+	if code != "" || result["outcome"] != nodeRemoveWorktreeChanged {
+		t.Fatalf("outcome=%v code=%q", result["outcome"], code)
+	}
 }
 
 // TestNodeWorktreeRemoveNeverForces proves the removal path cannot be talked
