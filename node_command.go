@@ -146,7 +146,7 @@ func validNodeJobName(name string) bool {
 	if name == "" || len(name) > 128 || name[0] == '-' || name[0] == '.' {
 		return false
 	}
-	return !strings.ContainsAny(name, "/\\ \t\r\n\x00") && !strings.Contains(name, "..")
+	return !nodeHasControlByte(name) && !strings.ContainsAny(name, "/\\ ") && !strings.Contains(name, "..")
 }
 
 func validNodeCommandPath(path string) bool {
@@ -289,7 +289,8 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		case nodeOutcomeBusy:
 			valid = result.RetryAfterS > 0 && result.Worktree == nil
 		case nodePrepareBranchElsewhere, nodePrepareShaMissing, nodePrepareOriginMismatch,
-			nodeOutcomeDirty, nodeRemoveLocked, nodeOutcomeGitFailed, nodeOutcomeGitTooOld:
+			nodeOutcomeDirty, nodeRemoveLocked, nodeOutcomeGitFailed, nodeOutcomeGitTooOld,
+			nodeOutcomeCancelled:
 			valid = result.Worktree == nil && result.RetryAfterS == 0
 		}
 		target = result
@@ -309,7 +310,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 			nodeRemoveLocked, nodeRemoveDetached, nodeRemoveStatusCheckFailed,
 			nodeOutcomeDirty, nodeRemovePaneInUse, nodeRemovePaneScanFailed,
 			nodeRemoveUnmerged, nodeRemoveOutsideWorkRoot, nodeOutcomeGitFailed,
-			nodeOutcomeGitTooOld:
+			nodeOutcomeGitTooOld, nodeOutcomeCancelled:
 			valid = result.Worktree == nil && result.Files == nil && result.RetryAfterS == 0
 		}
 		target = result
