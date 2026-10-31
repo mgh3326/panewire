@@ -158,6 +158,7 @@ type HubLastNote struct {
 type hubNodeRecord struct {
 	machineID         string
 	accepting         bool
+	capabilities      map[string]bool
 	connectedSince    time.Time
 	lastPing          time.Time
 	lastKeepaliveSent time.Time
@@ -1183,7 +1184,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			agent.transient = true
 			return
 		}
-		h.connect(machineID, message.Version, remoteAddr, agent, message.Accepting)
+		h.connect(machineID, message.Version, remoteAddr, agent, message.Accepting, message.Capabilities)
 	case "ping", "pong":
 		if agent.transient {
 			h.countUnknownMessage()
@@ -1419,13 +1420,14 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 }
 
 type hubInbound struct {
-	Type      string
-	MachineID string
-	Version   string
-	Transient bool
-	Accepting bool
-	Kind      string
-	Payload   json.RawMessage
+	Type         string
+	MachineID    string
+	Version      string
+	Transient    bool
+	Accepting    bool
+	Capabilities []string
+	Kind         string
+	Payload      json.RawMessage
 }
 
 type hubHeartbeatPayload struct {
@@ -1694,13 +1696,16 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 	}
 	switch message.Type {
 	case "hello":
-		if !allowed("type", "machine_id", "version", "transient", "accepting") || json.Unmarshal(fields["machine_id"], &message.MachineID) != nil || json.Unmarshal(fields["version"], &message.Version) != nil || message.MachineID == "" || message.Version == "" {
+		if !allowed("type", "machine_id", "version", "transient", "accepting", "capabilities") || json.Unmarshal(fields["machine_id"], &message.MachineID) != nil || json.Unmarshal(fields["version"], &message.Version) != nil || message.MachineID == "" || message.Version == "" {
 			return hubInbound{}, false
 		}
 		if rawTransient, exists := fields["transient"]; exists && json.Unmarshal(rawTransient, &message.Transient) != nil {
 			return hubInbound{}, false
 		}
 		if rawAccepting, exists := fields["accepting"]; exists && json.Unmarshal(rawAccepting, &message.Accepting) != nil {
+			return hubInbound{}, false
+		}
+		if rawCapabilities, exists := fields["capabilities"]; exists && json.Unmarshal(rawCapabilities, &message.Capabilities) != nil {
 			return hubInbound{}, false
 		}
 	case "ping", "pong":
@@ -1792,7 +1797,7 @@ func knownHubEventKind(kind string) bool {
 	return false
 }
 
-func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAgent, accepting bool) {
+func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAgent, accepting bool, capabilityLists ...[]string) {
 	// A node registration is the safe no-restart retry trigger for durable
 	// lane.event rows whose route was absent or disconnected when produced.
 	defer func() { go h.replayUndeliveredLaneEvents(context.Background()) }()
@@ -1804,10 +1809,21 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		previous = existing.agent
 		previousSnapshot = cloneHubSessionSnapshotRecord(existing.sessionSnapshot)
 	}
+	var capabilities []string
+	if len(capabilityLists) > 0 {
+		capabilities = capabilityLists[0]
+	}
+	capabilitySet := make(map[string]bool, len(capabilities))
+	for _, capability := range capabilities {
+		if capability != "" && len(capability) <= 64 {
+			capabilitySet[capability] = true
+		}
+	}
 	h.nodes[machineID] = &hubNodeRecord{
 		machineID: machineID, accepting: accepting, connectedSince: now, lastPing: now,
-		remoteMeta: map[string]string{"version": version, "remote_addr": remoteAddr},
-		state:      "connected", stateSince: now, lastHeartbeat: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
+		capabilities: capabilitySet,
+		remoteMeta:   map[string]string{"version": version, "remote_addr": remoteAddr},
+		state:        "connected", stateSince: now, lastHeartbeat: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
 	}
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)

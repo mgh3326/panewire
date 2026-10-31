@@ -6,12 +6,15 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 )
 
 type hubSpawnConfig struct {
@@ -23,8 +26,10 @@ type hubSpawnConfig struct {
 	RuntugPath string `json:"runtug_path,omitempty"`
 	// WorkRoot is the node's git work root for worktree.prepare: clones live
 	// at <work_root>/<repo>. Node-local only; callers never supply it.
-	WorkRoot string `json:"work_root,omitempty"`
-	Enabled  bool   `json:"enabled"`
+	WorkRoot       string `json:"work_root,omitempty"`
+	BriefDocPrefix string `json:"brief_doc_prefix,omitempty"`
+	HandoffkeepEnv string `json:"handoffkeep_env,omitempty"`
+	Enabled        bool   `json:"enabled"`
 }
 
 func defaultHubSpawnConfigPath(path string) string {
@@ -112,6 +117,60 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.RC, result.Error = 2, "cwd_unmapped"
 		return result
 	}
+	// The document key is validated before any checkout or runtug lookup: a
+	// key outside the node's prefix is refused whatever else is configured.
+	if message.BriefDoc != "" {
+		prefix := config.BriefDocPrefix
+		if prefix == "" {
+			prefix = "briefs/"
+		}
+		// "briefs" and "briefs/" name the same prefix.
+		if !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
+		if !strings.HasSuffix(prefix, "/") || !validHubSpawnDocKey(strings.TrimSuffix(prefix, "/")) || !strings.HasPrefix(message.BriefDoc, prefix) {
+			result.RC, result.Error = 2, "brief_doc_unavailable"
+			return result
+		}
+	}
+	extra := client.spawnTimeoutExtra
+	if extra == 0 {
+		extra = 60 * time.Second
+	}
+	runContext, cancel := context.WithTimeout(parent, time.Duration(message.WaitSeconds)*time.Second+extra)
+	defer cancel()
+	// The brief is fetched before any checkout: a failed fetch must not leave
+	// a prepared worktree behind.
+	briefText := message.BriefInline
+	if message.BriefDoc != "" {
+		fetched, err := client.fetchHubSpawnBrief(runContext, config.HandoffkeepEnv, message.BriefDoc)
+		if err != nil || fetched == "" || !utf8.ValidString(fetched) || len([]byte(fetched)) > hubSpawnMaxBriefBytes {
+			result.RC, result.Error = 2, "brief_doc_unavailable"
+			return result
+		}
+		briefText = fetched
+	}
+	if message.Checkout != nil {
+		prepare := client.spawnPrepare
+		if prepare == nil {
+			prepare = client.nodeWorktreePrepare
+		}
+		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir})
+		if code != "" {
+			result.RC, result.Error = 81, "checkout_refused:"+code
+			return result
+		}
+		outcome, ok := prepared.(nodeWorktreePrepareResult)
+		if !ok || (outcome.Outcome != nodePreparePrepared && outcome.Outcome != nodePrepareReused) || outcome.Worktree == nil {
+			name := "git-failed"
+			if ok && outcome.Outcome != "" {
+				name = outcome.Outcome
+			}
+			result.RC, result.Error = 81, "checkout_refused:"+name
+			return result
+		}
+		cwd = outcome.Worktree.Path
+	}
 	// The retired spawner is gone; a node without runtug is not spawn-capable.
 	// The daemon's PATH is minimal under launchd/systemd, so the binary is
 	// resolved through config, then ~/.local/bin, then PATH.
@@ -134,19 +193,13 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.RC, result.Error = 1, "spawn_failed"
 		return result
 	}
-	_, writeErr := io.WriteString(temporary, message.BriefInline)
+	_, writeErr := io.WriteString(temporary, briefText)
 	closeErr := temporary.Close()
 	if writeErr != nil || closeErr != nil {
 		result.RC, result.Error = 1, "spawn_failed"
 		return result
 	}
 
-	extra := client.spawnTimeoutExtra
-	if extra == 0 {
-		extra = 60 * time.Second
-	}
-	runContext, cancel := context.WithTimeout(parent, time.Duration(message.WaitSeconds)*time.Second+extra)
-	defer cancel()
 	output, runErr := runHubSpawnCommand(runContext, runtugPath, cwd, temporaryName, config.Workspace, config.HERDRSession, message.Args)
 	result.StdoutTail = output.tailString()
 	result.Pane, result.JobID = output.pane, output.jobID
@@ -164,6 +217,51 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.Error = "spawn_failed"
 	}
 	return result
+}
+
+func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key string) (string, error) {
+	if !validHubSpawnDocKey(key) || envPath == "" {
+		return "", errors.New("brief unavailable")
+	}
+	env, err := loadHubHandoffkeepEnv(envPath)
+	if err != nil {
+		return "", errors.New("brief unavailable")
+	}
+	base, err := url.Parse(strings.TrimSuffix(env.URL, "/"))
+	if err != nil {
+		return "", errors.New("brief unavailable")
+	}
+	base.Path = "/v1/documents/" + key
+	base.RawPath = ""
+	base.RawQuery = ""
+	base.ForceQuery = false
+	base.Fragment = ""
+	base.RawFragment = ""
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
+	if err != nil {
+		return "", errors.New("brief unavailable")
+	}
+	request.Header.Set("Authorization", "Bearer "+env.Token)
+	request.Header.Set("Accept", "application/json")
+	response, err := (&http.Client{Timeout: handoffkeepTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
+	if err != nil {
+		return "", errors.New("brief unavailable")
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return "", errors.New("brief unavailable")
+	}
+	payload, err := io.ReadAll(io.LimitReader(response.Body, hubSpawnMaxBodyBytes+1))
+	if err != nil || len(payload) > hubSpawnMaxBodyBytes {
+		return "", errors.New("brief unavailable")
+	}
+	var document struct {
+		Body string `json:"body"`
+	}
+	if json.Unmarshal(payload, &document) != nil {
+		return "", errors.New("brief unavailable")
+	}
+	return document.Body, nil
 }
 
 type hubSpawnOutput struct {

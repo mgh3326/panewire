@@ -72,7 +72,11 @@ All validation is shared by hub and node. Every listed argument is required
 and must not be null — a zero value such as `write:false` or
 `merged_after:0` has to be stated, never implied by omission. `pane_id` is
 `^[A-Za-z0-9._:-]{1,128}$`; `name` is a single safe path segment (no `/`,
-`\`, `..`, whitespace, or leading `-` / `.`); `cwd` is an absolute path.
+`\`, `..`, space, ASCII control byte, or leading `-` / `.`); `cwd` is an
+absolute path. Every ref or branch name (`branch`, `base`, the branch in
+`fetch`), `origin` and `regenerable` glob is refused as `invalid_args` if it
+holds any ASCII control byte (below 0x20, or 0x7f) — checked on the value as
+sent, before anything trims it.
 
 ### `agents.list`
 
@@ -152,8 +156,10 @@ clone under the node's work root — set in the node's own `spawn.json`
 `work_root`, never by the caller — with the clone at `<work_root>/<repo>`
 and the worktree at `<work_root>/<dir>`. `dir` is a single safe path
 segment, `origin` carries no userinfo (URL userinfo, or an `@` outside an
-absolute local path, is refused), `sha` is 40-hex, and `fetch` is a closed
-shape: `refs/heads/<branch>` or `pull/<n>/head`.
+absolute local path, is refused; an scp-style `host:owner/repo` needs a
+host of at least two characters, since a one-character host such as
+`C:owner/repo` is drive-letter shaped), `sha` is 40-hex, and `fetch` is a
+closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
 
 - `mode:"branch"` — runtug#18's branch behaviour on the node. `branch` is
   required, `fetch` must be stated empty (the whole remote is fetched), and
@@ -173,13 +179,18 @@ shape: `refs/heads/<branch>` or `pull/<n>/head`.
 A clone that already exists keeps its identity: a `git remote get-url
 origin` that decodes to a different `owner/repo` than the argument — a fork
 sharing the name — is `origin-mismatch`; one that cannot be read at all is
-refused the same way. A missing clone is created with `git clone <origin>`.
+refused the same way. The clone's own remote may carry a user: an scp-style
+remote is split at its first `:`, only the host side before it is read as
+`[user@]host`, and the path after it is kept whole, so
+`git@host:owner/re@po.git` decodes to `owner/re@po` rather than being
+refused. A missing clone is created with `git clone <origin>`.
 
 | `outcome` | Meaning |
 | --- | --- |
 | `prepared` | The worktree was created; `worktree` describes it. |
 | `reused` | The existing worktree at `dir` already matched. |
 | `busy` | Another git op holds the per-clone lock; `retry_after_s` is set. |
+| `cancelled` | The caller's context was cancelled while waiting for the per-clone lock; the lock was never taken, nothing ran, and there is no `retry_after_s`. |
 | `branch-elsewhere` | The branch is checked out elsewhere, `dir` sits on another branch/commit, or the branch is not on origin where required. |
 | `sha-missing` | The fetched ref does not resolve to `sha`, or the commit is not in the clone after fetching. |
 | `origin-mismatch` | The existing clone tracks a different owner/repo. |
@@ -190,7 +201,15 @@ refused the same way. A missing clone is created with `git clone <origin>`.
 
 Every op that touches one clone (`worktree.prepare`, `worktree.remove`)
 takes the exclusive per-clone lock `<clone>.git-op.lock`, waiting at most
-60 s before answering `busy`. A node with no configured work root answers
+60 s before answering `busy`. Both ops name `<clone>` the same way: the
+clone path with symlinks resolved, or — before prepare has cloned it — its
+resolved parent joined with the clone's name, which is what resolution gives
+once it exists. A clone path that exists but cannot be resolved (a dangling
+symlink, an unreadable component) answers `git-failed` without taking any
+lock, so one clone is never locked under two names. A wait that runs out —
+the 60 s budget or the node's own run deadline — answers `busy`; a caller
+whose context is cancelled answers `cancelled` instead, and a caller already
+cancelled never takes the lock. A node with no configured work root answers
 `work_root_unset`.
 
 ### `worktree.remove`
@@ -233,7 +252,7 @@ running a git op on the clone, then delete the lock file.
 | `unmerged-or-unpushed` | The branch is neither merged into `origin/<base>` nor fully pushed. |
 | `pane-in-use` | A pane (agent or shell) still sits inside the worktree. |
 | `pane-scan-failed` | `herdr pane list` failed; usage is unknown so removal refuses. |
-| `busy` / `git-failed` / `git_too_old` | As in `worktree.prepare`. |
+| `busy` / `cancelled` / `git-failed` / `git_too_old` | As in `worktree.prepare`. |
 
 The refusal outcomes mirror mergewake's reap receipt reasons verbatim.
 
