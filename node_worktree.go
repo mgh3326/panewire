@@ -132,7 +132,12 @@ func validNodeFetchRef(fetch string) bool {
 }
 
 func validNodeGlob(glob string) bool {
-	return glob != "" && len(glob) <= 128 && glob == nodeControlChars.Replace(glob)
+	if glob == "" || len(glob) > 128 || glob != nodeControlChars.Replace(glob) {
+		return false
+	}
+	// A pattern made only of wildcards ("*", "**", "*/?") would approve any
+	// ignored file for deletion; it must name something literal.
+	return strings.Trim(glob, "*?/") != ""
 }
 
 // nodeOriginRepo normalizes an origin argument (or a clone's own remote) to
@@ -436,13 +441,15 @@ func nodeRegenerable(globs []string, name string) bool {
 	if i := strings.LastIndex(p, "/"); i >= 0 {
 		base = p[i+1:]
 	}
-	for _, g := range globs {
-		g = strings.Trim(g, "/")
+	for _, raw := range globs {
+		// The slash test reads the glob as given: "logs/" or "/build" is a
+		// whole-path pattern, not a last-segment one.
+		g := strings.Trim(raw, "/")
 		if g == "" {
 			continue
 		}
 		match := base
-		if strings.Contains(g, "/") {
+		if strings.Contains(raw, "/") {
 			match = p
 		}
 		if ok, _ := path.Match(g, match); ok {

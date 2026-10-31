@@ -809,3 +809,22 @@ func TestNodeWorktreePrepareCloneSymlinkOutsideRoot(t *testing.T) {
 		t.Fatalf("worktree created through an outside clone: %v", err)
 	}
 }
+
+func TestNodeRegenerableGlobRules(t *testing.T) {
+	for _, g := range []string{"*", "**", "*/?", "/*/"} {
+		if validNodeGlob(g) {
+			t.Fatalf("%q must be invalid", g)
+		}
+	}
+	for _, g := range []string{"*.log", "node_modules", "build/*", "logs/"} {
+		if !validNodeGlob(g) {
+			t.Fatalf("%q must be valid", g)
+		}
+	}
+	if nodeRegenerable([]string{"logs/"}, "a/b/logs") {
+		t.Fatal(`"logs/" is a whole-path glob and must not match a/b/logs`)
+	}
+	if !nodeRegenerable([]string{"logs/"}, "logs") || !nodeRegenerable([]string{"*.log"}, "a/b/c.log") {
+		t.Fatal("expected matches failed")
+	}
+}

@@ -160,7 +160,9 @@ shape: `refs/heads/<branch>` or `pull/<n>/head`.
   `sha`, when given, names the expected tip. A worktree already at `dir` is
   reused only when it is on that branch and clean; the branch checked out
   elsewhere, a `dir` parked on another branch or commit, and a local branch
-  pointing at a commit other than the expected tip all refuse. A missing
+  pointing at a commit other than the expected tip all refuse; without
+  `sha` the expected tip is the freshly fetched `origin/<branch>`, so a local
+  branch that diverged from origin refuses too. A missing
   local branch is created tracking `origin/<branch>`, which must exist.
 - `mode:"detached"` — `sha` and `fetch` are required and `branch` must be
   stated empty. The node runs `git fetch origin <fetch>`, requires the
@@ -195,7 +197,9 @@ takes the exclusive per-clone lock `<clone>.git-op.lock`, waiting at most
 
 `args: {cwd, expect_head, base, regenerable}` — `cwd` inside the linked
 worktree, `expect_head` the 40-hex commit it must still be on, `base` the
-merged-into branch, and `regenerable` an allowlist of ignored paths that
+merged-into branch (a `regenerable` pattern must contain a literal
+character: wildcard-only patterns such as `*` are invalid_args; a glob with a
+`/` anywhere matches the whole path), and `regenerable` an allowlist of ignored paths that
 may be deleted with the worktree (a glob containing `/` matches the whole
 path, a slash-free one matches the last segment). The node re-resolves the
 worktree under the per-clone lock, then removes it only when all hold: the
