@@ -334,6 +334,11 @@ func collectDarwinHostMemory(ctx context.Context, run func(context.Context, ...s
 	swap, _ := run(ctx, "sysctl", "-n", "vm.swapusage")
 	vmstat, vmstatErr := run(ctx, "vm_stat")
 	level, _ := run(ctx, "sysctl", "-n", "kern.memorystatus_vm_pressure_level")
+	if vmstatErr != nil {
+		// A failed vm_stat read restarts the sampler, as on Linux, so the next
+		// rate is never computed across the gap.
+		darwinSwapRate.reset()
+	}
 	var primary *HubHostMemory
 	if pressureErr == nil {
 		memory, freeOK := parseDarwinMemoryPressure(string(pressure))
@@ -372,9 +377,13 @@ func setDarwinLiveMemory(memory *HubHostMemory, vmstat, level string, vmstatOK b
 		memory.Pressure = memoryFloat(float64(pressure))
 	}
 	if vmstatOK {
-		if pages, ok := parseDarwinSwapIns(vmstat); ok {
-			memory.SwapInPerS = darwinSwapRate.observe(pages, time.Now())
+		pages, ok := parseDarwinSwapIns(vmstat)
+		if !ok {
+			// An unparseable sample restarts the sampler, as on Linux.
+			darwinSwapRate.reset()
+			return
 		}
+		memory.SwapInPerS = darwinSwapRate.observe(pages, time.Now())
 	}
 }
 

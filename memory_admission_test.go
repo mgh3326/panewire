@@ -636,3 +636,30 @@ func TestPlacementWireGatesLiveMemoryFields(t *testing.T) {
 		t.Fatalf("tolerant decode lost the candidate: %v", names)
 	}
 }
+
+// A failed vm_stat read restarts the Darwin sampler, so no rate is ever
+// computed across the gap.
+func TestDarwinSwapInRateResetsAfterReadFailure(t *testing.T) {
+	darwinSwapRate.reset()
+	collect := func(vmstat string, vmstatErr error) *HubHostMemory {
+		memory, _ := collectDarwinHostMemory(context.Background(), func(_ context.Context, args ...string) ([]byte, error) {
+			switch args[0] {
+			case "memory_pressure":
+				return []byte("System-wide memory free percentage: 60%\n"), nil
+			case "vm_stat":
+				return []byte(vmstat), vmstatErr
+			}
+			return nil, errors.New("unavailable")
+		})
+		return memory
+	}
+	if got := collect("Swapins:                                100.\n", nil); got == nil || got.SwapInPerS != nil {
+		t.Fatalf("first sample: %+v", got)
+	}
+	if got := collect("", errors.New("vm_stat failed")); got == nil || got.SwapInPerS != nil {
+		t.Fatalf("failed read produced a rate: %+v", got)
+	}
+	if got := collect("Swapins:                                300.\n", nil); got == nil || got.SwapInPerS != nil {
+		t.Fatalf("rate was computed across a read gap: %+v", got)
+	}
+}
