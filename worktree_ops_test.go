@@ -763,3 +763,22 @@ func TestNodeGitOpLockPathCanonical(t *testing.T) {
 		t.Fatalf("fresh lock path %s, want %s", a, b)
 	}
 }
+
+func TestNodeWorktreeIgnoredRawNames(t *testing.T) {
+	dir := t.TempDir()
+	nodeGit(t, dir, "init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("*.log\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "a b é.log"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{}
+	got, err := nodeWorktreeIgnored(context.Background(), client.nodeGitRunner(), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0] != "a b é.log" || !nodeRegenerable([]string{"*.log"}, got[0]) {
+		t.Fatalf("ignored = %q", got)
+	}
+}

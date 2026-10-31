@@ -405,14 +405,15 @@ func nodeWorktreeClean(ctx context.Context, git relayCommandRunner, path string)
 // must refuse on any the regenerable allowlist does not cover, so the list
 // is never truncated.
 func nodeWorktreeIgnored(ctx context.Context, git relayCommandRunner, path string) ([]string, error) {
-	out, err := git(ctx, "-C", path, "status", "--porcelain", "--ignored")
+	// -z prints raw paths (no core.quotePath C-quoting), NUL-terminated.
+	out, err := git(ctx, "-C", path, "status", "--porcelain", "--ignored", "-z")
 	if err != nil {
 		return nil, err
 	}
 	var ignored []string
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.HasPrefix(line, "!! ") {
-			ignored = append(ignored, strings.TrimSpace(line[3:]))
+	for _, entry := range strings.Split(string(out), "\x00") {
+		if name, ok := strings.CutPrefix(entry, "!! "); ok && name != "" {
+			ignored = append(ignored, name)
 		}
 	}
 	return ignored, nil
@@ -742,6 +743,21 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	if !clean {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeDirty}, ""
 	}
+	if !nodeBranchReleased(ctx, git, main, entry.Branch, args.Base) {
+		return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnmerged}, ""
+	}
+	// The pane list is a stale snapshot the moment it is read, so the usage
+	// check re-reads it immediately before the removal itself.
+	inUse, err := client.nodePaneInUse(ctx, worktree.Path)
+	if err != nil {
+		return nodeWorktreeRemoveResult{Outcome: nodeRemovePaneScanFailed}, ""
+	}
+	if inUse {
+		return nodeWorktreeRemoveResult{Outcome: nodeRemovePaneInUse}, ""
+	}
+	// Ignored files are read last, right before removal, so the window in
+	// which a process can add one the allowlist never saw is as short as
+	// the lock and the live-pane check allow.
 	ignored, err := nodeWorktreeIgnored(ctx, git, worktree.Path)
 	if err != nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveStatusCheckFailed}, ""
@@ -761,18 +777,6 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 			reported = reported[:64]
 		}
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveIgnoredFiles, Files: reported}, ""
-	}
-	if !nodeBranchReleased(ctx, git, main, entry.Branch, args.Base) {
-		return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnmerged}, ""
-	}
-	// The pane list is a stale snapshot the moment it is read, so the usage
-	// check re-reads it immediately before the removal itself.
-	inUse, err := client.nodePaneInUse(ctx, worktree.Path)
-	if err != nil {
-		return nodeWorktreeRemoveResult{Outcome: nodeRemovePaneScanFailed}, ""
-	}
-	if inUse {
-		return nodeWorktreeRemoveResult{Outcome: nodeRemovePaneInUse}, ""
 	}
 	if _, err := git(ctx, "-C", main, "worktree", "remove", worktree.Path); err != nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
