@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -60,6 +61,8 @@ type HubHostMemory struct {
 	CompressedMB *float64 `json:"compressed_mb"`
 	SwapUsedMB   *float64 `json:"swap_used_mb"`
 	PSISomeAvg10 *float64 `json:"psi_some_avg10"`
+	SwapInPerS   *float64 `json:"swap_in_per_s,omitempty"`
+	Pressure     *float64 `json:"pressure,omitempty"`
 	Source       string   `json:"source"`
 }
 
@@ -67,10 +70,16 @@ func (memory HubHostMemory) valid() bool {
 	if memory.Source != "memory_pressure" && memory.Source != "vm_stat" && memory.Source != "proc_meminfo" {
 		return false
 	}
+	pressureMax := 2.0
+	if memory.Source == "proc_meminfo" {
+		pressureMax = 100
+	}
 	return validOptionalMemoryFloat(memory.FreePct, 0, 100) &&
 		validOptionalMemoryFloat(memory.CompressedMB, 0, math.Inf(1)) &&
 		validOptionalMemoryFloat(memory.SwapUsedMB, 0, math.Inf(1)) &&
-		validOptionalMemoryFloat(memory.PSISomeAvg10, 0, math.Inf(1))
+		validOptionalMemoryFloat(memory.PSISomeAvg10, 0, 100) &&
+		validOptionalMemoryFloat(memory.SwapInPerS, 0, math.Inf(1)) &&
+		validOptionalMemoryFloat(memory.Pressure, 0, pressureMax)
 }
 
 func validOptionalMemoryFloat(value *float64, minimum, maximum float64) bool {
@@ -86,6 +95,8 @@ func cloneHubHostMemory(memory *HubHostMemory) *HubHostMemory {
 	copy.CompressedMB = cloneMemoryFloat(memory.CompressedMB)
 	copy.SwapUsedMB = cloneMemoryFloat(memory.SwapUsedMB)
 	copy.PSISomeAvg10 = cloneMemoryFloat(memory.PSISomeAvg10)
+	copy.SwapInPerS = cloneMemoryFloat(memory.SwapInPerS)
+	copy.Pressure = cloneMemoryFloat(memory.Pressure)
 	return &copy
 }
 
@@ -97,7 +108,9 @@ func equalHubHostMemory(left, right *HubHostMemory) bool {
 		equalMemoryFloat(left.FreePct, right.FreePct) &&
 		equalMemoryFloat(left.CompressedMB, right.CompressedMB) &&
 		equalMemoryFloat(left.SwapUsedMB, right.SwapUsedMB) &&
-		equalMemoryFloat(left.PSISomeAvg10, right.PSISomeAvg10)
+		equalMemoryFloat(left.PSISomeAvg10, right.PSISomeAvg10) &&
+		equalMemoryFloat(left.SwapInPerS, right.SwapInPerS) &&
+		equalMemoryFloat(left.Pressure, right.Pressure)
 }
 
 func equalMemoryFloat(left, right *float64) bool {
@@ -319,20 +332,31 @@ func collectHubHostMemory(ctx context.Context) (*HubHostMemory, error) {
 func collectDarwinHostMemory(ctx context.Context, run func(context.Context, ...string) ([]byte, error)) (*HubHostMemory, error) {
 	pressure, pressureErr := run(ctx, "memory_pressure")
 	swap, _ := run(ctx, "sysctl", "-n", "vm.swapusage")
+	vmstat, vmstatErr := run(ctx, "vm_stat")
+	level, _ := run(ctx, "sysctl", "-n", "kern.memorystatus_vm_pressure_level")
+	if vmstatErr != nil {
+		// A failed vm_stat read restarts the sampler, as on Linux, so the next
+		// rate is never computed across the gap.
+		darwinSwapRate.reset()
+	}
 	var primary *HubHostMemory
 	if pressureErr == nil {
 		memory, freeOK := parseDarwinMemoryPressure(string(pressure))
 		primary = &memory
+		setDarwinLiveMemory(&memory, string(vmstat), string(level), vmstatErr == nil)
 		if freeOK {
 			setDarwinMemorySwap(&memory, swap)
 			return &memory, nil
 		}
 	}
 
-	vmstat, vmstatErr := run(ctx, "vm_stat")
 	memsize, memsizeErr := run(ctx, "sysctl", "-n", "hw.memsize")
 	if vmstatErr == nil && memsizeErr == nil {
 		memory, freeOK := parseDarwinVMStat(string(vmstat), string(memsize))
+		setDarwinLiveMemory(&memory, string(vmstat), string(level), primary == nil)
+		if primary != nil {
+			memory.SwapInPerS = primary.SwapInPerS
+		}
 		if freeOK {
 			setDarwinMemorySwap(&memory, swap)
 			return &memory, nil
@@ -348,6 +372,23 @@ func collectDarwinHostMemory(ctx context.Context, run func(context.Context, ...s
 	return nil, errors.New("host memory unavailable")
 }
 
+func setDarwinLiveMemory(memory *HubHostMemory, vmstat, level string, vmstatOK bool) {
+	if pressure, ok := parseDarwinPressureLevel(level); ok {
+		memory.Pressure = memoryFloat(float64(pressure))
+	}
+	if vmstatOK {
+		pages, ok := parseDarwinSwapIns(vmstat)
+		if !ok {
+			// An unparseable sample restarts the sampler, as on Linux.
+			darwinSwapRate.reset()
+			return
+		}
+		memory.SwapInPerS = darwinSwapRate.observe(pages, time.Now())
+	}
+}
+
+var darwinSwapRate swapInRateSampler
+
 func setDarwinMemorySwap(memory *HubHostMemory, swap []byte) {
 	if used, ok := parseDarwinSwapUsedMB(string(swap)); ok {
 		memory.SwapUsedMB = memoryFloat(used)
@@ -357,14 +398,91 @@ func setDarwinMemorySwap(memory *HubHostMemory, swap []byte) {
 func collectLinuxHostMemory(read func(string) ([]byte, error)) (*HubHostMemory, error) {
 	meminfo, meminfoErr := read("/proc/meminfo")
 	psi, psiErr := read("/proc/pressure/memory") // PSI is optional on Linux.
-	if meminfoErr != nil && psiErr != nil {
+	vmstat, vmstatErr := read("/proc/vmstat")
+	if meminfoErr != nil && psiErr != nil && vmstatErr != nil {
 		return nil, errors.New("host memory unavailable")
 	}
 	memory, ok := parseLinuxHostMemory(string(meminfo), string(psi))
 	if !ok {
 		return nil, errors.New("host memory unavailable")
 	}
+	if some, found := parseLinuxPSISomeAvg10(string(psi)); found {
+		memory.Pressure = memoryFloat(some)
+	}
+	if vmstatErr == nil {
+		if pages, found := parseLinuxSwapInPages(string(vmstat)); found {
+			memory.SwapInPerS = linuxSwapRate.observe(pages, time.Now())
+		} else {
+			linuxSwapRate.reset()
+		}
+	} else {
+		linuxSwapRate.reset()
+	}
 	return &memory, nil
+}
+
+var linuxSwapRate swapInRateSampler
+
+type swapInRateSampler struct {
+	mu      sync.Mutex
+	pages   int64
+	at      time.Time
+	started bool
+}
+
+func (sampler *swapInRateSampler) observe(pages int64, at time.Time) *float64 {
+	sampler.mu.Lock()
+	defer sampler.mu.Unlock()
+	if !sampler.started || !at.After(sampler.at) || pages < sampler.pages {
+		sampler.pages, sampler.at, sampler.started = pages, at, true
+		return nil
+	}
+	seconds := at.Sub(sampler.at).Seconds()
+	rate := float64(pages-sampler.pages) / seconds
+	sampler.pages, sampler.at = pages, at
+	return memoryFloat(rate)
+}
+
+// reset drops the baseline after a read gap so the next successful sample
+// starts a fresh interval instead of dividing the counter increase by the
+// whole outage.
+func (sampler *swapInRateSampler) reset() {
+	sampler.mu.Lock()
+	defer sampler.mu.Unlock()
+	sampler.pages, sampler.at, sampler.started = 0, time.Time{}, false
+}
+
+func parseLinuxSwapInPages(vmstat string) (int64, bool) {
+	for _, line := range strings.Split(vmstat, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 2 && fields[0] == "pswpin" {
+			value, err := strconv.ParseInt(fields[1], 10, 64)
+			return value, err == nil && value >= 0
+		}
+	}
+	return 0, false
+}
+
+func parseDarwinSwapIns(vmstat string) (int64, bool) {
+	match := regexp.MustCompile(`(?m)^Swapins:\s*([0-9]+)\.?\s*$`).FindStringSubmatch(vmstat)
+	if len(match) != 2 {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(match[1], 10, 64)
+	return value, err == nil && value >= 0
+}
+
+func parseDarwinPressureLevel(value string) (int, bool) {
+	switch strings.TrimSpace(value) {
+	case "1": // memorystatus level: normal
+		return 0, true
+	case "2": // memorystatus level: warn
+		return 1, true
+	case "4": // memorystatus level: critical
+		return 2, true
+	default:
+		return 0, false
+	}
 }
 
 func parseDarwinMemoryPressure(output string) (HubHostMemory, bool) {
@@ -416,6 +534,7 @@ func parseLinuxHostMemory(meminfo, psi string) (HubHostMemory, bool) {
 	}
 	if psiSome, ok := parseLinuxPSISomeAvg10(psi); ok {
 		memory.PSISomeAvg10 = memoryFloat(psiSome)
+		memory.Pressure = memoryFloat(psiSome)
 	}
 	return memory, memory.valid()
 }

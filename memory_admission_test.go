@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -9,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -136,7 +138,7 @@ func TestHostMemoryPartialMeasurementsAreRetained(t *testing.T) {
 
 func TestPlacementPolicyMemoryDefaultsAndOverrides(t *testing.T) {
 	legacy, err := ParsePlacementPolicy([]byte(`{"local_machine":"host-a","spill_targets":["host-b"],"max_active_jobs":10,"load_ratio":0.6}`))
-	if err != nil || !sameMemoryFloat(legacy.MemoryFreePctMin, 30) || !sameMemoryFloat(legacy.SwapUsedMBMax, 1536) {
+	if err != nil || !sameMemoryFloat(legacy.MemoryFreePctMin, 30) || !sameMemoryFloat(legacy.SwapUsedMBMax, 1536) || !sameMemoryFloat(legacy.SwapInPerSMax, 10) || !sameMemoryFloat(legacy.PSISomeAvg10Max, 1) || !sameMemoryFloat(legacy.PressureLevelMin, 1) || legacy.capacityWeight("host-a") != 1 {
 		t.Fatalf("legacy policy lost memory defaults: %+v err=%v", legacy, err)
 	}
 	explicit, err := ParsePlacementPolicy([]byte(`{"local_machine":"host-a","spill_targets":["host-b"],"max_active_jobs":10,"load_ratio":0.6,"memory_free_pct_min":0,"swap_used_mb_max":17}`))
@@ -145,6 +147,96 @@ func TestPlacementPolicyMemoryDefaultsAndOverrides(t *testing.T) {
 	}
 	if _, err := ParsePlacementPolicy([]byte(`{"local_machine":"host-a","max_active_jobs":10,"load_ratio":0.6,"memory_free_pct_min":100.1}`)); err == nil {
 		t.Fatal("out-of-range memory threshold was accepted")
+	}
+}
+
+func TestPlacementMemoryLiveSignalsAndLegacyFallback(t *testing.T) {
+	cases := []struct {
+		name      string
+		memory    *HubHostMemory
+		pressured bool
+	}{
+		{name: "sticky swap with quiet live signals", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), PSISomeAvg10: memoryFloat(.1), Pressure: memoryFloat(.1), Source: "proc_meminfo"}},
+		{name: "swap in rate", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(11), Pressure: memoryFloat(.1), Source: "proc_meminfo"}, pressured: true},
+		{name: "linux PSI", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), PSISomeAvg10: memoryFloat(1.1), Pressure: memoryFloat(1.1), Source: "proc_meminfo"}, pressured: true},
+		{name: "mac pressure warn", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), Pressure: memoryFloat(1), Source: "vm_stat"}, pressured: true},
+		{name: "legacy PSI retains swap-used fallback", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), PSISomeAvg10: memoryFloat(.1), Source: "proc_meminfo"}, pressured: true},
+		{name: "legacy swap fallback", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), Source: "proc_meminfo"}, pressured: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hub := memoryPlacementHub(t, "host-a")
+			hub.nodes["host-a"].hostMemory = tc.memory
+			candidate := memoryCandidate(t, hub.makePlacement(memoryPlacementPolicy("host-a"), placementMetrics{}, "hub-only", time.Now()), "host-a")
+			if got := strings.Contains(candidate.Reason, "not_accepting(memory_pressure)"); got != tc.pressured {
+				t.Fatalf("pressure=%t candidate=%+v", got, candidate)
+			}
+		})
+	}
+}
+
+func TestPlacementCapacityWeightsRankCandidatesButDoNotOverrideRefusals(t *testing.T) {
+	hub := memoryPlacementHub(t, "host-a", "host-b")
+	policy := memoryPlacementPolicy("host-a", "host-b")
+	policy.CapacityWeight = map[string]float64{"host-a": 1, "host-b": 2}
+	result := hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now())
+	if result.Candidates[0].Machine != "host-b" || result.Candidates[0].CapacityWeight != 2 {
+		t.Fatalf("capacity weight did not rank idle candidate: %+v", result.Candidates)
+	}
+	hub.nodes["host-b"].accepting = false
+	policy.CapacityWeight["host-b"] = 10000
+	result = hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now())
+	if result.Decision != "host-a" {
+		t.Fatalf("weight overrode refusal: %+v", result)
+	}
+	for _, candidate := range result.Candidates {
+		if candidate.Machine == "host-b" && !strings.Contains(candidate.Reason, "not_accepting") {
+			t.Fatalf("refusal reason was lost: %+v", candidate)
+		}
+	}
+}
+
+func TestMemorySignalFixtureParsersAndUnavailableSources(t *testing.T) {
+	darwinSwapRate.reset()
+	linuxSwapRate.reset()
+	linuxVM := readMemoryFixture(t, "memory/linux-vmstat.txt")
+	if pages, ok := parseLinuxSwapInPages(string(linuxVM)); !ok || pages != 42 {
+		t.Fatalf("linux swap pages=%d ok=%t", pages, ok)
+	}
+	macVM := readMemoryFixture(t, "memory/macos-vm_stat.txt")
+	if pages, ok := parseDarwinSwapIns(string(macVM)); !ok || pages != 0 {
+		t.Fatalf("mac swap pages=%d ok=%t", pages, ok)
+	}
+	level := readMemoryFixture(t, "memory/macos-pressure-level.txt")
+	for _, tc := range []struct {
+		kernel, normalized int
+	}{{1, 0}, {2, 1}, {4, 2}} {
+		if pressure, ok := parseDarwinPressureLevel(strconv.Itoa(tc.kernel)); !ok || pressure != tc.normalized {
+			t.Fatalf("mac kernel pressure=%d normalized=%d ok=%t", tc.kernel, pressure, ok)
+		}
+	}
+	linuxPSI := readMemoryFixture(t, "memory/linux-psi.txt")
+	linuxMemory, ok := parseLinuxHostMemory("MemTotal: 1000 kB\nMemAvailable: 850 kB\nSwapTotal: 5000 kB\nSwapFree: 100 kB\n", string(linuxPSI))
+	if !ok || !sameMemoryFloat(linuxMemory.Pressure, .25) {
+		t.Fatalf("linux pressure parse=%+v ok=%t", linuxMemory, ok)
+	}
+	macMemory, _ := parseDarwinMemoryPressure(string(readMemoryFixture(t, "memory/macos-memory_pressure.txt")))
+	setDarwinLiveMemory(&macMemory, string(macVM), string(level), true)
+	if !sameMemoryFloat(macMemory.Pressure, 1) || macMemory.SwapInPerS != nil {
+		t.Fatalf("mac live fields=%+v", macMemory)
+	}
+	var sampler swapInRateSampler
+	first := sampler.observe(42, time.Unix(100, 0))
+	second := sampler.observe(62, time.Unix(102, 0))
+	if first != nil || !sameMemoryFloat(second, 10) {
+		t.Fatalf("swap-in interval rate first=%v second=%v", first, second)
+	}
+	if got, err := collectLinuxHostMemory(func(string) ([]byte, error) { return nil, errors.New("fixture unreadable") }); err == nil || got != nil {
+		t.Fatalf("unreadable Linux sources produced telemetry: %+v err=%v", got, err)
+	}
+	mac, err := collectDarwinHostMemory(context.Background(), func(context.Context, ...string) ([]byte, error) { return nil, errors.New("fixture unreadable") })
+	if err == nil || mac != nil {
+		t.Fatalf("unreadable macOS sources produced telemetry: %+v err=%v", mac, err)
 	}
 }
 
@@ -219,7 +311,7 @@ func TestPlacementMemoryPressureSpillsOrBecomesUnavailable(t *testing.T) {
 
 func TestMemoryFieldsAreExposedByPlacementAndNodesAPIs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "placement.json")
-	if err := os.WriteFile(path, []byte(`{"local_machine":"host-a","max_active_jobs":5,"load_ratio":0.5}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"local_machine":"host-a","max_active_jobs":5,"load_ratio":0.5,"capacity_weight":{"host-a":2}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "host-a": r6NodeAToken}, PlacementPolicyPath: path})
@@ -228,7 +320,7 @@ func TestMemoryFieldsAreExposedByPlacementAndNodesAPIs(t *testing.T) {
 	}
 	agent := &hubAgent{}
 	hub.connect("host-a", "fixture", "fixture", agent, true)
-	payload := []byte(`{"type":"event","kind":"heartbeat","payload":{"status":"alive","host_memory":{"free_pct":50,"compressed_mb":null,"swap_used_mb":0,"psi_some_avg10":null,"source":"proc_meminfo"}}}`)
+	payload := []byte(`{"type":"event","kind":"heartbeat","payload":{"status":"alive","host_memory":{"free_pct":50,"compressed_mb":null,"swap_used_mb":0,"psi_some_avg10":0.1,"swap_in_per_s":0,"pressure":0.1,"source":"proc_meminfo"}}}`)
 	hub.handleAgentMessage("host-a", "fixture", agent, payload)
 
 	placementRequest := httptest.NewRequest(http.MethodGet, "/v1/placement?class=worker", nil)
@@ -244,7 +336,7 @@ func TestMemoryFieldsAreExposedByPlacementAndNodesAPIs(t *testing.T) {
 	if err := json.NewDecoder(placementResponse.Body).Decode(&placement); err != nil || len(placement.Candidates) != 1 {
 		t.Fatalf("placement response=%q err=%v", placementResponse.Body.String(), err)
 	}
-	for _, field := range []string{"memory_free_pct", "swap_used_mb", "memory_known"} {
+	for _, field := range []string{"memory_free_pct", "swap_used_mb", "swap_in_per_s", "pressure", "capacity_weight", "memory_known"} {
 		if _, exists := placement.Candidates[0][field]; !exists {
 			t.Fatalf("placement omitted %s: %s", field, placementResponse.Body.String())
 		}
@@ -373,4 +465,201 @@ func readMemoryFixture(t *testing.T, name string) []byte {
 
 func sameMemoryFloat(value *float64, want float64) bool {
 	return value != nil && math.Abs(*value-want) < 1e-9
+}
+
+func TestLinuxSwapInRateResetsAfterReadFailure(t *testing.T) {
+	linuxSwapRate.reset()
+	collect := func(vmstat string, vmstatErr error) *HubHostMemory {
+		memory, err := collectLinuxHostMemory(func(path string) ([]byte, error) {
+			switch path {
+			case "/proc/meminfo":
+				return []byte("SwapTotal: 2097152 kB\nSwapFree: 524288 kB\n"), nil
+			case "/proc/vmstat":
+				return []byte(vmstat), vmstatErr
+			default:
+				return nil, errors.New("unavailable")
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return memory
+	}
+	if got := collect("pswpin 100\n", nil); got.SwapInPerS != nil {
+		t.Fatalf("first sample produced a rate: %+v", got.SwapInPerS)
+	}
+	if got := collect("", errors.New("read failed")); got.SwapInPerS != nil {
+		t.Fatalf("failed read produced a rate: %+v", got.SwapInPerS)
+	}
+	if got := collect("pswpin 300\n", nil); got.SwapInPerS != nil {
+		t.Fatalf("rate was computed across a read gap: %+v", *got.SwapInPerS)
+	}
+}
+
+func TestDarwinMemoryFallbackKeepsPrimarySwapInRate(t *testing.T) {
+	darwinSwapRate.reset()
+	pressure := []byte("The system has 4096 (1 pages with a page size of 4096).\nPages used by compressor: 10\n")
+	vmstat := readMemoryFixture(t, "memory/macos-vm_stat.txt")
+	run := func(_ context.Context, argv ...string) ([]byte, error) {
+		switch strings.Join(argv, " ") {
+		case "memory_pressure":
+			return pressure, nil
+		case "vm_stat":
+			return vmstat, nil
+		case "sysctl -n hw.memsize":
+			return []byte("34359738368"), nil
+		case "sysctl -n kern.memorystatus_vm_pressure_level":
+			return []byte("2"), nil
+		default:
+			return nil, errors.New("unexpected fixture command")
+		}
+	}
+	first, err := collectDarwinHostMemory(t.Context(), run)
+	if err != nil || first.Source != "vm_stat" || first.SwapInPerS != nil {
+		t.Fatalf("first fallback collection=%+v err=%v", first, err)
+	}
+	second, err := collectDarwinHostMemory(t.Context(), run)
+	if err != nil || second.SwapInPerS == nil || !sameMemoryFloat(second.SwapInPerS, 0) {
+		t.Fatalf("second fallback collection dropped the primary rate: %+v err=%v", second, err)
+	}
+}
+
+// parseHubHostsEquivalent mirrors runtug's parseHubHosts decode: a tolerant
+// unmarshal that reads only the fields it needs and ignores the rest.
+func parseHubHostsEquivalent(t *testing.T, raw []byte) []string {
+	t.Helper()
+	var p struct {
+		Candidates []json.RawMessage `json:"candidates"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("placement response did not decode: %v", err)
+	}
+	var names []string
+	for _, v := range p.Candidates {
+		var c struct {
+			Machine, Host, Target, Reason string
+			Connected                     *bool
+			LoadRatio                     *float64
+		}
+		var name string
+		if json.Unmarshal(v, &name) != nil {
+			if err := json.Unmarshal(v, &c); err != nil {
+				t.Fatalf("placement candidate did not decode: %v", err)
+			}
+			name = c.Machine
+			if name == "" {
+				name = c.Host
+			}
+			if name == "" {
+				name = c.Target
+			}
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// legacyPlacementCandidate is the pre-change candidate shape. A rolling
+// upgrade is safe only while a hub emitting new fields can still be decoded
+// by this strict shape — so the fields must stay off the wire unless a live
+// signal or configured weight activates them.
+type legacyPlacementCandidate struct {
+	Machine       string   `json:"machine"`
+	Score         float64  `json:"score"`
+	LoadRatio     float64  `json:"load_ratio,omitempty"`
+	Throttled     bool     `json:"throttled"`
+	ActiveJobs    int      `json:"active_jobs"`
+	Tasks         *int     `json:"tasks,omitempty"`
+	TaskSlots     int      `json:"task_slots,omitempty"`
+	Connected     bool     `json:"connected"`
+	MetricsKnown  bool     `json:"metrics_known"`
+	QuotaDecision *string  `json:"quota_decision,omitempty"`
+	QuotaReason   *string  `json:"quota_reason,omitempty"`
+	MemoryFreePct *float64 `json:"memory_free_pct"`
+	SwapUsedMB    *float64 `json:"swap_used_mb"`
+	MemoryKnown   bool     `json:"memory_known"`
+	HoldsActive   bool     `json:"holds_active"`
+	BurstReady    bool     `json:"burst_ready"`
+	Reason        string   `json:"reason"`
+}
+
+func TestPlacementWireGatesLiveMemoryFields(t *testing.T) {
+	hub := memoryPlacementHub(t, "host-a")
+	hub.nodes["host-a"].hostMemory = &HubHostMemory{FreePct: memoryFloat(50), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"}
+	raw, err := json.Marshal(hub.makePlacement(memoryPlacementPolicy("host-a"), placementMetrics{}, "hub-only", time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidates []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &struct {
+		Candidates *[]map[string]json.RawMessage `json:"candidates"`
+	}{Candidates: &candidates}); err != nil || len(candidates) != 1 {
+		t.Fatalf("placement wire=%s err=%v", raw, err)
+	}
+	for _, field := range []string{"swap_in_per_s", "pressure", "capacity_weight"} {
+		if _, exists := candidates[0][field]; exists {
+			t.Fatalf("quiet node emitted %s: %s", field, raw)
+		}
+	}
+	candidateRaw, err := json.Marshal(candidates[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy legacyPlacementCandidate
+	strict := json.NewDecoder(bytes.NewReader(candidateRaw))
+	strict.DisallowUnknownFields()
+	if err := strict.Decode(&legacy); err != nil || legacy.Machine != "host-a" {
+		t.Fatalf("legacy strict decoder rejected quiet candidate: %v", err)
+	}
+	if names := parseHubHostsEquivalent(t, raw); len(names) != 1 || names[0] != "host-a" {
+		t.Fatalf("tolerant decode lost the candidate: %v", names)
+	}
+
+	hub.nodes["host-a"].hostMemory = &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(0), SwapInPerS: memoryFloat(0), Pressure: memoryFloat(.1), Source: "proc_meminfo"}
+	policy := memoryPlacementPolicy("host-a")
+	policy.CapacityWeight = map[string]float64{"host-a": 2}
+	raw, err = json.Marshal(hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &struct {
+		Candidates *[]map[string]json.RawMessage `json:"candidates"`
+	}{Candidates: &candidates}); err != nil || len(candidates) != 1 {
+		t.Fatalf("placement wire=%s err=%v", raw, err)
+	}
+	for _, field := range []string{"swap_in_per_s", "pressure", "capacity_weight"} {
+		if _, exists := candidates[0][field]; !exists {
+			t.Fatalf("live signal or weight did not emit %s: %s", field, raw)
+		}
+	}
+	if names := parseHubHostsEquivalent(t, raw); len(names) != 1 || names[0] != "host-a" {
+		t.Fatalf("tolerant decode lost the candidate: %v", names)
+	}
+}
+
+// A failed vm_stat read restarts the Darwin sampler, so no rate is ever
+// computed across the gap.
+func TestDarwinSwapInRateResetsAfterReadFailure(t *testing.T) {
+	darwinSwapRate.reset()
+	collect := func(vmstat string, vmstatErr error) *HubHostMemory {
+		memory, _ := collectDarwinHostMemory(context.Background(), func(_ context.Context, args ...string) ([]byte, error) {
+			switch args[0] {
+			case "memory_pressure":
+				return []byte("System-wide memory free percentage: 60%\n"), nil
+			case "vm_stat":
+				return []byte(vmstat), vmstatErr
+			}
+			return nil, errors.New("unavailable")
+		})
+		return memory
+	}
+	if got := collect("Swapins:                                100.\n", nil); got == nil || got.SwapInPerS != nil {
+		t.Fatalf("first sample: %+v", got)
+	}
+	if got := collect("", errors.New("vm_stat failed")); got == nil || got.SwapInPerS != nil {
+		t.Fatalf("failed read produced a rate: %+v", got)
+	}
+	if got := collect("Swapins:                                300.\n", nil); got == nil || got.SwapInPerS != nil {
+		t.Fatalf("rate was computed across a read gap: %+v", got)
+	}
 }

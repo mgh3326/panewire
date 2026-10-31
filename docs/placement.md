@@ -19,6 +19,10 @@ jobs reach `max_active_jobs`. `spill_targets` are considered in policy order.
   "load_ratio": 0.5,
   "memory_free_pct_min": 30,
   "swap_used_mb_max": 1536,
+  "swap_in_per_s_max": 10,
+  "psi_some_avg10_max": 1,
+  "pressure_level_min": 1,
+  "capacity_weight": {"mac-work": 1.0, "desktop": 2.0},
   "wake_on_spill": false,
   "machines": {
     "desktop": {"task_slots": 2}
@@ -163,9 +167,20 @@ only watches a configured path. The procedure is therefore:
 `memory_free_pct_min` and `swap_used_mb_max` are optional admission thresholds.
 They default to 30 percent and 1536 MB respectively; an explicit zero remains
 zero. A candidate is excluded when reported free memory is below the first
-threshold or reported swap use is above the second. Missing memory telemetry is
-fail-open, so older nodes and individual unavailable measurements keep the
-existing placement behavior.
+threshold. Live `swap_in_per_s` above `swap_in_per_s_max` (default 10 pages per
+second), Linux `pressure`/`psi_some_avg10` above `psi_some_avg10_max` (default
+1 percent), or macOS `pressure` at or above `pressure_level_min` (default 1,
+warn) also excludes a candidate. If either new live field is present, sticky
+`swap_used_mb` alone does not exclude it. If neither additive live field is
+present, the hub preserves the older `swap_used_mb_max` rule (default 1536 MB),
+including reports that contain only the legacy `psi_some_avg10` field. A low
+`free_pct` remains an exclusion in either case. Missing telemetry is fail-open.
+
+`capacity_weight` is an optional map from machine id to a positive relative
+capacity weight; it defaults to 1.0 per machine. The score multiplies the
+candidate's load/job headroom by that weight, so a faster idle machine ranks
+higher. It changes ranking only: disconnected, non-accepting, memory-pressured,
+or otherwise refused candidates remain unusable regardless of weight.
 
 The hub queries `PANEWIRE_PROM_URL`'s `/api/v1/query` endpoint with the
 five-minute CPU busy fraction and thermal speed-limit PromQL queries. The
