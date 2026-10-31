@@ -577,6 +577,18 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 	if err != nil {
 		return nodeOutcomeGitFailed
 	}
+	expected := strings.ToLower(args.Sha)
+	originTip := ""
+	if out, err := git(ctx, "-C", clone, "rev-parse", "--verify", "refs/remotes/origin/"+args.Branch+"^{commit}"); err == nil {
+		originTip = strings.TrimSpace(string(out))
+	}
+	if expected == "" {
+		if originTip == "" {
+			// No sha and no origin branch: nothing names the tip to prepare.
+			return nodePrepareBranchElsewhere
+		}
+		expected = strings.ToLower(originTip)
+	}
 	var atDir *nodeWorktreeEntry
 	for i := range entries {
 		if nodeSamePath(entries[i].Path, dir) {
@@ -599,28 +611,16 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		if !clean {
 			return nodeOutcomeDirty
 		}
-		if args.Sha != "" {
-			head, err := nodeGitHead(ctx, git, dir)
-			if err != nil {
-				return nodeOutcomeGitFailed
-			}
-			if !strings.EqualFold(head, args.Sha) {
-				return nodePrepareBranchElsewhere
-			}
+		// Reuse needs the same expected tip as the create path below: the
+		// stated sha, else the freshly fetched origin/<branch>.
+		head, err := nodeGitHead(ctx, git, dir)
+		if err != nil {
+			return nodeOutcomeGitFailed
 		}
-		return nodePrepareReused
-	}
-	expected := strings.ToLower(args.Sha)
-	originTip := ""
-	if out, err := git(ctx, "-C", clone, "rev-parse", "--verify", "refs/remotes/origin/"+args.Branch+"^{commit}"); err == nil {
-		originTip = strings.TrimSpace(string(out))
-	}
-	if expected == "" {
-		if originTip == "" {
-			// No sha and no origin branch: nothing names the tip to prepare.
+		if !strings.EqualFold(head, expected) {
 			return nodePrepareBranchElsewhere
 		}
-		expected = strings.ToLower(originTip)
+		return nodePrepareReused
 	}
 	if _, err := git(ctx, "-C", clone, "show-ref", "--verify", "--quiet", "refs/heads/"+args.Branch); err == nil {
 		out, err := git(ctx, "-C", clone, "rev-parse", "--verify", "refs/heads/"+args.Branch+"^{commit}")

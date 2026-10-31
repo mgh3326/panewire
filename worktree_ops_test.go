@@ -186,6 +186,14 @@ func TestNodeWorktreePrepareBranch(t *testing.T) {
 		t.Fatalf("second prepare outcome=%v", result["outcome"])
 	}
 
+	// A reused worktree must sit at the expected tip: a local commit that
+	// diverged from origin/feat is refused, not silently reused.
+	nodeGit(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "--allow-empty", "-m", "local")
+	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, args); result["outcome"] != nodePrepareBranchElsewhere {
+		t.Fatalf("diverged reuse outcome=%v", result["outcome"])
+	}
+	nodeGit(t, dir, "reset", "-q", "--hard", fixture.feat)
+
 	// The branch is checked out in repo.feat; a second directory for it is
 	// refused, and so is a dir parked on another branch.
 	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, fixture.prepareArgs("branch", "feat", "", "", "repo.second")); result["outcome"] != nodePrepareBranchElsewhere {
