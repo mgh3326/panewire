@@ -188,7 +188,7 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 
 func TestPW6SpawnScopeIsMachineBound(t *testing.T) {
 	_, server := pw2Hub(t, map[string]string{"svc-machine": "spawn@node-a", "svc-no-spawn": "wake@*"}, "", nil)
-	body := `{"request_id":"00000000-0000-4000-8000-000000000095","machine":"node-a","cwd_key":"repo","brief":{"inline":"brief"},"args":[],"wait_seconds":1}`
+	body := `{"request_id":"00000000-0000-4000-8000-000000000095","machine":"node-a","cwd_key":"repo","brief":{"inline":"brief"},"checkout":{"origin":"https://github.com/acme/repo.git","mode":"branch","branch":"feature/pw6","dir":"repo-job"},"args":[],"wait_seconds":1}`
 	allowed := pw2Caller{"svc-machine", "svc-machine", pw2ServiceToken("svc-machine")}
 	status, _ := allowed.do(t, server, http.MethodPost, "/v1/spawn", body)
 	if status != http.StatusServiceUnavailable {
