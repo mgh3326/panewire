@@ -103,6 +103,41 @@ Request:
   `spawn.result` `{request_id, machine, rc}` (no brief body or argument
   values).
 
+### Rollout order and rollback (`spawn_v2` hello)
+
+The hub's hello parser accepts only a fixed set of fields. A hub from before
+`spawn_v2` therefore drops a hello that carries `capabilities`: it registers no
+node and never answers that node's ping. The node must not depend on the hub
+being upgraded first, so it probes its own registration:
+
+1. The node sends `hello` with `capabilities:["spawn_v2"]`, immediately followed
+   by a `ping`. A hub answers a ping with `pong` only for a node whose hello it
+   accepted, so the `pong` is the hello's acknowledgement. No extra wait is
+   added: the node keeps serving while it waits.
+2. If no `pong` arrives within 5 seconds, the node sends a second `hello`
+   without `capabilities` (same `machine_id`, `version`, `accepting`), repeats
+   its heartbeat and pending job-completion state, and pings again. That
+   registers it on an old hub. The node then behaves as a node without
+   `spawn_v2` for the rest of that connection.
+3. The retry happens once per connection. If the capability-free hello is not
+   acknowledged either, the node logs a warning and keeps the session as it did
+   before; the cause is not the capabilities field.
+4. The next reconnect starts at step 1 again, so a node picks `spawn_v2` back up
+   as soon as it reconnects to a hub that understands it.
+
+| Order | Result |
+|---|---|
+| Hub upgraded first, then nodes | The hello with `capabilities` is accepted; one hello, no fallback. |
+| Node upgraded first (old hub) | Registers via the fallback hello after about 5 seconds; An old hub has no `spawn_v2` handling, so `checkout` and `brief.doc` spawns are unavailable until the hub is upgraded. |
+| Hub rolled back after nodes upgraded | Connected nodes reconnect, fall back as above, and stay on the fleet without `spawn_v2`. Upgrading the hub again and reconnecting the nodes restores the capability. |
+
+Limits: the fallback relies on the old hub dropping the hello and leaving the
+connection open, as the current hub does. Events a node emits during the roughly
+5 second window before the fallback hello are written to a hub that has not
+registered it and are dropped by that hub; heartbeat and job-completion state
+are repeated immediately after the fallback hello. The recommended order is
+still hub first, then nodes.
+
 ## B. node — `job.spawn` reception
 
 - Node configuration `~/.config/panewire/spawn.json` — optional
