@@ -436,6 +436,9 @@ func nodeGitHead(ctx context.Context, git relayCommandRunner, dir string) (strin
 // the caller's regenerable allowlist. A glob containing a slash must match
 // the whole path; a slash-free one may match only the last segment.
 func nodeRegenerable(globs []string, name string) bool {
+	// git reports a wholly ignored directory as one "dir/" entry; only a
+	// directory pattern (one ending in "/") may approve deleting all of it.
+	dirEntry := strings.HasSuffix(name, "/")
 	p := strings.Trim(name, "/")
 	base := p
 	if i := strings.LastIndex(p, "/"); i >= 0 {
@@ -445,7 +448,7 @@ func nodeRegenerable(globs []string, name string) bool {
 		// The slash test reads the glob as given: "logs/" or "/build" is a
 		// whole-path pattern, not a last-segment one.
 		g := strings.Trim(raw, "/")
-		if g == "" {
+		if g == "" || (dirEntry && !strings.HasSuffix(raw, "/")) {
 			continue
 		}
 		match := base
@@ -613,6 +616,10 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		originTip = strings.TrimSpace(string(out))
 	}
 	if expected == "" {
+		if originTip == "" {
+			// No sha and no origin branch: nothing names the tip to prepare.
+			return nodePrepareBranchElsewhere
+		}
 		expected = strings.ToLower(originTip)
 	}
 	if _, err := git(ctx, "-C", clone, "show-ref", "--verify", "--quiet", "refs/heads/"+args.Branch); err == nil {

@@ -210,9 +210,14 @@ func TestNodeWorktreePrepareBranch(t *testing.T) {
 	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, fixture.prepareArgs("branch", "localdev", fixture.main, "", "repo.dev")); result["outcome"] != nodePrepareBranchElsewhere {
 		t.Fatalf("diverged local branch outcome=%v", result["outcome"])
 	}
-	// With no expected tip at all the local branch is taken as-is.
-	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, fixture.prepareArgs("branch", "localdev", "", "", "repo.dev")); result["outcome"] != nodePreparePrepared {
-		t.Fatalf("local branch prepare outcome=%v", result["outcome"])
+	// With no sha and no origin branch nothing names the tip: refuse rather
+	// than prepare a local-only branch the remote never saw.
+	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, fixture.prepareArgs("branch", "localdev", "", "", "repo.dev")); result["outcome"] != nodePrepareBranchElsewhere {
+		t.Fatalf("origin-less local branch outcome=%v", result["outcome"])
+	}
+	// The same local branch is prepared when the caller names its tip.
+	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, fixture.prepareArgs("branch", "localdev", fixture.feat, "", "repo.dev")); result["outcome"] != nodePreparePrepared {
+		t.Fatalf("local branch with sha outcome=%v", result["outcome"])
 	}
 }
 
@@ -826,5 +831,12 @@ func TestNodeRegenerableGlobRules(t *testing.T) {
 	}
 	if !nodeRegenerable([]string{"logs/"}, "logs") || !nodeRegenerable([]string{"*.log"}, "a/b/c.log") {
 		t.Fatal("expected matches failed")
+	}
+	// A wholly ignored directory ("dir/") needs a directory pattern.
+	if nodeRegenerable([]string{"*.log"}, "cache.log/") {
+		t.Fatal("a file glob approved a whole ignored directory")
+	}
+	if !nodeRegenerable([]string{"node_modules/"}, "node_modules/") {
+		t.Fatal("a directory glob must approve its directory entry")
 	}
 }
