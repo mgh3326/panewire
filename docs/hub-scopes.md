@@ -35,7 +35,7 @@ name one lane.
 | Scope | Grants |
 | --- | --- |
 | `nodes.agents.read` | `GET /v1/nodes`, `GET /v1/nodes/agents`, `GET /v1/session-reap` |
-| `node.command:<op>@<machine>` or `@*` | `POST /v1/nodes/{machine}/command` with that op (`agents.list`, `pane.capture`, `pane.close`, `worktree.inspect`) |
+| `node.command:<op>@<machine>` or `@*` | `POST /v1/nodes/{machine}/command` with that op (`agents.list`, `pane.capture`, `pane.close`, `worktree.inspect`, `worktree.prepare`, `worktree.remove`, `quota.refresh`) |
 | `spawn@<machine>` or `@*` | `POST /v1/spawn` for that machine, and `GET /v1/spawn/{id}` for a request on it |
 | `wake@<machine>` or `@*` | `POST /v1/nodes/wake` for that machine |
 | `inbox.read:<lane>` | `GET /v1/inbox`, `/v1/inbox/count`, `/v1/inbox/wait` and `POST /v1/inbox/{id}/read` with `?lane=<lane>` |
@@ -54,7 +54,7 @@ body is validated before the scope check, so a malformed request answers `400`.
 The `svc-mergewake` line for hub reap (operator decision D1: every machine):
 
 ```sh
-HUB_SCOPES_svc-mergewake=nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*
+HUB_SCOPES_svc-mergewake=nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*,node.command:worktree.remove@*
 ```
 
 ## Reload
@@ -78,7 +78,7 @@ On the hub VM:
 
 ```sh
 deploy/hub-token-mint.sh svc-mergewake ./svc-mergewake.env \
-  'nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*'
+  'nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*,node.command:worktree.remove@*'
 ```
 
 The script generates a 256-bit random token, writes the client env file

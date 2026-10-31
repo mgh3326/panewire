@@ -145,6 +145,104 @@ fragment, and an scp-style remote (`[user[:secret]@]host:path`) loses
 everything up to its last `@` before the first `/`, so a token embedded in
 either form never leaves it.
 
+### `worktree.prepare`
+
+`args: {origin, mode, branch, sha, fetch, dir}`. Prepares a worktree of a
+clone under the node's work root — set in the node's own `spawn.json`
+`work_root`, never by the caller — with the clone at `<work_root>/<repo>`
+and the worktree at `<work_root>/<dir>`. `dir` is a single safe path
+segment, `origin` carries no userinfo (URL userinfo, or an `@` outside an
+absolute local path, is refused), `sha` is 40-hex, and `fetch` is a closed
+shape: `refs/heads/<branch>` or `pull/<n>/head`.
+
+- `mode:"branch"` — runtug#18's branch behaviour on the node. `branch` is
+  required, `fetch` must be stated empty (the whole remote is fetched), and
+  `sha`, when given, names the expected tip. A worktree already at `dir` is
+  reused only when it is on that branch and clean; the branch checked out
+  elsewhere, a `dir` parked on another branch or commit, and a local branch
+  pointing at a commit other than the expected tip all refuse; without
+  `sha` the expected tip is the freshly fetched `origin/<branch>`, so a local
+  branch that diverged from origin, or has no origin branch at all, refuses too. A missing
+  local branch is created tracking `origin/<branch>`, which must exist.
+- `mode:"detached"` — `sha` and `fetch` are required and `branch` must be
+  stated empty. The node runs `git fetch origin <fetch>`, requires the
+  fetched `FETCH_HEAD` to resolve to `sha`, and runs `git worktree add
+  --detach <dir> <sha>`. An existing worktree is reused only when detached
+  at exactly that commit and clean.
+
+A clone that already exists keeps its identity: a `git remote get-url
+origin` that decodes to a different `owner/repo` than the argument — a fork
+sharing the name — is `origin-mismatch`; one that cannot be read at all is
+refused the same way. A missing clone is created with `git clone <origin>`.
+
+| `outcome` | Meaning |
+| --- | --- |
+| `prepared` | The worktree was created; `worktree` describes it. |
+| `reused` | The existing worktree at `dir` already matched. |
+| `busy` | Another git op holds the per-clone lock; `retry_after_s` is set. |
+| `branch-elsewhere` | The branch is checked out elsewhere, `dir` sits on another branch/commit, or the branch is not on origin where required. |
+| `sha-missing` | The fetched ref does not resolve to `sha`, or the commit is not in the clone after fetching. |
+| `origin-mismatch` | The existing clone tracks a different owner/repo. |
+| `dirty` | The existing worktree at `dir` has uncommitted or untracked files. |
+| `locked` | The existing worktree at `dir` is locked (`git worktree lock`); it is never reused. |
+| `git-failed` | A git step failed. |
+| `git_too_old` | The node's git is older than 2.31, the floor `worktree.inspect` documents. |
+
+Every op that touches one clone (`worktree.prepare`, `worktree.remove`)
+takes the exclusive per-clone lock `<clone>.git-op.lock`, waiting at most
+60 s before answering `busy`. A node with no configured work root answers
+`work_root_unset`.
+
+### `worktree.remove`
+
+`args: {cwd, expect_head, base, regenerable}` — `cwd` inside the linked
+worktree, `expect_head` the 40-hex commit it must still be on, `base` the
+merged-into branch (a `regenerable` pattern must contain a literal
+character: wildcard-only patterns such as `*` are invalid_args; a glob with a
+`/` anywhere matches the whole path; a wholly ignored directory, reported by git as one `dir/` entry, is approved only by a pattern ending in `/`), and `regenerable` an allowlist of ignored paths that
+may be deleted with the worktree (a glob containing `/` matches the whole
+path, a slash-free one matches the last segment). The node re-resolves the
+worktree under the per-clone lock, then removes it only when all hold: the
+resolved worktree path and common git dir are under the node's configured
+work root, it appears in `git worktree list`, is not locked, is not
+detached, is clean, every ignored file matches `regenerable`, the branch is
+merged into `origin/<base>` or fully pushed to `origin/<branch>` (both judged after a
+`git fetch --prune origin`, whose failure answers `git-failed`; a local `base` ref is never proof, and a
+`base` equal to the branch never counts), and — re-read immediately before
+removal — no pane is live in it (the ignored-file scan and the pane check are the last reads; a non-pane process writing an ignored file between them and the removal is a residual window this op cannot fence). It then runs `git worktree remove` and
+`git branch -d`; never `--force` or `-D`.
+
+The per-clone lock is `flock` on macOS and Linux, released by the kernel
+when a holder dies. Other platforms use an exclusive-create file instead; a
+crashed holder leaves `<clone>.git-op.lock` behind and every op on that clone
+answers `busy`. Recovery: confirm no `panewire` process for that node is
+running a git op on the clone, then delete the lock file.
+
+| `outcome` | Meaning |
+| --- | --- |
+| `removed` | Worktree removed and `git branch -d` attempted; `worktree` describes what was removed. |
+| `worktree-gone` | `cwd` is not a linked worktree. |
+| `worktree-changed` | HEAD or common repository differs from the first inspection or `expect_head`. |
+| `outside-work-root` | The resolved worktree path or common git dir is outside the node's configured work root. |
+| `unregistered` | Resolves as a worktree but is not in `git worktree list`. |
+| `locked` | `git worktree lock` holds it. |
+| `detached` | Detached HEAD: no branch to delete. |
+| `status-check-failed` | `git status` could not be read. |
+| `dirty` | Uncommitted or untracked files. |
+| `ignored-files` | Ignored files not in `regenerable`; `files` names them. |
+| `unmerged-or-unpushed` | The branch is neither merged into `origin/<base>` nor fully pushed. |
+| `pane-in-use` | A pane (agent or shell) still sits inside the worktree. |
+| `pane-scan-failed` | `herdr pane list` failed; usage is unknown so removal refuses. |
+| `busy` / `git-failed` / `git_too_old` | As in `worktree.prepare`. |
+
+The refusal outcomes mirror mergewake's reap receipt reasons verbatim.
+
+### `quota.refresh`
+
+`args: {pool}` — `pool` matches `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`. A
+closed call to `pacelever refresh <pool>`; no other argv is reachable.
+Result `{"outcome":"refreshed"}`; a failed run answers `refresh_failed`.
+
 ## Wire
 
 Hub to node:
@@ -161,7 +259,8 @@ Node to hub, exactly one of `result` or `error`:
 ```
 
 Node error codes are a closed set: `invalid_args`, `herdr_failed`,
-`close_failed`, `capture_failed`, `jobs_root_unset`, `result_too_large`. A
+`close_failed`, `capture_failed`, `jobs_root_unset`, `work_root_unset`,
+`refresh_failed`, `result_too_large`. A
 result must fit the hub's 32 KiB per-message limit; a larger one answers
 `result_too_large`. The hub re-encodes each result through its op's shape,
 drops one outside it, and accepts an answer only from the machine and
