@@ -300,7 +300,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		}
 		switch result.Outcome {
 		case nodeRemoveRemoved:
-			valid = result.Worktree != nil && result.RetryAfterS == 0
+			valid = result.Worktree != nil && result.Worktree.Head != "" && result.RetryAfterS == 0 && result.Files == nil
 		case nodeOutcomeBusy:
 			valid = result.RetryAfterS > 0 && result.Worktree == nil && result.Files == nil
 		case nodeRemoveIgnoredFiles:

@@ -788,3 +788,24 @@ func TestNodeWorktreeIgnoredRawNames(t *testing.T) {
 		t.Fatalf("ignored = %q", got)
 	}
 }
+
+// A symlink at <work_root>/<repo> that leads outside the work root is
+// refused before any mutating git command runs against the target.
+func TestNodeWorktreePrepareCloneSymlinkOutsideRoot(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	outside := filepath.Join(t.TempDir(), "repo")
+	nodeGit(t, fixture.root, "clone", "-q", fixture.origin, outside)
+	if err := os.RemoveAll(fixture.clone); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, fixture.clone); err != nil {
+		t.Fatal(err)
+	}
+	result, code := nodeRun(t, fixture.client(), nodeCommandWorktreePrepare, fixture.prepareArgs("detached", "", fixture.feat, "pull/1/head", "repo.job"))
+	if code != "" || result["outcome"] != nodePrepareOriginMismatch {
+		t.Fatalf("outcome=%v code=%q", result["outcome"], code)
+	}
+	if _, err := os.Stat(filepath.Join(fixture.workRoot, "repo.job")); !os.IsNotExist(err) {
+		t.Fatalf("worktree created through an outside clone: %v", err)
+	}
+}

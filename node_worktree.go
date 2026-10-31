@@ -507,6 +507,9 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	defer release()
 
 	switch _, err := os.Stat(clone); {
+	case err == nil && !nodePathWithin(workRoot, clone):
+		// A symlink at <work_root>/<repo> must not lead git outside the root.
+		return nodeWorktreePrepareResult{Outcome: nodePrepareOriginMismatch}, ""
 	case err == nil:
 		// The clone's own origin is its identity: a same-named directory
 		// tracking a different owner/repo (a fork sharing the name) is a
@@ -572,6 +575,9 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		}
 	}
 	if atDir != nil {
+		if atDir.Locked {
+			return nodeOutcomeDirty
+		}
 		if atDir.Branch != args.Branch {
 			return nodePrepareBranchElsewhere
 		}
@@ -650,6 +656,9 @@ func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayComma
 		}
 	}
 	if atDir != nil {
+		if atDir.Locked {
+			return nodeOutcomeDirty
+		}
 		head, err := nodeGitHead(ctx, git, dir)
 		if err != nil {
 			return nodeOutcomeGitFailed
@@ -746,21 +755,16 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	if !clean {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeDirty}, ""
 	}
+	// origin/* refs are a cache: refresh them before they prove "merged" or
+	// "pushed", and fail closed when the remote cannot be read.
+	if _, err := git(ctx, "-C", main, "fetch", "--prune", "--no-tags", "origin"); err != nil {
+		return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnmerged}, ""
+	}
 	if !nodeBranchReleased(ctx, git, main, entry.Branch, args.Base) {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnmerged}, ""
 	}
-	// The pane list is a stale snapshot the moment it is read, so the usage
-	// check re-reads it immediately before the removal itself.
-	inUse, err := client.nodePaneInUse(ctx, worktree.Path)
-	if err != nil {
-		return nodeWorktreeRemoveResult{Outcome: nodeRemovePaneScanFailed}, ""
-	}
-	if inUse {
-		return nodeWorktreeRemoveResult{Outcome: nodeRemovePaneInUse}, ""
-	}
-	// Ignored files are read last, right before removal, so the window in
-	// which a process can add one the allowlist never saw is as short as
-	// the lock and the live-pane check allow.
+	// Ignored files, then live panes, are read last, right before removal,
+	// so the window for a new file or a new pane is as short as possible.
 	ignored, err := nodeWorktreeIgnored(ctx, git, worktree.Path)
 	if err != nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveStatusCheckFailed}, ""
@@ -780,6 +784,15 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 			reported = reported[:64]
 		}
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveIgnoredFiles, Files: reported}, ""
+	}
+	// The pane list is a stale snapshot the moment it is read, so the usage
+	// check re-reads it immediately before the removal itself.
+	inUse, err := client.nodePaneInUse(ctx, worktree.Path)
+	if err != nil {
+		return nodeWorktreeRemoveResult{Outcome: nodeRemovePaneScanFailed}, ""
+	}
+	if inUse {
+		return nodeWorktreeRemoveResult{Outcome: nodeRemovePaneInUse}, ""
 	}
 	if _, err := git(ctx, "-C", main, "worktree", "remove", worktree.Path); err != nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
