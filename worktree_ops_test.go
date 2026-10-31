@@ -756,7 +756,7 @@ func TestNodeCloneRemoteRepoAcceptsSSHForms(t *testing.T) {
 		}
 	}
 	// A query or fragment could carry a credential into the clone's config.
-	for _, raw := range []string{":fleet/repo", "https://example.invalid/fleet/repo.git?token=x", "https://example.invalid/fleet/repo.git?", "https://example.invalid/fleet/repo.git#x"} {
+	for _, raw := range []string{":fleet/repo", "https://example.invalid/fleet/repo%5c..%5cvictim.git", `https://example.invalid/fleet/re\\po.git`, "https://example.invalid/fleet/c:repo.git", "https://example.invalid/fleet/repo.git?token=x", "https://example.invalid/fleet/repo.git?", "https://example.invalid/fleet/repo.git#x"} {
 		if _, ok := nodeOriginRepo(raw); ok {
 			t.Fatalf("%s must be refused", raw)
 		}

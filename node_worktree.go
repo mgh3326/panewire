@@ -236,6 +236,11 @@ func nodeOriginPathSegments(p string) []string {
 		if seg == "." || seg == ".." {
 			return nil
 		}
+		// A segment becomes a directory name under the work root: it may
+		// hold no path syntax of any platform (backslash, drive colon).
+		if strings.ContainsAny(seg, "\\:") {
+			return nil
+		}
 		if seg != "" {
 			out = append(out, seg)
 		}
@@ -509,6 +514,11 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	}
 	repo := ownerRepo[strings.IndexByte(ownerRepo, '/')+1:]
 	clone := filepath.Join(workRoot, repo)
+	// The clone must be a direct child of the work root before anything is
+	// created there.
+	if filepath.Dir(clone) != filepath.Clean(workRoot) || filepath.Base(clone) != repo {
+		return nil, "invalid_args"
+	}
 	if strings.EqualFold(args.Dir, repo) {
 		// The job worktree may never be the clone's own main worktree.
 		return nil, "invalid_args"
