@@ -220,13 +220,17 @@ type PlacementCandidate struct {
 	MetricsKnown bool `json:"metrics_known"`
 	// QuotaDecision/QuotaReason are retired; kept decodable (and unemitted
 	// when absent) so a new client still reads an old hub's candidates.
-	QuotaDecision  *string  `json:"quota_decision,omitempty"`
-	QuotaReason    *string  `json:"quota_reason,omitempty"`
-	MemoryFreePct  *float64 `json:"memory_free_pct"`
-	SwapUsedMB     *float64 `json:"swap_used_mb"`
-	SwapInPerS     *float64 `json:"swap_in_per_s"`
-	Pressure       *float64 `json:"pressure"`
-	CapacityWeight float64  `json:"capacity_weight"`
+	QuotaDecision *string  `json:"quota_decision,omitempty"`
+	QuotaReason   *string  `json:"quota_reason,omitempty"`
+	MemoryFreePct *float64 `json:"memory_free_pct"`
+	SwapUsedMB    *float64 `json:"swap_used_mb"`
+	// SwapInPerS, Pressure and CapacityWeight serialize only when a node
+	// reports the live signal or the policy weights the machine; candidates
+	// without them keep the legacy wire byte-identical so older CLI decoders
+	// (DisallowUnknownFields) do not reject the response.
+	SwapInPerS     *float64 `json:"swap_in_per_s,omitempty"`
+	Pressure       *float64 `json:"pressure,omitempty"`
+	CapacityWeight float64  `json:"capacity_weight,omitempty"`
 	MemoryKnown    bool     `json:"memory_known"`
 	HoldsActive    bool     `json:"holds_active"`
 	BurstReady     bool     `json:"burst_ready"`
@@ -623,6 +627,10 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 			reasons = append(reasons, "available")
 		}
 		capacityWeight := policy.capacityWeight(machine)
+		var weightField float64
+		if _, weighted := policy.CapacityWeight[machine]; weighted {
+			weightField = capacityWeight
+		}
 		score := placementScoreBase(load, jobs, policy.power(machine)) * capacityWeight
 		if !connected {
 			score -= 1000
@@ -652,7 +660,7 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 			tasksField = new(int)
 			*tasksField = tasks
 		}
-		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, SwapInPerS: swapInPerS, Pressure: pressure, CapacityWeight: capacityWeight, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ","), slotFull: slotFull})
+		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, SwapInPerS: swapInPerS, Pressure: pressure, CapacityWeight: weightField, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ","), slotFull: slotFull})
 	}
 	h.mu.Unlock()
 	decision := policy.LocalMachine

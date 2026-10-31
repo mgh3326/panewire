@@ -1,6 +1,7 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -196,6 +197,8 @@ func TestPlacementCapacityWeightsRankCandidatesButDoNotOverrideRefusals(t *testi
 }
 
 func TestMemorySignalFixtureParsersAndUnavailableSources(t *testing.T) {
+	darwinSwapRate.reset()
+	linuxSwapRate.reset()
 	linuxVM := readMemoryFixture(t, "memory/linux-vmstat.txt")
 	if pages, ok := parseLinuxSwapInPages(string(linuxVM)); !ok || pages != 42 {
 		t.Fatalf("linux swap pages=%d ok=%t", pages, ok)
@@ -308,7 +311,7 @@ func TestPlacementMemoryPressureSpillsOrBecomesUnavailable(t *testing.T) {
 
 func TestMemoryFieldsAreExposedByPlacementAndNodesAPIs(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "placement.json")
-	if err := os.WriteFile(path, []byte(`{"local_machine":"host-a","max_active_jobs":5,"load_ratio":0.5}`), 0600); err != nil {
+	if err := os.WriteFile(path, []byte(`{"local_machine":"host-a","max_active_jobs":5,"load_ratio":0.5,"capacity_weight":{"host-a":2}}`), 0600); err != nil {
 		t.Fatal(err)
 	}
 	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": r6OperatorToken, "host-a": r6NodeAToken}, PlacementPolicyPath: path})
@@ -462,4 +465,174 @@ func readMemoryFixture(t *testing.T, name string) []byte {
 
 func sameMemoryFloat(value *float64, want float64) bool {
 	return value != nil && math.Abs(*value-want) < 1e-9
+}
+
+func TestLinuxSwapInRateResetsAfterReadFailure(t *testing.T) {
+	linuxSwapRate.reset()
+	collect := func(vmstat string, vmstatErr error) *HubHostMemory {
+		memory, err := collectLinuxHostMemory(func(path string) ([]byte, error) {
+			switch path {
+			case "/proc/meminfo":
+				return []byte("SwapTotal: 2097152 kB\nSwapFree: 524288 kB\n"), nil
+			case "/proc/vmstat":
+				return []byte(vmstat), vmstatErr
+			default:
+				return nil, errors.New("unavailable")
+			}
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return memory
+	}
+	if got := collect("pswpin 100\n", nil); got.SwapInPerS != nil {
+		t.Fatalf("first sample produced a rate: %+v", got.SwapInPerS)
+	}
+	if got := collect("", errors.New("read failed")); got.SwapInPerS != nil {
+		t.Fatalf("failed read produced a rate: %+v", got.SwapInPerS)
+	}
+	if got := collect("pswpin 300\n", nil); got.SwapInPerS != nil {
+		t.Fatalf("rate was computed across a read gap: %+v", *got.SwapInPerS)
+	}
+}
+
+func TestDarwinMemoryFallbackKeepsPrimarySwapInRate(t *testing.T) {
+	darwinSwapRate.reset()
+	pressure := []byte("The system has 4096 (1 pages with a page size of 4096).\nPages used by compressor: 10\n")
+	vmstat := readMemoryFixture(t, "memory/macos-vm_stat.txt")
+	run := func(_ context.Context, argv ...string) ([]byte, error) {
+		switch strings.Join(argv, " ") {
+		case "memory_pressure":
+			return pressure, nil
+		case "vm_stat":
+			return vmstat, nil
+		case "sysctl -n hw.memsize":
+			return []byte("34359738368"), nil
+		case "sysctl -n kern.memorystatus_vm_pressure_level":
+			return []byte("2"), nil
+		default:
+			return nil, errors.New("unexpected fixture command")
+		}
+	}
+	first, err := collectDarwinHostMemory(t.Context(), run)
+	if err != nil || first.Source != "vm_stat" || first.SwapInPerS != nil {
+		t.Fatalf("first fallback collection=%+v err=%v", first, err)
+	}
+	second, err := collectDarwinHostMemory(t.Context(), run)
+	if err != nil || second.SwapInPerS == nil || !sameMemoryFloat(second.SwapInPerS, 0) {
+		t.Fatalf("second fallback collection dropped the primary rate: %+v err=%v", second, err)
+	}
+}
+
+// parseHubHostsEquivalent mirrors runtug's parseHubHosts decode: a tolerant
+// unmarshal that reads only the fields it needs and ignores the rest.
+func parseHubHostsEquivalent(t *testing.T, raw []byte) []string {
+	t.Helper()
+	var p struct {
+		Candidates []json.RawMessage `json:"candidates"`
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		t.Fatalf("placement response did not decode: %v", err)
+	}
+	var names []string
+	for _, v := range p.Candidates {
+		var c struct {
+			Machine, Host, Target, Reason string
+			Connected                     *bool
+			LoadRatio                     *float64
+		}
+		var name string
+		if json.Unmarshal(v, &name) != nil {
+			if err := json.Unmarshal(v, &c); err != nil {
+				t.Fatalf("placement candidate did not decode: %v", err)
+			}
+			name = c.Machine
+			if name == "" {
+				name = c.Host
+			}
+			if name == "" {
+				name = c.Target
+			}
+		}
+		names = append(names, name)
+	}
+	return names
+}
+
+// legacyPlacementCandidate is the pre-change candidate shape. A rolling
+// upgrade is safe only while a hub emitting new fields can still be decoded
+// by this strict shape — so the fields must stay off the wire unless a live
+// signal or configured weight activates them.
+type legacyPlacementCandidate struct {
+	Machine       string   `json:"machine"`
+	Score         float64  `json:"score"`
+	LoadRatio     float64  `json:"load_ratio,omitempty"`
+	Throttled     bool     `json:"throttled"`
+	ActiveJobs    int      `json:"active_jobs"`
+	Tasks         *int     `json:"tasks,omitempty"`
+	TaskSlots     int      `json:"task_slots,omitempty"`
+	Connected     bool     `json:"connected"`
+	MetricsKnown  bool     `json:"metrics_known"`
+	QuotaDecision *string  `json:"quota_decision,omitempty"`
+	QuotaReason   *string  `json:"quota_reason,omitempty"`
+	MemoryFreePct *float64 `json:"memory_free_pct"`
+	SwapUsedMB    *float64 `json:"swap_used_mb"`
+	MemoryKnown   bool     `json:"memory_known"`
+	HoldsActive   bool     `json:"holds_active"`
+	BurstReady    bool     `json:"burst_ready"`
+	Reason        string   `json:"reason"`
+}
+
+func TestPlacementWireGatesLiveMemoryFields(t *testing.T) {
+	hub := memoryPlacementHub(t, "host-a")
+	hub.nodes["host-a"].hostMemory = &HubHostMemory{FreePct: memoryFloat(50), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"}
+	raw, err := json.Marshal(hub.makePlacement(memoryPlacementPolicy("host-a"), placementMetrics{}, "hub-only", time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var candidates []map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &struct {
+		Candidates *[]map[string]json.RawMessage `json:"candidates"`
+	}{Candidates: &candidates}); err != nil || len(candidates) != 1 {
+		t.Fatalf("placement wire=%s err=%v", raw, err)
+	}
+	for _, field := range []string{"swap_in_per_s", "pressure", "capacity_weight"} {
+		if _, exists := candidates[0][field]; exists {
+			t.Fatalf("quiet node emitted %s: %s", field, raw)
+		}
+	}
+	candidateRaw, err := json.Marshal(candidates[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy legacyPlacementCandidate
+	strict := json.NewDecoder(bytes.NewReader(candidateRaw))
+	strict.DisallowUnknownFields()
+	if err := strict.Decode(&legacy); err != nil || legacy.Machine != "host-a" {
+		t.Fatalf("legacy strict decoder rejected quiet candidate: %v", err)
+	}
+	if names := parseHubHostsEquivalent(t, raw); len(names) != 1 || names[0] != "host-a" {
+		t.Fatalf("tolerant decode lost the candidate: %v", names)
+	}
+
+	hub.nodes["host-a"].hostMemory = &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(0), SwapInPerS: memoryFloat(0), Pressure: memoryFloat(.1), Source: "proc_meminfo"}
+	policy := memoryPlacementPolicy("host-a")
+	policy.CapacityWeight = map[string]float64{"host-a": 2}
+	raw, err = json.Marshal(hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(raw, &struct {
+		Candidates *[]map[string]json.RawMessage `json:"candidates"`
+	}{Candidates: &candidates}); err != nil || len(candidates) != 1 {
+		t.Fatalf("placement wire=%s err=%v", raw, err)
+	}
+	for _, field := range []string{"swap_in_per_s", "pressure", "capacity_weight"} {
+		if _, exists := candidates[0][field]; !exists {
+			t.Fatalf("live signal or weight did not emit %s: %s", field, raw)
+		}
+	}
+	if names := parseHubHostsEquivalent(t, raw); len(names) != 1 || names[0] != "host-a" {
+		t.Fatalf("tolerant decode lost the candidate: %v", names)
+	}
 }

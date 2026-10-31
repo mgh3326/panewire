@@ -348,7 +348,10 @@ func collectDarwinHostMemory(ctx context.Context, run func(context.Context, ...s
 	memsize, memsizeErr := run(ctx, "sysctl", "-n", "hw.memsize")
 	if vmstatErr == nil && memsizeErr == nil {
 		memory, freeOK := parseDarwinVMStat(string(vmstat), string(memsize))
-		setDarwinLiveMemory(&memory, string(vmstat), string(level), true)
+		setDarwinLiveMemory(&memory, string(vmstat), string(level), primary == nil)
+		if primary != nil {
+			memory.SwapInPerS = primary.SwapInPerS
+		}
 		if freeOK {
 			setDarwinMemorySwap(&memory, swap)
 			return &memory, nil
@@ -400,7 +403,11 @@ func collectLinuxHostMemory(read func(string) ([]byte, error)) (*HubHostMemory, 
 	if vmstatErr == nil {
 		if pages, found := parseLinuxSwapInPages(string(vmstat)); found {
 			memory.SwapInPerS = linuxSwapRate.observe(pages, time.Now())
+		} else {
+			linuxSwapRate.reset()
 		}
+	} else {
+		linuxSwapRate.reset()
 	}
 	return &memory, nil
 }
@@ -425,6 +432,15 @@ func (sampler *swapInRateSampler) observe(pages int64, at time.Time) *float64 {
 	rate := float64(pages-sampler.pages) / seconds
 	sampler.pages, sampler.at = pages, at
 	return memoryFloat(rate)
+}
+
+// reset drops the baseline after a read gap so the next successful sample
+// starts a fresh interval instead of dividing the counter increase by the
+// whole outage.
+func (sampler *swapInRateSampler) reset() {
+	sampler.mu.Lock()
+	defer sampler.mu.Unlock()
+	sampler.pages, sampler.at, sampler.started = 0, time.Time{}, false
 }
 
 func parseLinuxSwapInPages(vmstat string) (int64, bool) {
