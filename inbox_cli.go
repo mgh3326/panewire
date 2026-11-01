@@ -26,7 +26,9 @@ Defaults: PANEWIRE_HUB_URL, PANEWIRE_HUB_TOKEN_ENV, PANEWIRE_HUB_CF_ENV,
 wait blocks until an unread item exists, prints it like read, and exits 0;
 on timeout it prints nothing and exits 3.
 read and ack <id> name one item: an ambient PANEWIRE_LANE does not scope them
-for operator tokens — only an explicit --lane does.`
+for operator tokens — only an explicit --lane does.
+ready, decision, blocked and findings items stay unread until ack <id>:
+injection into the pane and read do not retire them.`
 
 // inboxWaitDefaultTimeout is the client deadline when --timeout is absent.
 // Each server request is bounded by hubInboxWaitMaxWait; the client re-issues
@@ -230,11 +232,14 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		}
 		for _, item := range items {
 			state := "unread"
-			if item.ReadAt > 0 {
-				state = "read"
-			}
-			if item.AckedAt > 0 {
+			switch {
+			case item.AckedAt > 0:
 				state = "acked"
+			case item.MustAck:
+				// Read or injected, it stays unread until acked.
+				state = "unacked"
+			case item.ReadAt > 0:
+				state = "read"
 			}
 			fmt.Fprintf(stdout, "%d\t%s\t%s\t%s\t%s\n", item.ID, item.Lane, item.Class, state, truncateRelayText(strings.Join(strings.Fields(relayTextForKind(item.Kind, item.Event)), " "), 180))
 		}

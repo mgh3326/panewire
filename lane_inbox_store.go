@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,8 +22,9 @@ import (
 type laneInboxStore struct {
 	db *sql.DB
 	mu sync.Mutex
-	// notify is closed and replaced when a new inbox-class item lands, waking
-	// every long-poll waiter so they re-check for unread work.
+	// notify is closed and replaced when a new unread item lands (an
+	// inbox-class item or a must-ack one), waking every long-poll waiter so
+	// they re-check for unread work.
 	notify chan struct{}
 }
 
@@ -40,7 +42,15 @@ type laneInboxItem struct {
 	DigestAt        int64              `json:"digest_at_ms,omitempty"`
 	DigestBatch     string             `json:"digest_batch,omitempty"`
 	EscalationBatch string             `json:"escalation_batch,omitempty"`
+	// MustAck marks an item that stays unread until `inbox ack`, even after
+	// it was injected into a pane or read (mustAckNotifyTypes).
+	MustAck bool `json:"must_ack,omitempty"`
 }
+
+// laneInboxUnread is the unread predicate every reader shares: a must-ack
+// item until it is acked, any other inbox-class item until it is read or
+// acked. Interrupt items without must-ack are read when stored.
+const laneInboxUnread = `((must_ack=1 AND acked_at=0) OR (must_ack=0 AND class='inbox' AND read_at=0))`
 
 type laneInboxBatch struct {
 	ID   string
@@ -102,7 +112,44 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 			return nil, err
 		}
 	}
+	if err := addLaneInboxMustAck(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	return &laneInboxStore{db: db, notify: make(chan struct{})}, nil
+}
+
+// addLaneInboxMustAck adds the must_ack column to a store created before it
+// existed. Rows stored earlier keep must_ack=0 and their recorded read state.
+func addLaneInboxMustAck(db *sql.DB) error {
+	rows, err := db.Query(`PRAGMA table_info(lane_inbox)`)
+	if err != nil {
+		return err
+	}
+	found := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		found = found || name == "must_ack"
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	if !found {
+		// A second hub opening the same store may add the column first.
+		if _, err := db.Exec(`ALTER TABLE lane_inbox ADD COLUMN must_ack INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+			return err
+		}
+	}
+	_, err = db.Exec(`CREATE INDEX IF NOT EXISTS lane_inbox_must_ack ON lane_inbox(lane) WHERE must_ack=1 AND acked_at=0`)
+	return err
 }
 
 func (s *laneInboxStore) quarantineBatch(id, reason string) error {
@@ -172,14 +219,14 @@ func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
 	return nil
 }
 
-const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch`
+const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack`
 
 type inboxScanner interface{ Scan(...any) error }
 
 func scanLaneInbox(row inboxScanner) (laneInboxItem, error) {
 	var i laneInboxItem
 	var payload string
-	err := row.Scan(&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch)
+	err := row.Scan(&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch, &i.MustAck)
 	if err == nil {
 		err = json.Unmarshal([]byte(payload), &i.Event)
 	}
@@ -188,38 +235,46 @@ func scanLaneInbox(row inboxScanner) (laneInboxItem, error) {
 
 // put is first-writer-wins, including the class. A policy edit or source retry
 // cannot turn a previously accepted inbox item into a prompt after restart.
+// An interrupt is stored read — injection is its delivery — unless its
+// declared type must be acked: then it stays unread until `inbox ack`.
 func (s *laneInboxStore) put(key, lane, kind, class string, e hubJobEventPayload, now time.Time, deadline, window time.Duration) (laneInboxItem, error) {
 	raw, err := json.Marshal(e)
 	if err != nil {
 		return laneInboxItem{}, err
 	}
 	due, digest, read := int64(0), int64(0), int64(0)
+	mustAck := mustAckNotifyTypes[e.NotifyType]
 	if deadline > 0 {
 		due = now.Add(deadline).UnixMilli()
 	}
 	if class == "interrupt" {
-		read = now.UnixMilli()
-		if window > 0 {
+		if !mustAck {
+			read = now.UnixMilli()
+		}
+		// A must-ack item is injected on its own and acked by the receiver; a
+		// digest would fold it into a summary that is not must-ack. put holds
+		// this for every caller, not only receiveInbox.
+		if window > 0 && !mustAck {
 			digest = now.Add(window).UnixMilli()
 		}
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	insert, err := s.db.Exec(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`, key, lane, kind, class, string(raw), now.UnixMilli(), read, due, digest)
+	insert, err := s.db.Exec(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`, key, lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAck)
 	if err != nil {
 		return laneInboxItem{}, err
 	}
 	item, err := scanLaneInbox(s.db.QueryRow(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`, key))
 	n, _ := insert.RowsAffected()
 	item.Fresh = n == 1
-	if n == 1 && class == "inbox" {
+	if n == 1 && (class == "inbox" || mustAck) {
 		close(s.notify)
 		s.notify = make(chan struct{})
 	}
 	return item, err
 }
 
-// waitChan returns the channel closed by the next inbox-class insert. A waiter
+// waitChan returns the channel closed by the next unread insert. A waiter
 // must take it before re-checking unread state so an insert that lands between
 // the check and the select still wakes it.
 func (s *laneInboxStore) waitChan() chan struct{} {
@@ -228,10 +283,10 @@ func (s *laneInboxStore) waitChan() chan struct{} {
 	return s.notify
 }
 
-// firstUnread returns the oldest still-unread inbox item for one lane, or nil
-// when the lane has none.
+// firstUnread returns the oldest still-unread item for one lane (an inbox item
+// not yet read, or a must-ack item not yet acked), or nil when it has none.
 func (s *laneInboxStore) firstUnread(ctx context.Context, lane string) (*laneInboxItem, error) {
-	item, err := scanLaneInbox(s.db.QueryRowContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE lane=? AND class='inbox' AND read_at=0 ORDER BY id LIMIT 1`, lane))
+	item, err := scanLaneInbox(s.db.QueryRowContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE lane=? AND `+laneInboxUnread+` ORDER BY id LIMIT 1`, lane))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -244,7 +299,7 @@ func (s *laneInboxStore) firstUnread(ctx context.Context, lane string) (*laneInb
 func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error) {
 	q := `SELECT ` + laneInboxColumns + ` FROM lane_inbox WHERE (?='' OR lane=?)`
 	if unread {
-		q += ` AND class='inbox' AND read_at=0`
+		q += ` AND ` + laneInboxUnread
 	}
 	q += ` ORDER BY id DESC LIMIT 500`
 	rows, err := s.db.Query(q, lane, lane)
@@ -279,7 +334,7 @@ func (s *laneInboxStore) ack(id int64, lane string, all bool, now time.Time) (in
 }
 
 func (s *laneInboxStore) counts(lane string) (map[string]int, error) {
-	rows, err := s.db.Query(`SELECT lane,count(*) FROM lane_inbox WHERE class='inbox' AND read_at=0 AND (?='' OR lane=?) GROUP BY lane`, lane, lane)
+	rows, err := s.db.Query(`SELECT lane,count(*) FROM lane_inbox WHERE `+laneInboxUnread+` AND (?='' OR lane=?) GROUP BY lane`, lane, lane)
 	if err != nil {
 		return nil, err
 	}
