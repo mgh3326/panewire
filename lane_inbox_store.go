@@ -251,7 +251,10 @@ func (s *laneInboxStore) put(key, lane, kind, class string, e hubJobEventPayload
 		if !mustAck {
 			read = now.UnixMilli()
 		}
-		if window > 0 {
+		// A must-ack item is injected on its own and acked by the receiver; a
+		// digest would fold it into a summary that is not must-ack. put holds
+		// this for every caller, not only receiveInbox.
+		if window > 0 && !mustAck {
 			digest = now.Add(window).UnixMilli()
 		}
 	}

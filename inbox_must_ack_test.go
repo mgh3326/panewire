@@ -193,3 +193,26 @@ func TestMustAckWakesWaitersAndSkipsDigest(t *testing.T) {
 		t.Fatalf("%+v %v", items, err)
 	}
 }
+
+// put itself never digests a must-ack interrupt, whatever window a caller
+// passes (replay and other paths reach put without receiveInbox's guard);
+// other interrupts keep their digest.
+func TestPutNeverDigestsMustAck(t *testing.T) {
+	s, err := openLaneInboxStore(filepath.Join(t.TempDir(), "inbox.sqlite3"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.db.Close()
+	now := time.Now()
+	for _, typ := range []string{"ready", "decision", "blocked", "findings", "", "order"} {
+		e := quietEvent("put-"+typ, "text")
+		e.NotifyType = typ
+		item, err := s.put("key-"+typ, "lane-a", "lane.event", "interrupt", e, now, 0, 10*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if must := mustAckNotifyTypes[typ]; must != (item.DigestAt == 0) || item.MustAck != must {
+			t.Fatalf("type %q: must_ack=%v digest_at=%d", typ, item.MustAck, item.DigestAt)
+		}
+	}
+}
