@@ -108,6 +108,11 @@ func TestCrashReportUploadIsScrubbedAndDeletesTheFile(t *testing.T) {
 // reporting and panics off the main goroutine; the runtime must leave the
 // traceback in the child's crash file for the next start to send.
 func TestCrashOutputCapturesAGoroutinePanic(t *testing.T) {
+	if os.Getenv("PANEWIRE_CRASH_CHILD") == "main" {
+		// The production entry: a panic on the main goroutine itself.
+		runWithCrashReporting("panewire", "v-test", func() int { panic("crash-child-main-boom") })
+		return
+	}
 	if os.Getenv("PANEWIRE_CRASH_CHILD") == "1" {
 		startCrashReporting("panewire", "v-test")
 		done := make(chan struct{})
@@ -155,7 +160,7 @@ func TestReportPendingCrashesDropsWhatTheBudgetRefuses(t *testing.T) {
 	now := time.Now()
 	recordCrashSends(dir, now, crashReportDailyBudget)
 	path := writeCrashFile(t, dir, 1, deadPID(t), "panic: boom\n")
-	reportPendingCrashes("http://publickey@127.0.0.1:9/1", "tool", "v-test", dir, []string{path}, now)
+	reportPendingCrashes("http://publickey@127.0.0.1:9/1", "tool", "v-test", dir, now)
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatal("a crash over budget must be dropped")
 	}
@@ -165,7 +170,7 @@ func TestUnreachableSentryKeepsFileAndBudget(t *testing.T) {
 	dir := t.TempDir()
 	now := time.Now()
 	path := writeCrashFile(t, dir, 1, deadPID(t), "panic: boom\n")
-	reportPendingCrashes("http://publickey@127.0.0.1:9/1", "tool", "v-test", dir, []string{path}, now)
+	reportPendingCrashes("http://publickey@127.0.0.1:9/1", "tool", "v-test", dir, now)
 	if _, err := os.Stat(path); err != nil {
 		t.Fatalf("an undelivered crash must stay for the next start: %v", err)
 	}
@@ -193,4 +198,79 @@ func TestCrashReportScrubRemovesEmails(t *testing.T) {
 	if got := crashReportScrub("panic: user alice@example.org not found"); strings.Contains(got, "alice@example.org") {
 		t.Fatalf("email reached the report: %q", got)
 	}
+}
+
+// TestCrashOutputCapturesAMainGoroutinePanic runs the production wrapper in a
+// child that panics on the main goroutine: the disarm must not run during the
+// unwind, so the traceback lands in the crash file.
+func TestCrashOutputCapturesAMainGoroutinePanic(t *testing.T) {
+	state := t.TempDir()
+	command := exec.Command(os.Args[0], "-test.run=^TestCrashOutputCapturesAGoroutinePanic$")
+	command.Env = append(os.Environ(), "PANEWIRE_CRASH_CHILD=main", "XDG_STATE_HOME="+state, crashReportDSNEnv+"=http://publickey@127.0.0.1:9/1")
+	if err := command.Run(); err == nil {
+		t.Fatal("the child must crash")
+	}
+	pending := collectCrashFiles(filepath.Join(state, "panewire", "crash"))
+	if len(pending) != 1 {
+		t.Fatalf("pending crash files: %v", pending)
+	}
+	raw, err := os.ReadFile(pending[0])
+	if err != nil || !strings.Contains(string(raw), "panic: crash-child-main-boom") {
+		t.Fatalf("crash file: %q %v", raw, err)
+	}
+	info, err := os.Stat(filepath.Join(state, "panewire"))
+	if err != nil || info.Mode().Perm()&0o050 != 0o050 {
+		t.Fatalf("the state dir must stay group-traversable for events/: %v %v", info, err)
+	}
+}
+
+func TestCrashReportSendLogUnwritableSendsNothing(t *testing.T) {
+	var requests int
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		requests++
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	dir := t.TempDir()
+	path := writeCrashFile(t, dir, 1, deadPID(t), "panic: boom\n")
+	// A directory where the send log should be makes it unwritable.
+	if err := os.Mkdir(filepath.Join(dir, "sent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dsn := strings.Replace(server.URL, "http://", "http://publickey@", 1) + "/42"
+	reportPendingCrashes(dsn, "tool", "v-test", dir, time.Now())
+	mu.Lock()
+	defer mu.Unlock()
+	if requests != 0 {
+		t.Fatal("nothing may be sent while the daily cap cannot be recorded")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("the unsent crash must stay: %v", err)
+	}
+}
+
+func TestCrashDirLockSerializesReporters(t *testing.T) {
+	dir := t.TempDir()
+	unlock, ok := lockCrashDir(dir)
+	if !ok {
+		t.Fatal("first lock")
+	}
+	acquired := make(chan struct{})
+	go func() {
+		second, ok := lockCrashDir(dir)
+		if ok {
+			second()
+		}
+		close(acquired)
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("a second reporter must wait for the lock")
+	case <-time.After(100 * time.Millisecond):
+	}
+	unlock()
+	<-acquired
 }

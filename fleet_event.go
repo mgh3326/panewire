@@ -94,9 +94,13 @@ func appendFleetEvent(path string, maxBytes int64, ev fleetEvent) bool {
 	defer fleetEventMu.Unlock()
 	// Group-readable (0750 dir, 0640 file): on Linux the alloy system user
 	// tails these through a group or ACL grant. Every field is redacted.
-	if os.MkdirAll(filepath.Dir(path), 0o750) != nil {
+	dir := filepath.Dir(path)
+	if os.MkdirAll(dir, 0o750) != nil {
 		return false
 	}
+	// The modes are set explicitly: a restrictive umask (0077) would
+	// otherwise drop the group bits the alloy grant relies on.
+	_ = os.Chmod(dir, 0o750)
 	// Rotation is best effort across processes: racing writers may drop one
 	// rotated generation, never a line of the live file.
 	if info, err := os.Stat(path); err == nil && info.Size()+int64(len(line)) > maxBytes {
@@ -106,6 +110,7 @@ func appendFleetEvent(path string, maxBytes int64, ev fleetEvent) bool {
 	if err != nil {
 		return false
 	}
+	_ = file.Chmod(0o640)
 	_, err = file.Write(line)
 	if closeErr := file.Close(); err == nil {
 		err = closeErr
@@ -141,7 +146,10 @@ var fleetEventExtraSecrets = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)basic\s+[A-Za-z0-9+/=]{8,}`),
 	regexp.MustCompile(`\bgl(c|sa)_[A-Za-z0-9_=+/-]{16,}`),
 	regexp.MustCompile(`\bASIA[0-9A-Z]{16}\b`),
-	regexp.MustCompile(`(?i)[a-z0-9_.-]*(api[_-]?key|access[_-]?key|private[_-]?key|token|secret|password|passwd|credential|dsn)[a-z0-9_.-]*["']?\s*[:=]\s*["']?[^\s"',;&]{6,}`),
+	// A NAME=value whose name holds a credential word: a double- or single-
+	// quoted value through its closing quote (escapes and spaces included,
+	// or to the end when the tail cut the quote off), else the bare word.
+	regexp.MustCompile(`(?i)[a-z0-9_.-]*(api[_-]?key|access[_-]?key|private[_-]?key|token|secret|password|passwd|credential|dsn)[a-z0-9_.-]*["']?\s*[:=]\s*("(?:[^"\\]|\\.)*"?|'(?:[^'\\]|\\.)*'?|[^\s"',;&]+)`),
 	regexp.MustCompile(`(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b`),
 }
 
@@ -159,12 +167,12 @@ var (
 func fleetEventRedact(text string) string {
 	text = strings.ToValidUTF8(text, "?")
 	text = fleetEventUserinfo.ReplaceAllString(text, "${1}[redacted]@")
-	// The PEM block goes first: the stall set only removes its header line.
-	text = fleetEventExtraSecrets[0].ReplaceAllString(text, "[redacted]")
-	text = redactSecrets(text)
-	for _, pattern := range fleetEventExtraSecrets[1:] {
+	// The extra set goes first: the stall set only removes a PEM header and
+	// stops a quoted assignment value at its first space, leaving the rest.
+	for _, pattern := range fleetEventExtraSecrets {
 		text = pattern.ReplaceAllString(text, "[redacted]")
 	}
+	text = redactSecrets(text)
 	return fleetEventLongBlob.ReplaceAllStringFunc(text, func(match string) string {
 		if fleetEventHexOnly.MatchString(match) {
 			return match
