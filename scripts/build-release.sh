@@ -2,9 +2,14 @@
 # Builds the GitHub Release assets for the checked-out commit:
 #   panewire_<version>_<os>_<arch> for each target, plus SHA256SUMS.
 #
-# <version> is pw-<first 7 hex of HEAD>, the form hub-status already shows
-# (pw-05667f4). It is stamped with -X main.version, named in every asset, and is
-# verified by release tooling before rollout.
+# usage: scripts/build-release.sh [OUTPUT_DIR [VERSION]]
+#
+# <version> is VERSION when given (the release workflow passes the v* tag, so
+# `panewire version` prints the tag). Without it, <version> is
+# pw-<first 7 hex of HEAD>, the form hub-status already shows (pw-05667f4).
+# It is stamped with -X main.version, named in every asset, and is verified by
+# release tooling before rollout. Binaries are static (CGO_ENABLED=0) and
+# built with -trimpath.
 #
 # PANEWIRE_RELEASE_TARGETS overrides the target list (tests build a subset).
 # Prints the version on stdout.
@@ -19,8 +24,12 @@ case "$output" in
 esac
 targets=${PANEWIRE_RELEASE_TARGETS:-"darwin/amd64 darwin/arm64 linux/amd64 linux/arm64"}
 
-sha=$(git -C "$repo_root" rev-parse HEAD | cut -c1-7)
-version=$(PANEWIRE_DIST_VERSION="pw-$sha" "$script_dir/dist-version.sh")
+if [ -n "${2:-}" ]; then
+	version=$(PANEWIRE_DIST_VERSION="$2" "$script_dir/dist-version.sh")
+else
+	sha=$(git -C "$repo_root" rev-parse HEAD | cut -c1-7)
+	version=$(PANEWIRE_DIST_VERSION="pw-$sha" "$script_dir/dist-version.sh")
+fi
 
 mkdir -p "$output"
 assets=
@@ -37,7 +46,7 @@ for target in $targets; do
 	asset="panewire_${version}_${os}_${arch}"
 	(
 		cd "$repo_root"
-		GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -ldflags "-X main.version=$version" -o "$output/$asset" ./cmd/panewire
+		GOOS=$os GOARCH=$arch CGO_ENABLED=0 go build -trimpath -ldflags "-X main.version=$version" -o "$output/$asset" ./cmd/panewire
 	)
 	assets="$assets $asset"
 done

@@ -20,8 +20,9 @@ operator-run change.
 - `ENTRYPOINT ["/panewire"]`, `CMD ["hub"]`: arguments after the image name
   replace `hub`, so `docker run IMAGE hub --hub-auth /run/secrets/hub.env …`
   passes hub flags and `docker run IMAGE version` prints the stamp.
-- `panewire version` prints `pw-<first 7 hex of the commit>`, the same form as
-  the release binaries and `hub-status`. The smoke test checks it, and that
+- `panewire version` prints `pw-<first 7 hex of the commit>`, the form
+  `hub-status` shows for unreleased builds (tagged release binaries print
+  their `v*` tag instead). The smoke test checks it, and that
   the hub refuses to start without `--hub-auth` (exit 2).
 
 ## Running the hub from it

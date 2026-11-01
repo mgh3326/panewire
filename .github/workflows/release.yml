@@ -1,54 +1,102 @@
 name: Release
 
-# A v* tag builds the four node binaries with the pw-<sha> version stamp and
-# attaches them, with SHA256SUMS, to the tag's GitHub Release. Nodes install
-# only assets from this repository's release download path (see
+# A v* tag builds the four static node binaries stamped with the tag
+# (`panewire version` prints it) and attaches them, with SHA256SUMS, to the
+# tag's GitHub Release. Pull requests and manual runs build the same assets for
+# a dry-run tag (v0.0.0-dryrun.<run>) and check them without publishing.
+# Hosts pull published assets themselves (the fleet updater, or
 # docs/runbooks/node-update.md); publishing to nodes stays a separate,
-# operator-run `panewire update publish`.
+# operator-run `panewire update publish`. This workflow never reaches a host.
 on:
   push:
     tags: ['v*']
+  pull_request:
+  workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  release:
+  build:
     runs-on: ubuntu-latest
     steps:
-      # Pinned to reviewed commits: this job holds contents: write and builds
-      # what every node installs, so a moved tag must not change it.
+      # Pinned to reviewed commits: the publish job releases what this job
+      # builds, so a moved tag must not change it.
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - name: Resolve release tag
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          RUN_NUMBER: ${{ github.run_number }}
+        run: |
+          if [ "$EVENT" = push ] && [ "$REF_TYPE" = tag ]; then
+            tag=$REF_NAME
+          else
+            tag=v0.0.0-dryrun.$RUN_NUMBER
+          fi
+          # The tag is a path segment of the release URL the hub pins.
+          case "$tag" in
+            "" | . | .. | *[!A-Za-z0-9._-]*) echo "tag '$tag' is not a valid release path segment" >&2; exit 1 ;;
+          esac
+          echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
+      - name: Build assets
+        run: |
+          version=$(sh scripts/build-release.sh dist/release "$RELEASE_TAG")
+          test "$version" = "$RELEASE_TAG"
+      - name: Verify assets, SHA256SUMS and version output
+        run: |
+          for target in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do
+            test -x "dist/release/panewire_${RELEASE_TAG}_${target}"
+          done
+          test "$("dist/release/panewire_${RELEASE_TAG}_linux_amd64" version)" = "$RELEASE_TAG"
+          (cd dist/release && sha256sum -c SHA256SUMS)
+          test "$(wc -l < dist/release/SHA256SUMS)" -eq 4
+          cat dist/release/SHA256SUMS
+      - name: Keep assets for publish
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-assets
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  test:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
         with:
           go-version: '1.27.x'
           cache: true
       - run: go vet ./...
       - run: go test ./...
-      - name: Check tag
-        env:
-          TAG: ${{ github.ref_name }}
-        # The tag is a path segment of the release URL the hub pins.
-        run: |
-          case "$TAG" in
-            "" | . | .. | *[!A-Za-z0-9._-]*) echo "tag '$TAG' is not a valid release path segment" >&2; exit 1 ;;
-          esac
-      - name: Build assets
-        id: build
-        run: echo "version=$(sh scripts/build-release.sh dist/release)" >> "$GITHUB_OUTPUT"
-      - name: Verify stamp and checksums
-        env:
-          VERSION: ${{ steps.build.outputs.version }}
-        run: |
-          case "$VERSION" in pw-???????) ;; *) echo "unexpected version '$VERSION'" >&2; exit 1 ;; esac
-          test "$("dist/release/panewire_${VERSION}_linux_amd64" version)" = "$VERSION"
-          (cd dist/release && sha256sum -c SHA256SUMS)
-          test "$(wc -l < dist/release/SHA256SUMS)" -eq 4
+
+  publish:
+    needs: [build, test]
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release-assets
+          path: dist/release
       - name: Publish release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
-          VERSION: ${{ steps.build.outputs.version }}
         run: |
-          gh release create "$TAG" dist/release/* --verify-tag --title "$TAG" \
-            --notes "panewire $VERSION — publish with: panewire update publish --version $VERSION --url https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG/panewire_${VERSION}_<os>_<arch> --sha256 <from SHA256SUMS> --machines <canary>"
+          gh release create "$TAG" dist/release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
+            --notes "panewire $TAG — publish with: panewire update publish --version $TAG --url https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG/panewire_${TAG}_<os>_<arch> --sha256 <from SHA256SUMS> --machines <canary>"
