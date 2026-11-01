@@ -8,8 +8,9 @@
 # `panewire version` prints the tag). Without it, <version> is
 # pw-<first 7 hex of HEAD>, the form hub-status already shows (pw-05667f4).
 # It is stamped with -X main.version, named in every asset, and is verified by
-# release tooling before rollout. Binaries are static (CGO_ENABLED=0) and
-# built with -trimpath.
+# release tooling before rollout. Binaries are CGO-disabled (CGO_ENABLED=0:
+# fully static on Linux; Darwin links only the system libSystem) and built
+# with -trimpath.
 #
 # PANEWIRE_RELEASE_TARGETS overrides the target list (tests build a subset).
 # Prints the version on stdout.
