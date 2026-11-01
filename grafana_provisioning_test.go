@@ -131,6 +131,10 @@ func grafanaApplyRequests(t *testing.T, output string) map[string]string {
 	requests := map[string]string{}
 	for _, part := range strings.Split(output, "### ")[1:] {
 		head, body, _ := strings.Cut(part, "\n")
+		if strings.HasPrefix(head, "GET ") {
+			requests[head] = ""
+			continue
+		}
 		var value any
 		if err := json.Unmarshal([]byte(body), &value); err != nil {
 			t.Fatalf("dry-run body for %s is not JSON: %v", head, err)
@@ -149,6 +153,7 @@ func TestGrafanaApplyDryRunNeedsNoCredentials(t *testing.T) {
 	}
 	requests := grafanaApplyRequests(t, string(output))
 	for _, want := range []string{
+		"GET https://grafana.invalid/api/datasources",
 		"POST https://grafana.invalid/api/folders",
 		"POST https://grafana.invalid/api/dashboards/db",
 		"PUT https://grafana.invalid/api/v1/provisioning/folder/fleet-observability/rule-groups/fleet-observability",
@@ -162,7 +167,7 @@ func TestGrafanaApplyDryRunNeedsNoCredentials(t *testing.T) {
 	}
 	missing := exec.Command("sh", "deploy/grafana/apply.sh")
 	missing.Env = []string{"PATH=" + os.Getenv("PATH")}
-	if output, err := missing.CombinedOutput(); err == nil || !strings.Contains(string(output), "GRAFANA_URL is required") {
+	if output, err := missing.CombinedOutput(); err == nil || !strings.Contains(string(output), "GRAFANA_CLOUD_URL is required") {
 		t.Fatalf("a real run without credentials must refuse: %v %s", err, output)
 	}
 }
@@ -178,6 +183,10 @@ func TestGrafanaApplySendsIdempotentRequests(t *testing.T) {
 		mu.Lock()
 		seen[r.Method+" "+r.URL.Path] = r.Header.Get("Authorization") + "\n" + string(body)
 		mu.Unlock()
+		if r.URL.Path == "/api/datasources" {
+			_, _ = w.Write([]byte(`[{"uid":"prom-uid","type":"prometheus","name":"grafanacloud-x-prom"},{"uid":"loki-uid-1","type":"loki","name":"grafanacloud-x-logs"},{"uid":"loki-other","type":"loki","name":"scratch-loki"}]`))
+			return
+		}
 		if r.URL.Path == "/api/folders" {
 			w.WriteHeader(http.StatusConflict) // the folder already exists
 			return
@@ -186,7 +195,7 @@ func TestGrafanaApplySendsIdempotentRequests(t *testing.T) {
 	}))
 	defer server.Close()
 	command := exec.Command("sh", "deploy/grafana/apply.sh")
-	command.Env = []string{"PATH=" + os.Getenv("PATH"), "GRAFANA_URL=" + server.URL + "/", "GRAFANA_TOKEN=fake-token-0123", "LOKI_DATASOURCE_UID=loki-uid-1"}
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "GRAFANA_CLOUD_URL=" + server.URL + "/", "GRAFANA_CLOUD_SA_TOKEN=fake-token-0123"}
 	output, err := command.CombinedOutput()
 	if err != nil {
 		t.Fatalf("apply: %v\n%s", err, output)
@@ -194,10 +203,30 @@ func TestGrafanaApplySendsIdempotentRequests(t *testing.T) {
 	mu.Lock()
 	defer mu.Unlock()
 	rules := seen["PUT /api/v1/provisioning/folder/fleet-observability/rule-groups/fleet-observability"]
-	if len(seen) != 3 || !strings.HasPrefix(rules, "Bearer fake-token-0123\n") || !strings.Contains(rules, `"datasourceUid": "loki-uid-1"`) {
+	if len(seen) != 4 || !strings.HasPrefix(seen["GET /api/datasources"], "Bearer fake-token-0123\n") || !strings.HasPrefix(rules, "Bearer fake-token-0123\n") || !strings.Contains(rules, `"datasourceUid": "loki-uid-1"`) {
 		t.Fatalf("requests: %v", seen)
 	}
 	if strings.Contains(string(output), "fake-token-0123") {
 		t.Fatal("apply printed the token")
+	}
+}
+
+func TestGrafanaApplyReportsAMissingEditorRole(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl is not installed")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/datasources" {
+			_, _ = w.Write([]byte(`[{"uid":"loki-uid-1","type":"loki","name":"grafanacloud-x-logs"}]`))
+			return
+		}
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	defer server.Close()
+	command := exec.Command("sh", "deploy/grafana/apply.sh")
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "GRAFANA_CLOUD_URL=" + server.URL, "GRAFANA_CLOUD_SA_TOKEN=fake-token-0123"}
+	output, err := command.CombinedOutput()
+	if err == nil || !strings.Contains(string(output), "needs Editor") {
+		t.Fatalf("a viewer token must fail with the role named: %v %s", err, output)
 	}
 }

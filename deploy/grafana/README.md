@@ -31,13 +31,21 @@ The rule group has these rules:
 
 ```sh
 ./apply.sh --dry-run    # prints each request and body; reads no credentials
-GRAFANA_URL=https://<stack>.grafana.net GRAFANA_TOKEN=<token> LOKI_DATASOURCE_UID=<uid> ./apply.sh
+GRAFANA_CLOUD_URL=https://<stack>.grafana.net GRAFANA_CLOUD_SA_TOKEN=<token> ./apply.sh
 ```
 
-`GRAFANA_TOKEN` is a Grafana service-account token with the Editor role.
-`apply.sh` passes it to curl through a mode-0600 header file, never on the
-command line. `LOKI_DATASOURCE_UID` is the uid of the stack's Loki data source,
-which is the last path segment of its page under Connections > Data sources.
+`GRAFANA_CLOUD_SA_TOKEN` is a Grafana service-account token. The writes need
+the Editor role; with a lower role, `apply.sh` stops at the first write and
+says so. `apply.sh` passes the token to curl through a mode-0600 header file,
+never on the command line.
+
+The Loki data source uid is looked up with `GET /api/datasources`:
+
+- with one data source of type `loki`, that one is used;
+- with several, the one named `grafanacloud-*-logs` is used;
+- otherwise the script stops and lists the names it found.
+
+`apply.sh` needs `curl` and `python3`.
 
 Thresholds (3, 1 h, 2 h, 30 min) are plain numbers in `fleet-alert-rules.json`.
 Edit them there and re-apply.

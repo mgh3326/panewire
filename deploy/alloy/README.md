@@ -256,8 +256,8 @@ following steps, in this order:
    Without these variables, crash reporting is off.
 5. **Apply the dashboard and alerts** from `deploy/grafana/` (see its README):
    1. Run `./apply.sh --dry-run` and review the output.
-   2. Run it again with `GRAFANA_URL`, `GRAFANA_TOKEN` and
-      `LOKI_DATASOURCE_UID` set.
+   2. Run it again with `GRAFANA_CLOUD_URL` and `GRAFANA_CLOUD_SA_TOKEN`
+      set. The script looks up the Loki data source uid itself.
    3. Give the stack's default notification policy a contact point. The rules
       carry `team=fleet` for routing.
 
