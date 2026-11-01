@@ -103,4 +103,4 @@ jobs:
           set --
           case "$TAG" in *-*) set -- --prerelease ;; esac
           gh release create "$TAG" dist/release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" "$@" \
-            --notes "panewire $TAG — publish with: panewire update publish --version $TAG --url https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG/panewire_${TAG}_<os>_<arch> --sha256 <from SHA256SUMS> --machines <canary>"
+            --notes "panewire $TAG — publish with: panewire update publish --version $TAG --url ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/$TAG/panewire_${TAG}_<os>_<arch> --sha256 <from SHA256SUMS> --machines <canary>"
