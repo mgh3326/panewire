@@ -77,7 +77,13 @@ func quietEvent(id, text string) hubJobEventPayload {
 }
 func quietHub(t *testing.T, path, policy string, hk *handoffkeepRelayClient, now *time.Time) (*HubServer, *hubAgent) {
 	t.Helper()
-	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "host-a": "node", "host-b": "other"}, ReportRelayPath: r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"},"lane-b":{"machine":"host-b","pane":"w2:p1"},"child":{"machine":"host-a","pane":"w1:p2","parent":"lane-b"}}}`), DeliveryPolicyPath: policy, InboxStorePath: path, handoffkeep: hk, Now: func() time.Time { return *now }, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+	return quietHubOn(t, hubInboxStorage{path: path}, policy, hk, now)
+}
+
+// quietHubOn is quietHub with the inbox on either backend.
+func quietHubOn(t *testing.T, storage hubInboxStorage, policy string, hk *handoffkeepRelayClient, now *time.Time) (*HubServer, *hubAgent) {
+	t.Helper()
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "op", "host-a": "node", "host-b": "other"}, ReportRelayPath: r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"},"lane-b":{"machine":"host-b","pane":"w2:p1"},"child":{"machine":"host-a","pane":"w1:p2","parent":"lane-b"}}}`), DeliveryPolicyPath: policy, InboxStorePath: storage.path, InboxDatabaseURL: storage.dsn, handoffkeep: hk, Now: func() time.Time { return *now }, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 	if err != nil {
 		t.Fatal(err)
 	}
