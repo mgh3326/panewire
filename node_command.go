@@ -196,8 +196,17 @@ func nodeCommandHasFields(raw json.RawMessage, names []string) bool {
 	return true
 }
 
-// decodeNodeCommandArgs returns the typed, validated arguments for op.
+// decodeNodeCommandArgs returns the typed, validated arguments for op, and nil
+// when they are refused: a caller can never hold, or log, unvalidated text.
 func decodeNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
+	decoded, valid := parseNodeCommandArgs(op, raw)
+	if !valid {
+		return nil, false
+	}
+	return decoded, true
+}
+
+func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	names, known := nodeCommandArgFields[op]
 	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || !nodeCommandHasFields(raw, names) {
 		return nil, false

@@ -314,6 +314,21 @@ func TestNodeJobDoneNewReportRunsAgain(t *testing.T) {
 	}
 }
 
+// Refused arguments must not reach a caller in any form, however far decoding
+// got before it refused them.
+func TestNodeCommandArgsRefusedAreNotReturned(t *testing.T) {
+	for _, test := range []struct{ op, raw string }{
+		{nodeCommandPaneRead, `{"pane_id":"bad id","name":"job-a","cwd":"/work/a","tail_lines":0}`},
+		{nodeCommandJobDone, `{"job":"../job-a","report":"/work/report.md"}`},
+		{nodeCommandPaneClose, `{"pane_id":"bad id","name":"job-a","agent_status":"idle","cwd":"/work/a"}`},
+		{nodeCommandWorktreeInspect, `{"cwd":"relative"}`},
+	} {
+		if decoded, valid := decodeNodeCommandArgs(test.op, json.RawMessage(test.raw)); valid || decoded != nil {
+			t.Errorf("%s %s: decoded=%+v valid=%v", test.op, test.raw, decoded, valid)
+		}
+	}
+}
+
 func TestNodeReapResultShapes(t *testing.T) {
 	for _, test := range []struct {
 		op, raw string
@@ -531,6 +546,17 @@ func TestNodeReapEndToEnd(t *testing.T) {
 	if status, _ := reaper.do(t, fixture.server, http.MethodPost, nodeA, `{"op":"pane.read","args":{"pane_id":"w1:p1"}}`); status != http.StatusBadRequest {
 		t.Fatalf("malformed status=%d", status)
 	}
+	// Every field is present but none is valid, so the decoder fills them in
+	// before it refuses them. None of that text is a validated subject.
+	const forged = "forged-subject-not-for-logs"
+	for _, body := range []string{
+		`{"op":"pane.read","args":{"pane_id":"` + forged + ` x","name":"` + forged + `/x","cwd":"/work/a","tail_lines":0}}`,
+		`{"op":"job.done","args":{"job":"` + forged + `/x","report":"/work/report.md"}}`,
+	} {
+		if status, _ := reaper.do(t, fixture.server, http.MethodPost, nodeA, body); status != http.StatusBadRequest {
+			t.Fatalf("body=%s status=%d", body, status)
+		}
+	}
 	hubLogs := fixture.hubLogs.String()
 	for _, want := range []string{
 		"client=svc-reap machine=node-a op=pane.read pane=w1:p1 job=job-a outcome=read",
@@ -541,6 +567,7 @@ func TestNodeReapEndToEnd(t *testing.T) {
 		"client=svc-reap machine=node-a op=job.done pane=\"\" job=job-a outcome=already-done",
 		"client=operator machine=node-a op=pane.read pane=w1:p1 job=job-a outcome=scope_forbidden",
 		"client=svc-reap machine=node-a op=pane.read pane=\"\" job=\"\" outcome=invalid_request",
+		"client=svc-reap machine=node-a op=job.done pane=\"\" job=\"\" outcome=invalid_request",
 	} {
 		if !strings.Contains(hubLogs, want) {
 			t.Errorf("hub log lacks %q:\n%s", want, hubLogs)
@@ -557,7 +584,7 @@ func TestNodeReapEndToEnd(t *testing.T) {
 			t.Errorf("node log lacks %q:\n%s", want, nodeLogs)
 		}
 	}
-	for _, forbidden := range []string{nodeReapScreenSecret, "OK job=", pw2ServiceToken("svc-reap"), pw2OperatorToken, pw2NodeAToken} {
+	for _, forbidden := range []string{nodeReapScreenSecret, "OK job=", forged, pw2ServiceToken("svc-reap"), pw2OperatorToken, pw2NodeAToken} {
 		if strings.Contains(hubLogs+nodeLogs, forbidden) {
 			t.Errorf("logs hold %q:\n%s\n%s", forbidden, hubLogs, nodeLogs)
 		}
