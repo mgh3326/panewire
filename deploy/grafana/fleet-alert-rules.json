@@ -18,7 +18,7 @@
           "datasourceUid": "${LOKI_DATASOURCE_UID}",
           "model": {
             "refId": "A",
-            "expr": "sum by (host, reason) (count_over_time({source=\"fleet_events\", tool=~\"runtug|panewire\", kind=~\"spawn|node_spawn\", outcome=~\"refused|failed\"} | json reason=\"reason\" [30m]))",
+            "expr": "sum by (host, reason) (count_over_time({source=\"fleet_events\", tool=~\"runtug|panewire\", kind=~\"spawn|node_spawn\", outcome=~\"refused|failed\"} | json reason=\"reason\" | label_format reason=`{{ if .reason }}{{ .reason }}{{ else }}unspecified{{ end }}` [30m]))",
             "queryType": "instant",
             "editorMode": "code",
             "intervalMs": 1000,
@@ -81,7 +81,7 @@
           "datasourceUid": "${LOKI_DATASOURCE_UID}",
           "model": {
             "refId": "A",
-            "expr": "sum by (job, reason) (count_over_time({source=\"fleet_events\", tool=\"mergewake\", kind=\"review\", outcome=\"missing\"} | json job=\"job\", reason=\"reason\" [1h]))",
+            "expr": "sum by (job, reason) (count_over_time({source=\"fleet_events\", tool=\"mergewake\", kind=\"review\", outcome=\"missing\"} | json job=\"job\", reason=\"reason\" | label_format reason=`{{ if .reason }}{{ .reason }}{{ else }}unspecified{{ end }}` [1h]))",
             "queryType": "instant",
             "editorMode": "code",
             "intervalMs": 1000,
@@ -248,6 +248,69 @@
       },
       "annotations": {
         "summary": "The {{ $labels.pool }} quota observation for {{ $labels.target }} is older than 30 minutes and refused placements.",
+        "dashboard": "fleet-observability"
+      },
+      "isPaused": false,
+      "folderUID": "fleet-observability",
+      "ruleGroup": "fleet-observability",
+      "orgID": 1
+    },
+    {
+      "uid": "fleet-events-silent",
+      "title": "Fleet events pipeline silent",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "relativeTimeRange": {
+            "from": 21600,
+            "to": 0
+          },
+          "datasourceUid": "${LOKI_DATASOURCE_UID}",
+          "model": {
+            "refId": "A",
+            "expr": "absent_over_time({source=\"fleet_events\"}[6h])",
+            "queryType": "instant",
+            "editorMode": "code",
+            "intervalMs": 1000,
+            "maxDataPoints": 43200
+          }
+        },
+        {
+          "refId": "C",
+          "queryType": "",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    0
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "0m",
+      "labels": {
+        "team": "fleet",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "No fleet event reached Loki in 6 hours: alloy, its file grants, or the writers are down, and every other fleet alert is blind until this clears.",
         "dashboard": "fleet-observability"
       },
       "isPaused": false,

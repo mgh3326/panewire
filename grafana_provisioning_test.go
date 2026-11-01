@@ -117,8 +117,16 @@ func TestGrafanaAlertRulesAreValid(t *testing.T) {
 		}
 		expr, _ := query.Model["expr"].(string)
 		checkFleetEventQuery(t, rule.Title, expr)
+		// Count rules see "no data" when healthy; only the heartbeat may
+		// stand in for a dead pipeline, through absent_over_time.
+		if rule.Title == "Fleet events pipeline silent" && !strings.HasPrefix(expr, "absent_over_time(") {
+			t.Fatalf("heartbeat must use absent_over_time: %s", expr)
+		}
+		if strings.Contains(expr, "by (host, reason)") && !strings.Contains(expr, "unspecified") {
+			t.Fatalf("%s: a missing reason must group as unspecified", rule.Title)
+		}
 	}
-	for _, want := range []string{"Repeated spawn refusals", "Review missing", "Reviewer failing repeatedly", "Quota observation stale"} {
+	for _, want := range []string{"Repeated spawn refusals", "Review missing", "Reviewer failing repeatedly", "Quota observation stale", "Fleet events pipeline silent"} {
 		if !titles[want] {
 			t.Fatalf("alert rules lack %q", want)
 		}
@@ -228,5 +236,31 @@ func TestGrafanaApplyReportsAMissingEditorRole(t *testing.T) {
 	output, err := command.CombinedOutput()
 	if err == nil || !strings.Contains(string(output), "needs Editor") {
 		t.Fatalf("a viewer token must fail with the role named: %v %s", err, output)
+	}
+}
+
+func TestGrafanaApplyRefusesAMalformedDatasourceUID(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl is not installed")
+	}
+	var writes int
+	var mu sync.Mutex
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/datasources" {
+			_, _ = w.Write([]byte(`[{"uid":"../x y","type":"loki","name":"grafanacloud-x-logs"}]`))
+			return
+		}
+		mu.Lock()
+		writes++
+		mu.Unlock()
+	}))
+	defer server.Close()
+	command := exec.Command("sh", "deploy/grafana/apply.sh")
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "GRAFANA_CLOUD_URL=" + server.URL, "GRAFANA_CLOUD_SA_TOKEN=fake-token-0123"}
+	output, err := command.CombinedOutput()
+	mu.Lock()
+	defer mu.Unlock()
+	if err == nil || !strings.Contains(string(output), "unexpected Loki data source uid") || writes != 0 {
+		t.Fatalf("a malformed uid must stop before any write: %v writes=%d %s", err, writes, output)
 	}
 }

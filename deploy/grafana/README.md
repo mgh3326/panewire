@@ -28,6 +28,14 @@ The rule group has these rules:
 | Review missing | No reviewer produced a pass within 1 h. |
 | Reviewer failing repeatedly | The same reviewer fails 3 or more times within 2 h. |
 | Quota observation stale | A refusing quota observation is older than 30 min (`age_min`). |
+| Fleet events pipeline silent | No fleet event reached Loki in 6 h. |
+
+The rules count events, so "no data" is the healthy state for the first four,
+and they keep `noDataState: OK`. A dead pipeline (alloy down, missing grants,
+a writer bug) would leave all of them OK forever. The fifth rule catches that
+case with `absent_over_time`, which returns a value only when nothing arrived.
+Grouping labels that a line lacks become `unspecified`, never an empty
+string.
 
 ```sh
 ./apply.sh --dry-run    # prints each request and body; reads no credentials

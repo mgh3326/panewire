@@ -127,10 +127,12 @@ local.file_match "fleet_events" {
 	sync_period = "30s"
 }
 
+// No tail_from_end: a file without a stored position (first start, or the
+// fresh file after a rotation) is read from its start, and a restart resumes
+// from the positions file, so lines written while alloy was down still ship.
 loki.source.file "fleet_events" {
-	targets       = local.file_match.fleet_events.targets
-	forward_to    = [loki.process.fleet_events.receiver]
-	tail_from_end = true
+	targets    = local.file_match.fleet_events.targets
+	forward_to = [loki.process.fleet_events.receiver]
 }
 
 loki.process "fleet_events" {

@@ -31,7 +31,10 @@ else
   url=${GRAFANA_CLOUD_URL%/}
   # The token goes to curl through a mode-0600 header file, never argv (ps).
   headers=$(umask 077 && mktemp)
-  trap 'rm -f "$headers"' EXIT INT TERM
+  trap 'rm -f "$headers"' EXIT
+  # An interrupt aborts the rollout; EXIT then removes the header file.
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
   printf 'Authorization: Bearer %s\nContent-Type: application/json\nX-Disable-Provenance: true\n' "$GRAFANA_CLOUD_SA_TOKEN" > "$headers"
 fi
 
@@ -55,9 +58,13 @@ print(loki[0]["uid"])
 }
 
 uid=$(loki_uid)
-case "$uid" in
-  ""|*[!A-Za-z0-9_\<\>\ /.-]*) echo "unexpected Loki data source uid" >&2; exit 1 ;;
-esac
+# Grafana uids are [A-Za-z0-9_-]; anything else is refused before it is
+# substituted into the rule JSON. The dry run's placeholder is the exception.
+if [ "$dry" -eq 0 ]; then
+  case "$uid" in
+    ""|*[!A-Za-z0-9_-]*) echo "unexpected Loki data source uid" >&2; exit 1 ;;
+  esac
+fi
 
 folder_body='{"uid":"'"$folder_uid"'","title":"Fleet observability"}'
 dashboard_body=$(printf '{"folderUid":"%s","overwrite":true,"message":"deploy/grafana/apply.sh","dashboard":' "$folder_uid"; cat "$here/fleet-dashboard.json"; printf '}')

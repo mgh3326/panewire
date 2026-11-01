@@ -187,9 +187,18 @@ Both Alloy configs carry the same pipeline between `// BEGIN fleet events` and
 - `job`, `reason` and `detail` stay in the line. Query them with `| json` or
   `| regexp`.
 
+Alloy resumes from its positions file, and there is no `tail_from_end`. A
+line written while Alloy is down or restarting still ships, and so does the
+start of the fresh file after a rotation.
+
 `TestAlloyFleetEventsPipelineShipsLabelledLines` runs this block in the real
-`alloy` binary, with `loki.echo` in place of the cloud writer, and checks the
-labels, the timestamp, and that `.1` is not shipped.
+`alloy` binary, with `loki.echo` in place of the cloud writer. It checks:
+
+- the labels and the timestamp;
+- that a line written before the first start ships;
+- that a line written while Alloy was stopped ships after a restart, exactly
+  once;
+- that `.1` is never shipped.
 
 ### Free-tier volume estimate
 
@@ -222,22 +231,30 @@ following steps, in this order:
    `launchctl kickstart -k gui/$(id -u)/<label>`. The default root
    `$HOME/.local/state` applies.
 2. **Linux hosts that run a fleet tool:**
-   1. Create the event directories as the fleet user:
-      `mkdir -p -m 0750 ~/.local/state/{runtug,panewire,mergewake}/events`.
+   1. Create the event directories as the fleet user. These snippets are
+      POSIX `sh`, so they run under dash too:
+
+      ```sh
+      for t in runtug panewire mergewake; do
+        mkdir -p -m 0750 "$HOME/.local/state/$t/events"
+      done
+      ```
    2. Let the alloy user traverse to them and read them. Run this as root,
       with `U` set to the fleet user's home:
 
       ```sh
-      setfacl -m u:alloy:x "$U" "$U/.local" "$U/.local/state" "$U"/.local/state/{runtug,panewire,mergewake}
-      for d in "$U"/.local/state/{runtug,panewire,mergewake}/events; do
-        setfacl -m u:alloy:rx "$d"; setfacl -d -m u:alloy:r "$d"
+      setfacl -m u:alloy:x "$U" "$U/.local" "$U/.local/state"
+      for t in runtug panewire mergewake; do
+        setfacl -m u:alloy:x "$U/.local/state/$t"
+        setfacl -m u:alloy:rx "$U/.local/state/$t/events"
+        setfacl -d -m u:alloy:r "$U/.local/state/$t/events"
       done
       ```
 
       The default ACL covers files created later, including the file created
-      after rotation. Files are created 0640, so the ACL mask allows reads.
-      This works only when the services run with the default umask 022; a
-      service with `UMask=0077` creates 0600 files that alloy cannot read.
+      after rotation. The writers set the event file to 0640 and its
+      directory to 0750 whatever the service umask is (panewire as of #140),
+      so the ACL mask allows reads.
    3. Rerun the installer with
       `FLEET_EVENTS_ROOT=$U/.local/state` in its environment. It writes the
       variable into the EnvironmentFile. Alternatively, add the line to that

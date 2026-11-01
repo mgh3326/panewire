@@ -83,9 +83,76 @@ func (b *lockedBuffer) String() string {
 	return b.buf.String()
 }
 
+// alloyFleetRun is one alloy process running the fleet-events block with
+// loki.echo in place of the cloud writer.
+type alloyFleetRun struct {
+	command *exec.Cmd
+	output  *lockedBuffer
+}
+
+func startAlloyFleetRun(t *testing.T, alloy, configPath, storage, root string) *alloyFleetRun {
+	t.Helper()
+	// Alloy's cluster node refuses port 0, so reserve a free port first.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	listen := listener.Addr().String()
+	_ = listener.Close()
+	run := &alloyFleetRun{output: &lockedBuffer{}}
+	run.command = exec.Command(alloy, "run", "--server.http.listen-addr="+listen, "--storage.path="+storage, "--disable-reporting", configPath)
+	run.command.Env = append(os.Environ(), "FLEET_EVENTS_ROOT="+root)
+	run.command.Stdout, run.command.Stderr = run.output, run.output
+	if err := run.command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(run.stop)
+	return run
+}
+
+// stop kills the process by PID and reaps it; safe to call twice.
+func (run *alloyFleetRun) stop() {
+	if run.command.ProcessState == nil {
+		_ = run.command.Process.Kill()
+		_ = run.command.Wait()
+	}
+}
+
+// echoed returns the loki.echo lines that carry job.
+func (run *alloyFleetRun) echoed(job string) []string {
+	var lines []string
+	for _, line := range strings.Split(run.output.String(), "\n") {
+		if strings.Contains(line, "loki.echo.test") && strings.Contains(line, `\"job\":\"`+job+`\"`) {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func fleetEventLine(job, ts string) string {
+	return `{"ts":"` + ts + `","host":"node-a","tool":"runtug","kind":"spawn","job":"` + job + `","outcome":"refused","reason":"config","detail":"exit=70 quota gate refused"}` + "\n"
+}
+
+func appendLine(t *testing.T, path, line string) {
+	t.Helper()
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o640)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := file.WriteString(line); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestAlloyFleetEventsPipelineShipsLabelledLines runs the real pipeline from
 // the config, with loki.echo in place of the Grafana Cloud writer, against a
-// temporary state home, and checks what would be pushed.
+// temporary state home. It checks the labels and timestamp, that a line
+// written before the first start ships, that a line written while alloy was
+// down ships after a restart (positions, not tail-from-end), that nothing
+// ships twice, and that the rotated generation never ships.
 func TestAlloyFleetEventsPipelineShipsLabelledLines(t *testing.T) {
 	alloy, err := exec.LookPath("alloy")
 	if err != nil {
@@ -99,65 +166,17 @@ func TestAlloyFleetEventsPipelineShipsLabelledLines(t *testing.T) {
 		t.Fatal(err)
 	}
 	root := filepath.Join(work, "state")
+	storage := filepath.Join(work, "data")
 	events := filepath.Join(root, "runtug", "events", "fleet-events.jsonl")
 	if err := os.MkdirAll(filepath.Dir(events), 0o750); err != nil {
 		t.Fatal(err)
 	}
-	// The rotated generation must never be shipped.
-	if err := os.WriteFile(events+".1", []byte(`{"ts":"2026-11-01T00:00:00Z","host":"node-a","tool":"runtug","kind":"rotated","job":"","outcome":"refused","reason":"x","detail":""}`+"\n"), 0o640); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(events, nil, 0o640); err != nil {
-		t.Fatal(err)
-	}
+	appendLine(t, events+".1", fleetEventLine("job-rotated", "2026-11-01T00:00:00Z"))
+	appendLine(t, events, fleetEventLine("job-before", "2026-11-01T12:34:56.789Z"))
 
-	// Alloy's cluster node refuses port 0, so reserve a free port first.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	listen := listener.Addr().String()
-	_ = listener.Close()
-	output := &lockedBuffer{}
-	command := exec.Command(alloy, "run", "--server.http.listen-addr="+listen, "--storage.path="+filepath.Join(work, "data"), "--disable-reporting", configPath)
-	command.Env = append(os.Environ(), "FLEET_EVENTS_ROOT="+root)
-	command.Stdout, command.Stderr = output, output
-	if err := command.Start(); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() {
-		_ = command.Process.Kill()
-		_ = command.Wait()
-	})
-
-	line := `{"ts":"2026-11-01T12:34:56.789Z","host":"node-a","tool":"runtug","kind":"spawn","job":"job-a","outcome":"refused","reason":"config","detail":"exit=70 quota gate refused"}` + "\n"
-	var last time.Time
-	eventually(t, 60*time.Second, "loki.echo to print a fleet event", func() bool {
-		if strings.Contains(output.String(), "loki.echo.test") && strings.Contains(output.String(), "job-a") {
-			return true
-		}
-		// tail_from_end starts at the end once the tailer is up, so keep
-		// appending until one line arrives.
-		if time.Since(last) > 500*time.Millisecond {
-			last = time.Now()
-			file, err := os.OpenFile(events, os.O_WRONLY|os.O_APPEND, 0)
-			if err == nil {
-				_, _ = file.WriteString(line)
-				_ = file.Close()
-			}
-		}
-		return false
-	})
-	_ = command.Process.Kill()
-	_ = command.Wait()
-	text := output.String()
-	var echoed string
-	for _, l := range strings.Split(text, "\n") {
-		if strings.Contains(l, "loki.echo.test") && strings.Contains(l, "job-a") {
-			echoed = l
-			break
-		}
-	}
+	first := startAlloyFleetRun(t, alloy, configPath, storage, root)
+	eventually(t, 60*time.Second, "the line written before start", func() bool { return len(first.echoed("job-before")) == 1 })
+	echoed := first.echoed("job-before")[0]
 	for _, want := range []string{`host=\"node-a\"`, `tool=\"runtug\"`, `kind=\"spawn\"`, `outcome=\"refused\"`, `source=\"fleet_events\"`, "entry_timestamp=2026-11-01T12:34:56.789Z"} {
 		if !strings.Contains(echoed, want) {
 			t.Fatalf("echoed entry lacks %s:\n%s", want, echoed)
@@ -168,7 +187,21 @@ func TestAlloyFleetEventsPipelineShipsLabelledLines(t *testing.T) {
 			t.Fatalf("echoed entry carries label %s:\n%s", unwanted, echoed)
 		}
 	}
-	if strings.Contains(text, `\"kind\":\"rotated\"`) || strings.Contains(text, `kind=\"rotated\"`) {
+	// Positions are synced periodically and on shutdown; give the first
+	// run a moment, then stop it the way a restart would.
+	time.Sleep(time.Second)
+	_ = first.command.Process.Signal(os.Interrupt)
+	_ = first.command.Wait()
+
+	appendLine(t, events, fleetEventLine("job-while-down", "2026-11-01T12:35:00Z"))
+	second := startAlloyFleetRun(t, alloy, configPath, storage, root)
+	eventually(t, 60*time.Second, "the line written while alloy was down", func() bool { return len(second.echoed("job-while-down")) == 1 })
+	time.Sleep(time.Second)
+	second.stop()
+	if n := len(second.echoed("job-before")); n != 0 {
+		t.Fatalf("the restart re-shipped %d already shipped line(s)", n)
+	}
+	if len(first.echoed("job-rotated"))+len(second.echoed("job-rotated")) != 0 {
 		t.Fatal("the rotated generation was shipped")
 	}
 }
