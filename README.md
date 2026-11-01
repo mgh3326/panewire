@@ -139,6 +139,13 @@ instead of ssh: `GET /v1/nodes/agents` lists every node's agents, and
 uses its own scoped token instead of the operator's; see
 [docs/hub-scopes.md](docs/hub-scopes.md).
 
+The hub also keeps the latest fleet state, meaning per-account quota, per-host
+load, spawn start and end, and publisher liveness. It serves that state as a
+snapshot (`GET /v1/state`) and as a resumable SSE stream
+(`GET /v1/state/stream`), so runtug reads current state instead of measuring
+it on every spawn. See [docs/fleet-state.md](docs/fleet-state.md) for the
+message contract, the freshness rule, rollout and rollback.
+
 ## Hub job inbox compatibility
 
 For node job heartbeats, the local inbox contract is the arbiter envelope as

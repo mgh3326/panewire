@@ -556,7 +556,10 @@ func placementConnected(result PlacementResult, machine string) bool {
 	return false
 }
 
-func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetrics, source string, now time.Time) PlacementResult {
+// placementCandidates scores every policy machine, slot-full ones included,
+// in policy order. makePlacement decides from them; the fleet state publishes
+// them as per-host load values.
+func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placementMetrics, source string, now time.Time) []PlacementCandidate {
 	machines := append([]string{policy.LocalMachine}, policy.SpillTargets...)
 	candidates := make([]PlacementCandidate, 0, len(machines))
 	h.mu.Lock()
@@ -663,6 +666,11 @@ func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetri
 		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, SwapInPerS: swapInPerS, Pressure: pressure, CapacityWeight: weightField, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ","), slotFull: slotFull})
 	}
 	h.mu.Unlock()
+	return candidates
+}
+
+func (h *HubServer) makePlacement(policy PlacementPolicy, metrics placementMetrics, source string, now time.Time) PlacementResult {
+	candidates := h.placementCandidates(policy, metrics, source, now)
 	decision := policy.LocalMachine
 	if !placementUsable(candidates[0], policy, source) {
 		for _, candidate := range candidates[1:] {

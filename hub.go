@@ -508,6 +508,11 @@ type HubServer struct {
 	// NewHubServer, so the flush goroutine reads it without a lock.
 	closeCtx    context.Context
 	closeCancel context.CancelFunc
+	// fleetState is the latest-value store behind /v1/state; fleetLoadMu
+	// keeps at most one load publication in flight (docs/fleet-state.md).
+	fleetState  *fleetStateStore
+	fleetLoadMu sync.Mutex
+	fleetLoadAt time.Time // guarded by fleetLoadMu
 	// closeMu serializes Close so concurrent callers cannot race the logFile
 	// handoff; closed makes every call after the first return nil at once.
 	closeMu    sync.Mutex
@@ -687,6 +692,9 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.auth.Store(&authSet)
+	// The epoch is wall-clock, not the injectable clock: it must differ
+	// across hub restarts so a resuming reader never matches a stale id.
+	hub.fleetState = newFleetStateStore(time.Now())
 	hub.prepareInbox()
 	return hub, nil
 }
@@ -771,6 +779,8 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/burst/release", h.handleBurstRelease)
 	mux.HandleFunc("GET /v1/burst/holds", h.handleBurstHolds)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
+	mux.HandleFunc("GET /v1/state", h.handleFleetStateSnapshot)
+	mux.HandleFunc("GET /v1/state/stream", h.handleFleetStateStream)
 	// One-release tombstone: legacy producers still hit these during the
 	// upgrade window; answer a structured 503 instead of a bare 404.
 	mux.HandleFunc("GET /v2/quota/bindings", h.handleQuotaV2Gone)
@@ -1211,6 +1221,15 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			return
 		}
 		received := h.now().UTC()
+		if message.Kind == "state" {
+			// Fleet state has its own stream (/v1/state/stream); it is not
+			// broadcast to /v1/events subscribers.
+			publish, valid := decodeFleetStatePublish(message.Payload)
+			if !valid || !h.publishFleetStateFromNode(machineID, publish, received) {
+				h.countUnknownMessage()
+			}
+			return
+		}
 		if message.Kind == "heartbeat" {
 			heartbeat, valid := decodeHubHeartbeatPayload(message.Payload)
 			if !valid {
@@ -1230,6 +1249,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				}
 			}
 			h.mu.Unlock()
+			h.publishFleetPublisher(machineID, received)
 			h.observeHeartbeatAlerts(machineID, heartbeat)
 			h.observeActiveJobs(machineID, heartbeat.ActiveJobs, received)
 			if heartbeat.HostLoad != nil {
@@ -1747,6 +1767,11 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 				return hubInbound{}, false
 			}
 		}
+		if message.Kind == "state" {
+			if _, valid := decodeFleetStatePublish(rawPayload); !valid {
+				return hubInbound{}, false
+			}
+		}
 		if message.Kind == "idle-wake.route.request" {
 			if _, valid := decodeIdleWakeRouteRequest(rawPayload); !valid {
 				return hubInbound{}, false
@@ -1791,7 +1816,7 @@ func parseHubInbound(payload []byte) (hubInbound, bool) {
 
 func knownHubEventKind(kind string) bool {
 	switch kind {
-	case "heartbeat", "note", "job.completed", "job.escalate", "job.joined", "job.lost", "job.revoked", "lane.event", "idle-wake.route.request", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched", "relay.dropped":
+	case "heartbeat", "state", "note", "job.completed", "job.escalate", "job.joined", "job.lost", "job.revoked", "lane.event", "idle-wake.route.request", "job.revocation.ack", "relay.delivered", "relay.unconfirmed", "relay.held", "relay.released", "relay.cancelled", "relay.batched", "relay.dropped":
 		return true
 	}
 	return false
@@ -1867,6 +1892,7 @@ func (h *HubServer) disconnect(machineID string, agent *hubAgent) {
 	h.mu.Lock()
 	spawnWaiters, lost := h.disconnectLocked(machineID, agent)
 	h.mu.Unlock()
+	h.publishFleetPublisher(machineID, h.now().UTC())
 	wakeLostSpawns(spawnWaiters)
 	wakeLostNodeCommands(lost)
 }
@@ -2205,6 +2231,8 @@ func (h *HubServer) Sweep() {
 		}
 	}
 	h.mu.Unlock()
+	h.sweepFleetState(now)
+	h.startFleetLoadPublish(now)
 	h.sweepOrphanedJobs(now)
 	h.startLaneStallSweep(now)
 	for _, failover := range failovers {
