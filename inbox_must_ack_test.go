@@ -40,14 +40,22 @@ func laneUnread(t *testing.T, h *HubServer) int {
 
 // A READY, an ESC decision, a BLOCKED notice or a findings delivery is typed
 // into the receiving pane and still stays unread — through injection and an
-// explicit read — until the session runs `panewire inbox ack`.
+// explicit read — until the session runs `panewire inbox ack`. Runs on both
+// inbox backends.
 func TestMustAckTypesStayUnreadUntilInboxAck(t *testing.T) {
+	forEachHubInboxStorage(t, testMustAckTypesStayUnreadUntilInboxAck)
+}
+
+func testMustAckTypesStayUnreadUntilInboxAck(t *testing.T, storage hubInboxStorage) {
 	for _, typ := range []string{"ready", "decision", "blocked", "findings"} {
 		t.Run(typ, func(t *testing.T) {
 			_, hk, closeServer := newFakeHandoffkeep(t)
 			defer closeServer()
 			now := time.Now()
-			h, agent := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", hk, &now)
+			if storage.path != "" {
+				storage.path = filepath.Join(t.TempDir(), "inbox.sqlite3")
+			}
+			h, agent := quietHubOn(t, storage, "default", hk, &now)
 			e := quietEvent("ev-"+typ, "[worker] "+strings.ToUpper(typ)+" | pr 7")
 			e.NotifyType = typ
 			r := h.relayLaneEvent(e, agent)
@@ -91,8 +99,13 @@ func TestMustAckTypesStayUnreadUntilInboxAck(t *testing.T) {
 }
 
 // Idle-wake keeps its behaviour: a busy receiver gets it as an inbox item that
-// a read retires, an idle receiver gets it injected and stored read.
+// a read retires, an idle receiver gets it injected and stored read. Runs on
+// both inbox backends.
 func TestIdleWakeKeepsReadOnDelivery(t *testing.T) {
+	forEachHubInboxStorage(t, testIdleWakeKeepsReadOnDelivery)
+}
+
+func testIdleWakeKeepsReadOnDelivery(t *testing.T, storage hubInboxStorage) {
 	wake := func(id string) hubJobEventPayload {
 		e := quietEvent(id, idleWakeRouteText(idleWakeRouteRequest{EventID: id, Pane: "w2:p1", Label: "worker", State: "done", ChangedAt: time.Now().UTC().Format(time.RFC3339Nano), StateChangeSeq: 1}, idleWakeOwnerResolution{Lane: "lane-a"}))
 		return e
@@ -100,7 +113,7 @@ func TestIdleWakeKeepsReadOnDelivery(t *testing.T) {
 	_, hk, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
 	now := time.Now()
-	h, agent := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", hk, &now)
+	h, agent := quietHubOn(t, storage, "default", hk, &now)
 	r := h.relayLaneEvent(wake("wake-busy"), agent)
 	if r.ID == 0 || len(agent.relays) != 0 {
 		t.Fatalf("busy receiver: %+v relays=%d", r, len(agent.relays))
@@ -135,7 +148,8 @@ func TestIdleWakeKeepsReadOnDelivery(t *testing.T) {
 }
 
 // A store created before must_ack existed gains the column; its rows keep
-// their recorded read state.
+// their recorded read state. SQLite only: no Postgres inbox predates must_ack
+// (migration 0001 creates the column).
 func TestLaneInboxMustAckMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
 	s, err := openLaneInboxStore(path)
@@ -164,8 +178,13 @@ func TestLaneInboxMustAckMigration(t *testing.T) {
 }
 
 // A must-ack insert wakes `inbox wait` waiters, and a digest window never
-// folds a must-ack event into a digest: it is injected itself.
+// folds a must-ack event into a digest: it is injected itself. Runs on both
+// inbox backends.
 func TestMustAckWakesWaitersAndSkipsDigest(t *testing.T) {
+	forEachHubInboxStorage(t, testMustAckWakesWaitersAndSkipsDigest)
+}
+
+func testMustAckWakesWaitersAndSkipsDigest(t *testing.T, storage hubInboxStorage) {
 	_, hk, closeServer := newFakeHandoffkeep(t)
 	defer closeServer()
 	now := time.Now()
@@ -173,7 +192,7 @@ func TestMustAckWakesWaitersAndSkipsDigest(t *testing.T) {
 	if err := os.WriteFile(policy, []byte("default: interrupt\ndigest_window: 10s\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	h, agent := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), policy, hk, &now)
+	h, agent := quietHubOn(t, storage, policy, hk, &now)
 	wake := h.inbox.store.waitChan()
 	e := quietEvent("ev-findings", "review complete, 3 findings")
 	e.NotifyType = "findings"
@@ -196,13 +215,13 @@ func TestMustAckWakesWaitersAndSkipsDigest(t *testing.T) {
 
 // put itself never digests a must-ack interrupt, whatever window a caller
 // passes (replay and other paths reach put without receiveInbox's guard);
-// other interrupts keep their digest.
+// other interrupts keep their digest. Runs on both inbox backends.
 func TestPutNeverDigestsMustAck(t *testing.T) {
-	s, err := openLaneInboxStore(filepath.Join(t.TempDir(), "inbox.sqlite3"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.db.Close()
+	forEachLaneInboxBackend(t, testPutNeverDigestsMustAck)
+}
+
+func testPutNeverDigestsMustAck(t *testing.T, open func() *laneInboxStore) {
+	s := open()
 	now := time.Now()
 	for _, typ := range []string{"ready", "decision", "blocked", "findings", "", "order"} {
 		e := quietEvent("put-"+typ, "text")

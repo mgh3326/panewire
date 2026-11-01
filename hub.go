@@ -40,7 +40,10 @@ type HubServerConfig struct {
 	// CLI defaults to the embedded receiving-lane policy and a durable hub DB.
 	DeliveryPolicyPath string
 	InboxStorePath     string
-	Tokens             map[string]string
+	// InboxDatabaseURL, when set, puts the inbox on Postgres instead of
+	// InboxStorePath. It is a credential: never log it.
+	InboxDatabaseURL string
+	Tokens           map[string]string
 	// Scopes holds the raw HUB_SCOPES_<client> lines: a client listed here is
 	// a service (docs/hub-scopes.md), not a node. AuthPath, when set, names
 	// the auth file the hub hot-reloads both maps from.
@@ -680,7 +683,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 			controlPlaneLanesLastFailure = ""
 		}
 	}
-	inbox, err := newHubInbox(config.DeliveryPolicyPath, config.InboxStorePath)
+	inbox, err := newHubInbox(config.DeliveryPolicyPath, config.InboxStorePath, config.InboxDatabaseURL)
 	if err != nil {
 		return nil, err
 	}
@@ -742,8 +745,11 @@ func (h *HubServer) Close() error {
 	h.laneStallMu.Unlock()
 	h.laneStallSweeps.Wait()
 	if h.inbox != nil {
+		// An in-flight flush may sit in a store call on a stalled database;
+		// abort ends that call so taking flushMu cannot wait on it.
+		h.inbox.store.abort()
 		h.inbox.flushMu.Lock()
-		_ = h.inbox.store.db.Close()
+		_ = h.inbox.store.close()
 		h.inbox.flushMu.Unlock()
 	}
 	if h.logFile == nil {

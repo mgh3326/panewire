@@ -141,19 +141,21 @@ hub binary reverts; the extra column is ignored by the old binary.
 
 ## Durability and replay
 
-`--inbox-store PATH` chooses a private, persistent SQLite database on the hub.
-The default is `os.UserConfigDir()/panewire/hub-inbox.sqlite3` (on Linux normally
+`--inbox-store PATH` chooses a private, persistent SQLite database on the hub;
+setting `PANEWIRE_HUB_DATABASE_URL` puts the same store on Postgres instead
+(see [hub inbox on Postgres](hub-postgres.md)). The SQLite default is `os.UserConfigDir()/panewire/hub-inbox.sqlite3` (on Linux normally
 `$HOME/.config/panewire/hub-inbox.sqlite3`). It uses WAL and FULL synchronous
 commits; the database is mode 0600. The hub stores full originals and the chosen
 class before acknowledging a quiet event to the producer. Inbox acceptance does
 not depend on a connected destination node or on handoffkeep availability.
 
-This uses the existing SQLite driver, with no database server. Handoffkeep's
+The SQLite backend uses the existing SQLite driver, with no database server. Handoffkeep's
 current relay contract has no class/read/ack/escalation fields; extending it would
 require a coordinated second repository/schema release. The hub is already the
 receiving-lane authority, so a local durable store keeps this one PR deployable.
-Back up this store with SQLite's backup API, or stop the hub and copy the DB and
-any `-wal`/`-shm` sidecars. Do not delete it during rollback. There is no automatic
+Back up a SQLite store with SQLite's backup API, or stop the hub and copy the DB
+and any `-wal`/`-shm` sidecars; back up a Postgres store with the database's own
+backups (see [hub inbox on Postgres](hub-postgres.md#backup)). Do not delete it during rollback. There is no automatic
 retention/pruning; the desk owns backup, disk monitoring and archival. A future
 hub failover must move this database with the hub, not start an empty store.
 
@@ -165,7 +167,7 @@ imported. A pre-upgrade active pane submission cannot be recalled.
 
 An unread item past its deadline is claimed once into one short per-lane
 interrupt digest. Reading/acking before the claim suppresses escalation. The
-claim and outgoing digest are one SQLite transaction. Restart retries the same
+claim and outgoing digest are one database transaction. Restart retries the same
 batch ID. The digest is a single line — a count and the inbox pointer — which
 always satisfies the lane.event text contract (no control bytes, far under
 the length cap); full originals remain readable by `inbox list`. An item is

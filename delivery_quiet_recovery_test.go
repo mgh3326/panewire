@@ -466,8 +466,12 @@ func TestQuietKillSwitchBypassesStore(t *testing.T) {
 			}
 		})
 	}
-	// Even a path that cannot be opened is harmless when the policy is off.
-	if inbox, err := newHubInbox("off", t.TempDir()); err != nil || inbox != nil {
+	// Even a path or database URL that cannot be opened is harmless when the
+	// policy is off.
+	if inbox, err := newHubInbox("off", t.TempDir(), ""); err != nil || inbox != nil {
+		t.Fatal(inbox, err)
+	}
+	if inbox, err := newHubInbox("off", "", "postgres://pwsecretuser:pwsecretpass@127.0.0.1:1/db?connect_timeout=2"); err != nil || inbox != nil {
 		t.Fatal(inbox, err)
 	}
 }
