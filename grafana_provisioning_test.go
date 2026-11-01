@@ -1,0 +1,203 @@
+package panewire
+
+import (
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"regexp"
+	"strings"
+	"sync"
+	"testing"
+)
+
+// fleetEventLabels are the only labels the Alloy pipeline puts on fleet
+// events (plus source and the external machine_id/env); a query that selects
+// on job, reason or detail as a stream label would match nothing.
+var fleetEventStreamSelector = regexp.MustCompile(`\{([^{}]*source="fleet_events"[^{}]*)\}`)
+
+func checkFleetEventQuery(t *testing.T, where, expr string) {
+	t.Helper()
+	selector := fleetEventStreamSelector.FindStringSubmatch(expr)
+	if selector == nil {
+		t.Fatalf("%s: query does not select source=\"fleet_events\": %s", where, expr)
+	}
+	for _, matcher := range strings.Split(selector[1], ",") {
+		name, _, _ := strings.Cut(strings.TrimSpace(matcher), "=")
+		name = strings.TrimRight(name, "!~")
+		switch name {
+		case "source", "host", "tool", "kind", "outcome":
+		default:
+			t.Fatalf("%s: selects on %q, which is not a fleet event label: %s", where, name, expr)
+		}
+	}
+	if strings.Count(expr, "(") != strings.Count(expr, ")") || strings.Count(expr, "[") != strings.Count(expr, "]") {
+		t.Fatalf("%s: unbalanced query: %s", where, expr)
+	}
+}
+
+func TestGrafanaDashboardIsValidAndUsesTheLabelContract(t *testing.T) {
+	raw, err := os.ReadFile("deploy/grafana/fleet-dashboard.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dashboard struct {
+		UID    string `json:"uid"`
+		Panels []struct {
+			Title   string `json:"title"`
+			Targets []struct {
+				Expr string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	if err := json.Unmarshal(raw, &dashboard); err != nil {
+		t.Fatal(err)
+	}
+	titles := map[string]bool{}
+	for _, panel := range dashboard.Panels {
+		titles[panel.Title] = true
+		if len(panel.Targets) == 0 {
+			t.Fatalf("panel %q has no query", panel.Title)
+		}
+		for _, target := range panel.Targets {
+			checkFleetEventQuery(t, panel.Title, target.Expr)
+		}
+	}
+	for _, want := range []string{"Spawn refusals by host and reason", "Review outcomes", "Node spawn refusals by reason", "Quota observation age (minutes) at refusal"} {
+		if !titles[want] {
+			t.Fatalf("dashboard lacks panel %q", want)
+		}
+	}
+	if dashboard.UID != "fleet-observability" {
+		t.Fatalf("uid %q", dashboard.UID)
+	}
+}
+
+type grafanaRuleGroup struct {
+	Title     string `json:"title"`
+	FolderUID string `json:"folderUid"`
+	Interval  int    `json:"interval"`
+	Rules     []struct {
+		UID       string `json:"uid"`
+		Title     string `json:"title"`
+		Condition string `json:"condition"`
+		FolderUID string `json:"folderUID"`
+		RuleGroup string `json:"ruleGroup"`
+		Data      []struct {
+			RefID         string         `json:"refId"`
+			DatasourceUID string         `json:"datasourceUid"`
+			Model         map[string]any `json:"model"`
+		} `json:"data"`
+	} `json:"rules"`
+}
+
+func TestGrafanaAlertRulesAreValid(t *testing.T) {
+	raw, err := os.ReadFile("deploy/grafana/fleet-alert-rules.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var group grafanaRuleGroup
+	if err := json.Unmarshal(raw, &group); err != nil {
+		t.Fatal(err)
+	}
+	if group.Interval <= 0 || group.FolderUID == "" || group.Title == "" {
+		t.Fatalf("group: %+v", group)
+	}
+	titles := map[string]bool{}
+	for _, rule := range group.Rules {
+		titles[rule.Title] = true
+		if rule.UID == "" || rule.Condition != "C" || rule.FolderUID != group.FolderUID || rule.RuleGroup != group.Title || len(rule.Data) != 2 {
+			t.Fatalf("rule %q is incomplete", rule.Title)
+		}
+		query, threshold := rule.Data[0], rule.Data[1]
+		if query.RefID != "A" || query.DatasourceUID != "${LOKI_DATASOURCE_UID}" || threshold.RefID != "C" || threshold.DatasourceUID != "__expr__" || threshold.Model["expression"] != "A" {
+			t.Fatalf("rule %q data wiring", rule.Title)
+		}
+		expr, _ := query.Model["expr"].(string)
+		checkFleetEventQuery(t, rule.Title, expr)
+	}
+	for _, want := range []string{"Repeated spawn refusals", "Review missing", "Reviewer failing repeatedly", "Quota observation stale"} {
+		if !titles[want] {
+			t.Fatalf("alert rules lack %q", want)
+		}
+	}
+}
+
+// grafanaApplyRequests splits apply.sh --dry-run output into requests.
+func grafanaApplyRequests(t *testing.T, output string) map[string]string {
+	t.Helper()
+	requests := map[string]string{}
+	for _, part := range strings.Split(output, "### ")[1:] {
+		head, body, _ := strings.Cut(part, "\n")
+		var value any
+		if err := json.Unmarshal([]byte(body), &value); err != nil {
+			t.Fatalf("dry-run body for %s is not JSON: %v", head, err)
+		}
+		requests[head] = body
+	}
+	return requests
+}
+
+func TestGrafanaApplyDryRunNeedsNoCredentials(t *testing.T) {
+	command := exec.Command("sh", "deploy/grafana/apply.sh", "--dry-run")
+	command.Env = []string{"PATH=" + os.Getenv("PATH")}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("dry run: %v\n%s", err, output)
+	}
+	requests := grafanaApplyRequests(t, string(output))
+	for _, want := range []string{
+		"POST https://grafana.invalid/api/folders",
+		"POST https://grafana.invalid/api/dashboards/db",
+		"PUT https://grafana.invalid/api/v1/provisioning/folder/fleet-observability/rule-groups/fleet-observability",
+	} {
+		if _, ok := requests[want]; !ok {
+			t.Fatalf("dry run lacks %s:\n%s", want, output)
+		}
+	}
+	if strings.Contains(string(output), "Authorization") || strings.Contains(string(output), "${LOKI_DATASOURCE_UID}") {
+		t.Fatalf("dry run leaks a header or an unsubstituted uid:\n%s", output)
+	}
+	missing := exec.Command("sh", "deploy/grafana/apply.sh")
+	missing.Env = []string{"PATH=" + os.Getenv("PATH")}
+	if output, err := missing.CombinedOutput(); err == nil || !strings.Contains(string(output), "GRAFANA_URL is required") {
+		t.Fatalf("a real run without credentials must refuse: %v %s", err, output)
+	}
+}
+
+func TestGrafanaApplySendsIdempotentRequests(t *testing.T) {
+	if _, err := exec.LookPath("curl"); err != nil {
+		t.Skip("curl is not installed")
+	}
+	var mu sync.Mutex
+	seen := map[string]string{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		seen[r.Method+" "+r.URL.Path] = r.Header.Get("Authorization") + "\n" + string(body)
+		mu.Unlock()
+		if r.URL.Path == "/api/folders" {
+			w.WriteHeader(http.StatusConflict) // the folder already exists
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+	command := exec.Command("sh", "deploy/grafana/apply.sh")
+	command.Env = []string{"PATH=" + os.Getenv("PATH"), "GRAFANA_URL=" + server.URL + "/", "GRAFANA_TOKEN=fake-token-0123", "LOKI_DATASOURCE_UID=loki-uid-1"}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("apply: %v\n%s", err, output)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	rules := seen["PUT /api/v1/provisioning/folder/fleet-observability/rule-groups/fleet-observability"]
+	if len(seen) != 3 || !strings.HasPrefix(rules, "Bearer fake-token-0123\n") || !strings.Contains(rules, `"datasourceUid": "loki-uid-1"`) {
+		t.Fatalf("requests: %v", seen)
+	}
+	if strings.Contains(string(output), "fake-token-0123") {
+		t.Fatal("apply printed the token")
+	}
+}

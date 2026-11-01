@@ -144,18 +144,136 @@ reset. Check the cap with:
 count by (machine_id) (namedprocess_namegroup_num_procs) > 31
 ```
 
+## Fleet events
+
+runtug, panewire and mergewake record failures and decisions as **fleet-event
+v1** lines. Each line is one JSON object with exactly these string fields:
+
+| Field | Meaning |
+| --- | --- |
+| `ts` | RFC 3339 UTC time; Alloy uses it as the entry timestamp |
+| `host` | Short hostname of the writer (label) |
+| `tool` | `runtug`, `panewire` or `mergewake` (label) |
+| `kind` | What happened: `spawn`, `plan`, `placement`, `quota_observation` (runtug); `node_spawn` (panewire); `reviewer`, `review` (mergewake) (label) |
+| `job` | Job id, or `<repo>#<pr>` for reviews |
+| `outcome` | `refused`, `failed`, `skipped`, `missing`, `placed`, `stale`, `unusable` (label) |
+| `reason` | Short code: exit status class, spawn.json rule, ranking metric, skip reason |
+| `detail` | At most 1 KiB of `key=value` facts and a stderr tail |
+
+Every tool writes to `<state home>/<tool>/events/fleet-events.jsonl`, where the
+state home is `$XDG_STATE_HOME` or `~/.local/state`. mergewake writes under its
+`state_dir`, which defaults to the same place. Each writer:
+
+- redacts every field: tokens, `NAME=secret` assignments, PEM keys, URL
+  credentials and email addresses;
+- normalises `kind`, `outcome` and `reason` to `[a-z0-9_.:-]`;
+- writes mode 0640 in a 0750 directory;
+- rotates the file to `.1` at 4 MiB. Alloy never reads `.1`.
+
+Writing an event never changes a command's result. Per-tool tables are in
+runtug `docs/config.md` ("Fleet events"), mergewake `docs/config.md`
+("Fleet events and crash reports"), and panewire `hub_spawn_node.go`.
+
+Both Alloy configs carry the same pipeline between `// BEGIN fleet events` and
+`// END fleet events`:
+
+- `local.file_match` reads `$FLEET_EVENTS_ROOT/*/events/fleet-events.jsonl`.
+  The root defaults to `$HOME/.local/state`, which is right for the macOS user
+  agent. On Linux, set `FLEET_EVENTS_ROOT` to the fleet user's state home,
+  because the alloy system user's `$HOME` is not that user's.
+- `loki.process "fleet_events"` turns `host`, `tool`, `kind` and `outcome` into
+  labels and sets the timestamp from `ts`. It drops the `filename` label and
+  rate-limits each host to 0.5 lines/s with a burst of 200.
+- `job`, `reason` and `detail` stay in the line. Query them with `| json` or
+  `| regexp`.
+
+`TestAlloyFleetEventsPipelineShipsLabelledLines` runs this block in the real
+`alloy` binary, with `loki.echo` in place of the cloud writer, and checks the
+labels, the timestamp, and that `.1` is not shipped.
+
+### Free-tier volume estimate
+
+| Quantity | Typical | Worst case |
+| --- | --- | --- |
+| Events | about 2,000/day fleet-wide (see below) | 0.5 lines/s/host (Alloy limit) = 43,200/day/host |
+| Bytes per line | 300–600 | about 1.4 KB (1 KiB detail, JSON and labels) |
+| Loki ingest | about 1.2 MB/day, **under 40 MB/month** | about 60 MB/day/host, **about 1.8 GB/month/host**; 8 hosts about 14.5 GB/month |
+| Share of the Grafana Cloud free logs tier (50 GB/month) | under 0.1 % | about 29 % with 8 hosts all saturated |
+| Active streams | about 20 label combinations × hosts (about 160 at 8 hosts) | the same: labels are closed sets |
+| Local disk | under 1 MB | 8 MiB per tool per host (live file plus `.1`) |
+| Sentry crash reports | 0 | at most 3/day/host (budget kept across restarts) = 90/month/host; 8 hosts = 720/month, under the 5,000/month free tier |
+
+The typical figure is based on measurements taken on 2026-11-01. panewire,
+runtug and mergewake opened 116 PRs in 14 days, about 8 PRs/day, and this host
+started 39 jobs in 7 days. That gives fewer than 100 spawns/day per host and a
+few hundred review events/day. Multiplying by 10 for fleet growth gives the
+2,000/day figure. The free-tier numbers are the published Grafana Cloud Free
+(50 GB logs, 14-day retention) and Sentry Developer (5k errors) quotas. Re-check
+them before relying on the headroom.
+
+### Rollout (desk)
+
+The tools start writing events as soon as their new binaries are deployed. No
+configuration is needed for that. Shipping, crash reports and Grafana need the
+following steps, in this order:
+
+1. **macOS hosts:** install the updated `config.mac.alloy` at the plist's
+   config path and restart the agent:
+   `launchctl kickstart -k gui/$(id -u)/<label>`. The default root
+   `$HOME/.local/state` applies.
+2. **Linux hosts that run a fleet tool:**
+   1. Create the event directories as the fleet user:
+      `mkdir -p -m 0750 ~/.local/state/{runtug,panewire,mergewake}/events`.
+   2. Let the alloy user traverse to them and read them. Run this as root,
+      with `U` set to the fleet user's home:
+
+      ```sh
+      setfacl -m u:alloy:x "$U" "$U/.local" "$U/.local/state" "$U"/.local/state/{runtug,panewire,mergewake}
+      for d in "$U"/.local/state/{runtug,panewire,mergewake}/events; do
+        setfacl -m u:alloy:rx "$d"; setfacl -d -m u:alloy:r "$d"
+      done
+      ```
+
+      The default ACL covers files created later, including the file created
+      after rotation. Files are created 0640, so the ACL mask allows reads.
+      This works only when the services run with the default umask 022; a
+      service with `UMask=0077` creates 0600 files that alloy cannot read.
+   3. Rerun the installer with
+      `FLEET_EVENTS_ROOT=$U/.local/state` in its environment. It writes the
+      variable into the EnvironmentFile. Alternatively, add the line to that
+      file and restart alloy.
+3. **Check the shipping.** Run `runtug plan` with no flags; it refuses with a
+   usage error and writes a `plan`/`refused` event. Then open Grafana Explore
+   with `{source="fleet_events"}` and confirm the line arrives with the `host`,
+   `tool`, `kind` and `outcome` labels.
+4. **Turn on Sentry:**
+   - Add `SENTRY_DSN_PANEWIRE` to the environment of the `panewire daemon` and
+     `panewire hub` services, in the launchd plist `EnvironmentVariables` or
+     the systemd EnvironmentFile.
+   - Add `SENTRY_DSN_MERGEWAKE` to the mergewake daemon's environment.
+   - Restart the services.
+
+   Without these variables, crash reporting is off.
+5. **Apply the dashboard and alerts** from `deploy/grafana/` (see its README):
+   1. Run `./apply.sh --dry-run` and review the output.
+   2. Run it again with `GRAFANA_URL`, `GRAFANA_TOKEN` and
+      `LOKI_DATASOURCE_UID` set.
+   3. Give the stack's default notification policy a contact point. The rules
+      carry `team=fleet` for routing.
+
 ## Label contract
 
 | Label | Meaning | Populated by |
 | --- | --- | --- |
 | `machine_id` | Stable host identity | Required `MACHINE_ID` environment variable on every host |
 | `env` | Deployment environment | config external label (`prod`) |
-| `source` | Input type | `journal`, `docker`, or each macOS file source |
+| `source` | Input type | `journal`, `docker`, `fleet_events`, or each macOS file source |
 | `unit` | systemd unit | journal relabeling |
 | `app` | syslog identifier | journal relabeling |
 | `level` | journal priority keyword | journal relabeling |
 | `container` | Docker container name | Docker relabeling |
 | `file` | Basename of a macOS tailed file | file relabeling |
+| `host`, `tool`, `kind`, `outcome` | Fleet event fields (see Fleet events) | `loki.process "fleet_events"` from the JSON line |
 
 Labels not applicable to a source are absent. Queries should therefore scope by
 `source` before expecting `unit`, `container`, or `file`.
@@ -176,6 +294,9 @@ Labels not applicable to a source are absent. Queries should therefore scope by
 
 ## Validation
 
-Run `sh -n install-linux.sh run-alloy.sh proc-metrics.sh`, `gitleaks git --no-banner`, and `go test ./...`.
-The Go tests run `alloy fmt` and `alloy validate` on both configurations when the `alloy` binary
-is available; otherwise it reports an explicit skip.
+Run `sh -n install-linux.sh run-alloy.sh proc-metrics.sh ../grafana/apply.sh`, `gitleaks git --no-banner`, and `go test ./...`.
+When the `alloy` binary is available, the Go tests do three things: run
+`alloy fmt` and `alloy validate` on both configurations, check that the
+fleet events block is identical in both, and run that block end to end.
+Without the binary, they report an explicit skip. The Grafana files are
+covered by `grafana_provisioning_test.go`.

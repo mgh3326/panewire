@@ -1,0 +1,259 @@
+{
+  "title": "fleet-observability",
+  "folderUid": "fleet-observability",
+  "interval": 300,
+  "rules": [
+    {
+      "uid": "fleet-spawn-refusals-repeated",
+      "title": "Repeated spawn refusals",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "relativeTimeRange": {
+            "from": 1800,
+            "to": 0
+          },
+          "datasourceUid": "${LOKI_DATASOURCE_UID}",
+          "model": {
+            "refId": "A",
+            "expr": "sum by (host, reason) (count_over_time({source=\"fleet_events\", tool=~\"runtug|panewire\", kind=~\"spawn|node_spawn\", outcome=~\"refused|failed\"} | json reason=\"reason\" [30m]))",
+            "queryType": "instant",
+            "editorMode": "code",
+            "intervalMs": 1000,
+            "maxDataPoints": 43200
+          }
+        },
+        {
+          "refId": "C",
+          "queryType": "",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    3
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "0m",
+      "labels": {
+        "team": "fleet",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "{{ $labels.host }} refused more than 3 spawns for {{ $labels.reason }} in 30 minutes.",
+        "dashboard": "fleet-observability"
+      },
+      "isPaused": false,
+      "folderUID": "fleet-observability",
+      "ruleGroup": "fleet-observability",
+      "orgID": 1
+    },
+    {
+      "uid": "fleet-review-missing",
+      "title": "Review missing",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "relativeTimeRange": {
+            "from": 3600,
+            "to": 0
+          },
+          "datasourceUid": "${LOKI_DATASOURCE_UID}",
+          "model": {
+            "refId": "A",
+            "expr": "sum by (job, reason) (count_over_time({source=\"fleet_events\", tool=\"mergewake\", kind=\"review\", outcome=\"missing\"} | json job=\"job\", reason=\"reason\" [1h]))",
+            "queryType": "instant",
+            "editorMode": "code",
+            "intervalMs": 1000,
+            "maxDataPoints": 43200
+          }
+        },
+        {
+          "refId": "C",
+          "queryType": "",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    0
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "0m",
+      "labels": {
+        "team": "fleet",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "No reviewer produced a pass for {{ $labels.job }} ({{ $labels.reason }}); the PR gate stays review_missing.",
+        "dashboard": "fleet-observability"
+      },
+      "isPaused": false,
+      "folderUID": "fleet-observability",
+      "ruleGroup": "fleet-observability",
+      "orgID": 1
+    },
+    {
+      "uid": "fleet-reviewer-failing",
+      "title": "Reviewer failing repeatedly",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "relativeTimeRange": {
+            "from": 7200,
+            "to": 0
+          },
+          "datasourceUid": "${LOKI_DATASOURCE_UID}",
+          "model": {
+            "refId": "A",
+            "expr": "sum by (reviewer) (count_over_time({source=\"fleet_events\", tool=\"mergewake\", kind=\"reviewer\", outcome=\"failed\"} | regexp \"reviewer=(?P<reviewer>[^ \\\"]+)\" [2h]))",
+            "queryType": "instant",
+            "editorMode": "code",
+            "intervalMs": 1000,
+            "maxDataPoints": 43200
+          }
+        },
+        {
+          "refId": "C",
+          "queryType": "",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    2
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "0m",
+      "labels": {
+        "team": "fleet",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "Reviewer {{ $labels.reviewer }} failed 3 or more times in 2 hours.",
+        "dashboard": "fleet-observability"
+      },
+      "isPaused": false,
+      "folderUID": "fleet-observability",
+      "ruleGroup": "fleet-observability",
+      "orgID": 1
+    },
+    {
+      "uid": "fleet-quota-observation-stale",
+      "title": "Quota observation stale",
+      "condition": "C",
+      "data": [
+        {
+          "refId": "A",
+          "queryType": "instant",
+          "relativeTimeRange": {
+            "from": 900,
+            "to": 0
+          },
+          "datasourceUid": "${LOKI_DATASOURCE_UID}",
+          "model": {
+            "refId": "A",
+            "expr": "max by (target, pool) (max_over_time({source=\"fleet_events\", kind=\"quota_observation\", outcome=\"stale\"} | regexp \"target=(?P<target>[^ \\\"]+) pool=(?P<pool>[^ \\\"]+) age_min=(?P<age_min>-?[0-9]+)\" | unwrap age_min [15m]))",
+            "queryType": "instant",
+            "editorMode": "code",
+            "intervalMs": 1000,
+            "maxDataPoints": 43200
+          }
+        },
+        {
+          "refId": "C",
+          "queryType": "",
+          "relativeTimeRange": {
+            "from": 0,
+            "to": 0
+          },
+          "datasourceUid": "__expr__",
+          "model": {
+            "refId": "C",
+            "type": "threshold",
+            "expression": "A",
+            "conditions": [
+              {
+                "evaluator": {
+                  "type": "gt",
+                  "params": [
+                    30
+                  ]
+                }
+              }
+            ]
+          }
+        }
+      ],
+      "noDataState": "OK",
+      "execErrState": "Error",
+      "for": "0m",
+      "labels": {
+        "team": "fleet",
+        "severity": "warning"
+      },
+      "annotations": {
+        "summary": "The {{ $labels.pool }} quota observation for {{ $labels.target }} is older than 30 minutes and refused placements.",
+        "dashboard": "fleet-observability"
+      },
+      "isPaused": false,
+      "folderUID": "fleet-observability",
+      "ruleGroup": "fleet-observability",
+      "orgID": 1
+    }
+  ]
+}
