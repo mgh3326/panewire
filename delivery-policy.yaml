@@ -13,6 +13,8 @@ types:
   decision: interrupt
   order: interrupt
   ready: interrupt
+  blocked: interrupt
+  findings: interrupt
   report: inbox
   ack: inbox
   info: inbox

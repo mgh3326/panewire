@@ -113,7 +113,9 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		class = "interrupt"
 	}
 	deadline, window := h.inbox.policy.timing(lane, class)
-	if event.noDigest || h.inbox.policy.mustAct(lane, *event) || chatRelayEventPattern.MatchString(event.EventID) {
+	// A must-ack type is typed into the pane itself, never folded into a
+	// digest: the receiver acks the item it saw.
+	if event.noDigest || h.inbox.policy.mustAct(lane, *event) || mustAckNotifyTypes[event.NotifyType] || chatRelayEventPattern.MatchString(event.EventID) {
 		window = 0
 	}
 	item, err := h.inbox.store.put(relayEventDedupeKey(kind, *event), lane, kind, class, *event, h.now().UTC(), deadline, window)

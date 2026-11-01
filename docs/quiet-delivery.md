@@ -14,7 +14,7 @@ panewire emit --kind lane.event --lane desk --event-id need-decision \
 The optional `delivery_class` and sender-declared `notify_type` travel through
 event files, the immediate local socket request, scanner, node outbox and hub
 ingress. `--deliver` selects the class for **all emit kinds** and `--type`
-declares one of `decision | order | ready | report | ack | info`; an unknown
+declares one of `decision | order | ready | blocked | findings | report | ack | info`; an unknown
 value is a usage error. The existing JSON `deliver` field remains the
 separate node timing policy (`idle`, `now`, `max_wait=...`). No new field is sent
 in `relay.inject`; old daemons accept exactly their existing envelope. Missing
@@ -27,7 +27,7 @@ until that node upgrades.
 
 Must-act tags always interrupt, ahead of explicit class, the declared type,
 replay, and every inbox rule. Otherwise explicit class wins, then the `types:`
-map resolves a declared `--type` (decision/order/ready → interrupt;
+map resolves a declared `--type` (decision/order/ready/blocked/findings → interrupt;
 report/ack/info → inbox, all overridable globally or per lane), then the first
 matching rule, with lane
 rules ahead of global rules. Messages originating in the operator chat UI remain
@@ -116,6 +116,28 @@ field allowlist: it rejects `delivery_class`. Stop using explicit `--deliver`
 and ensure queued node payloads omit that field before reverting the hub. The
 kill switch on the upgraded hub accepts those payloads and requires no node
 rollback. Preserve the inbox database and its WAL during either rollback.
+
+### Must-ack types
+
+A lane event declared `--type ready`, `decision`, `blocked` or `findings` must be
+acknowledged by the receiving session. Injecting it into the pane does not mark it
+read, and `inbox read` does not retire it: it stays unread — in `inbox count`,
+`inbox list --unread` and `inbox wait` — until `panewire inbox ack <id>` (or
+`ack --all`). `inbox list` shows it as `unacked` until then, and its JSON carries
+`"must_ack": true`. This holds whatever class the policy gives the type.
+
+Every other interrupt is still stored read on insert: injection is its delivery.
+Idle-wake events (no declared type) and progress messages (`report`/`info`, or
+undeclared) keep that behaviour. Must-act text tags such as `READY` decide the
+class only; they do not make an undeclared event must-ack, so a producer that
+needs the guarantee declares the type.
+
+The hub adds the `must_ack` column to an existing inbox store on start; rows
+stored before keep their recorded read state. An old hub rejects the new
+`blocked` and `findings` types at ingress, and an old `panewire emit` rejects them
+as a usage error: upgrade the hub, then nodes and emitters, before producers
+declare them. Rollback: producers stop declaring `blocked`/`findings`, then the
+hub binary reverts; the extra column is ignored by the old binary.
 
 ## Durability and replay
 
@@ -208,9 +230,10 @@ panewire inbox count --json
 ```
 
 List is newest first, capped at 500 items, and includes the saved class; `--unread`
-filters unread inbox-class items. Read marks read. Ack marks read and acknowledged;
-neither removes the record. Interrupt originals appear in unfiltered lists for
-inspection, but do not increase the unread inbox count. A read/ack is a hub write.
+filters unread items: inbox-class items not yet read, and must-ack items
+(above) not yet acked. Read marks read. Ack marks read and acknowledged;
+neither removes the record. Other interrupt originals appear in unfiltered lists for
+inspection, but do not increase the unread count. A read/ack is a hub write.
 `wait` blocks until an unread item exists for the lane, prints it like `read`,
 and exits 0; on timeout it prints nothing and exits 3. It is the wake primitive
 an agent can run in the background instead of being typed into.

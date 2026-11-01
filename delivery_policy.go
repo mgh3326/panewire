@@ -28,11 +28,19 @@ var mustActDeliveryTags = regexp.MustCompile(`(?i)\b(?:BLOCKER|READY|ESC|BOUNCE|
 // `panewire emit --type`. The same set validates the wire field and the keys
 // of a policy's types: block, so a type that cannot be declared can never be
 // configured.
-var hubNotifyTypes = map[string]bool{"decision": true, "order": true, "ready": true, "report": true, "ack": true, "info": true}
+var hubNotifyTypes = map[string]bool{"decision": true, "order": true, "ready": true, "blocked": true, "findings": true, "report": true, "ack": true, "info": true}
 
 // defaultNotifyTypeClasses is the built-in type→class map. A policy file
 // overrides individual entries under types:; the rest stay built in.
-var defaultNotifyTypeClasses = map[string]string{"decision": "interrupt", "order": "interrupt", "ready": "interrupt", "report": "inbox", "ack": "inbox", "info": "inbox"}
+var defaultNotifyTypeClasses = map[string]string{"decision": "interrupt", "order": "interrupt", "ready": "interrupt", "blocked": "interrupt", "findings": "interrupt", "report": "inbox", "ack": "inbox", "info": "inbox"}
+
+// mustAckNotifyTypes are the declared types a receiving session must
+// acknowledge explicitly (`panewire inbox ack`): a READY, an ESC decision, a
+// BLOCKED notice or a review-findings delivery. Injecting one into a pane, or
+// reading it, does not retire it; it stays unread until acked, whatever class
+// the policy gives it. Idle-wake and progress events declare none of these
+// and keep their existing read-on-insert behaviour.
+var mustAckNotifyTypes = map[string]bool{"ready": true, "decision": true, "blocked": true, "findings": true}
 
 // defaultInboxAgentSupport is the built-in receiving-CLI capability map: only
 // harnesses whose agent can background-wait on `panewire inbox wait` are
