@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -43,31 +45,73 @@ func defaultHubSpawnConfigPath(path string) string {
 	return filepath.Join(home, ".config", "panewire", "spawn.json")
 }
 
+// hubSpawnConfigError is why spawn.json disables hub spawns: the rule the
+// file failed and, where there is one, the offending key or value. The hub
+// result still says spawn_disabled; the rule travels in the result's tail and
+// in the node_spawn fleet event.
+type hubSpawnConfigError struct {
+	Rule   string
+	Detail string
+}
+
+func (e *hubSpawnConfigError) Error() string {
+	if e.Detail == "" {
+		return "spawn.json rule " + e.Rule
+	}
+	return "spawn.json rule " + e.Rule + ": " + e.Detail
+}
+
+func spawnConfigRefusal(rule, detail string) (hubSpawnConfig, error) {
+	return hubSpawnConfig{}, &hubSpawnConfigError{Rule: rule, Detail: utf8PrefixWithin(detail, 200)}
+}
+
 func loadHubSpawnConfig(path string) (hubSpawnConfig, error) {
 	if path == "" {
-		return hubSpawnConfig{}, errors.New("spawn disabled")
+		return spawnConfigRefusal("config_path_unset", "")
 	}
 	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 64<<10 {
-		return hubSpawnConfig{}, errors.New("spawn disabled")
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return spawnConfigRefusal("config_missing", "")
+	case err != nil:
+		return spawnConfigRefusal("config_unreadable", "")
+	case !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0:
+		return spawnConfigRefusal("config_not_regular_file", "")
+	case info.Size() > 64<<10:
+		return spawnConfigRefusal("config_too_large", "limit 65536 bytes")
 	}
 	contents, err := os.ReadFile(path)
 	if err != nil {
-		return hubSpawnConfig{}, errors.New("spawn disabled")
+		return spawnConfigRefusal("config_unreadable", "")
 	}
 	decoder := json.NewDecoder(bytes.NewReader(contents))
 	decoder.DisallowUnknownFields()
 	var config hubSpawnConfig
-	if decoder.Decode(&config) != nil {
-		return hubSpawnConfig{}, errors.New("spawn disabled")
+	if err := decoder.Decode(&config); err != nil {
+		return spawnConfigRefusal("config_json_invalid", err.Error())
 	}
 	var trailing any
-	if decoder.Decode(&trailing) != io.EOF || !config.Enabled || config.Workspace == "" || config.HERDRSession == "" {
-		return hubSpawnConfig{}, errors.New("spawn disabled")
+	switch {
+	case decoder.Decode(&trailing) != io.EOF:
+		return spawnConfigRefusal("config_trailing_data", "")
+	case !config.Enabled:
+		return spawnConfigRefusal("enabled_false", "")
+	case config.Workspace == "":
+		return spawnConfigRefusal("workspace_required", "")
+	case config.HERDRSession == "":
+		return spawnConfigRefusal("herdr_session_required", "")
 	}
-	for key, directory := range config.CWDMap {
-		if !hubSpawnCWDKeyPattern.MatchString(key) || !filepath.IsAbs(directory) {
-			return hubSpawnConfig{}, errors.New("spawn disabled")
+	keys := make([]string, 0, len(config.CWDMap))
+	for key := range config.CWDMap {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+	for _, key := range keys {
+		if !hubSpawnCWDKeyPattern.MatchString(key) {
+			return spawnConfigRefusal("cwd_map_key_pattern", fmt.Sprintf("key %q must match %s", key, hubSpawnCWDKeyPattern))
+		}
+		if !filepath.IsAbs(config.CWDMap[key]) {
+			return spawnConfigRefusal("cwd_map_dir_absolute", fmt.Sprintf("cwd_map[%q] must be an absolute path", key))
 		}
 	}
 	return config, nil
@@ -105,11 +149,20 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	}{Type: "job.spawn.result", RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error})
 }
 
-func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) hubSpawnResult {
-	result := hubSpawnResult{RequestID: message.RequestID}
+func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) (result hubSpawnResult) {
+	// reason and detail refine result.Error in the node_spawn fleet event.
+	var reason, detail string
+	defer func() { client.recordHubSpawnOutcome(message, result, reason, detail) }()
+	result = hubSpawnResult{RequestID: message.RequestID}
 	config, err := loadHubSpawnConfig(client.spawnConfigPath)
 	if err != nil {
 		result.RC, result.Error = 2, "spawn_disabled"
+		var configErr *hubSpawnConfigError
+		if errors.As(err, &configErr) {
+			reason = configErr.Rule
+		}
+		detail = err.Error()
+		result.StdoutTail = detail
 		return result
 	}
 	cwd, found := config.CWDMap[message.CWDKey]
@@ -216,7 +269,63 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	} else {
 		result.Error = "spawn_failed"
 	}
+	// runtug explains a refusal on stderr; without it the caller only sees
+	// an empty "remote spawn:" message.
+	if stderr := strings.TrimSpace(fleetEventRedact(output.stderr.String())); stderr != "" {
+		result.StdoutTail = hubSpawnTailWithStderr(result.StdoutTail, stderr)
+		detail = fmt.Sprintf("rc=%d stderr: %s", result.RC, utf8SuffixWithin(stderr, fleetEventMaxDetail-32))
+	}
 	return result
+}
+
+// hubSpawnStderrTail bounds the runtug stderr kept in a spawn result.
+const hubSpawnStderrTail = 1536
+
+// hubSpawnTailWithStderr appends runtug's stderr tail to the stdout tail,
+// keeping the whole within hubSpawnResultTail (the hub's wire bound) by
+// dropping the oldest stdout first.
+func hubSpawnTailWithStderr(stdout, stderr string) string {
+	section := "stderr: " + utf8SuffixWithin(stderr, hubSpawnStderrTail)
+	if stdout = strings.TrimRight(stdout, "\n"); stdout != "" {
+		section = "\n" + section
+	}
+	return utf8SuffixWithin(stdout, hubSpawnResultTail-len(section)) + section
+}
+
+// recordHubSpawnOutcome writes the node_spawn fleet event for a refused or
+// failed hub spawn. reason defaults to the wire error; detail to the rc.
+func (client *HubClient) recordHubSpawnOutcome(message hubOutboundMessage, result hubSpawnResult, reason, detail string) {
+	if result.Error == "" {
+		return
+	}
+	outcome := "refused"
+	if result.Error == "spawn_failed" || result.Error == "timeout" {
+		outcome = "failed"
+	}
+	if reason == "" {
+		reason = result.Error
+	}
+	if detail == "" {
+		detail = fmt.Sprintf("rc=%d", result.RC)
+	}
+	now := time.Now
+	if client.now != nil {
+		now = client.now
+	}
+	emitFleetEvent(now(), "node_spawn", hubSpawnArg(message.Args, "--job"), outcome, reason, result.Error+" "+detail)
+}
+
+// hubSpawnArg returns the value of flag in a hub spawn's argv, or "".
+func hubSpawnArg(args []string, flag string) string {
+	for i, arg := range args {
+		if value, ok := strings.CutPrefix(arg, flag+"="); ok {
+			return value
+		}
+		if arg == flag && i+1 < len(args) {
+			return args[i+1]
+		}
+	}
+	return ""
 }
 
 func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key string) (string, error) {
@@ -265,11 +374,27 @@ func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key st
 }
 
 type hubSpawnOutput struct {
-	tail  []byte
-	line  []byte
-	pane  string
-	jobID string
+	// stderr keeps runtug's last stderr bytes for a failed spawn's result.
+	stderr hubSpawnStderr
+	tail   []byte
+	line   []byte
+	pane   string
+	jobID  string
 }
+
+// hubSpawnStderr is an io.Writer that keeps the last hubSpawnStderrTail*2
+// bytes written to it; the result bound is applied after redaction.
+type hubSpawnStderr struct{ tail []byte }
+
+func (s *hubSpawnStderr) Write(value []byte) (int, error) {
+	s.tail = append(s.tail, value...)
+	if limit := 2 * hubSpawnStderrTail; len(s.tail) > limit {
+		s.tail = append(s.tail[:0], s.tail[len(s.tail)-limit:]...)
+	}
+	return len(value), nil
+}
+
+func (s *hubSpawnStderr) String() string { return strings.ToValidUTF8(string(s.tail), "?") }
 
 func (output *hubSpawnOutput) Write(value []byte) (int, error) {
 	const maxLine = 8 << 10
@@ -405,7 +530,7 @@ func runHubSpawnCommand(ctx context.Context, runtugPath, cwd, briefPath, workspa
 	}
 	output := &hubSpawnOutput{}
 	command.Stdout = output
-	command.Stderr = io.Discard
+	command.Stderr = &output.stderr
 	err := command.Run()
 	if ctx.Err() == context.DeadlineExceeded {
 		return output, context.DeadlineExceeded
