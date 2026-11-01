@@ -109,3 +109,67 @@ loki.source.docker "docker" {
 	forward_to = [loki.write.cloud.receiver]
 }
 // END docker containers
+
+// BEGIN fleet events
+// Fleet events (fleet-event v1): runtug, panewire and mergewake each append
+// one JSON object per line to <state home>/<tool>/events/fleet-events.jsonl
+// (ts, host, tool, kind, job, outcome, reason, detail). FLEET_EVENTS_ROOT is
+// the fleet user's state home; it defaults to $HOME/.local/state, which is
+// right for a user launchd agent but not for the Linux alloy system user.
+// Only host, tool, kind and outcome become labels; job, reason and detail
+// stay in the line (query them with `| json`). The rotated .1 generation is
+// never matched, so no line ships twice. stage.limit caps a runaway writer
+// at 0.5 lines/s per host (see README "Fleet events" for the volume budget).
+local.file_match "fleet_events" {
+	path_targets = [
+		{__path__ = coalesce(sys.env("FLEET_EVENTS_ROOT"), sys.env("HOME") + "/.local/state") + "/*/events/fleet-events.jsonl", source = "fleet_events"},
+	]
+	sync_period = "30s"
+}
+
+// No tail_from_end: a file without a stored position (first start, or the
+// fresh file after a rotation) is read from its start, and a restart resumes
+// from the positions file, so lines written while alloy was down still ship.
+loki.source.file "fleet_events" {
+	targets    = local.file_match.fleet_events.targets
+	forward_to = [loki.process.fleet_events.receiver]
+}
+
+loki.process "fleet_events" {
+	forward_to = [loki.write.cloud.receiver]
+
+	stage.json {
+		expressions = {
+			ts      = "ts",
+			host    = "host",
+			tool    = "tool",
+			kind    = "kind",
+			outcome = "outcome",
+		}
+	}
+
+	stage.timestamp {
+		source = "ts"
+		format = "RFC3339Nano"
+	}
+
+	stage.labels {
+		values = {
+			host    = "",
+			tool    = "",
+			kind    = "",
+			outcome = "",
+		}
+	}
+
+	stage.label_drop {
+		values = ["filename"]
+	}
+
+	stage.limit {
+		rate  = 0.5
+		burst = 200
+		drop  = true
+	}
+}
+// END fleet events
