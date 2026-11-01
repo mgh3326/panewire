@@ -348,7 +348,8 @@ func (h *HubServer) authenticate(request *http.Request) hubCaller {
 // authorize is the single decision for scoped hub routes: the nodes reads,
 // node commands, spawn, wake and the inbox. The operator may do everything;
 // a node keeps exactly its pre-scope rights (its own lanes' inbox, nothing
-// else here); a service gets what its scopes name for this resource.
+// else here); a service gets what its scopes name for this resource. The
+// reap-only node commands narrow this further; see authorizeNodeCommand.
 func (h *HubServer) authorize(request *http.Request, scope, resource string) hubAccess {
 	caller := h.authenticate(request)
 	switch caller.kind {

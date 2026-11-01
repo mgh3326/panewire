@@ -14,10 +14,13 @@ out may re-issue, and every acting op re-checks on the node.
 
 Both endpoints require the operator token, or a service token whose scopes
 cover the call (`nodes.agents.read`, `node.command:<op>@<machine>`; see
-[hub-scopes.md](hub-scopes.md)). Nodes need no extra opt-in: the
+[hub-scopes.md](hub-scopes.md)). `pane.read` and `job.done` are narrower
+still: only a service token whose scopes name them is admitted, and the
+operator token gets `403 scope_forbidden`. Nodes need no extra opt-in: the
 hub can already type into any pane through `relay.inject`, and every op
 here is narrower than that. Each op is a closed shape; no op runs a shell,
-and no op takes a caller-chosen file path to write.
+and no op takes a caller-chosen file path to write. The one report path an op
+reads (`job.done`) must be one of two fixed files in that job's directory.
 
 ## Hub endpoints
 
@@ -129,6 +132,54 @@ it; the screen is written to an `O_EXCL|O_NOFOLLOW` temporary file and
 renamed over `pane-screen.txt`, which replaces a symlink there instead of
 writing through it. A symlink above `<inbox>/jobs` is operator-provisioned
 and honoured. Read or write failures answer `capture_failed`.
+
+### `pane.read`
+
+`args: {pane_id, name, cwd, tail_lines}` — the caller's snapshot of the pane,
+plus how many trailing screen lines to return (0 to 200; 0 returns none). The
+node re-reads `herdr agent list`, and only a row with that `pane_id`, name and
+cwd is read. Pane ids are host-local, so the same id on another node names
+another pane; matching name and cwd keeps that pane's data on its node.
+
+| `outcome` | Other fields | Meaning |
+| --- | --- | --- |
+| `read` | `agent_status`, `focused`, `composer`, optional `screen_tail` | The pane matched. |
+| `pane-changed` | none | Present, but name or cwd differs. Nothing is read. |
+| `pane-gone` | none | No such pane on this node. Nothing is read. |
+
+`composer` comes from `herdr pane read <id> --source visible`:
+
+| `composer` | Meaning |
+| --- | --- |
+| `empty` | The input line was located and holds nothing. |
+| `has_text` | The input line holds text. A dim placeholder or a prompt suggestion reads as text too, because the plain-text read cannot tell them apart. |
+| `unknown` | The screen could not be read, shows no composer, or the harness is not one of `claude`, `devin` or `codex`. |
+
+Only `empty` means nothing is unsent. `screen_tail` holds at most 4 KiB of
+valid UTF-8. A herdr row with no `focused` flag answers `herdr_failed`, so a
+missing flag never reads as "not focused". A failed agent list also answers
+`herdr_failed`.
+
+### `job.done`
+
+`args: {job, report}`. Runs `runtug done <job> --report <report>` on the node
+and answers runtug's last output line as `line`. `report` must be exactly
+`<inbox>/jobs/<job>/report.md` or `<inbox>/jobs/<job>/pane-screen.txt` — the
+paths `pane.capture` answers. runtug uploads the report it is given, so no other
+path is accepted.
+
+| `outcome` | `line` | Meaning |
+| --- | --- | --- |
+| `done` | runtug's line | runtug ran and completed the job. |
+| `already-done` | the recorded line | This report already completed the job. runtug does not run again, or it answered `duplicate=yes`. |
+| `not-a-job` | — | The job directory is missing or is a symlink. runtug does not run. |
+| `report-invalid` | — | `report` is not one of the two paths, is missing, or is not a regular file. runtug does not run. |
+
+A failed or timed-out runtug answers `done_failed` and can be re-issued; a node
+without a jobs root answers `jobs_root_unset`. The node records the report's
+digest in `<inbox>/jobs/<job>/.node-job-done` after runtug succeeds. The digest
+is the key because a released job id can be claimed again: a new report for that
+id runs runtug, the same rule runtug's own duplicate check applies.
 
 ### `worktree.inspect`
 
@@ -279,9 +330,56 @@ Node to hub, exactly one of `result` or `error`:
 
 Node error codes are a closed set: `invalid_args`, `herdr_failed`,
 `close_failed`, `capture_failed`, `jobs_root_unset`, `work_root_unset`,
-`refresh_failed`, `result_too_large`. A
+`refresh_failed`, `done_failed`, `result_too_large`. A
 result must fit the hub's 32 KiB per-message limit; a larger one answers
 `result_too_large`. The hub re-encodes each result through its op's shape,
 drops one outside it, and accepts an answer only from the machine and
 connection it sent the command to. An older node ignores `node.command`, so
 the caller sees `node_timeout`.
+
+## mergewake integration
+
+mergewake reap reaches `pane.read` and `job.done` through its `reap.HubHost`,
+over the same `POST /v1/nodes/{machine}/command` as its other ops.
+
+| mergewake call | Node command | Maps to |
+| --- | --- | --- |
+| `HubHost.Composer` | `pane.read` with `tail_lines: 0` | `empty` → `ComposerEmpty`; `has_text` → `ComposerText`; `unknown` → `ComposerUnknown`; `focused: true` → `operator-owned`; `pane-changed` and `pane-gone` → those reasons. |
+| `HubHost.JobDone` | `job.done` with the path `pane.capture` answered | `done` and `already-done` succeed; any other outcome or error fails the receipt. |
+
+`focused` must come from `pane.read`: `agents.list` rows carry no `focused`
+field, so mergewake's `Pane.Focused` is always false over the hub.
+
+Roll out in this order. A scope naming an op the hub does not know refuses the
+whole auth file, and an older node answers `node_timeout`.
+
+1. Deploy the hub, then the nodes.
+2. Add `node.command:pane.read@*,node.command:job.done@*` to the
+   `svc-mergewake` line ([hub-scopes.md](hub-scopes.md)).
+3. Deploy mergewake.
+
+A Go program can use `NodeReapClient` instead of its own HTTP call:
+
+```go
+client, err := panewire.NewNodeReapClient(hubURL, clientID, token, cfAccessClientID, cfAccessClientSecret)
+read, err := client.PaneRead(ctx, machine, paneID, name, cwd, 0)
+done, err := client.JobDone(ctx, machine, job, report)
+```
+
+The Cloudflare Access pair is optional: pass both values or neither. The client
+only sends credentials to the approved hub origin. `ErrNodeReapRefused` is a 401
+or 403, and `*NodeReapError` carries any other
+hub or node error code. The CLI takes the same arguments and prints the result
+as JSON:
+
+```sh
+panewire node pane-read --hub-url <url> --hub-token-env <service.env> \
+  --machine <machine> --pane-id <id> --name <name> --cwd <cwd> [--tail-lines N]
+panewire node job-done --hub-url <url> --hub-token-env <service.env> \
+  --machine <machine> --job <job> --report <path>
+```
+
+The client and the CLI refuse the operator credential. Both log nothing; the hub
+logs every `pane.read` and `job.done` call by client, machine, op, pane, job and
+outcome, including refused calls, and the node logs each call it runs. Neither
+logs screen contents or runtug's output.

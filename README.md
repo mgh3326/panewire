@@ -139,7 +139,8 @@ instead of ssh: `GET /v1/nodes/agents` lists every node's agents, and
 (`pane.close` closes only an exact re-read match). See
 [docs/node-commands.md](docs/node-commands.md). A service such as the reaper
 uses its own scoped token instead of the operator's; see
-[docs/hub-scopes.md](docs/hub-scopes.md).
+[docs/hub-scopes.md](docs/hub-scopes.md). `pane.read` and `job.done` admit only
+such a service; `panewire node pane-read` and `panewire node job-done` call them.
 
 The hub also keeps the latest fleet state, meaning per-account quota, per-host
 load, spawn start and end, and publisher liveness. It serves that state as a

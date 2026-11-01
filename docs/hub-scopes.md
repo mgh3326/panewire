@@ -35,7 +35,7 @@ name one lane.
 | Scope | Grants |
 | --- | --- |
 | `nodes.agents.read` | `GET /v1/nodes`, `GET /v1/nodes/agents`, `GET /v1/session-reap` |
-| `node.command:<op>@<machine>` or `@*` | `POST /v1/nodes/{machine}/command` with that op (`agents.list`, `pane.capture`, `pane.close`, `worktree.inspect`, `worktree.prepare`, `worktree.remove`, `quota.refresh`) |
+| `node.command:<op>@<machine>` or `@*` | `POST /v1/nodes/{machine}/command` with that op (`agents.list`, `pane.capture`, `pane.close`, `pane.read`, `job.done`, `worktree.inspect`, `worktree.prepare`, `worktree.remove`, `quota.refresh`). `pane.read` and `job.done` admit a service holding that scope and no other caller, not even the operator. |
 | `spawn@<machine>` or `@*` | `POST /v1/spawn` for that machine, and `GET /v1/spawn/{id}` for a request on it. A spawn request with `checkout` also authorizes the node's internal `worktree.prepare` preflight; no separate `node.command` grant is needed. Requests with `checkout` or `brief.doc` require the connected node to advertise `spawn_v2` in its hello; otherwise the hub returns `503 spawn_capability_required` immediately. |
 | `wake@<machine>` or `@*` | `POST /v1/nodes/wake` for that machine |
 | `inbox.read:<lane>` | `GET /v1/inbox`, `/v1/inbox/count`, `/v1/inbox/wait` and `POST /v1/inbox/{id}/read` with `?lane=<lane>` |
@@ -55,7 +55,7 @@ body is validated before the scope check, so a malformed request answers `400`.
 The `svc-mergewake` line for hub reap (operator decision D1: every machine):
 
 ```sh
-HUB_SCOPES_svc-mergewake=nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*,node.command:worktree.remove@*
+HUB_SCOPES_svc-mergewake=nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*,node.command:worktree.remove@*,node.command:pane.read@*,node.command:job.done@*
 ```
 
 An initiating runtug service needs `spawn@<machine>` for one destination, or
@@ -96,7 +96,7 @@ On the hub VM:
 
 ```sh
 deploy/hub-token-mint.sh svc-mergewake ./svc-mergewake.env \
-  'nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*,node.command:worktree.remove@*'
+  'nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*,node.command:worktree.remove@*,node.command:pane.read@*,node.command:job.done@*'
 ```
 
 The script generates a 256-bit random token, writes the client env file

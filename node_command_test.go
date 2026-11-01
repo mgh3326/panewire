@@ -23,6 +23,7 @@ type nodeFakeHerdr struct {
 	panesErr  error
 	closeErr  error
 	read      string
+	readErr   error
 	calls     [][]string
 	agentRead int
 }
@@ -41,7 +42,7 @@ func (fake *nodeFakeHerdr) run(_ context.Context, args ...string) ([]byte, error
 	case "pane close":
 		return nil, fake.closeErr
 	case "pane read":
-		return []byte(fake.read), nil
+		return []byte(fake.read), fake.readErr
 	}
 	return nil, errors.New("unexpected herdr call")
 }

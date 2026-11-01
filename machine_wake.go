@@ -324,10 +324,18 @@ func (client *HubClient) handleHubWake(ctx context.Context, message hubOutboundM
 }
 
 func runNodeCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
-	if len(args) == 0 || args[0] != "wake" {
+	if len(args) == 0 {
 		return ExitUsage
 	}
-	return runNodeWakeCLI(args[1:], stdout, stderr, deps)
+	switch args[0] {
+	case "wake":
+		return runNodeWakeCLI(args[1:], stdout, stderr, deps)
+	case "pane-read":
+		return runNodePaneReadCLI(args[1:], stdout, stderr, deps)
+	case "job-done":
+		return runNodeJobDoneCLI(args[1:], stdout, stderr, deps)
+	}
+	return ExitUsage
 }
 
 // runNodeWakeCLI is the operator credential path for `panewire node wake`. The
