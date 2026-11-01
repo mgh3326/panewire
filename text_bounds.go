@@ -25,6 +25,19 @@ func utf8PrefixWithin(value string, limit int) string {
 	return value[:limit]
 }
 
+// utf8SuffixWithin returns the longest valid UTF-8 suffix of value within
+// limit bytes: the tail of a process's output, where the error usually is.
+func utf8SuffixWithin(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	start := len(value) - limit
+	for start < len(value) && !utf8.RuneStart(value[start]) {
+		start++
+	}
+	return value[start:]
+}
+
 // truncateRelayText is the plain byte bound for relay note text: no marker.
 func truncateRelayText(value string, limit int) string {
 	return utf8PrefixWithin(value, limit)

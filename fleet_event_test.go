@@ -1,0 +1,204 @@
+package panewire
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+)
+
+// TestMain points every test's fleet events at a temporary state dir, so no
+// test appends to the developer's real ~/.local/state/panewire (which Alloy
+// ships to Loki).
+func TestMain(m *testing.M) {
+	state, err := os.MkdirTemp("", "panewire-test-state-")
+	if err != nil {
+		panic(err)
+	}
+	// The crash-output child keeps the state dir its parent test chose.
+	if os.Getenv("PANEWIRE_CRASH_CHILD") != "1" {
+		os.Setenv("XDG_STATE_HOME", state)
+	}
+	code := m.Run()
+	os.RemoveAll(state)
+	os.Exit(code)
+}
+
+var fleetEventFakeSecrets = []string{"ghp_FAKEfakeFAKEfakeFAKEfake0123456789", "hunter2pass", "tok3nVALUEfake99"}
+
+const fleetEventFakeSecretText = "token=tok3nVALUEfake99 ghp_FAKEfakeFAKEfakeFAKEfake0123456789 https://ops:hunter2pass@quota.invalid/v1"
+
+// readFleetEventsFile parses the panewire fleet-events file under a fresh
+// state dir and checks every line has exactly the v1 fields.
+func readFleetEventsFile(t *testing.T) (string, []map[string]string) {
+	t.Helper()
+	raw, err := os.ReadFile(fleetEventsPath())
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	var events []map[string]string
+	for _, line := range strings.Split(strings.TrimSuffix(string(raw), "\n"), "\n") {
+		var fields map[string]any
+		if err := json.Unmarshal([]byte(line), &fields); err != nil {
+			t.Fatalf("event line is not JSON: %q", line)
+		}
+		if len(fields) != 8 {
+			t.Fatalf("event is not the v1 shape: %q", line)
+		}
+		event := map[string]string{}
+		for _, key := range []string{"ts", "host", "tool", "kind", "job", "outcome", "reason", "detail"} {
+			value, ok := fields[key].(string)
+			if !ok {
+				t.Fatalf("event field %q missing: %q", key, line)
+			}
+			event[key] = value
+		}
+		events = append(events, event)
+	}
+	return string(raw), events
+}
+
+func TestHubSpawnUppercaseCWDKeyNamesTheRule(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	path := filepath.Join(t.TempDir(), "spawn.json")
+	if err := os.WriteFile(path, []byte(`{"cwd_map":{"Repo-A":"/srv/repo-a"},"workspace":"worker","herdr_session":"worker","enabled":true}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	message := hubOutboundMessage{RequestID: t14RequestID(90), CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 1, Args: []string{"--job", "job-upper"}}
+	result := (&HubClient{spawnConfigPath: path}).runHubSpawn(t.Context(), message)
+	// The wire error stays spawn_disabled for older hubs; the rule rides in the tail.
+	if result.RC != 2 || result.Error != "spawn_disabled" {
+		t.Fatalf("result=%+v", result)
+	}
+	if !strings.Contains(result.StdoutTail, "cwd_map_key_pattern") || !strings.Contains(result.StdoutTail, `"Repo-A"`) {
+		t.Fatalf("refusal must name the rule and key: %q", result.StdoutTail)
+	}
+	if _, ok := parseHubSpawnResult(hubSpawnResultWire(t, result)); !ok {
+		t.Fatal("the hub must still accept the result")
+	}
+	raw, events := readFleetEventsFile(t)
+	if len(events) != 1 {
+		t.Fatalf("want one event: %s", raw)
+	}
+	event := events[0]
+	if event["tool"] != "panewire" || event["kind"] != "node_spawn" || event["job"] != "job-upper" || event["outcome"] != "refused" || event["reason"] != "cwd_map_key_pattern" {
+		t.Fatalf("event=%+v", event)
+	}
+	if !strings.Contains(event["detail"], `key \"Repo-A\"`) && !strings.Contains(event["detail"], `key "Repo-A"`) {
+		t.Fatalf("detail=%q", event["detail"])
+	}
+}
+
+func TestHubSpawnConfigRulesAreNamed(t *testing.T) {
+	directory := t.TempDir()
+	cases := map[string]string{
+		`{"cwd_map":{},"workspace":"w","herdr_session":"s","enabled":false}`:              "enabled_false",
+		`{"cwd_map":{},"workspace":"","herdr_session":"s","enabled":true}`:                "workspace_required",
+		`{"cwd_map":{"a":"relative"},"workspace":"w","herdr_session":"s","enabled":true}`: "cwd_map_dir_absolute",
+		`{"cwd":{},"workspace":"w","herdr_session":"s","enabled":true}`:                   "config_json_invalid",
+		`{"cwd_map":{},"workspace":"w","herdr_session":"s","enabled":true} {}`:            "config_trailing_data",
+	}
+	for contents, rule := range cases {
+		path := filepath.Join(directory, rule+".json")
+		if err := os.WriteFile(path, []byte(contents), 0600); err != nil {
+			t.Fatal(err)
+		}
+		_, err := loadHubSpawnConfig(path)
+		if configErr, ok := err.(*hubSpawnConfigError); !ok || configErr.Rule != rule {
+			t.Fatalf("%s: got %v, want rule %s", contents, err, rule)
+		}
+	}
+	if _, err := loadHubSpawnConfig(filepath.Join(directory, "missing.json")); err == nil || !strings.Contains(err.Error(), "config_missing") {
+		t.Fatalf("missing file: %v", err)
+	}
+}
+
+func TestHubSpawnFailingRuntugStderrReachesResultBoundedAndRedacted(t *testing.T) {
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	root := t.TempDir()
+	// 8 KiB of stderr noise, then the line that explains the refusal.
+	t14FakeRuntug(t, `i=0; while [ $i -lt 128 ]; do printf '%064d\n' 0 >&2; i=$((i+1)); done
+printf 'runtug: quota gate refused: `+fleetEventFakeSecretText+`\n' >&2
+exit 70`)
+	message := hubOutboundMessage{RequestID: t14RequestID(91), CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 5, Args: []string{"--job", "job-stderr"}}
+	result := (&HubClient{spawnConfigPath: t14SpawnConfig(t, root)}).runHubSpawn(t.Context(), message)
+	if result.RC != 70 || result.Error != "spawn_failed" {
+		t.Fatalf("result=%+v", result)
+	}
+	if !strings.Contains(result.StdoutTail, "runtug: quota gate refused:") {
+		t.Fatalf("runtug's stderr tail must reach the result: %q", result.StdoutTail)
+	}
+	if len(result.StdoutTail) > hubSpawnResultTail || len(result.StdoutTail) > len("stderr: ")+hubSpawnStderrTail {
+		t.Fatalf("tail not bounded: %d bytes", len(result.StdoutTail))
+	}
+	if _, ok := parseHubSpawnResult(hubSpawnResultWire(t, result)); !ok {
+		t.Fatal("the hub must accept the result")
+	}
+	raw, events := readFleetEventsFile(t)
+	if len(events) != 1 || events[0]["outcome"] != "failed" || events[0]["reason"] != "spawn_failed" || !strings.HasPrefix(events[0]["detail"], "spawn_failed rc=70 stderr: ") {
+		t.Fatalf("events: %s", raw)
+	}
+	for _, secret := range fleetEventFakeSecrets {
+		if strings.Contains(result.StdoutTail, secret) || strings.Contains(raw, secret) {
+			t.Fatalf("secret %q leaked (result %q, events %s)", secret, result.StdoutTail, raw)
+		}
+	}
+}
+
+func TestHubSpawnTailWithStderrKeepsTheWireBound(t *testing.T) {
+	stdout := strings.Repeat("o", hubSpawnResultTail)
+	stderr := strings.Repeat("é", hubSpawnStderrTail)
+	got := hubSpawnTailWithStderr(stdout, stderr)
+	if len(got) > hubSpawnResultTail || !strings.HasSuffix(got, "é") || !strings.Contains(got, "\nstderr: ") {
+		t.Fatalf("len=%d", len(got))
+	}
+	if got := hubSpawnTailWithStderr("", "boom"); got != "stderr: boom" {
+		t.Fatalf("empty stdout: %q", got)
+	}
+}
+
+func TestFleetEventRedactsAndBounds(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "events", fleetEventFileName)
+	ok := appendFleetEvent(path, fleetEventMaxBytes, fleetEvent{TS: time.Unix(0, 0).UTC().Format(time.RFC3339Nano), Host: "Node-A", Tool: "panewire", Kind: "Node Spawn", Outcome: "REFUSED", Reason: "x", Detail: fleetEventFakeSecretText + strings.Repeat("z", 4096)})
+	if !ok {
+		t.Fatal("append failed")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var event fleetEvent
+	if err := json.Unmarshal(raw, &event); err != nil {
+		t.Fatal(err)
+	}
+	if event.Host != "node-a" || event.Kind != "node_spawn" || event.Outcome != "refused" || len(event.Detail) > fleetEventMaxDetail {
+		t.Fatalf("event=%+v", event)
+	}
+	for _, secret := range fleetEventFakeSecrets {
+		if strings.Contains(string(raw), secret) {
+			t.Fatalf("secret %q leaked: %s", secret, raw)
+		}
+	}
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm()&^0o640 != 0 || info.Mode().Perm()&0o600 != 0o600 {
+		t.Fatalf("mode: %v %v", info, err)
+	}
+}
+
+// hubSpawnResultWire renders a node result the way handleHubSpawn sends it.
+func hubSpawnResultWire(t *testing.T, result hubSpawnResult) []byte {
+	t.Helper()
+	wire := map[string]any{"type": "job.spawn.result", "request_id": result.RequestID, "rc": result.RC, "job_id": result.JobID, "pane": result.Pane, "stdout_tail": result.StdoutTail}
+	if result.Error != "" {
+		wire["error"] = result.Error
+	}
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return raw
+}
