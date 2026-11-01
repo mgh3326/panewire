@@ -682,3 +682,33 @@ func TestHubDatabaseURLNeverEchoed(t *testing.T) {
 		t.Fatalf("parse error = %v", err)
 	}
 }
+
+// A producer ACK waits for a durable commit: every pooled connection runs
+// with synchronous_commit=on, even when the DSN asks for less.
+func TestLaneInboxStorePostgresForcesSynchronousCommit(t *testing.T) {
+	_, dsn := hubPostgresTestSchema(t)
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := u.Query()
+	query.Set("synchronous_commit", "off")
+	u.RawQuery = query.Encode()
+	s, err := openLaneInboxStorePostgres(context.Background(), u.String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.close()
+	// Hold every pool slot at once so each connection is checked.
+	conns := make([]*sql.Conn, 4)
+	for i := range conns {
+		if conns[i], err = s.db.Conn(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		defer conns[i].Close()
+		var setting string
+		if err := conns[i].QueryRowContext(context.Background(), `SHOW synchronous_commit`).Scan(&setting); err != nil || setting != "on" {
+			t.Fatalf("connection %d synchronous_commit = %q, %v", i, setting, err)
+		}
+	}
+}
