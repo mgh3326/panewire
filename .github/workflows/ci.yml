@@ -119,6 +119,10 @@ jobs:
               echo "$name job ran outside its suite and reported $result"; exit 1
             fi
           }
+          case "$SUITE" in
+            all|test|postgres) ;;
+            *) echo "unknown suite: $SUITE"; exit 1 ;;
+          esac
           case "$SUITE" in all|test) test=yes ;; *) test=no ;; esac
           case "$SUITE" in all|postgres) postgres=yes ;; *) postgres=no ;; esac
           require "$test" test "$TEST_RESULT"

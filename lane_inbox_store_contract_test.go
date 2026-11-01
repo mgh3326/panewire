@@ -10,6 +10,7 @@ import (
 	"go/token"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -486,8 +487,9 @@ func TestLaneInboxStorePostgresConcurrentStartsMigrateOnce(t *testing.T) {
 }
 
 // Every database call in the store, the Postgres backend and migrate-sqlite
-// passes a context, so each is bounded by the store's op timeout or the
-// caller's (the CodeRabbit Major on #126).
+// passes a context (the CodeRabbit Major on #126). The store's contexts come
+// from s.op/s.opWithin and carry a deadline; migrate-sqlite's copy is bounded
+// by lock_timeout (TestHubMigrateSQLiteApplyFailsFastOnAHeldLock).
 func TestLaneInboxStoreCallsTakeAContext(t *testing.T) {
 	bare := map[string]bool{"Exec": true, "Query": true, "QueryRow": true, "Begin": true, "Ping": true, "Prepare": true}
 	for _, file := range []string{"lane_inbox_store.go", "lane_inbox_store_postgres.go", "hub_migrate_sqlite.go"} {
@@ -711,4 +713,55 @@ func TestLaneInboxStorePostgresForcesSynchronousCommit(t *testing.T) {
 			t.Fatalf("connection %d synchronous_commit = %q, %v", i, setting, err)
 		}
 	}
+}
+
+// A store error after connect is logged without the server's address on
+// Postgres; SQLite errors keep their text.
+func TestLaneInboxStoreLoggableErrors(t *testing.T) {
+	leaky := &net.OpError{Op: "read", Net: "tcp", Addr: &net.TCPAddr{IP: net.IPv4(192, 0, 2, 7), Port: 5432}, Err: errors.New("i/o timeout")}
+	pg := &laneInboxStore{dialect: laneInboxPostgres}
+	if got := pg.loggable("startup recovery", leaky).Error(); strings.Contains(got, "192.0.2.7") || got != "hub database startup recovery failed (*net.OpError)" {
+		t.Fatalf("postgres loggable = %q", got)
+	}
+	lite := &laneInboxStore{dialect: laneInboxSQLite}
+	if got := lite.loggable("startup recovery", errors.New("fixture recovery failure")); got.Error() != "fixture recovery failure" {
+		t.Fatalf("sqlite loggable = %q", got)
+	}
+}
+
+// The hub's real keys join their parts with NUL, and a job event's parts come
+// from the producer and need not be UTF-8. Both backends store them, keep
+// them distinct, and dedupe a retry of the same key.
+func TestLaneInboxStoreContractHubShapedKeys(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := open()
+		now := time.UnixMilli(1_700_000_000_000).UTC()
+		job := quietEvent("ev-1", "done")
+		job.ReportPath = "reports/\xff\xfe.md"
+		keys := []string{
+			relayEventDedupeKey("lane.event", quietEvent("ev-1", "FYI")),
+			relayEventDedupeKey("job.done", job),
+			// The same parts split differently: must not collide.
+			"lane.event\x00lane-a\x00ev-1\x00",
+			"lane.event\x00lane-a\x00ev-\x001",
+		}
+		ids := map[int64]bool{}
+		for _, key := range keys {
+			if !strings.Contains(key, "\x00") {
+				t.Fatalf("fixture key %q has no NUL", key)
+			}
+			first, err := s.put(key, "lane-a", "lane.event", "inbox", quietEvent("x", "FYI"), now, 0, 0)
+			if err != nil || !first.Fresh {
+				t.Fatalf("put %q = %+v, %v", key, first, err)
+			}
+			again, err := s.put(key, "lane-a", "lane.event", "inbox", quietEvent("x", "changed"), now, 0, 0)
+			if err != nil || again.Fresh || again.ID != first.ID {
+				t.Fatalf("retry of %q = %+v, %v", key, again, err)
+			}
+			ids[first.ID] = true
+		}
+		if len(ids) != len(keys) {
+			t.Fatalf("distinct keys collided: %v", ids)
+		}
+	})
 }

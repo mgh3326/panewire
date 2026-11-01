@@ -62,7 +62,9 @@ func hubDatabaseError(step string, err error) error {
 	case errors.Is(err, context.Canceled):
 		return &hubDatabaseErr{fmt.Sprintf("hub database %s failed: cancelled", step)}
 	}
-	return &hubDatabaseErr{fmt.Sprintf("hub database %s failed", step)}
+	// The error's type, never its text: a net.OpError's text holds the
+	// server address.
+	return &hubDatabaseErr{fmt.Sprintf("hub database %s failed (%T)", step, err)}
 }
 
 // hubPostgresConnector reduces every connect error, including the pool's

@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -138,8 +139,17 @@ const (
 )
 
 // laneInboxOpTimeout bounds every store call, including one makeBatches
-// transaction. SQLite's own busy_timeout is 5s.
-const laneInboxOpTimeout = 10 * time.Second
+// transaction. SQLite's own busy_timeout is 5s. laneInboxStartupTimeout
+// bounds the startup scans, which read every unread item once: a backlog
+// slower than one ordinary call must not disable digests at start.
+const (
+	laneInboxOpTimeout      = 10 * time.Second
+	laneInboxStartupTimeout = 2 * time.Minute
+)
+
+// laneInboxClaimChunk is how many item ids one claim UPDATE names, so a
+// backlog costs one statement per chunk, not one per item.
+const laneInboxClaimChunk = 500
 
 func newLaneInboxStore(db *sql.DB, dialect laneInboxDialect) *laneInboxStore {
 	life, abort := context.WithCancel(context.Background())
@@ -150,7 +160,11 @@ func newLaneInboxStore(db *sql.DB, dialect laneInboxDialect) *laneInboxStore {
 // laneInboxOpTimeout, and cancelled by abort. Every database call in this
 // store takes one (TestLaneInboxStoreCallsTakeAContext).
 func (s *laneInboxStore) op(parent context.Context) (context.Context, context.CancelFunc) {
-	ctx, cancel := context.WithTimeout(parent, laneInboxOpTimeout)
+	return s.opWithin(parent, laneInboxOpTimeout)
+}
+
+func (s *laneInboxStore) opWithin(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
 	stop := context.AfterFunc(s.life, cancel)
 	return ctx, func() { stop(); cancel() }
 }
@@ -174,10 +188,44 @@ func (s *laneInboxStore) q(query string) string {
 	return b.String()
 }
 
+// storedKey is the event_key column's form of key. Hub keys join their parts
+// with NUL (relayEventDedupeKey), and producer-supplied parts need not be
+// UTF-8; Postgres text holds neither, so the Postgres store keeps the key
+// hex-encoded. SQLite keeps the raw key, exactly as before.
+func (s *laneInboxStore) storedKey(key string) string {
+	return laneInboxStoredKey(s.dialect, key)
+}
+
+func laneInboxStoredKey(dialect laneInboxDialect, key string) string {
+	if dialect == laneInboxPostgres {
+		return hex.EncodeToString([]byte(key))
+	}
+	return key
+}
+
+// laneInboxKeyFromStored inverts laneInboxStoredKey.
+func laneInboxKeyFromStored(dialect laneInboxDialect, stored string) (string, error) {
+	if dialect != laneInboxPostgres {
+		return stored, nil
+	}
+	raw, err := hex.DecodeString(stored)
+	return string(raw), err
+}
+
 // close ends every in-flight call, then closes the database.
 func (s *laneInboxStore) close() error {
 	s.abort()
 	return s.db.Close()
+}
+
+// loggable returns err fit for a log line. A Postgres error after connect
+// can still name the server's address (a dropped connection's net error),
+// so it is reduced like a connect error; SQLite errors carry no credential.
+func (s *laneInboxStore) loggable(step string, err error) error {
+	if s.dialect == laneInboxPostgres {
+		return hubDatabaseError(step, err)
+	}
+	return err
 }
 
 // markBatchSent records that handoffkeep now owns a batch's identity.
@@ -242,7 +290,7 @@ func (s *laneInboxStore) quarantineInvalidBatches() error {
 }
 
 func (s *laneInboxStore) invalidBatches() ([]laneInboxBatch, error) {
-	ctx, done := s.op(s.life)
+	ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 	defer done()
 	rows, err := s.db.QueryContext(ctx, `SELECT id,lane,text FROM lane_inbox_batches WHERE sent=0 AND id NOT IN (SELECT batch_id FROM lane_inbox_batch_quarantine)`)
 	if err != nil {
@@ -270,12 +318,33 @@ func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
 	if err != nil {
 		return err
 	}
+	var ids []int64
 	for _, i := range unclaimed {
-		if !policy.mustAct(i.Lane, i.Event) {
-			continue
+		if policy.mustAct(i.Lane, i.Event) {
+			ids = append(ids, i.ID)
 		}
-		// Any positive timestamp in the past makes it immediately eligible.
-		if err := s.makeDue(i.ID); err != nil {
+	}
+	ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
+	defer done()
+	// Any positive timestamp in the past makes it immediately eligible.
+	return s.updateIDs(ctx, s.db, `UPDATE lane_inbox SET due_at=1,escalation_batch=''`, nil, ids)
+}
+
+type laneInboxExecer interface {
+	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+}
+
+// updateIDs runs update (a SET clause, its args first) on the rows named by
+// ids, laneInboxClaimChunk ids per statement.
+func (s *laneInboxStore) updateIDs(ctx context.Context, db laneInboxExecer, update string, args []any, ids []int64) error {
+	for start := 0; start < len(ids); start += laneInboxClaimChunk {
+		chunk := ids[start:min(start+laneInboxClaimChunk, len(ids))]
+		values := append([]any{}, args...)
+		for _, id := range chunk {
+			values = append(values, id)
+		}
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		if _, err := db.ExecContext(ctx, s.q(update+` WHERE id IN (`+marks+`)`), values...); err != nil {
 			return err
 		}
 	}
@@ -283,7 +352,7 @@ func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
 }
 
 func (s *laneInboxStore) unclaimedUnread() ([]laneInboxItem, error) {
-	ctx, done := s.op(s.life)
+	ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 	defer done()
 	rows, err := s.db.QueryContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE class='inbox' AND read_at=0 AND (escalation_batch='' OR escalation_batch IN (SELECT batch_id FROM lane_inbox_batch_quarantine))`)
 	if err != nil {
@@ -299,13 +368,6 @@ func (s *laneInboxStore) unclaimedUnread() ([]laneInboxItem, error) {
 		items = append(items, i)
 	}
 	return items, rows.Err()
-}
-
-func (s *laneInboxStore) makeDue(id int64) error {
-	ctx, done := s.op(s.life)
-	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET due_at=1,escalation_batch='' WHERE id=?`), id)
-	return err
 }
 
 const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack`
@@ -356,11 +418,11 @@ func (s *laneInboxStore) put(key, lane, kind, class string, e hubJobEventPayload
 	defer done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	insert, err := s.db.ExecContext(ctx, s.q(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`), key, lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn)
+	insert, err := s.db.ExecContext(ctx, s.q(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn)
 	if err != nil {
 		return laneInboxItem{}, err
 	}
-	item, err := scanLaneInbox(s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`), key))
+	item, err := scanLaneInbox(s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`), s.storedKey(key)))
 	n, _ := insert.RowsAffected()
 	item.Fresh = n == 1
 	if n == 1 && (class == "inbox" || mustAck) {
@@ -533,10 +595,12 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 			if _, err := tx.ExecContext(ctx, s.q(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES(?,?,?)`), id, lane, text); err != nil {
 				return err
 			}
-			for _, i := range items {
-				if _, err := tx.ExecContext(ctx, s.q(`UPDATE lane_inbox SET `+column+`=? WHERE id=?`), id, i.ID); err != nil {
-					return err
-				}
+			ids := make([]int64, len(items))
+			for n, i := range items {
+				ids[n] = i.ID
+			}
+			if err := s.updateIDs(ctx, tx, `UPDATE lane_inbox SET `+column+`=?`, []any{id}, ids); err != nil {
+				return err
 			}
 		}
 	}

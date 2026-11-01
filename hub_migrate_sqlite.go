@@ -242,7 +242,12 @@ func readHubInboxSnapshotTx(ctx context.Context, tx *sql.Tx, dialect laneInboxDi
 	}
 	for rows.Next() {
 		var i hubInboxSnapshotItem
-		err := rows.Scan(&i.key, &i.item.ID, &i.item.Lane, &i.item.Kind, &i.item.Class, &i.raw, &i.item.CreatedAt, &i.item.ReadAt, &i.item.AckedAt, &i.item.DueAt, &i.item.DigestAt, &i.item.DigestBatch, &i.item.EscalationBatch, &i.item.MustAck)
+		var stored string
+		err := rows.Scan(&stored, &i.item.ID, &i.item.Lane, &i.item.Kind, &i.item.Class, &i.raw, &i.item.CreatedAt, &i.item.ReadAt, &i.item.AckedAt, &i.item.DueAt, &i.item.DigestAt, &i.item.DigestBatch, &i.item.EscalationBatch, &i.item.MustAck)
+		if err == nil {
+			// Snapshots hold the raw key, so the two backends compare.
+			i.key, err = laneInboxKeyFromStored(dialect, stored)
+		}
 		if err != nil {
 			rows.Close()
 			return snapshot, err
@@ -332,6 +337,11 @@ func copyHubInboxSnapshot(ctx context.Context, db *sql.DB, snapshot hubInboxSnap
 		return false, err
 	}
 	defer tx.Rollback()
+	// A hub left running holds locks the copy needs; fail instead of
+	// waiting on it without end. This covers the migration lock too.
+	if _, err := tx.ExecContext(ctx, `SET LOCAL lock_timeout = '10s'`); err != nil {
+		return false, err
+	}
 	if err := migrateHubPostgresTx(ctx, tx); err != nil {
 		return false, err
 	}
@@ -356,7 +366,7 @@ func copyHubInboxSnapshot(ctx context.Context, db *sql.DB, snapshot hubInboxSnap
 			mustAck = 1
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-			i.item.ID, i.key, i.item.Lane, i.item.Kind, i.item.Class, i.raw, i.item.CreatedAt, i.item.ReadAt, i.item.AckedAt, i.item.DueAt, i.item.DigestAt, i.item.DigestBatch, i.item.EscalationBatch, mustAck); err != nil {
+			i.item.ID, laneInboxStoredKey(laneInboxPostgres, i.key), i.item.Lane, i.item.Kind, i.item.Class, i.raw, i.item.CreatedAt, i.item.ReadAt, i.item.AckedAt, i.item.DueAt, i.item.DigestAt, i.item.DigestBatch, i.item.EscalationBatch, mustAck); err != nil {
 			return false, err
 		}
 	}

@@ -94,7 +94,7 @@ func (h *HubServer) prepareInbox() {
 	}
 	if err != nil {
 		h.inbox.persistDisabled = true
-		h.logger.Error("inbox digest delivery disabled: startup recovery failed; fix the inbox store and restart the hub", "error", err)
+		h.logger.Error("inbox digest delivery disabled: startup recovery failed; fix the inbox store and restart the hub", "error", h.inbox.store.loggable("startup recovery", err))
 	}
 }
 

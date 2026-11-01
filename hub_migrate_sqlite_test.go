@@ -71,6 +71,13 @@ func hubMigrateSQLiteSource(t *testing.T, pendingWAL bool) string {
 			}
 		}
 	}
+	// A key shaped like the hub's own: NUL separators and a producer part
+	// that is not UTF-8.
+	job := quietEvent("job-1", "done")
+	job.ReportPath = "reports/\xff.md"
+	if _, err := s.put(relayEventDedupeKey("job.done", job), "lane-a", "job.done", "interrupt", job, now, 0, 0); err != nil {
+		t.Fatal(err)
+	}
 	// Byte order puts "Zlegacy" first, a locale collation "legacy": the copy
 	// check must not depend on either backend's text ordering.
 	if _, err := s.db.Exec(`INSERT INTO lane_inbox_batches(id,lane,text) VALUES('legacy','lane-b','two
@@ -128,7 +135,7 @@ func dirDigests(t *testing.T, path string) map[string][32]byte {
 	return digests
 }
 
-const hubMigrateSQLiteSourceSummary = "source: lane_inbox=7 (unread=3 must_ack=2 unacked=1) lane_inbox_batches=4 (pending=1) lane_inbox_batch_quarantine=2"
+const hubMigrateSQLiteSourceSummary = "source: lane_inbox=8 (unread=3 must_ack=2 unacked=1) lane_inbox_batches=4 (pending=1) lane_inbox_batch_quarantine=2"
 
 func TestHubMigrateSQLiteDryRunReadsOnly(t *testing.T) {
 	for _, pendingWAL := range []bool{false, true} {
@@ -284,7 +291,7 @@ func testHubMigrateSQLiteCopiesToPostgres(t *testing.T, pendingWAL bool) {
 		t.Fatalf("dry-run code = %d, stdout = %s, stderr = %s", code, stdout.String(), stderr.String())
 	}
 	stdout.Reset()
-	if code := runHubMigrateSQLite(ctx, []string{"--from", path, "--apply"}, dsn, &stdout, &stderr); code != ExitOK || !strings.Contains(stdout.String(), "applied: lane_inbox=7 (unread=3 must_ack=2 unacked=1)") {
+	if code := runHubMigrateSQLite(ctx, []string{"--from", path, "--apply"}, dsn, &stdout, &stderr); code != ExitOK || !strings.Contains(stdout.String(), "applied: lane_inbox=8 (unread=3 must_ack=2 unacked=1)") {
 		t.Fatalf("apply code = %d, stdout = %s, stderr = %s", code, stdout.String(), stderr.String())
 	}
 	if !reflect.DeepEqual(dirDigests(t, path), sourceFiles) {
@@ -360,5 +367,37 @@ func testHubMigrateSQLiteCopiesToPostgres(t *testing.T, pendingWAL bool) {
 	}
 	if after, _ := hubInboxTargetSnapshot(t, dsn); !reflect.DeepEqual(after, written) {
 		t.Fatal("refused apply changed the target")
+	}
+}
+
+// A hub left running holds the inbox tables; apply fails with the lock
+// timeout instead of waiting without end, and writes nothing.
+func TestHubMigrateSQLiteApplyFailsFastOnAHeldLock(t *testing.T) {
+	_, dsn := hubPostgresTestSchema(t)
+	path := hubMigrateSQLiteSource(t, false)
+	hub, err := openLaneInboxStorePostgres(context.Background(), dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer hub.close()
+	conn, err := hub.db.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(context.Background(), `BEGIN; LOCK TABLE lane_inbox IN ACCESS EXCLUSIVE MODE`); err != nil {
+		t.Fatal(err)
+	}
+	defer conn.ExecContext(context.Background(), `ROLLBACK`)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	started := time.Now()
+	var stdout, stderr bytes.Buffer
+	code := runHubMigrateSQLite(ctx, []string{"--from", path, "--apply"}, dsn, &stdout, &stderr)
+	if code != ExitInternal || !strings.Contains(stderr.String(), "SQLSTATE 55P03") {
+		t.Fatalf("code = %d, stdout = %s, stderr = %s", code, stdout.String(), stderr.String())
+	}
+	if waited := time.Since(started); waited > 20*time.Second {
+		t.Fatalf("apply waited %v on the held lock", waited)
 	}
 }

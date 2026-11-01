@@ -80,6 +80,8 @@ func TestCIOkRequiresOnlyTheSuitesJobs(t *testing.T) {
 		{"test", "failure", "", false},
 		{"postgres", "", "success", true},
 		{"postgres", "", "failure", false},
+		// A suite no job knows runs nothing; it must not pass.
+		{"lint", "", "", false},
 	} {
 		testResult, postgresResult := result("test", tc.suite, tc.test), result("postgres", tc.suite, tc.postgres)
 		cmd := exec.Command("bash", "-e", "-c", gate.Steps[0].Run)

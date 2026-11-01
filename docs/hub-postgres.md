@@ -26,9 +26,13 @@ Node daemons are unaffected: their store (`store.go`) stays a local SQLite file.
 - **Durability.** Every connection forces `synchronous_commit=on`. A producer
   gets its ACK only after its inbox row is durably committed, as with
   SQLite's FULL mode.
-- **Bounded calls.** Every store call runs with a 10 s deadline. Hub
-  shutdown cancels calls in flight, so a stalled database cannot hold the
-  hub open.
+- **Bounded calls.** Every store call runs with a 10 s deadline; the startup
+  scans get 2 min. Hub shutdown cancels calls in flight, so a stalled
+  database cannot hold the hub open. `migrate-sqlite --apply` waits at most
+  10 s for a lock (`lock_timeout`).
+- **Event keys.** The hub joins key parts with NUL, which Postgres `text`
+  cannot hold, so the Postgres store keeps `event_key` hex-encoded. SQLite
+  keeps the raw key.
 - **Must-ack.** Must-ack works as it does on SQLite: `ready`, `decision`,
   `blocked` and `findings` items stay unread until `panewire inbox ack`, and
   digests never include them.
@@ -51,8 +55,13 @@ Node daemons are unaffected: their store (`store.go`) stays a local SQLite file.
    root-owned, mode 0600, and outside any repository:
 
    ```sh
-   PANEWIRE_HUB_DATABASE_URL=postgres://panewire_hub:<password>@<db-host>:<port>/panewire_hub?sslmode=<mode>
+   PANEWIRE_HUB_DATABASE_URL=postgres://panewire_hub:<password>@<db-host>:<port>/panewire_hub?sslmode=verify-full
    ```
+
+   For a database on another machine, use `sslmode=verify-full`. Without a
+   `sslmode`, pgx uses `prefer`, which can fall back to plaintext. Use
+   `sslmode=disable` only for a database on the hub's own host, reached
+   over loopback or a Unix socket.
 
    Do not add the URL to the unit's `ExecStart`, to shell history or to a
    ticket.
