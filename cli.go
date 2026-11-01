@@ -283,6 +283,9 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	burstWakeMAC := fs.String("burst-wake-mac", "", "Wake-on-LAN MAC for hub burst events (defaults to failover MAC when configured)")
 	burstPoweroffAllowed := fs.Bool("burst-poweroff-allowed", false, "allow authenticated hub burst down events to run sudo -n /usr/sbin/poweroff")
 	wakeTargets := fs.String("wake-targets", "", "waker node's JSON allowlist: target machine → MAC and UDP broadcast for hub wake events")
+	statePublish := fs.Bool("state-publish", false, "publish this host's fleet state (spawn start/end, and quota for --state-quota-pools) to the hub; see docs/fleet-state.md")
+	stateQuotaPools := fs.String("state-quota-pools", "", "comma-separated pacelever pools whose accounts this host measures; requires --state-publish")
+	stateQuotaInterval := fs.Duration("state-quota-interval", defaultFleetQuotaInterval, "how often to refresh and publish --state-quota-pools")
 	idleShutdown := fs.Duration("idle-shutdown", 0, "power this machine off after being fully idle this long (0 = off)")
 	idleShutdownCommand := fs.String("idle-shutdown-command", "", "idle shutdown argv, e.g. 'sudo -n /usr/sbin/poweroff' (required when --idle-shutdown > 0)")
 	idleShutdownPoll := fs.Duration("idle-shutdown-poll", time.Minute, "idle condition probe interval")
@@ -353,6 +356,11 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 			return nil, ExitConditionInvalid, err
 		}
 		configuredHub.jobsInboxRoot = *hubJobsRoot
+		pools, valid := parseFleetQuotaPools(*stateQuotaPools)
+		if !valid || (len(pools) > 0 && !*statePublish) || *stateQuotaInterval < 10*time.Second {
+			return nil, ExitConditionInvalid, fmt.Errorf("state publishing flags are invalid")
+		}
+		configuredHub.statePublish, configuredHub.stateQuotaPools, configuredHub.stateQuotaInterval = *statePublish, pools, *stateQuotaInterval
 		hubClient = configuredHub
 		cfg.Hub = HubDaemonConfig{Enabled: true, Client: hubClient}
 	}
@@ -414,7 +422,7 @@ func (values *hubURLValues) Set(raw string) error {
 }
 
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "quota-stop-act", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "wake-targets", "checks-config"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "quota-stop-act", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "wake-targets", "checks-config", "state-publish", "state-quota-pools", "state-quota-interval"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {

@@ -40,6 +40,7 @@ name one lane.
 | `wake@<machine>` or `@*` | `POST /v1/nodes/wake` for that machine |
 | `inbox.read:<lane>` | `GET /v1/inbox`, `/v1/inbox/count`, `/v1/inbox/wait` and `POST /v1/inbox/{id}/read` with `?lane=<lane>` |
 | `inbox.ack:<lane>` | `POST /v1/inbox/ack` with `?lane=<lane>` |
+| `state.read` | `GET /v1/state` and `GET /v1/state/stream` ([fleet-state.md](fleet-state.md)) |
 
 Every other route keeps the authentication it had: operator-only, node-only
 for the websocket and a node's own lanes, CF Access where the UI and chat
