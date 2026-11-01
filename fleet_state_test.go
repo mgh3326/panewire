@@ -502,3 +502,117 @@ func TestFleetStateSweepPublishesLoad(t *testing.T) {
 		return ok && message.Load.Connected
 	})
 }
+
+// Review #141: a hub not built by NewHubServer must not panic on the
+// heartbeat, state, sweep or load paths.
+func TestFleetStateHubWithoutConstructorDoesNotPanic(t *testing.T) {
+	now := time.Now().UTC()
+	hub := &HubServer{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), nodes: map[string]*hubNodeRecord{"node-a": {machineID: "node-a", state: "connected", lastHeartbeat: now}}}
+	hub.publishFleetPublisher("node-a", now)
+	if !hub.publishFleetStateFromNode("node-a", FleetStatePublish{Kind: fleetStateKindSpawn, Key: "job-a", MeasuredAt: now, Spawn: &FleetStateSpawn{Phase: "start", Job: "job-a", At: now}}, now) {
+		t.Fatal("state publish refused")
+	}
+	hub.sweepFleetState(now)
+	hub.publishFleetLoad(context.Background(), now)
+	if _, ok := fsLatest(hub, "node-a", fleetStateKindSpawn, "job-a"); !ok {
+		t.Fatal("spawn not stored on a lazily created store")
+	}
+	if hub.fleetCloseDone() != nil {
+		t.Fatal("close signal of a hub without closeCtx must never be ready")
+	}
+}
+
+// Review #141: one node cannot flood the shared replay ring.
+func TestFleetStateNodePublishBudget(t *testing.T) {
+	store := newFleetStateStore(time.Unix(1, 0))
+	now := time.Unix(100, 0)
+	for i := 0; i < fleetStateNodeBurst; i++ {
+		if !store.allowNode("node-a", now) {
+			t.Fatalf("publish %d refused inside the burst", i)
+		}
+	}
+	if store.allowNode("node-a", now) {
+		t.Fatal("publish beyond the burst admitted")
+	}
+	if !store.allowNode("node-b", now) {
+		t.Fatal("another node's budget was spent by node-a")
+	}
+	if !store.allowNode("node-a", now.Add(time.Second)) {
+		t.Fatal("budget did not refill")
+	}
+}
+
+func TestFleetStateNodeOverBudgetIsDropped(t *testing.T) {
+	hub, server := fsHub(t, "")
+	nodeA := fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
+	base := time.Now().UTC().Truncate(time.Second)
+	before := hub.unknownMessageCount()
+	for i := 0; i < fleetStateNodeBurst+40; i++ {
+		r6Write(t, nodeA, fsSpawnPublish("start", fmt.Sprintf("job-%d", i), "builder-opus", "", base.Add(time.Duration(i)*time.Second)))
+	}
+	eventually(t, 3*time.Second, "over-budget publishes counted", func() bool { return hub.unknownMessageCount() >= before+20 })
+}
+
+// Review #141: a dead publisher is announced once, not every beat.
+func TestFleetStateDeadPublisherAnnouncedOnce(t *testing.T) {
+	hub, server := fsHub(t, "")
+	nodeA := fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
+	_ = nodeA.Close(websocket.StatusNormalClosure, "")
+	eventually(t, 2*time.Second, "disconnect announced", func() bool {
+		message, ok := fsLatest(hub, "node-a", fleetStateKindPublisher, "")
+		return ok && !message.Publisher.Connected
+	})
+	dead, _ := fsLatest(hub, "node-a", fleetStateKindPublisher, "")
+	for _, later := range []time.Duration{time.Minute, time.Hour, 24 * time.Hour} {
+		hub.publishFleetPublisher("node-a", time.Now().UTC().Add(later))
+	}
+	if again, _ := fsLatest(hub, "node-a", fleetStateKindPublisher, ""); again.Seq != dead.Seq {
+		t.Fatalf("connected:false re-emitted (seq %d -> %d)", dead.Seq, again.Seq)
+	}
+}
+
+// Review #141: accepting comes from placement's acceptance, not the reason
+// text, and usable is placement's own verdict.
+func TestFleetStateLoadAcceptingFromPlacement(t *testing.T) {
+	policyPath := t.TempDir() + "/placement.json"
+	writeTestFile(t, policyPath, `{"local_machine":"node-a","spill_targets":["node-b"],"max_active_jobs":5,"load_ratio":0.5}`)
+	hub, server := fsHub(t, policyPath)
+	fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
+	nodeB := r6DialAgent(t, server.URL, "node-b", fsNodeBToken)
+	t.Cleanup(func() { _ = nodeB.CloseNow() })
+	r6Write(t, nodeB, map[string]any{"type": "hello", "machine_id": "node-b", "version": "fs-test", "accepting": false})
+	r6Write(t, nodeB, map[string]any{"type": "event", "kind": "heartbeat", "payload": map[string]any{"status": "alive"}})
+	eventually(t, 2*time.Second, "node-b publisher", func() bool { _, ok := fsLatest(hub, "node-b", fleetStateKindPublisher, ""); return ok })
+	hub.publishFleetLoad(t.Context(), time.Now().UTC())
+	a, _ := fsLatest(hub, "node-a", fleetStateKindLoad, "")
+	b, _ := fsLatest(hub, "node-b", fleetStateKindLoad, "")
+	if !a.Load.Accepting || !a.Load.Usable || b.Load.Accepting || b.Load.Usable || !b.Load.Connected {
+		t.Fatalf("a=%+v b=%+v", a.Load, b.Load)
+	}
+}
+
+// Review #141: evicting a running spawn emits an end, so a stream reader
+// converges with the snapshot.
+func TestFleetStateEvictedRunningSpawnEmitsEnd(t *testing.T) {
+	store := newFleetStateStore(time.Unix(1, 0))
+	var reader *fleetStateReader
+	now := time.Unix(100, 0)
+	for i := 0; i <= fleetStateSpawnKeysPerHost; i++ {
+		if i == fleetStateSpawnKeysPerHost-4 {
+			// Subscribe late so the reader's buffer holds the tail.
+			reader, _, _, _ = store.subscribe(fmt.Sprintf("%s-%d", store.epoch, store.seq))
+		}
+		at := now.Add(time.Duration(i) * time.Second)
+		store.publish(FleetStateMessage{Host: "node-a", Kind: fleetStateKindSpawn, Key: fmt.Sprintf("job-%d", i), ReceivedAt: at, Spawn: &FleetStateSpawn{Phase: "start", Job: fmt.Sprintf("job-%d", i), Host: "node-a", At: at}}, 0)
+	}
+	if _, kept := store.latest[fleetStateKey{"node-a", fleetStateKindSpawn, "job-0"}]; kept {
+		t.Fatal("oldest running spawn not evicted")
+	}
+	var last FleetStateMessage
+	for len(reader.messages) > 0 {
+		last = <-reader.messages
+	}
+	if last.Spawn == nil || last.Spawn.Phase != "end" || last.Key != "job-0" || last.Host != "node-a" {
+		t.Fatalf("last stream message = %+v", last)
+	}
+}

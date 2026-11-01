@@ -510,9 +510,10 @@ type HubServer struct {
 	closeCancel context.CancelFunc
 	// fleetState is the latest-value store behind /v1/state; fleetLoadMu
 	// keeps at most one load publication in flight (docs/fleet-state.md).
-	fleetState  *fleetStateStore
-	fleetLoadMu sync.Mutex
-	fleetLoadAt time.Time // guarded by fleetLoadMu
+	fleetState     *fleetStateStore
+	fleetStateOnce sync.Once
+	fleetLoadMu    sync.Mutex
+	fleetLoadAt    time.Time // guarded by fleetLoadMu
 	// closeMu serializes Close so concurrent callers cannot race the logFile
 	// handoff; closed makes every call after the first return nil at once.
 	closeMu    sync.Mutex

@@ -39,7 +39,7 @@ Each `(host, kind, key)` triple names one latest value.
 | kind | key | publisher | body |
 |---|---|---|---|
 | `quota` | account key (`<pool>:<16-hex>`) | the node that runs the measurement | `quota`: `account_key`, `pool`, `source` (pacelever's measurement source), `buckets[]` (`window`, `used_pct`, `resets_at`, `scope`, `model`) |
-| `load` | empty | the hub, computed from the node's own heartbeats with `/etc/panewire/placement.json` | `load`: `load_ratio`, `score`, `capacity_weight`, `accepting`, `connected`, `active_jobs`, `reason` |
+| `load` | empty | the hub, computed from the node's own heartbeats with `/etc/panewire/placement.json` | `load`: `load_ratio`, `score`, `capacity_weight`, `accepting`, `usable`, `connected`, `slot_full`, `active_jobs`, `reason` |
 | `spawn` | job id | the node where the job runs | `spawn`: `phase` (`start` or `end`), `job`, `profile`, `host`, `at` |
 | `publisher` | empty | the hub, from the node's connection | `publisher`: `connected`, `last_seen` |
 
@@ -50,7 +50,9 @@ Each `(host, kind, key)` triple names one latest value.
   heartbeat. The hub adds the placement policy (score, `capacity_weight`, task
   slots, acceptance) through the same computation as `GET /v1/placement`, but
   without the wake-on-spill side effect. `measured_at` is the time of that
-  computation.
+  computation. `accepting` is placement's effective acceptance: connected,
+  accepting after operator overrides, and no memory pressure. `usable` is
+  placement's own verdict for the host.
 - **Spawn.** The node publishes `start` the first time a job appears in its
   active-job scan, and `end` when the job leaves that scan. `profile` comes from
   the job's `job.spawned` record. After a node restarts it publishes `start`
@@ -68,7 +70,8 @@ A consumer uses a hub value only when both of these hold:
    `connected: true`, and `at - last_seen <= publisher_ttl`. `at` is the
    snapshot time, or the consumer's clock for a stream reader. The hub emits a
    `publisher` beat at most every 20 s while heartbeats arrive (nodes beat every
-   10 s), and immediately on connect and disconnect. The default
+   10 s), and immediately on connect and disconnect. A dead publisher is
+   announced once, on the transition, and is not repeated. The default
    `publisher_ttl` is 90 s.
 2. **The value is fresh.** For `quota`, `now - measured_at` must be between
    −1 minute and the consumer's `fresh_ttl_s`, the same rule as the shared
@@ -116,7 +119,11 @@ Event ids are `<epoch>-<seq>`. `epoch` changes every time the hub starts.
 - Replay ring: 2048 messages.
 - Latest values: 64 `quota` keys and 256 `spawn` keys per host. An ended
   `spawn` value is dropped after one hour, and the oldest ended value is
-  dropped first when a host is full.
+  dropped first when a host is full. If a running `spawn` value has to be
+  dropped, the hub emits an `end` for it, so stream readers drop it too.
+- Each node has a publish budget: a burst of 320 values, refilled at 2 per
+  second. A value over the budget is dropped and counted as an unknown
+  message, so one node cannot flush the shared replay ring.
 - At most 32 concurrent stream readers; the 33rd gets a 503.
 - One node `state` event is at most 4 KiB.
 

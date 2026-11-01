@@ -216,12 +216,12 @@ func MainWithVersion(args []string, version string) int {
 		return ExitOK
 	}
 	if len(args) > 0 && args[0] == "daemon" {
-		defer startCrashReporting("panewire", version)()
-		return runDaemonCLIWithDeps(args[1:], daemonCLIDeps{Version: version})
+		return runWithCrashReporting("panewire", version, func() int {
+			return runDaemonCLIWithDeps(args[1:], daemonCLIDeps{Version: version})
+		})
 	}
 	if len(args) > 0 && args[0] == "hub" {
-		defer startCrashReporting("panewire", version)()
-		return runHubCLI(args[1:])
+		return runWithCrashReporting("panewire", version, func() int { return runHubCLI(args[1:]) })
 	}
 	return RunCLI(args, CLIConfig{})
 }
