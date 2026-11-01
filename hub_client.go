@@ -148,35 +148,43 @@ type HubClient struct {
 	outbox        *Store
 	outboxMu      sync.Mutex
 	// now is the outbox retry clock. Tests pin it; production leaves it nil.
-	now               func() time.Time
-	assignedJobs      map[string]uint64
-	assignmentMu      sync.Mutex
-	burstHoldsActive  bool
-	panesAlive        panesAliveFunc
-	panesAliveMu      sync.Mutex
-	sessionMu         sync.Mutex
-	spawnConfigPath   string
-	spawnMu           sync.Mutex
-	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
-	spawnSeenMu       sync.Mutex
-	spawnSeen         map[string]struct{}
-	spawnTimeoutExtra time.Duration // fixture seam; production is 60 seconds.
-	nodeCommandMu     sync.Mutex
-	nodeHerdr         relayCommandRunner // fixture seam for node commands; nil runs herdr.
-	nodeGit           relayCommandRunner // fixture seam for node commands; nil runs git.
-	nodePacelever     relayCommandRunner // fixture seam for quota.refresh; nil runs pacelever.
-	nodeCloseSettle   time.Duration      // fixture seam; zero is nodePaneCloseSettle.
-	nodeGitLockWait   time.Duration      // fixture seam; zero is nodeGitOpLockWait.
-	busyRelayMu       sync.Mutex
-	busyRelay         *relayBusyManager
-	relayCommand      relayCommandRunner   // fixture seam for agent get/wait.
-	relayEmitter      func(hubClientEvent) // fixture/connection-owned writer.
-	relayRecvSeqMu    sync.Mutex
-	relayRecvSeq      int64 // assigned synchronously by the hub read loop.
-	idleWakeMu        sync.Mutex
-	idleWake          *idleWakeManager
-	stallBeatMu       sync.Mutex
-	stallBeat         func() *hubStallBeatPayload
+	now              func() time.Time
+	assignedJobs     map[string]uint64
+	assignmentMu     sync.Mutex
+	burstHoldsActive bool
+	panesAlive       panesAliveFunc
+	panesAliveMu     sync.Mutex
+	sessionMu        sync.Mutex
+	spawnConfigPath  string
+	spawnMu          sync.Mutex
+	spawnPrepare     func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
+	spawnSeenMu      sync.Mutex
+	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
+	statePublish       bool
+	stateQuotaPools    []string
+	stateQuotaInterval time.Duration
+	fleetStateMu       sync.Mutex
+	fleetSpawns        map[string]fleetSpawnRunning
+	fleetSpawnResync   bool
+	fleetQuotaResync   bool
+	spawnSeen          map[string]struct{}
+	spawnTimeoutExtra  time.Duration // fixture seam; production is 60 seconds.
+	nodeCommandMu      sync.Mutex
+	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
+	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
+	nodePacelever      relayCommandRunner // fixture seam for quota.refresh; nil runs pacelever.
+	nodeCloseSettle    time.Duration      // fixture seam; zero is nodePaneCloseSettle.
+	nodeGitLockWait    time.Duration      // fixture seam; zero is nodeGitOpLockWait.
+	busyRelayMu        sync.Mutex
+	busyRelay          *relayBusyManager
+	relayCommand       relayCommandRunner   // fixture seam for agent get/wait.
+	relayEmitter       func(hubClientEvent) // fixture/connection-owned writer.
+	relayRecvSeqMu     sync.Mutex
+	relayRecvSeq       int64 // assigned synchronously by the hub read loop.
+	idleWakeMu         sync.Mutex
+	idleWake           *idleWakeManager
+	stallBeatMu        sync.Mutex
+	stallBeat          func() *hubStallBeatPayload
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -422,6 +430,7 @@ func (client *HubClient) Publish(kind string, payload any) bool {
 // Run reconnects until its context is canceled. Any hub error is isolated to
 // this goroutine: it never propagates into local daemon loops.
 func (client *HubClient) Run(ctx context.Context) {
+	go client.runFleetQuota(ctx)
 	backoff := client.initialBackoff
 	for {
 		if ctx.Err() != nil {
@@ -1487,6 +1496,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	}
 	client.setRelayEmitter(func(event hubClientEvent) { _ = peer.write(ctx, hubClientWireEvent(event)) })
 	client.relayBusyManager().resume(ctx)
+	client.resyncFleetState()
 	if err := peer.write(ctx, hubClientWireEvent(client.heartbeatEvent(ctx))); err != nil {
 		return nil, err
 	}
@@ -1769,6 +1779,7 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 		}
 	}
 	client.assignmentMu.Unlock()
+	client.publishFleetSpawns(active, client.nowUTC())
 	client.burstMu.Lock()
 	holdsActive := client.burstHoldsActive
 	client.burstMu.Unlock()

@@ -122,17 +122,25 @@ Event ids are `<epoch>-<seq>`. `epoch` changes every time the hub starts.
 
 ## Node publisher
 
-`panewire node` (the daemon) publishes:
+`panewire daemon` publishes only with `--state-publish`. With that flag it
+publishes:
 
-- `spawn` from the active-job scan it already runs for its heartbeat.
+- `spawn` from the active-job scan it already runs for its heartbeat. It
+  needs `--hub-jobs-root`. `profile` is read once per job from the job's
+  `job.spawned` record.
 - `quota` for each pool in `--state-quota-pools` (comma-separated, empty by
   default, which disables quota publishing). Every `--state-quota-interval`
-  (default 60 s) it runs `pacelever refresh <pool>`. pacelever reads the shared
+  (default 60 s, minimum 10 s) it runs `pacelever refresh <pool>`. pacelever reads the shared
   cache first and probes only when the reading is stale, so a 60 s interval
   keeps the account's shared reading fresh at the cost of one cache read per
   pool per minute. The node publishes a reading only when pacelever reports it
   as not stale, with an account fingerprint of kind `account`. It republishes
-  when the reading changes, and otherwise at least every 5 minutes.
+  when the reading changes, and otherwise at least every 5 minutes. A failing
+  refresh logs one warning per failure streak and publishes nothing. The
+  reading then ages past its TTL, and consumers measure directly.
+
+Every new hub connection re-announces the node's running jobs and current
+readings, so a restarted hub regains the node's state immediately.
 
 List only pools whose accounts this host measures: pacelever's
 `measurable_accounts`, plus the pools it derives from the local login.
@@ -146,8 +154,9 @@ Order: hub, then nodes, then runtug. Each step is safe on its own.
    never send `state` events. If runtug reads with a service token, add
    `state.read` to that service's `HUB_SCOPES_<client>` line; the operator
    token needs nothing.
-2. **Nodes.** Deploy the node build. On each host that measures an account, add
-   `--state-quota-pools <pools>` to the node's service arguments. Check that
+2. **Nodes.** Deploy the node build. Add `--state-publish` to every node's
+   service arguments. On each host that measures an account, also add
+   `--state-quota-pools <pools>`. Check that
    `GET /v1/state` lists that host's `quota` values with a recent
    `measured_at`. A new node that connects to an old hub only adds to the hub's
    unknown-message count, because the old hub ignores `state` events.
@@ -162,8 +171,8 @@ Reverse order. Each step is independent.
 
 1. **runtug.** Set `[hub] state = "off"`, or redeploy the previous runtug.
    runtug then measures directly, as before.
-2. **Nodes.** Remove `--state-quota-pools`, or redeploy the previous node
-   build. With no publisher, runtug falls back to direct measurement and
+2. **Nodes.** Remove `--state-publish` (and `--state-quota-pools`), or
+   redeploy the previous node build. With no publisher, runtug falls back to direct measurement and
    records the reason.
 3. **Hub.** Redeploy the previous hub build. `/v1/state` returns 404, and
    runtug records `hub_unavailable` and measures directly.
