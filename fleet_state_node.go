@@ -3,7 +3,6 @@ package panewire
 import (
 	"context"
 	"encoding/json"
-	"math"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -91,7 +90,18 @@ func (client *HubClient) publishFleetSpawns(active []HubActiveJob, now time.Time
 		client.fleetSpawns[job.JobID] = running
 	}
 	for jobID, running := range client.fleetSpawns {
-		if _, still := current[jobID]; !still && client.publishFleetSpawn("end", jobID, running.profile, now) {
+		if _, still := current[jobID]; still {
+			continue
+		}
+		// A job whose start the queue dropped still announces it before its
+		// end, so no consumer sees an end without a start.
+		if !running.announced {
+			if running.announced = client.publishFleetSpawn("start", jobID, running.profile, running.at); !running.announced {
+				continue
+			}
+			client.fleetSpawns[jobID] = running
+		}
+		if client.publishFleetSpawn("end", jobID, running.profile, now) {
 			delete(client.fleetSpawns, jobID)
 		}
 	}
@@ -165,7 +175,9 @@ type paceleverReading struct {
 // what the shared quota cache would accept as current.
 func fleetQuotaFromPacelever(pool string, output []byte) (FleetStatePublish, bool) {
 	var reading paceleverReading
-	if json.Unmarshal(output, &reading) != nil || reading.ID != pool || reading.Stale || reading.Error != "" || reading.FetchedAt <= 0 || math.IsInf(reading.FetchedAt, 0) {
+	// fetched_at is epoch seconds; the upper bound (year 2286) keeps the
+	// millisecond conversion below inside int64.
+	if json.Unmarshal(output, &reading) != nil || reading.ID != pool || reading.Stale || reading.Error != "" || !(reading.FetchedAt > 0 && reading.FetchedAt < 1e10) {
 		return FleetStatePublish{}, false
 	}
 	fp := ""
@@ -198,6 +210,11 @@ func fleetQuotaFromPacelever(pool string, output []byte) (FleetStatePublish, boo
 			out.ResetsAt = reset.UTC().Format(time.RFC3339)
 		}
 		quota.Buckets = append(quota.Buckets, out)
+	}
+	if len(quota.Buckets) == 0 {
+		// Every bucket unmeasured is no reading at all: publishing it would
+		// stand in for a measurement and stop consumers measuring directly.
+		return FleetStatePublish{}, false
 	}
 	measured := time.UnixMilli(int64(reading.FetchedAt * 1000)).UTC()
 	publish := FleetStatePublish{Kind: fleetStateKindQuota, Key: key, MeasuredAt: measured, Quota: quota}

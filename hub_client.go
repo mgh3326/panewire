@@ -430,7 +430,9 @@ func (client *HubClient) Publish(kind string, payload any) bool {
 // Run reconnects until its context is canceled. Any hub error is isolated to
 // this goroutine: it never propagates into local daemon loops.
 func (client *HubClient) Run(ctx context.Context) {
-	go client.runFleetQuota(ctx)
+	if client.statePublish && len(client.stateQuotaPools) > 0 {
+		go client.runFleetQuota(ctx)
+	}
 	backoff := client.initialBackoff
 	for {
 		if ctx.Err() != nil {

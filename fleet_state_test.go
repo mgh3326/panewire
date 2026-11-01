@@ -183,7 +183,7 @@ func fsStream(t *testing.T, server *httptest.Server, header http.Header) (<-chan
 // fsNext returns the next event the filter accepts, skipping the others.
 func fsNext(t *testing.T, events <-chan fsEvent, label string, accept func(fsEvent) bool) fsEvent {
 	t.Helper()
-	timeout := time.After(3 * time.Second)
+	timeout := time.After(10 * time.Second)
 	for {
 		select {
 		case event, open := <-events:

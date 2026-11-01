@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -96,6 +97,7 @@ func TestFleetQuotaFromPacelever(t *testing.T) {
 		"no fetched_at":   strings.Replace(fsPaceleverFresh, `"fetched_at":1761962400.25,`, ``, 1),
 		"bad resets_at":   strings.Replace(fsPaceleverFresh, `2026-11-01T05:00:00.5Z`, `tomorrow`, 1),
 		"no measured bkt": strings.Replace(fsPaceleverFresh, `"used_pct":42`, `"used_pct":null`, 1),
+		"huge fetched_at": strings.Replace(fsPaceleverFresh, `"fetched_at":1761962400.25`, `"fetched_at":1e300`, 1),
 		"not json":        `pacelever: unknown provider`,
 	} {
 		if _, ok := fleetQuotaFromPacelever("claude", []byte(raw)); ok {
@@ -155,5 +157,47 @@ func TestParseFleetQuotaPools(t *testing.T) {
 	}
 	if _, ok := parseFleetQuotaPools("claude;rm"); ok {
 		t.Fatal("invalid pool accepted")
+	}
+}
+
+// Review #142: an all-null reading is refused by the node itself, not only by
+// the hub's decoder.
+func TestFleetQuotaAllUnmeasuredBucketsRefused(t *testing.T) {
+	var reading paceleverReading
+	raw := strings.Replace(fsPaceleverFresh, `"used_pct":42`, `"used_pct":null`, 1)
+	if json.Unmarshal([]byte(raw), &reading) != nil || len(reading.Buckets) != 2 {
+		t.Fatal("fixture")
+	}
+	if _, ok := fleetQuotaFromPacelever("claude", []byte(raw)); ok {
+		t.Fatal("a reading with no measured bucket was published")
+	}
+}
+
+// Review #142: a job whose start was dropped by the full queue announces the
+// start before its end.
+func TestFleetSpawnEndNeverPrecedesStart(t *testing.T) {
+	client := &HubClient{events: make(chan hubClientEvent, 1), warn: func(string) {}, statePublish: true}
+	client.events <- hubClientEvent{Kind: "note"} // queue full: the start is dropped
+	client.publishFleetSpawns([]HubActiveJob{{JobID: "job-a", Epoch: 1}}, time.Now())
+	if running := client.fleetSpawns["job-a"]; running.announced {
+		t.Fatal("start counted as announced although the queue dropped it")
+	}
+	<-client.events
+	client.events = make(chan hubClientEvent, 4)
+	client.publishFleetSpawns(nil, time.Now()) // the job ended before a retry
+	var phases []string
+	for len(client.events) > 0 {
+		event := <-client.events
+		var publish FleetStatePublish
+		if json.Unmarshal(event.Payload, &publish) != nil || publish.Spawn == nil {
+			t.Fatalf("event %+v", event)
+		}
+		phases = append(phases, publish.Spawn.Phase)
+	}
+	if strings.Join(phases, ",") != "start,end" {
+		t.Fatalf("phases = %v, want start,end", phases)
+	}
+	if _, kept := client.fleetSpawns["job-a"]; kept {
+		t.Fatal("ended job kept")
 	}
 }
