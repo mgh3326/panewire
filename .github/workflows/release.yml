@@ -97,6 +97,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
+        # A -suffix tag (v1.2.3-rc.1) is a pre-release: never "Latest", so
+        # hosts that follow the latest release do not pick it up.
         run: |
-          gh release create "$TAG" dist/release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" \
+          set --
+          case "$TAG" in *-*) set -- --prerelease ;; esac
+          gh release create "$TAG" dist/release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" "$@" \
             --notes "panewire $TAG — publish with: panewire update publish --version $TAG --url https://github.com/${GITHUB_REPOSITORY}/releases/download/$TAG/panewire_${TAG}_<os>_<arch> --sha256 <from SHA256SUMS> --machines <canary>"
