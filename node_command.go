@@ -63,8 +63,9 @@ var (
 
 func knownNodeCommandOp(op string) bool {
 	switch op {
-	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandWorktreeInspect,
-		nodeCommandWorktreePrepare, nodeCommandWorktreeRemove, nodeCommandQuotaRefresh:
+	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
+		nodeCommandWorktreeInspect, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
+		nodeCommandQuotaRefresh, nodeCommandJobDone:
 		return true
 	}
 	return false
@@ -74,7 +75,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "result_too_large":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_too_large":
 		return true
 	}
 	return false
@@ -172,6 +173,8 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandAgentsList:      {},
 	nodeCommandPaneClose:       {"pane_id", "name", "agent_status", "cwd"},
 	nodeCommandPaneCapture:     {"pane_id", "name", "cwd", "merged_after", "write"},
+	nodeCommandPaneRead:        {"pane_id", "name", "cwd", "tail_lines"},
+	nodeCommandJobDone:         {"job", "report"},
 	nodeCommandWorktreeInspect: {"cwd"},
 	nodeCommandWorktreePrepare: {"origin", "mode", "branch", "sha", "fetch", "dir"},
 	nodeCommandWorktreeRemove:  {"cwd", "expect_head", "base", "regenerable"},
@@ -193,8 +196,17 @@ func nodeCommandHasFields(raw json.RawMessage, names []string) bool {
 	return true
 }
 
-// decodeNodeCommandArgs returns the typed, validated arguments for op.
+// decodeNodeCommandArgs returns the typed, validated arguments for op, and nil
+// when they are refused: a caller can never hold, or log, unvalidated text.
 func decodeNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
+	decoded, valid := parseNodeCommandArgs(op, raw)
+	if !valid {
+		return nil, false
+	}
+	return decoded, true
+}
+
+func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	names, known := nodeCommandArgFields[op]
 	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || !nodeCommandHasFields(raw, names) {
 		return nil, false
@@ -211,6 +223,13 @@ func decodeNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		var args nodePaneCaptureArgs
 		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && validNodeCommandPath(args.Cwd) && args.MergedAfter >= 0
 		return args, valid
+	case nodeCommandPaneRead:
+		var args nodePaneReadArgs
+		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && validNodeCommandPath(args.Cwd) && args.TailLines >= 0 && args.TailLines <= nodePaneReadMaxTailLines
+		return args, valid
+	case nodeCommandJobDone:
+		var args nodeJobDoneArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job) && validNodeCommandPath(args.Report)
 	case nodeCommandWorktreeInspect:
 		var args nodeWorktreeInspectArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeCommandPath(args.Cwd)
@@ -272,6 +291,14 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		case result.Outcome == nodeCaptureNotAJob || result.Outcome == nodePaneChanged || result.Outcome == nodePaneGone:
 			valid = result.Saved == ""
 		}
+		target = result
+	case nodeCommandPaneRead:
+		var result PaneReadResult
+		valid = decodeNodeCommandStrict(raw, &result) && validPaneReadResult(result)
+		target = result
+	case nodeCommandJobDone:
+		var result JobDoneResult
+		valid = decodeNodeCommandStrict(raw, &result) && validJobDoneResult(result)
 		target = result
 	case nodeCommandWorktreeInspect:
 		var result nodeWorktreeInspectResult
@@ -359,6 +386,10 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 	defer cancel()
 	reply := nodeCommandReply{Type: "node.command.result", RequestID: message.RequestID, Op: message.CommandOp}
 	result, code := client.runNodeCommand(runContext, message.CommandOp, message.CommandArgs)
+	if nodeCommandReapOnly(message.CommandOp) {
+		decoded, _ := decodeNodeCommandArgs(message.CommandOp, message.CommandArgs)
+		logNodeReapCommand(message.CommandOp, decoded, result, code)
+	}
 	if code == "" {
 		encoded, err := json.Marshal(result)
 		switch {
@@ -390,6 +421,12 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		return client.nodePaneCapture(ctx, args)
+	case nodePaneReadArgs:
+		return client.nodePaneRead(ctx, args)
+	case nodeJobDoneArgs:
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodeJobDone(ctx, args)
 	case nodeWorktreeInspectArgs:
 		return nodeWorktreeInspect(ctx, client.nodeGitRunner(), args.Cwd), ""
 	case nodeWorktreePrepareArgs:
@@ -403,10 +440,11 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 }
 
 // nodeHerdrRow is a herdr list row plus the node-local fields pane.close
-// compares; StateChangeSeq is nil when herdr does not report it.
+// compares and pane.read reports; each is nil when herdr does not report it.
 type nodeHerdrRow struct {
 	nodeAgentRow
 	StateChangeSeq *int64 `json:"state_change_seq"`
+	Focused        *bool  `json:"focused"`
 }
 
 func nodeHerdrRows(output []byte, key string) ([]nodeHerdrRow, error) {
@@ -524,34 +562,19 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 // already exist (proof the fleet spawned the pane), and report.md wins only
 // when it is newer than the merge.
 func (client *HubClient) nodePaneCapture(ctx context.Context, args nodePaneCaptureArgs) (any, string) {
-	if client.jobsInboxRoot == "" {
-		return nil, "jobs_root_unset"
-	}
-	// Every read and write below goes through an os.Root on the jobs
-	// directory, so no symlink — at the job dir, report.md, pane-screen.txt
-	// or anywhere between — can lead outside it. The job dir itself must be
-	// a real directory: a symlinked one is not something the fleet created.
-	jobsRoot := filepath.Join(client.jobsInboxRoot, "jobs")
-	jobs, err := os.OpenRoot(jobsRoot)
-	if errors.Is(err, os.ErrNotExist) {
-		return nodePaneCaptureResult{Outcome: nodeCaptureNotAJob}, ""
-	} else if err != nil {
-		return nil, "capture_failed"
-	}
-	defer jobs.Close()
-	info, err := jobs.Lstat(args.Name)
+	// Every read and write below goes through an os.Root on the job directory,
+	// so no symlink — at the job dir, report.md, pane-screen.txt or anywhere
+	// between — can lead outside it.
+	job, dir, found, err := client.openNodeJobDir(args.Name)
 	switch {
-	case errors.Is(err, os.ErrNotExist) || (err == nil && !info.IsDir()):
-		return nodePaneCaptureResult{Outcome: nodeCaptureNotAJob}, ""
+	case errors.Is(err, errNodeJobsRootUnset):
+		return nil, "jobs_root_unset"
 	case err != nil:
 		return nil, "capture_failed"
-	}
-	job, err := jobs.OpenRoot(args.Name)
-	if err != nil {
-		return nil, "capture_failed"
+	case !found:
+		return nodePaneCaptureResult{Outcome: nodeCaptureNotAJob}, ""
 	}
 	defer job.Close()
-	dir := filepath.Join(jobsRoot, args.Name)
 	report := filepath.Join(dir, "report.md")
 	if args.MergedAfter > 0 {
 		// Lstat: a symlinked report.md is not the job's own report.

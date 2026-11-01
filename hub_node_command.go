@@ -210,22 +210,33 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 	if len(body.Args) == 0 {
 		body.Args = json.RawMessage("{}")
 	}
-	if _, valid := decodeNodeCommandArgs(body.Op, body.Args); !valid {
+	decoded, valid := decodeNodeCommandArgs(body.Op, body.Args)
+	logReap := func(outcome string) {
+		if nodeCommandReapOnly(body.Op) {
+			pane, job := nodeReapCommandSubject(decoded)
+			h.logger.Info("node command", "client", h.authenticate(request).id, "machine", machine, "op", body.Op, "pane", pane, "job", job, "outcome", outcome)
+		}
+	}
+	if !valid {
+		logReap("invalid_request")
 		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
 		return
 	}
-	if access := h.authorize(request, hubScopeNodeCommand+body.Op, machine); access != hubAccessGranted {
+	if access := h.authorizeNodeCommand(request, body.Op, machine); access != hubAccessGranted {
+		logReap("scope_forbidden")
 		writeHubAccessDenied(writer, access)
 		return
 	}
 	pending, requestID, state, sent := h.sendNodeCommand(machine, body.Op, body.Args)
 	if !sent {
+		logReap("node_unavailable")
 		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "node_unavailable", "state": state})
 		return
 	}
 	timer := time.NewTimer(hubNodeWait(h.nodeCommandWait, hubNodeCommandWait))
 	defer timer.Stop()
 	result := h.awaitNodeCommand(request, requestID, pending, timer.C)
+	logReap(nodeCommandOutcome(result))
 	response := struct {
 		RequestID string          `json:"request_id"`
 		Machine   string          `json:"machine"`
@@ -246,6 +257,28 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 		status = http.StatusBadGateway
 	}
 	writeJSON(writer, status, response)
+}
+
+// authorizeNodeCommand adds one rule to authorize: a reap-only op is for a
+// service whose scopes name it, so the operator credential is refused too.
+func (h *HubServer) authorizeNodeCommand(request *http.Request, op, machine string) hubAccess {
+	if nodeCommandReapOnly(op) && h.authenticate(request).kind == hubCallerOperator {
+		return hubAccessForbidden
+	}
+	return h.authorize(request, hubScopeNodeCommand+op, machine)
+}
+
+// nodeCommandOutcome names a result for the log from its closed vocabulary:
+// the node's error code or the result's outcome, never any other result field.
+func nodeCommandOutcome(result hubNodeCommandResult) string {
+	if result.Error != "" {
+		return result.Error
+	}
+	var named struct {
+		Outcome string `json:"outcome"`
+	}
+	_ = json.Unmarshal(result.Result, &named)
+	return named.Outcome
 }
 
 // handleNodesAgents fans agents.list out to every known node and answers one
