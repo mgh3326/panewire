@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -18,7 +19,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	// The crash-output child keeps the state dir its parent test chose.
-	if os.Getenv("PANEWIRE_CRASH_CHILD") != "1" {
+	if os.Getenv("PANEWIRE_CRASH_CHILD") == "" {
 		os.Setenv("XDG_STATE_HOME", state)
 	}
 	code := m.Run()
@@ -184,7 +185,7 @@ func TestFleetEventRedactsAndBounds(t *testing.T) {
 			t.Fatalf("secret %q leaked: %s", secret, raw)
 		}
 	}
-	if info, err := os.Stat(path); err != nil || info.Mode().Perm()&^0o640 != 0 || info.Mode().Perm()&0o600 != 0o600 {
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o640 {
 		t.Fatalf("mode: %v %v", info, err)
 	}
 }
@@ -220,5 +221,54 @@ func TestFleetEventRedactCoversKeyAssignmentsPEMBlobsAndEmails(t *testing.T) {
 	sha := "2cdf695b2e8f19ce4fda2f7fad4236125453c22c"
 	if got := fleetEventRedact("head " + sha + " exit=3"); got != "head "+sha+" exit=3" {
 		t.Fatalf("a commit SHA and plain fields must survive: %q", got)
+	}
+}
+
+func TestFleetEventRedactQuotedSpacedAndShortCredentialValues(t *testing.T) {
+	cases := map[string]string{
+		`password="abc def"`:                   "abc def",
+		`password="abcdefghij klmnop"`:         "klmnop", // the stall set alone would stop at the space
+		`password="abc def`:                    "abc def",
+		`token='open sesame now'`:              "open sesame",
+		`secret="a \"quoted\" word"`:           "quoted",
+		`password=abc`:                         "abc",
+		`api_key: "k"`:                         `"k"`,
+		`{"client_secret": "s3 cr3t"}`:         "s3 cr3t",
+		`DB_PASSWORD = "two words" next=field`: "two words",
+	}
+	for input, secret := range cases {
+		got := fleetEventRedact(input)
+		if strings.Contains(got, secret) || !strings.Contains(got, "[redacted]") {
+			t.Fatalf("%s kept %q: %s", input, secret, got)
+		}
+	}
+	if got := fleetEventRedact(`DB_PASSWORD = "two words" next=field`); !strings.Contains(got, "next=field") {
+		t.Fatalf("redaction must stop at the closing quote: %s", got)
+	}
+}
+
+func TestFleetEventModesSurviveARestrictiveUmask(t *testing.T) {
+	old := syscall.Umask(0o077)
+	defer syscall.Umask(old)
+	path := filepath.Join(t.TempDir(), "events", fleetEventFileName)
+	if !appendFleetEvent(path, fleetEventMaxBytes, fleetEvent{Kind: "k", Outcome: "o"}) {
+		t.Fatal("append failed")
+	}
+	for target, want := range map[string]os.FileMode{path: 0o640, filepath.Dir(path): 0o750} {
+		if info, err := os.Stat(target); err != nil || info.Mode().Perm() != want {
+			t.Fatalf("%s: %v %v, want %o", target, info.Mode().Perm(), err, want)
+		}
+	}
+}
+
+func TestUTF8SuffixWithinClampsAndStaysValid(t *testing.T) {
+	if got := utf8SuffixWithin("abc", -5); got != "" {
+		t.Fatalf("negative limit: %q", got)
+	}
+	if got := utf8SuffixWithin("ok\xffend", 100); got != "okend" {
+		t.Fatalf("invalid bytes must go: %q", got)
+	}
+	if got := hubSpawnTailWithStderr(strings.Repeat("o", 10), strings.Repeat("e", hubSpawnResultTail*2)); len(got) > hubSpawnResultTail {
+		t.Fatalf("tail exceeded the wire bound: %d", len(got))
 	}
 }
