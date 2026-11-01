@@ -3,12 +3,14 @@ package panewire
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -24,10 +26,13 @@ import (
 
 const (
 	crashReportDSNEnv = "SENTRY_DSN_PANEWIRE"
-	// crashReportMaxPerStart samples a crash loop: each start sends at most
-	// this many reports and drops the older rest, which keeps a restart loop
-	// inside Sentry's free tier.
+	// crashReportMaxPerStart and crashReportDailyBudget sample a crash loop:
+	// a start considers at most the newest three crash files, and the host
+	// sends at most three reports in any 24 hours (counted in crash/sent
+	// across restarts). A launchd/systemd restart loop therefore costs at
+	// most ~90 events a month, well inside Sentry's free tier.
 	crashReportMaxPerStart = 3
+	crashReportDailyBudget = 3
 	crashReportMaxBytes    = 16 << 10
 	crashReportFlush       = 10 * time.Second
 )
@@ -46,9 +51,7 @@ func startCrashReporting(tool, version string) (stop func()) {
 		return func() {}
 	}
 	if pending := collectCrashFiles(dir); len(pending) > 0 {
-		go func() {
-			_ = uploadCrashReports(dsn, tool, version, pending)
-		}()
+		go reportPendingCrashes(dsn, tool, version, dir, pending, time.Now())
 	}
 	name := filepath.Join(dir, fmt.Sprintf("crash-%d-%d.log", time.Now().UnixNano(), os.Getpid()))
 	file, err := os.OpenFile(name, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
@@ -130,9 +133,54 @@ func crashProcessAlive(pid int) bool {
 	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
-// uploadCrashReports sends one Sentry event per crash file and deletes the
-// files once Sentry's transport has flushed them.
-func uploadCrashReports(dsn, tool, version string, paths []string) error {
+// reportPendingCrashes sends what the daily budget allows and drops the rest.
+// Only reports Sentry accepted consume the budget, so an outage leaves the
+// unsent files for the next start instead of spending the day's budget.
+func reportPendingCrashes(dsn, tool, version, dir string, pending []string, now time.Time) {
+	allowed := min(len(pending), crashBudgetLeft(dir, now))
+	for _, path := range pending[allowed:] {
+		_ = os.Remove(path)
+	}
+	if allowed > 0 {
+		sent, _ := uploadCrashReports(dsn, tool, version, pending[:allowed])
+		recordCrashSends(dir, now, sent)
+	}
+}
+
+// crashSendLog reads <dir>/sent: one unix second per accepted report, kept
+// for the last 24 hours.
+func crashSendLog(dir string, now time.Time) []string {
+	var kept []string
+	if raw, err := os.ReadFile(filepath.Join(dir, "sent")); err == nil {
+		for _, field := range strings.Fields(string(raw)) {
+			sec, err := strconv.ParseInt(field, 10, 64)
+			if err == nil && now.Sub(time.Unix(sec, 0)) < 24*time.Hour {
+				kept = append(kept, field)
+			}
+		}
+	}
+	return kept
+}
+
+// crashBudgetLeft is how many more reports this host may send at now.
+func crashBudgetLeft(dir string, now time.Time) int {
+	return max(0, crashReportDailyBudget-len(crashSendLog(dir, now)))
+}
+
+// recordCrashSends appends n accepted reports at now to the send log.
+func recordCrashSends(dir string, now time.Time, n int) {
+	kept := crashSendLog(dir, now)
+	for range n {
+		kept = append(kept, strconv.FormatInt(now.Unix(), 10))
+	}
+	_ = os.WriteFile(filepath.Join(dir, "sent"), []byte(strings.Join(kept, "\n")+"\n"), 0o600)
+}
+
+// uploadCrashReports sends one Sentry event per crash file and deletes a file
+// only after Sentry answered its event with a 2xx; a rejected or failed
+// delivery keeps the file for the next start.
+func uploadCrashReports(dsn, tool, version string, paths []string) (sent int, err error) {
+	delivery := &crashDelivery{base: http.DefaultTransport}
 	client, err := sentry.NewClient(sentry.ClientOptions{
 		Dsn:              dsn,
 		Release:          tool + "@" + version,
@@ -142,6 +190,7 @@ func uploadCrashReports(dsn, tool, version string, paths []string) error {
 		TracesSampleRate: 0,
 		SendDefaultPII:   false,
 		ServerName:       fleetEventCode(fleetEventHost()),
+		HTTPTransport:    delivery,
 		BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
 			event.User = sentry.User{}
 			event.Request = nil
@@ -150,22 +199,53 @@ func uploadCrashReports(dsn, tool, version string, paths []string) error {
 		},
 	})
 	if err != nil {
-		return err
+		return 0, err
 	}
+	var failed error
 	for _, path := range paths {
 		event := crashReportEvent(tool, path)
 		if event == nil {
 			continue
 		}
 		client.CaptureEvent(event, nil, sentry.NewScope())
-	}
-	if !client.Flush(crashReportFlush) {
-		return errors.New("crash reports not flushed")
-	}
-	for _, path := range paths {
+		client.Flush(crashReportFlush)
+		if accepted, rejected := delivery.take(); accepted == 0 || rejected > 0 {
+			failed = errors.New("sentry did not accept a crash report")
+			continue
+		}
 		_ = os.Remove(path)
+		sent++
 	}
-	return nil
+	return sent, failed
+}
+
+// crashDelivery records Sentry's HTTP answers: sentry-go's Flush reports a
+// drained queue, not an accepted event.
+type crashDelivery struct {
+	base               http.RoundTripper
+	mu                 sync.Mutex
+	accepted, rejected int
+}
+
+func (d *crashDelivery) RoundTrip(request *http.Request) (*http.Response, error) {
+	response, err := d.base.RoundTrip(request)
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if err != nil || response.StatusCode < 200 || response.StatusCode > 299 {
+		d.rejected++
+	} else {
+		d.accepted++
+	}
+	return response, err
+}
+
+// take returns and resets the counts since the last take.
+func (d *crashDelivery) take() (accepted, rejected int) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	accepted, rejected = d.accepted, d.rejected
+	d.accepted, d.rejected = 0, 0
+	return accepted, rejected
 }
 
 // crashReportEvent builds the event for one crash file: the panic line as the

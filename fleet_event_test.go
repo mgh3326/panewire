@@ -202,3 +202,23 @@ func hubSpawnResultWire(t *testing.T, result hubSpawnResult) []byte {
 	}
 	return raw
 }
+
+func TestFleetEventRedactCoversKeyAssignmentsPEMBlobsAndEmails(t *testing.T) {
+	pem := "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEAuFAKEKEYbodyFAKEKEYbodyFAKEKEYbody0123456789abcdefABCDEF\nQWERTYfakefakefake\n-----END RSA PRIVATE KEY-----"
+	cases := map[string]string{
+		"AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY":                "wJalrXUtnFEMI",
+		`"client_secret": "s3cr3tvalue99"`:                                            "s3cr3tvalue99",
+		"before " + pem + " after":                                                    "FAKEKEYbody",
+		"truncated tail: uFAKEKEYbodyFAKEKEYbodyFAKEKEYbody0123456789abcdefABCDEFxyz": "FAKEKEYbody",
+		"author alice@example.org pushed":                                             "alice@example.org",
+	}
+	for input, secret := range cases {
+		if got := fleetEventRedact(input); strings.Contains(got, secret) {
+			t.Fatalf("%q kept %q: %q", input, secret, got)
+		}
+	}
+	sha := "2cdf695b2e8f19ce4fda2f7fad4236125453c22c"
+	if got := fleetEventRedact("head " + sha + " exit=3"); got != "head "+sha+" exit=3" {
+		t.Fatalf("a commit SHA and plain fields must survive: %q", got)
+	}
+}

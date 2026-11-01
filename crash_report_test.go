@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestCrashReportingIsOffWithoutDSN(t *testing.T) {
@@ -81,7 +82,7 @@ func TestCrashReportUploadIsScrubbedAndDeletesTheFile(t *testing.T) {
 	home, _ := os.UserHomeDir()
 	dir := t.TempDir()
 	path := writeCrashFile(t, dir, 1, deadPID(t), "panic: boom "+fleetEventFakeSecretText+"\n\ngoroutine 7 [running]:\nmain.f()\n\t"+home+"/work/x/main.go:10 +0x1d\n")
-	if err := uploadCrashReports(dsn, "panewire", "v-test", []string{path}); err != nil {
+	if _, err := uploadCrashReports(dsn, "panewire", "v-test", []string{path}); err != nil {
 		t.Fatal(err)
 	}
 	mu.Lock()
@@ -130,5 +131,66 @@ func TestCrashOutputCapturesAGoroutinePanic(t *testing.T) {
 	raw, err := os.ReadFile(pending[0])
 	if err != nil || !strings.Contains(string(raw), "panic: crash-child-boom") || !strings.Contains(string(raw), "goroutine") {
 		t.Fatalf("crash file: %q %v", raw, err)
+	}
+}
+
+func TestCrashBudgetCountsOnlyAcceptedReports(t *testing.T) {
+	dir := t.TempDir()
+	start := time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC)
+	recordCrashSends(dir, start, 2)
+	if got := crashBudgetLeft(dir, start.Add(time.Minute)); got != 1 {
+		t.Fatalf("one report left: %d", got)
+	}
+	recordCrashSends(dir, start.Add(time.Minute), 1)
+	if got := crashBudgetLeft(dir, start.Add(2*time.Minute)); got != 0 {
+		t.Fatalf("a crash loop must be cut off: %d", got)
+	}
+	if got := crashBudgetLeft(dir, start.Add(25*time.Hour)); got != crashReportDailyBudget {
+		t.Fatalf("the budget renews after 24 hours: %d", got)
+	}
+}
+
+func TestReportPendingCrashesDropsWhatTheBudgetRefuses(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	recordCrashSends(dir, now, crashReportDailyBudget)
+	path := writeCrashFile(t, dir, 1, deadPID(t), "panic: boom\n")
+	reportPendingCrashes("http://publickey@127.0.0.1:9/1", "tool", "v-test", dir, []string{path}, now)
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatal("a crash over budget must be dropped")
+	}
+}
+
+func TestUnreachableSentryKeepsFileAndBudget(t *testing.T) {
+	dir := t.TempDir()
+	now := time.Now()
+	path := writeCrashFile(t, dir, 1, deadPID(t), "panic: boom\n")
+	reportPendingCrashes("http://publickey@127.0.0.1:9/1", "tool", "v-test", dir, []string{path}, now)
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("an undelivered crash must stay for the next start: %v", err)
+	}
+	if got := crashBudgetLeft(dir, now); got != crashReportDailyBudget {
+		t.Fatalf("an undelivered crash must not spend the budget: %d left", got)
+	}
+}
+
+func TestCrashReportRejectedBySentryIsKept(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer server.Close()
+	dsn := strings.Replace(server.URL, "http://", "http://publickey@", 1) + "/42"
+	path := writeCrashFile(t, t.TempDir(), 1, deadPID(t), "panic: boom\n")
+	if _, err := uploadCrashReports(dsn, "tool", "v-test", []string{path}); err == nil {
+		t.Fatal("a rejected report must be an error")
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("a rejected report's file must stay for the next start: %v", err)
+	}
+}
+
+func TestCrashReportScrubRemovesEmails(t *testing.T) {
+	if got := crashReportScrub("panic: user alice@example.org not found"); strings.Contains(got, "alice@example.org") {
+		t.Fatalf("email reached the report: %q", got)
 	}
 }

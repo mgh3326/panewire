@@ -131,24 +131,44 @@ func fleetEventCode(value string) string {
 	return utf8PrefixWithin(strings.Trim(value, "_"), fleetEventMaxCode)
 }
 
-// fleetEventExtraSecrets extends the stall redaction set with URL userinfo,
-// Basic credentials, Grafana tokens and DSN-shaped assignments, which the
-// fleet events can carry in stderr tails.
+// fleetEventExtraSecrets extends the stall redaction set for fleet events and
+// crash reports: Basic credentials, Grafana and AWS session tokens, any
+// NAME=value whose name holds key/token/secret/password, whole PEM private-key
+// blocks (or a truncated tail of one), and email addresses. runtug and
+// mergewake carry the same set.
 var fleetEventExtraSecrets = []*regexp.Regexp{
+	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)`),
 	regexp.MustCompile(`(?i)basic\s+[A-Za-z0-9+/=]{8,}`),
 	regexp.MustCompile(`\bgl(c|sa)_[A-Za-z0-9_=+/-]{16,}`),
-	regexp.MustCompile(`(?i)(api[_-]?key|token|secret|password|passwd|dsn)\s*[:=]\s*["']?[^\s"',;&]{6,}`),
+	regexp.MustCompile(`\bASIA[0-9A-Z]{16}\b`),
+	regexp.MustCompile(`(?i)[a-z0-9_.-]*(api[_-]?key|access[_-]?key|private[_-]?key|token|secret|password|passwd|credential|dsn)[a-z0-9_.-]*["']?\s*[:=]\s*["']?[^\s"',;&]{6,}`),
+	regexp.MustCompile(`(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b`),
 }
 
 var fleetEventUserinfo = regexp.MustCompile(`(?i)\b([a-z][a-z0-9+.-]*://)[^/\s:@]+(:[^/\s@]*)?@`)
 
-// fleetEventRedact strips credential-shaped substrings from free text.
+// fleetEventLongBlob matches a long base64-alphabet run, a key or token body
+// no named pattern caught; pure hex runs (commit SHAs, digests) are kept.
+var (
+	fleetEventLongBlob = regexp.MustCompile(`[A-Za-z0-9+/_-]{48,}={0,2}`)
+	fleetEventHexOnly  = regexp.MustCompile(`^[0-9a-fA-F]+$`)
+)
+
+// fleetEventRedact strips credential-shaped substrings and email addresses
+// from free text.
 func fleetEventRedact(text string) string {
 	text = strings.ToValidUTF8(text, "?")
 	text = fleetEventUserinfo.ReplaceAllString(text, "${1}[redacted]@")
+	// The PEM block goes first: the stall set only removes its header line.
+	text = fleetEventExtraSecrets[0].ReplaceAllString(text, "[redacted]")
 	text = redactSecrets(text)
-	for _, pattern := range fleetEventExtraSecrets {
+	for _, pattern := range fleetEventExtraSecrets[1:] {
 		text = pattern.ReplaceAllString(text, "[redacted]")
 	}
-	return text
+	return fleetEventLongBlob.ReplaceAllStringFunc(text, func(match string) string {
+		if fleetEventHexOnly.MatchString(match) {
+			return match
+		}
+		return "[redacted]"
+	})
 }
