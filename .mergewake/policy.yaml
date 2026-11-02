@@ -18,3 +18,7 @@ review_gate:
   land: graded
 fast_lane:
   max_changed_lines: 50
+
+deploy_approval:
+  - paths: ['deploy/**', 'provision/**', 'hub_*auth*.go', 'hub_*access*.go', 'hub_security*.go', 'hub_operator*.go', 'session_reap.go', 'hub_session_reap.go', 'job_close.go']
+    reason: Service access authority or destructive session lifecycle changes
