@@ -6,9 +6,16 @@ import (
 )
 
 func spawnRefusalFix(err error) string {
+	var exit *ExitError
+	if errors.As(err, &exit) && exit.Code == exitTrustPrompt {
+		return "Approve only this worktree in the executing CODEX_HOME, then repeat the same command; the brief was withheld until trust is confirmed."
+	}
 	message := err.Error()
 	for _, fix := range []struct{ match, hint string }{
 		{"agent not in foreground", "Inspect the failed pane with panewire find JOB, verify the selected harness binary starts on that host, then repeat the same command after cleanup succeeds."},
+		{"refusing broad workspace trust", "Pass -c with the specific worktree path; do not grant trust to a broad parent directory."},
+		{"malformed workspace trust store", "Repair the selected harness's workspace trust store on the executing host, preserving unrelated entries, then repeat the same command."},
+		{"trust", "Inspect the selected harness's workspace trust store on the executing host and approve only this worktree, then repeat the same command."},
 		{"workspace", "Run herdr workspace list on the executing host; set local.workspace to its id or pass -w WORKSPACE_ID."},
 		{"brief", "Pass -p with a readable nonempty brief file; for presets, save it under jobs/JOB/brief.md or override -p."},
 		{"task title", "Set the task title marker to (grade X, Tn), matching --t, then retry."},
@@ -18,15 +25,13 @@ func spawnRefusalFix(err error) string {
 		{"--owner", "For lead use --lane and --parent without --owner; for work pass --owner or set PANEWIRE_LANE."},
 		{"--override-reason", "Use -m auto --host auto, or provide --override-reason TEXT for an intentional pin."},
 		{"alias", "Run panewire hosts and use the canonical host key, or fix the aliases list in the hosts config."},
-		{"trust", "Approve the project in the selected harness on the executing host, then repeat the same command."},
 		{"requires PANEWIRE_E6_ARM=", "Set the exact PANEWIRE_E6_ARM value named in the refusal only if the operator authorized that rung; otherwise select an admitted rung."},
 	} {
 		if strings.Contains(message, fix.match) {
 			return fix.hint
 		}
 	}
-	var exit *ExitError
-	if errors.As(err, &exit) {
+	if exit != nil {
 		switch exit.Code {
 		case exitDuplicate:
 			return "Inspect the existing job with panewire find JOB. Use a new --job only for new work; never override a live duplicate. Failed launches with verified cleanup can retry on the same host."
