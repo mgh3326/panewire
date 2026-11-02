@@ -61,6 +61,12 @@ func TestSpawnReservationSurvivesRestartAndReplaysLostResponse(t *testing.T) {
 	if _, _, err = recovered.claimSpawn(ctx, changed, "second-job", "parent", now); !errors.Is(err, errSpawnClaimed) {
 		t.Fatalf("duplicate task/role accepted: %v", err)
 	}
+	for i, arg := range changed.Args {
+		if arg == "--task" {
+			changed.Args = append(changed.Args[:i], changed.Args[i+2:]...)
+			break
+		}
+	}
 	changed.Args = append(changed.Args, "--parent-job", "test-job")
 	if _, fresh, err = recovered.claimSpawn(ctx, changed, "second-job", "parent", now); err != nil || !fresh {
 		t.Fatalf("legal inherited child blocked: %v", err)

@@ -17,17 +17,18 @@ import (
 var errSpawnClaimed = errors.New("job_already_claimed")
 
 type hubSpawnOutcome struct {
-	RC        int              `json:"rc"`
-	Stage     string           `json:"stage"`
-	Fix       string           `json:"fix,omitempty"`
-	Reason    string           `json:"reason,omitempty"`
-	Host      string           `json:"host,omitempty"`
-	Pane      string           `json:"pane,omitempty"`
-	Profile   string           `json:"profile,omitempty"`
-	Model     string           `json:"model,omitempty"`
-	Role      string           `json:"role,omitempty"`
-	Retryable bool             `json:"retryable,omitempty"`
-	StageMS   map[string]int64 `json:"stage_ms,omitempty"`
+	RC         int              `json:"rc"`
+	Stage      string           `json:"stage"`
+	Fix        string           `json:"fix,omitempty"`
+	Reason     string           `json:"reason,omitempty"`
+	Host       string           `json:"host,omitempty"`
+	Pane       string           `json:"pane,omitempty"`
+	Profile    string           `json:"profile,omitempty"`
+	Model      string           `json:"model,omitempty"`
+	Role       string           `json:"role,omitempty"`
+	Retryable  bool             `json:"retryable,omitempty"`
+	NodeResult bool             `json:"node_result,omitempty"`
+	StageMS    map[string]int64 `json:"stage_ms,omitempty"`
 }
 
 type hubSpawnTask struct {
@@ -162,7 +163,7 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 		if err = tx.QueryRowContext(ctx, s.q(`SELECT node_id FROM spawn_operations WHERE request_id=? AND attempt=?`), task.Request.RequestID, task.Attempt).Scan(&node); err != nil {
 			return false, err
 		}
-		outcome.Retryable = !node.Valid
+		outcome.Retryable = !node.Valid || outcome.NodeResult && outcome.Retryable
 	}
 	status := spawnOutcomeStatus(outcome)
 	if status == "deadline_exceeded" || status == "reconciling" {
@@ -172,7 +173,7 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 	if err != nil {
 		return false, err
 	}
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','dispatching','reconciling','deadline_exceeded') AND status<>? AND NOT (status='deadline_exceeded' AND ?='reconciling') AND NOT (?='timeout' AND ?='retryable' AND node_id IS NOT NULL)`), status, string(raw), task.Request.RequestID, task.Attempt, status, status, outcome.Reason, status)
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','dispatching','reconciling','deadline_exceeded') AND status<>? AND NOT (status='deadline_exceeded' AND ?='reconciling') AND (node_id IS NULL OR ?<>'timeout' OR ?<>'retryable' OR ?)`), status, string(raw), task.Request.RequestID, task.Attempt, status, status, outcome.Reason, status, outcome.NodeResult)
 	if err != nil {
 		return false, err
 	}

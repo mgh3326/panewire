@@ -119,6 +119,12 @@ func (client *HubClient) spawnStartupError() error {
 	if errors.As(err, &configErr) && configErr.Rule == "config_json_invalid" && strings.Contains(configErr.Detail, `unknown field "runtug_path"`) {
 		return errors.New("node startup refused: remove retired runtug_path from spawn.json before starting this in-process node; preserve cwd_map, workspace, herdr_session and work_root")
 	}
+	if err == nil {
+		if _, err := client.acquireSpawnJournal(); err != nil {
+			return fmt.Errorf("node startup refused: spawn journal unavailable: %w; configure a private writable node state directory and preserve existing journal records", err)
+		}
+		client.releaseSpawnJournal()
+	}
 	return nil
 }
 
@@ -555,7 +561,25 @@ func (client *HubClient) acquireSpawnJournal() (*nodeSpawnJournal, error) {
 	client.spawnJournalMu.Lock()
 	defer client.spawnJournalMu.Unlock()
 	if client.spawnJournal == nil {
-		journal, err := openNodeSpawnJournal(filepath.Dir(client.spawnConfigPath))
+		root := client.spawnJournalDir
+		if root == "" {
+			state := panewireStateDir()
+			if state == "" {
+				return nil, errors.New("configure an absolute writable XDG_STATE_HOME for the spawn journal")
+			}
+			root = filepath.Join(state, "spawn")
+		}
+		if client.spawnConfigPath != "" {
+			legacy := filepath.Join(filepath.Dir(client.spawnConfigPath), "spawn-inbox.sqlite3")
+			if legacy != filepath.Join(root, "spawn-inbox.sqlite3") {
+				if _, err := os.Lstat(legacy); err == nil {
+					return nil, errors.New("legacy journal exists beside spawn.json; stop the node and migrate it with SQLite backup to the node state spawn directory before restarting")
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return nil, err
+				}
+			}
+		}
+		journal, err := openNodeSpawnJournal(root)
 		if err != nil {
 			return nil, err
 		}

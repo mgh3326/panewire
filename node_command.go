@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // Node commands (docs/node-commands.md) are operator-authenticated hub→node
@@ -38,7 +40,7 @@ const (
 	nodeCommandMaxPathBytes   = 4096
 	// nodePaneCloseSettle separates the two re-reads pane.close requires
 	// before it closes; see nodePaneClose.
-	nodePaneCloseSettle = 2 * time.Second
+	nodePaneCloseSettle = fleet.FailedSpawnCloseSettle
 )
 
 // Closed outcome vocabularies. pane.close mirrors mergewake reap's reclose
