@@ -99,17 +99,19 @@ jobs:
     # dispatches, a partial suite must not mint an exact 'ci-ok' check run.
     name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}
     runs-on: ubuntu-latest
-    needs: [test, postgres]
+    needs: [test, postgres, auto-tag-test]
     if: always()
     steps:
       - name: Check required jobs
         env:
+          AUTO_TAG_RESULT: ${{ needs.auto-tag-test.result }}
           TEST_RESULT: ${{ needs.test.result }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
           SUITE: ${{ inputs.suite || 'all' }}
         # A job the suite selects must succeed. A job it does not select
         # reports skipped, which passes (ci_workflow_test.go).
         run: |
+          [ "$AUTO_TAG_RESULT" = success ] || { echo "auto-tag regression failed"; exit 1; }
           require() {
             selected=$1 name=$2 result=$3
             if [ "$selected" = yes ] && [ "$result" != success ]; then
@@ -127,3 +129,12 @@ jobs:
           case "$SUITE" in all|postgres) postgres=yes ;; *) postgres=no ;; esac
           require "$test" test "$TEST_RESULT"
           require "$postgres" postgres "$POSTGRES_RESULT"
+
+  auto-tag-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - run: python3 scripts/test-auto-tag.py
+      - run: python3 scripts/test-repair-release.py
