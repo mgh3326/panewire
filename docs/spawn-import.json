@@ -1,5 +1,9 @@
 {
   "files": {
+    "docs/catalog/omp-credit-seed.json": {
+      "import_sha256": "e1ce3cbe21a995b6873df9883e958673554d771660eec56fa454c8ae8674a835",
+      "source_sha256": "e1ce3cbe21a995b6873df9883e958673554d771660eec56fa454c8ae8674a835"
+    },
     "internal/arbiter/arbiter_test.go": {
       "import_sha256": "dac4c88221906c1b4802283d000f9b7a627cf5ee10e67d8fc668d4f3d2bffada",
       "source_sha256": "dac4c88221906c1b4802283d000f9b7a627cf5ee10e67d8fc668d4f3d2bffada"

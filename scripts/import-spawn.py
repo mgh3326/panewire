@@ -24,6 +24,7 @@ def main():
     names = subprocess.check_output(
         ["git", "-C", str(args.source), "ls-tree", "-r", "--name-only", SOURCE, "internal"], text=True
     ).splitlines()
+    names.append("docs/catalog/omp-credit-seed.json")
     if not names:
         raise SystemExit("pinned source has no internal packages")
     manifest = {"source_revision": SOURCE, "files": {}}

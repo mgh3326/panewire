@@ -347,13 +347,6 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if s.Workspace == "" {
 		return fail(exitConfig, "WORKSPACE_UNCONFIGURED: set local.workspace on the executing host or pass -w WORKSPACE_ID")
 	}
-	if !s.DryRun {
-		var resolveErr error
-		s.Workspace, resolveErr = a.resolveWorkspace(ctx, s.Workspace)
-		if resolveErr != nil {
-			return resolveErr
-		}
-	}
 	payload, e := a.prepareBrief(s, string(brief))
 	if e != nil {
 		return e
@@ -433,6 +426,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	granted, e := admissionGate(seat.gateName(), s.AccountKey, launch.Pool, gate)
 	if e != nil {
 		return ledgerFail(e, "lease")
+	}
+	if !s.DryRun {
+		var resolveErr error
+		s.Workspace, resolveErr = a.resolveWorkspace(ctx, s.Workspace)
+		if resolveErr != nil {
+			return resolveErr
+		}
 	}
 	if s.AccountKey == "" {
 		key, _ := a.remoteAccount(ctx, firstNonempty(launch.Pool, gatePool(gate)), a.machine(), a.Config.Local)
