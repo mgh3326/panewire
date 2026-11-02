@@ -419,8 +419,8 @@ Automatic model selection (`spawn` with `-m` omitted or `-m auto`) reads the
 live bench catalog and pool status from the quota CLI, then orders candidates
 under the versioned pool-order policy (`[local].pool_policy` or
 `PANEWIRE_POOL_POLICY`, else the embedded copy): paid pools at waste risk
-first (see below), then free pool/model sets, then WASTE subscription pools,
-then ranked subscription pools, then credit pools. API credit is spent only
+first (see below), then other WASTE subscription pools, then free pool/model
+sets, then ranked subscription pools, then credit pools. API credit is spent only
 after eligible subscription capacity. Inside a tier the lowest catalog grade that satisfies the task wins,
 then the pool with the higher waste urgency — the unused projected share
 (100 − projected) per hour until its longest account window's reset (7d,
@@ -433,9 +433,9 @@ then the smaller effort, then the catalog score.
 The pool-order policy is version `2`. A version `1` file supplied through
 `[local].pool_policy`, `PANEWIRE_POOL_POLICY`, or `simulate --policy` is refused
 with exit 70 and a migration error. To migrate, copy
-`internal/panewire/pool-order.json`, retain any custom thresholds and free
+`internal/fleet/pool-order.json`, retain any custom thresholds and free
 model sets, and set `version` to `2`. The order is
-`["free", "waste", "ranked", "credit"]`, and `credit_pools` includes both
+`["waste", "free", "ranked", "credit"]`, and `credit_pools` includes both
 `anthropic-api` and `openai-api`. Version 2 requires credit last, after ranked.
 This version changes credit admission as well as the tier order: credit no
 longer requires a balance observation, but its pool class must remain readable.
@@ -1119,7 +1119,7 @@ placement error, because a failed spawn writes no placement record.
 | `alert_lane` | legacy | Existing value is retained; panewire returns explicit confirmation failure instead of sending uploader alerts. |
 
 Artifact policy is the embedded
-[artifact-policy.json](../internal/panewire/artifact-policy.json), or `sweep --policy`.
+[artifact-policy.json](../internal/fleet/artifact-policy.json), or `sweep --policy`.
 Its compatible schema names relative work roots and ordered classification rows
 (`class`, `root`, `glob`, optional `host`, `job`, `keep_newest`, `mirror_required`).
 Only evidence/final-build classes are sweep candidates; all other classes and

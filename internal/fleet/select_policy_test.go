@@ -48,13 +48,16 @@ func paceStatus(now time.Time, pools map[string]pace) string {
 
 // TestSelectionPolicyScenarios is the operator selection policy as a table:
 // a paid pool at waste risk (>= 20% projected unused at its reset) first, by
-// waste urgency; otherwise free first, then subscription quota that would be
-// wasted by reset, then ranked, then credit; never a pool projected to run
+// waste urgency; otherwise projected waste, then free, then ranked, then credit; never a pool projected to run
 // out; the lowest grade that fits the task, then the lower projection, then
 // the smaller effort.
 // Seats come from policy.json and the pool order and projection thresholds
 // from the shipped pool-order policy.
 func TestSelectionPolicyScenarios(t *testing.T) {
+	embedded, err := LoadPoolPolicy("")
+	if err != nil || strings.Join(embedded.Order, ",") != "waste,free,ranked,credit" {
+		t.Fatalf("embedded operator order=%v err=%v", embedded.Order, err)
+	}
 	// Credit has no automated balance reader and remains eligible after all
 	// subscription candidates are exhausted.
 	roomy := map[string]pace{"devin": {10, 0.5}, "claude": {15, 0.5}, "codex": {20, 0.5}}
@@ -81,10 +84,10 @@ func TestSelectionPolicyScenarios(t *testing.T) {
 		wantPool  string
 		wantTier  string
 	}{
-		{"B task, SWE-2 free has room, paid pools not at waste risk → SWE-2", "B", "T2", "3", tight,
-			"devin-swe2-medium@medium", "devin", "free"},
-		{"urgent B task, SWE-2 free has room, paid pools not at waste risk → still SWE-2", "B", "T2", "1", tight,
-			"devin-swe2-medium@medium", "devin", "free"},
+		{"B task, projected waste precedes free even below risk override", "B", "T2", "3", tight,
+			"sonnet@medium", "claude", "waste"},
+		{"urgent B task, projected waste precedes free", "B", "T2", "1", tight,
+			"sonnet@medium", "claude", "waste"},
 		{"B task, SWE-2 free has room, claude 70% / codex 60% unused at reset → claude (waste risk before free, higher urgency)", "B", "T2", "3", roomy,
 			"sonnet@medium", "claude", "waste"},
 		{"B task, SWE-2 exhausted, claude 16% / codex 42% projected → claude B fit, not S+", "B", "T2", "3",

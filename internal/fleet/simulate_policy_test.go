@@ -48,7 +48,7 @@ func TestSimulatePolicyOverridesChangeChoice(t *testing.T) {
 		t.Fatalf("the record names the policy file: %v", rec["policy_file"])
 	}
 	for _, set := range []string{"waste_risk.min_unused_pct=80", "waste_risk.horizon_hours=4"} {
-		rec, _, err = runSimulate(t, "--selection", riskFixturePath(), "--policy-set", set)
+		rec, _, err = runSimulate(t, "--selection", riskFixturePath(), "--policy", path, "--policy-set", set)
 		if err != nil {
 			t.Fatal(err)
 		}

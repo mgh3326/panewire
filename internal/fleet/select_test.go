@@ -102,7 +102,7 @@ func TestSelectGradeFilterPrefersCheapestCovering(t *testing.T) {
 	}
 }
 
-func TestSelectPolicyOrderFreeWasteRankedCredit(t *testing.T) {
+func TestSelectPolicyOrderWasteFreeRankedCredit(t *testing.T) {
 	waste, noWaste := true, false
 	mk := func() []CatalogRow {
 		return []CatalogRow{
@@ -126,7 +126,7 @@ func TestSelectPolicyOrderFreeWasteRankedCredit(t *testing.T) {
 		present []string
 		want    string
 	}{
-		{"free beats waste", mk(), pools, []string{"devin", "claude", "anthropic-api", "codex"}, "devin-swe2"},
+		{"waste beats free", mk(), pools, []string{"devin", "claude", "anthropic-api", "codex"}, "sonnet"},
 		{"waste beats credit and ranked", mk()[1:], pools, []string{"claude", "anthropic-api", "codex"}, "sonnet"},
 		{"ranked beats credit", mk()[2:], pools, []string{"anthropic-api", "codex"}, "codex-sol"},
 		{"ranked by blocking", mk()[3:], pools, []string{"codex"}, "codex-sol"},
