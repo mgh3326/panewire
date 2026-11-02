@@ -1396,7 +1396,14 @@ start time, and last event kind. The command accepts `--hub-url`,
 
 A node token may read only a lane registered on its own machine; jobs owned by
 that lane can have run on other machines. Requests for other lanes receive 403,
-and node requests without `owner_lane` receive 401. An operator can list all
+and node requests without `owner_lane` receive 401. The hub trusts reporting
+nodes to attribute jobs to lanes: an active heartbeat or a late terminal event
+can name a lane registered on another machine, and the hub does not verify that
+the job belongs to that lane. A compromised node can therefore insert misleading
+entries into another lane’s listing. Authoritative job-to-lane proof is tracked
+in hk task 2720.
+
+An operator can list all
 active jobs as before with `panewire jobs jobs`; add `--include-completed` to
 include retained completed records. The hub does not track a separate reaped
 state, so a retained completed record can still appear after reap.
