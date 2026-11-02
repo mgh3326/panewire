@@ -264,3 +264,50 @@ func TestHoldKindsCoalesce(t *testing.T) {
 func TestHoldTwentyFiveItemsHandoffFailureKeepsEveryItem(t *testing.T) {
 	testHoldHandoff(t, "", 25, false)
 }
+
+// A held batch that cannot be prepared (too large for a direct relay and no
+// document stored) must block only its own lane; other lanes still flush.
+func TestHoldPrepareFailureBlocksOnlyItsLane(t *testing.T) {
+	_, _, now, _, _ := holdHub(t, "", false)
+	policy := filepath.Join(t.TempDir(), "policy.yaml")
+	raw := "default: interrupt\nlanes:\n  lane-a:\n    hold_while_working:\n      max_hold: 10m\n      handoff_bytes: 100\n  lane-b:\n    hold_while_working:\n      max_hold: 10m\n"
+	if err := os.WriteFile(policy, []byte(raw), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeHandoffkeep{nextID: 100, status: 201, rows: map[string]*handoffkeepRelayEvent{}}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/documents/inbox/") {
+			w.WriteHeader(503)
+			return
+		}
+		fake.ServeHTTP(w, r)
+	}))
+	t.Cleanup(server.Close)
+	hk, err := newHandoffkeepRelayClient(hubHandoffkeepEnv{URL: server.URL, Token: "fixture-token"}, server.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, a := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), policy, hk, now)
+	for i := 0; i < 30; i++ {
+		holdNotice(t, h, a, fmt.Sprint("a", i), "ready", fmt.Sprintf("READY big %d %s", i, strings.Repeat("body", 250)))
+	}
+	b := quietEvent("b0", "READY small lane-b notice")
+	b.OwnerLane, b.JobID, b.NotifyType = "lane-b", laneEventTransportID("lane-b", "b0"), "ready"
+	if r := h.relayLaneEvent(b, a); r.ID == 0 || r.PersistFailed {
+		t.Fatalf("accept lane-b: %+v", r)
+	}
+	if len(a.relays) != 0 {
+		t.Fatal("injected while working")
+	}
+	holdIdle(h, *now)
+	h.nodes["host-b"].sessionSnapshot.sessions[0].Status = "idle"
+	h.nodes["host-b"].sessionSnapshot.receivedAt = *now
+	h.flushInbox()
+	d := holdReceive(t, a)
+	if !strings.Contains(d.Text, "lane-b notice") {
+		t.Fatalf("lane-b batch not delivered past lane-a failure: %q", d.Text)
+	}
+	if len(a.relays) != 0 {
+		t.Fatal("lane-a batch must stay retained while its document write fails")
+	}
+}

@@ -345,18 +345,26 @@ func (h *HubServer) flushInbox() {
 		failed = true
 		return
 	}
+	// A held batch that cannot be prepared (no document store, or the PUT keeps
+	// failing) stays retained and blocks only its own lane; other lanes flush.
+	blockedLanes := map[string]bool{}
 	for _, b := range batches {
 		if h.closeCtx.Err() != nil {
 			return
 		}
+		if blockedLanes[b.Lane] {
+			continue
+		}
 		held := strings.HasPrefix(b.ID, "held-")
 		if held {
+			lane := b.Lane
 			var err error
 			b, err = h.prepareHeldBatch(b)
 			if err != nil {
-				h.logger.Error("held inbox preparation failed; batch retained")
+				h.logger.Error("held inbox preparation failed; batch retained", "lane", lane)
 				failed = true
-				return
+				blockedLanes[lane] = true
+				continue
 			}
 		}
 		if held && b.Text == "" {
