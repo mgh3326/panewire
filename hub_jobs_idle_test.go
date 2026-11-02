@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// Every way runtug ends a job must take it off the active list. The mergewake
+// Every way panewire ends a job must take it off the active list. The mergewake
 // review runs that inflated mac-dev's count wrote claim then quota release,
 // with no spawn and no completion; a lost or reaped job has no pane left.
 func TestActiveJobScanEndsOnEveryRuntugTerminalEvent(t *testing.T) {

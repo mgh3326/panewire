@@ -71,7 +71,7 @@ func t14NodeWithSpawnV2(t *testing.T, hub *HubServer, server *httptest.Server, a
 	t.Cleanup(func() { _ = connection.CloseNow() })
 	hello := map[string]any{"type": "hello", "machine_id": "machine-a", "version": "t14", "accepting": accepting}
 	if spawnV2 {
-		hello["capabilities"] = []string{"spawn_v2"}
+		hello["capabilities"] = []string{"spawn_v2", "spawn_ops_v1"}
 	}
 	if err := wsjson.Write(t.Context(), connection, hello); err != nil {
 		t.Fatal(err)
@@ -798,8 +798,8 @@ func TestT14NodeAC12SerialAndIdempotent(t *testing.T) {
 			return
 		}
 		defer connection.CloseNow()
-		collected := make([]map[string]any, 0, 2)
-		for received := 0; received < 2; {
+		collected := make([]map[string]any, 0, 3)
+		for received := 0; received < 3; {
 			var message map[string]any
 			if wsjson.Read(t.Context(), connection, &message) != nil {
 				return
@@ -847,7 +847,7 @@ func TestT14NodeAC12SerialAndIdempotent(t *testing.T) {
 	select {
 	case got = <-results:
 	case <-time.After(3 * time.Second):
-		t.Fatal("node did not return two spawn results")
+		t.Fatal("node did not acknowledge all duplicate and unique requests")
 	}
 	cancel()
 	select {
@@ -855,7 +855,16 @@ func TestT14NodeAC12SerialAndIdempotent(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("node client did not stop")
 	}
-	if len(got) != 2 || got[0]["request_id"] == got[1]["request_id"] {
+	counts := map[string]int{}
+	completed := map[string]bool{}
+	for _, result := range got {
+		id, _ := result["request_id"].(string)
+		counts[id]++
+		if result["rc"] == float64(0) {
+			completed[id] = true
+		}
+	}
+	if len(got) != 3 || counts[t14RequestID(40)] != 2 || counts[t14RequestID(41)] != 1 || !completed[t14RequestID(40)] || !completed[t14RequestID(41)] {
 		t.Fatalf("results=%v", got)
 	}
 	if entries := strings.Fields(string(t14WaitFile(t, ledger))); strings.Join(entries, ",") != "begin,end,begin,end" {

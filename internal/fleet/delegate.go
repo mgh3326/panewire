@@ -349,7 +349,7 @@ func (a *App) delegatePane(ctx context.Context, s Spawn, timeout time.Duration) 
 	}
 	spawn := a.spawnFn
 	if spawn == nil {
-		spawn = func(ctx context.Context, a *App, s Spawn) error { return a.Spawn(ctx, s) }
+		spawn = func(ctx context.Context, a *App, s Spawn) error { return a.SubmitSpawn(ctx, s) }
 	}
 	out := a.Out
 	var chatter bytes.Buffer

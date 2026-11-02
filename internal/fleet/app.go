@@ -33,18 +33,20 @@ type App struct {
 	HerdrSession string // frozen for the lifetime of a spawn
 	// Arbiter is the local job ledger (leases, job events, gc). Nil means the
 	// one under Home and Jobs; tests inject a store over a temp dir.
-	Arbiter   *arbiter.Store
-	warned    map[string]bool
-	Source    PlacementSource
-	Wake      Waker
-	LoadRatio func(context.Context) (float64, error)
-	JobStore  JobStore
+	Arbiter        *arbiter.Store
+	warned         map[string]bool
+	PlacementHosts func(context.Context, string) ([]HostView, error)
+	Source         PlacementSource
+	Wake           Waker
+	LoadRatio      func(context.Context) (float64, error)
+	JobStore       JobStore
 	// Hub carries via="hub" spawns and quota refreshes; nil builds the HTTP
 	// client from [hub] on first use.
 	Hub              HubTransport
 	Repository       *Repository
 	ObserveStage     func(string, time.Duration)
 	ObserveRetryable func(bool)
+	ObserveReceipt   func(ExecutionReceipt)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
 	State    FleetStateReader

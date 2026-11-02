@@ -197,6 +197,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}
 	s.placement = &placementDecision{}
+	defer func() {
+		if a.ObserveReceipt != nil {
+			x := s.placement.execution
+			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role)})
+		}
+	}()
+
 	defer func() { a.finishPlacement(ctx, s, err) }()
 	defer func() { a.spawnEvents(s, err) }()
 	if s.Grade != "" && (topRoutingRole(builtinRoleMap[s.Role]) || topRoutingRole(s.RoutingRole)) {
@@ -500,7 +507,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 				a.ObserveRetryable(retrySafe)
 			}
 			if !retrySafe {
-				a.abandonJobRecord(context.WithoutCancel(ctx), s.Job)
+				a.markSpawnUncertain(context.WithoutCancel(ctx), s.Job)
 			}
 		}
 	}()
@@ -548,7 +555,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			defer cancel()
 			if pane != "" {
 				a.captureFailure(cleanup, s.Job, pane)
-				if closeErr := a.must(cleanup, "herdr", "pane", "close", pane); closeErr != nil {
+				if closeErr := a.closeFailedSpawn(cleanup, s, pane, seat.Kind); closeErr != nil {
 					retrySafe = false
 					a.warn("pane cleanup failed; inspect with panewire find %s before retry: %v", s.Label, closeErr)
 				}
@@ -612,6 +619,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	root, _ := created["root_pane"].(map[string]any)
 	pane = str(root, "pane_id")
 	s.placement.execution.PaneID = pane
+	s.placement.execution.Kind = seat.Kind
 	tab := str(created, "tab_id")
 	if pane == "" {
 		return fail(exitConfig, "tab create omitted pane_id")

@@ -58,7 +58,7 @@ The `svc-mergewake` line for hub reap (operator decision D1: every machine):
 HUB_SCOPES_svc-mergewake=nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*,node.command:worktree.remove@*,node.command:pane.read@*,node.command:job.done@*
 ```
 
-An initiating runtug service needs `spawn@<machine>` for one destination, or
+An initiating panewire service needs `spawn@<machine>` for one destination, or
 `spawn@*` for every destination. The same grant authorizes POST and GET for
 spawn requests, including the `worktree.prepare` preflight requested by the
 optional `checkout` field. Requests with `checkout` or `brief.doc` require the
@@ -68,7 +68,7 @@ to their configured `brief_doc_prefix` (default `briefs/`). Direct calls to the 
 need their own `node.command:<op>@<machine>` grant. For example:
 
 ```sh
-HUB_SCOPES_svc-runtug=spawn@*
+HUB_SCOPES_svc-panewire=spawn@*
 ```
 
 Operator authorization is unchanged. A service without a matching spawn grant
@@ -109,3 +109,6 @@ argument it mints a node credential.
 
 Two-slot rotation, a client listing endpoint and hashed-at-rest tokens are
 deferred.
+
+
+Normal `spawn`, `work` and `lead` submissions use the operator-only `POST /v1/spawns` durable operation API. A per-host low-level `spawn@machine` grant does not authorize automatic placement across hosts. The older `/v1/spawn` interface is a synchronous destination-pinned RPC surface; its in-memory waiters do not own accepted operations. See [durable spawn operations](hub-spawn-operations.md).

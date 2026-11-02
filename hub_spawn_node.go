@@ -113,48 +113,65 @@ func loadHubSpawnConfig(path string) (hubSpawnConfig, error) {
 	return config, nil
 }
 
-func (client *HubClient) rememberHubSpawn(requestID string) bool {
-	client.spawnSeenMu.Lock()
-	defer client.spawnSeenMu.Unlock()
-	if client.spawnSeen == nil {
-		client.spawnSeen = make(map[string]struct{})
-	}
-	if _, seen := client.spawnSeen[requestID]; seen {
-		return false
-	}
-	client.spawnSeen[requestID] = struct{}{}
-	return true
-}
-
 func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
-	if !client.rememberHubSpawn(message.RequestID) {
+	journal, err := client.acquireSpawnJournal()
+	if err != nil {
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_unavailable"})
 		return
 	}
-	executionContext, cancel := context.WithTimeout(ctx, time.Duration(message.WaitSeconds)*time.Second+client.spawnTimeoutExtra)
+	defer client.releaseSpawnJournal()
+	claimed, cached, err := journal.claim(ctx, message)
+	if err != nil {
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"})
+		return
+	}
+	if cached != nil {
+		client.sendSpawnResult(ctx, peer, *cached)
+		return
+	}
+	if !claimed {
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "reconciling"})
+		return
+	}
+	deadline := time.Now().Add(time.Duration(message.WaitSeconds)*time.Second + client.spawnTimeoutExtra)
+	if message.DeadlineMS != 0 && time.UnixMilli(message.DeadlineMS).Before(deadline) {
+		deadline = time.UnixMilli(message.DeadlineMS)
+	}
+	executionContext, cancel := context.WithDeadline(ctx, deadline)
 	defer cancel()
 	client.spawnMu.Lock()
-	defer client.spawnMu.Unlock()
-
-	result := client.runHubSpawn(executionContext, message)
+	result := client.runClaimedHubSpawn(executionContext, message)
+	client.spawnMu.Unlock()
+	// Disconnect is not cancellation of this daemon-owned execution. Its result
+	// remains available to the next authenticated replay even if this socket died.
+	persistCtx, persistCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer persistCancel()
+	if journal.complete(persistCtx, result) != nil {
+		return
+	}
+	client.sendSpawnResult(ctx, peer, result)
+}
+func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult) {
 	_ = peer.write(ctx, struct {
-		Type       string           `json:"type"`
-		RequestID  string           `json:"request_id"`
-		RC         int              `json:"rc"`
-		JobID      string           `json:"job_id"`
-		Pane       string           `json:"pane"`
-		StdoutTail string           `json:"stdout_tail"`
-		Error      string           `json:"error,omitempty"`
-		StageMS    map[string]int64 `json:"stage_ms,omitempty"`
-		Stage      string           `json:"stage,omitempty"`
-		Retryable  bool             `json:"retryable,omitempty"`
-	}{Type: "job.spawn.result", RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error, StageMS: result.StageMS, Stage: result.Stage, Retryable: result.Retryable})
+		Receipt    *fleet.ExecutionReceipt `json:"receipt,omitempty"`
+		Type       string                  `json:"type"`
+		RequestID  string                  `json:"request_id"`
+		RC         int                     `json:"rc"`
+		JobID      string                  `json:"job_id"`
+		Pane       string                  `json:"pane"`
+		StdoutTail string                  `json:"stdout_tail"`
+		Error      string                  `json:"error,omitempty"`
+		StageMS    map[string]int64        `json:"stage_ms,omitempty"`
+		Stage      string                  `json:"stage,omitempty"`
+		Retryable  bool                    `json:"retryable,omitempty"`
+	}{result.Receipt, "job.spawn.result", result.RequestID, result.RC, result.JobID, result.Pane, result.StdoutTail, result.Error, result.StageMS, result.Stage, result.Retryable})
 }
 
 func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) (result hubSpawnResult) {
 	// reason and detail refine result.Error in the node_spawn fleet event.
 	var reason, detail string
 	defer func() { client.recordHubSpawnOutcome(message, result, reason, detail) }()
-	result = hubSpawnResult{RequestID: message.RequestID}
+	result = hubSpawnResult{RequestID: message.RequestID, Retryable: true}
 	if parent.Err() != nil {
 		result.RC = 124
 		result.Error = "timeout"
@@ -177,7 +194,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.RC, result.Error = 2, "cwd_unmapped"
 		return result
 	}
-	// The document key is validated before any checkout or runtug lookup: a
+	// The document key is validated before any checkout or engine execution: a
 	// key outside the node's prefix is refused whatever else is configured.
 	if message.BriefDoc != "" {
 		prefix := config.BriefDocPrefix
@@ -267,8 +284,15 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		engine = runHubSpawnEngine
 	}
 	output, execution := engine(runContext, cwd, temporaryName, config.Workspace, config.HERDRSession, message.Args)
+	result.Receipt = &execution.Receipt
 	result.StdoutTail = output.tailString()
 	result.Pane, result.JobID = output.pane, output.jobID
+	if execution.Receipt.Pane != "" {
+		result.Pane = execution.Receipt.Pane
+	}
+	if execution.Receipt.Job != "" {
+		result.JobID = execution.Receipt.Job
+	}
 	result.RC, result.Stage, result.StageMS, result.Retryable = execution.RC, execution.Stage, execution.StageMS, execution.Retryable
 	if runContext.Err() != nil {
 		result.RC = 124
@@ -279,7 +303,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	if result.RC == 0 {
 		return result
 	}
-	// runtug explains a refusal on stderr; without it the caller only sees
+	// panewire explains a refusal on stderr; without it the caller only sees
 	// an empty "remote spawn:" message.
 	if stderr := strings.TrimSpace(fleetEventRedact(output.stderr.String())); stderr != "" {
 		result.StdoutTail = hubSpawnTailWithStderr(result.StdoutTail, stderr)
@@ -288,10 +312,10 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	return result
 }
 
-// hubSpawnStderrTail bounds the runtug stderr kept in a spawn result.
+// hubSpawnStderrTail bounds the panewire stderr kept in a spawn result.
 const hubSpawnStderrTail = 1536
 
-// hubSpawnTailWithStderr appends runtug's stderr tail to the stdout tail,
+// hubSpawnTailWithStderr appends panewire's stderr tail to the stdout tail,
 // keeping the whole within hubSpawnResultTail (the hub's wire bound) by
 // dropping the oldest stdout first.
 func hubSpawnTailWithStderr(stdout, stderr string) string {
@@ -384,7 +408,7 @@ func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key st
 }
 
 type hubSpawnOutput struct {
-	// stderr keeps runtug's last stderr bytes for a failed spawn's result.
+	// stderr keeps panewire's last stderr bytes for a failed spawn's result.
 	stderr hubSpawnStderr
 	tail   []byte
 	line   []byte
@@ -442,7 +466,7 @@ func (output *hubSpawnOutput) parseLine() {
 	output.pane, output.jobID = pane, jobID
 }
 
-// parseHubSpawnOK follows runtug's stable OK line rather than guessing from a
+// parseHubSpawnOK follows panewire's stable OK line rather than guessing from a
 // human-facing transcript. Missing keys remain empty by contract.
 func parseHubSpawnOK(raw []byte) (pane, jobID string) {
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -494,4 +518,34 @@ func runHubSpawnEngine(ctx context.Context, cwd, brief, workspace, session strin
 	output := &hubSpawnOutput{}
 	result := fleet.ExecuteNode(ctx, cwd, brief, workspace, session, args, output, &output.stderr)
 	return output, result
+}
+
+func (client *HubClient) acquireSpawnJournal() (*nodeSpawnJournal, error) {
+	client.spawnJournalMu.Lock()
+	defer client.spawnJournalMu.Unlock()
+	if client.spawnJournal == nil {
+		journal, err := openNodeSpawnJournal(filepath.Dir(client.spawnConfigPath))
+		if err != nil {
+			return nil, err
+		}
+		client.spawnJournal = journal
+	}
+	client.spawnJournalUsers++
+	return client.spawnJournal, nil
+}
+func (client *HubClient) releaseSpawnJournal() {
+	client.spawnJournalMu.Lock()
+	defer client.spawnJournalMu.Unlock()
+	client.spawnJournalUsers--
+	if client.spawnJournalUsers == 0 {
+		client.spawnJournal.db.Close()
+		client.spawnJournal = nil
+	}
+}
+
+func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutboundMessage) hubSpawnResult {
+	if message.DeadlineMS != 0 && time.Now().UnixMilli() >= message.DeadlineMS {
+		return hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnArg(message.Args, "--job"), RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
+	}
+	return client.runHubSpawn(ctx, message)
 }

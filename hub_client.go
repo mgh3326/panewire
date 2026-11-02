@@ -157,22 +157,23 @@ type HubClient struct {
 	panesAliveMu     sync.Mutex
 	// paneIdleSince is the first heartbeat at which each pane was idle or
 	// done (hub_jobs_idle.go).
-	paneIdleSince   map[string]time.Time
-	paneIdleMu      sync.Mutex
-	sessionMu       sync.Mutex
-	spawnConfigPath string
-	spawnMu         sync.Mutex
-	spawnEngine     hubSpawnEngine
-	spawnPrepare    func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
-	spawnSeenMu     sync.Mutex
+	paneIdleSince     map[string]time.Time
+	paneIdleMu        sync.Mutex
+	sessionMu         sync.Mutex
+	spawnConfigPath   string
+	spawnMu           sync.Mutex
+	spawnEngine       hubSpawnEngine
+	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
+	spawnJournalMu    sync.Mutex
+	spawnJournal      *nodeSpawnJournal
+	spawnJournalUsers int
 	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
 	statePublish       bool
 	stateQuotaPools    []string
 	stateQuotaInterval time.Duration
 	fleetStateMu       sync.Mutex
 	fleetQuotaResync   bool
-	spawnSeen          map[string]struct{}
-	spawnTimeoutExtra  time.Duration // fixture seam; production is 60 seconds.
+	spawnTimeoutExtra  time.Duration // fixture seam; production uses the absolute deadline.
 	nodeCommandMu      sync.Mutex
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
@@ -309,7 +310,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		config.helloAckTimeout = defaultHubHelloAckTimeout
 	}
 	return &HubClient{
-		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnSeen: make(map[string]struct{}), spawnTimeoutExtra: 0,
+		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnTimeoutExtra: 0,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, helloAckTimeout: config.helloAckTimeout, burstSeen: make(map[string]time.Time),
 		wakeTargets: wakeTargets, wakeSeen: make(map[string]time.Time),
@@ -555,6 +556,7 @@ type hubOutboundMessage struct {
 	BriefDoc        string
 	Checkout        *hubSpawnCheckout
 	Args            []string
+	DeadlineMS      int64
 	WaitSeconds     int
 	CommandOp       string
 	CommandArgs     json.RawMessage
@@ -1470,7 +1472,7 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 const defaultHubHelloAckTimeout = 5 * time.Second
 
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
-var hubSpawnCapabilities = []string{"spawn_v2"}
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1"}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {
@@ -2459,11 +2461,11 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		var brief hubSpawnBrief
 		var briefFields map[string]json.RawMessage
 		for name := range fields {
-			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" {
+			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_ms" {
 				return hubOutboundMessage{}, false
 			}
 		}
-		if (len(fields) != 6 && len(fields) != 7) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
+		if (len(fields) < 6 || len(fields) > 8) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
 			return hubOutboundMessage{}, false
 		}
 		if raw, ok := briefFields["inline"]; ok {
@@ -2483,6 +2485,11 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 				return hubOutboundMessage{}, false
 			}
 			message.Checkout = &checkout
+		}
+		if raw, ok := fields["deadline_ms"]; ok {
+			if json.Unmarshal(raw, &message.DeadlineMS) != nil || message.DeadlineMS <= 0 {
+				return hubOutboundMessage{}, false
+			}
 		}
 		message.BriefInline = brief.Inline
 		message.BriefDoc = brief.Doc

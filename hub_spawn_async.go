@@ -1,0 +1,628 @@
+package panewire
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
+)
+
+func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
+	if h.spawnNewApp != nil {
+		return h.spawnNewApp(out, errout)
+	}
+	return fleet.New(out, errout)
+}
+func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
+	// Placement chooses a resource after acceptance; only the unscoped operator
+	// may grant that authority. Per-host service tokens cannot escape their host.
+	if h.authenticate(r).kind != hubCallerOperator {
+		hubUnauthorized(w)
+		return
+	}
+	var request fleet.Submission
+	if !decodeHubJSON(w, r, hubSpawnMaxBodyBytes, &request) {
+		writeJSON(w, 400, map[string]string{"error": "invalid_request"})
+		return
+	}
+	spawn, err := fleet.ValidateSubmission(request)
+	if err == nil {
+		raw, _ := json.Marshal(request.Repository.Checkout)
+		var spec hubSpawnCheckout
+		if request.Repository.Checkout == nil || json.Unmarshal(raw, &spec) != nil || !validHubSpawnCheckout(spec) || spec.Dir != request.Repository.Worktree || spec.Sha == "" || spec.Origin != request.Repository.Origin {
+			err = errors.New("invalid pinned checkout")
+		}
+	}
+	if err != nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.OriginMachine) {
+		writeJSON(w, 400, map[string]string{"error": "invalid_request", "fix": "rebuild the request with panewire spawn"})
+		return
+	}
+	if h.inbox == nil {
+		writeJSON(w, 503, map[string]string{"error": "durable_store_required", "fix": "configure the hub inbox database before accepting spawns"})
+		return
+	}
+	owner := spawn.Owner
+	if spawn.Role == "builder" {
+		owner = spawn.Parent
+	}
+	if !hubAgentLabelPattern.MatchString(owner) {
+		writeJSON(w, 400, map[string]string{"error": "invalid_owner", "fix": "supply an existing lane name"})
+		return
+	}
+	// A replay does not need placement, quota or hk to be available again.
+	if old, err := h.inbox.store.spawnTask(r.Context(), request.RequestID); err == nil {
+		a, _ := json.Marshal(old.Request)
+		b, _ := json.Marshal(request)
+		if old.Owner != owner || !bytes.Equal(a, b) {
+			writeJSON(w, 409, map[string]string{"error": "idempotency_payload_conflict", "fix": "replay the original request unchanged or use a new job id"})
+			return
+		}
+		if old.Status == "retryable" {
+			old, err = h.inbox.store.resumeCleanedSpawn(r.Context(), old, h.now().UTC())
+			if err != nil {
+				writeJSON(w, 409, map[string]string{"error": "job_already_claimed"})
+				return
+			}
+		}
+		h.acceptSpawnResponse(w, old)
+		select {
+		case h.spawnKick <- struct{}{}:
+		default:
+		}
+		return
+	} else if !errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
+		return
+	}
+	app, err := h.newSpawnApp(io.Discard, io.Discard)
+	if err != nil || app.CheckTrust() != nil {
+		writeJSON(w, 503, map[string]string{"error": "spawn_config_unavailable", "fix": "configure hub fleet policy and trust before retrying this request"})
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+	defer cancel()
+	existing, found, err := app.ExistingJob(ctx, spawn.Job)
+	if err != nil {
+		writeJSON(w, 503, map[string]string{"error": "job_store_unavailable", "fix": "restore handoffkeep access and retry this same request"})
+		return
+	}
+	if found {
+		result, _ := existing["result"].(map[string]any)
+		retryable, _ := result["spawn_retryable"].(bool)
+		if existing["state"] != "claimed" || !retryable {
+			writeJSON(w, 409, map[string]string{"error": "job_already_claimed", "fix": "inspect the existing job; use a new job id for independent work"})
+			return
+		}
+		// HK claims are immutable host/task bindings. Safe retries stay on that host.
+		if host, _ := existing["host"].(string); host != "" && spawn.Host != host {
+			writeJSON(w, 409, map[string]string{"error": "retry_host_required", "fix": "retry with --host " + host + " --override-reason verified-cleanup-retry"})
+			return
+		}
+	}
+	task, _, err := h.inbox.store.claimSpawn(r.Context(), request, spawn.Job, owner, h.now().UTC())
+	if errors.Is(err, errSpawnClaimed) && spawn.ParentJob == "" {
+		priorID, priorJob, priorStatus, readErr := h.inbox.store.spawnRoleOwner(r.Context(), spawn.Task, spawn.Role)
+		if readErr == nil && (priorStatus == "succeeded" || priorStatus == "failed") {
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			record, exists, readErr := app.ExistingJob(ctx, priorJob)
+			cancel()
+			state, _ := record["state"].(string)
+			if readErr == nil && exists && (state == "completed" || state == "lost") {
+				if releaseErr := h.inbox.store.releaseCompletedSpawnRole(r.Context(), priorID, spawn.Task, spawn.Role); releaseErr == nil {
+					task, _, err = h.inbox.store.claimSpawn(r.Context(), request, spawn.Job, owner, h.now().UTC())
+				}
+			}
+		}
+	}
+	if errors.Is(err, errSpawnClaimed) {
+		writeJSON(w, 409, map[string]string{"error": "job_already_claimed", "fix": "inspect the existing operation; do not submit a new request while ownership is live"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, 503, map[string]string{"error": "store_unavailable", "fix": "restore the durable store and retry this same request"})
+		return
+	}
+	h.acceptSpawnResponse(w, task)
+	select {
+	case h.spawnKick <- struct{}{}:
+	default:
+	}
+}
+func (h *HubServer) acceptSpawnResponse(w http.ResponseWriter, task hubSpawnTask) {
+	writeJSON(w, 202, map[string]string{"job_id": task.Job, "request_id": task.Request.RequestID, "status": task.Status, "operation_url": "/v1/spawns/" + task.Request.RequestID, "claim": "durable_hub_reservation"})
+}
+func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request) {
+	if h.authenticate(r).kind != hubCallerOperator {
+		hubUnauthorized(w)
+		return
+	}
+	if h.inbox == nil {
+		writeJSON(w, 503, map[string]string{"error": "durable_store_required"})
+		return
+	}
+	task, err := h.inbox.store.spawnTask(r.Context(), r.PathValue("request_id"))
+	if errors.Is(err, sql.ErrNoRows) {
+		writeJSON(w, 404, map[string]string{"error": "not_found"})
+		return
+	}
+	if err != nil {
+		writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
+		return
+	}
+	// Never expose the persisted brief, argv or local paths through status reads.
+	writeJSON(w, 200, struct {
+		Job     string          `json:"job_id"`
+		Request string          `json:"request_id"`
+		Status  string          `json:"status"`
+		Result  hubSpawnOutcome `json:"result"`
+	}{task.Job, task.Request.RequestID, task.Status, task.Outcome})
+}
+
+func (h *HubServer) runSpawnCoordinator(parent context.Context) {
+	if h.inbox == nil {
+		return
+	}
+	ctx, cancel := context.WithCancel(parent)
+	defer cancel()
+	stop := context.AfterFunc(h.closeCtx, cancel)
+	defer stop()
+	work := make(chan hubSpawnTask, 4)
+	var mu sync.Mutex
+	active := map[string]bool{}
+	for range 4 {
+		h.spawnWorkers.Add(1)
+		go func() {
+			defer h.spawnWorkers.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case task := <-work:
+					h.inbox.store.touchSpawn(ctx, task.Request.RequestID, h.now().UTC())
+					h.executeSpawnTask(ctx, task)
+					mu.Lock()
+					delete(active, task.Request.RequestID)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	tick := time.NewTicker(2 * time.Second)
+	defer tick.Stop()
+	for {
+		tasks, err := h.inbox.store.pendingSpawns(ctx)
+		if err == nil {
+			for _, task := range tasks {
+				mu.Lock()
+				busy := active[task.Request.RequestID]
+				if !busy {
+					active[task.Request.RequestID] = true
+				}
+				mu.Unlock()
+				if busy {
+					continue
+				}
+				select {
+				case work <- task:
+				default:
+					mu.Lock()
+					delete(active, task.Request.RequestID)
+					mu.Unlock()
+				}
+			}
+		}
+		h.flushSpawnNotifications(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		case <-h.spawnKick:
+		}
+	}
+}
+func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) {
+	defer func() {
+		if recover() != nil {
+			h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 1, Stage: "launch", Reason: "unknown"})
+		}
+	}()
+	if !h.now().Before(task.Deadline) {
+		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task)})
+		if task.Node == nil {
+			return
+		}
+		ctx, cancel := context.WithTimeout(parent, 5*time.Second)
+		defer cancel()
+		transport := directSpawnTransport{h: h, task: task}
+		_, _ = transport.dispatch(ctx, *task.Node)
+		return
+	}
+	if task.Node == nil && task.Status == "reconciling" {
+		var err error
+		task, err = h.inbox.store.resumeUndispatchedSpawn(parent, task)
+		if err != nil {
+			return
+		}
+	}
+	ctx, cancel := context.WithDeadline(parent, task.Deadline)
+	defer cancel()
+	transport := &directSpawnTransport{h: h, task: task, started: time.Now()}
+	if task.Node != nil {
+		_, _ = transport.dispatch(ctx, *task.Node)
+		return
+	}
+	app, err := h.newSpawnApp(io.Discard, io.Discard)
+	if err != nil {
+		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 78, Stage: "placement", Reason: "configuration", Retryable: true})
+		return
+	}
+	outcome := hubSpawnOutcome{Stage: "placement", StageMS: map[string]int64{}}
+	app.Hub = transport
+	app.State = directSpawnState{h}
+	app.Wake = directSpawnWake{h}
+	app.PlacementHosts = func(ctx context.Context, cwd string) ([]fleet.HostView, error) {
+		raw, err := json.Marshal(h.placement(ctx, "worker", cwd))
+		if err != nil {
+			return nil, err
+		}
+		return fleet.ParseHubHosts(string(raw))
+	}
+	app.ObserveStage = func(stage string, d time.Duration) { outcome.Stage = stage; outcome.StageMS[stage] += d.Milliseconds() }
+	app.ObserveReceipt = func(r fleet.ExecutionReceipt) {
+		outcome.Host = r.Host
+		outcome.Pane = r.Pane
+		outcome.Profile = r.Profile
+		outcome.Model = r.Model
+		outcome.Role = r.Role
+	}
+	request := task.Request
+	if task.Outcome.Retryable && task.Outcome.Host != "" {
+		request.Args = append([]string(nil), request.Args...)
+		for i := 0; i+1 < len(request.Args); i++ {
+			if request.Args[i] == "--host" {
+				request.Args[i+1] = task.Outcome.Host
+			}
+		}
+		found := false
+		for i := 0; i+1 < len(request.Args); i++ {
+			if request.Args[i] == "--override-reason" {
+				request.Args[i+1] = "verified-cleanup-retry"
+				found = true
+			}
+		}
+		if !found {
+			request.Args = append(request.Args, "--override-reason", "verified-cleanup-retry")
+		}
+	}
+	err = app.ExecuteSubmission(ctx, request)
+	if transport.bound {
+		return
+	} // The node result owns completion and cleanup facts.
+	if parent.Err() != nil {
+		return
+	} // Restart resumes durable accepted ownership.
+	outcome.RC = fleet.ErrorCode(err)
+	outcome.Reason = "admission_refused"
+	if err != nil && strings.Contains(err.Error(), "hub_spawn_capability_required") {
+		outcome.Reason = "node_upgrade_required"
+		outcome.Fix = "Upgrade the selected node panewire to advertise spawn_ops_v1, then replay the saved request."
+	}
+	outcome.Retryable = true
+	if ctx.Err() != nil {
+		outcome.RC = 124
+		outcome.Reason = "timeout"
+	}
+	if changed, _ := h.inbox.store.completeSpawn(parent, task, outcome, h.now().UTC()); changed {
+		h.recordSpawnTrace(task, outcome)
+	}
+}
+func spawnTaskHost(task hubSpawnTask) string {
+	if task.Node != nil {
+		return task.Node.Machine
+	}
+	return ""
+}
+
+type directSpawnState struct{ h *HubServer }
+
+func (s directSpawnState) Snapshot(ctx context.Context) (fleet.FleetSnapshot, error) {
+	raw, err := json.Marshal(s.h.stateStore().snapshot(s.h.now()))
+	var snap fleet.FleetSnapshot
+	if err == nil {
+		err = json.Unmarshal(raw, &snap)
+	}
+	return snap, err
+}
+
+type directSpawnWake struct{ h *HubServer }
+
+func (w directSpawnWake) Wake(ctx context.Context, host string, request fleet.WakeRequest) error {
+	_, code := w.h.requestNodeWake(ctx, host)
+	if code != "" {
+		return errors.New("node wake refused")
+	}
+	return nil
+}
+
+type directSpawnTransport struct {
+	h       *HubServer
+	task    hubSpawnTask
+	bound   bool
+	started time.Time
+}
+
+func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequest) (fleet.HubSpawnReply, error) {
+	t.h.mu.Lock()
+	record := t.h.nodes[req.Machine]
+	oldNode := record != nil && record.agent != nil && record.state == "connected" && !record.capabilities["spawn_ops_v1"]
+	t.h.mu.Unlock()
+	if oldNode {
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_capability_required"}
+	}
+	raw, err := json.Marshal(req)
+	if err != nil {
+		return fleet.HubSpawnReply{}, err
+	}
+	var node hubSpawnRequest
+	if err = json.Unmarshal(raw, &node); err != nil {
+		return fleet.HubSpawnReply{}, err
+	}
+	if !t.started.IsZero() {
+		node.PlacementMS = time.Since(t.started).Milliseconds()
+	}
+	node.DeadlineMS = t.task.Deadline.UnixMilli()
+	node.WaitSeconds = max(1, min(3600, int(time.Until(t.task.Deadline).Seconds())+1))
+	// The bind can commit even when its response is lost. From this point a
+	// placement caller must not release ownership or fall through to a host.
+	t.bound = true
+	task, err := t.h.inbox.store.bindSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node)
+	if err != nil {
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
+	t.task = task
+	return t.dispatch(ctx, *task.Node)
+}
+func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnRequest) (fleet.HubSpawnReply, error) {
+	h := t.h
+	h.mu.Lock()
+	record := h.nodes[node.Machine]
+	if record == nil || record.agent == nil || record.state != "connected" || !record.capabilities["spawn_ops_v1"] {
+		h.mu.Unlock()
+		return t.unknown(ctx, "disconnected")
+	}
+	agent := record.agent
+	entry := &hubSpawnRecord{request: node, status: "pending", created: h.now(), waiter: make(chan hubSpawnResult, 1)}
+	h.spawnRecords[node.RequestID] = entry
+	h.mu.Unlock()
+	message := struct {
+		Type        string            `json:"type"`
+		RequestID   string            `json:"request_id"`
+		CWDKey      string            `json:"cwd_key"`
+		Brief       hubSpawnBrief     `json:"brief"`
+		Checkout    *hubSpawnCheckout `json:"checkout,omitempty"`
+		Args        []string          `json:"args"`
+		WaitSeconds int               `json:"wait_seconds"`
+		DeadlineMS  int64             `json:"deadline_ms,omitempty"`
+	}{"job.spawn", node.RequestID, node.CWDKey, node.Brief, node.Checkout, node.Args, node.WaitSeconds, node.DeadlineMS}
+	if agent.writeJSON(message) != nil {
+		return t.unknown(ctx, "disconnected")
+	}
+	select {
+	case result := <-entry.waiter:
+		if result.CompletedAt == nil || result.Error == "reconciling" || result.Error == "journal_unavailable" || result.Error == "journal_conflict" {
+			return t.unknown(ctx, "unknown")
+		}
+		// The authenticated node's completed journal is necessary, and a current
+		// exact pane read is additionally required before accepting late success.
+		if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnArg(node.Args, "-L"))) || !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
+			return t.unknown(ctx, "unknown")
+		}
+		stage := result.Stage
+		if stage == "" {
+			stage = "placement"
+		}
+		outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m")}
+		if outcome.StageMS == nil {
+			outcome.StageMS = map[string]int64{}
+		}
+		outcome.StageMS["placement"] = min(int64(3600000), outcome.StageMS["placement"]+node.PlacementMS)
+		outcome.Fix = spawnResultFix(result.StdoutTail)
+		if result.Receipt != nil {
+			outcome.Profile = result.Receipt.Profile
+			outcome.Model = result.Receipt.Model
+			outcome.Role = result.Receipt.Role
+		}
+		if outcome.RC != 0 && !outcome.Retryable && outcome.RC != 74 && outcome.Reason != "timeout" {
+			outcome.Reason = "unknown"
+		}
+		changed, err := h.inbox.store.completeSpawn(h.closeCtx, t.task, outcome, h.now().UTC())
+		if err != nil {
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+		if changed {
+			h.recordSpawnTrace(t.task, outcome)
+		}
+		return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error}, nil
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+		return t.unknown(h.closeCtx, "timeout")
+	}
+}
+func (t *directSpawnTransport) unknown(ctx context.Context, reason string) (fleet.HubSpawnReply, error) {
+	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: reason, Host: spawnTaskHost(t.task)}
+	if reason == "timeout" {
+		outcome.RC = 124
+	}
+	if changed, _ := t.h.inbox.store.completeSpawn(ctx, t.task, outcome, t.h.now().UTC()); changed {
+		t.h.recordSpawnTrace(t.task, outcome)
+	}
+	return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+}
+func (t *directSpawnTransport) Refresh(ctx context.Context, machine, pool string) error {
+	args, _ := json.Marshal(map[string]string{"pool": pool})
+	pending, id, _, sent := t.h.sendNodeCommand(machine, "quota.refresh", args)
+	if !sent {
+		return errors.New("quota refresh node unavailable")
+	}
+	defer t.h.forgetNodeCommand(id)
+	select {
+	case result := <-pending.done:
+		if result.Error != "" {
+			return errors.New("quota refresh failed")
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (h *HubServer) verifySpawnPane(ctx context.Context, machine string, result hubSpawnResult, args []string) bool {
+	if result.JobID != hubSpawnArg(args, "--job") || result.Pane == "" || result.Receipt == nil || result.Receipt.Job != result.JobID || result.Receipt.Pane != result.Pane || result.Receipt.Label != hubSpawnArg(args, "-l") || result.Receipt.CWD == "" || result.Receipt.Kind == "" {
+		return false
+	}
+	raw, _ := json.Marshal(map[string]any{"pane_id": result.Pane, "name": hubSpawnArg(args, "-l"), "tail_lines": 0, "cwd": result.Receipt.CWD, "kind": result.Receipt.Kind})
+	pending, id, _, sent := h.sendNodeCommand(machine, "pane.read", raw)
+	if !sent {
+		return false
+	}
+	defer h.forgetNodeCommand(id)
+	select {
+	case reply := <-pending.done:
+		var pane PaneReadResult
+		if reply.Error != "" || json.Unmarshal(reply.Result, &pane) != nil {
+			return false
+		}
+		if pane.Outcome == nodePaneReadOK {
+			return true
+		}
+		if pane.Outcome != nodePaneGone {
+			return false
+		}
+		// A completed job can legitimately have been reaped while the hub was
+		// disconnected. Require its immutable host and exact historical receipt,
+		// in addition to this authenticated node's durable landing result.
+		app, err := h.newSpawnApp(io.Discard, io.Discard)
+		if err != nil || app.CheckTrust() != nil {
+			return false
+		}
+		record, found, err := app.ExistingJob(ctx, result.JobID)
+		if err != nil || !found || record["state"] != "completed" || record["host"] != machine || record["pane_id"] != result.Pane || record["label"] != result.Receipt.Label || record["profile"] != result.Receipt.Profile {
+			return false
+		}
+		task := hubSpawnArg(args, "--task")
+		return task == "" || fmt.Sprint(record["task_id"]) == task
+	case <-ctx.Done():
+		return false
+	}
+}
+
+func (h *HubServer) flushSpawnNotifications(ctx context.Context) {
+	if h.inbox == nil {
+		return
+	}
+	store := h.inbox.store
+	op, done := store.op(ctx)
+	rows, err := store.db.QueryContext(op, `SELECT event_id,job,owner,result,created_ms FROM spawn_notifications WHERE delivered=0 ORDER BY created_ms LIMIT 32`)
+	if err != nil {
+		done()
+		return
+	}
+	type notification struct {
+		id, job, owner, raw string
+		at                  int64
+	}
+	var batch []notification
+	for rows.Next() {
+		var n notification
+		if rows.Scan(&n.id, &n.job, &n.owner, &n.raw, &n.at) != nil {
+			break
+		}
+		batch = append(batch, n)
+	}
+	rows.Close()
+	done()
+	for _, n := range batch {
+		var result hubSpawnOutcome
+		if json.Unmarshal([]byte(n.raw), &result) != nil {
+			continue
+		}
+		text := fmt.Sprintf("[panewire] SPAWN_FAILED %s rc=%d stage=%s reason=%s", n.job, result.RC, result.Stage, result.Reason)
+		if result.RC != 0 {
+			fix := result.Fix
+			if fix == "" {
+				fix = "Inspect the saved operation and executing node before retrying; preserve unknown ownership."
+			}
+			text += " fix=" + fix
+		}
+		if result.RC == 0 {
+			text = fmt.Sprintf("[panewire] SPAWNED %s host=%s pane=%s model=%s", n.job, result.Host, result.Pane, result.Model)
+		}
+		event := hubJobEventPayload{EventID: n.id, JobID: n.job, OwnerLane: n.owner, NotifyType: "report", Text: text, Host: "hub", Epoch: 1}
+		if h.handoffkeep == nil {
+			continue
+		}
+		stored, _, persisted := h.persistRelayEventRecord(ctx, "lane.event", event, reportRelayRoute{Machine: "hub"})
+		if !persisted || stored.ID == 0 {
+			continue
+		}
+		delivered := h.relayLaneEventContext(ctx, event, nil)
+		if delivered.ID == 0 {
+			continue
+		}
+		op, done := store.op(ctx)
+		_, _ = store.db.ExecContext(op, store.q(`UPDATE spawn_notifications SET delivered=1 WHERE event_id=?`), n.id)
+		done()
+	}
+}
+
+// Node results stay in the node's private journal indefinitely, so ACK loss and
+// prolonged offline periods never erase the only receipt. Automatic journal GC
+// and adoption of a pane after a node process crash are explicit non-goals.
+
+func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
+	h.closeMu.Lock()
+	defer h.closeMu.Unlock()
+	if h.closed {
+		return
+	}
+	h.spawnCoordinatorOnce.Do(func() { h.spawnWorkers.Add(1); go func() { defer h.spawnWorkers.Done(); h.runSpawnCoordinator(ctx) }() })
+}
+
+func (h *HubServer) finishSpawnOutcome(task hubSpawnTask, outcome hubSpawnOutcome) {
+	if changed, _ := h.inbox.store.completeSpawn(h.closeCtx, task, outcome, h.now().UTC()); changed {
+		h.recordSpawnTrace(task, outcome)
+	}
+}
+
+func spawnReceiptCheckoutPath(cwd, dir, lane string) bool {
+	if filepath.Base(cwd) == dir {
+		return true
+	}
+	return (lane == "live" || lane == "mock") && filepath.Base(cwd) == lane && filepath.Base(filepath.Dir(cwd)) == dir
+}
+
+func spawnResultFix(tail string) string {
+	index := strings.LastIndex(tail, "Fix: ")
+	if index < 0 {
+		return ""
+	}
+	fix := strings.SplitN(tail[index+5:], "\n", 2)[0]
+	fix = strings.Map(func(r rune) rune {
+		if r < 32 || r == 127 {
+			return ' '
+		}
+		return r
+	}, fleetEventRedact(fix))
+	return utf8PrefixWithin(strings.TrimSpace(fix), 512)
+}

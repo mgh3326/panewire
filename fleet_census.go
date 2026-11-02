@@ -656,7 +656,7 @@ func fleetCensusJobVerdict(scan fleetCensusJobScan, view fleetCensusLocalView, g
 	if age < int64(grace.Seconds()) {
 		return fleetCensusVerdictSilent, fleetCensusReasonWithinGrace, age
 	}
-	// the reaper skips a protected (`runtug spawn --keep`) job at exactly this
+	// the reaper skips a protected (`panewire spawn --keep`) job at exactly this
 	// point: after the grace gate, before the malformed-record check.
 	if scan.keep {
 		return fleetCensusVerdictSkip, fleetCensusReasonProtected, age

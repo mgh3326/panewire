@@ -162,24 +162,24 @@ missing flag never reads as "not focused". A failed agent list also answers
 
 ### `job.done`
 
-`args: {job, report}`. Runs `runtug done <job> --report <report>` on the node
-and answers runtug's last output line as `line`. `report` must be exactly
+`args: {job, report}`. Runs the `panewire done <job> --report <report>` lifecycle engine in-process on the node
+and answers panewire's last output line as `line`. `report` must be exactly
 `<inbox>/jobs/<job>/report.md` or `<inbox>/jobs/<job>/pane-screen.txt` — the
-paths `pane.capture` answers. runtug uploads the report it is given, so no other
+paths `pane.capture` answers. panewire uploads the report it is given, so no other
 path is accepted.
 
 | `outcome` | `line` | Meaning |
 | --- | --- | --- |
-| `done` | runtug's line | runtug ran and completed the job. |
-| `already-done` | the recorded line | This report already completed the job. runtug does not run again, or it answered `duplicate=yes`. |
-| `not-a-job` | — | The job directory is missing or is a symlink. runtug does not run. |
-| `report-invalid` | — | `report` is not one of the two paths, is missing, or is not a regular file. runtug does not run. |
+| `done` | panewire's line | panewire ran and completed the job. |
+| `already-done` | the recorded line | This report already completed the job. panewire does not run again, or it answered `duplicate=yes`. |
+| `not-a-job` | — | The job directory is missing or is a symlink. panewire does not run. |
+| `report-invalid` | — | `report` is not one of the two paths, is missing, or is not a regular file. panewire does not run. |
 
-A failed or timed-out runtug answers `done_failed` and can be re-issued; a node
+A failed or timed-out panewire answers `done_failed` and can be re-issued; a node
 without a jobs root answers `jobs_root_unset`. The node records the report's
-digest in `<inbox>/jobs/<job>/.node-job-done` after runtug succeeds. The digest
+digest in `<inbox>/jobs/<job>/.node-job-done` after panewire succeeds. The digest
 is the key because a released job id can be claimed again: a new report for that
-id runs runtug, the same rule runtug's own duplicate check applies.
+id runs panewire, the same rule panewire's own duplicate check applies.
 
 ### `worktree.inspect`
 
@@ -212,7 +212,7 @@ host of at least two characters, since a one-character host such as
 `C:owner/repo` is drive-letter shaped), `sha` is 40-hex, and `fetch` is a
 closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
 
-- `mode:"branch"` — runtug#18's branch behaviour on the node. `branch` is
+- `mode:"branch"` — panewire#18's branch behaviour on the node. `branch` is
   required, `fetch` must be stated empty (the whole remote is fetched), and
   `sha`, when given, names the expected tip. A worktree already at `dir` is
   reused only when it is on that branch and clean; the branch checked out
@@ -382,7 +382,7 @@ panewire node job-done --hub-url <url> --hub-token-env <service.env> \
 The client and the CLI refuse the operator credential. Both log nothing; the hub
 logs every `pane.read` and `job.done` call by client, machine, op, pane, job and
 outcome, including refused calls, and the node logs each call it runs. Neither
-logs screen contents or runtug's output.
+logs screen contents or panewire's output.
 
 ### Reap composer adapter
 

@@ -208,7 +208,8 @@ func decodeNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 
 func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	names, known := nodeCommandArgFields[op]
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || !nodeCommandHasFields(raw, names) {
+	optionalKind := op == nodeCommandPaneRead && nodeCommandHasFields(raw, append(append([]string(nil), names...), "kind"))
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind) {
 		return nil, false
 	}
 	switch op {

@@ -6,7 +6,10 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
+	"github.com/getsentry/sentry-go"
+	"github.com/mgh3326/panewire/internal/fleet"
 	"html/template"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -364,10 +367,16 @@ type hubSubscriptionMessage struct {
 	failover *hubFailoverEvent
 }
 
-// HubServer is an in-memory presence and event relay. It deliberately owns no
-// file relay, durable queue, command dispatcher, or credentials after startup.
+// HubServer relays presence and events. Accepted spawns and lane inbox work
+// live in the configured durable store; presence and legacy job fences do not.
 type HubServer struct {
-	inbox *hubInbox
+	inbox                *hubInbox
+	spawnTraceOnce       sync.Once
+	spawnSentry          *sentry.Client
+	spawnCoordinatorOnce sync.Once
+	spawnNewApp          func(io.Writer, io.Writer) (*fleet.App, error)
+	spawnKick            chan struct{}
+	spawnWorkers         sync.WaitGroup
 	// auth is swapped whole on an auth-file reload; read it through
 	// currentAuth on authentication paths and auth.Load() elsewhere.
 	auth              atomic.Pointer[hubAuthSet]
@@ -695,7 +704,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	}
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
-		inbox:    inbox,
+		inbox: inbox, spawnKick: make(chan struct{}, 1),
 		authPath: config.AuthPath, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
@@ -748,6 +757,7 @@ func (h *HubServer) Close() error {
 	h.laneStallClosing = true
 	h.laneStallMu.Unlock()
 	h.laneStallSweeps.Wait()
+	h.spawnWorkers.Wait()
 	if h.inbox != nil {
 		// An in-flight flush may sit in a store call on a stalled database;
 		// abort ends that call so taking flushMu cannot wait on it.
@@ -806,6 +816,8 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/relay/held", h.handleRelayHeld)
 	mux.HandleFunc("PATCH /v1/relay/events/{id}", h.handleRelayHeldEdit)
 	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
+	mux.HandleFunc("POST /v1/spawns", h.handleSpawnSubmit)
+	mux.HandleFunc("GET /v1/spawns/{request_id}", h.handleSpawnOperation)
 	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
 	mux.HandleFunc("GET /v1/nodes/agents", h.handleNodesAgents)
@@ -2253,6 +2265,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	// network call.
 	go h.runChatDispatcher(ctx)
 	go h.runInbox(ctx)
+	h.startSpawnCoordinator(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever
 	// Postgres still holds as undelivered predates this process.
 	h.replayUndeliveredRelayEvents(ctx)

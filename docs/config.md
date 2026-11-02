@@ -1,3 +1,7 @@
+# Hub execution
+
+Real spawn/work/lead commands now use [durable hub operations](hub-spawn-operations.md). Configure the hub operator credential in the fleet hosts config and provision node spawn/work-root policy. There is no launcher subprocess or SSH launcher fallback. The imported planning and dry-run policy details below still apply.
+
 # Spawn configuration
 
 Panewire reads `~/.config/fleet/hosts.toml`. `FLEET_HOSTS_CONFIG` overrides the file;

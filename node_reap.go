@@ -14,7 +14,7 @@ import (
 )
 
 // pane.read and job.done are the two node commands mergewake reap needs for a
-// job-bound lead: the composer guard before a close and `runtug done` after it
+// job-bound lead: the composer guard before a close and `panewire done` after it
 // (docs/node-commands.md). The hub admits them for a scoped service only.
 const (
 	nodeCommandPaneRead = "pane.read"
@@ -42,6 +42,7 @@ const (
 )
 
 type nodePaneReadArgs struct {
+	Kind   string `json:"kind,omitempty"`
 	PaneID string `json:"pane_id"`
 	Name   string `json:"name"`
 	Cwd    string `json:"cwd"`
@@ -66,7 +67,7 @@ type PaneReadResult struct {
 }
 
 // JobDoneResult is job.done's answer. Outcome is "done", "already-done",
-// "not-a-job" or "report-invalid"; Line is runtug's result line, and is empty
+// "not-a-job" or "report-invalid"; Line is the lifecycle engine's result line, and is empty
 // for the two refusals.
 type JobDoneResult struct {
 	Outcome string `json:"outcome"`
@@ -182,7 +183,7 @@ func nodeScreenTail(screen string, lines int) string {
 // another node can name an unrelated pane here, and that pane's data must not
 // come back.
 func (client *HubClient) nodePaneRead(ctx context.Context, args nodePaneReadArgs) (any, string) {
-	outcome, row, err := client.nodePaneMatch(ctx, args.PaneID, args.Name, "", args.Cwd, false)
+	outcome, row, err := client.nodePaneMatch(ctx, args.PaneID, args.Name, args.Kind, args.Cwd, false)
 	if err != nil {
 		return nil, "herdr_failed"
 	}
@@ -209,8 +210,8 @@ func (client *HubClient) nodePaneRead(ctx context.Context, args nodePaneReadArgs
 	return result, ""
 }
 
-// nodeJobDone runs `runtug done` once for a job whose directory exists here.
-// runtug uploads the report it is given, so the report can only be one of the
+// nodeJobDone runs `panewire done` once for a job whose directory exists here.
+// panewire uploads the report it is given, so the report can only be one of the
 // two files reap saves in that job's directory; any other path would let the
 // caller read arbitrary node files back out of the document store.
 func (client *HubClient) nodeJobDone(ctx context.Context, args nodeJobDoneArgs) (any, string) {
@@ -250,8 +251,8 @@ func (client *HubClient) nodeJobDone(ctx context.Context, args nodeJobDoneArgs) 
 	if strings.HasSuffix(line, nodeLifecycleDuplicateTag) {
 		result.Outcome = nodeJobAlreadyDone
 	}
-	// runtug has finished, so a failed marker costs only a repeat run, which
-	// runtug itself answers as a duplicate of the same report.
+	// panewire has finished, so a failed marker costs only a repeat run, which
+	// panewire itself answers as a duplicate of the same report.
 	if err := replaceFileAtomicallyInRoot(job, nodeJobDoneMarker, []byte(digest+"\n"+line+"\n"), 0600); err != nil {
 		slog.Warn("job.done marker write failed", "job", args.Job)
 	}
@@ -259,7 +260,7 @@ func (client *HubClient) nodeJobDone(ctx context.Context, args nodeJobDoneArgs) 
 }
 
 // readNodeJobDoneMarker answers the recorded result line when this report's
-// digest is the one last completed. The digest is the key, as in runtug's own
+// digest is the one last completed. The digest is the key, as in panewire's own
 // duplicate check, because a released job id can be claimed again: a marker
 // that only said "done" would swallow the later round's completion.
 func readNodeJobDoneMarker(job *os.Root, digest string) (string, bool) {
@@ -277,7 +278,7 @@ func readNodeJobDoneMarker(job *os.Root, digest string) (string, bool) {
 	return nodeJobDoneLine([]byte(line)), true
 }
 
-// nodeJobDoneLine is the last non-blank line of runtug's output, bounded.
+// nodeJobDoneLine is the last non-blank line of panewire's output, bounded.
 func nodeJobDoneLine(output []byte) string {
 	lines := strings.Split(strings.ToValidUTF8(string(output), ""), "\n")
 	for index := len(lines) - 1; index >= 0; index-- {
@@ -332,7 +333,7 @@ func (client *HubClient) nodeLifecycleRunner() relayCommandRunner {
 }
 
 // logNodeReapCommand records one reap call on the node. It never receives
-// screen contents or runtug's output.
+// screen contents or panewire's output.
 func logNodeReapCommand(op string, decoded any, result any, code string) {
 	pane, job := nodeReapCommandSubject(decoded)
 	outcome := code

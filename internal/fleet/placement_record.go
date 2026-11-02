@@ -48,6 +48,7 @@ type placementCandidateRecord struct {
 // The initiator must not guess the model from its own catalog: admission on
 // the destination can resolve a different launch rung.
 type placementExecution struct {
+	Kind       string `json:"kind,omitempty"`
 	Host       string `json:"chosen_host,omitempty"`
 	Family     string `json:"family,omitempty"`
 	Model      string `json:"model,omitempty"`

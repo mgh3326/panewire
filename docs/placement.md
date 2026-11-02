@@ -13,7 +13,7 @@ limit is below one, or active heartbeat jobs reach `max_active_jobs`.
 `spill_targets` are considered in policy order. Load never filters a
 candidate; it ranks candidates through `score` (see
 [Measured-load score](#measured-load-score)), and callers that rank hosts —
-runtug's host-first placement — read that score.
+panewire's host-first placement — read that score.
 
 ```json
 {
@@ -75,7 +75,7 @@ Across hosts, swap-in followed memory available: 15% available swapped in
 42 MB/s, 27% swapped in 8 MB/s, 37% swapped in 2 MB/s.
 
 **Calibration (2026-11-02, one run, n=1).** The desk timed the same Go
-workload (runtug 0758a0b: module download, cold build, vet, tests) on three
+workload (panewire 0758a0b: module download, cold build, vet, tests) on three
 hosts: mac-dev 37.6 s, mac-work 40.6 s, desktop 96.0 s
 (`handoffkeep doc get fleet/bench/2026-11-02-hosts`). mac-work and mac-dev
 are the same machine. mac-work ran 8% slower while it paged in ~25 MB/s with
@@ -131,7 +131,7 @@ The node heartbeat's active-job list feeds the bridge, `active_jobs`, task
 slots and `--explain`. A job leaves it when any of these is true:
 
 - its journal records `job.completed`, `job.revoked`, `job.lost`,
-  `job.reaped` or `quota_pool.release` (runtug writes the release whenever a
+  `job.reaped` or `quota_pool.release` (panewire writes the release whenever a
   run ends: done, failed spawn, reap, lost pane);
 - herdr no longer lists an agent on its pane;
 - herdr has reported its pane `idle` or `done` for 30 minutes (the clock
@@ -164,8 +164,8 @@ UPS counts as `battery`.
 | Not listed | Any, or none | Unaffected |
 
 A refused host is not `usable`. The reason appears in `GET /v1/placement` and in
-the `load` value of `GET /v1/state`. runtug refuses on the text `not_accepting`.
-A forced spawn (`runtug spawn --host local`, or a named host) does not go through
+the `load` value of `GET /v1/state`. panewire refuses on the text `not_accepting`.
+A forced spawn (`panewire spawn --host local`, or a named host) does not go through
 placement, so it is not refused.
 
 ### Rollout
@@ -361,7 +361,7 @@ hub starts the existing R16 on-demand burst request in the background with a
 short placement hold. The returned decision remains advisory: callers must
 wait for the target's normal authenticated heartbeat before assigning work.
 
-`runtug` invokes the stable CLI contract:
+`panewire` invokes the stable CLI contract:
 
 ```sh
 panewire place --class worker --cwd repo-key \

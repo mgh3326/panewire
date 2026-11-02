@@ -12,7 +12,7 @@ import (
 
 // Fleet events (fleet-event v1) make node-side failures visible after the
 // fact: one JSON object per line in <state dir>/events/fleet-events.jsonl,
-// which Grafana Alloy tails and ships to Loki. runtug and mergewake write the
+// which Grafana Alloy tails and ships to Loki. panewire and mergewake write the
 // same shape; the contract is in deploy/alloy/README.md ("Fleet events").
 // Writing an event never changes the caller's result.
 
@@ -40,7 +40,7 @@ const (
 var fleetEventMu sync.Mutex
 
 // panewireStateDir is $XDG_STATE_HOME/panewire, or ~/.local/state/panewire:
-// the layout runtug and mergewake use too, so one Alloy glob covers all three
+// the layout the fleet uses, so one Alloy glob covers both
 // tools' fleet events. It holds events/ and crash/.
 func panewireStateDir() string {
 	state := os.Getenv("XDG_STATE_HOME")
@@ -139,7 +139,7 @@ func fleetEventCode(value string) string {
 // fleetEventExtraSecrets extends the stall redaction set for fleet events and
 // crash reports: Basic credentials, Grafana and AWS session tokens, any
 // NAME=value whose name holds key/token/secret/password, whole PEM private-key
-// blocks (or a truncated tail of one), and email addresses. runtug and
+// blocks (or a truncated tail of one), and email addresses. panewire and
 // mergewake carry the same set.
 var fleetEventExtraSecrets = []*regexp.Regexp{
 	regexp.MustCompile(`-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(-----END [A-Z ]*PRIVATE KEY-----|$)`),

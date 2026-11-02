@@ -27,7 +27,7 @@ shared inbox under `jobs/<id>/events`.
 | claim `agent_label` ≠ receipt `label` | `held` / `label-conflict` |
 | a later receiptless, unfinished claim reuses the label | `held` / `label-reused` |
 | an event file of the job cannot be read (read error, invalid UTF-8, not JSON) — it may have been a revive | `held` / `record-unreadable` |
-| `"keep": true` on any claim, reclaim, or receipt (`runtug spawn --keep`) | `held` / `protected` |
+| `"keep": true` on any claim, reclaim, or receipt (`panewire spawn --keep`) | `held` / `protected` |
 | latest claim role outside `worker` / `builder` / `captain`, checked before the sticky builder marking | `held` / `protected-role` |
 | worker (testers are workers) | `candidate` only when the reap dry-run would close it; otherwise `held` with the reaper's reason |
 | builder (or legacy captain) whose pane passes the same pane gates | `builder-task-gate`. It is never a candidate at the node |

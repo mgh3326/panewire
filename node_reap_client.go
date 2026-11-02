@@ -67,7 +67,7 @@ func (client *NodeReapClient) PaneRead(ctx context.Context, machine, paneID, nam
 	return result, err
 }
 
-// JobDone runs `runtug done <job> --report <report>` on machine. report is the
+// JobDone runs `panewire done <job> --report <report>` on machine. report is the
 // path pane.capture answered: <dir>/report.md or <dir>/pane-screen.txt in that
 // job's directory.
 func (client *NodeReapClient) JobDone(ctx context.Context, machine, job, report string) (JobDoneResult, error) {

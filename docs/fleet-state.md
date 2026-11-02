@@ -1,10 +1,10 @@
 # Fleet state
 
 Every node publishes the state it owns. The hub keeps the latest value per key
-and serves it at `GET /v1/state`, so runtug reads the current state instead of
+and serves it at `GET /v1/state`, so panewire reads the current state instead of
 measuring it on every spawn.
 
-Before this, runtug measured on demand: it re-read quota and host load for each
+Before this, panewire measured on demand: it re-read quota and host load for each
 spawn. A host that relied on another host's measurement saw that reading go
 stale whenever the measuring host was idle longer than the freshness window,
 and its spawns were refused with `target account quota unavailable: stale`.
@@ -78,8 +78,8 @@ older `measured_at` that is still inside the TTL; the value stays usable.
 however recent its `measured_at`. Nodes republish an unchanged quota reading at
 most every 5 minutes.
 
-When the rule fails, runtug falls back to the direct measurement it used before
-this feature. It records which source it used (see runtug `docs/config.md`,
+When the rule fails, panewire falls back to the direct measurement it used before
+this feature. It records which source it used (see panewire `docs/config.md`,
 "Fleet state").
 
 ## Endpoints
@@ -124,11 +124,11 @@ List only pools whose accounts this host measures: pacelever's
 
 ## Rollout
 
-Order: hub, then nodes, then runtug. Each step is safe on its own.
+Order: hub, then nodes, then panewire. Each step is safe on its own.
 
 1. **Hub.** Deploy the hub build. `GET /v1/state` starts answering with `load`
    and `publisher` values right away. Older nodes keep working because they
-   never send `state` events. If runtug reads with a service token, add
+   never send `state` events. If panewire reads with a service token, add
    `state.read` to that service's `HUB_SCOPES_<client>` line; the operator
    token needs nothing.
 2. **Nodes.** Deploy the node build. Add `--state-publish` to every node's
@@ -137,19 +137,19 @@ Order: hub, then nodes, then runtug. Each step is safe on its own.
    `GET /v1/state` lists that host's `quota` values with a recent
    `measured_at`. A new node that connects to an old hub only adds to the hub's
    unknown-message count, because the old hub ignores `state` events.
-3. **runtug.** Deploy runtug. Placement and the quota gate read the hub state
+3. **panewire.** Deploy panewire. Placement and the quota gate read the hub state
    and record `state.source` (`hub` or `direct`) in the placement record. With
-   `[hub] state = "off"`, runtug skips the hub state and measures directly as
+   `[hub] state = "off"`, panewire skips the hub state and measures directly as
    before.
 
 ## Rollback
 
 Reverse order. Each step is independent.
 
-1. **runtug.** Set `[hub] state = "off"`, or redeploy the previous runtug.
-   runtug then measures directly, as before.
+1. **panewire.** Set `[hub] state = "off"`, or redeploy the previous panewire.
+   panewire then measures directly, as before.
 2. **Nodes.** Remove `--state-publish` (and `--state-quota-pools`), or
-   redeploy the previous node build. With no publisher, runtug falls back to direct measurement and
+   redeploy the previous node build. With no publisher, panewire falls back to direct measurement and
    records the reason.
 3. **Hub.** Redeploy the previous hub build. `/v1/state` returns 404, and
-   runtug records `hub_unavailable` and measures directly.
+   panewire records `hub_unavailable` and measures directly.

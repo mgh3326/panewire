@@ -3,6 +3,7 @@ package panewire
 import (
 	"encoding/json"
 	"errors"
+	"github.com/mgh3326/panewire/internal/fleet"
 	"net/http"
 	"regexp"
 	"strings"
@@ -73,6 +74,8 @@ type hubSpawnCheckout struct {
 }
 
 type hubSpawnRequest struct {
+	DeadlineMS  int64             `json:"deadline_ms,omitempty"`
+	PlacementMS int64             `json:"hub_placement_ms,omitempty"`
 	RequestID   string            `json:"request_id"`
 	Machine     string            `json:"machine"`
 	CWDKey      string            `json:"cwd_key"`
@@ -83,17 +86,18 @@ type hubSpawnRequest struct {
 }
 
 type hubSpawnResult struct {
-	Stage       string           `json:"stage,omitempty"`
-	StageMS     map[string]int64 `json:"stage_ms,omitempty"`
-	Retryable   bool             `json:"retryable,omitempty"`
-	RequestID   string           `json:"request_id"`
-	Machine     string           `json:"machine"`
-	RC          int              `json:"rc"`
-	JobID       string           `json:"job_id"`
-	Pane        string           `json:"pane"`
-	StdoutTail  string           `json:"stdout_tail"`
-	CompletedAt *time.Time       `json:"completed_at,omitempty"`
-	Error       string           `json:"error,omitempty"`
+	Receipt     *fleet.ExecutionReceipt `json:"receipt,omitempty"`
+	Stage       string                  `json:"stage,omitempty"`
+	StageMS     map[string]int64        `json:"stage_ms,omitempty"`
+	Retryable   bool                    `json:"retryable,omitempty"`
+	RequestID   string                  `json:"request_id"`
+	Machine     string                  `json:"machine"`
+	RC          int                     `json:"rc"`
+	JobID       string                  `json:"job_id"`
+	Pane        string                  `json:"pane"`
+	StdoutTail  string                  `json:"stdout_tail"`
+	CompletedAt *time.Time              `json:"completed_at,omitempty"`
+	Error       string                  `json:"error,omitempty"`
 }
 
 type hubSpawnRecord struct {
@@ -146,23 +150,35 @@ func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
 }
 
 func validHubSpawnArgs(args []string) bool {
-	if len(args)%2 != 0 {
-		return false
+	allowed := map[string]bool{}
+	for _, flag := range []string{"-m", "-w", "-l", "--t", "--effort", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--builder-family", "--builder-job", "--grade", "--routing-role", "--override-reason", "--operator-request", "--requested-by", "--purpose", "--lane-defer"} {
+		allowed[flag] = true
 	}
-	allowed := map[string]struct{}{
-		"-m": {}, "-w": {}, "-l": {}, "--t": {}, "--effort": {}, "--job": {}, "--owner": {}, "--report": {}, "--report-relative": {}, "--role": {}, "--lane": {}, "--parent": {}, "-L": {},
-		"--task": {}, "--parent-job": {}, "--tags": {}, "--urgency": {}, "--builder-family": {}, "--builder-job": {},
-	}
-	for index := 0; index < len(args); index += 2 {
-		pattern := hubSpawnArgValuePattern
-		if args[index] == "--tags" {
-			// --tags is a comma list; every other flag keeps the no-comma set.
-			pattern = hubSpawnTagsValuePattern
-		}
-		// The 200-char cap binds every value, tags included.
-		if _, found := allowed[args[index]]; !found || len(args[index+1]) > 200 || !pattern.MatchString(args[index+1]) || !validHubSpawnArgValue(args[index], args[index+1]) {
+	booleans := map[string]bool{"--keep": true, "--job-dup-ok": true, "--task-hk-bypass": true, "--allow-escalation": true}
+	seen := map[string]bool{}
+	for i := 0; i < len(args); {
+		flag := args[i]
+		if seen[flag] {
 			return false
 		}
+		seen[flag] = true
+		if booleans[flag] {
+			i++
+			continue
+		}
+		if !allowed[flag] || i+1 >= len(args) {
+			return false
+		}
+		value := args[i+1]
+		pattern := hubSpawnArgValuePattern
+		if flag == "--tags" {
+			pattern = hubSpawnTagsValuePattern
+		}
+		freeText := flag == "--override-reason" || flag == "--purpose" || flag == "-w"
+		if len(value) > 200 || value == "" || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") || (!freeText && !pattern.MatchString(value)) || !validHubSpawnArgValue(flag, value) {
+			return false
+		}
+		i += 2
 	}
 	return true
 }
@@ -189,12 +205,12 @@ func validHubSpawnArgValue(flag, value string) bool {
 // result is a node-to-hub control response, not an event envelope.
 func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || fields == nil || (len(fields) < 6 || len(fields) > 10) {
+	if json.Unmarshal(raw, &fields) != nil || fields == nil || (len(fields) < 6 || len(fields) > 11) {
 		return hubSpawnResult{}, false
 	}
 	for key := range fields {
 		switch key {
-		case "type", "request_id", "rc", "job_id", "pane", "stdout_tail", "error", "stage", "stage_ms", "retryable":
+		case "type", "request_id", "rc", "job_id", "pane", "stdout_tail", "error", "stage", "stage_ms", "retryable", "receipt":
 		default:
 			return hubSpawnResult{}, false
 		}
@@ -229,12 +245,19 @@ func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 			return hubSpawnResult{}, false
 		}
 	}
+	if raw, ok := fields["receipt"]; ok {
+		var receipt fleet.ExecutionReceipt
+		if json.Unmarshal(raw, &receipt) != nil || len(raw) > 4096 {
+			return hubSpawnResult{}, false
+		}
+		result.Receipt = &receipt
+	}
 	return result, true
 }
 
 func validHubSpawnResultError(value string) bool {
 	switch value {
-	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "timeout", "brief_doc_unavailable":
+	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "timeout", "brief_doc_unavailable", "journal_unavailable", "journal_conflict", "reconciling", "deadline_not_started":
 		return true
 	default:
 		return strings.HasPrefix(value, "checkout_refused:") && len(value) <= 80 && regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]+$`).MatchString(value)

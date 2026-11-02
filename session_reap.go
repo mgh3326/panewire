@@ -32,7 +32,7 @@ import (
 //     must agree with the receipt. Any unknown or different value holds the
 //     pane (#595 R3: a name-only match closed a working session whose name
 //     was empty).
-//   - A protected job (`runtug spawn --keep`, sticky on any claim or receipt)
+//   - A protected job (`panewire spawn --keep`, sticky on any claim or receipt)
 //     and a claim role outside the worker|builder|captain vocabulary are
 //     held.
 //   - A worker (testers are workers) is a candidate only when the reap

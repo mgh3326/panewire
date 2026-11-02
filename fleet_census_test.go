@@ -114,7 +114,7 @@ func t501StandardInbox() map[string][]map[string]any {
 			t501EnvelopedEvent("job.spawned", "", map[string]any{"pane_id": "w1:p1", "tab_id": "w1:t1"}),
 			t501FlatEvent("job.completed", old, nil),
 		},
-		// #603: a protected (`runtug spawn --keep`) finished job is skipped with
+		// #603: a protected (`panewire spawn --keep`) finished job is skipped with
 		// reason=protected; only the JSON literal true protects.
 		"j-kept": {
 			t501EnvelopedEvent("job.claim", "", map[string]any{"owner_lane": "lane-a", "role": "worker"}),

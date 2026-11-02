@@ -9,6 +9,7 @@ import (
 )
 
 type Execution struct {
+	Receipt   ExecutionReceipt `json:"receipt"`
 	RC        int              `json:"rc"`
 	Stage     string           `json:"stage"`
 	StageMS   map[string]int64 `json:"stage_ms"`
@@ -29,7 +30,7 @@ func ErrorCode(err error) int {
 // ExecuteNode is the node daemon's in-process launcher boundary. It shares the
 // CLI engine and guards, while execution paths and session come from node config.
 func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, args []string, out, errout io.Writer) Execution {
-	result := Execution{Stage: "placement", StageMS: map[string]int64{}}
+	result := Execution{Stage: "placement", StageMS: map[string]int64{}, Retryable: true}
 	a, err := New(out, errout)
 	if err != nil {
 		result.RC = ErrorCode(err)
@@ -48,11 +49,15 @@ func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, arg
 		fmt.Fprintln(errout, err)
 		return result
 	}
-	s.CWD, s.Prompt, s.Workspace, s.Host, s.Delegated = cwd, brief, workspace, "local", true
+	s = bindNodeSpawn(s, cwd, brief, workspace)
 	a.ObserveStage = func(stage string, duration time.Duration) {
+		if stage == "claim" {
+			result.Retryable = false
+		}
 		result.Stage = stage
 		result.StageMS[stage] += duration.Milliseconds()
 	}
+	a.ObserveReceipt = func(receipt ExecutionReceipt) { result.Receipt = receipt }
 	a.ObserveRetryable = func(safe bool) { result.Retryable = safe }
 	err = a.Spawn(ctx, s)
 	result.RC = ErrorCode(err)
@@ -71,4 +76,44 @@ func ExecuteLifecycle(ctx context.Context, args []string, out, errout io.Writer)
 		return err
 	}
 	return a.Run(ctx, args)
+}
+
+type ExecutionReceipt struct {
+	Job     string `json:"job"`
+	Host    string `json:"host"`
+	Pane    string `json:"pane"`
+	Profile string `json:"profile"`
+	Model   string `json:"model"`
+	Role    string `json:"role"`
+	CWD     string `json:"cwd"`
+	Label   string `json:"label"`
+	Kind    string `json:"kind"`
+}
+
+// ExistingJob exposes only the durable job read needed before hub acceptance.
+func (a *App) ExistingJob(ctx context.Context, id string) (map[string]any, bool, error) {
+	store, err := a.jobStore()
+	if err != nil {
+		return nil, false, err
+	}
+	record, err := store.Get(ctx, id)
+	if errors.Is(err, errJobNotFound) {
+		return nil, false, nil
+	}
+	return record, err == nil, err
+}
+
+func (a *App) CheckTrust() error {
+	if a.EnforceTrust {
+		return a.trust()
+	}
+	return nil
+}
+
+func bindNodeSpawn(s Spawn, cwd, brief, workspace string) Spawn {
+	s.CWD, s.Prompt, s.Host, s.Delegated = cwd, brief, "local", true
+	if s.Workspace == "" {
+		s.Workspace = workspace
+	}
+	return s
 }

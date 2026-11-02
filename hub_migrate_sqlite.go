@@ -237,6 +237,29 @@ func readHubInboxSnapshot(ctx context.Context, db *sql.DB, dialect laneInboxDial
 
 func readHubInboxSnapshotTx(ctx context.Context, tx *sql.Tx, dialect laneInboxDialect) (hubInboxSnapshot, error) {
 	var snapshot hubInboxSnapshot
+	var spawnTable bool
+	if dialect == laneInboxSQLite {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM sqlite_master WHERE type='table' AND name='spawn_operations'`).Scan(&count); err != nil {
+			return snapshot, err
+		}
+		spawnTable = count != 0
+	} else {
+		var name sql.NullString
+		if err := tx.QueryRowContext(ctx, `SELECT to_regclass('spawn_operations')::text`).Scan(&name); err != nil {
+			return snapshot, err
+		}
+		spawnTable = name.Valid
+	}
+	if spawnTable {
+		var count int
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM spawn_operations`).Scan(&count); err != nil {
+			return snapshot, err
+		}
+		if count != 0 {
+			return snapshot, errors.New("spawn ownership exists: keep the current backend; the inbox-only migrator cannot transfer spawn reservations, receipts or tombstones")
+		}
+	}
 	rows, err := tx.QueryContext(ctx, `SELECT event_key,`+laneInboxColumns+` FROM lane_inbox ORDER BY id`)
 	if err != nil {
 		return snapshot, err

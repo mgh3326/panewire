@@ -367,6 +367,9 @@ func (a *App) hubCheckout(ctx context.Context, repo *repoResolution) (*HubChecko
 		return nil, fmt.Sprintf("worktree %s has no readable HEAD", repo.wt)
 	}
 	dir := repo.localRoot + "/" + repo.wt
+	if repo.sourceDir != "" {
+		dir = repo.sourceDir
+	}
 	spec := &HubCheckout{Origin: origin, Dir: repo.wt}
 	if repo.branch != "" {
 		r := a.call(ctx, "git", "-C", dir, "merge-base", "--is-ancestor", repo.head, "refs/remotes/origin/"+repo.branch)
@@ -416,15 +419,14 @@ func hubArgs(jobs string, s Spawn) ([]string, error) {
 		set  bool
 	}{{"--keep", s.Keep}, {"--job-dup-ok", s.DupOK}, {"--task-hk-bypass", s.Bypass}, {"--allow-escalation", s.AllowEscalation}} {
 		if u.set {
-			return nil, fmt.Errorf("%s cannot cross the hub", u.flag)
+			args = append(args, u.flag)
 		}
 	}
 	for _, u := range []struct{ flag, v string }{{"--operator-request", s.OperatorRequest}, {"--requested-by", s.RequestedBy}, {"--purpose", s.Purpose}, {"--lane-defer", s.LaneDefer}} {
-		if u.v != "" {
-			return nil, fmt.Errorf("%s cannot cross the hub", u.flag)
-		}
+		add(u.flag, u.v)
 	}
 	add("-m", s.Profile)
+	add("-w", s.Workspace)
 	add("-l", s.Label)
 	add("--t", s.T)
 	add("--job", s.Job)
@@ -449,6 +451,9 @@ func hubArgs(jobs string, s Spawn) ([]string, error) {
 	add("--urgency", s.Urgency)
 	add("--builder-family", s.BuilderFamily)
 	add("--builder-job", s.BuilderJob)
+	add("--grade", s.Grade)
+	add("--routing-role", s.RoutingRole)
+	add("--override-reason", s.OverrideReason)
 	return args, nil
 }
 

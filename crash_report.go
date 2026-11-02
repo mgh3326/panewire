@@ -21,7 +21,8 @@ import (
 // hub is written by the Go runtime to this process's crash file
 // (runtime/debug.SetCrashOutput). The next start uploads crash files left by
 // processes that are gone to Sentry, then deletes them. Only crashes are
-// sent: no errors, traces, breadcrumbs, request data or user data. Without
+// sent by this reporter: no errors, traces, breadcrumbs, request data or user data.
+// The isolated spawn client is documented in hub_spawn_trace.go. Without
 // SENTRY_DSN_PANEWIRE nothing is written or sent.
 
 const (

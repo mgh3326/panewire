@@ -140,7 +140,7 @@ func (a *App) fleetSnapshot(ctx context.Context) (*FleetSnapshot, string) {
 // fleetStateEnabled is [hub] state: on unless set to "off" (the rollback
 // switch), and only with a hub URL configured.
 func (a *App) fleetStateEnabled() bool {
-	return !strings.EqualFold(str(a.Config.Hub, "state"), "off") && str(a.Config.Hub, "hub_url") != ""
+	return !strings.EqualFold(str(a.Config.Hub, "state"), "off") && (a.State != nil || str(a.Config.Hub, "hub_url") != "")
 }
 
 func (a *App) publisherTTL() time.Duration {

@@ -158,7 +158,7 @@ func cmdFixture(t *testing.T) (*App, Spawn, *fakeRunner, *int) {
 			if submitted {
 				status = "working"
 			}
-			return Result{Out: fmt.Sprintf(`{"result":{"agents":[{"pane_id":"w:p1","tab_id":"w:t1","name":"worker-a","agent":"cmd","agent_status":%q}]}}`, status)}
+			return Result{Out: fmt.Sprintf(`{"result":{"agents":[{"pane_id":"w:p1","tab_id":"w:t1","name":"worker-a","agent":"cmd","agent_status":%q,"cwd":%q}]}}`, status, cwd)}
 		case strings.HasPrefix(args, "agent read") && !launched:
 			// Real herdr: a shell-only pane has no agent yet (agent_not_found).
 			return Result{Code: 1, Out: `{"error":{"code":"agent_not_found"}}`}

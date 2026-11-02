@@ -14,7 +14,7 @@
     "from": "now-24h",
     "to": "now"
   },
-  "description": "fleet-event v1 lines from runtug, panewire and mergewake (panewire deploy/alloy/README.md, Fleet events).",
+  "description": "fleet-event v1 lines from panewire, panewire and mergewake (panewire deploy/alloy/README.md, Fleet events).",
   "templating": {
     "list": [
       {
@@ -35,7 +35,7 @@
       "id": 1,
       "type": "timeseries",
       "title": "Spawn refusals by host and reason",
-      "description": "runtug spawn refusals (reason = exit status class) and panewire node spawn refusals (reason = spawn.json rule or wire error).",
+      "description": "panewire spawn refusals (reason = exit status class) and panewire node spawn refusals (reason = spawn.json rule or wire error).",
       "datasource": {
         "type": "loki",
         "uid": "${datasource}"
@@ -53,7 +53,7 @@
             "type": "loki",
             "uid": "${datasource}"
           },
-          "expr": "sum by (host, reason) (count_over_time({source=\"fleet_events\", tool=~\"runtug|panewire\", kind=~\"spawn|node_spawn\", outcome=~\"refused|failed\"} | json reason=\"reason\" [$__auto]))",
+          "expr": "sum by (host, reason) (count_over_time({source=\"fleet_events\", tool=~\"panewire|panewire\", kind=~\"spawn|node_spawn\", outcome=~\"refused|failed\"} | json reason=\"reason\" [$__auto]))",
           "legendFormat": "{{host}} {{reason}}",
           "queryType": "range",
           "editorMode": "code"
@@ -107,7 +107,7 @@
             "type": "loki",
             "uid": "${datasource}"
           },
-          "expr": "sum by (chosen, reason) (count_over_time({source=\"fleet_events\", tool=\"runtug\", kind=\"placement\"} | json reason=\"reason\" | regexp \"chosen=(?P<chosen>[^ \\\"]+)\" [$__auto]))",
+          "expr": "sum by (chosen, reason) (count_over_time({source=\"fleet_events\", tool=\"panewire\", kind=\"placement\"} | json reason=\"reason\" | regexp \"chosen=(?P<chosen>[^ \\\"]+)\" [$__auto]))",
           "legendFormat": "{{chosen}} by {{reason}}",
           "queryType": "range",
           "editorMode": "code"

@@ -808,9 +808,10 @@ func (a *App) waitForNode(ctx context.Context, host string, h map[string]any, wa
 }
 
 type repoResolution struct {
-	name string
-	url  string
-	rel  string
+	sourceDir string // caller-side evidence path, never transmitted or executed by the hub
+	name      string
+	url       string
+	rel       string
 	// wt, branch and head describe a linked worktree checkout: name is then
 	// the canonical clone and wt the worktree directory beside it. wt is
 	// empty for a canonical checkout.
