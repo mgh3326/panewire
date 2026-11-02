@@ -174,6 +174,7 @@ func (h *HubServer) prepareHeldBatch(b laneInboxBatch) (laneInboxBatch, error) {
 // actual injection. Use it on first delivery and every replay path.
 func (h *HubServer) inboxRelayDirective(kind string, e hubJobEventPayload, route reportRelayRoute, id int64) hubRelayInjectEvent {
 	d := relayInjectDirective(kind, e, route, id)
+	d.Text = h.appendInboxSummary(kind, e, h.receivingLane(kind, e), d.Text)
 	if h.inbox == nil || kind != "lane.event" || !strings.HasPrefix(e.EventID, "held-") {
 		return d
 	}

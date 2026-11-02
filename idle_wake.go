@@ -692,12 +692,12 @@ func (m *idleWakeManager) materializeAssigned(ctx context.Context, at time.Time)
 		if m.quota != nil {
 			m.quota.observeBounded(ctx, candidate, at)
 		}
-		record := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: candidate.ChangedAt.UTC().Format(time.RFC3339Nano), OwnerLane: candidate.OwnerLane, Label: candidate.Label, PaneID: candidate.PaneID, EventID: candidate.EventID, Text: candidate.Text}
+		record := emitRecord{NotifyType: "idle-wake", Type: "lane.event", Epoch: 1, CreatedAt: candidate.ChangedAt.UTC().Format(time.RFC3339Nano), OwnerLane: candidate.OwnerLane, Label: candidate.Label, PaneID: candidate.PaneID, EventID: candidate.EventID, Text: candidate.Text}
 		if _, err := m.writeRecord(m.inboxRoot, record); err != nil {
 			m.logger.Warn("idle-wake durable event file unavailable")
 			continue
 		}
-		event := hubScannedRelayEvent{Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(candidate.OwnerLane, candidate.EventID), Epoch: 1, OwnerLane: candidate.OwnerLane, Label: candidate.Label}, PaneID: candidate.PaneID, EventID: candidate.EventID, Text: candidate.Text}
+		event := hubScannedRelayEvent{NotifyType: "idle-wake", Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(candidate.OwnerLane, candidate.EventID), Epoch: 1, OwnerLane: candidate.OwnerLane, Label: candidate.Label}, PaneID: candidate.PaneID, EventID: candidate.EventID, Text: candidate.Text}
 		m.enqueue(event)
 		if err := m.store.markIdleWakeMaterialized(ctx, candidate.EventID, at); err != nil {
 			m.logger.Warn("idle-wake materialization was not recorded")
