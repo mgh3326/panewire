@@ -39,6 +39,7 @@ type laneInboxStore struct {
 }
 
 type laneInboxItem struct {
+	HoldUntil       int64              `json:"hold_until_ms,omitempty"`
 	Fresh           bool               `json:"-"`
 	ID              int64              `json:"id"`
 	Lane            string             `json:"lane"`
@@ -69,7 +70,7 @@ type laneInboxBatch struct {
 }
 
 func (b laneInboxBatch) invalidReason() string {
-	if len(b.Text) > laneEventTextLimit {
+	if len(b.Text) > laneEventTextLimit && !strings.HasPrefix(b.ID, "held-") {
 		return "lane.event text exceeds 2048 bytes"
 	}
 	if !validLaneEventText(b.Text) {
@@ -124,7 +125,15 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 			return nil, err
 		}
 	}
+	if err := addLaneInboxColumn(ctx, db, "hold_until"); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if err := addLaneInboxMustAck(ctx, db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS lane_inbox_hold ON lane_inbox(lane,hold_until) WHERE hold_until>0 AND digest_batch='' AND acked_at=0`); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -236,9 +245,8 @@ func (s *laneInboxStore) markBatchSent(id string) error {
 	return err
 }
 
-// addLaneInboxMustAck adds the must_ack column to a store created before it
-// existed. Rows stored earlier keep must_ack=0 and their recorded read state.
-func addLaneInboxMustAck(ctx context.Context, db *sql.DB) error {
+// addLaneInboxColumn adds an integer state column to pre-feature SQLite stores.
+func addLaneInboxColumn(ctx context.Context, db *sql.DB, column string) error {
 	rows, err := db.QueryContext(ctx, `PRAGMA table_info(lane_inbox)`)
 	if err != nil {
 		return err
@@ -252,7 +260,7 @@ func addLaneInboxMustAck(ctx context.Context, db *sql.DB) error {
 			rows.Close()
 			return err
 		}
-		found = found || name == "must_ack"
+		found = found || name == column
 	}
 	err = rows.Err()
 	rows.Close()
@@ -261,11 +269,18 @@ func addLaneInboxMustAck(ctx context.Context, db *sql.DB) error {
 	}
 	if !found {
 		// A second hub opening the same store may add the column first.
-		if _, err := db.ExecContext(ctx, `ALTER TABLE lane_inbox ADD COLUMN must_ack INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		if _, err := db.ExecContext(ctx, `ALTER TABLE lane_inbox ADD COLUMN `+column+` INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 			return err
 		}
 	}
-	_, err = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS lane_inbox_must_ack ON lane_inbox(lane) WHERE must_ack=1 AND acked_at=0`)
+	return nil
+}
+
+func addLaneInboxMustAck(ctx context.Context, db *sql.DB) error {
+	if err := addLaneInboxColumn(ctx, db, "must_ack"); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS lane_inbox_must_ack ON lane_inbox(lane) WHERE must_ack=1 AND acked_at=0`)
 	return err
 }
 
@@ -370,14 +385,14 @@ func (s *laneInboxStore) unclaimedUnread() ([]laneInboxItem, error) {
 	return items, rows.Err()
 }
 
-const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack`
+const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack,hold_until`
 
 type inboxScanner interface{ Scan(...any) error }
 
 func scanLaneInbox(row inboxScanner) (laneInboxItem, error) {
 	var i laneInboxItem
 	var payload string
-	err := row.Scan(&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch, &i.MustAck)
+	err := row.Scan(&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch, &i.MustAck, &i.HoldUntil)
 	if err == nil {
 		err = json.Unmarshal([]byte(payload), &i.Event)
 	}
@@ -388,7 +403,7 @@ func scanLaneInbox(row inboxScanner) (laneInboxItem, error) {
 // cannot turn a previously accepted inbox item into a prompt after restart.
 // An interrupt is stored read — injection is its delivery — unless its
 // declared type must be acked: then it stays unread until `inbox ack`.
-func (s *laneInboxStore) put(key, lane, kind, class string, e hubJobEventPayload, now time.Time, deadline, window time.Duration) (laneInboxItem, error) {
+func (s *laneInboxStore) put(key, lane, kind, class string, e hubJobEventPayload, now time.Time, deadline, window time.Duration, hold ...time.Duration) (laneInboxItem, error) {
 	raw, err := json.Marshal(e)
 	if err != nil {
 		return laneInboxItem{}, err
@@ -414,11 +429,17 @@ func (s *laneInboxStore) put(key, lane, kind, class string, e hubJobEventPayload
 			digest = now.Add(window).UnixMilli()
 		}
 	}
+	holdUntil := int64(0)
+	if len(hold) > 0 && hold[0] > 0 {
+		holdUntil = now.Add(hold[0]).UnixMilli()
+		due = 0
+		digest = 0
+	}
 	ctx, done := s.op(s.life)
 	defer done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	insert, err := s.db.ExecContext(ctx, s.q(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn)
+	insert, err := s.db.ExecContext(ctx, s.q(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn, holdUntil)
 	if err != nil {
 		return laneInboxItem{}, err
 	}
@@ -536,7 +557,7 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 	}
 	defer tx.Rollback()
 	for _, escalation := range []bool{false, true} {
-		filter := `class='interrupt' AND digest_at>0 AND digest_batch=''`
+		filter := `class='interrupt' AND digest_at>0 AND digest_batch='' AND hold_until=0`
 		if escalation {
 			filter = `class='inbox' AND read_at=0 AND due_at>0 AND due_at<=? AND escalation_batch=''`
 		}

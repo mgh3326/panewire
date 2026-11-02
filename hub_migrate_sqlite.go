@@ -243,7 +243,7 @@ func readHubInboxSnapshotTx(ctx context.Context, tx *sql.Tx, dialect laneInboxDi
 	for rows.Next() {
 		var i hubInboxSnapshotItem
 		var stored string
-		err := rows.Scan(&stored, &i.item.ID, &i.item.Lane, &i.item.Kind, &i.item.Class, &i.raw, &i.item.CreatedAt, &i.item.ReadAt, &i.item.AckedAt, &i.item.DueAt, &i.item.DigestAt, &i.item.DigestBatch, &i.item.EscalationBatch, &i.item.MustAck)
+		err := rows.Scan(&stored, &i.item.ID, &i.item.Lane, &i.item.Kind, &i.item.Class, &i.raw, &i.item.CreatedAt, &i.item.ReadAt, &i.item.AckedAt, &i.item.DueAt, &i.item.DigestAt, &i.item.DigestBatch, &i.item.EscalationBatch, &i.item.MustAck, &i.item.HoldUntil)
 		if err == nil {
 			// Snapshots hold the raw key, so the two backends compare.
 			i.key, err = laneInboxKeyFromStored(dialect, stored)
@@ -365,8 +365,8 @@ func copyHubInboxSnapshot(ctx context.Context, db *sql.DB, snapshot hubInboxSnap
 		if i.item.MustAck {
 			mustAck = 1
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-			i.item.ID, laneInboxStoredKey(laneInboxPostgres, i.key), i.item.Lane, i.item.Kind, i.item.Class, i.raw, i.item.CreatedAt, i.item.ReadAt, i.item.AckedAt, i.item.DueAt, i.item.DigestAt, i.item.DigestBatch, i.item.EscalationBatch, mustAck); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack,hold_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+			i.item.ID, laneInboxStoredKey(laneInboxPostgres, i.key), i.item.Lane, i.item.Kind, i.item.Class, i.raw, i.item.CreatedAt, i.item.ReadAt, i.item.AckedAt, i.item.DueAt, i.item.DigestAt, i.item.DigestBatch, i.item.EscalationBatch, mustAck, i.item.HoldUntil); err != nil {
 			return false, err
 		}
 	}

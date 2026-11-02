@@ -694,7 +694,7 @@ func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (re
 // injectRelayEvent reports whether the injection was queued.
 func (h *HubServer) injectRelayEvent(kind string, event hubJobEventPayload, route reportRelayRoute, destinationAgent, persistedAgent *hubAgent, eventID int64, key string) bool {
 	h.registerRelayAckEvent(kind, event, route.Machine, route.Pane, eventID)
-	if !destinationAgent.queueRelay(relayInjectDirective(kind, event, route, eventID)) {
+	if !destinationAgent.queueRelay(h.inboxRelayDirective(kind, event, route, eventID)) {
 		// The row is durable but this injection never happened. Holding the
 		// key back would swallow the node's resend, and withholding the
 		// acknowledgement would keep that resend coming forever. Do neither:
@@ -713,7 +713,7 @@ func (h *HubServer) injectRelayEvent(kind string, event hubJobEventPayload, rout
 
 func (h *HubServer) injectLaneRelayEvent(event hubJobEventPayload, route reportRelayRoute, agent *hubAgent, eventID int64, key string) bool {
 	h.registerRelayAckEvent("lane.event", event, route.Machine, route.Pane, eventID)
-	if !agent.queueRelay(relayInjectDirective("lane.event", event, route, eventID)) {
+	if !agent.queueRelay(h.inboxRelayDirective("lane.event", event, route, eventID)) {
 		h.forgetRelayEvent(key)
 		h.forgetRelayAckEvent(eventID, event.JobID)
 		h.broadcastRelayUnrouted(event)
@@ -1300,7 +1300,7 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent, source string
 	}
 	if record.Kind == "lane.event" {
 		h.registerRelayAckEvent("lane.event", event, route.Machine, route.Pane, record.ID)
-		if !agent.queueRelay(relayInjectDirective("lane.event", event, route, record.ID)) {
+		if !agent.queueRelay(h.inboxRelayDirective("lane.event", event, route, record.ID)) {
 			h.forgetRelayEvent(key)
 			h.forgetRelayAckEvent(record.ID, event.JobID)
 			h.broadcastRelayUnrouted(event)

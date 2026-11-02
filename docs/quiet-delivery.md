@@ -213,6 +213,57 @@ for one receiving lane within the oldest item's window become one turn. A
 single item is also delayed by that window. Must-act tags and chat UI turns
 bypass batching. The flush runs every 100ms; a batch is never sent early.
 
+## Holding interrupts while a receiver works
+
+A receiving lane can opt into `hold_while_working`. The hub holds interrupt-class
+notices only while a fresh, complete heartbeat snapshot positively reports its
+pane as `working`. Idle/done releases them on the next flush (normally 100 ms).
+Missing, stale, truncated, disconnected or unknown state never starts or extends
+a hold. The oldest arrival's `max_hold` caps the queue even if the pane stays
+working; later arrivals cannot extend it. This setting does not change inbox-class
+handling or require a supported `agents:` entry.
+
+Recommended desk policy, added to an operator-owned copy of the default file:
+
+```yaml
+lanes:
+  desk:
+    hold_while_working:
+      max_hold: 10m
+      handoff_bytes: 1500
+      handoff_items: 3
+```
+
+`max_hold` must be positive. Omitting the block disables holding; thresholds
+must be nonnegative and zero/omitted values use the defaults shown above. A
+policy-wide block supplies defaults, and a lane block replaces it. The existing
+`--delivery-policy off` kill switch disables holding and document writes too.
+Old nodes without working-state reports deliver as before.
+
+READY, FINDINGS, BLOCKED and MERGED interrupt notices can be held. The READY tag
+still selects the interrupt class, but does not bypass this hold. Types `decision`
+and `order`, kinds `job.escalate`, `job.lost`, `job.revoked`, operator chat UI turns,
+and whole-word BLOCKER/URGENT/ESC tags always bypass the queue. BOUNCE and
+needs_decision tags also bypass it. Original IDs and must-ack requirements remain
+available through `inbox list` and `inbox ack`.
+
+One release produces one injection with a first-line count such as
+`[batch 7: BLOCKED 1, FINDINGS 1, MERGED 2, READY 3]`. Producer retries reuse the
+saved identity; delivered replays do not enter the queue, and acknowledged items
+are excluded before counting. Held items and claimed releases survive restart.
+
+When full batch text **exceeds** `handoff_bytes`, or its count **exceeds**
+`handoff_items`, the hub PUTs the full originals into an hk document under
+`inbox/<lane>/<UTC timestamp>-<unique suffix>`. The injection contains the counts,
+`hk:doc <key>` and bounded one-line titles. Document retries reuse the same key.
+The relay's small durable reference resolves to the saved injection on replay;
+keep the inbox database alongside the hub as described above.
+
+If the document write fails, the injection falls back to full text. The existing
+node directive ceiling is 24 KiB: a fallback too large for that envelope stays
+durable and retries document handoff, rather than truncating or dropping items.
+The normal relay persistence/retry requirements still apply during an hk outage.
+
 ## Inbox commands and API
 
 Set `PANEWIRE_HUB_URL`, `PANEWIRE_HUB_TOKEN_ENV` (path to the existing private

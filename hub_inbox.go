@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -117,16 +118,25 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	}
 	lane := h.receivingLane(kind, *event)
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
+	holdClass := class == "interrupt"
 	if class == "inbox" && h.inboxImmediate(lane, kind) {
 		class = "interrupt"
 	}
 	deadline, window := h.inbox.policy.timing(lane, class)
-	// A must-ack type is typed into the pane itself, never folded into a
-	// digest: the receiver acks the item it saw.
+	// Ordinary deadline digests still exclude must-ack types. Working holds
+	// retain each original ID so the receiver can acknowledge its items.
 	if event.noDigest || h.inbox.policy.mustAct(lane, *event) || mustAckNotifyTypes[event.NotifyType] || chatRelayEventPattern.MatchString(event.EventID) {
 		window = 0
 	}
-	item, err := h.inbox.store.put(relayEventDedupeKey(kind, *event), lane, kind, class, *event, h.now().UTC(), deadline, window)
+	hold := time.Duration(0)
+	if h.inbox.policy.holdPolicy(lane) != nil && !holdableEvent(kind, *event) {
+		window = 0
+	}
+	if settings := h.inbox.policy.holdPolicy(lane); settings != nil && holdClass && holdableEvent(kind, *event) && h.receiverInboxState(lane).working {
+		hold, _ = time.ParseDuration(settings.MaxHold)
+		window = 0
+	}
+	item, err := h.inbox.store.put(relayEventDedupeKey(kind, *event), lane, kind, class, *event, h.now().UTC(), deadline, window, hold)
 	if err != nil {
 		if class == "interrupt" {
 			event.DeliveryClass = class
@@ -138,7 +148,7 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	}
 	// The durable decision wins over changed config or a changed retry body.
 	event.DeliveryClass = item.Class
-	if item.Class != "inbox" && item.DigestAt == 0 {
+	if item.Class != "inbox" && item.DigestAt == 0 && item.HoldUntil == 0 {
 		return result, false
 	}
 	if sender != nil {
@@ -161,6 +171,7 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 type receiverInboxState struct {
 	supported bool
 	idle      bool
+	working   bool
 }
 
 func (h *HubServer) receiverInboxState(lane string) receiverInboxState {
@@ -184,7 +195,7 @@ func (h *HubServer) receiverInboxState(lane string) receiverInboxState {
 	}
 	for _, session := range snap.sessions {
 		if session.PaneID == route.Pane {
-			return receiverInboxState{supported: h.inbox.policy.agentSupported(session.Harness), idle: eligibleIdleWakeStatus(session.Status)}
+			return receiverInboxState{supported: h.inbox.policy.agentSupported(session.Harness), idle: eligibleIdleWakeStatus(session.Status), working: strings.EqualFold(session.Status, "working")}
 		}
 	}
 	return receiverInboxState{}
@@ -212,7 +223,7 @@ func (h *HubServer) inboxImmediate(lane, kind string) bool {
 // unconfirmed replay can claim an injection. Old handoffkeep rows are migrated
 // to the inbox before being retired; a failed retire is harmless and retried.
 func (h *HubServer) replayInbox(record handoffkeepRelayEvent) bool {
-	if h.inbox == nil || record.DeliveredAt != "" || isUnconfirmedMarkRecord(record) {
+	if h.inbox == nil || record.DeliveredAt != "" || h.isHeldBatch(record.OwnerLane, record.EventID) || isUnconfirmedMarkRecord(record) {
 		return false
 	}
 	event := relayEventFromRecord(record)
@@ -318,6 +329,11 @@ func (h *HubServer) flushInbox() {
 	}
 	failed := false
 	defer func() { h.noteInboxFlushResult(failed) }()
+	if err := h.makeHeldBatches(); err != nil {
+		h.logger.Error("held inbox batching failed")
+		failed = true
+		return
+	}
 	if err := h.inbox.store.makeBatches(h.now().UTC()); err != nil {
 		h.logger.Error("inbox batching failed")
 		failed = true
@@ -329,9 +345,30 @@ func (h *HubServer) flushInbox() {
 		failed = true
 		return
 	}
+	// A held batch that cannot be prepared (no document store, or the PUT keeps
+	// failing) stays retained and blocks only its own lane; other lanes flush.
+	blockedLanes := map[string]bool{}
 	for _, b := range batches {
 		if h.closeCtx.Err() != nil {
 			return
+		}
+		if blockedLanes[b.Lane] {
+			continue
+		}
+		held := strings.HasPrefix(b.ID, "held-")
+		if held {
+			lane := b.Lane
+			var err error
+			b, err = h.prepareHeldBatch(b)
+			if err != nil {
+				h.logger.Error("held inbox preparation failed; batch retained", "lane", lane)
+				failed = true
+				blockedLanes[lane] = true
+				continue
+			}
+		}
+		if held && b.Text == "" {
+			continue
 		}
 		if reason := b.invalidReason(); reason != "" {
 			if err := h.inbox.store.quarantineBatch(b.ID, reason); err != nil {
@@ -341,7 +378,11 @@ func (h *HubServer) flushInbox() {
 			}
 			continue
 		}
-		event := hubJobEventPayload{JobID: laneEventTransportID(b.Lane, b.ID), Epoch: 1, OwnerLane: b.Lane, EventID: b.ID, Text: b.Text, DeliveryClass: "interrupt", DeliverPolicy: "now", noDigest: true}
+		relayText := b.Text
+		if held {
+			relayText = strings.Split(b.Text, " | ")[0] + " | panewire inbox list --lane " + b.Lane
+		}
+		event := hubJobEventPayload{JobID: laneEventTransportID(b.Lane, b.ID), Epoch: 1, OwnerLane: b.Lane, EventID: b.ID, Text: relayText, DeliveryClass: "interrupt", DeliverPolicy: "now", noDigest: true}
 		result := h.relayLaneEventContext(h.closeCtx, event, nil)
 		// Handoffkeep now owns the stable batch identity, including an unrouted
 		// batch. Its usual replay owns retries from here, without re-escalating.
