@@ -21,6 +21,16 @@ func TestAsyncSpawnLateResultReconcilesAgainstSameNode(t *testing.T) {
 	for _, outcome := range []string{nodePaneReadOK, nodePaneChanged, "completed-and-reaped", "completed-wrong-pane"} {
 		t.Run(outcome, func(t *testing.T) {
 			h := asyncSpawnHub(t)
+			if strings.HasPrefix(outcome, "completed-") {
+				paneID := "pane-1"
+				if outcome == "completed-wrong-pane" {
+					paneID = "another-pane"
+				}
+				h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+					return &fleet.App{JobStore: spawnJobsFixture{record: map[string]any{"state": "completed", "host": "machine-a", "pane_id": paneID, "label": "test-job", "profile": "codex-sol", "task_id": 42}}, Out: out, Err: errout}, nil
+				}
+			}
+
 			server := httptest.NewServer(h.Handler())
 			defer server.Close()
 			node := t14Node(t, h, server, true)
@@ -77,13 +87,6 @@ func TestAsyncSpawnLateResultReconcilesAgainstSameNode(t *testing.T) {
 			}
 			if strings.HasPrefix(outcome, "completed-") {
 				result.Outcome = nodePaneGone
-				paneID := receipt.Pane
-				if outcome == "completed-wrong-pane" {
-					paneID = "another-pane"
-				}
-				h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-					return &fleet.App{JobStore: spawnJobsFixture{record: map[string]any{"state": "completed", "host": "machine-a", "pane_id": paneID, "label": receipt.Label, "profile": receipt.Profile, "task_id": 42}}, Out: out, Err: errout}, nil
-				}
 			}
 			nodeCommandReplyTo(t, node, command, map[string]any{"result": result})
 			select {

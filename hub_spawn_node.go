@@ -170,7 +170,12 @@ func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientCon
 func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) (result hubSpawnResult) {
 	// reason and detail refine result.Error in the node_spawn fleet event.
 	var reason, detail string
-	defer func() { client.recordHubSpawnOutcome(message, result, reason, detail) }()
+	defer func() {
+		if result.RC != 0 && spawnResultFix(result.StdoutTail) == "" {
+			result.StdoutTail = hubSpawnTailWithStderr(result.StdoutTail, "Fix: "+nodeSpawnRefusalFix(result.Error, reason))
+		}
+		client.recordHubSpawnOutcome(message, result, reason, detail)
+	}()
 	result = hubSpawnResult{RequestID: message.RequestID, Retryable: true}
 	if parent.Err() != nil {
 		result.RC = 124

@@ -287,6 +287,10 @@ func TestCodexTrustPromptStopsSpawnAndCleansResources(t *testing.T) {
 			started = true
 			return Result{Code: exitTimeout, Err: "agent startup timed out waiting for idle"}
 		}
+		if started && strings.HasPrefix(args, "agent list") {
+			raw, _ := json.Marshal(map[string]any{"agents": []Agent{{Pane: "w:p1", Name: s.Label, Kind: "codex", Status: "idle", CWD: s.CWD}}})
+			return Result{Out: string(raw)}
+		}
 		if started && strings.HasPrefix(args, "pane read") {
 			return Result{Out: string(screen)}
 		}
