@@ -1,0 +1,110 @@
+package fleet
+
+import (
+	"context"
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func TestUnratedCatalogParsers(t *testing.T) {
+	for _, input := range []string{
+		`{"catalog":[{"profile":"codex-sol","effort":"high","model_id":"sol-m","pool":"codex","grade":"unrated","gate":"default"}]}`,
+		"unrated codex-sol@high model=sol-m pool=codex gate=default\ncatalog=server\n",
+	} {
+		q := CLIQuota{Runner: &fakeRunner{Do: func(Command) Result { return Result{Out: input} }}, Binary: "pacelever"}
+		rows, err := q.Catalog(context.Background())
+		if err != nil || len(rows) != 1 || rows[0].Grade != "unrated" {
+			t.Fatalf("unrated catalog: rows=%+v err=%v", rows, err)
+		}
+	}
+}
+
+func TestUnratedGradedSelection(t *testing.T) {
+	for _, grade := range []string{"C", "B", "A", "A+", "S", "S+"} {
+		t.Run(grade, func(t *testing.T) {
+			a, s, q := leadFixture(t)
+			q.CatalogRows = []CatalogRow{
+				{Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"},
+				{Profile: "sonnet", Effort: "high", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "sonnet-m"},
+			}
+			s.Grade = grade
+			sel, err := a.selectProfile(context.Background(), s)
+			if err != nil || sel.chosen.row.Grade == "unrated" {
+				t.Fatalf("graded selection: sel=%+v err=%v", sel, err)
+			}
+			if got := candOutcome(sel.record(), "codex-sol", "high"); got["grade"] != "unrated" || got["reason"] != "grade_unrated" {
+				t.Fatalf("unrated skip reason: %v", got)
+			}
+			if gateAsked(q, "codex-sol", "high") {
+				t.Fatal("graded selection asked an unrated rung's quota gate")
+			}
+		})
+	}
+}
+
+func TestUnratedLeadConsultResolve(t *testing.T) {
+	for _, role := range []string{"lead", "consult"} {
+		t.Run(role, func(t *testing.T) {
+			a, _, q := leadFixture(t)
+			q.CatalogRows = []CatalogRow{{Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"}}
+			if err := a.resolveCmd(context.Background(), []string{"--role", role, "--json"}); err != nil {
+				t.Fatal(err)
+			}
+			var result resolveResult
+			if err := json.Unmarshal([]byte(a.Out.(interface{ String() string }).String()), &result); err != nil {
+				t.Fatal(err)
+			}
+			chosen, _ := result.Selection["chosen"].(map[string]any)
+			if result.Profile != "codex-sol" || result.Effort != "high" || result.Grade != "" || chosen["grade"] != "unrated" || result.OutcomeCode != outcomeAdmitted {
+				t.Fatalf("unrated %s resolve: %+v", role, result)
+			}
+		})
+	}
+}
+
+func TestUnratedSeatCheck(t *testing.T) {
+	s := Seat{Canon: "codex-sol", Kind: "codex", Family: "openai", Capability: "standard", Roles: []string{"builder", "counsel", "worker", "tester", "reviewer"}}
+	l := Launch{Profile: "codex-sol", ModelID: "sol-m", Effort: "high", Grade: "unrated", Gate: "default"}
+	for _, tc := range []struct {
+		role, grade string
+		want        int
+	}{{"builder", "", 0}, {"counsel", "", 0}, {"worker", "C", exitSeatRefused}, {"tester", "C", exitSeatRefused}, {"reviewer", "C", exitSeatRefused}} {
+		if got := code(s.Check(l, tc.role, tc.grade, "anthropic", "", nil, false)); got != tc.want {
+			t.Errorf("%s grade=%q: exit=%d want=%d", tc.role, tc.grade, got, tc.want)
+		}
+	}
+	l.Grade = "unknown"
+	if got := code(s.Check(l, "builder", "", "", "", nil, false)); got != exitConfig {
+		t.Fatalf("unknown grade accepted for lead: exit=%d", got)
+	}
+}
+
+func TestUnratedPlanOutput(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		for _, top := range []bool{false, true} {
+			a, q, _, _, out := planFixture(t)
+			q.CatalogRows = append(q.CatalogRows, CatalogRow{Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"})
+			args := []string{"--grade", "A", "--t", "T1"}
+			if top {
+				q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "unrated", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
+				q.GateDo = gatePools(map[string]string{"opus": "claude"})
+				serveRouting(a, routingDocV1)
+				args = []string{"--role", "builder", "--t", "T1"}
+			}
+			if asJSON {
+				args = append(args, "--json")
+			}
+			if err := a.planCmd(context.Background(), args); err != nil {
+				t.Fatalf("top=%t json=%t: %v\n%s", top, asJSON, err, out.String())
+			}
+			if asJSON {
+				if !strings.Contains(out.String(), `"grade": "unrated"`) {
+					t.Fatalf("plan JSON omitted unrated: %s", out.String())
+				}
+			} else if !strings.Contains(out.String(), "grade=unrated") {
+				t.Fatalf("plan text omitted unrated: %s", out.String())
+			}
+		}
+	}
+}

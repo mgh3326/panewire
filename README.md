@@ -1,6 +1,6 @@
 # panewire
 
-Panewire is a local daemon and CLI for watching agent panes, waiting on stable state, and delivering prompts with verified evidence.
+Panewire is a daemon, hub and CLI for agent placement, launch, job lifecycle, pane observation and verified prompt delivery. The launcher packages and job ledger formerly owned by runtug are now part of panewire.
 
 ## Lane routing
 
@@ -36,13 +36,13 @@ R2 adds `prompt` delivery with target preflight, identity checks, submission pro
 
 ## Scope
 
-The first usable slice is deliberately small:
+Pane observation and delivery commands include:
 
 - `wait` for a durable inbox file or a stable herdr agent state.
 - `prompt` for verified delivery to an already-running pane.
 - A local SQLite log of observed herdr and inbox events.
 
-The file inbox and pane injection remain the system of record. panewire automates the surrounding watching, checking, waiting, and recording procedures; it does not turn session-to-session coordination into server communication.
+The durable inbox, job ledger and verified pane operations preserve evidence as the hub coordinates placement and lifecycle.
 
 Spawning is the responsibility of `runtug`; panewire is a messaging and monitoring layer for sessions that are already alive.
 
@@ -200,3 +200,29 @@ those files to the owner lane.
 - **Concurrency**: the check, the sequence choice and the publish run under the
   job's `.wrk-events.lock` (the lock `job.completed` writers take), and the
   record lands by hard link, which never replaces an existing name.
+
+## Agent launch and lifecycle
+
+Use `panewire spawn` with the existing task, role, quota and landing checks, or
+`panewire work TASK_ID` / `panewire lead TASK_ID` for task-derived defaults.
+Explicit flags override preset defaults. `--dry-run` stays read-only and shows
+the same admission and placement plan as the equivalent long command.
+
+```sh
+panewire work 42 --dry-run
+panewire lead 42 --parent caller-lane --dry-run
+panewire spawn -c /work/project.feature -p /brief.md -l worker-a --task 42 --t T1 --owner caller-lane --report /jobs/worker-a/report.md --dry-run
+panewire done worker-a --report /jobs/worker-a/report.md
+panewire reap --lane caller-lane
+```
+
+Hosts and workspaces remain configuration-driven. Short host aliases resolve
+to configured machine ids; workspace labels resolve on the executing host.
+Without `-w`, the executing host's configured workspace is used. Confirmed
+pre-landing failures permit a same-id retry on that host, while live duplicates
+still refuse with exit 74. Refusals include the corrective action.
+
+See [spawn configuration and exit statuses](docs/config.md) and
+[import evidence](docs/spawn-import.md). This replaces runtug; no compatibility
+binary or forwarding shim is installed. The remaining hub orchestration and
+caller changes ship in the coordinated cutover before old binaries are removed.

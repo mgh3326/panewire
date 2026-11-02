@@ -1,0 +1,16 @@
+{
+  "version": 2,
+  "source_doc": "policy/quota-stop",
+  "order": ["free", "waste", "ranked", "credit"],
+  "free": [
+    {
+      "pool": "devin",
+      "models": ["swe-2", "swe-2-medium", "swe-2-max"]
+    }
+  ],
+  "credit_pools": ["anthropic-api", "openai-api"],
+  "waste_below_projected_pct": 100,
+  "exclude_at_projected_pct": 100,
+  "waste_risk": {"horizon_hours": 0, "min_unused_pct": 20},
+  "credit_final_days": 4
+}

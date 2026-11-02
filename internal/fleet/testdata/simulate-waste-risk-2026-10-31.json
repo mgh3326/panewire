@@ -1,0 +1,13 @@
+{
+  "now": "2026-10-31T08:50:00Z",
+  "grade": "A",
+  "role": "worker",
+  "pools": [
+    {"id": "devin", "class": "spend", "used_pct": 4, "resets_at": "2026-11-01T00:00:00Z", "window": "1d"},
+    {"id": "claude", "class": "spend", "used_pct": 31, "resets_at": "2026-10-31T16:50:00Z", "window": "7d"}
+  ],
+  "candidates": [
+    {"profile": "devin-swe2", "seat": "devin-swe2", "effort": "high", "grade": "A", "pool": "devin", "gate": "default", "model_id": "swe-2", "free": true},
+    {"profile": "sonnet", "seat": "sonnet", "effort": "high", "grade": "A", "pool": "claude", "gate": "default", "model_id": "m"}
+  ]
+}
