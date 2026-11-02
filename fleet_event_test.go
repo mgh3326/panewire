@@ -138,6 +138,9 @@ func TestHubSpawnFailingEngineStderrReachesResultBoundedAndRedacted(t *testing.T
 	if !strings.Contains(result.StdoutTail, "panewire: quota gate refused:") {
 		t.Fatalf("engine's stderr tail must reach the result: %q", result.StdoutTail)
 	}
+	if spawnResultFix(result.StdoutTail) == "" || strings.Count(result.StdoutTail, "stderr: ") != 1 {
+		t.Fatalf("refusal and actionable fix must share the bounded stderr section: %q", result.StdoutTail)
+	}
 	if len(result.StdoutTail) > hubSpawnResultTail || len(result.StdoutTail) > len("stderr: ")+hubSpawnStderrTail {
 		t.Fatalf("tail not bounded: %d bytes", len(result.StdoutTail))
 	}
