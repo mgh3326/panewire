@@ -329,10 +329,11 @@ func (h *HubServer) flushInbox() {
 	}
 	failed := false
 	defer func() { h.noteInboxFlushResult(failed) }()
+	// A held-batching failure must not starve ordinary digests or batches
+	// that are already pending for other lanes.
 	if err := h.makeHeldBatches(); err != nil {
-		h.logger.Error("held inbox batching failed")
+		h.logger.Error("held inbox batching failed; continuing with ordinary batches")
 		failed = true
-		return
 	}
 	if err := h.inbox.store.makeBatches(h.now().UTC()); err != nil {
 		h.logger.Error("inbox batching failed")
