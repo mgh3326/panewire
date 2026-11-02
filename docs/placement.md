@@ -171,18 +171,6 @@ for capped machines report `tasks` and `task_slots` so the counting is
 visible in the response itself; uncapped machines omit both fields so the
 wire stays byte-identical for deployments without a `machines` map.
 
-`GET /v1/placement/slots` answers "which machine has room" without running a
-placement decision. It shares `/v1/placement`'s operator-token boundary
-(unauthenticated requests get `401`) and returns each machine's used count and
-configured cap (`task_slots` is `null` when uncapped):
-
-```json
-{"machines":[{"machine":"desktop","tasks_used":1,"task_slots":2},{"machine":"mac-dev","tasks_used":0,"task_slots":3},{"machine":"mac-personal","tasks_used":2,"task_slots":3}],"policy_status":"current","asof":"2026-09-23T09:40:00Z"}
-```
-
-The slot list covers the policy's `local_machine` + `spill_targets`, every
-`machines` entry, and every machine with a node record.
-
 Two counting edge cases are deliberate. Jobs spawned with `--owner
 <lane>` where the lane is a coordinator (e.g. `director-N` spawning workers
 directly) all share that lane, so they count as one task — the same rule as
@@ -279,7 +267,7 @@ only watches a configured path. The procedure is therefore:
    once the path is configured, later edits hot-reload on the placement
    modtime check.
 3. Verify: `GET /v1/placement?class=worker` reports `"policy_status":"current"`
-   and `GET /v1/placement/slots` shows `task_slots` 3/3/2.
+   and capped candidates show their `tasks` and `task_slots`.
 4. If the file is rejected at startup the service refuses to boot; fix the
    JSON rather than bypassing validation (`machines` machine ids must match
    the node id pattern and `task_slots` must be 1–100).

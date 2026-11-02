@@ -537,7 +537,7 @@ func TestLanesNodeTokenRouteTable(t *testing.T) {
 		{name: "burst release", method: http.MethodPost, path: "/v1/burst/release", body: `{}`, nodeWant: []int{401}, opWant: 400},
 		{name: "burst holds", method: http.MethodGet, path: "/v1/burst/holds", nodeWant: []int{401}, opWant: 200},
 		{name: "placement", method: http.MethodGet, path: "/v1/placement", nodeWant: []int{401}, opWant: 400},
-		{name: "placement slots", method: http.MethodGet, path: "/v1/placement/slots", nodeWant: []int{401}, opWant: 200},
+		{name: "placement slots retired", method: http.MethodGet, path: "/v1/placement/slots", nodeWant: []int{404}, opWant: 404},
 		{name: "retired quota list", method: http.MethodGet, path: "/v1/quota", nodeWant: []int{404}, opWant: 404},
 		{name: "jobs", method: http.MethodGet, path: "/v1/jobs", nodeWant: []int{401}, opWant: 200},
 		{name: "orphaned jobs", method: http.MethodGet, path: "/v1/jobs/orphaned", nodeWant: []int{401}, opWant: 200},
@@ -554,10 +554,10 @@ func TestLanesNodeTokenRouteTable(t *testing.T) {
 		{name: "retired per-machine quota request", method: http.MethodPost, path: "/v1/quota/machine-a", body: `{}`, nodeWant: []int{404}, opWant: 404},
 		{name: "chat question upsert", method: http.MethodPost, path: "/v1/chat/questions", body: `{}`, nodeWant: []int{401}, opWant: 503},
 
-		{name: "quota v2 bindings tombstone", method: http.MethodGet, path: "/v2/quota/bindings", nodeWant: []int{503}, opWant: 503},
-		{name: "quota v2 binding put tombstone", method: http.MethodPut, path: "/v2/quota/bindings", body: `{}`, nodeWant: []int{503}, opWant: 503},
-		{name: "quota v2 observations tombstone", method: http.MethodGet, path: "/v2/quota/observations", nodeWant: []int{503}, opWant: 503},
-		{name: "quota v2 observations post tombstone", method: http.MethodPost, path: "/v2/quota/observations", body: `{}`, nodeWant: []int{503}, opWant: 503},
+		{name: "quota v2 bindings retired", method: http.MethodGet, path: "/v2/quota/bindings", nodeWant: []int{404}, opWant: 404},
+		{name: "quota v2 binding put retired", method: http.MethodPut, path: "/v2/quota/bindings", body: `{}`, nodeWant: []int{404}, opWant: 404},
+		{name: "quota v2 observations retired", method: http.MethodGet, path: "/v2/quota/observations", nodeWant: []int{404}, opWant: 404},
+		{name: "quota v2 observations post retired", method: http.MethodPost, path: "/v2/quota/observations", body: `{}`, nodeWant: []int{404}, opWant: 404},
 		{name: "agent websocket is the node route", method: http.MethodGet, path: "/v1/agent", nodeWant: []int{200, 400, 426}, opWant: 401},
 
 		// The browser surfaces are gated by authorizeUI/authorizeChat (operator

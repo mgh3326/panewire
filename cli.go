@@ -283,7 +283,7 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	burstWakeMAC := fs.String("burst-wake-mac", "", "Wake-on-LAN MAC for hub burst events (defaults to failover MAC when configured)")
 	burstPoweroffAllowed := fs.Bool("burst-poweroff-allowed", false, "allow authenticated hub burst down events to run sudo -n /usr/sbin/poweroff")
 	wakeTargets := fs.String("wake-targets", "", "waker node's JSON allowlist: target machine → MAC and UDP broadcast for hub wake events")
-	statePublish := fs.Bool("state-publish", false, "publish this host's fleet state (spawn start/end, and quota for --state-quota-pools) to the hub; see docs/fleet-state.md")
+	statePublish := fs.Bool("state-publish", false, "publish this host's fleet state (quota for --state-quota-pools) to the hub; see docs/fleet-state.md")
 	stateQuotaPools := fs.String("state-quota-pools", "", "comma-separated pacelever pools whose accounts this host measures; requires --state-publish")
 	stateQuotaInterval := fs.Duration("state-quota-interval", defaultFleetQuotaInterval, "how often to refresh and publish --state-quota-pools")
 	idleShutdown := fs.Duration("idle-shutdown", 0, "power this machine off after being fully idle this long (0 = off)")

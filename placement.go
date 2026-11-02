@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"net/url"
 	"os"
-	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -316,50 +315,31 @@ type PlacementSignals struct {
 	BridgedJobs  int      `json:"bridged_jobs"`
 }
 
-// PlacementQuotaDecision survives on the wire only: a new hub emits an
-// `allow` stub when a caller still asks for a pool, so a pre-change
-// `panewire place` keeps accepting the response during the rolling upgrade.
-type PlacementQuotaDecision struct {
-	Pool         string `json:"pool"`
-	AccountFP    string `json:"account_fp,omitempty"`
-	Decision     string `json:"decision"`
-	Reason       string `json:"reason"`
-	PolicyStatus string `json:"policy_status"`
-}
-
-// Legacy selector patterns kept for the compat stub's parameter check.
-var (
-	hubQuotaPoolPattern      = regexp.MustCompile(`^[a-z][a-z0-9._-]{0,63}$`)
-	hubQuotaAccountFPPattern = regexp.MustCompile(`^[0-9a-f]{8}$`)
-)
-
 type PlacementResult struct {
-	Decision     string                  `json:"decision"`
-	Candidates   []PlacementCandidate    `json:"candidates"`
-	Source       string                  `json:"source"`
-	Asof         time.Time               `json:"asof"`
-	PolicyStatus string                  `json:"policy_status"`
-	Reason       string                  `json:"reason,omitempty"`
-	Quota        *PlacementQuotaDecision `json:"quota,omitempty"`
+	Decision     string               `json:"decision"`
+	Candidates   []PlacementCandidate `json:"candidates"`
+	Source       string               `json:"source"`
+	Asof         time.Time            `json:"asof"`
+	PolicyStatus string               `json:"policy_status"`
+	Reason       string               `json:"reason,omitempty"`
 }
 
 // MarshalJSON keeps the internal unavailable sentinel useful to callers while
 // presenting the API contract's null decision to external clients.
 func (r PlacementResult) MarshalJSON() ([]byte, error) {
 	type wirePlacementResult struct {
-		Decision     *string                 `json:"decision"`
-		Candidates   []PlacementCandidate    `json:"candidates"`
-		Source       string                  `json:"source"`
-		Asof         time.Time               `json:"asof"`
-		PolicyStatus string                  `json:"policy_status"`
-		Reason       string                  `json:"reason,omitempty"`
-		Quota        *PlacementQuotaDecision `json:"quota,omitempty"`
+		Decision     *string              `json:"decision"`
+		Candidates   []PlacementCandidate `json:"candidates"`
+		Source       string               `json:"source"`
+		Asof         time.Time            `json:"asof"`
+		PolicyStatus string               `json:"policy_status"`
+		Reason       string               `json:"reason,omitempty"`
 	}
 	var decision *string
 	if r.Decision != "unavailable" {
 		decision = &r.Decision
 	}
-	return json.Marshal(wirePlacementResult{Decision: decision, Candidates: r.Candidates, Source: r.Source, Asof: r.Asof, PolicyStatus: r.PolicyStatus, Reason: r.Reason, Quota: r.Quota})
+	return json.Marshal(wirePlacementResult{Decision: decision, Candidates: r.Candidates, Source: r.Source, Asof: r.Asof, PolicyStatus: r.PolicyStatus, Reason: r.Reason})
 }
 
 func (r *PlacementResult) UnmarshalJSON(data []byte) error {
@@ -515,11 +495,6 @@ func (h *HubServer) setPlacementPolicyFailureLocked(failure string) {
 	}
 }
 
-// handleQuotaV2Gone is the retired /v2/quota shadow store's tombstone.
-func (h *HubServer) handleQuotaV2Gone(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "quota_v2_unsupported"})
-}
-
 func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeOperator(r) {
 		hubUnauthorized(w)
@@ -530,20 +505,7 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid placement class", http.StatusBadRequest)
 		return
 	}
-	// The retired quota selector stays answerable for one release: an old
-	// caller still sends it, so the response carries an allow stub.
-	pool, accountFP := r.URL.Query().Get("pool"), r.URL.Query().Get("account_fp")
-	if (pool == "" && accountFP != "") || (pool != "" && !hubQuotaPoolPattern.MatchString(pool)) || (accountFP != "" && !hubQuotaAccountFPPattern.MatchString(accountFP)) {
-		http.Error(w, "invalid quota selector", http.StatusBadRequest)
-		return
-	}
 	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"))
-	if pool != "" {
-		// An old caller validating the quota object gets a benign allow
-		// stub: quota is retired, and any stale rules were already logged
-		// and stripped on (re)load.
-		result.Quota = &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "allow", Reason: "quota_allowed", PolicyStatus: result.PolicyStatus}
-	}
 	writeJSON(w, http.StatusOK, placementWire(result, r.URL.Query().Get("signals") == "1"))
 }
 
@@ -562,64 +524,6 @@ func placementWire(result PlacementResult, withSignals bool) PlacementResult {
 	}
 	result.Candidates = candidates
 	return result
-}
-
-// PlacementSlotStatus is one machine's task-slot occupancy. TaskSlots is null
-// when the policy does not cap that machine.
-type PlacementSlotStatus struct {
-	Machine   string `json:"machine"`
-	TasksUsed int    `json:"tasks_used"`
-	TaskSlots *int   `json:"task_slots"`
-}
-
-type placementSlotsResult struct {
-	Machines     []PlacementSlotStatus `json:"machines"`
-	PolicyStatus string                `json:"policy_status"`
-	Asof         time.Time             `json:"asof"`
-}
-
-// handlePlacementSlots reports per-machine task-slot usage with the same
-// operator auth boundary as /v1/placement. It answers "which machine has room"
-// without running the placement decision.
-func (h *HubServer) handlePlacementSlots(w http.ResponseWriter, r *http.Request) {
-	if !h.authorizeOperator(r) {
-		hubUnauthorized(w)
-		return
-	}
-	now := h.now().UTC()
-	h.mu.Lock()
-	h.reloadPlacementPolicyLocked()
-	policy := h.placementPolicy
-	if !policy.valid() {
-		policy = DefaultPlacementPolicy()
-	}
-	names := map[string]struct{}{policy.LocalMachine: {}}
-	for _, machine := range policy.SpillTargets {
-		names[machine] = struct{}{}
-	}
-	for machine := range policy.Machines {
-		names[machine] = struct{}{}
-	}
-	for machine := range h.nodes {
-		names[machine] = struct{}{}
-	}
-	views := make([]PlacementSlotStatus, 0, len(names))
-	for machine := range names {
-		tasks := 0
-		if record := h.nodes[machine]; record != nil {
-			tasks = countPlacementTasks(record.activeJobs)
-		}
-		var slots *int
-		if configured, exists := policy.Machines[machine]; exists {
-			value := configured.TaskSlots
-			slots = &value
-		}
-		views = append(views, PlacementSlotStatus{Machine: machine, TasksUsed: tasks, TaskSlots: slots})
-	}
-	status := h.placementPolicyStatus
-	h.mu.Unlock()
-	sort.Slice(views, func(i, j int) bool { return views[i].Machine < views[j].Machine })
-	writeJSON(w, http.StatusOK, placementSlotsResult{Machines: views, PolicyStatus: status, Asof: now})
 }
 
 func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementResult {

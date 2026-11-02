@@ -787,12 +787,6 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/state", h.handleFleetStateSnapshot)
 	// One-release tombstone: legacy producers still hit these during the
 	// upgrade window; answer a structured 503 instead of a bare 404.
-	mux.HandleFunc("GET /v2/quota/bindings", h.handleQuotaV2Gone)
-	mux.HandleFunc("PUT /v2/quota/bindings", h.handleQuotaV2Gone)
-	mux.HandleFunc("DELETE /v2/quota/bindings", h.handleQuotaV2Gone)
-	mux.HandleFunc("GET /v2/quota/observations", h.handleQuotaV2Gone)
-	mux.HandleFunc("POST /v2/quota/observations", h.handleQuotaV2Gone)
-	mux.HandleFunc("GET /v1/placement/slots", h.handlePlacementSlots)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("GET /v1/session-reap", h.handleSessionReap)
