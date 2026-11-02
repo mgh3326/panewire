@@ -28,7 +28,30 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 	ctx, done := h.inbox.store.op(h.closeCtx)
 	defer done()
 	hub := sentry.NewHub(h.spawnSentry, sentry.NewScope())
-	for key, value := range map[string]string{"job": task.Job, "host": result.Host, "profile": result.Profile, "role": result.Role, "rc": strconv.Itoa(result.RC)} {
+	host, profile, role := result.Host, result.Profile, result.Role
+	if task.Node != nil {
+		if host == "" {
+			host = task.Node.Machine
+		}
+		if profile == "" {
+			profile = hubSpawnArg(task.Node.Args, "-m")
+		}
+	}
+	if role == "" {
+		role = hubSpawnArg(task.Request.Args, "--role")
+	}
+	if host == "" {
+		host = "unassigned"
+	}
+	if profile == "" {
+		profile = "auto"
+	}
+	if role == "" {
+		role = "worker"
+	}
+	tags := map[string]string{"job": task.Job, "host": host, "profile": profile, "role": role, "rc": strconv.Itoa(result.RC)}
+
+	for key, value := range tags {
 		if value != "" {
 			hub.Scope().SetTag(key, value)
 		}
@@ -56,7 +79,7 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 	trace.Op = "spawn"
 	trace.StartTime = task.Deadline.Add(-time.Duration(task.Request.DeadlineSeconds) * time.Second)
 	trace.EndTime = h.now().UTC()
-	for key, value := range map[string]string{"job": task.Job, "host": result.Host, "profile": result.Profile, "role": result.Role, "rc": strconv.Itoa(result.RC)} {
+	for key, value := range tags {
 		if value != "" {
 			trace.SetTag(key, value)
 			hub.Scope().SetTag(key, value)
