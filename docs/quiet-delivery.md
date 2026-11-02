@@ -4,6 +4,10 @@ The hub CLI enables the embedded `delivery-policy.yaml` by default. Informationa
 notices enter a durable per-lane inbox; actionable notices keep the existing pane
 injection and verification path. Nothing is installed by this document.
 
+The reviewed `operator-desk` override keeps routine events in its inbox even
+when idle. An external scheduler owns its digest. See [desk inbox delivery](desk-inbox.md)
+for the type map and interrupt summary behavior.
+
 ```sh
 panewire emit --kind lane.event --lane desk --event-id build-ready \
   --deliver inbox --type report --text '[build] done | report posted'
@@ -14,8 +18,9 @@ panewire emit --kind lane.event --lane desk --event-id need-decision \
 The optional `delivery_class` and sender-declared `notify_type` travel through
 event files, the immediate local socket request, scanner, node outbox and hub
 ingress. `--deliver` selects the class for **all emit kinds** and `--type`
-declares one of `decision | order | ready | blocked | findings | report | ack | info`; an unknown
-value is a usage error. The existing JSON `deliver` field remains the
+declares one of the [notification types](desk-inbox.md#desk-inbox-delivery); an unknown
+value is a usage error. New types include `merged`, `idle-wake`, `progress`,
+`deploy-approval`, `watch-hold`, `culprit-hold`, and `automation-failed`. The existing JSON `deliver` field remains the
 separate node timing policy (`idle`, `now`, `max_wait=...`). No new field is sent
 in `relay.inject`; old daemons accept exactly their existing envelope. Missing
 classes or types from old emitters/daemons are classified at the upgraded hub. An old

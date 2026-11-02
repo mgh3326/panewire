@@ -116,7 +116,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	eventID := fs.String("event-id", "", "producer event id for lane.event")
 	text := fs.String("text", "", "payload for lane.event")
 	deliver := fs.String("deliver", "", "interrupt | inbox (otherwise receiving-lane policy)")
-	notifyType := fs.String("type", "", "notification type: decision | order | ready | blocked | findings | report | ack | info")
+	notifyType := fs.String("type", "", "notification type: decision | order | ready | merged | blocked | findings | idle-wake | progress | report | ack | info | deploy-approval | watch-hold | culprit-hold | automation-failed")
 	sink := fs.Bool("sink", false, "allow sink lane.event text up to 8192 bytes")
 	report := fs.String("report", "", "report path")
 	ownerLane := fs.String("owner-lane", "", "owning lane")

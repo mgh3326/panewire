@@ -39,6 +39,7 @@ type laneInboxStore struct {
 }
 
 type laneInboxItem struct {
+	SurfacedAt      int64              `json:"surfaced_at_ms,omitempty"`
 	HoldUntil       int64              `json:"hold_until_ms,omitempty"`
 	Fresh           bool               `json:"-"`
 	ID              int64              `json:"id"`
@@ -107,6 +108,8 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), laneInboxOpTimeout)
 	defer cancel()
 	for _, q := range []string{
+		inboxSurfaceSchema,
+		`CREATE INDEX IF NOT EXISTS lane_inbox_surfaces_lane ON lane_inbox_surfaces(lane,delivered_at)`,
 		`PRAGMA busy_timeout=5000`, `PRAGMA journal_mode=WAL`, `PRAGMA synchronous=FULL`,
 		`CREATE TABLE IF NOT EXISTS lane_inbox (
    id INTEGER PRIMARY KEY, event_key TEXT NOT NULL UNIQUE, lane TEXT NOT NULL,
@@ -397,10 +400,14 @@ const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at
 
 type inboxScanner interface{ Scan(...any) error }
 
-func scanLaneInbox(row inboxScanner) (laneInboxItem, error) {
+func scanLaneInbox(row inboxScanner, surfaced ...bool) (laneInboxItem, error) {
 	var i laneInboxItem
 	var payload string
-	err := row.Scan(&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch, &i.MustAck, &i.HoldUntil, &i.DeliveredAt)
+	fields := []any{&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch, &i.MustAck, &i.HoldUntil, &i.DeliveredAt}
+	if len(surfaced) > 0 && surfaced[0] {
+		fields = append(fields, &i.SurfacedAt)
+	}
+	err := row.Scan(fields...)
 	if err == nil {
 		err = json.Unmarshal([]byte(payload), &i.Event)
 	}
@@ -490,7 +497,7 @@ func (s *laneInboxStore) firstUnread(parent context.Context, lane string) (*lane
 }
 
 func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error) {
-	q := `SELECT ` + laneInboxColumns + ` FROM lane_inbox WHERE (?='' OR lane=?)`
+	q := `SELECT ` + laneInboxColumns + `,(SELECT COALESCE(max(delivered_at),0) FROM lane_inbox_surfaces surfaced WHERE surfaced.lane=lane_inbox.lane AND surfaced.through_id>=lane_inbox.id) FROM lane_inbox WHERE (?='' OR lane=?)`
 	if unread {
 		q += ` AND ` + laneInboxUnread
 	}
@@ -504,7 +511,7 @@ func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error)
 	defer rows.Close()
 	items := []laneInboxItem{}
 	for rows.Next() {
-		i, err := scanLaneInbox(rows)
+		i, err := scanLaneInbox(rows, true)
 		if err != nil {
 			return nil, err
 		}

@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"regexp"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
@@ -21,18 +22,19 @@ var defaultDeliveryPolicy []byte
 // stays legal.
 var deliveryTagShape = regexp.MustCompile(`^[0-9A-Za-z_](?:.*[0-9A-Za-z_])?$`)
 
-// These safety tags cannot be demoted by a custom inbox policy or an emitter.
+// Safety tags outrank inbox delivery. READY can be deferred by a lane that
+// explicitly opts into scheduler-owned summaries.
 var mustActDeliveryTags = regexp.MustCompile(`(?i)\b(?:BLOCKER|READY|ESC|BOUNCE|URGENT|needs_decision)\b`)
 
 // hubNotifyTypes is the closed vocabulary a producer declares with
 // `panewire emit --type`. The same set validates the wire field and the keys
 // of a policy's types: block, so a type that cannot be declared can never be
 // configured.
-var hubNotifyTypes = map[string]bool{"decision": true, "order": true, "ready": true, "blocked": true, "findings": true, "report": true, "ack": true, "info": true}
+var hubNotifyTypes = map[string]bool{"decision": true, "order": true, "merged": true, "idle-wake": true, "progress": true, "deploy-approval": true, "watch-hold": true, "culprit-hold": true, "automation-failed": true, "ready": true, "blocked": true, "findings": true, "report": true, "ack": true, "info": true}
 
 // defaultNotifyTypeClasses is the built-in type→class map. A policy file
 // overrides individual entries under types:; the rest stay built in.
-var defaultNotifyTypeClasses = map[string]string{"decision": "interrupt", "order": "interrupt", "ready": "interrupt", "blocked": "interrupt", "findings": "interrupt", "report": "inbox", "ack": "inbox", "info": "inbox"}
+var defaultNotifyTypeClasses = map[string]string{"merged": "inbox", "idle-wake": "inbox", "progress": "inbox", "deploy-approval": "interrupt", "watch-hold": "interrupt", "culprit-hold": "interrupt", "automation-failed": "interrupt", "decision": "interrupt", "order": "interrupt", "ready": "interrupt", "blocked": "interrupt", "findings": "interrupt", "report": "inbox", "ack": "inbox", "info": "inbox"}
 
 // mustAckNotifyTypes are the declared types a receiving session must
 // acknowledge explicitly (`panewire inbox ack`): a READY, an ESC decision, a
@@ -70,7 +72,13 @@ type deliveryHoldPolicy struct {
 	HandoffItems int    `yaml:"handoff_items"`
 }
 
+type inboxSummaryPolicy struct {
+	DigestPrefix string `yaml:"digest_prefix"`
+	MaxChars     int    `yaml:"max_chars"`
+}
+
 type deliveryLanePolicy struct {
+	InboxSummary     *inboxSummaryPolicy `yaml:"inbox_summary"`
 	HoldWhileWorking *deliveryHoldPolicy `yaml:"hold_while_working"`
 	Default          string              `yaml:"default"`
 	Deadlines        map[string]string   `yaml:"deadlines"`
@@ -142,6 +150,14 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 		return nil, fmt.Errorf("delivery policy needs a default")
 	}
 	validate := func(l *deliveryLanePolicy) error {
+		if v := l.InboxSummary; v != nil {
+			if v.MaxChars == 0 {
+				v.MaxChars = 300
+			}
+			if v.MaxChars < 240 || v.MaxChars > 300 || !strings.HasPrefix(v.DigestPrefix, "inbox/") || strings.ContainsAny(v.DigestPrefix, "\r\n ?#") || len(v.DigestPrefix) > 120 {
+				return fmt.Errorf("inbox_summary needs digest_prefix inbox/... and max_chars in 240..300")
+			}
+		}
 		if v := l.HoldWhileWorking; v != nil {
 			duration, err := time.ParseDuration(v.MaxHold)
 			if err != nil || duration <= 0 || v.HandoffBytes < 0 || v.HandoffItems < 0 {
@@ -240,7 +256,7 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 }
 
 func (p *deliveryPolicy) classify(lane, kind string, e hubJobEventPayload, replay bool) string {
-	if p.legacy || p.mustAct(lane, e) {
+	if p.legacy || p.mustAct(lane, e) || (p.Lanes[lane].InboxSummary != nil && (kind == "job.escalate" || kind == "job.lost" || kind == "job.revoked")) {
 		return "interrupt"
 	}
 	if e.DeliveryClass != "" {
@@ -314,18 +330,28 @@ func deliveryEventText(e hubJobEventPayload) string {
 }
 
 func (p *deliveryPolicy) mustAct(lane string, e hubJobEventPayload) bool {
+	if p.Lanes[lane].InboxSummary != nil {
+		switch e.NotifyType {
+		case "decision", "order", "deploy-approval", "watch-hold", "culprit-hold", "automation-failed":
+			return true
+		}
+	}
 	text := deliveryEventText(e)
-	if mustActDeliveryTags.MatchString(text) {
+	// The desk reviews READY asynchronously. Other lanes retain the existing
+	// READY safety tag. ESC and the remaining safety tags always interrupt.
+	desk := p.Lanes[lane].InboxSummary != nil
+	if mustActDeliveryTags.MatchString(text) && (!desk || neverHoldTags.MatchString(text)) {
 		return true
 	}
-	// Additional interrupt tags in either scope also outrank all inbox rules,
-	// even when another rule would otherwise match first.
 	for _, rules := range [][]deliveryRule{p.Lanes[lane].Rules, p.Rules} {
 		for _, rule := range rules {
 			if rule.Class != "interrupt" {
 				continue
 			}
 			for _, tag := range rule.tags {
+				if desk && tag.String() == `(?i)\bREADY\b` {
+					continue
+				}
 				if tag.MatchString(text) {
 					return true
 				}
