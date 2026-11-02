@@ -51,6 +51,23 @@ func TestHubRouteHitsLogsPatternsHourly(t *testing.T) {
 	}
 }
 
+// A websocket's handler runs while it stays connected, so a request counts on
+// arrival. Counting on return would hide an open subscriber.
+func TestHubRouteHitsCountOnArrival(t *testing.T) {
+	hub := &HubServer{}
+	mux := http.NewServeMux()
+	var during uint64
+	mux.HandleFunc("GET /v1/events", func(http.ResponseWriter, *http.Request) {
+		hub.routeHits.mu.Lock()
+		during = hub.routeHits.counts["GET /v1/events"]
+		hub.routeHits.mu.Unlock()
+	})
+	hub.countRoutes(mux).ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/v1/events", nil))
+	if during != 1 {
+		t.Fatalf("while the handler ran the route had %d hits, want 1", during)
+	}
+}
+
 // The hourly line comes from the hub's maintenance sweep.
 func TestHubRouteHitsLoggedBySweep(t *testing.T) {
 	var logs bytes.Buffer

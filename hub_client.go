@@ -187,8 +187,8 @@ type HubClient struct {
 	relayRecvSeq       int64 // assigned synchronously by the hub read loop.
 	idleWakeMu         sync.Mutex
 	idleWake           *idleWakeManager
-	// hubAcceptsSignals is whether this connection's hub advertised host_signals.
-	hubAcceptsSignals    atomic.Bool
+	// signalsPeer is the current connection, whose hub decides on host_signals.
+	signalsPeer          atomic.Pointer[hubClientConnection]
 	hostSignalsCollector func(context.Context) *HubHostSignals // fixture seam; nil collects
 	loadErrorWarned      atomic.Bool
 	stallBeatMu          sync.Mutex
@@ -519,8 +519,12 @@ func nextHubBackoff(current, maximum time.Duration) time.Duration {
 }
 
 type hubClientConnection struct {
-	connection *websocket.Conn
-	writeMu    sync.Mutex
+	// acceptsSignals is whether this connection's hub advertised host_signals. It
+	// lives on the connection so a late reader of an old one cannot set it for
+	// the next, which may reach an older hub.
+	acceptsSignals atomic.Bool
+	connection     *websocket.Conn
+	writeMu        sync.Mutex
 }
 
 type hubOutboundMessage struct {
@@ -1498,7 +1502,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
 	peer := &hubClientConnection{connection: connection}
 	// Each connection may reach a different hub build (failover, redeploy).
-	client.hubAcceptsSignals.Store(false)
+	client.signalsPeer.Store(peer)
 	// The hello carries spawn_v2, and the ping that follows it is the
 	// registration probe: a hub only answers a ping from a registered node. A hub
 	// that does not know the capabilities field drops the whole hello (see
@@ -1583,7 +1587,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 					manager.ApplyRoute(ctx, hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason})
 				}
 			case "hub.features":
-				client.hubAcceptsSignals.Store(slices.Contains(message.Features, hubFeatureHostSignals))
+				peer.acceptsSignals.Store(slices.Contains(message.Features, hubFeatureHostSignals))
 				continue
 			case "burst.holds":
 				client.burstMu.Lock()

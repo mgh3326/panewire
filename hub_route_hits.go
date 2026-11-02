@@ -49,12 +49,13 @@ func (hits *hubRouteHits) drain(now time.Time) map[string]uint64 {
 	return drained
 }
 
-// countRoutes wraps the hub's mux. The mux sets the request's Pattern as it
-// routes, so the count is taken after serving; a hijacked websocket counts when
-// its handler returns.
+// countRoutes wraps the hub's mux. A request counts on arrival, not on return:
+// a websocket's handler runs for as long as it stays connected, so a subscriber
+// would otherwise show no use at all.
 func (h *HubServer) countRoutes(mux *http.ServeMux) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		defer func() { h.routeHits.add(request.Pattern) }()
+		_, pattern := mux.Handler(request)
+		h.routeHits.add(pattern)
 		mux.ServeHTTP(writer, request)
 	})
 }
