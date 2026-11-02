@@ -63,6 +63,10 @@ heartbeat-check alert state machine. An empty, duplicate, reserved, malformed,
 or unauthenticated ID rejects hub startup; correct the auth file or list before
 restarting.
 
+Once an hour the hub logs one `hub route hits` line per route it served since the
+last line, with the route pattern and the count. Use these lines to tell whether a
+route still has a reader; the hub has no access log.
+
 Endpoints are:
 
 | Endpoint | Authentication | Purpose |

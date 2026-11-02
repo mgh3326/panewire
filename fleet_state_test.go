@@ -1,7 +1,6 @@
 package panewire
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -126,79 +125,6 @@ func fsSnapshot(t *testing.T, server *httptest.Server) fleetStateSnapshot {
 	return snapshot
 }
 
-type fsEvent struct {
-	id, name string
-	message  FleetStateMessage
-}
-
-// fsStream opens /v1/state/stream and delivers parsed events until the test
-// or cancel ends it.
-func fsStream(t *testing.T, server *httptest.Server, header http.Header) (<-chan fsEvent, context.CancelFunc) {
-	t.Helper()
-	ctx, cancel := context.WithCancel(t.Context())
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, server.URL+"/v1/state/stream", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for name, values := range header {
-		request.Header[name] = values
-	}
-	response, err := server.Client().Do(request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "text/event-stream" {
-		t.Fatalf("stream status=%d type=%q", response.StatusCode, response.Header.Get("Content-Type"))
-	}
-	events := make(chan fsEvent, 4096)
-	go func() {
-		defer response.Body.Close()
-		defer close(events)
-		scanner := bufio.NewScanner(response.Body)
-		scanner.Buffer(make([]byte, 64<<10), 1<<20)
-		var current fsEvent
-		for scanner.Scan() {
-			line := scanner.Text()
-			switch {
-			case line == "":
-				if current.name != "" {
-					events <- current
-				}
-				current = fsEvent{}
-			case strings.HasPrefix(line, "id: "):
-				current.id = strings.TrimPrefix(line, "id: ")
-			case strings.HasPrefix(line, "event: "):
-				current.name = strings.TrimPrefix(line, "event: ")
-			case strings.HasPrefix(line, "data: ") && current.name == "state":
-				if err := json.Unmarshal([]byte(strings.TrimPrefix(line, "data: ")), &current.message); err != nil {
-					current.name = "invalid"
-				}
-			}
-		}
-	}()
-	t.Cleanup(cancel)
-	return events, cancel
-}
-
-// fsNext returns the next event the filter accepts, skipping the others.
-func fsNext(t *testing.T, events <-chan fsEvent, label string, accept func(fsEvent) bool) fsEvent {
-	t.Helper()
-	timeout := time.After(10 * time.Second)
-	for {
-		select {
-		case event, open := <-events:
-			if !open {
-				t.Fatalf("stream closed waiting for %s", label)
-			}
-			if accept(event) {
-				return event
-			}
-		case <-timeout:
-			t.Fatalf("timed out waiting for %s", label)
-		}
-	}
-}
-
 // Acceptance 1: a node token publishes only its own host; operator and
 // service tokens read; a node token cannot read.
 func TestFleetStateNodePublishesOnlyItsOwnHost(t *testing.T) {
@@ -212,9 +138,6 @@ func TestFleetStateNodePublishesOnlyItsOwnHost(t *testing.T) {
 	eventually(t, 2*time.Second, "refusals counted", func() bool { return hub.unknownMessageCount() == before+2 })
 	if _, ok := fsLatest(hub, "node-b", fleetStateKindQuota, fsAccountKey); ok {
 		t.Fatal("node-a published a quota value for node-b")
-	}
-	if _, ok := fsLatest(hub, "node-b", fleetStateKindSpawn, "job-x"); ok {
-		t.Fatal("node-a published a spawn value for node-b")
 	}
 
 	r6Write(t, nodeA, fsQuotaPublish("", measured, 10))
@@ -235,19 +158,8 @@ func TestFleetStateNodePublishesOnlyItsOwnHost(t *testing.T) {
 		{"node token", fsAs("node-a", fsNodeAToken), http.StatusUnauthorized},
 		{"no token", http.Header{}, http.StatusUnauthorized},
 	} {
-		for _, path := range []string{"/v1/state", "/v1/state/stream"} {
-			if read.want == http.StatusOK && path == "/v1/state/stream" {
-				events, cancel := fsStream(t, server, read.header)
-				event := fsNext(t, events, read.name+" stream", func(e fsEvent) bool { return e.message.Kind == fleetStateKindQuota })
-				if event.message.Host != "node-a" {
-					t.Fatalf("%s stream quota host=%q", read.name, event.message.Host)
-				}
-				cancel()
-				continue
-			}
-			if status, body := fsGet(t, server, path, read.header); status != read.want {
-				t.Fatalf("%s GET %s status=%d want %d body=%s", read.name, path, status, read.want, body)
-			}
+		if status, body := fsGet(t, server, "/v1/state", read.header); status != read.want {
+			t.Fatalf("%s GET /v1/state status=%d want %d body=%s", read.name, status, read.want, body)
 		}
 	}
 	snapshot := fsSnapshot(t, server)
@@ -258,145 +170,6 @@ func TestFleetStateNodePublishesOnlyItsOwnHost(t *testing.T) {
 	}
 }
 
-// Acceptance 1: a reader that reconnects with Last-Event-ID receives exactly
-// what it missed while the ring still covers it, and a reset otherwise.
-func TestFleetStateStreamResumesWithLastEventID(t *testing.T) {
-	hub, server := fsHub(t, "")
-	nodeA := fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
-	base := time.Now().UTC().Add(-time.Hour).Truncate(time.Second)
-
-	events, cancel := fsStream(t, server, fsOperator())
-	r6Write(t, nodeA, fsSpawnPublish("start", "job-0", "builder-opus", "", base))
-	seen := fsNext(t, events, "job-0", func(e fsEvent) bool { return e.message.Key == "job-0" })
-	cancel()
-
-	for i := 1; i <= 5; i++ {
-		r6Write(t, nodeA, fsSpawnPublish("start", fmt.Sprintf("job-%d", i), "builder-opus", "", base.Add(time.Duration(i)*time.Second)))
-	}
-	eventually(t, 2*time.Second, "five more spawns", func() bool { _, ok := fsLatest(hub, "node-a", fleetStateKindSpawn, "job-5"); return ok })
-
-	resumed, _ := fsStream(t, server, http.Header{"Authorization": {"Bearer " + fsOperatorToken}, "Last-Event-ID": {seen.id}})
-	for i := 1; i <= 5; i++ {
-		event := fsNext(t, resumed, fmt.Sprintf("missed job-%d", i), func(fsEvent) bool { return true })
-		if event.name != "state" || event.message.Key != fmt.Sprintf("job-%d", i) || event.id != event.message.ID {
-			t.Fatalf("missed event %d = %+v", i, event)
-		}
-	}
-
-	// The query parameter resumes the same way (EventSource cannot set
-	// headers on its first request).
-	status, _ := fsGet(t, server, "/v1/state?x=1", fsOperator())
-	if status != http.StatusOK {
-		t.Fatalf("snapshot status=%d", status)
-	}
-
-	// An id from another epoch, or older than the ring, gets a reset and the
-	// full snapshot instead of a silent gap.
-	for _, stale := range []string{"otherepoch-1", hub.fleetState.epoch + "-0"} {
-		if stale == hub.fleetState.epoch+"-0" {
-			hub.fleetState.mu.Lock()
-			for i := 0; i < fleetStateRingSize+10; i++ {
-				hub.fleetState.seq++
-				hub.fleetState.ring = append(hub.fleetState.ring, FleetStateMessage{Seq: hub.fleetState.seq})
-			}
-			hub.fleetState.ring = hub.fleetState.ring[len(hub.fleetState.ring)-fleetStateRingSize:]
-			hub.fleetState.mu.Unlock()
-		}
-		reset, _ := fsStream(t, server, http.Header{"Authorization": {"Bearer " + fsOperatorToken}, "Last-Event-ID": {stale}})
-		if first := fsNext(t, reset, "reset", func(fsEvent) bool { return true }); first.name != "reset" {
-			t.Fatalf("Last-Event-ID %q: first event %q, want reset", stale, first.name)
-		}
-		fsNext(t, reset, "snapshot after reset", func(e fsEvent) bool { return e.message.Key == "job-5" })
-	}
-}
-
-func TestFleetStateRingReplayIsBounded(t *testing.T) {
-	store := newFleetStateStore(time.Unix(1, 0))
-	now := time.Unix(100, 0)
-	for i := 0; i < 3*fleetStateRingSize; i++ {
-		store.publish(FleetStateMessage{Host: "node-a", Kind: fleetStateKindSpawn, Key: fmt.Sprintf("job-%d", i%10), ReceivedAt: now.Add(time.Duration(i) * time.Second), Spawn: &FleetStateSpawn{Phase: "start", Job: "x", At: now.Add(time.Duration(i) * time.Second)}}, 0)
-	}
-	if len(store.ring) >= 2*fleetStateRingSize {
-		t.Fatalf("ring grew to %d", len(store.ring))
-	}
-	recent := fmt.Sprintf("%s-%d", store.epoch, store.seq-10)
-	_, replay, reset, ok := store.subscribe(recent)
-	if !ok || reset || len(replay) != 10 || replay[0].Seq != store.seq-9 {
-		t.Fatalf("recent resume reset=%v replay=%d", reset, len(replay))
-	}
-	_, replay, reset, ok = store.subscribe(fmt.Sprintf("%s-%d", store.epoch, store.seq-fleetStateRingSize-1))
-	if !ok || !reset || len(replay) != 10 {
-		t.Fatalf("expired resume reset=%v replay=%d (want reset and the 10-key snapshot)", reset, len(replay))
-	}
-	for i := 2; i < fleetStateMaxReaders; i++ {
-		if _, _, _, ok := store.subscribe(""); !ok {
-			t.Fatalf("reader %d refused", i)
-		}
-	}
-	if _, _, _, ok := store.subscribe(""); ok {
-		t.Fatal("reader beyond the cap admitted")
-	}
-}
-
-func TestFleetStateSlowReaderIsCutOff(t *testing.T) {
-	store := newFleetStateStore(time.Unix(1, 0))
-	reader, _, _, _ := store.subscribe("")
-	now := time.Unix(100, 0)
-	for i := 0; i <= fleetStateReaderBuffer; i++ {
-		store.publish(FleetStateMessage{Host: "node-a", Kind: fleetStateKindSpawn, Key: fmt.Sprintf("job-%d", i), ReceivedAt: now, Spawn: &FleetStateSpawn{Phase: "start", Job: "x", At: now}}, 0)
-	}
-	select {
-	case <-reader.overflow:
-	default:
-		t.Fatal("a reader a full buffer behind was not cut off")
-	}
-	store.unsubscribe(reader) // must not double-close
-}
-
-func TestFleetStateHostKeysAreBounded(t *testing.T) {
-	store := newFleetStateStore(time.Unix(1, 0))
-	now := time.Unix(100, 0)
-	store.publish(FleetStateMessage{Host: "node-a", Kind: fleetStateKindSpawn, Key: "ended", ReceivedAt: now, Spawn: &FleetStateSpawn{Phase: "end", Job: "ended", At: now}}, 0)
-	for i := 0; i < fleetStateSpawnKeysPerHost; i++ {
-		at := now.Add(time.Duration(i+1) * time.Second)
-		store.publish(FleetStateMessage{Host: "node-a", Kind: fleetStateKindSpawn, Key: fmt.Sprintf("job-%d", i), ReceivedAt: at, Spawn: &FleetStateSpawn{Phase: "start", Job: "x", At: at}}, 0)
-	}
-	if len(store.latest) != fleetStateSpawnKeysPerHost {
-		t.Fatalf("latest holds %d spawn keys", len(store.latest))
-	}
-	if _, kept := store.latest[fleetStateKey{"node-a", fleetStateKindSpawn, "ended"}]; kept {
-		t.Fatal("the ended spawn was kept over a running one")
-	}
-	store.publish(FleetStateMessage{Host: "node-a", Kind: fleetStateKindSpawn, Key: "job-0", ReceivedAt: now.Add(time.Hour), Spawn: &FleetStateSpawn{Phase: "end", Job: "job-0", At: now.Add(time.Hour)}}, 0)
-	store.expire(now.Add(3 * time.Hour))
-	if _, kept := store.latest[fleetStateKey{"node-a", fleetStateKindSpawn, "job-0"}]; kept {
-		t.Fatal("an ended spawn outlived its retention")
-	}
-}
-
-// Acceptance 4: spawn start and end appear on the stream with job, profile
-// and host.
-func TestFleetStateSpawnEventsOnStream(t *testing.T) {
-	hub, server := fsHub(t, "")
-	nodeA := fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
-	events, _ := fsStream(t, server, fsOperator())
-	started := time.Now().UTC().Truncate(time.Second)
-
-	r6Write(t, nodeA, fsSpawnPublish("start", "job-sse", "builder-opus", "", started))
-	start := fsNext(t, events, "spawn start", func(e fsEvent) bool { return e.message.Kind == fleetStateKindSpawn })
-	r6Write(t, nodeA, fsSpawnPublish("end", "job-sse", "builder-opus", "node-a", started.Add(time.Minute)))
-	end := fsNext(t, events, "spawn end", func(e fsEvent) bool { return e.message.Kind == fleetStateKindSpawn })
-	for phase, event := range map[string]fsEvent{"start": start, "end": end} {
-		spawn := event.message.Spawn
-		if spawn == nil || spawn.Phase != phase || spawn.Job != "job-sse" || spawn.Profile != "builder-opus" || spawn.Host != "node-a" || event.message.Host != "node-a" || event.message.Key != "job-sse" {
-			t.Fatalf("%s event = %+v spawn=%+v", phase, event.message, spawn)
-		}
-	}
-	if end.message.Seq <= start.message.Seq {
-		t.Fatalf("end seq %d not after start seq %d", end.message.Seq, start.message.Seq)
-	}
-}
-
 // The publisher heartbeat distinguishes an unchanged value from a dead
 // publisher: disconnect is announced at once and the quota value stays.
 func TestFleetStatePublisherHeartbeat(t *testing.T) {
@@ -404,14 +177,11 @@ func TestFleetStatePublisherHeartbeat(t *testing.T) {
 	nodeA := fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
 	r6Write(t, nodeA, fsQuotaPublish("", time.Now().UTC().Add(-20*time.Minute).Truncate(time.Second), 10))
 	eventually(t, 2*time.Second, "quota stored", func() bool { _, ok := fsLatest(hub, "node-a", fleetStateKindQuota, fsAccountKey); return ok })
-	events, _ := fsStream(t, server, fsOperator())
 	_ = nodeA.Close(websocket.StatusNormalClosure, "")
-	dead := fsNext(t, events, "publisher disconnect", func(e fsEvent) bool {
-		return e.message.Kind == fleetStateKindPublisher && e.message.Seq > 0 && !e.message.Publisher.Connected
+	eventually(t, 2*time.Second, "publisher disconnect", func() bool {
+		message, ok := fsLatest(hub, "node-a", fleetStateKindPublisher, "")
+		return ok && !message.Publisher.Connected && !message.Publisher.LastSeen.IsZero()
 	})
-	if dead.message.Host != "node-a" || dead.message.Publisher.LastSeen.IsZero() {
-		t.Fatalf("publisher event = %+v", dead.message)
-	}
 	if _, ok := fsLatest(hub, "node-a", fleetStateKindQuota, fsAccountKey); !ok {
 		t.Fatal("the quota value was dropped with its publisher; consumers decide by the publisher state")
 	}
@@ -509,22 +279,20 @@ func TestFleetStateHubWithoutConstructorDoesNotPanic(t *testing.T) {
 	now := time.Now().UTC()
 	hub := &HubServer{logger: slog.New(slog.NewTextHandler(io.Discard, nil)), nodes: map[string]*hubNodeRecord{"node-a": {machineID: "node-a", state: "connected", lastHeartbeat: now}}}
 	hub.publishFleetPublisher("node-a", now)
-	if !hub.publishFleetStateFromNode("node-a", FleetStatePublish{Kind: fleetStateKindSpawn, Key: "job-a", MeasuredAt: now, Spawn: &FleetStateSpawn{Phase: "start", Job: "job-a", At: now}}, now) {
+	quota := 10.0
+	if !hub.publishFleetStateFromNode("node-a", FleetStatePublish{Kind: fleetStateKindQuota, Key: fsAccountKey, MeasuredAt: now, Quota: &FleetStateQuota{AccountKey: fsAccountKey, Pool: "claude", Buckets: []FleetStateBucket{{Window: "5h", UsedPct: &quota}}}}, now) {
 		t.Fatal("state publish refused")
 	}
 	hub.sweepFleetState(now)
 	hub.publishFleetLoad(context.Background(), now)
-	if _, ok := fsLatest(hub, "node-a", fleetStateKindSpawn, "job-a"); !ok {
-		t.Fatal("spawn not stored on a lazily created store")
-	}
-	if hub.fleetCloseDone() != nil {
-		t.Fatal("close signal of a hub without closeCtx must never be ready")
+	if _, ok := fsLatest(hub, "node-a", fleetStateKindQuota, fsAccountKey); !ok {
+		t.Fatal("quota not stored on a lazily created store")
 	}
 }
 
-// Review #141: one node cannot flood the shared replay ring.
+// Review #141: one node cannot flood the hub.
 func TestFleetStateNodePublishBudget(t *testing.T) {
-	store := newFleetStateStore(time.Unix(1, 0))
+	store := newFleetStateStore()
 	now := time.Unix(100, 0)
 	for i := 0; i < fleetStateNodeBurst; i++ {
 		if !store.allowNode("node-a", now) {
@@ -591,28 +359,52 @@ func TestFleetStateLoadAcceptingFromPlacement(t *testing.T) {
 	}
 }
 
-// Review #141: evicting a running spawn emits an end, so a stream reader
-// converges with the snapshot.
-func TestFleetStateEvictedRunningSpawnEmitsEnd(t *testing.T) {
-	store := newFleetStateStore(time.Unix(1, 0))
-	var reader *fleetStateReader
-	now := time.Unix(100, 0)
-	for i := 0; i <= fleetStateSpawnKeysPerHost; i++ {
-		if i == fleetStateSpawnKeysPerHost-4 {
-			// Subscribe late so the reader's buffer holds the tail.
-			reader, _, _, _ = store.subscribe(fmt.Sprintf("%s-%d", store.epoch, store.seq))
+// hk 2649: the hub state stream had no reader and is gone; the snapshot stays.
+func TestFleetStateStreamRouteRemoved(t *testing.T) {
+	_, server := fsHub(t, "")
+	if status, _ := fsGet(t, server, "/v1/state/stream", fsOperator()); status != http.StatusNotFound {
+		t.Fatalf("GET /v1/state/stream status=%d, want 404", status)
+	}
+	if status, _ := fsGet(t, server, "/v1/state", fsOperator()); status != http.StatusOK {
+		t.Fatalf("GET /v1/state status=%d, want 200", status)
+	}
+}
+
+// hk 2649: an old node still publishes spawn values. They stay valid, so they
+// are not counted as unknown messages, and nothing stores them.
+func TestFleetStateOldNodeSpawnPublishAcceptedAndDropped(t *testing.T) {
+	hub, server := fsHub(t, "")
+	nodeA := fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
+	measured := time.Now().UTC().Add(-time.Minute).Truncate(time.Second)
+	before := hub.unknownMessageCount()
+	r6Write(t, nodeA, fsSpawnPublish("start", "job-old", "builder-opus", "", measured))
+	r6Write(t, nodeA, fsSpawnPublish("start", "job-other", "builder-opus", "node-b", measured)) // still refused
+	r6Write(t, nodeA, fsQuotaPublish("", measured, 10))                                         // ordered after both
+	eventually(t, 2*time.Second, "publishes handled", func() bool {
+		_, ok := fsLatest(hub, "node-a", fleetStateKindQuota, fsAccountKey)
+		return ok
+	})
+	if got := hub.unknownMessageCount(); got != before+1 {
+		t.Fatalf("unknown messages grew by %d, want 1 (the other-host spawn)", got-before)
+	}
+	for _, message := range fsSnapshot(t, server).States {
+		if message.Kind == fleetStateKindSpawn {
+			t.Fatalf("a spawn value was stored: %+v", message)
 		}
-		at := now.Add(time.Duration(i) * time.Second)
-		store.publish(FleetStateMessage{Host: "node-a", Kind: fleetStateKindSpawn, Key: fmt.Sprintf("job-%d", i), ReceivedAt: at, Spawn: &FleetStateSpawn{Phase: "start", Job: fmt.Sprintf("job-%d", i), Host: "node-a", At: at}}, 0)
 	}
-	if _, kept := store.latest[fleetStateKey{"node-a", fleetStateKindSpawn, "job-0"}]; kept {
-		t.Fatal("oldest running spawn not evicted")
+}
+
+// Quota keys stay bounded per host, the oldest dropped first.
+func TestFleetStateQuotaKeysAreBounded(t *testing.T) {
+	store := newFleetStateStore()
+	now := time.Unix(100, 0)
+	for i := 0; i <= fleetStateQuotaKeysPerHost; i++ {
+		store.publish(FleetStateMessage{Host: "node-a", Kind: fleetStateKindQuota, Key: fmt.Sprintf("claude:%016x", i), ReceivedAt: now.Add(time.Duration(i) * time.Second)}, 0)
 	}
-	var last FleetStateMessage
-	for len(reader.messages) > 0 {
-		last = <-reader.messages
+	if len(store.latest) != fleetStateQuotaKeysPerHost {
+		t.Fatalf("latest holds %d quota keys", len(store.latest))
 	}
-	if last.Spawn == nil || last.Spawn.Phase != "end" || last.Key != "job-0" || last.Host != "node-a" {
-		t.Fatalf("last stream message = %+v", last)
+	if _, kept := store.latest[fleetStateKey{"node-a", fleetStateKindQuota, fmt.Sprintf("claude:%016x", 0)}]; kept {
+		t.Fatal("the oldest quota key was kept")
 	}
 }

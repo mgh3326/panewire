@@ -289,53 +289,6 @@ func TestPlacementTaskSlotsHotReload(t *testing.T) {
 	}
 }
 
-func TestPlacementSlotsEndpoint(t *testing.T) {
-	hub, _ := t607PolicyHub(t, map[string]PlacementMachineSlots{"desktop": {TaskSlots: 2}})
-	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
-	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
-	t607Task(hub, "desktop", 1, 2)
-	recorder := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodGet, "/v1/placement/slots", nil)
-	hub.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusUnauthorized {
-		t.Fatalf("unauthenticated status=%d, want 401", recorder.Code)
-	} // Mutant: dropping authorizeOperator turns this RED.
-	recorder = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodGet, "/v1/placement/slots", nil)
-	req.Header.Set("Authorization", "Bearer "+r6OperatorToken)
-	hub.Handler().ServeHTTP(recorder, req)
-	if recorder.Code != http.StatusOK {
-		t.Fatalf("status=%d", recorder.Code)
-	}
-	var body struct {
-		Machines []struct {
-			Machine   string `json:"machine"`
-			TasksUsed int    `json:"tasks_used"`
-			TaskSlots *int   `json:"task_slots"`
-		} `json:"machines"`
-		PolicyStatus string `json:"policy_status"`
-	}
-	if err := json.Unmarshal(recorder.Body.Bytes(), &body); err != nil {
-		t.Fatal(err)
-	}
-	if body.PolicyStatus != "current" || len(body.Machines) != 2 {
-		t.Fatalf("slots body=%s", recorder.Body.String())
-	}
-	var desktop, macWork *int
-	used := map[string]int{}
-	for _, machine := range body.Machines {
-		used[machine.Machine] = machine.TasksUsed
-		if machine.Machine == "desktop" {
-			desktop = machine.TaskSlots
-		} else {
-			macWork = machine.TaskSlots
-		}
-	}
-	if used["desktop"] != 1 || used["mac-work"] != 0 || desktop == nil || *desktop != 2 || macWork != nil {
-		t.Fatalf("slots body=%s", recorder.Body.String())
-	}
-}
-
 func TestParsePlacementPolicyMachines(t *testing.T) {
 	base := `{"local_machine":"mac-work","spill_targets":["desktop"],"max_active_jobs":5,"load_ratio":0.5%s}`
 	valid, err := ParsePlacementPolicy([]byte(fmt.Sprintf(base, `,"machines":{"desktop":{"task_slots":2}}`)))

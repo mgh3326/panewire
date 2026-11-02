@@ -95,6 +95,7 @@ func (h *HubServer) sendHeartbeatDirectives(machineID string, agent *hubAgent) {
 	}
 	h.mu.Unlock()
 	agent.queueHolds(hubBurstHoldsEvent{Type: "burst.holds", HoldsActive: active})
+	agent.queueFeatures()
 	for _, assignment := range assignments {
 		agent.queueAssignment(assignment)
 	}

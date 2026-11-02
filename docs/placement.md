@@ -144,6 +144,50 @@ The default is the same local `mac-work` / `desktop` spill shape. Policy files
 must be regular files; unknown fields and duplicate targets are rejected. A
 changed valid file hot-reloads without changing the last known-good policy.
 
+## Laptop power
+
+`laptops` is optional and lists the machines placement treats as laptops:
+
+```json
+{"laptops": ["mac-work"]}
+```
+
+A node on macOS reports its power source on the heartbeat, in
+`host_signals.power_source`, as `ac` or `battery`. It reads `pmset -g batt`. A
+UPS counts as `battery`.
+
+| Host | Report | Result |
+|---|---|---|
+| Listed | `battery` | Refused: `not_accepting(on_battery)` |
+| Listed | `ac` | Eligible |
+| Listed | None for more than 3 minutes since the later of its last report and its connect | Refused: `not_accepting(power_unknown)` |
+| Not listed | Any, or none | Unaffected |
+
+A refused host is not `usable`. The reason appears in `GET /v1/placement` and in
+the `load` value of `GET /v1/state`. runtug refuses on the text `not_accepting`.
+A forced spawn (`runtug spawn --host local`, or a named host) does not go through
+placement, so it is not refused.
+
+### Rollout
+
+Hub and nodes deploy in either order. A node sends `host_signals` only after its
+hub sends `{"type":"hub.features","features":["host_signals"]}`, and it forgets
+that on every new connection. An older hub rejects a heartbeat with an unknown
+field, so this is what keeps a new node working against it. An older node ignores
+the message.
+
+**Set `laptops` last.** An older hub rejects the policy file because of the
+unknown key, and a new hub refuses a listed laptop whose node doesn't report yet.
+
+1. Deploy the hub.
+2. Deploy the nodes.
+3. Confirm the laptop reports: the hub logs a `host power source` line with the
+   machine and its source when the node first reports, and on each change.
+4. Add `laptops` to the policy file. It hot-reloads.
+
+To add a new signal, add it to `HubHostSignals`. The hub ignores names it doesn't
+know inside `host_signals`, and an invalid value loses only that signal.
+
 ## Per-machine task slots
 
 `machines` is optional and maps a machine id to `{"task_slots": N}` (1–100). A
@@ -170,18 +214,6 @@ Surviving candidates
 for capped machines report `tasks` and `task_slots` so the counting is
 visible in the response itself; uncapped machines omit both fields so the
 wire stays byte-identical for deployments without a `machines` map.
-
-`GET /v1/placement/slots` answers "which machine has room" without running a
-placement decision. It shares `/v1/placement`'s operator-token boundary
-(unauthenticated requests get `401`) and returns each machine's used count and
-configured cap (`task_slots` is `null` when uncapped):
-
-```json
-{"machines":[{"machine":"desktop","tasks_used":1,"task_slots":2},{"machine":"mac-dev","tasks_used":0,"task_slots":3},{"machine":"mac-personal","tasks_used":2,"task_slots":3}],"policy_status":"current","asof":"2026-09-23T09:40:00Z"}
-```
-
-The slot list covers the policy's `local_machine` + `spill_targets`, every
-`machines` entry, and every machine with a node record.
 
 Two counting edge cases are deliberate. Jobs spawned with `--owner
 <lane>` where the lane is a coordinator (e.g. `director-N` spawning workers
@@ -279,7 +311,7 @@ only watches a configured path. The procedure is therefore:
    once the path is configured, later edits hot-reload on the placement
    modtime check.
 3. Verify: `GET /v1/placement?class=worker` reports `"policy_status":"current"`
-   and `GET /v1/placement/slots` shows `task_slots` 3/3/2.
+   and capped candidates show their `tasks` and `task_slots`.
 4. If the file is rejected at startup the service refuses to boot; fix the
    JSON rather than bypassing validation (`machines` machine ids must match
    the node id pattern and `task_slots` must be 1–100).

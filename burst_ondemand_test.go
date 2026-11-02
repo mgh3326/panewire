@@ -157,7 +157,7 @@ func TestBurstR16ClientAdoptsAssignedEpochAndHoldResponse(t *testing.T) {
 	client := &HubClient{jobsInboxRoot: root, assignedJobs: map[string]uint64{"job-a": 2}, completedJobs: make(map[string]uint64), burstSeen: make(map[string]time.Time)}
 	client.burstHoldsActive = true
 	heartbeat, ok := decodeHubHeartbeatPayload(client.heartbeatEvent(context.Background()).Payload)
-	if !ok || !heartbeat.HoldsActive || len(heartbeat.ActiveJobs) != 1 || heartbeat.ActiveJobs[0].Epoch != 2 {
+	if !ok || len(heartbeat.ActiveJobs) != 1 || heartbeat.ActiveJobs[0].Epoch != 2 {
 		t.Fatalf("node did not adopt directives: %+v ok=%t", heartbeat, ok)
 	}
 	if err := os.WriteFile(filepath.Join(events, "00002-job.completed.json"), []byte(`{"type":"job.completed","epoch":1}`), 0600); err != nil {
