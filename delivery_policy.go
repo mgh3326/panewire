@@ -64,12 +64,19 @@ type deliveryRule struct {
 	tags   []*regexp.Regexp
 }
 
+type deliveryHoldPolicy struct {
+	MaxHold      string `yaml:"max_hold"`
+	HandoffBytes int    `yaml:"handoff_bytes"`
+	HandoffItems int    `yaml:"handoff_items"`
+}
+
 type deliveryLanePolicy struct {
-	Default      string            `yaml:"default"`
-	Deadlines    map[string]string `yaml:"deadlines"`
-	DigestWindow string            `yaml:"digest_window"`
-	Types        map[string]string `yaml:"types"`
-	Rules        []deliveryRule    `yaml:"rules"`
+	HoldWhileWorking *deliveryHoldPolicy `yaml:"hold_while_working"`
+	Default          string              `yaml:"default"`
+	Deadlines        map[string]string   `yaml:"deadlines"`
+	DigestWindow     string              `yaml:"digest_window"`
+	Types            map[string]string   `yaml:"types"`
+	Rules            []deliveryRule      `yaml:"rules"`
 }
 
 type deliveryPolicy struct {
@@ -120,6 +127,12 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 		return nil, fmt.Errorf("delivery policy needs a default")
 	}
 	validate := func(l *deliveryLanePolicy) error {
+		if v := l.HoldWhileWorking; v != nil {
+			duration, err := time.ParseDuration(v.MaxHold)
+			if err != nil || duration <= 0 || v.HandoffBytes < 0 || v.HandoffItems < 0 {
+				return fmt.Errorf("hold_while_working needs positive max_hold and nonnegative handoff thresholds")
+			}
+		}
 		if !validDeliveryClass(l.Default) {
 			return fmt.Errorf("invalid delivery default")
 		}
@@ -356,4 +369,22 @@ func decodeDeliveryClass(fields map[string]json.RawMessage, event *hubJobEventPa
 func decodeNotifyType(fields map[string]json.RawMessage, event *hubJobEventPayload) bool {
 	raw, ok := fields["notify_type"]
 	return !ok || (json.Unmarshal(raw, &event.NotifyType) == nil && validNotifyType(event.NotifyType))
+}
+
+func (p *deliveryPolicy) holdPolicy(lane string) *deliveryHoldPolicy {
+	if p.legacy {
+		return nil
+	}
+	if local := p.Lanes[lane].HoldWhileWorking; local != nil {
+		return local
+	}
+	return p.HoldWhileWorking
+}
+
+var neverHoldTags = regexp.MustCompile(`(?i)\b(?:BLOCKER|URGENT|ESC|BOUNCE|needs_decision)\b`)
+
+func holdableEvent(kind string, e hubJobEventPayload) bool {
+	return !e.noDigest && e.NotifyType != "decision" && e.NotifyType != "order" &&
+		kind != "job.escalate" && kind != "job.lost" && kind != "job.revoked" &&
+		!chatRelayEventPattern.MatchString(e.EventID) && !neverHoldTags.MatchString(deliveryEventText(e))
 }

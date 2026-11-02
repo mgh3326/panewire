@@ -52,4 +52,6 @@ rules:
   - match: '(?i)\binfo([ _-]alert)?\b|\bquota\b|\breplayed after hub restart\b|"kind"\s*:\s*"idle-wake"|알림'
     class: inbox
 # Override any field per receiving lane. Rules fall through to global rules.
+# Opt in per lane with hold_while_working: {max_hold: 10m}.
+# Handoff thresholds default to handoff_bytes: 1500, handoff_items: 3.
 lanes: {}
