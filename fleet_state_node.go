@@ -3,17 +3,14 @@ package panewire
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
 )
 
-// Node side of the fleet state (docs/fleet-state.md): the node publishes
-// spawn start/end from its active-job scan and, for the pools it measures,
-// the shared quota reading pacelever keeps fresh.
+// Node side of the fleet state (docs/fleet-state.md): for the pools it
+// measures, the node publishes the shared quota reading pacelever keeps fresh.
 
 const (
 	defaultFleetQuotaInterval = time.Minute
@@ -43,108 +40,13 @@ func parseFleetQuotaPools(raw string) ([]string, bool) {
 	return pools, true
 }
 
-type fleetSpawnRunning struct {
-	profile   string
-	at        time.Time
-	announced bool
-}
-
-// resyncFleetState makes the next spawn diff and quota round re-announce
-// everything. serveConnection calls it for every new hub connection, so a
+// resyncFleetState makes the next quota round re-announce everything.
+// serveConnection calls it for every new hub connection, so a
 // restarted hub regains this node's state at once.
 func (client *HubClient) resyncFleetState() {
 	client.fleetStateMu.Lock()
-	client.fleetSpawnResync, client.fleetQuotaResync = true, true
+	client.fleetQuotaResync = true
 	client.fleetStateMu.Unlock()
-}
-
-// publishFleetSpawns diffs the active-job scan against the jobs this node has
-// already announced: a new job publishes start, a vanished one end. After a
-// reconnect every running job is announced again (the hub may have
-// restarted); ends that happened while disconnected are still published. A
-// value the bounded event queue dropped is retried on the next scan.
-func (client *HubClient) publishFleetSpawns(active []HubActiveJob, now time.Time) {
-	if !client.statePublish {
-		return
-	}
-	client.fleetStateMu.Lock()
-	defer client.fleetStateMu.Unlock()
-	if client.fleetSpawns == nil {
-		client.fleetSpawns = make(map[string]fleetSpawnRunning)
-	}
-	resync := client.fleetSpawnResync
-	client.fleetSpawnResync = false
-	current := make(map[string]struct{}, len(active))
-	for _, job := range active {
-		current[job.JobID] = struct{}{}
-		running, known := client.fleetSpawns[job.JobID]
-		if !known {
-			running = fleetSpawnRunning{profile: fleetSpawnProfile(client.jobsInboxRoot, job.JobID), at: now}
-			if started, err := time.Parse(time.RFC3339, job.StartedAt); err == nil {
-				running.at = started.UTC()
-			}
-		}
-		if !running.announced || resync {
-			running.announced = client.publishFleetSpawn("start", job.JobID, running.profile, running.at)
-		}
-		client.fleetSpawns[job.JobID] = running
-	}
-	for jobID, running := range client.fleetSpawns {
-		if _, still := current[jobID]; still {
-			continue
-		}
-		// A job whose start the queue dropped still announces it before its
-		// end, so no consumer sees an end without a start.
-		if !running.announced {
-			if running.announced = client.publishFleetSpawn("start", jobID, running.profile, running.at); !running.announced {
-				continue
-			}
-			client.fleetSpawns[jobID] = running
-		}
-		if client.publishFleetSpawn("end", jobID, running.profile, now) {
-			delete(client.fleetSpawns, jobID)
-		}
-	}
-}
-
-func (client *HubClient) publishFleetSpawn(phase, jobID, profile string, at time.Time) bool {
-	if !hubJobIDPattern.MatchString(jobID) {
-		return true
-	}
-	at = at.UTC().Truncate(time.Second)
-	return client.Publish("state", FleetStatePublish{Kind: fleetStateKindSpawn, Key: jobID, MeasuredAt: at, Spawn: &FleetStateSpawn{Phase: phase, Job: jobID, Profile: profile, Host: client.machineID, At: at}})
-}
-
-// fleetSpawnProfile reads the profile runtug recorded in the job's newest
-// job.spawned event, or "" when there is none. It runs once per new job.
-func fleetSpawnProfile(inboxRoot, jobID string) string {
-	if inboxRoot == "" || !hubJobIDPattern.MatchString(jobID) {
-		return ""
-	}
-	eventsDir := filepath.Join(inboxRoot, "jobs", jobID, "events")
-	entries, err := os.ReadDir(eventsDir)
-	if err != nil {
-		return ""
-	}
-	for i := len(entries) - 1; i >= 0; i-- {
-		name := entries[i].Name()
-		if !entries[i].Type().IsRegular() || !strings.Contains(name, "job.spawned") {
-			continue
-		}
-		contents, err := os.ReadFile(filepath.Join(eventsDir, name))
-		if err != nil || len(contents) > 64<<10 {
-			continue
-		}
-		var event struct {
-			Payload struct {
-				Profile string `json:"profile"`
-			} `json:"payload"`
-		}
-		if json.Unmarshal(contents, &event) == nil && fleetStateProfilePattern.MatchString(event.Payload.Profile) {
-			return event.Payload.Profile
-		}
-	}
-	return ""
 }
 
 // paceleverReading is the part of `pacelever refresh <pool>` output the node

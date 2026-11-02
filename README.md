@@ -143,10 +143,9 @@ uses its own scoped token instead of the operator's; see
 such a service; `panewire node pane-read` and `panewire node job-done` call them.
 
 The hub also keeps the latest fleet state, meaning per-account quota, per-host
-load, spawn start and end, and publisher liveness. It serves that state as a
-snapshot (`GET /v1/state`) and as a resumable SSE stream
-(`GET /v1/state/stream`), so runtug reads current state instead of measuring
-it on every spawn. See [docs/fleet-state.md](docs/fleet-state.md) for the
+load and publisher liveness. It serves that state as a snapshot
+(`GET /v1/state`), so runtug reads current state instead of measuring it on
+every spawn. See [docs/fleet-state.md](docs/fleet-state.md) for the
 message contract, the freshness rule, rollout and rollback.
 
 ## Hub job inbox compatibility

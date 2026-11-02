@@ -168,8 +168,6 @@ type HubClient struct {
 	stateQuotaPools    []string
 	stateQuotaInterval time.Duration
 	fleetStateMu       sync.Mutex
-	fleetSpawns        map[string]fleetSpawnRunning
-	fleetSpawnResync   bool
 	fleetQuotaResync   bool
 	spawnSeen          map[string]struct{}
 	spawnTimeoutExtra  time.Duration // fixture seam; production is 60 seconds.
@@ -1796,10 +1794,6 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 		}
 	}
 	client.assignmentMu.Unlock()
-	// Fleet-state spawn start/end follows the job's real lifetime (terminal
-	// event or closed pane), so a job that idles past the limit and later
-	// resumes does not publish a false end and a second start.
-	client.publishFleetSpawns(scanned, client.nowUTC())
 	active := scanned
 	switch {
 	case collectSessions != nil && sessionsErr == nil:

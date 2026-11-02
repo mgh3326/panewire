@@ -4,35 +4,30 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
 	"math"
 	"net/http"
 	"regexp"
 	"slices"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 )
 
 // Fleet state: every node publishes the state it owns, the hub keeps the
-// latest value per (host, kind, key) and fans it out over SSE. The contract,
-// including the freshness rule consumers apply, is docs/fleet-state.md.
+// latest value per (host, kind, key) and serves it at GET /v1/state. The
+// contract, including the freshness rule consumers apply, is docs/fleet-state.md.
 
 const (
 	fleetStateVersion = 1
 
-	fleetStateKindQuota     = "quota"
-	fleetStateKindLoad      = "load"
+	fleetStateKindQuota = "quota"
+	fleetStateKindLoad  = "load"
+	// fleetStateKindSpawn is retired. An old node still publishes it; the hub
+	// accepts the value and drops it. Remove once every node runs this build.
 	fleetStateKindSpawn     = "spawn"
 	fleetStateKindPublisher = "publisher"
 
-	fleetStateRingSize         = 2048
 	fleetStateQuotaKeysPerHost = 64
-	fleetStateSpawnKeysPerHost = 256
-	fleetStateEndedRetention   = time.Hour
-	fleetStateMaxReaders       = 32
-	fleetStateReaderBuffer     = 256
 	fleetStateMaxPublishBytes  = 4 << 10
 	fleetStateMaxBuckets       = 16
 
@@ -47,14 +42,13 @@ const (
 	fleetStateLoadInterval = 15 * time.Second
 	// fleetStateNodeRepeat drops an identical node value repeated sooner.
 	fleetStateNodeRepeat = time.Minute
-	fleetStateKeepalive  = 15 * time.Second
 
 	// A node's state publishes draw from a token bucket so one node cannot
-	// monopolize the shared replay ring. The burst covers a reconnect resync
-	// (every running job plus every quota key); the refill is far above the
-	// steady rate of a correct node (one quota per pool per minute plus
-	// spawn transitions).
-	fleetStateNodeBurst  = fleetStateSpawnKeysPerHost + fleetStateQuotaKeysPerHost
+	// flood the hub. The burst covers a reconnect resync (every quota key); the
+	// refill is far above the steady rate of a correct node (one quota per pool
+	// per minute). An old node's retired spawn publishes spend it too, so the
+	// burst keeps the room they had.
+	fleetStateNodeBurst  = 256 + fleetStateQuotaKeysPerHost
 	fleetStateNodeRefill = 2.0 // tokens per second
 )
 
@@ -65,11 +59,10 @@ var (
 )
 
 // FleetStateMessage is one state value on the wire. The hub sets the envelope
-// (v, id, seq, host, kind, key, received_at); the publisher owns measured_at
-// and exactly one kind body.
+// (v, seq, host, kind, key, received_at); the publisher owns measured_at and
+// exactly one kind body.
 type FleetStateMessage struct {
 	V          int                  `json:"v"`
-	ID         string               `json:"id"`
 	Seq        uint64               `json:"seq"`
 	Host       string               `json:"host"`
 	Kind       string               `json:"kind"`
@@ -78,7 +71,6 @@ type FleetStateMessage struct {
 	ReceivedAt time.Time            `json:"received_at"`
 	Quota      *FleetStateQuota     `json:"quota,omitempty"`
 	Load       *FleetStateLoad      `json:"load,omitempty"`
-	Spawn      *FleetStateSpawn     `json:"spawn,omitempty"`
 	Publisher  *FleetStatePublisher `json:"publisher,omitempty"`
 }
 
@@ -117,7 +109,8 @@ type FleetStateLoad struct {
 	Source     string `json:"source"`
 }
 
-// FleetStateSpawn says a job started or ended on a host.
+// FleetStateSpawn is what an old node still publishes. It is decoded so the
+// publish stays valid, then dropped.
 type FleetStateSpawn struct {
 	Phase   string    `json:"phase"`
 	Job     string    `json:"job"`
@@ -213,22 +206,12 @@ func validFleetStateSpawn(key string, spawn *FleetStateSpawn) bool {
 
 type fleetStateKey struct{ host, kind, key string }
 
-// fleetStateReader is one SSE subscriber. overflow is closed when the reader
-// falls a full buffer behind; it then reconnects with its last id.
-type fleetStateReader struct {
-	messages chan FleetStateMessage
-	overflow chan struct{}
-}
-
-// fleetStateStore holds the latest value per key, a bounded replay ring and
-// the live readers. Its mutex is never held across a network write.
+// fleetStateStore holds the latest value per key. Its mutex is never held
+// across a network write.
 type fleetStateStore struct {
 	mu      sync.Mutex
-	epoch   string
 	seq     uint64
 	latest  map[fleetStateKey]FleetStateMessage
-	ring    []FleetStateMessage
-	readers map[*fleetStateReader]struct{}
 	budgets map[string]*fleetStateBudget
 }
 
@@ -258,11 +241,9 @@ func (s *fleetStateStore) allowNode(host string, now time.Time) bool {
 	return true
 }
 
-func newFleetStateStore(started time.Time) *fleetStateStore {
+func newFleetStateStore() *fleetStateStore {
 	return &fleetStateStore{
-		epoch:   strconv.FormatInt(started.UnixNano(), 36),
 		latest:  make(map[fleetStateKey]FleetStateMessage),
-		readers: make(map[*fleetStateReader]struct{}),
 		budgets: make(map[string]*fleetStateBudget),
 	}
 }
@@ -273,19 +254,10 @@ func newFleetStateStore(started time.Time) *fleetStateStore {
 func (h *HubServer) stateStore() *fleetStateStore {
 	h.fleetStateOnce.Do(func() {
 		if h.fleetState == nil {
-			h.fleetState = newFleetStateStore(time.Now())
+			h.fleetState = newFleetStateStore()
 		}
 	})
 	return h.fleetState
-}
-
-// fleetCloseDone is the hub's close signal, or nil (never ready) for a hub
-// built without NewHubServer.
-func (h *HubServer) fleetCloseDone() <-chan struct{} {
-	if h.closeCtx == nil {
-		return nil
-	}
-	return h.closeCtx.Done()
 }
 
 // fleetStateBody is what "unchanged" compares: the kind body plus, for node
@@ -295,10 +267,9 @@ func fleetStateBody(message FleetStateMessage) string {
 		MeasuredAt *time.Time           `json:"m,omitempty"`
 		Quota      *FleetStateQuota     `json:"q,omitempty"`
 		Load       *FleetStateLoad      `json:"l,omitempty"`
-		Spawn      *FleetStateSpawn     `json:"s,omitempty"`
 		Publisher  *FleetStatePublisher `json:"p,omitempty"`
-	}{Quota: message.Quota, Load: message.Load, Spawn: message.Spawn}
-	if message.Kind == fleetStateKindQuota || message.Kind == fleetStateKindSpawn {
+	}{Quota: message.Quota, Load: message.Load}
+	if message.Kind == fleetStateKindQuota {
 		body.MeasuredAt = &message.MeasuredAt
 	}
 	if message.Publisher != nil {
@@ -310,7 +281,7 @@ func fleetStateBody(message FleetStateMessage) string {
 }
 
 // publish records message unless an identical value was recorded less than
-// repeat ago. It answers whether a new value (and seq) was emitted.
+// repeat ago. It answers whether a new value (and seq) was recorded.
 func (s *fleetStateStore) publish(message FleetStateMessage, repeat time.Duration) bool {
 	key := fleetStateKey{message.Host, message.Kind, message.Key}
 	s.mu.Lock()
@@ -318,44 +289,17 @@ func (s *fleetStateStore) publish(message FleetStateMessage, repeat time.Duratio
 	if previous, exists := s.latest[key]; exists && fleetStateBody(previous) == fleetStateBody(message) && message.ReceivedAt.Sub(previous.ReceivedAt) < repeat {
 		return false
 	}
-	message = s.appendLocked(message)
+	s.seq++
+	message.V, message.Seq = fleetStateVersion, s.seq
 	s.latest[key] = message
-	s.boundHostLocked(message.Host, message.Kind, message.ReceivedAt)
+	s.boundHostLocked(message.Host, message.Kind)
 	return true
 }
 
-// appendLocked numbers message, adds it to the replay ring and fans it out.
-func (s *fleetStateStore) appendLocked(message FleetStateMessage) FleetStateMessage {
-	s.seq++
-	message.V, message.Seq = fleetStateVersion, s.seq
-	message.ID = s.epoch + "-" + strconv.FormatUint(s.seq, 10)
-	s.ring = append(s.ring, message)
-	if len(s.ring) >= 2*fleetStateRingSize {
-		s.ring = append([]FleetStateMessage(nil), s.ring[len(s.ring)-fleetStateRingSize:]...)
-	}
-	for reader := range s.readers {
-		select {
-		case reader.messages <- message:
-		default:
-			delete(s.readers, reader)
-			close(reader.overflow)
-		}
-	}
-	return message
-}
-
-// boundHostLocked keeps one host's quota and spawn keys within their caps.
-// An ended spawn is evicted before a running one, the oldest first. Evicting
-// a running spawn emits a synthetic end, so a stream reader drops it just as
-// the snapshot does.
-func (s *fleetStateStore) boundHostLocked(host, kind string, now time.Time) {
-	limit := 0
-	switch kind {
-	case fleetStateKindQuota:
-		limit = fleetStateQuotaKeysPerHost
-	case fleetStateKindSpawn:
-		limit = fleetStateSpawnKeysPerHost
-	default:
+// boundHostLocked keeps one host's quota keys within their cap, dropping the
+// oldest first.
+func (s *fleetStateStore) boundHostLocked(host, kind string) {
+	if kind != fleetStateKindQuota {
 		return
 	}
 	var keys []fleetStateKey
@@ -364,39 +308,14 @@ func (s *fleetStateStore) boundHostLocked(host, kind string, now time.Time) {
 			keys = append(keys, key)
 		}
 	}
-	if len(keys) <= limit {
+	if len(keys) <= fleetStateQuotaKeysPerHost {
 		return
 	}
 	slices.SortFunc(keys, func(a, b fleetStateKey) int {
-		x, y := s.latest[a], s.latest[b]
-		if xEnded, yEnded := x.Spawn != nil && x.Spawn.Phase == "end", y.Spawn != nil && y.Spawn.Phase == "end"; xEnded != yEnded {
-			if xEnded {
-				return -1
-			}
-			return 1
-		}
-		return x.ReceivedAt.Compare(y.ReceivedAt)
+		return s.latest[a].ReceivedAt.Compare(s.latest[b].ReceivedAt)
 	})
-	for _, key := range keys[:len(keys)-limit] {
-		evicted := s.latest[key]
+	for _, key := range keys[:len(keys)-fleetStateQuotaKeysPerHost] {
 		delete(s.latest, key)
-		if evicted.Spawn != nil && evicted.Spawn.Phase == "start" {
-			spawn := *evicted.Spawn
-			spawn.Phase, spawn.At = "end", now.UTC().Truncate(time.Second)
-			s.appendLocked(FleetStateMessage{Host: evicted.Host, Kind: fleetStateKindSpawn, Key: evicted.Key, MeasuredAt: spawn.At, ReceivedAt: now, Spawn: &spawn})
-		}
-	}
-}
-
-// expire drops ended spawns older than the retention. It emits nothing: an
-// ended job has already said so on the stream.
-func (s *fleetStateStore) expire(now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for key, message := range s.latest {
-		if message.Spawn != nil && message.Spawn.Phase == "end" && now.Sub(message.ReceivedAt) > fleetStateEndedRetention {
-			delete(s.latest, key)
-		}
 	}
 }
 
@@ -419,7 +338,6 @@ func (s *fleetStateStore) snapshotLocked() []FleetStateMessage {
 
 type fleetStateSnapshot struct {
 	V      int                 `json:"v"`
-	Epoch  string              `json:"epoch"`
 	Seq    uint64              `json:"seq"`
 	At     time.Time           `json:"at"`
 	States []FleetStateMessage `json:"states"`
@@ -428,70 +346,7 @@ type fleetStateSnapshot struct {
 func (s *fleetStateStore) snapshot(now time.Time) fleetStateSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return fleetStateSnapshot{V: fleetStateVersion, Epoch: s.epoch, Seq: s.seq, At: now, States: s.snapshotLocked()}
-}
-
-// subscribe registers a reader and answers what it must be sent first: the
-// ring tail after lastID when lastID is from this epoch and still covered, or
-// a reset plus the full snapshot otherwise. Registration and the replay are
-// one critical section, so nothing published meanwhile is lost or repeated.
-func (s *fleetStateStore) subscribe(lastID string) (reader *fleetStateReader, replay []FleetStateMessage, reset bool, ok bool) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if len(s.readers) >= fleetStateMaxReaders {
-		return nil, nil, false, false
-	}
-	reader = &fleetStateReader{messages: make(chan FleetStateMessage, fleetStateReaderBuffer), overflow: make(chan struct{})}
-	s.readers[reader] = struct{}{}
-	if lastID == "" {
-		return reader, s.snapshotLocked(), false, true
-	}
-	if after, covered := s.ringAfterLocked(lastID); covered {
-		return reader, after, false, true
-	}
-	return reader, s.snapshotLocked(), true, true
-}
-
-func (s *fleetStateStore) ringAfterLocked(lastID string) ([]FleetStateMessage, bool) {
-	epoch, rawSeq, found := strings.Cut(lastID, "-")
-	if !found || epoch != s.epoch {
-		return nil, false
-	}
-	last, err := strconv.ParseUint(rawSeq, 10, 64)
-	if err != nil || last > s.seq {
-		return nil, false
-	}
-	if last == s.seq {
-		return nil, true
-	}
-	ring := s.ring
-	if len(ring) > fleetStateRingSize {
-		ring = ring[len(ring)-fleetStateRingSize:]
-	}
-	// The ring covers lastID only when the message right after it is still
-	// held; anything older has been trimmed and needs a reset.
-	if len(ring) == 0 || ring[0].Seq > last+1 {
-		return nil, false
-	}
-	index, _ := slices.BinarySearchFunc(ring, last+1, func(message FleetStateMessage, seq uint64) int {
-		switch {
-		case message.Seq < seq:
-			return -1
-		case message.Seq > seq:
-			return 1
-		}
-		return 0
-	})
-	return append([]FleetStateMessage(nil), ring[index:]...), true
-}
-
-func (s *fleetStateStore) unsubscribe(reader *fleetStateReader) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if _, exists := s.readers[reader]; exists {
-		delete(s.readers, reader)
-		close(reader.overflow)
-	}
+	return fleetStateSnapshot{V: fleetStateVersion, Seq: s.seq, At: now, States: s.snapshotLocked()}
 }
 
 // publishFleetStateFromNode stores one node `state` event under the node's
@@ -505,17 +360,14 @@ func (h *HubServer) publishFleetStateFromNode(machineID string, publish FleetSta
 		h.logger.Warn("fleet state publish over budget dropped", "machine", machineID, "kind", publish.Kind)
 		return false
 	}
-	message := FleetStateMessage{Host: machineID, Kind: publish.Kind, Key: publish.Key, MeasuredAt: publish.MeasuredAt.UTC(), ReceivedAt: received, Quota: publish.Quota}
-	if publish.Spawn != nil {
+	if publish.Kind == fleetStateKindSpawn {
 		if publish.Spawn.Host != "" && publish.Spawn.Host != machineID {
 			h.logger.Warn("fleet state for another host refused", "machine", machineID, "kind", publish.Kind)
 			return false
 		}
-		spawn := *publish.Spawn
-		spawn.Host, spawn.At = machineID, spawn.At.UTC()
-		message.Spawn = &spawn
+		return true
 	}
-	h.stateStore().publish(message, fleetStateNodeRepeat)
+	h.stateStore().publish(FleetStateMessage{Host: machineID, Kind: publish.Kind, Key: publish.Key, MeasuredAt: publish.MeasuredAt.UTC(), ReceivedAt: received, Quota: publish.Quota}, fleetStateNodeRepeat)
 	return true
 }
 
@@ -532,15 +384,15 @@ func (h *HubServer) publishFleetPublisher(machineID string, now time.Time) {
 	h.mu.Unlock()
 	repeat := fleetStatePublisherBeat
 	if !publisher.Connected {
-		// A dead publisher is announced once, on the transition; repeating an
-		// unchanged connected:false would only churn the replay ring.
+		// A dead publisher is recorded once, on the transition; its last_seen
+		// stays the moment it was last heard.
 		repeat = time.Duration(math.MaxInt64)
 	}
 	h.stateStore().publish(FleetStateMessage{Host: machineID, Kind: fleetStateKindPublisher, MeasuredAt: publisher.LastSeen, ReceivedAt: now, Publisher: &publisher}, repeat)
 }
 
-// sweepFleetState re-emits publisher state (so a stale node is announced) and
-// drops expired ended spawns. Sweep calls it with the maintenance clock.
+// sweepFleetState re-emits publisher state, so a stale node is recorded. Sweep
+// calls it with the maintenance clock.
 func (h *HubServer) sweepFleetState(now time.Time) {
 	h.mu.Lock()
 	machines := make([]string, 0, len(h.nodes))
@@ -551,7 +403,6 @@ func (h *HubServer) sweepFleetState(now time.Time) {
 	for _, machine := range machines {
 		h.publishFleetPublisher(machine, now)
 	}
-	h.stateStore().expire(now)
 }
 
 // startFleetLoadPublish runs publishFleetLoad off the sweep: the placement
@@ -629,72 +480,4 @@ func (h *HubServer) handleFleetStateSnapshot(writer http.ResponseWriter, request
 		return
 	}
 	writeJSON(writer, http.StatusOK, h.stateStore().snapshot(h.now().UTC()))
-}
-
-// handleFleetStateStream serves the state stream. The id of each event is the
-// message id, so a reconnecting EventSource resumes with Last-Event-ID.
-func (h *HubServer) handleFleetStateStream(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeFleetStateRead(writer, request) {
-		return
-	}
-	lastID := strings.TrimSpace(request.Header.Get("Last-Event-ID"))
-	if lastID == "" {
-		lastID = strings.TrimSpace(request.URL.Query().Get("last_event_id"))
-	}
-	if len(lastID) > 64 {
-		lastID = "invalid"
-	}
-	reader, replay, reset, ok := h.stateStore().subscribe(lastID)
-	if !ok {
-		writeJSON(writer, http.StatusServiceUnavailable, map[string]string{"error": "state_readers_full"})
-		return
-	}
-	defer h.stateStore().unsubscribe(reader)
-	controller := http.NewResponseController(writer)
-	header := writer.Header()
-	header.Set("Content-Type", "text/event-stream")
-	header.Set("Cache-Control", "no-store")
-	header.Set("X-Accel-Buffering", "no")
-	writer.WriteHeader(http.StatusOK)
-	write := func(chunk string) bool {
-		if _, err := writer.Write([]byte(chunk)); err != nil {
-			return false
-		}
-		return controller.Flush() == nil
-	}
-	head := "retry: 3000\n\n"
-	if reset {
-		head += fmt.Sprintf("event: reset\ndata: {\"epoch\":%q}\n\n", h.stateStore().epoch)
-	}
-	for _, message := range replay {
-		head += fleetStateEvent(message)
-	}
-	if !write(head) {
-		return
-	}
-	keepalive := time.NewTicker(fleetStateKeepalive)
-	defer keepalive.Stop()
-	for {
-		select {
-		case <-request.Context().Done():
-			return
-		case <-h.fleetCloseDone():
-			return
-		case <-reader.overflow:
-			return
-		case message := <-reader.messages:
-			if !write(fleetStateEvent(message)) {
-				return
-			}
-		case <-keepalive.C:
-			if !write(": keepalive\n\n") {
-				return
-			}
-		}
-	}
-}
-
-func fleetStateEvent(message FleetStateMessage) string {
-	encoded, _ := json.Marshal(message)
-	return "id: " + message.ID + "\nevent: state\ndata: " + string(encoded) + "\n\n"
 }

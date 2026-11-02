@@ -696,9 +696,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
 	}
 	hub.auth.Store(&authSet)
-	// The epoch is wall-clock, not the injectable clock: it must differ
-	// across hub restarts so a resuming reader never matches a stale id.
-	hub.fleetState = newFleetStateStore(time.Now())
+	hub.fleetState = newFleetStateStore()
 	hub.prepareInbox()
 	return hub, nil
 }
@@ -787,7 +785,6 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/burst/holds", h.handleBurstHolds)
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
 	mux.HandleFunc("GET /v1/state", h.handleFleetStateSnapshot)
-	mux.HandleFunc("GET /v1/state/stream", h.handleFleetStateStream)
 	// One-release tombstone: legacy producers still hit these during the
 	// upgrade window; answer a structured 503 instead of a bare 404.
 	mux.HandleFunc("GET /v2/quota/bindings", h.handleQuotaV2Gone)
@@ -1229,8 +1226,8 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 		}
 		received := h.now().UTC()
 		if message.Kind == "state" {
-			// Fleet state has its own stream (/v1/state/stream); it is not
-			// broadcast to /v1/events subscribers.
+			// Fleet state is served at /v1/state; it is not broadcast to
+			// /v1/events subscribers.
 			publish, valid := decodeFleetStatePublish(message.Payload)
 			if !valid || !h.publishFleetStateFromNode(machineID, publish, received) {
 				h.countUnknownMessage()

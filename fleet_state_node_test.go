@@ -47,30 +47,6 @@ func fsRunNode(t *testing.T, server string, configure func(*HubClient)) *HubClie
 	return client
 }
 
-// Acceptance 4, end to end: a job runtug spawned on the node appears on the
-// hub stream as spawn start, and as spawn end once it completes, with job,
-// profile and host.
-func TestFleetStateNodePublishesSpawnStartEnd(t *testing.T) {
-	_, server := fsHub(t, "")
-	events, _ := fsStream(t, server, fsOperator())
-	inbox := t.TempDir()
-	fsWriteJobEvent(t, inbox, "job-e2e", "00001-job.claim.json", `{"type":"job.claim","epoch":1,"agent_label":"agent-a"}`)
-	fsWriteJobEvent(t, inbox, "job-e2e", "00002-job.spawned.json", `{"kind":"job.spawned","payload":{"profile":"builder-opus","host":"node-a","launch_profile":"opus@high"}}`)
-	fsRunNode(t, server.URL, func(client *HubClient) { client.jobsInboxRoot = inbox })
-
-	start := fsNext(t, events, "spawn start", func(e fsEvent) bool { return e.message.Kind == fleetStateKindSpawn })
-	if spawn := start.message.Spawn; start.message.Host != "node-a" || spawn.Phase != "start" || spawn.Job != "job-e2e" || spawn.Profile != "builder-opus" || spawn.Host != "node-a" {
-		t.Fatalf("start = %+v spawn=%+v", start.message, spawn)
-	}
-	fsWriteJobEvent(t, inbox, "job-e2e", "00003-job.completed.json", `{"type":"job.completed","epoch":1}`)
-	end := fsNext(t, events, "spawn end", func(e fsEvent) bool {
-		return e.message.Kind == fleetStateKindSpawn && e.message.Spawn.Phase == "end"
-	})
-	if spawn := end.message.Spawn; spawn.Job != "job-e2e" || spawn.Profile != "builder-opus" || spawn.Host != "node-a" {
-		t.Fatalf("end spawn=%+v", spawn)
-	}
-}
-
 const fsPaceleverFresh = `{"id":"claude","buckets":[{"label":"5h","window":"5h","used_pct":42,"resets_at":"2026-11-01T05:00:00.5Z","scope":{"kind":"account"},"horizon":"short"},{"label":"7d opus","window":"7d","used_pct":null,"scope":{"kind":"model","name":"opus"}}],"pool_class":"spend","source":"handoffkeep","stale":false,"fetched_at":1761962400.25,"account_fp":"0123456789abcdef","account_fp_kind":"account"}`
 
 func TestFleetQuotaFromPacelever(t *testing.T) {
@@ -131,26 +107,6 @@ func TestFleetStateNodePublishesQuota(t *testing.T) {
 	}
 }
 
-func TestFleetSpawnsOffWithoutStatePublish(t *testing.T) {
-	client := &HubClient{events: make(chan hubClientEvent, 4), warn: func(string) {}}
-	client.publishFleetSpawns([]HubActiveJob{{JobID: "job-a", Epoch: 1}}, time.Now())
-	if len(client.events) != 0 {
-		t.Fatal("spawn state published without --state-publish")
-	}
-	client.statePublish = true
-	client.publishFleetSpawns([]HubActiveJob{{JobID: "job-a", Epoch: 1}}, time.Now())
-	client.publishFleetSpawns([]HubActiveJob{{JobID: "job-a", Epoch: 1}}, time.Now())
-	if len(client.events) != 1 {
-		t.Fatalf("an unchanged running job was re-announced: %d events", len(client.events))
-	}
-	client.resyncFleetState()
-	client.publishFleetSpawns([]HubActiveJob{{JobID: "job-a", Epoch: 1}}, time.Now())
-	client.publishFleetSpawns(nil, time.Now())
-	if len(client.events) != 3 {
-		t.Fatalf("resync start + end: %d events, want 3", len(client.events))
-	}
-}
-
 func TestParseFleetQuotaPools(t *testing.T) {
 	if pools, ok := parseFleetQuotaPools(" claude, codex,claude ,"); !ok || strings.Join(pools, ",") != "claude,codex" {
 		t.Fatalf("pools=%v ok=%v", pools, ok)
@@ -173,31 +129,21 @@ func TestFleetQuotaAllUnmeasuredBucketsRefused(t *testing.T) {
 	}
 }
 
-// Review #142: a job whose start was dropped by the full queue announces the
-// start before its end.
-func TestFleetSpawnEndNeverPrecedesStart(t *testing.T) {
-	client := &HubClient{events: make(chan hubClientEvent, 1), warn: func(string) {}, statePublish: true}
-	client.events <- hubClientEvent{Kind: "note"} // queue full: the start is dropped
-	client.publishFleetSpawns([]HubActiveJob{{JobID: "job-a", Epoch: 1}}, time.Now())
-	if running := client.fleetSpawns["job-a"]; running.announced {
-		t.Fatal("start counted as announced although the queue dropped it")
-	}
-	<-client.events
-	client.events = make(chan hubClientEvent, 4)
-	client.publishFleetSpawns(nil, time.Now()) // the job ended before a retry
-	var phases []string
-	for len(client.events) > 0 {
-		event := <-client.events
-		var publish FleetStatePublish
-		if json.Unmarshal(event.Payload, &publish) != nil || publish.Spawn == nil {
-			t.Fatalf("event %+v", event)
+// hk 2649: a node no longer publishes spawn values, whatever jobs it runs.
+func TestFleetStateNodeDoesNotPublishSpawn(t *testing.T) {
+	hub, server := fsHub(t, "")
+	inbox := t.TempDir()
+	fsWriteJobEvent(t, inbox, "job-e2e", "00001-job.claim.json", `{"type":"job.claim","epoch":1,"agent_label":"agent-a"}`)
+	fsRunNode(t, server.URL, func(client *HubClient) { client.jobsInboxRoot = inbox })
+	eventually(t, 5*time.Second, "job reached the hub", func() bool {
+		hub.mu.Lock()
+		defer hub.mu.Unlock()
+		record := hub.nodes["node-a"]
+		return record != nil && record.activeJobs["job-e2e"].JobID != ""
+	})
+	for _, message := range fsSnapshot(t, server).States {
+		if message.Kind == fleetStateKindSpawn {
+			t.Fatalf("a spawn value was published: %+v", message)
 		}
-		phases = append(phases, publish.Spawn.Phase)
-	}
-	if strings.Join(phases, ",") != "start,end" {
-		t.Fatalf("phases = %v, want start,end", phases)
-	}
-	if _, kept := client.fleetSpawns["job-a"]; kept {
-		t.Fatal("ended job kept")
 	}
 }
