@@ -24,7 +24,9 @@ func TestPlacementPrometheusPolicyBranches(t *testing.T) {
 		want      string
 	}{
 		{"local capacity", .23, 1, 0, true, "mac-work"},
-		{"local overloaded", .53, 1, 0, true, "desktop"},
+		// Load ranks and never filters: a busy local stays the policy-order
+		// decision and is merely scored below the idle spill target.
+		{"busy local is not filtered", .53, 1, 0, true, "mac-work"},
 		{"thermal throttle", .12, .89, 0, true, "desktop"}, // Mutant ①: deleting throttle eligibility makes this RED.
 		{"active job maximum", .12, 1, 5, true, "desktop"},
 		{"spill unavailable", .53, 1, 0, false, "mac-work"},
@@ -65,8 +67,8 @@ func TestPlacementHubOnlyNeverFailsAndCaches(t *testing.T) {
 	if first.Source != "hub-only" || first.Decision != "mac-work" || second.Source != "hub-only" {
 		t.Fatalf("must degrade: first=%+v second=%+v", first, second)
 	} // Mutant ②: returning a Prometheus failure turns this RED.
-	if got := calls.Load(); got != 1 {
-		t.Fatalf("prometheus calls=%d, want cached 1", got)
+	if got := calls.Load(); got != int32(len(placementMetricQueries)) {
+		t.Fatalf("prometheus calls=%d, want one cached read of %d queries", got, len(placementMetricQueries))
 	}
 }
 

@@ -20,6 +20,8 @@ func placementPowerProm(t *testing.T, busy, load5 map[string]string) *httptest.S
 		query := r.URL.Query().Get("query")
 		samples := map[string]string{"mac-work": "1", "desktop": "1"}
 		switch {
+		case strings.Contains(query, "swapped_in") || strings.Contains(query, "pswpin"):
+			samples = map[string]string{"mac-work": "0", "desktop": "0"}
 		case strings.Contains(query, "node_load5"):
 			samples = load5
 		case strings.Contains(query, "node_cpu_seconds_total"):
@@ -69,18 +71,24 @@ func TestPlacementLoadQueryIsCPUUtilisation(t *testing.T) {
 	defer prom.Close()
 	hub := placementHub(t, prom.URL)
 	_, _ = hub.fetchPlacementMetrics(t.Context())
-	var load string
+	var cpu []string
 	for _, query := range queries {
 		if strings.Contains(query, "node_cpu_seconds_total") {
-			load = query
+			cpu = append(cpu, query)
 		}
-		if strings.Contains(query, "node_load5") {
-			t.Fatalf("load5 must not feed placement: %q", query)
+		if strings.Contains(query, "node_load") {
+			t.Fatalf("load averages must not feed placement: %q", query)
 		}
 	}
-	for _, want := range []string{`mode="idle"`, "rate(", "[5m]", "avg by (machine_id)", "1 -"} {
-		if !strings.Contains(load, want) {
-			t.Fatalf("cpu query missing %q: %q", want, load)
+	// Two CPU windows: five minutes and the last scrape interval.
+	if len(cpu) != 2 {
+		t.Fatalf("cpu queries=%q", cpu)
+	}
+	for _, query := range cpu {
+		for _, want := range []string{`mode="idle"`, "rate(", "avg by (machine_id)", "1 -"} {
+			if !strings.Contains(query, want) {
+				t.Fatalf("cpu query missing %q: %q", want, query)
+			}
 		}
 	}
 }
@@ -119,37 +127,40 @@ func TestPlacementHighLoad5LowCPUStaysLocal(t *testing.T) {
 	}
 }
 
-// load_ratio keeps meaning "busy fraction": a genuinely busy CPU still spills.
-func TestPlacementBusyCPUSpills(t *testing.T) {
+// load_ratio keeps meaning "five-minute busy fraction" on the wire, but a
+// busy CPU only ranks the host lower: a stale load_ratio threshold in the
+// policy filters nothing.
+func TestPlacementBusyCPURanksLowerWithoutFilter(t *testing.T) {
 	prom := placementPowerProm(t, map[string]string{"mac-work": "0.62", "desktop": "0.10"}, nil)
 	defer prom.Close()
 	hub := placementPowerHub(t, prom.URL, PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop"}, MaxActiveJobs: 5, LoadRatio: .5})
 	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
 	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
-	if got := hub.placement(t.Context(), "worker", "repo"); got.Decision != "desktop" {
-		t.Fatalf("busy local must spill: %+v", got)
+	got := hub.placement(t.Context(), "worker", "repo")
+	busy, _ := t607Candidate(got, "mac-work")
+	if got.Candidates[0].Machine != "desktop" || busy.LoadRatio != .62 || strings.Contains(busy.Reason, "load_ratio") || !placementUsable(busy, PlacementPolicy{MaxActiveJobs: 5}, got.Source) {
+		t.Fatalf("busy local must rank lower and stay usable: %+v", got)
 	}
 }
 
 func TestPlacementScoreBase(t *testing.T) {
 	cases := []struct {
-		name  string
-		load  float64
-		jobs  int
-		power float64
-		want  float64
+		name    string
+		free    float64
+		bridged int
+		power   float64
+		want    float64
 	}{
-		{"idle strongest", 0, 0, 100, 105},
-		{"idle half power", 0, 0, 50, 102.5},
-		{"one job strongest", 0, 1, 100, 95},
-		{"one job half power doubles the penalty", 0, 1, 50, 82.5},
-		{"one job double power halves the penalty", 0, 1, 200, 105},
-		{"busy host earns no spare bonus", 1, 0, 100, 0},
-		{"load above one is clamped for the bonus", 2, 0, 100, -100},
+		{"idle strongest", 1, 0, 100, 100},
+		{"idle half power", 1, 0, 50, 50},
+		{"half free strongest", .5, 0, 100, 50},
+		{"bridged job costs a tenth of a power-100 host", 1, 1, 100, 90},
+		{"bridged job costs a fifth of a power-50 host", 1, 1, 50, 40},
+		{"fully busy host", 0, 0, 100, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := placementScoreBase(tc.load, tc.jobs, tc.power); got != tc.want {
+			if got := placementScoreBase(tc.free, tc.bridged, tc.power); got != tc.want {
 				t.Fatalf("score=%v, want %v", got, tc.want)
 			}
 		})
@@ -192,25 +203,24 @@ func TestPlacementPowerRanksStrongIdleHostFirst(t *testing.T) {
 	}
 }
 
-func TestPlacementPowerScalesJobPenalty(t *testing.T) {
+// A job older than the spawn bridge is already in the metrics: counting it
+// again was the stale-job-count bug, so it costs nothing, whatever the power.
+func TestPlacementSettledJobsDoNotCost(t *testing.T) {
 	prom := placementPowerProm(t, map[string]string{"mac-work": "0.2", "desktop": "0.2"}, nil)
 	defer prom.Close()
-	hub := placementPowerHub(t, prom.URL, PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop"}, MaxActiveJobs: 5, LoadRatio: .5, Power: map[string]float64{"mac-work": 20}})
+	hub := placementPowerHub(t, prom.URL, PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop"}, MaxActiveJobs: 50, Power: map[string]float64{"mac-work": 20}})
 	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
 	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
-	hub.observeActiveJobs("mac-work", placementPowerJobs("mac-work", 1), time.Now().UTC())
-	hub.observeActiveJobs("desktop", placementPowerJobs("desktop", 1), time.Now().UTC())
+	settled := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	jobs := placementPowerJobs("mac-work", 20)
+	for i := range jobs {
+		jobs[i].StartedAt = settled
+	}
+	hub.observeActiveJobs("mac-work", jobs, time.Now().UTC())
 	got := hub.placement(t.Context(), "worker", "repo")
 	weak, _ := t607Candidate(got, "mac-work")
 	strong, _ := t607Candidate(got, "desktop")
-	// Same load and one job each: the power-20 host pays 5x the job penalty.
-	if want := placementScoreBase(.2, 1, 20); weak.Score != want {
-		t.Fatalf("weak score=%v, want %v", weak.Score, want)
-	}
-	if want := placementScoreBase(.2, 1, 100); strong.Score != want {
-		t.Fatalf("strong score=%v, want %v", strong.Score, want)
-	}
-	if strong.Score-weak.Score < 40 {
-		t.Fatalf("job penalty not scaled by power: strong=%v weak=%v", strong.Score, weak.Score)
+	if weak.ActiveJobs != 20 || weak.Signals.BridgedJobs != 0 || weak.Score != placementScoreBase(.8, 0, 20) || strong.Score != placementScoreBase(.8, 0, 100) {
+		t.Fatalf("settled jobs changed the score: weak=%+v %+v strong=%+v", weak, weak.Signals, strong)
 	}
 }

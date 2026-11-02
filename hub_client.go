@@ -154,11 +154,15 @@ type HubClient struct {
 	burstHoldsActive bool
 	panesAlive       panesAliveFunc
 	panesAliveMu     sync.Mutex
-	sessionMu        sync.Mutex
-	spawnConfigPath  string
-	spawnMu          sync.Mutex
-	spawnPrepare     func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
-	spawnSeenMu      sync.Mutex
+	// paneIdleSince is the first heartbeat at which each pane was idle or
+	// done (hub_jobs_idle.go).
+	paneIdleSince   map[string]time.Time
+	paneIdleMu      sync.Mutex
+	sessionMu       sync.Mutex
+	spawnConfigPath string
+	spawnMu         sync.Mutex
+	spawnPrepare    func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
+	spawnSeenMu     sync.Mutex
 	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
 	statePublish       bool
 	stateQuotaPools    []string
@@ -1774,7 +1778,20 @@ func (client *HubClient) seedRelayRecvSeq(value int64) {
 }
 
 func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
+	// The herdr snapshot is read before the job scan: it reports each pane's
+	// idle/done status, which retires long-idle jobs from the active list.
+	collectSessions := client.sessionSnapshotHook()
+	var states []HerdrAgentState
+	var sessionsErr error
+	if collectSessions != nil {
+		lookup, cancel := context.WithTimeout(ctx, hubSessionSnapshotTimeout)
+		states, sessionsErr = collectSessions(lookup)
+		cancel()
+	}
 	active := scanHubActiveJobsWithPanes(ctx, client.jobsInboxRoot, client.panesAliveHook())
+	if collectSessions != nil && sessionsErr == nil {
+		active = client.dropLongIdleJobs(active, states, client.nowUTC())
+	}
 	client.assignmentMu.Lock()
 	for i := range active {
 		if epoch := client.assignedJobs[active[i].JobID]; epoch > active[i].Epoch {
@@ -1808,15 +1825,11 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	if memory, err := collectMemory(ctx); err == nil {
 		heartbeat.HostMemory = memory
 	}
-	collectSessions := client.sessionSnapshotHook()
 	if collectSessions == nil {
 		payload, _ := json.Marshal(heartbeat)
 		return hubClientEvent{Kind: "heartbeat", Payload: payload}
 	}
-	lookup, cancel := context.WithTimeout(ctx, hubSessionSnapshotTimeout)
-	defer cancel()
-	states, err := collectSessions(lookup)
-	if err != nil {
+	if sessionsErr != nil {
 		heartbeat.SnapshotStatus = hubSnapshotStatusUnavailable
 		heartbeat.Sessions = nil
 		heartbeat.Truncated = false

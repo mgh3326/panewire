@@ -14,22 +14,36 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
 // PlacementPolicy is deliberately small and operator-owned. It selects a
 // local machine first, then considers spill targets in the listed order.
 type PlacementPolicy struct {
-	LocalMachine     string   `json:"local_machine"`
-	SpillTargets     []string `json:"spill_targets"`
-	MaxActiveJobs    int      `json:"max_active_jobs"`
-	LoadRatio        float64  `json:"load_ratio"`
-	WakeOnSpill      bool     `json:"wake_on_spill"`
+	LocalMachine  string   `json:"local_machine"`
+	SpillTargets  []string `json:"spill_targets"`
+	MaxActiveJobs int      `json:"max_active_jobs"`
+	// LoadRatio is retired: placement no longer filters on load, the measured
+	// load only ranks candidates (docs/placement.md). It stays decodable, and
+	// optional, so an existing policy file still loads.
+	LoadRatio   float64 `json:"load_ratio,omitempty"`
+	WakeOnSpill bool    `json:"wake_on_spill"`
+	// MemoryFreePctMin is the only admission threshold left: a crash guard
+	// against starting a session on a host about to run out of memory.
 	MemoryFreePctMin *float64 `json:"memory_free_pct_min,omitempty"`
+	// SwapUsedMBMax, SwapInPerSMax, PSISomeAvg10Max and PressureLevelMin are
+	// retired load filters. Swap-in now lowers the score instead of excluding
+	// the host. They stay decodable so a stale policy file still loads.
 	SwapUsedMBMax    *float64 `json:"swap_used_mb_max,omitempty"`
 	SwapInPerSMax    *float64 `json:"swap_in_per_s_max,omitempty"`
 	PSISomeAvg10Max  *float64 `json:"psi_some_avg10_max,omitempty"`
 	PressureLevelMin *float64 `json:"pressure_level_min,omitempty"`
+	// SpawnBridgeSeconds is how long a freshly started job counts against its
+	// host's score: the metrics lag a spawn, so until their window covers it
+	// the job itself stands in for the load it is about to add. 0 means the
+	// default, placementDefaultSpawnBridge.
+	SpawnBridgeSeconds int `json:"spawn_bridge_seconds,omitempty"`
 	// QuotaExclude and QuotaBoost are retired and never evaluated. They stay
 	// decodable so a stale policy file still loads: reload logs a warning and
 	// strips them, so the desk can remove the keys at leisure. Remove the
@@ -54,17 +68,28 @@ type PlacementMachineSlots struct {
 const (
 	defaultPlacementPower = 100.0
 	maxPlacementPower     = 10000.0
-	// placementSparePowerBonus is the score a fully idle machine of power 100
-	// earns; it only has to break ties between otherwise equal candidates.
-	placementSparePowerBonus = 5.0
+	// placementDefaultSpawnBridge matches the five-minute CPU window: once
+	// that window covers a spawn, the job's real load is in the metrics.
+	placementDefaultSpawnBridge = 5 * time.Minute
+	maxPlacementSpawnBridge     = time.Hour
+	// placementSpawnBridgeCost is what one bridged job costs, in score points:
+	// a tenth of a power-100 host's headroom, so it weighs relatively more on
+	// a weaker host. It only has to keep back-to-back spawns apart until the
+	// metrics see the first one; it is not a model of any kind of job.
+	placementSpawnBridgeCost = 10.0
+	// placementSwapInHalfMBps is the swap-in rate that halves a host's free
+	// fraction. The fleet survey (docs/placement.md) put busy macOS hosts at
+	// 2-10 MB/s and a thrashing one at 25-50 MB/s; Linux hosts sit near 0.
+	placementSwapInHalfMBps = 20.0
 )
 
 func DefaultPlacementPolicy() PlacementPolicy {
-	return PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop"}, MaxActiveJobs: 5, LoadRatio: 0.5, MemoryFreePctMin: memoryFloat(30), SwapUsedMBMax: memoryFloat(1536)}
+	return PlacementPolicy{LocalMachine: "mac-work", SpillTargets: []string{"desktop"}, MaxActiveJobs: 5, MemoryFreePctMin: memoryFloat(30)}
 }
 
 func (p PlacementPolicy) valid() bool {
-	if !machineIDPattern.MatchString(p.LocalMachine) || p.LocalMachine == hubOperatorMachineID || p.MaxActiveJobs < 1 || p.MaxActiveJobs > 10000 || p.LoadRatio <= 0 || p.LoadRatio > 100 ||
+	if !machineIDPattern.MatchString(p.LocalMachine) || p.LocalMachine == hubOperatorMachineID || p.MaxActiveJobs < 1 || p.MaxActiveJobs > 10000 || p.LoadRatio < 0 || p.LoadRatio > 100 ||
+		p.SpawnBridgeSeconds < 0 || time.Duration(p.SpawnBridgeSeconds)*time.Second > maxPlacementSpawnBridge ||
 		!validOptionalMemoryFloat(p.MemoryFreePctMin, 0, 100) || !validOptionalMemoryFloat(p.SwapUsedMBMax, 0, math.Inf(1)) ||
 		!validOptionalMemoryFloat(p.SwapInPerSMax, 0, math.Inf(1)) || !validOptionalMemoryFloat(p.PSISomeAvg10Max, 0, 100) || !validOptionalMemoryFloat(p.PressureLevelMin, 0, 2) {
 		return false
@@ -112,14 +137,59 @@ func (p PlacementPolicy) power(machine string) float64 {
 	return defaultPlacementPower
 }
 
-// placementScoreBase is the load-and-jobs part of a candidate's score. Each
-// active job costs 10 points on a power-100 host and proportionally more on a
-// weaker one; an idle machine earns a bonus in proportion to its spare power
-// so stronger idle hosts win ties. A weak host stays eligible: it is ranked
-// lower, never filtered. load is a busy fraction and is clamped for the bonus.
-func placementScoreBase(load float64, jobs int, power float64) float64 {
-	spare := power * (1 - math.Min(math.Max(load, 0), 1))
-	return 100.0 - load*100 - float64(jobs)*10*defaultPlacementPower/power + placementSparePowerBonus*spare/defaultPlacementPower
+func (p PlacementPolicy) spawnBridge() time.Duration {
+	if p.SpawnBridgeSeconds <= 0 {
+		return placementDefaultSpawnBridge
+	}
+	return time.Duration(p.SpawnBridgeSeconds) * time.Second
+}
+
+// placementFree is the measured share of a host that is still free, 0..1: the
+// scarcer of CPU headroom and available memory, shrunk by swap-in. CPU busy is
+// the larger of the last-minute and five-minute readings, so a job that just
+// went heavy shows at once and a sustained one is not forgotten when one
+// minute dips. A signal the host does not report is left out rather than
+// guessed; with no CPU reading the host counts as idle (hub-only, or the
+// load_unknown penalty applies).
+func placementFree(signals PlacementSignals) float64 {
+	busy := 0.0
+	if signals.CPUBusy5m != nil {
+		busy = *signals.CPUBusy5m
+	}
+	if signals.CPUBusy1m != nil && *signals.CPUBusy1m > busy {
+		busy = *signals.CPUBusy1m
+	}
+	free := 1 - math.Min(math.Max(busy, 0), 1)
+	if signals.MemAvailable != nil {
+		free = math.Min(free, math.Min(math.Max(*signals.MemAvailable, 0), 1))
+	}
+	if signals.SwapInMBps != nil && *signals.SwapInMBps > 0 {
+		free /= 1 + *signals.SwapInMBps/placementSwapInHalfMBps
+	}
+	return free
+}
+
+// placementScoreBase is the measured-load part of a candidate's score: the
+// free fraction times the host's power, so at equal load the stronger host
+// wins and at equal power the less loaded one does. Each job inside the spawn
+// bridge costs placementSpawnBridgeCost. A weak or busy host stays eligible:
+// it is ranked lower, never filtered.
+func placementScoreBase(free float64, bridgedJobs int, power float64) float64 {
+	return free*power - float64(bridgedJobs)*placementSpawnBridgeCost
+}
+
+// countBridgedJobs counts the jobs that started less than bridge ago. A job
+// whose start time is unknown cannot be placed in the window and is left out;
+// a start slightly in the future (clock skew between node and hub) counts.
+func countBridgedJobs(jobs map[string]HubActiveJob, now time.Time, bridge time.Duration) int {
+	count := 0
+	for _, job := range jobs {
+		started, err := time.Parse(time.RFC3339, job.StartedAt)
+		if err == nil && now.Sub(started) < bridge {
+			count++
+		}
+	}
+	return count
 }
 
 func (p PlacementPolicy) memoryFreePctMin() float64 {
@@ -129,49 +199,9 @@ func (p PlacementPolicy) memoryFreePctMin() float64 {
 	return *p.MemoryFreePctMin
 }
 
-func (p PlacementPolicy) swapUsedMBMax() float64 {
-	if p.SwapUsedMBMax == nil {
-		return 1536
-	}
-	return *p.SwapUsedMBMax
-}
-
-func (p PlacementPolicy) swapInPerSMax() float64 {
-	if p.SwapInPerSMax == nil {
-		return 10
-	}
-	return *p.SwapInPerSMax
-}
-
-func (p PlacementPolicy) psiSomeAvg10Max() float64 {
-	if p.PSISomeAvg10Max == nil {
-		return 1
-	}
-	return *p.PSISomeAvg10Max
-}
-
-func (p PlacementPolicy) pressureLevelMin() float64 {
-	if p.PressureLevelMin == nil {
-		return 1
-	}
-	return *p.PressureLevelMin
-}
-
 func (p *PlacementPolicy) applyMemoryDefaults() {
 	if p.MemoryFreePctMin == nil {
 		p.MemoryFreePctMin = memoryFloat(30)
-	}
-	if p.SwapUsedMBMax == nil {
-		p.SwapUsedMBMax = memoryFloat(1536)
-	}
-	if p.SwapInPerSMax == nil {
-		p.SwapInPerSMax = memoryFloat(10)
-	}
-	if p.PSISomeAvg10Max == nil {
-		p.PSISomeAvg10Max = memoryFloat(1)
-	}
-	if p.PressureLevelMin == nil {
-		p.PressureLevelMin = memoryFloat(1)
 	}
 }
 
@@ -235,12 +265,30 @@ type PlacementCandidate struct {
 	HoldsActive    bool     `json:"holds_active"`
 	BurstReady     bool     `json:"burst_ready"`
 	Reason         string   `json:"reason"`
+	// Signals are the measurements behind Score. They serialize only when the
+	// caller asks with signals=1 (place --explain): a pre-change CLI decodes
+	// candidates with DisallowUnknownFields and never asks.
+	Signals *PlacementSignals `json:"signals,omitempty"`
 	// slotFull is wire-internal: a slot-full machine is filtered out of the
 	// candidates array before the response is encoded, so it never serializes.
 	slotFull bool
 	// accepting is the effective acceptance placement derived (connected,
-	// accepting after overrides, no memory pressure); wire-internal too.
+	// accepting after overrides, above the memory floor); wire-internal too.
 	accepting bool
+}
+
+// PlacementSignals explains one candidate's score. A nil measurement is one
+// the host does not export (macOS has no PSI or MemAvailable gauge); it is
+// left out of the score, not guessed. BridgedJobs are the jobs younger than
+// the spawn bridge, which the metrics do not cover yet.
+type PlacementSignals struct {
+	CPUBusy1m    *float64 `json:"cpu_busy_1m"`
+	CPUBusy5m    *float64 `json:"cpu_busy_5m"`
+	MemAvailable *float64 `json:"mem_available"`
+	SwapInMBps   *float64 `json:"swap_in_mbps"`
+	Free         float64  `json:"free"`
+	Power        float64  `json:"power"`
+	BridgedJobs  int      `json:"bridged_jobs"`
 }
 
 // PlacementQuotaDecision survives on the wire only: a new hub emits an
@@ -345,15 +393,49 @@ func countPlacementTasks(jobs map[string]HubActiveJob) int {
 	return len(tasks)
 }
 
-// placementCPUBusyQuery is the busy fraction (0..1) per machine: one minus the
-// idle rate over five minutes, averaged over that machine's cpus. Unlike
-// node_load5 it does not count blocked threads, which on macOS can push the
-// load average far above the core count on a host that is barely busy.
-const placementCPUBusyQuery = `clamp(1 - avg by (machine_id) (rate(node_cpu_seconds_total{mode="idle"}[5m])), 0, 1)`
+// The placement signals, chosen by the fleet metric survey in
+// docs/placement.md. Every query aggregates by machine_id so remote-write
+// labels such as instance and job cannot break vector matching.
+const (
+	// placementCPUBusyQuery is the busy fraction (0..1) per machine: one minus
+	// the idle rate over five minutes, averaged over that machine's cpus.
+	// Unlike node_load5 it does not count blocked threads, which on macOS can
+	// push the load average far above the core count on a barely busy host.
+	placementCPUBusyQuery = `clamp(1 - avg by (machine_id) (rate(node_cpu_seconds_total{mode="idle"}[5m])), 0, 1)`
+	// placementCPUBusy1mQuery is the same fraction over the last scrape
+	// interval (60s): irate reads the newest two samples in the 3m range.
+	placementCPUBusy1mQuery = `clamp(1 - avg by (machine_id) (irate(node_cpu_seconds_total{mode="idle"}[3m])), 0, 1)`
+	// placementMemAvailableQuery is the available memory fraction. Linux has
+	// MemAvailable. macOS has no such gauge; available is what Activity
+	// Monitor does not count as used (app memory, wired, compressed).
+	placementMemAvailableQuery = `clamp((max by (machine_id) (node_memory_MemAvailable_bytes) / max by (machine_id) (node_memory_MemTotal_bytes)) or (1 - (max by (machine_id) (node_memory_internal_bytes) - max by (machine_id) (node_memory_purgeable_bytes) + max by (machine_id) (node_memory_wired_bytes) + max by (machine_id) (node_memory_compressed_bytes)) / max by (machine_id) (node_memory_total_bytes)), 0, 1)`
+	// placementSwapInQuery is the swap-in rate in MB/s over five minutes:
+	// macOS counts bytes, Linux counts 4 KiB pages.
+	placementSwapInQuery  = `(sum by (machine_id) (rate(node_memory_swapped_in_bytes_total[5m])) or sum by (machine_id) (rate(node_vmstat_pswpin[5m])) * 4096) / 1048576`
+	placementThermalQuery = `min by (machine_id) (min_over_time(node_thermal_cpu_speed_limit_ratio[5m]))`
+)
+
+// placementMetricQueries is every query one metrics read issues, in the
+// order fetchPlacementMetrics indexes the answers.
+var placementMetricQueries = [...]string{placementCPUBusyQuery, placementThermalQuery, placementCPUBusy1mQuery, placementMemAvailableQuery, placementSwapInQuery}
 
 type placementMetrics struct {
-	load      map[string]float64
+	load      map[string]float64 // five-minute CPU busy fraction
+	cpu1m     map[string]float64
+	memAvail  map[string]float64
+	swapIn    map[string]float64
 	throttled map[string]bool
+}
+
+// signals assembles one machine's measurements; absent ones stay nil.
+func (m placementMetrics) signals(machine string) PlacementSignals {
+	lookup := func(values map[string]float64) *float64 {
+		if value, ok := values[machine]; ok {
+			return &value
+		}
+		return nil
+	}
+	return PlacementSignals{CPUBusy5m: lookup(m.load), CPUBusy1m: lookup(m.cpu1m), MemAvailable: lookup(m.memAvail), SwapInMBps: lookup(m.swapIn)}
 }
 
 func (h *HubServer) reloadPlacementPolicyLocked() {
@@ -433,7 +515,24 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 		// and stripped on (re)load.
 		result.Quota = &PlacementQuotaDecision{Pool: pool, AccountFP: accountFP, Decision: "allow", Reason: "quota_allowed", PolicyStatus: result.PolicyStatus}
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, placementWire(result, r.URL.Query().Get("signals") == "1"))
+}
+
+// placementWire is the response as a caller sees it. Signals ride along only
+// when asked for: pre-change CLIs decode candidates with
+// DisallowUnknownFields and never ask. The candidates are copied before they
+// are cleared because a fresh result shares its array with the cache.
+func placementWire(result PlacementResult, withSignals bool) PlacementResult {
+	if withSignals {
+		return result
+	}
+	candidates := make([]PlacementCandidate, len(result.Candidates))
+	for i, candidate := range result.Candidates {
+		candidate.Signals = nil
+		candidates[i] = candidate
+	}
+	result.Candidates = candidates
+	return result
 }
 
 // PlacementSlotStatus is one machine's task-slot occupancy. TaskSlots is null
@@ -568,10 +667,11 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 	h.mu.Lock()
 	for _, machine := range machines {
 		record := h.nodes[machine]
-		connected, accepting, jobs, tasks := false, false, 0, 0
+		connected, accepting, jobs, tasks, bridged := false, false, 0, 0, 0
 		var memory *HubHostMemory
 		if record != nil {
 			connected, accepting, jobs, tasks = record.agent != nil && record.state == "connected", h.acceptingEffectiveLocked(machine, record.accepting), len(record.activeJobs), countPlacementTasks(record.activeJobs)
+			bridged = countBridgedJobs(record.activeJobs, now, policy.spawnBridge())
 			memory = cloneHubHostMemory(record.hostMemory)
 		}
 		taskSlots, slotCapped := policy.machineTaskSlots(machine)
@@ -590,9 +690,6 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 		if !metricsKnown && source == "prometheus" {
 			reasons = append(reasons, "load_unknown")
 		}
-		if metricsKnown && load >= policy.LoadRatio {
-			reasons = append(reasons, fmt.Sprintf("load_ratio>=%.2f", policy.LoadRatio))
-		}
 		if throttled {
 			reasons = append(reasons, "throttled")
 		}
@@ -609,21 +706,10 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 			reasons = append(reasons, "burst_ready")
 		}
 		memoryKnown := memory != nil && memory.FreePct != nil && memory.SwapUsedMB != nil
-		liveSignal := memory != nil && (memory.SwapInPerS != nil || memory.Pressure != nil)
+		// The memory floor is the one admission refusal left, a crash guard.
+		// Swap and pressure only lower the score (placementFree). The reason
+		// keeps its historical spelling; consumers match "not_accepting".
 		memoryPressure := memory != nil && memory.FreePct != nil && *memory.FreePct < policy.memoryFreePctMin()
-		if memory != nil && liveSignal {
-			memoryPressure = memoryPressure || memory.SwapInPerS != nil && *memory.SwapInPerS > policy.swapInPerSMax() ||
-				memory.PSISomeAvg10 != nil && *memory.PSISomeAvg10 > policy.psiSomeAvg10Max()
-			if memory.Pressure != nil {
-				if memory.Source == "proc_meminfo" {
-					memoryPressure = memoryPressure || *memory.Pressure > policy.psiSomeAvg10Max()
-				} else {
-					memoryPressure = memoryPressure || *memory.Pressure >= policy.pressureLevelMin()
-				}
-			}
-		} else if memory != nil {
-			memoryPressure = memoryPressure || memory.SwapUsedMB != nil && *memory.SwapUsedMB > policy.swapUsedMBMax()
-		}
 		if memoryPressure {
 			reasons = append(reasons, "not_accepting(memory_pressure)")
 		} else if !memoryKnown {
@@ -637,7 +723,9 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 		if _, weighted := policy.CapacityWeight[machine]; weighted {
 			weightField = capacityWeight
 		}
-		score := placementScoreBase(load, jobs, policy.power(machine)) * capacityWeight
+		signals := metrics.signals(machine)
+		signals.Free, signals.Power, signals.BridgedJobs = placementFree(signals), policy.power(machine), bridged
+		score := placementScoreBase(signals.Free, bridged, signals.Power) * capacityWeight
 		if !connected {
 			score -= 1000
 		}
@@ -666,7 +754,7 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 			tasksField = new(int)
 			*tasksField = tasks
 		}
-		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, SwapInPerS: swapInPerS, Pressure: pressure, CapacityWeight: weightField, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ","), slotFull: slotFull, accepting: connected && accepting && !memoryPressure})
+		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, SwapInPerS: swapInPerS, Pressure: pressure, CapacityWeight: weightField, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ","), Signals: &signals, slotFull: slotFull, accepting: connected && accepting && !memoryPressure})
 	}
 	h.mu.Unlock()
 	return candidates
@@ -771,7 +859,9 @@ func placementUsable(candidate PlacementCandidate, policy PlacementPolicy, sourc
 	if source == "prometheus" && !candidate.MetricsKnown {
 		return false
 	}
-	if source == "prometheus" && (candidate.Throttled || candidate.LoadRatio >= policy.LoadRatio) {
+	// Load ranks candidates and never filters them; thermal throttling is a
+	// hardware state, not load, and still makes a host unusable.
+	if source == "prometheus" && candidate.Throttled {
 		return false
 	}
 	return true
@@ -787,20 +877,28 @@ func (h *HubServer) fetchPlacementMetrics(ctx context.Context) (placementMetrics
 	if client == nil {
 		client = &http.Client{Timeout: 5 * time.Second}
 	}
-	queries := []string{placementCPUBusyQuery, "min by (machine_id) (min_over_time(node_thermal_cpu_speed_limit_ratio[5m]))"}
-	values := make([]map[string]float64, len(queries))
-	for i, query := range queries {
-		got, err := prometheusVector(ctx, client, rawURL, query, bearer, user, pass)
-		if err != nil {
-			return placementMetrics{}, err
-		}
-		values[i] = got
+	// One failed query fails the whole read: a half-answered Prometheus is
+	// treated like a down one (hub-only), never as a host with no load. A
+	// query that succeeds without a host's series only leaves that signal out.
+	values := make([]map[string]float64, len(placementMetricQueries))
+	errs := make([]error, len(placementMetricQueries))
+	var wg sync.WaitGroup
+	for i, query := range placementMetricQueries {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			values[i], errs[i] = prometheusVector(ctx, client, rawURL, query, bearer, user, pass)
+		}()
+	}
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
+		return placementMetrics{}, err
 	}
 	throttled := make(map[string]bool, len(values[1]))
 	for machine, value := range values[1] {
 		throttled[machine] = value < 1
 	}
-	return placementMetrics{load: values[0], throttled: throttled}, nil
+	return placementMetrics{load: values[0], throttled: throttled, cpu1m: values[2], memAvail: values[3], swapIn: values[4]}, nil
 }
 
 func prometheusVector(ctx context.Context, client *http.Client, rawURL, query, bearer, user, pass string) (map[string]float64, error) {

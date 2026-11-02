@@ -7,21 +7,21 @@ a brief, a path, a token, or a command to a node.
 
 The hub first reads the operator-owned `/etc/panewire/placement.json` (or the
 path passed to `panewire hub --placement-policy`) and uses its local machine
-first. A local candidate spills only when its recent five-minute CPU busy
-fraction is at least `load_ratio`, thermal speed limit is below one, or active heartbeat
-jobs reach `max_active_jobs`. `spill_targets` are considered in policy order.
+first. A local candidate spills only when it is disconnected or not
+accepting, its free memory is below `memory_free_pct_min`, its thermal speed
+limit is below one, or active heartbeat jobs reach `max_active_jobs`.
+`spill_targets` are considered in policy order. Load never filters a
+candidate; it ranks candidates through `score` (see
+[Measured-load score](#measured-load-score)), and callers that rank hosts —
+runtug's host-first placement — read that score.
 
 ```json
 {
   "local_machine": "mac-work",
   "spill_targets": ["desktop"],
   "max_active_jobs": 5,
-  "load_ratio": 0.5,
   "memory_free_pct_min": 30,
-  "swap_used_mb_max": 1536,
-  "swap_in_per_s_max": 10,
-  "psi_some_avg10_max": 1,
-  "pressure_level_min": 1,
+  "spawn_bridge_seconds": 300,
   "capacity_weight": {"mac-work": 1.0, "desktop": 2.0},
   "wake_on_spill": false,
   "machines": {
@@ -29,6 +29,90 @@ jobs reach `max_active_jobs`. `spill_targets` are considered in policy order.
   }
 }
 ```
+
+`load_ratio`, `swap_used_mb_max`, `swap_in_per_s_max`, `psi_some_avg10_max`
+and `pressure_level_min` are retired. A policy file that still sets them
+loads, and the values are ignored.
+
+## Measured-load score
+
+The score answers "which host is really the most idle", from what the
+hosts' exporters send to Prometheus, not from counting jobs:
+
+```text
+free  = min(1 - max(cpu_busy_1m, cpu_busy_5m), mem_available) / (1 + swap_in_mbps / 20)
+score = (free * power - 10 * bridged_jobs) * capacity_weight
+        - 1000 if disconnected, - 200 if not accepting, - 500 if load_unknown,
+        - 100 if throttled, + 5 for a placement hold, + 5 if burst-ready
+```
+
+| Signal | PromQL (aggregated by `machine_id`) | Why |
+|---|---|---|
+| `cpu_busy_5m` | `1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))` | Sustained CPU use. Also the candidate's `load_ratio` field. |
+| `cpu_busy_1m` | `1 - avg(irate(node_cpu_seconds_total{mode="idle"}[3m]))` | The last scrape interval (60 s): a job that just went heavy shows at once. |
+| `mem_available` | Linux `MemAvailable / MemTotal`; macOS `1 - (internal - purgeable + wired + compressed) / total` | Agent sessions mostly cost memory. It fell after nearly every spawn in the survey. |
+| `swap_in_mbps` | `rate(node_memory_swapped_in_bytes_total[5m])` (macOS), `rate(node_vmstat_pswpin[5m]) * 4096` (Linux), in MB/s | Real memory contention. 20 MB/s halves `free`. |
+
+The signals come from a survey of every series the fleet's exporters send to
+Grafana Cloud (2026-11-02, 24 h, 7 hosts, 134 spawns). It kept the four
+signals above and rejected these:
+
+- `node_load1` / cores: noise on macOS, where it counts blocked threads (one
+  host read 36 per core).
+- `node_procs_running`, PSI (`node_pressure_*`), `node_disk_io_time_*`:
+  Linux only, and the Linux hosts were never contended.
+- `node_thermal_cpu_speed_limit_ratio`: one macOS host exports it. It stays
+  as the `throttled` hardware guard, not as load.
+- Swap used: sticky. A host keeps gigabytes swapped out long after the
+  pressure is gone. Swap-out is near zero everywhere.
+
+At +2 minutes after a spawn, `cpu_busy_1m` had risen +0.043 on the desk host
+and `cpu_busy_5m` +0.017. `mem_available` fell after 70–100% of spawns.
+Across hosts, swap-in followed memory available: 15% available swapped in
+42 MB/s, 27% swapped in 8 MB/s, 37% swapped in 2 MB/s.
+
+`free` takes the scarcer of CPU and memory, so a host is as free as its
+bottleneck. A signal a host does not export is left out, not guessed. Every
+job is treated alike: a heavy job (a Unity build, a full test suite) moves
+the measured signals, and the measurement pushes the next placement away.
+
+`power` (default 100, see below) makes a strong idle host win: at equal load
+the stronger host scores higher, and at equal power the less loaded one
+does. `capacity_weight` is the operator's extra multiplier.
+
+**Spawn bridge.** A metric lags a spawn by a few minutes, so for
+`spawn_bridge_seconds` (default 300, the CPU window; 1–3600) after a job's
+claim the job itself costs 10 points. That keeps the next spawn off the same
+host until the metrics cover the first one. After the window the job costs
+nothing: its load is in the metrics. The hub learns about a claim at the
+node's next heartbeat (every 10 s); two spawns placed before that heartbeat
+can still pick the same host.
+
+**Memory floor.** `memory_free_pct_min` (default 30) is the only admission
+threshold left. It is a crash guard on the node-reported `memory_free_pct`
+(macOS `memory_pressure` free percentage, Linux `MemAvailable`), not a load
+signal.
+
+`panewire place --explain` prints every signal behind each score (columns
+`FREE CPU_1M CPU_5M MEM_AVAIL SWAP_IN_MBPS POWER WEIGHT BRIDGED`); see
+`testdata/place_explain.golden`. It asks the hub with `signals=1`. Without
+that parameter the hub omits the `signals` object, so a pre-change CLI that
+decodes candidates strictly keeps working during a rolling upgrade.
+
+### Active jobs
+
+The node heartbeat's active-job list feeds the bridge, `active_jobs`, task
+slots and `--explain`. A job leaves it when any of these is true:
+
+- its journal records `job.completed`, `job.revoked`, `job.lost`,
+  `job.reaped` or `quota_pool.release` (runtug writes the release whenever a
+  run ends: done, failed spawn, reap, lost pane);
+- herdr no longer lists an agent on its pane;
+- herdr has reported its pane `idle` or `done` for 30 minutes (the clock
+  restarts when the pane works again, and when the node restarts).
+
+The idle-shutdown probe keeps its own scan without the 30-minute rule, so a
+lead waiting on its workers still keeps its host awake.
 
 The default is the same local `mac-work` / `desktop` spill shape. Policy files
 must be regular files; unknown fields and duplicate targets are rejected. A
@@ -84,8 +168,8 @@ at or below that.
 
 `power` is optional and maps a machine id to a relative speed weight, greater
 than 0 and at most 10000. 100 is the strongest host; a machine without an
-entry weighs 100, so a policy without `power` ranks machines purely on load
-and active jobs. It is a separate top-level map (not part of `machines`) so a
+entry weighs 100, so a policy without `power` ranks machines purely on
+measured load. It is a separate top-level map (not part of `machines`) so a
 weight never implies a task-slot cap.
 
 ```json
@@ -98,15 +182,10 @@ example `openssl speed -multi <cores> rsa2048` and read signatures per second
 the weight is the host's total capacity, not its per-core speed. Re-measure
 when hardware changes; a rounded value is fine.
 
-Power changes two terms of the candidate score, `100 - busy*100 - jobs*10*100/power`
-plus a spare-power bonus:
-
-- each active job costs `10 * 100 / power` points, so a job weighs five times
-  as much on a power-20 host as on a power-100 host;
-- an idle machine earns `5 * power * (1 - busy) / 100` points, so a stronger
-  idle host wins ties.
-
-Low-power hosts are ranked lower, never filtered out. The `decision` field
+Power multiplies the measured free fraction (`free * power`), so an idle
+power-100 host outranks an idle power-40 one, and a bridged job's 10 points
+are a larger share of a weak host's score. Low-power hosts are ranked lower,
+never filtered out. The `decision` field
 still follows policy order (`local_machine`, then `spill_targets`) among
 usable machines; power shapes `score` and therefore the order of `candidates`.
 
@@ -123,9 +202,7 @@ is:
   "local_machine": "mac-personal",
   "spill_targets": ["desktop", "mac-dev"],
   "max_active_jobs": 5,
-  "load_ratio": 0.5,
   "memory_free_pct_min": 30,
-  "swap_used_mb_max": 1536,
   "wake_on_spill": false,
   "machines": {
     "mac-personal": {"task_slots": 3},
@@ -164,35 +241,29 @@ only watches a configured path. The procedure is therefore:
    JSON rather than bypassing validation (`machines` machine ids must match
    the node id pattern and `task_slots` must be 1–100).
 
-`memory_free_pct_min` and `swap_used_mb_max` are optional admission thresholds.
-They default to 30 percent and 1536 MB respectively; an explicit zero remains
-zero. A candidate is excluded when reported free memory is below the first
-threshold. Live `swap_in_per_s` above `swap_in_per_s_max` (default 10 pages per
-second), Linux `pressure`/`psi_some_avg10` above `psi_some_avg10_max` (default
-1 percent), or macOS `pressure` at or above `pressure_level_min` (default 1,
-warn) also excludes a candidate. If either new live field is present, sticky
-`swap_used_mb` alone does not exclude it. If neither additive live field is
-present, the hub preserves the older `swap_used_mb_max` rule (default 1536 MB),
-including reports that contain only the legacy `psi_some_avg10` field. A low
-`free_pct` remains an exclusion in either case. Missing telemetry is fail-open.
+`memory_free_pct_min` is the one optional admission threshold. It defaults to
+30 percent; an explicit zero remains zero. A candidate is excluded when its
+reported free memory is below it. Swap use, swap-in, PSI and macOS pressure
+no longer exclude a candidate; swap-in lowers its score. The node still
+reports them in its heartbeat (`swap_in_per_s`, `pressure`), and the
+candidate still echoes them. Missing telemetry is fail-open.
 
 `capacity_weight` is an optional map from machine id to a positive relative
 capacity weight; it defaults to 1.0 per machine. The score multiplies the
-candidate's load/job headroom by that weight, so a faster idle machine ranks
+candidate's measured headroom by that weight, so a faster idle machine ranks
 higher. It changes ranking only: disconnected, non-accepting, memory-pressured,
 or otherwise refused candidates remain unusable regardless of weight.
 
 The hub queries `PANEWIRE_PROM_URL`'s `/api/v1/query` endpoint with the
-five-minute CPU busy fraction and thermal speed-limit PromQL queries. The
-busy fraction is `1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))`
-averaged over the machine's cpus and aggregated by `machine_id`, so
-remote-write scrape labels such as `instance` and `job` cannot break vector
-matching. It replaces `node_load5` / cores: the macOS load average counts
-blocked threads and can read several times the core count on a host that is
-barely busy. The `cpu` node-exporter collector must stay enabled on every
-host (see `ALLOY_DISABLE_COLLECTORS` in `deploy/alloy/README.md`); the
-`load_ratio` field of a candidate and the `load_ratio` threshold are both this
-busy fraction. Set either `PANEWIRE_PROM_BEARER` or
+signal queries in the table above and the thermal speed-limit query, in
+parallel; one failed query makes the whole read hub-only. Every query
+aggregates by `machine_id`, so remote-write scrape labels such as `instance`
+and `job` cannot break vector matching. CPU busy replaces `node_load5` /
+cores: the macOS load average counts blocked threads and can read several
+times the core count on a host that is barely busy. The `cpu` and `meminfo`
+node-exporter collectors must stay enabled on every host (see
+`ALLOY_DISABLE_COLLECTORS` in `deploy/alloy/README.md`); a candidate's
+`load_ratio` field is the five-minute busy fraction. Set either `PANEWIRE_PROM_BEARER` or
 `PANEWIRE_PROM_BASIC_USER`/`PANEWIRE_PROM_BASIC_PASS` outside the repository.
 Prometheus samples must have `machine_id`. A missing load sample is explicitly
 `load_unknown`: it cannot select the local machine; if no safe spill candidate
@@ -202,7 +273,7 @@ hub-only decision based on connected/accepting state and heartbeat active-job
 counts; it never returns a scheduler 500.
 
 ```json
-{"decision":"desktop","candidates":[{"machine":"mac-work","score":37,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"reason":"load_ratio>=0.50,memory_unknown"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
+{"decision":"mac-work","candidates":[{"machine":"mac-work","score":37,"load_ratio":0.53,"throttled":false,"active_jobs":1,"connected":true,"metrics_known":true,"memory_free_pct":null,"swap_used_mb":null,"memory_known":false,"holds_active":false,"burst_ready":false,"reason":"memory_unknown"}],"source":"prometheus","asof":"2026-09-04T00:20:00Z"}
 ```
 
 A node that does not send memory telemetry records `memory_unknown` rather

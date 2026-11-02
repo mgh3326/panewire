@@ -1,5 +1,11 @@
 # R22 memory-aware placement admission
 
+> **Superseded for admission (hk 2626).** Only `memory_free_pct_min` still
+> excludes a candidate. The swap and pressure thresholds below are retired
+> and ignored; swap-in now lowers the score instead. See
+> [placement.md § Measured-load score](placement.md#measured-load-score). The
+> heartbeat fields described here are unchanged.
+
 R22 adds bounded memory telemetry to node heartbeats so the hub can keep a
 memory-pressured candidate out of a placement decision. The telemetry contains
 only measurements; command output is parsed locally and discarded.

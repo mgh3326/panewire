@@ -138,7 +138,9 @@ func TestHostMemoryPartialMeasurementsAreRetained(t *testing.T) {
 
 func TestPlacementPolicyMemoryDefaultsAndOverrides(t *testing.T) {
 	legacy, err := ParsePlacementPolicy([]byte(`{"local_machine":"host-a","spill_targets":["host-b"],"max_active_jobs":10,"load_ratio":0.6}`))
-	if err != nil || !sameMemoryFloat(legacy.MemoryFreePctMin, 30) || !sameMemoryFloat(legacy.SwapUsedMBMax, 1536) || !sameMemoryFloat(legacy.SwapInPerSMax, 10) || !sameMemoryFloat(legacy.PSISomeAvg10Max, 1) || !sameMemoryFloat(legacy.PressureLevelMin, 1) || legacy.capacityWeight("host-a") != 1 {
+	// The memory floor is the only threshold left with a default; the retired
+	// swap and pressure thresholds stay decodable but unset.
+	if err != nil || !sameMemoryFloat(legacy.MemoryFreePctMin, 30) || legacy.SwapUsedMBMax != nil || legacy.SwapInPerSMax != nil || legacy.PSISomeAvg10Max != nil || legacy.PressureLevelMin != nil || legacy.capacityWeight("host-a") != 1 {
 		t.Fatalf("legacy policy lost memory defaults: %+v err=%v", legacy, err)
 	}
 	explicit, err := ParsePlacementPolicy([]byte(`{"local_machine":"host-a","spill_targets":["host-b"],"max_active_jobs":10,"load_ratio":0.6,"memory_free_pct_min":0,"swap_used_mb_max":17}`))
@@ -150,26 +152,27 @@ func TestPlacementPolicyMemoryDefaultsAndOverrides(t *testing.T) {
 	}
 }
 
-func TestPlacementMemoryLiveSignalsAndLegacyFallback(t *testing.T) {
+// Swap, PSI and macOS pressure were admission filters; they are load now, so
+// they lower the score through the measured signals and never refuse a host
+// that is above the memory floor (docs/placement.md).
+func TestPlacementSwapAndPressureNeverRefuse(t *testing.T) {
 	cases := []struct {
-		name      string
-		memory    *HubHostMemory
-		pressured bool
+		name   string
+		memory *HubHostMemory
 	}{
 		{name: "sticky swap with quiet live signals", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), PSISomeAvg10: memoryFloat(.1), Pressure: memoryFloat(.1), Source: "proc_meminfo"}},
-		{name: "swap in rate", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(11), Pressure: memoryFloat(.1), Source: "proc_meminfo"}, pressured: true},
-		{name: "linux PSI", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), PSISomeAvg10: memoryFloat(1.1), Pressure: memoryFloat(1.1), Source: "proc_meminfo"}, pressured: true},
-		{name: "mac pressure warn", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), Pressure: memoryFloat(1), Source: "vm_stat"}, pressured: true},
-		{name: "legacy PSI retains swap-used fallback", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), PSISomeAvg10: memoryFloat(.1), Source: "proc_meminfo"}, pressured: true},
-		{name: "legacy swap fallback", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), Source: "proc_meminfo"}, pressured: true},
+		{name: "swap in rate", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(11), Pressure: memoryFloat(.1), Source: "proc_meminfo"}},
+		{name: "linux PSI", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), PSISomeAvg10: memoryFloat(1.1), Pressure: memoryFloat(1.1), Source: "proc_meminfo"}},
+		{name: "mac pressure critical", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), SwapInPerS: memoryFloat(0), Pressure: memoryFloat(2), Source: "vm_stat"}},
+		{name: "legacy swap used", memory: &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(4700), Source: "proc_meminfo"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			hub := memoryPlacementHub(t, "host-a")
 			hub.nodes["host-a"].hostMemory = tc.memory
-			candidate := memoryCandidate(t, hub.makePlacement(memoryPlacementPolicy("host-a"), placementMetrics{}, "hub-only", time.Now()), "host-a")
-			if got := strings.Contains(candidate.Reason, "not_accepting(memory_pressure)"); got != tc.pressured {
-				t.Fatalf("pressure=%t candidate=%+v", got, candidate)
+			result := hub.makePlacement(memoryPlacementPolicy("host-a"), placementMetrics{}, "hub-only", time.Now())
+			if candidate := memoryCandidate(t, result, "host-a"); result.Decision != "host-a" || candidate.Reason != "available" {
+				t.Fatalf("decision=%q candidate=%+v", result.Decision, candidate)
 			}
 		})
 	}
@@ -251,7 +254,7 @@ func TestPlacementMemoryAdmissionBoundaries(t *testing.T) {
 		{name: "free 29.9 rejects", freePct: 29.9, swapUsed: 0, decision: "unavailable", pressured: true},
 		{name: "free 30 passes", freePct: 30, swapUsed: 0, decision: "host-a"},
 		{name: "swap 1536 passes", freePct: 50, swapUsed: 1536, decision: "host-a"},
-		{name: "swap 1536.1 rejects", freePct: 50, swapUsed: 1536.1, decision: "unavailable", pressured: true},
+		{name: "swap used no longer rejects", freePct: 50, swapUsed: 1536.1, decision: "host-a"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -367,7 +370,8 @@ func TestPlacementCacheKeepsSameMemoryHeartbeatAndInvalidatesChange(t *testing.T
 	memory := &HubHostMemory{FreePct: memoryFloat(50), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"}
 	sendMemoryHeartbeat(t, hub, "mac-work", agent, memory)
 	first := hub.placement(t.Context(), "worker", "cache-fixture")
-	if first.Decision != "mac-work" || calls.Load() != 2 {
+	perRead := int32(len(placementMetricQueries))
+	if first.Decision != "mac-work" || calls.Load() != perRead {
 		t.Fatalf("first placement=%+v calls=%d", first, calls.Load())
 	}
 	hub.mu.Lock()
@@ -379,13 +383,13 @@ func TestPlacementCacheKeepsSameMemoryHeartbeatAndInvalidatesChange(t *testing.T
 	hub.mu.Lock()
 	secondCacheAt := hub.placementCache.at
 	hub.mu.Unlock()
-	if second.Decision != "mac-work" || calls.Load() != 2 || !secondCacheAt.Equal(cacheAt) {
+	if second.Decision != "mac-work" || calls.Load() != perRead || !secondCacheAt.Equal(cacheAt) {
 		t.Fatalf("same heartbeat invalidated placement cache: second=%+v calls=%d at=%s want=%s", second, calls.Load(), secondCacheAt, cacheAt)
 	}
 
 	sendMemoryHeartbeat(t, hub, "mac-work", agent, &HubHostMemory{FreePct: memoryFloat(20), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"})
 	changed := hub.placement(t.Context(), "worker", "cache-fixture")
-	if changed.Decision != "unavailable" || calls.Load() != 4 {
+	if changed.Decision != "unavailable" || calls.Load() != 2*perRead {
 		t.Fatalf("changed heartbeat did not invalidate placement cache: changed=%+v calls=%d", changed, calls.Load())
 	}
 }
@@ -440,7 +444,7 @@ func memoryPlacementHub(t *testing.T, machines ...string) *HubServer {
 }
 
 func memoryPlacementPolicy(local string, spill ...string) PlacementPolicy {
-	return PlacementPolicy{LocalMachine: local, SpillTargets: spill, MaxActiveJobs: 5, LoadRatio: .5, MemoryFreePctMin: memoryFloat(30), SwapUsedMBMax: memoryFloat(1536)}
+	return PlacementPolicy{LocalMachine: local, SpillTargets: spill, MaxActiveJobs: 5, MemoryFreePctMin: memoryFloat(30)}
 }
 
 func memoryCandidate(t *testing.T, result PlacementResult, machine string) PlacementCandidate {
@@ -586,7 +590,7 @@ type legacyPlacementCandidate struct {
 func TestPlacementWireGatesLiveMemoryFields(t *testing.T) {
 	hub := memoryPlacementHub(t, "host-a")
 	hub.nodes["host-a"].hostMemory = &HubHostMemory{FreePct: memoryFloat(50), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"}
-	raw, err := json.Marshal(hub.makePlacement(memoryPlacementPolicy("host-a"), placementMetrics{}, "hub-only", time.Now()))
+	raw, err := json.Marshal(placementWire(hub.makePlacement(memoryPlacementPolicy("host-a"), placementMetrics{}, "hub-only", time.Now()), false))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -618,7 +622,7 @@ func TestPlacementWireGatesLiveMemoryFields(t *testing.T) {
 	hub.nodes["host-a"].hostMemory = &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(0), SwapInPerS: memoryFloat(0), Pressure: memoryFloat(.1), Source: "proc_meminfo"}
 	policy := memoryPlacementPolicy("host-a")
 	policy.CapacityWeight = map[string]float64{"host-a": 2}
-	raw, err = json.Marshal(hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()))
+	raw, err = json.Marshal(placementWire(hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()), false))
 	if err != nil {
 		t.Fatal(err)
 	}

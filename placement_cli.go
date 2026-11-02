@@ -65,6 +65,11 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if *accountFP != "" {
 		query.Set("account_fp", *accountFP)
 	}
+	if *explain {
+		// Only a caller that renders the signals asks for them; the JSON
+		// form keeps the wire older decoders accept.
+		query.Set("signals", "1")
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	response, err := client.do(ctx, http.MethodGet, "/v1/placement", query, nil)
@@ -131,10 +136,31 @@ func validPlacementCLIResult(result PlacementResult) bool {
 	return decisionFound
 }
 
+// renderPlacementExplain prints each candidate's score with the signals behind
+// it: score = FREE * POWER - BRIDGED * 10, times the capacity weight, minus
+// the connection/acceptance penalties named in REASON (docs/placement.md). A
+// signal the host does not export, or an older hub that sends no signals,
+// prints "-".
 func renderPlacementExplain(w io.Writer, result PlacementResult) {
 	fmt.Fprintf(w, "DECISION\t%s\nSOURCE\t%s\nASOF\t%s\n", result.Decision, result.Source, result.Asof.UTC().Format(time.RFC3339))
-	fmt.Fprintln(w, "MACHINE\tSCORE\tLOAD_RATIO\tTHROTTLED\tACTIVE_JOBS\tCONNECTED\tREASON")
+	fmt.Fprintln(w, "MACHINE\tSCORE\tFREE\tCPU_1M\tCPU_5M\tMEM_AVAIL\tSWAP_IN_MBPS\tPOWER\tWEIGHT\tBRIDGED\tACTIVE_JOBS\tTHROTTLED\tCONNECTED\tREASON")
 	for _, candidate := range result.Candidates {
-		fmt.Fprintf(w, "%s\t%.2f\t%.2f\t%t\t%d\t%t\t%s\n", candidate.Machine, candidate.Score, candidate.LoadRatio, candidate.Throttled, candidate.ActiveJobs, candidate.Connected, candidate.Reason)
+		free, cpu1m, cpu5m, mem, swap, power, bridged := "-", "-", "-", "-", "-", "-", "-"
+		if s := candidate.Signals; s != nil {
+			free, cpu1m, cpu5m, mem, swap = fmt.Sprintf("%.2f", s.Free), explainSignal(s.CPUBusy1m), explainSignal(s.CPUBusy5m), explainSignal(s.MemAvailable), explainSignal(s.SwapInMBps)
+			power, bridged = fmt.Sprintf("%.0f", s.Power), fmt.Sprintf("%d", s.BridgedJobs)
+		}
+		weight := candidate.CapacityWeight
+		if weight == 0 {
+			weight = 1 // an unweighted machine omits the field
+		}
+		fmt.Fprintf(w, "%s\t%.2f\t%s\t%s\t%s\t%s\t%s\t%s\t%.2f\t%s\t%d\t%t\t%t\t%s\n", candidate.Machine, candidate.Score, free, cpu1m, cpu5m, mem, swap, power, weight, bridged, candidate.ActiveJobs, candidate.Throttled, candidate.Connected, candidate.Reason)
 	}
+}
+
+func explainSignal(value *float64) string {
+	if value == nil {
+		return "-"
+	}
+	return fmt.Sprintf("%.2f", *value)
 }
