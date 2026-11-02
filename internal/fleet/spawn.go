@@ -348,9 +348,8 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	var placementRec map[string]any
 	if s.Host != "local" {
-		started := time.Now()
 		handled, rec, e := a.place(ctx, s, string(brief))
-		a.stage("placement", started)
+		a.stage("placement", startedAdmission)
 		admissionRecorded = true
 		if e != nil {
 			return e
@@ -474,15 +473,17 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	// The hk job claim runs on the executing host before the local claim:
 	// 409 job_id_taken refuses with the same exit 74, and hk down fails
 	// closed like the task claim.
-	a.stage("placement", startedAdmission)
-	admissionRecorded = true
+	if !admissionRecorded {
+		a.stage("placement", startedAdmission)
+		admissionRecorded = true
+	}
 	startedClaim := time.Now()
 	if e = a.claimJobRecord(ctx, s); e != nil {
 		a.stage("claim", startedClaim)
 		return e
 	}
 	a.stage("claim", startedClaim)
-	recordSpawned := false
+	committed := false
 	retrySafe := true
 	ownedClaim := false
 	hadPool := false
@@ -491,7 +492,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		// claim replays as claimed); its record belongs to that spawn, so a
 		// duplicate never marks it lost.
 		var ee *ExitError
-		if err != nil && !recordSpawned && !(errors.As(err, &ee) && ee.Code == exitDuplicate) {
+		if err != nil && !committed && !(errors.As(err, &ee) && ee.Code == exitDuplicate) {
 			if retrySafe {
 				if ownedClaim && !hadPool {
 					if e := a.ledger().ReleaseClaim(context.WithoutCancel(ctx), s.Job); e != nil {
@@ -513,7 +514,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}()
 	// The local ledger arbitrates concurrent duplicate claims on this host;
 	// never infer a free job from pane status.
+	startedLocalClaim := time.Now()
 	_, e = a.ledger().Claim(ctx, claim)
+	a.stage("claim", startedLocalClaim)
 	if e != nil && arbiter.Code(e) == arbiter.ExitDuplicate {
 		d, de := a.durable(ctx, s.Job)
 		if de != nil {
@@ -521,7 +524,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 		if d.State == "released" {
 			claim.ReclaimReleased = true
+			startedLocalClaim = time.Now()
 			_, e = a.ledger().Claim(ctx, claim)
+			a.stage("claim", startedLocalClaim)
 		} else if !s.DupOK {
 			return fail(exitDuplicate, "active duplicate job %s", s.Job)
 		} else {
@@ -546,7 +551,6 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			a.warn("placement decision record failed: %v", e)
 		}
 	}
-	committed := false
 	pane := ""
 	pool := ""
 	defer func() {
@@ -568,7 +572,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			}
 		}
 	}()
+	startedQuotaClaim := time.Now()
 	rec, e := a.ledger().RecordQuotaPool(ctx, arbiter.QuotaRun{Job: s.Job, Profile: seat.gateName(), LaunchProfile: launchProfile(seat.Canon, launch.Effort), Gate: granted})
+	a.stage("claim", startedQuotaClaim)
 	if e != nil {
 		return ledgerFail(e, "lease")
 	}
@@ -653,7 +659,6 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	a.stage("landing", startedLanding)
 	landingRecorded = true
-	recordSpawned = true
 	a.spawnedJobRecord(ctx, s, seat, launch, pane, pool, owner)
 	lane := s.Label
 	parent := owner

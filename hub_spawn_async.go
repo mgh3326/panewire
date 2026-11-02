@@ -441,7 +441,7 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		if stage == "" {
 			stage = "placement"
 		}
-		outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m")}
+		outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m")}
 		if outcome.StageMS == nil {
 			outcome.StageMS = map[string]int64{}
 		}
@@ -452,8 +452,8 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 			outcome.Model = result.Receipt.Model
 			outcome.Role = result.Receipt.Role
 		}
-		if outcome.RC != 0 && !outcome.Retryable && outcome.RC != 74 && outcome.Reason != "timeout" {
-			outcome.Reason = "unknown"
+		if outcome.RC != 0 && outcome.Reason == "" {
+			outcome.Reason = "spawn_failed"
 		}
 		changed, err := h.inbox.store.completeSpawn(h.closeCtx, t.task, outcome, h.now().UTC())
 		if err != nil {

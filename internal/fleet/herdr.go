@@ -123,12 +123,14 @@ func readThinking(home string) (string, error) {
 }
 
 type Agent struct {
-	Pane   string `json:"pane_id"`
-	Tab    string `json:"tab_id"`
-	Name   string `json:"name"`
-	Kind   string `json:"agent"`
-	Status string `json:"agent_status"`
-	CWD    string `json:"cwd"`
+	Pane           string `json:"pane_id"`
+	Tab            string `json:"tab_id"`
+	Name           string `json:"name"`
+	Kind           string `json:"agent"`
+	Status         string `json:"agent_status"`
+	CWD            string `json:"cwd"`
+	StateChangeSeq *int64 `json:"state_change_seq,omitempty"`
+	Focused        bool   `json:"focused,omitempty"`
 }
 
 func (a *App) agents(ctx context.Context) ([]Agent, error) {

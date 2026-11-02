@@ -107,7 +107,7 @@
             "type": "loki",
             "uid": "${datasource}"
           },
-          "expr": "sum by (chosen, reason) (count_over_time({source=\"fleet_events\", tool=\"panewire\", kind=\"placement\"} | json reason=\"reason\" | regexp \"chosen=(?P<chosen>[^ \\\"]+)\" [$__auto]))",
+          "expr": "sum by (chosen, reason) (count_over_time({source=\"fleet_events\", tool=~\"runtug|panewire\", kind=\"placement\"} | json reason=\"reason\" | regexp \"chosen=(?P<chosen>[^ \\\"]+)\" [$__auto]))",
           "legendFormat": "{{chosen}} by {{reason}}",
           "queryType": "range",
           "editorMode": "code"

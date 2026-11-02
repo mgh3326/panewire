@@ -114,8 +114,14 @@ manual force-release of an uncertain live pane are not introduced.
 Completed node journal entries are retained indefinitely as dedup tombstones.
 There is no one-hour expiry and no retirement before a durable hub receipt.
 Automatic journal GC and an ACK-driven retention policy are explicit non-goals.
-Back up the node's private `spawn-inbox.sqlite3` beside `spawn.json`, using SQLite's
-backup mechanism, and the hub database with all spawn tables. Do not delete a
+Back up the node's private `spawn/spawn-inbox.sqlite3` under its database directory,
+using SQLite's backup mechanism, and the hub database with all spawn tables. Library
+clients without a node database use `$XDG_STATE_HOME/panewire/spawn` (default
+`~/.local/state/panewire/spawn`), or an explicit absolute `SpawnJournalDir`.
+The configuration directory can be read-only. The node checks journal access
+before connecting. If a legacy journal exists beside `spawn.json`, stop the node
+and migrate it using SQLite backup to the state directory before restarting;
+startup refuses to silently abandon existing dedup records. Do not delete a
 journal or change backend while unresolved ownership exists.
 
 Before starting an upgraded node, remove the retired `runtug_path` key from

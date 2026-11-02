@@ -673,6 +673,7 @@ func TestT14SpawnHTTPAC14EventsAreMetadataOnly(t *testing.T) {
 
 func t14SpawnConfig(t *testing.T, cwd string) string {
 	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	path := filepath.Join(t.TempDir(), "spawn.json")
 	contents := []byte(`{"cwd_map":{"repo-a":"` + cwd + `"},"workspace":"worker","herdr_session":"worker","enabled":true}`)
 	if err := os.WriteFile(path, contents, 0600); err != nil {

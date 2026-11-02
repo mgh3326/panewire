@@ -22,11 +22,12 @@ const (
 )
 
 var (
-	hubSpawnRequestIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-	hubSpawnMachinePattern   = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
-	hubSpawnCWDKeyPattern    = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
-	hubSpawnArgValuePattern  = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,200}$`)
-	hubSpawnTagsValuePattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+){0,15}$`)
+	hubSpawnRequestIDPattern  = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	hubSpawnMachinePattern    = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+	hubSpawnCWDKeyPattern     = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
+	hubSpawnArgValuePattern   = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,200}$`)
+	hubSpawnTagsValuePattern  = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+){0,15}$`)
+	hubSpawnGradeValuePattern = regexp.MustCompile(`^(C|B|A|A\+|S|S\+)$`)
 )
 
 type hubSpawnBrief struct {
@@ -197,8 +198,12 @@ func validHubSpawnArgsForMode(args []string, operator bool) bool {
 		if flag == "--tags" {
 			pattern = hubSpawnTagsValuePattern
 		}
+		if flag == "--grade" {
+			pattern = hubSpawnGradeValuePattern
+		}
 		freeText := operator && (flag == "--override-reason" || flag == "--purpose" || flag == "-w")
-		if len(value) > 200 || value == "" || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") || (!freeText && !pattern.MatchString(value)) || !validHubSpawnArgValue(flag, value) {
+		validValue := validHubSpawnArgValue(flag, value) || operator && flag == "--role" && value == "counsel"
+		if len(value) > 200 || value == "" || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") || (!freeText && !pattern.MatchString(value)) || !validValue {
 			return false
 		}
 		i += 2

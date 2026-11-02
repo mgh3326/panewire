@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -66,6 +67,7 @@ type HubClientConfig struct {
 	// SpawnConfigPath is the local, operator-provisioned job.spawn policy.
 	// It is injectable so tests never consult a user's real configuration.
 	SpawnConfigPath     string
+	SpawnJournalDir     string
 	relayCommand        relayCommandRunner                               // fixture seam for agent get/wait.
 	relayInject         func(context.Context, string, string) bool       // fixture seam
 	hostLoadCollector   func(context.Context) (HubHostLoad, error)       // fixture seam
@@ -161,6 +163,7 @@ type HubClient struct {
 	paneIdleMu        sync.Mutex
 	sessionMu         sync.Mutex
 	spawnConfigPath   string
+	spawnJournalDir   string
 	spawnMu           sync.Mutex
 	spawnEngine       hubSpawnEngine
 	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
@@ -200,6 +203,9 @@ type HubClient struct {
 // NewHubClient validates the public base URL and all local inputs without
 // opening a connection. Production accepts only wss URLs; ws is fixture-only.
 func NewHubClient(config HubClientConfig) (*HubClient, error) {
+	if config.SpawnJournalDir != "" && !filepath.IsAbs(config.SpawnJournalDir) {
+		return nil, errors.New("spawn journal directory must be absolute; configure a writable node state directory")
+	}
 	rawURLs := append([]string(nil), config.URLs...)
 	if config.URL != "" {
 		rawURLs = append([]string{config.URL}, rawURLs...)
@@ -310,7 +316,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		config.helloAckTimeout = defaultHubHelloAckTimeout
 	}
 	return &HubClient{
-		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnTimeoutExtra: 0,
+		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnJournalDir: config.SpawnJournalDir, spawnTimeoutExtra: 0,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, helloAckTimeout: config.helloAckTimeout, burstSeen: make(map[string]time.Time),
 		wakeTargets: wakeTargets, wakeSeen: make(map[string]time.Time),
