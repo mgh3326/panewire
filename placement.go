@@ -77,7 +77,7 @@ const (
 	// a weaker host. It only has to keep back-to-back spawns apart until the
 	// metrics see the first one; it is not a model of any kind of job.
 	placementSpawnBridgeCost = 10.0
-	// placementSwapInHalfMBps is the swap-in rate that halves a host's free
+	// placementSwapInHalfMBps is the page-in rate that halves a host's free
 	// fraction. The fleet survey (docs/placement.md) put busy macOS hosts at
 	// 2-10 MB/s and a thrashing one at 25-50 MB/s; Linux hosts sit near 0.
 	placementSwapInHalfMBps = 20.0
@@ -409,8 +409,12 @@ const (
 	// MemAvailable. macOS has no such gauge; available is what Activity
 	// Monitor does not count as used (app memory, wired, compressed).
 	placementMemAvailableQuery = `clamp((max by (machine_id) (node_memory_MemAvailable_bytes) / max by (machine_id) (node_memory_MemTotal_bytes)) or (1 - (max by (machine_id) (node_memory_internal_bytes) - max by (machine_id) (node_memory_purgeable_bytes) + max by (machine_id) (node_memory_wired_bytes) + max by (machine_id) (node_memory_compressed_bytes)) / max by (machine_id) (node_memory_total_bytes)), 0, 1)`
-	// placementSwapInQuery is the swap-in rate in MB/s over five minutes:
-	// macOS counts bytes, Linux counts 4 KiB pages.
+	// placementSwapInQuery is the page-in rate in MB/s over five minutes.
+	// Linux reports swap-ins (pswpin, counted as 4 KiB pages; an aarch64
+	// kernel with larger pages is undercounted). On macOS node_exporter's
+	// swapped_in counter is the VM page-in count, which includes file-backed
+	// reads, not only compressor swap. It still tracks contention: across
+	// the fleet it rises as available memory falls (docs/placement.md).
 	placementSwapInQuery  = `(sum by (machine_id) (rate(node_memory_swapped_in_bytes_total[5m])) or sum by (machine_id) (rate(node_vmstat_pswpin[5m])) * 4096) / 1048576`
 	placementThermalQuery = `min by (machine_id) (min_over_time(node_thermal_cpu_speed_limit_ratio[5m]))`
 )
@@ -679,6 +683,13 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 		holdsActive := h.holdsActiveLocked(machine, now)
 		burstReady := h.burstPolicyPath != "" && h.burstPolicy.TargetMachine == machine && h.burstState.UpCompleted
 		load, metricsKnown := metrics.load[machine]
+		// Freshness gate: the last-minute reading exists only while the host
+		// sent a sample in the last ~3 minutes, whereas the 5m one survives
+		// for several. A host with only the stale 5m value is load_unknown,
+		// never idle.
+		if _, fresh := metrics.cpu1m[machine]; !fresh {
+			metricsKnown = false
+		}
 		throttled := metrics.throttled[machine]
 		reasons := make([]string, 0, 5)
 		if !connected {
@@ -724,6 +735,12 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 			weightField = capacityWeight
 		}
 		signals := metrics.signals(machine)
+		// Without a Prometheus memory reading, the node's own free_pct is
+		// the next real measurement; a missing one must not read as idle.
+		if signals.MemAvailable == nil && memory != nil && memory.FreePct != nil {
+			fallback := *memory.FreePct / 100
+			signals.MemAvailable = &fallback
+		}
 		signals.Free, signals.Power, signals.BridgedJobs = placementFree(signals), policy.power(machine), bridged
 		score := placementScoreBase(signals.Free, bridged, signals.Power) * capacityWeight
 		if !connected {

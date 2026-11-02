@@ -51,7 +51,7 @@ score = (free * power - 10 * bridged_jobs) * capacity_weight
 | `cpu_busy_5m` | `1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))` | Sustained CPU use. Also the candidate's `load_ratio` field. |
 | `cpu_busy_1m` | `1 - avg(irate(node_cpu_seconds_total{mode="idle"}[3m]))` | The last scrape interval (60 s): a job that just went heavy shows at once. |
 | `mem_available` | Linux `MemAvailable / MemTotal`; macOS `1 - (internal - purgeable + wired + compressed) / total` | Agent sessions mostly cost memory. It fell after nearly every spawn in the survey. |
-| `swap_in_mbps` | `rate(node_memory_swapped_in_bytes_total[5m])` (macOS), `rate(node_vmstat_pswpin[5m]) * 4096` (Linux), in MB/s | Real memory contention. 20 MB/s halves `free`. |
+| `swap_in_mbps` | `rate(node_memory_swapped_in_bytes_total[5m])` (macOS), `rate(node_vmstat_pswpin[5m]) * 4096` (Linux), in MB/s | Memory contention. 20 MB/s halves `free`. On macOS node_exporter maps this counter to VM page-ins, which include file-backed reads, not only swap; across the fleet it still rises as available memory falls. Linux assumes 4 KiB pages. |
 
 The signals come from a survey of every series the fleet's exporters send to
 Grafana Cloud (2026-11-02, 24 h, 7 hosts, 134 spawns). It kept the four
@@ -72,7 +72,17 @@ Across hosts, swap-in followed memory available: 15% available swapped in
 42 MB/s, 27% swapped in 8 MB/s, 37% swapped in 2 MB/s.
 
 `free` takes the scarcer of CPU and memory, so a host is as free as its
-bottleneck. A signal a host does not export is left out, not guessed. Every
+bottleneck. Stale or missing data never reads as idle:
+
+- **Freshness.** `cpu_busy_1m` exists only while the host sent a sample in
+  the last ~3 minutes. A host with only a lingering `cpu_busy_5m` is
+  `load_unknown` (−500, and not the local decision). In the survey this
+  never fired on an always-on host; it caught 11 minutes of a sleeping
+  laptop.
+- **Memory.** With no Prometheus memory reading, the node-reported
+  `memory_free_pct` stands in.
+- A signal no host of that kind exports (PSI on macOS) is simply not part
+  of the score. Every
 job is treated alike: a heavy job (a Unity build, a full test suite) moves
 the measured signals, and the measurement pushes the next placement away.
 

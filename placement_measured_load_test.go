@@ -149,6 +149,29 @@ func TestPlacementRefusesOnlyBelowMemoryFloor(t *testing.T) {
 	}
 }
 
+// Stale or missing data never reads as idle. A host whose exporter stopped
+// keeps a 5m CPU value for minutes after the last-minute one is gone: that
+// host is load_unknown. A host without a Prometheus memory reading is scored
+// on the node's own free_pct instead of as memory-idle.
+func TestPlacementStaleOrMissingNeverReadsIdle(t *testing.T) {
+	hub := measuredLoadHub(t, map[string]map[string]string{
+		placementCPUBusyQuery:   {"mac-work": "0.05", "desktop": "0.2"},
+		placementCPUBusy1mQuery: {"desktop": "0.2"}, // mac-work went quiet
+		placementSwapInQuery:    {"mac-work": "0", "desktop": "0"},
+		placementThermalQuery:   idleThermal(),
+	}, measuredLoadPolicy())
+	hub.nodes["desktop"].hostMemory = &HubHostMemory{FreePct: memoryFloat(40), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"}
+	got := hub.placement(t.Context(), "worker", "repo")
+	stale, _ := t607Candidate(got, "mac-work")
+	if got.Decision != "desktop" || !strings.Contains(stale.Reason, "load_unknown") || stale.MetricsKnown || got.Candidates[0].Machine != "desktop" {
+		t.Fatalf("stale host read as idle: decision=%q candidates=%+v", got.Decision, got.Candidates)
+	}
+	fresh, _ := t607Candidate(got, "desktop")
+	if fresh.Signals.MemAvailable == nil || *fresh.Signals.MemAvailable != .4 || fresh.Signals.Free != .4 {
+		t.Fatalf("missing Prometheus memory did not fall back to free_pct: %+v", fresh.Signals)
+	}
+}
+
 // Acceptance 3 (hub side): a job inside the spawn bridge lowers its host's
 // score; one older than the bridge does not, nor does one without a start.
 func TestPlacementSpawnBridgeCountsOnlyFreshJobs(t *testing.T) {
@@ -204,7 +227,7 @@ func TestPlacementSpawnBridgeIsConfigurable(t *testing.T) {
 // decodes candidates strictly and must keep accepting the default wire.
 func TestPlacementSignalsWireIsOptIn(t *testing.T) {
 	idle := map[string]string{"mac-work": "0.1", "desktop": "0.1"}
-	hub := measuredLoadHub(t, map[string]map[string]string{placementCPUBusyQuery: idle, placementThermalQuery: idleThermal()}, measuredLoadPolicy())
+	hub := measuredLoadHub(t, map[string]map[string]string{placementCPUBusyQuery: idle, placementCPUBusy1mQuery: idle, placementThermalQuery: idleThermal()}, measuredLoadPolicy())
 	fetch := func(query string) []map[string]json.RawMessage {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodGet, "/v1/placement?class=worker"+query, nil)
