@@ -1,4 +1,4 @@
-# Must-act tags always interrupt, ahead of explicit class and all inbox rules.
+# Safety tags interrupt. The operator-desk override defers routine READY.
 # Otherwise explicit class wins, then the first lane/global rule.
 default: interrupt
 # Completed inbox history; unread items and the one-day replay window are protected.
@@ -58,4 +58,31 @@ rules:
 # Override any field per receiving lane. Rules fall through to global rules.
 # Opt in per lane with hold_while_working: {max_hold: 10m}.
 # Handoff thresholds default to handoff_bytes: 1500, handoff_items: 3.
-lanes: {}
+lanes:
+  operator-desk:
+    # The Dagu digest job owns the 30-minute document. The hub only adds a
+    # bounded reference to the latest document when a real interrupt lands.
+    inbox_summary:
+      digest_prefix: inbox/operator-desk/digest/
+      max_chars: 300
+    types:
+      ready: inbox
+      merged: inbox
+      blocked: inbox
+      findings: inbox
+      idle-wake: inbox
+      progress: inbox
+      report: inbox
+      decision: interrupt
+      order: interrupt
+      deploy-approval: interrupt
+      watch-hold: interrupt
+      culprit-hold: interrupt
+      automation-failed: interrupt
+    rules:
+      - tags: [READY]
+        class: inbox
+      - kind: job.completed
+        class: inbox
+      - kind: job.joined
+        class: inbox
