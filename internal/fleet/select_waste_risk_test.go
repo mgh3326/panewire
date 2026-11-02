@@ -60,9 +60,9 @@ func TestSelectWasteRiskOverridesFree(t *testing.T) {
 		// the week projected unused.
 		{"2026-10-31 claude at waste risk beats SWE-2", riskPool(32.6, 8), "", "sonnet", true},
 		{"after claude's reset SWE-2 is first again", afterReset, "", "devin-swe2", false},
-		{"15% projected unused does not override free", riskPool(85, 8), "", "devin-swe2", false},
+		{"15% projected unused is waste ahead of free", riskPool(85, 8), "", "sonnet", false},
 		{"72 h from reset with 60% unused overrides free", riskPool(40, 72), "", "sonnet", true},
-		{"72 h from reset with 10% unused does not", riskPool(90, 72), "", "devin-swe2", false},
+		{"72 h reset with projected waste still precedes free", riskPool(90, 72), "", "sonnet", false},
 		{"horizon_hours 24 keeps a 72 h reset out", riskPool(40, 72), riskPolicy(`, "waste_risk": {"horizon_hours": 24}`), "devin-swe2", false},
 		{"horizon_hours 24 admits an 8 h reset", riskPool(32.6, 8), riskPolicy(`, "waste_risk": {"horizon_hours": 24}`), "sonnet", true},
 		{"policy min_unused_pct 80 lifts the 67% pool out of risk", riskPool(32.6, 8), riskPolicy(`, "waste_risk": {"min_unused_pct": 80}`), "devin-swe2", false},

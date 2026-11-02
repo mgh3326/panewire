@@ -18,9 +18,9 @@ import (
 var defaultPoolOrder []byte
 
 // PoolPolicy is the versioned model-selection order from
-// internal/panewire/pool-order.json. It encodes the operator's paid/credit pool
+// internal/fleet/pool-order.json. It encodes the operator's paid/credit pool
 // order (source_doc) without embedding model IDs or grades: "free" matches
-// catalog rows by (pool, model) so the SWE-2 free bucket is tried first,
+// catalog rows by (pool, model) so the SWE-2 free bucket follows quota that would be wasted,
 // "credit_pools" names spend pools drawn on credit, and a subscription pool
 // whose projected use at reset stays below "waste_below_projected_pct" is
 // promoted to waste because the rest is lost at reset. A pool projected at or
@@ -66,7 +66,7 @@ type FreeSet struct {
 	Models []string `json:"models"`
 }
 
-var poolTiers = []string{"free", "waste", "ranked", "credit"}
+var poolTiers = []string{"waste", "free", "ranked", "credit"}
 
 func LoadPoolPolicy(path string) (PoolPolicy, error) {
 	b := defaultPoolOrder
@@ -93,7 +93,7 @@ func LoadPoolPolicy(path string) (PoolPolicy, error) {
 // their defaults. It is rerun after simulate's --policy-set overrides.
 func (p *PoolPolicy) validate() error {
 	if p.Version != 2 {
-		return fail(exitConfig, "pool order policy version %d is unsupported; migrate to version 2 with order free,waste,ranked,credit and credit_pools anthropic-api,openai-api (docs/config.md)", p.Version)
+		return fail(exitConfig, "pool order policy version %d is unsupported; migrate to version 2 with order waste,free,ranked,credit and credit_pools anthropic-api,openai-api (docs/config.md)", p.Version)
 	}
 	if len(p.Order) == 0 {
 		return fail(exitConfig, "invalid pool order policy")

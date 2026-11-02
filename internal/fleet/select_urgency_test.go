@@ -41,7 +41,7 @@ func urgencyFixture(t *testing.T, priority string, rows []CatalogRow, pools map[
 	return a, s, q
 }
 
-func TestSelectNormalKeepsFreeFirst(t *testing.T) {
+func TestSelectNormalConsumesWasteBeforeFree(t *testing.T) {
 	rows, pools, present, gate := urgencyRows()
 	a, s, q := urgencyFixture(t, "3", rows, pools, present)
 	q.GateDo = gatePools(gate)
@@ -49,20 +49,20 @@ func TestSelectNormalKeepsFreeFirst(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	if sel.chosen.seatName != "devin-swe2" {
-		t.Fatalf("normal work keeps SWE-2 first: %s", sel.chosen.seatName)
+	if sel.chosen.seatName != "sonnet" {
+		t.Fatalf("normal work consumes expiring quota before SWE-2: %s", sel.chosen.seatName)
 	}
 	rec := sel.record()
 	if rec["urgency"] != "normal" || rec["urgency_source"] != "default" {
 		t.Fatalf("normal default must be recorded: %v %v", rec["urgency"], rec["urgency_source"])
 	}
-	if got := strings.Join(rec["tiers"].([]string), ","); got != "free,waste,ranked,credit" {
+	if got := strings.Join(rec["tiers"].([]string), ","); got != "waste,free,ranked,credit" {
 		t.Fatalf("normal tier order: %s", got)
 	}
 }
 
 // Urgency is recorded but never reorders the tiers (policy/quota-stop: free
-// first, always) or prefers a stronger model than the task needs.
+// after waste, always) or prefers a stronger model than the task needs.
 func TestSelectUrgentKeepsPolicyOrder(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -70,8 +70,8 @@ func TestSelectUrgentKeepsPolicyOrder(t *testing.T) {
 		want  string
 		tiers string
 	}{
-		{"free first", nil, "devin-swe2", "free"},
-		{"waste after free", []string{"devin-swe2"}, "sonnet", "waste"},
+		{"waste before free", nil, "sonnet", "waste"},
+		{"free after waste", []string{"sonnet"}, "devin-swe2", "free"},
 		{"ranked before credit", []string{"devin-swe2", "sonnet"}, "codex-luna", "ranked"},
 		{"credit last", []string{"devin-swe2", "sonnet", "codex-luna", "grok-hi"}, "opus", "credit"},
 		{"ranked lowest sufficient grade", []string{"devin-swe2", "sonnet", "opus"}, "codex-luna", "ranked"},
@@ -99,7 +99,7 @@ func TestSelectUrgentKeepsPolicyOrder(t *testing.T) {
 			if rec["urgency"] != "urgent" || rec["urgency_source"] != "flag" {
 				t.Fatalf("urgency record: %v %v", rec["urgency"], rec["urgency_source"])
 			}
-			if got := strings.Join(rec["tiers"].([]string), ","); got != "free,waste,ranked,credit" {
+			if got := strings.Join(rec["tiers"].([]string), ","); got != "waste,free,ranked,credit" {
 				t.Fatalf("urgent tier order: %s", got)
 			}
 		})
@@ -125,7 +125,7 @@ func TestSelectUrgentRankedFallsToHeadroomOnEqualGrade(t *testing.T) {
 	}
 }
 
-func TestSelectUrgentMovesToPaidWhenFreeRefused(t *testing.T) {
+func TestSelectUrgentDoesNotProbeFreeBeforeAdmittedWaste(t *testing.T) {
 	rows, pools, present, gate := urgencyRows()
 	delete(gate, "devin-swe2") // a live SWE-2 hold: the gate refuses free
 	a, s, q := urgencyFixture(t, "3", rows, pools, present)
@@ -136,10 +136,10 @@ func TestSelectUrgentMovesToPaidWhenFreeRefused(t *testing.T) {
 		t.Fatal(e)
 	}
 	if sel.chosen.seatName != "sonnet" || sel.chosen.tierName != "waste" {
-		t.Fatalf("a refused free rung must fall through to the waste pool: %s", sel.chosen.seatName)
+		t.Fatalf("available waste must precede the free rung: %s", sel.chosen.seatName)
 	}
-	if got := candOutcome(sel.record(), "devin-swe2", "high")["outcome"]; got != "dropped:gate_refused" {
-		t.Fatalf("free rung must be recorded as refused: %v", got)
+	if got := candOutcome(sel.record(), "devin-swe2", "high")["outcome"]; got != "below_choice" {
+		t.Fatalf("free rung should remain unprobed: %v", got)
 	}
 }
 
@@ -176,8 +176,8 @@ func TestSelectTaskPriorityDerivesUrgency(t *testing.T) {
 			if rec["urgency"] != tt.want || rec["urgency_source"] != tt.source {
 				t.Fatalf("got urgency=%v source=%v", rec["urgency"], rec["urgency_source"])
 			}
-			if sel.chosen.tierName != "free" {
-				t.Fatalf("free must be chosen for %s work: %s", tt.want, sel.chosen.tierName)
+			if sel.chosen.tierName != "waste" {
+				t.Fatalf("waste must be chosen for %s work: %s", tt.want, sel.chosen.tierName)
 			}
 		})
 	}

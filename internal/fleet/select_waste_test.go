@@ -223,7 +223,7 @@ func TestSelectFreeRungIgnoresPoolProjection(t *testing.T) {
 	}
 	pools := map[string]PoolView{
 		"devin":  {Status: "ok", Class: "spend", Blocking: ptrF(70), Projected: ptrF(106)},
-		"claude": {Status: "ok", Class: "spend", Blocking: ptrF(31), Projected: ptrF(31.8)},
+		"claude": {Status: "ok", Class: "spend", Blocking: ptrF(31), Projected: ptrF(106)},
 	}
 	a, s, q := selFixture(t, "A", rows, pools, []string{"devin", "claude"})
 	q.GateDo = func(r QuotaRequest) (string, error) {
@@ -248,10 +248,9 @@ func TestSelectFreeRungRefusedByObservedLimit(t *testing.T) {
 	rows := wasteRows()
 	pools := map[string]PoolView{
 		"devin": {Status: "ok", Class: "spend", Blocking: ptrF(70), Projected: ptrF(106)},
-		// Neither paid pool is at waste risk (15% and 10% unused at reset), so
-		// the free rung is tried first.
-		"claude": {Status: "ok", Class: "spend", Blocking: ptrF(80), Projected: ptrF(85), Urgency: ptrF(15 / 9.4), ResetHours: ptrF(9.4)},
-		"codex":  {Status: "ok", Class: "spend", Blocking: ptrF(60), Projected: ptrF(90), Urgency: ptrF(10.0 / 95), ResetHours: ptrF(95)},
+		// These paid pools are ranked, so the free rung is tried before them.
+		"claude": {Status: "ok", Class: "spend", Blocking: ptrF(80)},
+		"codex":  {Status: "ok", Class: "spend", Blocking: ptrF(90)},
 	}
 	a, s, q := selFixture(t, "A", rows, pools, []string{"devin", "claude", "codex"})
 	q.GateDo = gatePools(map[string]string{"sonnet": "claude", "codex-luna": "codex"}) // devin-swe2 refused

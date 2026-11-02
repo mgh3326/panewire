@@ -1,7 +1,7 @@
 {
   "version": 2,
   "source_doc": "policy/quota-stop",
-  "order": ["free", "waste", "ranked", "credit"],
+  "order": ["waste", "free", "ranked", "credit"],
   "free": [
     {
       "pool": "devin",

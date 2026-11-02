@@ -144,7 +144,7 @@ func TestRoutingLeadNeverDowngradesToSonnet(t *testing.T) {
 }
 
 // Acceptance 2: the implementer role keeps today's ordering among its allowed
-// profiles — the free SWE-2 seat first when admitted.
+// profiles — quota that would be wasted precedes free SWE-2.
 func TestRoutingImplementerKeepsPoolOrder(t *testing.T) {
 	rows := append(riskRows(),
 		CatalogRow{Profile: "haiku", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "haiku-m"},
@@ -176,8 +176,8 @@ func TestRoutingImplementerKeepsPoolOrder(t *testing.T) {
 		return out
 	}
 	routed, unrouted := run(false), run(true)
-	if routed.chosen.row.Profile != "devin-swe2" || routed.chosen.tierName != "free" {
-		t.Fatalf("free SWE-2 stays first for implementers: %+v", routed.chosen.row)
+	if routed.chosen.row.Profile != "sonnet" || routed.chosen.tierName != "waste" {
+		t.Fatalf("waste quota precedes free SWE-2 for implementers: %+v", routed.chosen.row)
 	}
 	want := slices.DeleteFunc(names(unrouted), func(p string) bool { return p == "haiku" })
 	if got := names(routed); !slices.Equal(got, want) {
