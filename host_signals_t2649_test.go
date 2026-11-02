@@ -112,9 +112,18 @@ func TestNodeSendsHostSignalsOnlyToAHubThatAdvertisedThem(t *testing.T) {
 	if !ok || !reflect.DeepEqual(message.Features, []string{"host_signals", "newer"}) {
 		t.Fatalf("message=%+v ok=%t", message, ok)
 	}
-	client.hubAcceptsSignals.Store(true)
+	advertised := &hubClientConnection{}
+	advertised.acceptsSignals.Store(true)
+	client.signalsPeer.Store(advertised)
 	if payload := client.heartbeatEvent(t.Context()).Payload; !strings.Contains(string(payload), `"host_signals":{"power_source":"ac"}`) {
 		t.Fatalf("not sent after the hub advertised them: %s", payload)
+	}
+	// A late reader of the old connection can only touch that connection's flag.
+	next := &hubClientConnection{}
+	client.signalsPeer.Store(next)
+	advertised.acceptsSignals.Store(true)
+	if payload := client.heartbeatEvent(t.Context()).Payload; strings.Contains(string(payload), "host_signals") {
+		t.Fatalf("the old connection's flag reached the new one: %s", payload)
 	}
 }
 
@@ -364,6 +373,17 @@ func TestPowerChangeInvalidatesPlacementCache(t *testing.T) {
 	hub.observeHostSignalsLocked(record, &HubHostSignals{PowerSource: powerSourceBattery}, now)
 	if hub.placementCache.key != "" {
 		t.Fatal("a changed source kept the cache")
+	}
+	// A report that ends a stale period clears a cached power_unknown, even when
+	// the source is unchanged.
+	hub.placementCache = placementCache{key: "cached", at: now}
+	hub.observeHostSignalsLocked(record, &HubHostSignals{PowerSource: powerSourceBattery}, now.Add(placementPowerReportMaxAge))
+	if hub.placementCache.key != "cached" {
+		t.Fatal("a report at the limit dropped the cache")
+	}
+	hub.observeHostSignalsLocked(record, &HubHostSignals{PowerSource: powerSourceBattery}, now.Add(2*placementPowerReportMaxAge+time.Second))
+	if hub.placementCache.key != "" {
+		t.Fatal("a report ending a stale period kept the cache")
 	}
 	// The log line is the rollout's confirmation: first report and each change.
 	if got := strings.Count(logs.String(), `msg="host power source"`); got != 2 {

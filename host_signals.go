@@ -120,12 +120,16 @@ func placementPowerRefusal(policy PlacementPolicy, machine string, record *hubNo
 	return ""
 }
 
-// observeHostSignalsLocked records a heartbeat's signals. A changed power source
-// can change the placement answer, so it drops the cached one, and it is logged:
-// that line is how an operator confirms a laptop reports before listing it.
+// observeHostSignalsLocked records a heartbeat's signals. A changed power source,
+// or a report that ends a stale period, can change the placement answer, so it
+// drops the cached one. A change is logged: that line is how an operator confirms
+// a laptop reports before listing it.
 func (h *HubServer) observeHostSignalsLocked(record *hubNodeRecord, signals *HubHostSignals, received time.Time) {
 	if signals == nil || signals.PowerSource == "" {
 		return
+	}
+	if received.Sub(record.powerAt) > placementPowerReportMaxAge {
+		h.placementCache = placementCache{}
 	}
 	if record.powerSource != signals.PowerSource {
 		h.placementCache = placementCache{}
@@ -150,7 +154,7 @@ func (agent *hubAgent) queueFeatures() {
 // hostSignalsForHeartbeat collects the signals when this connection's hub
 // accepts them.
 func (client *HubClient) hostSignalsForHeartbeat(ctx context.Context) *HubHostSignals {
-	if !client.hubAcceptsSignals.Load() {
+	if peer := client.signalsPeer.Load(); peer == nil || !peer.acceptsSignals.Load() {
 		return nil
 	}
 	collect := client.hostSignalsCollector
