@@ -90,7 +90,21 @@ func (h *HubServer) prepareInbox() {
 	if h.inbox == nil {
 		return
 	}
-	err := h.inbox.store.quarantineInvalidBatches()
+	var err error
+	for lane, p := range h.inbox.policy.Lanes {
+		if p.InboxSummary == nil {
+			continue
+		}
+		ctx, cancel := h.inbox.store.op(h.closeCtx)
+		_, err = h.inbox.store.db.ExecContext(ctx, h.inbox.store.q(`UPDATE lane_inbox SET due_at=0,digest_at=0 WHERE lane=? AND class='inbox'`), lane)
+		cancel()
+		if err != nil {
+			break
+		}
+	}
+	if err == nil {
+		err = h.inbox.store.quarantineInvalidBatches()
+	}
 	if err == nil {
 		err = h.inbox.store.recoverMustAct(h.inbox.policy)
 	}
@@ -118,12 +132,24 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		return result, false
 	}
 	lane := h.receivingLane(kind, *event)
+	if event.NotifyType == "" && h.inbox.policy.Lanes[lane].InboxSummary != nil {
+		switch kind {
+		case "job.completed", "job.joined":
+			event.NotifyType = "report"
+		case "job.escalate", "job.lost", "job.revoked":
+			event.NotifyType = "decision"
+		}
+	}
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
 	holdClass := class == "interrupt"
 	if class == "inbox" && h.inboxImmediate(lane, kind) {
 		class = "interrupt"
 	}
 	deadline, window := h.inbox.policy.timing(lane, class)
+	if class == "inbox" && h.inbox.policy.Lanes[lane].InboxSummary != nil {
+		// The external digest owns scheduling; no deadline may inject a second digest.
+		deadline, window = 0, 0
+	}
 	// Ordinary deadline digests still exclude must-ack types. Working holds
 	// retain each original ID so the receiver can acknowledge its items.
 	if event.noDigest || h.inbox.policy.mustAct(lane, *event) || mustAckNotifyTypes[event.NotifyType] || chatRelayEventPattern.MatchString(event.EventID) {
@@ -209,6 +235,9 @@ func (h *HubServer) receiverInboxState(lane string) receiverInboxState {
 // digest, the safety net for supported receivers that are busy or whose
 // reported status is unknown.
 func (h *HubServer) inboxImmediate(lane, kind string) bool {
+	if h.inbox.policy.Lanes[lane].InboxSummary != nil {
+		return false
+	}
 	if kind == "job.completed" || kind == "job.joined" {
 		// receivingLane guarantees the recipient is the job's owner lane or
 		// its parent — a completion the receiver owns never defers. Lanes
@@ -370,6 +399,12 @@ func (h *HubServer) flushInbox() {
 			return
 		}
 		if blockedLanes[b.Lane] {
+			continue
+		}
+		if h.inbox.policy.Lanes[b.Lane].InboxSummary != nil {
+			if err := h.inbox.store.quarantineBatch(b.ID, "external scheduler owns lane digest"); err != nil {
+				failed = true
+			}
 			continue
 		}
 		held := strings.HasPrefix(b.ID, "held-")

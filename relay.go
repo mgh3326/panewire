@@ -890,6 +890,9 @@ func (h *HubServer) persistRelayEventRecord(ctx context.Context, kind string, ev
 // It reports whether delivered_at was written (or there is no durable row).
 func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 	if h.inbox != nil && pending.kind != "" {
+		if err := h.inbox.store.surfaceInboxSummary(relayEventDedupeKey(pending.kind, pending.event), h.now().UTC()); err != nil {
+			h.logger.Warn("inbox summary surfacing was not recorded", "kind", pending.kind)
+		}
 		if err := h.inbox.store.recordDelivery(relayEventDedupeKey(pending.kind, pending.event), h.now().UTC()); err != nil {
 			h.logger.Warn("inbox delivery confirmation was not recorded", "kind", pending.kind)
 		}
