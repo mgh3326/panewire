@@ -46,6 +46,8 @@ func TestNodePaneReadComposerAndFocus(t *testing.T) {
 		{name: "devin empty", agent: "devin", screen: nodeReapScreen("❭ "), composer: nodeComposerEmpty},
 		{name: "devin typed", agent: "devin", screen: nodeReapScreen("❭ draft"), composer: nodeComposerHasText},
 		{name: "codex empty", agent: "codex", screen: "output\n› \n\n  footer\n", composer: nodeComposerEmpty},
+		{name: "codex placeholder remains text", agent: "codex", screen: "output\n› Ask Codex to do anything\n\n  footer\n", composer: nodeComposerHasText},
+		{name: "claude glyph-only draft", agent: "claude", screen: nodeReapScreen("❯ \n >>"), composer: nodeComposerHasText},
 		{name: "codex typed", agent: "codex", screen: "output\n› draft\n\n  footer\n", composer: nodeComposerHasText},
 		{name: "codex wrapped", agent: "codex", screen: "output\n› \n  wrapped\n\n  footer\n", composer: nodeComposerHasText},
 		{name: "unreadable", agent: "claude", screen: nodeReapScreen("❯ "), readErr: errors.New("read failed"), composer: nodeComposerUnknown},

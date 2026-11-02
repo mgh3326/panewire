@@ -109,6 +109,28 @@ func nodeComposerState(harness, screen string) string {
 	if strings.EqualFold(harness, "codex") {
 		return nodeCodexComposerState(screen)
 	}
+	if strings.EqualFold(harness, "claude") {
+		lines := strings.Split(screen, "\n")
+		var dividers []int
+		for i, line := range lines {
+			if strings.Contains(line, "─") && strings.Trim(line, " \t─") == "" {
+				dividers = append(dividers, i)
+			}
+		}
+		if len(dividers) < 2 {
+			return nodeComposerUnknown
+		}
+		for i, line := range lines[dividers[len(dividers)-2]+1 : dividers[len(dividers)-1]] {
+			line = strings.TrimSpace(line)
+			if i == 0 {
+				line = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "❯"), ">"))
+			}
+			if line != "" {
+				return nodeComposerHasText
+			}
+		}
+		return nodeComposerEmpty
+	}
 	content, located := relayComposer(harness, screen)
 	switch {
 	case !located:

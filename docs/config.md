@@ -42,7 +42,7 @@ workspace = "workers"
 capacity = 4
 tags = ["linux", "gpu", "unity"]
 presence_id = "host-b"
-cwd_map = { "/home/example/work/project" = "/srv/work/project" }
+cwd_map = { "/work/project" = "/srv/work/project" }
 
 [placement]
 load_threshold = 1.0
