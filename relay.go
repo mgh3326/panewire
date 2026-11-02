@@ -889,6 +889,11 @@ func (h *HubServer) persistRelayEventRecord(ctx context.Context, kind string, ev
 // failure here is operator signal only; it must never stall the relay path.
 // It reports whether delivered_at was written (or there is no durable row).
 func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
+	if h.inbox != nil && pending.kind != "" {
+		if err := h.inbox.store.recordDelivery(relayEventDedupeKey(pending.kind, pending.event), h.now().UTC()); err != nil {
+			h.logger.Warn("inbox delivery confirmation was not recorded", "kind", pending.kind)
+		}
+	}
 	if pending.eventID == 0 && pending.kind != "" {
 		// #989: an inject that left before its durable id was assigned still
 		// owns the row it was persisted as. The dedupe maps keep that binding

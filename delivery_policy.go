@@ -79,7 +79,13 @@ type deliveryLanePolicy struct {
 	Rules            []deliveryRule      `yaml:"rules"`
 }
 
+type inboxRetentionPolicy struct {
+	Days    int `yaml:"days"`
+	PerLane int `yaml:"per_lane"`
+}
+
 type deliveryPolicy struct {
+	Retention          inboxRetentionPolicy `yaml:"retention"`
 	deliveryLanePolicy `yaml:",inline"`
 	// Agents maps the receiving pane's reported agent CLI (harness) to
 	// supported|unsupported. Receivers without a supported entry — unknown,
@@ -122,6 +128,15 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 	var extra any
 	if err := d.Decode(&extra); err != io.EOF {
 		return nil, fmt.Errorf("expected one policy document")
+	}
+	if p.Retention.Days < 0 || p.Retention.Days > 36500 || p.Retention.PerLane < 0 {
+		return nil, fmt.Errorf("retention needs days in 1..36500 and positive per_lane (zero uses defaults)")
+	}
+	if p.Retention.Days == 0 {
+		p.Retention.Days = 14
+	}
+	if p.Retention.PerLane == 0 {
+		p.Retention.PerLane = 2000
 	}
 	if p.Default == "" {
 		return nil, fmt.Errorf("delivery policy needs a default")

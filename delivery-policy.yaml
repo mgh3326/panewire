@@ -1,6 +1,10 @@
 # Must-act tags always interrupt, ahead of explicit class and all inbox rules.
 # Otherwise explicit class wins, then the first lane/global rule.
 default: interrupt
+# Completed inbox history; unread items and the one-day replay window are protected.
+retention:
+  days: 14
+  per_lane: 2000
 deadlines:
   inbox: 30m
   interrupt: 0s

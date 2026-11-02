@@ -25,8 +25,9 @@ exactly this source is left unchanged, so a rerun is safe; a target holding
 other rows is refused. Stop the hub before applying. See docs/hub-postgres.md.`
 
 // hubInboxSnapshot is every row of the three inbox tables, batches in send
-// order.
+// order, plus the highest inbox ID that must never be reused.
 type hubInboxSnapshot struct {
+	idFloor    int64
 	items      []hubInboxSnapshotItem
 	batches    []hubInboxSnapshotBatch
 	quarantine [][2]string
@@ -44,7 +45,7 @@ type hubInboxSnapshotBatch struct {
 }
 
 func (s hubInboxSnapshot) empty() bool {
-	return len(s.items)+len(s.batches)+len(s.quarantine) == 0
+	return len(s.items)+len(s.batches)+len(s.quarantine) == 0 && s.idFloor == 0
 }
 
 func (s hubInboxSnapshot) summary() string {
@@ -243,7 +244,7 @@ func readHubInboxSnapshotTx(ctx context.Context, tx *sql.Tx, dialect laneInboxDi
 	for rows.Next() {
 		var i hubInboxSnapshotItem
 		var stored string
-		err := rows.Scan(&stored, &i.item.ID, &i.item.Lane, &i.item.Kind, &i.item.Class, &i.raw, &i.item.CreatedAt, &i.item.ReadAt, &i.item.AckedAt, &i.item.DueAt, &i.item.DigestAt, &i.item.DigestBatch, &i.item.EscalationBatch, &i.item.MustAck, &i.item.HoldUntil)
+		err := rows.Scan(&stored, &i.item.ID, &i.item.Lane, &i.item.Kind, &i.item.Class, &i.raw, &i.item.CreatedAt, &i.item.ReadAt, &i.item.AckedAt, &i.item.DueAt, &i.item.DigestAt, &i.item.DigestBatch, &i.item.EscalationBatch, &i.item.MustAck, &i.item.HoldUntil, &i.item.DeliveredAt)
 		if err == nil {
 			// Snapshots hold the raw key, so the two backends compare.
 			i.key, err = laneInboxKeyFromStored(dialect, stored)
@@ -290,6 +291,33 @@ func readHubInboxSnapshotTx(ctx context.Context, tx *sql.Tx, dialect laneInboxDi
 	}
 	if err := closeRows(rows); err != nil {
 		return snapshot, err
+	}
+
+	for _, i := range snapshot.items {
+		snapshot.idFloor = max(snapshot.idFloor, i.item.ID)
+	}
+	if dialect == laneInboxSQLite {
+		var floor int64
+		if err := tx.QueryRowContext(ctx, `SELECT floor FROM lane_inbox_id_floor WHERE singleton=1`).Scan(&floor); err != nil {
+			return snapshot, err
+		}
+		snapshot.idFloor = max(snapshot.idFloor, floor)
+	} else {
+		// pg_get_serial_sequence returns a SQL-quoted relation name. Read
+		// is_called too: setval(next, false) has not allocated next yet.
+		var sequence string
+		if err := tx.QueryRowContext(ctx, `SELECT pg_get_serial_sequence('lane_inbox','id')`).Scan(&sequence); err != nil {
+			return snapshot, err
+		}
+		var last int64
+		var called bool
+		if err := tx.QueryRowContext(ctx, `SELECT last_value,is_called FROM `+sequence).Scan(&last, &called); err != nil {
+			return snapshot, err
+		}
+		if !called {
+			last--
+		}
+		snapshot.idFloor = max(snapshot.idFloor, last)
 	}
 	// Sorted here, not by ORDER BY: Postgres collates text by locale and
 	// SQLite by bytes, and the copy check compares the two snapshots.
@@ -365,12 +393,12 @@ func copyHubInboxSnapshot(ctx context.Context, db *sql.DB, snapshot hubInboxSnap
 		if i.item.MustAck {
 			mustAck = 1
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack,hold_until) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
-			i.item.ID, laneInboxStoredKey(laneInboxPostgres, i.key), i.item.Lane, i.item.Kind, i.item.Class, i.raw, i.item.CreatedAt, i.item.ReadAt, i.item.AckedAt, i.item.DueAt, i.item.DigestAt, i.item.DigestBatch, i.item.EscalationBatch, mustAck, i.item.HoldUntil); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack,hold_until,delivered_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
+			i.item.ID, laneInboxStoredKey(laneInboxPostgres, i.key), i.item.Lane, i.item.Kind, i.item.Class, i.raw, i.item.CreatedAt, i.item.ReadAt, i.item.AckedAt, i.item.DueAt, i.item.DigestAt, i.item.DigestBatch, i.item.EscalationBatch, mustAck, i.item.HoldUntil, i.item.DeliveredAt); err != nil {
 			return false, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence('lane_inbox','id'), (SELECT COALESCE(max(id),0)+1 FROM lane_inbox), false)`); err != nil {
+	if _, err := tx.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence('lane_inbox','id'), (SELECT GREATEST(COALESCE(max(id),0),$1::bigint)+1 FROM lane_inbox), false)`, snapshot.idFloor); err != nil {
 		return false, err
 	}
 	for _, b := range snapshot.batches {

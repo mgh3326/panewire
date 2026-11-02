@@ -155,15 +155,30 @@ require a coordinated second repository/schema release. The hub is already the
 receiving-lane authority, so a local durable store keeps this one PR deployable.
 Back up a SQLite store with SQLite's backup API, or stop the hub and copy the DB
 and any `-wal`/`-shm` sidecars; back up a Postgres store with the database's own
-backups (see [hub inbox on Postgres](hub-postgres.md#backup)). Do not delete it during rollback. There is no automatic
-retention/pruning; the desk owns backup, disk monitoring and archival. A future
+backups (see [hub inbox on Postgres](hub-postgres.md#backup)). Do not delete it
+during rollback.
+
+The hub prunes completed inbox history on its first maintenance tick and hourly
+thereafter. Global policy `retention: {days: 14, per_lane: 2000}` sets the
+defaults: completed items expire after 14 days or outside the newest 2000
+items per lane. Omitted/zero values use defaults; negative values are rejected
+(and days is capped at 36500). Unread items, unacked must-ack notices and
+pending deliveries are protected regardless of age or count. Ordinary read
+inbox-class items count as completed; interrupts need an explicit ack or
+confirmed delivery. Creation, read, delivery and ack evidence is always kept
+for at least the one-day replay window, even with a smaller count limit. Sent batch metadata
+is retained. The desk still owns backup, disk monitoring and archival. A future
 hub failover must move this database with the hub, not start an empty store.
 
 Original inbox items never become relay directives. On old handoffkeep replay
 (including `hub_unconfirmed_once.go`), the hub saves informational rows in its
 inbox before retiring those relay rows. A failed retirement retries harmlessly;
 the inbox identity and class are stable. Delivered handoffkeep rows are not
-imported. A pre-upgrade active pane submission cannot be recalled.
+imported. Confirmed deliveries and explicitly acked inbox items (and read
+inbox-class items that do not require an ack) also suppress both ordinary and labelled restart replay. An
+interrupt's automatic read-on-insert timestamp alone never suppresses replay;
+only genuinely unconfirmed delivery can receive the once-only labelled copy.
+A pre-upgrade active pane submission cannot be recalled.
 
 An unread item past its deadline is claimed once into one short per-lane
 interrupt digest. Reading/acking before the claim suppresses escalation. The
