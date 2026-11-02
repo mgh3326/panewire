@@ -49,7 +49,11 @@ def main():
     if args.check:
         if path.read_text() != output:
             raise SystemExit("source import manifest differs")
-        print(f"verified {len(names)} source files at {SOURCE}")
+        tracked = set(subprocess.check_output(["git", "ls-files"], cwd=root, text=True).splitlines())
+        missing = sorted(set(manifest["files"]) - tracked)
+        if missing:
+            raise SystemExit("import files missing from git index (including ignored fixtures): " + ", ".join(missing))
+        print(f"verified {len(names)} tracked source files at {SOURCE}")
     else:
         path.write_text(output)
 
