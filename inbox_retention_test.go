@@ -240,3 +240,63 @@ func TestInboxRetentionDoesNotReuseAckIDs(t *testing.T) {
 		t.Fatalf("stale ack changed new work: n=%d err=%v", n, err)
 	}
 }
+
+func TestInboxReadMustAckWaitsForAck(t *testing.T) {
+	for _, backend := range laneInboxBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			store := backend.fresh(t)()
+			old := time.Now().UTC().Add(-30 * 24 * time.Hour)
+			now := old.Add(30 * 24 * time.Hour)
+			event := quietEvent("read-must-ack", "review this")
+			event.NotifyType = "ready"
+			key := relayEventDedupeKey("lane.event", event)
+			item, err := store.put(key, "lane-a", "lane.event", "inbox", event, old, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.read(item.ID, "lane-a", old); err != nil {
+				t.Fatal(err)
+			}
+			// The original was already owned by the inbox; replay must neither
+			// inject it nor remove the receiver's outstanding acknowledgement.
+			h, a := quietHub(t, filepath.Join(t.TempDir(), "hub.sqlite3"), "default", nil, &now)
+			originalStore := h.inbox.store
+			h.inbox.store = store
+			t.Cleanup(func() { h.inbox.store = originalStore })
+			record := handoffkeepRelayEvent{ID: 42, Kind: "lane.event", OwnerLane: event.OwnerLane, JobID: event.JobID, Epoch: 1, EventID: event.EventID, Text: event.Text, ReceivedAt: now.Format(time.RFC3339Nano)}
+			for _, delivered := range []bool{false, true} {
+				if delivered {
+					if err := store.recordDelivery(key, old); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if n, err := store.prune(now, inboxRetentionPolicy{Days: 14, PerLane: 1}); err != nil || n != 0 {
+					t.Fatalf("read unacked pruned: n=%d err=%v", n, err)
+				}
+				h.replayRelayEvent(record, relayReplaySourceStartup)
+				h.replayMarkedUnconfirmed(context.Background(), record, relayReplaySourceStartup)
+				if len(a.relays) != 0 {
+					t.Fatal("read must-ack item was re-injected")
+				}
+				unread, err := store.list("lane-a", true)
+				if err != nil || len(unread) != 1 || unread[0].ReadAt == 0 || unread[0].AckedAt != 0 {
+					t.Fatalf("outstanding ack lost: %+v %v", unread, err)
+				}
+			}
+			if _, err := store.ack(item.ID, "lane-a", false, now); err != nil {
+				t.Fatal(err)
+			}
+			h.replayRelayEvent(record, relayReplaySourceStartup)
+			h.replayMarkedUnconfirmed(context.Background(), record, relayReplaySourceStartup)
+			if len(a.relays) != 0 {
+				t.Fatal("acked item was re-injected")
+			}
+			if n, err := store.prune(now, inboxRetentionPolicy{Days: 14, PerLane: 1}); err != nil || n != 0 {
+				t.Fatalf("recent ack evidence pruned: n=%d err=%v", n, err)
+			}
+			if n, err := store.prune(now.Add(2*24*time.Hour), inboxRetentionPolicy{Days: 14, PerLane: 1}); err != nil || n != 1 {
+				t.Fatalf("old acked item not pruned: n=%d err=%v", n, err)
+			}
+		})
+	}
+}

@@ -231,12 +231,12 @@ func (h *HubServer) replayInbox(record handoffkeepRelayEvent) bool {
 		return false
 	}
 	event := relayEventFromRecord(record)
-	terminal, err := h.inbox.store.replayTerminal(relayEventDedupeKey(record.Kind, event))
+	suppressed, err := h.inbox.store.replaySuppressed(relayEventDedupeKey(record.Kind, event))
 	if err != nil {
 		h.logger.Warn("inbox replay evidence unavailable; replay deferred", "event_id", record.ID)
 		return true
 	}
-	if terminal {
+	if suppressed {
 		return true
 	}
 	if h.isHeldBatch(record.OwnerLane, record.EventID) || isUnconfirmedMarkRecord(record) {

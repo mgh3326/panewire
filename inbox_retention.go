@@ -5,17 +5,21 @@ import (
 	"time"
 )
 
-// replayTerminal uses explicit receiver evidence. Interrupt read_at alone is
-// not proof: put sets it before the node has confirmed the injection.
-func (s *laneInboxStore) replayTerminal(key string) (bool, error) {
+// laneInboxTerminal is shared by retention and replay. Must-ack work completes
+// only on ack; automatic interrupt read-on-insert never completes an item.
+const laneInboxTerminal = `(acked_at>0 OR (must_ack=0 AND (delivered_at>0 OR (class='inbox' AND read_at>0))))`
+
+// replaySuppressed also honors confirmed delivery of must-ack work: it stays
+// unread until acked, but must not be injected into the pane a second time.
+func (s *laneInboxStore) replaySuppressed(key string) (bool, error) {
 	ctx, done := s.op(s.life)
 	defer done()
-	var terminal bool
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT (acked_at>0 OR delivered_at>0 OR (class='inbox' AND read_at>0 AND must_ack=0)) FROM lane_inbox WHERE event_key=?`), s.storedKey(key)).Scan(&terminal)
+	var suppressed bool
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT (`+laneInboxTerminal+` OR delivered_at>0) FROM lane_inbox WHERE event_key=?`), s.storedKey(key)).Scan(&suppressed)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}
-	return terminal, err
+	return suppressed, err
 }
 
 // prune keeps all unread work, pending deliveries, and evidence touched within
@@ -39,7 +43,7 @@ func (s *laneInboxStore) prune(now time.Time, policy inboxRetentionPolicy) (int6
 	result, err := tx.ExecContext(ctx, s.q(`WITH ranked AS (
  SELECT id, ROW_NUMBER() OVER (PARTITION BY lane ORDER BY created_at DESC,id DESC) AS position FROM lane_inbox
  ) DELETE FROM lane_inbox WHERE (created_at<? OR id IN (SELECT id FROM ranked WHERE position>?))
- AND (acked_at>0 OR delivered_at>0 OR (class='inbox' AND read_at>0))
+ AND `+laneInboxTerminal+`
  AND NOT `+laneInboxUnread+`
  AND created_at<? AND read_at<? AND acked_at<? AND delivered_at<?
  AND NOT (acked_at=0 AND ((hold_until>0 AND digest_batch='') OR (digest_at>0 AND digest_batch='')))
