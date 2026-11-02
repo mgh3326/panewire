@@ -30,6 +30,7 @@ type hubInbox struct {
 	failures        int
 	nextAttempt     time.Time
 	persistDisabled bool
+	nextPrune       time.Time
 	// flushFailures counts failed flush passes for monitoring and tests.
 	flushFailures uint64
 }
@@ -223,10 +224,24 @@ func (h *HubServer) inboxImmediate(lane, kind string) bool {
 // unconfirmed replay can claim an injection. Old handoffkeep rows are migrated
 // to the inbox before being retired; a failed retire is harmless and retried.
 func (h *HubServer) replayInbox(record handoffkeepRelayEvent) bool {
-	if h.inbox == nil || record.DeliveredAt != "" || h.isHeldBatch(record.OwnerLane, record.EventID) || isUnconfirmedMarkRecord(record) {
+	if record.DeliveredAt != "" {
+		return true
+	}
+	if h.inbox == nil {
 		return false
 	}
 	event := relayEventFromRecord(record)
+	terminal, err := h.inbox.store.replayTerminal(relayEventDedupeKey(record.Kind, event))
+	if err != nil {
+		h.logger.Warn("inbox replay evidence unavailable; replay deferred", "event_id", record.ID)
+		return true
+	}
+	if terminal {
+		return true
+	}
+	if h.isHeldBatch(record.OwnerLane, record.EventID) || isUnconfirmedMarkRecord(record) {
+		return false
+	}
 	result, handled := h.receiveInbox(record.Kind, &event, nil, true)
 	if !handled {
 		return false
@@ -253,6 +268,7 @@ func (h *HubServer) runInbox(ctx context.Context) {
 		case <-h.closeCtx.Done():
 			return
 		case <-ticker.C:
+			h.pruneInbox()
 			h.flushInbox()
 		}
 	}

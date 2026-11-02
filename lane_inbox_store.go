@@ -47,6 +47,7 @@ type laneInboxItem struct {
 	Class           string             `json:"delivery_class"`
 	Event           hubJobEventPayload `json:"event"`
 	CreatedAt       int64              `json:"created_at_ms"`
+	DeliveredAt     int64              `json:"delivered_at_ms,omitempty"`
 	ReadAt          int64              `json:"read_at_ms,omitempty"`
 	AckedAt         int64              `json:"acked_at_ms,omitempty"`
 	DueAt           int64              `json:"due_at_ms,omitempty"`
@@ -117,6 +118,9 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		`CREATE INDEX IF NOT EXISTS lane_inbox_unread ON lane_inbox(lane) WHERE class='inbox' AND read_at=0`,
 		`CREATE INDEX IF NOT EXISTS lane_inbox_due ON lane_inbox(due_at) WHERE class='inbox' AND read_at=0 AND escalation_batch=''`,
 		`CREATE INDEX IF NOT EXISTS lane_inbox_digest ON lane_inbox(lane,digest_at) WHERE digest_at>0 AND digest_batch=''`,
+		// Pruning must not let SQLite reuse a deleted, publicly ackable ID.
+		`CREATE TABLE IF NOT EXISTS lane_inbox_id_floor (singleton INTEGER PRIMARY KEY CHECK(singleton=1), floor INTEGER NOT NULL)`,
+		`INSERT OR IGNORE INTO lane_inbox_id_floor(singleton,floor) VALUES(1,0)`,
 		`CREATE TABLE IF NOT EXISTS lane_inbox_batches (id TEXT PRIMARY KEY, lane TEXT NOT NULL, text TEXT NOT NULL, sent INTEGER NOT NULL DEFAULT 0)`,
 		`CREATE TABLE IF NOT EXISTS lane_inbox_batch_quarantine (batch_id TEXT PRIMARY KEY, reason TEXT NOT NULL)`,
 	} {
@@ -126,6 +130,10 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		}
 	}
 	if err := addLaneInboxColumn(ctx, db, "hold_until"); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := addLaneInboxColumn(ctx, db, "delivered_at"); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -385,14 +393,14 @@ func (s *laneInboxStore) unclaimedUnread() ([]laneInboxItem, error) {
 	return items, rows.Err()
 }
 
-const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack,hold_until`
+const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack,hold_until,delivered_at`
 
 type inboxScanner interface{ Scan(...any) error }
 
 func scanLaneInbox(row inboxScanner) (laneInboxItem, error) {
 	var i laneInboxItem
 	var payload string
-	err := row.Scan(&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch, &i.MustAck, &i.HoldUntil)
+	err := row.Scan(&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch, &i.MustAck, &i.HoldUntil, &i.DeliveredAt)
 	if err == nil {
 		err = json.Unmarshal([]byte(payload), &i.Event)
 	}
@@ -439,7 +447,11 @@ func (s *laneInboxStore) put(key, lane, kind, class string, e hubJobEventPayload
 	defer done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	insert, err := s.db.ExecContext(ctx, s.q(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn, holdUntil)
+	query := `INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
+	if s.dialect == laneInboxSQLite {
+		query = `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until) VALUES((SELECT max(COALESCE((SELECT max(id) FROM lane_inbox),0),floor)+1 FROM lane_inbox_id_floor WHERE singleton=1),?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
+	}
+	insert, err := s.db.ExecContext(ctx, s.q(query), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn, holdUntil)
 	if err != nil {
 		return laneInboxItem{}, err
 	}
