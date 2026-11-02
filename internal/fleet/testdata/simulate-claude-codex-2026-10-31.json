@@ -1,0 +1,15 @@
+{
+  "now": "2026-10-31T07:24:00Z",
+  "grade": "A",
+  "role": "worker",
+  "pools": [
+    {"id": "devin", "class": "spend", "used_pct": 4, "projected_pct": 8, "resets_at": "2026-11-01T00:00:00Z", "window": "1d"},
+    {"id": "claude", "class": "spend", "waste": true, "used_pct": 31, "projected_pct": 31.8, "resets_at": "2026-10-31T16:48:00Z", "window": "7d"},
+    {"id": "codex", "class": "spend", "used_pct": 13, "projected_pct": 30.0, "resets_at": "2026-11-04T06:24:00Z", "window": "7d"}
+  ],
+  "candidates": [
+    {"profile": "devin-swe2", "seat": "devin-swe2", "effort": "high", "grade": "A", "pool": "devin", "gate": "default", "model_id": "swe-2", "free": true, "free_limit": true},
+    {"profile": "sonnet", "seat": "sonnet", "effort": "high", "grade": "A", "pool": "claude", "gate": "default", "model_id": "m"},
+    {"profile": "codex-luna", "seat": "codex-luna", "effort": "high", "grade": "A", "pool": "codex", "gate": "default", "model_id": "m"}
+  ]
+}

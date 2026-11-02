@@ -16,14 +16,25 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 type CLIConfig struct{ SocketPath string }
 
 func RunCLI(args []string, cfg CLIConfig) int {
+	if len(args) > 0 && fleetCommand(args[0]) {
+		ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer cancel()
+		return fleet.Main(ctx, args, os.Stdout, os.Stderr)
+	}
+	if len(args) > 0 && args[0] == "heavy" {
+		fmt.Fprintln(os.Stderr, "panewire: heavy was removed; use panewire place to select a host by load")
+		return ExitUsage
+	}
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Usage: panewire COMMAND [arguments]")
-		fmt.Fprintln(os.Stdout, "Commands: daemon, hub, hub-status, hub-emit, burst, place, node, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, inbox, job, wait, version")
+		fmt.Fprintln(os.Stdout, "Commands: spawn, work, lead, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, burst, place, node, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, inbox, job, wait, version")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, lanesUsage)
 		return ExitOK
@@ -145,6 +156,14 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	return ExitOK
 }
 
+func fleetCommand(command string) bool {
+	switch command {
+	case "spawn", "work", "lead", "reap", "prune", "done", "escalate", "restore", "delegate", "hosts", "profiles", "find", "name-sync", "lanes-missing", "artifacts", "simulate", "plan", "resolve", "preflight", "gc", "_watch", "_spawn-stdin", "_artifact-inventory":
+		return true
+	}
+	return false
+}
+
 func runPromptCLI(args []string, cfg CLIConfig) int {
 	fs := flag.NewFlagSet("panewire prompt", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -208,7 +227,8 @@ func MainWithVersion(args []string, version string) int {
 	if version == "" || !hubVersionPattern.MatchString(version) {
 		version = "panewire-dev"
 	}
-	if len(args) > 0 && args[0] == "version" {
+	fleet.BuildVersion = version
+	if len(args) > 0 && (args[0] == "version" || args[0] == "--version") {
 		if len(args) != 1 {
 			return ExitUsage
 		}
