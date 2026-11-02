@@ -172,7 +172,14 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	var reason, detail string
 	defer func() {
 		if result.RC != 0 && spawnResultFix(result.StdoutTail) == "" {
-			result.StdoutTail = hubSpawnTailWithStderr(result.StdoutTail, "Fix: "+nodeSpawnRefusalFix(result.Error, reason))
+			fix := "Fix: " + nodeSpawnRefusalFix(result.Error, reason)
+			if strings.HasPrefix(result.StdoutTail, "stderr: ") {
+				result.StdoutTail = hubSpawnTailWithStderr("", strings.TrimPrefix(result.StdoutTail, "stderr: ")+"\n"+fix)
+			} else if stdout, stderr, ok := strings.Cut(result.StdoutTail, "\nstderr: "); ok {
+				result.StdoutTail = hubSpawnTailWithStderr(stdout, stderr+"\n"+fix)
+			} else {
+				result.StdoutTail = hubSpawnTailWithStderr(result.StdoutTail, fix)
+			}
 		}
 		client.recordHubSpawnOutcome(message, result, reason, detail)
 	}()
