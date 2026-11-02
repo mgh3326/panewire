@@ -65,7 +65,10 @@ restarting.
 
 Once an hour the hub logs one `hub route hits` line per route it served since the
 last line, with the route pattern and the count. Use these lines to tell whether a
-route still has a reader; the hub has no access log.
+route still has a reader; the hub has no access log. A websocket counts once, when
+it connects, so a route with an open subscriber can show no line for an hour.
+Judge a websocket route over a window that includes a hub restart, which makes
+every subscriber reconnect.
 
 Endpoints are:
 

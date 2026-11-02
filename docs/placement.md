@@ -311,7 +311,9 @@ only watches a configured path. The procedure is therefore:
    once the path is configured, later edits hot-reload on the placement
    modtime check.
 3. Verify: `GET /v1/placement?class=worker` reports `"policy_status":"current"`
-   and capped candidates show their `tasks` and `task_slots`.
+   and each capped machine with a free slot appears in `candidates` with its
+   `tasks` and `task_slots`. A capped machine at its limit is omitted, so this
+   check can't confirm a cap while that machine is full.
 4. If the file is rejected at startup the service refuses to boot; fix the
    JSON rather than bypassing validation (`machines` machine ids must match
    the node id pattern and `task_slots` must be 1–100).
