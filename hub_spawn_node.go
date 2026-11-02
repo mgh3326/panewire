@@ -113,24 +113,33 @@ func loadHubSpawnConfig(path string) (hubSpawnConfig, error) {
 	return config, nil
 }
 
+func (client *HubClient) spawnStartupError() error {
+	_, err := loadHubSpawnConfig(client.spawnConfigPath)
+	var configErr *hubSpawnConfigError
+	if errors.As(err, &configErr) && configErr.Rule == "config_json_invalid" && strings.Contains(configErr.Detail, `unknown field "runtug_path"`) {
+		return errors.New("node startup refused: remove retired runtug_path from spawn.json before starting this in-process node; preserve cwd_map, workspace, herdr_session and work_root")
+	}
+	return nil
+}
+
 func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
 	journal, err := client.acquireSpawnJournal()
 	if err != nil {
-		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_unavailable"})
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_unavailable"}, message.OperatorAuthorized)
 		return
 	}
 	defer client.releaseSpawnJournal()
 	claimed, cached, err := journal.claim(ctx, message)
 	if err != nil {
-		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"})
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"}, message.OperatorAuthorized)
 		return
 	}
 	if cached != nil {
-		client.sendSpawnResult(ctx, peer, *cached)
+		client.sendSpawnResult(ctx, peer, *cached, message.OperatorAuthorized)
 		return
 	}
 	if !claimed {
-		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "reconciling"})
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "reconciling"}, message.OperatorAuthorized)
 		return
 	}
 	deadline := time.Now().Add(time.Duration(message.WaitSeconds)*time.Second + client.spawnTimeoutExtra)
@@ -149,10 +158,20 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	if journal.complete(persistCtx, result) != nil {
 		return
 	}
-	client.sendSpawnResult(ctx, peer, result)
+	client.sendSpawnResult(ctx, peer, result, message.OperatorAuthorized)
 }
-func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult) {
-	_ = peer.write(ctx, struct {
+func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult, extended bool) {
+	_ = peer.write(ctx, spawnResultWire(result, extended))
+}
+func spawnResultWire(result hubSpawnResult, extended bool) any {
+	if !extended {
+		result.Receipt, result.Stage, result.StageMS, result.Retryable = nil, "", nil, false
+		switch result.Error {
+		case "reconciling", "journal_unavailable", "journal_conflict":
+			result.Error = "timeout" // Legacy hubs understand uncertainty as timeout.
+		}
+	}
+	return struct {
 		Receipt    *fleet.ExecutionReceipt `json:"receipt,omitempty"`
 		Type       string                  `json:"type"`
 		RequestID  string                  `json:"request_id"`
@@ -164,7 +183,7 @@ func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientCon
 		StageMS    map[string]int64        `json:"stage_ms,omitempty"`
 		Stage      string                  `json:"stage,omitempty"`
 		Retryable  bool                    `json:"retryable,omitempty"`
-	}{result.Receipt, "job.spawn.result", result.RequestID, result.RC, result.JobID, result.Pane, result.StdoutTail, result.Error, result.StageMS, result.Stage, result.Retryable})
+	}{result.Receipt, "job.spawn.result", result.RequestID, result.RC, result.JobID, result.Pane, result.StdoutTail, result.Error, result.StageMS, result.Stage, result.Retryable}
 }
 
 func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) (result hubSpawnResult) {
@@ -306,7 +325,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.JobID = execution.Receipt.Job
 	}
 	result.RC, result.Stage, result.StageMS, result.Retryable = execution.RC, execution.Stage, execution.StageMS, execution.Retryable
-	if runContext.Err() != nil {
+	if execution.RC != 0 && runContext.Err() != nil {
 		result.RC = 124
 		result.Error = "timeout"
 	} else if result.RC != 0 {

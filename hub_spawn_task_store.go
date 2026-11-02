@@ -138,28 +138,41 @@ func (s *laneInboxStore) bindSpawn(parent context.Context, id string, attempt in
 	if err == nil && (task.Attempt != attempt || task.Node == nil) {
 		return task, errSpawnClaimed
 	}
+	if err == nil {
+		bound, _ := json.Marshal(task.Node)
+		if !bytes.Equal(raw, bound) {
+			return task, errSpawnClaimed
+		}
+	}
 	return task, err
 }
 
 // Unknown observations retain the reservation. Only a definitive result may
 // release it, and only when the executing node has attested complete cleanup.
 func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask, outcome hubSpawnOutcome, now time.Time) (bool, error) {
-	status := spawnOutcomeStatus(outcome)
-	if status == "deadline_exceeded" || status == "reconciling" {
-		outcome.Retryable = false
-	}
 	ctx, done := s.op(parent)
 	defer done()
-	raw, err := json.Marshal(outcome)
-	if err != nil {
-		return false, err
-	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback()
-	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','dispatching','reconciling','deadline_exceeded') AND status<>? AND NOT (status='deadline_exceeded' AND ?='reconciling')`), status, string(raw), task.Request.RequestID, task.Attempt, status, status)
+	if outcome.Reason == "timeout" {
+		var node sql.NullString
+		if err = tx.QueryRowContext(ctx, s.q(`SELECT node_id FROM spawn_operations WHERE request_id=? AND attempt=?`), task.Request.RequestID, task.Attempt).Scan(&node); err != nil {
+			return false, err
+		}
+		outcome.Retryable = !node.Valid
+	}
+	status := spawnOutcomeStatus(outcome)
+	if status == "deadline_exceeded" || status == "reconciling" {
+		outcome.Retryable = false
+	}
+	raw, err := json.Marshal(outcome)
+	if err != nil {
+		return false, err
+	}
+	result, err := tx.ExecContext(ctx, s.q(`UPDATE spawn_operations SET status=?,result=? WHERE request_id=? AND attempt=? AND status IN ('accepted','dispatching','reconciling','deadline_exceeded') AND status<>? AND NOT (status='deadline_exceeded' AND ?='reconciling') AND NOT (?='timeout' AND ?='retryable' AND node_id IS NOT NULL)`), status, string(raw), task.Request.RequestID, task.Attempt, status, status, outcome.Reason, status)
 	if err != nil {
 		return false, err
 	}
@@ -298,6 +311,9 @@ func spawnOutcomeStatus(outcome hubSpawnOutcome) string {
 	}
 	switch outcome.Reason {
 	case "timeout":
+		if outcome.Retryable {
+			return "retryable"
+		}
 		return "deadline_exceeded"
 	case "disconnected", "unknown":
 		return "reconciling"

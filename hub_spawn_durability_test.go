@@ -86,7 +86,7 @@ func TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox(t *testing.T) {
 			other := node
 			other.Machine = "machine-b"
 			again, err := s.bindSpawn(ctx, req.RequestID, task.Attempt, other)
-			if err != nil || again.Node.Machine != "machine-a" {
+			if !errors.Is(err, errSpawnClaimed) || again.Node.Machine != "machine-a" {
 				t.Fatalf("destination changed: %+v %v", again, err)
 			}
 			if changed, err := s.completeSpawn(ctx, task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: reason, Retryable: true}, now); err != nil || !changed {

@@ -54,6 +54,10 @@ the durable queue is authoritative. HTTP cancellation does not cancel accepted
 work. Shutdown ends worker contexts and waits for them before closing storage.
 
 Only nodes advertising `spawn_ops_v1` can execute durable operations. Older nodes are refused with an upgrade fix, without a launcher fallback. Before sending node RPC, the hub commits the destination, node UUID and payload.
+Durable node messages carry an operator-authorization marker and absolute deadline.
+The legacy `/v1/spawn` endpoint rejects that marker, retains its original restricted
+flag list and 300-second maximum, and cannot grant operator-only spawn overrides.
+Unmarked node requests retain the legacy result shape, including on result replay.
 Recovery replays that exact UUID on that exact node. An uncertain send never
 falls through to another host. The node commits an executing journal entry
 before launch and commits its completed result before replying. Duplicate
@@ -93,6 +97,7 @@ sent merely because a deadline expired.
 | Failure | Recovery contract | Test / explicit non-goal |
 | --- | --- | --- |
 | Hub restart after reservation | Reopen the same operation; no second acceptance/host claim. | `TestSpawnReservationSurvivesRestartAndReplaysLostResponse`, `TestLaneInboxStoreSpawnDurabilityContract` (SQLite and CI Postgres). |
+| Deadline before dispatch | No node binding means no launch; release reservation and allow the same key/job to retry. | `TestAsyncSpawnUndispatchedTimeoutReleasesReservation` (queued and placement windows). |
 | Node disconnect or uncertain send | Retain node UUID/host; replay its journal on reconnect. | `TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox`, `TestAsyncSpawnLateResultReconcilesAgainstSameNode`. |
 | Duplicate accept / lost HTTP response | Identical key/body replays; changed body conflicts; CLI receipt preserves key. | Reservation test and `TestSubmissionReceiptReusesKeyAfterLostHTTPResponse`. |
 | Timeout followed by late pane | Retain ownership; reconcile receipt with exact node identity; never close working/unknown. | Late-result test and `TestFailedSpawnCleanupRequiresExactIdlePane`. |
@@ -112,6 +117,16 @@ Automatic journal GC and an ACK-driven retention policy are explicit non-goals.
 Back up the node's private `spawn-inbox.sqlite3` beside `spawn.json`, using SQLite's
 backup mechanism, and the hub database with all spawn tables. Do not delete a
 journal or change backend while unresolved ownership exists.
+
+Before starting an upgraded node, remove the retired `runtug_path` key from
+`spawn.json`; keep its workspace, session, repository mappings and work root.
+The node checks this migration at startup and reports an actionable refusal before
+connecting, rather than first discovering the retired key during a spawn. No
+launcher executable setting or forwarding shim is supported.
+
+A checkout-busy result completes one retryable attempt. The engine cannot bind a
+fresh node UUID inside that completed attempt; replay the saved logical submission
+to create the next attempt after the node's checkout operation finishes.
 
 ## Notifications and telemetry
 
