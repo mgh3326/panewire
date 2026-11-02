@@ -25,8 +25,9 @@ exactly this source is left unchanged, so a rerun is safe; a target holding
 other rows is refused. Stop the hub before applying. See docs/hub-postgres.md.`
 
 // hubInboxSnapshot is every row of the three inbox tables, batches in send
-// order.
+// order, plus the highest inbox ID that must never be reused.
 type hubInboxSnapshot struct {
+	idFloor    int64
 	items      []hubInboxSnapshotItem
 	batches    []hubInboxSnapshotBatch
 	quarantine [][2]string
@@ -44,7 +45,7 @@ type hubInboxSnapshotBatch struct {
 }
 
 func (s hubInboxSnapshot) empty() bool {
-	return len(s.items)+len(s.batches)+len(s.quarantine) == 0
+	return len(s.items)+len(s.batches)+len(s.quarantine) == 0 && s.idFloor == 0
 }
 
 func (s hubInboxSnapshot) summary() string {
@@ -291,6 +292,33 @@ func readHubInboxSnapshotTx(ctx context.Context, tx *sql.Tx, dialect laneInboxDi
 	if err := closeRows(rows); err != nil {
 		return snapshot, err
 	}
+
+	for _, i := range snapshot.items {
+		snapshot.idFloor = max(snapshot.idFloor, i.item.ID)
+	}
+	if dialect == laneInboxSQLite {
+		var floor int64
+		if err := tx.QueryRowContext(ctx, `SELECT floor FROM lane_inbox_id_floor WHERE singleton=1`).Scan(&floor); err != nil {
+			return snapshot, err
+		}
+		snapshot.idFloor = max(snapshot.idFloor, floor)
+	} else {
+		// pg_get_serial_sequence returns a SQL-quoted relation name. Read
+		// is_called too: setval(next, false) has not allocated next yet.
+		var sequence string
+		if err := tx.QueryRowContext(ctx, `SELECT pg_get_serial_sequence('lane_inbox','id')`).Scan(&sequence); err != nil {
+			return snapshot, err
+		}
+		var last int64
+		var called bool
+		if err := tx.QueryRowContext(ctx, `SELECT last_value,is_called FROM `+sequence).Scan(&last, &called); err != nil {
+			return snapshot, err
+		}
+		if !called {
+			last--
+		}
+		snapshot.idFloor = max(snapshot.idFloor, last)
+	}
 	// Sorted here, not by ORDER BY: Postgres collates text by locale and
 	// SQLite by bytes, and the copy check compares the two snapshots.
 	sort.Slice(snapshot.quarantine, func(i, j int) bool { return snapshot.quarantine[i][0] < snapshot.quarantine[j][0] })
@@ -370,7 +398,7 @@ func copyHubInboxSnapshot(ctx context.Context, db *sql.DB, snapshot hubInboxSnap
 			return false, err
 		}
 	}
-	if _, err := tx.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence('lane_inbox','id'), (SELECT COALESCE(max(id),0)+1 FROM lane_inbox), false)`); err != nil {
+	if _, err := tx.ExecContext(ctx, `SELECT setval(pg_get_serial_sequence('lane_inbox','id'), (SELECT GREATEST(COALESCE(max(id),0),$1::bigint)+1 FROM lane_inbox), false)`, snapshot.idFloor); err != nil {
 		return false, err
 	}
 	for _, b := range snapshot.batches {

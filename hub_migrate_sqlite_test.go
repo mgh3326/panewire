@@ -401,3 +401,84 @@ func TestHubMigrateSQLiteApplyFailsFastOnAHeldLock(t *testing.T) {
 		t.Fatalf("apply waited %v on the held lock", waited)
 	}
 }
+
+func TestHubMigrateSQLitePreservesPrunedIDFloor(t *testing.T) {
+	for _, retainRow := range []bool{false, true} {
+		t.Run(map[bool]string{false: "all-pruned", true: "lower-id-survives"}[retainRow], func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+			src, err := openLaneInboxStore(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			old := now.Add(-30 * 24 * time.Hour)
+			if retainRow {
+				if _, err := src.put("unread", "lane-a", "lane.event", "inbox", quietEvent("unread", "unread"), old, 0, 0); err != nil {
+					t.Fatal(err)
+				}
+			}
+			pruned, err := src.put("pruned", "lane-a", "lane.event", "inbox", quietEvent("pruned", "pruned"), old, 0, 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := src.ack(pruned.ID, "lane-a", false, old); err != nil {
+				t.Fatal(err)
+			}
+			if n, err := src.prune(now, inboxRetentionPolicy{Days: 14, PerLane: 2000}); err != nil || n != 1 {
+				t.Fatalf("pruned=%d err=%v", n, err)
+			}
+			if err := src.close(); err != nil {
+				t.Fatal(err)
+			}
+			ctx := context.Background()
+			snapshot, err := readHubInboxSQLiteSource(ctx, path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if snapshot.idFloor != pruned.ID {
+				t.Fatalf("snapshot floor=%d, want pruned ID %d", snapshot.idFloor, pruned.ID)
+			}
+			if snapshot.empty() {
+				t.Fatal("pruned ID evidence must not count as empty")
+			}
+			wantRows := 0
+			if retainRow {
+				wantRows = 1
+			}
+			if len(snapshot.items) != wantRows {
+				t.Fatalf("copied rows=%d, want %d", len(snapshot.items), wantRows)
+			}
+			t.Run("postgres", func(t *testing.T) {
+				_, dsn := hubPostgresTestSchema(t)
+				dst, err := openLaneInboxStorePostgres(ctx, dsn)
+				if err != nil {
+					t.Fatal(err)
+				}
+				defer dst.close()
+				copied, err := copyHubInboxSnapshot(ctx, dst.db, snapshot)
+				if err != nil || !copied {
+					t.Fatalf("copy=%v err=%v", copied, err)
+				}
+				// Rerunning a copy must preserve the floor, even when no items survived.
+				copied, err = copyHubInboxSnapshot(ctx, dst.db, snapshot)
+				if err != nil || copied {
+					t.Fatalf("rerun copy=%v err=%v", copied, err)
+				}
+				next, err := dst.put("new", "lane-a", "lane.event", "inbox", quietEvent("new", "new"), now, 0, 0)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if next.ID <= pruned.ID {
+					t.Fatalf("new ID %d reused pruned ID %d", next.ID, pruned.ID)
+				}
+				if n, err := dst.ack(pruned.ID, "lane-a", false, now); err != nil || n != 0 {
+					t.Fatalf("stale ack changed new work: n=%d err=%v", n, err)
+				}
+				unread, err := dst.list("lane-a", true)
+				if err != nil || len(unread) != wantRows+1 {
+					t.Fatalf("unread=%+v err=%v", unread, err)
+				}
+			})
+		})
+	}
+}
