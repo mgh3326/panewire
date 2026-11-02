@@ -73,24 +73,30 @@ type hubSpawnCheckout struct {
 }
 
 type hubSpawnRequest struct {
-	RequestID   string            `json:"request_id"`
-	Machine     string            `json:"machine"`
-	CWDKey      string            `json:"cwd_key"`
-	Brief       hubSpawnBrief     `json:"brief"`
-	Checkout    *hubSpawnCheckout `json:"checkout,omitempty"`
-	Args        []string          `json:"args"`
-	WaitSeconds int               `json:"wait_seconds"`
+	RequestID       string            `json:"request_id"`
+	Machine         string            `json:"machine"`
+	CWDKey          string            `json:"cwd_key"`
+	Brief           hubSpawnBrief     `json:"brief"`
+	Checkout        *hubSpawnCheckout `json:"checkout,omitempty"`
+	Args            []string          `json:"args"`
+	WaitSeconds     int               `json:"wait_seconds"`
+	Async           bool              `json:"async,omitempty"`
+	JobID           string            `json:"job_id,omitempty"`
+	OwnerLane       string            `json:"owner_lane,omitempty"`
+	DeadlineSeconds int               `json:"deadline_seconds,omitempty"`
 }
 
 type hubSpawnResult struct {
-	RequestID   string     `json:"request_id"`
-	Machine     string     `json:"machine"`
-	RC          int        `json:"rc"`
-	JobID       string     `json:"job_id"`
-	Pane        string     `json:"pane"`
-	StdoutTail  string     `json:"stdout_tail"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
-	Error       string     `json:"error,omitempty"`
+	StageMS     map[string]int64 `json:"stage_ms,omitempty"`
+	Stage       string           `json:"stage,omitempty"`
+	RequestID   string           `json:"request_id"`
+	Machine     string           `json:"machine"`
+	RC          int              `json:"rc"`
+	JobID       string           `json:"job_id"`
+	Pane        string           `json:"pane"`
+	StdoutTail  string           `json:"stdout_tail"`
+	CompletedAt *time.Time       `json:"completed_at,omitempty"`
+	Error       string           `json:"error,omitempty"`
 }
 
 type hubSpawnRecord struct {
@@ -106,6 +112,28 @@ func validHubSpawnRequestID(value string) bool { return hubSpawnRequestIDPattern
 func validHubSpawnRequest(request hubSpawnRequest) bool {
 	inline, doc := request.Brief.hasInline || request.Brief.Inline != "", request.Brief.hasDoc || request.Brief.Doc != ""
 	if request.Args == nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.Machine) || !hubSpawnCWDKeyPattern.MatchString(request.CWDKey) || request.WaitSeconds < 1 || request.WaitSeconds > 300 || inline == doc || inline && (request.Brief.Inline == "" || !utf8.ValidString(request.Brief.Inline) || len([]byte(request.Brief.Inline)) > hubSpawnMaxBriefBytes) || doc && (request.Brief.Doc == "" || !validHubSpawnDocKey(request.Brief.Doc)) {
+		return false
+	}
+	if request.Async {
+		if !validNodeJobName(request.JobID) || !hubAgentLabelPattern.MatchString(request.OwnerLane) || request.DeadlineSeconds < 0 || request.DeadlineSeconds > 3600 {
+			return false
+		}
+		job, label := "", ""
+		for i := 0; i+1 < len(request.Args); i += 2 {
+			if request.Args[i] == "--job" {
+				job = request.Args[i+1]
+			}
+			if request.Args[i] == "-l" {
+				label = request.Args[i+1]
+			}
+		}
+		if job == "" {
+			job = label
+		}
+		if job != request.JobID {
+			return false
+		}
+	} else if request.JobID != "" || request.OwnerLane != "" || request.DeadlineSeconds != 0 {
 		return false
 	}
 	return validHubSpawnArgs(request.Args) && (request.Checkout == nil || validHubSpawnCheckout(*request.Checkout))
@@ -186,8 +214,15 @@ func validHubSpawnArgValue(flag, value string) bool {
 // result is a node-to-hub control response, not an event envelope.
 func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || fields == nil || (len(fields) != 6 && len(fields) != 7) {
+	if json.Unmarshal(raw, &fields) != nil || fields == nil || len(fields) < 6 || len(fields) > 9 {
 		return hubSpawnResult{}, false
+	}
+	for key := range fields {
+		switch key {
+		case "type", "request_id", "rc", "job_id", "pane", "stdout_tail", "error", "stage_ms", "stage":
+		default:
+			return hubSpawnResult{}, false
+		}
 	}
 	var kind string
 	var result hubSpawnResult
@@ -203,8 +238,16 @@ func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 		if json.Unmarshal(rawError, &result.Error) != nil || !validHubSpawnResultError(result.Error) {
 			return hubSpawnResult{}, false
 		}
-	} else if len(fields) != 6 {
-		return hubSpawnResult{}, false
+	}
+	if raw, ok := fields["stage_ms"]; ok {
+		if json.Unmarshal(raw, &result.StageMS) != nil || !validSpawnStages(result.StageMS) {
+			return hubSpawnResult{}, false
+		}
+	}
+	if raw, ok := fields["stage"]; ok {
+		if json.Unmarshal(raw, &result.Stage) != nil || !validSpawnStage(result.Stage) {
+			return hubSpawnResult{}, false
+		}
 	}
 	return result, true
 }
@@ -220,7 +263,7 @@ func validHubSpawnResultError(value string) bool {
 
 func (h *HubServer) pruneSpawnRecordsLocked(now time.Time) {
 	for requestID, record := range h.spawnRecords {
-		if now.Sub(record.created) >= hubSpawnRetention {
+		if !record.request.Async && now.Sub(record.created) >= hubSpawnRetention {
 			delete(h.spawnRecords, requestID)
 		}
 	}
@@ -264,6 +307,11 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 	}
 	if access := h.authorize(request, hubScopeSpawn, body.Machine); access != hubAccessGranted {
 		writeHubAccessDenied(writer, access)
+		return
+	}
+
+	if body.Async {
+		h.handleAsyncSpawn(writer, request, body)
 		return
 	}
 
@@ -364,6 +412,12 @@ func (h *HubServer) resolveSpawn(machine string, result hubSpawnResult) {
 		h.mu.Unlock()
 		return
 	}
+	if record.request.Async && result.RC == 0 && (result.Error != "" || result.JobID != record.request.JobID || result.Pane == "") {
+		result.RC = 1
+		if result.Error == "" {
+			result.Error = "spawn_failed"
+		}
+	}
 	completed := h.now().UTC()
 	result.Machine = machine
 	result.CompletedAt = &completed
@@ -372,6 +426,9 @@ func (h *HubServer) resolveSpawn(machine string, result hubSpawnResult) {
 	waiter := record.waiter
 	h.mu.Unlock()
 	h.broadcastSpawnResult(result)
+	if record.request.Async {
+		h.notifyAsyncSpawn(record.request, result)
+	}
 	select {
 	case waiter <- result:
 	default:
@@ -385,7 +442,9 @@ func (h *HubServer) loseSpawnsLocked(machine string) []chan hubSpawnResult {
 	var waiters []chan hubSpawnResult
 	for _, record := range h.spawnRecords {
 		if record.status == "pending" && record.request.Machine == machine {
-			record.status = "lost"
+			if !record.request.Async {
+				record.status = "lost"
+			}
 			waiters = append(waiters, record.waiter)
 		}
 	}

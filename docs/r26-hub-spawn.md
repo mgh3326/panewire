@@ -195,3 +195,43 @@ The injected configuration path is available through `HubClientConfig` for
 tests. The production default is the path above; no normal test reads it.
 `spawn.json` and the node handoffkeep env file are operator-provisioned and
 are not deployed by this change.
+
+## Detached requests
+
+Add `async:true`, `job_id`, and `owner_lane` to a normal `POST /v1/spawn`
+request. `job_id` must match `--job` (or `-l` when `--job` is absent).
+`deadline_seconds` defaults to 600 and accepts 1–3600; `wait_seconds` remains
+required for compatibility but does not set the detached deadline. The target
+node must advertise `spawn_async`. The hub returns HTTP 202 immediately:
+
+```json
+{"request_id":"00000000-0000-4000-8000-000000000001","job_id":"job-a","status":"accepted"}
+```
+
+The node runs its existing configured checkout and runtug admission, launch and
+landing path. Client disconnect does not cancel it. One terminal `lane.event`
+is persisted for `owner_lane`: `[runtug] SPAWNED <job> host=<host> pane=<pane>
+model=<profile>` or `[runtug] SPAWN_FAILED <job> rc=<code> reason=<reason>`.
+A deadline emits `reason=timeout`; a disconnected node emits failure. Late
+results are ignored. GET by the accepted request id returns the terminal result.
+Duplicate job ids return the original accepted id without another execution;
+a different owner or host conflicts. Detached deduplication records live for
+the hub process lifetime, including terminal records. The submitting runtug
+job claim supplies the cross-restart duplicate guard; hub restart does not
+replay pending spawns.
+
+When `SENTRY_DSN_PANEWIRE` is configured, detached completions alone record an
+always-sampled `runtug.spawn` transaction tagged job, host, profile, role and rc.
+Failures additionally record an error grouped by stage and reason. Ordinary hub
+traffic starts no transactions. The node result optionally carries
+`stage_ms:{claim,placement,checkout,launch,landing}` (integer milliseconds) and
+`stage` for the failing stage. Only measured stages become spans. Node checkout
+time is measured on the node; runtug can supply its stage measurements through
+one stdout line `RUNTUG_SPAWN_TIMINGS {"stage_ms":{"claim":12},"stage":"launch"}`.
+Neither stdout nor brief text is sent to Sentry.
+
+Rollout: merge and deploy the hub/node support before enabling `runtug spawn
+--detach`. Verify a fake/test job's accepted id and terminal lane event; no live
+worker launch is needed for unit validation. Roll back by disabling callers'
+`--detach`, then reverting hub/node binaries. Existing synchronous requests
+retain their original response and deadline behavior.
