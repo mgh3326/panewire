@@ -1,0 +1,11 @@
+{
+  "schema": "fleet.artifact-policy.v1",
+  "roots": { "inbox": { "path": "herdr-inbox/jobs", "kind": "per-job" } },
+  "rows": [
+    { "class": "protected", "root": "inbox", "glob": "events/**" },
+    { "class": "protected", "root": "inbox", "glob": "refs/**" },
+    { "class": "record-text", "root": "inbox", "glob": "*.md" },
+    { "class": "evidence", "root": "inbox", "glob": "evidence/**", "mirror_required": true },
+    { "class": "final-build", "root": "inbox", "glob": "final/**" }
+  ]
+}

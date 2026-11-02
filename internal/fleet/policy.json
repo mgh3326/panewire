@@ -1,0 +1,2042 @@
+{
+  "version": 1,
+  "profiles": {
+    "opus": {
+      "canon": "opus",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "sonnet": {
+      "canon": "sonnet",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "haiku": {
+      "canon": "haiku",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "fable": {
+      "canon": "fable",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "sonnet-med": {
+      "canon": "sonnet",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "builder-opus": {
+      "canon": "opus",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "high",
+      "pin": true
+    },
+    "captain-opus": {
+      "canon": "opus",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "high",
+      "pin": true
+    },
+    "builder-sonnet": {
+      "canon": "sonnet",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "xhigh",
+      "rungs": {
+        "none": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        },
+        "low": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        },
+        "medium": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        },
+        "high": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "xhigh": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "max": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "ultra": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        }
+      }
+    },
+    "builder-opus-low": {
+      "canon": "opus",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "low",
+      "pin": true,
+      "e6": true
+    },
+    "builder-opus-medium": {
+      "canon": "opus",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "medium",
+      "pin": true,
+      "e6": true
+    },
+    "builder-sonnet-low": {
+      "canon": "sonnet",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "low",
+      "pin": true,
+      "e6": true
+    },
+    "builder-sonnet-medium": {
+      "canon": "sonnet",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "medium",
+      "pin": true,
+      "e6": true
+    },
+    "builder-sonnet-xhigh": {
+      "canon": "sonnet",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "xhigh",
+      "pin": true,
+      "e6": true
+    },
+    "builder-sonnet-max": {
+      "canon": "sonnet",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "max",
+      "pin": true,
+      "e6": true
+    },
+    "builder-haiku-low": {
+      "canon": "haiku",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "low",
+      "pin": true,
+      "e6": true
+    },
+    "builder-haiku-medium": {
+      "canon": "haiku",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "medium",
+      "pin": true,
+      "e6": true
+    },
+    "builder-haiku-high": {
+      "canon": "haiku",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "high",
+      "pin": true,
+      "e6": true
+    },
+    "builder-haiku-xhigh": {
+      "canon": "haiku",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "xhigh",
+      "pin": true,
+      "e6": true
+    },
+    "builder-haiku-max": {
+      "canon": "haiku",
+      "kind": "claude",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "max",
+      "pin": true,
+      "e6": true
+    },
+    "builder-sol-low": {
+      "canon": "codex-sol",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "low",
+      "pin": true,
+      "e6": true
+    },
+    "builder-sol-medium": {
+      "canon": "codex-sol",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "medium",
+      "pin": true,
+      "e6": true
+    },
+    "builder-sol-high": {
+      "canon": "codex-sol",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "high",
+      "pin": true,
+      "e6": true
+    },
+    "builder-sol-xhigh": {
+      "canon": "codex-sol",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "xhigh",
+      "pin": true
+    },
+    "builder-sol-max": {
+      "canon": "codex-sol",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "max",
+      "pin": true
+    },
+    "builder-luna-low": {
+      "canon": "codex-luna",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "low",
+      "pin": true,
+      "e6": true
+    },
+    "builder-luna-medium": {
+      "canon": "codex-luna",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "medium",
+      "pin": true,
+      "e6": true
+    },
+    "builder-luna-high": {
+      "canon": "codex-luna",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "high",
+      "pin": true,
+      "e6": true
+    },
+    "builder-luna-max": {
+      "canon": "codex-luna",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "max",
+      "pin": true,
+      "e6": true
+    },
+    "builder-terra61-medium": {
+      "canon": "codex-terra61",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "medium",
+      "pin": true,
+      "e6": true,
+      "proof": "codex-footer"
+    },
+    "builder-terra61-high": {
+      "canon": "codex-terra61",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "high",
+      "pin": true,
+      "e6": true,
+      "proof": "codex-footer"
+    },
+    "builder-terra61-xhigh": {
+      "canon": "codex-terra61",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "xhigh",
+      "pin": true,
+      "e6": true,
+      "proof": "codex-footer"
+    },
+    "builder-terra61-max": {
+      "canon": "codex-terra61",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "max",
+      "pin": true,
+      "e6": true,
+      "proof": "codex-footer"
+    },
+    "builder-grok-low": {
+      "canon": "grok-hi",
+      "kind": "grok",
+      "family": "xai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "low",
+      "pin": true,
+      "e6": true
+    },
+    "builder-grok-medium": {
+      "canon": "grok-hi",
+      "kind": "grok",
+      "family": "xai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "medium",
+      "pin": true,
+      "e6": true
+    },
+    "builder-grok-xhigh": {
+      "canon": "grok-hi",
+      "kind": "grok",
+      "family": "xai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "xhigh",
+      "pin": true,
+      "e6": true
+    },
+    "builder-kimi-high": {
+      "canon": "kimi-k3",
+      "kind": "kimi",
+      "family": "moonshot",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "high",
+      "pin": true,
+      "e6": true
+    },
+    "builder-kimi-max": {
+      "canon": "kimi-k3",
+      "kind": "kimi",
+      "family": "moonshot",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "max",
+      "pin": true,
+      "e6": true
+    },
+    "codex": {
+      "canon": "codex-sol",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "effort": "high"
+    },
+    "codex-sol": {
+      "canon": "codex-sol",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "codex-max": {
+      "canon": "codex-sol",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "builder-sol": {
+      "canon": "codex-sol",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "high",
+      "pin": true
+    },
+    "captain-sol": {
+      "canon": "codex-sol",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "high",
+      "pin": true
+    },
+    "codex-luna": {
+      "canon": "codex-luna",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "effort": "medium"
+    },
+    "codex-luna-hi": {
+      "canon": "codex-luna",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "effort": "high"
+    },
+    "codex-luna-max": {
+      "canon": "codex-luna",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "effort": "max"
+    },
+    "builder-luna": {
+      "canon": "codex-luna",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "xhigh",
+      "pin": true
+    },
+    "codex-terra61": {
+      "canon": "codex-terra61",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "effort": "low",
+      "proof": "codex-footer"
+    },
+    "codex-astra": {
+      "canon": "codex-astra",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-swe2": {
+      "canon": "devin-swe2",
+      "kind": "devin",
+      "family": "cognition",
+      "capability": "standard",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "devin-swe2-medium": {
+      "canon": "devin-swe2-medium",
+      "kind": "devin",
+      "family": "cognition",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "devin-swe2-max": {
+      "canon": "devin-swe2-max",
+      "kind": "devin",
+      "family": "cognition",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "devin-swe17": {
+      "canon": "devin-swe17",
+      "kind": "devin",
+      "family": "cognition",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-glm52": {
+      "canon": "devin-glm52",
+      "kind": "devin",
+      "family": "zhipu",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-ds41": {
+      "canon": "devin-ds41",
+      "kind": "devin",
+      "family": "deepseek",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-ds41-max": {
+      "canon": "devin-ds41-max",
+      "kind": "devin",
+      "family": "deepseek",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-fusion-opus55": {
+      "canon": "devin-fusion-opus55",
+      "kind": "devin",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-fusion-sonnet55": {
+      "canon": "devin-fusion-sonnet55",
+      "kind": "devin",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-fusion-sol61": {
+      "canon": "devin-fusion-sol61",
+      "kind": "devin",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-fusion-sol61-xhigh": {
+      "canon": "devin-fusion-sol61-xhigh",
+      "kind": "devin",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-argon": {
+      "canon": "devin-argon",
+      "kind": "devin",
+      "family": "google",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-argon-medium": {
+      "canon": "devin-argon-medium",
+      "kind": "devin",
+      "family": "google",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-argon-low": {
+      "canon": "devin-argon-low",
+      "kind": "devin",
+      "family": "google",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "builder-devin": {
+      "canon": "devin-swe2",
+      "kind": "devin",
+      "family": "cognition",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "builder-devin-medium": {
+      "canon": "devin-swe2-medium",
+      "kind": "devin",
+      "family": "cognition",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "builder-devin-max": {
+      "canon": "devin-swe2-max",
+      "kind": "devin",
+      "family": "cognition",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "builder-ds41": {
+      "canon": "devin-ds41",
+      "kind": "devin",
+      "family": "deepseek",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "builder-ds41-max": {
+      "canon": "devin-ds41-max",
+      "kind": "devin",
+      "family": "deepseek",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "grok": {
+      "canon": "grok-hi",
+      "kind": "grok",
+      "family": "xai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "grok-hi": {
+      "canon": "grok-hi",
+      "kind": "grok",
+      "family": "xai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "grok-med": {
+      "canon": "grok",
+      "kind": "grok",
+      "family": "xai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "effort": "medium"
+    },
+    "builder-grok": {
+      "canon": "grok-hi",
+      "kind": "grok",
+      "family": "xai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "xhigh",
+      "pin": true
+    },
+    "kimi-k3": {
+      "canon": "kimi-k3",
+      "kind": "kimi",
+      "family": "moonshot",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "kimi-k27": {
+      "canon": "kimi-k27",
+      "kind": "kimi",
+      "family": "moonshot",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kimi-k27-code": {
+      "canon": "kimi-k27-code",
+      "kind": "kimi",
+      "family": "moonshot",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "builder-kimi": {
+      "canon": "kimi-k3",
+      "kind": "kimi",
+      "family": "moonshot",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "kimi-k3-low": {
+      "canon": "kimi-k3",
+      "kind": "kimi",
+      "family": "moonshot",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "effort": "low",
+      "pin": true
+    },
+    "pi-haiku55": {
+      "canon": "pi-haiku55",
+      "kind": "pi",
+      "family": "anthropic",
+      "capability": "pi_anthropic",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "rungs": {
+        "none": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        },
+        "low": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "medium": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "high": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "xhigh": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "max": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "ultra": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        }
+      }
+    },
+    "pi-sonnet55": {
+      "canon": "pi-sonnet55",
+      "kind": "pi",
+      "family": "anthropic",
+      "capability": "pi_anthropic",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "rungs": {
+        "none": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        },
+        "low": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "medium": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "high": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "xhigh": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "max": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "ultra": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        }
+      }
+    },
+    "pi-opus55": {
+      "canon": "pi-opus55",
+      "kind": "pi",
+      "family": "anthropic",
+      "capability": "pi_anthropic",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "rungs": {
+        "none": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        },
+        "low": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "medium": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "high": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "xhigh": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "max": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "ultra": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        }
+      }
+    },
+    "cmd-dsflash41": {
+      "canon": "cmd-dsflash41",
+      "kind": "cmd",
+      "family": "deepseek",
+      "capability": "cmd_dsflash41",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "rungs": {
+        "none": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        },
+        "low": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "medium": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        },
+        "high": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "xhigh": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        },
+        "max": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel",
+            "builder"
+          ]
+        },
+        "ultra": {
+          "roles": [
+            "worker",
+            "tester",
+            "reviewer",
+            "counsel"
+          ]
+        }
+      }
+    },
+    "kiro-opus": {
+      "canon": "kiro-opus",
+      "kind": "kiro",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kiro-sonnet": {
+      "canon": "kiro-sonnet",
+      "kind": "kiro",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kiro-haiku": {
+      "canon": "kiro-haiku",
+      "kind": "kiro",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kiro-sol": {
+      "canon": "kiro-sol",
+      "kind": "kiro",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kiro-luna": {
+      "canon": "kiro-luna",
+      "kind": "kiro",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kiro-cheap": {
+      "canon": "kiro-cheap",
+      "kind": "kiro",
+      "family": "qwen",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kiro-glm": {
+      "canon": "kiro-glm",
+      "kind": "kiro",
+      "family": "zhipu",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kiro-deepseek": {
+      "canon": "kiro-deepseek",
+      "kind": "kiro",
+      "family": "deepseek",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kiro-minimax": {
+      "canon": "kiro-minimax",
+      "kind": "kiro",
+      "family": "minimax",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kiro-minimax21": {
+      "canon": "kiro-minimax21",
+      "kind": "kiro",
+      "family": "minimax",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kiro-opus-xhigh": {
+      "canon": "kiro-opus",
+      "kind": "kiro",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "effort": "xhigh"
+    },
+    "kiro-opus-max": {
+      "canon": "kiro-opus",
+      "kind": "kiro",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "effort": "max"
+    },
+    "kiro-sol-xhigh": {
+      "canon": "kiro-sol",
+      "kind": "kiro",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "effort": "xhigh"
+    },
+    "kiro-sol-max": {
+      "canon": "kiro-sol",
+      "kind": "kiro",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "effort": "max"
+    },
+    "oc-kimi-code": {
+      "canon": "oc-kimi-code",
+      "kind": "opencode",
+      "family": "moonshot",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "oc-glm": {
+      "canon": "oc-glm",
+      "kind": "opencode",
+      "family": "zhipu",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "oc-kimi-k3": {
+      "canon": "oc-kimi-k3",
+      "kind": "opencode",
+      "family": "moonshot",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "oc-dsflash": {
+      "canon": "oc-dsflash",
+      "kind": "opencode",
+      "family": "deepseek",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "oc-sonnet46": {
+      "canon": "oc-sonnet46",
+      "kind": "opencode",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "oc-oss": {
+      "canon": "oc-oss",
+      "kind": "opencode",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "oc-omni": {
+      "canon": "oc-omni",
+      "kind": "opencode",
+      "family": "mixed",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "oc-qwen37-max": {
+      "canon": "oc-qwen37-max",
+      "kind": "opencode",
+      "family": "qwen",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "oc-minimax-m3": {
+      "canon": "oc-minimax-m3",
+      "kind": "opencode",
+      "family": "minimax",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "oc-solar4": {
+      "canon": "oc-solar4",
+      "kind": "opencode",
+      "family": "upstage",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "codex-sol56": {
+      "canon": "codex-sol56",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "codex-luna56": {
+      "canon": "codex-luna56",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "codex-sol6": {
+      "canon": "codex-sol6",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "grok45": {
+      "canon": "grok45",
+      "kind": "grok",
+      "family": "xai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "grok45-med": {
+      "canon": "grok45-med",
+      "kind": "grok",
+      "family": "xai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "grok46": {
+      "canon": "grok46",
+      "kind": "grok",
+      "family": "xai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "grok46-med": {
+      "canon": "grok46-med",
+      "kind": "grok",
+      "family": "xai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "kiro": {
+      "canon": "kiro",
+      "kind": "kiro",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "agy-flash": {
+      "canon": "agy-flash",
+      "kind": "agy",
+      "family": "google",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "agy-flash36": {
+      "canon": "agy-flash36",
+      "kind": "agy",
+      "family": "google",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "agy-flash37": {
+      "canon": "agy-flash37",
+      "kind": "agy",
+      "family": "google",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "builder-sol6": {
+      "canon": "codex-sol6",
+      "kind": "codex",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ],
+      "effort": "high",
+      "pin": true
+    },
+    "agy-flash38-high": {
+      "canon": "agy-flash38-high",
+      "kind": "agy",
+      "family": "google",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "gate": "agy-flash"
+    },
+    "agy-flash38-medium": {
+      "canon": "agy-flash38-medium",
+      "kind": "agy",
+      "family": "google",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "gate": "agy-flash"
+    },
+    "agy-flash38-low": {
+      "canon": "agy-flash38-low",
+      "kind": "agy",
+      "family": "google",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "gate": "agy-flash"
+    },
+    "agy-sonnet46": {
+      "canon": "agy-sonnet46",
+      "kind": "agy",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "gate": "agy-flash"
+    },
+    "agy-opus46": {
+      "canon": "agy-opus46",
+      "kind": "agy",
+      "family": "anthropic",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "gate": "agy-flash"
+    },
+    "agy-oss120": {
+      "canon": "agy-oss120",
+      "kind": "agy",
+      "family": "openai",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "gate": "agy-flash"
+    },
+    "cc-qwen38": {
+      "canon": "cc-qwen38",
+      "kind": "claude",
+      "family": "qwen",
+      "capability": "clinepass",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "route": "clinepass"
+    },
+    "cc-glm": {
+      "canon": "cc-glm",
+      "kind": "claude",
+      "family": "zhipu",
+      "capability": "clinepass",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ],
+      "route": "clinepass",
+      "context_tokens": 1000000
+    },
+    "omp-opus": {
+      "canon": "omp-opus",
+      "kind": "omp",
+      "family": "anthropic",
+      "capability": "standard",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "omp-sonnet": {
+      "canon": "omp-sonnet",
+      "kind": "omp",
+      "family": "anthropic",
+      "capability": "standard",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "omp-sol": {
+      "canon": "omp-sol",
+      "kind": "omp",
+      "family": "openai",
+      "capability": "standard",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel",
+        "builder"
+      ]
+    },
+    "omp-terra61": {
+      "canon": "omp-terra61",
+      "kind": "omp",
+      "family": "openai",
+      "capability": "standard",
+      "effort": "high",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    }
+  }
+}

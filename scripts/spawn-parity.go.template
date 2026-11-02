@@ -1,0 +1,38 @@
+package PACKAGE
+
+import (
+ "context"
+ "encoding/json"
+ "os"
+ "sort"
+ "strings"
+ "testing"
+)
+
+func TestMigrationDryRunGolden(t *testing.T) {
+ var profiles []string
+ for profile:=range testApp(t).Policy.Profiles { profiles=append(profiles,profile) }
+ sort.Strings(profiles)
+ type snapshot struct { Code int; Error, Output string }
+ snapshots:=map[string]snapshot{}
+ for _,profile:=range profiles {
+  for _,role:=range []string{"worker","builder","reviewer","tester"} {
+   a,s,_,_:=cmdFixture(t)
+   s.DryRun,s.Profile,s.Role=true,profile,role
+   seat:=a.Policy.Profiles[profile]
+   a.Config.Local[seat.Capability]=true
+   q:=a.Quota.(*fakeQuota)
+   q.CatalogRows=[]CatalogRow{{Profile:seat.Canon,Effort:seat.Effort,Grade:"A",Pool:"example",Gate:"default",ModelID:"fixture/model"}}
+   if role=="builder" { s.Lane,s.Parent="fixture-lead","caller-lane" }
+   err:=a.Spawn(context.Background(),s)
+   snap:=snapshot{Code:code(err),Output:a.Out.(interface{String()string}).String()}
+   if err!=nil { snap.Error=err.Error() }
+   snap.Output=strings.ReplaceAll(snap.Output,a.Home,"<HOME>")
+   snap.Error=strings.ReplaceAll(snap.Error,a.Home,"<HOME>")
+   snapshots[profile+"/"+role]=snap
+  }
+ }
+ payload,err:=json.MarshalIndent(snapshots,"","  ");if err!=nil{t.Fatal(err)}
+ key:="SPAWN_PARITY_"+"OUTPUT"
+ if err:=os.WriteFile(os.Getenv(key),payload,0600);err!=nil{t.Fatal(err)}
+}

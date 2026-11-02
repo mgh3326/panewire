@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "default": "fleet-v1",
+  "blocks": {
+    "fleet-v1": "Host safety (fleet-v1):\n- Do not start local database servers. Database integration tests belong in CI.\n- Run only tests for what you changed locally; leave full suites to CI.\n- Stop every fixture or background process you start, by its PID, before finishing.\n- Work only in a worktree, never in the canonical checkout.\n- Reporting upward (READY, ESC, other notices): if the parent is operator-desk or a claude pane, use only `panewire emit --kind lane.event` and never write into that pane with herdr prompt/send-text/send-keys; emit rc 0 is enough even when you cannot see the receiver, so do not raise an ESC about delivery. Only if the parent pane is codex, grok or devin (which do not receive lane.event): emit, then `herdr agent prompt` to that parent pane once and confirm it landed."
+  },
+  "hosts": {},
+  "profiles": {}
+}

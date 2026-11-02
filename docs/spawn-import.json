@@ -1,0 +1,505 @@
+{
+  "files": {
+    "docs/catalog/omp-credit-seed.json": {
+      "import_sha256": "e1ce3cbe21a995b6873df9883e958673554d771660eec56fa454c8ae8674a835",
+      "source_sha256": "e1ce3cbe21a995b6873df9883e958673554d771660eec56fa454c8ae8674a835"
+    },
+    "internal/arbiter/arbiter_test.go": {
+      "import_sha256": "dac4c88221906c1b4802283d000f9b7a627cf5ee10e67d8fc668d4f3d2bffada",
+      "source_sha256": "dac4c88221906c1b4802283d000f9b7a627cf5ee10e67d8fc668d4f3d2bffada"
+    },
+    "internal/arbiter/events.go": {
+      "import_sha256": "f3f7950280987a21bac21c827c4f484e71f855d406ef1ce3d533c51e0d383a4e",
+      "source_sha256": "f3f7950280987a21bac21c827c4f484e71f855d406ef1ce3d533c51e0d383a4e"
+    },
+    "internal/arbiter/gc.go": {
+      "import_sha256": "ea13900e62f526414730e603fa822bc0ec8135f108eff55710a59553a78d6bf2",
+      "source_sha256": "ea13900e62f526414730e603fa822bc0ec8135f108eff55710a59553a78d6bf2"
+    },
+    "internal/arbiter/jobs.go": {
+      "import_sha256": "19a4c1e48f1a6bd30506729054e77197ed5f0271048fdfbcef9699c570ea5e6b",
+      "source_sha256": "19a4c1e48f1a6bd30506729054e77197ed5f0271048fdfbcef9699c570ea5e6b"
+    },
+    "internal/arbiter/lease.go": {
+      "import_sha256": "48a6c84d621d99d1cc959e129a0fa8348c3a002b71168ea85f7a6d85a2c97552",
+      "source_sha256": "48a6c84d621d99d1cc959e129a0fa8348c3a002b71168ea85f7a6d85a2c97552"
+    },
+    "internal/arbiter/store.go": {
+      "import_sha256": "8fcd8bd1683bccfeae0a0c44f0d09637bb1e59d921eb3850ae580cbfc619a924",
+      "source_sha256": "f2eacb549b6c1b217e75a6e5cd69625c6c47e23b0b73af4a8a95b21b553c3f79"
+    },
+    "internal/arbiter/testdata/arbiter-v2/jobs/job-a/events/00001-job.claim.json": {
+      "import_sha256": "56bf49b0d8bfb3dd873dc7edd19bdb3239717b7509cf4d5e8120470768aa19f4",
+      "source_sha256": "56bf49b0d8bfb3dd873dc7edd19bdb3239717b7509cf4d5e8120470768aa19f4"
+    },
+    "internal/arbiter/testdata/arbiter-v2/jobs/job-a/events/00002-quota_pool.record.json": {
+      "import_sha256": "9ce6511d8f93e4946abef64717aa61d9a978f8da940c2c0384dfd2f6ebe21af7",
+      "source_sha256": "9ce6511d8f93e4946abef64717aa61d9a978f8da940c2c0384dfd2f6ebe21af7"
+    },
+    "internal/arbiter/testdata/arbiter-v2/jobs/job-a/events/00003-job.spawned.json": {
+      "import_sha256": "a134c674bae4bebddc1576a67d00b983c5b1e27e5fa490ad84b42a05f956db92",
+      "source_sha256": "a134c674bae4bebddc1576a67d00b983c5b1e27e5fa490ad84b42a05f956db92"
+    },
+    "internal/arbiter/testdata/arbiter-v2/jobs/job-b/events/00001-job.claim.json": {
+      "import_sha256": "9d24f39ca8149129f0aaba54919defb1fce90da39f9ee04f2507d71004c623f8",
+      "source_sha256": "9d24f39ca8149129f0aaba54919defb1fce90da39f9ee04f2507d71004c623f8"
+    },
+    "internal/arbiter/testdata/arbiter-v2/jobs/job-b/events/00002-lease.acquire.json": {
+      "import_sha256": "e77b58e73b92555c05d13102a826436991c8c2e2eac4c2f0b4ea700b31425baa",
+      "source_sha256": "e77b58e73b92555c05d13102a826436991c8c2e2eac4c2f0b4ea700b31425baa"
+    },
+    "internal/arbiter/testdata/arbiter-v2/jobs/job-c/events/00001-job.claim.json": {
+      "import_sha256": "d264877ac494333bc4c646118acbbe7c01754348d05bd9cea0fa1703cae3bda5",
+      "source_sha256": "d264877ac494333bc4c646118acbbe7c01754348d05bd9cea0fa1703cae3bda5"
+    },
+    "internal/arbiter/testdata/arbiter-v2/jobs/job-c/events/00002-lease.acquire.json": {
+      "import_sha256": "b3fced6b8a033b2ab3a88d8ca3fa57a8eb860347da6fd35088eb0131809824bd",
+      "source_sha256": "b3fced6b8a033b2ab3a88d8ca3fa57a8eb860347da6fd35088eb0131809824bd"
+    },
+    "internal/arbiter/testdata/arbiter-v2/jobs/job-d/events/00001-job.claim.json": {
+      "import_sha256": "c32d6168ac8db53421bb2a45b7e95390e952c9b0ce5ca5ea23f794db872c8cbd",
+      "source_sha256": "c32d6168ac8db53421bb2a45b7e95390e952c9b0ce5ca5ea23f794db872c8cbd"
+    },
+    "internal/arbiter/testdata/arbiter-v2/jobs/job-d/events/00002-quota_pool.record.json": {
+      "import_sha256": "ed5ad7f2777ecc61986257a9b567681b3d636debed41afd812e2beb1b0a9bbc0",
+      "source_sha256": "ed5ad7f2777ecc61986257a9b567681b3d636debed41afd812e2beb1b0a9bbc0"
+    },
+    "internal/arbiter/testdata/arbiter-v2/jobs/job-d/events/00003-quota_pool.release.json": {
+      "import_sha256": "9d1149f80fd760a1890cd0d7ab44b080b461e5fa0eb58b10e109b983b9843661",
+      "source_sha256": "9d1149f80fd760a1890cd0d7ab44b080b461e5fa0eb58b10e109b983b9843661"
+    },
+    "internal/arbiter/testdata/arbiter-v2/state.db": {
+      "import_sha256": "33663c802387d112545123cb30e9358e3c44525ae47fca4f855887f0bd734956",
+      "source_sha256": "33663c802387d112545123cb30e9358e3c44525ae47fca4f855887f0bd734956"
+    },
+    "internal/fleet/admission.go": {
+      "import_sha256": "3b77c0ed44bc766a4ddc98ef0e9676cd8b33c62d98f163fa5c1eb40227080d24",
+      "source_sha256": "eaa4ee85e07a7b428c91573a080843fbf366e9af8ab3ead3f1daa9f1f5ac42d9"
+    },
+    "internal/fleet/admission_receipt_test.go": {
+      "import_sha256": "fd3563f8712b36a1477b79c615c6f0a49f606b60b34cb1210bba2556643eea88",
+      "source_sha256": "fa272af407adb6d36974cda69a23352968a41d7d8e5789d380daaf7d1445dc2d"
+    },
+    "internal/fleet/app.go": {
+      "import_sha256": "d6bc69ab0de7dffd7832f308eaa66ea7de7a8911c2974163b6a93b29769939fe",
+      "source_sha256": "a5f93693c506e81aac4d8d242114fa61a83802e8cd32c842a0a9b397cbfde5bb"
+    },
+    "internal/fleet/artifact-policy.json": {
+      "import_sha256": "4c5c3f39ee6143134aead6a83c3a95831249dc2595ebe0a5b4f21380cc0b3d1d",
+      "source_sha256": "4c5c3f39ee6143134aead6a83c3a95831249dc2595ebe0a5b4f21380cc0b3d1d"
+    },
+    "internal/fleet/artifacts.go": {
+      "import_sha256": "29dce4d11c9fcb778fb42975900655ea730b76fc3fd8e7087bd7f314b3609ae5",
+      "source_sha256": "fa8d41cc76a26adb2278d4b8890964f5397872d5cc77b43c2b05969e032b85e4"
+    },
+    "internal/fleet/artifacts_test.go": {
+      "import_sha256": "660efdf547235d158f5d136794d7763b33aaf03712b445864a103708c49cdff9",
+      "source_sha256": "932e9eb8f6ab6f8e40c0b44b1796fadb154a61ceb1356c29797fcf67b3ccc546"
+    },
+    "internal/fleet/brief-policy.json": {
+      "import_sha256": "7f4c4ade1c62fc1efb85e881e453db35386ff1daf44ed36df8a9264eca4d26ba",
+      "source_sha256": "7f4c4ade1c62fc1efb85e881e453db35386ff1daf44ed36df8a9264eca4d26ba"
+    },
+    "internal/fleet/brief.go": {
+      "import_sha256": "1361d1c7a1f7feaf92fff4f5686305861466de7a963c5090fc414b6524fb402e",
+      "source_sha256": "5c3dab88a4fa30c96943c8372c950609c0d7446dc9ec6d53fd4d06cfc57fecff"
+    },
+    "internal/fleet/command.go": {
+      "import_sha256": "233347e281138387bd448479882137c991ac2f6afa39a510b2589465585a09ec",
+      "source_sha256": "73fb943da9a3b6b6c37e1e214168c847a1a32f95425ba457be74b76d36434063"
+    },
+    "internal/fleet/config.go": {
+      "import_sha256": "e699affbdb75f2fbec480cdab86abd7973499226ef73a10b25f08993d3f3162b",
+      "source_sha256": "a5710935eac525996b4d636a23caedf83be73e91a5e9d851bd336133de2a9a9a"
+    },
+    "internal/fleet/config_test.go": {
+      "import_sha256": "23c823fd2e1f3940aef2e455c124262112a30c0ad4bf4b55c20c4b63cea39be6",
+      "source_sha256": "a9d3155987bf24a25d54719e5bb347de9c778992f83610d01083d250b41f1a18"
+    },
+    "internal/fleet/consistency_test.go": {
+      "import_sha256": "2a8163f24fbbef484f91cf847e68fff1b0a92f664a3c783d314e8eb0896b3fb3",
+      "source_sha256": "2095820937bf5ecc489faa06c33d678aac27aa2f9b5de465018933b534d02d27"
+    },
+    "internal/fleet/contracts_test.go": {
+      "import_sha256": "1b7b3fd9ca9d046639b82800691b06ce56351a1055d3d7446d76dce3a8a2d63e",
+      "source_sha256": "f4da3f0afe949adb94d28b378da211caa63a8ba5338105705743d817bca9340a"
+    },
+    "internal/fleet/credit_expiry.go": {
+      "import_sha256": "674cb22751b7ae8cb0e9aad1c0fd7e76e75358167c05916b9fc666d4463a1e37",
+      "source_sha256": "98b0a401b5bc6f29e136201074346528dcf771e3128c2b7aaf16cc71b9b9f5d7"
+    },
+    "internal/fleet/delegate.go": {
+      "import_sha256": "b9d8a7e429c799211a86b4a969abfb7c5ec48ab3a879f90ed1afde50ad2dc6ea",
+      "source_sha256": "0b6bcba9bc2881168c819700afe44aaa77feedb3ebac1eb42fd9b3ad83162473"
+    },
+    "internal/fleet/delegate_test.go": {
+      "import_sha256": "7e03993b03245bad8b9c4c11a3edfb3762ff316cba460014e51953b92d4ae7c3",
+      "source_sha256": "3eb1cedb9d2a23a4bce2cabdad3aecb7542aa1edb5f65422beb456b8c115a686"
+    },
+    "internal/fleet/events.go": {
+      "import_sha256": "8c1346c6914ff932675c1d4da48bcc668b207f082004248d3dd1e9cb4a7c1a15",
+      "source_sha256": "30f97d75155e4a1a94d9df8d90a78ae0578d0689dee5d4fa705e22de5878647f"
+    },
+    "internal/fleet/fleet.go": {
+      "import_sha256": "e8959056cb3f1864d7b520c6b233d81dc2550699af2027a6494cab28685f8d55",
+      "source_sha256": "e4877f6e47d72a2350903badfd3c48a1d0177cb64965b2c83546462fa03b2efa"
+    },
+    "internal/fleet/fleet_events.go": {
+      "import_sha256": "6fd66e513ab841ed4bbf0a67381d6a3421d442b0087d5c7d79053b636d403dd5",
+      "source_sha256": "18b335a15ec910620a5ae4d8d04028cf1001f4f8b450d0214fb462cdd1bfb098"
+    },
+    "internal/fleet/fleet_events_test.go": {
+      "import_sha256": "7d698965074704a30fb720e14f2a91f12cb7ccc385498b101cbda6f9b54213fc",
+      "source_sha256": "f810fccb1ee599b61c21029b29e23979a8690956941dc743adf6a90951a04347"
+    },
+    "internal/fleet/fleet_state.go": {
+      "import_sha256": "98ed00305de89d7c482d18ad64f38c536ccedb0ae3c510536aa2967b1c6f9e6b",
+      "source_sha256": "be1e86908014f86213529db5a77ea1214acfe79ef547ce146e8cbb570d730685"
+    },
+    "internal/fleet/fleet_state_test.go": {
+      "import_sha256": "ea8875b0d6a05013fca932a8f0b024099f6bd82e7e8e28d5805424bd464c485c",
+      "source_sha256": "ddd4e7465f501411880aa342983b9b85899ef3d2ddbd3b12673b86bb6c554967"
+    },
+    "internal/fleet/gate_refusal_test.go": {
+      "import_sha256": "445f656422d402cc9bef35211f1248ee0bc192ab09459b86494f5b5e4c7aa5db",
+      "source_sha256": "03b19ca67458653a28d0b2e92c017fcb84a31be4626946f56cec717d4f35d42c"
+    },
+    "internal/fleet/gc.go": {
+      "import_sha256": "4b56ffc3f35dba49362a7eb4f6e1f002c012e82486ce61e31a4255ae98b22263",
+      "source_sha256": "74953478b10c18e760efe683cac475d0be7da03a58e20276226b461fe0efec2d"
+    },
+    "internal/fleet/gc_test.go": {
+      "import_sha256": "dfe2d464f41ec2042a0e0a631b1b7a3f997d7c0dba94a641365cee026c13765e",
+      "source_sha256": "21ac3c1d15a6e9d815e312752de583657f6973c3949ce79528e1847be85cbece"
+    },
+    "internal/fleet/herdr.go": {
+      "import_sha256": "a91f7b0c907eccc179d875af51efadac42c6aad1a7efc867db5e9fea3851ecac",
+      "source_sha256": "56a1df3d5e51ee0e106dbd484ab4c6ac4faece1837a8f0dfef88925ef28ee3f1"
+    },
+    "internal/fleet/host_first_test.go": {
+      "import_sha256": "1b55dbf3b2916f872d9a6c510192671f7d2b113dbc22c8f7b948dd2c29a81e9a",
+      "source_sha256": "f3d4e31eac89d003619da821c5618ca5fb7bf28793ac94b37cc0aca02db7f445"
+    },
+    "internal/fleet/host_fit.go": {
+      "import_sha256": "0c1f77702ade483a77f574a2b0ad85801b306f04e04a91d9d46c745d42f0c4af",
+      "source_sha256": "08e759989777b72bb69a8f4e51e136fd5d41d8fe8409fe0a04de8d2509ba137d"
+    },
+    "internal/fleet/host_fit_test.go": {
+      "import_sha256": "218a97a117c90a4e296be33fc5738a1404b4234b61f9c049cd77a625bb41f823",
+      "source_sha256": "daa4308e8b83b7173d9ebd1d22ffcca01fb1631b1e5060a6aaf89f6a7e970d0e"
+    },
+    "internal/fleet/hub_only_host_test.go": {
+      "import_sha256": "1c2c39baec4ebe51b6bbbd1663638be5d39849609648694053fd8d994cdb109b",
+      "source_sha256": "8fbf6135c1af2c585d131244813373fc10dfdbabf8f628b28ec8ff5b1a9cd951"
+    },
+    "internal/fleet/hub_transport.go": {
+      "import_sha256": "4e6ce92d57e5d2ed7f8348869cb310339b03a2a45bbe6b5bcddeab35ee4ee206",
+      "source_sha256": "73fdbcb741e761ae712fd684ed12ddce4b2970835115cc90595cb5ccb75523b5"
+    },
+    "internal/fleet/hub_transport_test.go": {
+      "import_sha256": "c892280f349b9a5c4ced0a4bccfe79207cb4360dc906fca361e0ed11a7d6346b",
+      "source_sha256": "5cbd2c617314b175882b5ab9a0852bfdffa6df70274618274f1dc149139fe2ce"
+    },
+    "internal/fleet/hygiene.go": {
+      "import_sha256": "261c67459a5a9a437e16bb3dd7e3c103d048c84de8b5d9e3d10a4fc8f8849c03",
+      "source_sha256": "c185b6a7891f064370e60502f2f2948ee0761732d7d3bcdbca7e9fa94e426de5"
+    },
+    "internal/fleet/jobs.go": {
+      "import_sha256": "f31c73268fca9a24e15499802dde5daa1546e9c163503cfb40c5a373c1e79dc9",
+      "source_sha256": "adbd64af703724ee42219e817c851695e0efa6c632e10f79a27db62ac47aff9e"
+    },
+    "internal/fleet/jobs_test.go": {
+      "import_sha256": "15c1b4f2f307499478c047480816ceaf14e1d7224a97af10392cca2e47db559d",
+      "source_sha256": "31a5c0bad07515f6ad4c3ade3a99fa382409a2fa7e6de26b19fa5864d30dde29"
+    },
+    "internal/fleet/lifecycle.go": {
+      "import_sha256": "ec999e55921e61958ea6ea4d53befccf2ea400465445cf68b40531def28f5d72",
+      "source_sha256": "1892a15f2a2fdbea4694a83b0e0a40774e7b43298614b988eb214ebe1b8bb699"
+    },
+    "internal/fleet/lock.go": {
+      "import_sha256": "e2c65868fed525fdbae4f3c2f7a982e11433c6a34bb047bcc240c744fadf89e4",
+      "source_sha256": "54d4c3bcb4f56bad13dd35884c5db9098d0a24019281c97af4b200129205e139"
+    },
+    "internal/fleet/main_test.go": {
+      "import_sha256": "5478d5ef676e39b7dba5b0521e070d0da464cc7942eaef43f6c4d09b1652ba47",
+      "source_sha256": "b9493d8a71230f102d63765d5498b37335c5287f7bc1140fedef4737c7f661f7"
+    },
+    "internal/fleet/mock.go": {
+      "import_sha256": "9bf9abcefbb7e9b1de2063df0466960e44b5be1513553b683cefb5a50ede4296",
+      "source_sha256": "6e78f2e3f8ff2d87d8f6d4df4e6d60a709933621986e4104345cb74fd3ee7c90"
+    },
+    "internal/fleet/omp.go": {
+      "import_sha256": "74abc2d23fb26f74ebc15a2afa8d7615dde198e9ceb1bd624d2b2f47eec1f098",
+      "source_sha256": "3fcc7f147bf141fb3e6cda31e7d646c5e8b19474632ce618c2fa0cbf66759626"
+    },
+    "internal/fleet/omp_review_test.go": {
+      "import_sha256": "b8f37eec40038faf758e17814d9d85434e1c75d42b936229843227443d2737f4",
+      "source_sha256": "f15dcda46b38f242dda6e6dcf95454c7e732acd38bf461c91964af122446b7a8"
+    },
+    "internal/fleet/omp_test.go": {
+      "import_sha256": "86eed66e949931d8d0417fc10e8df02e9212da5ae12939f033caa5a5c4bfe56b",
+      "source_sha256": "4af24ac1294e1bc264ad312448a388151de1a95d7e151b1678d818278410d96b"
+    },
+    "internal/fleet/panel.go": {
+      "import_sha256": "72578d47962b6d255639f02ebaacb9b1f97d33e73f888e0aa49e9dc952047915",
+      "source_sha256": "a1d9678869629c8342cddb2423800de1ac1e23b1fd227a5609e03225ae248f15"
+    },
+    "internal/fleet/panel_test.go": {
+      "import_sha256": "5ca4f60030e6b17dfb04c33b897f51b4f53a7d7a718398b75094aab1d742076b",
+      "source_sha256": "14d0fa166638b445245b418349290be75f35f604f77cd1cfb551961fd8c9e226"
+    },
+    "internal/fleet/placement.go": {
+      "import_sha256": "fe895abe6195e29274574c79236c1de30d9df81deccd861dfe3f0891a38a3680",
+      "source_sha256": "0c98b132e4c94f3e9018f2de3f7e9c5a3ffdab54cb26160424a98075430e3b00"
+    },
+    "internal/fleet/placement_record.go": {
+      "import_sha256": "a5f52d50c8676eee212f7f43cb430b38ad788b476fe2321f59851f95413b9277",
+      "source_sha256": "35cb7971ca218cf2f6e07350cd82247f64ce51ea45e1fd47c4526fb340b5748a"
+    },
+    "internal/fleet/placement_record_test.go": {
+      "import_sha256": "8992a741f4b02941f81dab61bed3acfdcb211e975f75da19affc382e04f64f6b",
+      "source_sha256": "4e4f78212318c8d0b4b8222db7faa66704b39a2c0fb67ea757329eb003a5c148"
+    },
+    "internal/fleet/placement_test.go": {
+      "import_sha256": "b1587e3922d23320cf845f2989ea200803df20a0e8b379cb36cf7265edf43a24",
+      "source_sha256": "37738a69a7d7dd89fa7a43a9df43d3b6baf68b2e871ecf83975658c0760c5686"
+    },
+    "internal/fleet/plan.go": {
+      "import_sha256": "943ad92894e7d82ffc8c5ea1a897f899c16c7cdf32d80ae92d6ed9b24f6b44fb",
+      "source_sha256": "56651284de347057f03a29a89165ef9ff5f48209a62ba9cb5abe90dd4affd055"
+    },
+    "internal/fleet/plan_test.go": {
+      "import_sha256": "fac01f84888f893c1d132ee43d361ad137b4ae181484a4bb53770c5f75860abc",
+      "source_sha256": "653464579c43e8f79f6b52277b700e7cb5a0433cdb30d02116e3bae1d43d1cba"
+    },
+    "internal/fleet/policy.go": {
+      "import_sha256": "4412e889ceaec1663d3dc621bdb003548a7312b2d4445b1915574620c225dfef",
+      "source_sha256": "9e09d42271bd6f0cdc4f055611ae4ad5fe527c5c4f8bf1fb77332114b12fb83e"
+    },
+    "internal/fleet/policy.json": {
+      "import_sha256": "c3bc1c44e76de8743855e2a11e6e6361d0a163aba36a204981291dc02a36927c",
+      "source_sha256": "c3bc1c44e76de8743855e2a11e6e6361d0a163aba36a204981291dc02a36927c"
+    },
+    "internal/fleet/policy_test.go": {
+      "import_sha256": "9e4795809470dbe857b141ff3f0252c4bbb62efa707bd0c512eafcecb2d9f73c",
+      "source_sha256": "79fcc141af6e42d0d397a208dc097013033f8698f5c8daab734c4f01a6faafa5"
+    },
+    "internal/fleet/pool-order.json": {
+      "import_sha256": "b174f376f02d4596ed3429c3d38eb303803d2301352ae7e9f68cbf013cf3a3a0",
+      "source_sha256": "b174f376f02d4596ed3429c3d38eb303803d2301352ae7e9f68cbf013cf3a3a0"
+    },
+    "internal/fleet/pool_binding_test.go": {
+      "import_sha256": "c3ce94165c562c74ceeb895064d3f392102fd0f9a48d1a6d5ad039a99ed3a24e",
+      "source_sha256": "8b0a1926f8f26253459efaf6d48294e604eb48847743a04c85126c053ea992e2"
+    },
+    "internal/fleet/preflight.go": {
+      "import_sha256": "707be785fc3d62c1d8fc66cb3247d9ea8843db420faea47e0649c977f1e6775a",
+      "source_sha256": "b2fe7b4558cae5016a7fd11ec36893490b95d43f92cbb4a93922d0d6d6abbdf2"
+    },
+    "internal/fleet/preflight_test.go": {
+      "import_sha256": "72ea71fd5814943e5dc2859f8d506378e06e7e9190d6edb7dcbc46da3883203f",
+      "source_sha256": "27d85418edd2475cfe57b411dd3d09b7c92ffa75f2fce5727b67f049bb0377d1"
+    },
+    "internal/fleet/procname_test.go": {
+      "import_sha256": "b165a57c684eecafcb946a38bedb7c7f3a8083a4b8a4c749aebc26b4370ec41c",
+      "source_sha256": "a4c9cb6b4aa6f6b82ee3f266622c6ebfdda3e6509ea9c8a366145af2673f77ef"
+    },
+    "internal/fleet/proof_test.go": {
+      "import_sha256": "3dfe4c15e59ea209a0f15880d8158a3f73f01d4b2fdd8de49e7a27c41d855267",
+      "source_sha256": "f18dd2d23272cd2878142c1a01fc554c24a2ad193e2e713ead677bfb4f22247a"
+    },
+    "internal/fleet/provision.go": {
+      "import_sha256": "18ceb2556177fa9fedbd377d822e439ef0ac516e4ea326c9bc71d05169c7824b",
+      "source_sha256": "f3f82407dab312df96dd413fcb7afa9883a901de6cd07f2de09cf64145a7816c"
+    },
+    "internal/fleet/provision_test.go": {
+      "import_sha256": "3310ad0b397982565ea923f20d2d32ed3505b3124d3d5603a173759de3a0809a",
+      "source_sha256": "004de9ed9c68925f4668aba2de507c0a26daae64aef591ec77925f39ab41e297"
+    },
+    "internal/fleet/quota.go": {
+      "import_sha256": "a9662629f9825909860577116ed8a831500243ff618ca4994159350d50252ee1",
+      "source_sha256": "93c95fcda732c8577661f8c4c2cc2704158f250a15f08c264c1dc038fde84dda"
+    },
+    "internal/fleet/quota_host_test.go": {
+      "import_sha256": "ca89a52269dbed37455337693a5680f969ff035a69d0fd1ff9aef8a2995e1c61",
+      "source_sha256": "6cb9feb3c6b69754ba85b367c33fa5b3c3b51210368a40da9c543a0585230f52"
+    },
+    "internal/fleet/remote_spawn_reliability_test.go": {
+      "import_sha256": "2ecc24c6adf5622372487692cb1a8f4223f2d313f089dd7735ab3ca942efeada",
+      "source_sha256": "39986a308b5ad1452768ebce7362a8f352906d2f04531b3c2f373166affe6e5f"
+    },
+    "internal/fleet/remote_worktree.go": {
+      "import_sha256": "103a5d4d9c5ad1ed98590e5b44f7ebf0630e19b51d877736facb68635bd7fe15",
+      "source_sha256": "ffb4c5c45557f20266473d27b5ab92ff5a1481ea5cbf433acac921c2acd45f20"
+    },
+    "internal/fleet/remote_worktree_test.go": {
+      "import_sha256": "3c9a2a97165aadb37f92c88ca43cd2f19ece742e6140eb70f7417987486c4f0b",
+      "source_sha256": "be586bdba676e6f765ab6008779db10f3ff617ece746fca3986e1724f9d82be3"
+    },
+    "internal/fleet/resolve.go": {
+      "import_sha256": "f6b43fa6feec903d356b93f7aff97799beb222e641e5d1c7d6f00cf10f281ef9",
+      "source_sha256": "c1b3459caabf16fac947531394e9981a3b804f0e13b59080085e5205525a7287"
+    },
+    "internal/fleet/review_accounts_test.go": {
+      "import_sha256": "c4705278e369908f2ac2382030e13ee0f7befac40751188b706b9335f09aa0e1",
+      "source_sha256": "57c1718c83d99e66e4eea822fdf5298808ad2189ee8eaa041cf63dd6fad03e15"
+    },
+    "internal/fleet/routing.go": {
+      "import_sha256": "42a0fb53fae959ad49518d565ca35f496f4372c8189a7b9701ec0b2a336e5270",
+      "source_sha256": "59b24465bad99cb904440fbd38f1442ac3cfaecba743f3be5b777f4334606810"
+    },
+    "internal/fleet/routing_accounts_test.go": {
+      "import_sha256": "0bacb0663a699b99e14699bcc7b9d8db6e98c59e1466560fe30719116eeeab82",
+      "source_sha256": "589c1bbd4be97acf12fa411835486cceb748169d7456d3fa2abc4d38cbd8de70"
+    },
+    "internal/fleet/routing_test.go": {
+      "import_sha256": "f01863e05a9abc773c1dea19be7850841557abbab130716a4af9dffae2853ade",
+      "source_sha256": "cabfb4f8b8369a24cf36b61f9ffbe61d148cc16c4aab902055c35fba2d268f1b"
+    },
+    "internal/fleet/rungless_test.go": {
+      "import_sha256": "00ccfe619e92fc2907e2004964209dfcb0c6f940c6ad59af41a69cc1138da2af",
+      "source_sha256": "fc28064d5bd804d66424920187980e1d94b6c4a17e810c48b16122ff9aa3d3fb"
+    },
+    "internal/fleet/select.go": {
+      "import_sha256": "2a09256c99f3a530147cf84bb31885173b9b462d4c1182e5e757d6dbc9a39f44",
+      "source_sha256": "88b73993057e17afa63dff227aee74b864fa9f7c69459cda86149243d9d230da"
+    },
+    "internal/fleet/select_accounts.go": {
+      "import_sha256": "c9e26aace9a6e534c930628da6bc4154cdc6041072759f2ab058f3955bc36f52",
+      "source_sha256": "35e420254046d735c191d03268fb66406c162a9e80aaea15212b7a86edf5236a"
+    },
+    "internal/fleet/select_credit_expiry_test.go": {
+      "import_sha256": "a609126d3bb2bebe9055b0fa98c94e8f653f8a6b71a781b17216bfa809f41ae5",
+      "source_sha256": "58e66a884ab64708586a8f208ec7b1ab312b78694667d86a06422b6e5d6b06d9"
+    },
+    "internal/fleet/select_family_effort_test.go": {
+      "import_sha256": "790e4e3194ab7e5bd2fe136680ad98cab1bb26ae7e41eea160028170bee62a2e",
+      "source_sha256": "8c73ee6f9a9064f0387a2406f5a58fba1d6ce9714f0bf61eab7e8bc78b4e8676"
+    },
+    "internal/fleet/select_outcomes_test.go": {
+      "import_sha256": "6e354bf8ee7adfd600533f8caddf2ea7a0dcf71b555e2a39d0295937a95f69e4",
+      "source_sha256": "c9cdf20b519c675fd3efae4a0f77a5fdb1541e2fdfb63eaf85e894e9db83a12d"
+    },
+    "internal/fleet/select_policy_test.go": {
+      "import_sha256": "1f3ca96b81eceeb54fd3871bd1171dbeb692878ef659b1544102a9ca1111808c",
+      "source_sha256": "45765ecd7e88515b38ee0b218861b5e9594e28c10e638bb2ad9d769e460de6e4"
+    },
+    "internal/fleet/select_remote_test.go": {
+      "import_sha256": "a93d485a224030687d4ed263917a2002e793c16f3957b9bf97a24e35410a39de",
+      "source_sha256": "4ceb880ae93101508c5d5e452966329a72e6aa27677d1bc3fcdd784aa127ad95"
+    },
+    "internal/fleet/select_role_effort_test.go": {
+      "import_sha256": "6fa0e5556d5e0f7dacdc3693cd62ee158197298b6a0fb0fd0233b4542432531d",
+      "source_sha256": "862150a232c4dc2ae6f7ddfeabac5261b7d7af21d1dbbba7f1d2d50cfdf5b5c5"
+    },
+    "internal/fleet/select_test.go": {
+      "import_sha256": "2af63bf603d896a2ebc177c5ee7f59ac35e5c0bcde7bc0a562ed080549e1d591",
+      "source_sha256": "c9ee8a29f6fca69351e95aa7627b2363380eec61f72e92c8e66baa5c3308156c"
+    },
+    "internal/fleet/select_urgency_test.go": {
+      "import_sha256": "595c1253c011843236ca38e624bc8d9a321ace22f4ede0433429c42db66ea746",
+      "source_sha256": "f966dd8332a90bfecd9cb2b9ba069ea04777db6d067b92fd946e773620e03b16"
+    },
+    "internal/fleet/select_waste_risk_test.go": {
+      "import_sha256": "18283bb4e645047f03227da03736da7eff27356cf30115b0a473e703c9b3e81f",
+      "source_sha256": "d1618b6464fa0191eb20d7b7a5e96468529b8992a32b6e0337477523078f2e53"
+    },
+    "internal/fleet/select_waste_test.go": {
+      "import_sha256": "30b7f7300c8eb2a3213821c9b8f1f961c987b27aa96958ef9082faefcf75ad29",
+      "source_sha256": "1d3190578cb721c2b24511e77bf12006bfd3df760027cbdb43775527ee75f364"
+    },
+    "internal/fleet/simulate.go": {
+      "import_sha256": "22d9a0871e8f6db13222250f0adee47082aa5be5a47b0266b93757b538c96c40",
+      "source_sha256": "461208a81968ec58b959e4ee49a60caf206fb3ea373152efc4b68310eab71974"
+    },
+    "internal/fleet/simulate_policy_test.go": {
+      "import_sha256": "fedbd74ed5053cc6f78ec8999342b0262dee4a8b344fc932c71db1ecaaa0069f",
+      "source_sha256": "d1e903e1b1c400c28afaeab98f02f5a5754a1a55aab1964caeb1daa1b652c92b"
+    },
+    "internal/fleet/simulate_test.go": {
+      "import_sha256": "3a6134f007a7ac0f2bee833e66ead7237baae4b21a302ad8b63f8c508b08175c",
+      "source_sha256": "2f4bc9fcc5d9a0965422d0cab80d8824030ee99d7ce4e2b8f680b4087e262c96"
+    },
+    "internal/fleet/spawn.go": {
+      "import_sha256": "a25115762004a7bb45646a588bc6b4937323f18a39bb669b28072f505e3cb075",
+      "source_sha256": "bf83eb56f41c217318f7e92bc99423a11d522289b7790f282a61f5c3dba03bc3"
+    },
+    "internal/fleet/spawn_account_test.go": {
+      "import_sha256": "4a8cc1fe9a8c93011f2c47c5d939a3f2217eb4e6a47cc717fd4b13a0c50de85d",
+      "source_sha256": "5d407b3cb714906225242be3c20a3e2f5279666447b9c64ccf6241bf07bf8fb9"
+    },
+    "internal/fleet/spawn_builder_family_test.go": {
+      "import_sha256": "7fd6f092423a589652aa5ad0255043c50fd941ce9e4a294cadb68208a9d181ef",
+      "source_sha256": "1a23d036cddf2feeb9a18cc477b1f04f4d81380778b222cd68fc887b325f61bd"
+    },
+    "internal/fleet/spawn_review_regression_test.go": {
+      "import_sha256": "ff0364ed58b5794e3b032681cfeda3aa8f247b13e0753e846a6d0a1f1aebaf13",
+      "source_sha256": "9b0a0930784843e5b364b953de8f777f09fa651e3a349fadbc73bbec754a150e"
+    },
+    "internal/fleet/spawn_test.go": {
+      "import_sha256": "fbbc620de96b7bfe4bcf746443bf9fcd07b8a2fee55fb25a703e520d0cc50860",
+      "source_sha256": "4530669c8fcc1b9807e13a7960d2459318e268c2721fe6f2c29c3f8e44764007"
+    },
+    "internal/fleet/testdata/codex-trust-current.txt": {
+      "import_sha256": "2cac179cbb551c99c25ebb04a3f0686ec5a737beb4c602949c83f51f35c98fc8",
+      "source_sha256": "2cac179cbb551c99c25ebb04a3f0686ec5a737beb4c602949c83f51f35c98fc8"
+    },
+    "internal/fleet/testdata/codex-trust-fixtures.md": {
+      "import_sha256": "23cfd398d3f165f0ecad9dda7f9a6326c1c183be905c89cb4b8ffd74fa46f64f",
+      "source_sha256": "23cfd398d3f165f0ecad9dda7f9a6326c1c183be905c89cb4b8ffd74fa46f64f"
+    },
+    "internal/fleet/testdata/codex-trust-legacy.txt": {
+      "import_sha256": "05357984eb61efd54ac2dd1f940b81ceb80d16dff983220a89129f963fd7a65a",
+      "source_sha256": "05357984eb61efd54ac2dd1f940b81ceb80d16dff983220a89129f963fd7a65a"
+    },
+    "internal/fleet/testdata/simulate-claude-codex-2026-10-31.json": {
+      "import_sha256": "c09f7e3f495326dc4e865954d0117025ec7058a23cb53192f677ef4c7c361c4c",
+      "source_sha256": "c09f7e3f495326dc4e865954d0117025ec7058a23cb53192f677ef4c7c361c4c"
+    },
+    "internal/fleet/testdata/simulate-recorded-p4-pw6.json": {
+      "import_sha256": "6ef99254279d2627bdb5bdaf678bc57db1f80d3f7f2c47c6c0ef22ee46a7f91a",
+      "source_sha256": "6ef99254279d2627bdb5bdaf678bc57db1f80d3f7f2c47c6c0ef22ee46a7f91a"
+    },
+    "internal/fleet/testdata/simulate-waste-risk-2026-10-31.json": {
+      "import_sha256": "e8b5fbe85ac5fd4776549ea685a07500150aab74fdb852ad3beabfd3a45a6f12",
+      "source_sha256": "e8b5fbe85ac5fd4776549ea685a07500150aab74fdb852ad3beabfd3a45a6f12"
+    },
+    "internal/fleet/trust.go": {
+      "import_sha256": "1b738ed1414fa2aaaf68fcdf36e9d6398a2d9f47d1822fe99d1a1e72fa2d0841",
+      "source_sha256": "2da8d12301ffbf6c1a00c1c23610b7c29abc9a3c8959504fb00bf4516bb4c064"
+    },
+    "internal/fleet/unrated_role_test.go": {
+      "import_sha256": "dca1b09e95069a794987337edb7d6b1973cc2d5b4e59a8f9fe60ef462a8922cd",
+      "source_sha256": "f47c05e03710f622d4c7b2b23a4694d1331580b0da64f898906ce2adab4e769d"
+    },
+    "internal/fleet/unrated_test.go": {
+      "import_sha256": "672ac39dde9ad1dd0bf832231da70b577ef86521bd0c30f5ea0d8882c1537f5c",
+      "source_sha256": "33842599cc4913c358ff42d8a795bada6dc4714a05d02d52641e98fd86b617c7"
+    },
+    "internal/fleet/wait.go": {
+      "import_sha256": "7a534a7043b4d89aa6e06ecd5e7a3f8255206e548c47e66c68a553a122086205",
+      "source_sha256": "d776a68f86f928f4a894d71e7cceac6486e41ee4acf435d65be0057fd6e12520"
+    },
+    "internal/fleet/wait_test.go": {
+      "import_sha256": "a9e494f162e9cf310e25cfc2911c57d250c39a49808d57bc2333efa513152ad7",
+      "source_sha256": "9289fc41083582d38076c344c214adc8eab60aa5b8204c46834b2b48461cea53"
+    },
+    "internal/fleet/watch.go": {
+      "import_sha256": "755a53a5fa3eef9d1f07c5ff78e959389e48ac66e8de7357864f8fea69fb9754",
+      "source_sha256": "66c43dda51e22ec7aaffdbd0da7a3574c0e8253348f756c9e9c75a2433c6e651"
+    },
+    "internal/fleet/watch_test.go": {
+      "import_sha256": "1984f6872d1de6feb0daedbf09a94949144650679693feefe314b6790effb897",
+      "source_sha256": "70303ed482d15ec917330e990d209a96b610674f02d8cfd94217f189125f9033"
+    },
+    "internal/fleetevent/fleetevent.go": {
+      "import_sha256": "56026a933149cbf8a100773b8e665ddd9fc5feb6bc6215320bc6df9671ce158c",
+      "source_sha256": "d60ccc9b8060e1e16c3da767e5d0cd8d9c097d1815e952e682ee651ded631d85"
+    },
+    "internal/fleetevent/fleetevent_test.go": {
+      "import_sha256": "ebd91e230a186bae4a05757cb25bc4407f6d8e34c3d1943a031706358564b5cf",
+      "source_sha256": "044979414c90b36e56481fac30db381ef703e0b8cd2c7632236909e2d7a9fed7"
+    }
+  },
+  "source_revision": "6519bc855fa5597cf21cd7648e097e2b2fde809f"
+}
