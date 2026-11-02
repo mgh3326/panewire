@@ -41,7 +41,10 @@ type App struct {
 	JobStore  JobStore
 	// Hub carries via="hub" spawns and quota refreshes; nil builds the HTTP
 	// client from [hub] on first use.
-	Hub HubTransport
+	Hub              HubTransport
+	Repository       *Repository
+	ObserveStage     func(string, time.Duration)
+	ObserveRetryable func(bool)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
 	State    FleetStateReader
@@ -228,13 +231,19 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		if e != nil {
 			return e
 		}
-		return a.Spawn(ctx, s)
+		if s.DryRun {
+			return a.Spawn(ctx, s)
+		}
+		return a.SubmitSpawn(ctx, s)
 	case "spawn":
 		s, e := parseSpawn(args[1:])
 		if e != nil {
 			return e
 		}
-		return a.Spawn(ctx, s)
+		if s.DryRun {
+			return a.Spawn(ctx, s)
+		}
+		return a.SubmitSpawn(ctx, s)
 	case "done", "escalate", "restore":
 		return a.lifecycle(ctx, args[0], args[1:])
 	case "reap", "prune":

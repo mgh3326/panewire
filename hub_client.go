@@ -162,6 +162,7 @@ type HubClient struct {
 	sessionMu       sync.Mutex
 	spawnConfigPath string
 	spawnMu         sync.Mutex
+	spawnEngine     hubSpawnEngine
 	spawnPrepare    func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
 	spawnSeenMu     sync.Mutex
 	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
@@ -175,7 +176,7 @@ type HubClient struct {
 	nodeCommandMu      sync.Mutex
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
-	nodeRuntug         relayCommandRunner // fixture seam for job.done; nil runs runtug.
+	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
 	nodePacelever      relayCommandRunner // fixture seam for quota.refresh; nil runs pacelever.
 	nodeCloseSettle    time.Duration      // fixture seam; zero is nodePaneCloseSettle.
 	nodeGitLockWait    time.Duration      // fixture seam; zero is nodeGitOpLockWait.
@@ -308,7 +309,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		config.helloAckTimeout = defaultHubHelloAckTimeout
 	}
 	return &HubClient{
-		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnSeen: make(map[string]struct{}), spawnTimeoutExtra: 60 * time.Second,
+		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnSeen: make(map[string]struct{}), spawnTimeoutExtra: 0,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, helloAckTimeout: config.helloAckTimeout, burstSeen: make(map[string]time.Time),
 		wakeTargets: wakeTargets, wakeSeen: make(map[string]time.Time),

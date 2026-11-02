@@ -129,24 +129,34 @@ func TestNodePaneReadTailIsBounded(t *testing.T) {
 	}
 }
 
-// nodeReapRuntug installs a fake runtug that appends its argv to a file and
-// runs script, and returns a function counting its runs.
-func nodeReapRuntug(t *testing.T, script string) (runs func() int, argvPath string) {
+// nodeReapLifecycle replaces only the in-process lifecycle boundary.
+func nodeReapLifecycle(t *testing.T, failUntil string, duplicate bool) (func() int, string, relayCommandRunner) {
 	t.Helper()
-	argvPath = filepath.Join(t.TempDir(), "runtug-argv")
-	t14FakeRuntug(t, `printf '%s\n' "$*" >> '`+argvPath+`'`+"\n"+script+"\n")
-	return func() int {
-		contents, err := os.ReadFile(argvPath)
-		if errors.Is(err, os.ErrNotExist) {
-			return 0
-		} else if err != nil {
-			t.Fatal(err)
+	argvPath := filepath.Join(t.TempDir(), "lifecycle-argv")
+	runner := func(_ context.Context, args ...string) ([]byte, error) {
+		file, err := os.OpenFile(argvPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return nil, err
 		}
-		return strings.Count(string(contents), "\n")
-	}, argvPath
+		_, err = file.WriteString(strings.Join(args, " ") + "\n")
+		_ = file.Close()
+		if err != nil {
+			return nil, err
+		}
+		if failUntil != "" {
+			if _, err := os.Stat(failUntil); err != nil {
+				return nil, errors.New("fixture lifecycle failure")
+			}
+		}
+		suffix := " kind=job.completed"
+		if duplicate {
+			suffix = " duplicate=yes"
+		}
+		return []byte("progress\nOK job=" + args[1] + " report=" + args[3] + suffix + "\n"), nil
+	}
+	runs := func() int { raw, _ := os.ReadFile(argvPath); return strings.Count(string(raw), "\n") }
+	return runs, argvPath, runner
 }
-
-const nodeReapRuntugOK = `echo "warning for stderr" >&2; echo "progress"; echo "OK job=$2 report=$4 kind=job.completed"`
 
 func nodeReapJobDir(t *testing.T, job, report string) (*HubClient, string) {
 	t.Helper()
@@ -162,9 +172,10 @@ func nodeReapJobDir(t *testing.T, job, report string) (*HubClient, string) {
 	return &HubClient{jobsInboxRoot: inbox}, path
 }
 
-func TestNodeJobDoneRunsRuntugOnce(t *testing.T) {
-	runs, argvPath := nodeReapRuntug(t, nodeReapRuntugOK)
+func TestNodeJobDoneRunsLifecycleOnce(t *testing.T) {
+	runs, argvPath, lifecycle := nodeReapLifecycle(t, "", false)
 	client, report := nodeReapJobDir(t, "job-a", nodeCaptureScreenTxt)
+	client.nodeLifecycle = lifecycle
 	args := nodeJobDoneArgs{Job: "job-a", Report: report}
 
 	result, code := nodeRun(t, client, nodeCommandJobDone, args)
@@ -189,13 +200,14 @@ func TestNodeJobDoneRunsRuntugOnce(t *testing.T) {
 		t.Fatalf("second call code=%q result=%v", code, result)
 	}
 	if runs() != 1 {
-		t.Fatalf("runtug ran %d times", runs())
+		t.Fatalf("panewire ran %d times", runs())
 	}
 }
 
 func TestNodeJobDoneRefusesWhatIsNotThisJob(t *testing.T) {
-	runs, _ := nodeReapRuntug(t, nodeReapRuntugOK)
+	runs, _, lifecycle := nodeReapLifecycle(t, "", false)
 	client, report := nodeReapJobDir(t, "job-a", nodeJobReportFile)
+	client.nodeLifecycle = lifecycle
 	dir := filepath.Dir(report)
 	jobs := filepath.Dir(dir)
 
@@ -247,7 +259,7 @@ func TestNodeJobDoneRefusesWhatIsNotThisJob(t *testing.T) {
 		})
 	}
 	if runs() != 0 {
-		t.Fatalf("runtug ran %d times for a refusal", runs())
+		t.Fatalf("panewire ran %d times for a refusal", runs())
 	}
 	for _, name := range []string{"", "../job-a", "-rf", ".hidden", "a b"} {
 		if _, code := nodeRun(t, client, nodeCommandJobDone, nodeJobDoneArgs{Job: name, Report: report}); code != "invalid_args" {
@@ -264,8 +276,9 @@ func TestNodeJobDoneRefusesWhatIsNotThisJob(t *testing.T) {
 
 func TestNodeJobDoneFailureIsRetried(t *testing.T) {
 	flag := filepath.Join(t.TempDir(), "healthy")
-	runs, _ := nodeReapRuntug(t, `[ -e '`+flag+`' ] || exit 3`+"\n"+nodeReapRuntugOK)
+	runs, _, lifecycle := nodeReapLifecycle(t, flag, false)
 	client, report := nodeReapJobDir(t, "job-a", nodeJobReportFile)
+	client.nodeLifecycle = lifecycle
 	args := nodeJobDoneArgs{Job: "job-a", Report: report}
 	if _, code := nodeRun(t, client, nodeCommandJobDone, args); code != "done_failed" {
 		t.Fatalf("code=%q", code)
@@ -278,29 +291,31 @@ func TestNodeJobDoneFailureIsRetried(t *testing.T) {
 		t.Fatalf("code=%q result=%v", code, result)
 	}
 	if runs() != 2 {
-		t.Fatalf("runtug ran %d times", runs())
+		t.Fatalf("panewire ran %d times", runs())
 	}
 }
 
-// A lead that already ran runtug done leaves no marker; runtug's own duplicate
+// A lead that already ran panewire done leaves no marker; panewire's own duplicate
 // answer is what reports it.
-func TestNodeJobDoneReportsRuntugDuplicate(t *testing.T) {
-	runs, _ := nodeReapRuntug(t, `echo "OK job=$2 report=$4 duplicate=yes"`)
+func TestNodeJobDoneReportsLifecycleDuplicate(t *testing.T) {
+	runs, _, lifecycle := nodeReapLifecycle(t, "", true)
 	client, report := nodeReapJobDir(t, "job-a", nodeJobReportFile)
+	client.nodeLifecycle = lifecycle
 	result, code := nodeRun(t, client, nodeCommandJobDone, nodeJobDoneArgs{Job: "job-a", Report: report})
 	if code != "" || result["outcome"] != nodeJobAlreadyDone {
 		t.Fatalf("code=%q result=%v", code, result)
 	}
 	if runs() != 1 {
-		t.Fatalf("runtug ran %d times", runs())
+		t.Fatalf("panewire ran %d times", runs())
 	}
 }
 
 // A released job id can be claimed again, so a new report must still complete
 // that later round instead of being swallowed by the earlier marker.
 func TestNodeJobDoneNewReportRunsAgain(t *testing.T) {
-	runs, _ := nodeReapRuntug(t, nodeReapRuntugOK)
+	runs, _, lifecycle := nodeReapLifecycle(t, "", false)
 	client, report := nodeReapJobDir(t, "job-a", nodeJobReportFile)
+	client.nodeLifecycle = lifecycle
 	args := nodeJobDoneArgs{Job: "job-a", Report: report}
 	if _, code := nodeRun(t, client, nodeCommandJobDone, args); code != "" {
 		t.Fatal(code)
@@ -359,7 +374,7 @@ func TestNodeReapResultShapes(t *testing.T) {
 
 // nodeReapNode runs a real HubClient for machine with a fake herdr and connects
 // it to hub.
-func nodeReapNode(t *testing.T, hub *HubServer, server *httptest.Server, machine, token, inbox string, fake *nodeFakeHerdr) {
+func nodeReapNode(t *testing.T, hub *HubServer, server *httptest.Server, machine, token, inbox string, fake *nodeFakeHerdr, lifecycle ...relayCommandRunner) {
 	t.Helper()
 	client, err := NewHubClient(HubClientConfig{
 		URL: t14WSURL(server.URL, ""), MachineID: machine, Token: token, AllowInsecureForTests: true, PingInterval: time.Hour, JobsInboxRoot: inbox,
@@ -371,6 +386,9 @@ func nodeReapNode(t *testing.T, hub *HubServer, server *httptest.Server, machine
 		t.Fatal(err)
 	}
 	client.nodeHerdr = fake.run
+	if len(lifecycle) > 0 {
+		client.nodeLifecycle = lifecycle[0]
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -413,7 +431,7 @@ type nodeReapFixture struct {
 // can, under another name.
 func nodeReapSetup(t *testing.T, scopes map[string]string) *nodeReapFixture {
 	t.Helper()
-	runs, _ := nodeReapRuntug(t, nodeReapRuntugOK)
+	runs, _, lifecycle := nodeReapLifecycle(t, "", false)
 	fixture := &nodeReapFixture{hubLogs: &pw2LockedBuffer{}, nodeLogs: &pw2LockedBuffer{}, runs: runs}
 	previous := slog.Default()
 	slog.SetDefault(slog.New(slog.NewTextHandler(fixture.nodeLogs, nil)))
@@ -425,8 +443,8 @@ func nodeReapSetup(t *testing.T, scopes map[string]string) *nodeReapFixture {
 	fixture.herdrB = &nodeFakeHerdr{agents: []string{nodeAgentList(nodeReapRow("w1:p1", "job-z", "claude", false))}, read: screen}
 	jobClient, report := nodeReapJobDir(t, "job-a", nodeCaptureScreenTxt)
 	fixture.report = report
-	nodeReapNode(t, fixture.hub, fixture.server, "node-a", pw2NodeAToken, jobClient.jobsInboxRoot, fixture.herdrA)
-	nodeReapNode(t, fixture.hub, fixture.server, "node-b", pw2NodeBToken, t.TempDir(), fixture.herdrB)
+	nodeReapNode(t, fixture.hub, fixture.server, "node-a", pw2NodeAToken, jobClient.jobsInboxRoot, fixture.herdrA, lifecycle)
+	nodeReapNode(t, fixture.hub, fixture.server, "node-b", pw2NodeBToken, t.TempDir(), fixture.herdrB, lifecycle)
 
 	fixture.readBody = `{"op":"pane.read","args":{"pane_id":"w1:p1","name":"job-a","cwd":"/work/a","tail_lines":5}}`
 	encoded, err := json.Marshal(map[string]any{"op": "job.done", "args": nodeJobDoneArgs{Job: "job-a", Report: report}})
@@ -475,7 +493,7 @@ func TestNodeReapCommandsAdmitOnlyTheReapService(t *testing.T) {
 		t.Fatalf("a refused request reached a node: %v %v", fixture.herdrA.calls, fixture.herdrB.calls)
 	}
 	if fixture.runs() != 0 {
-		t.Fatalf("a refused request ran runtug %d times", fixture.runs())
+		t.Fatalf("a refused request ran panewire %d times", fixture.runs())
 	}
 	// Operator rights over every other op are unchanged.
 	if status, body := operator.do(t, fixture.server, http.MethodPost, nodeA, `{"op":"agents.list"}`); status == http.StatusForbidden || status == http.StatusUnauthorized {
@@ -522,7 +540,7 @@ func TestNodeReapEndToEnd(t *testing.T) {
 		t.Fatalf("job on another node: %v", result)
 	}
 	if fixture.runs() != 0 {
-		t.Fatalf("runtug ran %d times for another node's job", fixture.runs())
+		t.Fatalf("panewire ran %d times for another node's job", fixture.runs())
 	}
 
 	status, body = reaper.do(t, fixture.server, http.MethodPost, nodeA, fixture.doneBody)
@@ -534,11 +552,11 @@ func TestNodeReapEndToEnd(t *testing.T) {
 		t.Fatalf("second job.done: %v", result)
 	}
 	if fixture.runs() != 1 {
-		t.Fatalf("runtug ran %d times", fixture.runs())
+		t.Fatalf("panewire ran %d times", fixture.runs())
 	}
 
 	// Each side logged every call by pane, job and outcome, and neither logged
-	// the screen, the runtug line or a credential.
+	// the screen, the panewire line or a credential.
 	operator := pw2Caller{name: "operator", token: pw2OperatorToken}
 	if status, _ := operator.do(t, fixture.server, http.MethodPost, nodeA, fixture.readBody); status != http.StatusForbidden {
 		t.Fatalf("operator status=%d", status)

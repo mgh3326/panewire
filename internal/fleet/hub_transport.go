@@ -354,6 +354,11 @@ var (
 // without them. Only refs already present locally are read; nothing is fetched
 // here.
 func (a *App) hubCheckout(ctx context.Context, repo *repoResolution) (*HubCheckout, string) {
+	if a.Repository != nil && a.Repository.Checkout != nil {
+		copy := *a.Repository.Checkout
+		return &copy, ""
+	}
+
 	origin, ok := hubOrigin(repo.url)
 	if !ok {
 		return nil, fmt.Sprintf("origin of %s has no https form the node can clone", repo.name)

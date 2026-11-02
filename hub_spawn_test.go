@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -21,6 +20,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 const t14OperatorToken = "operator-token"
@@ -461,8 +461,17 @@ func TestPW6NodeFetchesBriefDocFromHandoffkeep(t *testing.T) {
 	}
 	briefPath := filepath.Join(root, "brief")
 	t.Setenv("T14_BRIEF_FILE", briefPath)
-	t14FakeRuntug(t, "cat \"$5\" > \"$T14_BRIEF_FILE\"\nprintf 'OK pane=p job=j\\n'")
-	client := &HubClient{spawnConfigPath: config}
+
+	client := &HubClient{spawnConfigPath: config, spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+		raw, err := os.ReadFile(brief)
+		if err != nil {
+			t.Error(err)
+		}
+		if err := os.WriteFile(briefPath, raw, 0600); err != nil {
+			t.Error(err)
+		}
+		return t14EngineOK()
+	}}
 	result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(93), CWDKey: "repo-a", BriefDoc: key, WaitSeconds: 1})
 	if result.RC != 0 {
 		t.Fatalf("result=%+v", result)
@@ -488,19 +497,17 @@ func TestPW6CheckoutRefusalSkipsSpawnAndPreparedCWD(t *testing.T) {
 			t.Errorf("outcome=%s result=%+v", outcome, result)
 		}
 	}
-	argsPath := filepath.Join(root, "args")
-	t.Setenv("T14_ARGS_FILE", argsPath)
-	t14FakeRuntug(t, "printf '%s\\000' \"$@\" > \"$T14_ARGS_FILE\"\nprintf 'OK pane=p job=j\\n'")
+
+	preparedCWD := ""
 	client := &HubClient{spawnConfigPath: config, spawnPrepare: func(context.Context, nodeWorktreePrepareArgs) (any, string) {
 		return nodeWorktreePrepareResult{Outcome: nodePreparePrepared, Worktree: &nodeWorktree{Path: filepath.Join(root, "prepared")}}, ""
+	}, spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+		preparedCWD = cwd
+		return t14EngineOK()
 	}}
 	result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(92), CWDKey: "repo-a", BriefInline: "brief", Checkout: checkout, WaitSeconds: 1})
-	if result.RC != 0 {
-		t.Fatalf("result=%+v", result)
-	}
-	got := strings.Split(strings.TrimSuffix(string(t14WaitFile(t, argsPath)), "\x00"), "\x00")
-	if len(got) < 3 || got[1] != "-c" || got[2] != filepath.Join(root, "prepared") {
-		t.Fatalf("argv=%q", got)
+	if result.RC != 0 || preparedCWD != filepath.Join(root, "prepared") {
+		t.Fatalf("result=%+v cwd=%q", result, preparedCWD)
 	}
 }
 
@@ -674,20 +681,10 @@ func t14SpawnConfig(t *testing.T, cwd string) string {
 	return path
 }
 
-func t14FakeRuntug(t *testing.T, script string) {
-	t.Helper()
-	directory := t.TempDir()
-	path := filepath.Join(directory, "runtug")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.Chmod(path, 0700); err != nil {
-		t.Fatal(err)
-	}
-	// HOME must not leak the developer's real ~/.local/bin/runtug, which the
-	// resolver prefers over PATH.
-	t.Setenv("HOME", t.TempDir())
-	t.Setenv("PATH", directory+string(os.PathListSeparator)+os.Getenv("PATH"))
+func t14EngineOK() (*hubSpawnOutput, fleet.Execution) {
+	output := &hubSpawnOutput{}
+	_, _ = output.Write([]byte("OK pane=pane-a model=fixture job=job-a\n"))
+	return output, fleet.Execution{Stage: "landing", StageMS: map[string]int64{"claim": 1, "launch": 2, "landing": 3}}
 }
 
 func t14WaitFile(t *testing.T, path string) []byte {
@@ -706,119 +703,70 @@ func t14WaitFile(t *testing.T, path string) []byte {
 
 func TestT14NodeAC9AC10AC13ArgvAndTemporary(t *testing.T) {
 	root := t.TempDir()
-	argsPath := filepath.Join(root, "args")
-	sessionPath := filepath.Join(root, "session")
-	temporaryPath := filepath.Join(root, "temporary")
-	parentPath := filepath.Join(root, "parent")
-	releasePath := filepath.Join(root, "release")
-	markerPath := filepath.Join(root, "shell-marker")
-	t.Setenv("T14_ARGS_FILE", argsPath)
-	t.Setenv("T14_SESSION_FILE", sessionPath)
-	t.Setenv("T14_TEMPORARY_FILE", temporaryPath)
-	t.Setenv("T14_PARENT_FILE", parentPath)
-	t.Setenv("T14_RELEASE_FILE", releasePath)
-	t.Setenv("T14_SHELL_MARKER", markerPath)
-	t14FakeRuntug(t, `printf '%s\000' "$@" > "$T14_ARGS_FILE"
-printf '%s' "$HERDR_SESSION" > "$T14_SESSION_FILE"
-printf '%s' "$5" > "$T14_TEMPORARY_FILE"
-ps -o comm= -p "$PPID" > "$T14_PARENT_FILE"
-while [ ! -f "$T14_RELEASE_FILE" ]; do sleep 0.01; done
-printf 'OK pane=pane-a model=m label=l status=s landed=y job=job-a quota_record=q\n'`)
-
-	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnTimeoutExtra: 20 * time.Millisecond}
-	message := hubOutboundMessage{RequestID: t14RequestID(30), CWDKey: "repo-a", BriefInline: "brief", Args: []string{"-m", "model-a", "--owner", "x; touch $T14_SHELL_MARKER"}, WaitSeconds: 1}
-	completed := make(chan hubSpawnResult, 1)
-	go func() { completed <- client.runHubSpawn(t.Context(), message) }()
-	temporary := strings.TrimSpace(string(t14WaitFile(t, temporaryPath)))
+	release := make(chan struct{})
+	seen := make(chan string, 1)
+	marker := filepath.Join(root, "must-not-run")
+	args := []string{"--owner", "x; touch " + marker}
+	client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, received []string) (*hubSpawnOutput, fleet.Execution) {
+		if cwd != root || workspace != "worker" || session != "worker" || strings.Join(args, "\x00") != strings.Join(received, "\x00") {
+			t.Errorf("execution inputs: cwd=%q workspace=%q session=%q args=%v", cwd, workspace, session, received)
+		}
+		seen <- brief
+		select {
+		case <-release:
+		case <-ctx.Done():
+		}
+		return t14EngineOK()
+	}}
+	done := make(chan hubSpawnResult, 1)
+	go func() {
+		done <- client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(30), CWDKey: "repo-a", BriefInline: "brief", Args: args, WaitSeconds: 1})
+	}()
+	var temporary string
+	select {
+	case temporary = <-seen:
+	case <-time.After(time.Second):
+		t.Fatal("engine was not called")
+	}
 	info, err := os.Stat(temporary)
 	if err != nil || info.Mode().Perm() != 0600 {
-		t.Fatalf("temporary=%s info=%v err=%v", temporary, info, err)
+		t.Fatalf("temporary info=%v err=%v", info, err)
 	}
-	if err := os.WriteFile(releasePath, []byte("release"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	result := <-completed
-	if result.RC != 0 || result.JobID != "job-a" || result.Pane != "pane-a" || !strings.HasPrefix(result.StdoutTail, "OK pane=") {
-		t.Fatalf("result=%+v", result)
+	close(release)
+	result := <-done
+	if result.RC != 0 || result.JobID != "job-a" || result.Pane != "pane-a" {
+		t.Fatalf("%+v", result)
 	}
 	if _, err := os.Stat(temporary); !os.IsNotExist(err) {
-		t.Fatalf("temporary remains after success: %v", err)
+		t.Fatalf("temporary retained: %v", err)
 	}
-	gotArgs := strings.Split(strings.TrimSuffix(string(t14WaitFile(t, argsPath)), "\x00"), "\x00")
-	wantArgs := append([]string{"spawn", "-c", root, "-p", temporary, "--host", "local", "-w", "worker"}, append(message.Args, "--override-reason", hubSpawnOverrideReason)...)
-	if strings.Join(gotArgs, "\x00") != strings.Join(wantArgs, "\x00") {
-		t.Fatalf("argv=%q want=%q", gotArgs, wantArgs)
-	}
-	if session := string(t14WaitFile(t, sessionPath)); session != "worker" {
-		t.Fatalf("HERDR_SESSION=%q", session)
-	}
-	if parent := strings.TrimSpace(string(t14WaitFile(t, parentPath))); parent == "sh" {
-		t.Fatalf("runtug was invoked through a shell: parent=%q", parent)
-	}
-	if _, err := os.Stat(markerPath); !os.IsNotExist(err) {
-		t.Fatalf("shell metacharacter was expanded: %v", err)
-	}
-	if _, ok := parseHubOutbound([]byte(`{"type":"job.spawn","request_id":"00000000-0000-4000-8000-000000000031","cwd_key":"repo-a","brief":{"inline":"brief"},"args":["-m","x;touch"],"wait_seconds":1}`)); ok {
-		t.Fatal("node accepted a metacharacter-bearing spawn directive")
-	}
-	if pane, jobID := parseHubSpawnOK([]byte("not an OK line\n")); pane != "" || jobID != "" {
-		t.Fatalf("missing OK line parsed pane=%q job=%q", pane, jobID)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatal("arguments were evaluated as shell code")
 	}
 }
 
 func TestT14NodeAC10FailureAndAC11TimeoutCleanup(t *testing.T) {
-	t.Run("failure", func(t *testing.T) {
-		root := t.TempDir()
-		temporaryPath := filepath.Join(root, "temporary")
-		t.Setenv("T14_TEMPORARY_FILE", temporaryPath)
-		t14FakeRuntug(t, `printf '%s' "$5" > "$T14_TEMPORARY_FILE"
-exit 7`)
-		client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnTimeoutExtra: 20 * time.Millisecond}
-		result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(32), CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 1})
-		temporary := strings.TrimSpace(string(t14WaitFile(t, temporaryPath)))
-		if result.RC != 7 || result.Error != "spawn_failed" {
-			t.Fatalf("result=%+v", result)
-		}
-		if _, err := os.Stat(temporary); !os.IsNotExist(err) {
-			t.Fatalf("temporary remains after failure: %v", err)
-		}
-	})
-	t.Run("timeout", func(t *testing.T) {
-		root := t.TempDir()
-		temporaryPath := filepath.Join(root, "temporary")
-		childPath := filepath.Join(root, "child")
-		t.Setenv("T14_TEMPORARY_FILE", temporaryPath)
-		t.Setenv("T14_CHILD_FILE", childPath)
-		t14FakeRuntug(t, `printf '%s' "$5" > "$T14_TEMPORARY_FILE"
-sleep 10 &
-printf '%s' "$!" > "$T14_CHILD_FILE"
-wait`)
-		client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnTimeoutExtra: 20 * time.Millisecond}
-		started := time.Now()
-		result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(33), CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 1})
-		if result.Error != "timeout" || time.Since(started) > 3*time.Second {
-			t.Fatalf("result=%+v elapsed=%s", result, time.Since(started))
-		}
-		temporary := strings.TrimSpace(string(t14WaitFile(t, temporaryPath)))
-		if _, err := os.Stat(temporary); !os.IsNotExist(err) {
-			t.Fatalf("temporary remains after timeout: %v", err)
-		}
-		pid, err := strconv.Atoi(strings.TrimSpace(string(t14WaitFile(t, childPath))))
-		if err != nil {
-			t.Fatal(err)
-		}
-		process, err := os.FindProcess(pid)
-		if err != nil {
-			t.Fatal(err)
-		}
-		deadline := time.Now().Add(time.Second)
-		for processRunning(process, pid) && time.Now().Before(deadline) {
-			time.Sleep(10 * time.Millisecond)
-		}
-		if processRunning(process, pid) {
-			t.Fatalf("timed-out process group left child %d alive", pid)
-		}
-	})
+	for _, timeout := range []bool{false, true} {
+		t.Run(strconv.FormatBool(timeout), func(t *testing.T) {
+			root := t.TempDir()
+			temporary := ""
+			client := &HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+				temporary = brief
+				if timeout {
+					<-ctx.Done()
+					return &hubSpawnOutput{}, fleet.Execution{RC: 124, Stage: "landing"}
+				}
+				return &hubSpawnOutput{}, fleet.Execution{RC: 7, Stage: "launch", Retryable: true}
+			}}
+			result := client.runHubSpawn(t.Context(), hubOutboundMessage{RequestID: t14RequestID(33), CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 1})
+			if timeout && result.Error != "timeout" || !timeout && (result.Error != "spawn_failed" || result.RC != 7 || !result.Retryable) {
+				t.Fatalf("%+v", result)
+			}
+			if _, err := os.Stat(temporary); !os.IsNotExist(err) {
+				t.Fatalf("temporary retained: %v", err)
+			}
+		})
+	}
 }
 
 func TestT14NodeSpawnConfigRejections(t *testing.T) {
@@ -841,10 +789,7 @@ func TestT14NodeAC12SerialAndIdempotent(t *testing.T) {
 	root := t.TempDir()
 	ledger := filepath.Join(root, "ledger")
 	t.Setenv("T14_LEDGER", ledger)
-	t14FakeRuntug(t, `printf 'begin\n' >> "$T14_LEDGER"
-sleep 0.05
-printf 'end\n' >> "$T14_LEDGER"
-printf 'OK pane=pane-a model=m label=l status=s landed=y job=job-a quota_record=q\n'`)
+
 	configPath := t14SpawnConfig(t, root)
 	results := make(chan []map[string]any, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -878,6 +823,18 @@ printf 'OK pane=pane-a model=m label=l status=s landed=y job=job-a quota_record=
 	client, err := NewHubClient(HubClientConfig{URL: t14WSURL(server.URL, ""), MachineID: "machine-a", Token: "node-token", AllowInsecureForTests: true, SpawnConfigPath: configPath, PingInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
+	}
+	client.spawnEngine = func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+		file, err := os.OpenFile(ledger, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			t.Error(err)
+			return &hubSpawnOutput{}, fleet.Execution{RC: 1}
+		}
+		_, _ = file.WriteString("begin\n")
+		time.Sleep(50 * time.Millisecond)
+		_, _ = file.WriteString("end\n")
+		_ = file.Close()
+		return t14EngineOK()
 	}
 	connection, _, err := websocket.Dial(t.Context(), client.endpoint, nil)
 	if err != nil {
@@ -956,47 +913,16 @@ func TestProcessRunningIgnoresUnreapedKilledChild(t *testing.T) {
 	})
 }
 
-func TestHubSpawnRuntugPathResolution(t *testing.T) {
-	lookup := func(good map[string]bool) func(string) (string, error) {
-		return func(name string) (string, error) {
-			if good[name] {
-				return "/usr/local/bin/" + name, nil
-			}
-			return "", errors.New("not found")
-		}
+func TestNodeSpawnRejectsLauncherPathConfiguration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "spawn.json")
+	if err := os.WriteFile(path, []byte(`{"enabled":true,"workspace":"wF","herdr_session":"fixture","runtug_path":"/old/binary"}`), 0600); err != nil {
+		t.Fatal(err)
 	}
-	stat := func(existing ...string) func(string) bool {
-		set := map[string]bool{}
-		for _, p := range existing {
-			set[p] = true
-		}
-		return func(path string) bool { return set[path] }
-	}
-	for _, tc := range []struct {
-		name       string
-		configured string
-		existing   []string
-		onPath     bool
-		want       string
-	}{
-		{"configured wins", "/opt/tools/runtug", []string{"/opt/tools/runtug"}, true, "/opt/tools/runtug"},
-		{"configured missing is fatal", "/opt/tools/runtug", nil, true, ""},
-		{"home bin fallback", "", []string{"/h/.local/bin/runtug"}, true, "/h/.local/bin/runtug"},
-		{"home bin beats PATH", "", []string{"/h/.local/bin/runtug"}, true, "/h/.local/bin/runtug"},
-		{"PATH fallback", "", nil, true, "/usr/local/bin/runtug"},
-		{"nothing found", "", nil, false, ""},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := hubSpawnRuntugPath(tc.configured, "/h", stat(tc.existing...), lookup(map[string]bool{"runtug": tc.onPath}))
-			if got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
-			}
-		})
+	if _, err := loadHubSpawnConfig(path); err == nil {
+		t.Fatal("retired launcher configuration was accepted")
 	}
 }
 
-// A document brief that cannot be fetched refuses the spawn before any
-// checkout is prepared, so a failed fetch never leaves a worktree behind.
 func TestPW6DocFetchFailureSkipsCheckout(t *testing.T) {
 	root := t.TempDir()
 	config := filepath.Join(root, "spawn.json")

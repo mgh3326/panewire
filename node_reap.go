@@ -1,17 +1,16 @@
 package panewire
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"github.com/mgh3326/panewire/internal/fleet"
 	"log/slog"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
-	"time"
 )
 
 // pane.read and job.done are the two node commands mergewake reap needs for a
@@ -33,13 +32,13 @@ const (
 	nodePaneReadMaxTailBytes = 4 << 10
 	nodePaneReadMaxStatus    = 64
 
-	nodeJobDoneOK          = "done"
-	nodeJobAlreadyDone     = "already-done"
-	nodeJobReportInvalid   = "report-invalid"
-	nodeJobDoneMaxLine     = 1 << 10
-	nodeJobDoneMarker      = ".node-job-done"
-	nodeJobReportFile      = "report.md"
-	nodeRuntugDuplicateTag = " duplicate=yes"
+	nodeJobDoneOK             = "done"
+	nodeJobAlreadyDone        = "already-done"
+	nodeJobReportInvalid      = "report-invalid"
+	nodeJobDoneMaxLine        = 1 << 10
+	nodeJobDoneMarker         = ".node-job-done"
+	nodeJobReportFile         = "report.md"
+	nodeLifecycleDuplicateTag = " duplicate=yes"
 )
 
 type nodePaneReadArgs struct {
@@ -220,13 +219,13 @@ func (client *HubClient) nodeJobDone(ctx context.Context, args nodeJobDoneArgs) 
 	if line, recorded := readNodeJobDoneMarker(job, digest); recorded {
 		return JobDoneResult{Outcome: nodeJobAlreadyDone, Line: line}, ""
 	}
-	output, err := client.nodeRuntugRunner()(ctx, "done", args.Job, "--report", args.Report)
+	output, err := client.nodeLifecycleRunner()(ctx, "done", args.Job, "--report", args.Report)
 	if err != nil {
 		return nil, "done_failed"
 	}
 	line := nodeJobDoneLine(output)
 	result := JobDoneResult{Outcome: nodeJobDoneOK, Line: line}
-	if strings.HasSuffix(line, nodeRuntugDuplicateTag) {
+	if strings.HasSuffix(line, nodeLifecycleDuplicateTag) {
 		result.Outcome = nodeJobAlreadyDone
 	}
 	// runtug has finished, so a failed marker costs only a repeat run, which
@@ -298,31 +297,16 @@ func (client *HubClient) openNodeJobDir(name string) (*os.Root, string, bool, er
 	return job, filepath.Join(jobsRoot, name), true, nil
 }
 
-func (client *HubClient) nodeRuntugRunner() relayCommandRunner {
-	if client.nodeRuntug != nil {
-		return client.nodeRuntug
+func (client *HubClient) nodeLifecycleRunner() relayCommandRunner {
+	if client.nodeLifecycle != nil {
+		return client.nodeLifecycle
 	}
 	return func(ctx context.Context, args ...string) ([]byte, error) {
-		// A node with spawn disabled has no usable config and still resolves
-		// the conventional install, like every other runtug caller here.
-		config, err := loadHubSpawnConfig(client.spawnConfigPath)
-		if err != nil {
-			config = hubSpawnConfig{}
-		}
-		home, _ := os.UserHomeDir()
-		path := hubSpawnRuntugPath(config.RuntugPath, home, hubSpawnExecutable, exec.LookPath)
-		if path == "" {
-			return nil, errors.New("runtug missing")
-		}
-		// runtug starts its own children, so a timeout kills the whole group.
-		command := exec.CommandContext(ctx, path, args...)
-		command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-		command.WaitDelay = time.Second
-		command.Cancel = func() error {
-			return syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-		}
-		return command.Output()
+		var output, errors bytes.Buffer
+		err := fleet.ExecuteLifecycle(ctx, args, &output, &errors)
+		return output.Bytes(), err
 	}
+
 }
 
 // logNodeReapCommand records one reap call on the node. It never receives

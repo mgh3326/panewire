@@ -83,14 +83,17 @@ type hubSpawnRequest struct {
 }
 
 type hubSpawnResult struct {
-	RequestID   string     `json:"request_id"`
-	Machine     string     `json:"machine"`
-	RC          int        `json:"rc"`
-	JobID       string     `json:"job_id"`
-	Pane        string     `json:"pane"`
-	StdoutTail  string     `json:"stdout_tail"`
-	CompletedAt *time.Time `json:"completed_at,omitempty"`
-	Error       string     `json:"error,omitempty"`
+	Stage       string           `json:"stage,omitempty"`
+	StageMS     map[string]int64 `json:"stage_ms,omitempty"`
+	Retryable   bool             `json:"retryable,omitempty"`
+	RequestID   string           `json:"request_id"`
+	Machine     string           `json:"machine"`
+	RC          int              `json:"rc"`
+	JobID       string           `json:"job_id"`
+	Pane        string           `json:"pane"`
+	StdoutTail  string           `json:"stdout_tail"`
+	CompletedAt *time.Time       `json:"completed_at,omitempty"`
+	Error       string           `json:"error,omitempty"`
 }
 
 type hubSpawnRecord struct {
@@ -105,7 +108,7 @@ func validHubSpawnRequestID(value string) bool { return hubSpawnRequestIDPattern
 
 func validHubSpawnRequest(request hubSpawnRequest) bool {
 	inline, doc := request.Brief.hasInline || request.Brief.Inline != "", request.Brief.hasDoc || request.Brief.Doc != ""
-	if request.Args == nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.Machine) || !hubSpawnCWDKeyPattern.MatchString(request.CWDKey) || request.WaitSeconds < 1 || request.WaitSeconds > 300 || inline == doc || inline && (request.Brief.Inline == "" || !utf8.ValidString(request.Brief.Inline) || len([]byte(request.Brief.Inline)) > hubSpawnMaxBriefBytes) || doc && (request.Brief.Doc == "" || !validHubSpawnDocKey(request.Brief.Doc)) {
+	if request.Args == nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.Machine) || !hubSpawnCWDKeyPattern.MatchString(request.CWDKey) || request.WaitSeconds < 1 || request.WaitSeconds > 3600 || inline == doc || inline && (request.Brief.Inline == "" || !utf8.ValidString(request.Brief.Inline) || len([]byte(request.Brief.Inline)) > hubSpawnMaxBriefBytes) || doc && (request.Brief.Doc == "" || !validHubSpawnDocKey(request.Brief.Doc)) {
 		return false
 	}
 	return validHubSpawnArgs(request.Args) && (request.Checkout == nil || validHubSpawnCheckout(*request.Checkout))
@@ -186,8 +189,15 @@ func validHubSpawnArgValue(flag, value string) bool {
 // result is a node-to-hub control response, not an event envelope.
 func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || fields == nil || (len(fields) != 6 && len(fields) != 7) {
+	if json.Unmarshal(raw, &fields) != nil || fields == nil || (len(fields) < 6 || len(fields) > 10) {
 		return hubSpawnResult{}, false
+	}
+	for key := range fields {
+		switch key {
+		case "type", "request_id", "rc", "job_id", "pane", "stdout_tail", "error", "stage", "stage_ms", "retryable":
+		default:
+			return hubSpawnResult{}, false
+		}
 	}
 	var kind string
 	var result hubSpawnResult
@@ -203,15 +213,28 @@ func parseHubSpawnResult(raw []byte) (hubSpawnResult, bool) {
 		if json.Unmarshal(rawError, &result.Error) != nil || !validHubSpawnResultError(result.Error) {
 			return hubSpawnResult{}, false
 		}
-	} else if len(fields) != 6 {
-		return hubSpawnResult{}, false
+	}
+	if raw, ok := fields["stage"]; ok {
+		if json.Unmarshal(raw, &result.Stage) != nil || !validSpawnStage(result.Stage) {
+			return hubSpawnResult{}, false
+		}
+	}
+	if raw, ok := fields["stage_ms"]; ok {
+		if json.Unmarshal(raw, &result.StageMS) != nil || !validSpawnStages(result.StageMS) {
+			return hubSpawnResult{}, false
+		}
+	}
+	if raw, ok := fields["retryable"]; ok {
+		if json.Unmarshal(raw, &result.Retryable) != nil {
+			return hubSpawnResult{}, false
+		}
 	}
 	return result, true
 }
 
 func validHubSpawnResultError(value string) bool {
 	switch value {
-	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "timeout", "brief_doc_unavailable", "runtug_missing":
+	case "spawn_disabled", "cwd_unmapped", "spawn_failed", "timeout", "brief_doc_unavailable":
 		return true
 	default:
 		return strings.HasPrefix(value, "checkout_refused:") && len(value) <= 80 && regexp.MustCompile(`^checkout_refused:[a-z0-9_.-]+$`).MatchString(value)

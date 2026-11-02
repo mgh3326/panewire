@@ -179,6 +179,13 @@ func (a *App) taskLink(ctx context.Context, s Spawn, bypassed bool) error {
 	return a.event(ctx, s.Job, "job.task_link", map[string]any{"task_id": s.Task, "job_id": s.Job, "claimed_by": s.Label, "status": status, "inherited_from": s.Inherited})
 }
 func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
+	startedAdmission := time.Now()
+	admissionRecorded := false
+	defer func() {
+		if !admissionRecorded {
+			a.stage("placement", startedAdmission)
+		}
+	}()
 	// Keep every herdr operation and lane identity on the same session.
 	if a.HerdrSession == "" {
 		a.HerdrSession = firstNonempty(os.Getenv("HERDR_SESSION"), "default")
@@ -334,7 +341,10 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	var placementRec map[string]any
 	if s.Host != "local" {
+		started := time.Now()
 		handled, rec, e := a.place(ctx, s, string(brief))
+		a.stage("placement", started)
+		admissionRecorded = true
 		if e != nil {
 			return e
 		}
@@ -457,9 +467,14 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	// The hk job claim runs on the executing host before the local claim:
 	// 409 job_id_taken refuses with the same exit 74, and hk down fails
 	// closed like the task claim.
+	a.stage("placement", startedAdmission)
+	admissionRecorded = true
+	startedClaim := time.Now()
 	if e = a.claimJobRecord(ctx, s); e != nil {
+		a.stage("claim", startedClaim)
 		return e
 	}
+	a.stage("claim", startedClaim)
 	recordSpawned := false
 	retrySafe := true
 	ownedClaim := false
@@ -480,6 +495,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 				if retrySafe {
 					a.markSpawnRetryable(context.WithoutCancel(ctx), s.Job)
 				}
+			}
+			if a.ObserveRetryable != nil {
+				a.ObserveRetryable(retrySafe)
 			}
 			if !retrySafe {
 				a.abandonJobRecord(context.WithoutCancel(ctx), s.Job)
@@ -570,6 +588,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = a.workspaceTrust(ctx, s, seat, env); e != nil {
 		return fail(exitConfig, "workspace trust: %v", e)
 	}
+	startedLaunch := time.Now()
+	launchRecorded := false
+	defer func() {
+		if !launchRecorded {
+			a.stage("launch", startedLaunch)
+		}
+	}()
 	tabArgs := []string{"tab", "create", "--workspace", s.Workspace, "--cwd", s.CWD, "--label", s.Label, "--no-focus"}
 	for _, v := range env {
 		tabArgs = append(tabArgs, "--env", v)
@@ -594,6 +619,15 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = a.start(ctx, s, seat, launch, pane, argv); e != nil {
 		return e
 	}
+	a.stage("launch", startedLaunch)
+	launchRecorded = true
+	startedLanding := time.Now()
+	landingRecorded := false
+	defer func() {
+		if !landingRecorded {
+			a.stage("landing", startedLanding)
+		}
+	}()
 	pointer, e := a.writeDeliveredBrief(s.Job, payload)
 	if e != nil {
 		return e
@@ -609,6 +643,8 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = a.taskLink(ctx, s, bypassed); e != nil {
 		return e
 	}
+	a.stage("landing", startedLanding)
+	landingRecorded = true
 	recordSpawned = true
 	a.spawnedJobRecord(ctx, s, seat, launch, pane, pool, owner)
 	lane := s.Label

@@ -827,6 +827,15 @@ type repoResolution struct {
 // basename, the origin URL used to clone it on a target, and the cwd's path
 // inside the checkout.
 func (a *App) localRepo(ctx context.Context, cwd string) *repoResolution {
+	if a.Repository != nil {
+		r := a.Repository
+		repo := &repoResolution{name: r.Name, url: r.Origin, rel: r.Relative, wt: r.Worktree, localRoot: r.LocalRoot}
+		if r.Checkout != nil {
+			repo.branch, repo.head = r.Checkout.Branch, r.Checkout.Sha
+		}
+		return repo
+	}
+
 	r := a.call(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel")
 	top := strings.TrimSpace(r.Out)
 	if r.Code != 0 || top == "" {
