@@ -383,3 +383,12 @@ The client and the CLI refuse the operator credential. Both log nothing; the hub
 logs every `pane.read` and `job.done` call by client, machine, op, pane, job and
 outcome, including refused calls, and the node logs each call it runs. Neither
 logs screen contents or runtug's output.
+
+### Reap composer adapter
+
+`pane.read` reuses mergewake's composer rules: the last two Claude dividers or
+the last Codex `›` line. The reap caller maps `has_text` to `composer-text` and
+`unknown` to `composer-unknown`; only `empty` permits closing. A plain-text
+"Ask Codex to do anything" remains text because visible reads cannot prove it
+is dim. `job.done` already runs the guarded host-local completion command.
+Both require explicit scoped service grants as described above.
