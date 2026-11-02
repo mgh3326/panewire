@@ -374,3 +374,49 @@ The normal form prints the JSON response and exits zero for both Prometheus and
 hub-only decisions. `--explain` prints the selected machine/source followed by
 a candidate table. Invalid flags, a non-operator credential, or an unavailable
 hub are non-zero.
+
+## Tagged recommendations for movable work
+
+`panewire place --class worker --tags dagu,macos` sends
+`GET /v1/placement?class=worker&tags=dagu,macos` with the usual operator credential.
+Assign capabilities in the operator-owned placement policy:
+
+```json
+"tags": {
+  "machine-a": ["dagu", "macos"],
+  "machine-b": ["dagu", "linux"]
+}
+```
+
+These keys must also be in the policy's local/spill candidate set. Tags do not
+add a host to that set. A query requires **all** named tags. Names use lowercase
+letters/digits plus dot, underscore or hyphen, at most 64 characters each and
+16 per request or host. The CLI canonicalizes order and duplicates; malformed
+queries and duplicate HTTP `tags` parameters are refused.
+
+Tagged requests choose the highest existing measured-load score among matching,
+connected, accepting candidates that pass the same memory, thermal, freshness,
+active-job and task-slot guards. They do not fall back to an untagged local host,
+an unknown capability, a full host or a disconnected wake target. No matching
+capacity returns `decision: null`, an empty candidate list and
+`reason: no_tagged_capacity`; the CLI exits nonzero with a repair hint. If Prometheus is unavailable, the existing hub-only presence/score fallback still applies; this is not a fresh load or quota guarantee. The cache
+key includes the canonical tag set. Untagged requests retain the existing
+local/spill policy order.
+
+This is a recommendation, not a job reservation, quota grant or execution lease.
+A movable Dagu step can consume `decision` and pass it to its execution adapter;
+Dagu keeps scheduling, retries, concurrency and cancellation. The hub does not
+retry a Dagu run or create another scheduler. The separate hk2661 integration
+must still configure its private pool tags and connect recommendation to a Dagu
+execution identity; this change does not install or alter DAGs.
+
+## Quota service boundary
+
+The absorbed spawn engine now reads the hub's timestamped fleet-state snapshot
+in-process and dispatches `quota.refresh` directly to the selected node. Existing
+provider adapters and their credentials remain on that node; stale or unknown
+quota remains fail-closed. `GET /v1/state` and node refresh already provide the
+shared service needed by placement. A second provider-measurement service and a
+`panewire quota` command are not added: they would duplicate those interfaces or
+centralize credentials without a demonstrated caller need. `pacelever` remains
+the provider measurement tool; this decision does not bypass its final gate.

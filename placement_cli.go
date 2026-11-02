@@ -12,18 +12,24 @@ import (
 	"time"
 )
 
-// runPlaceCLI is the intentionally thin operator client used by runtug. A
+// runPlaceCLI is the thin operator client for placement recommendations. A
 // successful hub-only answer is still a successful placement decision.
 func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	flags := flag.NewFlagSet("panewire place", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	class := flags.String("class", "", "worker or verifier")
 	cwd := flags.String("cwd", "", "repository key (metadata only)")
+	tagsFlag := flags.String("tags", "", "required capability tags, comma-separated")
 	explain := flags.Bool("explain", false, "render candidates as a table")
 	hubURL := flags.String("hub-url", "", "HTTPS hub base URL")
 	tokenPath := flags.String("hub-token-env", "", "mode-0600 operator HUB_MACHINE_ID/HUB_TOKEN env file")
 	cfPath := flags.String("hub-cf-env", "", "optional mode-0600 CF Access env file")
 	if flags.Parse(args) != nil || flags.NArg() != 0 || (*class != "worker" && *class != "verifier") || len(*cwd) > 256 || strings.ContainsAny(*cwd, "\r\n\x00") || *hubURL == "" || *tokenPath == "" {
+		return ExitUsage
+	}
+	tags, err := parsePlacementTags(*tagsFlag)
+	if err != nil {
+		fmt.Fprintln(stderr, "place rejected: invalid --tags; use a comma-separated list of capability names")
 		return ExitUsage
 	}
 	env, err := loadHubTokenEnv(*tokenPath)
@@ -46,6 +52,9 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	}
 	query := url.Values{}
 	query.Set("class", *class)
+	if len(tags) > 0 {
+		query.Set("tags", strings.Join(tags, ","))
+	}
 	if *cwd != "" {
 		query.Set("cwd", *cwd)
 	}
@@ -85,7 +94,7 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		return ExitInternal
 	}
 	if result.Decision == "unavailable" {
-		fmt.Fprintln(stderr, "place denied")
+		fmt.Fprintf(stderr, "place denied: %s; configure matching placement policy tags or wait for an eligible connected host\n", result.Reason)
 		return ExitConditionInvalid
 	}
 	if *explain {
