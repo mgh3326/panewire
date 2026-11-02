@@ -205,3 +205,34 @@ func TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized(t *testing.T) {
 		t.Fatal(got)
 	}
 }
+
+func TestSpawnSentryKeepsRequiredTagsBeforePlacement(t *testing.T) {
+	h := asyncSpawnHub(t)
+	transport := &spawnSentryTransport{}
+	client, err := sentry.NewClient(sentry.ClientOptions{Dsn: "https://public@example.invalid/1", EnableTracing: true, TracesSampleRate: 1, Transport: transport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.spawnSentry = client
+	request := durableSpawnRequest()
+	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 78, Stage: "placement", Reason: "configuration", Retryable: true})
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	if len(transport.events) != 2 {
+		t.Fatal(len(transport.events))
+	}
+	for _, event := range transport.events {
+		for _, tag := range []string{"job", "host", "profile", "role", "rc"} {
+			if event.Tags[tag] == "" {
+				t.Fatalf("missing %s: %+v", tag, event.Tags)
+			}
+		}
+		if event.Tags["host"] != "unassigned" || event.Tags["profile"] != "auto" {
+			t.Fatalf("invented placement: %+v", event.Tags)
+		}
+	}
+}
