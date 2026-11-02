@@ -69,3 +69,37 @@ func TestJobsListCLI(t *testing.T) {
 		t.Fatalf("got %q want %q", out.String(), body)
 	}
 }
+
+func TestJobsListEstablishedLaneName(t *testing.T) {
+	hub, server := pw2Hub(t, nil, "", nil)
+	if err := os.WriteFile(hub.reportRelayPath, []byte(`{"lanes":{"legacy.parent":{"machine":"node-a","pane":"pane-a"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	hub.jobs["job-a"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "job-a", OwnerLane: "legacy.parent"}, Node: "node-b"}
+	token := filepath.Join(t.TempDir(), "node.env")
+	if err := os.WriteFile(token, []byte("HUB_MACHINE_ID=node-a\nHUB_TOKEN="+pw2NodeAToken+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	status, body := (pw2Caller{"node", "node-a", pw2NodeAToken}).do(t, server, http.MethodGet, "/v1/jobs?owner_lane=legacy.parent", "")
+	if status != http.StatusOK || !strings.Contains(body, `"job_id":"job-a"`) {
+		t.Errorf("status=%d body=%s", status, body)
+	}
+	var out, errs bytes.Buffer
+	code := runJobsCLI([]string{"list", "--lane", "legacy.parent", "--hub-url", server.URL, "--hub-token-env", token, "--json"}, &out, &errs, t441Deps(server))
+	if code != ExitOK || !strings.Contains(out.String(), `"job_id":"job-a"`) {
+		t.Errorf("code=%d out=%q err=%q", code, out.String(), errs.String())
+	}
+}
+
+func TestJobsListLateCompletion(t *testing.T) {
+	hub, server := pw2Hub(t, nil, "", nil)
+	agent := &hubAgent{transient: true}
+	hub.handleAgentMessage("node-b", "fixture", agent, []byte(`{"type":"event","kind":"job.completed","payload":{"job_id":"job-late","epoch":1,"agent_label":"agent-a","owner_lane":"lane-a"}}`))
+	status, body := (pw2Caller{"node", "node-a", pw2NodeAToken}).do(t, server, http.MethodGet, "/v1/jobs?owner_lane=lane-a", "")
+	var result struct {
+		Jobs []hubConsoleJob `json:"jobs"`
+	}
+	if status != http.StatusOK || json.Unmarshal([]byte(body), &result) != nil || len(result.Jobs) != 1 || result.Jobs[0].JobID != "job-late" || result.Jobs[0].State != "completed" || result.Jobs[0].OwnerLane != "lane-a" {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+}

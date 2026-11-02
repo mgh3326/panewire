@@ -376,8 +376,12 @@ func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJo
 	if h.jobs[completion.JobID] != nil {
 		return false
 	}
+	ownerLane := completion.OwnerLane
+	if !validReportRelayLaneName(ownerLane) {
+		ownerLane = ""
+	}
 	h.jobs[completion.JobID] = &hubJobRecord{
-		HubActiveJob: HubActiveJob{JobID: completion.JobID, AgentLabel: completion.AgentLabel, Epoch: completion.Epoch},
+		HubActiveJob: HubActiveJob{JobID: completion.JobID, AgentLabel: completion.AgentLabel, Epoch: completion.Epoch, OwnerLane: ownerLane},
 		Node:         machineID,
 		LastSeen:     received,
 		Completed:    true,

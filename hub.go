@@ -1002,7 +1002,7 @@ func (h *HubServer) handleJobs(writer http.ResponseWriter, request *http.Request
 		hubUnauthorized(writer)
 		return
 	}
-	if lane != "" && !laneNamePattern.MatchString(lane) {
+	if lane != "" && !validReportRelayLaneName(lane) {
 		http.Error(writer, "invalid owner_lane", http.StatusBadRequest)
 		return
 	}
