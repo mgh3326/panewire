@@ -134,26 +134,19 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	if !client.rememberHubSpawn(message.RequestID) {
 		return
 	}
-	if message.DeadlineSeconds > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, time.Duration(message.DeadlineSeconds)*time.Second)
-		defer cancel()
-	}
 	client.spawnMu.Lock()
 	defer client.spawnMu.Unlock()
 
 	result := client.runHubSpawn(ctx, message)
 	_ = peer.write(ctx, struct {
-		Type       string           `json:"type"`
-		RequestID  string           `json:"request_id"`
-		RC         int              `json:"rc"`
-		JobID      string           `json:"job_id"`
-		Pane       string           `json:"pane"`
-		StdoutTail string           `json:"stdout_tail"`
-		Error      string           `json:"error,omitempty"`
-		StageMS    map[string]int64 `json:"stage_ms,omitempty"`
-		Stage      string           `json:"stage,omitempty"`
-	}{Type: "job.spawn.result", RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error, StageMS: result.StageMS, Stage: result.Stage})
+		Type       string `json:"type"`
+		RequestID  string `json:"request_id"`
+		RC         int    `json:"rc"`
+		JobID      string `json:"job_id"`
+		Pane       string `json:"pane"`
+		StdoutTail string `json:"stdout_tail"`
+		Error      string `json:"error,omitempty"`
+	}{Type: "job.spawn.result", RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error})
 }
 
 func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) (result hubSpawnResult) {
@@ -197,11 +190,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	if extra == 0 {
 		extra = 60 * time.Second
 	}
-	duration := time.Duration(message.WaitSeconds)*time.Second + extra
-	if message.DeadlineSeconds > 0 {
-		duration = time.Duration(message.DeadlineSeconds) * time.Second
-	}
-	runContext, cancel := context.WithTimeout(parent, duration)
+	runContext, cancel := context.WithTimeout(parent, time.Duration(message.WaitSeconds)*time.Second+extra)
 	defer cancel()
 	// The brief is fetched before any checkout: a failed fetch must not leave
 	// a prepared worktree behind.
@@ -214,25 +203,12 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		}
 		briefText = fetched
 	}
-	var checkoutMS *int64
 	if message.Checkout != nil {
-		started := time.Now()
-		result.Stage = "checkout"
-		defer func() {
-			if checkoutMS != nil {
-				if result.StageMS == nil {
-					result.StageMS = map[string]int64{}
-				}
-				result.StageMS["checkout"] = *checkoutMS
-			}
-		}()
 		prepare := client.spawnPrepare
 		if prepare == nil {
 			prepare = client.nodeWorktreePrepare
 		}
 		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir})
-		ms := time.Since(started).Milliseconds()
-		checkoutMS = &ms
 		if code != "" {
 			result.RC, result.Error = 81, "checkout_refused:"+code
 			return result
@@ -279,7 +255,6 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 
 	output, runErr := runHubSpawnCommand(runContext, runtugPath, cwd, temporaryName, config.Workspace, config.HERDRSession, message.Args)
 	result.StdoutTail = output.tailString()
-	result.StageMS, result.Stage = output.stageMS, output.stage
 	result.Pane, result.JobID = output.pane, output.jobID
 	if runErr == nil {
 		return result
@@ -399,8 +374,6 @@ func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key st
 }
 
 type hubSpawnOutput struct {
-	stageMS map[string]int64
-	stage   string
 	// stderr keeps runtug's last stderr bytes for a failed spawn's result.
 	stderr hubSpawnStderr
 	tail   []byte
@@ -452,17 +425,6 @@ func (output *hubSpawnOutput) Write(value []byte) (int, error) {
 }
 
 func (output *hubSpawnOutput) parseLine() {
-	if raw, ok := strings.CutPrefix(string(output.line), "RUNTUG_SPAWN_TIMINGS "); ok {
-		var timings struct {
-			StageMS map[string]int64 `json:"stage_ms"`
-			Stage   string           `json:"stage"`
-		}
-		if json.Unmarshal([]byte(raw), &timings) == nil && validSpawnStages(timings.StageMS) && (timings.Stage == "" || validSpawnStage(timings.Stage)) {
-			output.stageMS, output.stage = timings.StageMS, timings.Stage
-		}
-		return
-	}
-
 	pane, jobID := parseHubSpawnOKLine(strings.TrimSuffix(string(output.line), "\r"))
 	if pane == "" && jobID == "" {
 		return

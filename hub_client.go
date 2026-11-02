@@ -554,7 +554,6 @@ type hubOutboundMessage struct {
 	BriefDoc        string
 	Checkout        *hubSpawnCheckout
 	Args            []string
-	DeadlineSeconds int
 	WaitSeconds     int
 	CommandOp       string
 	CommandArgs     json.RawMessage
@@ -1470,7 +1469,7 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 const defaultHubHelloAckTimeout = 5 * time.Second
 
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
-var hubSpawnCapabilities = []string{"spawn_v2", "spawn_async"}
+var hubSpawnCapabilities = []string{"spawn_v2"}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {
@@ -2459,11 +2458,11 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		var brief hubSpawnBrief
 		var briefFields map[string]json.RawMessage
 		for name := range fields {
-			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_seconds" {
+			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" {
 				return hubOutboundMessage{}, false
 			}
 		}
-		if (len(fields) < 6 || len(fields) > 8) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
+		if (len(fields) != 6 && len(fields) != 7) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
 			return hubOutboundMessage{}, false
 		}
 		if raw, ok := briefFields["inline"]; ok {
@@ -2483,11 +2482,6 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 				return hubOutboundMessage{}, false
 			}
 			message.Checkout = &checkout
-		}
-		if raw, ok := fields["deadline_seconds"]; ok {
-			if json.Unmarshal(raw, &message.DeadlineSeconds) != nil || message.DeadlineSeconds < 1 || message.DeadlineSeconds > 3600 {
-				return hubOutboundMessage{}, false
-			}
 		}
 		message.BriefInline = brief.Inline
 		message.BriefDoc = brief.Doc
