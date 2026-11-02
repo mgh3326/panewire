@@ -58,6 +58,10 @@ type PlacementPolicy struct {
 	// See docs/placement.md for how the weights are measured.
 	Power          map[string]float64 `json:"power,omitempty"`
 	CapacityWeight map[string]float64 `json:"capacity_weight,omitempty"`
+	// Laptops lists the machines placement refuses on battery or without a
+	// recent power report (host_signals.go). Set it only after those nodes
+	// report: docs/placement.md, "Laptop power".
+	Laptops []string `json:"laptops,omitempty"`
 }
 
 // PlacementMachineSlots caps how many distinct tasks may hold active jobs on
@@ -131,6 +135,11 @@ func (p PlacementPolicy) valid() bool {
 	}
 	for machine, weight := range p.CapacityWeight {
 		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || !(weight > 0 && weight <= 10000) {
+			return false
+		}
+	}
+	for _, machine := range p.Laptops {
+		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID {
 			return false
 		}
 	}
@@ -645,7 +654,7 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 		if burstReady {
 			reasons = append(reasons, "burst_ready")
 		}
-		memoryKnown := memory != nil && memory.FreePct != nil && memory.SwapUsedMB != nil
+		memoryKnown := memory != nil && memory.FreePct != nil
 		// The memory floor is the one admission refusal left, a crash guard.
 		// Swap and pressure only lower the score (placementFree). The reason
 		// keeps its historical spelling; consumers match "not_accepting".
@@ -654,6 +663,13 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 			reasons = append(reasons, "not_accepting(memory_pressure)")
 		} else if !memoryKnown {
 			reasons = append(reasons, "memory_unknown")
+		}
+		powerRefusal := ""
+		if connected {
+			powerRefusal = placementPowerRefusal(policy, machine, record, now)
+		}
+		if powerRefusal != "" {
+			reasons = append(reasons, "not_accepting("+powerRefusal+")")
 		}
 		if len(reasons) == 0 {
 			reasons = append(reasons, "available")
@@ -700,7 +716,7 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 			tasksField = new(int)
 			*tasksField = tasks
 		}
-		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, SwapInPerS: swapInPerS, Pressure: pressure, CapacityWeight: weightField, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ","), Signals: &signals, slotFull: slotFull, accepting: connected && accepting && !memoryPressure})
+		candidates = append(candidates, PlacementCandidate{Machine: machine, Score: score, LoadRatio: load, Throttled: throttled, ActiveJobs: jobs, Tasks: tasksField, TaskSlots: taskSlots, Connected: connected, MetricsKnown: metricsKnown || source == "hub-only", MemoryFreePct: freePct, SwapUsedMB: swapUsedMB, SwapInPerS: swapInPerS, Pressure: pressure, CapacityWeight: weightField, MemoryKnown: memoryKnown, HoldsActive: holdsActive, BurstReady: burstReady, Reason: strings.Join(reasons, ","), Signals: &signals, slotFull: slotFull, accepting: connected && accepting && !memoryPressure && powerRefusal == ""})
 	}
 	h.mu.Unlock()
 	return candidates

@@ -396,7 +396,6 @@ type hubInboxEvent struct {
 	Event          string `json:"event"`
 	CreatedAt      string `json:"created_at"`
 	AgentLabel     string `json:"agent_label"`
-	PushSHA        string `json:"push_sha"`
 	Epoch          uint64 `json:"epoch"`
 	OwnerLane      string `json:"owner_lane"`
 	Label          string `json:"label"`
@@ -513,7 +512,7 @@ func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 			if epoch == 0 {
 				epoch = 1
 			}
-			candidate := HubActiveJob{JobID: jobID, AgentLabel: event.agentLabel(), LastEventSeq: seq, PushSHA: event.PushSHA, Epoch: epoch, OwnerLane: event.ownerLane(), Tier: event.tLevel(), Role: event.role()}
+			candidate := HubActiveJob{JobID: jobID, AgentLabel: event.agentLabel(), LastEventSeq: seq, Epoch: epoch, OwnerLane: event.ownerLane(), Tier: event.tLevel(), Role: event.role()}
 			if !eventTime.IsZero() {
 				candidate.StartedAt = eventTime.UTC().Format(time.RFC3339)
 			}

@@ -177,6 +177,9 @@ type hubNodeRecord struct {
 	hostLoad        *HubHostLoad
 	hostMemory      *HubHostMemory
 	sessionSnapshot *hubSessionSnapshotRecord
+	// powerSource and powerAt are the last power report (host_signals.go).
+	powerSource string
+	powerAt     time.Time
 }
 
 type hubAgent struct {
@@ -192,9 +195,12 @@ type hubAgent struct {
 	revocations chan hubJobRevokedEvent
 	assignments chan hubJobAssignedEvent
 	holds       chan hubBurstHoldsEvent
-	relays      chan hubRelayInjectEvent
-	persisted   chan hubRelayPersistedEvent
-	idleRoutes  chan hubIdleWakeRouteEvent
+	// features carries hub.features; featuresSent stops it after the first.
+	features     chan hubFeaturesEvent
+	featuresSent atomic.Bool
+	relays       chan hubRelayInjectEvent
+	persisted    chan hubRelayPersistedEvent
+	idleRoutes   chan hubIdleWakeRouteEvent
 }
 
 // HubActiveJob is deliberately metadata-only. It is copied from a node's
@@ -203,7 +209,6 @@ type HubActiveJob struct {
 	JobID          string `json:"job_id"`
 	AgentLabel     string `json:"agent_label"`
 	LastEventSeq   uint64 `json:"last_event_seq"`
-	PushSHA        string `json:"push_sha,omitempty"`
 	Epoch          uint64 `json:"epoch"`
 	OwnerLane      string `json:"owner_lane,omitempty"`
 	Label          string `json:"label,omitempty"`
@@ -412,6 +417,7 @@ type HubServer struct {
 	placementPolicyLoaded            bool
 	placementPolicyStatus            string
 	placementPolicyLastFailure       string
+	routeHits                        hubRouteHits
 	prometheusURL                    string
 	prometheusClient                 *http.Client
 	prometheusBearer                 string
@@ -806,7 +812,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
 	mux.HandleFunc("GET /v1/nodes/agents", h.handleNodesAgents)
 	mux.HandleFunc("POST /v1/nodes/{machine}/command", h.handleNodeCommand)
-	return mux
+	return h.countRoutes(mux)
 }
 
 //go:embed hub_ui.html
@@ -1113,7 +1119,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), wakes: make(chan hubWakeRequestEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
+	agent := &hubAgent{conn: connection, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), wakes: make(chan hubWakeRequestEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
@@ -1238,6 +1244,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			if record := h.nodes[machineID]; record != nil && record.agent == agent {
 				record.lastHeartbeat = received
 				record.hostLoad = cloneHubHostLoad(heartbeat.HostLoad)
+				h.observeHostSignalsLocked(record, heartbeat.HostSignals, received)
 				if !equalHubHostMemory(record.hostMemory, heartbeat.HostMemory) {
 					record.hostMemory = cloneHubHostMemory(heartbeat.HostMemory)
 					h.placementCache = placementCache{}
@@ -1452,10 +1459,9 @@ type hubHeartbeatPayload struct {
 	Status         string                    `json:"status"`
 	Checks         map[string]HubCheckStatus `json:"checks"`
 	HostLoad       *HubHostLoad              `json:"host_load,omitempty"`
-	LoadError      string                    `json:"load_error,omitempty"`
 	HostMemory     *HubHostMemory            `json:"host_memory,omitempty"`
 	ActiveJobs     []HubActiveJob            `json:"active_jobs,omitempty"`
-	HoldsActive    bool                      `json:"holds_active,omitempty"`
+	HostSignals    *HubHostSignals           `json:"host_signals,omitempty"`
 	Sessions       *[]HubSession             `json:"sessions,omitempty"`
 	SnapshotStatus string                    `json:"snapshot_status,omitempty"`
 	Truncated      bool                      `json:"truncated,omitempty"`
@@ -1504,7 +1510,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1517,9 +1523,6 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	heartbeat.Checks = make(map[string]HubCheckStatus)
-	if rawHolds, exists := fields["holds_active"]; exists && json.Unmarshal(rawHolds, &heartbeat.HoldsActive) != nil {
-		return hubHeartbeatPayload{}, false
-	}
 	if rawChecks, exists := fields["checks"]; exists {
 		if json.Unmarshal(rawChecks, &heartbeat.Checks) != nil || heartbeat.Checks == nil {
 			return hubHeartbeatPayload{}, false
@@ -1527,7 +1530,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 	}
 	if rawLoad, exists := fields["host_load"]; exists {
 		var loadFields map[string]json.RawMessage
-		if json.Unmarshal(rawLoad, &loadFields) != nil || (len(loadFields) != 4 && len(loadFields) != 6) {
+		if json.Unmarshal(rawLoad, &loadFields) != nil {
 			return hubHeartbeatPayload{}, false
 		}
 		for name := range loadFields {
@@ -1535,16 +1538,9 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 				return hubHeartbeatPayload{}, false
 			}
 		}
-		for _, name := range []string{"load1", "load5", "swap_used_gb", "worker_procs"} {
+		// load1 and load15 are retired: still accepted, no longer required.
+		for _, name := range []string{"load5", "swap_used_gb", "worker_procs"} {
 			if _, exists := loadFields[name]; !exists {
-				return hubHeartbeatPayload{}, false
-			}
-		}
-		if len(loadFields) == 6 {
-			if _, exists := loadFields["load15"]; !exists {
-				return hubHeartbeatPayload{}, false
-			}
-			if _, exists := loadFields["ncpu"]; !exists {
 				return hubHeartbeatPayload{}, false
 			}
 		}
@@ -1554,17 +1550,14 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		}
 		heartbeat.HostLoad = &load
 	}
-	if rawLoadError, exists := fields["load_error"]; exists {
-		if json.Unmarshal(rawLoadError, &heartbeat.LoadError) != nil || !validHubLoadError(heartbeat.LoadError) {
-			return hubHeartbeatPayload{}, false
-		}
-	}
 	if rawMemory, exists := fields["host_memory"]; exists {
 		var memoryFields map[string]json.RawMessage
-		if json.Unmarshal(rawMemory, &memoryFields) != nil || len(memoryFields) < 5 || len(memoryFields) > 7 {
+		if json.Unmarshal(rawMemory, &memoryFields) != nil {
 			return hubHeartbeatPayload{}, false
 		}
-		for _, name := range []string{"free_pct", "compressed_mb", "swap_used_mb", "psi_some_avg10", "source"} {
+		// compressed_mb, swap_used_mb and psi_some_avg10 are retired: still
+		// accepted, no longer required.
+		for _, name := range []string{"free_pct", "source"} {
 			if _, exists := memoryFields[name]; !exists {
 				return hubHeartbeatPayload{}, false
 			}
@@ -1580,8 +1573,12 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		}
 		heartbeat.HostMemory = &memory
 	}
-	// A retired node still sends "quota"; the name stays admitted so the
-	// heartbeat is accepted, and the value is dropped unread.
+	// An older node still sends quota, load_error and holds_active; the names
+	// stay admitted so the heartbeat is accepted, and the values are dropped
+	// unread. A hub that advertises host_signals reads them leniently.
+	if rawSignals, exists := fields["host_signals"]; exists {
+		heartbeat.HostSignals = decodeHubHostSignals(rawSignals)
+	}
 	if rawStall, exists := fields["stall_detect"]; exists {
 		var stallFields map[string]json.RawMessage
 		if json.Unmarshal(rawStall, &stallFields) != nil || len(stallFields) != 4 {
@@ -1640,7 +1637,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		heartbeat.ActiveJobs = make([]HubActiveJob, 0, len(rawActive))
 		seen := make(map[string]struct{}, len(heartbeat.ActiveJobs))
 		for _, rawJob := range rawActive {
-			if len(rawJob) < 4 {
+			if len(rawJob) < 3 {
 				return hubHeartbeatPayload{}, false
 			}
 			for name := range rawJob {
@@ -1648,7 +1645,8 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 					return hubHeartbeatPayload{}, false
 				}
 			}
-			for _, name := range []string{"job_id", "agent_label", "last_event_seq", "epoch"} {
+			// last_event_seq and push_sha are retired: still accepted, unread.
+			for _, name := range []string{"job_id", "agent_label", "epoch"} {
 				if _, present := rawJob[name]; !present {
 					return hubHeartbeatPayload{}, false
 				}
@@ -1675,10 +1673,6 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		}
 	}
 	return heartbeat, true
-}
-
-func validHubLoadError(value string) bool {
-	return len(value) > 0 && len(value) <= 256 && !strings.ContainsAny(value, "\r\n")
 }
 
 type hubOutbound struct {
@@ -2189,8 +2183,12 @@ func hubNodeLoadFromHostLoad(load *HubHostLoad) *HubNodeLoad {
 	if load == nil {
 		return nil
 	}
-	load1, load5 := load.Load1, load.Load5
-	view := &HubNodeLoad{Load1: &load1, Load5: &load5}
+	load5 := load.Load5
+	view := &HubNodeLoad{Load5: &load5}
+	if load.Load1 != nil {
+		value := *load.Load1
+		view.Load1 = &value
+	}
 	if load.Load15 != nil {
 		value := *load.Load15
 		view.Load15 = &value
@@ -2231,6 +2229,7 @@ func (h *HubServer) Sweep() {
 	h.mu.Unlock()
 	h.sweepFleetState(now)
 	h.startFleetLoadPublish(now)
+	h.logRouteHits(now)
 	h.sweepOrphanedJobs(now)
 	h.startLaneStallSweep(now)
 	for _, failover := range failovers {
@@ -2439,6 +2438,10 @@ func (agent *hubAgent) writeHolds(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case event := <-agent.holds:
+			if err := agent.writeJSON(event); err != nil {
+				return
+			}
+		case event := <-agent.features:
 			if err := agent.writeJSON(event); err != nil {
 				return
 			}

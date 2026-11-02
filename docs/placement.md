@@ -144,6 +144,50 @@ The default is the same local `mac-work` / `desktop` spill shape. Policy files
 must be regular files; unknown fields and duplicate targets are rejected. A
 changed valid file hot-reloads without changing the last known-good policy.
 
+## Laptop power
+
+`laptops` is optional and lists the machines placement treats as laptops:
+
+```json
+{"laptops": ["mac-work"]}
+```
+
+A node on macOS reports its power source on the heartbeat, in
+`host_signals.power_source`, as `ac` or `battery`. It reads `pmset -g batt`. A
+UPS counts as `battery`.
+
+| Host | Report | Result |
+|---|---|---|
+| Listed | `battery` | Refused: `not_accepting(on_battery)` |
+| Listed | `ac` | Eligible |
+| Listed | None for more than 3 minutes since the later of its last report and its connect | Refused: `not_accepting(power_unknown)` |
+| Not listed | Any, or none | Unaffected |
+
+A refused host is not `usable`. The reason appears in `GET /v1/placement` and in
+the `load` value of `GET /v1/state`. runtug refuses on the text `not_accepting`.
+A forced spawn (`runtug spawn --host local`, or a named host) does not go through
+placement, so it is not refused.
+
+### Rollout
+
+Hub and nodes deploy in either order. A node sends `host_signals` only after its
+hub sends `{"type":"hub.features","features":["host_signals"]}`, and it forgets
+that on every new connection. An older hub rejects a heartbeat with an unknown
+field, so this is what keeps a new node working against it. An older node ignores
+the message.
+
+**Set `laptops` last.** An older hub rejects the policy file because of the
+unknown key, and a new hub refuses a listed laptop whose node doesn't report yet.
+
+1. Deploy the hub.
+2. Deploy the nodes.
+3. Confirm the laptop reports: the hub logs a `host power source` line with the
+   machine and its source when the node first reports, and on each change.
+4. Add `laptops` to the policy file. It hot-reloads.
+
+To add a new signal, add it to `HubHostSignals`. The hub ignores names it doesn't
+know inside `host_signals`, and an invalid value loses only that signal.
+
 ## Per-machine task slots
 
 `machines` is optional and maps a machine id to `{"task_slots": N}` (1–100). A

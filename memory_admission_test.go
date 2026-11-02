@@ -275,7 +275,6 @@ func TestPlacementMemoryUnknownFailsOpen(t *testing.T) {
 		memory *HubHostMemory
 	}{
 		{name: "free null", memory: &HubHostMemory{SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"}},
-		{name: "swap null", memory: &HubHostMemory{FreePct: memoryFloat(50), Source: "proc_meminfo"}},
 		{name: "host memory absent"},
 	}
 	for _, tc := range cases {
@@ -288,6 +287,18 @@ func TestPlacementMemoryUnknownFailsOpen(t *testing.T) {
 				t.Fatalf("unknown memory changed admission: %+v", result)
 			}
 		})
+	}
+}
+
+// hk 2649: swap_used_mb is retired, so a node that stops sending it is not
+// memory_unknown. Placement needs only free_pct.
+func TestPlacementMemoryKnownWithoutSwap(t *testing.T) {
+	hub := memoryPlacementHub(t, "host-a")
+	hub.nodes["host-a"].hostMemory = &HubHostMemory{FreePct: memoryFloat(50), Source: "proc_meminfo"}
+	result := hub.makePlacement(memoryPlacementPolicy("host-a"), placementMetrics{}, "hub-only", time.Now())
+	candidate := memoryCandidate(t, result, "host-a")
+	if !candidate.MemoryKnown || strings.Contains(candidate.Reason, "memory_unknown") {
+		t.Fatalf("memory without swap reads as unknown: %+v", candidate)
 	}
 }
 

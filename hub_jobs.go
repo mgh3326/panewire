@@ -13,12 +13,11 @@ import (
 var (
 	hubJobIDPattern         = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 	hubAgentLabelPattern    = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
-	hubPushSHAPattern       = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
 	hubLastEventKindPattern = regexp.MustCompile(`^[a-z][a-z0-9_.]{0,31}$`)
 )
 
 func validHubActiveJob(job HubActiveJob) bool {
-	return hubJobIDPattern.MatchString(job.JobID) && hubAgentLabelPattern.MatchString(job.AgentLabel) && job.Epoch > 0 && (job.PushSHA == "" || hubPushSHAPattern.MatchString(job.PushSHA))
+	return hubJobIDPattern.MatchString(job.JobID) && hubAgentLabelPattern.MatchString(job.AgentLabel) && job.Epoch > 0
 }
 
 // normalizeHubActiveJobMetadata rejects invalid optional console metadata

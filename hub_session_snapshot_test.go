@@ -367,7 +367,6 @@ func TestTask268AC6SessionCapByteLimitAndDeterministicTruncation(t *testing.T) {
 	secondPayload := marshalHubHeartbeatWithSessions(hubHeartbeatPayload{
 		Status:         "alive",
 		Checks:         map[string]HubCheckStatus{},
-		LoadError:      "synthetic host load unavailable",
 		SnapshotStatus: hubSnapshotStatusOK,
 	}, sortedStates)
 	if !bytes.Equal(event.Payload, secondPayload) {

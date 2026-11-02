@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -186,8 +187,12 @@ type HubClient struct {
 	relayRecvSeq       int64 // assigned synchronously by the hub read loop.
 	idleWakeMu         sync.Mutex
 	idleWake           *idleWakeManager
-	stallBeatMu        sync.Mutex
-	stallBeat          func() *hubStallBeatPayload
+	// hubAcceptsSignals is whether this connection's hub advertised host_signals.
+	hubAcceptsSignals    atomic.Bool
+	hostSignalsCollector func(context.Context) *HubHostSignals // fixture seam; nil collects
+	loadErrorWarned      atomic.Bool
+	stallBeatMu          sync.Mutex
+	stallBeat            func() *hubStallBeatPayload
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -520,6 +525,7 @@ type hubClientConnection struct {
 
 type hubOutboundMessage struct {
 	Type            string
+	Features        []string
 	Machine         string
 	Phase           string
 	EmittedAt       time.Time
@@ -1491,6 +1497,8 @@ func (client *HubClient) writeHello(ctx context.Context, peer *hubClientConnecti
 func (client *HubClient) serveConnection(ctx context.Context, connection *websocket.Conn) (*websocket.Conn, error) {
 	connection.SetReadLimit(hubSpawnMaxBodyBytes)
 	peer := &hubClientConnection{connection: connection}
+	// Each connection may reach a different hub build (failover, redeploy).
+	client.hubAcceptsSignals.Store(false)
 	// The hello carries spawn_v2, and the ping that follows it is the
 	// registration probe: a hub only answers a ping from a registered node. A hub
 	// that does not know the capabilities field drops the whole hello (see
@@ -1574,6 +1582,9 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				if manager := client.idleWakeManager(); manager != nil {
 					manager.ApplyRoute(ctx, hubIdleWakeRouteEvent{Type: message.Type, EventID: message.IdleWakeEventID, Pane: message.Pane, Eligible: message.Eligible, Lane: message.Lane, Text: message.Text, JobID: message.JobID, Reason: message.Reason})
 				}
+			case "hub.features":
+				client.hubAcceptsSignals.Store(slices.Contains(message.Features, hubFeatureHostSignals))
+				continue
 			case "burst.holds":
 				client.burstMu.Lock()
 				client.burstHoldsActive = message.HoldsActive
@@ -1801,10 +1812,7 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	case collectSessions != nil:
 		client.resetIdleClock()
 	}
-	client.burstMu.Lock()
-	holdsActive := client.burstHoldsActive
-	client.burstMu.Unlock()
-	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HoldsActive: holdsActive}
+	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HostSignals: client.hostSignalsForHeartbeat(ctx)}
 	if provider := client.stallBeatProvider(); provider != nil {
 		if beat := provider(); beat != nil {
 			heartbeat.StallDetect = beat
@@ -1816,8 +1824,9 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	}
 	if load, err := collectLoad(ctx); err == nil {
 		heartbeat.HostLoad = &load
-	} else {
-		heartbeat.LoadError = err.Error()
+		client.loadErrorWarned.Store(false)
+	} else if !client.loadErrorWarned.Swap(true) && client.warn != nil {
+		client.warn("host load unavailable: " + err.Error())
 	}
 	collectMemory := client.hostMemoryCollector
 	if collectMemory == nil {
@@ -2341,6 +2350,11 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		}
 	case "job.assigned":
 		if len(fields) != 3 || json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || !hubJobIDPattern.MatchString(message.JobID) || message.Epoch == 0 {
+			return hubOutboundMessage{}, false
+		}
+	case "hub.features":
+		// Extra fields are a newer hub's; features alone is this node's business.
+		if json.Unmarshal(fields["features"], &message.Features) != nil {
 			return hubOutboundMessage{}, false
 		}
 	case "burst.holds":

@@ -21,7 +21,9 @@ import (
 // by the burst policy; the optional CPU values are observation-only.
 // It intentionally contains measurements, never command output.
 type HubHostLoad struct {
-	Load1       float64  `json:"load1"`
+	// Load1 is retired: an older hub still requires the key, so a node keeps
+	// sending it for one release. Nil means a node that no longer does.
+	Load1       *float64 `json:"load1"`
 	Load5       float64  `json:"load5"`
 	SwapUsedGB  float64  `json:"swap_used_gb"`
 	WorkerProcs int      `json:"worker_procs"`
@@ -30,9 +32,10 @@ type HubHostLoad struct {
 }
 
 func (load HubHostLoad) valid() bool {
-	return load.Load1 >= 0 && load.Load5 >= 0 && load.SwapUsedGB >= 0 && load.WorkerProcs >= 0 &&
-		!math.IsNaN(load.Load1) && !math.IsNaN(load.Load5) && !math.IsNaN(load.SwapUsedGB) &&
-		!math.IsInf(load.Load1, 0) && !math.IsInf(load.Load5, 0) && !math.IsInf(load.SwapUsedGB, 0) &&
+	return load.Load5 >= 0 && load.SwapUsedGB >= 0 && load.WorkerProcs >= 0 &&
+		!math.IsNaN(load.Load5) && !math.IsNaN(load.SwapUsedGB) &&
+		!math.IsInf(load.Load5, 0) && !math.IsInf(load.SwapUsedGB, 0) &&
+		(load.Load1 == nil || (!math.IsNaN(*load.Load1) && !math.IsInf(*load.Load1, 0) && *load.Load1 >= 0)) &&
 		(load.Load15 == nil || (!math.IsNaN(*load.Load15) && !math.IsInf(*load.Load15, 0) && *load.Load15 >= 0)) &&
 		(load.NCPU == nil || *load.NCPU >= 1)
 }
@@ -42,6 +45,10 @@ func cloneHubHostLoad(load *HubHostLoad) *HubHostLoad {
 		return nil
 	}
 	copy := *load
+	if load.Load1 != nil {
+		value := *load.Load1
+		copy.Load1 = &value
+	}
 	if load.Load15 != nil {
 		value := *load.Load15
 		copy.Load15 = &value
@@ -678,7 +685,7 @@ func parseDarwinHostLoad(loads, swap string) (HubHostLoad, error) {
 	if err1 != nil || err5 != nil || !swapOK {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
-	load := HubHostLoad{Load1: load1, Load5: load5, SwapUsedGB: usedMB / 1024}
+	load := HubHostLoad{Load1: &load1, Load5: load5, SwapUsedGB: usedMB / 1024}
 	// The guard above already requires three averages; this bound is kept so a
 	// future change to it cannot turn a short reading into an index panic.
 	if len(fields) >= 3 {
@@ -736,7 +743,7 @@ func parseLinuxHostLoad(loads, meminfo string) (HubHostLoad, error) {
 	if err1 != nil || err5 != nil || !totalOK || !freeOK || free > total {
 		return HubHostLoad{}, errors.New("host load unavailable")
 	}
-	load := HubHostLoad{Load1: load1, Load5: load5, SwapUsedGB: (total - free) / (1024 * 1024)}
+	load := HubHostLoad{Load1: &load1, Load5: load5, SwapUsedGB: (total - free) / (1024 * 1024)}
 	if len(fields) >= 3 {
 		if load15, err := strconv.ParseFloat(fields[2], 64); err == nil && load15 >= 0 && !math.IsNaN(load15) && !math.IsInf(load15, 0) {
 			load.Load15 = &load15

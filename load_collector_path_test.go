@@ -42,7 +42,7 @@ func TestTask67DarwinLoadCollectorPrefersAbsoluteSysctl(t *testing.T) {
 	}
 
 	load, err := collectDarwinHostLoad(t.Context(), run)
-	if err != nil || load.Load1 != 1.25 || load.Load5 != 2.5 || load.Load15 == nil || *load.Load15 != 3.75 || load.NCPU == nil || *load.NCPU != 8 {
+	if err != nil || load.Load1 == nil || *load.Load1 != 1.25 || load.Load5 != 2.5 || load.Load15 == nil || *load.Load15 != 3.75 || load.NCPU == nil || *load.NCPU != 8 {
 		t.Fatalf("absolute sysctl load=%+v err=%v", load, err)
 	}
 	want := [][]string{
@@ -73,7 +73,7 @@ func TestTask67DarwinLoadCollectorFallsBackToPathSysctl(t *testing.T) {
 	}
 
 	load, err := collectDarwinHostLoad(t.Context(), run)
-	if err != nil || load.Load1 != 1.25 || load.Load5 != 2.5 || load.Load15 == nil || *load.Load15 != 3.75 || load.NCPU == nil || *load.NCPU != 8 {
+	if err != nil || load.Load1 == nil || *load.Load1 != 1.25 || load.Load5 != 2.5 || load.Load15 == nil || *load.Load15 != 3.75 || load.NCPU == nil || *load.NCPU != 8 {
 		t.Fatalf("PATH fallback load=%+v err=%v", load, err)
 	}
 	want := [][]string{
@@ -87,7 +87,7 @@ func TestTask67DarwinLoadCollectorFallsBackToPathSysctl(t *testing.T) {
 	}
 }
 
-func TestTask67DarwinLoadCollectorFailureExposesHeartbeatError(t *testing.T) {
+func TestTask67DarwinLoadCollectorFailureWarnsOnceAndOmitsLoad(t *testing.T) {
 	var calls [][]string
 	run := func(_ context.Context, argv ...string) ([]byte, error) {
 		calls = append(calls, append([]string(nil), argv...))
@@ -110,31 +110,45 @@ func TestTask67DarwinLoadCollectorFailureExposesHeartbeatError(t *testing.T) {
 		t.Fatalf("failed sysctl calls=%v want=%v", calls, wantCalls)
 	}
 
+	var warnings []string
+	failing := true
 	client := &HubClient{
-		jobsInboxRoot:       t.TempDir(),
-		assignedJobs:        map[string]uint64{},
-		completedJobs:       map[string]uint64{},
-		completedReports:    map[string]struct{}{},
-		hostLoadCollector:   collector,
+		warn:             func(text string) { warnings = append(warnings, text) },
+		jobsInboxRoot:    t.TempDir(),
+		assignedJobs:     map[string]uint64{},
+		completedJobs:    map[string]uint64{},
+		completedReports: map[string]struct{}{},
+		hostLoadCollector: func(ctx context.Context) (HubHostLoad, error) {
+			if failing {
+				return collector(ctx)
+			}
+			return HubHostLoad{Load5: 1}, nil
+		},
 		hostMemoryCollector: func(context.Context) (*HubHostMemory, error) { return nil, errors.New("memory unavailable") },
 	}
-	heartbeat, ok := decodeHubHeartbeatPayload(client.heartbeatEvent(t.Context()).Payload)
-	if !ok || heartbeat.HostLoad != nil || heartbeat.LoadError != "host load unavailable" {
-		t.Fatalf("failed load heartbeat=%+v ok=%t", heartbeat, ok)
+	beat := func() hubHeartbeatPayload {
+		t.Helper()
+		heartbeat, ok := decodeHubHeartbeatPayload(client.heartbeatEvent(t.Context()).Payload)
+		if !ok {
+			t.Fatal("heartbeat did not decode")
+		}
+		return heartbeat
 	}
-}
-
-func TestTask67HeartbeatLoadErrorIsAdditiveAndStrict(t *testing.T) {
-	withLoadError := []byte(`{"status":"alive","load_error":"host load unavailable"}`)
-	heartbeat, ok := decodeHubHeartbeatPayload(withLoadError)
-	if !ok || heartbeat.LoadError != "host load unavailable" {
-		t.Fatalf("load_error heartbeat=%+v ok=%t", heartbeat, ok)
+	if heartbeat := beat(); heartbeat.HostLoad != nil {
+		t.Fatalf("failed load heartbeat=%+v", heartbeat)
 	}
-	if _, ok := decodeHubHeartbeatPayload([]byte(`{"status":"alive","load_error":"host load unavailable","unexpected":true}`)); ok {
-		t.Fatal("unknown heartbeat field was accepted")
+	beat()
+	if want := []string{"host load unavailable: host load unavailable"}; !reflect.DeepEqual(warnings, want) {
+		t.Fatalf("a failure streak warned %v, want once", warnings)
 	}
-	legacy, ok := decodeHubHeartbeatPayload([]byte(`{"status":"alive","checks":{"service":"ok"}}`))
-	if !ok || legacy.LoadError != "" {
-		t.Fatalf("legacy heartbeat=%+v ok=%t", legacy, ok)
+	// Recovery ends the streak, so the next failure warns again.
+	failing = false
+	if heartbeat := beat(); heartbeat.HostLoad == nil {
+		t.Fatal("recovered load missing")
+	}
+	failing = true
+	beat()
+	if len(warnings) != 2 {
+		t.Fatalf("warnings after a new streak=%v", warnings)
 	}
 }

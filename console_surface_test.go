@@ -28,7 +28,7 @@ func TestT12HostLoadHeartbeatAndNodesSurface(t *testing.T) {
 		t.Fatalf("six-key null host_load=%+v ok=%t", heartbeat.HostLoad, ok)
 	}
 	for _, payload := range [][]byte{
-		[]byte(`{"status":"alive","host_load":{"load1":1,"load5":2,"swap_used_gb":3,"worker_procs":4,"load15":5}}`),
+		[]byte(`{"status":"alive","host_load":{"load1":1,"swap_used_gb":3,"worker_procs":4}}`),
 		[]byte(`{"status":"alive","host_load":{"load1":1,"load5":2,"swap_used_gb":3,"worker_procs":4,"load15":5,"ncpu":8,"extra":1}}`),
 		[]byte(`{"status":"alive","host_load":{"load1":1,"load5":2,"swap_used_gb":3,"worker_procs":4,"unknown":1}}`),
 	} {
@@ -170,8 +170,8 @@ func TestT12ConsoleLoadDoesNotAffectPlacement(t *testing.T) {
 	metrics := placementMetrics{load: map[string]float64{"host-a": .1, "host-b": .2}, throttled: map[string]bool{}}
 	now := time.Date(2026, 9, 5, 0, 0, 0, 0, time.UTC)
 	before := hub.makePlacement(policy, metrics, "prometheus", now)
-	hub.nodes["host-a"].hostLoad = &HubHostLoad{Load1: .1, Load5: .2, Load15: t12Float(99), NCPU: t12Int(1)}
-	hub.nodes["host-b"].hostLoad = &HubHostLoad{Load1: .1, Load5: .2, Load15: t12Float(0), NCPU: t12Int(64)}
+	hub.nodes["host-a"].hostLoad = &HubHostLoad{Load1: t12Float(.1), Load5: .2, Load15: t12Float(99), NCPU: t12Int(1)}
+	hub.nodes["host-b"].hostLoad = &HubHostLoad{Load1: t12Float(.1), Load5: .2, Load15: t12Float(0), NCPU: t12Int(64)}
 	after := hub.makePlacement(policy, metrics, "prometheus", now)
 	beforeJSON, _ := json.Marshal(struct {
 		Decision   string               `json:"decision"`

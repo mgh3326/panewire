@@ -13,11 +13,11 @@ import (
 
 func TestHostLoadParsersFixedSamples(t *testing.T) {
 	darwin, err := parseDarwinHostLoad("{ 1.25 6.00 8.50 }\n", "total = 16384.00M  used = 8192.00M  free = 8192.00M  (encrypted)\n")
-	if err != nil || darwin.Load1 != 1.25 || darwin.Load5 != 6 || darwin.SwapUsedGB != 8 {
+	if err != nil || darwin.Load1 == nil || *darwin.Load1 != 1.25 || darwin.Load5 != 6 || darwin.SwapUsedGB != 8 {
 		t.Fatalf("darwin=%+v err=%v", darwin, err)
 	}
 	linux, err := parseLinuxHostLoad("0.50 6.00 8.50 1/100 1\n", "MemTotal: 1 kB\nSwapTotal:       16777216 kB\nSwapFree:         8388608 kB\n")
-	if err != nil || linux.Load1 != .5 || linux.Load5 != 6 || linux.SwapUsedGB != 8 {
+	if err != nil || linux.Load1 == nil || *linux.Load1 != .5 || linux.Load5 != 6 || linux.SwapUsedGB != 8 {
 		t.Fatalf("linux=%+v err=%v", linux, err)
 	}
 }
