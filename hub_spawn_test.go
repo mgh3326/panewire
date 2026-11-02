@@ -260,7 +260,7 @@ func TestT14SpawnHTTPAC2Validation(t *testing.T) {
 		}},
 		{"neither brief form", func(body map[string]any) { body["brief"] = map[string]any{} }},
 		{"wait zero", func(body map[string]any) { body["wait_seconds"] = 0 }},
-		{"wait over", func(body map[string]any) { body["wait_seconds"] = 301 }},
+		{"wait over", func(body map[string]any) { body["wait_seconds"] = 3601 }},
 		{"unknown flag", func(body map[string]any) { body["args"] = []string{"--job-dup-ok", "yes"} }},
 		{"space value", func(body map[string]any) { body["args"] = []string{"-m", "two words"} }},
 		{"shell value", func(body map[string]any) { body["args"] = []string{"-m", "x;touch"} }},
