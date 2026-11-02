@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -63,14 +64,20 @@ func placementPowerJobs(machine string, count int) []HubActiveJob {
 // The load query must be CPU utilisation, not load5: macOS counts blocked
 // threads in load5, so it is not a measure of how busy the host is.
 func TestPlacementLoadQueryIsCPUUtilisation(t *testing.T) {
+	// The metrics read issues its queries concurrently.
+	var mu sync.Mutex
 	var queries []string
 	prom := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
 		queries = append(queries, r.URL.Query().Get("query"))
+		mu.Unlock()
 		_ = json.NewEncoder(w).Encode(map[string]any{"status": "success", "data": map[string]any{"resultType": "vector", "result": []any{}}})
 	}))
 	defer prom.Close()
 	hub := placementHub(t, prom.URL)
 	_, _ = hub.fetchPlacementMetrics(t.Context())
+	mu.Lock()
+	defer mu.Unlock()
 	var cpu []string
 	for _, query := range queries {
 		if strings.Contains(query, "node_cpu_seconds_total") {

@@ -57,17 +57,53 @@ func TestPlacementFreeCombinesMeasuredSignals(t *testing.T) {
 		{"five-minute cpu", PlacementSignals{CPUBusy5m: f(.25)}, .75},
 		{"a heavy last minute shows at once", PlacementSignals{CPUBusy5m: f(.2), CPUBusy1m: f(.9)}, .1},
 		{"a quiet last minute does not forget sustained load", PlacementSignals{CPUBusy5m: f(.6), CPUBusy1m: f(.1)}, .4},
-		{"memory is the bottleneck", PlacementSignals{CPUBusy5m: f(.1), CPUBusy1m: f(.1), MemAvailable: f(.3)}, .3},
-		{"cpu is the bottleneck", PlacementSignals{CPUBusy5m: f(.8), MemAvailable: f(.9)}, .2},
-		{"swap-in at the half rate halves it", PlacementSignals{CPUBusy5m: f(0), MemAvailable: f(.8), SwapInMBps: f(placementSwapInHalfMBps)}, .4},
+		{"memory above the knee costs nothing", PlacementSignals{CPUBusy5m: f(.1), MemAvailable: f(.18)}, .9},
+		{"memory below the knee scales down", PlacementSignals{CPUBusy5m: f(.1), MemAvailable: f(.05)}, .45},
+		{"no memory left", PlacementSignals{CPUBusy5m: f(.1), MemAvailable: f(0)}, 0},
+		{"swap-in at the half rate halves it", PlacementSignals{CPUBusy5m: f(0), SwapInMBps: f(placementDefaultSwapInHalfMBps)}, .5},
+		{"bench: 25 MB/s costs about the measured 8%", PlacementSignals{CPUBusy5m: f(0), SwapInMBps: f(25)}, 1 / (1 + 25/placementDefaultSwapInHalfMBps)},
 		{"busy fraction above one is clamped", PlacementSignals{CPUBusy5m: f(1.5)}, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := placementFree(tc.signals); got < tc.want-1e-9 || got > tc.want+1e-9 {
+			if got := (PlacementPolicy{}).placementFree(tc.signals); got < tc.want-1e-9 || got > tc.want+1e-9 {
 				t.Fatalf("free=%v, want %v", got, tc.want)
 			}
 		})
+	}
+	if got := (PlacementPolicy{}).placementFree(PlacementSignals{SwapInMBps: f(25)}); got < .92 || got > .93 {
+		t.Fatalf("default swap penalty at 25 MB/s=%v, want the bench's ~0.926", got)
+	}
+	if got := (PlacementPolicy{SwapInHalfMBps: 25}).placementFree(PlacementSignals{SwapInMBps: f(25)}); got != .5 {
+		t.Fatalf("swap_in_half_mbps not honoured: %v", got)
+	}
+}
+
+// The 2026-11-02 benchmark (docs/placement.md, n=1): the same Go workload
+// took 37.6 s on mac-dev, 40.6 s on mac-work (the same machine, then paging
+// in ~25 MB/s with the least memory available) and 96.0 s on desktop. With
+// the measured idle power and the hosts' live signals from that hour,
+// mac-dev and mac-work must both rank above desktop.
+func TestPlacementBenchCalibratedRanking(t *testing.T) {
+	policy := PlacementPolicy{LocalMachine: "desktop", SpillTargets: []string{"mac-work", "mac-dev"}, MaxActiveJobs: 50,
+		Power: map[string]float64{"mac-dev": 100, "mac-work": 100, "desktop": 39}}
+	hub := placementPowerHub(t, measuredLoadProm(t, map[string]map[string]string{
+		placementCPUBusyQuery:      {"mac-dev": "0.14", "mac-work": "0.44", "desktop": "0.30"},
+		placementCPUBusy1mQuery:    {"mac-dev": "0.14", "mac-work": "0.41", "desktop": "0.30"},
+		placementMemAvailableQuery: {"mac-dev": "0.46", "mac-work": "0.18", "desktop": "0.86"},
+		placementSwapInQuery:       {"mac-dev": "2.01", "mac-work": "25.01", "desktop": "0"},
+		placementThermalQuery:      {"mac-dev": "1", "mac-work": "1", "desktop": "1"},
+	}).URL, policy)
+	for _, machine := range []string{"desktop", "mac-work", "mac-dev"} {
+		hub.connect(machine, "test", "fixture", &hubAgent{}, true)
+	}
+	got := hub.placement(t.Context(), "worker", "repo")
+	order := make([]string, 0, len(got.Candidates))
+	for _, candidate := range got.Candidates {
+		order = append(order, candidate.Machine)
+	}
+	if strings.Join(order, ",") != "mac-dev,mac-work,desktop" {
+		t.Fatalf("order=%v candidates=%+v", order, got.Candidates)
 	}
 }
 
@@ -80,7 +116,7 @@ func TestPlacementPrefersLowerMeasuredLoadAtEqualPower(t *testing.T) {
 		name      string
 		mem, swap map[string]string
 	}{
-		{"less memory available", map[string]string{"mac-work": "0.15", "desktop": "0.8"}, map[string]string{"mac-work": "0", "desktop": "0"}},
+		{"memory nearly exhausted", map[string]string{"mac-work": "0.05", "desktop": "0.8"}, map[string]string{"mac-work": "0", "desktop": "0"}},
 		{"swapping in", map[string]string{"mac-work": "0.8", "desktop": "0.8"}, map[string]string{"mac-work": "40", "desktop": "0"}},
 	}
 	for _, tc := range cases {
@@ -110,7 +146,7 @@ func TestPlacementPrefersStrongerHostAtEqualLoad(t *testing.T) {
 	}, policy)
 	got := hub.placement(t.Context(), "worker", "repo")
 	strong, weak := got.Candidates[0], got.Candidates[1]
-	if strong.Machine != "desktop" || strong.Score != 50 || weak.Score != 20 {
+	if strong.Machine != "desktop" || strong.Score != 75 || weak.Score != 30 {
 		t.Fatalf("stronger host must rank first with free*power: %+v", got.Candidates)
 	}
 }
@@ -159,16 +195,59 @@ func TestPlacementStaleOrMissingNeverReadsIdle(t *testing.T) {
 		placementCPUBusy1mQuery: {"desktop": "0.2"}, // mac-work went quiet
 		placementSwapInQuery:    {"mac-work": "0", "desktop": "0"},
 		placementThermalQuery:   idleThermal(),
-	}, measuredLoadPolicy())
-	hub.nodes["desktop"].hostMemory = &HubHostMemory{FreePct: memoryFloat(40), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"}
+	}, staleOrMissingPolicy())
+	hub.nodes["desktop"].hostMemory = &HubHostMemory{FreePct: memoryFloat(5), SwapUsedMB: memoryFloat(0), Source: "proc_meminfo"}
 	got := hub.placement(t.Context(), "worker", "repo")
 	stale, _ := t607Candidate(got, "mac-work")
 	if got.Decision != "desktop" || !strings.Contains(stale.Reason, "load_unknown") || stale.MetricsKnown || got.Candidates[0].Machine != "desktop" {
 		t.Fatalf("stale host read as idle: decision=%q candidates=%+v", got.Decision, got.Candidates)
 	}
 	fresh, _ := t607Candidate(got, "desktop")
-	if fresh.Signals.MemAvailable == nil || *fresh.Signals.MemAvailable != .4 || fresh.Signals.Free != .4 {
+	if fresh.Signals.MemAvailable == nil || *fresh.Signals.MemAvailable != .05 || fresh.Signals.Free != .4 {
 		t.Fatalf("missing Prometheus memory did not fall back to free_pct: %+v", fresh.Signals)
+	}
+}
+
+// A NaN sample (a 0/0 memory fraction) must not reach the score: encoding/json
+// refuses NaN, which would turn every placement response into an empty 200.
+func TestPlacementSkipsNonFiniteSamples(t *testing.T) {
+	idle := map[string]string{"mac-work": "0.1", "desktop": "0.1"}
+	hub := measuredLoadHub(t, map[string]map[string]string{
+		placementCPUBusyQuery: idle, placementCPUBusy1mQuery: idle, placementThermalQuery: idleThermal(),
+		placementMemAvailableQuery: {"mac-work": "NaN", "desktop": "0.5"},
+		placementSwapInQuery:       {"mac-work": "+Inf", "desktop": "0"},
+	}, measuredLoadPolicy())
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/v1/placement?class=worker&signals=1", nil)
+	request.Header.Set("Authorization", "Bearer "+r6OperatorToken)
+	hub.Handler().ServeHTTP(recorder, request)
+	var result PlacementResult
+	if err := json.Unmarshal(recorder.Body.Bytes(), &result); err != nil || recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d err=%v body=%q", recorder.Code, err, recorder.Body)
+	}
+	skipped, _ := t607Candidate(result, "mac-work")
+	if skipped.Signals.MemAvailable != nil || skipped.Signals.SwapInMBps != nil || skipped.Score != 90 {
+		t.Fatalf("non-finite samples reached the score: %+v score=%v", skipped.Signals, skipped.Score)
+	}
+}
+
+// staleOrMissingPolicy lowers the memory floor so the fallback reading can
+// sit below placementMemKnee and visibly change the score.
+func staleOrMissingPolicy() PlacementPolicy {
+	policy := measuredLoadPolicy()
+	policy.MemoryFreePctMin = memoryFloat(0)
+	return policy
+}
+
+func TestPlacementSwapInHalfPolicyKey(t *testing.T) {
+	for _, raw := range []string{`-1`, `100001`, `"fast"`} {
+		if _, err := ParsePlacementPolicy([]byte(`{"local_machine":"mac-work","max_active_jobs":5,"swap_in_half_mbps":` + raw + `}`)); err == nil {
+			t.Fatalf("swap_in_half_mbps %s accepted", raw)
+		}
+	}
+	policy, err := ParsePlacementPolicy([]byte(`{"local_machine":"mac-work","max_active_jobs":5,"swap_in_half_mbps":50}`))
+	if err != nil || policy.swapInHalfMBps() != 50 || (PlacementPolicy{}).swapInHalfMBps() != placementDefaultSwapInHalfMBps {
+		t.Fatalf("policy=%+v err=%v", policy, err)
 	}
 }
 
@@ -213,7 +292,19 @@ func TestPlacementSpawnBridgeIsConfigurable(t *testing.T) {
 	if got := countBridgedJobs(jobs, at, PlacementPolicy{SpawnBridgeSeconds: 600}.spawnBridge()); got != 1 {
 		t.Fatalf("10-minute bridge missed an 8-minute-old job: %d", got)
 	}
-	for _, raw := range []string{`-1`, `3601`} {
+	// A node clock a little ahead still counts; far ahead is not trusted,
+	// so skew cannot stretch the bridge past its window.
+	early := time.Date(2026, 11, 1, 23, 59, 30, 0, time.UTC)
+	if got := countBridgedJobs(jobs, early, PlacementPolicy{}.spawnBridge()); got != 1 {
+		t.Fatalf("start 30s ahead of the hub not counted: %d", got)
+	}
+	skewed := time.Date(2026, 11, 1, 23, 50, 0, 0, time.UTC)
+	if got := countBridgedJobs(jobs, skewed, PlacementPolicy{}.spawnBridge()); got != 0 {
+		t.Fatalf("start 10m ahead of the hub counted: %d", got)
+	}
+	// 9223372037 s wraps negative and 18446744074 s wraps to ~0.29 s when
+	// multiplied by time.Second; both must be rejected on the int itself.
+	for _, raw := range []string{`-1`, `3601`, `10000000000000`, `9223372037`, `18446744074`} {
 		if _, err := ParsePlacementPolicy([]byte(`{"local_machine":"mac-work","max_active_jobs":5,"spawn_bridge_seconds":` + raw + `}`)); err == nil {
 			t.Fatalf("spawn_bridge_seconds %s accepted", raw)
 		}
@@ -270,15 +361,23 @@ func TestPlacementSignalsWireIsOptIn(t *testing.T) {
 // that sends no signals.
 func TestPlaceExplainGolden(t *testing.T) {
 	f := func(v float64) *float64 { return &v }
-	result := PlacementResult{Decision: "mac-personal", Source: "prometheus", Asof: time.Date(2026, 11, 2, 4, 42, 10, 0, time.UTC), Candidates: []PlacementCandidate{
-		{Machine: "desktop", Score: 207.9, LoadRatio: .31, ActiveJobs: 4, Connected: true, CapacityWeight: 3, Reason: "available",
-			Signals: &PlacementSignals{CPUBusy1m: f(.307), CPUBusy5m: f(.308), MemAvailable: f(.866), SwapInMBps: f(.006), Free: .693, Power: 100}},
-		{Machine: "mac-dev", Score: 109.02, LoadRatio: .24, ActiveJobs: 6, Connected: true, CapacityWeight: 4.6, Reason: "available",
-			Signals: &PlacementSignals{CPUBusy1m: f(.23), CPUBusy5m: f(.238), MemAvailable: f(.371), SwapInMBps: f(2.02), Free: .337, Power: 100, BridgedJobs: 1}},
-		{Machine: "mac-personal", Score: 30.4, LoadRatio: .16, ActiveJobs: 2, Connected: true, CapacityWeight: 1.6, Reason: "available",
-			Signals: &PlacementSignals{CPUBusy1m: f(.143), CPUBusy5m: f(.162), MemAvailable: f(.268), SwapInMBps: f(8.15), Free: .19, Power: 100}},
-		{Machine: "rpi", Score: 29.61, LoadRatio: .01, Connected: true, CapacityWeight: .3, Reason: "memory_unknown",
-			Signals: &PlacementSignals{CPUBusy5m: f(.013), Free: .987, Power: 100}},
+	// Free and Score come from the formula itself, so every row with
+	// signals is what the hub would compute (calibrated powers, no weight
+	// except rpi's).
+	policy := PlacementPolicy{Power: map[string]float64{"mac-dev": 100, "mac-work": 100, "desktop": 39, "rpi": 7}}
+	row := func(machine string, loadRatio float64, jobs, bridged int, weight float64, reason string, signals PlacementSignals) PlacementCandidate {
+		signals.Free, signals.Power, signals.BridgedJobs = policy.placementFree(signals), policy.power(machine), bridged
+		w := weight
+		if w == 0 {
+			w = 1
+		}
+		return PlacementCandidate{Machine: machine, Score: placementScoreBase(signals.Free, bridged, signals.Power) * w, LoadRatio: loadRatio, ActiveJobs: jobs, Connected: true, CapacityWeight: weight, Reason: reason, Signals: &signals}
+	}
+	result := PlacementResult{Decision: "mac-dev", Source: "prometheus", Asof: time.Date(2026, 11, 2, 5, 23, 14, 0, time.UTC), Candidates: []PlacementCandidate{
+		row("mac-dev", .14, 6, 1, 0, "available", PlacementSignals{CPUBusy1m: f(.14), CPUBusy5m: f(.14), MemAvailable: f(.46), SwapInMBps: f(2.01)}),
+		row("mac-work", .44, 0, 0, 0, "available", PlacementSignals{CPUBusy1m: f(.41), CPUBusy5m: f(.44), MemAvailable: f(.18), SwapInMBps: f(25.01)}),
+		row("desktop", .30, 1, 0, 0, "available", PlacementSignals{CPUBusy1m: f(.30), CPUBusy5m: f(.30), MemAvailable: f(.86), SwapInMBps: f(0)}),
+		row("rpi", .01, 0, 0, .3, "memory_unknown", PlacementSignals{CPUBusy5m: f(.01)}),
 		{Machine: "old-hub-host", Score: 90, Connected: true, Reason: "available"},
 	}}
 	var out bytes.Buffer

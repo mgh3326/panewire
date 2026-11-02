@@ -22,6 +22,7 @@ runtug's host-first placement — read that score.
   "max_active_jobs": 5,
   "memory_free_pct_min": 30,
   "spawn_bridge_seconds": 300,
+  "swap_in_half_mbps": 300,
   "capacity_weight": {"mac-work": 1.0, "desktop": 2.0},
   "wake_on_spill": false,
   "machines": {
@@ -40,7 +41,9 @@ The score answers "which host is really the most idle", from what the
 hosts' exporters send to Prometheus, not from counting jobs:
 
 ```text
-free  = min(1 - max(cpu_busy_1m, cpu_busy_5m), mem_available) / (1 + swap_in_mbps / 20)
+free  = (1 - max(cpu_busy_1m, cpu_busy_5m))
+        * min(1, mem_available / 0.10)
+        / (1 + swap_in_mbps / swap_in_half_mbps)        # swap_in_half_mbps default 300
 score = (free * power - 10 * bridged_jobs) * capacity_weight
         - 1000 if disconnected, - 200 if not accepting, - 500 if load_unknown,
         - 100 if throttled, + 5 for a placement hold, + 5 if burst-ready
@@ -50,8 +53,8 @@ score = (free * power - 10 * bridged_jobs) * capacity_weight
 |---|---|---|
 | `cpu_busy_5m` | `1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))` | Sustained CPU use. Also the candidate's `load_ratio` field. |
 | `cpu_busy_1m` | `1 - avg(irate(node_cpu_seconds_total{mode="idle"}[3m]))` | The last scrape interval (60 s): a job that just went heavy shows at once. |
-| `mem_available` | Linux `MemAvailable / MemTotal`; macOS `1 - (internal - purgeable + wired + compressed) / total` | Agent sessions mostly cost memory. It fell after nearly every spawn in the survey. |
-| `swap_in_mbps` | `rate(node_memory_swapped_in_bytes_total[5m])` (macOS), `rate(node_vmstat_pswpin[5m]) * 4096` (Linux), in MB/s | Memory contention. 20 MB/s halves `free`. On macOS node_exporter maps this counter to VM page-ins, which include file-backed reads, not only swap; across the fleet it still rises as available memory falls. Linux assumes 4 KiB pages. |
+| `mem_available` | Linux `MemAvailable / MemTotal`; macOS `1 - (internal - purgeable + wired + compressed) / total` | Agent sessions mostly cost memory; it fell after 70–100% of spawns. It scales `free` only below 10% available, linearly to 0: above that the benchmark below ran at full speed. |
+| `swap_in_mbps` | `rate(node_memory_swapped_in_bytes_total[5m])` (macOS), `rate(node_vmstat_pswpin[5m]) * 4096` (Linux), in MB/s | Memory contention. `swap_in_half_mbps` (default 300) halves `free`. On macOS node_exporter maps this counter to VM page-ins, which include file-backed reads, not only swap; across the fleet it still rises as available memory falls. Linux assumes 4 KiB pages. |
 
 The signals come from a survey of every series the fleet's exporters send to
 Grafana Cloud (2026-11-02, 24 h, 7 hosts, 134 spawns). It kept the four
@@ -71,8 +74,20 @@ and `cpu_busy_5m` +0.017. `mem_available` fell after 70–100% of spawns.
 Across hosts, swap-in followed memory available: 15% available swapped in
 42 MB/s, 27% swapped in 8 MB/s, 37% swapped in 2 MB/s.
 
-`free` takes the scarcer of CPU and memory, so a host is as free as its
-bottleneck. Stale or missing data never reads as idle:
+**Calibration (2026-11-02, one run, n=1).** The desk timed the same Go
+workload (runtug 0758a0b: module download, cold build, vet, tests) on three
+hosts: mac-dev 37.6 s, mac-work 40.6 s, desktop 96.0 s
+(`handoffkeep doc get fleet/bench/2026-11-02-hosts`). mac-work and mac-dev
+are the same machine. mac-work ran 8% slower while it paged in ~25 MB/s with
+about 18% memory available. That sets the curve: a swap factor of at least
+0.926 at 25 MB/s puts the half point at ~310 MB/s, hence 300, and memory at
+18% must cost nothing, hence the 10% knee. The first draft used
+`min(cpu, memory)` and a 20 MB/s half point. Those scored mac-work at 37
+against desktop's 209, the opposite of the measured speed. This is a single
+CPU-heavy run. A memory-heavy workload (Unity) may suffer more from paging;
+`swap_in_half_mbps` is the knob for tightening it.
+
+Stale or missing data never reads as idle:
 
 - **Freshness.** `cpu_busy_1m` exists only while the host sent a sample in
   the last ~3 minutes. A host with only a lingering `cpu_busy_5m` is
@@ -86,7 +101,8 @@ bottleneck. Stale or missing data never reads as idle:
 job is treated alike: a heavy job (a Unity build, a full test suite) moves
 the measured signals, and the measurement pushes the next placement away.
 
-`power` (default 100, see below) makes a strong idle host win: at equal load
+`power` (default 100, see below) is the host's speed **unloaded**; load
+comes only from the live signals. It makes a strong idle host win: at equal load
 the stronger host scores higher, and at equal power the less loaded one
 does. `capacity_weight` is the operator's extra multiplier.
 
@@ -178,8 +194,8 @@ at or below that.
 
 `power` is optional and maps a machine id to a relative speed weight, greater
 than 0 and at most 10000. 100 is the strongest host; a machine without an
-entry weighs 100, so a policy without `power` ranks machines purely on
-measured load. It is a separate top-level map (not part of `machines`) so a
+entry weighs 100, so a policy without `power` ranks machines on measured
+load times `capacity_weight`. It is a separate top-level map (not part of `machines`) so a
 weight never implies a task-slot cap.
 
 ```json
@@ -190,7 +206,24 @@ weight never implies a task-slot cap.
 example `openssl speed -multi <cores> rsa2048` and read signatures per second
 — then set each weight to `100 * host_rate / strongest_rate`. Use all cores:
 the weight is the host's total capacity, not its per-core speed. Re-measure
-when hardware changes; a rounded value is fine.
+when hardware changes; a rounded value is fine. Measure with the host
+unloaded: load enters through the live signals, so a weight measured on a
+busy host would count that load twice.
+
+**Recommended fleet values (2026-11-02, not deployed).** These come from the
+workload benchmark above, and replace `capacity_weight`:
+
+```json
+{"power": {"mac-dev": 100, "mac-work": 100, "desktop": 39,
+           "mac-personal": 35, "oci": 11, "rpi": 7, "ncp": 9}}
+```
+
+mac-dev and desktop are measured (desktop nearly idle; mac-work is the same
+machine as mac-dev). mac-personal, oci, rpi and ncp are unmeasured. They keep
+their current `capacity_weight` relative to mac-dev's 4.6 (×100 / 4.6), so
+their standing does not change until the desk's oci and rpi runs land in the
+same hk doc. Remove `capacity_weight` when setting these values; keeping
+both would multiply the weights twice.
 
 Power multiplies the measured free fraction (`free * power`), so an idle
 power-100 host outranks an idle power-40 one, and a bridged job's 10 points

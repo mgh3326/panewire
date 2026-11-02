@@ -100,9 +100,36 @@ func TestHeartbeatDropsJobIdleThirtyMinutes(t *testing.T) {
 	if got := heartbeatJobIDs(t, client); !slices.Contains(got, "job-idle") {
 		t.Fatalf("restarted idle clock dropped the job at once: active=%q", got)
 	}
-	// An unreadable herdr snapshot drops nothing: the job scan alone decides.
+	// An unreadable herdr snapshot drops nothing, and it resets every idle
+	// clock: whether a pane worked meanwhile is unknown, so the done pane
+	// gets a fresh 30 minutes once herdr answers again.
 	statesErr = errors.New("herdr down")
 	if got := heartbeatJobIDs(t, client); !slices.Equal(got, all) {
 		t.Fatalf("snapshot failure filtered jobs: active=%q", got)
+	}
+	statesErr = nil
+	*clock = clock.Add(time.Minute)
+	if got := heartbeatJobIDs(t, client); !slices.Equal(got, all) {
+		t.Fatalf("idle clock survived a snapshot failure: active=%q", got)
+	}
+}
+
+// The idle clock belongs to a job on a pane, not to the pane: a job claimed
+// on a pane that sat idle under an earlier job is reported from its first
+// beat, and starts its own 30 minutes.
+func TestHeartbeatIdleClockRestartsForNewJobOnSamePane(t *testing.T) {
+	root := t.TempDir()
+	writeR20T6Job(t, root, "job-old", "w1:p1", time.Now().UTC())
+	states, statesErr := []HerdrAgentState{{PaneID: "w1:p1", Status: "idle"}}, error(nil)
+	client, clock := idleTestClient(t, root, []string{"w1:p1"}, &states, &statesErr)
+	_ = heartbeatJobIDs(t, client)
+	*clock = clock.Add(hubJobIdleAfter + time.Minute)
+	if got := heartbeatJobIDs(t, client); len(got) != 0 {
+		t.Fatalf("long-idle job still active: %q", got)
+	}
+	writeJobEvent(t, root, "job-old", 3, "job.completed", map[string]any{}, time.Now().UTC())
+	writeR20T6Job(t, root, "job-new", "w1:p1", time.Now().UTC())
+	if got := heartbeatJobIDs(t, client); !slices.Equal(got, []string{"job-new"}) {
+		t.Fatalf("new job on a long-idle pane was dropped at once: active=%q", got)
 	}
 }

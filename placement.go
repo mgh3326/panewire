@@ -44,6 +44,9 @@ type PlacementPolicy struct {
 	// the job itself stands in for the load it is about to add. 0 means the
 	// default, placementDefaultSpawnBridge.
 	SpawnBridgeSeconds int `json:"spawn_bridge_seconds,omitempty"`
+	// SwapInHalfMBps is the swap-in (macOS: page-in) rate that halves a
+	// host's free fraction. 0 means the default, placementDefaultSwapInHalfMBps.
+	SwapInHalfMBps float64 `json:"swap_in_half_mbps,omitempty"`
 	// QuotaExclude and QuotaBoost are retired and never evaluated. They stay
 	// decodable so a stale policy file still loads: reload logs a warning and
 	// strips them, so the desk can remove the keys at leisure. Remove the
@@ -72,15 +75,27 @@ const (
 	// that window covers a spawn, the job's real load is in the metrics.
 	placementDefaultSpawnBridge = 5 * time.Minute
 	maxPlacementSpawnBridge     = time.Hour
+	// placementBridgeClockSkew is how far in the future a job's start may be
+	// (node clock ahead of the hub) and still count; a start further ahead
+	// is not trusted, so a skewed clock cannot stretch the bridge.
+	placementBridgeClockSkew = time.Minute
 	// placementSpawnBridgeCost is what one bridged job costs, in score points:
 	// a tenth of a power-100 host's headroom, so it weighs relatively more on
 	// a weaker host. It only has to keep back-to-back spawns apart until the
 	// metrics see the first one; it is not a model of any kind of job.
 	placementSpawnBridgeCost = 10.0
-	// placementSwapInHalfMBps is the page-in rate that halves a host's free
-	// fraction. The fleet survey (docs/placement.md) put busy macOS hosts at
-	// 2-10 MB/s and a thrashing one at 25-50 MB/s; Linux hosts sit near 0.
-	placementSwapInHalfMBps = 20.0
+	// placementDefaultSwapInHalfMBps is calibrated on the 2026-11-02 host
+	// benchmark (docs/placement.md): mac-work, the same machine as mac-dev,
+	// ran a Go build-and-test workload 8% slower while paging in ~25 MB/s, so
+	// the swap factor at 25 MB/s is at least 0.926 and the half point at
+	// least ~310 MB/s. One CPU-heavy run (n=1); a memory-heavy workload may
+	// suffer more, which is what the policy key is for.
+	placementDefaultSwapInHalfMBps = 300.0
+	maxPlacementSwapInHalfMBps     = 100000.0
+	// placementMemKnee is the available-memory fraction below which memory
+	// scales the score down, linearly to 0 at none available. Above it memory
+	// costs nothing: the same benchmark ran at full speed with ~18% available.
+	placementMemKnee = 0.10
 )
 
 func DefaultPlacementPolicy() PlacementPolicy {
@@ -89,7 +104,8 @@ func DefaultPlacementPolicy() PlacementPolicy {
 
 func (p PlacementPolicy) valid() bool {
 	if !machineIDPattern.MatchString(p.LocalMachine) || p.LocalMachine == hubOperatorMachineID || p.MaxActiveJobs < 1 || p.MaxActiveJobs > 10000 || p.LoadRatio < 0 || p.LoadRatio > 100 ||
-		p.SpawnBridgeSeconds < 0 || time.Duration(p.SpawnBridgeSeconds)*time.Second > maxPlacementSpawnBridge ||
+		p.SpawnBridgeSeconds < 0 || p.SpawnBridgeSeconds > int(maxPlacementSpawnBridge/time.Second) ||
+		!(p.SwapInHalfMBps >= 0 && p.SwapInHalfMBps <= maxPlacementSwapInHalfMBps) ||
 		!validOptionalMemoryFloat(p.MemoryFreePctMin, 0, 100) || !validOptionalMemoryFloat(p.SwapUsedMBMax, 0, math.Inf(1)) ||
 		!validOptionalMemoryFloat(p.SwapInPerSMax, 0, math.Inf(1)) || !validOptionalMemoryFloat(p.PSISomeAvg10Max, 0, 100) || !validOptionalMemoryFloat(p.PressureLevelMin, 0, 2) {
 		return false
@@ -144,14 +160,22 @@ func (p PlacementPolicy) spawnBridge() time.Duration {
 	return time.Duration(p.SpawnBridgeSeconds) * time.Second
 }
 
-// placementFree is the measured share of a host that is still free, 0..1: the
-// scarcer of CPU headroom and available memory, shrunk by swap-in. CPU busy is
-// the larger of the last-minute and five-minute readings, so a job that just
-// went heavy shows at once and a sustained one is not forgotten when one
-// minute dips. A signal the host does not report is left out rather than
-// guessed; with no CPU reading the host counts as idle (hub-only, or the
-// load_unknown penalty applies).
-func placementFree(signals PlacementSignals) float64 {
+func (p PlacementPolicy) swapInHalfMBps() float64 {
+	if p.SwapInHalfMBps <= 0 {
+		return placementDefaultSwapInHalfMBps
+	}
+	return p.SwapInHalfMBps
+}
+
+// placementFree is the measured share of a host that is still free, 0..1:
+// CPU headroom, scaled down by memory only near exhaustion (below
+// placementMemKnee available) and by swap-in. CPU busy is the larger of the
+// last-minute and five-minute readings, so a job that just went heavy shows
+// at once and a sustained one is not forgotten when one minute dips. A signal
+// the host does not report is left out rather than guessed; with no CPU
+// reading the host counts as idle (hub-only, or the load_unknown penalty
+// applies). The calibration is in docs/placement.md.
+func (p PlacementPolicy) placementFree(signals PlacementSignals) float64 {
 	busy := 0.0
 	if signals.CPUBusy5m != nil {
 		busy = *signals.CPUBusy5m
@@ -161,10 +185,10 @@ func placementFree(signals PlacementSignals) float64 {
 	}
 	free := 1 - math.Min(math.Max(busy, 0), 1)
 	if signals.MemAvailable != nil {
-		free = math.Min(free, math.Min(math.Max(*signals.MemAvailable, 0), 1))
+		free *= math.Min(math.Max(*signals.MemAvailable, 0)/placementMemKnee, 1)
 	}
 	if signals.SwapInMBps != nil && *signals.SwapInMBps > 0 {
-		free /= 1 + *signals.SwapInMBps/placementSwapInHalfMBps
+		free /= 1 + *signals.SwapInMBps/p.swapInHalfMBps()
 	}
 	return free
 }
@@ -180,12 +204,13 @@ func placementScoreBase(free float64, bridgedJobs int, power float64) float64 {
 
 // countBridgedJobs counts the jobs that started less than bridge ago. A job
 // whose start time is unknown cannot be placed in the window and is left out;
-// a start slightly in the future (clock skew between node and hub) counts.
+// a start up to placementBridgeClockSkew in the future (node clock ahead of
+// the hub) counts, one further ahead does not.
 func countBridgedJobs(jobs map[string]HubActiveJob, now time.Time, bridge time.Duration) int {
 	count := 0
 	for _, job := range jobs {
 		started, err := time.Parse(time.RFC3339, job.StartedAt)
-		if err == nil && now.Sub(started) < bridge {
+		if age := now.Sub(started); err == nil && age < bridge && age > -placementBridgeClockSkew {
 			count++
 		}
 	}
@@ -741,7 +766,7 @@ func (h *HubServer) placementCandidates(policy PlacementPolicy, metrics placemen
 			fallback := *memory.FreePct / 100
 			signals.MemAvailable = &fallback
 		}
-		signals.Free, signals.Power, signals.BridgedJobs = placementFree(signals), policy.power(machine), bridged
+		signals.Free, signals.Power, signals.BridgedJobs = policy.placementFree(signals), policy.power(machine), bridged
 		score := placementScoreBase(signals.Free, bridged, signals.Power) * capacityWeight
 		if !connected {
 			score -= 1000
@@ -969,6 +994,12 @@ func prometheusVector(ctx context.Context, client *http.Client, rawURL, query, b
 		}
 		var value float64
 		if _, err := fmt.Sscan(raw, &value); err != nil {
+			continue
+		}
+		// A NaN or Inf sample (a 0/0 memory fraction, say) would make the
+		// score NaN, and encoding/json refuses NaN: the response would be
+		// an empty 200. Skip it so the signal reads as unreported.
+		if math.IsNaN(value) || math.IsInf(value, 0) {
 			continue
 		}
 		result[machine] = value

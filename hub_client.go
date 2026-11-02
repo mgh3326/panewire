@@ -1788,18 +1788,25 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 		states, sessionsErr = collectSessions(lookup)
 		cancel()
 	}
-	active := scanHubActiveJobsWithPanes(ctx, client.jobsInboxRoot, client.panesAliveHook())
-	if collectSessions != nil && sessionsErr == nil {
-		active = client.dropLongIdleJobs(active, states, client.nowUTC())
-	}
+	scanned := scanHubActiveJobsWithPanes(ctx, client.jobsInboxRoot, client.panesAliveHook())
 	client.assignmentMu.Lock()
-	for i := range active {
-		if epoch := client.assignedJobs[active[i].JobID]; epoch > active[i].Epoch {
-			active[i].Epoch = epoch
+	for i := range scanned {
+		if epoch := client.assignedJobs[scanned[i].JobID]; epoch > scanned[i].Epoch {
+			scanned[i].Epoch = epoch
 		}
 	}
 	client.assignmentMu.Unlock()
-	client.publishFleetSpawns(active, client.nowUTC())
+	// Fleet-state spawn start/end follows the job's real lifetime (terminal
+	// event or closed pane), so a job that idles past the limit and later
+	// resumes does not publish a false end and a second start.
+	client.publishFleetSpawns(scanned, client.nowUTC())
+	active := scanned
+	switch {
+	case collectSessions != nil && sessionsErr == nil:
+		active = client.dropLongIdleJobs(scanned, states, client.nowUTC())
+	case collectSessions != nil:
+		client.resetIdleClock()
+	}
 	client.burstMu.Lock()
 	holdsActive := client.burstHoldsActive
 	client.burstMu.Unlock()
