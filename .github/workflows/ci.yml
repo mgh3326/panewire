@@ -31,7 +31,7 @@ jobs:
         os: [macos-latest, ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.ref }}
       - uses: actions/setup-go@v5
@@ -75,7 +75,7 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
         with:
           ref: ${{ inputs.ref }}
       - uses: actions/setup-go@v5
@@ -127,3 +127,9 @@ jobs:
           case "$SUITE" in all|postgres) postgres=yes ;; *) postgres=no ;; esac
           require "$test" test "$TEST_RESULT"
           require "$postgres" postgres "$POSTGRES_RESULT"
+
+  auto-tag-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - run: python3 scripts/test-auto-tag.py

@@ -14,7 +14,15 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish assets for the selected tag
+        type: boolean
+        default: false
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 permissions:
   contents: read
 
@@ -39,7 +47,7 @@ jobs:
           REF_NAME: ${{ github.ref_name }}
           RUN_NUMBER: ${{ github.run_number }}
         run: |
-          if [ "$EVENT" = push ] && [ "$REF_TYPE" = tag ]; then
+          if [ "$REF_TYPE" = tag ]; then
             tag=$REF_NAME
           else
             tag=v0.0.0-dryrun.$RUN_NUMBER
@@ -63,7 +71,7 @@ jobs:
           test "$(wc -l < dist/release/SHA256SUMS)" -eq 4
           cat dist/release/SHA256SUMS
       - name: Keep assets for publish
-        if: github.event_name == 'push' && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
+        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-assets
@@ -72,7 +80,7 @@ jobs:
           retention-days: 7
 
   test:
-    if: github.event_name == 'push' && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
+    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -88,7 +96,7 @@ jobs:
 
   publish:
     needs: [build, test]
-    if: github.event_name == 'push' && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
+    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -117,5 +125,6 @@ jobs:
         run: |
           set --
           case "$TAG" in *-*) set -- --prerelease ;; esac
+          gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 && exit 0
           gh release create "$TAG" dist/release/* --repo "$GITHUB_REPOSITORY" --verify-tag --title "$TAG" "$@" \
             --notes "panewire $TAG — publish with: panewire update publish --version $TAG --url ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/releases/download/$TAG/panewire_${TAG}_<os>_<arch> --sha256 <from SHA256SUMS> --machines <canary>"
