@@ -322,7 +322,7 @@ func (a *App) parentFromHK(ctx context.Context, id string) (Job, error) {
 			return Job{}, e
 		}
 	}
-	return Job{}, fmt.Errorf("parent job %s: %v", id, last)
+	return Job{}, fmt.Errorf("parent job %s: %w", id, last)
 }
 
 // jobFromRecord projects the fields spawn needs out of an hk job record.

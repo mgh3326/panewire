@@ -101,12 +101,16 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 	trace.Finish()
 }
 func spawnTraceReason(reason string) string {
+	// Refusal text follows the code in a reason. It never reaches a fingerprint.
+	reason, _, _ = strings.Cut(reason, ": ")
 	switch reason {
-	case "timeout", "disconnected", "unknown", "spawn_failed", "configuration", "admission_refused", "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable", "node_upgrade_required":
+	case "timeout", "disconnected", "unknown", "spawn_failed", "configuration", "admission_refused", "parent_job_not_found", "quota_unconfirmed", "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable", "node_upgrade_required":
 		return reason
 	}
-	if strings.HasPrefix(reason, "checkout_refused:") {
-		return "checkout_refused"
+	for _, family := range []string{"checkout_refused", "quota_unconfirmed"} {
+		if strings.HasPrefix(reason, family+":") {
+			return family
+		}
 	}
 	return "spawn_failed"
 }

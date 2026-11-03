@@ -43,7 +43,9 @@ checkout or flags under that key is refused: inspect the original operation
 before repairing the receipt or starting independent work under a new job ID.
 
 `GET /v1/spawns/<request_id>` returns job, request, status and a bounded result.
-It never exposes the saved brief, argv, credentials or submitting paths.
+It never exposes the saved brief, argv, credentials or submitting paths. Its
+`reason` is a stable code followed by the refusal text (`<code>: <text>`), which
+is redacted, on one line and bounded, and can name a path on the executing node.
 
 ## State and recovery
 
@@ -137,12 +139,25 @@ to create the next attempt after the node's checkout operation finishes.
 ## Notifications and telemetry
 
 State changes and notification records commit in one database transaction.
-The outbox retries handoffkeep `lane.event` records with the real `job_id`, stable
-producer event id and owner/parent lane, then hands the same event to lane delivery.
-A restarted hub retries undelivered rows. Delivery is at least once; consumers
-use the event id to deduplicate. Timeout emits `SPAWN_FAILED … reason=timeout`
-as an observation with `deadline_exceeded`, not proof of cleanup. A later
-verified landing may emit a distinct `SPAWNED` reconciliation event.
+The outbox hands each record to lane delivery, which stores one handoffkeep
+`lane.event` with the real `job_id`, a stable producer event id and the owner or
+parent lane, then injects it. A restarted hub retries undelivered rows. Delivery
+is at least once; consumers use the event id
+(`<request_id>:<attempt>:<status>`) to deduplicate. Timeout emits
+`SPAWN_FAILED … reason=timeout` as an observation with `deadline_exceeded`, not
+proof of cleanup. A later verified landing may emit a distinct `SPAWNED`
+reconciliation event.
+
+`SPAWN_FAILED` names the job, request, exit status, stage, reason and fix. It has
+notify type `automation-failed`, so it interrupts a lane that digests its reports.
+`SPAWNED` stays type `report`.
+
+| Reason code | Meaning |
+| --- | --- |
+| `parent_job_not_found` | `--parent-job` resolved to no record within the 30-second wait. A job store that cannot answer stays `admission_refused`. |
+| `quota_unconfirmed:<cause>` | Admission could not confirm the target's quota. `<cause>` is the shared-observation reason, such as `no_usable_presence` or `stale`. Without one, the code is `quota_unconfirmed`. |
+| `admission_refused` | Any other refusal before a node was bound. The text says why. |
+| `spawn_failed` | The node's fleet App refused or failed. The text is its error, read from the result's stderr section. |
 
 A private Sentry client records one always-sampled `runtug.spawn` transaction per
 spawn attempt (the established telemetry name survives the CLI rename). Only this

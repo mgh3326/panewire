@@ -422,7 +422,7 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 					return j, err
 				}
 				observed = j.Reason
-				return j, fail(exitEvictionUnconfirmed, "target account measurement failed: %v", err)
+				return j, &quotaHostRefusal{fail(exitEvictionUnconfirmed, "target account measurement failed: %v", err), j.Reason}
 			}
 			j.Measured = "ok"
 			fresh, err := a.Source.SharedAccount(ctx, key)
@@ -435,7 +435,7 @@ func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, 
 		}
 		if j.Reason != "" {
 			observed = j.Reason
-			return j, fail(exitEvictionUnconfirmed, "target account quota unavailable: %s", j.Reason)
+			return j, &quotaHostRefusal{fail(exitEvictionUnconfirmed, "target account quota unavailable: %s (host %s, pool %s)", j.Reason, host, pool), j.Reason}
 		}
 		r.AccountKey = key
 	}
