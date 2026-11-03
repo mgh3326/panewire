@@ -390,7 +390,31 @@ logs screen contents or panewire's output.
 
 `pane.read` reuses mergewake's composer rules: the last two Claude dividers or
 the last Codex `›` line. The reap caller maps `has_text` to `composer-text` and
-`unknown` to `composer-unknown`; only `empty` permits closing. A plain-text
-"Ask Codex to do anything" remains text because visible reads cannot prove it
-is dim. `job.done` already runs the guarded host-local completion command.
-Both require explicit scoped service grants as described above.
+`unknown` to `composer-unknown`; only `empty` permits closing.
+
+Visible reads cannot prove a placeholder is dim, so a known idle placeholder
+counts as `empty` only when it is the whole composer, matched exactly after the
+glyph and surrounding spaces are trimmed:
+
+| Harness | Placeholder | Source |
+|---|---|---|
+| Codex | `Ask Codex to do anything` | `PLACEHOLDER`, `codex-rs/tui/src/chatwidget.rs`, tag `rust-v0.166.0` |
+| Devin | `Ask Devin to build features, fix bugs, or work on your code` | strings of the devin 3000.11.234 binary and finished-pane captures |
+
+Text that reads the same as the placeholder cannot be told apart from it, so an
+unsent draft of exactly those words reads `empty`. Every other prompt keeps the
+pane:
+
+- Messages queued above the composer read `has_text`, because the composer shows
+  its placeholder while the queue holds them.
+- Codex `Ask a follow-up question` (`SIDE_PLACEHOLDER`) and `Viewing sub-agent —
+  direct input is disabled` read `has_text`, because the thread's own draft is
+  stored out of sight while either view is open.
+- Codex's disabled-input prompts and Devin's `Guide Devin while it works` read
+  `has_text`, because they are not the idle state of a finished pane.
+- The rotating Codex placeholders removed by `rust-v0.148.0`, such as `Explain
+  this codebase`, read `has_text`. They are plausible drafts, and a pane on such
+  an old Codex stays open until someone closes it.
+
+`job.done` already runs the guarded host-local completion command. Both require
+explicit scoped service grants as described above.
