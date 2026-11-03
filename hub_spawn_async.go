@@ -660,17 +660,26 @@ func spawnOutcomeReason(code, refusal string) string {
 // A config refusal carries its rule in stdout and only the fix on stderr. The
 // tail is bounded from the front, so the error survives and warnings go first.
 func spawnResultRefusal(tail string) string {
-	if index := strings.LastIndex(tail, "Fix: "); index >= 0 {
-		tail = tail[:index]
+	lines := strings.Split(tail, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "stderr: ") {
+			start = i
+		}
 	}
-	index := strings.LastIndex(tail, "stderr: ")
-	if index < 0 {
+	if start < 0 {
 		return ""
 	}
-	text := strings.TrimSpace(tail[index+len("stderr: "):])
-	if text == "" {
-		lines := strings.Split(strings.TrimSpace(tail[:index]), "\n")
-		text = lines[len(lines)-1]
+	section := append([]string{strings.TrimPrefix(lines[start], "stderr: ")}, lines[start+1:]...)
+	for i := len(section) - 1; i >= 0; i-- {
+		if strings.HasPrefix(section[i], "Fix: ") {
+			section = section[:i]
+			break
+		}
+	}
+	text := strings.TrimSpace(strings.Join(section, "\n"))
+	if text == "" && start > 0 {
+		text = lines[start-1]
 	}
 	return spawnRefusalLine(text)
 }
