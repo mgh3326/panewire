@@ -170,7 +170,13 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 			limit = laneEventTextLimitSink
 		}
 		finalText, truncated := truncateLaneEventTextAtLimit(*text, limit)
-		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Type: *kind, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: *pane, EventID: *eventID, Text: finalText, Truncated: truncated}
+		// The completion watcher ties a READY, DONE or ESC event to its job by
+		// this pane, so a worker's emit names its pane without being asked.
+		paneID := *pane
+		if paneID == "" {
+			paneID = os.Getenv("HERDR_PANE_ID")
+		}
+		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Type: *kind, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: paneID, EventID: *eventID, Text: finalText, Truncated: truncated}
 		if record.Epoch == 0 {
 			record.Epoch = 1
 		}

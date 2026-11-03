@@ -34,6 +34,8 @@ For example:
 panewire emit --kind lane.event --lane lane-a --event-id producer-42 --text "approval requested" --host host-a --pane w1:p1
 ```
 
+Without `--pane`, the command records the pane named by `HERDR_PANE_ID`, if any.
+
 The command writes an atomic mode-0600 file under `events-lane/` before it
 tries the local daemon socket. That namespace is separate from `jobs/<id>/`:
 there is no real job ID to collide with, and job scanners cannot mistake a
@@ -90,3 +92,19 @@ counted once per durable row (subject to a bounded remembered set); eviction can
 only repeat that observation. The three-attempt exhausted contract is unchanged:
 each acknowledgement timeout now records its attempt and releases the active
 lane-event claim, ensuring the existing gate is actually reached.
+
+## Job completion signal
+
+A lane event stays outside the job lifecycle on the node and the hub, but the
+completion watcher on the worker's host reads `events-lane/` for one purpose. It
+completes a job when the job's report is stable across two polls and the current
+attempt has one of these signals:
+
+- a `job.escalate` record;
+- a lane event from the job's pane, written at or after the attempt started,
+  whose text starts with `READY`, `DONE` or `ESC`, after an optional `[label] `
+  prefix.
+
+The attempt starts at the newest `job.spawned`, `job.reclaim` or `job.reprompted`
+record. `panewire done` still completes a job directly. A report with no signal
+leaves the job live until the watcher deadline, and the job stays live after it.
