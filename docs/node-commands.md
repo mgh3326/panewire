@@ -99,14 +99,16 @@ for. herdr has no conditional close, so the node re-reads `herdr agent list`
 twice, two seconds apart, and closes only when both reads show a row with
 that `pane_id` and exactly that name, status and cwd, and — where herdr
 reports it — the same `state_change_seq`, so a pane that went to work and
-came back idle in between also survives. The second read immediately
-precedes `herdr pane close`; the gap left between them is the same one the
-ssh reap path has between its re-read and its close.
+came back idle in between also survives. Each identity read is followed by a
+fresh visible composer read. Both composers must be proven empty; draft text,
+an unknown composer or a failed screen read refuses the close as `pane-changed`.
+The second composer read immediately precedes `herdr pane close`; an unavoidable
+read-to-close gap remains, as in the ssh reap path.
 
 | `outcome` | Meaning |
 | --- | --- |
 | `closed` | Matched and `herdr pane close` succeeded. |
-| `pane-changed` | Present, but name, status or cwd differs; not closed. |
+| `pane-changed` | Identity/status changed, or composer is not proven empty; not closed. |
 | `pane-gone` | No such pane; nothing to close. |
 
 A failed close answers `close_failed`. Acting ops run one at a time per node.

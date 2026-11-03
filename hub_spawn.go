@@ -22,12 +22,13 @@ const (
 )
 
 var (
-	hubSpawnRequestIDPattern  = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-	hubSpawnMachinePattern    = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
-	hubSpawnCWDKeyPattern     = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
-	hubSpawnArgValuePattern   = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,200}$`)
-	hubSpawnTagsValuePattern  = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+){0,15}$`)
-	hubSpawnGradeValuePattern = regexp.MustCompile(`^(C|B|A|A\+|S|S\+)$`)
+	hubSpawnRequestIDPattern     = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	hubSpawnMachinePattern       = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+	hubSpawnCWDKeyPattern        = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
+	hubSpawnArgValuePattern      = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,200}$`)
+	hubSpawnTagsValuePattern     = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+){0,15}$`)
+	hubSpawnExcludedHostsPattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+)*$`)
+	hubSpawnGradeValuePattern    = regexp.MustCompile(`^(C|B|A|A\+|S|S\+)$`)
 )
 
 type hubSpawnBrief struct {
@@ -174,7 +175,7 @@ func validHubSpawnArgsForMode(args []string, operator bool) bool {
 	}
 	booleans := map[string]bool{}
 	if operator {
-		for _, flag := range []string{"--grade", "--routing-role", "--override-reason", "--operator-request", "--requested-by", "--purpose", "--lane-defer"} {
+		for _, flag := range []string{"-c", "-p", "--host", "--exclude-host", "--grade", "--routing-role", "--override-reason", "--operator-request", "--requested-by", "--purpose", "--lane-defer"} {
 			allowed[flag] = true
 		}
 		booleans = map[string]bool{"--keep": true, "--job-dup-ok": true, "--task-hk-bypass": true, "--allow-escalation": true}
@@ -201,9 +202,17 @@ func validHubSpawnArgsForMode(args []string, operator bool) bool {
 		if flag == "--grade" {
 			pattern = hubSpawnGradeValuePattern
 		}
-		freeText := operator && (flag == "--override-reason" || flag == "--purpose" || flag == "-w")
+		if flag == "--exclude-host" {
+			pattern = hubSpawnExcludedHostsPattern
+		}
+		path := operator && (flag == "-c" || flag == "-p")
+		maxBytes := 200
+		if path {
+			maxBytes = nodeCommandMaxPathBytes
+		}
+		freeText := operator && (path || flag == "--override-reason" || flag == "--purpose" || flag == "-w")
 		validValue := validHubSpawnArgValue(flag, value) || operator && flag == "--role" && value == "counsel"
-		if len(value) > 200 || value == "" || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") || (!freeText && !pattern.MatchString(value)) || !validValue {
+		if len(value) > maxBytes || value == "" || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") || (!freeText && !pattern.MatchString(value)) || !validValue {
 			return false
 		}
 		i += 2
