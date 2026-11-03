@@ -995,7 +995,8 @@ selection (the pane may be placed on another host), reads the `result` of the
 hk job record, which the delegate files with `panewire done JOB --result`
 (`{"answer": TEXT}`), then closes the pane after checking it is still the one
 the job spawned. If only the report exists because the completion watcher
-finished the job first, the report text is the answer. A delegate placed on
+finished the job on the delegate's terminal signal, the report text is the
+answer. A delegate placed on
 another host is answered the same way; its pane is left for that host's `reap`.
 When the wait fails (escalated, lost, timeout), the pane stays for
 `panewire reap` and nothing is printed on stdout.
@@ -1172,7 +1173,7 @@ for ownership and distribution.
 | `PANEWIRE_E6_ARM` | Exact canon@effort experiment marker when policy requires one. |
 | `ARBITER_JOB`, `HK_TASK_ID` | Calling job/task inheritance; populated in spawned panes. |
 | `PANEWIRE_LANE_STRICT=1` | A committed builder with unregistered lane returns 82. |
-| `PANEWIRE_COMPLETION_TIMEOUT_S` | Positive watcher lifetime; duration or bare seconds, default 1h. Expiry retains the job. |
+| `PANEWIRE_COMPLETION_TIMEOUT_S` | Positive watcher lifetime; duration or bare seconds, default 1h. Expiry retains the job. The watcher completes a job only on a [terminal signal](r21-lane-event.md#job-completion-signal), never on a stable report alone. |
 | `MOCK_MCP_PROFILE`, `PANEWIRE_MOCK_MCP_CONFIG` | Required reviewed mock profile name and exclusive stdio mcpServers JSON. |
 | `KIMI_CODE_HOME` | Kimi config home; thinking effort is verified. |
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | Harness config homes for selected-workspace trust; mock Codex uses its private job home. |

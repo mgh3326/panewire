@@ -1,10 +1,16 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWatcherExpiryKeepsLiveLease(t *testing.T) {
@@ -81,5 +87,203 @@ func TestCodexFooterRequiresLastContextRow(t *testing.T) {
 	}
 	if CodexFooterProof(screen+"\nOther model low /home/example/tree Context 50%", "gpt-6.1-example", "high", "/home/example/tree", "/home/example") {
 		t.Fatal("stale footer accepted")
+	}
+}
+
+// watchFixture is a live job whose pane stays present, with its report path
+// recorded in the spawn receipt, as a real spawn leaves it.
+func watchFixture(t *testing.T) (*App, *fakeRunner, string) {
+	t.Helper()
+	a := testApp(t)
+	f := ledgerRunner(t, a)
+	original := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"working"}]}}`}
+		}
+		return original(c)
+	}
+	report := filepath.Join(a.Jobs, "j", "report.md")
+	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "report": report})
+	seedLedger(t, a, "j")
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
+	return a, f, report
+}
+
+func writeReport(t *testing.T, path, body string) {
+	t.Helper()
+	if e := os.WriteFile(path, []byte(body), 0600); e != nil {
+		t.Fatal(e)
+	}
+}
+
+// putLaneEvent writes the record `panewire emit --kind lane.event` writes.
+func putLaneEvent(t *testing.T, a *App, pane, text string, at time.Time) {
+	t.Helper()
+	dir := filepath.Join(filepath.Dir(a.Jobs), "events-lane")
+	if e := os.MkdirAll(dir, 0700); e != nil {
+		t.Fatal(e)
+	}
+	files, _ := os.ReadDir(dir)
+	path := filepath.Join(dir, fmt.Sprintf("%05d-lane.event.json", len(files)+1))
+	body, e := json.Marshal(map[string]any{"type": "lane.event", "kind": "lane.event", "job_id": "", "epoch": 1, "created_at": at.UTC().Format(time.RFC3339), "owner_lane": "owner", "pane_id": pane, "event_id": fmt.Sprintf("e%d", len(files)), "text": text})
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e := os.WriteFile(path, body, 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e := os.Chtimes(path, at, at); e != nil {
+		t.Fatal(e)
+	}
+}
+
+func completions(t *testing.T, a *App, f *fakeRunner) (records, relays int) {
+	t.Helper()
+	for _, kind := range eventKindsOf(t, a, "j") {
+		if kind == "job.completed" {
+			records++
+		}
+	}
+	for _, c := range f.Calls {
+		if c.Name == "panewire" && slices.Contains(c.Args, "job.completed") {
+			relays++
+		}
+	}
+	return records, relays
+}
+
+// Mutation note: dropping the workerSignalledEnd condition from watch() restores
+// size/mtime-only completion, and this test fails with "stable report completed
+// without a marker".
+func TestWatcherStableReportWithoutMarkerStaysLive(t *testing.T) {
+	a, f, report := watchFixture(t)
+	writeReport(t, report, "status: in progress\n")
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if records, relays := completions(t, a, f); records != 0 || relays != 0 {
+		t.Fatalf("stable report completed without a marker: records=%d relays=%d", records, relays)
+	}
+	if st, pools := ledgerState(t, a, "j"); st != "leased" || len(pools) != 1 {
+		t.Fatalf("stable report released the job: %s %v", st, pools)
+	}
+	if !strings.Contains(a.Err.(*bytes.Buffer).String(), "watch-expired: job stays live; quota retained") {
+		t.Fatalf("no expiry notice: %q", a.Err)
+	}
+}
+
+func TestWatcherCompletesStableReportOnTerminalSignal(t *testing.T) {
+	lane := func(text string) func(*testing.T, *App) {
+		return func(t *testing.T, a *App) { putLaneEvent(t, a, "w:p1", text, a.Now().Add(time.Minute)) }
+	}
+	for name, signal := range map[string]func(*testing.T, *App){
+		"READY":       lane("READY: PR open"),
+		"DONE":        lane("DONE"),
+		"ESC":         lane("ESC: need a decision"),
+		"labelled":    lane("[agent-a] READY | PR | report"),
+		"same second": func(t *testing.T, a *App) { putLaneEvent(t, a, "w:p1", "READY", a.Now()) },
+		"escalate":    func(t *testing.T, a *App) { putEvent(t, a, "j", "job.escalate", map[string]any{"question": "which?"}) },
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, f, report := watchFixture(t)
+			writeReport(t, report, "final\n")
+			signal(t, a)
+			if e := a.watch(context.Background(), []string{"j"}); e != nil {
+				t.Fatal(e)
+			}
+			if records, relays := completions(t, a, f); records != 1 || relays != 1 {
+				t.Fatalf("records=%d relays=%d, want one completion", records, relays)
+			}
+			if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
+				t.Fatalf("completed job kept its lease: %s %v", st, pools)
+			}
+		})
+	}
+}
+
+func TestWatcherIgnoresEventsThatAreNotThisAttemptsSignal(t *testing.T) {
+	lane := func(pane, text string) func(*testing.T, *App) {
+		return func(t *testing.T, a *App) { putLaneEvent(t, a, pane, text, a.Now().Add(time.Minute)) }
+	}
+	for name, setup := range map[string]func(*testing.T, *App){
+		"another pane":    lane("w:p2", "READY"),
+		"no pane":         lane("", "READY"),
+		"marker mid text": lane("w:p1", "Acknowledged READY, still working"),
+		"longer word":     lane("w:p1", "READYING the PR"),
+		"lower case":      lane("w:p1", "ready soon"),
+		"before attempt":  func(t *testing.T, a *App) { putLaneEvent(t, a, "w:p1", "READY", a.Now().Add(-time.Hour)) },
+		"before reprompt": func(t *testing.T, a *App) {
+			putEvent(t, a, "j", "job.escalate", map[string]any{"question": "which?"})
+			putEvent(t, a, "j", "job.reprompted", map[string]any{})
+		},
+		"not a lane event": func(t *testing.T, a *App) {
+			dir := filepath.Join(filepath.Dir(a.Jobs), "events-lane")
+			if e := os.MkdirAll(dir, 0700); e != nil {
+				t.Fatal(e)
+			}
+			writeReport(t, filepath.Join(dir, "00001-lane.event.json"), `{"kind":"job.completed","pane_id":"w:p1","text":"READY"}`)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			a, f, report := watchFixture(t)
+			writeReport(t, report, "status: in progress\n")
+			setup(t, a)
+			if e := a.watch(context.Background(), []string{"j"}); e != nil {
+				t.Fatal(e)
+			}
+			if records, relays := completions(t, a, f); records != 0 || relays != 0 {
+				t.Fatalf("records=%d relays=%d, want no completion", records, relays)
+			}
+		})
+	}
+}
+
+// A report still changing after the marker waits until it settles, and a rewrite
+// after the completion never produces a second one.
+func TestWatcherReportRewrittenAfterMarkerCompletesOnce(t *testing.T) {
+	a, f, report := watchFixture(t)
+	writeReport(t, report, "first\n")
+	putLaneEvent(t, a, "w:p1", "READY", a.Now().Add(time.Minute))
+	sleep := a.Sleep
+	polls := 0
+	a.Sleep = func(ctx context.Context, d time.Duration) error {
+		if polls++; polls == 1 {
+			writeReport(t, report, "second, longer\n")
+		}
+		return sleep(ctx, d)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if polls < 2 {
+		t.Fatalf("completed on an unsettled report after %d polls", polls)
+	}
+	writeReport(t, report, "third, after completion\n")
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if records, relays := completions(t, a, f); records != 1 || relays != 1 {
+		t.Fatalf("records=%d relays=%d, want one completion", records, relays)
+	}
+}
+
+// A signal cannot complete a job without its report: lifecycle has nothing to
+// file. The deadline then behaves as it does for any live job.
+func TestWatcherSignalWithoutReportStaysLiveAtDeadline(t *testing.T) {
+	a, f, _ := watchFixture(t)
+	putLaneEvent(t, a, "w:p1", "READY", a.Now().Add(time.Minute))
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if records, relays := completions(t, a, f); records != 0 || relays != 0 {
+		t.Fatalf("records=%d relays=%d, want no completion", records, relays)
+	}
+	if st, pools := ledgerState(t, a, "j"); st != "leased" || len(pools) != 1 {
+		t.Fatalf("deadline released a live job: %s %v", st, pools)
+	}
+	if !strings.Contains(a.Err.(*bytes.Buffer).String(), "watch-expired") {
+		t.Fatalf("no expiry notice: %q", a.Err)
 	}
 }
