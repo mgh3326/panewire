@@ -992,9 +992,26 @@ func (h *HubServer) handleOrphanedJobs(writer http.ResponseWriter, request *http
 }
 
 func (h *HubServer) handleJobs(writer http.ResponseWriter, request *http.Request) {
-	if !h.authorizeOperator(request) {
+	caller := h.authenticate(request)
+	lane := request.URL.Query().Get("owner_lane")
+	if caller.kind != hubCallerOperator && caller.kind != hubCallerNode {
 		hubUnauthorized(writer)
 		return
+	}
+	if caller.kind == hubCallerNode && lane == "" {
+		hubUnauthorized(writer)
+		return
+	}
+	if lane != "" && !validReportRelayLaneName(lane) {
+		http.Error(writer, "invalid owner_lane", http.StatusBadRequest)
+		return
+	}
+	if caller.kind == hubCallerNode {
+		route, exists := loadReportRelayRoutes(h.reportRelayPath)[lane]
+		if !exists || route.Machine != caller.id {
+			http.Error(writer, "forbidden", http.StatusForbidden)
+			return
+		}
 	}
 	machine := request.URL.Query().Get("machine")
 	if machine != "" && !machineIDPattern.MatchString(machine) {
@@ -1003,7 +1020,7 @@ func (h *HubServer) handleJobs(writer http.ResponseWriter, request *http.Request
 	}
 	writeJSON(writer, http.StatusOK, struct {
 		Jobs []hubConsoleJob `json:"jobs"`
-	}{Jobs: h.activeConsoleJobs(machine)})
+	}{Jobs: h.consoleJobs(machine, lane, caller.kind == hubCallerNode || request.URL.Query().Get("include_completed") == "true")})
 }
 
 func (h *HubServer) handleReassignJob(writer http.ResponseWriter, request *http.Request) {
