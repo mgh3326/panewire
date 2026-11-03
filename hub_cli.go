@@ -656,8 +656,8 @@ func renderHubStatus(writer io.Writer, nodes []HubNode) {
 }
 
 func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
-	if len(args) == 0 || (args[0] != "jobs" && args[0] != "orphaned" && args[0] != "reassign") {
-		return writeHubCLIUsage(stderr, "jobs: expected jobs, orphaned, or reassign subcommand", jobsUsage)
+	if len(args) == 0 || (args[0] != "jobs" && args[0] != "list" && args[0] != "orphaned" && args[0] != "reassign") {
+		return writeHubCLIUsage(stderr, "jobs: expected list, jobs, orphaned, or reassign subcommand", jobsUsage)
 	}
 	flags := flag.NewFlagSet("panewire jobs "+args[0], flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
@@ -667,6 +667,14 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	jobID := flags.String("job-id", "", "orphaned job ID")
 	to := flags.String("to", "", "destination node identity")
 	machine := flags.String("machine", "", "filter active jobs by machine identity")
+	lane := flags.String("lane", "", "owner lane")
+	jsonOutput := flags.Bool("json", false, "print hub response")
+	includeCompleted := flags.Bool("include-completed", false, "include completed jobs")
+	if args[0] == "list" {
+		*hubURL = os.Getenv("PANEWIRE_HUB_URL")
+		*tokenEnvPath = os.Getenv("PANEWIRE_HUB_TOKEN_ENV")
+		*cfEnvPath = os.Getenv("PANEWIRE_HUB_CF_ENV")
+	}
 	if err := flags.Parse(args[1:]); err != nil {
 		reason := "jobs: invalid flag value"
 		if strings.HasPrefix(err.Error(), "flag provided but not defined:") {
@@ -688,8 +696,11 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if args[0] == "jobs" && *machine != "" && !machineIDPattern.MatchString(*machine) {
 		return writeHubCLIUsage(stderr, "jobs: invalid --machine", jobsUsage)
 	}
+	if args[0] == "list" && !validReportRelayLaneName(*lane) {
+		return writeHubCLIUsage(stderr, "jobs list: valid --lane is required", jobsUsage)
+	}
 	env, err := loadHubTokenEnv(*tokenEnvPath)
-	if err != nil || env.MachineID != hubOperatorMachineID {
+	if err != nil || (args[0] != "list" && env.MachineID != hubOperatorMachineID) {
 		fmt.Fprintln(stderr, "jobs rejected: invalid operator token env")
 		return ExitConditionInvalid
 	}
@@ -703,7 +714,7 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	}
 	path, method := "/v1/jobs/orphaned", http.MethodGet
 	var body io.Reader
-	if args[0] == "jobs" {
+	if args[0] == "jobs" || args[0] == "list" {
 		path = "/v1/jobs"
 	}
 	if args[0] == "reassign" {
@@ -722,9 +733,23 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		fmt.Fprintln(stderr, "jobs rejected: invalid hub URL")
 		return ExitConditionInvalid
 	}
+	if env.MachineID != hubOperatorMachineID {
+		client.machineID = env.MachineID
+	}
 	var query url.Values
-	if args[0] == "jobs" && *machine != "" {
+	if args[0] == "list" || *includeCompleted {
 		query = url.Values{}
+		if args[0] == "list" {
+			query.Set("owner_lane", *lane)
+			query.Set("include_completed", "true")
+		} else {
+			query.Set("include_completed", "true")
+		}
+	}
+	if args[0] == "jobs" && *machine != "" {
+		if query == nil {
+			query = url.Values{}
+		}
 		query.Set("machine", *machine)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -738,6 +763,26 @@ func runJobsCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if response.StatusCode != http.StatusOK {
 		fmt.Fprintln(stderr, "jobs unavailable")
 		return ExitConditionInvalid
+	}
+	if args[0] == "list" {
+		data, err := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+		if err != nil {
+			return ExitInternal
+		}
+		var result struct {
+			Jobs []hubConsoleJob `json:"jobs"`
+		}
+		if json.Unmarshal(data, &result) != nil {
+			return ExitInternal
+		}
+		if *jsonOutput {
+			_, _ = stdout.Write(data)
+			return ExitOK
+		}
+		for _, job := range result.Jobs {
+			fmt.Fprintf(stdout, "%s\t%s\t%s\t%s\t%s\t%s\n", job.JobID, job.Pane, job.Machine, job.State, job.StartedAt, job.LastEventKind)
+		}
+		return ExitOK
 	}
 	if args[0] == "jobs" {
 		var result struct {

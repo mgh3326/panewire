@@ -376,8 +376,12 @@ func (h *HubServer) lateRegisterJobCompletion(machineID string, completion hubJo
 	if h.jobs[completion.JobID] != nil {
 		return false
 	}
+	ownerLane := completion.OwnerLane
+	if !validReportRelayLaneName(ownerLane) {
+		ownerLane = ""
+	}
 	h.jobs[completion.JobID] = &hubJobRecord{
-		HubActiveJob: HubActiveJob{JobID: completion.JobID, AgentLabel: completion.AgentLabel, Epoch: completion.Epoch},
+		HubActiveJob: HubActiveJob{JobID: completion.JobID, AgentLabel: completion.AgentLabel, Epoch: completion.Epoch, OwnerLane: ownerLane},
 		Node:         machineID,
 		LastSeen:     received,
 		Completed:    true,
@@ -446,6 +450,7 @@ func (h *HubServer) jobRecordStaleLocked(job *hubJobRecord, now time.Time) bool 
 
 type hubConsoleJob struct {
 	Machine       string `json:"machine"`
+	State         string `json:"state"`
 	JobID         string `json:"job_id"`
 	OwnerLane     string `json:"owner_lane,omitempty"`
 	Pane          string `json:"pane,omitempty"`
@@ -457,14 +462,25 @@ type hubConsoleJob struct {
 }
 
 func (h *HubServer) activeConsoleJobs(machine string) []hubConsoleJob {
+	return h.consoleJobs(machine, "", false)
+}
+
+func (h *HubServer) consoleJobs(machine, lane string, includeCompleted bool) []hubConsoleJob {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	jobs := make([]hubConsoleJob, 0)
-	for _, job := range h.activeJobRecordsLocked() {
-		if machine != "" && job.Node != machine {
+	now := h.now()
+	for _, job := range h.jobs {
+		if (!includeCompleted && job.Completed) || h.jobRecordStaleLocked(job, now) || (machine != "" && job.Node != machine) || (lane != "" && job.OwnerLane != lane) {
 			continue
 		}
-		jobs = append(jobs, hubConsoleJob{Machine: job.Node, JobID: job.JobID, OwnerLane: job.OwnerLane, Pane: job.Pane, Tier: job.Tier, Role: job.Role, StartedAt: job.StartedAt, LastEventKind: job.LastEventKind, LastEventAt: job.LastEventAt})
+		state := "active"
+		if job.Completed {
+			state = "completed"
+		} else if job.Orphaned {
+			state = "orphaned"
+		}
+		jobs = append(jobs, hubConsoleJob{Machine: job.Node, State: state, JobID: job.JobID, OwnerLane: job.OwnerLane, Pane: job.Pane, Tier: job.Tier, Role: job.Role, StartedAt: job.StartedAt, LastEventKind: job.LastEventKind, LastEventAt: job.LastEventAt})
 	}
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].JobID < jobs[j].JobID })
 	return jobs

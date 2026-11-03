@@ -1389,3 +1389,25 @@ Spawn refusals retain their exit codes and print an action to repair the
 specific missing flag, workspace, account, quota evidence, task binding, trust
 approval or harness launch failure. `panewire heavy` remains removed and points
 to load-based `panewire place`; it creates no host lock.
+
+### Lane job listing
+
+`panewire jobs list --lane LANE [--json]` lists active, orphaned, and completed
+retained jobs owned by the lane. Text rows contain job ID, pane, machine, state,
+start time, and last event kind. The command accepts `--hub-url`,
+`--hub-token-env`, and `--hub-cf-env`, defaulting to `PANEWIRE_HUB_URL`,
+`PANEWIRE_HUB_TOKEN_ENV`, and `PANEWIRE_HUB_CF_ENV` respectively.
+
+A node token may read only a lane registered on its own machine; jobs owned by
+that lane can have run on other machines. Requests for other lanes receive 403,
+and node requests without `owner_lane` receive 401. The hub trusts reporting
+nodes to attribute jobs to lanes: an active heartbeat or a late terminal event
+can name a lane registered on another machine, and the hub does not verify that
+the job belongs to that lane. A compromised node can therefore insert misleading
+entries into another lane’s listing. Authoritative job-to-lane proof is tracked
+in hk task 2720.
+
+An operator can list all
+active jobs as before with `panewire jobs jobs`; add `--include-completed` to
+include retained completed records. The hub does not track a separate reaped
+state, so a retained completed record can still appear after reap.
