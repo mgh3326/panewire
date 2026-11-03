@@ -15,7 +15,7 @@ func parsePlacementTags(raw string) ([]string, error) {
 	if raw == "" {
 		return nil, nil
 	}
-	if len(raw) > 1024 {
+	if len(raw) > 16*64+15 {
 		return nil, errors.New("at most 16 tags of 64 characters")
 	}
 	parts := strings.Split(raw, ",")

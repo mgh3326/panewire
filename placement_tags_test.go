@@ -59,7 +59,7 @@ func TestPlacementTagsKeepAcceptanceAndCapacityGuards(t *testing.T) {
 }
 func TestPlacementTagsRejectMalformedPolicyAndQuery(t *testing.T) {
 	policy := measuredLoadPolicy()
-	for _, tags := range []map[string][]string{{"operator": {"dagu"}}, {"bad host": {"dagu"}}, {"desktop": {"GPU"}}, {"desktop": {"dagu", "dagu"}}} {
+	for _, tags := range []map[string][]string{{"operator": {"dagu"}}, {"bad host": {"dagu"}}, {"desktop": {"GPU"}}, {"desktop": {"dagu", "dagu"}}, {"unconfigured": {"dagu"}}, {"unconfigured": {}}} {
 		policy.Tags = tags
 		raw, _ := json.Marshal(policy)
 		if _, err := ParsePlacementPolicy(raw); err == nil {
@@ -75,6 +75,37 @@ func TestPlacementTagsRejectMalformedPolicyAndQuery(t *testing.T) {
 		if reply.Code != 400 {
 			t.Fatalf("query=%s code=%d", query, reply.Code)
 		}
+	}
+}
+
+func TestPlacementTagsAcceptMaximumRequest(t *testing.T) {
+	tags := make([]string, 16)
+	for i := range tags {
+		tags[i] = strings.Repeat(string(rune('a'+i)), 64)
+	}
+	raw := strings.Join(tags, ",")
+	parsed, err := parsePlacementTags(raw)
+	if err != nil || len(parsed) != 16 {
+		t.Fatalf("maximum documented request refused: tags=%d err=%v", len(parsed), err)
+	}
+	for _, invalid := range []string{raw + "x", raw + ",extra"} {
+		if _, err := parsePlacementTags(invalid); err == nil {
+			t.Fatalf("oversized request accepted: %s", invalid)
+		}
+	}
+}
+
+func TestPlacementTagsRequirePolicyCandidates(t *testing.T) {
+	policy := measuredLoadPolicy()
+	policy.Tags = map[string][]string{policy.LocalMachine: {"dagu"}, policy.SpillTargets[0]: {"linux"}}
+	raw, _ := json.Marshal(policy)
+	if _, err := ParsePlacementPolicy(raw); err != nil {
+		t.Fatalf("local/spill tag keys refused: %v", err)
+	}
+	policy.SpillTargets = nil
+	raw, _ = json.Marshal(policy)
+	if _, err := ParsePlacementPolicy(raw); err == nil {
+		t.Fatal("removed candidate's stale tag key accepted")
 	}
 }
 func TestPlaceCLISendsCanonicalTags(t *testing.T) {

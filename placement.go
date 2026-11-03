@@ -127,6 +127,11 @@ func (p PlacementPolicy) valid() bool {
 		}
 		seen[target] = struct{}{}
 	}
+	for machine := range p.Tags {
+		if _, candidate := seen[machine]; !candidate {
+			return false
+		}
+	}
 	for machine, slots := range p.Machines {
 		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || slots.TaskSlots < 1 || slots.TaskSlots > 100 {
 			return false
