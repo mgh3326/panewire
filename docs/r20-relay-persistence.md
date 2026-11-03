@@ -234,6 +234,13 @@ The set's relationship to the shared `TERMINAL` set (the reap contract,
 | `job.escalate` | no | owner lane's parent | no |
 | `lane.event` | n/a | named lane | no |
 
+`wrk done` leaves two `job.completed` files in a job directory: the
+`internal/fleet/lifecycle.go` envelope, whose `owner_lane` can be the job's own
+lane, and the flat record `panewire emit` writes after it. The node scanner
+relays the flat record and skips an envelope of the same epoch. An envelope
+with no such record is the `relay=file-only` fallback. After one minute it is
+relayed to the lane `lifecycle.go` would have given emit.
+
 Every relayed `job.*` kind except `job.completed` must carry a non-empty
 `reason`, and `job.lost`/`job.revoked` additionally require a routable
 `owner_lane`; a record that cannot state why or name its lane is refused at
