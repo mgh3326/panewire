@@ -101,10 +101,30 @@ func validJobDoneResult(result JobDoneResult) bool {
 	return false
 }
 
+// The idle placeholders a harness draws in an empty composer. "only `empty`
+// permits closing" (docs/node-commands.md, "Reap composer adapter"), and a
+// visible read cannot see that a placeholder is dim, so each one is a whole
+// composer row matched exactly, and only where it proves nothing is unsent. A
+// new or unlisted placeholder reads as text and keeps the pane. The sources are
+// in the same section of the docs.
+const (
+	nodeCodexIdlePlaceholder = "Ask Codex to do anything"
+	nodeDevinIdlePlaceholder = "Ask Devin to build features, fix bugs, or work on your code"
+)
+
+// nodeCodexQueueHeadings title the rows codex draws above its composer for
+// messages it holds unsent; the composer shows its placeholder under them.
+var nodeCodexQueueHeadings = []string{
+	"• Messages to be submitted after next tool call",
+	"• Messages to be submitted at end of turn",
+	"• Queued follow-up inputs",
+}
+
 // nodeComposerState classifies a pane's input line from its visible screen.
 // Anything but a composer located and seen empty is never "empty", because
-// that answer lets a caller close the pane: a dim placeholder or a prompt
-// suggestion reads as text, which keeps the pane.
+// that answer lets a caller close the pane: a prompt suggestion or any
+// placeholder other than a harness's idle one reads as text, which keeps the
+// pane.
 func nodeComposerState(harness, screen string) string {
 	screen = strings.ReplaceAll(screen, "\r", "")
 	if strings.EqualFold(harness, "codex") {
@@ -136,15 +156,27 @@ func nodeComposerState(harness, screen string) string {
 	switch {
 	case !located:
 		return nodeComposerUnknown
-	case content != "":
-		return nodeComposerHasText
+	case content == "" || (strings.EqualFold(harness, "devin") && nodeDevinComposerIdle(screen)):
+		return nodeComposerEmpty
 	}
-	return nodeComposerEmpty
+	return nodeComposerHasText
+}
+
+// nodeDevinComposerIdle reports whether devin's composer region is exactly its
+// idle placeholder with no queue above it. It lives here, not in relayComposer,
+// because the relay's return guard must keep reading the placeholder as text.
+func nodeDevinComposerIdle(screen string) bool {
+	region, located := composerRegionWith(screen, isDevinDividerLine)
+	if !located || devinQueued(screen) {
+		return false
+	}
+	return strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(region), "❭")) == nodeDevinIdlePlaceholder
 }
 
 // nodeCodexComposerState follows mergewake's rule for codex, which draws no
 // dividers: the input starts on the last › line and runs, wrapped or
-// multi-line, until the first blank line above the footer.
+// multi-line, until the first blank line above the footer. That input may also
+// be exactly codex's idle placeholder, unless messages are queued above it.
 func nodeCodexComposerState(screen string) string {
 	lines := strings.Split(screen, "\n")
 	for index := len(lines) - 1; index >= 0; index-- {
@@ -152,7 +184,7 @@ func nodeCodexComposerState(screen string) string {
 		if !found {
 			continue
 		}
-		if strings.TrimSpace(rest) != "" {
+		if rest = strings.TrimSpace(rest); rest != "" && (rest != nodeCodexIdlePlaceholder || nodeCodexQueued(lines[:index])) {
 			return nodeComposerHasText
 		}
 		for _, next := range lines[index+1:] {
@@ -164,6 +196,20 @@ func nodeCodexComposerState(screen string) string {
 		return nodeComposerEmpty
 	}
 	return nodeComposerUnknown
+}
+
+// nodeCodexQueued reports whether the rows above the composer open a queue
+// section. A heading quoted in the transcript also matches, which keeps the pane.
+func nodeCodexQueued(above []string) bool {
+	for _, line := range above {
+		line = strings.TrimSpace(line)
+		for _, heading := range nodeCodexQueueHeadings {
+			if strings.HasPrefix(line, heading) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // nodeScreenTail returns the last lines of screen within the tail byte bound.
