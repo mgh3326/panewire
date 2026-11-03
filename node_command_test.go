@@ -138,7 +138,7 @@ func TestNodeCommandPaneCloseExactMatch(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			fake := &nodeFakeHerdr{agents: []string{nodeAgentList(test.listed)}}
+			fake := &nodeFakeHerdr{agents: []string{nodeAgentList(test.listed)}, read: nodeReapScreen("❯ ")}
 			result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}, nodeCommandPaneClose, expected)
 			if code != "" || result["outcome"] != test.outcome {
 				t.Fatalf("result=%v code=%q", result, code)
@@ -150,7 +150,7 @@ func TestNodeCommandPaneCloseExactMatch(t *testing.T) {
 		})
 	}
 
-	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"))}, closeErr: errors.New("close failed")}
+	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"))}, closeErr: errors.New("close failed"), read: nodeReapScreen("❯ ")}
 	if _, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}, nodeCommandPaneClose, expected); code != "close_failed" {
 		t.Fatalf("failed close code=%q", code)
 	}
@@ -489,7 +489,7 @@ func TestNodeCommandArgsRequireEveryField(t *testing.T) {
 }
 
 func nodeAgentSeqJSON(pane, status string, seq int) string {
-	return `{"pane_id":"` + pane + `","name":"job-a","agent_status":"` + status + `","cwd":"/work/a","state_change_seq":` + strconv.Itoa(seq) + `}`
+	return `{"pane_id":"` + pane + `","name":"job-a","agent_status":"` + status + `","agent":"claude","cwd":"/work/a","state_change_seq":` + strconv.Itoa(seq) + `}`
 }
 
 // TestNodeCommandPaneCloseSettles pins the close guard herdr cannot give
@@ -510,7 +510,7 @@ func TestNodeCommandPaneCloseSettles(t *testing.T) {
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
-			fake := &nodeFakeHerdr{agents: test.reads}
+			fake := &nodeFakeHerdr{agents: test.reads, read: nodeReapScreen("❯ ")}
 			settle := 40 * time.Millisecond
 			started := time.Now()
 			result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: settle}, nodeCommandPaneClose, expected)
@@ -526,9 +526,9 @@ func TestNodeCommandPaneCloseSettles(t *testing.T) {
 			for _, call := range fake.calls {
 				sequence = append(sequence, strings.Join(call[:2], " "))
 			}
-			want := "agent list,agent list"
+			want := "agent list,pane read,agent list"
 			if test.outcome == nodePaneClosed {
-				want += ",pane close"
+				want += ",pane read,pane close"
 			}
 			if strings.Join(sequence, ",") != want {
 				t.Fatalf("herdr calls %v, want %s", sequence, want)
@@ -536,11 +536,53 @@ func TestNodeCommandPaneCloseSettles(t *testing.T) {
 		})
 	}
 
-	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 5))}}
+	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 5))}, read: nodeReapScreen("❯ ")}
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	raw, _ := json.Marshal(expected)
 	if _, code := (&HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Hour}).runNodeCommand(ctx, nodeCommandPaneClose, raw); code != "herdr_failed" || fake.called("pane", "close") != 0 {
 		t.Fatalf("cancelled settle code=%q calls=%v", code, fake.calls)
+	}
+}
+
+func TestNodeCommandPaneCloseRechecksComposer(t *testing.T) {
+	for _, change := range []string{"empty", "draft", "unknown", "read error", "already drafted", "missing harness"} {
+		t.Run(change, func(t *testing.T) {
+			fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentSeqJSON("w1:p1", "idle", 5))}, read: nodeReapScreen("❯ ")}
+			if change == "missing harness" {
+				fake.agents[0] = strings.ReplaceAll(fake.agents[0], `"agent":"claude",`, "")
+			}
+			reads := 0
+			runner := func(ctx context.Context, args ...string) ([]byte, error) {
+				if strings.Join(args, " ") == "pane read w1:p1 --source visible" {
+					reads++
+					if reads == 2 || change == "already drafted" {
+						switch change {
+						case "draft", "already drafted":
+							fake.read = nodeReapScreen("❯ unsent operator draft")
+						case "unknown":
+							fake.read = "no recognized composer"
+						case "read error":
+							fake.readErr = errors.New("screen unavailable")
+						}
+					}
+				}
+				return fake.run(ctx, args...)
+			}
+			expected := map[string]any{"pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "/work/a"}
+			result, code := nodeRun(t, &HubClient{nodeHerdr: runner, nodeCloseSettle: time.Millisecond}, nodeCommandPaneClose, expected)
+			want := nodePaneChanged
+			closes := 0
+			if change == "empty" {
+				want = nodePaneClosed
+				closes = 1
+			}
+			if code != "" || result["outcome"] != want || fake.called("pane", "close") != closes {
+				t.Fatalf("unsafe close: result=%v code=%s calls=%v", result, code, fake.calls)
+			}
+			if change != "already drafted" && change != "missing harness" && reads != 2 {
+				t.Fatalf("composer reads=%d", reads)
+			}
+		})
 	}
 }

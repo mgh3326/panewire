@@ -326,7 +326,7 @@ func (client *HubClient) nodeLifecycleRunner() relayCommandRunner {
 	}
 	return func(ctx context.Context, args ...string) ([]byte, error) {
 		var output, errors bytes.Buffer
-		err := fleet.ExecuteLifecycle(ctx, args, &output, &errors)
+		err := fleet.ExecuteLifecycle(ctx, client.jobsInboxRoot, args, &output, &errors)
 		return output.Bytes(), err
 	}
 

@@ -12,6 +12,9 @@ func TestActionableSpawnRefusals(t *testing.T) {
 	}{
 		{"agent not in foreground; brief withheld", "harness binary", exitConfig},
 		{"workspace workers not found", "herdr workspace list", exitConfig},
+		{"workspace trust: malformed workspace trust store", "Repair", exitConfig},
+		{"workspace trust: refusing broad workspace trust", "specific worktree", exitConfig},
+		{"workspace trust: permission denied", "trust store", exitConfig},
 		{"brief is empty", "-p", exitUsage},
 		{"active duplicate job job-a", "panewire find", exitDuplicate},
 		{"task scale does not match --t", "--t", exitSeatRefused},
@@ -22,5 +25,9 @@ func TestActionableSpawnRefusals(t *testing.T) {
 		if code(err) != test.status || !strings.Contains(spawnRefusalFix(err), test.fix) {
 			t.Fatalf("%s: code=%d fix=%s", test.message, code(err), spawnRefusalFix(err))
 		}
+	}
+	err := trustPromptError("/work/project")
+	if code(err) != exitTrustPrompt || !strings.Contains(spawnRefusalFix(err), "executing CODEX_HOME") {
+		t.Fatalf("real Codex trust refusal: code=%d fix=%s", code(err), spawnRefusalFix(err))
 	}
 }

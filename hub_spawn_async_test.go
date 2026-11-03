@@ -167,6 +167,10 @@ func TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	task, err = h.inbox.store.bindSpawn(t.Context(), req.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(983), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300})
+	if err != nil {
+		t.Fatal(err)
+	}
 	result := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: "unknown", Host: "machine-a", Profile: "model-a", Role: "worker", StageMS: map[string]int64{"claim": 5, "placement": 20, "checkout": 30, "launch": 40, "landing": 50}}
 	if _, err = h.inbox.store.completeSpawn(t.Context(), task, result, time.Now()); err != nil {
 		t.Fatal(err)

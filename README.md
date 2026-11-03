@@ -44,7 +44,7 @@ Pane observation and delivery commands include:
 
 The durable inbox, job ledger and verified pane operations preserve evidence as the hub coordinates placement and lifecycle.
 
-Spawning is the responsibility of `panewire`; panewire is a messaging and monitoring layer for sessions that are already alive.
+Spawn requests are submitted through `panewire spawn`, `work`, and `lead`; the hub coordinates placement and execution on the selected node. Panewire also observes sessions and delivers messages.
 
 See [docs/design.md](docs/design.md) for the complete contract and acceptance criteria.
 
@@ -223,7 +223,7 @@ pre-landing failures permit a same-id retry on that host, while live duplicates
 still refuse with exit 74. Refusals include the corrective action.
 
 See [spawn configuration and exit statuses](docs/config.md) and
-[import evidence](docs/spawn-import.md). This replaces panewire; no compatibility
+[import evidence](docs/spawn-import.md). This replaces runtug; no compatibility
 binary or forwarding shim is installed. The remaining hub orchestration and
 caller changes ship in the coordinated cutover before old binaries are removed.
 

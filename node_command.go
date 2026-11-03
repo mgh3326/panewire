@@ -13,6 +13,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // Node commands (docs/node-commands.md) are operator-authenticated hub→node
@@ -38,7 +40,7 @@ const (
 	nodeCommandMaxPathBytes   = 4096
 	// nodePaneCloseSettle separates the two re-reads pane.close requires
 	// before it closes; see nodePaneClose.
-	nodePaneCloseSettle = 2 * time.Second
+	nodePaneCloseSettle = fleet.FailedSpawnCloseSettle
 )
 
 // Closed outcome vocabularies. pane.close mirrors mergewake reap's reclose
@@ -517,7 +519,8 @@ func (client *HubClient) nodePaneMatch(ctx context.Context, paneID, name, status
 }
 
 // nodePaneClose closes a pane only after two matching re-reads a settle
-// interval apart, the second immediately before the close. herdr has no
+// interval apart, each followed by a proven-empty visible composer read.
+// The second composer read is immediately before the close. herdr has no
 // conditional close, so a pane can still go back to work between the last
 // read and `herdr pane close`; requiring the finished state to hold across
 // the interval — with an unchanged state_change_seq where herdr reports one,
@@ -530,6 +533,13 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 	}
 	if outcome != "" {
 		return nodePaneCloseResult{Outcome: outcome}, ""
+	}
+	composerEmpty := func(row nodeHerdrRow) bool {
+		screen, err := client.nodeHerdrRunner()(ctx, "pane", "read", args.PaneID, "--source", "visible")
+		return err == nil && nodeComposerState(row.Agent, string(screen)) == nodeComposerEmpty
+	}
+	if !composerEmpty(first) {
+		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
 	settle := client.nodeCloseSettle
 	if settle == 0 {
@@ -550,6 +560,9 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 		return nodePaneCloseResult{Outcome: outcome}, ""
 	}
 	if first.StateChangeSeq != nil && second.StateChangeSeq != nil && *first.StateChangeSeq != *second.StateChangeSeq {
+		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
+	}
+	if !composerEmpty(second) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
 	}
 	if _, err := client.nodeHerdrRunner()(ctx, "pane", "close", args.PaneID); err != nil {

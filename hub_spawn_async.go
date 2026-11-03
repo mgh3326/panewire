@@ -237,7 +237,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		}
 	}()
 	if !h.now().Before(task.Deadline) {
-		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task)})
+		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Host: spawnTaskHost(task), Retryable: task.Node == nil})
 		if task.Node == nil {
 			return
 		}
@@ -264,6 +264,10 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err != nil {
 		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 78, Stage: "placement", Reason: "configuration", Retryable: true})
+		return
+	}
+	if ctx.Err() != nil {
+		h.finishSpawnOutcome(task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout", Retryable: true})
 		return
 	}
 	outcome := hubSpawnOutcome{Stage: "placement", StageMS: map[string]int64{}}
@@ -369,6 +373,11 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 	if oldNode {
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_capability_required"}
 	}
+	if t.bound {
+		// A definitive node refusal already completed this attempt. An engine
+		// busy retry must not bind a second request or replay the old journal id.
+		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+	}
 	raw, err := json.Marshal(req)
 	if err != nil {
 		return fleet.HubSpawnReply{}, err
@@ -405,15 +414,16 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	h.spawnRecords[node.RequestID] = entry
 	h.mu.Unlock()
 	message := struct {
-		Type        string            `json:"type"`
-		RequestID   string            `json:"request_id"`
-		CWDKey      string            `json:"cwd_key"`
-		Brief       hubSpawnBrief     `json:"brief"`
-		Checkout    *hubSpawnCheckout `json:"checkout,omitempty"`
-		Args        []string          `json:"args"`
-		WaitSeconds int               `json:"wait_seconds"`
-		DeadlineMS  int64             `json:"deadline_ms,omitempty"`
-	}{"job.spawn", node.RequestID, node.CWDKey, node.Brief, node.Checkout, node.Args, node.WaitSeconds, node.DeadlineMS}
+		OperatorAuthorized bool              `json:"operator_authorized"`
+		Type               string            `json:"type"`
+		RequestID          string            `json:"request_id"`
+		CWDKey             string            `json:"cwd_key"`
+		Brief              hubSpawnBrief     `json:"brief"`
+		Checkout           *hubSpawnCheckout `json:"checkout,omitempty"`
+		Args               []string          `json:"args"`
+		WaitSeconds        int               `json:"wait_seconds"`
+		DeadlineMS         int64             `json:"deadline_ms,omitempty"`
+	}{true, "job.spawn", node.RequestID, node.CWDKey, node.Brief, node.Checkout, node.Args, node.WaitSeconds, node.DeadlineMS}
 	if agent.writeJSON(message) != nil {
 		return t.unknown(ctx, "disconnected")
 	}
@@ -431,7 +441,7 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		if stage == "" {
 			stage = "placement"
 		}
-		outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m")}
+		outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m")}
 		if outcome.StageMS == nil {
 			outcome.StageMS = map[string]int64{}
 		}
@@ -442,8 +452,8 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 			outcome.Model = result.Receipt.Model
 			outcome.Role = result.Receipt.Role
 		}
-		if outcome.RC != 0 && !outcome.Retryable && outcome.RC != 74 && outcome.Reason != "timeout" {
-			outcome.Reason = "unknown"
+		if outcome.RC != 0 && outcome.Reason == "" {
+			outcome.Reason = "spawn_failed"
 		}
 		changed, err := h.inbox.store.completeSpawn(h.closeCtx, t.task, outcome, h.now().UTC())
 		if err != nil {

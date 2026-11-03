@@ -2,6 +2,8 @@ package fleet
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -172,13 +174,17 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if repo == nil || repo.url == "" {
 		return Submission{}, fail(exitUsage, "checkout has no usable origin; configure origin and push the branch before spawn")
 	}
+	if repo.rel != "" {
+		return Submission{}, fail(exitPlacement, "hub_subdirectory_unsupported: pass -c with the checkout root before submitting")
+	}
 	if repo.wt == "" {
 		repo.sourceDir = cwd
 		repo.branch = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "branch", "--show-current").Out)
 		repo.head = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "rev-parse", "HEAD").Out)
 		repo.wt = s.Job
 		if len(repo.wt) > 110 {
-			repo.wt = repo.wt[:110]
+			sum := sha256.Sum256([]byte(s.Job))
+			repo.wt = repo.wt[:40] + "-" + hex.EncodeToString(sum[:])
 		}
 		repo.wt += "-checkout"
 	}
@@ -220,6 +226,9 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	if !isNumeric(s.Task) && s.ParentJob == "" {
 		return s, fail(exitUsage, "supply --task TASK_ID or --parent-job JOB")
 	}
+	if s.Task != "" && s.ParentJob != "" {
+		return s, fail(exitUsage, "--task and --parent-job are exclusive")
+	}
 	if s.Role == "builder" {
 		if s.Lane == "" || s.Parent == "" || s.Owner != "" || s.Task == "" {
 			return s, fail(exitUsage, "builder requires --lane --parent --task without --owner")
@@ -234,8 +243,8 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	if !validID(repo.Name) || repo.Worktree != "" && !validID(repo.Worktree) || !filepath.IsAbs(repo.LocalRoot) || !cloneURL.MatchString(repo.Origin) || credentialedURL(repo.Origin) || strings.ContainsAny(repo.Origin+repo.LocalRoot, "\x00\r\n") {
 		return s, fail(exitUsage, "invalid repository descriptor; use a credential-free origin and a safe checkout name")
 	}
-	if repo.Relative != "" && !hubReportRelativeOK(repo.Relative) {
-		return s, fail(exitUsage, "invalid repository subdirectory")
+	if repo.Relative != "" {
+		return s, fail(exitPlacement, "hub_subdirectory_unsupported: use the checkout root before submitting")
 	}
 	return s, nil
 }

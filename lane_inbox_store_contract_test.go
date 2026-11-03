@@ -787,6 +787,21 @@ func TestLaneInboxStoreSpawnDurabilityContract(t *testing.T) {
 			if err != nil || fresh || replay.Request.RequestID != task.Request.RequestID {
 				t.Fatalf("restart replay %v %v", fresh, err)
 			}
+			if _, err = store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout"}, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			task, err = second.spawnTask(t.Context(), request.RequestID)
+			if err != nil || task.Status != "retryable" {
+				t.Fatalf("unbound timeout retained ownership: %+v %v", task, err)
+			}
+			task, err = second.resumeCleanedSpawn(t.Context(), task, time.Now())
+			if err != nil || task.Attempt != 2 {
+				t.Fatalf("same-key retry: %+v %v", task, err)
+			}
+			task, err = store.bindSpawn(t.Context(), request.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(984), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300})
+			if err != nil {
+				t.Fatal(err)
+			}
 			if _, err = store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Retryable: true}, time.Now()); err != nil {
 				t.Fatal(err)
 			}
@@ -794,7 +809,7 @@ func TestLaneInboxStoreSpawnDurabilityContract(t *testing.T) {
 				t.Fatal(err)
 			}
 			var notifications int
-			if err = second.db.QueryRow(`SELECT count(*) FROM spawn_notifications`).Scan(&notifications); err != nil || notifications != 2 {
+			if err = second.db.QueryRow(`SELECT count(*) FROM spawn_notifications`).Scan(&notifications); err != nil || notifications != 3 {
 				t.Fatalf("outbox %d %v", notifications, err)
 			}
 			if _, err = store.db.Exec(`UPDATE spawn_notifications SET delivered=1`); err != nil {

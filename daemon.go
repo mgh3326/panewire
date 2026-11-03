@@ -64,6 +64,9 @@ func NewDaemon(cfg Config) *Daemon {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	if cfg.Hub.Client != nil && cfg.Hub.Client.spawnJournalDir == "" && filepath.IsAbs(cfg.DBPath) {
+		cfg.Hub.Client.spawnJournalDir = filepath.Join(filepath.Dir(cfg.DBPath), "spawn")
+	}
 	return &Daemon{cfg: cfg, store: cfg.Store}
 }
 func (d *Daemon) RecordSchemaGuard(ctx context.Context, g GuardResult, phase string) error {

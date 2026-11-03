@@ -23,7 +23,8 @@ lanes or jobs, and rm removes only its own lanes no foreign machine
 references. self-check requires an operator file.`
 
 const jobsUsage = `Usage:
-  panewire jobs jobs [--machine MACHINE] ` + hubCredentialUsage + `
+  panewire jobs list --lane LANE [--json] ` + hubCredentialUsage + `
+  panewire jobs jobs [--machine MACHINE] [--include-completed] ` + hubCredentialUsage + `
   panewire jobs orphaned ` + hubCredentialUsage + `
   panewire jobs reassign --job-id JOB --to MACHINE ` + hubCredentialUsage
 
