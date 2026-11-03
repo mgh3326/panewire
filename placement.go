@@ -20,9 +20,10 @@ import (
 // PlacementPolicy is deliberately small and operator-owned. It selects a
 // local machine first, then considers spill targets in the listed order.
 type PlacementPolicy struct {
-	LocalMachine  string   `json:"local_machine"`
-	SpillTargets  []string `json:"spill_targets"`
-	MaxActiveJobs int      `json:"max_active_jobs"`
+	Tags          map[string][]string `json:"tags,omitempty"`
+	LocalMachine  string              `json:"local_machine"`
+	SpillTargets  []string            `json:"spill_targets"`
+	MaxActiveJobs int                 `json:"max_active_jobs"`
 	// LoadRatio is retired: placement no longer filters on load, the measured
 	// load only ranks candidates (docs/placement.md). It stays decodable, and
 	// optional, so an existing policy file still loads.
@@ -106,6 +107,9 @@ func DefaultPlacementPolicy() PlacementPolicy {
 }
 
 func (p PlacementPolicy) valid() bool {
+	if !validPlacementHostTags(p.Tags) {
+		return false
+	}
 	if !machineIDPattern.MatchString(p.LocalMachine) || p.LocalMachine == hubOperatorMachineID || p.MaxActiveJobs < 1 || p.MaxActiveJobs > 10000 || p.LoadRatio < 0 || p.LoadRatio > 100 ||
 		p.SpawnBridgeSeconds < 0 || p.SpawnBridgeSeconds > int(maxPlacementSpawnBridge/time.Second) ||
 		!(p.SwapInHalfMBps >= 0 && p.SwapInHalfMBps <= maxPlacementSwapInHalfMBps) ||
@@ -122,6 +126,11 @@ func (p PlacementPolicy) valid() bool {
 			return false
 		}
 		seen[target] = struct{}{}
+	}
+	for machine := range p.Tags {
+		if _, candidate := seen[machine]; !candidate {
+			return false
+		}
 	}
 	for machine, slots := range p.Machines {
 		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || slots.TaskSlots < 1 || slots.TaskSlots > 100 {
@@ -514,7 +523,12 @@ func (h *HubServer) handlePlacement(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid placement class", http.StatusBadRequest)
 		return
 	}
-	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"))
+	tags, err := parsePlacementTags(r.URL.Query().Get("tags"))
+	if err != nil || len(r.URL.Query()["tags"]) > 1 {
+		http.Error(w, "invalid placement tags; supply one --tags a,b list", http.StatusBadRequest)
+		return
+	}
+	result := h.placement(r.Context(), class, r.URL.Query().Get("cwd"), tags...)
 	writeJSON(w, http.StatusOK, placementWire(result, r.URL.Query().Get("signals") == "1"))
 }
 
@@ -535,9 +549,12 @@ func placementWire(result PlacementResult, withSignals bool) PlacementResult {
 	return result
 }
 
-func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementResult {
+func (h *HubServer) placement(ctx context.Context, class, cwd string, tags ...string) PlacementResult {
 	now := h.now().UTC()
 	key := class + "\x00" + cwd
+	if len(tags) > 0 {
+		key += "\x00" + strings.Join(tags, ",")
+	}
 	h.mu.Lock()
 	h.reloadPlacementPolicyLocked()
 	if h.placementCache.key == key && now.Sub(h.placementCache.at) < 30*time.Second {
@@ -559,7 +576,12 @@ func (h *HubServer) placement(ctx context.Context, class, cwd string) PlacementR
 		source = "hub-only"
 		metrics = placementMetrics{}
 	}
-	result := h.makePlacement(policy, metrics, source, now)
+	var result PlacementResult
+	if len(tags) > 0 {
+		result = h.makeTaggedPlacement(policy, metrics, source, now, tags)
+	} else {
+		result = h.makePlacement(policy, metrics, source, now)
+	}
 	result.PolicyStatus = policyStatus
 	h.mu.Lock()
 	h.placementCache = placementCache{key: key, at: now, result: result}
