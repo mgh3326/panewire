@@ -5,13 +5,67 @@ import (
 	"strings"
 )
 
+// parentJobNotFound is a --parent-job that resolved to no record after the
+// bounded wait, as opposed to a job store that could not answer.
+type parentJobNotFound struct{ cause error }
+
+func (e *parentJobNotFound) Error() string { return e.cause.Error() }
+func (e *parentJobNotFound) Unwrap() error { return e.cause }
+
+// quotaHostRefusal is a target host's quota the hub could not confirm, with the
+// shared-observation reason (no_usable_presence, stale, measure_failed, ...).
+type quotaHostRefusal struct {
+	cause  error
+	reason string
+}
+
+func (e *quotaHostRefusal) Error() string { return e.cause.Error() }
+func (e *quotaHostRefusal) Unwrap() error { return e.cause }
+
+// AdmissionRefusalReason is the stable reason code for a spawn refused before
+// any node was bound. docs/hub-spawn-operations.md lists the codes.
+func AdmissionRefusalReason(err error) string {
+	var parent *parentJobNotFound
+	if errors.As(err, &parent) {
+		return "parent_job_not_found"
+	}
+	var quota *quotaHostRefusal
+	if errors.As(err, &quota) {
+		return "quota_unconfirmed:" + quota.reason
+	}
+	if exitCode(err) == exitEvictionUnconfirmed {
+		return "quota_unconfirmed"
+	}
+	return "admission_refused"
+}
+
+// SpawnRefusalFix is the repair hint for a refusal the hub observed in-process.
+func SpawnRefusalFix(err error) string { return spawnRefusalFix(err) }
+
 func spawnRefusalFix(err error) string {
 	var exit *ExitError
 	if errors.As(err, &exit) && exit.Code == exitTrustPrompt {
 		return "Approve only this worktree in the executing CODEX_HOME, then repeat the same command; the brief was withheld until trust is confirmed."
 	}
+	var parent *parentJobNotFound
+	if errors.As(err, &parent) {
+		return "Pass --parent-job with an existing job id, or use --task TASK_ID for top-level work; the job id may have been mistyped or never landed."
+	}
+	var quota *quotaHostRefusal
+	if errors.As(err, &quota) {
+		if quota.reason == "no_usable_presence" {
+			return "No host measurement names an account for this pool on the target. Refresh the pool on a host that holds it with pacelever refresh POOL, or choose a host that does."
+		}
+		return "Refresh the named pool on the target with pacelever refresh POOL, confirm a fresh observation of its account, then retry."
+	}
 	message := err.Error()
 	for _, fix := range []struct{ match, hint string }{
+		// These name a path or an id, which the broader matches below could hit.
+		{"symlink path refused", "Replace the named symlink with a real directory or point the executing node's jobs root at a symlink-free path, then replay the request."},
+		{"report must be under", "Pass --report inside this job's own jobs/JOB directory, or its --parent-job directory, then retry."},
+		{"cwd is not a directory", "Run panewire preflight --json on the executing node and repair its checkout or spawn.json.cwd_map path, then replay the request."},
+		{"task does not exist", "Run handoffkeep tasks show TASK_ID on the executing node; if the task exists, that node's handoffkeep points at another server."},
+		{"task has another claimant", "Run handoffkeep tasks show TASK_ID, then release or rebind the stale claim, or use a different task for new work."},
 		{"OMP_SETUP_WIZARD", "The installed omp no longer honors OMP_SKIP_SETUP. Run omp once on the executing host to finish setup, then repeat the same command after cleanup succeeds."},
 		{"agent not in foreground", "Inspect the failed pane with panewire find JOB, verify the selected harness binary starts on that host, then repeat the same command after cleanup succeeds."},
 		{"refusing broad workspace trust", "Pass -c with the specific worktree path; do not grant trust to a broad parent directory."},

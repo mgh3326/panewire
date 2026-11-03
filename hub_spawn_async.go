@@ -159,7 +159,8 @@ func (h *HubServer) handleSpawnOperation(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
 		return
 	}
-	// Never expose the persisted brief, argv or local paths through status reads.
+	// Never expose the persisted brief, argv or submitting paths through status
+	// reads. A reason's refusal text may name a path on the executing node.
 	writeJSON(w, 200, struct {
 		Job     string          `json:"job_id"`
 		Request string          `json:"request_id"`
@@ -316,7 +317,11 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		return
 	} // Restart resumes durable accepted ownership.
 	outcome.RC = fleet.ErrorCode(err)
-	outcome.Reason = "admission_refused"
+	outcome.Reason = fleet.AdmissionRefusalReason(err)
+	if err != nil {
+		outcome.Reason = spawnOutcomeReason(outcome.Reason, spawnRefusalLine(err.Error()))
+		outcome.Fix = utf8PrefixWithin(spawnRefusalLine(fleet.SpawnRefusalFix(err)), 512)
+	}
 	if err != nil && strings.Contains(err.Error(), "hub_spawn_capability_required") {
 		outcome.Reason = "node_upgrade_required"
 		outcome.Fix = "Upgrade the selected node panewire to advertise spawn_ops_v1, then replay the saved request."
@@ -455,6 +460,9 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		if outcome.RC != 0 && outcome.Reason == "" {
 			outcome.Reason = "spawn_failed"
 		}
+		if outcome.RC != 0 {
+			outcome.Reason = spawnOutcomeReason(outcome.Reason, spawnResultRefusal(result.StdoutTail))
+		}
 		changed, err := h.inbox.store.completeSpawn(h.closeCtx, t.task, outcome, h.now().UTC())
 		if err != nil {
 			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
@@ -543,19 +551,19 @@ func (h *HubServer) flushSpawnNotifications(ctx context.Context) {
 	}
 	store := h.inbox.store
 	op, done := store.op(ctx)
-	rows, err := store.db.QueryContext(op, `SELECT event_id,job,owner,result,created_ms FROM spawn_notifications WHERE delivered=0 ORDER BY created_ms LIMIT 32`)
+	rows, err := store.db.QueryContext(op, `SELECT event_id,request_id,job,owner,result,created_ms FROM spawn_notifications WHERE delivered=0 ORDER BY created_ms LIMIT 32`)
 	if err != nil {
 		done()
 		return
 	}
 	type notification struct {
-		id, job, owner, raw string
-		at                  int64
+		id, request, job, owner, raw string
+		at                           int64
 	}
 	var batch []notification
 	for rows.Next() {
 		var n notification
-		if rows.Scan(&n.id, &n.job, &n.owner, &n.raw, &n.at) != nil {
+		if rows.Scan(&n.id, &n.request, &n.job, &n.owner, &n.raw, &n.at) != nil {
 			break
 		}
 		batch = append(batch, n)
@@ -567,25 +575,12 @@ func (h *HubServer) flushSpawnNotifications(ctx context.Context) {
 		if json.Unmarshal([]byte(n.raw), &result) != nil {
 			continue
 		}
-		text := fmt.Sprintf("[panewire] SPAWN_FAILED %s rc=%d stage=%s reason=%s", n.job, result.RC, result.Stage, result.Reason)
-		if result.RC != 0 {
-			fix := result.Fix
-			if fix == "" {
-				fix = "Inspect the saved operation and executing node before retrying; preserve unknown ownership."
-			}
-			text += " fix=" + fix
-		}
-		if result.RC == 0 {
-			text = fmt.Sprintf("[panewire] SPAWNED %s host=%s pane=%s model=%s", n.job, result.Host, result.Pane, result.Model)
-		}
-		event := hubJobEventPayload{EventID: n.id, JobID: n.job, OwnerLane: n.owner, NotifyType: "report", Text: text, Host: "hub", Epoch: 1}
 		if h.handoffkeep == nil {
 			continue
 		}
-		stored, _, persisted := h.persistRelayEventRecord(ctx, "lane.event", event, reportRelayRoute{Machine: "hub"})
-		if !persisted || stored.ID == 0 {
-			continue
-		}
+		event := hubJobEventPayload{EventID: n.id, JobID: n.job, OwnerLane: n.owner, NotifyType: spawnNotificationType(result), Text: spawnNotificationText(n.job, n.request, result), Host: "hub", Epoch: 1}
+		// The relay owns the durable write. Persisting here first makes its own
+		// POST a 200 duplicate, which it leaves to replay instead of injecting.
 		delivered := h.relayLaneEventContext(ctx, event, nil)
 		if delivered.ID == 0 {
 			continue
@@ -594,6 +589,27 @@ func (h *HubServer) flushSpawnNotifications(ctx context.Context) {
 		_, _ = store.db.ExecContext(op, store.q(`UPDATE spawn_notifications SET delivered=1 WHERE event_id=?`), n.id)
 		done()
 	}
+}
+
+// spawnNotificationType keeps a failed spawn out of the owner's digest: the
+// submitter only saw ACCEPTED, so nothing else tells it the work did not start.
+func spawnNotificationType(result hubSpawnOutcome) string {
+	if result.RC != 0 {
+		return "automation-failed"
+	}
+	return "report"
+}
+
+func spawnNotificationText(job, request string, result hubSpawnOutcome) string {
+	if result.RC == 0 {
+		return fmt.Sprintf("[panewire] SPAWNED %s host=%s pane=%s model=%s", job, result.Host, result.Pane, result.Model)
+	}
+	fix := result.Fix
+	if fix == "" {
+		fix = "Inspect the saved operation and executing node before retrying; preserve unknown ownership."
+	}
+	text := fmt.Sprintf("[panewire] SPAWN_FAILED %s request=%s rc=%d stage=%s reason=%s fix=%s", job, request, result.RC, result.Stage, spawnRefusalLine(result.Reason), spawnRefusalLine(fix))
+	return utf8PrefixWithin(text, laneEventTextLimit)
 }
 
 // Node results stay in the node's private journal indefinitely, so ACK loss and
@@ -620,6 +636,67 @@ func spawnReceiptCheckoutPath(cwd, dir, lane string) bool {
 		return true
 	}
 	return (lane == "live" || lane == "mock") && filepath.Base(cwd) == lane && filepath.Base(filepath.Dir(cwd)) == dir
+}
+
+// hubSpawnReasonLimit bounds an outcome reason: it is read back through the
+// status API and quoted in the owner lane's SPAWN_FAILED event.
+const hubSpawnReasonLimit = 768
+
+// spawnOutcomeReason appends the refusal text to a stable reason code. The
+// status codes completeSpawn and spawnOutcomeStatus compare stay bare.
+func spawnOutcomeReason(code, refusal string) string {
+	switch code {
+	case "timeout", "disconnected", "unknown":
+		return code
+	}
+	if refusal == "" {
+		return code
+	}
+	return utf8PrefixWithin(code+": "+refusal, hubSpawnReasonLimit)
+}
+
+// spawnResultRefusal reads what the fleet App refused with from a node result
+// tail ("<stdout>\nstderr: <lines>\nFix: <fix>"; see hubSpawnTailWithStderr).
+// A config refusal carries its rule in stdout and only the fix on stderr. The
+// tail is bounded from the front, so the error survives and warnings go first.
+func spawnResultRefusal(tail string) string {
+	lines := strings.Split(tail, "\n")
+	start := -1
+	for i, line := range lines {
+		if strings.HasPrefix(line, "stderr: ") {
+			start = i
+		}
+	}
+	if start < 0 {
+		return ""
+	}
+	section := append([]string{strings.TrimPrefix(lines[start], "stderr: ")}, lines[start+1:]...)
+	for i := len(section) - 1; i >= 0; i-- {
+		if strings.HasPrefix(section[i], "Fix: ") {
+			section = section[:i]
+			break
+		}
+	}
+	text := strings.TrimSpace(strings.Join(section, "\n"))
+	if text == "" && start > 0 {
+		text = lines[start-1]
+	}
+	return spawnRefusalLine(text)
+}
+
+// spawnRefusalLine makes refusal text safe to store and relay: redacted, on one
+// line (handoffkeep rejects control characters) and bounded from its tail.
+func spawnRefusalLine(text string) string {
+	lines := strings.FieldsFunc(fleetEventRedact(text), func(r rune) bool { return r == '\n' || r == '\r' })
+	for i, line := range lines {
+		lines[i] = strings.TrimSpace(strings.Map(func(r rune) rune {
+			if r < 32 || r >= 0x7f && r <= 0x9f {
+				return ' '
+			}
+			return r
+		}, line))
+	}
+	return utf8SuffixWithin(strings.Join(lines, "; "), hubSpawnReasonLimit-64)
 }
 
 func spawnResultFix(tail string) string {

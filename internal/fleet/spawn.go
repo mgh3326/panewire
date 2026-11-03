@@ -272,6 +272,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	builderFamily := s.ParentFamily
 	if s.ParentJob != "" {
 		j, e := a.resolveParent(ctx, s.ParentJob)
+		if errors.Is(e, errJobNotFound) {
+			return &parentJobNotFound{fail(exitStateConflict, "parent job %s not found: --parent-job must name an existing job", s.ParentJob)}
+		}
 		if e != nil {
 			return fail(exitStateConflict, "parent metadata unreadable: %v", e)
 		}
