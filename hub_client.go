@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strconv"
@@ -66,6 +67,7 @@ type HubClientConfig struct {
 	// SpawnConfigPath is the local, operator-provisioned job.spawn policy.
 	// It is injectable so tests never consult a user's real configuration.
 	SpawnConfigPath     string
+	SpawnJournalDir     string
 	relayCommand        relayCommandRunner                               // fixture seam for agent get/wait.
 	relayInject         func(context.Context, string, string) bool       // fixture seam
 	hostLoadCollector   func(context.Context) (HubHostLoad, error)       // fixture seam
@@ -157,25 +159,28 @@ type HubClient struct {
 	panesAliveMu     sync.Mutex
 	// paneIdleSince is the first heartbeat at which each pane was idle or
 	// done (hub_jobs_idle.go).
-	paneIdleSince   map[string]time.Time
-	paneIdleMu      sync.Mutex
-	sessionMu       sync.Mutex
-	spawnConfigPath string
-	spawnMu         sync.Mutex
-	spawnPrepare    func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
-	spawnSeenMu     sync.Mutex
+	paneIdleSince     map[string]time.Time
+	paneIdleMu        sync.Mutex
+	sessionMu         sync.Mutex
+	spawnConfigPath   string
+	spawnJournalDir   string
+	spawnMu           sync.Mutex
+	spawnEngine       hubSpawnEngine
+	spawnPrepare      func(context.Context, nodeWorktreePrepareArgs) (any, string) // fixture seam
+	spawnJournalMu    sync.Mutex
+	spawnJournal      *nodeSpawnJournal
+	spawnJournalUsers int
 	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
 	statePublish       bool
 	stateQuotaPools    []string
 	stateQuotaInterval time.Duration
 	fleetStateMu       sync.Mutex
 	fleetQuotaResync   bool
-	spawnSeen          map[string]struct{}
-	spawnTimeoutExtra  time.Duration // fixture seam; production is 60 seconds.
+	spawnTimeoutExtra  time.Duration // fixture seam; production uses the absolute deadline.
 	nodeCommandMu      sync.Mutex
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
-	nodeRuntug         relayCommandRunner // fixture seam for job.done; nil runs runtug.
+	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
 	nodePacelever      relayCommandRunner // fixture seam for quota.refresh; nil runs pacelever.
 	nodeCloseSettle    time.Duration      // fixture seam; zero is nodePaneCloseSettle.
 	nodeGitLockWait    time.Duration      // fixture seam; zero is nodeGitOpLockWait.
@@ -198,6 +203,9 @@ type HubClient struct {
 // NewHubClient validates the public base URL and all local inputs without
 // opening a connection. Production accepts only wss URLs; ws is fixture-only.
 func NewHubClient(config HubClientConfig) (*HubClient, error) {
+	if config.SpawnJournalDir != "" && !filepath.IsAbs(config.SpawnJournalDir) {
+		return nil, errors.New("spawn journal directory must be absolute; configure a writable node state directory")
+	}
 	rawURLs := append([]string(nil), config.URLs...)
 	if config.URL != "" {
 		rawURLs = append([]string{config.URL}, rawURLs...)
@@ -308,7 +316,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		config.helloAckTimeout = defaultHubHelloAckTimeout
 	}
 	return &HubClient{
-		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnSeen: make(map[string]struct{}), spawnTimeoutExtra: 60 * time.Second,
+		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnJournalDir: config.SpawnJournalDir, spawnTimeoutExtra: 0,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, helloAckTimeout: config.helloAckTimeout, burstSeen: make(map[string]time.Time),
 		wakeTargets: wakeTargets, wakeSeen: make(map[string]time.Time),
@@ -438,6 +446,10 @@ func (client *HubClient) Publish(kind string, payload any) bool {
 // Run reconnects until its context is canceled. Any hub error is isolated to
 // this goroutine: it never propagates into local daemon loops.
 func (client *HubClient) Run(ctx context.Context) {
+	if err := client.spawnStartupError(); err != nil {
+		client.warn(err.Error())
+		return
+	}
 	if client.statePublish && len(client.stateQuotaPools) > 0 {
 		go client.runFleetQuota(ctx)
 	}
@@ -528,36 +540,38 @@ type hubClientConnection struct {
 }
 
 type hubOutboundMessage struct {
-	Type            string
-	Features        []string
-	Machine         string
-	Phase           string
-	EmittedAt       time.Time
-	WakeMAC         string
-	JobID           string
-	Epoch           uint64
-	HoldsActive     bool
-	Pane            string
-	Text            string
-	DeliverPolicy   string
-	Kind            string
-	ReportPath      string
-	Reason          string
-	EventID         int64
-	Lane            string
-	ProducerEventID string
-	IdleWakeEventID string
-	Eligible        bool
-	RequestID       string
-	CWDKey          string
-	BriefInline     string
-	BriefDoc        string
-	Checkout        *hubSpawnCheckout
-	Args            []string
-	WaitSeconds     int
-	CommandOp       string
-	CommandArgs     json.RawMessage
-	RecvSeq         int64 // local read-loop order; never part of the wire shape.
+	Type               string
+	Features           []string
+	Machine            string
+	Phase              string
+	EmittedAt          time.Time
+	WakeMAC            string
+	JobID              string
+	Epoch              uint64
+	HoldsActive        bool
+	Pane               string
+	Text               string
+	DeliverPolicy      string
+	Kind               string
+	ReportPath         string
+	Reason             string
+	EventID            int64
+	Lane               string
+	ProducerEventID    string
+	IdleWakeEventID    string
+	Eligible           bool
+	RequestID          string
+	CWDKey             string
+	BriefInline        string
+	BriefDoc           string
+	Checkout           *hubSpawnCheckout
+	Args               []string
+	DeadlineMS         int64
+	OperatorAuthorized bool
+	WaitSeconds        int
+	CommandOp          string
+	CommandArgs        json.RawMessage
+	RecvSeq            int64 // local read-loop order; never part of the wire shape.
 }
 
 func defaultHubRelayInject(ctx context.Context, pane, text string) bool {
@@ -1469,7 +1483,7 @@ func (client *HubClient) serve(ctx context.Context, connection *websocket.Conn) 
 const defaultHubHelloAckTimeout = 5 * time.Second
 
 // hubSpawnCapabilities is what an upgraded node advertises in hello.
-var hubSpawnCapabilities = []string{"spawn_v2"}
+var hubSpawnCapabilities = []string{"spawn_v2", "spawn_ops_v1"}
 
 func (client *HubClient) helloAckTimeoutOrDefault() time.Duration {
 	if client.helloAckTimeout > 0 {
@@ -2458,11 +2472,11 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		var brief hubSpawnBrief
 		var briefFields map[string]json.RawMessage
 		for name := range fields {
-			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" {
+			if name != "type" && name != "request_id" && name != "cwd_key" && name != "brief" && name != "checkout" && name != "args" && name != "wait_seconds" && name != "deadline_ms" && name != "operator_authorized" {
 				return hubOutboundMessage{}, false
 			}
 		}
-		if (len(fields) != 6 && len(fields) != 7) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
+		if (len(fields) < 6 || len(fields) > 9) || json.Unmarshal(fields["request_id"], &message.RequestID) != nil || json.Unmarshal(fields["cwd_key"], &message.CWDKey) != nil || json.Unmarshal(fields["brief"], &brief) != nil || json.Unmarshal(fields["brief"], &briefFields) != nil || (len(briefFields) != 1) || json.Unmarshal(fields["args"], &message.Args) != nil || message.Args == nil || json.Unmarshal(fields["wait_seconds"], &message.WaitSeconds) != nil {
 			return hubOutboundMessage{}, false
 		}
 		if raw, ok := briefFields["inline"]; ok {
@@ -2483,9 +2497,19 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 			}
 			message.Checkout = &checkout
 		}
+		if raw, ok := fields["deadline_ms"]; ok {
+			if json.Unmarshal(raw, &message.DeadlineMS) != nil || message.DeadlineMS <= 0 {
+				return hubOutboundMessage{}, false
+			}
+		}
+		if raw, ok := fields["operator_authorized"]; ok {
+			if json.Unmarshal(raw, &message.OperatorAuthorized) != nil || !message.OperatorAuthorized {
+				return hubOutboundMessage{}, false
+			}
+		}
 		message.BriefInline = brief.Inline
 		message.BriefDoc = brief.Doc
-		if !validHubSpawnRequest(hubSpawnRequest{RequestID: message.RequestID, Machine: "machine-a", CWDKey: message.CWDKey, Brief: brief, Checkout: message.Checkout, Args: message.Args, WaitSeconds: message.WaitSeconds}) {
+		if !validHubSpawnRequestForMode(hubSpawnRequest{RequestID: message.RequestID, Machine: "machine-a", CWDKey: message.CWDKey, Brief: brief, Checkout: message.Checkout, Args: message.Args, WaitSeconds: message.WaitSeconds, DeadlineMS: message.DeadlineMS}, message.OperatorAuthorized) {
 			return hubOutboundMessage{}, false
 		}
 	case "node.command":

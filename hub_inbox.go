@@ -80,6 +80,10 @@ func newHubInbox(policyPath, storePath, databaseURL string) (*hubInbox, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err = store.ensureSpawnTasks(); err != nil {
+		store.close()
+		return nil, err
+	}
 	return &hubInbox{store: store, policy: policy, waiters: make(chan struct{}, hubInboxWaitMaxWaiters)}, nil
 }
 

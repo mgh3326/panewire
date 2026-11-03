@@ -123,7 +123,7 @@ for job in jobs:
             spawned_tab = payload.get("tab_id") if isinstance(payload.get("tab_id"), str) else ""
         if kind == "job.reaped":
             reaped = True
-        # 보호 표시(`runtug spawn --keep`, #603)는 누적이다: claim·reclaim·spawn 영수증 중
+        # 보호 표시(`panewire spawn --keep`, #603)는 누적이다: claim·reclaim·spawn 영수증 중
         # 하나라도 JSON true 를 남겼으면 그 잡의 pane 은 닫지 않는다.
         if kind in ("job.claim", "job.reclaim", "job.spawned") and payload.get("keep") is True:
             keep = True

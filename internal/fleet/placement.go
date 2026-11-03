@@ -808,9 +808,10 @@ func (a *App) waitForNode(ctx context.Context, host string, h map[string]any, wa
 }
 
 type repoResolution struct {
-	name string
-	url  string
-	rel  string
+	sourceDir string // caller-side evidence path, never transmitted or executed by the hub
+	name      string
+	url       string
+	rel       string
 	// wt, branch and head describe a linked worktree checkout: name is then
 	// the canonical clone and wt the worktree directory beside it. wt is
 	// empty for a canonical checkout.
@@ -827,6 +828,15 @@ type repoResolution struct {
 // basename, the origin URL used to clone it on a target, and the cwd's path
 // inside the checkout.
 func (a *App) localRepo(ctx context.Context, cwd string) *repoResolution {
+	if a.Repository != nil {
+		r := a.Repository
+		repo := &repoResolution{name: r.Name, url: r.Origin, rel: r.Relative, wt: r.Worktree, localRoot: r.LocalRoot}
+		if r.Checkout != nil {
+			repo.branch, repo.head = r.Checkout.Branch, r.Checkout.Sha
+		}
+		return repo
+	}
+
 	r := a.call(ctx, "git", "-C", cwd, "rev-parse", "--show-toplevel")
 	top := strings.TrimSpace(r.Out)
 	if r.Code != 0 || top == "" {

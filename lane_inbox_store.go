@@ -186,6 +186,9 @@ func (s *laneInboxStore) op(parent context.Context) (context.Context, context.Ca
 func (s *laneInboxStore) opWithin(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithTimeout(parent, timeout)
 	stop := context.AfterFunc(s.life, cancel)
+	if s.life.Err() != nil {
+		cancel()
+	}
 	return ctx, func() { stop(); cancel() }
 }
 

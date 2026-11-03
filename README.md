@@ -44,7 +44,7 @@ Pane observation and delivery commands include:
 
 The durable inbox, job ledger and verified pane operations preserve evidence as the hub coordinates placement and lifecycle.
 
-Spawning is the responsibility of `runtug`; panewire is a messaging and monitoring layer for sessions that are already alive.
+Spawn requests are submitted through `panewire spawn`, `work`, and `lead`; the hub coordinates placement and execution on the selected node. Panewire also observes sessions and delivers messages.
 
 See [docs/design.md](docs/design.md) for the complete contract and acceptance criteria.
 
@@ -144,7 +144,7 @@ such a service; `panewire node pane-read` and `panewire node job-done` call them
 
 The hub also keeps the latest fleet state, meaning per-account quota, per-host
 load and publisher liveness. It serves that state as a snapshot
-(`GET /v1/state`), so runtug reads current state instead of measuring it on
+(`GET /v1/state`), so panewire reads current state instead of measuring it on
 every spawn. See [docs/fleet-state.md](docs/fleet-state.md) for the
 message contract, the freshness rule, rollout and rollback.
 
@@ -234,3 +234,6 @@ assigns a bounded reading task through the same quota and role policy. Use
 `--headless` when the selected harness supports it, `--patch` for an isolated
 scratch checkout, or `--panel` for independent readers. See
 [Delegation configuration](docs/config.md) for roles, results and exit codes.
+
+
+Spawn execution now belongs to the hub. `panewire spawn`, `work TASK` and `lead TASK` print ACCEPTED after a durable reservation; this is not landing proof. `--dry-run` stays synchronous and `--wait` preserves the job-completion contract. See [durable spawn operations](docs/hub-spawn-operations.md) for replay, timeout, recovery and Sentry behavior.

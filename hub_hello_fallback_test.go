@@ -73,7 +73,12 @@ func (hub *helloFallbackHub) snapshot() (hellos []map[string]any, registered boo
 
 func runHelloFallbackNode(t *testing.T, server *httptest.Server, ackTimeout time.Duration) {
 	t.Helper()
-	client, err := NewHubClient(HubClientConfig{URL: t14WSURL(server.URL, ""), MachineID: "machine-a", Token: "node-token", AllowInsecureForTests: true, PingInterval: time.Hour, helloAckTimeout: ackTimeout})
+	client, err := NewHubClient(HubClientConfig{URL: t14WSURL(server.URL, ""), MachineID: "machine-a", Token: "node-token", AllowInsecureForTests: true, PingInterval: time.Hour, helloAckTimeout: ackTimeout,
+		JobsInboxRoot:       t.TempDir(),
+		sessionCollector:    func(context.Context) ([]HerdrAgentState, error) { return nil, nil },
+		hostLoadCollector:   func(context.Context) (HubHostLoad, error) { return HubHostLoad{}, nil },
+		hostMemoryCollector: func(context.Context) (*HubHostMemory, error) { return nil, nil },
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -95,7 +100,7 @@ func runHelloFallbackNode(t *testing.T, server *httptest.Server, ackTimeout time
 
 func helloHasSpawnV2(hello map[string]any) bool {
 	capabilities, _ := hello["capabilities"].([]any)
-	return len(capabilities) == 1 && capabilities[0] == "spawn_v2"
+	return len(capabilities) == 2 && capabilities[0] == "spawn_v2" && capabilities[1] == "spawn_ops_v1"
 }
 
 func TestHelloFallbackOldHubRegistersWithoutCapabilities(t *testing.T) {
@@ -113,7 +118,7 @@ func TestHelloFallbackOldHubRegistersWithoutCapabilities(t *testing.T) {
 		t.Fatalf("want a capabilities hello, one fallback and at most one capable retry, got %d: %v", len(hellos), hellos)
 	}
 	if !helloHasSpawnV2(hellos[0]) {
-		t.Fatalf("first hello must advertise spawn_v2: %v", hellos[0])
+		t.Fatalf("first hello must advertise durable spawn capabilities: %v", hellos[0])
 	}
 	if _, present := hellos[1]["capabilities"]; present {
 		t.Fatalf("fallback hello must omit capabilities: %v", hellos[1])
@@ -139,7 +144,7 @@ func TestHelloFallbackNewHubSendsCapabilitiesOnce(t *testing.T) {
 	<-time.After(5 * ackTimeout)
 	hellos, _ := hub.snapshot()
 	if len(hellos) != 1 || !helloHasSpawnV2(hellos[0]) {
-		t.Fatalf("an accepting hub must see exactly one hello with spawn_v2, got %v", hellos)
+		t.Fatalf("an accepting hub must see exactly one hello with durable spawn capabilities, got %v", hellos)
 	}
 }
 

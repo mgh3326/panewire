@@ -765,3 +765,65 @@ func TestLaneInboxStoreContractHubShapedKeys(t *testing.T) {
 		}
 	})
 }
+
+func TestLaneInboxStoreSpawnDurabilityContract(t *testing.T) {
+	for _, backend := range laneInboxBackends() {
+		t.Run(backend.name, func(t *testing.T) {
+			open := backend.fresh(t)
+			store := open()
+			if err := store.ensureSpawnTasks(); err != nil {
+				t.Fatal(err)
+			}
+			request := durableSpawnRequest()
+			task, fresh, err := store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+			if err != nil || !fresh {
+				t.Fatalf("claim %v %v", fresh, err)
+			}
+			second := open()
+			if err = second.ensureSpawnTasks(); err != nil {
+				t.Fatal(err)
+			}
+			replay, fresh, err := second.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
+			if err != nil || fresh || replay.Request.RequestID != task.Request.RequestID {
+				t.Fatalf("restart replay %v %v", fresh, err)
+			}
+			if _, err = store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "placement", Reason: "timeout"}, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			task, err = second.spawnTask(t.Context(), request.RequestID)
+			if err != nil || task.Status != "retryable" {
+				t.Fatalf("unbound timeout retained ownership: %+v %v", task, err)
+			}
+			task, err = second.resumeCleanedSpawn(t.Context(), task, time.Now())
+			if err != nil || task.Attempt != 2 {
+				t.Fatalf("same-key retry: %+v %v", task, err)
+			}
+			task, err = store.bindSpawn(t.Context(), request.RequestID, task.Attempt, hubSpawnRequest{RequestID: t14RequestID(984), Machine: "machine-a", Args: []string{"--job", "test-job"}, WaitSeconds: 300})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: "timeout", Retryable: true}, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			if _, err = second.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "landing", Pane: "pane-1"}, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			var notifications int
+			if err = second.db.QueryRow(`SELECT count(*) FROM spawn_notifications`).Scan(&notifications); err != nil || notifications != 3 {
+				t.Fatalf("outbox %d %v", notifications, err)
+			}
+			if _, err = store.db.Exec(`UPDATE spawn_notifications SET delivered=1`); err != nil {
+				t.Fatal(err)
+			}
+			// The snapshot migrator must refuse rather than silently drop spawn ownership.
+			tx, err := store.db.BeginTx(t.Context(), nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer tx.Rollback()
+			if _, err = readHubInboxSnapshotTx(t.Context(), tx, store.dialect); err == nil || !strings.Contains(err.Error(), "spawn ownership exists") {
+				t.Fatalf("inbox-only migration dropped spawn state: %v", err)
+			}
+		})
+	}
+}

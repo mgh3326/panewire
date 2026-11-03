@@ -205,7 +205,7 @@ func TestHubSpawnArgs(t *testing.T) {
 	}
 	// Node-side flags are never sent: the node supplies workspace, host and
 	// the override reason itself.
-	for _, bad := range []string{"-w", "--host", "--override-reason", "-p", "-c", "--wait"} {
+	for _, bad := range []string{"--host", "-p", "-c", "--wait"} {
 		if slices.Contains(hub.spawns[0].Args, bad) {
 			t.Fatalf("%s must not be sent", bad)
 		}
@@ -222,13 +222,11 @@ func TestHubArgsParentJobReplacesTask(t *testing.T) {
 	}
 }
 
-func TestHubArgsRefuseWhatTheAllowlistCannotCarry(t *testing.T) {
-	for name, s := range map[string]Spawn{
-		"keep": {Keep: true}, "dup": {DupOK: true}, "bypass": {Bypass: true}, "escalation": {AllowEscalation: true},
-		"operator request": {OperatorRequest: "x"}, "requested by": {RequestedBy: "x"}, "purpose": {Purpose: "x"}, "lane defer": {LaneDefer: "h"},
-	} {
-		if _, e := hubArgs("/r", s); e == nil {
-			t.Errorf("%s was dropped silently", name)
+func TestHubArgsPreserveOptionsAcrossInProcessHub(t *testing.T) {
+	for flag, s := range map[string]Spawn{"--keep": {Keep: true}, "--job-dup-ok": {DupOK: true}, "--task-hk-bypass": {Bypass: true}, "--allow-escalation": {AllowEscalation: true}, "--operator-request": {OperatorRequest: "x"}, "--requested-by": {RequestedBy: "x"}, "--purpose": {Purpose: "x"}, "--lane-defer": {LaneDefer: "h"}} {
+		args, err := hubArgs("/r", s)
+		if err != nil || !slices.Contains(args, flag) {
+			t.Errorf("%s dropped: %v %v", flag, args, err)
 		}
 	}
 }

@@ -1,7 +1,9 @@
 package panewire
 
 import (
+	"context"
 	"encoding/json"
+	"github.com/mgh3326/panewire/internal/fleet"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,20 +121,25 @@ func TestHubSpawnConfigRulesAreNamed(t *testing.T) {
 	}
 }
 
-func TestHubSpawnFailingRuntugStderrReachesResultBoundedAndRedacted(t *testing.T) {
+func TestHubSpawnFailingEngineStderrReachesResultBoundedAndRedacted(t *testing.T) {
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	root := t.TempDir()
 	// 8 KiB of stderr noise, then the line that explains the refusal.
-	t14FakeRuntug(t, `i=0; while [ $i -lt 128 ]; do printf '%064d\n' 0 >&2; i=$((i+1)); done
-printf 'runtug: quota gate refused: `+fleetEventFakeSecretText+`\n' >&2
-exit 70`)
+
 	message := hubOutboundMessage{RequestID: t14RequestID(91), CWDKey: "repo-a", BriefInline: "brief", WaitSeconds: 5, Args: []string{"--job", "job-stderr"}}
-	result := (&HubClient{spawnConfigPath: t14SpawnConfig(t, root)}).runHubSpawn(t.Context(), message)
+	result := (&HubClient{spawnConfigPath: t14SpawnConfig(t, root), spawnEngine: func(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
+		output := &hubSpawnOutput{}
+		_, _ = output.stderr.Write([]byte(strings.Repeat("noise\n", 1500) + "panewire: quota gate refused: " + fleetEventFakeSecretText))
+		return output, fleet.Execution{RC: 70, Stage: "placement"}
+	}}).runHubSpawn(t.Context(), message)
 	if result.RC != 70 || result.Error != "spawn_failed" {
 		t.Fatalf("result=%+v", result)
 	}
-	if !strings.Contains(result.StdoutTail, "runtug: quota gate refused:") {
-		t.Fatalf("runtug's stderr tail must reach the result: %q", result.StdoutTail)
+	if !strings.Contains(result.StdoutTail, "panewire: quota gate refused:") {
+		t.Fatalf("engine's stderr tail must reach the result: %q", result.StdoutTail)
+	}
+	if spawnResultFix(result.StdoutTail) == "" || strings.Count(result.StdoutTail, "stderr: ") != 1 {
+		t.Fatalf("refusal and actionable fix must share the bounded stderr section: %q", result.StdoutTail)
 	}
 	if len(result.StdoutTail) > hubSpawnResultTail || len(result.StdoutTail) > len("stderr: ")+hubSpawnStderrTail {
 		t.Fatalf("tail not bounded: %d bytes", len(result.StdoutTail))

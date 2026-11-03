@@ -146,15 +146,15 @@ count by (machine_id) (namedprocess_namegroup_num_procs) > 31
 
 ## Fleet events
 
-runtug, panewire and mergewake record failures and decisions as **fleet-event
+panewire, panewire and mergewake record failures and decisions as **fleet-event
 v1** lines. Each line is one JSON object with exactly these string fields:
 
 | Field | Meaning |
 | --- | --- |
 | `ts` | RFC 3339 UTC time; Alloy uses it as the entry timestamp |
 | `host` | Short hostname of the writer (label) |
-| `tool` | `runtug`, `panewire` or `mergewake` (label) |
-| `kind` | What happened: `spawn`, `plan`, `placement`, `quota_observation` (runtug); `node_spawn` (panewire); `reviewer`, `review` (mergewake) (label) |
+| `tool` | `panewire`, `panewire` or `mergewake` (label) |
+| `kind` | What happened: `spawn`, `plan`, `placement`, `quota_observation` (panewire); `node_spawn` (panewire); `reviewer`, `review` (mergewake) (label) |
 | `job` | Job id, or `<repo>#<pr>` for reviews |
 | `outcome` | `refused`, `failed`, `skipped`, `missing`, `placed`, `stale`, `unusable` (label) |
 | `reason` | Short code: exit status class, spawn.json rule, ranking metric, skip reason |
@@ -171,7 +171,7 @@ state home is `$XDG_STATE_HOME` or `~/.local/state`. mergewake writes under its
 - rotates the file to `.1` at 4 MiB. Alloy never reads `.1`.
 
 Writing an event never changes a command's result. Per-tool tables are in
-runtug `docs/config.md` ("Fleet events"), mergewake `docs/config.md`
+panewire `docs/config.md` ("Fleet events"), mergewake `docs/config.md`
 ("Fleet events and crash reports"), and panewire `hub_spawn_node.go`.
 
 Both Alloy configs carry the same pipeline between `// BEGIN fleet events` and
@@ -213,7 +213,7 @@ start of the fresh file after a rotation.
 | Sentry crash reports | 0 | at most 3/day/host (budget kept across restarts) = 90/month/host; 8 hosts = 720/month, under the 5,000/month free tier |
 
 The typical figure is based on measurements taken on 2026-11-01. panewire,
-runtug and mergewake opened 116 PRs in 14 days, about 8 PRs/day, and this host
+runtug and mergewake opened 116 PRs in 14 days, about 8 PRs/day, and this host (Historical measurement: runtug was replaced by panewire.)
 started 39 jobs in 7 days. That gives fewer than 100 spawns/day per host and a
 few hundred review events/day. Multiplying by 10 for fleet growth gives the
 2,000/day figure. The free-tier numbers are the published Grafana Cloud Free
@@ -235,7 +235,7 @@ following steps, in this order:
       POSIX `sh`, so they run under dash too:
 
       ```sh
-      for t in runtug panewire mergewake; do
+      for t in panewire mergewake; do
         mkdir -p -m 0750 "$HOME/.local/state/$t/events"
       done
       ```
@@ -244,7 +244,7 @@ following steps, in this order:
 
       ```sh
       setfacl -m u:alloy:x "$U" "$U/.local" "$U/.local/state"
-      for t in runtug panewire mergewake; do
+      for t in panewire mergewake; do
         setfacl -m u:alloy:x "$U/.local/state/$t"
         setfacl -m u:alloy:rx "$U/.local/state/$t/events"
         setfacl -d -m u:alloy:r "$U/.local/state/$t/events"
@@ -259,7 +259,7 @@ following steps, in this order:
       `FLEET_EVENTS_ROOT=$U/.local/state` in its environment. It writes the
       variable into the EnvironmentFile. Alternatively, add the line to that
       file and restart alloy.
-3. **Check the shipping.** Run `runtug plan` with no flags; it refuses with a
+3. **Check the shipping.** Run `panewire plan` with no flags; it refuses with a
    usage error and writes a `plan`/`refused` event. Then open Grafana Explore
    with `{source="fleet_events"}` and confirm the line arrives with the `host`,
    `tool`, `kind` and `outcome` labels.

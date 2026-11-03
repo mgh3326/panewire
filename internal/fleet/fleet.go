@@ -20,6 +20,9 @@ import (
 type fleetSource struct{ a *App }
 
 func (s fleetSource) Hosts(ctx context.Context, cwd string) ([]HostView, error) {
+	if s.a.PlacementHosts != nil {
+		return s.a.PlacementHosts(ctx, cwd)
+	}
 	// panewire place is an operator call: it rejects a node token.
 	if str(s.a.Config.Hub, "hub_url") == "" || firstNonempty(str(s.a.Config.Hub, "operator_token_env"), str(s.a.Config.Hub, "hub_token_env")) == "" {
 		return nil, fail(exitConfig, "hub placement unavailable")

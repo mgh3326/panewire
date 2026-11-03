@@ -1,3 +1,5 @@
+> Historical low-level RPC contract. Normal task spawning moved to [durable hub operations](hub-spawn-operations.md). Launcher-subprocess instructions below were replaced by the in-process engine; low-level request waiters are not ownership of an ACCEPTED task.
+
 # R26 hub-directed spawn
 
 The hub keeps request status only in memory, just like presence. It forwards

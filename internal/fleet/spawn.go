@@ -179,6 +179,13 @@ func (a *App) taskLink(ctx context.Context, s Spawn, bypassed bool) error {
 	return a.event(ctx, s.Job, "job.task_link", map[string]any{"task_id": s.Task, "job_id": s.Job, "claimed_by": s.Label, "status": status, "inherited_from": s.Inherited})
 }
 func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
+	startedAdmission := time.Now()
+	admissionRecorded := false
+	defer func() {
+		if !admissionRecorded {
+			a.stage("placement", startedAdmission)
+		}
+	}()
 	// Keep every herdr operation and lane identity on the same session.
 	if a.HerdrSession == "" {
 		a.HerdrSession = firstNonempty(os.Getenv("HERDR_SESSION"), "default")
@@ -190,6 +197,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}
 	s.placement = &placementDecision{}
+	defer func() {
+		if a.ObserveReceipt != nil {
+			x := s.placement.execution
+			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role)})
+		}
+	}()
+
 	defer func() { a.finishPlacement(ctx, s, err) }()
 	defer func() { a.spawnEvents(s, err) }()
 	if s.Grade != "" && (topRoutingRole(builtinRoleMap[s.Role]) || topRoutingRole(s.RoutingRole)) {
@@ -335,6 +349,8 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	var placementRec map[string]any
 	if s.Host != "local" {
 		handled, rec, e := a.place(ctx, s, string(brief))
+		a.stage("placement", startedAdmission)
+		admissionRecorded = true
 		if e != nil {
 			return e
 		}
@@ -457,10 +473,17 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	// The hk job claim runs on the executing host before the local claim:
 	// 409 job_id_taken refuses with the same exit 74, and hk down fails
 	// closed like the task claim.
+	if !admissionRecorded {
+		a.stage("placement", startedAdmission)
+		admissionRecorded = true
+	}
+	startedClaim := time.Now()
 	if e = a.claimJobRecord(ctx, s); e != nil {
+		a.stage("claim", startedClaim)
 		return e
 	}
-	recordSpawned := false
+	a.stage("claim", startedClaim)
+	committed := false
 	retrySafe := true
 	ownedClaim := false
 	hadPool := false
@@ -469,7 +492,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		// claim replays as claimed); its record belongs to that spawn, so a
 		// duplicate never marks it lost.
 		var ee *ExitError
-		if err != nil && !recordSpawned && !(errors.As(err, &ee) && ee.Code == exitDuplicate) {
+		if err != nil && !committed && !(errors.As(err, &ee) && ee.Code == exitDuplicate) {
 			if retrySafe {
 				if ownedClaim && !hadPool {
 					if e := a.ledger().ReleaseClaim(context.WithoutCancel(ctx), s.Job); e != nil {
@@ -481,14 +504,19 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 					a.markSpawnRetryable(context.WithoutCancel(ctx), s.Job)
 				}
 			}
+			if a.ObserveRetryable != nil {
+				a.ObserveRetryable(retrySafe)
+			}
 			if !retrySafe {
-				a.abandonJobRecord(context.WithoutCancel(ctx), s.Job)
+				a.markSpawnUncertain(context.WithoutCancel(ctx), s.Job)
 			}
 		}
 	}()
 	// The local ledger arbitrates concurrent duplicate claims on this host;
 	// never infer a free job from pane status.
+	startedLocalClaim := time.Now()
 	_, e = a.ledger().Claim(ctx, claim)
+	a.stage("claim", startedLocalClaim)
 	if e != nil && arbiter.Code(e) == arbiter.ExitDuplicate {
 		d, de := a.durable(ctx, s.Job)
 		if de != nil {
@@ -496,7 +524,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 		if d.State == "released" {
 			claim.ReclaimReleased = true
+			startedLocalClaim = time.Now()
 			_, e = a.ledger().Claim(ctx, claim)
+			a.stage("claim", startedLocalClaim)
 		} else if !s.DupOK {
 			return fail(exitDuplicate, "active duplicate job %s", s.Job)
 		} else {
@@ -521,7 +551,6 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			a.warn("placement decision record failed: %v", e)
 		}
 	}
-	committed := false
 	pane := ""
 	pool := ""
 	defer func() {
@@ -530,7 +559,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			defer cancel()
 			if pane != "" {
 				a.captureFailure(cleanup, s.Job, pane)
-				if closeErr := a.must(cleanup, "herdr", "pane", "close", pane); closeErr != nil {
+				if closeErr := a.closeFailedSpawn(cleanup, s, pane, seat.Kind); closeErr != nil {
 					retrySafe = false
 					a.warn("pane cleanup failed; inspect with panewire find %s before retry: %v", s.Label, closeErr)
 				}
@@ -543,7 +572,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			}
 		}
 	}()
+	startedQuotaClaim := time.Now()
 	rec, e := a.ledger().RecordQuotaPool(ctx, arbiter.QuotaRun{Job: s.Job, Profile: seat.gateName(), LaunchProfile: launchProfile(seat.Canon, launch.Effort), Gate: granted})
+	a.stage("claim", startedQuotaClaim)
 	if e != nil {
 		return ledgerFail(e, "lease")
 	}
@@ -570,6 +601,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = a.workspaceTrust(ctx, s, seat, env); e != nil {
 		return fail(exitConfig, "workspace trust: %v", e)
 	}
+	startedLaunch := time.Now()
+	launchRecorded := false
+	defer func() {
+		if !launchRecorded {
+			a.stage("launch", startedLaunch)
+		}
+	}()
 	tabArgs := []string{"tab", "create", "--workspace", s.Workspace, "--cwd", s.CWD, "--label", s.Label, "--no-focus"}
 	for _, v := range env {
 		tabArgs = append(tabArgs, "--env", v)
@@ -587,6 +625,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	root, _ := created["root_pane"].(map[string]any)
 	pane = str(root, "pane_id")
 	s.placement.execution.PaneID = pane
+	s.placement.execution.Kind = seat.Kind
 	tab := str(created, "tab_id")
 	if pane == "" {
 		return fail(exitConfig, "tab create omitted pane_id")
@@ -594,6 +633,15 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = a.start(ctx, s, seat, launch, pane, argv); e != nil {
 		return e
 	}
+	a.stage("launch", startedLaunch)
+	launchRecorded = true
+	startedLanding := time.Now()
+	landingRecorded := false
+	defer func() {
+		if !landingRecorded {
+			a.stage("landing", startedLanding)
+		}
+	}()
 	pointer, e := a.writeDeliveredBrief(s.Job, payload)
 	if e != nil {
 		return e
@@ -609,7 +657,8 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = a.taskLink(ctx, s, bypassed); e != nil {
 		return e
 	}
-	recordSpawned = true
+	a.stage("landing", startedLanding)
+	landingRecorded = true
 	a.spawnedJobRecord(ctx, s, seat, launch, pane, pool, owner)
 	lane := s.Label
 	parent := owner

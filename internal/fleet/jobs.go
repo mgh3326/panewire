@@ -30,6 +30,7 @@ type JobStore interface {
 var (
 	errJobTaken    = errors.New("job_id_taken")
 	errJobNotFound = errors.New("not_found")
+	ErrJobNotFound = errJobNotFound
 )
 
 // hkJobs is the production JobStore over the shared handoffkeep HTTP client.
@@ -362,4 +363,13 @@ func (a *App) jobRecordOutcome(ctx context.Context, id string, warned *bool) wai
 		return waitOutcome{name: "lost"}
 	}
 	return waitOutcome{}
+}
+
+// A live/unverified pane is not a lost job. Keep its immutable claim while the
+// hub reconciles the attempt; no completion watcher is started before landing.
+func (a *App) markSpawnUncertain(ctx context.Context, id string) {
+	if err := a.putJobRecord(ctx, id, map[string]any{"result": map[string]any{"cleanup_pending": true, "spawn_retryable": false}}); err != nil {
+		a.jobRecordFailed(ctx, id, "cleanup_pending", err)
+	}
+	_ = a.event(ctx, id, "job.cleanup_pending", map[string]any{"reason": "pane_or_resources_unverified"})
 }

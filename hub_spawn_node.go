@@ -6,15 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/mgh3326/panewire/internal/fleet"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
-	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -23,9 +22,6 @@ type hubSpawnConfig struct {
 	CWDMap       map[string]string `json:"cwd_map"`
 	Workspace    string            `json:"workspace"`
 	HERDRSession string            `json:"herdr_session"`
-	// RuntugPath is an optional explicit path to the runtug binary for hosts
-	// where the daemon's minimal PATH (launchd/systemd) does not include it.
-	RuntugPath string `json:"runtug_path,omitempty"`
 	// WorkRoot is the node's git work root for worktree.prepare: clones live
 	// at <work_root>/<repo>. Node-local only; callers never supply it.
 	WorkRoot       string `json:"work_root,omitempty"`
@@ -117,43 +113,108 @@ func loadHubSpawnConfig(path string) (hubSpawnConfig, error) {
 	return config, nil
 }
 
-func (client *HubClient) rememberHubSpawn(requestID string) bool {
-	client.spawnSeenMu.Lock()
-	defer client.spawnSeenMu.Unlock()
-	if client.spawnSeen == nil {
-		client.spawnSeen = make(map[string]struct{})
+func (client *HubClient) spawnStartupError() error {
+	_, err := loadHubSpawnConfig(client.spawnConfigPath)
+	var configErr *hubSpawnConfigError
+	if errors.As(err, &configErr) && configErr.Rule == "config_json_invalid" && strings.Contains(configErr.Detail, `unknown field "runtug_path"`) {
+		return errors.New("node startup refused: remove retired runtug_path from spawn.json before starting this in-process node; preserve cwd_map, workspace, herdr_session and work_root")
 	}
-	if _, seen := client.spawnSeen[requestID]; seen {
-		return false
+	if err == nil {
+		if _, err := client.acquireSpawnJournal(); err != nil {
+			return fmt.Errorf("node startup refused: spawn journal unavailable: %w; configure a private writable node state directory and preserve existing journal records", err)
+		}
+		client.releaseSpawnJournal()
 	}
-	client.spawnSeen[requestID] = struct{}{}
-	return true
+	return nil
 }
 
 func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
-	if !client.rememberHubSpawn(message.RequestID) {
+	journal, err := client.acquireSpawnJournal()
+	if err != nil {
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_unavailable"}, message.OperatorAuthorized)
 		return
 	}
+	defer client.releaseSpawnJournal()
+	claimed, cached, err := journal.claim(ctx, message)
+	if err != nil {
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"}, message.OperatorAuthorized)
+		return
+	}
+	if cached != nil {
+		client.sendSpawnResult(ctx, peer, *cached, message.OperatorAuthorized)
+		return
+	}
+	if !claimed {
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "reconciling"}, message.OperatorAuthorized)
+		return
+	}
+	deadline := time.Now().Add(time.Duration(message.WaitSeconds)*time.Second + client.spawnTimeoutExtra)
+	if message.DeadlineMS != 0 && time.UnixMilli(message.DeadlineMS).Before(deadline) {
+		deadline = time.UnixMilli(message.DeadlineMS)
+	}
+	executionContext, cancel := context.WithDeadline(ctx, deadline)
+	defer cancel()
 	client.spawnMu.Lock()
-	defer client.spawnMu.Unlock()
-
-	result := client.runHubSpawn(ctx, message)
-	_ = peer.write(ctx, struct {
-		Type       string `json:"type"`
-		RequestID  string `json:"request_id"`
-		RC         int    `json:"rc"`
-		JobID      string `json:"job_id"`
-		Pane       string `json:"pane"`
-		StdoutTail string `json:"stdout_tail"`
-		Error      string `json:"error,omitempty"`
-	}{Type: "job.spawn.result", RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error})
+	result := client.runClaimedHubSpawn(executionContext, message)
+	client.spawnMu.Unlock()
+	// Disconnect is not cancellation of this daemon-owned execution. Its result
+	// remains available to the next authenticated replay even if this socket died.
+	persistCtx, persistCancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer persistCancel()
+	if journal.complete(persistCtx, result) != nil {
+		return
+	}
+	client.sendSpawnResult(ctx, peer, result, message.OperatorAuthorized)
+}
+func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult, extended bool) {
+	_ = peer.write(ctx, spawnResultWire(result, extended))
+}
+func spawnResultWire(result hubSpawnResult, extended bool) any {
+	if !extended {
+		result.Receipt, result.Stage, result.StageMS, result.Retryable = nil, "", nil, false
+		switch result.Error {
+		case "reconciling", "journal_unavailable", "journal_conflict":
+			result.Error = "timeout" // Legacy hubs understand uncertainty as timeout.
+		}
+	}
+	return struct {
+		Receipt    *fleet.ExecutionReceipt `json:"receipt,omitempty"`
+		Type       string                  `json:"type"`
+		RequestID  string                  `json:"request_id"`
+		RC         int                     `json:"rc"`
+		JobID      string                  `json:"job_id"`
+		Pane       string                  `json:"pane"`
+		StdoutTail string                  `json:"stdout_tail"`
+		Error      string                  `json:"error,omitempty"`
+		StageMS    map[string]int64        `json:"stage_ms,omitempty"`
+		Stage      string                  `json:"stage,omitempty"`
+		Retryable  bool                    `json:"retryable,omitempty"`
+	}{result.Receipt, "job.spawn.result", result.RequestID, result.RC, result.JobID, result.Pane, result.StdoutTail, result.Error, result.StageMS, result.Stage, result.Retryable}
 }
 
 func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) (result hubSpawnResult) {
 	// reason and detail refine result.Error in the node_spawn fleet event.
 	var reason, detail string
-	defer func() { client.recordHubSpawnOutcome(message, result, reason, detail) }()
-	result = hubSpawnResult{RequestID: message.RequestID}
+	defer func() {
+		if result.RC != 0 && spawnResultFix(result.StdoutTail) == "" {
+			fix := "Fix: " + nodeSpawnRefusalFix(result.Error, reason)
+			if strings.HasPrefix(result.StdoutTail, "stderr: ") {
+				result.StdoutTail = hubSpawnTailWithStderr("", strings.TrimPrefix(result.StdoutTail, "stderr: ")+"\n"+fix)
+			} else if stdout, stderr, ok := strings.Cut(result.StdoutTail, "\nstderr: "); ok {
+				result.StdoutTail = hubSpawnTailWithStderr(stdout, stderr+"\n"+fix)
+			} else {
+				result.StdoutTail = hubSpawnTailWithStderr(result.StdoutTail, fix)
+			}
+		}
+		client.recordHubSpawnOutcome(message, result, reason, detail)
+	}()
+	result = hubSpawnResult{RequestID: message.RequestID, Retryable: true}
+	if parent.Err() != nil {
+		result.RC = 124
+		result.Error = "timeout"
+		result.Retryable = true
+		return result
+	}
 	config, err := loadHubSpawnConfig(client.spawnConfigPath)
 	if err != nil {
 		result.RC, result.Error = 2, "spawn_disabled"
@@ -170,7 +231,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.RC, result.Error = 2, "cwd_unmapped"
 		return result
 	}
-	// The document key is validated before any checkout or runtug lookup: a
+	// The document key is validated before any checkout or engine execution: a
 	// key outside the node's prefix is refused whatever else is configured.
 	if message.BriefDoc != "" {
 		prefix := config.BriefDocPrefix
@@ -187,9 +248,6 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		}
 	}
 	extra := client.spawnTimeoutExtra
-	if extra == 0 {
-		extra = 60 * time.Second
-	}
 	runContext, cancel := context.WithTimeout(parent, time.Duration(message.WaitSeconds)*time.Second+extra)
 	defer cancel()
 	// The brief is fetched before any checkout: a failed fetch must not leave
@@ -203,13 +261,27 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		}
 		briefText = fetched
 	}
+	var checkoutMS *int64
 	if message.Checkout != nil {
+		started := time.Now()
+		result.Stage = "checkout"
+		defer func() {
+			if checkoutMS != nil {
+				if result.StageMS == nil {
+					result.StageMS = map[string]int64{}
+				}
+				result.StageMS["checkout"] = *checkoutMS
+			}
+		}()
 		prepare := client.spawnPrepare
 		if prepare == nil {
 			prepare = client.nodeWorktreePrepare
 		}
 		prepared, code := prepare(runContext, nodeWorktreePrepareArgs{Origin: message.Checkout.Origin, Mode: message.Checkout.Mode, Branch: message.Checkout.Branch, Sha: message.Checkout.Sha, Fetch: message.Checkout.Fetch, Dir: message.Checkout.Dir})
+		ms := time.Since(started).Milliseconds()
+		checkoutMS = &ms
 		if code != "" {
+			result.Retryable = true
 			result.RC, result.Error = 81, "checkout_refused:"+code
 			return result
 		}
@@ -223,15 +295,6 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 			return result
 		}
 		cwd = outcome.Worktree.Path
-	}
-	// The retired spawner is gone; a node without runtug is not spawn-capable.
-	// The daemon's PATH is minimal under launchd/systemd, so the binary is
-	// resolved through config, then ~/.local/bin, then PATH.
-	home, _ := os.UserHomeDir()
-	runtugPath := hubSpawnRuntugPath(config.RuntugPath, home, hubSpawnExecutable, exec.LookPath)
-	if runtugPath == "" {
-		result.RC, result.Error = 2, "runtug_missing"
-		return result
 	}
 
 	temporary, err := os.CreateTemp("", "panewire-spawn-*")
@@ -253,23 +316,31 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		return result
 	}
 
-	output, runErr := runHubSpawnCommand(runContext, runtugPath, cwd, temporaryName, config.Workspace, config.HERDRSession, message.Args)
+	engine := client.spawnEngine
+	if engine == nil {
+		engine = runHubSpawnEngine
+	}
+	output, execution := engine(runContext, cwd, temporaryName, config.Workspace, config.HERDRSession, message.Args)
+	result.Receipt = &execution.Receipt
 	result.StdoutTail = output.tailString()
 	result.Pane, result.JobID = output.pane, output.jobID
-	if runErr == nil {
-		return result
+	if execution.Receipt.Pane != "" {
+		result.Pane = execution.Receipt.Pane
 	}
-	result.RC = 1
-	var exitError *exec.ExitError
-	if errors.As(runErr, &exitError) && exitError.ProcessState != nil && exitError.ExitCode() > 0 {
-		result.RC = exitError.ExitCode()
+	if execution.Receipt.Job != "" {
+		result.JobID = execution.Receipt.Job
 	}
-	if errors.Is(runErr, context.DeadlineExceeded) {
+	result.RC, result.Stage, result.StageMS, result.Retryable = execution.RC, execution.Stage, execution.StageMS, execution.Retryable
+	if execution.RC != 0 && runContext.Err() != nil {
+		result.RC = 124
 		result.Error = "timeout"
-	} else {
+	} else if result.RC != 0 {
 		result.Error = "spawn_failed"
 	}
-	// runtug explains a refusal on stderr; without it the caller only sees
+	if result.RC == 0 {
+		return result
+	}
+	// panewire explains a refusal on stderr; without it the caller only sees
 	// an empty "remote spawn:" message.
 	if stderr := strings.TrimSpace(fleetEventRedact(output.stderr.String())); stderr != "" {
 		result.StdoutTail = hubSpawnTailWithStderr(result.StdoutTail, stderr)
@@ -278,10 +349,10 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	return result
 }
 
-// hubSpawnStderrTail bounds the runtug stderr kept in a spawn result.
+// hubSpawnStderrTail bounds the panewire stderr kept in a spawn result.
 const hubSpawnStderrTail = 1536
 
-// hubSpawnTailWithStderr appends runtug's stderr tail to the stdout tail,
+// hubSpawnTailWithStderr appends panewire's stderr tail to the stdout tail,
 // keeping the whole within hubSpawnResultTail (the hub's wire bound) by
 // dropping the oldest stdout first.
 func hubSpawnTailWithStderr(stdout, stderr string) string {
@@ -374,7 +445,7 @@ func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key st
 }
 
 type hubSpawnOutput struct {
-	// stderr keeps runtug's last stderr bytes for a failed spawn's result.
+	// stderr keeps panewire's last stderr bytes for a failed spawn's result.
 	stderr hubSpawnStderr
 	tail   []byte
 	line   []byte
@@ -432,7 +503,7 @@ func (output *hubSpawnOutput) parseLine() {
 	output.pane, output.jobID = pane, jobID
 }
 
-// parseHubSpawnOK follows runtug's stable OK line rather than guessing from a
+// parseHubSpawnOK follows panewire's stable OK line rather than guessing from a
 // human-facing transcript. Missing keys remain empty by contract.
 func parseHubSpawnOK(raw []byte) (pane, jobID string) {
 	for _, line := range strings.Split(string(raw), "\n") {
@@ -478,62 +549,58 @@ func hubSpawnEnvironment(environment []string, session string) []string {
 	return append(filtered, "HERDR_SESSION="+session)
 }
 
-// hubSpawnRuntugPath resolves the runtug binary: an explicit config path
-// (authoritative — a configured-but-missing path is a misconfiguration, not a
-// fallback), then the conventional ~/.local/bin install, then PATH.
-func hubSpawnRuntugPath(configured, home string, isExecutable func(string) bool, lookPath func(string) (string, error)) string {
-	if configured != "" {
-		// Abs anchors a relative configured path so exec does not silently
-		// fall back to PATH for a name with no separator.
-		if absolute, err := filepath.Abs(configured); err == nil && isExecutable(absolute) {
-			return absolute
-		}
-		return ""
-	}
-	if home != "" {
-		candidate := filepath.Join(home, ".local", "bin", "runtug")
-		if isExecutable(candidate) {
-			return candidate
-		}
-	}
-	if path, err := lookPath("runtug"); err == nil {
-		return path
-	}
-	return ""
-}
+type hubSpawnEngine func(context.Context, string, string, string, string, []string) (*hubSpawnOutput, fleet.Execution)
 
-func hubSpawnExecutable(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0o111 != 0
-}
-
-// hubSpawnOverrideReason records why runtug's model/host auto-selection was
-// bypassed: the hub directed this spawn at this node. runtug requires the
-// reason whenever -m or --host is explicit, and --host local always is.
-const hubSpawnOverrideReason = "hub-directed"
-
-func runHubSpawnCommand(ctx context.Context, runtugPath, cwd, briefPath, workspace, session string, args []string) (*hubSpawnOutput, error) {
-	argv := []string{"spawn", "-c", cwd, "-p", briefPath, "--host", "local", "-w", workspace}
-	argv = append(argv, args...)
-	// The node owns the reason for pinning the host; callers cannot supply
-	// --override-reason (it is not in the hub's args allowlist).
-	argv = append(argv, "--override-reason", hubSpawnOverrideReason)
-	command := exec.CommandContext(ctx, runtugPath, argv...)
-	command.Env = hubSpawnEnvironment(os.Environ(), session)
-	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	command.WaitDelay = time.Second
-	command.Cancel = func() error {
-		if command.Process == nil {
-			return nil
-		}
-		return syscall.Kill(-command.Process.Pid, syscall.SIGKILL)
-	}
+func runHubSpawnEngine(ctx context.Context, cwd, brief, workspace, session string, args []string) (*hubSpawnOutput, fleet.Execution) {
 	output := &hubSpawnOutput{}
-	command.Stdout = output
-	command.Stderr = &output.stderr
-	err := command.Run()
-	if ctx.Err() == context.DeadlineExceeded {
-		return output, context.DeadlineExceeded
+	result := fleet.ExecuteNode(ctx, cwd, brief, workspace, session, args, output, &output.stderr)
+	return output, result
+}
+
+func (client *HubClient) acquireSpawnJournal() (*nodeSpawnJournal, error) {
+	client.spawnJournalMu.Lock()
+	defer client.spawnJournalMu.Unlock()
+	if client.spawnJournal == nil {
+		root := client.spawnJournalDir
+		if root == "" {
+			state := panewireStateDir()
+			if state == "" {
+				return nil, errors.New("configure an absolute writable XDG_STATE_HOME for the spawn journal")
+			}
+			root = filepath.Join(state, "spawn")
+		}
+		if client.spawnConfigPath != "" {
+			legacy := filepath.Join(filepath.Dir(client.spawnConfigPath), "spawn-inbox.sqlite3")
+			if legacy != filepath.Join(root, "spawn-inbox.sqlite3") {
+				if _, err := os.Lstat(legacy); err == nil {
+					return nil, errors.New("legacy journal exists beside spawn.json; stop the node and migrate it with SQLite backup to the node state spawn directory before restarting")
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return nil, err
+				}
+			}
+		}
+		journal, err := openNodeSpawnJournal(root)
+		if err != nil {
+			return nil, err
+		}
+		client.spawnJournal = journal
 	}
-	return output, err
+	client.spawnJournalUsers++
+	return client.spawnJournal, nil
+}
+func (client *HubClient) releaseSpawnJournal() {
+	client.spawnJournalMu.Lock()
+	defer client.spawnJournalMu.Unlock()
+	client.spawnJournalUsers--
+	if client.spawnJournalUsers == 0 {
+		client.spawnJournal.db.Close()
+		client.spawnJournal = nil
+	}
+}
+
+func (client *HubClient) runClaimedHubSpawn(ctx context.Context, message hubOutboundMessage) hubSpawnResult {
+	if message.DeadlineMS != 0 && time.Now().UnixMilli() >= message.DeadlineMS {
+		return hubSpawnResult{RequestID: message.RequestID, JobID: hubSpawnArg(message.Args, "--job"), RC: 124, Stage: "claim", Error: "deadline_not_started", Retryable: true}
+	}
+	return client.runHubSpawn(ctx, message)
 }

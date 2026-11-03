@@ -524,7 +524,7 @@ func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 			// The spawn record is the only place the worker pane is named.
 			paneID = event.paneID()
 		case "job.completed", "job.completion", "job.revoked",
-			// runtug writes these when a job ends without a completion: the
+			// panewire writes these when a job ends without a completion: the
 			// quota release closes every run (done, failed spawn, reap,
 			// lost pane), and a lost or reaped job has no pane left.
 			"quota_pool.release", "quota_pool.release.force", "job.lost", "job.reaped":
