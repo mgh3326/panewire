@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -209,9 +210,10 @@ func nodeCommandDial(t *testing.T, hub *HubServer, server *httptest.Server, mach
 // close request crosses HTTP, the hub, the node's herdr re-read and back.
 func TestNodeCommandEndToEnd(t *testing.T) {
 	hub, server := t14Hub(t)
-	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"))}}
+	fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"))}, read: nodeReapScreen("❯ ")}
 	client, err := NewHubClient(HubClientConfig{
 		URL: t14WSURL(server.URL, ""), MachineID: "machine-a", Token: "node-token", AllowInsecureForTests: true, PingInterval: time.Hour,
+		SpawnConfigPath:     filepath.Join(t.TempDir(), "missing-spawn.json"),
 		hostLoadCollector:   func(context.Context) (HubHostLoad, error) { return HubHostLoad{}, errors.New("fixture") },
 		hostMemoryCollector: func(context.Context) (*HubHostMemory, error) { return nil, errors.New("fixture") },
 		sessionCollector:    func(context.Context) ([]HerdrAgentState, error) { return nil, errors.New("fixture") },
@@ -242,6 +244,9 @@ func TestNodeCommandEndToEnd(t *testing.T) {
 	if status != http.StatusOK || !strings.Contains(string(contents), `"result":{"outcome":"closed"}`) || fake.called("pane", "close", "w1:p1") != 1 {
 		t.Fatalf("status=%d body=%s calls=%v", status, contents, fake.calls)
 	}
+	if fake.called("pane", "read", "w1:p1", "--source", "visible") != 2 {
+		t.Fatalf("close did not prove both composers empty: %v", fake.calls)
+	}
 	status, _, contents = t14HTTP(t, http.MethodGet, server.URL+"/v1/nodes/agents", t14OperatorToken, nil)
 	if status != http.StatusOK || !strings.Contains(string(contents), `"pane_id":"w1:p1","name":"job-a","agent_status":"idle","agent":"claude","cwd":"/work/a"`) {
 		t.Fatalf("status=%d body=%s", status, contents)
@@ -254,6 +259,16 @@ func TestNodeCommandEndToEnd(t *testing.T) {
 	status, _, contents = t14HTTP(t, http.MethodPost, nodeCommandURL(server, "machine-a"), t14OperatorToken, nodeCommandCloseBody)
 	if status != http.StatusOK || !strings.Contains(string(contents), `"outcome":"pane-changed"`) || fake.called("pane", "close") != 1 {
 		t.Fatalf("status=%d body=%s calls=%v", status, contents, fake.calls)
+	}
+	// Returning to idle does not authorize closing an unsent draft.
+	fake.mu.Lock()
+	fake.agents = []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "idle", "/work/a"))}
+	fake.agentRead = 0
+	fake.read = nodeReapScreen("❯ unsent operator draft")
+	fake.mu.Unlock()
+	status, _, contents = t14HTTP(t, http.MethodPost, nodeCommandURL(server, "machine-a"), t14OperatorToken, nodeCommandCloseBody)
+	if status != http.StatusOK || !strings.Contains(string(contents), `"outcome":"pane-changed"`) || fake.called("pane", "close") != 1 {
+		t.Fatalf("closed an idle draft: status=%d body=%s calls=%v", status, contents, fake.calls)
 	}
 }
 
