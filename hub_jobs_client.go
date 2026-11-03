@@ -161,6 +161,12 @@ func scanHubCompletedJobs(inboxRoot string) []HubActiveJob {
 	return completed
 }
 
+// lifecycleEnvelopeSettle is how long a lifecycle envelope with no flat record
+// waits before it is treated as the file-only fallback. lifecycle.go writes the
+// envelope and then runs emit, so a scan in between must not deliver it: the
+// flat record would follow as a second note in the same pane.
+const lifecycleEnvelopeSettle = time.Minute
+
 type hubScannedRelayEvent struct {
 	DeliveryClass string
 	NotifyType    string
@@ -274,6 +280,23 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 				continue
 			}
 			reportPath := relaySignalReportPath(kind, event.reportPath())
+			ownerLane := event.ownerLane()
+			if kind == "job.completed" && event.isLifecycleEnvelope() {
+				// hub.go's R18 contract: "R14 fencing answers \"may this job be
+				// redispatched\"; R18 relay answers \"must this report reach its
+				// lane\"." The envelope's owner_lane is the job's own lane, which
+				// has no route once the job ends, so sending it answers neither
+				// and stays unacknowledged until relayOutboxMaxAge drops the file.
+				// The flat record is the delivery; the envelope only stands in
+				// for it once emit has had time to write one and has not. The
+				// claim label above still rides on it, per the R19e comment:
+				// "carried onto the terminal record so the hub can late-register
+				// a job that finished before any heartbeat advertised it".
+				if jobHasFlatCompletion(dir, files, epoch) || time.Since(eventTime) < lifecycleEnvelopeSettle {
+					continue
+				}
+				ownerLane, reportPath = event.lifecycleRouteLane(entry.Name()), event.Payload.Report
+			}
 			if relayEventPathFallbackKinds[kind] && reportPath == "" {
 				// The event is the durable full-question record when no separate
 				// report exists. The hub payload must point operators back to it,
@@ -283,7 +306,7 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 			// The event file name is the job event's durable identity: it is
 			// unique per emission, stable across node restarts, and shared by
 			// `panewire emit`, which derives the same value for its file.
-			events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: event.ownerLane(), Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name(), EventTime: eventTime})
+			events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name(), EventTime: eventTime})
 		}
 	}
 	sort.Slice(events, func(i, j int) bool {
@@ -344,6 +367,33 @@ func scanHubLaneEventsWithin(inboxRoot string, maxAge time.Duration) []hubScanne
 		return out[i].OwnerLane < out[j].OwnerLane
 	})
 	return out
+}
+
+// jobHasFlatCompletion reports whether a job's event files hold a flat
+// job.completed record for this epoch. It reads every file rather than only the
+// ones the scan kept: an age cut on the record must not revive its envelope.
+func jobHasFlatCompletion(dir string, files []os.DirEntry, epoch uint64) bool {
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".json") {
+			continue
+		}
+		contents, err := os.ReadFile(filepath.Join(dir, file.Name()))
+		if err != nil || len(contents) > 16<<10 {
+			continue
+		}
+		var event hubInboxEvent
+		if json.Unmarshal(contents, &event) != nil || event.OwnerLane == "" {
+			continue
+		}
+		kind, recordEpoch := event.eventKind(), event.Epoch
+		if recordEpoch == 0 {
+			recordEpoch = 1
+		}
+		if (kind == "job.completed" || kind == "job.completion") && recordEpoch == epoch {
+			return true
+		}
+	}
+	return false
 }
 
 // laneEventTransportID is protocol plumbing only: lane events never enter the
@@ -415,8 +465,10 @@ type hubInboxEvent struct {
 	Payload        struct {
 		AgentLabel     string `json:"agent_label"`
 		OwnerLane      string `json:"owner_lane"`
+		ParentLane     string `json:"parent_lane"`
 		Label          string `json:"label"`
 		Host           string `json:"host"`
+		Report         string `json:"report"`
 		ReportPath     string `json:"report_path"`
 		ReportLastLine string `json:"report_last_line"`
 		Reason         string `json:"reason"`
@@ -427,6 +479,32 @@ type hubInboxEvent struct {
 		Role           string `json:"role"`
 		TLevel         string `json:"t_level"`
 	} `json:"payload"`
+}
+
+// isLifecycleEnvelope recognizes the record internal/fleet/lifecycle.go writes
+// before it runs `panewire emit`: its lanes sit under payload and its report is
+// payload.report. Other envelopes spell it report_path and have no emit twin.
+func (e hubInboxEvent) isLifecycleEnvelope() bool {
+	return e.OwnerLane == "" && e.Payload.Report != ""
+}
+
+// lifecycleRouteLane is the lane lifecycle.go hands emit: the parent for a
+// builder or captain, otherwise the owner. Envelopes do not record a role today,
+// so without one an owner lane naming the job itself marks the job's own lane.
+func (e hubInboxEvent) lifecycleRouteLane(jobID string) string {
+	owner, parent := e.ownerLane(), e.Payload.ParentLane
+	if parent == "" {
+		return owner
+	}
+	switch e.role() {
+	case "builder", "captain":
+		return parent
+	case "":
+		if owner == jobID {
+			return parent
+		}
+	}
+	return owner
 }
 
 func (e hubInboxEvent) eventKind() string {
