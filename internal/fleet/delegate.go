@@ -367,7 +367,7 @@ func (a *App) delegatePane(ctx context.Context, s Spawn, timeout time.Duration) 
 
 // delegateAnswer reads what the delegate filed: the result object in the hk
 // job record (`panewire done --result`), else the report text when the
-// completion watcher finished the job first.
+// completion watcher finished the job on the delegate's terminal signal.
 func (a *App) delegateAnswer(ctx context.Context, id string, p delegatePaths) (string, map[string]any, error) {
 	var result map[string]any
 	if store, e := a.jobStore(); e == nil {

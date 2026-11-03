@@ -2,12 +2,22 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"time"
 )
+
+// laneEventMaxBytes bounds one events-lane record, as the relay scanner does.
+const laneEventMaxBytes = 16 << 10
+
+// laneTerminalMarker is the head of a lane event that ends a job. The optional
+// [label] prefix is the form most workers use; a marker later in the text, such
+// as "READY withheld" inside a progress note, does not count.
+var laneTerminalMarker = regexp.MustCompile(`^(\[[^\]]*\]\s*)?(READY|DONE|ESC)\b`)
 
 func (a *App) startWatch(job string) error {
 	// Unit fakes never spawn real processes.
@@ -74,7 +84,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		}
 		if j.Report != "" {
 			if info, e := os.Stat(j.Report); e == nil && info.Mode().IsRegular() {
-				if pending && size == info.Size() && modified.Equal(info.ModTime()) {
+				if pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
 					return a.lifecycle(ctx, "done", []string{id, "--report", j.Report})
 				}
 				pending = true
@@ -119,4 +129,57 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			return e
 		}
 	}
+}
+
+// workerSignalledEnd reports whether the current attempt recorded an explicit
+// end: a job.escalate record, or a READY, DONE or ESC lane event from its pane.
+// A report file is never a signal, because a worker can write one early and keep
+// working. A job.completed record needs no check here: it makes the job Terminal.
+func (a *App) workerSignalledEnd(j Job) bool {
+	var since time.Time
+	escalated := false
+	for _, ev := range j.Events {
+		switch ev.Kind {
+		case "job.spawned", "job.reclaim", "job.reprompted":
+			since, escalated = ev.when, false
+		case "job.escalate":
+			escalated = true
+		}
+	}
+	return escalated || a.paneEmittedMarker(j.Pane, since)
+}
+
+// paneEmittedMarker scans events-lane for a terminal marker the pane emitted at
+// or after since. Lane events carry no job id, so the pane that `panewire emit`
+// stamps is what ties an event to a job. An unreadable record is not a signal.
+func (a *App) paneEmittedMarker(pane string, since time.Time) bool {
+	if pane == "" {
+		return false
+	}
+	dir := filepath.Join(filepath.Dir(a.Jobs), "events-lane")
+	entries, e := os.ReadDir(dir)
+	if e != nil {
+		return false
+	}
+	// Records are stamped in whole seconds, so compare at that resolution.
+	since = since.Truncate(time.Second)
+	for _, entry := range entries {
+		info, e := entry.Info()
+		if e != nil || !info.Mode().IsRegular() || filepath.Ext(entry.Name()) != ".json" || info.Size() > laneEventMaxBytes || info.ModTime().Before(since) {
+			continue
+		}
+		body, e := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if e != nil {
+			continue
+		}
+		var record struct {
+			Kind string `json:"kind"`
+			Pane string `json:"pane_id"`
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(body, &record) == nil && record.Kind == "lane.event" && record.Pane == pane && laneTerminalMarker.MatchString(record.Text) {
+			return true
+		}
+	}
+	return false
 }
