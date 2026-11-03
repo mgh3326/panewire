@@ -39,7 +39,7 @@ func (a *App) launchArgs(s Seat, l Launch) ([]string, []string, error) {
 	case "pi":
 		return []string{"--no-mcp", "--model", m + ":" + e}, env, nil
 	case "omp":
-		return []string{"--model", m + ":" + e}, env, nil
+		return []string{"--model", m + ":" + e}, []string{"OMP_SKIP_SETUP=1"}, nil
 	case "cmd":
 		return []string{"-m", m, "--effort", e, "--yolo", "--skip-onboarding", "--no-session"}, env, nil
 	case "kimi":
@@ -265,6 +265,9 @@ func PiProof(screen, model, effort, cwd, home, brief string) bool {
 	return regexp.MustCompile(pattern).MatchString(footer[1]) && !strings.Contains(normalized(brief), normalized(strings.Join(footer[:2], "\n")))
 }
 func (a *App) modelProof(ctx context.Context, s Seat, l Launch, cwd, pane, brief string) error {
+	if s.Kind == "omp" {
+		return a.ompProof(ctx, l, cwd, pane, brief, ompLandedProofWait)
+	}
 	screen, e := a.visible(ctx, pane)
 	if e != nil {
 		return e
@@ -273,7 +276,7 @@ func (a *App) modelProof(ctx context.Context, s Seat, l Launch, cwd, pane, brief
 	if s.Kind == "cmd" {
 		ok = CmdProof(screen, l.ModelID, l.Effort, cwd, a.Home, brief)
 	}
-	if s.Kind == "pi" || s.Kind == "omp" {
+	if s.Kind == "pi" {
 		ok = PiProof(screen, l.ModelID, l.Effort, cwd, a.Home, brief)
 	}
 	if !ok {
@@ -281,6 +284,10 @@ func (a *App) modelProof(ctx context.Context, s Seat, l Launch, cwd, pane, brief
 	}
 	return nil
 }
+
+// ompLandedProofWait bounds the re-check after the brief lands: the seat already
+// painted its footer once, so only a redraw can hide it.
+const ompLandedProofWait = 15 * time.Second
 
 type processInfo struct {
 	ShellPID  int `json:"shell_pid"`
@@ -290,6 +297,7 @@ type processInfo struct {
 		Argv    []string `json:"argv"`
 		Name    string   `json:"name"`
 		Cmdline string   `json:"cmdline"`
+		CWD     string   `json:"cwd"`
 	} `json:"foreground_processes"`
 }
 
@@ -391,7 +399,7 @@ func (a *App) start(ctx context.Context, s Spawn, seat Seat, l Launch, pane stri
 			return e
 		}
 		for _, proc := range p.Processes {
-			if slices.Contains(executables(seat.Kind), procName(firstNonEmpty(proc.Argv0, firstArg(proc.Argv), proc.Name))) {
+			if foregroundAgent(seat.Kind, proc.Argv0, proc.Name, proc.Argv) {
 				foreground = true
 			}
 		}
@@ -420,8 +428,16 @@ func (a *App) start(ctx context.Context, s Spawn, seat Seat, l Launch, pane stri
 			return fail(exitConfig, "Devin identity not proven")
 		}
 	}
-	if seat.Kind == "pi" || seat.Kind == "omp" || seat.Kind == "cmd" {
+	if seat.Kind == "pi" || seat.Kind == "cmd" {
 		if e := a.modelProof(ctx, seat, l, s.CWD, pane, ""); e != nil {
+			return e
+		}
+	}
+	if seat.Kind == "omp" {
+		if e := a.ompProof(ctx, l, s.CWD, pane, "", timeout); e != nil {
+			return e
+		}
+		if e := a.ompProcessCWD(ctx, s.CWD, pane); e != nil {
 			return e
 		}
 	}
@@ -499,6 +515,14 @@ func CodexFooterProof(screen, model, effort, cwd, home string) bool {
 	}
 	return false
 }
+func foregroundAgent(kind, argv0, name string, argv []string) bool {
+	exe := procName(firstNonEmpty(argv0, firstArg(argv), name))
+	if slices.Contains(executables(kind), exe) {
+		return true
+	}
+	return kind == "omp" && exe == "bun" && ompBunScript(argv)
+}
+
 func executables(kind string) []string {
 	switch kind {
 	case "claude":

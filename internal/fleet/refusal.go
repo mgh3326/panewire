@@ -12,6 +12,7 @@ func spawnRefusalFix(err error) string {
 	}
 	message := err.Error()
 	for _, fix := range []struct{ match, hint string }{
+		{"OMP_SETUP_WIZARD", "The installed omp no longer honors OMP_SKIP_SETUP. Run omp once on the executing host to finish setup, then repeat the same command after cleanup succeeds."},
 		{"agent not in foreground", "Inspect the failed pane with panewire find JOB, verify the selected harness binary starts on that host, then repeat the same command after cleanup succeeds."},
 		{"refusing broad workspace trust", "Pass -c with the specific worktree path; do not grant trust to a broad parent directory."},
 		{"malformed workspace trust store", "Repair the selected harness's workspace trust store on the executing host, preserving unrelated entries, then repeat the same command."},
