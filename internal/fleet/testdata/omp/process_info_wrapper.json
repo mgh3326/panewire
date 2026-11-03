@@ -1,0 +1,27 @@
+{
+  "id": "cli:pane:process_info",
+  "result": {
+    "process_info": {
+      "foreground_process_group_id": 1001,
+      "foreground_processes": [
+        {
+          "argv": [
+            "/home/user/.bun/bin/bun",
+            "--no-env-file",
+            "/home/user/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js",
+            "--model",
+            "anthropic/claude-opus-5-5:high"
+          ],
+          "argv0": "bun",
+          "cmdline": "/home/user/.bun/bin/bun --no-env-file /home/user/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent/dist/cli.js --model anthropic/claude-opus-5-5:high",
+          "cwd": "/home/user/work/tree",
+          "name": "bun",
+          "pid": 1001
+        }
+      ],
+      "pane_id": "w:p1",
+      "shell_pid": 1000
+    },
+    "type": "pane_process_info"
+  }
+}
