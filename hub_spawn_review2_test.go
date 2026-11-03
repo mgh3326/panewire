@@ -4,15 +4,67 @@ import (
 	"context"
 	"errors"
 	"github.com/coder/websocket/wsjson"
+	"io"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )
+
+func TestOperatorSpawnAcceptsCanonicalSubmissionArgs(t *testing.T) {
+	for _, excluded := range []string{"", "machine-b,machine-c"} {
+		t.Run(excluded, func(t *testing.T) {
+			root, err := filepath.EvalSymlinks(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			cwd := filepath.Join(root, "project dir")
+			if err = os.Mkdir(cwd, 0700); err != nil {
+				t.Fatal(err)
+			}
+			brief := filepath.Join(root, "task brief.md")
+			if err = os.WriteFile(brief, []byte("Implement the scoped task"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			origin := "https://github.com/example/project.git"
+			app := &fleet.App{Home: root, Jobs: filepath.Join(root, "jobs"), Out: io.Discard, Err: io.Discard,
+				Config:     fleet.Config{Local: map[string]any{"machine_id": "machine-a"}},
+				Repository: &fleet.Repository{Name: "project", Origin: origin, LocalRoot: root, Worktree: "project.job", Checkout: &fleet.HubCheckout{Origin: origin, Mode: "branch", Branch: "wk/task", Sha: strings.Repeat("a", 40), Dir: "project.job"}},
+			}
+			request, err := app.PrepareSubmission(t.Context(), fleet.Spawn{CWD: cwd, Prompt: brief, Profile: "auto", Host: "auto", Label: "job", Job: "job", T: "T1", Task: "42", Owner: "parent", Role: "worker", Grade: "S+", ExcludeHosts: excluded})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, flag := range []string{"-c", "-p", "--host"} {
+				if !slices.Contains(request.Args, flag) {
+					t.Fatalf("canonical submission omitted %s: %q", flag, request.Args)
+				}
+			}
+			if excluded != "" && !slices.Contains(request.Args, "--exclude-host") {
+				t.Fatal("exclusions not serialized")
+			}
+			if !validHubSpawnArgsForMode(request.Args, true) {
+				t.Fatalf("canonical submissionArgs rejected: %q", request.Args)
+			}
+			if validHubSpawnArgs(request.Args) {
+				t.Fatal("canonical operator args admitted by legacy mode")
+			}
+		})
+	}
+	for _, flag := range []string{"-c", "-p", "--host", "--exclude-host"} {
+		if validHubSpawnArgs([]string{flag, "machine-a"}) {
+			t.Fatalf("legacy mode admits %s", flag)
+		}
+		if validHubSpawnArgsForMode([]string{flag, "bad\nvalue"}, true) {
+			t.Fatalf("operator control character accepted: %s", flag)
+		}
+	}
+}
 
 func TestOperatorSpawnGradeAndRoleBoundary(t *testing.T) {
 	for _, grade := range []string{"C", "B", "A", "A+", "S", "S+"} {
