@@ -35,6 +35,7 @@ type App struct {
 	// one under Home and Jobs; tests inject a store over a temp dir.
 	Arbiter        *arbiter.Store
 	warned         map[string]bool
+	ompModelNames  map[string]string // omp's footer names, read once per spawn
 	PlacementHosts func(context.Context, string) ([]HostView, error)
 	Source         PlacementSource
 	Wake           Waker

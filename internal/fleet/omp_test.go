@@ -73,9 +73,11 @@ func ompSpawnFixture(t *testing.T) (*App, Spawn, *fakeRunner) {
 			return Result{Out: fmt.Sprintf(`{"agents":[{"pane_id":"w:p1","tab_id":"w:t1","name":"worker-a","agent":"omp","agent_status":%q}]}`, status)}
 		case strings.HasPrefix(args, "pane read"), strings.HasPrefix(args, "agent read"):
 			if started {
-				return Result{Out: "── editor ──\n\n────────\n" + cwd + "\n12%/100k (anthropic) claude-opus-5-5 • high"}
+				return Result{Out: ompCapture(t, "screen_opus_high_worktree.txt")}
 			}
 			return Result{Out: token + "\n"}
+		case c.Name == "omp" && args == "models --json":
+			return Result{Out: ompCapture(t, "models.json")}
 		}
 		return Result{}
 	}}
@@ -119,7 +121,7 @@ func TestOMPSpawnRefusesMismatchedScreen(t *testing.T) {
 				}
 				r := base(c)
 				if !afterBrief || submitted {
-					r.Out = strings.ReplaceAll(r.Out, "claude-opus-5-5 • high", "claude-sonnet-5-5 • high")
+					r.Out = strings.ReplaceAll(r.Out, "◒ Opus 5.5", "◒ Sonnet 5.5")
 				}
 				return r
 			}
@@ -131,21 +133,26 @@ func TestOMPSpawnRefusesMismatchedScreen(t *testing.T) {
 }
 
 func TestOMPModelProof(t *testing.T) {
-	const screen = "── editor ──\n\n────────\n~/tree\n12%/100k (anthropic) claude-opus-5-5 • high"
+	screen := ompCapture(t, "screen_opus_high_worktree.txt")
 	for _, tc := range []struct {
 		name, screen, effort, brief string
 		want                        bool
 	}{
 		{"matching", screen, "high", "", true},
-		{"wrong model", strings.ReplaceAll(screen, "claude-opus-5-5", "claude-sonnet-5-5"), "high", "", false},
+		{"wrong model", strings.ReplaceAll(screen, "Opus 5.5", "Sonnet 5.5"), "high", "", false},
 		{"wrong effort", screen, "medium", "", false},
-		{"wrong cwd", strings.ReplaceAll(screen, "~/tree", "~/other"), "high", "", false},
+		{"wrong cwd", strings.ReplaceAll(screen, "panewire/tree", "panewire/other"), "high", "", false},
 		{"quoted footer", screen, "high", screen, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			a := testApp(t)
 			a.Home = "/home/example"
-			a.Runner = &fakeRunner{Do: func(Command) Result { return Result{Out: tc.screen} }}
+			a.Runner = &fakeRunner{Do: func(c Command) Result {
+				if c.Name == "omp" {
+					return Result{Out: ompCapture(t, "models.json")}
+				}
+				return Result{Out: tc.screen}
+			}}
 			err := a.modelProof(context.Background(), a.Policy.Profiles["omp-opus"], Launch{ModelID: "anthropic/claude-opus-5-5", Effort: tc.effort}, "/home/example/tree", "w:p1", tc.brief)
 			if (err == nil) != tc.want {
 				t.Fatalf("want proof=%t, got %v", tc.want, err)

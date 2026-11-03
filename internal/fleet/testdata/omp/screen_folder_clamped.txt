@@ -1,0 +1,17 @@
+
+                                            ████████████
+                                               ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                               ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                               ▒▒  ██                  █
+                                                   ██       v18.14.2
+
+                        Tip: `/shake` rips heavy tool results out of context to reclaim tokens
+                              without a full /compact — `/shake images` drops just images
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.16.0 is available. Run: omp update
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ π > ◒ Opus 5.5 > 📁 …e-directory/desk-for-the-clamped-footer ▶─1%────────────────────────────────────────╎─┃───────1M─
+╰─                                                                                         ⇧⇥ to change thinking effort
