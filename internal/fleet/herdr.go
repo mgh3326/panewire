@@ -503,14 +503,16 @@ func CodexFooterProof(screen, model, effort, cwd, home string) bool {
 	expected := strings.ToLower(strings.ReplaceAll(model, "-", " "))
 	for i := len(lines) - 1; i >= 0; i-- {
 		line := lines[i]
-		if !strings.Contains(strings.ToLower(line), "context") {
-			continue
-		}
-		shown := strings.ToLower(strings.ReplaceAll(line, "-", " "))
 		cwdShown := strings.Contains(line, cwd)
 		if strings.HasPrefix(cwd, home+"/") {
 			cwdShown = cwdShown || strings.Contains(line, "~"+strings.TrimPrefix(cwd, home))
 		}
+		// The footer is the last row that shows the cwd. Older Codex also
+		// printed "Context N%" there; 0.166 prints only "<model> <effort> · <cwd>".
+		if !cwdShown && !strings.Contains(strings.ToLower(line), "context") {
+			continue
+		}
+		shown := strings.ToLower(strings.ReplaceAll(line, "-", " "))
 		return cwdShown && strings.Contains(shown, expected) && regexp.MustCompile(`(?i)\b`+regexp.QuoteMeta(effort)+`\b`).MatchString(line)
 	}
 	return false

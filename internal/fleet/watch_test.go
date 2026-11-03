@@ -90,6 +90,22 @@ func TestCodexFooterRequiresLastContextRow(t *testing.T) {
 	}
 }
 
+// Codex 0.166 draws "<model> <effort> · <cwd>" with no Context column, under
+// the prompt and above a shortcuts row (hk 2802).
+func TestCodexFooterWithoutContextColumn(t *testing.T) {
+	banner := "  directory: ~/tree\n  model: gpt-6.1-example high\n"
+	footer := "› Ask Codex to do anything\n\n  GPT-6.1 Example high · ~/tree\n  ? for shortcuts      ⚠ 3 warnings · f2 to view\n"
+	if !CodexFooterProof(banner+footer, "gpt-6.1-example", "high", "/home/example/tree", "/home/example") {
+		t.Fatal("0.166 footer refused")
+	}
+	if CodexFooterProof(banner, "gpt-6.1-example", "high", "/home/example/tree", "/home/example") {
+		t.Fatal("banner without footer accepted")
+	}
+	if CodexFooterProof(strings.Replace(banner+footer, "Example high", "Example low", 1), "gpt-6.1-example", "high", "/home/example/tree", "/home/example") {
+		t.Fatal("wrong effort accepted")
+	}
+}
+
 // watchFixture is a live job whose pane stays present, with its report path
 // recorded in the spawn receipt, as a real spawn leaves it.
 func watchFixture(t *testing.T) (*App, *fakeRunner, string) {
