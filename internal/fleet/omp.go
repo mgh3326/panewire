@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // ompCLIScript is the script the omp wrapper execs under bun, so a running omp
@@ -87,11 +88,20 @@ func OMPFooterProof(screen, modelName, effort, cwd, home, brief string) bool {
 	return false
 }
 
+// ompPathClampTail is how much of a long path omp keeps behind "…". The cut can
+// fall inside a directory name, so this length, not a path boundary, is what
+// tells a real clamp from a short tail that many directories would end with.
+const ompPathClampTail = 39
+
+func ompClampedTail(tail string) bool {
+	return utf8.RuneCountInString(tail) == ompPathClampTail
+}
+
 // ompFolderShown follows omp's path segment: a ~ form, a path relative to one
 // of its display roots, or a tail clamped behind "…".
 func ompFolderShown(shown, cwd, home string) bool {
 	if tail, ok := strings.CutPrefix(shown, "…"); ok {
-		return tail != "" && strings.HasSuffix(cwd, tail)
+		return ompClampedTail(tail) && strings.HasSuffix(cwd, tail)
 	}
 	if rest, ok := strings.CutPrefix(shown, "~"); ok {
 		return strings.TrimRight(home, "/")+rest == cwd
@@ -107,7 +117,7 @@ func ompFolderShown(shown, cwd, home string) bool {
 func ompWorktreeShown(label, branch, cwd string) bool {
 	dir := filepath.Base(cwd)
 	if tail, ok := strings.CutPrefix(label, "…"); ok {
-		return strings.HasSuffix(tail, "/"+dir) || tail != "" && strings.HasSuffix(dir, tail)
+		return ompClampedTail(tail) && (strings.HasSuffix(tail, "/"+dir) || strings.HasSuffix(dir, tail))
 	}
 	if strings.Contains(label, "/") {
 		return strings.HasSuffix(label, "/"+dir)

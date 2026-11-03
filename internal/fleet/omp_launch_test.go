@@ -140,6 +140,13 @@ func TestOMPSpawnRefusesAnotherBunScript(t *testing.T) {
 func TestOMPFooterProof(t *testing.T) {
 	worktree := ompCapture(t, "screen_opus_high_worktree.txt")
 	folder := ompCapture(t, "screen_sonnet_medium_folder.txt")
+	clamped := ompCapture(t, "screen_folder_clamped.txt")
+	const longCWD = "/home/user/work/plain-fixture-directory/desk-for-the-clamped-footer"
+	// clampTail is what omp keeps of a long label ending in end.
+	clampTail := func(end string) string {
+		long := strings.Repeat("d", ompPathClampTail) + end
+		return long[len(long)-ompPathClampTail:]
+	}
 	const (
 		home    = "/home/user"
 		tree    = "/home/user/work/tree"
@@ -185,13 +192,16 @@ func TestOMPFooterProof(t *testing.T) {
 		{name: "absolute other", screen: row(footer, "/srv/other/desk"), model: "GPT-6.1 Terra", effort: "high", cwd: "/srv/plain/desk"},
 		{name: "display root stripped", screen: row(footer, "plain/desk"), model: "GPT-6.1 Terra", effort: "high", cwd: "/home/user/Projects/plain/desk", want: true},
 		{name: "display root stops at a path boundary", screen: row(footer, "lain/desk"), model: "GPT-6.1 Terra", effort: "high", cwd: "/home/user/Projects/plain/desk"},
-		{name: "clamped tail", screen: row(footer, "…ain/desk"), model: "GPT-6.1 Terra", effort: "high", cwd: desk, want: true},
-		{name: "clamped other tail", screen: row(footer, "…ain/other"), model: "GPT-6.1 Terra", effort: "high", cwd: desk},
+		{name: "captured clamp", screen: clamped, model: opus, effort: "high", cwd: longCWD, want: true},
+		{name: "captured clamp names another directory", screen: clamped, model: opus, effort: "high", cwd: "/home/user/work/plain-fixture-directory/desk-for-another-footer"},
+		{name: "short tail is not omp's clamp", screen: row(footer, "…ain/desk"), model: "GPT-6.1 Terra", effort: "high", cwd: "/home/user/plain/desk"},
 
 		{name: "worktree dir equals branch", screen: row(rowGit, "panewire", "tree"), model: opus, effort: "high", cwd: tree, want: true},
 		{name: "worktree branch names another dir", screen: row(rowGit, "panewire", "other"), model: opus, effort: "high", cwd: tree},
-		{name: "worktree label clamped", screen: row(rowGit, "…ire/tree", "wk/x"), model: opus, effort: "high", cwd: tree, want: true},
-		{name: "worktree label clamped to other", screen: row(rowGit, "…ire/other", "wk/x"), model: opus, effort: "high", cwd: tree},
+		{name: "worktree label clamped", screen: row(rowGit, "…"+clampTail("project/tree"), "wk/x"), model: opus, effort: "high", cwd: tree, want: true},
+		{name: "worktree label clamped to other", screen: row(rowGit, "…"+clampTail("project/other"), "wk/x"), model: opus, effort: "high", cwd: tree},
+		{name: "worktree dir clamped", screen: row(rowGit, "…"+clampTail("d"), "wk/x"), model: opus, effort: "high", cwd: "/home/user/work/" + strings.Repeat("d", 45), want: true},
+		{name: "worktree short tail is not omp's clamp", screen: row(rowGit, "…ire/tree", "wk/x"), model: opus, effort: "high", cwd: tree},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := OMPFooterProof(tc.screen, tc.model, tc.effort, tc.cwd, home, tc.brief); got != tc.want {
