@@ -85,15 +85,21 @@ func TestCIOkRequiresOnlyTheSuitesJobs(t *testing.T) {
 	} {
 		testResult, postgresResult := result("test", tc.suite, tc.test), result("postgres", tc.suite, tc.postgres)
 		cmd := exec.Command("bash", "-e", "-c", gate.Steps[0].Run)
-		cmd.Env = append(os.Environ(), "SUITE="+tc.suite, "TEST_RESULT="+testResult, "POSTGRES_RESULT="+postgresResult)
+		cmd.Env = append(os.Environ(), "SUITE="+tc.suite, "TEST_RESULT="+testResult, "POSTGRES_RESULT="+postgresResult, "AUTO_TAG_RESULT=success")
 		out, err := cmd.CombinedOutput()
 		if (err == nil) != tc.ok {
 			t.Errorf("suite=%s test=%s postgres=%s: ok=%v, want %v (%s)", tc.suite, testResult, postgresResult, err == nil, tc.ok, out)
 		}
 	}
+
+	cmdAuto := exec.Command("bash", "-e", "-c", gate.Steps[0].Run)
+	cmdAuto.Env = append(os.Environ(), "SUITE=all", "TEST_RESULT=success", "POSTGRES_RESULT=success", "AUTO_TAG_RESULT=failure")
+	if err := cmdAuto.Run(); err == nil {
+		t.Fatal("ci-ok admitted failing auto-tag regression")
+	}
 	// A skipped job the suite selects is a failure, not a pass.
 	cmd := exec.Command("bash", "-e", "-c", gate.Steps[0].Run)
-	cmd.Env = append(os.Environ(), "SUITE=all", "TEST_RESULT=success", "POSTGRES_RESULT=skipped")
+	cmd.Env = append(os.Environ(), "SUITE=all", "TEST_RESULT=success", "POSTGRES_RESULT=skipped", "AUTO_TAG_RESULT=success")
 	if err := cmd.Run(); err == nil {
 		t.Fatal("ci-ok passed a PR whose postgres job was skipped")
 	}

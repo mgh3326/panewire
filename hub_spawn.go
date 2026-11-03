@@ -22,11 +22,13 @@ const (
 )
 
 var (
-	hubSpawnRequestIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-	hubSpawnMachinePattern   = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
-	hubSpawnCWDKeyPattern    = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
-	hubSpawnArgValuePattern  = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,200}$`)
-	hubSpawnTagsValuePattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+){0,15}$`)
+	hubSpawnRequestIDPattern     = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+	hubSpawnMachinePattern       = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+	hubSpawnCWDKeyPattern        = regexp.MustCompile(`^[a-z0-9._-]{1,64}$`)
+	hubSpawnArgValuePattern      = regexp.MustCompile(`^[A-Za-z0-9._:/@-]{1,200}$`)
+	hubSpawnTagsValuePattern     = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+){0,15}$`)
+	hubSpawnExcludedHostsPattern = regexp.MustCompile(`^[A-Za-z0-9._:/@-]+(,[A-Za-z0-9._:/@-]+)*$`)
+	hubSpawnGradeValuePattern    = regexp.MustCompile(`^(C|B|A|A\+|S|S\+)$`)
 )
 
 type hubSpawnBrief struct {
@@ -111,11 +113,24 @@ type hubSpawnRecord struct {
 func validHubSpawnRequestID(value string) bool { return hubSpawnRequestIDPattern.MatchString(value) }
 
 func validHubSpawnRequest(request hubSpawnRequest) bool {
-	inline, doc := request.Brief.hasInline || request.Brief.Inline != "", request.Brief.hasDoc || request.Brief.Doc != ""
-	if request.Args == nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.Machine) || !hubSpawnCWDKeyPattern.MatchString(request.CWDKey) || request.WaitSeconds < 1 || request.WaitSeconds > 3600 || inline == doc || inline && (request.Brief.Inline == "" || !utf8.ValidString(request.Brief.Inline) || len([]byte(request.Brief.Inline)) > hubSpawnMaxBriefBytes) || doc && (request.Brief.Doc == "" || !validHubSpawnDocKey(request.Brief.Doc)) {
+	return validHubSpawnRequestForMode(request, false)
+}
+
+func validHubSpawnRequestForMode(request hubSpawnRequest, operator bool) bool {
+	maxWait := 300
+	if operator {
+		maxWait = 3600
+		if request.DeadlineMS <= 0 {
+			return false
+		}
+	} else if request.DeadlineMS != 0 || request.PlacementMS != 0 {
 		return false
 	}
-	return validHubSpawnArgs(request.Args) && (request.Checkout == nil || validHubSpawnCheckout(*request.Checkout))
+	inline, doc := request.Brief.hasInline || request.Brief.Inline != "", request.Brief.hasDoc || request.Brief.Doc != ""
+	if request.Args == nil || !validHubSpawnRequestID(request.RequestID) || !hubSpawnMachinePattern.MatchString(request.Machine) || !hubSpawnCWDKeyPattern.MatchString(request.CWDKey) || request.WaitSeconds < 1 || request.WaitSeconds > maxWait || inline == doc || inline && (request.Brief.Inline == "" || !utf8.ValidString(request.Brief.Inline) || len([]byte(request.Brief.Inline)) > hubSpawnMaxBriefBytes) || doc && (request.Brief.Doc == "" || !validHubSpawnDocKey(request.Brief.Doc)) {
+		return false
+	}
+	return validHubSpawnArgsForMode(request.Args, operator) && (request.Checkout == nil || validHubSpawnCheckout(*request.Checkout))
 }
 
 func validHubSpawnDocKey(key string) bool {
@@ -150,11 +165,21 @@ func validHubSpawnCheckout(checkout hubSpawnCheckout) bool {
 }
 
 func validHubSpawnArgs(args []string) bool {
+	return validHubSpawnArgsForMode(args, false)
+}
+
+func validHubSpawnArgsForMode(args []string, operator bool) bool {
 	allowed := map[string]bool{}
-	for _, flag := range []string{"-m", "-w", "-l", "--t", "--effort", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--builder-family", "--builder-job", "--grade", "--routing-role", "--override-reason", "--operator-request", "--requested-by", "--purpose", "--lane-defer"} {
+	for _, flag := range []string{"-m", "-w", "-l", "--t", "--effort", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--builder-family", "--builder-job"} {
 		allowed[flag] = true
 	}
-	booleans := map[string]bool{"--keep": true, "--job-dup-ok": true, "--task-hk-bypass": true, "--allow-escalation": true}
+	booleans := map[string]bool{}
+	if operator {
+		for _, flag := range []string{"-c", "-p", "--host", "--exclude-host", "--grade", "--routing-role", "--override-reason", "--operator-request", "--requested-by", "--purpose", "--lane-defer"} {
+			allowed[flag] = true
+		}
+		booleans = map[string]bool{"--keep": true, "--job-dup-ok": true, "--task-hk-bypass": true, "--allow-escalation": true}
+	}
 	seen := map[string]bool{}
 	for i := 0; i < len(args); {
 		flag := args[i]
@@ -174,8 +199,20 @@ func validHubSpawnArgs(args []string) bool {
 		if flag == "--tags" {
 			pattern = hubSpawnTagsValuePattern
 		}
-		freeText := flag == "--override-reason" || flag == "--purpose" || flag == "-w"
-		if len(value) > 200 || value == "" || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") || (!freeText && !pattern.MatchString(value)) || !validHubSpawnArgValue(flag, value) {
+		if flag == "--grade" {
+			pattern = hubSpawnGradeValuePattern
+		}
+		if flag == "--exclude-host" {
+			pattern = hubSpawnExcludedHostsPattern
+		}
+		path := operator && (flag == "-c" || flag == "-p")
+		maxBytes := 200
+		if path {
+			maxBytes = nodeCommandMaxPathBytes
+		}
+		freeText := operator && (path || flag == "--override-reason" || flag == "--purpose" || flag == "-w")
+		validValue := validHubSpawnArgValue(flag, value) || operator && flag == "--role" && value == "counsel"
+		if len(value) > maxBytes || value == "" || !utf8.ValidString(value) || strings.ContainsAny(value, "\x00\r\n") || (!freeText && !pattern.MatchString(value)) || !validValue {
 			return false
 		}
 		i += 2

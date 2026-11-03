@@ -61,6 +61,12 @@ func TestSpawnReservationSurvivesRestartAndReplaysLostResponse(t *testing.T) {
 	if _, _, err = recovered.claimSpawn(ctx, changed, "second-job", "parent", now); !errors.Is(err, errSpawnClaimed) {
 		t.Fatalf("duplicate task/role accepted: %v", err)
 	}
+	for i, arg := range changed.Args {
+		if arg == "--task" {
+			changed.Args = append(changed.Args[:i], changed.Args[i+2:]...)
+			break
+		}
+	}
 	changed.Args = append(changed.Args, "--parent-job", "test-job")
 	if _, fresh, err = recovered.claimSpawn(ctx, changed, "second-job", "parent", now); err != nil || !fresh {
 		t.Fatalf("legal inherited child blocked: %v", err)
@@ -86,7 +92,7 @@ func TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox(t *testing.T) {
 			other := node
 			other.Machine = "machine-b"
 			again, err := s.bindSpawn(ctx, req.RequestID, task.Attempt, other)
-			if err != nil || again.Node.Machine != "machine-a" {
+			if !errors.Is(err, errSpawnClaimed) || again.Node.Machine != "machine-a" {
 				t.Fatalf("destination changed: %+v %v", again, err)
 			}
 			if changed, err := s.completeSpawn(ctx, task, hubSpawnOutcome{RC: 124, Stage: "landing", Reason: reason, Retryable: true}, now); err != nil || !changed {

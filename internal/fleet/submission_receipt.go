@@ -33,7 +33,20 @@ func (a *App) saveSubmission(request Submission) (Submission, error) {
 	if err != nil {
 		return Submission{}, err
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0600)
+	file, err := os.CreateTemp(filepath.Dir(path), ".submission-*.tmp")
+	if err != nil {
+		return Submission{}, err
+	}
+	temporary := file.Name()
+	defer os.Remove(temporary)
+	if _, err = file.Write(raw); err == nil {
+		err = file.Sync()
+	}
+	err = errors.Join(err, file.Close())
+	if err != nil {
+		return Submission{}, err
+	}
+	err = os.Link(temporary, path)
 	if errors.Is(err, os.ErrExist) {
 		info, e := os.Lstat(path)
 		if e != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0077 != 0 || info.Size() > 1<<20 {
@@ -50,25 +63,18 @@ func (a *App) saveSubmission(request Submission) (Submission, error) {
 		if !bytes.Equal(normalized, canonical) {
 			return Submission{}, fail(exitDuplicate, "saved submission differs from this command; replay the original flags and brief, or use a new job id for independent work")
 		}
-		return saved, nil
+		return saved, syncSubmissionDirectory(filepath.Dir(path))
 	}
 	if err != nil {
 		return Submission{}, err
 	}
-	if _, err = file.Write(raw); err == nil {
-		err = file.Sync()
-	}
-	err = errors.Join(err, file.Close())
+	return request, syncSubmissionDirectory(filepath.Dir(path))
+}
+
+func syncSubmissionDirectory(path string) error {
+	dir, err := os.Open(path)
 	if err != nil {
-		return Submission{}, err
+		return err
 	}
-	dir, err := os.Open(filepath.Dir(path))
-	if err != nil {
-		return Submission{}, err
-	}
-	err = errors.Join(dir.Sync(), dir.Close())
-	if err != nil {
-		return Submission{}, err
-	}
-	return request, nil
+	return errors.Join(dir.Sync(), dir.Close())
 }

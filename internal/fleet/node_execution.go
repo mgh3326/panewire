@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"time"
 )
 
@@ -70,11 +71,19 @@ func ExecuteNode(ctx context.Context, cwd, brief, workspace, session string, arg
 
 // ExecuteLifecycle gives node commands the same completion/escalation entry
 // point as the CLI, without launching another panewire process.
-func ExecuteLifecycle(ctx context.Context, args []string, out, errout io.Writer) error {
+func ExecuteLifecycle(ctx context.Context, jobsRoot string, args []string, out, errout io.Writer) error {
 	a, err := New(out, errout)
 	if err != nil {
 		return err
 	}
+	return a.executeLifecycleAt(ctx, jobsRoot, args)
+}
+
+func (a *App) executeLifecycleAt(ctx context.Context, jobsRoot string, args []string) error {
+	if !filepath.IsAbs(jobsRoot) {
+		return fail(exitUsage, "node lifecycle requires an absolute jobs root")
+	}
+	a.Jobs = filepath.Clean(jobsRoot)
 	return a.Run(ctx, args)
 }
 

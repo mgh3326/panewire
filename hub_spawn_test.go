@@ -260,7 +260,7 @@ func TestT14SpawnHTTPAC2Validation(t *testing.T) {
 		}},
 		{"neither brief form", func(body map[string]any) { body["brief"] = map[string]any{} }},
 		{"wait zero", func(body map[string]any) { body["wait_seconds"] = 0 }},
-		{"wait over", func(body map[string]any) { body["wait_seconds"] = 3601 }},
+		{"wait over", func(body map[string]any) { body["wait_seconds"] = 301 }},
 		{"unknown flag", func(body map[string]any) { body["args"] = []string{"--job-dup-ok", "yes"} }},
 		{"space value", func(body map[string]any) { body["args"] = []string{"-m", "two words"} }},
 		{"shell value", func(body map[string]any) { body["args"] = []string{"-m", "x;touch"} }},
@@ -673,6 +673,7 @@ func TestT14SpawnHTTPAC14EventsAreMetadataOnly(t *testing.T) {
 
 func t14SpawnConfig(t *testing.T, cwd string) string {
 	t.Helper()
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	path := filepath.Join(t.TempDir(), "spawn.json")
 	contents := []byte(`{"cwd_map":{"repo-a":"` + cwd + `"},"workspace":"worker","herdr_session":"worker","enabled":true}`)
 	if err := os.WriteFile(path, contents, 0600); err != nil {
