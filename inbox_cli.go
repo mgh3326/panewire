@@ -20,7 +20,8 @@ const inboxUsage = `usage: panewire inbox list [--lane L] [--unread] [--json]
        panewire inbox ack <id>|--all [--lane L] [--json]
        panewire inbox count [--lane L] [--json]
        panewire inbox wait [--lane L] [--timeout D] [--json]
-Connection: --hub-url URL --hub-token-env FILE [--hub-cf-env FILE]
+Connection: defaults to the local node daemon; use --hub-url URL
+            --hub-token-env FILE [--hub-cf-env FILE] for direct access.
 Defaults: PANEWIRE_HUB_URL, PANEWIRE_HUB_TOKEN_ENV, PANEWIRE_HUB_CF_ENV,
           PANEWIRE_LANE. Node credentials require an owned --lane.
 wait blocks until an unread item exists, prints it like read, and exits 0;
@@ -51,6 +52,7 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	lane, hubURL, tokenEnv, cfEnv := os.Getenv("PANEWIRE_LANE"), os.Getenv("PANEWIRE_HUB_URL"), os.Getenv("PANEWIRE_HUB_TOKEN_ENV"), os.Getenv("PANEWIRE_HUB_CF_ENV")
 	unread, jsonMode, all := false, false, false
 	laneExplicit := false
+	connectionExplicit := hubURL != "" || tokenEnv != ""
 	timeout := inboxWaitDefaultTimeout
 	id := int64(0)
 	for i := 1; i < len(args); i++ {
@@ -73,8 +75,10 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 				lane = v
 				laneExplicit = true
 			case "--hub-url":
+				connectionExplicit = true
 				hubURL = v
 			case "--hub-token-env":
+				connectionExplicit = true
 				tokenEnv = v
 			case "--hub-cf-env":
 				cfEnv = v
@@ -108,6 +112,9 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if command == "wait" && lane == "" {
 		fmt.Fprintln(stderr, inboxUsage)
 		return ExitUsage
+	}
+	if !connectionExplicit {
+		return runInboxLocal(inboxRequest{Command: command, Lane: lane, ID: id, Unread: unread, All: all, JSON: jsonMode, Timeout: timeout}, stdout, stderr, deps.SocketPath)
 	}
 	if hubURL == "" || tokenEnv == "" {
 		fmt.Fprintln(stderr, inboxUsage)
@@ -146,6 +153,15 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if env.MachineID != hubOperatorMachineID {
 		client.machineID = env.MachineID
 	}
+	return executeInbox(client, stdout, stderr, inboxRequest{Command: command, Lane: lane, ID: id, Unread: unread, All: all, JSON: jsonMode, Timeout: timeout}, env.MachineID == hubOperatorMachineID && !laneExplicit)
+}
+
+type inboxHTTPClient interface {
+	do(context.Context, string, string, url.Values, io.Reader) (*http.Response, error)
+}
+
+func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxRequest, unscopedOperator bool) int {
+	command, lane, id, unread, all, jsonMode, timeout := req.Command, req.Lane, req.ID, req.Unread, req.All, req.JSON, req.Timeout
 	if command == "wait" {
 		return runInboxWait(client, stdout, stderr, lane, timeout, jsonMode)
 	}
@@ -155,7 +171,7 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	// credentials always keep the ambient default because the hub needs it
 	// for authorization.
 	itemScoped := command == "read" || (command == "ack" && !all)
-	if itemScoped && env.MachineID == hubOperatorMachineID && !laneExplicit {
+	if itemScoped && unscopedOperator {
 		lane = ""
 	}
 	query := url.Values{}
@@ -267,7 +283,7 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 // or the CLI deadline runs out. Each request asks the hub to hold for at most
 // hubInboxWaitMaxWait, so the loop is a continuation of one long wait rather
 // than polling.
-func runInboxWait(client *hubOperatorClient, stdout, stderr io.Writer, lane string, timeout time.Duration, jsonMode bool) int {
+func runInboxWait(client inboxHTTPClient, stdout, stderr io.Writer, lane string, timeout time.Duration, jsonMode bool) int {
 	deadline := time.Now().Add(timeout)
 	for {
 		remaining := time.Until(deadline)

@@ -399,7 +399,7 @@ Each spawn writes a record to hk `/v1/jobs` on the executing host (the design
 is `design/2026-10-30/cross-host-jobs`): the claim `POST {job_id, task_id,
 host}` runs before the local claim and a taken id refuses with exit 74, like
 the ledger's duplicate. `host` is the node's `HUB_MACHINE_ID`. hk unreachable
-or unconfigured fails the spawn closed, as the task claim does.
+or unconfigured fails the spawn closed. The task precheck also fails closed before launch.
 
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
 profile, model, pool, owner_lane, parent_lane, parent_job, pane_id,
@@ -420,6 +420,12 @@ record: `completed` exits 0 (the result is read from the record by the
 caller), `escalated` exits 83, `lost` exits 84, and a record still pending,
 absent or unreadable leaves the local signals and the usual deadline to
 decide (the unreadable case warns once with reason `hk-unavailable`).
+
+After the brief lands, a failed task claim leaves the pane running and the spawn
+landed. The `job.task_link` event records `status: failed` and a bounded reason;
+panewire warns and sends an owner-lane notice so the task can be linked manually.
+A successful claim records `status: linked`. Other spawn failures retain their
+normal cleanup behavior.
 
 An inherited spawn normally leaves the task bound to its parent job. It rebinds
 the task to the new job, through `handoffkeep tasks rebind`, only after the brief

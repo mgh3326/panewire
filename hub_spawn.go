@@ -396,6 +396,9 @@ func (h *HubServer) handleSpawn(writer http.ResponseWriter, request *http.Reques
 	select {
 	case result := <-entry.waiter:
 		if result.CompletedAt != nil {
+			// A request id is accepted once (a repeat is a conflict), so this
+			// answer counts once toward the launch-failure backoff.
+			h.observeLaunchOutcome(body.Machine, hubSpawnArg(body.Args, "-m"), result.RC, result.Error, h.now().UTC())
 			writeJSON(writer, http.StatusOK, result)
 			return
 		}

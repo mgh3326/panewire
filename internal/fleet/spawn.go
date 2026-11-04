@@ -220,9 +220,14 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task Task, ev map[st
 	return "rebound"
 }
 
+type taskClaimFailure struct{ reason string }
+
+func (e *taskClaimFailure) Error() string { return e.reason }
+
 func (a *App) taskLink(ctx context.Context, s Spawn, task Task, bypassed bool) error {
 	ev := map[string]any{"task_id": s.Task, "job_id": s.Job, "claimed_by": s.Label, "inherited_from": s.Inherited}
 	status := "inherited"
+	var claimFailure *taskClaimFailure
 	if s.replacesParent() {
 		status = a.rebindInherited(ctx, s, task, ev)
 	} else if s.unlinkedReviewer() {
@@ -233,18 +238,31 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task Task, bypassed bool) e
 		var t Task
 		if r.Code != 0 {
 			if !bypassed || !s.Bypass || strings.Contains(r.Out+r.Err, "conflict") || strings.Contains(r.Out+r.Err, "refused") {
-				return fail(exitConfig, "task claim refused: %s", r.Err)
+				claimFailure = &taskClaimFailure{reason: fmt.Sprintf("task claim exited with status %d", r.Code)}
+				status = "failed"
+			} else {
+				status = "bypassed"
 			}
-			status = "bypassed"
 		} else {
 			if e := json.Unmarshal([]byte(r.Out), &t); e != nil || t.ClaimedBy != s.Label || str(t.Refs, "job_id") != s.Job {
-				return fail(exitConfig, "task claim did not confirm claimed_by and refs.job_id")
+				claimFailure = &taskClaimFailure{reason: "task claim did not confirm claimed_by and refs.job_id"}
+				status = "failed"
+			} else {
+				status = "linked"
 			}
-			status = "linked"
 		}
 	}
 	ev["status"] = status
-	return a.event(ctx, s.Job, "job.task_link", ev)
+	if claimFailure != nil {
+		ev["reason"] = claimFailure.reason
+	}
+	if err := a.event(ctx, s.Job, "job.task_link", ev); err != nil {
+		return err
+	}
+	if claimFailure != nil {
+		return claimFailure
+	}
+	return nil
 }
 func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	startedAdmission := time.Now()
@@ -729,7 +747,17 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}
 	if e = a.taskLink(ctx, s, task, bypassed); e != nil {
-		return e
+		var claimFailure *taskClaimFailure
+		if !errors.As(e, &claimFailure) {
+			return e
+		}
+		a.warn("job %s task %s: %s; link the task manually", s.Job, s.Task, claimFailure.reason)
+		id := sha256.Sum256([]byte(s.Job))
+		text := fmt.Sprintf("[panewire] TASK_LINK_FAILED job=%s task=%s reason=%s; link the task manually", s.Job, s.Task, claimFailure.reason)
+		r := a.call(ctx, "panewire", "emit", "--kind", "lane.event", "--lane", owner, "--type", "automation-failed", "--event-id", fmt.Sprintf("task-link-failed-%x", id[:]), "--text", text, "--inbox-root", filepath.Dir(a.Jobs))
+		if r.Code != 0 {
+			a.warn("task link notice failed (exit %d)", r.Code)
+		}
 	}
 	a.stage("landing", startedLanding)
 	landingRecorded = true
