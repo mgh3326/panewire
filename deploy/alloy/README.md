@@ -152,7 +152,7 @@ v1** lines. Each line is one JSON object with exactly these string fields:
 | Field | Meaning |
 | --- | --- |
 | `ts` | RFC 3339 UTC time; Alloy uses it as the entry timestamp |
-| `host` | Short hostname of the writer (label) |
+| `host` | Short OS hostname of the writer. Alloy ships it as the `os_host` label; the `host` label is the fleet machine id (see below) |
 | `tool` | `panewire`, `panewire` or `mergewake` (label) |
 | `kind` | What happened: `spawn`, `plan`, `placement`, `quota_observation` (panewire); `node_spawn` (panewire); `reviewer`, `review` (mergewake) (label) |
 | `job` | Job id, or `<repo>#<pr>` for reviews |
@@ -184,6 +184,12 @@ Both Alloy configs carry the same pipeline between `// BEGIN fleet events` and
 - `loki.process "fleet_events"` turns `host`, `tool`, `kind` and `outcome` into
   labels and sets the timestamp from `ts`. It drops the `filename` label and
   rate-limits each host to 0.5 lines/s with a burst of 200.
+- The `host` label is the host's `MACHINE_ID` (`mac-dev`, `oci`, `ncp`, ...),
+  the fleet machine id that hk, Sentry, placement and panewire use, so fleet
+  events join those sources on `host`. The line's own `host` field, the OS
+  hostname, becomes the `os_host` label. If `MACHINE_ID` is unset or empty,
+  `host` stays the OS hostname, as before, and no event is dropped. Each host
+  has one `os_host`, so the extra label adds no streams.
 - `job`, `reason` and `detail` stay in the line. Query them with `| json` or
   `| regexp`.
 
@@ -198,7 +204,9 @@ start of the fresh file after a rotation.
 - that a line written before the first start ships;
 - that a line written while Alloy was stopped ships after a restart, exactly
   once;
-- that `.1` is never shipped.
+- that `.1` is never shipped;
+- that `host` is the OS hostname without `MACHINE_ID` and the machine id with
+  it, while `os_host` keeps the OS hostname.
 
 ### Free-tier volume estimate
 
@@ -261,8 +269,8 @@ following steps, in this order:
       file and restart alloy.
 3. **Check the shipping.** Run `panewire plan` with no flags; it refuses with a
    usage error and writes a `plan`/`refused` event. Then open Grafana Explore
-   with `{source="fleet_events"}` and confirm the line arrives with the `host`,
-   `tool`, `kind` and `outcome` labels.
+   with `{source="fleet_events"}` and confirm the line arrives with the `host`
+   (the machine id), `os_host`, `tool`, `kind` and `outcome` labels.
 4. **Turn on Sentry:**
    - Add `SENTRY_DSN_PANEWIRE` to the environment of the `panewire daemon` and
      `panewire hub` services, in the launchd plist `EnvironmentVariables` or
@@ -278,6 +286,34 @@ following steps, in this order:
    3. Give the stack's default notification policy a contact point. The rules
       carry `team=fleet` for routing.
 
+### Deploying the machine-id `host` label (desk)
+
+Before this change the `host` label on fleet events was the OS hostname
+(`robinui-macbookpro`, `mbp-server`, ...). After deploy it is the machine id.
+**Dashboards, alerts and saved queries that match `host=` against an OS
+hostname must be updated after deploy:** match the machine id instead, or
+switch them to `os_host=`. The repository's dashboard and alerts already use
+`host` only for grouping. For up to the longest rule window (2 h) after a
+host's restart, its counts split across the old and the new `host` value.
+
+`MACHINE_ID` is already set on every enrolled host (the Linux installer and
+`run-alloy.sh` refuse to run without it), so only the configuration changes.
+Deploy it to every host that runs Alloy:
+
+1. **macOS hosts:** install the updated `config.mac.alloy` at the plist's
+   config path and restart the agent:
+   `launchctl kickstart -k gui/$(id -u)/<label>`.
+2. **Linux hosts** (NCP, OCI and RPi in the Install table): stage
+   `config.linux.alloy`, `install-linux.sh` and a mode-0600 `loki.env` as in
+   Install, then rerun the installer with the host's existing machine id, for
+   example `sudo ALLOY_LOKI_ENV=/secure/loki.env ./install-linux.sh oci-id`.
+   The installer rewrites the EnvironmentFile from its environment, so pass
+   the `PROM_REMOTE_WRITE_*` variables and any `FLEET_EVENTS_ROOT`,
+   `FLEET_TEXTFILE_DIR` and `ALLOY_*_COLLECTORS` values that the host already
+   has. A variable you leave out is removed from the file.
+3. **Check:** in Grafana Explore, `{source="fleet_events"}` shows `host` equal
+   to the host's `machine_id` label and `os_host` equal to its OS hostname.
+
 ## Label contract
 
 | Label | Meaning | Populated by |
@@ -290,7 +326,9 @@ following steps, in this order:
 | `level` | journal priority keyword | journal relabeling |
 | `container` | Docker container name | Docker relabeling |
 | `file` | Basename of a macOS tailed file | file relabeling |
-| `host`, `tool`, `kind`, `outcome` | Fleet event fields (see Fleet events) | `loki.process "fleet_events"` from the JSON line |
+| `host` | Fleet machine id of the host that shipped a fleet event, the same value as `machine_id`; the OS hostname when `MACHINE_ID` is unset | `loki.process "fleet_events"` from `MACHINE_ID` |
+| `os_host` | OS hostname from the fleet event's `host` field | `loki.process "fleet_events"` from the JSON line |
+| `tool`, `kind`, `outcome` | Fleet event fields (see Fleet events) | `loki.process "fleet_events"` from the JSON line |
 
 Labels not applicable to a source are absent. Queries should therefore scope by
 `source` before expecting `unit`, `container`, or `file`.
