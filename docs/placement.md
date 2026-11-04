@@ -55,7 +55,7 @@ drops what does not fit.
 |---|---|
 | `harnesses.<kind>` for `claude`, `codex`, `omp`, `agy`, `devin`, `cmd` | `installed` (the binary is found; `cmd` is always installed), `version` (the first dotted number of `--version`), `herdr_integration` (`herdr integration status` says `current`), `login` (`present` / `missing` / `unknown`) with `account` (the pacelever account key), `dialog` |
 | `harnesses.<kind>.login` | From the node's own pacelever refresh of the pool named like the kind (`--state-quota-pools`). `missing` after a failed refresh; `unknown` when the node does not measure that pool |
-| `harnesses.<kind>.dialog` | The first-run dialog the **last launch** stopped at: `codex_hooks_review`, `codex_directory_trust`, `omp_setup_wizard` or `claude_trust`. It is the last known state, set by a failed launch and cleared by the next launch of that kind that succeeds. The node does not open a harness to look |
+| `harnesses.<kind>.dialog` | The first-run dialog the **last launch** stopped at: `codex_hooks_review`, `codex_directory_trust`, `omp_setup_wizard` or `claude_trust`. It is the last known state, set by a failed launch and cleared by the next launch of that kind that succeeds. The node does not open a harness to look, and a dropped pair is not launched again, so a reported dialog also expires after 30 minutes: the pair then gets one more launch, and a launch that stops at the dialog again reports it for another 30 minutes |
 | `repos` | The node's `cwd_map` keys (on defaults: the directories under the work root) |
 | `brief.handoffkeep_env` | The handoffkeep env file is present, mode 0600 and holds a URL and token |
 | `toolchains` | `go`, `node`, `bun` with their versions, when installed |

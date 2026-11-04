@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -83,9 +84,13 @@ func TestReadinessCmdAndUnreportedKinds(t *testing.T) {
 
 func TestReadinessUnknownNodeKeepsToday(t *testing.T) {
 	now := time.Now()
+	failing := readyNode()
+	failing.Harnesses = map[string]HarnessReadiness{} // would fail every check
+	failing.Repos = nil
 	for name, state := range map[string]ReadinessState{
-		"flagged":   {Unknown: true},
-		"no report": {},
+		"flagged":                  {Unknown: true},
+		"no report":                {},
+		"flagged with stale ghost": {Unknown: true, Readiness: failing},
 	} {
 		if got := state.Drop(ReadinessNeed{Kind: "claude", Repo: "panewire", Brief: true, Toolchains: []string{"go"}, MinVersion: "9"}, now); got != "" {
 			t.Errorf("%s: dropped %q", name, got)
@@ -303,5 +308,41 @@ func TestProfileKind(t *testing.T) {
 		if got := ProfileKind(name); got != seat.Kind {
 			t.Fatalf("%s: %q want %q", name, got, seat.Kind)
 		}
+	}
+}
+
+// Selection chooses among ready pairs, and placement must not walk past a
+// dropped host to it later: the plan's candidate list drops the same pair.
+func TestReadinessPlacementPlanDropsTheSamePair(t *testing.T) {
+	bad := ReadinessState{Readiness: readyNode()}
+	h := bad.Readiness.Harnesses["claude"]
+	h.Installed = false
+	bad.Readiness.Harnesses["claude"] = h
+	a, s := readinessFixture(t, map[string]ReadinessState{"mac-b": bad, "cloud-small": {Readiness: readyNode()}})
+	s.Profile = "opus"
+	plan, err := a.plan(context.Background(), s, "claude", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range plan.candidates {
+		if c.name == "mac-b" && c.outcome != ReadyHarnessMissing {
+			t.Fatalf("mac-b outcome=%q", c.outcome)
+		}
+	}
+	for _, c := range plan.ordered {
+		if c.name == "mac-b" {
+			t.Fatal("a host not ready for the harness stayed a fallback candidate")
+		}
+	}
+	if !slices.ContainsFunc(plan.ordered, func(c *placeCandidate) bool { return c.name == "cloud-small" }) {
+		t.Fatal("the ready host was dropped too")
+	}
+	// A seat of another kind on the same host is not touched.
+	s.Profile = "builder-sol-low"
+	if plan, err = a.plan(context.Background(), s, "codex", 0); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.ContainsFunc(plan.ordered, func(c *placeCandidate) bool { return c.name == "mac-b" }) {
+		t.Fatal("a codex pair was dropped for a claude check")
 	}
 }

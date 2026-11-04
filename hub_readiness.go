@@ -32,7 +32,7 @@ const (
 	maxPlacementLaunchBackoffMin   = 24 * 60
 
 	// hubReadinessMaxBytes bounds the readiness object a heartbeat carries.
-	hubReadinessMaxBytes = 8 << 10
+	hubReadinessMaxBytes = 32 << 10
 )
 
 // launchFailureThreshold is the consecutive failures of one (host, kind) that

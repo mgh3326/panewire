@@ -177,6 +177,28 @@ func TestLaunchBackoffAppliesAndClears(t *testing.T) {
 	}
 }
 
+// One failure of each of two kinds on a host is two kinds with one failure, not
+// one kind with two: the count is per (host, kind).
+func TestLaunchBackoffCountsPerKind(t *testing.T) {
+	hub, server := fsHub(t, "")
+	fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
+	fsConnectNode(t, hub, server, "node-b", fsNodeBToken)
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	hub.observeLaunchOutcome("node-a", "opus", 1, "spawn_failed", now)
+	hub.observeLaunchOutcome("node-a", "builder-sol-low", 1, "spawn_failed", now)
+	hub.observeLaunchOutcome("node-b", "opus", 1, "spawn_failed", now)
+	for _, machine := range []string{"node-a", "node-b"} {
+		if got := readinessState(t, hub, machine).BackoffUntil; len(got) != 0 {
+			t.Fatalf("%s backed off after one failure per kind: %v", machine, got)
+		}
+	}
+	hub.observeLaunchOutcome("node-a", "builder-sol-medium", 1, "spawn_failed", now)
+	got := readinessState(t, hub, "node-a").BackoffUntil
+	if _, codex := got["codex"]; !codex || len(got) != 1 {
+		t.Fatalf("until=%v want codex only", got)
+	}
+}
+
 func TestLaunchBackoffConstantsComeFromPlacementJSON(t *testing.T) {
 	hub, server := fsHub(t, backoffPolicyFile(t, `{"local_machine":"node-a","spill_targets":[],"max_active_jobs":5,"launch_failure_threshold":3,"launch_backoff_minutes":10}`))
 	fsConnectNode(t, hub, server, "node-a", fsNodeAToken)

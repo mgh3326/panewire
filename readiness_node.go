@@ -30,6 +30,12 @@ const (
 	// nodeReadinessProbeTimeout bounds one probe command.
 	nodeReadinessProbeTimeout = 5 * time.Second
 	nodeReadinessMaxRepos     = 256
+	// nodeDialogTTL is how long a launch's first-run dialog stays reported. A
+	// pair the dialog dropped is not launched again, so nothing else could
+	// clear it once the host owner has dealt with it; after the TTL the pair
+	// gets one more launch, and a launch that stops at the dialog again
+	// reports it for another TTL.
+	nodeDialogTTL = 30 * time.Minute
 
 	hubSpawnDefaultWorkspace = "workers"
 	hubSpawnDefaultSession   = "default"
@@ -124,7 +130,7 @@ type nodeReadinessState struct {
 	dirty      bool
 	refreshing bool
 	// dialogs is the first-run dialog each kind's last launch stopped at.
-	dialogs map[string]string
+	dialogs map[string]dialogMark
 	// accounts maps a pool to its logged-in account key; "" means the last
 	// pacelever refresh failed. A pool not in it is not measured here.
 	accounts map[string]string
@@ -133,6 +139,11 @@ type nodeReadinessState struct {
 	sentPeer      *hubClientConnection
 	sentAt        time.Time
 	sentCheckedAt time.Time
+}
+
+type dialogMark struct {
+	marker string
+	at     time.Time
 }
 
 // noteQuotaAccount records the outcome of a pool's pacelever refresh.
@@ -176,16 +187,16 @@ func (client *HubClient) noteLaunchResult(message hubOutboundMessage, result hub
 		return
 	}
 	if client.readiness.dialogs == nil {
-		client.readiness.dialogs = map[string]string{}
+		client.readiness.dialogs = map[string]dialogMark{}
 	}
 	switch dialog := classifyLaunchDialog(kind, result.StdoutTail); {
 	case result.RC == 0:
-		if client.readiness.dialogs[kind] != "" {
+		if _, had := client.readiness.dialogs[kind]; had {
 			delete(client.readiness.dialogs, kind)
 			client.readiness.dirty = true
 		}
 	case dialog != "":
-		client.readiness.dialogs[kind] = dialog
+		client.readiness.dialogs[kind] = dialogMark{marker: dialog, at: client.nowUTC()}
 	}
 }
 
@@ -244,7 +255,10 @@ func (client *HubClient) collectReadiness(ctx context.Context) *fleet.Readiness 
 	dialogs, accounts := cloneStringMap(client.readiness.dialogs), cloneStringMap(client.readiness.accounts)
 	client.readiness.mu.Unlock()
 	for _, kind := range fleet.ReadinessKinds {
-		h := fleet.HarnessReadiness{Login: fleet.ReadinessLoginUnknown, Dialog: dialogs[kind]}
+		h := fleet.HarnessReadiness{Login: fleet.ReadinessLoginUnknown}
+		if mark, ok := dialogs[kind]; ok && out.CheckedAt.Sub(mark.at) < nodeDialogTTL {
+			h.Dialog = mark.marker
+		}
 		if kind == "cmd" {
 			h.Installed, h.HerdrIntegration = true, true
 			out.Harnesses[kind] = h

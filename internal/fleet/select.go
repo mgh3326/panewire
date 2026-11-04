@@ -549,22 +549,15 @@ type selPresence struct {
 	// in it is unknown and never dropped by a readiness check. repo, brief
 	// and toolchains describe what this spawn needs of a host. drops records
 	// every (host, profile) pair the filter removed before ranking.
-	ready      map[string]ReadinessState
-	repo       string
-	minVersion map[string]string
-	toolchains []string
-	drops      []readinessDrop
+	ready readinessView
+	drops []readinessDrop
 }
 
 func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPresence {
 	required := req.tags
 	sp := &selPresence{a: a, now: a.Now(), presTTL: a.placementTTL("presence_ttl_s", 86400), accounts: map[string]SharedAccount{}, refreshed: map[string]accountRefresh{}, unreachable: map[string]string{}}
 	sp.hub, sp.degraded = a.hostViews(ctx, s.CWD)
-	if sp.ready = a.readinessStates(ctx); len(sp.ready) > 0 {
-		sp.repo = a.placementRepo(ctx, s.CWD)
-		sp.minVersion = harnessMinVersions(a.Config.Placement)
-		sp.toolchains = repoToolchains(a.Config.Placement, sp.repo)
-	}
+	sp.ready = a.newReadinessView(ctx, s.CWD)
 	if a.Source == nil {
 		sp.presErr = true
 		sp.degraded = append(sp.degraded, "presence_unavailable")

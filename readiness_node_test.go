@@ -70,7 +70,7 @@ func TestCollectReadinessFromFakes(t *testing.T) {
 	}))
 	client.noteQuotaAccount("claude", "claude:0123456789abcdef")
 	client.noteQuotaAccount("codex", "") // pacelever refresh failed
-	client.readiness.dialogs = map[string]string{"codex": fleet.DialogCodexHooksReview}
+	client.readiness.dialogs = map[string]dialogMark{"codex": {marker: fleet.DialogCodexHooksReview, at: client.nowUTC().Add(-time.Minute)}}
 	report := client.collectReadiness(t.Context())
 
 	claude, codex, omp := report.Harnesses["claude"], report.Harnesses["codex"], report.Harnesses["omp"]
@@ -321,7 +321,7 @@ func TestLaunchResultsTeachTheDialogState(t *testing.T) {
 	dialog := func(kind string) string {
 		client.readiness.mu.Lock()
 		defer client.readiness.mu.Unlock()
-		return client.readiness.dialogs[kind]
+		return client.readiness.dialogs[kind].marker
 	}
 	for _, tc := range []struct{ profile, kind, tail, want string }{
 		{"builder-sol-low", "codex", "stderr: HOOKS_REVIEW_REQUIRED: Codex is waiting at its Hooks need review screen", fleet.DialogCodexHooksReview},
@@ -340,10 +340,11 @@ func TestLaunchResultsTeachTheDialogState(t *testing.T) {
 	}
 	// A marker for one kind does not set another's dialog, and an unrelated
 	// failure keeps the last known state.
+	launch("omp-opus", 90, "WORKSPACE_TRUST_REQUIRED")
 	launch("opus", 90, "HOOKS_REVIEW_REQUIRED")
 	launch("builder-sol-low", 90, "HOOKS_REVIEW_REQUIRED")
 	launch("builder-sol-low", 1, "spawn_failed for another reason")
-	if dialog("claude") != "" || dialog("codex") != fleet.DialogCodexHooksReview {
+	if dialog("omp") != "" || dialog("claude") != "" || dialog("codex") != fleet.DialogCodexHooksReview {
 		t.Fatalf("claude=%q codex=%q", dialog("claude"), dialog("codex"))
 	}
 }
@@ -392,5 +393,30 @@ func TestHubFeaturesAdvertiseReadiness(t *testing.T) {
 	peer.acceptsReadiness.Store(strings.Contains(strings.Join(message.Features, ","), hubFeatureReadiness))
 	if peer.acceptsReadiness.Load() {
 		t.Fatal("readiness accepted from a hub that did not advertise it")
+	}
+}
+
+// A pair the dialog dropped is never launched again, so the dialog must expire
+// on its own: after the TTL the report stops carrying it and the next launch
+// can find out whether the host owner dealt with it.
+func TestReportedDialogExpires(t *testing.T) {
+	client := readinessClient(t, `{"cwd_map":{},"workspace":"w","herdr_session":"s","enabled":true}`, readinessFakes(map[string]string{"codex": "0.166.0"}))
+	client.noteLaunchResult(hubOutboundMessage{Args: []string{"-m", "builder-sol-low"}}, hubSpawnResult{RC: 90, StdoutTail: "HOOKS_REVIEW_REQUIRED"})
+	now := client.nowUTC()
+	if got := client.collectReadiness(t.Context()).Harnesses["codex"].Dialog; got != fleet.DialogCodexHooksReview {
+		t.Fatalf("dialog=%q right after the launch", got)
+	}
+	client.now = func() time.Time { return now.Add(nodeDialogTTL - time.Second) }
+	if got := client.collectReadiness(t.Context()).Harnesses["codex"].Dialog; got == "" {
+		t.Fatal("dialog expired early")
+	}
+	client.now = func() time.Time { return now.Add(nodeDialogTTL) }
+	if got := client.collectReadiness(t.Context()).Harnesses["codex"].Dialog; got != "" {
+		t.Fatalf("dialog=%q past the TTL", got)
+	}
+	// Stopping at it again reports it for another TTL.
+	client.noteLaunchResult(hubOutboundMessage{Args: []string{"-m", "builder-sol-low"}}, hubSpawnResult{RC: 90, StdoutTail: "HOOKS_REVIEW_REQUIRED"})
+	if got := client.collectReadiness(t.Context()).Harnesses["codex"].Dialog; got != fleet.DialogCodexHooksReview {
+		t.Fatalf("dialog=%q after stopping at it again", got)
 	}
 }

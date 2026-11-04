@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"context"
 	"slices"
 	"strconv"
 	"strings"
@@ -203,15 +204,40 @@ type readinessDrop struct {
 	host, profile, code string
 }
 
-// readinessDrop answers the code that removes the pair (host, seat), or "",
-// and records the drop once.
-func (sp *selPresence) readinessDrop(h selHost, seat *Seat) string {
-	state, reported := sp.ready[h.name]
+// readinessView is what one placement round knows about readiness: each
+// host's state, and what this spawn needs of a host.
+type readinessView struct {
+	states     map[string]ReadinessState
+	repo       string
+	minVersion map[string]string
+	toolchains []string
+	now        time.Time
+}
+
+func (a *App) newReadinessView(ctx context.Context, cwd string) readinessView {
+	v := readinessView{now: a.Now(), states: a.readinessStates(ctx)}
+	if len(v.states) > 0 {
+		v.repo = a.placementRepo(ctx, cwd)
+		v.minVersion = harnessMinVersions(a.Config.Placement)
+		v.toolchains = repoToolchains(a.Config.Placement, v.repo)
+	}
+	return v
+}
+
+// drop answers the code that removes the pair (host, kind), or "". A host
+// with no state is unknown and is never dropped.
+func (v readinessView) drop(host string, cfg map[string]any, kind string) string {
+	state, reported := v.states[host]
 	if !reported {
 		return ""
 	}
-	need := ReadinessNeed{Kind: seat.Kind, Repo: sp.repo, Brief: str(h.cfg, "via") == "hub", Toolchains: sp.toolchains, MinVersion: sp.minVersion[seat.Kind]}
-	code := state.Drop(need, sp.now)
+	return state.Drop(ReadinessNeed{Kind: kind, Repo: v.repo, Brief: str(cfg, "via") == "hub", Toolchains: v.toolchains, MinVersion: v.minVersion[kind]}, v.now)
+}
+
+// readinessDrop answers the code that removes the pair (host, seat), and
+// records the drop once.
+func (sp *selPresence) readinessDrop(h selHost, seat *Seat) string {
+	code := sp.ready.drop(h.name, h.cfg, seat.Kind)
 	if code == "" {
 		return ""
 	}
