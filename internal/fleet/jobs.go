@@ -369,3 +369,10 @@ func (a *App) jobRecordOutcome(ctx context.Context, id string, warned *bool) wai
 func (a *App) markSpawnUncertain(ctx context.Context, id string) {
 	_ = a.event(ctx, id, "job.cleanup_pending", map[string]any{"reason": "pane_or_resources_unverified"})
 }
+
+// MarkJobLost records a claimed job as lost. The hub calls it once the pane
+// behind a failed spawn is verifiably gone, so the job no longer holds its
+// task and role.
+func (a *App) MarkJobLost(ctx context.Context, id string) error {
+	return a.putJobRecord(ctx, id, map[string]any{"state": "lost"})
+}
