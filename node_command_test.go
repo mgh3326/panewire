@@ -554,7 +554,7 @@ func TestNodeCommandPaneCloseRechecksComposer(t *testing.T) {
 			}
 			reads := 0
 			runner := func(ctx context.Context, args ...string) ([]byte, error) {
-				if strings.Join(args, " ") == "pane read w1:p1 --source visible" {
+				if strings.Join(args, " ") == "pane read w1:p1 --source visible --format ansi" {
 					reads++
 					if reads == 2 || change == "already drafted" {
 						switch change {

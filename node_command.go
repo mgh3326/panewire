@@ -535,8 +535,8 @@ func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseAr
 		return nodePaneCloseResult{Outcome: outcome}, ""
 	}
 	composerEmpty := func(row nodeHerdrRow) bool {
-		screen, err := client.nodeHerdrRunner()(ctx, "pane", "read", args.PaneID, "--source", "visible")
-		return err == nil && nodeComposerState(row.Agent, string(screen)) == nodeComposerEmpty
+		screen, err := client.nodeReadScreen(ctx, args.PaneID)
+		return err == nil && nodeComposerState(row.Agent, screen) == nodeComposerEmpty
 	}
 	if !composerEmpty(first) {
 		return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
