@@ -17,14 +17,15 @@ import (
 // Writing an event never changes the caller's result.
 
 type fleetEvent struct {
-	TS      string `json:"ts"`
-	Host    string `json:"host"`
-	Tool    string `json:"tool"`
-	Kind    string `json:"kind"`
-	Job     string `json:"job"`
-	Outcome string `json:"outcome"`
-	Reason  string `json:"reason"`
-	Detail  string `json:"detail"`
+	TS        string `json:"ts"`
+	Host      string `json:"host"`
+	Tool      string `json:"tool"`
+	Kind      string `json:"kind"`
+	Job       string `json:"job"`
+	RequestID string `json:"request_id,omitempty"`
+	Outcome   string `json:"outcome"`
+	Reason    string `json:"reason"`
+	Detail    string `json:"detail"`
 }
 
 const (
@@ -64,17 +65,9 @@ func fleetEventsPath() string {
 }
 
 // emitFleetEvent appends one panewire event and reports whether it was written.
-func emitFleetEvent(now time.Time, kind, job, outcome, reason, detail string) bool {
-	return appendFleetEvent(fleetEventsPath(), fleetEventMaxBytes, fleetEvent{
-		TS:      now.UTC().Format(time.RFC3339Nano),
-		Host:    fleetEventHost(),
-		Tool:    "panewire",
-		Kind:    kind,
-		Job:     job,
-		Outcome: outcome,
-		Reason:  reason,
-		Detail:  detail,
-	})
+func emitFleetEvent(now time.Time, ev fleetEvent) bool {
+	ev.TS, ev.Host, ev.Tool = now.UTC().Format(time.RFC3339Nano), fleetEventHost(), "panewire"
+	return appendFleetEvent(fleetEventsPath(), fleetEventMaxBytes, ev)
 }
 
 func appendFleetEvent(path string, maxBytes int64, ev fleetEvent) bool {
@@ -84,6 +77,7 @@ func appendFleetEvent(path string, maxBytes int64, ev fleetEvent) bool {
 	ev.Host, ev.Tool = fleetEventCode(ev.Host), fleetEventCode(ev.Tool)
 	ev.Kind, ev.Outcome, ev.Reason = fleetEventCode(ev.Kind), fleetEventCode(ev.Outcome), fleetEventCode(ev.Reason)
 	ev.Job = utf8PrefixWithin(fleetEventRedact(ev.Job), fleetEventMaxJob)
+	ev.RequestID = utf8PrefixWithin(fleetEventRedact(ev.RequestID), fleetEventMaxJob)
 	ev.Detail = utf8PrefixWithin(fleetEventRedact(ev.Detail), fleetEventMaxDetail)
 	line, err := json.Marshal(ev)
 	if err != nil {

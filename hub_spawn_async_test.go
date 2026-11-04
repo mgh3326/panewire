@@ -142,8 +142,10 @@ func TestSpawnCleanedRetryPreservesKeyAndFencesOldAttempt(t *testing.T) {
 }
 
 type spawnSentryTransport struct {
-	mu     sync.Mutex
-	events []*sentry.Event
+	mu      sync.Mutex
+	events  []*sentry.Event
+	flushes []time.Duration
+	onFlush func()
 }
 
 func (*spawnSentryTransport) Configure(sentry.ClientOptions) {}
@@ -152,8 +154,16 @@ func (t *spawnSentryTransport) SendEvent(e *sentry.Event) {
 	defer t.mu.Unlock()
 	t.events = append(t.events, e)
 }
-func (*spawnSentryTransport) Flush(time.Duration) bool { return true }
-func (*spawnSentryTransport) Close()                   {}
+func (t *spawnSentryTransport) Flush(timeout time.Duration) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.flushes = append(t.flushes, timeout)
+	if t.onFlush != nil {
+		t.onFlush()
+	}
+	return true
+}
+func (*spawnSentryTransport) Close() {}
 func TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized(t *testing.T) {
 	h := asyncSpawnHub(t)
 	transport := &spawnSentryTransport{}
