@@ -542,7 +542,7 @@ func (a *App) delegateHeadless(ctx context.Context, s Spawn, c delegateCaller, b
 	if e != nil {
 		return "", e
 	}
-	if payload, e := a.prepareBrief(s, string(prompt)); e != nil {
+	if payload, e := a.prepareBrief(s, seat, launch, string(prompt)); e != nil {
 		return "", e
 	} else if shot.stdin {
 		cmd.Input = payload
