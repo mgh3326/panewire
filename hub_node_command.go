@@ -227,6 +227,7 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 		writeHubAccessDenied(writer, access)
 		return
 	}
+	commandStart := h.now().UTC()
 	pending, requestID, state, sent := h.sendNodeCommand(machine, body.Op, body.Args)
 	if !sent {
 		logReap("node_unavailable")
@@ -237,6 +238,7 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 	defer timer.Stop()
 	result := h.awaitNodeCommand(request, requestID, pending, timer.C)
 	logReap(nodeCommandOutcome(result))
+	h.releaseClosedPaneLanes(machine, decoded, result, commandStart)
 	response := struct {
 		RequestID string          `json:"request_id"`
 		Machine   string          `json:"machine"`
@@ -345,4 +347,19 @@ func (h *HubServer) handleNodesAgents(writer http.ResponseWriter, request *http.
 	writeJSON(writer, http.StatusOK, struct {
 		Nodes []hubNodeAgentsRow `json:"nodes"`
 	}{Nodes: rows})
+}
+
+// releaseClosedPaneLanes is the hub half of every reap that closes a job pane
+// through pane.close: once the node reports the pane closed or already gone,
+// the machine's lane rows for it have nothing left to route to.
+func (h *HubServer) releaseClosedPaneLanes(machine string, args any, result hubNodeCommandResult, commandStart time.Time) {
+	closeArgs, isClose := args.(nodePaneCloseArgs)
+	if !isClose || result.Error != "" {
+		return
+	}
+	var closed nodePaneCloseResult
+	if json.Unmarshal(result.Result, &closed) != nil || (closed.Outcome != nodePaneClosed && closed.Outcome != nodePaneGone) {
+		return
+	}
+	h.releasePaneLanes(machine, closeArgs.PaneID, commandStart)
 }
