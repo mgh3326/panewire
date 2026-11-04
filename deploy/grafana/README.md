@@ -26,9 +26,19 @@ The rule group has these rules:
 | --- | --- |
 | Repeated spawn refusals | More than 3 refusals for the same host and reason within 30 m. |
 | Review missing | No reviewer produced a pass within 1 h. |
-| Reviewer failing repeatedly | The same reviewer fails 3 or more times within 2 h. |
+| Reviewer failing repeatedly | The same reviewer on the same fleet host fails 3 or more times within 2 h. |
 | Quota observation stale | A refusing quota observation is older than 30 min (`age_min`). |
 | Fleet events pipeline silent | No fleet event reached Loki in 6 h. |
+
+"Reviewer failing repeatedly" groups by `host` and `reviewer`. `host` is the
+fleet machine id of the mergewake host that recorded the failure (see
+`../alloy/README.md`). `reviewer` comes from the event's `detail`
+(`reviewer=`). For a headless reviewer it is the mergewake review profile,
+which ran on that host. For a panewire pane it is the transport, `panewire`
+(`runtug` in older events): mergewake spawns the pane with `-m auto` and
+`--host auto`, and its event does not record the profile or the host that
+panewire chose. Keying pane failures by profile and pane host needs mergewake
+to add both to the reviewer event's `detail` when the spawn result names them.
 
 The rules count events, so "no data" is the healthy state for the first four,
 and they keep `noDataState: OK`. A dead pipeline (alloy down, missing grants,

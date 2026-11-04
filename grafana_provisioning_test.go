@@ -28,7 +28,7 @@ func checkFleetEventQuery(t *testing.T, where, expr string) {
 		name, _, _ := strings.Cut(strings.TrimSpace(matcher), "=")
 		name = strings.TrimRight(name, "!~")
 		switch name {
-		case "source", "host", "tool", "kind", "outcome":
+		case "source", "host", "os_host", "tool", "kind", "outcome":
 		default:
 			t.Fatalf("%s: selects on %q, which is not a fleet event label: %s", where, name, expr)
 		}

@@ -144,7 +144,7 @@
           "datasourceUid": "${LOKI_DATASOURCE_UID}",
           "model": {
             "refId": "A",
-            "expr": "sum by (reviewer) (count_over_time({source=\"fleet_events\", tool=\"mergewake\", kind=\"reviewer\", outcome=\"failed\"} | regexp \"reviewer=(?P<reviewer>[^ \\\"]+)\" [2h]))",
+            "expr": "sum by (host, reviewer) (count_over_time({source=\"fleet_events\", tool=\"mergewake\", kind=\"reviewer\", outcome=\"failed\"} | regexp \"reviewer=(?P<reviewer>[^ \\\"]+)\" [2h]))",
             "queryType": "instant",
             "editorMode": "code",
             "intervalMs": 1000,
@@ -184,7 +184,7 @@
         "severity": "warning"
       },
       "annotations": {
-        "summary": "Reviewer {{ $labels.reviewer }} failed 3 or more times in 2 hours.",
+        "summary": "Reviewer {{ $labels.reviewer }} on {{ $labels.host }} failed 3 or more times in 2 hours.",
         "dashboard": "fleet-observability"
       },
       "isPaused": false,
