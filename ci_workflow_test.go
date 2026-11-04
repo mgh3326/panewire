@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -132,6 +133,10 @@ func TestCIMacOSIsAdvisory(t *testing.T) {
 	mac, ok := workflow.Jobs["test-macos"]
 	if !ok || mac.RunsOn != "macos-latest" || !mac.ContinueOnError {
 		t.Fatalf("test-macos must exist on macos-latest with continue-on-error: %+v", mac)
+	}
+	// ci-any-ref passes a ref; its status must not wait on the advisory job.
+	if !strings.HasSuffix(mac.If, "&& !inputs.ref }}") {
+		t.Fatalf("test-macos must not run on ci-any-ref dispatches: if = %q", mac.If)
 	}
 	// Only-cancelled needs skip ci-ok (mergewake: unknown, hold); a failure
 	// still runs the gate (hk 2924).

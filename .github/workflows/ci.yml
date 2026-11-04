@@ -67,7 +67,9 @@ jobs:
     # gates ci-ok or mergewake (operator decision 2026-11-05). Same steps as
     # test, plus gitleaks, which only the macOS runner can install.
     name: test (macos-latest, advisory)
-    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    # PR and push runs only: a ci-any-ref dispatch always passes a ref, and
+    # its status must not wait on a macOS runner that may never be acquired.
+    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') && !inputs.ref }}
     runs-on: macos-latest
     continue-on-error: true
     steps:
