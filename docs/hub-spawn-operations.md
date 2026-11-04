@@ -36,6 +36,15 @@ Inherited children do not take the parent's direct task/role slot. Completed
 job IDs remain tombstones; a new direct task/role attempt requires evidence that
 the prior landed job completed or was lost.
 
+A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
+unverified) is checked on a colliding submission: the hub asks the operation's
+node for its herdr panes (`agents.list`). Only a complete pane list that lacks
+the recorded pane marks the hk job `lost` and releases the task/role slot. A
+present pane, an unreachable node, a read error or a missing pane id keeps the
+slot (fail closed). The 409 body then carries `request_id`, `job`, `host`,
+`pane` and a `fix` (close that pane, then resubmit), and the CLI prints them
+with exit 74.
+
 Before sending HTTP, the CLI saves `jobs/<job>/submission.json` privately and
 synchronizes it. Repeating the same command reuses that key. A lost response is
 not permission to generate a new key or try another host. A changed brief,
