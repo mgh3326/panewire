@@ -158,6 +158,24 @@ func TestCIMacOSIsAdvisory(t *testing.T) {
 		}
 	}
 
+	// The gate output must be a reusable-workflow output (on.workflow_call),
+	// or ci-any-ref reads it empty.
+	var trigger struct {
+		On struct {
+			WorkflowCall struct {
+				Outputs map[string]struct {
+					Value string `yaml:"value"`
+				} `yaml:"outputs"`
+			} `yaml:"workflow_call"`
+		} `yaml:"on"`
+	}
+	if err := yaml.Unmarshal(raw, &trigger); err != nil {
+		t.Fatal(err)
+	}
+	if got := trigger.On.WorkflowCall.Outputs["ok"].Value; got != "${{ jobs.ci-ok.outputs.ok }}" {
+		t.Fatalf("on.workflow_call.outputs.ok = %q, want the ci-ok gate output", got)
+	}
+
 	anyRef, err := os.ReadFile(".github/workflows/ci-any-ref.yml")
 	if err != nil {
 		t.Fatal(err)
