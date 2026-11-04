@@ -246,7 +246,7 @@ func (h *HubServer) releasePaneLanes(machine, pane string, commandStart time.Tim
 	return h.rewriteLanes("pane-close", func(routes map[string]reportRelayRoute) []string {
 		var release []string
 		for lane, route := range routes {
-			if route.Machine != machine || route.Pane != pane {
+			if route.Pane != pane {
 				continue
 			}
 			if wrote, known := h.laneLife.lastWrite(lane); known && wrote.After(commandStart) {

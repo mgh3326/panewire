@@ -92,6 +92,33 @@ oversized current file, or a failed safe replacement returns `500` with
 `lanes_unconfigured`, `lanes_invalid`, or `lanes_write_failed` as
 appropriate.
 
+### Dead rows are released and reused
+
+A row whose pane is gone would otherwise hold a slot until someone ran
+`wrk hygiene`. The hub reads each node's latest heartbeat session snapshot and
+treats a pane as gone only when that snapshot is `ok`, not truncated, no more
+than 120 s old, and from a node that is connected. Anything less releases
+nothing. The hub acts only on rows whose `machine` is the node's own, and
+applies the `DELETE` rules (not protected, no other machine routes through the
+name, not a control-plane authority lane).
+
+- **Cap.** A PUT that would create a row at the cap first evicts the caller's
+  own rows whose pane is absent from its snapshot, lowest lane name first, and
+  returns `429 lane_quota_exceeded` only when too few qualify to bring the node
+  back under the cap (the file is then unchanged). A row the hub wrote less
+  than 10 s before the snapshot was received is not evicted, because that
+  snapshot may predate its pane.
+- **Sweep.** Every 30 s the hub drops a node's row whose pane is absent from
+  its snapshot once the job on that pane is finished, or once the pane has been
+  absent for 5 minutes. A pane that reappears restarts the clock.
+- **`pane.close`.** A node command that reports `closed` or `pane-gone`
+  removes that machine's rows for the pane.
+
+Each removal logs `lane released` with a reason and broadcasts `lanes.changed`
+with `op: remove`. A relay event with no route logs one `relay unrouted` WARN
+per lane per minute, with the lane, the event id and the number of warnings
+suppressed since the last one.
+
 ### Remove a lane
 
 ```http
