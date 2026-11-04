@@ -3,6 +3,8 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"strings"
 	"testing"
 )
@@ -76,6 +78,52 @@ func TestFailedSpawnCleanupKeepsUnregisteredOrChangedPane(t *testing.T) {
 			}}
 			if err := a.closeFailedSpawn(t.Context(), Spawn{Label: "job", CWD: "/work/project"}, "pane-1", "codex"); err == nil || closes != 0 {
 				t.Fatalf("unsafe close: %d %v", closes, err)
+			}
+		})
+	}
+}
+
+// A pane cleanup refuses to close needs a receipt, or reap tools cannot find it.
+func TestFailedSpawnCleanupRefusalLeavesReceipt(t *testing.T) {
+	seq := int64(1)
+	for _, test := range []struct {
+		name   string
+		status string
+		want   bool
+	}{{"working", "working", true}, {"idle", "idle", false}} {
+		t.Run(test.name, func(t *testing.T) {
+			a := testApp(t)
+			agent := Agent{Pane: "pane-1", Name: "job", Kind: "omp", CWD: "/work/project", Status: test.status, StateChangeSeq: &seq}
+			a.Runner = &fakeRunner{Do: func(c Command) Result {
+				if strings.Join(c.Args, " ") == "agent list" {
+					raw, _ := json.Marshal(map[string]any{"agents": []Agent{agent}})
+					return Result{Out: string(raw)}
+				}
+				return Result{}
+			}}
+			err := a.closeFailedSpawn(t.Context(), Spawn{Job: "job-a", Label: "job", CWD: "/work/project"}, "pane-1", "omp")
+			var receipts []Event
+			evs, e := a.events("job-a")
+			if e != nil && !errors.Is(e, fs.ErrNotExist) {
+				t.Fatal(e)
+			}
+			for _, ev := range evs {
+				if ev.Kind == "job.cleanup_refused" {
+					receipts = append(receipts, ev)
+				}
+			}
+			if !test.want {
+				if err != nil || len(receipts) != 0 {
+					t.Fatalf("closed pane: err=%v receipts=%d", err, len(receipts))
+				}
+				return
+			}
+			if err == nil || len(receipts) != 1 {
+				t.Fatalf("err=%v receipts=%d", err, len(receipts))
+			}
+			p := receipts[0].Payload
+			if p["pane_id"] != "pane-1" || p["label"] != "job" || p["kind"] != "omp" || p["reason"] == "" {
+				t.Fatalf("receipt %+v", p)
 			}
 		})
 	}

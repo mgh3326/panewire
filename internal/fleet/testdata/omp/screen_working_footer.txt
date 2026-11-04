@@ -1,0 +1,17 @@
+
+                                            ████████████
+                                               ██  ██       ▄▀▀▄ █▀▄▀▄ █▀▀▄
+                                               ██  ██       ▀▄▄▀ █ █ █ █▄▄▀
+                                               ▒▒  ██                  █
+                                                   ██       v18.14.2
+
+                         Tip: No native tool_calling? Inference provider botches parsing them?
+                              `PI_DIALECT=glm|kimi|anthropic…` rolls it locally for them!
+
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+ Update Available
+ New version 18.16.0 is available. Run: omp update
+───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+ ⠸ 16s > ◒ Opus 5.5 > 🌳 panewire/tree > ⑂ detached > $0.03 ▶─1%───────────────────────────────╎┃─────1M─
+╰─                                                                                         ⇧⇥ to change thinking effort
