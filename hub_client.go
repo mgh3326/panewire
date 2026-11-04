@@ -154,7 +154,10 @@ type HubClient struct {
 	outbox        *Store
 	outboxMu      sync.Mutex
 	// now is the outbox retry clock. Tests pin it; production leaves it nil.
-	now              func() time.Time
+	now func() time.Time
+	// fleetEvents writes a fleet event. Tests substitute a recorder; production
+	// leaves it nil and events go to the state directory (emitFleetEvent).
+	fleetEvents      func(time.Time, fleetEvent) bool
 	assignedJobs     map[string]uint64
 	assignmentMu     sync.Mutex
 	burstHoldsActive bool

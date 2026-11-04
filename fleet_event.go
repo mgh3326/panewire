@@ -26,6 +26,10 @@ type fleetEvent struct {
 	Outcome   string `json:"outcome"`
 	Reason    string `json:"reason"`
 	Detail    string `json:"detail"`
+	// Profile and DurationMS ride on a node_spawn line of a successful spawn
+	// (the launch profile and how long the node took); omitted elsewhere.
+	Profile    string `json:"profile,omitempty"`
+	DurationMS *int64 `json:"duration_ms,omitempty"`
 }
 
 const (
@@ -76,6 +80,7 @@ func appendFleetEvent(path string, maxBytes int64, ev fleetEvent) bool {
 	}
 	ev.Host, ev.Tool = fleetEventCode(ev.Host), fleetEventCode(ev.Tool)
 	ev.Kind, ev.Outcome, ev.Reason = fleetEventCode(ev.Kind), fleetEventCode(ev.Outcome), fleetEventCode(ev.Reason)
+	ev.Profile = fleetEventCode(ev.Profile)
 	ev.Job = utf8PrefixWithin(fleetEventRedact(ev.Job), fleetEventMaxJob)
 	ev.RequestID = utf8PrefixWithin(fleetEventRedact(ev.RequestID), fleetEventMaxJob)
 	ev.Detail = utf8PrefixWithin(fleetEventRedact(ev.Detail), fleetEventMaxDetail)

@@ -22,8 +22,6 @@ panewire's host-first placement — read that score.
   "max_active_jobs": 5,
   "memory_free_pct_min": 30,
   "spawn_bridge_seconds": 300,
-  "swap_in_half_mbps": 300,
-  "capacity_weight": {"mac-work": 1.0, "desktop": 2.0},
   "wake_on_spill": false,
   "machines": {
     "desktop": {"task_slots": 2}
@@ -31,99 +29,149 @@ panewire's host-first placement — read that score.
 }
 ```
 
-`load_ratio`, `swap_used_mb_max`, `swap_in_per_s_max`, `psi_some_avg10_max`
-and `pressure_level_min` are retired. A policy file that still sets them
-loads, and the values are ignored.
+`load_ratio`, `swap_used_mb_max`, `swap_in_per_s_max`, `psi_some_avg10_max`,
+`pressure_level_min`, `swap_in_half_mbps` and `capacity_weight` are retired. A
+policy file that still sets them loads, and the values are ignored (reload logs
+a warning for `capacity_weight`; set `power` instead). The score constants have
+their own optional `score` object, see [Constants](#constants).
 
 ## Measured-load score
 
-The score answers "which host is really the most idle", from what the
-hosts' exporters send to Prometheus, not from counting jobs:
+The score answers "which host will lose the fewest spawns", from what the
+hosts' exporters send to Prometheus and from the jobs the hub sees. Score v2
+replaced the v1 formula on 2026-11-04. v1 ranked on CPU busy, but on the
+busiest host CPU busy did not predict spawn failures: load per core, page-ins
+and available memory below about 40% did (hk:doc
+`research/2026-11-04/placement-score-vs-failures`, §4). The host sat at 0.24
+CPU busy with load1 at 20–44 on 10 cores and its score stayed near 70.
 
 ```text
-free  = (1 - max(cpu_busy_1m, cpu_busy_5m))
-        * min(1, mem_available / 0.10)
-        / (1 + swap_in_mbps / swap_in_half_mbps)        # swap_in_half_mbps default 300
-score = (free * power - 10 * bridged_jobs) * capacity_weight
-        - 1000 if disconnected, - 200 if not accepting, - 500 if load_unknown,
+free  = cpu * mem * io * load * jobs
+score = free * power - 10 * claims_in_the_bridge_window
+        - 1000 if disconnected, - 500 if load_unknown, - 200 if not accepting,
         - 100 if throttled, + 5 for a placement hold, + 5 if burst-ready
 ```
 
-| Signal | PromQL (aggregated by `machine_id`) | Why |
+Each term runs from 0 to 1, and is 1 when its signal is absent or harmless.
+`power` stays multiplicative. `capacity_weight` is gone.
+
+| Term | Formula | Signal (PromQL, aggregated by `machine_id`) |
 |---|---|---|
-| `cpu_busy_5m` | `1 - avg(rate(node_cpu_seconds_total{mode="idle"}[5m]))` | Sustained CPU use. Also the candidate's `load_ratio` field. |
-| `cpu_busy_1m` | `1 - avg(irate(node_cpu_seconds_total{mode="idle"}[3m]))` | The last scrape interval (60 s): a job that just went heavy shows at once. |
-| `mem_available` | Linux `MemAvailable / MemTotal`; macOS `1 - (internal - purgeable + wired + compressed) / total` | Agent sessions mostly cost memory; it fell after 70–100% of spawns. It scales `free` only below 10% available, linearly to 0: above that the benchmark below ran at full speed. |
-| `swap_in_mbps` | `rate(node_memory_swapped_in_bytes_total[5m])` (macOS), `rate(node_vmstat_pswpin[5m]) * 4096` (Linux), in MB/s | Memory contention. `swap_in_half_mbps` (default 300) halves `free`. On macOS node_exporter maps this counter to VM page-ins, which include file-backed reads, not only swap; across the fleet it still rises as available memory falls. Linux assumes 4 KiB pages. |
+| `cpu` | `1 - max(cpu_busy_1m, cpu_busy_5m)` | `1 - avg(irate(node_cpu_seconds_total{mode="idle"}[3m]))`, and the same with `rate(...[5m])`. A job that just went heavy shows at once; a sustained one is not forgotten when one minute dips. |
+| `mem` | `clamp((mem_available - 0.20) / 0.20, 0, 1)` | Linux `MemAvailable / MemTotal`; macOS `1 - (internal - purgeable + wired + compressed) / total`. 0 at 20% available, 1 at 40%. |
+| `io` | `1 / (1 + pagein_MBps / 10)` | macOS: `sum(rate(node_memory_swapped_in_bytes_total[5m])) / 1048576`. On macOS node_exporter maps this counter to VM page-ins, which include file-backed reads. Linux: `sum(rate(node_vmstat_pswpin[5m])) * 4096 / 1048576`, with the half point at 20 MB/s (real swap-ins; 4 KiB pages assumed). A host that reports both uses the macOS one. |
+| `load` | `1 / (1 + max(0, min(load1_per_core, 4) - 0.75))` | `max(avg_over_time(node_load1[3m])) / count(count(node_cpu_seconds_total{mode="idle"}) by (machine_id, cpu))`. Costs nothing up to 0.75 per core; the reading stops counting at 4. |
+| `jobs` | `1 / (1 + live_jobs / 8)` | The node heartbeat's active-job list (below). |
 
-The signals come from a survey of every series the fleet's exporters send to
-Grafana Cloud (2026-11-02, 24 h, 7 hosts, 134 spawns). It kept the four
-signals above and rejected these:
+Why these shapes (the evidence is one host, one day and 16 failures; the
+constants are the knobs to tune with the telemetry below):
 
-- `node_load1` / cores: noise on macOS, where it counts blocked threads (one
-  host read 36 per core).
-- `node_procs_running`, PSI (`node_pressure_*`), `node_disk_io_time_*`:
-  Linux only, and the Linux hosts were never contended.
-- `node_thermal_cpu_speed_limit_ratio`: one macOS host exports it. It stays
-  as the `throttled` hardware guard, not as load.
-- Swap used: sticky. A host keeps gigabytes swapped out long after the
-  pressure is gone. Swap-out is near zero everywhere.
+| Signal band on the busiest host | Load-plausible failures per hour |
+|---|---|
+| load1 per core < 0.5 (63% of the time) | 0.1 |
+| 1–2 | 2.4 |
+| ≥ 2 (9% of the time, 10 of 16 failures) | 5.7 |
+| mem available ≥ 0.4 / 0.3–0.4 / < 0.3 | 0.2 / 1.3 / 4.5 |
+| page-ins < 2 / 5–10 / ≥ 10 MB/s | 0 / 1.2 / 4.5 |
+| cpu1 0.15–0.25 / 0.25–0.35 / ≥ 0.35 | 2.2 / 1.5 / 0 (not monotone) |
 
-At +2 minutes after a spawn, `cpu_busy_1m` had risen +0.043 on the desk host
-and `cpu_busy_5m` +0.017. `mem_available` fell after 70–100% of spawns.
-Across hosts, swap-in followed memory available: 15% available swapped in
-42 MB/s, 27% swapped in 8 MB/s, 37% swapped in 2 MB/s.
+Load and page-ins are correlated, so the terms overlap on purpose. CPU stays
+as a term but carries no special weight.
 
-**Calibration (2026-11-02, one run, n=1).** The desk timed the same Go
-workload (panewire 0758a0b: module download, cold build, vet, tests) on three
-hosts: mac-dev 37.6 s, mac-work 40.6 s, desktop 96.0 s
-(`handoffkeep doc get fleet/bench/2026-11-02-hosts`). mac-work and mac-dev
-are the same machine. mac-work ran 8% slower while it paged in ~25 MB/s with
-about 18% memory available. That sets the curve: a swap factor of at least
-0.926 at 25 MB/s puts the half point at ~310 MB/s, hence 300, and memory at
-18% must cost nothing, hence the 10% knee. The first draft used
-`min(cpu, memory)` and a 20 MB/s half point. Those scored mac-work at 37
-against desktop's 209, the opposite of the measured speed. This is a single
-CPU-heavy run. A memory-heavy workload (Unity) may suffer more from paging;
-`swap_in_half_mbps` is the knob for tightening it.
+**Spawn bridge.** A metric lags a spawn by minutes, so for
+`spawn_bridge_seconds` (default 600; 1–3600) after a job's claim the job
+itself costs 10 points. That keeps the next spawn off the same host until the
+metrics cover the first one. After the window the job costs nothing: its load
+is in the metrics, and the `jobs` term counts it for as long as it lives. The
+hub learns about a claim at the node's next heartbeat (every 10 s); two spawns
+placed before that heartbeat can still pick the same host.
 
 Stale or missing data never reads as idle:
 
-- **Freshness.** `cpu_busy_1m` exists only while the host sent a sample in
-  the last ~3 minutes. A host with only a lingering `cpu_busy_5m` is
-  `load_unknown` (−500, and not the local decision). In the survey this
-  never fired on an always-on host; it caught 11 minutes of a sleeping
-  laptop.
+- **Freshness.** `cpu_busy_1m` exists only while the host sent a sample in the
+  last ~3 minutes. A host with only a lingering `cpu_busy_5m` is
+  `load_unknown` (−500, and not the local decision).
 - **Memory.** With no Prometheus memory reading, the node-reported
   `memory_free_pct` stands in.
-- A signal no host of that kind exports (PSI on macOS) is simply not part
-  of the score. Every
-job is treated alike: a heavy job (a Unity build, a full test suite) moves
-the measured signals, and the measurement pushes the next placement away.
+- A signal no host of that kind exports (load per core, page-ins) leaves its
+  term at 1.
 
-`power` (default 100, see below) is the host's speed **unloaded**; load
-comes only from the live signals. It makes a strong idle host win: at equal load
-the stronger host scores higher, and at equal power the less loaded one
-does. `capacity_weight` is the operator's extra multiplier.
+`power` (default 100, see below) is the host's speed **unloaded**; load comes
+only from the live signals. At equal load the stronger host scores higher, and
+at equal power the less loaded one does.
 
-**Spawn bridge.** A metric lags a spawn by a few minutes, so for
-`spawn_bridge_seconds` (default 300, the CPU window; 1–3600) after a job's
-claim the job itself costs 10 points. That keeps the next spawn off the same
-host until the metrics cover the first one. After the window the job costs
-nothing: its load is in the metrics. The hub learns about a claim at the
-node's next heartbeat (every 10 s); two spawns placed before that heartbeat
-can still pick the same host.
+### The decision
+
+`decision` follows policy order (`local_machine`, then `spill_targets`) among
+usable machines, then two rules adjust it. Both look only at usable
+candidates (connected, accepting, above the memory floor, not throttled, under
+the job cap, with a free task slot):
+
+1. **All loaded.** If the best usable score is under 15, no host is a good
+   place. `reason` is `all_loaded` and the decision goes to the host with the
+   highest `mem` term (ties: higher score, then policy order).
+2. **Hysteresis.** Otherwise the policy-order winner keeps the decision unless
+   the best other usable host scores at least 1.25 times as much. Then `reason`
+   is `challenger` and that host takes it. A rival that is merely ahead does
+   not flip the decision, so back-to-back spawns do not bounce between hosts.
+
+A decision the rules left alone has no `reason`. Tagged requests (below) have
+no policy-order winner and always take the highest score.
+
+The spawn engine ranks hosts by the same scores, and prefers the host the hub
+named within a load bucket, so the margin holds there too. A spawn that does
+not go through the hub (`panewire spawn` on a node without a hub decision)
+ranks on score alone.
+
+### Constants
+
+All of them default as shown and live under an optional `score` object in
+`placement.json`. A bad value refuses the file; a missing one keeps its
+default.
+
+```json
+{"score": {
+  "mem_floor": 0.20, "mem_span": 0.20,
+  "pagein_half_mbps": 10, "linux_swap_in_half_mbps": 20,
+  "load_knee": 0.75, "load_cap": 4,
+  "jobs_half": 8, "claim_cost": 10,
+  "hysteresis": 1.25, "all_loaded_below": 15
+}}
+```
+
+### Telemetry
+
+Every decision leaves two kinds of Loki fleet event (`tool=panewire`, see
+`deploy/alloy/README.md`), so a later tuning can replay it:
+
+- `kind=placement`, one per placement decision, with `request_id` (the hub
+  spawn request), `job`, `chosen`, `reason` (`policy_order`, `challenger`,
+  `all_loaded`, else the ranking metric) and `candidates`: for every host its
+  `score`, the terms `cpu`, `mem`, `io`, `load`, `jobs`, its `power`, its
+  `bridge` count (claims inside the bridge window) and `outcome`.
+- `kind=node_spawn`, for failed and refused spawns as before and now for
+  **successful** ones: `outcome=ok`, `reason=spawned`, with `request_id`,
+  `job`, `profile` and `duration_ms`; `host` is the executing node.
+
+Neither carries screen text, a brief or argv.
+
+`panewire place --explain` prints the terms and the readings behind each score
+(columns `FREE CPU MEM IO LOAD JOBS CPU_BUSY MEM_AVAIL PAGEIN_MBPS LOAD1_CORE
+POWER BRIDGED`); see `testdata/place_explain.golden`. It asks the hub with
+`signals=1`. Without that parameter the hub omits the `signals` object, so a
+pre-change CLI that decodes candidates strictly keeps working during a rolling
+upgrade.
+
+**Replay.** `placement_replay_test.go` replays v1 and v2 on the 2026-11-02..04
+extract (`PLACEMENT_REPLAY_DIR`): of the 16 load-plausible failures on the
+busiest host, 14 would have gone elsewhere, and 5.9% of the minutes with load1
+per core under 0.5 flip. The extract has no claim history or live job counts,
+so `jobs` and the bridge read zero there.
 
 **Memory floor.** `memory_free_pct_min` (default 30) is the only admission
 threshold left. It is a crash guard on the node-reported `memory_free_pct`
 (macOS `memory_pressure` free percentage, Linux `MemAvailable`), not a load
 signal.
-
-`panewire place --explain` prints every signal behind each score (columns
-`FREE CPU_1M CPU_5M MEM_AVAIL SWAP_IN_MBPS POWER WEIGHT BRIDGED`); see
-`testdata/place_explain.golden`. It asks the hub with `signals=1`. Without
-that parameter the hub omits the `signals` object, so a pre-change CLI that
-decodes candidates strictly keeps working during a rolling upgrade.
 
 ### Active jobs
 
@@ -227,7 +275,7 @@ at or below that.
 `power` is optional and maps a machine id to a relative speed weight, greater
 than 0 and at most 10000. 100 is the strongest host; a machine without an
 entry weighs 100, so a policy without `power` ranks machines on measured
-load times `capacity_weight`. It is a separate top-level map (not part of `machines`) so a
+load alone. It is a separate top-level map (not part of `machines`) so a
 weight never implies a task-slot cap.
 
 ```json
@@ -242,8 +290,10 @@ when hardware changes; a rounded value is fine. Measure with the host
 unloaded: load enters through the live signals, so a weight measured on a
 busy host would count that load twice.
 
-**Recommended fleet values (2026-11-02, not deployed).** These come from the
-workload benchmark above, and replace `capacity_weight`:
+**Recommended fleet values (2026-11-02).** These come from the workload
+benchmark (`handoffkeep doc get fleet/bench/2026-11-02-hosts`: the same Go
+workload took 37.6 s on mac-dev, 40.6 s on mac-work, 96.0 s on desktop), and
+replace `capacity_weight`:
 
 ```json
 {"power": {"mac-dev": 100, "mac-work": 100, "desktop": 39,
@@ -254,15 +304,15 @@ mac-dev and desktop are measured (desktop nearly idle; mac-work is the same
 machine as mac-dev). mac-personal, oci, rpi and ncp are unmeasured. They keep
 their current `capacity_weight` relative to mac-dev's 4.6 (×100 / 4.6), so
 their standing does not change until the desk's oci and rpi runs land in the
-same hk doc. Remove `capacity_weight` when setting these values; keeping
-both would multiply the weights twice.
+same hk doc. `capacity_weight` is ignored, so leave it out.
 
 Power multiplies the measured free fraction (`free * power`), so an idle
-power-100 host outranks an idle power-40 one, and a bridged job's 10 points
-are a larger share of a weak host's score. Low-power hosts are ranked lower,
+power-100 host outranks an idle power-40 one, and a claim's 10 points are a
+larger share of a weak host's score. Low-power hosts are ranked lower,
 never filtered out. The `decision` field
-still follows policy order (`local_machine`, then `spill_targets`) among
-usable machines; power shapes `score` and therefore the order of `candidates`.
+still follows policy order among usable machines, adjusted by the
+[decision rules](#the-decision); power shapes `score` and therefore the order
+of `candidates`.
 
 ## Draft NCP policy file (not deployed)
 
@@ -325,19 +375,15 @@ no longer exclude a candidate; swap-in lowers its score. The node still
 reports them in its heartbeat (`swap_in_per_s`, `pressure`), and the
 candidate still echoes them. Missing telemetry is fail-open.
 
-`capacity_weight` is an optional map from machine id to a positive relative
-capacity weight; it defaults to 1.0 per machine. The score multiplies the
-candidate's measured headroom by that weight, so a faster idle machine ranks
-higher. It changes ranking only: disconnected, non-accepting, memory-pressured,
-or otherwise refused candidates remain unusable regardless of weight.
-
 The hub queries `PANEWIRE_PROM_URL`'s `/api/v1/query` endpoint with the
-signal queries in the table above and the thermal speed-limit query, in
-parallel; one failed query makes the whole read hub-only. Every query
+signal queries in the table above (the Linux swap-in rate is a query of its
+own) and the thermal speed-limit query, in parallel; one failed query makes the whole read hub-only. Every query
 aggregates by `machine_id`, so remote-write scrape labels such as `instance`
-and `job` cannot break vector matching. CPU busy replaces `node_load5` /
-cores: the macOS load average counts blocked threads and can read several
-times the core count on a host that is barely busy. The `cpu` and `meminfo`
+and `job` cannot break vector matching. CPU busy replaced `node_load5` / cores
+in v1 because the macOS load average counts blocked threads and can read
+several times the core count on a host that is barely busy; v2 reads
+`node_load1` per core again, as one term of five, because on the busiest host
+that count is what tracked the failures. The `cpu`, `loadavg` and `meminfo`
 node-exporter collectors must stay enabled on every host (see
 `ALLOY_DISABLE_COLLECTORS` in `deploy/alloy/README.md`); a candidate's
 `load_ratio` field is the five-minute busy fraction. Set either `PANEWIRE_PROM_BEARER` or

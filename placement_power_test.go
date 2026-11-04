@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -80,11 +81,12 @@ func TestPlacementLoadQueryIsCPUUtilisation(t *testing.T) {
 	defer mu.Unlock()
 	var cpu []string
 	for _, query := range queries {
-		if strings.Contains(query, "node_cpu_seconds_total") {
+		if strings.Contains(query, "node_cpu_seconds_total") && query != placementLoad1Query {
 			cpu = append(cpu, query)
 		}
-		if strings.Contains(query, "node_load") {
-			t.Fatalf("load averages must not feed placement: %q", query)
+		// Only the load1 term reads a load average, per core and averaged.
+		if strings.Contains(query, "node_load") && query != placementLoad1Query {
+			t.Fatalf("load averages may feed placement only through the load1 term: %q", query)
 		}
 	}
 	// Two CPU windows: five minutes and the last scrape interval.
@@ -161,13 +163,14 @@ func TestPlacementScoreBase(t *testing.T) {
 		{"idle strongest", 1, 0, 100, 100},
 		{"idle half power", 1, 0, 50, 50},
 		{"half free strongest", .5, 0, 100, 50},
-		{"bridged job costs a tenth of a power-100 host", 1, 1, 100, 90},
-		{"bridged job costs a fifth of a power-50 host", 1, 1, 50, 40},
+		{"a claim costs a tenth of a power-100 host", 1, 1, 100, 90},
+		{"a claim costs a fifth of a power-50 host", 1, 1, 50, 40},
+		{"claims add up", 1, 3, 100, 70},
 		{"fully busy host", 0, 0, 100, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := placementScoreBase(tc.free, tc.bridged, tc.power); got != tc.want {
+			if got := (PlacementPolicy{}).scoreK().scoreBase(tc.free, tc.bridged, tc.power); got != tc.want {
 				t.Fatalf("score=%v, want %v", got, tc.want)
 			}
 		})
@@ -203,9 +206,11 @@ func TestPlacementPowerRanksStrongIdleHostFirst(t *testing.T) {
 	if len(got.Candidates) != 2 || got.Candidates[0].Machine != "desktop" {
 		t.Fatalf("strong idle host must rank first: %+v", got.Candidates)
 	}
-	// The low-power host is ranked lower, not excluded.
+	// The low-power host is ranked lower, not excluded: it stays a usable
+	// candidate, and the strong host takes the decision only because its score
+	// clears the hysteresis margin over the policy-order winner.
 	weak, ok := t607Candidate(got, "mac-work")
-	if !ok || got.Decision != "mac-work" || weak.Reason != "memory_unknown" {
+	if !ok || got.Decision != "desktop" || got.Reason != "challenger" || weak.Reason != "memory_unknown" || !placementUsable(weak, hub.placementPolicy, got.Source) {
 		t.Fatalf("low-power host must stay eligible: decision=%q weak=%+v", got.Decision, weak)
 	}
 }
@@ -227,7 +232,11 @@ func TestPlacementSettledJobsDoNotCost(t *testing.T) {
 	got := hub.placement(t.Context(), "worker", "repo")
 	weak, _ := t607Candidate(got, "mac-work")
 	strong, _ := t607Candidate(got, "desktop")
-	if weak.ActiveJobs != 20 || weak.Signals.BridgedJobs != 0 || weak.Score != placementScoreBase(.8, 0, 20) || strong.Score != placementScoreBase(.8, 0, 100) {
+	// 20 live jobs slow the host through the jobs term (1/(1+20/8)), not through
+	// a claim cost.
+	k := (PlacementPolicy{}).scoreK()
+	weakFree := .8 / (1 + 20.0/8)
+	if weak.ActiveJobs != 20 || weak.Signals.BridgedJobs != 0 || math.Abs(weak.Score-k.scoreBase(weakFree, 0, 20)) > 1e-9 || strong.Score != k.scoreBase(.8, 0, 100) {
 		t.Fatalf("settled jobs changed the score: weak=%+v %+v strong=%+v", weak, weak.Signals, strong)
 	}
 }

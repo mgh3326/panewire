@@ -109,7 +109,7 @@ func hostBucket(h selHost) int {
 	return 0
 }
 
-// rankHosts orders the fit hosts: bucket, then the hub score (free capacity
+// rankHosts orders the fit hosts: bucket, then the host the hub decided on, then the hub score (free capacity
 // weighted by the host's power) when every ranked host has one, else the raw
 // load, then configuration order (local first).
 func rankHosts(hosts []selHost) []selHost {
@@ -123,6 +123,13 @@ func rankHosts(hosts []selHost) []selHost {
 	slices.SortStableFunc(out, func(x, y selHost) int {
 		if bx, by := hostBucket(x), hostBucket(y); bx != by {
 			return bx - by
+		}
+		// The hub's decision carries its hysteresis margin and all-loaded rule.
+		if x.decided != y.decided {
+			if x.decided {
+				return -1
+			}
+			return 1
 		}
 		if byScore {
 			return cmp.Compare(*y.score, *x.score)

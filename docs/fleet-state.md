@@ -38,14 +38,14 @@ Each `(host, kind, key)` triple names one latest value.
 | kind | key | publisher | body |
 |---|---|---|---|
 | `quota` | account key (`<pool>:<16-hex>`) | the node that runs the measurement | `quota`: `account_key`, `pool`, `source` (pacelever's measurement source), `buckets[]` (`window`, `used_pct`, `resets_at`, `scope`, `model`) |
-| `load` | empty | the hub, computed from the node's own heartbeats with `/etc/panewire/placement.json` | `load`: `load_ratio`, `score`, `capacity_weight`, `accepting`, `usable`, `connected`, `slot_full`, `active_jobs`, `reason` |
+| `load` | empty | the hub, computed from the node's own heartbeats with `/etc/panewire/placement.json` | `load`: `load_ratio`, `score`, `accepting`, `usable`, `connected`, `slot_full`, `active_jobs`, `reason` |
 | `publisher` | empty | the hub, from the node's connection | `publisher`: `connected`, `last_seen` |
 
 - **Host binding.** `host` is always the machine id of the authenticated
   connection the value arrived on. A node may name only itself. A message that
   names another host is refused and counted as an unknown message.
 - **Load.** The node already publishes its raw load and memory in its
-  heartbeat. The hub adds the placement policy (score, `capacity_weight`, task
+  heartbeat. The hub adds the placement policy (score, task
   slots, acceptance) through the same computation as `GET /v1/placement`, but
   without the wake-on-spill side effect. `measured_at` is the time of that
   computation. `accepting` is placement's effective acceptance: connected,

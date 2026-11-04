@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/mgh3326/panewire/internal/fleetevent"
 	"io"
 	"os"
 	"path/filepath"
@@ -48,6 +49,13 @@ type App struct {
 	ObserveStage     func(string, time.Duration)
 	ObserveRetryable func(bool)
 	ObserveReceipt   func(ExecutionReceipt)
+	// RequestID is the hub spawn request this App executes; the placement fleet
+	// event carries it so Loki joins the decision to the spawn and its Sentry
+	// event. Empty outside a hub spawn.
+	RequestID string
+	// EventSink receives fleet events instead of the state directory's file;
+	// tests only.
+	EventSink func(fleetevent.Event)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
 	State    FleetStateReader

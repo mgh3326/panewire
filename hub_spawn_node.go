@@ -195,6 +195,7 @@ func spawnResultWire(result hubSpawnResult, extended bool) any {
 func (client *HubClient) runHubSpawn(parent context.Context, message hubOutboundMessage) (result hubSpawnResult) {
 	// reason and detail refine result.Error in the node_spawn fleet event.
 	var reason, detail string
+	started := client.fleetClock()()
 	defer func() {
 		if result.RC != 0 && spawnResultFix(result.StdoutTail) == "" {
 			fix := "Fix: " + nodeSpawnRefusalFix(result.Error, reason)
@@ -206,7 +207,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 				result.StdoutTail = hubSpawnTailWithStderr(result.StdoutTail, fix)
 			}
 		}
-		client.recordHubSpawnOutcome(message, result, reason, detail)
+		client.recordHubSpawnOutcome(message, result, reason, detail, started)
 	}()
 	result = hubSpawnResult{RequestID: message.RequestID, Retryable: true}
 	if parent.Err() != nil {
@@ -370,11 +371,36 @@ func hubSpawnTailWithStderr(stdout, stderr string) string {
 	return utf8SuffixWithin(stdout, hubSpawnResultTail-len(section)) + section
 }
 
-// recordHubSpawnOutcome writes the node_spawn fleet event for a refused or
-// failed hub spawn. reason defaults to the refusal's closed-set code, else the
-// wire error; detail to the rc.
-func (client *HubClient) recordHubSpawnOutcome(message hubOutboundMessage, result hubSpawnResult, reason, detail string) {
+// fleetClock is the clock fleet events are stamped with.
+func (client *HubClient) fleetClock() func() time.Time {
+	if client.now != nil {
+		return client.now
+	}
+	return time.Now
+}
+
+// recordHubSpawnOutcome writes the node_spawn fleet event of a hub spawn: a
+// refused or failed one with its reason, a successful one with the profile it
+// launched and how long the node took. Neither carries screen text, the brief
+// or argv. reason defaults to the refusal's closed-set code, else the wire
+// error; detail to the rc.
+func (client *HubClient) recordHubSpawnOutcome(message hubOutboundMessage, result hubSpawnResult, reason, detail string, started time.Time) {
+	now := client.fleetClock()
+	write := emitFleetEvent
+	if client.fleetEvents != nil {
+		write = client.fleetEvents
+	}
 	if result.Error == "" {
+		if result.RC != 0 {
+			return
+		}
+		event := fleetEvent{Kind: "node_spawn", Job: hubSpawnArg(message.Args, "--job"), RequestID: message.RequestID, Outcome: "ok", Reason: "spawned"}
+		if result.Receipt != nil {
+			event.Profile = result.Receipt.Profile
+		}
+		elapsed := max(now().Sub(started).Milliseconds(), 0)
+		event.DurationMS = &elapsed
+		write(now(), event)
 		return
 	}
 	outcome := "refused"
@@ -390,11 +416,7 @@ func (client *HubClient) recordHubSpawnOutcome(message hubOutboundMessage, resul
 	if detail == "" {
 		detail = fmt.Sprintf("rc=%d", result.RC)
 	}
-	now := time.Now
-	if client.now != nil {
-		now = client.now
-	}
-	emitFleetEvent(now(), fleetEvent{Kind: "node_spawn", Job: hubSpawnArg(message.Args, "--job"), RequestID: message.RequestID, Outcome: outcome, Reason: reason, Detail: result.Error + " " + detail})
+	write(now(), fleetEvent{Kind: "node_spawn", Job: hubSpawnArg(message.Args, "--job"), RequestID: message.RequestID, Outcome: outcome, Reason: reason, Detail: result.Error + " " + detail})
 }
 
 // hubSpawnArg returns the value of flag in a hub spawn's argv, or "".

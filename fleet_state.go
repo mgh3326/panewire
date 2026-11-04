@@ -94,9 +94,8 @@ type FleetStateBucket struct {
 // FleetStateLoad is the hub's placement view of one host, computed from that
 // host's own heartbeats and the placement policy.
 type FleetStateLoad struct {
-	LoadRatio      float64 `json:"load_ratio"`
-	Score          float64 `json:"score"`
-	CapacityWeight float64 `json:"capacity_weight"`
+	LoadRatio float64 `json:"load_ratio"`
+	Score     float64 `json:"score"`
 	// Accepting is the node's effective acceptance as placement computes it
 	// (connected, operator/override acceptance, no memory pressure); Usable
 	// is placement's own verdict for this host (placementUsable).
@@ -452,16 +451,15 @@ func (h *HubServer) publishFleetLoad(ctx context.Context, now time.Time) {
 	for _, candidate := range h.placementCandidates(policy, metrics, source, now) {
 		reason := candidate.Reason
 		load := FleetStateLoad{
-			LoadRatio:      candidate.LoadRatio,
-			Score:          math.Round(candidate.Score*1000) / 1000,
-			CapacityWeight: policy.capacityWeight(candidate.Machine),
-			Connected:      candidate.Connected,
-			Accepting:      candidate.accepting,
-			Usable:         placementUsable(candidate, policy, source),
-			SlotFull:       candidate.slotFull,
-			ActiveJobs:     candidate.ActiveJobs,
-			Reason:         reason,
-			Source:         source,
+			LoadRatio:  candidate.LoadRatio,
+			Score:      math.Round(candidate.Score*1000) / 1000,
+			Connected:  candidate.Connected,
+			Accepting:  candidate.accepting,
+			Usable:     placementUsable(candidate, policy, source),
+			SlotFull:   candidate.slotFull,
+			ActiveJobs: candidate.ActiveJobs,
+			Reason:     reason,
+			Source:     source,
 		}
 		h.stateStore().publish(FleetStateMessage{Host: candidate.Machine, Kind: fleetStateKindLoad, MeasuredAt: now, ReceivedAt: now, Load: &load}, fleetStateLoadRepublish)
 	}
