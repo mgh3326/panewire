@@ -18,6 +18,7 @@ type ciWorkflow struct {
 	Jobs map[string]struct {
 		If       string   `yaml:"if"`
 		RunsOn   any      `yaml:"runs-on"`
+		Strategy any      `yaml:"strategy"`
 		Needs    []string `yaml:"needs"`
 		Uses     string   `yaml:"uses"`
 		Continue bool     `yaml:"continue-on-error"`
@@ -48,7 +49,7 @@ func TestCITiers(t *testing.T) {
 		if strings.Contains(job.If, "github.event_name != 'pull_request'") {
 			continue
 		}
-		runner, _ := yaml.Marshal(job.RunsOn)
+		runner, _ := yaml.Marshal([]any{job.RunsOn, job.Strategy})
 		if strings.Contains(string(runner), "vars.") || strings.Contains(string(runner), "self-hosted") {
 			t.Errorf("PR-reachable job %s has unsafe runner: %s", name, runner)
 		}
