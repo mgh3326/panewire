@@ -746,11 +746,25 @@ func (a *App) registerLaneWithRetry(ctx context.Context, lane, parent, pane, rol
 // the word READY nor ESC, which the wait loop reads as job outcomes.
 func (a *App) announceLaneUnregistered(ctx context.Context, s Spawn, lane, parent, pane, machine string) {
 	text := fmt.Sprintf("[%s] LANE_UNREGISTERED | lane=%s machine=%s pane=%s | hub lane registration failed after one retry; this pane's findings are not routed | fix: panewire lanes add %s --machine %s --pane %s --parent %s", s.Job, lane, machine, pane, lane, machine, pane, parent)
+	if s.laneError != "" {
+		text += " | reason=" + s.laneError
+	}
 	args := []string{"emit", "--kind", "lane.event", "--lane", parent, "--type", "blocked", "--event-id", s.Job + "-lane-unregistered", "--label", s.Label, "--host", machine, "--pane", pane, "--inbox-root", filepath.Dir(a.Jobs), "--text", text}
 	if r := a.call(ctx, "panewire", args...); r.Code != 0 {
 		a.warn("LANE_UNREGISTERED event to %s not delivered (rc=%d): %s", parent, r.Code, strings.TrimSpace(r.Err))
 		_ = a.event(ctx, s.Job, "job.relay_failed", map[string]any{"kind": "lane.event", "exit": r.Code})
 	}
+}
+
+// laneSecretRE matches a credential-looking key=value pair in a CLI error.
+var laneSecretRE = regexp.MustCompile(`(?i)\b(token|secret|password|authorization|client_secret)\s*[=:]\s*\S+`)
+
+// laneFailureReason turns a lane registration error into the bounded,
+// single-line, redacted reason recorded in the receipt and the notice.
+func laneFailureReason(e error) string {
+	msg := strings.Join(strings.Fields(e.Error()), " ")
+	msg = laneSecretRE.ReplaceAllString(msg, "$1=<redacted>")
+	return strings.ToValidUTF8(clip(msg, 240), "")
 }
 
 func (a *App) registerLane(ctx context.Context, lane, parent, pane, role, machine string) error {
