@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -323,6 +324,55 @@ func TestLaneInboxAckStateBackfillIsOnceAndResumable(t *testing.T) {
 	defer s.db.Close()
 	if states, err := s.ackStates([]string{"old-ev"}, ""); err != nil || len(states) != 1 {
 		t.Fatalf("row left unfilled after reopen: %+v %v", states, err)
+	}
+}
+
+// Migration 0005 fills event_id for rows stored before the column. It runs on
+// Postgres only (CI): the UPDATE is replayed over rows left empty, as a store
+// from before the migration would hold them.
+func TestPostgresAckStateMigrationBackfillsExistingRows(t *testing.T) {
+	config, _ := hubPostgresTestSchema(t)
+	store, err := openLaneInboxStorePostgresConfig(context.Background(), config.Copy())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.close()
+	rows := map[string]struct{ payload, want string }{
+		"plain":    {`{"job_id":"j","event_id":"ev-plain"}`, "ev-plain"},
+		"indented": {"  \n{\"job_id\":\"j\",\"event_id\":\"ev-indented\"}", "ev-indented"},
+		"nul-body": {`{"text":"a\u0000b","event_id":"ev-nul-body"}`, "ev-nul-body"},
+		"nul-id":   {`{"event_id":"a\u0000b"}`, ""},
+		"no-id":    {`{"job_id":"j"}`, ""},
+		"array":    {`[1]`, ""},
+		"scalar":   {`"str"`, ""},
+		"not-json": {`nonsense`, ""},
+	}
+	for key, row := range rows {
+		if _, err := store.db.Exec(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at) VALUES($1,'lane-a','lane.event','inbox',$2,1)`, key, row.payload); err != nil {
+			t.Fatal(key, err)
+		}
+	}
+	migration, err := hubPostgresMigrations.ReadFile("hub_postgres_migrations/0005_inbox_ack_state.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var update string
+	for _, line := range strings.Split(string(migration), "\n") {
+		if strings.HasPrefix(line, "UPDATE lane_inbox") {
+			update = line
+		}
+	}
+	if update == "" {
+		t.Fatal("0005 has no backfill UPDATE")
+	}
+	if _, err := store.db.Exec(update); err != nil {
+		t.Fatalf("backfill aborted on a legacy row: %v", err)
+	}
+	for key, row := range rows {
+		var got string
+		if err := store.db.QueryRow(`SELECT event_id FROM lane_inbox WHERE event_key=$1`, key).Scan(&got); err != nil || got != row.want {
+			t.Errorf("%s: event_id %q, want %q (%v)", key, got, row.want, err)
+		}
 	}
 }
 
