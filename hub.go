@@ -758,6 +758,7 @@ func (h *HubServer) Close() error {
 	h.laneStallMu.Unlock()
 	h.laneStallSweeps.Wait()
 	h.spawnWorkers.Wait()
+	h.flushSpawnTrace()
 	if h.inbox != nil {
 		// An in-flight flush may sit in a store call on a stalled database;
 		// abort ends that call so taking flushMu cannot wait on it.

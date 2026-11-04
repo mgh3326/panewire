@@ -9,6 +9,12 @@ import (
 	"time"
 
 	"github.com/getsentry/sentry-go"
+	"github.com/mgh3326/panewire/internal/fleet"
+)
+
+const (
+	spawnSentryServerName   = "panewire-hub"
+	spawnSentryFlushTimeout = 2 * time.Second
 )
 
 // This private client never attaches HTTP middleware or changes the crash
@@ -16,7 +22,7 @@ import (
 func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) {
 	h.spawnTraceOnce.Do(func() {
 		if h.spawnSentry == nil {
-			client, err := sentry.NewClient(sentry.ClientOptions{Dsn: strings.TrimSpace(os.Getenv(crashReportDSNEnv)), EnableTracing: true, TracesSampleRate: 1, SendDefaultPII: false})
+			client, err := sentry.NewClient(spawnSentryOptions(strings.TrimSpace(os.Getenv(crashReportDSNEnv))))
 			if err == nil {
 				h.spawnSentry = client
 			}
@@ -62,7 +68,7 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 		if err == nil {
 			if n, _ := recorded.RowsAffected(); n == 1 {
 				reason := spawnTraceReason(result.Reason)
-				hub.CaptureEvent(&sentry.Event{Level: sentry.LevelError, Message: "SPAWN_FAILED", Fingerprint: []string{"spawn", result.Stage, reason}, Tags: map[string]string{"stage": result.Stage, "reason": reason}})
+				hub.CaptureEvent(&sentry.Event{Level: sentry.LevelError, Message: "SPAWN_FAILED " + result.Stage + "/" + reason, Fingerprint: []string{"spawn", result.Stage, reason}, Tags: map[string]string{"stage": result.Stage, "reason": reason, "request": task.Request.RequestID, "attempt": strconv.Itoa(task.Attempt)}})
 			}
 		}
 	}
@@ -100,11 +106,40 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 	}
 	trace.Finish()
 }
+
+// spawnSentryOptions configures the spawn client. ServerName is fixed so the OS
+// hostname never reaches Sentry; the host tag names the fleet machine instead.
+func spawnSentryOptions(dsn string) sentry.ClientOptions {
+	return sentry.ClientOptions{
+		Dsn:                   dsn,
+		Release:               "panewire@" + fleet.BuildVersion,
+		Environment:           "fleet",
+		EnableTracing:         true,
+		TracesSampleRate:      1,
+		SendDefaultPII:        false,
+		ServerName:            spawnSentryServerName,
+		BeforeSend:            scrubSentryEvent,
+		BeforeSendTransaction: scrubSentryEvent,
+	}
+}
+
+// flushSpawnTrace delivers what the stopped spawn workers queued. Consuming the
+// once keeps a late trace from building a client that nothing would flush.
+func (h *HubServer) flushSpawnTrace() {
+	h.spawnTraceOnce.Do(func() {})
+	if h.spawnSentry != nil {
+		h.spawnSentry.Flush(spawnSentryFlushTimeout)
+	}
+}
+
 func spawnTraceReason(reason string) string {
 	// Refusal text follows the code in a reason. It never reaches a fingerprint.
 	reason, _, _ = strings.Cut(reason, ": ")
 	switch reason {
 	case "timeout", "disconnected", "unknown", "spawn_failed", "configuration", "admission_refused", "parent_job_not_found", "quota_unconfirmed", "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable", "node_upgrade_required":
+		return reason
+	}
+	if code, ok := strings.CutPrefix(reason, "spawn_failed:"); ok && fleet.IsSpawnRefusalCode(code) {
 		return reason
 	}
 	for _, family := range []string{"checkout_refused", "quota_unconfirmed"} {

@@ -220,6 +220,14 @@ func writeCrashSendLog(dir string, kept []string) error {
 	return os.WriteFile(filepath.Join(dir, "sent"), []byte(strings.Join(kept, "\n")+"\n"), 0o600)
 }
 
+// scrubSentryEvent drops the fields that can identify a user or a request.
+func scrubSentryEvent(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
+	event.User = sentry.User{}
+	event.Request = nil
+	event.Breadcrumbs = nil
+	return event
+}
+
 // uploadCrashReports sends one Sentry event per crash file and deletes a file
 // only after Sentry answered its event with a 2xx; a rejected or failed
 // delivery keeps the file for the next start.
@@ -235,12 +243,7 @@ func uploadCrashReports(dsn, tool, version string, paths []string) (sent int, er
 		SendDefaultPII:   false,
 		ServerName:       fleetEventCode(fleetEventHost()),
 		HTTPTransport:    delivery,
-		BeforeSend: func(event *sentry.Event, _ *sentry.EventHint) *sentry.Event {
-			event.User = sentry.User{}
-			event.Request = nil
-			event.Breadcrumbs = nil
-			return event
-		},
+		BeforeSend:       scrubSentryEvent,
 	})
 	if err != nil {
 		return 0, err
