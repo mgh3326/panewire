@@ -208,8 +208,10 @@ func (sp *selPresence) unknownJudgment(b accountBinding, why string) quotaJudgme
 
 func (p *selPlan) classify(c *selCand, v PoolView) {
 	c.blocking, c.projected, c.urgency, c.resetHrs = v.Blocking, v.Projected, v.Urgency, v.ResetHours
+	c.longProj = longProjection(v)
 	if p.policy.isCredit(c.row.Pool) || v.Class == "credit" {
 		c.creditPool = true
+		c.creditLeft = v.Credit != nil && v.Credit.LeftPct > 0
 		c.tierName, c.tier = "credit", slices.Index(p.order, "credit")
 		if v.Class == "exclude" {
 			c.reason, c.code, c.outcome = "pool_excluded", outcomeNoRoleCandidate, "dropped:pool_excluded"
@@ -233,6 +235,7 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 	}
 	free := p.policy.isFree(c.row)
 	c.risk, c.unused = p.policy.wasteRisk(c.row, free, v, true)
+	c.paced = p.policy.paced(c.row, free, c.risk, v)
 	if free {
 		c.exhausted = v.Projected != nil && *v.Projected >= *p.policy.ExcludeAt
 	} else {

@@ -185,14 +185,26 @@ type selCand struct {
 	// whatever its tier; credit is set when a balance is left within the
 	// policy's final window before expiry (credit_expiring): it then ranks
 	// ahead of every other candidate, waste risk included.
-	creditPool  bool
-	credit      *creditFinal
-	accountKey  string
-	host        string
-	hosts       []selHost
-	holders     []selHost
-	code        string
-	ignoreGrade bool
+	creditPool bool
+	credit     *creditFinal
+	// creditLeft marks a credit pool with a recorded balance above zero; only
+	// then may a paced pool rank behind credit.
+	creditLeft bool
+	// longProj is the pool's projection at reset over windows of a day or
+	// more; sub-daily windows never rank a pool.
+	longProj *float64
+	// paced marks a subscription pool on pace to use up its longest window
+	// by that window's reset (PoolPolicy.paced); behindCredit records that
+	// orderSelCands ranked it behind credit because a credit pool with a
+	// balance was a candidate.
+	paced        bool
+	behindCredit bool
+	accountKey   string
+	host         string
+	hosts        []selHost
+	holders      []selHost
+	code         string
+	ignoreGrade  bool
 }
 
 type selPlan struct {
@@ -377,10 +389,43 @@ func (p PoolPolicy) tierOf(row CatalogRow, order []string, v PoolView) (string, 
 		return "", -1
 	}
 	tier := "ranked"
-	if v.Projected != nil && *v.Projected < *p.WasteBelow || v.Projected == nil && v.Waste != nil && *v.Waste {
+	if long := longProjection(v); long != nil && *long < *p.WasteBelow || long == nil && v.Waste != nil && *v.Waste {
 		tier = "waste"
 	}
 	return tier, slices.Index(order, tier)
+}
+
+// longProjection is the pool's projected use at reset over its windows of a
+// day or more: LongProjected, else the longest window's waste urgency times
+// its hours to reset, else Projected when the pool reported no sub-daily
+// window (so Projected can only come from longer ones). It is nil when no
+// such window can be paced. Sub-daily windows gate admission only and never
+// enter it.
+func longProjection(v PoolView) *float64 {
+	if v.LongProjected != nil {
+		return v.LongProjected
+	}
+	if v.Urgency != nil && v.ResetHours != nil {
+		x := 100 - *v.Urgency**v.ResetHours
+		return &x
+	}
+	if v.ShortUsed == nil {
+		return v.Projected
+	}
+	return nil
+}
+
+// paced reports a subscription pool on pace to use up its longest window by
+// that window's reset (credit pacing, decision/2026-11-04/pool-order-owner):
+// that quota will be spent anyway, so a credit pool with a balance takes the
+// work first. Free seats, credit pools and pools at waste risk are never
+// paced. There is no threshold beyond "used up": 100%.
+func (p PoolPolicy) paced(row CatalogRow, free, risk bool, v PoolView) bool {
+	if free || risk || p.isCredit(row.Pool) || v.Class == "credit" {
+		return false
+	}
+	long := longProjection(v)
+	return long != nil && *long >= 100
 }
 
 // wasteRisk reports whether a paid pool is about to lose quota: its longest
@@ -408,27 +453,19 @@ func (p PoolPolicy) wasteRisk(row CatalogRow, free bool, v PoolView, ok bool) (b
 }
 
 // exhaustReason names why a non-free candidate's pool excludes it, or "".
-// A pool not at waste risk is excluded when its projection — every window's
-// pace, sub-daily included — reaches the exclusion threshold. A waste-risk
-// pool is used up rather than paced: only its windows of a day or more are
-// projected, and a sub-daily window refuses only once exhausted (used at or
-// above 100%).
+// Only a window already used up excludes a pool: a sub-daily window or the
+// blocking share at or above 100%. A pool merely on pace to use up its
+// longest window stays a candidate and ranks behind credit (paced, credit
+// pacing); sub-daily windows never project. A waste-risk pool is also
+// excluded once its longest window projects to the exclusion threshold.
 func (p PoolPolicy) exhaustReason(v PoolView, risk bool) string {
-	if !risk {
-		if v.Projected != nil && *v.Projected >= *p.ExcludeAt {
-			return "projected_exhaust"
-		}
-		return ""
-	}
 	if v.ShortUsed != nil && *v.ShortUsed >= 100 || v.Blocking != nil && *v.Blocking >= 100 {
 		return "window_exhausted"
 	}
-	long := v.LongProjected
-	if long == nil && v.Urgency != nil && v.ResetHours != nil {
-		x := 100 - *v.Urgency**v.ResetHours
-		long = &x
+	if !risk {
+		return ""
 	}
-	if long != nil && *long >= *p.ExcludeAt {
+	if long := longProjection(v); long != nil && *long >= *p.ExcludeAt {
 		return "projected_exhaust"
 	}
 	return ""
@@ -605,14 +642,17 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 // policy, then admitted in order through presence evidence and the existing
 // quota gate. The first admitted rung wins. Every row's outcome is recorded.
 //
-// The tier order is the policy order for every urgency (policy/quota-stop:
-// free first, always). Inside a tier the lowest grade that satisfies the task
+// The tier order is the policy order for every urgency (pool-order.json;
+// panewire owns it, decision/2026-11-04/pool-order-owner): expiring credit,
+// paid pools at waste risk, waste, free, ranked, credit, then pools on pace to
+// use up their longest window when a credit pool with a balance is a
+// candidate. Inside a tier the lowest grade that satisfies the task
 // wins, then the pool with the higher waste urgency — the unused projected
 // share per hour until its longest window's reset; a pool whose reset can be
 // paced always ranks ahead of one whose cannot — then the smaller effort.
 // Sub-daily windows (e.g. 5h) never rank a pool; they gate admission only.
 // A pool whose reset cannot be paced ranks by its projected use at reset. A
-// pool projected to run out before reset is never a candidate.
+// pool with a window already used up is never a candidate.
 func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 	if a.Quota == nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: selection needs the quota catalog")
@@ -846,6 +886,14 @@ func (p *selPlan) markRoleEffort() {
 // percentage when it cannot be paced yet), then smaller effort, catalog
 // score, profile.
 func orderSelCands(pending []*selCand) {
+	// Credit pacing: a pool on pace to use up its longest window ranks behind
+	// credit, but only when a credit pool with a recorded balance is a
+	// candidate; a credit pool with no balance (or none recorded) never takes
+	// work ahead of subscription quota.
+	creditLeft := slices.ContainsFunc(pending, func(c *selCand) bool { return c.creditPool && c.creditLeft })
+	for _, c := range pending {
+		c.behindCredit = creditLeft && c.paced
+	}
 	slices.SortStableFunc(pending, func(x, y *selCand) int {
 		// A credit balance in its final window before expiry ranks first:
 		// whatever is left is lost at expiry.
@@ -860,6 +908,12 @@ func orderSelCands(pending []*selCand) {
 		// order.
 		if x.risk != y.risk {
 			if x.risk {
+				return -1
+			}
+			return 1
+		}
+		if x.behindCredit != y.behindCredit {
+			if y.behindCredit {
 				return -1
 			}
 			return 1
@@ -889,7 +943,7 @@ func orderSelCands(pending []*selCand) {
 				return c
 			}
 		}
-		if c := cmp.Compare(rankBlocking(firstPct(x.projected, x.blocking)), rankBlocking(firstPct(y.projected, y.blocking))); c != 0 {
+		if c := cmp.Compare(rankBlocking(firstPct(x.longProj, x.blocking)), rankBlocking(firstPct(y.longProj, y.blocking))); c != 0 {
 			return c
 		}
 		if x.ignoreGrade {
@@ -978,6 +1032,13 @@ func (p *selPlan) record() map[string]any {
 			row["used_pct"] = *c.blocking
 		}
 		row["waste_risk"] = c.risk
+		if c.longProj != nil {
+			row["long_projected_pct"] = *c.longProj
+		}
+		if c.paced {
+			row["paced"] = true
+			row["behind_credit"] = c.behindCredit
+		}
 		if c.unused != nil {
 			row["unused_at_reset_pct"] = *c.unused
 		}
