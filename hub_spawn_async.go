@@ -115,22 +115,12 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	task, _, err := h.inbox.store.claimSpawn(r.Context(), request, spawn.Job, owner, h.now().UTC())
+	held := map[string]string{"error": "job_already_claimed", "fix": "inspect the existing operation; do not submit a new request while ownership is live"}
 	if errors.Is(err, errSpawnClaimed) && spawn.ParentJob == "" {
-		priorID, priorJob, priorStatus, readErr := h.inbox.store.spawnRoleOwner(r.Context(), spawn.Task, spawn.Role)
-		if readErr == nil && (priorStatus == "succeeded" || priorStatus == "failed") {
-			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-			record, exists, readErr := app.ExistingJob(ctx, priorJob)
-			cancel()
-			state, _ := record["state"].(string)
-			if readErr == nil && exists && (state == "completed" || state == "lost") {
-				if releaseErr := h.inbox.store.releaseCompletedSpawnRole(r.Context(), priorID, spawn.Task, spawn.Role); releaseErr == nil {
-					task, _, err = h.inbox.store.claimSpawn(r.Context(), request, spawn.Job, owner, h.now().UTC())
-				}
-			}
-		}
+		task, held, err = h.reclaimSpawnRole(r.Context(), app, request, spawn, owner)
 	}
 	if errors.Is(err, errSpawnClaimed) {
-		writeJSON(w, 409, map[string]string{"error": "job_already_claimed", "fix": "inspect the existing operation; do not submit a new request while ownership is live"})
+		writeJSON(w, 409, held)
 		return
 	}
 	if err != nil {
