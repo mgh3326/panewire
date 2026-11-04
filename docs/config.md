@@ -1374,9 +1374,17 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 87 | `QUOTA_EXHAUSTED`: every eligible account is measured exhausted and the role escalates to the parent lane. |
 | 88 | `AUTH_UNAVAILABLE`: no usable current account binding on eligible hosts. |
 | 89 | `QUOTA_UNKNOWN`: quota remains unknown after one bounded account refresh. |
-| 90 | `WORKSPACE_TRUST_REQUIRED`: Codex is waiting at its directory trust prompt; initial brief is withheld. |
+| 90 | `WORKSPACE_TRUST_REQUIRED`: Codex is waiting at its directory trust prompt; initial brief is withheld. Or `HOOKS_REVIEW_REQUIRED`: Codex is waiting at its "Hooks need review" screen; initial brief is withheld. |
 | 124 | A time-bounded CLI call reached its context deadline. |
 | 255 | SSH could not reach a remote host (repository check, clone or spawn leg). Never returned for a `via = "hub"` host. |
+
+`HOOKS_REVIEW_REQUIRED` shares status 90 with the trust prompt: both mean Codex is
+waiting for the host owner at a first-run screen and the brief was withheld. Codex shows
+"Hooks need review" at launch when hooks are new or changed. panewire fails at the first
+read of the screen instead of waiting for the footer deadline (rc 70, `Codex model/effort
+footer not proven`). It never accepts, dismisses or answers the screen. Fix: the host
+owner reviews the hooks in Codex on the executing host (the executing `CODEX_HOME`), then
+repeats the same spawn. The hub records the refusal as `spawn_failed:hooks_review`.
 
 Unexpected dependency failures preserve their subprocess exit code. A pane
 success receipt is always authoritative for avoiding a second spawn, even with exit 82.

@@ -458,6 +458,9 @@ func (a *App) start(ctx context.Context, s Spawn, seat Seat, l Launch, pane stri
 			if codexTrustPrompt(screen) {
 				return trustPromptError(s.CWD)
 			}
+			if codexHooksReviewPrompt(screen) {
+				return hooksReviewError()
+			}
 			if !a.Now().Before(deadline) {
 				break
 			}
@@ -659,10 +662,33 @@ func trustPromptError(cwd string) error {
 	return fail(exitTrustPrompt, "WORKSPACE_TRUST_REQUIRED: Codex directory trust prompt for %s; brief withheld; approve only this worktree in the executing CODEX_HOME", cwd)
 }
 
+// codexHooksReviewPrompt reports Codex's startup "Hooks need review" screen,
+// shown before the composer when hooks are new or changed. It matches the title
+// and two of the three choices, which every width renders (a narrow terminal
+// wraps the explanatory line and the third choice, so those are not matched
+// whole). The strings come from codex-rs/tui/src/startup_hooks_review.rs at tag
+// rust-v0.166.0 (selection_view_params) and its rendered snapshots
+// codex-rs/tui/src/snapshots/codex_tui__startup_hooks_review__tests__startup_hooks_review_prompt*.snap
+// (testdata/codex-hooks-review-fixtures.md). panewire only detects the screen;
+// hook trust is the host owner's decision.
+func codexHooksReviewPrompt(screen string) bool {
+	s := strings.ToLower(normalized(screen))
+	return strings.Contains(s, "hooks need review") && strings.Contains(s, "trust all and continue") && strings.Contains(s, "continue without trusting")
+}
+
+func hooksReviewError() error {
+	return fail(exitTrustPrompt, "HOOKS_REVIEW_REQUIRED: Codex is waiting at its Hooks need review screen; brief withheld; the host owner reviews the hooks in Codex on this host (the executing CODEX_HOME), then respawn")
+}
+
 func (a *App) checkTrustPrompt(ctx context.Context, kind, pane, cwd string) error {
 	if kind == "codex" {
-		if screen, e := a.visible(ctx, pane); e == nil && codexTrustPrompt(screen) {
-			return trustPromptError(cwd)
+		if screen, e := a.visible(ctx, pane); e == nil {
+			if codexTrustPrompt(screen) {
+				return trustPromptError(cwd)
+			}
+			if codexHooksReviewPrompt(screen) {
+				return hooksReviewError()
+			}
 		}
 	}
 	return nil
