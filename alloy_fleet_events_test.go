@@ -32,7 +32,8 @@ func fleetEventsBlock(t *testing.T, config string) string {
 }
 
 // The pipeline is identical on both platforms and keeps Loki's label set to
-// host, tool, kind and outcome (plus the source and external labels).
+// host, os_host, tool, kind and outcome (plus the source and external labels).
+// host is the fleet machine id when MACHINE_ID is set.
 func TestAlloyFleetEventsLabelContract(t *testing.T) {
 	linux := fleetEventsBlock(t, "deploy/alloy/config.linux.alloy")
 	if mac := fleetEventsBlock(t, "deploy/alloy/config.mac.alloy"); mac != linux {
@@ -45,6 +46,8 @@ func TestAlloyFleetEventsLabelContract(t *testing.T) {
 		`values = ["filename"]`,
 		"stage.limit {",
 		`format = "RFC3339Nano"`,
+		`os_host = "host"`,
+		`coalesce(sys.env("MACHINE_ID"), `,
 	} {
 		if !strings.Contains(linux, required) {
 			t.Fatalf("fleet events block lacks %s", required)
@@ -60,7 +63,7 @@ func TestAlloyFleetEventsLabelContract(t *testing.T) {
 			names = append(names, strings.TrimSpace(name))
 		}
 	}
-	if strings.Join(names, ",") != "host,tool,kind,outcome" {
+	if strings.Join(names, ",") != "host,os_host,tool,kind,outcome" {
 		t.Fatalf("labels %v: job, reason and detail must stay in the line", names)
 	}
 }
@@ -90,7 +93,8 @@ type alloyFleetRun struct {
 	output  *lockedBuffer
 }
 
-func startAlloyFleetRun(t *testing.T, alloy, configPath, storage, root string) *alloyFleetRun {
+// machineID is the run's MACHINE_ID; empty runs it as a host without one.
+func startAlloyFleetRun(t *testing.T, alloy, configPath, storage, root, machineID string) *alloyFleetRun {
 	t.Helper()
 	// Alloy's cluster node refuses port 0, so reserve a free port first.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -101,7 +105,7 @@ func startAlloyFleetRun(t *testing.T, alloy, configPath, storage, root string) *
 	_ = listener.Close()
 	run := &alloyFleetRun{output: &lockedBuffer{}}
 	run.command = exec.Command(alloy, "run", "--server.http.listen-addr="+listen, "--storage.path="+storage, "--disable-reporting", configPath)
-	run.command.Env = append(os.Environ(), "FLEET_EVENTS_ROOT="+root)
+	run.command.Env = append(os.Environ(), "FLEET_EVENTS_ROOT="+root, "MACHINE_ID="+machineID)
 	run.command.Stdout, run.command.Stderr = run.output, run.output
 	if err := run.command.Start(); err != nil {
 		t.Fatal(err)
@@ -152,7 +156,9 @@ func appendLine(t *testing.T, path, line string) {
 // temporary state home. It checks the labels and timestamp, that a line
 // written before the first start ships, that a line written while alloy was
 // down ships after a restart (positions, not tail-from-end), that nothing
-// ships twice, and that the rotated generation never ships.
+// ships twice, and that the rotated generation never ships. The first run has
+// no MACHINE_ID, so host stays the line's OS hostname; the restart sets one,
+// which replaces host while os_host keeps the OS hostname.
 func TestAlloyFleetEventsPipelineShipsLabelledLines(t *testing.T) {
 	alloy, err := exec.LookPath("alloy")
 	if err != nil {
@@ -174,10 +180,10 @@ func TestAlloyFleetEventsPipelineShipsLabelledLines(t *testing.T) {
 	appendLine(t, events+".1", fleetEventLine("job-rotated", "2026-11-01T00:00:00Z"))
 	appendLine(t, events, fleetEventLine("job-before", "2026-11-01T12:34:56.789Z"))
 
-	first := startAlloyFleetRun(t, alloy, configPath, storage, root)
+	first := startAlloyFleetRun(t, alloy, configPath, storage, root, "")
 	eventually(t, 60*time.Second, "the line written before start", func() bool { return len(first.echoed("job-before")) == 1 })
 	echoed := first.echoed("job-before")[0]
-	for _, want := range []string{`host=\"node-a\"`, `tool=\"runtug\"`, `kind=\"spawn\"`, `outcome=\"refused\"`, `source=\"fleet_events\"`, "entry_timestamp=2026-11-01T12:34:56.789Z"} {
+	for _, want := range []string{`{host=\"node-a\"`, `os_host=\"node-a\"`, `tool=\"runtug\"`, `kind=\"spawn\"`, `outcome=\"refused\"`, `source=\"fleet_events\"`, "entry_timestamp=2026-11-01T12:34:56.789Z"} {
 		if !strings.Contains(echoed, want) {
 			t.Fatalf("echoed entry lacks %s:\n%s", want, echoed)
 		}
@@ -194,8 +200,13 @@ func TestAlloyFleetEventsPipelineShipsLabelledLines(t *testing.T) {
 	_ = first.command.Wait()
 
 	appendLine(t, events, fleetEventLine("job-while-down", "2026-11-01T12:35:00Z"))
-	second := startAlloyFleetRun(t, alloy, configPath, storage, root)
+	second := startAlloyFleetRun(t, alloy, configPath, storage, root, "fleet-a")
 	eventually(t, 60*time.Second, "the line written while alloy was down", func() bool { return len(second.echoed("job-while-down")) == 1 })
+	for _, want := range []string{`{host=\"fleet-a\"`, `os_host=\"node-a\"`} {
+		if echoed := second.echoed("job-while-down")[0]; !strings.Contains(echoed, want) {
+			t.Fatalf("with MACHINE_ID set, the echoed entry lacks %s:\n%s", want, echoed)
+		}
+	}
 	time.Sleep(time.Second)
 	second.stop()
 	if n := len(second.echoed("job-before")); n != 0 {
