@@ -434,11 +434,12 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if s.Workspace == "" {
 		return fail(exitConfig, "WORKSPACE_UNCONFIGURED: set local.workspace on the executing host or pass -w WORKSPACE_ID")
 	}
-	payload, e := a.prepareBrief(s, string(brief))
-	if e != nil {
-		return e
-	}
 	if s.DryRun {
+		seat := a.Policy.Profiles[s.Profile]
+		payload, e := a.prepareBrief(s, seat, Launch{Effort: firstNonempty(s.Effort, seat.Effort)}, string(brief))
+		if e != nil {
+			return e
+		}
 		// The local preview must still refuse what Seat.Check would refuse:
 		// a capability-bound seat on a host that lacks the flag.
 		if seat := a.Policy.Profiles[s.Profile]; seat.Capability != "standard" && !boolean(a.Config.Local, seat.Capability, false) {
@@ -507,6 +508,10 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		s.Sel["requested"] = map[string]any{"grade": grade, "role": s.Role, "t": s.T, "effort": effort}
 	}
 	launch, gate, e := a.admitLaunch(ctx, s, seat, effort, selEffort, grade, builderFamily, autoSel)
+	if e != nil {
+		return e
+	}
+	payload, e := a.prepareBrief(s, seat, launch, string(brief))
 	if e != nil {
 		return e
 	}
