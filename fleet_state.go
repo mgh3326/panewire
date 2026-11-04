@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // Fleet state: every node publishes the state it owns, the hub keeps the
@@ -72,6 +74,8 @@ type FleetStateMessage struct {
 	Quota      *FleetStateQuota     `json:"quota,omitempty"`
 	Load       *FleetStateLoad      `json:"load,omitempty"`
 	Publisher  *FleetStatePublisher `json:"publisher,omitempty"`
+	// Readiness is the host's launch readiness and backoff (hub_readiness.go).
+	Readiness *fleet.ReadinessState `json:"readiness,omitempty"`
 }
 
 // FleetStateQuota is one account's shared reading, in the allowlisted bucket
@@ -264,11 +268,12 @@ func (h *HubServer) stateStore() *fleetStateStore {
 // values, the publisher's measured_at.
 func fleetStateBody(message FleetStateMessage) string {
 	body := struct {
-		MeasuredAt *time.Time           `json:"m,omitempty"`
-		Quota      *FleetStateQuota     `json:"q,omitempty"`
-		Load       *FleetStateLoad      `json:"l,omitempty"`
-		Publisher  *FleetStatePublisher `json:"p,omitempty"`
-	}{Quota: message.Quota, Load: message.Load}
+		MeasuredAt *time.Time            `json:"m,omitempty"`
+		Quota      *FleetStateQuota      `json:"q,omitempty"`
+		Load       *FleetStateLoad       `json:"l,omitempty"`
+		Publisher  *FleetStatePublisher  `json:"p,omitempty"`
+		Readiness  *fleet.ReadinessState `json:"r,omitempty"`
+	}{Quota: message.Quota, Load: message.Load, Readiness: message.Readiness}
 	if message.Kind == fleetStateKindQuota {
 		body.MeasuredAt = &message.MeasuredAt
 	}
@@ -402,6 +407,7 @@ func (h *HubServer) sweepFleetState(now time.Time) {
 	h.mu.Unlock()
 	for _, machine := range machines {
 		h.publishFleetPublisher(machine, now)
+		h.publishFleetReadiness(machine, now)
 	}
 }
 

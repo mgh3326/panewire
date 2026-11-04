@@ -63,6 +63,12 @@ type PlacementPolicy struct {
 	// recent power report (host_signals.go). Set it only after those nodes
 	// report: docs/placement.md, "Laptop power".
 	Laptops []string `json:"laptops,omitempty"`
+	// LaunchFailureThreshold consecutive launch failures of one (machine,
+	// harness kind) exclude that pair for LaunchBackoffMinutes; a success
+	// clears it. 0 means the defaults, 2 failures and 30 minutes
+	// (hub_readiness.go).
+	LaunchFailureThreshold int `json:"launch_failure_threshold,omitempty"`
+	LaunchBackoffMinutes   int `json:"launch_backoff_minutes,omitempty"`
 }
 
 // PlacementMachineSlots caps how many distinct tasks may hold active jobs on
@@ -111,6 +117,7 @@ func (p PlacementPolicy) valid() bool {
 		return false
 	}
 	if !machineIDPattern.MatchString(p.LocalMachine) || p.LocalMachine == hubOperatorMachineID || p.MaxActiveJobs < 1 || p.MaxActiveJobs > 10000 || p.LoadRatio < 0 || p.LoadRatio > 100 ||
+		p.LaunchFailureThreshold < 0 || p.LaunchFailureThreshold > maxPlacementLaunchFailures || p.LaunchBackoffMinutes < 0 || p.LaunchBackoffMinutes > maxPlacementLaunchBackoffMin ||
 		p.SpawnBridgeSeconds < 0 || p.SpawnBridgeSeconds > int(maxPlacementSpawnBridge/time.Second) ||
 		!(p.SwapInHalfMBps >= 0 && p.SwapInHalfMBps <= maxPlacementSwapInHalfMBps) ||
 		!validOptionalMemoryFloat(p.MemoryFreePctMin, 0, 100) || !validOptionalMemoryFloat(p.SwapUsedMBMax, 0, math.Inf(1)) ||

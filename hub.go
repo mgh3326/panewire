@@ -183,6 +183,10 @@ type hubNodeRecord struct {
 	// powerSource and powerAt are the last power report (host_signals.go).
 	powerSource string
 	powerAt     time.Time
+	// readiness is the last readiness report (hub_readiness.go); nil until
+	// the node sends one, which publishes readiness_unknown.
+	readiness   *fleet.Readiness
+	readinessAt time.Time
 }
 
 type hubAgent struct {
@@ -533,6 +537,9 @@ type HubServer struct {
 	// keeps at most one load publication in flight (docs/fleet-state.md).
 	fleetState     *fleetStateStore
 	fleetStateOnce sync.Once
+	// launchBackoffs counts consecutive launch failures per (machine, kind),
+	// guarded by mu (hub_readiness.go).
+	launchBackoffs map[launchKey]*launchBackoff
 	fleetLoadMu    sync.Mutex
 	fleetLoadAt    time.Time // guarded by fleetLoadMu
 	// closeMu serializes Close so concurrent callers cannot race the logFile
@@ -1276,6 +1283,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				record.lastHeartbeat = received
 				record.hostLoad = cloneHubHostLoad(heartbeat.HostLoad)
 				h.observeHostSignalsLocked(record, heartbeat.HostSignals, received)
+				h.observeReadinessLocked(record, heartbeat.Readiness, received)
 				if !equalHubHostMemory(record.hostMemory, heartbeat.HostMemory) {
 					record.hostMemory = cloneHubHostMemory(heartbeat.HostMemory)
 					h.placementCache = placementCache{}
@@ -1286,6 +1294,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 			}
 			h.mu.Unlock()
 			h.publishFleetPublisher(machineID, received)
+			h.publishFleetReadiness(machineID, received)
 			h.observeHeartbeatAlerts(machineID, heartbeat)
 			h.observeActiveJobs(machineID, heartbeat.ActiveJobs, received)
 			if heartbeat.HostLoad != nil {
@@ -1493,6 +1502,7 @@ type hubHeartbeatPayload struct {
 	HostMemory     *HubHostMemory            `json:"host_memory,omitempty"`
 	ActiveJobs     []HubActiveJob            `json:"active_jobs,omitempty"`
 	HostSignals    *HubHostSignals           `json:"host_signals,omitempty"`
+	Readiness      *fleet.Readiness          `json:"readiness,omitempty"`
 	Sessions       *[]HubSession             `json:"sessions,omitempty"`
 	SnapshotStatus string                    `json:"snapshot_status,omitempty"`
 	Truncated      bool                      `json:"truncated,omitempty"`
@@ -1541,7 +1551,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1609,6 +1619,9 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 	// unread. A hub that advertises host_signals reads them leniently.
 	if rawSignals, exists := fields["host_signals"]; exists {
 		heartbeat.HostSignals = decodeHubHostSignals(rawSignals)
+	}
+	if rawReadiness, exists := fields["readiness"]; exists {
+		heartbeat.Readiness = decodeHubReadiness(rawReadiness)
 	}
 	if rawStall, exists := fields["stall_detect"]; exists {
 		var stallFields map[string]json.RawMessage
@@ -1852,9 +1865,11 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 	now := h.now().UTC()
 	var previous *hubAgent
 	var previousSnapshot *hubSessionSnapshotRecord
+	var previousReadiness *fleet.Readiness
+	var previousReadinessAt time.Time
 	h.mu.Lock()
 	if existing := h.nodes[machineID]; existing != nil {
-		previous = existing.agent
+		previous, previousReadiness, previousReadinessAt = existing.agent, existing.readiness, existing.readinessAt
 		previousSnapshot = cloneHubSessionSnapshotRecord(existing.sessionSnapshot)
 	}
 	var capabilities []string
@@ -1872,6 +1887,7 @@ func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAge
 		capabilities: capabilitySet,
 		remoteMeta:   map[string]string{"version": version, "remote_addr": remoteAddr},
 		state:        "connected", stateSince: now, lastHeartbeat: now, agent: agent, activeJobs: make(map[string]HubActiveJob), sessionSnapshot: previousSnapshot,
+		readiness: previousReadiness, readinessAt: previousReadinessAt,
 	}
 	h.placementCache = placementCache{}
 	h.recordUIEventLocked("presence", "connected", machineID, now)
