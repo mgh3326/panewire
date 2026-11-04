@@ -34,31 +34,10 @@ func (a *App) launchArgs(s Seat, l Launch) ([]string, []string, error) {
 		return []string{"--yolo", "-m", m, "-c", "model_reasoning_effort=" + e}, env, nil
 	case "devin":
 		return []string{"--model", m, "--permission-mode", "dangerous", "--respect-workspace-trust", "false"}, env, nil
-	case "grok":
-		return []string{"--always-approve", "-m", m, "--effort", e}, env, nil
-	case "pi":
-		return []string{"--no-mcp", "--model", m + ":" + e}, env, nil
 	case "omp":
 		return []string{"--model", m + ":" + e}, []string{"OMP_SKIP_SETUP=1"}, nil
 	case "cmd":
 		return []string{"-m", m, "--effort", e, "--yolo", "--skip-onboarding", "--no-session"}, env, nil
-	case "kimi":
-		home := os.Getenv("KIMI_CODE_HOME")
-		if home == "" {
-			home = filepath.Join(a.Home, ".kimi-code")
-		}
-		if s.Pin {
-			key := "KIMI_CODE_" + strings.ToUpper(e) + "_HOME"
-			home = os.Getenv(key)
-			if home == "" {
-				home = filepath.Join(a.Home, ".local", "share", "kimi-code-"+e)
-			}
-		}
-		c, err := readThinking(home)
-		if err != nil || c != e {
-			return nil, nil, fail(exitConfig, "Kimi clone must attest thinking effort %s", e)
-		}
-		return []string{"--auto", "-m", m}, []string{"KIMI_CODE_HOME=" + home}, nil
 	case "kiro":
 		return []string{"chat", "--v3", "--trust-all-tools", "--require-mcp-startup", "--model", m, "--effort", e}, env, nil
 	case "opencode":
@@ -105,21 +84,6 @@ func (a *App) routeEnv(s Seat) ([]string, error) {
 		env = append(env, "CLAUDE_CODE_MAX_CONTEXT_TOKENS="+strconv.Itoa(s.ContextTokens))
 	}
 	return env, nil
-}
-func readThinking(home string) (string, error) {
-	b, e := os.ReadFile(filepath.Join(home, "config.toml"))
-	if e != nil {
-		return "", e
-	}
-	var t struct {
-		Thinking struct {
-			Effort string `toml:"effort"`
-		} `toml:"thinking"`
-	}
-	if e = unmarshalTOML(b, &t); e != nil {
-		return "", e
-	}
-	return t.Thinking.Effort, nil
 }
 
 type Agent struct {
@@ -219,51 +183,6 @@ func CmdProof(screen, model, effort, cwd, home, brief string) bool {
 	}
 	return count == 1
 }
-func PiProof(screen, model, effort, cwd, home, brief string) bool {
-	lines := cleanScreen(screen)
-	bottom := -1
-	for i, line := range lines {
-		if regexp.MustCompile(`^(─{3,}|─+ ↓ \d+ more ─+)$`).MatchString(line) {
-			bottom = i
-		}
-	}
-	if bottom < 2 || len(lines)-bottom < 3 || len(lines)-bottom > 4 {
-		return false
-	}
-	top := -1
-	for i := 0; i < bottom; i++ {
-		if strings.HasPrefix(lines[i], "──") {
-			top = i
-		}
-	}
-	if top < 0 || bottom-top < 2 {
-		return false
-	}
-	footer := lines[bottom+1:]
-	paths := []string{cwd}
-	if real, e := filepath.EvalSymlinks(cwd); e == nil {
-		paths = append(paths, real)
-	}
-	for _, p := range slices.Clone(paths) {
-		if p == home {
-			paths = append(paths, "~")
-		} else if strings.HasPrefix(p, home+"/") {
-			paths = append(paths, "~"+p[len(home):])
-		}
-	}
-	cwdOK := false
-	for _, p := range paths {
-		if regexp.MustCompile(`^` + regexp.QuoteMeta(p) + `(?: \([^\r\n]*\))?(?: • [^\r\n]+)?$`).MatchString(footer[0]) {
-			cwdOK = true
-		}
-	}
-	provider, name, ok := strings.Cut(model, "/")
-	if !ok || !cwdOK {
-		return false
-	}
-	pattern := `^(?s).*(?:\d+(?:\.\d+)?%|\?)/\S+(?: \(auto\))?\s+(?:\(` + regexp.QuoteMeta(provider) + `\) )?` + regexp.QuoteMeta(name) + ` • ` + regexp.QuoteMeta(effort) + `$`
-	return regexp.MustCompile(pattern).MatchString(footer[1]) && !strings.Contains(normalized(brief), normalized(strings.Join(footer[:2], "\n")))
-}
 func (a *App) modelProof(ctx context.Context, s Seat, l Launch, cwd, pane, brief string) error {
 	if s.Kind == "omp" {
 		return a.ompProof(ctx, l, cwd, pane, brief, ompLandedProofWait)
@@ -275,9 +194,6 @@ func (a *App) modelProof(ctx context.Context, s Seat, l Launch, cwd, pane, brief
 	ok := true
 	if s.Kind == "cmd" {
 		ok = CmdProof(screen, l.ModelID, l.Effort, cwd, a.Home, brief)
-	}
-	if s.Kind == "pi" {
-		ok = PiProof(screen, l.ModelID, l.Effort, cwd, a.Home, brief)
 	}
 	if !ok {
 		return fail(exitConfig, "%s model/effort not proven by visible session", s.Kind)
@@ -428,7 +344,7 @@ func (a *App) start(ctx context.Context, s Spawn, seat Seat, l Launch, pane stri
 			return fail(exitConfig, "Devin identity not proven")
 		}
 	}
-	if seat.Kind == "pi" || seat.Kind == "cmd" {
+	if seat.Kind == "cmd" {
 		if e := a.modelProof(ctx, seat, l, s.CWD, pane, ""); e != nil {
 			return e
 		}
@@ -531,10 +447,6 @@ func executables(kind string) []string {
 		return []string{"claude", "claude-code"}
 	case "devin":
 		return []string{"devin", "devin-cli"}
-	case "grok":
-		return []string{"grok", "grok-build"}
-	case "kimi":
-		return []string{"kimi-code", "kimi"}
 	case "cmd":
 		return []string{"cmd", "command-code"}
 	case "kiro":

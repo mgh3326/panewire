@@ -115,34 +115,34 @@ func TestPlacementTagFiltering(t *testing.T) {
 
 func TestPlacementCapabilityEligibility(t *testing.T) {
 	a := placementApp(t, &fakePlacementSource{hosts: []HostView{
-		{Name: "no-pi", Connected: true, LoadRatio: ptrF(0.1)},
-		{Name: "has-pi", Connected: true, LoadRatio: ptrF(0.9)},
+		{Name: "no-cmd", Connected: true, LoadRatio: ptrF(0.1)},
+		{Name: "has-cmd", Connected: true, LoadRatio: ptrF(0.9)},
 	}})
 	a.Config.Local = map[string]any{"spawn": false}
-	a.Config.Hosts = map[string]map[string]any{"no-pi": {}, "has-pi": {"pi_anthropic": true}}
-	a.Config.HostOrder = []string{"no-pi", "has-pi"}
-	p, e := a.plan(context.Background(), Spawn{Profile: "pi-sonnet55"}, "", 0)
+	a.Config.Hosts = map[string]map[string]any{"no-cmd": {}, "has-cmd": {"cmd_dsflash41": true}}
+	a.Config.HostOrder = []string{"no-cmd", "has-cmd"}
+	p, e := a.plan(context.Background(), Spawn{Profile: "cmd-dsflash41"}, "", 0)
 	if e != nil {
 		t.Fatal(e)
 	}
-	if got := strings.Join(orderNames(p), ","); got != "has-pi" {
+	if got := strings.Join(orderNames(p), ","); got != "has-cmd" {
 		t.Fatalf("a host without the seat capability can only refuse: %v", got)
 	}
-	var noPi *placeCandidate
+	var noCmd *placeCandidate
 	for i := range p.candidates {
-		if p.candidates[i].name == "no-pi" {
-			noPi = &p.candidates[i]
+		if p.candidates[i].name == "no-cmd" {
+			noCmd = &p.candidates[i]
 		}
 	}
-	if noPi == nil || noPi.outcome != "missing_capability:pi_anthropic" {
-		t.Fatalf("the gap must be recorded on the candidate: %+v", noPi)
+	if noCmd == nil || noCmd.outcome != "missing_capability:cmd_dsflash41" {
+		t.Fatalf("the gap must be recorded on the candidate: %+v", noCmd)
 	}
 	// A standard-capability seat keeps every host eligible.
 	p, e = a.plan(context.Background(), Spawn{Profile: "sonnet"}, "", 0)
 	if e != nil {
 		t.Fatal(e)
 	}
-	if got := strings.Join(orderNames(p), ","); got != "no-pi,has-pi" {
+	if got := strings.Join(orderNames(p), ","); got != "no-cmd,has-cmd" {
 		t.Fatalf("standard seats are unaffected: %v", got)
 	}
 }
@@ -154,7 +154,7 @@ func TestPlacementForcedHostMissingCapabilityRefuses(t *testing.T) {
 	a.Config.Hosts = map[string]map[string]any{"desk-1": {}}
 	a.Config.HostOrder = []string{"desk-1"}
 	s.Host = "desk-1"
-	s.Profile = "pi-sonnet55"
+	s.Profile = "cmd-dsflash41"
 	s.DryRun = true
 	_, _, e := a.place(context.Background(), s, "brief")
 	if code(e) != 70 {

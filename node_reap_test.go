@@ -53,7 +53,7 @@ func TestNodePaneReadComposerAndFocus(t *testing.T) {
 		{name: "unreadable", agent: "claude", screen: nodeReapScreen("❯ "), readErr: errors.New("read failed"), composer: nodeComposerUnknown},
 		{name: "no composer on screen", agent: "claude", screen: "just output\n", composer: nodeComposerUnknown},
 		{name: "codex no prompt", agent: "codex", screen: "just output\n", composer: nodeComposerUnknown},
-		{name: "unknown harness", agent: "grok", screen: nodeReapScreen("❯ "), composer: nodeComposerUnknown},
+		{name: "unknown harness", agent: "mystery", screen: nodeReapScreen("❯ "), composer: nodeComposerUnknown},
 		{name: "no harness", agent: "", screen: nodeReapScreen("❯ "), composer: nodeComposerUnknown},
 	}
 	for _, test := range cases {

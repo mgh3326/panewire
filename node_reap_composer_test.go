@@ -100,7 +100,7 @@ func TestNodeComposerStateIdlePlaceholders(t *testing.T) {
 		{"codex unrecognized", "codex", "  Worked for 7m 22s • 7:33 AM\n\n  ? for shortcuts\n", nodeComposerUnknown},
 		{"devin unrecognized", "devin", " ⏺ ~/work/<repo>\nAsk Devin to build features, fix bugs, or work on your code\n", nodeComposerUnknown},
 		{"placeholder row without a harness", "", nodeTailWith(nodeDevinIdleTail, nodeDevinPlaceholderRow), nodeComposerUnknown},
-		{"placeholder row of an unknown harness", "grok", nodeTailWith(nodeCodexIdleTail, nodeCodexPlaceholderRow), nodeComposerUnknown},
+		{"placeholder row of an unknown harness", "mystery", nodeTailWith(nodeCodexIdleTail, nodeCodexPlaceholderRow), nodeComposerUnknown},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
