@@ -108,9 +108,12 @@ func TestSelectionPolicyScenarios(t *testing.T) {
 		{"claude projected 120% at reset (30% used, quarter of window) → excluded; codex 80% chosen", "B", "T2", "3",
 			with(map[string]pace{"devin": exhausted, "claude": {30, 0.25}, "codex": {40, 0.5}}),
 			"codex-sol@high", "codex", "waste"},
-		{"credit pool readable, every subscription projected ≥100% → credit pool", "B", "T2", "3",
+		{"credit balance recorded, every subscription on pace to use up its week → credit before the paced pools", "B", "T2", "3",
 			with(map[string]pace{"devin": exhausted, "claude": {60, 0.5}, "codex": {70, 0.5}, "anthropic-api": {10, 0.5}}),
 			"pi-sonnet55@high", "anthropic-api", "credit"},
+		{"no credit balance recorded, every subscription on pace to use up its week → the paced pool stays ahead of credit", "B", "T2", "3",
+			with(map[string]pace{"devin": exhausted, "claude": {60, 0.5}, "codex": {70, 0.5}, "anthropic-api": {10, 0.5}}),
+			"sonnet@medium", "claude", "ranked"},
 		{"credit pool readable, claude 16% → waste before credit", "B", "T2", "3",
 			with(map[string]pace{"devin": exhausted, "claude": {8, 0.5}, "anthropic-api": {10, 0.5}}),
 			"sonnet@medium", "claude", "waste"},
@@ -132,7 +135,15 @@ func TestSelectionPolicyScenarios(t *testing.T) {
 			present := []string{"devin", "claude", "codex", "anthropic-api"}
 			a, s, q := selFixture(t, tt.grade, policyCatalog, nil, present)
 			a.Config.Local["pi_anthropic"] = true // the credit seat's capability
-			pools, e := CLIQuota{Runner: &fakeRunner{Do: func(Command) Result { return Result{Out: paceStatus(a.Now(), tt.pools)} }}, Binary: "quota"}.Pools(context.Background())
+			pools, e := CLIQuota{Runner: &fakeRunner{Do: func(c Command) Result {
+				if strings.Join(c.Args, " ") == "manual list" {
+					if !strings.HasPrefix(tt.situation, "credit balance recorded") {
+						return Result{Code: 2, Err: "no manual store"}
+					}
+					return Result{Out: creditStore(a.Now(), "anthropic-api", 20)}
+				}
+				return Result{Out: paceStatus(a.Now(), tt.pools)}
+			}}, Binary: "quota"}.Pools(context.Background())
 			if e != nil {
 				t.Fatal(e)
 			}
@@ -255,8 +266,10 @@ func TestSelectionRecordExplainsChoice(t *testing.T) {
 	if !strings.Contains(rec["rule"].(string), "lowest grade >= B") {
 		t.Fatalf("rule: %v", rec["rule"])
 	}
-	if got := candOutcome(rec, "opus", "high"); got["outcome"] != "dropped:projected_exhaust" || got["projected_pct"] != 120.0 {
-		t.Fatalf("a pool projected past reset must be excluded and say so: %v", got)
+	// Credit pacing: a pool on pace to use up its week is not excluded; it is
+	// marked paced, and with no credit candidate it keeps its tier.
+	if got := candOutcome(rec, "opus", "high"); got["outcome"] != "below_choice" || got["projected_pct"] != 120.0 || got["long_projected_pct"] != 120.0 || got["paced"] != true || got["behind_credit"] != false {
+		t.Fatalf("a pool projected past reset must stay a candidate and say it is paced: %v", got)
 	}
 	if got := candOutcome(rec, "haiku", "low"); got["outcome"] != "dropped:grade_insufficient" || got["account_key"] != "" || got["projected_pct"] != nil {
 		t.Fatalf("a static refusal must not borrow another account's projection: %v", got)
@@ -267,4 +280,16 @@ func TestSelectionRecordExplainsChoice(t *testing.T) {
 	if got := candOutcome(rec, "codex-sol", "high"); got["outcome"] != "below_choice" || got["tier"] != "waste" {
 		t.Fatalf("codex: %v", got)
 	}
+}
+
+// creditStore is a pacelever manual store recording one credit pool with
+// used percent of its balance spent, expiring well past the final window.
+func creditStore(now time.Time, pool string, used float64) string {
+	b, _ := json.Marshal(map[string]any{
+		"schema": "pacelever.manual.v1",
+		"latest": map[string]string{pool + ":credit": "m1"},
+		"history": []map[string]any{{"manual_observation_id": "m1", "event": "set", "pool": pool, "window": "credit", "used_pct": used,
+			"expires_at": now.Add(30 * 24 * time.Hour).Format(time.RFC3339Nano)}},
+	})
+	return string(b)
 }
