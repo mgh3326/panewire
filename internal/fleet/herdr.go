@@ -459,6 +459,15 @@ func executables(kind string) []string {
 	}
 	return []string{kind}
 }
+
+const (
+	defaultBriefSubmitTimeoutMS = 120000
+	defaultBriefSubmitRetryMS   = 15000
+	// briefSubmitReserve leaves the node time to capture the pane and finish
+	// cleanup (10s bound plus the 2s settle) inside its spawn budget.
+	briefSubmitReserve = 20 * time.Second
+)
+
 func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
 	before, e := a.status(ctx, pane)
 	if e != nil {
@@ -483,29 +492,41 @@ func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
 			return e
 		}
 	}
-	for attempt := 0; attempt < 2; attempt++ {
-		residue := false
-		for n := 0; n < 15; n++ {
-			status, e := a.status(ctx, pane)
-			if e != nil {
-				return e
-			}
-			visible, e := a.visible(ctx, pane)
-			if e != nil {
-				return e
-			}
-			// A pasted chip or the brief in the composer is not proof. Require the
-			// cold idle pane to start working, corroborated by no unsubmitted chip.
-			residue = briefInComposer(kind, visible, brief)
-			if !residue && (status == "working" || submittedBrief(kind, visible, brief) && !submittedBrief(kind, initial, brief)) {
-				return nil
-			}
-			if e = a.Sleep(ctx, time.Second); e != nil {
-				return e
-			}
+	timeout, retry := a.briefSubmitWindow()
+	clamped := false
+	// A node runs the spawn under its hub_wait budget. Refuse with 76 and the
+	// capture before that budget expires, or the node reports a bare timeout.
+	if until, ok := ctx.Deadline(); ok {
+		if left := time.Until(until) - briefSubmitReserve; left < timeout {
+			timeout, clamped = max(left, 0), true
+		}
+	}
+	deadline := a.Now().Add(timeout)
+	polls := int(timeout / time.Second)
+	nextReturn := a.Now().Add(retry)
+	residue := false
+	for n := 1; n <= polls && a.Now().Before(deadline); n++ {
+		status, e := a.status(ctx, pane)
+		if e != nil {
+			return e
+		}
+		visible, e := a.visible(ctx, pane)
+		if e != nil {
+			return e
+		}
+		// A pasted chip or the brief in the composer is not proof. Require the
+		// cold idle pane to start working, corroborated by no unsubmitted chip.
+		residue = briefInComposer(kind, visible, brief)
+		if !residue && (status == "working" || submittedBrief(kind, visible, brief) && !submittedBrief(kind, initial, brief)) {
+			return nil
+		}
+		if e = a.Sleep(ctx, time.Second); e != nil {
+			return e
 		}
 		// Retry the submit key, never paste a second copy of an ambiguous payload.
-		if attempt == 0 && (kind != "codex" || residue) {
+		// The cadence is wall-clock: one poll can take seconds on a loaded host.
+		if !a.Now().Before(nextReturn) && n < polls && a.Now().Before(deadline) && submitKeyAllowed(kind, status, residue) {
+			nextReturn = a.Now().Add(retry)
 			scope := "agent"
 			if kind == "cmd" {
 				scope = "pane"
@@ -515,12 +536,45 @@ func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
 			}
 		}
 	}
+	note := ""
+	if residue {
+		note = "; brief still in composer"
+	}
+	if clamped {
+		note += fmt.Sprintf("; window cut to %ds by the node budget, raise hub_wait for this host", int(timeout/time.Second))
+	}
+	if note != "" {
+		return fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn%s", a.herdrSession(), pane, note)
+	}
 	return fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn", a.herdrSession(), pane)
+}
+
+// briefSubmitWindow is how long deliver waits for a turn to start and how often
+// it repeats the submit key. A loaded host starts turns late; see docs/config.md.
+func (a *App) briefSubmitWindow() (timeout, retry time.Duration) {
+	return time.Duration(integer(a.Config.Local, "brief_submit_timeout_ms", defaultBriefSubmitTimeoutMS)) * time.Millisecond,
+		time.Duration(integer(a.Config.Local, "brief_submit_retry_ms", defaultBriefSubmitRetryMS)) * time.Millisecond
+}
+
+// submitKeyAllowed keeps Return away from a pane that could take it as an
+// answer. Return confirms a dialog's default, so only an idle pane gets one;
+// where the composer is readable, it must visibly still hold the brief.
+func submitKeyAllowed(kind, status string, residue bool) bool {
+	if status != "idle" && status != "done" {
+		return false
+	}
+	if kind == "codex" || kind == "claude" {
+		return residue
+	}
+	return true
 }
 
 // A prompt marker alone can be the editor. Require the exact payload followed
 // by an assistant turn; this also proves a brief that finished between reads.
 func submittedBrief(kind, screen, brief string) bool {
+	if kind == "claude" {
+		return claudeSubmittedBrief(cleanScreen(screen), brief)
+	}
 	if kind != "codex" {
 		return false
 	}
@@ -551,6 +605,9 @@ func briefInComposer(kind, screen, brief string) bool {
 	if strings.Contains(screen, "[Pasted text") {
 		return true
 	}
+	if kind == "claude" {
+		return claudeBriefInComposer(cleanScreen(screen), brief)
+	}
 	if kind != "codex" {
 		return false
 	}
@@ -558,6 +615,56 @@ func briefInComposer(kind, screen, brief string) bool {
 	for i := len(lines) - 1; i >= 0; i-- {
 		if strings.HasPrefix(strings.TrimSpace(lines[i]), "› ") {
 			return strings.Contains(compact(strings.Join(lines[i:], "")), compact(brief)) && !submittedBrief(kind, strings.Join(lines[i:], "\n"), brief)
+		}
+	}
+	return false
+}
+
+// claudePromptLines lists the rows carrying Claude Code's prompt marker; the
+// last one is the composer and any earlier one is a submitted turn.
+func claudePromptLines(lines []string) []int {
+	var rows []int
+	for i, line := range lines {
+		if strings.HasPrefix(strings.TrimSpace(line), "❯") {
+			rows = append(rows, i)
+		}
+	}
+	return rows
+}
+
+func claudeRule(line string) bool {
+	line = strings.TrimSpace(line)
+	return line != "" && strings.Trim(line, "─") == ""
+}
+
+// claudeBriefInComposer also accepts a prefix: a loaded pane draws the typed
+// text a piece at a time, and part of the brief is still unsubmitted text.
+func claudeBriefInComposer(lines []string, brief string) bool {
+	rows := claudePromptLines(lines)
+	if len(rows) == 0 {
+		return false
+	}
+	var body []string
+	for _, line := range lines[rows[len(rows)-1]:] {
+		if claudeRule(line) {
+			break
+		}
+		body = append(body, line)
+	}
+	text := compact(strings.TrimPrefix(compact(strings.Join(body, "")), "❯"))
+	return text != "" && strings.HasPrefix(compact(brief), text)
+}
+
+// A turn shows as the brief under a prompt marker above the composer.
+func claudeSubmittedBrief(lines []string, brief string) bool {
+	rows := claudePromptLines(lines)
+	if len(rows) < 2 {
+		return false
+	}
+	composer := rows[len(rows)-1]
+	for _, row := range rows[:len(rows)-1] {
+		if strings.HasPrefix(strings.TrimPrefix(compact(strings.Join(lines[row:composer], "")), "❯"), compact(brief)) {
+			return true
 		}
 	}
 	return false

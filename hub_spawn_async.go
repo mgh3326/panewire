@@ -97,9 +97,14 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if found {
-		result, _ := existing["result"].(map[string]any)
-		retryable, _ := result["spawn_retryable"].(bool)
-		if existing["state"] != "claimed" || !retryable {
+		// hk holds no retry marker (it takes a result only with state=completed),
+		// so the job's newest hub operation says whether cleanup was verified.
+		latest, latestErr := h.inbox.store.latestSpawnForJob(r.Context(), spawn.Job)
+		if latestErr != nil && !errors.Is(latestErr, sql.ErrNoRows) {
+			writeJSON(w, 503, map[string]string{"error": "store_unavailable"})
+			return
+		}
+		if existing["state"] != "claimed" || latestErr != nil || latest.Status != "retryable" {
 			writeJSON(w, 409, map[string]string{"error": "job_already_claimed", "fix": "inspect the existing job; use a new job id for independent work"})
 			return
 		}
@@ -291,7 +296,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		outcome.Role = r.Role
 	}
 	request := task.Request
-	if task.Outcome.Retryable && task.Outcome.Host != "" {
+	if task.Outcome.Retryable && task.Outcome.Host != "" && !spawnRefusalTriesNextHost(task.Outcome.Reason) {
 		request.Args = append([]string(nil), request.Args...)
 		for i := 0; i+1 < len(request.Args); i++ {
 			if request.Args[i] == "--host" {
@@ -335,6 +340,12 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		h.recordSpawnTrace(task, outcome)
 	}
 }
+func firstNonEmptyString(value, fallback string) string {
+	if value != "" {
+		return value
+	}
+	return fallback
+}
 func spawnTaskHost(task hubSpawnTask) string {
 	if task.Node != nil {
 		return task.Node.Machine
@@ -367,7 +378,16 @@ type directSpawnTransport struct {
 	h       *HubServer
 	task    hubSpawnTask
 	bound   bool
+	placing bool // inside the candidate loop, which can try another host
 	started time.Time
+}
+
+// spawnRefusalTriesNextHost names a node refusal that says only that this node
+// cannot run the request. The node answers it before any checkout or engine
+// call, and the hub cannot see a node's spawn.json to rule the node out first.
+func spawnRefusalTriesNextHost(reason string) bool {
+	code, _, _ := strings.Cut(reason, ": ")
+	return code == "cwd_unmapped"
 }
 
 func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequest) (fleet.HubSpawnReply, error) {
@@ -404,7 +424,23 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 		return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
 	}
 	t.task = task
+	t.placing = true
 	return t.dispatch(ctx, *task.Node)
+}
+
+// nextHostAfterRefusal hands an auto placement back to its candidate loop. A
+// pinned host is the operator's choice, so its refusal stays the answer.
+func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hubSpawnRequest, result hubSpawnResult) bool {
+	if !t.placing || result.RC == 0 || !spawnRefusalTriesNextHost(result.Error) || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
+		return false
+	}
+	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node.RequestID)
+	if err != nil {
+		return false
+	}
+	t.task, t.bound = task, false
+	t.h.logger.Warn("hub spawn refused by node; trying next candidate", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", hubSpawnArg(node.Args, "-m"), "rc", result.RC, "reason", result.Error)
+	return true
 }
 func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnRequest) (fleet.HubSpawnReply, error) {
 	h := t.h
@@ -441,6 +477,9 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		// exact pane read is additionally required before accepting late success.
 		if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnArg(node.Args, "-L"))) || !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
 			return t.unknown(ctx, "unknown")
+		}
+		if t.nextHostAfterRefusal(ctx, node, result) {
+			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: result.Error}, nil
 		}
 		stage := result.Stage
 		if stage == "" {
@@ -605,13 +644,13 @@ func spawnNotificationType(result hubSpawnOutcome) string {
 
 func spawnNotificationText(job, request string, result hubSpawnOutcome) string {
 	if result.RC == 0 {
-		return fmt.Sprintf("[panewire] SPAWNED %s host=%s pane=%s model=%s", job, result.Host, result.Pane, result.Model)
+		return fmt.Sprintf("[panewire] SPAWNED %s host=%s profile=%s pane=%s model=%s", job, result.Host, result.Profile, result.Pane, result.Model)
 	}
 	fix := result.Fix
 	if fix == "" {
 		fix = "Inspect the saved operation and executing node before retrying; preserve unknown ownership."
 	}
-	text := fmt.Sprintf("[panewire] SPAWN_FAILED %s request=%s rc=%d stage=%s reason=%s fix=%s", job, request, result.RC, result.Stage, spawnRefusalLine(result.Reason), spawnRefusalLine(fix))
+	text := fmt.Sprintf("[panewire] SPAWN_FAILED %s request=%s host=%s profile=%s rc=%d stage=%s reason=%s fix=%s", job, request, firstNonEmptyString(result.Host, "none"), firstNonEmptyString(result.Profile, "none"), result.RC, result.Stage, spawnRefusalLine(result.Reason), spawnRefusalLine(fix))
 	return utf8PrefixWithin(text, laneEventTextLimit)
 }
 

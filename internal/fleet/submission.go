@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -93,14 +94,16 @@ func (a *App) SubmitSpawn(ctx context.Context, s Spawn) error {
 	fmt.Fprintf(a.Out, "ACCEPTED job=%s request=%s\n", accepted.Job, accepted.Request)
 	if wait {
 		waiter, ok := submitter.(interface {
-			WaitSpawn(context.Context, string) error
+			WaitSpawn(context.Context, string) (SpawnAttempt, error)
 		})
 		if !ok {
 			return fail(exitConfig, "hub transport cannot wait for spawn status; upgrade the configured transport")
 		}
-		if err = waiter.WaitSpawn(ctx, accepted.Request); err != nil {
+		attempt, err := waiter.WaitSpawn(ctx, accepted.Request)
+		if err != nil {
 			return err
 		}
+		attempt.print(a.Out, accepted.Job)
 		s.Wait = true
 		return a.waitJob(ctx, s, true)
 	}
@@ -275,37 +278,71 @@ func (a *App) stage(name string, started time.Time) {
 	}
 }
 
+// spawnStatusFailureLimit bounds how many status reads in a row may fail before
+// WaitSpawn gives up; the operation keeps running on the hub meanwhile.
+const spawnStatusFailureLimit = 15
+
+// SpawnAttempt names where the hub actually ran an operation. The submitter
+// only chose "auto", and its own dry-run can differ from the hub's placement.
+type SpawnAttempt struct {
+	Host    string `json:"host"`
+	Profile string `json:"profile"`
+	Pane    string `json:"pane"`
+}
+
+func (s SpawnAttempt) String() string {
+	return "host=" + firstNonempty(s.Host, "none") + " profile=" + firstNonempty(s.Profile, "none")
+}
+
+func (s SpawnAttempt) print(out io.Writer, job string) {
+	fmt.Fprintf(out, "SPAWNED job=%s %s pane=%s\n", job, s, firstNonempty(s.Pane, "none"))
+}
+
 // WaitSpawn observes durable spawn state before the existing --wait completion
 // path. Admission/node refusal codes remain visible to synchronous callers.
-func (c *hubHTTP) WaitSpawn(ctx context.Context, id string) error {
+func (c *hubHTTP) WaitSpawn(ctx context.Context, id string) (SpawnAttempt, error) {
+	poll := c.statusPoll
+	if poll == 0 {
+		poll = 2 * time.Second
+	}
+	failures := 0
 	for {
 		status, raw, err := c.do(ctx, http.MethodGet, "/v1/spawns/"+id, nil, 5*time.Second)
-		if err != nil {
-			return fail(exitStateConflict, "spawn status unavailable; inspect operation %s and retry its saved request without choosing a new host", id)
+		if err != nil || status >= http.StatusInternalServerError {
+			if failures++; failures > spawnStatusFailureLimit {
+				return SpawnAttempt{}, fail(exitStateConflict, "spawn status unavailable; inspect operation %s and retry its saved request without choosing a new host", id)
+			}
+			if err = sleepContext(ctx, poll); err != nil {
+				return SpawnAttempt{}, err
+			}
+			continue
 		}
+		failures = 0
 		var result struct {
 			Status string `json:"status"`
 			Result struct {
+				SpawnAttempt
 				RC     int    `json:"rc"`
 				Reason string `json:"reason"`
 			} `json:"result"`
 		}
 		if status != 200 || json.Unmarshal(raw, &result) != nil {
-			return fail(exitStateConflict, "spawn status unreadable; inspect operation %s", id)
+			return SpawnAttempt{}, fail(exitStateConflict, "spawn status unreadable; inspect operation %s", id)
 		}
+		attempt := result.Result.SpawnAttempt
 		switch result.Status {
 		case "succeeded":
-			return nil
+			return attempt, nil
 		case "failed", "retryable":
-			return fail(result.Result.RC, "spawn refused: %s (operation %s)", result.Result.Reason, id)
+			return attempt, fail(result.Result.RC, "spawn refused %s: %s (operation %s)", attempt, result.Result.Reason, id)
 		case "reconciling", "deadline_exceeded":
-			return fail(exitStateConflict, "spawn ownership is unresolved; inspect operation %s and its executing node before any retry", id)
+			return attempt, fail(exitStateConflict, "spawn ownership is unresolved %s; inspect operation %s and its executing node before any retry", attempt, id)
 		case "accepted", "dispatching":
 		default:
-			return fail(exitStateConflict, "unknown spawn state; inspect operation %s", id)
+			return attempt, fail(exitStateConflict, "unknown spawn state; inspect operation %s", id)
 		}
-		if err = sleepContext(ctx, 2*time.Second); err != nil {
-			return err
+		if err = sleepContext(ctx, poll); err != nil {
+			return attempt, err
 		}
 	}
 }

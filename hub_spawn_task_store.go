@@ -217,12 +217,32 @@ func scanSpawnTask(row interface{ Scan(...any) error }) (hubSpawnTask, error) {
 	return task, err
 }
 
+// unbindRefusedSpawn returns a bound operation to placement after its node
+// refused it without side effects. A crash after this only places it again.
+func (s *laneInboxStore) unbindRefusedSpawn(parent context.Context, id string, attempt int, nodeID string) (hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET node_id=NULL,node_payload='',status='accepted' WHERE request_id=? AND attempt=? AND node_id=? AND status='dispatching'`), id, attempt, nodeID)
+	if err != nil {
+		return hubSpawnTask{}, err
+	}
+	if n, _ := result.RowsAffected(); n != 1 {
+		return hubSpawnTask{}, errSpawnClaimed
+	}
+	return s.spawnTask(parent, id)
+}
+
 const spawnTaskColumns = `job,owner,payload,status,created_ms,deadline_ms,node_payload,result,attempt`
 
 func (s *laneInboxStore) spawnTask(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()
 	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE request_id=?`), id))
+}
+func (s *laneInboxStore) latestSpawnForJob(parent context.Context, job string) (hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE job=? ORDER BY created_ms DESC,request_id DESC LIMIT 1`), job))
 }
 func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)

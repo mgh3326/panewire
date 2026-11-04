@@ -83,7 +83,7 @@ func TestSpawnReasonCodeReachesStatusAPIAndLane(t *testing.T) {
 			}
 			h.flushSpawnNotifications(t.Context())
 			injected := spawnFailedInjections(destination)
-			want := "[panewire] SPAWN_FAILED test-job request=" + requestID + " rc=70 stage=launch reason=" + reason + " fix=" + spawnReasonFix
+			want := "[panewire] SPAWN_FAILED test-job request=" + requestID + " host=machine-a profile=none rc=70 stage=launch reason=" + reason + " fix=" + spawnReasonFix
 			if len(injected) != 1 || !strings.HasSuffix(injected[0].Text, " :: "+want) {
 				t.Fatalf("lane text: %+v, want %q", injected, want)
 			}

@@ -40,10 +40,10 @@ func TestSpawnEventFailureKeepsCleanupMarkerAndLease(t *testing.T) {
 	if err == nil || !observed || safe {
 		t.Fatalf("failure not marked uncertain: %v %v %v", err, observed, safe)
 	}
-	record := store.record(t, s.Job)
-	result, _ := record["result"].(map[string]any)
-	if record["state"] != "spawned" || result["cleanup_pending"] != true || result["spawn_retryable"] != false {
-		t.Fatalf("missing marker: %+v", record)
+	// hk refuses a result without state=completed, and this fault also blocks the
+	// local event, so ObserveRetryable above is what keeps the hub from a retry.
+	if record := store.record(t, s.Job); record["state"] != "spawned" || record["result"] != nil {
+		t.Fatalf("record: %+v", record)
 	}
 	a.Arbiter.DB = originalDB
 	_, pools := ledgerState(t, a, s.Job)

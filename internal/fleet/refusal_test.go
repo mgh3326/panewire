@@ -154,17 +154,18 @@ func TestSpawnRefusalHintComesFromTheCodeRow(t *testing.T) {
 // These inputs are where the order decides, so each keeps its hint exactly.
 func TestSpawnRefusalPrecedenceKeepsEveryHint(t *testing.T) {
 	const (
-		trustPrompt = "Approve only this worktree in the executing CODEX_HOME, then repeat the same command; the brief was withheld until trust is confirmed."
-		brief       = "Pass -p with a readable nonempty brief file; for presets, save it under jobs/JOB/brief.md or override -p."
-		submit      = "Read the saved jobs/JOB/spawn-failed-screen.txt and fix the harness submission failure; retry the same command after verified cleanup."
-		generic     = "Run panewire preflight --json and repair the failed dependency or configuration named above before repeating the command."
+		trustPrompt  = "Approve only this worktree in the executing CODEX_HOME, then repeat the same command; the brief was withheld until trust is confirmed."
+		brief        = "Pass -p with a readable nonempty brief file; for presets, save it under jobs/JOB/brief.md or override -p."
+		submit       = "Read the saved jobs/JOB/spawn-failure-*.txt capture and fix the harness submission failure; retry the same command after verified cleanup."
+		submitWindow = "Read the saved jobs/JOB/spawn-failure-*.txt capture. If the brief sat in the composer on a loaded host, raise local.brief_submit_timeout_ms there; retry the same command after verified cleanup."
+		generic      = "Run panewire preflight --json and repair the failed dependency or configuration named above before repeating the command."
 	)
 	for _, test := range []struct {
 		err error
 		fix string
 	}{
 		{fail(exitTrustPrompt, "agent not in foreground; brief withheld"), trustPrompt},
-		{fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=s pane=p; no working transition or submitted brief turn"), brief},
+		{fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=s pane=p; no working transition or submitted brief turn"), submitWindow},
 		{fail(exitSubmitUnconfirmed, "agent must be idle before initial brief"), brief},
 		{fail(exitSubmitUnconfirmed, "initial submission unconfirmed"), submit},
 		{fail(exitConfig, "nothing the table names"), generic},

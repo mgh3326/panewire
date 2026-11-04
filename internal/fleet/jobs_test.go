@@ -49,6 +49,10 @@ func (s *fakeJobStore) Put(_ context.Context, jobID string, fields map[string]an
 	if s.putErr != nil {
 		return s.putErr
 	}
+	// handoffkeep's checkJobUpdate: a result needs state=completed.
+	if _, hasResult := fields["result"]; hasResult && fields["state"] != "completed" {
+		return &BackendError{Status: http.StatusBadRequest, Code: "invalid_context"}
+	}
 	rec, ok := s.records[jobID]
 	if !ok {
 		return errJobNotFound

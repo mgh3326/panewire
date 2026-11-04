@@ -25,6 +25,8 @@ spawn = true
 max_load_ratio = 1.5
 max_active = 4
 shell_ready_timeout_ms = 120000
+brief_submit_timeout_ms = 120000
+brief_submit_retry_ms = 15000
 cmd_dsflash41 = false
 clinepass = false
 
@@ -78,6 +80,8 @@ local_delete_at = "drive_confirmed"
 | `heavy_max` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `heavy_load_wait` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `shell_ready_timeout_ms` | `120000` | Startup readiness window, integer 30000–300000. |
+| `brief_submit_timeout_ms` | `120000` | How long a spawn waits for the brief to start a turn before it refuses with 76, integer 30000–600000. Raise it on a host that runs under sustained load. |
+| `brief_submit_retry_ms` | `15000` | How often the submit key repeats during that wait, at least 1000 and below the timeout. It goes only to an idle pane; Claude and Codex panes must also still show the brief in the composer. The brief is never pasted twice. |
 | `cmd_dsflash41` | `false` | Literal capability opt-in required by cmd policy rows. The provisioned cmd account must have no persisted MCP servers. |
 | `clinepass` | `false` | Literal capability opt-in required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). |
 | `tags` | unset | Capability tags offered by this host for job placement (`spawn --tags`). Lowercase tag names. `caps` is an alias; both lists merge. |
@@ -148,7 +152,7 @@ and its error is preserved in the registration warning.
 | `workspace` | target `[local] workspace` | Workspace on this remote host. The caller's `-w` / `--workspace` applies only to local placement. Missing target workspace configuration refuses with `WORKSPACE_UNCONFIGURED` (70). Automatic SSH placement tries the next candidate on this early refusal; forced placement still stops. |
 | `cwd_map` | explicit override | Inline table of local prefix → remote prefix; longest prefix wins. Only needed as an exception: the default remote cwd is `$HOME/work/<repo>` on the target, cloned when missing. For a job run from a linked git worktree the default is `<work root>/<worktree dir>`, where the work root is derived from entries that map a checkout directly under the local work root (else `$HOME/work`). |
 | `cwd_keys` | legacy | Kept for legacy hub configurations; not used. A hub host's cwd key is the canonical repo name. |
-| `hub_wait` | `120` | `via = "hub"` only: seconds (1..300) the hub waits for the node to answer a spawn. A first spawn that clones a large repo may need more. |
+| `hub_wait` | `240` | `via = "hub"` only: seconds (1..300) the hub waits for the node to answer a spawn. It bounds the whole node run, so it must exceed the node's `brief_submit_timeout_ms` plus launch time; a shorter budget cuts the submit window. A first spawn that clones a large repo may need more. |
 | `brief_doc_prefix` | `briefs/` | `via = "hub"` only: handoffkeep key prefix the brief is uploaded under; it must match the node's own `brief_doc_prefix` (ends in `/`). |
 | `tags` | unset | Capability tags offered by this host (`caps` is an alias; both lists merge). A job's required `--tags` must be a subset for the host to be a placement candidate. A capability the host does not declare is unknown and fails closed for this host only: the host is excluded for jobs that need it and stays eligible for every other job. See [Host capabilities and light hosts](#host-capabilities-and-light-hosts). |
 | `roles` | unset (all) | Nonempty list of spawn roles (`worker`, `builder`, `tester`, `reviewer`, `counsel`) this host accepts. Other roles record `role_not_accepted:<role>`. |

@@ -114,6 +114,9 @@ var spawnRefusals = []spawnRefusal{
 	// The real refusal names a path and the word "trust", so the status decides.
 	{rc: exitTrustPrompt, code: "trust_prompt", hint: "Approve only this worktree in the executing CODEX_HOME, then repeat the same command; the brief was withheld until trust is confirmed."},
 	// These name a path or an id, which the broader matches below could hit.
+	// Auto placement exhaustion lists the tried hosts, whose notes can say "brief".
+	{match: "no remote candidate completed", code: "local_disabled", hint: "Read the tried list above: add the repository to that node's spawn.json.cwd_map or repair the named refusal, or enable local.spawn on this host; then replay the saved request."},
+	{match: "no placement candidate accepted", code: "placement", hint: "Read the tried list above; add the repository to that node's spawn.json.cwd_map or repair the named refusal, then replay the saved request."},
 	{match: "symlink path refused", code: "symlink_path", hint: "Replace the named symlink with a real directory or point the executing node's jobs root at a symlink-free path, then replay the request."},
 	{match: "report must be under", code: "report_path", hint: "Pass --report inside this job's own jobs/JOB directory, or its --parent-job directory, then retry."},
 	{match: "cwd is not a directory", code: "cwd_not_directory", hint: "Run panewire preflight --json on the executing node and repair its checkout or spawn.json.cwd_map path, then replay the request."},
@@ -127,8 +130,8 @@ var spawnRefusals = []spawnRefusal{
 	{match: "entries; run herdr workspace list", code: "herdr_workspace_ambiguous", hint: spawnWorkspaceHint},
 	{match: "workspace", code: "workspace_unresolved", hint: spawnWorkspaceHint},
 	// Both exit 76 and say "brief", so the broad row below would misname them.
-	// They keep the hint that row has always given them.
-	{match: "BRIEF_SUBMISSION_UNCONFIRMED", code: "submit_unconfirmed", hint: spawnBriefHint},
+	// An unconfirmed submission is not a bad brief: point at the pane capture.
+	{match: "BRIEF_SUBMISSION_UNCONFIRMED", code: "submit_unconfirmed", hint: "Read the saved jobs/JOB/spawn-failure-*.txt capture. If the brief sat in the composer on a loaded host, raise local.brief_submit_timeout_ms there; retry the same command after verified cleanup."},
 	{match: "agent must be idle before initial brief", code: "submit_unconfirmed", hint: spawnBriefHint},
 	{match: "brief", code: "brief_invalid", hint: spawnBriefHint},
 	{match: "task title", code: "task_title", hint: "Set the task title marker to (grade X, Tn), matching --t, then retry."},
@@ -140,7 +143,7 @@ var spawnRefusals = []spawnRefusal{
 	{match: "alias", code: "host_alias", hint: "Run panewire hosts and use the canonical host key, or fix the aliases list in the hosts config."},
 	{match: "requires PANEWIRE_E6_ARM=", code: "e6_arm_required", hint: "Set the exact PANEWIRE_E6_ARM value named in the refusal only if the operator authorized that rung; otherwise select an admitted rung."},
 	{rc: exitDuplicate, code: "duplicate", hint: "Inspect the existing job with panewire find JOB. Use a new --job only for new work; never override a live duplicate. Failed launches with verified cleanup can retry on the same host."},
-	{rc: exitSubmitUnconfirmed, code: "submit_unconfirmed", hint: "Read the saved jobs/JOB/spawn-failed-screen.txt and fix the harness submission failure; retry the same command after verified cleanup."},
+	{rc: exitSubmitUnconfirmed, code: "submit_unconfirmed", hint: "Read the saved jobs/JOB/spawn-failure-*.txt capture and fix the harness submission failure; retry the same command after verified cleanup."},
 	{rc: exitAuthUnavailable, code: "auth_unavailable", hint: "Sign in to the selected quota account on the executing host and refresh that pool with pacelever refresh POOL, then retry."},
 	{rc: exitQuotaUnknown, code: "quota_unknown", hint: "Run pacelever refresh POOL for the named pool, confirm a fresh quota observation, then retry."},
 	{rc: exitLocalDisabled, code: "local_disabled", hint: "Enable local.spawn in the hosts config or configure an admitted remote host, then retry."},

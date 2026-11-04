@@ -411,6 +411,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if _, ok := a.Policy.Profiles[s.Profile]; !ok {
 		return fail(exitConfig, "missing seat policy for %s", s.Profile)
 	}
+	if s.DryRun && s.Host == "auto" {
+		a.warn("dry-run plans from this host; the hub coordinator places the real spawn from its own host list and may choose another node")
+	}
 	var placementRec map[string]any
 	if s.Host != "local" {
 		handled, rec, e := a.place(ctx, s, string(brief))
