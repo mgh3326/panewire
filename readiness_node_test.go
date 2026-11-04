@@ -420,3 +420,23 @@ func TestReportedDialogExpires(t *testing.T) {
 		t.Fatalf("dialog=%q after stopping at it again", got)
 	}
 }
+
+// A node on defaults still gets the startup guard: the spawn journal is
+// validated, and a retired runtug_path in a present file still refuses.
+func TestSpawnStartupGuardRunsOnDefaults(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	blocked := filepath.Join(t.TempDir(), "state-is-a-file")
+	if err := os.WriteFile(blocked, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{spawnConfigPath: defaultHubSpawnConfigPath(""), spawnConfigDefault: true, spawnJournalDir: filepath.Join(blocked, "spawn")}
+	if err := client.spawnStartupError(); err == nil || !strings.Contains(err.Error(), "spawn journal unavailable") {
+		t.Fatalf("a node on defaults skipped the journal check: %v", err)
+	}
+	client.spawnJournalDir = filepath.Join(t.TempDir(), "spawn")
+	if err := client.spawnStartupError(); err != nil {
+		t.Fatalf("a usable journal refused: %v", err)
+	}
+	client.releaseSpawnJournal()
+}

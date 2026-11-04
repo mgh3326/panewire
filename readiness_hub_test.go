@@ -199,6 +199,24 @@ func TestLaunchBackoffCountsPerKind(t *testing.T) {
 	}
 }
 
+// The two failures must fall inside the backoff window: an old one does not
+// combine with a new one.
+func TestLaunchBackoffFailuresAgeOut(t *testing.T) {
+	hub, server := fsHub(t, "")
+	fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
+	now := time.Date(2026, 11, 4, 12, 0, 0, 0, time.UTC)
+	hub.observeLaunchOutcome("node-a", "opus", 1, "spawn_failed", now)
+	hub.observeLaunchOutcome("node-a", "opus", 1, "spawn_failed", now.Add(31*time.Minute))
+	if got := readinessState(t, hub, "node-a").BackoffUntil; len(got) != 0 {
+		t.Fatalf("a failure 31 minutes old combined with a new one: %v", got)
+	}
+	// The new one starts a fresh window; a second inside it backs off.
+	hub.observeLaunchOutcome("node-a", "opus", 1, "spawn_failed", now.Add(40*time.Minute))
+	if got := readinessState(t, hub, "node-a").BackoffUntil; len(got) != 1 {
+		t.Fatalf("two failures inside the window did not back off: %v", got)
+	}
+}
+
 func TestLaunchBackoffConstantsComeFromPlacementJSON(t *testing.T) {
 	hub, server := fsHub(t, backoffPolicyFile(t, `{"local_machine":"node-a","spill_targets":[],"max_active_jobs":5,"launch_failure_threshold":3,"launch_backoff_minutes":10}`))
 	fsConnectNode(t, hub, server, "node-a", fsNodeAToken)

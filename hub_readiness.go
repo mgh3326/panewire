@@ -55,7 +55,10 @@ type launchKey struct{ machine, kind string }
 
 type launchBackoff struct {
 	failures int
-	until    time.Time
+	// last is the time of the latest failure; a count older than the backoff
+	// window does not carry into a new failure.
+	last  time.Time
+	until time.Time
 }
 
 // decodeHubReadiness reads the heartbeat's readiness object leniently, like
@@ -194,7 +197,11 @@ func (h *HubServer) observeLaunchOutcome(machine, profile string, rc int, reason
 			entry = &launchBackoff{}
 			h.launchBackoffs[key] = entry
 		}
+		if entry.failures > 0 && now.Sub(entry.last) > policy.launchBackoff() {
+			entry.failures = 0
+		}
 		entry.failures++
+		entry.last = now
 		if entry.failures >= policy.launchFailureThreshold() {
 			entry.until = now.Add(policy.launchBackoff())
 			changed = true

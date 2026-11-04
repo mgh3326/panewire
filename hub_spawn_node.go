@@ -114,7 +114,7 @@ func loadHubSpawnConfig(path string) (hubSpawnConfig, error) {
 }
 
 func (client *HubClient) spawnStartupError() error {
-	_, err := loadHubSpawnConfig(client.spawnConfigPath)
+	_, _, err := client.resolveHubSpawnConfig()
 	var configErr *hubSpawnConfigError
 	if errors.As(err, &configErr) && configErr.Rule == "config_json_invalid" && strings.Contains(configErr.Detail, `unknown field "runtug_path"`) {
 		return errors.New("node startup refused: remove retired runtug_path from spawn.json before starting this in-process node; preserve cwd_map, workspace, herdr_session and work_root")
