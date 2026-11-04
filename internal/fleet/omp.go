@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -31,10 +32,21 @@ func ompBunScript(argv []string) bool {
 // mark, the only place its footer shows effort. Other presets are refused.
 var ompEffortGlyphs = map[string]string{"minimal": "○", "low": "◔", "medium": "◑", "high": "◒", "xhigh": "◕", "max": "◉"}
 
+// ompWorkingLead is the first footer segment while omp is working: a braille
+// spinner frame and the elapsed time ("⠸ 16s", "⠙ 1m 4s").
+var ompWorkingLead = regexp.MustCompile(`^[\x{2800}-\x{28FF}] (?:\d+[hms] ?)*\d+[hms]$`)
+
+// ompFooterLead reports whether the first " > " segment is omp's: "π" at rest,
+// the spinner and elapsed time at work. Any other lead is not the footer.
+func ompFooterLead(segment string) bool {
+	return segment == "π" || ompWorkingLead.MatchString(segment)
+}
+
 // OMPFooterProof binds the seat to omp's bottom status row:
 //
 //	π > ◒ Opus 5.5 > 🌳 project/tree > ⑂ branch ▶─1%──…─1M─
 //	π > ◑ Sonnet 5.5 > 📁 ~/work/desk ▶─1%──…─1M─
+//	⠸ 16s > ◉ GPT-6.1 Sol > 🌳 project/tree > ⑂ detached > $0.03 ▶─1%──…─1M─
 //
 // modelName is omp's footer name for the launched model (see ompModelName).
 func OMPFooterProof(screen, modelName, effort, cwd, home, brief string) bool {
@@ -44,7 +56,7 @@ func OMPFooterProof(screen, modelName, effort, cwd, home, brief string) bool {
 	}
 	row := ""
 	for _, line := range cleanScreen(screen) {
-		if strings.HasPrefix(strings.TrimSpace(line), "π > ") {
+		if lead, _, found := strings.Cut(strings.TrimSpace(line), " > "); found && ompFooterLead(lead) {
 			row = line
 		}
 	}
