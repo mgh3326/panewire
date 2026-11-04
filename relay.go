@@ -747,6 +747,7 @@ func relayInjectDirective(kind string, event hubJobEventPayload, route reportRel
 // An unrouted/temporarily disconnected target remains observable to the
 // operator event feed. It is deliberately not reinterpreted as success.
 func (h *HubServer) broadcastRelayUnrouted(event hubJobEventPayload) {
+	h.warnUnroutedRelay(event.OwnerLane, event.EventID)
 	payload, _ := json.Marshal(event)
 	h.broadcast(hubEvent{Kind: "relay.unrouted", Payload: payload, Received: h.now().UTC()})
 }

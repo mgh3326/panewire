@@ -114,7 +114,9 @@ func TestR19dNodeCompactsEscalationAndUsesEventPath(t *testing.T) {
 		t.Fatal(err)
 	}
 	h.handleAgentMessage("synthetic-node", "synthetic-remote", agent, wire)
-	if logs.Len() != 0 {
+	// This hub has no route for the lane, so the unrouted-relay WARN is
+	// expected; the fallback truncation log names the field it cut.
+	if strings.Contains(logs.String(), "field=") {
 		t.Fatalf("node-side compaction unexpectedly required hub fallback: %s", logs.String())
 	}
 }

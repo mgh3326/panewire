@@ -17,6 +17,9 @@ import (
 )
 
 type Spawn struct {
+	// registeredLane is the hub lane row the spawn created for its pane. A
+	// failed spawn that closes the pane removes the row with it.
+	registeredLane                                                                                                                                                                                    *Job
 	CWD, Profile, Prompt, Workspace, Label, T, Job, Owner, Effort, Role, Lane, Parent, Task, ParentJob, Host, Report, ExecutionLane, OperatorRequest, RequestedBy, Purpose, LaneDefer, ReportRelative string
 	OverrideReason, WaitTimeout, Urgency                                                                                                                                                              string
 	Keep, DupOK, Bypass, DryRun, Wait, AllowEscalation                                                                                                                                                bool
@@ -741,6 +744,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			a.warn("lane registration failed (session=%s machine=%s pane=%s): %v", a.herdrSession(), machine, pane, e)
 		} else {
 			laneOK = true
+			s.registeredLane = &Job{HubLane: lane, Machine: machine, Pane: pane, Role: s.Role}
 		}
 	}
 	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
