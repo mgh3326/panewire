@@ -272,7 +272,7 @@ func TestLaneInboxAckStateMigration(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, q := range []string{`DROP INDEX lane_inbox_event_id`, `ALTER TABLE lane_inbox DROP COLUMN event_id`, `ALTER TABLE lane_inbox DROP COLUMN sender`,
+	for _, q := range []string{`DROP TABLE lane_inbox_event_id_backfill`, `DROP INDEX lane_inbox_event_id`, `ALTER TABLE lane_inbox DROP COLUMN event_id`, `ALTER TABLE lane_inbox DROP COLUMN sender`,
 		`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,acked_at) VALUES('old','lane-a','lane.event','inbox','{"job_id":"j","event_id":"old-ev"}',1,5)`} {
 		if _, err := s.db.Exec(q); err != nil {
 			t.Fatal(q, err)
@@ -292,9 +292,9 @@ func TestLaneInboxAckStateMigration(t *testing.T) {
 	}
 }
 
-// A hub that stopped after adding event_id but before filling it leaves rows
-// the next open must still fill.
-func TestLaneInboxAckStateBackfillResumesAfterACrash(t *testing.T) {
+// The backfill commits with its marker: a hub that stopped before the marker
+// was written backfills on the next open, and one that finished never rescans.
+func TestLaneInboxAckStateBackfillIsOnceAndResumable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
 	s, err := openLaneInboxStore(path)
 	if err != nil {
@@ -303,11 +303,23 @@ func TestLaneInboxAckStateBackfillResumesAfterACrash(t *testing.T) {
 	if _, err := s.db.Exec(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at) VALUES('old','lane-a','lane.event','inbox','{"job_id":"j","event_id":"old-ev"}',1),('none','lane-a','lane.event','inbox','{"job_id":"j2"}',1)`); err != nil {
 		t.Fatal(err)
 	}
-	s.db.Close()
-	s, err = openLaneInboxStore(path)
-	if err != nil {
+	reopen := func() {
+		s.db.Close()
+		var err error
+		if s, err = openLaneInboxStore(path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The first open already wrote the marker, so these rows are not rescanned.
+	reopen()
+	if states, err := s.ackStates([]string{"old-ev"}, ""); err != nil || len(states) != 0 {
+		t.Fatalf("finished backfill rescanned the table: %+v %v", states, err)
+	}
+	// Without the marker (a hub stopped before commit) the next open fills them.
+	if _, err := s.db.Exec(`DELETE FROM lane_inbox_event_id_backfill`); err != nil {
 		t.Fatal(err)
 	}
+	reopen()
 	defer s.db.Close()
 	if states, err := s.ackStates([]string{"old-ev"}, ""); err != nil || len(states) != 1 {
 		t.Fatalf("row left unfilled after reopen: %+v %v", states, err)

@@ -311,16 +311,42 @@ func addLaneInboxAckState(ctx context.Context, db *sql.DB) error {
 	if _, err := addLaneInboxColumn(ctx, db, "event_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	// Every open, not only the one that added the column: a hub that stopped
-	// between the ALTER and this UPDATE, or a second hub that saw the column
-	// the first just added, must not leave old rows without their id. Rows
-	// already filled, or whose payload names no id, are not touched.
-	if _, err := db.ExecContext(ctx, `UPDATE lane_inbox SET event_id=json_extract(payload,'$.event_id') WHERE event_id='' AND json_valid(payload) AND json_type(payload,'$.event_id')='text' AND json_extract(payload,'$.event_id')<>''`); err != nil {
+	if err := backfillLaneInboxEventIDs(db); err != nil {
 		return err
 	}
 	var err error
 	_, err = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS lane_inbox_event_id ON lane_inbox(event_id) WHERE event_id<>''`)
 	return err
+}
+
+// backfillLaneInboxEventIDs fills event_id from the payload of rows stored
+// before the column, once per store. The marker row and the UPDATE commit
+// together, so a hub that stops half way (or two that open one file) redoes
+// the backfill rather than skipping it, and a finished one is never rescanned:
+// rows whose payload names no id would otherwise be read again on every start.
+// The marker insert is the transaction's first statement, so it takes the
+// write lock up front. A large store gets the startup timeout, not one call's.
+func backfillLaneInboxEventIDs(db *sql.DB) error {
+	ctx, cancel := context.WithTimeout(context.Background(), laneInboxStartupTimeout)
+	defer cancel()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS lane_inbox_event_id_backfill (singleton INTEGER PRIMARY KEY CHECK(singleton=1))`); err != nil {
+		return err
+	}
+	marked, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO lane_inbox_event_id_backfill(singleton) VALUES(1)`)
+	if err != nil {
+		return err
+	}
+	if n, _ := marked.RowsAffected(); n == 1 {
+		if _, err := tx.ExecContext(ctx, `UPDATE lane_inbox SET event_id=json_extract(payload,'$.event_id') WHERE event_id='' AND json_valid(payload) AND json_type(payload,'$.event_id')='text' AND json_extract(payload,'$.event_id')<>''`); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func addLaneInboxMustAck(ctx context.Context, db *sql.DB) error {
