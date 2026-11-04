@@ -175,6 +175,11 @@ func (h *HubServer) latestInboxDigest(prefix string) (string, error) {
 	return best, nil
 }
 
+// inboxSummaryJoin separates the directive text from its summary line. The node
+// refuses relay.inject text holding \r, \n or NUL (validRelayFinalText) and drops
+// the whole directive, so the separator must stay printable.
+const inboxSummaryJoin = " | "
+
 func (h *HubServer) appendInboxSummary(kind string, e hubJobEventPayload, lane, text string) string {
 	if h.inbox == nil {
 		return text
@@ -192,7 +197,7 @@ func (h *HubServer) appendInboxSummary(kind string, e hubJobEventPayload, lane, 
 		if line == "" {
 			return text
 		}
-		return text + "\n" + line
+		return text + inboxSummaryJoin + line
 	}
 	items, err := h.inbox.store.unsurfacedInbox(lane)
 	if err != nil {
@@ -212,5 +217,5 @@ func (h *HubServer) appendInboxSummary(kind string, e hubJobEventPayload, lane, 
 	if err != nil || line == "" {
 		return text
 	}
-	return text + "\n" + line
+	return text + inboxSummaryJoin + line
 }
