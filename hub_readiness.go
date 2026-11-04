@@ -84,8 +84,10 @@ func decodeHubReadiness(raw json.RawMessage) *fleet.Readiness {
 // numbers, and for panewire itself "dev" or a describe suffix. A token that
 // merely looks like a name (a credential-shaped string) is not a version.
 var (
-	readinessVersionPattern  = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+){1,4}$`)
-	readinessPanewirePattern = regexp.MustCompile(`^(?:dev|v?[0-9]+(?:\.[0-9]+){1,3}(?:-[0-9]+-g[0-9a-f]{7,40})?)$`)
+	readinessVersionPattern = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+){1,4}$`)
+	// readinessPanewirePattern is the forms a build stamps (dist-version.sh:
+	// git describe --always --dirty, a release tag, panewire-rN, dev).
+	readinessPanewirePattern = regexp.MustCompile(`^(?:dev|panewire-r[0-9]+|v?[0-9]+(?:\.[0-9]+){1,3}|[0-9a-f]{7,40})(?:-[0-9]+-g[0-9a-f]{7,40})?(?:-dirty)?$`)
 )
 
 func readinessVersionOK(s string) bool {

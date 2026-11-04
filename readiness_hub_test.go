@@ -51,6 +51,25 @@ func TestReadinessHeartbeatDecode(t *testing.T) {
 	}
 }
 
+// The version forms a build stamps survive the hub; they come from
+// dist-version.sh and cli.go's injected version.
+func TestReadinessKeepsBuildVersionForms(t *testing.T) {
+	for _, version := range []string{"dev", "6a44c39", "6a44c39-dirty", "v1.2.3", "v1.2.3-4-gabc1234-dirty", "panewire-r10", "panewire-r10-3-gabc1234"} {
+		report := hubReadinessReport()
+		report.PanewireVersion = version
+		if got := sanitizeReadiness(report).PanewireVersion; got != version {
+			t.Errorf("version %q became %q", version, got)
+		}
+	}
+	for _, version := range []string{"sk-secret", "token=abc", "/usr/bin/panewire", "ghp_0123456789abcdef", "v1"} {
+		report := hubReadinessReport()
+		report.PanewireVersion = version
+		if got := sanitizeReadiness(report).PanewireVersion; got != "" {
+			t.Errorf("version %q survived as %q", version, got)
+		}
+	}
+}
+
 // Free text cannot reach the fleet state: only the closed vocabulary survives.
 func TestReadinessSanitizeKeepsOnlyClosedData(t *testing.T) {
 	report := hubReadinessReport()
