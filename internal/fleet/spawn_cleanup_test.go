@@ -128,3 +128,56 @@ func TestFailedSpawnCleanupRefusalLeavesReceipt(t *testing.T) {
 		})
 	}
 }
+
+// A failed spawn that closes its pane takes the lane row it registered with it
+// (hk 2887); a pane it keeps keeps its row, because the row still routes.
+func TestFailedSpawnCleanupRemovesTheRegisteredLaneOnlyWhenThePaneCloses(t *testing.T) {
+	seq := int64(1)
+	for _, test := range []struct {
+		name       string
+		status     string
+		laneKnown  bool
+		wantClosed bool
+		wantLaneRM bool
+	}{
+		{"closed with lane", "idle", true, true, true},
+		{"closed without lane", "idle", false, true, false},
+		{"kept with lane", "working", true, false, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			a := testApp(t)
+			agent := Agent{Pane: "pane-1", Name: "job", Kind: "codex", CWD: "/work/project", Status: test.status, StateChangeSeq: &seq}
+			var laneRemoval string
+			closed := false
+			a.Runner = &fakeRunner{Do: func(c Command) Result {
+				switch args := strings.Join(c.Args, " "); {
+				case args == "agent list":
+					raw, _ := json.Marshal(map[string]any{"agents": []Agent{agent}})
+					return Result{Out: string(raw)}
+				case args == "pane close pane-1":
+					closed = true
+				case strings.HasPrefix(args, "lanes rm "):
+					laneRemoval = args
+				}
+				return Result{}
+			}}
+			s := Spawn{Job: "job-a", Label: "job", CWD: "/work/project"}
+			if test.laneKnown {
+				s.registeredLane = &Job{HubLane: "job", Machine: "host-a", Pane: "pane-1", Role: "worker"}
+			}
+			err := a.closeFailedSpawn(t.Context(), s, "pane-1", "codex")
+			if closed != test.wantClosed || (err == nil) != test.wantClosed {
+				t.Fatalf("closed=%v err=%v", closed, err)
+			}
+			if test.wantLaneRM {
+				for _, want := range []string{"lanes rm job", "--expect-machine host-a", "--expect-pane pane-1"} {
+					if !strings.Contains(laneRemoval, want) {
+						t.Fatalf("lane removal %q lacks %q", laneRemoval, want)
+					}
+				}
+			} else if laneRemoval != "" {
+				t.Fatalf("unexpected lane removal %q", laneRemoval)
+			}
+		})
+	}
+}

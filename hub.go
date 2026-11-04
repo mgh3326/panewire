@@ -440,6 +440,9 @@ type HubServer struct {
 	r19a                             r19aHubState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int
+	laneLife                         laneLiveness
+	laneReleaseGrace                 time.Duration
+	laneReleaseInterval              time.Duration
 	lanesWriteOps                    lanesWriteOps
 	controlReadiness                 func(controlPlaneTransferRequest, map[string]reportRelayRoute) []controlPlaneReadinessCheck
 	controlPlaneLanesPath            string
@@ -2299,6 +2302,7 @@ func (h *HubServer) RunMaintenance(ctx context.Context) {
 	// network call.
 	go h.runChatDispatcher(ctx)
 	go h.runInbox(ctx)
+	go h.runLaneRelease(ctx.Done())
 	h.startSpawnCoordinator(ctx)
 	// Startup replay runs once, before the first keepalive tick: whatever
 	// Postgres still holds as undelivered predates this process.
