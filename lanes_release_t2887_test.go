@@ -395,3 +395,38 @@ func TestLaneReleaseUnroutedRelayWarnsOncePerIntervalPerLane(t *testing.T) {
 		t.Fatalf("after the interval want a third warning for evt-4 reporting suppressed=2, got:\n%s", strings.Join(got, "\n"))
 	}
 }
+
+// A row that is deleted and written again with the same pane is a new row: it
+// must not inherit the absence the old one had already accumulated.
+func TestLaneReleaseRecreatedRowDoesNotInheritTheOldAbsence(t *testing.T) {
+	for _, how := range []string{"delete then put", "put over the row"} {
+		t.Run(how, func(t *testing.T) {
+			hub, clock, path, _ := laneReleaseHub(t, `{"lanes":{"respawned":{"machine":"machine-a","pane":"w1:p1"}}}`, nil)
+			sweep := func(advance time.Duration) []string {
+				clock.at = clock.at.Add(advance)
+				laneReleaseNode(hub, "machine-a", clock.at)
+				return hub.releaseDeadLanes()
+			}
+			sweep(0) // the absence clock starts
+			clock.at = clock.at.Add(laneReleaseGrace - time.Second)
+			if how == "delete then put" {
+				if writer := lanesNodeDelete(t, hub, "respawned"); writer.Code != http.StatusOK {
+					t.Fatalf("delete status=%d body=%s", writer.Code, writer.Body.String())
+				}
+			}
+			if writer := lanesNodePut(t, hub, "respawned", `{"machine":"machine-a","pane":"w1:p1"}`); writer.Code != http.StatusCreated && writer.Code != http.StatusOK {
+				t.Fatalf("put status=%d body=%s", writer.Code, writer.Body.String())
+			}
+			// Past the old grace and the write settle, the new row is still young.
+			if got := sweep(laneWriteSettle + 2*time.Second); got != nil {
+				t.Fatalf("recreated row released on the old row's clock: %v", got)
+			}
+			if got := sweep(laneReleaseGrace); !reflect.DeepEqual(got, []string{"respawned"}) {
+				t.Fatalf("released %v after the new row's own grace, want [respawned]", got)
+			}
+			if len(laneReleaseLanes(t, path)) != 0 {
+				t.Fatalf("lanes file still has %v", laneReleaseLanes(t, path))
+			}
+		})
+	}
+}

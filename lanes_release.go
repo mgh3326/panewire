@@ -55,6 +55,9 @@ type unroutedWarnState struct {
 	suppressed int
 }
 
+// noteWrite records a hub write of lane and drops its absence timers: a row
+// that is written, or deleted and written again, starts a new life and must not
+// inherit the absence of the row it replaced.
 func (l *laneLiveness) noteWrite(lane string, at time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -62,12 +65,22 @@ func (l *laneLiveness) noteWrite(lane string, at time.Time) {
 		l.wrote = make(map[string]time.Time)
 	}
 	l.wrote[lane] = at
+	l.dropAbsenceLocked(lane)
 }
 
 func (l *laneLiveness) forget(lane string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.wrote, lane)
+	l.dropAbsenceLocked(lane)
+}
+
+func (l *laneLiveness) dropAbsenceLocked(lane string) {
+	for key := range l.absent {
+		if key.lane == lane {
+			delete(l.absent, key)
+		}
+	}
 }
 
 func (l *laneLiveness) lastWrite(lane string) (time.Time, bool) {
