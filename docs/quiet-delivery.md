@@ -286,7 +286,8 @@ The normal relay persistence/retry requirements still apply during an hk outage.
 
 ## Inbox commands and API
 
-Set `PANEWIRE_HUB_URL`, `PANEWIRE_HUB_TOKEN_ENV` (path to the existing private
+By default, inbox commands use the local node daemon and its hub connection.
+For direct access, set `PANEWIRE_HUB_URL`, `PANEWIRE_HUB_TOKEN_ENV` (path to the existing private
 `HUB_MACHINE_ID`/`HUB_TOKEN` env file), optional `PANEWIRE_HUB_CF_ENV`, and
 `PANEWIRE_LANE`, or pass the corresponding flags shown by `panewire inbox --help`.
 Use the same approved hub origin as other operator commands.
