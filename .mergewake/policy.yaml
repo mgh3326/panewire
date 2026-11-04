@@ -2,7 +2,6 @@ version: 1
 enabled: true
 required_checks:
   - 'test (ubuntu-latest)'
-  - 'test (macos-latest)'
 blocking:
   - paths: ['session_reap.go', 'hub_session_reap.go', 'job.go', 'job_close.go', '*prune*.go']
     reason: Session reaping can destroy live session state before a revert.

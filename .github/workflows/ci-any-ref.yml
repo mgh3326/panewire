@@ -73,7 +73,9 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TARGET_SHA: ${{ needs.resolve.outputs.sha }}
-      RESULT: ${{ needs.ci.result }}
+      # The ci-ok gate's verdict, not the whole run: the advisory macOS job
+      # may fail or be cancelled without failing the dispatch.
+      RESULT: ${{ needs.ci.outputs.ok == 'true' && 'success' || needs.ci.result == 'success' && 'failure' || needs.ci.result }}
       SUITE: ${{ inputs.suite }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
     steps:

@@ -507,8 +507,14 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 	if seat, ok := a.Policy.Profiles[s.Profile]; ok && seat.Capability != "standard" {
 		needCap = seat.Capability
 	}
+	// A host the readiness filter dropped for this harness is not a fallback
+	// either: selection chose among ready pairs, and placement must not walk
+	// past it to one that is not.
+	view := a.newReadinessView(ctx, s.CWD)
+	kind := a.Policy.Profiles[s.Profile].Kind
 	for i := range enum {
 		c := &enum[i]
+		notReady := view.drop(c.name, c.cfg, kind)
 		if c.excluded == "" && s.AccountKey != "" && hostAccount(presence, pool, firstNonempty(str(c.cfg, "presence_id"), c.name), now, presTTL) != s.AccountKey {
 			c.excluded = "different_account"
 		}
@@ -531,6 +537,8 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 			c.outcome = "missing_capability:" + c.missingCap
 		case c.roleRefusal != "":
 			c.outcome = c.roleRefusal
+		case notReady != "":
+			c.outcome = notReady
 		case !c.eligible:
 			c.outcome = "missing_tags:" + strings.Join(c.missing, ",")
 		case c.awake:

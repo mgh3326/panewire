@@ -25,6 +25,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // HubDial and HubWait make retry behavior deterministic in fixture tests. The
@@ -198,9 +199,17 @@ type HubClient struct {
 	// signalsPeer is the current connection, whose hub decides on host_signals.
 	signalsPeer          atomic.Pointer[hubClientConnection]
 	hostSignalsCollector func(context.Context) *HubHostSignals // fixture seam; nil collects
-	loadErrorWarned      atomic.Bool
-	stallBeatMu          sync.Mutex
-	stallBeat            func() *hubStallBeatPayload
+	// readiness caches the node's readiness report (readiness_node.go);
+	// readinessCollector and readinessDeps are fixture seams.
+	readiness          nodeReadinessState
+	readinessCollector func(context.Context) *fleet.Readiness
+	readinessDeps      nodeReadinessDeps
+	// spawnConfigDefault is set when no spawn.json path was configured, so a
+	// missing file at the default path means "run on defaults".
+	spawnConfigDefault bool
+	loadErrorWarned    atomic.Bool
+	stallBeatMu        sync.Mutex
+	stallBeat          func() *hubStallBeatPayload
 }
 
 // NewHubClient validates the public base URL and all local inputs without
@@ -319,7 +328,7 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		config.helloAckTimeout = defaultHubHelloAckTimeout
 	}
 	return &HubClient{
-		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnJournalDir: config.SpawnJournalDir, spawnTimeoutExtra: 0,
+		endpoint: endpoints[0], endpoints: endpoints, machineID: config.MachineID, token: config.Token, cfAccessClientID: config.CFAccessClientID, cfAccessSecret: config.CFAccessClientSecret, accepting: config.Accepting, jobsInboxRoot: config.JobsInboxRoot, spawnConfigPath: defaultHubSpawnConfigPath(config.SpawnConfigPath), spawnConfigDefault: config.SpawnConfigPath == "", spawnJournalDir: config.SpawnJournalDir, spawnTimeoutExtra: 0,
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, helloAckTimeout: config.helloAckTimeout, burstSeen: make(map[string]time.Time),
 		wakeTargets: wakeTargets, wakeSeen: make(map[string]time.Time),
@@ -538,8 +547,10 @@ type hubClientConnection struct {
 	// lives on the connection so a late reader of an old one cannot set it for
 	// the next, which may reach an older hub.
 	acceptsSignals atomic.Bool
-	connection     *websocket.Conn
-	writeMu        sync.Mutex
+	// acceptsReadiness is the same for hubFeatureReadiness (readiness_node.go).
+	acceptsReadiness atomic.Bool
+	connection       *websocket.Conn
+	writeMu          sync.Mutex
 }
 
 type hubOutboundMessage struct {
@@ -739,7 +750,7 @@ const devinComposerQueueHint = "Press Enter to send queued messages now"
 // Only claude and devin draw a composer between two dividers; codex draws
 // none and its placeholder is plain text, so its composer is never located.
 func relayComposer(harness, screen string) (string, bool) {
-	isDivider, glyph := isDividerLine, "❯"
+	isDivider, glyph := isClaudeDividerLine, "❯"
 	switch {
 	case strings.EqualFold(harness, "claude"):
 	case strings.EqualFold(harness, "devin"):
@@ -1606,6 +1617,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				}
 			case "hub.features":
 				peer.acceptsSignals.Store(slices.Contains(message.Features, hubFeatureHostSignals))
+				peer.acceptsReadiness.Store(slices.Contains(message.Features, hubFeatureReadiness))
 				continue
 			case "burst.holds":
 				client.burstMu.Lock()
@@ -1834,7 +1846,7 @@ func (client *HubClient) heartbeatEvent(ctx context.Context) hubClientEvent {
 	case collectSessions != nil:
 		client.resetIdleClock()
 	}
-	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HostSignals: client.hostSignalsForHeartbeat(ctx)}
+	heartbeat := hubHeartbeatPayload{Status: "alive", Checks: runHubChecks(ctx, client.checks, client.execute), ActiveJobs: active, HostSignals: client.hostSignalsForHeartbeat(ctx), Readiness: client.readinessForHeartbeat(ctx)}
 	if provider := client.stallBeatProvider(); provider != nil {
 		if beat := provider(); beat != nil {
 			heartbeat.StallDetect = beat

@@ -63,6 +63,12 @@ func (sp *selPresence) bindings(seat *Seat, pool string) []accountBinding {
 		}
 		bindings[i].holders = append(bindings[i].holders, h)
 		if sp.hostEligible(h, seat) {
+			// The readiness filter drops the pair before ranking: the host
+			// stays a holder (it can still measure the account) but is not
+			// offered this seat.
+			if code := sp.readinessDrop(h, seat); code != "" {
+				continue
+			}
 			bindings[i].hosts = append(bindings[i].hosts, h)
 		}
 	}
