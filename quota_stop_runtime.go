@@ -249,6 +249,12 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	if !taskOK || waitErr != nil {
 		decision, reason = "handover", "task_unavailable"
 	}
+	// herdr refuses agent.prompt on a blocked pane (agent_blocked) and sends
+	// nothing, so a blocked wake can only be observed and handed over; a
+	// resume would always fail and spend the pane's one wait (hk 2850).
+	if c.Status == "blocked" && decision == "wait" {
+		decision, reason = "handover", "blocked_dialog"
+	}
 	reset := "unknown"
 	due := int64(0)
 	if !stop.Reset.IsZero() {
@@ -364,6 +370,17 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			q.failResume(ctx, r.id, "submission_unproven")
 			continue
 		}
+		// A pane that is blocked now is never resumed, and its screen is not read: herdr would refuse the
+		// prompt, and the refusal would spend the one wait. Hand it over
+		// without marking an attempt.
+		var status string
+		q.store.mu.Lock()
+		_ = q.store.db.QueryRowContext(ctx, `SELECT agent_status FROM idle_wake_panes WHERE pane_id=?`, r.pane).Scan(&status)
+		q.store.mu.Unlock()
+		if status == "blocked" {
+			q.failResume(ctx, r.id, "blocked_dialog")
+			continue
+		}
 		readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		screen, e := q.read(readCtx, r.pane)
 		cancel()
@@ -377,7 +394,7 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 			continue
 		}
 		q.store.mu.Lock()
-		result, e := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET attempted=1 WHERE event_id=? AND attempted=0 AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.job=? AND d.attempted=1) AND (EXISTS (SELECT 1 FROM idle_wake_candidates c JOIN idle_wake_panes p ON p.pane_id=c.pane_id AND p.state_change_seq=c.state_change_seq WHERE c.event_id=? AND p.agent_status IN ('idle','done')) OR EXISTS (SELECT 1 FROM quota_blocked_wakes b JOIN idle_wake_panes p ON p.pane_id=b.pane_id AND p.state_change_seq=b.state_change_seq WHERE b.event_id=? AND p.agent_status='blocked'))`, r.id, r.job, r.id, r.id)
+		result, e := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET attempted=1 WHERE event_id=? AND attempted=0 AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.job=? AND d.attempted=1) AND EXISTS (SELECT 1 FROM idle_wake_candidates c JOIN idle_wake_panes p ON p.pane_id=c.pane_id AND p.state_change_seq=c.state_change_seq WHERE c.event_id=? AND p.agent_status IN ('idle','done'))`, r.id, r.job, r.id)
 		q.store.mu.Unlock()
 		if e != nil {
 			q.backoffAction(ctx, r.id, now)
