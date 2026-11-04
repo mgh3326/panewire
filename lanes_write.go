@@ -326,7 +326,9 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 	}
 	var projection hubLaneProjection
 	var created bool
+	var evicted []string
 	err := withLanesFileLock(h.reportRelayPath, func() error {
+		evicted = nil
 		if nodeMachine == "" {
 			// The authority decision comes from hub configuration, never from
 			// the lanes file, so it is answered before the source is read.
@@ -398,8 +400,20 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 		// otherwise valid, so the refusal reveals nothing about foreign or
 		// authority names. Updating a row the node already owns is allowed at
 		// the cap — the cap bounds creates, not maintenance of existing rows.
-		if nodeMachine != "" && !exists && countMachineLanes(snapshot.Routes, nodeMachine) >= h.lanesNodeRowCap {
-			return errLaneQuotaExceeded
+		// At the cap the node's own rows whose panes its fresh snapshot no
+		// longer lists are reused first; it is refused only when too few
+		// qualify to bring it back under the cap, and then nothing changes.
+		if nodeMachine != "" && !exists {
+			if over := countMachineLanes(snapshot.Routes, nodeMachine) - h.lanesNodeRowCap + 1; over > 0 {
+				dead := h.evictableLanes(snapshot.Routes, nodeMachine)
+				if len(dead) < over {
+					return errLaneQuotaExceeded
+				}
+				evicted = dead[:over]
+				for _, victim := range evicted {
+					delete(snapshot.Routes, victim)
+				}
+			}
 		}
 		if snapshot.Routes == nil {
 			snapshot.Routes = make(map[string]reportRelayRoute)
@@ -419,11 +433,19 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 			return err
 		}
 		created = !exists
+		h.laneLife.noteWrite(lane, lanesBackupNow(h))
+		for _, victim := range evicted {
+			h.laneLife.forget(victim)
+		}
 		projection = hubLaneProjection{Lane: lane, Machine: route.Machine, Pane: route.Pane, Parent: route.Parent, Sink: route.Sink, Standby: route.Standby}
 		return nil
 	})
 	if err != nil {
 		return hubLaneProjection{}, false, err
+	}
+	for _, victim := range evicted {
+		h.logger.Info("lane released", "lane", victim, "reason", "cap-eviction")
+		h.broadcastLanesChanged(victim, "remove")
 	}
 	h.broadcastLanesChanged(lane, map[bool]string{true: "add", false: "update"}[created])
 	return projection, created, nil
@@ -481,6 +503,7 @@ func (h *HubServer) deleteLane(lane, nodeMachine string) error {
 	if err != nil {
 		return err
 	}
+	h.laneLife.forget(lane)
 	h.broadcastLanesChanged(lane, "remove")
 	return nil
 }

@@ -212,16 +212,8 @@ func (h *HubServer) receiverInboxState(lane string) receiverInboxState {
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	node := h.nodes[route.Machine]
-	if node == nil || node.state != "connected" {
-		return receiverInboxState{}
-	}
-	snap := node.sessionSnapshot
-	if snap == nil || snap.snapshotStatus != hubSnapshotStatusOK || snap.truncated {
-		return receiverInboxState{}
-	}
-	now := h.now()
-	if snap.receivedAt.After(now) || now.Sub(snap.receivedAt) > sessionsFindSnapshotMaxAge {
+	snap := h.freshSessionSnapshotLocked(route.Machine)
+	if snap == nil {
 		return receiverInboxState{}
 	}
 	for _, session := range snap.sessions {
