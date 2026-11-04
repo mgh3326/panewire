@@ -1,0 +1,208 @@
+package panewire
+
+import (
+	"bytes"
+	"encoding/json"
+	"strings"
+	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
+)
+
+// Readiness: a node reports, per harness kind and per repository, whether it
+// can launch work (fleet.Readiness). The hub keeps the last report and
+// publishes it as the `readiness` fleet-state value of the host; placement
+// (the spawn engine) drops a (host, harness) pair that is not ready before it
+// ranks hosts. The hub also owns the launch-failure backoff: it sees every
+// node answer to a spawn, so it counts consecutive failures per (host, kind).
+// docs/placement.md, "Readiness".
+
+const (
+	// hubFeatureReadiness: an older hub rejects a heartbeat with an unknown
+	// field, so a node sends readiness only to a hub that advertised it.
+	hubFeatureReadiness = "readiness"
+
+	fleetStateKindReadiness = "readiness"
+
+	// Defaults of the launch-failure backoff; placement.json overrides them
+	// with launch_failure_threshold and launch_backoff_minutes.
+	placementDefaultLaunchFailures = 2
+	placementDefaultLaunchBackoff  = 30 * time.Minute
+	maxPlacementLaunchFailures     = 100
+	maxPlacementLaunchBackoffMin   = 24 * 60
+
+	// hubReadinessMaxBytes bounds the readiness object a heartbeat carries.
+	hubReadinessMaxBytes = 8 << 10
+)
+
+// launchFailureThreshold is the consecutive failures of one (host, kind) that
+// start the backoff.
+func (p PlacementPolicy) launchFailureThreshold() int {
+	if p.LaunchFailureThreshold > 0 {
+		return p.LaunchFailureThreshold
+	}
+	return placementDefaultLaunchFailures
+}
+
+func (p PlacementPolicy) launchBackoff() time.Duration {
+	if p.LaunchBackoffMinutes > 0 {
+		return time.Duration(p.LaunchBackoffMinutes) * time.Minute
+	}
+	return placementDefaultLaunchBackoff
+}
+
+type launchKey struct{ machine, kind string }
+
+type launchBackoff struct {
+	failures int
+	until    time.Time
+}
+
+// decodeHubReadiness reads the heartbeat's readiness object leniently, like
+// host_signals: a bad or oversized object costs the report, never the node's
+// liveness. Unknown fields are dropped, and the result carries only closed
+// data (names, versions, booleans).
+func decodeHubReadiness(raw json.RawMessage) *fleet.Readiness {
+	if len(raw) == 0 || len(raw) > hubReadinessMaxBytes {
+		return nil
+	}
+	var r fleet.Readiness
+	if json.NewDecoder(bytes.NewReader(raw)).Decode(&r) != nil || r.Harnesses == nil {
+		return nil
+	}
+	return sanitizeReadiness(r)
+}
+
+var readinessTokenOK = func(s string) bool {
+	return s == "" || fleetStateTokenPattern.MatchString(s)
+}
+
+// sanitizeReadiness keeps only values that fit the closed vocabulary, so a
+// node cannot put free text (a path, a screen, a secret) into the fleet state.
+func sanitizeReadiness(in fleet.Readiness) *fleet.Readiness {
+	out := fleet.Readiness{CheckedAt: in.CheckedAt.UTC(), Brief: in.Brief, Harnesses: map[string]fleet.HarnessReadiness{}, Toolchains: map[string]string{}, Repos: []string{}}
+	if readinessTokenOK(in.PanewireVersion) {
+		out.PanewireVersion = in.PanewireVersion
+	}
+	for _, kind := range fleet.ReadinessKinds {
+		h, ok := in.Harnesses[kind]
+		if !ok {
+			continue
+		}
+		clean := fleet.HarnessReadiness{Installed: h.Installed, HerdrIntegration: h.HerdrIntegration, Login: fleet.ReadinessLoginUnknown}
+		if readinessTokenOK(h.Version) {
+			clean.Version = h.Version
+		}
+		switch h.Login {
+		case fleet.ReadinessLoginPresent, fleet.ReadinessLoginMissing:
+			clean.Login = h.Login
+		}
+		if fleetStateAccountKeyPattern.MatchString(h.Account) {
+			clean.Account = h.Account
+		}
+		switch h.Dialog {
+		case "", fleet.DialogCodexHooksReview, fleet.DialogCodexTrust, fleet.DialogOmpSetupWizard, fleet.DialogClaudeTrust:
+			clean.Dialog = h.Dialog
+		}
+		out.Harnesses[kind] = clean
+	}
+	for _, repo := range in.Repos {
+		if hubSpawnCWDKeyPattern.MatchString(repo) && len(out.Repos) < 256 {
+			out.Repos = append(out.Repos, repo)
+		}
+	}
+	for tool, version := range in.Toolchains {
+		if (tool == "go" || tool == "node" || tool == "bun") && readinessTokenOK(version) {
+			out.Toolchains[tool] = version
+		}
+	}
+	switch in.Config.Source {
+	case fleet.ReadinessConfigDefault, fleet.ReadinessConfigFile:
+		out.Config.Source = in.Config.Source
+	}
+	if readinessTokenOK(in.Config.Workspace) {
+		out.Config.Workspace = in.Config.Workspace
+	}
+	if readinessTokenOK(in.Config.HerdrSession) {
+		out.Config.HerdrSession = in.Config.HerdrSession
+	}
+	out.Config.WorkRoot = in.Config.WorkRoot
+	return &out
+}
+
+// observeReadinessLocked records a heartbeat's readiness report. Callers hold
+// h.mu.
+func (h *HubServer) observeReadinessLocked(record *hubNodeRecord, readiness *fleet.Readiness, received time.Time) {
+	if readiness == nil {
+		return
+	}
+	record.readiness, record.readinessAt = readiness, received
+}
+
+// publishFleetReadiness publishes one machine's readiness value: the node's
+// last report (or readiness_unknown when it never sent one) and the hub's
+// launch backoff. An identical value is not republished within the load value's
+// republish bound, which keeps measured_at fresh for consumers.
+func (h *HubServer) publishFleetReadiness(machine string, now time.Time) {
+	h.mu.Lock()
+	record := h.nodes[machine]
+	if record == nil {
+		h.mu.Unlock()
+		return
+	}
+	state := fleet.ReadinessState{Unknown: record.readiness == nil, Readiness: record.readiness}
+	for key, entry := range h.launchBackoffs {
+		if key.machine == machine && now.Before(entry.until) {
+			if state.BackoffUntil == nil {
+				state.BackoffUntil = map[string]time.Time{}
+			}
+			state.BackoffUntil[key.kind] = entry.until.UTC()
+		}
+	}
+	h.mu.Unlock()
+	h.stateStore().publish(FleetStateMessage{Host: machine, Kind: fleetStateKindReadiness, MeasuredAt: now, ReceivedAt: now, Readiness: &state}, fleetStateLoadRepublish)
+}
+
+// observeLaunchOutcome counts one node answer to a spawn against its
+// (machine, kind). The threshold-th consecutive failure excludes the pair for
+// the policy's backoff; a success clears it. A busy checkout is not a launch
+// failure: the engine retries it on the same host.
+func (h *HubServer) observeLaunchOutcome(machine, profile string, rc int, reason string, now time.Time) {
+	kind := fleet.ProfileKind(profile)
+	if kind == "" || machine == "" || reason == "checkout_refused:busy" {
+		return
+	}
+	h.mu.Lock()
+	h.reloadPlacementPolicyLocked()
+	policy := h.placementPolicy
+	if !policy.valid() {
+		policy = DefaultPlacementPolicy()
+	}
+	key := launchKey{machine, kind}
+	changed := false
+	if rc == 0 {
+		if _, had := h.launchBackoffs[key]; had {
+			delete(h.launchBackoffs, key)
+			changed = true
+		}
+	} else {
+		if h.launchBackoffs == nil {
+			h.launchBackoffs = map[launchKey]*launchBackoff{}
+		}
+		entry := h.launchBackoffs[key]
+		if entry == nil {
+			entry = &launchBackoff{}
+			h.launchBackoffs[key] = entry
+		}
+		entry.failures++
+		if entry.failures >= policy.launchFailureThreshold() {
+			entry.until = now.Add(policy.launchBackoff())
+			changed = true
+			h.logger.Warn("launch backoff", "machine", machine, "kind", kind, "failures", entry.failures, "until", entry.until.UTC().Format(time.RFC3339), "reason", strings.ToLower(reason))
+		}
+	}
+	h.mu.Unlock()
+	if changed {
+		h.publishFleetReadiness(machine, now)
+	}
+}

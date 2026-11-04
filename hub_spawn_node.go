@@ -196,6 +196,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	// reason and detail refine result.Error in the node_spawn fleet event.
 	var reason, detail string
 	defer func() {
+		client.noteLaunchResult(message, result)
 		if result.RC != 0 && spawnResultFix(result.StdoutTail) == "" {
 			fix := "Fix: " + nodeSpawnRefusalFix(result.Error, reason)
 			if strings.HasPrefix(result.StdoutTail, "stderr: ") {
@@ -215,7 +216,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.Retryable = true
 		return result
 	}
-	config, err := loadHubSpawnConfig(client.spawnConfigPath)
+	config, defaults, err := client.resolveHubSpawnConfig()
 	if err != nil {
 		result.RC, result.Error = 2, "spawn_disabled"
 		var configErr *hubSpawnConfigError
@@ -227,6 +228,11 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		return result
 	}
 	cwd, found := config.CWDMap[message.CWDKey]
+	if !found && defaults {
+		// A node on defaults has no cwd_map: a repo is the directory of that
+		// name under its work root.
+		cwd, found = defaultRepoDir(config.WorkRoot, message.CWDKey)
+	}
 	if !found {
 		result.RC, result.Error = 2, "cwd_unmapped"
 		return result
