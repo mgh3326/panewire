@@ -297,6 +297,12 @@ func (client *HubClient) nodeWorkRoot() (string, error) {
 		return "", errors.New("work root unset")
 	}
 	info, err := os.Lstat(client.spawnConfigPath)
+	if errors.Is(err, os.ErrNotExist) && client.spawnConfigDefault {
+		// No spawn.json at the default path: the node runs on defaults.
+		if config, defaults, resolveErr := client.resolveHubSpawnConfig(); resolveErr == nil && defaults {
+			return config.WorkRoot, nil
+		}
+	}
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() > 64<<10 {
 		return "", errors.New("work root unset")
 	}

@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"regexp"
 	"slices"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -102,5 +103,95 @@ func TestCIOkRequiresOnlyTheSuitesJobs(t *testing.T) {
 	cmd.Env = append(os.Environ(), "SUITE=all", "TEST_RESULT=success", "POSTGRES_RESULT=skipped", "AUTO_TAG_RESULT=success")
 	if err := cmd.Run(); err == nil {
 		t.Fatal("ci-ok passed a PR whose postgres job was skipped")
+	}
+}
+
+// macOS runs as an advisory job (operator decision 2026-11-05): hosted macOS
+// runners are often not acquired, so neither ci-ok, mergewake's required
+// checks nor the ci-any-ref status may wait on it.
+func TestCIMacOSIsAdvisory(t *testing.T) {
+	raw, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			If              string   `yaml:"if"`
+			Needs           []string `yaml:"needs"`
+			RunsOn          string   `yaml:"runs-on"`
+			ContinueOnError bool     `yaml:"continue-on-error"`
+			Strategy        struct {
+				Matrix struct {
+					OS []string `yaml:"os"`
+				} `yaml:"matrix"`
+			} `yaml:"strategy"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	mac, ok := workflow.Jobs["test-macos"]
+	if !ok || mac.RunsOn != "macos-latest" || !mac.ContinueOnError {
+		t.Fatalf("test-macos must exist on macos-latest with continue-on-error: %+v", mac)
+	}
+	// ci-any-ref passes a ref; its status must not wait on the advisory job.
+	if !strings.HasSuffix(mac.If, "&& !inputs.ref }}") {
+		t.Fatalf("test-macos must not run on ci-any-ref dispatches: if = %q", mac.If)
+	}
+	// Only-cancelled needs skip ci-ok (mergewake: unknown, hold); a failure
+	// still runs the gate (hk 2924).
+	if got := workflow.Jobs["ci-ok"].If; got != "${{ always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}" {
+		t.Fatalf("ci-ok if = %q, want it skipped when needs are only cancelled", got)
+	}
+	if slices.Contains(workflow.Jobs["ci-ok"].Needs, "test-macos") {
+		t.Fatal("ci-ok must not need the advisory test-macos job")
+	}
+	if matrix := workflow.Jobs["test"].Strategy.Matrix.OS; !slices.Equal(matrix, []string{"ubuntu-latest"}) {
+		t.Fatalf("the required test matrix must be ubuntu only, got %v", matrix)
+	}
+
+	rawPolicy, err := os.ReadFile(".mergewake/policy.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy struct {
+		RequiredChecks []string `yaml:"required_checks"`
+	}
+	if err := yaml.Unmarshal(rawPolicy, &policy); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(policy.RequiredChecks, "test (ubuntu-latest)") {
+		t.Fatalf("required_checks lost the Linux test: %v", policy.RequiredChecks)
+	}
+	for _, check := range policy.RequiredChecks {
+		if regexp.MustCompile(`(?i)macos`).MatchString(check) {
+			t.Fatalf("required_checks must not wait on macOS: %v", policy.RequiredChecks)
+		}
+	}
+
+	// The gate output must be a reusable-workflow output (on.workflow_call),
+	// or ci-any-ref reads it empty.
+	var trigger struct {
+		On struct {
+			WorkflowCall struct {
+				Outputs map[string]struct {
+					Value string `yaml:"value"`
+				} `yaml:"outputs"`
+			} `yaml:"workflow_call"`
+		} `yaml:"on"`
+	}
+	if err := yaml.Unmarshal(raw, &trigger); err != nil {
+		t.Fatal(err)
+	}
+	if got := trigger.On.WorkflowCall.Outputs["ok"].Value; got != "${{ jobs.ci-ok.outputs.ok }}" {
+		t.Fatalf("on.workflow_call.outputs.ok = %q, want the ci-ok gate output", got)
+	}
+
+	anyRef, err := os.ReadFile(".github/workflows/ci-any-ref.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`RESULT: \$\{\{ needs\.ci\.outputs\.ok == 'true'`).Match(anyRef) {
+		t.Fatal("ci-any-ref must post its status from the ci-ok gate output, not the whole run")
 	}
 }

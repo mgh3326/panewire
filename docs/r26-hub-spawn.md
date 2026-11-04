@@ -165,8 +165,19 @@ still hub first, then nodes.
   document keys the node may fetch; it defaults to `briefs/`. Nodes advertise
   `spawn_v2` in hello when they support checkout and document briefs. The hub
   refuses those requests to older nodes without waiting for a timeout.
-  `enabled` defaults to false (no file rejects with `spawn_disabled`), and an
-  unmapped `cwd_key` rejects with `cwd_unmapped`. Rejections also reply as
+  A file that exists must have `enabled: true` (`enabled` false rejects with
+  `spawn_disabled`), and an unmapped `cwd_key` rejects with `cwd_unmapped`.
+  **The file is optional at its default path.** A node started without
+  `--spawn-config` and with no `~/.config/panewire/spawn.json` runs on
+  defaults: work root `~/work`, workspace `workers`, herdr session `default`,
+  `handoffkeep_env` `~/.config/handoffkeep/config.env`, and no `cwd_map`. On
+  defaults a `cwd_key` is the directory of that name directly under the work
+  root (a real directory; a symlink is unmapped). A file named explicitly with
+  `--spawn-config` must exist, and a file that exists is never replaced by
+  defaults. The node reports the effective configuration in its
+  [readiness](placement.md#readiness) (`config.source` is `defaults` or
+  `spawn.json`); per-host on/off is the hub's accepting override, not this
+  file. Rejections also reply as
   `job.spawn.result{rc:2, error}`. The optional `handoffkeep_env` path names
   a mode-0600 env file containing this node’s `HANDOFFKEEP_URL` and
   `HANDOFFKEEP_TOKEN`; the node uses it to fetch `brief.doc`. The hub never

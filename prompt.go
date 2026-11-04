@@ -529,7 +529,7 @@ func claudeComposerContains(screen, marker string) bool {
 // composerRegion returns the text between the final two divider lines --
 // claude's live composer, and devin's, whose layout is the same.
 func composerRegion(screen string) (string, bool) {
-	return composerRegionWith(screen, isDividerLine)
+	return composerRegionWith(screen, isClaudeDividerLine)
 }
 
 func composerRegionWith(screen string, isDivider func(string) bool) (string, bool) {
@@ -567,6 +567,15 @@ func isDividerLine(line string) bool {
 // isDevinDividerLine also accepts devin's decorated composer top edge,
 // captured live as "──────── (bypass permissions on) ─". Its long leading run
 // of ─ tells it apart from the queue header, which starts "── 1 queued".
+// isClaudeDividerLine also accepts Claude Code's composer top edge when it
+// carries the session title ("──────── Operator desk … ─"): the line starts
+// with at least eight rules and ends with one. Without this, a titled session
+// (the desk) never has its composer located (hk 2904).
+func isClaudeDividerLine(line string) bool {
+	trimmed := strings.TrimSpace(line)
+	return isDividerLine(line) || (strings.HasPrefix(trimmed, strings.Repeat("─", 8)) && strings.HasSuffix(trimmed, "─"))
+}
+
 func isDevinDividerLine(line string) bool {
 	return isDividerLine(line) || strings.HasPrefix(strings.TrimSpace(line), strings.Repeat("─", 8))
 }
@@ -757,7 +766,7 @@ func classifyPromptSubmission(harness, pre, screen, body string) (string, string
 //
 // Other harnesses have no locatable composer.
 func promptComposer(harness string, lines []string) (top, end int, ok bool) {
-	isEdge, glyph := isDividerLine, "❯"
+	isEdge, glyph := isClaudeDividerLine, "❯"
 	switch {
 	case strings.EqualFold(harness, "claude"):
 	case strings.EqualFold(harness, "devin"):

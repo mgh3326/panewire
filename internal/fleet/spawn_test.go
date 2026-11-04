@@ -366,7 +366,18 @@ func TestTaskClaimMustConfirmAtomicBinding(t *testing.T) {
 		}
 		return original(c)
 	}
-	if code(a.Spawn(context.Background(), s)) != 70 {
-		t.Fatal("half-record admitted")
+	// hk 2928: the claim runs after the brief is delivered, so a half record
+	// no longer fails the landed spawn; it must still never count as linked.
+	if err := a.Spawn(context.Background(), s); err != nil {
+		t.Fatalf("landed spawn failed: %v", err)
+	}
+	events, err := a.ledger().Events(context.Background(), s.Job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Kind == "job.task_link" && ev.Payload["status"] != "failed" {
+			t.Fatalf("half-record admitted: %v", ev.Payload)
+		}
 	}
 }

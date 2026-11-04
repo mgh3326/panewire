@@ -459,6 +459,7 @@ func loadHubCFAccessEnv(path string) (hubCFAccessEnv, error) {
 }
 
 type hubCLIDeps struct {
+	SocketPath            string
 	HTTPClient            *http.Client
 	AllowInsecureForTests bool
 	Now                   func() time.Time

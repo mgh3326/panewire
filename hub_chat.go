@@ -153,7 +153,7 @@ func (e *chatHTTPError) Error() string { return "chat store " + e.op + " rejecte
 // timeout and connection pool and cannot stall relay traffic.
 type handoffkeepChatStore struct {
 	baseURL *url.URL
-	token   string
+	env     hubHandoffkeepEnv
 	client  *http.Client
 }
 
@@ -172,7 +172,7 @@ func newHandoffkeepChatStore(env hubHandoffkeepEnv, httpClient *http.Client) (*h
 			Transport: &http.Transport{MaxConnsPerHost: hubChatMaxConnsPerHost, MaxIdleConnsPerHost: hubChatMaxConnsPerHost},
 		}
 	}
-	return &handoffkeepChatStore{baseURL: parsed, token: env.Token, client: httpClient}, nil
+	return &handoffkeepChatStore{baseURL: parsed, env: env, client: env.withoutCFRedirects(httpClient)}, nil
 }
 
 func (c *handoffkeepChatStore) endpoint(path string) string {
@@ -192,7 +192,7 @@ func (c *handoffkeepChatStore) do(ctx context.Context, method, endpoint string, 
 	if err != nil {
 		return 0, nil, errors.New("chat store request failed")
 	}
-	request.Header.Set("Authorization", "Bearer "+c.token)
+	c.env.setAuth(request)
 	request.Header.Set("Accept", "application/json")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
