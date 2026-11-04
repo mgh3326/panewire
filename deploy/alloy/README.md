@@ -147,7 +147,8 @@ count by (machine_id) (namedprocess_namegroup_num_procs) > 31
 ## Fleet events
 
 panewire, panewire and mergewake record failures and decisions as **fleet-event
-v1** lines. Each line is one JSON object with exactly these string fields:
+v1** lines. Each line is one JSON object with these string fields. All are always
+present except `request_id`:
 
 | Field | Meaning |
 | --- | --- |
@@ -156,8 +157,9 @@ v1** lines. Each line is one JSON object with exactly these string fields:
 | `tool` | `panewire`, `panewire` or `mergewake` (label) |
 | `kind` | What happened: `spawn`, `plan`, `placement`, `quota_observation` (panewire); `node_spawn` (panewire); `reviewer`, `review` (mergewake) (label) |
 | `job` | Job id, or `<repo>#<pr>` for reviews |
+| `request_id` | Hub spawn request id, on panewire `node_spawn` lines only; omitted when empty. It joins the line to the hub's spawn operation and the `request` tag of its Sentry event |
 | `outcome` | `refused`, `failed`, `skipped`, `missing`, `placed`, `stale`, `unusable` (label) |
-| `reason` | Short code: exit status class, spawn.json rule, ranking metric, skip reason |
+| `reason` | Short code: exit status class, spawn.json rule, ranking metric, skip reason. On `node_spawn` it can be a spawn-refusal code from panewire `internal/fleet/refusal.go`, such as `foreground_missing` |
 | `detail` | At most 1 KiB of `key=value` facts and a stderr tail |
 
 Every tool writes to `<state home>/<tool>/events/fleet-events.jsonl`, where the
@@ -190,8 +192,8 @@ Both Alloy configs carry the same pipeline between `// BEGIN fleet events` and
   hostname, becomes the `os_host` label. If `MACHINE_ID` is unset or empty,
   `host` stays the OS hostname, as before, and no event is dropped. Each host
   has one `os_host`, so the extra label adds no streams.
-- `job`, `reason` and `detail` stay in the line. Query them with `| json` or
-  `| regexp`.
+- `job`, `request_id`, `reason` and `detail` stay in the line. Query them with
+  `| json` or `| regexp`.
 
 Alloy resumes from its positions file, and there is no `tail_from_end`. A
 line written while Alloy is down or restarting still ships, and so does the
