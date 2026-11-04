@@ -35,6 +35,100 @@ panewire's host-first placement — read that score.
 and `pressure_level_min` are retired. A policy file that still sets them
 loads, and the values are ignored.
 
+## Readiness
+
+Placement used to rank hosts on load and account presence only. Every
+non-m1b spawn that failed in the 7 days to 2026-11-04 failed on readiness
+(19 of 19: `brief_doc_unavailable`, `cwd_unmapped`, Codex "Hooks need review",
+the omp setup wizard), and a host that had just failed a launch was ranked
+again unchanged. A node now reports what it can launch, and placement drops a
+(host, harness) pair that is not ready **before it ranks hosts**.
+
+### What a node reports
+
+The heartbeat's `readiness` object (type `fleet.Readiness`). It holds names,
+versions and booleans. It never holds a credential, a path, a file's contents
+or screen text; the hub re-checks every field against a closed vocabulary and
+drops what does not fit.
+
+| Field | Meaning |
+|---|---|
+| `harnesses.<kind>` for `claude`, `codex`, `omp`, `agy`, `devin`, `cmd` | `installed` (the binary is found; `cmd` is always installed), `version` (the first dotted number of `--version`), `herdr_integration` (`herdr integration status` says `current`), `login` (`present` / `missing` / `unknown`) with `account` (the pacelever account key), `dialog` |
+| `harnesses.<kind>.login` | From the node's own pacelever refresh of the pool named like the kind (`--state-quota-pools`). `missing` after a failed refresh; `unknown` when the node does not measure that pool |
+| `harnesses.<kind>.dialog` | The first-run dialog the **last launch** stopped at: `codex_hooks_review`, `codex_directory_trust`, `omp_setup_wizard` or `claude_trust`. It is the last known state, set by a failed launch and cleared by the next launch of that kind that succeeds. The node does not open a harness to look, and a dropped pair is not launched again, so a reported dialog also expires after 30 minutes: the pair then gets one more launch, and a launch that stops at the dialog again reports it for another 30 minutes |
+| `repos` | The node's `cwd_map` keys (on defaults: the directories under the work root) |
+| `brief.handoffkeep_env` | The handoffkeep env file is present, mode 0600 and holds a URL and token |
+| `toolchains` | `go`, `node`, `bun` with their versions, when installed |
+| `panewire_version` | The node's build |
+| `config` | The effective spawn configuration: `source` (`defaults` or `spawn.json`), `workspace`, `herdr_session` (the built-in default name, else `custom`: spawn.json names are free text and never travel), `work_root` (whether it exists). See [r26-hub-spawn.md](r26-hub-spawn.md) |
+
+The report is cached on the node. It is refreshed every 5 minutes and after
+every failed launch, probed in the background so a probe never delays a
+heartbeat, and re-sent every 45 seconds while unchanged so the hub's value
+stays fresh. The hub drops a stored report that was not re-sent for 5 minutes
+(the node reads `readiness_unknown` until the next one). A node sends it only to a hub that advertised the `readiness`
+feature in `hub.features` (an older hub rejects a heartbeat with an unknown
+field), and starts over on every connection.
+
+### The filter
+
+The hub publishes each host's report as the `readiness` fleet-state value
+([fleet-state.md](fleet-state.md)). Host-first selection reads it and drops a
+(host, harness) pair that fails a check. The first failing check names the
+outcome, in this order:
+
+| Outcome | The pair is dropped when |
+|---|---|
+| `launch_backoff` | The hub counted 2 consecutive launch failures of this (host, kind) in the last 30 minutes ([below](#launch-failure-backoff)) |
+| `harness_missing` | The harness binary is not installed |
+| `harness_version` | `placement.harness_min_version.<kind>` (in the spawner's `hosts.toml`) is set and the version is lower or unreadable |
+| `dialog_pending` | The last launch of this kind stopped at a first-run dialog |
+| `login_missing` | The node's pacelever refresh of the kind's pool failed (`cmd` needs no login) |
+| `repo_unmapped` | The spawn's repository is not in the node's `repos` |
+| `brief_unavailable` | The spawn goes through the hub with a brief document and the node cannot fetch one |
+| `toolchain_missing` | `placement.repo_toolchains.<repo>` lists a toolchain the node lacks |
+
+A drop removes one pair, not the host: another harness on the same host stays
+a candidate, and the dropped host still measures an account it holds. The
+outcome is recorded where the placement event already records a host: the
+host's `outcome` in the selection record names the check, `readiness_drops`
+lists each dropped profile with its code, and the placement event's candidate
+`reason` carries the same code. A kind the node does not report on
+(`kiro`, `opencode`) is not judged.
+
+**Old nodes.** A node that never sent readiness is `readiness_unknown`, and
+no readiness check drops it: it is placed as before. A readiness value that
+is stale, or whose publisher is dead, reads the same way. Only the
+launch-failure backoff, which the hub observes itself, still applies to it.
+
+### Launch-failure backoff
+
+The hub sees every node answer to a spawn. It counts consecutive launch
+failures per (host, harness kind). Two in a row exclude that pair for 30
+minutes; a success clears the count at once. A busy checkout
+(`checkout_refused:busy`) is not a launch failure, and a profile with no
+harness kind is not counted. The constants live in `placement.json`:
+
+```json
+{"launch_failure_threshold": 2, "launch_backoff_minutes": 30}
+```
+
+Both are optional (0 or absent means 2 and 30). The counts are in hub memory:
+a hub restart forgets them, which ends a backoff early and never starts one.
+
+### Spawner configuration
+
+Two optional `[placement]` tables in the spawner's `hosts.toml` feed the
+filter:
+
+```toml
+[placement.harness_min_version]
+codex = "0.166.0"
+
+[placement.repo_toolchains]
+panewire = ["go"]
+```
+
 ## Measured-load score
 
 The score answers "which host is really the most idle", from what the

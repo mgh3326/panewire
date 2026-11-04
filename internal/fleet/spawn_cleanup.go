@@ -12,6 +12,13 @@ const FailedSpawnCloseSettle = 2 * time.Second
 // or working pane and its leases; timeout alone never authorizes closing it.
 func (a *App) closeFailedSpawn(ctx context.Context, s Spawn, pane, kind string) error {
 	err := a.closeFailedSpawnPane(ctx, s, pane, kind)
+	if err == nil && s.registeredLane != nil {
+		// The pane is closed, so its lane row routes to nothing. A failure
+		// leaves the row for the hub's release of rows whose panes are gone.
+		if e := a.removeLane(ctx, *s.registeredLane); e != nil {
+			a.warn("lane retained: %v", e)
+		}
+	}
 	if err != nil {
 		// The pane stays open; the receipt lets reap tools find it by id.
 		if e := a.event(ctx, s.Job, "job.cleanup_refused", map[string]any{"pane_id": pane, "label": s.Label, "kind": kind, "reason": err.Error()}); e != nil {
