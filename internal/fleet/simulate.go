@@ -28,7 +28,8 @@ import (
 //	  "pools": [
 //	    {"id": "claude", "class": "spend", "waste": true,
 //	     "used_pct": 31, "projected_pct": 31.8,
-//	     "resets_at": "2026-10-31T16:50:00Z", "window": "7d"}
+//	     "resets_at": "2026-10-31T16:50:00Z", "window": "7d"},
+//	    {"id": "anthropic-api", "class": "credit", "credit_left_pct": 80}
 //	  ],
 //	  "candidates": [
 //	    {"profile": "sonnet", "seat": "sonnet", "effort": "high",
@@ -81,6 +82,9 @@ type simPool struct {
 	ResetsAt   string   `json:"resets_at"`
 	ResetHours *float64 `json:"reset_hours"`
 	Window     string   `json:"window"`
+	// CreditLeftPct is a credit pool's recorded balance left, as a percentage
+	// of its total; absent means no balance is recorded.
+	CreditLeftPct *float64 `json:"credit_left_pct"`
 }
 
 type simCand struct {
@@ -253,6 +257,9 @@ func simPoolView(p simPool, now time.Time) (PoolView, time.Time, error) {
 		reset, left = now.Add(time.Duration(*p.ResetHours*float64(time.Hour))), *p.ResetHours
 	}
 	v.pace(p.UsedPct, p.Projected, p.Window, left, now, reset)
+	if p.CreditLeftPct != nil {
+		v.Credit = &CreditBalance{LeftPct: *p.CreditLeftPct}
+	}
 	return v, reset, nil
 }
 
@@ -463,7 +470,12 @@ func (a *App) simulate(ctx context.Context, args []string) error {
 		}
 		if v, ok := pools[row.Pool]; ok {
 			c.blocking, c.projected, c.urgency, c.resetHrs = v.Blocking, v.Projected, v.Urgency, v.ResetHours
+			c.longProj = longProjection(v)
 			c.risk, c.unused = policy.wasteRisk(row, free, v, true)
+			c.paced = policy.paced(row, free, c.risk, v)
+			if policy.isCredit(row.Pool) || v.Class == "credit" {
+				c.creditPool, c.creditLeft = true, v.Credit != nil && v.Credit.LeftPct > 0
+			}
 			// A free rung is excluded only by an observed free limit, never by
 			// its shared pool's used or projected share.
 			if c.reason == "" && !free && !policy.isCredit(row.Pool) && v.Class != "credit" {

@@ -29,6 +29,8 @@ type quotaStopManager struct {
 	lastPolicy time.Time
 	policy     quotaPolicy
 	policyOK   bool
+	// clock times the observation phases; nil is time.Now.
+	clock func() time.Time
 }
 
 func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (*quotaStopManager, error) {
@@ -156,20 +158,38 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob) (int, tim
 	}
 	return priority, duration, n == 1
 }
+
+// Observation budgets. Each phase has its own bound, so a slow job scan or a
+// slow reservation can no longer leave the screen read no time at all (hk
+// 2846: every shadow decision on one host was screen_read_timeout while a
+// read takes ~10 ms).
+const (
+	quotaStopScanBudget = 2 * time.Second
+	quotaStopReadBudget = 5 * time.Second
+	// quotaStopLookupBudget bounds the policy and task lookups a quota screen
+	// needs; the decision is recorded even when they run out.
+	quotaStopLookupBudget = 5 * time.Second
+)
+
 func (q *quotaStopManager) observeBounded(ctx context.Context, c idleWakeCandidate, now time.Time) {
-	bounded, cancel := context.WithTimeout(ctx, 2*time.Second)
-	defer cancel()
-	q.observe(bounded, c, now)
+	q.observe(ctx, c, now)
 }
 
 func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now time.Time) {
-	job, ok := q.jobForPane(ctx, c.PaneID)
+	clock := q.clock
+	if clock == nil {
+		clock = time.Now
+	}
+	started := clock()
+	scanCtx, scanCancel := context.WithTimeout(ctx, quotaStopScanBudget)
+	defer scanCancel()
+	job, ok := q.jobForPane(scanCtx, c.PaneID)
 	if !ok || quotaExcluded(c.Label) {
 		return
 	}
 	// Reserve the wake before touching the screen. A restart can never reread it.
 	q.store.mu.Lock()
-	result, err := q.store.db.ExecContext(ctx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created) VALUES(?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli())
+	result, err := q.store.db.ExecContext(scanCtx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created) VALUES(?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli())
 	q.store.mu.Unlock()
 	if err != nil {
 		return
@@ -178,30 +198,48 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	if n != 1 {
 		return
 	}
-	readCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	scanned := clock()
+	readCtx, cancel := context.WithTimeout(ctx, quotaStopReadBudget)
 	screen, err := q.read(readCtx, c.PaneID)
+	readErr := readCtx.Err()
 	cancel()
+	read := clock()
+	timing := []any{"scan_ms", scanned.Sub(started).Milliseconds(), "read_ms", read.Sub(scanned).Milliseconds()}
 	if err != nil {
 		// A wake is already reserved and cannot be replayed safely. Record a
-		// conservative handover using a fresh DB context, including when the
-		// read exhausted the observation deadline.
+		// conservative handover using a fresh DB context. The reason says
+		// which bound ended the read: its own deadline, the caller's
+		// cancellation, or the read command itself.
 		reason := "screen_read_failed"
-		if ctx.Err() != nil || readCtx.Err() == context.DeadlineExceeded {
+		switch {
+		case ctx.Err() != nil:
+			reason = "observation_canceled"
+		case readErr == context.DeadlineExceeded:
 			reason = "screen_read_timeout"
 		}
+		q.logger.Info("quota-stop observation", append([]any{"pane", c.PaneID, "outcome", reason}, timing...)...)
 		dbCtx, done := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 		defer done()
 		q.recordDecision(dbCtx, c, now, "unknown", "unknown", "handover", reason, "", 0)
 		return
 	}
 	stop, ok := classifyQuotaStop(screen, now, time.Local)
+	outcome := "not_quota"
+	if ok {
+		outcome = "quota"
+	}
+	// Every read screen is counted, quota or not, so shadow mode shows that it
+	// classified real screens. Screen text is never logged.
+	q.logger.Info("quota-stop observation", append([]any{"pane", c.PaneID, "outcome", outcome}, timing...)...)
 	if !ok {
 		return
 	}
-	policy, policyOK := q.loadPolicy(ctx, now)
-	priority, expected, taskOK := q.task(ctx, job)
+	lookupCtx, lookupCancel := context.WithTimeout(ctx, quotaStopLookupBudget)
+	defer lookupCancel()
+	policy, policyOK := q.loadPolicy(lookupCtx, now)
+	priority, expected, taskOK := q.task(lookupCtx, job)
 	// Preserve the decision even if the bounded external lookup timed out.
-	dbCtx, dbCancel := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	dbCtx, dbCancel := context.WithTimeout(context.WithoutCancel(lookupCtx), time.Second)
 	defer dbCancel()
 	q.store.mu.Lock()
 	var waits int
