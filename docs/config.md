@@ -25,7 +25,6 @@ spawn = true
 max_load_ratio = 1.5
 max_active = 4
 shell_ready_timeout_ms = 120000
-pi_anthropic = false
 cmd_dsflash41 = false
 clinepass = false
 
@@ -79,7 +78,6 @@ local_delete_at = "drive_confirmed"
 | `heavy_max` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `heavy_load_wait` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `shell_ready_timeout_ms` | `120000` | Startup readiness window, integer 30000–300000. |
-| `pi_anthropic` | `false` | Literal capability opt-in required by pi policy rows. |
 | `cmd_dsflash41` | `false` | Literal capability opt-in required by cmd policy rows. The provisioned cmd account must have no persisted MCP servers. |
 | `clinepass` | `false` | Literal capability opt-in required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). |
 | `tags` | unset | Capability tags offered by this host for job placement (`spawn --tags`). Lowercase tag names. `caps` is an alias; both lists merge. |
@@ -1004,7 +1002,7 @@ When the wait fails (escalated, lost, timeout), the pane stays for
 **Headless mode.** The seat's CLI runs once, in `--cwd`, with the brief and a
 deadline of `--timeout`; its output is the answer. The job is claimed, leased
 and completed with the same `done` call. Kinds with a one-shot form: `claude`,
-`codex`, `devin`, `cmd`, `pi`, `grok`, `opencode`; any other kind is refused
+`codex`, `devin`, `cmd`, `omp`, `opencode`; any other kind is refused
 with exit 70 before anything is claimed. The one-shot flags are fixed in code
 and have been exercised only against a fake runner.
 
@@ -1175,9 +1173,7 @@ for ownership and distribution.
 | `PANEWIRE_LANE_STRICT=1` | A committed builder with unregistered lane returns 82. |
 | `PANEWIRE_COMPLETION_TIMEOUT_S` | Positive watcher lifetime; duration or bare seconds, default 1h. Expiry retains the job. The watcher completes a job only on a [terminal signal](r21-lane-event.md#job-completion-signal), never on a stable report alone. |
 | `MOCK_MCP_PROFILE`, `PANEWIRE_MOCK_MCP_CONFIG` | Required reviewed mock profile name and exclusive stdio mcpServers JSON. |
-| `KIMI_CODE_HOME` | Kimi config home; thinking effort is verified. |
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | Harness config homes for selected-workspace trust; mock Codex uses its private job home. |
-| `KIMI_CODE_LOW_HOME`, `KIMI_CODE_HIGH_HOME`, `KIMI_CODE_MAX_HOME` | Pinned clone homes; default ~/.local/share/kimi-code-EFFORT. |
 
 Legacy periodic prune environment switches are not read. Panewire never
 silently enables automatic pruning.

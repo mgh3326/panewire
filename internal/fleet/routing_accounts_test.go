@@ -211,7 +211,7 @@ func TestAccountLeadExhaustionAndUnknownAreDistinct(t *testing.T) {
 
 func TestLeadConsultNativeTopOnly(t *testing.T) {
 	for _, role := range []string{"builder", "counsel"} {
-		for _, profile := range []string{"agy-opus46", "pi-opus55", "opus"} {
+		for _, profile := range []string{"agy-opus46", "omp-opus", "opus"} {
 			t.Run(role+"/"+profile, func(t *testing.T) {
 				a, s, q := leadFixture(t)
 				s.Role = role

@@ -2,8 +2,6 @@ package fleet
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -66,25 +64,6 @@ func (a *App) workspaceTrust(ctx context.Context, s Spawn, seat Seat, env []stri
 			data["trusted_paths"] = append(paths, cwd)
 			return nil
 		})
-	case "kimi":
-		home := firstNonempty(os.Getenv("KIMI_CODE_HOME"), filepath.Join(a.Home, ".kimi-code"))
-		for _, entry := range env {
-			if h, ok := strings.CutPrefix(entry, "KIMI_CODE_HOME="); ok {
-				home = h
-			}
-		}
-		name := strings.ToLower(filepath.Base(cwd))
-		if len(name) > 40 {
-			name = name[:40]
-		}
-		name = strings.TrimRightFunc(name, func(c rune) bool { return !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) })
-		sum := sha256.Sum256([]byte(cwd))
-		path := filepath.Join(home, "workspace-trust", "wd_"+name+"_"+hex.EncodeToString(sum[:])[:12])
-		if e = noSymlinks(path); e != nil {
-			return e
-		}
-		b, _ := encode(map[string]any{"root": cwd, "trustedAt": a.Now().UnixMilli()})
-		return atomicFile(path, b, 0600)
 	case "codex":
 		home := firstNonempty(os.Getenv("CODEX_HOME"), filepath.Join(a.Home, ".codex"))
 		for _, entry := range env {

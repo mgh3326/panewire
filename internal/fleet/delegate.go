@@ -444,9 +444,7 @@ var oneShot = map[string]struct {
 	"codex":    {pre: []string{"exec"}, stdin: true},
 	"devin":    {post: []string{"-p"}},
 	"cmd":      {post: []string{"-p"}},
-	"pi":       {post: []string{"-p"}},
 	"omp":      {post: []string{"-p"}},
-	"grok":     {post: []string{"-p"}},
 	"opencode": {pre: []string{"run"}},
 }
 

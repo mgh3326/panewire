@@ -115,7 +115,7 @@ func TestOMPForegroundArgv(t *testing.T) {
 		{"lookalike package path", "omp", "bun", "bun", []string{"bun", "/home/user/x@oh-my-pi/pi-coding-agent/dist/cli.js"}, false},
 		{"node running the script", "omp", "node", "node", []string{"node", cli}, false},
 		{"shell", "omp", "zsh", "zsh", []string{"zsh"}, false},
-		{"bun wrapper is omp only", "pi", "bun", "bun", []string{"bun", cli}, false},
+		{"bun wrapper is omp only", "cmd", "bun", "bun", []string{"bun", cli}, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := foregroundAgent(tc.kind, tc.argv0, tc.proc, tc.argv); got != tc.want {

@@ -713,8 +713,8 @@ func relayInjectHarness(ctx context.Context, pane string) string {
 // harnessHasSubmissionEvidence reports whether classifySubmission can ever
 // prove this harness's submission one way or the other. queued and
 // marker_observed are gated on harness being claude, codex, or devin (see
-// classifySubmission); any other harness (e.g. grok, which exposes no prompt
-// in recent-unwrapped at all -- see 2026-09-14 fleet notes) can only ever
+// classifySubmission); any other harness (one that exposes no prompt in
+// recent-unwrapped at all -- see 2026-09-14 fleet notes) can only ever
 // land on composer_residue (and only if it happens to emit claude's literal
 // paste-chip text, which most don't) or unproven. See the unproven carve-out
 // below for why that distinction matters. The hub relay sends devin through
@@ -1123,7 +1123,7 @@ func relayComposerState(harness, visible string) string {
 // row stays undelivered, and a hub replay -- which meets the presend check
 // before anything is typed -- is the late-delivery path. A harness with no
 // submission-evidence path at all keeps the #264 D2 AC0 carve-out:
-// delivered on no negative evidence (e.g. grok, which exposes no prompt in
+// delivered on no negative evidence (a harness that exposes no prompt in
 // recent-unwrapped -- see 2026-09-14 fleet notes).
 func relayUnproven(harness string, reads relayPaneReads, prefix string) relayInjectResult {
 	if !reads.anyOK {
