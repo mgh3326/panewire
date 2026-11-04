@@ -106,5 +106,8 @@ attempt has one of these signals:
   prefix.
 
 The attempt starts at the newest `job.spawned`, `job.reclaim` or `job.reprompted`
-record. `panewire done` still completes a job directly. A report with no signal
+record. When `findings.json` beside the report is a regular file, the watcher
+attaches it as the result using the same validation as `panewire done --result`.
+Invalid results are rejected with a `job.result_rejected` event and a warning;
+the job still completes. `panewire done` still completes a job directly. A report with no signal
 leaves the job live until the watcher deadline, and the job stays live after it.

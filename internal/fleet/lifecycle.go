@@ -17,6 +17,10 @@ import (
 )
 
 func (a *App) lifecycle(ctx context.Context, kind string, args []string) error {
+	return a.lifecycleWithWatchResult(ctx, kind, args, false)
+}
+
+func (a *App) lifecycleWithWatchResult(ctx context.Context, kind string, args []string, watchResult bool) error {
 	if len(args) == 0 || !validID(args[0]) {
 		return fail(exitUsage, "%s requires a job id", kind)
 	}
@@ -45,28 +49,28 @@ func (a *App) lifecycle(ctx context.Context, kind string, args []string) error {
 		return fail(exitUsage, "escalate requires --question and a recorded parent lane")
 	}
 	var result json.RawMessage
+	var rejected string
+	if watchResult {
+		*resultFile = filepath.Join(filepath.Dir(*report), "findings.json")
+		info, err := os.Lstat(*resultFile)
+		if os.IsNotExist(err) {
+			*resultFile = ""
+		} else if err != nil || !info.Mode().IsRegular() {
+			rejected = "result is not a regular file"
+			*resultFile = ""
+		}
+	}
 	if *resultFile != "" {
 		if kind != "done" {
 			return fail(exitUsage, "%s accepts no --result", kind)
 		}
-		if e := noSymlinks(*resultFile); e != nil {
-			return e
-		}
-		body, e := os.ReadFile(*resultFile)
+		result, e = readResult(*resultFile)
 		if e != nil {
-			return e
+			if !watchResult {
+				return e
+			}
+			rejected = "result failed validation"
 		}
-		if len(body) > 64<<10 {
-			return fail(exitUsage, "--result exceeds 64 KiB")
-		}
-		var v any
-		if e := json.Unmarshal(body, &v); e != nil {
-			return fail(exitUsage, "--result is not valid JSON: %v", e)
-		}
-		if _, ok := v.(map[string]any); !ok {
-			return fail(exitUsage, "--result must be a JSON object")
-		}
-		result = json.RawMessage(body)
 	}
 	if *report == "" && kind == "done" {
 		*report = newestReport(filepath.Join(a.Jobs, id))
@@ -96,6 +100,15 @@ func (a *App) lifecycle(ctx context.Context, kind string, args []string) error {
 	j, e = a.job(id)
 	if e != nil {
 		return e
+	}
+	if watchResult && (j.Terminal || j.Reaped) {
+		return nil
+	}
+	if rejected != "" {
+		if e = a.event(ctx, id, "job.result_rejected", map[string]any{"reason": rejected}); e != nil {
+			return e
+		}
+		a.warn("watcher result rejected: %s", rejected)
 	}
 	hash := sha256.Sum256(body)
 	digest := hex.EncodeToString(hash[:])
@@ -217,6 +230,27 @@ func (a *App) lifecycle(ctx context.Context, kind string, args []string) error {
 	fmt.Fprintf(a.Out, "OK job=%s report=%s kind=%s%s\n", id, *report, eventKind, relay)
 	return nil
 }
+func readResult(path string) (json.RawMessage, error) {
+	if e := noSymlinks(path); e != nil {
+		return nil, e
+	}
+	body, e := os.ReadFile(path)
+	if e != nil {
+		return nil, e
+	}
+	if len(body) > 64<<10 {
+		return nil, fail(exitUsage, "--result exceeds 64 KiB")
+	}
+	var v any
+	if e := json.Unmarshal(body, &v); e != nil {
+		return nil, fail(exitUsage, "--result is not valid JSON: %v", e)
+	}
+	if _, ok := v.(map[string]any); !ok {
+		return nil, fail(exitUsage, "--result must be a JSON object")
+	}
+	return json.RawMessage(body), nil
+}
+
 func (a *App) releaseQuota(ctx context.Context, j Job) error {
 	pools, e := a.ledger().QuotaPools(ctx, j.ID)
 	if e != nil {
