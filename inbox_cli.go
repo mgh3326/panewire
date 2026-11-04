@@ -20,6 +20,7 @@ const inboxUsage = `usage: panewire inbox list [--lane L] [--unread] [--json]
        panewire inbox ack <id>|--all [--lane L] [--json]
        panewire inbox count [--lane L] [--json]
        panewire inbox wait [--lane L] [--timeout D] [--json]
+       panewire inbox status --event-id ID [--event-id ID ...] [--json]
 Connection: --hub-url URL --hub-token-env FILE [--hub-cf-env FILE]
 Defaults: PANEWIRE_HUB_URL, PANEWIRE_HUB_TOKEN_ENV, PANEWIRE_HUB_CF_ENV,
           PANEWIRE_LANE. Node credentials require an owned --lane.
@@ -28,7 +29,10 @@ on timeout it prints nothing and exits 3.
 read and ack <id> name one item: an ambient PANEWIRE_LANE does not scope them
 for operator tokens — only an explicit --lane does.
 ready, decision, blocked and findings items stay unread until ack <id>:
-injection into the pane and read do not retire them.`
+injection into the pane and read do not retire them.
+status answers only whether each event id was acked and when, with no lane or
+body: a node credential sees the events its own node relayed, a service needs
+the inbox.ack_state scope. It exits 7 when any id has no visible row.`
 
 // inboxWaitDefaultTimeout is the client deadline when --timeout is absent.
 // Each server request is bounded by hubInboxWaitMaxWait; the client re-issues
@@ -45,7 +49,7 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		fmt.Fprintln(stdout, inboxUsage)
 		return ExitOK
 	}
-	if command != "list" && command != "read" && command != "ack" && command != "count" && command != "wait" {
+	if command != "list" && command != "read" && command != "ack" && command != "count" && command != "wait" && command != "status" {
 		return ExitUsage
 	}
 	lane, hubURL, tokenEnv, cfEnv := os.Getenv("PANEWIRE_LANE"), os.Getenv("PANEWIRE_HUB_URL"), os.Getenv("PANEWIRE_HUB_TOKEN_ENV"), os.Getenv("PANEWIRE_HUB_CF_ENV")
@@ -53,6 +57,7 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	laneExplicit := false
 	timeout := inboxWaitDefaultTimeout
 	id := int64(0)
+	var eventIDs []string
 	for i := 1; i < len(args); i++ {
 		arg := args[i]
 		switch arg {
@@ -62,7 +67,7 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 			unread = true
 		case "--all":
 			all = true
-		case "--lane", "--hub-url", "--hub-token-env", "--hub-cf-env", "--timeout":
+		case "--lane", "--hub-url", "--hub-token-env", "--hub-cf-env", "--timeout", "--event-id":
 			if i+1 == len(args) {
 				return ExitUsage
 			}
@@ -72,6 +77,8 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 			case "--lane":
 				lane = v
 				laneExplicit = true
+			case "--event-id":
+				eventIDs = append(eventIDs, v)
 			case "--hub-url":
 				hubURL = v
 			case "--hub-token-env":
@@ -95,6 +102,16 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 			if err != nil || id < 1 {
 				return ExitUsage
 			}
+		}
+	}
+	if (command != "status" && len(eventIDs) > 0) || (command == "status" && (len(eventIDs) == 0 || len(eventIDs) > hubInboxAckStateMaxIDs || laneExplicit || id != 0)) {
+		fmt.Fprintln(stderr, inboxUsage)
+		return ExitUsage
+	}
+	for _, eventID := range eventIDs {
+		if !validLaneEventID(eventID) {
+			fmt.Fprintln(stderr, "inbox: invalid --event-id")
+			return ExitUsage
 		}
 	}
 	if (lane != "" && !validReportRelayLaneName(lane)) || (unread && command != "list") || (all && command != "ack") {
@@ -170,6 +187,15 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if command == "count" {
 		path += "/count"
 	}
+	if command == "status" {
+		path += "/ack-state"
+		// The ambient PANEWIRE_LANE means nothing here: the hub scopes the
+		// answer by credential, not by lane.
+		query.Del("lane")
+		for _, eventID := range eventIDs {
+			query.Add("event_id", eventID)
+		}
+	}
 	if command == "read" {
 		path += "/" + strconv.FormatInt(id, 10) + "/read"
 		method = http.MethodPost
@@ -192,7 +218,9 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		return ExitInternal
 	}
 	defer response.Body.Close()
-	if response.StatusCode != 200 {
+	// For status a 404 is an answer, not a failure: it lists the ids with no
+	// visible row.
+	if response.StatusCode != 200 && !(command == "status" && response.StatusCode == http.StatusNotFound) {
 		fmt.Fprintf(stderr, "inbox: hub returned HTTP %d\n", response.StatusCode)
 		return ExitDeliveryFailure
 	}
@@ -200,6 +228,9 @@ func runInboxCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if err != nil || !json.Valid(raw) {
 		fmt.Fprintln(stderr, "inbox: invalid hub response")
 		return ExitInternal
+	}
+	if command == "status" {
+		return printInboxStatus(raw, stdout, stderr, jsonMode)
 	}
 	if jsonMode {
 		_, _ = stdout.Write(raw)
@@ -320,4 +351,35 @@ func runInboxWait(client *hubOperatorClient, stdout, stderr io.Writer, lane stri
 		fmt.Fprintf(stdout, "#%d %s %s (%s)\n%s\n", item.ID, item.Lane, item.Class, item.Kind, relayTextForKind(item.Kind, item.Event))
 		return ExitOK
 	}
+}
+
+// printInboxStatus prints an ack-state answer and picks the exit code: 0 when
+// every id has a row, ExitPartial when any has none.
+func printInboxStatus(raw []byte, stdout, stderr io.Writer, jsonMode bool) int {
+	var answer struct {
+		Events   []laneInboxAckState `json:"events"`
+		NotFound []string            `json:"not_found"`
+	}
+	if json.Unmarshal(raw, &answer) != nil {
+		fmt.Fprintln(stderr, "inbox: invalid hub response")
+		return ExitInternal
+	}
+	if jsonMode {
+		_, _ = stdout.Write(raw)
+	} else {
+		for _, event := range answer.Events {
+			state := "unacked"
+			if event.Acked {
+				state = "acked\t" + event.AckedAt
+			}
+			fmt.Fprintf(stdout, "%s\t%s\n", event.EventID, state)
+		}
+		for _, id := range answer.NotFound {
+			fmt.Fprintf(stdout, "%s\tnot found\n", id)
+		}
+	}
+	if len(answer.NotFound) > 0 {
+		return ExitPartial
+	}
+	return ExitOK
 }

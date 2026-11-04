@@ -131,7 +131,11 @@ func (h *HubServer) receivingLane(kind string, e hubJobEventPayload) string {
 // receiveInbox returns handled=true only after durable ownership, or on a
 // storage error for an inbox-class event. Interrupts fail open to the existing
 // handoffkeep and node receipt machinery.
-func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender *hubAgent, replay bool) (result relayLaneEventResult, handled bool) {
+//
+// senderID is the node that relayed the event, or "" when the hub itself did
+// (replay, HTTP ingress, its own digests); the row records it for the ack-state
+// lookup.
+func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender *hubAgent, senderID string, replay bool) (result relayLaneEventResult, handled bool) {
 	if h.inbox == nil || event.sinkOnly {
 		return result, false
 	}
@@ -167,7 +171,7 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		hold, _ = time.ParseDuration(settings.MaxHold)
 		window = 0
 	}
-	item, err := h.inbox.store.put(relayEventDedupeKey(kind, *event), lane, kind, class, *event, h.now().UTC(), deadline, window, hold)
+	item, err := h.inbox.store.putFrom(senderID, relayEventDedupeKey(kind, *event), lane, kind, class, *event, h.now().UTC(), deadline, window, hold)
 	if err != nil {
 		if class == "interrupt" {
 			event.DeliveryClass = class
@@ -275,7 +279,7 @@ func (h *HubServer) replayInbox(record handoffkeepRelayEvent) bool {
 	if h.isHeldBatch(record.OwnerLane, record.EventID) || isUnconfirmedMarkRecord(record) {
 		return false
 	}
-	result, handled := h.receiveInbox(record.Kind, &event, nil, true)
+	result, handled := h.receiveInbox(record.Kind, &event, nil, "", true)
 	if !handled {
 		return false
 	}
@@ -505,6 +509,75 @@ func (h *HubServer) handleInboxList(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, 200, items)
 }
+
+// hubInboxAckStateMaxIDs bounds one ack-state request.
+const hubInboxAckStateMaxIDs = 100
+
+// handleInboxAckState answers, for each ?event_id=, whether its inbox row was
+// acked and when — nothing else about the row. The operator and a service
+// holding inbox.ack_state see every row; a node sees only rows it relayed
+// itself, so a sender can check its own events without reading any lane. A
+// node with no visible row among the ids gets the 401 it gets everywhere
+// else, whether the ids are another node's or unknown: the two must not be
+// told apart. For anyone else an id with no row is reported in not_found, and
+// the answer is 404 when no id has a row.
+func (h *HubServer) handleInboxAckState(w http.ResponseWriter, r *http.Request) {
+	caller := h.authenticate(r)
+	sender := ""
+	if caller.kind == hubCallerNode {
+		sender = caller.id
+	} else if access := h.authorize(r, hubScopeInboxAckState, ""); access != hubAccessGranted {
+		writeHubAccessDenied(w, access)
+		return
+	}
+	if h.inbox == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_disabled"})
+		return
+	}
+	ids := r.URL.Query()["event_id"]
+	if len(ids) == 0 || len(ids) > hubInboxAckStateMaxIDs {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+		return
+	}
+	seen := make(map[string]bool, len(ids))
+	unique := ids[:0:0]
+	for _, id := range ids {
+		if !validLaneEventID(id) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid_request"})
+			return
+		}
+		if !seen[id] {
+			seen[id] = true
+			unique = append(unique, id)
+		}
+	}
+	states, err := h.inbox.store.ackStates(unique, sender)
+	if err != nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_unavailable"})
+		return
+	}
+	if len(states) == 0 && caller.kind == hubCallerNode {
+		hubUnauthorized(w)
+		return
+	}
+	response := struct {
+		Events   []laneInboxAckState `json:"events"`
+		NotFound []string            `json:"not_found"`
+	}{Events: []laneInboxAckState{}, NotFound: []string{}}
+	for _, id := range unique {
+		if state, ok := states[id]; ok {
+			response.Events = append(response.Events, state)
+		} else {
+			response.NotFound = append(response.NotFound, id)
+		}
+	}
+	status := http.StatusOK
+	if len(response.Events) == 0 {
+		status = http.StatusNotFound
+	}
+	writeJSON(w, status, response)
+}
+
 func (h *HubServer) handleInboxCount(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeInbox(w, r, hubScopeInboxRead) {
 		return

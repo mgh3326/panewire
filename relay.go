@@ -259,7 +259,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		h.broadcastRelayRejected(event, "text_too_long")
 		return relayLaneEventResult{RejectedTooLong: true}
 	}
-	if result, handled := h.receiveInbox("lane.event", &event, sender, false); handled {
+	if result, handled := h.receiveInbox("lane.event", &event, sender, hubAgentMachineID(sender), false); handled {
 		return result
 	}
 	key := relayEventDedupeKey("lane.event", event)
@@ -428,7 +428,7 @@ func (h *HubServer) relayJobEventFrom(senderMachine, kind string, event hubJobEv
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
 	}
-	if _, handled := h.receiveInbox(kind, &event, h.relayPersistedAgent(senderMachine, nil), false); handled {
+	if _, handled := h.receiveInbox(kind, &event, h.relayPersistedAgent(senderMachine, nil), senderMachine, false); handled {
 		return
 	}
 	key := relayEventDedupeKey(kind, event)

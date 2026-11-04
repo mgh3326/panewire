@@ -132,11 +132,15 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 			return nil, err
 		}
 	}
-	if err := addLaneInboxColumn(ctx, db, "hold_until"); err != nil {
+	if _, err := addLaneInboxColumn(ctx, db, "hold_until", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		db.Close()
 		return nil, err
 	}
-	if err := addLaneInboxColumn(ctx, db, "delivered_at"); err != nil {
+	if _, err := addLaneInboxColumn(ctx, db, "delivered_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := addLaneInboxAckState(ctx, db); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -259,11 +263,12 @@ func (s *laneInboxStore) markBatchSent(id string) error {
 	return err
 }
 
-// addLaneInboxColumn adds an integer state column to pre-feature SQLite stores.
-func addLaneInboxColumn(ctx context.Context, db *sql.DB, column string) error {
+// addLaneInboxColumn adds a state column to pre-feature SQLite stores. added
+// is true only when this call created it, so a caller can backfill once.
+func addLaneInboxColumn(ctx context.Context, db *sql.DB, column, definition string) (added bool, err error) {
 	rows, err := db.QueryContext(ctx, `PRAGMA table_info(lane_inbox)`)
 	if err != nil {
-		return err
+		return false, err
 	}
 	found := false
 	for rows.Next() {
@@ -272,26 +277,52 @@ func addLaneInboxColumn(ctx context.Context, db *sql.DB, column string) error {
 		var dflt sql.NullString
 		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
 			rows.Close()
-			return err
+			return false, err
 		}
 		found = found || name == column
 	}
 	err = rows.Err()
 	rows.Close()
+	if err != nil || found {
+		return false, err
+	}
+	// A second hub opening the same store may add the column first.
+	if _, err := db.ExecContext(ctx, `ALTER TABLE lane_inbox ADD COLUMN `+column+` `+definition); err != nil {
+		return false, ignoreDuplicateColumn(err)
+	}
+	return true, nil
+}
+
+func ignoreDuplicateColumn(err error) error {
+	if strings.Contains(err.Error(), "duplicate column name") {
+		return nil
+	}
+	return err
+}
+
+// addLaneInboxAckState adds the columns the ack-state lookup reads: the machine
+// that relayed the row and the producer's event id. A store from before the
+// columns gets event_id backfilled from the stored payload; sender stays empty
+// for those rows, so only the operator and scoped services can see them.
+func addLaneInboxAckState(ctx context.Context, db *sql.DB) error {
+	if _, err := addLaneInboxColumn(ctx, db, "sender", "TEXT NOT NULL DEFAULT ''"); err != nil {
+		return err
+	}
+	added, err := addLaneInboxColumn(ctx, db, "event_id", "TEXT NOT NULL DEFAULT ''")
 	if err != nil {
 		return err
 	}
-	if !found {
-		// A second hub opening the same store may add the column first.
-		if _, err := db.ExecContext(ctx, `ALTER TABLE lane_inbox ADD COLUMN `+column+` INTEGER NOT NULL DEFAULT 0`); err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+	if added {
+		if _, err := db.ExecContext(ctx, `UPDATE lane_inbox SET event_id=COALESCE(json_extract(payload,'$.event_id'),'') WHERE json_valid(payload)`); err != nil {
 			return err
 		}
 	}
-	return nil
+	_, err = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS lane_inbox_event_id ON lane_inbox(event_id) WHERE event_id<>''`)
+	return err
 }
 
 func addLaneInboxMustAck(ctx context.Context, db *sql.DB) error {
-	if err := addLaneInboxColumn(ctx, db, "must_ack"); err != nil {
+	if _, err := addLaneInboxColumn(ctx, db, "must_ack", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
 	}
 	_, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS lane_inbox_must_ack ON lane_inbox(lane) WHERE must_ack=1 AND acked_at=0`)
@@ -422,6 +453,13 @@ func scanLaneInbox(row inboxScanner, surfaced ...bool) (laneInboxItem, error) {
 // An interrupt is stored read — injection is its delivery — unless its
 // declared type must be acked: then it stays unread until `inbox ack`.
 func (s *laneInboxStore) put(key, lane, kind, class string, e hubJobEventPayload, now time.Time, deadline, window time.Duration, hold ...time.Duration) (laneInboxItem, error) {
+	return s.putFrom("", key, lane, kind, class, e, now, deadline, window, hold...)
+}
+
+// putFrom is put recording which node or service relayed the event. sender is
+// first-writer-wins with the row; it is empty for a row the hub itself wrote
+// (replay, HTTP ingress, its own digests) and is never part of the item JSON.
+func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJobEventPayload, now time.Time, deadline, window time.Duration, hold ...time.Duration) (laneInboxItem, error) {
 	raw, err := json.Marshal(e)
 	if err != nil {
 		return laneInboxItem{}, err
@@ -457,11 +495,17 @@ func (s *laneInboxStore) put(key, lane, kind, class string, e hubJobEventPayload
 	defer done()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	query := `INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
-	if s.dialect == laneInboxSQLite {
-		query = `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until) VALUES((SELECT max(COALESCE((SELECT max(id) FROM lane_inbox),0),floor)+1 FROM lane_inbox_id_floor WHERE singleton=1),?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
+	// Only an id the lookup route would accept is stored, so a producer id
+	// Postgres text cannot hold never fails the insert.
+	eventID := e.EventID
+	if !validLaneEventID(eventID) {
+		eventID = ""
 	}
-	insert, err := s.db.ExecContext(ctx, s.q(query), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn, holdUntil)
+	query := `INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
+	if s.dialect == laneInboxSQLite {
+		query = `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id) VALUES((SELECT max(COALESCE((SELECT max(id) FROM lane_inbox),0),floor)+1 FROM lane_inbox_id_floor WHERE singleton=1),?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
+	}
+	insert, err := s.db.ExecContext(ctx, s.q(query), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn, holdUntil, sender, eventID)
 	if err != nil {
 		return laneInboxItem{}, err
 	}
@@ -521,6 +565,51 @@ func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error)
 		items = append(items, i)
 	}
 	return items, rows.Err()
+}
+
+// laneInboxAckState is what the ack-state lookup may say about an event: its
+// id and whether, and when, its inbox row was acked. It carries no lane, kind
+// or body.
+type laneInboxAckState struct {
+	EventID string `json:"event_id"`
+	Acked   bool   `json:"acked"`
+	AckedAt string `json:"acked_at,omitempty"`
+}
+
+// ackStates answers for each event id the rows the caller may see: every row
+// when sender is "", otherwise only rows that sender relayed. An id with
+// several visible rows (the same event relayed to several lanes) is acked
+// once all of them are, at the latest ack time. An id with no visible row is
+// absent from the result, so a hidden row and a missing one look the same.
+func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string]laneInboxAckState, error) {
+	args := make([]any, 0, len(eventIDs)+2)
+	marks := make([]string, len(eventIDs))
+	for i, id := range eventIDs {
+		marks[i] = "?"
+		args = append(args, id)
+	}
+	args = append(args, sender, sender)
+	ctx, done := s.op(s.life)
+	defer done()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT event_id,count(*),sum(CASE WHEN acked_at>0 THEN 1 ELSE 0 END),max(acked_at) FROM lane_inbox WHERE event_id IN (`+strings.Join(marks, ",")+`) AND (?='' OR sender=?) GROUP BY event_id`), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	states := map[string]laneInboxAckState{}
+	for rows.Next() {
+		var id string
+		var total, acked, latest int64
+		if err := rows.Scan(&id, &total, &acked, &latest); err != nil {
+			return nil, err
+		}
+		state := laneInboxAckState{EventID: id, Acked: acked == total}
+		if state.Acked {
+			state.AckedAt = time.UnixMilli(latest).UTC().Format(time.RFC3339)
+		}
+		states[id] = state
+	}
+	return states, rows.Err()
 }
 
 func (s *laneInboxStore) read(id int64, lane string, now time.Time) (laneInboxItem, error) {

@@ -19,6 +19,7 @@ const (
 	hubScopeWake            = "wake"
 	hubScopeInboxRead       = "inbox.read"
 	hubScopeInboxAck        = "inbox.ack"
+	hubScopeInboxAckState   = "inbox.ack_state"
 	hubScopeStateRead       = "state.read"
 
 	hubScopeAnyMachine = "*"
@@ -164,7 +165,7 @@ func parseHubScopes(raw string) ([]hubScopeGrant, error) {
 	for _, item := range strings.Split(raw, ",") {
 		scope := strings.TrimSpace(item)
 		switch {
-		case scope == hubScopeNodesAgentsRead, scope == hubScopeStateRead:
+		case scope == hubScopeNodesAgentsRead, scope == hubScopeStateRead, scope == hubScopeInboxAckState:
 			grants = append(grants, hubScopeGrant{name: scope})
 		case strings.HasPrefix(scope, hubScopeInboxRead+":"), strings.HasPrefix(scope, hubScopeInboxAck+":"):
 			name, lane, _ := strings.Cut(scope, ":")
