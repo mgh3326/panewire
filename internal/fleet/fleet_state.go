@@ -76,6 +76,7 @@ type FleetStateMessage struct {
 		Connected bool      `json:"connected"`
 		LastSeen  time.Time `json:"last_seen"`
 	} `json:"publisher,omitempty"`
+	Readiness *ReadinessState `json:"readiness,omitempty"`
 }
 
 // fleetStateLog is one run's record of the sources it used.
@@ -311,4 +312,23 @@ func (a *App) fleetStateRecord() map[string]any {
 		rec["quota"] = quota
 	}
 	return rec
+}
+
+// readinessStates answers each host's readiness from the hub's fleet state.
+// It applies the freshness rule of the load value: the publisher is alive and
+// the value is within the publisher TTL. A host whose value fails it is left
+// out, which the filter reads as today's behaviour (no readiness drop).
+func (a *App) readinessStates(ctx context.Context) map[string]ReadinessState {
+	snap, _ := a.fleetSnapshot(ctx)
+	if snap == nil {
+		return nil
+	}
+	out := map[string]ReadinessState{}
+	for _, m := range snap.States {
+		if m.Kind != "readiness" || m.Readiness == nil || !a.publisherAlive(snap, m.Host) || snap.At.Sub(m.MeasuredAt) > a.publisherTTL() {
+			continue
+		}
+		out[m.Host] = *m.Readiness
+	}
+	return out
 }
