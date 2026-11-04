@@ -22,15 +22,3 @@ func TestCommandCodeModelProof(t *testing.T) {
 		})
 	}
 }
-func TestPiFooterProof(t *testing.T) {
-	screen := "── editor ──\n\n────────\n~/tree\n12%/100k (anthropic) example • high"
-	if !PiProof(screen, "anthropic/example", "high", "/home/example/tree", "/home/example", "") {
-		t.Fatal("valid footer refused")
-	}
-	if PiProof(screen, "anthropic/example", "medium", "/home/example/tree", "/home/example", "") {
-		t.Fatal("wrong effort proved")
-	}
-	if PiProof(screen, "anthropic/example", "high", "/home/example/tree", "/home/example", screen) {
-		t.Fatal("quoted footer proved")
-	}
-}

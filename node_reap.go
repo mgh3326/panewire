@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 )
 
 // pane.read and job.done are the two node commands mergewake reap needs for a
@@ -122,31 +123,41 @@ var nodeCodexQueueHeadings = []string{
 
 // nodeComposerState classifies a pane's input line from its visible screen.
 // Anything but a composer located and seen empty is never "empty", because
-// that answer lets a caller close the pane: a prompt suggestion or any
-// placeholder other than a harness's idle one reads as text, which keeps the
-// pane.
+// that answer lets a caller close the pane: any placeholder other than a
+// harness's idle one reads as text, which keeps the pane. The screen is an ANSI
+// read (nodeReadScreen). A Claude composer whose every visible character is
+// dim (SGR 2) is a prompt suggestion, which is not unsent text, so it reads
+// empty; one non-dim character, typed text, keeps the pane.
 func nodeComposerState(harness, screen string) string {
-	screen = strings.ReplaceAll(screen, "\r", "")
+	rows := parseNodeScreen(screen)
+	screen = nodeScreenPlain(screen)
 	if strings.EqualFold(harness, "codex") {
 		return nodeCodexComposerState(screen)
 	}
 	if strings.EqualFold(harness, "claude") {
-		lines := strings.Split(screen, "\n")
 		var dividers []int
-		for i, line := range lines {
-			if strings.Contains(line, "─") && strings.Trim(line, " \t─") == "" {
+		for i, row := range rows {
+			if line := row.String(); strings.Contains(line, "─") && strings.Trim(line, " \t─") == "" {
 				dividers = append(dividers, i)
 			}
 		}
 		if len(dividers) < 2 {
 			return nodeComposerUnknown
 		}
-		for i, line := range lines[dividers[len(dividers)-2]+1 : dividers[len(dividers)-1]] {
-			line = strings.TrimSpace(line)
+		for i, row := range rows[dividers[len(dividers)-2]+1 : dividers[len(dividers)-1]] {
+			from := 0
 			if i == 0 {
-				line = strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(line, "❯"), ">"))
+				for from < len(row.text) && unicode.IsSpace(row.text[from]) {
+					from++
+				}
+				if from < len(row.text) && row.text[from] == '❯' {
+					from++
+				}
+				if from < len(row.text) && row.text[from] == '>' {
+					from++
+				}
 			}
-			if line != "" {
+			if row.solid(from) {
 				return nodeComposerHasText
 			}
 		}
@@ -224,6 +235,13 @@ func nodeScreenTail(screen string, lines int) string {
 	return utf8SuffixWithin(strings.Join(rows, "\n"), nodePaneReadMaxTailBytes)
 }
 
+// nodeReadScreen reads a pane's visible screen with its SGR attributes, which
+// nodeComposerState needs to tell a dim prompt suggestion from typed text.
+func (client *HubClient) nodeReadScreen(ctx context.Context, paneID string) (string, error) {
+	output, err := client.nodeHerdrRunner()(ctx, "pane", "read", paneID, "--source", "visible", "--format", "ansi")
+	return string(output), err
+}
+
 // nodePaneRead reports one pane. Matching name and cwd as well as the id is
 // what confines it to this node: pane ids are host-local, so an id meant for
 // another node can name an unrelated pane here, and that pane's data must not
@@ -246,13 +264,12 @@ func (client *HubClient) nodePaneRead(ctx context.Context, args nodePaneReadArgs
 		result.AgentStatus = "unknown"
 	}
 	result.AgentStatus = utf8PrefixWithin(result.AgentStatus, nodePaneReadMaxStatus)
-	output, err := client.nodeHerdrRunner()(ctx, "pane", "read", args.PaneID, "--source", "visible")
+	screen, err := client.nodeReadScreen(ctx, args.PaneID)
 	if err != nil {
 		return result, ""
 	}
-	screen := string(output)
 	result.Composer = nodeComposerState(row.Agent, screen)
-	result.ScreenTail = nodeScreenTail(screen, args.TailLines)
+	result.ScreenTail = nodeScreenTail(nodeScreenPlain(screen), args.TailLines)
 	return result, ""
 }
 

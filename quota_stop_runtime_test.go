@@ -81,14 +81,20 @@ func TestQuotaStopWakeShadowAndResume(t *testing.T) {
 			rig.manager.Tick(context.Background(), rig.now.Add(4*time.Second))
 			rig.manager.Tick(context.Background(), rig.now.Add(40*time.Second))
 			rig.manager.Tick(context.Background(), rig.now.Add(41*time.Second))
-			wantSends := 0
-			wantReads := 1
+			// A quota stop seen on a blocked pane is observed once and handed
+			// over (blocked_dialog): herdr refuses agent.prompt on a blocked
+			// pane, so it is never resumed and its one wait is kept (hk 2850).
+			wantHandovers := 0
 			if act {
-				wantSends = 1
-				wantReads = 2
+				wantHandovers = 1
 			}
-			if sends != wantSends || reads != wantReads || records != 1 {
-				t.Fatalf("reads=%d sends=%d records=%d", reads, sends, records)
+			if sends != 0 || reads != 1 || records != 1 || handovers != wantHandovers {
+				t.Fatalf("reads=%d sends=%d records=%d handovers=%d", reads, sends, records, handovers)
+			}
+			var decision, reason string
+			var attempted int
+			if err := rig.store.db.QueryRow(`SELECT decision,reason,attempted FROM quota_stop_decisions WHERE decision<>'' ORDER BY created LIMIT 1`).Scan(&decision, &reason, &attempted); err != nil || decision != "handover" || reason != "blocked_dialog" || attempted != 0 {
+				t.Fatalf("blocked stop: decision=%s reason=%s attempted=%d err=%v", decision, reason, attempted, err)
 			}
 			if act {
 				rig.now = rig.now.Add(50 * time.Second)
@@ -101,6 +107,12 @@ func TestQuotaStopWakeShadowAndResume(t *testing.T) {
 				rig.route(0, "owner")
 				rig.manager.Tick(context.Background(), rig.now.Add(4*time.Second))
 				rig.manager.Tick(context.Background(), rig.now.Add(5*time.Second))
+				// The idle stop still has its wait, because the blocked stop
+				// never spent it: once its reset is due it is resumed once.
+				if sends != 0 {
+					t.Fatalf("resumed before the reset: sends=%d", sends)
+				}
+				rig.manager.Tick(context.Background(), rig.now.Add(3*time.Minute))
 				if sends != 1 || handovers != 1 || records != 2 {
 					t.Fatalf("second stop sends=%d handovers=%d records=%d", sends, handovers, records)
 				}

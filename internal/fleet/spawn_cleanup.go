@@ -11,6 +11,17 @@ const FailedSpawnCloseSettle = 2 * time.Second
 // A deadline can expire after the harness starts working. Preserve an unknown
 // or working pane and its leases; timeout alone never authorizes closing it.
 func (a *App) closeFailedSpawn(ctx context.Context, s Spawn, pane, kind string) error {
+	err := a.closeFailedSpawnPane(ctx, s, pane, kind)
+	if err != nil {
+		// The pane stays open; the receipt lets reap tools find it by id.
+		if e := a.event(ctx, s.Job, "job.cleanup_refused", map[string]any{"pane_id": pane, "label": s.Label, "kind": kind, "reason": err.Error()}); e != nil {
+			a.warn("cleanup receipt for pane %s failed: %v", pane, e)
+		}
+	}
+	return err
+}
+
+func (a *App) closeFailedSpawnPane(ctx context.Context, s Spawn, pane, kind string) error {
 	first, err := a.failedSpawnPane(ctx, s, pane, kind)
 	if err != nil {
 		return err

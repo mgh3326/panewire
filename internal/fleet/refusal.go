@@ -109,6 +109,8 @@ const (
 // then the remaining exit statuses. Codes match ^[a-z0-9_]+$ and are at most 40
 // bytes.
 var spawnRefusals = []spawnRefusal{
+	// Same status as the trust prompt, so this text row must come first.
+	{match: "HOOKS_REVIEW_REQUIRED", code: "hooks_review", hint: "The host owner reviews the hooks in Codex on the executing host (the executing CODEX_HOME), then repeat the same command; the brief was withheld and panewire never answers the screen."},
 	// The real refusal names a path and the word "trust", so the status decides.
 	{rc: exitTrustPrompt, code: "trust_prompt", hint: "Approve only this worktree in the executing CODEX_HOME, then repeat the same command; the brief was withheld until trust is confirmed."},
 	// These name a path or an id, which the broader matches below could hit.

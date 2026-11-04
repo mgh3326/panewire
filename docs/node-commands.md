@@ -392,7 +392,14 @@ logs screen contents or panewire's output.
 the last Codex `›` line. The reap caller maps `has_text` to `composer-text` and
 `unknown` to `composer-unknown`; only `empty` permits closing.
 
-Visible reads cannot prove a placeholder is dim, so a known idle placeholder
+The node reads the screen with `herdr pane read --source visible --format ansi`
+and keeps SGR attributes only for the Claude rule: when every visible character
+between the last two dividers is dim (SGR 2), the composer is a prompt
+suggestion and reads `empty`; one non-dim character is typed text and reads
+`has_text`. `screen_tail` is returned as plain text.
+
+Codex and Devin are classified from the plain text alone. That text cannot prove
+a placeholder is dim, so a known idle placeholder
 counts as `empty` only when it is the whole composer, matched exactly after the
 glyph and surrounding spaces are trimmed:
 

@@ -155,7 +155,7 @@ func TestTask646EchoAfterAnchorWhenOldEchoScrollsOut(t *testing.T) {
 // Harnesses without submission evidence keep their unproven verdict: freshness
 // only narrows a positive verdict, it never creates one.
 func TestTask646NoEvidenceHarnessStaysUnproven(t *testing.T) {
-	for _, harness := range []string{"kimi", "agy", "grok", "mystery"} {
+	for _, harness := range []string{"agy", "mystery"} {
 		if got, _ := classifyPromptSubmission(harness, "idle\n", "assistant saw R2-MARKER\n", "R2-MARKER"); got != "unproven" {
 			t.Fatalf("%s: got %s, want unproven", harness, got)
 		}

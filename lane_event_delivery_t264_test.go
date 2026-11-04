@@ -166,7 +166,7 @@ func TestTask264RelayInjectHarnessAwareSubmission(t *testing.T) {
 	// classifySubmission was just never taught to read it. devin now shares
 	// claude/codex's evidence path (see harnessHasSubmissionEvidence), so the
 	// AC0 carve-out only remains for a harness with genuinely no evidence
-	// path (e.g. grok). A devin read with neither queue nor marker evidence
+	// path. A devin read with neither queue nor marker evidence
 	// must now report unconfirmed and retry, exactly like claude/codex.
 	t.Run("devin harness with no queue/marker evidence reports unconfirmed, not delivered", func(t *testing.T) {
 		dir := t.TempDir()

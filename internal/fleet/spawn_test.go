@@ -264,16 +264,13 @@ func TestSeatDefaultEffortResolvesBareProfile(t *testing.T) {
 	for _, tc := range []struct{ seat, effort string }{
 		{"devin-swe2", "high"},
 		{"cmd-dsflash41", "high"},
-		{"pi-haiku55", "high"},
-		{"pi-sonnet55", "high"},
-		{"pi-opus55", "high"},
 	} {
 		qr, ok := a.quotaRequest(Spawn{Profile: tc.seat})
 		if !ok || qr.Effort != tc.effort {
 			t.Fatalf("%s must default to effort %s: %+v", tc.seat, tc.effort, qr)
 		}
 	}
-	qr, _ := a.quotaRequest(Spawn{Profile: "pi-sonnet55", Effort: "max"})
+	qr, _ := a.quotaRequest(Spawn{Profile: "cmd-dsflash41", Effort: "max"})
 	if qr.Effort != "max" {
 		t.Fatalf("an explicit --effort must win over the seat default: %+v", qr)
 	}
@@ -281,7 +278,7 @@ func TestSeatDefaultEffortResolvesBareProfile(t *testing.T) {
 
 func TestSpawnDryRunLocalRefusesMissingCapability(t *testing.T) {
 	a, s, _, _ := cmdFixture(t)
-	s.Profile = "pi-sonnet55" // a.Config.Local carries cmd_dsflash41 but not pi_anthropic
+	s.Profile = "cc-glm" // a.Config.Local carries cmd_dsflash41 but not clinepass
 	s.DryRun = true
 	e := a.Spawn(context.Background(), s)
 	if code(e) != 70 {

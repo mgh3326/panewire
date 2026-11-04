@@ -27,7 +27,6 @@ max_active = 4
 shell_ready_timeout_ms = 120000
 brief_submit_timeout_ms = 120000
 brief_submit_retry_ms = 15000
-pi_anthropic = false
 cmd_dsflash41 = false
 clinepass = false
 
@@ -83,7 +82,6 @@ local_delete_at = "drive_confirmed"
 | `shell_ready_timeout_ms` | `120000` | Startup readiness window, integer 30000–300000. |
 | `brief_submit_timeout_ms` | `120000` | How long a spawn waits for the brief to start a turn before it refuses with 76, integer 30000–600000. Raise it on a host that runs under sustained load. |
 | `brief_submit_retry_ms` | `15000` | How often the submit key repeats during that wait, at least 1000 and below the timeout. It goes only to an idle pane; Claude and Codex panes must also still show the brief in the composer. The brief is never pasted twice. |
-| `pi_anthropic` | `false` | Literal capability opt-in required by pi policy rows. |
 | `cmd_dsflash41` | `false` | Literal capability opt-in required by cmd policy rows. The provisioned cmd account must have no persisted MCP servers. |
 | `clinepass` | `false` | Literal capability opt-in required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). |
 | `tags` | unset | Capability tags offered by this host for job placement (`spawn --tags`). Lowercase tag names. `caps` is an alias; both lists merge. |
@@ -1046,7 +1044,7 @@ When the wait fails (escalated, lost, timeout), the pane stays for
 **Headless mode.** The seat's CLI runs once, in `--cwd`, with the brief and a
 deadline of `--timeout`; its output is the answer. The job is claimed, leased
 and completed with the same `done` call. Kinds with a one-shot form: `claude`,
-`codex`, `devin`, `cmd`, `pi`, `grok`, `opencode`; any other kind is refused
+`codex`, `devin`, `cmd`, `omp`, `opencode`; any other kind is refused
 with exit 70 before anything is claimed. The one-shot flags are fixed in code
 and have been exercised only against a fake runner.
 
@@ -1217,9 +1215,7 @@ for ownership and distribution.
 | `PANEWIRE_LANE_STRICT=1` | A committed builder with unregistered lane returns 82. |
 | `PANEWIRE_COMPLETION_TIMEOUT_S` | Positive watcher lifetime; duration or bare seconds, default 1h. Expiry retains the job. The watcher completes a job only on a [terminal signal](r21-lane-event.md#job-completion-signal), never on a stable report alone. |
 | `MOCK_MCP_PROFILE`, `PANEWIRE_MOCK_MCP_CONFIG` | Required reviewed mock profile name and exclusive stdio mcpServers JSON. |
-| `KIMI_CODE_HOME` | Kimi config home; thinking effort is verified. |
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | Harness config homes for selected-workspace trust; mock Codex uses its private job home. |
-| `KIMI_CODE_LOW_HOME`, `KIMI_CODE_HIGH_HOME`, `KIMI_CODE_MAX_HOME` | Pinned clone homes; default ~/.local/share/kimi-code-EFFORT. |
 
 Legacy periodic prune environment switches are not read. Panewire never
 silently enables automatic pruning.
@@ -1378,9 +1374,17 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 87 | `QUOTA_EXHAUSTED`: every eligible account is measured exhausted and the role escalates to the parent lane. |
 | 88 | `AUTH_UNAVAILABLE`: no usable current account binding on eligible hosts. |
 | 89 | `QUOTA_UNKNOWN`: quota remains unknown after one bounded account refresh. |
-| 90 | `WORKSPACE_TRUST_REQUIRED`: Codex is waiting at its directory trust prompt; initial brief is withheld. |
+| 90 | `WORKSPACE_TRUST_REQUIRED`: Codex is waiting at its directory trust prompt; initial brief is withheld. Or `HOOKS_REVIEW_REQUIRED`: Codex is waiting at its "Hooks need review" screen; initial brief is withheld. |
 | 124 | A time-bounded CLI call reached its context deadline. |
 | 255 | SSH could not reach a remote host (repository check, clone or spawn leg). Never returned for a `via = "hub"` host. |
+
+`HOOKS_REVIEW_REQUIRED` shares status 90 with the trust prompt: both mean Codex is
+waiting for the host owner at a first-run screen and the brief was withheld. Codex shows
+"Hooks need review" at launch when hooks are new or changed. panewire fails at the first
+read of the screen instead of waiting for the footer deadline (rc 70, `Codex model/effort
+footer not proven`). It never accepts, dismisses or answers the screen. Fix: the host
+owner reviews the hooks in Codex on the executing host (the executing `CODEX_HOME`), then
+repeats the same spawn. The hub records the refusal as `spawn_failed:hooks_review`.
 
 Unexpected dependency failures preserve their subprocess exit code. A pane
 success receipt is always authoritative for avoiding a second spawn, even with exit 82.
