@@ -783,6 +783,13 @@ allows (any profile ID when the role allows `"*"`), or its effort is not
 one of `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`.
 This PR does not parse the proposed v2 schema.
 
+The seat-role map is read from `panewire_role_map` or its pre-#155 name
+`runtug_role_map` (the name hk publishes today); two maps that differ are
+refused, and the cache stores the map as `panewire_role_map`. A seat role
+the map does not name takes its builtin routing role (`builder` lead,
+`worker` implementer, `tester` verifier, `reviewer` reviewer, `counsel`
+consult) instead of running unfiltered.
+
 `--routing-role lead|consult|implementer|explorer|verifier|reviewer|judge`
 on `spawn` or `plan` selects the routing role. Seat admission still uses
 `--role`. Builder and counsel retain their required routing roles.
