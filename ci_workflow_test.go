@@ -104,3 +104,65 @@ func TestCIOkRequiresOnlyTheSuitesJobs(t *testing.T) {
 		t.Fatal("ci-ok passed a PR whose postgres job was skipped")
 	}
 }
+
+// macOS runs as an advisory job (operator decision 2026-11-05): hosted macOS
+// runners are often not acquired, so neither ci-ok, mergewake's required
+// checks nor the ci-any-ref status may wait on it.
+func TestCIMacOSIsAdvisory(t *testing.T) {
+	raw, err := os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var workflow struct {
+		Jobs map[string]struct {
+			Needs           []string `yaml:"needs"`
+			RunsOn          string   `yaml:"runs-on"`
+			ContinueOnError bool     `yaml:"continue-on-error"`
+			Strategy        struct {
+				Matrix struct {
+					OS []string `yaml:"os"`
+				} `yaml:"matrix"`
+			} `yaml:"strategy"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(raw, &workflow); err != nil {
+		t.Fatal(err)
+	}
+	mac, ok := workflow.Jobs["test-macos"]
+	if !ok || mac.RunsOn != "macos-latest" || !mac.ContinueOnError {
+		t.Fatalf("test-macos must exist on macos-latest with continue-on-error: %+v", mac)
+	}
+	if slices.Contains(workflow.Jobs["ci-ok"].Needs, "test-macos") {
+		t.Fatal("ci-ok must not need the advisory test-macos job")
+	}
+	if matrix := workflow.Jobs["test"].Strategy.Matrix.OS; !slices.Equal(matrix, []string{"ubuntu-latest"}) {
+		t.Fatalf("the required test matrix must be ubuntu only, got %v", matrix)
+	}
+
+	rawPolicy, err := os.ReadFile(".mergewake/policy.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy struct {
+		RequiredChecks []string `yaml:"required_checks"`
+	}
+	if err := yaml.Unmarshal(rawPolicy, &policy); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(policy.RequiredChecks, "test (ubuntu-latest)") {
+		t.Fatalf("required_checks lost the Linux test: %v", policy.RequiredChecks)
+	}
+	for _, check := range policy.RequiredChecks {
+		if regexp.MustCompile(`(?i)macos`).MatchString(check) {
+			t.Fatalf("required_checks must not wait on macOS: %v", policy.RequiredChecks)
+		}
+	}
+
+	anyRef, err := os.ReadFile(".github/workflows/ci-any-ref.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !regexp.MustCompile(`RESULT: \$\{\{ needs\.ci\.outputs\.ok == 'true'`).Match(anyRef) {
+		t.Fatal("ci-any-ref must post its status from the ci-ok gate output, not the whole run")
+	}
+}

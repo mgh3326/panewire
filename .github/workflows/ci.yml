@@ -16,6 +16,12 @@ on:
         required: false
         default: all
         type: string
+    outputs:
+      ok:
+        # 'true' when the ci-ok gate passed. ci-any-ref posts its status from
+        # this, not from the whole run, so the advisory test-macos job cannot
+        # fail or cancel a dispatch.
+        value: ${{ jobs.ci-ok.outputs.ok }}
 
 permissions:
   contents: read
@@ -23,12 +29,13 @@ permissions:
 jobs:
   test:
     # The process-group kill and reaping behaviour the R19 quota path depends on
-    # differs between Darwin and Linux, so both are exercised.
+    # differs between Darwin and Linux, so both are exercised: Linux here as a
+    # required check, Darwin in test-macos as an advisory one.
     if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-latest, ubuntu-latest]
+        os: [ubuntu-latest]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -54,9 +61,41 @@ jobs:
       - run: go test -race -run '^TestQuiet' .
       - run: go test -race -run '^(TestAsyncSpawn|TestSpawn|TestNodeSpawn)' .
       - run: sh -n deploy/alloy/install-linux.sh deploy/alloy/run-alloy.sh
+
+  test-macos:
+    # Advisory: hosted macOS runners are often not acquired, so this job never
+    # gates ci-ok or mergewake (operator decision 2026-11-05). Same steps as
+    # test, plus gitleaks, which only the macOS runner can install.
+    name: test (macos-latest, advisory)
+    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    runs-on: macos-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go test ./...
+      # The full -race suite stays red on a pre-existing hk 1243 bytes.Buffer
+      # race in the r20t5 10ms-timer tests, so the unconfirmed-replay races
+      # (#1002/#1034) get their own -race pin on both OSes.
+      - run: go test -race -count=3 -run 'T1002|T1034' .
+      - run: go test -race -run '^TestQuiet' .
+      - run: go test -race -run '^(TestAsyncSpawn|TestSpawn|TestNodeSpawn)' .
+      - run: sh -n deploy/alloy/install-linux.sh deploy/alloy/run-alloy.sh
       # gitleaks is installed through Homebrew, which only the macOS runner has.
-      - if: runner.os == 'macOS'
-        run: brew install gitleaks && gitleaks git --no-banner --config .gitleaks.toml
+      - run: brew install gitleaks && gitleaks git --no-banner --config .gitleaks.toml
 
   postgres:
     # The hub inbox's Postgres backend (docs/hub-postgres.md). Service
@@ -102,8 +141,11 @@ jobs:
     runs-on: ubuntu-latest
     needs: [test, postgres, auto-tag-test]
     if: always()
+    outputs:
+      ok: ${{ steps.gate.outputs.ok }}
     steps:
       - name: Check required jobs
+        id: gate
         env:
           AUTO_TAG_RESULT: ${{ needs.auto-tag-test.result }}
           TEST_RESULT: ${{ needs.test.result }}
@@ -130,6 +172,7 @@ jobs:
           case "$SUITE" in all|postgres) postgres=yes ;; *) postgres=no ;; esac
           require "$test" test "$TEST_RESULT"
           require "$postgres" postgres "$POSTGRES_RESULT"
+          echo "ok=true" >> "${GITHUB_OUTPUT:-/dev/null}"
 
   auto-tag-test:
     runs-on: ubuntu-latest
