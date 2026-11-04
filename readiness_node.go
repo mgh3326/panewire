@@ -292,7 +292,8 @@ func (client *HubClient) collectReadiness(ctx context.Context) *fleet.Readiness 
 		// A refused spawn.json cannot launch anything: no repos, no brief.
 		return out
 	}
-	out.Config.Workspace, out.Config.HerdrSession = config.Workspace, config.HERDRSession
+	out.Config.Workspace = fleet.ReadinessConfigName(config.Workspace, fleet.ReadinessDefaultWorkspace)
+	out.Config.HerdrSession = fleet.ReadinessConfigName(config.HERDRSession, fleet.ReadinessDefaultSession)
 	if info, err := os.Stat(config.WorkRoot); config.WorkRoot != "" && err == nil && info.IsDir() {
 		out.Config.WorkRoot = true
 	}

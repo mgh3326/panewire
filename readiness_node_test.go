@@ -89,7 +89,7 @@ func TestCollectReadinessFromFakes(t *testing.T) {
 	if strings.Join(report.Repos, ",") != "other,panewire" || !report.Brief.HandoffkeepEnv {
 		t.Errorf("repos=%v brief=%+v", report.Repos, report.Brief)
 	}
-	if report.Config != (fleet.ReadinessConfig{Source: fleet.ReadinessConfigFile, Workspace: "workers", HerdrSession: "main", WorkRoot: true}) {
+	if report.Config != (fleet.ReadinessConfig{Source: fleet.ReadinessConfigFile, Workspace: "workers", HerdrSession: fleet.ReadinessConfigCustom, WorkRoot: true}) {
 		t.Errorf("config=%+v", report.Config)
 	}
 	for _, kind := range fleet.ReadinessKinds {

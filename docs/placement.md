@@ -60,7 +60,7 @@ drops what does not fit.
 | `brief.handoffkeep_env` | The handoffkeep env file is present, mode 0600 and holds a URL and token |
 | `toolchains` | `go`, `node`, `bun` with their versions, when installed |
 | `panewire_version` | The node's build |
-| `config` | The effective spawn configuration: `source` (`defaults` or `spawn.json`), `workspace`, `herdr_session`, `work_root` (whether it exists). See [r26-hub-spawn.md](r26-hub-spawn.md) |
+| `config` | The effective spawn configuration: `source` (`defaults` or `spawn.json`), `workspace`, `herdr_session` (the built-in default name, else `custom`: spawn.json names are free text and never travel), `work_root` (whether it exists). See [r26-hub-spawn.md](r26-hub-spawn.md) |
 
 The report is cached on the node. It is refreshed every 5 minutes and after
 every failed launch, probed in the background so a probe never delays a

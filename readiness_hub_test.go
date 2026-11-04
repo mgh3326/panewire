@@ -59,12 +59,17 @@ func TestReadinessSanitizeKeepsOnlyClosedData(t *testing.T) {
 	report.Repos = []string{"panewire", "/etc/passwd", "Has Space"}
 	report.Toolchains = map[string]string{"go": "1.26.0", "rm": "1", "node": "/usr/bin/node"}
 	report.Config.Workspace = "ws; rm -rf /"
+	report.Config.HerdrSession = "sk-secret-session"
+	report.Toolchains["bun"] = "sk-secret"
 	clean := sanitizeReadiness(report)
 	encoded, _ := json.Marshal(clean)
-	for _, leak := range []string{"/Users", "token=", "sk-", "screen said", "rogue", "/etc", "Has Space", "rm -rf", "/usr/bin"} {
+	for _, leak := range []string{"/Users", "token=", "sk-", "screen said", "rogue", "/etc", "Has Space", "rm -rf", "/usr/bin", "secret"} {
 		if strings.Contains(string(encoded), leak) {
 			t.Errorf("%q survived: %s", leak, encoded)
 		}
+	}
+	if clean.Config.Workspace != fleet.ReadinessConfigCustom || clean.Config.HerdrSession != fleet.ReadinessConfigCustom || clean.PanewireVersion != "" {
+		t.Errorf("config=%+v version=%q", clean.Config, clean.PanewireVersion)
 	}
 	h := clean.Harnesses["claude"]
 	if !h.Installed || h.Login != fleet.ReadinessLoginUnknown || h.Account != "" || h.Dialog != "" || len(clean.Repos) != 1 || clean.Toolchains["go"] != "1.26.0" || len(clean.Toolchains) != 1 {

@@ -83,6 +83,27 @@ const (
 	ReadinessConfigFile    = "spawn.json"
 )
 
+// Names a node may report for its workspace and herdr session. spawn.json
+// holds free text there, so a value other than the built-in default reads
+// ReadinessConfigCustom: the report never carries an operator-chosen name.
+const (
+	ReadinessDefaultWorkspace = "workers"
+	ReadinessDefaultSession   = "default"
+	ReadinessConfigCustom     = "custom"
+)
+
+// ReadinessConfigName answers name when it is the built-in default, "custom"
+// for any other non-empty value, and "" for none.
+func ReadinessConfigName(name, builtin string) string {
+	switch name {
+	case "":
+		return ""
+	case builtin:
+		return builtin
+	}
+	return ReadinessConfigCustom
+}
+
 // ReadinessKinds are the harness kinds a node reports on.
 var ReadinessKinds = []string{"claude", "codex", "omp", "agy", "devin", "cmd"}
 

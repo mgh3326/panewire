@@ -3,6 +3,7 @@ package panewire
 import (
 	"bytes"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"time"
 
@@ -76,15 +77,23 @@ func decodeHubReadiness(raw json.RawMessage) *fleet.Readiness {
 	return sanitizeReadiness(r)
 }
 
-var readinessTokenOK = func(s string) bool {
-	return s == "" || fleetStateTokenPattern.MatchString(s)
+// Version fields carry only what the node's own probes produce: dotted
+// numbers, and for panewire itself "dev" or a describe suffix. A token that
+// merely looks like a name (a credential-shaped string) is not a version.
+var (
+	readinessVersionPattern  = regexp.MustCompile(`^[0-9]+(?:\.[0-9]+){1,4}$`)
+	readinessPanewirePattern = regexp.MustCompile(`^(?:dev|v?[0-9]+(?:\.[0-9]+){1,3}(?:-[0-9]+-g[0-9a-f]{7,40})?)$`)
+)
+
+func readinessVersionOK(s string) bool {
+	return s == "" || readinessVersionPattern.MatchString(s)
 }
 
 // sanitizeReadiness keeps only values that fit the closed vocabulary, so a
 // node cannot put free text (a path, a screen, a secret) into the fleet state.
 func sanitizeReadiness(in fleet.Readiness) *fleet.Readiness {
 	out := fleet.Readiness{CheckedAt: in.CheckedAt.UTC(), Brief: in.Brief, Harnesses: map[string]fleet.HarnessReadiness{}, Toolchains: map[string]string{}, Repos: []string{}}
-	if readinessTokenOK(in.PanewireVersion) {
+	if in.PanewireVersion == "" || readinessPanewirePattern.MatchString(in.PanewireVersion) {
 		out.PanewireVersion = in.PanewireVersion
 	}
 	for _, kind := range fleet.ReadinessKinds {
@@ -93,7 +102,7 @@ func sanitizeReadiness(in fleet.Readiness) *fleet.Readiness {
 			continue
 		}
 		clean := fleet.HarnessReadiness{Installed: h.Installed, HerdrIntegration: h.HerdrIntegration, Login: fleet.ReadinessLoginUnknown}
-		if readinessTokenOK(h.Version) {
+		if readinessVersionOK(h.Version) {
 			clean.Version = h.Version
 		}
 		switch h.Login {
@@ -115,7 +124,7 @@ func sanitizeReadiness(in fleet.Readiness) *fleet.Readiness {
 		}
 	}
 	for tool, version := range in.Toolchains {
-		if (tool == "go" || tool == "node" || tool == "bun") && readinessTokenOK(version) {
+		if (tool == "go" || tool == "node" || tool == "bun") && readinessVersionOK(version) {
 			out.Toolchains[tool] = version
 		}
 	}
@@ -123,12 +132,10 @@ func sanitizeReadiness(in fleet.Readiness) *fleet.Readiness {
 	case fleet.ReadinessConfigDefault, fleet.ReadinessConfigFile:
 		out.Config.Source = in.Config.Source
 	}
-	if readinessTokenOK(in.Config.Workspace) {
-		out.Config.Workspace = in.Config.Workspace
-	}
-	if readinessTokenOK(in.Config.HerdrSession) {
-		out.Config.HerdrSession = in.Config.HerdrSession
-	}
+	// Workspace and session names are free text in spawn.json, so only the
+	// built-in defaults travel by name; any other value reads "custom".
+	out.Config.Workspace = fleet.ReadinessConfigName(in.Config.Workspace, fleet.ReadinessDefaultWorkspace)
+	out.Config.HerdrSession = fleet.ReadinessConfigName(in.Config.HerdrSession, fleet.ReadinessDefaultSession)
 	out.Config.WorkRoot = in.Config.WorkRoot
 	return &out
 }
