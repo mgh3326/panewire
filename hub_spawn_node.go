@@ -416,6 +416,10 @@ func hubSpawnArg(args []string, flag string) string {
 	return ""
 }
 
+// hubSpawnBriefTransport is the brief fetch's transport; nil is the default.
+// Tests point it at a TLS test server.
+var hubSpawnBriefTransport http.RoundTripper
+
 func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key string) (string, error) {
 	if !validHubSpawnDocKey(key) || envPath == "" {
 		return "", errors.New("brief unavailable")
@@ -438,9 +442,9 @@ func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key st
 	if err != nil {
 		return "", errors.New("brief unavailable")
 	}
-	request.Header.Set("Authorization", "Bearer "+env.Token)
+	env.setAuth(request)
 	request.Header.Set("Accept", "application/json")
-	response, err := (&http.Client{Timeout: handoffkeepTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
+	response, err := (&http.Client{Transport: hubSpawnBriefTransport, Timeout: handoffkeepTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
 	if err != nil {
 		return "", errors.New("brief unavailable")
 	}
