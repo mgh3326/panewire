@@ -193,13 +193,12 @@ expect: name=orch-mock cwd=auto_trader
 
 `--uptake`의 의미는 새 프로토콜을 발명하지 않고 현행 절차를 그대로 이름 붙인 것이다.
 
-제출과 tool uptake 매처는 harness kind별로 닫힌 표를 사용한다. Claude 전용 문자열을 Codex·kimi·agy에 일반화하지 않으며, kind를 모르면 보수적으로 `unproven`이다.
+제출과 tool uptake 매처는 harness kind별로 닫힌 표를 사용한다. Claude 전용 문자열을 Codex·agy에 일반화하지 않으며, kind를 모르면 보수적으로 `unproven`이다.
 
 | harness kind | 제출 positive matcher | tool-uptake matcher | negative/주의 | R2 fixture |
 |---|---|---|---|---|
 | Claude | prompt marker; 또는 paste chip이 사라진 `Press up to edit queued messages` | 주입 후 같은 pane의 접수 확인 tool-call 표식 + marker/revision | paste chip 잔존·컴포저 원문 잔존은 미제출; `❯` 단독 금지 | 필수 |
 | Codex | prompt marker; 또는 주입 후 해당 prompt 처리와 연결된 `• Ran` tool line | post-injection `• Ran` 접수 확인 tool-call 표식 + marker/revision | 빈 `›`는 증거 아님; 일반 `• Ran`만으로 접수 확인을 주장하지 않음 | 필수 |
-| kimi | R2에서 positive screen matcher를 정의하지 않음 | 정의하지 않음 | 일반 텍스트는 `unproven` | 보수적 실패만 |
 | agy | R2에서 positive screen matcher를 정의하지 않음 | 정의하지 않음 | 일반 텍스트는 `unproven` | 보수적 실패만 |
 
 표의 marker와 tool line은 주입 이후 revision 범위에 있어야 하며, timestamp만으로 과거 화면을 증거로 재사용하지 않는다.

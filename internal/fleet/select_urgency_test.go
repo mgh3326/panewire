@@ -16,16 +16,16 @@ func urgencyRows() ([]CatalogRow, map[string]PoolView, []string, map[string]stri
 		{Profile: "sonnet", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "m"},
 		{Profile: "opus", Effort: "high", Grade: "A", Pool: "anthropic-api", Gate: "default", ModelID: "m"},
 		{Profile: "codex-luna", Effort: "high", Grade: "A", Pool: "codex", Gate: "default", ModelID: "m"},
-		{Profile: "grok-hi", Effort: "high", Grade: "S", Pool: "xai", Gate: "default", ModelID: "m"},
+		{Profile: "kiro-glm", Effort: "high", Grade: "S", Pool: "kiro", Gate: "default", ModelID: "m"},
 	}
 	pools := map[string]PoolView{
 		"claude":        {Status: "ok", Class: "spend", Waste: &waste, Blocking: ptrF(90)},
 		"anthropic-api": {Status: "ok", Class: "spend", Waste: &noWaste, Blocking: ptrF(30)},
 		"codex":         {Status: "ok", Class: "spend", Waste: &noWaste, Blocking: ptrF(5)},
-		"xai":           {Status: "ok", Class: "spend", Waste: &noWaste, Blocking: ptrF(60)},
+		"kiro":          {Status: "ok", Class: "spend", Waste: &noWaste, Blocking: ptrF(60)},
 	}
-	gate := map[string]string{"devin-swe2": "devin", "sonnet": "claude", "opus": "anthropic-api", "codex-luna": "codex", "grok-hi": "xai"}
-	return rows, pools, []string{"devin", "claude", "anthropic-api", "codex", "xai"}, gate
+	gate := map[string]string{"devin-swe2": "devin", "sonnet": "claude", "opus": "anthropic-api", "codex-luna": "codex", "kiro-glm": "kiro"}
+	return rows, pools, []string{"devin", "claude", "anthropic-api", "codex", "kiro"}, gate
 }
 
 // urgencyFixture is selFixture with an hk task priority on the bound task.
@@ -73,7 +73,7 @@ func TestSelectUrgentKeepsPolicyOrder(t *testing.T) {
 		{"waste before free", nil, "sonnet", "waste"},
 		{"free after waste", []string{"sonnet"}, "devin-swe2", "free"},
 		{"ranked before credit", []string{"devin-swe2", "sonnet"}, "codex-luna", "ranked"},
-		{"credit last", []string{"devin-swe2", "sonnet", "codex-luna", "grok-hi"}, "opus", "credit"},
+		{"credit last", []string{"devin-swe2", "sonnet", "codex-luna", "kiro-glm"}, "opus", "credit"},
 		{"ranked lowest sufficient grade", []string{"devin-swe2", "sonnet", "opus"}, "codex-luna", "ranked"},
 	}
 	for _, tt := range cases {

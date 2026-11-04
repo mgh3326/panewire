@@ -7,7 +7,7 @@ func TestProcNameStripsExeSuffix(t *testing.T) {
 		"/home/u/.local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe": "claude",
 		"claude":         "claude",
 		"/usr/bin/devin": "devin",
-		"kimi-code":      "kimi-code",
+		"command-code":   "command-code",
 	} {
 		if got := procName(in); got != want {
 			t.Fatalf("procName(%q) = %q, want %q", in, got, want)

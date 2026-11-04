@@ -714,7 +714,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = a.deliver(ctx, seat.Kind, pane, pointer); e != nil {
 		return e
 	}
-	if seat.Kind == "pi" || seat.Kind == "omp" || seat.Kind == "cmd" {
+	if seat.Kind == "omp" || seat.Kind == "cmd" {
 		if e = a.modelProof(ctx, seat, launch, s.CWD, pane, pointer); e != nil {
 			return e
 		}

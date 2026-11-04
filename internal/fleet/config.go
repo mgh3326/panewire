@@ -101,7 +101,7 @@ func LoadConfig(path string) (Config, error) {
 	for _, m := range regexp.MustCompile(`(?m)^\s*\[hosts\.([A-Za-z0-9._-]+)\]\s*(?:#.*)?$`).FindAllStringSubmatch(string(b), -1) {
 		c.HostOrder = append(c.HostOrder, m[1])
 	}
-	for _, k := range []string{"spawn", "pi_anthropic", "cmd_dsflash41"} {
+	for _, k := range []string{"spawn", "cmd_dsflash41"} {
 		if v, ok := c.Local[k]; ok {
 			if _, ok = v.(bool); !ok {
 				return c, fail(exitConfig, "local.%s must be a boolean", k)

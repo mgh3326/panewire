@@ -1963,7 +1963,7 @@ type stallProc struct {
 }
 
 var stallHarnessNames = map[string]bool{
-	"devin": true, "claude": true, "codex": true, "kimi": true,
+	"devin": true, "claude": true, "codex": true,
 	"astra": true, "fable": true, "gemini": true, "opencode": true, "amp": true,
 }
 
