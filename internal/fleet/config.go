@@ -108,7 +108,7 @@ func LoadConfig(path string) (Config, error) {
 			}
 		}
 	}
-	for _, k := range []string{"max_active", "shell_ready_timeout_ms", "fleet_usage_alert_gb"} {
+	for _, k := range []string{"max_active", "shell_ready_timeout_ms", "brief_submit_timeout_ms", "brief_submit_retry_ms", "fleet_usage_alert_gb"} {
 		if v, ok := c.Local[k]; ok {
 			if n, ok := v.(int64); !ok || n < 0 {
 				return c, fail(exitConfig, "local.%s must be a nonnegative integer", k)
@@ -252,6 +252,13 @@ func LoadConfig(path string) (Config, error) {
 		if n < 30000 || n > 300000 {
 			return c, fail(exitConfig, "shell_ready_timeout_ms must be 30000..300000")
 		}
+	}
+	submitTimeout := integer(c.Local, "brief_submit_timeout_ms", defaultBriefSubmitTimeoutMS)
+	if submitTimeout < 30000 || submitTimeout > 600000 {
+		return c, fail(exitConfig, "brief_submit_timeout_ms must be 30000..600000")
+	}
+	if retry := integer(c.Local, "brief_submit_retry_ms", defaultBriefSubmitRetryMS); retry < 1000 || retry >= submitTimeout {
+		return c, fail(exitConfig, "brief_submit_retry_ms must be at least 1000 and below brief_submit_timeout_ms")
 	}
 	return c, nil
 }

@@ -14,6 +14,7 @@ import (
 // This private client never attaches HTTP middleware or changes the crash
 // reporter's sampling/budget. Only accepted spawn operations enter it.
 func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) {
+	h.logSpawnOutcome(task, result)
 	h.spawnTraceOnce.Do(func() {
 		if h.spawnSentry == nil {
 			client, err := sentry.NewClient(sentry.ClientOptions{Dsn: strings.TrimSpace(os.Getenv(crashReportDSNEnv)), EnableTracing: true, TracesSampleRate: 1, SendDefaultPII: false})
@@ -28,23 +29,10 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 	ctx, done := h.inbox.store.op(h.closeCtx)
 	defer done()
 	hub := sentry.NewHub(h.spawnSentry, sentry.NewScope())
-	host, profile, role := result.Host, result.Profile, result.Role
-	if task.Node != nil {
-		if host == "" {
-			host = task.Node.Machine
-		}
-		if profile == "" {
-			profile = hubSpawnArg(task.Node.Args, "-m")
-		}
-	}
+	host, profile := spawnOutcomeTarget(task, result)
+	role := result.Role
 	if role == "" {
 		role = hubSpawnArg(task.Request.Args, "--role")
-	}
-	if host == "" {
-		host = "unassigned"
-	}
-	if profile == "" {
-		profile = "auto"
 	}
 	if role == "" {
 		role = "worker"
@@ -100,6 +88,40 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 	}
 	trace.Finish()
 }
+
+// spawnOutcomeTarget is the host and profile an outcome is about, falling back
+// to the bound node request for an outcome that does not name them.
+func spawnOutcomeTarget(task hubSpawnTask, result hubSpawnOutcome) (host, profile string) {
+	host, profile = result.Host, result.Profile
+	if task.Node != nil {
+		if host == "" {
+			host = task.Node.Machine
+		}
+		if profile == "" {
+			profile = hubSpawnArg(task.Node.Args, "-m")
+		}
+	}
+	if host == "" {
+		host = "unassigned"
+	}
+	if profile == "" {
+		profile = "auto"
+	}
+	return host, profile
+}
+
+// logSpawnOutcome is the hub journal's line for a finished operation. The reason
+// is redacted refusal text; the request's brief and argv never reach the log.
+func (h *HubServer) logSpawnOutcome(task hubSpawnTask, result hubSpawnOutcome) {
+	host, profile := spawnOutcomeTarget(task, result)
+	attrs := []any{"request_id", task.Request.RequestID, "job", task.Job, "host", host, "profile", profile, "rc", result.RC, "stage", result.Stage, "reason", result.Reason}
+	if result.RC != 0 {
+		h.logger.Warn("hub spawn refused", attrs...)
+		return
+	}
+	h.logger.Info("hub spawn landed", attrs...)
+}
+
 func spawnTraceReason(reason string) string {
 	// Refusal text follows the code in a reason. It never reaches a fingerprint.
 	reason, _, _ = strings.Cut(reason, ": ")

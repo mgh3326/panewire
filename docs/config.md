@@ -25,6 +25,8 @@ spawn = true
 max_load_ratio = 1.5
 max_active = 4
 shell_ready_timeout_ms = 120000
+brief_submit_timeout_ms = 120000
+brief_submit_retry_ms = 15000
 pi_anthropic = false
 cmd_dsflash41 = false
 clinepass = false
@@ -79,6 +81,8 @@ local_delete_at = "drive_confirmed"
 | `heavy_max` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `heavy_load_wait` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `shell_ready_timeout_ms` | `120000` | Startup readiness window, integer 30000–300000. |
+| `brief_submit_timeout_ms` | `120000` | How long a spawn waits for the brief to start a turn before it refuses with 76, integer 30000–600000. Raise it on a host that runs under sustained load. |
+| `brief_submit_retry_ms` | `15000` | How often the submit key repeats during that wait, at least 1000 and below the timeout. It goes only to an idle pane; Claude and Codex panes must also still show the brief in the composer. The brief is never pasted twice. |
 | `pi_anthropic` | `false` | Literal capability opt-in required by pi policy rows. |
 | `cmd_dsflash41` | `false` | Literal capability opt-in required by cmd policy rows. The provisioned cmd account must have no persisted MCP servers. |
 | `clinepass` | `false` | Literal capability opt-in required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). |

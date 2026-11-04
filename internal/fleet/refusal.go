@@ -61,6 +61,9 @@ func spawnRefusalFix(err error) string {
 	message := err.Error()
 	for _, fix := range []struct{ match, hint string }{
 		// These name a path or an id, which the broader matches below could hit.
+		{"BRIEF_SUBMISSION_UNCONFIRMED", "Read the saved jobs/JOB/spawn-failure-*.txt capture. If the brief sat in the composer on a loaded host, raise local.brief_submit_timeout_ms there; retry the same command after verified cleanup."},
+		{"no remote candidate completed", "Read the tried list above; add the repository to that node's spawn.json.cwd_map or repair the named refusal, then replay the saved request."},
+		{"no placement candidate accepted", "Read the tried list above; add the repository to that node's spawn.json.cwd_map or repair the named refusal, then replay the saved request."},
 		{"symlink path refused", "Replace the named symlink with a real directory or point the executing node's jobs root at a symlink-free path, then replay the request."},
 		{"report must be under", "Pass --report inside this job's own jobs/JOB directory, or its --parent-job directory, then retry."},
 		{"cwd is not a directory", "Run panewire preflight --json on the executing node and repair its checkout or spawn.json.cwd_map path, then replay the request."},
@@ -91,7 +94,7 @@ func spawnRefusalFix(err error) string {
 		case exitDuplicate:
 			return "Inspect the existing job with panewire find JOB. Use a new --job only for new work; never override a live duplicate. Failed launches with verified cleanup can retry on the same host."
 		case exitSubmitUnconfirmed:
-			return "Read the saved jobs/JOB/spawn-failed-screen.txt and fix the harness submission failure; retry the same command after verified cleanup."
+			return "Read the saved jobs/JOB/spawn-failure-*.txt capture and fix the harness submission failure; retry the same command after verified cleanup."
 		case exitAuthUnavailable:
 			return "Sign in to the selected quota account on the executing host and refresh that pool with pacelever refresh POOL, then retry."
 		case exitQuotaUnknown:

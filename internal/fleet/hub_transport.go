@@ -111,6 +111,7 @@ func (e *HubError) Error() string {
 type hubHTTP struct {
 	base, token, cfID, cfSecret string
 	client                      *http.Client
+	statusPoll                  time.Duration // 0 means the WaitSpawn default
 }
 
 var hubPoolRule = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)

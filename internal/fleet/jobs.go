@@ -185,11 +185,10 @@ func (a *App) claimJobRecord(ctx context.Context, s Spawn) error {
 }
 
 // markSpawnRetryable preserves the identical host/task claim after verified
-// pre-landing cleanup. A failed attempt is evidence, not a terminal job id.
+// pre-landing cleanup. A failed attempt is evidence, not a terminal job id. The
+// hk record stays as it is: hk takes a result only with state=completed, so
+// this fact lives in the local event and the hub's spawn operation.
 func (a *App) markSpawnRetryable(ctx context.Context, id string) {
-	if e := a.putJobRecord(ctx, id, map[string]any{"result": map[string]any{"spawn_retryable": true}}); e != nil {
-		a.jobRecordFailed(ctx, id, "retryable", e)
-	}
 	_ = a.event(ctx, id, "job.spawn_retryable", map[string]any{"retry": "repeat the same spawn command on the same host"})
 }
 
@@ -368,8 +367,5 @@ func (a *App) jobRecordOutcome(ctx context.Context, id string, warned *bool) wai
 // A live/unverified pane is not a lost job. Keep its immutable claim while the
 // hub reconciles the attempt; no completion watcher is started before landing.
 func (a *App) markSpawnUncertain(ctx context.Context, id string) {
-	if err := a.putJobRecord(ctx, id, map[string]any{"result": map[string]any{"cleanup_pending": true, "spawn_retryable": false}}); err != nil {
-		a.jobRecordFailed(ctx, id, "cleanup_pending", err)
-	}
 	_ = a.event(ctx, id, "job.cleanup_pending", map[string]any{"reason": "pane_or_resources_unverified"})
 }

@@ -244,6 +244,8 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		}
 		if !strings.HasSuffix(prefix, "/") || !validHubSpawnDocKey(strings.TrimSuffix(prefix, "/")) || !strings.HasPrefix(message.BriefDoc, prefix) {
 			result.RC, result.Error = 2, "brief_doc_unavailable"
+			reason, detail = "brief_doc_prefix", "brief document key is outside this node's brief_doc_prefix"
+			result.StdoutTail = detail
 			return result
 		}
 	}
@@ -257,6 +259,11 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		fetched, err := client.fetchHubSpawnBrief(runContext, config.HandoffkeepEnv, message.BriefDoc)
 		if err != nil || fetched == "" || !utf8.ValidString(fetched) || len([]byte(fetched)) > hubSpawnMaxBriefBytes {
 			result.RC, result.Error = 2, "brief_doc_unavailable"
+			reason, detail = "brief_doc_fetch", "this node could not fetch the brief document"
+			if config.HandoffkeepEnv == "" {
+				reason, detail = "handoffkeep_env_unset", "this node's spawn.json has no handoffkeep_env, so it cannot fetch the brief document"
+			}
+			result.StdoutTail = detail
 			return result
 		}
 		briefText = fetched

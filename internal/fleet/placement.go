@@ -1319,7 +1319,7 @@ func (a *App) placeAuto(ctx context.Context, s Spawn, brief string) (bool, map[s
 		a.attachSelection(rec, s)
 		return false, rec, nil
 	}
-	notes := p.preflightNotes()
+	notes := p.triedNotes() + p.preflightNotes()
 	if len(targets) > 0 {
 		if lastNote != "" {
 			return true, nil, fail(exitPlacement, "wake target did not accept spawn: %s%s", lastNote, notes)

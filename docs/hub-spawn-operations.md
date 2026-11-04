@@ -71,7 +71,14 @@ expires is refused without calling the engine. An execution already in progress
 may still finish late; its reservation is retained. Timeout alone cannot close
 a working or unverified pane. Failed-spawn cleanup re-reads id, name, cwd,
 harness and idle/done status before closing; ambiguous cleanup keeps the pane,
-quota and claim, and records `cleanup_pending` rather than declaring it lost.
+quota and claim, and records a local `job.cleanup_pending` event rather than
+declaring it lost. The hk job record stays `claimed`: hk takes a `result` only
+with `state=completed`, so a fresh request may reuse a job id only when the job's
+newest hub operation is `retryable`.
+
+Under `--host auto`, a node's `cwd_unmapped` refusal returns the operation to
+placement, which tries the next candidate. The node answers it before any
+checkout or engine call. A pinned `--host` keeps that refusal as its result.
 
 | Status | Meaning |
 | --- | --- |

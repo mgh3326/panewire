@@ -45,7 +45,8 @@ func TestWaitSpawnPreservesRefusalAndUnknownOwnership(t *testing.T) {
 			}))
 			defer server.Close()
 			c := hubHTTP{base: server.URL, token: "fixture", client: server.Client()}
-			if got := ErrorCode(c.WaitSpawn(t.Context(), "00000000-0000-4000-8000-000000000001")); got != test.want {
+			_, err := c.WaitSpawn(t.Context(), "00000000-0000-4000-8000-000000000001")
+			if got := ErrorCode(err); got != test.want {
 				t.Fatalf("rc=%d want=%d", got, test.want)
 			}
 		})

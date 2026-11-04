@@ -494,6 +494,20 @@ func (a *App) preflightCmd(ctx context.Context, args []string) error {
 
 // preflightNotes summarises the preflight of every refused candidate for an
 // error message, because a spawn that fails records no placement.
+// triedNotes names every host this placement asked and how it answered.
+func (p *placePlan) triedNotes() string {
+	var parts []string
+	for _, c := range p.candidates {
+		if c.outcome != "" {
+			parts = append(parts, c.name+" "+c.outcome)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return " (tried: " + strings.Join(parts, "; ") + ")"
+}
+
 func (p *placePlan) preflightNotes() string {
 	var parts []string
 	for _, c := range p.candidates {
