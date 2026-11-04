@@ -739,7 +739,7 @@ const devinComposerQueueHint = "Press Enter to send queued messages now"
 // Only claude and devin draw a composer between two dividers; codex draws
 // none and its placeholder is plain text, so its composer is never located.
 func relayComposer(harness, screen string) (string, bool) {
-	isDivider, glyph := isDividerLine, "❯"
+	isDivider, glyph := isClaudeDividerLine, "❯"
 	switch {
 	case strings.EqualFold(harness, "claude"):
 	case strings.EqualFold(harness, "devin"):
