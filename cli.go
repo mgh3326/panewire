@@ -82,7 +82,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 		return runRelayCLI(args[1:], os.Stdout, os.Stderr)
 	}
 	if args[0] == "inbox" {
-		return runInboxCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+		return runInboxCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{SocketPath: cfg.SocketPath})
 	}
 	if args[0] == "emit" {
 		return runEmitCLI(args[1:], os.Stdout, os.Stderr, cfg)
