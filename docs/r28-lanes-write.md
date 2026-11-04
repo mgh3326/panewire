@@ -105,8 +105,9 @@ name, not a control-plane authority lane).
 - **Cap.** A PUT that would create a row at the cap first evicts the caller's
   own rows whose pane is absent from its snapshot, lowest lane name first, and
   returns `429 lane_quota_exceeded` only when too few qualify to bring the node
-  back under the cap (the file is then unchanged). A row the hub wrote less
-  than 10 s before the snapshot was received is not evicted, because that
+  back under the cap (the file is then unchanged). A row the hub wrote, or
+  first saw (rows loaded from the file after a restart have no write time),
+  less than 10 s before the snapshot was received is not evicted, because that
   snapshot may predate its pane.
 - **Sweep.** Every 30 s the hub drops a node's row whose pane is absent from
   its snapshot once the job on that pane is finished, or once the pane has been

@@ -90,6 +90,35 @@ func (l *laneLiveness) lastWrite(lane string) (time.Time, bool) {
 	return at, known
 }
 
+// writeOrSeed returns the time of the hub's last write of lane. A row the hub
+// never wrote itself — loaded from the file after a restart, or changed by a
+// path that does not call noteWrite — has no age, so the first sighting is
+// taken as its write: it may have been created an instant ago, and no earlier
+// snapshot can speak for its pane.
+func (l *laneLiveness) writeOrSeed(lane string, now time.Time) time.Time {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if at, known := l.wrote[lane]; known {
+		return at
+	}
+	if l.wrote == nil {
+		l.wrote = make(map[string]time.Time)
+	}
+	l.wrote[lane] = now
+	return now
+}
+
+// retainWrites forgets the write times of lanes that are no longer rows.
+func (l *laneLiveness) retainWrites(routes map[string]reportRelayRoute) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for lane := range l.wrote {
+		if _, present := routes[lane]; !present {
+			delete(l.wrote, lane)
+		}
+	}
+}
+
 // laneObservation is what one node's fresh snapshot proves.
 type laneObservation struct {
 	panes      map[string]struct{}
@@ -161,15 +190,14 @@ func (h *HubServer) nodeMayDropLane(routes map[string]reportRelayRoute, lane str
 }
 
 // laneProvablyGone is true when the fresh snapshot omits the row's pane and was
-// received after the row's last hub write had time to show up in it.
+// received after the row's last write, or first sighting if the hub never wrote
+// it, had time to show up in it.
 func (h *HubServer) laneProvablyGone(lane string, route reportRelayRoute, obs laneObservation) bool {
 	if _, listed := obs.panes[route.Pane]; listed {
 		return false
 	}
-	if wrote, known := h.laneLife.lastWrite(lane); known && !obs.receivedAt.After(wrote.Add(laneWriteSettle)) {
-		return false
-	}
-	return true
+	wrote := h.laneLife.writeOrSeed(lane, h.now().UTC())
+	return obs.receivedAt.After(wrote.Add(laneWriteSettle))
 }
 
 // evictableLanes lists the caller's own rows whose pane is provably gone, in
@@ -199,6 +227,7 @@ func (h *HubServer) laneReleaseGraceOrDefault() time.Duration {
 // releaseDeadLanes is one sweep. It returns the lanes it removed.
 func (h *HubServer) releaseDeadLanes() []string {
 	return h.rewriteLanes("sweep", func(routes map[string]reportRelayRoute) []string {
+		h.laneLife.retainWrites(routes)
 		now := h.now().UTC()
 		grace := h.laneReleaseGraceOrDefault()
 		machines := make(map[string]struct{})

@@ -40,6 +40,17 @@ func laneReleaseHub(t *testing.T, lanes string, mutate func(*HubServerConfig)) (
 	return hub, clock, path, logs
 }
 
+// laneReleaseAge makes every row in the lanes file old enough for a snapshot
+// received now to speak for its pane: the hub marks each row as first seen and
+// the clock moves past the write settle.
+func laneReleaseAge(t *testing.T, hub *HubServer, clock *laneReleaseClock, path string) {
+	t.Helper()
+	for lane := range lanesNodeFile(t, path) {
+		hub.laneLife.writeOrSeed(lane, clock.at)
+	}
+	clock.at = clock.at.Add(laneWriteSettle + time.Second)
+}
+
 // laneReleaseNode installs a connected node whose latest heartbeat lists panes.
 func laneReleaseNode(h *HubServer, machine string, receivedAt time.Time, panes ...string) {
 	sessions := make([]HubSession, 0, len(panes))
@@ -69,6 +80,7 @@ const laneReleaseCapFile = `{"lanes":{
 
 func TestLaneReleaseSweepDropsDeadRowsAfterGraceAndKeepsLiveOnes(t *testing.T) {
 	hub, clock, path, _ := laneReleaseHub(t, laneReleaseCapFile, nil)
+	laneReleaseAge(t, hub, clock, path)
 	// machine-b has no snapshot at all, so its row must survive every sweep.
 	step := func(advance time.Duration) []string {
 		clock.at = clock.at.Add(advance)
@@ -93,6 +105,7 @@ func TestLaneReleaseSweepDropsDeadRowsAfterGraceAndKeepsLiveOnes(t *testing.T) {
 
 func TestLaneReleaseSweepResetsTheGraceWhenThePaneReturns(t *testing.T) {
 	hub, clock, path, _ := laneReleaseHub(t, `{"lanes":{"flap":{"machine":"machine-a","pane":"w1:p1"}}}`, nil)
+	laneReleaseAge(t, hub, clock, path)
 	sweep := func(advance time.Duration, panes ...string) []string {
 		clock.at = clock.at.Add(advance)
 		laneReleaseNode(hub, "machine-a", clock.at, panes...)
@@ -114,7 +127,7 @@ func TestLaneReleaseSweepResetsTheGraceWhenThePaneReturns(t *testing.T) {
 }
 
 func TestLaneReleaseSweepDropsAFinishedJobsRowWithoutWaiting(t *testing.T) {
-	hub, clock, _, _ := laneReleaseHub(t, `{"lanes":{
+	hub, clock, path, _ := laneReleaseHub(t, `{"lanes":{
 		"done-job":{"machine":"machine-a","pane":"w1:p1"},
 		"busy-job":{"machine":"machine-a","pane":"w1:p2"},
 		"shared":{"machine":"machine-a","pane":"w1:p3"}}}`, nil)
@@ -124,6 +137,7 @@ func TestLaneReleaseSweepDropsAFinishedJobsRowWithoutWaiting(t *testing.T) {
 	hub.jobs["old-job"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "old-job", Pane: "w1:p3"}, Node: "machine-a", Completed: true}
 	hub.jobs["new-job"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "new-job", Pane: "w1:p3"}, Node: "machine-a"}
 	hub.mu.Unlock()
+	laneReleaseAge(t, hub, clock, path)
 	laneReleaseNode(hub, "machine-a", clock.at)
 
 	if got := hub.releaseDeadLanes(); !reflect.DeepEqual(got, []string{"done-job"}) {
@@ -180,6 +194,7 @@ func TestLaneReleaseStaleOrUnknownSnapshotReleasesNothing(t *testing.T) {
 	for _, untrusted := range laneReleaseUntrusted {
 		t.Run("sweep/"+untrusted.name, func(t *testing.T) {
 			hub, clock, path, _ := laneReleaseHub(t, laneReleaseCapFile, nil)
+			laneReleaseAge(t, hub, clock, path)
 			before, _ := os.ReadFile(path)
 			// Several graces' worth of sweeps in an untrusted state must not
 			// release anything or start an absence clock.
@@ -196,6 +211,7 @@ func TestLaneReleaseStaleOrUnknownSnapshotReleasesNothing(t *testing.T) {
 		})
 		t.Run("cap/"+untrusted.name, func(t *testing.T) {
 			hub, clock, path, _ := laneReleaseHub(t, laneReleaseCapFile, func(config *HubServerConfig) { config.LanesNodeRowCap = 3 })
+			laneReleaseAge(t, hub, clock, path)
 			untrusted.setup(hub, clock.at)
 			before, _ := os.ReadFile(path)
 			writer := lanesNodePut(t, hub, "fresh-1", `{"machine":"machine-a","pane":"w1:p4"}`)
@@ -211,6 +227,7 @@ func TestLaneReleaseStaleOrUnknownSnapshotReleasesNothing(t *testing.T) {
 
 func TestLaneReleasePutAtTheCapEvictsOnlyTheCallersDeadRows(t *testing.T) {
 	hub, clock, path, logs := laneReleaseHub(t, laneReleaseCapFile, func(config *HubServerConfig) { config.LanesNodeRowCap = 3 })
+	laneReleaseAge(t, hub, clock, path)
 	// machine-b's pane is absent from machine-b's own fresh snapshot too: a
 	// foreign node's dead-looking row is still not the caller's to evict.
 	laneReleaseNode(hub, "machine-a", clock.at, "w1:p3")
@@ -264,6 +281,7 @@ func TestLaneReleasePutLeavesAnotherNodesRowsAloneWhenOnlyTheyLookDead(t *testin
 
 func TestLaneReleasePutNeedsEnoughDeadRowsToGetUnderAnOverfullCap(t *testing.T) {
 	hub, clock, path, _ := laneReleaseHub(t, laneReleaseCapFile, func(config *HubServerConfig) { config.LanesNodeRowCap = 2 })
+	laneReleaseAge(t, hub, clock, path)
 	// Three rows against a cap of two: a create needs two evictions. With
 	// one dead row it is refused and nothing changes.
 	laneReleaseNode(hub, "machine-a", clock.at, "w1:p2", "w1:p3")
@@ -287,6 +305,7 @@ func TestLaneReleasePutNeedsEnoughDeadRowsToGetUnderAnOverfullCap(t *testing.T) 
 // registered, so that row is not dead until a later snapshot also omits it.
 func TestLaneReleasePutDoesNotEvictARowTheHubJustWrote(t *testing.T) {
 	hub, clock, path, _ := laneReleaseHub(t, `{"lanes":{"seed":{"machine":"machine-a","pane":"w1:p1"}}}`, func(config *HubServerConfig) { config.LanesNodeRowCap = 2 })
+	laneReleaseAge(t, hub, clock, path)
 	laneReleaseNode(hub, "machine-a", clock.at, "w1:p1")
 	if writer := lanesNodePut(t, hub, "newborn", `{"machine":"machine-a","pane":"w1:p2"}`); writer.Code != http.StatusCreated {
 		t.Fatalf("seed put status=%d body=%s", writer.Code, writer.Body.String())
@@ -402,6 +421,7 @@ func TestLaneReleaseRecreatedRowDoesNotInheritTheOldAbsence(t *testing.T) {
 	for _, how := range []string{"delete then put", "put over the row"} {
 		t.Run(how, func(t *testing.T) {
 			hub, clock, path, _ := laneReleaseHub(t, `{"lanes":{"respawned":{"machine":"machine-a","pane":"w1:p1"}}}`, nil)
+			laneReleaseAge(t, hub, clock, path)
 			sweep := func(advance time.Duration) []string {
 				clock.at = clock.at.Add(advance)
 				laneReleaseNode(hub, "machine-a", clock.at)
@@ -428,5 +448,39 @@ func TestLaneReleaseRecreatedRowDoesNotInheritTheOldAbsence(t *testing.T) {
 				t.Fatalf("lanes file still has %v", laneReleaseLanes(t, path))
 			}
 		})
+	}
+}
+
+// A row the hub never wrote (loaded from the file after a restart, or changed
+// outside the PUT path) has no age. A snapshot received before the hub first saw
+// it cannot speak for its pane, so such a row is not evicted at once.
+func TestLaneReleaseRowTheHubNeverWroteIsNotEvictedOnFirstSight(t *testing.T) {
+	hub, clock, path, _ := laneReleaseHub(t, laneReleaseCapFile, func(config *HubServerConfig) { config.LanesNodeRowCap = 3 })
+	laneReleaseNode(hub, "machine-a", clock.at, "w1:p3")
+	before, _ := os.ReadFile(path)
+	if writer := lanesNodePut(t, hub, "fresh-1", `{"machine":"machine-a","pane":"w1:p4"}`); writer.Code != http.StatusTooManyRequests {
+		t.Fatalf("status=%d body=%s; rows of unknown age must not be evicted on a snapshot received before the hub saw them", writer.Code, writer.Body.String())
+	}
+	if after, _ := os.ReadFile(path); !bytes.Equal(before, after) {
+		t.Fatalf("refused put changed the lanes file: %s", after)
+	}
+	// A snapshot received after the settle that still omits the pane counts.
+	clock.at = clock.at.Add(laneWriteSettle + time.Second)
+	laneReleaseNode(hub, "machine-a", clock.at, "w1:p3")
+	if writer := lanesNodePut(t, hub, "fresh-1", `{"machine":"machine-a","pane":"w1:p4"}`); writer.Code != http.StatusCreated {
+		t.Fatalf("status=%d body=%s; the dead row should be reusable once a later snapshot omits it", writer.Code, writer.Body.String())
+	}
+}
+
+func TestLaneReleaseSweepForgetsWriteTimesOfRowsThatAreGone(t *testing.T) {
+	hub, clock, path, _ := laneReleaseHub(t, `{"lanes":{"keep":{"machine":"machine-a","pane":"w1:p1"}}}`, nil)
+	hub.laneLife.noteWrite("vanished", clock.at)
+	laneReleaseNode(hub, "machine-a", clock.at, "w1:p1")
+	hub.releaseDeadLanes()
+	if _, known := hub.laneLife.lastWrite("vanished"); known {
+		t.Fatal("write time of a lane that is not a row survived the sweep")
+	}
+	if len(laneReleaseLanes(t, path)) != 1 {
+		t.Fatalf("lanes file changed: %v", laneReleaseLanes(t, path))
 	}
 }
