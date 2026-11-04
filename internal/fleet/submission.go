@@ -105,6 +105,7 @@ func (a *App) SubmitSpawn(ctx context.Context, s Spawn) error {
 		}
 		attempt.print(a.Out, accepted.Job)
 		s.Wait = true
+		s.laneUnregistered = attempt.LaneUnregistered
 		return a.waitJob(ctx, s, true)
 	}
 	return nil
@@ -288,6 +289,8 @@ type SpawnAttempt struct {
 	Host    string `json:"host"`
 	Profile string `json:"profile"`
 	Pane    string `json:"pane"`
+	// LaneUnregistered: the pane runs but the hub has no lane for it.
+	LaneUnregistered bool `json:"lane_unregistered,omitempty"`
 }
 
 func (s SpawnAttempt) String() string {
@@ -295,7 +298,7 @@ func (s SpawnAttempt) String() string {
 }
 
 func (s SpawnAttempt) print(out io.Writer, job string) {
-	fmt.Fprintf(out, "SPAWNED job=%s %s pane=%s\n", job, s, firstNonempty(s.Pane, "none"))
+	fmt.Fprintf(out, "SPAWNED job=%s %s pane=%s%s\n", job, s, firstNonempty(s.Pane, "none"), laneUnregisteredSuffix(s.LaneUnregistered))
 }
 
 // WaitSpawn observes durable spawn state before the existing --wait completion

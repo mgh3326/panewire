@@ -51,6 +51,18 @@ func TestWaitSpawnSuccessReportsWhereItLanded(t *testing.T) {
 	}
 }
 
+func TestWaitSpawnCarriesUnregisteredLane(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"status": "succeeded", "result": map[string]any{"rc": 0, "host": "node-b", "profile": "sonnet", "pane": "w:p9", "lane_unregistered": true}})
+	}))
+	defer server.Close()
+	c := hubHTTP{base: server.URL, token: "fixture", client: server.Client()}
+	attempt, err := c.WaitSpawn(t.Context(), statusTestOperation)
+	if err != nil || !attempt.LaneUnregistered {
+		t.Fatalf("attempt=%+v err=%v", attempt, err)
+	}
+}
+
 // One lost status read used to answer rc75 while the operation kept running.
 func TestWaitSpawnSurvivesTransientStatusFailures(t *testing.T) {
 	for name, fault := range map[string]func(http.ResponseWriter){

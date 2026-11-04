@@ -495,6 +495,7 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 			outcome.Profile = result.Receipt.Profile
 			outcome.Model = result.Receipt.Model
 			outcome.Role = result.Receipt.Role
+			outcome.LaneUnregistered = result.Receipt.LaneUnregistered
 		}
 		if outcome.RC != 0 && outcome.Reason == "" {
 			outcome.Reason = "spawn_failed"
@@ -636,7 +637,7 @@ func (h *HubServer) flushSpawnNotifications(ctx context.Context) {
 // spawnNotificationType keeps a failed spawn out of the owner's digest: the
 // submitter only saw ACCEPTED, so nothing else tells it the work did not start.
 func spawnNotificationType(result hubSpawnOutcome) string {
-	if result.RC != 0 {
+	if result.RC != 0 || result.LaneUnregistered {
 		return "automation-failed"
 	}
 	return "report"
@@ -644,7 +645,11 @@ func spawnNotificationType(result hubSpawnOutcome) string {
 
 func spawnNotificationText(job, request string, result hubSpawnOutcome) string {
 	if result.RC == 0 {
-		return fmt.Sprintf("[panewire] SPAWNED %s host=%s profile=%s pane=%s model=%s", job, result.Host, result.Profile, result.Pane, result.Model)
+		text := fmt.Sprintf("[panewire] SPAWNED %s host=%s profile=%s pane=%s model=%s", job, result.Host, result.Profile, result.Pane, result.Model)
+		if result.LaneUnregistered {
+			text += " LANE_UNREGISTERED: hub lane registration failed after one retry; this pane's findings are not routed"
+		}
+		return text
 	}
 	fix := result.Fix
 	if fix == "" {

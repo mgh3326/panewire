@@ -1212,7 +1212,7 @@ for ownership and distribution.
 | `HERDR_SESSION` | Herdr session passed through or selected for remote execution. |
 | `PANEWIRE_E6_ARM` | Exact canon@effort experiment marker when policy requires one. |
 | `ARBITER_JOB`, `HK_TASK_ID` | Calling job/task inheritance; populated in spawned panes. |
-| `PANEWIRE_LANE_STRICT=1` | A committed builder with unregistered lane returns 82. |
+| `PANEWIRE_LANE_STRICT=1` | A committed spawn whose hub lane registration failed returns 82 (see [Lane registration failure](#lane-registration-failure)). |
 | `PANEWIRE_COMPLETION_TIMEOUT_S` | Positive watcher lifetime; duration or bare seconds, default 1h. Expiry retains the job. The watcher completes a job only on a [terminal signal](r21-lane-event.md#job-completion-signal), never on a stable report alone. |
 | `MOCK_MCP_PROFILE`, `PANEWIRE_MOCK_MCP_CONFIG` | Required reviewed mock profile name and exclusive stdio mcpServers JSON. |
 | `CLAUDE_CONFIG_DIR`, `CODEX_HOME` | Harness config homes for selected-workspace trust; mock Codex uses its private job home. |
@@ -1366,7 +1366,7 @@ HTTP 409 warns and drops the conflicting file. Local attempt markers under
 | 79 | Mock isolation refusal. |
 | 80 | Local spawning disabled/unavailable without a remote fallback. |
 | 81 | `NO_ELIGIBLE_HOST`, wake/capacity placement failure, the remote worktree for a linked-worktree job could not be prepared (also a `via = "hub"` checkout refusal), or the hub is unavailable for a forced `via = "hub"` host. |
-| 82 | Builder pane committed but lane unregistered under strict lane reporting. |
+| 82 | Pane committed but lane unregistered under strict lane reporting (`PANEWIRE_LANE_STRICT=1`). |
 | 83 | `spawn --wait` (and `delegate`): the job escalated. |
 | 84 | `spawn --wait`: the job was lost or revoked. |
 | 85 | `spawn --wait`: the wait deadline expired; the job is retained. |
@@ -1458,3 +1458,22 @@ An operator can list all
 active jobs as before with `panewire jobs jobs`; add `--include-completed` to
 include retained completed records. The hub does not track a separate reaped
 state, so a retained completed record can still appear after reap.
+
+## Lane registration failure
+
+A spawn registers the new pane's lane with the hub (`panewire lanes add`). A
+failed registration is retried once after a one-second pause; a local
+configuration refusal (exit 70) is not retried. If the second attempt fails
+too, the pane is already running, so the spawn still commits, but it says so:
+
+- `job.spawned` carries `lane_unregistered: true` and no `hub_lane`.
+- A `LANE_UNREGISTERED` lane event (type `blocked`, event id
+  `<job>-lane-unregistered`) goes to the parent lane: the owner of a worker, the
+  `--parent` of a builder. Findings and escalations from this pane have no hub
+  route until the lane is added by hand (the event text names the command).
+- The `OK` line, the `--wait` output (`wait job=… lane=UNREGISTERED`), the
+  `SPAWNED job=…` line of a hub-submitted spawn and the hub's `[panewire] SPAWNED`
+  notice (type `automation-failed`) name the problem.
+- The exit status is 0, unless `PANEWIRE_LANE_STRICT=1` is set: then it is 82.
+  A success receipt (`landed=yes`) is authoritative even with exit 82; do not
+  spawn again.
