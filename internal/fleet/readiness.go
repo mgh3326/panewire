@@ -158,7 +158,7 @@ func (s ReadinessState) Drop(n ReadinessNeed, now time.Time) string {
 		return ReadyLoginMissing
 	}
 	switch {
-	case n.Repo != "" && !slices.Contains(r.Repos, n.Repo):
+	case n.Repo != "" && !slices.ContainsFunc(r.Repos, func(repo string) bool { return RepoKey(repo) == RepoKey(n.Repo) }):
 		return ReadyRepoUnmapped
 	case n.Brief && !r.Brief.HandoffkeepEnv:
 		return ReadyBriefUnavailable
@@ -315,3 +315,8 @@ func repoToolchains(placement map[string]any, repo string) []string {
 	raw, _ := placement["repo_toolchains"].(map[string]any)
 	return stringsValue(raw, repo)
 }
+
+// RepoKey is the canonical form of a repo name wherever it is compared or sent
+// as a key: lower case, as cwd_map keys and the hub cwd_key pattern require.
+// Directory names keep the checkout's own spelling.
+func RepoKey(name string) string { return strings.ToLower(name) }

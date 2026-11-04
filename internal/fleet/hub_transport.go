@@ -550,7 +550,7 @@ func (a *App) spawnHub(ctx context.Context, s Spawn, brief string, c *placeCandi
 	if repo.rel != "" {
 		return refuse("hub_subdirectory_unsupported", fail(exitPlacement, "hub spawn cannot start in subdirectory %s of the repo", repo.rel))
 	}
-	key := repo.name
+	key := RepoKey(repo.name)
 	if !hubKeyRule.MatchString(key) {
 		return refuse("hub_cwd_key_invalid", fail(exitConfig, "repo name %q is not a valid hub cwd key", key))
 	}
