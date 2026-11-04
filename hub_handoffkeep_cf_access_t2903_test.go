@@ -97,3 +97,37 @@ func TestHubHandoffkeepClientsSendCFAccessPair(t *testing.T) {
 		t.Fatalf("chat store: status=%d err=%v", status, err)
 	}
 }
+
+// A redirect never carries the CF Access secret to another host: the clients
+// with a CF pair do not follow redirects (the node brief fetch never did).
+func TestHandoffkeepClientsDoNotForwardCFSecretOnRedirect(t *testing.T) {
+	leaked := false
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("CF-Access-Client-Secret") != "" {
+			leaked = true
+		}
+	}))
+	t.Cleanup(other.Close)
+	redirecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, other.URL+"/elsewhere", http.StatusFound)
+	}))
+	t.Cleanup(redirecting.Close)
+	env := hubHandoffkeepEnv{URL: redirecting.URL, Token: "hk-token", CFID: "cf-id", CFSecret: "cf-secret"}
+	relay, err := newHandoffkeepRelayClient(env, redirecting.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, _, _ := relay.do(context.Background(), http.MethodGet, relay.endpoint("/v1/documents/x"), nil); status != http.StatusFound {
+		t.Fatalf("relay client followed the redirect: status=%d", status)
+	}
+	chat, err := newHandoffkeepChatStore(env, redirecting.Client())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status, _, _ := chat.do(context.Background(), http.MethodGet, chat.endpoint("/v1/documents/x"), nil); status != http.StatusFound {
+		t.Fatalf("chat store followed the redirect: status=%d", status)
+	}
+	if leaked {
+		t.Fatal("the CF Access secret reached the redirect target")
+	}
+}

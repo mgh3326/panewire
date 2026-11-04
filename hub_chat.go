@@ -172,7 +172,7 @@ func newHandoffkeepChatStore(env hubHandoffkeepEnv, httpClient *http.Client) (*h
 			Transport: &http.Transport{MaxConnsPerHost: hubChatMaxConnsPerHost, MaxIdleConnsPerHost: hubChatMaxConnsPerHost},
 		}
 	}
-	return &handoffkeepChatStore{baseURL: parsed, env: env, client: httpClient}, nil
+	return &handoffkeepChatStore{baseURL: parsed, env: env, client: env.withoutCFRedirects(httpClient)}, nil
 }
 
 func (c *handoffkeepChatStore) endpoint(path string) string {

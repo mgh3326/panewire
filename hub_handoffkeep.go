@@ -47,6 +47,19 @@ type hubHandoffkeepEnv struct {
 	CFSecret string
 }
 
+// withoutCFRedirects returns httpClient unchanged when no CF Access pair is
+// configured. With a pair it returns a copy that never follows a redirect:
+// net/http strips Authorization on a cross-host redirect but forwards custom
+// headers such as CF-Access-Client-Secret, and handoffkeep does not redirect.
+func (env hubHandoffkeepEnv) withoutCFRedirects(httpClient *http.Client) *http.Client {
+	if env.CFID == "" {
+		return httpClient
+	}
+	copied := *httpClient
+	copied.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	return &copied
+}
+
 // setAuth puts the bearer token and, when configured, the CF Access pair on a
 // handoffkeep request. Every hub/node handoffkeep client uses it, so a node
 // whose handoffkeep sits behind CF Access is not answered 403.
@@ -118,7 +131,7 @@ func newHandoffkeepRelayClient(env hubHandoffkeepEnv, httpClient *http.Client) (
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: handoffkeepTimeout}
 	}
-	return &handoffkeepRelayClient{baseURL: parsed, env: env, client: httpClient}, nil
+	return &handoffkeepRelayClient{baseURL: parsed, env: env, client: env.withoutCFRedirects(httpClient)}, nil
 }
 
 // handoffkeepRelayEventRequest carries exactly the request-owned columns. The
