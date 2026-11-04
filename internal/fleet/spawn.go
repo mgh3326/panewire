@@ -44,6 +44,9 @@ type Spawn struct {
 	// laneUnregistered is set once hub lane registration failed after its
 	// retry; --wait output and the execution receipt name it.
 	laneUnregistered bool
+	// laneError is the bounded, redacted reason of the last failed lane
+	// registration, kept in the receipt and the LANE_UNREGISTERED notice.
+	laneError string
 	// Grade is the task grade a caller states itself (`panewire delegate`),
 	// used instead of the "(grade X, Tn" marker in the bound task's title.
 	Grade string `json:"-"`
@@ -778,6 +781,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if s.LaneDefer == "" {
 		if e := a.registerLaneWithRetry(ctx, lane, parent, pane, s.Role, machine); e != nil {
 			s.laneUnregistered = true
+			s.laneError = laneFailureReason(e)
 		} else {
 			laneOK = true
 			s.registeredLane = &Job{HubLane: lane, Machine: machine, Pane: pane, Role: s.Role}
@@ -790,6 +794,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	if s.laneUnregistered {
 		receipt["lane_unregistered"] = true
+		if s.laneError != "" {
+			receipt["lane_error"] = s.laneError
+		}
 	}
 	if e = a.event(ctx, s.Job, "job.spawned", receipt); e != nil {
 		return e
