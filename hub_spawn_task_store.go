@@ -17,18 +17,20 @@ import (
 var errSpawnClaimed = errors.New("job_already_claimed")
 
 type hubSpawnOutcome struct {
-	RC         int              `json:"rc"`
-	Stage      string           `json:"stage"`
-	Fix        string           `json:"fix,omitempty"`
-	Reason     string           `json:"reason,omitempty"`
-	Host       string           `json:"host,omitempty"`
-	Pane       string           `json:"pane,omitempty"`
-	Profile    string           `json:"profile,omitempty"`
-	Model      string           `json:"model,omitempty"`
-	Role       string           `json:"role,omitempty"`
-	Retryable  bool             `json:"retryable,omitempty"`
-	NodeResult bool             `json:"node_result,omitempty"`
-	StageMS    map[string]int64 `json:"stage_ms,omitempty"`
+	RC      int    `json:"rc"`
+	Stage   string `json:"stage"`
+	Fix     string `json:"fix,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Host    string `json:"host,omitempty"`
+	Pane    string `json:"pane,omitempty"`
+	Profile string `json:"profile,omitempty"`
+	Model   string `json:"model,omitempty"`
+	Role    string `json:"role,omitempty"`
+	// LaneUnregistered: the pane exists but hub lane registration failed.
+	LaneUnregistered bool             `json:"lane_unregistered,omitempty"`
+	Retryable        bool             `json:"retryable,omitempty"`
+	NodeResult       bool             `json:"node_result,omitempty"`
+	StageMS          map[string]int64 `json:"stage_ms,omitempty"`
 }
 
 type hubSpawnTask struct {
