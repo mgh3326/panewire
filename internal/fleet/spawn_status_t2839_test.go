@@ -118,7 +118,8 @@ func TestPlacementExhaustionNamesTriedHosts(t *testing.T) {
 		t.Fatalf("notes=%q", got)
 	}
 	hint := spawnRefusalFix(fail(exitLocalDisabled, "local spawns are disabled on this host; no remote candidate completed%s", got))
-	if strings.Contains(hint, "Pass -p") || strings.Contains(hint, "local.spawn") || !strings.Contains(hint, "spawn.json") {
+	// Both causes stay named: a node refusal or a client with local.spawn off.
+	if strings.Contains(hint, "Pass -p") || !strings.Contains(hint, "local.spawn") || !strings.Contains(hint, "spawn.json") {
 		t.Fatalf("hint=%q", hint)
 	}
 }

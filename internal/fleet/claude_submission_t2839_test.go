@@ -293,3 +293,49 @@ func TestSubmissionRefusalHintNamesTheCapture(t *testing.T) {
 		t.Fatalf("hint=%q", hint)
 	}
 }
+
+// Review of #178: a node runs deliver under its hub_wait context. The window
+// must end with 76 and its capture before that context does, not as rc124.
+func TestBriefSubmitWindowFitsNodeBudget(t *testing.T) {
+	a, d := claudeDeliveryApp(t, func(d *claudeDelivery) string {
+		if d.pastes == 0 {
+			return claudeScreenEmpty()
+		}
+		return claudeScreenBriefInComposer()
+	}, idleStatus)
+	ctx, cancel := context.WithTimeout(t.Context(), 50*time.Second)
+	defer cancel()
+	err := a.deliver(ctx, "claude", "w:p1", claudeTestBrief)
+	if code(err) != exitSubmitUnconfirmed || !strings.Contains(err.Error(), "node budget") || !strings.Contains(err.Error(), "hub_wait") {
+		t.Fatalf("err=%v", err)
+	}
+	if polls := d.reads - d.promptAtRead; polls > 31 {
+		t.Fatalf("polled %d times inside a 50s budget with a 20s reserve", polls)
+	}
+}
+
+func TestDefaultHubWaitCoversDefaultSubmitWindow(t *testing.T) {
+	if budget, window := time.Duration(hubDefaultWait)*time.Second, time.Duration(defaultBriefSubmitTimeoutMS)*time.Millisecond+briefSubmitReserve; budget <= window {
+		t.Fatalf("hub_wait default %v does not cover the submit window %v", budget, window)
+	}
+}
+
+// Review of #178: brief_submit_retry_ms is time, so slow polls must not stretch it.
+func TestBriefSubmitRetryIsWallClock(t *testing.T) {
+	a, d := claudeDeliveryApp(t, func(d *claudeDelivery) string {
+		if d.pastes == 0 {
+			return claudeScreenEmpty()
+		}
+		return claudeScreenBriefInComposer()
+	}, idleStatus)
+	clock := a.Now()
+	a.Now = func() time.Time { return clock }
+	a.Sleep = func(_ context.Context, wait time.Duration) error { clock = clock.Add(wait + 4*time.Second); return nil }
+	if err := a.deliver(t.Context(), "claude", "w:p1", claudeTestBrief); code(err) != exitSubmitUnconfirmed {
+		t.Fatalf("err=%v", err)
+	}
+	// 120s window, 5s polls, 15s retry: a Return about every third poll.
+	if d.returns < 6 || d.returns > 8 {
+		t.Fatalf("returns=%d in a 120s window with a 15s retry", d.returns)
+	}
+}

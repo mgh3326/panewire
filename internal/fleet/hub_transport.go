@@ -29,7 +29,7 @@ import (
 
 const (
 	hubMaxBriefBytes = 64 << 10
-	hubDefaultWait   = 120
+	hubDefaultWait   = 240 // must exceed the default brief submit window plus launch
 	hubBusyRetry     = 5 * time.Second
 )
 

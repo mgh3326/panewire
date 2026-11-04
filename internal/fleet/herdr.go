@@ -548,6 +548,9 @@ func executables(kind string) []string {
 const (
 	defaultBriefSubmitTimeoutMS = 120000
 	defaultBriefSubmitRetryMS   = 15000
+	// briefSubmitReserve leaves the node time to capture the pane and finish
+	// cleanup (10s bound plus the 2s settle) inside its spawn budget.
+	briefSubmitReserve = 20 * time.Second
 )
 
 func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
@@ -575,9 +578,17 @@ func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
 		}
 	}
 	timeout, retry := a.briefSubmitWindow()
+	clamped := false
+	// A node runs the spawn under its hub_wait budget. Refuse with 76 and the
+	// capture before that budget expires, or the node reports a bare timeout.
+	if until, ok := ctx.Deadline(); ok {
+		if left := time.Until(until) - briefSubmitReserve; left < timeout {
+			timeout, clamped = max(left, 0), true
+		}
+	}
 	deadline := a.Now().Add(timeout)
 	polls := int(timeout / time.Second)
-	every := max(1, int(retry/time.Second))
+	nextReturn := a.Now().Add(retry)
 	residue := false
 	for n := 1; n <= polls && a.Now().Before(deadline); n++ {
 		status, e := a.status(ctx, pane)
@@ -598,7 +609,9 @@ func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
 			return e
 		}
 		// Retry the submit key, never paste a second copy of an ambiguous payload.
-		if n%every == 0 && n < polls && submitKeyAllowed(kind, status, residue) {
+		// The cadence is wall-clock: one poll can take seconds on a loaded host.
+		if !a.Now().Before(nextReturn) && n < polls && a.Now().Before(deadline) && submitKeyAllowed(kind, status, residue) {
+			nextReturn = a.Now().Add(retry)
 			scope := "agent"
 			if kind == "cmd" {
 				scope = "pane"
@@ -608,8 +621,15 @@ func (a *App) deliver(ctx context.Context, kind, pane, brief string) error {
 			}
 		}
 	}
+	note := ""
 	if residue {
-		return fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn; brief still in composer", a.herdrSession(), pane)
+		note = "; brief still in composer"
+	}
+	if clamped {
+		note += fmt.Sprintf("; window cut to %ds by the node budget, raise hub_wait for this host", int(timeout/time.Second))
+	}
+	if note != "" {
+		return fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn%s", a.herdrSession(), pane, note)
 	}
 	return fail(exitSubmitUnconfirmed, "BRIEF_SUBMISSION_UNCONFIRMED: session=%s pane=%s; no working transition or submitted brief turn", a.herdrSession(), pane)
 }
