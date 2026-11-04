@@ -140,6 +140,7 @@ func TestOMPSpawnRefusesAnotherBunScript(t *testing.T) {
 func TestOMPFooterProof(t *testing.T) {
 	worktree := ompCapture(t, "screen_opus_high_worktree.txt")
 	folder := ompCapture(t, "screen_sonnet_medium_folder.txt")
+	working := ompCapture(t, "screen_working_footer.txt")
 	clamped := ompCapture(t, "screen_folder_clamped.txt")
 	const longCWD = "/home/user/work/plain-fixture-directory/desk-for-the-clamped-footer"
 	// clampTail is what omp keeps of a long label ending in end.
@@ -166,6 +167,14 @@ func TestOMPFooterProof(t *testing.T) {
 	}{
 		{name: "captured worktree", screen: worktree, model: opus, effort: "high", cwd: tree, want: true},
 		{name: "captured folder", screen: folder, model: sonnet, effort: "medium", cwd: desk, want: true},
+		{name: "captured working footer", screen: working, model: opus, effort: "high", cwd: tree, want: true},
+		{name: "working footer: different model", screen: working, model: sonnet, effort: "high", cwd: tree},
+		{name: "working footer: different cwd", screen: working, model: opus, effort: "high", cwd: "/home/user/work/other"},
+		{name: "working footer quoted by the brief", screen: working, model: opus, effort: "high", cwd: tree, brief: working},
+		{name: "minutes elapsed", screen: row(" ⠙ 1m 4s > ◒ Opus 5.5 > 📁 ~/work/plain/desk ▶─1%%──1M─"), model: opus, effort: "high", cwd: desk, want: true},
+		{name: "spinner without elapsed time", screen: row(" ⠙ > ◒ Opus 5.5 > 📁 ~/work/plain/desk ▶─1%%──1M─"), model: opus, effort: "high", cwd: desk},
+		{name: "elapsed time without spinner", screen: row(" 16s > ◒ Opus 5.5 > 📁 ~/work/plain/desk ▶─1%%──1M─"), model: opus, effort: "high", cwd: desk},
+		{name: "other lead segment", screen: row(" plan > ◒ Opus 5.5 > 📁 ~/work/plain/desk ▶─1%%──1M─"), model: opus, effort: "high", cwd: desk},
 
 		{name: "worktree: different model", screen: worktree, model: sonnet, effort: "high", cwd: tree},
 		{name: "folder: different model", screen: folder, model: opus, effort: "medium", cwd: desk},
