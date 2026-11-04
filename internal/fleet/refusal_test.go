@@ -33,6 +33,11 @@ func TestActionableSpawnRefusals(t *testing.T) {
 	if code(err) != exitTrustPrompt || !strings.Contains(spawnRefusalFix(err), "executing CODEX_HOME") {
 		t.Fatalf("real Codex trust refusal: code=%d fix=%s", code(err), spawnRefusalFix(err))
 	}
+	// Same status as the trust prompt, but its own fix: the host owner reviews hooks.
+	err = hooksReviewError()
+	if code(err) != exitTrustPrompt || !strings.Contains(spawnRefusalFix(err), "reviews the hooks") || strings.Contains(spawnRefusalFix(err), "worktree") {
+		t.Fatalf("Codex hooks review refusal: code=%d fix=%s", code(err), spawnRefusalFix(err))
+	}
 }
 
 // The observed causes (hk:doc research/2026-11-04/fleet-run-observability), each
@@ -51,6 +56,7 @@ var spawnRefusalCauses = []struct {
 	{"BRIEF_SUBMISSION_UNCONFIRMED: session=s pane=p; no working transition or submitted brief turn", exitSubmitUnconfirmed, "submit_unconfirmed"},
 	{"agent must be idle before initial brief", exitSubmitUnconfirmed, "submit_unconfirmed"},
 	{"WORKSPACE_TRUST_REQUIRED: Codex directory trust prompt for /w; brief withheld; approve only this worktree in the executing CODEX_HOME", exitTrustPrompt, "trust_prompt"},
+	{"HOOKS_REVIEW_REQUIRED: Codex is waiting at its Hooks need review screen; brief withheld", exitTrustPrompt, "hooks_review"},
 	{"job id job-a already claimed", exitDuplicate, "duplicate"},
 	{"task has another claimant without a job binding", exitUsage, "task_claimed"},
 	{"task bound to another job", exitUsage, "task_bound"},
@@ -89,7 +95,7 @@ func TestSpawnRefusalCodeFromTheRealFailSites(t *testing.T) {
 	for _, test := range []struct {
 		err  error
 		code string
-	}{{ambiguous, "herdr_workspace_ambiguous"}, {trustPromptError("/work/project"), "trust_prompt"}} {
+	}{{ambiguous, "herdr_workspace_ambiguous"}, {trustPromptError("/work/project"), "trust_prompt"}, {hooksReviewError(), "hooks_review"}} {
 		if got := SpawnRefusalCode(test.err.Error(), code(test.err)); got != test.code {
 			t.Errorf("%v rc=%d: code %q, want %q", test.err, code(test.err), got, test.code)
 		}
