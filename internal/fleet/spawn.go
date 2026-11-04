@@ -156,9 +156,70 @@ func (a *App) taskPrecheck(ctx context.Context, s Spawn) (Task, bool, error) {
 	}
 	return t, false, nil
 }
-func (a *App) taskLink(ctx context.Context, s Spawn, bypassed bool) error {
+
+// replacesParent reports whether this inherited spawn can take the parent's
+// place on its task. Only an implementer or lead seat can: a reviewer, tester,
+// consult or delegated reader or verifier works beside the parent, even one
+// that has completed, and must not take the task and its review routing away.
+// It reads the fields that cross the hub and ssh envelopes.
+func (s Spawn) replacesParent() bool {
+	if s.Inherited == "" || s.Inherited == s.Job {
+		return false
+	}
+	role := firstNonempty(s.RoutingRole, builtinRoleMap[s.Role])
+	return role == "implementer" || role == "lead"
+}
+
+// rebindInherited moves the task to this job when its parent is terminal and
+// the task is still bound to that parent, and returns the job.task_link status.
+// The spawn has landed by now, so a failure is recorded on ev and never returned.
+// Rule: docs/config.md, "--parent-job".
+func (a *App) rebindInherited(ctx context.Context, s Spawn, task Task, ev map[string]any) string {
+	refused := func(why string) string {
+		a.warn("task %s stays bound to job %s: %s", s.Task, s.Inherited, why)
+		ev["rebind_error"] = strings.ToValidUTF8(clip(why, 240), "")
+		return "inherited"
+	}
+	switch bound := str(task.Refs, "job_id"); bound {
+	case "":
+		return "inherited"
+	case s.Job:
+		// An earlier attempt of this request rebound the task and then failed.
+		return "rebound"
+	case s.Inherited:
+	default:
+		ev["bound_job"] = bound
+		return "inherited"
+	}
+	store, e := a.jobStore()
+	if e != nil {
+		return refused("parent job record unavailable")
+	}
+	parent, e := store.Get(ctx, s.Inherited)
+	if e != nil {
+		return refused("parent job record unreadable")
+	}
+	state := str(parent, "state")
+	if !slices.Contains([]string{"lost", "failed", "completed"}, state) {
+		return "inherited"
+	}
+	r := a.call(ctx, "handoffkeep", "tasks", "rebind", s.Task, "--from-job", s.Inherited, "--to-job", s.Job, "--by", s.Label, "--reason", "respawn continues "+state+" parent job "+s.Inherited)
+	if r.Code != 0 {
+		return refused("task rebind refused: " + strings.TrimSpace(r.Err))
+	}
+	var t Task
+	if e := json.Unmarshal([]byte(r.Out), &t); e != nil || t.ClaimedBy != s.Label || str(t.Refs, "job_id") != s.Job {
+		return refused("task rebind did not confirm claimed_by and refs.job_id")
+	}
+	return "rebound"
+}
+
+func (a *App) taskLink(ctx context.Context, s Spawn, task Task, bypassed bool) error {
+	ev := map[string]any{"task_id": s.Task, "job_id": s.Job, "claimed_by": s.Label, "inherited_from": s.Inherited}
 	status := "inherited"
-	if s.unlinkedReviewer() {
+	if s.replacesParent() {
+		status = a.rebindInherited(ctx, s, task, ev)
+	} else if s.unlinkedReviewer() {
 		// No claim: the task stays bound to whatever it was bound to.
 		status = "unlinked"
 	} else if s.Inherited == "" {
@@ -176,7 +237,8 @@ func (a *App) taskLink(ctx context.Context, s Spawn, bypassed bool) error {
 			status = "linked"
 		}
 	}
-	return a.event(ctx, s.Job, "job.task_link", map[string]any{"task_id": s.Task, "job_id": s.Job, "claimed_by": s.Label, "status": status, "inherited_from": s.Inherited})
+	ev["status"] = status
+	return a.event(ctx, s.Job, "job.task_link", ev)
 }
 func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	startedAdmission := time.Now()
@@ -657,7 +719,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			return e
 		}
 	}
-	if e = a.taskLink(ctx, s, bypassed); e != nil {
+	if e = a.taskLink(ctx, s, task, bypassed); e != nil {
 		return e
 	}
 	a.stage("landing", startedLanding)
