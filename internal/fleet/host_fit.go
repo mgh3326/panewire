@@ -142,6 +142,7 @@ type hostTry struct {
 
 // hostTrace explains one host's part in host-first selection.
 type hostTrace struct {
+	drops   []readinessDrop
 	host    selHost
 	rank    int
 	missing []string
@@ -170,6 +171,13 @@ func (t hostTrace) record() map[string]any {
 	}
 	if h.score != nil {
 		row["score"] = *h.score
+	}
+	if len(t.drops) > 0 {
+		drops := []any{}
+		for _, d := range t.drops {
+			drops = append(drops, map[string]any{"profile": d.profile, "code": d.code})
+		}
+		row["readiness_drops"] = drops
 	}
 	tried := []any{}
 	for _, x := range t.tries {
@@ -243,7 +251,7 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 	})
 	refusedOn := map[*selCand]string{}
 	for i, h := range ranked {
-		t := hostTrace{host: h, rank: i + 1, missing: missingCaps(h.cfg, p.req.tags)}
+		t := hostTrace{host: h, rank: i + 1, missing: missingCaps(h.cfg, p.req.tags), drops: sp.dropsOn(h.name)}
 		if p.chosen != nil {
 			t.outcome = "not_tried"
 			p.hosts = append(p.hosts, t)
@@ -299,6 +307,9 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 			t.outcome = "chosen"
 		case unreachable != "":
 			t.outcome = unreachable
+		case len(t.tries) == 0 && len(t.drops) > 0:
+			// No pair was left on this host: name the check that removed them.
+			t.outcome = t.drops[0].code
 		case len(t.tries) == 0:
 			t.outcome = "no_candidate_present"
 		default:

@@ -189,8 +189,10 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 		}
 		previous.failing = true
 		sent[pool] = previous
+		client.noteQuotaAccount(pool, "")
 		return
 	}
+	client.noteQuotaAccount(pool, publish.Key)
 	now := client.nowUTC()
 	body, _ := json.Marshal(publish)
 	if previous.body == string(body) && now.Sub(previous.at) < fleetQuotaRepublish {

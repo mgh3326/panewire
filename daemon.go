@@ -635,17 +635,18 @@ func (d *Daemon) serve(ctx context.Context) {
 }
 
 type localRequest struct {
-	DeliveryClass string `json:"delivery_class,omitempty"`
-	NotifyType    string `json:"notify_type,omitempty"`
-	Op            string `json:"op"`
-	Path          string `json:"path,omitempty"`
-	Target        string `json:"target,omitempty"`
-	Sender        string `json:"sender,omitempty"`
-	Uptake        string `json:"uptake,omitempty"`
-	StoreBody     bool   `json:"store_body,omitempty"`
-	Status        string `json:"status,omitempty"`
-	SettleMS      int64  `json:"settle_ms,omitempty"`
-	TimeoutMS     int64  `json:"timeout_ms,omitempty"`
+	Inbox         *inboxRequest `json:"inbox,omitempty"`
+	DeliveryClass string        `json:"delivery_class,omitempty"`
+	NotifyType    string        `json:"notify_type,omitempty"`
+	Op            string        `json:"op"`
+	Path          string        `json:"path,omitempty"`
+	Target        string        `json:"target,omitempty"`
+	Sender        string        `json:"sender,omitempty"`
+	Uptake        string        `json:"uptake,omitempty"`
+	StoreBody     bool          `json:"store_body,omitempty"`
+	Status        string        `json:"status,omitempty"`
+	SettleMS      int64         `json:"settle_ms,omitempty"`
+	TimeoutMS     int64         `json:"timeout_ms,omitempty"`
 	// The fields below belong to the R20 emit op. The names above are the
 	// established wait/prompt request contract and must not be renamed.
 	Kind           string `json:"kind,omitempty"`
@@ -714,6 +715,8 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 			}
 		case "emit":
 			err = d.emitRelayEvent(req)
+		case "inbox":
+			result, err = d.handleInbox(callCtx, req.Inbox)
 		case "prompt":
 			if !caps.Prompt || !caps.AgentRead {
 				result, err = recordUnavailablePrompt(callCtx, d.store, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, ExitDaemonUnavailable, "prompt capability unavailable")

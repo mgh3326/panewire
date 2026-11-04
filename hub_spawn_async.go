@@ -429,6 +429,9 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 		return false
 	}
 	t.task, t.bound = task, false
+	// A refusal that moves the request to another host still counts against
+	// this host's launch backoff: cwd_unmapped is such a failure.
+	t.h.observeLaunchOutcome(node.Machine, hubSpawnArg(node.Args, "-m"), result.RC, result.Error, t.h.now().UTC())
 	t.h.logger.Warn("hub spawn refused by node; trying next candidate", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", hubSpawnArg(node.Args, "-m"), "rc", result.RC, "reason", result.Error)
 	return true
 }
@@ -501,6 +504,9 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		}
 		if changed {
 			h.recordSpawnTrace(t.task, outcome)
+			// The first completion of a request is the launch outcome; a
+			// replayed completion must not count twice.
+			h.observeLaunchOutcome(node.Machine, firstNonEmptyString(hubSpawnArg(node.Args, "-m"), outcome.Profile), result.RC, outcome.Reason, h.now().UTC())
 		}
 		return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, Pane: result.Pane, StdoutTail: result.StdoutTail, Error: result.Error}, nil
 	case <-ctx.Done():
