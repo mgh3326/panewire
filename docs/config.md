@@ -417,6 +417,17 @@ caller), `escalated` exits 83, `lost` exits 84, and a record still pending,
 absent or unreadable leaves the local signals and the usual deadline to
 decide (the unreadable case warns once with reason `hk-unavailable`).
 
+An inherited spawn normally leaves the task bound to its parent job. It rebinds
+the task to the new job, through `handoffkeep tasks rebind`, only after the brief
+lands and only when all of these hold: the parent's hk record state is `lost`,
+`failed` or `completed`; the task's `refs.job_id` is the parent; the new job id
+differs; and the spawn is a replacement seat (routing role `implementer` or
+`lead`), not a reviewer, tester, consult or `panewire delegate` child. The
+`job.task_link` event then says `status: rebound`. Otherwise it says `inherited`,
+adding `bound_job` when the task is bound to a third job and `rebind_error` when
+the rebind failed or the parent's state was unreadable; neither fails the landed
+spawn.
+
 Automatic model selection (`spawn` with `-m` omitted or `-m auto`) reads the
 live bench catalog and pool status from the quota CLI, then orders candidates
 under the versioned pool-order policy (`[local].pool_policy` or
