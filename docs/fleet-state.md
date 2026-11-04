@@ -40,6 +40,7 @@ Each `(host, kind, key)` triple names one latest value.
 | `quota` | account key (`<pool>:<16-hex>`) | the node that runs the measurement | `quota`: `account_key`, `pool`, `source` (pacelever's measurement source), `buckets[]` (`window`, `used_pct`, `resets_at`, `scope`, `model`) |
 | `load` | empty | the hub, computed from the node's own heartbeats with `/etc/panewire/placement.json` | `load`: `load_ratio`, `score`, `accepting`, `usable`, `connected`, `slot_full`, `active_jobs`, `reason` |
 | `publisher` | empty | the hub, from the node's connection | `publisher`: `connected`, `last_seen` |
+| `readiness` | empty | the hub, from the node's heartbeat and its own launch counts | `readiness`: `readiness_unknown`, `readiness` (the node's report), `backoff_until` (harness kind to time). See [placement.md](placement.md#readiness) |
 
 - **Host binding.** `host` is always the machine id of the authenticated
   connection the value arrived on. A node may name only itself. A message that
@@ -51,6 +52,10 @@ Each `(host, kind, key)` triple names one latest value.
   computation. `accepting` is placement's effective acceptance: connected,
   accepting after operator overrides, and no memory pressure. `usable` is
   placement's own verdict for the host.
+- **Readiness.** A node that sends readiness has its last report here;
+  one that never did has `readiness_unknown: true` and no report. A consumer
+  applies the same freshness rule as for `load` and, when it fails, reads the
+  host as `readiness_unknown`: no readiness check drops it.
 - **Spawn is retired.** A node no longer publishes `spawn`. The hub accepts one
   from an old node and drops it. Job state comes from `GET /v1/jobs`.
 - **No secrets.** Messages carry account keys (fingerprints that the shared

@@ -547,12 +547,19 @@ type selPresence struct {
 	// host-first admission skips them (a holder that completed a refresh is
 	// known reachable, one that failed is not).
 	unreachable map[string]string
+	// ready is each host's readiness from the hub (readiness.go); a host not
+	// in it is unknown and never dropped by a readiness check. repo, brief
+	// and toolchains describe what this spawn needs of a host. drops records
+	// every (host, profile) pair the filter removed before ranking.
+	ready readinessView
+	drops []readinessDrop
 }
 
 func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPresence {
 	required := req.tags
 	sp := &selPresence{a: a, now: a.Now(), presTTL: a.placementTTL("presence_ttl_s", 86400), accounts: map[string]SharedAccount{}, refreshed: map[string]accountRefresh{}, unreachable: map[string]string{}}
 	sp.hub, sp.degraded = a.hostViews(ctx, s.CWD)
+	sp.ready = a.newReadinessView(ctx, s.CWD)
 	if a.Source == nil {
 		sp.presErr = true
 		sp.degraded = append(sp.degraded, "presence_unavailable")
@@ -763,7 +770,10 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		bindings := pres.bindings(c.seat, row.Pool)
 		if len(bindings) == 0 {
 			c.reason, c.code = "no_presence", outcomeAuthUnavailable
-			if !pres.hasHost(c.seat) {
+			if drop := pres.firstDrop(c.seat); drop != "" {
+				// Every host that held the account was dropped by readiness.
+				c.reason, c.code = drop, outcomeNoEligibleHost
+			} else if !pres.hasHost(c.seat) {
 				c.reason, c.code = "no_eligible_host", outcomeNoEligibleHost
 			}
 			c.outcome = "dropped:" + c.reason

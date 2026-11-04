@@ -114,7 +114,7 @@ func loadHubSpawnConfig(path string) (hubSpawnConfig, error) {
 }
 
 func (client *HubClient) spawnStartupError() error {
-	_, err := loadHubSpawnConfig(client.spawnConfigPath)
+	_, _, err := client.resolveHubSpawnConfig()
 	var configErr *hubSpawnConfigError
 	if errors.As(err, &configErr) && configErr.Rule == "config_json_invalid" && strings.Contains(configErr.Detail, `unknown field "runtug_path"`) {
 		return errors.New("node startup refused: remove retired runtug_path from spawn.json before starting this in-process node; preserve cwd_map, workspace, herdr_session and work_root")
@@ -197,6 +197,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	var reason, detail string
 	started := client.fleetClock()()
 	defer func() {
+		client.noteLaunchResult(message, result)
 		if result.RC != 0 && spawnResultFix(result.StdoutTail) == "" {
 			fix := "Fix: " + nodeSpawnRefusalFix(result.Error, reason)
 			if strings.HasPrefix(result.StdoutTail, "stderr: ") {
@@ -216,7 +217,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		result.Retryable = true
 		return result
 	}
-	config, err := loadHubSpawnConfig(client.spawnConfigPath)
+	config, defaults, err := client.resolveHubSpawnConfig()
 	if err != nil {
 		result.RC, result.Error = 2, "spawn_disabled"
 		var configErr *hubSpawnConfigError
@@ -228,6 +229,11 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		return result
 	}
 	cwd, found := config.CWDMap[message.CWDKey]
+	if !found && defaults {
+		// A node on defaults has no cwd_map: a repo is the directory of that
+		// name under its work root.
+		cwd, found = defaultRepoDir(config.WorkRoot, message.CWDKey)
+	}
 	if !found {
 		result.RC, result.Error = 2, "cwd_unmapped"
 		return result
@@ -432,6 +438,10 @@ func hubSpawnArg(args []string, flag string) string {
 	return ""
 }
 
+// hubSpawnBriefTransport is the brief fetch's transport; nil is the default.
+// Tests point it at a TLS test server.
+var hubSpawnBriefTransport http.RoundTripper
+
 func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key string) (string, error) {
 	if !validHubSpawnDocKey(key) || envPath == "" {
 		return "", errors.New("brief unavailable")
@@ -454,9 +464,9 @@ func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key st
 	if err != nil {
 		return "", errors.New("brief unavailable")
 	}
-	request.Header.Set("Authorization", "Bearer "+env.Token)
+	env.setAuth(request)
 	request.Header.Set("Accept", "application/json")
-	response, err := (&http.Client{Timeout: handoffkeepTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
+	response, err := (&http.Client{Transport: hubSpawnBriefTransport, Timeout: handoffkeepTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
 	if err != nil {
 		return "", errors.New("brief unavailable")
 	}
