@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -140,17 +141,21 @@ func (s ReadinessState) Drop(n ReadinessNeed, now time.Time) string {
 	if s.Unknown || r == nil {
 		return ""
 	}
-	if h, reported := r.Harnesses[n.Kind]; reported {
-		switch {
-		case !h.Installed:
-			return ReadyHarnessMissing
-		case n.MinVersion != "" && !versionAtLeast(h.Version, n.MinVersion):
-			return ReadyHarnessVersion
-		case h.Dialog != "":
-			return ReadyDialogPending
-		case n.Kind != "cmd" && h.Login == ReadinessLoginMissing:
-			return ReadyLoginMissing
-		}
+	// A kind the node does not report on (kiro, opencode) is not judged by
+	// any readiness check; only the hub-owned backoff above applies to it.
+	h, reported := r.Harnesses[n.Kind]
+	if !reported {
+		return ""
+	}
+	switch {
+	case !h.Installed:
+		return ReadyHarnessMissing
+	case n.MinVersion != "" && !versionAtLeast(h.Version, n.MinVersion):
+		return ReadyHarnessVersion
+	case h.Dialog != "":
+		return ReadyDialogPending
+	case n.Kind != "cmd" && h.Login == ReadinessLoginMissing:
+		return ReadyLoginMissing
 	}
 	switch {
 	case n.Repo != "" && !slices.Contains(r.Repos, n.Repo):
@@ -210,10 +215,11 @@ func parseVersion(v string) ([]int, bool) {
 	return out, true
 }
 
-// ProfileKind answers the harness kind of a seat profile name from the
-// built-in policy, or "". The hub uses it to attribute a launch outcome.
+// ProfileKind answers the harness kind of a seat profile name from the seat
+// policy the process runs on (PANEWIRE_POLICY, else the built-in one), or "".
+// The hub uses it to attribute a launch outcome.
 func ProfileKind(profile string) string {
-	policy, err := LoadPolicy("")
+	policy, err := LoadPolicy(os.Getenv("PANEWIRE_POLICY"))
 	if err != nil {
 		return ""
 	}

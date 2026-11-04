@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -246,5 +247,60 @@ func TestPlacementPolicyRejectsBadBackoff(t *testing.T) {
 	policy := DefaultPlacementPolicy()
 	if policy.launchFailureThreshold() != 2 || policy.launchBackoff() != 30*time.Minute {
 		t.Fatalf("defaults: %d %v", policy.launchFailureThreshold(), policy.launchBackoff())
+	}
+}
+
+// A report the node stopped resending expires: the pair is not judged on a
+// stale verdict, and the resend that follows brings the report back.
+func TestReadinessReportExpiresWithoutResend(t *testing.T) {
+	hub, server := fsHub(t, "")
+	node := fsConnectNode(t, hub, server, "node-a", fsNodeAToken)
+	r6Write(t, node, map[string]any{"type": "event", "kind": "heartbeat", "payload": map[string]any{"status": "alive", "readiness": hubReadinessReport()}})
+	eventually(t, 2*time.Second, "report published", func() bool {
+		message, ok := fsLatest(hub, "node-a", fleetStateKindReadiness, "")
+		return ok && !message.Readiness.Unknown
+	})
+	hub.mu.Lock()
+	received := hub.nodes["node-a"].readinessAt
+	hub.mu.Unlock()
+	hub.publishFleetReadiness("node-a", received.Add(hubReadinessExpiry-time.Second))
+	if state := readinessState(t, hub, "node-a"); state.Unknown {
+		t.Fatalf("a report inside the expiry read unknown: %+v", state)
+	}
+	hub.publishFleetReadiness("node-a", received.Add(hubReadinessExpiry+time.Second))
+	if state := readinessState(t, hub, "node-a"); !state.Unknown || state.Readiness != nil {
+		t.Fatalf("an expired report was published as fresh: %+v", state)
+	}
+}
+
+// POST /v1/spawn is a launch path too: its failed answers count toward the
+// backoff, and a success clears it.
+func TestLaunchBackoffCountsSynchronousSpawnAnswers(t *testing.T) {
+	hub, server := t14Hub(t)
+	node := t14Node(t, hub, server, true)
+	spawnBody := func(number int) map[string]any {
+		body := t14SpawnBody(t14RequestID(number))
+		body["args"] = []string{"-m", "codex-sol", "-w", "worker", "-l", "label-a", "--t", "T1", "--job", "job-a", "--owner", "lane-a"}
+		return body
+	}
+	for number := 1; number <= 2; number++ {
+		body := spawnBody(number)
+		response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawn", t14OperatorToken, body)
+		message := t14ReadNodeSpawn(t, node)
+		t14WriteSpawnResult(t, node, message.RequestID, 1, "", "", "", "spawn_failed")
+		if result := t14Result(t, response); result.status != http.StatusOK {
+			t.Fatalf("status=%d body=%s", result.status, result.body)
+		}
+	}
+	if _, backed := readinessState(t, hub, "machine-a").BackoffUntil["codex"]; !backed {
+		t.Fatal("two failed POST /v1/spawn answers did not back the pair off")
+	}
+	body := spawnBody(3)
+	response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawn", t14OperatorToken, body)
+	message := t14ReadNodeSpawn(t, node)
+	t14WriteSpawnResult(t, node, message.RequestID, 0, "job-a", "pane-a", "", "")
+	t14Result(t, response)
+	if got := readinessState(t, hub, "machine-a").BackoffUntil; len(got) != 0 {
+		t.Fatalf("a success did not clear the backoff: %v", got)
 	}
 }

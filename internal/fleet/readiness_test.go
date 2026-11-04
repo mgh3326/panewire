@@ -3,6 +3,8 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -79,6 +81,18 @@ func TestReadinessCmdAndUnreportedKinds(t *testing.T) {
 	}
 	if got := state.Drop(ReadinessNeed{Kind: "kiro"}, time.Now()); got != "" {
 		t.Fatalf("a kind the node does not report on was dropped: %s", got)
+	}
+	// None of the repo, brief or toolchain checks judge it either; only the
+	// hub-owned backoff does.
+	need := ReadinessNeed{Kind: "kiro", Repo: "not-mapped", Brief: true, Toolchains: []string{"cobol"}}
+	r.Brief.HandoffkeepEnv = false
+	if got := state.Drop(need, time.Now()); got != "" {
+		t.Fatalf("an unreported kind was judged by a repo-level check: %s", got)
+	}
+	now := time.Now()
+	state.BackoffUntil = map[string]time.Time{"kiro": now.Add(time.Minute)}
+	if got := state.Drop(need, now); got != ReadyLaunchBackoff {
+		t.Fatalf("backoff on an unreported kind: %q", got)
 	}
 }
 
@@ -293,6 +307,24 @@ func TestReadinessStaleValueIsUnknown(t *testing.T) {
 	}
 	if sel, err = a.selectProfile(context.Background(), s); err != nil || sel.chosen.host != "mac-b" {
 		t.Fatalf("a dead publisher's readiness dropped the pair: %v %v", sel, err)
+	}
+}
+
+// A profile of a custom seat policy resolves to its kind, so launch failures
+// of that profile reach the backoff.
+func TestProfileKindReadsTheActivePolicy(t *testing.T) {
+	custom := filepath.Join(t.TempDir(), "policy.json")
+	body := `{"version":1,"profiles":{"house-seat":{"canon":"house-seat","kind":"omp","family":"house","capability":"standard","roles":["worker"]}}}`
+	if err := os.WriteFile(custom, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PANEWIRE_POLICY", custom)
+	if got := ProfileKind("house-seat"); got != "omp" {
+		t.Fatalf("custom profile kind=%q", got)
+	}
+	t.Setenv("PANEWIRE_POLICY", filepath.Join(t.TempDir(), "missing.json"))
+	if got := ProfileKind("house-seat"); got != "" {
+		t.Fatalf("an unreadable policy still answered %q", got)
 	}
 }
 

@@ -34,6 +34,9 @@ const (
 
 	// hubReadinessMaxBytes bounds the readiness object a heartbeat carries.
 	hubReadinessMaxBytes = 32 << 10
+	// hubReadinessExpiry is how long a stored report stays valid without a
+	// resend. The node resends every 45 s, so it is several resend intervals.
+	hubReadinessExpiry = 5 * time.Minute
 )
 
 // launchFailureThreshold is the consecutive failures of one (host, kind) that
@@ -160,7 +163,13 @@ func (h *HubServer) publishFleetReadiness(machine string, now time.Time) {
 		h.mu.Unlock()
 		return
 	}
-	state := fleet.ReadinessState{Unknown: record.readiness == nil, Readiness: record.readiness}
+	// A report the node stopped resending is not republished as fresh: past
+	// the expiry the node reads as unknown, like one that never reported.
+	report := record.readiness
+	if report != nil && now.Sub(record.readinessAt) > hubReadinessExpiry {
+		report = nil
+	}
+	state := fleet.ReadinessState{Unknown: report == nil, Readiness: report}
 	for key, entry := range h.launchBackoffs {
 		if key.machine == machine && now.Before(entry.until) {
 			if state.BackoffUntil == nil {

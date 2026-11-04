@@ -65,7 +65,8 @@ drops what does not fit.
 The report is cached on the node. It is refreshed every 5 minutes and after
 every failed launch, probed in the background so a probe never delays a
 heartbeat, and re-sent every 45 seconds while unchanged so the hub's value
-stays fresh. A node sends it only to a hub that advertised the `readiness`
+stays fresh. The hub drops a stored report that was not re-sent for 5 minutes
+(the node reads `readiness_unknown` until the next one). A node sends it only to a hub that advertised the `readiness`
 feature in `hub.features` (an older hub rejects a heartbeat with an unknown
 field), and starts over on every connection.
 
