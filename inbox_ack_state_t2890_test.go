@@ -292,6 +292,28 @@ func TestLaneInboxAckStateMigration(t *testing.T) {
 	}
 }
 
+// A hub that stopped after adding event_id but before filling it leaves rows
+// the next open must still fill.
+func TestLaneInboxAckStateBackfillResumesAfterACrash(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	s, err := openLaneInboxStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at) VALUES('old','lane-a','lane.event','inbox','{"job_id":"j","event_id":"old-ev"}',1),('none','lane-a','lane.event','inbox','{"job_id":"j2"}',1)`); err != nil {
+		t.Fatal(err)
+	}
+	s.db.Close()
+	s, err = openLaneInboxStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.db.Close()
+	if states, err := s.ackStates([]string{"old-ev"}, ""); err != nil || len(states) != 1 {
+		t.Fatalf("row left unfilled after reopen: %+v %v", states, err)
+	}
+}
+
 func TestInboxStatusCLI(t *testing.T) {
 	h, server, _ := ackStateHub(t, hubInboxStorage{path: filepath.Join(t.TempDir(), "inbox.sqlite3")})
 	relayFrom(t, h, "node-a", "lane-a", "ev-a")

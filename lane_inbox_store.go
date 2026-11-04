@@ -308,15 +308,17 @@ func addLaneInboxAckState(ctx context.Context, db *sql.DB) error {
 	if _, err := addLaneInboxColumn(ctx, db, "sender", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	added, err := addLaneInboxColumn(ctx, db, "event_id", "TEXT NOT NULL DEFAULT ''")
-	if err != nil {
+	if _, err := addLaneInboxColumn(ctx, db, "event_id", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
-	if added {
-		if _, err := db.ExecContext(ctx, `UPDATE lane_inbox SET event_id=COALESCE(json_extract(payload,'$.event_id'),'') WHERE json_valid(payload)`); err != nil {
-			return err
-		}
+	// Every open, not only the one that added the column: a hub that stopped
+	// between the ALTER and this UPDATE, or a second hub that saw the column
+	// the first just added, must not leave old rows without their id. Rows
+	// already filled, or whose payload names no id, are not touched.
+	if _, err := db.ExecContext(ctx, `UPDATE lane_inbox SET event_id=json_extract(payload,'$.event_id') WHERE event_id='' AND json_valid(payload) AND json_type(payload,'$.event_id')='text' AND json_extract(payload,'$.event_id')<>''`); err != nil {
+		return err
 	}
+	var err error
 	_, err = db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS lane_inbox_event_id ON lane_inbox(event_id) WHERE event_id<>''`)
 	return err
 }
