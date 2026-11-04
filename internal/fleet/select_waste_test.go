@@ -239,8 +239,10 @@ func TestSelectFreeRungIgnoresPoolProjection(t *testing.T) {
 	if sel.chosen.seatName != "devin-swe2" {
 		t.Fatalf("a projected 106%% pool must not exclude its free rung: %s", sel.chosen.seatName)
 	}
-	if got := candOutcome(sel.record(), "devin-ds41", "high")["outcome"]; got != "dropped:projected_exhaust" {
-		t.Fatalf("paid rungs of the same pool are still refused by projection: %v", got)
+	// A paid rung of the same pool is on pace to use up its window: it stays a
+	// candidate, marked paced (credit pacing), behind the free rung.
+	if got := candOutcome(sel.record(), "devin-ds41", "high"); got["outcome"] != "below_choice" || got["paced"] != true {
+		t.Fatalf("a paid rung of a pool projected past reset is paced, not refused: %v", got)
 	}
 }
 

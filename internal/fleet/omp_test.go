@@ -349,14 +349,28 @@ func TestOMPDelegateHeadless(t *testing.T) {
 }
 
 func TestOMPSimulateCreditOrder(t *testing.T) {
-	for _, exhausted := range []bool{false, true} {
-		t.Run(fmt.Sprintf("exhausted=%t", exhausted), func(t *testing.T) {
+	// Credit pacing: a subscription pool on pace to use up its longest window
+	// ranks behind a credit pool that has a recorded balance; with no balance
+	// recorded the subscription pool keeps its place ahead of credit.
+	for _, tc := range []struct {
+		name               string
+		projected          float64
+		creditLeft         *float64
+		wantSeat, wantTier string
+	}{
+		{"pool leaves quota unused", 90, ptrF(80), "sonnet", "ranked"},
+		{"pool on pace to use up, credit balance recorded", 100, ptrF(80), "omp-opus", "credit"},
+		{"pool on pace to use up, no credit balance recorded", 100, nil, "sonnet", "ranked"},
+		{"pool on pace to use up, credit balance zero", 100, ptrF(0), "sonnet", "ranked"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			a := testApp(t)
-			projected := 90.0
-			if exhausted {
-				projected = 100
+			projected := tc.projected
+			pools := []simPool{{ID: "claude", Class: "spend", Projected: &projected}}
+			if tc.creditLeft != nil {
+				pools = append(pools, simPool{ID: "anthropic-api", Class: "credit", CreditLeftPct: tc.creditLeft})
 			}
-			doc := simDoc{Grade: "A", Pools: []simPool{{ID: "claude", Class: "spend", Projected: &projected}}, Candidates: []simCand{
+			doc := simDoc{Grade: "A", Pools: pools, Candidates: []simCand{
 				{Profile: "omp-opus", Effort: "high", Grade: "A", ModelID: "anthropic/claude-opus-5-5", Pool: "anthropic-api", Gate: "default"},
 				{Profile: "sonnet", Effort: "high", Grade: "A", ModelID: "claude-sonnet-5-5", Pool: "claude", Gate: "default"},
 			}}
@@ -374,12 +388,8 @@ func TestOMPSimulateCreditOrder(t *testing.T) {
 			if err := json.Unmarshal(a.Out.(*bytes.Buffer).Bytes(), &result); err != nil {
 				t.Fatal(err)
 			}
-			wantSeat, wantTier := "sonnet", "ranked"
-			if exhausted {
-				wantSeat, wantTier = "omp-opus", "credit"
-			}
-			if result.Chosen.Seat != wantSeat || result.Chosen.Tier != wantTier {
-				t.Fatalf("want %s tier=%s, got %+v", wantSeat, wantTier, result.Chosen)
+			if result.Chosen.Seat != tc.wantSeat || result.Chosen.Tier != tc.wantTier {
+				t.Fatalf("want %s tier=%s, got %+v", tc.wantSeat, tc.wantTier, result.Chosen)
 			}
 		})
 	}

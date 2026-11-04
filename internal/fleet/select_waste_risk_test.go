@@ -149,9 +149,11 @@ func TestSelectWasteRiskShortWindowGatesOnlyWhenExhausted(t *testing.T) {
 		// window at 90% paces to 450% — it must not refuse a waste-risk pool.
 		{"waste-risk pool, 5h at 90% and fast → admitted", 90, 31, "sonnet", ""},
 		{"waste-risk pool, 5h exhausted → refused", 100, 31, "devin-swe2", "window_exhausted"},
-		// 7d: 85% used → ~11% unused: not at waste risk, so the 5h pace still
-		// refuses it as today.
-		{"pool not at waste risk keeps the pace refusal", 90, 85, "devin-swe2", "projected_exhaust"},
+		// 7d: 85% used → ~11% unused: not at waste risk. Sub-daily windows
+		// gate admission only (decision/2026-11-04/pool-order-owner), so the
+		// 5h pace no longer refuses it; an exhausted 5h window still does.
+		{"pool not at waste risk, 5h at 90% and fast → admitted", 90, 85, "sonnet", ""},
+		{"pool not at waste risk, 5h exhausted → refused", 100, 85, "devin-swe2", "window_exhausted"},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
