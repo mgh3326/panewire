@@ -14,7 +14,7 @@ import (
 // the CF Access pair, like a handoffkeep behind Cloudflare Access.
 func cfAccessHandoffkeep(t *testing.T) *httptest.Server {
 	t.Helper()
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") != "Bearer hk-token" || r.Header.Get("CF-Access-Client-Id") != "cf-id" || r.Header.Get("CF-Access-Client-Secret") != "cf-secret" {
 			w.WriteHeader(http.StatusForbidden)
 			return
@@ -38,6 +38,8 @@ func writeHandoffkeepEnv(t *testing.T, lines ...string) string {
 // the CF Access pair from its env file is sent with the bearer.
 func TestBriefFetchSendsCFAccessPair(t *testing.T) {
 	server := cfAccessHandoffkeep(t)
+	hubSpawnBriefTransport = server.Client().Transport
+	t.Cleanup(func() { hubSpawnBriefTransport = nil })
 	base := []string{"HANDOFFKEEP_URL=" + server.URL, "HANDOFFKEEP_TOKEN=hk-token"}
 
 	withPair := writeHandoffkeepEnv(t, append(base, "HANDOFFKEEP_CF_ACCESS_CLIENT_ID=cf-id", "HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET=cf-secret")...)
@@ -62,6 +64,8 @@ func TestHandoffkeepEnvCFAccessPairIsBothOrNeither(t *testing.T) {
 		{"both", []string{"HANDOFFKEEP_CF_ACCESS_CLIENT_ID=cf-id", "HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET=cf-secret"}, true},
 		{"id only", []string{"HANDOFFKEEP_CF_ACCESS_CLIENT_ID=cf-id"}, false},
 		{"secret only", []string{"HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET=cf-secret"}, false},
+		{"pair over plain http", []string{"HANDOFFKEEP_URL=http://127.0.0.1:9", "HANDOFFKEEP_CF_ACCESS_CLIENT_ID=cf-id", "HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET=cf-secret"}, false},
+		{"plain http without a pair", []string{"HANDOFFKEEP_URL=http://127.0.0.1:9"}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeHandoffkeepEnv(t, append([]string{"HANDOFFKEEP_URL=https://hk.example", "HANDOFFKEEP_TOKEN=hk-token"}, tc.extra...)...)

@@ -82,7 +82,7 @@ func loadHubHandoffkeepEnv(path string) (hubHandoffkeepEnv, error) {
 	if !validHandoffkeepBaseURL(env.URL) || !validHandoffkeepToken(env.Token) {
 		return hubHandoffkeepEnv{}, errors.New("hub handoffkeep env is missing required values")
 	}
-	if (env.CFID == "") != (env.CFSecret == "") || (env.CFID != "" && (!validHandoffkeepToken(env.CFID) || !validHandoffkeepToken(env.CFSecret))) {
+	if (env.CFID == "") != (env.CFSecret == "") || (env.CFID != "" && (!validHandoffkeepToken(env.CFID) || !validHandoffkeepToken(env.CFSecret) || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(env.URL)), "https://"))) {
 		return hubHandoffkeepEnv{}, errors.New("hub handoffkeep env has an incomplete or invalid CF Access pair")
 	}
 	return env, nil
