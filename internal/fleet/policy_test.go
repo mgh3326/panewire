@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -66,11 +67,9 @@ func TestSeatPolicy(t *testing.T) {
 		host                                           bool
 		want                                           int
 	}{
-		{"pi builder default", "pi-haiku55", "builder", "default", "B", "", "", true, 0},
 		{"cmd builder default", "cmd-dsflash41", "builder", "default", "B", "", "", true, 0},
-		{"pi consult builder denied", "pi-haiku55", "builder", "consult_only", "B", "", "", true, 77},
+		{"cmd consult builder denied", "cmd-dsflash41", "builder", "consult_only", "B", "", "", true, 77},
 		{"cmd escalation builder denied", "cmd-dsflash41", "builder", "escalation", "B", "", "", true, 77},
-		{"pi shares anthropic", "pi-haiku55", "tester", "default", "B", "anthropic", "", true, 77},
 		{"cmd shares ds41", "cmd-dsflash41", "tester", "default", "B", "deepseek", "", true, 77},
 		{"independent tester", "cmd-dsflash41", "tester", "default", "B", "anthropic", "", true, 0},
 		{"missing builder family", "cmd-dsflash41", "tester", "default", "B", "", "", true, 77},
@@ -90,7 +89,7 @@ func TestSeatPolicy(t *testing.T) {
 	}
 }
 func TestHostsConfigFailClosed(t *testing.T) {
-	for _, input := range []string{"[local]\nspawn = 'true'", "[local]\nspawn=true\nspawn=false", "[hub]\nquota_gate='typo'", "[hub]\nstate='maybe'", "[hub]\nstate_publisher_ttl_s=0", "[hub]\nhub_token_env='TOKEN'", "spawn=true", "[local]\npi_anthropic=1"} {
+	for _, input := range []string{"[local]\nspawn = 'true'", "[local]\nspawn=true\nspawn=false", "[hub]\nquota_gate='typo'", "[hub]\nstate='maybe'", "[hub]\nstate_publisher_ttl_s=0", "[hub]\nhub_token_env='TOKEN'", "spawn=true", "[local]\ncmd_dsflash41=1"} {
 		t.Run(input, func(t *testing.T) {
 			path := filepath.Join(t.TempDir(), "hosts.toml")
 			if e := os.WriteFile(path, []byte(input), 0600); e != nil {
@@ -141,6 +140,25 @@ func TestBriefPolicyHostAndProfileOverrides(t *testing.T) {
 		got, e := a.prepareBrief(Spawn{Profile: tt.profile}, "BODY")
 		if e != nil || !strings.Contains(got, tt.want+"\n\nBODY") {
 			t.Fatalf("%q %v", got, e)
+		}
+	}
+}
+
+// The embedded policy holds only launchable seats, and none of the harnesses
+// hk policy/index retired (grok, kimi, pi-*) may come back as a profile.
+func TestEmbeddedPolicyHasNoRetiredOrUnlaunchableSeat(t *testing.T) {
+	p, e := LoadPolicy("")
+	if e != nil {
+		t.Fatal(e)
+	}
+	a := testApp(t)
+	retired := regexp.MustCompile(`grok|kimi|^pi-|^pi$`)
+	for name, s := range p.Profiles {
+		if retired.MatchString(name) || retired.MatchString(s.Kind) || retired.MatchString(s.Canon) {
+			t.Errorf("%s: retired seat (kind %s, canon %s)", name, s.Kind, s.Canon)
+		}
+		if _, _, e := a.launchArgs(s, Launch{ModelID: "provider/model", Effort: "high"}); e != nil && strings.Contains(e.Error(), "unsupported agent kind") {
+			t.Errorf("%s: %v", name, e)
 		}
 	}
 }

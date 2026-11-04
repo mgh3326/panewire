@@ -149,8 +149,8 @@ func TestPromptPollsSubmissionEvidenceAfterFirstRead(t *testing.T) {
 	}
 }
 
-func TestPromptKimiAndAgyHaveNoPositiveMatcher(t *testing.T) {
-	for _, harness := range []string{"kimi", "agy"} {
+func TestPromptAgyAndUnknownHaveNoPositiveMatcher(t *testing.T) {
+	for _, harness := range []string{"agy", "mystery"} {
 		t.Run(harness, func(t *testing.T) {
 			fixture := newHerdrFixture(t, promptFixtureSchema(false))
 			defer fixture.Close()

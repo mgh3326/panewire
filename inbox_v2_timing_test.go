@@ -79,7 +79,7 @@ func TestReceiverCapabilityAndIdleRules(t *testing.T) {
 		{"supported working", receiverSession("w1:p1", "working", "claude"), "inbox"},
 		{"supported blocked", receiverSession("w1:p1", "blocked", "claude"), "inbox"},
 		{"supported unknown status", receiverSession("w1:p1", "unknown", "claude"), "inbox"},
-		{"unsupported cli", receiverSession("w1:p1", "idle", "grok"), "interrupt"},
+		{"unsupported cli", receiverSession("w1:p1", "idle", "mystery"), "interrupt"},
 		{"unlisted cli", receiverSession("w1:p1", "idle", "mystery"), "interrupt"},
 		{"unreported cli", receiverSession("w1:p1", "idle", ""), "interrupt"},
 		{"pane missing from snapshot", receiverSession("w9:p9", "idle", "claude"), "interrupt"},
@@ -200,11 +200,11 @@ func TestMustActInterruptsEveryReceiver(t *testing.T) {
 }
 
 func TestAgentsPolicyParsing(t *testing.T) {
-	p, err := parseDeliveryPolicy([]byte("default: interrupt\nagents:\n  grok: supported\n  claude: unsupported\nrules: []\n"))
+	p, err := parseDeliveryPolicy([]byte("default: interrupt\nagents:\n  agy: supported\n  claude: unsupported\nrules: []\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !p.agentSupported("grok") || p.agentSupported("claude") || p.agentSupported("pi") {
+	if !p.agentSupported("agy") || p.agentSupported("claude") || p.agentSupported("mystery") {
 		t.Fatalf("agents=%v", p.Agents)
 	}
 	// Defaults: claude supported, everything else unsupported.

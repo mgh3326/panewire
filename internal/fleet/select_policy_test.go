@@ -27,7 +27,7 @@ var policyCatalog = []CatalogRow{
 	{Profile: "opus", Effort: "max", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "m"},
 	{Profile: "codex-sol", Effort: "high", Grade: "A", Pool: "codex", Gate: "default", ModelID: "m"},
 	{Profile: "codex-sol", Effort: "max", Grade: "S+", Pool: "codex", Gate: "default", ModelID: "m"},
-	{Profile: "pi-sonnet55", Effort: "high", Grade: "A", Pool: "anthropic-api", Gate: "default", ModelID: "m"},
+	{Profile: "omp-sonnet", Effort: "high", Grade: "A", Pool: "anthropic-api", Gate: "default", ModelID: "m"},
 }
 
 // paceStatus renders a quota status document with one 7d account
@@ -110,7 +110,7 @@ func TestSelectionPolicyScenarios(t *testing.T) {
 			"codex-sol@high", "codex", "waste"},
 		{"credit balance recorded, every subscription on pace to use up its week → credit before the paced pools", "B", "T2", "3",
 			with(map[string]pace{"devin": exhausted, "claude": {60, 0.5}, "codex": {70, 0.5}, "anthropic-api": {10, 0.5}}),
-			"pi-sonnet55@high", "anthropic-api", "credit"},
+			"omp-sonnet@high", "anthropic-api", "credit"},
 		{"no credit balance recorded, every subscription on pace to use up its week → the paced pool stays ahead of credit", "B", "T2", "3",
 			with(map[string]pace{"devin": exhausted, "claude": {60, 0.5}, "codex": {70, 0.5}, "anthropic-api": {10, 0.5}}),
 			"sonnet@medium", "claude", "ranked"},
@@ -134,7 +134,6 @@ func TestSelectionPolicyScenarios(t *testing.T) {
 		t.Run(tt.situation, func(t *testing.T) {
 			present := []string{"devin", "claude", "codex", "anthropic-api"}
 			a, s, q := selFixture(t, tt.grade, policyCatalog, nil, present)
-			a.Config.Local["pi_anthropic"] = true // the credit seat's capability
 			pools, e := CLIQuota{Runner: &fakeRunner{Do: func(c Command) Result {
 				if strings.Join(c.Args, " ") == "manual list" {
 					if !strings.HasPrefix(tt.situation, "credit balance recorded") {
@@ -150,7 +149,7 @@ func TestSelectionPolicyScenarios(t *testing.T) {
 			q.PoolViews = pools
 			// The quota gate itself refuses a pool that is used up now.
 			q.GateDo = func(r QuotaRequest) (string, error) {
-				pool := map[string]string{"devin-swe2": "devin", "devin-swe2-medium": "devin", "sonnet": "claude", "opus": "claude", "codex-sol": "codex", "pi-sonnet55": "anthropic-api"}[r.Profile]
+				pool := map[string]string{"devin-swe2": "devin", "devin-swe2-medium": "devin", "sonnet": "claude", "opus": "claude", "codex-sol": "codex", "omp-sonnet": "anthropic-api"}[r.Profile]
 				if tt.pools[pool].used >= 100 {
 					return "", fail(4, "pool %s exhausted", pool)
 				}

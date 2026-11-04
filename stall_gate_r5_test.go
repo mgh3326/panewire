@@ -541,7 +541,7 @@ func TestR5GateH2LiveStatesNewShapes(t *testing.T) {
 	// limit/auth lines at line head inside the live region, with composer
 	// lines below them (not at the very tail) — harness-agnostic rules.
 	t.Run("limit_auth_mid_live_region", func(t *testing.T) {
-		fx, pane := gateScreenJob(t, "kimi")
+		fx, pane := gateScreenJob(t, "agy")
 		screen := "work output\n" +
 			"Error: [provider.auth_error] 403 {\"error\":{\"message\":\"You've reached your 5-hour usage limit\"}}\n" +
 			"■ Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.\n"

@@ -357,7 +357,7 @@ func TestRelayInjectVerifySubmissionCodexWithholdsReturn(t *testing.T) {
 //     unproven
 //   - other:   composer_residue (chip only), unproven -- queued and
 //     marker_observed stay unreachable (harness-gated); this is the
-//     remaining carve-out (e.g. grok, see harnessHasSubmissionEvidence)
+//     remaining carve-out (see harnessHasSubmissionEvidence)
 //
 // #683 changed the verdicts this matrix pins: a queue banner is landed
 // (relayInjectQueued), and anything the reads cannot prove is
