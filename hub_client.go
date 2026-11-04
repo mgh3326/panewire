@@ -136,6 +136,9 @@ type HubClient struct {
 	dial                 HubDial
 	wait                 HubWait
 	warn                 func(string)
+	unparsedMu           sync.Mutex
+	unparsedWarnedAt     time.Time
+	unparsedSuppressed   int
 	relayInject          func(context.Context, string, string) bool
 	relayInjectVerdict   func(context.Context, string, string, []string) relayInjectResult // #547 three-way fixture seam; relayInject wins when set
 	hostLoadCollector    func(context.Context) (HubHostLoad, error)
@@ -1551,6 +1554,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			}
 			message, ok := parseHubOutbound(payload)
 			if !ok {
+				client.handleUnparsedHubMessage(payload)
 				continue
 			}
 			if message.Type == "relay.inject" {

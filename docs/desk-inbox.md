@@ -53,6 +53,11 @@ lanes:
 `max_chars` accepts 240 through 300. The digest prefix must start with `inbox/`.
 Removing `inbox_summary` restores ordinary inbox timing for that lane.
 
+The summary follows the interrupt text after a ` | ` separator, never a newline:
+the node drops any `relay.inject` text that holds `\r`, `\n` or NUL. A node that
+cannot parse a hub message logs a rate-limited WARN and answers
+`relay.unconfirmed` for a `relay.inject`, so the hub marks the row for replay.
+
 ## Scheduler kind detection
 
 Event prose remains compatible with existing detection for `[dots] RESULT`,

@@ -39,6 +39,25 @@ func deskDietHub(t *testing.T, path string, now *time.Time) (*HubServer, *hubAge
 	h.reportRelayPath = r20LanesFile(t, `{"lanes":{"operator-desk":{"machine":"host-a","pane":"w1:p1"}}}`)
 	return h, a, doc
 }
+
+// assertDeskInjectParses sends a hub-built directive through the node's
+// wire parser. The hub test fixtures read the in-memory struct, so only this
+// round trip proves the node keeps what the hub sends.
+func assertDeskInjectParses(t *testing.T, directive hubRelayInjectEvent) {
+	t.Helper()
+	wire, err := json.Marshal(directive)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, ok := parseHubOutbound(wire)
+	if !ok {
+		t.Fatalf("node parser rejects hub inject text %q", directive.Text)
+	}
+	if parsed.Text != directive.Text || parsed.EventID != directive.EventID {
+		t.Fatalf("node parsed %q, hub built %q", parsed.Text, directive.Text)
+	}
+}
+
 func deskDietEvent(id, typ, text string) hubJobEventPayload {
 	return hubJobEventPayload{JobID: laneEventTransportID("operator-desk", id), Epoch: 1, OwnerLane: "operator-desk", EventID: id, NotifyType: typ, Text: text}
 }
@@ -108,7 +127,8 @@ func TestDeskDietPiggybackBoundPointerSurfacingAndRestart(t *testing.T) {
 		t.Fatal(result, len(a.relays))
 	}
 	directive := <-a.relays
-	lines := strings.Split(directive.Text, "\n")
+	assertDeskInjectParses(t, directive)
+	lines := strings.SplitN(directive.Text, inboxSummaryJoin, 2)
 	if len(lines) != 2 || utf8.RuneCountInString(lines[1]) > 300 || !utf8.ValidString(lines[1]) || !strings.HasSuffix(lines[1], "hk:doc "+doc) {
 		t.Fatal(directive.Text)
 	}
@@ -152,6 +172,7 @@ func TestDeskDietPiggybackBoundPointerSurfacingAndRestart(t *testing.T) {
 	drainDeskPersisted(a2)
 	h2.relayLaneEvent(deskDietEvent("decision-two", "decision", "ESC next decision"), a2)
 	next := <-a2.relays
+	assertDeskInjectParses(t, next)
 	if !strings.Contains(next.Text, "[inbox] 1 new: progress 1") || strings.Contains(next.Text, "dots 1") {
 		t.Fatal(next.Text)
 	}
