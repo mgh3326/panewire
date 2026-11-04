@@ -500,6 +500,9 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 			outcome.Reason = "spawn_failed"
 		}
 		if outcome.RC != 0 {
+			if code := spawnFailureCode(result); outcome.Reason == "spawn_failed" && code != "" {
+				outcome.Reason += ":" + code
+			}
 			outcome.Reason = spawnOutcomeReason(outcome.Reason, spawnResultRefusal(result.StdoutTail))
 		}
 		changed, err := h.inbox.store.completeSpawn(h.closeCtx, t.task, outcome, h.now().UTC())
@@ -692,6 +695,13 @@ func spawnOutcomeReason(code, refusal string) string {
 		return code
 	}
 	return utf8PrefixWithin(code+": "+refusal, hubSpawnReasonLimit)
+}
+
+// spawnFailureCode is the closed-set code for a spawn_failed node result, or ""
+// when it is unclassified. The wire stays bare spawn_failed: nodes and the hub
+// deploy at different times, so each derives the code from the same tail and rc.
+func spawnFailureCode(result hubSpawnResult) string {
+	return fleet.SpawnRefusalCode(spawnResultRefusal(result.StdoutTail), result.RC)
 }
 
 // spawnResultRefusal reads what the fleet App refused with from a node result

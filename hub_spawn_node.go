@@ -371,7 +371,8 @@ func hubSpawnTailWithStderr(stdout, stderr string) string {
 }
 
 // recordHubSpawnOutcome writes the node_spawn fleet event for a refused or
-// failed hub spawn. reason defaults to the wire error; detail to the rc.
+// failed hub spawn. reason defaults to the refusal's closed-set code, else the
+// wire error; detail to the rc.
 func (client *HubClient) recordHubSpawnOutcome(message hubOutboundMessage, result hubSpawnResult, reason, detail string) {
 	if result.Error == "" {
 		return
@@ -382,6 +383,9 @@ func (client *HubClient) recordHubSpawnOutcome(message hubOutboundMessage, resul
 	}
 	if reason == "" {
 		reason = result.Error
+		if code := spawnFailureCode(result); result.Error == "spawn_failed" && code != "" {
+			reason = code
+		}
 	}
 	if detail == "" {
 		detail = fmt.Sprintf("rc=%d", result.RC)
@@ -390,7 +394,7 @@ func (client *HubClient) recordHubSpawnOutcome(message hubOutboundMessage, resul
 	if client.now != nil {
 		now = client.now
 	}
-	emitFleetEvent(now(), "node_spawn", hubSpawnArg(message.Args, "--job"), outcome, reason, result.Error+" "+detail)
+	emitFleetEvent(now(), fleetEvent{Kind: "node_spawn", Job: hubSpawnArg(message.Args, "--job"), RequestID: message.RequestID, Outcome: outcome, Reason: reason, Detail: result.Error + " " + detail})
 }
 
 // hubSpawnArg returns the value of flag in a hub spawn's argv, or "".

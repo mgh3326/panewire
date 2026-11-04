@@ -467,8 +467,8 @@ keys use it, both defaulting to 100:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `waste_below_projected_pct` | `100` | A non-credit subscription pool projected below this at reset is WASTE: the rest is lost at reset, so it is spent before credit and ranked pools. Without a projection the quota status `verdict.waste` flag decides. An explicit `0` disables projected waste. |
-| `exclude_at_projected_pct` | `100` | A pool projected at or above this is dropped as `projected_exhaust` (a waste-risk pool: projected over its windows of a day or more only, see below). A free-tier rung is kept for admission instead and survives only when the gate's `gate_basis` is a free bucket (`free-bucket:…`); any other basis drops it as `projected_exhaust`. Must be above 0 and not below `waste_below_projected_pct`. An over-consumed reading (used above 100%) still projects, so it is excluded. |
+| `waste_below_projected_pct` | `100` | A non-credit subscription pool projected (over its windows of a day or more) below this at reset is WASTE: the rest is lost at reset, so it is spent before credit and ranked pools. Without a projection the quota status `verdict.waste` flag decides. An explicit `0` disables projected waste. |
+| `exclude_at_projected_pct` | `100` | A waste-risk pool projected at or above this over its windows of a day or more is dropped as `projected_exhaust`. A pool not at waste risk is never dropped on projection: it ranks behind credit instead (credit pacing, below). A free-tier rung is kept for admission instead and survives only when the gate's `gate_basis` is a free bucket (`free-bucket:…`); any other basis drops it as `projected_exhaust`. Must be above 0 and not below `waste_below_projected_pct`. An over-consumed reading (used above 100%) still projects, so it is excluded. |
 
 A paid pool is at **waste risk** when the projected unused share of its
 longest window (a day or more) at that window's reset — waste urgency ×
@@ -484,8 +484,9 @@ other pool keeps the tier order above. For a waste-risk pool sub-daily
 windows (e.g. 5h) are used up rather than paced: they never contribute to
 its `projected_exhaust` check and refuse it only when exhausted — used at
 or above 100% (dropped as `window_exhausted`) or the quota gate's own
-exhausted refusal. A pool not at waste risk keeps the pace-based
-projection over all its windows. The quota gate itself never refuses on
+exhausted refusal. The same holds for every other subscription pool: only a
+window already used up (a sub-daily window or the blocking share at or above
+100%) drops it, and sub-daily windows never project. The quota gate itself never refuses on
 pace (pacelever: "pace ranks and warns; it never denies"), so no gate flag
 is passed.
 
@@ -505,8 +506,24 @@ refuses them. Their selection record carries `tier=credit`, with absent
 balance values left unset.
 
 Credit ranks below every admitted subscription pool, which resets sooner,
-and is used when none is admitted (pace refused, limit, no login on the
-host); how much credit has been spent does not matter. In the final
+and is used when none is admitted (window used up, limit, no login on the
+host); how much credit has been spent does not matter — except for credit
+pacing.
+
+**Credit pacing** (decision/2026-11-04/pool-order-owner): credit also
+expires. A subscription pool whose longest window (a day or more: weekly,
+monthly) is projected at or above 100% at that window's reset at its current
+pace will use that quota up anyway, so it ranks **behind credit**: the
+candidate records `paced=true` and `behind_credit=true`, and credit takes the
+work first. This applies only when a credit candidate with a recorded balance
+above zero (pacelever's manual store) is in the ranking; with no balance
+recorded, or a zero balance, the paced pool keeps its tier and
+`behind_credit=false`. A credit gate refusal falls through to the paced pool
+next. Free seats, credit pools and waste-risk pools are never paced. There is
+no threshold beyond "used up" (100%); sub-daily windows (e.g. 5h) never pace a
+pool, they only refuse it once exhausted. Candidates also record
+`long_projected_pct`, the projection over windows of a day or more; tiering
+and the unpaceable fallback order use it, never a sub-daily pace. In the final
 `credit_final_days` (default `4`; `0` disables) before the credit's expiry a
 pool with a balance left ranks first, ahead of waste-risk pools and the free
 seats, so the rest is used up: tier `waste`, `waste_reason=credit_expiring`.
@@ -587,7 +604,8 @@ spawn, no job writes. The input file is a minimal JSON document — or a
   "pools": [
     {"id": "claude", "status": "ok", "class": "spend", "waste": true,
      "used_pct": 31, "projected_pct": 31.8,
-     "resets_at": "2026-10-31T16:48:00Z", "window": "7d"}
+     "resets_at": "2026-10-31T16:48:00Z", "window": "7d"},
+    {"id": "anthropic-api", "class": "credit", "credit_left_pct": 80}
   ],
   "candidates": [
     {"profile": "sonnet", "seat": "sonnet", "effort": "high", "grade": "A",
@@ -602,7 +620,9 @@ projection is `projected_pct` when given, else pacelever's pace over
 `used_pct`/`window`/`resets_at` (or `reset_hours` relative to now); waste
 urgency is (100 − projected) ÷ hours-to-reset of the longest window of a
 day or more (sub-daily windows never rank), and pools without a readable
-reset rank by projected order. `free` marks a free-tier rung; `free_limit`
+reset rank by projected order. `credit_left_pct` records a credit pool's
+balance left (percent of its total) so credit pacing can be replayed; absent
+means no balance is recorded. `free` marks a free-tier rung; `free_limit`
 records an observed free limit — the only exclusion a free rung honors, so a
 shared pool's `used_pct` or projection never drops it. `--set` (repeatable)
 overrides or creates a pool and repaces it: `used` and `projected` are

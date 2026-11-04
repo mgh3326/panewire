@@ -164,7 +164,13 @@ notify type `automation-failed`, so it interrupts a lane that digests its report
 | `parent_job_not_found` | `--parent-job` resolved to no record within the 30-second wait. A job store that cannot answer stays `admission_refused`. |
 | `quota_unconfirmed:<cause>` | Admission could not confirm the target's quota. `<cause>` is the shared-observation reason, such as `no_usable_presence` or `stale`. Without one, the code is `quota_unconfirmed`. |
 | `admission_refused` | Any other refusal before a node was bound. The text says why. |
-| `spawn_failed` | The node's fleet App refused or failed. The text is its error, read from the result's stderr section. |
+| `spawn_failed:<code>` | The node's fleet App refused or failed, and the hub classified it. `<code>` comes from the closed table in `internal/fleet/refusal.go` (`spawnRefusals`), which also holds each refusal's fix. The text is the node's error, read from the result's stderr section. |
+| `spawn_failed` | As above, but no row in that table matches the text or exit status. |
+
+The hub derives `<code>` from the refusal text and exit status it already has, so
+the node-to-hub wire still carries bare `spawn_failed`. Nodes and the hub deploy
+at different times, and an older hub rejects any other error value. Status, retry
+and notification decisions never read the code.
 
 A private Sentry client records one always-sampled `runtug.spawn` transaction per
 spawn attempt (the established telemetry name survives the CLI rename). Only this
@@ -172,8 +178,16 @@ spawn path is traced; other hub traffic and the crash reporter's budget are
 unchanged. A transaction finishes on the first outcome observation; late reconciliation stays in the durable audit and each subsequent failure transition still gets its own deduplicated error event. Stage spans use measured claim/placement/checkout/launch/landing
 elapsed durations. Durations from node clocks are end-aligned, not presented as
 a synchronized cross-host causal timeline. Tags are job, host, profile, role and
-rc. `SPAWN_FAILED`, including timeout, also produces an error event fingerprinted
-by stage and normalized reason. Briefs, argv, pane capture, stderr, checkout paths
+rc. `SPAWN_FAILED`, including timeout, also produces an error event titled
+`SPAWN_FAILED <stage>/<reason>` and fingerprinted by stage and normalized reason.
+The normalized reason keeps `spawn_failed:<code>` only for a code in the closed
+table, so tag and fingerprint cardinality stay bounded; the refusal text never
+goes to Sentry. The error event also carries `request` and `attempt` tags, which
+join it to the operation and to the node's `node_spawn` fleet event.
+The client reports Environment `fleet`, Release `panewire@<version>` and the fixed
+ServerName `panewire-hub`, never the OS hostname, and it drops user, request and
+breadcrumbs from every event. Hub shutdown flushes it for at most 2 seconds after
+the spawn workers stop. Briefs, argv, pane capture, stderr, checkout paths
 and credentials are excluded. Export failure never authorizes a retry or changes
 the committed business outcome. `TestSpawnSentryOnlySpawnAlwaysSampledAndNormalized`
 uses a fake transport and also checks that ordinary HTTP traffic is untraced.

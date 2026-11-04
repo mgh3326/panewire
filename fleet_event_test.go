@@ -50,11 +50,15 @@ func readFleetEventsFile(t *testing.T) (string, []map[string]string) {
 		if err := json.Unmarshal([]byte(line), &fields); err != nil {
 			t.Fatalf("event line is not JSON: %q", line)
 		}
-		if len(fields) != 8 {
+		keys := []string{"ts", "host", "tool", "kind", "job", "outcome", "reason", "detail"}
+		if _, ok := fields["request_id"]; ok {
+			keys = append(keys, "request_id")
+		}
+		if len(fields) != len(keys) {
 			t.Fatalf("event is not the v1 shape: %q", line)
 		}
 		event := map[string]string{}
-		for _, key := range []string{"ts", "host", "tool", "kind", "job", "outcome", "reason", "detail"} {
+		for _, key := range keys {
 			value, ok := fields[key].(string)
 			if !ok {
 				t.Fatalf("event field %q missing: %q", key, line)
