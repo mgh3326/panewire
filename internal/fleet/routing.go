@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -30,6 +31,10 @@ type RoutingPolicy struct {
 	Version int                    `json:"version"`
 	Roles   map[string]RoutingRule `json:"roles"`
 	RoleMap map[string]string      `json:"panewire_role_map"`
+	// LegacyRoleMap is the map's name before the runtug absorption (#155).
+	// hk policy/model-routing still publishes it, so parseRoutingJSON reads it
+	// into RoleMap; it is never kept or cached under this name.
+	LegacyRoleMap map[string]string `json:"runtug_role_map,omitempty"`
 }
 
 // RoutingRule is one routing role's entry. Allowed names catalog profiles
@@ -201,6 +206,13 @@ func parseRoutingJSON(b []byte) (RoutingPolicy, error) {
 	if e := json.Unmarshal(b, &p); e != nil {
 		return p, e
 	}
+	if len(p.LegacyRoleMap) > 0 {
+		if len(p.RoleMap) > 0 && !maps.Equal(p.RoleMap, p.LegacyRoleMap) {
+			return p, fmt.Errorf("panewire_role_map and runtug_role_map disagree; publish one map")
+		}
+		p.RoleMap = p.LegacyRoleMap
+	}
+	p.LegacyRoleMap = nil
 	return p, p.validate()
 }
 
@@ -351,7 +363,9 @@ func (a *App) routeFor(ctx context.Context, seatRole, override string) (*routing
 		a.warn("%s unavailable (%v); %s proceeds unfiltered (builtin_default)", routingDocKey, e, firstNonempty(role, seatRole))
 		return &routing{role: role, source: routingSourceBuiltin}, nil
 	}
-	role := firstNonempty(override, p.RoleMap[seatRole])
+	// A seat role the table does not map takes the builtin routing role: a
+	// missing or renamed map must not leave the role unfiltered (hk 2837).
+	role := firstNonempty(override, p.RoleMap[seatRole], builtinRoleMap[seatRole])
 	r := &routing{role: role, version: p.Version, source: source}
 	if role == "" {
 		return r, nil
