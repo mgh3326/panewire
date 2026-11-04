@@ -13,7 +13,8 @@ const (
 	// hubMaxHeartbeatSessions bounds both node work and hub allocations. The
 	// byte-budget check below is still authoritative because labels and other
 	// existing heartbeat fields have variable encoded sizes.
-	hubMaxHeartbeatSessions = 64
+	hubMaxHeartbeatSessions     = 64
+	hubMaxHeartbeatPaneIDsBytes = 16 << 10
 
 	// hubSessionSnapshotTimeout bounds the once-per-heartbeat agent.list
 	// lookup. The collection runs inline in the heartbeat write loop, so a
@@ -68,10 +69,12 @@ type HubSessionSnapshot struct {
 }
 
 type hubSessionSnapshotRecord struct {
-	sessions       []HubSession
-	snapshotStatus string
-	truncated      bool
-	receivedAt     time.Time
+	sessions        []HubSession
+	paneIDs         []string
+	paneIDsComplete bool
+	snapshotStatus  string
+	truncated       bool
+	receivedAt      time.Time
 }
 
 func hubSessionSnapshotsFromStates(states []HerdrAgentState) []HubSession {
@@ -189,10 +192,12 @@ func cloneHubSessionSnapshotRecord(snapshot *hubSessionSnapshotRecord) *hubSessi
 		return nil
 	}
 	return &hubSessionSnapshotRecord{
-		sessions:       cloneHubSessions(snapshot.sessions),
-		snapshotStatus: snapshot.snapshotStatus,
-		truncated:      snapshot.truncated,
-		receivedAt:     snapshot.receivedAt,
+		sessions:        cloneHubSessions(snapshot.sessions),
+		paneIDs:         append([]string(nil), snapshot.paneIDs...),
+		paneIDsComplete: snapshot.paneIDsComplete,
+		snapshotStatus:  snapshot.snapshotStatus,
+		truncated:       snapshot.truncated,
+		receivedAt:      snapshot.receivedAt,
 	}
 }
 
@@ -205,11 +210,17 @@ func hubSessionSnapshotRecordFromHeartbeat(heartbeat hubHeartbeatPayload, receiv
 	if heartbeat.Sessions != nil {
 		sessions = cloneHubSessions(*heartbeat.Sessions)
 	}
+	var ids []string
+	if heartbeat.PaneIDs != nil {
+		ids = append([]string{}, (*heartbeat.PaneIDs)...)
+	}
 	return &hubSessionSnapshotRecord{
-		sessions:       sessions,
-		snapshotStatus: heartbeat.SnapshotStatus,
-		truncated:      heartbeat.Truncated,
-		receivedAt:     receivedAt,
+		sessions:        sessions,
+		paneIDs:         ids,
+		paneIDsComplete: heartbeat.PaneIDsComplete != nil && *heartbeat.PaneIDsComplete,
+		snapshotStatus:  heartbeat.SnapshotStatus,
+		truncated:       heartbeat.Truncated,
+		receivedAt:      receivedAt,
 	}
 }
 
@@ -294,6 +305,36 @@ func marshalHubHeartbeatForWire(heartbeat hubHeartbeatPayload) ([]byte, bool) {
 }
 
 func marshalHubHeartbeatWithSessions(heartbeat hubHeartbeatPayload, states []HerdrAgentState) []byte {
+	ids := make([]string, 0, len(states))
+	complete := true
+	seen := make(map[string]struct{}, len(states))
+	for _, state := range states {
+		if !validIdleWakePane(state.PaneID) {
+			complete = false
+			continue
+		}
+		if _, ok := seen[state.PaneID]; !ok {
+			seen[state.PaneID] = struct{}{}
+			ids = append(ids, state.PaneID)
+		}
+	}
+	sort.Strings(ids)
+	selectedIDs := make([]string, 0, len(ids))
+	heartbeat.PaneIDs = &selectedIDs
+	heartbeat.PaneIDsComplete = &complete
+	// Reserve the ID budget before spending any room on session details.
+	emptySessions := []HubSession{}
+	heartbeat.Sessions = &emptySessions
+	heartbeat.Truncated = true
+	for _, id := range ids {
+		selectedIDs = append(selectedIDs, id)
+		encoded, _ := json.Marshal(selectedIDs)
+		if _, fits := marshalHubHeartbeatForWire(heartbeat); !fits || len(encoded) > hubMaxHeartbeatPaneIDsBytes {
+			selectedIDs = selectedIDs[:len(selectedIDs)-1]
+			complete = false
+			break
+		}
+	}
 	candidates := hubSessionSnapshotsFromStates(states)
 	selected := make([]HubSession, 0, minInt(len(candidates), hubMaxHeartbeatSessions))
 	heartbeat.Sessions = &selected
