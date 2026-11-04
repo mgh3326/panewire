@@ -432,7 +432,7 @@ func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key st
 	if err != nil {
 		return "", errors.New("brief unavailable")
 	}
-	request.Header.Set("Authorization", "Bearer "+env.Token)
+	env.setAuth(request)
 	request.Header.Set("Accept", "application/json")
 	response, err := (&http.Client{Timeout: handoffkeepTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
 	if err != nil {

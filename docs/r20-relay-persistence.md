@@ -65,12 +65,20 @@ a node that was offline hand its backlog to the hub on reconnect. The answer to
 ## `--handoffkeep-env`
 
 `panewire hub --handoffkeep-env <path>` enables persistence. The file must be a
-regular mode-0600 file holding exactly two keys:
+regular mode-0600 file holding these keys:
 
 ```
 HANDOFFKEEP_URL=…
 HANDOFFKEEP_TOKEN=…
+# optional, both or neither: a handoffkeep behind Cloudflare Access
+HANDOFFKEEP_CF_ACCESS_CLIENT_ID=…
+HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET=…
 ```
+
+The same file format is the node's `spawn.json` `handoffkeep_env` (brief
+fetch) and the hub's `--chat-env`. When the CF Access pair is present, every
+handoffkeep request (relay, chat, node brief fetch) sends it with the bearer; a
+file with only one of the two is refused.
 
 Values never appear in a log line or an error message. A plaintext `http://`
 URL is accepted only for loopback and tailnet hosts, matching what the hub

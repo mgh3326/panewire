@@ -41,6 +41,21 @@ const (
 type hubHandoffkeepEnv struct {
 	URL   string
 	Token string
+	// CFID and CFSecret are an optional Cloudflare Access service-token pair
+	// for a handoffkeep behind CF Access. Both or neither.
+	CFID     string
+	CFSecret string
+}
+
+// setAuth puts the bearer token and, when configured, the CF Access pair on a
+// handoffkeep request. Every hub/node handoffkeep client uses it, so a node
+// whose handoffkeep sits behind CF Access is not answered 403.
+func (env hubHandoffkeepEnv) setAuth(request *http.Request) {
+	request.Header.Set("Authorization", "Bearer "+env.Token)
+	if env.CFID != "" {
+		request.Header.Set("CF-Access-Client-Id", env.CFID)
+		request.Header.Set("CF-Access-Client-Secret", env.CFSecret)
+	}
 }
 
 // loadHubHandoffkeepEnv requires an explicit mode-0600 file and never includes
@@ -50,9 +65,12 @@ func loadHubHandoffkeepEnv(path string) (hubHandoffkeepEnv, error) {
 	if err != nil {
 		return hubHandoffkeepEnv{}, errors.New("hub handoffkeep env must be a regular mode-0600 file")
 	}
-	env := hubHandoffkeepEnv{URL: values["HANDOFFKEEP_URL"], Token: values["HANDOFFKEEP_TOKEN"]}
+	env := hubHandoffkeepEnv{URL: values["HANDOFFKEEP_URL"], Token: values["HANDOFFKEEP_TOKEN"], CFID: values["HANDOFFKEEP_CF_ACCESS_CLIENT_ID"], CFSecret: values["HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET"]}
 	if !validHandoffkeepBaseURL(env.URL) || !validHandoffkeepToken(env.Token) {
 		return hubHandoffkeepEnv{}, errors.New("hub handoffkeep env is missing required values")
+	}
+	if (env.CFID == "") != (env.CFSecret == "") || (env.CFID != "" && (!validHandoffkeepToken(env.CFID) || !validHandoffkeepToken(env.CFSecret))) {
+		return hubHandoffkeepEnv{}, errors.New("hub handoffkeep env has an incomplete or invalid CF Access pair")
 	}
 	return env, nil
 }
@@ -84,7 +102,7 @@ func validHandoffkeepBaseURL(raw string) bool {
 // relay state of its own; this is the canonical record.
 type handoffkeepRelayClient struct {
 	baseURL *url.URL
-	token   string
+	env     hubHandoffkeepEnv
 	client  *http.Client
 }
 
@@ -100,7 +118,7 @@ func newHandoffkeepRelayClient(env hubHandoffkeepEnv, httpClient *http.Client) (
 	if httpClient == nil {
 		httpClient = &http.Client{Timeout: handoffkeepTimeout}
 	}
-	return &handoffkeepRelayClient{baseURL: parsed, token: env.Token, client: httpClient}, nil
+	return &handoffkeepRelayClient{baseURL: parsed, env: env, client: httpClient}, nil
 }
 
 // handoffkeepRelayEventRequest carries exactly the request-owned columns. The
@@ -174,7 +192,7 @@ func (c *handoffkeepRelayClient) do(ctx context.Context, method, endpoint string
 	if err != nil {
 		return 0, nil, errors.New("handoffkeep request failed")
 	}
-	request.Header.Set("Authorization", "Bearer "+c.token)
+	c.env.setAuth(request)
 	request.Header.Set("Accept", "application/json")
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
