@@ -140,7 +140,11 @@ jobs:
     name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}
     runs-on: ubuntu-latest
     needs: [test, postgres, auto-tag-test]
-    if: always()
+    # A needed job that was only cancelled (a hosted runner not acquired) is
+    # not a red verdict: ci-ok is then skipped, which mergewake reads as
+    # unknown and holds on, instead of failing and reading as Red. Any
+    # failure still runs the gate, which fails (hk 2924).
+    if: ${{ always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}
     outputs:
       ok: ${{ steps.gate.outputs.ok }}
     steps:

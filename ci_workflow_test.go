@@ -115,6 +115,7 @@ func TestCIMacOSIsAdvisory(t *testing.T) {
 	}
 	var workflow struct {
 		Jobs map[string]struct {
+			If              string   `yaml:"if"`
 			Needs           []string `yaml:"needs"`
 			RunsOn          string   `yaml:"runs-on"`
 			ContinueOnError bool     `yaml:"continue-on-error"`
@@ -131,6 +132,11 @@ func TestCIMacOSIsAdvisory(t *testing.T) {
 	mac, ok := workflow.Jobs["test-macos"]
 	if !ok || mac.RunsOn != "macos-latest" || !mac.ContinueOnError {
 		t.Fatalf("test-macos must exist on macos-latest with continue-on-error: %+v", mac)
+	}
+	// Only-cancelled needs skip ci-ok (mergewake: unknown, hold); a failure
+	// still runs the gate (hk 2924).
+	if got := workflow.Jobs["ci-ok"].If; got != "${{ always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}" {
+		t.Fatalf("ci-ok if = %q, want it skipped when needs are only cancelled", got)
 	}
 	if slices.Contains(workflow.Jobs["ci-ok"].Needs, "test-macos") {
 		t.Fatal("ci-ok must not need the advisory test-macos job")
