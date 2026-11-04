@@ -244,8 +244,8 @@ func TestAsyncSpawnCompletedNodeRefusalsRemainTerminal(t *testing.T) {
 			}
 			saved, err := h.inbox.store.spawnTask(t.Context(), req.RequestID)
 			want := reason
-			if want == "" {
-				want = "spawn_failed"
+			if want == "" || want == "spawn_failed" {
+				want = "spawn_failed:preflight" // no text, so rc 78 names the code
 			}
 			if err != nil || saved.Status != "failed" || saved.Outcome.Reason != want || !saved.Outcome.NodeResult {
 				t.Fatalf("definite refusal became unknown: %+v %v", saved, err)
