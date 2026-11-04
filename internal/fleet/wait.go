@@ -22,6 +22,15 @@ type waitOutcome struct {
 	detail string
 }
 
+// laneUnregisteredSuffix names a failed hub lane registration on the lines a
+// caller reads after a spawn. It is empty for a registered lane.
+func laneUnregisteredSuffix(unregistered bool) string {
+	if unregistered {
+		return " lane=UNREGISTERED"
+	}
+	return ""
+}
+
 // afterSpawn runs the --wait half of a spawn once the pane exists — locally
 // or, when placement delegated the spawn, back on the initiator. A delegated
 // job additionally watches its hk record (the W4 rule).
@@ -88,7 +97,7 @@ func (a *App) waitJob(ctx context.Context, s Spawn, delegated ...bool) error {
 	for {
 		out := a.waitOutcome(ctx, s, lane, &warned, &hkWarned, hkWatch)
 		if out.name != "" {
-			fmt.Fprintf(a.Out, "wait job=%s outcome=%s report=%s pane=%s\n", s.Job, out.name, out.report, out.pane)
+			fmt.Fprintf(a.Out, "wait job=%s outcome=%s report=%s pane=%s%s\n", s.Job, out.name, out.report, out.pane, laneUnregisteredSuffix(s.laneUnregistered))
 			switch out.name {
 			case "escalate":
 				return fail(exitWaitEscalated, "job %s escalated: %s", s.Job, firstNonempty(out.detail, "escalation"))
