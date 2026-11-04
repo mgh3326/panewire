@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"errors"
+	"slices"
 	"strings"
 )
 
@@ -43,10 +44,6 @@ func AdmissionRefusalReason(err error) string {
 func SpawnRefusalFix(err error) string { return spawnRefusalFix(err) }
 
 func spawnRefusalFix(err error) string {
-	var exit *ExitError
-	if errors.As(err, &exit) && exit.Code == exitTrustPrompt {
-		return "Approve only this worktree in the executing CODEX_HOME, then repeat the same command; the brief was withheld until trust is confirmed."
-	}
 	var parent *parentJobNotFound
 	if errors.As(err, &parent) {
 		return "Pass --parent-job with an existing job id, or use --task TASK_ID for top-level work; the job id may have been mistyped or never landed."
@@ -58,61 +55,99 @@ func spawnRefusalFix(err error) string {
 		}
 		return "Refresh the named pool on the target with pacelever refresh POOL, confirm a fresh observation of its account, then retry."
 	}
-	message := err.Error()
-	for _, fix := range []struct{ match, hint string }{
-		// These name a path or an id, which the broader matches below could hit.
-		{"symlink path refused", "Replace the named symlink with a real directory or point the executing node's jobs root at a symlink-free path, then replay the request."},
-		{"report must be under", "Pass --report inside this job's own jobs/JOB directory, or its --parent-job directory, then retry."},
-		{"cwd is not a directory", "Run panewire preflight --json on the executing node and repair its checkout or spawn.json.cwd_map path, then replay the request."},
-		{"task does not exist", "Run handoffkeep tasks show TASK_ID on the executing node; if the task exists, that node's handoffkeep points at another server."},
-		{"task has another claimant", "Run handoffkeep tasks show TASK_ID, then release or rebind the stale claim, or use a different task for new work."},
-		{"OMP_SETUP_WIZARD", "The installed omp no longer honors OMP_SKIP_SETUP. Run omp once on the executing host to finish setup, then repeat the same command after cleanup succeeds."},
-		{"agent not in foreground", "Inspect the failed pane with panewire find JOB, verify the selected harness binary starts on that host, then repeat the same command after cleanup succeeds."},
-		{"refusing broad workspace trust", "Pass -c with the specific worktree path; do not grant trust to a broad parent directory."},
-		{"malformed workspace trust store", "Repair the selected harness's workspace trust store on the executing host, preserving unrelated entries, then repeat the same command."},
-		{"trust", "Inspect the selected harness's workspace trust store on the executing host and approve only this worktree, then repeat the same command."},
-		{"workspace", "Run herdr workspace list on the executing host; set local.workspace to its id or pass -w WORKSPACE_ID."},
-		{"brief", "Pass -p with a readable nonempty brief file; for presets, save it under jobs/JOB/brief.md or override -p."},
-		{"task title", "Set the task title marker to (grade X, Tn), matching --t, then retry."},
-		{"task scale", "Make --t match the task title's T level, then retry."},
-		{"task bound", "Use the job id already bound to this task, or a different task for new work."},
-		{"task unavailable", "Run handoffkeep tasks show TASK_ID and restore the task to an available state before retrying."},
-		{"--owner", "For lead use --lane and --parent without --owner; for work pass --owner or set PANEWIRE_LANE."},
-		{"--override-reason", "Use -m auto --host auto, or provide --override-reason TEXT for an intentional pin."},
-		{"alias", "Run panewire hosts and use the canonical host key, or fix the aliases list in the hosts config."},
-		{"requires PANEWIRE_E6_ARM=", "Set the exact PANEWIRE_E6_ARM value named in the refusal only if the operator authorized that rung; otherwise select an admitted rung."},
-	} {
-		if strings.Contains(message, fix.match) {
-			return fix.hint
-		}
+	rc := 0
+	var exit *ExitError
+	if errors.As(err, &exit) {
+		rc = exit.Code
 	}
-	if exit != nil {
-		switch exit.Code {
-		case exitDuplicate:
-			return "Inspect the existing job with panewire find JOB. Use a new --job only for new work; never override a live duplicate. Failed launches with verified cleanup can retry on the same host."
-		case exitSubmitUnconfirmed:
-			return "Read the saved jobs/JOB/spawn-failed-screen.txt and fix the harness submission failure; retry the same command after verified cleanup."
-		case exitAuthUnavailable:
-			return "Sign in to the selected quota account on the executing host and refresh that pool with pacelever refresh POOL, then retry."
-		case exitQuotaUnknown:
-			return "Run pacelever refresh POOL for the named pool, confirm a fresh quota observation, then retry."
-		case exitLocalDisabled:
-			return "Enable local.spawn in the hosts config or configure an admitted remote host, then retry."
-		case exitPlacement, exitPreflight:
-			return "Run panewire preflight --json to identify the failing host check; fix that check or pass an eligible --host with --override-reason."
-		case exitSeatRefused:
-			return "Use panewire resolve --role ROLE --t Tn to select a rung admitted for the requested role and task, then retry with that policy."
-		case exitLaneUnregistered:
-			return "Run panewire lanes to inspect routing and register the committed pane's lane before dispatching more work; do not relaunch the live job."
-		case exitStateConflict:
-			return "Inspect the job's saved report and events under jobs/JOB; reconcile the conflicting task/job binding before retrying."
-		case exitRoleWait:
-			return "Wait until a listed eligible pool resets, refresh it with pacelever refresh POOL, then retry."
-		case exitRoleEscalate:
-			return "Emit a decision to the parent lane naming the exhausted role pools; choose another authorized policy only after its reply."
-		case exitUsage:
-			return "Run panewire spawn --help and supply or correct the exact flag named in the refusal."
-		}
+	if row, ok := findSpawnRefusal(err.Error(), rc); ok {
+		return row.hint
 	}
 	return "Run panewire preflight --json and repair the failed dependency or configuration named above before repeating the command."
+}
+
+// SpawnRefusalCode is the closed-set code for a refusal's text and exit status,
+// or "" when the table has no row for it. The hub prefixes it to form the
+// spawn_failed:<code> reason (docs/hub-spawn-operations.md).
+func SpawnRefusalCode(text string, rc int) string {
+	row, _ := findSpawnRefusal(text, rc)
+	return row.code
+}
+
+// IsSpawnRefusalCode reports whether code is in the closed set. Sentry takes
+// only these, so a tag or fingerprint cannot grow past the table.
+func IsSpawnRefusalCode(code string) bool {
+	return code != "" && slices.ContainsFunc(spawnRefusals, func(row spawnRefusal) bool { return row.code == code })
+}
+
+func findSpawnRefusal(text string, rc int) (spawnRefusal, bool) {
+	for _, row := range spawnRefusals {
+		if row.match == "" && row.rc == rc || row.match != "" && strings.Contains(text, row.match) {
+			return row, true
+		}
+	}
+	return spawnRefusal{}, false
+}
+
+// spawnRefusal is one row of the refusal table: what identifies the refusal, its
+// code and its repair hint. A row matches on text, or on rc when match is empty.
+type spawnRefusal struct {
+	match string
+	rc    int
+	code  string
+	hint  string
+}
+
+const (
+	spawnWorkspaceHint = "Run herdr workspace list on the executing host; set local.workspace to its id or pass -w WORKSPACE_ID."
+	spawnBriefHint     = "Pass -p with a readable nonempty brief file; for presets, save it under jobs/JOB/brief.md or override -p."
+	spawnPreflightHint = "Run panewire preflight --json to identify the failing host check; fix that check or pass an eligible --host with --override-reason."
+)
+
+// spawnRefusals is the closed set of spawn-failure codes. The first matching row
+// wins, so its order is the precedence: the trust prompt's status, then text,
+// then the remaining exit statuses. Codes match ^[a-z0-9_]+$ and are at most 40
+// bytes.
+var spawnRefusals = []spawnRefusal{
+	// The real refusal names a path and the word "trust", so the status decides.
+	{rc: exitTrustPrompt, code: "trust_prompt", hint: "Approve only this worktree in the executing CODEX_HOME, then repeat the same command; the brief was withheld until trust is confirmed."},
+	// These name a path or an id, which the broader matches below could hit.
+	{match: "symlink path refused", code: "symlink_path", hint: "Replace the named symlink with a real directory or point the executing node's jobs root at a symlink-free path, then replay the request."},
+	{match: "report must be under", code: "report_path", hint: "Pass --report inside this job's own jobs/JOB directory, or its --parent-job directory, then retry."},
+	{match: "cwd is not a directory", code: "cwd_not_directory", hint: "Run panewire preflight --json on the executing node and repair its checkout or spawn.json.cwd_map path, then replay the request."},
+	{match: "task does not exist", code: "task_not_found", hint: "Run handoffkeep tasks show TASK_ID on the executing node; if the task exists, that node's handoffkeep points at another server."},
+	{match: "task has another claimant", code: "task_claimed", hint: "Run handoffkeep tasks show TASK_ID, then release or rebind the stale claim, or use a different task for new work."},
+	{match: "OMP_SETUP_WIZARD", code: "omp_setup_wizard", hint: "The installed omp no longer honors OMP_SKIP_SETUP. Run omp once on the executing host to finish setup, then repeat the same command after cleanup succeeds."},
+	{match: "agent not in foreground", code: "foreground_missing", hint: "Inspect the failed pane with panewire find JOB, verify the selected harness binary starts on that host, then repeat the same command after cleanup succeeds."},
+	{match: "refusing broad workspace trust", code: "trust_too_broad", hint: "Pass -c with the specific worktree path; do not grant trust to a broad parent directory."},
+	{match: "malformed workspace trust store", code: "trust_store_malformed", hint: "Repair the selected harness's workspace trust store on the executing host, preserving unrelated entries, then repeat the same command."},
+	{match: "trust", code: "trust_store", hint: "Inspect the selected harness's workspace trust store on the executing host and approve only this worktree, then repeat the same command."},
+	{match: "entries; run herdr workspace list", code: "herdr_workspace_ambiguous", hint: spawnWorkspaceHint},
+	{match: "workspace", code: "workspace_unresolved", hint: spawnWorkspaceHint},
+	// Both exit 76 and say "brief", so the broad row below would misname them.
+	// They keep the hint that row has always given them.
+	{match: "BRIEF_SUBMISSION_UNCONFIRMED", code: "submit_unconfirmed", hint: spawnBriefHint},
+	{match: "agent must be idle before initial brief", code: "submit_unconfirmed", hint: spawnBriefHint},
+	{match: "brief", code: "brief_invalid", hint: spawnBriefHint},
+	{match: "task title", code: "task_title", hint: "Set the task title marker to (grade X, Tn), matching --t, then retry."},
+	{match: "task scale", code: "task_scale", hint: "Make --t match the task title's T level, then retry."},
+	{match: "task bound", code: "task_bound", hint: "Use the job id already bound to this task, or a different task for new work."},
+	{match: "task unavailable", code: "task_unavailable", hint: "Run handoffkeep tasks show TASK_ID and restore the task to an available state before retrying."},
+	{match: "--owner", code: "owner_flag", hint: "For lead use --lane and --parent without --owner; for work pass --owner or set PANEWIRE_LANE."},
+	{match: "--override-reason", code: "override_reason_required", hint: "Use -m auto --host auto, or provide --override-reason TEXT for an intentional pin."},
+	{match: "alias", code: "host_alias", hint: "Run panewire hosts and use the canonical host key, or fix the aliases list in the hosts config."},
+	{match: "requires PANEWIRE_E6_ARM=", code: "e6_arm_required", hint: "Set the exact PANEWIRE_E6_ARM value named in the refusal only if the operator authorized that rung; otherwise select an admitted rung."},
+	{rc: exitDuplicate, code: "duplicate", hint: "Inspect the existing job with panewire find JOB. Use a new --job only for new work; never override a live duplicate. Failed launches with verified cleanup can retry on the same host."},
+	{rc: exitSubmitUnconfirmed, code: "submit_unconfirmed", hint: "Read the saved jobs/JOB/spawn-failed-screen.txt and fix the harness submission failure; retry the same command after verified cleanup."},
+	{rc: exitAuthUnavailable, code: "auth_unavailable", hint: "Sign in to the selected quota account on the executing host and refresh that pool with pacelever refresh POOL, then retry."},
+	{rc: exitQuotaUnknown, code: "quota_unknown", hint: "Run pacelever refresh POOL for the named pool, confirm a fresh quota observation, then retry."},
+	{rc: exitLocalDisabled, code: "local_disabled", hint: "Enable local.spawn in the hosts config or configure an admitted remote host, then retry."},
+	{rc: exitPlacement, code: "placement", hint: spawnPreflightHint},
+	{rc: exitPreflight, code: "preflight", hint: spawnPreflightHint},
+	{rc: exitSeatRefused, code: "seat_refused", hint: "Use panewire resolve --role ROLE --t Tn to select a rung admitted for the requested role and task, then retry with that policy."},
+	{rc: exitLaneUnregistered, code: "lane_unregistered", hint: "Run panewire lanes to inspect routing and register the committed pane's lane before dispatching more work; do not relaunch the live job."},
+	{rc: exitStateConflict, code: "state_conflict", hint: "Inspect the job's saved report and events under jobs/JOB; reconcile the conflicting task/job binding before retrying."},
+	{rc: exitRoleWait, code: "role_wait", hint: "Wait until a listed eligible pool resets, refresh it with pacelever refresh POOL, then retry."},
+	{rc: exitRoleEscalate, code: "role_escalate", hint: "Emit a decision to the parent lane naming the exhausted role pools; choose another authorized policy only after its reply."},
+	{rc: exitUsage, code: "usage", hint: "Run panewire spawn --help and supply or correct the exact flag named in the refusal."},
 }

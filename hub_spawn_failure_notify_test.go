@@ -225,13 +225,17 @@ func TestSpawnOutcomeReasonCarriesRefusalAndKeepsStatusCodes(t *testing.T) {
 func TestSpawnTraceReasonNormalizesRefusalText(t *testing.T) {
 	for reason, want := range map[string]string{
 		"spawn_failed: symlink path refused: /jobs-root":                "spawn_failed",
+		"spawn_failed:symlink_path: symlink path refused: /jobs-root":   "spawn_failed:symlink_path",
+		"spawn_failed:quota_unknown":                                    "spawn_failed:quota_unknown",
+		"spawn_failed:made_up_code: free text":                          "spawn_failed",
+		"spawn_failed:":                                                 "spawn_failed",
 		"admission_refused: quota gate unavailable":                     "admission_refused",
 		"parent_job_not_found: parent job pj was not found":             "parent_job_not_found",
 		"quota_unconfirmed:no_usable_presence: target account unusable": "quota_unconfirmed",
-		"quota_unconfirmed":                 "quota_unconfirmed",
-		"checkout_refused:dirty":            "checkout_refused",
-		"timeout":                           "timeout",
-		"some_unrecognized_free_text value": "spawn_failed",
+		"quota_unconfirmed":                                             "quota_unconfirmed",
+		"checkout_refused:dirty":                                        "checkout_refused",
+		"timeout":                                                       "timeout",
+		"some_unrecognized_free_text value":                             "spawn_failed",
 	} {
 		if got := spawnTraceReason(reason); got != want {
 			t.Errorf("%q normalized to %q, want %q", reason, got, want)
