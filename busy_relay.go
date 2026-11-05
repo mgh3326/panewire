@@ -292,13 +292,6 @@ func (client *HubClient) relayRunner() relayCommandRunner {
 	return defaultRelayCommand
 }
 
-func (client *HubClient) relayNow() time.Time {
-	if client.now != nil {
-		return client.now().UTC()
-	}
-	return time.Now().UTC()
-}
-
 func (client *HubClient) relayEmit(event hubClientEvent) {
 	client.busyRelayMu.Lock()
 	emit := client.relayEmitter
@@ -418,13 +411,13 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 		policy = relayDeliveryPolicy{Name: "idle", MaxWait: defaultRelayMaxWait}
 	}
 	if policy.Name == "now" || message.EventID == 0 || message.Lane == "" {
-		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
+		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
 	runner := manager.client.relayRunner()
 	if runner == nil {
 		// Fixture-only clients without the explicit command seam are fail-open.
-		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
+		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
 	getContext, cancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
@@ -432,10 +425,10 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 	cancel()
 	status, parsed := parseRelayAgentStatus(output)
 	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" {
-		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
+		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
-	held := relayHeld{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.relayNow(), DeliverPolicy: policy.Name, MaxWait: policy.MaxWait, RecvSeq: message.RecvSeq, fresh: true}
+	held := relayHeld{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, MaxWait: policy.MaxWait, RecvSeq: message.RecvSeq, fresh: true}
 	// The lease rides the same agent get that proved the pane busy — no extra
 	// probe is needed to bind the row to the occupant instance it waited on.
 	if occupant, ok := parseRelayAgentOccupant(output); ok && occupant.Pane == message.Pane {
@@ -522,7 +515,7 @@ func (manager *relayBusyManager) retryOrDropWithin(item relayHeld, maxAttempts i
 		manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: "inject_failed_max_attempts"})
 		return
 	}
-	item.HeldSince = manager.client.relayNow()
+	item.HeldSince = manager.client.nowUTC()
 	manager.hold(ctx, item, "retry")
 }
 
@@ -830,7 +823,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		return
 	}
 	sort.SliceStable(items, func(i, j int) bool { return items[i].RecvSeq < items[j].RecvSeq })
-	now := manager.client.relayNow()
+	now := manager.client.nowUTC()
 	for _, group := range relayBatchGroups(items, expired, now) {
 		// The route observation can move between the release filter and this
 		// inject — a "now" delivery skips the filter entirely. Re-check each
