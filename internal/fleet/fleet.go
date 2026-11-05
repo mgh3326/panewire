@@ -148,7 +148,7 @@ func (a *App) quotaClient() (*hkQuota, error) {
 	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) && !(boolean(q, "allow_plaintext_tailnet", false) && isTailnetHost(parsed.Hostname())) {
 		return nil, fail(exitConfig, "shared quota cache requires HTTPS")
 	}
-	c := &hkQuota{base: strings.TrimRight(u, "/"), token: token, cfID: read("HANDOFFKEEP_CF_ACCESS_CLIENT_ID"), cfSecret: read("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET"), now: a.Now, freshTTL: a.placementTTL("fresh_ttl_s", 300)}
+	c := &hkQuota{base: strings.TrimRight(u, "/"), token: token, cfID: read("HANDOFFKEEP_CF_ACCESS_CLIENT_ID"), cfSecret: read("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET"), now: a.Now, freshTTL: a.sharedFreshTTL}
 	if (c.cfID == "") != (c.cfSecret == "") {
 		return nil, fail(exitConfig, "CF Access credential pair incomplete")
 	}
@@ -161,7 +161,7 @@ func (a *App) quotaClient() (*hkQuota, error) {
 type hkQuota struct {
 	base, token, cfID, cfSecret string
 	now                         func() time.Time
-	freshTTL                    time.Duration
+	freshTTL                    func(pool string) time.Duration
 	client                      *http.Client
 }
 
@@ -258,9 +258,10 @@ func (c *hkQuota) presence(ctx context.Context) ([]PresenceRecord, error) {
 func (c *hkQuota) sharedAccount(ctx context.Context, key string) (SharedAccount, error) {
 	var body struct {
 		Observation *struct {
-			Kind       string          `json:"kind"`
-			MeasuredAt time.Time       `json:"measured_at"`
-			Buckets    []accountBucket `json:"buckets"`
+			Kind        string          `json:"kind"`
+			MeasuredAt  time.Time       `json:"measured_at"`
+			ConfirmedAt *time.Time      `json:"confirmed_at"`
+			Buckets     []accountBucket `json:"buckets"`
 		} `json:"observation"`
 	}
 	if i := strings.IndexByte(key, ':'); i <= 0 || !validID(key[:i]) || !accountFP.MatchString(key[i+1:]) {
@@ -272,8 +273,18 @@ func (c *hkQuota) sharedAccount(ctx context.Context, key string) (SharedAccount,
 	acc := SharedAccount{Key: key}
 	if o := body.Observation; o != nil && o.Kind == "auto" {
 		acc.Observed = true
+		// handoffkeep keeps measured_at when a re-measurement publishes the
+		// same values and only advances confirmed_at, so the reading is valid
+		// as of the later of the two (pacelever sharedValidAt).
 		acc.MeasuredAt = o.MeasuredAt
-		if age := c.now().Sub(o.MeasuredAt); age >= -time.Minute && age <= c.freshTTL {
+		if o.ConfirmedAt != nil && o.ConfirmedAt.After(o.MeasuredAt) {
+			acc.MeasuredAt = *o.ConfirmedAt
+		}
+		ttl := 300 * time.Second
+		if c.freshTTL != nil {
+			ttl = c.freshTTL(accountPool(key))
+		}
+		if age := c.now().Sub(acc.MeasuredAt); age >= -time.Minute && age <= ttl {
 			acc.Fresh = true
 		}
 		acc.Quota = accountPoolView(o.Buckets, c.now())
