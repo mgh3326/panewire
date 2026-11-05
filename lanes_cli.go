@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -92,6 +93,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	path := "/v1/lanes"
 	method := http.MethodGet
 	var requestBody io.Reader
+	var query url.Values
 	if options.Command == "add" {
 		path += "/" + options.Lane
 		method = http.MethodPut
@@ -108,6 +110,15 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	} else if options.Command == "rm" {
 		path += "/" + options.Lane
 		method = http.MethodDelete
+		if options.ExpectedMachine != "" || options.ExpectedPane != "" {
+			query = url.Values{}
+			if options.ExpectedMachine != "" {
+				query.Set("expect_machine", options.ExpectedMachine)
+			}
+			if options.ExpectedPane != "" {
+				query.Set("expect_pane", options.ExpectedPane)
+			}
+		}
 	}
 	client, err := newHubOperatorClient(options.HubURL, env.Token, cfAccess, deps, lanesCLIRequestTimeout)
 	if err != nil {
@@ -121,7 +132,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), lanesCLIRequestTimeout)
 	defer cancel()
-	response, err := client.do(ctx, method, path, nil, requestBody)
+	response, err := client.do(ctx, method, path, query, requestBody)
 	if err != nil {
 		fmt.Fprintln(stderr, "lanes unavailable")
 		return ExitInternal
@@ -280,9 +291,15 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 			options.Sink = parsed
 		case "--hub-url", "--hub-token-env", "--hub-cf-env", "--machine", "--pane", "--parent", "--lane", "--expect-machine", "--expect-pane", "--expect-epoch":
 			switch name {
-			case "--lane", "--expect-machine", "--expect-pane", "--expect-epoch":
+			case "--lane", "--expect-epoch":
 				if options.Command != "self-check" {
 					return lanesCLIOptions{}, errors.New("invalid self-check flag")
+				}
+			case "--expect-machine", "--expect-pane":
+				// rm takes them as a guard the hub checks: remove the lane
+				// only while it still routes to the pane being reaped.
+				if options.Command != "self-check" && options.Command != "rm" {
+					return lanesCLIOptions{}, errors.New("invalid expected route flag")
 				}
 			}
 			if options.seen[name] {
