@@ -46,6 +46,9 @@ func TestCITiers(t *testing.T) {
 	if !w.Concurrency.Cancel || !strings.Contains(w.Concurrency.Group, "ci-main") {
 		t.Fatal("main concurrency must cancel older runs")
 	}
+	if !strings.Contains(w.Concurrency.Group, "format('ci-pr-{0}', github.event.pull_request.number)") {
+		t.Fatal("a pull request's new run must cancel its older run")
+	}
 	postOnly := map[string]string{
 		"post-test":  `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}`,
 		"postgres":   `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all') }}`,
@@ -77,6 +80,11 @@ func TestCITiers(t *testing.T) {
 		runner, _ := yaml.Marshal(job.RunsOn)
 		if !strings.Contains(string(runner), "vars.PANEWIRE_POST_") {
 			t.Errorf("%s missing post runner", name)
+		}
+		// ci-any-ref runs any ref through workflow_call; only a reviewed
+		// main push may reach a runner chosen by repository variable.
+		if !strings.Contains(string(runner), "github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PANEWIRE_POST_") {
+			t.Errorf("%s post runner is not limited to main pushes: %s", name, runner)
 		}
 	}
 	post := w.Jobs["post-test"]
