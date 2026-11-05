@@ -218,11 +218,11 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   required, `fetch` must be stated empty (the whole remote is fetched), and
   `sha`, when given, names the expected tip. A worktree already at `dir` is
   reused only when it is on that branch and clean; the branch checked out
-  elsewhere, a `dir` parked on another branch or commit, and a local branch
-  pointing at a commit other than the expected tip all refuse; without
-  `sha` the expected tip is the freshly fetched `origin/<branch>`, so a local
-  branch that diverged from origin, or has no origin branch at all, refuses too. A missing
-  local branch is created tracking `origin/<branch>`, which must exist.
+  elsewhere and a `dir` parked on another branch refuse. A clean local branch
+  behind the expected tip is fast-forwarded, including its worktree when reused;
+  an ahead or diverged branch refuses. Without `sha` the expected tip is the
+  freshly fetched `origin/<branch>`, which must exist. A missing local branch
+  is created tracking `origin/<branch>`.
 - `mode:"detached"` — `sha` and `fetch` are required and `branch` must be
   stated empty. The node runs `git fetch origin <fetch>`, requires the
   fetched `FETCH_HEAD` to resolve to `sha`, and runs `git worktree add
@@ -241,7 +241,7 @@ refused. A missing clone is created with `git clone <origin>`.
 | `outcome` | Meaning |
 | --- | --- |
 | `prepared` | The worktree was created; `worktree` describes it. |
-| `reused` | The existing worktree at `dir` already matched. |
+| `reused` | The existing worktree at `dir` matched or was fast-forwarded. |
 | `busy` | Another git op holds the per-clone lock; `retry_after_s` is set. |
 | `cancelled` | The caller's context was cancelled while waiting for the per-clone lock; the lock was never taken, nothing ran, and there is no `retry_after_s`. |
 | `branch-elsewhere` | The branch is checked out elsewhere, `dir` sits on another branch/commit, or the branch is not on origin where required. |
@@ -251,6 +251,10 @@ refused. A missing clone is created with `git clone <origin>`.
 | `locked` | The existing worktree at `dir` is locked (`git worktree lock`); it is never reused. |
 | `git-failed` | A git step failed. |
 | `git_too_old` | The node's git is older than 2.31, the floor `worktree.inspect` documents. |
+
+When a branch is fast-forwarded, the result includes `fast_forwarded: true`.
+A tip mismatch that cannot be fast-forwarded includes `reason` with
+`local=<sha7> expected=<sha7> relation=ahead|diverged`.
 
 Every op that touches one clone (`worktree.prepare`, `worktree.remove`)
 takes the exclusive per-clone lock `<clone>.git-op.lock`, waiting at most
