@@ -112,7 +112,7 @@ type HubClient struct {
 	cfAccessClientID     string
 	cfAccessSecret       string
 	accepting            bool
-	r19a                 r19aClientState
+	relayControl         clientRelayControlState
 	jobsInboxRoot        string
 	failoverWakeOn       string
 	failoverWakeMAC      net.HardwareAddr
@@ -337,8 +337,8 @@ func NewHubClient(config HubClientConfig) (*HubClient, error) {
 		failoverWakeOn: config.FailoverWakeOn, failoverWakeMAC: wakeMAC, failoverWakeDest: wakeDestination, failoverWakeArmed: wakeRequested,
 		burstWakeMAC: burstMAC, burstPoweroffAllowed: config.BurstPoweroffAllowed, burstPoweroff: config.burstPoweroff, helloAckTimeout: config.helloAckTimeout, burstSeen: make(map[string]time.Time),
 		wakeTargets: wakeTargets, wakeSeen: make(map[string]time.Time),
-		r19a:   newR19aClientState(config),
-		checks: cloneHubChecks(config.Checks), execute: config.Execute,
+		relayControl: newClientRelayControlState(config),
+		checks:       cloneHubChecks(config.Checks), execute: config.Execute,
 		pingInterval: config.PingInterval, initialBackoff: config.InitialBackoff, maxBackoff: config.MaxBackoff, preferRetry: config.PreferRetry, version: config.Version,
 		dial: config.Dial, wait: config.Wait, warn: config.Warn, relayInject: config.relayInject, relayCommand: config.relayCommand, hostLoadCollector: config.hostLoadCollector, hostMemoryCollector: config.hostMemoryCollector, sessionCollector: config.sessionCollector, events: make(chan hubClientEvent, 64), completedJobs: make(map[string]uint64), completedReports: make(map[string]struct{}), assignedJobs: make(map[string]uint64),
 	}, nil
@@ -1804,8 +1804,8 @@ func (client *HubClient) respondRelayInject(parent context.Context, peer *hubCli
 }
 
 func (client *HubClient) relayInjectTimeout() time.Duration {
-	if client.r19a.relayInjectTimeout > 0 {
-		return client.r19a.relayInjectTimeout
+	if client.relayControl.relayInjectTimeout > 0 {
+		return client.relayControl.relayInjectTimeout
 	}
 	return defaultRelayInjectTimeout
 }

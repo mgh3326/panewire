@@ -263,7 +263,7 @@ func TestLaneEventReplayFiltersKindAndAdvancesCursor(t *testing.T) {
 	}
 	fake.seedUndelivered(seed...)
 	hub := r20Hub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, nil)
-	hub.r19a.relayAckTimeout = time.Hour
+	hub.relayControl.relayAckTimeout = time.Hour
 	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 402)}
 	hub.nodes["host-a"] = &hubNodeRecord{agent: destination}
 	hub.replayUndeliveredLaneEvents(context.Background())
