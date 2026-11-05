@@ -19,6 +19,7 @@ func (a *App) ExecuteSubmission(ctx context.Context, request Submission) error {
 		return err
 	}
 	a.Repository = &request.Repository
+	a.RequestID = request.RequestID
 	if a.Config.Hosts == nil {
 		a.Config.Hosts = map[string]map[string]any{}
 	}

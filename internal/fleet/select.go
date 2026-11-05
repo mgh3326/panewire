@@ -520,6 +520,8 @@ type selHost struct {
 	restricted bool
 	load       *float64
 	score      *float64
+	// decided marks the host the hub's placement named (HostView.Decided).
+	decided bool
 	// over marks a host at or above its load threshold (local
 	// max_load_ratio, else placement.load_threshold); it ranks last among
 	// awake hosts. fit names why the host cannot take this work at all
@@ -583,7 +585,7 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 			h.awake = true
 			h.load = a.localLoad(ctx)
 			if hv, reported := sp.hub[name]; reported {
-				h.score = hv.Score
+				h.score, h.decided = hv.Score, hv.Decided
 			}
 			if !boolean(cfg, "spawn", true) {
 				h.excluded = true
@@ -592,7 +594,7 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 			h.wakeable = str(cfg, "wake") == "panewire"
 			if hv, reported := sp.hub[name]; reported {
 				h.awake = hv.Connected
-				h.load, h.score = hv.LoadRatio, hv.Score
+				h.load, h.score, h.decided = hv.LoadRatio, hv.Score, hv.Decided
 				if strings.Contains(hv.Reason, "not_accepting") {
 					h.excluded = true
 				}

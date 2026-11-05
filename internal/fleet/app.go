@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"github.com/mgh3326/panewire/internal/fleetevent"
 	"io"
 	"os"
 	"path/filepath"
@@ -48,6 +49,13 @@ type App struct {
 	ObserveStage     func(string, time.Duration)
 	ObserveRetryable func(bool)
 	ObserveReceipt   func(ExecutionReceipt)
+	// RequestID is the hub spawn request this App executes; the placement fleet
+	// event carries it so Loki joins the decision to the spawn and its Sentry
+	// event. Empty outside a hub spawn.
+	RequestID string
+	// EventSink receives fleet events instead of the state directory's file;
+	// tests only.
+	EventSink func(fleetevent.Event)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
 	State    FleetStateReader
@@ -282,7 +290,7 @@ func (a *App) help(cmd string) error {
 	case "work", "lead":
 		fmt.Fprintf(a.Out, "Usage: panewire %s TASK [spawn flags override task defaults]\n", cmd)
 	case "spawn":
-		fmt.Fprintln(a.Out, "Usage: panewire spawn -c CWD [-m PROFILE|auto] -p BRIEF -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role worker|builder|tester|reviewer|counsel] [--routing-role lead|consult|implementer|explorer|verifier|reviewer|judge] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--lane-defer HOST] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--dry-run]")
+		fmt.Fprintln(a.Out, "Usage: panewire spawn -c CWD [-m PROFILE|auto] -p BRIEF -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role worker|builder|tester|reviewer|counsel] [--routing-role lead|consult|implementer|explorer|verifier|reviewer|judge] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--lane-defer HOST] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--dry-run] (pins require --containment hk:ID or --operator-request REF)")
 	case "done":
 		fmt.Fprintln(a.Out, "Usage: panewire done JOB [--report PATH] [--result FILE]")
 	case "escalate":
