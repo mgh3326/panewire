@@ -31,16 +31,12 @@ permissions:
   contents: read
 
 jobs:
-  test:
-    # The process-group kill and reaping behaviour the R19 quota path depends on
-    # differs between Darwin and Linux, so both are exercised: Linux here as a
-    # required check, Darwin in test-macos as an advisory one.
+  vet:
+    # Pull request only: gofmt, go vet, the build and the tests of every
+    # package but the root run here, beside the root-package shards below.
+    name: vet
     if: ${{ github.event_name == 'pull_request' }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest]
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -58,7 +54,57 @@ jobs:
           fi
       - run: go vet ./...
       - run: go build ./...
-      - run: go test ./...
+      # The shards below run the root package; this runs the rest of ./...
+      - name: go test, packages other than the root
+        run: go list ./... | grep -v -x "$(go list -m)" | xargs go test
+
+  shard:
+    # The root package's tests, split across runners by
+    # scripts/ci-test-shard.sh. The shards together run every test in
+    # `go test -list .` (ci_workflow_test.go checks the matrix covers all of
+    # them), so the pull request path runs the same tests as `go test ./...`.
+    name: shard (${{ matrix.shard }})
+    if: ${{ github.event_name == 'pull_request' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ['0/3', '1/3', '2/3']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - run: scripts/ci-test-shard.sh ${{ matrix.shard }}
+
+  test:
+    # The required check, `test (ubuntu-latest)` (.mergewake/policy.yaml). It
+    # keeps that name and fails when the vet job or any shard fails. The
+    # process-group kill and reaping behaviour the R19 quota path depends on
+    # differs between Darwin and Linux, so both are exercised: Linux here as a
+    # required check, Darwin in test-macos as an advisory one.
+    #
+    # A needed job that was only cancelled (a hosted runner not acquired) is
+    # not a red verdict, so this job is then skipped, as ci-ok is (hk 2924).
+    # Any failure still runs it, and it fails.
+    if: ${{ always() && github.event_name == 'pull_request' && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}
+    needs: [vet, shard]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Check vet and shards
+        env:
+          VET_RESULT: ${{ needs.vet.result }}
+          SHARD_RESULT: ${{ needs.shard.result }}
+        run: |
+          [ "$VET_RESULT" = success ] || { echo "vet job did not succeed: $VET_RESULT"; exit 1; }
+          [ "$SHARD_RESULT" = success ] || { echo "a test shard did not succeed: $SHARD_RESULT"; exit 1; }
 
   post-test:
     # The process-group kill and reaping behaviour the R19 quota path depends on
