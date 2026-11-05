@@ -190,9 +190,11 @@ Stale or missing data never reads as idle:
 - A signal no host of that kind exports (load per core, page-ins) leaves its
   term at 1.
 - **Exception: a Prometheus outage.** When the read fails the decision is
-  `source=hub-only`: every candidate counts as having known metrics, no
-  `load_unknown` penalty applies, and only the `jobs` term (from heartbeat job
-  counts) and the power factor remain. An idle-looking score in that state
+  `source=hub-only`: every candidate counts as having known metrics and no
+  `load_unknown` penalty applies. The Prometheus terms (`cpu`, `io`, `load`)
+  read 1. `mem` still follows the node-reported `memory_free_pct`, and the
+  `jobs` term, the claim bridge and the hold/burst adjustments still apply, so
+  hosts can still rank differently. An idle-looking score in that state
   reflects missing data, not a measured idle host; the hub-only fallback is
   unchanged by score v2 and described under Prometheus below.
 
