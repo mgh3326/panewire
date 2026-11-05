@@ -274,3 +274,83 @@ func TestUsageCarriesNoTranscriptText(t *testing.T) {
 }
 
 func claudeFixtureDir(root string) string { return filepath.Dir(claudeFixturePath(root, "x")) }
+
+type terminalUsageStore struct {
+	JobStore
+	writes []map[string]any
+}
+
+func (s *terminalUsageStore) Put(ctx context.Context, id string, fields map[string]any) error {
+	rec, err := s.JobStore.Get(ctx, id)
+	if err != nil {
+		return err
+	}
+	s.writes = append(s.writes, fields)
+	if state := str(rec, "state"); state == "completed" || state == "escalated" || state == "lost" {
+		if _, ok := fields["usage"]; !ok || len(fields) != 1 {
+			return &BackendError{Status: 409, Code: "terminal_job"}
+		}
+	}
+	return s.JobStore.Put(ctx, id, fields)
+}
+
+func TestUsageWritesRespectTerminalJob(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	claudeFixture(t, a.Home)
+	base := usageJob(t, a, claudeSession())
+	store := &terminalUsageStore{JobStore: base}
+	a.JobStore = store
+	doneJob(t, a)
+	rec := base.record(t, "j")
+	if rec["model"] != "claude-sonnet-5-5" || usageOf(t, rec)["input_tokens"] != int64(150) {
+		t.Fatalf("completion record = %v", rec)
+	}
+	if err := os.WriteFile(claudeFixturePath(a.Home, testClaudeID), []byte(`{"type":"assistant","message":{"id":"later","model":"claude-sonnet-5-5","usage":{"input_tokens":42,"output_tokens":1}}}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store.writes = nil
+	reapJob(t, a)
+	if got := usageOf(t, base.record(t, "j"))["input_tokens"]; got != int64(42) {
+		t.Fatalf("reap usage input tokens = %v", got)
+	}
+	if len(store.writes) != 1 || len(store.writes[0]) != 1 || store.writes[0]["usage"] == nil {
+		t.Fatalf("reap writes = %v", store.writes)
+	}
+	store.writes = nil
+	j, err := a.job("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	j.Terminal = false // The local event may lag the already-terminal hk record.
+	a.recordJobUsage(t.Context(), j, false)
+	if len(store.writes) != 1 || len(store.writes[0]) != 1 || store.writes[0]["usage"] == nil {
+		t.Fatalf("terminal completion writes = %v", store.writes)
+	}
+}
+
+type modelConflictStore struct{ JobStore }
+
+func (s modelConflictStore) Put(ctx context.Context, id string, fields map[string]any) error {
+	if _, ok := fields["model"]; ok {
+		return &BackendError{Status: 409, Code: "terminal_job"}
+	}
+	return s.JobStore.Put(ctx, id, fields)
+}
+
+func TestModelConflictWarnsWithoutMisreportingUsage(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	claudeFixture(t, a.Home)
+	base := usageJob(t, a, claudeSession())
+	a.JobStore = modelConflictStore{base}
+	var stderr bytes.Buffer
+	a.Err = &stderr
+	doneJob(t, a)
+	if usageOf(t, base.record(t, "j"))["input_tokens"] != int64(150) {
+		t.Fatal("usage was not stored")
+	}
+	if got := stderr.String(); !strings.Contains(got, "job model write failed (hk status 409, code terminal_job)") || strings.Contains(got, "job usage write failed") {
+		t.Fatalf("warning = %q", got)
+	}
+}

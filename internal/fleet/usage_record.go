@@ -5,23 +5,14 @@ import (
 	"errors"
 )
 
-// recordJobUsage reads the job's harness usage and writes it, with the model
-// when known, through PUT /v1/jobs/{job}. The usage object replaces the stored
-// one as a whole, so the reap read overwrites the completion read. It is a
-// separate write after the terminal record, and a failure only warns: the
-// job's completion result never depends on it.
-//
-// At reap (atReap) a read with no figures is not written, so a record that is
-// gone by then cannot erase what the completion read stored.
-//
-// A job whose receipt has no harness_session (spawned before hk 3004) names no
-// record to read and gets no write.
+// recordJobUsage writes usage independently of model, since hk accepts only
+// usage updates after a job becomes terminal. Reap reads replace completion
+// reads only when they contain figures.
 func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) {
 	session, ok := receiptHarnessSession(j.Receipt)
 	if !ok {
 		return
 	}
-	// The session reference can appear after landing; prefer the live one.
 	if j.Pane != "" {
 		if live := a.harnessSession(ctx, j.Pane, session.Kind); live.Source != "unavailable" {
 			session = live
@@ -31,17 +22,39 @@ func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) {
 	if usage.Source == "" || atReap && !usage.HasFigures() {
 		return
 	}
-	fields := map[string]any{"usage": usage.Wire()}
-	if usage.Model != "" {
-		fields["model"] = usage.Model
+	if e := a.putJobRecord(ctx, j.ID, map[string]any{"usage": usage.Wire()}); e != nil {
+		a.warnUsageWrite("usage", e)
 	}
-	if e := a.putJobRecord(ctx, j.ID, fields); e != nil {
-		var backend *BackendError
-		if errors.As(e, &backend) {
-			a.warn("job usage write failed (hk status %d)", backend.Status)
-		} else {
-			a.warn("job usage write failed")
+	if atReap || j.Terminal || usage.Model == "" {
+		return
+	}
+	store, e := a.jobStore()
+	if e == nil {
+		var rec map[string]any
+		rec, e = store.Get(ctx, j.ID)
+		if e == nil {
+			switch str(rec, "state") {
+			case "completed", "escalated", "lost":
+				return
+			}
+			e = store.Put(ctx, j.ID, map[string]any{"model": usage.Model})
 		}
+	}
+	if e != nil {
+		a.warnUsageWrite("model", e)
+	}
+}
+
+func (a *App) warnUsageWrite(field string, err error) {
+	var backend *BackendError
+	if errors.As(err, &backend) {
+		if backend.Code != "" {
+			a.warn("job %s write failed (hk status %d, code %s)", field, backend.Status, backend.Code)
+		} else {
+			a.warn("job %s write failed (hk status %d)", field, backend.Status)
+		}
+	} else {
+		a.warn("job %s write failed", field)
 	}
 }
 
