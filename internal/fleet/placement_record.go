@@ -160,7 +160,7 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 	}
 	d := s.placement
 	d.recorded = true
-	if s.Delegated || s.OverrideReason == "hub-directed" {
+	if s.Delegated {
 		if err != nil && d.started && !d.placed {
 			fmt.Fprintf(a.Out, "FAILED placement=%s\n", d.execution.receipt())
 		}

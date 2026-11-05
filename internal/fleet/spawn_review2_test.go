@@ -169,7 +169,7 @@ func TestPrepareSubmissionCanonicalLongJobIdentityAndEarlySubdirectoryRefusal(t 
 	if err := os.WriteFile(s.Prompt, []byte("brief"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s.Label, s.T, s.Owner, s.Host, s.OverrideReason = "job-a", "T1", "parent", "h1", "fixture"
+	s.Label, s.T, s.Owner, s.Host, s.OverrideReason, s.Containment = "job-a", "T1", "parent", "h1", "fixture", "hk:12"
 	a.Repository = &Repository{Name: "repo-a", Origin: "https://git.invalid/org/repo-a.git", LocalRoot: s.CWD}
 	names := map[string]bool{}
 	for _, tail := range []string{"first", "second"} {

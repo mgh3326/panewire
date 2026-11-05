@@ -80,10 +80,10 @@ func TestHubNodeCommandRoundTrip(t *testing.T) {
 		t.Fatalf("status=%d body=%s", result.status, result.body)
 	}
 
-	// A node error answers 502 with the node's closed code.
+	// A node error answers 200 with the node's closed code.
 	results = t14HTTPAsync(t, http.MethodPost, nodeCommandURL(server, "machine-a"), t14OperatorToken, nodeCommandCloseBody)
 	nodeCommandReplyTo(t, connection, nodeCommandRead(t, connection), map[string]any{"error": "close_failed"})
-	if result := t14Result(t, results); result.status != http.StatusBadGateway || nodeCommandDecode(t, result.body)["error"] != "close_failed" {
+	if result := t14Result(t, results); result.status != http.StatusOK || nodeCommandDecode(t, result.body)["error"] != "close_failed" {
 		t.Fatalf("status=%d body=%s", result.status, result.body)
 	}
 }
@@ -356,5 +356,17 @@ func TestHubNodeCommandLiveNonConnectedStates(t *testing.T) {
 	}
 	if row := body.Nodes[0]; row.State != "stale" || row.Error != "" || row.Agents == nil {
 		t.Fatalf("stale node row=%+v", row)
+	}
+}
+
+func TestHubNodeCommandFailureDetail(t *testing.T) {
+	hub, server := t14Hub(t)
+	connection := t14Node(t, hub, server, false)
+	results := t14HTTPAsync(t, http.MethodPost, nodeCommandURL(server, "machine-a"), t14OperatorToken, nodeCommandCloseBody)
+	nodeCommandReplyTo(t, connection, nodeCommandRead(t, connection), map[string]any{"error": "done_failed", "detail": "job record unreadable token=<redacted>"})
+	result := t14Result(t, results)
+	body := nodeCommandDecode(t, result.body)
+	if result.status != http.StatusOK || body["error"] != "done_failed" || body["detail"] != "job record unreadable token=<redacted>" {
+		t.Fatalf("status=%d body=%s", result.status, result.body)
 	}
 }

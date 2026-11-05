@@ -23,6 +23,10 @@ on:
         # fail or cancel a dispatch.
         value: ${{ jobs.ci-ok.outputs.ok }}
 
+concurrency:
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-dispatch-{0}', github.run_id) || github.event_name == 'push' && 'ci-main' || format('ci-{0}', github.run_id) }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
@@ -31,7 +35,7 @@ jobs:
     # The process-group kill and reaping behaviour the R19 quota path depends on
     # differs between Darwin and Linux, so both are exercised: Linux here as a
     # required check, Darwin in test-macos as an advisory one.
-    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    if: ${{ github.event_name == 'pull_request' }}
     strategy:
       fail-fast: false
       matrix:
@@ -53,6 +57,36 @@ jobs:
             exit 1
           fi
       - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./...
+
+  post-test:
+    # The process-group kill and reaping behaviour the R19 quota path depends on
+    # differs between Darwin and Linux, so both are exercised: Linux here as a
+    # required check, Darwin in test-macos as an advisory one.
+    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    runs-on: ${{ vars.PANEWIRE_POST_LINUX_RUNNER || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go build ./...
       - run: go test ./...
       # The full -race suite stays red on a pre-existing hk 1243 bytes.Buffer
       # race in the r20t5 10ms-timer tests, so the unconfirmed-replay races
@@ -67,10 +101,9 @@ jobs:
     # gates ci-ok or mergewake (operator decision 2026-11-05). Same steps as
     # test, plus gitleaks, which only the macOS runner can install.
     name: test (macos-latest, advisory)
-    # PR and push runs only: a ci-any-ref dispatch always passes a ref, and
-    # its status must not wait on a macOS runner that may never be acquired.
-    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') && !inputs.ref }}
-    runs-on: macos-latest
+    # Post-merge and dispatch runs include this advisory job; ci-ok does not wait for it.
+    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') && github.event_name != 'pull_request' }}
+    runs-on: ${{ vars.PANEWIRE_POST_MAC_RUNNER || 'macos-latest' }}
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -105,8 +138,8 @@ jobs:
     # for tests, so this is the only place the Postgres half of the store
     # contract runs. Trust auth keeps a password out of this public file; the
     # service is published on 55432, not the default port.
-    if: ${{ contains(fromJSON('["all","postgres"]'), inputs.suite || 'all') }}
-    runs-on: ubuntu-latest
+    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all') }}
+    runs-on: ${{ vars.PANEWIRE_POST_LINUX_RUNNER || 'ubuntu-latest' }}
     services:
       postgres:
         image: postgres:17
@@ -141,7 +174,7 @@ jobs:
     # dispatches, a partial suite must not mint an exact 'ci-ok' check run.
     name: ${{ (inputs.suite || 'all') == 'all' && 'ci-ok' || format('ci-ok ({0})', inputs.suite) }}
     runs-on: ubuntu-latest
-    needs: [test, postgres, auto-tag-test]
+    needs: [test, post-test, postgres, auto-tag-test]
     # A needed job that was only cancelled (a hosted runner not acquired) is
     # not a red verdict: ci-ok is then skipped, which mergewake reads as
     # unknown and holds on, instead of failing and reading as Red. Any
@@ -155,6 +188,8 @@ jobs:
         env:
           AUTO_TAG_RESULT: ${{ needs.auto-tag-test.result }}
           TEST_RESULT: ${{ needs.test.result }}
+          POST_TEST_RESULT: ${{ needs.post-test.result }}
+          EVENT: ${{ github.event_name }}
           POSTGRES_RESULT: ${{ needs.postgres.result }}
           SUITE: ${{ inputs.suite || 'all' }}
         # A job the suite selects must succeed. A job it does not select
@@ -176,7 +211,14 @@ jobs:
           esac
           case "$SUITE" in all|test) test=yes ;; *) test=no ;; esac
           case "$SUITE" in all|postgres) postgres=yes ;; *) postgres=no ;; esac
-          require "$test" test "$TEST_RESULT"
+          if [ "$EVENT" = pull_request ]; then
+            require yes test "$TEST_RESULT"
+            require no post-test "$POST_TEST_RESULT"
+            postgres=no
+          else
+            require no test "$TEST_RESULT"
+            require "$test" post-test "$POST_TEST_RESULT"
+          fi
           require "$postgres" postgres "$POSTGRES_RESULT"
           echo "ok=true" >> "${GITHUB_OUTPUT:-/dev/null}"
 
