@@ -129,6 +129,12 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 		state, _ := record["state"].(string)
 		released := false
 		switch {
+		case readErr == nil && !exists && priorStatus == "failed" && holder.Outcome.Pane == "":
+			// Refused before any pane existed (e.g. checkout_refused at
+			// worktree.prepare): no pane was recorded and the node never
+			// claimed the hk job, which it does only after a pane takes the
+			// brief. Nothing can still hold the role, so release it.
+			released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, spawn.Task, spawn.Role) == nil
 		case readErr != nil || !exists:
 		case state == "completed" || state == "lost":
 			released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, spawn.Task, spawn.Role) == nil
