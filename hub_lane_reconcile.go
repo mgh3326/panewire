@@ -26,8 +26,9 @@ type laneRetry struct {
 }
 
 type laneReconciler struct {
+	machine  string
 	retries  map[string]laneRetry
-	list     func(context.Context) (map[string]bool, error)
+	list     func(context.Context) (map[string]hubLaneProjection, error)
 	register func(context.Context, HubActiveJob) error
 	pending  func(HubActiveJob) bool
 }
@@ -50,7 +51,7 @@ func (r *laneReconciler) pass(ctx context.Context, jobs []HubActiveJob, now time
 		if job.Role == "builder" {
 			lane = job.OwnerLane
 		}
-		if lanes[lane] {
+		if route, ok := lanes[lane]; ok && route.Machine == r.machine && route.Pane == job.Pane {
 			delete(r.retries, job.JobID)
 			continue
 		}
@@ -79,9 +80,16 @@ func (client *HubClient) runLaneReconcile(ctx context.Context) {
 	if client.jobsInboxRoot == "" {
 		return
 	}
-	r := laneReconciler{list: client.nodeLanes, pending: func(job HubActiveJob) bool {
+	list := client.nodeLanes
+	if client.laneReconcileList != nil {
+		list = client.laneReconcileList
+	}
+	r := laneReconciler{machine: client.machineID, list: list, pending: func(job HubActiveJob) bool {
 		return pendingLaneRegistration(filepath.Join(client.jobsInboxRoot, "jobs", job.JobID, "events"))
 	}, register: func(ctx context.Context, job HubActiveJob) error {
+		if client.laneReconcileRegister != nil {
+			return client.laneReconcileRegister(ctx, job)
+		}
 		config, _, err := client.resolveHubSpawnConfig()
 		if err != nil {
 			return err
@@ -92,20 +100,27 @@ func (client *HubClient) runLaneReconcile(ctx context.Context) {
 		}
 		return err
 	}}
-	ticker := time.NewTicker(laneReconcileInterval)
-	defer ticker.Stop()
+	ticks := client.laneReconcileTicks
+	if ticks == nil {
+		ticker := time.NewTicker(laneReconcileInterval)
+		defer ticker.Stop()
+		ticks = ticker.C
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
+		case <-ticks:
 			jobs := scanHubActiveJobsForLimit(ctx, client.jobsInboxRoot, client.panesAliveHook(), 0)
+			if client.laneReconcileJobs != nil {
+				jobs = client.laneReconcileJobs(ctx)
+			}
 			r.pass(ctx, jobs, client.nowUTC())
 		}
 	}
 }
 
-func (client *HubClient) nodeLanes(ctx context.Context) (map[string]bool, error) {
+func (client *HubClient) nodeLanes(ctx context.Context) (map[string]hubLaneProjection, error) {
 	for _, endpoint := range client.endpoints {
 		u, err := url.Parse(endpoint)
 		if err != nil {
@@ -134,9 +149,9 @@ func (client *HubClient) nodeLanes(ctx context.Context) (map[string]bool, error)
 		if response.StatusCode != http.StatusOK || err != nil || body.Lanes == nil {
 			continue
 		}
-		lanes := make(map[string]bool, len(body.Lanes))
+		lanes := make(map[string]hubLaneProjection, len(body.Lanes))
 		for _, lane := range body.Lanes {
-			lanes[lane.Lane] = true
+			lanes[lane.Lane] = lane
 		}
 		return lanes, nil
 	}

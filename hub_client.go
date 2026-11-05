@@ -105,51 +105,55 @@ type hubClientEvent struct {
 // HubClient owns a bounded in-memory event queue. It is intentionally not a
 // durable relay: the handoffkeep relay store owns offline delivery.
 type HubClient struct {
-	endpoint             string
-	endpoints            []string
-	machineID            string
-	token                string
-	cfAccessClientID     string
-	cfAccessSecret       string
-	accepting            bool
-	relayControl         clientRelayControlState
-	jobsInboxRoot        string
-	failoverWakeOn       string
-	failoverWakeMAC      net.HardwareAddr
-	failoverWakeDest     string
-	failoverWakeMu       sync.Mutex
-	failoverWakeArmed    bool
-	burstWakeMAC         net.HardwareAddr
-	burstPoweroffAllowed bool
-	burstPoweroff        func(context.Context) error
-	helloAckTimeout      time.Duration
-	burstMu              sync.Mutex
-	burstSeen            map[string]time.Time
-	wakeTargets          map[string]NodeWakeTarget
-	wakeMu               sync.Mutex
-	wakeSeen             map[string]time.Time
-	checks               []HubCheck
-	execute              HubCheckExecutor
-	pingInterval         time.Duration
-	initialBackoff       time.Duration
-	maxBackoff           time.Duration
-	preferRetry          time.Duration
-	version              string
-	dial                 HubDial
-	wait                 HubWait
-	warn                 func(string)
-	rearmStart           func(string) error
-	unparsedMu           sync.Mutex
-	unparsedWarnedAt     time.Time
-	unparsedSuppressed   int
-	relayInject          func(context.Context, string, string) bool
-	relayInjectVerdict   func(context.Context, string, string, []string) relayInjectResult // #547 three-way fixture seam; relayInject wins when set
-	hostLoadCollector    func(context.Context) (HubHostLoad, error)
-	hostMemoryCollector  func(context.Context) (*HubHostMemory, error)
-	sessionCollector     func(context.Context) ([]HerdrAgentState, error)
-	events               chan hubClientEvent
-	completedJobs        map[string]uint64
-	completedReports     map[string]struct{}
+	endpoint              string
+	endpoints             []string
+	machineID             string
+	token                 string
+	cfAccessClientID      string
+	cfAccessSecret        string
+	accepting             bool
+	relayControl          clientRelayControlState
+	jobsInboxRoot         string
+	laneReconcileTicks    <-chan time.Time
+	laneReconcileJobs     func(context.Context) []HubActiveJob
+	laneReconcileList     func(context.Context) (map[string]hubLaneProjection, error)
+	laneReconcileRegister func(context.Context, HubActiveJob) error
+	failoverWakeOn        string
+	failoverWakeMAC       net.HardwareAddr
+	failoverWakeDest      string
+	failoverWakeMu        sync.Mutex
+	failoverWakeArmed     bool
+	burstWakeMAC          net.HardwareAddr
+	burstPoweroffAllowed  bool
+	burstPoweroff         func(context.Context) error
+	helloAckTimeout       time.Duration
+	burstMu               sync.Mutex
+	burstSeen             map[string]time.Time
+	wakeTargets           map[string]NodeWakeTarget
+	wakeMu                sync.Mutex
+	wakeSeen              map[string]time.Time
+	checks                []HubCheck
+	execute               HubCheckExecutor
+	pingInterval          time.Duration
+	initialBackoff        time.Duration
+	maxBackoff            time.Duration
+	preferRetry           time.Duration
+	version               string
+	dial                  HubDial
+	wait                  HubWait
+	warn                  func(string)
+	rearmStart            func(string) error
+	unparsedMu            sync.Mutex
+	unparsedWarnedAt      time.Time
+	unparsedSuppressed    int
+	relayInject           func(context.Context, string, string) bool
+	relayInjectVerdict    func(context.Context, string, string, []string) relayInjectResult // #547 three-way fixture seam; relayInject wins when set
+	hostLoadCollector     func(context.Context) (HubHostLoad, error)
+	hostMemoryCollector   func(context.Context) (*HubHostMemory, error)
+	sessionCollector      func(context.Context) ([]HerdrAgentState, error)
+	events                chan hubClientEvent
+	completedJobs         map[string]uint64
+	completedReports      map[string]struct{}
 	// relayInflight holds the keys selected for a send that has not been
 	// stamped yet. It keeps the scan and `panewire emit` from offering the
 	// same record twice while it is in a write queue.
