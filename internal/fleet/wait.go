@@ -72,7 +72,7 @@ func timeoutValue(raw string) (time.Duration, bool) {
 
 // waitJob blocks until the job's outcome reaches this host: a durable
 // job.completed / escalate / lost / revoked / joined / handed_off event, or
-// the READY/ESC convention on the parent or owner lane. The loop reads
+// the READY convention on the parent or owner lane. The loop reads
 // event artifacts and the lane inbox with bounded backoff — no resident
 // process — so it survives the caller being backgrounded. Distinct exit
 // codes carry the outcome: 0 done/ready/joined/handed_off, 83 escalate,
@@ -204,11 +204,8 @@ func (a *App) waitOutcome(ctx context.Context, s Spawn, lane string, warned, hkW
 			if !strings.Contains(ev.Text, marker) {
 				continue
 			}
-			if strings.Contains(ev.Text, "READY") {
+			if laneTerminalMarker.MatchString(ev.Text) {
 				return waitOutcome{name: "ready", report: lastPipeField(ev.Text)}
-			}
-			if strings.Contains(ev.Text, "ESC") {
-				return waitOutcome{name: "escalate", detail: ev.Text}
 			}
 		}
 	}

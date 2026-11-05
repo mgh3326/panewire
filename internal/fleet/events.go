@@ -126,7 +126,7 @@ func (a *App) job(id string) (Job, error) {
 			}
 		case "job.reprompted":
 			j.Terminal = false
-		case "job.completed", "job.joined", "job.revoked", "job.handed_off":
+		case "job.completed", "job.joined", "job.revoked", "job.handed_off", "job.lost":
 			j.Terminal = true
 			j.At = ev.when
 		case "job.reaped":

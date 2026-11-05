@@ -198,10 +198,8 @@ func TestWatcherCompletesStableReportOnTerminalSignal(t *testing.T) {
 	for name, signal := range map[string]func(*testing.T, *App){
 		"READY":       lane("READY: PR open"),
 		"DONE":        lane("DONE"),
-		"ESC":         lane("ESC: need a decision"),
 		"labelled":    lane("[agent-a] READY | PR | report"),
 		"same second": func(t *testing.T, a *App) { putLaneEvent(t, a, "w:p1", "READY", a.Now()) },
-		"escalate":    func(t *testing.T, a *App) { putEvent(t, a, "j", "job.escalate", map[string]any{"question": "which?"}) },
 	} {
 		t.Run(name, func(t *testing.T) {
 			a, f, report := watchFixture(t)
@@ -218,6 +216,197 @@ func TestWatcherCompletesStableReportOnTerminalSignal(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWatcherDecisionStaysLiveUntilReady(t *testing.T) {
+	a, f, report := watchFixture(t)
+	writeReport(t, report, "draft\n")
+	putLaneEvent(t, a, "w:p1", "[worker] ESC | choose", a.Now())
+	sleep := a.Sleep
+	polls := 0
+	a.Sleep = func(ctx context.Context, d time.Duration) error {
+		polls++
+		if polls == 3 {
+			if records, _ := completions(t, a, f); records != 0 {
+				t.Fatalf("ESC completed job: %d", records)
+			}
+			if !slices.Contains(eventKindsOf(t, a, "j"), "job.waiting_decision") {
+				t.Fatal("decision not recorded")
+			}
+			putLaneEvent(t, a, "w:p1", "READY | done", a.Now())
+		}
+		return sleep(ctx, d)
+	}
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if polls < 3 {
+		t.Fatalf("ESC completed before READY after %d polls", polls)
+	}
+	if records, _ := completions(t, a, f); records != 1 {
+		t.Fatalf("completions=%d", records)
+	}
+}
+
+func TestWatcherDecisionIgnoresPaneActivity(t *testing.T) {
+	a, f, report := watchFixture(t)
+	writeReport(t, report, "draft\n")
+	putLaneEvent(t, a, "w:p1", "ESC | question", a.Now())
+	t.Setenv("PANEWIRE_DECISION_TIMEOUT_S", "20")
+	original := f.Do
+	seq := 1
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			return Result{Out: fmt.Sprintf(`{"result":{"agents":[{"pane_id":"w:p1","state_change_seq":%d}]}}`, seq)}
+		}
+		if c.Name == "herdr" && len(c.Args) > 1 && c.Args[0] == "pane" && c.Args[1] == "read" {
+			return Result{Out: fmt.Sprintf("redraw %d", seq)}
+		}
+		return original(c)
+	}
+	sleep := a.Sleep
+	a.Sleep = func(ctx context.Context, d time.Duration) error { seq++; return sleep(ctx, d) }
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	kinds := eventKindsOf(t, a, "j")
+	if slices.Contains(kinds, "job.decision_resumed") || !slices.Contains(kinds, "job.lost") {
+		t.Fatalf("activity cleared decision or avoided timeout: %v", kinds)
+	}
+}
+
+func TestWatcherDecisionRecordedReply(t *testing.T) {
+	a, f, report := watchFixture(t)
+	writeReport(t, report, "draft\n")
+	putLaneEvent(t, a, "w:p1", "ESC | question", a.Now())
+	answered := false
+	a.DecisionReply = func(_ context.Context, pane, lane string, since time.Time) (bool, error) {
+		if pane != "w:p1" || !since.Equal(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)) {
+			t.Fatalf("query %s %s %v", pane, lane, since)
+		}
+		return answered, nil
+	}
+	sleep := a.Sleep
+	polls := 0
+	a.Sleep = func(ctx context.Context, d time.Duration) error {
+		polls++
+		if polls == 2 {
+			answered = true
+		}
+		if polls == 4 {
+			if !slices.Contains(eventKindsOf(t, a, "j"), "job.decision_resumed") {
+				t.Fatal("recorded reply did not clear wait")
+			}
+			putLaneEvent(t, a, "w:p1", "READY", a.Now())
+		}
+		return sleep(ctx, d)
+	}
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := completions(t, a, f); n != 1 {
+		t.Fatalf("completions=%d", n)
+	}
+}
+
+func TestWatcherDecisionLaterPaneEvent(t *testing.T) {
+	a, f, report := watchFixture(t)
+	writeReport(t, report, "draft\n")
+	putLaneEvent(t, a, "w:p1", "ESC | question", a.Now())
+	sleep := a.Sleep
+	polls := 0
+	a.Sleep = func(ctx context.Context, d time.Duration) error {
+		polls++
+		if polls == 2 {
+			putLaneEvent(t, a, "w:p1", "progress", a.Now())
+		}
+		if polls == 4 {
+			if !slices.Contains(eventKindsOf(t, a, "j"), "job.decision_resumed") {
+				t.Fatal("later pane event did not clear wait")
+			}
+			putLaneEvent(t, a, "w:p1", "READY", a.Now())
+		}
+		return sleep(ctx, d)
+	}
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := completions(t, a, f); n != 1 {
+		t.Fatalf("completions=%d", n)
+	}
+}
+
+func TestWatcherDecisionSurvivesRestart(t *testing.T) {
+	a, _, _ := watchFixture(t)
+	t.Setenv("PANEWIRE_DECISION_TIMEOUT_S", "15")
+	putLaneEvent(t, a, "w:p1", "ESC | question", a.Now())
+	sleep := a.Sleep
+	a.Sleep = func(context.Context, time.Duration) error { return context.Canceled }
+	if err := a.watch(context.Background(), []string{"j"}); err != context.Canceled {
+		t.Fatalf("first watch: %v", err)
+	}
+	if err := sleep(context.Background(), 20*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	a.Sleep = sleep
+	if err := a.watch(context.Background(), []string{"j", "--rearmed"}); err != nil {
+		t.Fatal(err)
+	}
+	kinds := eventKindsOf(t, a, "j")
+	count := 0
+	for _, kind := range kinds {
+		if kind == "job.waiting_decision" {
+			count++
+		}
+	}
+	if count != 1 || !slices.Contains(kinds, "job.lost") {
+		t.Fatalf("waiting events=%d kinds=%v", count, kinds)
+	}
+}
+
+func TestWatcherPreservesEscalation(t *testing.T) {
+	a, f, report := watchFixture(t)
+	writeReport(t, report, "stopped\n")
+	putEvent(t, a, "j", "job.escalate", map[string]any{"question": "why?"})
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	if n, _ := completions(t, a, f); n != 0 {
+		t.Fatalf("escalation became completion: %d", n)
+	}
+}
+
+func TestBriefDecisionPolicy(t *testing.T) {
+	a := testApp(t)
+	brief, err := a.prepareBrief(Spawn{}, Seat{}, Launch{}, "task")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rule := range []string{"ESC asks a question and keeps the job open", "READY or DONE", "`panewire escalate` stops with a reason", "Difficulty or size is never a reason to stop"} {
+		if !strings.Contains(brief, rule) {
+			t.Errorf("missing policy %q", rule)
+		}
+	}
+}
+
+func TestWatcherDecisionTimeout(t *testing.T) {
+	a, _, report := watchFixture(t)
+	writeReport(t, report, "draft\n")
+	putLaneEvent(t, a, "w:p1", "ESC | question", a.Now())
+	t.Setenv("PANEWIRE_DECISION_TIMEOUT_S", "15")
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatal(err)
+	}
+	events, err := a.events("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Kind == "job.lost" && str(ev.Payload, "reason") == "decision_unanswered" {
+			return
+		}
+	}
+	t.Fatal("missing decision_unanswered loss")
 }
 
 func TestWatcherIgnoresEventsThatAreNotThisAttemptsSignal(t *testing.T) {
