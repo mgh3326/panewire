@@ -35,6 +35,7 @@ type HostView struct {
 	Score   *float64
 	Reason  string
 	Signals PlacementSignals
+	Source  string
 	// Decided marks the host the hub's placement named, after its all_loaded
 	// and hysteresis rules; DecisionReason is why ("" for the policy-order
 	// winner, "challenger", "all_loaded"). Ranking prefers it within a bucket,
@@ -193,6 +194,7 @@ type placeCandidate struct {
 	load        *float64
 	score       *float64
 	signals     PlacementSignals
+	source      string
 	// decided and decision carry the hub's decision: the host it named and why.
 	decided  bool
 	decision string
@@ -458,6 +460,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 	if hv, reported := hub[machine]; reported {
 		local.score = hv.Score
 		local.signals = hv.Signals
+		local.source = hv.Source
 	}
 	maxRatio, hasGuard := number(a.Config.Local, "max_load_ratio")
 	if local.load != nil && hasGuard && *local.load >= maxRatio {
@@ -503,6 +506,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 			c.load = hv.LoadRatio
 			c.score = hv.Score
 			c.signals = hv.Signals
+			c.source = hv.Source
 			c.decided, c.decision = hv.Decided, hv.DecisionReason
 		} else {
 			c.awake = !c.wakeable || hub == nil
@@ -1528,6 +1532,7 @@ func parseHubHosts(raw string) ([]HostView, error) {
 	var p struct {
 		Decision   *string           `json:"decision"`
 		Reason     string            `json:"reason"`
+		Source     string            `json:"source"`
 		Candidates []json.RawMessage `json:"candidates"`
 	}
 	if e := json.Unmarshal([]byte(raw), &p); e != nil {
@@ -1561,7 +1566,7 @@ func parseHubHosts(raw string) ([]HostView, error) {
 		if !validID(name) {
 			continue
 		}
-		hv := HostView{Name: name, Connected: true, LoadRatio: c.LoadRatio, Score: c.Score, Reason: c.Reason, Signals: c.PlacementSignals}
+		hv := HostView{Name: name, Connected: true, LoadRatio: c.LoadRatio, Score: c.Score, Reason: c.Reason, Signals: c.PlacementSignals, Source: p.Source}
 		if p.Decision != nil && *p.Decision == name {
 			hv.Decided, hv.DecisionReason = true, p.Reason
 		}

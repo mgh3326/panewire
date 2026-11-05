@@ -46,6 +46,7 @@ type Event struct {
 // nil when the hub sent none for that host.
 type Candidate struct {
 	Host    string   `json:"host"`
+	Source  string   `json:"source,omitempty"`
 	Score   *float64 `json:"score,omitempty"`
 	CPU     *float64 `json:"cpu,omitempty"`
 	Mem     *float64 `json:"mem,omitempty"`
@@ -132,6 +133,7 @@ func (w *Writer) EmitEvent(ev Event) bool {
 	ev.Candidates = append([]Candidate(nil), ev.Candidates...)
 	for i := range ev.Candidates {
 		ev.Candidates[i].Host, ev.Candidates[i].Outcome = Code(ev.Candidates[i].Host), Code(ev.Candidates[i].Outcome)
+		ev.Candidates[i].Source = Code(ev.Candidates[i].Source)
 	}
 	if w.Sink != nil {
 		w.Sink(ev)
