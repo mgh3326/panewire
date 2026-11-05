@@ -354,3 +354,20 @@ func TestModelConflictWarnsWithoutMisreportingUsage(t *testing.T) {
 		t.Fatalf("warning = %q", got)
 	}
 }
+
+func TestModelStateReadFailureWarnsAboutRead(t *testing.T) {
+	a := testApp(t)
+	ledgerRunner(t, a)
+	claudeFixture(t, a.Home)
+	base := usageJob(t, a, claudeSession())
+	base.getErr = &BackendError{Status: 503, Code: "unavailable"}
+	var stderr bytes.Buffer
+	a.Err = &stderr
+	doneJob(t, a)
+	if got := stderr.String(); !strings.Contains(got, "job model state read failed (hk status 503, code unavailable)") || strings.Contains(got, "job model write failed") {
+		t.Fatalf("warning = %q", got)
+	}
+	if rec := base.record(t, "j"); rec["model"] != nil || usageOf(t, rec)["input_tokens"] != int64(150) {
+		t.Fatalf("record = %v", rec)
+	}
+}

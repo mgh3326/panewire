@@ -23,7 +23,7 @@ func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) {
 		return
 	}
 	if e := a.putJobRecord(ctx, j.ID, map[string]any{"usage": usage.Wire()}); e != nil {
-		a.warnUsageWrite("usage", e)
+		a.warnUsageOperation("usage write", e)
 	}
 	if atReap || j.Terminal || usage.Model == "" {
 		return
@@ -32,29 +32,31 @@ func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) {
 	if e == nil {
 		var rec map[string]any
 		rec, e = store.Get(ctx, j.ID)
-		if e == nil {
-			switch str(rec, "state") {
-			case "completed", "escalated", "lost":
-				return
-			}
-			e = store.Put(ctx, j.ID, map[string]any{"model": usage.Model})
+		if e != nil {
+			a.warnUsageOperation("model state read", e)
+			return
 		}
+		switch str(rec, "state") {
+		case "completed", "escalated", "lost":
+			return
+		}
+		e = store.Put(ctx, j.ID, map[string]any{"model": usage.Model})
 	}
 	if e != nil {
-		a.warnUsageWrite("model", e)
+		a.warnUsageOperation("model write", e)
 	}
 }
 
-func (a *App) warnUsageWrite(field string, err error) {
+func (a *App) warnUsageOperation(operation string, err error) {
 	var backend *BackendError
 	if errors.As(err, &backend) {
 		if backend.Code != "" {
-			a.warn("job %s write failed (hk status %d, code %s)", field, backend.Status, backend.Code)
+			a.warn("job %s failed (hk status %d, code %s)", operation, backend.Status, backend.Code)
 		} else {
-			a.warn("job %s write failed (hk status %d)", field, backend.Status)
+			a.warn("job %s failed (hk status %d)", operation, backend.Status)
 		}
 	} else {
-		a.warn("job %s write failed", field)
+		a.warn("job %s failed", operation)
 	}
 }
 
