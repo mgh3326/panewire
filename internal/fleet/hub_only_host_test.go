@@ -58,9 +58,10 @@ func hubOnlyFixture(t *testing.T) *hubOnlyEnv {
 		case c.Name == "ssh":
 			e.ssh = append(e.ssh, strings.Join(c.Args, " "))
 			return Result{Code: exitUnreachable, Err: "ssh: connect to host hub-only-ssh: Operation timed out"}, true
-		case c.Name == "pacelever" && len(c.Args) == 2 && c.Args[0] == "refresh":
-			e.pace = append(e.pace, c.Args[1])
-			if c.Args[1] == "claude" {
+		case c.Name == "panewire" && len(c.Args) == 3 && c.Args[0] == "quota" && c.Args[1] == "refresh", c.Name == "pacelever" && len(c.Args) == 2 && c.Args[0] == "refresh":
+			pool := c.Args[len(c.Args)-1]
+			e.pace = append(e.pace, pool)
+			if pool == "claude" {
 				e.src.accounts[hubOnlyClaude] = SharedAccount{Key: hubOnlyClaude, Observed: true, Fresh: true, MeasuredAt: a.Now()}
 			}
 			return Result{}, true
@@ -159,7 +160,7 @@ func TestHubOnlyHostRestrictedHolderIsNotPlaced(t *testing.T) {
 	if _, err := e.a.selectProfile(context.Background(), e.s); exitCode(err) != exitPlacement || !strings.Contains(err.Error(), "--host host-hub restricts accounts") {
 		t.Fatalf("unmeasurable only holder: %v", err)
 	}
-	if len(e.ssh) != 1 || !strings.Contains(e.ssh[0], "hub-only-ssh pacelever refresh 'claude'") {
+	if len(e.ssh) != 1 || !strings.Contains(e.ssh[0], "hub-only-ssh panewire quota refresh 'claude'") {
 		t.Fatalf("only holder was not measured over its transport: %v", e.ssh)
 	}
 }

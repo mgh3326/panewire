@@ -48,13 +48,13 @@ func fsLoad(host string, connected bool, score, ratio float64, measured time.Tim
 	return map[string]any{"host": host, "kind": "load", "key": "", "measured_at": measured, "load": map[string]any{"connected": connected, "accepting": connected, "score": score, "load_ratio": ratio, "capacity_weight": 1, "reason": "available"}}
 }
 
-// fsMeasurements counts per-spawn quota measurements: pacelever refresh run
-// locally or over SSH on a target.
+// fsMeasurements counts per-spawn quota measurements: a refresh run locally or
+// over SSH on a target (pacelever refresh, or panewire quota refresh for claude).
 func fsMeasurements(f *fakeRunner) int {
 	n := 0
 	for _, c := range f.Calls {
 		args := strings.Join(c.Args, " ")
-		if (c.Name == "ssh" && strings.Contains(args, "pacelever refresh")) || ((c.Name == "pacelever" || strings.HasSuffix(c.Name, "/pacelever")) && strings.HasPrefix(args, "refresh")) {
+		if (c.Name == "ssh" && isQuotaRefresh(args)) || ((c.Name == "pacelever" || strings.HasSuffix(c.Name, "/pacelever")) && strings.HasPrefix(args, "refresh")) || (c.Name == "panewire" && strings.HasPrefix(args, "quota refresh")) {
 			n++
 		}
 	}
@@ -94,7 +94,7 @@ func fsStaleAccountFixture(t *testing.T, reader *fakeStateReader) (*App, Spawn, 
 	var a *App
 	a, s, f := remoteFixture(t, src, &fakeWaker{}, "2026-01-01T00:00:00Z", func(args string) Result {
 		switch {
-		case strings.Contains(args, "pacelever refresh"):
+		case isQuotaRefresh(args):
 			src.accounts[key] = SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: a.Now()}
 			return Result{}
 		case strings.Contains(args, "_spawn-stdin"):

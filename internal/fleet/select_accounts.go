@@ -139,7 +139,7 @@ func (sp *selPresence) account(ctx context.Context, key, pool string, hosts []se
 			if q, ok := sp.a.Quota.(CLIQuota); ok {
 				binary = q.Binary
 			}
-			result.err = checkQuotaPlain(runQuotaCommand(refresh, sp.a.Runner, Command{Name: binary, Args: []string{"refresh", pool}}, "quota refresh", 60*time.Second), "quota refresh")
+			result.err = checkQuotaPlain(runQuotaCommand(refresh, sp.a.Runner, refreshCommand(pool, binary), "quota refresh", 60*time.Second), "quota refresh")
 		} else {
 			result.err = sp.a.measureTarget(refresh, h.name, pool)
 		}

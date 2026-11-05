@@ -184,7 +184,7 @@ func TestFailedRemeasureWritesOneQuotaObservationEvent(t *testing.T) {
 	a.Config.Hosts = map[string]map[string]any{"host-b": {}}
 	measures := 0
 	a.Runner = &fakeRunner{Do: func(c Command) Result {
-		if c.Name == "ssh" && strings.Contains(strings.Join(c.Args, " "), "pacelever refresh") {
+		if c.Name == "ssh" && isQuotaRefresh(strings.Join(c.Args, " ")) {
 			measures++
 			return Result{Code: 1, Err: "refresh failed " + fakeSecretText}
 		}
