@@ -19,6 +19,7 @@ type ciWorkflow struct {
 		If       string   `yaml:"if"`
 		RunsOn   any      `yaml:"runs-on"`
 		Strategy any      `yaml:"strategy"`
+		Services any      `yaml:"services"`
 		Needs    []string `yaml:"needs"`
 		Uses     string   `yaml:"uses"`
 		Continue bool     `yaml:"continue-on-error"`
@@ -55,8 +56,12 @@ func TestCITiers(t *testing.T) {
 			continue
 		}
 		runner, _ := yaml.Marshal([]any{job.RunsOn, job.Strategy})
-		if strings.Contains(string(runner), "vars.") || strings.Contains(string(runner), "self-hosted") {
+		if strings.Contains(string(runner), "vars.") || strings.Contains(string(runner), "vars[") || strings.Contains(strings.ToLower(string(runner)), "self-hosted") || strings.Contains(strings.ToLower(string(runner)), "macos") {
 			t.Errorf("PR-reachable job %s has unsafe runner: %s", name, runner)
+		}
+		services, _ := yaml.Marshal(job.Services)
+		if strings.Contains(strings.ToLower(string(services)), "postgres") {
+			t.Errorf("PR-reachable job %s has Postgres service", name)
 		}
 		for _, step := range job.Steps {
 			if strings.Contains(step.Run, "-race") || strings.Contains(step.Run, "postgres:") {
@@ -98,6 +103,11 @@ func TestCITiers(t *testing.T) {
 	gate := w.Jobs["ci-ok"]
 	if gate.If != "${{ always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}" {
 		t.Fatal("ci-ok cancellation rule changed")
+	}
+	for _, required := range []string{"test", "post-test", "postgres", "auto-tag-test"} {
+		if !slices.Contains(gate.Needs, required) {
+			t.Errorf("ci-ok must need %s", required)
+		}
 	}
 	if slices.Contains(gate.Needs, "test-macos") {
 		t.Fatal("macOS must remain advisory")
