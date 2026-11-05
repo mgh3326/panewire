@@ -144,8 +144,8 @@ func (c Config) fetchAPI(ctx context.Context, token string) (quota.Observation, 
 		return quota.Observation{}, quota.Fail(quota.ErrKindParse, "invalid usage JSON")
 	}
 	observed := quota.Observation{Source: quota.SourceUsageAPI, Buckets: parseAPI(raw)}
-	if len(observed.Buckets) == 0 {
-		return quota.Observation{}, quota.Fail(quota.ErrKindParse, "usage response has no recognized windows")
+	if !hasMeasuredBucket(observed.Buckets) {
+		return quota.Observation{}, quota.Fail(quota.ErrKindParse, "usage response has no usable windows")
 	}
 	return observed, nil
 }
@@ -185,6 +185,18 @@ func retryAfter(header string, now time.Time) time.Duration {
 		}
 	}
 	return 0
+}
+
+// hasMeasuredBucket reports whether any window carries a valid utilisation. A
+// response of null or out-of-range windows is a parse failure, so the CLI
+// fallback still gets its one attempt.
+func hasMeasuredBucket(buckets []quota.Bucket) bool {
+	for _, b := range buckets {
+		if b.UsedPct != nil {
+			return true
+		}
+	}
+	return false
 }
 
 // parseAPI reads the usage endpoint: the 5h and 7d account windows plus any

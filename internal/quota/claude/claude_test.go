@@ -430,6 +430,39 @@ func TestCLIFailureKeepsAPIFailure(t *testing.T) {
 	}
 }
 
+// A 200 whose windows are null or out of range measured nothing; the CLI
+// still gets its one attempt, and a partial answer stays an API success.
+func TestAPIWithoutUsableWindowFallsBackToCLI(t *testing.T) {
+	for name, body := range map[string]string{
+		"null windows":   `{"five_hour":null,"seven_day":null}`,
+		"no utilisation": `{"five_hour":{"resets_at":"2026-10-29T00:00:00Z"}}`,
+		"out of range":   `{"five_hour":{"utilization":120}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(t, doFunc(func(*http.Request) (*http.Response, error) { return respond(200, body, nil), nil }))
+			calls := 0
+			cfg.RunCLI = func(context.Context, string, string, string) (string, error) {
+				calls++
+				return fixture(t, "claude_usage.txt"), nil
+			}
+			o, err := Measure(t.Context(), cfg)
+			if err != nil || calls != 1 || o.Source != quota.SourceCLI {
+				t.Fatalf("calls=%d %+v err=%v", calls, o, err)
+			}
+		})
+	}
+	cfg := testConfig(t, doFunc(func(*http.Request) (*http.Response, error) {
+		return respond(200, `{"five_hour":null,"seven_day":{"utilization":20}}`, nil), nil
+	}))
+	cfg.RunCLI = func(context.Context, string, string, string) (string, error) {
+		t.Error("CLI ran after a partial API answer")
+		return "", errors.New("unexpected")
+	}
+	if o, err := Measure(t.Context(), cfg); err != nil || o.Source != quota.SourceUsageAPI {
+		t.Fatalf("partial answer %+v err=%v", o, err)
+	}
+}
+
 func TestCLINotRunAfterAPISuccess(t *testing.T) {
 	cfg := testConfig(t, doFunc(func(*http.Request) (*http.Response, error) {
 		return respond(200, `{"five_hour":{"utilization":1}}`, nil), nil
