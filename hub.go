@@ -193,7 +193,10 @@ type hubAgent struct {
 	conn *websocket.Conn
 	// credential is the node token the websocket opened with; an auth reload
 	// that no longer maps the machine to it closes the socket.
-	credential  string
+	credential string
+	// machineID is the node this socket authenticated as. It is the sender
+	// the lane inbox records for a lane.event the node relays.
+	machineID   string
 	writeMu     sync.Mutex
 	transient   bool
 	failovers   chan hubFailoverEvent
@@ -822,6 +825,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/inbox", h.handleInboxList)
 	mux.HandleFunc("GET /v1/inbox/count", h.handleInboxCount)
 	mux.HandleFunc("GET /v1/inbox/wait", h.handleInboxWait)
+	mux.HandleFunc("GET /v1/inbox/ack-state", h.handleInboxAckState)
 	mux.HandleFunc("POST /v1/inbox/{id}/read", h.handleInboxRead)
 	mux.HandleFunc("POST /v1/inbox/ack", h.handleInboxAck)
 	mux.HandleFunc("GET /v1/relay/held", h.handleRelayHeld)
@@ -1157,7 +1161,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), wakes: make(chan hubWakeRequestEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
+	agent := &hubAgent{conn: connection, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), wakes: make(chan hubWakeRequestEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
@@ -1496,17 +1500,19 @@ type hubInbound struct {
 }
 
 type hubHeartbeatPayload struct {
-	Status         string                    `json:"status"`
-	Checks         map[string]HubCheckStatus `json:"checks"`
-	HostLoad       *HubHostLoad              `json:"host_load,omitempty"`
-	HostMemory     *HubHostMemory            `json:"host_memory,omitempty"`
-	ActiveJobs     []HubActiveJob            `json:"active_jobs,omitempty"`
-	HostSignals    *HubHostSignals           `json:"host_signals,omitempty"`
-	Readiness      *fleet.Readiness          `json:"readiness,omitempty"`
-	Sessions       *[]HubSession             `json:"sessions,omitempty"`
-	SnapshotStatus string                    `json:"snapshot_status,omitempty"`
-	Truncated      bool                      `json:"truncated,omitempty"`
-	StallDetect    *hubStallBeatPayload      `json:"stall_detect,omitempty"`
+	Status          string                    `json:"status"`
+	Checks          map[string]HubCheckStatus `json:"checks"`
+	HostLoad        *HubHostLoad              `json:"host_load,omitempty"`
+	HostMemory      *HubHostMemory            `json:"host_memory,omitempty"`
+	ActiveJobs      []HubActiveJob            `json:"active_jobs,omitempty"`
+	HostSignals     *HubHostSignals           `json:"host_signals,omitempty"`
+	Readiness       *fleet.Readiness          `json:"readiness,omitempty"`
+	Sessions        *[]HubSession             `json:"sessions,omitempty"`
+	PaneIDs         *[]string                 `json:"pane_ids,omitempty"`
+	PaneIDsComplete *bool                     `json:"pane_ids_complete,omitempty"`
+	SnapshotStatus  string                    `json:"snapshot_status,omitempty"`
+	Truncated       bool                      `json:"truncated,omitempty"`
+	StallDetect     *hubStallBeatPayload      `json:"stall_detect,omitempty"`
 }
 
 // hubStallBeatPayload is the node detector's no-data contract. beat_ms is the
@@ -1551,7 +1557,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1639,6 +1645,24 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		}
 		heartbeat.StallDetect = &beat
 	}
+	rawIDs, hasIDs := fields["pane_ids"]
+	rawIDsComplete, hasIDsComplete := fields["pane_ids_complete"]
+	if hasIDs != hasIDsComplete {
+		return hubHeartbeatPayload{}, false
+	}
+	if hasIDs {
+		var ids []string
+		var complete bool
+		if isJSONNull(rawIDs) || json.Unmarshal(rawIDs, &ids) != nil || ids == nil || isJSONNull(rawIDsComplete) || json.Unmarshal(rawIDsComplete, &complete) != nil {
+			return hubHeartbeatPayload{}, false
+		}
+		for i, id := range ids {
+			if !validIdleWakePane(id) || (i > 0 && ids[i-1] >= id) {
+				return hubHeartbeatPayload{}, false
+			}
+		}
+		heartbeat.PaneIDs, heartbeat.PaneIDsComplete = &ids, &complete
+	}
 	rawSnapshotStatus, hasSnapshotStatus := fields["snapshot_status"]
 	if hasSnapshotStatus {
 		if json.Unmarshal(rawSnapshotStatus, &heartbeat.SnapshotStatus) != nil || (heartbeat.SnapshotStatus != hubSnapshotStatusOK && heartbeat.SnapshotStatus != hubSnapshotStatusUnavailable) {
@@ -1658,6 +1682,9 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.Sessions = &sessions
+	}
+	if hasIDs && (!hasSnapshotStatus || heartbeat.SnapshotStatus != hubSnapshotStatusOK) {
+		return hubHeartbeatPayload{}, false
 	}
 	if hasSnapshotStatus {
 		switch heartbeat.SnapshotStatus {
@@ -2628,4 +2655,13 @@ func (subscriber *hubEventSubscriber) writeLoop() {
 			}
 		}
 	}
+}
+
+// hubAgentMachineID is the node behind a socket, or "" for the hub's own
+// relays, which carry no agent.
+func hubAgentMachineID(agent *hubAgent) string {
+	if agent == nil {
+		return ""
+	}
+	return agent.machineID
 }
