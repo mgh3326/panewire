@@ -179,9 +179,15 @@ func placementTerms(p *placePlan, chosen, ranking string) ([]fleetevent.Candidat
 	reason := ranking
 	out := make([]fleetevent.Candidate, 0, len(p.candidates))
 	for _, c := range p.candidates {
-		row := fleetevent.Candidate{Host: c.name, Score: c.score, Outcome: c.outcome}
+		row := fleetevent.Candidate{Host: c.name, Source: c.source, Score: c.score, Outcome: c.outcome}
+		if c.score != nil && c.signals.Terms == nil && row.Source != "hub-only" {
+			row.Source = "signals-unavailable"
+		}
 		if t := c.signals.Terms; t != nil {
-			row.CPU, row.Mem, row.IO, row.Load, row.Jobs = &t.CPU, &t.Mem, &t.IO, &t.Load, &t.Jobs
+			row.Jobs = &t.Jobs
+			if c.source != "hub-only" {
+				row.CPU, row.Mem, row.IO, row.Load = &t.CPU, &t.Mem, &t.IO, &t.Load
+			}
 		}
 		row.Power, row.Bridge = c.signals.Power, c.signals.BridgedJobs
 		if row.Outcome == "" {
