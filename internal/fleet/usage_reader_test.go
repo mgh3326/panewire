@@ -158,6 +158,24 @@ func TestUsageReaderMissingDataIsUnknownNotZero(t *testing.T) {
 			claudeFixture(t, root)
 			return HarnessSession{Kind: "claude", ID: "unknown", Source: "unavailable"}
 		}},
+		{"claude sentinel id never names unknown.jsonl", "claude", "claude-session-jsonl", func(t *testing.T, root string) HarnessSession {
+			claudeFixture(t, root)
+			data, err := os.ReadFile(claudeFixturePath(root, testClaudeID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeUsageFile(t, claudeFixturePath(root, "unknown"), string(data))
+			return HarnessSession{Kind: "claude", ID: "unknown", Source: "unavailable"}
+		}},
+		{"codex sentinel id never names a rollout", "codex", "codex-token-count", func(t *testing.T, root string) HarnessSession {
+			codexFixture(t, root)
+			data, err := os.ReadFile(codexFixturePath(root, testCodexID))
+			if err != nil {
+				t.Fatal(err)
+			}
+			writeUsageFile(t, codexFixturePath(root, "unknown"), string(data))
+			return HarnessSession{Kind: "codex", ID: "unknown", Source: "unavailable"}
+		}},
 		{"claude missing file", "claude", "claude-session-jsonl", func(t *testing.T, root string) HarnessSession {
 			return HarnessSession{Kind: "claude", ID: testClaudeID, Source: "herdr:claude"}
 		}},

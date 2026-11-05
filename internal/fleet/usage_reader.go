@@ -98,16 +98,26 @@ func (r UsageReader) Read(ref HarnessSession, cwd string) TokenUsage {
 	switch kind {
 	case "claude":
 		unknown.Source = usageSourceClaude
+	case "codex":
+		unknown.Source = usageSourceCodex
+	case "omp":
+		unknown.Source = usageSourceOMP
+	}
+	// "unknown" is FindHarnessSession's sentinel for no reference, not an id:
+	// it must never name a file.
+	if ref.ID == "unknown" {
+		return unknown
+	}
+	switch kind {
+	case "claude":
 		if path, ok := r.claudePath(ref, cwd); ok {
 			return readClaudeUsage(path)
 		}
 	case "codex":
-		unknown.Source = usageSourceCodex
 		if path, ok := r.codexPath(ref); ok {
 			return readCodexUsage(path)
 		}
 	case "omp":
-		unknown.Source = usageSourceOMP
 		if path, ok := r.ompPath(ref); ok {
 			return readOMPUsage(path)
 		}
