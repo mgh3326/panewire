@@ -87,7 +87,7 @@ drops what does not fit.
 | Field | Meaning |
 |---|---|
 | `harnesses.<kind>` for `claude`, `codex`, `omp`, `agy`, `devin`, `cmd` | `installed` (the binary is found; `cmd` is always installed), `version` (the first dotted number of `--version`), `herdr_integration` (`herdr integration status` says `current`), `login` (`present` / `missing` / `unknown`) with `account` (the pacelever account key), `dialog` |
-| `harnesses.<kind>.login` | From the node's own pacelever refresh of the pool named like the kind (`--state-quota-pools`). `present` after a successful refresh. `missing` only when a refresh failed and `pacelever --json` gives the pool an `error_kind` of `auth`, `auth_failed`, `credentials` or `token_expired`. Any other failure (timeout, transient error, `excluded`, unreadable status) keeps a present account while its last successful refresh is under 5 minutes old, and otherwise reads `unknown`; `unknown` also when the node does not measure that pool |
+| `harnesses.<kind>.login` | From the node's own refresh of the pool named like the kind (`--state-quota-pools`): `claude` is measured by the node itself, every other pool by pacelever. `present` after a successful refresh. `missing` only when a refresh failed with an `error_kind` of `auth`, `auth_failed`, `credentials` or `token_expired` (for claude, the measurement's own kind; for other pools, the one `pacelever --json` gives the pool). Any other failure (timeout, transient error, `excluded`, unreadable status) keeps a present account while its last successful refresh is under 5 minutes old, and otherwise reads `unknown`; `unknown` also when the node does not measure that pool |
 | `harnesses.<kind>.dialog` | The first-run dialog the **last launch** stopped at: `codex_hooks_review`, `codex_directory_trust`, `omp_setup_wizard` or `claude_trust`. It is the last known state, set by a failed launch and cleared by the next launch of that kind that succeeds. The node does not open a harness to look, and a dropped pair is not launched again, so a reported dialog also expires after 30 minutes: the pair then gets one more launch, and a launch that stops at the dialog again reports it for another 30 minutes |
 | `repos` | The node's `cwd_map` keys (on defaults: the directories under the work root) |
 | `brief.handoffkeep_env` | The handoffkeep env file is present, mode 0600 and holds a URL and token |
@@ -116,7 +116,7 @@ outcome, in this order:
 | `harness_missing` | The harness binary is not installed |
 | `harness_version` | `placement.harness_min_version.<kind>` (in the spawner's `hosts.toml`) is set and the version is lower or unreadable |
 | `dialog_pending` | The last launch of this kind stopped at a first-run dialog ([desk notice](#first-run-refusals-and-the-desk-notice)) |
-| `login_missing` | The node's pacelever refresh of the kind's pool failed with a login error kind (`cmd` needs no login) ([desk notice](#first-run-refusals-and-the-desk-notice)) |
+| `login_missing` | The node's refresh of the kind's pool failed with a login error kind (`cmd` needs no login) ([desk notice](#first-run-refusals-and-the-desk-notice)) |
 | `repo_unmapped` | The spawn's repository is not in the node's `repos` |
 | `brief_unavailable` | The spawn goes through the hub with a brief document and the node cannot fetch one |
 | `toolchain_missing` | `placement.repo_toolchains.<repo>` lists a toolchain the node lacks |

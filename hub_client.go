@@ -194,7 +194,9 @@ type HubClient struct {
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
 	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
-	nodePacelever      relayCommandRunner // fixture seam for quota.refresh; nil runs pacelever.
+	nodePacelever      relayCommandRunner // fixture seam for quota.refresh of a pool other than claude; nil runs pacelever.
+	claudeQuotaMu      sync.Mutex
+	claudeQuota        *claudeQuotaSource // the node's own claude measurement; fixtures set it, nil builds the default.
 	nodeCloseSettle    time.Duration      // fixture seam; zero is nodePaneCloseSettle.
 	nodeGitLockWait    time.Duration      // fixture seam; zero is nodeGitOpLockWait.
 	busyRelayMu        sync.Mutex

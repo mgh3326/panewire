@@ -184,7 +184,7 @@ func TestAccountLeadExhaustionAndUnknownAreDistinct(t *testing.T) {
 			refreshes := 0
 			next := a.Runner
 			a.Runner = runnerFunc(func(ctx context.Context, c Command) Result {
-				if c.Name == "ssh" && strings.Contains(strings.Join(c.Args, " "), "pacelever refresh") {
+				if c.Name == "ssh" && isQuotaRefresh(strings.Join(c.Args, " ")) {
 					refreshes++
 					if _, ok := ctx.Deadline(); !ok {
 						t.Fatal("account refresh has no deadline")

@@ -352,9 +352,32 @@ func (a *App) localAccountKeys(ctx context.Context, pool string) []string {
 	return keys
 }
 
-// measureTarget runs pacelever's on-demand refresh for the pool on the target
-// over the host's SSH transport so its account's shared observation is current.
-// pacelever only refreshes on demand for an account the spawning host holds.
+// nativeQuotaPool is the pool panewire measures itself (`panewire quota
+// refresh claude`); every other pool is refreshed by pacelever.
+const nativeQuotaPool = "claude"
+
+// refreshCommand is the on-demand refresh of pool on this host: pacelever's
+// binary for a pool pacelever measures, panewire's own quota command for the
+// one panewire measures.
+func refreshCommand(pool, paceleverBinary string) Command {
+	if pool == nativeQuotaPool {
+		return Command{Name: "panewire", Args: []string{"quota", "refresh", pool}}
+	}
+	return Command{Name: paceleverBinary, Args: []string{"refresh", pool}}
+}
+
+// remoteRefreshLine is refreshCommand as the one shell line ssh runs on the
+// target.
+func remoteRefreshLine(pool string) string {
+	if pool == nativeQuotaPool {
+		return "panewire quota refresh " + shellQuote(pool)
+	}
+	return "pacelever refresh " + shellQuote(pool)
+}
+
+// measureTarget runs the on-demand refresh for the pool on the target over the
+// host's SSH transport so its account's shared observation is current. The
+// refresh only measures an account the target holds.
 func (a *App) measureTarget(ctx context.Context, host, pool string) error {
 	h, ok := a.Config.Hosts[host]
 	if !ok || !validID(pool) {
@@ -371,7 +394,7 @@ func (a *App) measureTarget(ctx context.Context, host, pool string) error {
 	if timeout <= 0 || timeout > time.Minute {
 		timeout = time.Minute
 	}
-	r := runQuotaCommand(ctx, a.Runner, Command{Name: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", target, "pacelever refresh " + shellQuote(pool)}}, "quota refresh", timeout)
+	r := runQuotaCommand(ctx, a.Runner, Command{Name: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", target, remoteRefreshLine(pool)}}, "quota refresh", timeout)
 	return checkQuotaPlain(r, "quota refresh")
 }
 

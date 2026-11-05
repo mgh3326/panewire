@@ -176,7 +176,7 @@ func TestReviewSameAccountRefreshTriesAnotherHost(t *testing.T) {
 			return Result{}, false
 		}
 		args := strings.Join(c.Args, " ")
-		if !strings.Contains(args, "pacelever refresh") {
+		if !isQuotaRefresh(args) {
 			t.Fatalf("unexpected host contact: %s", args)
 		}
 		if strings.Contains(args, "host-a") {

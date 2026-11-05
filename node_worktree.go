@@ -1051,11 +1051,18 @@ func (client *HubClient) nodePaneInUse(ctx context.Context, path string) (bool, 
 	return false, nil
 }
 
-// nodeQuotaRefresh is a closed call: exactly `pacelever refresh <pool>`,
-// no other argv reachable from the wire.
+// nodeQuotaRefresh is a closed call: the claude pool is measured in this
+// process, every other pool runs exactly `pacelever refresh <pool>`; no other
+// argv is reachable from the wire.
 func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRefreshArgs) (any, string) {
 	ctx, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
+	if args.Pool == quotaNativePool {
+		if _, err := client.claudeQuotaSource().Refresh(ctx); err != nil {
+			return nil, "refresh_failed"
+		}
+		return nodeQuotaRefreshResult{Outcome: nodeQuotaRefreshed}, ""
+	}
 	if _, err := client.nodePaceleverRunner()(ctx, "refresh", args.Pool); err != nil {
 		return nil, "refresh_failed"
 	}

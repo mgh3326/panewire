@@ -20,9 +20,15 @@ func fakeQuotaPacelever(refresh func() ([]byte, error), status string) relayComm
 	}
 }
 
+// quotaStatus is pacelever's status with a failing codex pool of the given
+// kind next to a failing claude pool. The node measures claude itself, so the
+// pacelever status only ever decides a pool pacelever still measures.
 func quotaStatus(kind string) string {
-	return `{"providers":[{"id":"codex","status":"error","error_kind":"auth"},{"id":"claude","status":"error","error_kind":"` + kind + `"}]}`
+	return `{"providers":[{"id":"claude","status":"error","error_kind":"auth"},{"id":"codex","status":"error","error_kind":"` + kind + `"}]}`
 }
+
+// fsPaceleverFreshCodex is a fresh pacelever reading of the codex pool.
+var fsPaceleverFreshCodex = strings.Replace(fsPaceleverFresh, `"id":"claude"`, `"id":"codex"`, 1)
 
 func failedRefresh() ([]byte, error) { return nil, errors.New("exit status 2") }
 
@@ -34,9 +40,9 @@ func quotaClient(t *testing.T) *HubClient {
 	return client
 }
 
-func claudeLogin(t *testing.T, client *HubClient) fleet.HarnessReadiness {
+func poolLogin(t *testing.T, client *HubClient, pool string) fleet.HarnessReadiness {
 	t.Helper()
-	return client.collectReadiness(t.Context()).Harnesses["claude"]
+	return client.collectReadiness(t.Context()).Harnesses[pool]
 }
 
 // hk 3087: only a pacelever login error kind reads as a missing login; every
@@ -55,14 +61,14 @@ func TestFleetQuotaRefreshLoginClassification(t *testing.T) {
 		{"credentials", failedRefresh, quotaStatus("credentials"), fleet.ReadinessLoginMissing},
 		{"unparsed refresh, token_expired", func() ([]byte, error) { return []byte("not json"), nil }, quotaStatus("token_expired"), fleet.ReadinessLoginMissing},
 		{"unreadable status", failedRefresh, "pacelever: boom", fleet.ReadinessLoginUnknown},
-		{"pool not listed", failedRefresh, `{"providers":[{"id":"codex","error_kind":"auth"}]}`, fleet.ReadinessLoginUnknown},
-		{"success", func() ([]byte, error) { return []byte(fsPaceleverFresh), nil }, quotaStatus("auth"), fleet.ReadinessLoginPresent},
+		{"pool not listed", failedRefresh, `{"providers":[{"id":"claude","error_kind":"auth"}]}`, fleet.ReadinessLoginUnknown},
+		{"success", func() ([]byte, error) { return []byte(fsPaceleverFreshCodex), nil }, quotaStatus("auth"), fleet.ReadinessLoginPresent},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			client := quotaClient(t)
 			client.nodePacelever = fakeQuotaPacelever(test.refresh, test.status)
-			client.refreshFleetQuota(t.Context(), "claude", map[string]fleetQuotaSent{})
-			if got := claudeLogin(t, client).Login; got != test.want {
+			client.refreshFleetQuota(t.Context(), "codex", map[string]fleetQuotaSent{})
+			if got := poolLogin(t, client, "codex").Login; got != test.want {
 				t.Fatalf("login = %q, want %q", got, test.want)
 			}
 		})
@@ -81,14 +87,14 @@ func TestFleetQuotaTransientFailureRaisesNoLoginAction(t *testing.T) {
 		if failing {
 			return failedRefresh()
 		}
-		return []byte(fsPaceleverFresh), nil
+		return []byte(fsPaceleverFreshCodex), nil
 	}, quotaStatus("network"))
 	sent := map[string]fleetQuotaSent{}
 	report := func() fleet.HarnessReadiness {
-		client.refreshFleetQuota(t.Context(), "claude", sent)
+		client.refreshFleetQuota(t.Context(), "codex", sent)
 		readiness := client.collectReadiness(t.Context())
 		h.noteReadinessActions("pi", readiness, now)
-		return readiness.Harnesses["claude"]
+		return readiness.Harnesses["codex"]
 	}
 	if got := report(); got.Login != fleet.ReadinessLoginPresent {
 		t.Fatalf("first refresh: %+v", got)
@@ -123,9 +129,9 @@ func TestFleetQuotaFailureWarningNamesPoolAndKind(t *testing.T) {
 		return []byte("secret stderr text"), errors.New("exit status 4")
 	}, quotaStatus("excluded"))
 	sent := map[string]fleetQuotaSent{}
-	client.refreshFleetQuota(t.Context(), "claude", sent)
-	client.refreshFleetQuota(t.Context(), "claude", sent)
-	if len(warnings) != 1 || !strings.Contains(warnings[0], "claude") || !strings.Contains(warnings[0], "excluded") || strings.Contains(warnings[0], "secret") {
+	client.refreshFleetQuota(t.Context(), "codex", sent)
+	client.refreshFleetQuota(t.Context(), "codex", sent)
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "codex") || !strings.Contains(warnings[0], "excluded") || strings.Contains(warnings[0], "secret") {
 		t.Fatalf("warnings = %q", warnings)
 	}
 }

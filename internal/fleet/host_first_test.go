@@ -253,7 +253,7 @@ func TestHostFirstRefreshRefusalKeepsHostUp(t *testing.T) {
 			src.accounts[testCodexA] = SharedAccount{Key: testCodexA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: &c}
 			q.GateDo = gatePools(map[string]string{"opus": "claude", "codex-sol": "codex"})
 			a.Runner = wrapRunner(a.Runner, func(cmd Command) (Result, bool) {
-				if cmd.Name != "ssh" || !strings.Contains(strings.Join(cmd.Args, " "), "pacelever refresh 'claude'") {
+				if cmd.Name != "ssh" || !strings.Contains(strings.Join(cmd.Args, " "), "panewire quota refresh 'claude'") {
 					return Result{}, false
 				}
 				return Result{Code: tc.code, Err: "refused"}, true
