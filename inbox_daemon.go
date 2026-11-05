@@ -22,6 +22,9 @@ type inboxRequest struct {
 	All     bool          `json:"all,omitempty"`
 	JSON    bool          `json:"json,omitempty"`
 	Timeout time.Duration `json:"timeout"`
+	// EventIDs are the ids a status request asks about; no other command
+	// carries them.
+	EventIDs []string `json:"event_ids,omitempty"`
 }
 
 type inboxResult struct {
@@ -82,16 +85,35 @@ func runInboxLocal(req inboxRequest, stdout, stderr io.Writer, socket string) in
 	return resp.Result.Code
 }
 
+// validInboxStatusEventIDs reports whether the event ids fit the command:
+// status needs 1..hubInboxAckStateMaxIDs valid ids, every other command none.
+func validInboxStatusEventIDs(command string, eventIDs []string) bool {
+	if command != "status" {
+		return len(eventIDs) == 0
+	}
+	if len(eventIDs) == 0 || len(eventIDs) > hubInboxAckStateMaxIDs {
+		return false
+	}
+	for _, eventID := range eventIDs {
+		if !validLaneEventID(eventID) {
+			return false
+		}
+	}
+	return true
+}
+
 func (d *Daemon) handleInbox(ctx context.Context, req *inboxRequest) (any, error) {
 	if d.cfg.Hub.Client == nil {
 		return nil, &codedError{ExitDaemonUnavailable, errors.New("inbox: daemon has no hub client")}
 	}
 	if req == nil || req.Timeout <= 0 || (req.Lane != "" && !validReportRelayLaneName(req.Lane)) ||
-		(req.Command != "list" && req.Command != "read" && req.Command != "ack" && req.Command != "count" && req.Command != "wait") ||
+		(req.Command != "list" && req.Command != "read" && req.Command != "ack" && req.Command != "count" && req.Command != "wait" && req.Command != "status") ||
+		!validInboxStatusEventIDs(req.Command, req.EventIDs) ||
 		(req.Unread && req.Command != "list") || (req.All && req.Command != "ack") ||
 		((req.Command == "read" || req.Command == "ack") && !req.All && req.ID <= 0) ||
 		((req.Command == "list" || req.Command == "count" || req.Command == "wait" || req.All) && req.ID != 0) ||
-		(req.Command == "wait" && req.Lane == "") {
+		(req.Command == "wait" && req.Lane == "") ||
+		(req.Command == "status" && req.Lane != "") {
 		return nil, &codedError{ExitUsage, errors.New("inbox: invalid request")}
 	}
 	var out, errOut bytes.Buffer
