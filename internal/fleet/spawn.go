@@ -41,6 +41,12 @@ type Spawn struct {
 	// selection or admitPinnedProfile); launch admission reads its
 	// family_effort opt-in. Initiator-local like Sel.
 	route *routing
+	// laneUnregistered is set once hub lane registration failed after its
+	// retry; --wait output and the execution receipt name it.
+	laneUnregistered bool
+	// laneError is the bounded, redacted reason of the last failed lane
+	// registration, kept in the receipt and the LANE_UNREGISTERED notice.
+	laneError string
 	// Grade is the task grade a caller states itself (`panewire delegate`),
 	// used instead of the "(grade X, Tn" marker in the bound task's title.
 	Grade string `json:"-"`
@@ -283,7 +289,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	defer func() {
 		if a.ObserveReceipt != nil {
 			x := s.placement.execution
-			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role)})
+			a.ObserveReceipt(ExecutionReceipt{CWD: s.CWD, Label: s.Label, Job: s.Job, Host: x.Host, Pane: x.PaneID, Profile: firstNonempty(x.Profile, s.Profile), Model: x.Model, Kind: x.Kind, Role: firstNonempty(x.Role, s.Role), LaneUnregistered: s.laneUnregistered})
 		}
 	}()
 
@@ -452,11 +458,12 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if s.Workspace == "" {
 		return fail(exitConfig, "WORKSPACE_UNCONFIGURED: set local.workspace on the executing host or pass -w WORKSPACE_ID")
 	}
-	payload, e := a.prepareBrief(s, string(brief))
-	if e != nil {
-		return e
-	}
 	if s.DryRun {
+		seat := a.Policy.Profiles[s.Profile]
+		payload, e := a.prepareBrief(s, seat, Launch{Effort: firstNonempty(s.Effort, seat.Effort)}, string(brief))
+		if e != nil {
+			return e
+		}
 		// The local preview must still refuse what Seat.Check would refuse:
 		// a capability-bound seat on a host that lacks the flag.
 		if seat := a.Policy.Profiles[s.Profile]; seat.Capability != "standard" && !boolean(a.Config.Local, seat.Capability, false) {
@@ -525,6 +532,10 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		s.Sel["requested"] = map[string]any{"grade": grade, "role": s.Role, "t": s.T, "effort": effort}
 	}
 	launch, gate, e := a.admitLaunch(ctx, s, seat, effort, selEffort, grade, builderFamily, autoSel)
+	if e != nil {
+		return e
+	}
+	payload, e := a.prepareBrief(s, seat, launch, string(brief))
 	if e != nil {
 		return e
 	}
@@ -768,8 +779,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	machine := a.machine()
 	laneOK := false
 	if s.LaneDefer == "" {
-		if e := a.registerLane(ctx, lane, parent, pane, s.Role, machine); e != nil {
-			a.warn("lane registration failed (session=%s machine=%s pane=%s): %v", a.herdrSession(), machine, pane, e)
+		if e := a.registerLaneWithRetry(ctx, lane, parent, pane, s.Role, machine); e != nil {
+			s.laneUnregistered = true
+			s.laneError = laneFailureReason(e)
 		} else {
 			laneOK = true
 			s.registeredLane = &Job{HubLane: lane, Machine: machine, Pane: pane, Role: s.Role}
@@ -780,6 +792,12 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		receipt["hub_lane"] = lane
 		receipt["hub_lane_machine"] = machine
 	}
+	if s.laneUnregistered {
+		receipt["lane_unregistered"] = true
+		if s.laneError != "" {
+			receipt["lane_error"] = s.laneError
+		}
+	}
 	if e = a.event(ctx, s.Job, "job.spawned", receipt); e != nil {
 		return e
 	}
@@ -789,16 +807,19 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e = a.startWatch(s.Job); e != nil {
 		a.warn("completion watcher failed: %v", e)
 	}
+	if s.laneUnregistered {
+		a.announceLaneUnregistered(ctx, s, lane, parent, pane, machine)
+	}
 	laneStatus := ""
 	if laneOK {
 		laneStatus = " lane=" + lane + "@" + machine
-	} else if s.Role == "builder" {
+	} else if s.laneUnregistered || s.Role == "builder" {
 		laneStatus = " lane=UNREGISTERED"
 	}
 	fmt.Fprintf(a.Out, "OK pane=%s session=%s model=%s label=%s status=working landed=yes job=%s quota_record=%s/quota_pool%s placement=%s\n", pane, a.herdrSession(), s.Profile, s.Label, s.Job, pool, laneStatus, s.placement.execution.receipt())
 	a.finishPlacement(ctx, s, nil)
-	if s.Role == "builder" && !laneOK && a.envOr("PANEWIRE_LANE_STRICT", "WRK_LANE_STRICT") == "1" {
-		return fail(exitLaneUnregistered, "builder pane exists but lane is UNREGISTERED")
+	if (s.laneUnregistered || s.Role == "builder" && !laneOK) && a.envOr("PANEWIRE_LANE_STRICT", "WRK_LANE_STRICT") == "1" {
+		return fail(exitLaneUnregistered, "%s pane exists but lane is UNREGISTERED", s.Role)
 	}
 	return a.afterSpawn(ctx, s, false)
 }

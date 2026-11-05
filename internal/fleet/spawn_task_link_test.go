@@ -57,7 +57,9 @@ func TestSpawnTaskClaimAfterDelivery(t *testing.T) {
 				if c.Name == "herdr" && strings.HasPrefix(args, "pane close") {
 					t.Fatalf("closed landed pane: %s", args)
 				}
-				if c.Name == "panewire" && strings.HasPrefix(args, "emit --kind lane.event") {
+				// Only the task-link notice counts; other lane notices (such as
+				// an unregistered lane, hk 2888) are not this test's subject.
+				if c.Name == "panewire" && strings.HasPrefix(args, "emit --kind lane.event") && strings.Contains(args, "--event-id task-link-failed-") {
 					notices++
 					for _, want := range []string{"--lane owner", s.Job, s.Task, "task claim exited with status 17"} {
 						if !strings.Contains(args, want) {
