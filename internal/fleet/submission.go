@@ -49,7 +49,7 @@ func (c *hubHTTP) Submit(ctx context.Context, request Submission) (Accepted, err
 		return Accepted{}, err
 	}
 	if status == http.StatusConflict {
-		return Accepted{}, fail(exitDuplicate, "job id already claimed; inspect its existing accepted request")
+		return Accepted{}, fail(exitDuplicate, "%s", conflictMessage(raw))
 	}
 	var response struct {
 		Job     string `json:"job_id"`
@@ -61,6 +61,31 @@ func (c *hubHTTP) Submit(ctx context.Context, request Submission) (Accepted, err
 		return Accepted{}, fail(exitConfig, "hub did not accept spawn (HTTP %d, %s); fix: %s", status, response.Error, firstNonempty(response.Fix, "inspect the hub operation and restore its configuration, then replay the saved request"))
 	}
 	return Accepted{Job: response.Job, Request: response.Request}, nil
+}
+
+// conflictMessage prints what the hub said about a 409: its error, the
+// operation holding the claim, and the fix. A body that does not parse keeps
+// the generic text.
+func conflictMessage(raw []byte) string {
+	var conflict struct {
+		Error   string `json:"error"`
+		Fix     string `json:"fix"`
+		Request string `json:"request_id"`
+		Job     string `json:"job"`
+		Host    string `json:"host"`
+		Pane    string `json:"pane"`
+	}
+	if json.Unmarshal(raw, &conflict) != nil || conflict.Error == "" {
+		return "job id already claimed; inspect its existing accepted request"
+	}
+	message := "hub refused spawn: " + conflict.Error
+	if conflict.Request != "" || conflict.Job != "" {
+		message += fmt.Sprintf(" (held by request=%s job=%s host=%s pane=%s)", conflict.Request, conflict.Job, firstNonempty(conflict.Host, "unknown"), firstNonempty(conflict.Pane, "unknown"))
+	}
+	if conflict.Fix != "" {
+		message += "; fix: " + conflict.Fix
+	}
+	return message
 }
 
 func (a *App) SubmitSpawn(ctx context.Context, s Spawn) error {
@@ -105,6 +130,7 @@ func (a *App) SubmitSpawn(ctx context.Context, s Spawn) error {
 		}
 		attempt.print(a.Out, accepted.Job)
 		s.Wait = true
+		s.laneUnregistered = attempt.LaneUnregistered
 		return a.waitJob(ctx, s, true)
 	}
 	return nil
@@ -288,6 +314,8 @@ type SpawnAttempt struct {
 	Host    string `json:"host"`
 	Profile string `json:"profile"`
 	Pane    string `json:"pane"`
+	// LaneUnregistered: the pane runs but the hub has no lane for it.
+	LaneUnregistered bool `json:"lane_unregistered,omitempty"`
 }
 
 func (s SpawnAttempt) String() string {
@@ -295,7 +323,7 @@ func (s SpawnAttempt) String() string {
 }
 
 func (s SpawnAttempt) print(out io.Writer, job string) {
-	fmt.Fprintf(out, "SPAWNED job=%s %s pane=%s\n", job, s, firstNonempty(s.Pane, "none"))
+	fmt.Fprintf(out, "SPAWNED job=%s %s pane=%s%s\n", job, s, firstNonempty(s.Pane, "none"), laneUnregisteredSuffix(s.LaneUnregistered))
 }
 
 // WaitSpawn observes durable spawn state before the existing --wait completion
