@@ -250,6 +250,29 @@ func (a *App) loadThreshold() float64 {
 	return 1.0
 }
 
+// sharedFreshTTL is the freshness window for one pool's shared quota reading:
+// quota.pool_fresh_ttl_s[pool], then quota.fresh_ttl_s, then 900 s for claude
+// and 300 s for every other pool. It is pacelever's rule (shared_quota.go
+// freshTTL), so the status view and the gate agree on a reading
+// (handoff/2026-11-05/pacelever-design-local-gate-stale-ack §4).
+func (a *App) sharedFreshTTL(pool string) time.Duration {
+	if m, ok := a.Config.Quota["pool_fresh_ttl_s"].(map[string]any); ok {
+		if n := integer(m, pool, 0); n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	if pool == "claude" {
+		return a.placementTTL("fresh_ttl_s", 900)
+	}
+	return a.placementTTL("fresh_ttl_s", 300)
+}
+
+// accountPool is the pool part of an account key ("claude:<fp>" -> "claude").
+func accountPool(key string) string {
+	pool, _, _ := strings.Cut(key, ":")
+	return pool
+}
+
 func (a *App) placementTTL(key string, def int64) time.Duration {
 	if n := integer(a.Config.Quota, key, 0); n > 0 {
 		return time.Duration(n) * time.Second
@@ -1105,7 +1128,7 @@ func (a *App) spawnRemote(ctx context.Context, s Spawn, brief string, c *placeCa
 	remote.Delegated = true
 	remote.Wait = false
 	if remote.AccountKey != "" {
-		remote.FreshTTLS = int64(a.placementTTL("fresh_ttl_s", 300) / time.Second)
+		remote.FreshTTLS = int64(a.sharedFreshTTL(accountPool(remote.AccountKey)) / time.Second)
 	}
 	if s.Report != "" {
 		if !within(a.Jobs, s.Report) {
@@ -1653,6 +1676,8 @@ func (a *App) adoptFreshTTL(seconds int64) error {
 		quota = map[string]any{}
 	}
 	quota["fresh_ttl_s"] = seconds
+	// The placing host already resolved its per-pool window into seconds.
+	delete(quota, "pool_fresh_ttl_s")
 	a.Config.Quota = quota
 	return nil
 }

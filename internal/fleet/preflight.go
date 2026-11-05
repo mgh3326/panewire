@@ -237,7 +237,6 @@ func (a *App) quotaObservation(ctx context.Context, e *preflightEnv, host string
 	if len(pools) == 0 {
 		return refuse(checkQuotaObservation, "no_usable_presence", "no account presence recorded for this host")
 	}
-	fresh := a.placementTTL("fresh_ttl_s", 300)
 	var reasons, details []string
 	for _, p := range pools {
 		key := hostAccount(e.presence, p, id, now, ttl)
@@ -257,7 +256,7 @@ func (a *App) quotaObservation(ctx context.Context, e *preflightEnv, host string
 		if r := sharedReason(key, acc); r != "" {
 			reasons = append(reasons, p+":"+r)
 		}
-		details = append(details, fmt.Sprintf("%s age=%s fresh_ttl=%s", p, age, fresh))
+		details = append(details, fmt.Sprintf("%s age=%s fresh_ttl=%s", p, age, a.sharedFreshTTL(p)))
 	}
 	if len(reasons) > 0 {
 		return refuse(checkQuotaObservation, strings.Join(reasons, ","), strings.Join(details, "; "))

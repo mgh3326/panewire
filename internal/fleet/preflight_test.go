@@ -90,7 +90,7 @@ func TestPreflightEachConditionAlone(t *testing.T) {
 		{name: "shared observation older than fresh_ttl", break_: func(a *App, src *fakePlacementSource, _ *remoteFake) {
 			const key = "claude:00000000000000aa"
 			src.accounts[key] = SharedAccount{Key: key, Observed: true, Fresh: false, MeasuredAt: a.Now().Add(-20 * time.Minute)}
-		}, want: []string{"quota_observation:claude:stale"}, detail: "age=20m0s fresh_ttl=5m0s"},
+		}, want: []string{"quota_observation:claude:stale"}, detail: "age=20m0s fresh_ttl=15m0s"},
 		{name: "shared observation missing", break_: func(_ *App, src *fakePlacementSource, _ *remoteFake) {
 			delete(src.accounts, "claude:00000000000000aa")
 		}, want: []string{"quota_observation:claude:not_observed"}},

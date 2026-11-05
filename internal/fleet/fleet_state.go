@@ -172,7 +172,7 @@ func (a *App) hubSharedAccount(ctx context.Context, key string) (SharedAccount, 
 	if snap == nil {
 		return SharedAccount{}, why
 	}
-	now, ttl := a.Now(), a.placementTTL("fresh_ttl_s", 300)
+	now, ttl := a.Now(), a.sharedFreshTTL(accountPool(key))
 	reason := stateAbsent
 	var best *FleetStateMessage
 	for i, m := range snap.States {
