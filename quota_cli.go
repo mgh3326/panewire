@@ -52,7 +52,7 @@ func (p quotaProvider) reading() quotaReading {
 	}
 	return quotaReading{p.ID, account, p.Source, p.Age, p.Stale, p.Buckets}
 }
-func quotaRun(ctx context.Context, what string, timeout time.Duration, args ...string) ([]byte, int, error) {
+func quotaRun(ctx context.Context, what string, timeout time.Duration, jsonOutput bool, args ...string) ([]byte, int, error) {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "pacelever", args...)
@@ -72,6 +72,17 @@ func quotaRun(ctx context.Context, what string, timeout time.Duration, args ...s
 		code := ExitInternal
 		if e, ok := err.(*exec.ExitError); ok {
 			code = e.ExitCode()
+		}
+		if !jsonOutput {
+			summary := ""
+			for _, line := range strings.Split(stderr.String(), "\n") {
+				line = strings.TrimSpace(line)
+				if line != "" && !strings.HasPrefix(line, "warning:") {
+					summary = line
+					break
+				}
+			}
+			return out.Bytes(), code, fmt.Errorf("%s: exit %d: %s", what, code, summary)
 		}
 		var result struct {
 			Reason string `json:"reason"`
@@ -100,7 +111,7 @@ func runQuotaCLI(args []string, out, errOut io.Writer) int {
 		if len(args) > 2 || len(args) == 2 && args[1] != "--json" {
 			return ExitUsage
 		}
-		data, code, err := quotaRun(ctx, "quota status", 30*time.Second, "--json")
+		data, code, err := quotaRun(ctx, "quota status", 30*time.Second, true, "--json")
 		if err != nil {
 			fmt.Fprintln(errOut, err)
 			return code
@@ -114,7 +125,7 @@ func runQuotaCLI(args []string, out, errOut io.Writer) int {
 			fmt.Fprintln(errOut, "quota status: invalid JSON")
 			return ExitInternal
 		}
-		version, code, err := quotaRun(ctx, "pacelever version", 30*time.Second, "--version")
+		version, code, err := quotaRun(ctx, "pacelever version", 30*time.Second, false, "--version")
 		if err != nil {
 			fmt.Fprintln(errOut, err)
 			return code
@@ -146,7 +157,12 @@ func runQuotaCLI(args []string, out, errOut io.Writer) int {
 			_ = json.NewEncoder(out).Encode(result)
 		} else {
 			for _, v := range readings {
-				fmt.Fprintf(out, "%s %s account=%s source=%s age_seconds=%v stale=%t\n", host, v.Pool, v.Account, v.Source, v.AgeSeconds, v.Stale)
+				age := "unknown"
+				if v.AgeSeconds != nil {
+					age = fmt.Sprint(*v.AgeSeconds)
+				}
+				buckets, _ := json.Marshal(v.Buckets)
+				fmt.Fprintf(out, "%s %s account=%s source=%s age_seconds=%s stale=%t buckets=%s\n", host, v.Pool, v.Account, v.Source, age, v.Stale, buckets)
 			}
 		}
 		return 0
@@ -154,25 +170,28 @@ func runQuotaCLI(args []string, out, errOut io.Writer) int {
 		if len(args) != 2 || !fleetQuotaPoolPattern.MatchString(args[1]) {
 			return ExitUsage
 		}
-		data, code, err := quotaRun(ctx, "quota refresh", 60*time.Second, "refresh", args[1])
+		data, code, err := quotaRun(ctx, "quota refresh", 60*time.Second, false, "refresh", args[1])
 		if err != nil {
 			fmt.Fprintln(errOut, err)
 			return code
 		}
 		var p quotaProvider
-		if json.Unmarshal(data, &p) != nil || p.ID != args[1] {
-			fmt.Fprintln(errOut, "quota refresh: invalid JSON")
-			return ExitInternal
+		if json.Unmarshal(data, &p) == nil && p.ID == args[1] {
+			_ = json.NewEncoder(out).Encode(p.reading())
+		} else {
+			_, _ = out.Write(data)
 		}
-		_ = json.NewEncoder(out).Encode(p.reading())
 		return 0
 	case "observe":
 		if len(args) < 2 {
 			return ExitUsage
 		}
-		_, code, err := quotaRun(ctx, "quota observe", 30*time.Second, args...)
+		data, code, err := quotaRun(ctx, "quota observe", 30*time.Second, false, args...)
 		if err != nil {
 			fmt.Fprintln(errOut, err)
+		}
+		if err == nil {
+			_, _ = out.Write(data)
 		}
 		return code
 	}

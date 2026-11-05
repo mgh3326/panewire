@@ -17,7 +17,6 @@ func runQuotaCommand(ctx context.Context, runner Runner, cmd Command, what strin
 			slog.Debug("pacelever diagnostic", "line", line)
 		}
 	}
-	r.Err = ""
 	if ctx.Err() == context.DeadlineExceeded || r.Code == exitTimeout {
 		return Result{Code: exitTimeout, Out: what + ": timed out after " + timeout.String()}
 	}
@@ -43,4 +42,22 @@ func checkQuota(r Result, what string) error {
 		reason = "dependency failed"
 	}
 	return fail(r.Code, "%s: %s", what, reason)
+}
+
+func checkQuotaPlain(r Result, what string) error {
+	if r.Code == 0 {
+		return nil
+	}
+	if r.Code == exitTimeout {
+		return fail(r.Code, "%s", r.Out)
+	}
+	summary := ""
+	for _, line := range strings.Split(r.Err, "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" && !strings.HasPrefix(line, "warning:") {
+			summary = line
+			break
+		}
+	}
+	return fail(r.Code, "%s: exit %d: %s", what, r.Code, summary)
 }

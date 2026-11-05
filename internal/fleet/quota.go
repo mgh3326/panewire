@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"math"
 	"regexp"
 	"slices"
@@ -163,6 +162,9 @@ func (q CLIQuota) Gate(ctx context.Context, r QuotaRequest) (string, error) {
 	}
 	if e := checkQuota(x, "quota gate"); e != nil {
 		return "", e
+	}
+	if !json.Valid([]byte(x.Out)) {
+		return "", fail(exitConfig, "invalid quota gate JSON")
 	}
 	return x.Out, nil
 }
@@ -364,17 +366,8 @@ func (a *App) measureTarget(ctx context.Context, host, pool string) error {
 	if strings.HasPrefix(target, "-") || strings.ContainsAny(target, "\r\n") {
 		return fail(exitConfig, "invalid SSH target")
 	}
-	timeout := time.Duration(integer(a.Config.Quota, "measure_timeout_s", 60)) * time.Second
-	if timeout <= 0 {
-		timeout = time.Minute
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	r := a.Runner.Run(ctx, Command{Name: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", target, "pacelever refresh " + shellQuote(pool)}})
-	if ctx.Err() != nil {
-		return fail(exitTimeout, "measurement of pool %s on host %s timed out", pool, host)
-	}
-	return check(r, fmt.Sprintf("measurement of pool %s on host %s", pool, host))
+	r := runQuotaCommand(ctx, a.Runner, Command{Name: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", target, "pacelever refresh " + shellQuote(pool)}}, "quota refresh", 60*time.Second)
+	return checkQuotaPlain(r, "quota refresh")
 }
 
 func (a *App) judgeHost(ctx context.Context, r QuotaRequest, pool, host string, local bool, key string, acc SharedAccount) (quotaJudgment, error) {
@@ -492,20 +485,14 @@ func (a *App) judgeGate(ctx context.Context, r QuotaRequest, pool string, j quot
 	return j, err
 }
 
-// Catalog lists the bench catalog rungs. Newer quota CLIs serve a JSON
-// envelope under --json; older ones only print the text table, so the text
-// form is parsed as a fallback. A stale catalog is refused like the launch
-// resolution: grades and models must come from fresh evidence.
+// Catalog lists the bench catalog rungs from the JSON envelope. A stale
+// catalog is refused: grades and models must come from fresh evidence.
 func (q CLIQuota) Catalog(ctx context.Context) ([]CatalogRow, error) {
 	r := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: []string{"bench", "catalog", "list", "--json"}}, "bench catalog", 15*time.Second)
 	if e := checkQuota(r, "bench catalog"); e != nil {
 		return nil, e
 	}
-	out := strings.TrimSpace(r.Out)
-	if strings.HasPrefix(out, "{") {
-		return parseCatalogJSON(out)
-	}
-	return parseCatalogText(out)
+	return parseCatalogJSON(strings.TrimSpace(r.Out))
 }
 func parseCatalogJSON(out string) ([]CatalogRow, error) {
 	var doc struct {
