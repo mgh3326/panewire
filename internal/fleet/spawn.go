@@ -20,8 +20,9 @@ type Spawn struct {
 	// registeredLane is the hub lane row the spawn created for its pane. A
 	// failed spawn that closes the pane removes the row with it.
 	registeredLane                                                                                                                                                                                    *Job
+	requestedLocal                                                                                                                                                                                    bool
 	CWD, Profile, Prompt, Workspace, Label, T, Job, Owner, Effort, Role, Lane, Parent, Task, ParentJob, Host, Report, ExecutionLane, OperatorRequest, RequestedBy, Purpose, LaneDefer, ReportRelative string
-	OverrideReason, WaitTimeout, Urgency                                                                                                                                                              string
+	OverrideReason, Containment, WaitTimeout, Urgency                                                                                                                                                 string
 	Keep, DupOK, Bypass, DryRun, Wait, AllowEscalation                                                                                                                                                bool
 	Inherited, ParentFamily                                                                                                                                                                           string
 	// Tags lists the capability tags a host must carry and ExcludeHosts the
@@ -72,13 +73,29 @@ type Spawn struct {
 	placement *placementDecision
 }
 
+var containmentPattern = regexp.MustCompile(`^hk:[1-9][0-9]{0,8}$`)
+
+func validateContainment(s Spawn) error {
+	if s.Containment != "" && !containmentPattern.MatchString(s.Containment) {
+		return fail(exitUsage, "invalid containment: expected hk:<task id>")
+	}
+	if s.Delegated || s.OverrideReason == "hub-directed" {
+		return nil
+	}
+	pinned := (s.Profile != "" && s.Profile != "auto") || (s.Host != "" && s.Host != "auto" && s.Host != "local" && !s.requestedLocal)
+	if (s.ExcludeHosts != "" && s.Containment == "") || (pinned && s.Containment == "" && strings.TrimSpace(s.OperatorRequest) == "") {
+		return fail(exitUsage, "containment_required: placement pin or exclusion requires authorization")
+	}
+	return nil
+}
+
 func parseSpawn(args []string) (Spawn, error) {
 	s := Spawn{Role: "worker", Host: "auto"}
 	f := flags("spawn")
 	for _, p := range []struct {
 		k string
 		v *string
-	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"lane-defer", &s.LaneDefer}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"override-reason", &s.OverrideReason}, {"wait-timeout", &s.WaitTimeout}, {"urgency", &s.Urgency}, {"builder-family", &s.BuilderFamily}, {"builder-job", &s.BuilderJob}, {"routing-role", &s.RoutingRole}} {
+	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"lane-defer", &s.LaneDefer}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"urgency", &s.Urgency}, {"builder-family", &s.BuilderFamily}, {"builder-job", &s.BuilderJob}, {"routing-role", &s.RoutingRole}} {
 		f.StringVar(p.v, p.k, *p.v, "")
 	}
 	f.StringVar(&s.Grade, "grade", "", "task grade (workers only)")
@@ -91,6 +108,9 @@ func parseSpawn(args []string) (Spawn, error) {
 	f.BoolVar(&s.AllowEscalation, "allow-escalation", false, "")
 	if e := f.Parse(args); e != nil {
 		return s, fail(exitUsage, "%v", e)
+	}
+	if flagPassed(f, "containment") && s.Containment == "" {
+		return s, fail(exitUsage, "invalid containment: expected hk:<task id>")
 	}
 	if f.NArg() != 0 {
 		return s, fail(exitUsage, "unexpected spawn arguments")
@@ -312,6 +332,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	if s.Task != "" && s.ParentJob != "" {
 		return fail(exitUsage, "--task and --parent-job are exclusive")
+	}
+	if err := validateContainment(s); err != nil {
+		return err
 	}
 	resolved, aliasErr := a.resolveHost(s.Host)
 	if aliasErr != nil {
@@ -912,6 +935,9 @@ func (a *App) attachSelection(rec map[string]any, s Spawn) {
 	}
 	if state != nil {
 		rec["state"] = state
+	}
+	if s.Containment != "" {
+		rec["containment"] = s.Containment
 	}
 	if s.OverrideReason != "" {
 		rec["override_reason"] = s.OverrideReason

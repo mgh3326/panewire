@@ -175,7 +175,7 @@ func validHubSpawnArgsForMode(args []string, operator bool) bool {
 	}
 	booleans := map[string]bool{}
 	if operator {
-		for _, flag := range []string{"-c", "-p", "--host", "--exclude-host", "--grade", "--routing-role", "--override-reason", "--operator-request", "--requested-by", "--purpose", "--lane-defer"} {
+		for _, flag := range []string{"-c", "-p", "--host", "--exclude-host", "--grade", "--routing-role", "--override-reason", "--containment", "--operator-request", "--requested-by", "--purpose", "--lane-defer"} {
 			allowed[flag] = true
 		}
 		booleans = map[string]bool{"--keep": true, "--job-dup-ok": true, "--task-hk-bypass": true, "--allow-escalation": true}

@@ -455,6 +455,7 @@ func hubArgs(jobs string, s Spawn) ([]string, error) {
 	add("--grade", s.Grade)
 	add("--routing-role", s.RoutingRole)
 	add("--override-reason", s.OverrideReason)
+	add("--containment", s.Containment)
 	return args, nil
 }
 

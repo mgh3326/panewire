@@ -109,7 +109,7 @@ func cmdFixture(t *testing.T) (*App, Spawn, *fakeRunner, *int) {
 	if e := os.WriteFile(prompt, []byte(strings.Repeat("Please implement and verify the requested change.\n", 200)), 0600); e != nil {
 		t.Fatal(e)
 	}
-	s := Spawn{CWD: cwd, Profile: "cmd-dsflash41", Prompt: prompt, Workspace: "workspace", Label: "worker-a", Job: "job-a", T: "T1", Task: "42", Role: "worker", Host: "local", OverrideReason: "fixture"}
+	s := Spawn{CWD: cwd, Profile: "cmd-dsflash41", Prompt: prompt, Workspace: "workspace", Label: "worker-a", Job: "job-a", T: "T1", Task: "42", Role: "worker", Host: "local", OverrideReason: "fixture", Containment: "hk:12"}
 	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "cmd-dsflash41", ModelID: "provider/example-model", Effort: "high", Grade: "A+", Gate: "default"}}
 	launched, detected := false, false
 	submitted := false
