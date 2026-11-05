@@ -45,8 +45,13 @@ func TestCITiers(t *testing.T) {
 	if !w.Concurrency.Cancel || !strings.Contains(w.Concurrency.Group, "ci-main") {
 		t.Fatal("main concurrency must cancel older runs")
 	}
+	postOnly := map[string]string{
+		"post-test":  `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}`,
+		"postgres":   `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all') }}`,
+		"test-macos": `${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') && github.event_name != 'pull_request' }}`,
+	}
 	for name, job := range w.Jobs {
-		if strings.Contains(job.If, "github.event_name != 'pull_request'") {
+		if condition, ok := postOnly[name]; ok && job.If == condition {
 			continue
 		}
 		runner, _ := yaml.Marshal([]any{job.RunsOn, job.Strategy})
@@ -61,7 +66,7 @@ func TestCITiers(t *testing.T) {
 	}
 	for _, name := range []string{"post-test", "postgres", "test-macos"} {
 		job := w.Jobs[name]
-		if !strings.Contains(job.If, "github.event_name != 'pull_request'") {
+		if job.If != postOnly[name] {
 			t.Errorf("%s is not post-only", name)
 		}
 		runner, _ := yaml.Marshal(job.RunsOn)
@@ -103,7 +108,8 @@ func TestCITiers(t *testing.T) {
 	}
 	var any struct {
 		Jobs map[string]struct {
-			Uses string `yaml:"uses"`
+			Uses string            `yaml:"uses"`
+			Env  map[string]string `yaml:"env"`
 		} `yaml:"jobs"`
 	}
 	if err := yaml.Unmarshal(raw, &any); err != nil {
@@ -111,6 +117,46 @@ func TestCITiers(t *testing.T) {
 	}
 	if any.Jobs["ci"].Uses != "./.github/workflows/ci.yml" {
 		t.Fatal("dispatch must call post suite")
+	}
+	if !strings.Contains(any.Jobs["status"].Env["RESULT"], "needs.ci.outputs.ok == 'true'") {
+		t.Fatal("dispatch status must use the gate output")
+	}
+	raw, err = os.ReadFile(".github/workflows/ci.yml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var trigger struct {
+		On struct {
+			WorkflowCall struct {
+				Outputs map[string]struct {
+					Value string `yaml:"value"`
+				} `yaml:"outputs"`
+			} `yaml:"workflow_call"`
+		} `yaml:"on"`
+	}
+	if err := yaml.Unmarshal(raw, &trigger); err != nil {
+		t.Fatal(err)
+	}
+	if trigger.On.WorkflowCall.Outputs["ok"].Value != "${{ jobs.ci-ok.outputs.ok }}" {
+		t.Fatal("reusable workflow must expose the gate output")
+	}
+	raw, err = os.ReadFile(".mergewake/policy.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var policy struct {
+		RequiredChecks []string `yaml:"required_checks"`
+	}
+	if err := yaml.Unmarshal(raw, &policy); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Contains(policy.RequiredChecks, "test (ubuntu-latest)") {
+		t.Fatal("Linux check must remain required")
+	}
+	for _, check := range policy.RequiredChecks {
+		if strings.Contains(strings.ToLower(check), "macos") {
+			t.Fatal("macOS must remain advisory")
+		}
 	}
 }
 func TestCIGateResults(t *testing.T) {
