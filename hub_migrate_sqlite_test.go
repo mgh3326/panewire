@@ -331,8 +331,11 @@ func testHubMigrateSQLiteCopiesToPostgres(t *testing.T, pendingWAL bool) {
 	if i := slices.IndexFunc(all, func(i laneInboxItem) bool { return i.Event.EventID == "m-decision" }); i < 0 || !all[i].MustAck || all[i].AckedAt == 0 {
 		t.Fatalf("acked decision not copied with its ack: %+v", all)
 	}
+	// The pending escalation batch was made for k1-k3, then k1 was read. An
+	// unsent batch counts only items still unread and unacked (#235), so it
+	// now says 2.
 	pending, err := dst.pendingBatches()
-	if err != nil || len(pending) != 1 || !strings.HasPrefix(pending[0].Text, "3 unread inbox items | lane lane-b") {
+	if err != nil || len(pending) != 1 || !strings.HasPrefix(pending[0].Text, "2 unread inbox items | lane lane-b") {
 		t.Fatalf("pending batches = %+v, %v", pending, err)
 	}
 	_ = dst.close()
