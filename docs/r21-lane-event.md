@@ -48,7 +48,8 @@ standard error.
 The hub persists the event before injection. If no lane route is deliverable,
 the hub uses the node and pane of the sole live job whose agent label matches
 the lane. It logs the fallback with `route=job-record` and uses the normal
-relay and receipt path. Zero or multiple live matches remain unrouted.
+relay and receipt path. Orphaned and terminal jobs do not count as live.
+Zero or multiple live matches remain unrouted.
 
 If no route is available or the queue cannot accept an injection, the hub
 still stores the undelivered record and sends

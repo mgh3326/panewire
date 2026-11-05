@@ -29,6 +29,14 @@ func TestLaneEventJobRecordFallback(t *testing.T) {
 	if _, _, ok := f.hub.resolveRelayRoute("lane.event", event); ok {
 		t.Fatal("ambiguous jobs routed")
 	}
+	f.hub.jobs["other"].Pane = ""
+	if _, _, ok := f.hub.resolveRelayRoute("lane.event", event); ok {
+		t.Fatal("two live jobs routed despite one missing pane")
+	}
+	f.hub.jobs["other"].Orphaned = true
+	if route, _, ok := f.hub.resolveRelayRoute("lane.event", event); !ok || route.Pane != job.Pane {
+		t.Fatal("orphaned job hid the unique live job")
+	}
 	f.hub.jobs["other"].Completed = true
 	job.Completed = true
 	if _, _, ok := f.hub.resolveRelayRoute("lane.event", event); ok {

@@ -26,7 +26,6 @@ type laneRetry struct {
 }
 
 type laneReconciler struct {
-	machine  string
 	retries  map[string]laneRetry
 	list     func(context.Context) (map[string]hubLaneProjection, error)
 	register func(context.Context, HubActiveJob) error
@@ -51,7 +50,7 @@ func (r *laneReconciler) pass(ctx context.Context, jobs []HubActiveJob, now time
 		if job.Role == "builder" {
 			lane = job.OwnerLane
 		}
-		if route, ok := lanes[lane]; ok && route.Machine == r.machine && route.Pane == job.Pane {
+		if _, ok := lanes[lane]; ok {
 			delete(r.retries, job.JobID)
 			continue
 		}
@@ -84,7 +83,7 @@ func (client *HubClient) runLaneReconcile(ctx context.Context) {
 	if client.laneReconcileList != nil {
 		list = client.laneReconcileList
 	}
-	r := laneReconciler{machine: client.machineID, list: list, pending: func(job HubActiveJob) bool {
+	r := laneReconciler{list: list, pending: func(job HubActiveJob) bool {
 		return pendingLaneRegistration(filepath.Join(client.jobsInboxRoot, "jobs", job.JobID, "events"))
 	}, register: func(ctx context.Context, job HubActiveJob) error {
 		if client.laneReconcileRegister != nil {

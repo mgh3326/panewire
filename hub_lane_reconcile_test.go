@@ -58,14 +58,14 @@ func TestLaneReconcileHubAnswerAndPendingReceipt(t *testing.T) {
 	}
 }
 
-func TestLaneReconcileWrongPane(t *testing.T) {
+func TestLaneReconcileLeavesExistingRoute(t *testing.T) {
 	calls := 0
-	r := laneReconciler{machine: "node-a", list: func(context.Context) (map[string]hubLaneProjection, error) {
-		return map[string]hubLaneProjection{"lane": {Machine: "node-a", Pane: "old-pane"}}, nil
-	}, register: func(context.Context, HubActiveJob) error { calls++; return nil }}
-	r.pass(context.Background(), []HubActiveJob{{JobID: "job", AgentLabel: "lane", Pane: "new-pane"}}, time.Now())
-	if calls != 1 {
-		t.Fatalf("registration attempts = %d", calls)
+	r := laneReconciler{list: func(context.Context) (map[string]hubLaneProjection, error) {
+		return map[string]hubLaneProjection{"lane": {Machine: "node-a", Pane: "new-pane"}}, nil
+	}, pending: func(HubActiveJob) bool { return true }, register: func(context.Context, HubActiveJob) error { calls++; return nil }}
+	r.pass(context.Background(), []HubActiveJob{{JobID: "old", AgentLabel: "lane", Pane: "old-pane"}, {JobID: "new", AgentLabel: "lane", Pane: "new-pane"}}, time.Now())
+	if calls != 0 {
+		t.Fatalf("re-registered an existing lane %d times", calls)
 	}
 }
 

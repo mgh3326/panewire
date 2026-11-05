@@ -18,9 +18,10 @@ report file), which is shown in the relay text.
 The older `{"routes":...}` form and the `--report-relay-routes` flag remain
 read-compatible during migration.
 
-Nodes reconcile live jobs with panes every five minutes. A missing hub lane
-or an unresolved `lane_unregistered` receipt gets one registration attempt
-per pass, using the landing registration path. Success records
+Nodes reconcile live jobs with panes every five minutes. A missing hub lane gets one registration attempt per pass using the landing
+registration path. If the hub listing is unavailable, an unresolved
+`lane_unregistered` receipt also triggers an attempt. A listed lane is left
+untouched, including when it points to a different pane. Success records
 `job.lane_registered`; failure records a bounded, redacted reason. After
 three consecutive failures that job waits 30 minutes between attempts.
 A deliberately deferred lane is left to its designated owner.
