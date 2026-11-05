@@ -400,6 +400,7 @@ type nodeCommandReply struct {
 	Op        string          `json:"op"`
 	Result    json.RawMessage `json:"result,omitempty"`
 	Error     string          `json:"error,omitempty"`
+	Detail    string          `json:"detail,omitempty"`
 }
 
 func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientConnection, message hubOutboundMessage) {
@@ -423,6 +424,9 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 		}
 	}
 	reply.Error = code
+	if code == "done_failed" {
+		reply.Detail, _ = result.(string)
+	}
 	_ = peer.write(ctx, reply)
 }
 

@@ -57,8 +57,8 @@ reaches the node. The hub waits up to 30 seconds:
 | Status | Body | Meaning |
 | --- | --- | --- |
 | 200 | `{"request_id","machine","op","result":{...}}` | The node answered. |
-| 400 | `{"error":"invalid_request"}` or node `invalid_args` | Arguments rejected. |
-| 502 | `{"request_id","machine","op","error":"<code>"}` | The node answered with an error code. |
+| 200 | `{"request_id","machine","op","error":"<code>","detail":"..."}` | The node answered with an error; detail is optional. |
+| 400 | `{"error":"invalid_request"}` | Arguments rejected before dispatch. |
 | 503 | `{"error":"node_unavailable","state":"..."}` | Not connected; nothing was sent. |
 | 503 | `{...,"error":"node_lost"}` | The node disconnected while the hub waited. |
 | 504 | `{...,"error":"node_timeout"}` | No answer in time; a late answer is dropped. |
@@ -177,7 +177,7 @@ path is accepted.
 | `not-a-job` | — | The job directory is missing or is a symlink. panewire does not run. |
 | `report-invalid` | — | `report` is not one of the two paths, is missing, or is not a regular file. panewire does not run. |
 
-A failed or timed-out panewire answers `done_failed` and can be re-issued; a node
+A failed or timed-out panewire answers `done_failed` with optional `detail`: the last stderr line, redacted and bounded to 240 UTF-8 bytes. The command can be re-issued; a node
 without a jobs root answers `jobs_root_unset`. The node records the report's
 digest in `<inbox>/jobs/<job>/.node-job-done` after panewire succeeds. The digest
 is the key because a released job id can be claimed again: a new report for that
@@ -338,7 +338,10 @@ Node to hub, exactly one of `result` or `error`:
 ```json
 {"type":"node.command.result","request_id":"cmd-<hex>","op":"pane.close","result":{"outcome":"closed"}}
 {"type":"node.command.result","request_id":"cmd-<hex>","op":"pane.close","error":"close_failed"}
+{"type":"node.command.result","request_id":"cmd-<hex>","op":"job.done","error":"done_failed","detail":"job record unreadable"}
 ```
+
+The HTTP command endpoint returns 200 for node-reported errors, 504 for `node_timeout`, and 503 for `node_lost` or `node_unavailable`. Invalid requests are rejected with 400 before dispatch.
 
 Node error codes are a closed set: `invalid_args`, `herdr_failed`,
 `close_failed`, `capture_failed`, `jobs_root_unset`, `work_root_unset`,
