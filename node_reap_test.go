@@ -14,6 +14,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 const (
@@ -712,5 +713,60 @@ func TestNodeReapCLI(t *testing.T) {
 	stderr.Reset()
 	if code := runNodeCLI(unavailable, &stdout, &stderr, deps); code != ExitDaemonUnavailable || !strings.Contains(stderr.String(), "node_unavailable") {
 		t.Fatalf("unavailable code=%d stderr=%s", code, stderr.String())
+	}
+}
+
+func TestNodeJobDoneFailureDetail(t *testing.T) {
+	client, report := nodeReapJobDir(t, "job-a", "report.md")
+	client.nodeLifecycle = func(context.Context, ...string) ([]byte, error) {
+		return []byte("progress\nerror: job record unreadable token=private-value\n"), errors.New("failed")
+	}
+	raw, _ := json.Marshal(nodeJobDoneArgs{Job: "job-a", Report: report})
+	result, code := client.runNodeCommand(t.Context(), nodeCommandJobDone, raw)
+	detail, _ := result.(string)
+	if code != "done_failed" || !strings.Contains(detail, "job record unreadable") || strings.Contains(detail, "private-value") {
+		t.Fatalf("code=%q detail=%q", code, detail)
+	}
+}
+
+func TestNodeJobDoneFailureDetailEndToEnd(t *testing.T) {
+	hub, server := pw2Hub(t, map[string]string{"svc-reap": nodeReapScopes}, "", &pw2LockedBuffer{})
+	client, report := nodeReapJobDir(t, "job-a", "report.md")
+	runner := func(context.Context, ...string) ([]byte, error) {
+		return []byte("ignored\nerror: job record unreadable token=private-value\n"), errors.New("failure")
+	}
+	nodeReapNode(t, hub, server, "node-a", pw2NodeAToken, client.jobsInboxRoot, &nodeFakeHerdr{}, runner)
+	raw, _ := json.Marshal(map[string]any{"op": "job.done", "args": nodeJobDoneArgs{Job: "job-a", Report: report}})
+	status, body := nodeReapCaller("svc-reap").do(t, server, http.MethodPost, "/v1/nodes/node-a/command", string(raw))
+	var got struct {
+		Error  string `json:"error"`
+		Detail string `json:"detail"`
+	}
+	if err := json.Unmarshal([]byte(body), &got); err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusOK || got.Error != "done_failed" || !strings.Contains(got.Detail, "job record unreadable") || strings.Contains(got.Detail, "private-value") {
+		t.Fatalf("status=%d body=%s", status, body)
+	}
+}
+
+func TestNodeJobDoneFailureDetailBound(t *testing.T) {
+	client, report := nodeReapJobDir(t, "job-a", "report.md")
+	client.nodeLifecycle = func(context.Context, ...string) ([]byte, error) {
+		return []byte("previous line\n" + strings.Repeat("é", 150) + " token=private-value\n"), errors.New("failure")
+	}
+	raw, _ := json.Marshal(nodeJobDoneArgs{Job: "job-a", Report: report})
+	result, code := client.runNodeCommand(t.Context(), nodeCommandJobDone, raw)
+	detail, _ := result.(string)
+	if code != "done_failed" || len(detail) > 240 || !utf8.ValidString(detail) || strings.Contains(detail, "\n") || strings.Contains(detail, "private-value") || strings.Contains(detail, "previous line") {
+		t.Fatalf("code=%q detail=%q bytes=%d", code, detail, len(detail))
+	}
+}
+
+func TestNodeJobDoneLifecycleRunnerReportsError(t *testing.T) {
+	client := &HubClient{jobsInboxRoot: t.TempDir()}
+	output, err := client.nodeLifecycleRunner()(t.Context(), "done", "missing-job", "--report", "/missing/report.md")
+	if err == nil || !strings.Contains(string(output), err.Error()) {
+		t.Fatalf("output=%q error=%v", output, err)
 	}
 }

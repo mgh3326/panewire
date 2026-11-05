@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // The hub half of node commands (docs/node-commands.md). The hub keeps a
@@ -24,6 +26,7 @@ type hubNodeCommandResult struct {
 	Op        string
 	Result    json.RawMessage
 	Error     string
+	Detail    string
 }
 
 type hubNodeCommandPending struct {
@@ -67,7 +70,7 @@ func newHubNodeCommandID() string {
 // A result is re-encoded through its op's documented shape.
 func parseHubNodeCommandResult(raw []byte) (hubNodeCommandResult, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(raw, &fields) != nil || len(fields) != 4 {
+	if json.Unmarshal(raw, &fields) != nil || (len(fields) != 4 && len(fields) != 5) {
 		return hubNodeCommandResult{}, false
 	}
 	var kind string
@@ -81,7 +84,17 @@ func parseHubNodeCommandResult(raw []byte) (hubNodeCommandResult, bool) {
 		if json.Unmarshal(rawError, &result.Error) != nil || !validNodeCommandError(result.Error) {
 			return hubNodeCommandResult{}, false
 		}
+		if detail, found := fields["detail"]; found {
+			if len(fields) != 5 || result.Error != "done_failed" || json.Unmarshal(detail, &result.Detail) != nil || len(result.Detail) > 240 || !utf8.ValidString(result.Detail) || strings.ContainsAny(result.Detail, "\r\n") {
+				return hubNodeCommandResult{}, false
+			}
+		} else if len(fields) != 4 {
+			return hubNodeCommandResult{}, false
+		}
 		return result, true
+	}
+	if len(fields) != 4 {
+		return hubNodeCommandResult{}, false
 	}
 	canonical, valid := canonicalNodeCommandResult(result.Op, fields["result"])
 	if !valid {
@@ -245,7 +258,8 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 		Op        string          `json:"op"`
 		Result    json.RawMessage `json:"result,omitempty"`
 		Error     string          `json:"error,omitempty"`
-	}{RequestID: requestID, Machine: machine, Op: body.Op, Result: result.Result, Error: result.Error}
+		Detail    string          `json:"detail,omitempty"`
+	}{RequestID: requestID, Machine: machine, Op: body.Op, Result: result.Result, Error: result.Error, Detail: result.Detail}
 	status := http.StatusOK
 	switch result.Error {
 	case "":
@@ -253,10 +267,6 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 		status = http.StatusGatewayTimeout
 	case "node_lost":
 		status = http.StatusServiceUnavailable
-	case "invalid_args":
-		status = http.StatusBadRequest
-	default:
-		status = http.StatusBadGateway
 	}
 	writeJSON(writer, status, response)
 }
