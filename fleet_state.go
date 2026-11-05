@@ -103,13 +103,14 @@ type FleetStateLoad struct {
 	// Accepting is the node's effective acceptance as placement computes it
 	// (connected, operator/override acceptance, no memory pressure); Usable
 	// is placement's own verdict for this host (placementUsable).
-	Accepting  bool   `json:"accepting"`
-	Usable     bool   `json:"usable"`
-	Connected  bool   `json:"connected"`
-	SlotFull   bool   `json:"slot_full"`
-	ActiveJobs int    `json:"active_jobs"`
-	Reason     string `json:"reason"`
-	Source     string `json:"source"`
+	Accepting  bool              `json:"accepting"`
+	Usable     bool              `json:"usable"`
+	Connected  bool              `json:"connected"`
+	SlotFull   bool              `json:"slot_full"`
+	ActiveJobs int               `json:"active_jobs"`
+	Reason     string            `json:"reason"`
+	Source     string            `json:"source"`
+	Signals    *PlacementSignals `json:"signals,omitempty"`
 }
 
 // FleetStateSpawn is what an old node still publishes. It is decoded so the
@@ -466,6 +467,7 @@ func (h *HubServer) publishFleetLoad(ctx context.Context, now time.Time) {
 			ActiveJobs: candidate.ActiveJobs,
 			Reason:     reason,
 			Source:     source,
+			Signals:    candidate.Signals,
 		}
 		h.stateStore().publish(FleetStateMessage{Host: candidate.Machine, Kind: fleetStateKindLoad, MeasuredAt: now, ReceivedAt: now, Load: &load}, fleetStateLoadRepublish)
 	}

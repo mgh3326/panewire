@@ -628,9 +628,7 @@ func assistantAccessProtectedResourcePath(p string) bool {
 func (s *assistantServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if assistantAccessProtectedResourcePath(r.URL.Path) {
 		s.logAudit(r.Context(), "-", r.Method+" "+r.URL.Path, "-", "-", "not_found")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"not_found"}`))
+		writeJSONBytes(w, http.StatusNotFound, []byte(`{"error":"not_found"}`))
 		return
 	}
 	principal, reason, ok := s.authenticate(r)
@@ -643,33 +641,25 @@ func (s *assistantServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			result = reason
 		}
 		s.logAudit(r.Context(), "-", r.Method+" "+r.URL.Path, "-", "-", result)
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		_, _ = w.Write([]byte(`{"error":"unauthorized"}`))
+		writeJSONBytes(w, http.StatusUnauthorized, []byte(`{"error":"unauthorized"}`))
 		return
 	}
 	identity := principal.Label
 	if r.URL.Path != "/mcp" {
 		s.logAudit(r.Context(), identity, r.Method+" "+r.URL.Path, "-", "-", "not_found")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte(`{"error":"not_found"}`))
+		writeJSONBytes(w, http.StatusNotFound, []byte(`{"error":"not_found"}`))
 		return
 	}
 	if r.Method == http.MethodGet || r.Method == http.MethodDelete {
 		// Streamable HTTP GET/DELETE manage optional server streams and
 		// sessions; this stateless server has neither (spec-legal 405).
 		s.logAudit(r.Context(), identity, r.Method+" /mcp", "-", "-", "method_not_allowed")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_, _ = w.Write([]byte(`{"error":"method_not_allowed"}`))
+		writeJSONBytes(w, http.StatusMethodNotAllowed, []byte(`{"error":"method_not_allowed"}`))
 		return
 	}
 	if r.Method != http.MethodPost {
 		s.logAudit(r.Context(), identity, r.Method+" /mcp", "-", "-", "method_not_allowed")
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusMethodNotAllowed)
-		_, _ = w.Write([]byte(`{"error":"method_not_allowed"}`))
+		writeJSONBytes(w, http.StatusMethodNotAllowed, []byte(`{"error":"method_not_allowed"}`))
 		return
 	}
 	s.serveMCP(w, r, identity)

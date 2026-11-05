@@ -28,6 +28,9 @@ func (a *App) fleetEventWriter() *fleetevent.Writer {
 func (a *App) spawnEvents(s Spawn, err error) {
 	if err != nil {
 		a.refusalEvent("spawn", s.Job, err)
+		if !s.DryRun && s.Sel != nil && str(s.Sel, "outcome_code") != outcomeAdmitted {
+			a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "placement", Job: s.Job, RequestID: a.RequestID, Outcome: "refused", Reason: str(s.Sel, "outcome_code"), Selection: selectionTerms(s.Sel)})
+		}
 		return
 	}
 	if s.Host == "local" {
@@ -166,7 +169,29 @@ func (a *App) placementEvent(s Spawn, rec map[string]any, err error) {
 	if len(refused) > 0 {
 		detail += " refused=" + strings.Join(refused, ",")
 	}
-	a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "placement", Job: s.Job, RequestID: a.RequestID, Outcome: "placed", Reason: reason, Detail: detail, Chosen: chosen, Candidates: terms})
+	a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "placement", Job: s.Job, RequestID: a.RequestID, Outcome: "placed", Reason: reason, Detail: detail, Chosen: chosen, Candidates: terms, Selection: selectionTerms(s.Sel)})
+}
+
+// selectionTerms projects the ordered host/rung trace without account keys,
+// free-text gate reasons or other selection metadata.
+func selectionTerms(sel map[string]any) []fleetevent.HostSelection {
+	var out []fleetevent.HostSelection
+	hosts, _ := sel["hosts"].([]any)
+	for _, raw := range hosts {
+		h, _ := raw.(map[string]any)
+		rank, _ := h["rank"].(int)
+		if rank == 0 {
+			continue
+		}
+		x := fleetevent.HostSelection{Host: str(h, "host"), Rank: rank, Outcome: str(h, "admission_outcome")}
+		tries, _ := h["tried"].([]any)
+		for _, rawTry := range tries {
+			r, _ := rawTry.(map[string]any)
+			x.Tried = append(x.Tried, fleetevent.RungAttempt{Profile: str(r, "profile"), Effort: str(r, "effort"), Pool: str(r, "pool"), Outcome: str(r, "outcome")})
+		}
+		out = append(out, x)
+	}
+	return out
 }
 
 // placementTerms projects the plan's candidates for the placement event: each
@@ -179,9 +204,24 @@ func placementTerms(p *placePlan, chosen, ranking string) ([]fleetevent.Candidat
 	reason := ranking
 	out := make([]fleetevent.Candidate, 0, len(p.candidates))
 	for _, c := range p.candidates {
-		row := fleetevent.Candidate{Host: c.name, Score: c.score, Outcome: c.outcome}
+		row := fleetevent.Candidate{Host: c.name, Source: c.source, Score: c.score, Outcome: c.outcome}
+		if c.score != nil && c.signals.Terms == nil && row.Source != "hub-only" {
+			row.Source = "signals-unavailable"
+		}
 		if t := c.signals.Terms; t != nil {
-			row.CPU, row.Mem, row.IO, row.Load, row.Jobs = &t.CPU, &t.Mem, &t.IO, &t.Load, &t.Jobs
+			row.Jobs = &t.Jobs
+			if c.source != "hub-only" || c.signals.CPUBusyShort != nil || c.signals.CPUBusy5m != nil {
+				row.CPU = &t.CPU
+			}
+			if c.source != "hub-only" || c.signals.MemAvailable != nil {
+				row.Mem = &t.Mem
+			}
+			if c.source != "hub-only" || c.signals.SwapInMBPS != nil {
+				row.IO = &t.IO
+			}
+			if c.source != "hub-only" || c.signals.Load1PerCore != nil {
+				row.Load = &t.Load
+			}
 		}
 		row.Power, row.Bridge = c.signals.Power, c.signals.BridgedJobs
 		if row.Outcome == "" {

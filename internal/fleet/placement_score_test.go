@@ -130,3 +130,62 @@ func TestRankHostsPrefersTheHubDecidedHost(t *testing.T) {
 		t.Fatalf("without a decision the score leads: %+v", got)
 	}
 }
+
+func TestPlacementEventPreservesHubScoreSignals(t *testing.T) {
+	for _, source := range []string{"prometheus", "hub-only"} {
+		t.Run(source, func(t *testing.T) {
+			raw := `{"source":"` + source + `","decision":"host-a","candidates":[{"machine":"host-a","connected":true,"score":12,"signals":{"terms":{"cpu":0.2,"mem":0.3,"io":0.4,"load":0.5,"jobs":0.6},"power":70,"bridged_jobs":0,"mem_available":0.3}}]}`
+			views, err := parseHubHosts(raw)
+			if err != nil || len(views) != 1 {
+				t.Fatalf("views=%+v err=%v", views, err)
+			}
+			a := placementApp(t, &fakePlacementSource{hosts: views})
+			a.Config.Local = map[string]any{"spawn": false}
+			a.Config.Hosts = map[string]map[string]any{"host-a": {}}
+			a.Config.HostOrder = []string{"host-a"}
+			plan, err := a.plan(context.Background(), Spawn{Profile: "claude"}, "", 0)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var event fleetevent.Event
+			a.EventSink = func(e fleetevent.Event) { event = e }
+			a.placementEvent(Spawn{Job: "job-a", placement: &placementDecision{plan: plan}}, map[string]any{"chose": "host-a", "ranking": "score"}, nil)
+			for _, c := range event.Candidates {
+				if c.Host != "host-a" {
+					continue
+				}
+				if c.Source != source || c.Score == nil || *c.Score != 12 || c.Power == nil || *c.Power != 70 || c.Bridge == nil || *c.Bridge != 0 {
+					t.Fatalf("candidate: %+v", c)
+				}
+				if source == "prometheus" && (c.CPU == nil || *c.CPU != .2 || c.Mem == nil || *c.Mem != .3 || c.IO == nil || *c.IO != .4 || c.Load == nil || *c.Load != .5 || c.Jobs == nil || *c.Jobs != .6) {
+					t.Fatalf("missing score terms: %+v", c)
+				}
+				if source == "hub-only" && (c.CPU != nil || c.Mem == nil || *c.Mem != .3 || c.IO != nil || c.Load != nil) {
+					t.Fatalf("unknown terms present: %+v", c)
+				}
+				return
+			}
+			t.Fatalf("host-a missing: %+v", event.Candidates)
+		})
+	}
+}
+
+func TestFleetSourceRequestsScoreSignals(t *testing.T) {
+	a := testApp(t)
+	a.Config.Hub = map[string]any{"hub_url": "https://hub.invalid", "operator_token_env": "fixture"}
+	a.Runner = &fakeRunner{Do: func(c Command) Result {
+		if c.Name != "panewire" {
+			return Result{}
+		}
+		for _, arg := range c.Args {
+			if arg == "--signals" {
+				return Result{Out: `{"source":"prometheus","candidates":[{"machine":"host-a","score":12,"signals":{"terms":{"cpu":0.2,"mem":0.3,"io":0.4,"load":0.5,"jobs":0.6},"power":70,"bridged_jobs":0}}]}`}
+			}
+		}
+		return Result{Out: `{"source":"prometheus","candidates":[{"machine":"host-a","score":12}]}`}
+	}}
+	hosts, err := (fleetSource{a}).Hosts(context.Background(), "repo")
+	if err != nil || len(hosts) != 1 || hosts[0].Signals.Terms == nil || hosts[0].Signals.Terms.CPU != .2 {
+		t.Fatalf("direct placement lost score terms: hosts=%+v err=%v", hosts, err)
+	}
+}

@@ -220,9 +220,7 @@ func TestCLIQuotaPoolsReadsCreditBalance(t *testing.T) {
 	}
 }
 
-// Host-first placement tries the hosts that hold a final-window credit first,
-// so the credit is placed even when its host ranks below another host's
-// subscription account; outside the window host rank decides as before.
+// Final-window credit affects rung order inside a host, never host rank.
 func TestCreditFinalWindowHostFirst(t *testing.T) {
 	const creditKey = "anthropic-api:00000000000000d4"
 	for _, tc := range []struct {
@@ -231,7 +229,7 @@ func TestCreditFinalWindowHostFirst(t *testing.T) {
 		wantHost, wantSeat string
 		outcomes           map[string]string
 	}{
-		{"final window", 72 * time.Hour, "cloud-small", "omp-opus", map[string]string{"cloud-small": "chosen", "mac-b": "not_tried"}},
+		{"final window", 72 * time.Hour, "mac-b", "sonnet", map[string]string{"mac-b": "chosen", "cloud-small": "not_tried"}},
 		{"outside the window", 240 * time.Hour, "mac-b", "sonnet", map[string]string{"mac-b": "chosen", "cloud-small": "not_tried"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

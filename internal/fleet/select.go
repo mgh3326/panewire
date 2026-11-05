@@ -647,9 +647,10 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 
 // selectProfile runs automatic model selection when -m is omitted or "auto":
 // the bench catalog's live rungs are filtered to the task's grade, admission
-// gate, role and effort constraints, ordered by the versioned pool-order
-// policy, then admitted in order through presence evidence and the existing
-// quota gate. The first admitted rung wins. Every row's outcome is recorded.
+// gate, role and effort constraints. Eligible hosts are ranked first, then
+// their own accounts and rungs are ordered by the versioned pool policy and
+// admitted through the existing quota gate. The first admitted pair wins.
+// Every row's outcome is recorded. See docs/placement.md.
 //
 // The tier order is the policy order for every urgency (pool-order.json;
 // panewire owns it, decision/2026-11-04/pool-order-owner): expiring credit,
@@ -1086,7 +1087,7 @@ func (p *selPlan) record() map[string]any {
 		"outcome_code":      p.outcome,
 		"mode":              "auto",
 		"decision":          fmt.Sprintf("urgency=%s source=%s tiers=%s", p.req.urgency, p.req.urgencySource, strings.Join(p.order, ">")),
-		"rule":              fmt.Sprintf("credit pools with a balance in their last %g days before expiry first (credit_expiring), then waste-risk pools (longest window projected >= %g%% unused at reset%s; ranked by waste urgency; sub-daily windows refuse only when exhausted), then tier, then lowest grade >= %s, then waste urgency (unused share per hour to the longest window's reset; a paceable reset ranks ahead of an unpaceable one, which keeps the lower projected-at-reset order; sub-daily windows never rank), then smaller effort; waste < %g%%, excluded >= %g%% projected", *p.policy.CreditFinalDays, *p.policy.WasteRisk.MinUnusedPct, horizonClause(*p.policy.WasteRisk.HorizonHours), p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
+		"rule":              fmt.Sprintf("hosts first; within each host, credit pools with a balance in their last %g days before expiry first (credit_expiring), then waste-risk pools (longest window projected >= %g%% unused at reset%s; ranked by waste urgency; sub-daily windows refuse only when exhausted), then tier, then lowest grade >= %s, then waste urgency (unused share per hour to the longest window's reset; a paceable reset ranks ahead of an unpaceable one, which keeps the lower projected-at-reset order; sub-daily windows never rank), then smaller effort; waste < %g%%, excluded >= %g%% projected", *p.policy.CreditFinalDays, *p.policy.WasteRisk.MinUnusedPct, horizonClause(*p.policy.WasteRisk.HorizonHours), p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
 		"waste_risk":        map[string]any{"horizon_hours": *p.policy.WasteRisk.HorizonHours, "min_unused_pct": *p.policy.WasteRisk.MinUnusedPct},
 		"credit_final_days": *p.policy.CreditFinalDays,
 		"policy_version":    p.policy.Version,
@@ -1130,10 +1131,15 @@ func (p *selPlan) record() map[string]any {
 	}
 	if p.hosts != nil {
 		hosts := []any{}
+		order := []string{}
 		for _, t := range p.hosts {
 			hosts = append(hosts, t.record())
+			if t.rank > 0 {
+				order = append(order, t.host.name)
+			}
 		}
 		rec["hosts"] = hosts
+		rec["host_order"] = order
 		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score or load; on each host its present accounts in pool order; first admitted pair wins"
 	}
 	if p.req.route != nil {

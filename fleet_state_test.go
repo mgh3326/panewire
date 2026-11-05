@@ -203,6 +203,12 @@ func TestFleetStateLoadMirrorsPlacement(t *testing.T) {
 		if !ok {
 			t.Fatalf("no load value for %s", candidate.Machine)
 		}
+		raw, _ := json.Marshal(message.Load)
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(raw, &fields)
+		if len(fields["signals"]) == 0 {
+			t.Fatalf("%s: computed signals missing from fleet state: %s", candidate.Machine, raw)
+		}
 		if message.Load.Score != candidate.Score || message.Load.Connected != candidate.Connected || message.Load.Reason != candidate.Reason {
 			t.Fatalf("%s load %+v differs from placement %+v", candidate.Machine, message.Load, candidate)
 		}
@@ -406,5 +412,35 @@ func TestFleetStateQuotaKeysAreBounded(t *testing.T) {
 	}
 	if _, kept := store.latest[fleetStateKey{"node-a", fleetStateKindQuota, fmt.Sprintf("claude:%016x", 0)}]; kept {
 		t.Fatal("the oldest quota key was kept")
+	}
+}
+
+func TestFleetStateLoadCarriesPrometheusScoreTerms(t *testing.T) {
+	prom := placementPromServer(t, .23, 1, nil)
+	t.Cleanup(prom.Close)
+	hub := placementHub(t, prom.URL)
+	t.Cleanup(func() { _ = hub.Close() })
+	hub.connect("mac-work", "test", "fixture", &hubAgent{}, true)
+	hub.connect("desktop", "test", "fixture", &hubAgent{}, true)
+	now := time.Now().UTC()
+	metrics, err := hub.fetchPlacementMetrics(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.mu.Lock()
+	hub.reloadPlacementPolicyLocked()
+	policy := hub.placementPolicy
+	hub.mu.Unlock()
+	candidates := hub.placementCandidates(policy, metrics, "prometheus", now)
+	hub.publishFleetLoad(t.Context(), now)
+	for _, candidate := range candidates {
+		message, ok := fsLatest(hub, candidate.Machine, fleetStateKindLoad, "")
+		if !ok || message.Load.Signals == nil || message.Load.Signals.Terms == nil {
+			t.Fatalf("%s missing computed signals: %+v", candidate.Machine, message.Load)
+		}
+		got, want := message.Load.Signals, candidate.Signals
+		if *got.Terms != *want.Terms || got.Power != want.Power || got.BridgedJobs != want.BridgedJobs {
+			t.Fatalf("%s: published %+v, computed %+v", candidate.Machine, got, want)
+		}
 	}
 }

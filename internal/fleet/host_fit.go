@@ -163,7 +163,7 @@ func (t hostTrace) record() map[string]any {
 	if caps == nil {
 		caps = []string{}
 	}
-	row := map[string]any{"host": h.name, "caps": caps, "caps_match": len(t.missing) == 0, "awake": h.awake, "over_threshold": h.over, "outcome": t.outcome}
+	row := map[string]any{"host": h.name, "caps": caps, "caps_match": len(t.missing) == 0, "awake": h.awake, "over_threshold": h.over, "outcome": t.outcome, "admission_outcome": t.admissionOutcome()}
 	if h.local {
 		row["local"] = true
 	}
@@ -189,7 +189,7 @@ func (t hostTrace) record() map[string]any {
 	tried := []any{}
 	for _, x := range t.tries {
 		c := x.cand
-		r := map[string]any{"account_key": c.accountKey, "profile": firstNonempty(c.seatName, c.row.Profile), "effort": c.row.Effort, "pool": c.row.Pool, "tier": c.tierName, "result": x.result}
+		r := map[string]any{"account_key": c.accountKey, "profile": firstNonempty(c.seatName, c.row.Profile), "effort": c.row.Effort, "pool": c.row.Pool, "tier": c.tierName, "result": x.result, "outcome": admissionOutcome(x.code)}
 		if x.reason != "" {
 			r["reason"] = x.reason
 		}
@@ -200,6 +200,35 @@ func (t hostTrace) record() map[string]any {
 	}
 	row["tried"] = tried
 	return row
+}
+
+func admissionOutcome(code string) string {
+	switch code {
+	case outcomeAdmitted, outcomeQuotaExhausted, outcomeQuotaUnknown:
+		return strings.ToLower(code)
+	default:
+		return "no_rung"
+	}
+}
+
+func (t hostTrace) admissionOutcome() string {
+	if t.outcome == "not_tried" {
+		return "not_tried"
+	}
+	outcome := "no_rung"
+	for _, x := range t.tries {
+		switch x.code {
+		case outcomeAdmitted:
+			return "admitted"
+		case outcomeQuotaUnknown:
+			outcome = "quota_unknown"
+		case outcomeQuotaExhausted:
+			if outcome == "no_rung" {
+				outcome = "quota_exhausted"
+			}
+		}
+	}
+	return outcome
 }
 
 // capsGap names the required tags no usable host declares, for a refusal.
@@ -232,31 +261,17 @@ func capsGap(hosts []selHost, required []string) string {
 // work are ranked (rankHosts), and on each ranked host the ranked (account,
 // rung) candidates present there are judged in pool order through the
 // unchanged quota gate. The first admitted pair wins. A refusal about the
-// account itself (quota exhausted or unknown) holds on every host, so that
-// candidate is not judged again; a host-level failure only skips the host for
-// that candidate, and an unreachable host is skipped for the rest. A host
+// account itself holds on every host. Exhaustion is cached by account, while
+// other refusals remain scoped to the rung. A host-level failure skips that
+// host for the candidate, and an unreachable host is skipped for the rest. A host
 // whose present candidates are all refused is skipped, not fatal.
 //
-// A credit balance in its final window before expiry is lost unless it is
-// used, so the hosts that hold such a candidate are tried first, keeping
-// host rank among them and among the rest.
+// Quota policy, including expiring credit, orders rungs only inside a host.
+// See docs/placement.md for the selection order and trace fields.
 func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, pending []*selCand) {
 	ranked := rankHosts(sp.hosts)
-	holdsFinal := func(h selHost) bool {
-		return slices.ContainsFunc(pending, func(c *selCand) bool {
-			return c.credit != nil && slices.ContainsFunc(c.hosts, func(x selHost) bool { return x.name == h.name })
-		})
-	}
-	slices.SortStableFunc(ranked, func(x, y selHost) int {
-		if fx, fy := holdsFinal(x), holdsFinal(y); fx != fy {
-			if fx {
-				return -1
-			}
-			return 1
-		}
-		return 0
-	})
 	refusedOn := map[*selCand]string{}
+	exhausted := map[string]hostTry{}
 	for i, h := range ranked {
 		t := hostTrace{host: h, rank: i + 1, missing: missingCaps(h.cfg, p.req.tags), drops: sp.dropsOn(h.name)}
 		if p.chosen != nil {
@@ -269,8 +284,25 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 			down = "host_unavailable:" + why
 		}
 		unreachable := down
+		// Classification may have refused an account before admission. Keep
+		// those rungs in the host trace even though they never reach the gate.
+		for _, c := range p.cands {
+			if c.reason != "" && slices.ContainsFunc(c.hosts, func(x selHost) bool { return x.name == h.name }) && !slices.Contains(pending, c) {
+				t.tries = append(t.tries, hostTry{cand: c, result: "refused", reason: c.reason, code: c.code})
+			}
+		}
+		var present []*selCand
 		for _, c := range pending {
-			if !slices.ContainsFunc(c.hosts, func(x selHost) bool { return x.name == h.name }) {
+			if slices.ContainsFunc(c.hosts, func(x selHost) bool { return x.name == h.name }) {
+				present = append(present, c)
+			}
+		}
+		orderSelCands(present)
+		for _, c := range present {
+			if refusal, ok := exhausted[c.accountKey]; ok {
+				c.reason, c.code, c.outcome = refusal.reason, refusal.code, "dropped:quota_exhausted"
+				refusal.cand = c
+				t.tries = append(t.tries, refusal)
 				continue
 			}
 			if on, refused := refusedOn[c]; refused {
@@ -302,6 +334,9 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 				c.outcome = "dropped:" + c.reason
 			}
 			t.tries = append(t.tries, hostTry{cand: c, result: "refused", reason: c.reason, code: c.code})
+			if c.code == outcomeQuotaExhausted && c.reason != "projected_exhaust" {
+				exhausted[c.accountKey] = hostTry{result: "skipped", reason: "refused_on:" + h.name + ":" + c.reason, code: c.code}
+			}
 			switch {
 			case !hostGateFailure(err):
 				refusedOn[c] = h.name

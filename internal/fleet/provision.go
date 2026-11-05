@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/durable"
 )
 
 // Seed only the selected workspace's trust, using the CLI's existing format.
@@ -169,25 +171,5 @@ func atomicFile(path string, b []byte, mode os.FileMode) error {
 	if e := os.MkdirAll(filepath.Dir(path), 0700); e != nil {
 		return e
 	}
-	f, e := os.CreateTemp(filepath.Dir(path), ".panewire-*")
-	if e != nil {
-		return e
-	}
-	defer os.Remove(f.Name())
-	if e = f.Chmod(mode); e != nil {
-		f.Close()
-		return e
-	}
-	if _, e = f.Write(b); e != nil {
-		f.Close()
-		return e
-	}
-	if e = f.Sync(); e != nil {
-		f.Close()
-		return e
-	}
-	if e = f.Close(); e != nil {
-		return e
-	}
-	return os.Rename(f.Name(), path)
+	return durable.ReplaceFileAtomically(path, ".panewire-*", b, mode)
 }
