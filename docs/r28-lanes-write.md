@@ -43,6 +43,13 @@ underscore, upgrade the nodes and CLIs that read lane projections: older
 versions reject these names and can fail lane listing and self-check or omit
 the lane from fleet census.
 
+Before rolling the hub back to a version without this rule, remove any lane
+whose name starts with `_` and its references. The older relay loader drops
+such lanes or children naming them as parent, so reports cannot route to them
+and the loss guard refuses lane writes with `500 lanes_invalid`. Names such
+as `auto_trader-design`, which start with a letter or digit, are retained by
+the older relay loader.
+
 ### Register or replace a lane
 
 ```http
