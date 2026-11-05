@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -93,9 +95,11 @@ type nodeQuotaRefreshArgs struct {
 // Results stay close to worktree.inspect: the inspected worktree rides along
 // whenever there is one worth reporting.
 type nodeWorktreePrepareResult struct {
-	Outcome     string        `json:"outcome"`
-	Worktree    *nodeWorktree `json:"worktree"`
-	RetryAfterS int           `json:"retry_after_s,omitempty"`
+	Outcome       string        `json:"outcome"`
+	Worktree      *nodeWorktree `json:"worktree"`
+	RetryAfterS   int           `json:"retry_after_s,omitempty"`
+	FastForwarded bool          `json:"fast_forwarded,omitempty"`
+	Reason        string        `json:"reason,omitempty"`
 }
 
 type nodeWorktreeRemoveResult struct {
@@ -651,13 +655,14 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 
 	dir := filepath.Join(workRoot, args.Dir)
 	outcome := ""
+	result := nodeWorktreePrepareResult{}
 	switch args.Mode {
 	case "branch":
-		outcome = client.nodePrepareBranch(ctx, git, clone, dir, args)
+		outcome = client.nodePrepareBranch(ctx, git, clone, dir, args, &result)
 	case "detached":
 		outcome = client.nodePrepareDetached(ctx, git, clone, dir, args)
 	}
-	result := nodeWorktreePrepareResult{Outcome: outcome}
+	result.Outcome = outcome
 	if outcome == nodePreparePrepared || outcome == nodePrepareReused {
 		result.Worktree = nodeWorktreeInspect(ctx, git, dir).Worktree
 		if result.Worktree == nil || result.Worktree.Head == "" {
@@ -669,10 +674,7 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	return result, ""
 }
 
-// nodePrepareBranch is runtug#18's branch behaviour on the node: fetch, then
-// reuse only a worktree already on the branch, and refuse a local branch
-// that points at another commit instead of silently tracking it.
-func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommandRunner, clone, dir string, args nodeWorktreePrepareArgs) string {
+func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommandRunner, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
 	if _, err := git(ctx, "-C", clone, "fetch", "--prune", "origin"); err != nil {
 		return nodeOutcomeGitFailed
 	}
@@ -726,7 +728,25 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 			return nodeOutcomeGitFailed
 		}
 		if !strings.EqualFold(head, expected) {
-			return nodePrepareBranchElsewhere
+			relation, err := nodeCommitRelation(ctx, git, clone, head, expected)
+			if err != nil {
+				return nodeOutcomeGitFailed
+			}
+			if relation != "behind" {
+				result.Reason = nodeBranchRelationReason(head, expected, relation)
+				return nodePrepareBranchElsewhere
+			}
+			collision, err := nodeIgnoredCheckoutCollision(ctx, git, dir, head, expected)
+			if err != nil {
+				return nodeOutcomeGitFailed
+			}
+			if collision {
+				return nodeOutcomeDirty
+			}
+			if _, err := git(ctx, "-C", dir, "merge", "--ff-only", "--no-overwrite-ignore", expected); err != nil {
+				return nodeOutcomeGitFailed
+			}
+			result.FastForwarded = true
 		}
 		return nodePrepareReused
 	}
@@ -735,8 +755,20 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		if err != nil {
 			return nodeOutcomeGitFailed
 		}
-		if expected != "" && !strings.EqualFold(strings.TrimSpace(string(out)), expected) {
-			return nodePrepareBranchElsewhere
+		local := strings.TrimSpace(string(out))
+		if !strings.EqualFold(local, expected) {
+			relation, err := nodeCommitRelation(ctx, git, clone, local, expected)
+			if err != nil {
+				return nodeOutcomeGitFailed
+			}
+			if relation != "behind" {
+				result.Reason = nodeBranchRelationReason(local, expected, relation)
+				return nodePrepareBranchElsewhere
+			}
+			if _, err := git(ctx, "-C", clone, "update-ref", "refs/heads/"+args.Branch, expected, local); err != nil {
+				return nodeOutcomeGitFailed
+			}
+			result.FastForwarded = true
 		}
 		if _, err := git(ctx, "-C", clone, "worktree", "add", dir, args.Branch); err != nil {
 			return nodeOutcomeGitFailed
@@ -753,6 +785,61 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		return nodeOutcomeGitFailed
 	}
 	return nodePreparePrepared
+}
+
+func nodeIgnoredCheckoutCollision(ctx context.Context, git relayCommandRunner, dir, head, expected string) (bool, error) {
+	changed, err := git(ctx, "-C", dir, "diff", "--name-only", "-z", head, expected, "--")
+	if err != nil {
+		return false, err
+	}
+	ignored, err := git(ctx, "-C", dir, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+	if err != nil {
+		return false, err
+	}
+	for _, path := range strings.Split(string(changed), "\x00") {
+		if path == "" {
+			continue
+		}
+		for _, local := range strings.Split(string(ignored), "\x00") {
+			if local != "" && (path == local || strings.HasPrefix(path, local+"/") || strings.HasPrefix(local, path+"/")) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func nodeCommitRelation(ctx context.Context, git relayCommandRunner, clone, local, expected string) (string, error) {
+	ancestor := func(a, b string) (bool, error) {
+		_, err := git(ctx, "-C", clone, "merge-base", "--is-ancestor", a, b)
+		if err == nil {
+			return true, nil
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, err
+	}
+	behind, err := ancestor(local, expected)
+	if err != nil {
+		return "", err
+	}
+	if behind {
+		return "behind", nil
+	}
+	ahead, err := ancestor(expected, local)
+	if err != nil {
+		return "", err
+	}
+	if ahead {
+		return "ahead", nil
+	}
+	return "diverged", nil
+}
+
+func nodeBranchRelationReason(local, expected, relation string) string {
+	return fmt.Sprintf("local=%s expected=%s relation=%s", utf8PrefixWithin(local, 7), utf8PrefixWithin(expected, 7), relation)
 }
 
 // nodePrepareDetached fetches the caller's closed ref, requires the commit
