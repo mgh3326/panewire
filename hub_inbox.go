@@ -256,6 +256,17 @@ func (h *HubServer) replayInbox(record handoffkeepRelayEvent) bool {
 	if record.DeliveredAt != "" {
 		return true
 	}
+	// A stale row is retired before it can be migrated: the inbox evidence
+	// that would suppress it is pruned after the same replay window, so a row
+	// whose handoffkeep mark once failed would otherwise come back as a new
+	// item on every restart (hk 2976). Chat rows keep the chat store as their
+	// only authority.
+	if h.handoffkeep != nil && !strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) && chatRelayEventPattern.FindStringSubmatch(record.EventID) == nil {
+		if reason := h.relayReplayRetireReason(record); reason != "" {
+			h.retireRelayReplay(record, reason)
+			return true
+		}
+	}
 	if h.inbox == nil {
 		return false
 	}

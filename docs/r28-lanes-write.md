@@ -120,7 +120,9 @@ name, not a control-plane authority lane).
 Each removal logs `lane released` with a reason and broadcasts `lanes.changed`
 with `op: remove`. A relay event with no route logs one `relay unrouted` WARN
 per lane per minute, with the lane, the event id and the number of warnings
-suppressed since the last one.
+suppressed since the last one. The hub tracks at most 256 lanes for this; past
+that it forgets the lane that warned longest ago, so a new lane always gets its
+first WARN.
 
 ### Remove a lane
 
