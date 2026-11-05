@@ -24,7 +24,9 @@ on:
         value: ${{ jobs.ci-ok.outputs.ok }}
 
 concurrency:
-  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-dispatch-{0}', github.run_id) || github.event_name == 'push' && 'ci-main' || format('ci-{0}', github.run_id) }}
+  # A new push to a pull request cancels that PR's older run; main and
+  # dispatch runs keep their own groups.
+  group: ${{ github.event_name == 'workflow_dispatch' && format('ci-dispatch-{0}', github.run_id) || github.event_name == 'push' && 'ci-main' || github.event_name == 'pull_request' && format('ci-pr-{0}', github.event.pull_request.number) || format('ci-{0}', github.run_id) }}
   cancel-in-progress: true
 
 permissions:
@@ -69,7 +71,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-    runs-on: ${{ vars.PANEWIRE_POST_LINUX_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PANEWIRE_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -103,7 +105,7 @@ jobs:
     name: test (macos-latest, advisory)
     # Post-merge and dispatch runs include this advisory job; ci-ok does not wait for it.
     if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') && github.event_name != 'pull_request' }}
-    runs-on: ${{ vars.PANEWIRE_POST_MAC_RUNNER || 'macos-latest' }}
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PANEWIRE_POST_MAC_RUNNER) || 'macos-latest' }}
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -139,7 +141,7 @@ jobs:
     # contract runs. Trust auth keeps a password out of this public file; the
     # service is published on 55432, not the default port.
     if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all') }}
-    runs-on: ${{ vars.PANEWIRE_POST_LINUX_RUNNER || 'ubuntu-latest' }}
+    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PANEWIRE_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
     services:
       postgres:
         image: postgres:17

@@ -2,6 +2,9 @@ version: 1
 enabled: true
 required_checks:
   - 'test (ubuntu-latest)'
+# The required check runs on pull requests only; main is watched through
+# the ci-ok aggregate, which runs on both.
+watch_checks: ['ci-ok']
 blocking:
   - paths: ['session_reap.go', 'hub_session_reap.go', 'job.go', 'job_close.go', '*prune*.go']
     reason: Session reaping can destroy live session state before a revert.
