@@ -463,6 +463,38 @@ func TestAPIWithoutUsableWindowFallsBackToCLI(t *testing.T) {
 	}
 }
 
+// Anything after the JSON object makes the body untrustworthy, so it is a
+// parse failure and the CLI gets its one attempt.
+func TestAPITrailingDataFallsBackToCLI(t *testing.T) {
+	for name, body := range map[string]string{
+		"garbage":    `{"five_hour":{"utilization":12}} garbage`,
+		"second doc": `{"five_hour":{"utilization":12}}{"x":1}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(t, doFunc(func(*http.Request) (*http.Response, error) { return respond(200, body, nil), nil }))
+			calls := 0
+			cfg.RunCLI = func(context.Context, string, string, string) (string, error) {
+				calls++
+				return fixture(t, "claude_usage.txt"), nil
+			}
+			o, err := Measure(t.Context(), cfg)
+			if err != nil || calls != 1 || o.Source != quota.SourceCLI {
+				t.Fatalf("calls=%d %+v err=%v", calls, o, err)
+			}
+		})
+	}
+	cfg := testConfig(t, doFunc(func(*http.Request) (*http.Response, error) {
+		return respond(200, "{\"five_hour\":{\"utilization\":12}}\n", nil), nil
+	}))
+	cfg.RunCLI = func(context.Context, string, string, string) (string, error) {
+		t.Error("CLI ran after a clean body with a trailing newline")
+		return "", errors.New("unexpected")
+	}
+	if o, err := Measure(t.Context(), cfg); err != nil || o.Source != quota.SourceUsageAPI {
+		t.Fatalf("trailing newline %+v err=%v", o, err)
+	}
+}
+
 func TestCLINotRunAfterAPISuccess(t *testing.T) {
 	cfg := testConfig(t, doFunc(func(*http.Request) (*http.Response, error) {
 		return respond(200, `{"five_hour":{"utilization":1}}`, nil), nil

@@ -140,7 +140,8 @@ func (c Config) fetchAPI(ctx context.Context, token string) (quota.Observation, 
 		return quota.Observation{}, statusError(response.StatusCode, response.Header, c.now())
 	}
 	var raw map[string]json.RawMessage
-	if json.NewDecoder(io.LimitReader(response.Body, apiBodyLimit)).Decode(&raw) != nil {
+	body := json.NewDecoder(io.LimitReader(response.Body, apiBodyLimit))
+	if body.Decode(&raw) != nil || body.Decode(&struct{}{}) != io.EOF {
 		return quota.Observation{}, quota.Fail(quota.ErrKindParse, "invalid usage JSON")
 	}
 	observed := quota.Observation{Source: quota.SourceUsageAPI, Buckets: parseAPI(raw)}
