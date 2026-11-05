@@ -40,6 +40,7 @@ name one lane.
 | `wake@<machine>` or `@*` | `POST /v1/nodes/wake` for that machine |
 | `inbox.read:<lane>` | `GET /v1/inbox`, `/v1/inbox/count`, `/v1/inbox/wait` and `POST /v1/inbox/{id}/read` with `?lane=<lane>` |
 | `inbox.ack:<lane>` | `POST /v1/inbox/ack` with `?lane=<lane>` |
+| `inbox.ack_state` | `GET /v1/inbox/ack-state?event_id=…` (see [Ack state](#ack-state)); no lane, no resource |
 | `state.read` | `GET /v1/state` ([fleet-state.md](fleet-state.md)) |
 
 Every other route keeps the authentication it had: operator-only, node-only
@@ -74,6 +75,36 @@ HUB_SCOPES_svc-panewire=spawn@*
 Operator authorization is unchanged. A service without a matching spawn grant
 gets `403 {"error":"scope_forbidden"}`; a grant for another machine does not
 authorize this request.
+
+## Ack state
+
+A sender that needs to know whether its event was acked should not read a
+lane's inbox. `GET /v1/inbox/ack-state?event_id=ID[&event_id=ID...]` answers,
+for each id, only whether the event's inbox row was acked and when — never a
+lane, kind, body or sender:
+
+```json
+{"events":[{"event_id":"ev-1","acked":true,"acked_at":"2026-11-04T03:00:00Z"},
+           {"event_id":"ev-2","acked":false}],
+ "not_found":["ev-3"]}
+```
+
+`acked_at` is RFC 3339 UTC and present only when `acked` is true. Answers keep
+the request's order; a repeated id is answered once; one request names 1 to 100
+ids. When one event id reached several lanes, `acked` is true once every row is
+acked, and `acked_at` is the latest ack.
+
+| Caller | Sees | Otherwise |
+| --- | --- | --- |
+| operator | every row | `404` with `not_found` listing the ids when none has a row |
+| service with `inbox.ack_state` | every row | the same `404`; without the scope `403 {"error":"scope_forbidden"}` |
+| node | rows its own node relayed (the hub records the sender when it stores the row) | `401` when none of the ids is one of its rows |
+
+A node cannot tell another node's event from an unknown one: both are `401`
+when no id is visible, and both are listed in `not_found` when some are. A row
+stored before the hub recorded senders has none, so only the operator and a
+service see it. The CLI is `panewire inbox status --event-id ID [--event-id ID...] [--json]`;
+it prints the answer and exits `7` when any id has no visible row.
 
 ## Reload
 

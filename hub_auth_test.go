@@ -107,6 +107,7 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 		"svc-wild":      "nodes.agents.read,node.command:agents.list@*,spawn@*,wake@*",
 		"svc-readonly":  "inbox.read:lane-a",
 		"svc-mergewake": pw2MergewakeScopes,
+		"svc-ackstate":  "inbox.ack_state",
 	}
 	hub, server := pw2Hub(t, scopes, "", nil)
 	hub.mu.Lock()
@@ -129,6 +130,7 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 		{"inbox-wait", "GET", "/v1/inbox/wait?lane=lane-a&timeout=1ms", ""},
 		{"inbox-read", "POST", "/v1/inbox/1/read?lane=lane-a", ""},
 		{"inbox-ack", "POST", "/v1/inbox/ack?lane=lane-a", `{"id":1}`},
+		{"inbox-ack-state", "GET", "/v1/inbox/ack-state?event_id=ev-1", ""},
 	}
 	callers := []pw2Caller{
 		{"operator", "", pw2OperatorToken},
@@ -143,17 +145,18 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 
 	// G granted, D 401, F 403 — in routes order.
 	want := map[string]string{
-		"operator":           "GGGGGGGGGGGG",
-		"node-a":             "DDDDDDDGGGGG",
-		"node-b":             "DDDDDDDDDDDD",
-		"anonymous":          "DDDDDDDDDDDD",
-		"svc-ok":             "GGGGGGGGGGGG",
-		"svc-none":           "FFFFFFFFFFFF",
-		"svc-other":          "FFFFFFFFFFFF",
-		"svc-wild":           "GGGGGGGFFFFF",
-		"svc-readonly":       "FFFFFFFGGGGF",
-		"svc-mergewake":      "GGGGFFFFFFFF",
-		"svc-ok-wrong-token": "DDDDDDDDDDDD",
+		"operator":           "GGGGGGGGGGGGG",
+		"node-a":             "DDDDDDDGGGGGG",
+		"node-b":             "DDDDDDDDDDDDG",
+		"anonymous":          "DDDDDDDDDDDDD",
+		"svc-ok":             "GGGGGGGGGGGGF",
+		"svc-none":           "FFFFFFFFFFFFF",
+		"svc-other":          "FFFFFFFFFFFFF",
+		"svc-wild":           "GGGGGGGFFFFFF",
+		"svc-readonly":       "FFFFFFFGGGGFF",
+		"svc-mergewake":      "GGGGFFFFFFFFF",
+		"svc-ok-wrong-token": "DDDDDDDDDDDDD",
+		"svc-ackstate":       "FFFFFFFFFFFFG",
 	}
 	for _, caller := range callers {
 		for index, route := range routes {

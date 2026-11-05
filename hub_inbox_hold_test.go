@@ -120,7 +120,7 @@ func TestHoldNeverHeldKinds(t *testing.T) {
 			h, a, _, _, _ := holdHub(t, "", true)
 			e := quietEvent("critical", "act now")
 			e.DeliveryClass = "interrupt"
-			if _, handled := h.receiveInbox(kind, &e, a, false); handled {
+			if _, handled := h.receiveInbox(kind, &e, a, "", false); handled {
 				t.Fatal("critical job event held")
 			}
 			items, err := h.inbox.store.list("", false)
