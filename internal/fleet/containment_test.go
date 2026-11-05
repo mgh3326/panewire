@@ -15,12 +15,13 @@ func TestSpawnContainment(t *testing.T) {
 	}{
 		{"pin missing", []string{"-m", "codex-x", "--override-reason", "r"}, "containment_required"},
 		{"pin forged hub reason", []string{"-m", "codex-x", "--override-reason", "hub-directed"}, "containment_required"},
-		{"exclude forged hub reason", []string{"--exclude-host", "h1", "--override-reason", "hub-directed"}, "containment_required"},
+		{"exclude with forged hub reason", []string{"--exclude-host", "h1", "--override-reason", "hub-directed"}, ""},
 		{"pin containment", []string{"-m", "codex-x", "--override-reason", "r", "--containment", "hk:12"}, ""},
 		{"pin operator", []string{"-m", "codex-x", "--override-reason", "r", "--operator-request", "op-1"}, ""},
-		{"exclude missing", []string{"--exclude-host", "h1"}, "containment_required"},
+		// A standing exclusion is policy, not containment (operator 2026-11-05).
+		{"exclude alone", []string{"--exclude-host", "h1"}, ""},
 		{"exclude containment", []string{"--exclude-host", "h1", "--containment", "hk:12"}, ""},
-		{"exclude operator insufficient", []string{"--exclude-host", "h1", "--operator-request", "op-1"}, "containment_required"},
+		{"mergewake reviewer shape", []string{"-m", "auto", "--host", "auto", "--exclude-host", "oci"}, ""},
 		{"auto", []string{"-m", "auto", "--host", "auto"}, ""},
 		{"local", []string{"-m", "auto", "--host", "local"}, ""},
 		{"bad letters", []string{"--containment", "hk:abc"}, "usage"},
@@ -63,7 +64,7 @@ func TestSpawnContainment(t *testing.T) {
 }
 
 func TestSpawnContainmentBeforeAdmission(t *testing.T) {
-	for _, args := range [][]string{{"-m", "codex-x", "--override-reason", "r"}, {"--exclude-host", "h1"}} {
+	for _, args := range [][]string{{"-m", "codex-x", "--override-reason", "r"}, {"--host", "h1", "--override-reason", "r"}} {
 		a, base, _, _ := cmdFixture(t)
 		s, err := parseSpawn(args)
 		if err != nil {

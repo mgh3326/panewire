@@ -83,8 +83,11 @@ func validateContainment(s Spawn) error {
 		return nil
 	}
 	pinned := (s.Profile != "" && s.Profile != "auto") || (s.Host != "" && s.Host != "auto" && s.Host != "local" && !s.requestedLocal)
-	if (s.ExcludeHosts != "" && s.Containment == "") || (pinned && s.Containment == "" && strings.TrimSpace(s.OperatorRequest) == "") {
-		return fail(exitUsage, "containment_required: placement pin or exclusion requires authorization")
+	// --exclude-host is not gated: standing exclusions (mergewake keeps
+	// reviewers off its own host on every spawn) are policy, not containment
+	// (operator re-decision 2026-11-05, hk 2963).
+	if pinned && s.Containment == "" && strings.TrimSpace(s.OperatorRequest) == "" {
+		return fail(exitUsage, "containment_required: placement pin requires authorization")
 	}
 	return nil
 }

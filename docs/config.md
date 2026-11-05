@@ -230,8 +230,9 @@ neither tags nor limits are checked there; that override needs
 
 Explicit `-m PROFILE` (except `auto`) or `--host NAME` (except `auto` or
 `local`) requires `--containment hk:ID` or `--operator-request REF`.
-`--exclude-host` requires `--containment hk:ID`, even with an operator
-request. The containment ID must match `hk:` followed by a nonzero decimal
+`--exclude-host` is not gated: a standing exclusion (mergewake keeps
+reviewers off its own host on every spawn) is policy, not a containment.
+`--containment` may still be passed with it and is recorded. The containment ID must match `hk:` followed by a nonzero decimal
 task ID of at most nine digits. It is recorded in `job.placement` and does
 not replace the existing `--override-reason` requirement.
 
