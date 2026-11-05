@@ -85,12 +85,12 @@ func TestLoadPolicyRejectsBadAliasAndRoute(t *testing.T) {
 }
 
 func TestCLIQuotaGateUsesGateAlias(t *testing.T) {
-	f := &fakeRunner{}
+	f := &fakeRunner{Do: func(Command) Result { return Result{Out: `{}`} }}
 	q := CLIQuota{f, "quota"}
 	if _, e := q.Gate(context.Background(), QuotaRequest{Profile: "agy-sonnet46", GateProfile: "agy-flash", Role: "worker"}); e != nil {
 		t.Fatal(e)
 	}
-	if got := strings.Join(f.Calls[0].Args, " "); got != "gate -m agy-flash --role worker" {
+	if got := strings.Join(f.Calls[0].Args, " "); got != "gate -m agy-flash --role worker --json" {
 		t.Fatalf("gate must be called by its alias and without --effort: %s", got)
 	}
 	f.Calls = nil

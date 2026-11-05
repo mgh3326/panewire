@@ -44,12 +44,12 @@ func TestCLIQuotaAccountReceipt(t *testing.T) {
 }
 
 func TestCLIQuotaLocalGateUnchanged(t *testing.T) {
-	f := &fakeRunner{Do: func(Command) Result { return Result{Out: "pool=claude\n"} }}
+	f := &fakeRunner{Do: func(Command) Result { return Result{Out: `{"pool":"claude"}`} }}
 	q := CLIQuota{Runner: f, Binary: "pacelever"}
 	if _, err := q.Gate(context.Background(), QuotaRequest{Profile: "sonnet", Role: "worker"}); err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{"gate", "-m", "sonnet", "--role", "worker"}; !reflect.DeepEqual(f.Calls[0].Args, want) {
+	if want := []string{"gate", "-m", "sonnet", "--role", "worker", "--json"}; !reflect.DeepEqual(f.Calls[0].Args, want) {
 		t.Fatalf("local gate args changed: %v", f.Calls[0].Args)
 	}
 }

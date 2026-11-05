@@ -3,6 +3,7 @@ package fleet
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -36,6 +37,7 @@ func (r ExecRunner) Run(ctx context.Context, c Command) Result {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
+	cmd.WaitDelay = 100 * time.Millisecond
 	cmd.Stdin = strings.NewReader(c.Input)
 	cmd.Dir = c.Dir
 	cmd.Env = append(os.Environ(), c.Env...)
@@ -43,7 +45,7 @@ func (r ExecRunner) Run(ctx context.Context, c Command) Result {
 	cmd.Stdout = &out
 	cmd.Stderr = &err
 	code := 0
-	if e := cmd.Run(); e != nil {
+	if e := cmd.Run(); e != nil && !(errors.Is(e, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success()) {
 		code = 1
 		if x, ok := e.(*exec.ExitError); ok {
 			code = x.ExitCode()

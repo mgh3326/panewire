@@ -12,8 +12,13 @@ func TestUnratedCatalogParsers(t *testing.T) {
 		`{"catalog":[{"profile":"codex-sol","effort":"high","model_id":"sol-m","pool":"codex","grade":"unrated","gate":"default"}]}`,
 		"unrated codex-sol@high model=sol-m pool=codex gate=default\ncatalog=server\n",
 	} {
-		q := CLIQuota{Runner: &fakeRunner{Do: func(Command) Result { return Result{Out: input} }}, Binary: "pacelever"}
-		rows, err := q.Catalog(context.Background())
+		var rows []CatalogRow
+		var err error
+		if strings.HasPrefix(input, "{") {
+			rows, err = parseCatalogJSON(input)
+		} else {
+			rows, err = parseCatalogText(input)
+		}
 		if err != nil || len(rows) != 1 || rows[0].Grade != "unrated" {
 			t.Fatalf("unrated catalog: rows=%+v err=%v", rows, err)
 		}

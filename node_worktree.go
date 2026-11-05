@@ -1054,6 +1054,8 @@ func (client *HubClient) nodePaneInUse(ctx context.Context, path string) (bool, 
 // nodeQuotaRefresh is a closed call: exactly `pacelever refresh <pool>`,
 // no other argv reachable from the wire.
 func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRefreshArgs) (any, string) {
+	ctx, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
+	defer cancel()
 	if _, err := client.nodePaceleverRunner()(ctx, "refresh", args.Pool); err != nil {
 		return nil, "refresh_failed"
 	}

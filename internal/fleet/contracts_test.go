@@ -291,7 +291,7 @@ func TestR05MergewakePolicyActingAndNoLegacyPins(t *testing.T) {
 	}
 }
 func TestR06R13QuotaPoolAndManualFallbackStayInQuotaTool(t *testing.T) {
-	f := &fakeRunner{Do: func(Command) Result { return Result{Out: "pool=operator-manual-provider source=manual\n"} }}
+	f := &fakeRunner{Do: func(Command) Result { return Result{Out: `{"pool":"operator-manual-provider","source":"manual"}`} }}
 	q := CLIQuota{f, "quota"}
 	out, e := q.Gate(context.Background(), QuotaRequest{Profile: "external-profile", Effort: "high", Role: "worker"})
 	if e != nil || !strings.Contains(out, "operator-manual-provider") {

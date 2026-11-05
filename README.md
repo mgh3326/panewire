@@ -80,6 +80,8 @@ Prompt files begin with recipient metadata such as `expect: name=orch-mock cwd=/
 
 The CLI never falls back to herdr directly. If the daemon socket is absent it exits 4. `PANEWIRE_SOCKET` is available for tests and non-default local installations.
 
+Quota readings, refreshes, and observations use `panewire quota`; see [the quota command contract](docs/quota.md).
+
 ## Status
 
 R2: prompt target safety, verified submission/uptake, privacy-preserving delivery audit, schema guard, events, inbox watcher, and wait. Live prompt smoke remains prohibited in the fixture test job; use an operator-approved scratch pane separately.
