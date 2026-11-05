@@ -232,8 +232,30 @@ func defaultRepoDir(workRoot, key string) (string, bool) {
 		return "", false
 	}
 	path := filepath.Join(workRoot, key)
-	info, err := os.Lstat(path)
-	if err != nil || !info.IsDir() {
+	if info, err := os.Lstat(path); err == nil && info.IsDir() {
+		return path, true
+	}
+	// Keys are lower case; a checkout may keep its remote's spelling
+	// (ParkingArcade). Resolve only when exactly one directory matches.
+	entries, err := os.ReadDir(workRoot)
+	if err != nil {
+		return "", false
+	}
+	match := ""
+	for _, entry := range entries {
+		if fleet.RepoKey(entry.Name()) != key {
+			continue
+		}
+		if match != "" {
+			return "", false
+		}
+		match = entry.Name()
+	}
+	if match == "" {
+		return "", false
+	}
+	path = filepath.Join(workRoot, match)
+	if info, err := os.Lstat(path); err != nil || !info.IsDir() {
 		return "", false
 	}
 	return path, true
@@ -313,8 +335,9 @@ func (client *HubClient) collectReadiness(ctx context.Context) *fleet.Readiness 
 			}
 		}
 		for _, name := range list(config.WorkRoot) {
-			if _, ok := defaultRepoDir(config.WorkRoot, name); ok {
-				out.Repos = append(out.Repos, name)
+			key := fleet.RepoKey(name)
+			if _, ok := defaultRepoDir(config.WorkRoot, key); ok {
+				out.Repos = append(out.Repos, key)
 			}
 		}
 	}

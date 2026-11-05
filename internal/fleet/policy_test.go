@@ -137,8 +137,8 @@ func TestBriefPolicyHostAndProfileOverrides(t *testing.T) {
 	}
 	t.Setenv("PANEWIRE_BRIEF_POLICY", path)
 	for _, tt := range []struct{ profile, want string }{{"x", "host"}, {"p", "profile"}} {
-		got, e := a.prepareBrief(Spawn{Profile: tt.profile}, "BODY")
-		if e != nil || !strings.Contains(got, tt.want+"\n\nBODY") {
+		got, e := a.prepareBrief(Spawn{Profile: tt.profile}, Seat{}, Launch{}, "BODY")
+		if e != nil || !strings.Contains(got, tt.want+"\nLaunch identity: family=unknown launch_profile=unknown (use these for the Mergewake-Author-Family and Mergewake-Author-Profile trailers)\n\nBODY") {
 			t.Fatalf("%q %v", got, e)
 		}
 	}

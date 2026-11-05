@@ -1659,5 +1659,6 @@ func (a *App) prepareBriefForHost(s Spawn, host, body string) (string, error) {
 		copy.Config.Local[k] = v
 	}
 	copy.Config.Local["machine_id"] = host
-	return copy.prepareBrief(s, body)
+	seat := a.Policy.Profiles[s.Profile]
+	return copy.prepareBrief(s, seat, Launch{Effort: firstNonempty(s.Effort, seat.Effort)}, body)
 }

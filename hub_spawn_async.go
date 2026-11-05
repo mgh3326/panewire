@@ -115,22 +115,12 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	task, _, err := h.inbox.store.claimSpawn(r.Context(), request, spawn.Job, owner, h.now().UTC())
+	held := map[string]string{"error": "job_already_claimed", "fix": "inspect the existing operation; do not submit a new request while ownership is live"}
 	if errors.Is(err, errSpawnClaimed) && spawn.ParentJob == "" {
-		priorID, priorJob, priorStatus, readErr := h.inbox.store.spawnRoleOwner(r.Context(), spawn.Task, spawn.Role)
-		if readErr == nil && (priorStatus == "succeeded" || priorStatus == "failed") {
-			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-			record, exists, readErr := app.ExistingJob(ctx, priorJob)
-			cancel()
-			state, _ := record["state"].(string)
-			if readErr == nil && exists && (state == "completed" || state == "lost") {
-				if releaseErr := h.inbox.store.releaseCompletedSpawnRole(r.Context(), priorID, spawn.Task, spawn.Role); releaseErr == nil {
-					task, _, err = h.inbox.store.claimSpawn(r.Context(), request, spawn.Job, owner, h.now().UTC())
-				}
-			}
-		}
+		task, held, err = h.reclaimSpawnRole(r.Context(), app, request, spawn, owner)
 	}
 	if errors.Is(err, errSpawnClaimed) {
-		writeJSON(w, 409, map[string]string{"error": "job_already_claimed", "fix": "inspect the existing operation; do not submit a new request while ownership is live"})
+		writeJSON(w, 409, held)
 		return
 	}
 	if err != nil {
@@ -498,6 +488,7 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 			outcome.Profile = result.Receipt.Profile
 			outcome.Model = result.Receipt.Model
 			outcome.Role = result.Receipt.Role
+			outcome.LaneUnregistered = result.Receipt.LaneUnregistered
 		}
 		if outcome.RC != 0 && outcome.Reason == "" {
 			outcome.Reason = "spawn_failed"
@@ -642,7 +633,7 @@ func (h *HubServer) flushSpawnNotifications(ctx context.Context) {
 // spawnNotificationType keeps a failed spawn out of the owner's digest: the
 // submitter only saw ACCEPTED, so nothing else tells it the work did not start.
 func spawnNotificationType(result hubSpawnOutcome) string {
-	if result.RC != 0 {
+	if result.RC != 0 || result.LaneUnregistered {
 		return "automation-failed"
 	}
 	return "report"
@@ -650,7 +641,11 @@ func spawnNotificationType(result hubSpawnOutcome) string {
 
 func spawnNotificationText(job, request string, result hubSpawnOutcome) string {
 	if result.RC == 0 {
-		return fmt.Sprintf("[panewire] SPAWNED %s host=%s profile=%s pane=%s model=%s", job, result.Host, result.Profile, result.Pane, result.Model)
+		text := fmt.Sprintf("[panewire] SPAWNED %s host=%s profile=%s pane=%s model=%s", job, result.Host, result.Profile, result.Pane, result.Model)
+		if result.LaneUnregistered {
+			text += " LANE_UNREGISTERED: hub lane registration failed after one retry; this pane's findings are not routed"
+		}
+		return text
 	}
 	fix := result.Fix
 	if fix == "" {

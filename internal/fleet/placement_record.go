@@ -299,7 +299,7 @@ func (a *App) placementRepo(ctx context.Context, cwd string) string {
 	bounded, cancel := context.WithTimeout(ctx, placementDeliveryBudget)
 	defer cancel()
 	if repo := a.localRepo(bounded, cwd); repo != nil {
-		return repo.name
+		return RepoKey(repo.name)
 	}
 	return ""
 }

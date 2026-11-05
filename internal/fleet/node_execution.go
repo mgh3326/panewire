@@ -97,6 +97,9 @@ type ExecutionReceipt struct {
 	CWD     string `json:"cwd"`
 	Label   string `json:"label"`
 	Kind    string `json:"kind"`
+	// LaneUnregistered is true when the pane exists but hub lane registration
+	// failed after its retry (receipt field lane_unregistered).
+	LaneUnregistered bool `json:"lane_unregistered,omitempty"`
 }
 
 // ExistingJob exposes only the durable job read needed before hub acceptance.
