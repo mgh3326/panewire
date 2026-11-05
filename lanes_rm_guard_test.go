@@ -20,6 +20,8 @@ func TestLanesRmAcceptsTheReapGuard(t *testing.T) {
 	for _, args := range [][]string{
 		{"rm", "job-a", "--expect-epoch", "3"},
 		{"rm", "job-a", "--lane", "job-b"},
+		{"rm", "job-a", "--expect-machine=", "--expect-pane", "wF:p13X"},
+		{"rm", "job-a", "--expect-machine", "mac-dev", "--expect-pane="},
 		{"add", "job-a", "--machine", "m", "--pane", "p", "--expect-pane", "p"},
 	} {
 		if _, err := parseLanesCLI(args); err == nil {

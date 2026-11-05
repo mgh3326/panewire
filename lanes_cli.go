@@ -353,6 +353,11 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 		if len(positionals) != 1 {
 			return lanesCLIOptions{}, errors.New("lane is required")
 		}
+		// An empty guard value would send no guard and delete the lane
+		// unconditionally; refuse it instead.
+		if (options.seen["--expect-machine"] && options.ExpectedMachine == "") || (options.seen["--expect-pane"] && options.ExpectedPane == "") {
+			return lanesCLIOptions{}, errors.New("empty expected route flag")
+		}
 		options.Lane = positionals[0]
 	case "ls":
 		if len(positionals) != 0 || options.seen["--machine"] || options.seen["--pane"] || options.seen["--parent"] || options.seen["--sink"] {
