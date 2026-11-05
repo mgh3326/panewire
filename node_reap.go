@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"github.com/mgh3326/panewire/internal/fleet"
 	"log/slog"
 	"os"
@@ -307,7 +308,8 @@ func (client *HubClient) nodeJobDone(ctx context.Context, args nodeJobDoneArgs) 
 	}
 	output, err := client.nodeLifecycleRunner()(ctx, "done", args.Job, "--report", args.Report)
 	if err != nil {
-		return nil, "done_failed"
+		lines := strings.Split(strings.TrimRight(string(output), "\r\n"), "\n")
+		return utf8PrefixWithin(fleet.SanitizeFailureDetail(lines[len(lines)-1]), 240), "done_failed"
 	}
 	line := nodeJobDoneLine(output)
 	result := JobDoneResult{Outcome: nodeJobDoneOK, Line: line}
@@ -390,7 +392,11 @@ func (client *HubClient) nodeLifecycleRunner() relayCommandRunner {
 	return func(ctx context.Context, args ...string) ([]byte, error) {
 		var output, errors bytes.Buffer
 		err := fleet.ExecuteLifecycle(ctx, client.jobsInboxRoot, args, &output, &errors)
-		return output.Bytes(), err
+		if err != nil {
+			fmt.Fprintln(&errors, "panewire:", err)
+			return errors.Bytes(), err
+		}
+		return output.Bytes(), nil
 	}
 
 }
