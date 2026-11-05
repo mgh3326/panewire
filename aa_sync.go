@@ -188,7 +188,7 @@ func runAASync(args []string, out, errOut io.Writer) int {
 			dry = true
 		case "--out":
 			i++
-			if i >= len(args) || args[i] == "" {
+			if i >= len(args) || args[i] == "" || strings.HasPrefix(args[i], "-") {
 				return ExitUsage
 			}
 			path = args[i]

@@ -232,3 +232,12 @@ func TestAASyncAmbiguity(t *testing.T) {
 		t.Fatal("ambiguous model was annotated")
 	}
 }
+
+func TestAASyncOutRejectsFlag(t *testing.T) {
+	t.Setenv(aaKeyName, "fixture-key")
+	t.Setenv("PATH", t.TempDir())
+	var out, errs bytes.Buffer
+	if code := runQuotaCLI([]string{"aa-sync", "--out", "--dry-run"}, &out, &errs); code != ExitUsage {
+		t.Fatalf("--out --dry-run: got exit %d, want usage exit %d", code, ExitUsage)
+	}
+}
