@@ -132,10 +132,11 @@ func (q CLIQuota) Gate(ctx context.Context, r QuotaRequest) (string, error) {
 	if r.GateProfile != "" {
 		name = r.GateProfile
 	}
-	args := quotaArgs([]string{"gate", "-m", name, "--json"}, r)
+	args := quotaArgs([]string{"gate", "-m", name}, r)
 	if r.AccountKey != "" {
 		args = append(args, "--account-key", r.AccountKey)
 	}
+	args = append(args, "--json")
 	x := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: args}, "quota gate", 30*time.Second)
 	if x.Code == quotaGateRoleDenied {
 		err := checkQuota(x, "quota role-denied (gate exit 5 → panewire exit 77)")
@@ -366,7 +367,11 @@ func (a *App) measureTarget(ctx context.Context, host, pool string) error {
 	if strings.HasPrefix(target, "-") || strings.ContainsAny(target, "\r\n") {
 		return fail(exitConfig, "invalid SSH target")
 	}
-	r := runQuotaCommand(ctx, a.Runner, Command{Name: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", target, "pacelever refresh " + shellQuote(pool)}}, "quota refresh", 60*time.Second)
+	timeout := time.Duration(integer(a.Config.Quota, "measure_timeout_s", 60)) * time.Second
+	if timeout <= 0 || timeout > time.Minute {
+		timeout = time.Minute
+	}
+	r := runQuotaCommand(ctx, a.Runner, Command{Name: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", target, "pacelever refresh " + shellQuote(pool)}}, "quota refresh", timeout)
 	return checkQuotaPlain(r, "quota refresh")
 }
 

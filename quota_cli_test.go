@@ -5,6 +5,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -68,5 +69,32 @@ func TestQuotaObserveArguments(t *testing.T) {
 	var out, errout bytes.Buffer
 	if code := runQuotaCLI([]string{"observe", "devin-free-limit", "--foo", "bar"}, &out, &errout); code != 0 || out.String() != "observe\ndevin-free-limit\n--foo\nbar\n" {
 		t.Fatalf("%d %q %s", code, out.String(), errout.String())
+	}
+}
+
+func TestQuotaTimeoutInheritedPipe(t *testing.T) {
+	pidfile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("QUOTA_TEST_PIDFILE", pidfile)
+	quotaFake(t, `sleep 30 & echo $! > "$QUOTA_TEST_PIDFILE"; wait`)
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidfile)
+		if err != nil {
+			t.Errorf("read child pid: %v", err)
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		p, err := os.FindProcess(pid)
+		if err == nil {
+			_ = p.Kill()
+		}
+	})
+	start := time.Now()
+	_, code, err := quotaRun(context.Background(), "quota status", time.Second, true, "--json")
+	if elapsed := time.Since(start); code != ExitTimeout || err == nil || elapsed > 4*time.Second {
+		t.Fatalf("code=%d err=%v elapsed=%s", code, err, elapsed)
 	}
 }

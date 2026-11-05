@@ -36,6 +36,7 @@ func (r ExecRunner) Run(ctx context.Context, c Command) Result {
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, c.Name, c.Args...)
+	cmd.WaitDelay = 100 * time.Millisecond
 	cmd.Stdin = strings.NewReader(c.Input)
 	cmd.Dir = c.Dir
 	cmd.Env = append(os.Environ(), c.Env...)

@@ -359,7 +359,9 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 
 func defaultNodeCommandRunner(name string) relayCommandRunner {
 	return func(ctx context.Context, args ...string) ([]byte, error) {
-		return exec.CommandContext(ctx, name, args...).Output()
+		cmd := exec.CommandContext(ctx, name, args...)
+		cmd.WaitDelay = 100 * time.Millisecond
+		return cmd.Output()
 	}
 }
 

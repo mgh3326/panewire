@@ -44,7 +44,7 @@ func code(err error) int {
 func TestR15GateRoleDenialRemaps77(t *testing.T) {
 	for _, n := range []int{0, 2, 3, 4, 5, 6, 70} {
 		t.Run("gate_exit_"+strconv.Itoa(n), func(t *testing.T) {
-			f := &fakeRunner{Do: func(Command) Result { return Result{Code: n} }}
+			f := &fakeRunner{Do: func(Command) Result { return Result{Code: n, Out: `{}`} }}
 			q := CLIQuota{f, "quota"}
 			_, e := q.Gate(context.Background(), QuotaRequest{Profile: "profile", Role: "tester", Effort: "high"})
 			want := n

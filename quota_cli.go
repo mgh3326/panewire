@@ -56,6 +56,7 @@ func quotaRun(ctx context.Context, what string, timeout time.Duration, jsonOutpu
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "pacelever", args...)
+	cmd.WaitDelay = 100 * time.Millisecond
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
