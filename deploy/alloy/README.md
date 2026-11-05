@@ -162,6 +162,7 @@ present except `request_id`; a panewire `placement` line adds `chosen` and
 | `request_id` | Hub spawn request id, on panewire `node_spawn` and `placement` lines only; omitted when empty. It joins the line to the hub's spawn operation and the `request` tag of its Sentry event |
 | `chosen` | Panewire `placement` lines only: the host placement chose |
 | `candidates` | Panewire `placement` lines only: an array with one object per candidate host: `host`, `score`, the terms `cpu`, `mem`, `io`, `load`, `jobs` (each 0..1), `power`, `bridge` (claims inside the spawn bridge) and `outcome`. A host the hub reported nothing for has only `host` and `outcome`. At most 16 hosts. See panewire `docs/placement.md` |
+| `selection` | Automatic panewire `placement` lines only, including refusals: hosts in admission rank order with `host`, `rank`, `outcome`, and `tried` rungs. Each rung has `profile`, `effort`, `pool`, and `outcome`. Outcomes are `admitted`, `quota_exhausted`, `quota_unknown`, `no_rung`, or `not_tried`. At most 16 hosts and 32 rungs per host. Account identities and gate output are omitted. See panewire `docs/placement.md` |
 | `profile` | Panewire `node_spawn` lines of a successful spawn only: the launch profile |
 | `duration_ms` | Panewire `node_spawn` lines of a successful spawn only: milliseconds the node took, as a number |
 | `outcome` | `refused`, `failed`, `skipped`, `missing`, `placed`, `stale`, `unusable`, `ok` (label) |

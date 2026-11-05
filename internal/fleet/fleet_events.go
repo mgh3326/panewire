@@ -28,6 +28,9 @@ func (a *App) fleetEventWriter() *fleetevent.Writer {
 func (a *App) spawnEvents(s Spawn, err error) {
 	if err != nil {
 		a.refusalEvent("spawn", s.Job, err)
+		if !s.DryRun && s.Sel != nil && str(s.Sel, "outcome_code") != outcomeAdmitted {
+			a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "placement", Job: s.Job, RequestID: a.RequestID, Outcome: "refused", Reason: str(s.Sel, "outcome_code"), Selection: selectionTerms(s.Sel)})
+		}
 		return
 	}
 	if s.Host == "local" {
@@ -166,7 +169,29 @@ func (a *App) placementEvent(s Spawn, rec map[string]any, err error) {
 	if len(refused) > 0 {
 		detail += " refused=" + strings.Join(refused, ",")
 	}
-	a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "placement", Job: s.Job, RequestID: a.RequestID, Outcome: "placed", Reason: reason, Detail: detail, Chosen: chosen, Candidates: terms})
+	a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "placement", Job: s.Job, RequestID: a.RequestID, Outcome: "placed", Reason: reason, Detail: detail, Chosen: chosen, Candidates: terms, Selection: selectionTerms(s.Sel)})
+}
+
+// selectionTerms projects the ordered host/rung trace without account keys,
+// free-text gate reasons or other selection metadata.
+func selectionTerms(sel map[string]any) []fleetevent.HostSelection {
+	var out []fleetevent.HostSelection
+	hosts, _ := sel["hosts"].([]any)
+	for _, raw := range hosts {
+		h, _ := raw.(map[string]any)
+		rank, _ := h["rank"].(int)
+		if rank == 0 {
+			continue
+		}
+		x := fleetevent.HostSelection{Host: str(h, "host"), Rank: rank, Outcome: str(h, "admission_outcome")}
+		tries, _ := h["tried"].([]any)
+		for _, rawTry := range tries {
+			r, _ := rawTry.(map[string]any)
+			x.Tried = append(x.Tried, fleetevent.RungAttempt{Profile: str(r, "profile"), Effort: str(r, "effort"), Pool: str(r, "pool"), Outcome: str(r, "outcome")})
+		}
+		out = append(out, x)
+	}
+	return out
 }
 
 // placementTerms projects the plan's candidates for the placement event: each

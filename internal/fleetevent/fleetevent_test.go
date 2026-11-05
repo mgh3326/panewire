@@ -131,7 +131,15 @@ func TestEmitEventNormalisesPlacementFieldsForASink(t *testing.T) {
 	for i := range candidates {
 		candidates[i] = Candidate{Host: "Host One", Score: &score, Outcome: "Not Chosen"}
 	}
-	if !w.EmitEvent(Event{Kind: "Placement", RequestID: "req token=hunter2pass", Chosen: "Host One", Candidates: candidates}) {
+	tries := make([]RungAttempt, MaxRungs+1)
+	for i := range tries {
+		tries[i] = RungAttempt{Profile: "token=hunter2pass", Effort: "HIGH", Pool: "CLAUDE", Outcome: "Quota Exhausted"}
+	}
+	selection := make([]HostSelection, MaxCandidates+1)
+	for i := range selection {
+		selection[i] = HostSelection{Host: "Host One", Rank: i + 1, Outcome: "Quota Exhausted", Tried: tries}
+	}
+	if !w.EmitEvent(Event{Kind: "Placement", RequestID: "req token=hunter2pass", Chosen: "Host One", Candidates: candidates, Selection: selection}) {
 		t.Fatal("a sink must accept the event")
 	}
 	ev := got[0]
@@ -143,5 +151,14 @@ func TestEmitEventNormalisesPlacementFieldsForASink(t *testing.T) {
 	}
 	if candidates[0].Host != "Host One" {
 		t.Fatal("the caller's candidates were rewritten")
+	}
+	if len(ev.Selection) != MaxCandidates || ev.Selection[0].Host != "host_one" || ev.Selection[0].Rank != 1 || ev.Selection[0].Outcome != "quota_exhausted" || len(ev.Selection[0].Tried) != MaxRungs {
+		t.Fatalf("host selection was not bounded and normalized: %+v", ev.Selection)
+	}
+	if r := ev.Selection[0].Tried[0]; r.Profile != "[redacted]" || r.Effort != "high" || r.Pool != "claude" || r.Outcome != "quota_exhausted" {
+		t.Fatalf("rung was not redacted and normalized: %+v", r)
+	}
+	if selection[0].Host != "Host One" || tries[0].Profile != "token=hunter2pass" || len(selection[0].Tried) != MaxRungs+1 {
+		t.Fatal("the caller's selection was rewritten")
 	}
 }
