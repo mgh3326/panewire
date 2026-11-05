@@ -79,6 +79,7 @@ type inboxSummaryPolicy struct {
 
 type deliveryLanePolicy struct {
 	InboxSummary     *inboxSummaryPolicy `yaml:"inbox_summary"`
+	IdlePromote      *bool               `yaml:"idle_promote"`
 	HoldWhileWorking *deliveryHoldPolicy `yaml:"hold_while_working"`
 	Default          string              `yaml:"default"`
 	Deadlines        map[string]string   `yaml:"deadlines"`
@@ -151,6 +152,9 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 	}
 	validate := func(l *deliveryLanePolicy) error {
 		if v := l.InboxSummary; v != nil {
+			if l.IdlePromote != nil && !*l.IdlePromote {
+				return fmt.Errorf("idle_promote: false cannot be combined with inbox_summary")
+			}
 			if v.MaxChars == 0 {
 				v.MaxChars = 300
 			}
@@ -215,6 +219,9 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 			}
 		}
 		return nil
+	}
+	if p.IdlePromote != nil {
+		return nil, fmt.Errorf("idle_promote is only supported per lane")
 	}
 	if err := validate(&p.deliveryLanePolicy); err != nil {
 		return nil, err
