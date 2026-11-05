@@ -82,8 +82,8 @@ outcome, in this order:
 | `launch_backoff` | The hub counted 2 consecutive launch failures of this (host, kind) in the last 30 minutes ([below](#launch-failure-backoff)) |
 | `harness_missing` | The harness binary is not installed |
 | `harness_version` | `placement.harness_min_version.<kind>` (in the spawner's `hosts.toml`) is set and the version is lower or unreadable |
-| `dialog_pending` | The last launch of this kind stopped at a first-run dialog |
-| `login_missing` | The node's pacelever refresh of the kind's pool failed (`cmd` needs no login) |
+| `dialog_pending` | The last launch of this kind stopped at a first-run dialog ([desk notice](#first-run-refusals-and-the-desk-notice)) |
+| `login_missing` | The node's pacelever refresh of the kind's pool failed (`cmd` needs no login) ([desk notice](#first-run-refusals-and-the-desk-notice)) |
 | `repo_unmapped` | The spawn's repository is not in the node's `repos` |
 | `brief_unavailable` | The spawn goes through the hub with a brief document and the node cannot fetch one |
 | `toolchain_missing` | `placement.repo_toolchains.<repo>` lists a toolchain the node lacks |
@@ -115,6 +115,42 @@ harness kind is not counted. The constants live in `placement.json`:
 
 Both are optional (0 or absent means 2 and 30). The counts are in hub memory:
 a hub restart forgets them, which ends a backoff early and never starts one.
+
+### First-run refusals and the desk notice
+
+A first-run dialog or a missing login rules out one host, not the request. When
+the hub places a spawn under `--host auto` and a node refuses with one of these
+engine codes, the hub unbinds the request and the candidate loop tries the next
+host:
+
+| Code | Cause | Desk action |
+|---|---|---|
+| `hooks_review` | Codex "Hooks need review" | `run codex once and choose "Trust all and continue"` |
+| `trust_prompt` | Codex or Claude workspace trust | `trust the workspace` |
+| `omp_setup_wizard` | omp setup wizard | `run omp once and finish its setup` |
+| `auth_unavailable` | No usable login for the account | `log in` |
+
+`cwd_unmapped` moves on the same way. The refusing host still counts the
+failure in its launch backoff. A refusal moves on only when the node verified
+its pane cleanup (`retryable`); otherwise a pane may still hold the job id and
+the refusal is the request's answer. A pinned `--host` keeps its refusal.
+Nothing answers the dialog: trust stays a one-time human action on the host.
+
+The first time a host reports a need for a harness kind, the hub sends one
+`lane.event` to `operator-desk` and one Sentry warning (when hub Sentry is
+configured):
+
+```
+[oci] codex needs a one-time action: run codex once and choose "Trust all and continue"
+```
+
+A need is a readiness `dialog` value or `login: missing`; a refusal above counts
+as a report of the same need. The text carries the host, the kind and the
+action only, never screen content. The hub tells each (host, kind, need) once
+and forgets it when a later readiness report no longer shows it, so the need
+coming back is told again. A report computed before the notice cannot forget
+it. The told set is in hub memory: a hub restart tells the needs that are still
+reported once more.
 
 ### Spawner configuration
 

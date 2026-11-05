@@ -546,6 +546,9 @@ type HubServer struct {
 	// launchBackoffs counts consecutive launch failures per (machine, kind),
 	// guarded by mu (hub_readiness.go).
 	launchBackoffs map[launchKey]*launchBackoff
+	// oneTimeActions is the first-run needs already told to the desk, guarded
+	// by mu (hub_one_time_action.go).
+	oneTimeActions map[oneTimeActionKey]time.Time
 	fleetLoadMu    sync.Mutex
 	fleetLoadAt    time.Time // guarded by fleetLoadMu
 	// closeMu serializes Close so concurrent callers cannot race the logFile
@@ -1300,6 +1303,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				}
 			}
 			h.mu.Unlock()
+			h.noteReadinessActions(machineID, heartbeat.Readiness, received)
 			h.publishFleetPublisher(machineID, received)
 			h.publishFleetReadiness(machineID, received)
 			h.observeHeartbeatAlerts(machineID, heartbeat)
