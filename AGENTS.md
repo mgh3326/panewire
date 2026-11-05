@@ -18,6 +18,9 @@ leave the old code for a cleanup PR rather than copying its pattern.
   A ticket or round number never starts a file name.
 - Contracts and runbooks live in `docs/`; link them from code comments and
   from `README.md` instead of restating them.
+- Imports follow goimports: one standard-library group first, then module
+  imports. `TestImportGroupsPutStandardLibraryFirst` enforces it for every
+  package, since gofmt does not.
 
 ## Shared helpers — use these, do not hand-roll another copy
 
@@ -45,13 +48,23 @@ leave the old code for a cleanup PR rather than copying its pattern.
   error bodies); check the tests before changing how a handler writes.
 - Code that needs the current time and must be testable takes a
   `now func() time.Time` dependency instead of calling `time.Now()` inline.
+  When a type already carries one, every recorded timestamp and time-based
+  rule goes through it (`HubServer.now`, `HubClient.nowUTC()`,
+  `assistantCFVerifier.nowUnix()`); never add a second accessor. Elapsed
+  time for timeouts and deadlines stays on the wall clock, because a frozen
+  test clock would never expire it.
 
 ## Tests
 
 - Test files follow `<feature>[_<ticket>]_test.go`: the feature first, and an
   optional trailing ticket token (`_r20t5`, `_t1002`) for traceability.
-- Wait for asynchronous work with `eventually` (`test_helpers_test.go`), not a
-  fixed `time.Sleep` or a new deadline loop.
+- Wait for asynchronous work with the helpers in `test_helpers_test.go`, not
+  a fixed `time.Sleep` or a new deadline loop: `eventually` (fails with a
+  label), `waitUntil` (returns a bool so the failure can report observed
+  state), `awaitClientEvent` (next node-client event of a kind). Wait on the
+  outcome you assert, not on an earlier step that precedes it.
+- `time.Sleep` in a test is only for simulated latency, fixture pacing, or a
+  window that proves nothing *more* happens; say which in a comment.
 - The PR `test (ubuntu-latest)` check splits the root package across runners with
   `scripts/ci-test-shard.sh`. It deals out every name from `go test -list .`, so a new test
   needs no CI edit; `ci_workflow_shard_test.go` fails if any test would run in no shard.

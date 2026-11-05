@@ -3,7 +3,6 @@ package panewire
 import (
 	"context"
 	"errors"
-	"github.com/coder/websocket/wsjson"
 	"io"
 	"net/http/httptest"
 	"os"
@@ -12,6 +11,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket/wsjson"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 )

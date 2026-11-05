@@ -8,10 +8,10 @@ import (
 	"path/filepath"
 	"strings"
 	"sync/atomic"
-
-	"github.com/coder/websocket"
 	"testing"
 	"time"
+
+	"github.com/coder/websocket"
 )
 
 func TestLaneReconcileBackoff(t *testing.T) {
