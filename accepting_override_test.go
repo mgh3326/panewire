@@ -51,6 +51,10 @@ func TestAcceptingContainment(t *testing.T) {
 		h.Handler().ServeHTTP(w, req)
 		return w
 	}
+	missing := post(`{"mode":"off"}`)
+	if missing.Code != 400 || !strings.Contains(missing.Body.String(), "containment_required") {
+		t.Fatalf("missing: %d %s", missing.Code, missing.Body.String())
+	}
 	for _, value := range []string{"", "hk:0", "hk:01", "hk:1234567890", "hk:12x"} {
 		w := post(fmt.Sprintf(`{"mode":"off","containment":%q}`, value))
 		if w.Code != 400 || !strings.Contains(w.Body.String(), "containment_required") {
