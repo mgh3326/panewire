@@ -28,12 +28,19 @@ type HostView struct {
 	Name      string
 	Connected bool
 	LoadRatio *float64
-	// Score is the hub's placement score: free capacity weighted by the
-	// host's configured capacity_weight. Higher is better; nil when the hub
-	// did not send one.
+	// Score is the hub's placement score: free capacity (the product of the
+	// cpu, mem, io, load and jobs terms) times the host's power, less the
+	// claims inside the spawn bridge. Higher is better; nil when the hub did
+	// not send one.
 	Score   *float64
 	Reason  string
 	Signals PlacementSignals
+	// Decided marks the host the hub's placement named, after its all_loaded
+	// and hysteresis rules; DecisionReason is why ("" for the policy-order
+	// winner, "challenger", "all_loaded"). Ranking prefers it within a bucket,
+	// so a rival has to beat the winner by the hub's margin, not by a point.
+	Decided        bool
+	DecisionReason string
 }
 
 // PresenceRecord is a pacelever host-presence row: which host measured which
@@ -186,8 +193,11 @@ type placeCandidate struct {
 	load        *float64
 	score       *float64
 	signals     PlacementSignals
-	over        bool
-	outcome     string
+	// decided and decision carry the hub's decision: the host it named and why.
+	decided  bool
+	decision string
+	over     bool
+	outcome  string
 	// preflight is the remote-spawn preflight of a candidate the placement
 	// refused; it names why the host was not usable.
 	preflight *hostPreflight
@@ -493,6 +503,7 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 			c.load = hv.LoadRatio
 			c.score = hv.Score
 			c.signals = hv.Signals
+			c.decided, c.decision = hv.Decided, hv.DecisionReason
 		} else {
 			c.awake = !c.wakeable || hub == nil
 		}
@@ -572,6 +583,15 @@ func (a *App) plan(ctx context.Context, s Spawn, pool string, waited time.Durati
 		}
 		if rx, ry := loginRank(x.login), loginRank(y.login); rx != ry {
 			return rx - ry
+		}
+		// The hub's decision already applies its hysteresis margin and its
+		// all-hosts-loaded rule to the scores below; within a bucket it ranks
+		// first, so a rival that scores a little higher does not take over.
+		if x.decided != y.decided {
+			if x.decided {
+				return -1
+			}
+			return 1
 		}
 		// The hub score already folds load and host speed together, so a
 		// fast machine at moderate load beats a slow idle one. Raw load is
@@ -1506,6 +1526,8 @@ func taskWaited(t Task, now time.Time) time.Duration {
 
 func parseHubHosts(raw string) ([]HostView, error) {
 	var p struct {
+		Decision   *string           `json:"decision"`
+		Reason     string            `json:"reason"`
 		Candidates []json.RawMessage `json:"candidates"`
 	}
 	if e := json.Unmarshal([]byte(raw), &p); e != nil {
@@ -1540,6 +1562,9 @@ func parseHubHosts(raw string) ([]HostView, error) {
 			continue
 		}
 		hv := HostView{Name: name, Connected: true, LoadRatio: c.LoadRatio, Score: c.Score, Reason: c.Reason, Signals: c.PlacementSignals}
+		if p.Decision != nil && *p.Decision == name {
+			hv.Decided, hv.DecisionReason = true, p.Reason
+		}
 		if c.Signals != nil {
 			hv.Signals = *c.Signals
 		}

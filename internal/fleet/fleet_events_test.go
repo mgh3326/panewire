@@ -44,7 +44,15 @@ func readFleetEvents(t *testing.T, a *App) (string, []map[string]string) {
 			}
 			ev[k] = v
 		}
-		if len(fields) != 8 {
+		// Only a placement line carries the optional request_id, chosen and
+		// candidates fields; every other line keeps the eight-field v1 shape.
+		extras := 0
+		for _, k := range []string{"request_id", "chosen", "candidates"} {
+			if _, ok := fields[k]; ok {
+				extras++
+			}
+		}
+		if len(fields) != 8+extras || extras > 0 && fields["kind"] != "placement" {
 			t.Fatalf("event has fields beyond the v1 shape: %q", line)
 		}
 		events = append(events, ev)

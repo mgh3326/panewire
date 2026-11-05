@@ -272,7 +272,7 @@ cancelled never takes the lock. A node with no configured work root answers
 
 ### `worktree.remove`
 
-`args: {cwd, expect_head, base, regenerable}` — `cwd` inside the linked
+`args: {cwd, expect_head, base, regenerable, detached?}` — `cwd` inside the linked
 worktree, `expect_head` the 40-hex commit it must still be on, `base` the
 merged-into branch (a `regenerable` pattern must contain a literal
 character: wildcard-only patterns such as `*` are invalid_args; a glob with a
@@ -289,6 +289,15 @@ merged into `origin/<base>` or fully pushed to `origin/<branch>` (both judged af
 removal — no pane is live in it (the ignored-file scan and the pane check are the last reads; a non-pane process writing an ignored file between them and the removal is a residual window this op cannot fence). It then runs `git worktree remove` and
 `git branch -d`; never `--force` or `-D`.
 
+`detached` is an optional boolean, defaulting to false. When true, the
+worktree must be detached and its resolved directory must be a direct child
+of the work root named `mwr-` followed by one or more lowercase letters,
+digits, dots, underscores, or hyphens. HEAD must match `expect_head`; the
+registration, lock, cleanliness, ignored-file, work-root, and pane guards
+still apply. The branch fetch, release check, and deletion are skipped. A
+nonmatching directory returns `outside-work-root`; a branch returns
+`not_detached`. `base` remains required.
+
 The per-clone lock is `flock` on macOS and Linux, released by the kernel
 when a holder dies. Other platforms use an exclusive-create file instead; a
 crashed holder leaves `<clone>.git-op.lock` behind and every op on that clone
@@ -297,13 +306,14 @@ running a git op on the clone, then delete the lock file.
 
 | `outcome` | Meaning |
 | --- | --- |
-| `removed` | Worktree removed and `git branch -d` attempted; `worktree` describes what was removed. |
+| `removed` | Worktree removed and, in branch mode, `git branch -d` attempted; `worktree` describes what was removed. |
 | `worktree-gone` | `cwd` is not a linked worktree. |
 | `worktree-changed` | HEAD or common repository differs from the first inspection or `expect_head`. |
-| `outside-work-root` | The resolved worktree path or common git dir is outside the node's configured work root. |
+| `outside-work-root` | The resolved path or common git dir is outside the work root, or a detached-mode directory fails the reviewer name or location guard. |
 | `unregistered` | Resolves as a worktree but is not in `git worktree list`. |
 | `locked` | `git worktree lock` holds it. |
-| `detached` | Detached HEAD: no branch to delete. |
+| `detached` | Detached HEAD in the default branch mode. |
+| `not_detached` | Detached mode requires a detached worktree. |
 | `status-check-failed` | `git status` could not be read. |
 | `dirty` | Uncommitted or untracked files. |
 | `ignored-files` | Ignored files not in `regenerable`; `files` names them. |

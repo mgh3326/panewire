@@ -47,6 +47,7 @@ const (
 	nodeRemoveUnregistered      = "unregistered"
 	nodeRemoveLocked            = "locked"
 	nodeRemoveDetached          = "detached"
+	nodeRemoveNotDetached       = "not_detached"
 	nodeRemoveStatusCheckFailed = "status-check-failed"
 	nodeRemoveIgnoredFiles      = "ignored-files"
 	nodeRemovePaneInUse         = "pane-in-use"
@@ -63,10 +64,11 @@ var (
 )
 
 var (
-	nodeShaPattern       = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
-	nodeFetchPullPattern = regexp.MustCompile(`^pull/[0-9]+/head$`)
-	nodeQuotaPoolPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	nodeGlobClass        = regexp.MustCompile(`\[[^\]]*\]`)
+	nodeReviewerDirPattern = regexp.MustCompile(`^mwr-[a-z0-9._-]+$`)
+	nodeShaPattern         = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+	nodeFetchPullPattern   = regexp.MustCompile(`^pull/[0-9]+/head$`)
+	nodeQuotaPoolPattern   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	nodeGlobClass          = regexp.MustCompile(`\[[^\]]*\]`)
 )
 
 type nodeWorktreePrepareArgs struct {
@@ -81,6 +83,7 @@ type nodeWorktreePrepareArgs struct {
 type nodeWorktreeRemoveArgs struct {
 	Cwd         string   `json:"cwd"`
 	ExpectHead  string   `json:"expect_head"`
+	Detached    bool     `json:"detached"`
 	Base        string   `json:"base"`
 	Regenerable []string `json:"regenerable"`
 }
@@ -959,8 +962,12 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnregistered}, ""
 	case entry.Locked:
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveLocked}, ""
-	case entry.Branch == "":
+	case args.Detached && (entry.Branch != "" || !entry.Detached):
+		return nodeWorktreeRemoveResult{Outcome: nodeRemoveNotDetached}, ""
+	case !args.Detached && entry.Branch == "":
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveDetached}, ""
+	case args.Detached && (!nodeSamePath(filepath.Dir(worktree.Path), workRoot) || !nodeReviewerDirPattern.MatchString(filepath.Base(worktree.Path))):
+		return nodeWorktreeRemoveResult{Outcome: nodeRemoveOutsideWorkRoot}, ""
 	}
 	clean, err := nodeWorktreeClean(ctx, git, worktree.Path)
 	if err != nil {
@@ -969,14 +976,16 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	if !clean {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeDirty}, ""
 	}
-	// origin/* refs are a cache: refresh them before they prove "merged" or
-	// "pushed", and fail closed when the remote cannot be read.
-	if _, err := git(ctx, "-C", main, "fetch", "--prune", "--no-tags", "origin"); err != nil {
-		// Inconclusive, not a proven "unmerged": nothing is removed either way.
-		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
-	}
-	if !nodeBranchReleased(ctx, git, main, entry.Branch, args.Base) {
-		return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnmerged}, ""
+	if !args.Detached {
+		// origin/* refs are a cache: refresh them before they prove "merged" or
+		// "pushed", and fail closed when the remote cannot be read.
+		if _, err := git(ctx, "-C", main, "fetch", "--prune", "--no-tags", "origin"); err != nil {
+			// Inconclusive, not a proven "unmerged": nothing is removed either way.
+			return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
+		}
+		if !nodeBranchReleased(ctx, git, main, entry.Branch, args.Base) {
+			return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnmerged}, ""
+		}
 	}
 	// Ignored files, then live panes, are read last, right before removal,
 	// so the window for a new file or a new pane is as short as possible.
@@ -1012,11 +1021,13 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	if _, err := git(ctx, "-C", main, "worktree", "remove", worktree.Path); err != nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
-	// -d, never -D: git itself still refuses a branch that never merged. A
-	// branch that survives is logged, not hidden — the worktree is gone and
-	// the receipt reads removed either way.
-	if _, err := git(ctx, "-C", main, "branch", "-d", entry.Branch); err != nil {
-		slog.Warn("worktree.remove: branch delete failed", "branch", entry.Branch)
+	if !args.Detached {
+		// -d, never -D: git itself still refuses a branch that never merged. A
+		// branch that survives is logged, not hidden — the worktree is gone and
+		// the receipt reads removed either way.
+		if _, err := git(ctx, "-C", main, "branch", "-d", entry.Branch); err != nil {
+			slog.Warn("worktree.remove: branch delete failed", "branch", entry.Branch)
+		}
 	}
 	return nodeWorktreeRemoveResult{Outcome: nodeRemoveRemoved, Worktree: worktree}, ""
 }

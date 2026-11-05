@@ -4,14 +4,15 @@ name: Release
 # (`panewire version` prints it) and attaches them, with SHA256SUMS, to the
 # tag's GitHub Release. A test tag v0.0.0* (e.g. v0.0.0-test.1) runs the
 # same build and checks on the tag but is never published.
-# Pull requests and manual runs build the same assets for
-# a dry-run tag (v0.0.0-dryrun.<run>) and check them without publishing.
+# Main pushes and manual runs build dry-run assets without publishing.
+# Pull requests run a fast Go build.
 # Hosts pull published assets themselves (the fleet updater, or
 # docs/runbooks/node-update.md); publishing to nodes stays a separate,
 # operator-run `panewire update publish`. This workflow never reaches a host.
 on:
   push:
     tags: ['v*']
+    branches: [main]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -31,7 +32,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Validate requested publication ref
-        if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+        if: (github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)
         env:
           REF_TYPE: ${{ github.ref_type }}
           REF_NAME: ${{ github.ref_name }}
@@ -51,7 +52,11 @@ jobs:
         with:
           go-version: '1.27.x'
           cache: true
+      - name: Fast PR build
+        if: github.event_name == 'pull_request'
+        run: go build ./...
       - name: Resolve release tag
+        if: github.event_name != 'pull_request'
         env:
           EVENT: ${{ github.event_name }}
           REF_TYPE: ${{ github.ref_type }}
@@ -69,10 +74,12 @@ jobs:
           esac
           echo "RELEASE_TAG=$tag" >> "$GITHUB_ENV"
       - name: Build assets
+        if: github.event_name != 'pull_request'
         run: |
           version=$(sh scripts/build-release.sh dist/release "$RELEASE_TAG")
           test "$version" = "$RELEASE_TAG"
       - name: Verify assets, SHA256SUMS and version output
+        if: github.event_name != 'pull_request'
         run: |
           for target in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do
             test -x "dist/release/panewire_${RELEASE_TAG}_${target}"
@@ -82,7 +89,7 @@ jobs:
           test "$(wc -l < dist/release/SHA256SUMS)" -eq 4
           cat dist/release/SHA256SUMS
       - name: Keep assets for publish
-        if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
+        if: ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: release-assets
@@ -91,7 +98,7 @@ jobs:
           retention-days: 7
 
   test:
-    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
+    if: ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -107,7 +114,7 @@ jobs:
 
   publish:
     needs: [build, test]
-    if: (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
+    if: ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
     runs-on: ubuntu-latest
     permissions:
       contents: write

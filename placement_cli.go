@@ -129,26 +129,36 @@ func validPlacementCLIResult(result PlacementResult) bool {
 	return decisionFound
 }
 
-// renderPlacementExplain prints each candidate's score with the signals behind
-// it: score = FREE * POWER - BRIDGED * 10, times the capacity weight, minus
-// the connection/acceptance penalties named in REASON (docs/placement.md). A
-// signal the host does not export, or an older hub that sends no signals,
-// prints "-".
+// renderPlacementExplain prints each candidate's score with the terms behind
+// it: score = CPU*MEM*IO*LOAD*JOBS * POWER - BRIDGED * claim cost, minus the
+// connection/acceptance penalties named in REASON (docs/placement.md). A
+// signal the host does not export, or an older hub that sends no terms,
+// prints "-". LOAD1_CORE and PAGEIN_MBPS are the readings behind LOAD and IO.
 func renderPlacementExplain(w io.Writer, result PlacementResult) {
 	fmt.Fprintf(w, "DECISION\t%s\nSOURCE\t%s\nASOF\t%s\n", result.Decision, result.Source, result.Asof.UTC().Format(time.RFC3339))
-	fmt.Fprintln(w, "MACHINE\tSCORE\tFREE\tCPU_1M\tCPU_5M\tMEM_AVAIL\tSWAP_IN_MBPS\tPOWER\tWEIGHT\tBRIDGED\tACTIVE_JOBS\tTHROTTLED\tCONNECTED\tREASON")
-	for _, candidate := range result.Candidates {
-		free, cpu1m, cpu5m, mem, swap, power, bridged := "-", "-", "-", "-", "-", "-", "-"
-		if s := candidate.Signals; s != nil {
-			free, cpu1m, cpu5m, mem, swap = fmt.Sprintf("%.2f", s.Free), explainSignal(s.CPUBusy1m), explainSignal(s.CPUBusy5m), explainSignal(s.MemAvailable), explainSignal(s.SwapInMBps)
-			power, bridged = fmt.Sprintf("%.0f", s.Power), fmt.Sprintf("%d", s.BridgedJobs)
-		}
-		weight := candidate.CapacityWeight
-		if weight == 0 {
-			weight = 1 // an unweighted machine omits the field
-		}
-		fmt.Fprintf(w, "%s\t%.2f\t%s\t%s\t%s\t%s\t%s\t%s\t%.2f\t%s\t%d\t%t\t%t\t%s\n", candidate.Machine, candidate.Score, free, cpu1m, cpu5m, mem, swap, power, weight, bridged, candidate.ActiveJobs, candidate.Throttled, candidate.Connected, candidate.Reason)
+	if result.Reason != "" {
+		fmt.Fprintf(w, "REASON\t%s\n", result.Reason)
 	}
+	fmt.Fprintln(w, "MACHINE\tSCORE\tFREE\tCPU\tMEM\tIO\tLOAD\tJOBS\tCPU_BUSY\tMEM_AVAIL\tPAGEIN_MBPS\tLOAD1_CORE\tPOWER\tBRIDGED\tACTIVE_JOBS\tTHROTTLED\tCONNECTED\tREASON")
+	for _, candidate := range result.Candidates {
+		free, cpu, mem, ioTerm, load, jobs, busy, avail, pageIn, load1, power, bridged := "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"
+		if s := candidate.Signals; s != nil {
+			free, power, bridged = fmt.Sprintf("%.2f", s.Free), fmt.Sprintf("%.0f", s.Power), fmt.Sprintf("%d", s.BridgedJobs)
+			if t := s.Terms; t != nil {
+				cpu, mem, ioTerm, load, jobs = fmt.Sprintf("%.2f", t.CPU), fmt.Sprintf("%.2f", t.Mem), fmt.Sprintf("%.2f", t.IO), fmt.Sprintf("%.2f", t.Load), fmt.Sprintf("%.2f", t.Jobs)
+			}
+			busy, avail, pageIn, load1 = explainSignal(maxSignal(s.CPUBusy1m, s.CPUBusy5m)), explainSignal(s.MemAvailable), explainSignal(s.SwapInMBps), explainSignal(s.Load1PerCore)
+		}
+		fmt.Fprintf(w, "%s\t%.2f\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%t\t%t\t%s\n", candidate.Machine, candidate.Score, free, cpu, mem, ioTerm, load, jobs, busy, avail, pageIn, load1, power, bridged, candidate.ActiveJobs, candidate.Throttled, candidate.Connected, candidate.Reason)
+	}
+}
+
+// maxSignal is the larger of two optional readings, nil when neither exists.
+func maxSignal(a, b *float64) *float64 {
+	if a == nil || (b != nil && *b > *a) {
+		return b
+	}
+	return a
 }
 
 func explainSignal(value *float64) string {

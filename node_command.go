@@ -211,7 +211,8 @@ func decodeNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	names, known := nodeCommandArgFields[op]
 	optionalKind := op == nodeCommandPaneRead && nodeCommandHasFields(raw, append(append([]string(nil), names...), "kind"))
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind) {
+	optionalDetached := op == nodeCommandWorktreeRemove && nodeCommandHasFields(raw, append(append([]string(nil), names...), "detached"))
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached) {
 		return nil, false
 	}
 	switch op {
@@ -337,7 +338,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		case nodeRemoveIgnoredFiles:
 			valid = len(result.Files) > 0 && result.Worktree == nil && result.RetryAfterS == 0
 		case nodeRemoveWorktreeGone, nodeRemoveWorktreeChanged, nodeRemoveUnregistered,
-			nodeRemoveLocked, nodeRemoveDetached, nodeRemoveStatusCheckFailed,
+			nodeRemoveLocked, nodeRemoveDetached, nodeRemoveNotDetached, nodeRemoveStatusCheckFailed,
 			nodeOutcomeDirty, nodeRemovePaneInUse, nodeRemovePaneScanFailed,
 			nodeRemoveUnmerged, nodeRemoveOutsideWorkRoot, nodeOutcomeGitFailed,
 			nodeOutcomeGitTooOld, nodeOutcomeCancelled:
