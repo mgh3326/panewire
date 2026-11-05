@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/mgh3326/panewire/internal/durable"
 )
 
 // Event is one recorded job event, as the events table holds it.
@@ -188,22 +190,12 @@ func encodeBody(v any) (string, error) {
 // file is overwritten.
 func writeArtifact(dir string, seq int, kind, body string) error {
 	final := filepath.Join(dir, pad5(seq)+"-"+safeKind(kind)+".json")
-	tmp, e := os.CreateTemp(dir, ".tmp-*.json")
+	tmp, e := durable.WriteSyncedTemporaryFile(dir, ".tmp-*.json", []byte(body+"\n"), 0o600)
 	if e != nil {
 		return errf(ExitStorage, "cannot submit the event artifact: %v", e)
 	}
-	defer os.Remove(tmp.Name())
-	_, e = tmp.WriteString(body + "\n")
-	if e == nil {
-		e = tmp.Sync()
-	}
-	if ce := tmp.Close(); e == nil {
-		e = ce
-	}
-	if e != nil {
-		return errf(ExitStorage, "cannot submit the event artifact: %v", e)
-	}
-	if e = os.Link(tmp.Name(), final); e != nil {
+	defer os.Remove(tmp)
+	if e = os.Link(tmp, final); e != nil {
 		if errors.Is(e, fs.ErrExist) {
 			return errf(ExitDuplicate, "event artifact name already exists: %s", final)
 		}
@@ -227,10 +219,7 @@ func writeArtifact(dir string, seq int, kind, body string) error {
 			return errf(ExitStorage, "cannot submit the event artifact: %v", oe)
 		}
 	}
-	if d, e := os.Open(dir); e == nil {
-		_ = d.Sync()
-		d.Close()
-	}
+	durable.SyncDirectoryBestEffort(dir)
 	return nil
 }
 

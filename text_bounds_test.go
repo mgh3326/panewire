@@ -53,3 +53,31 @@ func TestCompletedRelayTextKeepsMultibyteLastLineValid(t *testing.T) {
 		t.Fatalf("relay text is not valid UTF-8: %q", text)
 	}
 }
+
+// legacyInboxSummaryCut is the pre-text_bounds inline form; the shared
+// helpers must keep its output byte for byte.
+func legacyInboxSummaryCut(content string, budget int) string {
+	if len([]rune(content)) > budget {
+		return string([]rune(content)[:max(0, budget-1)]) + "…"
+	}
+	return content
+}
+
+func TestInboxSummaryBoundsMatchTheLegacyCut(t *testing.T) {
+	long := strings.Repeat("보고서 제목 ", 20)
+	if got, want := inboxSummaryTitle(long), string([]rune(long)[:60]); got != want {
+		t.Fatalf("title=%q, want %q", got, want)
+	}
+	if got := inboxSummaryTitle("짧음"); got != "짧음" {
+		t.Fatalf("short title changed: %q", got)
+	}
+	for _, budget := range []int{-3, 0, 1, 10, 119, 120, 121, 500} {
+		if got, want := capInboxSummaryContent(long, budget), legacyInboxSummaryCut(long, budget); got != want {
+			t.Fatalf("budget %d: got %q, want %q", budget, got, want)
+		}
+	}
+	line := inboxSummaryLine([]laneInboxItem{{Kind: "job.completed", Event: hubJobEventPayload{ReportLastLine: long}}}, "doc-1", 80)
+	if utf8.RuneCountInString(line) > 80 || !strings.HasSuffix(line, " | hk:doc doc-1") {
+		t.Fatalf("summary line=%q runes=%d", line, utf8.RuneCountInString(line))
+	}
+}

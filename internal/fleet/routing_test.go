@@ -500,3 +500,12 @@ func TestSpawnRecordsRouting(t *testing.T) {
 		}
 	}
 }
+
+func TestClipKeepsMultibyteTextValid(t *testing.T) {
+	if got := clip("a가나", 3); got != "a…" {
+		t.Fatalf("clip=%q, want %q", got, "a…")
+	}
+	if got := clip("short", 10); got != "short" {
+		t.Fatalf("clip changed short text: %q", got)
+	}
+}

@@ -311,7 +311,7 @@ func TestT12SinkRelayAndLaneTextLimits(t *testing.T) {
 		t.Fatalf("sink queued pane injections=%d", injected)
 	}
 	hub.mu.Lock()
-	pending, timeouts := len(hub.r19a.relayPending), len(hub.r19a.relayTimeouts)
+	pending, timeouts := len(hub.relayControl.relayPending), len(hub.relayControl.relayTimeouts)
 	hub.mu.Unlock()
 	if pending != 0 || timeouts != 0 || len(seen("relay.unrouted")) != 0 || len(seen("lane.event")) != 1 {
 		t.Fatalf("sink bookkeeping pending=%d timeouts=%d unrouted=%d inbound=%d", pending, timeouts, len(seen("relay.unrouted")), len(seen("lane.event")))

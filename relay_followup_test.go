@@ -16,7 +16,7 @@ func TestT22LanePersistedDeliveryRetiresStateWithoutHandoffkeep(t *testing.T) {
 	key := relayEventDedupeKey("lane.event", event)
 	hub.rememberLanePersisted(key, 101)
 	hub.mu.Lock()
-	if !hub.r19a.rememberRelayTimeout(event.JobID) {
+	if !hub.relayControl.rememberRelayTimeout(event.JobID) {
 		hub.mu.Unlock()
 		t.Fatal("timeout suppression entry was not added")
 	}
@@ -36,7 +36,7 @@ func TestT22LanePersistedDeliveryRetiresStateWithoutHandoffkeep(t *testing.T) {
 	hub.handleAgentMessage("host-a", "test-remote", agent, payload)
 	hub.mu.Lock()
 	_, persisted := hub.lanePersisted[key]
-	_, timedOut := hub.r19a.relayTimeouts[event.JobID]
+	_, timedOut := hub.relayControl.relayTimeouts[event.JobID]
 	hub.mu.Unlock()
 	if persisted {
 		t.Fatal("lanePersisted retained the delivered lane event")
@@ -154,7 +154,7 @@ func TestT22RelayTimeoutsCapAndDeliveryCleanup(t *testing.T) {
 	hub := r20Hub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, nil, nil)
 	remember := func(jobID string) {
 		hub.mu.Lock()
-		hub.r19a.rememberRelayTimeout(jobID)
+		hub.relayControl.rememberRelayTimeout(jobID)
 		hub.mu.Unlock()
 	}
 	remember("oldest")
@@ -164,9 +164,9 @@ func TestT22RelayTimeoutsCapAndDeliveryCleanup(t *testing.T) {
 	remember("oldest")
 	remember("newest")
 	hub.mu.Lock()
-	length := len(hub.r19a.relayTimeouts)
-	_, oldestPresent := hub.r19a.relayTimeouts["oldest"]
-	_, evictedPresent := hub.r19a.relayTimeouts["timeout-0"]
+	length := len(hub.relayControl.relayTimeouts)
+	_, oldestPresent := hub.relayControl.relayTimeouts["oldest"]
+	_, evictedPresent := hub.relayControl.relayTimeouts["timeout-0"]
 	hub.mu.Unlock()
 	if length > relayTimeoutsMaxEntries || !oldestPresent || evictedPresent {
 		t.Fatalf("relayTimeouts entries=%d oldest_present=%t expected_eviction_present=%t", length, oldestPresent, evictedPresent)
@@ -180,7 +180,7 @@ func TestT22RelayTimeoutsCapAndDeliveryCleanup(t *testing.T) {
 	}
 	hub.markRelayEventDelivered(pending)
 	hub.mu.Lock()
-	_, retained := hub.r19a.relayTimeouts[event.JobID]
+	_, retained := hub.relayControl.relayTimeouts[event.JobID]
 	hub.mu.Unlock()
 	if retained {
 		t.Fatal("relayTimeouts retained the delivered job")
