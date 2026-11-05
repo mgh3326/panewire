@@ -782,7 +782,7 @@ func (a *App) sweepRecord(ctx context.Context, j Job, key string, rec ArtifactRe
 }
 func (a *App) watchActive(id string) bool {
 	path := filepath.Join(a.Jobs, id, ".panewire-watch.lock")
-	f, e := secureOpen(path, false)
+	f, e := secureOpen(path, false, a.warn)
 	if os.IsNotExist(e) {
 		_, e = os.Stat(filepath.Join(a.Jobs, id, "completion-sentinel.pid"))
 		return e == nil

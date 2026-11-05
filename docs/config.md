@@ -12,7 +12,9 @@ the new location. The same applies to retired environment names: `WRK_LANE_STRIC
 `WRK_COMPLETION_TIMEOUT_S`, `WRK_MOCK_MCP_CONFIG` and `SCOPEFUEL_E6_ARM` fall back
 to their `PANEWIRE_*` replacements with a warning; a set `SCOPEFUEL_BIN` is ignored
 with a warning. The workspace trust lock stays `.wrk.lock` until old spawner
-binaries are drained from every host.
+binaries are drained from every host. An own `.wrk.lock` left group-writable (for
+example by umask 002) is narrowed to 0600 through the open fd with a warning; any
+other insecure lock is refused naming its path, owner, mode and the failed rule.
 A missing file means a local host with standard harnesses. Malformed TOML,
 duplicate keys, root assignments, BOMs, invalid safety booleans and contradictory
 hub quota settings refuse with exit 70. Existing tables keep their key names.
