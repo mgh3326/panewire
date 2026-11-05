@@ -12,6 +12,7 @@ import (
 var (
 	ansiEscape         = regexp.MustCompile("\x1b(?:\\[[0-?]*[ -/]*[@-~]|\\][^\x07\x1b]*(?:\x07|\x1b\\\\)|\\([0-2])")
 	usagePercent       = regexp.MustCompile(`(?i)([0-9]{1,3}(?:\.[0-9]+)?)\s*%\s*(used|left)`)
+	usageHeading       = regexp.MustCompile(`(?i)current\s+(?:session|week)`)
 	usageOnly          = regexp.MustCompile(`(?i)\s+only$`)
 	usageReset         = regexp.MustCompile(`(?i)\bresets?\s+([A-Za-z]{3,9})\.?\s+([0-9]{1,2})\s+at\s+([0-9]{1,2})(?::([0-9]{2}))?\s*([ap])\.?m\.?\s*\(([A-Za-z0-9_+\-/]+)\)`)
 	usageMonths        = map[string]time.Month{"jan": time.January, "feb": time.February, "mar": time.March, "apr": time.April, "may": time.May, "jun": time.June, "jul": time.July, "aug": time.August, "sep": time.September, "oct": time.October, "nov": time.November, "dec": time.December}
@@ -96,6 +97,9 @@ func usageValue(lines []string, label string, now time.Time) (float64, string, b
 
 func percentNear(lines []string, start int) (float64, bool) {
 	for i := start; i < len(lines) && i < start+12; i++ {
+		if i > start && usageHeading.MatchString(lines[i]) {
+			return 0, false
+		}
 		m := usagePercent.FindStringSubmatch(lines[i])
 		if m == nil {
 			continue
@@ -114,6 +118,9 @@ func percentNear(lines []string, start int) (float64, bool) {
 
 func resetNear(lines []string, start int, now time.Time) (string, bool) {
 	for i := start; i < len(lines) && i < start+14; i++ {
+		if i > start && usageHeading.MatchString(lines[i]) {
+			return "", false
+		}
 		m := usageReset.FindStringSubmatch(lines[i])
 		if m == nil {
 			continue

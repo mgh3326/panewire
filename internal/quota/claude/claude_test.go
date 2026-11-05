@@ -118,6 +118,22 @@ func TestUsageScreenRejectsIncompleteOutput(t *testing.T) {
 	}
 }
 
+// A heading with no value of its own must not borrow the next section's
+// percentage or reset time.
+func TestUsageScreenDoesNotReadAcrossHeadings(t *testing.T) {
+	for name, screen := range map[string]string{
+		"no percent": "Current session\n  resets Oct 29 at 11:40pm (Asia/Seoul)\nCurrent week (all models)\n  10% used\n  resets Nov 1 at 2am (Asia/Seoul)\n",
+		"no reset":   "Current session: 6% used\nCurrent week (all models): 10% used\n  resets Nov 1 at 2am (Asia/Seoul)\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			o, err := ParseUsageScreen(screen, testNow)
+			if quota.KindOf(err) != quota.ErrKindParse || len(o.Buckets) != 0 {
+				t.Fatalf("borrowed a value from the next section: %+v err=%v", o, err)
+			}
+		})
+	}
+}
+
 // The API body of pacelever's TestHTTPProviders.
 func TestAPIBody(t *testing.T) {
 	body := `{"five_hour":{"utilization":12,"resets_at":"2026-10-29T00:00:00Z"},"seven_day":{"utilization":20}}`
