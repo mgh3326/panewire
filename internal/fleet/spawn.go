@@ -815,6 +815,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
 	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
+	if s.LaneDefer != "" {
+		receipt["lane_deferred"] = true
+	}
 	if laneOK {
 		receipt["hub_lane"] = lane
 		receipt["hub_lane_machine"] = machine

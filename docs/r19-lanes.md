@@ -18,6 +18,17 @@ report file), which is shown in the relay text.
 The older `{"routes":...}` form and the `--report-relay-routes` flag remain
 read-compatible during migration.
 
+Nodes reconcile live jobs with panes every five minutes. A missing hub lane gets one registration attempt per pass using the landing
+registration path. If the hub listing is unavailable, an unresolved
+`lane_unregistered` receipt also triggers an attempt. A listed lane is left
+untouched, including when it points to a different pane. Success records
+`job.lane_registered`; failure records a bounded, redacted reason. After
+three consecutive failures that job waits 30 minutes between attempts.
+A deliberately deferred lane is left to its designated owner.
+
+For direct lane events, a unique live job can supply a missing route; see
+[R21 direct lane events](r21-lane-event.md).
+
 Lanes that carry control-plane authority are moved with
 `POST /v1/control-plane/transfer`; a direct `PUT` **or `DELETE`** on one of them
 is refused with 409, and a transfer has to carry the whole configured bundle.
