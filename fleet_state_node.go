@@ -3,6 +3,8 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -175,6 +177,16 @@ func (client *HubClient) runFleetQuota(ctx context.Context) {
 	}
 }
 
+// fleetQuotaLoginMissingKinds are pacelever's error kinds (kinds.go) that mean
+// the pool has no usable login. Every other failure leaves the login unknown.
+var fleetQuotaLoginMissingKinds = map[string]bool{"auth": true, "auth_failed": true, "credentials": true, "token_expired": true}
+
+var fleetQuotaErrorKindPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+// fleetQuotaErrorKindUnreadable names a failure whose kind pacelever's status
+// did not give: a timeout, an unreadable status, or a pool it does not list.
+const fleetQuotaErrorKindUnreadable = "unreadable"
+
 func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sent map[string]fleetQuotaSent) {
 	run, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
@@ -185,14 +197,24 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	}
 	previous := sent[pool]
 	if !ok {
+		// refresh prints no error kind; pacelever's status names it. A timed-out
+		// refresh is not asked again: its login is unknown either way.
+		kind := fleetQuotaErrorKindUnreadable
+		if run.Err() == nil && !errors.Is(err, context.DeadlineExceeded) {
+			kind = client.fleetQuotaErrorKind(ctx, pool)
+		}
 		// One warning per failure streak, not one per interval. Consumers see
 		// the reading age past its TTL and measure directly.
 		if !previous.failing {
-			client.warnMessage("fleet state: quota reading for a configured pool is unavailable; not published")
+			client.warnMessage(fmt.Sprintf("fleet state: quota reading for pool %s is unavailable (error_kind %s); not published", pool, kind))
 		}
 		previous.failing = true
 		sent[pool] = previous
-		client.noteQuotaAccount(pool, "")
+		if fleetQuotaLoginMissingKinds[kind] {
+			client.noteQuotaAccount(pool, "")
+		} else {
+			client.noteQuotaUnknown(pool)
+		}
 		return
 	}
 	client.noteQuotaAccount(pool, publish.Key)
@@ -207,6 +229,30 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	if client.Publish("state", publish) {
 		sent[pool] = fleetQuotaSent{body: string(body), at: now}
 	}
+}
+
+// fleetQuotaErrorKind reads pool's error_kind from `pacelever --json` with its
+// own fleetQuotaTimeout. A status that exits non-zero but still lists the pool
+// is read: pacelever reports failing providers that way.
+func (client *HubClient) fleetQuotaErrorKind(ctx context.Context, pool string) string {
+	run, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
+	defer cancel()
+	output, _ := client.nodePaceleverRunner()(run, "--json")
+	var status struct {
+		Providers []struct {
+			ID        string `json:"id"`
+			ErrorKind string `json:"error_kind"`
+		} `json:"providers"`
+	}
+	if json.Unmarshal(output, &status) != nil {
+		return fleetQuotaErrorKindUnreadable
+	}
+	for _, provider := range status.Providers {
+		if provider.ID == pool && fleetQuotaErrorKindPattern.MatchString(provider.ErrorKind) {
+			return provider.ErrorKind
+		}
+	}
+	return fleetQuotaErrorKindUnreadable
 }
 
 // fleetQuotaObservationTransport is the confirmed_at read's transport; nil is

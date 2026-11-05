@@ -131,9 +131,9 @@ type nodeReadinessState struct {
 	refreshing bool
 	// dialogs is the first-run dialog each kind's last launch stopped at.
 	dialogs map[string]dialogMark
-	// accounts maps a pool to its logged-in account key; "" means the last
-	// pacelever refresh failed. A pool not in it is not measured here.
-	accounts map[string]string
+	// accounts maps a pool to its last pacelever refresh outcome. A pool not
+	// in it is not measured here, or its login is unknown.
+	accounts map[string]quotaAccountNote
 	// sentPeer, sentAt and sentCheckedAt mark what the current connection has
 	// been sent.
 	sentPeer      *hubClientConnection
@@ -146,14 +146,38 @@ type dialogMark struct {
 	at     time.Time
 }
 
-// noteQuotaAccount records the outcome of a pool's pacelever refresh.
+// quotaAccountNote is a pool's last refresh outcome: key "" means pacelever
+// named a login failure (Login missing); a key is the account a successful
+// refresh read at at.
+type quotaAccountNote struct {
+	key string
+	at  time.Time
+}
+
+// noteQuotaAccount records a refresh that read accountKey, or "" for one that
+// failed with a login error kind.
 func (client *HubClient) noteQuotaAccount(pool, accountKey string) {
+	at := client.nowUTC()
 	client.readiness.mu.Lock()
 	defer client.readiness.mu.Unlock()
 	if client.readiness.accounts == nil {
-		client.readiness.accounts = map[string]string{}
+		client.readiness.accounts = map[string]quotaAccountNote{}
 	}
-	client.readiness.accounts[pool] = accountKey
+	client.readiness.accounts[pool] = quotaAccountNote{key: accountKey, at: at}
+}
+
+// noteQuotaUnknown records a refresh that failed for a reason other than the
+// login (timeout, transient error, excluded pool, unreadable status). The
+// rule: a present account stays reported while its last successful refresh
+// is younger than fleetQuotaRepublish; otherwise, and always after a login
+// failure, the pool's note is cleared and its Login reads unknown.
+func (client *HubClient) noteQuotaUnknown(pool string) {
+	now := client.nowUTC()
+	client.readiness.mu.Lock()
+	defer client.readiness.mu.Unlock()
+	if note, ok := client.readiness.accounts[pool]; ok && (note.key == "" || now.Sub(note.at) >= fleetQuotaRepublish) {
+		delete(client.readiness.accounts, pool)
+	}
 }
 
 // classifyLaunchDialog names the first-run dialog a failed launch stopped at,
@@ -291,11 +315,11 @@ func (client *HubClient) collectReadiness(ctx context.Context) *fleet.Readiness 
 			h.Version = versionToken(deps.output(ctx, path, "--version"))
 		}
 		h.HerdrIntegration = integrations[nodeHerdrIntegrations[kind]]
-		if key, measured := accounts[kind]; measured {
-			if key == "" {
+		if note, measured := accounts[kind]; measured {
+			if note.key == "" {
 				h.Login = fleet.ReadinessLoginMissing
 			} else {
-				h.Login, h.Account = fleet.ReadinessLoginPresent, key
+				h.Login, h.Account = fleet.ReadinessLoginPresent, note.key
 			}
 		}
 		out.Harnesses[kind] = h
