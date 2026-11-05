@@ -47,3 +47,10 @@ func TestQuotaExecRunnerSuccessfulProcessWithInheritedPipe(t *testing.T) {
 		t.Fatalf("result: %+v", r)
 	}
 }
+
+func TestQuotaExecRunnerSignalFailure(t *testing.T) {
+	r := ExecRunner{}.Run(context.Background(), Command{Name: "sh", Args: []string{"-c", "kill -KILL $$"}})
+	if r.Code != exitFailure {
+		t.Fatalf("code=%d, want %d", r.Code, exitFailure)
+	}
+}
