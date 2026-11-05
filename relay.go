@@ -175,7 +175,11 @@ func completedRelayText(completion hubJobEventPayload) string {
 	if completion.Reason != "" {
 		reason = " [reason: " + completion.Reason + "]"
 	}
-	return "(같은 내용이 두 번 보이면 재실행 금지) [report] " + completion.Label + " (" + completion.Host + ")" + reason + " :: " + line + " → " + completion.ReportPath
+	prefix := ""
+	if completion.Late {
+		prefix = "[late completion: re-armed] "
+	}
+	return prefix + "(같은 내용이 두 번 보이면 재실행 금지) [report] " + completion.Label + " (" + completion.Host + ")" + reason + " :: " + line + " → " + completion.ReportPath
 }
 
 // boundRelayText protects the websocket note contract while keeping the

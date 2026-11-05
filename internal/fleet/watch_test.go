@@ -363,3 +363,43 @@ func TestRearmedWatcherWaitsForPaneBeforeDeclaringLoss(t *testing.T) {
 		})
 	}
 }
+
+func TestWatcherLateCompletion(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		rearmed bool
+	}{{"rearmed", true}, {"normal", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, f, report := watchFixture(t)
+			writeReport(t, report, "final\n")
+			putLaneEvent(t, a, "w:p1", "READY | report", a.Now().Add(time.Minute))
+			args := []string{"j"}
+			if tc.rearmed {
+				args = append(args, "--rearmed")
+			}
+			if err := a.watch(context.Background(), args); err != nil {
+				t.Fatal(err)
+			}
+			if records, relays := completions(t, a, f); records != 1 || relays != 1 {
+				t.Fatalf("records=%d relays=%d", records, relays)
+			}
+			events, err := a.events("j")
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, ev := range events {
+				if ev.Kind == "job.completed" && (ev.Payload["late"] == true) != tc.rearmed {
+					t.Errorf("completion late=%v, want %v", ev.Payload["late"], tc.rearmed)
+				}
+			}
+			for _, call := range f.Calls {
+				if call.Name == "panewire" && slices.Contains(call.Args, "job.completed") && slices.Contains(call.Args, "--late") != tc.rearmed {
+					t.Errorf("relay args=%v, rearmed=%v", call.Args, tc.rearmed)
+				}
+			}
+			if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
+				t.Fatalf("lease: %s %v", st, pools)
+			}
+		})
+	}
+}

@@ -2089,6 +2089,12 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			Replay         bool   `json:"replay,omitempty"`
 		}{job.JobID, job.Epoch, job.AgentLabel, job.OwnerLane, job.Label, job.Host, job.ReportPath, job.ReportLastLine, job.Reason, job.Question, job.PR, job.Head, job.PaneID, job.EventID, replay})
 	}
+	if job.Late && job.Kind == "job.completed" {
+		var fields map[string]json.RawMessage
+		_ = json.Unmarshal(payload, &fields)
+		fields["late"] = json.RawMessage("true")
+		payload, _ = json.Marshal(fields)
+	}
 	payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 	payload = relayPayloadNotifyType(payload, job.NotifyType)
 	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
