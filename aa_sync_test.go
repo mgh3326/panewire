@@ -241,3 +241,22 @@ func TestAASyncOutRejectsFlag(t *testing.T) {
 		t.Fatalf("--out --dry-run: got exit %d, want usage exit %d", code, ExitUsage)
 	}
 }
+
+func TestAASyncRejectsTrailingCatalogDataBeforeFetch(t *testing.T) {
+	dir := t.TempDir()
+	script := "#!/bin/sh\nprintf '%s\\n' '{\"catalog\":[{\"profile\":\"p\"}],\"source\":{\"source\":\"server\"}}' 'warning'\n"
+	if err := os.WriteFile(filepath.Join(dir, "pacelever"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+	t.Setenv(aaKeyName, "fixture-key")
+	old := http.DefaultTransport
+	calls := 0
+	http.DefaultTransport = aaTestTransport(func(*http.Request) (*http.Response, error) { calls++; return nil, fmt.Errorf("unexpected request") })
+	t.Cleanup(func() { http.DefaultTransport = old })
+	var out, errs bytes.Buffer
+	code := runQuotaCLI([]string{"aa-sync", "--out", filepath.Join(dir, "catalog.json")}, &out, &errs)
+	if code != ExitInternal || calls != 0 {
+		t.Fatalf("exit=%d HTTP requests=%d; want internal error before fetch", code, calls)
+	}
+}

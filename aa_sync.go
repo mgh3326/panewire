@@ -278,7 +278,7 @@ func runAASync(args []string, out, errOut io.Writer) int {
 	}
 	dec := json.NewDecoder(bytes.NewReader(data))
 	dec.UseNumber()
-	if dec.Decode(&doc) != nil || len(doc.Catalog) == 0 || doc.Source.Stale || (path != "" && doc.Source.Source != "server") {
+	if !json.Valid(data) || dec.Decode(&doc) != nil || len(doc.Catalog) == 0 || doc.Source.Stale || (path != "" && doc.Source.Source != "server") {
 		fmt.Fprintln(errOut, "aa-sync: requires a fresh server catalog for --out")
 		return ExitInternal
 	}
