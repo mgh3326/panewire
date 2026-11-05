@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 // laneDaemonStub answers the spawn engine the way the node daemon does: one
@@ -58,7 +59,11 @@ func newLaneDaemonStub(t *testing.T, answer func(map[string]any) string) *laneDa
 					return
 				}
 				stub.requests <- request
-				fmt.Fprintln(conn, answer(request))
+				// An empty answer models a daemon that accepted the request and
+				// closed without replying.
+				if answer := answer(request); answer != "" {
+					fmt.Fprintln(conn, answer)
+				}
 			}(conn)
 		}
 	}()
@@ -235,6 +240,52 @@ func TestDaemonWithoutHubClientFallsBackToFleetConfig(t *testing.T) {
 	}
 	if r := spawnedReceipt(t, a, s.Job); r["hub_lane"] != "worker-a" || r["lane_error"] != nil {
 		t.Fatalf("receipt=%v", r)
+	}
+}
+
+// Once the request is written the daemon may have registered the lane, so a
+// missing or unreadable answer must be reported, not retried on the other
+// route with a different credential.
+func TestDaemonLaneSocketFailureDoesNotFallBack(t *testing.T) {
+	for _, tc := range []struct{ name, answer, want string }{
+		{"no answer", "", "lanes: the daemon accepted the registration but did not answer"},
+		{"invalid answer", "not json", "lanes: the daemon accepted the registration and answered invalid JSON"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, s, f, _ := laneDaemonSpawn(t)
+			a.Config.Hub = map[string]any{"hub_url": "https://hub.example.invalid"}
+			stub := newLaneDaemonStub(t, func(map[string]any) string { return tc.answer })
+			t.Setenv("PANEWIRE_SOCKET", stub.path)
+			if err := a.Spawn(context.Background(), s); err != nil {
+				t.Fatal(err)
+			}
+			if laneAddCalls(f) != 0 {
+				t.Fatal("a failed socket registration re-ran on the fleet-config route")
+			}
+			if r := spawnedReceipt(t, a, s.Job); r["lane_error"] != tc.want {
+				t.Fatalf("lane_error=%v, want %q", r["lane_error"], tc.want)
+			}
+		})
+	}
+}
+
+// The daemon's own hub call is bounded by timeout_ms, so the socket read must
+// outlive a shorter caller context instead of abandoning the registration.
+func TestLaneDaemonDeadlineOutlivesCallerContext(t *testing.T) {
+	now := time.Date(2026, 11, 5, 0, 0, 0, 0, time.UTC)
+	want := now.Add(laneDaemonCallTimeout + laneDaemonReadGrace)
+	short, cancelShort := context.WithDeadline(context.Background(), now.Add(time.Second))
+	defer cancelShort()
+	if got := laneDaemonDeadline(short, now); !got.Equal(want) {
+		t.Fatalf("short caller deadline: %v, want %v", got, want)
+	}
+	long, cancelLong := context.WithDeadline(context.Background(), now.Add(time.Hour))
+	defer cancelLong()
+	if got := laneDaemonDeadline(long, now); !got.Equal(now.Add(time.Hour)) {
+		t.Fatalf("long caller deadline: %v, want %v", got, now.Add(time.Hour))
+	}
+	if got := laneDaemonDeadline(context.Background(), now); !got.Equal(want) {
+		t.Fatalf("no caller deadline: %v, want %v", got, want)
 	}
 }
 

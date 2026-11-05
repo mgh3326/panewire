@@ -47,8 +47,9 @@ func (a *App) laneDaemonServes() bool {
 // registerLaneThroughDaemon asks the local daemon to register the lane with the
 // node hub client it already holds. errLaneDaemonAbsent is returned when no
 // socket answers or the daemon has no hub client, leaving the fleet-config
-// `lanes add` route as the fallback; every other answer is the registration's
-// result, with the exit status the daemon reported.
+// `lanes add` route as the fallback. Once the request is written the daemon may
+// have registered the lane, so a missing or unreadable answer is a failure
+// rather than a second attempt with another credential.
 func (a *App) registerLaneThroughDaemon(ctx context.Context, lane, parent, pane, machine string) error {
 	if !a.laneDaemonServes() {
 		return errLaneDaemonAbsent
@@ -58,11 +59,7 @@ func (a *App) registerLaneThroughDaemon(ctx context.Context, lane, parent, pane,
 		return errLaneDaemonAbsent
 	}
 	defer conn.Close()
-	if deadline, ok := ctx.Deadline(); ok {
-		_ = conn.SetDeadline(deadline)
-	} else {
-		_ = conn.SetDeadline(time.Now().Add(laneDaemonCallTimeout + laneDaemonReadGrace))
-	}
+	_ = conn.SetDeadline(laneDaemonDeadline(ctx, time.Now()))
 	request := struct {
 		Op string `json:"op"`
 		daemonop.LanesPut
@@ -77,7 +74,7 @@ func (a *App) registerLaneThroughDaemon(ctx context.Context, lane, parent, pane,
 	}
 	line, err := bufio.NewReader(conn).ReadString('\n')
 	if err != nil {
-		return errLaneDaemonAbsent
+		return fail(exitFailure, "lanes: the daemon accepted the registration but did not answer")
 	}
 	var response struct {
 		OK    bool   `json:"ok"`
@@ -85,7 +82,7 @@ func (a *App) registerLaneThroughDaemon(ctx context.Context, lane, parent, pane,
 		Error string `json:"error"`
 	}
 	if json.Unmarshal([]byte(line), &response) != nil {
-		return errLaneDaemonAbsent
+		return fail(exitFailure, "lanes: the daemon accepted the registration and answered invalid JSON")
 	}
 	if response.OK {
 		return nil
@@ -98,4 +95,16 @@ func (a *App) registerLaneThroughDaemon(ctx context.Context, lane, parent, pane,
 		detail = "lanes unavailable"
 	}
 	return fail(response.Code, "lanes: %s", detail)
+}
+
+// laneDaemonDeadline is the socket read deadline. The daemon bounds its hub
+// call by the request's timeout_ms, so the read waits at least that long even
+// when the caller's context is shorter: a shorter deadline would abandon a
+// slow but successful registration and re-run it on the fleet-config route.
+func laneDaemonDeadline(ctx context.Context, now time.Time) time.Time {
+	deadline := now.Add(laneDaemonCallTimeout + laneDaemonReadGrace)
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.After(deadline) {
+		deadline = ctxDeadline
+	}
+	return deadline
 }
