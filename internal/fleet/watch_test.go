@@ -364,6 +364,37 @@ func TestWatcherDecisionSurvivesRestart(t *testing.T) {
 	}
 }
 
+func TestWatcherDecisionTimeoutWhenReplyLookupFails(t *testing.T) {
+	a, _, _ := watchFixture(t)
+	t.Setenv("PANEWIRE_DECISION_TIMEOUT_S", "15")
+	putLaneEvent(t, a, "w:p1", "ESC | question", a.Now())
+	a.DecisionReply = func(context.Context, string, string, time.Time) (bool, error) {
+		return false, fmt.Errorf("daemon unavailable")
+	}
+	sleep := a.Sleep
+	polls := 0
+	a.Sleep = func(ctx context.Context, d time.Duration) error {
+		polls++
+		if polls > 6 {
+			return context.Canceled
+		}
+		return sleep(ctx, d)
+	}
+	if err := a.watch(context.Background(), []string{"j"}); err != nil {
+		t.Fatalf("watch did not time out: %v", err)
+	}
+	events, err := a.events("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range events {
+		if ev.Kind == "job.lost" && str(ev.Payload, "reason") == "decision_unanswered" {
+			return
+		}
+	}
+	t.Fatal("missing decision_unanswered loss")
+}
+
 func TestWatcherPreservesEscalation(t *testing.T) {
 	a, f, report := watchFixture(t)
 	writeReport(t, report, "stopped\n")
@@ -373,6 +404,22 @@ func TestWatcherPreservesEscalation(t *testing.T) {
 	}
 	if n, _ := completions(t, a, f); n != 0 {
 		t.Fatalf("escalation became completion: %d", n)
+	}
+	if state, pools := ledgerState(t, a, "j"); state != "released" || len(pools) != 0 {
+		t.Fatalf("escalation retained quota: state=%s pools=%v", state, pools)
+	}
+}
+
+func TestRearmEscalatedWatcherReleasesQuota(t *testing.T) {
+	a, _, _ := watchFixture(t)
+	putEvent(t, a, "j", "job.escalate", map[string]any{"question": "why?"})
+	starts := 0
+	if err := a.RearmWatchers(func(id string) error { starts++; return a.watch(context.Background(), []string{id, "--rearmed"}) }, func(string) {}); err != nil {
+		t.Fatal(err)
+	}
+	state, pools := ledgerState(t, a, "j")
+	if starts != 1 || state != "released" || len(pools) != 0 {
+		t.Fatalf("starts=%d state=%s pools=%v", starts, state, pools)
 	}
 }
 

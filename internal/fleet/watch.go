@@ -82,7 +82,7 @@ func (a *App) RearmWatchers(start func(string) error, log func(string)) error {
 		if err != nil {
 			continue
 		}
-		if j.Terminal || j.Reaped || workerEscalated(j) || j.Pane == "" || a.watchActive(id) {
+		if j.Terminal || j.Reaped || j.Pane == "" || a.watchActive(id) {
 			continue
 		}
 		if err := start(id); err != nil {
@@ -148,8 +148,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if e != nil {
 			return e
 		}
-		if j.Terminal || j.Reaped || workerEscalated(j) {
+		if j.Terminal || j.Reaped {
 			return nil
+		}
+		if workerEscalated(j) {
+			return a.releaseQuota(ctx, j)
 		}
 		agents, e := a.agents(ctx)
 		if e != nil {
@@ -159,8 +162,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if err != nil && waiting == nil {
 			return err
 		}
-		replyUnavailable := err != nil
-		if replyUnavailable {
+		if err != nil {
 			a.warn("decision reply query unavailable: %v", err)
 		}
 		if wasWaiting && waiting == nil {
@@ -181,7 +183,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				pending = false
 			}
 		}
-		if waiting != nil && !replyUnavailable && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
+		if waiting != nil && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}
