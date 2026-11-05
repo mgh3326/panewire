@@ -11,6 +11,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/durable"
+	"github.com/mgh3326/panewire/internal/textbound"
 )
 
 // Role routing (hk document policy/model-routing, operator 2026-11-01).
@@ -269,20 +272,7 @@ func (a *App) writeRoutingCache(p RoutingPolicy) error {
 	if e = os.MkdirAll(filepath.Dir(path), 0700); e != nil {
 		return e
 	}
-	f, e := os.CreateTemp(filepath.Dir(path), ".model-routing-*.json")
-	if e != nil {
-		return e
-	}
-	defer os.Remove(f.Name())
-	if _, e = f.Write(append(b, '\n')); e == nil {
-		e = f.Close()
-	} else {
-		f.Close()
-	}
-	if e != nil {
-		return e
-	}
-	return os.Rename(f.Name(), path)
+	return durable.ReplaceFileAtomically(path, ".model-routing-*.json", append(b, '\n'), 0600)
 }
 
 // routingPolicy reads the table from hk, refreshing the cache, else falls
@@ -317,9 +307,10 @@ func (a *App) routingPolicy(ctx context.Context) (RoutingPolicy, string, error) 
 	return p, fmt.Sprintf("cache@v%d", p.Version), nil
 }
 
+// clip bounds s to n bytes on a UTF-8 boundary, marking a cut with "…".
 func clip(s string, n int) string {
 	if len(s) > n {
-		return s[:n] + "…"
+		return textbound.PrefixWithin(s, n) + "…"
 	}
 	return s
 }

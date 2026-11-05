@@ -96,3 +96,19 @@ Worker briefs should explicitly say: **push a `wip:` commit every 30 minutes,
 and before any risky step.** This gives a redispatched worker a bounded,
 inspectable resume point; it does not change the spawn gate or make the hub a
 source of truth.
+
+## Harness session identity
+
+A `job.spawned` payload contains `harness_session` with `kind`, `id`, and
+`source`. This identifies the harness conversation, not the herdr session
+that contains the pane. On `job.completed`, panewire refreshes the reference
+from herdr and retains the landing reference if the pane is unavailable.
+Older jobs without this field keep their existing completion record format.
+
+Herdr's `agent list` reports `agent_session` from its harness integrations:
+Claude and Codex provide an ID; omp provides a session path or ID. `source`
+is herdr's reported source (for example, `herdr:codex`). Other harnesses can
+also supply a reference through the same metadata. A reference is accepted only
+for the matching pane and harness. If none is available at landing, `id` is
+`unknown` and `source` is `unavailable`; the spawn still proceeds. No session
+or credential file is read to discover this value.

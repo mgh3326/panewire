@@ -938,7 +938,7 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 	// Cleanup belongs to the successful relay.delivered acknowledgement, not
 	// to handoffkeep. Pre-R20 deployments still need bounded local state.
 	h.mu.Lock()
-	h.r19a.forgetRelayTimeout(pending.event.JobID)
+	h.relayControl.forgetRelayTimeout(pending.event.JobID)
 	if pending.kind == "lane.event" {
 		h.forgetLanePersistedLocked(relayEventDedupeKey("lane.event", pending.event))
 	}

@@ -2,10 +2,11 @@ package panewire
 
 import "time"
 
-// r19aHubState contains the independent lane/acknowledgement controls.  It is
-// deliberately grouped so later hub transport extensions do not need to edit
-// HubServer's shared field and constructor blocks.
-type r19aHubState struct {
+// hubRelayControlState contains the independent lane/acknowledgement controls
+// introduced in round R19a. It is deliberately grouped so later hub transport
+// extensions do not need to edit HubServer's shared field and constructor
+// blocks.
+type hubRelayControlState struct {
 	relayAckTimeout        time.Duration
 	relayPending           map[string]relayPending
 	relayTimeouts          map[string]struct{}
@@ -14,7 +15,7 @@ type r19aHubState struct {
 	acceptingOverridesPath string
 }
 
-func (s *r19aHubState) rememberRelayTimeout(jobID string) bool {
+func (s *hubRelayControlState) rememberRelayTimeout(jobID string) bool {
 	if _, already := s.relayTimeouts[jobID]; already {
 		s.relayTimeoutOrder.touch(jobID, relayTimeoutsMaxEntries)
 		return false
@@ -29,22 +30,22 @@ func (s *r19aHubState) rememberRelayTimeout(jobID string) bool {
 	return true
 }
 
-func (s *r19aHubState) forgetRelayTimeout(jobID string) {
+func (s *hubRelayControlState) forgetRelayTimeout(jobID string) {
 	delete(s.relayTimeouts, jobID)
 	s.relayTimeoutOrder.forget(jobID)
 }
 
-type r19aClientState struct {
+type clientRelayControlState struct {
 	relayInjectTimeout time.Duration
 }
 
-func newR19aHubState(config HubServerConfig, overrides map[string]acceptingOverride) r19aHubState {
-	return r19aHubState{
+func newHubRelayControlState(config HubServerConfig, overrides map[string]acceptingOverride) hubRelayControlState {
+	return hubRelayControlState{
 		relayAckTimeout: config.RelayAckTimeout, relayPending: make(map[string]relayPending), relayTimeouts: make(map[string]struct{}),
 		acceptingOverride: overrides, acceptingOverridesPath: config.AcceptingOverridesPath,
 	}
 }
 
-func newR19aClientState(config HubClientConfig) r19aClientState {
-	return r19aClientState{relayInjectTimeout: relayInjectTimeout(config.RelayInjectTimeout)}
+func newClientRelayControlState(config HubClientConfig) clientRelayControlState {
+	return clientRelayControlState{relayInjectTimeout: relayInjectTimeout(config.RelayInjectTimeout)}
 }

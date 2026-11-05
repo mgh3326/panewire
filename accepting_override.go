@@ -103,7 +103,7 @@ func loadAcceptingOverrides(path string) (map[string]acceptingOverride, error) {
 }
 
 func (h *HubServer) acceptingOverrideLocked(machine string) string {
-	if mode := h.r19a.acceptingOverride[machine].Mode; mode != "" {
+	if mode := h.relayControl.acceptingOverride[machine].Mode; mode != "" {
 		return mode
 	}
 	return acceptingOverrideAuto
@@ -121,7 +121,7 @@ func (h *HubServer) acceptingEffectiveLocked(machine string, advertised bool) bo
 }
 
 func (h *HubServer) persistAcceptingOverridesLocked(next map[string]acceptingOverride) error {
-	if h.r19a.acceptingOverridesPath == "" {
+	if h.relayControl.acceptingOverridesPath == "" {
 		return nil
 	}
 	modes := make(map[string]string, len(next))
@@ -139,7 +139,7 @@ func (h *HubServer) persistAcceptingOverridesLocked(next map[string]acceptingOve
 	if err != nil {
 		return err
 	}
-	return replaceFileAtomically(h.r19a.acceptingOverridesPath, ".accepting-overrides-*", append(b, '\n'), 0600)
+	return replaceFileAtomically(h.relayControl.acceptingOverridesPath, ".accepting-overrides-*", append(b, '\n'), 0600)
 }
 
 func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request *http.Request) {
@@ -184,8 +184,8 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 		http.Error(writer, "unknown node", http.StatusNotFound)
 		return
 	}
-	next := make(map[string]acceptingOverride, len(h.r19a.acceptingOverride)+1)
-	for key, value := range h.r19a.acceptingOverride {
+	next := make(map[string]acceptingOverride, len(h.relayControl.acceptingOverride)+1)
+	for key, value := range h.relayControl.acceptingOverride {
 		next[key] = value
 	}
 	next[machine] = acceptingOverride{Mode: body.Mode, Containment: body.Containment, ContainmentVerified: verified}
@@ -194,7 +194,7 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 		http.Error(writer, "accepting override unavailable", http.StatusInternalServerError)
 		return
 	}
-	h.r19a.acceptingOverride = next
+	h.relayControl.acceptingOverride = next
 	effective := false
 	if record := h.nodes[machine]; record != nil {
 		effective = h.acceptingEffectiveLocked(machine, record.accepting)

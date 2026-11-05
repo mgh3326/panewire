@@ -88,10 +88,10 @@ func (h *HubServer) rememberRelayHeld(machine string, held relayHeldPayload) boo
 	// The machine is still the entitlement; the pane is a detail — but the
 	// window must follow the pane the node actually holds, because the
 	// node's own relay.dropped is pane-checked in consumeRelayDropped.
-	if pending, exists := h.r19a.relayPending[key]; exists && pending.machine == machine {
+	if pending, exists := h.relayControl.relayPending[key]; exists && pending.machine == machine {
 		pending.held = true
 		pending.pane = held.Pane
-		h.r19a.relayPending[key] = pending
+		h.relayControl.relayPending[key] = pending
 	}
 	return true
 }
@@ -104,7 +104,7 @@ func (h *HubServer) releaseRelayHeld(machine string, released relayReleasedPaylo
 		return false
 	}
 	key := relayPendingKey(released.OriginalEventID, released.JobID)
-	pending, pendingExists := h.r19a.relayPending[key]
+	pending, pendingExists := h.relayControl.relayPending[key]
 	if !exists && !pendingExists {
 		return false
 	}
@@ -116,7 +116,7 @@ func (h *HubServer) releaseRelayHeld(machine string, released relayReleasedPaylo
 	delete(h.relayHeld, released.OriginalEventID)
 	if pendingExists {
 		pending.held, pending.armed = false, false
-		h.r19a.relayPending[key] = pending
+		h.relayControl.relayPending[key] = pending
 	}
 	go h.armRelayAckEvent(released.OriginalEventID, released.JobID)
 	return true
@@ -137,7 +137,7 @@ func (h *HubServer) consumeRelayDropped(machine string, dropped relayDroppedPayl
 		return false
 	}
 	key := relayPendingKey(dropped.OriginalEventID, dropped.JobID)
-	if pending, exists := h.r19a.relayPending[key]; exists && (pending.machine != machine || pending.pane != dropped.Pane) {
+	if pending, exists := h.relayControl.relayPending[key]; exists && (pending.machine != machine || pending.pane != dropped.Pane) {
 		return false
 	}
 	delete(h.relayHeld, dropped.OriginalEventID)
@@ -277,7 +277,7 @@ func (h *HubServer) queueRelayHeldControl(id int64, control hubRelayInjectEvent)
 }
 
 func (h *HubServer) cancelRelayPendingLocked(eventID int64, jobID string) {
-	delete(h.r19a.relayPending, relayPendingKey(eventID, jobID))
+	delete(h.relayControl.relayPending, relayPendingKey(eventID, jobID))
 }
 
 func parseRelayHeldID(request *http.Request) (int64, bool) {

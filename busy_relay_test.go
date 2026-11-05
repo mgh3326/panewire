@@ -974,7 +974,7 @@ func TestR449HubDroppedClearsProjectionAndPendingAck(t *testing.T) {
 	key := relayPendingKey(640, "relay-job-640")
 	hub.mu.Lock()
 	hub.relayHeld[640] = hubRelayHeldProjection{ID: 640, Lane: "lane-a", Pane: "fixture-pane", Machine: "host-a", JobID: "relay-job-640"}
-	hub.r19a.relayPending[key] = relayPending{machine: "host-a", pane: "fixture-pane", eventID: 640, kind: "lane.event", held: true}
+	hub.relayControl.relayPending[key] = relayPending{machine: "host-a", pane: "fixture-pane", eventID: 640, kind: "lane.event", held: true}
 	hub.mu.Unlock()
 	payload, err := json.Marshal(relayDroppedPayload{JobID: "relay-job-640", Pane: "fixture-pane", Lane: "lane-a", OriginalEventID: 640, Reason: "lane_rerouted"})
 	if err != nil {
@@ -1006,7 +1006,7 @@ func TestR449HubDroppedClearsProjectionAndPendingAck(t *testing.T) {
 		hub.handleAgentMessage(sender, "fixture", agent, forged)
 		hub.mu.Lock()
 		_, heldExists := hub.relayHeld[640]
-		_, pendingExists := hub.r19a.relayPending[key]
+		_, pendingExists := hub.relayControl.relayPending[key]
 		hub.mu.Unlock()
 		if !heldExists || !pendingExists {
 			t.Fatalf("forged drop from %s cleared held=%t pending=%t", sender, heldExists, pendingExists)
@@ -1015,7 +1015,7 @@ func TestR449HubDroppedClearsProjectionAndPendingAck(t *testing.T) {
 	hub.handleAgentMessage("host-a", "fixture", agent, wire)
 	hub.mu.Lock()
 	_, heldExists := hub.relayHeld[640]
-	_, pendingExists := hub.r19a.relayPending[key]
+	_, pendingExists := hub.relayControl.relayPending[key]
 	hub.mu.Unlock()
 	if heldExists || pendingExists {
 		t.Fatalf("drop left held=%t pending=%t", heldExists, pendingExists)
