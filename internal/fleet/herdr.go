@@ -762,7 +762,12 @@ var laneSecretRE = regexp.MustCompile(`(?i)\b(token|secret|password|authorizatio
 // laneFailureReason turns a lane registration error into the bounded,
 // single-line, redacted reason recorded in the receipt and the notice.
 func laneFailureReason(e error) string {
-	msg := strings.Join(strings.Fields(e.Error()), " ")
+	return SanitizeFailureDetail(e.Error())
+}
+
+// SanitizeFailureDetail bounds and redacts a diagnostic before it leaves the node.
+func SanitizeFailureDetail(text string) string {
+	msg := strings.Join(strings.Fields(text), " ")
 	msg = laneSecretRE.ReplaceAllString(msg, "$1=<redacted>")
 	return strings.ToValidUTF8(clip(msg, 240), "")
 }

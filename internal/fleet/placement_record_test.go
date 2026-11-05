@@ -297,9 +297,9 @@ func TestPlacementDryRunAndDelegatedExecutorDoNotProduceRows(t *testing.T) {
 			a, s, _, _ := cmdFixture(t)
 			h := placementServer(t, a)
 			s.DryRun = mode == "dry-run"
-			s.Delegated = mode == "ssh-executor"
+			s.Delegated = mode != "dry-run"
 			if mode == "hub-executor" {
-				s.OverrideReason = "hub-directed"
+				s.Delegated = true
 			}
 			if err := a.Spawn(context.Background(), s); err != nil {
 				t.Fatal(err)
@@ -356,7 +356,7 @@ func remotePlacementFixture(t *testing.T, transport, source, outcome string, met
 		}
 		return Result{}
 	})
-	s.Label, s.Workspace, s.OverrideReason, s.T = "worker-a", "workspace", "fixture", "T1"
+	s.Label, s.Workspace, s.OverrideReason, s.T, s.Containment = "worker-a", "workspace", "fixture", "T1", "hk:12"
 	s.Prompt = filepath.Join(a.Home, "brief.md")
 	if err := os.WriteFile(s.Prompt, []byte("brief text"), 0600); err != nil {
 		t.Fatal(err)
@@ -523,7 +523,7 @@ func TestPlacementExecutorEmitsFailureOnlyAfterLaunchAttempt(t *testing.T) {
 				a, s, f, _ := cmdFixture(t)
 				s.Delegated = delegated
 				if !delegated {
-					s.OverrideReason = "hub-directed"
+					s.Delegated = true
 				}
 				a.Config.Local["spawn"] = started
 				base := f.Do

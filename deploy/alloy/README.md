@@ -148,7 +148,9 @@ count by (machine_id) (namedprocess_namegroup_num_procs) > 31
 
 panewire, panewire and mergewake record failures and decisions as **fleet-event
 v1** lines. Each line is one JSON object with these string fields. All are always
-present except `request_id`:
+present except `request_id`; a panewire `placement` line adds `chosen` and
+`candidates`, and a successful `node_spawn` line adds `profile` and
+`duration_ms`:
 
 | Field | Meaning |
 | --- | --- |
@@ -157,9 +159,13 @@ present except `request_id`:
 | `tool` | `panewire`, `panewire` or `mergewake` (label) |
 | `kind` | What happened: `spawn`, `plan`, `placement`, `quota_observation` (panewire); `node_spawn` (panewire); `reviewer`, `review` (mergewake) (label) |
 | `job` | Job id, or `<repo>#<pr>` for reviews |
-| `request_id` | Hub spawn request id, on panewire `node_spawn` lines only; omitted when empty. It joins the line to the hub's spawn operation and the `request` tag of its Sentry event |
-| `outcome` | `refused`, `failed`, `skipped`, `missing`, `placed`, `stale`, `unusable` (label) |
-| `reason` | Short code: exit status class, spawn.json rule, ranking metric, skip reason. On `node_spawn` it can be a spawn-refusal code from panewire `internal/fleet/refusal.go`, such as `foreground_missing` |
+| `request_id` | Hub spawn request id, on panewire `node_spawn` and `placement` lines only; omitted when empty. It joins the line to the hub's spawn operation and the `request` tag of its Sentry event |
+| `chosen` | Panewire `placement` lines only: the host placement chose |
+| `candidates` | Panewire `placement` lines only: an array with one object per candidate host: `host`, `score`, the terms `cpu`, `mem`, `io`, `load`, `jobs` (each 0..1), `power`, `bridge` (claims inside the spawn bridge) and `outcome`. A host the hub reported nothing for has only `host` and `outcome`. At most 16 hosts. See panewire `docs/placement.md` |
+| `profile` | Panewire `node_spawn` lines of a successful spawn only: the launch profile |
+| `duration_ms` | Panewire `node_spawn` lines of a successful spawn only: milliseconds the node took, as a number |
+| `outcome` | `refused`, `failed`, `skipped`, `missing`, `placed`, `stale`, `unusable`, `ok` (label) |
+| `reason` | Short code: exit status class, spawn.json rule, ranking metric, skip reason. On `placement` it is the decision rule (`policy_order`, `challenger`, `all_loaded`) when the chosen host is the hub's pick, else the ranking metric. On `node_spawn` it can be a spawn-refusal code from panewire `internal/fleet/refusal.go`, such as `foreground_missing`, or `spawned` with outcome `ok` |
 | `detail` | At most 1 KiB of `key=value` facts and a stderr tail |
 
 Every tool writes to `<state home>/<tool>/events/fleet-events.jsonl`, where the

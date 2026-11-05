@@ -140,7 +140,7 @@ func TestPlacementPolicyMemoryDefaultsAndOverrides(t *testing.T) {
 	legacy, err := ParsePlacementPolicy([]byte(`{"local_machine":"host-a","spill_targets":["host-b"],"max_active_jobs":10,"load_ratio":0.6}`))
 	// The memory floor is the only threshold left with a default; the retired
 	// swap and pressure thresholds stay decodable but unset.
-	if err != nil || !sameMemoryFloat(legacy.MemoryFreePctMin, 30) || legacy.SwapUsedMBMax != nil || legacy.SwapInPerSMax != nil || legacy.PSISomeAvg10Max != nil || legacy.PressureLevelMin != nil || legacy.capacityWeight("host-a") != 1 {
+	if err != nil || !sameMemoryFloat(legacy.MemoryFreePctMin, 30) || legacy.SwapUsedMBMax != nil || legacy.SwapInPerSMax != nil || legacy.PSISomeAvg10Max != nil || legacy.PressureLevelMin != nil {
 		t.Fatalf("legacy policy lost memory defaults: %+v err=%v", legacy, err)
 	}
 	explicit, err := ParsePlacementPolicy([]byte(`{"local_machine":"host-a","spill_targets":["host-b"],"max_active_jobs":10,"load_ratio":0.6,"memory_free_pct_min":0,"swap_used_mb_max":17}`))
@@ -178,19 +178,19 @@ func TestPlacementSwapAndPressureNeverRefuse(t *testing.T) {
 	}
 }
 
-func TestPlacementCapacityWeightsRankCandidatesButDoNotOverrideRefusals(t *testing.T) {
+func TestPlacementPowerRanksCandidatesButDoesNotOverrideRefusals(t *testing.T) {
 	hub := memoryPlacementHub(t, "host-a", "host-b")
 	policy := memoryPlacementPolicy("host-a", "host-b")
-	policy.CapacityWeight = map[string]float64{"host-a": 1, "host-b": 2}
+	policy.Power = map[string]float64{"host-a": 50, "host-b": 100}
 	result := hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now())
-	if result.Candidates[0].Machine != "host-b" || result.Candidates[0].CapacityWeight != 2 {
-		t.Fatalf("capacity weight did not rank idle candidate: %+v", result.Candidates)
+	if result.Candidates[0].Machine != "host-b" {
+		t.Fatalf("power did not rank idle candidate: %+v", result.Candidates)
 	}
 	hub.nodes["host-b"].accepting = false
-	policy.CapacityWeight["host-b"] = 10000
+	policy.Power["host-b"] = 10000
 	result = hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now())
 	if result.Decision != "host-a" {
-		t.Fatalf("weight overrode refusal: %+v", result)
+		t.Fatalf("power overrode refusal: %+v", result)
 	}
 	for _, candidate := range result.Candidates {
 		if candidate.Machine == "host-b" && !strings.Contains(candidate.Reason, "not_accepting") {
@@ -350,7 +350,7 @@ func TestMemoryFieldsAreExposedByPlacementAndNodesAPIs(t *testing.T) {
 	if err := json.NewDecoder(placementResponse.Body).Decode(&placement); err != nil || len(placement.Candidates) != 1 {
 		t.Fatalf("placement response=%q err=%v", placementResponse.Body.String(), err)
 	}
-	for _, field := range []string{"memory_free_pct", "swap_used_mb", "swap_in_per_s", "pressure", "capacity_weight", "memory_known"} {
+	for _, field := range []string{"memory_free_pct", "swap_used_mb", "swap_in_per_s", "pressure", "memory_known"} {
 		if _, exists := placement.Candidates[0][field]; !exists {
 			t.Fatalf("placement omitted %s: %s", field, placementResponse.Body.String())
 		}
@@ -611,7 +611,7 @@ func TestPlacementWireGatesLiveMemoryFields(t *testing.T) {
 	}{Candidates: &candidates}); err != nil || len(candidates) != 1 {
 		t.Fatalf("placement wire=%s err=%v", raw, err)
 	}
-	for _, field := range []string{"swap_in_per_s", "pressure", "capacity_weight"} {
+	for _, field := range []string{"swap_in_per_s", "pressure"} {
 		if _, exists := candidates[0][field]; exists {
 			t.Fatalf("quiet node emitted %s: %s", field, raw)
 		}
@@ -632,7 +632,6 @@ func TestPlacementWireGatesLiveMemoryFields(t *testing.T) {
 
 	hub.nodes["host-a"].hostMemory = &HubHostMemory{FreePct: memoryFloat(85), SwapUsedMB: memoryFloat(0), SwapInPerS: memoryFloat(0), Pressure: memoryFloat(.1), Source: "proc_meminfo"}
 	policy := memoryPlacementPolicy("host-a")
-	policy.CapacityWeight = map[string]float64{"host-a": 2}
 	raw, err = json.Marshal(placementWire(hub.makePlacement(policy, placementMetrics{}, "hub-only", time.Now()), false))
 	if err != nil {
 		t.Fatal(err)
@@ -642,9 +641,9 @@ func TestPlacementWireGatesLiveMemoryFields(t *testing.T) {
 	}{Candidates: &candidates}); err != nil || len(candidates) != 1 {
 		t.Fatalf("placement wire=%s err=%v", raw, err)
 	}
-	for _, field := range []string{"swap_in_per_s", "pressure", "capacity_weight"} {
+	for _, field := range []string{"swap_in_per_s", "pressure"} {
 		if _, exists := candidates[0][field]; !exists {
-			t.Fatalf("live signal or weight did not emit %s: %s", field, raw)
+			t.Fatalf("live signal did not emit %s: %s", field, raw)
 		}
 	}
 	if names := parseHubHostsEquivalent(t, raw); len(names) != 1 || names[0] != "host-a" {

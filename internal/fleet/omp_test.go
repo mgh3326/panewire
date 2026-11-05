@@ -41,7 +41,7 @@ func ompSpawnFixture(t *testing.T) (*App, Spawn, *fakeRunner) {
 	if err := os.WriteFile(prompt, []byte("Implement the fixture change."), 0600); err != nil {
 		t.Fatal(err)
 	}
-	s := Spawn{CWD: cwd, Profile: "omp-opus", Prompt: prompt, Workspace: "workspace", Label: "worker-a", Job: "job-a", T: "T1", Task: "42", Role: "worker", Host: "local", OverrideReason: "fixture"}
+	s := Spawn{CWD: cwd, Profile: "omp-opus", Prompt: prompt, Workspace: "workspace", Label: "worker-a", Job: "job-a", T: "T1", Task: "42", Role: "worker", Host: "local", OverrideReason: "fixture", Containment: "hk:12"}
 	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "omp-opus", ModelID: "anthropic/claude-opus-5-5", Effort: "high", Grade: "S+", Pool: "anthropic-api", Gate: "default"}, GateDo: gatePools(map[string]string{"omp-opus": "anthropic-api"})}
 	started, submitted := false, false
 	token := ""

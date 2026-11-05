@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -45,6 +47,7 @@ const (
 	nodeRemoveUnregistered      = "unregistered"
 	nodeRemoveLocked            = "locked"
 	nodeRemoveDetached          = "detached"
+	nodeRemoveNotDetached       = "not_detached"
 	nodeRemoveStatusCheckFailed = "status-check-failed"
 	nodeRemoveIgnoredFiles      = "ignored-files"
 	nodeRemovePaneInUse         = "pane-in-use"
@@ -61,10 +64,11 @@ var (
 )
 
 var (
-	nodeShaPattern       = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
-	nodeFetchPullPattern = regexp.MustCompile(`^pull/[0-9]+/head$`)
-	nodeQuotaPoolPattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	nodeGlobClass        = regexp.MustCompile(`\[[^\]]*\]`)
+	nodeReviewerDirPattern = regexp.MustCompile(`^mwr-[a-z0-9._-]+$`)
+	nodeShaPattern         = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
+	nodeFetchPullPattern   = regexp.MustCompile(`^pull/[0-9]+/head$`)
+	nodeQuotaPoolPattern   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	nodeGlobClass          = regexp.MustCompile(`\[[^\]]*\]`)
 )
 
 type nodeWorktreePrepareArgs struct {
@@ -79,6 +83,7 @@ type nodeWorktreePrepareArgs struct {
 type nodeWorktreeRemoveArgs struct {
 	Cwd         string   `json:"cwd"`
 	ExpectHead  string   `json:"expect_head"`
+	Detached    bool     `json:"detached"`
 	Base        string   `json:"base"`
 	Regenerable []string `json:"regenerable"`
 }
@@ -90,9 +95,11 @@ type nodeQuotaRefreshArgs struct {
 // Results stay close to worktree.inspect: the inspected worktree rides along
 // whenever there is one worth reporting.
 type nodeWorktreePrepareResult struct {
-	Outcome     string        `json:"outcome"`
-	Worktree    *nodeWorktree `json:"worktree"`
-	RetryAfterS int           `json:"retry_after_s,omitempty"`
+	Outcome       string        `json:"outcome"`
+	Worktree      *nodeWorktree `json:"worktree"`
+	RetryAfterS   int           `json:"retry_after_s,omitempty"`
+	FastForwarded bool          `json:"fast_forwarded,omitempty"`
+	Reason        string        `json:"reason,omitempty"`
 }
 
 type nodeWorktreeRemoveResult struct {
@@ -648,13 +655,14 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 
 	dir := filepath.Join(workRoot, args.Dir)
 	outcome := ""
+	result := nodeWorktreePrepareResult{}
 	switch args.Mode {
 	case "branch":
-		outcome = client.nodePrepareBranch(ctx, git, clone, dir, args)
+		outcome = client.nodePrepareBranch(ctx, git, clone, dir, args, &result)
 	case "detached":
 		outcome = client.nodePrepareDetached(ctx, git, clone, dir, args)
 	}
-	result := nodeWorktreePrepareResult{Outcome: outcome}
+	result.Outcome = outcome
 	if outcome == nodePreparePrepared || outcome == nodePrepareReused {
 		result.Worktree = nodeWorktreeInspect(ctx, git, dir).Worktree
 		if result.Worktree == nil || result.Worktree.Head == "" {
@@ -666,10 +674,7 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	return result, ""
 }
 
-// nodePrepareBranch is runtug#18's branch behaviour on the node: fetch, then
-// reuse only a worktree already on the branch, and refuse a local branch
-// that points at another commit instead of silently tracking it.
-func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommandRunner, clone, dir string, args nodeWorktreePrepareArgs) string {
+func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommandRunner, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
 	if _, err := git(ctx, "-C", clone, "fetch", "--prune", "origin"); err != nil {
 		return nodeOutcomeGitFailed
 	}
@@ -723,7 +728,25 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 			return nodeOutcomeGitFailed
 		}
 		if !strings.EqualFold(head, expected) {
-			return nodePrepareBranchElsewhere
+			relation, err := nodeCommitRelation(ctx, git, clone, head, expected)
+			if err != nil {
+				return nodeOutcomeGitFailed
+			}
+			if relation != "behind" {
+				result.Reason = nodeBranchRelationReason(head, expected, relation)
+				return nodePrepareBranchElsewhere
+			}
+			collision, err := nodeIgnoredCheckoutCollision(ctx, git, dir, head, expected)
+			if err != nil {
+				return nodeOutcomeGitFailed
+			}
+			if collision {
+				return nodeOutcomeDirty
+			}
+			if _, err := git(ctx, "-C", dir, "merge", "--ff-only", "--no-overwrite-ignore", expected); err != nil {
+				return nodeOutcomeGitFailed
+			}
+			result.FastForwarded = true
 		}
 		return nodePrepareReused
 	}
@@ -732,8 +755,20 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		if err != nil {
 			return nodeOutcomeGitFailed
 		}
-		if expected != "" && !strings.EqualFold(strings.TrimSpace(string(out)), expected) {
-			return nodePrepareBranchElsewhere
+		local := strings.TrimSpace(string(out))
+		if !strings.EqualFold(local, expected) {
+			relation, err := nodeCommitRelation(ctx, git, clone, local, expected)
+			if err != nil {
+				return nodeOutcomeGitFailed
+			}
+			if relation != "behind" {
+				result.Reason = nodeBranchRelationReason(local, expected, relation)
+				return nodePrepareBranchElsewhere
+			}
+			if _, err := git(ctx, "-C", clone, "update-ref", "refs/heads/"+args.Branch, expected, local); err != nil {
+				return nodeOutcomeGitFailed
+			}
+			result.FastForwarded = true
 		}
 		if _, err := git(ctx, "-C", clone, "worktree", "add", dir, args.Branch); err != nil {
 			return nodeOutcomeGitFailed
@@ -750,6 +785,61 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		return nodeOutcomeGitFailed
 	}
 	return nodePreparePrepared
+}
+
+func nodeIgnoredCheckoutCollision(ctx context.Context, git relayCommandRunner, dir, head, expected string) (bool, error) {
+	changed, err := git(ctx, "-C", dir, "diff", "--name-only", "-z", head, expected, "--")
+	if err != nil {
+		return false, err
+	}
+	ignored, err := git(ctx, "-C", dir, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+	if err != nil {
+		return false, err
+	}
+	for _, path := range strings.Split(string(changed), "\x00") {
+		if path == "" {
+			continue
+		}
+		for _, local := range strings.Split(string(ignored), "\x00") {
+			if local != "" && (path == local || strings.HasPrefix(path, local+"/") || strings.HasPrefix(local, path+"/")) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func nodeCommitRelation(ctx context.Context, git relayCommandRunner, clone, local, expected string) (string, error) {
+	ancestor := func(a, b string) (bool, error) {
+		_, err := git(ctx, "-C", clone, "merge-base", "--is-ancestor", a, b)
+		if err == nil {
+			return true, nil
+		}
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, err
+	}
+	behind, err := ancestor(local, expected)
+	if err != nil {
+		return "", err
+	}
+	if behind {
+		return "behind", nil
+	}
+	ahead, err := ancestor(expected, local)
+	if err != nil {
+		return "", err
+	}
+	if ahead {
+		return "ahead", nil
+	}
+	return "diverged", nil
+}
+
+func nodeBranchRelationReason(local, expected, relation string) string {
+	return fmt.Sprintf("local=%s expected=%s relation=%s", utf8PrefixWithin(local, 7), utf8PrefixWithin(expected, 7), relation)
 }
 
 // nodePrepareDetached fetches the caller's closed ref, requires the commit
@@ -872,8 +962,12 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnregistered}, ""
 	case entry.Locked:
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveLocked}, ""
-	case entry.Branch == "":
+	case args.Detached && (entry.Branch != "" || !entry.Detached):
+		return nodeWorktreeRemoveResult{Outcome: nodeRemoveNotDetached}, ""
+	case !args.Detached && entry.Branch == "":
 		return nodeWorktreeRemoveResult{Outcome: nodeRemoveDetached}, ""
+	case args.Detached && (!nodeSamePath(filepath.Dir(worktree.Path), workRoot) || !nodeReviewerDirPattern.MatchString(filepath.Base(worktree.Path))):
+		return nodeWorktreeRemoveResult{Outcome: nodeRemoveOutsideWorkRoot}, ""
 	}
 	clean, err := nodeWorktreeClean(ctx, git, worktree.Path)
 	if err != nil {
@@ -882,14 +976,16 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	if !clean {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeDirty}, ""
 	}
-	// origin/* refs are a cache: refresh them before they prove "merged" or
-	// "pushed", and fail closed when the remote cannot be read.
-	if _, err := git(ctx, "-C", main, "fetch", "--prune", "--no-tags", "origin"); err != nil {
-		// Inconclusive, not a proven "unmerged": nothing is removed either way.
-		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
-	}
-	if !nodeBranchReleased(ctx, git, main, entry.Branch, args.Base) {
-		return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnmerged}, ""
+	if !args.Detached {
+		// origin/* refs are a cache: refresh them before they prove "merged" or
+		// "pushed", and fail closed when the remote cannot be read.
+		if _, err := git(ctx, "-C", main, "fetch", "--prune", "--no-tags", "origin"); err != nil {
+			// Inconclusive, not a proven "unmerged": nothing is removed either way.
+			return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
+		}
+		if !nodeBranchReleased(ctx, git, main, entry.Branch, args.Base) {
+			return nodeWorktreeRemoveResult{Outcome: nodeRemoveUnmerged}, ""
+		}
 	}
 	// Ignored files, then live panes, are read last, right before removal,
 	// so the window for a new file or a new pane is as short as possible.
@@ -925,11 +1021,13 @@ func (client *HubClient) nodeWorktreeRemove(ctx context.Context, args nodeWorktr
 	if _, err := git(ctx, "-C", main, "worktree", "remove", worktree.Path); err != nil {
 		return nodeWorktreeRemoveResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
-	// -d, never -D: git itself still refuses a branch that never merged. A
-	// branch that survives is logged, not hidden — the worktree is gone and
-	// the receipt reads removed either way.
-	if _, err := git(ctx, "-C", main, "branch", "-d", entry.Branch); err != nil {
-		slog.Warn("worktree.remove: branch delete failed", "branch", entry.Branch)
+	if !args.Detached {
+		// -d, never -D: git itself still refuses a branch that never merged. A
+		// branch that survives is logged, not hidden — the worktree is gone and
+		// the receipt reads removed either way.
+		if _, err := git(ctx, "-C", main, "branch", "-d", entry.Branch); err != nil {
+			slog.Warn("worktree.remove: branch delete failed", "branch", entry.Branch)
+		}
 	}
 	return nodeWorktreeRemoveResult{Outcome: nodeRemoveRemoved, Worktree: worktree}, ""
 }

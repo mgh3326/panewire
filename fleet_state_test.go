@@ -209,7 +209,7 @@ func TestFleetStateLoadMirrorsPlacement(t *testing.T) {
 	}
 	a, _ := fsLatest(hub, "node-a", fleetStateKindLoad, "")
 	b, _ := fsLatest(hub, "node-b", fleetStateKindLoad, "")
-	if a.Load.CapacityWeight != 2 || !a.Load.Connected || !a.Load.Accepting || b.Load.Connected || b.Load.CapacityWeight != 1 {
+	if !a.Load.Connected || !a.Load.Accepting || b.Load.Connected {
 		t.Fatalf("load a=%+v b=%+v", a.Load, b.Load)
 	}
 	// An unchanged value is not re-emitted before the republish bound.
