@@ -47,7 +47,7 @@ func (r ExecRunner) Run(ctx context.Context, c Command) Result {
 	code := 0
 	if e := cmd.Run(); e != nil && !(errors.Is(e, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success()) {
 		code = 1
-		if x, ok := e.(*exec.ExitError); ok {
+		if x, ok := e.(*exec.ExitError); ok && x.ExitCode() >= 0 {
 			code = x.ExitCode()
 		} else {
 			fmt.Fprintln(&err, e)
