@@ -1,6 +1,9 @@
 package fleet
 
-import "context"
+import (
+	"context"
+	"encoding/json"
+)
 
 // AgentSession is the session reference reported by herdr's agent.list.
 type AgentSession struct {
@@ -25,7 +28,10 @@ func FindHarnessSession(agents []Agent, pane, kind string) HarnessSession {
 		if agent.Pane != pane || agent.Kind != kind || agent.Session == nil {
 			continue
 		}
-		ref := agent.Session
+		var ref AgentSession
+		if json.Unmarshal(agent.Session, &ref) != nil {
+			break
+		}
 		if ref.Agent == kind && (ref.Kind == "id" || ref.Kind == "path") && ref.Value != "" && ref.Source != "" {
 			result.ID, result.Source = ref.Value, ref.Source
 		}
