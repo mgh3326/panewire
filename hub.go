@@ -193,7 +193,10 @@ type hubAgent struct {
 	conn *websocket.Conn
 	// credential is the node token the websocket opened with; an auth reload
 	// that no longer maps the machine to it closes the socket.
-	credential  string
+	credential string
+	// machineID is the node this socket authenticated as. It is the sender
+	// the lane inbox records for a lane.event the node relays.
+	machineID   string
 	writeMu     sync.Mutex
 	transient   bool
 	failovers   chan hubFailoverEvent
@@ -822,6 +825,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/inbox", h.handleInboxList)
 	mux.HandleFunc("GET /v1/inbox/count", h.handleInboxCount)
 	mux.HandleFunc("GET /v1/inbox/wait", h.handleInboxWait)
+	mux.HandleFunc("GET /v1/inbox/ack-state", h.handleInboxAckState)
 	mux.HandleFunc("POST /v1/inbox/{id}/read", h.handleInboxRead)
 	mux.HandleFunc("POST /v1/inbox/ack", h.handleInboxAck)
 	mux.HandleFunc("GET /v1/relay/held", h.handleRelayHeld)
@@ -1157,7 +1161,7 @@ func (h *HubServer) handleAgent(writer http.ResponseWriter, request *http.Reques
 		return
 	}
 	connection.SetReadLimit(hubMaxMessageBytes)
-	agent := &hubAgent{conn: connection, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), wakes: make(chan hubWakeRequestEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
+	agent := &hubAgent{conn: connection, machineID: machineID, credential: hubRequestBearerToken(request), failovers: make(chan hubFailoverEvent, 64), bursts: make(chan hubBurstEvent, 64), wakes: make(chan hubWakeRequestEvent, 64), revocations: make(chan hubJobRevokedEvent, 64), assignments: make(chan hubJobAssignedEvent, 64), holds: make(chan hubBurstHoldsEvent, 4), features: make(chan hubFeaturesEvent, 1), relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64), idleRoutes: make(chan hubIdleWakeRouteEvent, 64)}
 	defer connection.CloseNow()
 	agentContext, agentCancel := context.WithCancel(request.Context())
 	defer agentCancel()
@@ -2651,4 +2655,13 @@ func (subscriber *hubEventSubscriber) writeLoop() {
 			}
 		}
 	}
+}
+
+// hubAgentMachineID is the node behind a socket, or "" for the hub's own
+// relays, which carry no agent.
+func hubAgentMachineID(agent *hubAgent) string {
+	if agent == nil {
+		return ""
+	}
+	return agent.machineID
 }
