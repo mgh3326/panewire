@@ -803,11 +803,13 @@ func writeJobRecord(eventsDir, kind string, fields []jobField) error {
 		case int:
 			body.WriteString(strconv.Itoa(value))
 		case fleet.HarnessSession:
-			data, err := json.Marshal(value)
-			if err != nil {
-				return err
-			}
-			body.Write(data)
+			body.WriteString(`{"kind":`)
+			body.WriteString(pythonJSONString(value.Kind))
+			body.WriteString(`,"id":`)
+			body.WriteString(pythonJSONString(value.ID))
+			body.WriteString(`,"source":`)
+			body.WriteString(pythonJSONString(value.Source))
+			body.WriteByte('}')
 		default:
 			return fmt.Errorf("unsupported record field %s", field.key)
 		}

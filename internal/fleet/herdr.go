@@ -87,15 +87,15 @@ func (a *App) routeEnv(s Seat) ([]string, error) {
 }
 
 type Agent struct {
-	Pane           string        `json:"pane_id"`
-	Tab            string        `json:"tab_id"`
-	Name           string        `json:"name"`
-	Kind           string        `json:"agent"`
-	Status         string        `json:"agent_status"`
-	CWD            string        `json:"cwd"`
-	StateChangeSeq *int64        `json:"state_change_seq,omitempty"`
-	Focused        bool          `json:"focused,omitempty"`
-	Session        *AgentSession `json:"agent_session,omitempty"`
+	Pane           string          `json:"pane_id"`
+	Tab            string          `json:"tab_id"`
+	Name           string          `json:"name"`
+	Kind           string          `json:"agent"`
+	Status         string          `json:"agent_status"`
+	CWD            string          `json:"cwd"`
+	StateChangeSeq *int64          `json:"state_change_seq,omitempty"`
+	Focused        bool            `json:"focused,omitempty"`
+	Session        json.RawMessage `json:"agent_session,omitempty"`
 }
 
 func (a *App) agents(ctx context.Context) ([]Agent, error) {

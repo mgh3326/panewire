@@ -42,7 +42,11 @@ func jobHarnessSession(eventsDir, pane string) *fleet.HarnessSession {
 		session := event.Payload.HarnessSession
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "herdr", "agent", "list")
+		binary := os.Getenv("HERDR_BIN")
+		if binary == "" {
+			binary = "herdr"
+		}
+		cmd := exec.CommandContext(ctx, binary, "agent", "list")
 		cmd.Env = hubSpawnEnvironment(os.Environ(), event.Payload.HerdrSession)
 		output, err := cmd.Output()
 		if err == nil {
