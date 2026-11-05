@@ -66,10 +66,19 @@ func (c *PlacementScoreConfig) valid() bool {
 	}
 	in := func(v *float64, lo, hi float64) bool { return v == nil || (*v >= lo && *v <= hi) }
 	pos := func(v *float64, hi float64) bool { return v == nil || (*v > 0 && *v <= hi) }
+	// The ordering holds for the effective values: a knee set above the default
+	// cap would otherwise leave the load term at 1 for every reading.
+	knee, loadCap := placementDefaultLoadKnee, placementDefaultLoadCap
+	if c.LoadKnee != nil {
+		knee = *c.LoadKnee
+	}
+	if c.LoadCap != nil {
+		loadCap = *c.LoadCap
+	}
 	return in(c.MemFloor, 0, 1) && pos(c.MemSpan, 1) && pos(c.PageInHalfMBps, 100000) && pos(c.LinuxSwapInHalfMBps, 100000) &&
 		in(c.LoadKnee, 0, 100) && pos(c.LoadCap, 100) && pos(c.JobsHalf, 10000) && in(c.ClaimCost, 0, 10000) &&
 		in(c.Hysteresis, 1, 100) && in(c.AllLoadedBelow, 0, 10000) &&
-		(c.LoadKnee == nil || c.LoadCap == nil || *c.LoadKnee < *c.LoadCap)
+		knee < loadCap
 }
 
 func (p PlacementPolicy) scoreK() placementScoreK {
