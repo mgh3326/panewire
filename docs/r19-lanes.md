@@ -31,14 +31,23 @@ node gives its local herdr injection a bounded 10-second context and keeps its
 websocket read loop available while it runs.
 
 An operator can temporarily control eligibility without changing node startup
-flags: `POST /v1/nodes/<machine>/accepting` with `{"mode":"on"}`, `off`, or
-`auto` and an operator bearer token. `auto` follows the hello value. The UI
-shows the effective value and provides the same controls. Overrides disappear
-at restart unless `--accepting-overrides /path/overrides.json` is set; that
-file is read at startup and atomically updated after each successful POST:
+flags. Send `POST /v1/nodes/<machine>/accepting` with an operator bearer token:
+`{"mode":"off","containment":"hk:12"}` disables accepting and requires an
+open containment task ID matching `hk:` followed by 1–9 digits, starting with
+1–9. Missing or invalid IDs return `400 containment_required`. With
+`--handoffkeep-env` configured, the hub checks the task: a closed task returns
+`409 containment_closed`, and a missing task returns `400 containment_not_found`.
+If handoffkeep is unavailable, the off still succeeds with
+`containment_verified: false`; check the task when service is restored.
+`{"mode":"on"}` and `{"mode":"auto"}` need no containment; auto follows the
+hello value. The UI prompts for the task when turning off. `/v1/nodes` and
+`panewire nodes` show the containment, and the API also shows verification state.
+Overrides disappear at restart unless `--accepting-overrides /path/overrides.json`
+is set. The hub reads that file at startup and atomically updates it on each
+successful POST. Older files with string modes remain supported.
 
 ```json
-{"overrides":{"host-a":"off"}}
+{"overrides":{"host-a":{"mode":"off","containment":"hk:12","containment_verified":true}}}
 ```
 
 The transport this contract rides on changed in R20: relay events are now

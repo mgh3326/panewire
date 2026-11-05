@@ -110,7 +110,7 @@ func TestR19AcceptingOverrideControlsPlacementAndUI(t *testing.T) {
 	}
 	h.nodes["host-a"] = &hubNodeRecord{machineID: "host-a", accepting: true, state: "connected", agent: &hubAgent{}, activeJobs: map[string]HubActiveJob{}, remoteMeta: map[string]string{}}
 	set := func(mode string) int {
-		request := httptest.NewRequest(http.MethodPost, "/v1/nodes/host-a/accepting", bytes.NewBufferString(`{"mode":"`+mode+`"}`))
+		request := httptest.NewRequest(http.MethodPost, "/v1/nodes/host-a/accepting", bytes.NewBufferString(`{"mode":"`+mode+`","containment":"hk:12"}`))
 		request.Header.Set("Authorization", "Bearer operator-token")
 		response := httptest.NewRecorder()
 		h.Handler().ServeHTTP(response, request)
@@ -134,7 +134,7 @@ func TestR19AcceptingOverrideControlsPlacementAndUI(t *testing.T) {
 		t.Fatalf("auto did not return to hello value: %+v", data.Nodes[0])
 	}
 	b, err := os.ReadFile(overrides)
-	if err != nil || !bytes.Contains(b, []byte(`"host-a":"auto"`)) {
+	if err != nil || !bytes.Contains(b, []byte(`"host-a":{"mode":"auto"`)) {
 		t.Fatalf("override file=%q err=%v", b, err)
 	}
 }
