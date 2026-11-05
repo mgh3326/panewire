@@ -213,6 +213,12 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 		repo.sourceDir = cwd
 		repo.branch = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "branch", "--show-current").Out)
 		repo.head = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "rev-parse", "HEAD").Out)
+		if s.Role != "reviewer" && s.Role != "counsel" && repo.branch != "" {
+			defaultRef := a.call(ctx, "git", "-C", cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+			if defaultRef.Code == 0 && strings.TrimSpace(defaultRef.Out) == "origin/"+repo.branch {
+				return Submission{}, fail(exitPlacement, "create a worktree on a new branch (git worktree add -b wk/<slug> ...) and pass it as -c")
+			}
+		}
 		repo.wt = s.Job
 		if len(repo.wt) > 110 {
 			sum := sha256.Sum256([]byte(s.Job))
@@ -223,7 +229,11 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	var checkout *HubCheckout
 	if repo.wt != "" {
 		var why string
-		checkout, why = a.hubCheckout(ctx, repo)
+		checkoutRepo := *repo
+		if s.Role == "reviewer" || s.Role == "counsel" {
+			checkoutRepo.branch = ""
+		}
+		checkout, why = a.hubCheckout(ctx, &checkoutRepo)
 		if checkout == nil {
 			return Submission{}, fail(exitPlacement, "%s", why)
 		}
