@@ -45,6 +45,7 @@ type reportRelayRoute struct {
 	Deliver   string              `json:"deliver,omitempty"`
 	Protected bool                `json:"protected,omitempty"`
 	Standby   *reportRelayStandby `json:"standby,omitempty"`
+	jobRecord bool
 }
 
 var errReportRelayRoutesInvalid = errors.New("report relay routes invalid")
@@ -692,6 +693,22 @@ func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (re
 	if exists && h.nodes[route.Machine] != nil {
 		agent = h.nodes[route.Machine].agent
 	}
+	if kind == "lane.event" && (!exists || agent == nil || route.Pane == "") {
+		var match *hubJobRecord
+		for _, job := range h.jobs {
+			if job.Completed || job.AgentLabel != event.OwnerLane {
+				continue
+			}
+			if match != nil {
+				return reportRelayRoute{}, nil, false
+			}
+			match = job
+		}
+		if match != nil && match.Pane != "" && h.nodes[match.Node] != nil && h.nodes[match.Node].agent != nil {
+			return reportRelayRoute{Machine: match.Node, Pane: match.Pane, jobRecord: true}, h.nodes[match.Node].agent, true
+		}
+		return reportRelayRoute{}, nil, false
+	}
 	return route, agent, exists && agent != nil
 }
 
@@ -724,6 +741,9 @@ func (h *HubServer) injectLaneRelayEvent(event hubJobEventPayload, route reportR
 		return false
 	}
 	h.armRelayAckEvent(eventID, event.JobID)
+	if route.jobRecord {
+		h.logger.Info("relay delivered", "route", "job-record", "lane", event.OwnerLane, "event_id", event.EventID)
+	}
 	return true
 }
 
@@ -1320,6 +1340,9 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent, source string
 			return
 		}
 		h.armRelayAckEvent(record.ID, event.JobID)
+		if route.jobRecord {
+			h.logger.Info("relay delivered", "route", "job-record", "lane", event.OwnerLane, "event_id", event.EventID)
+		}
 		// A queued chat directive just made it to the destination channel:
 		// mark the message delivered. Question resolution is explicit only.
 		if match := chatRelayEventPattern.FindStringSubmatch(record.EventID); match != nil {
