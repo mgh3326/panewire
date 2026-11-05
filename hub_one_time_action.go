@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/getsentry/sentry-go"
@@ -74,8 +75,10 @@ func (h *HubServer) noteOneTimeAction(machine, kind, need string, at time.Time) 
 	h.logger.Warn("host needs a one-time action", "host", machine, "kind", kind, "need", need)
 	if client := h.spawnSentryClient(); client != nil {
 		hub := sentry.NewHub(client, sentry.NewScope())
-		reason := "one_time_action/" + kind + "/" + need
-		hub.CaptureEvent(&sentry.Event{Level: sentry.LevelWarning, Message: "HOST_NEEDS_ACTION " + reason, Fingerprint: []string{"one_time_action", kind, need}, Tags: map[string]string{"host": machine, "kind": kind, "need": need}})
+		// The title and fingerprint carry the action without its quotes, so one
+		// issue is one host and action and the Discord rule posts it once.
+		plain := strings.ReplaceAll(action, `"`, "")
+		hub.CaptureEvent(&sentry.Event{Level: sentry.LevelWarning, Message: fmt.Sprintf("ACTION NEEDED: %s %s — %s", machine, kind, plain), Fingerprint: []string{"action-needed", machine, kind, plain}, Tags: map[string]string{"host": machine, "kind": kind, "need": need}})
 	}
 }
 

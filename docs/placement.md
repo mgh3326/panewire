@@ -138,7 +138,11 @@ Nothing answers the dialog: trust stays a one-time human action on the host.
 
 The first time a host reports a need for a harness kind, the hub sends one
 `lane.event` to `operator-desk` and one Sentry warning (when hub Sentry is
-configured):
+configured). The Sentry event is titled `ACTION NEEDED: <host> <kind> — <action>`
+(quotes dropped from the action) with fingerprint
+`[action-needed, host, kind, action]`, so the existing Sentry→Discord rule posts
+one message per host and action. The hub resolves nothing: a recurrence after the
+operator resolves the issue alerts again as a regression. The desk line:
 
 ```
 [oci] codex needs a one-time action: run codex once and choose "Trust all and continue"

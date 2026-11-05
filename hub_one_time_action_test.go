@@ -277,14 +277,27 @@ func TestOneTimeActionSendsOneSentryWarning(t *testing.T) {
 	dialog := readinessWith(now, "codex", fleet.HarnessReadiness{Installed: true, Dialog: fleet.DialogCodexHooksReview})
 	h.noteReadinessActions("oci", dialog, now)
 	h.noteReadinessActions("oci", dialog, now.Add(time.Minute))
-	h.spawnSentry.Flush(time.Second)
+	h.noteOneTimeActionRefusal("oci", "codex-sol", hubSpawnResult{RC: 90, StdoutTail: hooksTail})
 	eventually(t, 5*time.Second, "desk notice", func() bool { return len(deskNotices(t, destination)) > 0 })
 	transport.mu.Lock()
+	n := len(transport.events)
+	transport.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("sentry events=%d, want 1 while the need is uncleared", n)
+	}
+	// Cleared and back: the same fingerprint is sent once more.
+	h.noteReadinessActions("oci", readinessWith(now.Add(2*time.Minute), "codex", fleet.HarnessReadiness{Installed: true}), now.Add(2*time.Minute))
+	h.noteReadinessActions("oci", readinessWith(now.Add(3*time.Minute), "codex", dialog.Harnesses["codex"]), now.Add(3*time.Minute))
+	transport.mu.Lock()
 	defer transport.mu.Unlock()
-	if len(transport.events) != 1 {
-		t.Fatalf("sentry events=%d, want 1", len(transport.events))
+	if len(transport.events) != 2 || strings.Join(transport.events[1].Fingerprint, "|") != strings.Join(transport.events[0].Fingerprint, "|") {
+		t.Fatalf("sentry events after recurrence=%d", len(transport.events))
 	}
 	event := transport.events[0]
+	wantTitle := "ACTION NEEDED: oci codex — run codex once and choose Trust all and continue"
+	if event.Message != wantTitle || strings.Join(event.Fingerprint, "|") != "action-needed|oci|codex|run codex once and choose Trust all and continue" {
+		t.Fatalf("title=%q fingerprint=%q", event.Message, event.Fingerprint)
+	}
 	if event.Level != sentry.LevelWarning || event.Tags["host"] != "oci" || event.Tags["kind"] != "codex" || event.Tags["need"] != fleet.DialogCodexHooksReview {
 		t.Fatalf("event=%+v", event)
 	}
