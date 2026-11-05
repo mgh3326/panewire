@@ -77,6 +77,11 @@ type HubSpawnReply struct {
 	StdoutTail string `json:"stdout_tail"`
 	Error      string `json:"error"`
 	Status     string `json:"status"`
+	// NextHost is set by the hub's own transport when it handed the request back
+	// to placement after a refusal that rules out only this host (a first-run
+	// dialog, a missing login, an unmapped repository). The loop tries the next
+	// candidate; the refusal is not the request's answer.
+	NextHost bool `json:"next_host,omitempty"`
 }
 
 // Hub failure kinds. Every one of them refuses or stops the host; none falls
@@ -662,6 +667,9 @@ func (a *App) hubReply(host string, checkout *HubCheckout, r HubSpawnReply, forc
 			dir = checkout.Dir
 		}
 		return candResult{stop: fail(exitPlacement, "cannot prepare worktree %s on %s: checkout refused (%s)", dir, host, outcome)}
+	}
+	if r.NextHost {
+		return candResult{rc: exitConfig, note: "hub_" + strings.TrimPrefix(r.Error, "spawn_failed:")}
 	}
 	switch r.Error {
 	case "spawn_disabled", "cwd_unmapped", "panewire_missing", "brief_doc_unavailable":

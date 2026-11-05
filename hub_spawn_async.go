@@ -372,12 +372,26 @@ type directSpawnTransport struct {
 	started time.Time
 }
 
-// spawnRefusalTriesNextHost names a node refusal that says only that this node
-// cannot run the request. The node answers it before any checkout or engine
-// call, and the hub cannot see a node's spawn.json to rule the node out first.
+// nextHostRefusals are the refusals that say only that this host cannot run the
+// request now. cwd_unmapped is answered before any checkout or engine call, and
+// the hub cannot see a node's spawn.json to rule the node out first. The rest
+// are the first-run refusals a person clears once on the host: a dialog the
+// engine stopped at (hooks review, workspace trust, the omp setup wizard) and a
+// missing login. The reason names the engine's code as spawnResultReason
+// writes it. docs/placement.md, "Readiness".
+var nextHostRefusals = map[string]bool{
+	"cwd_unmapped":                  true,
+	"spawn_failed:hooks_review":     true,
+	"spawn_failed:trust_prompt":     true,
+	"spawn_failed:omp_setup_wizard": true,
+	"spawn_failed:auth_unavailable": true,
+}
+
+// spawnRefusalTriesNextHost names a node refusal that moves an auto placement
+// to the next candidate instead of ending the request.
 func spawnRefusalTriesNextHost(reason string) bool {
 	code, _, _ := strings.Cut(reason, ": ")
-	return code == "cwd_unmapped"
+	return nextHostRefusals[code]
 }
 
 func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequest) (fleet.HubSpawnReply, error) {
@@ -421,7 +435,9 @@ func (t *directSpawnTransport) Spawn(ctx context.Context, req fleet.HubSpawnRequ
 // nextHostAfterRefusal hands an auto placement back to its candidate loop. A
 // pinned host is the operator's choice, so its refusal stays the answer.
 func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hubSpawnRequest, result hubSpawnResult) bool {
-	if !t.placing || result.RC == 0 || !spawnRefusalTriesNextHost(result.Error) || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
+	// A dialog refusal comes after the engine launched a pane, so only a
+	// verified cleanup (Retryable) lets another host take the job id.
+	if !t.placing || result.RC == 0 || !result.Retryable || !spawnRefusalTriesNextHost(spawnResultReason(result)) || firstNonEmptyString(hubSpawnArg(t.task.Request.Args, "--host"), "auto") != "auto" {
 		return false
 	}
 	task, err := t.h.inbox.store.unbindRefusedSpawn(ctx, t.task.Request.RequestID, t.task.Attempt, node.RequestID)
@@ -430,9 +446,11 @@ func (t *directSpawnTransport) nextHostAfterRefusal(ctx context.Context, node hu
 	}
 	t.task, t.bound = task, false
 	// A refusal that moves the request to another host still counts against
-	// this host's launch backoff: cwd_unmapped is such a failure.
-	t.h.observeLaunchOutcome(node.Machine, hubSpawnArg(node.Args, "-m"), result.RC, result.Error, t.h.now().UTC())
-	t.h.logger.Warn("hub spawn refused by node; trying next candidate", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", hubSpawnArg(node.Args, "-m"), "rc", result.RC, "reason", result.Error)
+	// this host's launch backoff: cwd_unmapped and a first-run dialog are such
+	// failures.
+	reason := spawnResultReason(result)
+	t.h.observeLaunchOutcome(node.Machine, hubSpawnArg(node.Args, "-m"), result.RC, reason, t.h.now().UTC())
+	t.h.logger.Warn("hub spawn refused by node; trying next candidate", "request_id", task.Request.RequestID, "node_request_id", node.RequestID, "job", task.Job, "host", node.Machine, "profile", hubSpawnArg(node.Args, "-m"), "rc", result.RC, "reason", reason)
 	return true
 }
 func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnRequest) (fleet.HubSpawnReply, error) {
@@ -471,8 +489,9 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		if result.RC == 0 && (node.Checkout != nil && (result.Receipt == nil || !spawnReceiptCheckoutPath(result.Receipt.CWD, node.Checkout.Dir, hubSpawnArg(node.Args, "-L"))) || !h.verifySpawnPane(ctx, node.Machine, result, node.Args)) {
 			return t.unknown(ctx, "unknown")
 		}
+		h.noteOneTimeActionRefusal(node.Machine, hubSpawnArg(node.Args, "-m"), result)
 		if t.nextHostAfterRefusal(ctx, node, result) {
-			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: result.Error}, nil
+			return fleet.HubSpawnReply{RequestID: result.RequestID, RC: result.RC, JobID: result.JobID, StdoutTail: result.StdoutTail, Error: spawnResultReason(result), NextHost: true}, nil
 		}
 		stage := result.Stage
 		if stage == "" {
@@ -490,14 +509,8 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 			outcome.Role = result.Receipt.Role
 			outcome.LaneUnregistered = result.Receipt.LaneUnregistered
 		}
-		if outcome.RC != 0 && outcome.Reason == "" {
-			outcome.Reason = "spawn_failed"
-		}
 		if outcome.RC != 0 {
-			if code := spawnFailureCode(result); outcome.Reason == "spawn_failed" && code != "" {
-				outcome.Reason += ":" + code
-			}
-			outcome.Reason = spawnOutcomeReason(outcome.Reason, spawnResultRefusal(result.StdoutTail))
+			outcome.Reason = spawnOutcomeReason(spawnResultReason(result), spawnResultRefusal(result.StdoutTail))
 		}
 		changed, err := h.inbox.store.completeSpawn(h.closeCtx, t.task, outcome, h.now().UTC())
 		if err != nil {
@@ -696,6 +709,19 @@ func spawnOutcomeReason(code, refusal string) string {
 		return code
 	}
 	return utf8PrefixWithin(code+": "+refusal, hubSpawnReasonLimit)
+}
+
+// spawnResultReason is the stable reason code of a failed node result: the
+// wire error, with the engine's refusal code appended to a bare spawn_failed.
+func spawnResultReason(result hubSpawnResult) string {
+	reason := result.Error
+	if reason == "" {
+		reason = "spawn_failed"
+	}
+	if code := spawnFailureCode(result); reason == "spawn_failed" && code != "" {
+		reason += ":" + code
+	}
+	return reason
 }
 
 // spawnFailureCode is the closed-set code for a spawn_failed node result, or ""

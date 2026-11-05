@@ -19,13 +19,20 @@ import (
 // and stores relays in a fake handoffkeep, so a test observes real injections.
 func spawnNotifyHub(t *testing.T, policy string) (*HubServer, *fakeHandoffkeep, *hubAgent) {
 	t.Helper()
+	return spawnNotifyHubLane(t, policy, "parent")
+}
+
+// spawnNotifyHubLane is spawnNotifyHub with the connected destination serving
+// the named lane.
+func spawnNotifyHubLane(t *testing.T, policy, lane string) (*HubServer, *fakeHandoffkeep, *hubAgent) {
+	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
 	fake, client, stop := newFakeHandoffkeep(t)
 	t.Cleanup(stop)
 	config := HubServerConfig{
 		Tokens:          map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "desk-token"},
 		InboxStorePath:  filepath.Join(t.TempDir(), "inbox.sqlite3"),
-		ReportRelayPath: r20LanesFile(t, `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"}}}`),
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{"`+lane+`":{"machine":"machine-b","pane":"w1:p1"}}}`),
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		handoffkeep:     client,
 	}
