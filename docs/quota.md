@@ -72,3 +72,17 @@ same code. Other pools still run pacelever until their own change.
   announced at most every 10 minutes per account, under the node's machine id.
   With no `handoffkeep_env` the node measures directly and publishes to no
   store; with one it cannot use, the refresh fails `shared_unavailable`.
+
+### Artificial Analysis annotations
+
+`panewire quota aa-sync --out catalog.json` reads the current catalog through
+pacelever, fetches the free Data API, and writes a catalog artifact for review
+and a later operator-controlled catalog push. `--dry-run` reports the result
+without writing the artifact. The catalog must be fresh and server-sourced when
+using `--out`. Only explicit model mappings are annotated; unmapped or ambiguous
+rows are reported. Annotations are model priors, not grade evidence.
+
+Set `ARTIFICIAL_ANALYSIS_API_KEY` in the environment, or place it in the optional
+mode-0600 `panewire/aa.env` under the user configuration directory. Data is
+provided by [Artificial Analysis](https://artificialanalysis.ai/); see its
+[Data API reference](https://artificialanalysis.ai/data-api/docs/reference).

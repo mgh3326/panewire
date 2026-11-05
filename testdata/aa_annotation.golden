@@ -1,0 +1,17 @@
+{
+  "catalog": [
+    {
+      "benchmark_annotation": "{\"intelligence_index\":34.5,\"price_1m_input_tokens\":2,\"price_1m_output_tokens\":10,\"median_output_tokens_per_second\":59.792,\"aa_name\":\"GPT-6.1 Sol (Low)\",\"fetched_at\":\"2026-11-05T00:00:00Z\"}",
+      "benchmark_source": "artificialanalysis:v2:ii5:2026-11-05",
+      "effort": "low",
+      "grade": "B",
+      "model_id": "gpt-6.1-sol",
+      "profile": "codex-sol"
+    },
+    {
+      "effort": "",
+      "model_id": "x",
+      "profile": "unknown"
+    }
+  ]
+}

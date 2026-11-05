@@ -107,11 +107,13 @@ func quotaRun(ctx context.Context, what string, timeout time.Duration, jsonOutpu
 }
 func runQuotaCLI(args []string, out, errOut io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(errOut, "usage: panewire quota status [--json] | refresh POOL | observe KIND ...")
+		fmt.Fprintln(errOut, "usage: panewire quota status [--json] | refresh POOL | observe KIND ... | aa-sync [--out FILE] [--dry-run]")
 		return ExitUsage
 	}
 	ctx := context.Background()
 	switch args[0] {
+	case "aa-sync":
+		return runAASync(args[1:], out, errOut)
 	case "status":
 		if len(args) > 2 || len(args) == 2 && args[1] != "--json" {
 			return ExitUsage

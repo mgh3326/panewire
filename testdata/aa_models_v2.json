@@ -1,0 +1,882 @@
+{
+  "tier": "free",
+  "intelligence_index_version": 5,
+  "pagination": {
+    "page": 1,
+    "page_size": 58,
+    "total_pages": 1,
+    "has_more": false
+  },
+  "data": [
+    {
+      "id": "2f3c4dc9-a450-4303-8697-0237257cf08f",
+      "name": "Claude Opus 5.5 (Max, Default Fallback)",
+      "slug": "claude-opus-5-5",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 58.4
+      },
+      "pricing": {
+        "price_1m_input_tokens": 4,
+        "price_1m_output_tokens": 20
+      },
+      "performance": {
+        "median_output_tokens_per_second": 97.312
+      }
+    },
+    {
+      "id": "df5bf99d-d228-4715-b41b-19ca86118777",
+      "name": "Claude Opus 5.5 (Xhigh, Default Fallback)",
+      "slug": "claude-opus-5-5-xhigh",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 57
+      },
+      "pricing": {
+        "price_1m_input_tokens": 4,
+        "price_1m_output_tokens": 20
+      },
+      "performance": {
+        "median_output_tokens_per_second": 81.242
+      }
+    },
+    {
+      "id": "1f541ef3-913f-4eb2-9d07-0e93c7a9a5e3",
+      "name": "GPT-6 Astra (Xhigh)",
+      "slug": "gpt-6-astra-xhigh",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 55.3
+      },
+      "pricing": {
+        "price_1m_input_tokens": 10,
+        "price_1m_output_tokens": 50
+      },
+      "performance": {
+        "median_output_tokens_per_second": 68.705
+      }
+    },
+    {
+      "id": "b25ac058-1e33-4c31-bbc9-a20c3ad0717a",
+      "name": "GPT-6.1 Sol (Max)",
+      "slug": "gpt-6-1-sol",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 54.5
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 74.968
+      }
+    },
+    {
+      "id": "b171d979-5ec1-45de-b8b9-db1ee65e77ec",
+      "name": "Claude Sonnet 5.5 (Max, Default Fallback)",
+      "slug": "claude-sonnet-5-5",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 54.2
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 134.995
+      }
+    },
+    {
+      "id": "092a3b0e-c5c8-45dc-bf1b-53673c8ff352",
+      "name": "GPT-6.1 Sol (Xhigh)",
+      "slug": "gpt-6-1-sol-xhigh",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 52.3
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 68.919
+      }
+    },
+    {
+      "id": "f314eade-2232-44bf-a3ab-9b326bc67de6",
+      "name": "Claude Opus 5.5 (High, Default Fallback)",
+      "slug": "claude-opus-5-5-high",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 51.7
+      },
+      "pricing": {
+        "price_1m_input_tokens": 4,
+        "price_1m_output_tokens": 20
+      },
+      "performance": {
+        "median_output_tokens_per_second": 74.125
+      }
+    },
+    {
+      "id": "b0c462cf-f2d0-4126-9434-28db9502219f",
+      "name": "GPT-6.1 Terra (Max)",
+      "slug": "gpt-6-1-terra",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 51
+      },
+      "pricing": {
+        "price_1m_input_tokens": 1,
+        "price_1m_output_tokens": 5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 119.969
+      }
+    },
+    {
+      "id": "3b84fee3-b70a-41bc-819e-5fbdef9a0042",
+      "name": "GPT-6.1 Sol (High)",
+      "slug": "gpt-6-1-sol-high",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 50.2
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 59.262
+      }
+    },
+    {
+      "id": "9b166bf3-42db-4f63-8338-1c4a1244ffe8",
+      "name": "Claude Fable 5.1 (Xhigh, Default Fallback)",
+      "slug": "claude-fable-5-1-xhigh",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 49.7
+      },
+      "pricing": {
+        "price_1m_input_tokens": 10,
+        "price_1m_output_tokens": 50
+      },
+      "performance": {
+        "median_output_tokens_per_second": 56.012
+      }
+    },
+    {
+      "id": "975aeaef-50bd-4a65-9c73-f1015adcd4d4",
+      "name": "Claude Sonnet 5.5 (Xhigh, Default Fallback)",
+      "slug": "claude-sonnet-5-5-xhigh",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 49.6
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 95.473
+      }
+    },
+    {
+      "id": "3e87c73e-a257-495e-9730-367a66229811",
+      "name": "Claude Fable 5.1 (Max, Default Fallback)",
+      "slug": "claude-fable-5-1",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 49
+      },
+      "pricing": {
+        "price_1m_input_tokens": 10,
+        "price_1m_output_tokens": 50
+      },
+      "performance": {
+        "median_output_tokens_per_second": 67.929
+      }
+    },
+    {
+      "id": "ea9e0da6-169f-43c6-92f5-730a10d6ff8d",
+      "name": "Claude Opus 5.5 (Medium, Default Fallback)",
+      "slug": "claude-opus-5-5-medium",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 48.1
+      },
+      "pricing": {
+        "price_1m_input_tokens": 4,
+        "price_1m_output_tokens": 20
+      },
+      "performance": {
+        "median_output_tokens_per_second": 72.044
+      }
+    },
+    {
+      "id": "9d7d72cd-d95d-45a0-b109-4ad292c9aabd",
+      "name": "Claude Fable 5.1 (High, Default Fallback)",
+      "slug": "claude-fable-5-1-high",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 47
+      },
+      "pricing": {
+        "price_1m_input_tokens": 10,
+        "price_1m_output_tokens": 50
+      },
+      "performance": {
+        "median_output_tokens_per_second": 50.353
+      }
+    },
+    {
+      "id": "a2e51d62-ea4e-4f15-8be0-be9dc1fb489d",
+      "name": "GPT-6.1 Sol (Medium)",
+      "slug": "gpt-6-1-sol-medium",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 46.1
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 59.581
+      }
+    },
+    {
+      "id": "e8d443ba-8aca-4830-a186-ae869bb9c6fe",
+      "name": "GPT-6.1 Terra (Xhigh)",
+      "slug": "gpt-6-1-terra-xhigh",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 45
+      },
+      "pricing": {
+        "price_1m_input_tokens": 1,
+        "price_1m_output_tokens": 5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 104.297
+      }
+    },
+    {
+      "id": "3b7de71c-e034-4591-8ca6-6b6be2fa471f",
+      "name": "Claude Fable 5.1 (Medium, Default Fallback)",
+      "slug": "claude-fable-5-1-medium",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 43
+      },
+      "pricing": {
+        "price_1m_input_tokens": 10,
+        "price_1m_output_tokens": 50
+      },
+      "performance": {
+        "median_output_tokens_per_second": 52.332
+      }
+    },
+    {
+      "id": "ea3e1f50-f62d-41d2-849a-9af0413e4d37",
+      "name": "GPT-6.1 Terra (High)",
+      "slug": "gpt-6-1-terra-high",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 42.3
+      },
+      "pricing": {
+        "price_1m_input_tokens": 1,
+        "price_1m_output_tokens": 5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 90.897
+      }
+    },
+    {
+      "id": "268525e2-f873-4178-bc07-e6a0ee1f002d",
+      "name": "Claude Sonnet 5.5 (High, Default Fallback)",
+      "slug": "claude-sonnet-5-5-high",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 41.1
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 96.754
+      }
+    },
+    {
+      "id": "05776db7-f5c0-40f7-b824-079160f8cfa8",
+      "name": "Claude Fable 5.1 (Low, Default Fallback)",
+      "slug": "claude-fable-5-1-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 38.5
+      },
+      "pricing": {
+        "price_1m_input_tokens": 10,
+        "price_1m_output_tokens": 50
+      },
+      "performance": {
+        "median_output_tokens_per_second": 51.237
+      }
+    },
+    {
+      "id": "c441e158-a87d-4116-911b-93325e4b4f1c",
+      "name": "GPT-6.1 Terra (Medium)",
+      "slug": "gpt-6-1-terra-medium",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 38.1
+      },
+      "pricing": {
+        "price_1m_input_tokens": 1,
+        "price_1m_output_tokens": 5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 90.914
+      }
+    },
+    {
+      "id": "7d064a11-6e78-4030-b535-cdf940615041",
+      "name": "Claude Haiku 5.5 (Max)",
+      "slug": "claude-haiku-5-5",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 36.2
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.1,
+        "price_1m_output_tokens": 0.5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 237.741
+      }
+    },
+    {
+      "id": "272f5f03-aea9-4675-a244-2b753b618cdf",
+      "name": "Grok 4.7 (High)",
+      "slug": "grok-4-7-high",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 35
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 6
+      },
+      "performance": {
+        "median_output_tokens_per_second": 69.502
+      }
+    },
+    {
+      "id": "e76e0fe5-93ca-4272-9359-2eb1740467d1",
+      "name": "GPT-6.1 Sol (Low)",
+      "slug": "gpt-6-1-sol-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 34.5
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 59.792
+      }
+    },
+    {
+      "id": "4416ca93-fde6-4b7b-abbc-3a6be109cc3d",
+      "name": "Claude Opus 5.5 (Low, Default Fallback)",
+      "slug": "claude-opus-5-5-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 34.5
+      },
+      "pricing": {
+        "price_1m_input_tokens": 4,
+        "price_1m_output_tokens": 20
+      },
+      "performance": {
+        "median_output_tokens_per_second": 72.958
+      }
+    },
+    {
+      "id": "41b5bf5e-daf6-42d9-b8d1-60e340a3028d",
+      "name": "Claude Haiku 5.5 (Xhigh)",
+      "slug": "claude-haiku-5-5-xhigh",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 34.3
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.1,
+        "price_1m_output_tokens": 0.5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 173.618
+      }
+    },
+    {
+      "id": "59627802-1546-422c-9a65-65b61c022d36",
+      "name": "Grok 4.7 (Xhigh)",
+      "slug": "grok-4-7",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 34.3
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 6
+      },
+      "performance": {
+        "median_output_tokens_per_second": 72.22
+      }
+    },
+    {
+      "id": "208c16f0-8c5b-4524-ac8a-ac74c02e80a9",
+      "name": "Grok 4.7 (Low)",
+      "slug": "grok-4-7-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 30.9
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 6
+      },
+      "performance": {
+        "median_output_tokens_per_second": 59.392
+      }
+    },
+    {
+      "id": "8a999846-4c1d-4ce7-a8b7-1310a7166fd7",
+      "name": "Gemini 3.8 Flash (High)",
+      "slug": "gemini-3-8-flash",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 30.5
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.75,
+        "price_1m_output_tokens": 3.75
+      },
+      "performance": {
+        "median_output_tokens_per_second": 129.478
+      }
+    },
+    {
+      "id": "042e8a37-fcd0-40f4-8f41-99215fb68eda",
+      "name": "Claude Sonnet 5.5 (Medium, Default Fallback)",
+      "slug": "claude-sonnet-5-5-medium",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 30.3
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 91.67
+      }
+    },
+    {
+      "id": "744fa3c1-42a7-4995-b138-fb6be11f463c",
+      "name": "Gemini 3.8 Flash (Medium)",
+      "slug": "gemini-3-8-flash-medium",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 30
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.75,
+        "price_1m_output_tokens": 3.75
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "20829974-af06-497e-9f42-77fb958d43b9",
+      "name": "Claude Haiku 5.5 (High)",
+      "slug": "claude-haiku-5-5-high",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 29.6
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.1,
+        "price_1m_output_tokens": 0.5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 153.083
+      }
+    },
+    {
+      "id": "c955b262-a17f-4f1a-b097-6860b866295b",
+      "name": "GPT-6.1 Terra (Low)",
+      "slug": "gpt-6-1-terra-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 29.2
+      },
+      "pricing": {
+        "price_1m_input_tokens": 1,
+        "price_1m_output_tokens": 5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 90.906
+      }
+    },
+    {
+      "id": "6fb13851-40ce-4bda-ad3f-6b38e0c5daa7",
+      "name": "GPT-6 Luna (Max)",
+      "slug": "gpt-6-luna",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 27.8
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.1,
+        "price_1m_output_tokens": 0.5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 125.153
+      }
+    },
+    {
+      "id": "bbc2ffea-cf6b-43be-8c41-1769347e234d",
+      "name": "Claude Sonnet 5.5 (Low, Default Fallback)",
+      "slug": "claude-sonnet-5-5-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 25.3
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 89.013
+      }
+    },
+    {
+      "id": "af26fff4-8120-41be-a5f0-86aaea023f20",
+      "name": "Claude Haiku 5.5 (Medium)",
+      "slug": "claude-haiku-5-5-medium",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 24.6
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.1,
+        "price_1m_output_tokens": 0.5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 151.649
+      }
+    },
+    {
+      "id": "19813eb2-460a-475c-af65-810bb8660fec",
+      "name": "GPT-6 Luna (Xhigh)",
+      "slug": "gpt-6-luna-xhigh",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 23.3
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.1,
+        "price_1m_output_tokens": 0.5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 120.084
+      }
+    },
+    {
+      "id": "f6db039b-0f3b-485c-9d7f-982988e44f26",
+      "name": "Gemini 3.8 Flash (Low)",
+      "slug": "gemini-3-8-flash-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 22.3
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.75,
+        "price_1m_output_tokens": 3.75
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "7d1229bc-deea-4717-ba5b-f59a35d991e3",
+      "name": "GPT-6 Luna (High)",
+      "slug": "gpt-6-luna-high",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 21.4
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.1,
+        "price_1m_output_tokens": 0.5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 117.137
+      }
+    },
+    {
+      "id": "277f939a-985b-4b37-859d-b3eabc7c0b26",
+      "name": "MiniMax-M3",
+      "slug": "minimax-m3",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 18.7
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.3,
+        "price_1m_output_tokens": 1.2
+      },
+      "performance": {
+        "median_output_tokens_per_second": 112.9
+      }
+    },
+    {
+      "id": "42908ae3-d3bd-4934-be19-fbff93d3fde8",
+      "name": "Claude Haiku 5.5 (Low)",
+      "slug": "claude-haiku-5-5-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 18.6
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.1,
+        "price_1m_output_tokens": 0.5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 149.102
+      }
+    },
+    {
+      "id": "36667da0-9222-4967-adbb-f7efa15ad213",
+      "name": "GPT-6 Luna (Medium)",
+      "slug": "gpt-6-luna-medium",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 18.3
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.1,
+        "price_1m_output_tokens": 0.5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "512d17ef-13d2-4f65-bf9b-154b0dec7e8d",
+      "name": "Kimi K3 (Low)",
+      "slug": "kimi-k3-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 17.4
+      },
+      "pricing": {
+        "price_1m_input_tokens": 3,
+        "price_1m_output_tokens": 15
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "bf9708d8-933d-44f6-affa-b696a7a650c9",
+      "name": "GPT-6 Luna (Low)",
+      "slug": "gpt-6-luna-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": 9.7
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.1,
+        "price_1m_output_tokens": 0.5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 112.194
+      }
+    },
+    {
+      "id": "1305c921-7aaa-4d6d-99b5-99b3acf15e19",
+      "name": "Claude Opus 5 (Xhigh)",
+      "slug": "claude-opus-5-xhigh",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 5,
+        "price_1m_output_tokens": 25
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "ba0224cf-0351-4f56-8508-b3f1a740ae4a",
+      "name": "Claude Sonnet 5 (High)",
+      "slug": "claude-sonnet-5-high",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 10
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "b2331108-72ed-415a-82d1-188633875bbc",
+      "name": "Gemini 3.7 Flash (High)",
+      "slug": "gemini-3-7-flash",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.75,
+        "price_1m_output_tokens": 3.75
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "050c61cd-cddc-463a-a30a-a82aaa37be59",
+      "name": "GPT-5.6 Luna (Low)",
+      "slug": "gpt-5-6-luna-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.2,
+        "price_1m_output_tokens": 1.2
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "8afc250d-b538-45a2-812a-4605f4ffd87e",
+      "name": "GPT-5.6 Sol (High)",
+      "slug": "gpt-5-6-sol-high",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 4,
+        "price_1m_output_tokens": 20
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "81972fba-1219-477e-bbfb-18c656a63ff7",
+      "name": "GPT-5.6 Terra (High)",
+      "slug": "gpt-5-6-terra-high",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 12
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "cc4a20cd-09fe-4962-a430-119c815e85fa",
+      "name": "GPT-5.6 Terra (Low)",
+      "slug": "gpt-5-6-terra-low",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 12
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "bcf8db0a-3bb6-4d82-9516-0f57370c85a6",
+      "name": "GPT-5.6 Terra (Max)",
+      "slug": "gpt-5-6-terra",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 12
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "26e0f83a-ca98-4f34-94ac-7c5e251ee410",
+      "name": "GPT-5.6 Terra (Medium)",
+      "slug": "gpt-5-6-terra-medium",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 12
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "9e30696f-16fa-4b4f-ba53-161895a85fed",
+      "name": "GPT-5.6 Terra (Xhigh)",
+      "slug": "gpt-5-6-terra-xhigh",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2,
+        "price_1m_output_tokens": 12
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "8d0cb231-7303-452c-9923-a9620b948475",
+      "name": "Kimi K2.7 Code",
+      "slug": "kimi-k2-7-code",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.95,
+        "price_1m_output_tokens": 4
+      },
+      "performance": {
+        "median_output_tokens_per_second": 46.794
+      }
+    },
+    {
+      "id": "f7d2fc3e-1f7b-405f-818c-07952a4af78f",
+      "name": "Kimi K3 (Max)",
+      "slug": "kimi-k3",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 3,
+        "price_1m_output_tokens": 15
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    },
+    {
+      "id": "fc92f822-04b7-420d-9c07-a21af5e9aac7",
+      "name": "Qwen3 Coder Next",
+      "slug": "qwen3-coder-next",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 0.31,
+        "price_1m_output_tokens": 1
+      },
+      "performance": {
+        "median_output_tokens_per_second": 80.956
+      }
+    },
+    {
+      "id": "69534bed-2ffd-4235-832b-e20a810333ab",
+      "name": "Qwen3.7 Max",
+      "slug": "qwen3-7-max",
+      "evaluations": {
+        "artificial_analysis_intelligence_index": null
+      },
+      "pricing": {
+        "price_1m_input_tokens": 2.5,
+        "price_1m_output_tokens": 7.5
+      },
+      "performance": {
+        "median_output_tokens_per_second": 0
+      }
+    }
+  ]
+}
