@@ -43,4 +43,4 @@ if [ "${PANEWIRE_SHARD_DRY_RUN:-}" = 1 ]; then
 	exit 0
 fi
 echo "shard $spec: $(printf '%s\n' "$names" | wc -l | tr -d ' ') tests"
-exec go test -run "$pattern" .
+exec go test -v -run "$pattern" .
