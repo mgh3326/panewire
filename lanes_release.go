@@ -395,15 +395,17 @@ func (h *HubServer) warnUnroutedRelay(lane, eventID string) {
 		return
 	}
 	if !known && len(l.warned) >= unroutedWarnMaxLanes {
+		// Lane names come from nodes, so the table is bounded. A new lane is
+		// never silently dropped: make room by forgetting the lane that
+		// warned longest ago, which at worst lets that lane warn again early.
+		var oldest string
+		var oldestAt time.Time
 		for name, other := range l.warned {
-			if now.Sub(other.last) >= unroutedWarnInterval {
-				delete(l.warned, name)
+			if oldest == "" || other.last.Before(oldestAt) {
+				oldest, oldestAt = name, other.last
 			}
 		}
-		if len(l.warned) >= unroutedWarnMaxLanes {
-			l.mu.Unlock()
-			return
-		}
+		delete(l.warned, oldest)
 	}
 	suppressed := state.suppressed
 	l.warned[lane] = unroutedWarnState{last: now}

@@ -3,6 +3,7 @@ package panewire
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -482,5 +483,30 @@ func TestLaneReleaseSweepForgetsWriteTimesOfRowsThatAreGone(t *testing.T) {
 	}
 	if len(laneReleaseLanes(t, path)) != 1 {
 		t.Fatalf("lanes file changed: %v", laneReleaseLanes(t, path))
+	}
+}
+
+// The warned-lane table is bounded, but a burst across more lanes than it holds
+// must still log a WARN for every lane's first unrouted event.
+func TestLaneReleaseUnroutedWarnBurstPastTheTableBoundStillWarnsEveryLane(t *testing.T) {
+	hub, _, _, logs := laneReleaseHub(t, `{"lanes":{}}`, nil)
+	lanes := unroutedWarnMaxLanes + 44
+	for i := 0; i < lanes; i++ {
+		hub.broadcastRelayUnrouted(hubJobEventPayload{OwnerLane: fmt.Sprintf("burst-%03d", i), EventID: fmt.Sprintf("evt-%03d", i)})
+	}
+	warned := 0
+	for i := 0; i < lanes; i++ {
+		if strings.Contains(logs.String(), fmt.Sprintf("lane=burst-%03d event_id=evt-%03d", i, i)) {
+			warned++
+		}
+	}
+	if warned != lanes {
+		t.Fatalf("%d of %d lanes got a WARN in a burst past the table bound", warned, lanes)
+	}
+	hub.laneLife.mu.Lock()
+	size := len(hub.laneLife.warned)
+	hub.laneLife.mu.Unlock()
+	if size > unroutedWarnMaxLanes {
+		t.Fatalf("warned table grew to %d, bound is %d", size, unroutedWarnMaxLanes)
 	}
 }
