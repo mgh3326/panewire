@@ -102,13 +102,20 @@ lane-event claim, ensuring the existing gate is actually reached.
 
 A lane event stays outside the job lifecycle on the node and the hub, but the
 completion watcher on the worker's host reads `events-lane/` for one purpose. It
-completes a job when the job's report is stable across two polls and the current
-attempt has one of these signals:
+completes a job when the report is stable across two polls and the current
+attempt has a lane event from the job's pane, written at or after the attempt
+started, whose text starts with `READY` or `DONE`, after an optional `[label] `
+prefix.
 
-- a `job.escalate` record;
-- a lane event from the job's pane, written at or after the attempt started,
-  whose text starts with `READY`, `DONE` or `ESC`, after an optional `[label] `
-  prefix.
+A pane lane event starting with `ESC` asks a question and records
+`job.waiting_decision` with its event ID and time; it does not complete the
+job. The decision wait defaults to six hours and can be set in seconds with
+`PANEWIRE_DECISION_TIMEOUT_S`. An unanswered decision becomes `lost` with
+reason `decision_unanswered`. A proven `panewire prompt` delivery to the pane,
+a `relay_delivered` record for its lane and pane, or a later lane event from
+the pane resumes the job.
+Pane redraws and status changes do not clear the wait.
+An explicit `panewire escalate JOB --question ...` stops as escalated.
 
 The attempt starts at the newest `job.spawned`, `job.reclaim` or `job.reprompted`
 record. When `findings.json` beside the report is a regular file, the watcher

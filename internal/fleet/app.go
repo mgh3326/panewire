@@ -58,8 +58,9 @@ type App struct {
 	EventSink func(fleetevent.Event)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
-	State    FleetStateReader
-	fleetLog *fleetStateLog
+	DecisionReply func(context.Context, string, string, time.Time) (bool, error)
+	State         FleetStateReader
+	fleetLog      *fleetStateLog
 	// spawnFn replaces Spawn where delegate starts its pane; tests only.
 	spawnFn func(context.Context, *App, Spawn) error
 	// Version is the build line `panewire --version` prints, compared with the

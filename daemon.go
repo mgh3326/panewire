@@ -646,6 +646,7 @@ type localRequest struct {
 	Uptake        string        `json:"uptake,omitempty"`
 	StoreBody     bool          `json:"store_body,omitempty"`
 	Status        string        `json:"status,omitempty"`
+	SinceMS       int64         `json:"since_ms,omitempty"`
 	SettleMS      int64         `json:"settle_ms,omitempty"`
 	TimeoutMS     int64         `json:"timeout_ms,omitempty"`
 	// The fields below belong to the R20 emit op. The names above are the
@@ -718,6 +719,12 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 			err = d.emitRelayEvent(req)
 		case "inbox":
 			result, err = d.handleInbox(callCtx, req.Inbox)
+		case "decision.reply":
+			if req.Target == "" || req.SinceMS <= 0 {
+				err = &codedError{ExitUsage, fmt.Errorf("pane and since are required")}
+			} else {
+				result, err = d.store.DecisionReplyAfter(callCtx, req.Target, req.OwnerLane, req.SinceMS)
+			}
 		case "prompt":
 			if !caps.Prompt || !caps.AgentRead {
 				result, err = recordUnavailablePrompt(callCtx, d.store, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, ExitDaemonUnavailable, "prompt capability unavailable")
