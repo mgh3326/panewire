@@ -22,6 +22,25 @@ func (s *laneInboxStore) replaySuppressed(key string) (bool, error) {
 	return suppressed, err
 }
 
+// laneInboxSettled is the evidence that the receiver already has an item:
+// superseded, acked, confirmed delivered, or read by the receiver. A read
+// stamped at insert (a non-must-ack interrupt) is not the receiver's read, so
+// it never counts.
+const laneInboxSettled = `(superseded_at>0 OR acked_at>0 OR delivered_at>0 OR (read_at>0 AND (must_ack=1 OR class='inbox')))`
+
+// settled reports whether the inbox already holds the event key as an item
+// the receiver has been given. An absent item is not settled.
+func (s *laneInboxStore) settled(key string) (bool, error) {
+	ctx, done := s.op(s.life)
+	defer done()
+	var settled bool
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxSettled+` FROM lane_inbox WHERE event_key=?`), s.storedKey(key)).Scan(&settled)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return settled, err
+}
+
 // prune keeps all unread work, pending deliveries, and evidence touched within
 // the replay window. Ranking includes every item, so K means newest K per lane,
 // not K completed items in addition to an arbitrarily large unread backlog.

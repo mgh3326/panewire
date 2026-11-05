@@ -33,6 +33,10 @@ const (
 	// relayUnconfirmedRetireReason is the replay-retired suffix stamped on a
 	// marked row once its one labelled replay has been attempted.
 	relayUnconfirmedRetireReason = "unconfirmed"
+	// relayUnconfirmedInboxRetireReason retires a marked row whose lane inbox
+	// item is already delivered, read, acked or superseded: the receiver has
+	// the event, so its one labelled replay would only repeat it.
+	relayUnconfirmedInboxRetireReason = "inbox-delivered"
 	// relayUnconfirmedMarkRetireReason retires a marker row whose original
 	// row is already closed, exhausted, or gone.
 	relayUnconfirmedMarkRetireReason = "unconfirmed-mark"
