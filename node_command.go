@@ -362,11 +362,28 @@ func defaultNodeCommandRunner(name string) relayCommandRunner {
 	}
 }
 
+// nodeHerdrRunner runs herdr in the session the node spawns into (spawn.json
+// herdr_session, else "default"), so pane.read, pane.close and agents.list see
+// the panes the node launched. A plain herdr call would read the daemon's own
+// session and report a landed pane in another session as gone (hk 2966).
 func (client *HubClient) nodeHerdrRunner() relayCommandRunner {
 	if client.nodeHerdr != nil {
 		return client.nodeHerdr
 	}
-	return defaultNodeCommandRunner("herdr")
+	session := client.nodeSpawnSession()
+	return func(ctx context.Context, args ...string) ([]byte, error) {
+		cmd := exec.CommandContext(ctx, "herdr", args...)
+		cmd.Env = hubSpawnEnvironment(os.Environ(), session)
+		return cmd.Output()
+	}
+}
+
+// nodeSpawnSession is the herdr session spawns on this node use.
+func (client *HubClient) nodeSpawnSession() string {
+	if config, _, err := client.resolveHubSpawnConfig(); err == nil && config.HERDRSession != "" {
+		return config.HERDRSession
+	}
+	return hubSpawnDefaultSession
 }
 
 func (client *HubClient) nodeGitRunner() relayCommandRunner {
