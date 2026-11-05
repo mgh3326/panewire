@@ -3,6 +3,9 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
@@ -193,6 +196,9 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 		return
 	}
 	client.noteQuotaAccount(pool, publish.Key)
+	if confirmed := client.fleetQuotaConfirmedAt(run, publish.Key, publish.MeasuredAt); !confirmed.IsZero() {
+		publish.ConfirmedAt = &confirmed
+	}
 	now := client.nowUTC()
 	body, _ := json.Marshal(publish)
 	if previous.body == string(body) && now.Sub(previous.at) < fleetQuotaRepublish {
@@ -201,4 +207,66 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	if client.Publish("state", publish) {
 		sent[pool] = fleetQuotaSent{body: string(body), at: now}
 	}
+}
+
+// fleetQuotaObservationTransport is the confirmed_at read's transport; nil is
+// the default. Tests point it at a test server.
+var fleetQuotaObservationTransport http.RoundTripper
+
+// fleetQuotaConfirmedAt reads handoffkeep's latest shared observation of key
+// with this node's spawn.json handoffkeep_env and answers its confirmed_at
+// when it is the reading pacelever just returned (same measured_at, within a
+// second). pacelever's refresh output carries only measured_at (fetched_at),
+// and handoffkeep keeps measured_at when a re-measurement publishes the same
+// values, so without this an unchanged account always reads stale through the
+// hub (hk 3058). Zero means unknown: the reading is published as before.
+func (client *HubClient) fleetQuotaConfirmedAt(ctx context.Context, key string, measured time.Time) time.Time {
+	if !fleetStateAccountKeyPattern.MatchString(key) {
+		return time.Time{}
+	}
+	config, err := loadHubSpawnConfig(client.spawnConfigPath)
+	if err != nil || config.HandoffkeepEnv == "" {
+		return time.Time{}
+	}
+	env, err := loadHubHandoffkeepEnv(config.HandoffkeepEnv)
+	if err != nil {
+		return time.Time{}
+	}
+	base, err := url.Parse(strings.TrimSuffix(env.URL, "/"))
+	if err != nil {
+		return time.Time{}
+	}
+	base.Path, base.RawPath = "/v1/quota/accounts/"+key+"/latest", ""
+	base.RawQuery, base.ForceQuery, base.Fragment, base.RawFragment = "", false, "", ""
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
+	if err != nil {
+		return time.Time{}
+	}
+	env.setAuth(request)
+	request.Header.Set("Accept", "application/json")
+	response, err := (&http.Client{Transport: fleetQuotaObservationTransport, Timeout: handoffkeepTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
+	if err != nil {
+		return time.Time{}
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return time.Time{}
+	}
+	var body struct {
+		Observation *struct {
+			MeasuredAt  time.Time  `json:"measured_at"`
+			ConfirmedAt *time.Time `json:"confirmed_at"`
+		} `json:"observation"`
+	}
+	if json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&body) != nil || body.Observation == nil || body.Observation.ConfirmedAt == nil {
+		return time.Time{}
+	}
+	o := body.Observation
+	if d := o.MeasuredAt.Sub(measured); d < -time.Second || d > time.Second {
+		return time.Time{}
+	}
+	if !o.ConfirmedAt.After(o.MeasuredAt) || o.ConfirmedAt.After(client.nowUTC().Add(time.Minute)) {
+		return time.Time{}
+	}
+	return o.ConfirmedAt.UTC()
 }

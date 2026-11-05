@@ -55,11 +55,12 @@ type FleetSnapshot struct {
 }
 
 type FleetStateMessage struct {
-	Host       string    `json:"host"`
-	Kind       string    `json:"kind"`
-	Key        string    `json:"key"`
-	MeasuredAt time.Time `json:"measured_at"`
-	Quota      *struct {
+	Host        string     `json:"host"`
+	Kind        string     `json:"kind"`
+	Key         string     `json:"key"`
+	MeasuredAt  time.Time  `json:"measured_at"`
+	ConfirmedAt *time.Time `json:"confirmed_at,omitempty"`
+	Quota       *struct {
 		AccountKey string          `json:"account_key"`
 		Buckets    []accountBucket `json:"buckets"`
 	} `json:"quota,omitempty"`
@@ -185,11 +186,11 @@ func (a *App) hubSharedAccount(ctx context.Context, key string) (SharedAccount, 
 			}
 			continue
 		}
-		if age := now.Sub(m.MeasuredAt); age < -time.Minute || age > ttl {
+		if age := now.Sub(m.validAt()); age < -time.Minute || age > ttl {
 			reason = stateStale
 			continue
 		}
-		if best == nil || m.MeasuredAt.After(best.MeasuredAt) {
+		if best == nil || m.validAt().After(best.validAt()) {
 			best = &snap.States[i]
 		}
 	}
@@ -200,7 +201,17 @@ func (a *App) hubSharedAccount(ctx context.Context, key string) (SharedAccount, 
 	if quota == nil {
 		return SharedAccount{}, stateStale
 	}
-	return SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: best.MeasuredAt, Quota: quota}, ""
+	return SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: best.validAt(), Quota: quota}, ""
+}
+
+// validAt is when a quota reading was last known current: the later of its
+// measurement and the shared store's re-confirmation of the same values, the
+// rule the direct read uses (fleet.go sharedAccount).
+func (m FleetStateMessage) validAt() time.Time {
+	if m.ConfirmedAt != nil && m.ConfirmedAt.After(m.MeasuredAt) {
+		return *m.ConfirmedAt
+	}
+	return m.MeasuredAt
 }
 
 // hubHosts answers the host list from the hub's load values. It is used only
