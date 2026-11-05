@@ -696,7 +696,7 @@ func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (re
 	if kind == "lane.event" && (!exists || agent == nil || route.Pane == "") {
 		var match *hubJobRecord
 		for _, job := range h.jobs {
-			if job.Completed || job.AgentLabel != event.OwnerLane {
+			if job.Completed || h.jobRecordStaleLocked(job, h.now()) || job.AgentLabel != event.OwnerLane {
 				continue
 			}
 			if match != nil {

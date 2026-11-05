@@ -468,6 +468,7 @@ func (client *HubClient) Run(ctx context.Context) {
 		return
 	}
 	client.rearmWatchers()
+	go client.runLaneReconcile(ctx)
 	if client.statePublish && len(client.stateQuotaPools) > 0 {
 		go client.runFleetQuota(ctx)
 	}

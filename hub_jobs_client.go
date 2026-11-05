@@ -104,6 +104,10 @@ func scanHubActiveJobs(inboxRoot string) []HubActiveJob {
 // behind — a killed pane writes nothing — so pane liveness is the only
 // remaining truth about it. panesAlive is called at most once per scan.
 func scanHubActiveJobsWithPanes(ctx context.Context, inboxRoot string, panesAlive panesAliveFunc) []HubActiveJob {
+	return scanHubActiveJobsForLimit(ctx, inboxRoot, panesAlive, 32)
+}
+
+func scanHubActiveJobsForLimit(ctx context.Context, inboxRoot string, panesAlive panesAliveFunc, limit int) []HubActiveJob {
 	if inboxRoot == "" {
 		return nil
 	}
@@ -126,8 +130,8 @@ func scanHubActiveJobsWithPanes(ctx context.Context, inboxRoot string, panesAliv
 	jobs = filterActiveJobsByPane(jobs, alive, aliveKnown)
 	// Do not let old lexically early inbox directories hide recent work.
 	sort.Slice(jobs, func(i, j int) bool { return jobs[i].lastEvent.After(jobs[j].lastEvent) })
-	if len(jobs) > 32 {
-		jobs = jobs[:32]
+	if limit > 0 && len(jobs) > limit {
+		jobs = jobs[:limit]
 	}
 	active := make([]HubActiveJob, 0, len(jobs))
 	for _, scanned := range jobs {
