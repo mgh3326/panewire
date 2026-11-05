@@ -101,7 +101,7 @@ A pinned `--host` keeps any of these refusals as its result.
 | `deadline_exceeded` | Deadline observed; ownership retained, not terminal failure. |
 | `succeeded` | Node landing receipt and fresh exact-pane identity verified. |
 | `failed` | Definite refusal, including an existing job claim; never permission to reuse a live job. |
-| `retryable` | Node attested cleanup, or admission stopped before dispatch; reservations released. |
+| `retryable` | Node attested cleanup, or admission stopped before dispatch, and a replay can succeed once the operator's fix is done; reservations released. |
 
 A deliberate repeat of an identical cleanup-confirmed submission creates a new
 attempt under the same logical key. Its node UUID changes, and a prior executing
@@ -156,6 +156,13 @@ A checkout-busy result completes one retryable attempt. The engine cannot bind a
 fresh node UUID inside that completed attempt; replay the saved logical submission
 to create the next attempt after the node's checkout operation finishes.
 
+A checkout refusal whose fix is to inspect and correct the node's checkout
+(`checkout_refused:branch-elsewhere`, `checkout_refused:origin-mismatch`) is
+`failed`, whatever retryable flag the node sent: the same saved request meets the
+same conflict. The other checkout refusals (`busy`, `dirty`, `sha-missing`,
+`work_root_unset`, `git_too_old`) name a fix that ends in a replay and stay
+`retryable`. `spawnRefusalReplayable` holds the mapping.
+
 ## Notifications and telemetry
 
 State changes and notification records commit in one database transaction.
@@ -168,8 +175,13 @@ is at least once; consumers use the event id
 proof of cleanup. A later verified landing may emit a distinct `SPAWNED`
 reconciliation event.
 
-`SPAWN_FAILED` names the job, request, exit status, stage, reason and fix. It has
+`SPAWN_FAILED` names the job, request, exit status, stage, `replay=yes|no`
+(whether replaying the saved request can help), reason and fix. It has
 notify type `automation-failed`, so it interrupts a lane that digests its reports.
+A `failed` or `retryable` spawn is also sent to the submitting lane when that
+differs from the owner: `--requested-by`, else `--parent`. The owner's event id
+stays `<request_id>:<attempt>:<status>`; the submitting lane's is the same id
+with `:<lane>` appended.
 `SPAWNED` stays type `report`.
 
 | Reason code | Meaning |
