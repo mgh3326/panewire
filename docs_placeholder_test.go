@@ -39,6 +39,7 @@ var docAllowedHostSuffixes = []string{
 // reference. Subdomains are NOT implied — a real operational subdomain such
 // as a tenant host under one of these parents must fail.
 var docAllowedHostsExact = map[string]bool{
+	"artificialanalysis.ai":         true, // public data provider and API documentation
 	"code.claude.com":               true, // public Claude Code statusLine/hook documentation
 	"github.com":                    true, // public forge: module path and release URLs
 	"objects.githubusercontent.com": true, // GitHub release-asset redirect host
@@ -186,6 +187,7 @@ func TestDocLiteralScannerRules(t *testing.T) {
 		"db.corp",                             // internal pseudo-TLD
 		"nas.home",                            // internal pseudo-TLD
 		"realteam.cloudflareaccess.com",       // real subdomain of an allowed-<placeholder> service
+		"tenant.artificialanalysis.ai",        // subdomain of the public data provider is not implied
 		"tenant.github.com",                   // subdomain of an exact-allowed host is not implied
 		"tenant.code.claude.com",              // public docs host does not allow tenant subdomains
 		"tenant.modernc.org",                  // subdomain of an exact-allowed host is not implied
@@ -209,6 +211,7 @@ func TestDocLiteralScannerRules(t *testing.T) {
 		"https://<team>.cloudflareaccess.com/cdn-cgi/access/certs",
 		"github.com/mgh3326/panewire/cmd/panewire@latest",
 		"objects.githubusercontent.com",
+		"https://artificialanalysis.ai/data-api/docs/reference",
 		"modernc.org/sqlite",
 		"https://code.claude.com/docs/en/hooks",
 		"127.0.0.1:9377",
