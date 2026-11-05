@@ -124,7 +124,7 @@ func TestInboxRetentionAgeAndPerLane(t *testing.T) {
 func TestInboxRetentionPolicy(t *testing.T) {
 	for _, raw := range []string{"default: interrupt", "default: interrupt\nretention: {days: 0, per_lane: 0}"} {
 		p, err := parseDeliveryPolicy([]byte(raw))
-		if err != nil || p.Retention.Days != 14 || p.Retention.PerLane != 2000 {
+		if err != nil || p.Retention.Days != 30 || p.Retention.PerLane != 2000 {
 			t.Fatalf("%+v %v", p, err)
 		}
 	}

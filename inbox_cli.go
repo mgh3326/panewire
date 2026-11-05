@@ -285,6 +285,8 @@ func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxReq
 		for _, item := range items {
 			state := "unread"
 			switch {
+			case item.SupersededAt > 0:
+				state = "superseded"
 			case item.AckedAt > 0:
 				state = "acked"
 			case item.MustAck:
@@ -301,7 +303,11 @@ func executeInbox(client inboxHTTPClient, stdout, stderr io.Writer, req inboxReq
 			fmt.Fprintln(stderr, "inbox: invalid hub response")
 			return ExitInternal
 		}
-		fmt.Fprintf(stdout, "#%d %s %s (%s)\n%s\n", item.ID, item.Lane, item.Class, item.Kind, relayTextForKind(item.Kind, item.Event))
+		fmt.Fprintf(stdout, "#%d %s %s (%s)\n", item.ID, item.Lane, item.Class, item.Kind)
+		if item.SupersededAt > 0 {
+			fmt.Fprintf(stdout, "superseded by #%d\n", item.SupersededBy)
+		}
+		fmt.Fprintln(stdout, relayTextForKind(item.Kind, item.Event))
 	case "ack":
 		var result struct {
 			Acked int64 `json:"acked"`
@@ -369,7 +375,11 @@ func runInboxWait(client inboxHTTPClient, stdout, stderr io.Writer, lane string,
 			return ExitOK
 		}
 		item := body.Item
-		fmt.Fprintf(stdout, "#%d %s %s (%s)\n%s\n", item.ID, item.Lane, item.Class, item.Kind, relayTextForKind(item.Kind, item.Event))
+		fmt.Fprintf(stdout, "#%d %s %s (%s)\n", item.ID, item.Lane, item.Class, item.Kind)
+		if item.SupersededAt > 0 {
+			fmt.Fprintf(stdout, "superseded by #%d\n", item.SupersededBy)
+		}
+		fmt.Fprintln(stdout, relayTextForKind(item.Kind, item.Event))
 		return ExitOK
 	}
 }

@@ -2074,7 +2074,10 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			Epoch     uint64 `json:"epoch,omitempty"`
 			Truncated bool   `json:"truncated,omitempty"`
 			Replay    bool   `json:"replay,omitempty"`
-		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay})
+			Cause     string `json:"cause,omitempty"`
+			Head      string `json:"head,omitempty"`
+			PR        string `json:"pr,omitempty"`
+		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay, job.Cause, job.Head, job.PR})
 		payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 		payload = relayPayloadNotifyType(payload, job.NotifyType)
 		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
@@ -2107,6 +2110,8 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 	}
 	payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 	payload = relayPayloadNotifyType(payload, job.NotifyType)
+	payload = relayPayloadOptionalString(payload, "cause", job.Cause)
+	payload = relayPayloadOptionalString(payload, "head", job.Head)
 	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 }
 

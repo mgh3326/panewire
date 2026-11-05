@@ -175,6 +175,7 @@ type hubScannedRelayEvent struct {
 	Late          bool
 	DeliveryClass string
 	NotifyType    string
+	Cause         string
 	Kind          string
 	HubActiveJob
 	Reason    string
@@ -311,7 +312,7 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 			// The event file name is the job event's durable identity: it is
 			// unique per emission, stable across node restarts, and shared by
 			// `panewire emit`, which derives the same value for its file.
-			events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Late: event.Late || event.Payload.Late, NotifyType: event.notifyType(), Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name(), EventTime: eventTime})
+			events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Late: event.Late || event.Payload.Late, NotifyType: event.notifyType(), Cause: event.Cause, Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name(), EventTime: eventTime})
 		}
 	}
 	sort.Slice(events, func(i, j int) bool {
@@ -356,14 +357,14 @@ func scanHubLaneEventsWithin(inboxRoot string, maxAge time.Duration) []hubScanne
 			continue
 		}
 		lane, eventID, text := event.ownerLane(), event.eventID(), event.text()
-		if !hubAgentLabelPattern.MatchString(lane) || !validLaneEventID(eventID) || !validLaneEventText(text) || len(text) > laneEventTextLimitSink {
+		if !validInboxCause(event.Cause) || !hubAgentLabelPattern.MatchString(lane) || !validLaneEventID(eventID) || !validLaneEventText(text) || len(text) > laneEventTextLimitSink {
 			continue
 		}
 		epoch := event.Epoch
 		if epoch == 0 {
 			epoch = 1
 		}
-		out = append(out, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated()})
+		out = append(out, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Cause: event.Cause, Head: event.head(), PR: event.pr(), Kind: "lane.event", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(lane, eventID), Epoch: epoch, OwnerLane: lane, Label: event.label(), Host: event.host()}, PaneID: event.paneID(), EventID: eventID, Text: text, Truncated: event.truncated()})
 	}
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].OwnerLane == out[j].OwnerLane {
@@ -447,6 +448,7 @@ type hubInboxEvent struct {
 	Late           bool   `json:"late,omitempty"`
 	DeliveryClass  string `json:"delivery_class,omitempty"`
 	NotifyType     string `json:"notify_type,omitempty"`
+	Cause          string `json:"cause,omitempty"`
 	Type           string `json:"type"`
 	Kind           string `json:"kind"`
 	Event          string `json:"event"`

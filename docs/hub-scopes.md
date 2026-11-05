@@ -80,7 +80,7 @@ authorize this request.
 
 A sender that needs to know whether its event was acked should not read a
 lane's inbox. `GET /v1/inbox/ack-state?event_id=ID[&event_id=ID...]` answers,
-for each id, only whether the event's inbox row was acked and when — never a
+for each id, only whether the event's inbox row was acked or superseded and when — never a
 lane, kind, body or sender:
 
 ```json
@@ -92,7 +92,7 @@ lane, kind, body or sender:
 `acked_at` is RFC 3339 UTC and present only when `acked` is true. Answers keep
 the request's order; a repeated id is answered once; one request names 1 to 100
 ids. When one event id reached several lanes, `acked` is true once every row is
-acked, and `acked_at` is the latest ack.
+acked or superseded, and `acked_at` is the latest resolution time. A superseded row reports `acked: true` with its supersession time.
 
 | Caller | Sees | Otherwise |
 | --- | --- | --- |

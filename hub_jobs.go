@@ -52,11 +52,11 @@ func normalizeHubActiveJobMetadata(job *HubActiveJob) {
 
 func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 17 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 18 {
 		return hubJobEventPayload{}, nil, false
 	}
 	for name := range fields {
-		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "late" {
+		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "late" && name != "cause" {
 			return hubJobEventPayload{}, nil, false
 		}
 	}
@@ -101,6 +101,16 @@ func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, 
 			}
 		}
 	}
+	// cause is a supersession key: it is validated whole and never truncated,
+	// since a cut key names a different cause (#235 review).
+	if raw, ok := fields["cause"]; ok {
+		if json.Unmarshal(raw, &completion.Cause) != nil {
+			return hubJobEventPayload{}, nil, false
+		}
+	}
+	if !validInboxCause(completion.Cause) {
+		return hubJobEventPayload{}, nil, false
+	}
 	return completion, truncated, true
 }
 
@@ -114,7 +124,7 @@ func decodeHubJobCompletionPayload(payload []byte) (hubJobEventPayload, bool) {
 // operator-readable reason; it is not a command channel.
 func decodeHubJobEscalationPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 17 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 19 {
 		return hubJobEventPayload{}, nil, false
 	}
 	if _, hasReason := fields["reason"]; !hasReason {
@@ -149,11 +159,11 @@ func decodeHubJobEscalationPayload(payload []byte) (hubJobEventPayload, bool) {
 // heartbeat, completion, late registration, or orphan-sweep candidate.
 func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 8 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 11 {
 		return hubJobEventPayload{}, false
 	}
 	for name := range fields {
-		if name != "owner_lane" && name != "event_id" && name != "text" && name != "epoch" && name != "truncated" && name != "replay" && name != "delivery_class" && name != "notify_type" {
+		if name != "owner_lane" && name != "event_id" && name != "text" && name != "epoch" && name != "truncated" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "cause" && name != "head" && name != "pr" {
 			return hubJobEventPayload{}, false
 		}
 	}
@@ -165,6 +175,14 @@ func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 		return hubJobEventPayload{}, false
 	}
 	if raw, present := fields["epoch"]; present && (json.Unmarshal(raw, &event.Epoch) != nil || event.Epoch == 0) {
+		return hubJobEventPayload{}, false
+	}
+	for key, dst := range map[string]*string{"cause": &event.Cause, "head": &event.Head, "pr": &event.PR} {
+		if raw, ok := fields[key]; ok && (json.Unmarshal(raw, dst) != nil || !validLaneEventRef(*dst)) {
+			return hubJobEventPayload{}, false
+		}
+	}
+	if !validInboxCause(event.Cause) {
 		return hubJobEventPayload{}, false
 	}
 	if event.Epoch == 0 {
