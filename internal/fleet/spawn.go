@@ -554,6 +554,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			return fail(exitSeatRefused, "task title lacks (grade X, Tn marker")
 		}
 	}
+	s.TaskGrade = grade
 	if s.Sel != nil && s.Sel["requested"] == nil {
 		s.Sel["requested"] = map[string]any{"grade": grade, "role": s.Role, "t": s.T, "effort": effort}
 	}
