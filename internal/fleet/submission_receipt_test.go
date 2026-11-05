@@ -92,7 +92,7 @@ func TestPrepareSubmissionPinsPushedCheckoutAndResolvesAlias(t *testing.T) {
 			if err := os.WriteFile(s.Prompt, []byte("brief marker"), 0600); err != nil {
 				t.Fatal(err)
 			}
-			s.Label, s.T, s.Owner, s.Host, s.OverrideReason = "job-a", "T1", "parent", "m1b", "fixture"
+			s.Label, s.T, s.Owner, s.Host, s.OverrideReason, s.Containment = "job-a", "T1", "parent", "m1b", "fixture", "hk:12"
 			request, err := a.PrepareSubmission(t.Context(), s)
 			if !pushed {
 				if ErrorCode(err) != exitPlacement || !strings.Contains(err.Error(), "push") {

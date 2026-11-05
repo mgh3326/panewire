@@ -171,7 +171,7 @@ func TestHubOnlyHostRestrictedHolderIsNotPlaced(t *testing.T) {
 func TestHubOnlyHostPinnedProfileNamesUnplacedRung(t *testing.T) {
 	e := hubOnlyFixture(t)
 	e.s.Profile, e.s.Host, e.s.OverrideReason, e.s.DryRun = "codex-terra61", hubOnlyHost, "hk 2647", true
-	e.s.Prompt, e.s.Workspace, e.s.Label = writeBrief(t, e.a), "workers", "job-a"
+	e.s.Prompt, e.s.Workspace, e.s.Label, e.s.Containment = writeBrief(t, e.a), "workers", "job-a", "hk:12"
 	e.q.LaunchErr = fail(exitConfig, "quota catalog: Error: e6_arm_required: rung is not placed")
 	err := e.a.Spawn(context.Background(), e.s)
 	if err == nil || strings.Contains(err.Error(), "no_usable_presence") || !strings.Contains(err.Error(), "codex-terra61@low unresolved") || !strings.Contains(err.Error(), "e6_arm_required") {
@@ -180,7 +180,7 @@ func TestHubOnlyHostPinnedProfileNamesUnplacedRung(t *testing.T) {
 	// The placed rung reaches the host's shared account and its gate.
 	e = hubOnlyFixture(t)
 	e.s.Profile, e.s.Host, e.s.OverrideReason, e.s.DryRun, e.s.Effort = "codex-terra61", hubOnlyHost, "hk 2647", true, "high"
-	e.s.Prompt, e.s.Workspace, e.s.Label = writeBrief(t, e.a), "workers", "job-a"
+	e.s.Prompt, e.s.Workspace, e.s.Label, e.s.Containment = writeBrief(t, e.a), "workers", "job-a", "hk:12"
 	e.q.LaunchValue = Launch{Profile: "codex-terra61", ModelID: "terra-m", Effort: "high", Grade: "A+", Gate: "default", Pool: "codex"}
 	e.a.Config.Hosts[hubOnlyHost]["cwd_map"] = map[string]any{e.s.CWD: "/remote/repo"}
 	if err := e.a.Spawn(context.Background(), e.s); err != nil {

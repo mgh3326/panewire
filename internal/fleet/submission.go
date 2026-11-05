@@ -157,6 +157,9 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if _, err := hubArgs(a.Jobs, s); err != nil {
 		return Submission{}, fail(exitUsage, "%v; remove the unsupported flag before submitting through the hub", err)
 	}
+	if err := validateContainment(s); err != nil {
+		return Submission{}, err
+	}
 	originalHost := s.Host
 	resolved, err := a.resolveHost(s.Host)
 	if err != nil {
@@ -237,7 +240,11 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if err != nil {
 		return Submission{}, err
 	}
-	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, OriginMachine: a.machine(), DeadlineSeconds: 600, Args: submissionArgs(s)}
+	submissionSpawn := s
+	if originalHost == "local" {
+		submissionSpawn.Host = "local"
+	}
+	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, OriginMachine: a.machine(), DeadlineSeconds: 600, Args: submissionArgs(submissionSpawn)}
 	if _, err = ValidateSubmission(request); err != nil {
 		return Submission{}, err
 	}
@@ -248,6 +255,16 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	s, err := parseSpawn(request.Args)
 	if err != nil {
 		return s, err
+	}
+	if err := validateContainment(s); err != nil {
+		return s, err
+	}
+	if s.Host == "local" {
+		if !validID(request.OriginMachine) || request.OriginMachine == "local" {
+			return s, fail(exitUsage, "invalid origin machine for --host local")
+		}
+		s.Host = request.OriginMachine
+		s.requestedLocal = true
 	}
 	if !regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`).MatchString(request.RequestID) || !validID(s.Job) || !validID(s.Label) || s.DryRun || s.Delegated || s.Wait || s.Prompt == "" || !filepath.IsAbs(s.CWD) || len(request.Brief) > hubMaxBriefBytes || !utf8.ValidString(request.Brief) || strings.TrimSpace(request.Brief) == "" || request.DeadlineSeconds < 1 || request.DeadlineSeconds > 3600 {
 		return s, fail(exitUsage, "invalid spawn request; rebuild it with panewire spawn")
@@ -281,7 +298,7 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 func submissionArgs(s Spawn) []string {
 	var args []string
 	for _, field := range []struct{ flag, value string }{
-		{"-c", s.CWD}, {"-p", s.Prompt}, {"-m", s.Profile}, {"-w", s.Workspace}, {"-l", s.Label}, {"--job", s.Job}, {"--t", s.T}, {"--owner", s.Owner}, {"--effort", s.Effort}, {"--role", s.Role}, {"--lane", s.Lane}, {"--parent", s.Parent}, {"--task", s.Task}, {"--parent-job", s.ParentJob}, {"--host", s.Host}, {"--report-relative", s.ReportRelative}, {"-L", s.ExecutionLane}, {"--override-reason", s.OverrideReason}, {"--tags", s.Tags}, {"--exclude-host", s.ExcludeHosts}, {"--urgency", s.Urgency}, {"--builder-family", s.BuilderFamily}, {"--builder-job", s.BuilderJob}, {"--routing-role", s.RoutingRole}, {"--grade", s.Grade}, {"--operator-request", s.OperatorRequest}, {"--requested-by", s.RequestedBy}, {"--purpose", s.Purpose}, {"--lane-defer", s.LaneDefer},
+		{"-c", s.CWD}, {"-p", s.Prompt}, {"-m", s.Profile}, {"-w", s.Workspace}, {"-l", s.Label}, {"--job", s.Job}, {"--t", s.T}, {"--owner", s.Owner}, {"--effort", s.Effort}, {"--role", s.Role}, {"--lane", s.Lane}, {"--parent", s.Parent}, {"--task", s.Task}, {"--parent-job", s.ParentJob}, {"--host", s.Host}, {"--report-relative", s.ReportRelative}, {"-L", s.ExecutionLane}, {"--override-reason", s.OverrideReason}, {"--containment", s.Containment}, {"--tags", s.Tags}, {"--exclude-host", s.ExcludeHosts}, {"--urgency", s.Urgency}, {"--builder-family", s.BuilderFamily}, {"--builder-job", s.BuilderJob}, {"--routing-role", s.RoutingRole}, {"--grade", s.Grade}, {"--operator-request", s.OperatorRequest}, {"--requested-by", s.RequestedBy}, {"--purpose", s.Purpose}, {"--lane-defer", s.LaneDefer},
 	} {
 		if field.value != "" {
 			args = append(args, field.flag, field.value)

@@ -30,7 +30,34 @@ type Event struct {
 	Outcome string `json:"outcome"`
 	Reason  string `json:"reason"`
 	Detail  string `json:"detail"`
+	// RequestID, Chosen and Candidates are the optional fields of a placement
+	// line: the hub spawn request it decided, the host it chose and every
+	// candidate host's score terms. They are omitted when empty, so every other
+	// line keeps the eight-field shape.
+	RequestID  string      `json:"request_id,omitempty"`
+	Chosen     string      `json:"chosen,omitempty"`
+	Candidates []Candidate `json:"candidates,omitempty"`
 }
+
+// Candidate is one host's part in a placement decision: the five terms of its
+// free fraction (each 0..1), its power and the claims inside the spawn bridge,
+// the resulting score, and why it was not chosen when it was not. A term is
+// nil when the hub sent none for that host.
+type Candidate struct {
+	Host    string   `json:"host"`
+	Score   *float64 `json:"score,omitempty"`
+	CPU     *float64 `json:"cpu,omitempty"`
+	Mem     *float64 `json:"mem,omitempty"`
+	IO      *float64 `json:"io,omitempty"`
+	Load    *float64 `json:"load,omitempty"`
+	Jobs    *float64 `json:"jobs,omitempty"`
+	Power   *float64 `json:"power,omitempty"`
+	Bridge  *int     `json:"bridge,omitempty"`
+	Outcome string   `json:"outcome,omitempty"`
+}
+
+// MaxCandidates bounds the candidates of one line.
+const MaxCandidates = 16
 
 const (
 	// MaxDetail bounds the detail field in bytes, after redaction.
@@ -53,6 +80,9 @@ type Writer struct {
 	Host     string
 	MaxBytes int64
 	Now      func() time.Time
+	// Sink, when set, receives each normalised event instead of the file. Tests
+	// use it as a fake writer; production leaves it nil.
+	Sink func(Event)
 
 	mu sync.Mutex
 }
@@ -78,22 +108,33 @@ func ShortHost() string {
 
 // Emit appends one event. It reports whether the line was written.
 func (w *Writer) Emit(kind, job, outcome, reason, detail string) bool {
-	if w == nil || w.Path == "" {
+	return w.EmitEvent(Event{Kind: kind, Job: job, Outcome: outcome, Reason: reason, Detail: detail})
+}
+
+// EmitEvent appends ev, stamping the time, host and tool and normalising every
+// field. It reports whether the line was written.
+func (w *Writer) EmitEvent(ev Event) bool {
+	if w == nil || (w.Path == "" && w.Sink == nil) {
 		return false
 	}
 	now := time.Now
 	if w.Now != nil {
 		now = w.Now
 	}
-	ev := Event{
-		TS:      now().UTC().Format(time.RFC3339Nano),
-		Host:    Code(w.Host),
-		Tool:    Code(w.Tool),
-		Kind:    Code(kind),
-		Job:     Bound(Redact(job), maxJob),
-		Outcome: Code(outcome),
-		Reason:  Code(reason),
-		Detail:  Bound(Redact(detail), MaxDetail),
+	ev.TS, ev.Host, ev.Tool = now().UTC().Format(time.RFC3339Nano), Code(w.Host), Code(w.Tool)
+	ev.Kind, ev.Outcome, ev.Reason = Code(ev.Kind), Code(ev.Outcome), Code(ev.Reason)
+	ev.Job, ev.Detail = Bound(Redact(ev.Job), maxJob), Bound(Redact(ev.Detail), MaxDetail)
+	ev.RequestID, ev.Chosen = Bound(Redact(ev.RequestID), maxJob), Code(ev.Chosen)
+	if len(ev.Candidates) > MaxCandidates {
+		ev.Candidates = ev.Candidates[:MaxCandidates]
+	}
+	ev.Candidates = append([]Candidate(nil), ev.Candidates...)
+	for i := range ev.Candidates {
+		ev.Candidates[i].Host, ev.Candidates[i].Outcome = Code(ev.Candidates[i].Host), Code(ev.Candidates[i].Outcome)
+	}
+	if w.Sink != nil {
+		w.Sink(ev)
+		return true
 	}
 	line, err := json.Marshal(ev)
 	if err != nil {

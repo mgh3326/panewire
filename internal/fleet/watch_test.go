@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -301,6 +302,130 @@ func TestWatcherSignalWithoutReportStaysLiveAtDeadline(t *testing.T) {
 	}
 	if !strings.Contains(a.Err.(*bytes.Buffer).String(), "watch-expired") {
 		t.Fatalf("no expiry notice: %q", a.Err)
+	}
+}
+
+func TestWatcherFindingsResult(t *testing.T) {
+	for _, tc := range []struct {
+		name, body           string
+		symlink              bool
+		wantResult, rejected bool
+	}{
+		{name: "valid", body: `{"findings":[{"severity":"high"}]}`, wantResult: true},
+		{name: "absent"},
+		{name: "bad JSON", body: `secret invalid`, rejected: true},
+		{name: "too large", body: strings.Repeat("x", 65537), rejected: true},
+		{name: "symlink", symlink: true, rejected: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _, report := watchFixture(t)
+			h := newFakeHK(t)
+			h.claimJob("j", float64(42), "test-host")
+			h.records["j"]["state"] = "spawned"
+			a.JobStore = h.client()
+			writeReport(t, report, "final\n")
+			path := filepath.Join(filepath.Dir(report), "findings.json")
+			if tc.symlink {
+				if e := os.Symlink(report, path); e != nil {
+					t.Fatal(e)
+				}
+			} else if tc.body != "" {
+				writeReport(t, path, tc.body)
+			}
+			putLaneEvent(t, a, "w:p1", "READY", a.Now().Add(time.Minute))
+			if e := a.watch(context.Background(), []string{"j"}); e != nil {
+				t.Fatal(e)
+			}
+			rec := h.record(t, "j")
+			result, has := rec["result"]
+			if has != tc.wantResult {
+				t.Fatalf("result=%v record=%v", result, rec)
+			}
+			if has {
+				b, _ := json.Marshal(result)
+				if string(b) != tc.body {
+					t.Fatalf("result=%s", b)
+				}
+			}
+			events, e := a.events("j")
+			if e != nil {
+				t.Fatal(e)
+			}
+			count := 0
+			for _, ev := range events {
+				if ev.Kind == "job.result_rejected" {
+					count++
+					b, _ := json.Marshal(ev.Payload)
+					if strings.Contains(string(b), "secret invalid") {
+						t.Fatalf("content leaked: %s", b)
+					}
+				}
+			}
+			if tc.rejected && !strings.Contains(a.Err.(*bytes.Buffer).String(), "watcher result rejected") {
+				t.Fatal("missing rejection warning")
+			}
+			if (count == 1) != tc.rejected || count > 1 {
+				t.Fatalf("rejections=%d", count)
+			}
+			if str(rec, "state") != "completed" {
+				t.Fatalf("record=%v", rec)
+			}
+		})
+	}
+}
+
+func TestWatcherLeavesDirectDoneResultUntouched(t *testing.T) {
+	a, _, report := watchFixture(t)
+	h := newFakeHK(t)
+	h.claimJob("j", float64(42), "test-host")
+	h.records["j"]["state"] = "spawned"
+	a.JobStore = h.client()
+	writeReport(t, report, "final\n")
+	direct := filepath.Join(filepath.Dir(report), "direct.json")
+	writeReport(t, direct, `{"source":"direct"}`)
+	if e := a.lifecycle(context.Background(), "done", []string{"j", "--report", report, "--result", direct}); e != nil {
+		t.Fatal(e)
+	}
+	before := len(hkCalls(h))
+	writeReport(t, filepath.Join(filepath.Dir(report), "findings.json"), `{"source":"watcher"}`)
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	rec := h.record(t, "j")
+	if result, ok := rec["result"].(map[string]any); !ok || result["source"] != "direct" {
+		t.Fatalf("record=%v", rec)
+	}
+	if len(hkCalls(h)) != before {
+		t.Fatalf("watcher touched job store: %v", hkCalls(h))
+	}
+}
+
+// The watcher reads any worker-written findings.json, so an oversized file is
+// rejected after reading at most the limit, never loaded whole (hk 2927 review).
+func TestReadResultBoundsTheRead(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir()) // macOS /var is a symlink
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "findings.json")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(256 << 20); err != nil { // sparse: no disk use
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err = readResult(path)
+	runtime.ReadMemStats(&after)
+	if err == nil || !strings.Contains(err.Error(), "exceeds 64 KiB") {
+		t.Fatalf("err=%v", err)
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 8<<20 {
+		t.Fatalf("readResult allocated %d bytes for an oversized file", grew)
 	}
 }
 

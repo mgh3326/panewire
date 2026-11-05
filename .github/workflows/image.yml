@@ -37,6 +37,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
       - name: Smoke test image
+        if: github.event_name != 'pull_request'
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |

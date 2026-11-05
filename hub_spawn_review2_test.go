@@ -36,7 +36,7 @@ func TestOperatorSpawnAcceptsCanonicalSubmissionArgs(t *testing.T) {
 				Config:     fleet.Config{Local: map[string]any{"machine_id": "machine-a"}},
 				Repository: &fleet.Repository{Name: "project", Origin: origin, LocalRoot: root, Worktree: "project.job", Checkout: &fleet.HubCheckout{Origin: origin, Mode: "branch", Branch: "wk/task", Sha: strings.Repeat("a", 40), Dir: "project.job"}},
 			}
-			request, err := app.PrepareSubmission(t.Context(), fleet.Spawn{CWD: cwd, Prompt: brief, Profile: "auto", Host: "auto", Label: "job", Job: "job", T: "T1", Task: "42", Owner: "parent", Role: "worker", Grade: "S+", ExcludeHosts: excluded})
+			request, err := app.PrepareSubmission(t.Context(), fleet.Spawn{CWD: cwd, Prompt: brief, Profile: "auto", Host: "auto", Label: "job", Job: "job", T: "T1", Task: "42", Owner: "parent", Role: "worker", Grade: "S+", ExcludeHosts: excluded, Containment: "hk:12"})
 			if err != nil {
 				t.Fatal(err)
 			}

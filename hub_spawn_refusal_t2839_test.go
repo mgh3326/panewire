@@ -185,6 +185,7 @@ func TestPinnedHostRefusalStaysTerminal(t *testing.T) {
 	if hubSpawnArg(request.Args, "--host") != "machine-a" {
 		request.Args = append(request.Args, "--host", "machine-a")
 	}
+	request.Args = append(request.Args, "--containment", "hk:12")
 	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
 	if err != nil {
 		t.Fatal(err)
@@ -330,6 +331,7 @@ func TestFreshRequestRetriesAfterHubRecordedCleanup(t *testing.T) {
 		if !found {
 			request.Args = append(request.Args, "--host", host)
 		}
+		request.Args = append(request.Args, "--containment", "hk:12")
 		if !hasOverrideReason(request.Args) {
 			request.Args = append(request.Args, "--override-reason", "verified-cleanup-retry")
 		}
