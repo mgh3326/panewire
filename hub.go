@@ -6,8 +6,6 @@ import (
 	_ "embed"
 	"encoding/json"
 	"errors"
-	"github.com/getsentry/sentry-go"
-	"github.com/mgh3326/panewire/internal/fleet"
 	"html/template"
 	"io"
 	"log/slog"
@@ -23,6 +21,8 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/coder/websocket/wsjson"
+	"github.com/getsentry/sentry-go"
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 const (
@@ -443,7 +443,7 @@ type HubServer struct {
 	prometheusBasicUser              string
 	prometheusBasicPass              string
 	placementCache                   placementCache
-	r19a                             r19aHubState
+	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int
 	laneLife                         laneLiveness
@@ -724,7 +724,7 @@ func NewHubServer(config HubServerConfig) (*HubServer, error) {
 	closeCtx, closeCancel := context.WithCancel(context.Background())
 	hub := &HubServer{
 		inbox: inbox, spawnKick: make(chan struct{}, 1),
-		authPath: config.AuthPath, alertNodes: alertNodes, r19a: newR19aHubState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
+		authPath: config.AuthPath, alertNodes: alertNodes, relayControl: newHubRelayControlState(config, overrides), now: config.Now, staleAfter: config.StaleAfter, keepaliveInterval: config.KeepaliveInterval,
 		gracePeriod: config.GracePeriod, orphanGrace: config.OrphanGrace, alertObservations: defaultHubAlertObservations, notifier: config.Notifier, logger: config.Logger, burstPolicyPath: config.BurstPolicyPath,
 		placementPolicyPath: config.PlacementPolicyPath, placementPolicy: placementPolicy, placementPolicyModTime: placementPolicyModTime, placementPolicyObservedModTime: placementPolicyObservedModTime, placementPolicyLoaded: placementPolicyLoaded, placementPolicyStatus: placementPolicyStatus, placementPolicyLastFailure: placementPolicyLastFailure, prometheusURL: config.PrometheusURL, prometheusClient: config.PrometheusClient, prometheusBearer: config.PrometheusBearer, prometheusBasicUser: config.PrometheusBasicUser, prometheusBasicPass: config.PrometheusBasicPass,
 		nodes: make(map[string]*hubNodeRecord), lastNotes: make(map[string]*HubLastNote), subscribers: make(map[*hubEventSubscriber]struct{}), alerts: make(map[string]*hubAlertState), burstPolicy: burstPolicy, burstPolicyModTime: burstPolicyModTime, wakeConfigPath: config.WakeConfigPath, wakeTargets: wakeTargets, wakeConfigModTime: wakeConfigModTime, burstState: &hubBurstState{}, startedAt: config.Now().UTC(), uiAllowCFOnly: config.UIAllowCFOnly, jobs: make(map[string]*hubJobRecord), pendingRevocations: make(map[string]map[string]hubJobRevokedEvent), holds: make(map[string]*hubBurstHold), reportRelayPath: config.ReportRelayPath, lanesNodeRowCap: config.LanesNodeRowCap, controlPlaneLanesPath: config.ControlPlaneLanesPath, controlPlaneLanes: controlPlaneLanes, controlPlaneLanesModTime: controlPlaneLanesModTime, controlPlaneLanesObservedModTime: controlPlaneLanesObservedModTime, controlPlaneLanesLoaded: controlPlaneLanesLoaded, controlPlaneLanesStatus: controlPlaneLanesStatus, controlPlaneLanesLastFailure: controlPlaneLanesLastFailure, relayDedupe: make(map[string]int64), relayHeld: make(map[int64]hubRelayHeldProjection), relayCancelled: make(map[int64]struct{}), lanePersisted: make(map[string]int64), laneEventSHA: make(map[string]string), replayExhausted: make(map[int64]struct{}), handoffkeep: config.handoffkeep, chatStore: config.ChatStore, chatDeskLane: config.ChatDeskLane, chatKick: make(chan struct{}, 1), chatPending: make(map[int64]chatPendingMessage), chatLaneOf: make(map[int64]string), chatCancelled: make(map[int64]struct{}), chatRetriedFrom: make(map[int64]int64), cfAccess: cfAccess, spawnRecords: make(map[string]*hubSpawnRecord), stallBeats: make(map[string]*hubStallBeatState), closeCtx: closeCtx, closeCancel: closeCancel,
@@ -1113,11 +1113,9 @@ func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Reques
 		hubUnauthorized(writer)
 		return
 	}
-	writer.Header().Set("Content-Type", "application/json")
 	routes, control, controlReadable, err := loadReportRelayRoutesAndControlResult(h.reportRelayPath)
 	if err != nil {
-		writer.WriteHeader(http.StatusInternalServerError)
-		_ = json.NewEncoder(writer).Encode(struct {
+		writeJSON(writer, http.StatusInternalServerError, struct {
 			Error string `json:"error"`
 		}{Error: "lanes_invalid"})
 		return
@@ -1137,12 +1135,12 @@ func (h *HubServer) handleLanes(writer http.ResponseWriter, request *http.Reques
 	if nodeMachine != "" {
 		// A node's envelope carries only its own machine's lanes and none of
 		// the control-plane transfer fields the operator envelope has.
-		_ = json.NewEncoder(writer).Encode(struct {
+		writeJSON(writer, http.StatusOK, struct {
 			Lanes []hubLaneProjection `json:"lanes"`
 		}{Lanes: lanes})
 		return
 	}
-	_ = json.NewEncoder(writer).Encode(struct {
+	writeJSON(writer, http.StatusOK, struct {
 		Lanes                   []hubLaneProjection `json:"lanes"`
 		ControlEpoch            uint64              `json:"control_epoch"`
 		ControlOwner            string              `json:"control_owner"`
@@ -2252,7 +2250,7 @@ func (h *HubServer) Nodes() []HubNode {
 		}
 		effective := h.acceptingEffectiveLocked(record.machineID, record.accepting)
 		nodes = append(nodes, HubNode{
-			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), Containment: h.r19a.acceptingOverride[record.machineID].Containment, ContainmentVerified: h.r19a.acceptingOverride[record.machineID].ContainmentVerified, ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, Load: hubNodeLoadFromHostLoad(record.hostLoad), Memory: cloneHubHostMemory(record.hostMemory), RemoteMeta: remoteMeta, State: record.state,
+			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), Containment: h.relayControl.acceptingOverride[record.machineID].Containment, ContainmentVerified: h.relayControl.acceptingOverride[record.machineID].ContainmentVerified, ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, Load: hubNodeLoadFromHostLoad(record.hostLoad), Memory: cloneHubHostMemory(record.hostMemory), RemoteMeta: remoteMeta, State: record.state,
 			SessionSnapshot: hubSessionSnapshotView(record.sessionSnapshot, record.state == "stale" || record.state == "disconnected"),
 		})
 	}

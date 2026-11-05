@@ -87,7 +87,7 @@ func (rig *t1002Rig) startHub() {
 	if err != nil {
 		rig.t.Fatal(err)
 	}
-	hub.r19a.relayAckTimeout = time.Hour
+	hub.relayControl.relayAckTimeout = time.Hour
 	rig.hub = hub
 	rig.dest = &hubAgent{relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64)}
 	rig.src = &hubAgent{relays: make(chan hubRelayInjectEvent, 64), persisted: make(chan hubRelayPersistedEvent, 64)}
@@ -201,7 +201,7 @@ func TestT1002MarkedRowReplaysOnceWithLabel(t *testing.T) {
 			return
 		}
 		rig.hub.mu.Lock()
-		_, live := rig.hub.r19a.relayPending[pendingKey]
+		_, live := rig.hub.relayControl.relayPending[pendingKey]
 		rig.hub.mu.Unlock()
 		if live {
 			markObserved = true
@@ -217,7 +217,7 @@ func TestT1002MarkedRowReplaysOnceWithLabel(t *testing.T) {
 		t.Fatal("the unconfirmed mark was written after the live window retired (AC5)")
 	}
 	rig.hub.mu.Lock()
-	_, live := rig.hub.r19a.relayPending[pendingKey]
+	_, live := rig.hub.relayControl.relayPending[pendingKey]
 	rig.hub.mu.Unlock()
 	if live {
 		t.Fatal("an accepted unconfirmed left the live window registered")

@@ -349,7 +349,7 @@ func TestR24HTTPIngressSinkMarksDeliveredWithoutAckTimer(t *testing.T) {
 		t.Fatalf("handoffkeep calls=%v want=%v", got, want)
 	}
 	hub.mu.Lock()
-	pending, timeouts := len(hub.r19a.relayPending), len(hub.r19a.relayTimeouts)
+	pending, timeouts := len(hub.relayControl.relayPending), len(hub.relayControl.relayTimeouts)
 	hub.mu.Unlock()
 	if pending != 0 || timeouts != 0 {
 		t.Fatalf("sink started ack state pending=%d timeouts=%d", pending, timeouts)
