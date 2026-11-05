@@ -40,7 +40,7 @@ func (sp *selPresence) hasHost(seat *Seat) bool {
 }
 
 // bindings groups current logins by account, so two hosts never supply two
-// copies of the same quota. Hosts only compete inside their account. An
+// copies of the same quota. Admission ranks hosts across these accounts. An
 // account binds only through a placeable host; its restricted holders may
 // still measure it.
 func (sp *selPresence) bindings(seat *Seat, pool string) []accountBinding {

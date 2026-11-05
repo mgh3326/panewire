@@ -30,13 +30,28 @@ type Event struct {
 	Outcome string `json:"outcome"`
 	Reason  string `json:"reason"`
 	Detail  string `json:"detail"`
-	// RequestID, Chosen and Candidates are the optional fields of a placement
-	// line: the hub spawn request it decided, the host it chose and every
-	// candidate host's score terms. They are omitted when empty, so every other
-	// line keeps the eight-field shape.
-	RequestID  string      `json:"request_id,omitempty"`
-	Chosen     string      `json:"chosen,omitempty"`
-	Candidates []Candidate `json:"candidates,omitempty"`
+	// Placement lines optionally carry the request, chosen host, candidate
+	// scores and host/rung selection trace. Other lines keep eight fields.
+	RequestID  string          `json:"request_id,omitempty"`
+	Chosen     string          `json:"chosen,omitempty"`
+	Candidates []Candidate     `json:"candidates,omitempty"`
+	Selection  []HostSelection `json:"selection,omitempty"`
+}
+
+// HostSelection records admission in host rank order, before execution placement.
+// It carries no account identities or gate output.
+type HostSelection struct {
+	Host    string        `json:"host"`
+	Rank    int           `json:"rank"`
+	Outcome string        `json:"outcome"`
+	Tried   []RungAttempt `json:"tried,omitempty"`
+}
+
+type RungAttempt struct {
+	Profile string `json:"profile"`
+	Effort  string `json:"effort"`
+	Pool    string `json:"pool"`
+	Outcome string `json:"outcome"`
 }
 
 // Candidate is one host's part in a placement decision: the five terms of its
@@ -58,6 +73,9 @@ type Candidate struct {
 
 // MaxCandidates bounds the candidates of one line.
 const MaxCandidates = 16
+
+// MaxRungs bounds the admission attempts recorded for one host.
+const MaxRungs = 32
 
 const (
 	// MaxDetail bounds the detail field in bytes, after redaction.
@@ -131,6 +149,23 @@ func (w *Writer) EmitEvent(ev Event) bool {
 	ev.Candidates = append([]Candidate(nil), ev.Candidates...)
 	for i := range ev.Candidates {
 		ev.Candidates[i].Host, ev.Candidates[i].Outcome = Code(ev.Candidates[i].Host), Code(ev.Candidates[i].Outcome)
+	}
+	if len(ev.Selection) > MaxCandidates {
+		ev.Selection = ev.Selection[:MaxCandidates]
+	}
+	ev.Selection = append([]HostSelection(nil), ev.Selection...)
+	for i := range ev.Selection {
+		h := &ev.Selection[i]
+		h.Host, h.Outcome = Code(Redact(h.Host)), Code(Redact(h.Outcome))
+		if len(h.Tried) > MaxRungs {
+			h.Tried = h.Tried[:MaxRungs]
+		}
+		h.Tried = append([]RungAttempt(nil), h.Tried...)
+		for j := range h.Tried {
+			r := &h.Tried[j]
+			r.Profile, r.Effort = Bound(Redact(r.Profile), maxJob), Code(Redact(r.Effort))
+			r.Pool, r.Outcome = Code(Redact(r.Pool)), Code(Redact(r.Outcome))
+		}
 	}
 	if w.Sink != nil {
 		w.Sink(ev)

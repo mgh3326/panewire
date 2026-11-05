@@ -35,6 +35,39 @@ policy file that still sets them loads, and the values are ignored (reload logs
 a warning for `capacity_weight`; set `power` instead). The score constants have
 their own optional `score` object, see [Constants](#constants).
 
+## Automatic selection
+
+For `-m auto`, selection ranks eligible hosts before choosing an account or
+model rung. Host capability tags, accepted roles and grades, accepting state,
+and harness readiness filter the candidates. The existing placement order
+then applies: load bucket, the hub's decided host, score v2 when every host
+has a score, otherwise load, then configuration order.
+
+On each host in that order, selection considers only the accounts it holds
+and the rungs its harnesses can launch. Grade, role, routing, effort, and seat
+checks still apply. The quota policy orders those rungs within that host:
+waste, free, ranked, credit, including the existing waste-risk, expiring-credit,
+and credit-pacing rules. A credit balance on another host cannot promote that
+host or reorder this host's rungs. The first admitted host, rung, and account
+wins. A host whose accounts are exhausted or unknown is skipped.
+
+Measured quota exhaustion is cached by account for the decision. Several
+hosts holding one account share one quota and do not repeat its exhausted
+gate. Rung-specific policy refusals still allow other rungs, and a free
+bucket can still admit a rung despite the subscription's projected use.
+Explicit `-m PROFILE`, `--host`, and hub-directed spawns keep their existing
+placement and admission paths.
+
+The `job.placement` event's `selection` object and `plan --json` include
+`host_order` and each host's `rank`, `tried` rungs, and `admission_outcome`.
+An attempt records `admitted`, `quota_exhausted`, `quota_unknown`, or `no_rung`.
+Hosts after the winner record `not_tried`. The existing `outcome`, `result`,
+and readiness-drop fields retain the more specific host and rung reasons.
+Fleet `placement` events also carry a bounded `selection` array in host rank
+order, with each host's outcome and tried profile, effort, pool, and outcome.
+It omits account identities and gate output. Refused automatic selections
+emit this trace too. The handoffkeep placement API payload is unchanged.
+
 ## Readiness
 
 Placement used to rank hosts on load and account presence only. Every
