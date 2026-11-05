@@ -15,6 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/daemonop"
 )
 
 const (
@@ -673,6 +675,9 @@ type localRequest struct {
 	// daemon's. That is how a test run against a temporary inbox root ends up
 	// stamping the operator's production journal.
 	InboxRoot string `json:"inbox_root,omitempty"`
+	// LanesPut carries a lane registration for the lanes.put op; the field
+	// names are the shared socket contract in internal/daemonop.
+	daemonop.LanesPut
 }
 type localResponse struct {
 	OK     bool   `json:"ok"`
@@ -718,6 +723,8 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 			err = d.emitRelayEvent(req)
 		case "inbox":
 			result, err = d.handleInbox(callCtx, req.Inbox)
+		case daemonop.LanesPutOp:
+			result, err = d.handleLanesPut(callCtx, req.LanesPut)
 		case "prompt":
 			if !caps.Prompt || !caps.AgentRead {
 				result, err = recordUnavailablePrompt(callCtx, d.store, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, ExitDaemonUnavailable, "prompt capability unavailable")
@@ -813,7 +820,7 @@ func (d *Daemon) SocketPath() string {
 }
 func defaultSocketPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "Application Support", "panewire", "panewire.sock")
+	return daemonop.DefaultSocketPath(home)
 }
 
 // emitNamespaceMatches reports whether a caller's inbox root is the one this

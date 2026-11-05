@@ -212,6 +212,28 @@ machine still references. `self-check` reads
 the control-plane fields a node-filtered response never carries, so it keeps
 requiring an operator file and refuses a node file before any request.
 
+### Node registration route
+
+A spawn registers its lane through the node's local panewire daemon when one
+answers, instead of running the credentialled command. The spawn engine dials
+the daemon socket (`PANEWIRE_SOCKET`, else the default socket under the home
+directory) and sends a `lanes.put` request carrying the lane, machine, pane
+and parent. The daemon makes the same `PUT /v1/lanes/<lane>` with the node
+credential, hub URL list and Cloudflare Access pair it already holds, so a
+host whose fleet config carries no `[hub]` token key can still register a
+spawned lane.
+
+The hub's node authorization is unchanged: the daemon's credential may write
+only its own machine's lanes, and the parent rules above still apply. A
+refusal keeps the command's text and exit status — `lane_machine_mismatch`,
+`lane_quota_exceeded`, `lanes_file_full` and the transport failures all read
+the same on either route — so the receipt's `lane_error` is identical.
+
+The credentialled command above remains the fallback when no daemon socket
+answers or the daemon has no hub client. A session that names its own lane
+credential in `hub.session_lanes_token_envs` also keeps the command route,
+because that session's hub identity is not the daemon's.
+
 ```sh
 panewire lanes add <lane> --machine <machine> --pane <wN:pN> [--parent <lane>] [--sink] \
   --hub-url <https-hub-url> --hub-token-env <token-env> [--hub-cf-env <access-env>]

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -56,13 +57,9 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		return ExitConditionInvalid
 	}
 	if options.Command == "add" {
-		if options.Machine == hubOperatorMachineID || !machineIDPattern.MatchString(options.Machine) || !validLanePane(options.Pane) {
-			fmt.Fprintln(stderr, "lanes rejected: invalid route")
-			return ExitConditionInvalid
-		}
-		if options.Parent != "" && (!laneNamePattern.MatchString(options.Parent) || options.Parent == options.Lane) {
-			fmt.Fprintln(stderr, "lanes rejected: invalid parent")
-			return ExitConditionInvalid
+		if detail, code := validateLaneAdd(options.Lane, options.Machine, options.Pane, options.Parent); code != ExitOK {
+			fmt.Fprintln(stderr, detail)
+			return code
 		}
 	}
 	if options.Command == "self-check" && (options.ExpectedMachine == hubOperatorMachineID || !machineIDPattern.MatchString(options.ExpectedMachine) || !validLanePane(options.ExpectedPane)) {
@@ -91,21 +88,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 
 	path := "/v1/lanes"
 	method := http.MethodGet
-	var requestBody io.Reader
-	if options.Command == "add" {
-		path += "/" + options.Lane
-		method = http.MethodPut
-		encoded, marshalErr := json.Marshal(struct {
-			Machine string `json:"machine"`
-			Pane    string `json:"pane"`
-			Parent  string `json:"parent,omitempty"`
-			Sink    bool   `json:"sink,omitempty"`
-		}{Machine: options.Machine, Pane: options.Pane, Parent: options.Parent, Sink: options.Sink})
-		if marshalErr != nil {
-			return ExitInternal
-		}
-		requestBody = bytes.NewReader(encoded)
-	} else if options.Command == "rm" {
+	if options.Command == "rm" {
 		path += "/" + options.Lane
 		method = http.MethodDelete
 	}
@@ -121,7 +104,16 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), lanesCLIRequestTimeout)
 	defer cancel()
-	response, err := client.do(ctx, method, path, nil, requestBody)
+	if options.Command == "add" {
+		result, detail, code := laneAddThroughHub(ctx, client, options)
+		if code != ExitOK {
+			fmt.Fprintln(stderr, detail)
+			return code
+		}
+		_ = json.NewEncoder(stdout).Encode(result)
+		return ExitOK
+	}
+	response, err := client.do(ctx, method, path, nil, nil)
 	if err != nil {
 		fmt.Fprintln(stderr, "lanes unavailable")
 		return ExitInternal
@@ -129,17 +121,6 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	defer response.Body.Close()
 
 	switch options.Command {
-	case "add":
-		if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
-			return lanesCLIStatusForParent(stderr, response, options.Parent)
-		}
-		var result hubLaneProjection
-		if err := decodeLanesJSON(response.Body, &result); err != nil || !validHubLaneWriteProjection(result) || result.Lane != options.Lane {
-			fmt.Fprintln(stderr, "lanes unavailable")
-			return ExitInternal
-		}
-		_ = json.NewEncoder(stdout).Encode(result)
-		return ExitOK
 	case "rm":
 		if response.StatusCode != http.StatusOK {
 			return lanesCLIStatus(stderr, response)
@@ -238,6 +219,57 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	default:
 		return writeHubCLIUsage(stderr, "lanes: unknown command", lanesUsage)
 	}
+}
+
+// validateLaneAdd answers the refusal line and exit status for a lane write.
+// The order and wording are the `lanes add` contract; the daemon's lanes.put
+// op reports the same line so a spawn receipt records it unchanged.
+func validateLaneAdd(lane, machine, pane, parent string) (string, int) {
+	if !laneNamePattern.MatchString(lane) {
+		return "lanes rejected: invalid lane", ExitConditionInvalid
+	}
+	if machine == hubOperatorMachineID || !machineIDPattern.MatchString(machine) || !validLanePane(pane) {
+		return "lanes rejected: invalid route", ExitConditionInvalid
+	}
+	if parent != "" && (!laneNamePattern.MatchString(parent) || parent == lane) {
+		return "lanes rejected: invalid parent", ExitConditionInvalid
+	}
+	return "", ExitOK
+}
+
+// hubLaneWriter is the request boundary a lane write crosses: the operator
+// client for `lanes add` and the daemon's node client for lanes.put.
+type hubLaneWriter interface {
+	do(context.Context, string, string, url.Values, io.Reader) (*http.Response, error)
+}
+
+// laneAddThroughHub makes the lane PUT and maps the answer to the projection on
+// success, or to the exact line and exit status `lanes add` reports. Both
+// routes share it so a refusal keeps its text and status across the socket.
+func laneAddThroughHub(ctx context.Context, client hubLaneWriter, options lanesCLIOptions) (hubLaneProjection, string, int) {
+	encoded, err := json.Marshal(struct {
+		Machine string `json:"machine"`
+		Pane    string `json:"pane"`
+		Parent  string `json:"parent,omitempty"`
+		Sink    bool   `json:"sink,omitempty"`
+	}{Machine: options.Machine, Pane: options.Pane, Parent: options.Parent, Sink: options.Sink})
+	if err != nil {
+		return hubLaneProjection{}, "lanes unavailable", ExitInternal
+	}
+	response, err := client.do(ctx, http.MethodPut, "/v1/lanes/"+options.Lane, nil, bytes.NewReader(encoded))
+	if err != nil {
+		return hubLaneProjection{}, "lanes unavailable", ExitInternal
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
+		detail, code := lanesRefusalForParent(response, options.Parent)
+		return hubLaneProjection{}, detail, code
+	}
+	var result hubLaneProjection
+	if err := decodeLanesJSON(response.Body, &result); err != nil || !validHubLaneWriteProjection(result) || result.Lane != options.Lane {
+		return hubLaneProjection{}, "lanes unavailable", ExitInternal
+	}
+	return result, "", ExitOK
 }
 
 func parseLanesCLI(args []string) (lanesCLIOptions, error) {
@@ -372,6 +404,15 @@ func lanesCLIStatus(stderr io.Writer, response *http.Response) int {
 }
 
 func lanesCLIStatusForParent(stderr io.Writer, response *http.Response, parent string) int {
+	line, code := lanesRefusalForParent(response, parent)
+	fmt.Fprintln(stderr, line)
+	return code
+}
+
+// lanesRefusalForParent returns the stderr line and exit status for a hub
+// refusal, keeping the code and the parent hint that make a lane_quota_exceeded
+// or a lane_machine_mismatch actionable.
+func lanesRefusalForParent(response *http.Response, parent string) (string, int) {
 	var body struct {
 		Error string `json:"error"`
 		Use   string `json:"use"`
@@ -390,18 +431,14 @@ func lanesCLIStatusForParent(stderr io.Writer, response *http.Response, parent s
 	}
 	if response.StatusCode >= 400 && response.StatusCode < 500 {
 		if detail != "" {
-			fmt.Fprintf(stderr, "lanes rejected by hub: %s\n", detail)
-		} else {
-			fmt.Fprintln(stderr, "lanes rejected by hub")
+			return "lanes rejected by hub: " + detail, ExitConditionInvalid
 		}
-		return ExitConditionInvalid
+		return "lanes rejected by hub", ExitConditionInvalid
 	}
 	if detail != "" {
-		fmt.Fprintf(stderr, "lanes unavailable: %s\n", detail)
-	} else {
-		fmt.Fprintln(stderr, "lanes unavailable")
+		return "lanes unavailable: " + detail, ExitInternal
 	}
-	return ExitInternal
+	return "lanes unavailable", ExitInternal
 }
 
 // lanesPrintableHint caps an echo of hub guidance at one printable-ASCII run:

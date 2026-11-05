@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -778,7 +779,13 @@ func SanitizeFailureDetail(text string) string {
 	return strings.ToValidUTF8(clip(msg, 240), "")
 }
 
+// registerLane registers a spawned lane with the hub. On a node the daemon
+// already holds the hub credential, so the socket route goes first; the
+// fleet-config `lanes add` command stays for hosts where no daemon answers.
 func (a *App) registerLane(ctx context.Context, lane, parent, pane, role, machine string) error {
+	if e := a.registerLaneThroughDaemon(ctx, lane, parent, pane, machine); !errors.Is(e, errLaneDaemonAbsent) {
+		return e
+	}
 	if str(a.Config.Hub, "hub_url") == "" {
 		return fail(exitConfig, "hub lane config missing")
 	}
