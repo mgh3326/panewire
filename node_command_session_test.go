@@ -1,13 +1,15 @@
 package panewire
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 )
 
-// fakeHerdrBySession puts a herdr on PATH that lists one agent only when it
+// fakeHerdrBySession points node commands at a fake herdr that lists one agent only when it
 // runs in session "fleet", the way a real herdr scopes `agent list` by
 // HERDR_SESSION.
 func fakeHerdrBySession(t *testing.T) {
@@ -18,10 +20,15 @@ func fakeHerdrBySession(t *testing.T) {
 	bin := t.TempDir()
 	fleetList := nodeAgentList(nodeAgentJSON("wR:p11", "job-a", "working", "/work/repo-a"))
 	script := "#!/bin/sh\nif [ \"$HERDR_SESSION\" = fleet ]; then printf '%s' '" + fleetList + "'; else printf '%s' '" + nodeAgentList() + "'; fi\n"
-	if err := os.WriteFile(filepath.Join(bin, "herdr"), []byte(script), 0o755); err != nil {
+	fake := filepath.Join(bin, "herdr")
+	if err := os.WriteFile(fake, []byte(script), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// An absolute path, not PATH: a real herdr must never run in a test
+	// (one did and hung a full run for minutes waiting on session "fleet").
+	previous := nodeHerdrExecutable
+	nodeHerdrExecutable = fake
+	t.Cleanup(func() { nodeHerdrExecutable = previous })
 	t.Setenv("HERDR_SESSION", "default") // the daemon's own session
 }
 
@@ -35,7 +42,7 @@ func TestNodeCommandsReadTheSpawnSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	client := &HubClient{spawnConfigPath: config}
-	outcome, row, err := client.nodePaneMatch(t.Context(), "wR:p11", "job-a", "", "/work/repo-a", false)
+	outcome, row, err := client.nodePaneMatch(boundedTestContext(t), "wR:p11", "job-a", "", "/work/repo-a", false)
 	if err != nil || outcome != "" || row.PaneID != "wR:p11" {
 		t.Fatalf("pane in the spawn session: outcome=%q row=%+v err=%v", outcome, row, err)
 	}
@@ -48,8 +55,16 @@ func TestNodeCommandsDefaultSessionWithoutSpawnConfig(t *testing.T) {
 	if got := client.nodeSpawnSession(); got != hubSpawnDefaultSession {
 		t.Fatalf("session=%q", got)
 	}
-	outcome, _, err := client.nodePaneMatch(t.Context(), "wR:p11", "job-a", "", "/work/repo-a", false)
+	outcome, _, err := client.nodePaneMatch(boundedTestContext(t), "wR:p11", "job-a", "", "/work/repo-a", false)
 	if err != nil || outcome != nodePaneGone {
 		t.Fatalf("default session must not see the fleet pane: outcome=%q err=%v", outcome, err)
 	}
+}
+
+// boundedTestContext fails fast instead of hanging if the fake is bypassed.
+func boundedTestContext(t *testing.T) context.Context {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	t.Cleanup(cancel)
+	return ctx
 }

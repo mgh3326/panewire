@@ -373,11 +373,15 @@ func (client *HubClient) nodeHerdrRunner() relayCommandRunner {
 	}
 	session := client.nodeSpawnSession()
 	return func(ctx context.Context, args ...string) ([]byte, error) {
-		cmd := exec.CommandContext(ctx, "herdr", args...)
+		cmd := exec.CommandContext(ctx, nodeHerdrExecutable, args...)
 		cmd.Env = hubSpawnEnvironment(os.Environ(), session)
 		return cmd.Output()
 	}
 }
+
+// nodeHerdrExecutable is the herdr binary node commands run; tests point it at
+// a fake so they never reach a real herdr on the host.
+var nodeHerdrExecutable = "herdr"
 
 // nodeSpawnSession is the herdr session spawns on this node use.
 func (client *HubClient) nodeSpawnSession() string {
