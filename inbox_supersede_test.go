@@ -95,6 +95,10 @@ func TestInboxSupersededExcludesPendingBatches(t *testing.T) {
 		if _, err := s.put("next", "a", "lane.event", "interrupt", next, now.Add(3*time.Second), 0, 0); err != nil {
 			t.Fatal(err)
 		}
+		states, err := s.ackStates([]string{"old"}, "")
+		if err != nil || !states["old"].Acked || states["old"].AckedAt == "" {
+			t.Fatalf("ack state=%+v err=%v", states, err)
+		}
 		counts, err := s.counts("a")
 		if err != nil || counts["a"] != 0 {
 			t.Fatalf("counts=%v err=%v", counts, err)

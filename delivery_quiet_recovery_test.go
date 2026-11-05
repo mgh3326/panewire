@@ -389,11 +389,11 @@ func TestQuietStartupMustActEscalatesOnce(t *testing.T) {
 		t.Fatal("startup escalation missing", batches, err)
 	}
 	injection := <-agent.relays
-	if !strings.Contains(injection.Text, "2 unread inbox items") {
+	if !strings.Contains(injection.Text, "3 unread inbox items") {
 		t.Fatal("startup recovered wrong items", injection)
 	}
 	var claimed int
-	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM lane_inbox WHERE escalation_batch<>'' AND escalation_batch<>'legacy'`).Scan(&claimed); err != nil || claimed != 2 {
+	if err := h.inbox.store.db.QueryRow(`SELECT count(*) FROM lane_inbox WHERE escalation_batch<>'' AND escalation_batch<>'legacy'`).Scan(&claimed); err != nil || claimed != 3 {
 		t.Fatal(claimed, err)
 	}
 	h.Close()

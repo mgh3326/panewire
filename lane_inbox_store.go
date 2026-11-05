@@ -407,8 +407,8 @@ func (s *laneInboxStore) invalidBatches() ([]laneInboxBatch, error) {
 }
 
 // recoverMustAct scans all unread originals at startup, including rows without
-// a deadline. Existing escalation claims stay intact, including quarantined
-// claims, so restart cannot escalate an item twice.
+// a deadline and unsent, invalid legacy claims. A sent or externally owned
+// claim stays intact, so restart cannot escalate an item twice.
 func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
 	unclaimed, err := s.unclaimedUnread()
 	if err != nil {
@@ -423,7 +423,7 @@ func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
 	ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 	defer done()
 	// Any positive timestamp in the past makes it immediately eligible.
-	return s.updateIDs(ctx, s.db, `UPDATE lane_inbox SET due_at=1`, nil, ids)
+	return s.updateIDs(ctx, s.db, `UPDATE lane_inbox SET due_at=1,escalation_batch=CASE WHEN escalation_batch IN (SELECT q.batch_id FROM lane_inbox_batch_quarantine q JOIN lane_inbox_batches b ON b.id=q.batch_id WHERE b.sent=0 AND q.reason<>'external scheduler owns lane digest') THEN '' ELSE escalation_batch END`, nil, ids)
 }
 
 type laneInboxExecer interface {
@@ -450,7 +450,7 @@ func (s *laneInboxStore) updateIDs(ctx context.Context, db laneInboxExecer, upda
 func (s *laneInboxStore) unclaimedUnread() ([]laneInboxItem, error) {
 	ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE class='inbox' AND read_at=0 AND acked_at=0 AND superseded_at=0 AND escalation_batch=''`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE class='inbox' AND read_at=0 AND acked_at=0 AND superseded_at=0 AND (escalation_batch='' OR escalation_batch IN (SELECT q.batch_id FROM lane_inbox_batch_quarantine q JOIN lane_inbox_batches b ON b.id=q.batch_id WHERE b.sent=0 AND q.reason<>'external scheduler owns lane digest'))`)
 	if err != nil {
 		return nil, err
 	}
@@ -625,7 +625,7 @@ func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error)
 }
 
 // laneInboxAckState is what the ack-state lookup may say about an event: its
-// id and whether, and when, its inbox row was acked. It carries no lane, kind
+// id and whether, and when, its inbox row was acked or superseded. It carries no lane, kind
 // or body.
 type laneInboxAckState struct {
 	EventID string `json:"event_id"`
@@ -636,7 +636,7 @@ type laneInboxAckState struct {
 // ackStates answers for each event id the rows the caller may see: every row
 // when sender is "", otherwise only rows that sender relayed. An id with
 // several visible rows (the same event relayed to several lanes) is acked
-// once all of them are, at the latest ack time. An id with no visible row is
+// once all are acked or superseded, at the latest resolution time. An id with no visible row is
 // absent from the result, so a hidden row and a missing one look the same.
 func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string]laneInboxAckState, error) {
 	args := make([]any, 0, len(eventIDs)+2)
@@ -648,7 +648,7 @@ func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string
 	args = append(args, sender, sender)
 	ctx, done := s.op(s.life)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT event_id,count(*),sum(CASE WHEN acked_at>0 THEN 1 ELSE 0 END),max(acked_at) FROM lane_inbox WHERE event_id IN (`+strings.Join(marks, ",")+`) AND (?='' OR sender=?) GROUP BY event_id`), args...)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT event_id,count(*),sum(CASE WHEN acked_at>0 OR superseded_at>0 THEN 1 ELSE 0 END),max(CASE WHEN acked_at>0 THEN acked_at ELSE superseded_at END) FROM lane_inbox WHERE event_id IN (`+strings.Join(marks, ",")+`) AND (?='' OR sender=?) GROUP BY event_id`), args...)
 	if err != nil {
 		return nil, err
 	}
