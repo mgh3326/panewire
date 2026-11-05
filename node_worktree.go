@@ -733,7 +733,14 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 				result.Reason = nodeBranchRelationReason(head, expected, relation)
 				return nodePrepareBranchElsewhere
 			}
-			if _, err := git(ctx, "-C", dir, "merge", "--ff-only", expected); err != nil {
+			collision, err := nodeIgnoredCheckoutCollision(ctx, git, dir, head, expected)
+			if err != nil {
+				return nodeOutcomeGitFailed
+			}
+			if collision {
+				return nodeOutcomeDirty
+			}
+			if _, err := git(ctx, "-C", dir, "merge", "--ff-only", "--no-overwrite-ignore", expected); err != nil {
 				return nodeOutcomeGitFailed
 			}
 			result.FastForwarded = true
@@ -775,6 +782,28 @@ func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommand
 		return nodeOutcomeGitFailed
 	}
 	return nodePreparePrepared
+}
+
+func nodeIgnoredCheckoutCollision(ctx context.Context, git relayCommandRunner, dir, head, expected string) (bool, error) {
+	changed, err := git(ctx, "-C", dir, "diff", "--name-only", "-z", head, expected, "--")
+	if err != nil {
+		return false, err
+	}
+	ignored, err := git(ctx, "-C", dir, "ls-files", "--others", "--ignored", "--exclude-standard", "-z")
+	if err != nil {
+		return false, err
+	}
+	for _, path := range strings.Split(string(changed), "\x00") {
+		if path == "" {
+			continue
+		}
+		for _, local := range strings.Split(string(ignored), "\x00") {
+			if local != "" && (path == local || strings.HasPrefix(path, local+"/") || strings.HasPrefix(local, path+"/")) {
+				return true, nil
+			}
+		}
+	}
+	return false, nil
 }
 
 func nodeCommitRelation(ctx context.Context, git relayCommandRunner, clone, local, expected string) (string, error) {

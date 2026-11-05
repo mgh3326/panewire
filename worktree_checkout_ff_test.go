@@ -16,6 +16,12 @@ func TestNodeWorktreePrepareFastForward(t *testing.T) {
 			nodeGit(t, f.clone, "branch", "job", f.main)
 			if reuse {
 				nodeGit(t, f.clone, "worktree", "add", "-q", dir, "job")
+				if err := os.WriteFile(filepath.Join(f.clone, ".git", "info", "exclude"), []byte("unrelated\n"), 0600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(filepath.Join(dir, "unrelated"), []byte("keep"), 0600); err != nil {
+					t.Fatal(err)
+				}
 			}
 			result, code := nodeRun(t, f.client(), nodeCommandWorktreePrepare, f.prepareArgs("branch", "job", f.feat, "", "repo.job"))
 			want := nodePreparePrepared
@@ -81,5 +87,37 @@ func TestNodeWorktreePrepareDirtyBehind(t *testing.T) {
 	}
 	if head := nodeGit(t, dir, "rev-parse", "HEAD"); head != f.main {
 		t.Fatalf("dirty head moved to %s", head)
+	}
+}
+
+func TestNodeWorktreePrepareIgnoredCollision(t *testing.T) {
+	f := newNodeWorktreeFixture(t)
+	f.cloneRepo(t)
+	dir := filepath.Join(f.workRoot, "repo.job")
+	nodeGit(t, f.clone, "worktree", "add", "-q", "-b", "job", dir, f.main)
+	if err := os.WriteFile(filepath.Join(f.clone, ".git", "info", "exclude"), []byte("precious\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "precious"), []byte("local content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	seed := filepath.Join(f.root, "seed")
+	if err := os.WriteFile(filepath.Join(seed, "precious"), []byte("upstream content"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	nodeGit(t, seed, "add", "precious")
+	nodeGit(t, seed, "commit", "-q", "-m", "add precious")
+	expected := nodeGit(t, seed, "rev-parse", "HEAD")
+	nodeGit(t, seed, "push", "-q", "origin", "feat")
+	result, _ := nodeRun(t, f.client(), nodeCommandWorktreePrepare, f.prepareArgs("branch", "job", expected, "", "repo.job"))
+	if result["outcome"] != nodeOutcomeDirty {
+		t.Errorf("result=%v; want dirty", result)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "precious"))
+	if err != nil || string(data) != "local content" {
+		t.Errorf("file=%q err=%v; want local content", data, err)
+	}
+	if head := nodeGit(t, dir, "rev-parse", "HEAD"); head != f.main {
+		t.Errorf("head=%s; want %s", head, f.main)
 	}
 }

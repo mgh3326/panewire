@@ -220,6 +220,7 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   reused only when it is on that branch and clean; the branch checked out
   elsewhere and a `dir` parked on another branch refuse. A clean local branch
   behind the expected tip is fast-forwarded, including its worktree when reused;
+  an ignored local file that would be overwritten is treated as dirty, and
   an ahead or diverged branch refuses. Without `sha` the expected tip is the
   freshly fetched `origin/<branch>`, which must exist. A missing local branch
   is created tracking `origin/<branch>`.
