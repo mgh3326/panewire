@@ -156,3 +156,15 @@ func TestNodeJobResultEncoding(t *testing.T) {
 		t.Fatalf("missing findings rejected: %s", raw)
 	}
 }
+
+func TestNodeJobResultRejectsCombinedFindingErrors(t *testing.T) {
+	for _, reason := range []string{"missing|too_large", "too_large|not_json", ""} {
+		raw, err := json.Marshal(nodeJobResult{Found: true, FindingsError: reason})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, ok := canonicalNodeCommandResult(nodeCommandJobResult, raw); ok {
+			t.Errorf("hub accepted findings_error %q", reason)
+		}
+	}
+}

@@ -198,8 +198,12 @@ func validNodeJobResult(r nodeJobResult) bool {
 		if len(r.Findings) > nodeJobFindingsLimit || validNodeFindings(r.Findings) != "" || r.FindingsError != "" {
 			return false
 		}
-	} else if !strings.Contains("|missing|too_large|not_json|schema|", "|"+r.FindingsError+"|") {
-		return false
+	} else {
+		switch r.FindingsError {
+		case "missing", "too_large", "not_json", "schema":
+		default:
+			return false
+		}
 	}
 	return r.Report.Bytes >= 0 && len(r.Report.LastLine) <= nodeJobLastLineLimit && (r.Report.Present || r.Report == (nodeJobReport{}))
 }
