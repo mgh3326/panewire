@@ -7,7 +7,7 @@ import (
 
 // laneInboxTerminal is shared by retention and replay. Must-ack work completes
 // only on ack; automatic interrupt read-on-insert never completes an item.
-const laneInboxTerminal = `(acked_at>0 OR (must_ack=0 AND (delivered_at>0 OR (class='inbox' AND read_at>0))))`
+const laneInboxTerminal = `(superseded_at>0 OR acked_at>0 OR (must_ack=0 AND (delivered_at>0 OR (class='inbox' AND read_at>0))))`
 
 // replaySuppressed also honors confirmed delivery of must-ack work: it stays
 // unread until acked, but must not be injected into the pane a second time.
@@ -45,9 +45,9 @@ func (s *laneInboxStore) prune(now time.Time, policy inboxRetentionPolicy) (int6
  ) DELETE FROM lane_inbox WHERE (created_at<? OR id IN (SELECT id FROM ranked WHERE position>?))
  AND `+laneInboxTerminal+`
  AND NOT `+laneInboxUnread+`
- AND created_at<? AND read_at<? AND acked_at<? AND delivered_at<?
- AND NOT (acked_at=0 AND ((hold_until>0 AND digest_batch='') OR (digest_at>0 AND digest_batch='')))
- AND NOT EXISTS (SELECT 1 FROM lane_inbox_batches b WHERE b.sent=0 AND (b.id=lane_inbox.digest_batch OR b.id=lane_inbox.escalation_batch))`), now.Add(-time.Duration(policy.Days)*24*time.Hour).UnixMilli(), policy.PerLane, now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli())
+ AND created_at<? AND read_at<? AND acked_at<? AND delivered_at<? AND superseded_at<?
+ AND NOT (acked_at=0 AND superseded_at=0 AND ((hold_until>0 AND digest_batch='') OR (digest_at>0 AND digest_batch='')))
+ AND NOT EXISTS (SELECT 1 FROM lane_inbox_batches b WHERE b.sent=0 AND (b.id=lane_inbox.digest_batch OR b.id=lane_inbox.escalation_batch))`), now.Add(-time.Duration(policy.Days)*24*time.Hour).UnixMilli(), policy.PerLane, now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli())
 	if err != nil {
 		return 0, err
 	}

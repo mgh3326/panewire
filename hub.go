@@ -258,6 +258,7 @@ type hubJobEventPayload struct {
 	Late          bool   `json:"late,omitempty"`
 	DeliveryClass string `json:"delivery_class,omitempty"`
 	NotifyType    string `json:"notify_type,omitempty"`
+	Cause         string `json:"cause,omitempty"`
 	noDigest      bool
 	// lane.event uses these relay-only fields. It deliberately never enters
 	// the hub's job registration paths despite sharing the delivery envelope.

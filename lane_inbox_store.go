@@ -41,6 +41,8 @@ type laneInboxStore struct {
 type laneInboxItem struct {
 	SurfacedAt      int64              `json:"surfaced_at_ms,omitempty"`
 	HoldUntil       int64              `json:"hold_until_ms,omitempty"`
+	SupersededAt    int64              `json:"superseded_at_ms,omitempty"`
+	SupersededBy    int64              `json:"superseded_by,omitempty"`
 	Fresh           bool               `json:"-"`
 	ID              int64              `json:"id"`
 	Lane            string             `json:"lane"`
@@ -63,7 +65,7 @@ type laneInboxItem struct {
 // laneInboxUnread is the unread predicate every reader shares: a must-ack
 // item until it is acked, any other inbox-class item until it is read or
 // acked. Interrupt items without must-ack are read when stored.
-const laneInboxUnread = `((must_ack=1 AND acked_at=0) OR (must_ack=0 AND class='inbox' AND read_at=0))`
+const laneInboxUnread = `(superseded_at=0 AND ((must_ack=1 AND acked_at=0) OR (must_ack=0 AND class='inbox' AND read_at=0)))`
 
 type laneInboxBatch struct {
 	ID   string
@@ -139,6 +141,12 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 	if _, err := addLaneInboxColumn(ctx, db, "delivered_at", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		db.Close()
 		return nil, err
+	}
+	for _, column := range []struct{ name, definition string }{{"cause", "TEXT"}, {"superseded_at", "INTEGER NOT NULL DEFAULT 0"}, {"superseded_by", "INTEGER NOT NULL DEFAULT 0"}} {
+		if _, err := addLaneInboxColumn(ctx, db, column.name, column.definition); err != nil {
+			db.Close()
+			return nil, err
+		}
 	}
 	if err := addLaneInboxAckState(ctx, db); err != nil {
 		db.Close()
@@ -399,8 +407,8 @@ func (s *laneInboxStore) invalidBatches() ([]laneInboxBatch, error) {
 }
 
 // recoverMustAct scans all unread originals at startup, including rows without
-// a deadline and rows claimed by a quarantined legacy batch. A valid existing
-// escalation claim stays intact, so restart cannot escalate an item twice.
+// a deadline. Existing escalation claims stay intact, including quarantined
+// claims, so restart cannot escalate an item twice.
 func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
 	unclaimed, err := s.unclaimedUnread()
 	if err != nil {
@@ -415,7 +423,7 @@ func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
 	ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 	defer done()
 	// Any positive timestamp in the past makes it immediately eligible.
-	return s.updateIDs(ctx, s.db, `UPDATE lane_inbox SET due_at=1,escalation_batch=''`, nil, ids)
+	return s.updateIDs(ctx, s.db, `UPDATE lane_inbox SET due_at=1`, nil, ids)
 }
 
 type laneInboxExecer interface {
@@ -442,7 +450,7 @@ func (s *laneInboxStore) updateIDs(ctx context.Context, db laneInboxExecer, upda
 func (s *laneInboxStore) unclaimedUnread() ([]laneInboxItem, error) {
 	ctx, done := s.opWithin(s.life, laneInboxStartupTimeout)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE class='inbox' AND read_at=0 AND (escalation_batch='' OR escalation_batch IN (SELECT batch_id FROM lane_inbox_batch_quarantine))`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE class='inbox' AND read_at=0 AND acked_at=0 AND superseded_at=0 AND escalation_batch=''`)
 	if err != nil {
 		return nil, err
 	}
@@ -458,14 +466,14 @@ func (s *laneInboxStore) unclaimedUnread() ([]laneInboxItem, error) {
 	return items, rows.Err()
 }
 
-const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack,hold_until,delivered_at`
+const laneInboxColumns = `id,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack,hold_until,delivered_at,superseded_at,superseded_by`
 
 type inboxScanner interface{ Scan(...any) error }
 
 func scanLaneInbox(row inboxScanner, surfaced ...bool) (laneInboxItem, error) {
 	var i laneInboxItem
 	var payload string
-	fields := []any{&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch, &i.MustAck, &i.HoldUntil, &i.DeliveredAt}
+	fields := []any{&i.ID, &i.Lane, &i.Kind, &i.Class, &payload, &i.CreatedAt, &i.ReadAt, &i.AckedAt, &i.DueAt, &i.DigestAt, &i.DigestBatch, &i.EscalationBatch, &i.MustAck, &i.HoldUntil, &i.DeliveredAt, &i.SupersededAt, &i.SupersededBy}
 	if len(surfaced) > 0 && surfaced[0] {
 		fields = append(fields, &i.SurfacedAt)
 	}
@@ -529,17 +537,38 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 	if !validLaneEventID(eventID) {
 		eventID = ""
 	}
-	query := `INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
+	query := `INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id,cause) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
 	if s.dialect == laneInboxSQLite {
-		query = `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id) VALUES((SELECT max(COALESCE((SELECT max(id) FROM lane_inbox),0),floor)+1 FROM lane_inbox_id_floor WHERE singleton=1),?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
+		query = `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id,cause) VALUES((SELECT max(COALESCE((SELECT max(id) FROM lane_inbox),0),floor)+1 FROM lane_inbox_id_floor WHERE singleton=1),?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
 	}
-	insert, err := s.db.ExecContext(ctx, s.q(query), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn, holdUntil, sender, eventID)
+	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return laneInboxItem{}, err
 	}
-	item, err := scanLaneInbox(s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`), s.storedKey(key)))
+	defer tx.Rollback()
+	if s.dialect == laneInboxPostgres && e.Cause != "" {
+		if _, err := tx.ExecContext(ctx, s.q(`SELECT pg_advisory_xact_lock(hashtext(?))`), lane+"\x1f"+e.Cause); err != nil {
+			return laneInboxItem{}, err
+		}
+	}
+	insert, err := tx.ExecContext(ctx, s.q(query), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn, holdUntil, sender, eventID, nullableCause(e.Cause))
+	if err != nil {
+		return laneInboxItem{}, err
+	}
+	item, err := scanLaneInbox(tx.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE event_key=?`), s.storedKey(key)))
 	n, _ := insert.RowsAffected()
 	item.Fresh = n == 1
+	if err != nil {
+		return item, err
+	}
+	if item.Fresh && e.Cause != "" {
+		if err := s.supersede(ctx, tx, item, now); err != nil {
+			return laneInboxItem{}, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return laneInboxItem{}, err
+	}
 	if n == 1 && (class == "inbox" || mustAck) {
 		close(s.notify)
 		s.notify = make(chan struct{})
@@ -652,7 +681,7 @@ func (s *laneInboxStore) read(id int64, lane string, now time.Time) (laneInboxIt
 func (s *laneInboxStore) ack(id int64, lane string, all bool, now time.Time) (int64, error) {
 	ctx, done := s.op(s.life)
 	defer done()
-	result, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET acked_at=?,read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE acked_at=0 AND ((? AND (?='' OR lane=?)) OR (NOT ? AND id=? AND (?='' OR lane=?)))`), now.UnixMilli(), now.UnixMilli(), all, lane, lane, all, id, lane, lane)
+	result, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET acked_at=?,read_at=CASE WHEN read_at=0 THEN ? ELSE read_at END WHERE acked_at=0 AND superseded_at=0 AND ((? AND (?='' OR lane=?)) OR (NOT ? AND id=? AND (?='' OR lane=?)))`), now.UnixMilli(), now.UnixMilli(), all, lane, lane, all, id, lane, lane)
 	if err != nil {
 		return 0, err
 	}
@@ -696,9 +725,9 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 	}
 	defer tx.Rollback()
 	for _, escalation := range []bool{false, true} {
-		filter := `class='interrupt' AND digest_at>0 AND digest_batch='' AND hold_until=0`
+		filter := `class='interrupt' AND acked_at=0 AND superseded_at=0 AND digest_at>0 AND digest_batch='' AND hold_until=0`
 		if escalation {
-			filter = `class='inbox' AND read_at=0 AND due_at>0 AND due_at<=? AND escalation_batch=''`
+			filter = `class='inbox' AND read_at=0 AND acked_at=0 AND superseded_at=0 AND due_at>0 AND due_at<=? AND escalation_batch=''`
 		}
 		args := []any{}
 		if escalation {
@@ -770,20 +799,46 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 func (s *laneInboxStore) pendingBatches() ([]laneInboxBatch, error) {
 	ctx, done := s.op(s.life)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, `SELECT id,lane,text FROM lane_inbox_batches WHERE sent=0 AND id NOT IN (SELECT batch_id FROM lane_inbox_batch_quarantine) ORDER BY `+s.batchOrder()+` LIMIT 100`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,lane,text,
+ (SELECT count(*) FROM lane_inbox i WHERE i.digest_batch=b.id OR i.escalation_batch=b.id),
+ (SELECT count(*) FROM lane_inbox i WHERE (i.digest_batch=b.id OR i.escalation_batch=b.id) AND i.acked_at=0 AND i.superseded_at=0 AND (i.escalation_batch<>b.id OR i.read_at=0))
+ FROM lane_inbox_batches b WHERE sent=0 AND id NOT IN (SELECT batch_id FROM lane_inbox_batch_quarantine) ORDER BY `+s.batchOrder()+` LIMIT 100`)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	batches := []laneInboxBatch{}
+	var retired []string
 	for rows.Next() {
 		var b laneInboxBatch
-		if err := rows.Scan(&b.ID, &b.Lane, &b.Text); err != nil {
+		var total, active int
+		if err := rows.Scan(&b.ID, &b.Lane, &b.Text, &total, &active); err != nil {
+			rows.Close()
 			return nil, err
+		}
+		if total > 0 && active == 0 {
+			retired = append(retired, b.ID)
+			continue
+		}
+		if total > active && !strings.HasPrefix(b.ID, "held-") {
+			if strings.Contains(b.Text, " unread inbox items | ") {
+				b.Text = fmt.Sprintf("%d unread inbox items | lane %s | panewire inbox list --lane %s", active, b.Lane, b.Lane)
+			} else {
+				b.Text = fmt.Sprintf("%d interrupt events | lane %s | panewire inbox list --lane %s", active, b.Lane, b.Lane)
+			}
 		}
 		batches = append(batches, b)
 	}
-	return batches, rows.Err()
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range retired {
+		if err := s.markBatchSent(id); err != nil {
+			return nil, err
+		}
+	}
+	return batches, nil
 }
 
 // batchOrder is the column batches are sent in, creation order: SQLite's

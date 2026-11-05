@@ -24,7 +24,7 @@ func (h *HubServer) makeHeldBatches() error {
 		return err
 	}
 	defer tx.Rollback()
-	rows, err := tx.QueryContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE hold_until>0 AND digest_batch='' AND acked_at=0 ORDER BY id`)
+	rows, err := tx.QueryContext(ctx, `SELECT `+laneInboxColumns+` FROM lane_inbox WHERE hold_until>0 AND digest_batch='' AND acked_at=0 AND superseded_at=0 ORDER BY id`)
 	if err != nil {
 		return err
 	}
@@ -98,13 +98,10 @@ func heldBatchText(items []laneInboxItem) string {
 }
 
 func (h *HubServer) prepareHeldBatch(b laneInboxBatch) (laneInboxBatch, error) {
-	if strings.Contains(b.Text, " | hk:doc inbox/") {
-		return b, nil
-	}
 	s := h.inbox.store
 	ctx, done := s.op(s.life)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE digest_batch=? AND acked_at=0 ORDER BY id`), b.ID)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE digest_batch=? AND acked_at=0 AND superseded_at=0 ORDER BY id`), b.ID)
 	if err != nil {
 		return b, err
 	}

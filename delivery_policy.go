@@ -30,11 +30,11 @@ var mustActDeliveryTags = regexp.MustCompile(`(?i)\b(?:BLOCKER|READY|ESC|BOUNCE|
 // `panewire emit --type`. The same set validates the wire field and the keys
 // of a policy's types: block, so a type that cannot be declared can never be
 // configured.
-var hubNotifyTypes = map[string]bool{"decision": true, "order": true, "merged": true, "idle-wake": true, "progress": true, "deploy-approval": true, "watch-hold": true, "culprit-hold": true, "automation-failed": true, "ready": true, "blocked": true, "findings": true, "report": true, "ack": true, "info": true}
+var hubNotifyTypes = map[string]bool{"decision": true, "order": true, "merged": true, "closed": true, "idle-wake": true, "progress": true, "deploy-approval": true, "watch-hold": true, "culprit-hold": true, "automation-failed": true, "ready": true, "blocked": true, "findings": true, "report": true, "ack": true, "info": true}
 
 // defaultNotifyTypeClasses is the built-in type→class map. A policy file
 // overrides individual entries under types:; the rest stay built in.
-var defaultNotifyTypeClasses = map[string]string{"merged": "inbox", "idle-wake": "inbox", "progress": "inbox", "deploy-approval": "interrupt", "watch-hold": "interrupt", "culprit-hold": "interrupt", "automation-failed": "interrupt", "decision": "interrupt", "order": "interrupt", "ready": "interrupt", "blocked": "interrupt", "findings": "interrupt", "report": "inbox", "ack": "inbox", "info": "inbox"}
+var defaultNotifyTypeClasses = map[string]string{"merged": "inbox", "closed": "inbox", "idle-wake": "inbox", "progress": "inbox", "deploy-approval": "interrupt", "watch-hold": "interrupt", "culprit-hold": "interrupt", "automation-failed": "interrupt", "decision": "interrupt", "order": "interrupt", "ready": "interrupt", "blocked": "interrupt", "findings": "interrupt", "report": "inbox", "ack": "inbox", "info": "inbox"}
 
 // mustAckNotifyTypes are the declared types a receiving session must
 // acknowledge explicitly (`panewire inbox ack`): a READY, an ESC decision, a
@@ -141,7 +141,7 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 		return nil, fmt.Errorf("retention needs days in 1..36500 and positive per_lane (zero uses defaults)")
 	}
 	if p.Retention.Days == 0 {
-		p.Retention.Days = 14
+		p.Retention.Days = 30
 	}
 	if p.Retention.PerLane == 0 {
 		p.Retention.PerLane = 2000

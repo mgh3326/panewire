@@ -164,8 +164,8 @@ backups (see [hub inbox on Postgres](hub-postgres.md#backup)). Do not delete it
 during rollback.
 
 The hub prunes completed inbox history on its first maintenance tick and hourly
-thereafter. Global policy `retention: {days: 14, per_lane: 2000}` sets the
-defaults: completed items expire after 14 days or outside the newest 2000
+thereafter. Global policy `retention: {days: 30, per_lane: 2000}` sets the
+defaults: completed items expire after 30 days or outside the newest 2000
 items per lane. Omitted/zero values use defaults; negative values are rejected
 (and days is capped at 36500). Unread items, unacked must-ack notices and
 pending deliveries are protected regardless of age or count. Ordinary read

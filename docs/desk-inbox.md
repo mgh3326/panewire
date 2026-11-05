@@ -70,3 +70,24 @@ scheduler acknowledgment.
 The synthetic replay test uses the supplied 500-event sample counts. Its named
 groups total 414, so the remaining 86 events are routine information. It records
 22 interrupts and 478 inbox items without private event text.
+
+## Cause keys and supersession
+
+`panewire emit --cause` accepts `pr:<owner>/<repo>#<number>`, `job:<job-id>`,
+or `task:<hk-task-id>`. Keys are at most 256 bytes; components use ASCII
+letters, digits, `_`, `-`, and `.`. PR numbers are positive decimal integers.
+For a PR event, send `--head` to identify its revision. Keys are explicit;
+the hub does not infer them from event IDs or text.
+
+Within one lane and cause, a PR `merged` or `closed` event supersedes earlier
+unacked items. A PR `ready`, `blocked`, or `findings` with a head supersedes
+earlier items of those types with a different head. Job completion, escalation,
+lost, revoked, or a job's `merged` lane event supersedes its earlier `progress`,
+`idle-wake`, and `decision` items. Superseded items remain readable with their
+replacement ID but are terminal for delivery and unread counts. Items without
+a cause are never superseded.
+
+Ordinary inbox escalation delay can be set per lane in delivery policy, for
+example `lanes: {my-lane: {deadlines: {inbox: 30m}}}`. The external scheduler
+setting above disables that deadline for its lane. Retention defaults to 30 days
+and 2000 items per lane, subject to replay-window and pending-delivery guards.

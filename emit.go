@@ -83,6 +83,7 @@ type emitRecord struct {
 	DeliveryClass string `json:"delivery_class,omitempty"`
 	Late          bool   `json:"late,omitempty"`
 	NotifyType    string `json:"notify_type,omitempty"`
+	Cause         string `json:"cause,omitempty"`
 	Type          string `json:"type"`
 	// Kind carries the same value as Type under the key the reap reader
 	// (document["kind"]), scanJobCloseState and the fleet census read, so an
@@ -131,6 +132,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	question := fs.String("question", "", "escalation question")
 	pr := fs.String("pr", "", "pull request URL")
 	head := fs.String("head", "", "head SHA")
+	cause := fs.String("cause", "", "cause key: pr:owner/repo#number, job:id, or task:id")
 	inboxRoot := fs.String("inbox-root", "", "inbox root containing jobs/<job>/events")
 	timeout := fs.Duration("timeout", 2*time.Second, "local daemon call timeout")
 	if fs.Parse(args) != nil || fs.NArg() != 0 {
@@ -158,6 +160,10 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		fmt.Fprintln(stderr, "emit: invalid --type", *notifyType)
 		return ExitUsage
 	}
+	if !validInboxCause(*cause) {
+		fmt.Fprintln(stderr, "emit: invalid --cause")
+		return ExitUsage
+	}
 	if *kind == "lane.event" {
 		if !hubAgentLabelPattern.MatchString(*lane) {
 			fmt.Fprintln(stderr, "emit: invalid --lane", *lane)
@@ -182,7 +188,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		if paneID == "" {
 			paneID = os.Getenv("HERDR_PANE_ID")
 		}
-		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Type: *kind, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: paneID, EventID: *eventID, Text: finalText, Truncated: truncated}
+		record := emitRecord{DeliveryClass: *deliver, NotifyType: *notifyType, Type: *kind, Cause: *cause, PR: *pr, Head: *head, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339), OwnerLane: *lane, Label: *label, Host: *host, PaneID: paneID, EventID: *eventID, Text: finalText, Truncated: truncated}
 		if record.Epoch == 0 {
 			record.Epoch = 1
 		}
@@ -202,7 +208,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		return reportEmitPushResult(stderr, pushEmitRecord(socket, record, root, *timeout))
 	}
 	record := emitRecord{
-		DeliveryClass: *deliver, Late: *late, NotifyType: *notifyType, Type: *kind, JobID: *job, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339),
+		DeliveryClass: *deliver, Late: *late, NotifyType: *notifyType, Type: *kind, Cause: *cause, JobID: *job, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339),
 		AgentLabel: *label, OwnerLane: *ownerLane, Label: *label, Host: *host, ReportPath: *report,
 		ReportLastLine: *reportLastLine, Reason: *reason, Question: *question, PR: *pr, Head: *head, PaneID: *pane,
 	}
@@ -478,6 +484,7 @@ func validLaneRelayText(value string) bool {
 type emitDedupeRecord struct {
 	deliveryClass  string
 	notifyType     string
+	cause          string
 	key            string
 	kind           string
 	late           bool
@@ -499,7 +506,7 @@ type emitDedupeRecord struct {
 // write time, while older records do not carry AgentLabel; neither changes
 // the relay event emit is asked to notify immediately.
 func (existing emitDedupeRecord) matches(record emitRecord) bool {
-	return existing.late == record.Late && existing.kind == record.Type && existing.deliveryClass == record.DeliveryClass && existing.notifyType == record.NotifyType &&
+	return existing.late == record.Late && existing.kind == record.Type && existing.deliveryClass == record.DeliveryClass && existing.notifyType == record.NotifyType && existing.cause == record.Cause &&
 		existing.epoch == record.Epoch &&
 		existing.ownerLane == record.OwnerLane &&
 		existing.label == record.Label &&
@@ -541,6 +548,7 @@ func readEmitDedupeKey(eventsDir, name, jobID string) (emitDedupeRecord, bool) {
 		deliveryClass:  event.DeliveryClass,
 		late:           event.Late,
 		notifyType:     event.notifyType(),
+		cause:          event.Cause,
 		key:            relayEventOutboxKey(kind, jobID, epoch, reportPath, event.reason()),
 		kind:           kind,
 		createdAt:      event.CreatedAt,
@@ -570,7 +578,7 @@ func emitJobEventFileID(inboxRoot string, req localRequest, epoch uint64) (strin
 		return "", time.Time{}
 	}
 	record := emitRecord{
-		Type: req.Kind, DeliveryClass: req.DeliveryClass, Late: req.Late, NotifyType: req.NotifyType, JobID: req.JobID, Epoch: epoch, OwnerLane: req.OwnerLane,
+		Type: req.Kind, DeliveryClass: req.DeliveryClass, Late: req.Late, NotifyType: req.NotifyType, Cause: req.Cause, JobID: req.JobID, Epoch: epoch, OwnerLane: req.OwnerLane,
 		Label: req.Label, Host: req.Host, ReportPath: relaySignalReportPath(req.Kind, req.ReportPath),
 		ReportLastLine: req.ReportLastLine, Reason: req.Reason, Question: req.Question,
 		PR: req.PR, Head: req.Head, PaneID: req.PaneID,
@@ -649,7 +657,7 @@ func pushEmitRecord(socket string, record emitRecord, inboxRoot string, timeout 
 	defer connection.Close()
 	_ = connection.SetDeadline(time.Now().Add(timeout))
 	request := localRequest{
-		DeliveryClass: record.DeliveryClass, Late: record.Late, NotifyType: record.NotifyType, Op: "emit", Kind: record.Type, JobID: record.JobID, Epoch: record.Epoch, OwnerLane: record.OwnerLane,
+		DeliveryClass: record.DeliveryClass, Late: record.Late, NotifyType: record.NotifyType, Cause: record.Cause, Op: "emit", Kind: record.Type, JobID: record.JobID, Epoch: record.Epoch, OwnerLane: record.OwnerLane,
 		Label: record.Label, Host: record.Host, PaneID: record.PaneID, ReportPath: record.ReportPath,
 		ReportLastLine: record.ReportLastLine, Reason: record.Reason, Question: record.Question,
 		PR: record.PR, Head: record.Head, AgentLabel: record.AgentLabel, EventID: record.EventID, Text: record.Text, Truncated: record.Truncated, InboxRoot: inboxRoot, TimeoutMS: timeout.Milliseconds(),

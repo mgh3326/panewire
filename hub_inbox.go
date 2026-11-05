@@ -192,6 +192,16 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	}
 	// The durable decision wins over changed config or a changed retry body.
 	event.DeliveryClass = item.Class
+	if item.SupersededAt > 0 {
+		if sender != nil {
+			if kind == "lane.event" {
+				h.queueLaneRelayPersisted(*event, sender, item.ID)
+			} else {
+				h.queueRelayPersisted(kind, *event, sender, item.ID)
+			}
+		}
+		return relayLaneEventResult{ID: item.ID, Routed: true, Machine: "inbox", Duplicate: true}, true
+	}
 	if item.Class != "inbox" && item.DigestAt == 0 && item.HoldUntil == 0 {
 		return result, false
 	}
