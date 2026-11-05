@@ -18,6 +18,7 @@ func TestBriefIdentityMatchesSpawnReceipt(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a, s, f, _ := cmdFixture(t)
 			s.Profile = tc.profile
+			s.Task = "3113"
 			s.Effort = "high"
 			seat := a.Policy.Profiles[s.Profile]
 			seat.Canon, seat.Family = tc.canon, tc.family
@@ -30,6 +31,8 @@ func TestBriefIdentityMatchesSpawnReceipt(t *testing.T) {
 			f.Do = func(c Command) Result {
 				args := strings.Join(c.Args, " ")
 				switch {
+				case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show"):
+					return Result{Out: `{"id":3113,"title":"work (grade C, T1)","state":"ready","refs":{}}`}
 				case strings.HasPrefix(args, "agent start"):
 					started = true
 					return Result{}
@@ -72,6 +75,9 @@ func TestBriefIdentityMatchesSpawnReceipt(t *testing.T) {
 			if !strings.Contains(string(b), want+"\n\n") {
 				t.Fatalf("missing receipt identity %q in brief", want)
 			}
+			if !strings.Contains(string(b), "Mergewake-Task: 3113\nMergewake-Grade: C\nMergewake-Tier: T1\n\n") {
+				t.Fatalf("missing validated task trailers in brief: %s", b)
+			}
 		})
 	}
 }
@@ -84,5 +90,27 @@ func TestBriefIdentityUnknownProfile(t *testing.T) {
 	}
 	if !strings.Contains(got, "Launch identity: family=anthropic launch_profile=unknown ") {
 		t.Fatalf("unexpected brief: %s", got)
+	}
+}
+
+func TestBriefMergewakeTrailers(t *testing.T) {
+	a := testApp(t)
+	identity := "Launch identity: family=anthropic launch_profile=opus@high (use these for the Mergewake-Author-Family and Mergewake-Author-Profile trailers)\n\n"
+	block := "Mergewake trailers (paste at the end of the PR body):\nMergewake-Author-Family: anthropic\nMergewake-Author-Profile: opus@high\nMergewake-Task: 3113\nMergewake-Grade: C\nMergewake-Tier: T1\n\nBODY"
+	s := Spawn{Task: "3113", TaskGrade: "C", T: "T1"}
+	seat := Seat{Family: "anthropic", Canon: "opus"}
+	got, err := a.prepareBrief(s, seat, Launch{Effort: "high"}, "BODY")
+	if err != nil || !strings.HasSuffix(got, identity+block) {
+		t.Fatalf("brief = %q, error = %v; want suffix %q", got, err, identity+block)
+	}
+	s.Task = ""
+	got, err = a.prepareBrief(s, seat, Launch{Effort: "high"}, "BODY")
+	if err != nil || !strings.HasSuffix(got, identity+"BODY") {
+		t.Fatalf("brief without task = %q, error = %v", got, err)
+	}
+	s.Task, seat.Family, seat.Canon = "3113", "", ""
+	got, err = a.prepareBrief(s, seat, Launch{}, "BODY")
+	if err != nil || strings.Contains(got, "Mergewake-Author-Family:") || strings.Contains(got, "Mergewake-Author-Profile:") || strings.Contains(got, ": unknown") {
+		t.Fatalf("brief with unknown identity = %q, error = %v", got, err)
 	}
 }
