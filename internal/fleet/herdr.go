@@ -87,14 +87,15 @@ func (a *App) routeEnv(s Seat) ([]string, error) {
 }
 
 type Agent struct {
-	Pane           string `json:"pane_id"`
-	Tab            string `json:"tab_id"`
-	Name           string `json:"name"`
-	Kind           string `json:"agent"`
-	Status         string `json:"agent_status"`
-	CWD            string `json:"cwd"`
-	StateChangeSeq *int64 `json:"state_change_seq,omitempty"`
-	Focused        bool   `json:"focused,omitempty"`
+	Pane           string        `json:"pane_id"`
+	Tab            string        `json:"tab_id"`
+	Name           string        `json:"name"`
+	Kind           string        `json:"agent"`
+	Status         string        `json:"agent_status"`
+	CWD            string        `json:"cwd"`
+	StateChangeSeq *int64        `json:"state_change_seq,omitempty"`
+	Focused        bool          `json:"focused,omitempty"`
+	Session        *AgentSession `json:"agent_session,omitempty"`
 }
 
 func (a *App) agents(ctx context.Context) ([]Agent, error) {
@@ -102,8 +103,13 @@ func (a *App) agents(ctx context.Context) ([]Agent, error) {
 	if e := check(r, "herdr agent list"); e != nil {
 		return nil, e
 	}
+	return ParseAgents([]byte(r.Out))
+}
+
+// ParseAgents decodes herdr agent.list metadata.
+func ParseAgents(data []byte) ([]Agent, error) {
 	var m map[string]json.RawMessage
-	if e := json.Unmarshal([]byte(r.Out), &m); e != nil {
+	if e := json.Unmarshal(data, &m); e != nil {
 		return nil, e
 	}
 	if v, ok := m["result"]; ok {
