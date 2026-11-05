@@ -75,7 +75,7 @@ func quotaRun(ctx context.Context, what string, timeout time.Duration, jsonOutpu
 	}
 	if err != nil {
 		code := ExitInternal
-		if e, ok := err.(*exec.ExitError); ok {
+		if e, ok := err.(*exec.ExitError); ok && e.ExitCode() >= 0 {
 			code = e.ExitCode()
 		}
 		if !jsonOutput {
