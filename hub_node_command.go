@@ -277,6 +277,9 @@ func (h *HubServer) authorizeNodeCommand(request *http.Request, op, machine stri
 	if nodeCommandReapOnly(op) && h.authenticate(request).kind == hubCallerOperator {
 		return hubAccessForbidden
 	}
+	if op == nodeCommandWorktreeList {
+		op = nodeCommandWorktreeInspect
+	}
 	return h.authorize(request, hubScopeNodeCommand+op, machine)
 }
 

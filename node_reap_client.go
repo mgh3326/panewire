@@ -157,6 +157,7 @@ func mustNodeReapJSON(value any) json.RawMessage {
 
 type nodeReapConnect struct {
 	hubURL, tokenPath, cfPath, machine *string
+	allowOperator                      bool
 }
 
 func nodeReapFlags(flags *flag.FlagSet) nodeReapConnect {
@@ -173,7 +174,7 @@ func (connect nodeReapConnect) run(stdout, stderr io.Writer, deps hubCLIDeps, ca
 		return ExitUsage
 	}
 	env, err := loadHubTokenEnv(*connect.tokenPath)
-	if err != nil || env.MachineID == hubOperatorMachineID {
+	if err != nil || (env.MachineID == hubOperatorMachineID && !connect.allowOperator) {
 		fmt.Fprintln(stderr, "node reap rejected: invalid service token env")
 		return ExitConditionInvalid
 	}
@@ -184,7 +185,17 @@ func (connect nodeReapConnect) run(stdout, stderr io.Writer, deps hubCLIDeps, ca
 			return ExitConditionInvalid
 		}
 	}
-	client, err := newNodeReapClient(*connect.hubURL, env, cf, deps)
+	var client *NodeReapClient
+	if env.MachineID == hubOperatorMachineID {
+		var hub *hubOperatorClient
+		hub, err = newHubOperatorClient(*connect.hubURL, env.Token, cf, deps, nodeReapClientTimeout)
+		if err == nil {
+			hub.machineID = env.MachineID
+			client = &NodeReapClient{hub: hub}
+		}
+	} else {
+		client, err = newNodeReapClient(*connect.hubURL, env, cf, deps)
+	}
 	if err != nil {
 		fmt.Fprintln(stderr, "node reap rejected: invalid hub URL")
 		return ExitConditionInvalid
@@ -203,6 +214,14 @@ func (connect nodeReapConnect) run(stdout, stderr io.Writer, deps hubCLIDeps, ca
 	case err != nil:
 		fmt.Fprintln(stderr, "node reap unavailable")
 		return ExitDaemonUnavailable
+	}
+	if rows, ok := result.(nodeWorktreeListLines); ok {
+		for _, row := range rows {
+			if err := json.NewEncoder(stdout).Encode(row); err != nil {
+				return ExitInternal
+			}
+		}
+		return ExitOK
 	}
 	if err := json.NewEncoder(stdout).Encode(result); err != nil {
 		return ExitInternal
