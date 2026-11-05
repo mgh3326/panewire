@@ -192,3 +192,59 @@ func assertRoleHeldBy(t *testing.T, hub *HubServer, request string) {
 		t.Fatalf("reservation moved to %s (%v)", owner, err)
 	}
 }
+
+// A spawn refused before any pane existed (checkout_refused at
+// worktree.prepare) recorded no pane and never claimed its hk job, so nothing
+// can hold the role: a new submission takes it at once, without probing a
+// node. Before this, the reservation was held for good (rc 74
+// job_already_claimed on every retry).
+func TestRoleReleaseAfterPrePaneRefusal(t *testing.T) {
+	setup := func(t *testing.T, jobRecord bool) (*HubServer, *httptest.Server, hubSpawnTask) {
+		t.Helper()
+		t.Setenv(crashReportDSNEnv, "")
+		hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { hub.Close() })
+		jobs := &roleJobs{records: map[string]map[string]any{}}
+		if jobRecord {
+			jobs.records["test-job"] = map[string]any{"state": "claimed"}
+		}
+		hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+			return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
+		}
+		server := httptest.NewServer(hub.Handler())
+		t.Cleanup(server.Close)
+		held, _, err := hub.inbox.store.claimSpawn(t.Context(), durableSpawnRequest(), "test-job", "parent", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err = hub.inbox.store.completeSpawn(t.Context(), held, hubSpawnOutcome{RC: 81, Stage: "placement", Reason: "checkout_refused:branch-elsewhere", Host: "machine-a"}, time.Now()); err != nil {
+			t.Fatal(err)
+		}
+		held, err = hub.inbox.store.spawnTask(t.Context(), held.Request.RequestID)
+		if err != nil || held.Status != "failed" || held.Outcome.Pane != "" {
+			t.Fatalf("holder %+v %v", held, err)
+		}
+		return hub, server, held
+	}
+	t.Run("no pane and no hk job releases at once", func(t *testing.T) {
+		hub, server, held := setup(t, false)
+		result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest()))
+		if result.status != http.StatusAccepted {
+			t.Fatalf("status=%d body=%s", result.status, result.body)
+		}
+		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker")
+		if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
+			t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
+		}
+	})
+	t.Run("no pane but a claimed hk job keeps the reservation", func(t *testing.T) {
+		hub, server, held := setup(t, true)
+		if result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())); result.status != http.StatusConflict {
+			t.Fatalf("status=%d body=%s", result.status, result.body)
+		}
+		assertRoleHeldBy(t, hub, held.Request.RequestID)
+	})
+}
