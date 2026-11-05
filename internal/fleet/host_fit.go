@@ -261,17 +261,17 @@ func capsGap(hosts []selHost, required []string) string {
 // work are ranked (rankHosts), and on each ranked host the ranked (account,
 // rung) candidates present there are judged in pool order through the
 // unchanged quota gate. The first admitted pair wins. A refusal about the
-// account itself holds on every host. Exhaustion is cached by account, while
-// other refusals remain scoped to the rung. A host-level failure skips that
-// host for the candidate, and an unreachable host is skipped for the rest. A host
-// whose present candidates are all refused is skipped, not fatal.
+// account/rung pair holds on every host, so it is not gated again on another
+// holder. Other rungs keep their own admission: a gate refusal need not mean
+// the entire account is exhausted. A host-level failure skips that host for
+// the candidate, and an unreachable host is skipped for the rest. A host whose
+// present candidates are all refused is skipped, not fatal.
 //
 // Quota policy, including expiring credit, orders rungs only inside a host.
 // See docs/placement.md for the selection order and trace fields.
 func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, pending []*selCand) {
 	ranked := rankHosts(sp.hosts)
 	refusedOn := map[*selCand]string{}
-	exhausted := map[string]hostTry{}
 	for i, h := range ranked {
 		t := hostTrace{host: h, rank: i + 1, missing: missingCaps(h.cfg, p.req.tags), drops: sp.dropsOn(h.name)}
 		if p.chosen != nil {
@@ -299,12 +299,6 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 		}
 		orderSelCands(present)
 		for _, c := range present {
-			if refusal, ok := exhausted[c.accountKey]; ok {
-				c.reason, c.code, c.outcome = refusal.reason, refusal.code, "dropped:quota_exhausted"
-				refusal.cand = c
-				t.tries = append(t.tries, refusal)
-				continue
-			}
 			if on, refused := refusedOn[c]; refused {
 				t.tries = append(t.tries, hostTry{cand: c, result: "skipped", reason: "refused_on:" + on + ":" + c.reason, code: c.code})
 				continue
@@ -334,9 +328,6 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 				c.outcome = "dropped:" + c.reason
 			}
 			t.tries = append(t.tries, hostTry{cand: c, result: "refused", reason: c.reason, code: c.code})
-			if c.code == outcomeQuotaExhausted && c.reason != "projected_exhaust" {
-				exhausted[c.accountKey] = hostTry{result: "skipped", reason: "refused_on:" + h.name + ":" + c.reason, code: c.code}
-			}
 			switch {
 			case !hostGateFailure(err):
 				refusedOn[c] = h.name

@@ -171,10 +171,8 @@ func TestHostFirstT2997RefusalEventAndNoRung(t *testing.T) {
 	}
 }
 
-func TestHostFirstT2997SharedExhaustionAcrossRungs(t *testing.T) {
-	rows := append([]CatalogRow{}, workerRows...)
-	rows = append(rows, CatalogRow{Profile: "opus", Effort: "high", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "opus-m"})
-	a, s, q, _ := scoredAccountFixture(t, rows, true)
+func TestHostFirstT2997SharedExhaustionOnce(t *testing.T) {
+	a, s, q, _ := scoredAccountFixture(t, workerRows, true)
 	gate := q.GateDo
 	calls := map[string]int{}
 	q.GateDo = func(r QuotaRequest) (string, error) {
@@ -189,9 +187,29 @@ func TestHostFirstT2997SharedExhaustionAcrossRungs(t *testing.T) {
 		t.Fatalf("healthy account on next host must win: %v, %+v", err, sel)
 	}
 	if calls[testClaudeA] != 1 || calls[testClaudeB] != 1 {
-		t.Fatalf("shared exhausted account must be gated once across hosts and rungs: %v", calls)
+		t.Fatalf("shared exhausted account must be gated once across hosts: %v", calls)
 	}
 	if row := hostRow(t, sel, "cloud-small"); row["admission_outcome"] != "quota_exhausted" {
 		t.Fatalf("second holder must retain exhaustion: %v", row)
+	}
+}
+
+func TestHostFirstT2997RungRefusalKeepsOtherRungs(t *testing.T) {
+	rows := append([]CatalogRow{}, workerRows...)
+	rows = append(rows, CatalogRow{Profile: "opus", Effort: "high", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "opus-m"})
+	a, s, q, _ := scoredAccountFixture(t, rows, false)
+	gate := q.GateDo
+	q.GateDo = func(r QuotaRequest) (string, error) {
+		if r.Profile == "opus" {
+			return "", fail(3, "model-specific quota exhausted")
+		}
+		return gate(r)
+	}
+	sel, err := a.selectProfile(context.Background(), s)
+	if err != nil || sel.chosen.host != "cloud-small" || sel.chosen.row.Profile != "sonnet" || sel.chosen.accountKey != testClaudeB {
+		t.Fatalf("rung-scoped quota refusal must allow sonnet on cloud-small: err=%v, selection=%+v, gates=%+v", err, sel, q.Calls)
+	}
+	if len(q.Calls) != 2 || q.Calls[0].Profile != "opus" || q.Calls[1].Profile != "sonnet" || q.Calls[0].AccountKey != testClaudeB || q.Calls[1].AccountKey != testClaudeB {
+		t.Fatalf("both rungs must be gated against the first host's account: %+v", q.Calls)
 	}
 }

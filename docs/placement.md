@@ -51,10 +51,12 @@ and credit-pacing rules. A credit balance on another host cannot promote that
 host or reorder this host's rungs. The first admitted host, rung, and account
 wins. A host whose accounts are exhausted or unknown is skipped.
 
-Measured quota exhaustion is cached by account for the decision. Several
-hosts holding one account share one quota and do not repeat its exhausted
-gate. Rung-specific policy refusals still allow other rungs, and a free
-bucket can still admit a rung despite the subscription's projected use.
+Account readings and refreshes are cached by account for the decision.
+Several hosts holding one account share the same measured quota. A refused
+account/rung pair is not gated again on another host, but other rungs still
+reach their own gates. A gate refusal, including exit 3, can describe a
+model-specific limit rather than account-wide exhaustion. A free bucket can
+still admit a rung despite the subscription's projected use.
 Explicit `-m PROFILE`, `--host`, and hub-directed spawns keep their existing
 placement and admission paths.
 
