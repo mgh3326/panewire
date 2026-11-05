@@ -82,23 +82,19 @@ func TestR19PreferenceSwitchesDoNotNest(t *testing.T) {
 	go func() { served <- client.serve(ctx, first) }()
 
 	baseline := 0
-	deadline := time.Now().Add(15 * time.Second)
-	for {
+	var done int
+	if !waitUntil(15*time.Second, func() bool {
 		mu.Lock()
-		done := switches
+		done = switches
 		mu.Unlock()
 		if done == 1 && baseline == 0 {
 			// Measured once the session is fully established, so the reader
 			// goroutine and the preference probe are already counted.
 			baseline = runtime.NumGoroutine()
 		}
-		if done == switchCount {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d preference switches completed", done, switchCount)
-		}
-		time.Sleep(5 * time.Millisecond)
+		return done == switchCount
+	}) {
+		t.Fatalf("only %d of %d preference switches completed", done, switchCount)
 	}
 	// Let the superseded session's reader goroutine observe its closed
 	// connection and exit before anything is counted.

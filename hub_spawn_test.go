@@ -76,19 +76,13 @@ func t14NodeWithSpawnV2(t *testing.T, hub *HubServer, server *httptest.Server, a
 	if err := wsjson.Write(t.Context(), connection, hello); err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
+	eventually(t, time.Second, "the node to connect", func() bool {
 		hub.mu.Lock()
+		defer hub.mu.Unlock()
 		record := hub.nodes["machine-a"]
-		connected := record != nil && record.agent != nil && record.state == "connected"
-		hub.mu.Unlock()
-		if connected {
-			return connection
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatal("node did not connect")
-	return nil
+		return record != nil && record.agent != nil && record.state == "connected"
+	})
+	return connection
 }
 
 func t14HTTP(t *testing.T, method, url, token string, body any) (int, http.Header, []byte) {
@@ -568,16 +562,13 @@ func TestT14SpawnHTTPAC6PendingThenGet(t *testing.T) {
 		t.Fatalf("pending=%d %s", pending.status, pending.body)
 	}
 	t14WriteSpawnResult(t, node, message.RequestID, 0, "job-a", "pane-a", "later", "")
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		status, _, body := t14HTTP(t, http.MethodGet, server.URL+"/v1/spawn/"+message.RequestID, t14OperatorToken, nil)
-		if status == http.StatusOK && bytes.Contains(body, []byte(`"job_id":"job-a"`)) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("late result status=%d body=%s", status, body)
-		}
-		time.Sleep(time.Millisecond)
+	var status int
+	var late []byte
+	if !waitUntil(3*time.Second, func() bool {
+		status, _, late = t14HTTP(t, http.MethodGet, server.URL+"/v1/spawn/"+message.RequestID, t14OperatorToken, nil)
+		return status == http.StatusOK && bytes.Contains(late, []byte(`"job_id":"job-a"`))
+	}) {
+		t.Fatalf("late result status=%d body=%s", status, late)
 	}
 }
 
@@ -593,16 +584,13 @@ func TestT14SpawnHTTPAC7Lost(t *testing.T) {
 	if result := t14Result(t, response); result.status != http.StatusOK || !bytes.Contains(result.body, []byte(`"status":"lost"`)) {
 		t.Fatalf("post response=%d %s", result.status, result.body)
 	}
-	deadline := time.Now().Add(time.Second)
-	for {
-		status, _, response := t14HTTP(t, http.MethodGet, server.URL+"/v1/spawn/"+message.RequestID, t14OperatorToken, nil)
-		if status == http.StatusOK && bytes.Contains(response, []byte(`"status":"lost"`)) {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("lost lookup=%d %s", status, response)
-		}
-		time.Sleep(time.Millisecond)
+	var status int
+	var lookup []byte
+	if !waitUntil(time.Second, func() bool {
+		status, _, lookup = t14HTTP(t, http.MethodGet, server.URL+"/v1/spawn/"+message.RequestID, t14OperatorToken, nil)
+		return status == http.StatusOK && bytes.Contains(lookup, []byte(`"status":"lost"`))
+	}) {
+		t.Fatalf("lost lookup=%d %s", status, lookup)
 	}
 }
 
@@ -690,16 +678,13 @@ func t14EngineOK() (*hubSpawnOutput, fleet.Execution) {
 
 func t14WaitFile(t *testing.T, path string) []byte {
 	t.Helper()
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		contents, err := os.ReadFile(path)
-		if err == nil {
-			return contents
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("file was not created: %s", path)
-	return nil
+	var contents []byte
+	eventually(t, time.Second, "file "+path, func() bool {
+		var err error
+		contents, err = os.ReadFile(path)
+		return err == nil
+	})
+	return contents
 }
 
 func TestT14NodeAC9AC10AC13ArgvAndTemporary(t *testing.T) {

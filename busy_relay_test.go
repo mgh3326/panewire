@@ -233,21 +233,6 @@ func r27Directive(id int64, text, policy string) hubOutboundMessage {
 	return hubOutboundMessage{Type: "relay.inject", Kind: "lane.event", JobID: "relay-job-" + strconv.FormatInt(id, 10), Pane: "fixture-pane", Lane: "lane-a", EventID: id, Text: text, DeliverPolicy: policy}
 }
 
-func r27Await(t *testing.T, events <-chan hubClientEvent, kind string) hubClientEvent {
-	t.Helper()
-	deadline := time.After(time.Second)
-	for {
-		select {
-		case event := <-events:
-			if event.Kind == kind {
-				return event
-			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for %s", kind)
-		}
-	}
-}
-
 func r27WaitStarted(t *testing.T, fake *r27FakeHerdr) {
 	t.Helper()
 	select {
@@ -268,8 +253,8 @@ func TestR27BusyRelaySixPathsUseFixtureHerdr(t *testing.T) {
 		if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "now please") {
 			t.Fatalf("prompts=%q", got)
 		}
-		r27Await(t, events, "relay.released")
-		r27Await(t, events, "relay.delivered")
+		awaitClientEvent(t, time.Second, events, "relay.released")
+		awaitClientEvent(t, time.Second, events, "relay.delivered")
 		if fake.count("get") != 1 || fake.count("wait") != 0 {
 			t.Fatalf("get=%d wait=%d", fake.count("get"), fake.count("wait"))
 		}
@@ -282,10 +267,10 @@ func TestR27BusyRelaySixPathsUseFixtureHerdr(t *testing.T) {
 		defer store.Close()
 		client, prompts, events := r27Node(t, store, fake)
 		client.relayBusyManager().offer(t.Context(), r27Directive(102, "after work", "max_wait=7"))
-		r27Await(t, events, "relay.held")
+		awaitClientEvent(t, time.Second, events, "relay.held")
 		r27WaitStarted(t, fake)
 		close(gate)
-		r27Await(t, events, "relay.released")
+		awaitClientEvent(t, time.Second, events, "relay.released")
 		if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "after work") {
 			t.Fatalf("prompts=%q", got)
 		}
@@ -307,8 +292,8 @@ func TestR27BusyRelaySixPathsUseFixtureHerdr(t *testing.T) {
 		defer store.Close()
 		client, prompts, events := r27Node(t, store, fake)
 		client.relayBusyManager().offer(t.Context(), r27Directive(103, "deadline note", "max_wait=1"))
-		r27Await(t, events, "relay.held")
-		r27Await(t, events, "relay.released")
+		awaitClientEvent(t, time.Second, events, "relay.held")
+		awaitClientEvent(t, time.Second, events, "relay.released")
 		if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "[대기 만료 0분]") || !strings.Contains(got[0], "deadline note") {
 			t.Fatalf("prompts=%q", got)
 		}
@@ -321,12 +306,12 @@ func TestR27BusyRelaySixPathsUseFixtureHerdr(t *testing.T) {
 		defer store.Close()
 		client, prompts, events := r27Node(t, store, fake)
 		client.relayBusyManager().offer(t.Context(), r27Directive(104, "discard", "idle"))
-		r27Await(t, events, "relay.held")
+		awaitClientEvent(t, time.Second, events, "relay.held")
 		r27WaitStarted(t, fake)
 		if !client.relayBusyManager().cancel(t.Context(), 104) {
 			t.Fatal("cancel did not remove held relay")
 		}
-		r27Await(t, events, "relay.cancelled")
+		awaitClientEvent(t, time.Second, events, "relay.cancelled")
 		if len(*prompts) != 0 {
 			t.Fatalf("cancelled relay prompted=%q", *prompts)
 		}
@@ -339,13 +324,13 @@ func TestR27BusyRelaySixPathsUseFixtureHerdr(t *testing.T) {
 		defer store.Close()
 		client, prompts, events := r27Node(t, store, fake)
 		client.relayBusyManager().offer(t.Context(), r27Directive(105, "before", "idle"))
-		r27Await(t, events, "relay.held")
+		awaitClientEvent(t, time.Second, events, "relay.held")
 		r27WaitStarted(t, fake)
 		if !client.relayBusyManager().edit(t.Context(), 105, "after") {
 			t.Fatal("edit rejected held relay")
 		}
 		close(gate)
-		released := r27Await(t, events, "relay.released")
+		released := awaitClientEvent(t, time.Second, events, "relay.released")
 		if !strings.Contains(string(released.Payload), `"final_text":"after"`) || !strings.Contains(string(released.Payload), `"edited":true`) {
 			t.Fatalf("released=%s", released.Payload)
 		}
@@ -361,13 +346,13 @@ func TestR27BusyRelaySixPathsUseFixtureHerdr(t *testing.T) {
 		defer store.Close()
 		client, prompts, events := r27Node(t, store, fake)
 		client.relayBusyManager().offer(t.Context(), r27Directive(106, "first", "idle"))
-		r27Await(t, events, "relay.held")
+		awaitClientEvent(t, time.Second, events, "relay.held")
 		r27WaitStarted(t, fake)
 		client.relayBusyManager().offer(t.Context(), r27Directive(107, "second", "idle"))
-		r27Await(t, events, "relay.held")
+		awaitClientEvent(t, time.Second, events, "relay.held")
 		r27WaitStarted(t, fake)
 		close(gate)
-		r27Await(t, events, "relay.batched")
+		awaitClientEvent(t, time.Second, events, "relay.batched")
 		var delivered []hubClientEvent
 		released := 0
 		deadline := time.After(time.Second)
@@ -404,7 +389,7 @@ func TestR27RestoreDedupesHubReplayAndNeverPromptsCancelledPane(t *testing.T) {
 	first, _, firstEvents := r27Node(t, store, firstFake)
 	firstContext, stopFirst := context.WithCancel(t.Context())
 	first.relayBusyManager().offer(firstContext, r27Directive(201, "only once", "idle"))
-	r27Await(t, firstEvents, "relay.held")
+	awaitClientEvent(t, time.Second, firstEvents, "relay.held")
 	r27WaitStarted(t, firstFake)
 	stopFirst()
 
@@ -412,13 +397,13 @@ func TestR27RestoreDedupesHubReplayAndNeverPromptsCancelledPane(t *testing.T) {
 	secondFake := &r27FakeHerdr{t: t, getStatus: "working", waitStatus: "done", waitGate: secondGate, started: make(chan struct{}, 3)}
 	second, prompts, events := r27Node(t, store, secondFake)
 	second.relayBusyManager().resume(t.Context())
-	r27Await(t, events, "relay.held")
+	awaitClientEvent(t, time.Second, events, "relay.held")
 	r27WaitStarted(t, secondFake)
 	// The replay names the same (lane,event_id); it re-reports but adds no row.
 	second.relayBusyManager().offer(t.Context(), r27Directive(201, "only once", "idle"))
-	r27Await(t, events, "relay.held")
+	awaitClientEvent(t, time.Second, events, "relay.held")
 	close(secondGate)
-	r27Await(t, events, "relay.released")
+	awaitClientEvent(t, time.Second, events, "relay.released")
 	if len(*prompts) != 1 {
 		t.Fatalf("replayed relay prompt count=%d, want 1", len(*prompts))
 	}
@@ -465,8 +450,8 @@ func TestR27BatchByteLimitKeepsOversizedItemIntact(t *testing.T) {
 	if len(*prompts) != 1 || !strings.Contains((*prompts)[0], big.Text) {
 		t.Fatalf("oversized item was not injected whole: prompts=%q", *prompts)
 	}
-	released := r27Await(t, events, "relay.released")
-	delivered := r27Await(t, events, "relay.delivered")
+	released := awaitClientEvent(t, time.Second, events, "relay.released")
+	delivered := awaitClientEvent(t, time.Second, events, "relay.delivered")
 	if _, valid := decodeRelayReleasedPayload(released.Payload); !valid {
 		t.Fatalf("oversized release rejected by hub parser: %s", released.Payload)
 	}
@@ -650,7 +635,7 @@ func r449SetSession(session string) func(agent map[string]json.RawMessage) {
 // end to end rather than against a string the node happens to emit.
 func r449DroppedReason(t *testing.T, events <-chan hubClientEvent) relayDroppedPayload {
 	t.Helper()
-	event := r27Await(t, events, "relay.dropped")
+	event := awaitClientEvent(t, time.Second, events, "relay.dropped")
 	dropped, valid := decodeRelayDroppedPayload(event.Payload)
 	if !valid {
 		t.Fatalf("dropped payload rejected by hub parser: %s", event.Payload)
@@ -666,7 +651,7 @@ func TestR449ReusedPaneNewOccupantNeverReceivesHeldText(t *testing.T) {
 	defer store.Close()
 	client, prompts, events := r27Node(t, store, fake)
 	client.relayBusyManager().offer(t.Context(), r27Directive(601, "to the first agent", "idle"))
-	r27Await(t, events, "relay.held")
+	awaitClientEvent(t, time.Second, events, "relay.held")
 	r27WaitStarted(t, fake)
 	held, err := store.RelayHeldForPane(t.Context(), "fixture-pane")
 	if err != nil || len(held) != 1 || held[0].Lease == "" {
@@ -698,7 +683,7 @@ func TestR449LaneRerouteExpiresStaleHeld(t *testing.T) {
 	defer store.Close()
 	client, prompts, events := r27Node(t, store, fake)
 	client.relayBusyManager().offer(t.Context(), r449Directive(602, "lane-a", "fixture-pane", "bound to old pane", "idle"))
-	r27Await(t, events, "relay.held")
+	awaitClientEvent(t, time.Second, events, "relay.held")
 	r27WaitStarted(t, fake)
 	// The hub re-resolved lane-a to a different pane and injected there —
 	// that directive is the node's newest route observation for the lane.
@@ -725,15 +710,15 @@ func TestR449UnchangedRouteAndOccupantDelivers(t *testing.T) {
 	defer store.Close()
 	client, prompts, events := r27Node(t, store, fake)
 	client.relayBusyManager().offer(t.Context(), r27Directive(604, "still mine", "idle"))
-	r27Await(t, events, "relay.held")
+	awaitClientEvent(t, time.Second, events, "relay.held")
 	r27WaitStarted(t, fake)
 	held, err := store.RelayHeldForPane(t.Context(), "fixture-pane")
 	if err != nil || len(held) != 1 || held[0].Lease == "" {
 		t.Fatalf("held rows=%+v err=%v want one leased row", held, err)
 	}
 	close(gate)
-	r27Await(t, events, "relay.released")
-	r27Await(t, events, "relay.delivered")
+	awaitClientEvent(t, time.Second, events, "relay.released")
+	awaitClientEvent(t, time.Second, events, "relay.delivered")
 	if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "still mine") {
 		t.Fatalf("prompts=%q", got)
 	}
@@ -747,7 +732,7 @@ func TestR449DeadPaneOccupantGone(t *testing.T) {
 	defer store.Close()
 	client, prompts, events := r27Node(t, store, fake)
 	client.relayBusyManager().offer(t.Context(), r27Directive(605, "to a dying pane", "idle"))
-	r27Await(t, events, "relay.held")
+	awaitClientEvent(t, time.Second, events, "relay.held")
 	r27WaitStarted(t, fake)
 	// herdr's definitive absence answer — the pane no longer hosts an agent.
 	fake.r27SetGet(r27Fixture(t, "agent-get-not-found.json"), errors.New("exit status 1"))
@@ -770,7 +755,7 @@ func TestR449UnverifiableProbeRearmsRatherThanExpires(t *testing.T) {
 		defer store.Close()
 		client, prompts, events := r27Node(t, store, fake)
 		client.relayBusyManager().offer(t.Context(), r27Directive(eventID, "probe keeps failing", "idle"))
-		r27Await(t, events, "relay.held")
+		awaitClientEvent(t, time.Second, events, "relay.held")
 		r27WaitStarted(t, fake)
 		fake.r27SetGet(getOutput, getErr)
 		close(gate)
@@ -812,7 +797,7 @@ func TestR449PreLeaseRowsFallBackToNameMembership(t *testing.T) {
 		client, prompts, events, store := seed(t, "lane-a", 610)
 		defer store.Close()
 		client.relayBusyManager().release(t.Context(), "fixture-pane", false)
-		r27Await(t, events, "relay.delivered")
+		awaitClientEvent(t, time.Second, events, "relay.delivered")
 		if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "legacy row") {
 			t.Fatalf("prompts=%q", got)
 		}
@@ -898,7 +883,7 @@ func TestR449LegalExtremes(t *testing.T) {
 		defer store.Close()
 		client, prompts, events := r27Node(t, store, fake)
 		client.relayBusyManager().offer(t.Context(), r449Directive(620, "lane-a", "fixture-pane", "oldest binding", "idle"))
-		r27Await(t, events, "relay.held")
+		awaitClientEvent(t, time.Second, events, "relay.held")
 		r27WaitStarted(t, fake)
 		client.relayBusyManager().offer(t.Context(), r449Directive(621, "lane-a", "fixture-pane-2", "hop one", "now"))
 		client.relayBusyManager().offer(t.Context(), r449Directive(622, "lane-a", "fixture-pane-3", "hop two", "now"))
@@ -920,20 +905,20 @@ func TestR449LegalExtremes(t *testing.T) {
 		defer store.Close()
 		client, prompts, events := r27Node(t, store, fake)
 		client.relayBusyManager().offer(t.Context(), r27Directive(623, "first occupant's text", "idle"))
-		r27Await(t, events, "relay.held")
+		awaitClientEvent(t, time.Second, events, "relay.held")
 		r27WaitStarted(t, fake)
 		// Route happens to resolve to the same pane id again — but a new
 		// session occupies it now, and the second row leases to that session.
 		fake.r27SetGet(r449OccupantGet(t, "working", r449SetSession("second-session")), nil)
 		client.relayBusyManager().offer(t.Context(), r27Directive(624, "second occupant's text", "idle"))
-		r27Await(t, events, "relay.held")
+		awaitClientEvent(t, time.Second, events, "relay.held")
 		fake.r27SetGet(r449OccupantGet(t, "idle", r449SetSession("second-session")), nil)
 		close(gate)
 		dropped := r449DroppedReason(t, events)
 		if dropped.Reason != "pane_occupant_changed" || dropped.OriginalEventID != 623 {
 			t.Fatalf("dropped=%+v", dropped)
 		}
-		r27Await(t, events, "relay.delivered")
+		awaitClientEvent(t, time.Second, events, "relay.delivered")
 		got := *prompts
 		if len(got) != 1 || !strings.Contains(got[0], "second occupant's text") || strings.Contains(got[0], "first occupant") {
 			t.Fatalf("prompts=%q want only the live occupant's delivery", got)
@@ -957,7 +942,7 @@ func TestR449LegalExtremes(t *testing.T) {
 			t.Fatalf("seed inserted=%t err=%v", inserted, err)
 		}
 		client.relayBusyManager().release(t.Context(), "fixture-pane", false)
-		r27Await(t, events, "relay.delivered")
+		awaitClientEvent(t, time.Second, events, "relay.delivered")
 		if got := *prompts; len(got) != 1 || !strings.Contains(got[0], "no route observation") {
 			t.Fatalf("prompts=%q", got)
 		}

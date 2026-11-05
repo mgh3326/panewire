@@ -166,10 +166,7 @@ func TestIdleWakeUnavailableEventsCapabilityUsesBoundedProbeBackoff(t *testing.T
 	if got := probeCount(); got != 0 {
 		t.Fatalf("capability probes before initial backoff=%d", got)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for probeCount() == 0 && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
+	waitUntil(2*time.Second, func() bool { return probeCount() != 0 })
 	if got := probeCount(); got != 1 {
 		t.Fatalf("capability probes after initial backoff=%d", got)
 	}

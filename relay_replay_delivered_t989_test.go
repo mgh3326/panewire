@@ -189,23 +189,16 @@ func (rig *t989Rig) assertNoReplay(events func(kind string) []json.RawMessage, n
 // emits arrive asynchronously.
 func (rig *t989Rig) awaitDelivered(ids map[int64]bool, pane string) {
 	rig.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		done := true
+	if !waitUntil(5*time.Second, func() bool {
 		for id := range ids {
 			if rig.fake.deliveredToFor(id) == "" {
-				done = false
-				break
+				rig.flush()
+				return false
 			}
 		}
-		if done {
-			break
-		}
-		rig.flush()
-		if time.Now().After(deadline) {
-			rig.t.Fatalf("not all rows closed: %+v", ids)
-		}
-		time.Sleep(5 * time.Millisecond)
+		return true
+	}) {
+		rig.t.Fatalf("not all rows closed: %+v", ids)
 	}
 	rig.flush()
 	for id := range ids {
