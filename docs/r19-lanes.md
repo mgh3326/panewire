@@ -44,10 +44,10 @@ hello value. The UI prompts for the task when turning off. `/v1/nodes` and
 `panewire nodes` show the containment, and the API also shows verification state.
 Overrides disappear at restart unless `--accepting-overrides /path/overrides.json`
 is set. The hub reads that file at startup and atomically updates it on each
-successful POST. Older files with string modes remain supported.
+successful POST. The mode map remains readable by older hub versions; after a rollback, those versions ignore containment metadata.
 
 ```json
-{"overrides":{"host-a":{"mode":"off","containment":"hk:12","containment_verified":true}}}
+{"overrides":{"host-a":"off"},"containments":{"host-a":{"containment":"hk:12","containment_verified":true}}}
 ```
 
 The transport this contract rides on changed in R20: relay events are now

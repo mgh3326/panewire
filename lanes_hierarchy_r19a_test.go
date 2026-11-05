@@ -134,7 +134,7 @@ func TestR19AcceptingOverrideControlsPlacementAndUI(t *testing.T) {
 		t.Fatalf("auto did not return to hello value: %+v", data.Nodes[0])
 	}
 	b, err := os.ReadFile(overrides)
-	if err != nil || !bytes.Contains(b, []byte(`"host-a":{"mode":"auto"`)) {
+	if err != nil || !bytes.Contains(b, []byte(`"host-a":"auto"`)) {
 		t.Fatalf("override file=%q err=%v", b, err)
 	}
 }

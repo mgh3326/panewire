@@ -29,7 +29,13 @@ func (o *acceptingOverride) UnmarshalJSON(b []byte) error {
 }
 
 type acceptingOverrideFile struct {
-	Overrides map[string]acceptingOverride `json:"overrides"`
+	Overrides    map[string]acceptingOverride    `json:"overrides"`
+	Containments map[string]acceptingContainment `json:"containments,omitempty"`
+}
+
+type acceptingContainment struct {
+	Containment         string `json:"containment"`
+	ContainmentVerified bool   `json:"containment_verified"`
 }
 
 var containmentPattern = regexp.MustCompile(`^hk:[1-9][0-9]{0,8}$`)
@@ -82,6 +88,12 @@ func loadAcceptingOverrides(path string) (map[string]acceptingOverride, error) {
 		return nil, errors.New("invalid override file")
 	}
 	for machine, override := range wire.Overrides {
+		if details, ok := wire.Containments[machine]; ok {
+			override.Containment, override.ContainmentVerified = details.Containment, details.ContainmentVerified
+		}
+		if override.Mode != "off" {
+			override.Containment, override.ContainmentVerified = "", false
+		}
 		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || !validAcceptingOverride(override.Mode) || (override.Containment != "" && !containmentPattern.MatchString(override.Containment)) {
 			return nil, errors.New("invalid override file")
 		}
@@ -112,7 +124,18 @@ func (h *HubServer) persistAcceptingOverridesLocked(next map[string]acceptingOve
 	if h.r19a.acceptingOverridesPath == "" {
 		return nil
 	}
-	b, err := json.Marshal(acceptingOverrideFile{Overrides: next})
+	modes := make(map[string]string, len(next))
+	details := make(map[string]acceptingContainment)
+	for machine, override := range next {
+		modes[machine] = override.Mode
+		if override.Mode == "off" && override.Containment != "" {
+			details[machine] = acceptingContainment{override.Containment, override.ContainmentVerified}
+		}
+	}
+	b, err := json.Marshal(struct {
+		Overrides    map[string]string               `json:"overrides"`
+		Containments map[string]acceptingContainment `json:"containments,omitempty"`
+	}{modes, details})
 	if err != nil {
 		return err
 	}

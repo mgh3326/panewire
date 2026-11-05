@@ -75,6 +75,17 @@ func TestAcceptingContainment(t *testing.T) {
 	if err := json.Unmarshal(nodes.Body.Bytes(), &data); err != nil || len(data.Nodes) != 1 || data.Nodes[0].Containment != "hk:12" || !data.Nodes[0].ContainmentVerified {
 		t.Fatalf("nodes: %d %s %v", nodes.Code, nodes.Body.String(), err)
 	}
+	// A pre-change hub must be able to decode the modes after rollback.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy struct {
+		Overrides map[string]string `json:"overrides"`
+	}
+	if err := json.Unmarshal(raw, &legacy); err != nil || legacy.Overrides["host-a"] != "off" {
+		t.Fatalf("legacy reader: %s %v", raw, err)
+	}
 	restarted, err := NewHubServer(config)
 	if err != nil {
 		t.Fatal(err)
@@ -110,5 +121,22 @@ func TestAcceptingContainment(t *testing.T) {
 	w = post(`{"mode":"auto"}`)
 	if w.Code != 200 {
 		t.Fatalf("auto: %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAcceptingOverrideClearsStaleContainment(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "overrides.json")
+	data := `{"overrides":{"host-a":"on","host-b":"auto"},"containments":{"host-a":{"containment":"hk:12","containment_verified":true},"host-b":{"containment":"hk:13","containment_verified":true}}}`
+	if err := os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	overrides, err := loadAcceptingOverrides(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, machine := range []string{"host-a", "host-b"} {
+		if got := overrides[machine]; got.Containment != "" || got.ContainmentVerified {
+			t.Fatalf("%s: %+v", machine, got)
+		}
 	}
 }

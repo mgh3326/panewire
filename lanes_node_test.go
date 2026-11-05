@@ -531,7 +531,7 @@ func TestLanesNodeTokenRouteTable(t *testing.T) {
 
 		{name: "nodes", method: http.MethodGet, path: "/v1/nodes", nodeWant: []int{401}, opWant: 200},
 		{name: "control-plane transfer", method: http.MethodPost, path: "/v1/control-plane/transfer", body: `{}`, nodeWant: []int{401}, opWant: 400},
-		{name: "accepting override", method: http.MethodPost, path: "/v1/nodes/machine-a/accepting", body: `{"mode":"off"}`, nodeWant: []int{401}, opWant: 200},
+		{name: "accepting override", method: http.MethodPost, path: "/v1/nodes/machine-a/accepting", body: `{"mode":"off","containment":"hk:12"}`, nodeWant: []int{401}, opWant: 200},
 		{name: "burst", method: http.MethodGet, path: "/v1/burst", nodeWant: []int{401}, opWant: 200},
 		{name: "burst request", method: http.MethodPost, path: "/v1/burst/request", body: `{}`, nodeWant: []int{401}, opWant: 400},
 		{name: "burst release", method: http.MethodPost, path: "/v1/burst/release", body: `{}`, nodeWant: []int{401}, opWant: 400},
