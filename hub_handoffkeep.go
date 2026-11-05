@@ -37,6 +37,10 @@ const (
 	// item is already delivered, read, acked or superseded: the receiver has
 	// the event, so its one labelled replay would only repeat it.
 	relayUnconfirmedInboxRetireReason = "inbox-delivered"
+	// relayDigestNotReplayedRetireReason retires a marked row that is an
+	// inbox digest or escalation batch: its count is stale after a restart, so
+	// the still-unread items are released and escalated afresh instead.
+	relayDigestNotReplayedRetireReason = "digest-not-replayed"
 	// relayUnconfirmedMarkRetireReason retires a marker row whose original
 	// row is already closed, exhausted, or gone.
 	relayUnconfirmedMarkRetireReason = "unconfirmed-mark"

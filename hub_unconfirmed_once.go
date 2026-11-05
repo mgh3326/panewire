@@ -187,6 +187,9 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (map[int64]bool,
 // rule is: no labelled copy is ever queued unless the durable retire for
 // that row has already succeeded.
 func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffkeepRelayEvent, source string) {
+	if h.retireUnconfirmedDigest(record) {
+		return
+	}
 	if h.retireUnconfirmedSettledInInbox(record) {
 		return
 	}
@@ -298,6 +301,44 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 	}
 	h.logger.Info("relay unconfirmed replay injected", "event_id", record.ID, "kind", record.Kind, "lane", record.OwnerLane, "machine", route.Machine, "pane", route.Pane, "first_sent", firstSent, "source", source)
 	h.broadcastRelayReplayInjected(record, route, record.Attempts, source)
+}
+
+// retireUnconfirmedDigest spends no replay on an inbox digest or escalation
+// batch: its count was true only when it was made, and it has no lane inbox
+// item the settled lookup could consult. The batch's still-unread items are
+// released before the row retires, so a crash between the two leaves at worst
+// a fresh escalation plus a retire the next restart repeats, never an item
+// that no batch will ever escalate. The next flush then escalates them through
+// the normal path with the current count. A failed lookup, release or retire
+// replays nothing and the next trigger tries again; chat rows are never
+// batches.
+func (h *HubServer) retireUnconfirmedDigest(record handoffkeepRelayEvent) bool {
+	if h.handoffkeep == nil || record.Kind != "lane.event" || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || chatRelayEventPattern.MatchString(record.EventID) {
+		return false
+	}
+	if h.inbox == nil {
+		// Without a store there is no batch table; the id prefix still names it
+		// and there is nothing to release.
+		if !strings.HasPrefix(record.EventID, quietDigestBatchPrefix) {
+			return false
+		}
+		h.retireRelayReplay(record, relayDigestNotReplayedRetireReason)
+		return true
+	}
+	isBatch, err := h.inbox.store.isDigestBatch(record.OwnerLane, record.EventID)
+	if err != nil {
+		h.logger.Warn("inbox batch lookup unavailable; unconfirmed replay deferred", "event_id", record.ID)
+		return true
+	}
+	if !isBatch {
+		return false
+	}
+	if err := h.inbox.store.releaseBatchClaims(record.EventID); err != nil {
+		h.logger.Warn("inbox batch claims were not released; unconfirmed replay deferred", "event_id", record.ID)
+		return true
+	}
+	h.retireRelayReplay(record, relayDigestNotReplayedRetireReason)
+	return true
 }
 
 // retireUnconfirmedSettledInInbox spends no labelled replay on a row whose
