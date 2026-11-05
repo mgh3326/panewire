@@ -185,8 +185,17 @@ func placementTerms(p *placePlan, chosen, ranking string) ([]fleetevent.Candidat
 		}
 		if t := c.signals.Terms; t != nil {
 			row.Jobs = &t.Jobs
-			if c.source != "hub-only" {
-				row.CPU, row.Mem, row.IO, row.Load = &t.CPU, &t.Mem, &t.IO, &t.Load
+			if c.source != "hub-only" || c.signals.CPUBusyShort != nil || c.signals.CPUBusy5m != nil {
+				row.CPU = &t.CPU
+			}
+			if c.source != "hub-only" || c.signals.MemAvailable != nil {
+				row.Mem = &t.Mem
+			}
+			if c.source != "hub-only" || c.signals.SwapInMBPS != nil {
+				row.IO = &t.IO
+			}
+			if c.source != "hub-only" || c.signals.Load1PerCore != nil {
+				row.Load = &t.Load
 			}
 		}
 		row.Power, row.Bridge = c.signals.Power, c.signals.BridgedJobs
