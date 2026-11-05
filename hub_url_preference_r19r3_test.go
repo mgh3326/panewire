@@ -82,19 +82,27 @@ func TestR19PreferenceSwitchesDoNotNest(t *testing.T) {
 	go func() { served <- client.serve(ctx, first) }()
 
 	baseline := 0
-	var done int
-	if !waitUntil(15*time.Second, func() bool {
+	// The baseline depends on the poll interval: it is taken the first time
+	// one switch is seen, and a faster poll reads it before the session's
+	// reader goroutine and preference probe exist. Keep the 5 ms loop here
+	// rather than waitUntil's 1 ms poll.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
 		mu.Lock()
-		done = switches
+		done := switches
 		mu.Unlock()
 		if done == 1 && baseline == 0 {
 			// Measured once the session is fully established, so the reader
 			// goroutine and the preference probe are already counted.
 			baseline = runtime.NumGoroutine()
 		}
-		return done == switchCount
-	}) {
-		t.Fatalf("only %d of %d preference switches completed", done, switchCount)
+		if done == switchCount {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d preference switches completed", done, switchCount)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 	// Let the superseded session's reader goroutine observe its closed
 	// connection and exit before anything is counted.
