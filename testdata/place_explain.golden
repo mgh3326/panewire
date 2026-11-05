@@ -1,9 +1,10 @@
 DECISION	mac-dev
 SOURCE	prometheus
 ASOF	2026-11-02T05:23:14Z
-MACHINE	SCORE	FREE	CPU_1M	CPU_5M	MEM_AVAIL	SWAP_IN_MBPS	POWER	WEIGHT	BRIDGED	ACTIVE_JOBS	THROTTLED	CONNECTED	REASON
-mac-dev	75.43	0.85	0.14	0.14	0.46	2.01	100	1.00	1	6	false	true	available
-mac-work	51.69	0.52	0.41	0.44	0.18	25.01	100	1.00	0	0	false	true	available
-desktop	27.30	0.70	0.30	0.30	0.86	0.00	39	1.00	0	1	false	true	available
-rpi	2.08	0.99	-	0.01	-	-	7	0.30	0	0	false	true	memory_unknown
-old-hub-host	90.00	-	-	-	-	-	-	1.00	-	0	false	true	available
+REASON	challenger
+MACHINE	SCORE	FREE	CPU	MEM	IO	LOAD	JOBS	CPU_BUSY	MEM_AVAIL	PAGEIN_MBPS	LOAD1_CORE	POWER	BRIDGED	ACTIVE_JOBS	THROTTLED	CONNECTED	REASON
+mac-dev	30.92	0.41	0.86	1.00	0.83	1.00	0.57	0.14	0.46	2.01	0.60	100	1	6	false	true	available
+mac-work	0.00	0.00	0.56	0.00	0.29	0.38	1.00	0.44	0.18	25.01	2.40	100	0	0	false	true	available
+desktop	24.27	0.62	0.70	1.00	1.00	1.00	0.89	0.30	0.86	0.00	-	39	0	1	false	true	available
+rpi	6.93	0.99	0.99	1.00	1.00	1.00	1.00	0.01	-	-	-	7	0	0	false	true	memory_unknown
+old-hub-host	90.00	-	-	-	-	-	-	-	-	-	-	-	-	0	false	true	available

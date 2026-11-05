@@ -122,3 +122,26 @@ func TestRedactQuotedSpacedAndShortCredentialValues(t *testing.T) {
 		t.Fatalf("redaction must stop at the closing quote: %s", got)
 	}
 }
+
+func TestEmitEventNormalisesPlacementFieldsForASink(t *testing.T) {
+	var got []Event
+	w := &Writer{Tool: "panewire", Host: "Node-A", Sink: func(ev Event) { got = append(got, ev) }, Now: func() time.Time { return time.Unix(0, 0) }}
+	score := 12.5
+	candidates := make([]Candidate, MaxCandidates+3)
+	for i := range candidates {
+		candidates[i] = Candidate{Host: "Host One", Score: &score, Outcome: "Not Chosen"}
+	}
+	if !w.EmitEvent(Event{Kind: "Placement", RequestID: "req token=hunter2pass", Chosen: "Host One", Candidates: candidates}) {
+		t.Fatal("a sink must accept the event")
+	}
+	ev := got[0]
+	if ev.Host != "node-a" || ev.Kind != "placement" || ev.Chosen != "host_one" || len(ev.Candidates) != MaxCandidates || ev.Candidates[0].Host != "host_one" || ev.Candidates[0].Outcome != "not_chosen" {
+		t.Fatalf("event=%+v", ev)
+	}
+	if strings.Contains(ev.RequestID, "hunter2pass") {
+		t.Fatalf("request id not redacted: %q", ev.RequestID)
+	}
+	if candidates[0].Host != "Host One" {
+		t.Fatal("the caller's candidates were rewritten")
+	}
+}

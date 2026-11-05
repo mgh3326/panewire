@@ -54,6 +54,25 @@ func readFleetEventsFile(t *testing.T) (string, []map[string]string) {
 		if _, ok := fields["request_id"]; ok {
 			keys = append(keys, "request_id")
 		}
+		// A successful node_spawn also carries its profile and duration_ms.
+		if _, ok := fields["profile"]; ok {
+			keys = append(keys, "profile")
+		}
+		if _, ok := fields["duration_ms"].(float64); ok {
+			if len(fields) != len(keys)+1 {
+				t.Fatalf("event is not the v1 shape: %q", line)
+			}
+			event := map[string]string{"duration_ms": "set"}
+			for _, key := range keys {
+				value, ok := fields[key].(string)
+				if !ok {
+					t.Fatalf("event field %q missing: %q", key, line)
+				}
+				event[key] = value
+			}
+			events = append(events, event)
+			continue
+		}
 		if len(fields) != len(keys) {
 			t.Fatalf("event is not the v1 shape: %q", line)
 		}
