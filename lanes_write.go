@@ -216,8 +216,15 @@ func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.R
 		writeLaneJSONError(writer, http.StatusBadRequest, "invalid_lane")
 		return
 	}
-	if err := h.deleteLane(lane, nodeMachine); err != nil {
+	expect := laneRouteExpectation{Machine: request.URL.Query().Get("expect_machine"), Pane: request.URL.Query().Get("expect_pane")}
+	if (expect.Machine != "" && !machineIDPattern.MatchString(expect.Machine)) || len(expect.Pane) > 128 {
+		writeLaneJSONError(writer, http.StatusBadRequest, "invalid_expected_route")
+		return
+	}
+	if err := h.deleteLane(lane, nodeMachine, expect); err != nil {
 		switch {
+		case errors.Is(err, errLaneRouteChanged):
+			writeLaneJSONError(writer, http.StatusConflict, "lane_route_changed")
 		case errors.Is(err, errLaneMachineMismatch):
 			writeLaneJSONError(writer, http.StatusForbidden, "lane_machine_mismatch")
 		case errors.Is(err, errAuthorityLaneDirectWrite):
@@ -451,7 +458,14 @@ func (h *HubServer) putLane(lane string, body hubLaneWriteRequest, nodeMachine s
 	return projection, created, nil
 }
 
-func (h *HubServer) deleteLane(lane, nodeMachine string) error {
+// laneRouteExpectation guards a delete: a non-empty field must equal the
+// lane's current route, so reaping a finished pane never removes a lane that
+// a newer attempt has since re-registered.
+type laneRouteExpectation struct{ Machine, Pane string }
+
+var errLaneRouteChanged = errors.New("lane route changed")
+
+func (h *HubServer) deleteLane(lane, nodeMachine string, expect laneRouteExpectation) error {
 	if h.reportRelayPath == "" {
 		return errLanesWriteUnconfigured
 	}
@@ -485,6 +499,9 @@ func (h *HubServer) deleteLane(lane, nodeMachine string) error {
 		}
 		if route.Protected {
 			return errLaneProtected
+		}
+		if (expect.Machine != "" && route.Machine != expect.Machine) || (expect.Pane != "" && route.Pane != expect.Pane) {
+			return errLaneRouteChanged
 		}
 		delete(snapshot.Routes, lane)
 		contents, err := encodeLanesFile(snapshot)
