@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestTask264InjectFailureRearmsThenDrops is the AC-2 assertion for #264 D1:
@@ -30,15 +31,15 @@ func TestTask264InjectFailureRearmsThenDrops(t *testing.T) {
 	client.relayBusyManager().restore(t.Context())
 
 	client.relayBusyManager().offer(t.Context(), r27Directive(264, "never lands", "max_wait=1"))
-	r27Await(t, events, "relay.held")
+	awaitClientEvent(t, time.Second, events, "relay.held")
 	r27WaitStarted(t, fake)
 	close(gate)
 
 	// Each failed attempt still reports relay.unconfirmed...
-	r27Await(t, events, "relay.unconfirmed")
+	awaitClientEvent(t, time.Second, events, "relay.unconfirmed")
 	// ...but the manager must not stop there forever: it either keeps
 	// retrying (bounded) or gives up with an explicit terminal signal.
-	dropped := r27Await(t, events, "relay.dropped")
+	dropped := awaitClientEvent(t, time.Second, events, "relay.dropped")
 	if !strings.Contains(string(dropped.Payload), `"original_event_id":264`) {
 		t.Fatalf("relay.dropped payload=%s", dropped.Payload)
 	}
@@ -72,12 +73,12 @@ func TestTask264InjectFailureThenSuccessDeliversWithoutSticking(t *testing.T) {
 	client.relayBusyManager().restore(t.Context())
 
 	client.relayBusyManager().offer(t.Context(), r27Directive(265, "lands eventually", "max_wait=1"))
-	r27Await(t, events, "relay.held")
+	awaitClientEvent(t, time.Second, events, "relay.held")
 	r27WaitStarted(t, fake)
 	close(gate)
 
-	r27Await(t, events, "relay.unconfirmed")
-	r27Await(t, events, "relay.delivered")
+	awaitClientEvent(t, time.Second, events, "relay.unconfirmed")
+	awaitClientEvent(t, time.Second, events, "relay.delivered")
 	if len(injectCalls) != 2 {
 		t.Fatalf("inject attempts=%d, want exactly 2 (fail once, then succeed)", len(injectCalls))
 	}

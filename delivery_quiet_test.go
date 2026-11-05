@@ -742,13 +742,7 @@ func TestQuietInboxContractProbe(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go h.runInbox(ctx)
-	deadline := time.Now().Add(5 * time.Second)
-	for !h.inboxDigestDisabled() && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !h.inboxDigestDisabled() {
-		t.Fatal("runInbox did not probe the contract")
-	}
+	eventually(t, 5*time.Second, "runInbox to probe the contract", h.inboxDigestDisabled)
 }
 
 // PANEWIRE_DELIVERY_POLICY=off is the env-var kill switch equivalent to the

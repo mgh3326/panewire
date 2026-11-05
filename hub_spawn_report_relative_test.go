@@ -3,10 +3,11 @@ package panewire
 import (
 	"bytes"
 	"context"
-	"github.com/mgh3326/panewire/internal/fleet"
 	"net/http"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 func TestHubSpawnReportRelativeArgValidation(t *testing.T) {

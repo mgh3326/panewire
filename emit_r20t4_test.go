@@ -59,19 +59,16 @@ func (p *r20t4Pushes) add(request localRequest) {
 
 func (p *r20t4Pushes) await(t *testing.T, want int) []localRequest {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	var got []localRequest
+	if !waitUntil(2*time.Second, func() bool {
 		p.mu.Lock()
-		got := append([]localRequest(nil), p.records...)
+		got = append([]localRequest(nil), p.records...)
 		p.mu.Unlock()
-		if len(got) >= want {
-			return got
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("socket pushes=%d, want %d", len(got), want)
-		}
-		time.Sleep(5 * time.Millisecond)
+		return len(got) >= want
+	}) {
+		t.Fatalf("socket pushes=%d, want %d", len(got), want)
 	}
+	return got
 }
 
 func r20t4EventFileReportPath(t *testing.T, path string) (string, bool) {

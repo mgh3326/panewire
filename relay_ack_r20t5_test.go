@@ -409,27 +409,15 @@ func TestR20T5UnconfirmedInjectionRecordsAnAttempt(t *testing.T) {
 	}
 	// The node never acknowledges: the window expires on its own.
 	deadline := time.Now().Add(3 * time.Second)
-	for {
-		if attempts := fake.attemptsFor("job.completed", "r20t5-unconfirmed", 1, "report.md", ""); attempts == 2 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("an ack timeout did not record an attempt: attempts=%d, want 2", fake.attemptsFor("job.completed", "r20t5-unconfirmed", 1, "report.md", ""))
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !waitUntil(time.Until(deadline), func() bool { return fake.attemptsFor("job.completed", "r20t5-unconfirmed", 1, "report.md", "") == 2 }) {
+		t.Fatalf("an ack timeout did not record an attempt: attempts=%d, want 2", fake.attemptsFor("job.completed", "r20t5-unconfirmed", 1, "report.md", ""))
 	}
 	// The durable attempt is recorded before the broadcast, so a fast runner
 	// can observe attempts==2 in the small window before the event fanout.
 	// Wait for the same deadline-bound asynchronous outcome rather than making
 	// that scheduling window a platform-dependent failure.
-	for {
-		if unconfirmed := events("relay.unconfirmed"); len(unconfirmed) == 1 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("relay.unconfirmed broadcast was not observed after attempt recording")
-		}
-		time.Sleep(5 * time.Millisecond)
+	if !waitUntil(time.Until(deadline), func() bool { return len(events("relay.unconfirmed")) == 1 }) {
+		t.Fatalf("relay.unconfirmed broadcast was not observed after attempt recording")
 	}
 	if fake.rowCount() != 1 {
 		t.Fatalf("the attempt bump created a row: handoffkeep holds %d", fake.rowCount())

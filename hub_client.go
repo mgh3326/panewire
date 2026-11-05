@@ -2010,8 +2010,10 @@ func relayEventOutboxKeyFor(job hubScannedRelayEvent) relayOutboxKey {
 	return relayOutboxKey{Kind: job.Kind, JobID: job.JobID, Epoch: job.Epoch, ReportPath: job.ReportPath, Reason: reason, EventID: job.EventID}
 }
 
-// nowUTC is the outbox retry clock, injectable so a fixture can pin the
-// sixty-second backoff instead of racing the wall clock.
+// nowUTC is the node's injectable clock for every recorded timestamp (outbox
+// retry, held relays, readiness), so a fixture can pin the sixty-second
+// backoff instead of racing the wall clock. Elapsed-time deadlines stay on
+// the wall clock.
 func (client *HubClient) nowUTC() time.Time {
 	if client.now != nil {
 		return client.now().UTC()
@@ -2255,7 +2257,7 @@ func (client *HubClient) recordRelayPersisted(message hubOutboundMessage) {
 		return
 	}
 	key := relayOutboxKey{Kind: message.Kind, JobID: message.JobID, Epoch: message.Epoch, ReportPath: message.ReportPath, Reason: message.Reason, Lane: message.Lane, EventID: message.ProducerEventID}
-	if err := client.outbox.RecordRelayPersisted(context.Background(), key, time.Now().UTC()); err != nil {
+	if err := client.outbox.RecordRelayPersisted(context.Background(), key, client.nowUTC()); err != nil {
 		client.warnMessage("relay outbox persistence was not recorded")
 	}
 }

@@ -3,12 +3,13 @@ package panewire
 import (
 	"encoding/json"
 	"errors"
-	"github.com/mgh3326/panewire/internal/fleet"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 const (

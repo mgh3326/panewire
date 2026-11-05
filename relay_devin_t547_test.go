@@ -377,7 +377,7 @@ func task547RelayRun(t *testing.T, verdict func(context.Context, string, string,
 	client.setRelayEmitter(func(event hubClientEvent) { events <- event })
 	client.relayBusyManager().restore(t.Context())
 	client.relayBusyManager().offer(t.Context(), r27Directive(547, task547RelayText, "max_wait=1"))
-	r27Await(t, events, "relay.held")
+	awaitClientEvent(t, time.Second, events, "relay.held")
 	r27WaitStarted(t, fake)
 	close(gate)
 	return &injects, client, events
@@ -388,11 +388,11 @@ func TestTask547DevinRetryableIsReinjectedAtMostOnce(t *testing.T) {
 	injects, client, events := task547RelayRun(t, func(context.Context, string, string, []string) relayInjectResult {
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: "devin", Evidence: "visible+recent-unwrapped:none"}
 	})
-	unconfirmed := task547Await(t, events, "relay.unconfirmed")
+	unconfirmed := awaitClientEvent(t, task547AwaitTimeout, events, "relay.unconfirmed")
 	if !strings.Contains(string(unconfirmed.Payload), `"reason":"visible+recent-unwrapped:none"`) {
 		t.Fatalf("relay.unconfirmed carries no evidence: %s", unconfirmed.Payload)
 	}
-	task547Await(t, events, "relay.dropped")
+	awaitClientEvent(t, task547AwaitTimeout, events, "relay.dropped")
 	if *injects != relayDevinMaxInjectAttempts || relayDevinMaxInjectAttempts != 2 {
 		t.Fatalf("devin injects=%d, want 2 (one re-inject)", *injects)
 	}
@@ -406,11 +406,11 @@ func TestTask547ClaudeRetryCapUnchanged(t *testing.T) {
 	injects, _, events := task547RelayRun(t, func(context.Context, string, string, []string) relayInjectResult {
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: "claude"}
 	})
-	unconfirmed := task547Await(t, events, "relay.unconfirmed")
+	unconfirmed := awaitClientEvent(t, task547AwaitTimeout, events, "relay.unconfirmed")
 	if strings.Contains(string(unconfirmed.Payload), `"reason"`) {
 		t.Fatalf("claude relay.unconfirmed payload changed: %s", unconfirmed.Payload)
 	}
-	task547Await(t, events, "relay.dropped")
+	awaitClientEvent(t, task547AwaitTimeout, events, "relay.dropped")
 	if *injects != relayMaxInjectAttempts {
 		t.Fatalf("claude injects=%d, want relayMaxInjectAttempts=%d", *injects, relayMaxInjectAttempts)
 	}
@@ -422,12 +422,12 @@ func TestTask547DevinMaybeInPaneIsNeverReinjected(t *testing.T) {
 	injects, client, events := task547RelayRun(t, func(context.Context, string, string, []string) relayInjectResult {
 		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: "devin", Evidence: "visible:devin_queue_banner after_return:visible:devin_queue_banner"}
 	})
-	unconfirmed := task547Await(t, events, "relay.unconfirmed")
+	unconfirmed := awaitClientEvent(t, task547AwaitTimeout, events, "relay.unconfirmed")
 	var ack relayAckPayload
 	if err := json.Unmarshal(unconfirmed.Payload, &ack); err != nil || !strings.HasPrefix(ack.Reason, "maybe_in_pane visible:devin_queue_banner") {
 		t.Fatalf("relay.unconfirmed=%s err=%v, want maybe_in_pane reason with evidence", unconfirmed.Payload, err)
 	}
-	dropped := task547Await(t, events, "relay.dropped")
+	dropped := awaitClientEvent(t, task547AwaitTimeout, events, "relay.dropped")
 	if !strings.Contains(string(dropped.Payload), `"reason":"maybe_in_pane"`) {
 		t.Fatalf("relay.dropped=%s", dropped.Payload)
 	}
@@ -460,15 +460,15 @@ func TestTask547DevinPartialSendIsNotTypedTwice(t *testing.T) {
 	injects, _, events := task547RelayRun(t, func(ctx context.Context, pane, text string, members []string) relayInjectResult {
 		return defaultHubRelayInjectVerdict(ctx, pane, text, members)
 	})
-	first := task547Await(t, events, "relay.unconfirmed")
+	first := awaitClientEvent(t, task547AwaitTimeout, events, "relay.unconfirmed")
 	if !strings.Contains(string(first.Payload), `"reason":"prompt_failed"`) {
 		t.Fatalf("first unconfirmed=%s", first.Payload)
 	}
-	second := task547Await(t, events, "relay.unconfirmed")
+	second := awaitClientEvent(t, task547AwaitTimeout, events, "relay.unconfirmed")
 	if !strings.Contains(string(second.Payload), "maybe_in_pane") || !strings.Contains(string(second.Payload), "composer") {
 		t.Fatalf("second unconfirmed=%s, want maybe_in_pane on the composer residue", second.Payload)
 	}
-	task547Await(t, events, "relay.dropped")
+	awaitClientEvent(t, task547AwaitTimeout, events, "relay.dropped")
 	b, _ := os.ReadFile(filepath.Join(dir, "calls.log"))
 	if prompts := strings.Count(string(b), "prompt"); prompts != 1 || *injects != 2 {
 		t.Fatalf("prompts=%d injects=%d, want 1 prompt over 2 attempts", prompts, *injects)
@@ -660,23 +660,10 @@ func TestTask547DevinLiveQueueLayoutIsQueued(t *testing.T) {
 	}
 }
 
-// task547Await is r27Await with room for the fake-herdr shell calls of a
-// devin inject on a loaded host. A timeout here would otherwise leave a
-// retry running on context.Background() into the next test's fake herdr.
-func task547Await(t *testing.T, events <-chan hubClientEvent, kind string) hubClientEvent {
-	t.Helper()
-	deadline := time.After(20 * time.Second)
-	for {
-		select {
-		case event := <-events:
-			if event.Kind == kind {
-				return event
-			}
-		case <-deadline:
-			t.Fatalf("timed out waiting for %s", kind)
-		}
-	}
-}
+// task547AwaitTimeout leaves room for the fake-herdr shell calls of a devin
+// inject on a loaded host. A timeout here would otherwise leave a retry
+// running on context.Background() into the next test's fake herdr.
+const task547AwaitTimeout = 20 * time.Second
 
 // Live devin v3000.10.31 captures from the b547 probe pane (2026-09-22): a
 // message queued while "sleep 75" ran. The spinner sits right above the queue
@@ -766,7 +753,7 @@ func TestTask547DevinQueuedIsAcceptedWithoutRetry(t *testing.T) {
 	injects, client, events := task547RelayRun(t, func(context.Context, string, string, []string) relayInjectResult {
 		return relayInjectResult{Outcome: relayInjectQueued, Harness: "devin", Evidence: "visible:devin_queue_banner busy:agent_status_working"}
 	})
-	delivered := task547Await(t, events, "relay.delivered")
+	delivered := awaitClientEvent(t, task547AwaitTimeout, events, "relay.delivered")
 	var ack relayAckPayload
 	if err := json.Unmarshal(delivered.Payload, &ack); err != nil || ack.Reason != "queued visible:devin_queue_banner busy:agent_status_working" {
 		t.Fatalf("relay.delivered=%s err=%v", delivered.Payload, err)

@@ -5,12 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/mgh3326/panewire/internal/fleetevent"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleetevent"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
 )

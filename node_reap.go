@@ -7,12 +7,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/mgh3326/panewire/internal/fleet"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // pane.read and job.done are the two node commands mergewake reap needs for a

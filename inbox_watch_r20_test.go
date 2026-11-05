@@ -73,12 +73,8 @@ func TestR20PollWatcherRecordsTheSameEventKinds(t *testing.T) {
 
 func waitForEventKind(t *testing.T, store *Store, kind string, want int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if store.CountEventKind(kind) >= want {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if waitUntil(5*time.Second, func() bool { return store.CountEventKind(kind) >= want }) {
+		return
 	}
 	t.Fatalf("%s never reached %d (have %d)", kind, want, store.CountEventKind(kind))
 }

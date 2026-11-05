@@ -3,13 +3,14 @@ package panewire
 import (
 	"context"
 	"encoding/json"
-	"github.com/mgh3326/panewire/internal/fleet"
 	"os"
 	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // TestMain points every test's fleet events at a temporary state dir, so no

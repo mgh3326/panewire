@@ -104,18 +104,14 @@ func TestR20EmitRecordedEventStillPushes(t *testing.T) {
 	if names := r20EventFiles(t, inbox, "r20-dupe"); len(names) != 1 {
 		t.Fatalf("a duplicate emit wrote a second file: %v", names)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	var count int
+	if !waitUntil(2*time.Second, func() bool {
 		mu.Lock()
-		count := len(pushes)
+		count = len(pushes)
 		mu.Unlock()
-		if count == 2 || time.Now().After(deadline) {
-			if count != 2 {
-				t.Fatalf("socket pushes=%d, want 2", count)
-			}
-			break
-		}
-		time.Sleep(5 * time.Millisecond)
+		return count == 2
+	}) {
+		t.Fatalf("socket pushes=%d, want 2", count)
 	}
 	mu.Lock()
 	first := pushes[0]

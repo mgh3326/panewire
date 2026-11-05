@@ -1647,13 +1647,7 @@ func TestHubChatJWTKeysOutageContract(t *testing.T) {
 	// set, and the same request authorizes again. The kick is rate-limited,
 	// so the wait budget covers a full kick interval plus fetch time.
 	down.Store(false)
-	deadline := time.Now().Add(10 * time.Second)
-	for authed() != http.StatusOK {
-		if time.Now().After(deadline) {
-			t.Fatal("background refresh did not restore access after the outage")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	eventually(t, 10*time.Second, "background refresh to restore access after the outage", func() bool { return authed() == http.StatusOK })
 }
 
 // AC-B4-5 (c): an in-flight certs fetch must never block a request. The
@@ -1704,13 +1698,7 @@ func TestHubChatJWTRefreshNeverBlocksRequest(t *testing.T) {
 	// same assertion then verifies.
 	close(gate)
 	gateOpen = true
-	deadline := time.Now().Add(5 * time.Second)
-	for !verifier.verify(request) {
-		if time.Now().After(deadline) {
-			t.Fatal("refresh did not land the key set after the gate opened")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	eventually(t, 5*time.Second, "refresh to land the key set after the gate opened", func() bool { return verifier.verify(request) })
 }
 
 // Regression from the live rig: relay rows written before the event-id body
@@ -2022,10 +2010,7 @@ func TestHubChatJWTExpiredCacheKickRateLimited(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for fetches.Load() < 1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitUntil(2*time.Second, func() bool { return fetches.Load() >= 1 })
 	baseline := fetches.Load() // the constructor's kick, failed — cache empty
 
 	request := httptest.NewRequest(http.MethodGet, "/chat/data", nil)
@@ -2052,10 +2037,7 @@ func TestHubChatJWTExpiredCacheKickRateLimited(t *testing.T) {
 	if verifier.verify(request) {
 		t.Fatal("verify passed during the outage")
 	}
-	deadline = time.Now().Add(2 * time.Second)
-	for fetches.Load() < baseline+1 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
+	waitUntil(2*time.Second, func() bool { return fetches.Load() >= baseline+1 })
 	if got := fetches.Load(); got != baseline+1 {
 		t.Fatalf("post-interval kick drove %d fetches, want %d", got, baseline+1)
 	}

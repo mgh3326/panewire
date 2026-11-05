@@ -71,26 +71,17 @@ func r725AwaitClosed(t *testing.T, done <-chan struct{}, what string) {
 // which of two racing offers reached the probe first.
 func r725AwaitCalls(t *testing.T, fake *r27FakeHerdr, command, pane string) {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
-	for {
+	if !waitUntil(2*time.Second, func() bool {
 		fake.mu.Lock()
-		seen := false
+		defer fake.mu.Unlock()
 		for _, call := range fake.calls {
 			if len(call) > 2 && call[0] == "agent" && call[1] == command && call[2] == pane {
-				seen = true
-				break
+				return true
 			}
 		}
-		fake.mu.Unlock()
-		if seen {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("agent %s never targeted %s", command, pane)
-		default:
-			time.Sleep(time.Millisecond)
-		}
+		return false
+	}) {
+		t.Fatalf("agent %s never targeted %s", command, pane)
 	}
 }
 
@@ -99,17 +90,11 @@ func r725AwaitCalls(t *testing.T, fake *r27FakeHerdr, command, pane string) {
 // guaranteed to sit inside the claim wait.
 func r725AwaitRoute(t *testing.T, manager *relayBusyManager, lane, pane string) {
 	t.Helper()
-	deadline := time.After(2 * time.Second)
-	for {
-		if observed, known := manager.observedLanePane(lane); known && observed == pane {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("lane=%s never observed pane=%s", lane, pane)
-		default:
-			time.Sleep(time.Millisecond)
-		}
+	if !waitUntil(2*time.Second, func() bool {
+		observed, known := manager.observedLanePane(lane)
+		return known && observed == pane
+	}) {
+		t.Fatalf("lane=%s never observed pane=%s", lane, pane)
 	}
 }
 
@@ -272,7 +257,7 @@ func TestR725InflightRepeatReroutedPaneStillDelivers(t *testing.T) {
 	if counts := manager.RelayDedupeCounts(); counts.Suppressed != 0 {
 		t.Fatalf("the surviving delivery was counted as a suppression: %+v", counts)
 	}
-	r27Await(t, events, "relay.dropped")
+	awaitClientEvent(t, time.Second, events, "relay.dropped")
 }
 
 // The mismatch clause at the in-flight window: a concurrent repeat whose
@@ -675,7 +660,7 @@ func TestR725FailedDeliveryIsRedeliveredNotRecorded(t *testing.T) {
 	}
 	r27WaitStarted(t, fake)
 	close(gate)
-	r27Await(t, events, "relay.delivered")
+	awaitClientEvent(t, time.Second, events, "relay.delivered")
 	if got := *prompts; len(got) != 1 {
 		t.Fatalf("prompts=%q", got)
 	}
@@ -829,7 +814,7 @@ func TestR725DeliveredAckOnlyAfterRecord(t *testing.T) {
 	if got := *prompts; len(got) != 1 {
 		t.Fatalf("prompts=%q", got)
 	}
-	r27Await(t, events, "relay.delivered")
+	awaitClientEvent(t, time.Second, events, "relay.delivered")
 	if ackedBeforeRecord.Load() {
 		t.Fatal("relay.delivered was emitted before the delivered record existed")
 	}
@@ -955,7 +940,7 @@ func TestR725InflightRepeatHeldOldPaneReroutesToNew(t *testing.T) {
 			if rows, err := store.RelayHeldForPane(t.Context(), "pane-old"); err != nil || len(rows) != 0 {
 				t.Fatalf("stale held rows=%+v err=%v", rows, err)
 			}
-			if event := r27Await(t, events, "relay.dropped"); !strings.Contains(string(event.Payload), "lane_rerouted") {
+			if event := awaitClientEvent(t, time.Second, events, "relay.dropped"); !strings.Contains(string(event.Payload), "lane_rerouted") {
 				t.Fatalf("stale row left held without a rerouted drop: %s", event.Payload)
 			}
 		})
