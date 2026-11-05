@@ -145,7 +145,8 @@ type aaTestTransport func(*http.Request) (*http.Response, error)
 func (f aaTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 func TestAASyncCommandArtifact(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\nprintf '%s\\n' '{\"catalog\":[{\"profile\":\"codex-sol\",\"model_id\":\"gpt-6.1-sol\",\"effort\":\"low\",\"grade\":\"B\"}],\"source\":{\"source\":\"server\",\"stale\":false}}'\n"
+	catalog := `{"catalog":[{"profile":"codex-sol","model_id":"gpt-6.1-sol","effort":"low","grade":"B","gate":"default","decided_at":"2026-11-01T00:00:00Z","decided_by":"operator","decided_reason":"reviewed","score":7.50,"benchmark_source":"old","benchmark_annotation":"old"},{"profile":"unknown","model_id":"x","effort":"","grade":"A","gate":"escalation","decided_at":"2026-11-02T00:00:00Z","decided_by":"operator"}],"source":{"source":"server","stale":false}}`
+	script := "#!/bin/sh\nprintf '%s\\n' '" + catalog + "'\n"
 	if e := os.WriteFile(filepath.Join(dir, "pacelever"), []byte(script), 0700); e != nil {
 		t.Fatal(e)
 	}
@@ -174,6 +175,35 @@ func TestAASyncCommandArtifact(t *testing.T) {
 	}
 	if !strings.Contains(string(b), "benchmark_annotation") || !strings.Contains(string(b), `"grade": "B"`) || strings.Contains(out.String()+errs.String()+string(b), "fixture-key") {
 		t.Fatal("artifact or output incorrect")
+	}
+	var before, after struct {
+		Catalog []map[string]json.RawMessage `json:"catalog"`
+	}
+	if json.Unmarshal([]byte(catalog), &before) != nil || json.Unmarshal(b, &after) != nil || len(before.Catalog) != len(after.Catalog) {
+		t.Fatal("invalid catalog artifact")
+	}
+	for i, row := range before.Catalog {
+		for field, value := range row {
+			if field == "benchmark_source" || field == "benchmark_annotation" {
+				continue
+			}
+			if !bytes.Equal(value, after.Catalog[i][field]) {
+				t.Errorf("row %d field %s changed: %s -> %s", i, field, value, after.Catalog[i][field])
+			}
+		}
+		for field := range after.Catalog[i] {
+			if field != "benchmark_source" && field != "benchmark_annotation" {
+				if _, ok := row[field]; !ok {
+					t.Errorf("row %d added field %s", i, field)
+				}
+			}
+		}
+	}
+	if bytes.Equal(before.Catalog[0]["benchmark_source"], after.Catalog[0]["benchmark_source"]) || bytes.Equal(before.Catalog[0]["benchmark_annotation"], after.Catalog[0]["benchmark_annotation"]) {
+		t.Fatal("mapped benchmark fields did not change")
+	}
+	if !reflect.DeepEqual(before.Catalog[1], after.Catalog[1]) {
+		t.Fatal("unmapped row changed")
 	}
 	if !strings.Contains(out.String(), "https://artificialanalysis.ai/") {
 		t.Fatal("attribution missing")
