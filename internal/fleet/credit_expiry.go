@@ -48,8 +48,8 @@ type manualEntry struct {
 // creditBalances reads the current credit-window entry of every pool in
 // pacelever's manual store.
 func (q CLIQuota) creditBalances(ctx context.Context) (map[string]*CreditBalance, error) {
-	r := q.Runner.Run(ctx, Command{Name: q.Binary, Args: []string{"manual", "list"}})
-	if e := check(r, "manual store"); e != nil {
+	r := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: []string{"manual", "list"}}, "manual store", 30*time.Second)
+	if e := checkQuota(r, "manual store"); e != nil {
 		return nil, e
 	}
 	var store struct {

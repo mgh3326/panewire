@@ -104,8 +104,8 @@ type CLIQuota struct {
 func (q CLIQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
 	a := []string{"policy", "launch", r.Profile, "--json"}
 	a = quotaArgs(a, r)
-	result := q.Runner.Run(ctx, Command{Name: q.Binary, Args: a})
-	if e := check(result, "quota catalog"); e != nil {
+	result := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: a}, "quota catalog", 15*time.Second)
+	if e := checkQuota(result, "quota catalog"); e != nil {
 		return Launch{}, e
 	}
 	var l Launch
@@ -133,13 +133,14 @@ func (q CLIQuota) Gate(ctx context.Context, r QuotaRequest) (string, error) {
 	if r.GateProfile != "" {
 		name = r.GateProfile
 	}
-	args := quotaArgs([]string{"gate", "-m", name}, r)
+	args := quotaArgs([]string{"gate", "-m", name, "--json"}, r)
 	if r.AccountKey != "" {
-		args = append(args, "--account-key", r.AccountKey, "--json")
+		args = append(args, "--account-key", r.AccountKey)
 	}
-	x := q.Runner.Run(ctx, Command{Name: q.Binary, Args: args})
+	x := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: args}, "quota gate", 30*time.Second)
 	if x.Code == quotaGateRoleDenied {
-		return "", fail(exitSeatRefused, "quota role-denied (gate exit 5 → panewire exit 77): %s", x.Err)
+		err := checkQuota(x, "quota role-denied (gate exit 5 → panewire exit 77)")
+		return "", fail(exitSeatRefused, "%s", err)
 	}
 	if r.AccountKey != "" && (x.Code == 0 || x.Code == quotaGateBlocked) {
 		receipt, err := readAccountGateReceipt(x, r.AccountKey)
@@ -160,7 +161,7 @@ func (q CLIQuota) Gate(ctx context.Context, r QuotaRequest) (string, error) {
 			return "", err
 		}
 	}
-	if e := check(x, "quota gate"); e != nil {
+	if e := checkQuota(x, "quota gate"); e != nil {
 		return "", e
 	}
 	return x.Out, nil
@@ -496,11 +497,8 @@ func (a *App) judgeGate(ctx context.Context, r QuotaRequest, pool string, j quot
 // form is parsed as a fallback. A stale catalog is refused like the launch
 // resolution: grades and models must come from fresh evidence.
 func (q CLIQuota) Catalog(ctx context.Context) ([]CatalogRow, error) {
-	r := q.Runner.Run(ctx, Command{Name: q.Binary, Args: []string{"bench", "catalog", "list", "--json"}})
-	if r.Code != 0 {
-		r = q.Runner.Run(ctx, Command{Name: q.Binary, Args: []string{"bench", "catalog", "list"}})
-	}
-	if e := check(r, "bench catalog"); e != nil {
+	r := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: []string{"bench", "catalog", "list", "--json"}}, "bench catalog", 15*time.Second)
+	if e := checkQuota(r, "bench catalog"); e != nil {
 		return nil, e
 	}
 	out := strings.TrimSpace(r.Out)
@@ -602,8 +600,8 @@ func parseCatalogText(out string) ([]CatalogRow, error) {
 // adapter does not report waste flags or a blocking percentage; the selector
 // degrades those inputs rather than inventing them.
 func (q CLIQuota) Pools(ctx context.Context) (map[string]PoolView, error) {
-	r := q.Runner.Run(ctx, Command{Name: q.Binary, Args: []string{"--json"}})
-	if e := check(r, "quota status"); e != nil {
+	r := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: []string{"--json"}}, "quota status", 30*time.Second)
+	if e := checkQuota(r, "quota status"); e != nil {
 		return nil, e
 	}
 	var doc struct {
