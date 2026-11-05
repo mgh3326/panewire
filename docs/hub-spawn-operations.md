@@ -87,7 +87,11 @@ newest hub operation is `retryable`.
 
 Under `--host auto`, a node's `cwd_unmapped` refusal returns the operation to
 placement, which tries the next candidate. The node answers it before any
-checkout or engine call. A pinned `--host` keeps that refusal as its result.
+checkout or engine call. A first-run refusal (`hooks_review`, `trust_prompt`,
+`omp_setup_wizard`, `auth_unavailable`) does the same once the node verified
+its pane cleanup, and the hub tells `operator-desk` which one-time action the
+host needs ([placement.md](placement.md#first-run-refusals-and-the-desk-notice)).
+A pinned `--host` keeps any of these refusals as its result.
 
 | Status | Meaning |
 | --- | --- |

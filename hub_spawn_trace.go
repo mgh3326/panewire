@@ -21,15 +21,7 @@ const (
 // reporter's sampling/budget. Only accepted spawn operations enter it.
 func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) {
 	h.logSpawnOutcome(task, result)
-	h.spawnTraceOnce.Do(func() {
-		if h.spawnSentry == nil {
-			client, err := sentry.NewClient(spawnSentryOptions(strings.TrimSpace(os.Getenv(crashReportDSNEnv))))
-			if err == nil {
-				h.spawnSentry = client
-			}
-		}
-	})
-	if h.spawnSentry == nil || h.inbox == nil {
+	if h.spawnSentryClient() == nil || h.inbox == nil {
 		return
 	}
 	ctx, done := h.inbox.store.op(h.closeCtx)
@@ -93,6 +85,20 @@ func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) 
 		}
 	}
 	trace.Finish()
+}
+
+// spawnSentryClient is the hub's private Sentry client, built once from the
+// configured DSN; nil when reporting is not configured.
+func (h *HubServer) spawnSentryClient() *sentry.Client {
+	h.spawnTraceOnce.Do(func() {
+		if h.spawnSentry == nil {
+			client, err := sentry.NewClient(spawnSentryOptions(strings.TrimSpace(os.Getenv(crashReportDSNEnv))))
+			if err == nil {
+				h.spawnSentry = client
+			}
+		}
+	})
+	return h.spawnSentry
 }
 
 // spawnOutcomeTarget is the host and profile an outcome is about, falling back
