@@ -90,3 +90,18 @@ func TestHarnessSessionSpawn(t *testing.T) {
 		})
 	}
 }
+
+func TestHarnessSessionMalformedMetadataDoesNotBreakAgentList(t *testing.T) {
+	for _, raw := range []string{`"none"`, `42`, `{"agent":"codex","kind":"id","value":123,"source":"herdr:codex"}`} {
+		t.Run(raw, func(t *testing.T) {
+			agents, err := ParseAgents([]byte(`{"agents":[{"pane_id":"w:p1","agent":"codex","agent_status":"idle","agent_session":` + raw + `}]}`))
+			if err != nil || len(agents) != 1 || agents[0].Status != "idle" {
+				t.Fatalf("agent list: %+v, %v", agents, err)
+			}
+			got := FindHarnessSession(agents, "w:p1", "codex")
+			if got.ID != "unknown" || got.Source != "unavailable" {
+				t.Fatalf("session: %+v", got)
+			}
+		})
+	}
+}

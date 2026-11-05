@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 func TestJobCompletionHarnessSession(t *testing.T) {
@@ -19,12 +21,13 @@ func TestJobCompletionHarnessSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(events, "00001-job.spawned.json"), []byte(spawn), 0600); err != nil {
 		t.Fatal(err)
 	}
-	bin := filepath.Join(root, "herdr")
+	bin := filepath.Join(root, "custom-herdr")
 	script := "#!/bin/sh\nif [ \"$HERDR_SESSION\" != fleet ]; then exit 1; fi\nprintf '%s' '{\"agents\":[{\"pane_id\":\"w:p1\",\"agent\":\"codex\",\"agent_session\":{\"agent\":\"codex\",\"kind\":\"id\",\"value\":\"late-id\",\"source\":\"herdr:codex\"}}]}'\n"
 	if err := os.WriteFile(bin, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", root)
+	t.Setenv("HERDR_BIN", bin)
 	report := filepath.Join(root, "report.md")
 	if err := os.WriteFile(report, []byte("done\n"), 0600); err != nil {
 		t.Fatal(err)
@@ -52,5 +55,21 @@ func TestJobCompletionHarnessSession(t *testing.T) {
 	session := jobHarnessSession(events, "w:p1")
 	if session == nil || session.ID != "unknown" || session.Source != "unavailable" {
 		t.Fatalf("fallback: %+v", session)
+	}
+}
+
+func TestJobCompletionHarnessSessionJSONBytes(t *testing.T) {
+	dir := t.TempDir()
+	session := fleet.HarnessSession{Kind: "omp", ID: "/한<&.jsonl", Source: "herdr:omp"}
+	if err := writeJobRecord(dir, "job.completed", []jobField{{"harness_session", session}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "00001-job.completed.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `{"harness_session":{"kind":"omp","id":"/\ud55c<&.jsonl","source":"herdr:omp"}}` + "\n"
+	if string(data) != want {
+		t.Fatalf("record = %s; want %s", data, want)
 	}
 }
