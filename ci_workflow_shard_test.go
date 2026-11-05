@@ -57,7 +57,7 @@ func TestCIRequiredCheckGatesVetAndShards(t *testing.T) {
 	if gate.Name != "" || !slices.Equal(gate.Strategy.Matrix["os"], []string{"ubuntu-latest"}) {
 		t.Fatalf("test must keep the check name `test (ubuntu-latest)`: name=%q matrix=%v", gate.Name, gate.Strategy.Matrix)
 	}
-	for _, need := range []string{"vet", "shard"} {
+	for _, need := range []string{"vet", "shard", "postgres"} {
 		if !slices.Contains(gate.Needs, need) {
 			t.Errorf("test must need %s", need)
 		}
@@ -69,19 +69,23 @@ func TestCIRequiredCheckGatesVetAndShards(t *testing.T) {
 		t.Fatalf("test gate has %d steps", len(gate.Steps))
 	}
 	for _, tc := range []struct {
-		vet, shard string
-		ok         bool
+		vet, shard, postgres string
+		ok                   bool
 	}{
-		{"success", "success", true},
-		{"failure", "success", false},
-		{"success", "failure", false},
-		{"success", "cancelled", false},
-		{"success", "skipped", false},
-		{"skipped", "success", false},
-		{"", "success", false},
+		{"success", "success", "skipped", true},
+		// An inbox-store PR runs postgres, and its failure fails the check.
+		{"success", "success", "success", true},
+		{"success", "success", "failure", false},
+		{"success", "success", "cancelled", false},
+		{"failure", "success", "skipped", false},
+		{"success", "failure", "skipped", false},
+		{"success", "cancelled", "skipped", false},
+		{"success", "skipped", "skipped", false},
+		{"skipped", "success", "skipped", false},
+		{"", "success", "skipped", false},
 	} {
 		cmd := exec.Command("bash", "-e", "-c", gate.Steps[0].Run)
-		cmd.Env = append(os.Environ(), "VET_RESULT="+tc.vet, "SHARD_RESULT="+tc.shard)
+		cmd.Env = append(os.Environ(), "VET_RESULT="+tc.vet, "SHARD_RESULT="+tc.shard, "POSTGRES_RESULT="+tc.postgres)
 		out, err := cmd.CombinedOutput()
 		if (err == nil) != tc.ok {
 			t.Errorf("%+v: %s %v", tc, out, err)
