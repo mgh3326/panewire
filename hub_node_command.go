@@ -268,6 +268,13 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 	case "node_lost":
 		status = http.StatusServiceUnavailable
 	}
+	if body.Op == nodeCommandJobResult {
+		encoded, err := marshalNodeCommandJSON(response)
+		if err == nil {
+			writeJSONBytes(writer, status, append(encoded, '\n'))
+			return
+		}
+	}
 	writeJSON(writer, status, response)
 }
 
@@ -277,7 +284,7 @@ func (h *HubServer) authorizeNodeCommand(request *http.Request, op, machine stri
 	if nodeCommandReapOnly(op) && h.authenticate(request).kind == hubCallerOperator {
 		return hubAccessForbidden
 	}
-	if op == nodeCommandWorktreeList {
+	if op == nodeCommandWorktreeList || op == nodeCommandJobResult {
 		op = nodeCommandWorktreeInspect
 	}
 	return h.authorize(request, hubScopeNodeCommand+op, machine)

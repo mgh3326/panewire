@@ -223,8 +223,35 @@ func (connect nodeReapConnect) run(stdout, stderr io.Writer, deps hubCLIDeps, ca
 		}
 		return ExitOK
 	}
+	if _, ok := result.(nodeJobResult); ok {
+		encoded, err := marshalNodeCommandJSON(result)
+		if err != nil {
+			return ExitInternal
+		}
+		if _, err = stdout.Write(append(encoded, '\n')); err != nil {
+			return ExitInternal
+		}
+		return ExitOK
+	}
 	if err := json.NewEncoder(stdout).Encode(result); err != nil {
 		return ExitInternal
 	}
 	return ExitOK
+}
+
+func runNodeJobResultCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
+	flags := flag.NewFlagSet("panewire node job-result", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	connect := nodeReapFlags(flags)
+	connect.allowOperator = true
+	flags.StringVar(connect.machine, "host", "", "machine hosting the job")
+	job := flags.String("job", "", "job id")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || !validNodeJobName(*job) {
+		return ExitUsage
+	}
+	return connect.run(stdout, stderr, deps, func(ctx context.Context, client *NodeReapClient, machine string) (any, error) {
+		var result nodeJobResult
+		err := client.command(ctx, machine, nodeCommandJobResult, nodeJobResultArgs{Job: *job}, &result)
+		return result, err
+	})
 }
