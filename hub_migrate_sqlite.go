@@ -37,6 +37,10 @@ type hubInboxSnapshotItem struct {
 	key  string
 	item laneInboxItem
 	raw  string
+	// sender and eventID are the ack-state lookup's columns; they are not
+	// part of laneInboxItem, whose JSON is the public item shape.
+	sender  string
+	eventID string
 }
 
 type hubInboxSnapshotBatch struct {
@@ -260,14 +264,19 @@ func readHubInboxSnapshotTx(ctx context.Context, tx *sql.Tx, dialect laneInboxDi
 			return snapshot, errors.New("spawn ownership exists: keep the current backend; the inbox-only migrator cannot transfer spawn reservations, receipts or tombstones")
 		}
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT event_key,`+laneInboxColumns+` FROM lane_inbox ORDER BY id`)
+	rows, err := tx.QueryContext(ctx, `SELECT event_key,`+laneInboxColumns+`,sender,event_id FROM lane_inbox ORDER BY id`)
 	if err != nil {
 		return snapshot, err
 	}
 	for rows.Next() {
 		var i hubInboxSnapshotItem
 		var stored string
-		err := rows.Scan(&stored, &i.item.ID, &i.item.Lane, &i.item.Kind, &i.item.Class, &i.raw, &i.item.CreatedAt, &i.item.ReadAt, &i.item.AckedAt, &i.item.DueAt, &i.item.DigestAt, &i.item.DigestBatch, &i.item.EscalationBatch, &i.item.MustAck, &i.item.HoldUntil, &i.item.DeliveredAt)
+		err := rows.Scan(&stored, &i.item.ID, &i.item.Lane, &i.item.Kind, &i.item.Class, &i.raw, &i.item.CreatedAt, &i.item.ReadAt, &i.item.AckedAt, &i.item.DueAt, &i.item.DigestAt, &i.item.DigestBatch, &i.item.EscalationBatch, &i.item.MustAck, &i.item.HoldUntil, &i.item.DeliveredAt, &i.sender, &i.eventID)
+		if !validLaneEventID(i.eventID) {
+			// A backfilled SQLite id may hold what Postgres text cannot, and
+			// the lookup would never accept it.
+			i.eventID = ""
+		}
 		if err == nil {
 			// Snapshots hold the raw key, so the two backends compare.
 			i.key, err = laneInboxKeyFromStored(dialect, stored)
@@ -416,8 +425,8 @@ func copyHubInboxSnapshot(ctx context.Context, db *sql.DB, snapshot hubInboxSnap
 		if i.item.MustAck {
 			mustAck = 1
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack,hold_until,delivered_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)`,
-			i.item.ID, laneInboxStoredKey(laneInboxPostgres, i.key), i.item.Lane, i.item.Kind, i.item.Class, i.raw, i.item.CreatedAt, i.item.ReadAt, i.item.AckedAt, i.item.DueAt, i.item.DigestAt, i.item.DigestBatch, i.item.EscalationBatch, mustAck, i.item.HoldUntil, i.item.DeliveredAt); err != nil {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,acked_at,due_at,digest_at,digest_batch,escalation_batch,must_ack,hold_until,delivered_at,sender,event_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)`,
+			i.item.ID, laneInboxStoredKey(laneInboxPostgres, i.key), i.item.Lane, i.item.Kind, i.item.Class, i.raw, i.item.CreatedAt, i.item.ReadAt, i.item.AckedAt, i.item.DueAt, i.item.DigestAt, i.item.DigestBatch, i.item.EscalationBatch, mustAck, i.item.HoldUntil, i.item.DeliveredAt, i.sender, i.eventID); err != nil {
 			return false, err
 		}
 	}

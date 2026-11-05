@@ -33,7 +33,7 @@ func hubMigrateSQLiteSource(t *testing.T, pendingWAL bool) string {
 	}
 	now := time.UnixMilli(1_700_000_000_000).UTC()
 	for _, key := range []string{"i1", "i2"} {
-		if _, err := s.put(key, "lane-a", "lane.event", "interrupt", quietEvent(key, "now"), now, 0, time.Second); err != nil {
+		if _, err := s.putFrom("host-a", key, "lane-a", "lane.event", "interrupt", quietEvent(key, "now"), now, 0, time.Second); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -304,6 +304,9 @@ func testHubMigrateSQLiteCopiesToPostgres(t *testing.T, pendingWAL bool) {
 	copied, schema := hubInboxTargetSnapshot(t, dsn)
 	if !reflect.DeepEqual(copied, source) {
 		t.Fatalf("target rows differ from the source:\ngot  %+v\nwant %+v", copied, source)
+	}
+	if first := copied.items[0]; first.sender != "host-a" || first.eventID != "i1" {
+		t.Fatalf("ack-state columns not copied: sender=%q event_id=%q", first.sender, first.eventID)
 	}
 
 	// Read and ack state behave the same on the target: the unacked READY is

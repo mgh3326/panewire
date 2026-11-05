@@ -73,6 +73,17 @@ func TestInboxDaemonParity(t *testing.T) {
 			fmt.Fprint(w, "{\"acked\":1}\n")
 		case "/v1/inbox/count":
 			fmt.Fprint(w, "{\"lane-a\":1}\n")
+		case "/v1/inbox/ack-state":
+			if r.URL.Query().Get("lane") != "" {
+				w.WriteHeader(400)
+				return
+			}
+			if r.URL.Query().Get("event_id") == "evt-missing" {
+				w.WriteHeader(404)
+				fmt.Fprint(w, "{\"events\":[],\"not_found\":[\"evt-missing\"]}\n")
+				return
+			}
+			fmt.Fprint(w, "{\"events\":[{\"event_id\":\"evt-1\",\"acked\":true,\"acked_at\":\"2026-11-05T00:00:00Z\"}],\"not_found\":[]}\n")
 		case "/v1/inbox/wait":
 			if r.URL.Query().Get("lane") == "lane-empty" {
 				d, _ := time.ParseDuration(r.URL.Query().Get("timeout"))
@@ -102,7 +113,7 @@ func TestInboxDaemonParity(t *testing.T) {
 	daemon := NewDaemon(Config{Hub: HubDaemonConfig{Client: client}, Logger: slog.New(slog.NewTextHandler(&logs, nil))})
 	socket := inboxDaemonSocket(t, daemon)
 	deps := hubCLIDeps{AllowInsecureForTests: true, SocketPath: socket}
-	cases := [][]string{{"list", "--lane", "lane-a", "--unread"}, {"read", "1", "--lane", "lane-a"}, {"ack", "1", "--lane", "lane-a"}, {"count", "--lane", "lane-a"}, {"wait", "--lane", "lane-a", "--timeout", "1s"}, {"wait", "--lane", "lane-empty", "--timeout", "25ms"}, {"list", "--lane", "lane-denied"}}
+	cases := [][]string{{"list", "--lane", "lane-a", "--unread"}, {"read", "1", "--lane", "lane-a"}, {"ack", "1", "--lane", "lane-a"}, {"count", "--lane", "lane-a"}, {"wait", "--lane", "lane-a", "--timeout", "1s"}, {"wait", "--lane", "lane-empty", "--timeout", "25ms"}, {"list", "--lane", "lane-denied"}, {"status", "--event-id", "evt-1"}, {"status", "--event-id", "evt-missing"}}
 	for _, args := range cases {
 		for _, jsonMode := range []bool{false, true} {
 			args := append([]string(nil), args...)
@@ -124,10 +135,22 @@ func TestInboxDaemonParity(t *testing.T) {
 			if strings.Contains(strings.Join(args, " "), "lane-denied") && localCode != ExitDeliveryFailure {
 				t.Errorf("refusal: %d", localCode)
 			}
+			if strings.Contains(strings.Join(args, " "), "evt-missing") && localCode != ExitPartial {
+				t.Errorf("status not found: %d", localCode)
+			}
+			if strings.Contains(strings.Join(args, " "), "evt-1") && localCode != ExitOK {
+				t.Errorf("status: %d %q", localCode, localErr.String())
+			}
 		}
 	}
 	if nodeRequests.Load() == 0 {
 		t.Fatal("daemon did not forward node CF credentials")
+	}
+	// An ambient lane must not leak into status: the hub rejects a lane there.
+	t.Setenv("PANEWIRE_LANE", "lane-a")
+	var ambientOut, ambientErr bytes.Buffer
+	if code := runInboxCLI([]string{"status", "--event-id", "evt-1", "--json"}, &ambientOut, &ambientErr, deps); code != ExitOK {
+		t.Errorf("status with ambient lane: %d %q %q", code, ambientOut.String(), ambientErr.String())
 	}
 	conn, err := net.Dial("unix", socket)
 	if err != nil {
