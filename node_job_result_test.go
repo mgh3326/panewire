@@ -50,7 +50,10 @@ func TestNodeJobResultFiles(t *testing.T) {
 	if err := os.Symlink(outside, filepath.Join(dir, "findings.json")); err != nil {
 		t.Fatal(err)
 	}
-	got, _ = client.nodeJobResult(nodeJobResultArgs{Job: "job-a"})
+	got, code := client.nodeJobResult(nodeJobResultArgs{Job: "job-a"})
+	if code != "" {
+		t.Fatalf("symlink: expected missing, got error %q", code)
+	}
 	if got.(nodeJobResult).FindingsError != "missing" {
 		t.Fatal(got)
 	}
