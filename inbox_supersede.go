@@ -13,6 +13,17 @@ var inboxCausePattern = regexp.MustCompile(`^(?:pr:[A-Za-z0-9_.-]+/[A-Za-z0-9_.-
 func validInboxCause(cause string) bool {
 	return cause == "" || (len(cause) <= 256 && inboxCausePattern.MatchString(cause))
 }
+
+// laneEventRefLimit bounds the --pr and --head fields of a lane event, the
+// same bytes the hub's lane.event decoder accepts for them and for cause.
+const laneEventRefLimit = 256
+
+// validLaneEventRef reports whether a lane event's pr or head value would pass
+// the hub decode: at most laneEventRefLimit bytes, no CR, LF or NUL.
+func validLaneEventRef(value string) bool {
+	return len(value) <= laneEventRefLimit && !strings.ContainsAny(value, "\r\n\x00")
+}
+
 func nullableCause(cause string) any {
 	if cause == "" {
 		return nil

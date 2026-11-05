@@ -171,7 +171,7 @@ func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 		return hubJobEventPayload{}, false
 	}
 	for key, dst := range map[string]*string{"cause": &event.Cause, "head": &event.Head, "pr": &event.PR} {
-		if raw, ok := fields[key]; ok && (json.Unmarshal(raw, dst) != nil || len(*dst) > 256 || strings.ContainsAny(*dst, "\r\n\x00")) {
+		if raw, ok := fields[key]; ok && (json.Unmarshal(raw, dst) != nil || !validLaneEventRef(*dst)) {
 			return hubJobEventPayload{}, false
 		}
 	}

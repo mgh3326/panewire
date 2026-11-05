@@ -3,7 +3,9 @@ package panewire
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -171,5 +173,76 @@ func TestInboxSupersededReadCLI(t *testing.T) {
 	read := inboxAckCLI(t, h, "read", fmt.Sprint(a.ID), "--lane", "lane-a")
 	if !strings.Contains(read, fmt.Sprintf("superseded by #%d", b.ID)) {
 		t.Fatalf("read=%q", read)
+	}
+}
+
+// A lane event skips the job-field normalization, so emit must refuse a --pr or
+// --head the hub would drop, and must do so before any event file is written.
+func TestInboxEmitLaneEventRejectsBadPRAndHead(t *testing.T) {
+	for _, tc := range []struct {
+		flag, value string
+	}{
+		{"--head", strings.Repeat("a", 257)},
+		{"--head", "abc\ndef"},
+		{"--head", "abc\x00"},
+		{"--pr", strings.Repeat("p", 257)},
+		{"--pr", "https://example.test/pull/1\r\n"},
+	} {
+		root := t.TempDir()
+		args := []string{"--kind", "lane.event", "--lane", "lane-a", "--event-id", "id", "--text", "hello", tc.flag, tc.value, "--inbox-root", root}
+		var errout bytes.Buffer
+		if code := runEmitCLI(args, &bytes.Buffer{}, &errout, CLIConfig{SocketPath: filepath.Join(t.TempDir(), "absent")}); code != ExitUsage || !strings.Contains(errout.String(), tc.flag) {
+			t.Fatalf("%s %q: code=%d stderr=%s", tc.flag, tc.value, code, errout.String())
+		}
+		if events := scanHubLaneEventsWithin(root, 0); len(events) != 0 {
+			t.Fatalf("%s %q: event file written: %+v", tc.flag, tc.value, events)
+		}
+	}
+	// The longest accepted value still records and passes the hub decode.
+	root := t.TempDir()
+	long := strings.Repeat("a", laneEventRefLimit)
+	args := []string{"--kind", "lane.event", "--lane", "lane-a", "--event-id", "id", "--text", "hello", "--head", long, "--pr", long, "--inbox-root", root}
+	if code := runEmitCLI(args, &bytes.Buffer{}, &bytes.Buffer{}, CLIConfig{SocketPath: filepath.Join(t.TempDir(), "absent")}); code != ExitOK {
+		t.Fatal(code)
+	}
+	events := scanHubLaneEventsWithin(root, 0)
+	if len(events) != 1 {
+		t.Fatalf("scan=%+v", events)
+	}
+	wire, ok := (&HubClient{}).relayEventForSend(events[0])
+	if !ok {
+		t.Fatal("event not sent")
+	}
+	if event, ok := decodeHubLaneEventPayload(wire.Payload); !ok || event.Head != long || event.PR != long {
+		t.Fatalf("hub dropped an accepted value: %s", wire.Payload)
+	}
+}
+
+// job.completed carries --head to the hub: its PR supersession rule needs a
+// non-empty head, and an empty head leaves the payload unchanged.
+func TestInboxJobCompletedRelaySendsHead(t *testing.T) {
+	for _, head := range []string{"abc123", ""} {
+		root := t.TempDir()
+		args := []string{"--kind", "job.completed", "--job", "job-1", "--owner-lane", "lane-a", "--label", "worker", "--host", "host-a", "--report", "report.md", "--head", head, "--inbox-root", root}
+		if code := runEmitCLI(args, io.Discard, io.Discard, CLIConfig{SocketPath: filepath.Join(t.TempDir(), "absent.sock")}); code != ExitOK {
+			t.Fatal(code)
+		}
+		events := scanHubRelayEvents(root)
+		if len(events) != 1 {
+			t.Fatalf("scan=%+v", events)
+		}
+		wire, ok := (&HubClient{completedJobs: map[string]uint64{}}).relayEventForSend(events[0])
+		if !ok {
+			t.Fatal("event not sent")
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(wire.Payload, &fields); err != nil {
+			t.Fatal(err)
+		}
+		_, has := fields["head"]
+		event, ok := decodeHubJobCompletionPayload(wire.Payload)
+		if !ok || event.Head != head || has != (head != "") {
+			t.Fatalf("head %q: wire=%s decoded=%+v", head, wire.Payload, event)
+		}
 	}
 }

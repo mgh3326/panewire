@@ -2109,6 +2109,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 	payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 	payload = relayPayloadNotifyType(payload, job.NotifyType)
 	payload = relayPayloadOptionalString(payload, "cause", job.Cause)
+	payload = relayPayloadOptionalString(payload, "head", job.Head)
 	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 }
 

@@ -177,6 +177,17 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 			fmt.Fprintln(stderr, "emit: invalid --text")
 			return ExitUsage
 		}
+		// Lane events skip the job-field normalization, so an oversized or
+		// newline-bearing value would be stored, sent raw and dropped by the hub
+		// while the command still reported success.
+		if !validLaneEventRef(*pr) {
+			fmt.Fprintln(stderr, "emit: invalid --pr")
+			return ExitUsage
+		}
+		if !validLaneEventRef(*head) {
+			fmt.Fprintln(stderr, "emit: invalid --head")
+			return ExitUsage
+		}
 		limit := laneEventTextLimit
 		if *sink {
 			limit = laneEventTextLimitSink
