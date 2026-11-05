@@ -211,7 +211,9 @@ the job cap, with a free task slot):
 
 1. **All loaded.** If the best usable score is under 15, no host is a good
    place. `reason` is `all_loaded` and the decision goes to the host with the
-   highest `mem` term (ties: higher score, then policy order).
+   highest measured `mem` term (ties: higher score, then policy order). A host
+   that reports no memory never counts as the one with the most; if no usable
+   host reports it, the policy-order winner keeps the decision.
 2. **Hysteresis.** Otherwise the policy-order winner keeps the decision unless
    the best other usable host scores at least 1.25 times as much. Then `reason`
    is `challenger` and that host takes it. A rival that is merely ahead does

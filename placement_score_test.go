@@ -11,7 +11,13 @@ import (
 )
 
 func scoredCandidate(machine string, score, mem float64) PlacementCandidate {
-	return PlacementCandidate{Machine: machine, Score: score, Signals: &PlacementSignals{Terms: &PlacementTerms{CPU: 1, Mem: mem, IO: 1, Load: 1, Jobs: 1}}}
+	return PlacementCandidate{Machine: machine, Score: score, Signals: &PlacementSignals{MemAvailable: &mem, Terms: &PlacementTerms{CPU: 1, Mem: mem, IO: 1, Load: 1, Jobs: 1}}}
+}
+
+// unmeasuredCandidate is a host that reports no memory: its mem term reads 1
+// only because a missing signal is left out of the product.
+func unmeasuredCandidate(machine string, score float64) PlacementCandidate {
+	return PlacementCandidate{Machine: machine, Score: score, Signals: &PlacementSignals{Terms: &PlacementTerms{CPU: 1, Mem: 1, IO: 1, Load: 1, Jobs: 1}}}
 }
 
 // Acceptance 2: the policy-order winner keeps the decision unless a challenger
@@ -70,6 +76,16 @@ func TestPlacementAllLoadedChoosesHighestMemTerm(t *testing.T) {
 	usable = []PlacementCandidate{scoredCandidate("first", 5, .5), scoredCandidate("second", 9, .5), scoredCandidate("third", 9, .5)}
 	if got, reason := k.decide(usable, 0); got != 1 || reason != "all_loaded" {
 		t.Fatalf("decide=%d %q", got, reason)
+	}
+	// A host with no memory reading never beats a measured one, however low.
+	usable = []PlacementCandidate{unmeasuredCandidate("first", 14), scoredCandidate("second", 9, .05)}
+	if got, reason := k.decide(usable, 0); got != 1 || reason != "all_loaded" {
+		t.Fatalf("decide=%d %q, want the measured host", got, reason)
+	}
+	// With no measurement anywhere the policy-order winner stays.
+	usable = []PlacementCandidate{unmeasuredCandidate("first", 3), unmeasuredCandidate("second", 9)}
+	if got, reason := k.decide(usable, 0); got != 0 || reason != "all_loaded" {
+		t.Fatalf("decide=%d %q, want policy order", got, reason)
 	}
 	// One host at 15 is enough: the normal rules apply.
 	usable = []PlacementCandidate{scoredCandidate("first", 14, .2), scoredCandidate("second", 15, .9)}

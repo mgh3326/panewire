@@ -168,25 +168,39 @@ func (k placementScoreK) scoreBase(free float64, bridgedJobs int, power float64)
 // the policy-order winner). It returns the index of the candidate that takes
 // the decision and the reason: "" keeps the winner, "all_loaded" means no
 // usable host scored allLoadedBelow and the decision went to the one with the
-// most free memory, "challenger" means a rival scored hysteresis times the
+// most free measured memory, "challenger" means a rival scored hysteresis times the
 // winner.
 func (k placementScoreK) decide(usable []PlacementCandidate, winner int) (int, string) {
 	best := math.Inf(-1)
 	for _, c := range usable {
 		best = math.Max(best, c.Score)
 	}
-	mem := func(c PlacementCandidate) float64 {
-		if c.Signals != nil && c.Signals.Terms != nil {
-			return c.Signals.Terms.Mem
+	// A host that reports no memory has an unknown mem term, not a free one:
+	// the all-loaded pick prefers a measured reading, and falls back to the
+	// policy-order winner when no host has one.
+	mem := func(c PlacementCandidate) (float64, bool) {
+		if c.Signals != nil && c.Signals.Terms != nil && c.Signals.MemAvailable != nil {
+			return c.Signals.Terms.Mem, true
 		}
-		return 1
+		return 0, false
 	}
 	if best < k.allLoadedBelow {
-		pick := 0
+		pick := -1
 		for i, c := range usable {
-			if m, pm := mem(c), mem(usable[pick]); m > pm || (m == pm && c.Score > usable[pick].Score) {
+			m, known := mem(c)
+			if !known {
+				continue
+			}
+			if pick < 0 {
+				pick = i
+				continue
+			}
+			if pm, _ := mem(usable[pick]); m > pm || (m == pm && c.Score > usable[pick].Score) {
 				pick = i
 			}
+		}
+		if pick < 0 {
+			pick = winner
 		}
 		return pick, "all_loaded"
 	}
