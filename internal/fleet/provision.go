@@ -83,7 +83,7 @@ func (a *App) workspaceTrust(ctx context.Context, s Spawn, seat Seat, env []stri
 		// The .wrk.lock suffix is shared with the retired spawner so
 		// concurrently deployed binaries still serialize on the same file;
 		// rename only after every host has drained its old processes.
-		lock, e := secureOpen(path+".wrk.lock", true)
+		lock, e := secureOpen(path+".wrk.lock", true, a.warn)
 		if e != nil {
 			return e
 		}
@@ -134,7 +134,7 @@ func (a *App) mergeStore(ctx context.Context, path string, required bool, mutate
 		return e
 	}
 	// See above: the lock name stays .wrk.lock for one release.
-	lock, e := secureOpen(path+".wrk.lock", true)
+	lock, e := secureOpen(path+".wrk.lock", true, a.warn)
 	if e != nil {
 		return e
 	}
