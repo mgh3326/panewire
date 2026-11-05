@@ -191,6 +191,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if e := a.putJobRecord(ctx, id, rec); e != nil {
 		a.jobRecordFailed(ctx, id, state, e)
 	}
+	a.recordJobUsage(ctx, j, false)
 	p := map[string]any{"report": *report, "report_sha256": digest, "question": *question, "owner_lane": j.Owner, "parent_lane": j.Parent, "label": j.Label, "pane_id": j.Pane, "document": doc}
 	if late {
 		p["late"] = true
