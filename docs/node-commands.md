@@ -71,7 +71,7 @@ A connection that has died unnoticed answers `node_lost` or `node_timeout`.
 
 ## Ops
 
-All validation is shared by hub and node. Every listed argument is required
+All validation is shared by hub and node. Except for the optional `worktree.list` cursor and limit, every listed argument is required
 and must not be null — a zero value such as `write:false` or
 `merged_after:0` has to be stated, never implied by omission. `pane_id` is
 `^[A-Za-z0-9._:-]{1,128}$`; `name` is a single safe path segment (no `/`,
@@ -201,6 +201,28 @@ Otherwise:
 fragment, and an scp-style remote (`[user[:secret]@]host:path`) loses
 everything up to its last `@` before the first `/`, so a token embedded in
 either form never leaves it.
+
+### `worktree.list`
+
+`args: {common, cursor?, limit?}`. `common` is an absolute path to the common
+Git directory or main checkout. `limit` is 1 through 100 and defaults to 50.
+The node sorts worktrees by path and returns `worktrees`, `total`, and
+`next_cursor`. Each row has `path`, `branch`, `head`, `detached`, and `status`.
+Status contains `dirty`, `untracked`, and `ignored`; `error` is present when
+status cannot be read. Dirty includes tracked changes and untracked entries.
+Ignored and untracked counts follow Git's porcelain output, including collapsed
+directories. Missing worktrees remain in the list with a status error.
+
+A cursor is valid only for the same repository snapshot and node process. If
+Git's worktree list changes or the node restarts, start again without a cursor.
+The node may return fewer than `limit` rows to keep the result under 28 KiB.
+The `worktree.inspect` scope authorizes this operation on the same machines.
+Status uses Git with optional locks disabled and refuses symlinked paths.
+
+`panewire node worktree-list --hub-url <url> --hub-token-env <env> --host <machine> --common <path> [--all]`
+prints one JSON object per worktree. Without `--all`, it prints the first page;
+with `--all`, it reads every page. The optional `--hub-cf-env` flag supplies
+Cloudflare Access credentials.
 
 ### `worktree.prepare`
 

@@ -28,6 +28,7 @@ const (
 	nodeCommandPaneClose       = "pane.close"
 	nodeCommandPaneCapture     = "pane.capture"
 	nodeCommandWorktreeInspect = "worktree.inspect"
+	nodeCommandWorktreeList    = "worktree.list"
 	nodeCommandWorktreePrepare = "worktree.prepare"
 	nodeCommandWorktreeRemove  = "worktree.remove"
 	nodeCommandQuotaRefresh    = "quota.refresh"
@@ -66,7 +67,7 @@ var (
 func knownNodeCommandOp(op string) bool {
 	switch op {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
-		nodeCommandWorktreeInspect, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
+		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
 		nodeCommandQuotaRefresh, nodeCommandJobDone:
 		return true
 	}
@@ -178,6 +179,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandPaneRead:        {"pane_id", "name", "cwd", "tail_lines"},
 	nodeCommandJobDone:         {"job", "report"},
 	nodeCommandWorktreeInspect: {"cwd"},
+	nodeCommandWorktreeList:    {"common"},
 	nodeCommandWorktreePrepare: {"origin", "mode", "branch", "sha", "fetch", "dir"},
 	nodeCommandWorktreeRemove:  {"cwd", "expect_head", "base", "regenerable"},
 	nodeCommandQuotaRefresh:    {"pool"},
@@ -212,7 +214,8 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	names, known := nodeCommandArgFields[op]
 	optionalKind := op == nodeCommandPaneRead && nodeCommandHasFields(raw, append(append([]string(nil), names...), "kind"))
 	optionalDetached := op == nodeCommandWorktreeRemove && nodeCommandHasFields(raw, append(append([]string(nil), names...), "detached"))
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached) {
+	optionalList := op == nodeCommandWorktreeList && nodeWorktreeListFields(raw)
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalList) {
 		return nil, false
 	}
 	switch op {
@@ -237,6 +240,10 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandWorktreeInspect:
 		var args nodeWorktreeInspectArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeCommandPath(args.Cwd)
+	case nodeCommandWorktreeList:
+		var args nodeWorktreeListArgs
+		valid := decodeNodeCommandStrict(raw, &args) && validNodeCommandPath(args.Common) && (args.Limit == nil || (*args.Limit >= 1 && *args.Limit <= 100))
+		return args, valid
 	case nodeCommandWorktreePrepare:
 		var args nodeWorktreePrepareArgs
 		if !decodeNodeCommandStrict(raw, &args) {
@@ -307,6 +314,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandWorktreeInspect:
 		var result nodeWorktreeInspectResult
 		valid = decodeNodeCommandStrict(raw, &result)
+		target = result
+	case nodeCommandWorktreeList:
+		var result nodeWorktreeListResult
+		valid = decodeNodeCommandStrict(raw, &result) && result.Worktrees != nil && result.Total >= len(result.Worktrees)
 		target = result
 	case nodeCommandWorktreePrepare:
 		var result nodeWorktreePrepareResult
@@ -464,6 +475,8 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		return client.nodeJobDone(ctx, args)
 	case nodeWorktreeInspectArgs:
 		return nodeWorktreeInspect(ctx, client.nodeGitRunner(), args.Cwd), ""
+	case nodeWorktreeListArgs:
+		return nodeWorktreeList(ctx, client.nodeGitRunner(), args)
 	case nodeWorktreePrepareArgs:
 		return client.nodeWorktreePrepare(ctx, args)
 	case nodeWorktreeRemoveArgs:
