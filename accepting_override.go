@@ -1,24 +1,74 @@
 package panewire
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 )
 
 const acceptingOverrideAuto = "auto"
 
+type acceptingOverride struct {
+	Mode                string `json:"mode"`
+	Containment         string `json:"containment,omitempty"`
+	ContainmentVerified bool   `json:"containment_verified"`
+}
+
+func (o *acceptingOverride) UnmarshalJSON(b []byte) error {
+	var legacy string
+	if json.Unmarshal(b, &legacy) == nil {
+		o.Mode = legacy
+		return nil
+	}
+	type plain acceptingOverride
+	return json.Unmarshal(b, (*plain)(o))
+}
+
 type acceptingOverrideFile struct {
-	Overrides map[string]string `json:"overrides"`
+	Overrides    map[string]acceptingOverride    `json:"overrides"`
+	Containments map[string]acceptingContainment `json:"containments,omitempty"`
+}
+
+type acceptingContainment struct {
+	Containment         string `json:"containment"`
+	ContainmentVerified bool   `json:"containment_verified"`
+}
+
+var containmentPattern = regexp.MustCompile(`^hk:[1-9][0-9]{0,8}$`)
+
+func (h *HubServer) verifyContainment(ctx context.Context, containment string) (bool, int) {
+	if h.handoffkeep == nil {
+		return false, 0
+	}
+	id, _ := strconv.ParseInt(containment[3:], 10, 64)
+	status, payload, err := h.handoffkeep.do(ctx, http.MethodGet, h.handoffkeep.endpoint("/v1/tasks/"+strconv.FormatInt(id, 10)), nil)
+	if err != nil {
+		return false, 0
+	}
+	if status == http.StatusNotFound {
+		return false, http.StatusNotFound
+	}
+	var task assistantTask
+	if status != http.StatusOK || json.Unmarshal(payload, &task) != nil || task.ID != id || task.State == "" {
+		return false, 0
+	}
+	switch task.State {
+	case "merged", "deployed", "dropped", "duplicate":
+		return false, http.StatusConflict
+	}
+	return true, 0
 }
 
 func validAcceptingOverride(mode string) bool {
 	return mode == "on" || mode == "off" || mode == acceptingOverrideAuto
 }
 
-func loadAcceptingOverrides(path string) (map[string]string, error) {
-	overrides := make(map[string]string)
+func loadAcceptingOverrides(path string) (map[string]acceptingOverride, error) {
+	overrides := make(map[string]acceptingOverride)
 	if path == "" {
 		return overrides, nil
 	}
@@ -37,17 +87,23 @@ func loadAcceptingOverrides(path string) (map[string]string, error) {
 	if json.Unmarshal(b, &wire) != nil {
 		return nil, errors.New("invalid override file")
 	}
-	for machine, mode := range wire.Overrides {
-		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || !validAcceptingOverride(mode) {
+	for machine, override := range wire.Overrides {
+		if details, ok := wire.Containments[machine]; ok {
+			override.Containment, override.ContainmentVerified = details.Containment, details.ContainmentVerified
+		}
+		if override.Mode != "off" {
+			override.Containment, override.ContainmentVerified = "", false
+		}
+		if !machineIDPattern.MatchString(machine) || machine == hubOperatorMachineID || !validAcceptingOverride(override.Mode) || (override.Containment != "" && !containmentPattern.MatchString(override.Containment)) {
 			return nil, errors.New("invalid override file")
 		}
-		overrides[machine] = mode
+		overrides[machine] = override
 	}
 	return overrides, nil
 }
 
 func (h *HubServer) acceptingOverrideLocked(machine string) string {
-	if mode := h.r19a.acceptingOverride[machine]; mode != "" {
+	if mode := h.r19a.acceptingOverride[machine].Mode; mode != "" {
 		return mode
 	}
 	return acceptingOverrideAuto
@@ -64,11 +120,22 @@ func (h *HubServer) acceptingEffectiveLocked(machine string, advertised bool) bo
 	}
 }
 
-func (h *HubServer) persistAcceptingOverridesLocked(next map[string]string) error {
+func (h *HubServer) persistAcceptingOverridesLocked(next map[string]acceptingOverride) error {
 	if h.r19a.acceptingOverridesPath == "" {
 		return nil
 	}
-	b, err := json.Marshal(acceptingOverrideFile{Overrides: next})
+	modes := make(map[string]string, len(next))
+	details := make(map[string]acceptingContainment)
+	for machine, override := range next {
+		modes[machine] = override.Mode
+		if override.Mode == "off" && override.Containment != "" {
+			details[machine] = acceptingContainment{override.Containment, override.ContainmentVerified}
+		}
+	}
+	b, err := json.Marshal(struct {
+		Overrides    map[string]string               `json:"overrides"`
+		Containments map[string]acceptingContainment `json:"containments,omitempty"`
+	}{modes, details})
 	if err != nil {
 		return err
 	}
@@ -82,7 +149,8 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 	}
 	machine := request.PathValue("machine")
 	var body struct {
-		Mode string `json:"mode"`
+		Mode        string `json:"mode"`
+		Containment string `json:"containment"`
 	}
 	decoder := json.NewDecoder(http.MaxBytesReader(writer, request.Body, 1024))
 	decoder.DisallowUnknownFields()
@@ -90,17 +158,37 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 		http.Error(writer, "invalid accepting override", http.StatusBadRequest)
 		return
 	}
+
+	if body.Mode == "off" && !containmentPattern.MatchString(body.Containment) {
+		http.Error(writer, "containment_required", http.StatusBadRequest)
+		return
+	}
+	verified := false
+	if body.Mode == "off" {
+		var status int
+		verified, status = h.verifyContainment(request.Context(), body.Containment)
+		if status == http.StatusConflict {
+			http.Error(writer, "containment_closed", status)
+			return
+		}
+		if status == http.StatusNotFound {
+			http.Error(writer, "containment_not_found", http.StatusBadRequest)
+			return
+		}
+	} else {
+		body.Containment = ""
+	}
 	h.mu.Lock()
 	if _, known := h.auth.Load().tokens[machine]; !known {
 		h.mu.Unlock()
 		http.Error(writer, "unknown node", http.StatusNotFound)
 		return
 	}
-	next := make(map[string]string, len(h.r19a.acceptingOverride)+1)
+	next := make(map[string]acceptingOverride, len(h.r19a.acceptingOverride)+1)
 	for key, value := range h.r19a.acceptingOverride {
 		next[key] = value
 	}
-	next[machine] = body.Mode
+	next[machine] = acceptingOverride{Mode: body.Mode, Containment: body.Containment, ContainmentVerified: verified}
 	if err := h.persistAcceptingOverridesLocked(next); err != nil {
 		h.mu.Unlock()
 		http.Error(writer, "accepting override unavailable", http.StatusInternalServerError)
@@ -114,8 +202,10 @@ func (h *HubServer) handleAcceptingOverride(writer http.ResponseWriter, request 
 	h.placementCache = placementCache{}
 	h.mu.Unlock()
 	writeJSON(writer, http.StatusOK, struct {
-		Machine   string `json:"machine"`
-		Mode      string `json:"mode"`
-		Effective bool   `json:"accepting_effective"`
-	}{machine, body.Mode, effective})
+		Machine             string `json:"machine"`
+		Mode                string `json:"mode"`
+		Effective           bool   `json:"accepting_effective"`
+		Containment         string `json:"containment,omitempty"`
+		ContainmentVerified bool   `json:"containment_verified"`
+	}{machine, body.Mode, effective, body.Containment, verified})
 }

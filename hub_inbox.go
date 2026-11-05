@@ -136,6 +136,9 @@ func (h *HubServer) receivingLane(kind string, e hubJobEventPayload) string {
 // (replay, HTTP ingress, its own digests); the row records it for the ack-state
 // lookup.
 func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender *hubAgent, senderID string, replay bool) (result relayLaneEventResult, handled bool) {
+	if h.inbox == nil && kind == "job.completed" && event.Late {
+		return relayLaneEventResult{PersistFailed: true}, true
+	}
 	if h.inbox == nil || event.sinkOnly {
 		return result, false
 	}
@@ -149,18 +152,24 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		}
 	}
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
+	if kind == "job.completed" && event.Late {
+		class = "inbox"
+	}
 	holdClass := class == "interrupt"
-	if class == "inbox" && h.inboxImmediate(lane, kind) {
+	if class == "inbox" && !event.Late && h.inboxImmediate(lane, kind) {
 		class = "interrupt"
 	}
 	deadline, window := h.inbox.policy.timing(lane, class)
+	if kind == "job.completed" && event.Late {
+		deadline, window = 0, 0
+	}
 	if class == "inbox" && h.inbox.policy.Lanes[lane].InboxSummary != nil {
 		// The external digest owns scheduling; no deadline may inject a second digest.
 		deadline, window = 0, 0
 	}
 	// Ordinary deadline digests still exclude must-ack types. Working holds
 	// retain each original ID so the receiver can acknowledge its items.
-	if event.noDigest || h.inbox.policy.mustAct(lane, *event) || mustAckNotifyTypes[event.NotifyType] || chatRelayEventPattern.MatchString(event.EventID) {
+	if event.Late || event.noDigest || h.inbox.policy.mustAct(lane, *event) || mustAckNotifyTypes[event.NotifyType] || chatRelayEventPattern.MatchString(event.EventID) {
 		window = 0
 	}
 	hold := time.Duration(0)

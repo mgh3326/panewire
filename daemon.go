@@ -637,6 +637,7 @@ func (d *Daemon) serve(ctx context.Context) {
 type localRequest struct {
 	Inbox         *inboxRequest `json:"inbox,omitempty"`
 	DeliveryClass string        `json:"delivery_class,omitempty"`
+	Late          bool          `json:"late,omitempty"`
 	NotifyType    string        `json:"notify_type,omitempty"`
 	Op            string        `json:"op"`
 	Path          string        `json:"path,omitempty"`
@@ -883,7 +884,7 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		return &codedError{ExitDaemonUnavailable, fmt.Errorf("hub client unavailable")}
 	}
 	event := hubScannedRelayEvent{
-		DeliveryClass: req.DeliveryClass, NotifyType: req.NotifyType, Kind: req.Kind,
+		DeliveryClass: req.DeliveryClass, Late: req.Late, NotifyType: req.NotifyType, Kind: req.Kind,
 		HubActiveJob: HubActiveJob{
 			JobID: req.JobID, Epoch: epoch, AgentLabel: req.AgentLabel, OwnerLane: req.OwnerLane,
 			Label: req.Label, Host: req.Host, ReportPath: req.ReportPath, ReportLastLine: req.ReportLastLine,

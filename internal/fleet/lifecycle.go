@@ -18,10 +18,13 @@ import (
 )
 
 func (a *App) lifecycle(ctx context.Context, kind string, args []string) error {
-	return a.lifecycleWithWatchResult(ctx, kind, args, false)
+	return a.lifecycleWithOptions(ctx, kind, args, false, false)
 }
 
-func (a *App) lifecycleWithWatchResult(ctx context.Context, kind string, args []string, watchResult bool) error {
+// lifecycleWithOptions is lifecycle for the completion watcher: watchResult
+// attaches the job-dir findings.json (hk 2927), late marks a completion a
+// re-armed watcher found (hk 2986).
+func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []string, watchResult, late bool) error {
 	if len(args) == 0 || !validID(args[0]) {
 		return fail(exitUsage, "%s requires a job id", kind)
 	}
@@ -189,6 +192,9 @@ func (a *App) lifecycleWithWatchResult(ctx context.Context, kind string, args []
 		a.jobRecordFailed(ctx, id, state, e)
 	}
 	p := map[string]any{"report": *report, "report_sha256": digest, "question": *question, "owner_lane": j.Owner, "parent_lane": j.Parent, "label": j.Label, "pane_id": j.Pane, "document": doc}
+	if late {
+		p["late"] = true
+	}
 	if e = a.event(ctx, id, eventKind, p); e != nil {
 		return e
 	}
@@ -204,6 +210,9 @@ func (a *App) lifecycleWithWatchResult(ctx context.Context, kind string, args []
 		last += " doc:" + doc
 	}
 	argsEmit := []string{"emit", "--kind", eventKind, "--job", id, "--owner-lane", owner, "--epoch", "1", "--label", j.Label, "--host", a.machine(), "--pane", j.Pane, "--inbox-root", filepath.Dir(a.Jobs)}
+	if late {
+		argsEmit = append(argsEmit, "--late", "--deliver", "inbox")
+	}
 	if *report != "" {
 		argsEmit = append(argsEmit, "--report", *report, "--report-last-line", last)
 	}

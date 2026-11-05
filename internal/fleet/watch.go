@@ -145,7 +145,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if j.Report != "" {
 			if info, e := os.Stat(j.Report); e == nil && info.Mode().IsRegular() {
 				if pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
-					return a.lifecycleWithWatchResult(ctx, "done", []string{id, "--report", j.Report}, true)
+					return a.lifecycleWithOptions(ctx, "done", []string{id, "--report", j.Report}, true, len(args) == 2)
 				}
 				pending = true
 				size = info.Size()
