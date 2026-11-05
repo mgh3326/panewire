@@ -34,6 +34,20 @@ type PlacementSignals struct {
 	Tasks        *int     `json:"tasks,omitempty"`
 	TaskSlots    *int     `json:"task_slots,omitempty"`
 	Power        *float64 `json:"power,omitempty"`
+	// LiveJobs, Load1PerCore and Terms are the score v2 inputs: the terms are
+	// the factors of the candidate's free fraction (docs/placement.md).
+	LiveJobs     *int            `json:"live_jobs,omitempty"`
+	Load1PerCore *float64        `json:"load1_per_core,omitempty"`
+	Terms        *PlacementTerms `json:"terms,omitempty"`
+}
+
+// PlacementTerms are the hub's five score factors for one candidate, each 0..1.
+type PlacementTerms struct {
+	CPU  float64 `json:"cpu"`
+	Mem  float64 `json:"mem"`
+	IO   float64 `json:"io"`
+	Load float64 `json:"load"`
+	Jobs float64 `json:"jobs"`
 }
 
 type placementCandidateRecord struct {

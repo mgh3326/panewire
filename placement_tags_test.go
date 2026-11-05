@@ -21,8 +21,10 @@ func taggedPlacementHub(t *testing.T) *HubServer {
 }
 func TestPlacementTagsFilterAndUseHighestScore(t *testing.T) {
 	h := taggedPlacementHub(t)
-	if plain := h.placement(t.Context(), "worker", "repo"); plain.Decision != "mac-work" {
-		t.Fatalf("legacy policy order changed: %+v", plain)
+	// Untagged placement keeps policy order unless a challenger clears the
+	// hysteresis margin: desktop (90) is far over 1.25x mac-work (10).
+	if plain := h.placement(t.Context(), "worker", "repo"); plain.Decision != "desktop" || plain.Reason != "challenger" {
+		t.Fatalf("untagged decision: %+v", plain)
 	}
 	if tagged := h.placement(t.Context(), "worker", "repo", "dagu"); tagged.Decision != "desktop" || len(tagged.Candidates) != 2 || tagged.Candidates[0].Score <= tagged.Candidates[1].Score {
 		t.Fatalf("tagged score ranking %+v", tagged)

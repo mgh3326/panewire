@@ -14,7 +14,13 @@ import (
 
 // emitFleetEvent appends one event under the App's state dir.
 func (a *App) emitFleetEvent(kind, job, outcome, reason, detail string) {
-	fleetevent.New(a.stateDir(), "panewire", a.Now).Emit(kind, job, outcome, reason, detail)
+	a.fleetEventWriter().Emit(kind, job, outcome, reason, detail)
+}
+
+func (a *App) fleetEventWriter() *fleetevent.Writer {
+	w := fleetevent.New(a.stateDir(), "panewire", a.Now)
+	w.Sink = a.EventSink
+	return w
 }
 
 // spawnEvents records how a spawn ended: its refusal, or, for --host local
@@ -148,6 +154,11 @@ func (a *App) placementEvent(s Spawn, rec map[string]any, err error) {
 			refused = append(refused, host+":"+fleetevent.Code(outcome))
 		}
 	}
+	reason := ranking
+	var terms []fleetevent.Candidate
+	if s.placement != nil && s.placement.plan != nil {
+		terms, reason = placementTerms(s.placement.plan, chosen, ranking)
+	}
 	detail := fmt.Sprintf("chosen=%s ranking=%s candidates=%d", chosen, ranking, len(candidates))
 	if pool, _ := rec["pool"].(string); pool != "" {
 		detail += " pool=" + pool
@@ -155,7 +166,39 @@ func (a *App) placementEvent(s Spawn, rec map[string]any, err error) {
 	if len(refused) > 0 {
 		detail += " refused=" + strings.Join(refused, ",")
 	}
-	a.emitFleetEvent("placement", s.Job, "placed", ranking, detail)
+	a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "placement", Job: s.Job, RequestID: a.RequestID, Outcome: "placed", Reason: reason, Detail: detail, Chosen: chosen, Candidates: terms})
+}
+
+// placementTerms projects the plan's candidates for the placement event: each
+// host's score and the hub's terms behind it (cpu, mem, io, load, jobs, power,
+// bridge), and the reason the chosen host won. The reason is the hub's own
+// when the chosen host is the one the hub named (policy_order, challenger,
+// all_loaded), else the ranking metric. It carries numbers and host ids only;
+// no screen text, brief or argv.
+func placementTerms(p *placePlan, chosen, ranking string) ([]fleetevent.Candidate, string) {
+	reason := ranking
+	out := make([]fleetevent.Candidate, 0, len(p.candidates))
+	for _, c := range p.candidates {
+		row := fleetevent.Candidate{Host: c.name, Score: c.score, Outcome: c.outcome}
+		if t := c.signals.Terms; t != nil {
+			row.CPU, row.Mem, row.IO, row.Load, row.Jobs = &t.CPU, &t.Mem, &t.IO, &t.Load, &t.Jobs
+		}
+		row.Power, row.Bridge = c.signals.Power, c.signals.BridgedJobs
+		if row.Outcome == "" {
+			row.Outcome = "not_chosen"
+		}
+		if c.name == chosen {
+			row.Outcome = "chosen"
+			if c.decided {
+				reason = c.decision
+				if reason == "" {
+					reason = "policy_order"
+				}
+			}
+		}
+		out = append(out, row)
+	}
+	return out, reason
 }
 
 // quotaObservationEvent records a target account whose shared quota
