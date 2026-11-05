@@ -36,6 +36,29 @@ type nodeJobResult struct {
 	FindingsError string          `json:"findings_error"`
 	Report        nodeJobReport   `json:"report"`
 	Completed     bool            `json:"completed"`
+	// ActivityEvents counts ledger events that are not spawn bookkeeping
+	// (see nodeJobBookkeepingEvent). A nil value is a node that predates the
+	// field: the caller reads it as unknown, never as zero.
+	ActivityEvents *int `json:"activity_events,omitempty"`
+}
+
+// nodeJobBookkeepingEvent reports whether an events/NNNNN-<kind>.json file
+// name is something the spawner or the quota gate writes around a claim. A
+// file of any other kind, or a name that does not parse, counts as activity,
+// so an unfamiliar record keeps a pane from being released as unworked.
+func nodeJobBookkeepingEvent(name string) bool {
+	rest := strings.TrimLeft(name, "0123456789")
+	kind, ok := strings.CutPrefix(rest, "-")
+	kind, okSuffix := strings.CutSuffix(kind, ".json")
+	if !ok || !okSuffix || len(rest) == len(name) {
+		return false
+	}
+	switch kind {
+	case "job.claim", "job.reclaim", "job.placement", "job.task_link", "job.duplicate_override",
+		"job.spawn_retryable", "job.spawn_aborted", "job.record_failed", "job.cleanup_pending", "job.cleanup_refused":
+		return true
+	}
+	return strings.HasPrefix(kind, "lease.") || strings.HasPrefix(kind, "quota_pool.")
 }
 
 // openNodeResultFile rejects links and special files, and never blocks on a FIFO
@@ -161,6 +184,13 @@ func (client *HubClient) nodeJobResult(args nodeJobResultArgs) (any, string) {
 		if err != nil {
 			return nil, "result_failed"
 		}
+		activity := 0
+		for _, entry := range entries {
+			if !entry.Type().IsRegular() || !nodeJobBookkeepingEvent(entry.Name()) {
+				activity++
+			}
+		}
+		result.ActivityEvents = &activity
 		for _, entry := range entries {
 			if !strings.HasSuffix(entry.Name(), "-job.completed.json") {
 				continue
@@ -184,6 +214,11 @@ func (client *HubClient) nodeJobResult(args nodeJobResultArgs) (any, string) {
 			}
 		}
 	}
+	if result.ActivityEvents == nil {
+		// No events directory: the ledger holds nothing after the claim.
+		zero := 0
+		result.ActivityEvents = &zero
+	}
 	return result, ""
 }
 
@@ -204,6 +239,9 @@ func validNodeJobResult(r nodeJobResult) bool {
 		default:
 			return false
 		}
+	}
+	if r.ActivityEvents != nil && *r.ActivityEvents < 0 {
+		return false
 	}
 	return r.Report.Bytes >= 0 && len(r.Report.LastLine) <= nodeJobLastLineLimit && (r.Report.Present || r.Report == (nodeJobReport{}))
 }
