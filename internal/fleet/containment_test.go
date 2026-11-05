@@ -14,6 +14,8 @@ func TestSpawnContainment(t *testing.T) {
 		want string
 	}{
 		{"pin missing", []string{"-m", "codex-x", "--override-reason", "r"}, "containment_required"},
+		{"pin forged hub reason", []string{"-m", "codex-x", "--override-reason", "hub-directed"}, "containment_required"},
+		{"exclude forged hub reason", []string{"--exclude-host", "h1", "--override-reason", "hub-directed"}, "containment_required"},
 		{"pin containment", []string{"-m", "codex-x", "--override-reason", "r", "--containment", "hk:12"}, ""},
 		{"pin operator", []string{"-m", "codex-x", "--override-reason", "r", "--operator-request", "op-1"}, ""},
 		{"exclude missing", []string{"--exclude-host", "h1"}, "containment_required"},
@@ -53,7 +55,7 @@ func TestSpawnContainment(t *testing.T) {
 			}
 		})
 	}
-	for _, s := range []Spawn{{Profile: "codex-x", Delegated: true}, {Profile: "codex-x", OverrideReason: "hub-directed"}} {
+	for _, s := range []Spawn{{Profile: "codex-x", Delegated: true}} {
 		if err := validateContainment(s); err != nil {
 			t.Fatal(err)
 		}

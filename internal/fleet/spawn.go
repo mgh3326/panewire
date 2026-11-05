@@ -79,7 +79,7 @@ func validateContainment(s Spawn) error {
 	if s.Containment != "" && !containmentPattern.MatchString(s.Containment) {
 		return fail(exitUsage, "invalid containment: expected hk:<task id>")
 	}
-	if s.Delegated || s.OverrideReason == "hub-directed" {
+	if s.Delegated {
 		return nil
 	}
 	pinned := (s.Profile != "" && s.Profile != "auto") || (s.Host != "" && s.Host != "auto" && s.Host != "local" && !s.requestedLocal)
