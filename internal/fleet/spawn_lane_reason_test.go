@@ -68,3 +68,22 @@ func TestLaneFailureReasonIsBoundedAndSingleLine(t *testing.T) {
 type laneTestError string
 
 func (e laneTestError) Error() string { return string(e) }
+
+func TestLaneRegistrationParentMismatchReason(t *testing.T) {
+	reason := "lanes rejected by hub: lane_machine_mismatch (check that parent lane p is registered on the hub)"
+	a, s, _, emitted, _ := laneRegisterFixture(t, Result{Code: 4, Err: reason})
+	s.Owner = "p"
+	if err := a.Spawn(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := spawnedReceipt(t, a, s.Job)["lane_error"].(string)
+	if !strings.Contains(got, "check that parent lane p is registered") {
+		t.Fatalf("lane_error=%q", got)
+	}
+	for _, c := range *emitted {
+		if strings.Contains(flagValue(c.Args, "--text"), "LANE_UNREGISTERED") && strings.Contains(flagValue(c.Args, "--text"), got) {
+			return
+		}
+	}
+	t.Fatal("notice did not include lane_error")
+}

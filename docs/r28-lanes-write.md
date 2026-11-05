@@ -37,6 +37,9 @@ lane configured as an authority lane is refused the same `403` unless the
 node already owns it — only then does the request reveal the `409
 authority_lane_direct_write` guard.
 
+Lane names are 1–32 characters of lowercase ASCII letters, digits, hyphens,
+and underscores (`^[a-z0-9_-]{1,32}$`).
+
 ### Register or replace a lane
 
 ```http

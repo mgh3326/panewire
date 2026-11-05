@@ -131,7 +131,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	switch options.Command {
 	case "add":
 		if response.StatusCode != http.StatusOK && response.StatusCode != http.StatusCreated {
-			return lanesCLIStatus(stderr, response)
+			return lanesCLIStatusForParent(stderr, response, options.Parent)
 		}
 		var result hubLaneProjection
 		if err := decodeLanesJSON(response.Body, &result); err != nil || !validHubLaneWriteProjection(result) || result.Lane != options.Lane {
@@ -368,6 +368,10 @@ var lanesErrorCodePattern = regexp.MustCompile(`^[a-z0-9_]{1,64}$`)
 // differently from a generic rejection — and differently again from a
 // transport failure.
 func lanesCLIStatus(stderr io.Writer, response *http.Response) int {
+	return lanesCLIStatusForParent(stderr, response, "")
+}
+
+func lanesCLIStatusForParent(stderr io.Writer, response *http.Response, parent string) int {
 	var body struct {
 		Error string `json:"error"`
 		Use   string `json:"use"`
@@ -378,6 +382,9 @@ func lanesCLIStatus(stderr io.Writer, response *http.Response) int {
 		code = ""
 	}
 	detail := code
+	if response.StatusCode == http.StatusForbidden && code == "lane_machine_mismatch" && parent != "" {
+		detail += " (check that parent lane " + parent + " is registered on the hub)"
+	}
 	if use := lanesPrintableHint(body.Use); use != "" {
 		detail += " (use: " + use + ")"
 	}

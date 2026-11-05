@@ -3,6 +3,7 @@ package panewire
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -355,13 +356,39 @@ func TestLanesCLIPrintsHubErrorCode(t *testing.T) {
 				t.Fatal(err)
 			}
 			var stdout, stderr strings.Builder
-			code := runLanesCLI([]string{"add", "lane-a", "--machine", "machine-a", "--pane", "w1:p1", "--hub-url", server.URL, "--hub-token-env", envPath}, &stdout, &stderr, hubCLIDeps{HTTPClient: server.Client(), AllowInsecureForTests: true})
+			code := runLanesCLI([]string{"add", "lane-a", "--machine", "machine-a", "--pane", "w1:p1", "--parent", "p", "--hub-url", server.URL, "--hub-token-env", envPath}, &stdout, &stderr, hubCLIDeps{HTTPClient: server.Client(), AllowInsecureForTests: true})
+			if test.name == "mismatch" && !strings.Contains(stderr.String(), "check that parent lane p is registered on the hub") {
+				t.Fatalf("missing parent hint: %q", stderr.String())
+			}
 			wantExit := ExitConditionInvalid
 			if test.status >= 500 {
 				wantExit = ExitInternal
 			}
 			if code != wantExit || !strings.Contains(stderr.String(), test.want) {
 				t.Fatalf("code=%d stderr=%q want exit %d and %q", code, stderr.String(), wantExit, test.want)
+			}
+		})
+	}
+}
+
+func TestLaneParentMismatchHint(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		status             int
+		body, parent, want string
+	}{
+		{"mismatch", http.StatusForbidden, `{"error":"lane_machine_mismatch"}`, "p", "check that parent lane p is registered on the hub"},
+		{"no parent", http.StatusForbidden, `{"error":"lane_machine_mismatch"}`, "", ""},
+		{"other code", http.StatusForbidden, `{"error":"other"}`, "p", ""},
+		{"other status", http.StatusBadRequest, `{"error":"lane_machine_mismatch"}`, "p", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			response := &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body))}
+			var out strings.Builder
+			lanesCLIStatusForParent(&out, response, tc.parent)
+			got := strings.Contains(out.String(), "check that parent lane")
+			if got != (tc.want != "") || tc.want != "" && !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("output=%q", out.String())
 			}
 		})
 	}
