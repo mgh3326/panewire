@@ -50,7 +50,7 @@ func TestCITiers(t *testing.T) {
 		t.Fatal("a pull request's new run must cancel its older run")
 	}
 	postOnly := map[string]string{
-		"post-test":  `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}`,
+		"post-test": `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}`,
 		// postgres also runs on a pull request that touches the inbox store
 		// (store-paths), because the production hub keeps its inbox there.
 		"postgres":   `${{ !cancelled() && ((github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all')) || (github.event_name == 'pull_request' && needs.store-paths.outputs.store == 'true')) }}`,
