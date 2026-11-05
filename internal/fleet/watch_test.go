@@ -303,3 +303,24 @@ func TestWatcherSignalWithoutReportStaysLiveAtDeadline(t *testing.T) {
 		t.Fatalf("no expiry notice: %q", a.Err)
 	}
 }
+
+func TestWatcherDetachedSession(t *testing.T) {
+	cmd := watchCommand("panewire", "j")
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatal("watcher must start a new session")
+	}
+}
+
+func TestWatcherRearmCatchUp(t *testing.T) {
+	a, f, report := watchFixture(t)
+	writeReport(t, report, "final\n")
+	putLaneEvent(t, a, "w:p1", "READY | report", a.Now().Add(time.Minute))
+	starts := 0
+	err := a.RearmWatchers(func(id string) error { starts++; return a.watch(context.Background(), []string{id}) }, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records, _ := completions(t, a, f); starts != 1 || records != 1 {
+		t.Fatalf("starts=%d completions=%d", starts, records)
+	}
+}

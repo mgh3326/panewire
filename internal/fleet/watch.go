@@ -3,11 +3,13 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"syscall"
 	"time"
 )
 
@@ -37,8 +39,8 @@ func (a *App) startWatch(job string) error {
 		return e
 	}
 	defer log.Close()
-	cmd := exec.Command(exe, "_watch", job)
-	cmd.Env = append(os.Environ(), "HERDR_SESSION="+a.herdrSession())
+	cmd := watchCommand(exe, job)
+	cmd.Env = append(os.Environ(), "HERDR_SESSION="+a.herdrSession(), "ARBITER_INBOX_ROOT="+a.Jobs)
 	cmd.Stdout = log
 	cmd.Stderr = log
 	cmd.Stdin = nil
@@ -46,6 +48,52 @@ func (a *App) startWatch(job string) error {
 		return e
 	}
 	return cmd.Process.Release()
+}
+func watchCommand(exe, job string) *exec.Cmd {
+	cmd := exec.Command(exe, "_watch", job)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	return cmd
+}
+
+// RearmWatchers starts missing completion watchers for live jobs at node startup.
+func (a *App) RearmWatchers(start func(string) error, log func(string)) error {
+	entries, err := os.ReadDir(a.Jobs)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	var failures []error
+	for _, entry := range entries {
+		id := entry.Name()
+		if !entry.IsDir() || !validID(id) {
+			continue
+		}
+		j, err := a.job(id)
+		if err != nil {
+			continue
+		}
+		if j.Terminal || j.Reaped || j.Pane == "" || a.watchActive(id) {
+			continue
+		}
+		if err := start(id); err != nil {
+			failures = append(failures, fmt.Errorf("re-arm watcher %s: %w", id, err))
+			continue
+		}
+		log(id)
+	}
+	return errors.Join(failures...)
+}
+
+// RearmNodeWatchers uses the node's jobs root and session for detached watchers.
+func RearmNodeWatchers(jobs, session string, log func(string)) error {
+	a, err := New(os.Stdout, os.Stderr)
+	if err != nil {
+		return err
+	}
+	a.Jobs, a.HerdrSession = jobs, session
+	return a.RearmWatchers(a.startWatch, log)
 }
 func (a *App) watch(ctx context.Context, args []string) error {
 	if len(args) != 1 || !validID(args[0]) {

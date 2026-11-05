@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -137,6 +138,7 @@ type HubClient struct {
 	dial                 HubDial
 	wait                 HubWait
 	warn                 func(string)
+	rearmHook            func()
 	unparsedMu           sync.Mutex
 	unparsedWarnedAt     time.Time
 	unparsedSuppressed   int
@@ -462,6 +464,7 @@ func (client *HubClient) Run(ctx context.Context) {
 		client.warn(err.Error())
 		return
 	}
+	client.rearmWatchers()
 	if client.statePublish && len(client.stateQuotaPools) > 0 {
 		go client.runFleetQuota(ctx)
 	}
@@ -487,6 +490,20 @@ func (client *HubClient) Run(ctx context.Context) {
 			return
 		}
 		backoff = nextHubBackoff(backoff, client.maxBackoff)
+	}
+}
+
+func (client *HubClient) rearmWatchers() {
+	if client.rearmHook != nil {
+		client.rearmHook()
+		return
+	}
+	config, _, err := client.resolveHubSpawnConfig()
+	if err == nil {
+		err = fleet.RearmNodeWatchers(client.jobsInboxRoot, config.HERDRSession, func(id string) { slog.Info("completion watcher re-armed", "job", id) })
+	}
+	if err != nil {
+		slog.Warn("completion watcher re-arm failed", "error", err)
 	}
 }
 

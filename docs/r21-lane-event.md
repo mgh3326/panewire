@@ -108,3 +108,9 @@ attempt has one of these signals:
 The attempt starts at the newest `job.spawned`, `job.reclaim` or `job.reprompted`
 record. `panewire done` still completes a job directly. A report with no signal
 leaves the job live until the watcher deadline, and the job stays live after it.
+
+On node startup, live jobs with pane receipts and no watcher holding the watch
+lock get a new watcher. Watchers run in their own session so a daemon restart
+does not signal them. A re-armed watcher reads existing terminal signals and
+completes once it observes the report stable across two polls. Terminal and
+reaped jobs are left alone.
