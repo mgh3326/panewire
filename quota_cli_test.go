@@ -98,3 +98,54 @@ func TestQuotaTimeoutInheritedPipe(t *testing.T) {
 		t.Fatalf("code=%d err=%v elapsed=%s", code, err, elapsed)
 	}
 }
+
+func TestQuotaSuccessfulProcessWithInheritedPipe(t *testing.T) {
+	pidfile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("QUOTA_TEST_PIDFILE", pidfile)
+	quotaFake(t, `sleep 30 & echo $! > "$QUOTA_TEST_PIDFILE"; echo done`)
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidfile)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill()
+		}
+	})
+	var out, errout bytes.Buffer
+	if code := runQuotaCLI([]string{"observe", "devin-free-limit"}, &out, &errout); code != 0 || out.String() != "done\n" {
+		t.Fatalf("code=%d out=%q err=%q", code, out.String(), errout.String())
+	}
+
+}
+
+func TestNodeRunnerSuccessfulProcessWithInheritedPipe(t *testing.T) {
+	pidfile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv("QUOTA_TEST_PIDFILE", pidfile)
+	quotaFake(t, `sleep 30 & echo $! > "$QUOTA_TEST_PIDFILE"; echo done`)
+	t.Cleanup(func() {
+		data, err := os.ReadFile(pidfile)
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		if p, err := os.FindProcess(pid); err == nil {
+			_ = p.Kill()
+		}
+	})
+	data, err := defaultNodeCommandRunner("pacelever")(context.Background(), "refresh", "codex")
+	if err != nil || string(data) != "done\n" {
+		t.Fatalf("node out=%q err=%v", data, err)
+	}
+}

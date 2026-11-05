@@ -361,7 +361,11 @@ func defaultNodeCommandRunner(name string) relayCommandRunner {
 	return func(ctx context.Context, args ...string) ([]byte, error) {
 		cmd := exec.CommandContext(ctx, name, args...)
 		cmd.WaitDelay = 100 * time.Millisecond
-		return cmd.Output()
+		out, err := cmd.Output()
+		if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+			return out, nil
+		}
+		return out, err
 	}
 }
 

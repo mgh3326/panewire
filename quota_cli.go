@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -61,6 +62,9 @@ func quotaRun(ctx context.Context, what string, timeout time.Duration, jsonOutpu
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
 	err := cmd.Run()
+	if errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil && cmd.ProcessState.Success() {
+		err = nil
+	}
 	for _, line := range strings.Split(stderr.String(), "\n") {
 		if line != "" && !strings.HasPrefix(line, "warning:") {
 			slog.Debug("pacelever diagnostic", "line", line)
