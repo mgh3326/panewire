@@ -3,6 +3,8 @@ package panewire
 import (
 	"strings"
 	"unicode/utf8"
+
+	"github.com/mgh3326/panewire/internal/textbound"
 )
 
 // Every bounded-text rule lives here so the variants stay side by side. Each
@@ -13,35 +15,11 @@ import (
 
 const hubRelayPayloadTextLimit = 240
 
-// utf8PrefixWithin returns value when it fits in limit bytes, otherwise the
-// longest prefix of at most limit bytes that is valid UTF-8.
-func utf8PrefixWithin(value string, limit int) string {
-	if len(value) <= limit {
-		return value
-	}
-	for limit > 0 && !utf8.ValidString(value[:limit]) {
-		limit--
-	}
-	return value[:limit]
-}
+// utf8PrefixWithin and utf8SuffixWithin are the root package's names for the
+// shared cuts in internal/textbound.
+func utf8PrefixWithin(value string, limit int) string { return textbound.PrefixWithin(value, limit) }
 
-// utf8SuffixWithin returns the longest valid UTF-8 suffix of value within
-// limit bytes: the tail of a process's output, where the error usually is.
-// A negative limit yields "", and invalid bytes are dropped so the result is
-// always valid UTF-8.
-func utf8SuffixWithin(value string, limit int) string {
-	if limit <= 0 {
-		return ""
-	}
-	if len(value) > limit {
-		start := len(value) - limit
-		for start < len(value) && !utf8.RuneStart(value[start]) {
-			start++
-		}
-		value = value[start:]
-	}
-	return strings.ToValidUTF8(value, "")
-}
+func utf8SuffixWithin(value string, limit int) string { return textbound.SuffixWithin(value, limit) }
 
 // truncateRelayText is the plain byte bound for relay note text: no marker.
 func truncateRelayText(value string, limit int) string {
@@ -87,5 +65,21 @@ func truncateHubRelayPayloadText(value string, normalizeNewlines bool) (string, 
 	if utf8.RuneCountInString(value) <= hubRelayPayloadTextLimit {
 		return value, false
 	}
-	return string([]rune(value)[:hubRelayPayloadTextLimit]), true
+	return textbound.RunePrefix(value, hubRelayPayloadTextLimit), true
+}
+
+const inboxSummaryTitleRunes = 60
+
+// inboxSummaryTitle bounds one report title in the desk inbox summary line.
+func inboxSummaryTitle(text string) string {
+	return textbound.RunePrefix(text, inboxSummaryTitleRunes)
+}
+
+// capInboxSummaryContent fits the inbox summary content into budget runes,
+// ending a cut line with "…" (which counts toward the budget).
+func capInboxSummaryContent(content string, budget int) string {
+	if utf8.RuneCountInString(content) <= budget {
+		return content
+	}
+	return textbound.RunePrefix(content, max(0, budget-1)) + "…"
 }
