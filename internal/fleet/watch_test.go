@@ -428,3 +428,63 @@ func TestReadResultBoundsTheRead(t *testing.T) {
 		t.Fatalf("readResult allocated %d bytes for an oversized file", grew)
 	}
 }
+
+func TestWatcherDetachedSession(t *testing.T) {
+	cmd := watchCommand("panewire", "j", false)
+	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.Setsid {
+		t.Fatal("watcher must start a new session")
+	}
+}
+
+func TestWatcherRearmCatchUp(t *testing.T) {
+	a, f, report := watchFixture(t)
+	writeReport(t, report, "final\n")
+	putLaneEvent(t, a, "w:p1", "READY | report", a.Now().Add(time.Minute))
+	starts := 0
+	err := a.RearmWatchers(func(id string) error { starts++; return a.watch(context.Background(), []string{id}) }, func(string) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if records, _ := completions(t, a, f); starts != 1 || records != 1 {
+		t.Fatalf("starts=%d completions=%d", starts, records)
+	}
+}
+
+func TestRearmedWatcherWaitsForPaneBeforeDeclaringLoss(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		presentAt int
+		wantLost  bool
+	}{
+		{"never restored", 0, false},
+		{"restored then lost", 3, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := testApp(t)
+			f := ledgerRunner(t, a)
+			seedJob(t, a, "j", "worker")
+			seedLedger(t, a, "j")
+			original := f.Do
+			polls := 0
+			f.Do = func(c Command) Result {
+				if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+					polls++
+					if polls == tc.presentAt {
+						return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1"}]}}`}
+					}
+					return Result{Out: `{"result":{"agents":[]}}`}
+				}
+				return original(c)
+			}
+			t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "30")
+			if err := a.watch(context.Background(), []string{"j", "--rearmed"}); err != nil {
+				t.Fatal(err)
+			}
+			state, _ := ledgerState(t, a, "j")
+			lost := slices.Contains(eventKindsOf(t, a, "j"), "job.lost")
+			if lost != tc.wantLost || (state == "released") != tc.wantLost {
+				t.Fatalf("polls=%d lost=%v state=%s", polls, lost, state)
+			}
+		})
+	}
+}
