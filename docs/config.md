@@ -228,6 +228,14 @@ exit 70. Automatic selection applies the limits like `tags`, also under
 neither tags nor limits are checked there; that override needs
 `--override-reason`, which is recorded.
 
+Explicit `-m PROFILE` (except `auto`) or `--host NAME` (except `auto` or
+`local`) requires `--containment hk:ID` or `--operator-request REF`.
+`--exclude-host` is not gated: a standing exclusion (mergewake keeps
+reviewers off its own host on every spawn) is policy, not a containment.
+`--containment` may still be passed with it and is recorded. The containment ID must match `hk:` followed by a nonzero decimal
+task ID of at most nine digits. It is recorded in `job.placement` and does
+not replace the existing `--override-reason` requirement.
+
 ### Hub transport (`via = "hub"`)
 
 A host with `via = "hub"` is spawned through the panewire hub (`POST /v1/spawn`,
