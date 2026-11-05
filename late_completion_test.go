@@ -37,8 +37,12 @@ func TestLateCompletionEmitScanAndInbox(t *testing.T) {
 				t.Fatalf("wire=%s decoded=%+v", wire.Payload, event)
 			}
 			text := relayText(event)
-			if strings.HasPrefix(text, "[late completion: re-armed] ") != late {
-				t.Fatalf("relay text=%q", text)
+			wantText := "(같은 내용이 두 번 보이면 재실행 금지) [report] worker (host-a) :: READY → report.md"
+			if late {
+				wantText = "[late completion: re-armed] " + wantText
+			}
+			if text != wantText {
+				t.Fatalf("relay text=%q, want %q", text, wantText)
 			}
 			now := time.Now()
 			h, agent := quietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), "default", nil, &now)

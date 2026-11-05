@@ -393,7 +393,7 @@ func TestWatcherLateCompletion(t *testing.T) {
 				}
 			}
 			for _, call := range f.Calls {
-				if call.Name == "panewire" && slices.Contains(call.Args, "job.completed") && slices.Contains(call.Args, "--late") != tc.rearmed {
+				if call.Name == "panewire" && slices.Contains(call.Args, "job.completed") && (slices.Contains(call.Args, "--late") != tc.rearmed || slices.Contains(call.Args, "--deliver") != tc.rearmed) {
 					t.Errorf("relay args=%v, rearmed=%v", call.Args, tc.rearmed)
 				}
 			}
