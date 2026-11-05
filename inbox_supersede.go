@@ -42,7 +42,9 @@ var supersedeRules = []struct {
 		return supersedePRType(old.Event.NotifyType) && old.Event.Head != next.Event.Head
 	}},
 	{"job:", func(i laneInboxItem) bool {
-		return i.Kind == "job.completed" || i.Kind == "job.escalate" || i.Kind == "job.lost" || i.Kind == "job.revoked" || (i.Kind == "lane.event" && i.Event.NotifyType == "merged")
+		// job.escalate is not an end: an ESC asks a question and the job stays
+		// open (hk 3012), so a second ESC must not supersede the first.
+		return i.Kind == "job.completed" || i.Kind == "job.lost" || i.Kind == "job.revoked" || (i.Kind == "lane.event" && i.Event.NotifyType == "merged")
 	}, func(old, next laneInboxItem) bool {
 		return old.Event.NotifyType == "progress" || old.Event.NotifyType == "idle-wake" || old.Event.NotifyType == "decision"
 	}},

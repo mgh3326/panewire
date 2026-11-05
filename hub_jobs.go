@@ -86,7 +86,7 @@ func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, 
 		}
 	}
 	var truncated []string
-	for key, destination := range map[string]*string{"owner_lane": &completion.OwnerLane, "label": &completion.Label, "host": &completion.Host, "report_path": &completion.ReportPath, "report_last_line": &completion.ReportLastLine, "question": &completion.Question, "pr": &completion.PR, "head": &completion.Head, "pane_id": &completion.PaneID, "event_id": &completion.EventID, "cause": &completion.Cause} {
+	for key, destination := range map[string]*string{"owner_lane": &completion.OwnerLane, "label": &completion.Label, "host": &completion.Host, "report_path": &completion.ReportPath, "report_last_line": &completion.ReportLastLine, "question": &completion.Question, "pr": &completion.PR, "head": &completion.Head, "pane_id": &completion.PaneID, "event_id": &completion.EventID} {
 		if raw, ok := fields[key]; ok {
 			if json.Unmarshal(raw, destination) != nil || strings.Contains(*destination, "\x00") {
 				return hubJobEventPayload{}, nil, false
@@ -99,6 +99,13 @@ func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, 
 			if wasTruncated {
 				truncated = append(truncated, key)
 			}
+		}
+	}
+	// cause is a supersession key: it is validated whole and never truncated,
+	// since a cut key names a different cause (#235 review).
+	if raw, ok := fields["cause"]; ok {
+		if json.Unmarshal(raw, &completion.Cause) != nil {
+			return hubJobEventPayload{}, nil, false
 		}
 	}
 	if !validInboxCause(completion.Cause) {

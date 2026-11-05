@@ -26,6 +26,9 @@ func TestLaneInboxStoreContractSupersede(t *testing.T) {
 			{"new head", "a", "pr:o/r#1", "ready", "a", "lane.event", "pr:o/r#1", "ready", "b", true},
 			{"same head", "a", "pr:o/r#1", "ready", "a", "lane.event", "pr:o/r#1", "ready", "a", false},
 			{"job end", "a", "job:j", "decision", "", "job.completed", "job:j", "", "", true},
+			// An ESC asks a question and the job stays open (hk 3012): a second
+			// ESC from the same job must not supersede the first, unanswered one.
+			{"second ESC keeps the first", "a", "job:j", "decision", "", "job.escalate", "job:j", "decision", "", false},
 			{"no cause", "a", "", "ready", "a", "lane.event", "", "merged", "", false},
 		}
 		for n, tc := range cases {
@@ -244,5 +247,20 @@ func TestInboxJobCompletedRelaySendsHead(t *testing.T) {
 		if !ok || event.Head != head || has != (head != "") {
 			t.Fatalf("head %q: wire=%s decoded=%+v", head, wire.Payload, event)
 		}
+	}
+}
+
+// A cause is a supersession key: the hub validates it whole and never
+// truncates it, since a cut key names a different cause (#235 review).
+func TestHubJobCompletionKeepsLongCauseWhole(t *testing.T) {
+	cause := "job:" + strings.Repeat("a", 250)
+	payload, _ := json.Marshal(map[string]any{"job_id": "j1", "epoch": 1, "cause": cause})
+	event, _, ok := decodeHubJobCompletionPayloadDetailed(payload)
+	if !ok || event.Cause != cause {
+		t.Fatalf("cause = %d bytes ok=%v, want the %d-byte cause unchanged", len(event.Cause), ok, len(cause))
+	}
+	tooLong, _ := json.Marshal(map[string]any{"job_id": "j1", "epoch": 1, "cause": "job:" + strings.Repeat("a", 260)})
+	if _, _, ok := decodeHubJobCompletionPayloadDetailed(tooLong); ok {
+		t.Fatal("a cause over the limit was accepted instead of refused")
 	}
 }
