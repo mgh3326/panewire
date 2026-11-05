@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
@@ -234,7 +235,14 @@ func readResult(path string) (json.RawMessage, error) {
 	if e := noSymlinks(path); e != nil {
 		return nil, e
 	}
-	body, e := os.ReadFile(path)
+	// Read at most one byte past the limit: the watcher runs this on any
+	// worker-written findings.json, which must not be loaded whole.
+	f, e := os.Open(path)
+	if e != nil {
+		return nil, e
+	}
+	defer f.Close()
+	body, e := io.ReadAll(io.LimitReader(f, 64<<10+1))
 	if e != nil {
 		return nil, e
 	}

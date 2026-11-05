@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -396,5 +397,34 @@ func TestWatcherLeavesDirectDoneResultUntouched(t *testing.T) {
 	}
 	if len(hkCalls(h)) != before {
 		t.Fatalf("watcher touched job store: %v", hkCalls(h))
+	}
+}
+
+// The watcher reads any worker-written findings.json, so an oversized file is
+// rejected after reading at most the limit, never loaded whole (hk 2927 review).
+func TestReadResultBoundsTheRead(t *testing.T) {
+	dir, err := filepath.EvalSymlinks(t.TempDir()) // macOS /var is a symlink
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "findings.json")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(256 << 20); err != nil { // sparse: no disk use
+		t.Fatal(err)
+	}
+	_ = f.Close()
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	_, err = readResult(path)
+	runtime.ReadMemStats(&after)
+	if err == nil || !strings.Contains(err.Error(), "exceeds 64 KiB") {
+		t.Fatalf("err=%v", err)
+	}
+	if grew := after.TotalAlloc - before.TotalAlloc; grew > 8<<20 {
+		t.Fatalf("readResult allocated %d bytes for an oversized file", grew)
 	}
 }
