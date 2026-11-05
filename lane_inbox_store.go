@@ -408,7 +408,7 @@ func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
 	}
 	var ids []int64
 	for _, i := range unclaimed {
-		if policy.mustAct(i.Lane, i.Event) {
+		if !(i.Kind == "job.completed" && i.Event.Late) && policy.mustAct(i.Lane, i.Event) {
 			ids = append(ids, i.ID)
 		}
 	}

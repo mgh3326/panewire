@@ -52,11 +52,11 @@ func normalizeHubActiveJobMetadata(job *HubActiveJob) {
 
 func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, []string, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 16 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 2 || len(fields) > 17 {
 		return hubJobEventPayload{}, nil, false
 	}
 	for name := range fields {
-		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" {
+		if name != "job_id" && name != "epoch" && name != "agent_label" && name != "owner_lane" && name != "label" && name != "host" && name != "report_path" && name != "report_last_line" && name != "question" && name != "pr" && name != "head" && name != "pane_id" && name != "event_id" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "late" {
 			return hubJobEventPayload{}, nil, false
 		}
 	}
@@ -65,6 +65,9 @@ func decodeHubJobCompletionPayloadDetailed(payload []byte) (hubJobEventPayload, 
 		return hubJobEventPayload{}, nil, false
 	}
 	if json.Unmarshal(fields["job_id"], &completion.JobID) != nil || json.Unmarshal(fields["epoch"], &completion.Epoch) != nil || !hubJobIDPattern.MatchString(completion.JobID) || completion.Epoch == 0 {
+		return hubJobEventPayload{}, nil, false
+	}
+	if raw, present := fields["late"]; present && json.Unmarshal(raw, &completion.Late) != nil {
 		return hubJobEventPayload{}, nil, false
 	}
 	// agent_label is the claim metadata a node carries on the terminal record so

@@ -255,6 +255,7 @@ type hubJobReassignment struct {
 }
 
 type hubJobEventPayload struct {
+	Late          bool   `json:"late,omitempty"`
 	DeliveryClass string `json:"delivery_class,omitempty"`
 	NotifyType    string `json:"notify_type,omitempty"`
 	noDigest      bool

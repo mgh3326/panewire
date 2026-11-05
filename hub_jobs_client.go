@@ -168,6 +168,7 @@ func scanHubCompletedJobs(inboxRoot string) []HubActiveJob {
 const lifecycleEnvelopeSettle = time.Minute
 
 type hubScannedRelayEvent struct {
+	Late          bool
 	DeliveryClass string
 	NotifyType    string
 	Kind          string
@@ -306,7 +307,7 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 			// The event file name is the job event's durable identity: it is
 			// unique per emission, stable across node restarts, and shared by
 			// `panewire emit`, which derives the same value for its file.
-			events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, NotifyType: event.notifyType(), Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name(), EventTime: eventTime})
+			events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Late: event.Late || event.Payload.Late, NotifyType: event.notifyType(), Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name(), EventTime: eventTime})
 		}
 	}
 	sort.Slice(events, func(i, j int) bool {
@@ -439,6 +440,7 @@ func scanHubJobCompletion(eventsDir, jobID string) (HubActiveJob, bool) {
 // hubInboxEvent accepts the arbiter envelope as the canonical form while
 // retaining the older flat form emitted by existing completion writers.
 type hubInboxEvent struct {
+	Late           bool   `json:"late,omitempty"`
 	DeliveryClass  string `json:"delivery_class,omitempty"`
 	NotifyType     string `json:"notify_type,omitempty"`
 	Type           string `json:"type"`
@@ -463,6 +465,7 @@ type hubInboxEvent struct {
 	Text           string `json:"text"`
 	Truncated      bool   `json:"truncated"`
 	Payload        struct {
+		Late           bool   `json:"late,omitempty"`
 		AgentLabel     string `json:"agent_label"`
 		OwnerLane      string `json:"owner_lane"`
 		ParentLane     string `json:"parent_lane"`
