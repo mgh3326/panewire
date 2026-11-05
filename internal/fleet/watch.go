@@ -22,6 +22,10 @@ const laneEventMaxBytes = 16 << 10
 var laneTerminalMarker = regexp.MustCompile(`^(\[[^\]]*\]\s*)?(READY|DONE|ESC)\b`)
 
 func (a *App) startWatch(job string) error {
+	return a.startWatchMode(job, false)
+}
+
+func (a *App) startWatchMode(job string, rearmed bool) error {
 	// Unit fakes never spawn real processes.
 	if _, ok := a.Runner.(ExecRunner); !ok {
 		return nil
@@ -39,7 +43,7 @@ func (a *App) startWatch(job string) error {
 		return e
 	}
 	defer log.Close()
-	cmd := watchCommand(exe, job)
+	cmd := watchCommand(exe, job, rearmed)
 	cmd.Env = append(os.Environ(), "HERDR_SESSION="+a.herdrSession(), "ARBITER_INBOX_ROOT="+a.Jobs)
 	cmd.Stdout = log
 	cmd.Stderr = log
@@ -49,8 +53,12 @@ func (a *App) startWatch(job string) error {
 	}
 	return cmd.Process.Release()
 }
-func watchCommand(exe, job string) *exec.Cmd {
-	cmd := exec.Command(exe, "_watch", job)
+func watchCommand(exe, job string, rearmed bool) *exec.Cmd {
+	args := []string{"_watch", job}
+	if rearmed {
+		args = append(args, "--rearmed")
+	}
+	cmd := exec.Command(exe, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	return cmd
 }
@@ -87,16 +95,19 @@ func (a *App) RearmWatchers(start func(string) error, log func(string)) error {
 }
 
 // RearmNodeWatchers uses the node's jobs root and session for detached watchers.
-func RearmNodeWatchers(jobs, session string, log func(string)) error {
+func RearmNodeWatchers(jobs, session string, start func(string) error, log func(string)) error {
 	a, err := New(os.Stdout, os.Stderr)
 	if err != nil {
 		return err
 	}
 	a.Jobs, a.HerdrSession = jobs, session
-	return a.RearmWatchers(a.startWatch, log)
+	if start == nil {
+		start = func(id string) error { return a.startWatchMode(id, true) }
+	}
+	return a.RearmWatchers(start, log)
 }
 func (a *App) watch(ctx context.Context, args []string) error {
-	if len(args) != 1 || !validID(args[0]) {
+	if (len(args) != 1 && (len(args) != 2 || args[1] != "--rearmed")) || !validID(args[0]) {
 		return fail(exitUsage, "invalid watch job")
 	}
 	id := args[0]
@@ -121,6 +132,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	var modified time.Time
 	pending := false
 	missing := 0
+	seen := len(args) == 1
 	latePoll := false
 	for {
 		j, e := a.job(id)
@@ -159,10 +171,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				present = true
 			}
 		}
-		if !present {
-			missing++
-		} else {
+		if present {
+			seen = true
 			missing = 0
+		} else if seen {
+			missing++
 		}
 		if missing >= 2 {
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {

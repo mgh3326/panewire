@@ -8,8 +8,6 @@ import (
 	"reflect"
 	"syscall"
 	"testing"
-
-	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 func TestNodeStartupRearmsWatchers(t *testing.T) {
@@ -18,8 +16,10 @@ func TestNodeStartupRearmsWatchers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("HOME", t.TempDir())
+	jobs := filepath.Join(root, "jobs")
 	for _, id := range []string{"live", "locked", "completed", "reaped", "no-pane"} {
-		dir := filepath.Join(root, id, "events")
+		dir := filepath.Join(jobs, id, "events")
 		if err := os.MkdirAll(dir, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -44,7 +44,7 @@ func TestNodeStartupRearmsWatchers(t *testing.T) {
 			}
 		}
 	}
-	lock, err := os.OpenFile(filepath.Join(root, "locked", ".panewire-watch.lock"), os.O_CREATE|os.O_RDWR, 0600)
+	lock, err := os.OpenFile(filepath.Join(jobs, "locked", ".panewire-watch.lock"), os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,17 +52,16 @@ func TestNodeStartupRearmsWatchers(t *testing.T) {
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		t.Fatal(err)
 	}
-	var started, logged []string
-	app := &fleet.App{Jobs: root}
-	client := &HubClient{spawnConfigPath: filepath.Join(t.TempDir(), "missing"), spawnJournalDir: filepath.Join(t.TempDir(), "journal"), rearmHook: func() {
-		if err := app.RearmWatchers(func(id string) error { started = append(started, id); return nil }, func(id string) { logged = append(logged, id) }); err != nil {
-			t.Fatal(err)
-		}
-	}}
+	var started []string
+	config := filepath.Join(t.TempDir(), "spawn.json")
+	if err := os.WriteFile(config, []byte(`{"enabled":true,"workspace":"w","herdr_session":"s","cwd_map":{}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client := &HubClient{jobsInboxRoot: root, spawnConfigPath: config, spawnJournalDir: filepath.Join(t.TempDir(), "journal"), rearmStart: func(id string) error { started = append(started, id); return nil }}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	client.Run(ctx)
-	if !reflect.DeepEqual(started, []string{"live"}) || !reflect.DeepEqual(logged, started) {
-		t.Fatalf("started=%v logged=%v", started, logged)
+	if !reflect.DeepEqual(started, []string{"live"}) {
+		t.Fatalf("started=%v", started)
 	}
 }

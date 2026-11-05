@@ -138,7 +138,7 @@ type HubClient struct {
 	dial                 HubDial
 	wait                 HubWait
 	warn                 func(string)
-	rearmHook            func()
+	rearmStart           func(string) error
 	unparsedMu           sync.Mutex
 	unparsedWarnedAt     time.Time
 	unparsedSuppressed   int
@@ -494,13 +494,12 @@ func (client *HubClient) Run(ctx context.Context) {
 }
 
 func (client *HubClient) rearmWatchers() {
-	if client.rearmHook != nil {
-		client.rearmHook()
+	if client.jobsInboxRoot == "" {
 		return
 	}
 	config, _, err := client.resolveHubSpawnConfig()
 	if err == nil {
-		err = fleet.RearmNodeWatchers(client.jobsInboxRoot, config.HERDRSession, func(id string) { slog.Info("completion watcher re-armed", "job", id) })
+		err = fleet.RearmNodeWatchers(filepath.Join(client.jobsInboxRoot, "jobs"), config.HERDRSession, client.rearmStart, func(id string) { slog.Info("completion watcher re-armed", "job", id) })
 	}
 	if err != nil {
 		slog.Warn("completion watcher re-arm failed", "error", err)
