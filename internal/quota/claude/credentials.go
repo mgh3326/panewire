@@ -96,8 +96,8 @@ func chooseOAuth(file, keychain map[string]any, now time.Time) map[string]any {
 	}
 	f, fok := finiteNumber(file["expiresAt"])
 	k, kok := finiteNumber(keychain["expiresAt"])
-	expiredF := fok && f/1000 <= float64(now.Unix())
-	expiredK := kok && k/1000 <= float64(now.Unix())
+	expiredF := fok && f <= float64(now.UnixMilli())
+	expiredK := kok && k <= float64(now.UnixMilli())
 	if expiredF != expiredK {
 		if expiredF {
 			return keychain

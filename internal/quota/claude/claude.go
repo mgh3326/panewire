@@ -85,7 +85,7 @@ func Measure(ctx context.Context, cfg Config) (quota.Observation, error) {
 	if token == "" {
 		return quota.Observation{}, quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
 	}
-	if expires, ok := finiteNumber(oauth["expiresAt"]); ok && expires/1000 < float64(cfg.now().Unix()) {
+	if expires, ok := finiteNumber(oauth["expiresAt"]); ok && expires < float64(cfg.now().UnixMilli()) {
 		return quota.Observation{}, quota.Fail(quota.ErrKindTokenExpired, "token expired")
 	}
 	observed, err := cfg.fetchAPI(ctx, token)

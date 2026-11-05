@@ -234,6 +234,8 @@ func TestMissingLoginNeverCallsTheAPI(t *testing.T) {
 		{"no credentials", map[string]string{}, quota.ErrKindCredentials},
 		{"no token", map[string]string{"/home/u/.claude/.credentials.json": `{"claudeAiOauth":{"expiresAt":1}}`}, quota.ErrKindCredentials},
 		{"expired", map[string]string{"/home/u/.claude/.credentials.json": credentialFile(secretToken, testNow.Add(-time.Hour))}, quota.ErrKindTokenExpired},
+		// Expiry is in milliseconds: half a second ago is expired, not valid.
+		{"expired within the second", map[string]string{"/home/u/.claude/.credentials.json": credentialFile(secretToken, testNow.Add(-500*time.Millisecond))}, quota.ErrKindTokenExpired},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := testConfig(t, doFunc(func(*http.Request) (*http.Response, error) {
