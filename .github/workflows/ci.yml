@@ -201,7 +201,7 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
-          if git diff --name-only "$BASE_SHA"...HEAD | grep -Eq '^(lane_inbox|inbox_|hub_inbox|hub_postgres|hub_migrate|hub_unconfirmed|hub_spawn_task_store|hub_store|store)[^/]*\.go$|^hub_postgres_migrations/'; then
+          if git diff --name-only "$BASE_SHA"...HEAD | grep -Eq '^(lane_inbox|inbox_|hub_inbox|hub_postgres|hub_migrate|hub_unconfirmed|hub_spawn_task_store|hub_store|store)[^/]*\.go$|^hub\.go$|^hub_postgres_migrations/'; then
             echo "store=true" >> "$GITHUB_OUTPUT"
           else
             echo "store=false" >> "$GITHUB_OUTPUT"
