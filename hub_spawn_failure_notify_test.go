@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http/httptest"
@@ -26,13 +27,24 @@ func spawnNotifyHub(t *testing.T, policy string) (*HubServer, *fakeHandoffkeep, 
 // the named lane.
 func spawnNotifyHubLane(t *testing.T, policy, lane string) (*HubServer, *fakeHandoffkeep, *hubAgent) {
 	t.Helper()
+	return spawnNotifyHubLanes(t, policy, lane)
+}
+
+// spawnNotifyHubLanes serves every named lane from the one destination node,
+// each on its own pane (w1:p1, w1:p2, ...).
+func spawnNotifyHubLanes(t *testing.T, policy string, lanes ...string) (*HubServer, *fakeHandoffkeep, *hubAgent) {
+	t.Helper()
+	routes := make([]string, len(lanes))
+	for i, lane := range lanes {
+		routes[i] = fmt.Sprintf(`"%s":{"machine":"machine-b","pane":"w1:p%d"}`, lane, i+1)
+	}
 	t.Setenv(crashReportDSNEnv, "")
 	fake, client, stop := newFakeHandoffkeep(t)
 	t.Cleanup(stop)
 	config := HubServerConfig{
 		Tokens:          map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "desk-token"},
 		InboxStorePath:  filepath.Join(t.TempDir(), "inbox.sqlite3"),
-		ReportRelayPath: r20LanesFile(t, `{"lanes":{"`+lane+`":{"machine":"machine-b","pane":"w1:p1"}}}`),
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{`+strings.Join(routes, ",")+`}}`),
 		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
 		handoffkeep:     client,
 	}

@@ -664,7 +664,11 @@ func spawnNotificationText(job, request string, result hubSpawnOutcome) string {
 	if fix == "" {
 		fix = "Inspect the saved operation and executing node before retrying; preserve unknown ownership."
 	}
-	text := fmt.Sprintf("[panewire] SPAWN_FAILED %s request=%s host=%s profile=%s rc=%d stage=%s reason=%s fix=%s", job, request, firstNonEmptyString(result.Host, "none"), firstNonEmptyString(result.Profile, "none"), result.RC, result.Stage, spawnRefusalLine(result.Reason), spawnRefusalLine(fix))
+	replay := "no"
+	if result.Retryable {
+		replay = "yes"
+	}
+	text := fmt.Sprintf("[panewire] SPAWN_FAILED %s request=%s host=%s profile=%s rc=%d stage=%s replay=%s reason=%s fix=%s", job, request, firstNonEmptyString(result.Host, "none"), firstNonEmptyString(result.Profile, "none"), result.RC, result.Stage, replay, spawnRefusalLine(result.Reason), spawnRefusalLine(fix))
 	return utf8PrefixWithin(text, laneEventTextLimit)
 }
 
