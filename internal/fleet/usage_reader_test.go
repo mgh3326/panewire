@@ -313,3 +313,25 @@ func TestUsageReaderOutputHoldsNoTranscriptText(t *testing.T) {
 		}
 	}
 }
+
+// A last record without a trailing newline is still counted, for every reader.
+func TestUsageReaderCountsFinalRecordWithoutTrailingNewline(t *testing.T) {
+	root := t.TempDir()
+	trim := func(body string) string { return strings.TrimSuffix(body, "\n") }
+	writeUsageFile(t, claudeFixturePath(root, testClaudeID), trim(jsonl(
+		`{"type":"assistant","message":{"id":"m1","usage":{"input_tokens":1,"output_tokens":1}}}`,
+		`{"type":"assistant","message":{"id":"m2","usage":{"input_tokens":10,"output_tokens":20}}}`,
+	)))
+	writeUsageFile(t, codexFixturePath(root, testCodexID), trim(jsonl(
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1,"output_tokens":1}}}}`,
+		`{"type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":70,"output_tokens":80}}}}`,
+	)))
+	omp := writeUsageFile(t, filepath.Join(root, ".omp", "s.jsonl"), trim(jsonl(
+		`{"type":"message","id":"a1","message":{"role":"assistant","usage":{"input":1,"output":1}}}`,
+		`{"type":"message","id":"a2","message":{"role":"assistant","usage":{"input":100,"output":200}}}`,
+	)))
+	r := UsageReader{Root: root}
+	wantUsage(t, r.Read(HarnessSession{Kind: "claude", ID: testClaudeID}, testCWD), "claude-session-jsonl", "", n(11), n(21), nil, nil, nil)
+	wantUsage(t, r.Read(HarnessSession{Kind: "codex", ID: testCodexID}, testCWD), "codex-token-count", "", n(70), n(80), nil, nil, nil)
+	wantUsage(t, r.Read(HarnessSession{Kind: "omp", ID: omp}, testCWD), "omp", "", n(101), n(201), nil, nil, nil)
+}

@@ -103,11 +103,6 @@ func (r UsageReader) Read(ref HarnessSession, cwd string) TokenUsage {
 	case "omp":
 		unknown.Source = usageSourceOMP
 	}
-	// "unknown" is FindHarnessSession's sentinel for no reference, not an id:
-	// it must never name a file.
-	if ref.ID == "unknown" {
-		return unknown
-	}
 	switch kind {
 	case "claude":
 		if path, ok := r.claudePath(ref, cwd); ok {
@@ -125,8 +120,14 @@ func (r UsageReader) Read(ref HarnessSession, cwd string) TokenUsage {
 	return unknown
 }
 
+// usableSessionID accepts an id that may name a file. "unknown" is
+// FindHarnessSession's sentinel for no reference, not an id.
+func usableSessionID(id string) bool {
+	return id != "unknown" && usageSessionIDRE.MatchString(id)
+}
+
 func (r UsageReader) claudePath(ref HarnessSession, cwd string) (string, bool) {
-	if r.Root == "" || !usageSessionIDRE.MatchString(ref.ID) || !filepath.IsAbs(cwd) {
+	if r.Root == "" || !usableSessionID(ref.ID) || !filepath.IsAbs(cwd) {
 		return "", false
 	}
 	var dir strings.Builder
@@ -147,7 +148,7 @@ func (r UsageReader) claudePath(ref HarnessSession, cwd string) (string, bool) {
 // codexPath finds the one rollout file named for the session id under
 // sessions/YYYY/MM/DD. Two matches are ambiguous and match nothing.
 func (r UsageReader) codexPath(ref HarnessSession) (string, bool) {
-	if r.Root == "" || !usageSessionIDRE.MatchString(ref.ID) {
+	if r.Root == "" || !usableSessionID(ref.ID) {
 		return "", false
 	}
 	suffix := "-" + ref.ID + ".jsonl"
