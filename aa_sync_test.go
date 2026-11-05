@@ -145,7 +145,7 @@ type aaTestTransport func(*http.Request) (*http.Response, error)
 func (f aaTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 func TestAASyncCommandArtifact(t *testing.T) {
 	dir := t.TempDir()
-	catalog := `{"catalog":[{"profile":"codex-sol","model_id":"gpt-6.1-sol","effort":"low","grade":"B","gate":"default","decided_at":"2026-11-01T00:00:00Z","decided_by":"operator","decided_reason":"reviewed","score":7.50,"benchmark_source":"old","benchmark_annotation":"old"},{"profile":"unknown","model_id":"x","effort":"","grade":"A","gate":"escalation","decided_at":"2026-11-02T00:00:00Z","decided_by":"operator"}],"source":{"source":"server","stale":false}}`
+	catalog := `{"catalog":[{"profile":"codex-sol","model_id":"gpt-6.1-sol","effort":"low","grade":"B","gate":"default","decided_at":"2026-11-01T00:00:00Z","decided_by":"operator","decided_reason":"a & b <c> \u0061","extra": { "nested" : [ 1, 2 ] },"score":7.50,"benchmark_source":"old","benchmark_annotation":"old"},{"profile":"unknown","model_id":"x","effort":"","grade":"A","gate":"escalation","decided_at":"2026-11-02T00:00:00Z","decided_by":"operator"}],"source":{"source":"server","stale":false}}`
 	script := "#!/bin/sh\nprintf '%s\\n' '" + catalog + "'\n"
 	if e := os.WriteFile(filepath.Join(dir, "pacelever"), []byte(script), 0700); e != nil {
 		t.Fatal(e)

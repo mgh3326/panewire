@@ -179,6 +179,53 @@ func aaAnnotate(rows []map[string]any, models []aaModel, version int, at time.Ti
 	return result, annotated, unmapped, changed
 }
 
+func aaCatalogArtifact(data []byte, rows []map[string]any) ([]byte, error) {
+	var original struct {
+		Catalog []map[string]json.RawMessage `json:"catalog"`
+	}
+	if err := json.Unmarshal(data, &original); err != nil || len(original.Catalog) != len(rows) {
+		return nil, fmt.Errorf("invalid catalog")
+	}
+	var out bytes.Buffer
+	out.WriteString("{\n  \"catalog\": [\n")
+	for i, row := range original.Catalog {
+		if i > 0 {
+			out.WriteString(",\n")
+		}
+		for _, field := range []string{"benchmark_source", "benchmark_annotation"} {
+			if value, ok := rows[i][field]; ok {
+				b, err := json.Marshal(value)
+				if err != nil {
+					return nil, err
+				}
+				row[field] = b
+			}
+		}
+		keys := make([]string, 0, len(row))
+		for key := range row {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		out.WriteString("    {")
+		for j, key := range keys {
+			if j > 0 {
+				out.WriteByte(',')
+			}
+			out.WriteString("\n      ")
+			k, err := json.Marshal(key)
+			if err != nil {
+				return nil, err
+			}
+			out.Write(k)
+			out.WriteString(": ")
+			out.Write(row[key])
+		}
+		out.WriteString("\n    }")
+	}
+	out.WriteString("\n  ]\n}\n")
+	return out.Bytes(), nil
+}
+
 func runAASync(args []string, out, errOut io.Writer) int {
 	var path string
 	dry := false
@@ -243,8 +290,8 @@ func runAASync(args []string, out, errOut io.Writer) int {
 	}
 	rows, annotated, unmapped, changed := aaAnnotate(doc.Catalog, models, version, sync.now())
 	if path != "" && !dry {
-		b, e := json.MarshalIndent(map[string]any{"catalog": rows}, "", "  ")
-		if e != nil || replaceFileAtomically(path, ".aa-sync-*", append(b, '\n'), 0600) != nil {
+		b, e := aaCatalogArtifact(data, rows)
+		if e != nil || replaceFileAtomically(path, ".aa-sync-*", b, 0600) != nil {
 			fmt.Fprintln(errOut, "aa-sync: cannot write catalog artifact")
 			return ExitInternal
 		}
