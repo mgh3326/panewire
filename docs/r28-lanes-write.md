@@ -38,7 +38,10 @@ node already owns it — only then does the request reveal the `409
 authority_lane_direct_write` guard.
 
 Lane names are 1–32 characters of lowercase ASCII letters, digits, hyphens,
-and underscores (`^[a-z0-9_-]{1,32}$`).
+and underscores (`^[a-z0-9_-]{1,32}$`). Before registering a lane with an
+underscore, upgrade the nodes and CLIs that read lane projections: older
+versions reject these names and can fail lane listing and self-check or omit
+the lane from fleet census.
 
 ### Register or replace a lane
 
