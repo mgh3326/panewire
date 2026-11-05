@@ -442,7 +442,7 @@ func TestPlaceExplainGolden(t *testing.T) {
 	}
 }
 
-// The CLI asks for signals only when it renders them.
+// The CLI requests signals for explain or explicit JSON output.
 func TestPlaceCLIRequestsSignalsOnlyForExplain(t *testing.T) {
 	var asked []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -457,10 +457,10 @@ func TestPlaceCLIRequestsSignalsOnlyForExplain(t *testing.T) {
 	deps := hubCLIDeps{HTTPClient: server.Client(), AllowInsecureForTests: true}
 	args := []string{"--class", "worker", "--hub-url", server.URL, "--hub-token-env", tokenPath}
 	var out, stderr bytes.Buffer
-	if runPlaceCLI(args, &out, &stderr, deps) != ExitOK || runPlaceCLI(append(args, "--explain"), &out, &stderr, deps) != ExitOK {
+	if runPlaceCLI(args, &out, &stderr, deps) != ExitOK || runPlaceCLI(append(args, "--explain"), &out, &stderr, deps) != ExitOK || runPlaceCLI(append(args, "--signals"), &out, &stderr, deps) != ExitOK {
 		t.Fatalf("stderr=%q", stderr.String())
 	}
-	if len(asked) != 2 || asked[0] != "" || asked[1] != "1" {
+	if len(asked) != 3 || asked[0] != "" || asked[1] != "1" || asked[2] != "1" {
 		t.Fatalf("signals asked=%q", asked)
 	}
 }

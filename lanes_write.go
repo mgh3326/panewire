@@ -198,11 +198,11 @@ func (h *HubServer) handlePutLane(writer http.ResponseWriter, request *http.Requ
 		writeLanesWriteError(writer, err)
 		return
 	}
-	writer.Header().Set("Content-Type", "application/json")
+	status := http.StatusOK
 	if created {
-		writer.WriteHeader(http.StatusCreated)
+		status = http.StatusCreated
 	}
-	_ = json.NewEncoder(writer).Encode(projection)
+	writeJSON(writer, status, projection)
 }
 
 func (h *HubServer) handleDeleteLane(writer http.ResponseWriter, request *http.Request) {

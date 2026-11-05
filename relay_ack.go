@@ -54,42 +54,42 @@ func (h *HubServer) startRelayAckEvent(kind string, event hubJobEventPayload, ma
 func (h *HubServer) registerRelayAckEvent(kind string, event hubJobEventPayload, machine, pane string, eventID int64) {
 	key := relayPendingKey(eventID, event.JobID)
 	h.mu.Lock()
-	if _, exists := h.r19a.relayPending[key]; exists {
+	if _, exists := h.relayControl.relayPending[key]; exists {
 		h.mu.Unlock()
 		return
 	}
-	h.r19a.relayPending[key] = relayPending{machine: machine, pane: pane, eventID: eventID, kind: kind, event: event}
+	h.relayControl.relayPending[key] = relayPending{machine: machine, pane: pane, eventID: eventID, kind: kind, event: event}
 	h.mu.Unlock()
 }
 
 func (h *HubServer) armRelayAckEvent(eventID int64, jobID string) {
 	key := relayPendingKey(eventID, jobID)
 	h.mu.Lock()
-	pending, exists := h.r19a.relayPending[key]
+	pending, exists := h.relayControl.relayPending[key]
 	if !exists || pending.armed || pending.held {
 		h.mu.Unlock()
 		return
 	}
 	pending.armed = true
-	h.r19a.relayPending[key] = pending
-	timeout := h.r19a.relayAckTimeout
+	h.relayControl.relayPending[key] = pending
+	timeout := h.relayControl.relayAckTimeout
 	h.mu.Unlock()
 	time.AfterFunc(timeout, func() { h.expireRelayAck(key) })
 }
 
 func (h *HubServer) forgetRelayAckEvent(eventID int64, jobID string) {
 	h.mu.Lock()
-	delete(h.r19a.relayPending, relayPendingKey(eventID, jobID))
+	delete(h.relayControl.relayPending, relayPendingKey(eventID, jobID))
 	h.mu.Unlock()
 }
 
 func (h *HubServer) expireRelayAck(key string) {
 	h.mu.Lock()
-	pending, isPending := h.r19a.relayPending[key]
+	pending, isPending := h.relayControl.relayPending[key]
 	if !isPending {
 		// Kept for package tests and legacy internal callers which addressed
 		// the old map by job id. Wire acknowledgements use original_event_id.
-		for candidate, value := range h.r19a.relayPending {
+		for candidate, value := range h.relayControl.relayPending {
 			if value.event.JobID == key {
 				key, pending, isPending = candidate, value, true
 				break
@@ -104,7 +104,7 @@ func (h *HubServer) expireRelayAck(key string) {
 		h.mu.Unlock()
 		return
 	}
-	delete(h.r19a.relayPending, key)
+	delete(h.relayControl.relayPending, key)
 	h.mu.Unlock()
 	// Every expired window spends an attempt and releases its lane.event claim.
 	// relayTimeouts only suppresses duplicate operator broadcasts below.
@@ -116,7 +116,7 @@ func (h *HubServer) expireRelayAck(key string) {
 		h.forgetRelayEvent(relayEventDedupeKey("lane.event", pending.event))
 	}
 	h.mu.Lock()
-	broadcast := h.r19a.rememberRelayTimeout(key)
+	broadcast := h.relayControl.rememberRelayTimeout(key)
 	h.mu.Unlock()
 	if !broadcast {
 		return
@@ -146,7 +146,7 @@ func (h *HubServer) acknowledgeRelayPending(machineID string, ack relayAckPayloa
 	// re-pointed between inject and ack (#989) must not strand the row: the
 	// pane is a destination detail, the machine is the entitlement, so the
 	// ack claims the row under the pane it truly reached.
-	delete(h.r19a.relayPending, key)
+	delete(h.relayControl.relayPending, key)
 	pending.pane = ack.Pane
 	return pending, true
 }
@@ -156,23 +156,23 @@ func (h *HubServer) acknowledgeRelayPending(machineID string, ack relayAckPayloa
 // while the window is still live (#1002).
 func (h *HubServer) findRelayPendingLocked(machineID string, ack relayAckPayload) (string, relayPending, bool) {
 	key := relayPendingKey(ack.OriginalEventID, ack.JobID)
-	pending, exists := h.r19a.relayPending[key]
+	pending, exists := h.relayControl.relayPending[key]
 	if !exists && ack.OriginalEventID == 0 {
 		key = relayPendingKey(0, ack.JobID)
-		pending, exists = h.r19a.relayPending[key]
+		pending, exists = h.relayControl.relayPending[key]
 		if !exists {
 			// A legacy ack carries no durable id. The job scan prefers the
 			// pending whose pane the ack still names so two live windows for
 			// one job on different panes never trade acks; only then does a
 			// machine match alone suffice.
-			for candidate, value := range h.r19a.relayPending {
+			for candidate, value := range h.relayControl.relayPending {
 				if value.event.JobID == ack.JobID && value.machine == machineID && value.pane == ack.Pane {
 					key, pending, exists = candidate, value, true
 					break
 				}
 			}
 			if !exists {
-				for candidate, value := range h.r19a.relayPending {
+				for candidate, value := range h.relayControl.relayPending {
 					if value.event.JobID == ack.JobID && value.machine == machineID {
 						key, pending, exists = candidate, value, true
 						break
@@ -205,6 +205,6 @@ func (h *HubServer) peekRelayPending(machineID string, ack relayAckPayload) (str
 // caller's choice; the row then keeps today's replay behaviour.
 func (h *HubServer) consumeRelayPending(key string) {
 	h.mu.Lock()
-	delete(h.r19a.relayPending, key)
+	delete(h.relayControl.relayPending, key)
 	h.mu.Unlock()
 }

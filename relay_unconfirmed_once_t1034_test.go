@@ -395,7 +395,7 @@ func TestT1034FailedMarkKeepsWindowAndRemarksOnce(t *testing.T) {
 	rig.unconfirmed(directive, "maybe_in_pane")
 
 	rig.hub.mu.Lock()
-	_, live := rig.hub.r19a.relayPending[pendingKey]
+	_, live := rig.hub.relayControl.relayPending[pendingKey]
 	rig.hub.mu.Unlock()
 	if !live {
 		t.Fatal("a failed unconfirmed mark consumed the live window")
@@ -417,7 +417,7 @@ func TestT1034FailedMarkKeepsWindowAndRemarksOnce(t *testing.T) {
 	rig.fake.mu.Unlock()
 	rig.unconfirmed(directive, "maybe_in_pane")
 	rig.hub.mu.Lock()
-	_, live = rig.hub.r19a.relayPending[pendingKey]
+	_, live = rig.hub.relayControl.relayPending[pendingKey]
 	rig.hub.mu.Unlock()
 	if live {
 		t.Fatal("a successful re-mark left the live window registered")
@@ -467,7 +467,7 @@ func TestT1034TransportLookupFailureKeepsWindow(t *testing.T) {
 	t650Send(t, rig.hub, "host-a", rig.dest, "relay.unconfirmed", relayAckPayload{JobID: transportID, Pane: directive.Pane, Reason: "maybe_in_pane"})
 
 	rig.hub.mu.Lock()
-	_, live := rig.hub.r19a.relayPending[pendingKey]
+	_, live := rig.hub.relayControl.relayPending[pendingKey]
 	rig.hub.mu.Unlock()
 	if !live {
 		t.Fatal("a failed transport-id lookup consumed the live window")
@@ -492,7 +492,7 @@ func TestT1034TransportLookupFailureKeepsWindow(t *testing.T) {
 	rig.fake.mu.Unlock()
 	t650Send(t, rig.hub, "host-a", rig.dest, "relay.unconfirmed", relayAckPayload{JobID: transportID, Pane: directive.Pane, Reason: "maybe_in_pane"})
 	rig.hub.mu.Lock()
-	_, live = rig.hub.r19a.relayPending[pendingKey]
+	_, live = rig.hub.relayControl.relayPending[pendingKey]
 	rig.hub.mu.Unlock()
 	if live {
 		t.Fatal("a successful re-mark left the live window registered")

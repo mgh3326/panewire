@@ -399,7 +399,7 @@ func TestR20T5UnconfirmedInjectionRecordsAnAttempt(t *testing.T) {
 	defer closeServer()
 	hub, agent := r20t5Hub(t, r20t5OneLane, client, 4)
 	hub.mu.Lock()
-	hub.r19a.relayAckTimeout = 10 * time.Millisecond
+	hub.relayControl.relayAckTimeout = 10 * time.Millisecond
 	hub.mu.Unlock()
 	events := r20t5Subscribe(t, hub)
 

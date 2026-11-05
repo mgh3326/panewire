@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+
+	"github.com/mgh3326/panewire/internal/durable"
 )
 
 // Save before sending. A response can be lost after the hub commits; rerunning
@@ -33,19 +35,11 @@ func (a *App) saveSubmission(request Submission) (Submission, error) {
 	if err != nil {
 		return Submission{}, err
 	}
-	file, err := os.CreateTemp(filepath.Dir(path), ".submission-*.tmp")
+	temporary, err := durable.WriteSyncedTemporaryFile(filepath.Dir(path), ".submission-*.tmp", raw, 0600)
 	if err != nil {
 		return Submission{}, err
 	}
-	temporary := file.Name()
 	defer os.Remove(temporary)
-	if _, err = file.Write(raw); err == nil {
-		err = file.Sync()
-	}
-	err = errors.Join(err, file.Close())
-	if err != nil {
-		return Submission{}, err
-	}
 	err = os.Link(temporary, path)
 	if errors.Is(err, os.ErrExist) {
 		info, e := os.Lstat(path)

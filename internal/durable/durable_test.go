@@ -1,4 +1,4 @@
-package panewire
+package durable
 
 import (
 	"os"
@@ -12,7 +12,7 @@ func TestReplaceFileAtomicallyPublishesModeAndLeavesNoTemporary(t *testing.T) {
 	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	if err := replaceFileAtomically(path, ".state-*", []byte("new\n"), 0o600); err != nil {
+	if err := ReplaceFileAtomically(path, ".state-*", []byte("new\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	contents, err := os.ReadFile(path)
@@ -30,7 +30,7 @@ func TestReplaceFileAtomicallyPublishesModeAndLeavesNoTemporary(t *testing.T) {
 }
 
 func TestWriteSyncedTemporaryFileFailureLeavesNothing(t *testing.T) {
-	if _, err := writeSyncedTemporaryFile(filepath.Join(t.TempDir(), "missing"), ".x-*", []byte("x"), 0o600); err == nil {
+	if _, err := WriteSyncedTemporaryFile(filepath.Join(t.TempDir(), "missing"), ".x-*", []byte("x"), 0o600); err == nil {
 		t.Fatal("expected an error for a missing directory")
 	}
 }

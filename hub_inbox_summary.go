@@ -113,7 +113,7 @@ func inboxSummaryLine(items []laneInboxItem, doc string, limit int) string {
 				text = strings.TrimPrefix(text, mark)
 			}
 			if text != "" {
-				titles = append(titles, string([]rune(text)[:min(len([]rune(text)), 60)]))
+				titles = append(titles, inboxSummaryTitle(text))
 			}
 		}
 	}
@@ -132,10 +132,7 @@ func inboxSummaryLine(items []laneInboxItem, doc string, limit int) string {
 	}
 	pointer := " | hk:doc " + doc
 	budget := limit - len([]rune(pointer))
-	if len([]rune(content)) > budget {
-		content = string([]rune(content)[:max(0, budget-1)]) + "…"
-	}
-	return content + pointer
+	return capInboxSummaryContent(content, budget) + pointer
 }
 
 // The script timestamps keys in its own timezone. UTC yesterday/today/tomorrow

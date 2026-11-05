@@ -21,6 +21,7 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	cwd := flags.String("cwd", "", "repository key (metadata only)")
 	tagsFlag := flags.String("tags", "", "required capability tags, comma-separated")
 	explain := flags.Bool("explain", false, "render candidates as a table")
+	signals := flags.Bool("signals", false, "include score signals in JSON")
 	hubURL := flags.String("hub-url", "", "HTTPS hub base URL")
 	tokenPath := flags.String("hub-token-env", "", "mode-0600 operator HUB_MACHINE_ID/HUB_TOKEN env file")
 	cfPath := flags.String("hub-cf-env", "", "optional mode-0600 CF Access env file")
@@ -58,7 +59,7 @@ func runPlaceCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	if *cwd != "" {
 		query.Set("cwd", *cwd)
 	}
-	if *explain {
+	if *explain || *signals {
 		// Only a caller that renders the signals asks for them; the JSON
 		// form keeps the wire older decoders accept.
 		query.Set("signals", "1")

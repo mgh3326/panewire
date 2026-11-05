@@ -69,6 +69,7 @@ type FleetStateMessage struct {
 		Connected bool    `json:"connected"`
 		SlotFull  bool    `json:"slot_full"`
 		Reason    string  `json:"reason"`
+		Source    string  `json:"source"`
 		PlacementSignals
 		Signals *PlacementSignals `json:"signals,omitempty"`
 	} `json:"load,omitempty"`
@@ -228,7 +229,7 @@ func (a *App) hubHosts(ctx context.Context) ([]HostView, string) {
 			// /v1/placement drops a slot-full machine from its candidates.
 			continue
 		}
-		hv := HostView{Name: m.Host, Connected: true, Reason: m.Load.Reason, Signals: m.Load.PlacementSignals}
+		hv := HostView{Name: m.Host, Connected: true, Reason: m.Load.Reason, Signals: m.Load.PlacementSignals, Source: m.Load.Source}
 		if m.Load.Signals != nil {
 			hv.Signals = *m.Load.Signals
 		}

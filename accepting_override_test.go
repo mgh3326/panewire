@@ -90,7 +90,7 @@ func TestAcceptingContainment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := restarted.r19a.acceptingOverride["host-a"]; got.Containment != "hk:12" || !got.ContainmentVerified {
+	if got := restarted.relayControl.acceptingOverride["host-a"]; got.Containment != "hk:12" || !got.ContainmentVerified {
 		t.Fatalf("restart: %+v", got)
 	}
 	var out bytes.Buffer
@@ -111,11 +111,11 @@ func TestAcceptingContainment(t *testing.T) {
 		t.Fatalf("unreachable: %d %s", w.Code, w.Body.String())
 	}
 	restarted, err = NewHubServer(config)
-	if err != nil || restarted.r19a.acceptingOverride["host-a"].ContainmentVerified {
+	if err != nil || restarted.relayControl.acceptingOverride["host-a"].ContainmentVerified {
 		t.Fatalf("unverified restart: %v", err)
 	}
 	w = post(`{"mode":"on"}`)
-	if w.Code != 200 || h.r19a.acceptingOverride["host-a"].Containment != "" {
+	if w.Code != 200 || h.relayControl.acceptingOverride["host-a"].Containment != "" {
 		t.Fatalf("on: %d %s", w.Code, w.Body.String())
 	}
 	w = post(`{"mode":"auto"}`)

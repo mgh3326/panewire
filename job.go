@@ -19,6 +19,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // `panewire job done|escalate|joined` owns the job record contract the
@@ -725,6 +727,9 @@ func (c *jobCLI) completionEvent(jobsRoot, job, owner, label, pane, host, report
 	if digest != "" {
 		fields = append(fields, jobField{"report_sha256", digest})
 	}
+	if session := jobHarnessSession(eventsDir, pane); session != nil {
+		fields = append(fields, jobField{"harness_session", *session})
+	}
 	if err := writeJobRecord(eventsDir, "job.completed", fields); err != nil {
 		c.warn("completion record not written: %v", err)
 		return "failed"
@@ -797,6 +802,12 @@ func writeJobRecord(eventsDir, kind string, fields []jobField) error {
 			body.WriteString(pythonJSONString(value))
 		case int:
 			body.WriteString(strconv.Itoa(value))
+		case fleet.HarnessSession:
+			data, err := json.Marshal(value)
+			if err != nil {
+				return err
+			}
+			body.Write(data)
 		default:
 			return fmt.Errorf("unsupported record field %s", field.key)
 		}

@@ -47,7 +47,7 @@ func readFleetEvents(t *testing.T, a *App) (string, []map[string]string) {
 		// Only a placement line carries the optional request_id, chosen and
 		// candidates fields; every other line keeps the eight-field v1 shape.
 		extras := 0
-		for _, k := range []string{"request_id", "chosen", "candidates"} {
+		for _, k := range []string{"request_id", "chosen", "candidates", "selection"} {
 			if _, ok := fields[k]; ok {
 				extras++
 			}

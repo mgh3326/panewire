@@ -1306,12 +1306,16 @@ outcome, reason, detail`) to `$XDG_STATE_HOME/panewire/events/fleet-events.jsonl
 | --- | --- | --- | --- |
 | `spawn`, `plan` | `refused` or `failed` | the exit status name (`config`, `seat_refused`, `placement`, ...) | the command exits non-zero; `detail` is `exit=N <message>` |
 | `placement` | `placed` | ranking metric: `score`, `raw_load` (some host had no hub score), `single_candidate`, `wake`, `forced` | a non-dry-run spawn chose a host; `detail` names `chosen=`, `candidates=`, `pool=` and the hosts that `refused=` first |
+| `placement` | `refused` | automatic selection's outcome code, such as `quota_exhausted` or `quota_unknown` | selection refused before execution placement; `selection` retains the ordered host and rung attempts |
 | `quota_observation` | `stale` or `unusable` | the shared-observation reason (`stale`, `not_observed`, `measure_failed`, ...) | a target account's quota observation refused a host; `detail` carries `target=`, `pool=` and `age_min=` |
 
 Every field is redacted (tokens, URL credentials) and bounded (`detail` at
 1 KiB); the file rotates to `.1` at 4 MiB. Writing an event never changes the
 command's result. Grafana Alloy ships the file to Loki; the shipping, dashboard
 and alerts live in panewire `deploy/alloy` and `deploy/grafana`.
+
+Automatic `placement` lines also carry the bounded host and rung `selection`
+trace described in [Automatic selection](placement.md#automatic-selection).
 
 ## Placement record producer
 

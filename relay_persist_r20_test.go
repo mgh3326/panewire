@@ -588,7 +588,7 @@ func TestR20StartupReplayAdvancesDurableCursor(t *testing.T) {
 	}
 	fake.seedUndelivered(seed...)
 	hub := r20Hub(t, `{"lanes":{"lane-a":{"machine":"host-a","pane":"w1:p1"}}}`, client, nil)
-	hub.r19a.relayAckTimeout = time.Hour
+	hub.relayControl.relayAckTimeout = time.Hour
 	agent := &hubAgent{relays: make(chan hubRelayInjectEvent, handoffkeepReplayLimit+2), persisted: make(chan hubRelayPersistedEvent, handoffkeepReplayLimit+2)}
 	hub.nodes["host-a"] = &hubNodeRecord{agent: agent}
 	hub.replayUndeliveredRelayEvents(context.Background())

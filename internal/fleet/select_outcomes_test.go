@@ -40,8 +40,10 @@ func TestSelectRetainsEveryProfileAccountCandidate(t *testing.T) {
 			t.Fatalf("candidate %s count=%d, want %d", key, got[key], count)
 		}
 	}
-	if len(sel.ranked) != 3 || len(q.Calls) != 3 {
-		t.Fatalf("healthy account candidates were skipped: ranked=%d, gates=%d", len(sel.ranked), len(q.Calls))
+	// Both claude rungs retain their candidate records, but measured account
+	// exhaustion is authoritative for both, so the second is not gated again.
+	if len(sel.ranked) != 3 || len(q.Calls) != 2 {
+		t.Fatalf("account admission must gate exhausted quota once: ranked=%d, gates=%d", len(sel.ranked), len(q.Calls))
 	}
 	if rows := sel.record()["candidates"].([]any); len(rows) != 5 {
 		t.Fatalf("record lost account candidates: %v", rows)

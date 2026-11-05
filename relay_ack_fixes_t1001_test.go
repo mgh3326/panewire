@@ -54,14 +54,14 @@ func TestT1001MovedHoldDropRetiresWindow(t *testing.T) {
 		t.Fatal("hold on the moved pane was refused")
 	}
 	rig.hub.mu.Lock()
-	held := rig.hub.r19a.relayPending[key].held
+	held := rig.hub.relayControl.relayPending[key].held
 	rig.hub.mu.Unlock()
 	if !held {
 		t.Fatal("the window was not marked held")
 	}
 	dropped := rig.hub.consumeRelayDropped("host-a", relayDroppedPayload{JobID: directive.JobID, Pane: "w1:pB", Lane: t989Lane, OriginalEventID: directive.EventID, Reason: "ttl"})
 	rig.hub.mu.Lock()
-	_, stillPending := rig.hub.r19a.relayPending[key]
+	_, stillPending := rig.hub.relayControl.relayPending[key]
 	rig.hub.mu.Unlock()
 	if !dropped || stillPending {
 		t.Fatalf("CE2: the holding node's own drop was refused (dropped=%v) and the held window survives (pending=%v)", dropped, stillPending)
