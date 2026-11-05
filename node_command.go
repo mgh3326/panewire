@@ -68,7 +68,7 @@ func knownNodeCommandOp(op string) bool {
 	switch op {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
-		nodeCommandQuotaRefresh, nodeCommandJobDone:
+		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult:
 		return true
 	}
 	return false
@@ -78,7 +78,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_too_large":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "result_too_large":
 		return true
 	}
 	return false
@@ -178,6 +178,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandPaneCapture:     {"pane_id", "name", "cwd", "merged_after", "write"},
 	nodeCommandPaneRead:        {"pane_id", "name", "cwd", "tail_lines"},
 	nodeCommandJobDone:         {"job", "report"},
+	nodeCommandJobResult:       {"job"},
 	nodeCommandWorktreeInspect: {"cwd"},
 	nodeCommandWorktreeList:    {"common"},
 	nodeCommandWorktreePrepare: {"origin", "mode", "branch", "sha", "fetch", "dir"},
@@ -234,6 +235,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		var args nodePaneReadArgs
 		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && validNodeCommandPath(args.Cwd) && args.TailLines >= 0 && args.TailLines <= nodePaneReadMaxTailLines
 		return args, valid
+	case nodeCommandJobResult:
+		var args nodeJobResultArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job)
 	case nodeCommandJobDone:
 		var args nodeJobDoneArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job) && validNodeCommandPath(args.Report)
@@ -307,6 +311,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		var result PaneReadResult
 		valid = decodeNodeCommandStrict(raw, &result) && validPaneReadResult(result)
 		target = result
+	case nodeCommandJobResult:
+		var result nodeJobResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeJobResult(result)
+		target = result
 	case nodeCommandJobDone:
 		var result JobDoneResult
 		valid = decodeNodeCommandStrict(raw, &result) && validJobDoneResult(result)
@@ -364,7 +372,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	if !valid {
 		return nil, false
 	}
-	encoded, err := json.Marshal(target)
+	encoded, err := marshalNodeCommandJSON(target)
 	return encoded, err == nil
 }
 
@@ -434,7 +442,7 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 		logNodeReapCommand(message.CommandOp, decoded, result, code)
 	}
 	if code == "" {
-		encoded, err := json.Marshal(result)
+		encoded, err := marshalNodeCommandJSON(result)
 		switch {
 		case err != nil:
 			code = "herdr_failed"
@@ -448,7 +456,11 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 	if code == "done_failed" {
 		reply.Detail, _ = result.(string)
 	}
-	_ = peer.write(ctx, reply)
+	if message.CommandOp == nodeCommandJobResult {
+		_ = peer.writeNodeResult(ctx, reply)
+	} else {
+		_ = peer.write(ctx, reply)
+	}
 }
 
 func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json.RawMessage) (any, string) {
@@ -469,6 +481,8 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		return client.nodePaneCapture(ctx, args)
 	case nodePaneReadArgs:
 		return client.nodePaneRead(ctx, args)
+	case nodeJobResultArgs:
+		return client.nodeJobResult(args)
 	case nodeJobDoneArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
