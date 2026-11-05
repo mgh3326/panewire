@@ -465,3 +465,20 @@ pane:
 
 `job.done` already runs the guarded host-local completion command. Both require
 explicit scoped service grants as described above.
+
+### `job.result`
+
+`job.result` reads a job's local artifacts without changing them. Call it with
+`{"job":"NAME"}`; the job name follows the node job-name rules. It is
+available to the operator and services authorized for `worktree.inspect` on
+that host. The CLI is `panewire node job-result --host HOST --job NAME`, with
+the same hub connection flags as `node worktree-list`.
+
+The result contains `found`, `findings`, `findings_error`, `report`, and
+`completed`. `findings` is the JSON object from `findings.json` when it is at
+most 24 KiB and contains a `findings` array. Otherwise it is null and
+`findings_error` is `missing`, `too_large`, `not_json`, or `schema`. A missing
+job has `found: false`. Files must be regular files inside the job directory.
+`report` contains `present`, `bytes`, `sha256`, and `last_line`; the last line
+is limited to 256 UTF-8 bytes. The report body is never returned. `completed`
+is true when the local event ledger contains a `job.completed` event.
