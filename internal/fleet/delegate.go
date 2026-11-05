@@ -408,6 +408,7 @@ func (a *App) delegateClose(ctx context.Context, id string) {
 			a.warn("delegate pane %s now belongs to another agent; not closed", j.Pane)
 			return
 		}
+		a.recordJobUsage(ctx, j, true)
 		if e = a.must(ctx, "herdr", "pane", "close", j.Pane); e != nil {
 			a.warn("delegate pane %s not closed: %v", j.Pane, e)
 			return

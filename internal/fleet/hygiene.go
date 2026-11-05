@@ -132,6 +132,7 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 		if reason == "stale-pane-absent" && present {
 			continue
 		}
+		a.recordJobUsage(ctx, latest, true)
 		if present {
 			if e = a.must(ctx, "herdr", "pane", "close", j.Pane); e != nil {
 				return e
