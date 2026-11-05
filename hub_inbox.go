@@ -250,9 +250,8 @@ func (h *HubServer) receiverInboxState(lane string) receiverInboxState {
 // inboxImmediate promotes an inbox-class event to immediate delivery when the
 // receiving lane owns the completed job, when its pane cannot serve the inbox
 // itself — an unsupported, unknown, or unreported agent CLI — or when a
-// supported receiver is known idle. Everything else waits for the deadline
-// digest, the safety net for supported receivers that are busy or whose
-// reported status is unknown.
+// supported receiver is known idle, unless the lane disables idle promotion.
+// Everything else waits for the deadline digest.
 func (h *HubServer) inboxImmediate(lane, kind string) bool {
 	if h.inbox.policy.Lanes[lane].InboxSummary != nil {
 		return false
@@ -263,6 +262,9 @@ func (h *HubServer) inboxImmediate(lane, kind string) bool {
 		// that merely observe a completion learn about it through events
 		// that keep their own class.
 		return true
+	}
+	if promote := h.inbox.policy.Lanes[lane].IdlePromote; promote != nil && !*promote {
+		return false
 	}
 	state := h.receiverInboxState(lane)
 	return !state.supported || state.idle
