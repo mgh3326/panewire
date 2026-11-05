@@ -96,8 +96,10 @@ appropriate.
 
 A row whose pane is gone would otherwise hold a slot until someone ran
 `wrk hygiene`. The hub reads each node's latest heartbeat session snapshot and
-treats a pane as gone only when that snapshot is `ok`, not truncated, no more
-than 120 s old, and from a node that is connected. Anything less releases
+treats a pane as gone only when the snapshot is `ok`, no more than 120 s old,
+and from a connected node. A complete `pane_ids` list proves absence even if
+the detailed sessions are truncated. When `pane_ids` is incomplete or absent,
+the hub uses sessions only if they are not truncated. Anything less releases
 nothing. The hub acts only on rows whose `machine` is the node's own, and
 applies the `DELETE` rules (not protected, no other machine routes through the
 name, not a control-plane authority lane).

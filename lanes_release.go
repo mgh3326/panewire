@@ -151,13 +151,23 @@ func (h *HubServer) freshSessionSnapshotLocked(machine string) *hubSessionSnapsh
 func (h *HubServer) observeNodePanes(machine string) (laneObservation, bool) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	snap := h.freshSessionSnapshotLocked(machine)
-	if snap == nil {
+	node := h.nodes[machine]
+	if node == nil || node.state != "connected" {
+		return laneObservation{}, false
+	}
+	snap := node.sessionSnapshot
+	if snap == nil || snap.snapshotStatus != hubSnapshotStatusOK || (snap.truncated && !snap.paneIDsComplete) || snap.receivedAt.After(h.now()) || h.now().Sub(snap.receivedAt) > sessionsFindSnapshotMaxAge {
 		return laneObservation{}, false
 	}
 	obs := laneObservation{panes: make(map[string]struct{}, len(snap.sessions)), receivedAt: snap.receivedAt, finished: make(map[string]struct{})}
-	for _, session := range snap.sessions {
-		obs.panes[session.PaneID] = struct{}{}
+	if snap.paneIDsComplete {
+		for _, id := range snap.paneIDs {
+			obs.panes[id] = struct{}{}
+		}
+	} else {
+		for _, session := range snap.sessions {
+			obs.panes[session.PaneID] = struct{}{}
+		}
 	}
 	running := make(map[string]struct{})
 	for _, job := range h.jobs {

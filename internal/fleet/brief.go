@@ -17,7 +17,7 @@ type BriefPolicy struct {
 	Profiles map[string]string `json:"profiles"`
 }
 
-func (a *App) prepareBrief(s Spawn, body string) (string, error) {
+func (a *App) prepareBrief(s Spawn, seat Seat, launch Launch, body string) (string, error) {
 	b := defaultBriefPolicy
 	path := os.Getenv("PANEWIRE_BRIEF_POLICY")
 	if path == "" {
@@ -51,5 +51,9 @@ func (a *App) prepareBrief(s Spawn, body string) (string, error) {
 	if block == "" {
 		return "", fail(exitConfig, "missing brief preamble %q", key)
 	}
-	return fmt.Sprintf("panewire brief-policy: v%d / %s\n%s\n\n%s", p.Version, key, block, body), nil
+	profile := "unknown"
+	if seat.Canon != "" {
+		profile = launchProfile(seat.Canon, launch.Effort)
+	}
+	return fmt.Sprintf("panewire brief-policy: v%d / %s\n%s\nLaunch identity: family=%s launch_profile=%s (use these for the Mergewake-Author-Family and Mergewake-Author-Profile trailers)\n\n%s", p.Version, key, block, firstNonempty(seat.Family, "unknown"), profile, body), nil
 }
