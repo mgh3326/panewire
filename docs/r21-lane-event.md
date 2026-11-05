@@ -114,7 +114,8 @@ job. The decision wait defaults to six hours and can be set in seconds with
 reason `decision_unanswered`. A proven `panewire prompt` delivery to the pane,
 a `relay_delivered` record for its lane and pane, or a later lane event from
 the pane resumes the job.
-Pane redraws and status changes do not clear the wait.
+Pane redraws and status changes do not clear the wait. If the daemon cannot
+be queried, the watcher warns and the decision deadline still applies.
 An explicit `panewire escalate JOB --question ...` stops as escalated.
 
 The attempt starts at the newest `job.spawned`, `job.reclaim` or `job.reprompted`
