@@ -58,9 +58,6 @@ func TestCITiers(t *testing.T) {
 				t.Errorf("PR-reachable job %s runs heavy check", name)
 			}
 		}
-		if name == "test-macos" || name == "postgres" || name == "post-test" {
-			t.Errorf("%s reachable from PR", name)
-		}
 	}
 	for _, name := range []string{"post-test", "postgres", "test-macos"} {
 		job := w.Jobs[name]
