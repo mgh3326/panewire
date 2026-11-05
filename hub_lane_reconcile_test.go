@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 
 	"github.com/coder/websocket"
@@ -113,4 +115,22 @@ func TestLaneReconcileRunStartsAndRetries(t *testing.T) {
 			return false
 		}
 	})
+}
+
+func TestLaneReconcileDoesNotFollowRedirect(t *testing.T) {
+	var received atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { received.Add(1) }))
+	defer target.Close()
+	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Redirect(w, r, target.URL, http.StatusFound) }))
+	defer source.Close()
+	client, err := NewHubClient(HubClientConfig{URL: "ws" + strings.TrimPrefix(source.URL, "http"), MachineID: "node-a", Token: "fixture", CFAccessClientID: "fixture-id", CFAccessClientSecret: "fixture-secret", AllowInsecureForTests: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := client.nodeLanes(context.Background()); err == nil {
+		t.Fatal("redirect accepted")
+	}
+	if received.Load() != 0 {
+		t.Fatal("followed redirect to another server")
+	}
 }
