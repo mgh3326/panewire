@@ -27,7 +27,9 @@ func TestClaudeDelayedSubmissionProof(t *testing.T) {
 func TestClaudeMissingSubmissionProofStaysUnconfirmed(t *testing.T) {
 	text := task687Text(3163, task626Text)
 	_, calls := task683FakeHerdr(t, "claude", []string{task626ClaudeEmpty}, []string{task626TranscriptOnly})
-	ctx, cancel := context.WithTimeout(context.Background(), 350*time.Millisecond)
+	// Long enough for the fake herdr's first exec (slow on macOS) and the
+	// prompt; short of the 8 s observation, so the context ends it.
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
 	result := relayInjectForHarness(ctx, "w1:p1", "claude", text, nil)
 	if result.Outcome != relayInjectMaybeInPane {
