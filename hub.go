@@ -1496,17 +1496,19 @@ type hubInbound struct {
 }
 
 type hubHeartbeatPayload struct {
-	Status         string                    `json:"status"`
-	Checks         map[string]HubCheckStatus `json:"checks"`
-	HostLoad       *HubHostLoad              `json:"host_load,omitempty"`
-	HostMemory     *HubHostMemory            `json:"host_memory,omitempty"`
-	ActiveJobs     []HubActiveJob            `json:"active_jobs,omitempty"`
-	HostSignals    *HubHostSignals           `json:"host_signals,omitempty"`
-	Readiness      *fleet.Readiness          `json:"readiness,omitempty"`
-	Sessions       *[]HubSession             `json:"sessions,omitempty"`
-	SnapshotStatus string                    `json:"snapshot_status,omitempty"`
-	Truncated      bool                      `json:"truncated,omitempty"`
-	StallDetect    *hubStallBeatPayload      `json:"stall_detect,omitempty"`
+	Status          string                    `json:"status"`
+	Checks          map[string]HubCheckStatus `json:"checks"`
+	HostLoad        *HubHostLoad              `json:"host_load,omitempty"`
+	HostMemory      *HubHostMemory            `json:"host_memory,omitempty"`
+	ActiveJobs      []HubActiveJob            `json:"active_jobs,omitempty"`
+	HostSignals     *HubHostSignals           `json:"host_signals,omitempty"`
+	Readiness       *fleet.Readiness          `json:"readiness,omitempty"`
+	Sessions        *[]HubSession             `json:"sessions,omitempty"`
+	PaneIDs         *[]string                 `json:"pane_ids,omitempty"`
+	PaneIDsComplete *bool                     `json:"pane_ids_complete,omitempty"`
+	SnapshotStatus  string                    `json:"snapshot_status,omitempty"`
+	Truncated       bool                      `json:"truncated,omitempty"`
+	StallDetect     *hubStallBeatPayload      `json:"stall_detect,omitempty"`
 }
 
 // hubStallBeatPayload is the node detector's no-data contract. beat_ms is the
@@ -1551,7 +1553,7 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		return hubHeartbeatPayload{}, false
 	}
 	for name := range fields {
-		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" {
+		if name != "status" && name != "checks" && name != "host_load" && name != "load_error" && name != "host_memory" && name != "quota" && name != "active_jobs" && name != "holds_active" && name != "host_signals" && name != "readiness" && name != "sessions" && name != "snapshot_status" && name != "truncated" && name != "stall_detect" && name != "pane_ids" && name != "pane_ids_complete" {
 			return hubHeartbeatPayload{}, false
 		}
 	}
@@ -1639,6 +1641,24 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 		}
 		heartbeat.StallDetect = &beat
 	}
+	rawIDs, hasIDs := fields["pane_ids"]
+	rawIDsComplete, hasIDsComplete := fields["pane_ids_complete"]
+	if hasIDs != hasIDsComplete {
+		return hubHeartbeatPayload{}, false
+	}
+	if hasIDs {
+		var ids []string
+		var complete bool
+		if isJSONNull(rawIDs) || json.Unmarshal(rawIDs, &ids) != nil || ids == nil || isJSONNull(rawIDsComplete) || json.Unmarshal(rawIDsComplete, &complete) != nil {
+			return hubHeartbeatPayload{}, false
+		}
+		for i, id := range ids {
+			if !validIdleWakePane(id) || (i > 0 && ids[i-1] >= id) {
+				return hubHeartbeatPayload{}, false
+			}
+		}
+		heartbeat.PaneIDs, heartbeat.PaneIDsComplete = &ids, &complete
+	}
 	rawSnapshotStatus, hasSnapshotStatus := fields["snapshot_status"]
 	if hasSnapshotStatus {
 		if json.Unmarshal(rawSnapshotStatus, &heartbeat.SnapshotStatus) != nil || (heartbeat.SnapshotStatus != hubSnapshotStatusOK && heartbeat.SnapshotStatus != hubSnapshotStatusUnavailable) {
@@ -1658,6 +1678,9 @@ func decodeHubHeartbeatPayload(payload []byte) (hubHeartbeatPayload, bool) {
 			return hubHeartbeatPayload{}, false
 		}
 		heartbeat.Sessions = &sessions
+	}
+	if hasIDs && (!hasSnapshotStatus || heartbeat.SnapshotStatus != hubSnapshotStatusOK) {
+		return hubHeartbeatPayload{}, false
 	}
 	if hasSnapshotStatus {
 		switch heartbeat.SnapshotStatus {

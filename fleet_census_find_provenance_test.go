@@ -309,11 +309,8 @@ func TestSessionsFindMixedProvenance(t *testing.T) {
 	}
 }
 
-// TestT443HeartbeatBudgetWireFeasible carries the director's replacement for
-// the discarded decoder-maxima wording (hk:doc 2172): 64 sessions with all
-// ten accepted wire fields populated by wire-feasible values must encode into
-// a full heartbeat envelope below 32 KiB, keep every row, and stay
-// untruncated. This is not a worst-case or decoder-maxima claim.
+// The pane-ID list takes priority when a previously wire-feasible set of
+// detailed sessions no longer fits alongside it.
 func TestT443HeartbeatBudgetWireFeasible(t *testing.T) {
 	ready := true
 	states := make([]HerdrAgentState, hubMaxHeartbeatSessions)
@@ -348,11 +345,11 @@ func TestT443HeartbeatBudgetWireFeasible(t *testing.T) {
 	if err := json.Unmarshal(payload, &decoded); err != nil {
 		t.Fatal(err)
 	}
-	if decoded.Sessions == nil || len(*decoded.Sessions) != hubMaxHeartbeatSessions {
-		t.Fatalf("wire-feasible fixture dropped sessions: %d", len(*decoded.Sessions))
+	if decoded.PaneIDs == nil || len(*decoded.PaneIDs) != len(states) || decoded.PaneIDsComplete == nil || !*decoded.PaneIDsComplete {
+		t.Fatal("pane IDs must remain complete")
 	}
-	if decoded.Truncated {
-		t.Fatal("wire-feasible 64-session fixture was marked truncated")
+	if decoded.Sessions == nil || len(*decoded.Sessions) == 0 || len(*decoded.Sessions) >= len(states) || !decoded.Truncated {
+		t.Fatal("detailed sessions must be truncated to fit the pane IDs")
 	}
 	for index, session := range *decoded.Sessions {
 		if session.AgentName == "" || session.LabelSource != hubLabelSourceAgentName || session.DisplayLabel == "" || session.InteractiveReady == nil {
