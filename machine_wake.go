@@ -269,7 +269,6 @@ func (h *HubServer) handleNodeWake(writer http.ResponseWriter, request *http.Req
 	ctx, cancel := context.WithTimeout(request.Context(), timeout)
 	defer cancel()
 	result, reason := h.requestNodeWake(ctx, body.Machine)
-	writer.Header().Set("Content-Type", "application/json")
 	if reason != "" {
 		status := http.StatusGatewayTimeout
 		switch reason {
@@ -278,11 +277,10 @@ func (h *HubServer) handleNodeWake(writer http.ResponseWriter, request *http.Req
 		case "waker_unavailable":
 			status = http.StatusServiceUnavailable
 		}
-		writer.WriteHeader(status)
-		_ = json.NewEncoder(writer).Encode(map[string]string{"reason": reason})
+		writeJSON(writer, status, map[string]string{"reason": reason})
 		return
 	}
-	_ = json.NewEncoder(writer).Encode(result)
+	writeJSON(writer, http.StatusOK, result)
 }
 
 // handleHubWake is the node side of `panewire node wake`. The event may only

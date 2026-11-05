@@ -185,13 +185,11 @@ func (h *HubServer) handleBurstRequest(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	lease, reason := h.requestBurst(ctx, body.Target, body.Reason, duration)
-	w.Header().Set("Content-Type", "application/json")
 	if reason != "" {
-		w.WriteHeader(http.StatusGatewayTimeout)
-		_ = json.NewEncoder(w).Encode(map[string]string{"reason": reason})
+		writeJSON(w, http.StatusGatewayTimeout, map[string]string{"reason": reason})
 		return
 	}
-	_ = json.NewEncoder(w).Encode(lease)
+	writeJSON(w, http.StatusOK, lease)
 }
 
 func (h *HubServer) handleBurstRelease(w http.ResponseWriter, r *http.Request) {
