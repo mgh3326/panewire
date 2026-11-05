@@ -35,7 +35,7 @@ const (
 )
 
 var (
-	laneNamePattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
+	laneNamePattern = regexp.MustCompile(`^[a-z0-9_-]{1,32}$`)
 	lanePanePattern = regexp.MustCompile(`^w[A-Za-z0-9]+:p[A-Za-z0-9]+$`)
 
 	errLanesWriteUnconfigured = errors.New("lanes path is not configured")
