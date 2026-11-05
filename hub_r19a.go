@@ -10,7 +10,7 @@ type r19aHubState struct {
 	relayPending           map[string]relayPending
 	relayTimeouts          map[string]struct{}
 	relayTimeoutOrder      lruIndex[string]
-	acceptingOverride      map[string]string
+	acceptingOverride      map[string]acceptingOverride
 	acceptingOverridesPath string
 }
 
@@ -38,7 +38,7 @@ type r19aClientState struct {
 	relayInjectTimeout time.Duration
 }
 
-func newR19aHubState(config HubServerConfig, overrides map[string]string) r19aHubState {
+func newR19aHubState(config HubServerConfig, overrides map[string]acceptingOverride) r19aHubState {
 	return r19aHubState{
 		relayAckTimeout: config.RelayAckTimeout, relayPending: make(map[string]relayPending), relayTimeouts: make(map[string]struct{}),
 		acceptingOverride: overrides, acceptingOverridesPath: config.AcceptingOverridesPath,

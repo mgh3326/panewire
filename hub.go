@@ -128,19 +128,21 @@ type HubServerConfig struct {
 // HubNode is the deliberately small presence view returned to authenticated
 // operators. RemoteMeta records only protocol metadata, never credentials.
 type HubNode struct {
-	MachineID          string              `json:"machine_id"`
-	AlertClass         string              `json:"alert_class"`
-	Accepting          bool                `json:"accepting"`
-	AcceptingEffective bool                `json:"accepting_effective"`
-	AcceptingOverride  string              `json:"accepting_override"`
-	ConnectedSince     time.Time           `json:"connected_since"`
-	LastPingMS         int64               `json:"last_ping_ms"`
-	LastNote           *HubLastNote        `json:"last_note,omitempty"`
-	Load               *HubNodeLoad        `json:"load"`
-	Memory             *HubHostMemory      `json:"memory"`
-	RemoteMeta         map[string]string   `json:"remote_meta"`
-	State              string              `json:"state"`
-	SessionSnapshot    *HubSessionSnapshot `json:"session_snapshot,omitempty"`
+	MachineID           string              `json:"machine_id"`
+	AlertClass          string              `json:"alert_class"`
+	Accepting           bool                `json:"accepting"`
+	AcceptingEffective  bool                `json:"accepting_effective"`
+	AcceptingOverride   string              `json:"accepting_override"`
+	Containment         string              `json:"containment,omitempty"`
+	ContainmentVerified bool                `json:"containment_verified"`
+	ConnectedSince      time.Time           `json:"connected_since"`
+	LastPingMS          int64               `json:"last_ping_ms"`
+	LastNote            *HubLastNote        `json:"last_note,omitempty"`
+	Load                *HubNodeLoad        `json:"load"`
+	Memory              *HubHostMemory      `json:"memory"`
+	RemoteMeta          map[string]string   `json:"remote_meta"`
+	State               string              `json:"state"`
+	SessionSnapshot     *HubSessionSnapshot `json:"session_snapshot,omitempty"`
 }
 
 // HubNodeLoad is the CPU-only console projection of a heartbeat host_load.
@@ -2245,7 +2247,7 @@ func (h *HubServer) Nodes() []HubNode {
 		}
 		effective := h.acceptingEffectiveLocked(record.machineID, record.accepting)
 		nodes = append(nodes, HubNode{
-			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, Load: hubNodeLoadFromHostLoad(record.hostLoad), Memory: cloneHubHostMemory(record.hostMemory), RemoteMeta: remoteMeta, State: record.state,
+			MachineID: record.machineID, AlertClass: h.alertClass(record.machineID), Accepting: effective, AcceptingEffective: effective, AcceptingOverride: h.acceptingOverrideLocked(record.machineID), Containment: h.r19a.acceptingOverride[record.machineID].Containment, ContainmentVerified: h.r19a.acceptingOverride[record.machineID].ContainmentVerified, ConnectedSince: record.connectedSince, LastPingMS: age.Milliseconds(), LastNote: lastNote, Load: hubNodeLoadFromHostLoad(record.hostLoad), Memory: cloneHubHostMemory(record.hostMemory), RemoteMeta: remoteMeta, State: record.state,
 			SessionSnapshot: hubSessionSnapshotView(record.sessionSnapshot, record.state == "stale" || record.state == "disconnected"),
 		})
 	}
