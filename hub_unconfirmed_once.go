@@ -187,6 +187,9 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (map[int64]bool,
 // rule is: no labelled copy is ever queued unless the durable retire for
 // that row has already succeeded.
 func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffkeepRelayEvent, source string) {
+	if h.retireUnconfirmedSettledInInbox(record) {
+		return
+	}
 	if h.replayInbox(record) {
 		return
 	}
@@ -295,6 +298,29 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 	}
 	h.logger.Info("relay unconfirmed replay injected", "event_id", record.ID, "kind", record.Kind, "lane", record.OwnerLane, "machine", route.Machine, "pane", route.Pane, "first_sent", firstSent, "source", source)
 	h.broadcastRelayReplayInjected(record, route, record.Attempts, source)
+}
+
+// retireUnconfirmedSettledInInbox spends no labelled replay on a row whose
+// lane inbox item the receiver already has (delivered, read, acked or
+// superseded): the row is retired as inbox-delivered and the marker retires
+// with it on the same walk, because settleUnconfirmedMarker sees the origin
+// closed. An absent or still undelivered, unread item leaves the row to its
+// one labelled replay. A failed lookup or retire replays nothing; the next
+// trigger tries again. Chat rows keep the chat store as their authority.
+func (h *HubServer) retireUnconfirmedSettledInInbox(record handoffkeepRelayEvent) bool {
+	if h.inbox == nil || h.handoffkeep == nil || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || chatRelayEventPattern.MatchString(record.EventID) {
+		return false
+	}
+	settled, err := h.inbox.store.settled(relayEventDedupeKey(record.Kind, relayEventFromRecord(record)))
+	if err != nil {
+		h.logger.Warn("inbox evidence unavailable; unconfirmed replay deferred", "event_id", record.ID)
+		return true
+	}
+	if !settled {
+		return false
+	}
+	h.retireRelayReplay(record, relayUnconfirmedInboxRetireReason)
+	return true
 }
 
 // settleUnconfirmedMarker keeps a marker alive only while the row it names
