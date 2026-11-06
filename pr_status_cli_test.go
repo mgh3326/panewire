@@ -175,7 +175,7 @@ func TestPRStatusSummaryLine(t *testing.T) {
 		t.Fatalf("code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
 	}
 	// hk 404 is a note, never a failure, and gh is not consulted for it.
-	if !strings.Contains(run.stderr, "note: hk change record omitted: /v1/changes answered 404") {
+	if !strings.Contains(run.stderr, "note: hk change record omitted: /v1/changes/one answered 404") {
 		t.Fatalf("stderr=%q", run.stderr)
 	}
 	if log := readLog(t, gh); log != "" {
@@ -354,27 +354,26 @@ func TestPRStatusGHFailsToo(t *testing.T) {
 	}
 }
 
-// One source is enough: the missing one is a note, and gh is never run.
+// One source is enough: the missing one is a note, and gh is never run. An hk
+// record alone answers both commands, since it carries the threads.
 func TestPRStatusOneSourceIsEnough(t *testing.T) {
 	gh := fakeGH(t, ghViewFixture, ghThreadsFixture)
-	change := json.RawMessage(`{"pr":"https://github.com/owner/name/pull/152"}`)
 	onlyHK := nodePRStatusResult{
 		Mergewake: nodePRStatusMergewake{Outcome: prStatusNotFound},
-		HK:        nodePRStatusHK{Outcome: prStatusOK, Status: 200, Change: change},
+		HK:        prFixtureHK(t, prStatusFixtureNow),
 	}
 	stub := newPRCLIStub(t, 200, prNodeReply(t, onlyHK))
 	connection := prCLIConnection(t, stub.URL)
-	run := runPR(t, append([]string{"status", "owner/name", "152"}, connection...)...)
-	if run.code != ExitOK || !strings.Contains(run.stdout, "no mergewake snapshot; handoffkeep change record only") || !strings.Contains(run.stderr, "mergewake snapshot omitted: mergewake has no snapshot for this PR") {
+	run := runPR(t, append([]string{"status", "mgh3326/panewire", "269"}, connection...)...)
+	if run.code != ExitOK || !strings.HasPrefix(run.stdout, "mgh3326/panewire#269 merged head=7ce6095") || !strings.Contains(run.stderr, "mergewake snapshot omitted: mergewake has no snapshot for this PR") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
 	}
 	run = runPR(t, append([]string{"status", "owner/name", "152", "--json"}, connection...)...)
 	var merged map[string]any
-	if err := json.Unmarshal([]byte(run.stdout), &merged); err != nil || merged["mergewake"] != nil || merged["hk"] == nil || merged["source"] != "panewire" {
+	if err := json.Unmarshal([]byte(run.stdout), &merged); err != nil || merged["mergewake"] != nil || merged["hk"] == nil || merged["snapshot"] == nil || merged["source"] != "panewire" {
 		t.Fatalf("stdout=%q err=%v", run.stdout, err)
 	}
-	// Findings come only from mergewake: say so instead of guessing from hk.
-	if run = runPR(t, append([]string{"findings", "owner/name", "152"}, connection...)...); run.code != ExitDaemonUnavailable || run.stdout != "" || !strings.Contains(run.stderr, "findings need the mergewake snapshot") {
+	if run = runPR(t, append([]string{"findings", "owner/name", "152"}, connection...)...); run.code != ExitOK || !strings.Contains(run.stdout, ".github/workflows/ci.yml:30") {
 		t.Fatalf("findings code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
 	}
 
@@ -465,7 +464,7 @@ func TestPRStatusEndToEndThroughHubAndNode(t *testing.T) {
 	if run.code != ExitOK || run.stdout != "owner/name#152 blocked head=1c4231f blocking=1 checks=2/2 green observed=3m ago reasons=threads_open:1\n" {
 		t.Fatalf("code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
 	}
-	if !strings.Contains(run.stderr, "hk change record omitted: /v1/changes answered 404") {
+	if !strings.Contains(run.stderr, "hk change record omitted: /v1/changes/one answered 404") {
 		t.Fatalf("stderr=%q", run.stderr)
 	}
 	run = runPR(t, "findings", "owner/name", "152", "--json")
@@ -590,18 +589,17 @@ func TestPRStatusGHFallbackPaginatesReviewThreads(t *testing.T) {
 	}
 }
 
-// hk answering 200 with an empty changes list holds no record: with mergewake
-// missing too, gh answers (finding: empty list suppressed the fallback).
-func TestPRStatusEmptyHKChangesFallsBackToGH(t *testing.T) {
+// hk answering 404 holds no record: with mergewake missing too, gh answers.
+func TestPRStatusHK404WithoutMergewakeFallsBackToGH(t *testing.T) {
 	gh := fakeGH(t, ghViewFixture, ghThreadsFixture)
-	empty := nodePRStatusResult{
+	none := nodePRStatusResult{
 		Mergewake: nodePRStatusMergewake{Outcome: prStatusNotFound},
-		HK:        nodePRStatusHK{Outcome: prStatusNotFound, Status: http.StatusOK},
+		HK:        prHKNotDeployed,
 	}
-	stub := newPRCLIStub(t, 200, prNodeReply(t, empty))
+	stub := newPRCLIStub(t, 200, prNodeReply(t, none))
 	connection := prCLIConnection(t, stub.URL)
 	run := runPR(t, append([]string{"status", "owner/name", "152"}, connection...)...)
-	if run.code != ExitOK || !strings.Contains(run.stdout, "source=gh (fallback: mergewake has no snapshot for this PR, handoffkeep") {
+	if run.code != ExitOK || !strings.Contains(run.stdout, "source=gh (fallback: mergewake has no snapshot for this PR, handoffkeep answered 404") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
 	}
 	if run := runPR(t, append([]string{"findings", "owner/name", "152"}, connection...)...); run.code != ExitOK || !strings.Contains(run.stdout, "a/b.go:42") {
@@ -609,12 +607,6 @@ func TestPRStatusEmptyHKChangesFallsBackToGH(t *testing.T) {
 	}
 	if !strings.Contains(readLog(t, gh), "api graphql") {
 		t.Fatal("gh was not consulted")
-	}
-	// With a mergewake snapshot, the empty hk list is only a note.
-	stub.response = prNodeReply(t, prFixtureResult(t, nodePRStatusHK{Outcome: prStatusNotFound, Status: http.StatusOK}))
-	run = runPR(t, append([]string{"status", "owner/name", "152"}, connection...)...)
-	if run.code != ExitOK || !strings.HasPrefix(run.stdout, "owner/name#152 blocked") || !strings.Contains(run.stderr, "/v1/changes has no change for this PR") {
-		t.Fatalf("code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
 	}
 }
 

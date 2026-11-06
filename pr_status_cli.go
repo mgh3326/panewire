@@ -8,7 +8,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -19,10 +18,10 @@ import (
 )
 
 // `panewire pr status` and `panewire pr findings` read a PR's state from
-// mergewake's last gate decision and handoffkeep's change record through the
-// pr.status node op (docs/pr-status.md), so a worker spends no GitHub request
-// and holds no GitHub token. gh is the fallback only when neither source
-// answered, and the output then says so and why.
+// handoffkeep's change record, and from mergewake's last gate decision when hk
+// has none it can trust, through the pr.status node op (docs/pr-status.md), so
+// a worker spends no GitHub request and holds no GitHub token. gh is the
+// fallback only when neither source answered, and the output then says so and why.
 const prUsage = `Usage:
   panewire pr status   <owner/repo> <n> [--fresh] [--json] [connection flags]
   panewire pr findings <owner/repo> <n> [--json] [connection flags]
@@ -127,14 +126,7 @@ func collectPRStatus(connect nodeReapConnect, stderr io.Writer, deps hubCLIDeps,
 	if result != nil {
 		view.Node = result
 		view.Notes = prStatusSourceNotes(*result)
-		mergewakeOK := result.Mergewake.Outcome == prStatusOK
-		hkOK := result.HK.Outcome == prStatusOK
-		if mergewakeOK || (hkOK && !needFindings) {
-			view.Source = prSourcePanewire
-			return view
-		}
-		if hkOK {
-			view.Notes = append(view.Notes, "findings need the mergewake snapshot, and it is missing; gh was not used because handoffkeep answered")
+		if prViewSnapshot(view) != nil {
 			view.Source = prSourcePanewire
 			return view
 		}
@@ -198,6 +190,8 @@ func prStatusDescribeMergewake(source nodePRStatusMergewake) string {
 		return "has no snapshot for this PR"
 	case prStatusOK:
 		return "answered"
+	case prStatusNotAsked:
+		return "was not asked"
 	}
 	return source.Outcome + " (" + source.Reason + ")"
 }
@@ -206,6 +200,8 @@ func prStatusDescribeHK(source nodePRStatusHK) string {
 	switch source.Outcome {
 	case prStatusNotFound:
 		return "answered 404"
+	case prStatusStale:
+		return "record is stale (" + prStatusDescribeStale(source.Stale) + ")"
 	case prStatusUnconfigured:
 		return "is not configured on that node"
 	case prStatusTooLarge:
@@ -216,23 +212,48 @@ func prStatusDescribeHK(source nodePRStatusHK) string {
 	return source.Outcome
 }
 
+func prStatusDescribeStale(stale []PRStatusStale) string {
+	var parts []string
+	for _, section := range stale {
+		part := section.Section
+		switch {
+		case section.Problem == prStatusSectionMissing && section.ObservedAt == "":
+			part += " has no observed_at"
+		case section.Problem == prStatusSectionMissing:
+			part += " observed_at=" + oneLine(section.ObservedAt) + " is unreadable"
+		default:
+			part += " observed_at=" + oneLine(section.ObservedAt) + " source=" + oneLine(section.Source) + " is older than " + (time.Duration(section.BoundSeconds) * time.Second).String()
+		}
+		parts = append(parts, part)
+	}
+	return strings.Join(parts, "; ")
+}
+
 // prStatusSourceNotes says, for a source that is missing, that it was omitted
 // and why; the command still succeeds on the other source.
 func prStatusSourceNotes(result nodePRStatusResult) []string {
 	var notes []string
-	if result.Mergewake.Outcome != prStatusOK {
+	mergewakeAnswered := result.Mergewake.Outcome == prStatusOK
+	switch result.Mergewake.Outcome {
+	case prStatusOK, prStatusNotAsked:
+	default:
 		notes = append(notes, "mergewake snapshot omitted: mergewake "+prStatusDescribeMergewake(result.Mergewake))
+	}
+	used := ""
+	if mergewakeAnswered && result.HK.Snapshot == nil {
+		used = "; used the mergewake snapshot"
 	}
 	switch result.HK.Outcome {
 	case prStatusOK:
 	case prStatusNotFound:
-		if result.HK.Status == http.StatusOK {
-			notes = append(notes, "hk change record omitted: /v1/changes has no change for this PR")
-		} else {
-			notes = append(notes, "hk change record omitted: /v1/changes answered 404 (handoffkeep may not have it deployed)")
-		}
+		notes = append(notes, "hk change record omitted: /v1/changes/one answered 404 (no record for this PR, or handoffkeep may not have it deployed)"+used)
+	case prStatusStale:
+		notes = append(notes, "hk record not used: "+prStatusDescribeStale(result.HK.Stale)+used)
 	default:
-		notes = append(notes, "hk change record omitted: handoffkeep "+prStatusDescribeHK(result.HK))
+		notes = append(notes, "hk change record omitted: handoffkeep "+prStatusDescribeHK(result.HK)+used)
+	}
+	if result.HK.Unposted > 0 {
+		notes = append(notes, fmt.Sprintf("hk holds %d open findings with no review thread yet; they are not listed", result.HK.Unposted))
 	}
 	if snapshot := result.Mergewake.Snapshot; snapshot != nil {
 		if snapshot.FindingsOmitted > 0 {
@@ -468,8 +489,8 @@ func printPRStatus(stdout io.Writer, view prStatusView, asJSON bool, now time.Ti
 			checks = append(checks, PRStatusCheck{State: ghCheckState(entry.Conclusion, entry.State)})
 		}
 		fmt.Fprintf(stdout, "%s %s head=%s blocking=? checks=%s observed=now source=gh (fallback: %s)\n", head, strings.ToLower(oneLine(gh.State)), shortHead(gh.Head), prChecksSummary(checks), oneLine(view.Fallback))
-	case view.Node.Mergewake.Snapshot != nil:
-		snapshot := view.Node.Mergewake.Snapshot
+	case prViewSnapshot(view) != nil:
+		snapshot := prViewSnapshot(view)
 		line := fmt.Sprintf("%s %s head=%s blocking=%d checks=%s observed=%s", head, oneLine(snapshot.State), shortHead(snapshot.Head), snapshot.Threads.Blocking, prChecksSummary(snapshot.Checks), prObservedAge(snapshot.ObservedAt, now))
 		if snapshot.GateHead != "" && snapshot.GateHead != snapshot.Head {
 			line += " gate_head=" + shortHead(snapshot.GateHead)
@@ -482,18 +503,19 @@ func printPRStatus(stdout io.Writer, view prStatusView, asJSON bool, now time.Ti
 		}
 		fmt.Fprintln(stdout, line)
 	default:
-		fmt.Fprintf(stdout, "%s no mergewake snapshot; handoffkeep change record only (use --json)\n", head)
+		fmt.Fprintf(stdout, "%s no snapshot\n", head)
+		return ExitInternal
 	}
 	return ExitOK
 }
 
 func printPRFindings(stdout, stderr io.Writer, view prStatusView, asJSON bool) int {
 	findings, omitted, observed := prViewFindings(view)
-	if view.Source == prSourcePanewire && (view.Node == nil || view.Node.Mergewake.Snapshot == nil) {
+	if view.Source == prSourcePanewire && prViewSnapshot(view) == nil {
 		return ExitDaemonUnavailable
 	}
 	if asJSON {
-		return writePRJSON(stdout, map[string]any{"source": view.Source, "repo": view.Repo, "pr": view.PR, "head": prViewHead(view), "observed_at": observed, "findings": findings, "findings_omitted": omitted, "fallback": view.Fallback, "notes": prNotes(view)})
+		return writePRJSON(stdout, map[string]any{"source": view.Source, "repo": view.Repo, "pr": view.PR, "head": prViewHead(view), "observed_at": observed, "sections": prViewSections(view), "findings": findings, "findings_omitted": omitted, "fallback": view.Fallback, "notes": prNotes(view)})
 	}
 	if len(findings) == 0 {
 		fmt.Fprintln(stderr, "note: no open findings")
@@ -524,18 +546,39 @@ func prViewFindings(view prStatusView) (findings []PRStatusFinding, omitted int,
 	if view.Source == prSourceGH {
 		return append([]PRStatusFinding{}, view.GHThreads...), 0, ""
 	}
-	if view.Node != nil && view.Node.Mergewake.Snapshot != nil {
-		snapshot := view.Node.Mergewake.Snapshot
+	if snapshot := prViewSnapshot(view); snapshot != nil {
 		return append([]PRStatusFinding{}, snapshot.Findings...), snapshot.FindingsOmitted, snapshot.ObservedAt
 	}
 	return []PRStatusFinding{}, 0, ""
 }
 
 func prViewHead(view prStatusView) string {
-	if view.Node != nil && view.Node.Mergewake.Snapshot != nil {
-		return view.Node.Mergewake.Snapshot.Head
+	if snapshot := prViewSnapshot(view); snapshot != nil {
+		return snapshot.Head
 	}
 	return ""
+}
+
+// prViewSnapshot is the snapshot a node answer renders from: mergewake's when
+// it ran (a fresh read, or hk had nothing to trust), else the one built from
+// hk. A gh answer has none.
+func prViewSnapshot(view prStatusView) *PRStatusSnapshot {
+	switch {
+	case view.Node == nil:
+		return nil
+	case view.Node.Mergewake.Snapshot != nil:
+		return view.Node.Mergewake.Snapshot
+	}
+	return view.Node.HK.Snapshot
+}
+
+// prViewSections is each hk section's observed_at and source, empty when the
+// answer is not built from hk.
+func prViewSections(view prStatusView) map[string]PRStatusSection {
+	if snapshot := prViewSnapshot(view); snapshot != nil && snapshot.Sections != nil {
+		return snapshot.Sections
+	}
+	return map[string]PRStatusSection{}
 }
 
 func prNotes(view prStatusView) []string {
@@ -547,13 +590,18 @@ func prNotes(view prStatusView) []string {
 
 // prMergedView is the --json document: mergewake's snapshot and hk's change
 // record when present, null when not, plus the notes that explain any gap.
+// snapshot is the one the text line renders from (hk's or mergewake's) and
+// sections its per-section freshness; both were added after the first shape.
 func prMergedView(view prStatusView) map[string]any {
-	merged := map[string]any{"source": view.Source, "repo": view.Repo, "pr": view.PR, "mergewake": nil, "hk": nil, "gh": nil, "fallback": view.Fallback, "notes": prNotes(view)}
+	merged := map[string]any{"source": view.Source, "repo": view.Repo, "pr": view.PR, "mergewake": nil, "hk": nil, "gh": nil, "snapshot": nil, "sections": prViewSections(view), "fallback": view.Fallback, "notes": prNotes(view)}
+	if snapshot := prViewSnapshot(view); snapshot != nil {
+		merged["snapshot"] = snapshot
+	}
 	if view.Node != nil {
 		if view.Node.Mergewake.Snapshot != nil {
 			merged["mergewake"] = view.Node.Mergewake.Snapshot
 		}
-		if view.Node.HK.Outcome == prStatusOK {
+		if view.Node.HK.Outcome == prStatusOK || view.Node.HK.Outcome == prStatusStale {
 			merged["hk"] = view.Node.HK.Change
 		}
 	}

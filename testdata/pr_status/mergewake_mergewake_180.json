@@ -1,0 +1,21 @@
+{
+  "repo": "mgh3326/mergewake",
+  "pr": 180,
+  "head": "625a7de8a12d15c2c8fb9550e9193545751dd150",
+  "gate_head": "625a7de8a12d15c2c8fb9550e9193545751dd150",
+  "state": "ready",
+  "reasons": [],
+  "checks": [
+    {"name": "build-darwin-amd64", "state": "green"}, {"name": "build-darwin-arm64", "state": "green"},
+    {"name": "build-linux-amd64", "state": "green"}, {"name": "build-linux-arm64", "state": "green"},
+    {"name": "test", "state": "green"}, {"name": "vet", "state": "green"}
+  ],
+  "review": {"passes": [{"pass": 1, "lens": "default", "family": "cognition"}], "done": true},
+  "threads": {"blocking": 0, "other": 0, "unresolved": 0},
+  "findings": [],
+  "base_fresh": true,
+  "observed_at": "2026-11-06T19:02:21.564774+09:00",
+  "fresh": null,
+  "fresh_at": null,
+  "source": "last_pass"
+}
