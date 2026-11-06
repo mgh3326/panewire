@@ -23,7 +23,7 @@ func retryableStoredHostTask(t *testing.T, h *HubServer, request fleet.Submissio
 	if err != nil {
 		t.Fatal(err)
 	}
-	failed := hubSpawnOutcome{RC: 124, Stage: "admission", Reason: "timeout", Host: "machine-a", Profile: "sonnet", Retryable: true}
+	failed := hubSpawnOutcome{RC: 124, Stage: "admission", Reason: "timeout", Host: "desktop", Profile: "codex-luna", Retryable: true}
 	if _, err = h.inbox.store.completeSpawn(t.Context(), task, failed, time.Now()); err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ type retrySource struct{ now time.Time }
 
 func (retrySource) Hosts(context.Context, string) ([]fleet.HostView, error) { return nil, nil }
 func (s retrySource) Presence(context.Context) ([]fleet.PresenceRecord, error) {
-	return []fleet.PresenceRecord{{HostID: "machine-a", AccountKey: "p:0000000000000001", LastSeen: s.now}}, nil
+	return []fleet.PresenceRecord{{HostID: "desktop", AccountKey: "p:0000000000000001", LastSeen: s.now}}, nil
 }
 func (s retrySource) SharedAccount(_ context.Context, key string) (fleet.SharedAccount, error) {
 	zero := 0.0
@@ -87,7 +87,7 @@ func retryDispatchApp(t *testing.T, out, errout io.Writer) *fleet.App {
 	clock := time.Unix(1_800_000_000, 0)
 	return &fleet.App{
 		Policy: policy, Runner: retryRunner{}, Quota: retryQuota{}, Source: retrySource{now: clock},
-		Config:   fleet.Config{Hosts: map[string]map[string]any{"machine-a": {}}, HostOrder: []string{"machine-a"}},
+		Config:   fleet.Config{Hosts: map[string]map[string]any{"desktop": {}, "machine-a": {}}, HostOrder: []string{"desktop", "machine-a"}},
 		JobStore: spawnJobsFixture{}, Home: root, Jobs: filepath.Join(root, "jobs"), Out: out, Err: errout,
 		Now:   func() time.Time { return clock },
 		Sleep: func(_ context.Context, d time.Duration) error { clock = clock.Add(d); return nil },
@@ -97,16 +97,21 @@ func retryDispatchApp(t *testing.T, out, errout io.Writer) *fleet.App {
 func TestHubSpawnRetryReplayIsNotAPlacementPin(t *testing.T) {
 	// The spawn writes fleet events under the state home; keep them out of the tree.
 	t.Setenv("XDG_STATE_HOME", t.TempDir())
-	h := asyncSpawnHub(t)
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "desktop": "node-token", "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
 	server := httptest.NewServer(h.Handler())
 	defer server.Close()
-	node := t14Node(t, h, server, true)
+	// A second connected node the retry must not choose: only the stored
+	// outcome's host (desktop) may receive the job.
+	t14NamedNode(t, h, server, "machine-a", true, true)
+	node := t14NamedNode(t, h, server, "desktop", true, true)
 	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) { return retryDispatchApp(t, out, errout), nil }
 	request := durableSpawnRequest()
 	task := retryableStoredHostTask(t, h, request)
-	// machine-a stands in for the host the first attempt failed on; t14Node
-	// registers only that machine.
-	if task.Outcome.Host != "machine-a" || !task.Outcome.Retryable {
+	if task.Outcome.Host != "desktop" || !task.Outcome.Retryable {
 		t.Fatalf("fixture lost the stored outcome: %+v", task.Outcome)
 	}
 	done := make(chan struct{})
@@ -120,7 +125,7 @@ func TestHubSpawnRetryReplayIsNotAPlacementPin(t *testing.T) {
 	t14WriteSpawnResult(t, node, sent.RequestID, 0, "test-job", "w1:p9", "OK pane=w1:p9 job=test-job\n", "")
 	<-done
 	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
-	if err != nil || saved.Attempt != 2 || saved.Node == nil || saved.Node.Machine != "machine-a" || saved.Node.RequestID != sent.RequestID {
+	if err != nil || saved.Attempt != 2 || saved.Node == nil || saved.Node.Machine != "desktop" || saved.Node.RequestID != sent.RequestID {
 		t.Fatalf("the retry was not bound to the stored host's dispatch: %+v %v", saved, err)
 	}
 	if strings.Contains(saved.Outcome.Reason, "containment_required") {
@@ -128,7 +133,7 @@ func TestHubSpawnRetryReplayIsNotAPlacementPin(t *testing.T) {
 	}
 	// Same request, same idempotency key: the retry rewrites an in-memory copy.
 	raw, err := json.Marshal(saved.Request)
-	if err != nil || saved.Request.RequestID != request.RequestID || !strings.Contains(string(raw), `"--host","auto"`) || strings.Contains(string(raw), `"--host","machine-a"`) {
+	if err != nil || saved.Request.RequestID != request.RequestID || !strings.Contains(string(raw), `"--host","auto"`) || strings.Contains(string(raw), `"--host","desktop"`) {
 		t.Fatalf("the stored request changed: %s %v", raw, err)
 	}
 }

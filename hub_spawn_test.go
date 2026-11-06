@@ -60,16 +60,21 @@ func t14Node(t *testing.T, hub *HubServer, server *httptest.Server, accepting bo
 }
 
 func t14NodeWithSpawnV2(t *testing.T, hub *HubServer, server *httptest.Server, accepting, spawnV2 bool) *websocket.Conn {
+	return t14NamedNode(t, hub, server, "machine-a", accepting, spawnV2)
+}
+
+// t14NamedNode connects a spawn-capable node as machine; its token is "node-token".
+func t14NamedNode(t *testing.T, hub *HubServer, server *httptest.Server, machine string, accepting, spawnV2 bool) *websocket.Conn {
 	t.Helper()
 	headers := http.Header{}
-	headers.Set(hubMachineIDHeader, "machine-a")
+	headers.Set(hubMachineIDHeader, machine)
 	headers.Set(hubAuthorizationHeader, "Bearer node-token")
 	connection, _, err := websocket.Dial(t.Context(), t14WSURL(server.URL, "/v1/agent"), &websocket.DialOptions{HTTPHeader: headers})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = connection.CloseNow() })
-	hello := map[string]any{"type": "hello", "machine_id": "machine-a", "version": "t14", "accepting": accepting}
+	hello := map[string]any{"type": "hello", "machine_id": machine, "version": "t14", "accepting": accepting}
 	if spawnV2 {
 		hello["capabilities"] = []string{"spawn_v2", "spawn_ops_v1"}
 	}
@@ -79,7 +84,7 @@ func t14NodeWithSpawnV2(t *testing.T, hub *HubServer, server *httptest.Server, a
 	eventually(t, time.Second, "the node to connect", func() bool {
 		hub.mu.Lock()
 		defer hub.mu.Unlock()
-		record := hub.nodes["machine-a"]
+		record := hub.nodes[machine]
 		return record != nil && record.agent != nil && record.state == "connected"
 	})
 	return connection
