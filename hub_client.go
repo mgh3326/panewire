@@ -718,11 +718,20 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		// paste chip is unowned and never earns a keypress.
 		return relayVerifyOutcome(ctx, pane, harness, text, "", "presend:", presendQueued, presend)
 	}
-	if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
+	if err := relaySendText(ctx, pane, harness, text); err != nil {
 		// herdr may have typed part of the text before failing; the next
 		// attempt's presend check decides whether a retry would duplicate
 		// it.
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness, Evidence: "prompt_failed"}
+	}
+	if adapter, ok := relayAdapterFor(harness); ok && adapter.paneTransport {
+		// The pane transport is the spawn path's pair, not one call: pane
+		// send-text only types, so the submit is its own keypress. A failing
+		// return leaves the text typed but unsubmitted, which is
+		// maybe-in-pane, never a re-inject.
+		if relaySendReturn(ctx, pane, harness) != nil {
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "return_failed"}
+		}
 	}
 	result := relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, relayReadPane(ctx, pane, harness).withPresend(presend))
 	adapter, known := relayAdapterFor(harness)
@@ -752,6 +761,27 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 			}
 		}
 	}
+}
+
+// relaySendText types text into pane. A pane-level harness (cmd) gets the
+// pane call, because herdr refuses agent prompt for it with agent_not_ready
+// (hk 3330); every other harness keeps herdr's agent prompt. The caller
+// decides what a failure means.
+func relaySendText(ctx context.Context, pane, harness, text string) error {
+	if adapter, ok := relayAdapterFor(harness); ok && adapter.paneTransport {
+		return exec.CommandContext(ctx, "herdr", "pane", "send-text", pane, text).Run()
+	}
+	return exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run()
+}
+
+// relaySendReturn presses return in pane, at the same level as the text: a
+// pane-level harness has no agent for herdr to address, and mixing the two
+// would type through one transport and submit through another.
+func relaySendReturn(ctx context.Context, pane, harness string) error {
+	if adapter, ok := relayAdapterFor(harness); ok && adapter.paneTransport {
+		return exec.CommandContext(ctx, "herdr", "pane", "send-keys", pane, "return").Run()
+	}
+	return exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run()
 }
 
 func relayInjectHarness(ctx context.Context, pane string) string {
@@ -799,8 +829,13 @@ func parseRelayAgentHarness(raw []byte) string {
 // paste-chip text, which most don't) or unproven. See the unproven carve-out
 // below for why that distinction matters. The hub relay sends devin through
 // devinRelayInject (#547) instead, so it never reaches this carve-out there.
+//
+// cmd draws claude's composer (see promptComposer), so classifyPromptSubmission
+// can locate its live composer and prove an echo the same way; without that it
+// would stop here as unproven and a hand relay through `panewire prompt` could
+// never confirm (hk 3330).
 func harnessHasSubmissionEvidence(harness string) bool {
-	return strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex") || strings.EqualFold(harness, "devin")
+	return strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex") || strings.EqualFold(harness, "devin") || strings.EqualFold(harness, "cmd")
 }
 
 // relayComposerSoleChipRE is claude's paste chip alone, after
@@ -1265,7 +1300,7 @@ func relayVerifyOutcome(ctx context.Context, pane, harness, text, before, prefix
 		if safe, why := relayComposerReturnSafe(harness, reads.visible, text, before); !safe {
 			return maybe("return_withheld:" + why)
 		}
-		if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
+		if relaySendReturn(ctx, pane, harness) != nil {
 			return maybe("return_failed")
 		}
 		// A banner already up on the residue screen is an older queue, so it

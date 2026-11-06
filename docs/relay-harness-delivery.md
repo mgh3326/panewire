@@ -47,6 +47,7 @@ report, has no adapter and no delivery proof.
 | devin | nonce in the transcript, or devin's own queue banner (`nonce_echo`, `devin_queue_banner`) | no |
 | grok | nonce on screen and herdr reports idle/done before the send and `working` after it (`nonce_echo+status_working`) | observed 8 s |
 | omp | same as grok | observed 8 s |
+| cmd | same as grok, and typed through `pane send-text` plus `pane send-keys return` | observed 8 s |
 | anything else | none | n/a |
 
 The nonce is the per-row `[r<id><check>]` token at the head of every typed text
@@ -59,6 +60,16 @@ before the send. A directive typed into a *working* grok or omp pane is
 therefore injected but stays unconfirmed (one retry, then the escalation below)
 until a live capture gives a transcript rule that tells a queued message from a
 pending paste.
+
+cmd uses the same proof, and its transport is different: herdr answers
+`agent get` and `agent read` for a cmd pane but refuses `agent prompt` and
+`agent send-keys` with `agent_not_ready` ("not an active named agent"), so the
+relay types with `pane send-text` and submits with `pane send-keys return` —
+the pair the spawn path already uses for a cmd brief. The text is not
+submitted by `pane send-text` alone; a failed return leaves it typed and
+unsubmitted, which is `return_failed` and `maybe_in_pane`, never a re-inject.
+`panewire prompt --to <cmd pane>` takes the same transport, so a hand relay
+through panewire reaches a cmd worker too.
 
 ## What "delivered" means
 
@@ -106,4 +117,7 @@ The hub's own one-labelled-replay after a restart
 
 `relay_harness_delivery_t3276_test.go` drives a real hub over a fake
 handoffkeep, the real node relay and a shell `herdr` that models one pane, for
-codex (idle and working), devin, grok and omp.
+codex (idle and working), devin, grok and omp. `relay_cmd_transport_t3330_test.go`
+does the same for cmd, with a shell `herdr` that refuses the agent-level writes
+the way herdr does; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
+transport.

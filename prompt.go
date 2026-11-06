@@ -192,7 +192,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	if acceptedTarget == "" {
 		acceptedTarget = pane.Agent
 	}
-	_, err = client.Call(ctx, "agent.prompt", map[string]any{"target": acceptedTarget, "text": body})
+	_, err = promptSend(ctx, client, pane.Harness, acceptedTarget, body)
 	d.HerdrAcceptance = "accepted"
 	if err != nil {
 		d.HerdrAcceptance = "rejected"
@@ -677,13 +677,13 @@ func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, body st
 		} else if residueSince.IsZero() {
 			residueSince = time.Now()
 		} else if !returnAttempted && time.Since(residueSince) >= promptReturnSettle && promptBudgetLeft(ctx) >= promptReturnRecheck {
-			if safe, why := relayComposerReturnSafe(p.Harness, post.Text, body, pre.Text); safe && (why == "composer_self" || why == "composer_self_chip") {
+			if safe, why := promptComposerReturnSafe(p.Harness, post.Text, body, pre.Text); safe && (why == "composer_self" || why == "composer_self_chip") {
 				returnAttempted = true
 				target := p.PaneID
 				if target == "" {
 					target = p.Agent
 				}
-				if _, err := c.Call(ctx, "agent.send_keys", map[string]any{"target": target, "keys": []string{"return"}}); err == nil {
+				if _, err := promptSendReturn(ctx, c, p.Harness, target, []string{"return"}); err == nil {
 					returnRule = why
 				}
 			}
@@ -698,6 +698,72 @@ func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, body st
 		case <-timer.C:
 		}
 	}
+}
+
+// promptComposerReturnSafe is relayComposerReturnSafe for the direct prompt
+// path. Its only difference is cmd: cmd draws claude's composer (see
+// promptComposer), so the prompt can locate it and decide the same way, while
+// the relay keeps cmd composer-less because its transport types and presses
+// return as one pair and a second keypress would submit twice (hk 3330).
+func promptComposerReturnSafe(harness, screen, text, before string) (bool, string) {
+	if strings.EqualFold(harness, "cmd") {
+		return promptCmdComposerReturnSafe(screen, text, before)
+	}
+	return relayComposerReturnSafe(harness, screen, text, before)
+}
+
+// promptCmdComposerReturnSafe applies relayComposerReturnSafe's rule to the
+// composer promptComposer located for cmd.
+func promptCmdComposerReturnSafe(screen, text, before string) (bool, string) {
+	content, ok := promptComposerText("cmd", screen)
+	if !ok {
+		return false, "composer_unlocated"
+	}
+	switch {
+	case content == "":
+		return true, "composer_empty"
+	case content == compactWhitespace(text):
+		return true, "composer_self"
+	case relayComposerSoleChipRE.MatchString(content):
+		prior, ok := promptComposerText("cmd", before)
+		if !ok || strings.Contains(prior, "[Pastedtext#") {
+			return false, "composer_chip_unowned"
+		}
+		return true, "composer_self_chip"
+	}
+	return false, "composer_foreign"
+}
+
+// promptComposerText is the located composer's text with the prompt glyph and
+// whitespace removed.
+func promptComposerText(harness, screen string) (string, bool) {
+	lines := strings.Split(screen, "\n")
+	top, end, ok := promptComposer(harness, lines)
+	if !ok {
+		return "", false
+	}
+	return strings.TrimPrefix(compactWhitespace(strings.Join(lines[top+1:end], "\n")), "❯"), true
+}
+
+// promptSend types body into the resolved pane. A pane-level harness (cmd) is
+// sent through pane.send_text, because herdr refuses agent.prompt for it with
+// agent_not_ready (hk 3330); every other harness keeps agent.prompt. The text
+// is not submitted here: pollSubmission presses the one return, through the
+// same level.
+func promptSend(ctx context.Context, c *HerdrClient, harness, target, body string) (json.RawMessage, error) {
+	if harnessPaneTransport(harness) {
+		return c.Call(ctx, "pane.send_text", map[string]any{"pane_id": target, "text": body})
+	}
+	return c.Call(ctx, "agent.prompt", map[string]any{"target": target, "text": body})
+}
+
+// promptSendReturn is promptSend's submit: the one return pollSubmission is
+// allowed, at the same level as the text it submits.
+func promptSendReturn(ctx context.Context, c *HerdrClient, harness, target string, keys []string) (json.RawMessage, error) {
+	if harnessPaneTransport(harness) {
+		return c.Call(ctx, "pane.send_keys", map[string]any{"pane_id": target, "keys": keys})
+	}
+	return c.Call(ctx, "agent.send_keys", map[string]any{"target": target, "keys": keys})
 }
 
 func promptBudgetLeft(ctx context.Context) time.Duration {
@@ -782,7 +848,9 @@ func classifyPromptSubmission(harness, pre, screen, body string) (string, string
 // "────" or "❯ ..." lines cannot pose as an edge.
 //
 //   - claude and devin draw the composer between two divider lines, the
-//     top one followed by the ❯ (claude) or ❭ (devin) prompt;
+//     top one followed by the ❯ (claude) or ❭ (devin) prompt; cmd draws
+//     claude's layout with the same ❯ prompt ("❯ Ask your question..."),
+//     captured live on a cmd pane (hk 3330);
 //   - codex draws no divider; its composer is the last line starting
 //     with the › prompt, down to the footer. An echo starts with › too,
 //     but a new composer is always drawn below it.
@@ -791,7 +859,7 @@ func classifyPromptSubmission(harness, pre, screen, body string) (string, string
 func promptComposer(harness string, lines []string) (top, end int, ok bool) {
 	isEdge, glyph := isClaudeDividerLine, "❯"
 	switch {
-	case strings.EqualFold(harness, "claude"):
+	case strings.EqualFold(harness, "claude"), strings.EqualFold(harness, "cmd"):
 	case strings.EqualFold(harness, "devin"):
 		isEdge, glyph = isDevinDividerLine, "❭"
 	case strings.EqualFold(harness, "codex"):
