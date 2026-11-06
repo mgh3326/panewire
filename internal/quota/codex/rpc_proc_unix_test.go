@@ -91,27 +91,33 @@ func (f fakeCodex) pid(t *testing.T, name string) int {
 	return pid
 }
 
-// awaitStarted returns once the fake has recorded every name, that is once
-// the app-server is running; it fails the test after the start timeout.
-func (f fakeCodex) awaitStarted(t *testing.T, names ...string) {
-	t.Helper()
-	eventually(t, startTimeout, "the fake app-server to start", func() bool {
-		for _, name := range names {
-			if _, ok := f.readPID(name); !ok {
-				return false
-			}
+// started reports whether the fake has recorded every name, that is whether
+// the app-server is running.
+func (f fakeCodex) started(names ...string) bool {
+	for _, name := range names {
+		if _, ok := f.readPID(name); !ok {
+			return false
 		}
-		return true
-	})
+	}
+	return true
 }
 
 // startTimeout bounds how long a test waits for the fake to start; it is far
 // above a slow exec so that only a fake that never starts reaches it.
-const startTimeout = 30 * time.Second
+const startTimeout = 10 * time.Second
+
+// awaitStarted returns once the fake has recorded every name and fails the
+// test after startTimeout.
+func (f fakeCodex) awaitStarted(t *testing.T, names ...string) {
+	t.Helper()
+	eventually(t, startTimeout, "the fake app-server to start", func() bool { return f.started(names...) })
+}
 
 // startAfterStarted is a Config.StartRPC that spawns the real app-server and
 // returns only once the fake has recorded names, so a short RPCTimeout is
 // judged against a server that is running and not against its exec latency.
+// It may run off the test goroutine, so it reports a fake that never starts as
+// a start error rather than failing the test.
 func (f fakeCodex) startAfterStarted(t *testing.T, names ...string) func(context.Context, string, string, string) (Transport, error) {
 	return func(ctx context.Context, binary, dir, codexHome string) (Transport, error) {
 		tr, err := startAppServer(ctx, binary, dir, codexHome)
@@ -119,7 +125,10 @@ func (f fakeCodex) startAfterStarted(t *testing.T, names ...string) func(context
 			return nil, err
 		}
 		t.Cleanup(tr.Close)
-		f.awaitStarted(t, names...)
+		if !waitUntil(startTimeout, func() bool { return f.started(names...) }) {
+			tr.Close()
+			return nil, errors.New("the fake app-server did not start")
+		}
 		return tr, nil
 	}
 }
@@ -205,9 +214,24 @@ func TestAppServerHangIsKilledAndReaped(t *testing.T) {
 			cfg := f.config(reply(200, fixture(t, "wham_usage.json"), nil))
 			cfg.RPCTimeout = 300 * time.Millisecond // simulated latency: the server never replies
 			cfg.StartRPC = f.startAfterStarted(t, "pid", "child")
-			observed, err := Measure(t.Context(), cfg)
-			if err != nil || observed.Source != "usage-api" {
-				t.Fatalf("%+v %v", observed, err)
+			type measured struct {
+				observed quota.Observation
+				err      error
+			}
+			done := make(chan measured, 1)
+			go func() {
+				observed, err := Measure(t.Context(), cfg)
+				done <- measured{observed, err}
+			}()
+			// Without the kill Measure never returns; fail instead of waiting
+			// for the package timeout.
+			select {
+			case m := <-done:
+				if m.err != nil || m.observed.Source != "usage-api" {
+					t.Fatalf("%+v %v", m.observed, m.err)
+				}
+			case <-time.After(2 * startTimeout):
+				t.Fatal("Measure did not return: the hung app-server was never killed")
 			}
 			pid, child := f.pid(t, "pid"), f.pid(t, "child")
 			if alive(pid) {
