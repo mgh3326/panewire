@@ -175,14 +175,25 @@ func shadowQuotaLine(pool string, pacelever, native shadowReading) string {
 }
 
 // logShadowQuota measures pool in this process — directly, never through the
-// shared store — and logs the comparison with pacelever's reading. It reports
+// shared store — and logs the comparison with pacelever's reading. The
+// measurement runs in the background, so a slow provider can never delay or
+// fail the refresh it rides on (placement bounds that refresh with
+// measure_timeout_s); it is cut off after shadowMeasureTimeout, and a pool
+// already being measured in shadow is skipped rather than queued. It reports
 // nothing back: spawns and the fleet-state publish keep pacelever's result.
 func (client *HubClient) logShadowQuota(ctx context.Context, pool string, pacelever shadowReading) {
 	if ctx.Err() != nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(ctx, shadowMeasureTimeout)
-	defer cancel()
-	reading, err := client.nativeQuotaSource(pool).measureOnly(ctx)
-	client.warnMessage(shadowQuotaLine(pool, pacelever, shadowFromShared(reading, err)))
+	if _, running := client.shadowQuotaRunning.LoadOrStore(pool, struct{}{}); running {
+		return
+	}
+	detached := context.WithoutCancel(ctx)
+	go func() {
+		defer client.shadowQuotaRunning.Delete(pool)
+		ctx, cancel := context.WithTimeout(detached, shadowMeasureTimeout)
+		defer cancel()
+		reading, err := client.nativeQuotaSource(pool).measureOnly(ctx)
+		client.warnMessage(shadowQuotaLine(pool, pacelever, shadowFromShared(reading, err)))
+	}()
 }

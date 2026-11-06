@@ -250,7 +250,11 @@ func (c Config) whoami(ctx context.Context, token string) (Identity, error) {
 		account = org
 	}
 	identity := Identity{Org: org, FP: fingerprint(account)}
-	c.Identities.put(token, identity)
+	// Only a named account is remembered: a whoami that omitted both ids must
+	// be asked again, not pin the key to "no account" after the API recovers.
+	if identity.FP != "" {
+		c.Identities.put(token, identity)
+	}
 	return identity, nil
 }
 

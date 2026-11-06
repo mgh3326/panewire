@@ -206,7 +206,9 @@ a config error. `claude` and `codex` are always native and need no entry.
   pool, and the fleet-state loop still publishes pacelever's reading. Beside each
   pacelever refresh the node measures commandcode itself — once, directly, with
   no store lease, no publication and no presence, so no other host's reading
-  changes — and logs one line (the node's warning log; 25 s bound):
+  changes — and logs one line (the node's warning log). The measurement runs in the
+  background with a 25 s bound, so it never delays or fails the refresh it
+  rides on, and a pool already being measured in shadow is skipped, not queued:
 
   ```
   quota shadow commandcode: match=false account=same pacelever=[5h=0.0%@2026-11-06T09:00:00Z 7d=1.3%@2026-11-12T00:00:00Z] native=[5h=0.0%@2026-11-06T09:00:00Z 7d=1.3%@2026-11-12T00:00:00Z 30d=9.3%@2026-11-27T07:38:00Z] diff=30d: native only

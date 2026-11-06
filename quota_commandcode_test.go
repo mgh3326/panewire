@@ -150,6 +150,40 @@ func paceleverCommandcodeStatus(kind string) string {
 	return `{"providers":[{"id":"commandcode","status":"error","error_kind":"` + kind + `"}]}`
 }
 
+// warnLog collects a client's warnings; the shadow comparison writes its line
+// from a background goroutine.
+type warnLog struct {
+	mu  sync.Mutex
+	log []string
+}
+
+func newWarnLog(client *HubClient) *warnLog {
+	w := &warnLog{}
+	client.warn = func(m string) {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		w.log = append(w.log, m)
+	}
+	return w
+}
+
+func (w *warnLog) all() []string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]string(nil), w.log...)
+}
+
+// shadowLine waits for the one comparison line of a refresh and returns it.
+func shadowLine(t *testing.T, w *warnLog) string {
+	t.Helper()
+	eventually(t, 5*time.Second, "the shadow comparison line", func() bool { return len(shadowLines(w.all())) > 0 })
+	lines := shadowLines(w.all())
+	if len(lines) != 1 {
+		t.Fatalf("shadow lines %q (all %q)", lines, w.all())
+	}
+	return lines[0]
+}
+
 func shadowLines(warnings []string) []string {
 	var lines []string
 	for _, w := range warnings {
@@ -173,8 +207,7 @@ func TestFleetQuotaCommandcodeNativeNeverRunsPacelever(t *testing.T) {
 	client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": source}
 	pacelever := &paceleverRunnerFake{}
 	client.nodePacelever = pacelever.run
-	var warnings []string
-	client.warn = func(m string) { warnings = append(warnings, m) }
+	warned := newWarnLog(client)
 
 	sent := map[string]fleetQuotaSent{}
 	client.refreshFleetQuota(t.Context(), "commandcode", sent)
@@ -182,8 +215,8 @@ func TestFleetQuotaCommandcodeNativeNeverRunsPacelever(t *testing.T) {
 	if calls := pacelever.called(); len(calls) != 0 {
 		t.Fatalf("pacelever was run for commandcode in native mode: %v", calls)
 	}
-	if len(warnings) != 0 {
-		t.Fatalf("warnings %q", warnings)
+	if got := warned.all(); len(got) != 0 {
+		t.Fatalf("warnings %q", got)
 	}
 	if hk.published() != 1 {
 		t.Fatalf("the shared store got %d observations", hk.published())
@@ -257,8 +290,7 @@ func TestFleetQuotaCommandcodeShadowStillRunsPacelever(t *testing.T) {
 	client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": commandcodeTestSource(client.spawnConfigPath, commandcodeLoginFiles(commandcodeSecret), api)}
 	pacelever := &paceleverRunnerFake{output: paceleverCommandcodeOutput()}
 	client.nodePacelever = pacelever.run
-	var warnings []string
-	client.warn = func(m string) { warnings = append(warnings, m) }
+	warned := newWarnLog(client)
 
 	client.refreshFleetQuota(t.Context(), "commandcode", map[string]fleetQuotaSent{})
 
@@ -268,16 +300,14 @@ func TestFleetQuotaCommandcodeShadowStillRunsPacelever(t *testing.T) {
 	if hk.published() != 0 {
 		t.Fatalf("shadow mode published %d observations to the shared store", hk.published())
 	}
+	line := shadowLine(t, warned)
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
 	for _, call := range hk.calls {
 		if strings.Contains(call, "/lease") || strings.Contains(call, "/observation") || strings.Contains(call, "/presence") {
 			t.Fatalf("shadow mode touched the store: %s", call)
 		}
 	}
-	lines := shadowLines(warnings)
-	if len(lines) != 1 {
-		t.Fatalf("shadow lines %q (all warnings %q)", lines, warnings)
-	}
-	line := lines[0]
 	for _, want := range []string{
 		"match=false", "account=same",
 		"pacelever=[5h=0.0%@" + claudeTestNow.Add(4*time.Hour).UTC().Format(time.RFC3339) + " 7d=1.3%@",
@@ -344,19 +374,15 @@ func TestFleetQuotaCommandcodeShadowReportsFailures(t *testing.T) {
 			}
 			client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": commandcodeTestSource("/nonexistent", test.files, api)}
 			client.nodePacelever = test.pacelike.run
-			var warnings []string
-			client.warn = func(m string) { warnings = append(warnings, m) }
+			warned := newWarnLog(client)
 			client.refreshFleetQuota(t.Context(), "commandcode", map[string]fleetQuotaSent{})
-			lines := shadowLines(warnings)
-			if len(lines) != 1 {
-				t.Fatalf("shadow lines %q (all %q)", lines, warnings)
-			}
+			line := shadowLine(t, warned)
 			for _, want := range test.want {
-				if !strings.Contains(lines[0], want) {
-					t.Fatalf("line lacks %q:\n%s", want, lines[0])
+				if !strings.Contains(line, want) {
+					t.Fatalf("line lacks %q:\n%s", want, line)
 				}
 			}
-			if strings.Contains(strings.Join(warnings, "\n"), commandcodeSecret) {
+			if strings.Contains(strings.Join(warned.all(), "\n"), commandcodeSecret) {
 				t.Fatal("key in a warning")
 			}
 		})
@@ -401,8 +427,7 @@ func TestNodeQuotaRefreshCommandcodeShadowAndNative(t *testing.T) {
 			client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": commandcodeTestSource(client.spawnConfigPath, commandcodeLoginFiles(commandcodeSecret), newCommandcodeAPI())}
 			pacelever := &paceleverRunnerFake{output: paceleverCommandcodeOutput()}
 			client.nodePacelever = pacelever.run
-			var warnings []string
-			client.warn = func(m string) { warnings = append(warnings, m) }
+			warned := newWarnLog(client)
 
 			result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "commandcode"})
 			if code != "" || result["outcome"] != nodeQuotaRefreshed {
@@ -410,16 +435,16 @@ func TestNodeQuotaRefreshCommandcodeShadowAndNative(t *testing.T) {
 			}
 			calls := pacelever.called()
 			if native {
-				if len(calls) != 0 || hk.published() != 1 || len(shadowLines(warnings)) != 0 {
-					t.Fatalf("native: pacelever=%v published=%d warnings=%q", calls, hk.published(), warnings)
+				if len(calls) != 0 || hk.published() != 1 || len(shadowLines(warned.all())) != 0 {
+					t.Fatalf("native: pacelever=%v published=%d warnings=%q", calls, hk.published(), warned.all())
 				}
 				return
 			}
 			if len(calls) != 1 || calls[0] != "refresh commandcode" || hk.published() != 0 {
 				t.Fatalf("shadow: pacelever=%v published=%d", calls, hk.published())
 			}
-			if lines := shadowLines(warnings); len(lines) != 1 || !strings.Contains(lines[0], "30d=9.3%@2026-11-27T07:38:00Z") {
-				t.Fatalf("shadow lines %q", lines)
+			if line := shadowLine(t, warned); !strings.Contains(line, "30d=9.3%@2026-11-27T07:38:00Z") {
+				t.Fatalf("shadow line %q", line)
 			}
 		})
 	}
@@ -433,13 +458,12 @@ func TestNodeQuotaRefreshCommandcodeShadowPaceleverFailure(t *testing.T) {
 	client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": commandcodeTestSource("/nonexistent", commandcodeLoginFiles(commandcodeSecret), newCommandcodeAPI())}
 	pacelever := &paceleverRunnerFake{status: paceleverCommandcodeStatus("edge_rejected")}
 	client.nodePacelever = pacelever.run
-	var warnings []string
-	client.warn = func(m string) { warnings = append(warnings, m) }
+	warned := newWarnLog(client)
 	if _, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "commandcode"}); code != "refresh_failed" {
 		t.Fatalf("code=%q", code)
 	}
-	if lines := shadowLines(warnings); len(lines) != 1 || !strings.Contains(lines[0], "pacelever=error edge_rejected") {
-		t.Fatalf("shadow lines %q", lines)
+	if line := shadowLine(t, warned); !strings.Contains(line, "pacelever=error edge_rejected") {
+		t.Fatalf("shadow line %q", line)
 	}
 }
 
@@ -571,14 +595,13 @@ func TestFleetQuotaCommandcodeNativeFailureKinds(t *testing.T) {
 			client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": commandcodeTestSource("/nonexistent", test.files, api)}
 			pacelever := &paceleverRunnerFake{}
 			client.nodePacelever = pacelever.run
-			var warnings []string
-			client.warn = func(m string) { warnings = append(warnings, m) }
+			warned := newWarnLog(client)
 			client.refreshFleetQuota(t.Context(), "commandcode", map[string]fleetQuotaSent{})
 			if len(pacelever.called()) != 0 {
 				t.Fatalf("pacelever was run: %v", pacelever.called())
 			}
-			if len(warnings) != 1 || !strings.Contains(warnings[0], "error_kind "+test.kind) || strings.Contains(warnings[0], commandcodeSecret) {
-				t.Fatalf("warnings %q, want kind %s", warnings, test.kind)
+			if got := warned.all(); len(got) != 1 || !strings.Contains(got[0], "error_kind "+test.kind) || strings.Contains(got[0], commandcodeSecret) {
+				t.Fatalf("warnings %q, want kind %s", got, test.kind)
 			}
 		})
 	}
@@ -639,10 +662,70 @@ func TestCommandcodeKeyNeverLeaves(t *testing.T) {
 	}
 	client := quotaClient(t)
 	client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": source}
-	var warnings []string
-	client.warn = func(m string) { warnings = append(warnings, m) }
+	warned := newWarnLog(client)
 	client.refreshFleetQuota(t.Context(), "commandcode", map[string]fleetQuotaSent{})
-	if len(warnings) != 1 || strings.Contains(strings.Join(warnings, "\n"), commandcodeSecret) {
-		t.Fatalf("warnings %q", warnings)
+	if got := warned.all(); len(got) != 1 || strings.Contains(strings.Join(got, "\n"), commandcodeSecret) {
+		t.Fatalf("warnings %q", got)
+	}
+}
+
+// A slow shadow measurement never holds up the refresh it rides on: quota.refresh
+// answers as soon as pacelever has, and the comparison line follows once the
+// native measurement ends. A second refresh while one is in flight is skipped,
+// not queued.
+func TestNodeQuotaRefreshDoesNotWaitForTheShadowMeasurement(t *testing.T) {
+	setCommandcodeSwitch(t, false)
+	release := make(chan struct{})
+	started := make(chan struct{}, 4)
+	slow := claudeAPIFunc(func(r *http.Request) (*http.Response, error) {
+		started <- struct{}{}
+		select {
+		case <-release:
+		case <-r.Context().Done():
+			return nil, r.Context().Err()
+		}
+		return newCommandcodeAPI().Do(r)
+	})
+	client := &HubClient{spawnConfigPath: "/nonexistent"}
+	client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": commandcodeTestSource("/nonexistent", commandcodeLoginFiles(commandcodeSecret), slow)}
+	pacelever := &paceleverRunnerFake{output: paceleverCommandcodeOutput()}
+	client.nodePacelever = pacelever.run
+	warned := newWarnLog(client)
+
+	done := make(chan string, 1)
+	go func() {
+		_, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "commandcode"})
+		done <- code
+	}()
+	select {
+	case code := <-done:
+		if code != "" {
+			t.Fatalf("refresh code %q", code)
+		}
+	case <-time.After(10 * time.Second): // the refresh must return while the API is still blocked
+		t.Fatal("quota.refresh waited for the shadow measurement")
+	}
+	<-started // the shadow measurement is in flight, blocked on the API
+	if len(shadowLines(warned.all())) != 0 {
+		t.Fatal("the comparison was logged before the native measurement finished")
+	}
+	if _, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "commandcode"}); code != "" {
+		t.Fatalf("second refresh code %q", code)
+	}
+	if calls := pacelever.called(); len(calls) != 2 {
+		t.Fatalf("pacelever calls %v", calls)
+	}
+	close(release)
+	line := shadowLine(t, warned)
+	if !strings.Contains(line, "30d=9.3%@2026-11-27T07:38:00Z") {
+		t.Fatalf("line %s", line)
+	}
+	// Only the first refresh measured: the second found one in flight.
+	eventually(t, 5*time.Second, "the in-flight marker to clear", func() bool {
+		_, busy := client.shadowQuotaRunning.Load("commandcode")
+		return !busy
+	})
+	if got := len(shadowLines(warned.all())); got != 1 {
+		t.Fatalf("%d shadow lines for two refreshes with one measurement in flight", got)
 	}
 }

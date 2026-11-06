@@ -414,3 +414,25 @@ func TestResetTime(t *testing.T) {
 		}
 	}
 }
+
+// A whoami that names no account is not remembered: the next fingerprint read
+// asks again and picks the account up once the API names it, instead of
+// answering "no account" for as long as the key stays the same.
+func TestAccountFPRetriesAfterAnEmptyWhoami(t *testing.T) {
+	a := fixtureAPI(t)
+	good := a.replies["/alpha/whoami"]
+	a.replies["/alpha/whoami"] = respond(200, `{"data":{}}`)
+	cfg := config(a, login(), nil)
+	cfg.Identities = &IdentityCache{}
+	if fp, err := AccountFP(t.Context(), cfg); err != nil || fp != "" {
+		t.Fatalf("fp=%q err=%v", fp, err)
+	}
+	a.replies["/alpha/whoami"] = good
+	if fp, err := AccountFP(t.Context(), cfg); err != nil || fp != fixtureFP {
+		t.Fatalf("after recovery fp=%q err=%v", fp, err)
+	}
+	before := len(a.requests)
+	if fp, _ := AccountFP(t.Context(), cfg); fp != fixtureFP || len(a.requests) != before {
+		t.Fatalf("a named account was not remembered: fp=%q requests %d→%d", fp, before, len(a.requests))
+	}
+}
