@@ -4,7 +4,7 @@
 scheduled for removal; callers should use panewire's interface.
 
 - `panewire quota status [--json]` reads the local host's cached readings.
-- `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` and `codex` are measured by panewire itself ([claude](#native-measurement-claude), [codex](#native-measurement-codex)); every other pool runs the dependency.
+- `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` and `codex` are measured by panewire itself ([claude](#native-measurement-claude), [codex](#native-measurement-codex)), and so is `devin` once the host's `spawn.json` lists it in `quota_native` ([devin](#native-measurement-devin), [shadow and native](#shadow-and-native)); every other pool, and `devin` until then, runs the dependency.
 - `panewire quota observe KIND ...` forwards the observation kind and all remaining arguments, including `devin-free-limit` options, and returns the dependency's exit code.
 
 Status and version calls each have a 30-second bound; gate calls have a
@@ -127,7 +127,108 @@ through the same four paths and the same shared store flow as claude.
 - **Shared store flow** as for claude, except that a reading stays fresh for
   300 s, the default for every pool but claude.
 
-### Artificial Analysis annotations
+## Native measurement: devin
+
+panewire measures the `devin` pool in its own process (`internal/quota/devin`)
+with pacelever's sources, buckets, error kinds and account fingerprint, and the
+shared store flow below. It ships in [shadow](#shadow-and-native); the switch
+makes it the pool's only measurement.
+
+- **Only a host with a devin login measures.** The login is a non-blank
+  `windsurf_api_key` in `<XDG data>/devin/credentials.toml` (`~/.local/share`
+  by default). The key only proves a login exists; it is never read into a
+  request, hashed or logged. Any other host answers `credentials` ("no login
+  here") before any store call: it takes no lease, runs no probe and sends no
+  request. The shared reading is read through placement and the quota gate as
+  before.
+- **Web source first.** With `DEVIN_BEARER_TOKEN` in the environment and
+  `[pools.devin] org_id` in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
+  `<XDG config>/pacelever/config.toml`; the id must look like `org-…`),
+  `GET /api/<org>/billing/quota/usage` on devin's web app host with the bearer
+  token and `x-cog-org-id`; 20 s timeout, redirects refused, 2 MiB cap. `1d` (omitted
+  when `hide_daily_quota`) and `7d` account buckets read from the flat
+  `*_percentage` / `*_reset_at` fields or the nested `quota_usage` object
+  (`used_percent`, `remaining_percent`, or `used`/`limit`/`remaining`); a value
+  below 1 is a fraction, a `remaining_percent` of exactly 1 is 100% left. The
+  plan name is capitalised. A 401/403 is `auth_failed`, a 429 `rate_limited`
+  (with `Retry-After`, no default wait), another non-200 `http`, no response
+  `network`, an unreadable body or no window `parse_error`. Any web failure
+  falls through to the probe without being reported, as pacelever's does.
+- **The `/usage` probe.** `devin --respect-workspace-trust false` runs on a
+  200×50 pseudo-terminal in a private empty git repository (`devin` from
+  `PACELEVER_DEVIN_BIN`, `[pools.devin] bin`, or `PATH`), at most 35 s. The
+  probe waits for an input prompt, types `/usage`, and, after the input has
+  settled (500 ms), Enter in a separate write; it parses the panel once the
+  screen has been quiet 250 ms. **The prompt is any of `❯`, `❭` (U+276D, devin's
+  own), `›`, `> ` or `Shift+Tab`** — without U+276D the probe never types and ends
+  at its timeout (pacelever#57). A line naming weekly/7-day, 5h/5-hour, daily
+  or monthly with a percentage is a `7d`/`5h`/`1d`/`30d` bucket (`% used`,
+  `% left` or `% remaining`; a reset of "resets in 6d 2h" is now + that); a panel
+  with none falls back to the plan line's "NN% remaining". A trust prompt, a
+  timeout, an early exit or a missing binary is `probe_error` with the stage
+  reached; an unreadable panel is `parse_error`. The TUI's whole process group is
+  killed and reaped on every exit path. pacelever's `devin models list` Free tags
+  are not part of the shared reading and are not measured.
+- **Account key** `devin:<fp>`, `fp = hex(sha256("devin-account|" + org))[:16]`,
+  `org` = `devin.org_id` in `<XDG config>/devin/config.json`, only with a login.
+  A web reading carries the organization pacelever's config names, so a web
+  answer for another organization than the login's is `account_mismatch` and not
+  published; a login with no organization is `account_unknown`.
+- **Free tier.** devin's SWE-2 models have no used percentage, so a reading also
+  carries `free_bucket` (`available`, `exhausted` with `resets_at`, or
+  `unknown`), which pacelever's gate requires of any devin reading. It comes
+  from the host's own free-limit record (`devin-free-limit.json` in pacelever's
+  cache directory, written by `panewire quota observe devin-free-limit`): an
+  exceed that still holds is `exhausted` until its reset, a record with no
+  readable reset holds for an hour after its observation, one with no readable
+  time is `unknown`, none is `available`. Merging keeps another host's later
+  hold, and a locally recorded exceed is published even over a fresh reading.
+  The free state does not depend on the paid probe: a failed measurement still
+  publishes `{buckets: [], free_bucket}` and the refresh succeeds with no paid
+  window (pacelever's rule); only a 429 is remembered, backing the paid probe off
+  for its `Retry-After` (300 s default) while the free state keeps publishing.
+- **Shared store flow** as for claude, with a 300 s freshness window, except
+  that **the wait for another host's measurement is bounded at 15 s** (not two
+  lease windows): past it the refresh ends `shared_pending` instead of holding a
+  spawn path.
+
+## Shadow and native
+
+A pool that can be measured natively but still spawns through pacelever (today
+only `devin`) has a switch in the node's `spawn.json`:
+
+```json
+{"quota_native": ["devin"]}
+```
+
+- **shadow (default; key absent, unreadable or not listing the pool).**
+  Everything that ran pacelever for the pool still does: the fleet-state loop,
+  the `quota.refresh` node command, placement's refresh and `panewire quota
+  refresh devin` (which runs `pacelever refresh devin`). The node also measures
+  the pool itself, without touching the store (no lease, no publication, no
+  presence — pacelever owns the shared reading), and writes one line per
+  comparison: `msg="quota shadow compare" pool=devin verdict=… account=…
+  native_buckets=… pacelever_buckets=… diffs=…`. `verdict` is `match` (same
+  account; same buckets, used percentages within 1 point, resets within 5
+  minutes), `differ` (with `diffs` naming each `used:`, `reset:`,
+  `native_missing:`, `pacelever_missing:` or `account`), `native_error`,
+  `pacelever_error` or `both_error`, with each side's error kind. A host without
+  a login logs `quota shadow skipped reason=no_login` at debug. The comparison
+  runs in the background, one per pool at a time, so it never delays a spawn.
+  Only the node daemon compares (the loop and `quota.refresh`); the CLI in shadow
+  is pacelever alone.
+- **native (`quota_native` lists the pool).** The same four paths run the
+  native measurement and its store flow and run no pacelever for the pool. The
+  file is read on every refresh: flipping it needs no restart, and removing the
+  line returns to shadow. `internal/fleet` sends the refresh of a switched pool
+  through `panewire quota refresh <pool>` on the host that holds the account
+  (locally or over ssh), and that host's own `spawn.json` decides; a host running
+  an older panewire answers with pacelever.
+
+The desk flips the switch after reading the comparison lines: a few hours of
+loop rounds and the spawns made meanwhile.
+
+## Artificial Analysis annotations
 
 `panewire quota aa-sync --out catalog.json` reads the current catalog through
 pacelever, fetches the free Data API, and writes a catalog artifact for review

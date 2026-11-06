@@ -4,6 +4,7 @@ go 1.27
 
 require (
 	github.com/coder/websocket v1.8.15
+	github.com/creack/pty v1.1.24
 	github.com/fsnotify/fsnotify v1.9.0
 	github.com/getsentry/sentry-go v0.31.1
 	github.com/google/uuid v1.6.0

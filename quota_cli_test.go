@@ -48,7 +48,7 @@ func TestQuotaCLIRefusalAndPlainCommands(t *testing.T) {
 	}
 	out.Reset()
 	errout.Reset()
-	if code := runQuotaCLI([]string{"refresh", "devin"}, &out, &errout); code != 0 || out.String() != "refreshed\n" {
+	if code := runQuotaCLI([]string{"refresh", "kimi"}, &out, &errout); code != 0 || out.String() != "refreshed\n" {
 		t.Fatalf("refresh %d %q %s", code, out.String(), errout.String())
 	}
 	out.Reset()

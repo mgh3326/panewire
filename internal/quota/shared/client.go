@@ -33,6 +33,21 @@ type Bucket struct {
 	Model    string     `json:"model,omitempty"`
 }
 
+// FreeBucket is the availability of a pool's free tier (devin's SWE-2 models),
+// which has no used percentage. State is one of the Free* constants; ResetsAt
+// is set exactly when the state is FreeExhausted.
+type FreeBucket struct {
+	State    string     `json:"state"`
+	ResetsAt *time.Time `json:"resets_at,omitempty"`
+}
+
+// Free bucket states.
+const (
+	FreeAvailable = "available"
+	FreeExhausted = "exhausted"
+	FreeUnknown   = "unknown" // a limit record is damaged
+)
+
 // Observation is a stored reading. ConfirmedAt is set by the store when a later
 // measurement republished the same values; a reading is valid as of the later
 // of MeasuredAt and ConfirmedAt.
@@ -45,6 +60,8 @@ type Observation struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	Plan        string     `json:"plan,omitempty"`
 	Buckets     []Bucket   `json:"buckets"`
+	// FreeBucket is published by pools with a free tier; nil otherwise.
+	FreeBucket *FreeBucket `json:"free_bucket,omitempty"`
 }
 
 // Latest is the store's answer for one account; Observation is nil when none

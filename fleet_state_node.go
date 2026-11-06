@@ -224,13 +224,14 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 }
 
 // measureFleetQuota takes pool's reading for the fleet-state publish. The
-// claude and codex pools are measured in this process; every other pool runs
-// `pacelever refresh`. A failed measurement answers the error kind that says
-// why: the login rule reads it. run is the measurement's own deadline and
-// parent the loop's context, which the failure-kind status lookup outlives it
-// on.
+// claude and codex pools are measured in this process, and so is a switched
+// pool (devin) whose spawn.json says native; every other pool runs `pacelever
+// refresh`, and a switched pool in shadow is also measured beside it for the
+// comparison log. A failed measurement answers the error kind that says why:
+// the login rule reads it. run is the measurement's own deadline and parent
+// the loop's context, which the failure-kind status lookup outlives it on.
 func (client *HubClient) measureFleetQuota(run, parent context.Context, pool string) (FleetStatePublish, bool, string) {
-	if isNativeQuotaPool(pool) {
+	if client.servesQuotaNatively(pool) {
 		reading, err := client.nativeQuotaSource(pool).Refresh(run)
 		if err != nil {
 			// A timed-out refresh says nothing about the login.
@@ -245,6 +246,15 @@ func (client *HubClient) measureFleetQuota(run, parent context.Context, pool str
 		}
 		return publish, true, ""
 	}
+	return client.measureFleetQuotaWithPacelever(run, parent, pool)
+}
+
+// servesQuotaNatively reports whether the node runs no pacelever for pool.
+func (client *HubClient) servesQuotaNatively(pool string) bool {
+	return isNativeQuotaPool(pool) || isSwitchedQuotaPool(pool) && quotaSwitchedNative(client.spawnConfigPath, pool)
+}
+
+func (client *HubClient) measureFleetQuotaWithPacelever(run, parent context.Context, pool string) (FleetStatePublish, bool, string) {
 	output, err := client.nodePaceleverRunner()(run, "refresh", pool)
 	publish, ok := FleetStatePublish{}, false
 	if err == nil {
@@ -254,6 +264,9 @@ func (client *HubClient) measureFleetQuota(run, parent context.Context, pool str
 		if confirmed := client.fleetQuotaConfirmedAt(run, publish.Key, publish.MeasuredAt); !confirmed.IsZero() {
 			publish.ConfirmedAt = &confirmed
 		}
+		if isSwitchedQuotaPool(pool) {
+			client.shadowQuota(pool, paceleverShadow(pool, output, err, ""))
+		}
 		return publish, true, ""
 	}
 	// refresh prints no error kind; pacelever's status names it. A timed-out
@@ -261,6 +274,9 @@ func (client *HubClient) measureFleetQuota(run, parent context.Context, pool str
 	kind := fleetQuotaErrorKindUnreadable
 	if run.Err() == nil && !errors.Is(err, context.DeadlineExceeded) {
 		kind = client.fleetQuotaErrorKind(parent, pool)
+	}
+	if isSwitchedQuotaPool(pool) {
+		client.shadowQuota(pool, paceleverShadow(pool, output, err, kind))
 	}
 	return FleetStatePublish{}, false, kind
 }

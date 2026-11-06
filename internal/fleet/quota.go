@@ -352,9 +352,15 @@ func (a *App) localAccountKeys(ctx context.Context, pool string) []string {
 	return keys
 }
 
-// isNativeQuotaPool says whether panewire measures the pool itself (`panewire
-// quota refresh <pool>`); every other pool is refreshed by pacelever.
-func isNativeQuotaPool(pool string) bool { return pool == "claude" || pool == "codex" }
+// isNativeQuotaPool says whether the refresh of the pool goes through `panewire
+// quota refresh <pool>`; every other pool is refreshed by pacelever. devin is
+// one: the command on the host that holds the account decides, by that host's
+// spawn.json, whether it measures natively or still runs pacelever (shadow),
+// so a refresh needs no knowledge of the switch and an older panewire on the
+// target still answers with pacelever.
+func isNativeQuotaPool(pool string) bool {
+	return pool == "claude" || pool == "codex" || pool == "devin"
+}
 
 // refreshCommand is the on-demand refresh of pool on this host: pacelever's
 // binary for a pool pacelever measures, panewire's own quota command for the

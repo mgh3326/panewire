@@ -37,6 +37,7 @@ func quotaClient(t *testing.T) *HubClient {
 	client := readinessClient(t, "", readinessFakes(nil))
 	client.events = make(chan hubClientEvent, 8)
 	client.warn = func(string) {}
+	isolateDevinShadow(client)
 	return client
 }
 

@@ -54,7 +54,10 @@ type claudeHK struct {
 	calls  []string
 	latest json.RawMessage
 	holder string
-	pubs   []json.RawMessage
+	// foreignHolder, when set, holds every lease for a minute: this node never
+	// gets it.
+	foreignHolder string
+	pubs          []json.RawMessage
 }
 
 func newClaudeHK(t *testing.T) *claudeHK {
@@ -75,6 +78,8 @@ func newClaudeHK(t *testing.T) *claudeHK {
 				return
 			}
 			_, _ = w.Write([]byte(`{"observation":` + string(h.latest) + `}`))
+		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/lease") && h.foreignHolder != "":
+			_ = json.NewEncoder(w).Encode(shared.Lease{Holder: h.foreignHolder, ExpiresAt: time.Now().Add(time.Minute)})
 		case r.Method == "POST" && strings.HasSuffix(r.URL.Path, "/lease"):
 			h.holder = body.Holder
 			_ = json.NewEncoder(w).Encode(shared.Lease{Holder: body.Holder, ExpiresAt: time.Now().Add(time.Minute), Acquired: true})

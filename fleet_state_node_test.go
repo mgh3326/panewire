@@ -89,6 +89,7 @@ func TestFleetStateNodePublishesQuota(t *testing.T) {
 	var calls atomic.Int32
 	fsRunNode(t, server.URL, func(client *HubClient) {
 		client.stateQuotaPools = []string{"devin"}
+		isolateDevinShadow(client)
 		client.stateQuotaInterval = 10 * time.Second
 		client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
 			calls.Add(1)

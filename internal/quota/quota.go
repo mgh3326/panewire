@@ -15,6 +15,7 @@ import (
 // compare these names, never a string literal.
 const (
 	ErrKindAuth                = "auth"          // 401/403 without a provider-specific hint
+	ErrKindAuthFailed          = "auth_failed"   // refused credential with a login hint
 	ErrKindCredentials         = "credentials"   // no usable local credential
 	ErrKindHTTP                = "http"          // any other non-200 response
 	ErrKindNetwork             = "network"       // the request never got a response
