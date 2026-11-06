@@ -356,7 +356,11 @@ func (a *App) deliverPlacements(ctx context.Context) {
 	cursor, _ := os.ReadFile(cursorPath)
 	start := sort.Search(len(entries), func(i int) bool { return entries[i].Name() > string(cursor) })
 	lastAttempted := ""
+	rejected := false
 	defer func() {
+		if rejected {
+			a.capRejectedPlacements()
+		}
 		if lastAttempted != "" {
 			if e := atomicFile(cursorPath, []byte(lastAttempted), 0600); e != nil {
 				a.warn("placement delivery cursor could not be saved")
@@ -373,6 +377,7 @@ func (a *App) deliverPlacements(ctx context.Context) {
 			continue
 		}
 		attempted++
+		previous := lastAttempted
 		lastAttempted = ent.Name()
 		path := filepath.Join(dir, ent.Name())
 		b, e := os.ReadFile(path)
@@ -404,7 +409,19 @@ func (a *App) deliverPlacements(ctx context.Context) {
 		e = c.request(ctx, http.MethodPost, "/v1/placements", p.Record, nil)
 		var be *BackendError
 		conflict := errors.As(e, &be) && be.Status == http.StatusConflict
+		if errors.As(e, &be) && (be.Status == http.StatusBadRequest || be.Status == http.StatusUnprocessableEntity) {
+			rejectedDir := filepath.Join(a.stateDir(), "placements-rejected")
+			if noSymlinks(rejectedDir) != nil || os.MkdirAll(rejectedDir, 0700) != nil || os.Chmod(path, 0600) != nil || os.Rename(path, filepath.Join(rejectedDir, ent.Name())) != nil {
+				lastAttempted = previous
+				a.warn("placement record could not be quarantined; records remain spooled")
+				break
+			}
+			rejected = true
+			a.warn("placement record %s rejected: hk HTTP %d %s", ent.Name(), be.Status, be.Code)
+			continue
+		}
 		if e != nil && !conflict {
+			lastAttempted = previous
 			// Name hk's answer (status and error code, never the body) so a
 			// refusal such as a token scope can be told from an outage.
 			if errors.As(e, &be) {
@@ -420,5 +437,46 @@ func (a *App) deliverPlacements(ctx context.Context) {
 		if e := os.Remove(path); e != nil && !os.IsNotExist(e) {
 			a.warn("placement spool entry could not be removed")
 		}
+	}
+}
+
+func (a *App) capRejectedPlacements() {
+	dir := filepath.Join(a.stateDir(), "placements-rejected")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		a.warn("placement quarantine could not be read")
+		return
+	}
+	type file struct {
+		name     string
+		modified time.Time
+	}
+	var files []file
+	for _, entry := range entries {
+		if entry.Type().IsRegular() {
+			info, err := entry.Info()
+			if err != nil {
+				a.warn("placement quarantine entry could not be inspected")
+				return
+			}
+			files = append(files, file{entry.Name(), info.ModTime()})
+		}
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].modified.Equal(files[j].modified) {
+			return files[i].name < files[j].name
+		}
+		return files[i].modified.Before(files[j].modified)
+	})
+	dropped := 0
+	for _, f := range files[:max(0, len(files)-1000)] {
+		if err := os.Remove(filepath.Join(dir, f.name)); err != nil {
+			a.warn("placement quarantine entry could not be removed")
+			break
+		}
+		dropped++
+	}
+	if dropped > 0 {
+		a.warn("placement quarantine dropped %d oldest records", dropped)
 	}
 }

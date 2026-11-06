@@ -19,12 +19,13 @@ import (
 )
 
 type placementHK struct {
-	mu       sync.Mutex
-	server   *httptest.Server
-	requests [][]byte
-	rows     map[string][]byte
-	status   int
-	loseAck  bool
+	mu          sync.Mutex
+	server      *httptest.Server
+	requests    [][]byte
+	rows        map[string][]byte
+	status      int
+	statusFirst int
+	loseAck     bool
 }
 
 func placementServer(t *testing.T, a *App) *placementHK {
@@ -69,6 +70,11 @@ func placementServer(t *testing.T, a *App) *placementHK {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		h.requests = append(h.requests, b)
+		if h.statusFirst != 0 && len(h.requests) == 1 {
+			w.WriteHeader(h.statusFirst)
+			_, _ = w.Write([]byte(`{"error":"invalid_context"}`))
+			return
+		}
 		if h.status != 0 {
 			w.WriteHeader(h.status)
 			return
@@ -696,5 +702,120 @@ func TestPlacementDeliveryRefusalNamesTheStatus(t *testing.T) {
 	a.flushPlacements()
 	if warnings := a.Err.(*bytes.Buffer).String(); !strings.Contains(warnings, "hk HTTP 401") || len(placementSpool(t, a)) == 0 {
 		t.Fatalf("refusal must name HTTP 401 and keep the record spooled: warnings=%s spool=%d", warnings, len(placementSpool(t, a)))
+	}
+}
+
+func TestPlacementPermanentRefusalQuarantinesAndContinues(t *testing.T) {
+	for _, status := range []int{http.StatusBadRequest, http.StatusUnprocessableEntity} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			a := testApp(t)
+			h := placementServer(t, a)
+			h.statusFirst = status
+			for _, id := range []string{"a", "b", "c"} {
+				p := pendingPlacement{Record: placementRecord{JobID: id}}
+				if err := a.spoolPlacement(&p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			a.flushPlacements()
+			requests, rows := h.snapshot()
+			if len(requests) != 3 || len(rows) != 2 {
+				t.Fatalf("want 3 requests and 2 delivered rows, got %d/%d", len(requests), len(rows))
+			}
+			rejected := filepath.Join(a.stateDir(), "placements-rejected", "a.1.json")
+			info, err := os.Stat(rejected)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if info.Mode().Perm() != 0600 {
+				t.Fatalf("mode %v", info.Mode())
+			}
+			if got := placementSpool(t, a); len(got) != 0 {
+				t.Fatalf("remaining spool: %v", got)
+			}
+			cursor, err := os.ReadFile(filepath.Join(a.stateDir(), "placement-cursor"))
+			if err != nil || string(cursor) != "c.1.json" {
+				t.Fatalf("cursor %q: %v", cursor, err)
+			}
+			warnings := a.Err.(*bytes.Buffer).String()
+			if !strings.Contains(warnings, "a.1.json") || !strings.Contains(warnings, fmt.Sprint(status)) || !strings.Contains(warnings, "invalid_context") {
+				t.Fatalf("warning: %s", warnings)
+			}
+			a.flushPlacements()
+			requests, _ = h.snapshot()
+			if len(requests) != 3 {
+				t.Fatalf("rejected record retried: %d", len(requests))
+			}
+		})
+	}
+}
+
+func TestPlacementTransientRefusalStopsDelivery(t *testing.T) {
+	for _, status := range []int{401, 403, 408, 429, 503} {
+		t.Run(fmt.Sprint(status), func(t *testing.T) {
+			a := testApp(t)
+			h := placementServer(t, a)
+			h.statusFirst = status
+			for _, id := range []string{"a", "b", "c"} {
+				p := pendingPlacement{Record: placementRecord{JobID: id}}
+				if err := a.spoolPlacement(&p); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cursorPath := filepath.Join(a.stateDir(), "placement-cursor")
+			if err := os.WriteFile(cursorPath, []byte("0"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			a.flushPlacements()
+			requests, rows := h.snapshot()
+			if len(requests) != 1 || len(rows) != 0 || len(placementSpool(t, a)) != 3 {
+				t.Fatalf("requests=%d rows=%d spool=%v", len(requests), len(rows), placementSpool(t, a))
+			}
+			cursor, err := os.ReadFile(cursorPath)
+			if err != nil || string(cursor) != "0" {
+				t.Fatalf("cursor %q: %v", cursor, err)
+			}
+			if _, err := os.Stat(filepath.Join(a.stateDir(), "placements-rejected")); !os.IsNotExist(err) {
+				t.Fatalf("unexpected quarantine: %v", err)
+			}
+		})
+	}
+}
+
+func TestPlacementQuarantineCapDropsOldest(t *testing.T) {
+	a := testApp(t)
+	h := placementServer(t, a)
+	h.statusFirst = 400
+	dir := filepath.Join(a.stateDir(), "placements-rejected")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 1000; i++ {
+		path := filepath.Join(dir, fmt.Sprintf("old-%04d.json", i))
+		if err := os.WriteFile(path, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		stamp := time.Unix(int64(i+1), 0)
+		if err := os.Chtimes(path, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+	}
+	p := pendingPlacement{Record: placementRecord{JobID: "new"}}
+	if err := a.spoolPlacement(&p); err != nil {
+		t.Fatal(err)
+	}
+	a.flushPlacements()
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1000 {
+		t.Fatalf("entries=%d err=%v", len(entries), err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "old-0000.json")); !os.IsNotExist(err) {
+		t.Fatalf("oldest retained: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new.1.json")); err != nil {
+		t.Fatal(err)
+	}
+	if warnings := a.Err.(*bytes.Buffer).String(); !strings.Contains(warnings, "dropped 1 oldest") {
+		t.Fatalf("warnings: %s", warnings)
 	}
 }
