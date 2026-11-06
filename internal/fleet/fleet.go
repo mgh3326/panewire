@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 )
@@ -292,8 +293,10 @@ func (c *hkQuota) sharedAccount(ctx context.Context, key string) (SharedAccount,
 	return acc, nil
 }
 
-// accountBucket is the allowlisted shared-observation wire format. Model and
-// group buckets are left to the exact profile's gate; account windows rank it.
+// accountBucket is the allowlisted shared-observation wire format. Model
+// buckets are left to the exact profile's gate; account windows rank it. A
+// reading with no account window at all (agy publishes only group windows)
+// ranks on its group windows instead, so the pool is not quota_unknown.
 type accountBucket struct {
 	Window   string   `json:"window"`
 	UsedPct  *float64 `json:"used_pct"`
@@ -308,6 +311,12 @@ func accountPoolView(buckets []accountBucket, now time.Time) *PoolView {
 	}
 	v := &PoolView{Status: "ok", Class: "spend"}
 	var longest time.Duration
+	// The strictest group window gates every rung of the account: placement
+	// does not map a rung to its model group.
+	rankScope := "group"
+	if slices.ContainsFunc(buckets, func(b accountBucket) bool { return b.Scope == "account" }) {
+		rankScope = "account"
+	}
 	for _, b := range buckets {
 		if b.UsedPct == nil || !finite(*b.UsedPct) || *b.UsedPct < 0 || *b.UsedPct > 100 {
 			return nil
@@ -318,7 +327,7 @@ func accountPoolView(buckets []accountBucket, now time.Time) *PoolView {
 				return nil
 			}
 		}
-		if b.Scope != "account" {
+		if b.Scope != rankScope {
 			continue
 		}
 		if v.Blocking == nil || *b.UsedPct > *v.Blocking {
