@@ -35,7 +35,7 @@ name one lane.
 | Scope | Grants |
 | --- | --- |
 | `nodes.agents.read` | `GET /v1/nodes`, `GET /v1/nodes/agents`, `GET /v1/session-reap` |
-| `node.command:<op>@<machine>` or `@*` | `POST /v1/nodes/{machine}/command` with that op (`agents.list`, `pane.capture`, `pane.close`, `pane.read`, `job.done`, `worktree.inspect` (also authorizes `worktree.list`), `worktree.prepare`, `worktree.remove`, `quota.refresh`). `pane.read` and `job.done` admit a service holding that scope and no other caller, not even the operator. |
+| `node.command:<op>@<machine>` or `@*` | `POST /v1/nodes/{machine}/command` with that op (`agents.list`, `pane.capture`, `pane.close`, `pane.read`, `job.done`, `worktree.inspect` (also authorizes `worktree.list`), `worktree.prepare`, `worktree.remove`, `quota.refresh`, `pr.status` (only on the hub's `--pr-status-host`; see [pr-status.md](pr-status.md))). `pane.read` and `job.done` admit a service holding that scope and no other caller, not even the operator. A node credential is admitted for `pr.status` alone, with no scope, on the PR-status host. |
 | `spawn@<machine>` or `@*` | `POST /v1/spawn` for that machine, and `GET /v1/spawn/{id}` for a request on it. A spawn request with `checkout` also authorizes the node's internal `worktree.prepare` preflight; no separate `node.command` grant is needed. Requests with `checkout` or `brief.doc` require the connected node to advertise `spawn_v2` in its hello; otherwise the hub returns `503 spawn_capability_required` immediately. |
 | `wake@<machine>` or `@*` | `POST /v1/nodes/wake` for that machine |
 | `inbox.read:<lane>` | `GET /v1/inbox`, `/v1/inbox/count`, `/v1/inbox/wait` and `POST /v1/inbox/{id}/read` with `?lane=<lane>` |
@@ -142,4 +142,4 @@ Two-slot rotation, a client listing endpoint and hashed-at-rest tokens are
 deferred.
 
 
-Normal `spawn`, `work` and `lead` submissions use the operator-only `POST /v1/spawns` durable operation API. A per-host low-level `spawn@machine` grant does not authorize automatic placement across hosts. The older `/v1/spawn` interface is a synchronous destination-pinned RPC surface; its in-memory waiters do not own accepted operations. See [durable spawn operations](hub-spawn-operations.md).
+Normal `spawn` and `work` submissions use the operator-only `POST /v1/spawns` durable operation API. A per-host low-level `spawn@machine` grant does not authorize automatic placement across hosts. The older `/v1/spawn` interface is a synchronous destination-pinned RPC surface; its in-memory waiters do not own accepted operations. See [durable spawn operations](hub-spawn-operations.md).

@@ -52,9 +52,6 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	owner := spawn.Owner
-	if spawn.Role == "builder" {
-		owner = spawn.Parent
-	}
 	if !hubAgentLabelPattern.MatchString(owner) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_owner", "fix": "supply an existing lane name"})
 		return
@@ -127,6 +124,7 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]string{"error": "store_unavailable", "fix": "restore the durable store and retry this same request"})
 		return
 	}
+	h.supersedeRetryableHolders(r.Context(), app, request, spawn)
 	h.acceptSpawnResponse(w, task)
 	select {
 	case h.spawnKick <- struct{}{}:
@@ -291,6 +289,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		for i := 0; i+1 < len(request.Args); i++ {
 			if request.Args[i] == "--host" {
 				request.Args[i+1] = task.Outcome.Host
+				request.RetryHost = task.Outcome.Host
 			}
 		}
 		found := false

@@ -194,11 +194,11 @@ type HubClient struct {
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
 	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
-	nodePacelever      relayCommandRunner // fixture seam for quota.refresh of a pool other than claude; nil runs pacelever.
-	claudeQuotaMu      sync.Mutex
-	claudeQuota        *claudeQuotaSource // the node's own claude measurement; fixtures set it, nil builds the default.
-	nodeCloseSettle    time.Duration      // fixture seam; zero is nodePaneCloseSettle.
-	nodeGitLockWait    time.Duration      // fixture seam; zero is nodeGitOpLockWait.
+	nodePacelever      relayCommandRunner // fixture seam for quota.refresh of a pool the node does not measure itself; nil runs pacelever.
+	nativeQuotaMu      sync.Mutex
+	nativeQuota        map[string]*nativeQuotaSource // the node's own measurement per native pool; fixtures set it, a missing pool builds the default.
+	nodeCloseSettle    time.Duration                 // fixture seam; zero is nodePaneCloseSettle.
+	nodeGitLockWait    time.Duration                 // fixture seam; zero is nodeGitOpLockWait.
 	busyRelayMu        sync.Mutex
 	busyRelay          *relayBusyManager
 	relayCommand       relayCommandRunner   // fixture seam for agent get/wait.
@@ -722,7 +722,33 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		// it.
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness, Evidence: "prompt_failed"}
 	}
-	return relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, relayReadPane(ctx, pane))
+	result := relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, relayReadPane(ctx, pane))
+	if !strings.EqualFold(harness, "claude") || !strings.HasPrefix(result.Evidence, "unproven:") || len(relayNoncesIn(text)) == 0 {
+		return result
+	}
+	// Claude can accept input while busy before it appears in either read.
+	// Observe only: another prompt or return could duplicate or alter input.
+	deadline := time.NewTimer(8 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return result
+		case <-deadline.C:
+			return result
+		case <-tick.C:
+			reads := relayReadPane(ctx, pane)
+			classification, rule, proven := relayClassifyReads(harness, reads, text, true, presendQueued)
+			switch classification {
+			case "marker_observed":
+				return relayInjectResult{Outcome: relayInjectDelivered, Harness: harness, Evidence: rule, Proven: proven}
+			case "queued":
+				return relayInjectResult{Outcome: relayInjectQueued, Harness: harness, Evidence: rule, Proven: proven}
+			}
+		}
+	}
 }
 
 func relayInjectHarness(ctx context.Context, pane string) string {

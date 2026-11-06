@@ -113,6 +113,18 @@ for the matching pane and harness. If none is available at landing, `id` is
 `unknown` and `source` is `unavailable`; the spawn still proceeds. No session
 or credential file is read to discover this value.
 
+## Reap closes the hk record of a revoked job
+
+A job that ends by `job.revoked` or `job.lost` writes nothing to hk, so its
+record would stay `claimed` or `spawned` and hold the task's role against every
+later spawn. `panewire reap --apply` therefore writes `state=lost` to the hk
+record before it closes the pane and writes `job.reaped`, when the job's newest
+terminal event since its last claim is `job.revoked` or `job.lost`. A job that
+completed or joined, a record that is already `completed` or `lost` and a job hk
+does not know are not written. A failed hk read or write is a warning plus a
+`job.record_failed` event (`op: reap`); reap still closes the pane and writes
+`job.reaped`.
+
 ## Token usage capture
 
 When the node completes a job (`panewire done`, `escalate`, and the completion

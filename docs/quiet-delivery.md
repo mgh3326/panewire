@@ -47,6 +47,19 @@ counts as unsupported), or when a supported pane is known idle/done by a fresh
 heartbeat session snapshot. Unknown state is never treated as idle. Everything
 else keeps the deadline digest as its safety net.
 
+Set `idle_promote: false` on a lane to keep inbox items queued when its
+pane is idle or unsupported, while retaining ordinary deadline escalation.
+Owned job completions and interrupt-class events still deliver immediately.
+Use this for lanes without an external digest scheduler; `inbox_summary`
+disables inbox deadlines and requires an external scheduler instead. The two
+`idle_promote: false` cannot be combined with `inbox_summary` on a lane.
+
+```yaml
+lanes:
+  design:
+    idle_promote: false
+```
+
 ```yaml
 agents:
   claude: supported   # built-in default; every other CLI defaults unsupported

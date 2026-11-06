@@ -223,7 +223,7 @@ type selPlan struct {
 	routeRefusal string
 	before       *selPlan
 	outcome      string
-	// roleSkips names the lead/consult families skipped role_effort_unplaced;
+	// roleSkips names the consult families skipped role_effort_unplaced;
 	// escalation records a chosen rung above the role effort;
 	// familyEffort records a chosen rung whose role effort family_effort set.
 	roleSkips    []map[string]any
@@ -340,8 +340,6 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 				reason = "family_filtered"
 			case !slices.Contains(roles, req.role):
 				reason = "seat_role"
-			case req.role == "builder" && row.Gate != "default" && !req.route.familyAdmitsGate(row):
-				reason = "builder_gate"
 			case (req.role == "tester" || req.role == "reviewer") && req.builderFamily == "":
 				reason = "builder_family_unreadable"
 			case (req.role == "tester" || req.role == "reviewer") && seat.Family == req.builderFamily:
@@ -572,7 +570,7 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 	machine := a.machine()
 	excluded, _ := parseHosts(s.ExcludeHosts)
 	threshold := a.loadThreshold()
-	// A lead or consult has no grade, whatever the task title says; the
+	// A consult has no grade, whatever the task title says; the
 	// placement plan clears it the same way (placeAuto, planHosts).
 	grade := req.grade
 	if req.route.top() {
@@ -830,7 +828,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 	return p, nil
 }
 
-// markRoleEffort records how the lead/consult role-effort cap shaped the
+// markRoleEffort records how the consult role-effort cap shaped the
 // selection. A family's role effort is the role's effort unless family_effort
 // names the family. Without --allow-escalation a rung above it is never
 // a candidate (above_role_effort). When its family's role-effort rung was not

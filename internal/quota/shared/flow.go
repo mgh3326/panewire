@@ -17,6 +17,9 @@ const (
 	DefaultLeaseTTL = 120
 	// DefaultFreshTTL is how long a claude reading stays current.
 	DefaultFreshTTL = 15 * time.Minute
+	// OtherFreshTTL is how long a reading of any other pool stays current
+	// (pacelever's and placement's rule).
+	OtherFreshTTL = 5 * time.Minute
 	// DefaultPresenceEvery bounds how often a host re-announces an account.
 	DefaultPresenceEvery = 10 * time.Minute
 	defaultWait          = time.Second

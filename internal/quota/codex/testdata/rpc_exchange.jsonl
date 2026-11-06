@@ -1,0 +1,4 @@
+{"jsonrpc":"2.0","method":"sessionConfigured"}
+{"id":1,"result":{}}
+{"id":2,"result":{"rateLimits":{"planType":"pro","primary":{"usedPercent":94,"resetsAt":1790500839,"windowDurationMins":10080},"secondary":{"usedPercent":12,"resetsAt":1789980000,"windowDurationMins":300}},"rateLimitsByLimitId":{"codex":{"primary":{"usedPercent":1}},"codex_spark":{"limitName":"Codex Spark","primary":{"usedPercent":40,"resetsAt":1789980000,"windowDurationMins":300},"secondary":{"usedPercent":5,"windowDurationMins":10080}}}}}
+{"id":3,"result":{"account":{"email":"fixture@example.invalid"}}}

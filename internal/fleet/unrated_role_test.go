@@ -7,9 +7,9 @@ import (
 )
 
 func TestUnratedTopRoleReachesQuota(t *testing.T) {
-	for _, role := range []string{"lead", "consult"} {
+	for _, role := range []string{"consult"} {
 		t.Run(role, func(t *testing.T) {
-			a, _, q := leadFixture(t)
+			a, _, q := consultFixture(t)
 			q.CatalogRows = []CatalogRow{{Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"}}
 			admit := gatePools(map[string]string{"codex-sol": "codex"})
 			q.GateDo = func(req QuotaRequest) (string, error) {
@@ -35,8 +35,8 @@ func TestUnratedTopRoleReachesQuota(t *testing.T) {
 func TestQuotaRequestKeepsTopRoutingRole(t *testing.T) {
 	a := testApp(t)
 	for _, tc := range []struct{ seatRole, routingRole, want string }{
-		{"worker", "lead", "lead"}, {"worker", "consult", "consult"},
-		{"builder", "lead", "lead"}, {"counsel", "consult", "consult"},
+		{"worker", "consult", "consult"},
+		{"counsel", "consult", "consult"},
 		{"worker", "implementer", "worker"}, {"tester", "verifier", "tester"}, {"worker", "", "worker"},
 	} {
 		qr, ok := a.quotaRequest(Spawn{Profile: "codex-sol", Effort: "high", Role: tc.seatRole, RoutingRole: tc.routingRole})

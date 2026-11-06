@@ -168,3 +168,56 @@ func TestNodeJobResultRejectsCombinedFindingErrors(t *testing.T) {
 		}
 	}
 }
+
+// activity_events is what lets the hub tell a pane that never worked from one
+// that did (hk 3179): only the spawner's and the quota gate's own records are
+// bookkeeping; any other event, or a name that does not parse, is activity.
+func TestNodeJobResultActivityEvents(t *testing.T) {
+	client, report := nodeReapJobDir(t, "job-a", "report.md")
+	dir := filepath.Dir(report)
+	count := func(t *testing.T) int {
+		t.Helper()
+		got, code := client.nodeJobResult(nodeJobResultArgs{Job: "job-a"})
+		result, _ := got.(nodeJobResult)
+		if code != "" || result.ActivityEvents == nil {
+			t.Fatalf("code=%q result=%+v", code, result)
+		}
+		return *result.ActivityEvents
+	}
+	if got := count(t); got != 0 {
+		t.Fatalf("no events directory: %d", got)
+	}
+	events := filepath.Join(dir, "events")
+	if err := os.Mkdir(events, 0700); err != nil {
+		t.Fatal(err)
+	}
+	write := func(name string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(events, name), []byte(`{}`), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for i, name := range []string{"00001-job.claim.json", "00002-job.placement.json", "00003-lease.acquire.json", "00004-quota_pool.record.json", "00005-job.task_link.json"} {
+		write(name)
+		if got := count(t); got != 0 {
+			t.Fatalf("bookkeeping event %d %s counted as activity: %d", i, name, got)
+		}
+	}
+	for want, name := range []string{"00006-lane.event.json", "00007-job.spawned.json", "00008-job.escalate.json", "stray.json", "00010-job.claim.txt", "1-job.claim.json", "-job.claim.json", "000011-job.claim.json", "0001a-job.claim.json", "00012-.json"} {
+		write(name)
+		if got := count(t); got != want+1 {
+			t.Fatalf("%s: activity %d, want %d", name, got, want+1)
+		}
+	}
+}
+
+func TestNodeJobResultActivityEventsValidation(t *testing.T) {
+	negative := -1
+	if validNodeJobResult(nodeJobResult{Found: true, FindingsError: "missing", ActivityEvents: &negative}) {
+		t.Fatal("negative count accepted")
+	}
+	zero := 0
+	if !validNodeJobResult(nodeJobResult{Found: true, FindingsError: "missing", ActivityEvents: &zero}) || !validNodeJobResult(nodeJobResult{Found: true, FindingsError: "missing"}) {
+		t.Fatal("count rejected")
+	}
+}

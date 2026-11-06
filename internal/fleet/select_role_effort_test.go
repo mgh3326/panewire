@@ -45,8 +45,7 @@ func gateAsked(q *fakeQuota, profile, effort string) bool {
 // the record names codex-sol skipped with role_effort_unplaced.
 func TestLeadSkipsFamilyWhoseRoleEffortRungIsUnplaced(t *testing.T) {
 	for _, tc := range []struct{ name, role, override string }{
-		{"--routing-role lead", "worker", "lead"},
-		{"spawn --role builder", "builder", ""},
+		{"--routing-role consult", "worker", "consult"},
 		{"--role counsel (consult)", "counsel", ""},
 	} {
 		a, s, q := roleEffortFixture(t)
@@ -83,7 +82,7 @@ func TestLeadSkipsFamilyWhoseRoleEffortRungIsUnplaced(t *testing.T) {
 	a, s, _ := roleEffortFixture(t)
 	q := a.Quota.(*fakeQuota)
 	q.CatalogRows = append(q.CatalogRows, CatalogRow{Profile: "opus", Effort: "max", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "opus-m"})
-	s.RoutingRole = "lead"
+	s.RoutingRole = "consult"
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
@@ -97,7 +96,7 @@ func TestLeadSkipsFamilyWhoseRoleEffortRungIsUnplaced(t *testing.T) {
 // selection record carries the escalation.
 func TestLeadAllowEscalationRecordsEscalation(t *testing.T) {
 	a, s, _ := roleEffortFixture(t)
-	s.RoutingRole, s.AllowEscalation = "lead", true
+	s.RoutingRole, s.AllowEscalation = "consult", true
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
@@ -151,11 +150,11 @@ func TestNonLeadRolesKeepTodaysOrdering(t *testing.T) {
 	}
 }
 
-// Acceptance 4: `panewire resolve --role lead` prints the choice spawn's
-// selection makes, and `plan --routing-role lead` agrees.
+// Acceptance 4: `panewire resolve --role consult` prints the choice spawn's
+// selection makes, and `plan --routing-role consult` agrees.
 func TestResolveLeadMatchesSpawnUnderRoleEffortCap(t *testing.T) {
 	a, s, _ := roleEffortFixture(t)
-	s.RoutingRole = "lead"
+	s.RoutingRole = "consult"
 	spawnSel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
@@ -164,7 +163,7 @@ func TestResolveLeadMatchesSpawnUnderRoleEffortCap(t *testing.T) {
 
 	a, _, _ = roleEffortFixture(t)
 	out := captureOut(a)
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "lead", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--json"}); e != nil {
 		t.Fatalf("resolve: %v\n%s", e, out)
 	}
 	var r resolveResult
@@ -180,7 +179,7 @@ func TestResolveLeadMatchesSpawnUnderRoleEffortCap(t *testing.T) {
 
 	a, _, _ = roleEffortFixture(t)
 	out = captureOut(a)
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "lead"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult"}); e != nil {
 		t.Fatal(e)
 	}
 	if !strings.Contains(out.String(), "rung_effort=high") || !strings.HasSuffix(strings.TrimSpace(out.String()), "profile=opus effort=high") {
@@ -189,7 +188,7 @@ func TestResolveLeadMatchesSpawnUnderRoleEffortCap(t *testing.T) {
 
 	a, _, _ = roleEffortFixture(t)
 	out = captureOut(a)
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "lead", "--allow-escalation"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--allow-escalation"}); e != nil {
 		t.Fatal(e)
 	}
 	if !strings.HasSuffix(strings.TrimSpace(out.String()), "profile=codex-sol effort=max") {
@@ -199,7 +198,7 @@ func TestResolveLeadMatchesSpawnUnderRoleEffortCap(t *testing.T) {
 	a, _, q := roleEffortFixture(t)
 	q.LaunchValue = Launch{Profile: "opus", ModelID: "opus-m", Effort: "high", Grade: "S", Gate: "default", Pool: "claude"}
 	out = captureOut(a)
-	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "lead", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult", "--json"}); e != nil {
 		t.Fatalf("plan: %v\n%s", e, out)
 	}
 	var plan map[string]any

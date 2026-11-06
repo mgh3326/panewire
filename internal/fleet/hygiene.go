@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -133,6 +134,7 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 			continue
 		}
 		a.recordJobUsage(ctx, latest, true)
+		a.markEndedJobLost(ctx, latest)
 		if present {
 			if e = a.must(ctx, "herdr", "pane", "close", j.Pane); e != nil {
 				return e
@@ -416,4 +418,40 @@ func (a *App) lanesMissing(ctx context.Context) error {
 	}
 	fmt.Fprintf(a.Out, "lanes-missing: audited %d open job(s), %d missing\n", count, missing)
 	return nil
+}
+
+// markEndedJobLost writes `lost` to the hk record of a job that ended without a
+// completion: its newest terminal event is job.revoked or job.lost, so no
+// job.completed or job.joined follows its last claim. Without it the record
+// stays claimed or spawned and holds the task's role for every later spawn. A
+// record that is already completed or lost, or that hk does not hold, is left
+// alone. A failed read or write is a warning plus job.record_failed; reap
+// goes on.
+func (a *App) markEndedJobLost(ctx context.Context, j Job) {
+	if j.Ended != "job.revoked" && j.Ended != "job.lost" {
+		return
+	}
+	readFailed := func(e error) {
+		a.warn("job record reap read failed: %v", e)
+		_ = a.event(ctx, j.ID, "job.record_failed", map[string]any{"op": "reap"})
+	}
+	store, e := a.jobStore()
+	if e != nil {
+		readFailed(e)
+		return
+	}
+	rec, e := store.Get(ctx, j.ID)
+	if errors.Is(e, errJobNotFound) {
+		return
+	}
+	if e != nil {
+		readFailed(e)
+		return
+	}
+	if state := str(rec, "state"); state != "claimed" && state != "spawned" {
+		return
+	}
+	if e = a.MarkJobLost(ctx, j.ID); e != nil {
+		a.jobRecordFailed(ctx, j.ID, "reap", e)
+	}
 }

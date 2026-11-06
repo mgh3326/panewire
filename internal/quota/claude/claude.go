@@ -25,7 +25,6 @@ const (
 	apiTimeout       = 20 * time.Second
 	apiBodyLimit     = 2 << 20
 	defaultRateWait  = 300 * time.Second
-	maxRetryAfter    = 86400 * time.Second
 	credentialsLimit = 1 << 20
 )
 
@@ -137,7 +136,7 @@ func (c Config) fetchAPI(ctx context.Context, token string) (quota.Observation, 
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return quota.Observation{}, statusError(response.StatusCode, response.Header, c.now())
+		return quota.Observation{}, quota.StatusError(response.StatusCode, response.Header, c.now(), defaultRateWait)
 	}
 	var raw map[string]json.RawMessage
 	body := json.NewDecoder(io.LimitReader(response.Body, apiBodyLimit))
@@ -149,43 +148,6 @@ func (c Config) fetchAPI(ctx context.Context, token string) (quota.Observation, 
 		return quota.Observation{}, quota.Fail(quota.ErrKindParse, "usage response has no usable windows")
 	}
 	return observed, nil
-}
-
-// statusError is the one mapping from a non-200 status to a safe failure.
-func statusError(status int, header http.Header, now time.Time) *quota.Error {
-	switch status {
-	case http.StatusUnauthorized, http.StatusForbidden:
-		return quota.Fail(quota.ErrKindAuth, "usage HTTP "+http.StatusText(status))
-	case http.StatusTooManyRequests:
-		e := quota.Fail(quota.ErrKindRateLimited, "usage HTTP 429")
-		e.RetryAfter = retryAfter(header.Get("Retry-After"), now)
-		if e.RetryAfter <= 0 {
-			e.RetryAfter = defaultRateWait
-		}
-		return e
-	}
-	return quota.Fail(quota.ErrKindHTTP, "usage HTTP "+http.StatusText(status))
-}
-
-// retryAfter reads a Retry-After header as delay-seconds or an HTTP-date,
-// capped at a day. Missing, zero, negative and unparseable values are 0.
-func retryAfter(header string, now time.Time) time.Duration {
-	value := strings.TrimSpace(header)
-	if value == "" {
-		return 0
-	}
-	if n, ok := quota.ParseFinite(value); ok {
-		if n <= 0 {
-			return 0
-		}
-		return time.Duration(math.Min(n, maxRetryAfter.Seconds()) * float64(time.Second))
-	}
-	if at, err := http.ParseTime(value); err == nil {
-		if d := at.Sub(now); d > 0 {
-			return min(d, maxRetryAfter)
-		}
-	}
-	return 0
 }
 
 // hasMeasuredBucket reports whether any window carries a valid utilisation. A

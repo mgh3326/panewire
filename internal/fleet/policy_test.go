@@ -67,22 +67,20 @@ func TestSeatPolicy(t *testing.T) {
 		host                                           bool
 		want                                           int
 	}{
-		{"cmd builder default", "cmd-dsflash41", "builder", "default", "B", "", "", true, 0},
-		{"cmd consult builder denied", "cmd-dsflash41", "builder", "consult_only", "B", "", "", true, 77},
-		{"cmd escalation builder denied", "cmd-dsflash41", "builder", "escalation", "B", "", "", true, 77},
+		{"cmd worker default", "cmd-dsflash41", "worker", "default", "B", "", "", true, 0},
 		{"cmd shares ds41", "cmd-dsflash41", "tester", "default", "B", "deepseek", "", true, 77},
 		{"independent tester", "cmd-dsflash41", "tester", "default", "B", "anthropic", "", true, 0},
 		{"missing builder family", "cmd-dsflash41", "tester", "default", "B", "", "", true, 77},
 		{"grade too low", "cmd-dsflash41", "worker", "default", "S+", "", "", true, 77},
 		{"capability absent", "cmd-dsflash41", "worker", "default", "B", "", "", false, 70},
-		{"E6 marker absent", "builder-haiku-high", "builder", "default", "B", "", "", true, 77},
-		{"E6 marker exact", "builder-haiku-high", "builder", "default", "B", "", "haiku@high", true, 0},
+		{"E6 marker absent", "builder-haiku-high", "worker", "default", "B", "", "", true, 77},
+		{"E6 marker exact", "builder-haiku-high", "worker", "default", "B", "", "haiku@high", true, 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			s := p.Profiles[tt.profile]
 			host := map[string]any{s.Capability: tt.host}
 			l := Launch{ModelID: "provider/model", Effort: "high", Grade: "A+", Gate: tt.gate}
-			if got := code(s.Check(l, tt.role, tt.grade, tt.builder, tt.arm, host, false)); got != tt.want {
+			if got := code(s.Check(l, tt.role, tt.grade, tt.builder, tt.arm, host)); got != tt.want {
 				t.Fatalf("got %d want %d", got, tt.want)
 			}
 		})

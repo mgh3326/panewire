@@ -1,6 +1,6 @@
 # Hub execution
 
-Real spawn/work/lead commands now use [durable hub operations](hub-spawn-operations.md). Configure the hub operator credential in the fleet hosts config and provision node spawn/work-root policy. There is no launcher subprocess or SSH launcher fallback. The imported planning and dry-run policy details below still apply.
+Real spawn/work commands now use [durable hub operations](hub-spawn-operations.md). Configure the hub operator credential in the fleet hosts config and provision node spawn/work-root policy. There is no launcher subprocess or SSH launcher fallback. The imported planning and dry-run policy details below still apply.
 
 # Spawn configuration
 
@@ -12,7 +12,9 @@ the new location. The same applies to retired environment names: `WRK_LANE_STRIC
 `WRK_COMPLETION_TIMEOUT_S`, `WRK_MOCK_MCP_CONFIG` and `SCOPEFUEL_E6_ARM` fall back
 to their `PANEWIRE_*` replacements with a warning; a set `SCOPEFUEL_BIN` is ignored
 with a warning. The workspace trust lock stays `.wrk.lock` until old spawner
-binaries are drained from every host.
+binaries are drained from every host. An own `.wrk.lock` left group-writable (for
+example by umask 002) is narrowed to 0600 through the open fd with a warning; any
+other insecure lock is refused naming its path, owner, mode and the failed rule.
 A missing file means a local host with standard harnesses. Malformed TOML,
 duplicate keys, root assignments, BOMs, invalid safety booleans and contradictory
 hub quota settings refuse with exit 70. Existing tables keep their key names.
@@ -117,7 +119,7 @@ grades and gates for each effort. The desk publishes the seed after merge.
 | --- | --- |
 | `hub_url` | Panewire hub URL. |
 | `hub_token_env` | Operator credential-file path for placement/quota. Configuring it opts into the hub quota gate and requires hub_url. |
-| `operator_token_env` | Operator credential file for control operations and builder lane fallback. |
+| `operator_token_env` | Operator credential file for control operations and the lane-list fallback. |
 | `lanes_token_env` | Dedicated machine-bound lane credential; preferred for lane registration/removal. |
 | `hub_cf_env` | Optional access-service credential file passed to panewire. |
 | `machine_id` | Host identity fallback. |
@@ -127,15 +129,15 @@ grades and gates for each effort. The desk publishes the seed after merge.
 | `state` | `"on"` (default) reads the hub's fleet state for placement and the quota gate; `"off"` skips it and measures directly as before (the rollback switch). See [Fleet state](#fleet-state). |
 | `state_publisher_ttl_s` | Seconds a publisher heartbeat stays alive. Default 90. |
 
-Worker lane credentials use lanes_token_env, then hub_token_env. Builder lane
-credentials use lanes_token_env, then operator_token_env, then hub_token_env.
+Worker lane credentials use lanes_token_env, then hub_token_env. Lane listing
+and lanes of legacy builder jobs use lanes_token_env, then operator_token_env, then hub_token_env.
 Panewire owns authentication and relay transport; panewire never prints credentials.
 All herdr calls during a spawn use one frozen `HERDR_SESSION` (default `default`).
 For example, a node serving session `fleet` can use
 `session_machine_ids = { fleet = "host-a", default = "host-a-default" }` and
 `session_lanes_token_envs = { fleet = "/config/node.env", default = "/config/node-default.env" }`.
 The registration warning includes session, machine, pane and panewire's error text;
-it is emitted for workers and builders. A credential explicitly declaring another
+it is emitted for workers. A credential explicitly declaring another
 machine fails locally with `LANE_SESSION_MACHINE_MISMATCH` (70); configure both session
 maps rather than relabeling the route. `job.spawned` and the success line also
 record the herdr session, so a pane id is never the only delivery address.
@@ -155,8 +157,8 @@ and its error is preserved in the registration warning.
 | `hub_wait` | `240` | `via = "hub"` only: seconds (1..300) the hub waits for the node to answer a spawn. It bounds the whole node run, so it must exceed the node's `brief_submit_timeout_ms` plus launch time; a shorter budget cuts the submit window. A first spawn that clones a large repo may need more. |
 | `brief_doc_prefix` | `briefs/` | `via = "hub"` only: handoffkeep key prefix the brief is uploaded under; it must match the node's own `brief_doc_prefix` (ends in `/`). |
 | `tags` | unset | Capability tags offered by this host (`caps` is an alias; both lists merge). A job's required `--tags` must be a subset for the host to be a placement candidate. A capability the host does not declare is unknown and fails closed for this host only: the host is excluded for jobs that need it and stays eligible for every other job. See [Host capabilities and light hosts](#host-capabilities-and-light-hosts). |
-| `roles` | unset (all) | Nonempty list of spawn roles (`worker`, `builder`, `tester`, `reviewer`, `counsel`) this host accepts. Other roles record `role_not_accepted:<role>`. |
-| `grades` | unset (all) | Nonempty list of task grades (`C`, `B`, `A`, `A+`, `S`, `S+`) this host accepts. Other grades record `grade_not_accepted:<grade>`; a lead or consult has no grade and records `grade_not_accepted:none`. |
+| `roles` | unset (all) | Nonempty list of spawn roles (`worker`, `tester`, `reviewer`, `counsel`) this host accepts. Other roles record `role_not_accepted:<role>`. A list that still names the retired `builder` role is a config error (exit 70) that names the key to edit: delete `"builder"` from `<host>.roles`. |
+| `grades` | unset (all) | Nonempty list of task grades (`C`, `B`, `A`, `A+`, `S`, `S+`) this host accepts. Other grades record `grade_not_accepted:<grade>`; a consult has no grade and records `grade_not_accepted:none`. |
 | `presence_id` | host `NAME` | Identity this host uses in pacelever host-presence records. |
 | `capacity` | unset | Inventory value displayed by hosts. Authoritative capacity comes from panewire placement and remote admission. |
 | `heavy` | legacy | Accepted and ignored; the `heavy` command and its host lock were removed. |
@@ -197,7 +199,7 @@ Recommended declarations by machine class:
 | macOS development machines | `["macos", "unity", "xcode"]` | none |
 | Linux desktop | `["linux", "unity", "gpu"]` | none |
 | Small cloud VM | `["linux"]` | none; no `unity` |
-| One-core cloud VM | `["linux"]` | `roles = ["worker", "tester", "reviewer"]`, `grades = ["C", "B", "A"]` (no lead, no heavy grade) |
+| One-core cloud VM | `["linux"]` | `roles = ["worker", "tester", "reviewer"]`, `grades = ["C", "B", "A"]` (no consult, no heavy grade) |
 | Raspberry Pi | `["linux"]` | `roles = ["worker", "tester"]`, `grades = ["C", "B"]` (Python and docs work) |
 
 ```toml
@@ -266,7 +268,7 @@ panewire:
    --builder-family --builder-job`). The node supplies workspace, host and the
    override reason. A flag the allowlist cannot carry (`--keep`, `--job-dup-ok`,
    `--task-hk-bypass`, `--allow-escalation`, `--operator-request`,
-   `--requested-by`, `--purpose`, `--lane-defer`) refuses the spawn (exit 2)
+   `--requested-by`, `--purpose`) refuses the spawn (exit 2)
    instead of being dropped. A report is sent as `--report-relative <path>`,
    relative to the jobs root, and the node resolves it under its own jobs root,
    so the two hosts' home directories may differ. This applies to `--report`
@@ -289,8 +291,8 @@ panewire:
    `--host auto` moves to the next candidate.
 
 The target account is refreshed with the `quota.refresh` node command instead
-of `ssh <host> pacelever refresh` (or `panewire quota refresh claude` for the
-claude pool); `measure_timeout_s` still bounds it.
+of `ssh <host> pacelever refresh` (or `panewire quota refresh <pool>` for the
+claude and codex pools); `measure_timeout_s` still bounds it.
 
 Failures never fall back to ssh (design D4):
 
@@ -399,7 +401,7 @@ overrides.
 | `presence_ttl_s` | `86400` | How recent a host-presence record must be to count as login evidence. |
 | `fresh_ttl_s` | `900` for `claude`, `300` otherwise | How recent a shared observation must be to count as fresh, for every pool without its own `pool_fresh_ttl_s` entry. A reading is valid as of the later of `measured_at` and `confirmed_at`: handoffkeep keeps `measured_at` when a re-measurement publishes the same values and only advances `confirmed_at`. This is pacelever's rule, so `pacelever --json` and the gate agree on a reading. A spawn delegated over ssh with a selected account carries the placing host's window for that account's pool, and the executing host rechecks that account with it (up to 86400). |
 | `pool_fresh_ttl_s` | unset | Optional pool → seconds table (`[quota.pool_fresh_ttl_s]`, nonnegative integers) that overrides `fresh_ttl_s` for one pool. |
-| `measure_timeout_s` | `60` | Bound on the on-target refresh (`panewire quota refresh claude` for claude, else `pacelever refresh`) for a remote account the spawning host does not hold. |
+| `measure_timeout_s` | `60` | Bound on the on-target refresh (`panewire quota refresh <pool>` for claude and codex, else `pacelever refresh`) for a remote account the spawning host does not hold. |
 | `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. |
 | `node_env` | `~/.config/panewire/hub-node.env` | Panewire node env file; `HUB_MACHINE_ID` in it is the host id written to job records. `PANEWIRE_NODE_ENV` overrides the path. |
 
@@ -441,8 +443,8 @@ An inherited spawn normally leaves the task bound to its parent job. It rebinds
 the task to the new job, through `handoffkeep tasks rebind`, only after the brief
 lands and only when all of these hold: the parent's hk record state is `lost`,
 `failed` or `completed`; the task's `refs.job_id` is the parent; the new job id
-differs; and the spawn is a replacement seat (routing role `implementer` or
-`lead`), not a reviewer, tester, consult or `panewire delegate` child. The
+differs; and the spawn is a replacement seat (routing role `implementer`),
+not a reviewer, tester, consult or `panewire delegate` child. The
 `job.task_link` event then says `status: rebound`. Otherwise it says `inherited`,
 adding `bound_job` when the task is bound to a third job and `rebind_error` when
 the rebind failed or the parent's state was unreadable; neither fails the landed
@@ -672,7 +674,7 @@ carries `policy_file` and `policy_overrides`.
 model would a spawn get" without a task or brief. It is live and read-only:
 it runs the spawn's selection core with catalog, account observations,
 presence, and account-bound gates. Worker roles use `--grade` instead of a
-task title. Lead and consult omit the grade. Selection then walks the same placement plan for the chosen seat — the local launch
+task title. Consult omits the grade. Selection then walks the same placement plan for the chosen seat — the local launch
 resolution, seat check and gate for this host, the shared-account quota
 gate for each remote host — and stops at the first host that admits it. It
 never spawns, wakes a host, claims a local job, writes an hk task or job
@@ -717,15 +719,14 @@ this boundary. An explicit `-m PROFILE` requires `--override-reason`, but
 that reason overrides placement only. A retired or role-ineligible profile
 is refused before placement.
 
-### Lead and consult
+### Consult
 
-`spawn --role builder` maps to routing role `lead`. `--role counsel` maps
-to `consult`. Both admit only `opus` and `fable` through `claude`, or
+`--role counsel` maps to routing role `consult`. It admits only `opus` and `fable` through `claude`, or
 `codex-sol` and `codex-astra` through `codex`. OMP also admits the exact model
 selectors `anthropic/claude-opus-5-5`, `anthropic/claude-fable-5-1`,
 `openai/gpt-6.1-sol`, and `openai/gpt-6-astra`.
 The shipped `omp-opus` and `omp-sol` profiles qualify. `omp-sonnet` and
-`omp-terra61` cannot lead or consult. An `agy` or `pi` seat running an
+`omp-terra61` cannot consult. An `agy` or `pi` seat running an
 Anthropic model is ineligible. These constraints also apply to a wildcard
 in the v1 table and to explicit profiles.
 
@@ -733,16 +734,15 @@ The routing table's profile allowlist still applies. OMP profiles must be
 listed by name or covered by `"*"`. Catalog and launch model IDs are checked,
 so a top-profile name cannot admit a non-top OMP model.
 
-Task grade is recorded but does not filter or rank a lead or consult.
-`spawn --role builder`, `spawn --role counsel`, and their `plan` forms
-accept no `--grade`. An explicit grade returns exit 70 and the named rule
-`lead_consult_take_no_grade`. `resolve --role lead` and
-`resolve --role consult` also take no grade. Other resolve roles default to
+Task grade is recorded but does not filter or rank a consult.
+`spawn --role counsel` and its `plan` form accept no `--grade`. An explicit grade returns exit 70 and the named rule
+`lead_consult_take_no_grade` (the code keeps its historical spelling).
+`resolve --role consult` also takes no grade. Other resolve roles default to
 grade `C`. Other plan roles require a grade.
 
-### Role effort for lead and consult
+### Role effort for consult
 
-A lead or consult never runs above its role's `effort` (`high` in the
+A consult never runs above its role's `effort` (`high` in the
 current table) unless the request passes `--allow-escalation`. This rule
 applies the same way to `spawn -m auto`, `plan`, and `resolve`. `delegate`
 routes only as implementer, explorer, verifier, or reviewer, so the cap does
@@ -770,7 +770,7 @@ today's ordering.
 
 #### Per-family role effort (`family_effort`)
 
-`roles.lead.family_effort` (or `roles.consult.family_effort`) maps a
+`roles.consult.family_effort` maps a
 profile name to the role effort that family leads at, in place of the
 role's `effort`. The current table carries `{"codex-sol": "xhigh"}`.
 
@@ -779,10 +779,9 @@ role's `effort`. The current table carries `{"codex-sol": "xhigh"}`.
   unplaced the family is skipped `role_effort_unplaced` with
   `role_effort` set to the mapped effort.
 - The entry is the operator's explicit opt-in for that exact rung. panewire
-  admits it even when its catalog gate is `escalation`, and a builder seat
-  may launch it. Without `--allow-escalation`, other escalation rungs stay
+  admits it even when its catalog gate is `escalation`. Without `--allow-escalation`, other escalation rungs stay
   `gate_class`, and rungs above the mapped one stay excluded.
-  With `family_effort` `codex-sol=xhigh`, a lead admits `codex-sol@xhigh`
+  With `family_effort` `codex-sol=xhigh`, a consult admits `codex-sol@xhigh`
   (gate `escalation`). It still drops `codex-sol@max` as
   `above_role_effort`.
 - Family rule: a key matches a catalog row whose profile is the key. A key
@@ -802,9 +801,9 @@ role's `effort`. The current table carries `{"codex-sol": "xhigh"}`.
   Such a rung is not an escalation, so `routing.escalation` is absent.
   `resolve` prints `effort=<mapped rung>`.
 
-The document remains v1. If it has no `consult` entry, panewire uses its
-`lead` rule with the distinct `consult` identity. Lead and consult always
-wait on exhaustion and never downgrade. Neither seat role can override its
+The document remains v1. panewire reads no `lead` entry: a `consult` entry
+is required, and a `lead` entry left in the table is ignored. Consult always
+waits on exhaustion and never downgrades. The seat role cannot override its
 routing role to obtain weaker eligibility.
 
 ### The v1 table
@@ -812,11 +811,11 @@ routing role to obtain weaker eligibility.
 panewire reads the first fenced `json` block of `policy/model-routing`.
 `version` must be `1`. `roles.R.allowed` lists catalog profile names, or
 `"*"`. The table also supplies `effort`, `on_exhaustion`, `downgrade_to`,
-`family_rule`, `fixed`, and, on lead and consult, `family_effort`. Unknown
+`family_rule`, `fixed`, and, on consult, `family_effort`. Unknown
 fields are ignored. Duplicate keys, invalid exhaustion modes, and role maps
 naming absent roles are refused. A `family_effort` entry is refused with
-`family_effort_invalid` in three cases: it sits on a role other than lead
-or consult, its key is neither a top profile nor a profile the role
+`family_effort_invalid` in three cases: it sits on a role other than
+consult, its key is neither a top profile nor a profile the role
 allows (any profile ID when the role allows `"*"`), or its effort is not
 one of `low`, `medium`, `high`, `xhigh`, `max`, or `ultra`.
 This PR does not parse the proposed v2 schema.
@@ -824,13 +823,12 @@ This PR does not parse the proposed v2 schema.
 The seat-role map is read from `panewire_role_map` or its pre-#155 name
 `runtug_role_map` (the name hk publishes today); two maps that differ are
 refused, and the cache stores the map as `panewire_role_map`. A seat role
-the map does not name takes its builtin routing role (`builder` lead,
-`worker` implementer, `tester` verifier, `reviewer` reviewer, `counsel`
+the map does not name takes its builtin routing role (`worker` implementer, `tester` verifier, `reviewer` reviewer, `counsel`
 consult) instead of running unfiltered.
 
-`--routing-role lead|consult|implementer|explorer|verifier|reviewer|judge`
+`--routing-role consult|implementer|explorer|verifier|reviewer|judge`
 on `spawn` or `plan` selects the routing role. Seat admission still uses
-`--role`. Builder and counsel retain their required routing roles.
+`--role`. Counsel retains its required routing role.
 Delegate maps `reader` to `explorer`, `verifier` to `verifier`, and
 `reviewer` to `reviewer`. `--patch` uses `implementer` eligibility.
 
@@ -838,7 +836,7 @@ A valid document is cached atomically at
 `$XDG_STATE_HOME/panewire/model-routing.json`, or
 `~/.local/state/panewire/model-routing.json`. If hk is unreachable or
 unreadable, a usable cache supplies `policy_source=cache@v<N>`.
-Without either source, lead, consult, and verifier return
+Without either source, consult and verifier return
 `POLICY_UNAVAILABLE`. The existing v1 fallback for other roles uses
 `builtin_default`.
 
@@ -890,8 +888,8 @@ bucket. The
 executing host checks the current binding again before launch. An explicit
 `--host` limits the eligible accounts. A refusal names that restriction and
 does not claim fleet exhaustion. Exhausted Claude accounts do not prevent
-selection of an eligible Codex lead, and exhausted Codex accounts do not
-prevent selection of an eligible Claude lead.
+selection of an eligible Codex consult, and exhausted Codex accounts do not
+prevent selection of an eligible Claude consult.
 
 ### Fleet state
 
@@ -953,7 +951,7 @@ host does not mask QUOTA_EXHAUSTED. Unknown quota or an authentication,
 transport, or policy failure on a bound account still prevents that claim.
 If no account is bound, missing-login or missing-host outcomes apply. An exhausted v1 role with `on_exhaustion=downgrade_to` retries
 once using only its listed profiles and records `downgraded_from`.
-Lead and consult never take this path. Exit 86 reports a refusal, not a
+Consult never takes this path. Exit 86 reports a refusal, not a
 scheduled retry.
 
 Account-bound gate refusals validate the same schema, account, pool, and
@@ -984,14 +982,14 @@ The nested `routing` object carries `routing_version`, `policy_source`,
 the allowlist, and the exhaustion rule. The hk job metadata schema is
 unchanged.
 
-`panewire resolve --role lead|consult|implementer|explorer|verifier|reviewer|judge
+`panewire resolve --role consult|implementer|explorer|verifier|reviewer|judge
 [--grade G] [--t T0..T3] [--builder-family F] [--harness KIND] [--allow-escalation] [--json]` runs the same
 selection core without a launch or job write. `--t` defaults to `T0`.
 Reviewer and judge require `--builder-family` to exclude that family.
 The result names the account and host selected now; it is not a reservation.
 The text answer ends with `profile=<profile> effort=<effort>`.
 `effort` is the role's starting effort, or the selected rung's when absent.
-For a lead or consult rung chosen above the role effort with
+For a consult rung chosen above the role effort with
 `--allow-escalation`, `effort` is the chosen rung's.
 
 `--harness omp` restricts selection to OMP seats before quota ordering. For
@@ -1194,7 +1192,7 @@ job's own inbox subtree even if a wider root is configured.
 `kind`, `family`, `capability` and nonempty `roles`. Optional `effort` and `pin`
 fix an alias to a rung; `e6` requires an exact marker. A nonempty `rungs` map is
 closed: unlisted efforts are refused. A rung has `roles` and optional `e6`.
-Roles are worker, builder, tester, reviewer and counsel. Model IDs and grades
+Roles are worker, tester, reviewer and counsel. Model IDs and grades
 are read from the quota tool, never this file.
 
 `PANEWIRE_BRIEF_POLICY` overrides `[local].brief_policy`. Brief policy schema:
@@ -1222,7 +1220,7 @@ for ownership and distribution.
 | `HANDOFFKEEP_BIN` | Must resolve to the canonical current-user ~/.local/bin executable in production. |
 | `XDG_DATA_HOME` | Data home of the local ledger (`$XDG_DATA_HOME/arbiter/state.db`); production guard requires the canonical `~/.local/share`. |
 | `XDG_STATE_HOME` | State home of the role routing cache (`$XDG_STATE_HOME/panewire/model-routing.json`); default `~/.local/state`. |
-| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude pool is measured by panewire itself and ignores it. |
+| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools are measured by panewire itself and ignore it. |
 | `PANEWIRE_NODE_ENV` | Panewire node env file for `HUB_MACHINE_ID` (job record host id); default `~/.config/panewire/hub-node.env`, or `[quota].node_env`. |
 | `ARBITER_INBOX_ROOT` | Jobs root; production guard requires the canonical inbox. |
 | `HERDR_SESSION` | Herdr session passed through or selected for remote execution. |
@@ -1334,8 +1332,7 @@ a reason code. Candidates include scores, available hub signals, and skip
 reasons. Missing signals stay absent. Forced placements can have an empty
 candidate list. The server derives `decided_on` from the node token's host grant.
 
-Execution metadata includes `family`, the admitted `model`, `role` (`lead`,
-`worker`, `review`, or `consult`), `profile`, `pool`, `pane_id`, the repository
+Execution metadata includes `family`, the admitted `model`, `role` (`worker`, `review`, or `consult`), `profile`, `pool`, `pane_id`, the repository
 name, and an opaque `account_key`. Account fingerprints remain fingerprints.
 Other account aliases become hashes. Briefs, local paths, login identities,
 credentials, and terminal output do not enter the record. Mergewake passes the
@@ -1411,19 +1408,21 @@ success receipt is always authoritative for avoiding a second spawn, even with e
 
 ## Task presets
 
-`panewire work TASK_ID` and `panewire lead TASK_ID` expand task metadata into
-normal spawn flags. Both use `-m auto --host auto -w workers`, derive `--t`
+`panewire work TASK_ID` expands task metadata into
+normal spawn flags. It uses `-m auto --host auto -w workers`, derive `--t`
 from the title marker, and pass the numeric task binding. The task marker
-continues to supply grade to admission. Lead uses the existing builder role
-and lead routing policy; it does not turn grade into a lead policy override.
+continues to supply grade to admission.
 
-Job/label default to `refs.job_id`, otherwise `task<ID>-work` or
-`task<ID>-lead`. Lead's lane defaults to the job id. Working directory comes
+`panewire lead TASK_ID` and `--role builder` are refused with a usage error
+(exit 2) and one line: the delegated lead seat is retired, and lead is an
+operator-opened session that works through subagents.
+
+Job/label default to `refs.job_id`, otherwise `task<ID>-work`.
+Working directory comes
 from `refs.worktree.path`, `refs.worktree`, `refs.cwd`, then the current directory.
 Brief/report use `refs.brief_path` / `refs.report_path`, otherwise
 `<jobs>/<job>/brief.md` and `report.md`. Caller lane comes from `PANEWIRE_LANE`,
-`local.lane`, or the calling `ARBITER_JOB` metadata. Work uses it as `--owner`;
-lead uses it as `--parent`. An unknown caller lane names the flag to supply.
+`local.lane`, or the calling `ARBITER_JOB` metadata. It is the `--owner`. An unknown caller lane names the flag to supply.
 Flags after the task id override defaults. Save the brief first; presets do
 not invent or overwrite instructions. A dry run uses the same planning path
 as the equivalent long spawn command and creates no claim or worker.
@@ -1488,8 +1487,7 @@ too, the pane is already running, so the spawn still commits, but it says so:
 
 - `job.spawned` carries `lane_unregistered: true` and no `hub_lane`.
 - A `LANE_UNREGISTERED` lane event (type `blocked`, event id
-  `<job>-lane-unregistered`) goes to the parent lane: the owner of a worker, the
-  `--parent` of a builder. Findings and escalations from this pane have no hub
+  `<job>-lane-unregistered`) goes to the parent lane: the owner of the job. Findings and escalations from this pane have no hub
   route until the lane is added by hand (the event text names the command).
 - The `OK` line, the `--wait` output (`wait job=… lane=UNREGISTERED`), the
   `SPAWNED job=…` line of a hub-submitted spawn and the hub's `[panewire] SPAWNED`

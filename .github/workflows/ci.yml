@@ -93,7 +93,7 @@ jobs:
     # not a red verdict, so this job is then skipped, as ci-ok is (hk 2924).
     # Any failure still runs it, and it fails.
     if: ${{ always() && github.event_name == 'pull_request' && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}
-    needs: [vet, shard]
+    needs: [vet, shard, postgres]
     strategy:
       fail-fast: false
       matrix:
@@ -104,9 +104,12 @@ jobs:
         env:
           VET_RESULT: ${{ needs.vet.result }}
           SHARD_RESULT: ${{ needs.shard.result }}
+          POSTGRES_RESULT: ${{ needs.postgres.result }}
         run: |
           [ "$VET_RESULT" = success ] || { echo "vet job did not succeed: $VET_RESULT"; exit 1; }
           [ "$SHARD_RESULT" = success ] || { echo "a test shard did not succeed: $SHARD_RESULT"; exit 1; }
+          # postgres runs only when the PR touches the inbox store.
+          case "$POSTGRES_RESULT" in success|skipped) ;; *) echo "postgres job did not succeed: $POSTGRES_RESULT"; exit 1 ;; esac
 
   post-test:
     # The process-group kill and reaping behaviour the R19 quota path depends on
@@ -180,13 +183,40 @@ jobs:
       # gitleaks is installed through Homebrew, which only the macOS runner has.
       - run: brew install gitleaks && gitleaks git --no-banner --config .gitleaks.toml
 
+  store-paths:
+    # Pull request only: does this change touch the hub inbox store? The
+    # production hub keeps its inbox in Postgres, so such a PR also runs the
+    # postgres job below before merge (operator decision 2026-11-06);
+    # every other PR stays light.
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: ubuntu-latest
+    outputs:
+      store: ${{ steps.paths.outputs.store }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+      - id: paths
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          if git diff --name-only "$BASE_SHA"...HEAD | grep -Eq '^(lane_inbox|inbox_|hub_inbox|hub_postgres|hub_migrate|hub_unconfirmed|hub_spawn_task_store|hub_store|store)[^/]*\.go$|^hub\.go$|^hub_postgres_migrations/'; then
+            echo "store=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "store=false" >> "$GITHUB_OUTPUT"
+          fi
+
   postgres:
     # The hub inbox's Postgres backend (docs/hub-postgres.md). Service
     # containers exist only on Linux runners, and hosts never run a database
     # for tests, so this is the only place the Postgres half of the store
     # contract runs. Trust auth keeps a password out of this public file; the
     # service is published on 55432, not the default port.
-    if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all') }}
+    # Post-merge and dispatch runs, and a pull request whose store-paths
+    # job found an inbox-store change.
+    needs: [store-paths]
+    if: ${{ !cancelled() && ((github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all')) || (github.event_name == 'pull_request' && needs.store-paths.outputs.store == 'true')) }}
     runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PANEWIRE_POST_LINUX_RUNNER) || 'ubuntu-latest' }}
     services:
       postgres:
@@ -262,12 +292,14 @@ jobs:
           if [ "$EVENT" = pull_request ]; then
             require yes test "$TEST_RESULT"
             require no post-test "$POST_TEST_RESULT"
-            postgres=no
+            # A PR runs postgres only for an inbox-store change.
+            case "$POSTGRES_RESULT" in success|skipped) ;; *) echo "postgres job did not succeed: $POSTGRES_RESULT"; exit 1 ;; esac
+            postgres=checked
           else
             require no test "$TEST_RESULT"
             require "$test" post-test "$POST_TEST_RESULT"
           fi
-          require "$postgres" postgres "$POSTGRES_RESULT"
+          [ "$postgres" = checked ] || require "$postgres" postgres "$POSTGRES_RESULT"
           echo "ok=true" >> "${GITHUB_OUTPUT:-/dev/null}"
 
   auto-tag-test:
