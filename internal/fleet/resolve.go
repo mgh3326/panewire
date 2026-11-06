@@ -49,11 +49,11 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 	var asJSON, allowEscalation bool
 	f := flags("resolve")
 	f.StringVar(&role, "role", "", "routing role")
-	f.StringVar(&grade, "grade", "", "task grade (C, B, A, A+, S, S+; not for lead/consult)")
+	f.StringVar(&grade, "grade", "", "task grade (C, B, A, A+, S, S+; not for consult)")
 	f.StringVar(&t, "t", "T0", "task scale T0..T3")
 	f.StringVar(&builderFamily, "builder-family", "", "author or parent family (reviewer/judge)")
 	f.StringVar(&harness, "harness", "", "restrict selection to an agent harness, e.g. omp")
-	f.BoolVar(&allowEscalation, "allow-escalation", false, "admit escalation rungs, and lead/consult rungs above the role effort")
+	f.BoolVar(&allowEscalation, "allow-escalation", false, "admit escalation rungs, and consult rungs above the role effort")
 	f.BoolVar(&asJSON, "json", false, "print the decision as JSON")
 	if e := f.Parse(args); e != nil {
 		return fail(exitUsage, "%v", e)

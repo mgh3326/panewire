@@ -113,8 +113,6 @@ func placementRole(s Spawn) string {
 		return "review"
 	case role == "consult":
 		return "consult"
-	case role == "lead":
-		return "lead"
 	default:
 		return "worker"
 	}

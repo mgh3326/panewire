@@ -76,7 +76,7 @@ Request:
   `^[A-Za-z0-9._:/@-]{1,200}$` — except `--tags`, a comma list of up to 16
   entries, all within the 200-char bound — (spaces and shell metacharacters
   rejected),
-  and `wait_seconds` is 1..300. `--role` accepts `worker`, `builder`,
+  and `wait_seconds` is 1..300. `--role` accepts `worker`,
   `reviewer`, or `tester`; `--builder-family` accepts `anthropic`, `openai`,
   `google`, `xai`, `deepseek`, `meta`, `mistral`, or `other`; job values use
   `^[A-Za-z0-9._-]{1,128}$`.

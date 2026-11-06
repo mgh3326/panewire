@@ -10,49 +10,67 @@ import (
 )
 
 func TestPresetFlagSets(t *testing.T) {
-	for _, kind := range []string{"work", "lead"} {
-		t.Run(kind, func(t *testing.T) {
-			a := testApp(t)
-			t.Setenv("PANEWIRE_LANE", "caller-lane")
-			a.Runner = &fakeRunner{Do: func(c Command) Result {
-				return Result{Out: `{"id":42,"title":"change (grade A, T1)","state":"ready","refs":{"worktree":{"path":"/work/project.feature"}}}`}
-			}}
-			job := "task42-" + kind
-			args := []string{"-c", "/work/project.feature", "-m", "auto", "-p", filepath.Join(a.Jobs, job, "brief.md"), "-w", "workers", "-l", job, "--job", job, "--t", "T1", "--task", "42", "--host", "auto", "--report", filepath.Join(a.Jobs, job, "report.md")}
-			if kind == "lead" {
-				args = append(args, "--role", "builder", "--lane", job, "--parent", "caller-lane")
-			} else {
-				args = append(args, "--role", "worker", "--owner", "caller-lane")
-			}
-			args = append(args, "--dry-run")
-			want, err := parseSpawn(args)
-			if err != nil {
-				t.Fatal(err)
-			}
-			got, err := a.preset(context.Background(), kind, []string{"42", "--dry-run"})
-			if err != nil {
-				t.Fatal(err)
-			}
-			if !reflect.DeepEqual(got, want) {
-				g, _ := json.Marshal(got)
-				w, _ := json.Marshal(want)
-				t.Fatalf("preset=%s\nlong=%s", g, w)
-			}
-		})
+	a := testApp(t)
+	t.Setenv("PANEWIRE_LANE", "caller-lane")
+	a.Runner = &fakeRunner{Do: func(c Command) Result {
+		return Result{Out: `{"id":42,"title":"change (grade A, T1)","state":"ready","refs":{"worktree":{"path":"/work/project.feature"}}}`}
+	}}
+	job := "task42-work"
+	want, err := parseSpawn([]string{"-c", "/work/project.feature", "-m", "auto", "-p", filepath.Join(a.Jobs, job, "brief.md"), "-w", "workers", "-l", job, "--job", job, "--t", "T1", "--task", "42", "--host", "auto", "--report", filepath.Join(a.Jobs, job, "report.md"), "--role", "worker", "--owner", "caller-lane", "--dry-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := a.workPreset(context.Background(), []string{"42", "--dry-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		g, _ := json.Marshal(got)
+		w, _ := json.Marshal(want)
+		t.Fatalf("preset=%s\nlong=%s", g, w)
 	}
 }
 
 func TestPresetOverrides(t *testing.T) {
 	a := testApp(t)
 	a.Runner = &fakeRunner{Do: func(Command) Result {
-		return Result{Out: `{"id":42,"title":"change (grade A, T1)","state":"ready","refs":{"job_id":"existing-lead","cwd":"/work/project"}}`}
+		return Result{Out: `{"id":42,"title":"change (grade A, T1)","state":"ready","refs":{"job_id":"existing-work","cwd":"/work/project"}}`}
 	}}
-	s, err := a.preset(context.Background(), "lead", []string{"42", "--parent", "caller", "--job", "custom", "-l", "custom", "--lane", "custom", "-p", "/brief", "--report", "/report", "-c", "/work/other", "-w", "wF"})
+	s, err := a.workPreset(context.Background(), []string{"42", "--owner", "caller", "--job", "custom", "-l", "custom", "-p", "/brief", "--report", "/report", "-c", "/work/other", "-w", "wF"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if s.Job != "custom" || s.Label != "custom" || s.Lane != "custom" || s.Parent != "caller" || s.CWD != "/work/other" || s.Workspace != "wF" || s.Prompt != "/brief" || s.Report != "/report" {
+	if s.Job != "custom" || s.Label != "custom" || s.Owner != "caller" || s.CWD != "/work/other" || s.Workspace != "wF" || s.Prompt != "/brief" || s.Report != "/report" {
 		t.Fatalf("%+v", s)
+	}
+}
+
+// The delegated lead seat is retired: `panewire lead` and `--role builder`
+// (or its legacy alias captain) are usage refusals that point to the new lead
+// definition, before any task, host or hub is read.
+func TestRetiredLeadSeatRefused(t *testing.T) {
+	spawnArgs := func(role string) []string {
+		return []string{"spawn", "-c", "/work/p", "-p", "/brief", "-l", "job", "--t", "T1", "--task", "42", "--role", role, "--lane", "job", "--parent", "caller"}
+	}
+	for name, args := range map[string][]string{
+		"lead command": {"lead", "42", "--parent", "caller"},
+		"role builder": spawnArgs("builder"),
+		"role captain": spawnArgs("captain"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			a := testApp(t)
+			a.Runner = &fakeRunner{Do: func(c Command) Result {
+				t.Errorf("refusal must not run %v", c.Args)
+				return Result{}
+			}}
+			err := a.Run(context.Background(), args)
+			if exitCode(err) != exitUsage || err == nil || !strings.Contains(err.Error(), retiredLeadSeatPointer) {
+				t.Fatalf("exit=%d err=%v", exitCode(err), err)
+			}
+			if strings.Contains(err.Error(), "\n") {
+				t.Fatalf("pointer must be one line: %q", err)
+			}
+		})
 	}
 }
 

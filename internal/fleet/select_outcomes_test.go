@@ -7,7 +7,7 @@ import (
 )
 
 func TestSelectRetainsEveryProfileAccountCandidate(t *testing.T) {
-	a, s, q, _ := accountLeadFixture(t)
+	a, s, q, _ := accountConsultFixture(t)
 	s.Role = "counsel"
 	q.CatalogRows = q.CatalogRows[1:]
 	q.GateDo = func(r QuotaRequest) (string, error) {
@@ -66,7 +66,7 @@ func TestSelectBoundAccountOutcomesPrecedeMissingBindings(t *testing.T) {
 		{"no-hosts", outcomeNoEligibleHost, exitPlacement},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a, s, q, src := accountLeadFixture(t)
+			a, s, q, src := accountConsultFixture(t)
 			q.CatalogRows = []CatalogRow{q.CatalogRows[1], q.CatalogRows[3]}
 			src.presence = src.presence[:1]
 			switch tc.name {
@@ -111,7 +111,7 @@ func TestSelectBoundAccountOutcomesPrecedeMissingBindings(t *testing.T) {
 func TestSelectRefreshedClassificationKeepsItsOutcome(t *testing.T) {
 	for _, reason := range []string{"window_exhausted", "quota_unknown"} {
 		t.Run(reason, func(t *testing.T) {
-			a, s, q, src := accountLeadFixture(t)
+			a, s, q, src := accountConsultFixture(t)
 			q.CatalogRows = q.CatalogRows[1:2]
 			src.presence = src.presence[1:2]
 			calls := 0

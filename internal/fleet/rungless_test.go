@@ -28,7 +28,7 @@ func TestSeatCheckRunglessLaunch(t *testing.T) {
 	} {
 		seat := p.Profiles[tt.seat]
 		l := Launch{Profile: seat.Canon, ModelID: tt.model, Grade: "A", Gate: "default"}
-		if got := code(seat.Check(l, "worker", "B", "", "", host, false)); got != tt.want {
+		if got := code(seat.Check(l, "worker", "B", "", "", host)); got != tt.want {
 			t.Errorf("%s: code %d want %d", tt.seat, got, tt.want)
 		}
 	}
@@ -38,7 +38,7 @@ func TestSeatCheckRoutedSeatNeedsCapability(t *testing.T) {
 	p, _ := LoadPolicy("")
 	seat := p.Profiles["cc-glm"]
 	l := Launch{Profile: "cc-glm", ModelID: "glm-5.2", Grade: "B", Gate: "default"}
-	if got := code(seat.Check(l, "worker", "B", "", "", map[string]any{}, false)); got != 70 {
+	if got := code(seat.Check(l, "worker", "B", "", "", map[string]any{})); got != 70 {
 		t.Fatalf("a routed seat on a host without the route capability must refuse 70, got %d", got)
 	}
 }
@@ -233,7 +233,7 @@ func TestRoutedSeatTakesNoEffort(t *testing.T) {
 	seat := p.Profiles["cc-glm"]
 	// Check refuses a launch that resolved a rung for a routed seat.
 	l := Launch{Profile: "cc-glm", ModelID: "glm-5.2", Effort: "high", Grade: "B", Gate: "default"}
-	if got := code(seat.Check(l, "worker", "B", "", "", map[string]any{"clinepass": true}, false)); got != 70 {
+	if got := code(seat.Check(l, "worker", "B", "", "", map[string]any{"clinepass": true})); got != 70 {
 		t.Fatalf("a routed seat with a rung must refuse 70, got %d", got)
 	}
 	// Even if one reached the launcher, no --effort flag is passed.

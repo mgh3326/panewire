@@ -70,8 +70,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "high",
       "pin": true
@@ -85,8 +84,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "high",
       "pin": true
@@ -100,8 +98,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "xhigh",
       "rungs": {
@@ -134,8 +131,7 @@
             "worker",
             "tester",
             "reviewer",
-            "counsel",
-            "builder"
+            "counsel"
           ]
         },
         "xhigh": {
@@ -143,8 +139,7 @@
             "worker",
             "tester",
             "reviewer",
-            "counsel",
-            "builder"
+            "counsel"
           ]
         },
         "max": {
@@ -152,8 +147,7 @@
             "worker",
             "tester",
             "reviewer",
-            "counsel",
-            "builder"
+            "counsel"
           ]
         },
         "ultra": {
@@ -175,8 +169,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "low",
       "pin": true,
@@ -191,8 +184,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "medium",
       "pin": true,
@@ -207,8 +199,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "low",
       "pin": true,
@@ -223,8 +214,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "medium",
       "pin": true,
@@ -239,8 +229,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "xhigh",
       "pin": true,
@@ -255,8 +244,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "max",
       "pin": true,
@@ -271,8 +259,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "low",
       "pin": true,
@@ -287,8 +274,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "medium",
       "pin": true,
@@ -303,8 +289,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "high",
       "pin": true,
@@ -319,8 +304,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "xhigh",
       "pin": true,
@@ -335,8 +319,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "max",
       "pin": true,
@@ -351,8 +334,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "low",
       "pin": true,
@@ -367,8 +349,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "medium",
       "pin": true,
@@ -383,8 +364,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "high",
       "pin": true,
@@ -399,8 +379,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "xhigh",
       "pin": true
@@ -414,8 +393,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "max",
       "pin": true
@@ -429,8 +407,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "low",
       "pin": true,
@@ -445,8 +422,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "medium",
       "pin": true,
@@ -461,8 +437,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "high",
       "pin": true,
@@ -477,8 +452,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "max",
       "pin": true,
@@ -493,8 +467,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "medium",
       "pin": true,
@@ -510,8 +483,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "high",
       "pin": true,
@@ -527,8 +499,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "xhigh",
       "pin": true,
@@ -544,8 +515,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "max",
       "pin": true,
@@ -598,8 +568,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "high",
       "pin": true
@@ -613,8 +582,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "high",
       "pin": true
@@ -667,8 +635,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "xhigh",
       "pin": true
@@ -709,8 +676,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ]
     },
     "devin-swe2-medium": {
@@ -722,8 +688,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ]
     },
     "devin-swe2-max": {
@@ -735,8 +700,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ]
     },
     "devin-swe17": {
@@ -880,8 +844,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ]
     },
     "builder-devin-medium": {
@@ -893,8 +856,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ]
     },
     "builder-devin-max": {
@@ -906,8 +868,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ]
     },
     "builder-ds41": {
@@ -919,8 +880,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ]
     },
     "builder-ds41-max": {
@@ -932,8 +892,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ]
     },
     "cmd-dsflash41": {
@@ -946,8 +905,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "rungs": {
         "none": {
@@ -963,8 +921,7 @@
             "worker",
             "tester",
             "reviewer",
-            "counsel",
-            "builder"
+            "counsel"
           ]
         },
         "medium": {
@@ -980,8 +937,7 @@
             "worker",
             "tester",
             "reviewer",
-            "counsel",
-            "builder"
+            "counsel"
           ]
         },
         "xhigh": {
@@ -997,8 +953,7 @@
             "worker",
             "tester",
             "reviewer",
-            "counsel",
-            "builder"
+            "counsel"
           ]
         },
         "ultra": {
@@ -1372,8 +1327,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ],
       "effort": "high",
       "pin": true
@@ -1493,8 +1447,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ]
     },
     "omp-sonnet": {
@@ -1520,8 +1473,7 @@
         "worker",
         "tester",
         "reviewer",
-        "counsel",
-        "builder"
+        "counsel"
       ]
     },
     "omp-terra61": {

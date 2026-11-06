@@ -169,7 +169,7 @@ func readinessFixture(t *testing.T, states map[string]ReadinessState) (*App, Spa
 	// mac-b is the better host and holds account A, which ranks first; the
 	// other host holds B. A drop of mac-b's pair must move the choice, not
 	// refuse the spawn.
-	a, s, _, _ := hostFirstFixture(t, "builder", "A", leadRows, map[string]string{"mac-b": testClaudeA, "cloud-small": testClaudeB}, map[string]float64{"mac-b": 0.1, "cloud-small": 0.5})
+	a, s, _, _ := hostFirstFixture(t, "counsel", "A", consultRows, map[string]string{"mac-b": testClaudeA, "cloud-small": testClaudeB}, map[string]float64{"mac-b": 0.1, "cloud-small": 0.5})
 	a.Repository = &Repository{Name: "panewire"}
 	a.Config.Hosts["mac-b"]["via"] = "hub"
 	a.Config.Hosts["cloud-small"]["via"] = "hub"
@@ -254,7 +254,7 @@ func TestReadinessFilterDropsThePairBeforeRanking(t *testing.T) {
 func TestReadinessDropNamesTheCheckWhenNoHostIsLeft(t *testing.T) {
 	bad := ReadinessState{Readiness: readyNode()}
 	bad.Readiness.Repos = nil
-	a, s, _, _ := hostFirstFixture(t, "builder", "A", leadRows, map[string]string{"mac-b": testClaudeA}, map[string]float64{"mac-b": 0.1})
+	a, s, _, _ := hostFirstFixture(t, "counsel", "A", consultRows, map[string]string{"mac-b": testClaudeA}, map[string]float64{"mac-b": 0.1})
 	a.Repository = &Repository{Name: "panewire"}
 	a.State = readinessSnapshot(t, a, map[string]ReadinessState{"mac-b": bad}, a.Now())
 	sel, err := a.selectProfile(context.Background(), s)
