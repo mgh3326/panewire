@@ -96,10 +96,17 @@ type prCLIRun struct {
 	stdout, stderr string
 }
 
+// runPR runs the CLI with no local node: its socket path names nothing, so a
+// test never reaches a daemon on the machine that runs it.
 func runPR(t *testing.T, args ...string) prCLIRun {
 	t.Helper()
+	return runPRWithSocket(t, filepath.Join(r20SocketRoot(t), "absent.sock"), args...)
+}
+
+func runPRWithSocket(t *testing.T, socket string, args ...string) prCLIRun {
+	t.Helper()
 	var stdout, stderr bytes.Buffer
-	deps := hubCLIDeps{AllowInsecureForTests: true, Now: func() time.Time { return prCLINow }}
+	deps := hubCLIDeps{AllowInsecureForTests: true, Now: func() time.Time { return prCLINow }, SocketPath: socket}
 	code := runPRCLI(args, &stdout, &stderr, deps)
 	run := prCLIRun{code: code, stdout: stdout.String(), stderr: stderr.String()}
 	if strings.Contains(run.stdout+run.stderr, prCLIToken) {
@@ -330,9 +337,9 @@ func TestPRStatusFallbackWhenHubCannotBeAsked(t *testing.T) {
 			t.Errorf("%s: code=%d stdout=%q stderr=%q", name, run.code, run.stdout, run.stderr)
 		}
 	}
-	// No hub connection configured: gh answers, and the line says why.
+	// A half-given connection is not the local node: gh answers, and the line says why.
 	prCLIConnection(t, "") // clears the environment
-	run := runPR(t, "status", "owner/name", "152")
+	run := runPR(t, "status", "owner/name", "152", "--hub-url", down.URL)
 	if run.code != ExitOK || !strings.Contains(run.stdout, "fallback: hub connection is not configured") {
 		t.Fatalf("code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
 	}

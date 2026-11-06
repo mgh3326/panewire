@@ -268,7 +268,11 @@ the tail and reports the count as `findings_omitted`. The environment the
 mergewake child receives is `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
 `TMPDIR` and `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`; no credential
 of the node's own is passed on, and no credential appears in argv or in the
-result. The scope is `node.command:pr.status@<machine>`.
+result. The scope is `node.command:pr.status@<machine>`. A node credential
+(a machine's own `HUB_MACHINE_ID`/`HUB_TOKEN`) may also run this op, on the
+PR-status host only and with no scope: it is how the local node daemon asks on
+a worker's behalf ([pr-status.md](pr-status.md#transport)). A node credential
+is refused every other op on this route.
 
 ### `worktree.prepare`
 
