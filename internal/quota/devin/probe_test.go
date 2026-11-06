@@ -352,26 +352,85 @@ func TestFetchProbeStartFailureIsProbeError(t *testing.T) {
 
 // A read can end in the middle of a line. The panel is accepted only after the
 // screen has been quiet, so "Daily: 40%" followed by " left" is 60% used, not
-// 40%, and a weekly line that arrives with the next read is not lost.
+// 40%, and a weekly line that arrives with the next read is not lost. The test
+// is the only sender of ticks and of output, so the order is exact: a chunk is
+// drawn, the probe is seen to have read it, and only then does time move.
 func TestProbeWaitsForTheScreenToSettleBeforeParsing(t *testing.T) {
+	clock := newFakeClock()
+	submitted := make(chan struct{})
 	var sawUsage bool
-	script := func(typed string, f *fakeTerminal) {
+	term := newFakeTerminal(func(typed string, _ *fakeTerminal) {
 		switch typed {
 		case "/usage":
 			sawUsage = true
 		case "\r":
 			if sawUsage {
-				f.emit("Usage\r\nDaily: 40%")
-				f.emit(" left \u00b7 resets in 3h 5m\r\n")
-				f.emit("Weekly: 70% left \u00b7 resets in 2 days 4 hours\r\n")
+				close(submitted)
 			}
 		}
+	})
+	cfg := config(nil, nil)
+	cfg.Clock = clock
+	type result struct {
+		text string
+		err  error
 	}
-	run := runProbe(t, fixture(t, "tui_prompt_u276d.txt"), script)
-	if run.err != nil {
-		t.Fatalf("probe failed after %s: %v", run.elapsed, run.err)
+	done := make(chan result, 1)
+	go func() {
+		text, err := cfg.drive(t.Context(), term)
+		done <- result{text, err}
+	}()
+	tick := func() {
+		select {
+		case clock.ticks <- clock.Now():
+			clock.advance(probeTick)
+		case r := <-done:
+			t.Fatalf("probe ended early: %q %v", r.text, r.err)
+		}
 	}
-	o, err := ParseScreen(run.text, testNow)
+	read := func(chunk string) { // draw chunk and wait until the probe has read it
+		for len(clock.nowCalls) > 0 {
+			<-clock.nowCalls
+		}
+		term.emit(chunk)
+		<-clock.nowCalls
+	}
+	<-clock.nowCalls // the probe started its clock
+	read(fixture(t, "tui_prompt_u276d.txt"))
+	for { // type /usage, settle, press Enter
+		select {
+		case <-submitted:
+		default:
+			tick()
+			continue
+		}
+		break
+	}
+	read("Usage\r\nDaily: 40%") // the first read ends mid-line and already parses
+	for range 4 {               // 200 ms of silence, short of the 250 ms the probe waits for
+		tick()
+	}
+	select {
+	case r := <-done:
+		t.Fatalf("a panel read mid-line was accepted: %q %v", r.text, r.err)
+	default:
+	}
+	read(" left \u00b7 resets in 3h 5m\r\n")
+	read("Weekly: 70% left \u00b7 resets in 2 days 4 hours\r\n")
+	var r result
+loop:
+	for range 100 {
+		select {
+		case r = <-done:
+			break loop
+		case clock.ticks <- clock.Now():
+			clock.advance(probeTick)
+		}
+	}
+	if r.err != nil {
+		t.Fatalf("probe failed: %v", r.err)
+	}
+	o, err := ParseScreen(r.text, testNow)
 	if err != nil {
 		t.Fatal(err)
 	}
