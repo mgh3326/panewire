@@ -75,6 +75,27 @@ the slot. The 409 body then carries `request_id`, `job`, `host`,
 `pane` and a `fix` (close that pane, then resubmit), and the CLI prints them
 with exit 74.
 
+A **reviewer** holder whose pane is present is also released when its spawn
+`succeeded` or `failed`, and every one of these holds (hk 3315). Workers and
+testers are never released this way, because an idle worker may be waiting on an
+ESC answer.
+
+- the new submission is for the same (task, role, review pass) key, not a replay
+  of the holder's request;
+- the pane is listed under the holder's pane id and agent label, with status
+  `idle`, `done` or `blocked` (never `working`; any other status keeps the hold);
+- the spawn's deadline passed more than the grace ago (the same 10 minute
+  `UnworkedLandingGrace`; the node's agent list carries no time of the last
+  state change);
+- `pane.capture` saves the screen, then `pane.close` closes the pane (it
+  re-reads the pane and refuses one that changed or whose composer is not
+  provably empty).
+
+The hub then has the holder's node mark the hk job `lost` and logs one INFO line
+`hub closed a finished reviewer pane` with `branch` `reviewer_pane_finished`
+(succeeded) or `reviewer_pane_stuck` (failed). An unreachable node or an
+unreadable check keeps the hold.
+
 A prior operation in `succeeded` whose hk job is still `claimed` or `spawned`
 (a job revoked and reaped by an older binary, or one that ended without writing
 its record, hk 3204) is checked the same way: only a complete pane list that

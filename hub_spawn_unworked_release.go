@@ -60,6 +60,25 @@ func (h *HubServer) nodeCall(ctx context.Context, machine, op string, args any, 
 	}
 }
 
+// closeHeldPaneAndMarkLost saves the holder's pane screen, closes the pane and
+// marks its hk job lost, all through the holder's node. pane.close re-reads the
+// pane itself and refuses one that changed, so it runs before the irreversible
+// hk write; a refused or unreadable step returns false with the node's reason.
+func (h *HubServer) closeHeldPaneAndMarkLost(ctx context.Context, app *fleet.App, holder hubSpawnTask, name string, row nodeAgentRow) (bool, string) {
+	machine := spawnHolderHost(holder)
+	var captured nodePaneCaptureResult
+	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, MergedAfter: 0, Write: true}
+	if !h.nodeCall(ctx, machine, nodeCommandPaneCapture, capture, spawnHeldPaneActWait, &captured) || captured.Outcome != nodeCaptureScreen {
+		return false, ""
+	}
+	var closed nodePaneCloseResult
+	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd}
+	if !h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) || (closed.Outcome != nodePaneClosed && closed.Outcome != nodePaneGone) {
+		return false, ""
+	}
+	return h.markHolderJobLost(ctx, app, holder, name)
+}
+
 // releaseUnworkedLanding closes the empty pane of a failed-at-landing holder
 // and marks its hk job lost, so the caller can release the reservation. Nothing
 // is closed or written unless every proof holds. pane.close re-reads the pane
@@ -71,7 +90,7 @@ func (h *HubServer) releaseUnworkedLanding(ctx context.Context, app *fleet.App, 
 	if state, _ := record["state"].(string); state != "claimed" || !failedAtLanding(holder) || checkout == nil || machine == "" || !validNodeJobName(name) || !validNodeJobName(holder.Job) {
 		return false, ""
 	}
-	if !nodePaneClosableStatus[row.AgentStatus] || !spawnReceiptCheckoutPath(row.Cwd, checkout.Dir, hubSpawnArg(holder.Request.Args, "-L")) || !validNodeCommandPath(row.Cwd) {
+	if !nodePaneIdleStatus[row.AgentStatus] || !spawnReceiptCheckoutPath(row.Cwd, checkout.Dir, hubSpawnArg(holder.Request.Args, "-L")) || !validNodeCommandPath(row.Cwd) {
 		return false, ""
 	}
 	if h.now().Before(holder.Deadline.Add(h.unworkedLandingGrace)) {
@@ -85,17 +104,7 @@ func (h *HubServer) releaseUnworkedLanding(ctx context.Context, app *fleet.App, 
 	if !ledger.Found || ledger.Completed || ledger.Report.Present || ledger.ActivityEvents == nil || *ledger.ActivityEvents != 0 {
 		return false, ""
 	}
-	var captured nodePaneCaptureResult
-	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, MergedAfter: 0, Write: true}
-	if !h.nodeCall(ctx, machine, nodeCommandPaneCapture, capture, spawnHeldPaneActWait, &captured) || captured.Outcome != nodeCaptureScreen {
-		return false, ""
-	}
-	var closed nodePaneCloseResult
-	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd}
-	if !h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) || (closed.Outcome != nodePaneClosed && closed.Outcome != nodePaneGone) {
-		return false, ""
-	}
-	if marked, reason := h.markHolderJobLost(ctx, app, holder, name); !marked {
+	if marked, reason := h.closeHeldPaneAndMarkLost(ctx, app, holder, name, row); !marked {
 		return false, reason
 	}
 	slog.Info("released an unworked landing failure", "job", holder.Job, "request", holder.Request.RequestID, "machine", machine, "pane", row.PaneID, "reason", unworkedLandingReason)

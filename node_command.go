@@ -59,9 +59,14 @@ const (
 
 var (
 	nodeCommandPaneIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
-	// pane.close only ever closes a finished pane: the expected status must
-	// be one of these, and the node re-reads it before closing.
-	nodePaneClosableStatus = map[string]bool{"idle": true, "done": true}
+	// pane.close never closes a working pane: the expected status must be one
+	// of these, and the node re-reads it before closing. blocked is a pane
+	// stopped at a prompt that needs a person, which only the hub's finished
+	// reviewer release closes (hub_spawn_reviewer_release.go).
+	nodePaneClosableStatus = map[string]bool{"idle": true, "done": true, "blocked": true}
+	// nodePaneIdleStatus is the finished subset, for a release that must not
+	// close a pane waiting on a prompt.
+	nodePaneIdleStatus = map[string]bool{"idle": true, "done": true}
 )
 
 func knownNodeCommandOp(op string) bool {

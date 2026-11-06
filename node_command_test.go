@@ -161,11 +161,24 @@ func TestNodeCommandPaneCloseExactMatch(t *testing.T) {
 		{"pane_id": "w1:p1", "name": "job-a", "agent_status": "idle", "cwd": "work/a"},
 		{"pane_id": "w1:p1", "name": "job-a", "cwd": "/work/a"},
 		{"pane_id": "w1:p1", "name": "job-a", "agent_status": "working", "cwd": "/work/a"},
-		{"pane_id": "w1:p1", "name": "job-a", "agent_status": "blocked", "cwd": "/work/a"},
+		{"pane_id": "w1:p1", "name": "job-a", "agent_status": "unknown", "cwd": "/work/a"},
 	} {
 		fake := &nodeFakeHerdr{agents: []string{nodeAgentList()}}
 		if _, code := nodeRun(t, &HubClient{nodeHerdr: fake.run}, nodeCommandPaneClose, bad); code != "invalid_args" || len(fake.calls) != 0 {
 			t.Fatalf("args=%v code=%q calls=%v", bad, code, fake.calls)
+		}
+	}
+}
+
+// A blocked pane (stopped at a prompt) closes like an idle one, but only when
+// its status still reads blocked on both re-reads (hk 3315).
+func TestNodeCommandPaneCloseBlocked(t *testing.T) {
+	expected := map[string]any{"pane_id": "w1:p1", "name": "job-a", "agent_status": "blocked", "cwd": "/work/a"}
+	for status, outcome := range map[string]string{"blocked": nodePaneClosed, "working": nodePaneChanged} {
+		fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", status, "/work/a"))}, read: nodeReapScreen("❯ ")}
+		result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}, nodeCommandPaneClose, expected)
+		if code != "" || result["outcome"] != outcome {
+			t.Fatalf("listed %s: result=%v code=%q", status, result, code)
 		}
 	}
 }

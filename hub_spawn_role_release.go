@@ -391,6 +391,17 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 			trace.hk, trace.branch = state, "succeeded_pane_held"
 			released, probe = h.releaseFinishedSpawnRole(ctx, app, holder, record, roleKey)
 		}
+		if !released && readErr == nil && exists {
+			// The probes above keep a present pane. A reviewer's finished or
+			// stuck pane is released here instead (hk 3315).
+			if closed, branch := h.releaseFinishedReviewerPane(ctx, app, request, spawn, holder, record, probe); closed {
+				released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, roleKey) == nil
+				trace.branch = branch
+				if !released {
+					trace.branch = "release_write_failed"
+				}
+			}
+		}
 		trace.probe = probe
 		if released {
 			task, _, err = h.inbox.store.claimSpawn(ctx, request, spawn.Job, owner, h.now().UTC())
