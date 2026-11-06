@@ -67,6 +67,9 @@ var routingStrictRoles = []string{"consult", "verifier"}
 // so a counsel is still known to be a consult (and refused) without one.
 var builtinRoleMap = map[string]string{"worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "consult"}
 
+// retiredLeadRole is the routing role panewire no longer reads from the table.
+const retiredLeadRole = "lead"
+
 // noLeadGradeRule is a wire reason code callers match on; it keeps its
 // historical spelling although the lead role is gone.
 const noLeadGradeRule = "lead_consult_take_no_grade"
@@ -218,6 +221,10 @@ func parseRoutingJSON(b []byte) (RoutingPolicy, error) {
 		p.RoleMap = p.LegacyRoleMap
 	}
 	p.LegacyRoleMap = nil
+	// The retired lead entry is never read, so it is never validated: a table
+	// that still carries one (with or without family_effort) stays usable, and
+	// a role map that names lead is refused as an unknown role.
+	delete(p.Roles, retiredLeadRole)
 	return p, p.validate()
 }
 

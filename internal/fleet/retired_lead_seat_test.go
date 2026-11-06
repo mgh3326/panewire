@@ -62,3 +62,22 @@ func TestLeadEntryInPolicyIsNeverRead(t *testing.T) {
 		t.Fatalf("resolve --role lead must be a usage refusal: %v", err)
 	}
 }
+
+// Until desk deletes it (stage 2), the table still carries a lead entry, with
+// the family_effort lead had. panewire ignores it without refusing the table,
+// and refuses a seat role mapped to lead.
+func TestLeadEntryWithFamilyEffortDoesNotBreakThePolicy(t *testing.T) {
+	withLead := strings.Replace(routingBlockV1, `"consult":     {`, `"lead":        {"allowed": ["opus"], "effort": "high", "on_exhaustion": "wait", "family_effort": {"codex-sol": "xhigh"}},
+    "consult":     {`, 1)
+	p, err := parseRoutingDoc(routingDoc(withLead))
+	if err != nil {
+		t.Fatalf("a retired lead entry must not make the table unreadable: %v", err)
+	}
+	if _, ok := p.Roles["lead"]; ok || p.Roles["consult"].Allowed == nil {
+		t.Fatalf("lead must be dropped and consult kept: %v", p.Roles)
+	}
+	mapped := strings.Replace(withLead, `"worker": "implementer"`, `"worker": "lead"`, 1)
+	if _, err := parseRoutingDoc(routingDoc(mapped)); err == nil || !strings.Contains(err.Error(), "unknown role lead") {
+		t.Fatalf("a seat role mapped to lead must be refused: %v", err)
+	}
+}
