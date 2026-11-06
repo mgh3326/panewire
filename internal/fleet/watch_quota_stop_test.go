@@ -89,6 +89,9 @@ func TestWatcherQuotaStopEndsIdleJobAsLost(t *testing.T) {
 			if p == nil || str(p, "reason") != "quota_stop" || str(p, "pool") != "devin-free" || str(p, "reset_at") != reset || str(p, "pane_id") != "w:p1" {
 				t.Fatalf("job.lost payload=%v, want reason quota_stop pool devin-free reset_at %s", p, reset)
 			}
+			if _, ok := p["owner_lane"]; ok {
+				t.Fatalf("quota stop unexpectedly routes a lane relay: %v", p)
+			}
 			if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
 				t.Fatalf("quota not released: %s %v", st, pools)
 			}
