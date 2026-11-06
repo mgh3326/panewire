@@ -183,6 +183,13 @@ type HubClient struct {
 	spawnJournalMu    sync.Mutex
 	spawnJournal      *nodeSpawnJournal
 	spawnJournalUsers int
+	// Task pane sweep (node_pane_sweep.go, docs/pane-sweep.md). An interval of
+	// zero leaves the sweep off, as in every fixture.
+	taskPaneSweepInterval time.Duration
+	taskPaneSweepGrace    time.Duration
+	taskPaneSweepTicks    <-chan time.Time      // fixture seam; nil uses a ticker.
+	taskPaneSweepPass     func(context.Context) // fixture seam; nil runs the real pass.
+	nodeTaskState         fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
 	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
 	statePublish       bool
 	stateQuotaPools    []string
@@ -477,6 +484,7 @@ func (client *HubClient) Run(ctx context.Context) {
 	}
 	client.rearmWatchers()
 	go client.runLaneReconcile(ctx)
+	go client.runTaskPaneSweep(ctx)
 	if client.statePublish && len(client.stateQuotaPools) > 0 {
 		go client.runFleetQuota(ctx)
 	}

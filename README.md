@@ -157,6 +157,8 @@ load and publisher liveness. It serves that state as a snapshot
 every spawn. See [docs/fleet-state.md](docs/fleet-state.md) for the
 message contract, the freshness rule, rollout and rollback.
 
+The node closes a worker's pane once its hk task is merged, done or dropped and the pane has stayed not working past a grace; see [the task pane sweep](docs/pane-sweep.md).
+
 Harness conversation references in job events are described in the [job record contract](docs/jobs-resilience.md#harness-session-identity).
 
 ## Hub job inbox compatibility
