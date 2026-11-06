@@ -1814,7 +1814,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				client.assignmentMu.Lock()
 				client.assignedJobs[message.JobID] = message.Epoch
 				client.assignmentMu.Unlock()
-			case "relay.persisted":
+			case "relay.persisted", "pool.cooling.ack":
 				client.recordRelayPersisted(message)
 			case "idle-wake.route":
 				if manager := client.idleWakeManager(); manager != nil {
@@ -2652,8 +2652,8 @@ func parseHubOutbound(payload []byte) (hubOutboundMessage, bool) {
 		if len(fields) != 2 || json.Unmarshal(fields["event_id"], &message.EventID) != nil || message.EventID < 1 {
 			return hubOutboundMessage{}, false
 		}
-	case "relay.persisted":
-		if json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["kind"], &message.Kind) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || json.Unmarshal(fields["report_path"], &message.ReportPath) != nil || json.Unmarshal(fields["reason"], &message.Reason) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || !hubJobIDPattern.MatchString(message.JobID) || !relayPersistedKinds[message.Kind] || message.EventID < 1 {
+	case "relay.persisted", "pool.cooling.ack":
+		if json.Unmarshal(fields["job_id"], &message.JobID) != nil || json.Unmarshal(fields["kind"], &message.Kind) != nil || json.Unmarshal(fields["epoch"], &message.Epoch) != nil || json.Unmarshal(fields["report_path"], &message.ReportPath) != nil || json.Unmarshal(fields["reason"], &message.Reason) != nil || json.Unmarshal(fields["event_id"], &message.EventID) != nil || !hubJobIDPattern.MatchString(message.JobID) || !(relayPersistedKinds[message.Kind] || message.Type == "pool.cooling.ack" && message.Kind == "job.lost") || message.EventID < 1 {
 			return hubOutboundMessage{}, false
 		}
 		if message.Kind == "lane.event" {
@@ -2859,6 +2859,6 @@ func (peer *hubClientConnection) write(ctx context.Context, value any) error {
 	return wsjson.Write(writeContext, peer.connection, value)
 }
 
-// relayPersistedKinds bounds the hub-originated acknowledgement to the three
+// relayPersistedKinds bounds the hub-originated acknowledgement to the
 // relay record kinds. It is a closed set, not a passthrough.
-var relayPersistedKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "lane.event": true}
+var relayPersistedKinds = map[string]bool{"job.completed": true, "job.escalate": true, "job.joined": true, "job.lost": true, "lane.event": true}

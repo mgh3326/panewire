@@ -20,6 +20,9 @@ coverage.html
 .panewire/
 # XDG state written when HOME points at a checkout (fleet events carry host names).
 /.local/
+# Per-project state the cmd (commandcode) harness writes into a worker's
+# checkout. Untracked, it makes the node refuse to reuse the worktree as dirty.
+/.commandcode/
 
 # macOS and editor files
 .DS_Store

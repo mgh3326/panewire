@@ -110,7 +110,7 @@ func TestSelectionPolicyScenarios(t *testing.T) {
 			"codex-sol@high", "codex", "waste"},
 		{"credit balance recorded, every subscription on pace to use up its week → credit before the paced pools", "B", "T2", "3",
 			with(map[string]pace{"devin": exhausted, "claude": {60, 0.5}, "codex": {70, 0.5}, "anthropic-api": {10, 0.5}}),
-			"omp-sonnet@high", "anthropic-api", "credit"},
+			"omp-sonnet@high", "anthropic-api", "waste"},
 		{"no credit balance recorded, every subscription on pace to use up its week → the paced pool stays ahead of credit", "B", "T2", "3",
 			with(map[string]pace{"devin": exhausted, "claude": {60, 0.5}, "codex": {70, 0.5}, "anthropic-api": {10, 0.5}}),
 			"sonnet@medium", "claude", "ranked"},
@@ -282,7 +282,7 @@ func TestSelectionRecordExplainsChoice(t *testing.T) {
 }
 
 // creditStore is a pacelever manual store recording one credit pool with
-// used percent of its balance spent, expiring well past the final window.
+// used percent of its balance spent, expiring in thirty days.
 func creditStore(now time.Time, pool string, used float64) string {
 	b, _ := json.Marshal(map[string]any{
 		"schema": "pacelever.manual.v1",

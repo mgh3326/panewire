@@ -47,7 +47,7 @@ On each host in that order, selection considers only the accounts it holds
 and the rungs its harnesses can launch. Grade, role, routing, effort, and seat
 checks still apply. The quota policy orders those rungs within that host:
 waste, free, ranked, credit, including the existing waste-risk, expiring-credit,
-and credit-pacing rules. A credit balance on another host cannot promote that
+and credit-pacing rules. Expiring credit competes with waste-risk subscriptions by remaining percentage divided by hours to expiry. A credit balance on another host cannot promote that
 host or reorder this host's rungs. The first admitted host, rung, and account
 wins. A host whose accounts are exhausted or unknown is skipped.
 
@@ -643,3 +643,7 @@ shared service needed by placement. A second provider-measurement service and a
 `panewire quota` command are not added: they would duplicate those interfaces or
 centralize credentials without a demonstrated caller need. `pacelever` remains
 the provider measurement tool; this decision does not bypass its final gate.
+
+A quota-stop job end cools its pool across hosts until its reset, or for five minutes when no reset is known. Candidates are recorded as `pool_cooling` during that period. Cooling is held in hub memory and is lost on hub restart.
+
+When hub state is unavailable or disabled, the selection record reports `pool_cooling_hub_unavailable` or `pool_cooling_hub_state_off` in `degraded`; cooling cannot be checked.

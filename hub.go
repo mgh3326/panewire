@@ -453,6 +453,7 @@ type HubServer struct {
 	prometheusBasicUser              string
 	prometheusBasicPass              string
 	placementCache                   placementCache
+	poolCooling                      map[string]time.Time
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int
@@ -1380,6 +1381,10 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				if !h.observeJobRevocation(machineID, event, received) {
 					h.lateRegisterJobCompletion(machineID, event, received)
 				}
+			}
+			if message.Kind == "job.lost" && h.observePoolCooling(event.Reason, received) && !validReportRelayLaneName(event.OwnerLane) {
+				// This acknowledges in-memory cooling, not durable relay persistence.
+				agent.queuePersisted(hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID})
 			}
 			h.relayJobEventFrom(machineID, message.Kind, event)
 		}

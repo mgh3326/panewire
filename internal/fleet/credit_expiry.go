@@ -19,17 +19,13 @@ type CreditBalance struct {
 	ExpiresAt  time.Time
 }
 
-// finalWindow reports whether a balance is left within the policy's final
-// window before expiry (credit_final_days; 0 disables), and the hours left.
-// How much credit has been spent does not matter: credit ranks below
-// subscription quota, which resets sooner, until this window, and then
-// first so the rest is used up before it expires.
-func (c *CreditBalance) finalWindow(now time.Time, days float64) (bool, float64) {
-	if c == nil || c.LeftPct <= 0 || days <= 0 {
+// expiring reports a positive balance with a future expiry.
+func (c *CreditBalance) expiring(now time.Time) (bool, float64) {
+	if c == nil || c.LeftPct <= 0 || c.ExpiresAt.IsZero() {
 		return false, 0
 	}
 	hours := c.ExpiresAt.Sub(now).Hours()
-	return hours > 0 && hours <= days*24, hours
+	return hours > 0, hours
 }
 
 type manualEntry struct {
@@ -92,16 +88,14 @@ func creditExpiry(m manualEntry) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
 }
 
-// creditFinal is a candidate's final-window reading: the plan text and
-// record name the reason, the days left, the window and the balance.
+// creditFinal records a candidate's balance and time to expiry.
 type creditFinal struct {
 	balance   *CreditBalance
 	hoursLeft float64
-	days      float64
 }
 
 func (c *creditFinal) note() string {
-	s := fmt.Sprintf("credit_expiring final_window_days=%g days_left=%.1f balance_pct=%.1f", c.days, c.hoursLeft/24, c.balance.LeftPct)
+	s := fmt.Sprintf("credit_expiring days_left=%.1f balance_pct=%.1f", c.hoursLeft/24, c.balance.LeftPct)
 	if c.balance.BalanceUSD != nil {
 		s += fmt.Sprintf(" balance_usd=%.2f", *c.balance.BalanceUSD)
 	}
@@ -109,7 +103,7 @@ func (c *creditFinal) note() string {
 }
 
 func (c *creditFinal) record() map[string]any {
-	r := map[string]any{"days_left": c.hoursLeft / 24, "final_window_days": c.days, "balance_pct": c.balance.LeftPct, "expires_at": c.balance.ExpiresAt.Format(time.RFC3339)}
+	r := map[string]any{"days_left": c.hoursLeft / 24, "balance_pct": c.balance.LeftPct, "expires_at": c.balance.ExpiresAt.Format(time.RFC3339)}
 	if c.balance.BalanceUSD != nil {
 		r["balance_usd"] = *c.balance.BalanceUSD
 	}

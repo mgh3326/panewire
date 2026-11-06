@@ -352,10 +352,11 @@ func (s *fleetStateStore) snapshotLocked() []FleetStateMessage {
 }
 
 type fleetStateSnapshot struct {
-	V      int                 `json:"v"`
-	Seq    uint64              `json:"seq"`
-	At     time.Time           `json:"at"`
-	States []FleetStateMessage `json:"states"`
+	V       int                  `json:"v"`
+	Seq     uint64               `json:"seq"`
+	At      time.Time            `json:"at"`
+	States  []FleetStateMessage  `json:"states"`
+	Cooling map[string]time.Time `json:"pool_cooling,omitempty"`
 }
 
 func (s *fleetStateStore) snapshot(now time.Time) fleetStateSnapshot {
@@ -495,7 +496,7 @@ func (h *HubServer) handleFleetStateSnapshot(writer http.ResponseWriter, request
 	if !h.authorizeFleetStateRead(writer, request) {
 		return
 	}
-	writeJSON(writer, http.StatusOK, h.stateStore().snapshot(h.now().UTC()))
+	writeJSON(writer, http.StatusOK, h.fleetSnapshot(h.now().UTC()))
 }
 
 // utcPtr copies an optional time in UTC.
