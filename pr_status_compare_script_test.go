@@ -56,7 +56,12 @@ case "$1 $2" in
   "api rate_limit") cat '`+counter+`' ;;
   "pr view") bump; echo '{"state":"OPEN"}' ;;
   "pr checks") bump; echo '[{"bucket":"pass"},{"bucket":"fail"}]' ;;
-  "api graphql") bump; echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":false},{"isResolved":false},{"isResolved":false},{"isResolved":true}]}}}}}' ;;
+  "api graphql")
+    bump
+    case "$*" in *--paginate*) ;; *) exit 3 ;; esac
+    # --paginate prints one JSON document per page: the threads are split over two.
+    echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":false},{"isResolved":true}]}}}}}'
+    echo '{"data":{"repository":{"pullRequest":{"reviewThreads":{"nodes":[{"isResolved":false},{"isResolved":false}]}}}}}' ;;
   *) exit 2 ;;
 esac
 `)

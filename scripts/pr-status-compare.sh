@@ -74,7 +74,8 @@ gh_required_buckets() {
 
 owner=${repo%%/*}
 name=${repo#*/}
-threads_query='query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{isResolved}}}}}'
+# every page of threads, so a PR with more than 100 is counted as hk counts it
+threads_query='query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$endCursor){nodes{isResolved}pageInfo{hasNextPage endCursor}}}}}'
 
 printf 'pr\tpanewire_state\tgh_state\tstate_agrees\tpanewire_checks\tgh_checks\tchecks_agree\tpanewire_findings\tgh_threads\tthreads_agree\tpanewire_ms\tgh_ms\tgh_requests\tpanewire_source\tpanewire_origin\thk_state\thk_state_agrees\thk_checks\thk_checks_agree\thk_findings\thk_threads_agree\thk_ms\n'
 for n in "$@"; do
@@ -90,13 +91,13 @@ for n in "$@"; do
   start=$(now_ms)
   view_json=$("$gh_bin" pr view "$n" --repo "$repo" --json state)
   checks_json=$(gh_required_buckets "$n")
-  threads_json=$("$gh_bin" api graphql -f query="$threads_query" -f owner="$owner" -f name="$name" -F number="$n")
+  threads_json=$("$gh_bin" api graphql --paginate -f query="$threads_query" -f owner="$owner" -f name="$name" -F number="$n")
   gh_ms=$(($(now_ms) - start))
   gh_requests=$(($(requests_used) - used_before))
 
   gh_state=$(jq -r '.state' <<<"$view_json")
   gh_checks=$(gh_check_counts <<<"$checks_json")
-  gh_threads=$(jq '[.data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length' <<<"$threads_json")
+  gh_threads=$(jq -s '[.[].data.repository.pullRequest.reviewThreads.nodes[] | select(.isResolved | not)] | length' <<<"$threads_json")
 
   origin=$(jq -r '.snapshot.source // .mergewake.source // "-"' <<<"$status_json")
 
