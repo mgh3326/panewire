@@ -313,3 +313,46 @@ func TestWatcherReleasesQuotaWhenTheHubClosedTheHandedOverPane(t *testing.T) {
 		t.Fatalf("quota not released: %s %v", st, pools)
 	}
 }
+
+// A pane that goes back to work during the hand-off grace is not stopped any
+// more: the job is live again (job.reprompted), the announced job.lost is not
+// adopted a second time, the grace does not restart, and the quota stays leased.
+func TestWatcherPaneResumedDuringGraceKeepsTheJobLive(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	a.QuotaHandOffGrace = 2 * time.Minute
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	lists := 0
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			status, seq := "idle", 7
+			if lists > 2 {
+				status, seq = "working", 8
+			}
+			return Result{Out: fmt.Sprintf(`{"result":{"agents":[{"pane_id":"w:p1","agent_status":%q,"state_change_seq":%d}]}}`, status, seq)}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	kinds := eventKindsOf(t, a, "j")
+	count := func(kind string) (n int) {
+		for _, k := range kinds {
+			if k == kind {
+				n++
+			}
+		}
+		return
+	}
+	if count("job.lost") != 1 || count("job.reprompted") != 1 {
+		t.Fatalf("events %v, want one job.lost and one job.reprompted (no restarted grace)", kinds)
+	}
+	if got := str(h.record(t, "j"), "state"); got == "lost" {
+		t.Fatal("a job whose pane went back to work was ended as lost")
+	}
+	if st, pools := ledgerState(t, a, "j"); st != "leased" || len(pools) != 1 {
+		t.Fatalf("a live job lost its lease: %s %v", st, pools)
+	}
+}

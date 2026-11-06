@@ -245,6 +245,13 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				return a.quotaStopLost(ctx, j, handOff.stop, false)
 			}
 			if present && !handOff.unchanged(paneAgent) {
+				// The pane moved on during the grace (someone resumed it): the
+				// stop is stale and the job lives. job.reprompted makes the
+				// job live again, so the announced job.lost is not adopted a
+				// second time and the grace does not restart.
+				if e := a.event(ctx, id, "job.reprompted", map[string]any{"reason": "quota_stop_resumed", "pane_id": j.Pane}); e != nil {
+					return e
+				}
 				handOff = quotaHandOff{}
 			}
 		}
