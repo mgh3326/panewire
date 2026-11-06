@@ -770,7 +770,7 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 				}
 				items = items[:end]
 			}
-			id := "quiet-digest-" + uuid.NewString()
+			id := quietDigestBatchPrefix + uuid.NewString()
 			// The digest is one line — a count and the inbox pointer — so it
 			// always satisfies the lane.event text contract (no control
 			// bytes, far under the length cap) and never breaks receivers.

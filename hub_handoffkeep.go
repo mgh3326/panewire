@@ -30,6 +30,9 @@ const (
 	// relayUnconfirmedMarkEventPrefix prefixes a marker row's event_id. The
 	// rest of the value is the durable id of the row it marks.
 	relayUnconfirmedMarkEventPrefix = "unconfirmed-mark-"
+	// relayUnconfirmedDigestMarkSuffix ends the event_id of a marker whose row
+	// was an inbox digest or escalation batch when it was marked.
+	relayUnconfirmedDigestMarkSuffix = "-digest"
 	// relayUnconfirmedRetireReason is the replay-retired suffix stamped on a
 	// marked row once its one labelled replay has been attempted.
 	relayUnconfirmedRetireReason = "unconfirmed"
@@ -37,6 +40,10 @@ const (
 	// item is already delivered, read, acked or superseded: the receiver has
 	// the event, so its one labelled replay would only repeat it.
 	relayUnconfirmedInboxRetireReason = "inbox-delivered"
+	// relayDigestNotReplayedRetireReason retires a marked row that is an
+	// inbox digest or escalation batch: its count is stale after a restart, so
+	// the still-unread items are released and escalated afresh instead.
+	relayDigestNotReplayedRetireReason = "digest-not-replayed"
 	// relayUnconfirmedMarkRetireReason retires a marker row whose original
 	// row is already closed, exhausted, or gone.
 	relayUnconfirmedMarkRetireReason = "unconfirmed-mark"

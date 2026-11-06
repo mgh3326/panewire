@@ -195,7 +195,8 @@ the inbox identity and class are stable. Delivered handoffkeep rows are not
 imported. Confirmed deliveries and explicitly acked inbox items (and read
 inbox-class items that do not require an ack) also suppress both ordinary and labelled restart replay. An
 interrupt's automatic read-on-insert timestamp alone never suppresses replay;
-only genuinely unconfirmed delivery can receive the once-only labelled copy.
+only genuinely unconfirmed delivery can receive the once-only labelled copy,
+and a digest or escalation batch never receives it (see below).
 A pre-upgrade active pane submission cannot be recalled.
 
 An unread item past its deadline is claimed once into one short per-lane
@@ -204,9 +205,15 @@ claim and outgoing digest are one database transaction. Restart retries the same
 batch ID. The digest is a single line — a count and the inbox pointer — which
 always satisfies the lane.event text contract (no control bytes, far under
 the length cap); full originals remain readable by `inbox list`. An item is
-never escalated into another batch, although the existing relay transport may
-retry an unconfirmed submission as before. Later unread items can cause a
-later digest. Escalations use the existing handoffkeep relay; during a
+never escalated into another batch while its batch is live, although the existing relay transport may
+retry an unconfirmed submission as before. The one exception is a batch relay
+whose pane submission was never proven (`relay.unconfirmed`): after a hub
+restart it is not replayed, because its count is stale. The hub retires its row
+as `digest-not-replayed` and releases the batch's items that are still unread
+or unacked, so the next flush escalates them in a fresh batch with the current
+count. A batch is recognised by its row in the batch table, never by its event
+id; a hub with no inbox store open defers such a row until a store is open
+again. Later unread items can cause a later digest. Escalations use the existing handoffkeep relay; during a
 handoffkeep outage their durable batches wait and retry.
 
 At startup the hub scans all unread inbox originals for must-act tags, including

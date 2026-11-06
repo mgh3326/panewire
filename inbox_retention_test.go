@@ -274,7 +274,7 @@ func TestInboxReadMustAckWaitsForAck(t *testing.T) {
 					t.Fatalf("read unacked pruned: n=%d err=%v", n, err)
 				}
 				h.replayRelayEvent(record, relayReplaySourceStartup)
-				h.replayMarkedUnconfirmed(context.Background(), record, relayReplaySourceStartup)
+				h.replayMarkedUnconfirmed(context.Background(), record, relayReplaySourceStartup, false)
 				if len(a.relays) != 0 {
 					t.Fatal("read must-ack item was re-injected")
 				}
@@ -287,7 +287,7 @@ func TestInboxReadMustAckWaitsForAck(t *testing.T) {
 				t.Fatal(err)
 			}
 			h.replayRelayEvent(record, relayReplaySourceStartup)
-			h.replayMarkedUnconfirmed(context.Background(), record, relayReplaySourceStartup)
+			h.replayMarkedUnconfirmed(context.Background(), record, relayReplaySourceStartup, false)
 			if len(a.relays) != 0 {
 				t.Fatal("acked item was re-injected")
 			}
