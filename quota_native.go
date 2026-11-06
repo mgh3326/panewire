@@ -17,17 +17,19 @@ import (
 	"github.com/mgh3326/panewire/internal/quota/claude"
 	"github.com/mgh3326/panewire/internal/quota/codex"
 	"github.com/mgh3326/panewire/internal/quota/commandcode"
+	"github.com/mgh3326/panewire/internal/quota/devin"
 	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
-// The node measures the claude, codex and commandcode pools itself (docs/quota.md
-// §Native measurement): each pool's own source (claude: the OAuth usage API then
-// one `claude -p /usage`; codex: the app-server then the wham usage API;
-// commandcode: the billing, subscription and usage-summary APIs) and the shared
+// The node measures the claude, codex, commandcode and devin pools itself
+// (docs/quota.md §Native measurement): each pool's own source (claude: the OAuth
+// usage API then one `claude -p /usage`; codex: the app-server then the wham
+// usage API; commandcode: the billing, subscription and usage-summary APIs;
+// devin: the web quota endpoint then the `/usage` probe) and the shared
 // quota store's lease/publish flow. Every other pool still goes through
 // pacelever until its own change.
 //
-// claude and codex are always native. commandcode has a switch (docs/quota.md
+// claude and codex are always native. commandcode and devin have a switch (docs/quota.md
 // §Native measurement: commandcode): it is native only once the host's
 // `[quota].native_pools` lists it, and until then it is in shadow — see
 // quota_shadow.go.
@@ -45,13 +47,14 @@ var quotaPresenceHostPattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 // presence interval persist across the fleet-state loop and the quota.refresh
 // op.
 type nativeQuotaSource struct {
-	// Pool is the pool measured: "claude", "codex" or "commandcode".
+	// Pool is the pool measured: "claude", "codex", "commandcode" or "devin".
 	Pool string
-	// Claude, Codex and Commandcode are the credential, HTTP and process
+	// Claude, Codex, Commandcode and Devin are the credential, HTTP and process
 	// environment of a measurement of their pool.
 	Claude      claude.Config
 	Codex       codex.Config
 	Commandcode commandcode.Config
+	Devin       devin.Config
 	// SpawnConfigPath is the spawn.json whose handoffkeep_env names the store.
 	SpawnConfigPath string
 	// HostID is announced as the holder of the account; empty skips presence.
@@ -127,6 +130,18 @@ func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountF
 		// request the first time a login is seen (cached after that).
 		return func(ctx context.Context) (quota.Observation, error) { return commandcode.Measure(ctx, config) },
 			func(ctx context.Context) (string, error) { return commandcode.AccountFP(ctx, config) }, shared.OtherFreshTTL
+	case "devin":
+		config := s.Devin
+		config.Now = s.Now
+		return func(ctx context.Context) (quota.Observation, error) { return devin.Measure(ctx, config) },
+			func(context.Context) (string, error) {
+				// Only a host with a devin login measures; any other host's
+				// reason is its missing credentials, never a lease wait.
+				if !devin.HasLogin(config) {
+					return "", quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
+				}
+				return devin.AccountFP(config), nil
+			}, shared.OtherFreshTTL
 	case "codex":
 		config := s.Codex
 		config.Now = s.Now
@@ -168,9 +183,20 @@ func (s *nativeQuotaSource) Refresh(ctx context.Context) (shared.Reading, error)
 	}
 	s.flowOnce.Do(func() {
 		s.flow = &shared.Flow{Now: s.Now, FreshTTL: freshTTL, HostID: s.HostID, Wait: s.Wait}
+		if s.Pool == "devin" {
+			config := s.Devin
+			config.Now = s.Now
+			s.flow.LocalFree = devin.LocalFree(config)
+			s.flow.MaxWait = devinLeaseWait
+		}
 	})
 	return s.flow.Refresh(ctx, store, s.Pool+":"+fp, measure)
 }
+
+// devinLeaseWait bounds how long a devin refresh waits for another measurement
+// of the account: past it the refresh gives up with shared_pending instead of
+// holding a spawn path for two lease windows.
+var devinLeaseWait = 15 * time.Second
 
 // measureOnly is one measurement that touches no shared store: no lease, no
 // publication, no presence. Shadow mode uses it to compare against pacelever

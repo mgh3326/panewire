@@ -56,7 +56,7 @@ func TestMeasureTargetSSHRefreshPerPool(t *testing.T) {
 	}
 }
 
-// commandcode has a native/shadow switch: the host's `[quota].native_pools`
+// commandcode and devin have a native/shadow switch: the host's `[quota].native_pools`
 // decides, and an unlisted (or unreadable) config leaves it in shadow, so spawns
 // keep running pacelever for it. claude and codex ignore the list.
 func TestNativeQuotaPoolSwitch(t *testing.T) {
@@ -73,6 +73,11 @@ func TestNativeQuotaPoolSwitch(t *testing.T) {
 		{"commandcode", map[string]any{"native_pools": []any{}}, false},
 		{"commandcode", map[string]any{"native_pools": "commandcode"}, false},
 		{"commandcode", native, true},
+		{"devin", nil, false},
+		{"devin", map[string]any{"native_pools": []any{}}, false},
+		{"devin", native, false},
+		{"devin", map[string]any{"native_pools": []any{"devin"}}, true},
+		{"commandcode", map[string]any{"native_pools": []any{"devin"}}, false},
 		{"devin", native, false},
 	} {
 		if got := IsNativeQuotaPool(test.pool, test.quota); got != test.want {
@@ -133,7 +138,7 @@ func TestHostNativeQuotaPoolReadsTheHostConfig(t *testing.T) {
 	if !HostNativeQuotaPool("commandcode") {
 		t.Fatal("commandcode stayed in shadow after the flip")
 	}
-	if err := os.WriteFile(path, []byte("[quota]\nnative_pools = [\"commandcode\", \"devin\"]\n"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("[quota]\nnative_pools = [\"commandcode\", \"claude\"]\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if HostNativeQuotaPool("commandcode") {
@@ -143,11 +148,12 @@ func TestHostNativeQuotaPoolReadsTheHostConfig(t *testing.T) {
 
 func TestLoadConfigValidatesNativePools(t *testing.T) {
 	for body, ok := range map[string]bool{
-		"[quota]\nnative_pools = [\"commandcode\"]\n": true,
-		"[quota]\nnative_pools = []\n":                true,
-		"[quota]\nnative_pools = \"commandcode\"\n":   false,
-		"[quota]\nnative_pools = [\"devin\"]\n":       false,
-		"[quota]\nnative_pools = [1]\n":               false,
+		"[quota]\nnative_pools = [\"commandcode\"]\n":            true,
+		"[quota]\nnative_pools = []\n":                           true,
+		"[quota]\nnative_pools = \"commandcode\"\n":              false,
+		"[quota]\nnative_pools = [\"claude\"]\n":                 false,
+		"[quota]\nnative_pools = [\"commandcode\", \"devin\"]\n": true,
+		"[quota]\nnative_pools = [1]\n":                          false,
 	} {
 		_, err := LoadConfig(writeHostsConfig(t, body))
 		if (err == nil) != ok {
