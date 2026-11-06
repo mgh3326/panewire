@@ -62,10 +62,15 @@ type Flow struct {
 	Wait time.Duration
 	// HostID is announced as the holder of an account. Empty: no presence.
 	HostID string
-	// MaxWait bounds how long this host waits for another host's measurement
-	// before giving up on it, so a held lease never holds the caller; zero is
-	// two lease windows.
+	// MaxWait is the hard bound on the whole time this host spends waiting for
+	// another host's measurement — every poll pause and the last one — so a held
+	// lease never holds the caller longer; zero is two lease windows.
 	MaxWait time.Duration
+	// Wall and Sleep are the wall clock and the pause the wait runs on; nil are
+	// time.Now and a context-aware sleep. A fixture replaces both to prove the
+	// MaxWait bound without waiting for it.
+	Wall  func() time.Time
+	Sleep func(context.Context, time.Duration) error
 	// LocalFree makes the pool one with a free tier: it reports this host's
 	// own free-tier state at a time, which is merged into every publication.
 	// Such a reading needs a free bucket, may have no paid window, and a failed
@@ -114,6 +119,20 @@ func (f *Flow) maxWait() time.Duration {
 		return f.MaxWait
 	}
 	return 2 * time.Duration(f.leaseTTL()) * time.Second
+}
+
+func (f *Flow) wall() time.Time {
+	if f.Wall != nil {
+		return f.Wall()
+	}
+	return time.Now()
+}
+
+func (f *Flow) pause(ctx context.Context, d time.Duration) error {
+	if f.Sleep != nil {
+		return f.Sleep(ctx, d)
+	}
+	return sleep(ctx, d)
 }
 
 func (f *Flow) presenceEvery() time.Duration {
@@ -203,7 +222,13 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 	// holder's lease expires, then takes over the expired slot once, so a
 	// failed or killed publication never strands the account on "pending".
 	holder := ""
-	publisherGone := false
+	publisherGone, waitedOut := false, false
+	// Wall-clock pacing: the whole wait for another host's measurement, over
+	// both lease attempts, ends at waitDeadline. Every pause is cut to what
+	// is left of it, and once it has passed nothing more is slept, so the
+	// caller waits at most MaxWait (plus the store calls) however the server
+	// keeps reporting contention.
+	waitDeadline := f.wall().Add(f.maxWait())
 	// A free-tier pool measures through a paid-probe backoff: the free state
 	// is published without the probe.
 	for attempts := 0; attempts < 2 && holder == "" && (!backingOff || f.LocalFree != nil); attempts++ {
@@ -216,22 +241,19 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 			return Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 		}
 		publisherGone = false
-		waitedOut := false
-		// Wall-clock pacing: each wait ends at the holder's lease expiry and
-		// the whole wait is bounded by ctx and MaxWait, so the loop ends even
-		// if the server keeps reporting new contention.
-		deadline := time.Now().Add(f.maxWait())
 		for !lease.Acquired || lease.Holder != holder {
-			if !lease.ExpiresAt.After(time.Now()) {
+			if !lease.ExpiresAt.After(f.wall()) {
 				publisherGone = true
 				break
 			}
-			if time.Now().After(deadline) {
+			remaining := waitDeadline.Sub(f.wall())
+			if remaining <= 0 {
 				waitedOut = true
 				break
 			}
-			pause := min(f.wait(), time.Until(lease.ExpiresAt))
-			if sleep(ctx, pause) != nil {
+			// Each pause ends at the holder's lease expiry, at the next poll,
+			// or at the bound, whichever is first.
+			if f.pause(ctx, min(f.wait(), lease.ExpiresAt.Sub(f.wall()), remaining)) != nil {
 				return Reading{}, quota.Fail(quota.ErrKindSharedWait, "shared quota wait cancelled")
 			}
 			if latest, err = c.Latest(ctx, key); err != nil {
@@ -255,7 +277,9 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 		}
 	}
 	if holder == "" {
-		if sleep(ctx, f.wait()) != nil {
+		// One last poll interval, never past the bound: after waiting out the
+		// bound the host reads once more and gives up without sleeping.
+		if last := min(f.wait(), max(waitDeadline.Sub(f.wall()), 0)); last > 0 && f.pause(ctx, last) != nil {
 			return Reading{}, quota.Fail(quota.ErrKindSharedWait, "shared quota wait cancelled")
 		}
 		if latest, err = c.Latest(ctx, key); err != nil {

@@ -249,3 +249,84 @@ func TestFreeNeedsPublish(t *testing.T) {
 		})
 	}
 }
+
+// fakeWait is the wait's wall clock and pause on virtual time: Sleep records
+// each requested pause and moves the clock by it, so the whole wait runs in no
+// time and the bound is exact.
+type fakeWait struct {
+	now    time.Time
+	sleeps []time.Duration
+}
+
+func (w *fakeWait) wall() time.Time { return w.now }
+
+func (w *fakeWait) sleep(_ context.Context, d time.Duration) error {
+	w.sleeps = append(w.sleeps, d)
+	w.now = w.now.Add(d)
+	return nil
+}
+
+func (w *fakeWait) total() time.Duration {
+	var sum time.Duration
+	for _, d := range w.sleeps {
+		sum += d
+	}
+	return sum
+}
+
+// MaxWait is a hard bound, not a check between pauses: each pause is cut to
+// what is left of it, and once it has passed the refresh reads once more and
+// gives up without sleeping again. Whatever the poll interval, the total slept
+// never exceeds MaxWait.
+func TestMaxWaitIsAHardBoundOnTheWholeWait(t *testing.T) {
+	for _, test := range []struct {
+		name          string
+		wait, max     time.Duration
+		wantSleeps    []time.Duration
+		freeTierFlows bool
+	}{
+		{"pause cut to the remainder", 2 * time.Second, 5 * time.Second, []time.Duration{2 * time.Second, 2 * time.Second, time.Second}, false},
+		{"pause longer than the bound", 10 * time.Second, 3 * time.Second, []time.Duration{3 * time.Second}, false},
+		{"bound is a whole number of pauses", time.Second, 3 * time.Second, []time.Duration{time.Second, time.Second, time.Second}, false},
+		{"free-tier pool", 2 * time.Second, 5 * time.Second, []time.Duration{2 * time.Second, 2 * time.Second, time.Second}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			hk := newFakeHK(t)
+			hk.latest = freeStored(testNow.Add(-time.Hour), freeState(FreeAvailable, nil))
+			if !test.freeTierFlows {
+				hk.latest = stored(testNow.Add(-time.Hour), 30)
+			}
+			hk.onLease = func(h *fakeHK, n int, holder string) (Lease, bool) {
+				return Lease{Holder: "other-host", ExpiresAt: time.Now().Add(time.Hour)}, true
+			}
+			clock := &fakeWait{now: time.Now()}
+			flow := newFlow()
+			if test.freeTierFlows {
+				flow = newFreeFlow(freeState(FreeAvailable, nil))
+			}
+			flow.Wait, flow.MaxWait, flow.Wall, flow.Sleep = test.wait, test.max, clock.wall, clock.sleep
+			_, err := flow.Refresh(t.Context(), hk.client(), testKey, mustMeasureNothing(t))
+			if quota.KindOf(err) != quota.ErrKindSharedPending {
+				t.Fatalf("err = %v, want shared_pending", err)
+			}
+			if clock.total() > test.max {
+				t.Fatalf("slept %s in %v, past the %s bound", clock.total(), clock.sleeps, test.max)
+			}
+			if len(clock.sleeps) != len(test.wantSleeps) {
+				t.Fatalf("pauses %v, want %v", clock.sleeps, test.wantSleeps)
+			}
+			for i, d := range clock.sleeps {
+				if d != test.wantSleeps[i] {
+					t.Fatalf("pauses %v, want %v", clock.sleeps, test.wantSleeps)
+				}
+			}
+			// The last read after the bound is a read, not a sleep: it was made.
+			if got := hk.latestCalls; got != len(test.wantSleeps)+2 {
+				t.Fatalf("%d store reads for %d pauses, want one before, one per pause and one after the bound", got, len(test.wantSleeps))
+			}
+			if len(hk.pub) != 0 {
+				t.Fatal("published although another host held the lease")
+			}
+		})
+	}
+}
