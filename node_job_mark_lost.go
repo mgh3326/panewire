@@ -66,7 +66,7 @@ type nodeJobLedger struct {
 }
 
 type nodeJobLedgerEvent struct {
-	kind, pane, label string
+	kind, pane, label, role string
 }
 
 func nodeJobClaimKind(kind string) bool {
@@ -166,6 +166,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				PaneID     string `json:"pane_id"`
 				Label      string `json:"label"`
 				AgentLabel string `json:"agent_label"`
+				Role       string `json:"role"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(data, &event) != nil || event.Kind == "" {
@@ -175,7 +176,7 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 		if label == "" {
 			label = event.Payload.AgentLabel
 		}
-		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label})
+		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role})
 	}
 	return events, nil
 }
@@ -257,4 +258,23 @@ func (client *HubClient) nodeJobStoreForCommand() (fleet.JobStore, error) {
 		return nil, err
 	}
 	return fleet.NewJobStore(env.URL, env.Token, env.CFID, env.CFSecret)
+}
+
+// nodeJobRole is the role the job's own ledger names: the newest claim or
+// spawned event that carries one. A job with no directory or no role event has
+// no role, so a caller that needs one keeps the pane.
+func (client *HubClient) nodeJobRole(name string) (string, error) {
+	root, _, found, err := client.openNodeJobDir(name)
+	if err != nil || !found {
+		return "", err
+	}
+	defer root.Close()
+	events, err := readNodeJobLedgerEvents(root)
+	role := ""
+	for _, event := range events {
+		if event.role != "" && (nodeJobClaimKind(event.kind) || event.kind == "job.spawned") {
+			role = event.role
+		}
+	}
+	return role, err
 }

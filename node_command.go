@@ -61,8 +61,9 @@ var (
 	nodeCommandPaneIDPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 	// pane.close never closes a working pane: the expected status must be one
 	// of these, and the node re-reads it before closing. blocked is a pane
-	// stopped at a prompt that needs a person, which only the hub's finished
-	// reviewer release closes (hub_spawn_reviewer_release.go).
+	// stopped at a prompt; the node closes it only for a reviewer job
+	// (nodePaneClose), the pane the hub's finished-reviewer release targets
+	// (hub_spawn_reviewer_release.go).
 	nodePaneClosableStatus = map[string]bool{"idle": true, "done": true, "blocked": true}
 	// nodePaneIdleStatus is the finished subset, for a release that must not
 	// close a pane waiting on a prompt.
@@ -617,6 +618,14 @@ func (client *HubClient) nodePaneMatch(ctx context.Context, paneID, name, status
 // so an idle→working→idle bounce also refuses — leaves only that read-to-
 // close gap, which is no wider than the ssh reap's re-read then close.
 func (client *HubClient) nodePaneClose(ctx context.Context, args nodePaneCloseArgs) (any, string) {
+	// A blocked pane may be a worker waiting on an ESC answer, so the node
+	// closes one only when the job's own ledger names the reviewer role; the
+	// operator-credential command path cannot widen that (hk 3315).
+	if args.AgentStatus == "blocked" {
+		if role, err := client.nodeJobRole(args.Name); err != nil || role != "reviewer" {
+			return nodePaneCloseResult{Outcome: nodePaneChanged}, ""
+		}
+	}
 	outcome, first, err := client.nodePaneMatch(ctx, args.PaneID, args.Name, args.AgentStatus, args.Cwd, true)
 	if err != nil {
 		return nil, "herdr_failed"

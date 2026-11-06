@@ -170,16 +170,49 @@ func TestNodeCommandPaneCloseExactMatch(t *testing.T) {
 	}
 }
 
-// A blocked pane (stopped at a prompt) closes like an idle one, but only when
-// its status still reads blocked on both re-reads (hk 3315).
+// A blocked pane (stopped at a prompt) closes only for a job whose own ledger
+// names the reviewer role, and only while its status still reads blocked on
+// both re-reads: a blocked worker may be waiting on an ESC answer (hk 3315).
 func TestNodeCommandPaneCloseBlocked(t *testing.T) {
 	expected := map[string]any{"pane_id": "w1:p1", "name": "job-a", "agent_status": "blocked", "cwd": "/work/a"}
-	for status, outcome := range map[string]string{"blocked": nodePaneClosed, "working": nodePaneChanged} {
-		fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", status, "/work/a"))}, read: nodeReapScreen("❯ ")}
-		result, code := nodeRun(t, &HubClient{nodeHerdr: fake.run, nodeCloseSettle: time.Millisecond}, nodeCommandPaneClose, expected)
-		if code != "" || result["outcome"] != outcome {
-			t.Fatalf("listed %s: result=%v code=%q", status, result, code)
-		}
+	claim := func(role string) map[string]any {
+		return map[string]any{"kind": "job.claimed", "payload": map[string]any{"role": role}}
+	}
+	cases := []struct {
+		name    string
+		listed  string
+		events  []map[string]any
+		noJobs  bool
+		outcome string
+	}{
+		{name: "reviewer job closes", listed: "blocked", events: []map[string]any{claim("reviewer")}, outcome: nodePaneClosed},
+		{name: "role from the spawned receipt closes", listed: "blocked", events: []map[string]any{{"kind": "job.spawned", "payload": map[string]any{"role": "reviewer", "pane_id": "w1:p1"}}}, outcome: nodePaneClosed},
+		{name: "worker job is refused", listed: "blocked", events: []map[string]any{claim("worker")}, outcome: nodePaneChanged},
+		{name: "ledger with no role is refused", listed: "blocked", events: []map[string]any{{"kind": "job.claimed"}}, outcome: nodePaneChanged},
+		{name: "unknown job is refused", listed: "blocked", outcome: nodePaneChanged},
+		{name: "unset jobs root is refused", listed: "blocked", noJobs: true, events: []map[string]any{claim("reviewer")}, outcome: nodePaneChanged},
+		{name: "pane back at work is refused", listed: "working", events: []map[string]any{claim("reviewer")}, outcome: nodePaneChanged},
+	}
+	for _, test := range cases {
+		t.Run(test.name, func(t *testing.T) {
+			inbox := t.TempDir()
+			if len(test.events) > 0 {
+				markLostJobEvents(t, inbox, "job-a", test.events...)
+			}
+			client := &HubClient{jobsInboxRoot: inbox, nodeCloseSettle: time.Millisecond}
+			if test.noJobs {
+				client.jobsInboxRoot = ""
+			}
+			fake := &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", test.listed, "/work/a"))}, read: nodeReapScreen("❯ ")}
+			client.nodeHerdr = fake.run
+			result, code := nodeRun(t, client, nodeCommandPaneClose, expected)
+			if code != "" || result["outcome"] != test.outcome {
+				t.Fatalf("result=%v code=%q", result, code)
+			}
+			if closes := fake.called("pane", "close"); (test.outcome == nodePaneClosed) != (closes == 1) {
+				t.Fatalf("outcome=%s but closes=%d", test.outcome, closes)
+			}
+		})
 	}
 }
 
