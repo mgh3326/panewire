@@ -425,7 +425,8 @@ text, command lines, pane output and absolute local paths are never written.
 `--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT,
 and emits the relay only after the PUT returns; `escalate` writes
 `{state:"escalated"}` and the watcher writes `{state:"lost"}` after two
-missing-pane observations. A failed write after the pane exists degrades to a
+missing-pane observations, or when a worker, tester or reviewer pane is idle on
+a quota or rate-limit screen with no report (see `docs/quota-stop.md`). A failed write after the pane exists degrades to a
 `job.record_failed` event and a warning; the relay still goes out so readers
 fall back.
 

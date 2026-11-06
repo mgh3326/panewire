@@ -108,7 +108,7 @@ type fakeHK struct {
 	down    bool
 }
 
-var jobRecordFields = []string{"state", "role", "label", "family", "profile", "model", "pool", "owner_lane", "parent_lane", "parent_job", "pane_id", "worktree", "report_doc", "result"}
+var jobRecordFields = []string{"state", "role", "label", "family", "profile", "model", "pool", "owner_lane", "parent_lane", "parent_job", "pane_id", "worktree", "report_doc", "result", "end_reason"}
 
 func newFakeHK(t *testing.T) *fakeHK {
 	t.Helper()
