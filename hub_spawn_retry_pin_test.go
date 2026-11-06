@@ -14,10 +14,10 @@ import (
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
-// retryableDesktopTask is a stored operation whose first attempt failed on
+// retryableStoredHostTask is a stored operation whose first attempt failed on
 // desktop and was resumed as a second attempt, the state the hub's
 // verified-cleanup retry rewrites.
-func retryableDesktopTask(t *testing.T, h *HubServer, request fleet.Submission) hubSpawnTask {
+func retryableStoredHostTask(t *testing.T, h *HubServer, request fleet.Submission) hubSpawnTask {
 	t.Helper()
 	task, _, err := h.inbox.store.claimSpawn(t.Context(), request, "test-job", "parent", time.Now())
 	if err != nil {
@@ -38,36 +38,102 @@ func retryableDesktopTask(t *testing.T, h *HubServer, request fleet.Submission) 
 	return retried
 }
 
-func TestHubSpawnRetryReplayIsNotAPlacementPin(t *testing.T) {
-	h := asyncSpawnHub(t)
-	root := t.TempDir()
-	clock := time.Unix(1_800_000_000, 0)
-	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
-		return &fleet.App{
-			Config:   fleet.Config{Hosts: map[string]map[string]any{"desktop": {}}, HostOrder: []string{"desktop"}},
-			JobStore: spawnJobsFixture{}, Home: root, Jobs: filepath.Join(root, "jobs"), Out: out, Err: errout,
-			Now:   func() time.Time { return clock },
-			Sleep: func(_ context.Context, d time.Duration) error { clock = clock.Add(d); return nil },
-		}, nil
+// retryQuota admits one sonnet seat on pool "p" for every request.
+type retryQuota struct{}
+
+func (retryQuota) Launch(context.Context, fleet.QuotaRequest) (fleet.Launch, error) {
+	return fleet.Launch{Profile: "sonnet", ModelID: "m", Effort: "high", Grade: "B", Gate: "default"}, nil
+}
+func (retryQuota) Gate(context.Context, fleet.QuotaRequest) (string, error) { return "pool=p\n", nil }
+func (retryQuota) Catalog(context.Context) ([]fleet.CatalogRow, error) {
+	return []fleet.CatalogRow{{Profile: "sonnet", Effort: "high", Grade: "B", ModelID: "m", Pool: "p", Gate: "default"}}, nil
+}
+func (retryQuota) Pools(context.Context) (map[string]fleet.PoolView, error) {
+	zero := 0.0
+	return map[string]fleet.PoolView{"p": {Status: "ok", Class: "spend", Blocking: &zero}}, nil
+}
+
+type retrySource struct{ now time.Time }
+
+func (retrySource) Hosts(context.Context, string) ([]fleet.HostView, error) { return nil, nil }
+func (s retrySource) Presence(context.Context) ([]fleet.PresenceRecord, error) {
+	return []fleet.PresenceRecord{{HostID: "desktop", AccountKey: "p:0000000000000001", LastSeen: s.now}}, nil
+}
+func (s retrySource) SharedAccount(_ context.Context, key string) (fleet.SharedAccount, error) {
+	zero := 0.0
+	return fleet.SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: s.now, Quota: &fleet.PoolView{Status: "ok", Class: "spend", Blocking: &zero}}, nil
+}
+
+// retryRunner answers the hk reads and brief upload the hub path makes.
+type retryRunner struct{}
+
+func (retryRunner) Run(_ context.Context, c fleet.Command) fleet.Result {
+	args := strings.Join(c.Args, " ")
+	if c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show") {
+		return fleet.Result{Out: `{"id":42,"title":"work (grade B, T1)","state":"ready","refs":{}}`}
 	}
-	request := durableSpawnRequest()
-	task := retryableDesktopTask(t, h, request)
-	if task.Outcome.Host != "desktop" || !task.Outcome.Retryable {
-		t.Fatalf("fixture lost the stored outcome: %+v", task.Outcome)
-	}
-	h.executeSpawnTask(t.Context(), task)
-	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
+	return fleet.Result{}
+}
+
+// retryDispatchApp is an App whose auto placement can select a seat, so a
+// replay runs through to the hub transport.
+func retryDispatchApp(t *testing.T, out, errout io.Writer) *fleet.App {
+	t.Helper()
+	policy, err := fleet.LoadPolicy("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The fixture app has no quota catalog, so the replay ends at selection;
-	// before the marker it ended at containment, before placement.
-	if strings.Contains(saved.Outcome.Reason, "containment_required") || saved.Outcome.Reason == "" {
+	root := t.TempDir()
+	clock := time.Unix(1_800_000_000, 0)
+	return &fleet.App{
+		Policy: policy, Runner: retryRunner{}, Quota: retryQuota{}, Source: retrySource{now: clock},
+		Config:   fleet.Config{Hosts: map[string]map[string]any{"desktop": {}, "machine-a": {}}, HostOrder: []string{"desktop", "machine-a"}},
+		JobStore: spawnJobsFixture{}, Home: root, Jobs: filepath.Join(root, "jobs"), Out: out, Err: errout,
+		Now:   func() time.Time { return clock },
+		Sleep: func(_ context.Context, d time.Duration) error { clock = clock.Add(d); return nil },
+	}
+}
+
+func TestHubSpawnRetryReplayIsNotAPlacementPin(t *testing.T) {
+	// The spawn writes fleet events under the state home; keep them out of the tree.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
+	h, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "desktop": "node-token", "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	server := httptest.NewServer(h.Handler())
+	defer server.Close()
+	// A second connected node the retry must not choose: only the stored
+	// outcome's host (desktop) may receive the job.
+	t14NamedNode(t, h, server, "machine-a", true, true)
+	node := t14NamedNode(t, h, server, "desktop", true, true)
+	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) { return retryDispatchApp(t, out, errout), nil }
+	request := durableSpawnRequest()
+	task := retryableStoredHostTask(t, h, request)
+	if task.Outcome.Host != "desktop" || !task.Outcome.Retryable {
+		t.Fatalf("fixture lost the stored outcome: %+v", task.Outcome)
+	}
+	done := make(chan struct{})
+	go func() { defer close(done); h.executeSpawnTask(t.Context(), task) }()
+	sent := t14ReadNodeSpawn(t, node)
+	// The node is the stored outcome's host; the rewrite keeps the override
+	// reason and the logical request key.
+	if sent.WaitSeconds == 0 || hubSpawnArg(sent.Args, "--override-reason") != "verified-cleanup-retry" || hubSpawnArg(sent.Args, "--job") != "test-job" {
+		t.Fatalf("dispatched args: %v", sent.Args)
+	}
+	t14WriteSpawnResult(t, node, sent.RequestID, 0, "test-job", "w1:p9", "OK pane=w1:p9 job=test-job\n", "")
+	<-done
+	saved, err := h.inbox.store.spawnTask(t.Context(), request.RequestID)
+	if err != nil || saved.Attempt != 2 || saved.Node == nil || saved.Node.Machine != "desktop" || saved.Node.RequestID != sent.RequestID {
+		t.Fatalf("the retry was not bound to the stored host's dispatch: %+v %v", saved, err)
+	}
+	if strings.Contains(saved.Outcome.Reason, "containment_required") {
 		t.Fatalf("the hub's own retry was refused as an operator pin: %+v", saved.Outcome)
 	}
 	// Same request, same idempotency key: the retry rewrites an in-memory copy.
 	raw, err := json.Marshal(saved.Request)
-	if err != nil || !strings.Contains(string(raw), `"--host","auto"`) || strings.Contains(string(raw), "desktop") {
+	if err != nil || saved.Request.RequestID != request.RequestID || !strings.Contains(string(raw), `"--host","auto"`) || strings.Contains(string(raw), `"--host","desktop"`) {
 		t.Fatalf("the stored request changed: %s %v", raw, err)
 	}
 }
