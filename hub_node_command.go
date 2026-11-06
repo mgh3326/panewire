@@ -210,7 +210,9 @@ func wakeLostNodeCommands(lost []*hubNodeCommandPending) {
 }
 
 func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.Request) {
-	if !h.authenticateScoped(request) {
+	// A node credential reaches this route only for pr.status, which
+	// authorizeNodeCommand enforces once the body names the op.
+	if !h.authenticateScoped(request) && h.authenticate(request).kind != hubCallerNode {
 		hubUnauthorized(writer)
 		return
 	}
@@ -287,6 +289,14 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 // authorizeNodeCommand adds one rule to authorize: a reap-only op is for a
 // service whose scopes name it, so the operator credential is refused too.
 func (h *HubServer) authorizeNodeCommand(request *http.Request, op, machine string) hubAccess {
+	if h.authenticate(request).kind == hubCallerNode {
+		// The local node daemon asks for PR state on a worker's behalf, so a
+		// node may run the read-only pr.status op and nothing else here.
+		if op == nodeCommandPRStatus {
+			return hubAccessGranted
+		}
+		return hubAccessDenied
+	}
 	if nodeCommandReapOnly(op) && h.authenticate(request).kind == hubCallerOperator {
 		return hubAccessForbidden
 	}

@@ -33,7 +33,7 @@ func (e *NodeReapError) Error() string { return fmt.Sprintf("hub %d %s", e.Statu
 // guarded boundary as the operator commands, so only the approved hub origin
 // ever receives it.
 type NodeReapClient struct {
-	hub *hubOperatorClient
+	hub inboxHTTPClient
 }
 
 // NewNodeReapClient binds a service client id and bearer to the hub origin.

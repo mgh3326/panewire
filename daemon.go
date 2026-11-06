@@ -637,21 +637,22 @@ func (d *Daemon) serve(ctx context.Context) {
 }
 
 type localRequest struct {
-	Inbox         *inboxRequest `json:"inbox,omitempty"`
-	DeliveryClass string        `json:"delivery_class,omitempty"`
-	Late          bool          `json:"late,omitempty"`
-	NotifyType    string        `json:"notify_type,omitempty"`
-	Cause         string        `json:"cause,omitempty"`
-	Op            string        `json:"op"`
-	Path          string        `json:"path,omitempty"`
-	Target        string        `json:"target,omitempty"`
-	Sender        string        `json:"sender,omitempty"`
-	Uptake        string        `json:"uptake,omitempty"`
-	StoreBody     bool          `json:"store_body,omitempty"`
-	Status        string        `json:"status,omitempty"`
-	SinceMS       int64         `json:"since_ms,omitempty"`
-	SettleMS      int64         `json:"settle_ms,omitempty"`
-	TimeoutMS     int64         `json:"timeout_ms,omitempty"`
+	Inbox         *inboxRequest         `json:"inbox,omitempty"`
+	PRStatus      *localPRStatusRequest `json:"pr_status,omitempty"`
+	DeliveryClass string                `json:"delivery_class,omitempty"`
+	Late          bool                  `json:"late,omitempty"`
+	NotifyType    string                `json:"notify_type,omitempty"`
+	Cause         string                `json:"cause,omitempty"`
+	Op            string                `json:"op"`
+	Path          string                `json:"path,omitempty"`
+	Target        string                `json:"target,omitempty"`
+	Sender        string                `json:"sender,omitempty"`
+	Uptake        string                `json:"uptake,omitempty"`
+	StoreBody     bool                  `json:"store_body,omitempty"`
+	Status        string                `json:"status,omitempty"`
+	SinceMS       int64                 `json:"since_ms,omitempty"`
+	SettleMS      int64                 `json:"settle_ms,omitempty"`
+	TimeoutMS     int64                 `json:"timeout_ms,omitempty"`
 	// The fields below belong to the R20 emit op. The names above are the
 	// established wait/prompt request contract and must not be renamed.
 	Kind           string `json:"kind,omitempty"`
@@ -727,6 +728,8 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 			result, err = d.handleInbox(callCtx, req.Inbox)
 		case daemonop.LanesPutOp:
 			result, err = d.handleLanesPut(callCtx, req.LanesPut)
+		case "pr.status":
+			result, err = d.handlePRStatus(callCtx, req.PRStatus)
 		case "decision.reply":
 			if req.Target == "" || req.SinceMS <= 0 {
 				err = &codedError{ExitUsage, fmt.Errorf("pane and since are required")}
@@ -746,7 +749,7 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 				}
 			}
 		default:
-			err = &codedError{ExitUsage, fmt.Errorf("unknown operation")}
+			err = &codedError{ExitUsage, errors.New(localUnknownOperation)}
 		}
 		cancel()
 		code := ExitCode(err)

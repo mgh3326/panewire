@@ -6,8 +6,8 @@
 #   pr panewire_state gh_state state_agrees panewire_checks gh_checks checks_agree
 #   panewire_findings gh_threads threads_agree panewire_ms gh_ms gh_requests panewire_source
 #
-# Read-only. Needs jq, python3 (millisecond clock), gh logged in, and the hub
-# connection panewire pr reads from its flags or PANEWIRE_HUB_* environment.
+# Read-only. Needs jq, python3 (millisecond clock), gh logged in, and either the
+# local node daemon (the default) or a hub connection in PANEWIRE_HUB_* environment.
 # PANEWIRE_BIN and GH_BIN override the binaries.
 #
 # gh_requests is the rise in the GitHub core+graphql rate-limit counters over
