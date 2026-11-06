@@ -332,6 +332,27 @@ func (s *laneInboxStore) spawnRoleOwner(parent context.Context, task, role strin
 	err = s.db.QueryRowContext(ctx, s.q(`SELECT o.request_id,o.job,o.status FROM spawn_reservations r JOIN spawn_operations o ON r.request_id=o.request_id WHERE r.task_role=?`), task+":"+role).Scan(&id, &job, &status)
 	return
 }
+
+// retryableSpawns lists the operations that ended with verified cleanup and
+// wait for a replay of their own request.
+func (s *laneInboxStore) retryableSpawns(parent context.Context) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status='retryable'`))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
 func (s *laneInboxStore) releaseCompletedSpawnRole(parent context.Context, id, task, role string) error {
 	ctx, done := s.op(parent)
 	defer done()

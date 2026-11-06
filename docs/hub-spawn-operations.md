@@ -61,6 +61,19 @@ a read error or a missing pane id keeps the slot. The 409 body then carries `req
 `pane` and a `fix` (close that pane, then resubmit), and the CLI prints them
 with exit 74.
 
+A prior operation in `succeeded` whose hk job is still `claimed` or `spawned`
+(a job revoked and reaped by an older binary, or one that ended without writing
+its record, hk 3204) is checked the same way: only a complete pane list that
+lacks the recorded pane marks the hk job `lost` and releases the slot. A
+present pane, an unreadable pane list, an unreachable node or no recorded pane
+keeps the slot and the 409 body as before. A `retryable` operation holds no
+slot (its reservation is deleted when it ends), but its hk job stays `claimed`:
+a new submission for the same task and role under another job id marks that
+job `lost` once it holds the slot. A replay of the retryable request itself
+takes the replay path and writes nothing. `panewire reap` now writes `lost` to
+the hk record of a job whose newest terminal event is `job.revoked` or
+`job.lost` (see `docs/jobs-resilience.md`).
+
 Before sending HTTP, the CLI saves `jobs/<job>/submission.json` privately and
 synchronizes it. Repeating the same command reuses that key. A lost response is
 not permission to generate a new key or try another host. A changed brief,

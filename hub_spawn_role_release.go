@@ -80,10 +80,65 @@ func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, 
 	if state, _ := record["state"].(string); state != "claimed" {
 		return false, heldPaneUnknown
 	}
+	return h.markLostAndRelease(ctx, app, holder, task, role), pane
+}
+
+// markLostAndRelease writes the hk job lost, then drops the reservation. A
+// crash between the two repeats harmlessly: a lost job releases through the
+// completed-or-lost path.
+func (h *HubServer) markLostAndRelease(ctx context.Context, app *fleet.App, holder hubSpawnTask, task, role string) bool {
 	if err := app.MarkJobLost(ctx, holder.Job); err != nil {
+		return false
+	}
+	return h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, task, role) == nil
+}
+
+// releaseFinishedSpawnRole frees the role held by a succeeded operation whose
+// hk job never reached a terminal state (a job revoked and reaped by an older
+// binary, or one that ended without writing its record). Only a node that
+// listed every pane and lacks the recorded one proves the job gone; a present
+// pane, an unknown pane state, or no recorded pane keeps the hold. A present
+// idle pane is a reviewer that finished without completing, which stays held.
+func (h *HubServer) releaseFinishedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, task, role string) (released bool, pane heldPane) {
+	pane, _ = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane)
+	if pane != heldPaneAbsent {
+		return false, pane
+	}
+	if state, _ := record["state"].(string); state != "claimed" && state != "spawned" {
 		return false, heldPaneUnknown
 	}
-	return h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, task, role) == nil, pane
+	return h.markLostAndRelease(ctx, app, holder, task, role), pane
+}
+
+// supersedeRetryableHolders marks lost the hk job of every retryable operation
+// on the same (task, role) under another job id, once the new request holds
+// that role. A retryable operation (verified pre-landing cleanup) holds no hub
+// reservation, because completeSpawn deletes it, and its hk job stays
+// `claimed`, so nothing else would ever close that record. A replay of the
+// holder's own request never reaches here: it takes the replay path first.
+// Best effort: a failed hk read or write leaves the record for the next
+// submission.
+func (h *HubServer) supersedeRetryableHolders(ctx context.Context, app *fleet.App, request fleet.Submission, spawn fleet.Spawn) {
+	if spawn.Task == "" || spawn.ParentJob != "" {
+		return
+	}
+	holders, err := h.inbox.store.retryableSpawns(ctx)
+	if err != nil {
+		return
+	}
+	for _, holder := range holders {
+		prior, err := fleet.ValidateSubmission(holder.Request)
+		if err != nil || prior.Task != spawn.Task || prior.Role != spawn.Role || holder.Request.RequestID == request.RequestID || holder.Job == spawn.Job {
+			continue
+		}
+		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		record, exists, readErr := app.ExistingJob(readCtx, holder.Job)
+		cancel()
+		if state, _ := record["state"].(string); readErr != nil || !exists || state != "claimed" {
+			continue
+		}
+		_ = app.MarkJobLost(ctx, holder.Job)
+	}
 }
 
 func spawnHolderHost(holder hubSpawnTask) string {
@@ -123,8 +178,9 @@ func spawnRoleHeldBody(holder hubSpawnTask, pane heldPane, found bool) map[strin
 }
 
 // reclaimSpawnRole retries claimSpawn after a role collision when the holder is
-// finished: its hk job is completed or lost, or it failed and its pane is
-// verifiably gone. When it cannot, held carries the 409 body naming the holder.
+// finished: its hk job is completed or lost, or it failed or succeeded and its
+// pane is verifiably gone. When it cannot, held carries the 409 body naming the
+// holder.
 func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, request fleet.Submission, spawn fleet.Spawn, owner string) (task hubSpawnTask, held map[string]string, err error) {
 	priorID, priorJob, priorStatus, readErr := h.inbox.store.spawnRoleOwner(ctx, spawn.Task, spawn.Role)
 	if readErr != nil {
@@ -150,6 +206,8 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 			released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, spawn.Task, spawn.Role) == nil
 		case priorStatus == "failed":
 			released, pane = h.releaseFailedSpawnRole(ctx, app, holder, record, spawn.Task, spawn.Role)
+		case priorStatus == "succeeded":
+			released, pane = h.releaseFinishedSpawnRole(ctx, app, holder, record, spawn.Task, spawn.Role)
 		}
 		if released {
 			task, _, err = h.inbox.store.claimSpawn(ctx, request, spawn.Job, owner, h.now().UTC())
