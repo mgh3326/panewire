@@ -177,8 +177,8 @@ func runQuotaCLI(args []string, out, errOut io.Writer) int {
 		if len(args) != 2 || !fleetQuotaPoolPattern.MatchString(args[1]) {
 			return ExitUsage
 		}
-		if args[1] == quotaNativePool {
-			return runClaudeQuotaRefresh(ctx, out, errOut)
+		if isNativeQuotaPool(args[1]) {
+			return runNativeQuotaRefresh(ctx, args[1], out, errOut)
 		}
 		data, code, err := quotaRun(ctx, "quota refresh", 60*time.Second, false, "refresh", args[1])
 		if err != nil {

@@ -51,29 +51,29 @@ func TestRoleReleaseAfterSucceededSpawn(t *testing.T) {
 			if len(jobs.writes()) != 0 || jobs.state("test-job") != hkState {
 				t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 			}
-			owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker")
+			owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
 			if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 				t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 			}
 		})
 	}
-	t.Run("a holder that completed in its ledger holds the role for the terminal path", func(t *testing.T) {
+	t.Run("a holder that completes during the probe keeps its completed record and releases", func(t *testing.T) {
 		hub, server, jobs, held := roleHolderHub(t, succeeded, "spawned", "succeeded")
 		jobs.completeAfterGet = true
-		sink := captureHubLog(hub)
 		node := t14Node(t, hub, server, true)
 		response := submit(server)
 		roleReplyPanes(t, node, nodeCommandRead(t, node), []nodeAgentRow{{PaneID: "w2:p9", Cwd: "/work/other"}}, true)
 		roleReplyMarkLost(t, node, nodeJobMarkLostCompleted)
 		result := t14Result(t, response)
-		if result.status != http.StatusConflict || jobs.state("test-job") != "completed" {
+		if result.status != http.StatusAccepted || jobs.state("test-job") != "completed" {
 			t.Fatalf("status=%d body=%s hk=%v", result.status, result.body, jobs.state("test-job"))
 		}
 		if len(jobs.writes()) != 0 {
 			t.Fatalf("hub wrote hk: %v", jobs.writes())
 		}
-		assertRoleHeldBy(t, hub, held.Request.RequestID)
-		assertHeldLine(t, sink, "release_write_failed", "spawned", "absent", nodeJobMarkLostCompleted)
+		if owner, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err != nil || owner == held.Request.RequestID {
+			t.Fatalf("reservation not moved: %s %v", owner, err)
+		}
 	})
 	t.Run("a refused lost write on a record still not terminal keeps the hold", func(t *testing.T) {
 		hub, server, jobs, held := roleHolderHub(t, succeeded, "spawned", "succeeded")
@@ -151,7 +151,7 @@ func TestRoleReleaseSupersedesRetryableHolder(t *testing.T) {
 	retryable := hubSpawnOutcome{RC: 70, Stage: "landing", Reason: "spawn_failed", Host: "machine-a", Retryable: true}
 	t.Run("another job id has the holder node mark the old job lost and claims", func(t *testing.T) {
 		hub, server, jobs, held := roleHolderHub(t, retryable, "claimed", "retryable")
-		if _, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker"); err == nil {
+		if _, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err == nil {
 			t.Fatal("a retryable operation still holds the reservation")
 		}
 		node := t14Node(t, hub, server, true)
@@ -165,7 +165,7 @@ func TestRoleReleaseSupersedesRetryableHolder(t *testing.T) {
 		if len(jobs.writes()) != 0 || jobs.state("test-job") != "claimed" {
 			t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 		}
-		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker")
+		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
 		if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 			t.Fatalf("new request did not claim: %s %s %v", owner, job, err)
 		}
@@ -179,7 +179,7 @@ func TestRoleReleaseSupersedesRetryableHolder(t *testing.T) {
 		if jobs.state("test-job") != "claimed" || len(jobs.writes()) != 0 {
 			t.Fatalf("replay wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 		}
-		owner, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker")
+		owner, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
 		if err != nil || owner != held.Request.RequestID {
 			t.Fatalf("replay did not resume its own reservation: %s %v", owner, err)
 		}
@@ -196,7 +196,7 @@ func TestRoleReleaseSupersedesRetryableHolder(t *testing.T) {
 		if result.status != http.StatusConflict {
 			t.Fatalf("status=%d body=%s", result.status, result.body)
 		}
-		if _, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker"); err != nil || job != "test-job-r2" {
+		if _, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err != nil || job != "test-job-r2" {
 			t.Fatalf("role moved off the new request: %s %v", job, err)
 		}
 	})

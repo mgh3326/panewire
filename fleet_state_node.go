@@ -19,8 +19,8 @@ import (
 
 // Node side of the fleet state (docs/fleet-state.md): for the pools it
 // measures, the node publishes the shared quota reading it keeps fresh. The
-// claude pool is measured in this process (quota_claude.go); other pools run
-// pacelever.
+// claude and codex pools are measured in this process (quota_native.go); other
+// pools run pacelever.
 
 const (
 	defaultFleetQuotaInterval = time.Minute
@@ -224,14 +224,14 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 }
 
 // measureFleetQuota takes pool's reading for the fleet-state publish. The
-// claude pool is measured in this process; every other pool runs
+// claude and codex pools are measured in this process; every other pool runs
 // `pacelever refresh`. A failed measurement answers the error kind that says
 // why: the login rule reads it. run is the measurement's own deadline and
 // parent the loop's context, which the failure-kind status lookup outlives it
 // on.
 func (client *HubClient) measureFleetQuota(run, parent context.Context, pool string) (FleetStatePublish, bool, string) {
-	if pool == quotaNativePool {
-		reading, err := client.claudeQuotaSource().Refresh(run)
+	if isNativeQuotaPool(pool) {
+		reading, err := client.nativeQuotaSource(pool).Refresh(run)
 		if err != nil {
 			// A timed-out refresh says nothing about the login.
 			if run.Err() != nil {

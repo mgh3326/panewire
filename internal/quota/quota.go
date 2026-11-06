@@ -37,6 +37,7 @@ const (
 // Observation sources and bucket scopes, as pacelever names them.
 const (
 	SourceUsageAPI    = "usage-api"
+	SourceUsageRPC    = "usage-rpc"
 	SourceCLI         = "cli:/usage"
 	SourceHandoffkeep = "handoffkeep"
 

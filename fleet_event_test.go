@@ -11,16 +11,23 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/quota/codex"
 )
 
 // TestMain points every test's fleet events at a temporary state dir, so no
 // test appends to the developer's real ~/.local/state/panewire (which Alloy
-// ships to Loki).
+// ships to Loki). It also points the claude and codex logins at an empty
+// directory, so a test that reaches the node's native quota measurement
+// without a fixture finds no credential instead of the developer's own login.
 func TestMain(m *testing.M) {
 	state, err := os.MkdirTemp("", "panewire-test-state-")
 	if err != nil {
 		panic(err)
 	}
+	os.Setenv("CODEX_HOME", filepath.Join(state, "no-codex-login"))
+	os.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(state, "no-claude-login"))
+	os.Unsetenv("CLAUDE_SECURESTORAGE_CONFIG_DIR")
+	os.Unsetenv(codex.BinaryOverrideEnv)
 	// The crash-output child keeps the state dir its parent test chose.
 	if os.Getenv("PANEWIRE_CRASH_CHILD") == "" {
 		os.Setenv("XDG_STATE_HOME", state)

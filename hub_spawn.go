@@ -171,7 +171,7 @@ func validHubSpawnArgs(args []string) bool {
 
 func validHubSpawnArgsForMode(args []string, operator bool) bool {
 	allowed := map[string]bool{}
-	for _, flag := range []string{"-m", "-w", "-l", "--t", "--effort", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--builder-family", "--builder-job"} {
+	for _, flag := range []string{"-m", "-w", "-l", "--t", "--effort", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--builder-family", "--builder-job", "--review-pass"} {
 		allowed[flag] = true
 	}
 	booleans := map[string]bool{}
@@ -227,6 +227,8 @@ func validHubSpawnArgValue(flag, value string) bool {
 		return value == "worker" || value == "reviewer" || value == "tester"
 	case "--builder-family":
 		return value == "anthropic" || value == "openai" || value == "google" || value == "xai" || value == "deepseek" || value == "meta" || value == "mistral" || value == "other"
+	case "--review-pass":
+		return len(value) == 1 && value[0] >= '1' && value[0] <= '9'
 	case "--parent-job", "--builder-job":
 		return regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`).MatchString(value)
 	case "--report-relative":

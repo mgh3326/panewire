@@ -265,7 +265,7 @@ panewire:
    node's `cwd_map[<repo name>]`.
 3. sends the flags the hub's allowlist carries (`-m -l --t --job --owner
    --effort --role --lane --parent --task|--parent-job --report-relative -L --urgency
-   --builder-family --builder-job`). The node supplies workspace, host and the
+   --builder-family --builder-job --review-pass`). The node supplies workspace, host and the
    override reason. A flag the allowlist cannot carry (`--keep`, `--job-dup-ok`,
    `--task-hk-bypass`, `--allow-escalation`, `--operator-request`,
    `--requested-by`, `--purpose`) refuses the spawn (exit 2)
@@ -284,15 +284,18 @@ panewire:
    only (the author's job is not bound to the task): the reviewer then runs as
    a top-level job, still excludes that family, and neither claims nor links
    the task, so several passes on one task all spawn. Any other role keeps the
-   "go together" refusal (exit 2).
+   "go together" refusal (exit 2). The hub still holds one reviewer slot per
+   task, so passes that start together name theirs: `--review-pass N` (1..9,
+   `--role reviewer` only) keys the slot `task:reviewer:p<N>`
+   ([hub-spawn-operations.md](hub-spawn-operations.md)).
 4. the node's `spawn.json` must map the repo name as a `cwd_key` and set
    `work_root`; `spawn_disabled`, `cwd_unmapped`, `panewire_missing` and
    `brief_doc_unavailable` refuse that host (recorded as `hub_<reason>`) and
    `--host auto` moves to the next candidate.
 
 The target account is refreshed with the `quota.refresh` node command instead
-of `ssh <host> pacelever refresh` (or `panewire quota refresh claude` for the
-claude pool); `measure_timeout_s` still bounds it.
+of `ssh <host> pacelever refresh` (or `panewire quota refresh <pool>` for the
+claude and codex pools); `measure_timeout_s` still bounds it.
 
 Failures never fall back to ssh (design D4):
 
@@ -401,7 +404,7 @@ overrides.
 | `presence_ttl_s` | `86400` | How recent a host-presence record must be to count as login evidence. |
 | `fresh_ttl_s` | `900` for `claude`, `300` otherwise | How recent a shared observation must be to count as fresh, for every pool without its own `pool_fresh_ttl_s` entry. A reading is valid as of the later of `measured_at` and `confirmed_at`: handoffkeep keeps `measured_at` when a re-measurement publishes the same values and only advances `confirmed_at`. This is pacelever's rule, so `pacelever --json` and the gate agree on a reading. A spawn delegated over ssh with a selected account carries the placing host's window for that account's pool, and the executing host rechecks that account with it (up to 86400). |
 | `pool_fresh_ttl_s` | unset | Optional pool → seconds table (`[quota.pool_fresh_ttl_s]`, nonnegative integers) that overrides `fresh_ttl_s` for one pool. |
-| `measure_timeout_s` | `60` | Bound on the on-target refresh (`panewire quota refresh claude` for claude, else `pacelever refresh`) for a remote account the spawning host does not hold. |
+| `measure_timeout_s` | `60` | Bound on the on-target refresh (`panewire quota refresh <pool>` for claude and codex, else `pacelever refresh`) for a remote account the spawning host does not hold. |
 | `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. |
 | `node_env` | `~/.config/panewire/hub-node.env` | Panewire node env file; `HUB_MACHINE_ID` in it is the host id written to job records. `PANEWIRE_NODE_ENV` overrides the path. |
 
@@ -1220,7 +1223,7 @@ for ownership and distribution.
 | `HANDOFFKEEP_BIN` | Must resolve to the canonical current-user ~/.local/bin executable in production. |
 | `XDG_DATA_HOME` | Data home of the local ledger (`$XDG_DATA_HOME/arbiter/state.db`); production guard requires the canonical `~/.local/share`. |
 | `XDG_STATE_HOME` | State home of the role routing cache (`$XDG_STATE_HOME/panewire/model-routing.json`); default `~/.local/state`. |
-| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude pool is measured by panewire itself and ignores it. |
+| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools are measured by panewire itself and ignore it. |
 | `PANEWIRE_NODE_ENV` | Panewire node env file for `HUB_MACHINE_ID` (job record host id); default `~/.config/panewire/hub-node.env`, or `[quota].node_env`. |
 | `ARBITER_INBOX_ROOT` | Jobs root; production guard requires the canonical inbox. |
 | `HERDR_SESSION` | Herdr session passed through or selected for remote execution. |

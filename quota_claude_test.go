@@ -121,9 +121,9 @@ func claudeLoginFiles(token string, expires time.Time) map[string]string {
 
 // claudeTestSource is a claude measurement over fakes: the login files, the
 // usage API, no claude binary.
-func claudeTestSource(spawnConfig string, files map[string]string, api claudeAPIFunc) *claudeQuotaSource {
-	return &claudeQuotaSource{
-		SpawnConfigPath: spawnConfig, HostID: "node-a", Now: func() time.Time { return claudeTestNow }, Wait: 5 * time.Millisecond,
+func claudeTestSource(spawnConfig string, files map[string]string, api claudeAPIFunc) *nativeQuotaSource {
+	return &nativeQuotaSource{
+		Pool: "claude", SpawnConfigPath: spawnConfig, HostID: "node-a", Now: func() time.Time { return claudeTestNow }, Wait: 5 * time.Millisecond,
 		Claude: claude.Config{
 			HTTP: api, Home: "/home/u", GOOS: "linux", LookupEnv: func(string) (string, bool) { return "", false },
 			ReadFile: func(path string) ([]byte, error) {
@@ -157,10 +157,10 @@ func TestFleetQuotaClaudeIsMeasuredNatively(t *testing.T) {
 	client := quotaClient(t)
 	client.spawnConfigPath = claudeStore(t, hk.server.URL)
 	var requests []*http.Request
-	client.claudeQuota = claudeTestSource(client.spawnConfigPath, claudeLoginFiles(claudeSecret, claudeTestNow.Add(time.Hour)), func(r *http.Request) (*http.Response, error) {
+	client.nativeQuota = map[string]*nativeQuotaSource{"claude": claudeTestSource(client.spawnConfigPath, claudeLoginFiles(claudeSecret, claudeTestNow.Add(time.Hour)), func(r *http.Request) (*http.Response, error) {
 		requests = append(requests, r)
 		return claudeAPIReply(200, claudeAPIBody)(r)
-	})
+	})}
 	var pacelever []string
 	client.nodePacelever = paceleverNeverForClaude(t, &pacelever)
 	var warnings []string
@@ -219,14 +219,14 @@ func TestFleetQuotaOtherPoolStillRunsPacelever(t *testing.T) {
 	var calls []string
 	client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
 		calls = append(calls, strings.Join(args, " "))
-		return []byte(fsPaceleverFreshCodex), nil
+		return []byte(fsPaceleverFreshDevin), nil
 	}
-	client.claudeQuota = &claudeQuotaSource{SpawnConfigPath: "/nonexistent"}
-	client.refreshFleetQuota(t.Context(), "codex", map[string]fleetQuotaSent{})
-	if len(calls) != 1 || calls[0] != "refresh codex" {
+	client.nativeQuota = map[string]*nativeQuotaSource{"claude": {Pool: "claude", SpawnConfigPath: "/nonexistent"}}
+	client.refreshFleetQuota(t.Context(), "devin", map[string]fleetQuotaSent{})
+	if len(calls) != 1 || calls[0] != "refresh devin" {
 		t.Fatalf("pacelever calls: %v", calls)
 	}
-	if got := poolLogin(t, client, "codex"); got.Login != fleet.ReadinessLoginPresent {
+	if got := poolLogin(t, client, "devin"); got.Login != fleet.ReadinessLoginPresent {
 		t.Fatalf("codex login %+v", got)
 	}
 }
@@ -257,7 +257,7 @@ func TestFleetQuotaClaudeLoginClassification(t *testing.T) {
 			hk := newClaudeHK(t)
 			client := quotaClient(t)
 			client.spawnConfigPath = claudeStore(t, hk.server.URL)
-			client.claudeQuota = claudeTestSource(client.spawnConfigPath, test.files, test.api)
+			client.nativeQuota = map[string]*nativeQuotaSource{"claude": claudeTestSource(client.spawnConfigPath, test.files, test.api)}
 			var pacelever []string
 			client.nodePacelever = paceleverNeverForClaude(t, &pacelever)
 			var warnings []string
@@ -285,7 +285,7 @@ func TestNodeQuotaRefreshClaudeIsNative(t *testing.T) {
 	hk := newClaudeHK(t)
 	client := &HubClient{}
 	client.spawnConfigPath = claudeStore(t, hk.server.URL)
-	client.claudeQuota = claudeTestSource(client.spawnConfigPath, claudeLoginFiles(claudeSecret, claudeTestNow.Add(time.Hour)), claudeAPIReply(200, claudeAPIBody))
+	client.nativeQuota = map[string]*nativeQuotaSource{"claude": claudeTestSource(client.spawnConfigPath, claudeLoginFiles(claudeSecret, claudeTestNow.Add(time.Hour)), claudeAPIReply(200, claudeAPIBody))}
 	var pacelever []string
 	client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
 		pacelever = append(pacelever, strings.Join(args, " "))
@@ -301,11 +301,11 @@ func TestNodeQuotaRefreshClaudeIsNative(t *testing.T) {
 	if len(pacelever) != 0 || hk.published() != 1 {
 		t.Fatalf("pacelever=%v published=%d", pacelever, hk.published())
 	}
-	if result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "codex"}); code != "" || result["outcome"] != nodeQuotaRefreshed || len(pacelever) != 1 || pacelever[0] != "refresh codex" {
+	if result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "devin"}); code != "" || result["outcome"] != nodeQuotaRefreshed || len(pacelever) != 1 || pacelever[0] != "refresh devin" {
 		t.Fatalf("codex refresh: result=%v code=%q pacelever=%v", result, code, pacelever)
 	}
 
-	failing := &HubClient{claudeQuota: claudeTestSource("/nonexistent", claudeLoginFiles("", time.Time{}), claudeAPIReply(200, claudeAPIBody))}
+	failing := &HubClient{nativeQuota: map[string]*nativeQuotaSource{"claude": claudeTestSource("/nonexistent", claudeLoginFiles("", time.Time{}), claudeAPIReply(200, claudeAPIBody))}}
 	failing.nodePacelever = paceleverNeverForClaude(t, &pacelever)
 	if _, code := nodeRun(t, failing, nodeCommandQuotaRefresh, map[string]any{"pool": "claude"}); code != "refresh_failed" {
 		t.Fatalf("failing claude refresh code=%q", code)
@@ -383,9 +383,9 @@ func TestFleetQuotaFromReading(t *testing.T) {
 func TestQuotaCLIRefreshClaude(t *testing.T) {
 	hk := newClaudeHK(t)
 	spawn := claudeStore(t, hk.server.URL)
-	previous := quotaCLIClaudeSource
-	t.Cleanup(func() { quotaCLIClaudeSource = previous })
-	quotaCLIClaudeSource = func() *claudeQuotaSource {
+	previous := quotaCLISource
+	t.Cleanup(func() { quotaCLISource = previous })
+	quotaCLISource = func(string) *nativeQuotaSource {
 		return claudeTestSource(spawn, claudeLoginFiles(claudeSecret, claudeTestNow.Add(time.Hour)), claudeAPIReply(200, claudeAPIBody))
 	}
 	var out, errOut bytes.Buffer
@@ -405,7 +405,7 @@ func TestQuotaCLIRefreshClaude(t *testing.T) {
 
 	// A fresh shared reading needs no login; an empty store does.
 	empty := claudeStore(t, newClaudeHK(t).server.URL)
-	quotaCLIClaudeSource = func() *claudeQuotaSource {
+	quotaCLISource = func(string) *nativeQuotaSource {
 		return claudeTestSource(empty, claudeLoginFiles("", time.Time{}), claudeAPIReply(200, claudeAPIBody))
 	}
 	out.Reset()
@@ -429,16 +429,16 @@ func TestClaudeTokenNeverLeaves(t *testing.T) {
 	}
 	client := quotaClient(t)
 	client.spawnConfigPath = spawn
-	client.claudeQuota = source
+	client.nativeQuota = map[string]*nativeQuotaSource{"claude": source}
 	var warnings []string
 	client.warn = func(m string) { warnings = append(warnings, m) }
 	client.refreshFleetQuota(t.Context(), "claude", map[string]fleetQuotaSent{})
 	if strings.Contains(strings.Join(warnings, "\n"), claudeSecret) {
 		t.Fatal("token in a warning")
 	}
-	quotaCLIPrevious := quotaCLIClaudeSource
-	t.Cleanup(func() { quotaCLIClaudeSource = quotaCLIPrevious })
-	quotaCLIClaudeSource = func() *claudeQuotaSource { return source }
+	quotaCLIPrevious := quotaCLISource
+	t.Cleanup(func() { quotaCLISource = quotaCLIPrevious })
+	quotaCLISource = func(string) *nativeQuotaSource { return source }
 	var out, errOut bytes.Buffer
 	runQuotaCLI([]string{"refresh", "claude"}, &out, &errOut)
 	if strings.Contains(out.String()+errOut.String(), claudeSecret) {
