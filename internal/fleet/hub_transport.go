@@ -459,6 +459,7 @@ func hubArgs(jobs string, s Spawn) ([]string, error) {
 	add("--builder-job", s.BuilderJob)
 	add("--grade", s.Grade)
 	add("--routing-role", s.RoutingRole)
+	add("--review-pass", s.ReviewPass)
 	add("--override-reason", s.OverrideReason)
 	add("--containment", s.Containment)
 	return args, nil

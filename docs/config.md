@@ -265,7 +265,7 @@ panewire:
    node's `cwd_map[<repo name>]`.
 3. sends the flags the hub's allowlist carries (`-m -l --t --job --owner
    --effort --role --lane --parent --task|--parent-job --report-relative -L --urgency
-   --builder-family --builder-job`). The node supplies workspace, host and the
+   --builder-family --builder-job --review-pass`). The node supplies workspace, host and the
    override reason. A flag the allowlist cannot carry (`--keep`, `--job-dup-ok`,
    `--task-hk-bypass`, `--allow-escalation`, `--operator-request`,
    `--requested-by`, `--purpose`) refuses the spawn (exit 2)
@@ -284,7 +284,10 @@ panewire:
    only (the author's job is not bound to the task): the reviewer then runs as
    a top-level job, still excludes that family, and neither claims nor links
    the task, so several passes on one task all spawn. Any other role keeps the
-   "go together" refusal (exit 2).
+   "go together" refusal (exit 2). The hub still holds one reviewer slot per
+   task, so passes that start together name theirs: `--review-pass N` (1..9,
+   `--role reviewer` only) keys the slot `task:reviewer:p<N>`
+   ([hub-spawn-operations.md](hub-spawn-operations.md)).
 4. the node's `spawn.json` must map the repo name as a `cwd_key` and set
    `work_root`; `spawn_disabled`, `cwd_unmapped`, `panewire_missing` and
    `brief_doc_unavailable` refuse that host (recorded as `hub_<reason>`) and

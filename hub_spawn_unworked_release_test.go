@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"reflect"
 	"strings"
@@ -80,10 +81,11 @@ func unworkedRow(status, cwd string) nodeAgentRow {
 
 func unworkedReplies(row nodeAgentRow, ledger map[string]any) map[string]map[string]any {
 	return map[string]map[string]any{
-		"agents.list":  {"result": map[string]any{"agents": []nodeAgentRow{row}, "panes": []nodeAgentRow{row}, "panes_ok": true}},
-		"job.result":   {"result": ledger},
-		"pane.capture": {"result": map[string]any{"outcome": "screen", "saved": "/inbox/jobs/test-job/pane-screen.txt"}},
-		"pane.close":   {"result": map[string]any{"outcome": "closed"}},
+		"agents.list":   {"result": map[string]any{"agents": []nodeAgentRow{row}, "panes": []nodeAgentRow{row}, "panes_ok": true}},
+		"job.result":    {"result": ledger},
+		"pane.capture":  {"result": map[string]any{"outcome": "screen", "saved": "/inbox/jobs/test-job/pane-screen.txt"}},
+		"pane.close":    {"result": map[string]any{"outcome": "closed"}},
+		"job.mark_lost": {"result": map[string]any{"outcome": "lost"}},
 	}
 }
 
@@ -103,6 +105,7 @@ func unworkedLedger(activity any) map[string]any {
 func TestRoleReleaseUnworkedLanding(t *testing.T) {
 	const checkoutCwd = "/work/project.test-job"
 	allOps := []string{"agents.list", "job.result", "pane.capture", "pane.close"}
+	releasedOps := append(append([]string(nil), allOps...), "job.mark_lost")
 	reportLedger := unworkedLedger(0)
 	reportLedger["report"] = map[string]any{"present": true, "bytes": 12, "sha256": strings.Repeat("a", 64), "last_line": "done"}
 	completedLedger := unworkedLedger(1)
@@ -121,10 +124,10 @@ func TestRoleReleaseUnworkedLanding(t *testing.T) {
 	}{
 		{name: "idle past the grace with an empty ledger releases", since: 11 * time.Minute, replies: func() map[string]map[string]any {
 			return unworkedReplies(unworkedRow("idle", checkoutCwd), unworkedLedger(0))
-		}, wantOps: allOps, released: true},
+		}, wantOps: releasedOps, released: true},
 		{name: "done past the grace releases", since: 11 * time.Minute, replies: func() map[string]map[string]any {
 			return unworkedReplies(unworkedRow("done", checkoutCwd), unworkedLedger(0))
-		}, wantOps: allOps, released: true},
+		}, wantOps: releasedOps, released: true},
 		{name: "a lane event in the ledger keeps the reservation", since: 11 * time.Minute, replies: func() map[string]map[string]any {
 			return unworkedReplies(unworkedRow("idle", checkoutCwd), unworkedLedger(1))
 		}, wantOps: allOps[:2]},
@@ -178,6 +181,7 @@ func TestRoleReleaseUnworkedLanding(t *testing.T) {
 				outcome = *tc.outcome
 			}
 			hub, server, jobs, held := roleReleaseHubFor(t, outcome)
+			jobs.putErr = errors.New("job_host_forbidden")
 			// The clock is fixed relative to the holder's deadline so the
 			// default 10 minute grace is crossed exactly when the case says.
 			now := held.Deadline.Add(tc.since)
@@ -194,14 +198,19 @@ func TestRoleReleaseUnworkedLanding(t *testing.T) {
 				if result.status != http.StatusAccepted {
 					t.Fatalf("status=%d body=%s", result.status, result.body)
 				}
-				if jobs.state("test-job") != "lost" {
-					t.Fatalf("prior hk job state=%v", jobs.state("test-job"))
+				// The holder's node wrote the record; the hub's client made no write.
+				if len(jobs.writes()) != 0 || jobs.state("test-job") != "claimed" {
+					t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 				}
-				owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker")
+				owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
 				if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 					t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 				}
-				var capture, closeArgs map[string]any
+				var mark, capture, closeArgs map[string]any
+				_ = json.Unmarshal(node.args["job.mark_lost"], &mark)
+				if mark["job"] != "test-job" || mark["pane_id"] != roleHeldPane || mark["label"] != "test-job" {
+					t.Fatalf("mark lost args %v", mark)
+				}
 				_ = json.Unmarshal(node.args["pane.capture"], &capture)
 				_ = json.Unmarshal(node.args["pane.close"], &closeArgs)
 				if capture["pane_id"] != roleHeldPane || capture["name"] != "test-job" || capture["cwd"] != checkoutCwd || capture["write"] != true || capture["merged_after"] != float64(0) {
@@ -245,13 +254,14 @@ func (n *unworkedNode) replyStatus() string {
 func TestRoleReleaseUnworkedLandingConfiguredGrace(t *testing.T) {
 	hub, server, jobs, held := roleReleaseHub(t)
 	hub.unworkedLandingGrace = time.Minute
+	jobs.putErr = errors.New("job_host_forbidden")
 	now := held.Deadline.Add(2 * time.Minute)
 	hub.now = func() time.Time { return now }
 	node := startUnworkedNode(t, t14Node(t, hub, server, true), unworkedReplies(unworkedRow("idle", "/work/project.test-job"), unworkedLedger(0)))
 	if result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())); result.status != http.StatusAccepted {
 		t.Fatalf("status=%d body=%s ops=%v", result.status, result.body, node.seen())
 	}
-	if jobs.state("test-job") != "lost" {
-		t.Fatalf("prior hk job state=%v", jobs.state("test-job"))
+	if len(jobs.writes()) != 0 || jobs.state("test-job") != "claimed" {
+		t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 	}
 }

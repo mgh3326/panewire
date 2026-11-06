@@ -84,6 +84,30 @@ func (a *App) jobStore() (JobStore, error) {
 	return a.JobStore, nil
 }
 
+// NewJobStore returns the hk /v1/jobs client for an explicit handoffkeep
+// endpoint and bearer credential. It is how a node writes a job record with its
+// own credential (spawn.json handoffkeep_env) rather than the hub's.
+func NewJobStore(baseURL, token, cfID, cfSecret string) (JobStore, error) {
+	parsed, err := url.Parse(strings.TrimSpace(baseURL))
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, errors.New("invalid handoffkeep endpoint")
+	}
+	if parsed.Scheme != "https" && parsed.Scheme != "http" {
+		return nil, errors.New("invalid handoffkeep endpoint scheme")
+	}
+	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) && !isTailnetHost(parsed.Hostname()) {
+		return nil, errors.New("handoffkeep endpoint requires HTTPS")
+	}
+	if token == "" || (cfID == "") != (cfSecret == "") {
+		return nil, errors.New("invalid handoffkeep credential")
+	}
+	return newHKJobs(&hkQuota{base: strings.TrimRight(baseURL, "/"), token: token, cfID: cfID, cfSecret: cfSecret}), nil
+}
+
+// NodeID reports the host id this app claims job records under: HUB_MACHINE_ID
+// from the node env file. It is the host whose hk host grant this app holds.
+func (a *App) NodeID() (string, bool) { return a.nodeID() }
+
 // nodeEnvMaxBytes bounds the node env read, as in pacelever: a larger file is
 // refused, not truncated.
 const nodeEnvMaxBytes = 1 << 20

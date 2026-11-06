@@ -289,6 +289,12 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 // authorizeNodeCommand adds one rule to authorize: a reap-only op is for a
 // service whose scopes name it, so the operator credential is refused too.
 func (h *HubServer) authorizeNodeCommand(request *http.Request, op, machine string) hubAccess {
+	if op == nodeCommandJobMarkLost {
+		// The hub issues this op itself over the holder's connection when it
+		// releases a spawn reservation. It is never a public command, whatever
+		// the caller's scope and whichever credential presented it.
+		return hubAccessForbidden
+	}
 	if h.authenticate(request).kind == hubCallerNode {
 		// The local node daemon asks for PR state on a worker's behalf, so a
 		// node may run the read-only pr.status op and nothing else here.
