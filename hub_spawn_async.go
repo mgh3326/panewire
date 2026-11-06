@@ -288,6 +288,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		for i := 0; i+1 < len(request.Args); i++ {
 			if request.Args[i] == "--host" {
 				request.Args[i+1] = task.Outcome.Host
+				request.RetryHost = task.Outcome.Host
 			}
 		}
 		found := false
