@@ -126,7 +126,7 @@ grades and gates for each effort. The desk publishes the seed after merge.
 | `session_machine_ids` | Herdr session → machine identity table used for lane placement. |
 | `session_lanes_token_envs` | Herdr session → lane credential-file path. Overrides `lanes_token_env` for that session; pair it with `session_machine_ids` when sessions use separate node identities. |
 | `quota_gate` | Only `"local"` is accepted: explicit local-only quota mode. It contradicts hub_token_env; remove one of those keys. |
-| `state` | `"on"` (default) reads the hub's fleet state for placement and the quota gate; `"off"` skips it and measures directly as before (the rollback switch). See [Fleet state](#fleet-state). |
+| `state` | `"on"` (default) reads the hub's fleet state for placement and the quota gate; `"off"` skips it and measures directly as before (the rollback switch). Cooling cannot be checked when hub state is off or unavailable; the selection record reports the condition in `degraded`. See [Fleet state](#fleet-state). |
 | `state_publisher_ttl_s` | Seconds a publisher heartbeat stays alive. Default 90. |
 
 Worker lane credentials use lanes_token_env, then hub_token_env. Lane listing
@@ -465,8 +465,7 @@ live bench catalog and pool status from the quota CLI, then orders candidates
 under the versioned pool-order policy (`[local].pool_policy` or
 `PANEWIRE_POOL_POLICY`, else the embedded copy): paid pools at waste risk
 first (see below), then other WASTE subscription pools, then free pool/model
-sets, then ranked subscription pools, then credit pools. API credit is spent only
-after eligible subscription capacity. Inside a tier the lowest catalog grade that satisfies the task wins,
+sets, then ranked subscription pools, then credit pools without a usable expiry. Expiring credit joins the waste-risk ordering by remaining balance percentage per hour until expiry. Inside a tier the lowest catalog grade that satisfies the task wins,
 then the pool with the higher waste urgency — the unused projected share
 (100 − projected) per hour until its longest account window's reset (7d,
 monthly; sub-daily windows such as a 5h rate window never rank a pool, they
@@ -502,8 +501,7 @@ A paid pool is at **waste risk** when the projected unused share of its
 longest window (a day or more) at that window's reset — waste urgency ×
 hours to reset, i.e. 100 − its projection — is at least
 `waste_risk.min_unused_pct`, however far the reset is. Free seats and
-`credit_pools` are never at waste risk by this rule (a credit balance in
-its final window ranks first instead, below), and neither is a pool whose
+`credit_pools` use their balance and expiry instead (below), and neither is a pool whose
 longest window cannot be paced (for example the first 5% of a fresh
 window). Waste-risk pools rank ahead of every tier, free included, and
 among themselves by waste urgency first (a pool resetting sooner with the
@@ -533,37 +531,18 @@ admissible without a balance observation. An operator pool class of `exclude`
 refuses them. Their selection record carries `tier=credit`, with absent
 balance values left unset.
 
-Credit ranks below every admitted subscription pool, which resets sooner,
-and is used when none is admitted (window used up, limit, no login on the
-host); how much credit has been spent does not matter — except for credit
-pacing.
+A credit pool with a recorded positive balance and future expiry joins the
+waste-risk ordering. Its urgency is the remaining balance percentage divided
+by the hours until expiry; it competes with subscription waste risk on that
+value. Its account-bound gate still decides admission. Credit without a
+recorded balance or expiry, already expired, or used up stays in tier `credit`.
+`credit_final_days` is deprecated, has no effect, and emits a warning when set.
+`panewire plan --credit-at TIME` evaluates expiry at the supplied time.
 
-**Credit pacing** (decision/2026-11-04/pool-order-owner): credit also
-expires. A subscription pool whose longest window (a day or more: weekly,
-monthly) is projected at or above 100% at that window's reset at its current
-pace will use that quota up anyway, so it ranks **behind credit**: the
-candidate records `paced=true` and `behind_credit=true`, and credit takes the
-work first. This applies only when a credit candidate with a recorded balance
-above zero (pacelever's manual store) is in the ranking; with no balance
-recorded, or a zero balance, the paced pool keeps its tier and
-`behind_credit=false`. A credit gate refusal falls through to the paced pool
-next. Free seats, credit pools and waste-risk pools are never paced. There is
-no threshold beyond "used up" (100%); sub-daily windows (e.g. 5h) never pace a
-pool, they only refuse it once exhausted. Candidates also record
-`long_projected_pct`, the projection over windows of a day or more; tiering
-and the unpaceable fallback order use it, never a sub-daily pace. In the final
-`credit_final_days` (default `4`; `0` disables) before the credit's expiry a
-pool with a balance left ranks first, ahead of waste-risk pools and the free
-seats, so the rest is used up: tier `waste`, `waste_reason=credit_expiring`.
-panewire reads the balance (`100 − used_pct`, plus the dollar balance when
-recorded) and the expiry from the pool's current credit entry in pacelever's
-manual store (`pacelever manual list`). `panewire plan` prints
-`credit_expiring final_window_days=… days_left=… balance_pct=…` (and
-`balance_usd=…` when recorded); `panewire plan --credit-at TIME` judges the
-window as of another RFC3339 time or date, read-only, with quota and presence
-still read at the clock. A credit with no entry, already expired or used up,
-or outside the window stays in tier `credit`, and so does every credit pool
-when the store is unreadable.
+A subscription pool on pace to use its longest window ranks behind credit with
+a recorded positive balance and future expiry. Sub-daily windows do not pace a
+pool, and exhausted windows still refuse it.
+
 If the pool-status query fails, credit candidates are dropped as
 `QUOTA_UNKNOWN` with reason `quota_unknown` and the selection records
 `credit_pool_status_unavailable` in `degraded`. Healthy subscription candidates
@@ -649,8 +628,7 @@ projection is `projected_pct` when given, else pacelever's pace over
 urgency is (100 − projected) ÷ hours-to-reset of the longest window of a
 day or more (sub-daily windows never rank), and pools without a readable
 reset rank by projected order. `credit_left_pct` records a credit pool's
-balance left (percent of its total) so credit pacing can be replayed; absent
-means no balance is recorded. `free` marks a free-tier rung; `free_limit`
+balance left (percent of its total); `resets_at` or `reset_hours` supplies its expiry for urgency ranking. Without either value it remains last. `free` marks a free-tier rung; `free_limit`
 records an observed free limit — the only exclusion a free rung honors, so a
 shared pool's `used_pct` or projection never drops it. `--set` (repeatable)
 overrides or creates a pool and repaces it: `used` and `projected` are

@@ -49,9 +49,17 @@ type FleetStateReader interface {
 
 // FleetSnapshot is the subset of GET /v1/state panewire reads.
 type FleetSnapshot struct {
-	V      int                 `json:"v"`
-	At     time.Time           `json:"at"`
-	States []FleetStateMessage `json:"states"`
+	V       int                  `json:"v"`
+	At      time.Time            `json:"at"`
+	States  []FleetStateMessage  `json:"states"`
+	Cooling map[string]time.Time `json:"pool_cooling,omitempty"`
+}
+
+func (s *FleetSnapshot) poolCooling(pool string, now time.Time) bool {
+	if pool == "devin" && now.Before(s.Cooling["devin-free"]) {
+		return true
+	}
+	return now.Before(s.Cooling[pool])
 }
 
 type FleetStateMessage struct {
