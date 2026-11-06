@@ -430,7 +430,17 @@ func (a *App) deliverPlacements(ctx context.Context) {
 				}
 			}
 			rejected = true
-			a.warn("placement record %s rejected: hk HTTP %d %s", ent.Name(), be.Status, be.Code)
+			// The sidecar keeps hk's answer next to the record so the refusal
+			// can be read after the fact; a failed write only loses the note.
+			note, _ := json.Marshal(map[string]any{"status": be.Status, "error": be.Code, "reason": be.Reason})
+			if atomicFile(filepath.Join(rejectedDir, ent.Name()+".reason"), note, 0600) != nil {
+				a.warn("placement rejection reason could not be saved")
+			}
+			if be.Reason != "" {
+				a.warn("placement record %s rejected: hk HTTP %d %s: %s", ent.Name(), be.Status, be.Code, be.Reason)
+			} else {
+				a.warn("placement record %s rejected: hk HTTP %d %s", ent.Name(), be.Status, be.Code)
+			}
 			continue
 		}
 		if e != nil && !conflict {
@@ -466,7 +476,8 @@ func (a *App) capRejectedPlacements() {
 	}
 	var files []file
 	for _, entry := range entries {
-		if entry.Type().IsRegular() {
+		// A rejection-reason sidecar is not a record: it goes with its record.
+		if entry.Type().IsRegular() && !strings.HasSuffix(entry.Name(), ".reason") {
 			info, err := entry.Info()
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -493,6 +504,7 @@ func (a *App) capRejectedPlacements() {
 			a.warn("placement quarantine entry could not be removed")
 			break
 		}
+		_ = os.Remove(filepath.Join(dir, f.name+".reason"))
 		dropped++
 	}
 	if dropped > 0 {

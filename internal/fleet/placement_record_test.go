@@ -27,6 +27,7 @@ type placementHK struct {
 	statusFirst        int
 	beforeFirstRefusal func()
 	loseAck            bool
+	refusalBody        string
 }
 
 func placementServer(t *testing.T, a *App) *placementHK {
@@ -76,7 +77,11 @@ func placementServer(t *testing.T, a *App) *placementHK {
 				h.beforeFirstRefusal()
 			}
 			w.WriteHeader(h.statusFirst)
-			_, _ = w.Write([]byte(`{"error":"invalid_context"}`))
+			body := h.refusalBody
+			if body == "" {
+				body = `{"error":"invalid_context"}`
+			}
+			_, _ = w.Write([]byte(body))
 			return
 		}
 		if h.status != 0 {
@@ -810,8 +815,18 @@ func TestPlacementQuarantineCapDropsOldest(t *testing.T) {
 	}
 	a.flushPlacements()
 	entries, err := os.ReadDir(dir)
-	if err != nil || len(entries) != 1000 {
-		t.Fatalf("entries=%d err=%v", len(entries), err)
+	records := 0
+	for _, e := range entries {
+		// Rejection-reason sidecars travel with their record and are not counted.
+		if !strings.HasSuffix(e.Name(), ".reason") {
+			records++
+		}
+	}
+	if err != nil || records != 1000 {
+		t.Fatalf("records=%d err=%v", records, err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "new.1.json.reason")); err != nil {
+		t.Fatalf("the new rejection has no reason sidecar: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "old-0000.json")); !os.IsNotExist(err) {
 		t.Fatalf("oldest retained: %v", err)
@@ -851,5 +866,44 @@ func TestPlacementConcurrentQuarantineContinuesDelivery(t *testing.T) {
 	}
 	if warnings := a.Err.(*bytes.Buffer).String(); strings.Contains(warnings, "could not be quarantined") {
 		t.Fatalf("false warning: %s", warnings)
+	}
+}
+
+// A refused record keeps hk's reason: in the warning (one line, bounded) and
+// in a sidecar next to the quarantined record, which the cap drops with it.
+func TestPlacementRejectionKeepsHKReason(t *testing.T) {
+	a, s, _, _ := cmdFixture(t)
+	h := placementServer(t, a)
+	h.statusFirst = http.StatusBadRequest
+	h.refusalBody = `{"error":"invalid_context","reason":"task_id 42 not found\nin this store"}`
+	if err := a.Spawn(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	a.flushPlacements()
+	if warnings := a.Err.(*bytes.Buffer).String(); !strings.Contains(warnings, "hk HTTP 400 invalid_context: task_id 42 not found in this store") {
+		t.Fatalf("warning lacks the flattened reason: %s", warnings)
+	}
+	dir := filepath.Join(a.stateDir(), "placements-rejected")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sidecar []byte
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".reason") {
+			sidecar, _ = os.ReadFile(filepath.Join(dir, e.Name()))
+		}
+	}
+	var note map[string]any
+	if json.Unmarshal(sidecar, &note) != nil || note["reason"] != "task_id 42 not found in this store" || note["error"] != "invalid_context" || note["status"] != float64(400) {
+		t.Fatalf("sidecar = %s", sidecar)
+	}
+}
+
+func TestBackendReasonIsBoundedToOneLine(t *testing.T) {
+	long := strings.Repeat("é", 300) + "\nsecond line"
+	got := backendReason(long)
+	if strings.Contains(got, "\n") || len(got) > backendReasonMaxBytes+len("…") {
+		t.Fatalf("reason not bounded/flattened: %d bytes", len(got))
 	}
 }
