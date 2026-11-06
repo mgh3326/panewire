@@ -24,7 +24,8 @@ const inboxUsage = `usage: panewire inbox list [--lane L] [--unread] [--json]
 Connection: defaults to the local node daemon; use --hub-url URL
             --hub-token-env FILE [--hub-cf-env FILE] for direct access.
 Defaults: PANEWIRE_HUB_URL, PANEWIRE_HUB_TOKEN_ENV, PANEWIRE_HUB_CF_ENV,
-          PANEWIRE_LANE. Node credentials require an owned --lane.
+          PANEWIRE_LANE. Node credentials need an owned --lane, except read <id> and
+          ack <id>, which the hub scopes by the item's own lane.
 wait blocks until an unread item exists, prints it like read, and exits 0;
 on timeout it prints nothing and exits 3.
 read and ack <id> name one item: an ambient PANEWIRE_LANE does not scope them

@@ -342,7 +342,7 @@ func TestT1034StalePageDoesNotInject(t *testing.T) {
 	rig.startHub()
 
 	// Walk A's view, captured while the row was still undelivered.
-	marks, err := rig.hub.unconfirmedMarkOrigins(context.Background())
+	marks, _, err := rig.hub.unconfirmedMarkOrigins(context.Background())
 	if err != nil || !marks[eventID] {
 		t.Fatalf("marks=%v err=%v, want the mark collected", marks, err)
 	}
@@ -373,7 +373,7 @@ func TestT1034StalePageDoesNotInject(t *testing.T) {
 	rig.hub.expireRelayAck(relayPendingKey(eventID, directive.JobID))
 
 	// Walk A resumes on its stale page.
-	rig.hub.replayMarkedUnconfirmed(context.Background(), stale, relayReplaySourceStartup)
+	rig.hub.replayMarkedUnconfirmed(context.Background(), stale, relayReplaySourceStartup, false)
 	if injects := rig.t1034Labelled(eventID); len(injects) != 0 {
 		t.Fatalf("a stale listing page injected %d more labelled copies of a retired row, want 0", len(injects))
 	}

@@ -163,10 +163,6 @@ still hub first, then nodes.
   {"cwd_map":{"repo-a":"/abs/path"},"workspace":"worker","herdr_session":"worker","enabled":true,"work_root":"/abs/work","handoffkeep_env":"/path/to/node-hk.env","brief_doc_prefix":"briefs/"}
   ```
 
-  `quota_native` (optional list of pool names) flips a quota pool the node can
-  measure itself from *shadow* to *native*; only `devin` has the switch today
-  ([Shadow and native](quota.md#shadow-and-native)). It is read on every quota
-  refresh, so a change needs no restart, and anything unreadable means shadow.
   `work_root` is required for checkouts. `brief_doc_prefix` controls which hk
   document keys the node may fetch; it defaults to `briefs/`. Nodes advertise
   `spawn_v2` in hello when they support checkout and document briefs. The hub

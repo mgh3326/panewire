@@ -15,7 +15,8 @@ import (
 // compare these names, never a string literal.
 const (
 	ErrKindAuth                = "auth"          // 401/403 without a provider-specific hint
-	ErrKindAuthFailed          = "auth_failed"   // refused credential with a login hint
+	ErrKindAuthFailed          = "auth_failed"   // 401/403 with a provider-specific login hint
+	ErrKindEdgeRejected        = "edge_rejected" // an edge proxy refused the request (403 without JSON)
 	ErrKindCredentials         = "credentials"   // no usable local credential
 	ErrKindHTTP                = "http"          // any other non-200 response
 	ErrKindNetwork             = "network"       // the request never got a response

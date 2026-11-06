@@ -28,11 +28,7 @@ type hubSpawnConfig struct {
 	WorkRoot       string `json:"work_root,omitempty"`
 	BriefDocPrefix string `json:"brief_doc_prefix,omitempty"`
 	HandoffkeepEnv string `json:"handoffkeep_env,omitempty"`
-	// QuotaNative lists the switched quota pools this node serves natively
-	// instead of through pacelever (docs/quota.md §Shadow and native). Read
-	// live by quotaSwitchedNative, which ignores anything else in the file.
-	QuotaNative []string `json:"quota_native,omitempty"`
-	Enabled     bool     `json:"enabled"`
+	Enabled        bool   `json:"enabled"`
 }
 
 func defaultHubSpawnConfigPath(path string) string {

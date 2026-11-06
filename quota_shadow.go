@@ -4,240 +4,233 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"math"
-	"slices"
 	"strings"
 	"time"
 
-	"github.com/mgh3326/panewire/internal/quota"
+	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
-// Shadow comparison (docs/quota.md §Shadow and native). While a switched pool
-// is in shadow the node's own measurement runs beside pacelever's and one log
-// line says whether they agree. The comparison never changes what a spawn, the
-// fleet-state loop or the quota.refresh command answers.
+// Shadow mode (docs/quota.md §Shadow and native): a pool with a switch that the
+// host's `[quota].native_pools` does not list is still refreshed by pacelever —
+// spawns, the fleet-state loop and `quota.refresh` all run it. Beside that run
+// the node measures the pool itself, with no store lease and no publication,
+// and logs one line comparing the two readings. The desk reads the lines and
+// flips the switch.
 
 const (
-	// shadowUsedTolerance is how far two used percentages may differ and still
-	// match: the two readings are taken seconds to minutes apart.
+	// shadowMeasureTimeout bounds the node's own measurement in shadow, so a
+	// slow provider cannot hold up the pacelever refresh it rides on.
+	shadowMeasureTimeout = 25 * time.Second
+	// shadowUsedTolerance is how far apart two used percentages may be and
+	// still agree: the two readings are seconds apart.
 	shadowUsedTolerance = 1.0
-	// shadowResetTolerance is the same for reset times. devin's panel states a
-	// reset as "in 6d 2h", so its resolution is the minute and the reading's age.
-	shadowResetTolerance = 5 * time.Minute
+	// shadowResetTolerance is the same for a window's reset time.
+	shadowResetTolerance = time.Minute
 )
 
-// shadowPacelever is pacelever's reading of the pool, or why it has none.
-type shadowPacelever struct {
-	ok      bool
-	publish FleetStatePublish
-	// errKind is pacelever's error kind when !ok; kindFn, when set, computes it
-	// lazily (it may ask pacelever for its status), off the caller's path.
-	errKind string
-	kindFn  func(context.Context) string
+// isShadowQuotaPool says whether pool is measured beside pacelever: it has a
+// switch and the switch is not flipped.
+func isShadowQuotaPool(pool string) bool {
+	return fleet.QuotaPoolHasSwitch(pool) && !isNativeQuotaPool(pool)
 }
 
-// paceleverShadow reads one `pacelever refresh` answer for the comparison. It
-// is more permissive than the hub publish: a per-model free tag has no window,
-// which the publish refuses, but is no reason to ignore the paid buckets next
-// to it. errKind is what the caller knows of a failure; empty means ask kindFn.
-func paceleverShadow(pool string, output []byte, runErr error, errKind string) shadowPacelever {
-	pace := shadowPacelever{errKind: errKind}
-	var reading paceleverReading
-	if runErr != nil || json.Unmarshal(output, &reading) != nil || reading.ID != pool || reading.Stale || reading.Error != "" {
-		return pace
-	}
-	fp := ""
-	switch {
-	case reading.PublishFPKind == "account" && reading.PublishFP != "":
-		fp = reading.PublishFP
-	case reading.AccountFPKind == "account" && reading.AccountFP != "":
-		fp = reading.AccountFP
-	}
-	pace.ok = true
-	pace.publish = FleetStatePublish{Quota: &FleetStateQuota{Pool: pool, Source: reading.Source}}
-	if fp != "" {
-		pace.publish.Key = pool + ":" + fp
-	}
-	for _, b := range reading.Buckets {
-		if b.UsedPct == nil {
-			continue
-		}
-		out := FleetStateBucket{Window: b.Window, UsedPct: b.UsedPct, Scope: b.Scope.Kind, Model: b.Scope.Name}
-		if at, err := time.Parse(time.RFC3339Nano, b.ResetsAt); err == nil {
-			out.ResetsAt = at.UTC().Format(time.RFC3339)
-		}
-		pace.publish.Quota.Buckets = append(pace.publish.Quota.Buckets, out)
-	}
-	return pace
-}
-
-// shadowBucket is one window of either reading, keyed by what it limits.
+// shadowBucket is one window of a reading in the comparison.
 type shadowBucket struct {
-	scope, model, window string
-	used                 float64
-	reset                time.Time // zero when the reading states none
+	window string
+	used   float64
+	reset  time.Time // zero when the window names none
 }
 
-func (b shadowBucket) id() string { return b.scope + "/" + b.model + "/" + b.window }
-
-func (b shadowBucket) String() string {
-	text := fmt.Sprintf("%s=%.4g", b.window, b.used)
-	if b.scope == quota.ScopeModel {
-		text = b.model + ":" + text
-	}
-	if !b.reset.IsZero() {
-		text += "@" + b.reset.UTC().Format(time.RFC3339)
-	}
-	return text
+// shadowReading is one side of the comparison: the account key and windows it
+// measured, or the error kind it failed with.
+type shadowReading struct {
+	key     string
+	buckets []shadowBucket
+	errKind string
 }
 
-func paceleverShadowBuckets(p FleetStatePublish) []shadowBucket {
-	var out []shadowBucket
-	if p.Quota == nil {
-		return out
+func (r shadowReading) ok() bool { return r.errKind == "" }
+
+// shadowFromPublish is pacelever's side: the reading its refresh printed, as
+// the node would publish it. A refresh that gave none is an error of errKind.
+func shadowFromPublish(publish FleetStatePublish, ok bool, errKind string) shadowReading {
+	if !ok {
+		return shadowReading{errKind: errKind}
 	}
-	for _, b := range p.Quota.Buckets {
-		// A bucket with no window is a per-model free tag, not a measurement.
-		if b.UsedPct == nil || b.Window == "" {
-			continue
+	reading := shadowReading{key: publish.Key}
+	for _, b := range publish.Quota.Buckets {
+		bucket := shadowBucket{window: b.Window}
+		if b.UsedPct != nil {
+			bucket.used = *b.UsedPct
 		}
-		bucket := shadowBucket{scope: b.Scope, model: b.Model, window: b.Window, used: *b.UsedPct}
 		if at, err := time.Parse(time.RFC3339, b.ResetsAt); err == nil {
 			bucket.reset = at
 		}
-		out = append(out, bucket)
+		reading.buckets = append(reading.buckets, bucket)
+	}
+	return reading
+}
+
+// shadowFromPacelever is pacelever's side when the refresh output is at hand.
+// The hub publish refuses a reading that carries a bucket with no window, and
+// devin's does: pacelever adds a per-model Free tag, which is a tag and not a
+// measurement. The comparison reads the output on its own terms — every
+// windowed bucket — so those tags do not hide the paid windows.
+func shadowFromPacelever(pool string, output []byte, publish FleetStatePublish, ok bool, errKind string) shadowReading {
+	if ok {
+		return shadowFromPublish(publish, ok, errKind)
+	}
+	var reading paceleverReading
+	if json.Unmarshal(output, &reading) != nil || reading.ID != pool || reading.Stale || reading.Error != "" {
+		return shadowFromPublish(publish, ok, errKind)
+	}
+	out := shadowReading{}
+	switch {
+	case reading.PublishFPKind == "account" && reading.PublishFP != "":
+		out.key = pool + ":" + reading.PublishFP
+	case reading.AccountFPKind == "account" && reading.AccountFP != "":
+		out.key = pool + ":" + reading.AccountFP
+	}
+	for _, b := range reading.Buckets {
+		if b.UsedPct == nil || b.Window == "" {
+			continue
+		}
+		bucket := shadowBucket{window: b.Window, used: *b.UsedPct}
+		if at, err := time.Parse(time.RFC3339Nano, b.ResetsAt); err == nil {
+			bucket.reset = at
+		}
+		out.buckets = append(out.buckets, bucket)
+	}
+	if len(out.buckets) == 0 {
+		return shadowFromPublish(publish, ok, errKind)
 	}
 	return out
 }
 
-func nativeShadowBuckets(r shared.Reading) []shadowBucket {
-	var out []shadowBucket
-	for _, b := range r.Buckets {
-		bucket := shadowBucket{scope: b.Scope, model: b.Model, window: b.Window, used: b.UsedPct}
+// shadowFromShared is the node's own side.
+func shadowFromShared(reading shared.Reading, err error) shadowReading {
+	if err != nil {
+		return shadowReading{errKind: quotaErrorKind(err)}
+	}
+	out := shadowReading{key: reading.Key}
+	for _, b := range reading.Buckets {
+		bucket := shadowBucket{window: b.Window, used: b.UsedPct}
 		if b.ResetsAt != nil {
 			bucket.reset = *b.ResetsAt
 		}
-		out = append(out, bucket)
+		out.buckets = append(out.buckets, bucket)
 	}
 	return out
 }
 
-func joinShadowBuckets(buckets []shadowBucket) string {
-	parts := make([]string, 0, len(buckets))
-	for _, b := range buckets {
-		parts = append(parts, b.String())
+func (r shadowReading) String() string {
+	if !r.ok() {
+		return "error " + r.errKind
 	}
-	slices.Sort(parts)
-	return strings.Join(parts, ",")
+	parts := make([]string, 0, len(r.buckets))
+	for _, b := range r.buckets {
+		reset := "-"
+		if !b.reset.IsZero() {
+			reset = b.reset.UTC().Format(time.RFC3339)
+		}
+		parts = append(parts, fmt.Sprintf("%s=%.1f%%@%s", b.window, b.used, reset))
+	}
+	return "[" + strings.Join(parts, " ") + "]"
 }
 
-// quotaShadowComparison is the outcome the log line reports.
-type quotaShadowComparison struct {
-	Verdict string // match, differ, native_error, pacelever_error or both_error
-	Account string // same, different or unknown
-	Native  string
-	Pace    string
-	Diffs   []string
-}
-
-// compareQuotaShadow judges the node's reading against pacelever's: same
-// account, the same buckets, used percentages and resets within tolerance.
-func compareQuotaShadow(pace shadowPacelever, native shared.Reading, nativeErr error) quotaShadowComparison {
-	c := quotaShadowComparison{Verdict: "match", Account: "unknown"}
+// compareShadow lists how the node's reading differs from pacelever's, window
+// by window, in pacelever's then the node's order. Empty means they agree.
+func compareShadow(pacelever, native shadowReading) []string {
+	var diffs []string
 	switch {
-	case nativeErr != nil && !pace.ok:
-		c.Verdict = "both_error"
-		return c
-	case nativeErr != nil:
-		c.Verdict = "native_error"
-		c.Pace = joinShadowBuckets(paceleverShadowBuckets(pace.publish))
-		return c
-	case !pace.ok:
-		c.Verdict = "pacelever_error"
-		c.Native = joinShadowBuckets(nativeShadowBuckets(native))
-		return c
+	case !pacelever.ok() && !native.ok():
+		if pacelever.errKind != native.errKind {
+			diffs = append(diffs, "error kind differs")
+		}
+		return diffs
+	case !pacelever.ok():
+		return append(diffs, "pacelever failed ("+pacelever.errKind+"), native measured")
+	case !native.ok():
+		return append(diffs, "native failed ("+native.errKind+"), pacelever measured")
 	}
-	paceBuckets, nativeBuckets := paceleverShadowBuckets(pace.publish), nativeShadowBuckets(native)
-	c.Native, c.Pace = joinShadowBuckets(nativeBuckets), joinShadowBuckets(paceBuckets)
-	if native.Key != "" && pace.publish.Key != "" {
-		c.Account = "same"
-		if native.Key != pace.publish.Key {
-			c.Account = "different"
-			c.Diffs = append(c.Diffs, "account")
+	if pacelever.key != native.key {
+		diffs = append(diffs, "account differs")
+	}
+	seen := map[string]bool{}
+	index := func(buckets []shadowBucket, window string) (shadowBucket, bool) {
+		for _, b := range buckets {
+			if b.window == window {
+				return b, true
+			}
+		}
+		return shadowBucket{}, false
+	}
+	var windows []string
+	for _, b := range append(append([]shadowBucket{}, pacelever.buckets...), native.buckets...) {
+		if !seen[b.window] {
+			seen[b.window] = true
+			windows = append(windows, b.window)
 		}
 	}
-	for _, p := range paceBuckets {
-		i := slices.IndexFunc(nativeBuckets, func(n shadowBucket) bool { return n.id() == p.id() })
-		if i < 0 {
-			c.Diffs = append(c.Diffs, "native_missing:"+p.id())
-			continue
-		}
-		n := nativeBuckets[i]
-		if math.Abs(n.used-p.used) > shadowUsedTolerance {
-			c.Diffs = append(c.Diffs, "used:"+p.id())
-		}
-		if !n.reset.IsZero() && !p.reset.IsZero() && n.reset.Sub(p.reset).Abs() > shadowResetTolerance || n.reset.IsZero() != p.reset.IsZero() {
-			c.Diffs = append(c.Diffs, "reset:"+p.id())
-		}
-	}
-	for _, n := range nativeBuckets {
-		if !slices.ContainsFunc(paceBuckets, func(p shadowBucket) bool { return p.id() == n.id() }) {
-			c.Diffs = append(c.Diffs, "pacelever_missing:"+n.id())
+	for _, window := range windows {
+		p, inPacelever := index(pacelever.buckets, window)
+		n, inNative := index(native.buckets, window)
+		switch {
+		case !inNative:
+			diffs = append(diffs, window+": pacelever only")
+		case !inPacelever:
+			diffs = append(diffs, window+": native only")
+		case math.Abs(p.used-n.used) > shadowUsedTolerance:
+			diffs = append(diffs, fmt.Sprintf("%s: used %.1f%% vs %.1f%%", window, p.used, n.used))
+		case p.reset.IsZero() != n.reset.IsZero() || !p.reset.IsZero() && p.reset.Sub(n.reset).Abs() > shadowResetTolerance:
+			diffs = append(diffs, window+": reset differs")
 		}
 	}
-	if len(c.Diffs) > 0 {
-		c.Verdict = "differ"
-	}
-	return c
+	return diffs
 }
 
-// shadowQuota compares the node's own measurement of pool with pacelever's
-// reading, in the background so neither the spawn path nor the loop waits for
-// it. One comparison per pool runs at a time; a request made while one runs is
-// dropped, since the next reading will be compared too.
-func (client *HubClient) shadowQuota(pool string, pace shadowPacelever) {
-	client.shadowMu.Lock()
-	if client.shadowRunning[pool] {
-		client.shadowMu.Unlock()
+// shadowQuotaLine is the one comparison line of a refresh: pool, whether the
+// readings agree, the account match, both readings (windows, used%, resets) or
+// error kinds, and the differences. No credential, response body or URL can be
+// in it: every part is a window label, a number, a time or an error kind.
+func shadowQuotaLine(pool string, pacelever, native shadowReading) string {
+	diffs := compareShadow(pacelever, native)
+	account := "unknown"
+	if pacelever.ok() && native.ok() && pacelever.key != "" && native.key != "" {
+		account = "differ"
+		if pacelever.key == native.key {
+			account = "same"
+		}
+	}
+	diff := "none"
+	if len(diffs) > 0 {
+		diff = strings.Join(diffs, "; ")
+	}
+	return fmt.Sprintf("quota shadow %s: match=%t account=%s pacelever=%s native=%s diff=%s", pool, len(diffs) == 0, account, pacelever, native, diff)
+}
+
+// logShadowQuota measures pool in this process — directly, never through the
+// shared store — and logs the comparison with pacelever's reading. The
+// measurement runs in the background, so a slow provider can never delay or
+// fail the refresh it rides on (placement bounds that refresh with
+// measure_timeout_s); it is cut off after shadowMeasureTimeout, and a pool
+// already being measured in shadow is skipped rather than queued. It reports
+// nothing back: spawns and the fleet-state publish keep pacelever's result.
+func (client *HubClient) logShadowQuota(ctx context.Context, pool string, pacelever shadowReading) {
+	if ctx.Err() != nil {
 		return
 	}
-	if client.shadowRunning == nil {
-		client.shadowRunning = map[string]bool{}
+	if _, running := client.shadowQuotaRunning.LoadOrStore(pool, struct{}{}); running {
+		return
 	}
-	client.shadowRunning[pool] = true
-	client.shadowMu.Unlock()
+	detached := context.WithoutCancel(ctx)
 	go func() {
-		defer func() {
-			client.shadowMu.Lock()
-			delete(client.shadowRunning, pool)
-			client.shadowMu.Unlock()
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), fleetQuotaTimeout)
+		defer client.shadowQuotaRunning.Delete(pool)
+		ctx, cancel := context.WithTimeout(detached, shadowMeasureTimeout)
 		defer cancel()
-		if !pace.ok && pace.kindFn != nil {
-			pace.errKind = pace.kindFn(ctx)
-		}
-		native, err := client.nativeQuotaSource(pool).Shadow(ctx)
-		if kind := quota.KindOf(err); kind == quota.ErrKindCredentials {
-			// No login here: nothing to compare, and not worth a line per round.
-			slog.Debug("quota shadow skipped", "pool", pool, "reason", "no_login")
-			return
-		}
-		c := compareQuotaShadow(pace, native, err)
-		if pace.ok {
-			pace.errKind = ""
-		}
-		slog.Info("quota shadow compare", "pool", pool, "verdict", c.Verdict, "account", c.Account,
-			"native_source", native.Source, "native_buckets", c.Native, "native_error_kind", shadowErrorKind(err),
-			"pacelever_buckets", c.Pace, "pacelever_error_kind", pace.errKind, "diffs", strings.Join(c.Diffs, ","))
+		reading, err := client.nativeQuotaSource(pool).measureOnly(ctx)
+		client.warnMessage(shadowQuotaLine(pool, pacelever, shadowFromShared(reading, err)))
 	}()
-}
-
-func shadowErrorKind(err error) string {
-	if err == nil {
-		return ""
-	}
-	return quotaErrorKind(err)
 }

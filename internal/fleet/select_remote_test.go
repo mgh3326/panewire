@@ -87,7 +87,7 @@ func TestSelectMeasuresDifferentRemoteAccountThenAdmits(t *testing.T) {
 	if err != nil || sel.chosen == nil {
 		t.Fatalf("measured account not admitted: %v", err)
 	}
-	if len(ssh) != 1 || !strings.Contains(ssh[0], "host-b panewire quota refresh 'devin'") {
+	if len(ssh) != 1 || !strings.Contains(ssh[0], "host-b pacelever refresh 'devin'") {
 		t.Fatalf("measurement calls: %v", ssh)
 	}
 	if g := sel.chosen.judgments; len(g) != 1 || g[0].Measured != "ok" || g[0].Outcome != "admitted" {
@@ -142,7 +142,7 @@ func TestSelectPinnedRefreshMeasuresOnAnyHolder(t *testing.T) {
 		if c.Name == "ssh" {
 			t.Fatal("pinned refresh skipped the local holder")
 		}
-		if c.Name == "panewire" {
+		if c.Name == "pacelever" {
 			measured++
 			src.accounts[key] = SharedAccount{Key: key, Observed: true, Fresh: true}
 			return Result{}, true

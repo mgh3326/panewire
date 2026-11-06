@@ -238,7 +238,7 @@ func TestRefreshNeverAddsIneligibleLocalHolder(t *testing.T) {
 			}
 			local, remote := 0, 0
 			a.Runner = wrapRunner(a.Runner, func(c Command) (Result, bool) {
-				if c.Name == "panewire" {
+				if c.Name == "pacelever" {
 					local++
 				} else if c.Name == "ssh" {
 					remote++

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -91,24 +90,47 @@ func isolateDevinShadow(client *HubClient) {
 	})
 }
 
-// devinSpawnConfig writes spawn.json for the store at url, with devin listed
-// in quota_native when native.
-func devinSpawnConfig(t *testing.T, url string, native bool) string {
+// setDevinSwitch writes this host's fleet config with devin listed (native) or
+// not (shadow) in `[quota].native_pools` and points the node at it.
+func setDevinSwitch(t *testing.T, native bool) {
 	t.Helper()
-	dir := t.TempDir()
-	env := filepath.Join(dir, "hk.env")
-	if err := os.WriteFile(env, []byte("HANDOFFKEEP_URL="+url+"\nHANDOFFKEEP_TOKEN=hk-node-test-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	listed := ""
+	body := "[quota]\nfresh_ttl_s = 300\n"
 	if native {
-		listed = `,"quota_native":["devin"]`
+		body = "[quota]\nnative_pools = [\"devin\"]\n"
 	}
-	spawn := filepath.Join(dir, "spawn.json")
-	if err := os.WriteFile(spawn, []byte(`{"enabled":false,"handoffkeep_env":"`+env+`"`+listed+`}`), 0o600); err != nil {
+	path := filepath.Join(t.TempDir(), "hosts.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	return spawn
+	t.Setenv("FLEET_HOSTS_CONFIG", path)
+}
+
+// devinPacelever is a pacelever fake that answers `refresh devin` with output
+// (or fails) and `--json` with status, and records every call.
+type devinPacelever struct {
+	mu     sync.Mutex
+	calls  []string
+	output []byte
+	status string
+}
+
+func (p *devinPacelever) run(_ context.Context, args ...string) ([]byte, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.calls = append(p.calls, strings.Join(args, " "))
+	switch {
+	case len(args) == 2 && args[0] == "refresh" && args[1] == "devin" && p.output != nil:
+		return p.output, nil
+	case len(args) == 1 && args[0] == "--json":
+		return []byte(p.status), nil
+	}
+	return nil, errors.New("exit status 2")
+}
+
+func (p *devinPacelever) called() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]string(nil), p.calls...)
 }
 
 // devinPaceleverOutput is `pacelever refresh devin` for the web_flat fixture:
@@ -127,105 +149,38 @@ func devinPaceleverOutputWithFreeTag() []byte {
 	return []byte(strings.TrimSuffix(out, "]}") + `,{"window":"","used_pct":0,"scope":{"kind":"model","name":"swe-2-high"}}]}`)
 }
 
-// paceleverCalls is a pacelever fake that records its calls and answers refresh
-// with output.
-func paceleverCalls(calls *[]string, mu *sync.Mutex, output []byte, err error) relayCommandRunner {
-	return func(_ context.Context, args ...string) ([]byte, error) {
-		mu.Lock()
-		*calls = append(*calls, strings.Join(args, " "))
-		mu.Unlock()
-		return output, err
-	}
-}
-
-// logLines captures slog output for the test and returns it on demand.
-type logLines struct {
-	mu  sync.Mutex
-	buf bytes.Buffer
-}
-
-func (l *logLines) Write(p []byte) (int, error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buf.Write(p)
-}
-
-func (l *logLines) String() string {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.buf.String()
-}
-
-func captureSlog(t *testing.T) *logLines {
+// devinShadowLine waits for the one devin comparison line.
+func devinShadowLine(t *testing.T, w *warnLog) string {
 	t.Helper()
-	lines := &logLines{}
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewTextHandler(lines, &slog.HandlerOptions{Level: slog.LevelDebug})))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-	return lines
+	line := func() []string {
+		var lines []string
+		for _, m := range w.all() {
+			if strings.HasPrefix(m, "quota shadow devin:") {
+				lines = append(lines, m)
+			}
+		}
+		return lines
+	}
+	eventually(t, 5*time.Second, "the devin shadow comparison line", func() bool { return len(line()) > 0 })
+	lines := line()
+	if len(lines) != 1 {
+		t.Fatalf("shadow lines %q", lines)
+	}
+	return lines[0]
 }
 
 func shadowIdle(client *HubClient) bool {
-	client.shadowMu.Lock()
-	defer client.shadowMu.Unlock()
-	return len(client.shadowRunning) == 0
+	idle := true
+	client.shadowQuotaRunning.Range(func(any, any) bool { idle = false; return false })
+	return idle
 }
 
-func compareLine(lines *logLines) string {
-	for _, line := range strings.Split(lines.String(), "\n") {
-		if strings.Contains(line, "quota shadow compare") {
-			return line
-		}
-	}
-	return ""
-}
-
-func TestQuotaSwitchedNative(t *testing.T) {
-	write := func(t *testing.T, body string) string {
-		path := filepath.Join(t.TempDir(), "spawn.json")
-		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		return path
-	}
-	for _, test := range []struct {
-		name, body, pool string
-		want             bool
-	}{
-		{"listed", `{"enabled":true,"quota_native":["devin"]}`, "devin", true},
-		{"listed among others", `{"quota_native":["kimi","devin"]}`, "devin", true},
-		{"absent key is shadow", `{"enabled":true}`, "devin", false},
-		{"empty list is shadow", `{"quota_native":[]}`, "devin", false},
-		{"another pool listed", `{"quota_native":["claude"]}`, "devin", false},
-		{"malformed is shadow", `{"quota_native":["devin"`, "devin", false},
-		{"wrong type is shadow", `{"quota_native":"devin"}`, "devin", false},
-		{"a pool without a switch cannot be flipped", `{"quota_native":["kimi"]}`, "kimi", false},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			if got := quotaSwitchedNative(write(t, test.body), test.pool); got != test.want {
-				t.Fatalf("quotaSwitchedNative = %t, want %t", got, test.want)
-			}
-		})
-	}
-	if quotaSwitchedNative("", "devin") || quotaSwitchedNative(filepath.Join(t.TempDir(), "missing.json"), "devin") {
-		t.Fatal("a missing spawn.json flipped the switch")
-	}
-	if quotaSwitchedNative(t.TempDir(), "devin") {
-		t.Fatal("a directory flipped the switch")
-	}
-}
-
-// The strict spawn.json loader knows the switch, so listing devin there does
-// not disable hub spawns.
-func TestSpawnConfigAcceptsQuotaNative(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "spawn.json")
-	body := `{"enabled":true,"workspace":"w","herdr_session":"s","quota_native":["devin"]}`
-	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	config, err := loadHubSpawnConfig(path)
-	if err != nil || len(config.QuotaNative) != 1 || config.QuotaNative[0] != "devin" {
-		t.Fatalf("config %+v err=%v", config, err)
+func noStoreCalls(t *testing.T, hk *claudeHK) {
+	t.Helper()
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	if len(hk.calls) != 0 {
+		t.Fatalf("the shared store was touched: %v", hk.calls)
 	}
 }
 
@@ -233,44 +188,34 @@ func TestSpawnConfigAcceptsQuotaNative(t *testing.T) {
 // publishes its reading; the node's own measurement runs beside it, writes one
 // comparison line, and touches neither the store nor the hub.
 func TestFleetQuotaDevinShadowKeepsPaceleverAndLogsTheComparison(t *testing.T) {
-	lines := captureSlog(t)
+	setDevinSwitch(t, false)
 	hk := newClaudeHK(t)
 	client := quotaClient(t)
-	client.spawnConfigPath = devinSpawnConfig(t, hk.server.URL, false)
+	client.spawnConfigPath = claudeStore(t, hk.server.URL)
 	var web []*http.Request
 	client.nativeQuota = map[string]*nativeQuotaSource{"devin": devinTestSource(client.spawnConfigPath, devinLoginFiles(true), func(r *http.Request) (*http.Response, error) {
 		web = append(web, r)
 		return claudeAPIReply(200, devinWebBody(t))(r)
 	})}
-	var pacelever []string
-	var mu sync.Mutex
-	client.nodePacelever = paceleverCalls(&pacelever, &mu, devinPaceleverOutput(25, 55), nil)
+	pacelever := &devinPacelever{output: devinPaceleverOutput(25, 55)}
+	client.nodePacelever = pacelever.run
+	warned := newWarnLog(client)
 
 	client.refreshFleetQuota(t.Context(), "devin", map[string]fleetQuotaSent{})
-	eventually(t, 5*time.Second, "the shadow comparison line", func() bool { return compareLine(lines) != "" })
-	eventually(t, 5*time.Second, "the shadow comparison to finish", func() bool { return shadowIdle(client) })
+	line := devinShadowLine(t, warned)
 
-	mu.Lock()
-	if len(pacelever) == 0 || pacelever[0] != "refresh devin" {
-		t.Fatalf("pacelever calls %v, want refresh devin", pacelever)
+	if calls := pacelever.called(); len(calls) != 1 || calls[0] != "refresh devin" {
+		t.Fatalf("pacelever calls %v, want exactly one refresh of devin", calls)
 	}
-	mu.Unlock()
-	line := compareLine(lines)
-	for _, want := range []string{"verdict=match", "account=same", "pool=devin", "native_source=usage-api",
-		`native_buckets="1d=25@2026-11-07T00:00:00Z,7d=55@2026-11-12T16:13:20Z"`, `pacelever_buckets="1d=25@2026-11-07T00:00:00Z,7d=55@2026-11-12T16:13:20Z"`} {
+	for _, want := range []string{"match=true", "account=same", "pacelever=[1d=25.0%@2026-11-07T00:00:00Z 7d=55.0%@2026-11-12T16:13:20Z]", "native=[1d=25.0%@2026-11-07T00:00:00Z 7d=55.0%@2026-11-12T16:13:20Z]", "diff=none"} {
 		if !strings.Contains(line, want) {
-			t.Errorf("comparison line misses %q:\n%s", want, line)
+			t.Errorf("line lacks %q:\n%s", want, line)
 		}
 	}
 	if len(web) != 1 || web[0].Header.Get("Authorization") != "Bearer "+devinSecret {
 		t.Fatalf("web requests %v", web)
 	}
-	hk.mu.Lock()
-	calls := hk.calls
-	hk.mu.Unlock()
-	if len(calls) != 0 {
-		t.Fatalf("shadow touched the shared store: %v", calls)
-	}
+	noStoreCalls(t, hk)
 	// pacelever's reading is what the hub got.
 	select {
 	case event := <-client.events:
@@ -281,154 +226,111 @@ func TestFleetQuotaDevinShadowKeepsPaceleverAndLogsTheComparison(t *testing.T) {
 	default:
 		t.Fatal("pacelever's reading was not published")
 	}
-	if strings.Contains(lines.String(), devinSecret) {
+	if strings.Contains(line, devinSecret) {
 		t.Fatal("token in the log")
 	}
 }
 
 // pacelever's reading with its per-model Free tag is refused by the hub publish
-// (a bucket without a window), yet the comparison still judges the paid
-// buckets next to it.
+// (a bucket without a window), yet the comparison still judges the paid buckets
+// next to it.
 func TestDevinShadowReadsPastTheFreeTag(t *testing.T) {
-	lines := captureSlog(t)
+	setDevinSwitch(t, false)
 	client := quotaClient(t)
-	client.spawnConfigPath = devinSpawnConfig(t, "http://127.0.0.1:1", false)
+	client.spawnConfigPath = claudeStore(t, "http://127.0.0.1:1")
 	client.nativeQuota = map[string]*nativeQuotaSource{"devin": devinTestSource(client.spawnConfigPath, devinLoginFiles(true), claudeAPIReply(200, devinWebBody(t)))}
-	var pacelever []string
-	var mu sync.Mutex
-	client.nodePacelever = paceleverCalls(&pacelever, &mu, devinPaceleverOutputWithFreeTag(), nil)
+	client.nodePacelever = (&devinPacelever{output: devinPaceleverOutputWithFreeTag()}).run
+	warned := newWarnLog(client)
 	client.refreshFleetQuota(t.Context(), "devin", map[string]fleetQuotaSent{})
-	eventually(t, 5*time.Second, "the shadow comparison line", func() bool { return compareLine(lines) != "" })
-	if line := compareLine(lines); !strings.Contains(line, "verdict=match") || strings.Contains(line, "swe-2-high") {
-		t.Fatalf("comparison line:\n%s", line)
+	if line := devinShadowLine(t, warned); !strings.Contains(line, "match=true") || strings.Contains(line, "swe-2-high") {
+		t.Fatalf("line %s", line)
 	}
 }
 
 // The same in shadow through the quota.refresh node command: a spawn's refresh
 // answers from pacelever and is compared in the background.
 func TestNodeQuotaRefreshDevinShadowRunsPacelever(t *testing.T) {
-	lines := captureSlog(t)
+	setDevinSwitch(t, false)
 	hk := newClaudeHK(t)
 	client := quotaClient(t)
-	client.spawnConfigPath = devinSpawnConfig(t, hk.server.URL, false)
+	client.spawnConfigPath = claudeStore(t, hk.server.URL)
 	client.nativeQuota = map[string]*nativeQuotaSource{"devin": devinTestSource(client.spawnConfigPath, devinLoginFiles(true), claudeAPIReply(200, devinWebBody(t)))}
-	var pacelever []string
-	var mu sync.Mutex
-	client.nodePacelever = paceleverCalls(&pacelever, &mu, devinPaceleverOutput(25, 70), nil)
+	pacelever := &devinPacelever{output: devinPaceleverOutput(25, 70)}
+	client.nodePacelever = pacelever.run
+	warned := newWarnLog(client)
 
-	result, failure := client.nodeQuotaRefresh(t.Context(), nodeQuotaRefreshArgs{Pool: "devin"})
-	if failure != "" || result == nil {
+	if result, failure := client.nodeQuotaRefresh(t.Context(), nodeQuotaRefreshArgs{Pool: "devin"}); failure != "" || result == nil {
 		t.Fatalf("result %v failure %q", result, failure)
 	}
-	eventually(t, 5*time.Second, "the shadow comparison line", func() bool { return compareLine(lines) != "" })
-	mu.Lock()
-	if len(pacelever) != 1 || pacelever[0] != "refresh devin" {
-		t.Fatalf("pacelever calls %v", pacelever)
+	line := devinShadowLine(t, warned)
+	if calls := pacelever.called(); len(calls) != 1 || calls[0] != "refresh devin" {
+		t.Fatalf("pacelever calls %v", calls)
 	}
-	mu.Unlock()
-	if line := compareLine(lines); !strings.Contains(line, "verdict=differ") || !strings.Contains(line, "diffs=used:account//7d") {
+	if !strings.Contains(line, "match=false") || !strings.Contains(line, "7d: used 70.0% vs 55.0%") {
 		t.Fatalf("a 7d reading of 70 against 55 must differ:\n%s", line)
 	}
+	noStoreCalls(t, hk)
 }
 
-// A failed pacelever refresh in shadow still answers refresh_failed, and the
-// comparison names pacelever's error kind (asked of its status off the caller's
-// path) next to the node's measurement.
-func TestNodeQuotaRefreshDevinShadowWithFailingPacelever(t *testing.T) {
-	lines := captureSlog(t)
-	client := quotaClient(t)
-	client.spawnConfigPath = devinSpawnConfig(t, "http://127.0.0.1:1", false)
-	client.nativeQuota = map[string]*nativeQuotaSource{"devin": devinTestSource(client.spawnConfigPath, devinLoginFiles(true), claudeAPIReply(200, devinWebBody(t)))}
-	client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
-		if len(args) > 0 && args[0] == "--json" {
-			return []byte(`{"providers":[{"id":"devin","error_kind":"probe_error"}]}`), nil
-		}
-		return nil, errors.New("exit status 1")
-	}
-	if _, failure := client.nodeQuotaRefresh(t.Context(), nodeQuotaRefreshArgs{Pool: "devin"}); failure != "refresh_failed" {
-		t.Fatalf("failure %q", failure)
-	}
-	eventually(t, 5*time.Second, "the shadow comparison line", func() bool { return compareLine(lines) != "" })
-	line := compareLine(lines)
-	if !strings.Contains(line, "verdict=pacelever_error") || !strings.Contains(line, "pacelever_error_kind=probe_error") || !strings.Contains(line, "native_buckets=") {
-		t.Fatalf("comparison line:\n%s", line)
-	}
-}
-
-// A host without a devin login is not measured in shadow either: no web
-// request, no probe, no comparison line.
-func TestDevinShadowSkipsAHostWithoutALogin(t *testing.T) {
-	lines := captureSlog(t)
-	client := quotaClient(t)
-	client.spawnConfigPath = devinSpawnConfig(t, "http://127.0.0.1:1", false)
-	client.nativeQuota = map[string]*nativeQuotaSource{"devin": devinTestSource(client.spawnConfigPath, devinLoginFiles(false), func(*http.Request) (*http.Response, error) {
-		t.Error("a web request was sent from a host without a login")
-		return nil, errors.New("unexpected")
-	})}
-	var pacelever []string
-	var mu sync.Mutex
-	client.nodePacelever = paceleverCalls(&pacelever, &mu, nil, errors.New("no login"))
-	client.refreshFleetQuota(t.Context(), "devin", map[string]fleetQuotaSent{})
-	eventually(t, 5*time.Second, "the shadow comparison to finish", func() bool { return shadowIdle(client) })
-	if compareLine(lines) != "" {
-		t.Fatalf("a comparison line without a login:\n%s", lines.String())
-	}
-	if !strings.Contains(lines.String(), "quota shadow skipped") {
-		t.Fatalf("the skip is not logged:\n%s", lines.String())
-	}
-}
-
-// One comparison per pool runs at a time.
-func TestDevinShadowRunsOneComparisonAtATime(t *testing.T) {
-	captureSlog(t)
-	client := quotaClient(t)
-	client.spawnConfigPath = devinSpawnConfig(t, "http://127.0.0.1:1", false)
-	release := make(chan struct{})
-	var requests int
-	var mu sync.Mutex
-	client.nativeQuota = map[string]*nativeQuotaSource{"devin": devinTestSource(client.spawnConfigPath, devinLoginFiles(true), func(r *http.Request) (*http.Response, error) {
-		mu.Lock()
-		requests++
-		mu.Unlock()
-		<-release
-		return claudeAPIReply(200, devinWebBody(t))(r)
-	})}
-	pace := shadowPacelever{ok: true}
-	client.shadowQuota("devin", pace)
-	eventually(t, 5*time.Second, "the first comparison to start", func() bool { mu.Lock(); defer mu.Unlock(); return requests == 1 })
-	client.shadowQuota("devin", pace) // dropped: one is in flight
-	close(release)
-	eventually(t, 5*time.Second, "the comparison to finish", func() bool { return shadowIdle(client) })
-	mu.Lock()
-	defer mu.Unlock()
-	if requests != 1 {
-		t.Fatalf("%d measurements for two requests, want the second dropped", requests)
-	}
-}
-
-// Acceptance 2, native: spawn.json lists devin, so the loop measures it in this
-// process — the shared store, the hub publish — and never execs pacelever.
-func TestFleetQuotaDevinNativeRunsNoPacelever(t *testing.T) {
-	lines := captureSlog(t)
+// A host without a devin login is measured in shadow without any request, probe
+// or store call: the node's side of the line is its missing credentials.
+func TestDevinShadowOnAHostWithoutALoginStartsNothing(t *testing.T) {
+	setDevinSwitch(t, false)
 	hk := newClaudeHK(t)
 	client := quotaClient(t)
-	client.spawnConfigPath = devinSpawnConfig(t, hk.server.URL, true)
+	client.spawnConfigPath = claudeStore(t, hk.server.URL)
+	source := devinTestSource(client.spawnConfigPath, devinLoginFiles(false), func(*http.Request) (*http.Response, error) {
+		t.Error("a web request was sent from a host without a login")
+		return nil, errors.New("unexpected")
+	})
+	probes := 0
+	source.Devin.StartProbe = func(context.Context, string, string, []string) (devin.Terminal, error) {
+		probes++
+		return nil, errors.New("unexpected")
+	}
+	client.nativeQuota = map[string]*nativeQuotaSource{"devin": source}
+	client.nodePacelever = (&devinPacelever{output: devinPaceleverOutput(25, 55)}).run
+	warned := newWarnLog(client)
+	client.refreshFleetQuota(t.Context(), "devin", map[string]fleetQuotaSent{})
+	line := devinShadowLine(t, warned)
+	if !strings.Contains(line, "native failed (credentials)") || probes != 0 {
+		t.Fatalf("probes %d, line %s", probes, line)
+	}
+	noStoreCalls(t, hk)
+}
+
+// With no switch configured at all, devin is in shadow.
+func TestDevinDefaultsToShadow(t *testing.T) {
+	t.Setenv("FLEET_HOSTS_CONFIG", filepath.Join(t.TempDir(), "missing.toml"))
+	if isNativeQuotaPool("devin") {
+		t.Fatal("devin is native without a config")
+	}
+	setDevinSwitch(t, true)
+	if !isNativeQuotaPool("devin") {
+		t.Fatal("devin stayed in shadow after the flip")
+	}
+}
+
+// Acceptance 2, native: the switch lists devin, so the loop measures it in this
+// process — the shared store, the hub publish — and never execs pacelever.
+func TestFleetQuotaDevinNativeRunsNoPacelever(t *testing.T) {
+	setDevinSwitch(t, true)
+	hk := newClaudeHK(t)
+	client := quotaClient(t)
+	client.spawnConfigPath = claudeStore(t, hk.server.URL)
 	var web []*http.Request
 	client.nativeQuota = map[string]*nativeQuotaSource{"devin": devinTestSource(client.spawnConfigPath, devinLoginFiles(true), func(r *http.Request) (*http.Response, error) {
 		web = append(web, r)
 		return claudeAPIReply(200, devinWebBody(t))(r)
 	})}
-	var pacelever []string
-	client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
-		pacelever = append(pacelever, strings.Join(args, " "))
-		t.Errorf("pacelever was run in native mode: %v", args)
-		return nil, errors.New("unexpected")
-	}
+	pacelever := &devinPacelever{}
+	client.nodePacelever = pacelever.run
+	warned := newWarnLog(client)
 
 	client.refreshFleetQuota(t.Context(), "devin", map[string]fleetQuotaSent{})
 
-	if len(pacelever) != 0 || len(web) != 1 {
-		t.Fatalf("pacelever=%v web=%d", pacelever, len(web))
+	if calls := pacelever.called(); len(calls) != 0 || len(web) != 1 {
+		t.Fatalf("pacelever=%v web=%d", calls, len(web))
 	}
 	if hk.published() != 1 {
 		t.Fatalf("the shared store got %d observations", hk.published())
@@ -472,8 +374,8 @@ func TestFleetQuotaDevinNativeRunsNoPacelever(t *testing.T) {
 	if got := poolLogin(t, client, "devin"); got.Login != fleet.ReadinessLoginPresent || got.Account != devinKeyForTest {
 		t.Fatalf("login %+v", got)
 	}
-	if strings.Contains(lines.String(), "quota shadow") {
-		t.Fatalf("native mode compared with pacelever:\n%s", lines.String())
+	if lines := warned.all(); len(lines) != 0 {
+		t.Fatalf("native mode logged %q", lines)
 	}
 	// The next round reads the shared reading: nothing is measured again.
 	client.refreshFleetQuota(t.Context(), "devin", map[string]fleetQuotaSent{})
@@ -485,28 +387,28 @@ func TestFleetQuotaDevinNativeRunsNoPacelever(t *testing.T) {
 // Native through the quota.refresh node command: no pacelever, the store
 // flow's reading.
 func TestNodeQuotaRefreshDevinNativeRunsNoPacelever(t *testing.T) {
+	setDevinSwitch(t, true)
 	hk := newClaudeHK(t)
 	client := quotaClient(t)
-	client.spawnConfigPath = devinSpawnConfig(t, hk.server.URL, true)
+	client.spawnConfigPath = claudeStore(t, hk.server.URL)
 	client.nativeQuota = map[string]*nativeQuotaSource{"devin": devinTestSource(client.spawnConfigPath, devinLoginFiles(true), claudeAPIReply(200, devinWebBody(t)))}
-	client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
-		t.Errorf("pacelever was run in native mode: %v", args)
-		return nil, errors.New("unexpected")
-	}
+	pacelever := &devinPacelever{}
+	client.nodePacelever = pacelever.run
 	if result, failure := client.nodeQuotaRefresh(t.Context(), nodeQuotaRefreshArgs{Pool: "devin"}); failure != "" || result == nil {
 		t.Fatalf("result %v failure %q", result, failure)
 	}
-	if hk.published() != 1 {
-		t.Fatalf("published %d", hk.published())
+	if calls := pacelever.called(); len(calls) != 0 || hk.published() != 1 {
+		t.Fatalf("pacelever=%v published=%d", calls, hk.published())
 	}
 }
 
-// Acceptance 6: a host without a devin login — shadow or native — takes no
-// lease, starts no probe and sends no request; its refresh reports credentials.
+// Acceptance 6: a native host without a devin login takes no lease, starts no
+// probe and sends no request; its refresh reports credentials.
 func TestDevinNativeHostWithoutALoginTakesNoLease(t *testing.T) {
+	setDevinSwitch(t, true)
 	hk := newClaudeHK(t)
 	client := quotaClient(t)
-	client.spawnConfigPath = devinSpawnConfig(t, hk.server.URL, true)
+	client.spawnConfigPath = claudeStore(t, hk.server.URL)
 	source := devinTestSource(client.spawnConfigPath, devinLoginFiles(false), func(*http.Request) (*http.Response, error) {
 		t.Error("a web request was sent from a host without a login")
 		return nil, errors.New("unexpected")
@@ -517,10 +419,8 @@ func TestDevinNativeHostWithoutALoginTakesNoLease(t *testing.T) {
 		return nil, errors.New("unexpected")
 	}
 	client.nativeQuota = map[string]*nativeQuotaSource{"devin": source}
-	client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
-		t.Errorf("pacelever was run in native mode: %v", args)
-		return nil, errors.New("unexpected")
-	}
+	pacelever := &devinPacelever{}
+	client.nodePacelever = pacelever.run
 	if _, failure := client.nodeQuotaRefresh(t.Context(), nodeQuotaRefreshArgs{Pool: "devin"}); failure != "refresh_failed" {
 		t.Fatalf("failure %q", failure)
 	}
@@ -528,11 +428,9 @@ func TestDevinNativeHostWithoutALoginTakesNoLease(t *testing.T) {
 	if ok || kind != quota.ErrKindCredentials || publish.Key != "" {
 		t.Fatalf("publish %+v ok=%t kind=%q, want credentials", publish, ok, kind)
 	}
-	hk.mu.Lock()
-	calls := hk.calls
-	hk.mu.Unlock()
-	if len(calls) != 0 || probes != 0 {
-		t.Fatalf("store calls %v, probes %d: a host without a login must not touch the store or the TUI", calls, probes)
+	noStoreCalls(t, hk)
+	if probes != 0 || len(pacelever.called()) != 0 {
+		t.Fatalf("probes %d, pacelever %v", probes, pacelever.called())
 	}
 	client.refreshFleetQuota(t.Context(), "devin", map[string]fleetQuotaSent{})
 	if got := poolLogin(t, client, "devin"); got.Login != fleet.ReadinessLoginMissing {
@@ -549,7 +447,7 @@ func TestDevinNativeRefreshDoesNotWaitPastTheBound(t *testing.T) {
 	previous := devinLeaseWait
 	devinLeaseWait = 40 * time.Millisecond
 	t.Cleanup(func() { devinLeaseWait = previous })
-	source := devinTestSource(devinSpawnConfig(t, hk.server.URL, true), devinLoginFiles(true), func(*http.Request) (*http.Response, error) {
+	source := devinTestSource(claudeStore(t, hk.server.URL), devinLoginFiles(true), func(*http.Request) (*http.Response, error) {
 		t.Error("measured although another host holds the lease")
 		return nil, errors.New("unexpected")
 	})
@@ -571,7 +469,7 @@ func TestDevinNativeRefreshDoesNotWaitPastTheBound(t *testing.T) {
 // published and a second refresh reuses it.
 func TestDevinFreeBucketIsPublishedAndRead(t *testing.T) {
 	hk := newClaudeHK(t)
-	source := devinTestSource(devinSpawnConfig(t, hk.server.URL, true), devinLoginFiles(true), claudeAPIReply(200, devinWebBody(t)))
+	source := devinTestSource(claudeStore(t, hk.server.URL), devinLoginFiles(true), claudeAPIReply(200, devinWebBody(t)))
 	reading, err := source.Refresh(t.Context())
 	if err != nil || reading.Free == nil || reading.Free.State != shared.FreeAvailable || len(reading.Buckets) != 2 {
 		t.Fatalf("reading %+v err=%v", reading, err)
@@ -582,48 +480,42 @@ func TestDevinFreeBucketIsPublishedAndRead(t *testing.T) {
 }
 
 // Acceptance 2 at the CLI, which every spawn path outside the node daemon runs
-// (`panewire quota refresh devin`, locally or over ssh): in shadow it runs
-// pacelever; in native it runs no pacelever and answers from the node's own
+// (`panewire quota refresh devin`, locally or over ssh): in shadow it is
+// pacelever's; flipped, it runs no pacelever and answers from the node's own
 // measurement.
-func TestQuotaCLIRefreshDevinShadowRunsPacelever(t *testing.T) {
+func TestQuotaCLIRefreshDevinShadowAndNative(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "pacelever-ran")
 	quotaFake(t, `echo "$@" > `+marker+`; echo refreshed`)
 	hk := newClaudeHK(t)
-	spawn := devinSpawnConfig(t, hk.server.URL, false)
+	spawn := claudeStore(t, hk.server.URL)
 	previous := quotaCLISource
-	quotaCLISource = func(pool string) *nativeQuotaSource {
-		return devinTestSource(spawn, devinLoginFiles(true), func(*http.Request) (*http.Response, error) {
-			t.Error("the CLI measured natively in shadow")
-			return nil, errors.New("unexpected")
-		})
-	}
 	t.Cleanup(func() { quotaCLISource = previous })
-	var out, errout bytes.Buffer
-	if code := runQuotaCLI([]string{"refresh", "devin"}, &out, &errout); code != 0 || out.String() != "refreshed\n" {
-		t.Fatalf("refresh %d %q %s", code, out.String(), errout.String())
+	sources := 0
+	quotaCLISource = func(string) *nativeQuotaSource {
+		sources++
+		return devinTestSource(spawn, devinLoginFiles(true), claudeAPIReply(200, devinWebBody(t)))
 	}
-	ran, err := os.ReadFile(marker)
-	if err != nil || strings.TrimSpace(string(ran)) != "refresh devin" {
+
+	setDevinSwitch(t, false)
+	var out, errout bytes.Buffer
+	if code := runQuotaCLI([]string{"refresh", "devin"}, &out, &errout); code != 0 || out.String() != "refreshed\n" || sources != 0 {
+		t.Fatalf("shadow refresh %d %q %s (native sources built: %d)", code, out.String(), errout.String(), sources)
+	}
+	if ran, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(ran)) != "refresh devin" {
 		t.Fatalf("pacelever ran with %q (%v)", ran, err)
 	}
 	if hk.published() != 0 {
 		t.Fatal("the shadow CLI published to the store")
 	}
-}
 
-func TestQuotaCLIRefreshDevinNativeRunsNoPacelever(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "pacelever-ran")
-	quotaFake(t, `echo "$@" > `+marker+`; echo refreshed`)
-	hk := newClaudeHK(t)
-	spawn := devinSpawnConfig(t, hk.server.URL, true)
-	previous := quotaCLISource
-	quotaCLISource = func(pool string) *nativeQuotaSource {
-		return devinTestSource(spawn, devinLoginFiles(true), claudeAPIReply(200, devinWebBody(t)))
+	setDevinSwitch(t, true)
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { quotaCLISource = previous })
-	var out, errout bytes.Buffer
+	out.Reset()
+	errout.Reset()
 	if code := runQuotaCLI([]string{"refresh", "devin"}, &out, &errout); code != 0 {
-		t.Fatalf("refresh %d %q %s", code, out.String(), errout.String())
+		t.Fatalf("native refresh %d %q %s", code, out.String(), errout.String())
 	}
 	if _, err := os.Stat(marker); err == nil {
 		t.Fatal("pacelever ran in native mode")
@@ -637,68 +529,23 @@ func TestQuotaCLIRefreshDevinNativeRunsNoPacelever(t *testing.T) {
 	}
 }
 
-// A CLI on a host without a devin login says why instead of waiting.
+// A native CLI on a host without a devin login says why instead of waiting.
 func TestQuotaCLIRefreshDevinWithoutALoginReportsCredentials(t *testing.T) {
+	setDevinSwitch(t, true)
 	quotaFake(t, `echo pacelever must not run; exit 9`)
 	hk := newClaudeHK(t)
-	spawn := devinSpawnConfig(t, hk.server.URL, true)
+	spawn := claudeStore(t, hk.server.URL)
 	previous := quotaCLISource
-	quotaCLISource = func(pool string) *nativeQuotaSource {
+	t.Cleanup(func() { quotaCLISource = previous })
+	quotaCLISource = func(string) *nativeQuotaSource {
 		return devinTestSource(spawn, devinLoginFiles(false), func(*http.Request) (*http.Response, error) {
 			t.Error("a request was sent without a login")
 			return nil, errors.New("unexpected")
 		})
 	}
-	t.Cleanup(func() { quotaCLISource = previous })
 	var out, errout bytes.Buffer
 	if code := runQuotaCLI([]string{"refresh", "devin"}, &out, &errout); code == 0 || !strings.Contains(errout.String(), "quota refresh: credentials") {
 		t.Fatalf("refresh %d out=%q err=%q", code, out.String(), errout.String())
 	}
-	hk.mu.Lock()
-	calls := hk.calls
-	hk.mu.Unlock()
-	if len(calls) != 0 {
-		t.Fatalf("store calls %v", calls)
-	}
+	noStoreCalls(t, hk)
 }
-
-func TestCompareQuotaShadow(t *testing.T) {
-	paceBuckets := func(used7d float64, reset string) shadowPacelever {
-		return shadowPacelever{ok: true, publish: FleetStatePublish{Key: devinKeyForTest, Quota: &FleetStateQuota{Buckets: []FleetStateBucket{
-			{Window: "7d", UsedPct: &used7d, ResetsAt: reset, Scope: "account"},
-			{Window: "", UsedPct: &used7d, Scope: "model", Model: "swe-2-high"}, // a free tag
-		}}}}
-	}
-	reset := time.Date(2026, 11, 12, 16, 0, 0, 0, time.UTC)
-	native := func(key string, used float64, at *time.Time) shared.Reading {
-		return shared.Reading{Key: key, Buckets: []shared.Bucket{{Window: "7d", UsedPct: used, ResetsAt: at, Scope: "account"}}}
-	}
-	for _, test := range []struct {
-		name       string
-		pace       shadowPacelever
-		native     shared.Reading
-		nativeErr  error
-		verdict    string
-		diffs      string
-		accountVal string
-	}{
-		{"same", paceBuckets(62, "2026-11-12T16:00:00Z"), native(devinKeyForTest, 62, &reset), nil, "match", "", "same"},
-		{"within tolerance", paceBuckets(62, "2026-11-12T16:00:00Z"), native(devinKeyForTest, 62.9, ptrTime(reset.Add(4*time.Minute))), nil, "match", "", "same"},
-		{"used differs", paceBuckets(62, "2026-11-12T16:00:00Z"), native(devinKeyForTest, 64, &reset), nil, "differ", "used:account//7d", "same"},
-		{"reset differs", paceBuckets(62, "2026-11-12T16:00:00Z"), native(devinKeyForTest, 62, ptrTime(reset.Add(time.Hour))), nil, "differ", "reset:account//7d", "same"},
-		{"reset missing on one side", paceBuckets(62, ""), native(devinKeyForTest, 62, &reset), nil, "differ", "reset:account//7d", "same"},
-		{"other account", paceBuckets(62, "2026-11-12T16:00:00Z"), native("devin:0000000000000000", 62, &reset), nil, "differ", "account", "different"},
-		{"native error", paceBuckets(62, ""), shared.Reading{}, quota.Fail(quota.ErrKindProbe, "x"), "native_error", "", "unknown"},
-		{"pacelever error", shadowPacelever{}, native(devinKeyForTest, 62, &reset), nil, "pacelever_error", "", "unknown"},
-		{"both error", shadowPacelever{}, shared.Reading{}, quota.Fail(quota.ErrKindProbe, "x"), "both_error", "", "unknown"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			got := compareQuotaShadow(test.pace, test.native, test.nativeErr)
-			if got.Verdict != test.verdict || strings.Join(got.Diffs, ",") != test.diffs || got.Account != test.accountVal {
-				t.Fatalf("comparison %+v, want %s %q %s", got, test.verdict, test.diffs, test.accountVal)
-			}
-		})
-	}
-}
-
-func ptrTime(t time.Time) *time.Time { return &t }

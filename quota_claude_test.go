@@ -306,7 +306,7 @@ func TestNodeQuotaRefreshClaudeIsNative(t *testing.T) {
 	if len(pacelever) != 0 || hk.published() != 1 {
 		t.Fatalf("pacelever=%v published=%d", pacelever, hk.published())
 	}
-	if result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "devin"}); code != "" || result["outcome"] != nodeQuotaRefreshed || len(pacelever) != 1 || pacelever[0] != "refresh devin" {
+	if result, code := nodeRun(t, client, nodeCommandQuotaRefresh, map[string]any{"pool": "kimi"}); code != "" || result["outcome"] != nodeQuotaRefreshed || len(pacelever) != 1 || pacelever[0] != "refresh kimi" {
 		t.Fatalf("codex refresh: result=%v code=%q pacelever=%v", result, code, pacelever)
 	}
 

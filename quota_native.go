@@ -8,67 +8,35 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/quota"
 	"github.com/mgh3326/panewire/internal/quota/claude"
 	"github.com/mgh3326/panewire/internal/quota/codex"
+	"github.com/mgh3326/panewire/internal/quota/commandcode"
 	"github.com/mgh3326/panewire/internal/quota/devin"
 	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
-// The node measures the claude, codex and devin pools itself (docs/quota.md
-// §Native measurement): each pool's own source (claude: the OAuth usage API
-// then one `claude -p /usage`; codex: the app-server then the wham usage API;
-// devin: the web quota endpoint then the `/usage` probe) and the shared quota
-// store's lease/publish flow. Every other pool still goes through pacelever
-// until its own change.
+// The node measures the claude, codex, commandcode and devin pools itself
+// (docs/quota.md §Native measurement): each pool's own source (claude: the OAuth
+// usage API then one `claude -p /usage`; codex: the app-server then the wham
+// usage API; commandcode: the billing, subscription and usage-summary APIs;
+// devin: the web quota endpoint then the `/usage` probe) and the shared
+// quota store's lease/publish flow. Every other pool still goes through
+// pacelever until its own change.
+//
+// claude and codex are always native. commandcode and devin have a switch (docs/quota.md
+// §Native measurement: commandcode): it is native only once the host's
+// `[quota].native_pools` lists it, and until then it is in shadow — see
+// quota_shadow.go.
 
-// quotaNativePools are the pools measured in this process, always.
-var quotaNativePools = []string{"claude", "codex"}
-
-func isNativeQuotaPool(pool string) bool { return slices.Contains(quotaNativePools, pool) }
-
-// quotaSwitchedPools are the pools the node can measure but whose spawn-path
-// measurement is still pacelever's until the node's spawn.json says
-// otherwise (docs/quota.md §Shadow and native). In shadow, the default,
-// spawns and the fleet-state loop keep running pacelever and the node only
-// compares its own measurement with pacelever's reading in the log; in native
-// they stop running pacelever for the pool.
-var quotaSwitchedPools = []string{"devin"}
-
-func isSwitchedQuotaPool(pool string) bool { return slices.Contains(quotaSwitchedPools, pool) }
-
-// quotaSwitchedNative reports whether spawn.json lists pool in quota_native.
-// A missing, unreadable or malformed file is shadow: the switch only moves on
-// an explicit, readable setting. It is read on every call, so flipping it
-// needs no restart.
-func quotaSwitchedNative(spawnConfigPath, pool string) bool {
-	if spawnConfigPath == "" || !isSwitchedQuotaPool(pool) {
-		return false
-	}
-	info, err := os.Lstat(spawnConfigPath)
-	if err != nil || !info.Mode().IsRegular() || info.Size() > 64<<10 {
-		return false
-	}
-	contents, err := os.ReadFile(spawnConfigPath)
-	if err != nil {
-		return false
-	}
-	var config struct {
-		QuotaNative []string `json:"quota_native"`
-	}
-	return json.Unmarshal(contents, &config) == nil && slices.Contains(config.QuotaNative, pool)
-}
-
-// servedNatively reports whether this source's pool runs no pacelever: the
-// always-native pools, and a switched pool that spawn.json has flipped.
-func (s *nativeQuotaSource) servedNatively() bool {
-	return isNativeQuotaPool(s.Pool) || quotaSwitchedNative(s.SpawnConfigPath, s.Pool)
-}
+// isNativeQuotaPool says whether this host measures pool itself. The host
+// config is read at call time, so flipping a switch needs no restart.
+func isNativeQuotaPool(pool string) bool { return fleet.HostNativeQuotaPool(pool) }
 
 // quotaPresenceHostPattern is the host id alphabet the store's presence
 // records accept.
@@ -79,13 +47,14 @@ var quotaPresenceHostPattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 // presence interval persist across the fleet-state loop and the quota.refresh
 // op.
 type nativeQuotaSource struct {
-	// Pool is the pool measured: "claude", "codex" or "devin".
+	// Pool is the pool measured: "claude", "codex", "commandcode" or "devin".
 	Pool string
-	// Claude, Codex and Devin are the credential, HTTP and process
+	// Claude, Codex, Commandcode and Devin are the credential, HTTP and process
 	// environment of a measurement of their pool.
-	Claude claude.Config
-	Codex  codex.Config
-	Devin  devin.Config
+	Claude      claude.Config
+	Codex       codex.Config
+	Commandcode commandcode.Config
+	Devin       devin.Config
 	// SpawnConfigPath is the spawn.json whose handoffkeep_env names the store.
 	SpawnConfigPath string
 	// HostID is announced as the holder of the account; empty skips presence.
@@ -99,6 +68,9 @@ type nativeQuotaSource struct {
 
 	flowOnce sync.Once
 	flow     *shared.Flow
+	// commandcodeAccounts remembers the account behind the login so the
+	// fingerprint read before each refresh costs no request once known.
+	commandcodeAccounts commandcode.IdentityCache
 }
 
 // errQuotaStoreUnconfigured says spawn.json names no handoffkeep_env, so there
@@ -148,25 +120,21 @@ func (s *nativeQuotaSource) now() time.Time {
 // poolMeasurement is what Refresh needs of a pool: how to measure it, the
 // account fingerprint the login names before any request (or why the host has
 // no login), and how long a shared reading stays current.
-func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountFP func() (string, error), freshTTL time.Duration) {
+func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountFP func(context.Context) (string, error), freshTTL time.Duration) {
 	switch s.Pool {
-	case "codex":
-		config := s.Codex
+	case "commandcode":
+		config := s.Commandcode
 		config.Now = s.Now
-		return func(ctx context.Context) (quota.Observation, error) { return codex.Measure(ctx, config) },
-			func() (string, error) {
-				// A logged-out host reports its credentials, not a missing
-				// account: the login rule reads the kind.
-				if !codex.HasLogin(config) {
-					return "", quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
-				}
-				return codex.AccountFP(config), nil
-			}, shared.OtherFreshTTL
+		config.Identities = &s.commandcodeAccounts
+		// The account is the one whoami names, so the fingerprint needs a
+		// request the first time a login is seen (cached after that).
+		return func(ctx context.Context) (quota.Observation, error) { return commandcode.Measure(ctx, config) },
+			func(ctx context.Context) (string, error) { return commandcode.AccountFP(ctx, config) }, shared.OtherFreshTTL
 	case "devin":
 		config := s.Devin
 		config.Now = s.Now
 		return func(ctx context.Context) (quota.Observation, error) { return devin.Measure(ctx, config) },
-			func() (string, error) {
+			func(context.Context) (string, error) {
 				// Only a host with a devin login measures; any other host's
 				// reason is its missing credentials, never a lease wait.
 				if !devin.HasLogin(config) {
@@ -174,11 +142,23 @@ func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountF
 				}
 				return devin.AccountFP(config), nil
 			}, shared.OtherFreshTTL
+	case "codex":
+		config := s.Codex
+		config.Now = s.Now
+		return func(ctx context.Context) (quota.Observation, error) { return codex.Measure(ctx, config) },
+			func(context.Context) (string, error) {
+				// A logged-out host reports its credentials, not a missing
+				// account: the login rule reads the kind.
+				if !codex.HasLogin(config) {
+					return "", quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
+				}
+				return codex.AccountFP(config), nil
+			}, shared.OtherFreshTTL
 	default:
 		config := s.Claude
 		config.Now = s.Now
 		return func(ctx context.Context) (quota.Observation, error) { return claude.Measure(ctx, config) },
-			func() (string, error) { return claude.AccountFP(config), nil }, shared.DefaultFreshTTL
+			func(context.Context) (string, error) { return claude.AccountFP(config), nil }, shared.DefaultFreshTTL
 	}
 }
 
@@ -194,7 +174,7 @@ func (s *nativeQuotaSource) Refresh(ctx context.Context) (shared.Reading, error)
 	if err != nil {
 		return shared.Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 	}
-	fp, err := accountFP()
+	fp, err := accountFP(ctx)
 	if err != nil {
 		return shared.Reading{}, err
 	}
@@ -218,15 +198,11 @@ func (s *nativeQuotaSource) Refresh(ctx context.Context) (shared.Reading, error)
 // holding a spawn path for two lease windows.
 var devinLeaseWait = 15 * time.Second
 
-// Shadow takes this host's own measurement without touching the store: no
-// lease, no publication, no presence. In shadow pacelever still owns the shared
-// reading, so a native publication would race it. A host without a login
-// answers its missing credentials and measures nothing.
-func (s *nativeQuotaSource) Shadow(ctx context.Context) (shared.Reading, error) {
-	measure, accountFP, _ := s.poolMeasurement()
-	if _, err := accountFP(); err != nil {
-		return shared.Reading{}, err
-	}
+// measureOnly is one measurement that touches no shared store: no lease, no
+// publication, no presence. Shadow mode uses it to compare against pacelever
+// without changing what other hosts read.
+func (s *nativeQuotaSource) measureOnly(ctx context.Context) (shared.Reading, error) {
+	measure, _, _ := s.poolMeasurement()
 	return s.measureDirect(ctx, measure)
 }
 
@@ -287,10 +263,11 @@ var quotaCLISource = func(pool string) *nativeQuotaSource {
 	return source
 }
 
-// runNativeQuotaRefresh is `panewire quota refresh <pool>` for a pool served
-// natively (a switched pool in shadow runs pacelever instead): it measures through the same source the node daemon uses and prints the
+// runNativeQuotaRefresh is `panewire quota refresh <pool>` for a native pool:
+// it measures through the same source the node daemon uses and prints the
 // reading.
-func runNativeQuotaRefresh(ctx context.Context, source *nativeQuotaSource, pool string, out, errOut io.Writer) int {
+func runNativeQuotaRefresh(ctx context.Context, pool string, out, errOut io.Writer) int {
+	source := quotaCLISource(pool)
 	ctx, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
 	reading, err := source.Refresh(ctx)

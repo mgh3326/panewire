@@ -46,7 +46,7 @@ func TestInboxDeliveredMustAckInterruptNoEscalationNoReplay(t *testing.T) {
 	h2.flushInbox()
 	h2.flushInbox()
 	h2.replayRelayEvent(original, relayReplaySourceStartup)
-	h2.replayMarkedUnconfirmed(context.Background(), original, relayReplaySourceStartup)
+	h2.replayMarkedUnconfirmed(context.Background(), original, relayReplaySourceStartup, false)
 	h2.replayUndeliveredRelayEvents(context.Background())
 	h2.replayUndeliveredLaneEvents(context.Background())
 	h2.flushInbox()

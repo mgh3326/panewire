@@ -678,6 +678,15 @@ func (s *laneInboxStore) read(id int64, lane string, now time.Time) (laneInboxIt
 	return scanLaneInbox(s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxColumns+` FROM lane_inbox WHERE id=? AND (?='' OR lane=?)`), id, lane, lane))
 }
 
+// itemLane is the lane that owns item id; sql.ErrNoRows when there is none.
+func (s *laneInboxStore) itemLane(id int64) (string, error) {
+	ctx, done := s.op(s.life)
+	defer done()
+	var lane string
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT lane FROM lane_inbox WHERE id=?`), id).Scan(&lane)
+	return lane, err
+}
+
 func (s *laneInboxStore) ack(id int64, lane string, all bool, now time.Time) (int64, error) {
 	ctx, done := s.op(s.life)
 	defer done()
@@ -770,7 +779,7 @@ func (s *laneInboxStore) makeBatches(now time.Time) error {
 				}
 				items = items[:end]
 			}
-			id := "quiet-digest-" + uuid.NewString()
+			id := quietDigestBatchPrefix + uuid.NewString()
 			// The digest is one line — a count and the inbox pointer — so it
 			// always satisfies the lane.event text contract (no control
 			// bytes, far under the length cap) and never breaks receivers.

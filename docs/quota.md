@@ -4,7 +4,7 @@
 scheduled for removal; callers should use panewire's interface.
 
 - `panewire quota status [--json]` reads the local host's cached readings.
-- `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` and `codex` are measured by panewire itself ([claude](#native-measurement-claude), [codex](#native-measurement-codex)), and so is `devin` once the host's `spawn.json` lists it in `quota_native` ([devin](#native-measurement-devin), [shadow and native](#shadow-and-native)); every other pool, and `devin` until then, runs the dependency.
+- `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` and `codex` are measured by panewire itself ([claude](#native-measurement-claude), [codex](#native-measurement-codex)), and so are `commandcode` and `devin` once their switch is flipped ([commandcode](#native-measurement-commandcode), [devin](#native-measurement-devin)); every other pool, and those two until then, runs the dependency.
 - `panewire quota observe KIND ...` forwards the observation kind and all remaining arguments, including `devin-free-limit` options, and returns the dependency's exit code.
 
 Status and version calls each have a 30-second bound; gate calls have a
@@ -28,8 +28,9 @@ panewire measures the `claude` pool in its own process (`internal/quota/claude`,
 `internal/quota/shared`); the node daemon, the `quota.refresh` node command,
 placement's on-demand refresh and `panewire quota refresh claude` all run the
 same code. The shared store flow below is shared with
-[codex](#native-measurement-codex). Other pools still run pacelever until their
-own change.
+[codex](#native-measurement-codex) and
+[commandcode](#native-measurement-commandcode). Other pools still run pacelever
+until their own change.
 
 - **API first.** `GET /api/oauth/usage` on Anthropic's API host with the
   OAuth bearer token and `anthropic-beta: oauth-2025-04-20`; 20 s timeout,
@@ -127,26 +128,84 @@ through the same four paths and the same shared store flow as claude.
 - **Shared store flow** as for claude, except that a reading stays fresh for
   300 s, the default for every pool but claude.
 
+## Native measurement: commandcode
+
+panewire measures the `commandcode` pool in its own process
+(`internal/quota/commandcode`) through the same shared store flow as claude and
+codex. Unlike them it ships behind a switch, in [shadow](#shadow-and-native)
+first.
+
+- **Requests.** `GET` on the commandcode API host: `/alpha/whoami?limits=1`
+  (who the key is), `/alpha/billing/credits` (scoped with `?orgId=` when whoami
+  names an org), `/alpha/billing/subscriptions` and `/alpha/usage/summary`. Each
+  sends `Authorization: Bearer <key>` and `User-Agent: cmd/1.88.1` (the API's
+  edge rejects generic clients; this is pacelever's constant), 20 s timeout,
+  redirects refused, 2 MiB body cap. Responses may carry their object under
+  `data` or at the top level.
+- **5h and 7d** are `windowLimits.fiveHour` and `.weekly` of the credits
+  response: `used / cap`, clamped to 100 when past the cap. A window without a
+  positive `cap` or a numeric `used >= 0` is left out; a malformed value never
+  reads as an unused window. `resetAt` is epoch seconds, milliseconds or
+  microseconds, RFC 3339 or an HTTP date.
+- **30d** is the share of this billing period's plan credits already spent:
+  `totalMonthlyCredits / (totalMonthlyCredits + credits.monthlyCredits)`, with
+  `totalMonthlyCredits` from the usage summary (its `periodBasis` must be
+  `billing-period` when it says one) and `monthlyCredits` (the plan credits
+  left, USD, floored at 0) from the credits response. The reset is the
+  subscription's `data.currentPeriodEnd`. Purchased and free credits are never
+  read: they are outside the plan's allowance, so neither the numerator nor the
+  denominator includes them. There is no plan table, so a price change needs no
+  release.
+- **A missing 30d is a missing window.** If the usage summary or the credits
+  `monthlyCredits` cannot be read (a failed or malformed response, a non-numeric
+  or negative total, another `periodBasis`, a zero total) the reading has the
+  5h and 7d buckets and no 30d bucket; nothing is estimated. If only the
+  subscription is unreadable, 30d keeps its value and has no reset (and the
+  reading has no plan name). Refusing a spawn for want of a 30d window is the
+  gate's rule, not this measurement's. A deadline that ends during a secondary
+  request fails the whole measurement as `timeout` rather than publishing a
+  partial reading.
+- **Error kinds** follow pacelever's for this pool: no key `credentials`; a
+  401/403 `auth_failed`, except a 403 whose body is not JSON, which is
+  `edge_rejected`; 429 `rate_limited` (with `Retry-After`; without it the shared
+  flow backs the account off 300 s itself); a deadline `timeout`; a failed
+  request `network`; any other status `http`; unreadable JSON or no usable
+  window `parse_error`. A body saying `success: false` is `http`. Only the credits
+  and whoami requests decide the kind; a secondary request's failure never
+  does.
+- **Credentials** are located, not copied: the key is
+  `COMMAND_CODE_API_KEY`, else `COMMANDCODE_API_KEY`, else `apiKey` of
+  `~/.commandcode/auth.json` — pacelever's sources, no others. It is read into
+  memory for the requests of one measurement, and never logged, written, put in
+  an error or on a command line.
+- **Account key** `commandcode:<fp>`, `fp = hex(sha256("commandcode-account|" +
+  id))[:16]`, where `id` is whoami's `user.id`, else `org.id`: pacelever's key
+  for the same login. The fingerprint is read before each refresh, which costs
+  one whoami request the first time a key is seen and none after (the node
+  remembers it). A login whose whoami names no id has no key (`account_unknown`
+  with a store; the node still measures it directly without one).
+- **Shared store flow** as for codex: a reading stays fresh for 300 s.
+
 ## Native measurement: devin
 
 panewire measures the `devin` pool in its own process (`internal/quota/devin`)
 with pacelever's sources, buckets, error kinds and account fingerprint, and the
-shared store flow below. It ships in [shadow](#shadow-and-native); the switch
-makes it the pool's only measurement.
+shared store flow. It has a switch and ships in [shadow](#shadow-and-native).
 
 - **Only a host with a devin login measures.** The login is a non-blank
   `windsurf_api_key` in `<XDG data>/devin/credentials.toml` (`~/.local/share`
   by default). The key only proves a login exists; it is never read into a
   request, hashed or logged. Any other host answers `credentials` ("no login
   here") before any store call: it takes no lease, runs no probe and sends no
-  request. The shared reading is read through placement and the quota gate as
-  before.
+  request. It has no account key, so it cannot read the shared reading itself;
+  placement and the quota gate read it from the store as before.
 - **Web source first.** With `DEVIN_BEARER_TOKEN` in the environment and
   `[pools.devin] org_id` in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
   `<XDG config>/pacelever/config.toml`; the id must look like `org-…`),
   `GET /api/<org>/billing/quota/usage` on devin's web app host with the bearer
-  token and `x-cog-org-id`; 20 s timeout, redirects refused, 2 MiB cap. `1d` (omitted
-  when `hide_daily_quota`) and `7d` account buckets read from the flat
+  token and `x-cog-org-id`; 20 s timeout, redirects refused, 2 MiB cap, and a
+  body that is one JSON object and nothing after it. `1d` (omitted when
+  `hide_daily_quota`) and `7d` account buckets read from the flat
   `*_percentage` / `*_reset_at` fields or the nested `quota_usage` object
   (`used_percent`, `remaining_percent`, or `used`/`limit`/`remaining`); a value
   below 1 is a fraction, a `remaining_percent` of exactly 1 is 100% left. The
@@ -187,48 +246,57 @@ makes it the pool's only measurement.
   publishes `{buckets: [], free_bucket}` and the refresh succeeds with no paid
   window (pacelever's rule); only a 429 is remembered, backing the paid probe off
   for its `Retry-After` (300 s default) while the free state keeps publishing.
-- **Shared store flow** as for claude, with a 300 s freshness window, except
+- **Shared store flow** as for codex: a reading stays fresh for 300 s, except
   that **the wait for another host's measurement is bounded at 15 s** (not two
   lease windows): past it the refresh ends `shared_pending` instead of holding a
   spawn path.
 
-## Shadow and native
+### Shadow and native
 
-A pool that can be measured natively but still spawns through pacelever (today
-only `devin`) has a switch in the node's `spawn.json`:
+`commandcode` and `devin` are native only when the host's fleet config
+(`~/.config/fleet/hosts.toml`, or `FLEET_HOSTS_CONFIG`) lists them:
 
-```json
-{"quota_native": ["devin"]}
+```toml
+[quota]
+native_pools = ["commandcode", "devin"]
 ```
 
-- **shadow (default; key absent, unreadable or not listing the pool).**
-  Everything that ran pacelever for the pool still does: the fleet-state loop,
-  the `quota.refresh` node command, placement's refresh and `panewire quota
-  refresh devin` (which runs `pacelever refresh devin`). The node also measures
-  the pool itself, without touching the store (no lease, no publication, no
-  presence — pacelever owns the shared reading), and writes one line per
-  comparison: `msg="quota shadow compare" pool=devin verdict=… account=…
-  native_buckets=… pacelever_buckets=… diffs=…`. `verdict` is `match` (same
-  account; same buckets, used percentages within 1 point, resets within 5
-  minutes), `differ` (with `diffs` naming each `used:`, `reset:`,
-  `native_missing:`, `pacelever_missing:` or `account`), `native_error`,
-  `pacelever_error` or `both_error`, with each side's error kind. A host without
-  a login logs `quota shadow skipped reason=no_login` at debug. The comparison
-  runs in the background, one per pool at a time, so it never delays a spawn.
-  Only the node daemon compares (the loop and `quota.refresh`); the CLI in shadow
-  is pacelever alone.
-- **native (`quota_native` lists the pool).** The same four paths run the
-  native measurement and its store flow and run no pacelever for the pool. The
-  file is read on every refresh: flipping it needs no restart, and removing the
-  line returns to shadow. `internal/fleet` sends the refresh of a switched pool
-  through `panewire quota refresh <pool>` on the host that holds the account
-  (locally or over ssh), and that host's own `spawn.json` decides; a host running
-  an older panewire answers with pacelever.
+The file is read at each use, so flipping the switch needs no restart. A
+missing, unreadable or invalid file leaves the pool in shadow; `native_pools`
+lists only pools that have a switch (today `commandcode` and `devin`) and any other entry is
+a config error. `claude` and `codex` are always native and need no entry.
 
-The desk flips the switch after reading the comparison lines: a few hours of
-loop rounds and the spawns made meanwhile.
+- **Shadow (the default).** Spawns, placement refresh, the `quota.refresh` node
+  command and `panewire quota refresh commandcode` still run pacelever for the
+  pool, and the fleet-state loop still publishes pacelever's reading. Beside each
+  pacelever refresh the node measures commandcode itself — once, directly, with
+  no store lease, no publication and no presence, so no other host's reading
+  changes — and logs one line (the node's warning log). The measurement runs in the
+  background with a 25 s bound, so it never delays or fails the refresh it
+  rides on, and a pool already being measured in shadow is skipped, not queued:
 
-## Artificial Analysis annotations
+  ```
+  quota shadow commandcode: match=false account=same pacelever=[5h=0.0%@2026-11-06T09:00:00Z 7d=1.3%@2026-11-12T00:00:00Z] native=[5h=0.0%@2026-11-06T09:00:00Z 7d=1.3%@2026-11-12T00:00:00Z 30d=9.3%@2026-11-27T07:38:00Z] diff=30d: native only
+  ```
+
+  `match` is true when the account key and every window agree: used percentages
+  within 1 point and resets within 60 s, a window on one side only is a
+  difference. A failed side prints `error <kind>` in place of its windows, and
+  `diff` says which side failed. pacelever cannot read 30d (its response has no
+  `planId`), so a healthy shadow line reads `diff=30d: native only`: that is the
+  expected difference, not a fault. The desk reads the lines and flips the switch.
+  For `devin` the line is `quota shadow devin: …` and healthy means `match=true`;
+  pacelever's windowless per-model Free tag is not a window and is left out of the
+  comparison. A host without a devin login reads `native=error credentials` (the
+  node starts no probe and sends no request there).
+- **Native.** The fleet-state loop, `quota.refresh`, placement refresh and
+  `panewire quota refresh commandcode` use the node's measurement and the shared
+  store as for codex, and no spawn-side step runs `pacelever refresh` for the
+  pool (an ssh refresh of a remote account runs `panewire quota refresh
+  commandcode`, which follows the target's own switch). The `pacelever gate`
+  call is unchanged and is not part of this switch.
+
+### Artificial Analysis annotations
 
 `panewire quota aa-sync --out catalog.json` reads the current catalog through
 pacelever, fetches the free Data API, and writes a catalog artifact for review

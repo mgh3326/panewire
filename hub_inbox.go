@@ -521,6 +521,30 @@ func (h *HubServer) authorizeInbox(w http.ResponseWriter, r *http.Request, scope
 	return true
 }
 
+// authorizeInboxItem is authorizeInbox for read <id> and ack <id>. A node
+// that names no lane is authorized by the item's own lane, when that lane is
+// routed to the node: a worker pane need not know its lane to ack its item.
+// It returns the lane the store must scope the item to ("" when the caller
+// named none and needs no fallback). Any other refusal is the plain 401/403.
+func (h *HubServer) authorizeInboxItem(w http.ResponseWriter, r *http.Request, scope string, id int64) (string, bool) {
+	queryLane := r.URL.Query().Get("lane")
+	access := h.authorize(r, scope, queryLane)
+	if access != hubAccessGranted && queryLane == "" && h.inbox != nil && h.authenticate(r).kind == hubCallerNode {
+		if lane, err := h.inbox.store.itemLane(id); err == nil && h.authorize(r, scope, lane) == hubAccessGranted {
+			return lane, true
+		}
+	}
+	if access != hubAccessGranted {
+		writeHubAccessDenied(w, access)
+		return "", false
+	}
+	if h.inbox == nil {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "inbox_disabled"})
+		return "", false
+	}
+	return queryLane, true
+}
+
 func (h *HubServer) handleInboxList(w http.ResponseWriter, r *http.Request) {
 	if !h.authorizeInbox(w, r, hubScopeInboxRead) {
 		return
@@ -614,15 +638,19 @@ func (h *HubServer) handleInboxCount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, counts)
 }
 func (h *HubServer) handleInboxRead(w http.ResponseWriter, r *http.Request) {
-	if !h.authorizeInbox(w, r, hubScopeInboxRead) {
-		return
-	}
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil || id < 1 {
+		if !h.authorizeInbox(w, r, hubScopeInboxRead) {
+			return
+		}
 		writeJSON(w, 400, map[string]string{"error": "invalid_id"})
 		return
 	}
-	item, err := h.inbox.store.read(id, r.URL.Query().Get("lane"), h.now().UTC())
+	lane, ok := h.authorizeInboxItem(w, r, hubScopeInboxRead, id)
+	if !ok {
+		return
+	}
+	item, err := h.inbox.store.read(id, lane, h.now().UTC())
 	if errors.Is(err, sql.ErrNoRows) {
 		writeJSON(w, 404, map[string]string{"error": "not_found"})
 		return
@@ -712,7 +740,11 @@ func (h *HubServer) handleInboxWait(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *HubServer) handleInboxAck(w http.ResponseWriter, r *http.Request) {
-	if !h.authorizeInbox(w, r, hubScopeInboxAck) {
+	// ack <id> names its item in the body, so a node that sent no lane is
+	// authorized by the item's lane after the body is read. Every other
+	// caller is decided before the body is parsed, as ever.
+	nodeItem := r.URL.Query().Get("lane") == "" && h.authenticate(r).kind == hubCallerNode
+	if !nodeItem && !h.authorizeInbox(w, r, hubScopeInboxAck) {
 		return
 	}
 	var b struct {
@@ -723,6 +755,17 @@ func (h *HubServer) handleInboxAck(w http.ResponseWriter, r *http.Request) {
 	if !decodeHubJSON(w, r, 4096, &b) || (!b.All && b.ID < 1) || (b.All && b.ID != 0) {
 		writeJSON(w, 400, map[string]string{"error": "invalid_request"})
 		return
+	}
+	if nodeItem {
+		if b.All || b.Lane != "" {
+			hubUnauthorized(w)
+			return
+		}
+		lane, ok := h.authorizeInboxItem(w, r, hubScopeInboxAck, b.ID)
+		if !ok {
+			return
+		}
+		b.Lane = lane
 	}
 	if lane := r.URL.Query().Get("lane"); lane != "" {
 		if b.Lane != "" && b.Lane != lane {
