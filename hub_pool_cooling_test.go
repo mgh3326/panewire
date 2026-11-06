@@ -93,3 +93,17 @@ func TestMalformedQuotaStopResetFallsBack(t *testing.T) {
 		t.Fatalf("reset %v", got)
 	}
 }
+
+func TestOwnerlessQuotaStopRejectsInvalidPool(t *testing.T) {
+	inbox := t.TempDir()
+	for _, tc := range []struct{ job, pool string }{{"bad-space", "devin free"}, {"bad-long", strings.Repeat("a", 65)}} {
+		raw, err := json.Marshal(map[string]any{"kind": "job.lost", "payload": map[string]any{"reason": "quota_stop", "pool": tc.pool}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		r20t7WriteEvent(t, inbox, tc.job, "00001-job.lost.json", string(raw))
+	}
+	if events := scanHubRelayEvents(inbox); len(events) != 0 {
+		t.Fatalf("invalid pool events entered outbox: %+v", events)
+	}
+}

@@ -282,7 +282,7 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 			// A terminal signal without a routable owner lane can never be
 			// delivered — emitting it would only stamp an outbox row the hub's
 			// relayJobEventFrom drops unanswered.
-			if relayTerminalSignalKinds[kind] && !validReportRelayLaneName(event.ownerLane()) && !(kind == "job.lost" && event.reason() == "quota_stop" && event.Payload.Pool != "") {
+			if relayTerminalSignalKinds[kind] && !validReportRelayLaneName(event.ownerLane()) && !(kind == "job.lost" && event.reason() == "quota_stop" && fleetStateTokenPattern.MatchString(event.Payload.Pool)) {
 				continue
 			}
 			reportPath := relaySignalReportPath(kind, event.reportPath())
