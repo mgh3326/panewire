@@ -242,12 +242,17 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, taskState, e
 		delete(s.idleSince, key)
 		return s.notIdleReason(latest, fresh)
 	}
-	a.recordJobUsage(ctx, latest, true)
-	a.markSweptJob(ctx, latest, endState)
+	// The pane closes before hk is told the job ended: a failed close must not
+	// leave a finished record beside a pane that is still open. A failed record
+	// write after the close is a job.record_failed event plus a warning, as in
+	// reap. The record write comes before usage, which hk takes only once the
+	// job is terminal.
 	if err := a.must(ctx, "herdr", "pane", "close", j.Pane); err != nil {
 		return "close-failed"
 	}
 	delete(s.idleSince, key)
+	a.markSweptJob(ctx, latest, endState)
+	a.recordJobUsage(ctx, latest, true)
 	if err := a.releaseQuota(ctx, j); err != nil {
 		a.warn("quota retained: %v", err)
 	}

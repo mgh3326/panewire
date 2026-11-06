@@ -406,6 +406,52 @@ func TestPaneSweepRestartsTheGraceAfterHerdrCannotBeRead(t *testing.T) {
 	}
 }
 
+// The pane closes before hk is told the job ended, so a close that fails leaves
+// the record as it was and the job unreaped for the next sweep.
+func TestPaneSweepWritesTheRecordOnlyAfterThePaneCloses(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	f.job("j", "worker", "42")
+	f.tasks["42"] = "merged"
+	closeResult := Result{Code: 1}
+	base := f.runner.Do
+	f.runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && len(c.Args) > 1 && c.Args[1] == "close" {
+			return closeResult
+		}
+		return base(c)
+	}
+	order := &sweepOrderStore{fakeJobStore: f.store, closes: func() int { return len(f.closed()) }}
+	f.a.JobStore = order
+	f.at(0)
+	f.at(11)
+	if state := f.store.record(t, "j")["state"]; state != "spawned" || f.reaped("j") != nil {
+		t.Fatalf("failed close left record %v, reaped %v", state, f.reaped("j"))
+	}
+	if !f.infoHas("reason=close-failed") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+	closeResult = Result{}
+	f.at(12)
+	if state := f.store.record(t, "j")["state"]; state != "completed" || f.reaped("j") == nil {
+		t.Fatalf("retry left record %v, reaped %v", state, f.reaped("j"))
+	}
+	if len(order.closesAtPut) == 0 || slices.Contains(order.closesAtPut, 0) {
+		t.Fatalf("hk written before the pane closed: closes at each put = %v", order.closesAtPut)
+	}
+}
+
+// sweepOrderStore notes how many close calls had been made at each hk write.
+type sweepOrderStore struct {
+	*fakeJobStore
+	closes      func() int
+	closesAtPut []int
+}
+
+func (s *sweepOrderStore) Put(ctx context.Context, id string, fields map[string]any) error {
+	s.closesAtPut = append(s.closesAtPut, s.closes())
+	return s.fakeJobStore.Put(ctx, id, fields)
+}
+
 func TestPaneSweepLogsIdsNeverScreenText(t *testing.T) {
 	f := newPaneSweepFixture(t)
 	f.job("j", "worker", "42")
