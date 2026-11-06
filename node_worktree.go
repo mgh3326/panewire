@@ -1051,9 +1051,10 @@ func (client *HubClient) nodePaneInUse(ctx context.Context, path string) (bool, 
 	return false, nil
 }
 
-// nodeQuotaRefresh is a closed call: the claude and codex pools are measured in
-// this process, every other pool runs exactly `pacelever refresh <pool>`; no
-// other argv is reachable from the wire.
+// nodeQuotaRefresh is a closed call: the pools this host measures natively are
+// measured in this process, every other pool runs exactly `pacelever refresh
+// <pool>` (a pool in shadow also logs the node's own measurement beside it);
+// no other argv is reachable from the wire.
 func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRefreshArgs) (any, string) {
 	ctx, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
@@ -1063,7 +1064,20 @@ func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRef
 		}
 		return nodeQuotaRefreshResult{Outcome: nodeQuotaRefreshed}, ""
 	}
-	if _, err := client.nodePaceleverRunner()(ctx, "refresh", args.Pool); err != nil {
+	shadow := isShadowQuotaPool(args.Pool)
+	output, err := client.nodePaceleverRunner()(ctx, "refresh", args.Pool)
+	if shadow {
+		publish, ok := FleetStatePublish{}, false
+		if err == nil {
+			publish, ok = fleetQuotaFromPacelever(args.Pool, output)
+		}
+		kind := fleetQuotaErrorKindUnreadable
+		if !ok && ctx.Err() == nil && !errors.Is(err, context.DeadlineExceeded) {
+			kind = client.fleetQuotaErrorKind(ctx, args.Pool)
+		}
+		client.logShadowQuota(ctx, args.Pool, shadowFromPublish(publish, ok, kind))
+	}
+	if err != nil {
 		return nil, "refresh_failed"
 	}
 	return nodeQuotaRefreshResult{Outcome: nodeQuotaRefreshed}, ""

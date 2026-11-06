@@ -8,27 +8,33 @@ import (
 	"net/http"
 	"os"
 	"regexp"
-	"slices"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/quota"
 	"github.com/mgh3326/panewire/internal/quota/claude"
 	"github.com/mgh3326/panewire/internal/quota/codex"
+	"github.com/mgh3326/panewire/internal/quota/commandcode"
 	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
-// The node measures the claude and codex pools itself (docs/quota.md §Native
-// measurement): each pool's own source (claude: the OAuth usage API then one
-// `claude -p /usage`; codex: the app-server then the wham usage API) and the
-// shared quota store's lease/publish flow. Every other pool still goes through
+// The node measures the claude, codex and commandcode pools itself (docs/quota.md
+// §Native measurement): each pool's own source (claude: the OAuth usage API then
+// one `claude -p /usage`; codex: the app-server then the wham usage API;
+// commandcode: the billing, subscription and usage-summary APIs) and the shared
+// quota store's lease/publish flow. Every other pool still goes through
 // pacelever until its own change.
+//
+// claude and codex are always native. commandcode has a switch (docs/quota.md
+// §Native measurement: commandcode): it is native only once the host's
+// `[quota].native_pools` lists it, and until then it is in shadow — see
+// quota_shadow.go.
 
-// quotaNativePools are the pools measured in this process.
-var quotaNativePools = []string{"claude", "codex"}
-
-func isNativeQuotaPool(pool string) bool { return slices.Contains(quotaNativePools, pool) }
+// isNativeQuotaPool says whether this host measures pool itself. The host
+// config is read at call time, so flipping a switch needs no restart.
+func isNativeQuotaPool(pool string) bool { return fleet.HostNativeQuotaPool(pool) }
 
 // quotaPresenceHostPattern is the host id alphabet the store's presence
 // records accept.
@@ -39,12 +45,13 @@ var quotaPresenceHostPattern = regexp.MustCompile(`^[a-z0-9-]{1,32}$`)
 // presence interval persist across the fleet-state loop and the quota.refresh
 // op.
 type nativeQuotaSource struct {
-	// Pool is the pool measured: "claude" or "codex".
+	// Pool is the pool measured: "claude", "codex" or "commandcode".
 	Pool string
-	// Claude and Codex are the credential, HTTP and process environment of a
-	// measurement of their pool.
-	Claude claude.Config
-	Codex  codex.Config
+	// Claude, Codex and Commandcode are the credential, HTTP and process
+	// environment of a measurement of their pool.
+	Claude      claude.Config
+	Codex       codex.Config
+	Commandcode commandcode.Config
 	// SpawnConfigPath is the spawn.json whose handoffkeep_env names the store.
 	SpawnConfigPath string
 	// HostID is announced as the holder of the account; empty skips presence.
@@ -58,6 +65,9 @@ type nativeQuotaSource struct {
 
 	flowOnce sync.Once
 	flow     *shared.Flow
+	// commandcodeAccounts remembers the account behind the login so the
+	// fingerprint read before each refresh costs no request once known.
+	commandcodeAccounts commandcode.IdentityCache
 }
 
 // errQuotaStoreUnconfigured says spawn.json names no handoffkeep_env, so there
@@ -107,13 +117,21 @@ func (s *nativeQuotaSource) now() time.Time {
 // poolMeasurement is what Refresh needs of a pool: how to measure it, the
 // account fingerprint the login names before any request (or why the host has
 // no login), and how long a shared reading stays current.
-func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountFP func() (string, error), freshTTL time.Duration) {
+func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountFP func(context.Context) (string, error), freshTTL time.Duration) {
 	switch s.Pool {
+	case "commandcode":
+		config := s.Commandcode
+		config.Now = s.Now
+		config.Identities = &s.commandcodeAccounts
+		// The account is the one whoami names, so the fingerprint needs a
+		// request the first time a login is seen (cached after that).
+		return func(ctx context.Context) (quota.Observation, error) { return commandcode.Measure(ctx, config) },
+			func(ctx context.Context) (string, error) { return commandcode.AccountFP(ctx, config) }, shared.OtherFreshTTL
 	case "codex":
 		config := s.Codex
 		config.Now = s.Now
 		return func(ctx context.Context) (quota.Observation, error) { return codex.Measure(ctx, config) },
-			func() (string, error) {
+			func(context.Context) (string, error) {
 				// A logged-out host reports its credentials, not a missing
 				// account: the login rule reads the kind.
 				if !codex.HasLogin(config) {
@@ -125,7 +143,7 @@ func (s *nativeQuotaSource) poolMeasurement() (measure shared.Measurer, accountF
 		config := s.Claude
 		config.Now = s.Now
 		return func(ctx context.Context) (quota.Observation, error) { return claude.Measure(ctx, config) },
-			func() (string, error) { return claude.AccountFP(config), nil }, shared.DefaultFreshTTL
+			func(context.Context) (string, error) { return claude.AccountFP(config), nil }, shared.DefaultFreshTTL
 	}
 }
 
@@ -141,7 +159,7 @@ func (s *nativeQuotaSource) Refresh(ctx context.Context) (shared.Reading, error)
 	if err != nil {
 		return shared.Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 	}
-	fp, err := accountFP()
+	fp, err := accountFP(ctx)
 	if err != nil {
 		return shared.Reading{}, err
 	}
@@ -152,6 +170,14 @@ func (s *nativeQuotaSource) Refresh(ctx context.Context) (shared.Reading, error)
 		s.flow = &shared.Flow{Now: s.Now, FreshTTL: freshTTL, HostID: s.HostID, Wait: s.Wait}
 	})
 	return s.flow.Refresh(ctx, store, s.Pool+":"+fp, measure)
+}
+
+// measureOnly is one measurement that touches no shared store: no lease, no
+// publication, no presence. Shadow mode uses it to compare against pacelever
+// without changing what other hosts read.
+func (s *nativeQuotaSource) measureOnly(ctx context.Context) (shared.Reading, error) {
+	measure, _, _ := s.poolMeasurement()
+	return s.measureDirect(ctx, measure)
 }
 
 // measureDirect is the unshared measurement: nothing is published, and the

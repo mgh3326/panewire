@@ -352,15 +352,11 @@ func (a *App) localAccountKeys(ctx context.Context, pool string) []string {
 	return keys
 }
 
-// isNativeQuotaPool says whether panewire measures the pool itself (`panewire
-// quota refresh <pool>`); every other pool is refreshed by pacelever.
-func isNativeQuotaPool(pool string) bool { return pool == "claude" || pool == "codex" }
-
-// refreshCommand is the on-demand refresh of pool on this host: pacelever's
-// binary for a pool pacelever measures, panewire's own quota command for the
-// one panewire measures.
-func refreshCommand(pool, paceleverBinary string) Command {
-	if isNativeQuotaPool(pool) {
+// refreshCommand is the on-demand refresh of pool on this host: panewire's own
+// quota command for a pool panewire measures (native), pacelever's binary for
+// every other pool.
+func refreshCommand(pool, paceleverBinary string, native bool) Command {
+	if native {
 		return Command{Name: "panewire", Args: []string{"quota", "refresh", pool}}
 	}
 	return Command{Name: paceleverBinary, Args: []string{"refresh", pool}}
@@ -368,8 +364,8 @@ func refreshCommand(pool, paceleverBinary string) Command {
 
 // remoteRefreshLine is refreshCommand as the one shell line ssh runs on the
 // target.
-func remoteRefreshLine(pool string) string {
-	if isNativeQuotaPool(pool) {
+func remoteRefreshLine(pool string, native bool) string {
+	if native {
 		return "panewire quota refresh " + shellQuote(pool)
 	}
 	return "pacelever refresh " + shellQuote(pool)
@@ -394,7 +390,7 @@ func (a *App) measureTarget(ctx context.Context, host, pool string) error {
 	if timeout <= 0 || timeout > time.Minute {
 		timeout = time.Minute
 	}
-	r := runQuotaCommand(ctx, a.Runner, Command{Name: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", target, remoteRefreshLine(pool)}}, "quota refresh", timeout)
+	r := runQuotaCommand(ctx, a.Runner, Command{Name: "ssh", Args: []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--", target, remoteRefreshLine(pool, a.nativeQuotaPool(pool))}}, "quota refresh", timeout)
 	return checkQuotaPlain(r, "quota refresh")
 }
 

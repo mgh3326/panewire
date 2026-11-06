@@ -196,6 +196,7 @@ type HubClient struct {
 	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
 	nodeJobs           fleet.JobStore     // fixture seam for job.mark_lost; nil reads spawn.json handoffkeep_env.
 	nodePacelever      relayCommandRunner // fixture seam for quota.refresh of a pool the node does not measure itself; nil runs pacelever.
+	shadowQuotaRunning sync.Map           // pool → in-flight shadow measurement (quota_shadow.go).
 	nativeQuotaMu      sync.Mutex
 	nativeQuota        map[string]*nativeQuotaSource // the node's own measurement per native pool; fixtures set it, a missing pool builds the default.
 	nodeCloseSettle    time.Duration                 // fixture seam; zero is nodePaneCloseSettle.
