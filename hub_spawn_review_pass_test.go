@@ -5,6 +5,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"slices"
 	"testing"
@@ -169,6 +170,13 @@ func TestReviewPassReleaseFreesOnlyItsPass(t *testing.T) {
 // A retryable holder is superseded only by a submission for its own pass.
 func TestReviewPassSupersedeMatchesPass(t *testing.T) {
 	retryable := hubSpawnOutcome{RC: 70, Stage: "landing", Reason: "spawn_failed", Host: "machine-a", Retryable: true}
+	// The holder ran on the hub's own host, so the hub writes its lost record
+	// itself (a remote holder's node writes it: hk 3235).
+	env := filepath.Join(t.TempDir(), "hub-node.env")
+	if err := os.WriteFile(env, []byte("HUB_MACHINE_ID=machine-a\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PANEWIRE_NODE_ENV", env)
 	hub, server, jobs := reviewPassHub(t, map[string]string{"rev-p1": "claimed"})
 	held, _, err := hub.inbox.store.claimSpawn(t.Context(), reviewPassRequest(1, "rev-p1", "1"), "rev-p1", "parent", time.Now())
 	if err != nil {

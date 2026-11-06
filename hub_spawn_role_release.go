@@ -28,11 +28,13 @@ const (
 )
 
 // heldProbe is a pane probe's verdict with the reason behind it, for the log
-// line a refused reclaim writes.
+// line a refused reclaim writes. write marks a refusal at the lost-record
+// write that follows a proven-absent or freshly closed pane.
 type heldProbe struct {
 	state  heldPane
 	row    nodeAgentRow
 	reason string
+	write  bool
 }
 
 func (p heldPane) String() string {
@@ -104,7 +106,11 @@ func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane, agent stri
 func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, roleKey string) (released bool, probe heldProbe) {
 	probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, "")
 	if probe.state == heldPanePresent {
-		return h.releaseUnworkedLanding(ctx, app, holder, record, probe.row) && h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil, probe
+		released, markReason := h.releaseUnworkedLanding(ctx, app, holder, record, probe.row)
+		if markReason != "" {
+			probe.write, probe.reason = true, markReason
+		}
+		return released && h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil, probe
 	}
 	if probe.state != heldPaneAbsent {
 		return false, probe
@@ -112,7 +118,11 @@ func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, 
 	if state, _ := record["state"].(string); state != "claimed" {
 		return false, heldProbe{reason: "hk_state_not_claimable"}
 	}
-	return h.markLostAndRelease(ctx, app, holder, roleKey), probe
+	released, markReason := h.markLostAndRelease(ctx, app, holder, heldAgentName(holder, record), roleKey)
+	if !released {
+		probe.write, probe.reason = true, markReason
+	}
+	return released, probe
 }
 
 // hkTerminalState reports whether hk never rewrites a job in state (hk
@@ -121,24 +131,87 @@ func hkTerminalState(state string) bool {
 	return state == "completed" || state == "lost" || state == "escalated"
 }
 
-// markLostAndRelease writes the hk job lost, then drops the reservation. A
-// crash between the two repeats harmlessly: a lost job releases through the
-// completed-or-lost path.
-//
-// hk never rewrites a terminal record (409), so a holder that completed after
-// the caller read its state keeps its completed record. A refused write then
-// re-reads it: a record now completed or lost releases the role as the
-// terminal path does, anything else keeps the hold.
-func (h *HubServer) markLostAndRelease(ctx context.Context, app *fleet.App, holder hubSpawnTask, roleKey string) bool {
-	if err := app.MarkJobLost(ctx, holder.Job); err != nil {
+// markLostAndRelease has the holder's node write the hk job lost, then drops
+// the reservation. A crash between the two repeats harmlessly: a lost job
+// releases through the completed-or-lost path. The hub writes the record
+// itself only when the holder ran on the hub's own host, where its hk client
+// holds the grant; a remote host's node writes with its own credential.
+func (h *HubServer) markLostAndRelease(ctx context.Context, app *fleet.App, holder hubSpawnTask, label, roleKey string) (bool, string) {
+	if lost, reason := h.markHolderJobLost(ctx, app, holder, label); !lost {
+		return false, reason
+	}
+	return h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil, ""
+}
+
+// markHolderJobLost asks the holder's node to write its hk job lost, because
+// the hub's hk client is not granted a remote host. A node that answers
+// anything but lost, or does not answer, keeps the reservation; the reason is
+// what the caller logs. The hub writes the record itself only for a holder on
+// its own host, whose grant it holds.
+func (h *HubServer) markHolderJobLost(ctx context.Context, app *fleet.App, holder hubSpawnTask, label string) (bool, string) {
+	host, pane := spawnHolderHost(holder), holder.Outcome.Pane
+	if host == "" {
+		return false, "no_host"
+	}
+	if hubHost, known := app.NodeID(); known && hubHost == host {
+		return h.writeJobLost(ctx, app, holder.Job)
+	}
+	if pane == "" && label == "" {
+		return false, "no_pane_or_label"
+	}
+	raw, err := json.Marshal(nodeJobMarkLostArgs{Job: holder.Job, PaneID: pane, Label: label})
+	if err != nil {
+		return false, "invalid_args"
+	}
+	pending, requestID, state, sent := h.sendNodeCommand(host, nodeCommandJobMarkLost, raw)
+	if !sent {
+		return false, "node_unreachable:" + state
+	}
+	defer h.forgetNodeCommand(requestID)
+	waitCtx, cancel := context.WithTimeout(ctx, hubNodeWait(h.nodeCommandWait, hubNodeCommandWait))
+	defer cancel()
+	select {
+	case reply := <-pending.done:
+		if reply.Error != "" {
+			return false, reply.Error
+		}
+		var result nodeJobMarkLostResult
+		if json.Unmarshal(reply.Result, &result) != nil {
+			return false, "unreadable_reply"
+		}
+		if result.Outcome == nodeJobMarkLostLost {
+			return true, result.Outcome
+		}
+		// A holder that completed meanwhile frees its role once hk holds the
+		// terminal record, exactly as on the completed-or-lost path; a
+		// completion hk has not recorded yet keeps the hold.
+		if result.Outcome == nodeJobMarkLostCompleted {
+			readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			record, exists, readErr := app.ExistingJob(readCtx, holder.Job)
+			cancel()
+			if state, _ := record["state"].(string); readErr == nil && exists && hkTerminalState(state) {
+				return true, result.Outcome
+			}
+		}
+		return false, result.Outcome
+	case <-waitCtx.Done():
+		return false, "mark_lost_timeout"
+	}
+}
+
+// writeJobLost is the hub-local fallback. hk never rewrites a terminal record
+// (409), so a refused write re-reads it: a record now completed or lost
+// releases the role as the terminal path does; anything else keeps the hold.
+func (h *HubServer) writeJobLost(ctx context.Context, app *fleet.App, job string) (bool, string) {
+	if err := app.MarkJobLost(ctx, job); err != nil {
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-		record, exists, readErr := app.ExistingJob(readCtx, holder.Job)
+		record, exists, readErr := app.ExistingJob(readCtx, job)
 		cancel()
 		if state, _ := record["state"].(string); readErr != nil || !exists || state != "completed" && state != "lost" {
-			return false
+			return false, "hk_write_failed"
 		}
 	}
-	return h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil
+	return true, "hk_lost"
 }
 
 // releaseFinishedSpawnRole frees the role held by a succeeded operation whose
@@ -150,14 +223,19 @@ func (h *HubServer) markLostAndRelease(ctx context.Context, app *fleet.App, hold
 // A listed pane with the holder's agent name under another id (a pane herdr
 // moved across workspaces) also keeps the hold.
 func (h *HubServer) releaseFinishedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, roleKey string) (released bool, probe heldProbe) {
-	probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record))
+	label := heldAgentName(holder, record)
+	probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, label)
 	if probe.state != heldPaneAbsent {
 		return false, probe
 	}
 	if state, _ := record["state"].(string); state != "claimed" && state != "spawned" {
 		return false, heldProbe{reason: "hk_state_not_claimable"}
 	}
-	return h.markLostAndRelease(ctx, app, holder, roleKey), probe
+	released, markReason := h.markLostAndRelease(ctx, app, holder, label, roleKey)
+	if !released {
+		probe.write, probe.reason = true, markReason
+	}
+	return released, probe
 }
 
 // releaseRecordlessSpawnRole frees the role held by a succeeded operation whose
@@ -208,7 +286,9 @@ func (h *HubServer) supersedeRetryableHolders(ctx context.Context, app *fleet.Ap
 		if state, _ := record["state"].(string); readErr != nil || !exists || state != "claimed" {
 			continue
 		}
-		_ = app.MarkJobLost(ctx, holder.Job)
+		// The holder's own node writes the record; the hub's hk client is not
+		// granted a remote host.
+		_, _ = h.markHolderJobLost(ctx, app, holder, heldAgentName(holder, nil))
 	}
 }
 
@@ -318,7 +398,7 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 				return task, nil, err
 			}
 			trace.branch = "claim_raced"
-		} else if probe.state == heldPaneAbsent {
+		} else if probe.state == heldPaneAbsent || probe.write {
 			trace.branch = "release_write_failed"
 		}
 	}

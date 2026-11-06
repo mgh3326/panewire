@@ -68,7 +68,7 @@ func knownNodeCommandOp(op string) bool {
 	switch op {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
-		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandPRStatus:
+		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus:
 		return true
 	}
 	return false
@@ -78,7 +78,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "result_too_large":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "mark_lost_failed", "result_too_large":
 		return true
 	}
 	return false
@@ -179,6 +179,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandPaneRead:        {"pane_id", "name", "cwd", "tail_lines"},
 	nodeCommandJobDone:         {"job", "report"},
 	nodeCommandJobResult:       {"job"},
+	nodeCommandJobMarkLost:     {"job", "pane_id", "label"},
 	nodeCommandWorktreeInspect: {"cwd"},
 	nodeCommandWorktreeList:    {"common"},
 	nodeCommandWorktreePrepare: {"origin", "mode", "branch", "sha", "fetch", "dir"},
@@ -239,6 +240,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandJobResult:
 		var args nodeJobResultArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job)
+	case nodeCommandJobMarkLost:
+		var args nodeJobMarkLostArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobMarkLostArgs(args)
 	case nodeCommandJobDone:
 		var args nodeJobDoneArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job) && validNodeCommandPath(args.Report)
@@ -318,6 +322,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandJobResult:
 		var result nodeJobResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodeJobResult(result)
+		target = result
+	case nodeCommandJobMarkLost:
+		var result nodeJobMarkLostResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeJobMarkLostResult(result)
 		target = result
 	case nodeCommandJobDone:
 		var result JobDoneResult
@@ -491,6 +499,12 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		return client.nodePaneRead(ctx, args)
 	case nodeJobResultArgs:
 		return client.nodeJobResult(args)
+	case nodeJobMarkLostArgs:
+		// One acting command at a time per node: the herdr re-check and the
+		// hk write must not interleave with a pane close.
+		client.nodeCommandMu.Lock()
+		defer client.nodeCommandMu.Unlock()
+		return client.nodeJobMarkLost(ctx, args)
 	case nodeJobDoneArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
