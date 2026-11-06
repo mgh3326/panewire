@@ -424,7 +424,7 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 	output, err := runner(getContext, "agent", "get", message.Pane)
 	cancel()
 	status, parsed := parseRelayAgentStatus(output)
-	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" {
+	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" || manager.acceptsMidTurn(status, output) {
 		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
@@ -435,6 +435,19 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 		held.Lease = occupant.key()
 	}
 	manager.hold(parent, held, status)
+}
+
+// acceptsMidTurn reports whether a working pane's harness takes input while a
+// turn runs (hk 3276: herdr agent prompt reaches codex mid-work). Its queue
+// banner is then the delivery proof, so the row is injected instead of held
+// for idle. A blocked pane never qualifies: its prompt may be an approval
+// question that the text would answer.
+func (manager *relayBusyManager) acceptsMidTurn(status string, agentGet []byte) bool {
+	if status != "working" {
+		return false
+	}
+	adapter, known := relayAdapterFor(parseRelayAgentHarness(agentGet))
+	return known && adapter.midTurn
 }
 
 func (manager *relayBusyManager) hold(parent context.Context, item relayHeld, reason string) {
@@ -848,8 +861,8 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		switch result.Outcome {
 		case relayInjectRetryable:
 			maxAttempts := relayMaxInjectAttempts
-			if strings.EqualFold(result.Harness, "devin") {
-				maxAttempts = relayDevinMaxInjectAttempts
+			if adapter, known := relayAdapterFor(result.Harness); known {
+				maxAttempts = adapter.injectAttempts()
 			}
 			for _, item := range group {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(result.Evidence), OriginalEventID: item.EventID})

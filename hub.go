@@ -1436,6 +1436,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
+			h.escalateUnconfirmedRelay(machineID, dropped)
 		}
 		if message.Kind == "job.revocation.ack" {
 			ack, valid := decodeHubJobCompletionPayload(message.Payload)
