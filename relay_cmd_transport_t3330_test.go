@@ -54,7 +54,7 @@ case "$1 $2" in
 "agent get")
   if [ -f "$d/prompted" ]; then st=$(cat "$d/status.post"); else st=$(cat "$d/status.pre"); fi
   printf '{"result":{"agent":{"agent":"cmd","agent_status":"%s","name":"` + t3276Worker + `","pane_id":"w1:pW"}}}\n' "$st" ;;
-"agent read") src=visible; lines=60; prev=
+"agent read"|"pane read") src=visible; lines=60; prev=
   for a in "$@"; do [ "$prev" = "--source" ] && src=$a; [ "$prev" = "--lines" ] && lines=$a; prev=$a; done
   phase=pre; [ -f "$d/prompted" ] && phase=post
   tail -n "$lines" "$d/$phase.$src.last" ;;

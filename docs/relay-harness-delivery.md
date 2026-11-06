@@ -77,6 +77,17 @@ empty; a draft in it is `presend:composer_pending` and an unlocated composer is
 `presend:composer_unlocated`, both final, and nothing is typed. A composer that
 already holds this row's own text (a replay after a failed return) is
 submitted with the one return and not typed again, so exactly one copy lands.
+
+The presend reads cmd's composer from the ANSI screen (`herdr pane read
+--format ansi`), because an idle cmd pane draws claude's dim prompt suggestion
+in its empty composer and a plain read cannot tell it from a draft. It applies
+the reap's dim rule (`nodeComposerState`): a composer whose every visible
+character is dim reads empty and the event is typed. The return after
+`pane send-text` goes through the same gate as every other harness
+(`relayComposerReturnSafe`, on a read taken after the text landed); a draft that
+appears in between is `return_withheld:composer_foreign` and `maybe_in_pane`.
+That is the one return of the inject: verify does not press a second one when
+the composer still draws the text (echo lag), it observes until the echo lands.
 `panewire prompt --to <cmd pane>` takes the same transport, so a hand relay
 through panewire reaches a cmd worker too.
 
@@ -129,5 +140,6 @@ handoffkeep, the real node relay and a shell `herdr` that models one pane, for
 codex (idle and working), devin, grok and omp. `relay_cmd_transport_t3330_test.go`
 does the same for cmd, with a shell `herdr` that refuses the agent-level writes
 the way herdr does; `relay_cmd_composer_t3330_test.go` pins the send-text
-failure, the failed-return replay and the draft cases; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
+failure, the failed-return replay, the draft, dim-suggestion, draft-between and
+echo-lag cases; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
 transport.

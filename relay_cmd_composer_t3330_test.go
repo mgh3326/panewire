@@ -42,10 +42,23 @@ echo "$1 $2" >> "$d/calls"
 case "$1 $2" in
 "agent get")
   printf '{"result":{"agent":{"agent":"cmd","agent_status":"%s","name":"` + t3276Worker + `","pane_id":"w1:pW"}}}\n' "$(cat "$d/status")" ;;
-"agent read")
+"agent read"|"pane read")
+  src=visible; prev=
+  for a in "$@"; do [ "$prev" = "--source" ] && src=$a; prev=$a; done
+  fmt=plain; [ "$1" = pane ] && fmt=ansi
+  buf=$(cat "$d/buf")
+  # echo lag: right after a return the first visible read still draws the text
+  # the keypress just submitted.
+  if [ "$src" = visible ] && [ -f "$d/stale" ]; then buf=$(cat "$d/stale"); rm "$d/stale"; fi
   { cat "$d/submitted"
     echo '` + t3330CmdDivider + `'
-    echo "❯ $(cat "$d/buf")"
+    if [ -z "$buf" ] && [ -f "$d/suggestion" ]; then
+      # an idle composer holds claude's dim prompt suggestion; only the ANSI
+      # read can tell it from a draft.
+      if [ $fmt = ansi ]; then printf '❯ \033[2m%s\033[0m\n' "$(cat "$d/suggestion")"; else echo "❯ $(cat "$d/suggestion")"; fi
+    else
+      echo "❯ $buf"
+    fi
     echo '` + t3330CmdDivider + `'; } ;;
 "agent prompt"|"agent send-keys")
   echo '{"error":{"code":"agent_not_ready"}}' >&2
@@ -57,11 +70,14 @@ case "$1 $2" in
     printf '%s%s' "$(cat "$d/buf")" "$half" > "$d/buf"
     exit 1
   fi
-  printf '%s%s' "$(cat "$d/buf")" "$4" > "$d/buf" ;;
+  printf '%s%s' "$(cat "$d/buf")" "$4" > "$d/buf"
+  # a draft the operator types between send-text and return
+  if [ -f "$d/draft_after_text" ]; then printf '%s operator-draft' "$(cat "$d/buf")" > "$d/buf"; fi ;;
 "pane send-keys")
   [ "$4" = "return" ] || exit 0
   if [ -f "$d/fail_return" ]; then rm "$d/fail_return"; exit 1; fi
   echo "❯ $(cat "$d/buf")" >> "$d/submitted"
+  if [ -f "$d/lag_return" ]; then cp "$d/buf" "$d/stale"; fi
   : > "$d/buf"
   echo working > "$d/status" ;;
 esac
@@ -217,4 +233,76 @@ func TestCmdDraftInComposerIsWithheldNotTyped_t3330(t *testing.T) {
 			t.Fatalf("events=%v, want one relay.unconfirmed and no relay.delivered", kinds)
 		}
 	})
+}
+
+// Round 3, finding A (comment 4498495723): an idle cmd pane draws claude's dim
+// prompt suggestion in its empty composer. The plain read cannot tell it from a
+// draft, so the presend reads the ANSI screen and applies the reap's dim rule:
+// the suggestion is not a draft, and the event is typed and submitted once.
+func TestCmdDimSuggestionInEmptyComposerIsTypedOnce_t3330(t *testing.T) {
+	pane := t3330InstallComposer(t, "")
+	if err := os.WriteFile(filepath.Join(pane.dir, "suggestion"), []byte("Check PR 76 status"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	text := t3330RelayText()
+
+	result := defaultHubRelayInjectVerdict(t.Context(), "w1:pW", text, nil)
+
+	if result.Outcome != relayInjectDelivered {
+		t.Fatalf("result=%+v, want delivered: a dim suggestion is not a pending draft", result)
+	}
+	if got := pane.calls(t, "pane send-text"); got != 1 {
+		t.Fatalf("pane send-text called %d times, want 1", got)
+	}
+	if got := pane.calls(t, "pane send-keys"); got != 1 {
+		t.Fatalf("pane send-keys called %d times, want exactly 1 return", got)
+	}
+	if got := pane.submittedCopies(t, text); got != 1 {
+		t.Fatalf("submitted copies=%d, want exactly 1", got)
+	}
+}
+
+// Round 3, finding B (comment 4498495738): the return after send-text is gated
+// by the composer read after the text landed. A draft that appears between
+// send-text and return would be submitted with the relay text, so no return is
+// pressed and the verdict is maybe-in-pane.
+func TestCmdDraftBetweenSendTextAndReturnWithholdsReturn_t3330(t *testing.T) {
+	pane := t3330InstallComposer(t, "")
+	pane.flag(t, "draft_after_text")
+
+	result := defaultHubRelayInjectVerdict(t.Context(), "w1:pW", t3330RelayText(), nil)
+
+	if result.Outcome != relayInjectMaybeInPane || result.Evidence != "return_withheld:composer_foreign" {
+		t.Fatalf("result=%+v, want maybe-in-pane with return_withheld:composer_foreign", result)
+	}
+	if relayRetriesOnce(result) {
+		t.Fatal("a withheld return is retried: the retry would type over the text already in the composer")
+	}
+	if got := pane.calls(t, "pane send-keys"); got != 0 {
+		t.Fatalf("pane send-keys called %d times, want 0: the draft would have been submitted", got)
+	}
+	if got := pane.read(t, "submitted"); got != "" {
+		t.Fatalf("submitted=%q, want nothing", got)
+	}
+}
+
+// Round 3, finding C (comment 4498495743): one return per inject. The composer
+// still draws the text right after the return (echo lag); verify must not read
+// that as residue to submit again. It observes until the echo lands.
+func TestCmdEchoLagAfterReturnPressesOneReturn_t3330(t *testing.T) {
+	pane := t3330InstallComposer(t, "")
+	pane.flag(t, "lag_return")
+	text := t3330RelayText()
+
+	result := defaultHubRelayInjectVerdict(t.Context(), "w1:pW", text, nil)
+
+	if got := pane.calls(t, "pane send-keys"); got != 1 {
+		t.Fatalf("pane send-keys called %d times, want exactly 1 return (result=%+v)", got, result)
+	}
+	if got := pane.submittedCopies(t, text); got != 1 {
+		t.Fatalf("submitted copies=%d, want exactly 1", got)
+	}
+	if result.Outcome != relayInjectDelivered {
+		t.Fatalf("result=%+v, want delivered once the lagging echo settled", result)
+	}
 }
