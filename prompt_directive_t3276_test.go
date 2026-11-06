@@ -39,10 +39,12 @@ func TestPromptDirectiveTargetTurnsWorkingBeforeSend_t3276(t *testing.T) {
 	fixture := newHerdrFixture(t, promptFixtureSchema(true))
 	defer fixture.Close()
 	configurePromptFixture(fixture, "claude", promptEchoScreen)
+	// Idle until the first preflight read, working from the second resolve on.
 	var lists atomic.Int32
 	fixture.On("agent.list", func() any {
+		lists.Add(1)
 		status := "working"
-		if lists.Add(1) == 1 {
+		if fixture.Requests("agent.read") == 0 {
 			status = "idle"
 		}
 		return map[string]any{"agents": []any{map[string]any{"agent": "orch", "name": "orch", "label": "orch", "harness": "claude", "pane_id": "p1", "workspace_id": "w1", "cwd": "/work", "revision": 10, "agent_status": status}}}
