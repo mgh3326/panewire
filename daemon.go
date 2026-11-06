@@ -648,6 +648,7 @@ type localRequest struct {
 	Target        string                `json:"target,omitempty"`
 	Sender        string                `json:"sender,omitempty"`
 	Uptake        string                `json:"uptake,omitempty"`
+	Directive     bool                  `json:"directive,omitempty"`
 	StoreBody     bool                  `json:"store_body,omitempty"`
 	Status        string                `json:"status,omitempty"`
 	SinceMS       int64                 `json:"since_ms,omitempty"`
@@ -744,7 +745,7 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 				if e != nil {
 					result, err = recordUnavailablePrompt(callCtx, d.store, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, ExitDaemonUnavailable, e.Error())
 				} else {
-					result, err = Prompt(callCtx, d.store, c2, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, caps)
+					result, err = Prompt(callCtx, d.store, c2, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, Directive: req.Directive, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, caps)
 					_ = c2.Close()
 				}
 			}

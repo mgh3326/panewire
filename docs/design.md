@@ -143,7 +143,7 @@ agent wait는 subscription을 기다리기 전에 현재 상태를 1회 snapshot
 ### `panewire prompt`
 
 ```text
-panewire prompt --from SENDER --to TARGET --file PATH [--uptake tool|status-transition]
+panewire prompt --from SENDER --to TARGET --file PATH [--uptake tool|status-transition] [--directive]
 ```
 
 | 인자 | 계약 |
@@ -152,6 +152,7 @@ panewire prompt --from SENDER --to TARGET --file PATH [--uptake tool|status-tran
 | `--to TARGET` | `wait --agent`와 동일한 해석기: pane_id·name·label 정확 일치만. 복수 후보(전부 표시 후 실패), 부재, 현재 pane과 문맥 불일치는 전송하지 않는다. |
 | `--file PATH` | prompt 본문을 읽을 입력 파일. 파일은 전송의 원문 정본이며 SHA-256을 계산한다. 첫 metadata block에 수신자 identity를 기술하는 `expect:`를 포함해야 한다. |
 | `--uptake` | `status-transition` 또는 `tool`. 생략 시 제출 검증까지만 수행하며 uptake 성공을 주장하지 않는다. |
+| `--directive` | 잡의 워커에게 보내는 지시(리뷰 지적, ESC 답, 후속 명령). working 대상을 거부(exit 6)하지 않고, working 에서는 볼 수 없는 status-transition 을 요구하지 않으며 제출 증거만으로 판정한다(`uptake_result=submission_only_working`). 플래그가 없으면 기존 규칙 그대로다. |
 
 `expect:`는 사람의 §2 화면 판정을 기계적으로 감사 가능하게 만드는 최소 envelope다. 이것은 **새 임무의 token이 아니라 수신자의 현재 identity**를 기술한다. 새 임무 ID는 아직 수신자 pane의 title/read에 없으므로 매칭 대상이 아니다. 예시는 다음과 같다.
 

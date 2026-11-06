@@ -30,8 +30,8 @@ const (
 )
 
 // relayHarnessAdapter is one harness's entry in the relay: how its composer is
-// found, how a message queued mid-turn shows, whether it takes input while
-// working, and which evidence proves delivery. A harness without an entry gets
+// found, how a message queued mid-turn shows, and which evidence proves
+// delivery. A harness without an entry gets
 // no injection proof at all.
 type relayHarnessAdapter struct {
 	// composerEdge and composerGlyph locate the live composer between two
@@ -41,12 +41,7 @@ type relayHarnessAdapter struct {
 	// queued reports the harness's "accepted into the submit-later queue"
 	// evidence on a visible read; nil means the harness shows none.
 	queued func(screen string) bool
-	// midTurn: the harness accepts input while a turn runs (herdr agent prompt
-	// reaches it mid-work), so a working pane is injected at once instead of
-	// held until idle. A blocked pane is never injected mid-turn: its prompt
-	// may be an approval question that the text would answer.
-	midTurn bool
-	proof   relayProof
+	proof  relayProof
 	// observe: a read that shows no proof yet is re-read for the observation
 	// window before the inject is called unconfirmed, because the echo renders
 	// late on a busy pane. Observation never types or presses anything.
@@ -68,11 +63,12 @@ func relayQueuedClaudeCodex(screen string) bool {
 // relayHarnessAdapters is the closed table of harnesses the relay can prove a
 // delivery on. The grok and omp entries have no captured screen to read a
 // composer or queue banner from, so they use the one rule that needs neither
-// (relayProofEchoAndWorking) and are never injected mid-turn; a live capture
-// would replace that rule with a transcript one.
+// (relayProofEchoAndWorking). That rule needs the pane idle or done before the
+// send, so a message injected into a working grok or omp pane is typed but
+// stays unconfirmed until a live capture gives a transcript rule.
 var relayHarnessAdapters = map[string]relayHarnessAdapter{
 	"claude": {composerEdge: isClaudeDividerLine, composerGlyph: "❯", queued: relayQueuedClaudeCodex, proof: relayProofTranscriptEcho, observe: true},
-	"codex":  {queued: relayQueuedClaudeCodex, midTurn: true, proof: relayProofTranscriptEcho, observe: true},
+	"codex":  {queued: relayQueuedClaudeCodex, proof: relayProofTranscriptEcho, observe: true},
 	"devin":  {composerEdge: isDevinDividerLine, composerGlyph: "❭", queued: devinQueued, proof: relayProofTranscriptEcho, maxAttempts: relayDevinMaxInjectAttempts},
 	"grok":   {proof: relayProofEchoAndWorking, observe: true},
 	"omp":    {proof: relayProofEchoAndWorking, observe: true},

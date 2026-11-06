@@ -17,6 +17,21 @@ import (
 type PromptRequest struct {
 	Sender, Target, Path, Uptake string
 	StorePromptBody              bool
+	// Directive marks a message a session sends a job's worker because the
+	// worker needs it (findings, an ESC answer, an order). A working target is
+	// then neither refused nor waited for; see uptakeFor.
+	Directive bool
+}
+
+// uptakeFor is the uptake mode a prompt is held to. A status transition cannot
+// be observed on a pane that is already working, so a directive to a working
+// target is judged on its submission evidence alone (hk 3276); every other
+// request keeps its mode, and with it the refusal of a working target.
+func uptakeFor(req PromptRequest, pane paneIdentity) string {
+	if req.Directive && pane.Status == "working" {
+		return ""
+	}
+	return req.Uptake
 }
 
 type PromptResult struct {
@@ -117,7 +132,8 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 		failed := expectFailures(expect, pane, pre.Text)
 		return recordFailureForRequestWithPaneDetail(ctx, store, id, req, promptHash, body, req.StorePromptBody, pane, pre.Revision, digest(pre.Text), "mismatch", "expect_failed="+strings.Join(failed, ","), &codedError{ExitConditionInvalid, fmt.Errorf("recipient identity does not match expect")})
 	}
-	if req.Uptake != "" && pane.Status == "working" {
+	uptake := uptakeFor(req, pane)
+	if uptake != "" && pane.Status == "working" {
 		return recordFailureForRequestWithPane(ctx, store, id, req, promptHash, body, req.StorePromptBody, pane, pre.Revision, digest(pre.Text), "passed", &codedError{ExitDeliveryFailure, fmt.Errorf("uptake_unproven: target is already working")})
 	}
 
@@ -143,6 +159,9 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 		SourcePath: req.Path, PromptSHA256: promptHash, BodyStored: req.StorePromptBody, RequestedAtMS: time.Now().UnixMilli(),
 		PreflightRevision: pre.Revision, SendRevision: sendPane.Revision, PreflightReadSHA256: digest(pre.Text), PreflightResult: "passed",
 		UptakeMode: req.Uptake, UptakeResult: "not_requested"}
+	if uptake != req.Uptake {
+		d.UptakeResult = "submission_only_working"
+	}
 	inserted, err := store.InsertDelivery(ctx, d, body)
 	if err != nil {
 		return PromptResult{}, &codedError{ExitInternal, fmt.Errorf("persist preflight: %w", err)}
@@ -156,7 +175,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	}
 
 	var statusEvents <-chan HerdrEvent
-	if req.Uptake == "status-transition" {
+	if uptake == "status-transition" {
 		if !caps.Events {
 			return finishPrompt(ctx, store, d, &codedError{ExitDaemonUnavailable, fmt.Errorf("events capability unavailable")})
 		}
@@ -202,7 +221,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 		return finishPrompt(ctx, store, d, &codedError{ExitDeliveryFailure, fmt.Errorf("submission evidence unproven")})
 	}
 
-	if req.Uptake == "status-transition" {
+	if uptake == "status-transition" {
 		d.UptakeResult = "unproven"
 		for {
 			select {
@@ -220,7 +239,7 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 			}
 		}
 	}
-	if req.Uptake == "tool" {
+	if uptake == "tool" {
 		if !toolReceipt(pane.Harness, post.Text, markerFor(body), post.Revision, sendPane.Revision) {
 			d.UptakeResult = "unproven"
 			return finishPrompt(ctx, store, d, &codedError{ExitDeliveryFailure, fmt.Errorf("tool uptake evidence unproven")})

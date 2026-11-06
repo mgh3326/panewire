@@ -424,7 +424,7 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 	output, err := runner(getContext, "agent", "get", message.Pane)
 	cancel()
 	status, parsed := parseRelayAgentStatus(output)
-	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" || manager.acceptsMidTurn(status, output) {
+	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" {
 		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
@@ -435,19 +435,6 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 		held.Lease = occupant.key()
 	}
 	manager.hold(parent, held, status)
-}
-
-// acceptsMidTurn reports whether a working pane's harness takes input while a
-// turn runs (hk 3276: herdr agent prompt reaches codex mid-work). Its queue
-// banner is then the delivery proof, so the row is injected instead of held
-// for idle. A blocked pane never qualifies: its prompt may be an approval
-// question that the text would answer.
-func (manager *relayBusyManager) acceptsMidTurn(status string, agentGet []byte) bool {
-	if status != "working" {
-		return false
-	}
-	adapter, known := relayAdapterFor(parseRelayAgentHarness(agentGet))
-	return known && adapter.midTurn
 }
 
 func (manager *relayBusyManager) hold(parent context.Context, item relayHeld, reason string) {
@@ -858,11 +845,26 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		ctx, cancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
 		result := manager.inject(ctx, group, text)
 		cancel()
+		immediate := relayGroupImmediate(group)
+		if immediate && relayRetriesOnce(result) {
+			// hk 3276: a worker directive is not held for a quieter pane, so a
+			// send that was rejected or never showed up is typed once more
+			// right away. The row's nonce is unchanged, and the text already
+			// tells the reader a repeat is not a reason to re-run it.
+			retryContext, retryCancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
+			result = manager.inject(retryContext, group, text)
+			retryCancel()
+		}
 		switch result.Outcome {
 		case relayInjectRetryable:
 			maxAttempts := relayMaxInjectAttempts
 			if adapter, known := relayAdapterFor(result.Harness); known {
 				maxAttempts = adapter.injectAttempts()
+			}
+			if immediate {
+				// The one retry is spent: drop now (and escalate through the
+				// hub) instead of re-holding the row until the pane is idle.
+				maxAttempts = 1
 			}
 			for _, item := range group {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(result.Evidence), OriginalEventID: item.EventID})
@@ -937,6 +939,40 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			manager.emit("relay.delivered", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(reason), FinalText: item.Text, Edited: item.Edited, OriginalEventID: item.EventID})
 		}
 	}
+}
+
+// relayGroupImmediate reports whether every row in group is a worker directive
+// the hub marked deliver=now: sent at once whatever the pane is doing.
+func relayGroupImmediate(group []relayHeld) bool {
+	for _, item := range group {
+		if item.DeliverPolicy != "now" || item.EventID == 0 || item.Lane == "" {
+			return false
+		}
+	}
+	return len(group) > 0
+}
+
+// relayRetriesOnce reports whether an immediate delivery's first attempt is
+// worth one more send: herdr rejected it, or herdr took it and nothing showed
+// it landed. A verdict that says the text may already be in the pane for any
+// other reason (a composer that holds a foreign draft, a changed harness, an
+// unreadable pane, a harness with no adapter) is final.
+func relayRetriesOnce(result relayInjectResult) bool {
+	switch result.Outcome {
+	case relayInjectRetryable:
+		return true
+	case relayInjectMaybeInPane:
+		// "unproven:..." is the claude/codex/grok/omp reads showing nothing;
+		// "postsend:...:none" is devin's.
+		switch {
+		case result.Evidence == "unproven:no_adapter", result.Evidence == "unproven:read_failed":
+			return false
+		case strings.HasPrefix(result.Evidence, "unproven:"):
+			return true
+		}
+		return strings.HasPrefix(result.Evidence, "postsend:") && strings.HasSuffix(result.Evidence, ":none")
+	}
+	return false
 }
 
 func (manager *relayBusyManager) edit(ctx context.Context, eventID int64, text string) bool {

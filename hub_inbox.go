@@ -176,7 +176,7 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	if h.inbox.policy.holdPolicy(lane) != nil && !holdableEvent(kind, *event) {
 		window = 0
 	}
-	if settings := h.inbox.policy.holdPolicy(lane); settings != nil && holdClass && holdableEvent(kind, *event) && h.receiverInboxState(lane).working {
+	if settings := h.inbox.policy.holdPolicy(lane); settings != nil && holdClass && holdableEvent(kind, *event) && !isWorkerDirective(kind, *event, loadReportRelayRoutes(h.reportRelayPath)[lane]) && h.receiverInboxState(lane).working {
 		hold, _ = time.ParseDuration(settings.MaxHold)
 		window = 0
 	}

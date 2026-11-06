@@ -21,6 +21,8 @@ import (
 const (
 	t3276Worker = "wk-t3276"
 	t3276Design = "design-t3276"
+	// t3276Lone has no parent: the desk is such a lane.
+	t3276Lone = "lone-t3276"
 )
 
 // t3276Screens is what one harness's fake pane shows. pre is the pane before
@@ -42,6 +44,7 @@ func t3276Harnesses() map[string]t3276Screens {
 	codexIdle := "• finished the last step\n\n› Ask Codex to do anything\n  gpt-5 high · ~/work/panewire"
 	codexWorking := "• Working (12s • esc to interrupt)\n\n› Ask Codex to do anything\n  gpt-5 high · ~/work/panewire"
 	devinIdle := "─────────────────────\n❭ Ask Devin to build features, fix bugs, or work on your code\n─────────────────────\nSWE-2 High"
+	claudeWorking := "⏺ Working…"
 	return map[string]t3276Screens{
 		"codex-idle": {
 			harness: "codex", preStatus: "idle", postStatus: "working",
@@ -61,7 +64,23 @@ func t3276Harnesses() map[string]t3276Screens {
 			pending:   func(string) string { return codexWorking },
 			delivered: "queued_banner", deliveredOut: "queued",
 		},
-		"devin": {
+		"claude-idle": {
+			harness: "claude", preStatus: "idle", postStatus: "working",
+			pre:       func(string) string { return task626ClaudeEmpty },
+			echo:      func(typed string) string { return task626Claude([]string{"❯ " + typed}, "❯") },
+			pending:   func(string) string { return task626ClaudeEmpty },
+			delivered: "nonce_echo",
+		},
+		"claude-working": {
+			harness: "claude", preStatus: "working", postStatus: "working",
+			pre: func(string) string { return task626Claude([]string{claudeWorking}, "❯") },
+			echo: func(typed string) string {
+				return task626Claude([]string{claudeWorking, "❯ " + typed, "Press up to edit queued messages"}, "❯")
+			},
+			pending:   func(string) string { return task626Claude([]string{claudeWorking}, "❯") },
+			delivered: "queued_banner", deliveredOut: "queued",
+		},
+		"devin-idle": {
 			harness: "devin", preStatus: "idle", postStatus: "working",
 			pre:  func(string) string { return devinIdle },
 			echo: func(typed string) string { return "❭ " + typed + "\n" + devinIdle },
@@ -69,14 +88,23 @@ func t3276Harnesses() map[string]t3276Screens {
 			pending:   func(string) string { return devinIdle },
 			delivered: "nonce_echo",
 		},
-		"grok": {
+		"devin-working": {
+			harness: "devin", preStatus: "working", postStatus: "working",
+			pre: func(string) string { return devinIdle },
+			echo: func(typed string) string {
+				return "── 1 queued ──────────────────────────────────────── ↑ edit · ↵ send now ──\n○ " + typed + "\n─────────────────────\n❭ Press Enter to send queued messages now\n─────────────────────\nSWE-2 High"
+			},
+			pending:   func(string) string { return devinIdle },
+			delivered: "devin_queue_banner", deliveredOut: "queued",
+		},
+		"grok-idle": {
 			harness: "grok", preStatus: "idle", postStatus: "working",
 			pre:       func(string) string { return "grok ready\n> " },
 			echo:      func(typed string) string { return "you: " + typed + "\ngrok is thinking\n> " },
 			pending:   func(typed string) string { return "grok ready\n> " + typed },
 			delivered: "nonce_echo+status_working",
 		},
-		"omp": {
+		"omp-idle": {
 			harness: "omp", preStatus: "idle", postStatus: "working",
 			pre:       func(string) string { return "omp ready\n$ " },
 			echo:      func(typed string) string { return "user: " + typed + "\nomp is working\n$ " },
@@ -84,6 +112,21 @@ func t3276Harnesses() map[string]t3276Screens {
 			delivered: "nonce_echo+status_working",
 		},
 	}
+}
+
+// t3276WorkingUnprovable are the working grok and omp panes. The directive is
+// typed at once, but with no captured screen the only rule they have needs the
+// pane idle or done before the send, so nothing can prove it landed.
+func t3276WorkingUnprovable() map[string]t3276Screens {
+	out := map[string]t3276Screens{}
+	for name, sc := range t3276Harnesses() {
+		if sc.harness == "grok" || sc.harness == "omp" {
+			sc.preStatus, sc.postStatus = "working", "working"
+			out[sc.harness+"-working"] = sc
+		}
+		_ = name
+	}
+	return out
 }
 
 // t3276Pane is the shell herdr for one pane. Screens and statuses switch when
@@ -170,6 +213,7 @@ func t3276Start(t *testing.T) *t3276Rig {
 	lanes, _ := json.Marshal(map[string]any{"lanes": map[string]reportRelayRoute{
 		t3276Worker: {Machine: "host-a", Pane: "w1:pW", Parent: t3276Design},
 		t3276Design: {Machine: "host-a", Pane: "w1:pD"},
+		t3276Lone:   {Machine: "host-a", Pane: "w1:pL"},
 	}})
 	hub := r20Hub(t, string(lanes), client, nil)
 	hub.relayControl.relayAckTimeout = time.Hour
@@ -203,16 +247,21 @@ func t3276Start(t *testing.T) *t3276Rig {
 // directive it queued for the node.
 func (rig *t3276Rig) send(eventID, notifyType, text string) hubRelayInjectEvent {
 	rig.t.Helper()
-	event := hubJobEventPayload{JobID: laneEventTransportID(t3276Worker, eventID), Epoch: 1, OwnerLane: t3276Worker, EventID: eventID, Text: text, NotifyType: notifyType}
+	return rig.sendTo(t3276Worker, eventID, notifyType, text)
+}
+
+func (rig *t3276Rig) sendTo(lane, eventID, notifyType, text string) hubRelayInjectEvent {
+	rig.t.Helper()
+	event := hubJobEventPayload{JobID: laneEventTransportID(lane, eventID), Epoch: 1, OwnerLane: lane, EventID: eventID, Text: text, NotifyType: notifyType}
 	rig.hub.relayLaneEvent(event, rig.src)
 	select {
 	case directive := <-rig.dest.relays:
-		if directive.Lane != t3276Worker || directive.EventID < 1 {
+		if directive.Lane != lane || directive.EventID < 1 {
 			rig.t.Fatalf("directive for the wrong lane or without a durable id: %+v", directive)
 		}
 		return directive
 	case <-time.After(2 * time.Second):
-		rig.t.Fatal("the hub queued no relay.inject for the worker lane")
+		rig.t.Fatal("the hub queued no relay.inject for the lane")
 	}
 	return hubRelayInjectEvent{}
 }
@@ -291,6 +340,9 @@ func TestHarnessDeliveryRecordsProofSignal_t3276(t *testing.T) {
 			t.Run(name+"/"+notify, func(t *testing.T) {
 				rig := t3276Start(t)
 				directive := rig.send("ev-"+name+"-"+notify, notify, "[mergewake] "+notify+" for the worker: fix the failing check")
+				if directive.Deliver != "now" {
+					t.Fatalf("a %s for a worker lane carries deliver=%q, want now: it is never held for a quieter pane", notify, directive.Deliver)
+				}
 				pane := t3276InstallPane(t, sc, t3276TypedFor(directive), true)
 
 				rig.node.relayBusyManager().offer(t.Context(), t3276Message(directive))
@@ -326,9 +378,10 @@ func TestHarnessDeliveryRecordsProofSignal_t3276(t *testing.T) {
 }
 
 // Acceptance 2, missing-proof half: the text reaches the pane (it was typed)
-// but nothing shows it taken. No relay.delivered is recorded, the durable row
-// stays open, and the design lane hears about it exactly once, with the event
-// id -- also when the same row drops a second time.
+// but nothing shows it taken. It is typed once more at once, and then no
+// relay.delivered is recorded, the durable row stays open, and the design lane
+// hears about it exactly once, with the event id -- also when the same row drops
+// a second time.
 func TestHarnessMissingProofEscalatesOnce_t3276(t *testing.T) {
 	prevWindow := relayObserveWindow
 	relayObserveWindow = 400 * time.Millisecond
@@ -342,8 +395,8 @@ func TestHarnessMissingProofEscalatesOnce_t3276(t *testing.T) {
 
 				rig.node.relayBusyManager().offer(t.Context(), t3276Message(directive))
 
-				if got := pane.calls(t, "prompt"); got != 1 {
-					t.Fatalf("pane got %d prompts, want exactly 1 (a missing proof never re-types)", got)
+				if got := pane.calls(t, "prompt"); got != 2 {
+					t.Fatalf("pane got %d prompts, want 2: the first and the one immediate retry", got)
 				}
 				kinds, _ := rig.drainEvents()
 				if t3276Count(kinds, "relay.delivered") != 0 {
@@ -417,42 +470,65 @@ func mustReadFile(t *testing.T, path string) string {
 	return string(body)
 }
 
-// Acceptance 2, grok and omp: a working pane is not injected mid-turn (their
-// screens give no queue evidence), so the interrupt is held until the pane is
-// idle -- the same as claude. Codex is the harness that takes input mid-work.
-func TestMidTurnInjectionIsCodexOnly_t3276(t *testing.T) {
-	for _, name := range []string{"grok", "omp"} {
-		t.Run(name+" working pane is held", func(t *testing.T) {
+// A working grok or omp pane gets the directive at once too. With no captured
+// screen the only proof those harnesses have needs an idle or done pane before
+// the send, so the typed text stays unconfirmed: one retry, then one escalation.
+func TestWorkingGrokAndOmpAreInjectedThenEscalated_t3276(t *testing.T) {
+	prevWindow := relayObserveWindow
+	relayObserveWindow = 300 * time.Millisecond
+	t.Cleanup(func() { relayObserveWindow = prevWindow })
+	for name, sc := range t3276WorkingUnprovable() {
+		t.Run(name, func(t *testing.T) {
 			rig := t3276Start(t)
-			sc := t3276Harnesses()[name]
-			sc.preStatus = "working"
-			directive := rig.send("ev-held-"+name, "findings", "[mergewake] findings for the worker")
+			directive := rig.send("ev-working-"+name, "findings", "[mergewake] findings for the worker")
 			pane := t3276InstallPane(t, sc, t3276TypedFor(directive), true)
 
 			rig.node.relayBusyManager().offer(t.Context(), t3276Message(directive))
 
-			if got := pane.calls(t, "prompt"); got != 0 {
-				t.Fatalf("a working %s pane was prompted mid-turn", name)
+			if got := pane.calls(t, "prompt"); got != 2 {
+				t.Fatalf("a working %s pane got %d prompts, want the directive and one retry", sc.harness, got)
 			}
 			kinds, _ := rig.drainEvents()
-			if t3276Count(kinds, "relay.held") != 1 {
-				t.Fatalf("events=%v, want the interrupt held until idle", kinds)
+			if t3276Count(kinds, "relay.held") != 0 || t3276Count(kinds, "relay.delivered") != 0 {
+				t.Fatalf("events=%v: want injected at once and not delivered without proof", kinds)
+			}
+			if got := rig.escalations(); len(got) != 1 {
+				t.Fatalf("design lane got %d escalations, want 1", len(got))
 			}
 		})
 	}
-	t.Run("a blocked codex pane is held too", func(t *testing.T) {
-		rig := t3276Start(t)
-		sc := t3276Harnesses()["codex-working"]
-		sc.preStatus = "blocked"
-		directive := rig.send("ev-held-codex-blocked", "decision", "[mergewake] decision for the worker")
-		pane := t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+}
 
-		rig.node.relayBusyManager().offer(t.Context(), t3276Message(directive))
-
-		if got := pane.calls(t, "prompt"); got != 0 {
-			t.Fatal("a codex pane waiting on an approval prompt was typed into")
-		}
-	})
+// The immediate path is for worker directives only. The same pane, working, is
+// still waited for when the message is not a directive (a report) or the lane
+// has no parent (the desk), and an explicit deliver on the event still wins.
+func TestOnlyWorkerDirectivesSkipTheBusyHold_t3276(t *testing.T) {
+	for _, tc := range []struct {
+		name, lane, notify, deliver string
+	}{
+		{"report to a worker lane", t3276Worker, "report", "idle"},
+		{"findings to a lane with no parent", t3276Lone, "findings", "idle"},
+		{"order to a worker lane", t3276Worker, "order", "now"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rig := t3276Start(t)
+			directive := rig.sendTo(tc.lane, "ev-scope-"+strings.ReplaceAll(tc.name, " ", "-"), tc.notify, "[mergewake] text for the lane")
+			if directive.Deliver != tc.deliver {
+				t.Fatalf("deliver=%q, want %q", directive.Deliver, tc.deliver)
+			}
+			if tc.deliver != "idle" {
+				return
+			}
+			pane := t3276InstallPane(t, t3276Harnesses()["codex-working"], t3276TypedFor(directive), true)
+			rig.node.relayBusyManager().offer(t.Context(), t3276Message(directive))
+			if got := pane.calls(t, "prompt"); got != 0 {
+				t.Fatalf("a working pane was typed into for a message that is not a worker directive")
+			}
+			if kinds, _ := rig.drainEvents(); t3276Count(kinds, "relay.held") != 1 {
+				t.Fatalf("events=%v, want the row held until the pane is idle", kinds)
+			}
+		})
+	}
 }
 
 // The proof rules fail closed for a harness the relay has no adapter for, and
