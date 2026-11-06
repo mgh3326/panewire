@@ -56,6 +56,32 @@ func TestRoleReleaseAfterSucceededSpawn(t *testing.T) {
 			}
 		})
 	}
+	t.Run("a holder that completes during the probe keeps its completed record and releases", func(t *testing.T) {
+		hub, server, jobs, held := roleHolderHub(t, succeeded, "spawned", "succeeded")
+		jobs.completeAfterGet = true
+		node := t14Node(t, hub, server, true)
+		response := submit(server)
+		roleReplyPanes(t, node, nodeCommandRead(t, node), []nodeAgentRow{{PaneID: "w2:p9", Cwd: "/work/other"}}, true)
+		result := t14Result(t, response)
+		if result.status != http.StatusAccepted || jobs.state("test-job") != "completed" {
+			t.Fatalf("status=%d body=%s hk=%v", result.status, result.body, jobs.state("test-job"))
+		}
+		if owner, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker"); err != nil || owner == held.Request.RequestID {
+			t.Fatalf("reservation not moved: %s %v", owner, err)
+		}
+	})
+	t.Run("a refused lost write on a record still not terminal keeps the hold", func(t *testing.T) {
+		hub, server, jobs, held := roleHolderHub(t, succeeded, "spawned", "succeeded")
+		jobs.putErr = errors.New("hk unavailable")
+		node := t14Node(t, hub, server, true)
+		response := submit(server)
+		roleReplyPanes(t, node, nodeCommandRead(t, node), []nodeAgentRow{{PaneID: "w2:p9", Cwd: "/work/other"}}, true)
+		result := t14Result(t, response)
+		if result.status != http.StatusConflict || jobs.state("test-job") != "spawned" {
+			t.Fatalf("status=%d body=%s hk=%v", result.status, result.body, jobs.state("test-job"))
+		}
+		assertRoleHeldBy(t, hub, held.Request.RequestID)
+	})
 	t.Run("pane present keeps the hold", func(t *testing.T) {
 		hub, server, jobs, held := roleHolderHub(t, succeeded, "spawned", "succeeded")
 		node := t14Node(t, hub, server, true)

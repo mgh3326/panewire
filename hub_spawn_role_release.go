@@ -89,9 +89,19 @@ func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, 
 // markLostAndRelease writes the hk job lost, then drops the reservation. A
 // crash between the two repeats harmlessly: a lost job releases through the
 // completed-or-lost path.
+//
+// hk never rewrites a terminal record (409), so a holder that completed after
+// the caller read its state keeps its completed record. A refused write then
+// re-reads it: a record now completed or lost releases the role as the
+// completed-or-lost path does, anything else keeps the hold.
 func (h *HubServer) markLostAndRelease(ctx context.Context, app *fleet.App, holder hubSpawnTask, task, role string) bool {
 	if err := app.MarkJobLost(ctx, holder.Job); err != nil {
-		return false
+		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		record, exists, readErr := app.ExistingJob(readCtx, holder.Job)
+		cancel()
+		if state, _ := record["state"].(string); readErr != nil || !exists || state != "completed" && state != "lost" {
+			return false
+		}
 	}
 	return h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, task, role) == nil
 }

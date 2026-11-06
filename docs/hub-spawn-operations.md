@@ -67,7 +67,10 @@ its record, hk 3204) is checked the same way: only a complete pane list that
 lacks the recorded pane, and lists no pane named like the holder's agent label
 (herdr renumbers a pane moved across workspaces), marks the hk job `lost` and
 releases the slot. A present pane, an unreadable pane list, an unreachable node
-or no recorded pane keeps the slot and the 409 body as before. A `retryable` operation holds no
+or no recorded pane keeps the slot and the 409 body as before. hk never rewrites a
+terminal record, so a holder that completes during the probe keeps its completed
+record: the refused `lost` write is followed by a re-read, and a record now
+`completed` or `lost` releases the slot. A `retryable` operation holds no
 slot (its reservation is deleted when it ends), but its hk job stays `claimed`:
 a new submission for the same task and role under another job id marks that
 job `lost` once it holds the slot. A replay of the retryable request itself

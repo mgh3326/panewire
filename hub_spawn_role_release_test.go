@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,10 @@ type roleJobs struct {
 	records map[string]map[string]any
 	getErr  map[string]error // a job whose Get fails with the mapped error
 	puts    []string         // "<job> <state>" for every Put, in order
+	// completeAfterGet makes the holder complete right after its first Get,
+	// the way a job finishing during the pane probe does.
+	completeAfterGet bool
+	putErr           error // when set, every Put fails with it
 }
 
 func (r *roleJobs) Claim(context.Context, string, string, string) error { return nil }
@@ -30,6 +35,13 @@ func (r *roleJobs) Put(_ context.Context, id string, fields map[string]any) erro
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.puts = append(r.puts, id+" "+scalarString(fields["state"]))
+	if r.putErr != nil {
+		return r.putErr
+	}
+	// hk never rewrites a terminal record.
+	if state := r.records[id]["state"]; state == "completed" || state == "lost" || state == "escalated" {
+		return errors.New("job_state_conflict")
+	}
 	for key, value := range fields {
 		r.records[id][key] = value
 	}
@@ -42,7 +54,11 @@ func (r *roleJobs) Get(_ context.Context, id string) (map[string]any, error) {
 		return nil, err
 	}
 	if record, ok := r.records[id]; ok {
-		return map[string]any{"state": record["state"]}, nil
+		out := map[string]any{"state": record["state"]}
+		if r.completeAfterGet && id == "test-job" {
+			record["state"] = "completed"
+		}
+		return out, nil
 	}
 	return nil, fleet.ErrJobNotFound
 }
