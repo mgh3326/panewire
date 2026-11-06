@@ -202,7 +202,10 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 			return a.releaseQuota(ctx, j)
 		}
-		if waiting == nil && a.Now().After(deadline) && (!pending || latePoll) {
+		// An announced quota stop is watched through its hand-off grace, past
+		// the ordinary completion deadline: its fallback ends the job and
+		// releases the lease, which nothing else would.
+		if waiting == nil && !handOff.active && a.Now().After(deadline) && (!pending || latePoll) {
 			fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
 			return nil
 		}
@@ -241,7 +244,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 		}
 		if handOff.active {
-			if present && handOff.expired(a.Now(), paneAgent) {
+			if handOff.expired(a.Now(), paneAgent, present) {
 				return a.quotaStopLost(ctx, j, handOff.stop, false)
 			}
 			if present && !handOff.unchanged(paneAgent) {
@@ -255,7 +258,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				handOff = quotaHandOff{}
 			}
 		}
-		if missing >= 2 {
+		// A pane that vanished during a quota hand-off is the hub closing it
+		// after placing the successor: the hk record is the hub's to write
+		// (with the successor pointer), and the watcher ends the job after the
+		// grace instead.
+		if missing >= 2 && !handOff.active {
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}

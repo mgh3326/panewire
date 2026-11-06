@@ -303,8 +303,12 @@ func TestWatcherReleasesQuotaWhenTheHubClosedTheHandedOverPane(t *testing.T) {
 		}
 		return do(c)
 	}
+	started := a.Now()
 	if e := a.watch(context.Background(), []string{"j"}); e != nil {
 		t.Fatal(e)
+	}
+	if a.Now().Sub(started) < 10*time.Minute {
+		t.Fatalf("the watcher ended the job %v after the pane vanished, before the grace: the generic lost path wrote the record without the successor pointer", a.Now().Sub(started))
 	}
 	if got := str(h.record(t, "j"), "end_reason"); got != "quota_stop pool=claude replaced_by=j-q1" {
 		t.Fatalf("end_reason rewritten: %q", got)
@@ -354,5 +358,58 @@ func TestWatcherPaneResumedDuringGraceKeepsTheJobLive(t *testing.T) {
 	}
 	if st, pools := ledgerState(t, a, "j"); st != "leased" || len(pools) != 1 {
 		t.Fatalf("a live job lost its lease: %s %v", st, pools)
+	}
+}
+
+// A pane that vanishes during the grace but whose record the hub never wrote
+// (the replacement did not happen) is ended after the grace with the plain
+// quota_stop end_reason, not by the generic missing-pane path.
+func TestWatcherVanishedPaneWithoutHubRecordEndsAfterGraceWithQuotaReason(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	a.QuotaHandOffGrace = 4 * time.Minute
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	lists := 0
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			if lists++; lists > 2 {
+				return Result{Out: `{"result":{"agents":[]}}`}
+			}
+		}
+		return do(c)
+	}
+	started := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if a.Now().Sub(started) < 4*time.Minute {
+		t.Fatalf("ended after %v, before the grace", a.Now().Sub(started))
+	}
+	if rec := h.record(t, "j"); str(rec, "state") != "lost" || !strings.HasPrefix(str(rec, "end_reason"), "quota_stop pool=devin-free") {
+		t.Fatalf("hk record %v", rec)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota not released: %s", st)
+	}
+}
+
+// A stop announced close to the ordinary completion deadline is still watched
+// through its grace: the fallback must end the job and release its lease.
+func TestWatcherQuotaHandOffOutlivesTheCompletionDeadline(t *testing.T) {
+	a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	a.QuotaHandOffGrace = 2 * time.Minute
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "30")
+	started := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if a.Now().Sub(started) < 2*time.Minute {
+		t.Fatalf("the completion deadline ended the watch after %v, inside the grace", a.Now().Sub(started))
+	}
+	if str(h.record(t, "j"), "state") != "lost" {
+		t.Fatalf("hk record %v", h.record(t, "j"))
+	}
+	if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
+		t.Fatalf("quota not released: %s %v", st, pools)
 	}
 }

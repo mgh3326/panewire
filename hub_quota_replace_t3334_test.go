@@ -164,6 +164,9 @@ func (f *quotaReplaceFixture) run(t *testing.T, placed hubSpawnOutcome, nodeComm
 			t.Fatal("the replacement did not give up on a busy pane")
 		}
 	}
+	// The hub closes the old pane (capture, close) before it places anything.
+	serve(nodeCommandRead(t, f.node))
+	serve(nodeCommandRead(t, f.node))
 	next, _, _ := quotaReplacementJob(f.job)
 	var successor hubSpawnTask
 	eventually(t, 2*time.Second, "the successor to be claimed", func() bool {
@@ -174,7 +177,7 @@ func (f *quotaReplaceFixture) run(t *testing.T, placed hubSpawnOutcome, nodeComm
 	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, placed, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	for i := 1; i < nodeCommands; i++ {
+	for i := 3; i < nodeCommands; i++ {
 		serve(nodeCommandRead(t, f.node))
 	}
 	select {
@@ -281,12 +284,13 @@ func TestQuotaReplacementJobNames(t *testing.T) {
 	}
 }
 
-// When no other pool can take the work the successor is not placed, and the
-// stopped job is left alone for the node to end: today's behaviour.
+// When no other pool can take the work the successor is not placed and the hub
+// writes nothing: the old pane is closed (so one job holds the task) and the
+// node's watcher ends the job after its grace as a plain quota stop.
 func TestQuotaStopReviewerWithNoOtherPoolIsNotReplaced(t *testing.T) {
 	f := newQuotaReplaceFixture(t, "reviewer", "mwr-2-p1")
-	result, commands := f.run(t, hubSpawnOutcome{RC: 81, Stage: "placement", Reason: "no_eligible_host"}, 1)
-	if result.ok || len(commands) != 1 {
+	result, commands := f.run(t, hubSpawnOutcome{RC: 81, Stage: "placement", Reason: "no_eligible_host"}, 3)
+	if result.ok || len(commands) != 3 {
 		t.Fatalf("result=%+v commands=%d", result, len(commands))
 	}
 	if state := f.jobs.records["mwr-2-p1"]["state"]; state != "spawned" {
@@ -384,5 +388,51 @@ func TestQuotaReplaceBudgetFitsTheWatcherGrace(t *testing.T) {
 	next, err := quotaReplacementRequest(long, "mwr-9-p1", "mwr-9-p1-q1", "claude", "reviewer")
 	if err != nil || time.Duration(next.DeadlineSeconds)*time.Second != quotaReplaceDeadline {
 		t.Fatalf("the successor's spawn deadline is %ds (%v), want %v", next.DeadlineSeconds, err, quotaReplaceDeadline)
+	}
+}
+
+// A pane that changed after the probe is refused by pane.close: nothing is
+// placed, so the replacement can never run beside the original (review finding).
+func TestQuotaStopPaneChangedBeforeCloseGetsNoSuccessor(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-5-p1")
+	done := make(chan quotaReplaceResult, 1)
+	go func() {
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		done <- quotaReplaceResult{job, ok}
+	}()
+	command := nodeCommandRead(t, f.node)
+	roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+	command = nodeCommandRead(t, f.node)
+	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/x/pane-screen.txt"}})
+	command = nodeCommandRead(t, f.node)
+	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodePaneChanged}})
+	select {
+	case result := <-done:
+		if result.ok {
+			t.Fatalf("replaced a job whose pane could not be closed: %+v", result)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the replacement did not finish")
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), "mwr-5-p1-q1"); err == nil {
+		t.Fatal("a successor was placed while the old pane stayed open")
+	}
+}
+
+// The successor pointer is written once, so a successor id that would push
+// end_reason past hk's 128 characters is refused before anything is closed or
+// placed (review finding).
+func TestQuotaStopRefusesASuccessorWhoseEndReasonWouldNotFit(t *testing.T) {
+	job := "mwr-" + strings.Repeat("a", 96)
+	f := newQuotaReplaceFixture(t, "reviewer", job)
+	next, _, ok := quotaReplacementJob(job)
+	if !ok || len(next) > 128 {
+		t.Fatalf("setup: the successor id %d must be valid on its own", len(next))
+	}
+	if got, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(job)); ok || got != "" {
+		t.Fatalf("replaced with an id whose end_reason cannot be written: %q", got)
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), next); err == nil {
+		t.Fatal("a successor was placed")
 	}
 }

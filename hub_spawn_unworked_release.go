@@ -71,18 +71,25 @@ func (h *HubServer) closeHeldPaneAndMarkLost(ctx context.Context, app *fleet.App
 // closeHeldPaneAndMarkLostBecause is closeHeldPaneAndMarkLost with the hk
 // end_reason the lost record takes.
 func (h *HubServer) closeHeldPaneAndMarkLostBecause(ctx context.Context, app *fleet.App, holder hubSpawnTask, name string, row nodeAgentRow, endReason string) (bool, string) {
+	if !h.closeHeldPane(ctx, holder, name, row) {
+		return false, ""
+	}
+	return h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
+}
+
+// closeHeldPane saves the holder's pane screen and closes the pane through the
+// holder's node. pane.close re-reads the pane and refuses one that changed, so
+// a true result means the pane is closed or already gone.
+func (h *HubServer) closeHeldPane(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow) bool {
 	machine := spawnHolderHost(holder)
 	var captured nodePaneCaptureResult
 	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, MergedAfter: 0, Write: true}
 	if !h.nodeCall(ctx, machine, nodeCommandPaneCapture, capture, spawnHeldPaneActWait, &captured) || captured.Outcome != nodeCaptureScreen {
-		return false, ""
+		return false
 	}
 	var closed nodePaneCloseResult
 	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd}
-	if !h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) || (closed.Outcome != nodePaneClosed && closed.Outcome != nodePaneGone) {
-		return false, ""
-	}
-	return h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
+	return h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) && (closed.Outcome == nodePaneClosed || closed.Outcome == nodePaneGone)
 }
 
 // releaseUnworkedLanding closes the empty pane of a failed-at-landing holder

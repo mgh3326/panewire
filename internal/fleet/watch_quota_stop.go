@@ -91,8 +91,10 @@ func (h quotaHandOff) unchanged(ag Agent) bool {
 	return h.seq == nil || ag.StateChangeSeq == nil || *h.seq == *ag.StateChangeSeq
 }
 
-func (h quotaHandOff) expired(now time.Time, ag Agent) bool {
-	return !now.Before(h.until) && h.unchanged(ag)
+// expired reports whether the grace has run out with the stop still standing:
+// the pane unchanged, or gone (the hub closed it, or it died).
+func (h quotaHandOff) expired(now time.Time, ag Agent, present bool) bool {
+	return !now.Before(h.until) && (!present || h.unchanged(ag))
 }
 
 func quotaStopPayload(j Job, stop quotastop.Stop) map[string]any {
@@ -151,8 +153,12 @@ func (a *App) quotaStopAnnounce(ctx context.Context, j Job, stop quotastop.Stop)
 // emit is false when quotaStopAnnounce already recorded job.lost.
 func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emit bool) error {
 	endReason := QuotaStopEndReason(stop.Pool, stop.Reset, "", "")
-	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": endReason}); e != nil {
-		a.jobRecordFailed(ctx, j.ID, "lost", e)
+	// After a hand-off grace the hub may already have written the record lost
+	// with the successor pointer; hk would refuse a rewrite, so leave it.
+	if emit || !a.hkJobEnded(ctx, j.ID) {
+		if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": endReason}); e != nil {
+			a.jobRecordFailed(ctx, j.ID, "lost", e)
+		}
 	}
 	if emit {
 		if e := a.quotaStopAnnounce(ctx, j, stop); e != nil {
@@ -160,4 +166,19 @@ func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop, emi
 		}
 	}
 	return a.releaseQuota(ctx, j)
+}
+
+// hkJobEnded reports whether hk already holds a terminal record for the job. An
+// unreadable record is not an end.
+func (a *App) hkJobEnded(ctx context.Context, id string) bool {
+	store, e := a.jobStore()
+	if e != nil {
+		return false
+	}
+	rec, e := store.Get(ctx, id)
+	if e != nil {
+		return false
+	}
+	state, _ := rec["state"].(string)
+	return state == "completed" || state == "lost" || state == "escalated"
 }

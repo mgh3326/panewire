@@ -184,8 +184,17 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	if err != nil || !exists || (state != "claimed" && state != "spawned") || !hubSpawnArgValuePattern.MatchString(pool) {
 		return skip("job_record", "state", state)
 	}
-	// Place nothing while the old pane is busy or unreadable: it is closed
-	// once the successor holds the work, and a pane still working must not be.
+	// The pointer to the successor is written once, with state=lost, so its
+	// whole value must fit hk's limit before anything is closed or placed.
+	key, verb := "replaced_by", "replaced"
+	if role != "reviewer" {
+		key, verb = "handed_over_to", "handed over"
+	}
+	endReason := fleet.QuotaStopEndReason(pool, time.Time{}, key, newJob)
+	if !validNodeEndReason(endReason) {
+		return skip("end_reason_too_long", "length", len(endReason))
+	}
+	// Place nothing while the old pane is busy or unreadable.
 	name := heldAgentName(holder, record)
 	probe := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, name)
 	if probe.state == heldPaneUnknown || probe.state == heldPanePresent && (!nodePaneIdleStatus[probe.row.AgentStatus] || !validNodeCommandPath(probe.row.Cwd)) {
@@ -199,8 +208,15 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	if err != nil || !hubAgentLabelPattern.MatchString(next.Owner) {
 		return skip("invalid_replacement")
 	}
+	// Close the old pane before the successor exists, so a single job holds
+	// the task: a pane that changed since the probe is refused by pane.close
+	// and nothing is placed. A closed pane with no successor is ended by the
+	// node's watcher after its grace, as a quota stop with no replacement.
+	if probe.state == heldPanePresent && !h.closeHeldPane(ctx, holder, name, probe.row) {
+		return skip("pane_not_closed", "pane", holder.Outcome.Pane)
+	}
 	if priorID, _, _, err := store.spawnRoleOwner(ctx, prior.RoleKey()); err == nil && priorID == holder.Request.RequestID {
-		// The stopped job still holds the role; its pane is closed below.
+		// The stopped job still holds the role; its pane is closed.
 		_ = store.releaseCompletedSpawnRole(ctx, priorID, prior.RoleKey())
 	}
 	if _, _, err := store.claimSpawn(ctx, request, newJob, next.Owner, h.now().UTC()); err != nil {
@@ -215,13 +231,8 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		h.logger.Info("quota-stop replacement not placed", "job", event.JobID, "replacement", newJob, "pool", pool, "rc", outcome.RC, "reason", outcome.Reason)
 		return "", false
 	}
-	key, verb := "replaced_by", "replaced"
-	if role != "reviewer" {
-		key, verb = "handed_over_to", "handed over"
-	}
-	endReason := fleet.QuotaStopEndReason(pool, time.Time{}, key, newJob)
-	if !h.closeQuotaStoppedJob(ctx, app, holder, name, probe, endReason) {
-		h.logger.Warn("quota-stop replacement placed but the stopped job was not closed", "job", event.JobID, "replacement", newJob)
+	if lost, reason := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); !lost {
+		h.logger.Warn("quota-stop replacement placed but the stopped job's record was not written", "job", event.JobID, "replacement", newJob, "reason", reason)
 		return "", false
 	}
 	h.logger.Info("quota-stop replacement", "job", event.JobID, "replacement", newJob, "role", role, "pool", pool, "host", outcome.Host, "profile", outcome.Profile)
@@ -255,20 +266,4 @@ func (h *HubServer) awaitSpawnOutcome(ctx context.Context, requestID string, lim
 			return hubSpawnOutcome{}, false
 		}
 	}
-}
-
-// closeQuotaStoppedJob saves the stopped pane's screen, closes the pane and
-// writes the job's hk record lost with endReason, all through the holder's
-// node (probe is the idle pane replaceQuotaStopped found). A pane that is
-// already gone only needs the record; pane.close re-reads the pane itself.
-func (h *HubServer) closeQuotaStoppedJob(ctx context.Context, app *fleet.App, holder hubSpawnTask, name string, probe heldProbe, endReason string) bool {
-	switch probe.state {
-	case heldPaneAbsent:
-		lost, _ := h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
-		return lost
-	case heldPanePresent:
-		lost, _ := h.closeHeldPaneAndMarkLostBecause(ctx, app, holder, name, probe.row, endReason)
-		return lost
-	}
-	return false
 }
