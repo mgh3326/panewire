@@ -40,133 +40,69 @@ func balance(left float64, in time.Duration) func(time.Time) *CreditBalance {
 
 func noBalance(time.Time) *CreditBalance { return nil }
 
-// (3) In the final window before expiry (default 4 days) a credit pool with a
-// balance left ranks first, ahead of subscription waste and the free seat.
-func TestCreditFinalWindowRanksFirst(t *testing.T) {
-	cases := []struct {
-		name   string
-		credit func(time.Time) *CreditBalance
-		policy string
+func TestCreditUrgencyCompetesWithWaste(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		hours float64
+		want  string
 	}{
-		{"3 days left, default 4-day window", balance(80, 72*time.Hour), ""},
-		{"a little balance is still used up", balance(0.5, 24*time.Hour), ""},
-		{"credit_final_days 14 takes in 10 days left", balance(80, 240*time.Hour), `, "credit_final_days": 14`},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			// claude is at waste risk with urgency 67.4/8 = 8.4 per hour.
-			a, s := creditFixture(t, tt.credit, riskPool(32.6, 8), tt.policy, nil)
+		{"higher subscription urgency", 100, "sonnet"},
+		{"lower subscription urgency", 300, "omp-opus"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// 77/220 = 0.35; subscription unused is 80%.
+			a, s := creditFixture(t, balance(77, 220*time.Hour), riskPool(20, tc.hours), `, "credit_final_days": 30`, nil)
 			sel, err := a.selectProfile(context.Background(), s)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if sel.chosen.seatName != "omp-opus" {
-				t.Fatalf("final-window credit ranks first, got %s", sel.chosen.seatName)
-			}
-			if second := sel.ranked[1].seatName; second != "sonnet" {
-				t.Fatalf("subscription waste ranks next, got %s", second)
+			if sel.chosen.seatName != tc.want {
+				t.Fatalf("chosen %s, want %s", sel.chosen.seatName, tc.want)
 			}
 			row := candOutcome(sel.record(), "omp-opus", "high")
-			c, _ := row["credit"].(map[string]any)
-			if row["tier"] != "waste" || row["waste_reason"] != "credit_expiring" || c == nil || c["days_left"] == nil || c["final_window_days"] == nil || c["balance_pct"] == nil {
-				t.Fatalf("record states the final-window reason, days left and balance: %v", row)
-			}
-			if !strings.HasPrefix(creditNote(sel.chosen), " credit_expiring final_window_days=") {
-				t.Fatalf("plan text: %q", creditNote(sel.chosen))
+			if row["waste_urgency"] != 0.35 || row["waste_risk"] != true {
+				t.Fatalf("credit urgency: %v", row)
 			}
 		})
 	}
 }
 
-// (1) Outside the final window credit ranks below every admitted pool,
-// however much of it is left and however little has been spent.
-func TestCreditOutsideFinalWindowRanksLast(t *testing.T) {
-	cases := []struct {
-		name   string
-		credit func(time.Time) *CreditBalance
-		claude PoolView
-		policy string
-	}{
-		{"10 days left", balance(95, 240*time.Hour), riskPool(32.6, 8), ""},
-		{"10 days left, subscription ranked (not waste)", balance(95, 240*time.Hour), riskPool(85, 100), ""},
-		{"no balance or expiry recorded", noBalance, riskPool(32.6, 8), ""},
-		{"balance used up in the window", balance(0, 24*time.Hour), riskPool(32.6, 8), ""},
-		{"already expired", balance(80, -time.Hour), riskPool(32.6, 8), ""},
-		{"credit_final_days 0 disables the window", balance(80, 24*time.Hour), riskPool(32.6, 8), `, "credit_final_days": 0`},
-	}
-	for _, tt := range cases {
-		t.Run(tt.name, func(t *testing.T) {
-			a, s := creditFixture(t, tt.credit, tt.claude, tt.policy, nil)
-			sel, err := a.selectProfile(context.Background(), s)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if sel.chosen.seatName == "omp-opus" || sel.ranked[len(sel.ranked)-1].seatName != "omp-opus" {
-				t.Fatalf("credit ranks last: chosen %s", sel.chosen.seatName)
-			}
-			row := candOutcome(sel.record(), "omp-opus", "high")
-			if row["tier"] != "credit" || row["waste_risk"] != false || row["waste_reason"] != nil {
-				t.Fatalf("outside the final window credit stays tier credit: %v", row)
-			}
-		})
-	}
-}
-
-// (2) When no subscription or free pool is admitted the credit pool is used,
-// as before.
-func TestCreditUsedWhenNoSubscriptionAdmitted(t *testing.T) {
-	a, s := creditFixture(t, balance(95, 240*time.Hour), riskPool(32.6, 8), "", map[string]string{"omp-opus": "anthropic-api"})
+func TestCreditWithoutExpiryRanksLast(t *testing.T) {
+	noExpiry := func(time.Time) *CreditBalance { return &CreditBalance{LeftPct: 77} }
+	a, s := creditFixture(t, noExpiry, riskPool(20, 100), "", nil)
 	sel, err := a.selectProfile(context.Background(), s)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sel.chosen.seatName != "omp-opus" || sel.chosen.tierName != "credit" {
-		t.Fatalf("credit is the fallback: %s tier=%s", sel.chosen.seatName, sel.chosen.tierName)
+	if got := sel.ranked[len(sel.ranked)-1].seatName; got != "omp-opus" {
+		t.Fatalf("last = %s", got)
 	}
 }
 
-func TestPoolPolicyCreditFinalDays(t *testing.T) {
-	embedded, e := LoadPoolPolicy("")
-	if e != nil || *embedded.CreditFinalDays != 4 {
-		t.Fatalf("embedded credit_final_days is 4: %v", e)
-	}
+func TestPoolPolicyCreditFinalDaysDeprecated(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "p.json")
-	for extra, ok := range map[string]bool{"": true, `, "credit_final_days": 0`: true, `, "credit_final_days": -1`: false} {
-		if e := os.WriteFile(path, []byte(riskPolicy(extra)), 0o600); e != nil {
-			t.Fatal(e)
-		}
-		p, e := LoadPoolPolicy(path)
-		if (e == nil) != ok {
-			t.Fatalf("%q: err=%v", extra, e)
-		}
-		if extra == "" && *p.CreditFinalDays != 4 {
-			t.Fatalf("absent credit_final_days defaults to 4: %v", *p.CreditFinalDays)
-		}
+	if err := os.WriteFile(path, []byte(riskPolicy(`, "credit_final_days": 14`)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := creditFixture(t, balance(77, 220*time.Hour), riskPool(20, 100), `, "credit_final_days": 14`, nil)
+	var warning bytes.Buffer
+	a.Err = &warning
+	if _, err := a.poolPolicy(); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(warning.String(), "deprecated") {
+		t.Fatalf("warning: %s", warning.String())
 	}
 }
 
-// `plan --credit-at` judges the credit window as of another date, read-only.
 func TestPlanCreditAt(t *testing.T) {
 	a, _ := creditFixture(t, balance(80, 240*time.Hour), riskPool(32.6, 8), "", nil)
-	run := func(args ...string) (string, error) {
-		out := &bytes.Buffer{}
-		a.Out = out
-		e := a.planCmd(context.Background(), append([]string{"--grade", "A", "--t", "T1"}, args...))
-		return out.String(), e
-	}
-	// The fixture has no launch data, so placement after the selection
-	// refuses; the selection lines are what --credit-at changes.
-	text, _ := run()
-	if !strings.Contains(text, "chosen host=none seat=sonnet@high") || strings.Contains(text, "credit_expiring") {
-		t.Fatalf("10 days out: no final window\n%s", text)
-	}
+	out := &bytes.Buffer{}
+	a.Out = out
 	at := a.Now().Add(8 * 24 * time.Hour).UTC().Format(time.RFC3339)
-	text, _ = run("--credit-at", at)
-	if !strings.Contains(text, "seat=omp-opus@high model=anthropic/claude-opus-5-5 pool=anthropic-api grade=A tier=waste waste_risk=true credit_expiring final_window_days=4 days_left=2.0 balance_pct=80.0 balance_usd=160.00") {
-		t.Fatalf("--credit-at %s: final window\n%s", at, text)
-	}
-	if _, e := run("--credit-at", "soon"); code(e) != exitUsage {
-		t.Fatalf("invalid --credit-at: %v", e)
+	_ = a.planCmd(context.Background(), []string{"--grade", "A", "--t", "T1", "--credit-at", at})
+	if !strings.Contains(out.String(), "credit_expiring days_left=2.0") {
+		t.Fatalf("plan: %s", out.String())
 	}
 }
 

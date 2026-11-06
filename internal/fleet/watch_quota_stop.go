@@ -49,7 +49,7 @@ func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStop
 // pool and reset_at. No result is written; hk takes one only with completed.
 func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop) error {
 	endReason := "quota_stop pool=" + stop.Pool
-	payload := map[string]any{"pane_id": j.Pane, "reason": "quota_stop", "pool": stop.Pool}
+	payload := map[string]any{"pane_id": j.Pane, "reason": "quota_stop", "pool": stop.Pool, "owner_lane": j.Owner, "parent_lane": j.Parent}
 	if !stop.Reset.IsZero() {
 		reset := stop.Reset.UTC().Format(time.RFC3339)
 		endReason += " reset_at=" + reset

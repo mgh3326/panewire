@@ -42,9 +42,7 @@ type PoolPolicy struct {
 	WasteBelow  *float64         `json:"waste_below_projected_pct"`
 	ExcludeAt   *float64         `json:"exclude_at_projected_pct"`
 	WasteRisk   *WasteRiskPolicy `json:"waste_risk"`
-	// CreditFinalDays is the final window before a credit pool's expiry in
-	// which a balance left ranks it first, ahead of subscription waste
-	// (default 4; 0 disables). Outside it credit ranks last.
+	// CreditFinalDays is deprecated and has no effect.
 	CreditFinalDays *float64 `json:"credit_final_days"`
 }
 
@@ -58,7 +56,6 @@ type WasteRiskPolicy struct {
 const (
 	defaultWasteRiskHorizonHours = 0.0
 	defaultWasteRiskMinUnusedPct = 20.0
-	defaultCreditFinalDays       = 4.0
 )
 
 type FreeSet struct {
@@ -130,11 +127,7 @@ func (p *PoolPolicy) validate() error {
 	if *p.WasteBelow < 0 || *p.ExcludeAt <= 0 || *p.WasteBelow > *p.ExcludeAt {
 		return fail(exitConfig, "invalid projected-at-reset thresholds")
 	}
-	if p.CreditFinalDays == nil {
-		v := defaultCreditFinalDays
-		p.CreditFinalDays = &v
-	}
-	if d := *p.CreditFinalDays; !finite(d) || d < 0 {
+	if p.CreditFinalDays != nil && (!finite(*p.CreditFinalDays) || *p.CreditFinalDays < 0) {
 		return fail(exitConfig, "invalid credit_final_days")
 	}
 	if p.WasteRisk == nil {
@@ -156,7 +149,11 @@ func (p *PoolPolicy) validate() error {
 
 func finite(x float64) bool { return !math.IsNaN(x) && !math.IsInf(x, 0) }
 func (a *App) poolPolicy() (PoolPolicy, error) {
-	return LoadPoolPolicy(str(a.Config.Local, "pool_policy"))
+	p, err := LoadPoolPolicy(str(a.Config.Local, "pool_policy"))
+	if err == nil && p.CreditFinalDays != nil {
+		a.warn("credit_final_days is deprecated and has no effect")
+	}
+	return p, err
 }
 
 // selCand is one profile/rung/account choice. Static refusals have no account.
@@ -181,10 +178,7 @@ type selCand struct {
 	// its projected unused share at the longest window's reset.
 	risk   bool
 	unused *float64
-	// creditPool marks a prepaid credit pool, admitted by its gate alone
-	// whatever its tier; credit is set when a balance is left within the
-	// policy's final window before expiry (credit_expiring): it then ranks
-	// ahead of every other candidate, waste risk included.
+	// creditPool identifies a prepaid pool; credit records its expiry reading.
 	creditPool bool
 	credit     *creditFinal
 	// creditLeft marks a credit pool with a recorded balance above zero; only
@@ -707,6 +701,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: %v", e)
 	}
 	p := &selPlan{policy: policy, order: slices.Clone(policy.Order), req: req, at: a.Now()}
+	snapshot, _ := a.fleetSnapshot(ctx)
 	rows, e := a.Quota.Catalog(ctx)
 	if e != nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: bench catalog unreadable: %v", e)
@@ -752,6 +747,8 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			c.reason = "effort_mismatch"
 		case !validID(row.Pool):
 			c.reason = "pool_invalid"
+		case snapshot != nil && snapshot.poolCooling(row.Pool, p.at):
+			c.reason = "pool_cooling"
 		default:
 			if name, seat, reason := a.seatFor(row, req); seat == nil {
 				c.reason = reason
@@ -906,14 +903,6 @@ func orderSelCands(pending []*selCand) {
 		c.behindCredit = creditLeft && c.paced
 	}
 	slices.SortStableFunc(pending, func(x, y *selCand) int {
-		// A credit balance in its final window before expiry ranks first:
-		// whatever is left is lost at expiry.
-		if (x.credit != nil) != (y.credit != nil) {
-			if x.credit != nil {
-				return -1
-			}
-			return 1
-		}
 		// Waste-risk pools rank ahead of every tier, free included, and among
 		// themselves by waste urgency first; everything else keeps the tier
 		// order.
@@ -1081,21 +1070,20 @@ func (p *selPlan) record() map[string]any {
 		tags = []string{}
 	}
 	rec := map[string]any{
-		"routing_role":      routingRole(p.req),
-		"outcome_code":      p.outcome,
-		"mode":              "auto",
-		"decision":          fmt.Sprintf("urgency=%s source=%s tiers=%s", p.req.urgency, p.req.urgencySource, strings.Join(p.order, ">")),
-		"rule":              fmt.Sprintf("hosts first; within each host, credit pools with a balance in their last %g days before expiry first (credit_expiring), then waste-risk pools (longest window projected >= %g%% unused at reset%s; ranked by waste urgency; sub-daily windows refuse only when exhausted), then tier, then lowest grade >= %s, then waste urgency (unused share per hour to the longest window's reset; a paceable reset ranks ahead of an unpaceable one, which keeps the lower projected-at-reset order; sub-daily windows never rank), then smaller effort; waste < %g%%, excluded >= %g%% projected", *p.policy.CreditFinalDays, *p.policy.WasteRisk.MinUnusedPct, horizonClause(*p.policy.WasteRisk.HorizonHours), p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
-		"waste_risk":        map[string]any{"horizon_hours": *p.policy.WasteRisk.HorizonHours, "min_unused_pct": *p.policy.WasteRisk.MinUnusedPct},
-		"credit_final_days": *p.policy.CreditFinalDays,
-		"policy_version":    p.policy.Version,
-		"policy_source":     p.policy.SourceDoc,
-		"requested":         map[string]any{"grade": p.req.grade, "t": p.req.t, "role": p.req.role, "tags": tags, "effort": p.req.effort, "allow_escalation": p.req.allowEscalation},
-		"urgency":           p.req.urgency,
-		"urgency_source":    p.req.urgencySource,
-		"tiers":             p.order,
-		"candidates":        cands,
-		"at":                p.at.Format(time.RFC3339Nano),
+		"routing_role":   routingRole(p.req),
+		"outcome_code":   p.outcome,
+		"mode":           "auto",
+		"decision":       fmt.Sprintf("urgency=%s source=%s tiers=%s", p.req.urgency, p.req.urgencySource, strings.Join(p.order, ">")),
+		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk pools and expiring credit rank by waste urgency (unused share per hour until reset or expiry), then tier, lowest grade >= %s, waste urgency and smaller effort; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
+		"waste_risk":     map[string]any{"horizon_hours": *p.policy.WasteRisk.HorizonHours, "min_unused_pct": *p.policy.WasteRisk.MinUnusedPct},
+		"policy_version": p.policy.Version,
+		"policy_source":  p.policy.SourceDoc,
+		"requested":      map[string]any{"grade": p.req.grade, "t": p.req.t, "role": p.req.role, "tags": tags, "effort": p.req.effort, "allow_escalation": p.req.allowEscalation},
+		"urgency":        p.req.urgency,
+		"urgency_source": p.req.urgencySource,
+		"tiers":          p.order,
+		"candidates":     cands,
+		"at":             p.at.Format(time.RFC3339Nano),
 	}
 	if c := p.chosen; c != nil {
 		canon := c.row.Profile

@@ -11,6 +11,5 @@
   "credit_pools": ["anthropic-api", "openai-api"],
   "waste_below_projected_pct": 100,
   "exclude_at_projected_pct": 100,
-  "waste_risk": {"horizon_hours": 0, "min_unused_pct": 20},
-  "credit_final_days": 4
+  "waste_risk": {"horizon_hours": 0, "min_unused_pct": 20}
 }

@@ -345,7 +345,7 @@ func spawnTaskHost(task hubSpawnTask) string {
 type directSpawnState struct{ h *HubServer }
 
 func (s directSpawnState) Snapshot(ctx context.Context) (fleet.FleetSnapshot, error) {
-	raw, err := json.Marshal(s.h.stateStore().snapshot(s.h.now()))
+	raw, err := json.Marshal(s.h.fleetSnapshot(s.h.now()))
 	var snap fleet.FleetSnapshot
 	if err == nil {
 		err = json.Unmarshal(raw, &snap)

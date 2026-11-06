@@ -453,6 +453,7 @@ type HubServer struct {
 	prometheusBasicUser              string
 	prometheusBasicPass              string
 	placementCache                   placementCache
+	poolCooling                      map[string]time.Time
 	relayControl                     hubRelayControlState
 	reportRelayPath                  string
 	lanesNodeRowCap                  int
@@ -1380,6 +1381,9 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				if !h.observeJobRevocation(machineID, event, received) {
 					h.lateRegisterJobCompletion(machineID, event, received)
 				}
+			}
+			if message.Kind == "job.lost" {
+				h.observePoolCooling(event.Reason, received)
 			}
 			h.relayJobEventFrom(machineID, message.Kind, event)
 		}

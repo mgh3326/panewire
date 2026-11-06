@@ -218,25 +218,23 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 	c.longProj = longProjection(v)
 	if p.policy.isCredit(c.row.Pool) || v.Class == "credit" {
 		c.creditPool = true
-		c.creditLeft = v.Credit != nil && v.Credit.LeftPct > 0
+		c.creditLeft = false
 		c.tierName, c.tier = "credit", slices.Index(p.order, "credit")
 		if v.Class == "exclude" {
 			c.reason, c.code, c.outcome = "pool_excluded", outcomeNoRoleCandidate, "dropped:pool_excluded"
 			return
 		}
-		// Credit ranks below subscription quota, which resets sooner, and
-		// is the fallback when none is admitted. In the final window before
-		// expiry a balance left ranks first so it is used up; the
-		// account-bound gate still admits it.
+		// A recorded balance competes on urgency until its expiry.
 		at := p.req.creditAt
 		if at.IsZero() {
 			at = p.at
 		}
-		if ok, hours := v.Credit.finalWindow(at, *p.policy.CreditFinalDays); ok {
+		if ok, hours := v.Credit.expiring(at); ok {
+			c.creditLeft = true
 			left, urgency := v.Credit.LeftPct, v.Credit.LeftPct/hours
 			c.tierName, c.tier = "waste", slices.Index(p.order, "waste")
 			c.risk, c.urgency, c.resetHrs, c.unused = true, &urgency, &hours, &left
-			c.credit = &creditFinal{balance: v.Credit, hoursLeft: hours, days: *p.policy.CreditFinalDays}
+			c.credit = &creditFinal{balance: v.Credit, hoursLeft: hours}
 		}
 		return
 	}
