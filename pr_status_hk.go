@@ -85,6 +85,9 @@ type hkChangeOne struct {
 		Source    string   `json:"source"`
 	} `json:"gate"`
 	Checks []struct {
+		// HeadSHA is the commit the check ran on; hk keeps the rows of earlier
+		// heads, so only a row for the change's current head counts.
+		HeadSHA    string `json:"head_sha"`
 		Name       string `json:"name"`
 		State      string `json:"state"`
 		Conclusion string `json:"conclusion"`
@@ -246,8 +249,8 @@ func prStatusHKRecordOf(one hkChangeOne) prStatusHKRecord {
 //
 //   - state is the gate's verdict for an open PR and merged or closed for a
 //     finished one, so a merged PR is never reported as ready;
-//   - checks are the current head's checks that are required or not yet known to be
-//     optional, so a webhook-written row (required unset) is shown, not hidden;
+//   - checks are the rows for the change's current head (hk keeps earlier heads'
+//     rows) that are required or not yet known to be optional, so a webhook-written row (required unset) is shown, not hidden;
 //   - a thread blocks unless a bot wrote it, and findings are the unresolved
 //     threads, which is what mergewake's PRRT_ finding ids are.
 //
@@ -266,7 +269,7 @@ func prStatusSnapshotFromHK(one hkChangeOne) (PRStatusSnapshot, int) {
 		snapshot.Reasons = []string{}
 	}
 	for _, check := range one.Checks {
-		if (check.Required == nil || *check.Required) && !check.Gone {
+		if check.HeadSHA == change.HeadSHA && (check.Required == nil || *check.Required) && !check.Gone {
 			snapshot.Checks = append(snapshot.Checks, PRStatusCheck{Name: check.Name, State: ghCheckState(check.Conclusion, check.State)})
 		}
 	}

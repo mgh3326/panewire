@@ -38,11 +38,13 @@ case "$2:$3" in
   findings:owner/name) echo '`+findingsJSON+`' ;;
 esac
 `)
-	hkJSON := `{"change":{"state":"open"},"checks":[
-	  {"name":"a","state":"completed","conclusion":"success","required":true},
-	  {"name":"b","state":"completed","conclusion":"failure","required":true},
-	  {"name":"c","state":"completed","conclusion":"failure","required":false},
-	  {"name":"d","state":"in_progress","required":true,"gone":true}],
+	hkJSON := `{"change":{"state":"open","head_sha":"new"},"checks":[
+	  {"head_sha":"new","name":"a","state":"completed","conclusion":"success","required":true},
+	  {"head_sha":"new","name":"b","state":"completed","conclusion":"failure","required":true},
+	  {"head_sha":"new","name":"c","state":"completed","conclusion":"failure","required":false},
+	  {"head_sha":"new","name":"d","state":"in_progress","required":true,"gone":true},
+	  {"head_sha":"old","name":"e","state":"in_progress","required":true},
+	  {"head_sha":"old","name":"f","state":"completed","conclusion":"failure"}],
 	 "threads":[{"resolved":false},{"resolved":false},{"resolved":false},{"resolved":true}]}`
 	hk := write("handoffkeep", `
 [ "$1 $2 $3 $4 $5" = "changes show --repo owner/name --pr" ] || exit 2
@@ -85,7 +87,7 @@ esac
 		t.Fatalf("row %q", rows[1])
 	}
 	// The hk columns read hk directly: the checks of the current head that are not
-	// known to be optional (the not-required and the gone ones are left out) and the
+	// known to be optional (the not-required, the gone and the earlier-head ones are left out) and the
 	// unresolved threads.
 	wantHK := []string{"OPEN", "yes", "green:1,red:1", "yes", "3", "yes"}
 	if got := strings.Join(cells[15:21], "|"); got != strings.Join(wantHK, "|") || cells[21] == "-" {

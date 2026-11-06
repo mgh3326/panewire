@@ -160,16 +160,22 @@ func TestPRStatusHKFixtureRendersLikeTheMergewakeFixture(t *testing.T) {
 }
 
 // A webhook-written check has no required flag yet; it is shown rather than
-// hidden, and a check known to be optional is not.
+// hidden, and a check known to be optional is not. Checks kept from an earlier
+// head are never counted against the current one.
 func TestPRStatusHKChecksWithUnknownRequiredAreShown(t *testing.T) {
 	body := hkFixtureWith(t, func(doc map[string]any) {
 		openPR(doc)
+		head := doc["change"].(map[string]any)["head_sha"]
 		doc["checks"] = []any{
-			map[string]any{"name": "unknown-green", "state": "completed", "conclusion": "success"},
-			map[string]any{"name": "unknown-running", "state": "in_progress"},
-			map[string]any{"name": "optional", "state": "completed", "conclusion": "failure", "required": false},
-			map[string]any{"name": "required-red", "state": "completed", "conclusion": "failure", "required": true},
-			map[string]any{"name": "gone", "state": "completed", "conclusion": "success", "required": true, "gone": true},
+			map[string]any{"head_sha": head, "name": "unknown-green", "state": "completed", "conclusion": "success"},
+			map[string]any{"head_sha": head, "name": "unknown-running", "state": "in_progress"},
+			map[string]any{"head_sha": head, "name": "optional", "state": "completed", "conclusion": "failure", "required": false},
+			map[string]any{"head_sha": head, "name": "required-red", "state": "completed", "conclusion": "failure", "required": true},
+			map[string]any{"head_sha": head, "name": "gone", "state": "completed", "conclusion": "success", "required": true, "gone": true},
+			// Rows hk kept from earlier heads, and one that names no head, are not this head's checks.
+			map[string]any{"head_sha": "0000000000000000000000000000000000000000", "name": "old-head-red", "state": "completed", "conclusion": "failure", "required": true},
+			map[string]any{"head_sha": "0000000000000000000000000000000000000000", "name": "old-head-unknown", "state": "in_progress"},
+			map[string]any{"name": "no-head", "state": "completed", "conclusion": "failure", "required": true},
 		}
 	})
 	hk := newPRStatusHKServer(t, http.StatusOK, body)

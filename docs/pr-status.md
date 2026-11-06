@@ -93,7 +93,7 @@ hk stores facts, not mergewake's verdict on them, so the node derives the fields
 | `state` | `change.state` when it is `merged` or `closed`, else `gate.state` |
 | `head`, `gate_head` | `change.head_sha`, `gate.head_sha` |
 | `reasons` | `gate.reasons` |
-| `checks` | the checks of the current head with `required: true` or no `required` yet (hk leaves it null for a check a webhook wrote, and only a mergewake pass sets it), so an unknown check is shown, not hidden; `green`, `red`, `pending`, `skipped` or `cancelled` from `conclusion`, else `state` |
+| `checks` | the checks whose `head_sha` is the change's current head (hk keeps earlier heads' rows; a row with no `head_sha` is ignored) and `required: true` or no `required` yet (hk leaves it null for a check a webhook wrote, and only a mergewake pass sets it), so an unknown check is shown, not hidden; `green`, `red`, `pending`, `skipped` or `cancelled` from `conclusion`, else `state` |
 | `threads` | unresolved threads: `blocking` when a human or mergewake wrote it, `other` when a bot did |
 | `findings` | the unresolved threads, with `thread_id`, `path:line`, `severity`, `url`, `replied`, and the first line of the excerpt with HTML and emphasis markers removed |
 | `review` | the review passes recorded for the current head (`pass`, `lens`, `family`); `done` when there is one |

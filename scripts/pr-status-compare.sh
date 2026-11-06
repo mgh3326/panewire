@@ -53,12 +53,12 @@ gh_check_counts() {
 panewire_check_counts() {
   jq -r '[(.snapshot // .mergewake).checks[].state] | group_by(.) | map("\(.[0]):\(length)") | sort | join(",")'
 }
-# hk's record onto mergewake's vocabulary: checks of the current head that are
-# required or not yet known to be optional (`required` is null on a webhook write),
+# hk's record onto mergewake's vocabulary: checks of the current head (hk keeps
+# earlier heads' rows) that are required or not yet known to be optional (`required` is null on a webhook write),
 # state as the open, merged or closed class, open findings as unresolved threads.
 hk_class() { jq -r '.change.state | if . == "merged" then "MERGED" elif . == "closed" then "CLOSED" else "OPEN" end'; }
 hk_check_counts() {
-  jq -r '[.checks[] | select((.required != false) and (.gone | not)) | (.conclusion // .state | ascii_downcase)
+  jq -r '.change.head_sha as $head | [.checks[] | select(.head_sha == $head and (.required != false) and (.gone | not)) | (.conclusion // .state | ascii_downcase)
           | if . == "success" then "green" elif . == "failure" or . == "error" or . == "timed_out" or . == "startup_failure" or . == "action_required" then "red" elif . == "cancelled" then "cancelled" elif . == "skipped" or . == "neutral" then "skipped" else "pending" end]
          | group_by(.) | map("\(.[0]):\(length)") | sort | join(",")'
 }
