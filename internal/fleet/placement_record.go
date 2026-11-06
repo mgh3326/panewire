@@ -196,6 +196,9 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 		hosts, _ := s.Sel["hosts"].([]any)
 		for _, raw := range hosts {
 			host, _ := raw.(map[string]any)
+			if pass, _ := host["pass"].(int); pass > 1 {
+				continue // the credit band retries hosts pass 1 already listed
+			}
 			row := placementCandidateRecord{Host: str(host, "host"), Outcome: "skipped", Reason: placementSkipReason(str(host, "outcome"))}
 			if row.Host == d.execution.Host && (d.placed || d.started) {
 				row.Outcome, row.Reason = "chosen", "available"

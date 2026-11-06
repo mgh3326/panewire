@@ -152,9 +152,12 @@ type hostTry struct {
 
 // hostTrace explains one host's part in host-first selection.
 type hostTrace struct {
-	drops   []readinessDrop
-	host    selHost
-	rank    int
+	drops []readinessDrop
+	host  selHost
+	rank  int
+	// pass is the band the row belongs to: 1 for the ranked candidates, 2 for
+	// the credit band tried only when pass 1 chose nothing.
+	pass    int
 	missing []string
 	tries   []hostTry
 	outcome string
@@ -175,6 +178,7 @@ func (t hostTrace) record() map[string]any {
 	}
 	if t.rank > 0 {
 		row["rank"] = t.rank
+		row["pass"] = t.pass
 	}
 	if h.load != nil {
 		row["load_ratio"] = *h.load
@@ -269,31 +273,20 @@ func capsGap(hosts []selHost, required []string) string {
 // host for the candidate, and an unreachable host is skipped for the rest. A host
 // whose present candidates are all refused is skipped, not fatal.
 //
-// Quota policy, including expiring credit, orders rungs only inside a host.
-// See docs/placement.md for the selection order and trace fields.
+// Credit is a fleet-wide last band. Pass 1 walks the ranked hosts with every
+// candidate except plain credit and the pools ranked behind credit; pass 2
+// walks the same hosts with those, only when pass 1 chose nothing. Quota
+// policy, including expiring credit, still orders rungs inside a host in each
+// pass: expiring credit is waste-risk, so it stays in pass 1. See
+// docs/placement.md for the selection order and trace fields.
 func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, pending []*selCand) {
 	ranked := rankHosts(sp.hosts)
-	refusedOn := map[*selCand]string{}
-	exhausted := map[string]hostTry{}
+	// Order each host's present candidates once, on the whole host, so the
+	// credit-pacing rule sees every candidate the host holds. The passes then
+	// take their share in that order.
+	bands := make([][2][]*selCand, len(ranked))
+	creditBand := false
 	for i, h := range ranked {
-		t := hostTrace{host: h, rank: i + 1, missing: missingCaps(h.cfg, p.req.tags), drops: sp.dropsOn(h.name)}
-		if p.chosen != nil {
-			t.outcome = "not_tried"
-			p.hosts = append(p.hosts, t)
-			continue
-		}
-		down := ""
-		if why := sp.unreachable[h.name]; why != "" {
-			down = "host_unavailable:" + why
-		}
-		unreachable := down
-		// Classification may have refused an account before admission. Keep
-		// those rungs in the host trace even though they never reach the gate.
-		for _, c := range p.cands {
-			if c.reason != "" && slices.ContainsFunc(c.hosts, func(x selHost) bool { return x.name == h.name }) && !slices.Contains(pending, c) {
-				t.tries = append(t.tries, hostTry{cand: c, result: "refused", reason: c.reason, code: c.code})
-			}
-		}
 		var present []*selCand
 		for _, c := range pending {
 			if slices.ContainsFunc(c.hosts, func(x selHost) bool { return x.name == h.name }) {
@@ -302,13 +295,81 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 		}
 		orderSelCands(present)
 		for _, c := range present {
-			if refusal, ok := exhausted[c.accountKey]; ok {
+			band := 0
+			if c.behindCredit || c.creditPool && !c.risk {
+				band, creditBand = 1, true
+			}
+			bands[i][band] = append(bands[i][band], c)
+		}
+	}
+	st := &hostAdmission{refusedOn: map[*selCand]string{}, exhausted: map[string]hostTry{}, down: map[string]string{}}
+	sp.admitPass(ctx, s, p, pending, ranked, st, 1, func(i int) []*selCand { return bands[i][0] })
+	if p.chosen == nil && creditBand {
+		sp.admitPass(ctx, s, p, pending, ranked, st, 2, func(i int) []*selCand { return bands[i][1] })
+	}
+	for _, h := range sp.hosts {
+		if h.fit != "" {
+			p.hosts = append(p.hosts, hostTrace{host: h, missing: missingCaps(h.cfg, p.req.tags), outcome: h.fit})
+		}
+	}
+	for _, c := range pending {
+		if p.chosen != nil && c.outcome == "" {
+			c.outcome = "below_choice"
+		}
+	}
+}
+
+// hostAdmission is the state one decision's passes share: refusals about an
+// account, or about a rung, hold in the later pass too.
+type hostAdmission struct {
+	refusedOn map[*selCand]string
+	exhausted map[string]hostTry
+	down      map[string]string
+}
+
+// admitPass walks the ranked hosts once with the candidates cands(i) gives
+// for the i-th host, and records one trace row per host for this pass.
+func (sp *selPresence) admitPass(ctx context.Context, s Spawn, p *selPlan, pending []*selCand, ranked []selHost, st *hostAdmission, pass int, cands func(int) []*selCand) {
+	for i, h := range ranked {
+		present := cands(i)
+		if pass > 1 && len(present) == 0 {
+			// Pass 1 already traced this host's readiness; a host with no
+			// credit-band candidate has nothing to add.
+			continue
+		}
+		t := hostTrace{host: h, rank: i + 1, pass: pass, missing: missingCaps(h.cfg, p.req.tags)}
+		if pass == 1 {
+			t.drops = sp.dropsOn(h.name)
+		}
+		if p.chosen != nil {
+			t.outcome = "not_tried"
+			p.hosts = append(p.hosts, t)
+			continue
+		}
+		unreachable := ""
+		if why := sp.unreachable[h.name]; why != "" {
+			unreachable = "host_unavailable:" + why
+		}
+		down, ok := st.down[h.name]
+		if !ok {
+			down = unreachable
+		}
+		// Classification may have refused an account before admission. Keep
+		// those rungs in the host trace, once, even though they never reach
+		// the gate.
+		for _, c := range p.cands {
+			if pass == 1 && c.reason != "" && slices.ContainsFunc(c.hosts, func(x selHost) bool { return x.name == h.name }) && !slices.Contains(pending, c) {
+				t.tries = append(t.tries, hostTry{cand: c, result: "refused", reason: c.reason, code: c.code})
+			}
+		}
+		for _, c := range present {
+			if refusal, ok := st.exhausted[c.accountKey]; ok {
 				c.reason, c.code, c.outcome = refusal.reason, refusal.code, "dropped:quota_exhausted"
 				refusal.cand = c
 				t.tries = append(t.tries, refusal)
 				continue
 			}
-			if on, refused := refusedOn[c]; refused {
+			if on, refused := st.refusedOn[c]; refused {
 				t.tries = append(t.tries, hostTry{cand: c, result: "skipped", reason: "refused_on:" + on + ":" + c.reason, code: c.code})
 				continue
 			}
@@ -338,13 +399,14 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 			}
 			t.tries = append(t.tries, hostTry{cand: c, result: "refused", reason: c.reason, code: c.code})
 			if c.code == outcomeQuotaExhausted && c.reason != "projected_exhaust" {
-				exhausted[c.accountKey] = hostTry{result: "skipped", reason: "refused_on:" + h.name + ":" + c.reason, code: c.code}
+				st.exhausted[c.accountKey] = hostTry{result: "skipped", reason: "refused_on:" + h.name + ":" + c.reason, code: c.code}
 			}
 			switch {
 			case !hostGateFailure(err):
-				refusedOn[c] = h.name
+				st.refusedOn[c] = h.name
 			case c.code == outcomeNoEligibleHost:
 				down = "host_unavailable:" + c.reason
+				st.down[h.name] = down
 			}
 		}
 		switch {
@@ -361,15 +423,5 @@ func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, 
 			t.outcome = "all_refused"
 		}
 		p.hosts = append(p.hosts, t)
-	}
-	for _, h := range sp.hosts {
-		if h.fit != "" {
-			p.hosts = append(p.hosts, hostTrace{host: h, missing: missingCaps(h.cfg, p.req.tags), outcome: h.fit})
-		}
-	}
-	for _, c := range pending {
-		if p.chosen != nil && c.outcome == "" {
-			c.outcome = "below_choice"
-		}
 	}
 }

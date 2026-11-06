@@ -47,9 +47,18 @@ On each host in that order, selection considers only the accounts it holds
 and the rungs its harnesses can launch. Grade, role, routing, effort, and seat
 checks still apply. The quota policy orders those rungs within that host:
 waste, free, ranked, credit, including the existing waste-risk, expiring-credit,
-and credit-pacing rules. Expiring credit competes with waste-risk subscriptions by remaining percentage divided by hours to expiry. A credit balance on another host cannot promote that
-host or reorder this host's rungs. The first admitted host, rung, and account
-wins. A host whose accounts are exhausted or unknown is skipped.
+and credit-pacing rules. Expiring credit competes with waste-risk subscriptions by remaining percentage divided by hours to expiry.
+
+Credit is a fleet-wide last band. Selection walks the ranked hosts twice.
+Pass 1 tries every candidate except plain credit and the pools ranked behind
+credit (a subscription paced to use up its window, on a host that also holds
+credit worth spending). Pass 2 walks the same hosts again with those
+candidates, credit first, and runs only when pass 1 admitted nothing on any
+host. Expiring credit is waste-risk, so it stays in pass 1 and keeps its
+urgency order against waste-risk subscriptions. The first admitted host,
+rung, and account wins. A host whose accounts are exhausted or unknown is
+skipped. A credit candidate left unchosen because pass 1 admitted another
+account records `below_choice`. A credit balance on another host still cannot reorder this host's rungs.
 
 Measured quota exhaustion is cached by account for the decision. Several
 hosts holding one account share one quota and do not repeat its exhausted
@@ -59,7 +68,9 @@ Explicit `-m PROFILE`, `--host`, and hub-directed spawns keep their existing
 placement and admission paths.
 
 The `job.placement` event's `selection` object and `plan --json` include
-`host_order` and each host's `rank`, `tried` rungs, and `admission_outcome`.
+`host_order` and each host's `rank`, `pass` (1, or 2 for the credit band),
+`tried` rungs, and `admission_outcome`. A host appears once per pass that tried
+it; pass 2 rows exist only for hosts that hold a credit-band candidate.
 An attempt records `admitted`, `quota_exhausted`, `quota_unknown`, or `no_rung`.
 Hosts after the winner record `not_tried`. The existing `outcome`, `result`,
 and readiness-drop fields retain the more specific host and rung reasons.
