@@ -9,22 +9,11 @@ import (
 // usage updates after a job becomes terminal. Reap reads replace completion
 // reads only when they contain figures.
 func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) {
-	session, ok := receiptHarnessSession(j.Receipt)
+	usage, ok := a.readJobUsage(ctx, j, atReap)
 	if !ok {
 		return
 	}
-	if j.Pane != "" {
-		if live := a.harnessSession(ctx, j.Pane, session.Kind); live.Source != "unavailable" {
-			session = live
-		}
-	}
-	usage := UsageReader{Root: a.Home}.Read(session, str(j.Receipt, "cwd"))
-	if usage.Source == "" || atReap && !usage.HasFigures() {
-		return
-	}
-	if e := a.putJobRecord(ctx, j.ID, map[string]any{"usage": usage.Wire()}); e != nil {
-		a.warnUsageOperation("usage write", e)
-	}
+	a.writeJobUsage(ctx, j.ID, usage)
 	if atReap || j.Terminal || usage.Model == "" {
 		return
 	}
@@ -44,6 +33,34 @@ func (a *App) recordJobUsage(ctx context.Context, j Job, atReap bool) {
 	}
 	if e != nil {
 		a.warnUsageOperation("model write", e)
+	}
+}
+
+// readJobUsage reads the job's token usage from its harness session, taking the
+// live session reference from herdr when the pane is listed. A caller that is
+// about to close the pane reads before it closes: once herdr stops listing the
+// pane only the receipt's session is left, which may name none. ok is false when
+// there is nothing to write.
+func (a *App) readJobUsage(ctx context.Context, j Job, atReap bool) (TokenUsage, bool) {
+	session, ok := receiptHarnessSession(j.Receipt)
+	if !ok {
+		return TokenUsage{}, false
+	}
+	if j.Pane != "" {
+		if live := a.harnessSession(ctx, j.Pane, session.Kind); live.Source != "unavailable" {
+			session = live
+		}
+	}
+	usage := UsageReader{Root: a.Home}.Read(session, str(j.Receipt, "cwd"))
+	if usage.Source == "" || atReap && !usage.HasFigures() {
+		return TokenUsage{}, false
+	}
+	return usage, true
+}
+
+func (a *App) writeJobUsage(ctx context.Context, id string, usage TokenUsage) {
+	if e := a.putJobRecord(ctx, id, map[string]any{"usage": usage.Wire()}); e != nil {
+		a.warnUsageOperation("usage write", e)
 	}
 }
 

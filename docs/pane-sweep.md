@@ -41,11 +41,16 @@ When the pane has been not working for at least the grace, the sweep:
    atomically); a pane whose screen cannot be saved is kept;
 2. re-reads the job and the pane immediately before closing, as
    `panewire reap` does, and keeps the pane if either changed;
-3. runs reap's tail: records usage, sets the hk job state (`completed` for
-   `merged` and `done`, `lost` for `dropped`; a record that is already
-   completed, escalated or lost is left alone), closes the pane, releases the
-   job's quota, removes its lane, and records `job.reaped` with reason
-   `task_merged`, `task_done` or `task_dropped`.
+3. reads the job's token usage while herdr still lists the pane, then closes
+   the pane; a failed close keeps the job as it was, with nothing written to
+   hk, and the next sweep tries again;
+4. runs reap's tail: sets the hk job state (`completed` for `merged` and
+   `done`, `lost` for `dropped`; a record that is already completed, escalated
+   or lost is left alone), records the usage it read, releases the job's quota,
+   removes its lane, and records `job.reaped` with reason `task_merged`,
+   `task_done` or `task_dropped`. If the hk write fails, the pane is already
+   closed: the sweep logs a warning and records `job.record_failed`, as reap
+   does, and does not retry the write.
 
 The close runs under the node's acting-command lock, so it never interleaves
 with a `pane.close` or `job.done` from the hub.

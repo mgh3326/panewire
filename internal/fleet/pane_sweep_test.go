@@ -23,6 +23,8 @@ type paneSweepFixture struct {
 	now      time.Time
 	status   map[string]string // pane id → herdr agent_status
 	names    map[string]string // pane id → herdr agent name
+	sessions map[string]string // pane id → herdr agent_session JSON; the row also reports agent claude
+	shut     map[string]bool   // panes closed: herdr stops listing them
 	tasks    map[string]string // task id → hk task state
 	taskErr  error
 	taskRead int
@@ -33,7 +35,7 @@ func newPaneSweepFixture(t *testing.T) *paneSweepFixture {
 	t.Helper()
 	a := testApp(t)
 	f := &paneSweepFixture{t: t, a: a, store: a.JobStore.(*fakeJobStore), now: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
-		status: map[string]string{}, names: map[string]string{}, tasks: map[string]string{}}
+		status: map[string]string{}, names: map[string]string{}, sessions: map[string]string{}, shut: map[string]bool{}, tasks: map[string]string{}}
 	a.Now = func() time.Time { return f.now }
 	f.runner = &fakeRunner{}
 	f.runner.Do = func(c Command) Result {
@@ -42,10 +44,20 @@ func newPaneSweepFixture(t *testing.T) *paneSweepFixture {
 		case c.Name == "herdr" && line == "agent list":
 			var rows []string
 			for pane, status := range f.status {
-				rows = append(rows, fmt.Sprintf(`{"pane_id":%q,"tab_id":"t-%s","name":%q,"agent_status":%q}`, pane, pane, f.names[pane], status))
+				if f.shut[pane] {
+					continue
+				}
+				extra := ""
+				if session := f.sessions[pane]; session != "" {
+					extra = `,"agent":"claude","agent_session":` + session
+				}
+				rows = append(rows, fmt.Sprintf(`{"pane_id":%q,"tab_id":"t-%s","name":%q,"agent_status":%q%s}`, pane, pane, f.names[pane], status, extra))
 			}
 			slices.Sort(rows)
 			return Result{Out: `{"result":{"agents":[` + strings.Join(rows, ",") + `]}}`}
+		case c.Name == "herdr" && strings.HasPrefix(line, "pane close "):
+			f.shut[strings.TrimPrefix(line, "pane close ")] = true
+			return Result{}
 		case c.Name == "herdr" && strings.HasPrefix(line, "pane read "):
 			return Result{Out: "last screen of " + strings.TrimPrefix(line, "pane read ")}
 		}
@@ -437,6 +449,29 @@ func TestPaneSweepWritesTheRecordOnlyAfterThePaneCloses(t *testing.T) {
 	}
 	if len(order.closesAtPut) == 0 || slices.Contains(order.closesAtPut, 0) {
 		t.Fatalf("hk written before the pane closed: closes at each put = %v", order.closesAtPut)
+	}
+}
+
+// herdr stops listing a pane once it is closed, so the live session reference a
+// harness reports is gone by the time the sweep writes usage. A job whose
+// receipt names no session therefore has its usage read before the close.
+func TestPaneSweepReadsUsageBeforeThePaneCloses(t *testing.T) {
+	f := newPaneSweepFixture(t)
+	claudeFixture(t, f.a.Home)
+	pane := f.job("j", "worker", "42", map[string]any{"cwd": testCWD, "harness_session": map[string]any{"kind": "claude", "id": "unknown", "source": "unavailable"}})
+	f.sessions[pane] = `{"agent":"claude","kind":"id","value":"` + testClaudeID + `","source":"herdr:claude"}`
+	f.tasks["42"] = "merged"
+	f.at(0)
+	f.at(11)
+	if !slices.Equal(f.closed(), []string{pane}) {
+		t.Fatalf("pane not closed: %v", f.closed())
+	}
+	rec := f.store.record(t, "j")
+	if rec["state"] != "completed" {
+		t.Fatalf("record = %v", rec)
+	}
+	if got := usageOf(t, rec); got["input_tokens"] != int64(150) {
+		t.Fatalf("usage = %v, want the live session's figures", got)
 	}
 }
 
