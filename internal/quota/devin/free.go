@@ -78,25 +78,28 @@ func (c Config) cacheDir() string {
 // file pacelever and `observe devin-free-limit` write: exhausted with the
 // record's reset while one holds, unknown when a record's times cannot be read
 // (a damaged record holds, it does not admit), else available. A record file
-// that is present but cannot be read or parsed is unknown too, never available:
+// that is present but cannot be read, parsed or has no `records` object is unknown too, never available:
 // only an absent file means no exceed was ever recorded. When several records
 // hold, the one that ends last wins.
 func LocalFree(cfg Config) func(now time.Time) *shared.FreeBucket {
 	return func(now time.Time) *shared.FreeBucket {
+		// records must be present and an object: {} or "records": null is a
+		// truncated store that may have held an active exceed.
 		var store struct {
-			Records map[string]limitRecord `json:"records"`
+			Records *map[string]limitRecord `json:"records"`
 		}
 		data, err := cfg.readFileErr(filepath.Join(cfg.cacheDir(), "devin-free-limit.json"))
 		switch {
 		case errors.Is(err, fs.ErrNotExist):
 			return &shared.FreeBucket{State: shared.FreeAvailable}
-		case err != nil || !decodeJSONObject(data, &store):
+		case err != nil || !decodeJSONObject(data, &store) || store.Records == nil:
 			return &shared.FreeBucket{State: shared.FreeUnknown}
 		}
+		records := *store.Records
 		var holds *time.Time
 		unknown := false
 		for _, id := range cfg.limitIdentities() {
-			record, ok := store.Records[id]
+			record, ok := records[id]
 			if !ok {
 				continue
 			}

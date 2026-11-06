@@ -247,6 +247,11 @@ shared store flow. It has a switch and ships in [shadow](#shadow-and-native).
   publishes `{buckets: [], free_bucket}` and the refresh succeeds with no paid
   window (pacelever's rule); only a 429 is remembered, backing the paid probe off
   for its `Retry-After` (300 s default) while the free state keeps publishing.
+- **Store requirement.** Publishing a devin reading sends `free_bucket`, which
+  the store accepts since handoffkeep `c8cf75f4` ("Accept additive free_bucket on
+  shared quota observations", hk 2334, #96). Do not flip devin native on a host
+  whose hub store predates it: the publish would fail `shared_publish_failed`
+  (pacelever's devin publication needs the same build).
 - **Shared store flow** as for codex: a reading stays fresh for 300 s, except
   that **the wait for another host's measurement is bounded at 15 s** (not two
   lease windows): past it the refresh ends `shared_pending` instead of holding a

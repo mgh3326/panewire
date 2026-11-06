@@ -349,3 +349,31 @@ func TestFetchProbeStartFailureIsProbeError(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+// A read can end in the middle of a line. The panel is accepted only after the
+// screen has been quiet, so "Daily: 40%" followed by " left" is 60% used, not
+// 40%, and a weekly line that arrives with the next read is not lost.
+func TestProbeWaitsForTheScreenToSettleBeforeParsing(t *testing.T) {
+	var sawUsage bool
+	script := func(typed string, f *fakeTerminal) {
+		switch typed {
+		case "/usage":
+			sawUsage = true
+		case "\r":
+			if sawUsage {
+				f.emit("Usage\r\nDaily: 40%")
+				f.emit(" left \u00b7 resets in 3h 5m\r\n")
+				f.emit("Weekly: 70% left \u00b7 resets in 2 days 4 hours\r\n")
+			}
+		}
+	}
+	run := runProbe(t, fixture(t, "tui_prompt_u276d.txt"), script)
+	if run.err != nil {
+		t.Fatalf("probe failed after %s: %v", run.elapsed, run.err)
+	}
+	o, err := ParseScreen(run.text, testNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkBuckets(t, o.Buckets, []wantBucket{{"1d", 60, "2026-11-06T15:05:00Z"}, {"7d", 30, "2026-11-08T16:00:00Z"}})
+}

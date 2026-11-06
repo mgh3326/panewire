@@ -51,6 +51,15 @@ func TestLocalFree(t *testing.T) {
 		{"truncated record file", func() map[string]string { f := loginFiles(); f[cacheFile] = `{"records":{"x":`; return f }(), shared.FreeUnknown, nil},
 		{"record file of the wrong shape", func() map[string]string { f := loginFiles(); f[cacheFile] = `[1]`; return f }(), shared.FreeUnknown, nil},
 		{"empty record file", func() map[string]string { f := loginFiles(); f[cacheFile] = ``; return f }(), shared.FreeUnknown, nil},
+		{"empty object", func() map[string]string { f := loginFiles(); f[cacheFile] = `{}`; return f }(), shared.FreeUnknown, nil},
+		{"records null", func() map[string]string { f := loginFiles(); f[cacheFile] = `{"schema":"s","records":null}`; return f }(), shared.FreeUnknown, nil},
+		{"schema only", func() map[string]string {
+			f := loginFiles()
+			f[cacheFile] = `{"schema":"pacelever.devin-free-limit.v1"}`
+			return f
+		}(), shared.FreeUnknown, nil},
+		{"records an array", func() map[string]string { f := loginFiles(); f[cacheFile] = `{"records":[]}`; return f }(), shared.FreeUnknown, nil},
+		{"a record of the wrong type", func() map[string]string { f := loginFiles(); f[cacheFile] = `{"records":{"x":"text"}}`; return f }(), shared.FreeUnknown, nil},
 		{"no records yet", func() map[string]string { f := loginFiles(); f[cacheFile] = `{"records":{}}`; return f }(), shared.FreeAvailable, nil},
 		{"no record for this host", limits(record(hostUserID("other", 1000), future, observed)), shared.FreeAvailable, nil},
 		{"active exceed", limits(record(host, future, observed)), shared.FreeExhausted, ptr(testNow.Add(3 * time.Hour))},

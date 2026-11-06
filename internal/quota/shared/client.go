@@ -60,7 +60,11 @@ type Observation struct {
 	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
 	Plan        string     `json:"plan,omitempty"`
 	Buckets     []Bucket   `json:"buckets"`
-	// FreeBucket is published by pools with a free tier; nil otherwise.
+	// FreeBucket is published by pools with a free tier; nil otherwise. The
+	// store must accept it before a host publishes one (native devin): an older
+	// handoffkeep rejects the field and the publish fails shared_publish_failed.
+	// It is accepted since handoffkeep c8cf75f4 ("Accept additive free_bucket on
+	// shared quota observations", hk 2334, #96).
 	FreeBucket *FreeBucket `json:"free_bucket,omitempty"`
 }
 

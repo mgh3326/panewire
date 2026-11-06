@@ -193,10 +193,10 @@ func (c Config) drive(ctx context.Context, terminal Terminal) (string, error) {
 			lastChange = clock.Now()
 			stage = "no-prompt"
 			if submitted {
+				// A panel is accepted only once the screen has been quiet (the
+				// tick below): a read can end mid-line, "Daily: 40%" before
+				// " left", and parse as a different number.
 				stage = "unparsed"
-				if parsed() {
-					return string(out.b), nil
-				}
 			}
 		case <-ticks:
 			clean := cleanScreen(string(out.b))
