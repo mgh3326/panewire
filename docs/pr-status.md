@@ -92,8 +92,9 @@ owner/name#152 open head=1c4231f blocking=? checks=1/3 green pending:1 red:1 obs
 
 `blocking=?` and the `?` in a findings line mean gh does not know them. The
 fallback runs `gh pr view --json state,headRefOid,isDraft,mergeable,statusCheckRollup`
-(status) or one `gh api graphql` review-thread query (findings) with gh's own
-authentication; panewire adds nothing to its arguments or environment. If gh
+(status) or a `gh api graphql` review-thread query (findings, 100 threads a
+page, at most 10 pages; a longer PR gets a note that the list is incomplete)
+with gh's own authentication; panewire adds nothing to its arguments or environment. If gh
 fails too, the command exits 4 and names both failures.
 
 ## Transport

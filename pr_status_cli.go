@@ -242,7 +242,39 @@ func runPRStatusGH(args ...string) ([]byte, error) {
 	return stdout.buf.Bytes(), nil
 }
 
-const prStatusGHThreadsQuery = `query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100){nodes{id isResolved path line comments(first:1){totalCount nodes{body url}}}}}}}`
+// prStatusGHThreadPages bounds the review-thread pagination of the gh fallback
+// (100 threads a page); a PR with more threads gets a note, never a silent cut.
+const prStatusGHThreadPages = 10
+
+const prStatusGHThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved path line comments(first:1){totalCount nodes{body url}}}}}}}`
+
+type prStatusGHThreadsPage struct {
+	Data struct {
+		Repository struct {
+			PullRequest struct {
+				ReviewThreads struct {
+					PageInfo struct {
+						HasNextPage bool   `json:"hasNextPage"`
+						EndCursor   string `json:"endCursor"`
+					} `json:"pageInfo"`
+					Nodes []struct {
+						ID         string `json:"id"`
+						IsResolved bool   `json:"isResolved"`
+						Path       string `json:"path"`
+						Line       *int   `json:"line"`
+						Comments   struct {
+							TotalCount int `json:"totalCount"`
+							Nodes      []struct {
+								Body string `json:"body"`
+								URL  string `json:"url"`
+							} `json:"nodes"`
+						} `json:"comments"`
+					} `json:"nodes"`
+				} `json:"reviewThreads"`
+			} `json:"pullRequest"`
+		} `json:"repository"`
+	} `json:"data"`
+}
 
 func fallbackPRStatusGH(view *prStatusView, args nodePRStatusArgs, needFindings bool, why string) error {
 	view.Source = prSourceGH
@@ -250,53 +282,46 @@ func fallbackPRStatusGH(view *prStatusView, args nodePRStatusArgs, needFindings 
 	view.Notes = []string{"fell back to gh: " + why}
 	if needFindings {
 		owner, name, _ := strings.Cut(args.Repo, "/")
-		out, err := runPRStatusGH("api", "graphql", "-f", "query="+prStatusGHThreadsQuery, "-f", "owner="+owner, "-f", "name="+name, "-F", "number="+strconv.Itoa(args.PR))
-		if err != nil {
-			return err
-		}
-		var body struct {
-			Data struct {
-				Repository struct {
-					PullRequest struct {
-						ReviewThreads struct {
-							Nodes []struct {
-								ID         string `json:"id"`
-								IsResolved bool   `json:"isResolved"`
-								Path       string `json:"path"`
-								Line       *int   `json:"line"`
-								Comments   struct {
-									TotalCount int `json:"totalCount"`
-									Nodes      []struct {
-										Body string `json:"body"`
-										URL  string `json:"url"`
-									} `json:"nodes"`
-								} `json:"comments"`
-							} `json:"nodes"`
-						} `json:"reviewThreads"`
-					} `json:"pullRequest"`
-				} `json:"repository"`
-			} `json:"data"`
-		}
-		if json.Unmarshal(out, &body) != nil {
-			return errors.New("gh answered unreadable review threads")
-		}
 		view.GHThreads = []PRStatusFinding{}
-		for _, thread := range body.Data.Repository.PullRequest.ReviewThreads.Nodes {
-			if thread.IsResolved {
-				continue
+		cursor := ""
+		for page := 1; ; page++ {
+			argv := []string{"api", "graphql", "-f", "query=" + prStatusGHThreadsQuery, "-f", "owner=" + owner, "-f", "name=" + name, "-F", "number=" + strconv.Itoa(args.PR)}
+			if cursor != "" {
+				argv = append(argv, "-f", "after="+cursor)
 			}
-			location := thread.Path
-			if thread.Line != nil {
-				location += ":" + strconv.Itoa(*thread.Line)
+			out, err := runPRStatusGH(argv...)
+			if err != nil {
+				return err
 			}
-			finding := PRStatusFinding{ID: thread.ID, Location: location, AuthorReplied: thread.Comments.TotalCount > 1}
-			if len(thread.Comments.Nodes) > 0 {
-				finding.Summary = firstLine(thread.Comments.Nodes[0].Body)
-				finding.URL = thread.Comments.Nodes[0].URL
+			var body prStatusGHThreadsPage
+			if json.Unmarshal(out, &body) != nil {
+				return errors.New("gh answered unreadable review threads")
 			}
-			view.GHThreads = append(view.GHThreads, finding)
+			threads := body.Data.Repository.PullRequest.ReviewThreads
+			for _, thread := range threads.Nodes {
+				if thread.IsResolved {
+					continue
+				}
+				location := thread.Path
+				if thread.Line != nil {
+					location += ":" + strconv.Itoa(*thread.Line)
+				}
+				finding := PRStatusFinding{ID: thread.ID, Location: location, AuthorReplied: thread.Comments.TotalCount > 1}
+				if len(thread.Comments.Nodes) > 0 {
+					finding.Summary = firstLine(thread.Comments.Nodes[0].Body)
+					finding.URL = thread.Comments.Nodes[0].URL
+				}
+				view.GHThreads = append(view.GHThreads, finding)
+			}
+			if !threads.PageInfo.HasNextPage || threads.PageInfo.EndCursor == "" {
+				return nil
+			}
+			if page == prStatusGHThreadPages {
+				view.Notes = append(view.Notes, fmt.Sprintf("gh listed only the first %d review threads; the findings list is incomplete, read the rest with gh", page*100))
+				return nil
+			}
+			cursor = threads.PageInfo.EndCursor
 		}
-		return nil
 	}
 	out, err := runPRStatusGH("pr", "view", strconv.Itoa(args.PR), "--repo", args.Repo, "--json", "state,headRefOid,isDraft,mergeable,statusCheckRollup")
 	if err != nil {

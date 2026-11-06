@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -502,5 +503,82 @@ func TestPRObservedAge(t *testing.T) {
 	}
 	if got := prObservedAge("garbage", prCLINow); got != "unknown" {
 		t.Fatal(got)
+	}
+}
+
+// fakeGHThreadPages installs a gh whose review-thread query answers page 1 until
+// it is asked `after=C1`, then page 2; it logs every call.
+func fakeGHThreadPages(t *testing.T, page1, page2 string) (argvLog string) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("fake gh is a POSIX shell script")
+	}
+	dir := t.TempDir()
+	argvLog = filepath.Join(dir, "gh-argv")
+	for name, contents := range map[string]string{"page1.json": page1, "page2.json": page2} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(contents), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	script := `#!/bin/sh
+printf '%s\n' "$*" >> '` + argvLog + `'
+case "$*" in
+  *"after=C1"*) cat '` + filepath.Join(dir, "page2.json") + `' ;;
+  *) cat '` + filepath.Join(dir, "page1.json") + `' ;;
+esac
+`
+	path := filepath.Join(dir, "gh")
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	previous := prStatusGHExecutable
+	prStatusGHExecutable = path
+	t.Cleanup(func() { prStatusGHExecutable = previous })
+	return argvLog
+}
+
+func ghThreadsPage(hasNext bool, cursor, threads string) string {
+	return fmt.Sprintf(`{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":%t,"endCursor":%q},"nodes":[%s]}}}}}`, hasNext, cursor, threads)
+}
+
+const ghThreadNode = `{"id":%q,"isResolved":false,"path":"f.go","line":%d,"comments":{"totalCount":1,"nodes":[{"body":"finding %s","url":"https://github.com/owner/name/pull/152#r%s"}]}}`
+
+// The gh fallback follows pageInfo, so an unresolved thread past the first 100
+// is listed, and a PR the page cap cannot cover says the list is incomplete.
+func TestPRStatusGHFallbackPaginatesReviewThreads(t *testing.T) {
+	stub := newPRCLIStub(t, 200, prNodeReply(t, prBothDown))
+	connection := prCLIConnection(t, stub.URL)
+
+	log := fakeGHThreadPages(t,
+		ghThreadsPage(true, "C1", fmt.Sprintf(ghThreadNode, "T1", 1, "one", "1")),
+		ghThreadsPage(false, "", fmt.Sprintf(ghThreadNode, "T2", 2, "two", "2")))
+	run := runPR(t, append([]string{"findings", "owner/name", "152"}, connection...)...)
+	if run.code != ExitOK || strings.Count(run.stdout, "\n") != 2 || !strings.Contains(run.stdout, "f.go:1\tfinding one") || !strings.Contains(run.stdout, "f.go:2\tfinding two") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
+	}
+	if strings.Contains(run.stderr, "incomplete") {
+		t.Fatalf("complete list reported as incomplete: %q", run.stderr)
+	}
+	calls := strings.Split(strings.TrimSpace(readLog(t, log)), "\n")
+	if len(calls) != 2 || strings.Contains(calls[0], "after=") || !strings.Contains(calls[1], "-f after=C1") {
+		t.Fatalf("gh calls %q", calls)
+	}
+
+	// Every page claims another one: stop at the cap and say the list is partial.
+	log = fakeGHThreadPages(t, ghThreadsPage(true, "C1", fmt.Sprintf(ghThreadNode, "T1", 1, "one", "1")), ghThreadsPage(true, "C1", fmt.Sprintf(ghThreadNode, "T2", 2, "two", "2")))
+	run = runPR(t, append([]string{"findings", "owner/name", "152", "--json"}, connection...)...)
+	var listed struct {
+		Findings []PRStatusFinding `json:"findings"`
+		Notes    []string          `json:"notes"`
+	}
+	if err := json.Unmarshal([]byte(run.stdout), &listed); err != nil || run.code != ExitOK {
+		t.Fatalf("code=%d stdout=%q err=%v", run.code, run.stdout, err)
+	}
+	if got := len(strings.Split(strings.TrimSpace(readLog(t, log)), "\n")); got != prStatusGHThreadPages {
+		t.Fatalf("gh called %d times, want the cap %d", got, prStatusGHThreadPages)
+	}
+	joined := strings.Join(listed.Notes, "|")
+	if !strings.Contains(joined, "findings list is incomplete") || !strings.Contains(joined, "fell back to gh") {
+		t.Fatalf("notes %v", listed.Notes)
 	}
 }
