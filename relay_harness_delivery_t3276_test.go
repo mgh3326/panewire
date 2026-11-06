@@ -987,3 +987,40 @@ func TestWorkingWakeDeliversOnlyItsOwnSnapshot_t3276(t *testing.T) {
 		t.Fatalf("held rows=%+v err=%v, want the report still held", rows, err)
 	}
 }
+
+// The delivery of a working wake runs on the wait's context. A row an offer
+// holds meanwhile arms a wait of its own, and arm cancels the wait registered
+// for the pane; that must not be the wait this delivery runs on, or the inject
+// and its retry start canceled and the directive is reported unconfirmed.
+func TestWorkingWakeDeliveryIsNotCanceledByAConcurrentArm_t3276(t *testing.T) {
+	rig := t3276Start(t)
+	directive := rig.send("ev-arm-directive", "findings", "[mergewake] findings for the worker")
+	report := rig.send("ev-arm-report", "report", "[worker] progress")
+	sc := t3276Harnesses()["codex-working"]
+	sc.preStatus, sc.postStatus = "blocked", "working"
+	pane := t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+	manager := rig.node.relayBusyManager()
+	manager.offer(t.Context(), t3276Message(report))
+	manager.offer(t.Context(), t3276Message(directive))
+
+	// The wake runs on the context the manager has registered for the pane.
+	waitCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	manager.mu.Lock()
+	manager.waits["w1:pW"] = cancel
+	manager.mu.Unlock()
+	// A concurrent offer arms the pane right after the wake's decision.
+	relayWorkingReleaseGap = func() { manager.arm(context.Background(), "w1:pW") }
+	t.Cleanup(func() { relayWorkingReleaseGap = nil })
+	rig.drainEvents()
+
+	manager.releaseWorking(waitCtx, "w1:pW", false)
+
+	if got := pane.calls(t, "prompt"); got != 1 {
+		t.Fatalf("prompts=%d, want the directive typed once", got)
+	}
+	kinds, _ := rig.drainEvents()
+	if t3276Count(kinds, "relay.delivered") != 1 || t3276Count(kinds, "relay.unconfirmed") != 0 {
+		t.Fatalf("events=%v, want the directive delivered and not unconfirmed", kinds)
+	}
+}

@@ -750,7 +750,15 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 		}
 	}
 	manager.held[pane] = remaining
+	// Detach this wait, as release does: a row an offer holds from here on arms
+	// a wait of its own, and arm cancels the wait registered for the pane. If
+	// that were the wait this delivery runs on, its inject and its one retry
+	// would start from a canceled context and be reported unconfirmed.
+	delete(manager.waits, pane)
 	manager.mu.Unlock()
+	if relayWorkingReleaseGap != nil {
+		relayWorkingReleaseGap()
+	}
 	manager.deliver(parent, manager.filterDeliverableHeld(parent, directives), false)
 	manager.reconcileHeld(parent, pane)
 	manager.arm(context.Background(), pane)
