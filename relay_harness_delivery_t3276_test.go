@@ -619,3 +619,22 @@ func TestDirectiveRetriesOnceWhenProofIsUndecidable_t3276(t *testing.T) {
 		t.Fatalf("design lane got %d escalations, want 1", len(got))
 	}
 }
+
+// The retry-once path belongs to worker directives. An explicit deliver=now on
+// any other event keeps the one send it always had.
+func TestExplicitNowIsNotAnImmediateDirective_t3276(t *testing.T) {
+	row := func(policy string) []relayHeld {
+		return []relayHeld{{Pane: "w1:pW", Lane: t3276Worker, EventID: 7, DeliverPolicy: policy}}
+	}
+	if !relayGroupImmediate(row(relayDeliverDirective)) {
+		t.Fatal("a directive row must be immediate")
+	}
+	for _, policy := range []string{"now", "idle", "max_wait=30"} {
+		if relayGroupImmediate(row(policy)) {
+			t.Fatalf("deliver=%s must not take the directive retry path", policy)
+		}
+	}
+	if relayGroupImmediate(nil) {
+		t.Fatal("an empty group is not immediate")
+	}
+}

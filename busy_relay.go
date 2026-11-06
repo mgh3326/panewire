@@ -952,10 +952,11 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 }
 
 // relayGroupImmediate reports whether every row in group is a worker directive
-// the hub marked deliver=now: sent at once whatever the pane is doing.
+// the hub marked deliver=directive: sent at once unless the pane is blocked.
+// An explicit deliver=now keeps its established single send.
 func relayGroupImmediate(group []relayHeld) bool {
 	for _, item := range group {
-		if (item.DeliverPolicy != "now" && item.DeliverPolicy != relayDeliverDirective) || item.EventID == 0 || item.Lane == "" {
+		if item.DeliverPolicy != relayDeliverDirective || item.EventID == 0 || item.Lane == "" {
 			return false
 		}
 	}
