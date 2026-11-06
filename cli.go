@@ -37,7 +37,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Usage: panewire COMMAND [arguments]")
-		fmt.Fprintln(os.Stdout, "Commands: spawn, work, lead, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, burst, place, node, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, inbox, job, pr, wait, version, quota")
+		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, burst, place, node, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, inbox, job, pr, wait, version, quota")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, lanesUsage)
 		return ExitOK

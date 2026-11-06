@@ -138,7 +138,7 @@ var spawnRefusals = []spawnRefusal{
 	{match: "task scale", code: "task_scale", hint: "Make --t match the task title's T level, then retry."},
 	{match: "task bound", code: "task_bound", hint: "Use the job id already bound to this task, or a different task for new work."},
 	{match: "task unavailable", code: "task_unavailable", hint: "Run handoffkeep tasks show TASK_ID and restore the task to an available state before retrying."},
-	{match: "--owner", code: "owner_flag", hint: "For lead use --lane and --parent without --owner; for work pass --owner or set PANEWIRE_LANE."},
+	{match: "--owner", code: "owner_flag", hint: "Pass --owner or set PANEWIRE_LANE."},
 	{match: "containment_required", code: "containment_required", hint: "Use --containment hk:<task id> for a pin that works around a problem, or --operator-request REF for an approved pin."},
 	{match: "--override-reason", code: "override_reason_required", hint: "Use -m auto --host auto, or provide --override-reason TEXT for an intentional pin."},
 	{match: "alias", code: "host_alias", hint: "Run panewire hosts and use the canonical host key, or fix the aliases list in the hosts config."},

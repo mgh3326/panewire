@@ -320,7 +320,6 @@ func TestRespawnReplacementSeatSurvivesTheEnvelopes(t *testing.T) {
 	}{
 		{"worker", "worker", "", true},
 		{"implementer", "worker", "implementer", true},
-		{"lead", "worker", "lead", true},
 		{"reader", "worker", "explorer", false},
 		{"verifier", "worker", "verifier", false},
 		{"reviewer", "reviewer", "reviewer", false},

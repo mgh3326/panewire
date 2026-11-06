@@ -113,10 +113,8 @@ func validCatalogGrade(grade string) bool {
 // form "Grade S+, T3"; both are accepted. Grade and scale must be adjacent.
 var taskMarker = regexp.MustCompile(`(?i)(?:\(|\b)grade (S\+|S|A\+|A|B|C),\s*(T[0-3])\b`)
 
-// Check admits one launch row for a seat role. familyGate is the routing
-// table's family_effort opt-in for exactly this escalation rung
-// (routing.familyAdmitsGate); it lets a builder run it.
-func (s Seat) Check(l Launch, role, grade, builderFamily, arm string, host map[string]any, familyGate bool) error {
+// Check admits one launch row for a seat role.
+func (s Seat) Check(l Launch, role, grade, builderFamily, arm string, host map[string]any) error {
 	if !validCatalogGrade(l.Grade) || l.ModelID == "" || (l.Effort == "" && s.needsEffort()) || l.Gate == "" {
 		return fail(exitConfig, "canon launch data incomplete")
 	}
@@ -143,13 +141,10 @@ func (s Seat) Check(l Launch, role, grade, builderFamily, arm string, host map[s
 	if !slices.Contains(roles, role) {
 		return fail(exitSeatRefused, "seat does not allow role %s", role)
 	}
-	if role == "builder" && l.Gate != "default" && !familyGate {
-		return fail(exitSeatRefused, "%s rung is worker/tester only", l.Gate)
-	}
 	if e6 && arm != s.Canon+"@"+l.Effort {
 		return fail(exitSeatRefused, "requires PANEWIRE_E6_ARM=%s@%s", s.Canon, l.Effort)
 	}
-	if grade != "" && role != "builder" && role != "counsel" {
+	if grade != "" && role != "counsel" {
 		n, ok := gradeOrder[grade]
 		if !ok || l.Grade == gradeUnrated || gradeOrder[l.Grade] < n {
 			return fail(exitSeatRefused, "canon grade %s does not cover task grade %s", l.Grade, grade)

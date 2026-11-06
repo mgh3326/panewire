@@ -15,14 +15,14 @@ import (
 const routingBlockV1 = `{
   "version": 1,
   "roles": {
-    "lead":        {"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait"},
+    "consult":     {"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait"},
     "implementer": {"allowed": ["sonnet", "opus", "codex-terra61", "codex-sol", "devin-swe2", "devin-swe2-medium", "devin-swe2-max", "cmd-dsflash41"], "effort": "high", "on_exhaustion": "wait"},
     "explorer":    {"allowed": ["sonnet", "haiku", "codex-luna", "devin-swe2-medium", "agy-flash38-high"], "effort": "medium", "on_exhaustion": "downgrade_to", "downgrade_to": ["haiku", "devin-swe2-medium"]},
     "reviewer":    {"allowed": ["*"], "effort": "high", "on_exhaustion": "escalate", "family_rule": "not_author"},
     "verifier":    {"allowed": ["opus", "codex-terra61"], "effort": "high", "on_exhaustion": "wait", "fixed": true},
     "judge":       {"allowed": ["*"], "effort": "high", "on_exhaustion": "escalate", "family_rule": "not_parent"}
   },
-  "panewire_role_map": {"builder": "lead", "worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "lead"}
+  "panewire_role_map": {"worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "consult"}
 }`
 
 var routingDocV1 = routingDoc(routingBlockV1)
@@ -63,10 +63,10 @@ func routingStamp(t *testing.T, sel *selPlan) map[string]any {
 	return rt
 }
 
-// leadFixture is the incident: a grade A task, the claude pool wasted quota
+// consultFixture is the incident: a grade A task, the claude pool wasted quota
 // with sonnet its cheapest rung, and lead profiles (opus, fable, codex-sol)
 // available above it.
-func leadFixture(t *testing.T) (*App, Spawn, *fakeQuota) {
+func consultFixture(t *testing.T) (*App, Spawn, *fakeQuota) {
 	t.Helper()
 	rows := []CatalogRow{
 		{Profile: "sonnet", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "sonnet-m"},
@@ -88,19 +88,18 @@ func TestRoutingLeadNeverDowngradesToSonnet(t *testing.T) {
 	ctx := context.Background()
 
 	// Control: without routing the incident reproduces — sonnet wins.
-	a, s, _ := leadFixture(t)
-	s.Role = "builder"
+	a, s, _ := consultFixture(t)
+	s.Role = "counsel"
 	sel, e := a.selectFor(ctx, s, selReq{grade: "A", t: s.T, role: s.Role, urgency: urgencyNormal, urgencySource: "default"})
 	if e != nil || sel.chosen.seat.Canon != "sonnet" {
 		t.Fatalf("control: unrouted builder must pick the cheapest rung, sonnet: %v %+v", e, sel)
 	}
 
 	for _, tc := range []struct{ name, role, override string }{
-		{"spawn --role builder", "builder", ""},
-		{"--routing-role lead", "worker", "lead"},
+		{"--routing-role consult", "worker", "consult"},
 		{"--role counsel", "counsel", ""},
 	} {
-		a, s, _ := leadFixture(t)
+		a, s, _ := consultFixture(t)
 		s.Role, s.RoutingRole = tc.role, tc.override
 		sel, e := a.selectProfile(ctx, s)
 		if e != nil {
@@ -113,15 +112,15 @@ func TestRoutingLeadNeverDowngradesToSonnet(t *testing.T) {
 			t.Fatalf("%s: sonnet must be role_filtered, got %v", tc.name, got)
 		}
 		rt := routingStamp(t, sel)
-		if rt["routing_role"] != map[string]string{"builder": "lead", "worker": "lead", "counsel": "consult"}[tc.role] || rt["routing_version"] != 1 || rt["policy_source"] != "hk" {
+		if rt["routing_role"] != map[string]string{"worker": "consult", "counsel": "consult"}[tc.role] || rt["routing_version"] != 1 || rt["policy_source"] != "hk" {
 			t.Fatalf("%s: routing stamp: %v", tc.name, rt)
 		}
 	}
 
 	// Every lead profile refused at its gate while sonnet would still admit:
 	// refuse role_exhausted_wait with the earliest reset, never sonnet.
-	a, s, q := leadFixture(t)
-	s.Role = "builder"
+	a, s, q := consultFixture(t)
+	s.Role = "counsel"
 	q.GateDo = exhaustedGatePools(map[string]string{"sonnet": "claude"})
 	sel, e = a.selectProfile(ctx, s)
 	if exitCode(e) != exitRoleWait || !strings.Contains(e.Error(), reasonRoleExhaustWait) {
@@ -196,8 +195,8 @@ func TestRoutingImplementerKeepsPoolOrder(t *testing.T) {
 // unfiltered with builtin_default.
 func TestRoutingCacheFallback(t *testing.T) {
 	ctx := context.Background()
-	a, s, _ := leadFixture(t)
-	s.Role = "builder"
+	a, s, _ := consultFixture(t)
+	s.Role = "counsel"
 	if _, e := a.selectProfile(ctx, s); e != nil {
 		t.Fatal(e)
 	}
@@ -225,13 +224,13 @@ func TestRoutingCacheFallback(t *testing.T) {
 		t.Fatalf("an unreadable document uses the cache: %v", e)
 	}
 
-	// No cache: lead (builder, counsel, --routing-role lead) and verifier are
+	// No cache: lead (builder, counsel, --routing-role consult) and verifier are
 	// refused; implementer proceeds unfiltered.
 	if e := os.Remove(a.routingCachePath()); e != nil {
 		t.Fatal(e)
 	}
 	serveRouting(a, "")
-	for _, tc := range []struct{ role, override string }{{"builder", ""}, {"counsel", ""}, {"worker", "lead"}, {"tester", ""}} {
+	for _, tc := range []struct{ role, override string }{{"counsel", ""}, {"worker", "consult"}, {"tester", ""}} {
 		s.Role, s.RoutingRole, s.ParentFamily = tc.role, tc.override, "openai"
 		if _, e := a.selectProfile(ctx, s); exitCode(e) != exitConfig {
 			t.Fatalf("%s/%s without hk or cache must exit %d, got %v", tc.role, tc.override, exitConfig, e)
@@ -299,7 +298,7 @@ func TestRoutingOnExhaustion(t *testing.T) {
 	a, s = fixture(map[string]string{"sonnet": "claude", "haiku": "claude"})
 	rows = append(rows, CatalogRow{Profile: "opus", Effort: "high", Grade: "S", Pool: "claude", Gate: "default", ModelID: "opus-m"})
 	a.Quota.(*fakeQuota).CatalogRows = rows
-	s.RoutingRole = "lead"
+	s.RoutingRole = "consult"
 	if sel, e = a.selectProfile(ctx, s); exitCode(e) != exitRoleWait || !strings.HasPrefix(e.Error(), reasonRoleExhaustWait) {
 		t.Fatalf("lead waits: %v", e)
 	}
@@ -326,7 +325,7 @@ func TestRoutingOnExhaustion(t *testing.T) {
 	}
 }
 
-// Acceptance 5: `panewire resolve --role lead --grade A --json` prints the
+// Acceptance 5: `panewire resolve --role consult --grade A --json` prints the
 // profile `plan` chooses and spawns nothing.
 func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 	setup := func() (*App, *fakeRunner, *bytes.Buffer) {
@@ -347,7 +346,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 	}
 
 	a, _, out := setup()
-	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "lead", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult", "--json"}); e != nil {
 		t.Fatalf("plan: %v\n%s", e, out)
 	}
 	var plan map[string]any
@@ -358,12 +357,12 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 	if planChosen["canon"] != "opus" || plan["chosen"].(map[string]any)["seat"] != "opus" {
 		t.Fatalf("plan for a lead picks opus: %v", planChosen)
 	}
-	if rt := plan["selection"].(map[string]any)["routing"].(map[string]any); rt["routing_role"] != "lead" || rt["policy_source"] != "hk" {
+	if rt := plan["selection"].(map[string]any)["routing"].(map[string]any); rt["routing_role"] != "consult" || rt["policy_source"] != "hk" {
 		t.Fatalf("plan stamps the routing: %v", rt)
 	}
 
 	a, fr, out := setup()
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "lead", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--json"}); e != nil {
 		t.Fatalf("resolve: %v\n%s", e, out)
 	}
 	var r resolveResult
@@ -373,7 +372,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 	if r.Profile != planChosen["canon"] || r.Seat != plan["chosen"].(map[string]any)["seat"] || r.Effort != "high" {
 		t.Fatalf("resolve must print plan's choice: %+v", r)
 	}
-	if r.RoutingRole != "lead" || r.RoutingVersion != 1 || r.PolicySource != "hk" {
+	if r.RoutingRole != "consult" || r.RoutingVersion != 1 || r.PolicySource != "hk" {
 		t.Fatalf("resolve stamps the routing: %+v", r)
 	}
 	// The answer is last.
@@ -391,7 +390,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 	// at each scale both choose the same profile and record the same request.
 	for _, scale := range []string{"T1", "T2"} {
 		a, _, out := setup()
-		if e := a.Run(context.Background(), []string{"plan", "--t", scale, "--routing-role", "lead", "--json"}); e != nil {
+		if e := a.Run(context.Background(), []string{"plan", "--t", scale, "--routing-role", "consult", "--json"}); e != nil {
 			t.Fatalf("plan --t %s: %v\n%s", scale, e, out)
 		}
 		var plan map[string]any
@@ -400,7 +399,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 		}
 		planSel := plan["selection"].(map[string]any)
 		a, _, out = setup()
-		if e := a.Run(context.Background(), []string{"resolve", "--role", "lead", "--t", scale, "--json"}); e != nil {
+		if e := a.Run(context.Background(), []string{"resolve", "--role", "consult", "--t", scale, "--json"}); e != nil {
 			t.Fatalf("resolve --t %s: %v\n%s", scale, e, out)
 		}
 		var r resolveResult
@@ -417,7 +416,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 
 	// Text form: the last line is the answer.
 	a, _, out = setup()
-	if e := a.Run(context.Background(), []string{"resolve", "--role", "lead"}); e != nil {
+	if e := a.Run(context.Background(), []string{"resolve", "--role", "consult"}); e != nil {
 		t.Fatal(e)
 	}
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
@@ -425,7 +424,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 		t.Fatalf("text answer last:\n%s", out)
 	}
 
-	for _, args := range [][]string{{"resolve"}, {"resolve", "--role", "boss"}, {"resolve", "--role", "reviewer"}, {"resolve", "--role", "implementer", "--grade", "Z"}, {"resolve", "--role", "lead", "--t", "T9"}} {
+	for _, args := range [][]string{{"resolve"}, {"resolve", "--role", "boss"}, {"resolve", "--role", "reviewer"}, {"resolve", "--role", "implementer", "--grade", "Z"}, {"resolve", "--role", "consult", "--t", "T9"}} {
 		if e := a.Run(context.Background(), args); exitCode(e) != exitUsage {
 			t.Fatalf("%v: want usage exit, got %v", args, e)
 		}
@@ -440,7 +439,7 @@ func TestRoutingPolicyValidation(t *testing.T) {
 		"version":   strings.Replace(routingBlockV1, `"version": 1`, `"version": 2`, 1),
 		"exhaust":   strings.Replace(routingBlockV1, `"on_exhaustion": "escalate", "family_rule": "not_author"`, `"on_exhaustion": "panic"`, 1),
 		"downgrade": strings.Replace(routingBlockV1, `, "downgrade_to": ["haiku", "devin-swe2-medium"]`, ``, 1),
-		"role map":  strings.Replace(routingBlockV1, `"builder": "lead"`, `"builder": "boss"`, 1),
+		"role map":  strings.Replace(routingBlockV1, `"worker": "implementer"`, `"worker": "boss"`, 1),
 		"dup key":   strings.Replace(routingBlockV1, `"version": 1,`, `"version": 1, "version": 1,`, 1),
 	} {
 		if _, e := parseRoutingDoc(routingDoc(block)); e == nil {
@@ -490,7 +489,7 @@ func TestSpawnRecordsRouting(t *testing.T) {
 	}
 
 	a, s, f := setup()
-	s.RoutingRole = "lead"
+	s.RoutingRole = "consult"
 	if e := a.Spawn(context.Background(), s); exitCode(e) != exitSeatRefused || !strings.Contains(e.Error(), reasonRoleNoCandidate) {
 		t.Fatalf("a lead with no lead profile in the catalog is refused: %v", e)
 	}

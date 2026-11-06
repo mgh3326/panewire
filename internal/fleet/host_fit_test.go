@@ -48,8 +48,8 @@ func hostFirstFixture(t *testing.T, role, grade string, rows []CatalogRow, place
 }
 
 var (
-	leadRows   = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "S", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
-	workerRows = []CatalogRow{{Profile: "sonnet", Effort: "high", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "sonnet-m"}}
+	consultRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "S", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
+	workerRows  = []CatalogRow{{Profile: "sonnet", Effort: "high", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "sonnet-m"}}
 )
 
 func TestHostFitPlacement(t *testing.T) {
@@ -63,18 +63,18 @@ func TestHostFitPlacement(t *testing.T) {
 		wantErr                 string
 	}{
 		{
-			name: "unity lead skips the waste account on a non-unity host", role: "builder", grade: "A", tags: "unity", rows: leadRows,
+			name: "unity lead skips the waste account on a non-unity host", role: "counsel", grade: "A", tags: "unity", rows: consultRows,
 			place:    map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
 			load:     map[string]float64{"cloud-small": 0.1, "mac-b": 0.5},
 			wantHost: "mac-b", wantKey: testClaudeB,
 		},
 		{
-			name: "no host declares the cap", role: "builder", grade: "A", tags: "gpu", rows: leadRows,
+			name: "no host declares the cap", role: "counsel", grade: "A", tags: "gpu", rows: consultRows,
 			place:    map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
-			wantCode: exitPlacement, wantErr: "NO_ELIGIBLE_HOST: no account admitted routing role lead; no host declares cap gpu",
+			wantCode: exitPlacement, wantErr: "NO_ELIGIBLE_HOST: no account admitted routing role consult; no host declares cap gpu",
 		},
 		{
-			name: "no single host declares every cap", role: "builder", grade: "A", tags: "unity,linux", rows: leadRows,
+			name: "no single host declares every cap", role: "counsel", grade: "A", tags: "unity,linux", rows: consultRows,
 			place:    map[string]string{"cloud-small": testClaudeA, "mac-b": testClaudeB},
 			wantCode: exitPlacement, wantErr: "no single host declares all caps unity,linux",
 		},
@@ -85,12 +85,12 @@ func TestHostFitPlacement(t *testing.T) {
 		},
 		{
 			// Fitting hosts exist but none holds a login: AUTH_UNAVAILABLE.
-			name: "pi never takes a lead", role: "builder", grade: "B", rows: leadRows,
+			name: "pi never takes a lead", role: "counsel", grade: "B", rows: consultRows,
 			place:    map[string]string{"pi": testClaudeB},
 			wantCode: exitAuthUnavailable, wantErr: "AUTH_UNAVAILABLE",
 		},
 		{
-			name: "an idle pi does not draw a lead from a busier host", role: "builder", grade: "B", rows: leadRows,
+			name: "an idle pi does not draw a lead from a busier host", role: "counsel", grade: "B", rows: consultRows,
 			place:    map[string]string{"pi": testClaudeB, "mac-b": testClaudeB},
 			load:     map[string]float64{"pi": 0.0, "mac-b": 0.8},
 			wantHost: "mac-b", wantKey: testClaudeB,
@@ -172,7 +172,7 @@ tags = ["linux"]
 	if got := hostCaps(c.Local); strings.Join(got, ",") != "macos,unity" {
 		t.Fatalf("local caps %v", got)
 	}
-	if r := roleRefusal(c.Hosts["pi"], "builder", ""); r != "role_not_accepted:builder" {
+	if r := roleRefusal(c.Hosts["pi"], "counsel", ""); r != "role_not_accepted:counsel" {
 		t.Fatalf("pi lead: %q", r)
 	}
 	if r := roleRefusal(c.Hosts["pi"], "worker", "A"); r != "grade_not_accepted:A" {
@@ -181,7 +181,7 @@ tags = ["linux"]
 	if r := roleRefusal(c.Hosts["pi"], "tester", "B"); r != "" {
 		t.Fatalf("pi tester B: %q", r)
 	}
-	if r := roleRefusal(c.Hosts["cloud-small"], "builder", ""); r != "" {
+	if r := roleRefusal(c.Hosts["cloud-small"], "counsel", ""); r != "" {
 		t.Fatalf("unlimited host refused: %q", r)
 	}
 	for name, body := range map[string]string{
@@ -219,11 +219,11 @@ tags = ["linux"]
 // The placement plan applies the same limits.
 func TestPlacementPlanHostFit(t *testing.T) {
 	a, _, _, _ := hostFirstFixture(t, "worker", "B", workerRows, nil, map[string]float64{"mac-b": 0.5, "cloud-small": 0.2, "cloud-tiny": 0.1, "pi": 0.1})
-	p, err := a.plan(context.Background(), Spawn{Role: "builder"}, "", 0)
+	p, err := a.plan(context.Background(), Spawn{Role: "counsel"}, "", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
-	for host, want := range map[string]string{"pi": "role_not_accepted:builder", "cloud-tiny": "role_not_accepted:builder"} {
+	for host, want := range map[string]string{"pi": "role_not_accepted:counsel", "cloud-tiny": "role_not_accepted:counsel"} {
 		if c := p.candidate(host); c.eligible || c.outcome != want {
 			t.Fatalf("%s: eligible=%t outcome=%q", host, c.eligible, c.outcome)
 		}
@@ -255,7 +255,7 @@ func TestHostFitLeadIgnoresStaleTaskGrade(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// Task title "(grade A, T1)": A is in cloud-tiny's grades list.
-			a, s, _, _ := hostFirstFixture(t, "builder", "A", leadRows, tc.place, tc.load)
+			a, s, _, _ := hostFirstFixture(t, "counsel", "A", consultRows, tc.place, tc.load)
 			delete(a.Config.Hosts["cloud-tiny"], "roles")
 			sel, err := a.selectProfile(context.Background(), s)
 			if tc.wantHost == "" {

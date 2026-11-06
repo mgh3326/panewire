@@ -17,9 +17,9 @@ import (
 //     fails closed for that host only; other hosts stay eligible.
 //   - roles: the spawn roles the host accepts. Unset accepts every role.
 //   - grades: the task grades the host accepts. Unset accepts every grade. A
-//     lead or consult has no grade, so a host with grades set refuses it.
+//     consult has no grade, so a host with grades set refuses it.
 
-var spawnRoles = []string{"worker", "builder", "tester", "reviewer", "counsel"}
+var spawnRoles = []string{"worker", "tester", "reviewer", "counsel"}
 var hostCapabilities = []string{"macos", "linux", "unity", "xcode", "gpu", "heavy-go"}
 
 // hostCaps returns the declared capabilities of a host: tags and caps merged.
@@ -46,7 +46,7 @@ func missingCaps(cfg map[string]any, required []string) []string {
 }
 
 // roleRefusal names why a host does not take this role and grade, or "".
-// An empty grade is a lead or consult, which a grade-limited host refuses.
+// An empty grade is a consult, which a grade-limited host refuses.
 func roleRefusal(cfg map[string]any, role, grade string) string {
 	if roles := stringsValue(cfg, "roles"); len(roles) > 0 && !slices.Contains(roles, role) {
 		return "role_not_accepted:" + role
@@ -86,6 +86,9 @@ func validHostFit(h map[string]any, key string) error {
 			return fail(exitConfig, "%s.%s must be a nonempty list", key, f.name)
 		}
 		for _, x := range list {
+			if x == "builder" && f.name == "roles" {
+				return fail(exitConfig, "%s.roles lists the retired seat role \"builder\"; delete \"builder\" from %s.roles", key, key)
+			}
 			if s, isStr := x.(string); !isStr || !f.valid(s) {
 				return fail(exitConfig, "%s.%s contains an invalid value %v", key, f.name, x)
 			}

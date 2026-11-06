@@ -142,4 +142,4 @@ Two-slot rotation, a client listing endpoint and hashed-at-rest tokens are
 deferred.
 
 
-Normal `spawn`, `work` and `lead` submissions use the operator-only `POST /v1/spawns` durable operation API. A per-host low-level `spawn@machine` grant does not authorize automatic placement across hosts. The older `/v1/spawn` interface is a synchronous destination-pinned RPC surface; its in-memory waiters do not own accepted operations. See [durable spawn operations](hub-spawn-operations.md).
+Normal `spawn` and `work` submissions use the operator-only `POST /v1/spawns` durable operation API. A per-host low-level `spawn@machine` grant does not authorize automatic placement across hosts. The older `/v1/spawn` interface is a synchronous destination-pinned RPC surface; its in-memory waiters do not own accepted operations. See [durable spawn operations](hub-spawn-operations.md).

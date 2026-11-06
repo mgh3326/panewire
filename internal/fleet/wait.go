@@ -83,9 +83,6 @@ func (a *App) waitJob(ctx context.Context, s Spawn, delegated ...bool) error {
 		return e
 	}
 	lane := s.Owner
-	if s.Role == "builder" && s.Parent != "" {
-		lane = s.Parent
-	}
 	if lane == "" {
 		lane = "default"
 	}

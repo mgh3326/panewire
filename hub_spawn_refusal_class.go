@@ -25,7 +25,7 @@ func spawnRefusalReplayable(reason string) bool {
 
 // spawnSubmitterLane is the lane that submitted the spawn, when it is not the
 // task owner. `--requested-by` names the submitting session on the operator
-// flag set; `--parent` is the lane that spawned a lead or builder. `--lane` is
+// flag set; `--parent` is the lane that spawned the job. `--lane` is
 // the spawned pane's own lane, so it never names the submitter.
 func spawnSubmitterLane(args []string) string {
 	for _, flag := range []string{"--requested-by", "--parent"} {

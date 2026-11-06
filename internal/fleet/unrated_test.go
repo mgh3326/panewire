@@ -28,7 +28,7 @@ func TestUnratedCatalogParsers(t *testing.T) {
 func TestUnratedGradedSelection(t *testing.T) {
 	for _, grade := range []string{"C", "B", "A", "A+", "S", "S+"} {
 		t.Run(grade, func(t *testing.T) {
-			a, s, q := leadFixture(t)
+			a, s, q := consultFixture(t)
 			q.CatalogRows = []CatalogRow{
 				{Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"},
 				{Profile: "sonnet", Effort: "high", Grade: "S+", Pool: "claude", Gate: "default", ModelID: "sonnet-m"},
@@ -49,9 +49,9 @@ func TestUnratedGradedSelection(t *testing.T) {
 }
 
 func TestUnratedLeadConsultResolve(t *testing.T) {
-	for _, role := range []string{"lead", "consult"} {
+	for _, role := range []string{"consult"} {
 		t.Run(role, func(t *testing.T) {
-			a, _, q := leadFixture(t)
+			a, _, q := consultFixture(t)
 			q.CatalogRows = []CatalogRow{{Profile: "codex-sol", Effort: "high", Grade: "unrated", Pool: "codex", Gate: "default", ModelID: "sol-m"}}
 			if err := a.resolveCmd(context.Background(), []string{"--role", role, "--json"}); err != nil {
 				t.Fatal(err)
@@ -69,19 +69,19 @@ func TestUnratedLeadConsultResolve(t *testing.T) {
 }
 
 func TestUnratedSeatCheck(t *testing.T) {
-	s := Seat{Canon: "codex-sol", Kind: "codex", Family: "openai", Capability: "standard", Roles: []string{"builder", "counsel", "worker", "tester", "reviewer"}}
+	s := Seat{Canon: "codex-sol", Kind: "codex", Family: "openai", Capability: "standard", Roles: []string{"counsel", "worker", "tester", "reviewer"}}
 	l := Launch{Profile: "codex-sol", ModelID: "sol-m", Effort: "high", Grade: "unrated", Gate: "default"}
 	for _, tc := range []struct {
 		role, grade string
 		want        int
-	}{{"builder", "", 0}, {"counsel", "", 0}, {"worker", "C", exitSeatRefused}, {"tester", "C", exitSeatRefused}, {"reviewer", "C", exitSeatRefused}} {
-		if got := code(s.Check(l, tc.role, tc.grade, "anthropic", "", nil, false)); got != tc.want {
+	}{{"counsel", "", 0}, {"worker", "C", exitSeatRefused}, {"tester", "C", exitSeatRefused}, {"reviewer", "C", exitSeatRefused}} {
+		if got := code(s.Check(l, tc.role, tc.grade, "anthropic", "", nil)); got != tc.want {
 			t.Errorf("%s grade=%q: exit=%d want=%d", tc.role, tc.grade, got, tc.want)
 		}
 	}
 	l.Grade = "unknown"
-	if got := code(s.Check(l, "builder", "", "", "", nil, false)); got != exitConfig {
-		t.Fatalf("unknown grade accepted for lead: exit=%d", got)
+	if got := code(s.Check(l, "counsel", "", "", "", nil)); got != exitConfig {
+		t.Fatalf("unknown grade accepted for consult: exit=%d", got)
 	}
 }
 
@@ -95,7 +95,7 @@ func TestUnratedPlanOutput(t *testing.T) {
 				q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "unrated", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
 				q.GateDo = gatePools(map[string]string{"opus": "claude"})
 				serveRouting(a, routingDocV1)
-				args = []string{"--role", "builder", "--t", "T1"}
+				args = []string{"--role", "counsel", "--t", "T1"}
 			}
 			if asJSON {
 				args = append(args, "--json")

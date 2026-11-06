@@ -10,14 +10,14 @@ import (
 // hk 2595: roles.<role>.family_effort sets a lead/consult family's
 // role-effort rung and opts that exact escalation rung in.
 
-const leadRuleV1 = `"lead":        {"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait"}`
+const consultRuleV1 = `"consult":     {"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait"}`
 
-func leadFamilyEffortBlock(t *testing.T, familyEffort string) string {
+func consultFamilyEffortBlock(t *testing.T, familyEffort string) string {
 	t.Helper()
-	lead := strings.Replace(leadRuleV1, `"on_exhaustion": "wait"}`, `"on_exhaustion": "wait", "family_effort": `+familyEffort+`}`, 1)
-	block := strings.Replace(routingBlockV1, leadRuleV1, lead, 1)
+	lead := strings.Replace(consultRuleV1, `"on_exhaustion": "wait"}`, `"on_exhaustion": "wait", "family_effort": `+familyEffort+`}`, 1)
+	block := strings.Replace(routingBlockV1, consultRuleV1, lead, 1)
 	if block == routingBlockV1 {
-		t.Fatal("routingBlockV1 lead rule moved; update leadRuleV1")
+		t.Fatal("routingBlockV1 lead rule moved; update consultRuleV1")
 	}
 	return block
 }
@@ -25,19 +25,19 @@ func leadFamilyEffortBlock(t *testing.T, familyEffort string) string {
 // Acceptance 1: a valid map parses; a bad effort, an unknown key, or a map
 // on a role without the lead/consult cap is refused by name.
 func TestRoutingFamilyEffortParse(t *testing.T) {
-	p, e := parseRoutingDoc(routingDoc(leadFamilyEffortBlock(t, `{"codex-sol": "xhigh", "opus": "high"}`)))
+	p, e := parseRoutingDoc(routingDoc(consultFamilyEffortBlock(t, `{"codex-sol": "xhigh", "opus": "high"}`)))
 	if e != nil {
 		t.Fatalf("valid family_effort refused: %v", e)
 	}
-	if got := p.Roles["lead"].FamilyEffort; got["codex-sol"] != "xhigh" || got["opus"] != "high" || len(got) != 2 {
+	if got := p.Roles["consult"].FamilyEffort; got["codex-sol"] != "xhigh" || got["opus"] != "high" || len(got) != 2 {
 		t.Fatalf("family_effort not parsed: %v", got)
 	}
 	for name, tc := range map[string]struct{ block, want string }{
-		"bad effort":   {leadFamilyEffortBlock(t, `{"codex-sol": "turbo"}`), `family_effort codex-sol has unknown effort "turbo"`},
-		"empty effort": {leadFamilyEffortBlock(t, `{"codex-sol": ""}`), `unknown effort ""`},
-		"unknown key":  {leadFamilyEffortBlock(t, `{"sonnet": "xhigh"}`), `names unknown profile "sonnet"`},
-		"not a map":    {leadFamilyEffortBlock(t, `"xhigh"`), "cannot unmarshal"},
-		"non-top role": {strings.Replace(routingBlockV1, `"verifier":    {"allowed": ["opus", "codex-terra61"], "effort": "high"`, `"verifier":    {"allowed": ["opus", "codex-terra61"], "family_effort": {"opus": "max"}, "effort": "high"`, 1), "only lead and consult take one"},
+		"bad effort":   {consultFamilyEffortBlock(t, `{"codex-sol": "turbo"}`), `family_effort codex-sol has unknown effort "turbo"`},
+		"empty effort": {consultFamilyEffortBlock(t, `{"codex-sol": ""}`), `unknown effort ""`},
+		"unknown key":  {consultFamilyEffortBlock(t, `{"sonnet": "xhigh"}`), `names unknown profile "sonnet"`},
+		"not a map":    {consultFamilyEffortBlock(t, `"xhigh"`), "cannot unmarshal"},
+		"non-top role": {strings.Replace(routingBlockV1, `"verifier":    {"allowed": ["opus", "codex-terra61"], "effort": "high"`, `"verifier":    {"allowed": ["opus", "codex-terra61"], "family_effort": {"opus": "max"}, "effort": "high"`, 1), "only consult takes one"},
 	} {
 		_, e := parseRoutingDoc(routingDoc(tc.block))
 		if e == nil || !strings.Contains(e.Error(), tc.want) {
@@ -48,7 +48,7 @@ func TestRoutingFamilyEffortParse(t *testing.T) {
 		}
 	}
 	// A wildcard role may name any profile id, OMP profiles included.
-	star := strings.Replace(leadFamilyEffortBlock(t, `{"omp-sol": "xhigh"}`), `"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait", "family`, `"allowed": ["*"], "effort": "high", "on_exhaustion": "wait", "family`, 1)
+	star := strings.Replace(consultFamilyEffortBlock(t, `{"omp-sol": "xhigh"}`), `"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait", "family`, `"allowed": ["*"], "effort": "high", "on_exhaustion": "wait", "family`, 1)
 	if _, e := parseRoutingDoc(routingDoc(star)); e != nil {
 		t.Fatalf("wildcard lead may key omp-sol: %v", e)
 	}
@@ -62,7 +62,7 @@ func familyEffortFixture(t *testing.T, familyEffort string) (*App, Spawn, *fakeQ
 	a, s, q := roleEffortFixture(t)
 	q.CatalogRows = append(q.CatalogRows, CatalogRow{Profile: "codex-sol", Effort: "xhigh", Grade: "S+", Pool: "codex", Gate: "escalation", ModelID: "sol-m"})
 	if familyEffort != "" {
-		serveRouting(a, routingDoc(leadFamilyEffortBlock(t, familyEffort)))
+		serveRouting(a, routingDoc(consultFamilyEffortBlock(t, familyEffort)))
 	}
 	return a, s, q
 }
@@ -71,8 +71,7 @@ func familyEffortFixture(t *testing.T, familyEffort string) (*App, Spawn, *fakeQ
 // codex-sol@xhigh through its escalation gate and still drops codex-sol@max.
 func TestLeadFamilyEffortAdmitsEscalationRung(t *testing.T) {
 	for _, tc := range []struct{ name, role, override string }{
-		{"--routing-role lead", "worker", "lead"},
-		{"spawn --role builder", "builder", ""},
+		{"--routing-role consult", "worker", "consult"},
 		{"--role counsel (consult)", "counsel", ""},
 	} {
 		a, s, q := familyEffortFixture(t, `{"codex-sol": "xhigh"}`)
@@ -113,7 +112,7 @@ func TestLeadFamilyEffortAdmitsEscalationRung(t *testing.T) {
 	// Without the map the escalation rung stays gate_class and the lead falls
 	// through to opus@high exactly as before.
 	a, s, _ := familyEffortFixture(t, "")
-	s.RoutingRole = "lead"
+	s.RoutingRole = "consult"
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
@@ -142,7 +141,7 @@ func TestLeadFamilyEffortAdmitsEscalationRung(t *testing.T) {
 		}
 		return refuse(r)
 	}
-	s.RoutingRole = "lead"
+	s.RoutingRole = "consult"
 	sel, e = a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
@@ -160,7 +159,7 @@ func TestLeadFamilyEffortAdmitsEscalationRung(t *testing.T) {
 	a, s, _ = familyEffortFixture(t, `{"codex-sol": "xhigh"}`)
 	q = a.Quota.(*fakeQuota)
 	q.CatalogRows = q.CatalogRows[:len(q.CatalogRows)-1] // drop xhigh
-	s.RoutingRole, s.AllowEscalation = "lead", true
+	s.RoutingRole, s.AllowEscalation = "consult", true
 	sel, e = a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
@@ -176,7 +175,7 @@ func TestPlanLeadFamilyEffort(t *testing.T) {
 	a, _, q := familyEffortFixture(t, `{"codex-sol": "xhigh"}`)
 	q.LaunchValue = Launch{Profile: "codex-sol", ModelID: "sol-m", Effort: "xhigh", Grade: "S+", Gate: "escalation", Pool: "codex"}
 	out := captureOut(a)
-	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "lead", "--json"}); e != nil {
+	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult", "--json"}); e != nil {
 		t.Fatalf("plan: %v\n%s", e, out)
 	}
 	var plan map[string]any
@@ -198,7 +197,7 @@ func TestPlanLeadFamilyEffort(t *testing.T) {
 	a, _, q = familyEffortFixture(t, `{"codex-sol": "xhigh"}`)
 	q.LaunchValue = Launch{Profile: "codex-sol", ModelID: "sol-m", Effort: "xhigh", Grade: "S+", Gate: "escalation", Pool: "codex"}
 	out = captureOut(a)
-	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "lead"}); e != nil {
+	if e := a.Run(context.Background(), []string{"plan", "--t", "T1", "--routing-role", "consult"}); e != nil {
 		t.Fatalf("plan: %v\n%s", e, out)
 	}
 	if !strings.Contains(out.String(), "family_effort codex-sol=xhigh chosen=codex-sol@xhigh gate=escalation\n") {
@@ -237,9 +236,9 @@ func TestLeadFamilyEffortOMPSol(t *testing.T) {
 				}
 				return admit(r)
 			}
-			block := strings.Replace(leadFamilyEffortBlock(t, tc.familyEffort), `"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait", "family`, `"allowed": ["*"], "effort": "high", "on_exhaustion": "wait", "family`, 1)
+			block := strings.Replace(consultFamilyEffortBlock(t, tc.familyEffort), `"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait", "family`, `"allowed": ["*"], "effort": "high", "on_exhaustion": "wait", "family`, 1)
 			serveRouting(a, routingDoc(block))
-			s.RoutingRole = "lead"
+			s.RoutingRole = "consult"
 			sel, e := a.selectProfile(context.Background(), s)
 			if e != nil {
 				t.Fatal(e)
@@ -257,38 +256,6 @@ func TestLeadFamilyEffortOMPSol(t *testing.T) {
 			}
 			if got, _ := candOutcome(rec, "codex-sol", "xhigh")["reason"].(string); tc.codexXhigh != "" && got != tc.codexXhigh {
 				t.Fatalf("codex-sol@xhigh: want %s, got %v", tc.codexXhigh, got)
-			}
-		})
-	}
-}
-
-// A builder seat refuses a non-default gate rung at launch unless the
-// routing decision that picked it opts that exact rung in.
-func TestBuilderLaunchFamilyEffortGate(t *testing.T) {
-	for _, tc := range []struct {
-		name, familyEffort, effort string
-		want                       int
-	}{
-		{"opted-in xhigh", `{"codex-sol": "xhigh"}`, "xhigh", 0},
-		{"no map", "", "xhigh", exitSeatRefused},
-		{"map names another rung", `{"codex-sol": "max"}`, "xhigh", exitSeatRefused},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			a, s, q := familyEffortFixture(t, tc.familyEffort)
-			q.LaunchValue = Launch{Profile: "codex-sol", ModelID: "sol-m", Effort: tc.effort, Grade: "S+", Gate: "escalation", Pool: "codex"}
-			s.Role = "builder"
-			route, e := a.routeFor(context.Background(), s.Role, "")
-			if e != nil {
-				t.Fatal(e)
-			}
-			s.RoutingRole, s.route = route.role, route
-			seat := a.Policy.Profiles["builder-sol-xhigh"]
-			_, _, e = a.admitLaunch(context.Background(), s, seat, tc.effort, tc.effort, "", "", true)
-			if got := code(e); got != tc.want {
-				t.Fatalf("want exit %d, got %v", tc.want, e)
-			}
-			if tc.want != 0 && !strings.Contains(e.Error(), "worker/tester only") {
-				t.Fatalf("refusal must name the builder gate rule: %v", e)
 			}
 		})
 	}
