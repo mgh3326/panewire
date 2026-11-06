@@ -128,6 +128,9 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 	}
 	agents, err := a.agents(ctx)
 	if err != nil {
+		// Nothing proved the panes stayed idle through this pass, so the
+		// grace starts again once herdr answers.
+		clear(s.idleSince)
 		s.info("task pane sweep kept every pane", "reason", "herdr-unreadable")
 		return nil
 	}

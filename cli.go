@@ -455,7 +455,7 @@ func (values *hubURLValues) Set(raw string) error {
 }
 
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "quota-stop-act", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "wake-targets", "checks-config", "state-publish", "state-quota-pools", "state-quota-interval"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "quota-stop-act", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "wake-targets", "checks-config", "state-publish", "state-quota-pools", "state-quota-interval", "task-pane-sweep-interval", "task-pane-sweep-grace"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {

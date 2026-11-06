@@ -95,3 +95,13 @@ func TestTaskPaneSweepDaemonFlags(t *testing.T) {
 		}
 	}
 }
+
+// The sweep flags alone do not build a hub client; they are refused as hub
+// configuration, not accepted and ignored.
+func TestTaskPaneSweepFlagsAloneAreRefused(t *testing.T) {
+	for _, args := range [][]string{{"--task-pane-sweep-interval", "1m"}, {"--task-pane-sweep-grace=20m"}} {
+		if daemon, code, err := newDaemonForCLI(args, daemonCLIDeps{AllowInsecureForTests: true}); daemon != nil || code != ExitConditionInvalid || err == nil {
+			t.Fatalf("%v accepted without a hub: daemon=%v code=%d err=%v", args, daemon, code, err)
+		}
+	}
+}

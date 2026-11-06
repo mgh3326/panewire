@@ -377,9 +377,11 @@ func TestPaneSweepKeepsThePaneWhenItsScreenCannotBeSaved(t *testing.T) {
 	}
 }
 
-func TestPaneSweepKeepsEveryPaneWhenHerdrCannotBeRead(t *testing.T) {
+// A pass that cannot list herdr proves nothing about the pane, so the idle time
+// gathered before it does not count toward the grace.
+func TestPaneSweepRestartsTheGraceAfterHerdrCannotBeRead(t *testing.T) {
 	f := newPaneSweepFixture(t)
-	f.job("j", "worker", "42")
+	pane := f.job("j", "worker", "42")
 	f.tasks["42"] = "merged"
 	f.at(0)
 	base := f.runner.Do
@@ -392,6 +394,15 @@ func TestPaneSweepKeepsEveryPaneWhenHerdrCannotBeRead(t *testing.T) {
 	f.at(11)
 	if len(f.closed()) != 0 {
 		t.Fatalf("pane closed with herdr unreadable")
+	}
+	f.runner.Do = base
+	f.at(12)
+	if len(f.closed()) != 0 {
+		t.Fatalf("pane closed on idle time from before herdr was unreadable")
+	}
+	f.at(22)
+	if !slices.Equal(f.closed(), []string{pane}) {
+		t.Fatalf("pane not closed 10 minutes after herdr recovered: %v", f.closed())
 	}
 }
 
