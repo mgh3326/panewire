@@ -1,0 +1,62 @@
+package fleet
+
+import (
+	"context"
+	"fmt"
+	"slices"
+	"time"
+
+	"github.com/mgh3326/panewire/internal/quotastop"
+)
+
+// quotaStopRoles are the seats whose idle pane on a quota or rate-limit screen
+// ends the job. Counsel panes are consults, not jobs a retry can replace.
+var quotaStopRoles = []string{"worker", "tester", "reviewer"}
+
+// quotaStopWatch remembers the pane state the watcher last read, so an idle
+// pane is read once per state change and not on every poll.
+type quotaStopWatch struct {
+	read bool
+	seq  int64
+}
+
+// quotaStopped reports the quota stop an idle pane of j shows. It only reads
+// the visible screen; it never sends input to the pane, so no "send a message
+// to retry" automation exists here. A failed read is not a stop.
+func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStopWatch) (quotastop.Stop, bool) {
+	if !slices.Contains(quotaStopRoles, j.Role) || (ag.Status != "idle" && ag.Status != "done") {
+		return quotastop.Stop{}, false
+	}
+	if ag.StateChangeSeq != nil {
+		if seen.read && seen.seq == *ag.StateChangeSeq {
+			return quotastop.Stop{}, false
+		}
+		seen.read, seen.seq = true, *ag.StateChangeSeq
+	}
+	r := a.call(ctx, "herdr", "agent", "read", ag.Pane, "--source", "visible", "--lines", "60")
+	if e := check(r, "pane screen"); e != nil {
+		if ag.StateChangeSeq != nil {
+			a.warn("quota-stop screen read unavailable: %v", e)
+		}
+		return quotastop.Stop{}, false
+	}
+	return quotastop.Classify(r.Out, a.Now(), time.Local)
+}
+
+// quotaStopLost ends a job whose idle pane shows a quota stop and has no
+// report. The hk record only takes state (its field list has no reason), so
+// the reason and the parsed reset travel on job.lost, which owners and
+// mergewake read.
+func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop) error {
+	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost"}); e != nil {
+		a.jobRecordFailed(ctx, j.ID, "lost", e)
+	}
+	payload := map[string]any{"pane_id": j.Pane, "reason": fmt.Sprintf("quota_stop:%s", stop.Pool)}
+	if !stop.Reset.IsZero() {
+		payload["reset_at"] = stop.Reset.UTC().Format(time.RFC3339)
+	}
+	if e := a.event(ctx, j.ID, "job.lost", payload); e != nil {
+		return e
+	}
+	return a.releaseQuota(ctx, j)
+}
