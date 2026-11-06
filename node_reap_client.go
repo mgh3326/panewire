@@ -169,23 +169,22 @@ func nodeReapFlags(flags *flag.FlagSet) nodeReapConnect {
 	}
 }
 
-func (connect nodeReapConnect) run(stdout, stderr io.Writer, deps hubCLIDeps, call func(context.Context, *NodeReapClient, string) (any, error)) int {
-	if *connect.hubURL == "" || *connect.tokenPath == "" || !machineIDPattern.MatchString(*connect.machine) || *connect.machine == hubOperatorMachineID {
-		return ExitUsage
-	}
+// open builds the hub client from the connection flags. label prefixes every
+// refusal, so each CLI that reaches a node through the hub names itself.
+// code is the exit status when client is nil.
+func (connect nodeReapConnect) open(stderr io.Writer, deps hubCLIDeps, label string) (client *NodeReapClient, code int) {
 	env, err := loadHubTokenEnv(*connect.tokenPath)
 	if err != nil || (env.MachineID == hubOperatorMachineID && !connect.allowOperator) {
-		fmt.Fprintln(stderr, "node reap rejected: invalid service token env")
-		return ExitConditionInvalid
+		fmt.Fprintln(stderr, label+" rejected: invalid service token env")
+		return nil, ExitConditionInvalid
 	}
 	var cf hubCFAccessEnv
 	if *connect.cfPath != "" {
 		if cf, err = loadHubCFAccessEnv(*connect.cfPath); err != nil {
-			fmt.Fprintln(stderr, "node reap rejected: invalid Cloudflare Access env")
-			return ExitConditionInvalid
+			fmt.Fprintln(stderr, label+" rejected: invalid Cloudflare Access env")
+			return nil, ExitConditionInvalid
 		}
 	}
-	var client *NodeReapClient
 	if env.MachineID == hubOperatorMachineID {
 		var hub *hubOperatorClient
 		hub, err = newHubOperatorClient(*connect.hubURL, env.Token, cf, deps, nodeReapClientTimeout)
@@ -197,8 +196,19 @@ func (connect nodeReapConnect) run(stdout, stderr io.Writer, deps hubCLIDeps, ca
 		client, err = newNodeReapClient(*connect.hubURL, env, cf, deps)
 	}
 	if err != nil {
-		fmt.Fprintln(stderr, "node reap rejected: invalid hub URL")
-		return ExitConditionInvalid
+		fmt.Fprintln(stderr, label+" rejected: invalid hub URL")
+		return nil, ExitConditionInvalid
+	}
+	return client, ExitOK
+}
+
+func (connect nodeReapConnect) run(stdout, stderr io.Writer, deps hubCLIDeps, call func(context.Context, *NodeReapClient, string) (any, error)) int {
+	if *connect.hubURL == "" || *connect.tokenPath == "" || !machineIDPattern.MatchString(*connect.machine) || *connect.machine == hubOperatorMachineID {
+		return ExitUsage
+	}
+	client, code := connect.open(stderr, deps, "node reap")
+	if client == nil {
+		return code
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), nodeReapClientTimeout)
 	defer cancel()
