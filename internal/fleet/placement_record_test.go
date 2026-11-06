@@ -683,3 +683,18 @@ func TestPlacementAccountLoginAndSecretStayOutOfPayload(t *testing.T) {
 		t.Fatalf("the raw account key must become an opaque hash: %+v", r)
 	}
 }
+
+// A refused delivery names hk's status so a token-scope refusal can be told
+// from an outage; the record stays spooled for the next pass.
+func TestPlacementDeliveryRefusalNamesTheStatus(t *testing.T) {
+	a, s, _, _ := cmdFixture(t)
+	h := placementServer(t, a)
+	h.status = http.StatusUnauthorized
+	if err := a.Spawn(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	a.flushPlacements()
+	if warnings := a.Err.(*bytes.Buffer).String(); !strings.Contains(warnings, "hk HTTP 401") || len(placementSpool(t, a)) == 0 {
+		t.Fatalf("refusal must name HTTP 401 and keep the record spooled: warnings=%s spool=%d", warnings, len(placementSpool(t, a)))
+	}
+}
