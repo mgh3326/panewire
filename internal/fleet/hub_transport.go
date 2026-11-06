@@ -428,7 +428,7 @@ func hubArgs(jobs string, s Spawn) ([]string, error) {
 			args = append(args, u.flag)
 		}
 	}
-	for _, u := range []struct{ flag, v string }{{"--operator-request", s.OperatorRequest}, {"--requested-by", s.RequestedBy}, {"--purpose", s.Purpose}, {"--lane-defer", s.LaneDefer}} {
+	for _, u := range []struct{ flag, v string }{{"--operator-request", s.OperatorRequest}, {"--requested-by", s.RequestedBy}, {"--purpose", s.Purpose}} {
 		add(u.flag, u.v)
 	}
 	add("-m", s.Profile)

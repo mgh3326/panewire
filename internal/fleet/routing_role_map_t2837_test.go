@@ -49,15 +49,15 @@ func TestRoutingRoleMapKeys(t *testing.T) {
 	if p, e := parseRoutingDoc(routingDoc(routingBlockPublished)); e != nil || p.RoleMap["worker"] != "implementer" {
 		t.Fatalf("runtug_role_map is read into the role map: %v %v", p.RoleMap, e)
 	}
-	both := strings.Replace(routingBlockV1, `"panewire_role_map": {`, `"runtug_role_map": {"builder": "lead", "worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "lead"}, "panewire_role_map": {`, 1)
+	both := strings.Replace(routingBlockV1, `"panewire_role_map": {`, `"runtug_role_map": {"worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "consult"}, "panewire_role_map": {`, 1)
 	if _, e := parseRoutingDoc(routingDoc(both)); e != nil {
 		t.Fatalf("two equal maps are one map: %v", e)
 	}
-	disagree := strings.Replace(both, `"runtug_role_map": {"builder": "lead", "worker": "implementer"`, `"runtug_role_map": {"builder": "lead", "worker": "explorer"`, 1)
+	disagree := strings.Replace(both, `"runtug_role_map": {"worker": "implementer"`, `"runtug_role_map": {"worker": "explorer"`, 1)
 	if _, e := parseRoutingDoc(routingDoc(disagree)); e == nil {
 		t.Fatal("two maps that disagree must be refused, not resolved by precedence")
 	}
-	legacyUnknown := strings.Replace(routingBlockPublished, `"builder": "lead"`, `"builder": "boss"`, 1)
+	legacyUnknown := strings.Replace(routingBlockPublished, `"worker": "implementer"`, `"worker": "boss"`, 1)
 	if _, e := parseRoutingDoc(routingDoc(legacyUnknown)); e == nil {
 		t.Fatal("the runtug_role_map is validated like panewire_role_map")
 	}
@@ -66,8 +66,8 @@ func TestRoutingRoleMapKeys(t *testing.T) {
 // A seat role the published table does not map takes its builtin routing role
 // instead of running unfiltered.
 func TestRoutingUnmappedSeatRoleUsesBuiltinRole(t *testing.T) {
-	block := strings.Replace(routingBlockV1, `, "panewire_role_map": {"builder": "lead", "worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "lead"}`, ``, 1)
-	block = strings.Replace(block, "  },\n  \"panewire_role_map\": {\"builder\": \"lead\", \"worker\": \"implementer\", \"tester\": \"verifier\", \"reviewer\": \"reviewer\", \"counsel\": \"lead\"}\n", "  }\n", 1)
+	block := strings.Replace(routingBlockV1, `, "panewire_role_map": {"worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "consult"}`, ``, 1)
+	block = strings.Replace(block, "  },\n  \"panewire_role_map\": {\"worker\": \"implementer\", \"tester\": \"verifier\", \"reviewer\": \"reviewer\", \"counsel\": \"consult\"}\n", "  }\n", 1)
 	if strings.Contains(block, "role_map") {
 		t.Fatalf("fixture still carries a role map:\n%s", block)
 	}

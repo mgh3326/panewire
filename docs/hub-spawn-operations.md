@@ -1,6 +1,6 @@
 # Durable spawn operations
 
-`panewire spawn`, `work TASK` and `lead TASK` submit to the hub. The hub runs
+`panewire spawn` and `work TASK` submit to the hub. The hub runs
 placement and admission in-process; the selected node prepares the pinned
 checkout and runs launch and landing in-process. No launcher binary or SSH
 launcher is called. `--dry-run` remains the synchronous planning path.

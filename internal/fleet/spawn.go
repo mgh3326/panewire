@@ -19,12 +19,12 @@ import (
 type Spawn struct {
 	// registeredLane is the hub lane row the spawn created for its pane. A
 	// failed spawn that closes the pane removes the row with it.
-	registeredLane                                                                                                                                                                                    *Job
-	requestedLocal                                                                                                                                                                                    bool
-	CWD, Profile, Prompt, Workspace, Label, T, Job, Owner, Effort, Role, Lane, Parent, Task, ParentJob, Host, Report, ExecutionLane, OperatorRequest, RequestedBy, Purpose, LaneDefer, ReportRelative string
-	OverrideReason, Containment, WaitTimeout, Urgency                                                                                                                                                 string
-	Keep, DupOK, Bypass, DryRun, Wait, AllowEscalation                                                                                                                                                bool
-	Inherited, ParentFamily                                                                                                                                                                           string
+	registeredLane                                                                                                                                                                         *Job
+	requestedLocal                                                                                                                                                                         bool
+	CWD, Profile, Prompt, Workspace, Label, T, Job, Owner, Effort, Role, Lane, Parent, Task, ParentJob, Host, Report, ExecutionLane, OperatorRequest, RequestedBy, Purpose, ReportRelative string
+	OverrideReason, Containment, WaitTimeout, Urgency                                                                                                                                      string
+	Keep, DupOK, Bypass, DryRun, Wait, AllowEscalation                                                                                                                                     bool
+	Inherited, ParentFamily                                                                                                                                                                string
 	// Tags lists the capability tags a host must carry and ExcludeHosts the
 	// hosts placement must not pick. Delegated marks a spawn delivered by
 	// another initiator. Sel carries the selection decision record; all four
@@ -67,7 +67,7 @@ type Spawn struct {
 	// SelHost is the host host-first selection admitted the account on;
 	// placement tries it first among hosts in the same load bucket.
 	// TaskGrade is the grade placement checks against a host's grades
-	// list, empty for lead and consult.
+	// list, empty for consult.
 	SelHost   string `json:"-"`
 	TaskGrade string `json:"-"`
 	placement *placementDecision
@@ -92,13 +92,17 @@ func validateContainment(s Spawn) error {
 	return nil
 }
 
+// retiredLeadSeatPointer is the one line `--role builder` and `panewire lead`
+// are refused with: lead is no longer a seat panewire spawns.
+const retiredLeadSeatPointer = "the delegated lead seat is retired (--role builder, panewire lead): lead is an operator-opened session that works through subagents; see the rstack wake and robin-mode skills"
+
 func parseSpawn(args []string) (Spawn, error) {
 	s := Spawn{Role: "worker", Host: "auto"}
 	f := flags("spawn")
 	for _, p := range []struct {
 		k string
 		v *string
-	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"lane-defer", &s.LaneDefer}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"urgency", &s.Urgency}, {"builder-family", &s.BuilderFamily}, {"builder-job", &s.BuilderJob}, {"routing-role", &s.RoutingRole}} {
+	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"urgency", &s.Urgency}, {"builder-family", &s.BuilderFamily}, {"builder-job", &s.BuilderJob}, {"routing-role", &s.RoutingRole}} {
 		f.StringVar(p.v, p.k, *p.v, "")
 	}
 	f.StringVar(&s.Grade, "grade", "", "task grade (workers only)")
@@ -121,8 +125,8 @@ func parseSpawn(args []string) (Spawn, error) {
 	if s.Job == "" {
 		s.Job = s.Label
 	}
-	if s.Role == "captain" {
-		s.Role = "builder"
+	if s.Role == "builder" || s.Role == "captain" {
+		return s, fail(exitUsage, "%s", retiredLeadSeatPointer)
 	}
 	// An operator request is the operator-request purpose: the astra gate admits
 	// only director, architect or operator-request, and a spawn that cited the
@@ -131,7 +135,7 @@ func parseSpawn(args []string) (Spawn, error) {
 		s.Purpose = "operator-request"
 	}
 	if flagPassed(f, "grade") && (topRoutingRole(builtinRoleMap[s.Role]) || topRoutingRole(s.RoutingRole)) {
-		return s, fail(exitConfig, "%s: --grade is not accepted for lead or consult", noLeadGradeRule)
+		return s, fail(exitConfig, "%s: --grade is not accepted for consult", noLeadGradeRule)
 	}
 	return s, nil
 }
@@ -190,7 +194,7 @@ func (a *App) taskPrecheck(ctx context.Context, s Spawn) (Task, bool, error) {
 }
 
 // replacesParent reports whether this inherited spawn can take the parent's
-// place on its task. Only an implementer or lead seat can: a reviewer, tester,
+// place on its task. Only an implementer seat can: a reviewer, tester,
 // consult or delegated reader or verifier works beside the parent, even one
 // that has completed, and must not take the task and its review routing away.
 // It reads the fields that cross the hub and ssh envelopes.
@@ -199,7 +203,7 @@ func (s Spawn) replacesParent() bool {
 		return false
 	}
 	role := firstNonempty(s.RoutingRole, builtinRoleMap[s.Role])
-	return role == "implementer" || role == "lead"
+	return role == "implementer"
 }
 
 // rebindInherited moves the task to this job when its parent is terminal and
@@ -319,19 +323,13 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	defer func() { a.finishPlacement(ctx, s, err) }()
 	defer func() { a.spawnEvents(s, err) }()
 	if s.Grade != "" && (topRoutingRole(builtinRoleMap[s.Role]) || topRoutingRole(s.RoutingRole)) {
-		return fail(exitConfig, "%s: --grade is not accepted for lead or consult", noLeadGradeRule)
+		return fail(exitConfig, "%s: --grade is not accepted for consult", noLeadGradeRule)
 	}
 	if s.CWD == "" || s.Prompt == "" || s.Label == "" || !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) {
 		return fail(exitUsage, "spawn requires -c -p -l --t T0..T3; supply the missing flags (workspace defaults to executing local.workspace)")
 	}
-	if !validID(s.Job) || !validID(s.Label) || !slices.Contains([]string{"worker", "builder", "tester", "reviewer", "counsel"}, s.Role) {
+	if !validID(s.Job) || !validID(s.Label) || !slices.Contains([]string{"worker", "tester", "reviewer", "counsel"}, s.Role) {
 		return fail(exitUsage, "invalid job, label or role")
-	}
-	if s.Role == "builder" && (s.Lane == "" || s.Parent == "" || s.Owner != "" || s.Task == "") {
-		return fail(exitUsage, "builder requires --lane --parent --task; --owner is not accepted")
-	}
-	if s.LaneDefer != "" && (s.Role != "builder" || !validID(s.LaneDefer)) {
-		return fail(exitUsage, "--lane-defer requires builder and a host name")
 	}
 	if s.Task != "" && s.ParentJob != "" {
 		return fail(exitUsage, "--task and --parent-job are exclusive")
@@ -587,13 +585,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if owner == "" {
 		owner = "default"
 	}
-	if s.Role == "builder" {
-		owner = s.Lane
-	}
 	claim := arbiter.Claim{Job: s.Job, AgentLabel: s.Label, Lane: owner, T: s.T, Role: "worker", TaskID: s.Task, TaskInheritedFrom: s.Inherited}
-	if s.Role == "builder" {
-		claim.Role, claim.ParentLane = "builder", s.Parent
-	}
 	if s.Bypass {
 		claim.TaskLinkOverride = "declared"
 	}
@@ -799,26 +791,17 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	a.spawnedJobRecord(ctx, s, seat, launch, pane, pool, owner)
 	lane := s.Label
 	parent := owner
-	if s.Role == "builder" {
-		lane = s.Lane
-		parent = s.Parent
-	}
 	machine := a.machine()
 	laneOK := false
-	if s.LaneDefer == "" {
-		if e := a.registerLaneWithRetry(ctx, lane, parent, pane, s.Role, machine); e != nil {
-			s.laneUnregistered = true
-			s.laneError = laneFailureReason(e)
-		} else {
-			laneOK = true
-			s.registeredLane = &Job{HubLane: lane, Machine: machine, Pane: pane, Role: s.Role}
-		}
+	if e := a.registerLaneWithRetry(ctx, lane, parent, pane, s.Role, machine); e != nil {
+		s.laneUnregistered = true
+		s.laneError = laneFailureReason(e)
+	} else {
+		laneOK = true
+		s.registeredLane = &Job{HubLane: lane, Machine: machine, Pane: pane, Role: s.Role}
 	}
 	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
 	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
-	if s.LaneDefer != "" {
-		receipt["lane_deferred"] = true
-	}
 	if laneOK {
 		receipt["hub_lane"] = lane
 		receipt["hub_lane_machine"] = machine
@@ -844,12 +827,12 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	laneStatus := ""
 	if laneOK {
 		laneStatus = " lane=" + lane + "@" + machine
-	} else if s.laneUnregistered || s.Role == "builder" {
+	} else if s.laneUnregistered {
 		laneStatus = " lane=UNREGISTERED"
 	}
 	fmt.Fprintf(a.Out, "OK pane=%s session=%s model=%s label=%s status=working landed=yes job=%s quota_record=%s/quota_pool%s placement=%s\n", pane, a.herdrSession(), s.Profile, s.Label, s.Job, pool, laneStatus, s.placement.execution.receipt())
 	a.finishPlacement(ctx, s, nil)
-	if (s.laneUnregistered || s.Role == "builder" && !laneOK) && a.envOr("PANEWIRE_LANE_STRICT", "WRK_LANE_STRICT") == "1" {
+	if s.laneUnregistered && a.envOr("PANEWIRE_LANE_STRICT", "WRK_LANE_STRICT") == "1" {
 		return fail(exitLaneUnregistered, "%s pane exists but lane is UNREGISTERED", s.Role)
 	}
 	return a.afterSpawn(ctx, s, false)
@@ -881,15 +864,15 @@ func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEf
 	if topRoutingRole(s.RoutingRole) {
 		grade = ""
 		if !(&routing{role: s.RoutingRole}).admitsSeat(seat, launch.ModelID) {
-			return Launch{}, "", fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot lead or consult", launch.ModelID, seat.Kind)
+			return Launch{}, "", fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
 		}
 	}
-	familyGate := s.route.familyAdmitsGate(launch.row())
-	if e = seat.Check(launch, s.Role, grade, builderFamily, a.envOr("PANEWIRE_E6_ARM", "SCOPEFUEL_E6_ARM"), a.Config.Local, familyGate); e != nil {
+	if e = seat.Check(launch, s.Role, grade, builderFamily, a.envOr("PANEWIRE_E6_ARM", "SCOPEFUEL_E6_ARM"), a.Config.Local); e != nil {
 		return Launch{}, "", e
 	}
 	// A gate alias is the pool gate for a whole family of spellings, so it
 	// cannot tell an escalation rung from a default one; the launch row can.
+	familyGate := s.route.familyAdmitsGate(launch.row())
 	if seat.Gate != "" && launch.Gate != "default" && !s.AllowEscalation && !familyGate {
 		return Launch{}, "", fail(exitSeatRefused, "%s is a %s rung; pass --allow-escalation", seat.Canon, launch.Gate)
 	}

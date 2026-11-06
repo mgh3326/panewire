@@ -18,12 +18,12 @@ import (
 
 // Role routing (hk document policy/model-routing, operator 2026-11-01).
 //
-// The v1 table filters profiles before account quota ordering. Lead and
-// consult ignore task grade and require native top profiles or OMP top models. Other roles
-// retain grade, gate and seat constraints. Exhaustion never escapes the role.
+// The v1 table filters profiles before account quota ordering. Consult
+// ignores task grade and requires native top profiles or OMP top models.
+// Other roles retain grade, gate and seat constraints. Exhaustion never escapes the role.
 //
 // A valid hk read refreshes the disk cache. If neither hk nor the cache is
-// usable, lead, consult and verifier refuse; other roles retain v1's
+// usable, consult and verifier refuse; other roles retain v1's
 // builtin_default fallback.
 
 const routingDocKey = "policy/model-routing"
@@ -50,23 +50,25 @@ type RoutingRule struct {
 	FamilyRule   string   `json:"family_rule,omitempty"`
 	Fixed        bool     `json:"fixed,omitempty"`
 	// FamilyEffort maps a profile, or a top family, to the role-effort rung
-	// it leads at instead of Effort (lead and consult only). That exact rung
+	// it leads at instead of Effort (consult only). That exact rung
 	// is admitted even when its catalog gate is escalation: the entry is the
 	// operator's opt-in. See routing.familyEffortKey for the family rule.
 	FamilyEffort map[string]string `json:"family_effort,omitempty"`
 }
 
 // routingRoles are the values --routing-role accepts.
-var routingRoles = []string{"lead", "consult", "implementer", "explorer", "verifier", "reviewer", "judge"}
+var routingRoles = []string{"consult", "implementer", "explorer", "verifier", "reviewer", "judge"}
 
 // routingStrictRoles are refused when neither hk nor a cached copy can say
 // which profiles they may run on.
-var routingStrictRoles = []string{"lead", "consult", "verifier"}
+var routingStrictRoles = []string{"consult", "verifier"}
 
 // builtinRoleMap maps seat roles to routing roles when no table is readable,
-// so a builder is still known to be a lead (and refused) without one.
-var builtinRoleMap = map[string]string{"builder": "lead", "worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "consult"}
+// so a counsel is still known to be a consult (and refused) without one.
+var builtinRoleMap = map[string]string{"worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "consult"}
 
+// noLeadGradeRule is a wire reason code callers match on; it keeps its
+// historical spelling although the lead role is gone.
 const noLeadGradeRule = "lead_consult_take_no_grade"
 
 var topProfiles = []string{"opus", "fable", "codex-sol", "codex-astra"}
@@ -89,7 +91,7 @@ func topProfileRank(row CatalogRow) int {
 	return len(topProfiles)
 }
 
-func topRoutingRole(role string) bool { return role == "lead" || role == "consult" }
+func topRoutingRole(role string) bool { return role == "consult" }
 
 func (r *routing) top() bool { return r != nil && topRoutingRole(r.role) }
 
@@ -166,14 +168,14 @@ func (p RoutingPolicy) validate() error {
 const reasonFamilyEffortInvalid = "family_effort_invalid"
 
 // validateFamilyEffort refuses a family_effort panewire would otherwise ignore:
-// on a role without the lead/consult cap, keyed by a profile the role cannot
+// on a role without the consult cap, keyed by a profile the role cannot
 // name, or naming no known effort.
 func (r RoutingRule) validateFamilyEffort(role string) error {
 	if len(r.FamilyEffort) == 0 {
 		return nil
 	}
 	if !topRoutingRole(role) {
-		return fmt.Errorf("%s: routing role %s has family_effort; only lead and consult take one", reasonFamilyEffortInvalid, role)
+		return fmt.Errorf("%s: routing role %s has family_effort; only consult takes one", reasonFamilyEffortInvalid, role)
 	}
 	for key, effort := range r.FamilyEffort {
 		known := slices.Contains(topProfiles, key) || slices.Contains(r.Allowed, key) || slices.Contains(r.Allowed, "*") && validID(key)
@@ -338,7 +340,7 @@ func (a *App) routeFor(ctx context.Context, seatRole, override string) (*routing
 	if override != "" && !slices.Contains(routingRoles, override) {
 		return nil, fail(exitUsage, "--routing-role must be one of %s", strings.Join(routingRoles, "|"))
 	}
-	// Execution authority cannot be relabelled to escape lead admission.
+	// Execution authority cannot be relabelled to escape consult admission.
 	if required := builtinRoleMap[seatRole]; topRoutingRole(required) {
 		if override != "" && override != required {
 			return nil, fail(exitSeatRefused, "NO_ROLE_CANDIDATE: --role %s requires routing role %s", seatRole, required)
@@ -362,11 +364,6 @@ func (a *App) routeFor(ctx context.Context, seatRole, override string) (*routing
 		return r, nil
 	}
 	rule, ok := p.Roles[role]
-	if role == "consult" && !ok {
-		// v1 has no consult entry: counsel uses lead eligibility while keeping
-		// its distinct routing identity. No v2 document is required.
-		rule, ok = p.Roles["lead"]
-	}
 	if !ok {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: %s v%d has no role %s", routingDocKey, p.Version, role)
 	}
@@ -380,8 +377,8 @@ func (a *App) routeFor(ctx context.Context, seatRole, override string) (*routing
 	return r, nil
 }
 
-// effort is the role's starting effort, else the chosen rung's. A lead or
-// consult rung escalated above the role effort, or one whose effort a
+// effort is the role's starting effort, else the chosen rung's. A consult
+// rung escalated above the role effort, or one whose effort a
 // family_effort entry sets, reports its own effort.
 func (r *routing) effort(row CatalogRow) string {
 	if row.Effort != "" && r.familyEffortKey(row) != "" {
@@ -393,7 +390,7 @@ func (r *routing) effort(row CatalogRow) string {
 	return row.Effort
 }
 
-// roleEffortCap is the effort a lead or consult never climbs above without
+// roleEffortCap is the effort a consult never climbs above without
 // --allow-escalation (policy/model-routing: max only on a recorded
 // escalation); "" for every other role, which keeps grade-driven selection.
 // roleEffortFor is the same cap for one catalog row, after family_effort.
@@ -404,7 +401,7 @@ func (r *routing) roleEffortCap() string {
 	return r.rule.Effort
 }
 
-// familyEffortKey is the family_effort key that sets a lead/consult row's
+// familyEffortKey is the family_effort key that sets a consult row's
 // role effort: the row's own profile, else the native top profile its
 // catalog model is (omp-sol runs openai/gpt-6.1-sol, so it follows a
 // codex-sol entry; omp-opus follows opus). An exact profile key wins, and a
@@ -478,7 +475,7 @@ const (
 	reasonRoleExhaustEscal = "role_exhausted_escalate"
 )
 
-// Candidate drop reasons of the lead/consult role-effort cap.
+// Candidate drop reasons of the consult role-effort cap.
 const (
 	reasonAboveRoleEffort    = "above_role_effort"
 	reasonRoleEffortUnplaced = "role_effort_unplaced"

@@ -11,9 +11,9 @@ import (
 	"strings"
 )
 
-func (a *App) preset(ctx context.Context, kind string, args []string) (Spawn, error) {
+func (a *App) workPreset(ctx context.Context, args []string) (Spawn, error) {
 	if len(args) == 0 || !regexp.MustCompile(`^[0-9]+$`).MatchString(args[0]) {
-		return Spawn{}, fail(exitUsage, "use panewire %s TASK_ID followed by optional spawn flags", kind)
+		return Spawn{}, fail(exitUsage, "use panewire work TASK_ID followed by optional spawn flags")
 	}
 	id := args[0]
 	r := a.call(ctx, "handoffkeep", "tasks", "show", id)
@@ -23,9 +23,9 @@ func (a *App) preset(ctx context.Context, kind string, args []string) (Spawn, er
 	}
 	marker := taskMarker.FindStringSubmatch(task.Title)
 	if marker == nil {
-		return Spawn{}, fail(exitSeatRefused, "task %s needs a (grade X, Tn) title marker; update the task title before panewire %s", id, kind)
+		return Spawn{}, fail(exitSeatRefused, "task %s needs a (grade X, Tn) title marker; update the task title before panewire work", id)
 	}
-	job := firstNonempty(str(task.Refs, "job_id"), "task"+id+"-"+kind)
+	job := firstNonempty(str(task.Refs, "job_id"), "task"+id+"-work")
 	cwd, err := os.Getwd()
 	if err != nil {
 		return Spawn{}, err
@@ -44,17 +44,13 @@ func (a *App) preset(ctx context.Context, kind string, args []string) (Spawn, er
 		caller = firstNonempty(j.Label, j.Owner)
 	}
 	defaults := []string{"-c", cwd, "-m", "auto", "-p", firstNonempty(str(task.Refs, "brief_path"), filepath.Join(a.Jobs, job, "brief.md")), "-w", "workers", "-l", job, "--job", job, "--t", strings.ToUpper(marker[2]), "--task", id, "--host", "auto", "--report", firstNonempty(str(task.Refs, "report_path"), filepath.Join(a.Jobs, job, "report.md"))}
-	if kind == "lead" {
-		defaults = append(defaults, "--role", "builder", "--lane", job, "--parent", caller)
-	} else {
-		defaults = append(defaults, "--role", "worker", "--owner", caller)
-	}
+	defaults = append(defaults, "--role", "worker", "--owner", caller)
 	s, err := parseSpawn(append(defaults, args[1:]...))
 	if err != nil {
 		return s, err
 	}
-	if kind == "lead" && s.Parent == "" || kind == "work" && s.Owner == "" {
-		return s, fail(exitUsage, "caller lane unknown; set PANEWIRE_LANE or pass --%s LANE", map[bool]string{true: "parent", false: "owner"}[kind == "lead"])
+	if s.Owner == "" {
+		return s, fail(exitUsage, "caller lane unknown; set PANEWIRE_LANE or pass --owner LANE")
 	}
 	return s, nil
 }

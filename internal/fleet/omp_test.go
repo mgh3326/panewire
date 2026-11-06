@@ -161,8 +161,8 @@ func TestOMPModelProof(t *testing.T) {
 	}
 }
 
-func TestOMPLeadEligibility(t *testing.T) {
-	for _, role := range []string{"lead", "consult"} {
+func TestOMPConsultEligibility(t *testing.T) {
+	for _, role := range []string{"consult"} {
 		for _, tc := range []struct {
 			profile, model, pool string
 			want                 bool
@@ -197,12 +197,12 @@ func TestOMPLeadEligibility(t *testing.T) {
 	}
 }
 
-func TestOMPExplicitLeadCannotChangeModel(t *testing.T) {
+func TestOMPExplicitConsultCannotChangeModel(t *testing.T) {
 	a, s, fr := ompSpawnFixture(t)
 	q := a.Quota.(*fakeQuota)
 	q.CatalogRows = []CatalogRow{ompRow("omp-opus", "anthropic/claude-opus-5-5", "anthropic-api")}
 	q.LaunchValue.ModelID = "anthropic/claude-sonnet-5-5"
-	s.Role, s.Lane, s.Parent = "builder", "fixture-lead", "fixture-parent"
+	s.Role = "counsel"
 	if err := a.Spawn(context.Background(), s); code(err) != exitSeatRefused {
 		t.Fatalf("launch model must be checked again: %v", err)
 	}

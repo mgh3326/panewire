@@ -44,7 +44,7 @@ Pane observation and delivery commands include:
 
 The durable inbox, job ledger and verified pane operations preserve evidence as the hub coordinates placement and lifecycle.
 
-Spawn requests are submitted through `panewire spawn`, `work`, and `lead`; the hub coordinates placement and execution on the selected node. Panewire also observes sessions and delivers messages.
+Spawn requests are submitted through `panewire spawn` and `work`; the hub coordinates placement and execution on the selected node. Panewire also observes sessions and delivers messages.
 
 See [docs/design.md](docs/design.md) for the complete contract and acceptance criteria.
 
@@ -208,13 +208,14 @@ those files to the owner lane.
 ## Agent launch and lifecycle
 
 Use `panewire spawn` with the existing task, role, quota and landing checks, or
-`panewire work TASK_ID` / `panewire lead TASK_ID` for task-derived defaults.
+`panewire work TASK_ID` for task-derived defaults. The delegated lead seat
+(`panewire lead`, `--role builder`) is retired and refused: lead is an
+operator-opened session that works through subagents.
 Explicit flags override preset defaults. `--dry-run` stays read-only and shows
 the same admission and placement plan as the equivalent long command.
 
 ```sh
 panewire work 42 --dry-run
-panewire lead 42 --parent caller-lane --dry-run
 panewire spawn -c /work/project.feature -p /brief.md -l worker-a --task 42 --t T1 --owner caller-lane --report /jobs/worker-a/report.md --dry-run
 panewire done worker-a --report /jobs/worker-a/report.md
 panewire reap --lane caller-lane
@@ -240,4 +241,4 @@ scratch checkout, or `--panel` for independent readers. See
 [Delegation configuration](docs/config.md) for roles, results and exit codes.
 
 
-Spawn execution now belongs to the hub. `panewire spawn`, `work TASK` and `lead TASK` print ACCEPTED after a durable reservation; this is not landing proof. `--dry-run` stays synchronous and `--wait` preserves the job-completion contract. See [durable spawn operations](docs/hub-spawn-operations.md) for replay, timeout, recovery and Sentry behavior.
+Spawn execution now belongs to the hub. `panewire spawn` and `work TASK` print ACCEPTED after a durable reservation; this is not landing proof. `--dry-run` stays synchronous and `--wait` preserves the job-completion contract. See [durable spawn operations](docs/hub-spawn-operations.md) for replay, timeout, recovery and Sentry behavior.

@@ -59,7 +59,7 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	o.grade = strings.ToUpper(o.grade)
 	top := topRoutingRole(builtinRoleMap[o.role]) || topRoutingRole(o.routingRole)
 	if top && flagPassed(f, "grade") {
-		return fail(exitConfig, "%s: --grade is not accepted for lead or consult", noLeadGradeRule)
+		return fail(exitConfig, "%s: --grade is not accepted for consult", noLeadGradeRule)
 	}
 	if _, ok := gradeOrder[o.grade]; !ok && !top {
 		return fail(exitUsage, "plan needs --grade C|B|A|A+|S|S+")
@@ -68,7 +68,7 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	if !slices.Contains([]string{"T0", "T1", "T2", "T3"}, o.t) {
 		return fail(exitUsage, "plan needs --t T0..T3")
 	}
-	if !slices.Contains([]string{"worker", "builder", "tester", "reviewer", "counsel"}, o.role) {
+	if !slices.Contains([]string{"worker", "tester", "reviewer", "counsel"}, o.role) {
 		return fail(exitUsage, "invalid role %q", o.role)
 	}
 	if (o.role == "tester" || o.role == "reviewer") != (o.builderFamily != "") {
@@ -164,7 +164,7 @@ func (a *App) planHosts(ctx context.Context, s Spawn, grade string) (*placePlan,
 		launch, err := a.Quota.Launch(ctx, qr)
 		if err == nil {
 			seat := a.Policy.Profiles[s.Profile]
-			err = seat.Check(launch, s.Role, grade, s.ParentFamily, a.envOr("PANEWIRE_E6_ARM", "SCOPEFUEL_E6_ARM"), a.Config.Local, s.route.familyAdmitsGate(launch.row()))
+			err = seat.Check(launch, s.Role, grade, s.ParentFamily, a.envOr("PANEWIRE_E6_ARM", "SCOPEFUEL_E6_ARM"), a.Config.Local)
 		}
 		if err != nil {
 			c.outcome, localRefusal = "admission_refused", err
