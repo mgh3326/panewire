@@ -9,13 +9,18 @@ import (
 	"io"
 	"os"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/daemonop"
 )
 
 const (
-	ExitOK                = 0
-	ExitUsage             = 2
-	ExitTimeout           = 3
-	ExitDaemonUnavailable = 4
+	ExitOK      = 0
+	ExitUsage   = 2
+	ExitTimeout = 3
+	// ExitDaemonUnavailable is the local socket response code for an op the
+	// daemon cannot serve; see internal/daemonop for the shared copy a caller
+	// outside this package reads.
+	ExitDaemonUnavailable = daemonop.ExitDaemonUnavailable
 	ExitConditionInvalid  = 5
 	ExitDeliveryFailure   = 6
 	ExitPartial           = 7

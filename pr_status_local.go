@@ -93,7 +93,7 @@ func (d *Daemon) handlePRStatus(ctx context.Context, req *localPRStatusRequest) 
 	if d.cfg.Hub.Client == nil {
 		return localPRStatusResult{Why: "local node has no hub connection"}, nil
 	}
-	hub := &NodeReapClient{hub: inboxNodeClient{ctx: ctx, client: d.cfg.Hub.Client}}
+	hub := &NodeReapClient{hub: nodeHubClient{ctx: ctx, client: d.cfg.Hub.Client}}
 	var result nodePRStatusResult
 	err := hub.command(ctx, req.Machine, nodeCommandPRStatus, req.Args, &result)
 	if why := prStatusHubFailure(err, req.Machine, result); why != "" {
