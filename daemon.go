@@ -641,6 +641,7 @@ type localRequest struct {
 	DeliveryClass string        `json:"delivery_class,omitempty"`
 	Late          bool          `json:"late,omitempty"`
 	NotifyType    string        `json:"notify_type,omitempty"`
+	Cause         string        `json:"cause,omitempty"`
 	Op            string        `json:"op"`
 	Path          string        `json:"path,omitempty"`
 	Target        string        `json:"target,omitempty"`
@@ -648,6 +649,7 @@ type localRequest struct {
 	Uptake        string        `json:"uptake,omitempty"`
 	StoreBody     bool          `json:"store_body,omitempty"`
 	Status        string        `json:"status,omitempty"`
+	SinceMS       int64         `json:"since_ms,omitempty"`
 	SettleMS      int64         `json:"settle_ms,omitempty"`
 	TimeoutMS     int64         `json:"timeout_ms,omitempty"`
 	// The fields below belong to the R20 emit op. The names above are the
@@ -725,6 +727,12 @@ func (d *Daemon) handle(ctx context.Context, c net.Conn) {
 			result, err = d.handleInbox(callCtx, req.Inbox)
 		case daemonop.LanesPutOp:
 			result, err = d.handleLanesPut(callCtx, req.LanesPut)
+		case "decision.reply":
+			if req.Target == "" || req.SinceMS <= 0 {
+				err = &codedError{ExitUsage, fmt.Errorf("pane and since are required")}
+			} else {
+				result, err = d.store.DecisionReplyAfter(callCtx, req.Target, req.OwnerLane, req.SinceMS)
+			}
 		case "prompt":
 			if !caps.Prompt || !caps.AgentRead {
 				result, err = recordUnavailablePrompt(callCtx, d.store, PromptRequest{Sender: req.Sender, Target: req.Target, Path: req.Path, Uptake: req.Uptake, StorePromptBody: req.StoreBody || d.cfg.StorePromptBody || d.cfg.Logging.StorePromptBody}, ExitDaemonUnavailable, "prompt capability unavailable")
@@ -864,7 +872,7 @@ func sameLocalPath(left, right string) bool {
 // immediate queue. A hub that is absent or disconnected is not an error: the
 // event file is durable and the node outbox retries from it.
 func (d *Daemon) emitRelayEvent(req localRequest) error {
-	if !emitRelayKinds[req.Kind] || !validDeliveryClass(req.DeliveryClass) || !validNotifyType(req.NotifyType) {
+	if !emitRelayKinds[req.Kind] || !validDeliveryClass(req.DeliveryClass) || !validNotifyType(req.NotifyType) || !validInboxCause(req.Cause) {
 		return &codedError{ExitUsage, fmt.Errorf("invalid emit request")}
 	}
 	if req.Kind == "lane.event" {
@@ -891,7 +899,7 @@ func (d *Daemon) emitRelayEvent(req localRequest) error {
 		return &codedError{ExitDaemonUnavailable, fmt.Errorf("hub client unavailable")}
 	}
 	event := hubScannedRelayEvent{
-		DeliveryClass: req.DeliveryClass, Late: req.Late, NotifyType: req.NotifyType, Kind: req.Kind,
+		DeliveryClass: req.DeliveryClass, Late: req.Late, NotifyType: req.NotifyType, Cause: req.Cause, Kind: req.Kind,
 		HubActiveJob: HubActiveJob{
 			JobID: req.JobID, Epoch: epoch, AgentLabel: req.AgentLabel, OwnerLane: req.OwnerLane,
 			Label: req.Label, Host: req.Host, ReportPath: req.ReportPath, ReportLastLine: req.ReportLastLine,

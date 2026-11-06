@@ -82,6 +82,10 @@ func TestR19PreferenceSwitchesDoNotNest(t *testing.T) {
 	go func() { served <- client.serve(ctx, first) }()
 
 	baseline := 0
+	// The baseline depends on the poll interval: it is taken the first time
+	// one switch is seen, and a faster poll reads it before the session's
+	// reader goroutine and preference probe exist. Keep the 5 ms loop here
+	// rather than waitUntil's 1 ms poll.
 	deadline := time.Now().Add(15 * time.Second)
 	for {
 		mu.Lock()

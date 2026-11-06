@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"os"
@@ -132,6 +133,8 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 		if reason == "stale-pane-absent" && present {
 			continue
 		}
+		a.recordJobUsage(ctx, latest, true)
+		a.markEndedJobLost(ctx, latest)
 		if present {
 			if e = a.must(ctx, "herdr", "pane", "close", j.Pane); e != nil {
 				return e
@@ -140,7 +143,9 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 		if e = a.releaseQuota(ctx, j); e != nil {
 			return e
 		}
-		if e = a.removeLane(ctx, j); e != nil {
+		if owner, foreign := a.laneOwnedElsewhere(j); foreign {
+			a.warn("lane %s retained: it belongs to machine %s and this host is %s; a node cannot remove another machine's lane, so remove it from %s", j.HubLane, j.Machine, owner, j.Machine)
+		} else if e = a.removeLane(ctx, j); e != nil {
 			a.warn("lane retained: %v", e)
 		}
 		if e = a.event(ctx, j.ID, "job.reaped", map[string]any{"pane_id": j.Pane, "reason": reason}); e != nil {
@@ -154,15 +159,35 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 	}
 	return nil
 }
+
+// laneRoute is the App as the job's lane credential sees it: the herdr session
+// recorded in the receipt picks the node token and machine id.
+func (a *App) laneRoute(j Job) App {
+	route := *a
+	if session := str(j.Receipt, "herdr_session"); session != "" {
+		route.HerdrSession = session
+	}
+	return route
+}
+
+// laneOwnedElsewhere reports that the job's registered lane belongs to a
+// machine other than the one the lane credential acts as. The hub answers a
+// node token 403 lane_machine_mismatch for such a lane, so reap does not try;
+// it returns the caller's machine id for the message.
+func (a *App) laneOwnedElsewhere(j Job) (caller string, foreign bool) {
+	if j.HubLane == "" || j.Machine == "" {
+		return "", false
+	}
+	route := a.laneRoute(j)
+	caller = route.machine()
+	return caller, caller != j.Machine
+}
 func (a *App) removeLane(ctx context.Context, j Job) error {
 	if j.HubLane == "" || j.Machine == "" {
 		return nil
 	}
 	args := []string{"lanes", "rm", j.HubLane, "--expect-machine", j.Machine, "--expect-pane", j.Pane}
-	route := *a
-	if session := str(j.Receipt, "herdr_session"); session != "" {
-		route.HerdrSession = session
-	}
+	route := a.laneRoute(j)
 	args = append(args, route.laneHubArgs(j.Role)...)
 	return a.must(ctx, "panewire", args...)
 }
@@ -393,4 +418,40 @@ func (a *App) lanesMissing(ctx context.Context) error {
 	}
 	fmt.Fprintf(a.Out, "lanes-missing: audited %d open job(s), %d missing\n", count, missing)
 	return nil
+}
+
+// markEndedJobLost writes `lost` to the hk record of a job that ended without a
+// completion: its newest terminal event is job.revoked or job.lost, so no
+// job.completed or job.joined follows its last claim. Without it the record
+// stays claimed or spawned and holds the task's role for every later spawn. A
+// record that is already completed or lost, or that hk does not hold, is left
+// alone. A failed read or write is a warning plus job.record_failed; reap
+// goes on.
+func (a *App) markEndedJobLost(ctx context.Context, j Job) {
+	if j.Ended != "job.revoked" && j.Ended != "job.lost" {
+		return
+	}
+	readFailed := func(e error) {
+		a.warn("job record reap read failed: %v", e)
+		_ = a.event(ctx, j.ID, "job.record_failed", map[string]any{"op": "reap"})
+	}
+	store, e := a.jobStore()
+	if e != nil {
+		readFailed(e)
+		return
+	}
+	rec, e := store.Get(ctx, j.ID)
+	if errors.Is(e, errJobNotFound) {
+		return
+	}
+	if e != nil {
+		readFailed(e)
+		return
+	}
+	if state := str(rec, "state"); state != "claimed" && state != "spawned" {
+		return
+	}
+	if e = a.MarkJobLost(ctx, j.ID); e != nil {
+		a.jobRecordFailed(ctx, j.ID, "reap", e)
+	}
 }

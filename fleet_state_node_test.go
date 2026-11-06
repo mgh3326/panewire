@@ -88,18 +88,18 @@ func TestFleetStateNodePublishesQuota(t *testing.T) {
 	hub, server := fsHub(t, "")
 	var calls atomic.Int32
 	fsRunNode(t, server.URL, func(client *HubClient) {
-		client.stateQuotaPools = []string{"claude"}
+		client.stateQuotaPools = []string{"codex"}
 		client.stateQuotaInterval = 10 * time.Second
 		client.nodePacelever = func(_ context.Context, args ...string) ([]byte, error) {
 			calls.Add(1)
-			if strings.Join(args, " ") != "refresh claude" {
+			if strings.Join(args, " ") != "refresh codex" {
 				t.Errorf("pacelever argv = %q", args)
 			}
-			return []byte(fsPaceleverFresh), nil
+			return []byte(fsPaceleverFreshCodex), nil
 		}
 	})
 	eventually(t, 3*time.Second, "quota from node", func() bool {
-		message, ok := fsLatest(hub, "node-a", fleetStateKindQuota, fsAccountKey)
+		message, ok := fsLatest(hub, "node-a", fleetStateKindQuota, "codex:0123456789abcdef")
 		return ok && message.Quota.Buckets[0].UsedPct != nil && *message.Quota.Buckets[0].UsedPct == 42
 	})
 	if calls.Load() < 1 {

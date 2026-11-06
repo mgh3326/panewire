@@ -71,7 +71,7 @@ A connection that has died unnoticed answers `node_lost` or `node_timeout`.
 
 ## Ops
 
-All validation is shared by hub and node. Every listed argument is required
+All validation is shared by hub and node. Except for the optional `worktree.list` cursor and limit, every listed argument is required
 and must not be null — a zero value such as `write:false` or
 `merged_after:0` has to be stated, never implied by omission. `pane_id` is
 `^[A-Za-z0-9._:-]{1,128}$`; `name` is a single safe path segment (no `/`,
@@ -202,6 +202,74 @@ fragment, and an scp-style remote (`[user[:secret]@]host:path`) loses
 everything up to its last `@` before the first `/`, so a token embedded in
 either form never leaves it.
 
+### `worktree.list`
+
+`args: {common, cursor?, limit?}`. `common` is an absolute path to the common
+Git directory or main checkout. `limit` is 1 through 100 and defaults to 50.
+The node sorts worktrees by path and returns `worktrees`, `total`, and
+`next_cursor`. Each row has `path`, `branch`, `head`, `detached`, and `status`.
+Status contains `dirty`, `untracked`, and `ignored`; `error` is present when
+status cannot be read. Dirty includes tracked changes and untracked entries.
+Ignored and untracked counts follow Git's porcelain output, including collapsed
+directories. Missing worktrees remain in the list with a status error.
+
+A cursor is valid only for the same repository snapshot and node process. If
+Git's worktree list changes or the node restarts, start again without a cursor.
+The node may return fewer than `limit` rows to keep the result under 28 KiB.
+The `worktree.inspect` scope authorizes this operation on the same machines.
+Status uses Git with optional locks disabled and refuses symlinked paths.
+
+`panewire node worktree-list --hub-url <url> --hub-token-env <env> --host <machine> --common <path> [--all]`
+prints one JSON object per worktree. Without `--all`, it prints the first page;
+with `--all`, it reads every page. The optional `--hub-cf-env` flag supplies
+Cloudflare Access credentials.
+
+### `pr.status`
+
+`args: {repo, pr, fresh}` — all three required. `repo` is `owner/name`
+(`[A-Za-z0-9._-]`, each segment at most 100 bytes, no `.` or `..` name, no
+`.git` suffix), `pr` is an integer from 1 through 2147483647, and `fresh` asks
+mergewake for its one GraphQL read. The op is read-only: it takes no acting-command lock
+and writes nothing. It reads two sources and answers each with its own closed
+outcome, so a source that is down never fails the op; see
+[pr-status.md](pr-status.md) for the CLI.
+
+The hub admits `pr.status` for exactly one machine, the one named by its
+`--pr-status-host` flag (default `oci`); any other machine answers
+`400 {"error":"wrong_machine"}` before a node sees the request, whatever the
+caller's scope.
+
+The node runs `mergewake pr-status --repo <repo> --pr <pr> --json [--fresh]`
+with a closed environment, at most 12 seconds and 64 KiB of output, and reads
+`GET /v1/changes?pr=https://github.com/<repo>/pull/<pr>` from the handoffkeep
+named by its `spawn.json` `handoffkeep_env`, at most 5 seconds and 4 KiB.
+
+```json
+{"mergewake":{"outcome":"ok","snapshot":{"repo":"owner/name","pr":152,"head":"…","gate_head":"…","state":"blocked","reasons":["threads_open:1"],"checks":[{"name":"test","state":"green"}],"review":{"passes":[{"pass":1,"lens":"correctness","family":"openai"}],"done":true},"threads":{"blocking":1,"other":1,"unresolved":2},"findings":[{"id":"PRRT_…","location":"path:42","severity":"high","blocking":true,"summary":"…","url":"…","author_replied":false}],"base_fresh":true,"observed_at":"2026-11-06T00:12:06Z","fresh":null,"fresh_at":null,"source":"last_pass"}},
+ "hk":{"outcome":"not_found","status":404}}
+```
+
+| Source | `outcome` | Meaning |
+| --- | --- | --- |
+| `mergewake` | `ok` | `snapshot` is set. |
+| | `not_found` | mergewake has no snapshot for this PR. |
+| | `failed` / `unavailable` | No snapshot. `reason` is one of `not_installed`, `timeout`, `exit_status`, `unreadable_output`, `output_too_large`; mergewake's own error text is never forwarded. |
+| `hk` | `ok` | `change` is hk's JSON object, passed through unread (at most 4 KiB). |
+| | `not_found` | hk holds no record: it answered 404 (as a handoffkeep without `/v1/changes` does), or 200 with an empty `changes` list. |
+| | `unconfigured` | The node has no usable `handoffkeep_env`. |
+| | `too_large` | The record exceeds 4 KiB; it is not truncated. |
+| | `failed` | `reason` is `http_status`, `request_failed` or `unreadable_body`. |
+
+mergewake's JSON is read leniently, so a field it adds later is dropped rather
+than failing the op, and the node bounds every list and string (50 checks, 20
+reasons, 10 passes, 50 findings of at most 240 bytes of summary) so the result
+fits the reply cap. When the findings still do not fit, the node drops them from
+the tail and reports the count as `findings_omitted`. The environment the
+mergewake child receives is `PATH`, `HOME`, `USER`, `LOGNAME`, `LANG`, `LC_ALL`,
+`TMPDIR` and `XDG_CONFIG_HOME`, `XDG_STATE_HOME`, `XDG_DATA_HOME`; no credential
+of the node's own is passed on, and no credential appears in argv or in the
+result. The scope is `node.command:pr.status@<machine>`.
+
 ### `worktree.prepare`
 
 `args: {origin, mode, branch, sha, fetch, dir}`. Prepares a worktree of a
@@ -327,7 +395,8 @@ The refusal outcomes mirror mergewake's reap receipt reasons verbatim.
 ### `quota.refresh`
 
 `args: {pool}` — `pool` matches `^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`. A
-closed call to `pacelever refresh <pool>`; no other argv is reachable.
+closed call: `claude` is measured in the node's own process (no exec), every
+other pool runs exactly `pacelever refresh <pool>`; no other argv is reachable.
 Result `{"outcome":"refreshed"}`; a failed run answers `refresh_failed`.
 
 ## Wire
@@ -443,3 +512,29 @@ pane:
 
 `job.done` already runs the guarded host-local completion command. Both require
 explicit scoped service grants as described above.
+
+### `job.result`
+
+`job.result` reads a job's local artifacts without changing them. Call it with
+`{"job":"NAME"}`; the job name follows the node job-name rules. It is
+available to the operator and services authorized for `worktree.inspect` on
+that host. The CLI is `panewire node job-result --host HOST --job NAME`, with
+the same hub connection flags as `node worktree-list`.
+
+The result contains `found`, `findings`, `findings_error`, `report`, and
+`completed`. `findings` is the JSON object from `findings.json` when it is at
+most 24 KiB and contains a `findings` array. Otherwise it is null and
+`findings_error` is `missing`, `too_large`, `not_json`, or `schema`. A missing
+job has `found: false`. Files must be regular files inside the job directory.
+`report` contains `present`, `bytes`, `sha256`, and `last_line`; the last line
+is limited to 256 UTF-8 bytes. The report body is never returned. `completed`
+is true when the local event ledger contains a `job.completed` event.
+`activity_events` counts the ledger's `events/` files that are not spawn
+bookkeeping: `job.claim`, `job.reclaim`, `job.placement`, `job.task_link`,
+`job.duplicate_override`, `job.spawn_retryable`, `job.spawn_aborted`,
+`job.record_failed`, `job.cleanup_pending`, `job.cleanup_refused`, `lease.*` and
+`quota_pool.*`. Any other kind, and any name that does not parse as
+`NNNNN-<kind>.json` (exactly five digits), counts, so a job that shows 0 has had nothing after its
+claim. A node that predates the field omits it; a caller reads that as unknown,
+never as 0. The hub uses it to release the task reservation of a spawn whose
+brief never landed ([hub-spawn-operations.md](hub-spawn-operations.md)).

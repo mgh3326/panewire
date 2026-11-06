@@ -46,14 +46,22 @@ func TestCITiers(t *testing.T) {
 	if !w.Concurrency.Cancel || !strings.Contains(w.Concurrency.Group, "ci-main") {
 		t.Fatal("main concurrency must cancel older runs")
 	}
+	if !strings.Contains(w.Concurrency.Group, "format('ci-pr-{0}', github.event.pull_request.number)") {
+		t.Fatal("a pull request's new run must cancel its older run")
+	}
 	postOnly := map[string]string{
-		"post-test":  `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}`,
-		"postgres":   `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all') }}`,
+		"post-test": `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}`,
+		// postgres also runs on a pull request that touches the inbox store
+		// (store-paths), because the production hub keeps its inbox there.
+		"postgres":   `${{ !cancelled() && ((github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all')) || (github.event_name == 'pull_request' && needs.store-paths.outputs.store == 'true')) }}`,
 		"test-macos": `${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') && github.event_name != 'pull_request' }}`,
 	}
 	for name, job := range w.Jobs {
 		if condition, ok := postOnly[name]; ok && job.If == condition {
 			continue
+		}
+		if name == "store-paths" && job.If != "${{ github.event_name == 'pull_request' }}" {
+			t.Errorf("store-paths must run on pull requests only: %s", job.If)
 		}
 		runner, _ := yaml.Marshal([]any{job.RunsOn, job.Strategy})
 		if strings.Contains(string(runner), "vars.") || strings.Contains(string(runner), "vars[") || strings.Contains(strings.ToLower(string(runner)), "self-hosted") || strings.Contains(strings.ToLower(string(runner)), "macos") {
@@ -69,14 +77,22 @@ func TestCITiers(t *testing.T) {
 			}
 		}
 	}
+	if pg := w.Jobs["postgres"]; !slices.Contains(pg.Needs, "store-paths") {
+		t.Error("postgres must need store-paths to decide pull request runs")
+	}
 	for _, name := range []string{"post-test", "postgres", "test-macos"} {
 		job := w.Jobs[name]
 		if job.If != postOnly[name] {
-			t.Errorf("%s is not post-only", name)
+			t.Errorf("%s is not post-only (or, for postgres, not store-gated)", name)
 		}
 		runner, _ := yaml.Marshal(job.RunsOn)
 		if !strings.Contains(string(runner), "vars.PANEWIRE_POST_") {
 			t.Errorf("%s missing post runner", name)
+		}
+		// ci-any-ref runs any ref through workflow_call; only a reviewed
+		// main push may reach a runner chosen by repository variable.
+		if !strings.Contains(string(runner), "github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PANEWIRE_POST_") {
+			t.Errorf("%s post runner is not limited to main pushes: %s", name, runner)
 		}
 	}
 	post := w.Jobs["post-test"]

@@ -64,16 +64,19 @@ var (
 // (v, seq, host, kind, key, received_at); the publisher owns measured_at and
 // exactly one kind body.
 type FleetStateMessage struct {
-	V          int                  `json:"v"`
-	Seq        uint64               `json:"seq"`
-	Host       string               `json:"host"`
-	Kind       string               `json:"kind"`
-	Key        string               `json:"key"`
-	MeasuredAt time.Time            `json:"measured_at"`
-	ReceivedAt time.Time            `json:"received_at"`
-	Quota      *FleetStateQuota     `json:"quota,omitempty"`
-	Load       *FleetStateLoad      `json:"load,omitempty"`
-	Publisher  *FleetStatePublisher `json:"publisher,omitempty"`
+	V          int       `json:"v"`
+	Seq        uint64    `json:"seq"`
+	Host       string    `json:"host"`
+	Kind       string    `json:"kind"`
+	Key        string    `json:"key"`
+	MeasuredAt time.Time `json:"measured_at"`
+	// ConfirmedAt is when the shared store last re-confirmed an unchanged
+	// quota reading (handoffkeep keeps measured_at and advances confirmed_at).
+	ConfirmedAt *time.Time           `json:"confirmed_at,omitempty"`
+	ReceivedAt  time.Time            `json:"received_at"`
+	Quota       *FleetStateQuota     `json:"quota,omitempty"`
+	Load        *FleetStateLoad      `json:"load,omitempty"`
+	Publisher   *FleetStatePublisher `json:"publisher,omitempty"`
 	// Readiness is the host's launch readiness and backoff (hub_readiness.go).
 	Readiness *fleet.ReadinessState `json:"readiness,omitempty"`
 }
@@ -133,12 +136,14 @@ type FleetStatePublisher struct {
 // FleetStatePublish is the payload of a node's websocket `state` event. Host
 // is optional; when present it must name the publishing node itself.
 type FleetStatePublish struct {
-	Kind       string           `json:"kind"`
-	Host       string           `json:"host,omitempty"`
-	Key        string           `json:"key"`
-	MeasuredAt time.Time        `json:"measured_at"`
-	Quota      *FleetStateQuota `json:"quota,omitempty"`
-	Spawn      *FleetStateSpawn `json:"spawn,omitempty"`
+	Kind       string    `json:"kind"`
+	Host       string    `json:"host,omitempty"`
+	Key        string    `json:"key"`
+	MeasuredAt time.Time `json:"measured_at"`
+	// ConfirmedAt is optional and quota-only: see FleetStateMessage.
+	ConfirmedAt *time.Time       `json:"confirmed_at,omitempty"`
+	Quota       *FleetStateQuota `json:"quota,omitempty"`
+	Spawn       *FleetStateSpawn `json:"spawn,omitempty"`
 }
 
 // decodeFleetStatePublish validates a node's state event without knowing the
@@ -154,6 +159,9 @@ func decodeFleetStatePublish(raw []byte) (FleetStatePublish, bool) {
 		return FleetStatePublish{}, false
 	}
 	if publish.Host != "" && !machineIDPattern.MatchString(publish.Host) {
+		return FleetStatePublish{}, false
+	}
+	if publish.ConfirmedAt != nil && (publish.Kind != fleetStateKindQuota || publish.ConfirmedAt.Before(publish.MeasuredAt)) {
 		return FleetStatePublish{}, false
 	}
 	switch publish.Kind {
@@ -269,6 +277,7 @@ func (h *HubServer) stateStore() *fleetStateStore {
 func fleetStateBody(message FleetStateMessage) string {
 	body := struct {
 		MeasuredAt *time.Time            `json:"m,omitempty"`
+		Confirmed  *time.Time            `json:"c,omitempty"`
 		Quota      *FleetStateQuota      `json:"q,omitempty"`
 		Load       *FleetStateLoad       `json:"l,omitempty"`
 		Publisher  *FleetStatePublisher  `json:"p,omitempty"`
@@ -276,6 +285,7 @@ func fleetStateBody(message FleetStateMessage) string {
 	}{Quota: message.Quota, Load: message.Load, Readiness: message.Readiness}
 	if message.Kind == fleetStateKindQuota {
 		body.MeasuredAt = &message.MeasuredAt
+		body.Confirmed = message.ConfirmedAt
 	}
 	if message.Publisher != nil {
 		// last_seen advances every heartbeat; only connectivity is a change.
@@ -372,7 +382,7 @@ func (h *HubServer) publishFleetStateFromNode(machineID string, publish FleetSta
 		}
 		return true
 	}
-	h.stateStore().publish(FleetStateMessage{Host: machineID, Kind: publish.Kind, Key: publish.Key, MeasuredAt: publish.MeasuredAt.UTC(), ReceivedAt: received, Quota: publish.Quota}, fleetStateNodeRepeat)
+	h.stateStore().publish(FleetStateMessage{Host: machineID, Kind: publish.Kind, Key: publish.Key, MeasuredAt: publish.MeasuredAt.UTC(), ConfirmedAt: utcPtr(publish.ConfirmedAt), ReceivedAt: received, Quota: publish.Quota}, fleetStateNodeRepeat)
 	return true
 }
 
@@ -486,4 +496,13 @@ func (h *HubServer) handleFleetStateSnapshot(writer http.ResponseWriter, request
 		return
 	}
 	writeJSON(writer, http.StatusOK, h.stateStore().snapshot(h.now().UTC()))
+}
+
+// utcPtr copies an optional time in UTC.
+func utcPtr(t *time.Time) *time.Time {
+	if t == nil {
+		return nil
+	}
+	u := t.UTC()
+	return &u
 }

@@ -3,12 +3,13 @@ package panewire
 import (
 	"encoding/json"
 	"errors"
-	"github.com/mgh3326/panewire/internal/fleet"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 const (
@@ -175,7 +176,7 @@ func validHubSpawnArgsForMode(args []string, operator bool) bool {
 	}
 	booleans := map[string]bool{}
 	if operator {
-		for _, flag := range []string{"-c", "-p", "--host", "--exclude-host", "--grade", "--routing-role", "--override-reason", "--containment", "--operator-request", "--requested-by", "--purpose", "--lane-defer"} {
+		for _, flag := range []string{"-c", "-p", "--host", "--exclude-host", "--grade", "--routing-role", "--override-reason", "--containment", "--operator-request", "--requested-by", "--purpose"} {
 			allowed[flag] = true
 		}
 		booleans = map[string]bool{"--keep": true, "--job-dup-ok": true, "--task-hk-bypass": true, "--allow-escalation": true}
@@ -223,7 +224,7 @@ func validHubSpawnArgsForMode(args []string, operator bool) bool {
 func validHubSpawnArgValue(flag, value string) bool {
 	switch flag {
 	case "--role":
-		return value == "worker" || value == "builder" || value == "reviewer" || value == "tester"
+		return value == "worker" || value == "reviewer" || value == "tester"
 	case "--builder-family":
 		return value == "anthropic" || value == "openai" || value == "google" || value == "xai" || value == "deepseek" || value == "meta" || value == "mistral" || value == "other"
 	case "--parent-job", "--builder-job":

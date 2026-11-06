@@ -21,8 +21,7 @@ func (s reviewAccountSource) SharedAccount(ctx context.Context, key string) (Sha
 func reviewSpawnFixture(t *testing.T, sharedClaude, explicit bool) (*App, Spawn, *fakeQuota, *[]Spawn) {
 	t.Helper()
 	a, s, fr, _ := cmdFixture(t)
-	s.Profile, s.Host, s.Role = "auto", "auto", "builder"
-	s.Lane, s.Parent = "test-lane", "test-parent"
+	s.Profile, s.Host, s.Role = "auto", "auto", "counsel"
 	if explicit {
 		s.Profile, s.Host = "builder-opus", "host-b"
 	}
@@ -150,8 +149,8 @@ func TestReviewPinnedRemoteDoesNotInheritInitiatorAccount(t *testing.T) {
 }
 
 func TestReviewLocalAccountJudgmentIsLocalAndBound(t *testing.T) {
-	a, s, q := leadFixture(t)
-	s.Role, s.Host = "builder", "local"
+	a, s, q := consultFixture(t)
+	s.Role, s.Host = "counsel", "local"
 	q.GateDo = gatePools(map[string]string{"opus": "claude"})
 	sel, err := a.selectProfile(context.Background(), s)
 	if err != nil {
@@ -164,7 +163,7 @@ func TestReviewLocalAccountJudgmentIsLocalAndBound(t *testing.T) {
 }
 
 func TestReviewSameAccountRefreshTriesAnotherHost(t *testing.T) {
-	a, s, q, src := accountLeadFixture(t)
+	a, s, q, src := accountConsultFixture(t)
 	src.presence = src.presence[:2]
 	src.presence[1].AccountKey = testClaudeA
 	src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA, Observed: true}
@@ -176,7 +175,7 @@ func TestReviewSameAccountRefreshTriesAnotherHost(t *testing.T) {
 			return Result{}, false
 		}
 		args := strings.Join(c.Args, " ")
-		if !strings.Contains(args, "pacelever refresh") {
+		if !isQuotaRefresh(args) {
 			t.Fatalf("unexpected host contact: %s", args)
 		}
 		if strings.Contains(args, "host-a") {
@@ -201,7 +200,7 @@ func TestReviewSameAccountRefreshTriesAnotherHost(t *testing.T) {
 }
 
 func TestReviewHostGateFailureTriesAnotherHolder(t *testing.T) {
-	a, s, q, src := accountLeadFixture(t)
+	a, s, q, src := accountConsultFixture(t)
 	src.presence = src.presence[:2]
 	src.presence[0].AccountKey = testClaudeB
 	q.CatalogRows = q.CatalogRows[1:2]
@@ -223,7 +222,7 @@ func TestReviewHostGateFailureTriesAnotherHolder(t *testing.T) {
 }
 
 func TestReviewAccountQuotaRefusalDoesNotRetryHolders(t *testing.T) {
-	a, s, q, src := accountLeadFixture(t)
+	a, s, q, src := accountConsultFixture(t)
 	src.presence = src.presence[:2]
 	src.presence[0].AccountKey = testClaudeB
 	q.CatalogRows = q.CatalogRows[1:2]
@@ -250,7 +249,7 @@ func TestReviewRefreshInfrastructureFailuresAreNotQuotaUnknown(t *testing.T) {
 		{exitTimeout, exitPlacement, outcomeNoEligibleHost},
 		{exitUsage, exitConfig, outcomePolicyUnavailable},
 	} {
-		a, s, q, src := accountLeadFixture(t)
+		a, s, q, src := accountConsultFixture(t)
 		q.CatalogRows = q.CatalogRows[1:2]
 		src.presence = src.presence[:1]
 		src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA}
@@ -269,7 +268,7 @@ func TestReviewRefreshInfrastructureFailuresAreNotQuotaUnknown(t *testing.T) {
 
 func TestReviewPostRefreshReadSharesDeadline(t *testing.T) {
 	for _, cancelRead := range []bool{false, true} {
-		a, s, q, src := accountLeadFixture(t)
+		a, s, q, src := accountConsultFixture(t)
 		q.CatalogRows = q.CatalogRows[1:2]
 		src.presence = src.presence[1:2]
 		src.accounts[testClaudeB] = SharedAccount{Key: testClaudeB}
@@ -320,7 +319,7 @@ func TestReviewGateInfrastructureFailuresAreNotQuotaUnknown(t *testing.T) {
 		{exitConfig, exitConfig, outcomePolicyUnavailable},
 		{exitFailure, exitConfig, outcomePolicyUnavailable},
 	} {
-		a, s, q, src := accountLeadFixture(t)
+		a, s, q, src := accountConsultFixture(t)
 		q.CatalogRows = q.CatalogRows[1:2]
 		src.presence = src.presence[1:2]
 		q.GateDo = func(QuotaRequest) (string, error) { return "", fail(tc.status, "infrastructure failure") }

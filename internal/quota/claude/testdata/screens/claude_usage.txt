@@ -1,0 +1,6 @@
+Current session: 6% used · resets Oct 29 at 11:40pm (Asia/Seoul)
+Current week (all models): 10% used · resets Nov 1 at 2am (Asia/Seoul)
+Current week (Fable): 0% used · resets Nov 1 at 2am (Asia/Seoul)
+
+What's contributing to usage
+Conversation history and tool calls can affect the current session.

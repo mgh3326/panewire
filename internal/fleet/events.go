@@ -22,9 +22,12 @@ type Job struct {
 	ID                                                                                                string
 	Owner, Parent, Role, Label, Pane, Tab, Task, Family, Profile, Effort, Report, HubLane, Machine, T string
 	Keep, Terminal, Reaped                                                                            bool
-	At                                                                                                time.Time
-	Receipt                                                                                           map[string]any
-	Events                                                                                            []Event
+	// Ended is the kind of the newest terminal event since the last claim,
+	// spawn or reprompt; empty while the job is live.
+	Ended   string
+	At      time.Time
+	Receipt map[string]any
+	Events  []Event
 }
 
 func (a *App) events(id string) ([]Event, error) {
@@ -103,7 +106,7 @@ func (a *App) job(id string) (Job, error) {
 			}
 			j.Task = scalar(p["task_id"])
 			j.T = str(p, "t_level")
-			j.Terminal = false
+			j.Terminal, j.Ended = false, ""
 			j.Reaped = false
 		case "job.spawned":
 			j.Receipt = p
@@ -119,15 +122,15 @@ func (a *App) job(id string) (Job, error) {
 			j.Report = str(p, "report")
 			j.HubLane = str(p, "hub_lane")
 			j.Machine = str(p, "hub_lane_machine")
-			j.Terminal = false
+			j.Terminal, j.Ended = false, ""
 			j.Reaped = false
 			if j.Task == "" {
 				j.Task = scalar(p["task_id"])
 			}
 		case "job.reprompted":
-			j.Terminal = false
-		case "job.completed", "job.joined", "job.revoked", "job.handed_off":
-			j.Terminal = true
+			j.Terminal, j.Ended = false, ""
+		case "job.completed", "job.joined", "job.revoked", "job.handed_off", "job.lost":
+			j.Terminal, j.Ended = true, ev.Kind
 			j.At = ev.when
 		case "job.reaped":
 			j.Reaped = true

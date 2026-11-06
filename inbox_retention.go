@@ -7,7 +7,7 @@ import (
 
 // laneInboxTerminal is shared by retention and replay. Must-ack work completes
 // only on ack; automatic interrupt read-on-insert never completes an item.
-const laneInboxTerminal = `(acked_at>0 OR (must_ack=0 AND (delivered_at>0 OR (class='inbox' AND read_at>0))))`
+const laneInboxTerminal = `(superseded_at>0 OR acked_at>0 OR (must_ack=0 AND (delivered_at>0 OR (class='inbox' AND read_at>0))))`
 
 // replaySuppressed also honors confirmed delivery of must-ack work: it stays
 // unread until acked, but must not be injected into the pane a second time.
@@ -20,6 +20,25 @@ func (s *laneInboxStore) replaySuppressed(key string) (bool, error) {
 		return false, nil
 	}
 	return suppressed, err
+}
+
+// laneInboxSettled is the evidence that the receiver already has an item:
+// superseded, acked, confirmed delivered, or read by the receiver. A read
+// stamped at insert (a non-must-ack interrupt) is not the receiver's read, so
+// it never counts.
+const laneInboxSettled = `(superseded_at>0 OR acked_at>0 OR delivered_at>0 OR (read_at>0 AND (must_ack=1 OR class='inbox')))`
+
+// settled reports whether the inbox already holds the event key as an item
+// the receiver has been given. An absent item is not settled.
+func (s *laneInboxStore) settled(key string) (bool, error) {
+	ctx, done := s.op(s.life)
+	defer done()
+	var settled bool
+	err := s.db.QueryRowContext(ctx, s.q(`SELECT `+laneInboxSettled+` FROM lane_inbox WHERE event_key=?`), s.storedKey(key)).Scan(&settled)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	return settled, err
 }
 
 // prune keeps all unread work, pending deliveries, and evidence touched within
@@ -45,9 +64,9 @@ func (s *laneInboxStore) prune(now time.Time, policy inboxRetentionPolicy) (int6
  ) DELETE FROM lane_inbox WHERE (created_at<? OR id IN (SELECT id FROM ranked WHERE position>?))
  AND `+laneInboxTerminal+`
  AND NOT `+laneInboxUnread+`
- AND created_at<? AND read_at<? AND acked_at<? AND delivered_at<?
- AND NOT (acked_at=0 AND ((hold_until>0 AND digest_batch='') OR (digest_at>0 AND digest_batch='')))
- AND NOT EXISTS (SELECT 1 FROM lane_inbox_batches b WHERE b.sent=0 AND (b.id=lane_inbox.digest_batch OR b.id=lane_inbox.escalation_batch))`), now.Add(-time.Duration(policy.Days)*24*time.Hour).UnixMilli(), policy.PerLane, now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli())
+ AND created_at<? AND read_at<? AND acked_at<? AND delivered_at<? AND superseded_at<?
+ AND NOT (acked_at=0 AND superseded_at=0 AND ((hold_until>0 AND digest_batch='') OR (digest_at>0 AND digest_batch='')))
+ AND NOT EXISTS (SELECT 1 FROM lane_inbox_batches b WHERE b.sent=0 AND (b.id=lane_inbox.digest_batch OR b.id=lane_inbox.escalation_batch))`), now.Add(-time.Duration(policy.Days)*24*time.Hour).UnixMilli(), policy.PerLane, now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli(), now.Add(-relayReplayMaxAge).UnixMilli())
 	if err != nil {
 		return 0, err
 	}

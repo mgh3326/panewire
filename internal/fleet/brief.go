@@ -4,6 +4,7 @@ import (
 	_ "embed"
 	"fmt"
 	"os"
+	"strings"
 )
 
 //go:embed brief-policy.json
@@ -55,5 +56,21 @@ func (a *App) prepareBrief(s Spawn, seat Seat, launch Launch, body string) (stri
 	if seat.Canon != "" {
 		profile = launchProfile(seat.Canon, launch.Effort)
 	}
-	return fmt.Sprintf("panewire brief-policy: v%d / %s\n%s\nLaunch identity: family=%s launch_profile=%s (use these for the Mergewake-Author-Family and Mergewake-Author-Profile trailers)\n\n%s", p.Version, key, block, firstNonempty(seat.Family, "unknown"), profile, body), nil
+	trailers := ""
+	if s.Task != "" {
+		var lines []string
+		for _, field := range []struct{ name, value string }{
+			{"Mergewake-Author-Family", seat.Family},
+			{"Mergewake-Author-Profile", profile},
+			{"Mergewake-Task", s.Task},
+			{"Mergewake-Grade", s.TaskGrade},
+			{"Mergewake-Tier", s.T},
+		} {
+			if field.value != "" && field.value != "unknown" {
+				lines = append(lines, field.name+": "+field.value)
+			}
+		}
+		trailers = "Mergewake trailers (paste at the end of the PR body):\n" + strings.Join(lines, "\n") + "\n\n"
+	}
+	return fmt.Sprintf("panewire brief-policy: v%d / %s\n%s\nLaunch identity: family=%s launch_profile=%s (use these for the Mergewake-Author-Family and Mergewake-Author-Profile trailers)\n\n%s%s", p.Version, key, block, firstNonempty(seat.Family, "unknown"), profile, trailers, body), nil
 }

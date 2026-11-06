@@ -136,7 +136,7 @@ func (client *HubClient) nodeLanes(ctx context.Context) (map[string]hubLaneProje
 			continue
 		}
 		request.Header = client.dialHeaders(endpoint)
-		response, err := (&http.Client{Timeout: 15 * time.Second}).Do(request)
+		response, err := (&http.Client{Timeout: 15 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
 		if err != nil {
 			continue
 		}

@@ -35,6 +35,12 @@ type Submission struct {
 	Repository      Repository `json:"repository"`
 	OriginMachine   string     `json:"origin_machine"`
 	DeadlineSeconds int        `json:"deadline_seconds"`
+	// RetryHost is the hub-internal marker of a verified-cleanup retry: the
+	// hub sets it, in memory, on the one request it rewrites to `--host <the
+	// stored outcome host>`, and validateContainment then does not treat that
+	// host as a submitter pin. It never travels on the wire or in the store
+	// (json:"-"), and no flag parses into it.
+	RetryHost string `json:"-"`
 }
 
 type Accepted struct{ Job, Request string }
@@ -213,6 +219,12 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 		repo.sourceDir = cwd
 		repo.branch = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "branch", "--show-current").Out)
 		repo.head = strings.TrimSpace(a.call(ctx, "git", "-C", cwd, "rev-parse", "HEAD").Out)
+		if s.Role != "reviewer" && s.Role != "counsel" && repo.branch != "" {
+			defaultRef := a.call(ctx, "git", "-C", cwd, "symbolic-ref", "--short", "refs/remotes/origin/HEAD")
+			if defaultRef.Code == 0 && strings.TrimSpace(defaultRef.Out) == "origin/"+repo.branch {
+				return Submission{}, fail(exitPlacement, "create a worktree on a new branch (git worktree add -b wk/<slug> ...) and pass it as -c")
+			}
+		}
 		repo.wt = s.Job
 		if len(repo.wt) > 110 {
 			sum := sha256.Sum256([]byte(s.Job))
@@ -223,7 +235,11 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	var checkout *HubCheckout
 	if repo.wt != "" {
 		var why string
-		checkout, why = a.hubCheckout(ctx, repo)
+		checkoutRepo := *repo
+		if s.Role == "reviewer" || s.Role == "counsel" {
+			checkoutRepo.branch = ""
+		}
+		checkout, why = a.hubCheckout(ctx, &checkoutRepo)
 		if checkout == nil {
 			return Submission{}, fail(exitPlacement, "%s", why)
 		}
@@ -256,6 +272,7 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	if err != nil {
 		return s, err
 	}
+	s.hubRetryHost = request.RetryHost
 	if err := validateContainment(s); err != nil {
 		return s, err
 	}
@@ -275,14 +292,10 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	if s.Task != "" && s.ParentJob != "" {
 		return s, fail(exitUsage, "--task and --parent-job are exclusive")
 	}
-	if s.Role == "builder" {
-		if s.Lane == "" || s.Parent == "" || s.Owner != "" || s.Task == "" {
-			return s, fail(exitUsage, "builder requires --lane --parent --task without --owner")
-		}
-	} else if s.Owner == "" {
+	if s.Owner == "" {
 		return s, fail(exitUsage, "supply --owner LANE so completion can be delivered")
 	}
-	if !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) || !slices.Contains([]string{"worker", "builder", "reviewer", "tester", "counsel"}, s.Role) {
+	if !slices.Contains([]string{"T0", "T1", "T2", "T3"}, s.T) || !slices.Contains([]string{"worker", "reviewer", "tester", "counsel"}, s.Role) {
 		return s, fail(exitUsage, "use --t T0..T3 and a supported --role")
 	}
 	repo := request.Repository
@@ -298,7 +311,7 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 func submissionArgs(s Spawn) []string {
 	var args []string
 	for _, field := range []struct{ flag, value string }{
-		{"-c", s.CWD}, {"-p", s.Prompt}, {"-m", s.Profile}, {"-w", s.Workspace}, {"-l", s.Label}, {"--job", s.Job}, {"--t", s.T}, {"--owner", s.Owner}, {"--effort", s.Effort}, {"--role", s.Role}, {"--lane", s.Lane}, {"--parent", s.Parent}, {"--task", s.Task}, {"--parent-job", s.ParentJob}, {"--host", s.Host}, {"--report-relative", s.ReportRelative}, {"-L", s.ExecutionLane}, {"--override-reason", s.OverrideReason}, {"--containment", s.Containment}, {"--tags", s.Tags}, {"--exclude-host", s.ExcludeHosts}, {"--urgency", s.Urgency}, {"--builder-family", s.BuilderFamily}, {"--builder-job", s.BuilderJob}, {"--routing-role", s.RoutingRole}, {"--grade", s.Grade}, {"--operator-request", s.OperatorRequest}, {"--requested-by", s.RequestedBy}, {"--purpose", s.Purpose}, {"--lane-defer", s.LaneDefer},
+		{"-c", s.CWD}, {"-p", s.Prompt}, {"-m", s.Profile}, {"-w", s.Workspace}, {"-l", s.Label}, {"--job", s.Job}, {"--t", s.T}, {"--owner", s.Owner}, {"--effort", s.Effort}, {"--role", s.Role}, {"--lane", s.Lane}, {"--parent", s.Parent}, {"--task", s.Task}, {"--parent-job", s.ParentJob}, {"--host", s.Host}, {"--report-relative", s.ReportRelative}, {"-L", s.ExecutionLane}, {"--override-reason", s.OverrideReason}, {"--containment", s.Containment}, {"--tags", s.Tags}, {"--exclude-host", s.ExcludeHosts}, {"--urgency", s.Urgency}, {"--builder-family", s.BuilderFamily}, {"--builder-job", s.BuilderJob}, {"--routing-role", s.RoutingRole}, {"--grade", s.Grade}, {"--operator-request", s.OperatorRequest}, {"--requested-by", s.RequestedBy}, {"--purpose", s.Purpose},
 	} {
 		if field.value != "" {
 			args = append(args, field.flag, field.value)

@@ -167,6 +167,7 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 		}
 		outcome.Retryable = !node.Valid || outcome.NodeResult && outcome.Retryable
 	}
+	outcome.Retryable = outcome.Retryable && spawnRefusalReplayable(outcome.Reason)
 	status := spawnOutcomeStatus(outcome)
 	if status == "deadline_exceeded" || status == "reconciling" {
 		outcome.Retryable = false
@@ -189,9 +190,19 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 		}
 	}
 	eventID := fmt.Sprintf("%s:%d:%s", task.Request.RequestID, task.Attempt, status)
-	_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`), eventID, task.Request.RequestID, task.Job, task.Owner, string(raw), now.UnixMilli())
-	if err != nil {
-		return false, err
+	// The owner keeps the bare event id. A failed or retryable spawn also tells
+	// the submitting lane, whose only other sign of it was ACCEPTED.
+	lanes := []struct{ id, lane string }{{eventID, task.Owner}}
+	if status == "failed" || status == "retryable" {
+		if lane := spawnSubmitterLane(task.Request.Args); lane != "" && lane != task.Owner {
+			lanes = append(lanes, struct{ id, lane string }{eventID + ":" + lane, lane})
+		}
+	}
+	for _, n := range lanes {
+		_, err = tx.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms) VALUES(?,?,?,?,?,?) ON CONFLICT DO NOTHING`), n.id, task.Request.RequestID, task.Job, n.lane, string(raw), now.UnixMilli())
+		if err != nil {
+			return false, err
+		}
 	}
 	return true, tx.Commit()
 }
@@ -320,6 +331,27 @@ func (s *laneInboxStore) spawnRoleOwner(parent context.Context, task, role strin
 	defer done()
 	err = s.db.QueryRowContext(ctx, s.q(`SELECT o.request_id,o.job,o.status FROM spawn_reservations r JOIN spawn_operations o ON r.request_id=o.request_id WHERE r.task_role=?`), task+":"+role).Scan(&id, &job, &status)
 	return
+}
+
+// retryableSpawns lists the operations that ended with verified cleanup and
+// wait for a replay of their own request.
+func (s *laneInboxStore) retryableSpawns(parent context.Context) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE status='retryable'`))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
 }
 func (s *laneInboxStore) releaseCompletedSpawnRole(parent context.Context, id, task, role string) error {
 	ctx, done := s.op(parent)

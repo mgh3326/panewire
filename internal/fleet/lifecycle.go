@@ -173,6 +173,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			a.warn("report upload failed; local report retained")
 		}
 	}
+	a.recordJobUsage(ctx, j, false)
 	// The hk record state is written before the relay: one PUT carries the
 	// terminal state, the report doc and — for done --result — the findings.
 	// A failed write degrades to a job.record_failed event and the relay

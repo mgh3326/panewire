@@ -4,7 +4,7 @@
 scheduled for removal; callers should use panewire's interface.
 
 - `panewire quota status [--json]` reads the local host's cached readings.
-- `panewire quota refresh POOL` measures the named pool now, with a 60-second bound.
+- `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` is measured by panewire itself ([below](#native-measurement-claude)); every other pool runs the dependency.
 - `panewire quota observe KIND ...` forwards the observation kind and all remaining arguments, including `devin-free-limit` options, and returns the dependency's exit code.
 
 Status and version calls each have a 30-second bound; gate calls have a
@@ -21,3 +21,68 @@ Each reading has `pool`, `account` (empty if unknown), `source`, `age_seconds`
 `used_pct` (number or null), optional `resets_at`, and `scope` with `kind` and
 optional `name`. Age is measured by the source, in seconds. A refresh that
 returns a JSON reading emits the same reading shape; text responses pass through.
+
+## Native measurement: claude
+
+panewire measures the `claude` pool in its own process (`internal/quota/claude`,
+`internal/quota/shared`); the node daemon, the `quota.refresh` node command,
+placement's on-demand refresh and `panewire quota refresh claude` all run the
+same code. Other pools still run pacelever until their own change.
+
+- **API first.** `GET /api/oauth/usage` on Anthropic's API host with the
+  OAuth bearer token and `anthropic-beta: oauth-2025-04-20`; 20 s timeout,
+  redirects refused, 2 MiB body cap. `five_hour` is the `5h` and `seven_day`
+  the `7d` account bucket; each `limits[].scope.model.display_name` is a `7d`
+  model bucket.
+- **One CLI fallback.** If the API fails, `claude -p /usage --allowed-tools ""`
+  runs once in a private temporary directory (15 s, its own process group
+  killed on timeout, stderr discarded) and its panel is parsed: "current
+  session" is `5h`, "current week (all models)" `7d`, other weeks model
+  buckets; `% used` and `% left` both read. If the CLI fails too, the API's
+  failure is the result. The CLI gets the inherited environment plus
+  `CLAUDE_CONFIG_DIR` when an account is selected; never the token.
+- **Error kinds** are pacelever's names (`auth` for 401/403, `rate_limited` for
+  429 with `Retry-After` seconds or date capped at a day and a 300 s default,
+  `http`, `network`, `parse_error`, `probe_error`, `credentials`,
+  `token_expired`, and the shared-store kinds `account_mismatch`,
+  `account_unknown`, `probe_failed`, `shared_*`). The node's login rule is
+  unchanged: Login is missing only for `auth`, `auth_failed`, `credentials`
+  and `token_expired`.
+- **Credentials** are located, not copied: `<dir>/.credentials.json`
+  (`claudeAiOauth.accessToken`, `expiresAt` in ms) where `dir` is
+  `CLAUDE_SECURESTORAGE_CONFIG_DIR`, else `CLAUDE_CONFIG_DIR`, else
+  `~/.claude`; on macOS also the keychain item `Claude Code-credentials`
+  (suffixed with `-<hex(sha256(NFC(dir)))[:4]>` when a config dir is set). The
+  unexpired login, then the later expiry, wins. The token is read into memory
+  for the request and never logged, written, put in an error or on a command
+  line; errors carry kinds, not response bodies.
+- **Account key** `claude:<fp>`, `fp = hex(sha256("claude-account|" +
+  oauthAccount.accountUuid))[:16]`, from `~/.claude.json` (or
+  `$CLAUDE_CONFIG_DIR/.claude.json`), only when the login is shareable (the
+  secure-storage dir is not steered away from the config dir).
+- **Shared store flow.** The store is the `handoffkeep_env` named in the
+  node's `spawn.json`. A fresh reading (valid as of the later of `measured_at`
+  and `confirmed_at`, within 900 s, every window still running) is returned
+  without measuring. Otherwise the node takes the account's lease (120 s),
+  re-reads, measures, publishes `{kind: "auto", measured_at, buckets}` and
+  releases. Another holder's live lease is polled (1 s, at most two lease
+  windows) and an expired one taken over once; a measurement for another
+  account refuses to publish (`account_mismatch`). A 429 backs the account off
+  in memory for its `Retry-After`. Presence (`PUT /v1/quota/presence`) is
+  announced at most every 10 minutes per account, under the node's machine id.
+  With no `handoffkeep_env` the node measures directly and publishes to no
+  store; with one it cannot use, the refresh fails `shared_unavailable`.
+
+### Artificial Analysis annotations
+
+`panewire quota aa-sync --out catalog.json` reads the current catalog through
+pacelever, fetches the free Data API, and writes a catalog artifact for review
+and a later operator-controlled catalog push. `--dry-run` reports the result
+without writing the artifact. The catalog must be fresh and server-sourced when
+using `--out`. Only explicit model mappings are annotated; unmapped or ambiguous
+rows are reported. Annotations are model priors, not grade evidence.
+
+Set `ARTIFICIAL_ANALYSIS_API_KEY` in the environment, or place it in the optional
+mode-0600 `panewire/aa.env` under the user configuration directory. Data is
+provided by [Artificial Analysis](https://artificialanalysis.ai/); see its
+[Data API reference](https://artificialanalysis.ai/data-api/docs/reference).

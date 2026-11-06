@@ -18,6 +18,8 @@ coverage.html
 *.sqlite
 *.sqlite3
 .panewire/
+# XDG state written when HOME points at a checkout (fleet events carry host names).
+/.local/
 
 # macOS and editor files
 .DS_Store

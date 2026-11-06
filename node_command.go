@@ -28,6 +28,7 @@ const (
 	nodeCommandPaneClose       = "pane.close"
 	nodeCommandPaneCapture     = "pane.capture"
 	nodeCommandWorktreeInspect = "worktree.inspect"
+	nodeCommandWorktreeList    = "worktree.list"
 	nodeCommandWorktreePrepare = "worktree.prepare"
 	nodeCommandWorktreeRemove  = "worktree.remove"
 	nodeCommandQuotaRefresh    = "quota.refresh"
@@ -66,8 +67,8 @@ var (
 func knownNodeCommandOp(op string) bool {
 	switch op {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
-		nodeCommandWorktreeInspect, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
-		nodeCommandQuotaRefresh, nodeCommandJobDone:
+		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
+		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandPRStatus:
 		return true
 	}
 	return false
@@ -77,7 +78,7 @@ func knownNodeCommandOp(op string) bool {
 // result. node_lost and node_timeout are hub-local and never on the wire.
 func validNodeCommandError(code string) bool {
 	switch code {
-	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_too_large":
+	case "invalid_args", "herdr_failed", "close_failed", "capture_failed", "jobs_root_unset", "work_root_unset", "refresh_failed", "done_failed", "result_failed", "result_too_large":
 		return true
 	}
 	return false
@@ -177,10 +178,13 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandPaneCapture:     {"pane_id", "name", "cwd", "merged_after", "write"},
 	nodeCommandPaneRead:        {"pane_id", "name", "cwd", "tail_lines"},
 	nodeCommandJobDone:         {"job", "report"},
+	nodeCommandJobResult:       {"job"},
 	nodeCommandWorktreeInspect: {"cwd"},
+	nodeCommandWorktreeList:    {"common"},
 	nodeCommandWorktreePrepare: {"origin", "mode", "branch", "sha", "fetch", "dir"},
 	nodeCommandWorktreeRemove:  {"cwd", "expect_head", "base", "regenerable"},
 	nodeCommandQuotaRefresh:    {"pool"},
+	nodeCommandPRStatus:        {"repo", "pr", "fresh"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -212,7 +216,8 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	names, known := nodeCommandArgFields[op]
 	optionalKind := op == nodeCommandPaneRead && nodeCommandHasFields(raw, append(append([]string(nil), names...), "kind"))
 	optionalDetached := op == nodeCommandWorktreeRemove && nodeCommandHasFields(raw, append(append([]string(nil), names...), "detached"))
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached) {
+	optionalList := op == nodeCommandWorktreeList && nodeWorktreeListFields(raw)
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalList) {
 		return nil, false
 	}
 	switch op {
@@ -231,12 +236,19 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 		var args nodePaneReadArgs
 		valid := decodeNodeCommandStrict(raw, &args) && nodeCommandPaneIDPattern.MatchString(args.PaneID) && validNodeJobName(args.Name) && validNodeCommandPath(args.Cwd) && args.TailLines >= 0 && args.TailLines <= nodePaneReadMaxTailLines
 		return args, valid
+	case nodeCommandJobResult:
+		var args nodeJobResultArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job)
 	case nodeCommandJobDone:
 		var args nodeJobDoneArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job) && validNodeCommandPath(args.Report)
 	case nodeCommandWorktreeInspect:
 		var args nodeWorktreeInspectArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeCommandPath(args.Cwd)
+	case nodeCommandWorktreeList:
+		var args nodeWorktreeListArgs
+		valid := decodeNodeCommandStrict(raw, &args) && validNodeCommandPath(args.Common) && (args.Limit == nil || (*args.Limit >= 1 && *args.Limit <= 100))
+		return args, valid
 	case nodeCommandWorktreePrepare:
 		var args nodeWorktreePrepareArgs
 		if !decodeNodeCommandStrict(raw, &args) {
@@ -268,6 +280,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandQuotaRefresh:
 		var args nodeQuotaRefreshArgs
 		return args, decodeNodeCommandStrict(raw, &args) && nodeQuotaPoolPattern.MatchString(args.Pool)
+	case nodeCommandPRStatus:
+		var args nodePRStatusArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodePRStatusArgs(args)
 	}
 	return nil, false
 }
@@ -300,6 +315,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		var result PaneReadResult
 		valid = decodeNodeCommandStrict(raw, &result) && validPaneReadResult(result)
 		target = result
+	case nodeCommandJobResult:
+		var result nodeJobResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodeJobResult(result)
+		target = result
 	case nodeCommandJobDone:
 		var result JobDoneResult
 		valid = decodeNodeCommandStrict(raw, &result) && validJobDoneResult(result)
@@ -307,6 +326,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandWorktreeInspect:
 		var result nodeWorktreeInspectResult
 		valid = decodeNodeCommandStrict(raw, &result)
+		target = result
+	case nodeCommandWorktreeList:
+		var result nodeWorktreeListResult
+		valid = decodeNodeCommandStrict(raw, &result) && result.Worktrees != nil && result.Total >= len(result.Worktrees)
 		target = result
 	case nodeCommandWorktreePrepare:
 		var result nodeWorktreePrepareResult
@@ -349,11 +372,15 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		var result nodeQuotaRefreshResult
 		valid = decodeNodeCommandStrict(raw, &result) && result.Outcome == nodeQuotaRefreshed
 		target = result
+	case nodeCommandPRStatus:
+		var result nodePRStatusResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodePRStatusResult(result)
+		target = result
 	}
 	if !valid {
 		return nil, false
 	}
-	encoded, err := json.Marshal(target)
+	encoded, err := marshalNodeCommandJSON(target)
 	return encoded, err == nil
 }
 
@@ -423,7 +450,7 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 		logNodeReapCommand(message.CommandOp, decoded, result, code)
 	}
 	if code == "" {
-		encoded, err := json.Marshal(result)
+		encoded, err := marshalNodeCommandJSON(result)
 		switch {
 		case err != nil:
 			code = "herdr_failed"
@@ -437,7 +464,11 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 	if code == "done_failed" {
 		reply.Detail, _ = result.(string)
 	}
-	_ = peer.write(ctx, reply)
+	if message.CommandOp == nodeCommandJobResult {
+		_ = peer.writeNodeResult(ctx, reply)
+	} else {
+		_ = peer.write(ctx, reply)
+	}
 }
 
 func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json.RawMessage) (any, string) {
@@ -458,18 +489,26 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		return client.nodePaneCapture(ctx, args)
 	case nodePaneReadArgs:
 		return client.nodePaneRead(ctx, args)
+	case nodeJobResultArgs:
+		return client.nodeJobResult(args)
 	case nodeJobDoneArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		return client.nodeJobDone(ctx, args)
 	case nodeWorktreeInspectArgs:
 		return nodeWorktreeInspect(ctx, client.nodeGitRunner(), args.Cwd), ""
+	case nodeWorktreeListArgs:
+		return nodeWorktreeList(ctx, client.nodeGitRunner(), args)
 	case nodeWorktreePrepareArgs:
 		return client.nodeWorktreePrepare(ctx, args)
 	case nodeWorktreeRemoveArgs:
 		return client.nodeWorktreeRemove(ctx, args)
 	case nodeQuotaRefreshArgs:
 		return client.nodeQuotaRefresh(ctx, args)
+	case nodePRStatusArgs:
+		// Read-only: no acting-command lock, so a status read never queues
+		// behind a pane close.
+		return client.nodePRStatus(ctx, args)
 	}
 	return client.nodeAgentsList(ctx)
 }

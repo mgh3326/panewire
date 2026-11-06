@@ -213,6 +213,17 @@ func LoadConfig(path string) (Config, error) {
 			}
 		}
 	}
+	if v, ok := c.Quota["pool_fresh_ttl_s"]; ok {
+		m, isMap := v.(map[string]any)
+		if !isMap {
+			return c, fail(exitConfig, "quota.pool_fresh_ttl_s must map pool names to nonnegative integers")
+		}
+		for pool, n := range m {
+			if i, isInt := n.(int64); !validID(pool) || !isInt || i < 0 {
+				return c, fail(exitConfig, "quota.pool_fresh_ttl_s.%s must be a nonnegative integer", pool)
+			}
+		}
+	}
 	if v := str(c.Quota, "url"); v != "" {
 		u, e := url.Parse(v)
 		if e != nil || u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname())) {

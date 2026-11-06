@@ -5,12 +5,13 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"github.com/mgh3326/panewire/internal/fleetevent"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleetevent"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
 )
@@ -58,8 +59,9 @@ type App struct {
 	EventSink func(fleetevent.Event)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
-	State    FleetStateReader
-	fleetLog *fleetStateLog
+	DecisionReply func(context.Context, string, string, time.Time) (bool, error)
+	State         FleetStateReader
+	fleetLog      *fleetStateLog
 	// spawnFn replaces Spawn where delegate starts its pane; tests only.
 	spawnFn func(context.Context, *App, Spawn) error
 	// Version is the build line `panewire --version` prints, compared with the
@@ -77,7 +79,7 @@ func Main(ctx context.Context, args []string, out, errout io.Writer) int {
 	}
 	if e != nil {
 		fmt.Fprintln(errout, "panewire:", e)
-		if len(args) > 0 && (args[0] == "spawn" || args[0] == "work" || args[0] == "lead") {
+		if len(args) > 0 && (args[0] == "spawn" || args[0] == "work") {
 			fmt.Fprintln(errout, "Fix:", spawnRefusalFix(e))
 		}
 		var x *ExitError
@@ -228,17 +230,20 @@ func (a *App) Run(ctx context.Context, args []string) error {
 		fmt.Fprintln(a.Out, "Usage: panewire <spawn|delegate|done|escalate|restore|reap|prune|lanes-missing|hosts|profiles|find|name-sync|artifacts|simulate|plan|resolve|preflight> [options]")
 		return nil
 	}
+	if args[0] == "lead" {
+		return fail(exitUsage, "%s", retiredLeadSeatPointer)
+	}
 	if len(args) > 1 && (args[1] == "--help" || args[1] == "-h") {
 		return a.help(args[0])
 	}
-	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "lead" || args[0] == "delegate" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "gc" || args[0] == "artifacts" || args[0] == "_watch") {
+	if a.EnforceTrust && (args[0] == "spawn" || args[0] == "work" || args[0] == "delegate" || args[0] == "plan" || args[0] == "resolve" || args[0] == "preflight" || args[0] == "_spawn-stdin" || args[0] == "done" || args[0] == "escalate" || args[0] == "restore" || args[0] == "reap" || args[0] == "prune" || args[0] == "gc" || args[0] == "artifacts" || args[0] == "_watch") {
 		if e := a.trust(); e != nil {
 			return e
 		}
 	}
 	switch args[0] {
-	case "work", "lead":
-		s, e := a.preset(ctx, args[0], args[1:])
+	case "work":
+		s, e := a.workPreset(ctx, args[1:])
 		if e != nil {
 			return e
 		}
@@ -287,10 +292,10 @@ func (a *App) Run(ctx context.Context, args []string) error {
 }
 func (a *App) help(cmd string) error {
 	switch cmd {
-	case "work", "lead":
-		fmt.Fprintf(a.Out, "Usage: panewire %s TASK [spawn flags override task defaults]\n", cmd)
+	case "work":
+		fmt.Fprintln(a.Out, "Usage: panewire work TASK [spawn flags override task defaults]")
 	case "spawn":
-		fmt.Fprintln(a.Out, "Usage: panewire spawn -c CWD [-m PROFILE|auto] -p BRIEF -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role worker|builder|tester|reviewer|counsel] [--routing-role lead|consult|implementer|explorer|verifier|reviewer|judge] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--lane-defer HOST] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--dry-run] (pins require --containment hk:ID or --operator-request REF)")
+		fmt.Fprintln(a.Out, "Usage: panewire spawn -c CWD [-m PROFILE|auto] -p BRIEF -w WORKSPACE -l LABEL --t T0..T3 [--task ID|--parent-job JOB] [--effort E] [--role worker|tester|reviewer|counsel] [--routing-role consult|implementer|explorer|verifier|reviewer|judge] [--lane L] [--parent L] [--owner L] [--job ID] [--host auto|local|NAME] [--tags a,b,c] [--exclude-host a,b] [--report PATH] [-L live|mock] [--keep] [--job-dup-ok] [--task-hk-bypass] [--allow-escalation] [--override-reason TEXT] [--containment hk:ID] [--operator-request REF] [--requested-by NAME] [--purpose PURPOSE] [--report-relative PATH] [--wait] [--wait-timeout DUR] [--dry-run] (pins require --containment hk:ID or --operator-request REF)")
 	case "done":
 		fmt.Fprintln(a.Out, "Usage: panewire done JOB [--report PATH] [--result FILE]")
 	case "escalate":
@@ -310,7 +315,7 @@ func (a *App) help(cmd string) error {
 	case "plan":
 		fmt.Fprintln(a.Out, "Usage: panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E] [--urgency normal|urgent] [--exclude-host a,b] [--builder-family F] [--routing-role R] [--allow-escalation] [--credit-at TIME] [--json] (live, read-only: the host and model a spawn would get now; no task, spawn or job write)")
 	case "resolve":
-		fmt.Fprintln(a.Out, "Usage: panewire resolve --role lead|consult|implementer|explorer|verifier|reviewer|judge [--grade G] [--t T0..T3] [--builder-family F] [--harness KIND] [--allow-escalation] [--json] (read-only: the profile and effort role routing and quota ordering pick now, for an in-session subagent; no host placement, spawn or job write; the answer is the last thing printed)")
+		fmt.Fprintln(a.Out, "Usage: panewire resolve --role consult|implementer|explorer|verifier|reviewer|judge [--grade G] [--t T0..T3] [--builder-family F] [--harness KIND] [--allow-escalation] [--json] (read-only: the profile and effort role routing and quota ordering pick now, for an in-session subagent; no host placement, spawn or job write; the answer is the last thing printed)")
 	case "preflight":
 		fmt.Fprintln(a.Out, "Usage: panewire preflight [--host NAME] [--pool P] [--json] (read-only: per remote host, hub acceptance, shared quota observation age, quota transport setting, hub load/memory, mergewake review config and panewire/panewire version skew, each with a named reason; exit 0 when all good, 78 otherwise)")
 	default:

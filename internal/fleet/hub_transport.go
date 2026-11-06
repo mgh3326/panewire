@@ -428,7 +428,7 @@ func hubArgs(jobs string, s Spawn) ([]string, error) {
 			args = append(args, u.flag)
 		}
 	}
-	for _, u := range []struct{ flag, v string }{{"--operator-request", s.OperatorRequest}, {"--requested-by", s.RequestedBy}, {"--purpose", s.Purpose}, {"--lane-defer", s.LaneDefer}} {
+	for _, u := range []struct{ flag, v string }{{"--operator-request", s.OperatorRequest}, {"--requested-by", s.RequestedBy}, {"--purpose", s.Purpose}} {
 		add(u.flag, u.v)
 	}
 	add("-m", s.Profile)
@@ -705,8 +705,8 @@ func (a *App) hubReply(host string, checkout *HubCheckout, r HubSpawnReply, forc
 	return candResult{rc: r.RC, note: "refused rc=" + strconv.Itoa(r.RC)}
 }
 
-// refreshViaHub is measureTarget for a via=hub host: pacelever's on-demand
-// refresh runs on the node through the quota.refresh node command.
+// refreshViaHub is measureTarget for a via=hub host: the on-demand refresh
+// runs on the node through the quota.refresh node command.
 func (a *App) refreshViaHub(ctx context.Context, host, pool string) error {
 	if !hubPoolRule.MatchString(pool) || !regexp.MustCompile(`^[a-z0-9-]{1,32}$`).MatchString(host) {
 		return fail(exitConfig, "target %s pool %s cannot be measured", host, pool)

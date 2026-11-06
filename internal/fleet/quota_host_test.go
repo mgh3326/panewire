@@ -141,12 +141,19 @@ func TestPlacementGatesEachHostsAccount(t *testing.T) {
 	}
 }
 
+// isQuotaRefresh says an ssh argument line or a local command line is an
+// on-demand refresh: pacelever's for most pools, `panewire quota refresh` for
+// claude, which panewire measures itself.
+func isQuotaRefresh(args string) bool {
+	return strings.Contains(args, "pacelever refresh") || strings.Contains(args, "panewire quota refresh")
+}
+
 func TestPlacementTargetAccountUnavailable(t *testing.T) {
 	for _, mode := range []string{"missing presence", "stale presence", "ambiguous presence", "missing observation", "stale observation", "degraded observation", "wrong account", "read error", "presence error", "unknown pool"} {
 		for _, host := range []string{"auto", "host-a"} {
 			t.Run(mode+"/"+host, func(t *testing.T) {
 				a, s, f := remoteFixture(t, &fakePlacementSource{}, &fakeWaker{}, "2026-01-01T00:00:00Z", func(args string) Result {
-					if strings.Contains(args, "pacelever refresh") {
+					if isQuotaRefresh(args) {
 						return Result{Code: 1}
 					}
 					t.Error("unavailable account reached SSH")
@@ -190,7 +197,7 @@ func TestPlacementTargetAccountUnavailable(t *testing.T) {
 					t.Fatal("unavailable target admitted")
 				}
 				for _, c := range f.Calls {
-					if (c.Name == "ssh" && !strings.Contains(strings.Join(c.Args, " "), "pacelever refresh")) || c.Name == "git" {
+					if (c.Name == "ssh" && !isQuotaRefresh(strings.Join(c.Args, " "))) || c.Name == "git" {
 						t.Fatalf("quota refusal happened after remote preparation: %+v", c)
 					}
 				}

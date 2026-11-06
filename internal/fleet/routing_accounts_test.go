@@ -24,10 +24,10 @@ func exhaustedGatePools(pools map[string]string) func(QuotaRequest) (string, err
 	}
 }
 
-func accountLeadFixture(t *testing.T) (*App, Spawn, *fakeQuota, *fakePlacementSource) {
+func accountConsultFixture(t *testing.T) (*App, Spawn, *fakeQuota, *fakePlacementSource) {
 	t.Helper()
-	a, s, q := leadFixture(t)
-	s.Role = "builder"
+	a, s, q := consultFixture(t)
+	s.Role = "counsel"
 	a.Config.Local["spawn"] = false
 	a.Config.Hosts = map[string]map[string]any{"host-a": {}, "host-b": {}}
 	a.Config.HostOrder = []string{"host-a", "host-b"}
@@ -55,7 +55,7 @@ func accountLeadFixture(t *testing.T) (*App, Spawn, *fakeQuota, *fakePlacementSo
 }
 
 func TestAccountLeadTriesHealthyAccountOnAnotherHost(t *testing.T) {
-	a, s, q, _ := accountLeadFixture(t)
+	a, s, q, _ := accountConsultFixture(t)
 	q.PoolViews["claude"] = riskPool(120, 8)
 	q.GateDo = func(r QuotaRequest) (string, error) {
 		if r.AccountKey == testClaudeB {
@@ -73,8 +73,8 @@ func TestAccountLeadTriesHealthyAccountOnAnotherHost(t *testing.T) {
 }
 
 func TestAccountLeadIgnoresTaskGrade(t *testing.T) {
-	a, s, q := leadFixture(t)
-	s.Role = "builder"
+	a, s, q := consultFixture(t)
+	s.Role = "counsel"
 	// The task grade is metadata; it must not promote fable over opus.
 	q.CatalogRows[1].Grade = "C"
 	sel, err := a.selectProfile(context.Background(), s)
@@ -84,7 +84,7 @@ func TestAccountLeadIgnoresTaskGrade(t *testing.T) {
 }
 
 func TestLeadConsultRejectExplicitGrade(t *testing.T) {
-	for _, role := range []string{"builder", "counsel"} {
+	for _, role := range []string{"counsel"} {
 		a, _, _, _ := cmdFixture(t)
 		err := a.Run(context.Background(), []string{"spawn", "--role", role, "--grade", "A"})
 		if exitCode(err) != exitConfig || !strings.Contains(err.Error(), "lead_consult_take_no_grade") {
@@ -95,14 +95,14 @@ func TestLeadConsultRejectExplicitGrade(t *testing.T) {
 
 func TestLeadConsultRejectEmptyGradeFlag(t *testing.T) {
 	for _, args := range [][]string{
-		{"spawn", "--role", "builder", "--grade="},
 		{"spawn", "--role", "counsel", "--grade="},
-		{"plan", "--role", "builder", "--t", "T1", "--grade="},
+		{"spawn", "--role", "counsel", "--grade="},
 		{"plan", "--role", "counsel", "--t", "T1", "--grade="},
-		{"resolve", "--role", "lead", "--grade="},
+		{"plan", "--role", "counsel", "--t", "T1", "--grade="},
+		{"resolve", "--role", "consult", "--grade="},
 		{"resolve", "--role", "consult", "--grade="},
 	} {
-		a, _, _, _ := accountLeadFixture(t)
+		a, _, _, _ := accountConsultFixture(t)
 		err := a.Run(context.Background(), args)
 		if exitCode(err) != exitConfig || !strings.Contains(err.Error(), noLeadGradeRule) {
 			t.Fatalf("%v: an explicit empty grade must still refuse: %v", args, err)
@@ -110,18 +110,17 @@ func TestLeadConsultRejectEmptyGradeFlag(t *testing.T) {
 	}
 }
 
-func TestExplicitProfileCannotBypassLeadOrRetirement(t *testing.T) {
+func TestExplicitProfileCannotBypassConsultOrRetirement(t *testing.T) {
 	for _, retired := range []bool{false, true} {
 		a, s, fr, _ := cmdFixture(t)
 		serveRouting(a, routingDocV1)
 		q := a.Quota.(*fakeQuota)
 		q.CatalogRows = []CatalogRow{{Profile: "sonnet", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "sonnet-m"}}
-		s.Profile, s.Role, s.OverrideReason = "sonnet", "builder", "test placement override"
-		s.Lane, s.Parent = "test-lane", "test-parent"
+		s.Profile, s.Role, s.OverrideReason = "sonnet", "counsel", "test placement override"
 		if retired {
 			at := "2026-01-01T00:00:00Z"
 			q.CatalogRows[0].RetiredAt = &at
-			s.Role, s.Lane, s.Parent = "worker", "", ""
+			s.Role = "worker"
 		}
 		err := a.Spawn(context.Background(), s)
 		if exitCode(err) != exitSeatRefused {
@@ -136,7 +135,7 @@ func TestExplicitProfileCannotBypassLeadOrRetirement(t *testing.T) {
 }
 
 func TestAccountLeadSharedLoginFallsBackToCodex(t *testing.T) {
-	a, s, q, src := accountLeadFixture(t)
+	a, s, q, src := accountConsultFixture(t)
 	src.presence[1].AccountKey = testClaudeA
 	q.GateDo = func(r QuotaRequest) (string, error) {
 		if r.AccountKey != testCodexA {
@@ -166,7 +165,7 @@ func TestAccountLeadSharedLoginFallsBackToCodex(t *testing.T) {
 func TestAccountLeadExhaustionAndUnknownAreDistinct(t *testing.T) {
 	for _, kind := range []string{"exhausted", "unobserved", "model-only"} {
 		t.Run(kind, func(t *testing.T) {
-			a, s, q, src := accountLeadFixture(t)
+			a, s, q, src := accountConsultFixture(t)
 			for key, acc := range src.accounts {
 				v := riskPool(120, 8)
 				acc.Quota = &v
@@ -184,7 +183,7 @@ func TestAccountLeadExhaustionAndUnknownAreDistinct(t *testing.T) {
 			refreshes := 0
 			next := a.Runner
 			a.Runner = runnerFunc(func(ctx context.Context, c Command) Result {
-				if c.Name == "ssh" && strings.Contains(strings.Join(c.Args, " "), "pacelever refresh") {
+				if c.Name == "ssh" && isQuotaRefresh(strings.Join(c.Args, " ")) {
 					refreshes++
 					if _, ok := ctx.Deadline(); !ok {
 						t.Fatal("account refresh has no deadline")
@@ -210,17 +209,17 @@ func TestAccountLeadExhaustionAndUnknownAreDistinct(t *testing.T) {
 }
 
 func TestLeadConsultNativeTopOnly(t *testing.T) {
-	for _, role := range []string{"builder", "counsel"} {
+	for _, role := range []string{"counsel"} {
 		for _, profile := range []string{"agy-opus46", "omp-opus", "opus"} {
 			t.Run(role+"/"+profile, func(t *testing.T) {
-				a, s, q := leadFixture(t)
+				a, s, q := consultFixture(t)
 				s.Role = role
 				block := strings.Replace(routingBlockV1, `["opus", "fable", "codex-sol", "codex-astra"]`, `["*"]`, 1)
 				serveRouting(a, routingDoc(block))
 				q.CatalogRows = []CatalogRow{{Profile: profile, Effort: "high", Grade: "S", Pool: "claude", Gate: "default", ModelID: "anthropic-model"}}
 				for name, seat := range a.Policy.Profiles {
 					if seat.Canon == profile {
-						seat.Kind, seat.Capability, seat.Roles = "agy", "standard", []string{"builder", "counsel", "worker"}
+						seat.Kind, seat.Capability, seat.Roles = "agy", "standard", []string{"counsel", "worker"}
 						a.Policy.Profiles[name] = seat
 					}
 				}
@@ -234,8 +233,8 @@ func TestLeadConsultNativeTopOnly(t *testing.T) {
 }
 
 func TestLeadConsultResolveAndPlanWithoutGrade(t *testing.T) {
-	for _, role := range []string{"lead", "consult"} {
-		a, _, _ := leadFixture(t)
+	for _, role := range []string{"consult"} {
+		a, _, _ := consultFixture(t)
 		if err := a.resolveCmd(context.Background(), []string{"--role", role, "--json"}); err != nil {
 			t.Fatal(err)
 		}
@@ -247,7 +246,7 @@ func TestLeadConsultResolveAndPlanWithoutGrade(t *testing.T) {
 			t.Fatalf("no-grade %s receipt: %+v", role, result)
 		}
 	}
-	for _, role := range []string{"builder", "counsel"} {
+	for _, role := range []string{"counsel"} {
 		a, q, _, _, _ := planFixture(t)
 		q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "C", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
 		q.GateDo = gatePools(map[string]string{"opus": "claude"})
@@ -259,7 +258,7 @@ func TestLeadConsultResolveAndPlanWithoutGrade(t *testing.T) {
 }
 
 func TestAccountHostPinDoesNotClaimFleetExhaustion(t *testing.T) {
-	a, s, _, _ := accountLeadFixture(t)
+	a, s, _, _ := accountConsultFixture(t)
 	s.Host = "host-a"
 	_, err := a.selectProfile(context.Background(), s)
 	if err == nil || !strings.Contains(err.Error(), "--host host-a restricts accounts") || !strings.Contains(err.Error(), "not fleet exhaustion") {
@@ -278,10 +277,10 @@ func TestDelegateCannotBypassRoleEligibility(t *testing.T) {
 }
 
 func TestLaunchKeepsSelectedAccountAndJSONReceipt(t *testing.T) {
-	a, s, q, src := accountLeadFixture(t)
+	a, s, q, src := accountConsultFixture(t)
 	a.Config.Local["spawn"] = true
 	src.presence = append(src.presence, PresenceRecord{HostID: "local", AccountKey: testClaudeB, LastSeen: a.Now()})
-	s.Role, s.RoutingRole, s.AccountKey = "worker", "lead", testClaudeB
+	s.Role, s.RoutingRole, s.AccountKey = "worker", "consult", testClaudeB
 	q.LaunchValue = Launch{Profile: "opus", ModelID: "opus-m", Effort: "high", Grade: "C", Gate: "default", Pool: "claude"}
 	q.GateDo = func(r QuotaRequest) (string, error) {
 		if r.AccountKey != testClaudeB {
@@ -300,7 +299,7 @@ func TestLaunchKeepsSelectedAccountAndJSONReceipt(t *testing.T) {
 }
 
 func TestLeadConsultSpawnWithoutTaskGrade(t *testing.T) {
-	for _, role := range []string{"builder", "counsel"} {
+	for _, role := range []string{"counsel"} {
 		a, s, fr, _ := cmdFixture(t)
 		s.Profile, s.Role, s.DryRun = "auto", role, true
 		if role == "builder" {
@@ -339,7 +338,7 @@ func TestSelectionRefusalCodes(t *testing.T) {
 		{"policy", outcomePolicyUnavailable, exitConfig},
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
-			a, _, q, src := accountLeadFixture(t)
+			a, _, q, src := accountConsultFixture(t)
 			switch tc.kind {
 			case "auth":
 				src.presence = nil
@@ -351,7 +350,7 @@ func TestSelectionRefusalCodes(t *testing.T) {
 			case "policy":
 				serveRouting(a, "")
 			}
-			err := a.resolveCmd(context.Background(), []string{"--role", "lead", "--json"})
+			err := a.resolveCmd(context.Background(), []string{"--role", "consult", "--json"})
 			var result resolveResult
 			if parseErr := json.Unmarshal([]byte(a.Out.(interface{ String() string }).String()), &result); parseErr != nil {
 				t.Fatal(parseErr)

@@ -21,7 +21,10 @@ read-compatible during migration.
 Nodes reconcile live jobs with panes every five minutes. A missing hub lane gets one registration attempt per pass using the landing
 registration path. If the hub listing is unavailable, an unresolved
 `lane_unregistered` receipt also triggers an attempt. A listed lane is left
-untouched, including when it points to a different pane. Success records
+untouched, including when it points to a different pane. A node-scoped listing
+contains only that node’s lanes; a lane owned by another node appears missing,
+and the hub refuses an attempted overwrite. A removed lane is recreated while
+the job remains live unless its registration is deferred. Success records
 `job.lane_registered`; failure records a bounded, redacted reason. After
 three consecutive failures that job waits 30 minutes between attempts.
 A deliberately deferred lane is left to its designated owner.

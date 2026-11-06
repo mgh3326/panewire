@@ -328,8 +328,12 @@ func runNodeCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 	switch args[0] {
 	case "wake":
 		return runNodeWakeCLI(args[1:], stdout, stderr, deps)
+	case "worktree-list":
+		return runNodeWorktreeListCLI(args[1:], stdout, stderr, deps)
 	case "pane-read":
 		return runNodePaneReadCLI(args[1:], stdout, stderr, deps)
+	case "job-result":
+		return runNodeJobResultCLI(args[1:], stdout, stderr, deps)
 	case "job-done":
 		return runNodeJobDoneCLI(args[1:], stdout, stderr, deps)
 	}

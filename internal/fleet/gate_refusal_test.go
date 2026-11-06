@@ -20,7 +20,7 @@ func (q refusalQuota) Gate(ctx context.Context, req QuotaRequest) (string, error
 func TestRawGateExitThreeUsesCodeInsteadOfProse(t *testing.T) {
 	for _, message := range []string{"window_exhausted", "weekly limit reached", "사용량 한도 초과"} {
 		t.Run(message, func(t *testing.T) {
-			a, s, q, src := accountLeadFixture(t)
+			a, s, q, src := accountConsultFixture(t)
 			q.CatalogRows = q.CatalogRows[1:2]
 			src.presence = src.presence[1:2]
 			q.GateDo = func(QuotaRequest) (string, error) { return "", fail(3, "%s", message) }
@@ -45,7 +45,7 @@ func TestStructuredGateRefusalsAreIndependentOfMessages(t *testing.T) {
 		{"ambiguous measured block", "", "", "weekly limit reached", outcomeQuotaUnknown, exitQuotaUnknown, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a, s, q, src := accountLeadFixture(t)
+			a, s, q, src := accountConsultFixture(t)
 			q.CatalogRows = q.CatalogRows[1:2]
 			src.presence = src.presence[1:2]
 			calls := 0
@@ -78,7 +78,7 @@ func TestStructuredGateRefusalsAreIndependentOfMessages(t *testing.T) {
 }
 
 func TestRefreshExitThreeIsNotGateExhaustion(t *testing.T) {
-	a, s, q, src := accountLeadFixture(t)
+	a, s, q, src := accountConsultFixture(t)
 	q.CatalogRows = q.CatalogRows[1:2]
 	src.presence = src.presence[1:2]
 	src.accounts[testClaudeB] = SharedAccount{Key: testClaudeB}
@@ -111,7 +111,7 @@ func TestUnreadableGateExitThreeGetsOneRefresh(t *testing.T) {
 		{"recovers", "window_exhausted", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a, s, q, src := accountLeadFixture(t)
+			a, s, q, src := accountConsultFixture(t)
 			q.CatalogRows = q.CatalogRows[1:2]
 			// Account A is measured exhausted; B's unreadable gate must
 			// stay unknown rather than turn their aggregate into policy failure.
@@ -148,7 +148,7 @@ func TestUnreadableGateExitThreeGetsOneRefresh(t *testing.T) {
 }
 
 func TestPlanKeepsTypedGateRefusalOutcome(t *testing.T) {
-	a, _, q, src := accountLeadFixture(t)
+	a, _, q, src := accountConsultFixture(t)
 	a.Config.Local["spawn"] = true
 	a.Config.Hosts, a.Config.HostOrder = nil, nil
 	src.presence = src.presence[1:2]
@@ -165,7 +165,7 @@ func TestPlanKeepsTypedGateRefusalOutcome(t *testing.T) {
 	}
 	out := &bytes.Buffer{}
 	a.Out = out
-	err := a.planCmd(context.Background(), []string{"--role", "builder", "--t", "T1", "--json"})
+	err := a.planCmd(context.Background(), []string{"--role", "counsel", "--t", "T1", "--json"})
 	var doc map[string]any
 	if parseErr := json.Unmarshal(out.Bytes(), &doc); parseErr != nil {
 		t.Fatalf("plan JSON: %v", parseErr)

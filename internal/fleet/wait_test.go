@@ -96,14 +96,14 @@ func TestWaitCompletedFromLaneInbox(t *testing.T) {
 	}
 }
 
-func TestWaitEscalateFromLaneInbox(t *testing.T) {
+func TestWaitDecisionFromLaneInboxStaysLive(t *testing.T) {
 	a, s := waitApp(t)
 	a.Config.Hub = map[string]any{"hub_url": "https://hub.invalid"}
 	a.Runner = &fakeRunner{Do: func(c Command) Result {
-		return Result{Out: `[{"kind":"lane.event","event":{"job_id":"x","text":"[j] ESC blocked on credentials"}}]`}
+		return Result{Out: `[{"kind":"lane.event","event":{"job_id":"x","text":"[j] ESC | should this be READY?"}}]`}
 	}}
-	if code(a.waitJob(context.Background(), s)) != 83 {
-		t.Fatal("lane ESC must exit 83")
+	if code(a.waitJob(context.Background(), s)) != exitWaitTimeout {
+		t.Fatal("lane ESC must leave the job live until wait timeout")
 	}
 }
 

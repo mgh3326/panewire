@@ -19,7 +19,7 @@ const laneEventMaxBytes = 16 << 10
 // laneTerminalMarker is the head of a lane event that ends a job. The optional
 // [label] prefix is the form most workers use; a marker later in the text, such
 // as "READY withheld" inside a progress note, does not count.
-var laneTerminalMarker = regexp.MustCompile(`^(\[[^\]]*\]\s*)?(READY|DONE|ESC)\b`)
+var laneTerminalMarker = regexp.MustCompile(`^(\[[^\]]*\]\s*)?(READY|DONE)\b`)
 
 func (a *App) startWatch(job string) error {
 	return a.startWatchMode(job, false)
@@ -127,10 +127,19 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		}
 		timeout = d
 	}
+	decisionTimeout := 6 * time.Hour
+	if v := a.envOr("PANEWIRE_DECISION_TIMEOUT_S", ""); v != "" {
+		var ok bool
+		decisionTimeout, ok = timeoutValue(v)
+		if !ok {
+			return fail(exitUsage, "invalid decision timeout")
+		}
+	}
 	deadline := a.Now().Add(timeout)
 	var size int64 = -1
 	var modified time.Time
 	pending := false
+	wasWaiting := false
 	missing := 0
 	seen := len(args) == 1
 	latePoll := false
@@ -142,6 +151,26 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		if j.Terminal || j.Reaped {
 			return nil
 		}
+		if workerEscalated(j) {
+			return a.releaseQuota(ctx, j)
+		}
+		agents, e := a.agents(ctx)
+		if e != nil {
+			return e
+		}
+		waiting, err := a.updateDecision(ctx, j)
+		if err != nil && waiting == nil {
+			return err
+		}
+		if err != nil {
+			a.warn("decision reply query unavailable: %v", err)
+		}
+		if wasWaiting && waiting == nil {
+			deadline = a.Now().Add(timeout)
+			latePoll = false
+		}
+		wasWaiting = waiting != nil
+
 		if j.Report != "" {
 			if info, e := os.Stat(j.Report); e == nil && info.Mode().IsRegular() {
 				if pending && size == info.Size() && modified.Equal(info.ModTime()) && a.workerSignalledEnd(j) {
@@ -154,16 +183,21 @@ func (a *App) watch(ctx context.Context, args []string) error {
 				pending = false
 			}
 		}
-		if a.Now().After(deadline) && (!pending || latePoll) {
+		if waiting != nil && !(pending && a.workerSignalledEnd(j)) && !a.Now().Before(waiting.at.Add(decisionTimeout)) {
+			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
+				a.jobRecordFailed(ctx, id, "lost", e)
+			}
+			if e := a.event(ctx, id, "job.lost", map[string]any{"pane_id": j.Pane, "reason": "decision_unanswered"}); e != nil {
+				return e
+			}
+			return a.releaseQuota(ctx, j)
+		}
+		if waiting == nil && a.Now().After(deadline) && (!pending || latePoll) {
 			fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
 			return nil
 		}
-		if a.Now().After(deadline) {
+		if waiting == nil && a.Now().After(deadline) {
 			latePoll = true
-		}
-		agents, e := a.agents(ctx)
-		if e != nil {
-			return e
 		}
 		present := false
 		for _, ag := range agents {
@@ -192,22 +226,29 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	}
 }
 
-// workerSignalledEnd reports whether the current attempt recorded an explicit
-// end: a job.escalate record, or a READY, DONE or ESC lane event from its pane.
-// A report file is never a signal, because a worker can write one early and keep
-// working. A job.completed record needs no check here: it makes the job Terminal.
-func (a *App) workerSignalledEnd(j Job) bool {
-	var since time.Time
+func workerEscalated(j Job) bool {
 	escalated := false
 	for _, ev := range j.Events {
 		switch ev.Kind {
 		case "job.spawned", "job.reclaim", "job.reprompted":
-			since, escalated = ev.when, false
+			escalated = false
 		case "job.escalate":
 			escalated = true
 		}
 	}
-	return escalated || a.paneEmittedMarker(j.Pane, since)
+	return escalated
+}
+
+// workerSignalledEnd requires a READY or DONE event from this attempt.
+func (a *App) workerSignalledEnd(j Job) bool {
+	var since time.Time
+	for _, ev := range j.Events {
+		switch ev.Kind {
+		case "job.spawned", "job.reclaim", "job.reprompted":
+			since = ev.when
+		}
+	}
+	return a.paneEmittedMarker(j.Pane, since)
 }
 
 // paneEmittedMarker scans events-lane for a terminal marker the pane emitted at
@@ -243,4 +284,89 @@ func (a *App) paneEmittedMarker(pane string, since time.Time) bool {
 		}
 	}
 	return false
+}
+
+var laneDecisionMarker = regexp.MustCompile(`^(\[[^\]]*\]\s*)?ESC\b`)
+
+type decisionWait struct {
+	id string
+	at time.Time
+}
+
+// updateDecision reconstructs the pending question from durable job and lane
+// records. Only a subsequent pane event or a recorded delivery answers it.
+func (a *App) updateDecision(ctx context.Context, j Job) (*decisionWait, error) {
+	var since time.Time
+	var waiting *decisionWait
+	seen := map[string]bool{}
+	for _, ev := range j.Events {
+		switch ev.Kind {
+		case "job.spawned", "job.reclaim", "job.reprompted":
+			since = ev.when
+			waiting = nil
+			seen = map[string]bool{}
+		case "job.waiting_decision":
+			id := str(ev.Payload, "event_id")
+			at, _ := time.Parse(time.RFC3339Nano, str(ev.Payload, "time"))
+			waiting = &decisionWait{id: id, at: at}
+			seen[id] = true
+		case "job.decision_resumed":
+			seen[str(ev.Payload, "event_id")] = true
+			waiting = nil
+		}
+	}
+	dir := filepath.Join(filepath.Dir(a.Jobs), "events-lane")
+	entries, _ := os.ReadDir(dir)
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil || !info.Mode().IsRegular() || filepath.Ext(entry.Name()) != ".json" || info.Size() > laneEventMaxBytes || info.ModTime().Before(since.Truncate(time.Second)) {
+			continue
+		}
+		body, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil {
+			continue
+		}
+		var r struct {
+			Kind string `json:"kind"`
+			Pane string `json:"pane_id"`
+			Text string `json:"text"`
+			ID   string `json:"event_id"`
+		}
+		if json.Unmarshal(body, &r) != nil || r.Kind != "lane.event" || r.Pane != j.Pane || j.Pane == "" || r.ID == "" {
+			continue
+		}
+		at := info.ModTime()
+		if waiting != nil && at.After(waiting.at) {
+			if err := a.event(ctx, j.ID, "job.decision_resumed", map[string]any{"event_id": waiting.id}); err != nil {
+				return nil, err
+			}
+			waiting = nil
+		}
+		if !laneDecisionMarker.MatchString(r.Text) || seen[r.ID] {
+			continue
+		}
+		payload := map[string]any{"event_id": r.ID, "time": at.UTC().Format(time.RFC3339Nano)}
+		if err := a.event(ctx, j.ID, "job.waiting_decision", payload); err != nil {
+			return nil, err
+		}
+		waiting = &decisionWait{id: r.ID, at: at}
+		seen[r.ID] = true
+	}
+	if waiting != nil {
+		reply := a.DecisionReply
+		if reply == nil {
+			reply = decisionReply
+		}
+		answered, err := reply(ctx, j.Pane, j.HubLane, waiting.at)
+		if err != nil {
+			return waiting, err
+		}
+		if answered {
+			if err := a.event(ctx, j.ID, "job.decision_resumed", map[string]any{"event_id": waiting.id}); err != nil {
+				return nil, err
+			}
+			waiting = nil
+		}
+	}
+	return waiting, nil
 }

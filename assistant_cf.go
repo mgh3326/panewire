@@ -36,9 +36,9 @@ type assistantCFVerifier struct {
 	fetchedAt   time.Time
 	lastUnknown time.Time
 
-	// now, when set, is the clock for Access-user exp/nbf. Production
-	// leaves it nil. Tests freeze it so a one-second boundary cannot
-	// flake. It does not add leeway.
+	// now, when set, is the clock for token exp/nbf checks (service tokens
+	// and Access users alike). Production leaves it nil. Tests freeze it so
+	// a one-second boundary cannot flake. It does not add leeway.
 	now func() time.Time
 }
 
@@ -127,7 +127,7 @@ func (v *assistantCFVerifier) authenticate(r *http.Request) (string, bool) {
 	if json.Unmarshal(claimsJSON, &claims) != nil {
 		return "", false
 	}
-	now := time.Now().Unix()
+	now := v.nowUnix()
 	if claims.Exp == 0 || claims.Exp <= now || (claims.Nbf != 0 && claims.Nbf > now) {
 		return "", false
 	}
@@ -292,10 +292,10 @@ func (v *assistantCFVerifier) keyLookup(ctx context.Context, kid string) (*rsa.P
 	return nil, "unknown_kid"
 }
 
-// accessUserNow is the Access-user exp/nbf instant in unix seconds.
+// nowUnix is the token exp/nbf instant in unix seconds.
 // The comparison itself has no leeway: exp == now is expired, and
 // nbf == now+1 is not yet valid.
-func (v *assistantCFVerifier) accessUserNow() int64 {
+func (v *assistantCFVerifier) nowUnix() int64 {
 	if v.now != nil {
 		return v.now().Unix()
 	}
@@ -363,7 +363,7 @@ func (v *assistantCFVerifier) authenticateAccessUser(r *http.Request) (assistant
 	// grammar as cfAccessAudienceMatches. Recorded on the audit line even
 	// when a later check rejects the token.
 	principal.Audiences = cfAccessAudiences(claims.Aud)
-	now := v.accessUserNow()
+	now := v.nowUnix()
 	if claims.Exp == 0 || claims.Exp <= now {
 		return principal, "expired"
 	}

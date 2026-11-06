@@ -827,3 +827,41 @@ func TestLaneInboxStoreSpawnDurabilityContract(t *testing.T) {
 		})
 	}
 }
+
+// settled is what the unconfirmed replay consults: an item the receiver has
+// (delivered, read, acked, superseded) answers true on either backend, and an
+// item that is merely stored, an insert-time read, or a missing key answers
+// false.
+func TestLaneInboxStoreContractSettled(t *testing.T) {
+	forEachLaneInboxBackend(t, func(t *testing.T, open func() *laneInboxStore) {
+		s := open()
+		now := time.UnixMilli(1_700_000_000_000).UTC()
+		must := quietEvent("must", "READY")
+		must.NotifyType = "ready"
+		item, err := s.put("must", "lane-a", "lane.event", "interrupt", must, now, 0, 0)
+		if err != nil || !item.MustAck {
+			t.Fatalf("must-ack put = %+v, %v", item, err)
+		}
+		plain := quietEvent("plain", "now")
+		if _, err := s.put("plain", "lane-a", "lane.event", "interrupt", plain, now, 0, 0); err != nil {
+			t.Fatal(err)
+		}
+		expect := func(key string, want bool) {
+			t.Helper()
+			if got, err := s.settled(key); err != nil || got != want {
+				t.Fatalf("settled(%q) = %v, %v; want %v", key, got, err, want)
+			}
+		}
+		expect("missing", false)
+		expect("must", false)
+		expect("plain", false) // read at insert is not the receiver's read
+		if _, err := s.read(item.ID, "lane-a", now.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		expect("must", true)
+		if err := s.recordDelivery("plain", now.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		expect("plain", true)
+	})
+}

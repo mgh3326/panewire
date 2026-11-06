@@ -75,7 +75,7 @@ func quotaRun(ctx context.Context, what string, timeout time.Duration, jsonOutpu
 	}
 	if err != nil {
 		code := ExitInternal
-		if e, ok := err.(*exec.ExitError); ok {
+		if e, ok := err.(*exec.ExitError); ok && e.ExitCode() >= 0 {
 			code = e.ExitCode()
 		}
 		if !jsonOutput {
@@ -107,11 +107,13 @@ func quotaRun(ctx context.Context, what string, timeout time.Duration, jsonOutpu
 }
 func runQuotaCLI(args []string, out, errOut io.Writer) int {
 	if len(args) == 0 {
-		fmt.Fprintln(errOut, "usage: panewire quota status [--json] | refresh POOL | observe KIND ...")
+		fmt.Fprintln(errOut, "usage: panewire quota status [--json] | refresh POOL | observe KIND ... | aa-sync [--out FILE] [--dry-run]")
 		return ExitUsage
 	}
 	ctx := context.Background()
 	switch args[0] {
+	case "aa-sync":
+		return runAASync(args[1:], out, errOut)
 	case "status":
 		if len(args) > 2 || len(args) == 2 && args[1] != "--json" {
 			return ExitUsage
@@ -174,6 +176,9 @@ func runQuotaCLI(args []string, out, errOut io.Writer) int {
 	case "refresh":
 		if len(args) != 2 || !fleetQuotaPoolPattern.MatchString(args[1]) {
 			return ExitUsage
+		}
+		if args[1] == quotaNativePool {
+			return runClaudeQuotaRefresh(ctx, out, errOut)
 		}
 		data, code, err := quotaRun(ctx, "quota refresh", 60*time.Second, false, "refresh", args[1])
 		if err != nil {

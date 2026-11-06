@@ -157,6 +157,7 @@ func mustNodeReapJSON(value any) json.RawMessage {
 
 type nodeReapConnect struct {
 	hubURL, tokenPath, cfPath, machine *string
+	allowOperator                      bool
 }
 
 func nodeReapFlags(flags *flag.FlagSet) nodeReapConnect {
@@ -168,26 +169,46 @@ func nodeReapFlags(flags *flag.FlagSet) nodeReapConnect {
 	}
 }
 
-func (connect nodeReapConnect) run(stdout, stderr io.Writer, deps hubCLIDeps, call func(context.Context, *NodeReapClient, string) (any, error)) int {
-	if *connect.hubURL == "" || *connect.tokenPath == "" || !machineIDPattern.MatchString(*connect.machine) || *connect.machine == hubOperatorMachineID {
-		return ExitUsage
-	}
+// open builds the hub client from the connection flags. label prefixes every
+// refusal, so each CLI that reaches a node through the hub names itself.
+// code is the exit status when client is nil.
+func (connect nodeReapConnect) open(stderr io.Writer, deps hubCLIDeps, label string) (client *NodeReapClient, code int) {
 	env, err := loadHubTokenEnv(*connect.tokenPath)
-	if err != nil || env.MachineID == hubOperatorMachineID {
-		fmt.Fprintln(stderr, "node reap rejected: invalid service token env")
-		return ExitConditionInvalid
+	if err != nil || (env.MachineID == hubOperatorMachineID && !connect.allowOperator) {
+		fmt.Fprintln(stderr, label+" rejected: invalid service token env")
+		return nil, ExitConditionInvalid
 	}
 	var cf hubCFAccessEnv
 	if *connect.cfPath != "" {
 		if cf, err = loadHubCFAccessEnv(*connect.cfPath); err != nil {
-			fmt.Fprintln(stderr, "node reap rejected: invalid Cloudflare Access env")
-			return ExitConditionInvalid
+			fmt.Fprintln(stderr, label+" rejected: invalid Cloudflare Access env")
+			return nil, ExitConditionInvalid
 		}
 	}
-	client, err := newNodeReapClient(*connect.hubURL, env, cf, deps)
+	if env.MachineID == hubOperatorMachineID {
+		var hub *hubOperatorClient
+		hub, err = newHubOperatorClient(*connect.hubURL, env.Token, cf, deps, nodeReapClientTimeout)
+		if err == nil {
+			hub.machineID = env.MachineID
+			client = &NodeReapClient{hub: hub}
+		}
+	} else {
+		client, err = newNodeReapClient(*connect.hubURL, env, cf, deps)
+	}
 	if err != nil {
-		fmt.Fprintln(stderr, "node reap rejected: invalid hub URL")
-		return ExitConditionInvalid
+		fmt.Fprintln(stderr, label+" rejected: invalid hub URL")
+		return nil, ExitConditionInvalid
+	}
+	return client, ExitOK
+}
+
+func (connect nodeReapConnect) run(stdout, stderr io.Writer, deps hubCLIDeps, call func(context.Context, *NodeReapClient, string) (any, error)) int {
+	if *connect.hubURL == "" || *connect.tokenPath == "" || !machineIDPattern.MatchString(*connect.machine) || *connect.machine == hubOperatorMachineID {
+		return ExitUsage
+	}
+	client, code := connect.open(stderr, deps, "node reap")
+	if client == nil {
+		return code
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), nodeReapClientTimeout)
 	defer cancel()
@@ -204,8 +225,43 @@ func (connect nodeReapConnect) run(stdout, stderr io.Writer, deps hubCLIDeps, ca
 		fmt.Fprintln(stderr, "node reap unavailable")
 		return ExitDaemonUnavailable
 	}
+	if rows, ok := result.(nodeWorktreeListLines); ok {
+		for _, row := range rows {
+			if err := json.NewEncoder(stdout).Encode(row); err != nil {
+				return ExitInternal
+			}
+		}
+		return ExitOK
+	}
+	if _, ok := result.(nodeJobResult); ok {
+		encoded, err := marshalNodeCommandJSON(result)
+		if err != nil {
+			return ExitInternal
+		}
+		if _, err = stdout.Write(append(encoded, '\n')); err != nil {
+			return ExitInternal
+		}
+		return ExitOK
+	}
 	if err := json.NewEncoder(stdout).Encode(result); err != nil {
 		return ExitInternal
 	}
 	return ExitOK
+}
+
+func runNodeJobResultCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
+	flags := flag.NewFlagSet("panewire node job-result", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	connect := nodeReapFlags(flags)
+	connect.allowOperator = true
+	flags.StringVar(connect.machine, "host", "", "machine hosting the job")
+	job := flags.String("job", "", "job id")
+	if flags.Parse(args) != nil || flags.NArg() != 0 || !validNodeJobName(*job) {
+		return ExitUsage
+	}
+	return connect.run(stdout, stderr, deps, func(ctx context.Context, client *NodeReapClient, machine string) (any, error) {
+		var result nodeJobResult
+		err := client.command(ctx, machine, nodeCommandJobResult, nodeJobResultArgs{Job: *job}, &result)
+		return result, err
+	})
 }

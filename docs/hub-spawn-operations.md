@@ -1,6 +1,6 @@
 # Durable spawn operations
 
-`panewire spawn`, `work TASK` and `lead TASK` submit to the hub. The hub runs
+`panewire spawn` and `work TASK` submit to the hub. The hub runs
 placement and admission in-process; the selected node prepares the pinned
 checkout and runs launch and landing in-process. No launcher binary or SSH
 launcher is called. `--dry-run` remains the synchronous planning path.
@@ -40,10 +40,43 @@ A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's
 node for its herdr panes (`agents.list`). Only a complete pane list that lacks
 the recorded pane marks the hk job `lost` and releases the task/role slot. A
-present pane, an unreachable node, a read error or a missing pane id keeps the
-slot (fail closed). The 409 body then carries `request_id`, `job`, `host`,
+present pane keeps the slot (fail closed) unless it provably never started work
+(hk 3179), which needs every one of these:
+
+- the operation failed in the `landing` stage (the brief's delivery was never
+  proven);
+- the pane's agent row is `idle` or `done`, and its cwd is the prepared checkout
+  of the request;
+- the spawn's deadline passed more than the grace ago (10 minutes; hub config
+  `UnworkedLandingGrace`);
+- the node's `job.result` finds the job, with no `job.completed`, no report and
+  `activity_events` of 0, so the ledger holds nothing after the spawner's own
+  claim records. A node that predates `activity_events` proves nothing;
+- `pane.capture` saves the screen, then `pane.close` closes the pane (it
+  re-reads the pane and refuses one that went to work).
+
+The hub then marks the hk job `lost`, logs `landing_failed_unworked`, and the new
+submission claims the slot. Any failed or unreadable check, an unreachable node,
+a read error or a missing pane id keeps the slot. The 409 body then carries `request_id`, `job`, `host`,
 `pane` and a `fix` (close that pane, then resubmit), and the CLI prints them
 with exit 74.
+
+A prior operation in `succeeded` whose hk job is still `claimed` or `spawned`
+(a job revoked and reaped by an older binary, or one that ended without writing
+its record, hk 3204) is checked the same way: only a complete pane list that
+lacks the recorded pane, and lists no pane named like the holder's agent label
+(herdr renumbers a pane moved across workspaces), marks the hk job `lost` and
+releases the slot. A present pane, an unreadable pane list, an unreachable node
+or no recorded pane keeps the slot and the 409 body as before. hk never rewrites a
+terminal record, so a holder that completes during the probe keeps its completed
+record: the refused `lost` write is followed by a re-read, and a record now
+`completed` or `lost` releases the slot. A `retryable` operation holds no
+slot (its reservation is deleted when it ends), but its hk job stays `claimed`:
+a new submission for the same task and role under another job id marks that
+job `lost` once it holds the slot. A replay of the retryable request itself
+takes the replay path and writes nothing. `panewire reap` now writes `lost` to
+the hk record of a job whose newest terminal event is `job.revoked` or
+`job.lost` (see `docs/jobs-resilience.md`).
 
 Before sending HTTP, the CLI saves `jobs/<job>/submission.json` privately and
 synchronizes it. Repeating the same command reuses that key. A lost response is
@@ -101,7 +134,7 @@ A pinned `--host` keeps any of these refusals as its result.
 | `deadline_exceeded` | Deadline observed; ownership retained, not terminal failure. |
 | `succeeded` | Node landing receipt and fresh exact-pane identity verified. |
 | `failed` | Definite refusal, including an existing job claim; never permission to reuse a live job. |
-| `retryable` | Node attested cleanup, or admission stopped before dispatch; reservations released. |
+| `retryable` | Node attested cleanup, or admission stopped before dispatch, and a replay can succeed once the operator's fix is done; reservations released. |
 
 A deliberate repeat of an identical cleanup-confirmed submission creates a new
 attempt under the same logical key. Its node UUID changes, and a prior executing
@@ -156,6 +189,13 @@ A checkout-busy result completes one retryable attempt. The engine cannot bind a
 fresh node UUID inside that completed attempt; replay the saved logical submission
 to create the next attempt after the node's checkout operation finishes.
 
+A checkout refusal whose fix is to inspect and correct the node's checkout
+(`checkout_refused:branch-elsewhere`, `checkout_refused:origin-mismatch`) is
+`failed`, whatever retryable flag the node sent: the same saved request meets the
+same conflict. The other checkout refusals (`busy`, `dirty`, `sha-missing`,
+`work_root_unset`, `git_too_old`) name a fix that ends in a replay and stay
+`retryable`. `spawnRefusalReplayable` holds the mapping.
+
 ## Notifications and telemetry
 
 State changes and notification records commit in one database transaction.
@@ -168,8 +208,13 @@ is at least once; consumers use the event id
 proof of cleanup. A later verified landing may emit a distinct `SPAWNED`
 reconciliation event.
 
-`SPAWN_FAILED` names the job, request, exit status, stage, reason and fix. It has
+`SPAWN_FAILED` names the job, request, exit status, stage, `replay=yes|no`
+(whether replaying the saved request can help), reason and fix. It has
 notify type `automation-failed`, so it interrupts a lane that digests its reports.
+A `failed` or `retryable` spawn is also sent to the submitting lane when that
+differs from the owner: `--requested-by`, else `--parent`. The owner's event id
+stays `<request_id>:<attempt>:<status>`; the submitting lane's is the same id
+with `:<lane>` appended.
 `SPAWNED` stays type `report`.
 
 | Reason code | Meaning |

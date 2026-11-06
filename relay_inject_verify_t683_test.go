@@ -427,7 +427,7 @@ func TestTask683UndecidablePaneIsNotReinjected(t *testing.T) {
 	client.setRelayEmitter(func(event hubClientEvent) { events <- event })
 	client.relayBusyManager().deliver(context.Background(), []relayHeld{{
 		Pane: "w1:p1", Lane: "lane-a", EventID: 68301, JobID: "relay-job-68301",
-		Text: task626Text, HeldSince: client.relayNow(), DeliverPolicy: "idle",
+		Text: task626Text, HeldSince: client.nowUTC(), DeliverPolicy: "idle",
 	}}, false)
 	if got := calls(); task683Count(got, "prompt") != 1 {
 		t.Fatalf("undecidable verdict re-injected: herdr calls = %q", got)

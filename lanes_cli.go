@@ -88,9 +88,19 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 
 	path := "/v1/lanes"
 	method := http.MethodGet
+	var query url.Values
 	if options.Command == "rm" {
 		path += "/" + options.Lane
 		method = http.MethodDelete
+		if options.ExpectedMachine != "" || options.ExpectedPane != "" {
+			query = url.Values{}
+			if options.ExpectedMachine != "" {
+				query.Set("expect_machine", options.ExpectedMachine)
+			}
+			if options.ExpectedPane != "" {
+				query.Set("expect_pane", options.ExpectedPane)
+			}
+		}
 	}
 	client, err := newHubOperatorClient(options.HubURL, env.Token, cfAccess, deps, lanesCLIRequestTimeout)
 	if err != nil {
@@ -113,7 +123,7 @@ func runLanesCLI(args []string, stdout, stderr io.Writer, deps hubCLIDeps) int {
 		_ = json.NewEncoder(stdout).Encode(result)
 		return ExitOK
 	}
-	response, err := client.do(ctx, method, path, nil, nil)
+	response, err := client.do(ctx, method, path, query, nil)
 	if err != nil {
 		fmt.Fprintln(stderr, "lanes unavailable")
 		return ExitInternal
@@ -312,9 +322,15 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 			options.Sink = parsed
 		case "--hub-url", "--hub-token-env", "--hub-cf-env", "--machine", "--pane", "--parent", "--lane", "--expect-machine", "--expect-pane", "--expect-epoch":
 			switch name {
-			case "--lane", "--expect-machine", "--expect-pane", "--expect-epoch":
+			case "--lane", "--expect-epoch":
 				if options.Command != "self-check" {
 					return lanesCLIOptions{}, errors.New("invalid self-check flag")
+				}
+			case "--expect-machine", "--expect-pane":
+				// rm takes them as a guard the hub checks: remove the lane
+				// only while it still routes to the pane being reaped.
+				if options.Command != "self-check" && options.Command != "rm" {
+					return lanesCLIOptions{}, errors.New("invalid expected route flag")
 				}
 			}
 			if options.seen[name] {
@@ -367,6 +383,11 @@ func parseLanesCLI(args []string) (lanesCLIOptions, error) {
 	case "rm":
 		if len(positionals) != 1 {
 			return lanesCLIOptions{}, errors.New("lane is required")
+		}
+		// An empty guard value would send no guard and delete the lane
+		// unconditionally; refuse it instead.
+		if (options.seen["--expect-machine"] && options.ExpectedMachine == "") || (options.seen["--expect-pane"] && options.ExpectedPane == "") {
+			return lanesCLIOptions{}, errors.New("empty expected route flag")
 		}
 		options.Lane = positionals[0]
 	case "ls":

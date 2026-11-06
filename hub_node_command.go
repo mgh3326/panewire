@@ -240,6 +240,12 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 		writeHubAccessDenied(writer, access)
 		return
 	}
+	if _, isStatus := decoded.(nodePRStatusArgs); isStatus && machine != h.prStatusHost {
+		// Only the machine that hosts mergewake can answer; naming any other
+		// is refused before a node sees it, whatever the caller's scope.
+		writeJSON(writer, http.StatusBadRequest, map[string]string{"error": "wrong_machine"})
+		return
+	}
 	commandStart := h.now().UTC()
 	pending, requestID, state, sent := h.sendNodeCommand(machine, body.Op, body.Args)
 	if !sent {
@@ -268,6 +274,13 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 	case "node_lost":
 		status = http.StatusServiceUnavailable
 	}
+	if body.Op == nodeCommandJobResult {
+		encoded, err := marshalNodeCommandJSON(response)
+		if err == nil {
+			writeJSONBytes(writer, status, append(encoded, '\n'))
+			return
+		}
+	}
 	writeJSON(writer, status, response)
 }
 
@@ -276,6 +289,9 @@ func (h *HubServer) handleNodeCommand(writer http.ResponseWriter, request *http.
 func (h *HubServer) authorizeNodeCommand(request *http.Request, op, machine string) hubAccess {
 	if nodeCommandReapOnly(op) && h.authenticate(request).kind == hubCallerOperator {
 		return hubAccessForbidden
+	}
+	if op == nodeCommandWorktreeList || op == nodeCommandJobResult {
+		op = nodeCommandWorktreeInspect
 	}
 	return h.authorize(request, hubScopeNodeCommand+op, machine)
 }

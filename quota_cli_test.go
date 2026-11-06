@@ -149,3 +149,11 @@ func TestNodeRunnerSuccessfulProcessWithInheritedPipe(t *testing.T) {
 		t.Fatalf("node out=%q err=%v", data, err)
 	}
 }
+
+func TestQuotaObserveSignalFailure(t *testing.T) {
+	quotaFake(t, `kill -KILL $$`)
+	var out, errout bytes.Buffer
+	if code := runQuotaCLI([]string{"observe", "devin-free-limit"}, &out, &errout); code != ExitInternal || !strings.Contains(errout.String(), "exit 70") {
+		t.Fatalf("code=%d stderr=%q", code, errout.String())
+	}
+}

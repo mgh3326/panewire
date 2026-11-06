@@ -113,14 +113,14 @@ func TestR07ReapProtectsBuildersKeepAndRevivedJobs(t *testing.T) {
 }
 func TestR07KernelLockAndSecureFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "slot")
-	a, e := secureOpen(path, true)
+	a, e := secureOpen(path, true, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
 	if !tryLock(a) {
 		t.Fatal("first lock failed")
 	}
-	b, e := secureOpen(path, false)
+	b, e := secureOpen(path, false, nil)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -136,7 +136,7 @@ func TestR07KernelLockAndSecureFile(t *testing.T) {
 	if e = os.Symlink(path, link); e != nil {
 		t.Fatal(e)
 	}
-	if _, e = secureOpen(link, false); e == nil {
+	if _, e = secureOpen(link, false, nil); e == nil {
 		t.Fatal("symlink lock accepted")
 	}
 }
@@ -332,6 +332,159 @@ func TestTrustGuardRejectsWritableBinary(t *testing.T) {
 	}
 	if e := TrustBinary(path, uint32(os.Getuid())); e != nil {
 		t.Fatal(e)
+	}
+}
+
+// lockFixture creates a lock at mode, owned by uid:gid when chown is allowed.
+func lockFixture(t *testing.T, mode os.FileMode, uid, gid int) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "x.wrk.lock")
+	if e := os.WriteFile(path, nil, 0600); e != nil {
+		t.Fatal(e)
+	}
+	if uid >= 0 {
+		if e := os.Chown(path, uid, gid); e != nil {
+			t.Skipf("cannot chown to %d:%d: %v", uid, gid, e)
+		}
+	}
+	if e := os.Chmod(path, mode); e != nil {
+		t.Fatal(e)
+	}
+	return path
+}
+
+func lockMode(t *testing.T, path string) os.FileMode {
+	t.Helper()
+	info, e := os.Stat(path)
+	if e != nil {
+		t.Fatal(e)
+	}
+	return info.Mode().Perm()
+}
+
+// ownGID is a group id that is ours, and is not 0 when we are root, so the
+// fixture is an own lock and never the root:root shared shape.
+func ownGID() int {
+	if os.Getuid() == 0 {
+		return 4242
+	}
+	return os.Getgid()
+}
+
+func TestSecureOpenRepairsOwnGroupWritableLock(t *testing.T) {
+	path := lockFixture(t, 0664, os.Getuid(), ownGID())
+	var warned []string
+	f, e := secureOpen(path, true, func(format string, args ...any) {
+		warned = append(warned, fmt.Sprintf(format, args...))
+	})
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer f.Close()
+	if got := lockMode(t, path); got != 0600 {
+		t.Fatalf("mode %o, want 0600", got)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], path) || !strings.Contains(warned[0], "0664") || !strings.Contains(warned[0], "0600") {
+		t.Fatalf("repair warning %q", warned)
+	}
+	again, e := secureOpen(path, false, func(string, ...any) { t.Fatal("repaired lock warned again") })
+	if e != nil {
+		t.Fatal(e)
+	}
+	again.Close()
+}
+
+func TestSecureOpenRefusesOwnOtherWritableLock(t *testing.T) {
+	path := lockFixture(t, 0666, os.Getuid(), ownGID())
+	_, e := secureOpen(path, false, nil)
+	if e == nil || !strings.Contains(e.Error(), path) || !strings.Contains(e.Error(), "other-write") || !strings.Contains(e.Error(), "chmod 600") {
+		t.Fatalf("refusal %v", e)
+	}
+	if got := lockMode(t, path); got != 0666 {
+		t.Fatalf("refused lock was chmod'ed to %o", got)
+	}
+}
+
+func TestSecureOpenKeepsRootSharedLock(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("a root:root lock needs root to build")
+	}
+	path := lockFixture(t, 0664, 0, 0)
+	f, e := secureOpen(path, false, func(string, ...any) { t.Fatal("shared lock repaired") })
+	if e != nil {
+		t.Fatal(e)
+	}
+	f.Close()
+	if got := lockMode(t, path); got != 0664 {
+		t.Fatalf("shared lock mode %o, want 0664", got)
+	}
+}
+
+func TestSecureOpenRefusesForeignOwnedLock(t *testing.T) {
+	if os.Getuid() != 0 {
+		t.Skip("a foreign-owned lock needs root to chown")
+	}
+	path := lockFixture(t, 0664, 4243, 4243)
+	_, e := secureOpen(path, false, nil)
+	if e == nil || !strings.Contains(e.Error(), "4243:4243") || !strings.Contains(e.Error(), "owned by another user") {
+		t.Fatalf("refusal %v", e)
+	}
+	if got := lockMode(t, path); got != 0664 {
+		t.Fatalf("foreign lock chmod'ed to %o", got)
+	}
+}
+
+func TestSecureOpenRefusesHardLinkedLock(t *testing.T) {
+	path := lockFixture(t, 0664, os.Getuid(), ownGID())
+	if e := os.Link(path, path+".twin"); e != nil {
+		t.Skipf("hard links unsupported: %v", e)
+	}
+	_, e := secureOpen(path, false, nil)
+	if e == nil || !strings.Contains(e.Error(), "2 hard links") {
+		t.Fatalf("refusal %v", e)
+	}
+	if got := lockMode(t, path); got != 0664 {
+		t.Fatalf("hard-linked lock chmod'ed to %o", got)
+	}
+}
+
+func TestLockRepairAndRefusalRules(t *testing.T) {
+	const me = 1000
+	reg := os.FileMode(0)
+	for _, c := range []struct {
+		name     string
+		uid, gid uint32
+		perm     os.FileMode
+		nlink    uint64
+		repair   bool
+		refusal  string // substring; "" means accepted
+	}{
+		{"own 0664", me, me, 0664, 1, true, ""},
+		{"own 0666", me, me, 0666, 1, false, "other-write"},
+		{"own 0600", me, me, 0600, 1, false, ""},
+		{"root:root 0664 as user", 0, 0, 0664, 1, false, ""},
+		{"root:root 0664 as root", 0, 0, 0664, 1, false, ""},
+		{"root:root 0666", 0, 0, 0666, 1, false, "pre-created root:root"},
+		{"foreign 0664", 2000, 2000, 0664, 1, false, "uid 2000"},
+		{"own hard-linked", me, me, 0664, 2, false, "2 hard links"},
+	} {
+		self := uint32(me)
+		if c.name == "root:root 0664 as root" {
+			self = 0
+		}
+		if got := lockRepairable(reg, c.nlink, c.uid, c.gid, c.perm, self); got != c.repair {
+			t.Errorf("%s: repairable=%v want %v", c.name, got, c.repair)
+		}
+		if c.repair {
+			continue
+		}
+		why := lockRefusal(reg, c.nlink, c.uid, c.gid, c.perm, self)
+		if (c.refusal == "") != (why == "") || !strings.Contains(why, c.refusal) {
+			t.Errorf("%s: refusal %q, want containing %q", c.name, why, c.refusal)
+		}
+	}
+	if why := lockRefusal(os.ModeDir, 1, me, me, 0600, me); !strings.Contains(why, "not a regular file") {
+		t.Errorf("directory refusal %q", why)
 	}
 }
 

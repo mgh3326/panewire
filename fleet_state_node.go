@@ -3,14 +3,24 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"regexp"
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/quota"
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 // Node side of the fleet state (docs/fleet-state.md): for the pools it
-// measures, the node publishes the shared quota reading pacelever keeps fresh.
+// measures, the node publishes the shared quota reading it keeps fresh. The
+// claude pool is measured in this process (quota_claude.go); other pools run
+// pacelever.
 
 const (
 	defaultFleetQuotaInterval = time.Minute
@@ -172,24 +182,34 @@ func (client *HubClient) runFleetQuota(ctx context.Context) {
 	}
 }
 
+// fleetQuotaLoginMissingKinds are pacelever's error kinds (kinds.go) that mean
+// the pool has no usable login. Every other failure leaves the login unknown.
+var fleetQuotaLoginMissingKinds = map[string]bool{"auth": true, "auth_failed": true, "credentials": true, "token_expired": true}
+
+var fleetQuotaErrorKindPattern = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+// fleetQuotaErrorKindUnreadable names a failure whose kind pacelever's status
+// did not give: a timeout, an unreadable status, or a pool it does not list.
+const fleetQuotaErrorKindUnreadable = "unreadable"
+
 func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sent map[string]fleetQuotaSent) {
 	run, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
 	defer cancel()
-	output, err := client.nodePaceleverRunner()(run, "refresh", pool)
-	publish, ok := FleetStatePublish{}, false
-	if err == nil {
-		publish, ok = fleetQuotaFromPacelever(pool, output)
-	}
+	publish, ok, kind := client.measureFleetQuota(run, ctx, pool)
 	previous := sent[pool]
 	if !ok {
 		// One warning per failure streak, not one per interval. Consumers see
 		// the reading age past its TTL and measure directly.
 		if !previous.failing {
-			client.warnMessage("fleet state: quota reading for a configured pool is unavailable; not published")
+			client.warnMessage(fmt.Sprintf("fleet state: quota reading for pool %s is unavailable (error_kind %s); not published", pool, kind))
 		}
 		previous.failing = true
 		sent[pool] = previous
-		client.noteQuotaAccount(pool, "")
+		if fleetQuotaLoginMissingKinds[kind] {
+			client.noteQuotaAccount(pool, "")
+		} else {
+			client.noteQuotaUnknown(pool)
+		}
 		return
 	}
 	client.noteQuotaAccount(pool, publish.Key)
@@ -201,4 +221,170 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 	if client.Publish("state", publish) {
 		sent[pool] = fleetQuotaSent{body: string(body), at: now}
 	}
+}
+
+// measureFleetQuota takes pool's reading for the fleet-state publish. The
+// claude pool is measured in this process; every other pool runs
+// `pacelever refresh`. A failed measurement answers the error kind that says
+// why: the login rule reads it. run is the measurement's own deadline and
+// parent the loop's context, which the failure-kind status lookup outlives it
+// on.
+func (client *HubClient) measureFleetQuota(run, parent context.Context, pool string) (FleetStatePublish, bool, string) {
+	if pool == quotaNativePool {
+		reading, err := client.claudeQuotaSource().Refresh(run)
+		if err != nil {
+			// A timed-out refresh says nothing about the login.
+			if run.Err() != nil {
+				return FleetStatePublish{}, false, fleetQuotaErrorKindUnreadable
+			}
+			return FleetStatePublish{}, false, quotaErrorKind(err)
+		}
+		publish, ok := fleetQuotaFromReading(pool, reading, client.nowUTC())
+		if !ok {
+			return FleetStatePublish{}, false, quota.ErrKindParse
+		}
+		return publish, true, ""
+	}
+	output, err := client.nodePaceleverRunner()(run, "refresh", pool)
+	publish, ok := FleetStatePublish{}, false
+	if err == nil {
+		publish, ok = fleetQuotaFromPacelever(pool, output)
+	}
+	if ok {
+		if confirmed := client.fleetQuotaConfirmedAt(run, publish.Key, publish.MeasuredAt); !confirmed.IsZero() {
+			publish.ConfirmedAt = &confirmed
+		}
+		return publish, true, ""
+	}
+	// refresh prints no error kind; pacelever's status names it. A timed-out
+	// refresh is not asked again: its login is unknown either way.
+	kind := fleetQuotaErrorKindUnreadable
+	if run.Err() == nil && !errors.Is(err, context.DeadlineExceeded) {
+		kind = client.fleetQuotaErrorKind(parent, pool)
+	}
+	return FleetStatePublish{}, false, kind
+}
+
+// fleetQuotaFromReading turns a native reading into a publishable value. It
+// refuses a reading with no account key or no measured bucket, as
+// fleetQuotaFromPacelever does for pacelever's output. The store's
+// confirmed_at travels with it when it is later than the measurement.
+func fleetQuotaFromReading(pool string, reading shared.Reading, now time.Time) (FleetStatePublish, bool) {
+	if !fleetStateAccountKeyPattern.MatchString(reading.Key) || !strings.HasPrefix(reading.Key, pool+":") {
+		return FleetStatePublish{}, false
+	}
+	quotaValue := &FleetStateQuota{AccountKey: reading.Key, Pool: pool, Buckets: []FleetStateBucket{}}
+	if fleetStateTokenPattern.MatchString(reading.Source) {
+		quotaValue.Source = reading.Source
+	}
+	for _, bucket := range reading.Buckets {
+		value := bucket.UsedPct
+		out := FleetStateBucket{Window: bucket.Window, UsedPct: &value, Scope: bucket.Scope, Model: bucket.Model}
+		if bucket.ResetsAt != nil {
+			out.ResetsAt = bucket.ResetsAt.UTC().Format(time.RFC3339)
+		}
+		quotaValue.Buckets = append(quotaValue.Buckets, out)
+	}
+	if len(quotaValue.Buckets) == 0 {
+		return FleetStatePublish{}, false
+	}
+	publish := FleetStatePublish{Kind: fleetStateKindQuota, Key: reading.Key, MeasuredAt: reading.MeasuredAt.UTC().Truncate(time.Millisecond), Quota: quotaValue}
+	if confirmed := reading.ConfirmedAt; confirmed != nil && confirmed.After(reading.MeasuredAt) && !confirmed.After(now.Add(time.Minute)) {
+		at := confirmed.UTC()
+		publish.ConfirmedAt = &at
+	}
+	encoded, err := json.Marshal(publish)
+	if err != nil {
+		return FleetStatePublish{}, false
+	}
+	if _, valid := decodeFleetStatePublish(encoded); !valid {
+		return FleetStatePublish{}, false
+	}
+	return publish, true
+}
+
+// fleetQuotaErrorKind reads pool's error_kind from `pacelever --json` with its
+// own fleetQuotaTimeout. A status that exits non-zero but still lists the pool
+// is read: pacelever reports failing providers that way.
+func (client *HubClient) fleetQuotaErrorKind(ctx context.Context, pool string) string {
+	run, cancel := context.WithTimeout(ctx, fleetQuotaTimeout)
+	defer cancel()
+	output, _ := client.nodePaceleverRunner()(run, "--json")
+	var status struct {
+		Providers []struct {
+			ID        string `json:"id"`
+			ErrorKind string `json:"error_kind"`
+		} `json:"providers"`
+	}
+	if json.Unmarshal(output, &status) != nil {
+		return fleetQuotaErrorKindUnreadable
+	}
+	for _, provider := range status.Providers {
+		if provider.ID == pool && fleetQuotaErrorKindPattern.MatchString(provider.ErrorKind) {
+			return provider.ErrorKind
+		}
+	}
+	return fleetQuotaErrorKindUnreadable
+}
+
+// fleetQuotaObservationTransport is the confirmed_at read's transport; nil is
+// the default. Tests point it at a test server.
+var fleetQuotaObservationTransport http.RoundTripper
+
+// fleetQuotaConfirmedAt reads handoffkeep's latest shared observation of key
+// with this node's spawn.json handoffkeep_env and answers its confirmed_at
+// when it is the reading pacelever just returned (same measured_at, within a
+// second). pacelever's refresh output carries only measured_at (fetched_at),
+// and handoffkeep keeps measured_at when a re-measurement publishes the same
+// values, so without this an unchanged account always reads stale through the
+// hub (hk 3058). Zero means unknown: the reading is published as before.
+func (client *HubClient) fleetQuotaConfirmedAt(ctx context.Context, key string, measured time.Time) time.Time {
+	if !fleetStateAccountKeyPattern.MatchString(key) {
+		return time.Time{}
+	}
+	config, err := loadHubSpawnConfig(client.spawnConfigPath)
+	if err != nil || config.HandoffkeepEnv == "" {
+		return time.Time{}
+	}
+	env, err := loadHubHandoffkeepEnv(config.HandoffkeepEnv)
+	if err != nil {
+		return time.Time{}
+	}
+	base, err := url.Parse(strings.TrimSuffix(env.URL, "/"))
+	if err != nil {
+		return time.Time{}
+	}
+	base.Path, base.RawPath = "/v1/quota/accounts/"+key+"/latest", ""
+	base.RawQuery, base.ForceQuery, base.Fragment, base.RawFragment = "", false, "", ""
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, base.String(), nil)
+	if err != nil {
+		return time.Time{}
+	}
+	env.setAuth(request)
+	request.Header.Set("Accept", "application/json")
+	response, err := (&http.Client{Transport: fleetQuotaObservationTransport, Timeout: handoffkeepTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}).Do(request)
+	if err != nil {
+		return time.Time{}
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return time.Time{}
+	}
+	var body struct {
+		Observation *struct {
+			MeasuredAt  time.Time  `json:"measured_at"`
+			ConfirmedAt *time.Time `json:"confirmed_at"`
+		} `json:"observation"`
+	}
+	if json.NewDecoder(io.LimitReader(response.Body, 64<<10)).Decode(&body) != nil || body.Observation == nil || body.Observation.ConfirmedAt == nil {
+		return time.Time{}
+	}
+	o := body.Observation
+	if d := o.MeasuredAt.Sub(measured); d < -time.Second || d > time.Second {
+		return time.Time{}
+	}
+	if !o.ConfirmedAt.After(o.MeasuredAt) || o.ConfirmedAt.After(client.nowUTC().Add(time.Minute)) {
+		return time.Time{}
+	}
+	return o.ConfirmedAt.UTC()
 }

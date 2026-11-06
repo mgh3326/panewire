@@ -112,11 +112,13 @@ publishes:
 
 - `quota` for each pool in `--state-quota-pools` (comma-separated, empty by
   default, which disables quota publishing). Every `--state-quota-interval`
-  (default 60 s, minimum 10 s) it runs `pacelever refresh <pool>`. pacelever reads the shared
-  cache first and probes only when the reading is stale, so a 60 s interval
-  keeps the account's shared reading fresh at the cost of one cache read per
-  pool per minute. The node publishes a reading only when pacelever reports it
-  as not stale, with an account fingerprint of kind `account`. It republishes
+  (default 60 s, minimum 10 s) it refreshes the pool: `claude` is measured by
+  the node itself ([docs/quota.md](quota.md#native-measurement-claude)), every
+  other pool runs `pacelever refresh <pool>`. Both read the shared cache first
+  and probe only when the reading is stale, so a 60 s interval keeps the
+  account's shared reading fresh at the cost of one cache read per pool per
+  minute. The node publishes a reading only when it is current and carries an
+  account fingerprint of kind `account`. It republishes
   when the reading changes, and otherwise at least every 5 minutes. A failing
   refresh logs one warning per failure streak and publishes nothing. The
   reading then ages past its TTL, and consumers measure directly.

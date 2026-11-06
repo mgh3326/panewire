@@ -47,6 +47,19 @@ counts as unsupported), or when a supported pane is known idle/done by a fresh
 heartbeat session snapshot. Unknown state is never treated as idle. Everything
 else keeps the deadline digest as its safety net.
 
+Set `idle_promote: false` on a lane to keep inbox items queued when its
+pane is idle or unsupported, while retaining ordinary deadline escalation.
+Owned job completions and interrupt-class events still deliver immediately.
+Use this for lanes without an external digest scheduler; `inbox_summary`
+disables inbox deadlines and requires an external scheduler instead. The two
+`idle_promote: false` cannot be combined with `inbox_summary` on a lane.
+
+```yaml
+lanes:
+  design:
+    idle_promote: false
+```
+
 ```yaml
 agents:
   claude: supported   # built-in default; every other CLI defaults unsupported
@@ -164,8 +177,8 @@ backups (see [hub inbox on Postgres](hub-postgres.md#backup)). Do not delete it
 during rollback.
 
 The hub prunes completed inbox history on its first maintenance tick and hourly
-thereafter. Global policy `retention: {days: 14, per_lane: 2000}` sets the
-defaults: completed items expire after 14 days or outside the newest 2000
+thereafter. Global policy `retention: {days: 30, per_lane: 2000}` sets the
+defaults: completed items expire after 30 days or outside the newest 2000
 items per lane. Omitted/zero values use defaults; negative values are rejected
 (and days is capped at 36500). Unread items, unacked must-ack notices and
 pending deliveries are protected regardless of age or count. Ordinary read

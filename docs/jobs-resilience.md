@@ -112,3 +112,50 @@ also supply a reference through the same metadata. A reference is accepted only
 for the matching pane and harness. If none is available at landing, `id` is
 `unknown` and `source` is `unavailable`; the spawn still proceeds. No session
 or credential file is read to discover this value.
+
+## Reap closes the hk record of a revoked job
+
+A job that ends by `job.revoked` or `job.lost` writes nothing to hk, so its
+record would stay `claimed` or `spawned` and hold the task's role against every
+later spawn. `panewire reap --apply` therefore writes `state=lost` to the hk
+record before it closes the pane and writes `job.reaped`, when the job's newest
+terminal event since its last claim is `job.revoked` or `job.lost`. A job that
+completed or joined, a record that is already `completed` or `lost` and a job hk
+does not know are not written. A failed hk read or write is a warning plus a
+`job.record_failed` event (`op: reap`); reap still closes the pane and writes
+`job.reaped`.
+
+## Token usage capture
+
+When the node completes a job (`panewire done`, `escalate`, and the completion
+watcher) it reads that job's token usage and writes it with a second
+`PUT /v1/jobs/{job}`, after the terminal record. `panewire reap` and the
+delegate close read again and write again, before the pane closes. The `usage`
+object replaces the stored one as a whole, so the later read wins; a reap read
+with no figures is not written, so it cannot erase the completion read. A job
+whose `job.spawned` carries no `harness_session` gets no usage write. A failed
+usage write is a warning (HTTP status only) and changes nothing about the
+job's completion. The hk side is `usage` and `model` in
+hk:doc `handoff/2026-11-05/handoffkeep-design-usage-outcome-contract` §1.
+
+The read is made on the node that ran the pane, from the record the job's
+`harness_session` names. It never picks a file by working directory or
+recency. An `unknown` id, a missing, unreadable, ambiguous or symlinked file,
+or a file over 8 MiB gives unknown for every count (`usage` carries only
+`source`), never 0. Lines over 2 MiB and malformed lines are skipped. Only
+integers and a model id (matched against a strict character set) leave the
+parser.
+
+| Harness | Record | Counts | `source` |
+|---|---|---|---|
+| claude | `~/.claude/projects/<cwd, non-alphanumerics as "-">/<id>.jsonl` | `message.usage` of assistant entries, once per `message.id` (a message is written once per content block): `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`; reasoning unknown | `claude-session-jsonl` |
+| codex | the one `~/.codex/sessions/*/*/*/rollout-*-<id>.jsonl` | `total_token_usage` of the **last** `token_count` event (cumulative, never summed): `input_tokens`, `cached_input_tokens`, `output_tokens`, `reasoning_output_tokens`; cache write unknown | `codex-token-count` |
+| omp | the `path` reference, inside the home directory | `message.usage` of assistant `message` entries: `input`, `output`, `cacheRead`, `cacheWrite`; reasoning unknown | `omp` |
+| devin, agy, cmd, other | none documented | all unknown | the harness kind |
+
+Known limits, from the harnesses' own documentation: Claude Code builds each
+assistant entry's `output_tokens` from the count reported when the response
+began, so the claude output total can undercount (the Agent SDK cost-tracking
+guide says to read output from the result message, which a transcript
+reader has no access to). Codex `input_tokens` includes `cached_input_tokens`.
+The code is `internal/fleet/usage_reader.go` and `usage_record.go`.

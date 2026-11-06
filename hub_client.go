@@ -194,7 +194,9 @@ type HubClient struct {
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
 	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
-	nodePacelever      relayCommandRunner // fixture seam for quota.refresh; nil runs pacelever.
+	nodePacelever      relayCommandRunner // fixture seam for quota.refresh of a pool other than claude; nil runs pacelever.
+	claudeQuotaMu      sync.Mutex
+	claudeQuota        *claudeQuotaSource // the node's own claude measurement; fixtures set it, nil builds the default.
 	nodeCloseSettle    time.Duration      // fixture seam; zero is nodePaneCloseSettle.
 	nodeGitLockWait    time.Duration      // fixture seam; zero is nodeGitOpLockWait.
 	busyRelayMu        sync.Mutex
@@ -720,7 +722,33 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		// it.
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness, Evidence: "prompt_failed"}
 	}
-	return relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, relayReadPane(ctx, pane))
+	result := relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, relayReadPane(ctx, pane))
+	if !strings.EqualFold(harness, "claude") || !strings.HasPrefix(result.Evidence, "unproven:") || len(relayNoncesIn(text)) == 0 {
+		return result
+	}
+	// Claude can accept input while busy before it appears in either read.
+	// Observe only: another prompt or return could duplicate or alter input.
+	deadline := time.NewTimer(8 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(200 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return result
+		case <-deadline.C:
+			return result
+		case <-tick.C:
+			reads := relayReadPane(ctx, pane)
+			classification, rule, proven := relayClassifyReads(harness, reads, text, true, presendQueued)
+			switch classification {
+			case "marker_observed":
+				return relayInjectResult{Outcome: relayInjectDelivered, Harness: harness, Evidence: rule, Proven: proven}
+			case "queued":
+				return relayInjectResult{Outcome: relayInjectQueued, Harness: harness, Evidence: rule, Proven: proven}
+			}
+		}
+	}
 }
 
 func relayInjectHarness(ctx context.Context, pane string) string {
@@ -2010,8 +2038,10 @@ func relayEventOutboxKeyFor(job hubScannedRelayEvent) relayOutboxKey {
 	return relayOutboxKey{Kind: job.Kind, JobID: job.JobID, Epoch: job.Epoch, ReportPath: job.ReportPath, Reason: reason, EventID: job.EventID}
 }
 
-// nowUTC is the outbox retry clock, injectable so a fixture can pin the
-// sixty-second backoff instead of racing the wall clock.
+// nowUTC is the node's injectable clock for every recorded timestamp (outbox
+// retry, held relays, readiness), so a fixture can pin the sixty-second
+// backoff instead of racing the wall clock. Elapsed-time deadlines stay on
+// the wall clock.
 func (client *HubClient) nowUTC() time.Time {
 	if client.now != nil {
 		return client.now().UTC()
@@ -2072,7 +2102,10 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 			Epoch     uint64 `json:"epoch,omitempty"`
 			Truncated bool   `json:"truncated,omitempty"`
 			Replay    bool   `json:"replay,omitempty"`
-		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay})
+			Cause     string `json:"cause,omitempty"`
+			Head      string `json:"head,omitempty"`
+			PR        string `json:"pr,omitempty"`
+		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay, job.Cause, job.Head, job.PR})
 		payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 		payload = relayPayloadNotifyType(payload, job.NotifyType)
 		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
@@ -2105,6 +2138,8 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 	}
 	payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 	payload = relayPayloadNotifyType(payload, job.NotifyType)
+	payload = relayPayloadOptionalString(payload, "cause", job.Cause)
+	payload = relayPayloadOptionalString(payload, "head", job.Head)
 	return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
 }
 
@@ -2255,7 +2290,7 @@ func (client *HubClient) recordRelayPersisted(message hubOutboundMessage) {
 		return
 	}
 	key := relayOutboxKey{Kind: message.Kind, JobID: message.JobID, Epoch: message.Epoch, ReportPath: message.ReportPath, Reason: message.Reason, Lane: message.Lane, EventID: message.ProducerEventID}
-	if err := client.outbox.RecordRelayPersisted(context.Background(), key, time.Now().UTC()); err != nil {
+	if err := client.outbox.RecordRelayPersisted(context.Background(), key, client.nowUTC()); err != nil {
 		client.warnMessage("relay outbox persistence was not recorded")
 	}
 }

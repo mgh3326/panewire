@@ -7,12 +7,13 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"github.com/mgh3326/panewire/internal/fleet"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 	"unicode"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 // pane.read and job.done are the two node commands mergewake reap needs for a
@@ -385,13 +386,19 @@ func (client *HubClient) openNodeJobDir(name string) (*os.Root, string, bool, er
 	return job, filepath.Join(jobsRoot, name), true, nil
 }
 
+// nodeExecuteLifecycle is fleet.ExecuteLifecycle; tests replace it to see the
+// jobs root the node passes.
+var nodeExecuteLifecycle = fleet.ExecuteLifecycle
+
 func (client *HubClient) nodeLifecycleRunner() relayCommandRunner {
 	if client.nodeLifecycle != nil {
 		return client.nodeLifecycle
 	}
 	return func(ctx context.Context, args ...string) ([]byte, error) {
 		var output, errors bytes.Buffer
-		err := fleet.ExecuteLifecycle(ctx, client.jobsInboxRoot, args, &output, &errors)
+		// jobsInboxRoot is the inbox root (openNodeJobDir appends "jobs");
+		// the lifecycle and its canonical-path trust check take the jobs root.
+		err := nodeExecuteLifecycle(ctx, filepath.Join(client.jobsInboxRoot, "jobs"), args, &output, &errors)
 		if err != nil {
 			fmt.Fprintln(&errors, "panewire:", err)
 			return errors.Bytes(), err
