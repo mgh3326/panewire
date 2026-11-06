@@ -411,10 +411,23 @@ func (a *App) deliverPlacements(ctx context.Context) {
 		conflict := errors.As(e, &be) && be.Status == http.StatusConflict
 		if errors.As(e, &be) && (be.Status == http.StatusBadRequest || be.Status == http.StatusUnprocessableEntity) {
 			rejectedDir := filepath.Join(a.stateDir(), "placements-rejected")
-			if noSymlinks(rejectedDir) != nil || os.MkdirAll(rejectedDir, 0700) != nil || os.Chmod(path, 0600) != nil || os.Rename(path, filepath.Join(rejectedDir, ent.Name())) != nil {
-				lastAttempted = previous
-				a.warn("placement record could not be quarantined; records remain spooled")
-				break
+			moveErr := noSymlinks(rejectedDir)
+			if moveErr == nil {
+				moveErr = os.MkdirAll(rejectedDir, 0700)
+			}
+			if moveErr == nil {
+				moveErr = os.Chmod(path, 0600)
+			}
+			if moveErr == nil {
+				moveErr = os.Rename(path, filepath.Join(rejectedDir, ent.Name()))
+			}
+			if moveErr != nil {
+				_, sourceErr := os.Stat(path)
+				if !os.IsNotExist(moveErr) || !os.IsNotExist(sourceErr) {
+					lastAttempted = previous
+					a.warn("placement record could not be quarantined; records remain spooled")
+					break
+				}
 			}
 			rejected = true
 			a.warn("placement record %s rejected: hk HTTP %d %s", ent.Name(), be.Status, be.Code)
@@ -471,6 +484,9 @@ func (a *App) capRejectedPlacements() {
 	dropped := 0
 	for _, f := range files[:max(0, len(files)-1000)] {
 		if err := os.Remove(filepath.Join(dir, f.name)); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
 			a.warn("placement quarantine entry could not be removed")
 			break
 		}

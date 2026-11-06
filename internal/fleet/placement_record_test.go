@@ -19,13 +19,14 @@ import (
 )
 
 type placementHK struct {
-	mu          sync.Mutex
-	server      *httptest.Server
-	requests    [][]byte
-	rows        map[string][]byte
-	status      int
-	statusFirst int
-	loseAck     bool
+	mu                 sync.Mutex
+	server             *httptest.Server
+	requests           [][]byte
+	rows               map[string][]byte
+	status             int
+	statusFirst        int
+	beforeFirstRefusal func()
+	loseAck            bool
 }
 
 func placementServer(t *testing.T, a *App) *placementHK {
@@ -71,6 +72,9 @@ func placementServer(t *testing.T, a *App) *placementHK {
 		defer h.mu.Unlock()
 		h.requests = append(h.requests, b)
 		if h.statusFirst != 0 && len(h.requests) == 1 {
+			if h.beforeFirstRefusal != nil {
+				h.beforeFirstRefusal()
+			}
 			w.WriteHeader(h.statusFirst)
 			_, _ = w.Write([]byte(`{"error":"invalid_context"}`))
 			return
@@ -817,5 +821,35 @@ func TestPlacementQuarantineCapDropsOldest(t *testing.T) {
 	}
 	if warnings := a.Err.(*bytes.Buffer).String(); !strings.Contains(warnings, "dropped 1 oldest") {
 		t.Fatalf("warnings: %s", warnings)
+	}
+}
+
+func TestPlacementConcurrentQuarantineContinuesDelivery(t *testing.T) {
+	a := testApp(t)
+	h := placementServer(t, a)
+	h.statusFirst = 400
+	for _, id := range []string{"a", "b"} {
+		p := pendingPlacement{Record: placementRecord{JobID: id}}
+		if err := a.spoolPlacement(&p); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.beforeFirstRefusal = func() {
+		dir := filepath.Join(a.stateDir(), "placements-rejected")
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Error(err)
+			return
+		}
+		if err := os.Rename(filepath.Join(a.stateDir(), "placements", "a.1.json"), filepath.Join(dir, "a.1.json")); err != nil {
+			t.Error(err)
+		}
+	}
+	a.flushPlacements()
+	requests, rows := h.snapshot()
+	if len(requests) != 2 || len(rows) != 1 || len(placementSpool(t, a)) != 0 {
+		t.Fatalf("requests=%d rows=%d spool=%v", len(requests), len(rows), placementSpool(t, a))
+	}
+	if warnings := a.Err.(*bytes.Buffer).String(); strings.Contains(warnings, "could not be quarantined") {
+		t.Fatalf("false warning: %s", warnings)
 	}
 }
