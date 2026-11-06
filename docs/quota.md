@@ -240,7 +240,8 @@ shared store flow. It has a switch and ships in [shadow](#shadow-and-native).
   cache directory, written by `panewire quota observe devin-free-limit`): an
   exceed that still holds is `exhausted` until its reset, a record with no
   readable reset holds for an hour after its observation, one with no readable
-  time is `unknown`, none is `available`. Merging keeps another host's later
+  time is `unknown`, none is `available`. A record file that is present but unreadable or
+  malformed is `unknown` too; only an absent file is `available`. Merging keeps another host's later
   hold, and a locally recorded exceed is published even over a fresh reading.
   The free state does not depend on the paid probe: a failed measurement still
   publishes `{buckets: [], free_bucket}` and the refresh succeeds with no paid

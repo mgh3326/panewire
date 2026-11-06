@@ -13,6 +13,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"os"
 	"os/exec"
@@ -98,15 +99,28 @@ func (c Config) env(name string) string {
 }
 
 func (c Config) readFile(path string) []byte {
+	data, err := c.readFileErr(path)
+	if err != nil {
+		return nil
+	}
+	return data
+}
+
+// readFileErr reads a small file, saying why when it cannot: an absent file is
+// fs.ErrNotExist, so a caller can tell it from a present one it cannot use.
+func (c Config) readFileErr(path string) ([]byte, error) {
 	read := c.ReadFile
 	if read == nil {
 		read = os.ReadFile
 	}
 	data, err := read(path)
-	if err != nil || len(data) > authFileLimit {
-		return nil
+	switch {
+	case err != nil:
+		return nil, err
+	case len(data) > authFileLimit:
+		return nil, errors.New("file too large")
 	}
-	return data
+	return data, nil
 }
 
 // base is an XDG root: the variable when set, else a directory under home.

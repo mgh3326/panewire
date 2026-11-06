@@ -3,6 +3,7 @@ package devin
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"io/fs"
 	"strconv"
 	"testing"
 	"time"
@@ -47,7 +48,10 @@ func TestLocalFree(t *testing.T) {
 		reset *time.Time
 	}{
 		{"no record file", loginFiles(), shared.FreeAvailable, nil},
-		{"damaged record file", func() map[string]string { f := loginFiles(); f[cacheFile] = "{"; return f }(), shared.FreeAvailable, nil},
+		{"truncated record file", func() map[string]string { f := loginFiles(); f[cacheFile] = `{"records":{"x":`; return f }(), shared.FreeUnknown, nil},
+		{"record file of the wrong shape", func() map[string]string { f := loginFiles(); f[cacheFile] = `[1]`; return f }(), shared.FreeUnknown, nil},
+		{"empty record file", func() map[string]string { f := loginFiles(); f[cacheFile] = ``; return f }(), shared.FreeUnknown, nil},
+		{"no records yet", func() map[string]string { f := loginFiles(); f[cacheFile] = `{"records":{}}`; return f }(), shared.FreeAvailable, nil},
 		{"no record for this host", limits(record(hostUserID("other", 1000), future, observed)), shared.FreeAvailable, nil},
 		{"active exceed", limits(record(host, future, observed)), shared.FreeExhausted, ptr(testNow.Add(3 * time.Hour))},
 		{"exceed filed under the account", limits(record(accountID(fixtureFP), future, observed)), shared.FreeExhausted, ptr(testNow.Add(3 * time.Hour))},
@@ -76,3 +80,28 @@ func TestPaceleverCacheEnvOverride(t *testing.T) {
 }
 
 func ptr(t time.Time) *time.Time { return &t }
+
+// A record file that is there but cannot be read (permissions, a directory in
+// its place) is not an absent one: it is unknown, never permission to spend the
+// free tier.
+func TestLocalFreeUnreadableRecordFileIsUnknown(t *testing.T) {
+	cfg := config(loginFiles(), nil)
+	cfg.ReadFile = func(path string) ([]byte, error) {
+		if path == cacheFile {
+			return nil, fs.ErrPermission
+		}
+		return config(loginFiles(), nil).ReadFile(path)
+	}
+	if got := LocalFree(cfg)(testNow); got.State != shared.FreeUnknown {
+		t.Fatalf("free bucket %+v", got)
+	}
+	cfg.ReadFile = func(path string) ([]byte, error) {
+		if path == cacheFile {
+			return make([]byte, authFileLimit+1), nil
+		}
+		return config(loginFiles(), nil).ReadFile(path)
+	}
+	if got := LocalFree(cfg)(testNow); got.State != shared.FreeUnknown {
+		t.Fatalf("oversized record file: %+v", got)
+	}
+}
