@@ -46,6 +46,7 @@ func (h *fakeHub) Refresh(_ context.Context, machine, pool string) error {
 // gitState is what the fake local checkout answers for the hub's ref probes.
 type gitState struct {
 	pushed    bool     // HEAD is an ancestor of refs/remotes/origin/<branch>
+	onOrigin  bool     // refs/remotes/origin/<branch> exists; pushed implies it
 	pointsAt  []string // refs whose tip is HEAD
 	contained []string // refs that contain HEAD
 }
@@ -72,6 +73,11 @@ func hubFixture(t *testing.T, g gitState, branch string, hosts map[string]map[st
 				t.Errorf("branch probe names the wrong ref: %s", args)
 			}
 			if g.pushed {
+				return Result{}
+			}
+			return Result{Code: 1}
+		case c.Name == "git" && branch != "" && strings.Contains(args, "rev-parse --verify") && strings.Contains(args, "refs/remotes/origin/"+branch):
+			if g.pushed || g.onOrigin {
 				return Result{}
 			}
 			return Result{Code: 1}

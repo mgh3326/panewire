@@ -257,6 +257,9 @@ panewire:
    with `fetch: pull/<n>/head` when a local `origin/pull/<n>/head` ref points
    at HEAD, or `fetch: refs/heads/<branch>` of an origin branch containing it
    (a detached HEAD, or a branch whose commits sit on another origin ref).
+   A writing role (any role but `reviewer` and `counsel`) whose `branch` has no
+   local `refs/remotes/origin/<branch>` is refused (exit 81) before anything is
+   uploaded, naming the `git -C <cwd> push -u origin <branch>` command to run.
    Only refs already known locally are read; nothing is fetched. Commits on no
    origin ref, an origin URL without an https form (`git@host:o/r` and
    `ssh://` become `https://host/o/r`), or a subdirectory start refuse with

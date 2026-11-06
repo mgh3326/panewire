@@ -80,6 +80,9 @@ func conflictMessage(raw []byte) string {
 		Job     string `json:"job"`
 		Host    string `json:"host"`
 		Pane    string `json:"pane"`
+		// RetryAfter is the seconds until the hold frees on its own; the hub
+		// sends it only for a reviewer held by the landing grace.
+		RetryAfter int `json:"retry_after_s"`
 	}
 	if json.Unmarshal(raw, &conflict) != nil || conflict.Error == "" {
 		return "job id already claimed; inspect its existing accepted request"
@@ -87,6 +90,9 @@ func conflictMessage(raw []byte) string {
 	message := "hub refused spawn: " + conflict.Error
 	if conflict.Request != "" || conflict.Job != "" {
 		message += fmt.Sprintf(" (held by request=%s job=%s host=%s pane=%s)", conflict.Request, conflict.Job, firstNonempty(conflict.Host, "unknown"), firstNonempty(conflict.Pane, "unknown"))
+	}
+	if conflict.RetryAfter > 0 {
+		message += fmt.Sprintf(" retry_after_s=%d", conflict.RetryAfter)
 	}
 	if conflict.Fix != "" {
 		message += "; fix: " + conflict.Fix
@@ -231,6 +237,17 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 			repo.wt = repo.wt[:40] + "-" + hex.EncodeToString(sum[:])
 		}
 		repo.wt += "-checkout"
+	}
+	// A writing role must have its branch on origin before submitting: without
+	// refs/remotes/origin/<branch> the checkout spec falls back to a detached
+	// HEAD at whatever origin ref holds HEAD, which is not the worktree the
+	// caller passed. Reviewer and counsel clear the branch below and keep that
+	// fallback; a pinned checkout already carries its evidence.
+	pinned := a.Repository != nil && a.Repository.Checkout != nil
+	if !pinned && repo.branch != "" && s.Role != "reviewer" && s.Role != "counsel" {
+		if a.call(ctx, "git", "-C", cwd, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+repo.branch).Code != 0 {
+			return Submission{}, fail(exitPlacement, "branch %s is not on origin; push it first: git -C %s push -u origin %s", repo.branch, cwd, repo.branch)
+		}
 	}
 	var checkout *HubCheckout
 	if repo.wt != "" {
