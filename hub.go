@@ -401,6 +401,9 @@ type HubServer struct {
 	// quotaMarkBackoff overrides the wait between tries to write the stopped
 	// job's record; zero uses quotaMarkBackoff.
 	quotaMarkBackoff time.Duration
+	// quotaWait overrides how long a replacement waits for its successor; zero
+	// uses quotaReplaceWait.
+	quotaWait time.Duration
 	// quotaReplaceBudget overrides the hard bound on one replacement; zero uses
 	// quotaReplaceBudget.
 	quotaReplaceBudget time.Duration

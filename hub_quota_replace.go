@@ -239,10 +239,23 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	case h.spawnKick <- struct{}{}:
 	default:
 	}
-	outcome, ok := h.awaitSpawnOutcome(ctx, request.RequestID, quotaReplaceWait)
-	if !ok || outcome.RC != 0 {
+	wait := h.quotaWait
+	if wait <= 0 {
+		wait = quotaReplaceWait
+	}
+	outcome, settled := h.awaitSpawnOutcome(ctx, request.RequestID, wait)
+	if settled && outcome.RC != 0 {
 		h.logger.Info("quota-stop replacement not placed", "job", event.JobID, "replacement", newJob, "pool", pool, "rc", outcome.RC, "reason", outcome.Reason)
 		return "", false
+	}
+	// A successor still reconciling or past its deadline may yet be completed
+	// by a late node result, and the old record cannot be repaired after the
+	// watcher ends it. So an undecided successor gets its pointer too: a
+	// pointer to a successor that later fails is a recoverable chain, a
+	// running successor nobody points to is duplicate work.
+	pending := !settled
+	if pending {
+		h.logger.Warn("quota-stop replacement undecided; writing its pointer", "job", event.JobID, "replacement", newJob)
 	}
 	// The pointer can only be written once and the watcher's fallback would
 	// write a plain record, so a transient failure is retried inside the grace.
@@ -266,10 +279,14 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		return "", false
 	}
 	h.logger.Info("quota-stop replacement", "job", event.JobID, "replacement", newJob, "role", role, "pool", pool, "host", outcome.Host, "profile", outcome.Profile)
-	text := fmt.Sprintf("%s %s (%s quota) with %s on %s/%s", verb, event.JobID, pool, newJob, outcome.Host, outcome.Profile)
+	to, place := "with", fmt.Sprintf("%s/%s", outcome.Host, outcome.Profile)
 	if role != "reviewer" {
-		text = fmt.Sprintf("%s %s (%s quota) to %s on %s/%s", verb, event.JobID, pool, newJob, outcome.Host, outcome.Profile)
+		to = "to"
 	}
+	if pending {
+		place = "(placement still pending)"
+	}
+	text := fmt.Sprintf("%s %s (%s quota) %s %s on %s", verb, event.JobID, pool, to, newJob, place)
 	h.relayLaneEventContext(ctx, hubJobEventPayload{EventID: "quota-replace:" + newJob, JobID: newJob, OwnerLane: next.Owner, NotifyType: "info", Text: utf8PrefixWithin(text, laneEventTextLimit), Host: "hub", Epoch: 1}, nil)
 	return newJob, true
 }
@@ -284,8 +301,9 @@ func spawnStatusActive(status string) bool {
 	return false
 }
 
-// awaitSpawnOutcome waits for the successor's operation to leave the states
-// that still run.
+// awaitSpawnOutcome waits for the successor's operation to reach a final state
+// (settled) and returns its outcome; settled is false when the wait ended with
+// the operation still running.
 func (h *HubServer) awaitSpawnOutcome(ctx context.Context, requestID string, limit time.Duration) (hubSpawnOutcome, bool) {
 	poll := h.quotaReplacePoll
 	if poll <= 0 {
@@ -299,7 +317,7 @@ func (h *HubServer) awaitSpawnOutcome(ctx context.Context, requestID string, lim
 		// complete the successor from reconciling. Only succeeded, failed and
 		// retryable are final.
 		if err == nil && !spawnStatusActive(task.Status) {
-			return task.Outcome, task.Status == "succeeded"
+			return task.Outcome, true
 		}
 		if ctx.Err() != nil || time.Now().After(deadline) {
 			return hubSpawnOutcome{}, false

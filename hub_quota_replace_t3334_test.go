@@ -546,3 +546,41 @@ func TestQuotaStopWaitsThroughReconcilingForTheSuccessor(t *testing.T) {
 		t.Fatal("the replacement did not finish")
 	}
 }
+
+// When the wait for the successor ends with the operation still undecided
+// (reconciling, or past its deadline), a late node result can still make it
+// run, and hk cannot repair the old record afterwards. So the hub writes the
+// pointer anyway: a pointer to a successor that later fails is a recoverable
+// chain, a running successor nobody points to is not (review finding).
+func TestQuotaStopUndecidedSuccessorStillGetsItsPointer(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-10-p1")
+	f.hub.quotaWait = 150 * time.Millisecond
+	done := make(chan quotaReplaceResult, 1)
+	go func() {
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		done <- quotaReplaceResult{job, ok}
+	}()
+	roleReplyPanes(t, f.node, nodeCommandRead(t, f.node), []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/x/pane-screen.txt"}})
+	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodePaneClosed}})
+	var successor hubSpawnTask
+	eventually(t, 2*time.Second, "the successor to be claimed", func() bool {
+		var err error
+		successor, err = f.hub.inbox.store.latestSpawnForJob(t.Context(), "mwr-10-p1-q1")
+		return err == nil
+	})
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, hubSpawnOutcome{RC: 75, Stage: "landing", Reason: "unknown"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	// It stays reconciling past the wait: the pointer is written regardless.
+	command := nodeCommandRead(t, f.node)
+	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeJobMarkLostLost}})
+	select {
+	case result := <-done:
+		if !result.ok || result.job != "mwr-10-p1-q1" || endReasonOf(t, command) != "quota_stop pool=claude replaced_by=mwr-10-p1-q1" {
+			t.Fatalf("result %+v end_reason %q", result, endReasonOf(t, command))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the replacement did not finish")
+	}
+}
