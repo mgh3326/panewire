@@ -284,8 +284,8 @@ func selectionCandidates(sel map[string]any, chosen string, launched bool) []pla
 			// row so the refusal it carries is not lost: it replaces a pass 1
 			// row that tried nothing, and otherwise pass 1 keeps the entry.
 			if i, ok := at[name]; ok {
-				if untried[name] && out[i].Outcome != "chosen" {
-					out[i].Reason = placementSkipReason(creditBandReason(host))
+				if reason, failed := creditBandRefusal(host); failed && untried[name] && out[i].Outcome != "chosen" {
+					out[i].Reason = placementSkipReason(reason)
 				}
 				continue
 			}
@@ -304,13 +304,19 @@ func selectionCandidates(sel map[string]any, chosen string, launched bool) []pla
 	return out
 }
 
-// creditBandReason names why a host's credit band attempt did not place: the
-// gate's quota result when it gave one, else the host row's own outcome.
-func creditBandReason(host map[string]any) string {
-	if got := str(host, "admission_outcome"); got == "quota_exhausted" || got == "quota_unknown" {
-		return got
+// creditBandRefusal names why a host's credit band attempt did not place: the
+// gate's quota result when it gave one, else the host row's own outcome. It
+// reports false for a row that placed or never tried, which carries no refusal.
+func creditBandRefusal(host map[string]any) (string, bool) {
+	switch got := str(host, "admission_outcome"); got {
+	case "quota_exhausted", "quota_unknown":
+		return got, true
+	case "no_rung":
+		if tried, _ := host["tried"].([]any); len(tried) > 0 {
+			return str(host, "outcome"), true
+		}
 	}
-	return str(host, "outcome")
+	return "", false
 }
 
 func placementSkipReason(reason string) string {
