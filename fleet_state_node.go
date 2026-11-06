@@ -224,8 +224,10 @@ func (client *HubClient) refreshFleetQuota(ctx context.Context, pool string, sen
 }
 
 // measureFleetQuota takes pool's reading for the fleet-state publish. The
-// claude and codex pools are measured in this process; every other pool runs
-// `pacelever refresh`. A failed measurement answers the error kind that says
+// pools this host measures natively (claude, codex, and commandcode once its
+// switch is flipped) are measured in this process; every other pool runs
+// `pacelever refresh`, and a pool in shadow also logs the node's own
+// measurement beside it (quota_shadow.go). A failed measurement answers the error kind that says
 // why: the login rule reads it. run is the measurement's own deadline and
 // parent the loop's context, which the failure-kind status lookup outlives it
 // on.
@@ -245,6 +247,17 @@ func (client *HubClient) measureFleetQuota(run, parent context.Context, pool str
 		}
 		return publish, true, ""
 	}
+	shadow := isShadowQuotaPool(pool)
+	publish, ok, kind := client.measureFleetQuotaWithPacelever(run, parent, pool)
+	if shadow {
+		client.logShadowQuota(parent, pool, shadowFromPublish(publish, ok, kind))
+	}
+	return publish, ok, kind
+}
+
+// measureFleetQuotaWithPacelever is the fleet-state measurement of a pool the
+// node does not measure itself, or measures only in shadow.
+func (client *HubClient) measureFleetQuotaWithPacelever(run, parent context.Context, pool string) (FleetStatePublish, bool, string) {
 	output, err := client.nodePaceleverRunner()(run, "refresh", pool)
 	publish, ok := FleetStatePublish{}, false
 	if err == nil {
