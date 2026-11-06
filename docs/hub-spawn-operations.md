@@ -96,6 +96,14 @@ The hub then has the holder's node mark the hk job `lost` and logs one INFO line
 (succeeded) or `reviewer_pane_stuck` (failed). An unreachable node or an
 unreadable check keeps the hold.
 
+When only that grace keeps a reviewer holder (the pane is present, its status is
+closable and its hk job is `claimed` or `spawned`), the `job_already_claimed` 409
+also carries `retry_after_s`, an integer of at least 1: the seconds until the
+spawn's deadline plus the grace. The response sets the same value in an HTTP
+`Retry-After` header, and the CLI appends ` retry_after_s=<n>` after the
+`(held by ...)` part of its exit 74 message. Every other hold has neither,
+because nothing time-based will free it.
+
 A prior operation in `succeeded` whose hk job is still `claimed` or `spawned`
 (a job revoked and reaped by an older binary, or one that ended without writing
 its record, hk 3204) is checked the same way: only a complete pane list that

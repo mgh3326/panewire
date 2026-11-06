@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -113,11 +114,12 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	}
 	task, _, err := h.inbox.store.claimSpawn(r.Context(), request, spawn.Job, owner, h.now().UTC())
 	held := map[string]string{"error": "job_already_claimed", "fix": "inspect the existing operation; do not submit a new request while ownership is live"}
+	retryAfterS := 0
 	if errors.Is(err, errSpawnClaimed) && spawn.ParentJob == "" {
-		task, held, err = h.reclaimSpawnRole(r.Context(), app, request, spawn, owner)
+		task, held, retryAfterS, err = h.reclaimSpawnRole(r.Context(), app, request, spawn, owner)
 	}
 	if errors.Is(err, errSpawnClaimed) {
-		writeJSON(w, 409, held)
+		writeSpawnHeld(w, held, retryAfterS)
 		return
 	}
 	if err != nil {
@@ -131,6 +133,25 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	default:
 	}
 }
+
+// writeSpawnHeld answers a held reservation with 409. retryAfterS above zero
+// means the hold frees on its own after that many seconds: the body carries it
+// as retry_after_s and the Retry-After header repeats it. Every other hold has
+// neither, because nothing time-based will free it.
+func writeSpawnHeld(w http.ResponseWriter, held map[string]string, retryAfterS int) {
+	if retryAfterS < 1 {
+		writeJSON(w, 409, held)
+		return
+	}
+	body := make(map[string]any, len(held)+1)
+	for key, value := range held {
+		body[key] = value
+	}
+	body["retry_after_s"] = retryAfterS
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterS))
+	writeJSON(w, 409, body)
+}
+
 func (h *HubServer) acceptSpawnResponse(w http.ResponseWriter, task hubSpawnTask) {
 	writeJSON(w, 202, map[string]string{"job_id": task.Job, "request_id": task.Request.RequestID, "status": task.Status, "operation_url": "/v1/spawns/" + task.Request.RequestID, "claim": "durable_hub_reservation"})
 }
