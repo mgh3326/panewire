@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-// The comparison harness is the operator's way to put panewire and gh side by
-// side (docs/pr-status.md); this runs it against fakes of both.
+// The comparison harness is the operator's way to put panewire, hk and gh side
+// by side (docs/pr-status.md); this runs it against fakes of all three.
 func TestPRStatusCompareScript(t *testing.T) {
 	for _, tool := range []string{"bash", "jq", "python3"} {
 		if _, err := exec.LookPath(tool); err != nil {
@@ -28,7 +28,7 @@ func TestPRStatusCompareScript(t *testing.T) {
 		}
 		return path
 	}
-	statusJSON := `{"source":"panewire","mergewake":{"state":"blocked","checks":[{"name":"a","state":"green"},{"name":"b","state":"red"}]}}`
+	statusJSON := `{"source":"panewire","mergewake":null,"snapshot":{"source":"hk","state":"blocked","checks":[{"name":"a","state":"green"},{"name":"b","state":"red"}]}}`
 	findingsJSON := `{"source":"panewire","findings":[{"id":"1"},{"id":"2"}],"findings_omitted":1}`
 	fallbackJSON := `{"source":"gh","mergewake":null}`
 	panewire := write("panewire", `
@@ -37,6 +37,16 @@ case "$2:$3" in
   status:owner/name) case "$4" in 7) echo '`+statusJSON+`' ;; *) echo '`+fallbackJSON+`' ;; esac ;;
   findings:owner/name) echo '`+findingsJSON+`' ;;
 esac
+`)
+	hkJSON := `{"change":{"state":"open"},"checks":[
+	  {"name":"a","state":"completed","conclusion":"success","required":true},
+	  {"name":"b","state":"completed","conclusion":"failure","required":true},
+	  {"name":"c","state":"completed","conclusion":"failure","required":false},
+	  {"name":"d","state":"in_progress","required":true,"gone":true}],
+	 "threads":[{"resolved":false},{"resolved":false},{"resolved":false},{"resolved":true}]}`
+	hk := write("handoffkeep", `
+[ "$1 $2 $3 $4 $5" = "changes show --repo owner/name --pr" ] || exit 2
+case "$6" in 7) echo '`+hkJSON+`' ;; *) exit 1 ;; esac
 `)
 	gh := write("gh", `
 bump() { n=$(cat '`+counter+`'); echo $((n + 1)) > '`+counter+`'; }
@@ -52,9 +62,10 @@ esac
 	if err != nil {
 		t.Fatal(err)
 	}
+	hkBin := hk
 	run := func(args ...string) (string, error) {
 		cmd := exec.Command("bash", append([]string{script}, args...)...)
-		cmd.Env = append(os.Environ(), "PANEWIRE_BIN="+panewire, "GH_BIN="+gh)
+		cmd.Env = append(os.Environ(), "PANEWIRE_BIN="+panewire, "GH_BIN="+gh, "HK_BIN="+hkBin)
 		out, err := cmd.CombinedOutput()
 		return string(out), err
 	}
@@ -70,13 +81,30 @@ esac
 	// pr, states, checks, findings (2 listed + 1 omitted = 3 threads), then the
 	// three gh requests the harness counted itself.
 	want := []string{"7", "blocked", "OPEN", "yes", "green:1,red:1", "green:1,red:1", "yes", "3", "3", "yes"}
-	if len(cells) != 14 || strings.Join(cells[:10], "|") != strings.Join(want, "|") || cells[12] != "3" || cells[13] != "panewire" {
+	if len(cells) != 22 || strings.Join(cells[:10], "|") != strings.Join(want, "|") || cells[12] != "3" || cells[13] != "panewire" || cells[14] != "hk" {
 		t.Fatalf("row %q", rows[1])
 	}
+	// The hk columns read hk directly: the checks of the current head that are not
+	// known to be optional (the not-required and the gone ones are left out) and the
+	// unresolved threads.
+	wantHK := []string{"OPEN", "yes", "green:1,red:1", "yes", "3", "yes"}
+	if got := strings.Join(cells[15:21], "|"); got != strings.Join(wantHK, "|") || cells[21] == "-" {
+		t.Fatalf("hk cells %q in %q", got, rows[1])
+	}
 	fallback := strings.Split(rows[2], "\t")
-	if fallback[0] != "8" || fallback[1] != "-" || fallback[3] != "n/a" || fallback[6] != "n/a" || fallback[9] != "n/a" || fallback[13] != "gh" {
+	if fallback[0] != "8" || fallback[1] != "-" || fallback[3] != "n/a" || fallback[6] != "n/a" || fallback[9] != "n/a" || fallback[13] != "gh" || fallback[14] != "-" {
 		t.Fatalf("fallback row %q", rows[2])
 	}
+	// hk answering an error, or no handoffkeep CLI at all, leaves its columns "-".
+	if strings.Join(fallback[15:], "|") != "-|n/a|-|n/a|-|n/a|-" {
+		t.Fatalf("hk error cells %q", rows[2])
+	}
+	hkBin = filepath.Join(dir, "absent")
+	out, err = run("owner/name", "7")
+	if cells = strings.Split(strings.Split(strings.TrimSuffix(out, "\n"), "\n")[1], "\t"); err != nil || strings.Join(cells[15:], "|") != "-|n/a|-|n/a|-|n/a|-" {
+		t.Fatalf("without handoffkeep: %v %q", err, out)
+	}
+	hkBin = hk
 	for _, args := range [][]string{{}, {"owner/name"}, {"noslash", "1"}, {"owner/name", "x"}} {
 		if out, err := run(args...); err == nil {
 			t.Errorf("args %v accepted: %s", args, out)

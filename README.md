@@ -145,8 +145,8 @@ uses its own scoped token instead of the operator's; see
 such a service; `panewire node pane-read` and `panewire node job-done` call them.
 
 `panewire pr status` and `panewire pr findings` read a PR's gate state and open
-review findings from mergewake's last decision and handoffkeep's change record
-through the `pr.status` node op, so a worker needs no GitHub request or token
+review findings from handoffkeep's change record (mergewake's last decision when
+hk has none it can trust, or with `--fresh`) through the `pr.status` node op, so a worker needs no GitHub request or token
 for them; see [docs/pr-status.md](docs/pr-status.md).
 
 The hub also keeps the latest fleet state, meaning per-account quota, per-host

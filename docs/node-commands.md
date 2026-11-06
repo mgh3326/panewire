@@ -269,15 +269,20 @@ and writes nothing. It reads two sources and answers each with its own closed
 outcome, so a source that is down never fails the op; see
 [pr-status.md](pr-status.md) for the CLI.
 
+With `fresh: false` the node reads hk first. When hk's record has every section
+fresh enough (`hk.outcome: "ok"` with a `snapshot`), the node answers from it alone
+and never runs mergewake (`mergewake.outcome: "not_asked"`); otherwise it runs
+mergewake too. With `fresh: true` it runs mergewake first, then reads hk.
+
 The hub admits `pr.status` for exactly one machine, the one named by its
 `--pr-status-host` flag (default `oci`); any other machine answers
 `400 {"error":"wrong_machine"}` before a node sees the request, whatever the
 caller's scope.
 
-The node runs `mergewake pr-status --repo <repo> --pr <pr> --json [--fresh]`
-with a closed environment, at most 12 seconds and 64 KiB of output, and reads
-`GET /v1/changes?pr=https://github.com/<repo>/pull/<pr>` from the handoffkeep
-named by its `spawn.json` `handoffkeep_env`, at most 5 seconds and 4 KiB.
+The node reads `GET /v1/changes/one?repo=<repo>&pr=<pr>` from the handoffkeep
+named by its `spawn.json` `handoffkeep_env`, at most 5 seconds and 256 KiB, and
+runs `mergewake pr-status --repo <repo> --pr <pr> --json [--fresh]` with a closed
+environment, at most 12 seconds and 64 KiB of output, when it needs it.
 
 ```json
 {"mergewake":{"outcome":"ok","snapshot":{"repo":"owner/name","pr":152,"head":"…","gate_head":"…","state":"blocked","reasons":["threads_open:1"],"checks":[{"name":"test","state":"green"}],"review":{"passes":[{"pass":1,"lens":"correctness","family":"openai"}],"done":true},"threads":{"blocking":1,"other":1,"unresolved":2},"findings":[{"id":"PRRT_…","location":"path:42","severity":"high","blocking":true,"summary":"…","url":"…","author_replied":false}],"base_fresh":true,"observed_at":"2026-11-06T00:12:06Z","fresh":null,"fresh_at":null,"source":"last_pass"}},
@@ -288,12 +293,14 @@ named by its `spawn.json` `handoffkeep_env`, at most 5 seconds and 4 KiB.
 | --- | --- | --- |
 | `mergewake` | `ok` | `snapshot` is set. |
 | | `not_found` | mergewake has no snapshot for this PR. |
+| | `not_asked` | hk answered a read without `fresh`, so mergewake was not run. Only with `hk.outcome: "ok"` and a `hk.snapshot`. |
 | | `failed` / `unavailable` | No snapshot. `reason` is one of `not_installed`, `timeout`, `exit_status`, `unreadable_output`, `output_too_large`; mergewake's own error text is never forwarded. |
-| `hk` | `ok` | `change` is hk's JSON object, passed through unread (at most 4 KiB). |
-| | `not_found` | hk holds no record: it answered 404 (as a handoffkeep without `/v1/changes` does), or 200 with an empty `changes` list. |
+| `hk` | `ok` | Every section the snapshot needs is fresh. `change` is a bounded projection of hk's record (`change`, `gate`, `freshness`; at most 4 KiB, no thread excerpts). `snapshot` is the record in mergewake's snapshot shape with `source: "hk"` and a per-section `sections` map of `observed_at` and `source`; the node leaves it out when mergewake's own snapshot answers the same call. `unposted_findings` counts open hk findings that have no review thread. |
+| | `stale` | hk holds a record that cannot be trusted. `stale` lists each section with `section`, `observed_at`, `source`, `problem` (`missing` or `older_than_bound`) and `bound_seconds`. No `snapshot`. |
+| | `not_found` | hk answered 404: it has never seen the PR, or it predates `/v1/changes/one`. |
 | | `unconfigured` | The node has no usable `handoffkeep_env`. |
-| | `too_large` | The record exceeds 4 KiB; it is not truncated. |
-| | `failed` | `reason` is `http_status`, `request_failed` or `unreadable_body`. |
+| | `too_large` | The response exceeds 256 KiB; it is not truncated. |
+| | `failed` | `reason` is `http_status`, `request_failed` or `unreadable_body` (which includes a record about another PR). |
 
 mergewake's JSON is read leniently, so a field it adds later is dropped rather
 than failing the op, and the node bounds every list and string (50 checks, 20

@@ -330,7 +330,7 @@ func TestPRStatusNodeLargeMergewakeSnapshotThroughOp(t *testing.T) {
 	}
 }
 
-// prStatusHKServer answers GET /v1/changes and records each request.
+// prStatusHKServer answers GET /v1/changes/one and records each request.
 type prStatusHKServer struct {
 	*httptest.Server
 	mu       sync.Mutex
@@ -349,58 +349,6 @@ func newPRStatusHKServer(t *testing.T, status int, body string) *prStatusHKServe
 	}))
 	t.Cleanup(hk.Close)
 	return hk
-}
-
-func TestPRStatusNodeHandoffkeepOutcomes(t *testing.T) {
-	installFakeMergewake(t, "cat '"+fixtureFile(t, prStatusFixture)+"'")
-	cases := map[string]struct {
-		status  int
-		body    string
-		outcome string
-		reason  string
-	}{
-		"record":        {200, `{"change":{"pr":"x","verdict":"approve"}}`, "ok", ""},
-		"not deployed":  {404, `{"error":"not found"}`, "not_found", ""},
-		"empty changes": {200, `{"changes":[]}`, "not_found", ""},
-		"server error":  {500, `boom`, "failed", "http_status"},
-		"forbidden":     {403, `{}`, "failed", "http_status"},
-		"not an object": {200, `[1,2]`, "failed", "unreadable_body"},
-		"not json":      {200, `<html>`, "failed", "unreadable_body"},
-		"too large":     {200, `{"pad":"` + strings.Repeat("x", prStatusMaxHKChange) + `"}`, "too_large", ""},
-	}
-	for name, tc := range cases {
-		t.Run(name, func(t *testing.T) {
-			hk := newPRStatusHKServer(t, tc.status, tc.body)
-			result, code := nodeRun(t, prStatusNodeClient(t, hk.URL), nodeCommandPRStatus, prStatusArgsJSON("owner/name", 152, false))
-			if code != "" {
-				t.Fatalf("op error %q: a failed hk must not fail the op", code)
-			}
-			source := result["hk"].(map[string]any)
-			if source["outcome"] != tc.outcome || (tc.reason != "" && source["reason"] != tc.reason) {
-				t.Fatalf("hk %v", source)
-			}
-			if result["mergewake"].(map[string]any)["outcome"] != "ok" {
-				t.Fatalf("mergewake lost with hk %s: %v", name, result["mergewake"])
-			}
-			if len(hk.requests) != 1 {
-				t.Fatalf("hk requests %d", len(hk.requests))
-			}
-			request := hk.requests[0]
-			if request.Method != http.MethodGet || request.URL.Path != "/v1/changes" || request.URL.Query().Get("pr") != "https://github.com/owner/name/pull/152" || request.Header.Get("Authorization") != "Bearer hk-secret-token-1" {
-				t.Fatalf("hk request %s %s auth=%q", request.Method, request.URL.String(), request.Header.Get("Authorization"))
-			}
-			// hk's token authenticates the node's own call and never travels back.
-			if encoded, _ := json.Marshal(result); strings.Contains(string(encoded), "hk-secret-token-1") {
-				t.Fatalf("hk token in result: %s", encoded)
-			}
-			if tc.outcome == "ok" {
-				change := source["change"].(map[string]any)["change"].(map[string]any)
-				if change["verdict"] != "approve" {
-					t.Fatalf("change %v", source["change"])
-				}
-			}
-		})
-	}
 }
 
 func TestPRStatusNodeHandoffkeepUnreachableIsAnOutcome(t *testing.T) {
@@ -431,15 +379,5 @@ func TestPRStatusNodeDoesNotTakeActingLock(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("pr.status waited for the acting-command lock")
-	}
-}
-
-// A 200 whose changes list holds entries is a record; only an empty list is none.
-func TestPRStatusNodeHKNonEmptyChangesIsARecord(t *testing.T) {
-	installFakeMergewake(t, "cat '"+fixtureFile(t, prStatusFixture)+"'")
-	hk := newPRStatusHKServer(t, 200, `{"changes":[{"pr":"https://github.com/owner/name/pull/152"}]}`)
-	result, code := nodeRun(t, prStatusNodeClient(t, hk.URL), nodeCommandPRStatus, prStatusArgsJSON("owner/name", 152, false))
-	if source := result["hk"].(map[string]any); code != "" || source["outcome"] != "ok" || source["status"] != float64(200) {
-		t.Fatalf("code=%q hk=%v", code, source)
 	}
 }

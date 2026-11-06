@@ -1,0 +1,20 @@
+{
+  "repo": "mgh3326/panewire",
+  "pr": 269,
+  "head": "7ce60957ab4f4b77b5f25be4ba14d81d0414e6d9",
+  "gate_head": "7ce60957ab4f4b77b5f25be4ba14d81d0414e6d9",
+  "state": "ready",
+  "reasons": [],
+  "checks": [{"name": "test (ubuntu-latest)", "state": "green"}],
+  "review": {"passes": [{"pass": 1, "lens": "correctness"}, {"pass": 2, "lens": "state-risk"}], "done": true},
+  "threads": {"blocking": 0, "other": 1, "unresolved": 1},
+  "findings": [
+    {"id": "PRRT_kwDOUGxnCM60c7Qq", "location": ".github/workflows/ci.yml:30", "blocking": false,
+     "summary": "Minor · Stability & Availability · Low value", "url": "https://github.com/mgh3326/panewire/pull/269#discussion_r4491011144", "author_replied": false}
+  ],
+  "base_fresh": true,
+  "observed_at": "2026-11-06T18:43:55.983983+09:00",
+  "fresh": null,
+  "fresh_at": null,
+  "source": "last_pass"
+}

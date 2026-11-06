@@ -22,17 +22,22 @@ import (
 //
 //   - mergewake's last gate decision, read with `mergewake pr-status --json`
 //     (zero GitHub calls unless the caller asked for fresh), and
-//   - handoffkeep's change record, `GET /v1/changes?pr=<PR URL>`, read with
+//   - handoffkeep's change record, `GET /v1/changes/one?repo=&pr=`, read with
 //     this node's own spawn.json handoffkeep_env.
 //
-// Neither source needs a credential from the caller, and neither failure fails
-// the op: each source carries its own closed outcome so the CLI can say which
-// one was missing and fall back to gh only when both are.
+// A read without fresh asks handoffkeep first and answers from it alone when
+// every section it needs is fresh enough (pr_status_hk.go): no mergewake child
+// runs and nothing reaches GitHub. Otherwise, and for a fresh read, mergewake
+// answers too. Neither source needs a credential from the caller, and neither
+// failure fails the op: each source carries its own closed outcome so the CLI
+// can say which one was missing and fall back to gh only when both are.
 const (
 	nodeCommandPRStatus = "pr.status"
 
 	// Source outcomes. They are the only words a caller reads from a source.
 	prStatusOK           = "ok"
+	prStatusNotAsked     = "not_asked"
+	prStatusStale        = "stale"
 	prStatusNotFound     = "not_found"
 	prStatusFailed       = "failed"
 	prStatusUnavailable  = "unavailable"
@@ -57,7 +62,10 @@ const (
 	prStatusMaxMergewakeOutput = 64 << 10
 	prStatusMaxStderr          = 2 << 10
 	prStatusMaxHKChange        = 4 << 10
-	prStatusMaxFresh           = 2 << 10
+	// prStatusMaxHKBody bounds what the node reads from handoffkeep. The record
+	// it passes on is the much smaller projection under prStatusMaxHKChange.
+	prStatusMaxHKBody = 256 << 10
+	prStatusMaxFresh  = 2 << 10
 	// prStatusResultBudget leaves the reply envelope room under
 	// nodeCommandMaxResultBytes; findings are dropped from the tail to fit.
 	prStatusResultBudget = nodeCommandMaxResultBytes - 2<<10
@@ -65,6 +73,7 @@ const (
 	prStatusMaxReasons  = 20
 	prStatusMaxChecks   = 50
 	prStatusMaxPasses   = 10
+	prStatusMaxSections = 8
 	prStatusMaxFindings = 50
 	prStatusMaxShort    = 100
 	prStatusMaxID       = 128
@@ -137,6 +146,9 @@ type PRStatusSnapshot struct {
 	FreshAt    *string           `json:"fresh_at"`
 	FreshError string            `json:"fresh_error,omitempty"`
 	Source     string            `json:"source"`
+	// Sections is each hk section's observed_at and source, set only on a
+	// snapshot built from handoffkeep.
+	Sections map[string]PRStatusSection `json:"sections,omitempty"`
 	// FindingsOmitted counts findings the node dropped to fit the reply cap;
 	// it is panewire's field, never mergewake's.
 	FindingsOmitted int `json:"findings_omitted,omitempty"`
@@ -176,20 +188,29 @@ type PRStatusFinding struct {
 }
 
 // nodePRStatusMergewake is the mergewake half of the answer. Snapshot is set
-// only when Outcome is ok; Reason names why it is not otherwise.
+// only when Outcome is ok; Reason names why it is not otherwise. not_asked means
+// handoffkeep answered a read without fresh and mergewake was never run.
 type nodePRStatusMergewake struct {
 	Outcome  string            `json:"outcome"`
 	Reason   string            `json:"reason,omitempty"`
 	Snapshot *PRStatusSnapshot `json:"snapshot,omitempty"`
 }
 
-// nodePRStatusHK is the handoffkeep half. Change is hk's own JSON object,
-// passed through unread because its shape is hk's contract, not panewire's.
+// nodePRStatusHK is the handoffkeep half. Change is the bounded projection of
+// hk's record (prStatusHKRecord). Snapshot is that record in mergewake's snapshot
+// shape: set when ok, unless mergewake's own snapshot answers the same call.
+// stale means hk holds a record but not a trustworthy one, and Stale says which
+// sections and why.
 type nodePRStatusHK struct {
-	Outcome string          `json:"outcome"`
-	Reason  string          `json:"reason,omitempty"`
-	Status  int             `json:"status,omitempty"`
-	Change  json.RawMessage `json:"change,omitempty"`
+	Outcome  string            `json:"outcome"`
+	Reason   string            `json:"reason,omitempty"`
+	Status   int               `json:"status,omitempty"`
+	Change   json.RawMessage   `json:"change,omitempty"`
+	Snapshot *PRStatusSnapshot `json:"snapshot,omitempty"`
+	Stale    []PRStatusStale   `json:"stale,omitempty"`
+	// Unposted counts open findings hk holds that have no review thread yet;
+	// the snapshot lists threads only.
+	Unposted int `json:"unposted_findings,omitempty"`
 }
 
 type nodePRStatusResult struct {
@@ -253,6 +274,15 @@ func boundPRStatusSnapshot(snapshot PRStatusSnapshot) PRStatusSnapshot {
 		})
 	}
 	snapshot.Findings = findings
+	if snapshot.Sections != nil {
+		sections := map[string]PRStatusSection{}
+		for name, section := range snapshot.Sections {
+			if len(sections) < prStatusMaxSections {
+				sections[utf8PrefixWithin(name, prStatusMaxShort)] = PRStatusSection{ObservedAt: utf8PrefixWithin(section.ObservedAt, prStatusMaxShort), Source: utf8PrefixWithin(section.Source, prStatusMaxShort)}
+			}
+		}
+		snapshot.Sections = sections
+	}
 	if snapshot.FreshAt != nil {
 		bounded := utf8PrefixWithin(*snapshot.FreshAt, prStatusMaxShort)
 		snapshot.FreshAt = &bounded
@@ -278,6 +308,9 @@ func jsonObjectOrNull(raw json.RawMessage) bool {
 func fitPRStatusResult(result nodePRStatusResult) nodePRStatusResult {
 	snapshot := result.Mergewake.Snapshot
 	if snapshot == nil {
+		snapshot = result.HK.Snapshot
+	}
+	if snapshot == nil {
 		return result
 	}
 	for {
@@ -291,7 +324,7 @@ func fitPRStatusResult(result nodePRStatusResult) nodePRStatusResult {
 }
 
 func validPRStatusSnapshot(snapshot PRStatusSnapshot) bool {
-	if !validPRStatusRepo(snapshot.Repo) || snapshot.PR < 1 || snapshot.PR > prStatusMaxPR || snapshot.State == "" || snapshot.Reasons == nil || snapshot.Checks == nil || snapshot.Review.Passes == nil || snapshot.Findings == nil || snapshot.FindingsOmitted < 0 {
+	if !validPRStatusRepo(snapshot.Repo) || snapshot.PR < 1 || snapshot.PR > prStatusMaxPR || snapshot.State == "" || snapshot.Reasons == nil || snapshot.Checks == nil || snapshot.Review.Passes == nil || snapshot.Findings == nil || snapshot.FindingsOmitted < 0 || len(snapshot.Sections) > prStatusMaxSections {
 		return false
 	}
 	if _, err := time.Parse(time.RFC3339, snapshot.ObservedAt); err != nil {
@@ -314,6 +347,11 @@ func validNodePRStatusResult(result nodePRStatusResult) bool {
 		if merge.Snapshot != nil || merge.Reason != "" {
 			return false
 		}
+	case prStatusNotAsked:
+		// Only an hk snapshot can stand in for a mergewake one that was not asked.
+		if merge.Snapshot != nil || merge.Reason != "" || result.HK.Outcome != prStatusOK || result.HK.Snapshot == nil {
+			return false
+		}
 	case prStatusFailed, prStatusUnavailable:
 		if merge.Snapshot != nil {
 			return false
@@ -327,11 +365,14 @@ func validNodePRStatusResult(result nodePRStatusResult) bool {
 		return false
 	}
 	hk := result.HK
+	if hk.Unposted < 0 || (hk.Outcome != prStatusOK && (hk.Snapshot != nil || hk.Unposted != 0)) || (hk.Outcome != prStatusStale && hk.Stale != nil) {
+		return false
+	}
 	switch hk.Outcome {
 	case prStatusOK:
-		trimmed := bytes.TrimSpace(hk.Change)
-		var object map[string]json.RawMessage
-		return hk.Reason == "" && hk.Status == http.StatusOK && len(trimmed) > 0 && len(trimmed) <= prStatusMaxHKChange && json.Unmarshal(trimmed, &object) == nil && object != nil
+		return hk.Reason == "" && hk.Status == http.StatusOK && validHKChange(hk.Change) && (hk.Snapshot == nil || validPRStatusSnapshot(*hk.Snapshot))
+	case prStatusStale:
+		return hk.Reason == "" && hk.Status == http.StatusOK && validHKChange(hk.Change) && len(hk.Stale) > 0 && len(hk.Stale) <= prStatusMaxStale && validPRStatusStale(hk.Stale)
 	case prStatusNotFound:
 		return hk.Reason == "" && (hk.Status == http.StatusNotFound || hk.Status == http.StatusOK) && hk.Change == nil
 	case prStatusUnconfigured, prStatusTooLarge:
@@ -340,6 +381,21 @@ func validNodePRStatusResult(result nodePRStatusResult) bool {
 		return hk.Change == nil && (hk.Reason == prStatusReasonHTTPStatus || hk.Reason == prStatusReasonRequest || hk.Reason == prStatusReasonBadBody)
 	}
 	return false
+}
+
+func validHKChange(change json.RawMessage) bool {
+	trimmed := bytes.TrimSpace(change)
+	var object map[string]json.RawMessage
+	return len(trimmed) > 0 && len(trimmed) <= prStatusMaxHKChange && json.Unmarshal(trimmed, &object) == nil && object != nil
+}
+
+func validPRStatusStale(stale []PRStatusStale) bool {
+	for _, section := range stale {
+		if section.Section == "" || (section.Problem != prStatusSectionMissing && section.Problem != prStatusSectionStale) || section.BoundSeconds < 0 {
+			return false
+		}
+	}
+	return true
 }
 
 // prStatusLimitedBuffer keeps at most max bytes and remembers it dropped more,
@@ -419,9 +475,10 @@ func readNodePRStatusMergewake(ctx context.Context, args nodePRStatusArgs) nodeP
 var prStatusHKTransport http.RoundTripper
 
 // readNodePRStatusHK asks handoffkeep for the PR's change record with this
-// node's own credential from spawn.json handoffkeep_env. A 404 is expected
-// while a handoffkeep that predates /v1/changes is deployed, and is its own
-// outcome so the CLI can say so.
+// node's own credential from spawn.json handoffkeep_env. A 404 means hk has
+// never seen the PR (or predates /v1/changes/one) and is its own outcome so the
+// CLI can say so. A record with a section that is missing or older than its
+// bound is stale: it is reported, never rendered.
 func (client *HubClient) readNodePRStatusHK(ctx context.Context, args nodePRStatusArgs) nodePRStatusHK {
 	config, err := loadHubSpawnConfig(client.spawnConfigPath)
 	if err != nil || config.HandoffkeepEnv == "" {
@@ -435,9 +492,10 @@ func (client *HubClient) readNodePRStatusHK(ctx context.Context, args nodePRStat
 	if err != nil {
 		return nodePRStatusHK{Outcome: prStatusUnconfigured}
 	}
-	base.Path, base.RawPath, base.Fragment, base.RawFragment, base.ForceQuery = base.Path+"/v1/changes", "", "", "", false
+	base.Path, base.RawPath, base.Fragment, base.RawFragment, base.ForceQuery = base.Path+"/v1/changes/one", "", "", "", false
 	query := url.Values{}
-	query.Set("pr", "https://github.com/"+args.Repo+"/pull/"+strconv.Itoa(args.PR))
+	query.Set("repo", args.Repo)
+	query.Set("pr", strconv.Itoa(args.PR))
 	base.RawQuery = query.Encode()
 	runContext, cancel := context.WithTimeout(ctx, prStatusHKTimeout)
 	defer cancel()
@@ -460,36 +518,52 @@ func (client *HubClient) readNodePRStatusHK(ctx context.Context, args nodePRStat
 	default:
 		return nodePRStatusHK{Outcome: prStatusFailed, Reason: prStatusReasonHTTPStatus}
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, prStatusMaxHKChange+1))
+	body, err := io.ReadAll(io.LimitReader(response.Body, prStatusMaxHKBody+1))
 	if err != nil {
 		return nodePRStatusHK{Outcome: prStatusFailed, Reason: prStatusReasonBadBody}
 	}
-	if len(body) > prStatusMaxHKChange {
+	if len(body) > prStatusMaxHKBody {
 		return nodePRStatusHK{Outcome: prStatusTooLarge}
 	}
-	var object map[string]json.RawMessage
-	if json.Unmarshal(body, &object) != nil || object == nil {
+	var one hkChangeOne
+	if json.Unmarshal(body, &one) != nil || !prStatusHKReadable(one, args) {
 		return nodePRStatusHK{Outcome: prStatusFailed, Reason: prStatusReasonBadBody}
 	}
-	// A list endpoint that answers 200 with no change for this PR holds no record.
-	var changes []json.RawMessage
-	if raw, listed := object["changes"]; listed && json.Unmarshal(raw, &changes) == nil && changes != nil && len(changes) == 0 {
-		return nodePRStatusHK{Outcome: prStatusNotFound, Status: http.StatusOK}
-	}
-	compact := &bytes.Buffer{}
-	if json.Compact(compact, body) != nil {
+	record, err := json.Marshal(prStatusHKRecordOf(one))
+	if err != nil || len(record) > prStatusMaxHKChange {
 		return nodePRStatusHK{Outcome: prStatusFailed, Reason: prStatusReasonBadBody}
 	}
-	return nodePRStatusHK{Outcome: prStatusOK, Status: http.StatusOK, Change: compact.Bytes()}
+	if stale := prStatusHKStaleSections(one, client.nowUTC()); len(stale) > 0 {
+		return nodePRStatusHK{Outcome: prStatusStale, Status: http.StatusOK, Change: record, Stale: stale}
+	}
+	snapshot, unposted := prStatusSnapshotFromHK(one)
+	if !validPRStatusSnapshot(snapshot) {
+		return nodePRStatusHK{Outcome: prStatusFailed, Reason: prStatusReasonBadBody}
+	}
+	return nodePRStatusHK{Outcome: prStatusOK, Status: http.StatusOK, Change: record, Snapshot: &snapshot, Unposted: unposted}
 }
 
 // nodePRStatus is read-only: it neither takes the node's acting-command lock
-// nor writes anything. Both sources are read on every call; a failed source is
-// reported in its own outcome, never as an op error.
+// nor writes anything. A failed source is reported in its own outcome, never as
+// an op error. Without fresh, hk is read first and a trustworthy record answers
+// alone; with fresh, mergewake runs first so that what it writes through to hk
+// is what hk is read for afterwards.
 func (client *HubClient) nodePRStatus(ctx context.Context, args nodePRStatusArgs) (any, string) {
-	result := nodePRStatusResult{
-		Mergewake: readNodePRStatusMergewake(ctx, args),
-		HK:        client.readNodePRStatusHK(ctx, args),
+	var result nodePRStatusResult
+	if args.Fresh {
+		result.Mergewake = readNodePRStatusMergewake(ctx, args)
+		result.HK = client.readNodePRStatusHK(ctx, args)
+		if result.Mergewake.Outcome == prStatusOK {
+			// The mergewake snapshot is the one rendered; hk's would only double the reply.
+			result.HK.Snapshot = nil
+		}
+		return fitPRStatusResult(result), ""
+	}
+	result.HK = client.readNodePRStatusHK(ctx, args)
+	if result.HK.Outcome == prStatusOK {
+		result.Mergewake = nodePRStatusMergewake{Outcome: prStatusNotAsked}
+	} else {
+		result.Mergewake = readNodePRStatusMergewake(ctx, args)
 	}
 	return fitPRStatusResult(result), ""
 }
