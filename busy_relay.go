@@ -687,35 +687,40 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 	if store == nil {
 		return
 	}
+	// The store snapshot and the removal of the directives from the in-memory
+	// set happen under one lock, and only the delivered rows are removed from
+	// the current set: a row an offer holds meanwhile stays held and is armed.
 	manager.mu.Lock()
 	items, err := store.RelayHeldForPane(parent, pane)
-	manager.mu.Unlock()
 	if err != nil {
-		return
-	}
-	var others bool
-	for _, item := range items {
-		others = others || item.DeliverPolicy != relayDeliverDirective
-	}
-	if !others || expired {
-		manager.release(parent, pane, expired)
+		manager.mu.Unlock()
 		return
 	}
 	var directives []relayHeld
+	delivering := map[int64]bool{}
+	others := false
 	for _, item := range items {
 		if item.DeliverPolicy == relayDeliverDirective {
 			directives = append(directives, item)
+			delivering[item.EventID] = true
+		} else {
+			others = true
 		}
+	}
+	if !others || expired {
+		manager.mu.Unlock()
+		manager.release(parent, pane, expired)
+		return
 	}
 	if len(directives) == 0 {
 		// An unexpected working wake with no directive: keep everything held.
+		manager.mu.Unlock()
 		manager.arm(parent, pane)
 		return
 	}
-	manager.mu.Lock()
 	var remaining []relayHeld
-	for _, item := range items {
-		if item.DeliverPolicy != relayDeliverDirective {
+	for _, item := range manager.held[pane] {
+		if !delivering[item.EventID] {
 			remaining = append(remaining, item)
 		}
 	}

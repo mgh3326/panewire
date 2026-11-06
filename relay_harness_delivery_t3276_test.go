@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -774,5 +775,38 @@ func TestWorkingWakeLeavesIdleRowHeld_t3276(t *testing.T) {
 	rows, err := rig.node.relayStore().RelayHeldForPane(t.Context(), "w1:pW")
 	if err != nil || len(rows) != 1 || rows[0].EventID != report.EventID {
 		t.Fatalf("held rows=%+v err=%v, want the report still held", rows, err)
+	}
+}
+
+// A row an offer holds while a working wake is releasing the directives must
+// stay in the in-memory held set, or it is stranded until its deadline: the
+// wake removes only the rows it delivers, not everything it saw in the store.
+func TestWorkingWakeKeepsRowHeldMeanwhile_t3276(t *testing.T) {
+	rig := t3276Start(t)
+	directive := rig.send("ev-race-directive", "findings", "[mergewake] findings for the worker")
+	report := rig.send("ev-race-report", "report", "[worker] progress")
+	sc := t3276Harnesses()["codex-working"]
+	sc.preStatus, sc.postStatus = "blocked", "working"
+	t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+	manager := rig.node.relayBusyManager()
+	manager.offer(t.Context(), t3276Message(report))
+	manager.offer(t.Context(), t3276Message(directive))
+
+	// An offer persisted and registered this row after the wake's snapshot.
+	late := relayHeld{Pane: "w1:pW", Lane: t3276Worker, EventID: 9999, JobID: "late", Text: "late", DeliverPolicy: relayDeliverDirective, HeldSince: time.Now()}
+	manager.mu.Lock()
+	manager.held["w1:pW"] = append(manager.held["w1:pW"], late)
+	manager.mu.Unlock()
+
+	manager.releaseWorking(t.Context(), "w1:pW", false)
+
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	var ids []int64
+	for _, item := range manager.held["w1:pW"] {
+		ids = append(ids, item.EventID)
+	}
+	if !slices.Contains(ids, int64(9999)) || !slices.Contains(ids, report.EventID) || slices.Contains(ids, directive.EventID) {
+		t.Fatalf("held set after the wake = %v, want the late row and the report kept and the delivered directive gone", ids)
 	}
 }
