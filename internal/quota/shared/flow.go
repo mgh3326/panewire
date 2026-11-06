@@ -41,6 +41,8 @@ type Reading struct {
 	ConfirmedAt *time.Time
 	Plan        string
 	Buckets     []Bucket
+	// Free is the free-tier state of a pool that has one (Flow.LocalFree set).
+	Free *FreeBucket
 }
 
 // Measurer takes one fresh measurement. A failure must be a *quota.Error.
@@ -60,6 +62,21 @@ type Flow struct {
 	Wait time.Duration
 	// HostID is announced as the holder of an account. Empty: no presence.
 	HostID string
+	// MaxWait is the hard bound on the whole time this host spends waiting for
+	// another host's measurement — every poll pause and the last one — so a held
+	// lease never holds the caller longer; zero is two lease windows.
+	MaxWait time.Duration
+	// Wall and Sleep are the wall clock and the pause the wait runs on; nil are
+	// time.Now and a context-aware sleep. A fixture replaces both to prove the
+	// MaxWait bound without waiting for it.
+	Wall  func() time.Time
+	Sleep func(context.Context, time.Duration) error
+	// LocalFree makes the pool one with a free tier: it reports this host's
+	// own free-tier state at a time, which is merged into every publication.
+	// Such a reading needs a free bucket, may have no paid window, and a failed
+	// paid measurement still publishes the free state (pacelever's rule: the
+	// free tier does not depend on the paid probe).
+	LocalFree func(now time.Time) *FreeBucket
 	// PresenceEvery is the minimum gap between announcements of one account;
 	// zero is DefaultPresenceEvery.
 	PresenceEvery time.Duration
@@ -97,6 +114,27 @@ func (f *Flow) wait() time.Duration {
 	return defaultWait
 }
 
+func (f *Flow) maxWait() time.Duration {
+	if f.MaxWait > 0 {
+		return f.MaxWait
+	}
+	return 2 * time.Duration(f.leaseTTL()) * time.Second
+}
+
+func (f *Flow) wall() time.Time {
+	if f.Wall != nil {
+		return f.Wall()
+	}
+	return time.Now()
+}
+
+func (f *Flow) pause(ctx context.Context, d time.Duration) error {
+	if f.Sleep != nil {
+		return f.Sleep(ctx, d)
+	}
+	return sleep(ctx, d)
+}
+
 func (f *Flow) presenceEvery() time.Duration {
 	if f.PresenceEvery > 0 {
 		return f.PresenceEvery
@@ -114,9 +152,34 @@ func ValidAt(o *Observation) time.Time {
 }
 
 // current is o as a Reading when it is an automatic reading no older than ttl
-// whose every window is still running, else false.
+// whose every window is still running, else false. A pool with a free tier
+// also needs a well-formed free bucket and may have no paid window, and a
+// reading this host must still correct is not current.
+func (f *Flow) current(o *Observation, key string, now time.Time) (Reading, bool) {
+	ttl := f.freshTTL()
+	if f.LocalFree == nil {
+		return current(o, key, now, ttl)
+	}
+	free, ok := normalizeFree(o.freeBucket(), now)
+	if !ok || free == nil || freeNeedsPublish(free, f.LocalFree(now), now) {
+		return Reading{}, false
+	}
+	return currentWith(o, key, now, ttl, free, true)
+}
+
+func (o *Observation) freeBucket() *FreeBucket {
+	if o == nil {
+		return nil
+	}
+	return o.FreeBucket
+}
+
 func current(o *Observation, key string, now time.Time, ttl time.Duration) (Reading, bool) {
-	if o == nil || o.Kind != KindAuto || o.MeasuredAt.IsZero() || len(o.Buckets) == 0 {
+	return currentWith(o, key, now, ttl, nil, false)
+}
+
+func currentWith(o *Observation, key string, now time.Time, ttl time.Duration, free *FreeBucket, hasFree bool) (Reading, bool) {
+	if o == nil || o.Kind != KindAuto || o.MeasuredAt.IsZero() || len(o.Buckets) == 0 && !hasFree {
 		return Reading{}, false
 	}
 	age := now.Sub(ValidAt(o))
@@ -132,7 +195,7 @@ func current(o *Observation, key string, now time.Time, ttl time.Duration) (Read
 			return Reading{}, false
 		}
 	}
-	return Reading{Key: key, Source: quota.SourceHandoffkeep, MeasuredAt: o.MeasuredAt, ConfirmedAt: o.ConfirmedAt, Plan: o.Plan, Buckets: o.Buckets}, true
+	return Reading{Key: key, Source: quota.SourceHandoffkeep, MeasuredAt: o.MeasuredAt, ConfirmedAt: o.ConfirmedAt, Plan: o.Plan, Buckets: o.Buckets, Free: free}, true
 }
 
 // Refresh returns key's current reading, measuring only when the store has
@@ -145,12 +208,11 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 	if !accountKeyPattern.MatchString(key) {
 		return Reading{}, quota.Fail(quota.ErrKindAccountUnknown, "no account key")
 	}
-	ttl := f.freshTTL()
 	latest, err := c.Latest(ctx, key)
 	if err != nil {
 		return Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 	}
-	fresh := func() (Reading, bool) { return current(latest.Observation, key, f.now(), ttl) }
+	fresh := func() (Reading, bool) { return f.current(latest.Observation, key, f.now()) }
 	if reading, ok := fresh(); ok {
 		f.announce(ctx, c, key)
 		return reading, nil
@@ -160,8 +222,16 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 	// holder's lease expires, then takes over the expired slot once, so a
 	// failed or killed publication never strands the account on "pending".
 	holder := ""
-	publisherGone := false
-	for attempts := 0; attempts < 2 && holder == "" && !backingOff; attempts++ {
+	publisherGone, waitedOut := false, false
+	// Wall-clock pacing: the whole wait for another host's measurement, over
+	// both lease attempts, ends at waitDeadline. Every pause is cut to what
+	// is left of it, and once it has passed nothing more is slept, so the
+	// caller waits at most MaxWait (plus the store calls) however the server
+	// keeps reporting contention.
+	waitDeadline := f.wall().Add(f.maxWait())
+	// A free-tier pool measures through a paid-probe backoff: the free state
+	// is published without the probe.
+	for attempts := 0; attempts < 2 && holder == "" && (!backingOff || f.LocalFree != nil); attempts++ {
 		holder, err = newHolder()
 		if err != nil {
 			return Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
@@ -171,22 +241,19 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 			return Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 		}
 		publisherGone = false
-		waitedOut := false
-		// Wall-clock pacing: each wait ends at the holder's lease expiry and
-		// the whole wait is bounded by ctx and two lease windows, so the loop
-		// ends even if the server keeps reporting new contention.
-		deadline := time.Now().Add(2 * time.Duration(f.leaseTTL()) * time.Second)
 		for !lease.Acquired || lease.Holder != holder {
-			if !lease.ExpiresAt.After(time.Now()) {
+			if !lease.ExpiresAt.After(f.wall()) {
 				publisherGone = true
 				break
 			}
-			if time.Now().After(deadline) {
+			remaining := waitDeadline.Sub(f.wall())
+			if remaining <= 0 {
 				waitedOut = true
 				break
 			}
-			pause := min(f.wait(), time.Until(lease.ExpiresAt))
-			if sleep(ctx, pause) != nil {
+			// Each pause ends at the holder's lease expiry, at the next poll,
+			// or at the bound, whichever is first.
+			if f.pause(ctx, min(f.wait(), lease.ExpiresAt.Sub(f.wall()), remaining)) != nil {
 				return Reading{}, quota.Fail(quota.ErrKindSharedWait, "shared quota wait cancelled")
 			}
 			if latest, err = c.Latest(ctx, key); err != nil {
@@ -210,7 +277,9 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 		}
 	}
 	if holder == "" {
-		if sleep(ctx, f.wait()) != nil {
+		// One last poll interval, never past the bound: after waiting out the
+		// bound the host reads once more and gives up without sleeping.
+		if last := min(f.wait(), max(waitDeadline.Sub(f.wall()), 0)); last > 0 && f.pause(ctx, last) != nil {
 			return Reading{}, quota.Fail(quota.ErrKindSharedWait, "shared quota wait cancelled")
 		}
 		if latest, err = c.Latest(ctx, key); err != nil {
@@ -245,33 +314,40 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, time.Duration(f.leaseTTL())*time.Second-probeMargin)
 	defer cancel()
-	observed, err := measure(probeCtx)
-	if err != nil {
-		var failure *quota.Error
-		if e, ok := err.(*quota.Error); ok {
-			failure = e
-		} else {
-			failure = quota.Fail(quota.ErrKindProbeFailed, "measurement failed")
-		}
-		if failure.Kind == quota.ErrKindRateLimited {
-			wait := failure.RetryAfter
-			if wait <= 0 {
-				wait = defaultRateWait
+	var observed quota.Observation
+	if !backingOff || f.LocalFree == nil {
+		var measureErr error
+		if observed, measureErr = measure(probeCtx); measureErr != nil {
+			failure := asFailure(measureErr)
+			if failure.Kind == quota.ErrKindRateLimited {
+				wait := failure.RetryAfter
+				if wait <= 0 {
+					wait = defaultRateWait
+				}
+				f.setBackoff(key, f.now().Add(wait))
 			}
-			f.setBackoff(key, f.now().Add(wait))
+			if f.LocalFree == nil {
+				return Reading{}, failure
+			}
+			observed = quota.Observation{}
 		}
-		return Reading{}, failure
 	}
-	// The account measured must be the account the lease is for.
-	if observed.AccountFP == "" || pool+":"+observed.AccountFP != key {
-		return Reading{}, quota.Fail(quota.ErrKindAccountMismatch, "measured account differs from the shared account")
+	// The account measured must be the account the lease is for. A free-tier
+	// pool whose paid measurement produced nothing names no account.
+	if f.LocalFree == nil || len(observed.Buckets) > 0 {
+		if observed.AccountFP == "" || pool+":"+observed.AccountFP != key {
+			return Reading{}, quota.Fail(quota.ErrKindAccountMismatch, "measured account differs from the shared account")
+		}
 	}
 	at := f.now()
-	stored, convertErr := Convert(observed, at)
+	stored, convertErr := convert(observed, at, f.LocalFree != nil)
 	if convertErr != nil {
 		return Reading{}, convertErr
 	}
-	reading, ok := current(&stored, key, at, ttl)
+	if f.LocalFree != nil {
+		stored.FreeBucket = mergeFree(latest.Observation.freeBucket(), f.LocalFree(at), at)
+	}
+	reading, ok := f.current(&stored, key, at)
 	if !ok {
 		return Reading{}, quota.Fail(quota.ErrKindProbeFailed, "measurement failed")
 	}
@@ -284,6 +360,14 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 	released = true
 	f.announce(ctx, c, key)
 	return reading, nil
+}
+
+// asFailure is err as a *quota.Error; any other failure is probe_failed.
+func asFailure(err error) *quota.Error {
+	if e, ok := err.(*quota.Error); ok {
+		return e
+	}
+	return quota.Fail(quota.ErrKindProbeFailed, "measurement failed")
 }
 
 func (f *Flow) release(c Client, key, holder string) error {
@@ -362,6 +446,12 @@ func newHolder() (string, error) {
 // out; a value outside 0..100, an unparsable reset or no measured bucket at
 // all fails as probe_failed.
 func Convert(observed quota.Observation, at time.Time) (Observation, error) {
+	return convert(observed, at, false)
+}
+
+// convert is Convert; allowEmpty accepts a measurement with no paid window, for
+// a pool whose reading carries a free-tier state.
+func convert(observed quota.Observation, at time.Time, allowEmpty bool) (Observation, error) {
 	stored := Observation{Kind: KindAuto, MeasuredAt: at, Plan: observed.Plan, Buckets: []Bucket{}}
 	for _, b := range observed.Buckets {
 		if b.UsedPct == nil {
@@ -380,7 +470,7 @@ func Convert(observed quota.Observation, at time.Time) (Observation, error) {
 		}
 		stored.Buckets = append(stored.Buckets, published)
 	}
-	if len(stored.Buckets) == 0 {
+	if len(stored.Buckets) == 0 && !allowEmpty {
 		return Observation{}, quota.Fail(quota.ErrKindProbeFailed, "measurement failed")
 	}
 	return stored, nil

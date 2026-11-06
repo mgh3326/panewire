@@ -7,14 +7,14 @@ import (
 )
 
 // Which pools panewire measures itself (docs/quota.md §Native measurement).
-// claude and codex always are. A pool with a switch — commandcode — is
+// claude and codex always are. A pool with a switch — commandcode and devin — is
 // measured natively only once the host's fleet config lists it in
 // `[quota].native_pools`; until then it is in shadow: spawns keep running
 // pacelever for it while the node compares its own measurement against
 // pacelever's.
 
 // quotaSwitchedPools are the pools that have a native/shadow switch.
-var quotaSwitchedPools = []string{"commandcode"}
+var quotaSwitchedPools = []string{"commandcode", "devin"}
 
 // QuotaPoolHasSwitch reports whether pool is measured natively only when the
 // host's `[quota].native_pools` lists it.

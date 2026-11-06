@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"math"
 	"strings"
@@ -70,6 +71,42 @@ func shadowFromPublish(publish FleetStatePublish, ok bool, errKind string) shado
 		reading.buckets = append(reading.buckets, bucket)
 	}
 	return reading
+}
+
+// shadowFromPacelever is pacelever's side when the refresh output is at hand.
+// The hub publish refuses a reading that carries a bucket with no window, and
+// devin's does: pacelever adds a per-model Free tag, which is a tag and not a
+// measurement. The comparison reads the output on its own terms — every
+// windowed bucket — so those tags do not hide the paid windows.
+func shadowFromPacelever(pool string, output []byte, publish FleetStatePublish, ok bool, errKind string) shadowReading {
+	if ok {
+		return shadowFromPublish(publish, ok, errKind)
+	}
+	var reading paceleverReading
+	if json.Unmarshal(output, &reading) != nil || reading.ID != pool || reading.Stale || reading.Error != "" {
+		return shadowFromPublish(publish, ok, errKind)
+	}
+	out := shadowReading{}
+	switch {
+	case reading.PublishFPKind == "account" && reading.PublishFP != "":
+		out.key = pool + ":" + reading.PublishFP
+	case reading.AccountFPKind == "account" && reading.AccountFP != "":
+		out.key = pool + ":" + reading.AccountFP
+	}
+	for _, b := range reading.Buckets {
+		if b.UsedPct == nil || b.Window == "" {
+			continue
+		}
+		bucket := shadowBucket{window: b.Window, used: *b.UsedPct}
+		if at, err := time.Parse(time.RFC3339Nano, b.ResetsAt); err == nil {
+			bucket.reset = at
+		}
+		out.buckets = append(out.buckets, bucket)
+	}
+	if len(out.buckets) == 0 {
+		return shadowFromPublish(publish, ok, errKind)
+	}
+	return out
 }
 
 // shadowFromShared is the node's own side.

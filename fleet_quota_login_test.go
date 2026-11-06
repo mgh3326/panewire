@@ -37,6 +37,7 @@ func quotaClient(t *testing.T) *HubClient {
 	client := readinessClient(t, "", readinessFakes(nil))
 	client.events = make(chan hubClientEvent, 8)
 	client.warn = func(string) {}
+	isolateDevinShadow(client)
 	return client
 }
 
@@ -123,14 +124,21 @@ func TestFleetQuotaTransientFailureRaisesNoLoginAction(t *testing.T) {
 
 func TestFleetQuotaFailureWarningNamesPoolAndKind(t *testing.T) {
 	client := quotaClient(t)
-	var warnings []string
-	client.warn = func(message string) { warnings = append(warnings, message) }
+	warned := newWarnLog(client)
 	client.nodePacelever = fakeQuotaPacelever(func() ([]byte, error) {
 		return []byte("secret stderr text"), errors.New("exit status 4")
 	}, quotaStatus("excluded"))
 	sent := map[string]fleetQuotaSent{}
 	client.refreshFleetQuota(t.Context(), "devin", sent)
 	client.refreshFleetQuota(t.Context(), "devin", sent)
+	// devin is in shadow, so the node's own measurement logs a comparison line
+	// beside the failure warning; this test is about the warning.
+	var warnings []string
+	for _, w := range warned.all() {
+		if !strings.HasPrefix(w, "quota shadow ") {
+			warnings = append(warnings, w)
+		}
+	}
 	if len(warnings) != 1 || !strings.Contains(warnings[0], "devin") || !strings.Contains(warnings[0], "excluded") || strings.Contains(warnings[0], "secret") {
 		t.Fatalf("warnings = %q", warnings)
 	}

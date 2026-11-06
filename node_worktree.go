@@ -1075,7 +1075,7 @@ func (client *HubClient) nodeQuotaRefresh(ctx context.Context, args nodeQuotaRef
 		if !ok && ctx.Err() == nil && !errors.Is(err, context.DeadlineExceeded) {
 			kind = client.fleetQuotaErrorKind(ctx, args.Pool)
 		}
-		client.logShadowQuota(ctx, args.Pool, shadowFromPublish(publish, ok, kind))
+		client.logShadowQuota(ctx, args.Pool, shadowFromPacelever(args.Pool, output, publish, ok, kind))
 	}
 	if err != nil {
 		return nil, "refresh_failed"
