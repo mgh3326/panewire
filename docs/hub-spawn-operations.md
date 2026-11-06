@@ -102,6 +102,8 @@ not permission to generate a new key or try another host. A changed brief,
 checkout or flags under that key is refused: inspect the original operation
 before repairing the receipt or starting independent work under a new job ID.
 
+`GET /v1/spawns/live[?except=<request_id>]` (operator credential) returns `{"profiles":{<placed profile>:<live spawns>}}`, the count the `[quota].pool_max_concurrent` cap reads ([placement](placement.md#pool-concurrency-cap)).
+
 `GET /v1/spawns/<request_id>` returns job, request, status and a bounded result.
 It never exposes the saved brief, argv, credentials or submitting paths. Its
 `reason` is a stable code followed by the refusal text (`<code>: <text>`), which

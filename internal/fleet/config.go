@@ -227,6 +227,9 @@ func LoadConfig(path string) (Config, error) {
 	if err := validateNativePools(c.Quota); err != nil {
 		return c, err
 	}
+	if err := validatePoolMaxConcurrent(c.Quota); err != nil {
+		return c, err
+	}
 	if v := str(c.Quota, "url"); v != "" {
 		u, e := url.Parse(v)
 		if e != nil || u.Scheme != "https" && (u.Scheme != "http" || !isLoopbackHost(u.Hostname())) {

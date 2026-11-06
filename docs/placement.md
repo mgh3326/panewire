@@ -68,6 +68,33 @@ order, with each host's outcome and tried profile, effort, pool, and outcome.
 It omits account identities and gate output. Refused automatic selections
 emit this trace too. The handoffkeep placement API payload is unchanged.
 
+### Pool concurrency cap
+
+`[quota].pool_max_concurrent = { devin = 2 }` limits live spawns on a pool,
+fleet-wide ([config](config.md#quota)). Selection drops a candidate whose pool
+is at its cap with the reason `pool_at_cap`. The reason shows in the
+selection record and as `dropped … reason=pool_at_cap` in `plan` and
+`--dry-run`. Selection then goes on to the next candidate or pool as for any
+other drop. A spawn never waits for a slot. If every candidate is dropped and
+at least one only for `pool_at_cap`, the refusal names the pools and their
+caps (`pool_at_cap: devin=2 at [quota].pool_max_concurrent`).
+
+The hub counts, because it places every hub spawn
+([durable spawn operations](hub-spawn-operations.md)). A live spawn on a pool
+is a hub spawn operation that is accepted or dispatching, or succeeded with a
+job that a node still lists as active, whose placed profile is in that pool.
+A spawn that succeeded less than two minutes ago counts before its first
+heartbeat. An auto spawn that is still being placed has no profile yet and
+is not counted, and neither is the spawn being placed. The hub's own selection
+reads the count from its operations. Any other selection (`plan`, a direct
+spawn) reads it from the hub with `GET /v1/spawns/live` and the operator
+credential.
+
+When the count cannot be read the cap does not apply. Selection records
+`pool_cap_count_unavailable` under `degraded` and the node writes a warning
+with the cause. The cap is checked at each placement, so two spawns placed at
+the same moment can both see one free slot.
+
 ## Readiness
 
 Placement used to rank hosts on load and account presence only. Every

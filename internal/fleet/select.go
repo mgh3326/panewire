@@ -215,6 +215,9 @@ type selPlan struct {
 	ranked   []*selCand // tiered candidates in rank order
 	chosen   *selCand
 	degraded []string
+	// poolCaps is [quota].pool_max_concurrent as this selection read it; the
+	// refusal names the caps that dropped candidates.
+	poolCaps map[string]int
 	at       time.Time
 	// routeRefusal names the role refusal (role_no_candidate,
 	// role_exhausted_wait, role_exhausted_escalate) when routing ended the
@@ -726,6 +729,8 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		}
 	}
 	var pending []*selCand
+	capGate := a.newPoolCapGate(rows)
+	p.poolCaps = capGate.caps
 	for _, row := range rows {
 		c := &selCand{row: row, tier: -1, ignoreGrade: req.route.top()}
 		roleCap := req.route.roleEffortFor(row)
@@ -758,6 +763,11 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			} else {
 				c.seat = seat
 				c.seatName = name
+				// Checked after the seat rules so a candidate those rules
+				// drop keeps its own reason.
+				if capGate.full(ctx, row.Pool) {
+					c.reason = reasonPoolAtCap
+				}
 			}
 		}
 		if c.reason != "" {
@@ -818,6 +828,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			}
 		}
 	}
+	p.degraded = append(p.degraded, capGate.degraded()...)
 	orderSelCands(pending)
 	p.ranked = pending
 	pres.admitHostFirst(ctx, s, p, pending)

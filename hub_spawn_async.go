@@ -21,7 +21,11 @@ func (h *HubServer) newSpawnApp(out, errout io.Writer) (*fleet.App, error) {
 	if h.spawnNewApp != nil {
 		return h.spawnNewApp(out, errout)
 	}
-	return fleet.New(out, errout)
+	app, err := fleet.New(out, errout)
+	if app != nil {
+		app.LiveSpawnProfiles = h.liveSpawnProfiles
+	}
+	return app, err
 }
 func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 	// Placement chooses a resource after acceptance; only the unscoped operator
