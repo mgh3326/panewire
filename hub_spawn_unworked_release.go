@@ -65,39 +65,39 @@ func (h *HubServer) nodeCall(ctx context.Context, machine, op string, args any, 
 // is closed or written unless every proof holds. pane.close re-reads the pane
 // itself and refuses a pane that went to work in the meantime, so it runs
 // before the irreversible hk write.
-func (h *HubServer) releaseUnworkedLanding(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, row nodeAgentRow) bool {
+func (h *HubServer) releaseUnworkedLanding(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, row nodeAgentRow) (released bool, markReason string) {
 	machine, checkout := spawnHolderHost(holder), holder.Request.Repository.Checkout
 	name := hubSpawnArg(holder.Request.Args, "-l")
 	if state, _ := record["state"].(string); state != "claimed" || !failedAtLanding(holder) || checkout == nil || machine == "" || !validNodeJobName(name) || !validNodeJobName(holder.Job) {
-		return false
+		return false, ""
 	}
 	if !nodePaneClosableStatus[row.AgentStatus] || !spawnReceiptCheckoutPath(row.Cwd, checkout.Dir, hubSpawnArg(holder.Request.Args, "-L")) || !validNodeCommandPath(row.Cwd) {
-		return false
+		return false, ""
 	}
 	if h.now().Before(holder.Deadline.Add(h.unworkedLandingGrace)) {
-		return false
+		return false, ""
 	}
 	var ledger nodeJobResult
 	if !h.nodeCall(ctx, machine, nodeCommandJobResult, nodeJobResultArgs{Job: holder.Job}, spawnHeldPaneProbeWait, &ledger) {
-		return false
+		return false, ""
 	}
 	// A nil count is a node that predates the field: nothing is proven.
 	if !ledger.Found || ledger.Completed || ledger.Report.Present || ledger.ActivityEvents == nil || *ledger.ActivityEvents != 0 {
-		return false
+		return false, ""
 	}
 	var captured nodePaneCaptureResult
 	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, MergedAfter: 0, Write: true}
 	if !h.nodeCall(ctx, machine, nodeCommandPaneCapture, capture, spawnHeldPaneActWait, &captured) || captured.Outcome != nodeCaptureScreen {
-		return false
+		return false, ""
 	}
 	var closed nodePaneCloseResult
 	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd}
 	if !h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) || (closed.Outcome != nodePaneClosed && closed.Outcome != nodePaneGone) {
-		return false
+		return false, ""
 	}
-	if err := app.MarkJobLost(ctx, holder.Job); err != nil {
-		return false
+	if marked, reason := h.markHolderJobLost(ctx, app, holder, name); !marked {
+		return false, reason
 	}
 	slog.Info("released an unworked landing failure", "job", holder.Job, "request", holder.Request.RequestID, "machine", machine, "pane", row.PaneID, "reason", unworkedLandingReason)
-	return true
+	return true, ""
 }

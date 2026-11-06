@@ -39,9 +39,12 @@ the prior landed job completed or was lost.
 A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's
 node for its herdr panes (`agents.list`). Only a complete pane list that lacks
-the recorded pane marks the hk job `lost` and releases the task/role slot. A
-present pane keeps the slot (fail closed) unless it provably never started work
-(hk 3179), which needs every one of these:
+the recorded pane has the holder's node mark the hk job `lost` and releases the
+task/role slot. The holder's node writes the record with its own credential
+(`job.mark_lost`), because the hub's hk client is not granted a remote host; the
+hub writes itself only when the holder ran on the hub's own host. A present pane
+keeps the slot (fail closed) unless it provably never started work (hk 3179),
+which needs every one of these:
 
 - the operation failed in the `landing` stage (the brief's delivery was never
   proven);
@@ -55,9 +58,10 @@ present pane keeps the slot (fail closed) unless it provably never started work
 - `pane.capture` saves the screen, then `pane.close` closes the pane (it
   re-reads the pane and refuses one that went to work).
 
-The hub then marks the hk job `lost`, logs `landing_failed_unworked`, and the new
-submission claims the slot. Any failed or unreadable check, an unreachable node,
-a read error or a missing pane id keeps the slot. The 409 body then carries `request_id`, `job`, `host`,
+The hub then has the holder's node mark the hk job `lost`, logs
+`landing_failed_unworked`, and the new submission claims the slot. Any failed or
+unreadable check, an unreachable node, a read error or a missing pane id keeps
+the slot. The 409 body then carries `request_id`, `job`, `host`,
 `pane` and a `fix` (close that pane, then resubmit), and the CLI prints them
 with exit 74.
 
@@ -65,18 +69,22 @@ A prior operation in `succeeded` whose hk job is still `claimed` or `spawned`
 (a job revoked and reaped by an older binary, or one that ended without writing
 its record, hk 3204) is checked the same way: only a complete pane list that
 lacks the recorded pane, and lists no pane named like the holder's agent label
-(herdr renumbers a pane moved across workspaces), marks the hk job `lost` and
-releases the slot. A present pane, an unreadable pane list, an unreachable node
-or no recorded pane keeps the slot and the 409 body as before. hk never rewrites a
-terminal record, so a holder that completes during the probe keeps its completed
-record: the refused `lost` write is followed by a re-read, and a record now
-`completed` or `lost` releases the slot. A `retryable` operation holds no
-slot (its reservation is deleted when it ends), but its hk job stays `claimed`:
-a new submission for the same task and role under another job id marks that
-job `lost` once it holds the slot. A replay of the retryable request itself
-takes the replay path and writes nothing. `panewire reap` now writes `lost` to
-the hk record of a job whose newest terminal event is `job.revoked` or
-`job.lost` (see `docs/jobs-resilience.md`).
+(herdr renumbers a pane moved across workspaces), has the holder's node mark the
+hk job `lost` and releases the slot. A present pane, an unreadable pane list, an
+unreachable node or no recorded pane keeps the slot and the 409 body as before.
+A node that refuses `job.mark_lost`, because its local ledger holds a completion
+or a newer claim or because herdr still lists the pane, keeps the slot too; the
+hub logs `branch=release_write_failed` with the node's reason. When the holder
+ran on the hub's own host the hub writes the record itself, and hk never
+rewrites a terminal record, so a holder that completes during the probe keeps
+its completed record: the refused `lost` write is followed by a re-read, and a
+record now `completed` or `lost` releases the slot. A `retryable` operation holds
+no slot (its reservation is deleted when it ends), but its hk job stays
+`claimed`: a new submission for the same task and role under another job id has
+that holder's node mark the job `lost` once it holds the slot. A replay of the
+retryable request itself takes the replay path and writes nothing. `panewire
+reap` now writes `lost` to the hk record of a job whose newest terminal event is
+`job.revoked` or `job.lost` (see `docs/jobs-resilience.md`).
 
 Before sending HTTP, the CLI saves `jobs/<job>/submission.json` privately and
 synchronizes it. Repeating the same command reuses that key. A lost response is

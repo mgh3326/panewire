@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"slices"
 	"testing"
 )
 
@@ -34,7 +33,7 @@ func TestRoleReleaseAfterSucceededSpawn(t *testing.T) {
 		assertRoleHeldBy(t, hub, held.Request.RequestID)
 	}
 	for _, hkState := range []string{"spawned", "claimed"} {
-		t.Run("pane absent releases and marks the "+hkState+" job lost", func(t *testing.T) {
+		t.Run("pane absent releases and the holder node marks the "+hkState+" job lost", func(t *testing.T) {
 			hub, server, jobs, held := roleHolderHub(t, succeeded, hkState, "succeeded")
 			node := t14Node(t, hub, server, true)
 			response := submit(server)
@@ -43,12 +42,14 @@ func TestRoleReleaseAfterSucceededSpawn(t *testing.T) {
 				t.Fatalf("probe=%s", command["op"])
 			}
 			roleReplyPanes(t, node, command, []nodeAgentRow{{PaneID: "w2:p9", Cwd: "/work/other"}}, true)
+			roleReplyMarkLost(t, node, nodeJobMarkLostLost)
 			result := t14Result(t, response)
 			if result.status != http.StatusAccepted {
 				t.Fatalf("status=%d body=%s", result.status, result.body)
 			}
-			if jobs.state("test-job") != "lost" {
-				t.Fatalf("prior hk job state=%v", jobs.state("test-job"))
+			// The hub's client holds no grant for machine-a: it made no write.
+			if len(jobs.writes()) != 0 || jobs.state("test-job") != hkState {
+				t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 			}
 			owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker")
 			if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
@@ -56,31 +57,40 @@ func TestRoleReleaseAfterSucceededSpawn(t *testing.T) {
 			}
 		})
 	}
-	t.Run("a holder that completes during the probe keeps its completed record and releases", func(t *testing.T) {
+	t.Run("a holder that completed in its ledger holds the role for the terminal path", func(t *testing.T) {
 		hub, server, jobs, held := roleHolderHub(t, succeeded, "spawned", "succeeded")
 		jobs.completeAfterGet = true
+		sink := captureHubLog(hub)
 		node := t14Node(t, hub, server, true)
 		response := submit(server)
 		roleReplyPanes(t, node, nodeCommandRead(t, node), []nodeAgentRow{{PaneID: "w2:p9", Cwd: "/work/other"}}, true)
+		roleReplyMarkLost(t, node, nodeJobMarkLostCompleted)
 		result := t14Result(t, response)
-		if result.status != http.StatusAccepted || jobs.state("test-job") != "completed" {
+		if result.status != http.StatusConflict || jobs.state("test-job") != "completed" {
 			t.Fatalf("status=%d body=%s hk=%v", result.status, result.body, jobs.state("test-job"))
 		}
-		if owner, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker"); err != nil || owner == held.Request.RequestID {
-			t.Fatalf("reservation not moved: %s %v", owner, err)
+		if len(jobs.writes()) != 0 {
+			t.Fatalf("hub wrote hk: %v", jobs.writes())
 		}
+		assertRoleHeldBy(t, hub, held.Request.RequestID)
+		assertHeldLine(t, sink, "release_write_failed", "spawned", "absent", nodeJobMarkLostCompleted)
 	})
 	t.Run("a refused lost write on a record still not terminal keeps the hold", func(t *testing.T) {
 		hub, server, jobs, held := roleHolderHub(t, succeeded, "spawned", "succeeded")
-		jobs.putErr = errors.New("hk unavailable")
+		sink := captureHubLog(hub)
 		node := t14Node(t, hub, server, true)
 		response := submit(server)
 		roleReplyPanes(t, node, nodeCommandRead(t, node), []nodeAgentRow{{PaneID: "w2:p9", Cwd: "/work/other"}}, true)
+		nodeCommandReplyTo(t, node, nodeCommandRead(t, node), map[string]any{"error": "mark_lost_failed"})
 		result := t14Result(t, response)
 		if result.status != http.StatusConflict || jobs.state("test-job") != "spawned" {
 			t.Fatalf("status=%d body=%s hk=%v", result.status, result.body, jobs.state("test-job"))
 		}
+		if len(jobs.writes()) != 0 {
+			t.Fatalf("hub wrote hk: %v", jobs.writes())
+		}
 		assertRoleHeldBy(t, hub, held.Request.RequestID)
+		assertHeldLine(t, sink, "release_write_failed", "spawned", "absent", "mark_lost_failed")
 	})
 	t.Run("pane present keeps the hold", func(t *testing.T) {
 		hub, server, jobs, held := roleHolderHub(t, succeeded, "spawned", "succeeded")
@@ -139,17 +149,21 @@ func TestRoleReleaseAfterSucceededSpawn(t *testing.T) {
 // submission for the same (task, role) under another job id closes that record.
 func TestRoleReleaseSupersedesRetryableHolder(t *testing.T) {
 	retryable := hubSpawnOutcome{RC: 70, Stage: "landing", Reason: "spawn_failed", Host: "machine-a", Retryable: true}
-	t.Run("another job id marks the old job lost and claims", func(t *testing.T) {
+	t.Run("another job id has the holder node mark the old job lost and claims", func(t *testing.T) {
 		hub, server, jobs, held := roleHolderHub(t, retryable, "claimed", "retryable")
 		if _, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker"); err == nil {
 			t.Fatal("a retryable operation still holds the reservation")
 		}
-		result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest()))
+		node := t14Node(t, hub, server, true)
+		response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())
+		roleReplyMarkLost(t, node, nodeJobMarkLostLost)
+		result := t14Result(t, response)
 		if result.status != http.StatusAccepted {
 			t.Fatalf("status=%d body=%s", result.status, result.body)
 		}
-		if jobs.state("test-job") != "lost" || !slices.Equal(jobs.writes(), []string{"test-job lost"}) {
-			t.Fatalf("old hk job state=%v writes=%v", jobs.state("test-job"), jobs.writes())
+		// No recorded pane: the node checks the request's label and the ledger.
+		if len(jobs.writes()) != 0 || jobs.state("test-job") != "claimed" {
+			t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 		}
 		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker")
 		if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
@@ -172,7 +186,10 @@ func TestRoleReleaseSupersedesRetryableHolder(t *testing.T) {
 	})
 	t.Run("a replay of the superseded request is refused while the new request holds the role", func(t *testing.T) {
 		hub, server, _, _ := roleHolderHub(t, retryable, "claimed", "retryable")
-		if result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())); result.status != http.StatusAccepted {
+		node := t14Node(t, hub, server, true)
+		response := t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())
+		roleReplyMarkLost(t, node, nodeJobMarkLostLost)
+		if result := t14Result(t, response); result.status != http.StatusAccepted {
 			t.Fatalf("status=%d body=%s", result.status, result.body)
 		}
 		result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, durableSpawnRequest()))

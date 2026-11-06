@@ -16,11 +16,14 @@ Both endpoints require the operator token, or a service token whose scopes
 cover the call (`nodes.agents.read`, `node.command:<op>@<machine>`; see
 [hub-scopes.md](hub-scopes.md)). `pane.read` and `job.done` are narrower
 still: only a service token whose scopes name them is admitted, and the
-operator token gets `403 scope_forbidden`. Nodes need no extra opt-in: the
-hub can already type into any pane through `relay.inject`, and every op
-here is narrower than that. Each op is a closed shape; no op runs a shell,
-and no op takes a caller-chosen file path to write. The one report path an op
-reads (`job.done`) must be one of two fixed files in that job's directory.
+operator token gets `403 scope_forbidden`. `job.mark_lost` is narrower again:
+the hub issues it itself over the holder's connection when it releases a spawn
+reservation, and the HTTP command endpoint refuses it for every caller. Nodes
+need no extra opt-in: the hub can already type into any pane through
+`relay.inject`, and every op here is narrower than that. Each op is a closed
+shape; no op runs a shell, and no op takes a caller-chosen file path to write.
+The one report path an op reads (`job.done`) must be one of two fixed files in
+that job's directory.
 
 ## Hub endpoints
 
@@ -182,6 +185,34 @@ without a jobs root answers `jobs_root_unset`. The node records the report's
 digest in `<inbox>/jobs/<job>/.node-job-done` after panewire succeeds. The digest
 is the key because a released job id can be claimed again: a new report for that
 id runs panewire, the same rule panewire's own duplicate check applies.
+
+### `job.mark_lost`
+
+`args: {job, pane_id, label}` — at least one of `pane_id` and `label` is
+required. The hub issues this op itself when it releases a spawn reservation
+whose holder ran on another host: the hub's handoffkeep client is not granted
+that host, so the holder's node writes the record with its own credential
+(`spawn.json` `handoffkeep_env`). The HTTP command endpoint refuses the op for
+every caller, and a node credential is refused as for every other op.
+
+The node first reads its local job ledger: a `job.completed` event or a
+`job.reclaim` event refuses, because the record has moved on. It then re-reads
+`herdr agent list` and `herdr pane list` and refuses when either list still
+names `pane_id` or an agent row still names `label`; a failed pane list refuses
+a pane check as unknown, while a label-only check needs only the agent list.
+Only when both proofs hold does it write `{"state":"lost"}` to handoffkeep.
+
+| `outcome` | Meaning |
+| --- | --- |
+| `lost` | The record was written lost. |
+| `pane-listed` | herdr still lists `pane_id`; nothing is written. |
+| `label-listed` | an agent row still carries `label`; nothing is written. |
+| `panes-unknown` | `herdr pane list` failed, so a pane check proves nothing. |
+| `completed` | the local ledger holds a `job.completed` event; nothing is written. |
+| `newer-claim` | the local ledger holds a `job.reclaim` event; nothing is written. |
+
+A failed ledger read or handoffkeep write answers `mark_lost_failed`; a node
+without a jobs root answers `jobs_root_unset`.
 
 ### `worktree.inspect`
 
@@ -423,12 +454,12 @@ The HTTP command endpoint returns 200 for node-reported errors, 504 for `node_ti
 
 Node error codes are a closed set: `invalid_args`, `herdr_failed`,
 `close_failed`, `capture_failed`, `jobs_root_unset`, `work_root_unset`,
-`refresh_failed`, `done_failed`, `result_too_large`. A
-result must fit the hub's 32 KiB per-message limit; a larger one answers
-`result_too_large`. The hub re-encodes each result through its op's shape,
-drops one outside it, and accepts an answer only from the machine and
-connection it sent the command to. An older node ignores `node.command`, so
-the caller sees `node_timeout`.
+`refresh_failed`, `done_failed`, `result_failed`, `mark_lost_failed`,
+`result_too_large`. A result must fit the hub's 32 KiB per-message limit; a
+larger one answers `result_too_large`. The hub re-encodes each result through
+its op's shape, drops one outside it, and accepts an answer only from the
+machine and connection it sent the command to. An older node ignores
+`node.command`, so the caller sees `node_timeout`.
 
 ## mergewake integration
 

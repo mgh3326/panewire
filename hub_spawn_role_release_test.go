@@ -142,11 +142,32 @@ func roleReplyPanes(t *testing.T, node *websocket.Conn, command map[string]json.
 	nodeCommandReplyTo(t, node, command, map[string]any{"result": result})
 }
 
+// roleReplyMarkLost reads the hub's job.mark_lost command and answers it.
+func roleReplyMarkLost(t *testing.T, node *websocket.Conn, outcome string) map[string]json.RawMessage {
+	t.Helper()
+	command := nodeCommandRead(t, node)
+	if string(command["op"]) != `"job.mark_lost"` {
+		t.Fatalf("mark lost op=%s", command["op"])
+	}
+	nodeCommandReplyTo(t, node, command, map[string]any{"result": map[string]any{"outcome": outcome}})
+	return command
+}
+
+// roleMarkLostArgs decodes the arguments of a job.mark_lost command.
+func roleMarkLostArgs(t *testing.T, command map[string]json.RawMessage) map[string]any {
+	t.Helper()
+	var args map[string]any
+	if err := json.Unmarshal(command["args"], &args); err != nil {
+		t.Fatal(err)
+	}
+	return args
+}
+
 func TestRoleReleaseAfterFailedSpawn(t *testing.T) {
 	submit := func(t *testing.T, server *httptest.Server) <-chan t14HTTPResult {
 		return t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())
 	}
-	t.Run("pane absent releases and marks the prior job lost", func(t *testing.T) {
+	t.Run("pane absent releases and the holder node marks the prior job lost", func(t *testing.T) {
 		hub, server, jobs, held := roleReleaseHub(t)
 		node := t14Node(t, hub, server, true)
 		response := submit(t, server)
@@ -155,12 +176,18 @@ func TestRoleReleaseAfterFailedSpawn(t *testing.T) {
 			t.Fatalf("probe=%s", command["op"])
 		}
 		roleReplyPanes(t, node, command, []nodeAgentRow{{PaneID: "w2:p9", Cwd: "/work/other"}}, true)
+		mark := roleReplyMarkLost(t, node, nodeJobMarkLostLost)
+		args := roleMarkLostArgs(t, mark)
+		if args["job"] != "test-job" || args["pane_id"] != roleHeldPane || args["label"] != "test-job" {
+			t.Fatalf("mark lost args=%v", args)
+		}
 		result := t14Result(t, response)
 		if result.status != http.StatusAccepted {
 			t.Fatalf("status=%d body=%s", result.status, result.body)
 		}
-		if jobs.state("test-job") != "lost" {
-			t.Fatalf("prior hk job state=%v", jobs.state("test-job"))
+		// The hub's client never writes another host's job record.
+		if len(jobs.writes()) != 0 || jobs.state("test-job") != "claimed" {
+			t.Fatalf("hub wrote hk: state=%v writes=%v", jobs.state("test-job"), jobs.writes())
 		}
 		owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker")
 		if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {

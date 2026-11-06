@@ -194,6 +194,7 @@ type HubClient struct {
 	nodeHerdr          relayCommandRunner // fixture seam for node commands; nil runs herdr.
 	nodeGit            relayCommandRunner // fixture seam for node commands; nil runs git.
 	nodeLifecycle      relayCommandRunner // fixture seam for job.done; nil runs runtug.
+	nodeJobs           fleet.JobStore     // fixture seam for job.mark_lost; nil reads spawn.json handoffkeep_env.
 	nodePacelever      relayCommandRunner // fixture seam for quota.refresh of a pool other than claude; nil runs pacelever.
 	claudeQuotaMu      sync.Mutex
 	claudeQuota        *claudeQuotaSource // the node's own claude measurement; fixtures set it, nil builds the default.
