@@ -20,8 +20,11 @@ var quotaStopRoles = []string{"reviewer"}
 // replace a quota-stopped job before it ends the job itself, without a
 // replacement. The hub places the replacement, closes the pane and writes the
 // hk record with replaced_by (hk never rewrites a lost record, so the pointer
-// can only be written once). Zero ends the job at once.
-const QuotaStopHandOffGrace = 3 * time.Minute
+// can only be written once). Zero ends the job at once. It must outlast the
+// hub's whole replacement (hub_quota_replace.go quotaReplaceBudget), or the
+// watcher writes a terminal record without the successor pointer while the hub
+// is still placing it.
+const QuotaStopHandOffGrace = 6 * time.Minute
 
 // QuotaStopEndReason is the hk end_reason of a quota-stopped job:
 // "quota_stop pool=<pool> reset_at=<RFC3339 UTC>", reset_at left out when the

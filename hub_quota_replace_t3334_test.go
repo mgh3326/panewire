@@ -371,3 +371,18 @@ func TestHubSpawnAllowlistCarriesExcludePool(t *testing.T) {
 		})
 	}
 }
+
+// The watcher ends an unchanged stopped job after QuotaStopHandOffGrace; the hub
+// must be done, one way or the other, before that, or the old hk record is
+// written lost without replaced_by while the successor is still being placed.
+func TestQuotaReplaceBudgetFitsTheWatcherGrace(t *testing.T) {
+	if quotaReplaceBudget >= fleet.QuotaStopHandOffGrace {
+		t.Fatalf("the hub can hold a replacement for %v, past the watcher grace %v", quotaReplaceBudget, fleet.QuotaStopHandOffGrace)
+	}
+	long := quotaHolderRequest("reviewer", "mwr-9-p1")
+	long.DeadlineSeconds = 3600
+	next, err := quotaReplacementRequest(long, "mwr-9-p1", "mwr-9-p1-q1", "claude", "reviewer")
+	if err != nil || time.Duration(next.DeadlineSeconds)*time.Second != quotaReplaceDeadline {
+		t.Fatalf("the successor's spawn deadline is %ds (%v), want %v", next.DeadlineSeconds, err, quotaReplaceDeadline)
+	}
+}

@@ -43,6 +43,18 @@ func quotaReplacementJob(old string) (job string, n int, ok bool) {
 	return job, n, len(job) <= 128 && hubJobIDPattern.MatchString(job)
 }
 
+// quotaReplaceDeadline is the deadline the hub gives the successor's spawn, so
+// the operation itself expires (with its own cleanup) before the node's watcher
+// ends the stopped job. quotaReplaceBudget is the longest the hub can hold a
+// replacement: the pane probe, the wait for placement, and the three node
+// commands that close the old pane and write its record. It must stay under
+// fleet.QuotaStopHandOffGrace (TestQuotaReplaceBudgetFitsTheWatcherGrace).
+const (
+	quotaReplaceDeadline = 150 * time.Second
+	quotaReplaceWait     = quotaReplaceDeadline + 30*time.Second
+	quotaReplaceBudget   = spawnHeldPaneProbeWait + quotaReplaceWait + 3*spawnHeldPaneActWait
+)
+
 // quotaReplacePoll is how often the hub looks for the successor's outcome.
 const quotaReplacePoll = 500 * time.Millisecond
 
@@ -75,6 +87,9 @@ func quotaReplacementRequest(old fleet.Submission, oldJob, newJob, pool string, 
 	}
 	next := old
 	next.RequestID = id
+	if next.DeadlineSeconds < 1 || next.DeadlineSeconds > int(quotaReplaceDeadline/time.Second) {
+		next.DeadlineSeconds = int(quotaReplaceDeadline / time.Second)
+	}
 	next.Args = slices.Clone(old.Args)
 	next.RetryHost = ""
 	suffix := strings.TrimPrefix(newJob, oldJob)
@@ -195,7 +210,7 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	case h.spawnKick <- struct{}{}:
 	default:
 	}
-	outcome, ok := h.awaitSpawnOutcome(ctx, request.RequestID, time.Duration(request.DeadlineSeconds+30)*time.Second)
+	outcome, ok := h.awaitSpawnOutcome(ctx, request.RequestID, quotaReplaceWait)
 	if !ok || outcome.RC != 0 {
 		h.logger.Info("quota-stop replacement not placed", "job", event.JobID, "replacement", newJob, "pool", pool, "rc", outcome.RC, "reason", outcome.Reason)
 		return "", false
