@@ -815,7 +815,7 @@ func TestWorkingWakeKeepsRowHeldMeanwhile_t3276(t *testing.T) {
 }
 
 // hold registers a row under the same lock a working wake takes around its own
-// snapshot. Holding that lock, an offer must not have inserted its row yet:
+// snapshot. Holding that lock, a hold must not have inserted its row yet:
 // otherwise a release could deliver the row between the offer's snapshot and
 // its registration, and the offer would then put the delivered row back.
 func TestHoldIsSerializedWithRelease_t3276(t *testing.T) {
@@ -830,17 +830,17 @@ func TestHoldIsSerializedWithRelease_t3276(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		manager.offer(t.Context(), t3276Message(directive))
+		manager.hold(t.Context(), relayHeld{Pane: directive.Pane, Lane: directive.Lane, EventID: directive.EventID, JobID: directive.JobID, Text: directive.Text, HeldSince: time.Now(), DeliverPolicy: directive.Deliver, MaxWait: time.Minute, RecvSeq: 1}, "blocked")
 	}()
 	time.Sleep(150 * time.Millisecond) // a window that proves the offer does not progress while the lock is held
 	rows, err := rig.node.relayStore().RelayHeldForPane(t.Context(), "w1:pW")
 	manager.mu.Unlock()
 	if err != nil || len(rows) != 0 {
-		t.Fatalf("the offer inserted its held row (%+v, err=%v) while the manager lock was held", rows, err)
+		t.Fatalf("hold inserted its row (%+v, err=%v) while the manager lock was held", rows, err)
 	}
 	<-done
 	if rows, err := rig.node.relayStore().RelayHeldForPane(t.Context(), "w1:pW"); err != nil || len(rows) != 1 {
-		t.Fatalf("after the lock was released the offer's row is missing: %+v err=%v", rows, err)
+		t.Fatalf("after the lock was released the held row is missing: %+v err=%v", rows, err)
 	}
 }
 
