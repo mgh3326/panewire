@@ -72,7 +72,11 @@ until their own change.
   windows) and an expired one taken over once; a measurement for another
   account refuses to publish (`account_mismatch`). A 429 backs the account off
   in memory for its `Retry-After`. Presence (`PUT /v1/quota/presence`) is
-  announced at most every 10 minutes per account, under the node's machine id.
+  announced at most every 10 minutes per account, under the node's machine id,
+  as soon as the store answers the first read — before any lease or
+  measurement — so a host whose measurement fails, is rate-limited or waits on
+  another host's lease is still known to placement as holding the account (a
+  login with no readable shared reading stays `unknown`, never absent).
   With no `handoffkeep_env` the node measures directly and publishes to no
   store; with one it cannot use, the refresh fails `shared_unavailable`.
 
