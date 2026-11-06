@@ -43,8 +43,10 @@ func readCI(t *testing.T, path string) ciWorkflow {
 }
 func TestCITiers(t *testing.T) {
 	w := readCI(t, ".github/workflows/ci.yml")
-	if !w.Concurrency.Cancel || !strings.Contains(w.Concurrency.Group, "ci-main") {
-		t.Fatal("main concurrency must cancel older runs")
+	// One group per ref (policy/fleet-ci-main-cancel, mergewake docs/ci-policy.md):
+	// a constant group such as 'ci-main' is reported as not per ref.
+	if !w.Concurrency.Cancel || !strings.Contains(w.Concurrency.Group, "format('ci-push-{0}', github.ref)") {
+		t.Fatal("main concurrency must cancel older runs, grouped per ref")
 	}
 	if !strings.Contains(w.Concurrency.Group, "format('ci-pr-{0}', github.event.pull_request.number)") {
 		t.Fatal("a pull request's new run must cancel its older run")
