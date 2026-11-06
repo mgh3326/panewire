@@ -197,7 +197,7 @@ func TestRoleReleaseUnworkedLanding(t *testing.T) {
 				if jobs.state("test-job") != "lost" {
 					t.Fatalf("prior hk job state=%v", jobs.state("test-job"))
 				}
-				owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker")
+				owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker")
 				if err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 					t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 				}

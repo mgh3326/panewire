@@ -21,7 +21,7 @@ the document with its own handoffkeep client.
 >   `^[a-z0-9._-]{1,64}$`, inline/doc 중 정확히 하나(빈 값은 400), 선택적 `checkout`은
 >   `worktree.prepare` 문법, `args`는 **runtug 플래그 allowlist**만
 >   (`-m -w -l --t --effort --job --owner --report --role --lane --parent
->   -L --task --parent-job --builder-family --builder-job --tags --urgency`), 각 값
+>   -L --task --parent-job --builder-family --builder-job --review-pass --tags --urgency`), 각 값
 >   `^[A-Za-z0-9._:/@-]{1,200}$` 단 `--tags`만 쉼표 목록(최대 16개) 허용
 >   (공백·셸 메타문자 거부), `--role`, `--builder-family`, `--parent-job`, `--builder-job` 값은 유효성
 >   검사를 거치며, `wait_seconds`는 1..300.
@@ -71,15 +71,17 @@ Request:
   `^[a-z0-9._-]{1,64}$`, exactly one nonempty `brief.inline` or `brief.doc`, optional `checkout`
   following the `worktree.prepare` grammar, and `args` accepts **only runtug
   flags** (`-m -w -l --t --effort --job --owner --report --report-relative --role --lane
-  --parent -L --task --parent-job --builder-family --builder-job --tags
-  --urgency`), each value
+  --parent -L --task --parent-job --builder-family --builder-job --review-pass
+  --tags --urgency`), each value
   `^[A-Za-z0-9._:/@-]{1,200}$` — except `--tags`, a comma list of up to 16
   entries, all within the 200-char bound — (spaces and shell metacharacters
   rejected),
   and `wait_seconds` is 1..300. `--role` accepts `worker`,
   `reviewer`, or `tester`; `--builder-family` accepts `anthropic`, `openai`,
   `google`, `xai`, `deepseek`, `meta`, `mistral`, or `other`; job values use
-  `^[A-Za-z0-9._-]{1,128}$`.
+  `^[A-Za-z0-9._-]{1,128}$`; `--review-pass` is one digit 1..9 and sets the
+  reviewer reservation key to `task:reviewer:p<N>`
+  ([hub-spawn-operations.md](hub-spawn-operations.md)).
 - `--report-relative` is a report path relative to the **node's** jobs root
   (the caller cannot know the node's home). Absolute paths, a trailing slash
   and empty, `.` and `..` segments are refused with 400. The node passes it

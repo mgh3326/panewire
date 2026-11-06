@@ -95,7 +95,7 @@ func (s *laneInboxStore) claimSpawn(parent context.Context, request fleet.Submis
 	}
 	var taskRole any
 	if spawn.Task != "" && spawn.ParentJob == "" {
-		taskRole = spawn.Task + ":" + spawn.Role
+		taskRole = spawn.RoleKey()
 	}
 	claimed, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?) ON CONFLICT DO NOTHING`), job, request.RequestID, taskRole)
 	if err != nil {
@@ -297,7 +297,7 @@ func (s *laneInboxStore) resumeCleanedSpawn(parent context.Context, task hubSpaw
 	}
 	var taskRole any
 	if spawn.Task != "" && spawn.ParentJob == "" {
-		taskRole = spawn.Task + ":" + spawn.Role
+		taskRole = spawn.RoleKey()
 	}
 	result, err := tx.ExecContext(ctx, s.q(`INSERT INTO spawn_reservations(job,request_id,task_role) VALUES(?,?,?) ON CONFLICT DO NOTHING`), task.Job, task.Request.RequestID, taskRole)
 	if err != nil {
@@ -326,10 +326,10 @@ func (s *laneInboxStore) touchSpawn(parent context.Context, id string, now time.
 	_, _ = s.db.ExecContext(ctx, s.q(`UPDATE spawn_operations SET last_run_ms=? WHERE request_id=?`), now.UnixMilli(), id)
 }
 
-func (s *laneInboxStore) spawnRoleOwner(parent context.Context, task, role string) (id, job, status string, err error) {
+func (s *laneInboxStore) spawnRoleOwner(parent context.Context, roleKey string) (id, job, status string, err error) {
 	ctx, done := s.op(parent)
 	defer done()
-	err = s.db.QueryRowContext(ctx, s.q(`SELECT o.request_id,o.job,o.status FROM spawn_reservations r JOIN spawn_operations o ON r.request_id=o.request_id WHERE r.task_role=?`), task+":"+role).Scan(&id, &job, &status)
+	err = s.db.QueryRowContext(ctx, s.q(`SELECT o.request_id,o.job,o.status FROM spawn_reservations r JOIN spawn_operations o ON r.request_id=o.request_id WHERE r.task_role=?`), roleKey).Scan(&id, &job, &status)
 	return
 }
 
@@ -353,10 +353,10 @@ func (s *laneInboxStore) retryableSpawns(parent context.Context) ([]hubSpawnTask
 	}
 	return tasks, rows.Err()
 }
-func (s *laneInboxStore) releaseCompletedSpawnRole(parent context.Context, id, task, role string) error {
+func (s *laneInboxStore) releaseCompletedSpawnRole(parent context.Context, id, roleKey string) error {
 	ctx, done := s.op(parent)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role=? AND EXISTS(SELECT 1 FROM spawn_operations WHERE request_id=? AND status IN ('succeeded','failed'))`), id, task+":"+role, id)
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE spawn_reservations SET task_role=NULL WHERE request_id=? AND task_role=? AND EXISTS(SELECT 1 FROM spawn_operations WHERE request_id=? AND status IN ('succeeded','failed'))`), id, roleKey, id)
 	return err
 }
 
