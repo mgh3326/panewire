@@ -682,7 +682,7 @@ func relayInjectForHarness(ctx context.Context, pane, harness, text string, memb
 	return relayInjectForHarnessGuarded(ctx, pane, harness, text, members, nil)
 }
 
-func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text string, members []string, guard func(string) bool) relayInjectResult {
+func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text string, members []string, guard func(string) bool) (final relayInjectResult) {
 	if strings.EqualFold(harness, "devin") {
 		return devinRelayInjectGuarded(ctx, pane, text, members, guard)
 	}
@@ -716,16 +716,72 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		// The return-once contract submits it only when the composer
 		// provably holds nothing but this text; with no earlier read a
 		// paste chip is unowned and never earns a keypress.
-		return relayVerifyOutcome(ctx, pane, harness, text, "", "presend:", presendQueued, presend)
+		return relayVerifyOutcome(ctx, pane, harness, text, "", "presend:", presendQueued, false, presend)
 	}
-	if exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run() != nil {
-		// herdr may have typed part of the text before failing; the next
-		// attempt's presend check decides whether a retry would duplicate
-		// it.
+	adapter, known := relayAdapterFor(harness)
+	if known && adapter.paneTransport {
+		// cmd presses return right after the text, so a draft already in the
+		// composer would be submitted with the relay text appended to it. Type
+		// only into a composer that is located and empty; otherwise the pane
+		// is left as it is. The evidence has no "unproven:" for a draft, so the
+		// one immediate retry never fires on it.
+		//
+		// The plain visible read cannot tell a dim prompt suggestion from a
+		// draft, and an idle cmd pane shows a suggestion in its empty composer,
+		// so the check reads the ANSI screen and applies the dim rule the reap
+		// uses (relayAnsiComposerState). An unreadable screen is
+		// "unproven:read_failed": nothing was typed, so the retry is harmless.
+		ansi, err := relayReadPaneANSI(ctx, pane)
+		if err != nil {
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "presend:unproven:read_failed"}
+		}
+		if state := relayAnsiComposerState(ansi); state != "composer_empty" {
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "presend:" + state}
+		}
+	}
+	if err := relaySendText(ctx, pane, harness, text); err != nil {
+		if known && adapter.paneTransport {
+			// herdr may have typed part of the text before failing, and a
+			// re-type on top of it would submit both. The verdict is final:
+			// relayRetriesOnce does not retry it.
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "send_text_failed"}
+		}
+		// herdr rejected the agent prompt; the next attempt's presend check
+		// decides whether a retry would duplicate anything it typed.
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness, Evidence: "prompt_failed"}
 	}
-	result := relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, relayReadPane(ctx, pane, harness).withPresend(presend))
-	adapter, known := relayAdapterFor(harness)
+	returnSpent := false
+	defer func() {
+		// The one return went out and the composer still draws this text after
+		// the whole observation window. A retry would meet its own text in the
+		// composer in presend and press a second return, so the verdict is
+		// final: it carries no "unproven:" and relayRetriesOnce leaves it.
+		if returnSpent && final.Outcome == relayInjectMaybeInPane && strings.HasSuffix(final.Evidence, "unproven:composer_pending") {
+			final.Evidence = "return_unconfirmed:composer_pending"
+		}
+	}()
+	if known && adapter.paneTransport {
+		// The pane transport is the spawn path's pair, not one call: pane
+		// send-text only types, so the submit is its own keypress. It goes
+		// through the same gate as every other harness's return: the composer
+		// is read after the text landed, and the keypress is pressed only if
+		// that composer holds nothing but this inject's text (a draft typed
+		// between the two calls would be submitted with it). A failing return
+		// leaves the text typed but unsubmitted, which is maybe-in-pane, never
+		// a re-inject.
+		after := relayReadPane(ctx, pane, harness)
+		if !after.visibleOK {
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "return_withheld:composer_unread"}
+		}
+		if safe, why := relayComposerReturnSafe(harness, after.visible, text, presend.visible); !safe {
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "return_withheld:" + why}
+		}
+		if relaySendReturn(ctx, pane, harness) != nil {
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "return_failed"}
+		}
+		returnSpent = true
+	}
+	result := relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, returnSpent, relayReadPane(ctx, pane, harness).withPresend(presend))
 	if !known || !adapter.observe || !strings.HasPrefix(result.Evidence, "unproven:") || len(relayNoncesIn(text)) == 0 {
 		return result
 	}
@@ -752,6 +808,27 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 			}
 		}
 	}
+}
+
+// relaySendText types text into pane. A pane-level harness (cmd) gets the
+// pane call, because herdr refuses agent prompt for it with agent_not_ready
+// (hk 3330); every other harness keeps herdr's agent prompt. The caller
+// decides what a failure means.
+func relaySendText(ctx context.Context, pane, harness, text string) error {
+	if adapter, ok := relayAdapterFor(harness); ok && adapter.paneTransport {
+		return exec.CommandContext(ctx, "herdr", "pane", "send-text", pane, text).Run()
+	}
+	return exec.CommandContext(ctx, "herdr", "agent", "prompt", pane, text).Run()
+}
+
+// relaySendReturn presses return in pane, at the same level as the text: a
+// pane-level harness has no agent for herdr to address, and mixing the two
+// would type through one transport and submit through another.
+func relaySendReturn(ctx context.Context, pane, harness string) error {
+	if adapter, ok := relayAdapterFor(harness); ok && adapter.paneTransport {
+		return exec.CommandContext(ctx, "herdr", "pane", "send-keys", pane, "return").Run()
+	}
+	return exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run()
 }
 
 func relayInjectHarness(ctx context.Context, pane string) string {
@@ -799,8 +876,13 @@ func parseRelayAgentHarness(raw []byte) string {
 // paste-chip text, which most don't) or unproven. See the unproven carve-out
 // below for why that distinction matters. The hub relay sends devin through
 // devinRelayInject (#547) instead, so it never reaches this carve-out there.
+//
+// cmd draws claude's composer (see promptComposer), so classifyPromptSubmission
+// can locate its live composer and prove an echo the same way; without that it
+// would stop here as unproven and a hand relay through `panewire prompt` could
+// never confirm (hk 3330).
 func harnessHasSubmissionEvidence(harness string) bool {
-	return strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex") || strings.EqualFold(harness, "devin")
+	return strings.EqualFold(harness, "claude") || strings.EqualFold(harness, "codex") || strings.EqualFold(harness, "devin") || strings.EqualFold(harness, "cmd")
 }
 
 // relayComposerSoleChipRE is claude's paste chip alone, after
@@ -1222,6 +1304,27 @@ func relayComposerState(harness, visible string) string {
 	return "composer_empty"
 }
 
+// relayReadPaneANSI reads pane's visible screen with its SGR attributes, the
+// source relayAnsiComposerState needs to tell a dim suggestion from a draft.
+func relayReadPaneANSI(ctx context.Context, pane string) (string, error) {
+	out, err := exec.CommandContext(ctx, "herdr", "pane", "read", pane, "--source", "visible", "--format", "ansi").Output()
+	return string(out), err
+}
+
+// relayAnsiComposerState is relayComposerState for a pane transport harness
+// (cmd), read from an ANSI screen. cmd draws claude's composer, so it takes
+// the rule nodeComposerState applies to claude: a composer whose every visible
+// character is dim is a prompt suggestion, not unsent text, and reads empty.
+func relayAnsiComposerState(ansi string) string {
+	switch nodeComposerState("claude", ansi) {
+	case nodeComposerEmpty:
+		return "composer_empty"
+	case nodeComposerHasText:
+		return "composer_pending"
+	}
+	return "composer_unlocated"
+}
+
 // relayUnproven is the #683 policy: an undecidable verdict after herdr
 // accepted the send is maybe-in-pane, never a re-inject. The durable relay
 // row stays undelivered, and a hub replay -- which meets the presend check
@@ -1252,11 +1355,20 @@ func relayUnproven(harness string, reads relayPaneReads, prefix string) relayInj
 // composer_residue result and verifying once more after it. presendQueued
 // records whether a queue banner was already showing before this inject's
 // paste; prefix namespaces the evidence ("presend:", "after_return:").
-func relayVerifyOutcome(ctx context.Context, pane, harness, text, before, prefix string, presendQueued bool, reads relayPaneReads) relayInjectResult {
+//
+// returnSpent says the caller already pressed the one return for this inject
+// (the pane transport presses it itself, gated, right after the text). A
+// composer that still shows the text then is the harness's echo lagging behind
+// the keypress, not a second submit to make: verify presses nothing, and
+// reports it unproven so the observation window re-reads until the echo lands.
+func relayVerifyOutcome(ctx context.Context, pane, harness, text, before, prefix string, presendQueued, returnSpent bool, reads relayPaneReads) relayInjectResult {
 	maybe := func(evidence string) relayInjectResult {
 		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: prefix + evidence}
 	}
 	result, rule, proven := relayClassifyReads(harness, reads, text, true, presendQueued)
+	if result == "composer_residue" && returnSpent {
+		return relayUnproven(harness, reads, prefix)
+	}
 	if result == "composer_residue" {
 		// The relay-handoff contract permits exactly one return, and only
 		// when the live composer provably holds nothing but this inject's
@@ -1265,7 +1377,7 @@ func relayVerifyOutcome(ctx context.Context, pane, harness, text, before, prefix
 		if safe, why := relayComposerReturnSafe(harness, reads.visible, text, before); !safe {
 			return maybe("return_withheld:" + why)
 		}
-		if exec.CommandContext(ctx, "herdr", "agent", "send-keys", pane, "return").Run() != nil {
+		if relaySendReturn(ctx, pane, harness) != nil {
 			return maybe("return_failed")
 		}
 		// A banner already up on the residue screen is an older queue, so it
@@ -1302,7 +1414,7 @@ func relayInjectVerifySubmission(ctx context.Context, pane, harness, text string
 // whenever the reads cannot prove what happened (#683) -- the text may
 // already be in the pane, so an undecidable verdict is never a re-inject.
 func relayInjectVerify(ctx context.Context, pane, harness, text, before string) relayInjectResult {
-	return relayVerifyOutcome(ctx, pane, harness, text, before, "", relayQueuedBanner(harness, before), relayReadPane(ctx, pane, harness))
+	return relayVerifyOutcome(ctx, pane, harness, text, before, "", relayQueuedBanner(harness, before), false, relayReadPane(ctx, pane, harness))
 }
 
 // devin verification reads: the visible screen for the queue banner and the
