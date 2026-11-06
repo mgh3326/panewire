@@ -97,8 +97,11 @@ must treat pane usage as unknown. A failed agent list answers
 ### `pane.close`
 
 `args: {pane_id, name, agent_status, cwd}` — the caller's snapshot of the
-pane; `agent_status` must be `idle` or `done`, the only states a close is
-for. herdr has no conditional close, so the node re-reads `herdr agent list`
+pane; `agent_status` must be `idle`, `done` or `blocked` (a pane stopped at a
+prompt), never `working`. A `blocked` close also needs the job's own ledger
+(`job.claimed` or `job.spawned` event) to name role `reviewer`, because a
+blocked worker may be waiting on an ESC answer; otherwise the outcome is
+`pane-changed`. herdr has no conditional close, so the node re-reads `herdr agent list`
 twice, two seconds apart, and closes only when both reads show a row with
 that `pane_id` and exactly that name, status and cwd, and — where herdr
 reports it — the same `state_change_seq`, so a pane that went to work and
