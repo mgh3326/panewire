@@ -260,6 +260,12 @@ panewire:
    A writing role (any role but `reviewer` and `counsel`) whose `branch` has no
    local `refs/remotes/origin/<branch>` is refused (exit 81) before anything is
    uploaded, naming the `git -C <cwd> push -u origin <branch>` command to run.
+   The same roles are refused (exit 81) when HEAD is a strict ancestor of that
+   ref (the worktree is behind origin), naming the
+   `git -C <cwd> fetch && git -C <cwd> merge --ff-only origin/<branch>` command
+   to run. HEAD equal to or ahead of the ref keeps today's behaviour. The
+   submitter never fetches, so the check sees only the remote-tracking ref as of
+   the last fetch.
    Only refs already known locally are read; nothing is fetched. Commits on no
    origin ref, an origin URL without an https form (`git@host:o/r` and
    `ssh://` become `https://host/o/r`), or a subdirectory start refuse with

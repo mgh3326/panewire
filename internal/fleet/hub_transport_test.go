@@ -47,6 +47,7 @@ func (h *fakeHub) Refresh(_ context.Context, machine, pool string) error {
 type gitState struct {
 	pushed    bool     // HEAD is an ancestor of refs/remotes/origin/<branch>
 	onOrigin  bool     // refs/remotes/origin/<branch> exists; pushed implies it
+	originTip string   // sha of refs/remotes/origin/<branch>; hubHead when empty
 	pointsAt  []string // refs whose tip is HEAD
 	contained []string // refs that contain HEAD
 }
@@ -78,7 +79,7 @@ func hubFixture(t *testing.T, g gitState, branch string, hosts map[string]map[st
 			return Result{Code: 1}
 		case c.Name == "git" && branch != "" && strings.Contains(args, "rev-parse --verify") && strings.Contains(args, "refs/remotes/origin/"+branch):
 			if g.pushed || g.onOrigin {
-				return Result{}
+				return Result{Out: firstNonempty(g.originTip, hubHead) + "\n"}
 			}
 			return Result{Code: 1}
 		case c.Name == "git" && strings.Contains(args, "for-each-ref") && strings.Contains(args, "--points-at"):

@@ -243,10 +243,21 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	// HEAD at whatever origin ref holds HEAD, which is not the worktree the
 	// caller passed. Reviewer and counsel clear the branch below and keep that
 	// fallback; a pinned checkout already carries its evidence.
+	//
+	// A branch whose origin tip is a descendant of HEAD (HEAD strictly behind)
+	// is refused too: the node would find the origin tip differs from the sha
+	// and answer branch-elsewhere. HEAD equal to or ahead of the tip keeps
+	// today's behaviour. Both checks read only the local remote-tracking ref;
+	// the submitter never fetches, so a stale ref passes (hk 3355).
 	pinned := a.Repository != nil && a.Repository.Checkout != nil
 	if !pinned && repo.branch != "" && s.Role != "reviewer" && s.Role != "counsel" {
-		if a.call(ctx, "git", "-C", cwd, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+repo.branch).Code != 0 {
+		originRef := "refs/remotes/origin/" + repo.branch
+		tip := a.call(ctx, "git", "-C", cwd, "rev-parse", "--verify", "--quiet", originRef)
+		if tip.Code != 0 {
 			return Submission{}, fail(exitPlacement, "branch %s is not on origin; push it first: git -C %s push -u origin %s", repo.branch, cwd, repo.branch)
+		}
+		if strings.TrimSpace(tip.Out) != repo.head && a.call(ctx, "git", "-C", cwd, "merge-base", "--is-ancestor", repo.head, originRef).Code == 0 {
+			return Submission{}, fail(exitPlacement, "worktree is behind origin/%s; run: git -C %s fetch && git -C %s merge --ff-only origin/%s", repo.branch, cwd, cwd, repo.branch)
 		}
 	}
 	var checkout *HubCheckout
