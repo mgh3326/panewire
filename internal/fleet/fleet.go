@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/mgh3326/panewire/internal/textbound"
 	"io"
 	"net/http"
 	"net/url"
@@ -14,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/textbound"
 )
 
 // fleetSource is the production PlacementSource. Host connectivity and load
