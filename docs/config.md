@@ -1468,6 +1468,21 @@ active jobs as before with `panewire jobs jobs`; add `--include-completed` to
 include retained completed records. The hub does not track a separate reaped
 state, so a retained completed record can still appear after reap.
 
+## Task pane sweep
+
+`panewire daemon` closes the pane of a worker or tester whose bound hk task is
+merged, done or dropped, once the pane has stayed not working for a grace. The
+rules are in [pane-sweep.md](pane-sweep.md). Two daemon flags configure it:
+
+- `--task-pane-sweep-interval DURATION` — how often the sweep runs. Default
+  `5m`; `0` turns it off; any other value must be at least `10s`.
+- `--task-pane-sweep-grace DURATION` — how long a pane must have stayed not
+  working before it is closed. Default `10m`; `0` closes at the first sweep that
+  finds the task ended.
+
+The sweep needs `--hub-url`, `--hub-token-env` and `--hub-jobs-root`, and reads
+hk through `handoffkeep_env` in the node's `spawn.json`.
+
 ## Lane registration failure
 
 A spawn registers the new pane's lane with the hub (`panewire lanes add`). A
