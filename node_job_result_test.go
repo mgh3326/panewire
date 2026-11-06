@@ -203,7 +203,7 @@ func TestNodeJobResultActivityEvents(t *testing.T) {
 			t.Fatalf("bookkeeping event %d %s counted as activity: %d", i, name, got)
 		}
 	}
-	for want, name := range []string{"00006-lane.event.json", "00007-job.spawned.json", "00008-job.escalate.json", "stray.json", "00010-job.claim.txt"} {
+	for want, name := range []string{"00006-lane.event.json", "00007-job.spawned.json", "00008-job.escalate.json", "stray.json", "00010-job.claim.txt", "1-job.claim.json", "-job.claim.json", "000011-job.claim.json", "0001a-job.claim.json", "00012-.json"} {
 		write(name)
 		if got := count(t); got != want+1 {
 			t.Fatalf("%s: activity %d, want %d", name, got, want+1)

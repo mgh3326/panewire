@@ -47,10 +47,18 @@ type nodeJobResult struct {
 // file of any other kind, or a name that does not parse, counts as activity,
 // so an unfamiliar record keeps a pane from being released as unworked.
 func nodeJobBookkeepingEvent(name string) bool {
-	rest := strings.TrimLeft(name, "0123456789")
-	kind, ok := strings.CutPrefix(rest, "-")
-	kind, okSuffix := strings.CutSuffix(kind, ".json")
-	if !ok || !okSuffix || len(rest) == len(name) {
+	// The ledger names a file by pad5(seq): exactly five digits, a hyphen, a
+	// kind. Any other shape was not written by it and counts as activity.
+	if len(name) < len("00000-x.json") || name[5] != '-' {
+		return false
+	}
+	for _, digit := range []byte(name[:5]) {
+		if digit < '0' || digit > '9' {
+			return false
+		}
+	}
+	kind, ok := strings.CutSuffix(name[6:], ".json")
+	if !ok || kind == "" {
 		return false
 	}
 	switch kind {
