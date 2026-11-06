@@ -95,6 +95,8 @@ func retryDispatchApp(t *testing.T, out, errout io.Writer) *fleet.App {
 }
 
 func TestHubSpawnRetryReplayIsNotAPlacementPin(t *testing.T) {
+	// The spawn writes fleet events under the state home; keep them out of the tree.
+	t.Setenv("XDG_STATE_HOME", t.TempDir())
 	h := asyncSpawnHub(t)
 	server := httptest.NewServer(h.Handler())
 	defer server.Close()
