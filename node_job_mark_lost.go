@@ -55,72 +55,132 @@ func validNodeJobMarkLostResult(result nodeJobMarkLostResult) bool {
 	return false
 }
 
-// nodeJobLedger is what the local event ledger proves about a job: a
-// completion, or a claim made after the job was released.
+// nodeJobLedger is what the local event ledger proves about a job's current
+// attempt: a completion after it, or a claim newer than it. A job id can be
+// released and reclaimed, so an earlier cycle's completion or claim is not
+// evidence about this attempt.
 type nodeJobLedger struct {
 	completed  bool
 	newerClaim bool
 }
 
-// readNodeJobLedger reads <job>/events under the job's os.Root. A missing
-// events directory proves nothing happened after the claim. An unreadable event
-// is an error: the caller keeps the record rather than guessing.
-func readNodeJobLedger(job *os.Root) (nodeJobLedger, error) {
+type nodeJobLedgerEvent struct {
+	kind, pane, label string
+}
+
+func nodeJobClaimKind(kind string) bool {
+	return kind == "job.claim" || kind == "job.claimed" || kind == "job.reclaim"
+}
+
+// readNodeJobLedger reads <job>/events under the job's os.Root and reports what
+// happened after the attempt the caller names by pane or label. A missing
+// attempt receipt falls back to the newest claim carrying the label; with no
+// identity at all the whole ledger is read. An unreadable event is an error:
+// the caller keeps the record rather than guessing.
+func readNodeJobLedger(job *os.Root, pane, label string) (nodeJobLedger, error) {
 	var ledger nodeJobLedger
-	events, err := job.OpenRoot("events")
-	if errors.Is(err, os.ErrNotExist) {
-		return ledger, nil
-	}
+	events, err := readNodeJobLedgerEvents(job)
 	if err != nil {
 		return ledger, err
 	}
-	defer events.Close()
-	dir, err := events.Open(".")
-	if err != nil {
-		return ledger, err
+	attempt := -1
+	for index, event := range events {
+		if event.kind == "job.spawned" && (pane != "" && event.pane == pane || pane == "" && event.label == label) {
+			attempt = index
+		}
 	}
-	entries, err := dir.ReadDir(-1)
-	dir.Close()
-	if err != nil {
-		return ledger, err
+	if attempt < 0 {
+		for index, event := range events {
+			if nodeJobClaimKind(event.kind) && (label == "" || event.label == label) {
+				attempt = index
+			}
+		}
 	}
-	for _, entry := range entries {
-		if entry.IsDir() {
+	if attempt < 0 {
+		// No receipt or claim names this attempt: treat the newest claim as
+		// it, so the original claim never reads as a newer one.
+		for index, event := range events {
+			if nodeJobClaimKind(event.kind) {
+				attempt = index
+			}
+		}
+	}
+	for index, event := range events {
+		if index <= attempt {
 			continue
 		}
-		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
-			return ledger, errors.New("unreadable job event")
-		}
-		file, err := openNodeResultFile(events, entry.Name())
-		if err != nil {
-			return ledger, err
-		}
-		data, err := io.ReadAll(io.LimitReader(file, 64<<10))
-		file.Close()
-		if err != nil {
-			return ledger, err
-		}
-		var event struct {
-			Kind string `json:"kind"`
-		}
-		if json.Unmarshal(data, &event) != nil || event.Kind == "" {
-			return ledger, errors.New("unreadable job event")
-		}
-		switch event.Kind {
-		case "job.completed":
+		switch {
+		case event.kind == "job.completed":
 			ledger.completed = true
-		case "job.reclaim":
+		case nodeJobClaimKind(event.kind):
 			ledger.newerClaim = true
 		}
 	}
 	return ledger, nil
 }
 
+// readNodeJobLedgerEvents parses the job's events in file order, which is
+// sequence order.
+func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
+	root, err := job.OpenRoot("events")
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	dir, err := root.Open(".")
+	if err != nil {
+		return nil, err
+	}
+	entries, err := dir.ReadDir(-1)
+	dir.Close()
+	if err != nil {
+		return nil, err
+	}
+	events := make([]nodeJobLedgerEvent, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() {
+			continue
+		}
+		if !entry.Type().IsRegular() || !strings.HasSuffix(entry.Name(), ".json") {
+			return nil, errors.New("unreadable job event")
+		}
+		file, err := openNodeResultFile(root, entry.Name())
+		if err != nil {
+			return nil, err
+		}
+		data, err := io.ReadAll(io.LimitReader(file, 64<<10))
+		file.Close()
+		if err != nil {
+			return nil, err
+		}
+		var event struct {
+			Kind    string `json:"kind"`
+			Payload struct {
+				PaneID     string `json:"pane_id"`
+				Label      string `json:"label"`
+				AgentLabel string `json:"agent_label"`
+			} `json:"payload"`
+		}
+		if json.Unmarshal(data, &event) != nil || event.Kind == "" {
+			return nil, errors.New("unreadable job event")
+		}
+		label := event.Payload.Label
+		if label == "" {
+			label = event.Payload.AgentLabel
+		}
+		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label})
+	}
+	return events, nil
+}
+
 // nodeJobMarkLost writes a holder's hk record lost with this node's own
 // credential, after proving from herdr and the local ledger that the job is
 // still the one the hub means and never completed.
 func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLostArgs) (any, string) {
-	ledger, err := client.openNodeJobLedger(args.Job)
+	ledger, err := client.openNodeJobLedger(args.Job, args.PaneID, args.Label)
 	if errors.Is(err, errNodeJobsRootUnset) {
 		return nil, "jobs_root_unset"
 	}
@@ -166,7 +226,7 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 
 // openNodeJobLedger reads the job's local ledger; a node without a jobs root
 // cannot prove anything.
-func (client *HubClient) openNodeJobLedger(job string) (nodeJobLedger, error) {
+func (client *HubClient) openNodeJobLedger(job, pane, label string) (nodeJobLedger, error) {
 	root, _, found, err := client.openNodeJobDir(job)
 	if err != nil {
 		return nodeJobLedger{}, err
@@ -175,7 +235,7 @@ func (client *HubClient) openNodeJobLedger(job string) (nodeJobLedger, error) {
 		return nodeJobLedger{}, nil
 	}
 	defer root.Close()
-	return readNodeJobLedger(root)
+	return readNodeJobLedger(root, pane, label)
 }
 
 // nodeJobStoreForCommand is the node's own hk client: spawn.json

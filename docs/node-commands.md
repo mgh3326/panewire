@@ -195,12 +195,16 @@ that host, so the holder's node writes the record with its own credential
 (`spawn.json` `handoffkeep_env`). The HTTP command endpoint refuses the op for
 every caller, and a node credential is refused as for every other op.
 
-The node first reads its local job ledger: a `job.completed` event or a
-`job.reclaim` event refuses, because the record has moved on. It then re-reads
-`herdr agent list` and `herdr pane list` and refuses when either list still
-names `pane_id` or an agent row still names `label`; a failed pane list refuses
-a pane check as unknown, while a label-only check needs only the agent list.
-Only when both proofs hold does it write `{"state":"lost"}` to handoffkeep.
+The node first reads its local job ledger for the attempt named by `pane_id`
+and `label` — the newest `job.spawned` receipt carrying that pane, else the
+newest claim carrying that label. A `job.completed` event after that attempt,
+or a claim newer than it, refuses, because the record has moved on. An earlier
+released-and-reclaimed cycle's events say nothing about this attempt and do not
+block it. The node then re-reads `herdr agent list` and `herdr pane list` and
+refuses when either list still names `pane_id` or an agent row still names
+`label`; a failed pane list refuses a pane check as unknown, while a label-only
+check needs only the agent list. Only when both proofs hold does it write
+`{"state":"lost"}` to handoffkeep.
 
 | `outcome` | Meaning |
 | --- | --- |

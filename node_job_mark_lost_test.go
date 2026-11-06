@@ -12,13 +12,27 @@ import (
 // markLostJobDir writes a job directory with the given ledger event kinds.
 func markLostJobDir(t *testing.T, inbox, job string, kinds ...string) {
 	t.Helper()
+	events := make([]map[string]any, len(kinds))
+	for index, kind := range kinds {
+		events[index] = map[string]any{"kind": kind}
+	}
+	markLostJobEvents(t, inbox, job, events...)
+}
+
+// markLostJobEvents writes one events file per event, in order.
+func markLostJobEvents(t *testing.T, inbox, job string, events ...map[string]any) {
+	t.Helper()
 	dir := filepath.Join(inbox, "jobs", job, "events")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for index, kind := range kinds {
-		name := fmt.Sprintf("%05d-%s.json", index+1, kind)
-		if err := os.WriteFile(filepath.Join(dir, name), []byte(`{"kind":"`+kind+`"}`), 0600); err != nil {
+	for index, event := range events {
+		data, err := json.Marshal(event)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name := fmt.Sprintf("%05d-%v.json", index+1, event["kind"])
+		if err := os.WriteFile(filepath.Join(dir, name), data, 0600); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -99,20 +113,22 @@ func TestNodeJobMarkLostLabelOnlyIgnoresAFailedPaneList(t *testing.T) {
 	}
 }
 
-// The local ledger is read before herdr: a completion or a reclaim refuses and
-// never writes.
+// The local ledger is read before herdr: a completion or a reclaim after the
+// holder's own attempt refuses and never writes.
 func TestNodeJobMarkLostRefusesOnTheLocalLedger(t *testing.T) {
+	claim := map[string]any{"kind": "job.claim", "payload": map[string]any{"agent_label": "job-a"}}
+	spawned := map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w2:p3", "label": "job-a"}}
 	for _, test := range []struct {
 		name  string
-		kinds []string
+		extra map[string]any
 		want  string
 	}{
-		{"completion", []string{"job.claim", "job.spawned", "job.completed"}, nodeJobMarkLostCompleted},
-		{"newer claim", []string{"job.claim", "job.spawned", "job.reclaim"}, nodeJobMarkLostNewerClaim},
+		{"completion", map[string]any{"kind": "job.completed"}, nodeJobMarkLostCompleted},
+		{"newer claim", map[string]any{"kind": "job.reclaim", "payload": map[string]any{"agent_label": "job-a"}}, nodeJobMarkLostNewerClaim},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			inbox := t.TempDir()
-			markLostJobDir(t, inbox, "job-a", test.kinds...)
+			markLostJobEvents(t, inbox, "job-a", claim, spawned, test.extra)
 			client, store, fake := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
 			result, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", PaneID: "w2:p3", Label: "job-a"})
 			if code != "" || result["outcome"] != test.want {
@@ -122,6 +138,27 @@ func TestNodeJobMarkLostRefusesOnTheLocalLedger(t *testing.T) {
 				t.Fatalf("writes=%v herdr=%v", store.writes(), fake.calls)
 			}
 		})
+	}
+}
+
+// A job id may be released and reclaimed, so an earlier cycle's completion and
+// claim say nothing about the holder's own attempt.
+func TestNodeJobMarkLostIgnoresAnEarlierCycle(t *testing.T) {
+	inbox := t.TempDir()
+	markLostJobEvents(t, inbox, "job-a",
+		map[string]any{"kind": "job.claim", "payload": map[string]any{"agent_label": "job-a"}},
+		map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w0:p1", "label": "job-a"}},
+		map[string]any{"kind": "job.completed"},
+		map[string]any{"kind": "job.reclaim", "payload": map[string]any{"agent_label": "job-a"}},
+		map[string]any{"kind": "job.spawned", "payload": map[string]any{"pane_id": "w2:p3", "label": "job-a"}},
+	)
+	client, store, _ := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
+	result, code := nodeRun(t, client, nodeCommandJobMarkLost, nodeJobMarkLostArgs{Job: "job-a", PaneID: "w2:p3", Label: "job-a"})
+	if code != "" || result["outcome"] != nodeJobMarkLostLost {
+		t.Fatalf("code=%q result=%v", code, result)
+	}
+	if store.state("job-a") != "lost" {
+		t.Fatalf("hk state=%v", store.state("job-a"))
 	}
 }
 
