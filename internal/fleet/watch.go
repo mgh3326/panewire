@@ -143,6 +143,7 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	missing := 0
 	seen := len(args) == 1
 	latePoll := false
+	var screenRead quotaStopWatch
 	for {
 		j, e := a.job(id)
 		if e != nil {
@@ -200,9 +201,11 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			latePoll = true
 		}
 		present := false
+		var paneAgent Agent
 		for _, ag := range agents {
 			if ag.Pane == j.Pane {
 				present = true
+				paneAgent = ag
 			}
 		}
 		if present {
@@ -210,6 +213,14 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			missing = 0
 		} else if seen {
 			missing++
+		}
+		// An idle pane stopped by a quota screen with no report will not
+		// finish: end the job with the reason, so it is retried, not lost
+		// silently at the watch deadline.
+		if present && !pending {
+			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok {
+				return a.quotaStopLost(ctx, j, stop)
+			}
 		}
 		if missing >= 2 {
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {

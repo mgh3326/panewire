@@ -9,3 +9,7 @@ The default is shadow (`quota_stop.act=false`, represented by the zero-value `Co
 This feature does not change spawn routing or make the SWE-2 free hold fleet-wide. The spawn order is panewire's pool-order policy ([config](config.md), decision/2026-11-04/pool-order-owner).
 
 A blocked pane is never resumed. herdr refuses `agent.prompt` on a blocked pane (`agent_blocked`) and sends nothing, so a quota stop seen on a blocked wake is handed over as `blocked_dialog`, and a due wait whose pane is blocked at resume time is handed over the same way without reading the screen or spending the job's one wait.
+
+## Job end on a quota stop
+
+Independent of `--quota-stop-act`, the job watcher ends a job whose worker, tester or reviewer pane is idle on a quota stop screen and has no report. It writes the hk record `state=lost` with `end_reason="quota_stop pool=<pool> reset_at=<RFC3339 UTC>"` (`reset_at` left out when unknown, at most 128 characters, no `result`), emits `job.lost` with `reason: "quota_stop"`, `pool` and `reset_at`, and releases the quota reservation. It only reads the screen and never sends input to the pane. The classifier is `internal/quotastop`; the devin line is matched anywhere in the status line, including the `▲ Something went wrong — ` prefix. A report with the end signal still takes the done path.

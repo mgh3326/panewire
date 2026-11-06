@@ -32,7 +32,10 @@ func (a *App) launchArgs(s Seat, l Launch) ([]string, []string, error) {
 		}
 		return argv, env, nil
 	case "codex":
-		return []string{"--yolo", "-m", m, "-c", "model_reasoning_effort=" + e}, env, nil
+		// check_for_update_on_startup=false: an "Update now / Skip" prompt at
+		// startup holds the pane before it reads the brief (agent_not_ready),
+		// whatever the host's ~/.codex/config.toml says. Upgrades are deploys.
+		return []string{"--yolo", "-m", m, "-c", "model_reasoning_effort=" + e, "-c", "check_for_update_on_startup=false"}, env, nil
 	case "devin":
 		return []string{"--model", m, "--permission-mode", "dangerous", "--respect-workspace-trust", "false"}, env, nil
 	case "omp":

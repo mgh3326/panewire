@@ -1,0 +1,8 @@
+❭ [pw-example] Read the brief and review the PR
+
+▲ Something went wrong — Reached free model rate limit … reset in 5 minutes (10:32 UTC). Send a message to retry
+
+────────────────────────────────────────
+❭ Ask Devin to build features, fix bugs, or work on your code
+────────────────────────────────────────
+  SWE-2 max
