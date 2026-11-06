@@ -2,7 +2,6 @@ package fleet
 
 import (
 	"context"
-	"fmt"
 	"slices"
 	"time"
 
@@ -44,16 +43,20 @@ func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStop
 }
 
 // quotaStopLost ends a job whose idle pane shows a quota stop and has no
-// report. The hk record only takes state (its field list has no reason), so
-// the reason and the parsed reset travel on job.lost, which owners and
-// mergewake read.
+// report. The contract mergewake reads (hk 3302): the hk record takes
+// state=lost and end_reason="quota_stop pool=<pool> reset_at=<RFC3339 UTC>"
+// (reset_at left out when unknown), and job.lost carries reason="quota_stop",
+// pool and reset_at. No result is written; hk takes one only with completed.
 func (a *App) quotaStopLost(ctx context.Context, j Job, stop quotastop.Stop) error {
-	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost"}); e != nil {
-		a.jobRecordFailed(ctx, j.ID, "lost", e)
-	}
-	payload := map[string]any{"pane_id": j.Pane, "reason": fmt.Sprintf("quota_stop:%s", stop.Pool)}
+	endReason := "quota_stop pool=" + stop.Pool
+	payload := map[string]any{"pane_id": j.Pane, "reason": "quota_stop", "pool": stop.Pool}
 	if !stop.Reset.IsZero() {
-		payload["reset_at"] = stop.Reset.UTC().Format(time.RFC3339)
+		reset := stop.Reset.UTC().Format(time.RFC3339)
+		endReason += " reset_at=" + reset
+		payload["reset_at"] = reset
+	}
+	if e := a.putJobRecord(ctx, j.ID, map[string]any{"state": "lost", "end_reason": endReason}); e != nil {
+		a.jobRecordFailed(ctx, j.ID, "lost", e)
 	}
 	if e := a.event(ctx, j.ID, "job.lost", payload); e != nil {
 		return e

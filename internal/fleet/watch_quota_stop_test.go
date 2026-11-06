@@ -77,12 +77,17 @@ func TestWatcherQuotaStopEndsIdleJobAsLost(t *testing.T) {
 			if e := a.watch(context.Background(), []string{"j"}); e != nil {
 				t.Fatal(e)
 			}
-			if got := str(h.record(t, "j"), "state"); got != "lost" {
-				t.Fatalf("hk state=%q, want lost", got)
+			rec := h.record(t, "j")
+			wantEnd := "quota_stop pool=devin-free reset_at=" + reset
+			if str(rec, "state") != "lost" || str(rec, "end_reason") != wantEnd || len(wantEnd) > 128 {
+				t.Fatalf("hk record state=%v end_reason=%q, want lost / %q", rec["state"], rec["end_reason"], wantEnd)
+			}
+			if _, ok := rec["result"]; ok {
+				t.Fatalf("hk record carries a result: %v", rec["result"])
 			}
 			p := lostPayload(t, a)
-			if p == nil || str(p, "reason") != "quota_stop:devin-free" || str(p, "reset_at") != reset || str(p, "pane_id") != "w:p1" {
-				t.Fatalf("job.lost payload=%v, want reason quota_stop:devin-free reset_at %s", p, reset)
+			if p == nil || str(p, "reason") != "quota_stop" || str(p, "pool") != "devin-free" || str(p, "reset_at") != reset || str(p, "pane_id") != "w:p1" {
+				t.Fatalf("job.lost payload=%v, want reason quota_stop pool devin-free reset_at %s", p, reset)
 			}
 			if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
 				t.Fatalf("quota not released: %s %v", st, pools)
@@ -144,5 +149,19 @@ func TestWatcherQuotaStopWithReportKeepsDonePath(t *testing.T) {
 	}
 	if got := str(h.record(t, "j"), "state"); got != "completed" {
 		t.Fatalf("hk state=%q, want completed", got)
+	}
+}
+
+// With no parsed reset, reset_at is left out of both the hk end_reason and job.lost.
+func TestWatcherQuotaStopUnknownResetOmitsResetAt(t *testing.T) {
+	a, _, h, _ := quotaStopFixture(t, "worker", "idle", "▲ Something went wrong — Reached free model rate limit\n❭ Ask Devin to build features, fix bugs, or work on your code\n")
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if got := str(h.record(t, "j"), "end_reason"); got != "quota_stop pool=devin-free" {
+		t.Fatalf("end_reason=%q", got)
+	}
+	if p := lostPayload(t, a); p == nil || str(p, "reason") != "quota_stop" || str(p, "pool") != "devin-free" || p["reset_at"] != nil {
+		t.Fatalf("job.lost payload=%v", p)
 	}
 }
