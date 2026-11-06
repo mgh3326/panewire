@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -139,6 +140,9 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 	if err != nil {
 		return nil, err
 	}
+	// File.ReadDir is directory order; the ledger's sequence is the file-name
+	// order.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
 	events := make([]nodeJobLedgerEvent, 0, len(entries))
 	for _, entry := range entries {
 		if entry.IsDir() {
