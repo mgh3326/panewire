@@ -793,7 +793,10 @@ func TestWorkingWakeKeepsRowHeldMeanwhile_t3276(t *testing.T) {
 	manager.offer(t.Context(), t3276Message(directive))
 
 	// An offer persisted and registered this row after the wake's snapshot.
-	late := relayHeld{Pane: "w1:pW", Lane: t3276Worker, EventID: 9999, JobID: "late", Text: "late", DeliverPolicy: relayDeliverDirective, HeldSince: time.Now()}
+	late := relayHeld{Pane: "w1:pW", Lane: t3276Worker, EventID: 9999, JobID: "late", Text: "late", DeliverPolicy: "idle", HeldSince: time.Now(), RecvSeq: 9999}
+	if _, err := rig.node.relayStore().InsertRelayHeld(t.Context(), late); err != nil {
+		t.Fatal(err)
+	}
 	manager.mu.Lock()
 	manager.held["w1:pW"] = append(manager.held["w1:pW"], late)
 	manager.mu.Unlock()
@@ -809,4 +812,81 @@ func TestWorkingWakeKeepsRowHeldMeanwhile_t3276(t *testing.T) {
 	if !slices.Contains(ids, int64(9999)) || !slices.Contains(ids, report.EventID) || slices.Contains(ids, directive.EventID) {
 		t.Fatalf("held set after the wake = %v, want the late row and the report kept and the delivered directive gone", ids)
 	}
+}
+
+// hold registers a row under the same lock a working wake takes around its own
+// snapshot. Holding that lock, an offer must not have inserted its row yet:
+// otherwise a release could deliver the row between the offer's snapshot and
+// its registration, and the offer would then put the delivered row back.
+func TestHoldIsSerializedWithRelease_t3276(t *testing.T) {
+	rig := t3276Start(t)
+	directive := rig.send("ev-serial", "findings", "[mergewake] findings for the worker")
+	sc := t3276Harnesses()["codex-working"]
+	sc.preStatus, sc.postStatus = "blocked", "blocked"
+	t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+	manager := rig.node.relayBusyManager()
+
+	manager.mu.Lock()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		manager.offer(t.Context(), t3276Message(directive))
+	}()
+	time.Sleep(150 * time.Millisecond) // a window that proves the offer does not progress while the lock is held
+	rows, err := rig.node.relayStore().RelayHeldForPane(t.Context(), "w1:pW")
+	manager.mu.Unlock()
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("the offer inserted its held row (%+v, err=%v) while the manager lock was held", rows, err)
+	}
+	<-done
+	if rows, err := rig.node.relayStore().RelayHeldForPane(t.Context(), "w1:pW"); err != nil || len(rows) != 1 {
+		t.Fatalf("after the lock was released the offer's row is missing: %+v err=%v", rows, err)
+	}
+}
+
+// After a wake the in-memory held set is made to match the store, so a row that
+// was delivered and deleted cannot linger and send the next wait looking for a
+// state that is already true (a loop that starves the idle rows).
+func TestReconcileDropsDeliveredRowFromMemory_t3276(t *testing.T) {
+	rig := t3276Start(t)
+	report := rig.send("ev-recon-report", "report", "[worker] progress")
+	sc := t3276Harnesses()["codex-working"]
+	sc.preStatus, sc.postStatus = "blocked", "blocked"
+	t3276InstallPane(t, sc, t3276TypedFor(report), true)
+	manager := rig.node.relayBusyManager()
+	manager.offer(t.Context(), t3276Message(report))
+	stale := relayHeld{Pane: "w1:pW", Lane: t3276Worker, EventID: 9998, JobID: "gone", Text: "gone", DeliverPolicy: relayDeliverDirective, HeldSince: time.Now()}
+	manager.mu.Lock()
+	manager.held["w1:pW"] = append(manager.held["w1:pW"], stale)
+	manager.mu.Unlock()
+
+	manager.reconcileHeld(t.Context(), "w1:pW")
+
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	if len(manager.held["w1:pW"]) != 1 || manager.held["w1:pW"][0].EventID != report.EventID {
+		t.Fatalf("held set = %+v, want only the report that is still in the store", manager.held["w1:pW"])
+	}
+}
+
+// An unreadable store during a working wake must not leave the held rows with
+// no waiter: the wait is armed again shortly.
+func TestWorkingWakeRearmsWhenStoreUnreadable_t3276(t *testing.T) {
+	prev := relayWorkingRetryDelay
+	relayWorkingRetryDelay = 20 * time.Millisecond
+	t.Cleanup(func() { relayWorkingRetryDelay = prev })
+	rig := t3276Start(t)
+	directive := rig.send("ev-store-down", "findings", "[mergewake] findings for the worker")
+	sc := t3276Harnesses()["codex-working"]
+	sc.preStatus, sc.postStatus = "blocked", "blocked"
+	t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+	manager := rig.node.relayBusyManager()
+	manager.offer(t.Context(), t3276Message(directive))
+	waits := func() int { rig.waitMu.Lock(); defer rig.waitMu.Unlock(); return len(rig.waits) }
+	eventually(t, 2*time.Second, "the first wait", func() bool { return waits() == 1 })
+
+	rig.node.relayStore().Close() // the store becomes unreadable
+	manager.releaseWorking(t.Context(), "w1:pW", false)
+
+	eventually(t, 2*time.Second, "the wait armed again after the store error", func() bool { return waits() >= 2 })
 }

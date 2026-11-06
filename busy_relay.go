@@ -456,40 +456,45 @@ func (manager *relayBusyManager) hold(parent context.Context, item relayHeld, re
 		manager.deliver(parent, []relayHeld{item}, false)
 		return
 	}
+	// The insert, the snapshot and the in-memory update are one step under the
+	// manager lock, the same lock a release takes around its own snapshot: a
+	// release can never interleave between this row's snapshot and its
+	// registration, and so cannot have the row it delivered restored here.
+	manager.mu.Lock()
 	inserted, err := store.InsertRelayHeld(parent, item)
 	if err != nil {
+		manager.mu.Unlock()
 		manager.deliver(parent, []relayHeld{item}, false)
 		return
 	}
+	rows, rowsErr := store.RelayHeldForPane(parent, item.Pane)
+	if rowsErr == nil {
+		if inserted {
+			for index := range rows {
+				if rows[index].EventID == item.EventID {
+					// SQLite stores milliseconds for restart recovery. Keep the precise
+					// receipt instant in this live process so max_wait=N reaches herdr as
+					// exactly N*1000 milliseconds on its first arm.
+					rows[index].HeldSince = item.HeldSince
+					rows[index].fresh = true
+				}
+			}
+		}
+		manager.held[item.Pane] = rows
+	}
+	manager.mu.Unlock()
 	if !inserted {
 		// A hub replay after a node restart is the same local hold, not another
 		// prompt. Re-report it so a restarted hub rebuilds its projection.
-		rows, err := store.RelayHeldForPane(parent, item.Pane)
-		if err == nil {
-			manager.mu.Lock()
-			manager.held[item.Pane] = rows
-			manager.mu.Unlock()
+		if rowsErr == nil {
 			manager.arm(parent, item.Pane)
 		}
 		manager.reportHeld(item, reason)
 		return
 	}
-	rows, err := store.RelayHeldForPane(parent, item.Pane)
-	if err != nil {
+	if rowsErr != nil {
 		return
 	}
-	for index := range rows {
-		if rows[index].EventID == item.EventID {
-			// SQLite stores milliseconds for restart recovery. Keep the precise
-			// receipt instant in this live process so max_wait=N reaches herdr as
-			// exactly N*1000 milliseconds on its first arm.
-			rows[index].HeldSince = item.HeldSince
-			rows[index].fresh = true
-		}
-	}
-	manager.mu.Lock()
-	manager.held[item.Pane] = rows
-	manager.mu.Unlock()
 	manager.reportHeld(item, reason)
 	manager.arm(parent, item.Pane)
 }
@@ -694,6 +699,9 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 	items, err := store.RelayHeldForPane(parent, pane)
 	if err != nil {
 		manager.mu.Unlock()
+		// A transient store error must not strand the held rows with no
+		// waiter: this wait is over, so wait again shortly.
+		time.AfterFunc(relayWorkingRetryDelay, func() { manager.arm(parent, pane) })
 		return
 	}
 	var directives []relayHeld
@@ -727,7 +735,44 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 	manager.held[pane] = remaining
 	manager.mu.Unlock()
 	manager.deliver(parent, manager.filterDeliverableHeld(parent, directives), false)
+	manager.reconcileHeld(parent, pane)
 	manager.arm(parent, pane)
+}
+
+// relayWorkingRetryDelay spaces the re-wait after a held snapshot could not be
+// read during a working wake.
+var relayWorkingRetryDelay = time.Second
+
+// reconcileHeld makes the in-memory held set match the store for a pane, so a
+// row that was delivered (and deleted) cannot linger in memory and keep the next
+// wait looking for a state that is already true. In-memory timing (the precise
+// receipt instant and the fresh flag) is kept for rows that are still held. An
+// unreadable store leaves the set as it is.
+func (manager *relayBusyManager) reconcileHeld(parent context.Context, pane string) {
+	store := manager.client.relayStore()
+	if store == nil {
+		return
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	rows, err := store.RelayHeldForPane(parent, pane)
+	if err != nil {
+		return
+	}
+	current := map[int64]relayHeld{}
+	for _, item := range manager.held[pane] {
+		current[item.EventID] = item
+	}
+	for index := range rows {
+		if live, ok := current[rows[index].EventID]; ok {
+			rows[index].HeldSince, rows[index].fresh = live.HeldSince, live.fresh
+		}
+	}
+	if len(rows) == 0 {
+		delete(manager.held, pane)
+		return
+	}
+	manager.held[pane] = rows
 }
 
 func (manager *relayBusyManager) release(parent context.Context, pane string, expired bool) {
