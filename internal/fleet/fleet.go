@@ -239,7 +239,8 @@ const backendReasonMaxBytes = 200
 func backendReason(reason string) string {
 	reason = strings.Join(strings.Fields(reason), " ")
 	if len(reason) > backendReasonMaxBytes {
-		return textbound.PrefixWithin(reason, backendReasonMaxBytes) + "…"
+		// The ellipsis counts toward the bound.
+		return textbound.PrefixWithin(reason, backendReasonMaxBytes-len("…")) + "…"
 	}
 	return reason
 }

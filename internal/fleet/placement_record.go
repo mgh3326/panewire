@@ -476,8 +476,15 @@ func (a *App) capRejectedPlacements() {
 	}
 	var files []file
 	for _, entry := range entries {
-		// A rejection-reason sidecar is not a record: it goes with its record.
-		if entry.Type().IsRegular() && !strings.HasSuffix(entry.Name(), ".reason") {
+		// Only records count (a sidecar, or another process's temp file mid
+		// publish, is not one). A sidecar whose record is gone is swept here.
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".reason") {
+			if _, err := os.Stat(filepath.Join(dir, strings.TrimSuffix(entry.Name(), ".reason"))); os.IsNotExist(err) {
+				_ = os.Remove(filepath.Join(dir, entry.Name()))
+			}
+			continue
+		}
+		if entry.Type().IsRegular() && strings.HasSuffix(entry.Name(), ".json") {
 			info, err := entry.Info()
 			if err != nil {
 				if os.IsNotExist(err) {
@@ -499,6 +506,7 @@ func (a *App) capRejectedPlacements() {
 	for _, f := range files[:max(0, len(files)-1000)] {
 		if err := os.Remove(filepath.Join(dir, f.name)); err != nil {
 			if os.IsNotExist(err) {
+				_ = os.Remove(filepath.Join(dir, f.name+".reason"))
 				continue
 			}
 			a.warn("placement quarantine entry could not be removed")

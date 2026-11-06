@@ -903,7 +903,31 @@ func TestPlacementRejectionKeepsHKReason(t *testing.T) {
 func TestBackendReasonIsBoundedToOneLine(t *testing.T) {
 	long := strings.Repeat("é", 300) + "\nsecond line"
 	got := backendReason(long)
-	if strings.Contains(got, "\n") || len(got) > backendReasonMaxBytes+len("…") {
+	if strings.Contains(got, "\n") || len(got) > backendReasonMaxBytes {
 		t.Fatalf("reason not bounded/flattened: %d bytes", len(got))
+	}
+}
+
+// The cap counts .json records only (a temp file mid-publish is not one) and
+// sweeps a sidecar whose record is already gone.
+func TestPlacementQuarantineCountsRecordsAndSweepsOrphanSidecars(t *testing.T) {
+	a := testApp(t)
+	dir := filepath.Join(a.stateDir(), "placements-rejected")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"a.json", "a.json.reason", "gone.json.reason", ".panewire-tmp123"} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	a.capRejectedPlacements()
+	if _, err := os.Stat(filepath.Join(dir, "gone.json.reason")); !os.IsNotExist(err) {
+		t.Fatalf("orphan sidecar kept: %v", err)
+	}
+	for _, keep := range []string{"a.json", "a.json.reason", ".panewire-tmp123"} {
+		if _, err := os.Stat(filepath.Join(dir, keep)); err != nil {
+			t.Fatalf("%s removed: %v", keep, err)
+		}
 	}
 }
