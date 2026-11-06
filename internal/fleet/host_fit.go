@@ -277,8 +277,10 @@ func capsGap(hosts []selHost, required []string) string {
 // candidate except plain credit and the pools ranked behind credit; pass 2
 // walks the same hosts with those, only when pass 1 chose nothing. Quota
 // policy, including expiring credit, still orders rungs inside a host in each
-// pass: expiring credit is waste-risk, so it stays in pass 1. See
-// docs/placement.md for the selection order and trace fields.
+// pass: expiring credit is waste-risk, so it stays in pass 1. A pool is paced
+// behind credit (behindCredit) only by credit present on its own host (T2997);
+// credit on another host is only the pass 2 last band and never demotes it.
+// See docs/placement.md for the selection order and trace fields.
 func (sp *selPresence) admitHostFirst(ctx context.Context, s Spawn, p *selPlan, pending []*selCand) {
 	ranked := rankHosts(sp.hosts)
 	// Order each host's present candidates once, on the whole host, so the

@@ -193,21 +193,7 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 	// Selection can refuse before a placePlan exists. Keep its host trace
 	// too, projecting only the host, scores, and structured skip reasons.
 	if d.plan == nil {
-		hosts, _ := s.Sel["hosts"].([]any)
-		for _, raw := range hosts {
-			host, _ := raw.(map[string]any)
-			if pass, _ := host["pass"].(int); pass > 1 {
-				continue // the credit band retries hosts pass 1 already listed
-			}
-			row := placementCandidateRecord{Host: str(host, "host"), Outcome: "skipped", Reason: placementSkipReason(str(host, "outcome"))}
-			if row.Host == d.execution.Host && (d.placed || d.started) {
-				row.Outcome, row.Reason = "chosen", "available"
-			}
-			if score, ok := number(host, "score"); ok {
-				row.Score = &score
-			}
-			r.Candidates = append(r.Candidates, row)
-		}
+		r.Candidates = append(r.Candidates, selectionCandidates(s.Sel, d.execution.Host, d.placed || d.started)...)
 	}
 	if d.plan != nil {
 		r.Pool, r.Repo = d.plan.pool, d.plan.repo
@@ -282,6 +268,49 @@ func (a *App) finishPlacement(ctx context.Context, s Spawn, err error) {
 		return
 	}
 	a.deliverPlacements(ctx)
+}
+
+// selectionCandidates projects a selection's host trace into one candidate row
+// per host. launched says the host named chosen took the job.
+func selectionCandidates(sel map[string]any, chosen string, launched bool) []placementCandidateRecord {
+	var out []placementCandidateRecord
+	hosts, _ := sel["hosts"].([]any)
+	at, untried := map[string]int{}, map[string]bool{}
+	for _, raw := range hosts {
+		host, _ := raw.(map[string]any)
+		name := str(host, "host")
+		if pass, _ := host["pass"].(int); pass > 1 {
+			// The credit band retries a host pass 1 already listed. Merge its
+			// row so the refusal it carries is not lost: it replaces a pass 1
+			// row that tried nothing, and otherwise pass 1 keeps the entry.
+			if i, ok := at[name]; ok {
+				if untried[name] && out[i].Outcome != "chosen" {
+					out[i].Reason = placementSkipReason(creditBandReason(host))
+				}
+				continue
+			}
+		}
+		row := placementCandidateRecord{Host: name, Outcome: "skipped", Reason: placementSkipReason(str(host, "outcome"))}
+		if name == chosen && launched {
+			row.Outcome, row.Reason = "chosen", "available"
+		}
+		if score, ok := number(host, "score"); ok {
+			row.Score = &score
+		}
+		tried, _ := host["tried"].([]any)
+		at[name], untried[name] = len(out), len(tried) == 0
+		out = append(out, row)
+	}
+	return out
+}
+
+// creditBandReason names why a host's credit band attempt did not place: the
+// gate's quota result when it gave one, else the host row's own outcome.
+func creditBandReason(host map[string]any) string {
+	if got := str(host, "admission_outcome"); got == "quota_exhausted" || got == "quota_unknown" {
+		return got
+	}
+	return str(host, "outcome")
 }
 
 func placementSkipReason(reason string) string {

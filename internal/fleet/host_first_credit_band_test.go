@@ -168,3 +168,92 @@ func TestHostFirstPacedPoolIsInLastBand(t *testing.T) {
 		t.Fatalf("paced pool outcome = %q, want below_choice", got)
 	}
 }
+
+// T2997 stands: a pool is paced behind credit only when that credit is on its
+// own host. Credit on another host is only the pass 2 last band, so it never
+// pre-empts a paced pool: the paced pool on rank 1 is chosen in pass 1.
+func TestHostFirstPacedPoolOnAWithCreditOnlyOnBChosenInPassOne(t *testing.T) {
+	paced := PoolView{Status: "ok", Class: "spend", Blocking: ptrF(60), LongProjected: ptrF(120), Projected: ptrF(120), ShortUsed: ptrF(40)}
+	for _, tc := range []struct {
+		name   string
+		credit func(time.Time) *CreditBalance
+	}{
+		{"plain credit", noBalance},
+		{"expiring credit", balance(80, 100*time.Hour)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, s, _, src := creditBandFixture(t, []CatalogRow{creditRow, sonnetRow}, map[string]string{"mac-b": testClaudeA, "cloud-small": testCreditA}, tc.credit)
+			src.accounts[testClaudeA] = SharedAccount{Key: testClaudeA, Observed: true, Fresh: true, MeasuredAt: a.Now(), Quota: &paced}
+			sel, err := a.selectProfile(context.Background(), s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sel.chosen.seatName != "sonnet" || sel.chosen.host != "mac-b" || sel.chosen.behindCredit {
+				t.Fatalf("paced pool on A must beat credit that is only on B: %s on %s behindCredit=%v", sel.chosen.row.Profile, sel.chosen.host, sel.chosen.behindCredit)
+			}
+			if got := outcomeOf(t, sel, "omp-opus"); got != "below_choice" {
+				t.Fatalf("credit outcome = %q, want below_choice", got)
+			}
+			for _, got := range hostPasses(sel) {
+				if got[len(got)-1] != '1' {
+					t.Fatalf("the paced pool is chosen in pass 1, pass 2 untried: %v", hostPasses(sel))
+				}
+			}
+		})
+	}
+}
+
+// A credit-only host whose gate says quota exhausted keeps that refusal in the
+// placement record, though pass 1 listed the host as having no candidate.
+func TestPlacementRecordKeepsCreditBandRefusal(t *testing.T) {
+	a, s, q, _ := creditBandFixture(t, []CatalogRow{creditRow}, map[string]string{"mac-b": testCreditA}, noBalance)
+	q.GateDo = func(QuotaRequest) (string, error) { return "", fail(3, "quota exhausted") }
+	sel, err := a.selectProfile(context.Background(), s)
+	if err == nil {
+		t.Fatal("the only credit account is exhausted: selection must refuse")
+	}
+	rec := sel.record()
+	if got := hostRow(t, sel, "mac-b")["outcome"]; got != "no_candidate_present" && got != "all_refused" {
+		t.Fatalf("unexpected pass 1 row outcome %v", got)
+	}
+	rows := selectionCandidates(rec, "", false)
+	var seen int
+	for _, r := range rows {
+		if r.Host != "mac-b" {
+			continue
+		}
+		seen++
+		if r.Reason != "quota_exhausted" {
+			t.Fatalf("mac-b record reason = %q, want quota_exhausted (the credit band's refusal)", r.Reason)
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("mac-b must appear once in the record, got %d: %+v", seen, rows)
+	}
+}
+
+// A two-pass selection lists each host once in the job.placement event, so a
+// repeated host does not use up MaxCandidates.
+func TestSelectionTermsListEachHostOnce(t *testing.T) {
+	a, s, _, _ := creditBandFixture(t, []CatalogRow{creditRow}, map[string]string{"mac-b": testCreditA, "cloud-small": testCreditA}, noBalance)
+	sel, err := a.selectProfile(context.Background(), s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := hostPasses(sel); !slices.Contains(got, "mac-b/2") || !slices.Contains(got, "mac-b/1") {
+		t.Fatalf("fixture must run two passes: %v", got)
+	}
+	terms := selectionTerms(sel.record())
+	seen := map[string]int{}
+	for _, h := range terms {
+		seen[h.Host]++
+	}
+	if len(terms) != len(seen) || seen["mac-b"] != 1 || seen["cloud-small"] != 1 {
+		t.Fatalf("each host once, got %+v", terms)
+	}
+	for _, h := range terms {
+		if h.Host == "mac-b" && h.Outcome != "admitted" {
+			t.Fatalf("the pass 2 row replaces pass 1: mac-b outcome = %q", h.Outcome)
+		}
+	}
+}
