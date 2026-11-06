@@ -35,11 +35,23 @@ func unconfirmedMarkEventID(rowID int64) string {
 	return relayUnconfirmedMarkEventPrefix + strconv.FormatInt(rowID, 10)
 }
 
+// unconfirmedDigestMarkEventID names the marker of a row that was an inbox
+// digest or escalation batch when it was marked. The fact travels on the
+// marker so a walk with no inbox store open can still tell the row must not
+// be replayed as an ordinary event.
+func unconfirmedDigestMarkEventID(rowID int64) string {
+	return unconfirmedMarkEventID(rowID) + relayUnconfirmedDigestMarkSuffix
+}
+
+func unconfirmedMarkIsDigest(eventID string) bool {
+	return strings.HasPrefix(eventID, relayUnconfirmedMarkEventPrefix) && strings.HasSuffix(eventID, relayUnconfirmedDigestMarkSuffix)
+}
+
 func unconfirmedMarkOriginID(eventID string) int64 {
 	if !strings.HasPrefix(eventID, relayUnconfirmedMarkEventPrefix) {
 		return 0
 	}
-	id, err := strconv.ParseInt(strings.TrimPrefix(eventID, relayUnconfirmedMarkEventPrefix), 10, 64)
+	id, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(eventID, relayUnconfirmedMarkEventPrefix), relayUnconfirmedDigestMarkSuffix), 10, 64)
 	if err != nil || id < 1 {
 		return 0
 	}
@@ -131,6 +143,18 @@ func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) bool {
 		return true
 	}
 	markID := unconfirmedMarkEventID(record.ID)
+	if h.inbox != nil && record.Kind == "lane.event" && !chatRelayEventPattern.MatchString(record.EventID) {
+		// An unreadable batch table cannot prove the mark unneeded or ordinary,
+		// so the window is kept like a failed marker POST.
+		isBatch, err := h.inbox.store.isDigestBatch(record.OwnerLane, record.EventID)
+		if err != nil {
+			h.logger.Warn("relay unconfirmed batch lookup failed", "event_id", record.ID)
+			return false
+		}
+		if isBatch {
+			markID = unconfirmedDigestMarkEventID(record.ID)
+		}
+	}
 	mark := hubJobEventPayload{
 		JobID:     laneEventTransportID(relayUnconfirmedMarkLane, markID),
 		Epoch:     1,
@@ -147,32 +171,34 @@ func (h *HubServer) markRelayEventUnconfirmed(pending relayPending) bool {
 }
 
 // unconfirmedMarkOrigins walks the undelivered listing once and returns the
-// set of durable row ids a live marker still names. Marker rows are always
+// set of durable row ids a live marker still names, and the subset whose
+// marker says the row was a digest or escalation batch. Marker rows are always
 // lane.event, so the scan shares that listing.
-func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (map[int64]bool, error) {
-	origins := make(map[int64]bool)
+func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (origins, digests map[int64]bool, err error) {
+	origins = make(map[int64]bool)
+	digests = make(map[int64]bool)
 	var afterID int64
 	for {
 		pageStart := afterID
 		records, err := h.handoffkeep.listUndelivered(ctx, "", "lane.event", afterID, handoffkeepReplayLimit)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for _, record := range records {
 			if isUnconfirmedMarkRecord(record) {
 				if origin := unconfirmedMarkOriginID(record.EventID); origin > 0 {
 					origins[origin] = true
+					if unconfirmedMarkIsDigest(record.EventID) {
+						digests[origin] = true
+					}
 				}
 			}
 			if record.ID > afterID {
 				afterID = record.ID
 			}
 		}
-		if len(records) < handoffkeepReplayLimit {
-			return origins, nil
-		}
-		if afterID <= pageStart {
-			return origins, nil
+		if len(records) < handoffkeepReplayLimit || afterID <= pageStart {
+			return origins, digests, nil
 		}
 	}
 }
@@ -186,11 +212,11 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (map[int64]bool,
 // can never leave the row open for another labelled inject (#1034). The
 // rule is: no labelled copy is ever queued unless the durable retire for
 // that row has already succeeded.
-func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffkeepRelayEvent, source string) {
+func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffkeepRelayEvent, source string, digestMark bool) {
 	if h.retireUnconfirmedSettledInInbox(record) {
 		return
 	}
-	if h.retireUnconfirmedDigest(record) {
+	if h.retireUnconfirmedDigest(record, digestMark) {
 		return
 	}
 	if h.replayInbox(record) {
@@ -308,17 +334,23 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 // check, which already retires a batch whose own inbox item the receiver has.
 // A row is a batch only when lane_inbox_batches names it for its lane; the
 // table is never pruned, and an event id alone proves nothing because a
-// producer may choose any id. With no inbox store the row cannot be told from
-// an ordinary event and cannot release its items, so it is left to the
-// ordinary labelled replay. The batch's still-unread items are released before
-// the row retires, so a crash between the two leaves at worst a fresh
+// producer may choose any id. With no inbox store the table cannot be read, so
+// the marker decides: a marker written for a batch (while a store was open)
+// defers the row without a copy, anything else is an ordinary row. The batch's
+// still-unread items are released before the row retires, so a crash between the two leaves at worst a fresh
 // escalation plus a retire the next restart repeats, never an item that no
 // batch will ever escalate. The next flush then escalates them through the
 // normal path with the current count. A failed lookup, release or retire
 // replays nothing and the next trigger tries again; chat rows are never
 // batches.
-func (h *HubServer) retireUnconfirmedDigest(record handoffkeepRelayEvent) bool {
-	if h.inbox == nil || h.handoffkeep == nil || record.Kind != "lane.event" || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || chatRelayEventPattern.MatchString(record.EventID) {
+func (h *HubServer) retireUnconfirmedDigest(record handoffkeepRelayEvent, digestMark bool) bool {
+	if h.inbox == nil {
+		// The marker, written while a store was open, says the row was a batch;
+		// without a store its items cannot be released, so nothing is spent and
+		// no copy is injected. A later run with the store retires and releases.
+		return digestMark && h.handoffkeep != nil && record.DeliveredAt == "" && !strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker)
+	}
+	if h.handoffkeep == nil || record.Kind != "lane.event" || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || chatRelayEventPattern.MatchString(record.EventID) {
 		return false
 	}
 	isBatch, err := h.inbox.store.isDigestBatch(record.OwnerLane, record.EventID)

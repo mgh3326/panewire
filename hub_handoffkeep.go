@@ -30,6 +30,9 @@ const (
 	// relayUnconfirmedMarkEventPrefix prefixes a marker row's event_id. The
 	// rest of the value is the durable id of the row it marks.
 	relayUnconfirmedMarkEventPrefix = "unconfirmed-mark-"
+	// relayUnconfirmedDigestMarkSuffix ends the event_id of a marker whose row
+	// was an inbox digest or escalation batch when it was marked.
+	relayUnconfirmedDigestMarkSuffix = "-digest"
 	// relayUnconfirmedRetireReason is the replay-retired suffix stamped on a
 	// marked row once its one labelled replay has been attempted.
 	relayUnconfirmedRetireReason = "unconfirmed"

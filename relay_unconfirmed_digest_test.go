@@ -38,6 +38,15 @@ func digestRow(t *testing.T, fake *fakeHandoffkeep, id int64) handoffkeepRelayEv
 // and returns the rig with the first hub closed.
 func unconfirmedDigestStart(t *testing.T) *unconfirmedDigestRig {
 	t.Helper()
+	return unconfirmedDigestStartClass(t, "inbox", "2 unread inbox items | lane lane-a")
+}
+
+// unconfirmedDigestStartClass is unconfirmedDigestStart for either batch kind:
+// class "inbox" escalates past-deadline unread items, class "interrupt" sends
+// the quiet digest of interrupts whose window has closed. wantText is the
+// count line the first batch must carry.
+func unconfirmedDigestStartClass(t *testing.T, class, wantText string) *unconfirmedDigestRig {
+	t.Helper()
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
 	now := time.Now().UTC()
 	store, err := openLaneInboxStore(path)
@@ -48,7 +57,13 @@ func unconfirmedDigestStart(t *testing.T) *unconfirmedDigestRig {
 	for i, text := range []string{"Blocker: merged, install broken", "ready | report"} {
 		e := quietEvent(fmt.Sprint(i), text)
 		e.DeliveryClass, e.Replay = "inbox", true
-		item, err := store.put(fmt.Sprint(i), "lane-a", "lane.event", "inbox", e, now, 0, 0)
+		var item laneInboxItem
+		var err error
+		if class == "interrupt" {
+			item, err = store.put(fmt.Sprint(i), "lane-a", "lane.event", class, e, now.Add(-time.Hour), 0, time.Minute)
+		} else {
+			item, err = store.put(fmt.Sprint(i), "lane-a", "lane.event", class, e, now, 0, 0)
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -61,7 +76,7 @@ func unconfirmedDigestStart(t *testing.T) *unconfirmedDigestRig {
 	h, a := quietHub(t, path, "default", client, &rig.now)
 	h.flushInbox()
 	directive := holdReceive(t, a)
-	if !strings.Contains(directive.Text, "2 unread inbox items | lane lane-a") {
+	if !strings.Contains(directive.Text, wantText) {
 		t.Fatalf("first escalation = %q", directive.Text)
 	}
 	rig.batch = directive.EventID
@@ -194,29 +209,66 @@ func TestUnconfirmedDigestTheInboxDeliveredIsRetiredAsInboxDelivered(t *testing.
 	}
 }
 
-// With no inbox store open a row cannot be proven a batch and nothing could be
-// released, so it is not spent as one: it keeps the ordinary labelled replay,
-// and a later run with the store still finds the batch to retire and release.
-func TestUnconfirmedDigestWithNoInboxStoreIsNotSpentAsABatch(t *testing.T) {
+// With no inbox store open the batch table cannot be read, but the marker
+// written while a store was open says the row was a batch: the real walk
+// injects nothing and spends nothing, and a later run with the store retires
+// the row, releases the items and escalates them once.
+func TestUnconfirmedDigestWithNoInboxStoreIsDeferredUntilTheStoreReturns(t *testing.T) {
 	rig := unconfirmedDigestStart(t)
-	h, _ := quietHub(t, "", "off", rig.hk, &rig.now)
+	h, a := quietHub(t, "", "off", rig.hk, &rig.now)
 	if h.inbox != nil {
 		t.Fatal("the kill switch left an inbox store open")
 	}
-	record := digestRow(t, rig.fake, rig.batch)
-	if h.retireUnconfirmedDigest(record) {
-		t.Fatal("a row was treated as a batch with no inbox store")
+	h.replayUndeliveredRelayEvents(context.Background())
+	h.replayUndeliveredLaneEvents(context.Background())
+	if len(a.relays) != 0 {
+		t.Fatalf("the no-store walk injected %q", (<-a.relays).Text)
 	}
 	if got := rig.fake.deliveredToFor(rig.batch); got != "" {
-		t.Fatalf("batch row was retired: %q", got)
+		t.Fatalf("the no-store walk spent the batch row: %q", got)
 	}
-	h2, a := rig.restart(t)
-	if len(a.relays) != 0 || rig.fake.deliveredToFor(rig.batch) != "hub/"+relayReplayRetiredPane+relayDigestNotReplayedRetireReason {
-		t.Fatal("a later run with the store did not retire the batch")
+	if got := rig.fake.deliveredToFor(rig.markerRow(t)); got != "" {
+		t.Fatalf("the marker retired with its row still pending: %q", got)
+	}
+	h2, a2 := rig.restart(t)
+	if len(a2.relays) != 0 || rig.fake.deliveredToFor(rig.batch) != "hub/"+relayReplayRetiredPane+relayDigestNotReplayedRetireReason {
+		t.Fatal("a later run with the store did not retire the batch without a copy")
 	}
 	h2.flushInbox()
+	if len(a2.relays) != 1 || !strings.Contains((<-a2.relays).Text, "2 unread inbox items | lane lane-a") {
+		t.Fatal("items released by the later run were not escalated once")
+	}
+}
+
+// A digest of interrupts claims its items through digest_batch, not
+// escalation_batch; the release must cover that column too.
+func TestUnconfirmedInterruptDigestIsNotReplayedAndStillUnackedItemsGetOneFreshDigest(t *testing.T) {
+	rig := unconfirmedDigestStartClass(t, "interrupt", "2 interrupt events | lane lane-a")
+	store, err := openLaneInboxStore(rig.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ack(rig.ids[0], "lane-a", false, rig.now); err != nil {
+		t.Fatal(err)
+	}
+	store.db.Close()
+	h, a := rig.restart(t)
+	if len(a.relays) != 0 {
+		t.Fatalf("the stale digest was injected: %q", (<-a.relays).Text)
+	}
+	if got := rig.fake.deliveredToFor(rig.batch); got != "hub/"+relayReplayRetiredPane+relayDigestNotReplayedRetireReason {
+		t.Fatalf("digest row delivered_to = %q", got)
+	}
+	h.flushInbox()
 	if len(a.relays) != 1 {
-		t.Fatalf("items released by the later run were not escalated: %d", len(a.relays))
+		t.Fatalf("fresh digests = %d, want exactly one", len(a.relays))
+	}
+	if fresh := <-a.relays; !strings.Contains(fresh.Text, "1 interrupt events | lane lane-a") || strings.Contains(fresh.Text, "[replayed after hub restart") {
+		t.Fatalf("fresh digest = %q", fresh.Text)
+	}
+	h.flushInbox()
+	if len(a.relays) != 0 {
+		t.Fatal("the released item was digested twice")
 	}
 }
 

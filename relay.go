@@ -1221,7 +1221,7 @@ func (h *HubServer) replayUndeliveredLaneEvents(ctx context.Context) {
 // A mark scan failure aborts the walk rather than letting a marked row fall
 // through to the unbounded ordinary replay.
 func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source, warnText string) {
-	marks, err := h.unconfirmedMarkOrigins(ctx)
+	marks, digestMarks, err := h.unconfirmedMarkOrigins(ctx)
 	if err != nil {
 		h.logger.Warn("undelivered unconfirmed marks could not be read", "source", source)
 		return
@@ -1239,7 +1239,7 @@ func (h *HubServer) replayUndeliveredRelayRows(ctx context.Context, kind, source
 			case isUnconfirmedMarkRecord(record):
 				h.settleUnconfirmedMarker(ctx, record)
 			case marks[record.ID]:
-				h.replayMarkedUnconfirmed(ctx, record, source)
+				h.replayMarkedUnconfirmed(ctx, record, source, digestMarks[record.ID])
 			default:
 				h.replayRelayEvent(record, source)
 			}
