@@ -477,3 +477,52 @@ func TestQuotaStopRetriesTheStoppedJobRecordWrite(t *testing.T) {
 		t.Fatalf("retried end_reason=%q", got)
 	}
 }
+
+// reconciling is still an active spawn state (a node may complete the successor
+// later): the hub keeps waiting through it, and writes the old record's pointer
+// once the successor is placed (review finding).
+func TestQuotaStopWaitsThroughReconcilingForTheSuccessor(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-7-p1")
+	done := make(chan quotaReplaceResult, 1)
+	go func() {
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		done <- quotaReplaceResult{job, ok}
+	}()
+	roleReplyPanes(t, f.node, nodeCommandRead(t, f.node), []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/x/pane-screen.txt"}})
+	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodePaneClosed}})
+	var successor hubSpawnTask
+	eventually(t, 2*time.Second, "the successor to be claimed", func() bool {
+		var err error
+		successor, err = f.hub.inbox.store.latestSpawnForJob(t.Context(), "mwr-7-p1-q1")
+		return err == nil
+	})
+	// The node's answer is unknown for now: the operation is reconciling.
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, hubSpawnOutcome{RC: 75, Stage: "landing", Reason: "unknown"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := f.hub.inbox.store.spawnTask(t.Context(), successor.Request.RequestID); err != nil || got.Status != "reconciling" {
+		t.Fatalf("setup: status %q %v", got.Status, err)
+	}
+	select {
+	case result := <-done:
+		t.Fatalf("the hub gave up on a reconciling successor: %+v", result)
+	case <-time.After(100 * time.Millisecond):
+	}
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := f.hub.inbox.store.spawnTask(t.Context(), successor.Request.RequestID); got.Status != "succeeded" {
+		t.Fatalf("setup: the reconciling operation did not complete: %q", got.Status)
+	}
+	command := nodeCommandRead(t, f.node)
+	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeJobMarkLostLost}})
+	select {
+	case result := <-done:
+		if !result.ok || endReasonOf(t, command) != "quota_stop pool=claude replaced_by=mwr-7-p1-q1" {
+			t.Fatalf("result %+v end_reason %q", result, endReasonOf(t, command))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the replacement did not finish")
+	}
+}

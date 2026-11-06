@@ -265,6 +265,16 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 	return newJob, true
 }
 
+// spawnStatusActive lists the operation states the coordinator still works
+// (laneInboxStore.pendingSpawns).
+func spawnStatusActive(status string) bool {
+	switch status {
+	case "accepted", "dispatching", "reconciling", "deadline_exceeded":
+		return true
+	}
+	return false
+}
+
 // awaitSpawnOutcome waits for the successor's operation to leave the states
 // that still run.
 func (h *HubServer) awaitSpawnOutcome(ctx context.Context, requestID string, limit time.Duration) (hubSpawnOutcome, bool) {
@@ -275,7 +285,11 @@ func (h *HubServer) awaitSpawnOutcome(ctx context.Context, requestID string, lim
 	deadline := time.Now().Add(limit)
 	for {
 		task, err := h.inbox.store.spawnTask(ctx, requestID)
-		if err == nil && task.Status != "accepted" && task.Status != "dispatching" {
+		// accepted, dispatching, reconciling and deadline_exceeded are the
+		// states the coordinator still retries (pendingSpawns); a node may yet
+		// complete the successor from reconciling. Only succeeded, failed and
+		// retryable are final.
+		if err == nil && !spawnStatusActive(task.Status) {
 			return task.Outcome, task.Status == "succeeded"
 		}
 		if ctx.Err() != nil || time.Now().After(deadline) {
