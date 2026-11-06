@@ -718,9 +718,23 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 			others = true
 		}
 	}
-	if !others || expired {
+	if len(items) == 0 {
 		manager.mu.Unlock()
-		manager.release(parent, pane, expired)
+		return
+	}
+	if !others || expired {
+		// Everything held is released, and exactly the snapshot read above: a
+		// second snapshot after the unlock could pick up an idle row an offer
+		// holds in the gap and deliver it to a working pane.
+		delete(manager.waits, pane)
+		delete(manager.held, pane)
+		manager.mu.Unlock()
+		if relayWorkingReleaseGap != nil {
+			relayWorkingReleaseGap()
+		}
+		manager.deliver(parent, manager.filterDeliverableHeld(parent, items), expired)
+		manager.reconcileHeld(parent, pane)
+		manager.arm(context.Background(), pane)
 		return
 	}
 	if len(directives) == 0 {
@@ -741,6 +755,10 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 	manager.reconcileHeld(parent, pane)
 	manager.arm(context.Background(), pane)
 }
+
+// relayWorkingReleaseGap, when set, runs between the snapshot a working wake
+// decided on and the delivery of it. Tests use it to hold a row in that gap.
+var relayWorkingReleaseGap func()
 
 // relayWorkingRetryDelay spaces the re-wait after a held snapshot could not be
 // read during a working wake.

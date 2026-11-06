@@ -955,3 +955,35 @@ func TestWorkingWakeRearmsOnAStableContext_t3276(t *testing.T) {
 		t.Fatalf("%d wait(s) in all exited, want only the first: the wake's re-armed wait was derived from the canceled one", rig.waitExits)
 	}
 }
+
+// A working wake that finds only directives releases exactly the snapshot it
+// decided on. An idle row an offer holds after that decision is not part of it,
+// and a working pane must not be typed into for it.
+func TestWorkingWakeDeliversOnlyItsOwnSnapshot_t3276(t *testing.T) {
+	rig := t3276Start(t)
+	directive := rig.send("ev-gap-directive", "findings", "[mergewake] findings for the worker")
+	report := rig.send("ev-gap-report", "report", "[worker] progress")
+	sc := t3276Harnesses()["codex-working"]
+	sc.preStatus, sc.postStatus = "blocked", "blocked"
+	pane := t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+	manager := rig.node.relayBusyManager()
+	manager.offer(t.Context(), t3276Message(directive))
+
+	relayWorkingReleaseGap = func() {
+		manager.offer(t.Context(), t3276Message(report))
+	}
+	t.Cleanup(func() { relayWorkingReleaseGap = nil })
+
+	manager.releaseWorking(t.Context(), "w1:pW", false)
+
+	if got := pane.calls(t, "prompt"); got != 1 {
+		t.Fatalf("prompts=%d, want only the directive typed", got)
+	}
+	if typed := pane.typed(t); strings.Contains(typed, "progress") {
+		t.Fatalf("the idle row was typed into a working pane: %q", typed)
+	}
+	rows, err := rig.node.relayStore().RelayHeldForPane(t.Context(), "w1:pW")
+	if err != nil || len(rows) != 1 || rows[0].EventID != report.EventID {
+		t.Fatalf("held rows=%+v err=%v, want the report still held", rows, err)
+	}
+}
