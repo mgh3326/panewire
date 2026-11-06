@@ -68,7 +68,7 @@ func knownNodeCommandOp(op string) bool {
 	switch op {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
-		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult:
+		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandPRStatus:
 		return true
 	}
 	return false
@@ -184,6 +184,7 @@ var nodeCommandArgFields = map[string][]string{
 	nodeCommandWorktreePrepare: {"origin", "mode", "branch", "sha", "fetch", "dir"},
 	nodeCommandWorktreeRemove:  {"cwd", "expect_head", "base", "regenerable"},
 	nodeCommandQuotaRefresh:    {"pool"},
+	nodeCommandPRStatus:        {"repo", "pr", "fresh"},
 }
 
 // nodeCommandHasFields reports whether raw is an object holding exactly the
@@ -279,6 +280,9 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandQuotaRefresh:
 		var args nodeQuotaRefreshArgs
 		return args, decodeNodeCommandStrict(raw, &args) && nodeQuotaPoolPattern.MatchString(args.Pool)
+	case nodeCommandPRStatus:
+		var args nodePRStatusArgs
+		return args, decodeNodeCommandStrict(raw, &args) && validNodePRStatusArgs(args)
 	}
 	return nil, false
 }
@@ -367,6 +371,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 	case nodeCommandQuotaRefresh:
 		var result nodeQuotaRefreshResult
 		valid = decodeNodeCommandStrict(raw, &result) && result.Outcome == nodeQuotaRefreshed
+		target = result
+	case nodeCommandPRStatus:
+		var result nodePRStatusResult
+		valid = decodeNodeCommandStrict(raw, &result) && validNodePRStatusResult(result)
 		target = result
 	}
 	if !valid {
@@ -497,6 +505,10 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		return client.nodeWorktreeRemove(ctx, args)
 	case nodeQuotaRefreshArgs:
 		return client.nodeQuotaRefresh(ctx, args)
+	case nodePRStatusArgs:
+		// Read-only: no acting-command lock, so a status read never queues
+		// behind a pane close.
+		return client.nodePRStatus(ctx, args)
 	}
 	return client.nodeAgentsList(ctx)
 }

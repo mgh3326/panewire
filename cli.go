@@ -37,7 +37,7 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Usage: panewire COMMAND [arguments]")
-		fmt.Fprintln(os.Stdout, "Commands: spawn, work, lead, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, burst, place, node, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, inbox, job, wait, version, quota")
+		fmt.Fprintln(os.Stdout, "Commands: spawn, work, lead, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, burst, place, node, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, inbox, job, pr, wait, version, quota")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, lanesUsage)
 		return ExitOK
@@ -86,6 +86,9 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	}
 	if args[0] == "inbox" {
 		return runInboxCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{SocketPath: cfg.SocketPath})
+	}
+	if args[0] == "pr" {
+		return runPRCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
 	}
 	if args[0] == "emit" {
 		return runEmitCLI(args[1:], os.Stdout, os.Stderr, cfg)

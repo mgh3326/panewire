@@ -144,6 +144,11 @@ uses its own scoped token instead of the operator's; see
 [docs/hub-scopes.md](docs/hub-scopes.md). `pane.read` and `job.done` admit only
 such a service; `panewire node pane-read` and `panewire node job-done` call them.
 
+`panewire pr status` and `panewire pr findings` read a PR's gate state and open
+review findings from mergewake's last decision and handoffkeep's change record
+through the `pr.status` node op, so a worker needs no GitHub request or token
+for them; see [docs/pr-status.md](docs/pr-status.md).
+
 The hub also keeps the latest fleet state, meaning per-account quota, per-host
 load and publisher liveness. It serves that state as a snapshot
 (`GET /v1/state`), so panewire reads current state instead of measuring it on
