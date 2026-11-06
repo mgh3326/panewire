@@ -35,6 +35,12 @@ type Submission struct {
 	Repository      Repository `json:"repository"`
 	OriginMachine   string     `json:"origin_machine"`
 	DeadlineSeconds int        `json:"deadline_seconds"`
+	// RetryHost is the hub-internal marker of a verified-cleanup retry: the
+	// hub sets it, in memory, on the one request it rewrites to `--host <the
+	// stored outcome host>`, and validateContainment then does not treat that
+	// host as a submitter pin. It never travels on the wire or in the store
+	// (json:"-"), and no flag parses into it.
+	RetryHost string `json:"-"`
 }
 
 type Accepted struct{ Job, Request string }
@@ -266,6 +272,7 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	if err != nil {
 		return s, err
 	}
+	s.hubRetryHost = request.RetryHost
 	if err := validateContainment(s); err != nil {
 		return s, err
 	}

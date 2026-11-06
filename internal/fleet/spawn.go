@@ -17,6 +17,11 @@ import (
 )
 
 type Spawn struct {
+	// hubRetryHost is the host the hub's own verified-cleanup retry pinned,
+	// copied from Submission.RetryHost by ValidateSubmission. Nothing parses
+	// into it; validateContainment accepts exactly this host without an
+	// operator reference.
+	hubRetryHost string
 	// registeredLane is the hub lane row the spawn created for its pane. A
 	// failed spawn that closes the pane removes the row with it.
 	registeredLane                                                                                                                                                                         *Job
@@ -82,7 +87,13 @@ func validateContainment(s Spawn) error {
 	if s.Delegated {
 		return nil
 	}
-	pinned := (s.Profile != "" && s.Profile != "auto") || (s.Host != "" && s.Host != "auto" && s.Host != "local" && !s.requestedLocal)
+	hostPinned := s.Host != "" && s.Host != "auto" && s.Host != "local" && !s.requestedLocal
+	// The hub's verified-cleanup retry re-pins the host its own stored
+	// outcome named; that is not a submitter's placement pin.
+	if s.hubRetryHost != "" && s.Host == s.hubRetryHost {
+		hostPinned = false
+	}
+	pinned := (s.Profile != "" && s.Profile != "auto") || hostPinned
 	// --exclude-host is not gated: standing exclusions (mergewake keeps
 	// reviewers off its own host on every spawn) are policy, not containment
 	// (operator re-decision 2026-11-05, hk 2963).
