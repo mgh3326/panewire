@@ -47,6 +47,7 @@ report, has no adapter and no delivery proof.
 | devin | nonce in the transcript, or devin's own queue banner (`nonce_echo`, `devin_queue_banner`) | no |
 | grok | nonce on screen and herdr reports idle/done before the send and `working` after it (`nonce_echo+status_working`) | observed 8 s |
 | omp | same as grok | observed 8 s |
+| cmd | same as grok, typed through `pane send-text` plus `pane send-keys return`; the composer is found with claude's rule (below) | observed 8 s |
 | anything else | none | n/a |
 
 The nonce is the per-row `[r<id><check>]` token at the head of every typed text
@@ -60,20 +61,53 @@ therefore injected but stays unconfirmed (one retry, then the escalation below)
 until a live capture gives a transcript rule that tells a queued message from a
 pending paste.
 
+cmd uses the same proof, and its transport is different: herdr answers
+`agent get` and `agent read` for a cmd pane but refuses `agent prompt` and
+`agent send-keys` with `agent_not_ready` ("not an active named agent"), so the
+relay types with `pane send-text` and submits with `pane send-keys return` —
+the pair the spawn path already uses for a cmd brief. The text is not
+submitted by `pane send-text` alone; a failed return leaves it typed and
+unsubmitted, which is `return_failed` and `maybe_in_pane`, never a re-inject.
+A failed `pane send-text` is `send_text_failed` and `maybe_in_pane` too: herdr
+may have typed part of the text, so it is never typed again.
+
+cmd draws claude's two-divider composer with the same `❯` prompt, so the relay
+reads it with claude's rule. Before typing, the composer must be located and
+empty; a draft in it is `presend:composer_pending` and an unlocated composer is
+`presend:composer_unlocated`, both final, and nothing is typed. A composer that
+already holds this row's own text (a replay after a failed return) is
+submitted with the one return and not typed again, so exactly one copy lands.
+
+The presend reads cmd's composer from the ANSI screen (`herdr pane read
+--format ansi`), because an idle cmd pane draws claude's dim prompt suggestion
+in its empty composer and a plain read cannot tell it from a draft. It applies
+the reap's dim rule (`nodeComposerState`): a composer whose every visible
+character is dim reads empty and the event is typed. The return after
+`pane send-text` goes through the same gate as every other harness
+(`relayComposerReturnSafe`, on a read taken after the text landed); a draft that
+appears in between is `return_withheld:composer_foreign` and `maybe_in_pane`.
+That is the one return of the inject: verify does not press a second one when
+the composer still draws the text (echo lag), it observes until the echo lands.
+If it still draws the text when the observation window ends, the verdict is
+`return_unconfirmed:composer_pending`, final and not retried: a retry's presend
+would meet this row's own text and press a second return.
+`panewire prompt --to <cmd pane>` takes the same transport, so a hand relay
+through panewire reaches a cmd worker too.
+
 ## What "delivered" means
 
 `relay.delivered` is emitted, and the durable row closed, only on the proof in
 the table. Everything else is `relay.unconfirmed`:
 
-- a send herdr rejected, or a send herdr accepted whose proof never shows
+- a send herdr rejected (`agent prompt`), or a send herdr accepted whose proof never shows
   (`unproven:...`, including a harness with no adapter, and an unreadable pane
   before or after the send, devin's included),
   is typed once more at once (a directive) and then dropped
   as `inject_failed_max_attempts` or `maybe_in_pane`. The text already tells the
   reader that seeing it twice is not a reason to re-run it;
 - any other `maybe_in_pane` verdict (a foreign draft in the composer, a changed
-  harness, an unreadable pane) is final, because the text may already be in the
-  pane;
+  harness, an unreadable pane, a cmd `pane send-text` failure) is final,
+  because the text may already be in the pane;
 - a harness with no adapter is `maybe_in_pane` with `unproven:no_adapter`.
 
 Messages that are not worker directives keep their earlier budgets: a rejected
@@ -106,4 +140,9 @@ The hub's own one-labelled-replay after a restart
 
 `relay_harness_delivery_t3276_test.go` drives a real hub over a fake
 handoffkeep, the real node relay and a shell `herdr` that models one pane, for
-codex (idle and working), devin, grok and omp.
+codex (idle and working), devin, grok and omp. `relay_cmd_transport_t3330_test.go`
+does the same for cmd, with a shell `herdr` that refuses the agent-level writes
+the way herdr does; `relay_cmd_composer_t3330_test.go` pins the send-text
+failure, the failed-return replay, the draft, dim-suggestion, draft-between and
+echo-lag cases; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
+transport.
