@@ -83,6 +83,8 @@ func TestWebFailureKinds(t *testing.T) {
 		{"network", func(*http.Request) (*http.Response, error) { return nil, errors.New("dial " + token) }, quota.ErrKindNetwork, 0},
 		{"malformed JSON", reply(200, "<html>", nil), quota.ErrKindParse, 0},
 		{"not an object", reply(200, "[1]", nil), quota.ErrKindParse, 0},
+		{"trailing garbage", reply(200, `{"weekly_percentage":40}garbage`, nil), quota.ErrKindParse, 0},
+		{"two objects", reply(200, `{"weekly_percentage":40}{"weekly_percentage":41}`, nil), quota.ErrKindParse, 0},
 		{"no windows", reply(200, `{"unexpected":true}`, nil), quota.ErrKindParse, 0},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -143,6 +145,15 @@ func TestWebPercentBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	checkBuckets(t, o.Buckets, []wantBucket{{"1d", 1, ""}, {"7d", 50, ""}})
+}
+
+// Trailing whitespace after the object is fine.
+func TestWebBodyMayEndInWhitespace(t *testing.T) {
+	cfg := config(nil, nil)
+	cfg.HTTP = reply(200, `{"weekly_percentage":40}`+"\n \r\n", nil)
+	if o, err := cfg.fetchWeb(t.Context(), token, org); err != nil || len(o.Buckets) != 1 {
+		t.Fatalf("observation %+v err=%v", o, err)
+	}
 }
 
 func TestWebCancelledRequestIsANetworkFailure(t *testing.T) {

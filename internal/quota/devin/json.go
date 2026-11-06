@@ -3,6 +3,7 @@ package devin
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"math"
 	"net/http"
 	"strings"
@@ -90,11 +91,13 @@ func epochTime(n float64) string {
 	return at.Format(time.RFC3339Nano)
 }
 
-// decodeBody decodes one JSON object and nothing after it.
+// decodeBody decodes one JSON object and nothing after it but whitespace: a
+// body with trailing data or a second value is malformed, not a measurement.
+// (pacelever reads only the first value; the codex source here is strict too.)
 func decodeBody(data []byte) (map[string]any, bool) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var raw map[string]any
-	if decoder.Decode(&raw) != nil || raw == nil {
+	if decoder.Decode(&raw) != nil || raw == nil || decoder.Decode(&struct{}{}) != io.EOF {
 		return nil, false
 	}
 	return raw, true
