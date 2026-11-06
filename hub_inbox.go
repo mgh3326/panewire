@@ -155,6 +155,13 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	if kind == "job.completed" && event.Late {
 		class = "inbox"
 	}
+	// hk 3276: a worker directive reaches the worker's pane at once. A lane
+	// policy that files its findings or orders as inbox (kept for a digest or
+	// an idle promotion) must not retain them.
+	directive := isWorkerDirective(kind, *event, loadReportRelayRoutes(h.reportRelayPath)[lane])
+	if directive && class == "inbox" {
+		class = "interrupt"
+	}
 	holdClass := class == "interrupt"
 	if class == "inbox" && !event.Late && h.inboxImmediate(lane, kind) {
 		class = "interrupt"
@@ -172,11 +179,14 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	if event.Late || event.noDigest || h.inbox.policy.mustAct(lane, *event) || mustAckNotifyTypes[event.NotifyType] || chatRelayEventPattern.MatchString(event.EventID) {
 		window = 0
 	}
+	if directive {
+		window = 0
+	}
 	hold := time.Duration(0)
 	if h.inbox.policy.holdPolicy(lane) != nil && !holdableEvent(kind, *event) {
 		window = 0
 	}
-	if settings := h.inbox.policy.holdPolicy(lane); settings != nil && holdClass && holdableEvent(kind, *event) && !isWorkerDirective(kind, *event, loadReportRelayRoutes(h.reportRelayPath)[lane]) && h.receiverInboxState(lane).working {
+	if settings := h.inbox.policy.holdPolicy(lane); settings != nil && holdClass && holdableEvent(kind, *event) && !directive && h.receiverInboxState(lane).working {
 		hold, _ = time.ParseDuration(settings.MaxHold)
 		window = 0
 	}

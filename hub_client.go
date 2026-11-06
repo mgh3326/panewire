@@ -777,9 +777,12 @@ func parseRelayAgentHarness(raw []byte) string {
 	if json.Unmarshal(raw, &response) != nil {
 		return ""
 	}
+	// One normalized identity for every dispatch and proof check that follows:
+	// a padded or differently cased name must not fall past a switch on the
+	// lower-case harness and reach a rule that cannot tell a pending paste.
 	for _, candidate := range []string{response.Result.Agent.Harness, response.Result.Agent.Kind, response.Result.Agent.Agent} {
-		if candidate != "" {
-			return candidate
+		if name := strings.ToLower(strings.TrimSpace(candidate)); name != "" {
+			return name
 		}
 	}
 	return ""

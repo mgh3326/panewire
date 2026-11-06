@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Contract: docs/relay-harness-delivery.md.
@@ -26,6 +27,11 @@ const (
 	relayDroppedRetriesExhausted = "inject_failed_max_attempts"
 	relayDroppedMaybeInPane      = "maybe_in_pane"
 )
+
+// unconfirmedEscalationBackoff spaces the retries of an escalation whose
+// durable write failed (a handoffkeep outage). The drop was already consumed,
+// so nothing else would send it; the last wait is the final try.
+var unconfirmedEscalationBackoff = []time.Duration{2 * time.Second, 10 * time.Second, time.Minute, 5 * time.Minute}
 
 func relayDroppedIsUnconfirmed(reason string) bool {
 	return reason == relayDroppedRetriesExhausted || reason == relayDroppedMaybeInPane
@@ -72,15 +78,29 @@ func escalatesWhenUnconfirmed(record handoffkeepRelayEvent) bool {
 // dropped as unconfirmed. It runs after the drop was consumed, so the held
 // projection and ack window are already clear. A row the pane already confirmed,
 // a row escalatesWhenUnconfirmed refuses, and a lane with no design lane to
-// tell are skipped.
+// tell are skipped. A transient handoffkeep failure, reading the row or writing
+// the escalation, is retried on unconfirmedEscalationBackoff until the
+// escalation is durable: the durable id keeps the retries to one escalation.
 func (h *HubServer) escalateUnconfirmedRelay(machine string, dropped relayDroppedPayload) {
+	h.escalateUnconfirmedRelayAttempt(machine, dropped, 0)
+}
+
+func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped relayDroppedPayload, attempt int) {
 	if !relayDroppedIsUnconfirmed(dropped.Reason) || dropped.OriginalEventID < 1 || dropped.Lane == "" || h.handoffkeep == nil {
 		return
+	}
+	retry := func(why string) {
+		if attempt >= len(unconfirmedEscalationBackoff) {
+			h.logger.Error("relay unconfirmed escalation gave up", "event_id", dropped.OriginalEventID, "lane", dropped.Lane, "why", why)
+			return
+		}
+		h.logger.Warn("relay unconfirmed escalation will retry", "event_id", dropped.OriginalEventID, "lane", dropped.Lane, "why", why, "attempt", attempt+1)
+		time.AfterFunc(unconfirmedEscalationBackoff[attempt], func() { h.escalateUnconfirmedRelayAttempt(machine, dropped, attempt+1) })
 	}
 	ctx := context.Background()
 	record, found, err := h.handoffkeep.relayEvent(ctx, dropped.OriginalEventID)
 	if err != nil {
-		h.logger.Warn("relay unconfirmed escalation could not read its row", "event_id", dropped.OriginalEventID)
+		retry("row_read_failed")
 		return
 	}
 	if !found || record.DeliveredAt != "" || !escalatesWhenUnconfirmed(record) {
@@ -103,7 +123,12 @@ func (h *HubServer) escalateUnconfirmedRelay(machine string, dropped relayDroppe
 		Reason:     dropped.Reason,
 		Text:       unconfirmedEscalationText(record, dropped, machine),
 	}
-	if result := h.relayLaneEventContext(ctx, event, nil); result.ID == 0 || result.Duplicate {
+	result := h.relayLaneEventContext(ctx, event, nil)
+	if result.PersistFailed && (result.PersistStatus == 0 || result.PersistStatus >= 500) {
+		retry("persist_failed")
+		return
+	}
+	if result.ID == 0 || result.Duplicate {
 		// A second drop of the same row posts the same event id and the
 		// durable idempotency answers it: the design lane was told already.
 		return

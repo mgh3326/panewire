@@ -12,7 +12,11 @@ A worker directive is typed into the pane at once on every harness. It never
 waits for a turn boundary, and a `working` pane is not a reason to refuse or
 defer it. A `blocked` pane is the exception: it is waiting on a prompt (a codex
 approval) that the text could answer, so the R27 hold still applies and the
-directive waits until the pane is released. A worker directive is a `lane.event` of type `findings`, `decision`
+directive waits until the pane is released, which is when it turns idle, done
+or working again (the held directive's wait also ends on `working`, and only the
+directive is typed then; a row on the idle policy keeps waiting). A directive
+is also never filed as inbox or kept for a digest by a lane policy, and it never
+shares a send with an ordinary held row. A worker directive is a `lane.event` of type `findings`, `decision`
 (an ESC answer) or `order` sent to a lane whose route names a parent, the
 design lane it reports to. The hub gives it `deliver: directive` (typed at once, held only while `blocked`)
 unless the event or the route already names a policy. An explicit `deliver: now`
@@ -62,7 +66,8 @@ pending paste.
 the table. Everything else is `relay.unconfirmed`:
 
 - a send herdr rejected, or a send herdr accepted whose proof never shows
-  (`unproven:...`, including a harness with no adapter and an unreadable pane),
+  (`unproven:...`, including a harness with no adapter, and an unreadable pane
+  before or after the send, devin's included),
   is typed once more at once (a directive) and then dropped
   as `inject_failed_max_attempts` or `maybe_in_pane`. The text already tells the
   reader that seeing it twice is not a reason to re-run it;
@@ -81,7 +86,9 @@ or `blocked` item stays unread until the worker runs `panewire inbox ack <id>`.
 ## Escalation
 
 When a node drops an event as `inject_failed_max_attempts` or
-`maybe_in_pane`, the hub tells the job's design lane once. The design lane is
+`maybe_in_pane`, the hub tells the job's design lane once. A handoffkeep outage
+while the hub reads the row or writes the escalation is retried (2 s, 10 s,
+1 min, 5 min) until the escalation is durable. The design lane is
 the parent of the worker lane's route (the lane `job.escalate` already reaches),
 else the owner lane of the live job that runs in that lane. The escalation is
 an `automation-failed` lane event with producer id

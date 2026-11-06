@@ -637,22 +637,33 @@ func (manager *relayBusyManager) arm(parent context.Context, pane string) {
 	for index := range manager.held[pane] {
 		manager.held[pane][index].fresh = false
 	}
+	directiveHeld := false
+	for _, item := range items {
+		directiveHeld = directiveHeld || item.DeliverPolicy == relayDeliverDirective
+	}
 	ctx, cancel := context.WithCancel(parent)
 	manager.waits[pane] = cancel
 	manager.mu.Unlock()
-	go manager.waitForPane(ctx, pane, waitFor)
+	go manager.waitForPane(ctx, pane, waitFor, directiveHeld)
 }
 
-func (manager *relayBusyManager) waitForPane(ctx context.Context, pane string, waitFor time.Duration) {
+func (manager *relayBusyManager) waitForPane(ctx context.Context, pane string, waitFor time.Duration, directiveHeld bool) {
 	runner := manager.client.relayRunner()
 	if runner == nil {
 		return
 	}
-	output, err := runner(ctx, "agent", "wait", pane, "--until", "idle", "--until", "done", "--timeout", strconv.FormatInt(waitFor.Milliseconds(), 10))
+	args := []string{"agent", "wait", pane, "--until", "idle", "--until", "done"}
+	if directiveHeld {
+		// hk 3276: a directive is held only while the pane is blocked. Once
+		// the prompt is answered the pane turns working, which is no reason
+		// to keep it waiting for the end of the turn.
+		args = append(args, "--until", "working")
+	}
+	output, err := runner(ctx, append(args, "--timeout", strconv.FormatInt(waitFor.Milliseconds(), 10))...)
 	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 		return
 	}
-	_, parsed := parseRelayAgentStatus(output)
+	status, parsed := parseRelayAgentStatus(output)
 	// Only the documented wait timeout is an expiry. Other command failures
 	// fail open, but are not mislabeled as a policy deadline.
 	timedOut := err != nil && relayWaitTimedOut(output)
@@ -661,7 +672,57 @@ func (manager *relayBusyManager) waitForPane(ctx context.Context, pane string, w
 	if err == nil && !parsed {
 		timedOut = false
 	}
+	if status == "working" {
+		manager.releaseWorking(ctx, pane, timedOut)
+		return
+	}
 	manager.release(ctx, pane, timedOut)
+}
+
+// releaseWorking is the wake-up when a blocked pane turned working: only the
+// directives held on it are delivered. A row on the idle policy keeps waiting
+// for the pane to finish its turn.
+func (manager *relayBusyManager) releaseWorking(parent context.Context, pane string, expired bool) {
+	store := manager.client.relayStore()
+	if store == nil {
+		return
+	}
+	manager.mu.Lock()
+	items, err := store.RelayHeldForPane(parent, pane)
+	manager.mu.Unlock()
+	if err != nil {
+		return
+	}
+	var others bool
+	for _, item := range items {
+		others = others || item.DeliverPolicy != relayDeliverDirective
+	}
+	if !others || expired {
+		manager.release(parent, pane, expired)
+		return
+	}
+	var directives []relayHeld
+	for _, item := range items {
+		if item.DeliverPolicy == relayDeliverDirective {
+			directives = append(directives, item)
+		}
+	}
+	if len(directives) == 0 {
+		// An unexpected working wake with no directive: keep everything held.
+		manager.arm(parent, pane)
+		return
+	}
+	manager.mu.Lock()
+	var remaining []relayHeld
+	for _, item := range items {
+		if item.DeliverPolicy != relayDeliverDirective {
+			remaining = append(remaining, item)
+		}
+	}
+	manager.held[pane] = remaining
+	manager.mu.Unlock()
+	manager.deliver(parent, manager.filterDeliverableHeld(parent, directives), false)
+	manager.arm(parent, pane)
 }
 
 func (manager *relayBusyManager) release(parent context.Context, pane string, expired bool) {
@@ -818,6 +879,12 @@ func relayBatchGroups(items []relayHeld, expired bool, now time.Time) [][]relayH
 			continue
 		}
 		last := groups[len(groups)-1]
+		if relayGroupImmediate(last) != relayGroupImmediate([]relayHeld{item}) {
+			// A directive has its own retry and escalation disposition, so it
+			// never shares a send with an ordinary held row.
+			groups = append(groups, []relayHeld{item})
+			continue
+		}
 		candidate := append(append([]relayHeld(nil), last...), item)
 		if len(item.Text) > relayBatchTextLimit || len(relayBatchText(candidate, expired, now)) > relayBatchTextLimit {
 			groups = append(groups, []relayHeld{item})
@@ -979,6 +1046,11 @@ func relayRetriesOnce(result relayInjectResult) bool {
 		// the second inject's own presend check still refuses a pending
 		// composer or a changed harness. "postsend:...:none" is devin's.
 		if strings.Contains(result.Evidence, "unproven:") {
+			return true
+		}
+		// devin's own unreadable-pane verdicts: before the send nothing was
+		// typed, after it the retry's presend check guards the composer.
+		if result.Evidence == "presend:read_failed" || result.Evidence == "postsend:read_failed" {
 			return true
 		}
 		return strings.HasPrefix(result.Evidence, "postsend:") && strings.HasSuffix(result.Evidence, ":none")

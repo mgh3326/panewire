@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -164,7 +165,7 @@ echo "$2" >> "$d/calls"
 case "$2" in
 get)
   if [ -f "$d/prompted" ]; then st=$(cat "$d/status.post"); else st=$(cat "$d/status.pre"); fi
-  printf '{"result":{"agent":{"agent":"` + sc.harness + `","agent_status":"%s","pane_id":"w1:pW"}}}\n' "$st" ;;
+  printf '{"result":{"agent":{"agent":"` + sc.harness + `","agent_status":"%s","name":"` + t3276Worker + `","pane_id":"w1:pW"}}}\n' "$st" ;;
 prompt) printf '%s' "$4" > "$d/typed"; touch "$d/prompted" ;;
 read) src=visible; lines=60; prev=
   for a in "$@"; do [ "$prev" = "--source" ] && src=$a; [ "$prev" = "--lines" ] && lines=$a; prev=$a; done
@@ -204,6 +205,9 @@ type t3276Rig struct {
 	src    *hubAgent
 	node   *HubClient
 	events chan hubClientEvent
+	// waits records the arguments of every `herdr agent wait` a hold started.
+	waitMu sync.Mutex
+	waits  []string
 }
 
 func t3276Start(t *testing.T) *t3276Rig {
@@ -230,6 +234,9 @@ func t3276Start(t *testing.T) *t3276Rig {
 	rig.node = &HubClient{outbox: store, relayCommand: func(ctx context.Context, args ...string) ([]byte, error) {
 		if len(args) >= 2 && args[1] == "wait" {
 			// A held row waits for the pane to go idle; here it never does.
+			rig.waitMu.Lock()
+			rig.waits = append(rig.waits, strings.Join(args, " "))
+			rig.waitMu.Unlock()
 			<-ctx.Done()
 			return nil, ctx.Err()
 		}
@@ -595,7 +602,7 @@ func TestWorkerDirectiveIsHeldWhileBlocked_t3276(t *testing.T) {
 // in a foreign or changed composer: a harness with no adapter, an unreadable
 // pane and the reads showing nothing all retry once and then escalate once.
 func TestDirectiveRetriesOnceWhenProofIsUndecidable_t3276(t *testing.T) {
-	for _, evidence := range []string{"unproven:no_adapter", "unproven:read_failed", "presend:unproven:read_failed", "unproven:composer_unlocated", "postsend:visible+recent-unwrapped:none"} {
+	for _, evidence := range []string{"unproven:no_adapter", "unproven:read_failed", "presend:unproven:read_failed", "unproven:composer_unlocated", "postsend:visible+recent-unwrapped:none", "presend:read_failed", "postsend:read_failed"} {
 		if !relayRetriesOnce(relayInjectResult{Outcome: relayInjectMaybeInPane, Evidence: evidence}) {
 			t.Errorf("evidence %q: want one retry", evidence)
 		}
@@ -636,5 +643,136 @@ func TestExplicitNowIsNotAnImmediateDirective_t3276(t *testing.T) {
 	}
 	if relayGroupImmediate(nil) {
 		t.Fatal("an empty group is not immediate")
+	}
+}
+
+// The escalation is kept until it is durable. The drop is consumed before the
+// escalation is written, so a handoffkeep outage at that moment would otherwise
+// lose it for good; it is retried and, the durable id being fixed, sent once.
+func TestEscalationRetriesUntilDurable_t3276(t *testing.T) {
+	prev := unconfirmedEscalationBackoff
+	unconfirmedEscalationBackoff = []time.Duration{40 * time.Millisecond, 40 * time.Millisecond, 40 * time.Millisecond, 40 * time.Millisecond}
+	t.Cleanup(func() { unconfirmedEscalationBackoff = prev })
+
+	rig := t3276Start(t)
+	directive := rig.send("ev-outage", "findings", "[mergewake] findings for the worker")
+	rig.fake.mu.Lock()
+	rig.fake.failPostOwnerLane = t3276Design
+	rig.fake.mu.Unlock()
+
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", relayDroppedPayload{JobID: directive.JobID, Pane: directive.Pane, Lane: directive.Lane, OriginalEventID: directive.EventID, Reason: "maybe_in_pane"})
+	time.Sleep(120 * time.Millisecond) // simulated outage: the writes must keep failing for a few retries
+	if got := rig.escalations(); len(got) != 0 {
+		t.Fatalf("escalation reached the design lane during the outage: %+v", got)
+	}
+
+	rig.fake.mu.Lock()
+	rig.fake.failPostOwnerLane = ""
+	rig.fake.mu.Unlock()
+	var got []hubRelayInjectEvent
+	eventually(t, 3*time.Second, "the escalation after the outage", func() bool {
+		got = append(got, rig.escalations()...)
+		return len(got) > 0
+	})
+	time.Sleep(200 * time.Millisecond) // a window that proves no second escalation follows
+	got = append(got, rig.escalations()...)
+	if len(got) != 1 || !strings.Contains(got[0].Text, fmt.Sprintf("event %d", directive.EventID)) {
+		t.Fatalf("want exactly one escalation naming the event, got %+v", got)
+	}
+}
+
+// A held directive wakes when its blocked pane turns working, but a row on the
+// idle policy held beside it keeps waiting for the pane to finish.
+func TestBlockedHeldDirectiveReleasedWhenPaneTurnsWorking_t3276(t *testing.T) {
+	rig := t3276Start(t)
+	directive := rig.send("ev-unblock", "findings", "[mergewake] findings for the worker")
+	sc := t3276Harnesses()["codex-working"]
+	sc.preStatus, sc.postStatus = "blocked", "working"
+	pane := t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+
+	manager := rig.node.relayBusyManager()
+	manager.offer(t.Context(), t3276Message(directive))
+	if got := pane.calls(t, "prompt"); got != 0 {
+		t.Fatalf("blocked pane typed into %d times", got)
+	}
+	// The hold waits for the pane to turn working as well as idle or done.
+	eventually(t, 2*time.Second, "the held directive's wait", func() bool {
+		rig.waitMu.Lock()
+		defer rig.waitMu.Unlock()
+		return len(rig.waits) > 0 && strings.Contains(rig.waits[len(rig.waits)-1], "--until idle --until done --until working")
+	})
+	// The user answers the approval: the pane turns working.
+	manager.releaseWorking(t.Context(), "w1:pW", false)
+	if got := pane.calls(t, "prompt"); got < 1 {
+		t.Fatalf("the directive was not released when the blocked pane turned working")
+	}
+}
+
+// A directive keeps its own retry and escalation disposition, so a batch built
+// from rows released together never mixes it with an ordinary held row.
+func TestDirectiveNeverSharesBatchWithOrdinaryRow_t3276(t *testing.T) {
+	now := time.Now()
+	directive := func(id int64) relayHeld {
+		return relayHeld{Pane: "w1:pW", Lane: t3276Worker, EventID: id, RecvSeq: id, Text: "directive", DeliverPolicy: relayDeliverDirective}
+	}
+	ordinary := func(id int64) relayHeld {
+		return relayHeld{Pane: "w1:pW", Lane: t3276Worker, EventID: id, RecvSeq: id, Text: "report", DeliverPolicy: "idle"}
+	}
+	for _, tc := range []struct {
+		name   string
+		items  []relayHeld
+		groups int
+	}{
+		{"two directives batch together", []relayHeld{directive(1), directive(2)}, 1},
+		{"two ordinary rows batch together", []relayHeld{ordinary(1), ordinary(2)}, 1},
+		{"directive then ordinary", []relayHeld{directive(1), ordinary(2)}, 2},
+		{"ordinary then directive", []relayHeld{ordinary(1), directive(2)}, 2},
+	} {
+		if got := relayBatchGroups(tc.items, false, now); len(got) != tc.groups {
+			t.Errorf("%s: %d groups, want %d", tc.name, len(got), tc.groups)
+		}
+	}
+}
+
+// The harness name is one normalized identity before any dispatch or proof
+// check, so a padded or upper-case name from herdr cannot slip past a rule.
+func TestRelayHarnessNameIsNormalized_t3276(t *testing.T) {
+	for _, raw := range []string{` {"result":{"agent":{"harness":" Codex "}}}`, `{"result":{"agent":{"kind":"CODEX"}}}`, `{"result":{"agent":{"agent":"\tcodex\n"}}}`} {
+		if got := parseRelayAgentHarness([]byte(raw)); got != "codex" {
+			t.Errorf("%s -> %q, want codex", raw, got)
+		}
+	}
+	if got := parseRelayAgentHarness([]byte(`{"result":{"agent":{"harness":"   ","kind":"Devin"}}}`)); got != "devin" {
+		t.Errorf("a blank harness must fall through to kind, got %q", got)
+	}
+}
+
+// Waking on working releases the directive only; a report held beside it on
+// the idle policy keeps waiting for the pane to finish its turn.
+func TestWorkingWakeLeavesIdleRowHeld_t3276(t *testing.T) {
+	rig := t3276Start(t)
+	directive := rig.send("ev-mixed-directive", "findings", "[mergewake] findings for the worker")
+	report := rig.send("ev-mixed-report", "report", "[worker] progress")
+	sc := t3276Harnesses()["codex-working"]
+	sc.preStatus, sc.postStatus = "blocked", "working"
+	pane := t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+	manager := rig.node.relayBusyManager()
+	manager.offer(t.Context(), t3276Message(report))
+	manager.offer(t.Context(), t3276Message(directive))
+	if got := pane.calls(t, "prompt"); got != 0 {
+		t.Fatalf("a blocked pane was typed into %d times", got)
+	}
+
+	manager.releaseWorking(t.Context(), "w1:pW", false)
+
+	if got := pane.calls(t, "prompt"); got != 1 {
+		t.Fatalf("prompts=%d, want only the directive typed", got)
+	}
+	if typed := pane.typed(t); !strings.Contains(typed, "findings for the worker") || strings.Contains(typed, "progress") {
+		t.Fatalf("typed %q: want the directive alone", typed)
+	}
+	rows, err := rig.node.relayStore().RelayHeldForPane(t.Context(), "w1:pW")
+	if err != nil || len(rows) != 1 || rows[0].EventID != report.EventID {
+		t.Fatalf("held rows=%+v err=%v, want the report still held", rows, err)
 	}
 }
