@@ -418,8 +418,10 @@ the ledger's duplicate. `host` is the node's `HUB_MACHINE_ID`. hk unreachable
 or unconfigured fails the spawn closed. The task precheck also fails closed before launch.
 
 After the brief lands, panewire merges `{state:"spawned", role, label, family,
-profile, model, pool, owner_lane, parent_lane, parent_job, pane_id,
-worktree:{origin, branch|null, head}}` — the allowlisted fields only; brief
+profile, model, harness, effort, pool, owner_lane, parent_lane, parent_job,
+pane_id, worktree:{origin, branch|null, head}}` — the allowlisted fields only
+(hk's `JobUpdate` accepts `harness` and `effort` since handoffkeep v0.0.39;
+production runs v0.0.63); brief
 text, command lines, pane output and absolute local paths are never written.
 `panewire done` writes `{state:"completed", report_doc}` plus `result` when
 `--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT,

@@ -253,6 +253,8 @@ func (a *App) spawnedJobRecord(ctx context.Context, s Spawn, seat Seat, launch L
 		"family":     seat.Family,
 		"profile":    s.Profile,
 		"model":      launch.ModelID,
+		"harness":    seat.Kind,
+		"effort":     launch.Effort,
 		"pool":       pool,
 		"owner_lane": owner,
 		"pane_id":    pane,
