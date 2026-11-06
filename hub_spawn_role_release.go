@@ -339,7 +339,7 @@ func spawnRoleHeldBody(holder hubSpawnTask, pane heldPane, found bool) map[strin
 // succeeded and its pane is verifiably gone (a succeeded holder with no hk
 // record included). When it cannot, held carries the 409 body naming the
 // holder, and one INFO line says which branch held.
-func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, request fleet.Submission, spawn fleet.Spawn, owner string) (task hubSpawnTask, held map[string]string, err error) {
+func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, request fleet.Submission, spawn fleet.Spawn, owner string) (task hubSpawnTask, held map[string]string, retryAfterS int, err error) {
 	roleKey := spawn.RoleKey()
 	trace := heldTrace{branch: "owner_read_error", hk: "not_read"}
 	holder := hubSpawnTask{}
@@ -350,7 +350,7 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 	}()
 	priorID, priorJob, priorStatus, readErr := h.inbox.store.spawnRoleOwner(ctx, roleKey)
 	if readErr != nil {
-		return task, spawnRoleHeldBody(hubSpawnTask{}, heldPaneUnknown, false), errSpawnClaimed
+		return task, spawnRoleHeldBody(hubSpawnTask{}, heldPaneUnknown, false), 0, errSpawnClaimed
 	}
 	holder, holderErr := h.inbox.store.spawnTask(ctx, priorID)
 	trace.branch = "holder_unreadable"
@@ -400,7 +400,9 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 		if !released && readErr == nil && exists {
 			// The probes above keep a present pane. A reviewer's finished or
 			// stuck pane is released here instead (hk 3315).
-			if closed, branch := h.releaseFinishedReviewerPane(ctx, app, request, spawn, holder, record, probe); closed {
+			closed, branch, remaining := h.releaseFinishedReviewerPane(ctx, app, request, spawn, holder, record, probe)
+			retryAfterS = retryAfterSeconds(remaining)
+			if closed {
 				released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, roleKey) == nil
 				trace.branch = branch
 				if !released {
@@ -412,15 +414,16 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 		if released {
 			task, _, err = h.inbox.store.claimSpawn(ctx, request, spawn.Job, owner, h.now().UTC())
 			if !errors.Is(err, errSpawnClaimed) {
-				return task, nil, err
+				return task, nil, 0, err
 			}
+			retryAfterS = 0
 			trace.branch = "claim_raced"
 		} else if probe.state == heldPaneAbsent || probe.write {
 			trace.branch = "release_write_failed"
 		}
 	}
 	trace.probe = probe
-	return task, spawnRoleHeldBody(holder, probe.state, holderErr == nil), errSpawnClaimed
+	return task, spawnRoleHeldBody(holder, probe.state, holderErr == nil), retryAfterS, errSpawnClaimed
 }
 
 // heldTrace is what a refused reclaim saw: the branch that held, the hk read

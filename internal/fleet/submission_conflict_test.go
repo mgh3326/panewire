@@ -18,6 +18,10 @@ func TestSubmitConflictPrintsHubReasonAndFix(t *testing.T) {
 			`{"error":"job_already_claimed","request_id":"4a2514ef","job":"pw-author-trailer","host":"m1b","pane":"w2:p3","fix":"close pane w2:p3 on m1b, then resubmit"}`,
 			[]string{"job_already_claimed", "request=4a2514ef", "job=pw-author-trailer", "host=m1b", "pane=w2:p3", "fix: close pane w2:p3 on m1b, then resubmit"},
 		},
+		"held by the landing grace": {
+			`{"error":"job_already_claimed","request_id":"4a2514ef","job":"mwr-283-7e8272c-p1","host":"m1b","pane":"w5:p78","retry_after_s":412,"fix":"inspect the existing operation"}`,
+			[]string{"(held by request=4a2514ef job=mwr-283-7e8272c-p1 host=m1b pane=w5:p78) retry_after_s=412; fix: inspect"},
+		},
 		"no holder": {
 			`{"error":"idempotency_payload_conflict","fix":"use a new job id"}`,
 			[]string{"idempotency_payload_conflict", "fix: use a new job id"},
