@@ -248,16 +248,17 @@ func (client *HubClient) measureFleetQuota(run, parent context.Context, pool str
 		return publish, true, ""
 	}
 	shadow := isShadowQuotaPool(pool)
-	publish, ok, kind := client.measureFleetQuotaWithPacelever(run, parent, pool)
+	publish, ok, kind, output := client.measureFleetQuotaWithPacelever(run, parent, pool)
 	if shadow {
-		client.logShadowQuota(parent, pool, shadowFromPublish(publish, ok, kind))
+		client.logShadowQuota(parent, pool, shadowFromPacelever(pool, output, publish, ok, kind))
 	}
 	return publish, ok, kind
 }
 
 // measureFleetQuotaWithPacelever is the fleet-state measurement of a pool the
-// node does not measure itself, or measures only in shadow.
-func (client *HubClient) measureFleetQuotaWithPacelever(run, parent context.Context, pool string) (FleetStatePublish, bool, string) {
+// node does not measure itself, or measures only in shadow. It also returns
+// pacelever's raw output, which the shadow comparison reads on its own terms.
+func (client *HubClient) measureFleetQuotaWithPacelever(run, parent context.Context, pool string) (FleetStatePublish, bool, string, []byte) {
 	output, err := client.nodePaceleverRunner()(run, "refresh", pool)
 	publish, ok := FleetStatePublish{}, false
 	if err == nil {
@@ -267,7 +268,7 @@ func (client *HubClient) measureFleetQuotaWithPacelever(run, parent context.Cont
 		if confirmed := client.fleetQuotaConfirmedAt(run, publish.Key, publish.MeasuredAt); !confirmed.IsZero() {
 			publish.ConfirmedAt = &confirmed
 		}
-		return publish, true, ""
+		return publish, true, "", output
 	}
 	// refresh prints no error kind; pacelever's status names it. A timed-out
 	// refresh is not asked again: its login is unknown either way.
@@ -275,7 +276,7 @@ func (client *HubClient) measureFleetQuotaWithPacelever(run, parent context.Cont
 	if run.Err() == nil && !errors.Is(err, context.DeadlineExceeded) {
 		kind = client.fleetQuotaErrorKind(parent, pool)
 	}
-	return FleetStatePublish{}, false, kind
+	return FleetStatePublish{}, false, kind, output
 }
 
 // fleetQuotaFromReading turns a native reading into a publishable value. It

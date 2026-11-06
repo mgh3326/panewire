@@ -1,0 +1,6 @@
+Devin CLI
+v3000.11.234
+
+────────────────────────────────────────
+❯ Ask Devin to build features, fix bugs, or work on your code
+────────────────────────────────────────

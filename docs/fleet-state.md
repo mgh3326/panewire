@@ -113,7 +113,7 @@ publishes:
 - `quota` for each pool in `--state-quota-pools` (comma-separated, empty by
   default, which disables quota publishing). Every `--state-quota-interval`
   (default 60 s, minimum 10 s) it refreshes the pool: `claude`, `codex` and (once
-  its switch is flipped) `commandcode` are
+  their switch is flipped) `commandcode` and `devin` are
   measured by the node itself ([docs/quota.md](quota.md#native-measurement-claude)),
   every other pool runs `pacelever refresh <pool>`; a pool in
   [shadow](quota.md#shadow-and-native) also logs the node's own measurement

@@ -339,8 +339,8 @@ func TestCommandcodeDefaultsToShadow(t *testing.T) {
 	if isNativeQuotaPool("commandcode") || !isShadowQuotaPool("commandcode") {
 		t.Fatal("commandcode is not in shadow by default")
 	}
-	if !isNativeQuotaPool("claude") || !isNativeQuotaPool("codex") || isShadowQuotaPool("claude") || isShadowQuotaPool("devin") {
-		t.Fatal("claude and codex are always native, and only commandcode has a switch")
+	if !isNativeQuotaPool("claude") || !isNativeQuotaPool("codex") || isShadowQuotaPool("claude") || isShadowQuotaPool("kimi") {
+		t.Fatal("claude and codex are always native, and only commandcode and devin have a switch")
 	}
 }
 
