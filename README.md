@@ -48,6 +48,8 @@ Spawn requests are submitted through `panewire spawn` and `work`; the hub coordi
 
 See [docs/design.md](docs/design.md) for the complete contract and acceptance criteria.
 
+What the node relay does per harness when it types a lane event into a worker pane, and when it may report it delivered, is in [relay delivery per harness](docs/relay-harness-delivery.md).
+
 ## Installation and use
 
 R1 ships one executable, `panewire`, with a `daemon` subcommand. This avoids two separately versioned Go artifacts while keeping the launchd entry point explicit (`panewire daemon`).

@@ -696,7 +696,7 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 	// drop. A replay of an already-landed row therefore types again and is
 	// proven by the postsend nonce; what presend still checks is only the
 	// composer, where a pending paste would be mangled by a second one.
-	presend := relayReadPane(ctx, pane)
+	presend := relayReadPane(ctx, pane, harness)
 	if !presend.visibleOK {
 		// The composer is located only in the visible read, so without it
 		// the one presend check cannot run -- and typing blind is exactly
@@ -724,13 +724,14 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		// it.
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness, Evidence: "prompt_failed"}
 	}
-	result := relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, relayReadPane(ctx, pane))
-	if !strings.EqualFold(harness, "claude") || !strings.HasPrefix(result.Evidence, "unproven:") || len(relayNoncesIn(text)) == 0 {
+	result := relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, relayReadPane(ctx, pane, harness).withPresend(presend))
+	adapter, known := relayAdapterFor(harness)
+	if !known || !adapter.observe || !strings.HasPrefix(result.Evidence, "unproven:") || len(relayNoncesIn(text)) == 0 {
 		return result
 	}
-	// Claude can accept input while busy before it appears in either read.
+	// A harness can accept input while busy before it appears in either read.
 	// Observe only: another prompt or return could duplicate or alter input.
-	deadline := time.NewTimer(8 * time.Second)
+	deadline := time.NewTimer(relayObserveWindow)
 	defer deadline.Stop()
 	tick := time.NewTicker(200 * time.Millisecond)
 	defer tick.Stop()
@@ -741,7 +742,7 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		case <-deadline.C:
 			return result
 		case <-tick.C:
-			reads := relayReadPane(ctx, pane)
+			reads := relayReadPane(ctx, pane, harness).withPresend(presend)
 			classification, rule, proven := relayClassifyReads(harness, reads, text, true, presendQueued)
 			switch classification {
 			case "marker_observed":
@@ -758,6 +759,12 @@ func relayInjectHarness(ctx context.Context, pane string) string {
 	if err != nil {
 		return ""
 	}
+	return parseRelayAgentHarness(out)
+}
+
+// parseRelayAgentHarness names the harness a herdr agent get reply reports:
+// its harness, else its kind, else its agent name.
+func parseRelayAgentHarness(raw []byte) string {
 	var response struct {
 		Result struct {
 			Agent struct {
@@ -767,19 +774,24 @@ func relayInjectHarness(ctx context.Context, pane string) string {
 			} `json:"agent"`
 		} `json:"result"`
 	}
-	if json.Unmarshal(out, &response) != nil {
+	if json.Unmarshal(raw, &response) != nil {
 		return ""
 	}
+	// One normalized identity for every dispatch and proof check that follows:
+	// a padded or differently cased name must not fall past a switch on the
+	// lower-case harness and reach a rule that cannot tell a pending paste.
 	for _, candidate := range []string{response.Result.Agent.Harness, response.Result.Agent.Kind, response.Result.Agent.Agent} {
-		if candidate != "" {
-			return candidate
+		if name := strings.ToLower(strings.TrimSpace(candidate)); name != "" {
+			return name
 		}
 	}
 	return ""
 }
 
 // harnessHasSubmissionEvidence reports whether classifySubmission can ever
-// prove this harness's submission one way or the other. queued and
+// prove this harness's submission one way or the other. It serves the direct
+// `panewire prompt` path only; the relay proves a delivery through
+// relayHarnessAdapters and has no such carve-out (hk 3276). queued and
 // marker_observed are gated on harness being claude, codex, or devin (see
 // classifySubmission); any other harness (one that exposes no prompt in
 // recent-unwrapped at all -- see 2026-09-14 fleet notes) can only ever
@@ -804,19 +816,15 @@ const devinComposerQueueHint = "Press Enter to send queued messages now"
 // Only claude and devin draw a composer between two dividers; codex draws
 // none and its placeholder is plain text, so its composer is never located.
 func relayComposer(harness, screen string) (string, bool) {
-	isDivider, glyph := isClaudeDividerLine, "❯"
-	switch {
-	case strings.EqualFold(harness, "claude"):
-	case strings.EqualFold(harness, "devin"):
-		isDivider, glyph = isDevinDividerLine, "❭"
-	default:
+	adapter, ok := relayAdapterFor(harness)
+	if !ok || adapter.composerEdge == nil {
 		return "", false
 	}
-	region, ok := composerRegionWith(screen, isDivider)
+	region, ok := composerRegionWith(screen, adapter.composerEdge)
 	if !ok {
 		return "", false
 	}
-	return strings.TrimPrefix(compactWhitespace(region), glyph), true
+	return strings.TrimPrefix(compactWhitespace(region), adapter.composerGlyph), true
 }
 
 // relayComposerReturnSafe reports whether one return keypress on screen can
@@ -878,9 +886,15 @@ const (
 type relayPaneReads struct {
 	visible, unwrapped string
 	anyOK, visibleOK   bool
+	// status is herdr's agent_status at read time and presendStatus the one
+	// read before the paste. Only a relayProofEchoAndWorking harness asks for
+	// them: its proof is the pane going idle/done -> working after the send.
+	status, presendStatus string
 }
 
-func relayReadPane(ctx context.Context, pane string) relayPaneReads {
+// relayReadPane reads the visible screen and the recent-unwrapped transcript
+// of pane. For a harness whose proof needs the agent status it reads that too.
+func relayReadPane(ctx context.Context, pane, harness string) relayPaneReads {
 	var reads relayPaneReads
 	if out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", relayVerifyVisibleLines).Output(); err == nil {
 		reads.visible, reads.anyOK, reads.visibleOK = string(out), true, true
@@ -888,6 +902,17 @@ func relayReadPane(ctx context.Context, pane string) relayPaneReads {
 	if out, err := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "recent-unwrapped", "--lines", relayVerifyUnwrappedLines).Output(); err == nil {
 		reads.unwrapped, reads.anyOK = string(out), true
 	}
+	if adapter, ok := relayAdapterFor(harness); ok && adapter.proof == relayProofEchoAndWorking {
+		if out, err := exec.CommandContext(ctx, "herdr", "agent", "get", pane).Output(); err == nil {
+			reads.status, _ = parseRelayAgentStatus(out)
+		}
+	}
+	return reads
+}
+
+// withPresend carries the status read before the paste onto a later read.
+func (reads relayPaneReads) withPresend(presend relayPaneReads) relayPaneReads {
+	reads.presendStatus = presend.status
 	return reads
 }
 
@@ -898,14 +923,8 @@ func relayReadPane(ctx context.Context, pane string) relayPaneReads {
 // the message was delivered to it -- the harness submits the queue itself
 // when the turn ends -- and it never earns a return keypress.
 func relayQueuedBanner(harness, screen string) bool {
-	switch {
-	case strings.EqualFold(harness, "claude"), strings.EqualFold(harness, "codex"):
-		return strings.Contains(screen, "Press up to edit queued messages") ||
-			strings.Contains(screen, "Messages to be submitted after next tool call")
-	case strings.EqualFold(harness, "devin"):
-		return devinQueued(screen)
-	}
-	return false
+	adapter, ok := relayAdapterFor(harness)
+	return ok && adapter.queued != nil && adapter.queued(screen)
 }
 
 // #687: a relay inject is proven by a per-row nonce, not by matching the
@@ -1162,6 +1181,23 @@ func relayClassifyReads(harness string, reads relayPaneReads, text string, postS
 		return "composer_residue", "paste_chip", nil
 	}
 	source, proven := relayTranscriptNonces(harness, reads, nonces)
+	adapter, known := relayAdapterFor(harness)
+	if !known || adapter.proof == relayProofNone {
+		// hk 3276: no adapter, no proof. What the pane shows of an unknown
+		// harness cannot be told from a pending paste.
+		return "unproven", "none", nil
+	}
+	if adapter.proof == relayProofEchoAndWorking {
+		// No composer can be located, so the nonce alone could be a pending
+		// paste. It counts only when the pane was idle or done before the
+		// send and herdr now reports it working: a submitted prompt starts a
+		// turn, a pending paste does not.
+		started := reads.status == "working" && (reads.presendStatus == "idle" || reads.presendStatus == "done")
+		if postSend && len(proven) > 0 && started {
+			return "marker_observed", source + ":nonce_echo+status_working", proven
+		}
+		return "unproven", "none", nil
+	}
 	if postSend && !presendQueued && relayQueuedBanner(harness, reads.visible) && len(proven) > 0 {
 		return "queued", "queued_banner", proven
 	}
@@ -1189,16 +1225,19 @@ func relayComposerState(harness, visible string) string {
 // relayUnproven is the #683 policy: an undecidable verdict after herdr
 // accepted the send is maybe-in-pane, never a re-inject. The durable relay
 // row stays undelivered, and a hub replay -- which meets the presend check
-// before anything is typed -- is the late-delivery path. A harness with no
-// submission-evidence path at all keeps the #264 D2 AC0 carve-out:
-// delivered on no negative evidence (a harness that exposes no prompt in
-// recent-unwrapped -- see 2026-09-14 fleet notes).
+// before anything is typed -- is the late-delivery path. The #264 D2 AC0
+// carve-out (a harness with no evidence path is delivered on no negative
+// evidence) is gone: a harness without an adapter is unconfirmed too.
 func relayUnproven(harness string, reads relayPaneReads, prefix string) relayInjectResult {
 	if !reads.anyOK {
 		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: prefix + "unproven:read_failed"}
 	}
-	if !harnessHasSubmissionEvidence(harness) {
-		return relayInjectResult{Outcome: relayInjectDelivered, Harness: harness}
+	adapter, known := relayAdapterFor(harness)
+	if !known || adapter.proof == relayProofNone {
+		// hk 3276: the old carve-out called a harness with no evidence path
+		// delivered on the absence of negative evidence. A message nobody saw
+		// land must not close its durable row, so it is unconfirmed.
+		return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: prefix + "unproven:no_adapter"}
 	}
 	return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: prefix + "unproven:" + relayComposerState(harness, reads.visible)}
 }
@@ -1234,7 +1273,7 @@ func relayVerifyOutcome(ctx context.Context, pane, harness, text, before, prefix
 		// failed residue-screen read leaves that state unknown, which
 		// excludes it too.
 		presendQueued = presendQueued || !reads.visibleOK || relayQueuedBanner(harness, reads.visible)
-		reads = relayReadPane(ctx, pane)
+		reads = relayReadPane(ctx, pane, harness).withPresend(reads)
 		prefix += "after_return:"
 		result, rule, proven = relayClassifyReads(harness, reads, text, true, presendQueued)
 	}
@@ -1263,7 +1302,7 @@ func relayInjectVerifySubmission(ctx context.Context, pane, harness, text string
 // whenever the reads cannot prove what happened (#683) -- the text may
 // already be in the pane, so an undecidable verdict is never a re-inject.
 func relayInjectVerify(ctx context.Context, pane, harness, text, before string) relayInjectResult {
-	return relayVerifyOutcome(ctx, pane, harness, text, before, "", relayQueuedBanner(harness, before), relayReadPane(ctx, pane))
+	return relayVerifyOutcome(ctx, pane, harness, text, before, "", relayQueuedBanner(harness, before), relayReadPane(ctx, pane, harness))
 }
 
 // devin verification reads: the visible screen for the queue banner and the

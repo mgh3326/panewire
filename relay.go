@@ -747,6 +747,19 @@ func (h *HubServer) injectLaneRelayEvent(event hubJobEventPayload, route reportR
 	return true
 }
 
+// workerDirectiveTypes are the notify types a session sends a worker because
+// the worker needs them: review findings, an ESC answer, a follow-up order.
+var workerDirectiveTypes = map[string]bool{"findings": true, "decision": true, "order": true}
+
+// isWorkerDirective reports whether a lane.event is such a message for a worker
+// lane: a lane whose route names a parent, the design lane it reports to. It is
+// sent at once on every harness, working or not (hk 3276); a lane with no
+// parent, such as the desk, keeps its delivery policy. An explicit deliver on
+// the event or the route still wins.
+func isWorkerDirective(kind string, event hubJobEventPayload, route reportRelayRoute) bool {
+	return kind == "lane.event" && route.Parent != "" && !route.Sink && workerDirectiveTypes[event.NotifyType]
+}
+
 func relayInjectDirective(kind string, event hubJobEventPayload, route reportRelayRoute, eventID int64) hubRelayInjectEvent {
 	if eventID == 0 {
 		// Pre-R20/no-handoffkeep operation has no durable identity and therefore
@@ -761,6 +774,9 @@ func relayInjectDirective(kind string, event hubJobEventPayload, route reportRel
 	deliver := event.DeliverPolicy
 	if deliver == "" {
 		deliver = route.Deliver
+	}
+	if deliver == "" && isWorkerDirective(kind, event, route) {
+		deliver = relayDeliverDirective
 	}
 	if deliver == "" {
 		deliver = "idle"

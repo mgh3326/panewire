@@ -340,7 +340,7 @@ func TestRelayInjectVerifySubmissionCodexWithholdsReturn(t *testing.T) {
 // TestRelayInjectVerifySubmissionHarnessEvidenceMatrix is the closed
 // enumeration the 2026-09-16 rework requires: every harness family (claude,
 // codex, devin -- added this rework, no longer the no-evidence carve-out --
-// and an unrecognized/empty harness string, which keeps the carve-out)
+// and an unrecognized/empty harness string, which hk 3276 made unconfirmed)
 // crossed with every classifySubmission value it can actually reach, pinning
 // both the delivered/unconfirmed result and whether that result would drive
 // a hub retry (busy_relay.go's retryOrDrop fires on false;
@@ -356,8 +356,8 @@ func TestRelayInjectVerifySubmissionCodexWithholdsReturn(t *testing.T) {
 //     two-divider composer layout), queued ("send now"), marker_observed,
 //     unproven
 //   - other:   composer_residue (chip only), unproven -- queued and
-//     marker_observed stay unreachable (harness-gated); this is the
-//     remaining carve-out (see harnessHasSubmissionEvidence)
+//     marker_observed stay unreachable (harness-gated); the relay no
+//     longer carves these out as delivered (hk 3276)
 //
 // #683 changed the verdicts this matrix pins: a queue banner is landed
 // (relayInjectQueued), and anything the reads cannot prove is
@@ -399,10 +399,12 @@ func TestRelayInjectVerifySubmissionHarnessEvidenceMatrix(t *testing.T) {
 		// the queued row carries this inject's nonce.
 		{"devin queued over a foreign draft is landed", "devin", []string{strings.Replace(unprovenDevinQueuedDraft, "○ hi", "○ "+text, 1)}, relayInjectQueued},
 
-		// An unrecognized/empty harness string keeps the no-evidence
-		// carve-out: unproven reports delivered.
-		{"unrecognized harness unproven direct", "some-future-harness", []string{"nothing relevant"}, relayInjectDelivered},
-		{"empty harness unproven direct", "", []string{"nothing relevant"}, relayInjectDelivered},
+		// hk 3276: an unrecognized or empty harness string has no adapter, so
+		// nothing it shows is proof. The old no-evidence carve-out reported
+		// these delivered; they are unconfirmed now, even with the text on
+		// screen (see relay_harness_delivery_t3276_test.go).
+		{"unrecognized harness unproven direct", "some-future-harness", []string{"nothing relevant"}, relayInjectMaybeInPane},
+		{"empty harness unproven direct", "", []string{"nothing relevant"}, relayInjectMaybeInPane},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

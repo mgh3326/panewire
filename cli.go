@@ -179,6 +179,7 @@ func runPromptCLI(args []string, cfg CLIConfig) int {
 	uptake := fs.String("uptake", "", "uptake mode")
 	timeout := fs.Duration("timeout", 2*time.Second, "overall timeout")
 	storeBody := fs.Bool("store-prompt-body", false, "opt in to storing prompt body")
+	directive := fs.Bool("directive", false, "message for a job's worker: a working target is not refused (hk 3276)")
 	if err := fs.Parse(args); err != nil {
 		return ExitUsage
 	}
@@ -195,7 +196,7 @@ func runPromptCLI(args []string, cfg CLIConfig) int {
 		return ExitDaemonUnavailable
 	}
 	defer conn.Close()
-	req := localRequest{Op: "prompt", Sender: *sender, Target: *target, Path: *file, Uptake: *uptake, StoreBody: *storeBody, TimeoutMS: timeout.Milliseconds()}
+	req := localRequest{Op: "prompt", Sender: *sender, Target: *target, Path: *file, Uptake: *uptake, Directive: *directive, StoreBody: *storeBody, TimeoutMS: timeout.Milliseconds()}
 	b, _ := json.Marshal(req)
 	if _, err = fmt.Fprintf(conn, "%s\n", b); err != nil {
 		return ExitDaemonUnavailable

@@ -34,6 +34,11 @@ const (
 	relayDevinMaxInjectAttempts = 2
 )
 
+// relayDeliverDirective is the delivery policy the hub gives a worker
+// directive. It is "now" except for a blocked pane, whose approval prompt the
+// text could answer (R27).
+const relayDeliverDirective = "directive"
+
 type relayCommandRunner func(context.Context, ...string) ([]byte, error)
 
 type relayDeliveryPolicy struct {
@@ -48,6 +53,11 @@ func parseRelayDeliveryPolicy(value string) (relayDeliveryPolicy, bool) {
 	}
 	if value == "now" {
 		return relayDeliveryPolicy{Name: "now"}, true
+	}
+	if value == relayDeliverDirective {
+		// A worker directive (hk 3276): typed at once while the pane is idle,
+		// done or working, and held only while it is blocked on a prompt.
+		return relayDeliveryPolicy{Name: relayDeliverDirective, MaxWait: defaultRelayMaxWait}, true
 	}
 	seconds, found := strings.CutPrefix(value, "max_wait=")
 	if !found {
@@ -233,6 +243,10 @@ type relayBusyManager struct {
 	mu     sync.Mutex
 	held   map[string][]relayHeld
 	waits  map[string]context.CancelFunc
+	// inflight is the event ids a release is delivering right now. A row stays
+	// in the store until its inject and proof are done, so another wake's
+	// snapshot would otherwise find it again and type it a second time.
+	inflight map[int64]struct{}
 	// lanePane is the newest route observation each inject directive carries:
 	// the hub re-resolves lanes.json for every relay, so the (lane, pane) an
 	// inject names is authoritative for its arrival instant. A held row whose
@@ -262,7 +276,7 @@ func (client *HubClient) relayBusyManager() *relayBusyManager {
 	client.busyRelayMu.Lock()
 	defer client.busyRelayMu.Unlock()
 	if client.busyRelay == nil {
-		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc), lanePane: make(map[string]string), dedupeInFlight: make(map[string]chan struct{})}
+		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc), inflight: make(map[int64]struct{}), lanePane: make(map[string]string), dedupeInFlight: make(map[string]chan struct{})}
 	}
 	return client.busyRelay
 }
@@ -424,7 +438,7 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 	output, err := runner(getContext, "agent", "get", message.Pane)
 	cancel()
 	status, parsed := parseRelayAgentStatus(output)
-	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" {
+	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" || (policy.Name == relayDeliverDirective && status != "blocked") {
 		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
@@ -446,40 +460,45 @@ func (manager *relayBusyManager) hold(parent context.Context, item relayHeld, re
 		manager.deliver(parent, []relayHeld{item}, false)
 		return
 	}
+	// The insert, the snapshot and the in-memory update are one step under the
+	// manager lock, the same lock a release takes around its own snapshot: a
+	// release can never interleave between this row's snapshot and its
+	// registration, and so cannot have the row it delivered restored here.
+	manager.mu.Lock()
 	inserted, err := store.InsertRelayHeld(parent, item)
 	if err != nil {
+		manager.mu.Unlock()
 		manager.deliver(parent, []relayHeld{item}, false)
 		return
 	}
+	rows, rowsErr := store.RelayHeldForPane(parent, item.Pane)
+	if rowsErr == nil {
+		if inserted {
+			for index := range rows {
+				if rows[index].EventID == item.EventID {
+					// SQLite stores milliseconds for restart recovery. Keep the precise
+					// receipt instant in this live process so max_wait=N reaches herdr as
+					// exactly N*1000 milliseconds on its first arm.
+					rows[index].HeldSince = item.HeldSince
+					rows[index].fresh = true
+				}
+			}
+		}
+		manager.held[item.Pane] = rows
+	}
+	manager.mu.Unlock()
 	if !inserted {
 		// A hub replay after a node restart is the same local hold, not another
 		// prompt. Re-report it so a restarted hub rebuilds its projection.
-		rows, err := store.RelayHeldForPane(parent, item.Pane)
-		if err == nil {
-			manager.mu.Lock()
-			manager.held[item.Pane] = rows
-			manager.mu.Unlock()
+		if rowsErr == nil {
 			manager.arm(parent, item.Pane)
 		}
 		manager.reportHeld(item, reason)
 		return
 	}
-	rows, err := store.RelayHeldForPane(parent, item.Pane)
-	if err != nil {
+	if rowsErr != nil {
 		return
 	}
-	for index := range rows {
-		if rows[index].EventID == item.EventID {
-			// SQLite stores milliseconds for restart recovery. Keep the precise
-			// receipt instant in this live process so max_wait=N reaches herdr as
-			// exactly N*1000 milliseconds on its first arm.
-			rows[index].HeldSince = item.HeldSince
-			rows[index].fresh = true
-		}
-	}
-	manager.mu.Lock()
-	manager.held[item.Pane] = rows
-	manager.mu.Unlock()
 	manager.reportHeld(item, reason)
 	manager.arm(parent, item.Pane)
 }
@@ -627,22 +646,33 @@ func (manager *relayBusyManager) arm(parent context.Context, pane string) {
 	for index := range manager.held[pane] {
 		manager.held[pane][index].fresh = false
 	}
+	directiveHeld := false
+	for _, item := range items {
+		directiveHeld = directiveHeld || item.DeliverPolicy == relayDeliverDirective
+	}
 	ctx, cancel := context.WithCancel(parent)
 	manager.waits[pane] = cancel
 	manager.mu.Unlock()
-	go manager.waitForPane(ctx, pane, waitFor)
+	go manager.waitForPane(ctx, pane, waitFor, directiveHeld)
 }
 
-func (manager *relayBusyManager) waitForPane(ctx context.Context, pane string, waitFor time.Duration) {
+func (manager *relayBusyManager) waitForPane(ctx context.Context, pane string, waitFor time.Duration, directiveHeld bool) {
 	runner := manager.client.relayRunner()
 	if runner == nil {
 		return
 	}
-	output, err := runner(ctx, "agent", "wait", pane, "--until", "idle", "--until", "done", "--timeout", strconv.FormatInt(waitFor.Milliseconds(), 10))
+	args := []string{"agent", "wait", pane, "--until", "idle", "--until", "done"}
+	if directiveHeld {
+		// hk 3276: a directive is held only while the pane is blocked. Once
+		// the prompt is answered the pane turns working, which is no reason
+		// to keep it waiting for the end of the turn.
+		args = append(args, "--until", "working")
+	}
+	output, err := runner(ctx, append(args, "--timeout", strconv.FormatInt(waitFor.Milliseconds(), 10))...)
 	if errors.Is(err, context.Canceled) || ctx.Err() != nil {
 		return
 	}
-	_, parsed := parseRelayAgentStatus(output)
+	status, parsed := parseRelayAgentStatus(output)
 	// Only the documented wait timeout is an expiry. Other command failures
 	// fail open, but are not mislabeled as a policy deadline.
 	timedOut := err != nil && relayWaitTimedOut(output)
@@ -651,7 +681,167 @@ func (manager *relayBusyManager) waitForPane(ctx context.Context, pane string, w
 	if err == nil && !parsed {
 		timedOut = false
 	}
+	if status == "working" {
+		manager.releaseWorking(ctx, pane, timedOut)
+		return
+	}
 	manager.release(ctx, pane, timedOut)
+}
+
+// releaseWorking is the wake-up when a blocked pane turned working: only the
+// directives held on it are delivered. A row on the idle policy keeps waiting
+// for the pane to finish its turn. It runs on the wait's own context, which arm
+// cancels as "the previous wait", so every re-arm here starts from a stable
+// context (as retryOrDrop does): a wait derived from the canceled one would
+// exit at once and leave the idle rows held with no waiter.
+func (manager *relayBusyManager) releaseWorking(parent context.Context, pane string, expired bool) {
+	store := manager.client.relayStore()
+	if store == nil {
+		return
+	}
+	// The store snapshot and the removal of the directives from the in-memory
+	// set happen under one lock, and only the delivered rows are removed from
+	// the current set: a row an offer holds meanwhile stays held and is armed.
+	manager.mu.Lock()
+	items, err := manager.heldSnapshot(parent, store, pane)
+	if err != nil {
+		manager.mu.Unlock()
+		// A transient store error must not strand the held rows with no
+		// waiter: this wait is over, so wait again shortly.
+		time.AfterFunc(relayWorkingRetryDelay, func() { manager.arm(context.Background(), pane) })
+		return
+	}
+	var directives []relayHeld
+	delivering := map[int64]bool{}
+	others := false
+	for _, item := range items {
+		if item.DeliverPolicy == relayDeliverDirective {
+			directives = append(directives, item)
+			delivering[item.EventID] = true
+		} else {
+			others = true
+		}
+	}
+	if len(items) == 0 {
+		manager.mu.Unlock()
+		return
+	}
+	if !others || expired {
+		// Everything held is released, and exactly the snapshot read above: a
+		// second snapshot after the unlock could pick up an idle row an offer
+		// holds in the gap and deliver it to a working pane.
+		delete(manager.waits, pane)
+		delete(manager.held, pane)
+		manager.markInflight(items)
+		manager.mu.Unlock()
+		if relayWorkingReleaseGap != nil {
+			relayWorkingReleaseGap()
+		}
+		manager.deliver(parent, manager.filterDeliverableHeld(parent, items), expired)
+		manager.finishInflight(items)
+		manager.reconcileHeld(parent, pane)
+		manager.arm(context.Background(), pane)
+		return
+	}
+	if len(directives) == 0 {
+		// An unexpected working wake with no directive: keep everything held.
+		manager.mu.Unlock()
+		manager.arm(context.Background(), pane)
+		return
+	}
+	var remaining []relayHeld
+	for _, item := range manager.held[pane] {
+		if !delivering[item.EventID] {
+			remaining = append(remaining, item)
+		}
+	}
+	manager.held[pane] = remaining
+	// Detach this wait, as release does: a row an offer holds from here on arms
+	// a wait of its own, and arm cancels the wait registered for the pane. If
+	// that were the wait this delivery runs on, its inject and its one retry
+	// would start from a canceled context and be reported unconfirmed.
+	delete(manager.waits, pane)
+	manager.markInflight(directives)
+	manager.mu.Unlock()
+	if relayWorkingReleaseGap != nil {
+		relayWorkingReleaseGap()
+	}
+	manager.deliver(parent, manager.filterDeliverableHeld(parent, directives), false)
+	manager.finishInflight(directives)
+	manager.reconcileHeld(parent, pane)
+	manager.arm(context.Background(), pane)
+}
+
+// relayWorkingReleaseGap, when set, runs between the snapshot a working wake
+// decided on and the delivery of it. Tests use it to hold a row in that gap.
+var relayWorkingReleaseGap func()
+
+// relayWorkingRetryDelay spaces the re-wait after a held snapshot could not be
+// read during a working wake.
+var relayWorkingRetryDelay = time.Second
+
+// reconcileHeld makes the in-memory held set match the store for a pane, so a
+// row that was delivered (and deleted) cannot linger in memory and keep the next
+// wait looking for a state that is already true. In-memory timing (the precise
+// receipt instant and the fresh flag) is kept for rows that are still held. An
+// unreadable store leaves the set as it is.
+func (manager *relayBusyManager) reconcileHeld(parent context.Context, pane string) {
+	store := manager.client.relayStore()
+	if store == nil {
+		return
+	}
+	manager.mu.Lock()
+	defer manager.mu.Unlock()
+	rows, err := store.RelayHeldForPane(parent, pane)
+	if err != nil {
+		return
+	}
+	current := map[int64]relayHeld{}
+	for _, item := range manager.held[pane] {
+		current[item.EventID] = item
+	}
+	for index := range rows {
+		if live, ok := current[rows[index].EventID]; ok {
+			rows[index].HeldSince, rows[index].fresh = live.HeldSince, live.fresh
+		}
+	}
+	if len(rows) == 0 {
+		delete(manager.held, pane)
+		return
+	}
+	manager.held[pane] = rows
+}
+
+// heldSnapshot reads the rows held for a pane from the store, leaving out the
+// ones a release is delivering. The caller holds manager.mu.
+func (manager *relayBusyManager) heldSnapshot(parent context.Context, store *Store, pane string) ([]relayHeld, error) {
+	items, err := store.RelayHeldForPane(parent, pane)
+	if err != nil || len(manager.inflight) == 0 {
+		return items, err
+	}
+	kept := items[:0:0]
+	for _, item := range items {
+		if _, busy := manager.inflight[item.EventID]; !busy {
+			kept = append(kept, item)
+		}
+	}
+	return kept, nil
+}
+
+// markInflight and finishInflight bracket a delivery. markInflight needs
+// manager.mu; finishInflight takes it.
+func (manager *relayBusyManager) markInflight(items []relayHeld) {
+	for _, item := range items {
+		manager.inflight[item.EventID] = struct{}{}
+	}
+}
+
+func (manager *relayBusyManager) finishInflight(items []relayHeld) {
+	manager.mu.Lock()
+	for _, item := range items {
+		delete(manager.inflight, item.EventID)
+	}
+	manager.mu.Unlock()
 }
 
 func (manager *relayBusyManager) release(parent context.Context, pane string, expired bool) {
@@ -660,17 +850,27 @@ func (manager *relayBusyManager) release(parent context.Context, pane string, ex
 		return
 	}
 	manager.mu.Lock()
-	items, err := store.RelayHeldForPane(parent, pane)
+	items, err := manager.heldSnapshot(parent, store, pane)
 	if err != nil || len(items) == 0 {
 		manager.mu.Unlock()
 		return
 	}
 	delete(manager.waits, pane)
 	delete(manager.held, pane)
+	manager.markInflight(items)
 	manager.mu.Unlock()
 	// The state transition is serialized above, but prompt itself must not hold
 	// the manager-wide map lock: another pane's read-loop work stays independent.
 	manager.deliver(parent, manager.filterDeliverableHeld(parent, items), expired)
+	manager.finishInflight(items)
+	// A retry inside deliver re-holds a row; a wake that came while it was in
+	// flight skipped it, so wait again for whatever is held now.
+	manager.mu.Lock()
+	rearm := len(manager.held[pane]) > 0
+	manager.mu.Unlock()
+	if rearm {
+		manager.arm(context.Background(), pane)
+	}
 }
 
 // filterDeliverableHeld is the fail-closed lease gate between a finished wait
@@ -808,6 +1008,12 @@ func relayBatchGroups(items []relayHeld, expired bool, now time.Time) [][]relayH
 			continue
 		}
 		last := groups[len(groups)-1]
+		if relayGroupImmediate(last) != relayGroupImmediate([]relayHeld{item}) {
+			// A directive has its own retry and escalation disposition, so it
+			// never shares a send with an ordinary held row.
+			groups = append(groups, []relayHeld{item})
+			continue
+		}
 		candidate := append(append([]relayHeld(nil), last...), item)
 		if len(item.Text) > relayBatchTextLimit || len(relayBatchText(candidate, expired, now)) > relayBatchTextLimit {
 			groups = append(groups, []relayHeld{item})
@@ -845,11 +1051,26 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		ctx, cancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
 		result := manager.inject(ctx, group, text)
 		cancel()
+		immediate := relayGroupImmediate(group)
+		if immediate && relayRetriesOnce(result) {
+			// hk 3276: a worker directive is not held for a quieter pane, so a
+			// send that was rejected or never showed up is typed once more
+			// right away. The row's nonce is unchanged, and the text already
+			// tells the reader a repeat is not a reason to re-run it.
+			retryContext, retryCancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
+			result = manager.inject(retryContext, group, text)
+			retryCancel()
+		}
 		switch result.Outcome {
 		case relayInjectRetryable:
 			maxAttempts := relayMaxInjectAttempts
-			if strings.EqualFold(result.Harness, "devin") {
-				maxAttempts = relayDevinMaxInjectAttempts
+			if adapter, known := relayAdapterFor(result.Harness); known {
+				maxAttempts = adapter.injectAttempts()
+			}
+			if immediate {
+				// The one retry is spent: drop now (and escalate through the
+				// hub) instead of re-holding the row until the pane is idle.
+				maxAttempts = 1
 			}
 			for _, item := range group {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(result.Evidence), OriginalEventID: item.EventID})
@@ -924,6 +1145,46 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			manager.emit("relay.delivered", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(reason), FinalText: item.Text, Edited: item.Edited, OriginalEventID: item.EventID})
 		}
 	}
+}
+
+// relayGroupImmediate reports whether every row in group is a worker directive
+// the hub marked deliver=directive: sent at once unless the pane is blocked.
+// An explicit deliver=now keeps its established single send.
+func relayGroupImmediate(group []relayHeld) bool {
+	for _, item := range group {
+		if item.DeliverPolicy != relayDeliverDirective || item.EventID == 0 || item.Lane == "" {
+			return false
+		}
+	}
+	return len(group) > 0
+}
+
+// relayRetriesOnce reports whether an immediate delivery's first attempt is
+// worth one more send: herdr rejected it, or herdr took it and nothing showed
+// it landed. A verdict that says the text may already be in the pane for any
+// other reason (a composer that holds a foreign draft, a changed harness) is
+// final.
+func relayRetriesOnce(result relayInjectResult) bool {
+	switch result.Outcome {
+	case relayInjectRetryable:
+		return true
+	case relayInjectMaybeInPane:
+		// "unproven:..." (also behind a "presend:" prefix) is the reads
+		// showing nothing: no adapter, an unreadable pane, an empty or
+		// unlocated composer. The scope contract is one retry for all of them;
+		// the second inject's own presend check still refuses a pending
+		// composer or a changed harness. "postsend:...:none" is devin's.
+		if strings.Contains(result.Evidence, "unproven:") {
+			return true
+		}
+		// devin's own unreadable-pane verdicts: before the send nothing was
+		// typed, after it the retry's presend check guards the composer.
+		if result.Evidence == "presend:read_failed" || result.Evidence == "postsend:read_failed" {
+			return true
+		}
+		return strings.HasPrefix(result.Evidence, "postsend:") && strings.HasSuffix(result.Evidence, ":none")
+	}
+	return false
 }
 
 func (manager *relayBusyManager) edit(ctx context.Context, eventID int64, text string) bool {
