@@ -65,6 +65,12 @@ func (h *HubServer) nodeCall(ctx context.Context, machine, op string, args any, 
 // pane itself and refuses one that changed, so it runs before the irreversible
 // hk write; a refused or unreadable step returns false with the node's reason.
 func (h *HubServer) closeHeldPaneAndMarkLost(ctx context.Context, app *fleet.App, holder hubSpawnTask, name string, row nodeAgentRow) (bool, string) {
+	return h.closeHeldPaneAndMarkLostBecause(ctx, app, holder, name, row, "")
+}
+
+// closeHeldPaneAndMarkLostBecause is closeHeldPaneAndMarkLost with the hk
+// end_reason the lost record takes.
+func (h *HubServer) closeHeldPaneAndMarkLostBecause(ctx context.Context, app *fleet.App, holder hubSpawnTask, name string, row nodeAgentRow, endReason string) (bool, string) {
 	machine := spawnHolderHost(holder)
 	var captured nodePaneCaptureResult
 	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, MergedAfter: 0, Write: true}
@@ -76,7 +82,7 @@ func (h *HubServer) closeHeldPaneAndMarkLost(ctx context.Context, app *fleet.App
 	if !h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) || (closed.Outcome != nodePaneClosed && closed.Outcome != nodePaneGone) {
 		return false, ""
 	}
-	return h.markHolderJobLost(ctx, app, holder, name)
+	return h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
 }
 
 // releaseUnworkedLanding closes the empty pane of a failed-at-landing holder

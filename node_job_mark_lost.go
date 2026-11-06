@@ -31,6 +31,23 @@ type nodeJobMarkLostArgs struct {
 	Job    string `json:"job"`
 	PaneID string `json:"pane_id"`
 	Label  string `json:"label"`
+	// EndReason is the hk end_reason the lost record takes, for a job the hub
+	// replaced after a quota stop (hk 3334). Empty writes none.
+	EndReason string `json:"end_reason,omitempty"`
+}
+
+// validNodeEndReason bounds an end_reason the hub asks a node to write: one
+// printable ASCII line, as hk's 128-character field takes it.
+func validNodeEndReason(reason string) bool {
+	if len(reason) > 128 {
+		return false
+	}
+	for _, r := range reason {
+		if r < ' ' || r > '~' {
+			return false
+		}
+	}
+	return true
 }
 
 type nodeJobMarkLostResult struct {
@@ -42,6 +59,9 @@ func validNodeJobMarkLostArgs(args nodeJobMarkLostArgs) bool {
 		return false
 	}
 	if args.PaneID != "" && !nodeCommandPaneIDPattern.MatchString(args.PaneID) {
+		return false
+	}
+	if !validNodeEndReason(args.EndReason) {
 		return false
 	}
 	return args.Label == "" || hubAgentLabelPattern.MatchString(args.Label)
@@ -223,7 +243,11 @@ func (client *HubClient) nodeJobMarkLost(ctx context.Context, args nodeJobMarkLo
 	if err != nil {
 		return nil, "mark_lost_failed"
 	}
-	if err := store.Put(ctx, args.Job, map[string]any{"state": "lost"}); err != nil {
+	record := map[string]any{"state": "lost"}
+	if args.EndReason != "" {
+		record["end_reason"] = args.EndReason
+	}
+	if err := store.Put(ctx, args.Job, record); err != nil {
 		return nil, "mark_lost_failed"
 	}
 	return nodeJobMarkLostResult{Outcome: nodeJobMarkLostLost}, ""

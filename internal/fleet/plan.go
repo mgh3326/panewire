@@ -30,8 +30,8 @@ import (
 // seat (hosts a spawn would wake are listed); a local launch or gate refusal
 // keeps its own code.
 type planOpts struct {
-	grade, t, role, tags, effort, urgency, exclude, builderFamily, routingRole, creditAt string
-	allowEscalation, json                                                                bool
+	grade, t, role, tags, effort, urgency, exclude, excludePool, builderFamily, routingRole, creditAt string
+	allowEscalation, json                                                                             bool
 }
 
 func (a *App) planCmd(ctx context.Context, args []string) (err error) {
@@ -45,6 +45,7 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	f.StringVar(&o.effort, "effort", "", "pin a catalog effort rung")
 	f.StringVar(&o.urgency, "urgency", "", "normal or urgent")
 	f.StringVar(&o.exclude, "exclude-host", "", "hosts placement must not pick")
+	f.StringVar(&o.excludePool, "exclude-pool", "", "quota pools placement must not pick")
 	f.StringVar(&o.builderFamily, "builder-family", "", "builder model family (tester/reviewer)")
 	f.StringVar(&o.routingRole, "routing-role", "", "override the policy/model-routing role")
 	f.BoolVar(&o.allowEscalation, "allow-escalation", false, "admit escalation and consult-only rungs")
@@ -84,6 +85,10 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 	if _, e := parseHosts(o.exclude); e != nil {
 		return e
 	}
+	excludePools, e := parsePools(o.excludePool)
+	if e != nil {
+		return e
+	}
 	var creditAt time.Time
 	if o.creditAt != "" {
 		if creditAt, e = time.Parse(time.RFC3339, o.creditAt); e != nil {
@@ -96,8 +101,8 @@ func (a *App) planCmd(ctx context.Context, args []string) (err error) {
 		return fail(exitConfig, "plan needs the quota catalog")
 	}
 	cwd, _ := os.Getwd()
-	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: o.role, T: o.t, Tags: o.tags, Effort: o.effort, ExcludeHosts: o.exclude, AllowEscalation: o.allowEscalation, ParentFamily: o.builderFamily, Urgency: o.urgency, DryRun: true}
-	req := selReq{grade: o.grade, t: o.t, role: o.role, tags: tags, effort: o.effort, allowEscalation: o.allowEscalation, builderFamily: o.builderFamily, urgency: urgencyNormal, urgencySource: "default", creditAt: creditAt}
+	s := Spawn{CWD: cwd, Profile: "auto", Host: "auto", Role: o.role, T: o.t, Tags: o.tags, Effort: o.effort, ExcludeHosts: o.exclude, ExcludePools: o.excludePool, AllowEscalation: o.allowEscalation, ParentFamily: o.builderFamily, Urgency: o.urgency, DryRun: true}
+	req := selReq{grade: o.grade, t: o.t, role: o.role, tags: tags, effort: o.effort, allowEscalation: o.allowEscalation, builderFamily: o.builderFamily, excludePools: excludePools, urgency: urgencyNormal, urgencySource: "default", creditAt: creditAt}
 	if o.urgency != "" {
 		req.urgency, req.urgencySource = o.urgency, "flag"
 	}

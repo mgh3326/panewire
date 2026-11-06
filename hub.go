@@ -395,8 +395,11 @@ type HubServer struct {
 	spawnSentry          *sentry.Client
 	spawnCoordinatorOnce sync.Once
 	spawnNewApp          func(io.Writer, io.Writer) (*fleet.App, error)
-	spawnKick            chan struct{}
-	spawnWorkers         sync.WaitGroup
+	// quotaReplacePoll overrides how often a quota-stop replacement looks for
+	// its successor's outcome; zero uses quotaReplacePoll.
+	quotaReplacePoll time.Duration
+	spawnKick        chan struct{}
+	spawnWorkers     sync.WaitGroup
 	// auth is swapped whole on an auth-file reload; read it through
 	// currentAuth on authentication paths and auth.Load() elsewhere.
 	auth              atomic.Pointer[hubAuthSet]
@@ -1382,6 +1385,9 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				}
 			}
 			h.relayJobEventFrom(machineID, message.Kind, event)
+			if message.Kind == "job.lost" && !event.Replay {
+				h.startQuotaReplacement(machineID, event)
+			}
 		}
 		if message.Kind == "lane.event" {
 			event, valid := decodeHubLaneEventPayload(message.Payload)

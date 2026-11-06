@@ -402,3 +402,13 @@ func (a *App) markSpawnUncertain(ctx context.Context, id string) {
 func (a *App) MarkJobLost(ctx context.Context, id string) error {
 	return a.putJobRecord(ctx, id, map[string]any{"state": "lost"})
 }
+
+// MarkJobLostBecause is MarkJobLost with an hk end_reason; an empty one writes
+// none.
+func (a *App) MarkJobLostBecause(ctx context.Context, id, endReason string) error {
+	record := map[string]any{"state": "lost"}
+	if endReason != "" {
+		record["end_reason"] = endReason
+	}
+	return a.putJobRecord(ctx, id, record)
+}

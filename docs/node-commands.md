@@ -192,7 +192,11 @@ id runs panewire, the same rule panewire's own duplicate check applies.
 ### `job.mark_lost`
 
 `args: {job, pane_id, label}` — at least one of `pane_id` and `label` is
-required. The hub issues this op itself when it releases a spawn reservation
+required. An optional `end_reason` (one printable ASCII line, at most 128
+characters) is written with the record: `{"state":"lost","end_reason":...}`. The
+hub sets it when it replaces a quota-stopped job (`replaced_by=<job>`,
+[quota-stop.md](quota-stop.md)); a node older than this field refuses it, so
+deploy nodes first. The hub issues this op itself when it releases a spawn reservation
 whose holder ran on another host: the hub's handoffkeep client is not granted
 that host, so the holder's node writes the record with its own credential
 (`spawn.json` `handoffkeep_env`). The HTTP command endpoint refuses the op for

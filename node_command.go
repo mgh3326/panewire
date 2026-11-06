@@ -224,7 +224,8 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	optionalKind := op == nodeCommandPaneRead && nodeCommandHasFields(raw, append(append([]string(nil), names...), "kind"))
 	optionalDetached := op == nodeCommandWorktreeRemove && nodeCommandHasFields(raw, append(append([]string(nil), names...), "detached"))
 	optionalList := op == nodeCommandWorktreeList && nodeWorktreeListFields(raw)
-	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalList) {
+	optionalEndReason := op == nodeCommandJobMarkLost && nodeCommandHasFields(raw, append(append([]string(nil), names...), "end_reason"))
+	if !known || len(raw) == 0 || len(raw) > nodeCommandMaxArgsBytes || (!nodeCommandHasFields(raw, names) && !optionalKind && !optionalDetached && !optionalList && !optionalEndReason) {
 		return nil, false
 	}
 	switch op {

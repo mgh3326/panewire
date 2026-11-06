@@ -1,0 +1,373 @@
+package panewire
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"log/slog"
+	"net/http/httptest"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/coder/websocket"
+
+	"github.com/mgh3326/panewire/internal/fleet"
+)
+
+// quotaJobs is an hk fake that keeps each record whole and refuses to rewrite a
+// terminal one, as hk does.
+type quotaJobs struct {
+	mu      sync.Mutex
+	records map[string]map[string]any
+}
+
+func (q *quotaJobs) Claim(context.Context, string, string, string) error { return nil }
+func (q *quotaJobs) Put(_ context.Context, id string, fields map[string]any) error {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if state := q.records[id]["state"]; state == "completed" || state == "lost" || state == "escalated" {
+		return errors.New("job_state_conflict")
+	}
+	for key, value := range fields {
+		q.records[id][key] = value
+	}
+	return nil
+}
+func (q *quotaJobs) Get(_ context.Context, id string) (map[string]any, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	record, ok := q.records[id]
+	if !ok {
+		return nil, fleet.ErrJobNotFound
+	}
+	out := map[string]any{}
+	for key, value := range record {
+		out[key] = value
+	}
+	return out, nil
+}
+
+type quotaReplaceFixture struct {
+	hub         *HubServer
+	node        *websocket.Conn
+	jobs        *quotaJobs
+	destination *hubAgent
+	holder      hubSpawnTask
+	job         string
+	paneStatus  string
+}
+
+// quotaHolderRequest is the submission of a stopped job of the given role: task
+// 42, review pass 1 for a reviewer, owner "parent", an auto profile.
+func quotaHolderRequest(role, job string) fleet.Submission {
+	request := durableSpawnRequest()
+	request.Args = []string{"-c", "/work/project", "-p", "/work/brief.md", "-m", "auto", "-l", job, "--job", job, "--t", "T1", "--task", "42", "--owner", "parent", "--role", role, "--host", "auto", "--report-relative", job + "/report.md"}
+	if role == "reviewer" {
+		request.Args = append(request.Args, "--review-pass", "1")
+	}
+	request.Brief = "Review the change"
+	request.Repository.Worktree = job + "-checkout"
+	request.Repository.Checkout.Dir = job + "-checkout"
+	return request
+}
+
+func newQuotaReplaceFixture(t *testing.T, role, job string) *quotaReplaceFixture {
+	t.Helper()
+	t.Setenv(crashReportDSNEnv, "")
+	fake, client, stop := newFakeHandoffkeep(t)
+	t.Cleanup(stop)
+	hub, err := NewHubServer(HubServerConfig{
+		Tokens:          map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "desk-token"},
+		InboxStorePath:  filepath.Join(t.TempDir(), "inbox.sqlite3"),
+		ReportRelayPath: r20LanesFile(t, `{"lanes":{"parent":{"machine":"machine-b","pane":"w1:p1"}}}`),
+		Logger:          slog.New(slog.NewTextHandler(io.Discard, nil)),
+		handoffkeep:     client,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = fake
+	t.Cleanup(func() { hub.Close() })
+	hub.quotaReplacePoll = 5 * time.Millisecond
+	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
+	hub.mu.Lock()
+	hub.nodes["machine-b"] = &hubNodeRecord{agent: destination}
+	hub.mu.Unlock()
+	jobs := &quotaJobs{records: map[string]map[string]any{job: {"state": "spawned", "pool": "claude"}}}
+	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
+		return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
+	}
+	server := httptest.NewServer(hub.Handler())
+	t.Cleanup(server.Close)
+	node := t14Node(t, hub, server, true)
+	held, _, err := hub.inbox.store.claimSpawn(t.Context(), quotaHolderRequest(role, job), job, "parent", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = hub.inbox.store.completeSpawn(t.Context(), held, hubSpawnOutcome{RC: 0, Stage: "done", Host: "machine-a", Pane: roleHeldPane}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	held, err = hub.inbox.store.spawnTask(t.Context(), held.Request.RequestID)
+	if err != nil || held.Status != "succeeded" {
+		t.Fatalf("holder %+v %v", held, err)
+	}
+	return &quotaReplaceFixture{hub: hub, node: node, jobs: jobs, destination: destination, holder: held, job: job, paneStatus: "idle"}
+}
+
+func quotaStopEvent(job string) hubJobEventPayload {
+	return hubJobEventPayload{JobID: job, Epoch: 1, Reason: "quota_stop", OwnerLane: "parent"}
+}
+
+type quotaReplaceResult struct {
+	job string
+	ok  bool
+}
+
+// run starts the replacement, plays the hub's side of the placement (the
+// successor's operation finishing with outcome) and the holder node's side of
+// the close, and returns what the replacement reported.
+func (f *quotaReplaceFixture) run(t *testing.T, placed hubSpawnOutcome, nodeCommands int) (quotaReplaceResult, []map[string]json.RawMessage) {
+	t.Helper()
+	done := make(chan quotaReplaceResult, 1)
+	go func() {
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		done <- quotaReplaceResult{job, ok}
+	}()
+	var commands []map[string]json.RawMessage
+	serve := func(command map[string]json.RawMessage) {
+		commands = append(commands, command)
+		switch string(command["op"]) {
+		case `"agents.list"`:
+			roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: f.paneStatus, Cwd: "/work/project.checkout"}}, true)
+		case `"pane.capture"`:
+			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/" + f.job + "/pane-screen.txt"}})
+		case `"pane.close"`:
+			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodePaneClosed}})
+		case `"job.mark_lost"`:
+			nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeJobMarkLostLost}})
+		default:
+			t.Fatalf("unexpected node command %s", command["op"])
+		}
+	}
+	// The hub probes the old pane before it places anything.
+	serve(nodeCommandRead(t, f.node))
+	if f.paneStatus != "idle" {
+		select {
+		case result := <-done:
+			return result, commands
+		case <-time.After(3 * time.Second):
+			t.Fatal("the replacement did not give up on a busy pane")
+		}
+	}
+	next, _, _ := quotaReplacementJob(f.job)
+	var successor hubSpawnTask
+	eventually(t, 2*time.Second, "the successor to be claimed", func() bool {
+		var err error
+		successor, err = f.hub.inbox.store.latestSpawnForJob(t.Context(), next)
+		return err == nil
+	})
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, placed, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	for i := 1; i < nodeCommands; i++ {
+		serve(nodeCommandRead(t, f.node))
+	}
+	select {
+	case result := <-done:
+		return result, commands
+	case <-time.After(3 * time.Second):
+		t.Fatal("the replacement did not finish")
+	}
+	return quotaReplaceResult{}, nil
+}
+
+func (f *quotaReplaceFixture) successor(t *testing.T, job string) fleet.Submission {
+	t.Helper()
+	task, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), job)
+	if err != nil {
+		t.Fatalf("no spawn for %s: %v", job, err)
+	}
+	return task.Request
+}
+
+func endReasonOf(t *testing.T, command map[string]json.RawMessage) string {
+	t.Helper()
+	var args nodeJobMarkLostArgs
+	if err := json.Unmarshal(command["args"], &args); err != nil {
+		t.Fatal(err)
+	}
+	return args.EndReason
+}
+
+const quotaPlaced = "machine-b"
+
+// (a) hk 3334: a reviewer on quota_stop gets a replacement at once, with the
+// stopped pool excluded; the old hk record ends with replaced_by as the last
+// token; a third stop in the chain gets no replacement.
+func TestQuotaStopReviewerIsReplacedAtOnceOnAnotherPool(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-1-p1")
+	placed := hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}
+	result, commands := f.run(t, placed, 4)
+	if !result.ok || result.job != "mwr-1-p1-q1" {
+		t.Fatalf("replacement=%+v, want mwr-1-p1-q1", result)
+	}
+	request := f.successor(t, "mwr-1-p1-q1")
+	args := request.Args
+	if i := slices.Index(args, "--exclude-pool"); i < 0 || args[i+1] != "claude" {
+		t.Fatalf("the replacement must exclude the stopped pool: %v", args)
+	}
+	for flag, want := range map[string]string{"--job": "mwr-1-p1-q1", "--task": "42", "--role": "reviewer", "--review-pass": "1", "--owner": "parent", "--report-relative": "mwr-1-p1/report.md"} {
+		if got := hubSpawnArg(args, flag); got != want {
+			t.Fatalf("%s=%q, want %q (%v)", flag, got, want, args)
+		}
+	}
+	if request.Brief != "Review the change" {
+		t.Fatalf("the reviewer keeps the same brief, got %q", request.Brief)
+	}
+	if request.Repository.Worktree != "mwr-1-p1-q1-checkout" || request.Repository.Checkout.Dir != "mwr-1-p1-q1-checkout" {
+		t.Fatalf("the reviewer's checkout follows its job: %+v", request.Repository)
+	}
+	ops := []string{}
+	for _, command := range commands {
+		ops = append(ops, strings.Trim(string(command["op"]), `"`))
+	}
+	if !slices.Equal(ops, []string{"agents.list", "pane.capture", "pane.close", "job.mark_lost"}) {
+		t.Fatalf("node commands %v", ops)
+	}
+	// hk end_reason: replaced_by is the last key=value token (mergewake hk 3335).
+	if reason := endReasonOf(t, commands[3]); reason != "quota_stop pool=claude replaced_by=mwr-1-p1-q1" {
+		t.Fatalf("end_reason=%q", reason)
+	}
+	eventually(t, 2*time.Second, "the owner's info lane event", func() bool {
+		for _, relay := range spawnFailedInjections(f.destination) {
+			if strings.Contains(relay.Text, "replaced mwr-1-p1 (claude quota) with mwr-1-p1-q1 on machine-b/sonnet") {
+				return true
+			}
+		}
+		return false
+	})
+
+	// The replacement stops on quota in turn: one more, then none.
+	second := newQuotaReplaceFixture(t, "reviewer", "mwr-1-p1-q1")
+	if result, _ := second.run(t, placed, 4); !result.ok || result.job != "mwr-1-p1-q1-q2" {
+		t.Fatalf("second replacement=%+v", result)
+	}
+	third := newQuotaReplaceFixture(t, "reviewer", "mwr-1-p1-q1-q2")
+	if job, ok := third.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent("mwr-1-p1-q1-q2")); ok || job != "" {
+		t.Fatalf("a third stop got a replacement: %q", job)
+	}
+	if _, err := third.hub.inbox.store.latestSpawnForJob(t.Context(), "mwr-1-p1-q1-q2-q3"); err == nil {
+		t.Fatal("a third replacement was submitted")
+	}
+}
+
+func TestQuotaReplacementJobNames(t *testing.T) {
+	for old, want := range map[string]string{"mwr-1-p1": "mwr-1-p1-q1", "mwr-1-p1-q1": "mwr-1-p1-q1-q2", "pw.job_2": "pw.job_2-q1"} {
+		got, _, ok := quotaReplacementJob(old)
+		if !ok || got != want || !hubJobIDPattern.MatchString(got) {
+			t.Fatalf("%s -> %q %v, want %q", old, got, ok, want)
+		}
+	}
+	if _, _, ok := quotaReplacementJob("mwr-1-p1-q1-q2"); ok {
+		t.Fatal("a third replacement is allowed")
+	}
+	if _, _, ok := quotaReplacementJob(strings.Repeat("a", 126)); ok {
+		t.Fatal("a successor id past 128 characters is allowed")
+	}
+}
+
+// When no other pool can take the work the successor is not placed, and the
+// stopped job is left alone for the node to end: today's behaviour.
+func TestQuotaStopReviewerWithNoOtherPoolIsNotReplaced(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-2-p1")
+	result, commands := f.run(t, hubSpawnOutcome{RC: 81, Stage: "placement", Reason: "no_eligible_host"}, 1)
+	if result.ok || len(commands) != 1 {
+		t.Fatalf("result=%+v commands=%d", result, len(commands))
+	}
+	if state := f.jobs.records["mwr-2-p1"]["state"]; state != "spawned" {
+		t.Fatalf("the stopped job was changed: %v", state)
+	}
+}
+
+// A worker the manager handed over is replaced with the same task; its brief
+// names the earlier job's report and branch; its record ends handed_over_to.
+func TestQuotaStopHandedOverWorkerIsReplaced(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "worker", "pw-task-42")
+	placed := hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "devin-swe2"}
+	result, commands := f.run(t, placed, 4)
+	if !result.ok || result.job != "pw-task-42-q1" {
+		t.Fatalf("replacement=%+v", result)
+	}
+	request := f.successor(t, "pw-task-42-q1")
+	if i := slices.Index(request.Args, "--exclude-pool"); i < 0 || request.Args[i+1] != "claude" {
+		t.Fatalf("the hand-over must exclude the stopped pool: %v", request.Args)
+	}
+	if request.Repository.Worktree != "pw-task-42-checkout" || request.Repository.Checkout.Branch != "wk/task" {
+		t.Fatalf("a worker continues in the same worktree and branch: %+v", request.Repository)
+	}
+	if !strings.HasPrefix(request.Brief, "Review the change") || !strings.Contains(request.Brief, "Continue the earlier job pw-task-42") || !strings.Contains(request.Brief, "pw-task-42/report.md") || !strings.Contains(request.Brief, "wk/task") {
+		t.Fatalf("brief=%q", request.Brief)
+	}
+	if reason := endReasonOf(t, commands[3]); reason != "quota_stop pool=claude handed_over_to=pw-task-42-q1" {
+		t.Fatalf("end_reason=%q", reason)
+	}
+}
+
+// A pinned profile cannot move to another pool, and a role other than worker,
+// tester or reviewer has no replacement.
+func TestQuotaStopRefusesWhatItCannotReplace(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-3-p1")
+	if job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-b", quotaStopEvent("mwr-3-p1")); ok || job != "" {
+		t.Fatal("an event from another node was honoured")
+	}
+	if job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent("unknown-job")); ok || job != "" {
+		t.Fatal("an unknown job was replaced")
+	}
+}
+
+// A pane that is working, not idle, is never replaced or closed: nothing is
+// placed while the old pane could still be doing the work.
+func TestQuotaStopBusyPaneIsNotReplaced(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "worker", "pw-task-43")
+	f.paneStatus = "working"
+	result, commands := f.run(t, hubSpawnOutcome{}, 1)
+	if result.ok || len(commands) != 1 {
+		t.Fatalf("result=%+v commands=%d", result, len(commands))
+	}
+	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), "pw-task-43-q1"); err == nil {
+		t.Fatal("a successor was placed beside a working pane")
+	}
+}
+
+// --exclude-pool is on the hub's operator allowlist beside --exclude-host, with
+// the same value shape, and is refused for a caller that is not the operator.
+func TestHubSpawnAllowlistCarriesExcludePool(t *testing.T) {
+	base := []string{"-c", "/work/project", "-p", "/work/brief.md", "--t", "T1", "--task", "42"}
+	for name, tc := range map[string]struct {
+		value    string
+		operator bool
+		want     bool
+	}{
+		"operator one pool":   {"claude", true, true},
+		"operator two pools":  {"claude,codex", true, true},
+		"operator bad value":  {"claude codex", true, false},
+		"operator empty list": {"claude,,codex", true, false},
+		"not the operator":    {"claude", false, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			args := append(slices.Clone(base), "--exclude-pool", tc.value)
+			if !tc.operator {
+				args = args[4:]
+				args = append([]string{"--t", "T1", "--task", "42"}, args[len(args)-2:]...)
+			}
+			if got := validHubSpawnArgsForMode(args, tc.operator); got != tc.want {
+				t.Fatalf("validHubSpawnArgsForMode(%v, %v)=%v, want %v", args, tc.operator, got, tc.want)
+			}
+		})
+	}
+}

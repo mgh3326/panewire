@@ -144,12 +144,21 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	seen := len(args) == 1
 	latePoll := false
 	var screenRead quotaStopWatch
+	var handOff quotaHandOff
 	for {
 		j, e := a.job(id)
 		if e != nil {
 			return e
 		}
-		if j.Terminal || j.Reaped {
+		// The job.lost announced for a quota stop (by this watcher for a
+		// reviewer, by the manager for a handed-over worker or tester) is not
+		// an end until the grace for the hub's replacement runs out.
+		if !handOff.active {
+			if stop, ok := announcedQuotaStop(j); ok && !j.Reaped {
+				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), active: true}
+			}
+		}
+		if j.Reaped || j.Terminal && !handOff.active {
 			return nil
 		}
 		if workerEscalated(j) {
@@ -219,7 +228,24 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// silently at the watch deadline.
 		if present && !pending {
 			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok {
-				return a.quotaStopLost(ctx, j, stop)
+				if a.QuotaHandOffGrace <= 0 {
+					return a.quotaStopLost(ctx, j, stop, true)
+				}
+				// A reviewer is replaced on another pool at once, by the
+				// hub (hk 3334): announce the stop, then leave the hk
+				// record to the hub for a grace period.
+				if e := a.quotaStopAnnounce(ctx, j, stop); e != nil {
+					return e
+				}
+				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), seq: paneAgent.StateChangeSeq, active: true}
+			}
+		}
+		if handOff.active {
+			if present && handOff.expired(a.Now(), paneAgent) {
+				return a.quotaStopLost(ctx, j, handOff.stop, false)
+			}
+			if present && !handOff.unchanged(paneAgent) {
+				handOff = quotaHandOff{}
 			}
 		}
 		if missing >= 2 {
