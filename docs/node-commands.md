@@ -255,7 +255,7 @@ named by its `spawn.json` `handoffkeep_env`, at most 5 seconds and 4 KiB.
 | | `not_found` | mergewake has no snapshot for this PR. |
 | | `failed` / `unavailable` | No snapshot. `reason` is one of `not_installed`, `timeout`, `exit_status`, `unreadable_output`, `output_too_large`; mergewake's own error text is never forwarded. |
 | `hk` | `ok` | `change` is hk's JSON object, passed through unread (at most 4 KiB). |
-| | `not_found` | hk answered 404, as a handoffkeep without `/v1/changes` does. |
+| | `not_found` | hk holds no record: it answered 404 (as a handoffkeep without `/v1/changes` does), or 200 with an empty `changes` list. |
 | | `unconfigured` | The node has no usable `handoffkeep_env`. |
 | | `too_large` | The record exceeds 4 KiB; it is not truncated. |
 | | `failed` | `reason` is `http_status`, `request_failed` or `unreadable_body`. |

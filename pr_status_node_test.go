@@ -361,6 +361,7 @@ func TestPRStatusNodeHandoffkeepOutcomes(t *testing.T) {
 	}{
 		"record":        {200, `{"change":{"pr":"x","verdict":"approve"}}`, "ok", ""},
 		"not deployed":  {404, `{"error":"not found"}`, "not_found", ""},
+		"empty changes": {200, `{"changes":[]}`, "not_found", ""},
 		"server error":  {500, `boom`, "failed", "http_status"},
 		"forbidden":     {403, `{}`, "failed", "http_status"},
 		"not an object": {200, `[1,2]`, "failed", "unreadable_body"},
@@ -430,5 +431,15 @@ func TestPRStatusNodeDoesNotTakeActingLock(t *testing.T) {
 	case <-done:
 	case <-time.After(10 * time.Second):
 		t.Fatal("pr.status waited for the acting-command lock")
+	}
+}
+
+// A 200 whose changes list holds entries is a record; only an empty list is none.
+func TestPRStatusNodeHKNonEmptyChangesIsARecord(t *testing.T) {
+	installFakeMergewake(t, "cat '"+fixtureFile(t, prStatusFixture)+"'")
+	hk := newPRStatusHKServer(t, 200, `{"changes":[{"pr":"https://github.com/owner/name/pull/152"}]}`)
+	result, code := nodeRun(t, prStatusNodeClient(t, hk.URL), nodeCommandPRStatus, prStatusArgsJSON("owner/name", 152, false))
+	if source := result["hk"].(map[string]any); code != "" || source["outcome"] != "ok" || source["status"] != float64(200) {
+		t.Fatalf("code=%q hk=%v", code, source)
 	}
 }

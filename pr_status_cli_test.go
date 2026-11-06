@@ -582,3 +582,58 @@ func TestPRStatusGHFallbackPaginatesReviewThreads(t *testing.T) {
 		t.Fatalf("notes %v", listed.Notes)
 	}
 }
+
+// hk answering 200 with an empty changes list holds no record: with mergewake
+// missing too, gh answers (finding: empty list suppressed the fallback).
+func TestPRStatusEmptyHKChangesFallsBackToGH(t *testing.T) {
+	gh := fakeGH(t, ghViewFixture, ghThreadsFixture)
+	empty := nodePRStatusResult{
+		Mergewake: nodePRStatusMergewake{Outcome: prStatusNotFound},
+		HK:        nodePRStatusHK{Outcome: prStatusNotFound, Status: http.StatusOK},
+	}
+	stub := newPRCLIStub(t, 200, prNodeReply(t, empty))
+	connection := prCLIConnection(t, stub.URL)
+	run := runPR(t, append([]string{"status", "owner/name", "152"}, connection...)...)
+	if run.code != ExitOK || !strings.Contains(run.stdout, "source=gh (fallback: mergewake has no snapshot for this PR, handoffkeep") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
+	}
+	if run := runPR(t, append([]string{"findings", "owner/name", "152"}, connection...)...); run.code != ExitOK || !strings.Contains(run.stdout, "a/b.go:42") {
+		t.Fatalf("findings code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
+	}
+	if !strings.Contains(readLog(t, gh), "api graphql") {
+		t.Fatal("gh was not consulted")
+	}
+	// With a mergewake snapshot, the empty hk list is only a note.
+	stub.response = prNodeReply(t, prFixtureResult(t, nodePRStatusHK{Outcome: prStatusNotFound, Status: http.StatusOK}))
+	run = runPR(t, append([]string{"status", "owner/name", "152"}, connection...)...)
+	if run.code != ExitOK || !strings.HasPrefix(run.stdout, "owner/name#152 blocked") || !strings.Contains(run.stderr, "/v1/changes has no change for this PR") {
+		t.Fatalf("code=%d stdout=%q stderr=%q", run.code, run.stdout, run.stderr)
+	}
+}
+
+// A GraphQL answer without the PR (unknown number, no access) or with errors is
+// a gh failure, never "no open findings".
+func TestPRStatusGHFallbackRejectsIncompleteGraphQL(t *testing.T) {
+	stub := newPRCLIStub(t, 200, prNodeReply(t, prBothDown))
+	connection := prCLIConnection(t, stub.URL)
+	for name, answer := range map[string]string{
+		"null pull request": `{"data":{"repository":{"pullRequest":null}}}`,
+		"null repository":   `{"data":{"repository":null}}`,
+		"null data":         `{"data":null}`,
+		"empty object":      `{}`,
+		"no threads":        `{"data":{"repository":{"pullRequest":{}}}}`,
+		"graphql errors":    `{"errors":[{"message":"Could not resolve to a PullRequest"}],"data":{"repository":{"pullRequest":null}}}`,
+		"errors with data":  `{"errors":[{"message":"rate limited"}],"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false,"endCursor":""},"nodes":[]}}}}}`,
+	} {
+		fakeGH(t, ghViewFixture, answer)
+		run := runPR(t, append([]string{"findings", "owner/name", "152"}, connection...)...)
+		if run.code != ExitDaemonUnavailable || run.stdout != "" || strings.Contains(run.stderr, "no open findings") || !strings.Contains(run.stderr, "gh failed") {
+			t.Errorf("%s: code=%d stdout=%q stderr=%q", name, run.code, run.stdout, run.stderr)
+		}
+	}
+	// A real PR with no threads is still an empty list, not a failure.
+	fakeGH(t, ghViewFixture, ghThreadsPage(false, "", ""))
+	if run := runPR(t, append([]string{"findings", "owner/name", "152"}, connection...)...); run.code != ExitOK || !strings.Contains(run.stderr, "no open findings") {
+		t.Fatalf("empty PR code=%d stderr=%q", run.code, run.stderr)
+	}
+}

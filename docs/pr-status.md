@@ -77,11 +77,11 @@ cap, `findings_omitted` counts the rest and a note says to read them with `gh`.
 | mergewake | hk | Result |
 | --- | --- | --- |
 | answered | answered | merged view |
-| answered | 404, failed or not configured | mergewake only; a `note:` on stderr names what was omitted |
+| answered | 404, no change for the PR, failed or not configured | mergewake only; a `note:` on stderr names what was omitted |
 | missing | answered | `status` shows the hk record (`--json`); `findings` exits 4, because only mergewake lists findings |
 | missing | missing | **gh fallback**, and the output says so |
 
-A hk `404` is expected while the handoffkeep that is deployed does not serve
+A hk `404` (or a `200` with an empty `changes` list) is expected while the handoffkeep that is deployed does not serve
 `/v1/changes`; it never fails the command. gh runs only when neither source
 answered, which includes the hub being unreachable, refusing the credential, or
 not configured. The fallback output says that it fell back and why:

@@ -333,7 +333,7 @@ func validNodePRStatusResult(result nodePRStatusResult) bool {
 		var object map[string]json.RawMessage
 		return hk.Reason == "" && hk.Status == http.StatusOK && len(trimmed) > 0 && len(trimmed) <= prStatusMaxHKChange && json.Unmarshal(trimmed, &object) == nil && object != nil
 	case prStatusNotFound:
-		return hk.Reason == "" && hk.Status == http.StatusNotFound && hk.Change == nil
+		return hk.Reason == "" && (hk.Status == http.StatusNotFound || hk.Status == http.StatusOK) && hk.Change == nil
 	case prStatusUnconfigured, prStatusTooLarge:
 		return hk.Reason == "" && hk.Status == 0 && hk.Change == nil
 	case prStatusFailed:
@@ -470,6 +470,11 @@ func (client *HubClient) readNodePRStatusHK(ctx context.Context, args nodePRStat
 	var object map[string]json.RawMessage
 	if json.Unmarshal(body, &object) != nil || object == nil {
 		return nodePRStatusHK{Outcome: prStatusFailed, Reason: prStatusReasonBadBody}
+	}
+	// A list endpoint that answers 200 with no change for this PR holds no record.
+	var changes []json.RawMessage
+	if raw, listed := object["changes"]; listed && json.Unmarshal(raw, &changes) == nil && changes != nil && len(changes) == 0 {
+		return nodePRStatusHK{Outcome: prStatusNotFound, Status: http.StatusOK}
 	}
 	compact := &bytes.Buffer{}
 	if json.Compact(compact, body) != nil {

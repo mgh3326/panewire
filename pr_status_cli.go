@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"sort"
@@ -209,7 +210,11 @@ func prStatusSourceNotes(result nodePRStatusResult) []string {
 	switch result.HK.Outcome {
 	case prStatusOK:
 	case prStatusNotFound:
-		notes = append(notes, "hk change record omitted: /v1/changes answered 404 (handoffkeep may not have it deployed)")
+		if result.HK.Status == http.StatusOK {
+			notes = append(notes, "hk change record omitted: /v1/changes has no change for this PR")
+		} else {
+			notes = append(notes, "hk change record omitted: /v1/changes answered 404 (handoffkeep may not have it deployed)")
+		}
 	default:
 		notes = append(notes, "hk change record omitted: handoffkeep "+prStatusDescribeHK(result.HK))
 	}
@@ -248,32 +253,50 @@ const prStatusGHThreadPages = 10
 
 const prStatusGHThreadsQuery = `query($owner:String!,$name:String!,$number:Int!,$after:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewThreads(first:100,after:$after){pageInfo{hasNextPage endCursor}nodes{id isResolved path line comments(first:1){totalCount nodes{body url}}}}}}}`
 
+type prStatusGHThreadNodes struct {
+	PageInfo struct {
+		HasNextPage bool   `json:"hasNextPage"`
+		EndCursor   string `json:"endCursor"`
+	} `json:"pageInfo"`
+	Nodes []struct {
+		ID         string `json:"id"`
+		IsResolved bool   `json:"isResolved"`
+		Path       string `json:"path"`
+		Line       *int   `json:"line"`
+		Comments   struct {
+			TotalCount int `json:"totalCount"`
+			Nodes      []struct {
+				Body string `json:"body"`
+				URL  string `json:"url"`
+			} `json:"nodes"`
+		} `json:"comments"`
+	} `json:"nodes"`
+}
+
+// prStatusGHThreadsPage keeps every level a pointer so a GraphQL answer that
+// lacks the repository, the pull request or the thread connection (an unknown
+// PR, no access) is told apart from a PR with no threads.
 type prStatusGHThreadsPage struct {
-	Data struct {
-		Repository struct {
-			PullRequest struct {
-				ReviewThreads struct {
-					PageInfo struct {
-						HasNextPage bool   `json:"hasNextPage"`
-						EndCursor   string `json:"endCursor"`
-					} `json:"pageInfo"`
-					Nodes []struct {
-						ID         string `json:"id"`
-						IsResolved bool   `json:"isResolved"`
-						Path       string `json:"path"`
-						Line       *int   `json:"line"`
-						Comments   struct {
-							TotalCount int `json:"totalCount"`
-							Nodes      []struct {
-								Body string `json:"body"`
-								URL  string `json:"url"`
-							} `json:"nodes"`
-						} `json:"comments"`
-					} `json:"nodes"`
-				} `json:"reviewThreads"`
+	Errors []json.RawMessage `json:"errors"`
+	Data   *struct {
+		Repository *struct {
+			PullRequest *struct {
+				ReviewThreads *prStatusGHThreadNodes `json:"reviewThreads"`
 			} `json:"pullRequest"`
 		} `json:"repository"`
 	} `json:"data"`
+}
+
+// threads returns the thread connection, or an error that never carries gh's
+// own text.
+func (page prStatusGHThreadsPage) threads() (*prStatusGHThreadNodes, error) {
+	if len(page.Errors) > 0 {
+		return nil, errors.New("gh answered review threads with GraphQL errors")
+	}
+	if page.Data == nil || page.Data.Repository == nil || page.Data.Repository.PullRequest == nil || page.Data.Repository.PullRequest.ReviewThreads == nil {
+		return nil, errors.New("gh found no review threads for this pull request (unknown PR or no access)")
+	}
+	return page.Data.Repository.PullRequest.ReviewThreads, nil
 }
 
 func fallbackPRStatusGH(view *prStatusView, args nodePRStatusArgs, needFindings bool, why string) error {
@@ -297,7 +320,10 @@ func fallbackPRStatusGH(view *prStatusView, args nodePRStatusArgs, needFindings 
 			if json.Unmarshal(out, &body) != nil {
 				return errors.New("gh answered unreadable review threads")
 			}
-			threads := body.Data.Repository.PullRequest.ReviewThreads
+			threads, err := body.threads()
+			if err != nil {
+				return err
+			}
 			for _, thread := range threads.Nodes {
 				if thread.IsResolved {
 					continue
