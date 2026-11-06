@@ -76,7 +76,8 @@ func (c Config) now() time.Time {
 
 // Measure reads the claude quota: the usage API, then one CLI fallback. The
 // error is a *quota.Error whose kind names the first (API) failure when both
-// fail, as pacelever reports it.
+// fail, as pacelever reports it. A stored token past its expiry skips the API
+// and goes to the CLI alone; if that fails too the kind is token_expired.
 func Measure(ctx context.Context, cfg Config) (quota.Observation, error) {
 	loc := cfg.locations()
 	oauth := cfg.oauth(ctx, loc)
@@ -84,16 +85,27 @@ func Measure(ctx context.Context, cfg Config) (quota.Observation, error) {
 	if token == "" {
 		return quota.Observation{}, quota.Fail(quota.ErrKindCredentials, "credentials unavailable")
 	}
+	var observed quota.Observation
 	if expires, ok := finiteNumber(oauth["expiresAt"]); ok && expires < float64(cfg.now().UnixMilli()) {
-		return quota.Observation{}, quota.Fail(quota.ErrKindTokenExpired, "token expired")
-	}
-	observed, err := cfg.fetchAPI(ctx, token)
-	if err != nil {
+		// The stored access token is short-lived and only the claude CLI
+		// refreshes it, so an expired one on an idle host is not a lost login.
+		// Skip the API, which would refuse it, and let the CLI refresh and
+		// measure; only if that fails is the login reported expired.
 		cli, cliErr := cfg.fetchCLI(ctx)
 		if cliErr != nil {
-			return quota.Observation{}, err
+			return quota.Observation{}, quota.Fail(quota.ErrKindTokenExpired, "token expired")
 		}
 		observed = cli
+	} else {
+		var err error
+		observed, err = cfg.fetchAPI(ctx, token)
+		if err != nil {
+			cli, cliErr := cfg.fetchCLI(ctx)
+			if cliErr != nil {
+				return quota.Observation{}, err
+			}
+			observed = cli
+		}
 	}
 	if loc.shareable {
 		observed.AccountFP = cfg.accountFP(loc.identity)
