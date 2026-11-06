@@ -380,15 +380,35 @@ func TestHubSpawnAllowlistCarriesExcludePool(t *testing.T) {
 // The watcher ends an unchanged stopped job after QuotaStopHandOffGrace; the hub
 // must be done, one way or the other, before that, or the old hk record is
 // written lost without replaced_by while the successor is still being placed.
+// The bound is a context deadline on the whole replacement, so it holds whatever
+// the phases (hk reads, node commands, retries) add up to.
 func TestQuotaReplaceBudgetFitsTheWatcherGrace(t *testing.T) {
-	if quotaReplaceBudget >= fleet.QuotaStopHandOffGrace {
-		t.Fatalf("the hub can hold a replacement for %v, past the watcher grace %v", quotaReplaceBudget, fleet.QuotaStopHandOffGrace)
+	if quotaReplaceBudget+quotaReplaceSlack > fleet.QuotaStopHandOffGrace {
+		t.Fatalf("hub budget %v plus relay slack %v is past the watcher grace %v", quotaReplaceBudget, quotaReplaceSlack, fleet.QuotaStopHandOffGrace)
+	}
+	if quotaReplaceWait >= quotaReplaceBudget {
+		t.Fatalf("the wait for placement %v must leave room in the budget %v", quotaReplaceWait, quotaReplaceBudget)
 	}
 	long := quotaHolderRequest("reviewer", "mwr-9-p1")
 	long.DeadlineSeconds = 3600
 	next, err := quotaReplacementRequest(long, "mwr-9-p1", "mwr-9-p1-q1", "claude", "reviewer")
 	if err != nil || time.Duration(next.DeadlineSeconds)*time.Second != quotaReplaceDeadline {
 		t.Fatalf("the successor's spawn deadline is %ds (%v), want %v", next.DeadlineSeconds, err, quotaReplaceDeadline)
+	}
+}
+
+// The budget is enforced, not just declared: with a node that never answers,
+// the replacement gives up when its budget runs out, not after each step's own
+// wait (a 5 s probe here).
+func TestQuotaReplacementStopsAtItsBudget(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-8-p1")
+	f.hub.quotaReplaceBudget = 200 * time.Millisecond
+	started := time.Now()
+	if job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job)); ok || job != "" {
+		t.Fatalf("replaced without a node answer: %q", job)
+	}
+	if took := time.Since(started); took > 2*time.Second {
+		t.Fatalf("the replacement ran %v past a 200 ms budget", took)
 	}
 }
 

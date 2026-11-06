@@ -401,8 +401,11 @@ type HubServer struct {
 	// quotaMarkBackoff overrides the wait between tries to write the stopped
 	// job's record; zero uses quotaMarkBackoff.
 	quotaMarkBackoff time.Duration
-	spawnKick        chan struct{}
-	spawnWorkers     sync.WaitGroup
+	// quotaReplaceBudget overrides the hard bound on one replacement; zero uses
+	// quotaReplaceBudget.
+	quotaReplaceBudget time.Duration
+	spawnKick          chan struct{}
+	spawnWorkers       sync.WaitGroup
 	// auth is swapped whole on an auth-file reload; read it through
 	// currentAuth on authentication paths and auth.Load() elsewhere.
 	auth              atomic.Pointer[hubAuthSet]

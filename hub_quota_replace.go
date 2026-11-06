@@ -44,19 +44,22 @@ func quotaReplacementJob(old string) (job string, n int, ok bool) {
 }
 
 // quotaReplaceDeadline is the deadline the hub gives the successor's spawn, so
-// the operation itself expires (with its own cleanup) before the node's watcher
-// ends the stopped job. quotaReplaceBudget is the longest the hub can hold a
-// replacement: the pane probe, the wait for placement, and the three node
-// commands that close the old pane and write its record. It must stay under
-// fleet.QuotaStopHandOffGrace (TestQuotaReplaceBudgetFitsTheWatcherGrace).
+// the operation itself expires (with its own cleanup) before the hub stops
+// waiting. quotaReplaceBudget is a HARD bound, a context deadline on the whole
+// replacement (every hk read, node command and wait inside it), not a sum of
+// phase constants: the node's watcher ends an unchanged stopped job after
+// fleet.QuotaStopHandOffGrace, and a replacement still running then would lose
+// the successor pointer (hk never rewrites a lost record). The grace leaves
+// quotaReplaceSlack beyond the budget for the relay from the watcher's job.lost
+// to the hub (TestQuotaReplaceBudgetFitsTheWatcherGrace).
 const (
 	quotaReplaceDeadline = 150 * time.Second
 	quotaReplaceWait     = quotaReplaceDeadline + 30*time.Second
+	quotaReplaceBudget   = 6 * time.Minute
+	quotaReplaceSlack    = 2 * time.Minute
 	// The old record is written with up to quotaMarkAttempts tries, quotaMarkBackoff apart.
-	quotaMarkAttempts  = 3
-	quotaMarkBackoff   = 5 * time.Second
-	quotaReplaceBudget = spawnHeldPaneProbeWait + quotaReplaceWait + 2*spawnHeldPaneActWait +
-		quotaMarkAttempts*spawnHeldPaneActWait + (quotaMarkAttempts-1)*quotaMarkBackoff
+	quotaMarkAttempts = 3
+	quotaMarkBackoff  = 5 * time.Second
 )
 
 // quotaReplacePoll is how often the hub looks for the successor's outcome.
@@ -148,6 +151,12 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		h.logger.Info("quota-stop replacement skipped", append([]any{"job", event.JobID, "node", machine, "reason", reason}, kv...)...)
 		return "", false
 	}
+	budget := h.quotaReplaceBudget
+	if budget <= 0 {
+		budget = quotaReplaceBudget
+	}
+	ctx, cancel := context.WithTimeout(ctx, budget)
+	defer cancel()
 	store := h.inbox.store
 	holder, err := store.latestSpawnForJob(ctx, event.JobID)
 	if err != nil {
