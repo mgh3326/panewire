@@ -352,15 +352,15 @@ func (a *App) localAccountKeys(ctx context.Context, pool string) []string {
 	return keys
 }
 
-// nativeQuotaPool is the pool panewire measures itself (`panewire quota
-// refresh claude`); every other pool is refreshed by pacelever.
-const nativeQuotaPool = "claude"
+// isNativeQuotaPool says whether panewire measures the pool itself (`panewire
+// quota refresh <pool>`); every other pool is refreshed by pacelever.
+func isNativeQuotaPool(pool string) bool { return pool == "claude" || pool == "codex" }
 
 // refreshCommand is the on-demand refresh of pool on this host: pacelever's
 // binary for a pool pacelever measures, panewire's own quota command for the
 // one panewire measures.
 func refreshCommand(pool, paceleverBinary string) Command {
-	if pool == nativeQuotaPool {
+	if isNativeQuotaPool(pool) {
 		return Command{Name: "panewire", Args: []string{"quota", "refresh", pool}}
 	}
 	return Command{Name: paceleverBinary, Args: []string{"refresh", pool}}
@@ -369,7 +369,7 @@ func refreshCommand(pool, paceleverBinary string) Command {
 // remoteRefreshLine is refreshCommand as the one shell line ssh runs on the
 // target.
 func remoteRefreshLine(pool string) string {
-	if pool == nativeQuotaPool {
+	if isNativeQuotaPool(pool) {
 		return "panewire quota refresh " + shellQuote(pool)
 	}
 	return "pacelever refresh " + shellQuote(pool)

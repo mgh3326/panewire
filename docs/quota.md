@@ -4,7 +4,7 @@
 scheduled for removal; callers should use panewire's interface.
 
 - `panewire quota status [--json]` reads the local host's cached readings.
-- `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` is measured by panewire itself ([below](#native-measurement-claude)); every other pool runs the dependency.
+- `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` and `codex` are measured by panewire itself ([claude](#native-measurement-claude), [codex](#native-measurement-codex)); every other pool runs the dependency.
 - `panewire quota observe KIND ...` forwards the observation kind and all remaining arguments, including `devin-free-limit` options, and returns the dependency's exit code.
 
 Status and version calls each have a 30-second bound; gate calls have a
@@ -27,7 +27,9 @@ returns a JSON reading emits the same reading shape; text responses pass through
 panewire measures the `claude` pool in its own process (`internal/quota/claude`,
 `internal/quota/shared`); the node daemon, the `quota.refresh` node command,
 placement's on-demand refresh and `panewire quota refresh claude` all run the
-same code. Other pools still run pacelever until their own change.
+same code. The shared store flow below is shared with
+[codex](#native-measurement-codex). Other pools still run pacelever until their
+own change.
 
 - **API first.** `GET /api/oauth/usage` on Anthropic's API host with the
   OAuth bearer token and `anthropic-beta: oauth-2025-04-20`; 20 s timeout,
@@ -72,6 +74,58 @@ same code. Other pools still run pacelever until their own change.
   announced at most every 10 minutes per account, under the node's machine id.
   With no `handoffkeep_env` the node measures directly and publishes to no
   store; with one it cannot use, the refresh fails `shared_unavailable`.
+
+## Native measurement: codex
+
+panewire measures the `codex` pool in its own process (`internal/quota/codex`)
+through the same four paths and the same shared store flow as claude.
+
+- **App-server first.** `codex -s read-only -a never app-server` runs with its
+  working directory and `CODEX_HOME` set to the codex home, in its own
+  process group, for at most 15 s. panewire sends `initialize`, the
+  `initialized` notification, `account/rateLimits/read` and `account/read`.
+  `rateLimits.primary` and `.secondary` are account buckets and each
+  `rateLimitsByLimitId` entry except `codex` (sorted by id) is a model bucket
+  named by its `limitName` (else `limitId`, else the id) with a leading
+  `codex_` (capitalised) or `codex ` removed. A `free` plan with no windows is
+  one `free` bucket at 0%. The process is always killed (the whole group) and
+  reaped within 2 s: on success, failure, timeout and cancellation.
+- **Wham usage API fallback.** Any app-server failure (no binary, a start or
+  exchange error, an empty non-free plan, no measured window) falls back
+  silently to `GET /backend-api/wham/usage` on ChatGPT's backend host with the
+  access token as `Authorization: Bearer` and `ChatGPT-Account-Id:
+  <account_id>`; 20 s timeout, redirects refused, 2 MiB body cap. `rate_limit.primary_window` and
+  `.secondary_window` are account buckets, each `additional_rate_limits[]` a
+  model bucket named by `limit_name`, and `credits` a `credit` bucket measured
+  against a fixed 1000. The `x-codex-primary-used-percent` and
+  `x-codex-secondary-used-percent` headers override the body's percentages and
+  `x-codex-credits-balance` the balance. A reset is `reset_at` (epoch seconds)
+  or now + `reset_after_seconds`.
+- **Window labels** come from the window length: 28 days or more is `30d`, 6
+  days `7d`, 20 hours `1d`, 4 to 6 hours `5h`, else `<n>s`. The app-server's
+  `windowDurationMins` is converted to seconds first.
+- **Error kinds** are the claude section's, with two differences: a 429 without
+  `Retry-After` carries no default wait (the shared flow backs the account off
+  300 s itself), and the app-server's own failures are never reported, only the
+  API's.
+- **Credentials** are located, not copied: `<codex home>/auth.json`
+  (`tokens.access_token`, `tokens.account_id`), where the codex home is the
+  account selector, else `CODEX_HOME`, else `~/.codex`. Without a token nothing
+  is spawned or sent and the failure is `credentials`. The access token is read
+  into memory for the one HTTP request; the app-server reads its own login. It
+  is never logged, written, put in an error or on a command line. The
+  app-server inherits the node's environment with `CODEX_HOME` set.
+- **Binary** resolution: `PACELEVER_CODEX_BIN` (kept so an existing override
+  works), then the configured path, then `codex` on `PATH`, then on macOS
+  `/Applications/Codex.app/Contents/Resources/codex` and
+  `~/Applications/Codex.app/Contents/Resources/codex`.
+- **Account key** `codex:<fp>`, `fp = hex(sha256("codex-account|" +
+  tokens.account_id))[:16]`. The email the app-server reports is not used. A
+  login without an `account_id` has no key (`account_unknown`, and a host with
+  no login at all is `credentials`); without a configured store the node still
+  measures it directly.
+- **Shared store flow** as for claude, except that a reading stays fresh for
+  300 s, the default for every pool but claude.
 
 ### Artificial Analysis annotations
 
