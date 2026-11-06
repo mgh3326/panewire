@@ -232,6 +232,17 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 		}
 		repo.wt += "-checkout"
 	}
+	// A writing role must have its branch on origin before submitting: without
+	// refs/remotes/origin/<branch> the checkout spec falls back to a detached
+	// HEAD at whatever origin ref holds HEAD, which is not the worktree the
+	// caller passed. Reviewer and counsel clear the branch below and keep that
+	// fallback; a pinned checkout already carries its evidence.
+	pinned := a.Repository != nil && a.Repository.Checkout != nil
+	if !pinned && repo.branch != "" && s.Role != "reviewer" && s.Role != "counsel" {
+		if a.call(ctx, "git", "-C", cwd, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+repo.branch).Code != 0 {
+			return Submission{}, fail(exitPlacement, "branch %s is not on origin; push it first: git -C %s push -u origin %s", repo.branch, cwd, repo.branch)
+		}
+	}
 	var checkout *HubCheckout
 	if repo.wt != "" {
 		var why string
