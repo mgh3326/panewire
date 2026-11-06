@@ -51,6 +51,11 @@ const roleHeldPane = "w2:p3"
 // roleReleaseHub holds a failed operation (rc70, pane cleanup unverified) for
 // task 42 role worker; its hk job is still claimed.
 func roleReleaseHub(t *testing.T) (*HubServer, *httptest.Server, *roleJobs, hubSpawnTask) {
+	return roleReleaseHubFor(t, hubSpawnOutcome{RC: 70, Stage: "landing", Reason: "spawn_failed", Host: "machine-a", Pane: roleHeldPane})
+}
+
+// roleReleaseHubFor is roleReleaseHub with the holder's recorded outcome chosen.
+func roleReleaseHubFor(t *testing.T, outcome hubSpawnOutcome) (*HubServer, *httptest.Server, *roleJobs, hubSpawnTask) {
 	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
 	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
@@ -68,7 +73,7 @@ func roleReleaseHub(t *testing.T) (*HubServer, *httptest.Server, *roleJobs, hubS
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err = hub.inbox.store.completeSpawn(t.Context(), held, hubSpawnOutcome{RC: 70, Stage: "landing", Reason: "spawn_failed", Host: "machine-a", Pane: roleHeldPane}, time.Now()); err != nil {
+	if _, err = hub.inbox.store.completeSpawn(t.Context(), held, outcome, time.Now()); err != nil {
 		t.Fatal(err)
 	}
 	held, err = hub.inbox.store.spawnTask(t.Context(), held.Request.RequestID)

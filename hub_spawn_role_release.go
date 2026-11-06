@@ -29,14 +29,14 @@ const (
 
 // probeHeldPane asks machine's node for every pane herdr lists. Only a node
 // that answered with a complete pane list lacking the pane proves it absent;
-// anything else keeps the reservation.
-func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane string) heldPane {
+// anything else keeps the reservation. A present pane returns its row.
+func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane string) (heldPane, nodeAgentRow) {
 	if machine == "" || !nodeCommandPaneIDPattern.MatchString(pane) {
-		return heldPaneUnknown
+		return heldPaneUnknown, nodeAgentRow{}
 	}
 	pending, id, _, sent := h.sendNodeCommand(machine, nodeCommandAgentsList, json.RawMessage("{}"))
 	if !sent {
-		return heldPaneUnknown
+		return heldPaneUnknown, nodeAgentRow{}
 	}
 	defer h.forgetNodeCommand(id)
 	ctx, cancel := context.WithTimeout(ctx, spawnHeldPaneProbeWait)
@@ -45,25 +45,35 @@ func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane string) hel
 	case reply := <-pending.done:
 		var list nodeAgentsListResult
 		if reply.Error != "" || json.Unmarshal(reply.Result, &list) != nil || !list.PanesOK {
-			return heldPaneUnknown
+			return heldPaneUnknown, nodeAgentRow{}
 		}
-		for _, row := range append(append([]nodeAgentRow(nil), list.Agents...), list.Panes...) {
+		// herdr lists a pane in both reads; only the agent row carries the
+		// status, so it is read last and wins.
+		found := nodeAgentRow{}
+		for _, row := range append(append([]nodeAgentRow(nil), list.Panes...), list.Agents...) {
 			if row.PaneID == pane {
-				return heldPanePresent
+				found = row
 			}
 		}
-		return heldPaneAbsent
+		if found.PaneID == "" {
+			return heldPaneAbsent, nodeAgentRow{}
+		}
+		return heldPanePresent, found
 	case <-ctx.Done():
-		return heldPaneUnknown
+		return heldPaneUnknown, nodeAgentRow{}
 	}
 }
 
 // releaseFailedSpawnRole frees the role held by a failed operation when its
-// pane is verifiably gone: it marks the still-claimed hk job lost, then drops
+// pane is verifiably gone, or present but proven never to have worked
+// (releaseUnworkedLanding): it marks the still-claimed hk job lost, then drops
 // the reservation. A crash between the two repeats harmlessly, because a lost
 // job already releases through the completed-or-lost path.
 func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, task, role string) (released bool, pane heldPane) {
-	pane = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane)
+	pane, row := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane)
+	if pane == heldPanePresent {
+		return h.releaseUnworkedLanding(ctx, app, holder, record, row) && h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, task, role) == nil, pane
+	}
 	if pane != heldPaneAbsent {
 		return false, pane
 	}
