@@ -413,3 +413,38 @@ func TestWatcherQuotaHandOffOutlivesTheCompletionDeadline(t *testing.T) {
 		t.Fatalf("quota not released: %s %v", st, pools)
 	}
 }
+
+// herdr may omit state_change_seq. A stable quota pane is then read on every
+// poll; once a hand-off is active it is not announced again, so the grace
+// deadline holds, the fallback ends the job and the lease is released.
+func TestWatcherQuotaStopWithoutStateChangeSeqKeepsTheGraceDeadline(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	a.QuotaHandOffGrace = 2 * time.Minute
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"idle"}]}}`}
+		}
+		return do(c)
+	}
+	started := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if waited := a.Now().Sub(started); waited < 2*time.Minute || waited > 3*time.Minute {
+		t.Fatalf("ended after %v, want the 2 minute grace (not restarted by each poll)", waited)
+	}
+	lost := 0
+	for _, kind := range eventKindsOf(t, a, "j") {
+		if kind == "job.lost" {
+			lost++
+		}
+	}
+	if lost != 1 || str(h.record(t, "j"), "state") != "lost" {
+		t.Fatalf("job.lost events=%d record=%v", lost, h.record(t, "j"))
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota not released: %s", st)
+	}
+}

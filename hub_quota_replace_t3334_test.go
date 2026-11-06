@@ -94,6 +94,7 @@ func newQuotaReplaceFixture(t *testing.T, role, job string) *quotaReplaceFixture
 	_ = fake
 	t.Cleanup(func() { hub.Close() })
 	hub.quotaReplacePoll = 5 * time.Millisecond
+	hub.quotaMarkBackoff = time.Millisecond
 	destination := &hubAgent{relays: make(chan hubRelayInjectEvent, 8), persisted: make(chan hubRelayPersistedEvent, 8)}
 	hub.mu.Lock()
 	hub.nodes["machine-b"] = &hubNodeRecord{agent: destination}
@@ -434,5 +435,45 @@ func TestQuotaStopRefusesASuccessorWhoseEndReasonWouldNotFit(t *testing.T) {
 	}
 	if _, err := f.hub.inbox.store.latestSpawnForJob(t.Context(), next); err == nil {
 		t.Fatal("a successor was placed")
+	}
+}
+
+// A transient job.mark_lost failure after the successor is placed is retried, so
+// the old record still gets its pointer before the watcher's fallback (review
+// finding).
+func TestQuotaStopRetriesTheStoppedJobRecordWrite(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-6-p1")
+	done := make(chan quotaReplaceResult, 1)
+	go func() {
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		done <- quotaReplaceResult{job, ok}
+	}()
+	command := nodeCommandRead(t, f.node)
+	roleReplyPanes(t, f.node, command, []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/x/pane-screen.txt"}})
+	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodePaneClosed}})
+	var successor hubSpawnTask
+	eventually(t, 2*time.Second, "the successor to be claimed", func() bool {
+		var err error
+		successor, err = f.hub.inbox.store.latestSpawnForJob(t.Context(), "mwr-6-p1-q1")
+		return err == nil
+	})
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	first := nodeCommandRead(t, f.node)
+	nodeCommandReplyTo(t, f.node, first, map[string]any{"error": "mark_lost_failed"})
+	second := nodeCommandRead(t, f.node)
+	nodeCommandReplyTo(t, f.node, second, map[string]any{"result": map[string]any{"outcome": nodeJobMarkLostLost}})
+	select {
+	case result := <-done:
+		if !result.ok || result.job != "mwr-6-p1-q1" {
+			t.Fatalf("result %+v", result)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the replacement did not finish")
+	}
+	if got := endReasonOf(t, second); got != "quota_stop pool=claude replaced_by=mwr-6-p1-q1" {
+		t.Fatalf("retried end_reason=%q", got)
 	}
 }

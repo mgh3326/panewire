@@ -52,7 +52,11 @@ func quotaReplacementJob(old string) (job string, n int, ok bool) {
 const (
 	quotaReplaceDeadline = 150 * time.Second
 	quotaReplaceWait     = quotaReplaceDeadline + 30*time.Second
-	quotaReplaceBudget   = spawnHeldPaneProbeWait + quotaReplaceWait + 3*spawnHeldPaneActWait
+	// The old record is written with up to quotaMarkAttempts tries, quotaMarkBackoff apart.
+	quotaMarkAttempts  = 3
+	quotaMarkBackoff   = 5 * time.Second
+	quotaReplaceBudget = spawnHeldPaneProbeWait + quotaReplaceWait + 2*spawnHeldPaneActWait +
+		quotaMarkAttempts*spawnHeldPaneActWait + (quotaMarkAttempts-1)*quotaMarkBackoff
 )
 
 // quotaReplacePoll is how often the hub looks for the successor's outcome.
@@ -231,7 +235,24 @@ func (h *HubServer) replaceQuotaStopped(ctx context.Context, machine string, eve
 		h.logger.Info("quota-stop replacement not placed", "job", event.JobID, "replacement", newJob, "pool", pool, "rc", outcome.RC, "reason", outcome.Reason)
 		return "", false
 	}
-	if lost, reason := h.markHolderJobLostBecause(ctx, app, holder, name, endReason); !lost {
+	// The pointer can only be written once and the watcher's fallback would
+	// write a plain record, so a transient failure is retried inside the grace.
+	backoff := h.quotaMarkBackoff
+	if backoff <= 0 {
+		backoff = quotaMarkBackoff
+	}
+	var lost bool
+	var reason string
+	for attempt := 0; attempt < quotaMarkAttempts && !lost; attempt++ {
+		if attempt > 0 {
+			select {
+			case <-time.After(backoff):
+			case <-ctx.Done():
+			}
+		}
+		lost, reason = h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
+	}
+	if !lost {
 		h.logger.Warn("quota-stop replacement placed but the stopped job's record was not written", "job", event.JobID, "replacement", newJob, "reason", reason)
 		return "", false
 	}

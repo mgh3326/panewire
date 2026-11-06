@@ -398,6 +398,9 @@ type HubServer struct {
 	// quotaReplacePoll overrides how often a quota-stop replacement looks for
 	// its successor's outcome; zero uses quotaReplacePoll.
 	quotaReplacePoll time.Duration
+	// quotaMarkBackoff overrides the wait between tries to write the stopped
+	// job's record; zero uses quotaMarkBackoff.
+	quotaMarkBackoff time.Duration
 	spawnKick        chan struct{}
 	spawnWorkers     sync.WaitGroup
 	// auth is swapped whole on an auth-file reload; read it through

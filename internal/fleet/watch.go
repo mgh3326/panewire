@@ -229,7 +229,10 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// An idle pane stopped by a quota screen with no report will not
 		// finish: end the job with the reason, so it is retried, not lost
 		// silently at the watch deadline.
-		if present && !pending {
+		// Not while a hand-off is active: its stop is already announced, and a
+		// pane that reports no state_change_seq would be read and announced on
+		// every poll, moving the grace deadline each time.
+		if present && !pending && !handOff.active {
 			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok {
 				if a.QuotaHandOffGrace <= 0 {
 					return a.quotaStopLost(ctx, j, stop, true)
