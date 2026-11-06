@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // t3330Composer is a stateful cmd pane. send-text appends to the composer
@@ -76,6 +77,8 @@ case "$1 $2" in
 "pane send-keys")
   [ "$4" = "return" ] || exit 0
   if [ -f "$d/fail_return" ]; then rm "$d/fail_return"; exit 1; fi
+  # a return the pane ignores: the text stays in the composer, nothing submits
+  if [ -f "$d/stuck_return" ]; then exit 0; fi
   echo "❯ $(cat "$d/buf")" >> "$d/submitted"
   if [ -f "$d/lag_return" ]; then cp "$d/buf" "$d/stale"; fi
   : > "$d/buf"
@@ -304,5 +307,31 @@ func TestCmdEchoLagAfterReturnPressesOneReturn_t3330(t *testing.T) {
 	}
 	if result.Outcome != relayInjectDelivered {
 		t.Fatalf("result=%+v, want delivered once the lagging echo settled", result)
+	}
+}
+
+// Round 3 follow-up (comment 4498641926): the one return went out and the
+// composer still draws the text after the whole observation window. The verdict
+// is final, because a retry's presend would meet its own text in the composer
+// and press a second return. The replay path still gets its one return when the
+// operator's pane is later found holding this row's text; an inject that already
+// pressed one does not press another.
+func TestCmdTextStillInComposerAfterReturnIsNotRetried_t3330(t *testing.T) {
+	prevWindow := relayObserveWindow
+	relayObserveWindow = 400 * time.Millisecond
+	t.Cleanup(func() { relayObserveWindow = prevWindow })
+	pane := t3330InstallComposer(t, "")
+	pane.flag(t, "stuck_return")
+
+	result := defaultHubRelayInjectVerdict(t.Context(), "w1:pW", t3330RelayText(), nil)
+
+	if result.Outcome != relayInjectMaybeInPane || result.Evidence != "return_unconfirmed:composer_pending" {
+		t.Fatalf("result=%+v, want maybe-in-pane with return_unconfirmed:composer_pending", result)
+	}
+	if relayRetriesOnce(result) {
+		t.Fatal("the verdict is retried: the retry's presend would press a second return on this row's own text")
+	}
+	if got := pane.calls(t, "pane send-keys"); got != 1 {
+		t.Fatalf("pane send-keys called %d times, want exactly 1 return", got)
 	}
 }

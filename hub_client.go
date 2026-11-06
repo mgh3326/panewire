@@ -682,7 +682,7 @@ func relayInjectForHarness(ctx context.Context, pane, harness, text string, memb
 	return relayInjectForHarnessGuarded(ctx, pane, harness, text, members, nil)
 }
 
-func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text string, members []string, guard func(string) bool) relayInjectResult {
+func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text string, members []string, guard func(string) bool) (final relayInjectResult) {
 	if strings.EqualFold(harness, "devin") {
 		return devinRelayInjectGuarded(ctx, pane, text, members, guard)
 	}
@@ -751,6 +751,15 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness, Evidence: "prompt_failed"}
 	}
 	returnSpent := false
+	defer func() {
+		// The one return went out and the composer still draws this text after
+		// the whole observation window. A retry would meet its own text in the
+		// composer in presend and press a second return, so the verdict is
+		// final: it carries no "unproven:" and relayRetriesOnce leaves it.
+		if returnSpent && final.Outcome == relayInjectMaybeInPane && strings.HasSuffix(final.Evidence, "unproven:composer_pending") {
+			final.Evidence = "return_unconfirmed:composer_pending"
+		}
+	}()
 	if known && adapter.paneTransport {
 		// The pane transport is the spawn path's pair, not one call: pane
 		// send-text only types, so the submit is its own keypress. It goes

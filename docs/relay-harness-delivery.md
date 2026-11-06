@@ -88,6 +88,9 @@ character is dim reads empty and the event is typed. The return after
 appears in between is `return_withheld:composer_foreign` and `maybe_in_pane`.
 That is the one return of the inject: verify does not press a second one when
 the composer still draws the text (echo lag), it observes until the echo lands.
+If it still draws the text when the observation window ends, the verdict is
+`return_unconfirmed:composer_pending`, final and not retried: a retry's presend
+would meet this row's own text and press a second return.
 `panewire prompt --to <cmd pane>` takes the same transport, so a hand relay
 through panewire reaches a cmd worker too.
 
