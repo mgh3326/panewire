@@ -133,4 +133,16 @@ func TestReapContinuesWhenTheRecordCannotBeRead(t *testing.T) {
 	if !slices.Contains(kinds, "job.record_failed") || !slices.Contains(kinds, "job.reaped") {
 		t.Fatalf("events %v", kinds)
 	}
+	if warn := a.Err.(interface{ String() string }).String(); !strings.Contains(warn, "job record reap read failed") || strings.Contains(warn, "write failed") {
+		t.Fatalf("warning = %q", warn)
+	}
+	evs, err := a.events("j")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, ev := range evs {
+		if ev.Kind == "job.record_failed" && ev.Payload["op"] != "reap" {
+			t.Fatalf("job.record_failed payload = %v", ev.Payload)
+		}
+	}
 }

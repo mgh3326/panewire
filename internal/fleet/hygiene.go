@@ -431,9 +431,13 @@ func (a *App) markEndedJobLost(ctx context.Context, j Job) {
 	if j.Ended != "job.revoked" && j.Ended != "job.lost" {
 		return
 	}
+	readFailed := func(e error) {
+		a.warn("job record reap read failed: %v", e)
+		_ = a.event(ctx, j.ID, "job.record_failed", map[string]any{"op": "reap"})
+	}
 	store, e := a.jobStore()
 	if e != nil {
-		a.jobRecordFailed(ctx, j.ID, "reap", e)
+		readFailed(e)
 		return
 	}
 	rec, e := store.Get(ctx, j.ID)
@@ -441,7 +445,7 @@ func (a *App) markEndedJobLost(ctx context.Context, j Job) {
 		return
 	}
 	if e != nil {
-		a.jobRecordFailed(ctx, j.ID, "reap", e)
+		readFailed(e)
 		return
 	}
 	if state := str(rec, "state"); state != "claimed" && state != "spawned" {
