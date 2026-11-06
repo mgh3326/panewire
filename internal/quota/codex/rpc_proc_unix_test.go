@@ -22,6 +22,7 @@ import (
 // started must be gone when Measure returns.
 
 const fakeAppServer = `#!/bin/sh
+if [ -n "$FAKE_START_DELAY" ]; then sleep "$FAKE_START_DELAY"; fi
 echo "$$" > "$FAKE_DIR/pid"
 printf '%s\n' "$@" > "$FAKE_DIR/argv"
 pwd > "$FAKE_DIR/cwd"
@@ -62,6 +63,7 @@ func newFakeCodex(t *testing.T) fakeCodex {
 	}
 	t.Setenv("FAKE_DIR", f.dir)
 	t.Setenv("FAKE_HANG", "")
+	t.Setenv("FAKE_START_DELAY", "")
 	return f
 }
 
@@ -69,17 +71,57 @@ func (f fakeCodex) config(api Doer) Config {
 	return Config{CodexHome: f.home, Binary: f.binary, HTTP: api, Now: func() time.Time { return testNow }, LookupEnv: func(string) (string, bool) { return "", false }}
 }
 
-func (f fakeCodex) pid(t *testing.T, name string) int {
-	t.Helper()
+// readPID reports the pid the fake recorded under name. The shell creates the
+// file before it writes the pid, so an empty or partial file is not yet ready.
+func (f fakeCodex) readPID(name string) (int, bool) {
 	data, err := os.ReadFile(filepath.Join(f.dir, name))
 	if err != nil {
-		t.Fatalf("the fake app-server did not start: %v", err)
+		return 0, false
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil {
-		t.Fatal(err)
+	return pid, err == nil
+}
+
+func (f fakeCodex) pid(t *testing.T, name string) int {
+	t.Helper()
+	pid, ok := f.readPID(name)
+	if !ok {
+		t.Fatalf("the fake app-server did not record %s", name)
 	}
 	return pid
+}
+
+// awaitStarted returns once the fake has recorded every name, that is once
+// the app-server is running; it fails the test after the start timeout.
+func (f fakeCodex) awaitStarted(t *testing.T, names ...string) {
+	t.Helper()
+	eventually(t, startTimeout, "the fake app-server to start", func() bool {
+		for _, name := range names {
+			if _, ok := f.readPID(name); !ok {
+				return false
+			}
+		}
+		return true
+	})
+}
+
+// startTimeout bounds how long a test waits for the fake to start; it is far
+// above a slow exec so that only a fake that never starts reaches it.
+const startTimeout = 30 * time.Second
+
+// startAfterStarted is a Config.StartRPC that spawns the real app-server and
+// returns only once the fake has recorded names, so a short RPCTimeout is
+// judged against a server that is running and not against its exec latency.
+func (f fakeCodex) startAfterStarted(t *testing.T, names ...string) func(context.Context, string, string, string) (Transport, error) {
+	return func(ctx context.Context, binary, dir, codexHome string) (Transport, error) {
+		tr, err := startAppServer(ctx, binary, dir, codexHome)
+		if err != nil {
+			return nil, err
+		}
+		t.Cleanup(tr.Close)
+		f.awaitStarted(t, names...)
+		return tr, nil
+	}
 }
 
 func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }
@@ -88,14 +130,7 @@ func alive(pid int) bool { return syscall.Kill(pid, 0) == nil }
 // reaps it, which takes a moment.
 func gone(t *testing.T, pid int) bool {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for alive(pid) {
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(5 * time.Millisecond) // pacing a poll of the OS process table
-	}
-	return true
+	return waitUntil(5*time.Second, func() bool { return !alive(pid) })
 }
 
 // killOnCleanup stops pid if the test failed before the code under test did.
@@ -152,25 +187,36 @@ func mustEval(t *testing.T, path string) string {
 	return resolved
 }
 
-// A hung app-server, and the child it started, are killed at the timeout and
-// the usage API answers.
+// A started app-server that never replies, and the child it started, are
+// killed at the timeout and the usage API answers. The fake is slow to start in
+// the second case, as a fresh exec can be on a loaded host: the timeout has run
+// out before the fake is up, and the server is still killed and reaped.
 func TestAppServerHangIsKilledAndReaped(t *testing.T) {
-	f := newFakeCodex(t)
-	t.Setenv("FAKE_HANG", "1")
-	killOnCleanup(t, f, "pid")
-	killOnCleanup(t, f, "child")
-	cfg := f.config(reply(200, fixture(t, "wham_usage.json"), nil))
-	cfg.RPCTimeout = 300 * time.Millisecond // simulated latency: the server never replies
-	observed, err := Measure(t.Context(), cfg)
-	if err != nil || observed.Source != "usage-api" {
-		t.Fatalf("%+v %v", observed, err)
-	}
-	pid, child := f.pid(t, "pid"), f.pid(t, "child")
-	if alive(pid) {
-		t.Fatal("the hung app-server was not reaped")
-	}
-	if !gone(t, child) {
-		t.Fatal("the app-server's child outlived it")
+	for _, tc := range []struct{ name, startDelay string }{
+		{"starts within the timeout", ""},
+		{"starts after the timeout", "0.6"}, // simulated latency: the exec outlasts RPCTimeout
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newFakeCodex(t)
+			t.Setenv("FAKE_HANG", "1")
+			t.Setenv("FAKE_START_DELAY", tc.startDelay)
+			killOnCleanup(t, f, "pid")
+			killOnCleanup(t, f, "child")
+			cfg := f.config(reply(200, fixture(t, "wham_usage.json"), nil))
+			cfg.RPCTimeout = 300 * time.Millisecond // simulated latency: the server never replies
+			cfg.StartRPC = f.startAfterStarted(t, "pid", "child")
+			observed, err := Measure(t.Context(), cfg)
+			if err != nil || observed.Source != "usage-api" {
+				t.Fatalf("%+v %v", observed, err)
+			}
+			pid, child := f.pid(t, "pid"), f.pid(t, "child")
+			if alive(pid) {
+				t.Fatal("the hung app-server was not reaped")
+			}
+			if !gone(t, child) {
+				t.Fatal("the app-server's child outlived it")
+			}
+		})
 	}
 }
 
@@ -186,16 +232,7 @@ func TestAppServerCancelled(t *testing.T) {
 		_, err := Measure(ctx, f.config(doFunc(func(r *http.Request) (*http.Response, error) { return nil, r.Context().Err() })))
 		done <- err
 	}()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if _, err := os.Stat(filepath.Join(f.dir, "child")); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the fake app-server never started")
-		}
-		time.Sleep(5 * time.Millisecond) // pacing a wait for the fake to start
-	}
+	f.awaitStarted(t, "pid", "child")
 	cancel()
 	err := <-done
 	if quota.KindOf(err) != quota.ErrKindNetwork {
