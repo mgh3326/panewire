@@ -753,6 +753,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	env = append(env, mockEnv...)
 	env = append(env, "ARBITER_JOB="+s.Job, "ARBITER_RESOURCE="+pool, "ARBITER_KIND=quota_pool", "ARBITER_PROFILE="+seat.gateName(), "HK_TASK_ID="+s.Task)
+	// The pane's hub lane is its label (registered below). Naming it here lets
+	// the pane's `panewire inbox` commands default to their own lane.
+	env = append(env, "PANEWIRE_LANE="+s.Label)
 	if seat.Kind == "claude" && s.Purpose != "director" {
 		env = append(env, "CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false")
 	}
