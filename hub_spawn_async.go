@@ -124,6 +124,7 @@ func (h *HubServer) handleSpawnSubmit(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 503, map[string]string{"error": "store_unavailable", "fix": "restore the durable store and retry this same request"})
 		return
 	}
+	h.supersedeRetryableHolders(r.Context(), app, request, spawn)
 	h.acceptSpawnResponse(w, task)
 	select {
 	case h.spawnKick <- struct{}{}:

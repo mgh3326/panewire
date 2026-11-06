@@ -3,6 +3,7 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -21,12 +22,26 @@ import (
 type roleJobs struct {
 	mu      sync.Mutex
 	records map[string]map[string]any
+	getErr  map[string]error // a job whose Get fails with the mapped error
+	puts    []string         // "<job> <state>" for every Put, in order
+	// completeAfterGet makes the holder complete right after its first Get,
+	// the way a job finishing during the pane probe does.
+	completeAfterGet bool
+	putErr           error // when set, every Put fails with it
 }
 
 func (r *roleJobs) Claim(context.Context, string, string, string) error { return nil }
 func (r *roleJobs) Put(_ context.Context, id string, fields map[string]any) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	r.puts = append(r.puts, id+" "+scalarString(fields["state"]))
+	if r.putErr != nil {
+		return r.putErr
+	}
+	// hk never rewrites a terminal record.
+	if state := r.records[id]["state"]; state == "completed" || state == "lost" || state == "escalated" {
+		return errors.New("job_state_conflict")
+	}
 	for key, value := range fields {
 		r.records[id][key] = value
 	}
@@ -35,10 +50,26 @@ func (r *roleJobs) Put(_ context.Context, id string, fields map[string]any) erro
 func (r *roleJobs) Get(_ context.Context, id string) (map[string]any, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if err := r.getErr[id]; err != nil {
+		return nil, err
+	}
 	if record, ok := r.records[id]; ok {
-		return map[string]any{"state": record["state"]}, nil
+		out := map[string]any{"state": record["state"]}
+		if r.completeAfterGet && id == "test-job" {
+			record["state"] = "completed"
+		}
+		return out, nil
 	}
 	return nil, fleet.ErrJobNotFound
+}
+func scalarString(v any) string {
+	s, _ := v.(string)
+	return s
+}
+func (r *roleJobs) writes() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.puts...)
 }
 func (r *roleJobs) state(id string) any {
 	r.mu.Lock()
@@ -56,6 +87,12 @@ func roleReleaseHub(t *testing.T) (*HubServer, *httptest.Server, *roleJobs, hubS
 
 // roleReleaseHubFor is roleReleaseHub with the holder's recorded outcome chosen.
 func roleReleaseHubFor(t *testing.T, outcome hubSpawnOutcome) (*HubServer, *httptest.Server, *roleJobs, hubSpawnTask) {
+	return roleHolderHub(t, outcome, "claimed", "failed")
+}
+
+// roleHolderHub holds task 42 role worker with an operation that ended in
+// wantStatus with outcome, and an hk job in hkState.
+func roleHolderHub(t *testing.T, outcome hubSpawnOutcome, hkState, wantStatus string) (*HubServer, *httptest.Server, *roleJobs, hubSpawnTask) {
 	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
 	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": t14OperatorToken, "machine-a": "node-token"}, InboxStorePath: filepath.Join(t.TempDir(), "inbox.sqlite3")})
@@ -63,7 +100,7 @@ func roleReleaseHubFor(t *testing.T, outcome hubSpawnOutcome) (*HubServer, *http
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { hub.Close() })
-	jobs := &roleJobs{records: map[string]map[string]any{"test-job": {"state": "claimed"}}}
+	jobs := &roleJobs{records: map[string]map[string]any{"test-job": {"state": hkState}}}
 	hub.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) {
 		return &fleet.App{JobStore: jobs, Out: out, Err: errout}, nil
 	}
@@ -77,7 +114,7 @@ func roleReleaseHubFor(t *testing.T, outcome hubSpawnOutcome) (*HubServer, *http
 		t.Fatal(err)
 	}
 	held, err = hub.inbox.store.spawnTask(t.Context(), held.Request.RequestID)
-	if err != nil || held.Status != "failed" {
+	if err != nil || held.Status != wantStatus {
 		t.Fatalf("holder %+v %v", held, err)
 	}
 	return hub, server, jobs, held
