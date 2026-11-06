@@ -243,11 +243,11 @@ func TestStaleMeasuresPublishesAndReleases(t *testing.T) {
 	}
 	want := strings.Join([]string{
 		"GET /v1/quota/accounts/" + testKey + "/latest",
+		"PUT /v1/quota/presence", // before the lease: a failed measurement still names the holder
 		"POST /v1/quota/accounts/" + testKey + "/lease",
 		"GET /v1/quota/accounts/" + testKey + "/latest", // re-read after the lease
 		"PUT /v1/quota/accounts/" + testKey + "/observation",
 		"DELETE /v1/quota/accounts/" + testKey + "/lease",
-		"PUT /v1/quota/presence",
 	}, "\n")
 	if got := hk.callLog(); got != want {
 		t.Fatalf("call order\n%s\nwant\n%s", got, want)
@@ -300,6 +300,70 @@ func TestPresenceAtMostEveryTenMinutes(t *testing.T) {
 	refresh()
 	if n := hk.count("PUT /v1/quota/presence"); n != 2 {
 		t.Fatalf("presence announced %d times after the interval", n)
+	}
+}
+
+// A host that holds the account is announced whatever the refresh ends in
+// (hk 3320): the measurement fails, the provider rate-limits, the lease is held
+// by another host past the wait, or the measurement is never reached. Before,
+// presence followed only a successful reading, so a host whose measurement
+// kept failing never reached placement and its account was never tried there.
+func TestPresenceIsAnnouncedWhenTheRefreshFails(t *testing.T) {
+	failing := func(context.Context) (quota.Observation, error) {
+		return quota.Observation{}, quota.Fail(quota.ErrKindParse, "usage response has no usable windows")
+	}
+	limited := func(context.Context) (quota.Observation, error) {
+		return quota.Observation{}, quota.Fail(quota.ErrKindRateLimited, "rate limited")
+	}
+	for name, run := range map[string]func(hk *fakeHK) error{
+		"measurement fails": func(hk *fakeHK) error {
+			_, err := newFlow().Refresh(t.Context(), hk.client(), testKey, failing)
+			return err
+		},
+		"provider rate limit": func(hk *fakeHK) error {
+			_, err := newFlow().Refresh(t.Context(), hk.client(), testKey, limited)
+			return err
+		},
+		"lease held elsewhere": func(hk *fakeHK) error {
+			hk.holder, hk.expires = "another-host", time.Now().Add(time.Hour)
+			flow := newFlow()
+			flow.MaxWait = 20 * time.Millisecond
+			_, err := flow.Refresh(t.Context(), hk.client(), testKey, mustMeasureNothing(t))
+			return err
+		},
+		"unmeasurable window": func(hk *fakeHK) error {
+			expired := func(context.Context) (quota.Observation, error) {
+				return quota.Observation{Source: quota.SourceUsageAPI, AccountFP: "0123456789abcdef", Buckets: []quota.Bucket{
+					{Window: "5h", UsedPct: pct(0), ResetsAt: testNow.Add(-time.Hour).Format(time.RFC3339Nano), Scope: quota.Scope{Kind: quota.ScopeAccount}},
+				}}, nil
+			}
+			_, err := newFlow().Refresh(t.Context(), hk.client(), testKey, expired)
+			return err
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			hk := newFakeHK(t)
+			hk.latest = stored(testNow.Add(-time.Hour), 30)
+			if err := run(hk); err == nil {
+				t.Fatal("the refresh was expected to fail")
+			}
+			if len(hk.presence) != 1 || hk.presence[0].HostID != "node-a" || hk.presence[0].AccountKey != testKey {
+				t.Fatalf("presence %+v\n%s", hk.presence, hk.callLog())
+			}
+		})
+	}
+}
+
+// A store that cannot be read names no holder: presence waits for the first
+// answer, so an unreachable store is not asked twice.
+func TestNoPresenceWhenTheStoreCannotBeRead(t *testing.T) {
+	hk := newFakeHK(t)
+	hk.server.Close()
+	if _, err := newFlow().Refresh(t.Context(), hk.client(), testKey, mustMeasureNothing(t)); quota.KindOf(err) != quota.ErrKindSharedUnavailable {
+		t.Fatalf("err = %v", err)
+	}
+	if len(hk.presence) != 0 {
+		t.Fatalf("presence %+v", hk.presence)
 	}
 }
 

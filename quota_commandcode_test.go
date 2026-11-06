@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -275,6 +276,40 @@ func TestFleetQuotaCommandcodeNativeNeverRunsPacelever(t *testing.T) {
 		if header.Get("Authorization") != "Bearer "+commandcodeSecret || header.Get("User-Agent") != "cmd/1.88.1" {
 			t.Fatalf("request headers %v", header)
 		}
+	}
+}
+
+// hk 3320: mac-dev ran commandcode natively with a working login and was never
+// offered the account, because presence followed only a published reading. The
+// loop on a host whose measurement fails (here a 5h window the API reports as
+// already over) still tells the store that this host holds the account, so
+// placement can try cmd-dsflash41 there and the quota gate re-measures it.
+func TestFleetQuotaCommandcodeNativePublishesPresenceWhenMeasurementFails(t *testing.T) {
+	setCommandcodeSwitch(t, true)
+	hk := newClaudeHK(t)
+	client := quotaClient(t)
+	client.spawnConfigPath = claudeStore(t, hk.server.URL)
+	client.machineID = "node-a"
+	api := newCommandcodeAPI()
+	api.replies["/alpha/billing/credits"] = fmt.Sprintf(`{"success":true,"data":{"windowLimits":{"fiveHour":{"used":0,"cap":14,"resetAt":%d},"weekly":{"used":0.45,"cap":35,"resetAt":%d}},"credits":{"monthlyCredits":63.48}}}`,
+		claudeTestNow.Add(-6*time.Hour).UnixMilli(), claudeTestNow.Add(6*24*time.Hour).UnixMilli())
+	source := commandcodeTestSource(client.spawnConfigPath, commandcodeLoginFiles(commandcodeSecret), api)
+	client.nativeQuota = map[string]*nativeQuotaSource{"commandcode": source}
+	client.nodePacelever = (&paceleverRunnerFake{}).run
+	warned := newWarnLog(client)
+
+	client.refreshFleetQuota(t.Context(), "commandcode", map[string]fleetQuotaSent{})
+
+	if hk.published() != 0 {
+		t.Fatalf("a failed measurement was published")
+	}
+	if got := warned.all(); len(got) != 1 || !strings.Contains(got[0], "pool commandcode is unavailable (error_kind probe_failed)") {
+		t.Fatalf("warnings %q", got)
+	}
+	hk.mu.Lock()
+	defer hk.mu.Unlock()
+	if !slices.Contains(hk.calls, "PUT /v1/quota/presence") {
+		t.Fatalf("no presence for the commandcode account:\n%s", strings.Join(hk.calls, "\n"))
 	}
 }
 

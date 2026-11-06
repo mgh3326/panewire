@@ -212,9 +212,14 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 	if err != nil {
 		return Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 	}
+	// Presence says this host holds the account (the node named it from its
+	// login and reached the store), not that a reading succeeded: it goes out
+	// before the lease and the measurement, so a measurement that fails, a
+	// lease held elsewhere or a deadline in the wait cannot leave a host with a
+	// working login unknown to placement.
+	f.announce(ctx, c, key)
 	fresh := func() (Reading, bool) { return f.current(latest.Observation, key, f.now()) }
 	if reading, ok := fresh(); ok {
-		f.announce(ctx, c, key)
 		return reading, nil
 	}
 	backingOff := f.backingOff(key)
@@ -260,7 +265,6 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 				return Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 			}
 			if reading, ok := fresh(); ok {
-				f.announce(ctx, c, key)
 				return reading, nil
 			}
 			// A holder that finishes or fails early releases its lease, so
@@ -286,7 +290,6 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 			return Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 		}
 		if reading, ok := fresh(); ok {
-			f.announce(ctx, c, key)
 			return reading, nil
 		}
 		switch {
@@ -309,7 +312,6 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 		return Reading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
 	}
 	if reading, ok := fresh(); ok {
-		f.announce(ctx, c, key)
 		return reading, nil
 	}
 	probeCtx, cancel := context.WithTimeout(ctx, time.Duration(f.leaseTTL())*time.Second-probeMargin)
@@ -358,7 +360,6 @@ func (f *Flow) Refresh(ctx context.Context, c Client, key string, measure Measur
 		return Reading{}, quota.Fail(quota.ErrKindSharedReleaseFailed, "shared release failed")
 	}
 	released = true
-	f.announce(ctx, c, key)
 	return reading, nil
 }
 
@@ -377,7 +378,7 @@ func (f *Flow) release(c Client, key, holder string) error {
 }
 
 // announce tells the store this host holds key, at most once per presence
-// interval. A lost announcement is retried on the next reading rather than
+// interval. A lost announcement is retried on the next refresh rather than
 // suppressed for the whole interval; it never changes the reading's outcome.
 func (f *Flow) announce(ctx context.Context, c Client, key string) {
 	if f.HostID == "" {
