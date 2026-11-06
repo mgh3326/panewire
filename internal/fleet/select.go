@@ -701,7 +701,11 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: %v", e)
 	}
 	p := &selPlan{policy: policy, order: slices.Clone(policy.Order), req: req, at: a.Now()}
-	snapshot, _ := a.fleetSnapshot(ctx)
+	// Hub-only cooling fails open when the snapshot is unavailable; record the gap.
+	snapshot, coolingState := a.fleetSnapshot(ctx)
+	if snapshot == nil {
+		p.degraded = append(p.degraded, "pool_cooling_"+coolingState)
+	}
 	rows, e := a.Quota.Catalog(ctx)
 	if e != nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: bench catalog unreadable: %v", e)

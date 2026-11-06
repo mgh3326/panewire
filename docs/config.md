@@ -126,7 +126,7 @@ grades and gates for each effort. The desk publishes the seed after merge.
 | `session_machine_ids` | Herdr session → machine identity table used for lane placement. |
 | `session_lanes_token_envs` | Herdr session → lane credential-file path. Overrides `lanes_token_env` for that session; pair it with `session_machine_ids` when sessions use separate node identities. |
 | `quota_gate` | Only `"local"` is accepted: explicit local-only quota mode. It contradicts hub_token_env; remove one of those keys. |
-| `state` | `"on"` (default) reads the hub's fleet state for placement and the quota gate; `"off"` skips it and measures directly as before (the rollback switch). See [Fleet state](#fleet-state). |
+| `state` | `"on"` (default) reads the hub's fleet state for placement and the quota gate; `"off"` skips it and measures directly as before (the rollback switch). Cooling cannot be checked when hub state is off or unavailable; the selection record reports the condition in `degraded`. See [Fleet state](#fleet-state). |
 | `state_publisher_ttl_s` | Seconds a publisher heartbeat stays alive. Default 90. |
 
 Worker lane credentials use lanes_token_env, then hub_token_env. Lane listing
