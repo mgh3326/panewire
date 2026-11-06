@@ -470,7 +470,9 @@ monthly; sub-daily windows such as a 5h rate window never rank a pool, they
 stay admission gates only). A pool whose longest window's reset can be paced
 always ranks ahead of one whose cannot; unpaceable pools keep the lower
 projected use at reset (the used percentage when it cannot be paced yet) —
-then the smaller effort, then the catalog score.
+then the smaller effort, then the catalog score. A pool whose reading has no
+account window (agy publishes only group windows) ranks on its group windows;
+its strictest group sets the blocking use for every rung of the account.
 
 The pool-order policy is version `2`. A version `1` file supplied through
 `[local].pool_policy`, `PANEWIRE_POOL_POLICY`, or `simulate --policy` is refused
