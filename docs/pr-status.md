@@ -19,8 +19,12 @@ panewire pr status   <owner/repo> <n> [--fresh] [--json]
 panewire pr findings <owner/repo> <n> [--json]
 ```
 
-Flags may follow the positional arguments. The connection comes from flags or
-the environment, the same names `panewire inbox` uses:
+Flags may follow the positional arguments. With no connection given, the
+command asks the **local node daemon** over its unix socket, the way
+`panewire inbox` does, so a worker needs no credential and no environment.
+`--hub-url` or `--hub-token-env` (or `PANEWIRE_HUB_URL` or
+`PANEWIRE_HUB_TOKEN_ENV`) selects a direct hub connection instead, with the
+same names `panewire inbox` uses:
 
 | Flag | Environment | Meaning |
 | --- | --- | --- |
@@ -83,8 +87,9 @@ cap, `findings_omitted` counts the rest and a note says to read them with `gh`.
 
 A hk `404` (or a `200` with an empty `changes` list) is expected while the handoffkeep that is deployed does not serve
 `/v1/changes`; it never fails the command. gh runs only when neither source
-answered, which includes the hub being unreachable, refusing the credential, or
-not configured. The fallback output says that it fell back and why:
+answered, which includes the hub being unreachable, refusing the credential, a
+half-given direct connection, no local node running, or a local node daemon
+that predates the op. The fallback output says that it fell back and why:
 
 ```
 owner/name#152 open head=1c4231f blocking=? checks=1/3 green pending:1 red:1 observed=now source=gh (fallback: hub unreachable)
@@ -99,9 +104,20 @@ fails too, the command exits 4 and names both failures.
 
 ## Transport
 
-The CLI calls the hub's node-command endpoint
-(`POST /v1/nodes/{machine}/command`, op `pr.status`; see
-[node-commands.md](node-commands.md#prstatus)). The hub refuses the op for any
+With no connection flags the CLI sends the op to the local node daemon
+(`op: "pr.status"` on its socket, the one `panewire inbox` uses). The daemon
+forwards it through the hub with its own node credential, so the worker holds
+none, and answers with the node reply or the sentence that explains why it
+could not (`hub unreachable`, `hub answered 503 node_unavailable`, ...). The
+hub admits a node credential for `pr.status` on the PR-status host and for no
+other op. If no daemon is listening, the note says `local node is not running`;
+a daemon built before this op answers `local node does not support pr.status`.
+Either way gh answers, as below.
+
+With `--hub-url` and `--hub-token-env`, the CLI calls the hub's node-command endpoint
+directly (`POST /v1/nodes/{machine}/command`, op `pr.status`; see
+[node-commands.md](node-commands.md#prstatus)); the daemon uses the same
+endpoint. The hub refuses the op for any
 machine except its `--pr-status-host` (default `oci`), and a service
 credential needs `node.command:pr.status@<machine>` ([hub-scopes.md](hub-scopes.md)).
 The node on that machine runs `mergewake pr-status --repo R --pr N --json` and
@@ -125,5 +141,5 @@ before and after its own gh calls. The panewire path makes none by
 construction, since the node op never calls GitHub unless `--fresh` is given,
 so the harness does not count it. State is compared as the open, merged or
 closed class (mergewake's `ready`, `blocked` and `pending` are open). Run it
-from a host that has a hub credential and gh logged in. A `panewire_source`
+from a host that runs the node daemon (or pass hub flags) and has gh logged in. A `panewire_source`
 of `gh` means the panewire path fell back and the row measures gh against gh.

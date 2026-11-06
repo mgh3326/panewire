@@ -20,7 +20,7 @@ const (
 func prStatusHub(t *testing.T, host string) (*HubServer, *httptest.Server) {
 	t.Helper()
 	hub, err := NewHubServer(HubServerConfig{
-		Tokens:       map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "svc-pr": prHubServiceToken, "svc-other": prHubOtherToken},
+		Tokens:       map[string]string{"operator": t14OperatorToken, "machine-a": "node-token", "machine-b": "node-b-token", "svc-pr": prHubServiceToken, "svc-other": prHubOtherToken},
 		Scopes:       map[string]string{"svc-pr": "node.command:pr.status@machine-a", "svc-other": "node.command:agents.list@machine-a"},
 		PRStatusHost: host,
 	})

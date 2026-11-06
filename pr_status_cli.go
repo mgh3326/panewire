@@ -149,8 +149,14 @@ func collectPRStatus(connect nodeReapConnect, stderr io.Writer, deps hubCLIDeps,
 }
 
 // askPRStatusNode returns the node's answer, or nil with the reason it could
-// not be asked. No reason ever carries a credential or a response body.
+// not be asked. No reason ever carries a credential or a response body. With no
+// connection given, the local node daemon asks the hub with its own credential,
+// the way `panewire inbox` does; --hub-url or --hub-token-env (or their
+// environment) keep the direct path.
 func askPRStatusNode(connect nodeReapConnect, stderr io.Writer, deps hubCLIDeps, args nodePRStatusArgs) (*nodePRStatusResult, string) {
+	if *connect.hubURL == "" && *connect.tokenPath == "" {
+		return askPRStatusLocal(deps.SocketPath, *connect.machine, args)
+	}
 	if *connect.hubURL == "" || *connect.tokenPath == "" {
 		return nil, "hub connection is not configured (--hub-url and --hub-token-env)"
 	}
@@ -162,18 +168,28 @@ func askPRStatusNode(connect nodeReapConnect, stderr io.Writer, deps hubCLIDeps,
 	defer cancel()
 	var result nodePRStatusResult
 	err := client.command(ctx, *connect.machine, nodeCommandPRStatus, args, &result)
+	if why := prStatusHubFailure(err, *connect.machine, result); why != "" {
+		return nil, why
+	}
+	return &result, ""
+}
+
+// prStatusHubFailure names why a hub call did not produce a usable result, or
+// is "" when it did. The CLI and the node daemon both ask the hub, and say the
+// same words about it.
+func prStatusHubFailure(err error, machine string, result nodePRStatusResult) string {
 	var hubErr *NodeReapError
 	switch {
 	case errors.Is(err, ErrNodeReapRefused):
-		return nil, "hub refused the credential for pr.status on " + *connect.machine
+		return "hub refused the credential for pr.status on " + machine
 	case errors.As(err, &hubErr):
-		return nil, "hub answered " + strconv.Itoa(hubErr.Status) + " " + hubErr.Code
+		return "hub answered " + strconv.Itoa(hubErr.Status) + " " + hubErr.Code
 	case err != nil:
-		return nil, "hub unreachable"
+		return "hub unreachable"
 	case !validNodePRStatusResult(result):
-		return nil, "hub answered an unusable pr.status result"
+		return "hub answered an unusable pr.status result"
 	}
-	return &result, ""
+	return ""
 }
 
 func prStatusDescribeMergewake(source nodePRStatusMergewake) string {
