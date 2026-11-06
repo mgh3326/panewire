@@ -68,23 +68,25 @@ func relayQueuedClaudeCodex(screen string) bool {
 }
 
 // relayHarnessAdapters is the closed table of harnesses the relay can prove a
-// delivery on. The grok, omp and cmd entries have no captured screen to read a
-// composer or queue banner from, so they use the one rule that needs neither
-// (relayProofEchoAndWorking). That rule needs the pane idle or done before the
+// delivery on. The grok, omp and cmd entries have no captured queue banner, so
+// they use the one rule that needs none (relayProofEchoAndWorking). That rule needs the pane idle or done before the
 // send, so a message injected into a working grok, omp or cmd pane is typed but
 // stays unconfirmed until a live capture gives a transcript rule.
 //
 // cmd is also the one pane-level harness: herdr answers agent get and agent
 // read for it but refuses agent prompt and agent send-keys with
 // agent_not_ready, so its text goes through pane send-text and its submit
-// through pane send-keys (hk 3330).
+// through pane send-keys (hk 3330). cmd draws claude's two-divider composer
+// with the same ❯ prompt, so it takes claude's composer rule: a draft or its
+// own typed text is found there, and the relay never types over a draft or
+// submits a text it cannot see.
 var relayHarnessAdapters = map[string]relayHarnessAdapter{
 	"claude": {composerEdge: isClaudeDividerLine, composerGlyph: "❯", queued: relayQueuedClaudeCodex, proof: relayProofTranscriptEcho, observe: true},
 	"codex":  {queued: relayQueuedClaudeCodex, proof: relayProofTranscriptEcho, observe: true},
 	"devin":  {composerEdge: isDevinDividerLine, composerGlyph: "❭", queued: devinQueued, proof: relayProofTranscriptEcho, maxAttempts: relayDevinMaxInjectAttempts},
 	"grok":   {proof: relayProofEchoAndWorking, observe: true},
 	"omp":    {proof: relayProofEchoAndWorking, observe: true},
-	"cmd":    {proof: relayProofEchoAndWorking, observe: true, paneTransport: true},
+	"cmd":    {composerEdge: isClaudeDividerLine, composerGlyph: "❯", proof: relayProofEchoAndWorking, observe: true, paneTransport: true},
 }
 
 // relayAdapterFor looks a harness name up case-insensitively. An empty or

@@ -27,7 +27,7 @@ type t3330CmdPane struct {
 func t3330InstallPaneFor(t *testing.T, preStatus, postStatus, typed string, submitted bool) *t3330CmdPane {
 	t.Helper()
 	dir := t.TempDir()
-	idle := strings.Join([]string{t3330CmdDivider, "❯ Ask your question...", t3330CmdDivider}, "\n")
+	idle := strings.Join([]string{t3330CmdDivider, "❯", t3330CmdDivider}, "\n")
 	echo := strings.Join([]string{"❯ " + typed, "done", t3330CmdDivider, "❯", t3330CmdDivider}, "\n")
 	post := idle
 	if submitted {

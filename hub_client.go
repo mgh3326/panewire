@@ -718,13 +718,29 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		// paste chip is unowned and never earns a keypress.
 		return relayVerifyOutcome(ctx, pane, harness, text, "", "presend:", presendQueued, presend)
 	}
+	adapter, known := relayAdapterFor(harness)
+	if known && adapter.paneTransport {
+		// cmd presses return right after the text, so a draft already in the
+		// composer would be submitted with the relay text appended to it. Type
+		// only into a composer that is located and empty; otherwise the pane
+		// is left as it is. The evidence has no "unproven:", so the one
+		// immediate retry never fires on it.
+		if state := relayComposerState(harness, presend.visible); state != "composer_empty" {
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "presend:" + state}
+		}
+	}
 	if err := relaySendText(ctx, pane, harness, text); err != nil {
-		// herdr may have typed part of the text before failing; the next
-		// attempt's presend check decides whether a retry would duplicate
-		// it.
+		if known && adapter.paneTransport {
+			// herdr may have typed part of the text before failing, and a
+			// re-type on top of it would submit both. The verdict is final:
+			// relayRetriesOnce does not retry it.
+			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "send_text_failed"}
+		}
+		// herdr rejected the agent prompt; the next attempt's presend check
+		// decides whether a retry would duplicate anything it typed.
 		return relayInjectResult{Outcome: relayInjectRetryable, Harness: harness, Evidence: "prompt_failed"}
 	}
-	if adapter, ok := relayAdapterFor(harness); ok && adapter.paneTransport {
+	if known && adapter.paneTransport {
 		// The pane transport is the spawn path's pair, not one call: pane
 		// send-text only types, so the submit is its own keypress. A failing
 		// return leaves the text typed but unsubmitted, which is
@@ -734,7 +750,6 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		}
 	}
 	result := relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, relayReadPane(ctx, pane, harness).withPresend(presend))
-	adapter, known := relayAdapterFor(harness)
 	if !known || !adapter.observe || !strings.HasPrefix(result.Evidence, "unproven:") || len(relayNoncesIn(text)) == 0 {
 		return result
 	}

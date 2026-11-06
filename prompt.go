@@ -701,10 +701,9 @@ func pollSubmission(ctx context.Context, c *HerdrClient, p paneIdentity, body st
 }
 
 // promptComposerReturnSafe is relayComposerReturnSafe for the direct prompt
-// path. Its only difference is cmd: cmd draws claude's composer (see
-// promptComposer), so the prompt can locate it and decide the same way, while
-// the relay keeps cmd composer-less because its transport types and presses
-// return as one pair and a second keypress would submit twice (hk 3330).
+// path. Its only difference is cmd: the prompt locates cmd's composer with
+// promptComposer, which also requires the prompt glyph on the first composer
+// line (hk 3330). The relay locates it with the adapter's composerEdge.
 func promptComposerReturnSafe(harness, screen, text, before string) (bool, string) {
 	if strings.EqualFold(harness, "cmd") {
 		return promptCmdComposerReturnSafe(screen, text, before)
