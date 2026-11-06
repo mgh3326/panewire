@@ -258,7 +258,7 @@ func simPoolView(p simPool, now time.Time) (PoolView, time.Time, error) {
 	}
 	v.pace(p.UsedPct, p.Projected, p.Window, left, now, reset)
 	if p.CreditLeftPct != nil {
-		v.Credit = &CreditBalance{LeftPct: *p.CreditLeftPct}
+		v.Credit = &CreditBalance{LeftPct: *p.CreditLeftPct, ExpiresAt: reset}
 	}
 	return v, reset, nil
 }
@@ -400,6 +400,9 @@ func (a *App) simulate(ctx context.Context, args []string) error {
 	var policy PoolPolicy
 	if *policyFile != "" {
 		policy, e = LoadPoolPolicy(*policyFile)
+		if e == nil && policy.CreditFinalDays != nil {
+			a.warn("credit_final_days is deprecated and has no effect")
+		}
 	} else {
 		policy, e = a.poolPolicy()
 	}
@@ -474,7 +477,7 @@ func (a *App) simulate(ctx context.Context, args []string) error {
 			c.risk, c.unused = policy.wasteRisk(row, free, v, true)
 			c.paced = policy.paced(row, free, c.risk, v)
 			if policy.isCredit(row.Pool) || v.Class == "credit" {
-				c.creditPool, c.creditLeft = true, v.Credit != nil && v.Credit.LeftPct > 0
+				p.classify(c, v)
 			}
 			// A free rung is excluded only by an observed free limit, never by
 			// its shared pool's used or projected share.
@@ -492,7 +495,9 @@ func (a *App) simulate(ctx context.Context, args []string) error {
 			c.outcome = "dropped:quota_unknown"
 			continue
 		}
-		c.tier, c.tierName = n, tierName
+		if !c.risk || !c.creditPool {
+			c.tier, c.tierName = n, tierName
+		}
 		pending = append(pending, c)
 	}
 	orderSelCands(pending)

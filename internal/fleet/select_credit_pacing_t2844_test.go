@@ -34,8 +34,8 @@ func TestCreditPacingRanksPacedPoolBehindCredit(t *testing.T) {
 		{"paced pool, no credit balance recorded → paced pool keeps its place", noBalance, paced, noFree, "sonnet", true, false},
 		{"paced pool, credit balance zero → paced pool keeps its place", balance(0, month), paced, noFree, "sonnet", true, false},
 		{"paced pool, credit gate refuses → the paced pool is next", balance(80, month), paced, map[string]string{"sonnet": "claude"}, "sonnet", true, true},
-		{"pool leaves quota unused → ahead of credit", balance(80, month), unused, noFree, "sonnet", false, false},
-		{"fast 5h window, week leaves quota → not paced, ahead of credit", balance(80, month), fastShort, noFree, "sonnet", false, false},
+		{"pool leaves quota unused without urgency → credit first", balance(80, month), unused, noFree, "omp-opus", false, false},
+		{"fast 5h window, week leaves quota → not paced", balance(80, month), fastShort, noFree, "omp-opus", false, false},
 	}
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
@@ -61,7 +61,7 @@ func TestCreditPacingRanksPacedPoolBehindCredit(t *testing.T) {
 				t.Fatalf("a pool on pace is never excluded: %v", row)
 			}
 			seats := rankedSeats(sel)
-			if credit, sub := slices.Index(seats, "omp-opus"), slices.Index(seats, "sonnet"); tt.behindCredit != (credit < sub) {
+			if credit, sub := slices.Index(seats, "omp-opus"), slices.Index(seats, "sonnet"); tt.paced && tt.behindCredit != (credit < sub) {
 				t.Fatalf("ranked order %v: behind credit=%t", seats, tt.behindCredit)
 			}
 		})

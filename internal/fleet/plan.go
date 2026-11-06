@@ -312,8 +312,7 @@ func (a *App) printPlan(asJSON bool, out map[string]any, sel *selPlan, pp *place
 	}
 }
 
-// creditNote names why a credit pool ranks first: a balance is left in the
-// final window before its expiry.
+// creditNote describes a credit balance and its expiry.
 func creditNote(c *selCand) string {
 	if c.credit == nil {
 		return ""

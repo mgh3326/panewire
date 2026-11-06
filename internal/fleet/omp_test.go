@@ -359,7 +359,7 @@ func TestOMPSimulateCreditOrder(t *testing.T) {
 		wantSeat, wantTier string
 	}{
 		{"pool leaves quota unused", 90, ptrF(80), "sonnet", "ranked"},
-		{"pool on pace to use up, credit balance recorded", 100, ptrF(80), "omp-opus", "credit"},
+		{"pool on pace to use up, credit without expiry", 100, ptrF(80), "sonnet", "ranked"},
 		{"pool on pace to use up, no credit balance recorded", 100, nil, "sonnet", "ranked"},
 		{"pool on pace to use up, credit balance zero", 100, ptrF(0), "sonnet", "ranked"},
 	} {

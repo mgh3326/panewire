@@ -282,7 +282,7 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 			// A terminal signal without a routable owner lane can never be
 			// delivered — emitting it would only stamp an outbox row the hub's
 			// relayJobEventFrom drops unanswered.
-			if relayTerminalSignalKinds[kind] && !validReportRelayLaneName(event.ownerLane()) {
+			if relayTerminalSignalKinds[kind] && !validReportRelayLaneName(event.ownerLane()) && !(kind == "job.lost" && event.reason() == "quota_stop" && event.Payload.Pool != "") {
 				continue
 			}
 			reportPath := relaySignalReportPath(kind, event.reportPath())
@@ -309,10 +309,18 @@ func scanHubRelayEventsWithin(inboxRoot string, maxAge time.Duration) []hubScann
 				// and `panewire emit` substitutes the very same path.
 				reportPath = filepath.Join(dir, file.Name())
 			}
+			reason := event.reason()
+			if kind == "job.lost" && reason == "quota_stop" && event.Payload.Pool != "" {
+				reset := event.Payload.ResetAt
+				if reset == "" {
+					reset = eventTime.Add(5 * time.Minute).UTC().Format(time.RFC3339Nano)
+				}
+				reason += " pool=" + event.Payload.Pool + " reset_at=" + reset
+			}
 			// The event file name is the job event's durable identity: it is
 			// unique per emission, stable across node restarts, and shared by
 			// `panewire emit`, which derives the same value for its file.
-			events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Late: event.Late || event.Payload.Late, NotifyType: event.notifyType(), Cause: event.Cause, Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: event.reason(), Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name(), EventTime: eventTime})
+			events = append(events, hubScannedRelayEvent{DeliveryClass: event.DeliveryClass, Late: event.Late || event.Payload.Late, NotifyType: event.notifyType(), Cause: event.Cause, Kind: kind, HubActiveJob: HubActiveJob{JobID: entry.Name(), Epoch: epoch, AgentLabel: agentLabel, OwnerLane: ownerLane, Label: event.label(), Host: event.host(), ReportPath: reportPath, ReportLastLine: event.reportLastLine()}, Reason: reason, Question: event.question(), PR: event.pr(), Head: event.head(), PaneID: event.paneID(), EventID: file.Name(), EventTime: eventTime})
 		}
 	}
 	sort.Slice(events, func(i, j int) bool {
@@ -481,6 +489,8 @@ type hubInboxEvent struct {
 		ReportPath     string `json:"report_path"`
 		ReportLastLine string `json:"report_last_line"`
 		Reason         string `json:"reason"`
+		Pool           string `json:"pool"`
+		ResetAt        string `json:"reset_at"`
 		Question       string `json:"question"`
 		PR             string `json:"pr"`
 		Head           string `json:"head"`
