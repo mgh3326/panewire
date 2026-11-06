@@ -101,10 +101,10 @@ func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane, agent stri
 // (releaseUnworkedLanding): it marks the still-claimed hk job lost, then drops
 // the reservation. A crash between the two repeats harmlessly, because a lost
 // job already releases through the completed-or-lost path.
-func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, task, role string) (released bool, probe heldProbe) {
+func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, roleKey string) (released bool, probe heldProbe) {
 	probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, "")
 	if probe.state == heldPanePresent {
-		return h.releaseUnworkedLanding(ctx, app, holder, record, probe.row) && h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, task, role) == nil, probe
+		return h.releaseUnworkedLanding(ctx, app, holder, record, probe.row) && h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil, probe
 	}
 	if probe.state != heldPaneAbsent {
 		return false, probe
@@ -112,7 +112,7 @@ func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, 
 	if state, _ := record["state"].(string); state != "claimed" {
 		return false, heldProbe{reason: "hk_state_not_claimable"}
 	}
-	return h.markLostAndRelease(ctx, app, holder, task, role), probe
+	return h.markLostAndRelease(ctx, app, holder, roleKey), probe
 }
 
 // hkTerminalState reports whether hk never rewrites a job in state (hk
@@ -129,7 +129,7 @@ func hkTerminalState(state string) bool {
 // the caller read its state keeps its completed record. A refused write then
 // re-reads it: a record now completed or lost releases the role as the
 // terminal path does, anything else keeps the hold.
-func (h *HubServer) markLostAndRelease(ctx context.Context, app *fleet.App, holder hubSpawnTask, task, role string) bool {
+func (h *HubServer) markLostAndRelease(ctx context.Context, app *fleet.App, holder hubSpawnTask, roleKey string) bool {
 	if err := app.MarkJobLost(ctx, holder.Job); err != nil {
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		record, exists, readErr := app.ExistingJob(readCtx, holder.Job)
@@ -138,7 +138,7 @@ func (h *HubServer) markLostAndRelease(ctx context.Context, app *fleet.App, hold
 			return false
 		}
 	}
-	return h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, task, role) == nil
+	return h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil
 }
 
 // releaseFinishedSpawnRole frees the role held by a succeeded operation whose
@@ -149,7 +149,7 @@ func (h *HubServer) markLostAndRelease(ctx context.Context, app *fleet.App, hold
 // idle pane is a reviewer that finished without completing, which stays held.
 // A listed pane with the holder's agent name under another id (a pane herdr
 // moved across workspaces) also keeps the hold.
-func (h *HubServer) releaseFinishedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, task, role string) (released bool, probe heldProbe) {
+func (h *HubServer) releaseFinishedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, roleKey string) (released bool, probe heldProbe) {
 	probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record))
 	if probe.state != heldPaneAbsent {
 		return false, probe
@@ -157,19 +157,19 @@ func (h *HubServer) releaseFinishedSpawnRole(ctx context.Context, app *fleet.App
 	if state, _ := record["state"].(string); state != "claimed" && state != "spawned" {
 		return false, heldProbe{reason: "hk_state_not_claimable"}
 	}
-	return h.markLostAndRelease(ctx, app, holder, task, role), probe
+	return h.markLostAndRelease(ctx, app, holder, roleKey), probe
 }
 
 // releaseRecordlessSpawnRole frees the role held by a succeeded operation whose
 // hk job has no record at all. The proof is releaseFinishedSpawnRole's: a node
 // that listed every pane and lacks both the recorded pane id and the request's
 // -l label. There is no record to mark lost, so it only drops the reservation.
-func (h *HubServer) releaseRecordlessSpawnRole(ctx context.Context, holder hubSpawnTask, task, role string) (released bool, probe heldProbe) {
+func (h *HubServer) releaseRecordlessSpawnRole(ctx context.Context, holder hubSpawnTask, roleKey string) (released bool, probe heldProbe) {
 	probe = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, nil))
 	if probe.state != heldPaneAbsent {
 		return false, probe
 	}
-	return h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, task, role) == nil, probe
+	return h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, roleKey) == nil, probe
 }
 
 // heldAgentName is the herdr agent name the holder's pane carries: the label hk
@@ -199,7 +199,7 @@ func (h *HubServer) supersedeRetryableHolders(ctx context.Context, app *fleet.Ap
 	}
 	for _, holder := range holders {
 		prior, err := fleet.ValidateSubmission(holder.Request)
-		if err != nil || prior.Task != spawn.Task || prior.Role != spawn.Role || holder.Request.RequestID == request.RequestID || holder.Job == spawn.Job {
+		if err != nil || prior.RoleKey() != spawn.RoleKey() || holder.Request.RequestID == request.RequestID || holder.Job == spawn.Job {
 			continue
 		}
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -254,6 +254,7 @@ func spawnRoleHeldBody(holder hubSpawnTask, pane heldPane, found bool) map[strin
 // record included). When it cannot, held carries the 409 body naming the
 // holder, and one INFO line says which branch held.
 func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, request fleet.Submission, spawn fleet.Spawn, owner string) (task hubSpawnTask, held map[string]string, err error) {
+	roleKey := spawn.RoleKey()
 	trace := heldTrace{branch: "owner_read_error", hk: "not_read"}
 	holder := hubSpawnTask{}
 	defer func() {
@@ -261,7 +262,7 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 			h.logHeldSpawnRole(spawn, request, holder, trace)
 		}
 	}()
-	priorID, priorJob, priorStatus, readErr := h.inbox.store.spawnRoleOwner(ctx, spawn.Task, spawn.Role)
+	priorID, priorJob, priorStatus, readErr := h.inbox.store.spawnRoleOwner(ctx, roleKey)
 	if readErr != nil {
 		return task, spawnRoleHeldBody(hubSpawnTask{}, heldPaneUnknown, false), errSpawnClaimed
 	}
@@ -291,24 +292,24 @@ func (h *HubServer) reclaimSpawnRole(ctx context.Context, app *fleet.App, reques
 				// worktree.prepare): no pane was recorded and the node never
 				// claimed the hk job, which it does only after a pane takes the
 				// brief. Nothing can still hold the role, so release it.
-				released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, spawn.Task, spawn.Role) == nil
+				released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, roleKey) == nil
 				trace.branch = "release_write_failed"
 			case priorStatus == "failed":
 				trace.branch = "failed_record_missing"
 			default:
-				released, probe = h.releaseRecordlessSpawnRole(ctx, holder, spawn.Task, spawn.Role)
+				released, probe = h.releaseRecordlessSpawnRole(ctx, holder, roleKey)
 				trace.branch = "recordless_pane_held"
 			}
 		case hkTerminalState(state):
 			trace.hk = state
-			released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, spawn.Task, spawn.Role) == nil
+			released = h.inbox.store.releaseCompletedSpawnRole(ctx, priorID, roleKey) == nil
 			trace.branch = "release_write_failed"
 		case priorStatus == "failed":
 			trace.hk, trace.branch = state, "failed_pane_held"
-			released, probe = h.releaseFailedSpawnRole(ctx, app, holder, record, spawn.Task, spawn.Role)
+			released, probe = h.releaseFailedSpawnRole(ctx, app, holder, record, roleKey)
 		default:
 			trace.hk, trace.branch = state, "succeeded_pane_held"
-			released, probe = h.releaseFinishedSpawnRole(ctx, app, holder, record, spawn.Task, spawn.Role)
+			released, probe = h.releaseFinishedSpawnRole(ctx, app, holder, record, roleKey)
 		}
 		trace.probe = probe
 		if released {
@@ -345,7 +346,7 @@ func (h *HubServer) logHeldSpawnRole(spawn fleet.Spawn, request fleet.Submission
 	}
 	h.logger.Info("hub held a spawn role reservation",
 		"branch", trace.branch,
-		"role_key", spawn.Task+":"+spawn.Role,
+		"role_key", spawn.RoleKey(),
 		"request", request.RequestID, "job", spawn.Job,
 		"holder_request", holder.Request.RequestID, "holder_job", holder.Job, "holder_status", holder.Status,
 		"holder_host", spawnHolderHost(holder), "holder_pane", pane,

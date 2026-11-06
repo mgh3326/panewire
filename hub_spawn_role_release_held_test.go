@@ -60,7 +60,7 @@ func TestRoleReleaseOfEscalatedHolder(t *testing.T) {
 			if result.status != http.StatusAccepted || len(jobs.writes()) != 0 {
 				t.Fatalf("status=%d body=%s writes=%v", result.status, result.body, jobs.writes())
 			}
-			if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
+			if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 				t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 			}
 			if lines := heldRoleLines(t, sink); len(lines) != 0 {
@@ -92,7 +92,7 @@ func TestRoleReleaseOfRecordlessHolder(t *testing.T) {
 		if result.status != http.StatusAccepted || len(jobs.writes()) != 0 {
 			t.Fatalf("status=%d body=%s writes=%v", result.status, result.body, jobs.writes())
 		}
-		if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
+		if owner, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42:worker"); err != nil || job != "test-job-r2" || owner == held.Request.RequestID {
 			t.Fatalf("reservation not moved: %s %s %v", owner, job, err)
 		}
 		if lines := heldRoleLines(t, sink); len(lines) != 0 {

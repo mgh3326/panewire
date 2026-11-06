@@ -36,6 +36,16 @@ Inherited children do not take the parent's direct task/role slot. Completed
 job IDs remain tombstones; a new direct task/role attempt requires evidence that
 the prior landed job completed or was lost.
 
+The reservation key is `<task>:<role>`, or `<task>:reviewer:p<N>` for a reviewer
+spawned with `--review-pass N` (N is 1..9; reviewer only; any other role, 0 or 10
+is a usage refusal). One helper builds it (`fleet.Spawn.RoleKey`), and the claim,
+resume, owner lookup, release, reclaim and retryable-holder supersede paths all
+use it, so the p1 and p2 reviewers of one task hold at once while a second p1 is
+refused with the same 409 as any held slot. panewire reads the pass only from
+the flag, never from a label. A reviewer without the flag keeps `<task>:reviewer`,
+and stored keys without a pass need no migration. The held-reservation log line
+prints the key as `role_key`. Worker and tester keys are unchanged.
+
 A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's
 node for its herdr panes (`agents.list`). Only a complete pane list that lacks

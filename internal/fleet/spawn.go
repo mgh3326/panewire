@@ -28,8 +28,12 @@ type Spawn struct {
 	requestedLocal                                                                                                                                                                         bool
 	CWD, Profile, Prompt, Workspace, Label, T, Job, Owner, Effort, Role, Lane, Parent, Task, ParentJob, Host, Report, ExecutionLane, OperatorRequest, RequestedBy, Purpose, ReportRelative string
 	OverrideReason, Containment, WaitTimeout, Urgency                                                                                                                                      string
-	Keep, DupOK, Bypass, DryRun, Wait, AllowEscalation                                                                                                                                     bool
-	Inherited, ParentFamily                                                                                                                                                                string
+	// ReviewPass is the explicit review pass ("1".."9") of a reviewer spawn. It
+	// only widens the hub reservation key (RoleKey); panewire never parses it out
+	// of a label.
+	ReviewPass                                         string `json:"review_pass,omitempty"`
+	Keep, DupOK, Bypass, DryRun, Wait, AllowEscalation bool
+	Inherited, ParentFamily                            string
 	// Tags lists the capability tags a host must carry and ExcludeHosts the
 	// hosts placement must not pick. Delegated marks a spawn delivered by
 	// another initiator. Sel carries the selection decision record; all four
@@ -107,6 +111,26 @@ func validateContainment(s Spawn) error {
 // are refused with: lead is no longer a seat panewire spawns.
 const retiredLeadSeatPointer = "the delegated lead seat is retired (--role builder, panewire lead): lead is an operator-opened session that works through subagents; see the rstack wake and robin-mode skills"
 
+var reviewPassPattern = regexp.MustCompile(`^[1-9]$`)
+
+// RoleKey is the hub's reservation key for a spawn bound to a task: one
+// holder per (task, role), and per review pass when --review-pass is set, so
+// the p1 and p2 reviewers of one task run together. Every reader and writer
+// of spawn_reservations.task_role builds the key here. Stored keys without a
+// pass stay "task:role".
+func (s Spawn) RoleKey() string {
+	return SpawnRoleKey(s.Task, s.Role, s.ReviewPass)
+}
+
+// SpawnRoleKey is RoleKey for a caller that holds the parts, not a Spawn.
+func SpawnRoleKey(task, role, pass string) string {
+	key := task + ":" + role
+	if pass != "" {
+		key += ":p" + pass
+	}
+	return key
+}
+
 func parseSpawn(args []string) (Spawn, error) {
 	s := Spawn{Role: "worker", Host: "auto"}
 	f := flags("spawn")
@@ -117,6 +141,7 @@ func parseSpawn(args []string) (Spawn, error) {
 		f.StringVar(p.v, p.k, *p.v, "")
 	}
 	f.StringVar(&s.Grade, "grade", "", "task grade (workers only)")
+	f.StringVar(&s.ReviewPass, "review-pass", "", "review pass 1..9 (reviewer only)")
 	f.StringVar(&s.Workspace, "workspace", "", "local herdr workspace")
 	f.BoolVar(&s.Keep, "keep", false, "")
 	f.BoolVar(&s.DupOK, "job-dup-ok", false, "")
@@ -132,6 +157,9 @@ func parseSpawn(args []string) (Spawn, error) {
 	}
 	if f.NArg() != 0 {
 		return s, fail(exitUsage, "unexpected spawn arguments")
+	}
+	if flagPassed(f, "review-pass") && (s.Role != "reviewer" || !reviewPassPattern.MatchString(s.ReviewPass)) {
+		return s, fail(exitUsage, "--review-pass N (1..9) is accepted only with --role reviewer")
 	}
 	if s.Job == "" {
 		s.Job = s.Label
