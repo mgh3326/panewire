@@ -469,6 +469,9 @@ func (a *App) capRejectedPlacements() {
 		if entry.Type().IsRegular() {
 			info, err := entry.Info()
 			if err != nil {
+				if os.IsNotExist(err) {
+					continue
+				}
 				a.warn("placement quarantine entry could not be inspected")
 				return
 			}
