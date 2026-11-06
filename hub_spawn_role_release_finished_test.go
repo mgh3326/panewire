@@ -63,6 +63,14 @@ func TestRoleReleaseAfterSucceededSpawn(t *testing.T) {
 		roleReplyPanes(t, node, nodeCommandRead(t, node), []nodeAgentRow{{PaneID: roleHeldPane, Cwd: "/work/project.test-job"}}, true)
 		keepsHold(t, hub, jobs, held, t14Result(t, response), "spawned")
 	})
+	t.Run("the holder's agent under another pane id keeps the hold", func(t *testing.T) {
+		// herdr renumbers a pane moved across workspaces; the live job must not be released.
+		hub, server, jobs, held := roleHolderHub(t, succeeded, "spawned", "succeeded")
+		node := t14Node(t, hub, server, true)
+		response := submit(server)
+		roleReplyPanes(t, node, nodeCommandRead(t, node), []nodeAgentRow{{PaneID: "w3:p1", Name: "test-job", Cwd: "/work/project.test-job"}}, true)
+		keepsHold(t, hub, jobs, held, t14Result(t, response), "spawned")
+	})
 	t.Run("panes_ok false keeps the hold", func(t *testing.T) {
 		hub, server, jobs, held := roleHolderHub(t, succeeded, "spawned", "succeeded")
 		node := t14Node(t, hub, server, true)
@@ -134,6 +142,19 @@ func TestRoleReleaseSupersedesRetryableHolder(t *testing.T) {
 		owner, _, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker")
 		if err != nil || owner != held.Request.RequestID {
 			t.Fatalf("replay did not resume its own reservation: %s %v", owner, err)
+		}
+	})
+	t.Run("a replay of the superseded request is refused while the new request holds the role", func(t *testing.T) {
+		hub, server, _, _ := roleHolderHub(t, retryable, "claimed", "retryable")
+		if result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, roleSecondRequest())); result.status != http.StatusAccepted {
+			t.Fatalf("status=%d body=%s", result.status, result.body)
+		}
+		result := t14Result(t, t14HTTPAsync(t, http.MethodPost, server.URL+"/v1/spawns", t14OperatorToken, durableSpawnRequest()))
+		if result.status != http.StatusConflict {
+			t.Fatalf("status=%d body=%s", result.status, result.body)
+		}
+		if _, job, _, err := hub.inbox.store.spawnRoleOwner(t.Context(), "42", "worker"); err != nil || job != "test-job-r2" {
+			t.Fatalf("role moved off the new request: %s %v", job, err)
 		}
 	})
 	t.Run("a record that is no longer claimed is not rewritten", func(t *testing.T) {

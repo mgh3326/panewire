@@ -64,9 +64,10 @@ with exit 74.
 A prior operation in `succeeded` whose hk job is still `claimed` or `spawned`
 (a job revoked and reaped by an older binary, or one that ended without writing
 its record, hk 3204) is checked the same way: only a complete pane list that
-lacks the recorded pane marks the hk job `lost` and releases the slot. A
-present pane, an unreadable pane list, an unreachable node or no recorded pane
-keeps the slot and the 409 body as before. A `retryable` operation holds no
+lacks the recorded pane, and lists no pane named like the holder's agent label
+(herdr renumbers a pane moved across workspaces), marks the hk job `lost` and
+releases the slot. A present pane, an unreadable pane list, an unreachable node
+or no recorded pane keeps the slot and the 409 body as before. A `retryable` operation holds no
 slot (its reservation is deleted when it ends), but its hk job stays `claimed`:
 a new submission for the same task and role under another job id marks that
 job `lost` once it holds the slot. A replay of the retryable request itself

@@ -29,8 +29,11 @@ const (
 
 // probeHeldPane asks machine's node for every pane herdr lists. Only a node
 // that answered with a complete pane list lacking the pane proves it absent;
-// anything else keeps the reservation. A present pane returns its row.
-func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane string) (heldPane, nodeAgentRow) {
+// anything else keeps the reservation. A present pane returns its row. A
+// non-empty agent name also counts as presence when any listed row carries it:
+// herdr gives a pane moved across workspaces a new id, so the id alone cannot
+// prove a live job gone.
+func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane, agent string) (heldPane, nodeAgentRow) {
 	if machine == "" || !nodeCommandPaneIDPattern.MatchString(pane) {
 		return heldPaneUnknown, nodeAgentRow{}
 	}
@@ -51,7 +54,7 @@ func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane string) (he
 		// status, so it is read last and wins.
 		found := nodeAgentRow{}
 		for _, row := range append(append([]nodeAgentRow(nil), list.Panes...), list.Agents...) {
-			if row.PaneID == pane {
+			if row.PaneID == pane || agent != "" && row.Name == agent {
 				found = row
 			}
 		}
@@ -70,7 +73,7 @@ func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane string) (he
 // the reservation. A crash between the two repeats harmlessly, because a lost
 // job already releases through the completed-or-lost path.
 func (h *HubServer) releaseFailedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, task, role string) (released bool, pane heldPane) {
-	pane, row := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane)
+	pane, row := h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, "")
 	if pane == heldPanePresent {
 		return h.releaseUnworkedLanding(ctx, app, holder, record, row) && h.inbox.store.releaseCompletedSpawnRole(ctx, holder.Request.RequestID, task, role) == nil, pane
 	}
@@ -99,8 +102,10 @@ func (h *HubServer) markLostAndRelease(ctx context.Context, app *fleet.App, hold
 // listed every pane and lacks the recorded one proves the job gone; a present
 // pane, an unknown pane state, or no recorded pane keeps the hold. A present
 // idle pane is a reviewer that finished without completing, which stays held.
+// A listed pane with the holder's agent name under another id (a pane herdr
+// moved across workspaces) also keeps the hold.
 func (h *HubServer) releaseFinishedSpawnRole(ctx context.Context, app *fleet.App, holder hubSpawnTask, record map[string]any, task, role string) (released bool, pane heldPane) {
-	pane, _ = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane)
+	pane, _ = h.probeHeldPane(ctx, spawnHolderHost(holder), holder.Outcome.Pane, heldAgentName(holder, record))
 	if pane != heldPaneAbsent {
 		return false, pane
 	}
@@ -108,6 +113,15 @@ func (h *HubServer) releaseFinishedSpawnRole(ctx context.Context, app *fleet.App
 		return false, heldPaneUnknown
 	}
 	return h.markLostAndRelease(ctx, app, holder, task, role), pane
+}
+
+// heldAgentName is the herdr agent name the holder's pane carries: the label hk
+// recorded at landing, else the request's -l label.
+func heldAgentName(holder hubSpawnTask, record map[string]any) string {
+	if label, _ := record["label"].(string); label != "" {
+		return label
+	}
+	return hubSpawnArg(holder.Request.Args, "-l")
 }
 
 // supersedeRetryableHolders marks lost the hk job of every retryable operation
