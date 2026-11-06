@@ -108,7 +108,7 @@ type fakeHK struct {
 	down    bool
 }
 
-var jobRecordFields = []string{"state", "role", "label", "family", "profile", "model", "pool", "owner_lane", "parent_lane", "parent_job", "pane_id", "worktree", "report_doc", "result"}
+var jobRecordFields = []string{"state", "role", "label", "family", "profile", "model", "harness", "effort", "pool", "owner_lane", "parent_lane", "parent_job", "pane_id", "worktree", "report_doc", "result"}
 
 func newFakeHK(t *testing.T) *fakeHK {
 	t.Helper()
@@ -353,7 +353,7 @@ func TestSpawnedRecordAllowlistOnly(t *testing.T) {
 			t.Fatalf("absolute path leaked in %s=%s", k, b)
 		}
 	}
-	for _, want := range []string{"role", "label", "family", "profile", "model", "pool", "owner_lane", "pane_id"} {
+	for _, want := range []string{"role", "label", "family", "profile", "model", "harness", "effort", "pool", "owner_lane", "pane_id"} {
 		if _, ok := rec[want]; !ok {
 			t.Fatalf("missing spawned field %s", want)
 		}
