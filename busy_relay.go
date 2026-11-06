@@ -243,6 +243,10 @@ type relayBusyManager struct {
 	mu     sync.Mutex
 	held   map[string][]relayHeld
 	waits  map[string]context.CancelFunc
+	// inflight is the event ids a release is delivering right now. A row stays
+	// in the store until its inject and proof are done, so another wake's
+	// snapshot would otherwise find it again and type it a second time.
+	inflight map[int64]struct{}
 	// lanePane is the newest route observation each inject directive carries:
 	// the hub re-resolves lanes.json for every relay, so the (lane, pane) an
 	// inject names is authoritative for its arrival instant. A held row whose
@@ -272,7 +276,7 @@ func (client *HubClient) relayBusyManager() *relayBusyManager {
 	client.busyRelayMu.Lock()
 	defer client.busyRelayMu.Unlock()
 	if client.busyRelay == nil {
-		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc), lanePane: make(map[string]string), dedupeInFlight: make(map[string]chan struct{})}
+		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc), inflight: make(map[int64]struct{}), lanePane: make(map[string]string), dedupeInFlight: make(map[string]chan struct{})}
 	}
 	return client.busyRelay
 }
@@ -699,7 +703,7 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 	// set happen under one lock, and only the delivered rows are removed from
 	// the current set: a row an offer holds meanwhile stays held and is armed.
 	manager.mu.Lock()
-	items, err := store.RelayHeldForPane(parent, pane)
+	items, err := manager.heldSnapshot(parent, store, pane)
 	if err != nil {
 		manager.mu.Unlock()
 		// A transient store error must not strand the held rows with no
@@ -728,11 +732,13 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 		// holds in the gap and deliver it to a working pane.
 		delete(manager.waits, pane)
 		delete(manager.held, pane)
+		manager.markInflight(items)
 		manager.mu.Unlock()
 		if relayWorkingReleaseGap != nil {
 			relayWorkingReleaseGap()
 		}
 		manager.deliver(parent, manager.filterDeliverableHeld(parent, items), expired)
+		manager.finishInflight(items)
 		manager.reconcileHeld(parent, pane)
 		manager.arm(context.Background(), pane)
 		return
@@ -755,11 +761,13 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 	// that were the wait this delivery runs on, its inject and its one retry
 	// would start from a canceled context and be reported unconfirmed.
 	delete(manager.waits, pane)
+	manager.markInflight(directives)
 	manager.mu.Unlock()
 	if relayWorkingReleaseGap != nil {
 		relayWorkingReleaseGap()
 	}
 	manager.deliver(parent, manager.filterDeliverableHeld(parent, directives), false)
+	manager.finishInflight(directives)
 	manager.reconcileHeld(parent, pane)
 	manager.arm(context.Background(), pane)
 }
@@ -804,23 +812,65 @@ func (manager *relayBusyManager) reconcileHeld(parent context.Context, pane stri
 	manager.held[pane] = rows
 }
 
+// heldSnapshot reads the rows held for a pane from the store, leaving out the
+// ones a release is delivering. The caller holds manager.mu.
+func (manager *relayBusyManager) heldSnapshot(parent context.Context, store *Store, pane string) ([]relayHeld, error) {
+	items, err := store.RelayHeldForPane(parent, pane)
+	if err != nil || len(manager.inflight) == 0 {
+		return items, err
+	}
+	kept := items[:0:0]
+	for _, item := range items {
+		if _, busy := manager.inflight[item.EventID]; !busy {
+			kept = append(kept, item)
+		}
+	}
+	return kept, nil
+}
+
+// markInflight and finishInflight bracket a delivery. markInflight needs
+// manager.mu; finishInflight takes it.
+func (manager *relayBusyManager) markInflight(items []relayHeld) {
+	for _, item := range items {
+		manager.inflight[item.EventID] = struct{}{}
+	}
+}
+
+func (manager *relayBusyManager) finishInflight(items []relayHeld) {
+	manager.mu.Lock()
+	for _, item := range items {
+		delete(manager.inflight, item.EventID)
+	}
+	manager.mu.Unlock()
+}
+
 func (manager *relayBusyManager) release(parent context.Context, pane string, expired bool) {
 	store := manager.client.relayStore()
 	if store == nil {
 		return
 	}
 	manager.mu.Lock()
-	items, err := store.RelayHeldForPane(parent, pane)
+	items, err := manager.heldSnapshot(parent, store, pane)
 	if err != nil || len(items) == 0 {
 		manager.mu.Unlock()
 		return
 	}
 	delete(manager.waits, pane)
 	delete(manager.held, pane)
+	manager.markInflight(items)
 	manager.mu.Unlock()
 	// The state transition is serialized above, but prompt itself must not hold
 	// the manager-wide map lock: another pane's read-loop work stays independent.
 	manager.deliver(parent, manager.filterDeliverableHeld(parent, items), expired)
+	manager.finishInflight(items)
+	// A retry inside deliver re-holds a row; a wake that came while it was in
+	// flight skipped it, so wait again for whatever is held now.
+	manager.mu.Lock()
+	rearm := len(manager.held[pane]) > 0
+	manager.mu.Unlock()
+	if rearm {
+		manager.arm(context.Background(), pane)
+	}
 }
 
 // filterDeliverableHeld is the fail-closed lease gate between a finished wait

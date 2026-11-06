@@ -1024,3 +1024,42 @@ func TestWorkingWakeDeliveryIsNotCanceledByAConcurrentArm_t3276(t *testing.T) {
 		t.Fatalf("events=%v, want the directive delivered and not unconfirmed", kinds)
 	}
 }
+
+// A row stays in the store until its inject and proof are done. A second wake
+// that comes while the first is delivering (an offer armed a replacement wait
+// that returns at once because the pane is already working) must not find the
+// row again and type it a second time.
+func TestWorkingWakeNeverDeliversARowInFlightTwice_t3276(t *testing.T) {
+	for _, withIdleRow := range []bool{false, true} {
+		name := "directive only"
+		if withIdleRow {
+			name = "directive beside an idle row"
+		}
+		t.Run(name, func(t *testing.T) {
+			rig := t3276Start(t)
+			directive := rig.send("ev-twice-"+name, "findings", "[mergewake] findings for the worker")
+			sc := t3276Harnesses()["codex-working"]
+			sc.preStatus, sc.postStatus = "blocked", "working"
+			pane := t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+			manager := rig.node.relayBusyManager()
+			if withIdleRow {
+				report := rig.send("ev-twice-report-"+name, "report", "[worker] progress")
+				manager.offer(t.Context(), t3276Message(report))
+			}
+			manager.offer(t.Context(), t3276Message(directive))
+
+			// While the first wake is delivering, a second one runs.
+			relayWorkingReleaseGap = func() {
+				relayWorkingReleaseGap = nil
+				manager.releaseWorking(t.Context(), "w1:pW", false)
+			}
+			t.Cleanup(func() { relayWorkingReleaseGap = nil })
+
+			manager.releaseWorking(t.Context(), "w1:pW", false)
+
+			if got := pane.calls(t, "prompt"); got != 1 {
+				t.Fatalf("prompts=%d, want the directive typed once", got)
+			}
+		})
+	}
+}
