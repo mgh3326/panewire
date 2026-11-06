@@ -233,9 +233,6 @@ func TestMissingLoginNeverCallsTheAPI(t *testing.T) {
 	}{
 		{"no credentials", map[string]string{}, quota.ErrKindCredentials},
 		{"no token", map[string]string{"/home/u/.claude/.credentials.json": `{"claudeAiOauth":{"expiresAt":1}}`}, quota.ErrKindCredentials},
-		{"expired", map[string]string{"/home/u/.claude/.credentials.json": credentialFile(secretToken, testNow.Add(-time.Hour))}, quota.ErrKindTokenExpired},
-		// Expiry is in milliseconds: half a second ago is expired, not valid.
-		{"expired within the second", map[string]string{"/home/u/.claude/.credentials.json": credentialFile(secretToken, testNow.Add(-500*time.Millisecond))}, quota.ErrKindTokenExpired},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := testConfig(t, doFunc(func(*http.Request) (*http.Response, error) {
@@ -246,6 +243,59 @@ func TestMissingLoginNeverCallsTheAPI(t *testing.T) {
 			_, err := Measure(t.Context(), cfg)
 			if quota.KindOf(err) != tt.kind || strings.Contains(err.Error(), secretToken) {
 				t.Fatalf("err = %v, want kind %s", err, tt.kind)
+			}
+		})
+	}
+}
+
+// An expired stored access token is not a lost login: only the claude CLI
+// refreshes it. The API is never called with it; the CLI fallback decides.
+func TestExpiredTokenMeasuresThroughTheCLI(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		expiresAt time.Time
+	}{
+		{"an hour ago", testNow.Add(-time.Hour)},
+		// Expiry is in milliseconds: half a second ago is expired, not valid.
+		{"within the second", testNow.Add(-500 * time.Millisecond)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := testConfig(t, doFunc(func(*http.Request) (*http.Response, error) {
+				t.Error("API called with a token known to be expired")
+				return nil, errors.New("unexpected")
+			}))
+			cfg.ReadFile = login{files: map[string]string{
+				"/home/u/.claude/.credentials.json": credentialFile(secretToken, tt.expiresAt),
+				"/home/u/.claude.json":              `{"oauthAccount":{"accountUuid":"00000000-0000-4000-8000-000000000001"}}`,
+			}}.read
+			calls := 0
+			cfg.RunCLI = func(context.Context, string, string, string) (string, error) {
+				calls++
+				return fixture(t, "claude_usage.txt"), nil
+			}
+			o, err := Measure(t.Context(), cfg)
+			if err != nil || calls != 1 || o.Source != quota.SourceCLI || len(o.Buckets) != 3 || o.AccountFP == "" {
+				t.Fatalf("calls=%d %+v err=%v", calls, o, err)
+			}
+		})
+	}
+}
+
+func TestExpiredTokenWithFailingCLIIsTokenExpired(t *testing.T) {
+	for name, run := range map[string]func(context.Context, string, string, string) (string, error){
+		"cli error":      func(context.Context, string, string, string) (string, error) { return "", errors.New("no claude") },
+		"unparsable out": func(context.Context, string, string, string) (string, error) { return "garbage", nil },
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := testConfig(t, doFunc(func(*http.Request) (*http.Response, error) {
+				t.Error("API called with a token known to be expired")
+				return nil, errors.New("unexpected")
+			}))
+			cfg.ReadFile = login{files: map[string]string{"/home/u/.claude/.credentials.json": credentialFile(secretToken, testNow.Add(-time.Hour))}}.read
+			cfg.RunCLI = run
+			_, err := Measure(t.Context(), cfg)
+			if quota.KindOf(err) != quota.ErrKindTokenExpired || strings.Contains(err.Error(), secretToken) {
+				t.Fatalf("err = %v, want kind %s", err, quota.ErrKindTokenExpired)
 			}
 		})
 	}
