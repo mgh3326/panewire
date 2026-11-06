@@ -161,12 +161,88 @@ func TestIsDigestBatchNamesStoredBatchesNotHeldOrOrdinaryEvents(t *testing.T) {
 		{"lane-a", "stored-batch", true},
 		{"lane-b", "stored-batch", false},
 		{"lane-a", "held-1", false},
-		{"lane-a", quietDigestBatchPrefix + "pruned-row", true},
+		{"lane-a", quietDigestBatchPrefix + "producer-chosen-id", false},
 		{"lane-a", "ev-unconfirmed", false},
 	} {
 		got, err := store.isDigestBatch(tc.lane, tc.id)
 		if err != nil || got != tc.want {
 			t.Errorf("isDigestBatch(%q, %q) = %v, %v; want %v", tc.lane, tc.id, got, err, tc.want)
 		}
+	}
+}
+
+// A late delivery the inbox recorded while the durable /delivered write failed
+// leaves the batch row marked and undelivered. The settled check retires it as
+// inbox-delivered; the receiver has the digest, so nothing escalates again.
+func TestUnconfirmedDigestTheInboxDeliveredIsRetiredAsInboxDelivered(t *testing.T) {
+	rig := unconfirmedDigestStart(t)
+	store, err := openLaneInboxStore(rig.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.recordDelivery(relayEventDedupeKey("lane.event", rig.event), rig.now); err != nil {
+		t.Fatal(err)
+	}
+	store.db.Close()
+	h, a := rig.restart(t)
+	h.flushInbox()
+	if len(a.relays) != 0 {
+		t.Fatalf("a digest the inbox shows delivered was injected: %q", (<-a.relays).Text)
+	}
+	if got := rig.fake.deliveredToFor(rig.batch); got != "hub/"+relayReplayRetiredPane+relayUnconfirmedInboxRetireReason {
+		t.Fatalf("batch row delivered_to = %q", got)
+	}
+}
+
+// With no inbox store open a row cannot be proven a batch and nothing could be
+// released, so it is not spent as one: it keeps the ordinary labelled replay,
+// and a later run with the store still finds the batch to retire and release.
+func TestUnconfirmedDigestWithNoInboxStoreIsNotSpentAsABatch(t *testing.T) {
+	rig := unconfirmedDigestStart(t)
+	h, _ := quietHub(t, "", "off", rig.hk, &rig.now)
+	if h.inbox != nil {
+		t.Fatal("the kill switch left an inbox store open")
+	}
+	record := digestRow(t, rig.fake, rig.batch)
+	if h.retireUnconfirmedDigest(record) {
+		t.Fatal("a row was treated as a batch with no inbox store")
+	}
+	if got := rig.fake.deliveredToFor(rig.batch); got != "" {
+		t.Fatalf("batch row was retired: %q", got)
+	}
+	h2, a := rig.restart(t)
+	if len(a.relays) != 0 || rig.fake.deliveredToFor(rig.batch) != "hub/"+relayReplayRetiredPane+relayDigestNotReplayedRetireReason {
+		t.Fatal("a later run with the store did not retire the batch")
+	}
+	h2.flushInbox()
+	if len(a.relays) != 1 {
+		t.Fatalf("items released by the later run were not escalated: %d", len(a.relays))
+	}
+}
+
+// A producer may name an ordinary event quiet-digest-...; only the batch table
+// makes a batch, so it keeps its one labelled replay (#1002).
+func TestUnconfirmedReplayOfProducerEventNamedLikeADigestIsStillReplayed(t *testing.T) {
+	fake, client, closeServer := newFakeHandoffkeep(t)
+	t.Cleanup(closeServer)
+	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
+	now := time.Now().UTC()
+	h, a := quietHub(t, path, "default", client, &now)
+	event := quietEvent(quietDigestBatchPrefix+"producer-chosen-id", "READY review")
+	event.NotifyType = "ready"
+	h.relayLaneEvent(event, a)
+	row := holdReceive(t, a).EventID
+	if !h.markRelayEventUnconfirmed(relayPending{eventID: row, kind: "lane.event", event: event}) {
+		t.Fatal("the unconfirmed marker was not written")
+	}
+	h.Close()
+	h2, a2 := quietHub(t, path, "default", client, &now)
+	h2.replayUndeliveredRelayEvents(context.Background())
+	h2.replayUndeliveredLaneEvents(context.Background())
+	if len(a2.relays) != 1 {
+		t.Fatalf("injections = %d, want the one labelled replay", len(a2.relays))
+	}
+	if got := fake.deliveredToFor(row); got != "hub/"+relayReplayRetiredPane+relayUnconfirmedRetireReason {
+		t.Fatalf("row delivered_to = %q", got)
 	}
 }

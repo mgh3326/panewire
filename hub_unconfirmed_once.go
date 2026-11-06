@@ -187,10 +187,10 @@ func (h *HubServer) unconfirmedMarkOrigins(ctx context.Context) (map[int64]bool,
 // rule is: no labelled copy is ever queued unless the durable retire for
 // that row has already succeeded.
 func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffkeepRelayEvent, source string) {
-	if h.retireUnconfirmedDigest(record) {
+	if h.retireUnconfirmedSettledInInbox(record) {
 		return
 	}
-	if h.retireUnconfirmedSettledInInbox(record) {
+	if h.retireUnconfirmedDigest(record) {
 		return
 	}
 	if h.replayInbox(record) {
@@ -304,26 +304,22 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 }
 
 // retireUnconfirmedDigest spends no replay on an inbox digest or escalation
-// batch: its count was true only when it was made, and it has no lane inbox
-// item the settled lookup could consult. The batch's still-unread items are
-// released before the row retires, so a crash between the two leaves at worst
-// a fresh escalation plus a retire the next restart repeats, never an item
-// that no batch will ever escalate. The next flush then escalates them through
-// the normal path with the current count. A failed lookup, release or retire
+// batch: its count was true only when it was made. It runs after the settled
+// check, which already retires a batch whose own inbox item the receiver has.
+// A row is a batch only when lane_inbox_batches names it for its lane; the
+// table is never pruned, and an event id alone proves nothing because a
+// producer may choose any id. With no inbox store the row cannot be told from
+// an ordinary event and cannot release its items, so it is left to the
+// ordinary labelled replay. The batch's still-unread items are released before
+// the row retires, so a crash between the two leaves at worst a fresh
+// escalation plus a retire the next restart repeats, never an item that no
+// batch will ever escalate. The next flush then escalates them through the
+// normal path with the current count. A failed lookup, release or retire
 // replays nothing and the next trigger tries again; chat rows are never
 // batches.
 func (h *HubServer) retireUnconfirmedDigest(record handoffkeepRelayEvent) bool {
-	if h.handoffkeep == nil || record.Kind != "lane.event" || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || chatRelayEventPattern.MatchString(record.EventID) {
+	if h.inbox == nil || h.handoffkeep == nil || record.Kind != "lane.event" || record.DeliveredAt != "" || strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) || chatRelayEventPattern.MatchString(record.EventID) {
 		return false
-	}
-	if h.inbox == nil {
-		// Without a store there is no batch table; the id prefix still names it
-		// and there is nothing to release.
-		if !strings.HasPrefix(record.EventID, quietDigestBatchPrefix) {
-			return false
-		}
-		h.retireRelayReplay(record, relayDigestNotReplayedRetireReason)
-		return true
 	}
 	isBatch, err := h.inbox.store.isDigestBatch(record.OwnerLane, record.EventID)
 	if err != nil {

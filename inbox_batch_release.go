@@ -3,14 +3,14 @@ package panewire
 import "strings"
 
 // quietDigestBatchPrefix starts the id makeBatches gives every digest and
-// escalation batch. It is the documented fallback for naming a batch when its
-// lane_inbox_batches row is gone; the table row is the structured origin.
+// escalation batch. Producers may choose any event id, so the prefix alone
+// never marks a row as a batch.
 const quietDigestBatchPrefix = "quiet-digest-"
 
 // isDigestBatch reports whether event id is a digest or escalation batch of
 // lane that the inbox store made (never a held batch, which carries a document
-// the receiver cannot rebuild from counts). The batch table is the structured
-// origin; the id prefix answers only when the table has no row for the id.
+// the receiver cannot rebuild from counts). lane_inbox_batches is the only
+// authority: retention prunes lane_inbox but never this table.
 func (s *laneInboxStore) isDigestBatch(lane, id string) (bool, error) {
 	if strings.HasPrefix(id, "held-") {
 		return false, nil
@@ -21,7 +21,7 @@ func (s *laneInboxStore) isDigestBatch(lane, id string) (bool, error) {
 	if err := s.db.QueryRowContext(ctx, s.q(`SELECT count(*) FROM lane_inbox_batches WHERE id=? AND lane=?`), id, lane).Scan(&n); err != nil {
 		return false, err
 	}
-	return n > 0 || strings.HasPrefix(id, quietDigestBatchPrefix), nil
+	return n > 0, nil
 }
 
 // releaseBatchClaims returns the items a sent batch still claims to the
