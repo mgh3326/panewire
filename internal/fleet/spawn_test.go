@@ -382,3 +382,28 @@ func TestTaskClaimMustConfirmAtomicBinding(t *testing.T) {
 		}
 	}
 }
+
+// A spawned pane carries its own hub lane, so `panewire inbox` run inside it
+// scopes to that lane without --lane.
+func TestSpawnPaneEnvironmentNamesItsLane(t *testing.T) {
+	a, s, f, _ := cmdFixture(t)
+	if e := a.Spawn(context.Background(), s); e != nil {
+		t.Fatal(e)
+	}
+	for _, c := range f.Calls {
+		if !strings.HasPrefix(strings.Join(c.Args, " "), "tab create") {
+			continue
+		}
+		var lanes []string
+		for i, arg := range c.Args {
+			if i > 0 && c.Args[i-1] == "--env" && strings.HasPrefix(arg, "PANEWIRE_LANE=") {
+				lanes = append(lanes, arg)
+			}
+		}
+		if len(lanes) != 1 || lanes[0] != "PANEWIRE_LANE="+s.Label {
+			t.Fatalf("pane env PANEWIRE_LANE = %v, want exactly PANEWIRE_LANE=%s", lanes, s.Label)
+		}
+		return
+	}
+	t.Fatal("no tab created")
+}
