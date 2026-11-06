@@ -13,6 +13,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/textbound"
 )
 
 // fleetSource is the production PlacementSource. Host connectivity and load
@@ -207,10 +209,11 @@ func (c *hkQuota) request(ctx context.Context, method, path string, body, out an
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		var er struct {
-			Code string `json:"error"`
+			Code   string `json:"error"`
+			Reason string `json:"reason"`
 		}
 		_ = json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&er)
-		return &BackendError{Status: resp.StatusCode, Code: er.Code}
+		return &BackendError{Status: resp.StatusCode, Code: er.Code, Reason: backendReason(er.Reason)}
 	}
 	if out != nil {
 		if e := json.NewDecoder(io.LimitReader(resp.Body, 16<<20)).Decode(out); e != nil {
@@ -220,10 +223,25 @@ func (c *hkQuota) request(ctx context.Context, method, path string, body, out an
 	return nil
 }
 
-// BackendError reports an HTTP failure without response details.
+// BackendError reports an HTTP failure without response details. Reason is
+// hk's store-authored refusal reason (the failing field or rule, hk #197),
+// bounded and flattened to one line; nothing else of the body is kept.
 type BackendError struct {
 	Status int
 	Code   string
+	Reason string
+}
+
+// backendReasonMaxBytes bounds the hk refusal reason a warning or a
+// quarantine sidecar may carry.
+const backendReasonMaxBytes = 200
+
+func backendReason(reason string) string {
+	reason = strings.Join(strings.Fields(reason), " ")
+	if len(reason) > backendReasonMaxBytes {
+		return textbound.PrefixWithin(reason, backendReasonMaxBytes) + "…"
+	}
+	return reason
 }
 
 func (e *BackendError) Error() string {
