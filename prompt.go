@@ -149,6 +149,10 @@ func Prompt(ctx context.Context, store *Store, client *HerdrClient, req PromptRe
 	if identityChanged(pane, sendPane) {
 		return recordFailureForRequestWithPane(ctx, store, id, req, promptHash, body, req.StorePromptBody, pane, pre.Revision, digest(pre.Text), "identity_changed", &codedError{ExitConditionInvalid, fmt.Errorf("target identity changed during preflight")})
 	}
+	// A directive's uptake mode follows the pane as it is now: a target that
+	// turned working since the first read cannot show an idle-to-working
+	// transition, so it is judged on submission evidence alone.
+	uptake = uptakeFor(req, sendPane)
 	if sendPane.Revision == 0 {
 		sendPane.Revision = pre.Revision
 	}

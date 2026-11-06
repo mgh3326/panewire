@@ -17,7 +17,7 @@ func TestHoldWhileWorkingNeverHoldsWorkerDirective_t3276(t *testing.T) {
 	}
 	holdNotice(t, h, a, "directive", "findings", "FINDINGS review complete")
 	d := holdReceive(t, a)
-	if d.Deliver != "now" {
-		t.Fatalf("worker directive injected with deliver=%q, want now", d.Deliver)
+	if d.Deliver != relayDeliverDirective {
+		t.Fatalf("worker directive injected with deliver=%q, want directive", d.Deliver)
 	}
 }

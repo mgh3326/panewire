@@ -34,6 +34,11 @@ const (
 	relayDevinMaxInjectAttempts = 2
 )
 
+// relayDeliverDirective is the delivery policy the hub gives a worker
+// directive. It is "now" except for a blocked pane, whose approval prompt the
+// text could answer (R27).
+const relayDeliverDirective = "directive"
+
 type relayCommandRunner func(context.Context, ...string) ([]byte, error)
 
 type relayDeliveryPolicy struct {
@@ -48,6 +53,11 @@ func parseRelayDeliveryPolicy(value string) (relayDeliveryPolicy, bool) {
 	}
 	if value == "now" {
 		return relayDeliveryPolicy{Name: "now"}, true
+	}
+	if value == relayDeliverDirective {
+		// A worker directive (hk 3276): typed at once while the pane is idle,
+		// done or working, and held only while it is blocked on a prompt.
+		return relayDeliveryPolicy{Name: relayDeliverDirective, MaxWait: defaultRelayMaxWait}, true
 	}
 	seconds, found := strings.CutPrefix(value, "max_wait=")
 	if !found {
@@ -424,7 +434,7 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 	output, err := runner(getContext, "agent", "get", message.Pane)
 	cancel()
 	status, parsed := parseRelayAgentStatus(output)
-	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" {
+	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" || (policy.Name == relayDeliverDirective && status != "blocked") {
 		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
@@ -945,7 +955,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 // the hub marked deliver=now: sent at once whatever the pane is doing.
 func relayGroupImmediate(group []relayHeld) bool {
 	for _, item := range group {
-		if item.DeliverPolicy != "now" || item.EventID == 0 || item.Lane == "" {
+		if (item.DeliverPolicy != "now" && item.DeliverPolicy != relayDeliverDirective) || item.EventID == 0 || item.Lane == "" {
 			return false
 		}
 	}
@@ -955,19 +965,19 @@ func relayGroupImmediate(group []relayHeld) bool {
 // relayRetriesOnce reports whether an immediate delivery's first attempt is
 // worth one more send: herdr rejected it, or herdr took it and nothing showed
 // it landed. A verdict that says the text may already be in the pane for any
-// other reason (a composer that holds a foreign draft, a changed harness, an
-// unreadable pane, a harness with no adapter) is final.
+// other reason (a composer that holds a foreign draft, a changed harness) is
+// final.
 func relayRetriesOnce(result relayInjectResult) bool {
 	switch result.Outcome {
 	case relayInjectRetryable:
 		return true
 	case relayInjectMaybeInPane:
-		// "unproven:..." is the claude/codex/grok/omp reads showing nothing;
-		// "postsend:...:none" is devin's.
-		switch {
-		case result.Evidence == "unproven:no_adapter", result.Evidence == "unproven:read_failed":
-			return false
-		case strings.HasPrefix(result.Evidence, "unproven:"):
+		// "unproven:..." (also behind a "presend:" prefix) is the reads
+		// showing nothing: no adapter, an unreadable pane, an empty or
+		// unlocated composer. The scope contract is one retry for all of them;
+		// the second inject's own presend check still refuses a pending
+		// composer or a changed harness. "postsend:...:none" is devin's.
+		if strings.Contains(result.Evidence, "unproven:") {
 			return true
 		}
 		return strings.HasPrefix(result.Evidence, "postsend:") && strings.HasSuffix(result.Evidence, ":none")

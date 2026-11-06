@@ -776,7 +776,7 @@ func relayInjectDirective(kind string, event hubJobEventPayload, route reportRel
 		deliver = route.Deliver
 	}
 	if deliver == "" && isWorkerDirective(kind, event, route) {
-		deliver = "now"
+		deliver = relayDeliverDirective
 	}
 	if deliver == "" {
 		deliver = "idle"

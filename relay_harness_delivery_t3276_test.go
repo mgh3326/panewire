@@ -340,8 +340,8 @@ func TestHarnessDeliveryRecordsProofSignal_t3276(t *testing.T) {
 			t.Run(name+"/"+notify, func(t *testing.T) {
 				rig := t3276Start(t)
 				directive := rig.send("ev-"+name+"-"+notify, notify, "[mergewake] "+notify+" for the worker: fix the failing check")
-				if directive.Deliver != "now" {
-					t.Fatalf("a %s for a worker lane carries deliver=%q, want now: it is never held for a quieter pane", notify, directive.Deliver)
+				if directive.Deliver != relayDeliverDirective {
+					t.Fatalf("a %s for a worker lane carries deliver=%q, want directive: it is never held for a quieter pane", notify, directive.Deliver)
 				}
 				pane := t3276InstallPane(t, sc, t3276TypedFor(directive), true)
 
@@ -508,7 +508,7 @@ func TestOnlyWorkerDirectivesSkipTheBusyHold_t3276(t *testing.T) {
 	}{
 		{"report to a worker lane", t3276Worker, "report", "idle"},
 		{"findings to a lane with no parent", t3276Lone, "findings", "idle"},
-		{"order to a worker lane", t3276Worker, "order", "now"},
+		{"order to a worker lane", t3276Worker, "order", relayDeliverDirective},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			rig := t3276Start(t)
@@ -568,5 +568,54 @@ func TestEscalationSkipsIdleWakeAndLostEscalations_t3276(t *testing.T) {
 				t.Fatalf("escalated a row that must not escalate: %+v", got)
 			}
 		})
+	}
+}
+
+// A worker directive is typed into a working pane at once, but a blocked pane
+// is waiting on a prompt (an approval) the text could answer, so R27's hold
+// still applies to it: nothing is typed until the pane is released.
+func TestWorkerDirectiveIsHeldWhileBlocked_t3276(t *testing.T) {
+	rig := t3276Start(t)
+	directive := rig.send("ev-blocked", "findings", "[mergewake] findings for the worker")
+	sc := t3276Harnesses()["codex-working"]
+	sc.preStatus, sc.postStatus = "blocked", "blocked"
+	pane := t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+
+	rig.node.relayBusyManager().offer(t.Context(), t3276Message(directive))
+
+	if got := pane.calls(t, "prompt"); got != 0 {
+		t.Fatalf("a blocked pane was typed into %d times", got)
+	}
+	if kinds, _ := rig.drainEvents(); t3276Count(kinds, "relay.held") != 1 {
+		t.Fatalf("events=%v, want the directive held while the pane is blocked", kinds)
+	}
+}
+
+// One retry covers every unconfirmed outcome that does not say the text sits
+// in a foreign or changed composer: a harness with no adapter, an unreadable
+// pane and the reads showing nothing all retry once and then escalate once.
+func TestDirectiveRetriesOnceWhenProofIsUndecidable_t3276(t *testing.T) {
+	for _, evidence := range []string{"unproven:no_adapter", "unproven:read_failed", "presend:unproven:read_failed", "unproven:composer_unlocated", "postsend:visible+recent-unwrapped:none"} {
+		if !relayRetriesOnce(relayInjectResult{Outcome: relayInjectMaybeInPane, Evidence: evidence}) {
+			t.Errorf("evidence %q: want one retry", evidence)
+		}
+	}
+	for _, evidence := range []string{"composer_foreign", "presend:composer_residue", "harness_changed"} {
+		if relayRetriesOnce(relayInjectResult{Outcome: relayInjectMaybeInPane, Evidence: evidence}) {
+			t.Errorf("evidence %q: want no retry", evidence)
+		}
+	}
+
+	rig := t3276Start(t)
+	directive := rig.send("ev-no-adapter", "findings", "[mergewake] findings for the worker")
+	sc := t3276Harnesses()["codex-working"]
+	sc.harness = "some-future-harness"
+	pane := t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+	rig.node.relayBusyManager().offer(t.Context(), t3276Message(directive))
+	if got := pane.calls(t, "prompt"); got != 2 {
+		t.Fatalf("a harness with no adapter got %d prompts, want the directive and one retry", got)
+	}
+	if got := rig.escalations(); len(got) != 1 {
+		t.Fatalf("design lane got %d escalations, want 1", len(got))
 	}
 }
