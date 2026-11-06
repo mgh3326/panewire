@@ -483,3 +483,12 @@ job has `found: false`. Files must be regular files inside the job directory.
 `report` contains `present`, `bytes`, `sha256`, and `last_line`; the last line
 is limited to 256 UTF-8 bytes. The report body is never returned. `completed`
 is true when the local event ledger contains a `job.completed` event.
+`activity_events` counts the ledger's `events/` files that are not spawn
+bookkeeping: `job.claim`, `job.reclaim`, `job.placement`, `job.task_link`,
+`job.duplicate_override`, `job.spawn_retryable`, `job.spawn_aborted`,
+`job.record_failed`, `job.cleanup_pending`, `job.cleanup_refused`, `lease.*` and
+`quota_pool.*`. Any other kind, and any name that does not parse as
+`NNNNN-<kind>.json` (exactly five digits), counts, so a job that shows 0 has had nothing after its
+claim. A node that predates the field omits it; a caller reads that as unknown,
+never as 0. The hub uses it to release the task reservation of a spawn whose
+brief never landed ([hub-spawn-operations.md](hub-spawn-operations.md)).

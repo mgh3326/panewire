@@ -40,8 +40,24 @@ A prior operation in `failed` whose hk job is still `claimed` (pane cleanup
 unverified) is checked on a colliding submission: the hub asks the operation's
 node for its herdr panes (`agents.list`). Only a complete pane list that lacks
 the recorded pane marks the hk job `lost` and releases the task/role slot. A
-present pane, an unreachable node, a read error or a missing pane id keeps the
-slot (fail closed). The 409 body then carries `request_id`, `job`, `host`,
+present pane keeps the slot (fail closed) unless it provably never started work
+(hk 3179), which needs every one of these:
+
+- the operation failed in the `landing` stage (the brief's delivery was never
+  proven);
+- the pane's agent row is `idle` or `done`, and its cwd is the prepared checkout
+  of the request;
+- the spawn's deadline passed more than the grace ago (10 minutes; hub config
+  `UnworkedLandingGrace`);
+- the node's `job.result` finds the job, with no `job.completed`, no report and
+  `activity_events` of 0, so the ledger holds nothing after the spawner's own
+  claim records. A node that predates `activity_events` proves nothing;
+- `pane.capture` saves the screen, then `pane.close` closes the pane (it
+  re-reads the pane and refuses one that went to work).
+
+The hub then marks the hk job `lost`, logs `landing_failed_unworked`, and the new
+submission claims the slot. Any failed or unreadable check, an unreachable node,
+a read error or a missing pane id keeps the slot. The 409 body then carries `request_id`, `job`, `host`,
 `pane` and a `fix` (close that pane, then resubmit), and the CLI prints them
 with exit 74.
 
