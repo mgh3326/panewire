@@ -405,7 +405,13 @@ func (a *App) deliverPlacements(ctx context.Context) {
 		var be *BackendError
 		conflict := errors.As(e, &be) && be.Status == http.StatusConflict
 		if e != nil && !conflict {
-			a.warn("placement delivery failed; records remain spooled")
+			// Name hk's answer (status and error code, never the body) so a
+			// refusal such as a token scope can be told from an outage.
+			if errors.As(e, &be) {
+				a.warn("placement delivery failed: hk HTTP %d %s; records remain spooled", be.Status, be.Code)
+			} else {
+				a.warn("placement delivery failed: hk unreachable; records remain spooled")
+			}
 			break
 		}
 		if conflict {

@@ -930,6 +930,9 @@ func (h *HubServer) persistRelayEventRecord(ctx context.Context, kind string, ev
 // failure here is operator signal only; it must never stall the relay path.
 // It reports whether delivered_at was written (or there is no durable row).
 func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
+	// One INFO line per proven delivery, so a delivery can be confirmed from
+	// the hub journal without reading its database. Ids only, never text.
+	h.logger.Info("relay delivered", "route", "ack", "kind", pending.kind, "lane", pending.event.OwnerLane, "event_id", pending.event.EventID, "job", pending.event.JobID, "machine", pending.machine, "pane", pending.pane)
 	if h.inbox != nil && pending.kind != "" {
 		if err := h.inbox.store.surfaceInboxSummary(relayEventDedupeKey(pending.kind, pending.event), h.now().UTC()); err != nil {
 			h.logger.Warn("inbox summary surfacing was not recorded", "kind", pending.kind)
