@@ -182,6 +182,49 @@ func TestPRStatusHKChecksWithUnknownRequiredAreShown(t *testing.T) {
 	}
 }
 
+// The second real answer: mgh3326/mergewake#180, written by mergewake itself,
+// with required checks, a review pass that names its family, and no open threads.
+func TestPRStatusHKMergewakeWrittenFixtureRendersLikeTheMergewakeFixture(t *testing.T) {
+	read := func(name string) []byte {
+		contents, err := os.ReadFile(filepath.Join("testdata", "pr_status", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return contents
+	}
+	hk := newPRStatusHKServer(t, http.StatusOK, string(read("changes_one_mergewake_180.json")))
+	hkHalf := hkNodeClient(t, hk.URL, prStatusFixtureNow).readNodePRStatusHK(t.Context(), nodePRStatusArgs{Repo: "mgh3326/mergewake", PR: 180})
+	if hkHalf.Outcome != prStatusOK {
+		t.Fatalf("hk %+v", hkHalf)
+	}
+	var snapshot PRStatusSnapshot
+	if err := json.Unmarshal(read("mergewake_mergewake_180.json"), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	snapshot = boundPRStatusSnapshot(snapshot)
+	hkSnap := hkHalf.Snapshot
+	if hkSnap.State != "merged" || len(hkSnap.Checks) != 6 || len(hkSnap.Findings) != 0 || hkSnap.Threads.Blocking != 0 || *hkSnap.Threads.Unresolved != 0 || hkHalf.Unposted != 0 {
+		t.Fatalf("snapshot %+v", hkSnap)
+	}
+	if got := hkSnap.Review; !got.Done || len(got.Passes) != 1 || got.Passes[0] != (PRStatusPass{Pass: 1, Lens: "default", Family: "cognition"}) {
+		t.Fatalf("review %+v", got)
+	}
+	// Everything the mergewake snapshot says is what hk says, but for the merged state.
+	want, got := snapshot, *hkSnap
+	want.State, want.Source, want.ObservedAt, want.BaseFresh = "merged", "hk", got.ObservedAt, nil
+	want.Sections = got.Sections
+	wantJSON, _ := json.Marshal(want)
+	gotJSON, _ := json.Marshal(got)
+	if string(wantJSON) != string(gotJSON) {
+		t.Fatalf("hk snapshot differs from the mergewake one:\n hk %s\n mw %s", gotJSON, wantJSON)
+	}
+	var out bytes.Buffer
+	view := prStatusView{Source: prSourcePanewire, Repo: "mgh3326/mergewake", PR: 180, Node: &nodePRStatusResult{Mergewake: nodePRStatusMergewake{Outcome: prStatusNotAsked}, HK: hkHalf}}
+	if printPRStatus(&out, view, false, prStatusFixtureNow) != ExitOK || out.String() != "mgh3326/mergewake#180 merged head=625a7de blocking=0 checks=6/6 green observed=12m ago\n" {
+		t.Fatalf("status %q", out.String())
+	}
+}
+
 func TestPRStatusHKOpenPRSnapshot(t *testing.T) {
 	// A human thread blocks, a bot thread does not; a resolved one is not a finding.
 	body := hkFixtureWith(t, func(doc map[string]any) {

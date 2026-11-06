@@ -112,6 +112,7 @@ type hkChangeOne struct {
 		ReviewedHead string `json:"reviewed_head"`
 		Pass         int    `json:"pass"`
 		Lens         string `json:"lens"`
+		Family       string `json:"family"`
 	} `json:"reviews"`
 	Freshness map[string]*struct {
 		ObservedAt string `json:"observed_at"`
@@ -271,7 +272,7 @@ func prStatusSnapshotFromHK(one hkChangeOne) (PRStatusSnapshot, int) {
 	}
 	for _, review := range one.Reviews {
 		if review.ReviewedHead == change.HeadSHA {
-			snapshot.Review.Passes = append(snapshot.Review.Passes, PRStatusPass{Pass: review.Pass, Lens: review.Lens})
+			snapshot.Review.Passes = append(snapshot.Review.Passes, PRStatusPass{Pass: review.Pass, Lens: review.Lens, Family: review.Family})
 		}
 	}
 	snapshot.Review.Done = len(snapshot.Review.Passes) > 0

@@ -96,7 +96,7 @@ hk stores facts, not mergewake's verdict on them, so the node derives the fields
 | `checks` | the checks of the current head with `required: true` or no `required` yet (hk leaves it null for a check a webhook wrote, and only a mergewake pass sets it), so an unknown check is shown, not hidden; `green`, `red`, `pending`, `skipped` or `cancelled` from `conclusion`, else `state` |
 | `threads` | unresolved threads: `blocking` when a human or mergewake wrote it, `other` when a bot did |
 | `findings` | the unresolved threads, with `thread_id`, `path:line`, `severity`, `url`, `replied`, and the first line of the excerpt with HTML and emphasis markers removed |
-| `review` | the review passes recorded for the current head; `done` when there is one |
+| `review` | the review passes recorded for the current head (`pass`, `lens`, `family`); `done` when there is one |
 | `observed_at` | the oldest of the `state`, `checks`, `threads` and `gate` sections |
 
 The gate's `reasons` stay the authority on why a PR is blocked; the thread split
