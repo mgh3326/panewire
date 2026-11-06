@@ -207,8 +207,9 @@ type t3276Rig struct {
 	node   *HubClient
 	events chan hubClientEvent
 	// waits records the arguments of every `herdr agent wait` a hold started.
-	waitMu sync.Mutex
-	waits  []string
+	waitMu    sync.Mutex
+	waits     []string
+	waitExits int
 }
 
 func t3276Start(t *testing.T) *t3276Rig {
@@ -239,6 +240,9 @@ func t3276Start(t *testing.T) *t3276Rig {
 			rig.waits = append(rig.waits, strings.Join(args, " "))
 			rig.waitMu.Unlock()
 			<-ctx.Done()
+			rig.waitMu.Lock()
+			rig.waitExits++
+			rig.waitMu.Unlock()
 			return nil, ctx.Err()
 		}
 		return defaultRelayCommand(ctx, args...)
@@ -885,8 +889,69 @@ func TestWorkingWakeRearmsWhenStoreUnreadable_t3276(t *testing.T) {
 	waits := func() int { rig.waitMu.Lock(); defer rig.waitMu.Unlock(); return len(rig.waits) }
 	eventually(t, 2*time.Second, "the first wait", func() bool { return waits() == 1 })
 
+	// The wake runs on the context the manager registered for the pane.
+	waitCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	manager.mu.Lock()
+	manager.waits["w1:pW"] = cancel
+	manager.mu.Unlock()
+
 	rig.node.relayStore().Close() // the store becomes unreadable
-	manager.releaseWorking(t.Context(), "w1:pW", false)
+	manager.releaseWorking(waitCtx, "w1:pW", false)
 
 	eventually(t, 2*time.Second, "the wait armed again after the store error", func() bool { return waits() >= 2 })
+	time.Sleep(150 * time.Millisecond) // a window that proves the new wait is not exiting
+	rig.waitMu.Lock()
+	defer rig.waitMu.Unlock()
+	if rig.waitExits != 0 {
+		t.Fatalf("the re-armed wait exited at once: it was derived from the canceled wait context")
+	}
+}
+
+// releaseWorking runs on the context of the wait that just ended, and arm
+// cancels that wait as "the previous one". The next wait must not be derived
+// from it, or it exits at once and the idle rows held beside the directive
+// wait for nothing.
+func TestWorkingWakeRearmsOnAStableContext_t3276(t *testing.T) {
+	rig := t3276Start(t)
+	directive := rig.send("ev-ctx-directive", "findings", "[mergewake] findings for the worker")
+	report := rig.send("ev-ctx-report", "report", "[worker] progress")
+	sc := t3276Harnesses()["codex-working"]
+	sc.preStatus, sc.postStatus = "blocked", "working"
+	t3276InstallPane(t, sc, t3276TypedFor(directive), true)
+	manager := rig.node.relayBusyManager()
+	manager.offer(t.Context(), t3276Message(report))
+	manager.offer(t.Context(), t3276Message(directive))
+
+	// Holding the directive re-armed the pane and ended the first wait; let that
+	// settle so only exits caused by the wake are counted.
+	eventually(t, 2*time.Second, "the first wait to end", func() bool {
+		rig.waitMu.Lock()
+		defer rig.waitMu.Unlock()
+		return len(rig.waits) == 2 && rig.waitExits == 1
+	})
+
+	// The wake runs on the context the manager has registered for the pane.
+	waitCtx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	manager.mu.Lock()
+	manager.waits["w1:pW"] = cancel
+	manager.mu.Unlock()
+	rig.waitMu.Lock()
+	before := len(rig.waits)
+	rig.waitMu.Unlock()
+
+	manager.releaseWorking(waitCtx, "w1:pW", false)
+
+	eventually(t, 2*time.Second, "the next wait for the idle row", func() bool {
+		rig.waitMu.Lock()
+		defer rig.waitMu.Unlock()
+		return len(rig.waits) > before
+	})
+	time.Sleep(150 * time.Millisecond) // a window that proves the new wait is not exiting
+	rig.waitMu.Lock()
+	defer rig.waitMu.Unlock()
+	if rig.waitExits != 1 {
+		t.Fatalf("%d wait(s) in all exited, want only the first: the wake's re-armed wait was derived from the canceled one", rig.waitExits)
+	}
 }

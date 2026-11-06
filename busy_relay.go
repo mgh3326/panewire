@@ -686,7 +686,10 @@ func (manager *relayBusyManager) waitForPane(ctx context.Context, pane string, w
 
 // releaseWorking is the wake-up when a blocked pane turned working: only the
 // directives held on it are delivered. A row on the idle policy keeps waiting
-// for the pane to finish its turn.
+// for the pane to finish its turn. It runs on the wait's own context, which arm
+// cancels as "the previous wait", so every re-arm here starts from a stable
+// context (as retryOrDrop does): a wait derived from the canceled one would
+// exit at once and leave the idle rows held with no waiter.
 func (manager *relayBusyManager) releaseWorking(parent context.Context, pane string, expired bool) {
 	store := manager.client.relayStore()
 	if store == nil {
@@ -701,7 +704,7 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 		manager.mu.Unlock()
 		// A transient store error must not strand the held rows with no
 		// waiter: this wait is over, so wait again shortly.
-		time.AfterFunc(relayWorkingRetryDelay, func() { manager.arm(parent, pane) })
+		time.AfterFunc(relayWorkingRetryDelay, func() { manager.arm(context.Background(), pane) })
 		return
 	}
 	var directives []relayHeld
@@ -723,7 +726,7 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 	if len(directives) == 0 {
 		// An unexpected working wake with no directive: keep everything held.
 		manager.mu.Unlock()
-		manager.arm(parent, pane)
+		manager.arm(context.Background(), pane)
 		return
 	}
 	var remaining []relayHeld
@@ -736,7 +739,7 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 	manager.mu.Unlock()
 	manager.deliver(parent, manager.filterDeliverableHeld(parent, directives), false)
 	manager.reconcileHeld(parent, pane)
-	manager.arm(parent, pane)
+	manager.arm(context.Background(), pane)
 }
 
 // relayWorkingRetryDelay spaces the re-wait after a held snapshot could not be
