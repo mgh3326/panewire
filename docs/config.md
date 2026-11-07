@@ -520,16 +520,21 @@ first (see below), then other WASTE subscription pools, then free pool/model
 sets, then ranked subscription pools, then credit pools without a usable expiry. Expiring credit joins the waste-risk ordering by dollars at risk per hour until expiry (below); an entry without recorded dollars keeps the percentage rule. Inside a tier the lowest catalog grade that satisfies the task wins,
 then the pool with the higher waste urgency — the unused projected share
 (100 − projected) per hour until its longest account window's reset (7d,
-monthly; sub-daily windows such as a 5h rate window never rank a pool, they
-stay admission gates only). A pool whose longest window's reset can be paced
-always ranks ahead of one whose cannot; unpaceable pools keep the lower
-projected use at reset (the used percentage when it cannot be paced yet) —
+monthly; sub-daily windows such as a 5h rate window never rank an account's
+pool, they stay admission gates only). A pool whose longest window's reset can
+be paced always ranks ahead of one whose cannot; unpaceable pools keep the
+lower projected use at reset (the used percentage when it cannot be paced yet) —
 then the smaller effort, then the catalog score. A pool whose reading has no
-account window (agy publishes only group windows) ranks on its group windows:
-an agy rung ranks and is blocked on the windows of the group it draws from
-(`gemini` or `3p`, from the catalog row's `group` or its model id), so one
-exhausted group blocks only its own rungs and a rung with no group is blocked by
-the strictest group.
+account window (agy publishes only group windows) is paced, ranked and put at
+waste risk on the group the rung draws from: `gemini` or `3p`, from the catalog
+row's `group` or its model id. That group's longest window is used exactly as an
+account window is, even when it is sub-daily — the gemini group publishes only a
+5h window, and that window's reset is the one point where the rest of it is
+lost. So one exhausted group blocks only its own rungs, a group whose window
+projects unused quota at reset puts its rungs at waste risk, and a rung with no
+group keeps the conservative rule: it is blocked and paced on the strictest
+group (highest used share, then highest projection). The selection record names
+the group as `waste_group`.
 
 The pool-order policy is version `2`. A version `1` file supplied through
 `[local].pool_policy`, `PANEWIRE_POOL_POLICY`, or `simulate --policy` is refused
@@ -664,8 +669,10 @@ per candidate, `waste_risk` (`true`/`false`) on every candidate and
 paced,
 `waste_urgency`, `reset_hours` and `waste_order` (`reset` or
 `projected_fallback`) per ranked candidate,
-and on `chosen` its `tier`, `grade`, `waste_risk`, `projected_pct`,
-`waste_urgency` and a one-line `why`;
+`waste_group` (`gemini` or `3p`) on a candidate of a pool that publishes only
+group windows,
+and on `chosen` its `tier`, `grade`, `waste_risk`, `waste_group`,
+`projected_pct`, `waste_urgency` and a one-line `why`;
 `--dry-run` prints `urgency=<v> source=<s> tiers=<a>><b>...` before the full
 record.
 

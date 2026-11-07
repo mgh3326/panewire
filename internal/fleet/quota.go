@@ -90,10 +90,17 @@ type PoolView struct {
 	// manual store records none.
 	Credit *CreditBalance
 	// Groups is the view of each metering group of a reading that has only
-	// group-scoped windows (agy), by group name. The fields above then rank on
-	// the strictest group; a rung that maps to a group ranks on its own group's
-	// view instead (forRung).
+	// group-scoped windows (agy), by group name. Each group view ranks on that
+	// group's longest window even when it is sub-daily, since the group has no
+	// longer one (hk 3415): gemini's 5h window paces and can be wasted. The
+	// fields above then carry the strictest group's view whole, so a rung that
+	// maps to no group is blocked and paced on the same group. A rung that maps
+	// to a group ranks on its own group's view instead (forRung).
 	Groups map[string]PoolView
+	// Group names the metering group this view is: a group view's own name, or
+	// the strictest group's name on the account view of a group-only reading.
+	// Empty for an account-scoped reading and for a pool view built elsewhere.
+	Group string
 }
 
 // forRung is the view a catalog rung ranks and is blocked on. A rung that maps
