@@ -26,8 +26,10 @@ const (
 	// send that may already be in the pane and is never re-injected.
 	relayDroppedRetriesExhausted = "inject_failed_max_attempts"
 	relayDroppedMaybeInPane      = "maybe_in_pane"
-	// relayDroppedWorkingExpired ends a directive held for a working pane that
-	// never turned idle within max_wait (hk 3370). Nothing was typed.
+	// relayDroppedWorkingExpired ends a row held for a working cmd pane that
+	// never turned idle within relay.cmd_hold_max (hk 3370, hk 3411). Nothing
+	// was typed; the next idle wake re-delivers it once
+	// (hub_relay_idle_redelivery.go).
 	relayDroppedWorkingExpired = "working_wait_expired"
 )
 

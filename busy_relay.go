@@ -917,8 +917,10 @@ func (manager *relayBusyManager) release(parent context.Context, pane string, ex
 // The same read names the harness, which the caller needs to decide how the
 // kept rows are typed (deliverReleased). A harness that cannot prove text typed
 // into a working pane (cmd) gets nothing typed while that pane is working, on
-// any policy (hk 3370, hk 3384): past the wait the row is dropped and told as
-// working_wait_expired, before it the row simply stays held.
+// any policy (hk 3370, hk 3384). Before the wait runs out the row simply stays
+// held; past it the row keeps waiting while its job is live (hk 3411,
+// keepWorkingCmdHold) and is dropped and told as working_wait_expired only
+// past the relay.cmd_hold_max ceiling.
 func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, items []relayHeld, expired bool) (keep []relayHeld, harness string) {
 	var survivors []relayHeld
 	for _, item := range items {
@@ -981,8 +983,13 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 			// and this harness cannot prove text typed into a working pane —
 			// whatever the row's policy. Typed anyway it sits unsent in the
 			// composer (or, for a directive, is typed twice), so nothing is
-			// typed: the hub tells the design lane once, and the durable row
-			// stays undelivered for a replay.
+			// typed. hk 3411: while its job is live the row has no working-wait
+			// expiry and keeps waiting for idle or done.
+			if manager.keepWorkingCmdHold(parent, item) {
+				continue
+			}
+			// Past relay.cmd_hold_max the hub tells the design lane once, and
+			// the durable row stays undelivered for a replay.
 			manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayDroppedWorkingExpired, OriginalEventID: item.EventID})
 			manager.expireHeldLease(parent, item, relayDroppedWorkingExpired)
 			continue

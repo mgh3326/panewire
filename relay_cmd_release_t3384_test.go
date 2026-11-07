@@ -116,11 +116,14 @@ func t3384HeldRows(t *testing.T, rig *t3276Rig) []relayHeld {
 // Acceptance (a): the wait runs out on a working cmd pane whose rows are held
 // under the idle and the max_wait=60 policy. Nothing is typed; each row is told
 // as working_wait_expired and dropped. Both wakes an expired wait can take are
-// covered: the wait reporting working (the incident) and a plain expiry.
+// covered: the wait reporting working (the incident) and a plain expiry. Since
+// hk 3411 a working cmd hold ends only at the relay.cmd_hold_max ceiling, which
+// this test sets already passed.
 func TestCmdExpiredHoldOfAnyPolicyNotTypedIntoWorkingPane_t3384(t *testing.T) {
 	for _, wake := range []string{"working", "expiry"} {
 		t.Run(wake, func(t *testing.T) {
 			rig := t3276Start(t)
+			rig.node.relayControl.cmdHoldMax = time.Nanosecond
 			pane := t3384Install(t, "cmd", "working")
 			held := t3384Hold(t, rig, "idle", "max_wait=60")
 			manager := rig.node.relayBusyManager()

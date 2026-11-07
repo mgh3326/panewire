@@ -1419,6 +1419,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				return
 			}
 			agent.queueIdleWakeRoute(h.idleWakeRoute(machineID, request))
+			go h.redeliverWorkingExpiredOnIdle(machineID, request)
 		}
 		if message.Kind == "relay.held" {
 			held, valid := decodeRelayHeldPayload(message.Payload)
@@ -1512,6 +1513,7 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 			return
 		}
 		h.consumeRelayPending(key)
+		h.rememberWorkingExpired(pending, ack)
 		// Logging it keeps a dropped-ack diagnosis greppable.
 		h.logger.Warn("relay delivery unconfirmed", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "event_id", pending.eventID, "reason", ack.Reason)
 		h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: received})

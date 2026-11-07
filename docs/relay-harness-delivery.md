@@ -49,7 +49,7 @@ report, has no adapter and no delivery proof.
 | devin | nonce in the transcript, or devin's own queue banner (`nonce_echo`, `devin_queue_banner`) | no |
 | grok | nonce on screen and herdr reports idle/done before the send and `working` after it (`nonce_echo+status_working`) | observed 8 s |
 | omp | same as grok | observed 8 s |
-| cmd | same as grok, typed through `pane send-text` plus `pane send-keys return`; the composer is found with claude's rule (below); `workingUnprovable`: a directive waits for idle or done; nothing is typed into it while working; one row per inject | observed 8 s |
+| cmd | same as grok, typed through `pane send-text` plus `pane send-keys return`; the composer is found with claude's rule (below); `workingUnprovable`: a directive waits for idle or done; nothing is typed into it while working, and a held row waits for idle while the job is live; one row per inject | observed 8 s |
 | anything else | none | n/a |
 
 `workingUnprovable` marks a harness that cannot prove a directive typed into a
@@ -58,12 +58,31 @@ so a send into a working one stays unproven and the retry-once rule would type
 the directive a second time (hk 3370). For such a harness the directive policy
 holds while the pane is `working` as well as `blocked`, through the same R27
 hold, and types when the pane turns idle or done. The wait ends on idle or done
-only. Past `max_wait` a pane that is still working is not typed into, whatever
-the row's policy (`directive`, `idle` or `max_wait=N`; hk 3384): the row is
-dropped as `working_wait_expired`, the design lane is told once (see below),
-and the durable row stays undelivered for a replay. A release that finds such a
-pane working before `max_wait` types nothing and keeps the rows held. Every
-other harness is typed at once as before.
+only. A pane that is still working is never typed into, whatever the row's
+policy (`directive`, `idle` or `max_wait=N`; hk 3384), and while the job is live
+the row has no working-wait expiry (hk 3411): when `max_wait` runs out the row
+stays held, its deadline moves 30 minutes on, and the same wait is armed again;
+nothing new polls. The row is typed when the pane turns idle or done, one row
+per inject. It is dropped only when:
+
+- the pane is gone or holds another occupant, or the lane moved (the lease
+  gate: `pane_occupant_gone`, `pane_occupant_changed`, `lease_unverifiable`,
+  `lane_rerouted`);
+- the node's own record of the lane's job (`jobs/<lane>/events`) shows the job
+  ended (`job_ended`); a lane with no job record keeps its hold;
+- the `relay.cmd_hold_max` ceiling passes, counted from when the row was held
+  (default 24h; set it on the node with `PANEWIRE_RELAY_CMD_HOLD_MAX`, a Go
+  duration). Then the row is dropped as `working_wait_expired`, the design lane
+  is told once (see below), and the durable row stays undelivered.
+
+A row dropped as `working_wait_expired` was never typed. The hub remembers it
+when its unconfirmed mark lands and re-delivers it when the idle-wake observer
+next reports the pane idle: the oldest such row per idle wake, so one row per
+inject, as the row's one labelled replay, so at most once. Its text starts with
+`[held while this pane was working - first sent <KST time> - delivered now that
+it is idle]`. The memory is not durable; after a hub restart the startup replay
+gives every marked row its one labelled replay instead (#1002). Every other
+harness is typed at once as before.
 
 A pane-transport harness (cmd) is never sent a batch (hk 3384). Its return gate
 reads the composer after the text lands, and a batch wrapped over several
@@ -143,8 +162,8 @@ or `blocked` item stays unread until the worker runs `panewire inbox ack <id>`.
 
 ## Escalation
 
-When a node drops an event as `inject_failed_max_attempts` or
-`maybe_in_pane`, the hub tells the job's design lane once. A handoffkeep outage
+When a node drops an event as `inject_failed_max_attempts`,
+`maybe_in_pane` or `working_wait_expired`, the hub tells the job's design lane once. A handoffkeep outage
 while the hub reads the row or writes the escalation is retried (2 s, 10 s,
 1 min, 5 min) until the escalation is durable. The design lane is
 the parent of the worker lane's route (the lane `job.escalate` already reaches),
@@ -170,5 +189,8 @@ the way herdr does; `relay_cmd_composer_t3330_test.go` pins the send-text
 failure, the failed-return replay, the draft, dim-suggestion, draft-between and
 echo-lag cases; `relay_cmd_working_hold_t3370_test.go` pins the working hold,
 its expiry and the unchanged claude pane; `relay_cmd_release_t3384_test.go` pins
-the expiry of every policy, one row per inject and the unchanged claude batch; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
+the expiry of every policy, one row per inject and the unchanged claude batch;
+`relay_cmd_hold_until_idle_t3411_test.go` pins the hold past `max_wait`, the
+drops for a gone pane, an ended job and the ceiling, the unchanged claude pane,
+and the idle re-delivery of a `working_wait_expired` row; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
 transport.
