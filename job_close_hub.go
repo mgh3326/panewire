@@ -143,8 +143,14 @@ func requestHubJobClose(ctx context.Context, client inboxHTTPClient, req hubJobC
 		return hubJobCloseResult{}, err
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusUnauthorized {
+		return hubJobCloseResult{Failure: "hub_unauthorized"}, nil
+	}
 	var result hubJobCloseResult
 	if json.NewDecoder(io.LimitReader(response.Body, hubNodeCommandMaxBytes)).Decode(&result) != nil {
+		if response.StatusCode == http.StatusForbidden {
+			return hubJobCloseResult{Failure: "hub_forbidden"}, nil
+		}
 		return result, errors.New("invalid hub response")
 	}
 	if response.StatusCode != http.StatusOK && result.Refusal == "" && result.Failure == "" {
@@ -163,7 +169,7 @@ func (d *Daemon) handleJobClose(ctx context.Context, req *hubJobCloseRequest) (a
 	if d.cfg.Hub.Client == nil {
 		return nil, &codedError{ExitDaemonUnavailable, errors.New("close: daemon has no hub connection")}
 	}
-	result, err := requestHubJobClose(ctx, nodeHubClient{ctx: ctx, client: d.cfg.Hub.Client}, *req)
+	result, err := requestHubJobClose(ctx, nodeHubClient{ctx: ctx, client: d.cfg.Hub.Client, noFailover: true}, *req)
 	if err != nil {
 		return hubJobCloseResult{Failure: "close_unconfirmed"}, nil
 	}

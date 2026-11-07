@@ -29,7 +29,10 @@ service attempting it receives `override_requires_operator`.
 `node_offline` means the hub had no connected target to send to. A lost or
 failed connection after a request may have been sent returns
 `close_unconfirmed`: inspect the owning node's events before retrying, since
-the record may already exist. The command does not automatically retry.
+the record may already exist. The command does not automatically retry. The
+daemon sends a close to the first configured hub endpoint only; it does not
+fail over an uncertain write. An HTTP authentication rejection is reported as
+`hub_unauthorized` or `hub_forbidden`.
 
 `--lane` must match the newest claim's `owner_lane` byte for byte. An unreadable
 claim, a claim without an owner, or a terminal event after the latest claim

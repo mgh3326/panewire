@@ -14,8 +14,9 @@ import (
 // the node's token, Cloudflare Access pair and endpoint order stay inside the
 // daemon instead of being handed to each caller.
 type nodeHubClient struct {
-	ctx    context.Context
-	client *HubClient
+	ctx        context.Context
+	client     *HubClient
+	noFailover bool
 }
 
 func (c nodeHubClient) do(ctx context.Context, method, path string, query url.Values, body io.Reader) (*http.Response, error) {
@@ -24,7 +25,11 @@ func (c nodeHubClient) do(ctx context.Context, method, path string, query url.Va
 		payload, _ = io.ReadAll(body)
 	}
 	var last error
-	for _, endpoint := range c.client.endpoints {
+	endpoints := c.client.endpoints
+	if c.noFailover && len(endpoints) > 1 {
+		endpoints = endpoints[:1]
+	}
+	for _, endpoint := range endpoints {
 		base, err := url.Parse(endpoint)
 		if err != nil {
 			last = err

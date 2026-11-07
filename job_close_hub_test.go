@@ -3,11 +3,13 @@ package panewire
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -396,5 +398,51 @@ func TestJobCloseConnectionOptions(t *testing.T) {
 	}
 	if _, err := parseHubScopes("jobs.close:*"); err == nil {
 		t.Fatal("wildcard lane scope accepted")
+	}
+}
+
+func TestJobCloseDoesNotRetryAfterLostResponse(t *testing.T) {
+	var first, second atomic.Int32
+	firstHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		first.Add(1)
+		_, _ = io.Copy(io.Discard, r.Body)
+		conn, _, err := w.(http.Hijacker).Hijack()
+		if err != nil {
+			t.Error(err)
+			return
+		}
+		_ = conn.Close()
+	}))
+	t.Cleanup(firstHub.Close)
+	secondHub := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		second.Add(1)
+		writeJSON(w, http.StatusOK, hubJobCloseResult{Refusal: "already_terminal"})
+	}))
+	t.Cleanup(secondHub.Close)
+	client, err := NewHubClient(HubClientConfig{URLs: []string{r6WSURL(firstHub.URL, ""), r6WSURL(secondHub.URL, "")}, MachineID: "node-a", Token: "fixture-token", AllowInsecureForTests: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	daemon := NewDaemon(Config{Hub: HubDaemonConfig{Client: client}})
+	value, err := daemon.handleJobClose(t.Context(), &hubJobCloseRequest{Job: "remote", Lane: "lane-a", Outcome: "completed", Reason: "done"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := value.(hubJobCloseResult)
+	if result.Failure != "close_unconfirmed" || first.Load() != 1 || second.Load() != 0 {
+		t.Fatalf("result=%+v first=%d second=%d", result, first.Load(), second.Load())
+	}
+}
+
+func TestJobCloseHubUnauthorized(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { hubUnauthorized(w) }))
+	t.Cleanup(server.Close)
+	client, err := newHubOperatorClient(server.URL, "fixture-token", hubCFAccessEnv{}, hubCLIDeps{AllowInsecureForTests: true}, nodeReapClientTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := requestHubJobClose(t.Context(), client, hubJobCloseRequest{Job: "remote", Lane: "lane-a", Outcome: "completed", Reason: "done"})
+	if err != nil || result.Failure != "hub_unauthorized" {
+		t.Fatalf("result=%+v err=%v", result, err)
 	}
 }
