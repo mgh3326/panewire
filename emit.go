@@ -14,6 +14,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/google/uuid"
 )
 
 // emitRelayKinds is the closed set of relay record kinds, and the node
@@ -115,7 +117,7 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 	kind := fs.String("kind", "", "job.completed | job.escalate | job.joined | job.lost | job.revoked | lane.event")
 	job := fs.String("job", "", "job id")
 	lane := fs.String("lane", "", "direct destination lane for lane.event")
-	eventID := fs.String("event-id", "", "producer event id for lane.event")
+	eventID := fs.String("event-id", "", "producer event id for lane.event (generated when omitted)")
 	text := fs.String("text", "", "payload for lane.event")
 	late := fs.Bool("late", false, "completion found by a re-armed watcher")
 	deliver := fs.String("deliver", "", "interrupt | inbox (otherwise receiving-lane policy)")
@@ -169,6 +171,9 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 			fmt.Fprintln(stderr, "emit: invalid --lane", *lane)
 			return ExitUsage
 		}
+		if *eventID == "" {
+			*eventID = "emit-" + uuid.NewString()
+		}
 		if !validLaneEventID(*eventID) {
 			fmt.Fprintln(stderr, "emit: invalid --event-id")
 			return ExitUsage
@@ -216,7 +221,12 @@ func runEmitCLI(args []string, stdout, stderr io.Writer, cfg CLIConfig) int {
 		if socket == "" {
 			socket = socketPathFromEnv()
 		}
-		return reportEmitPushResult(stderr, pushEmitRecord(socket, record, root, *timeout))
+		// The sender keeps the id it just sent and the one command that answers
+		// whether the text reached the pane. It prints even when the daemon is
+		// absent: the durable file is what the node later relays.
+		result := pushEmitRecord(socket, record, root, *timeout)
+		fmt.Fprintf(stdout, "event_id=%s\npanewire inbox status --event-id %s\n", record.EventID, record.EventID)
+		return reportEmitPushResult(stderr, result)
 	}
 	record := emitRecord{
 		DeliveryClass: *deliver, Late: *late, NotifyType: *notifyType, Type: *kind, Cause: *cause, JobID: *job, Epoch: *epoch, CreatedAt: time.Now().UTC().Format(time.RFC3339),

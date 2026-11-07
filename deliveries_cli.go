@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
@@ -16,7 +15,8 @@ import (
 const deliveriesUsage = `usage: panewire deliveries show <delivery-id or unique prefix> [--db PATH]
        panewire deliveries list [--to TARGET] [--limit N] [--db PATH]
   Reads the prompt delivery audit (one row per panewire prompt) read-only.
-  --db defaults to the daemon's database under ~/Library/Application Support/panewire.`
+  --db defaults to the daemon's database: ~/Library/Application Support/panewire
+  on macOS, otherwise $XDG_DATA_HOME/panewire or ~/.local/share/panewire.`
 
 // runDeliveriesCLI reads the deliveries table that panewire prompt writes, so
 // a delivery can be traced after the fact (#646 AC4): which pane it resolved
@@ -53,12 +53,15 @@ func runDeliveriesCLI(args []string, stdout, stderr io.Writer) int {
 	}
 	path := *db
 	if path == "" {
-		home, _ := os.UserHomeDir()
-		path = filepath.Join(home, "Library", "Application Support", "panewire", "panewire.sqlite3")
+		path = defaultDBPath()
 	}
 	store, err := openStoreReadOnly(path)
 	if err != nil {
-		fmt.Fprintf(stderr, "deliveries unavailable: %v\n", err)
+		if os.IsNotExist(err) {
+			fmt.Fprintf(stderr, "deliveries: no node database at %s; pass --db PATH, or use `panewire inbox status --event-id ID` to check whether an event reached its pane\n", path)
+		} else {
+			fmt.Fprintf(stderr, "deliveries unavailable: %v\n", err)
+		}
 		return ExitDaemonUnavailable
 	}
 	defer store.Close()

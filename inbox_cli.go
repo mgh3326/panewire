@@ -32,9 +32,12 @@ read and ack <id> name one item: an ambient PANEWIRE_LANE does not scope them
 for operator tokens — only an explicit --lane does.
 ready, decision, blocked and findings items stay unread until ack <id>:
 injection into the pane and read do not retire them.
-status answers only whether each event id was acked and when, with no lane or
-body: a node credential sees the events its own node relayed, a service needs
-the inbox.ack_state scope. It exits 7 when any id has no visible row.`
+status answers, for each event id, the lane, the delivery stage its row
+reached (queued, held, typed, delivered, unconfirmed, dropped or inbox_only),
+the reason for an unconfirmed or dropped stage, the machine and pane, and
+whether the event was acked: a node credential sees the events its own node
+relayed, a service needs the inbox.ack_state scope. It exits 7 when any id has
+no visible row.`
 
 // inboxWaitDefaultTimeout is the client deadline when --timeout is absent.
 // Each server request is bounded by hubInboxWaitMaxWait; the client re-issues
@@ -386,7 +389,8 @@ func runInboxWait(client inboxHTTPClient, stdout, stderr io.Writer, lane string,
 }
 
 // printInboxStatus prints an ack-state answer and picks the exit code: 0 when
-// every id has a row, ExitPartial when any has none.
+// every id has a row, ExitPartial when any has none. One line per event names
+// the lane, the delivery stage that row reached, and whether it was acked.
 func printInboxStatus(raw []byte, stdout, stderr io.Writer, jsonMode bool) int {
 	var answer struct {
 		Events   []laneInboxAckState `json:"events"`
@@ -400,11 +404,11 @@ func printInboxStatus(raw []byte, stdout, stderr io.Writer, jsonMode bool) int {
 		_, _ = stdout.Write(raw)
 	} else {
 		for _, event := range answer.Events {
-			state := "unacked"
+			acked := "no"
 			if event.Acked {
-				state = "acked\t" + event.AckedAt
+				acked = "yes"
 			}
-			fmt.Fprintf(stdout, "%s\t%s\n", event.EventID, state)
+			fmt.Fprintf(stdout, "event=%s lane=%s stage=%s reason=%s machine=%s pane=%s acked=%s\n", event.EventID, dash(event.Lane), dash(event.Stage), dash(event.Reason), dash(event.Machine), dash(event.Pane), acked)
 		}
 		for _, id := range answer.NotFound {
 			fmt.Fprintf(stdout, "%s\tnot found\n", id)

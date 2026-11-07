@@ -142,6 +142,33 @@ func openLaneInboxStore(path string) (*laneInboxStore, error) {
 		db.Close()
 		return nil, err
 	}
+	stageAdded, err := addLaneInboxColumn(ctx, db, "delivery_stage", "TEXT NOT NULL DEFAULT ''")
+	if err != nil {
+		db.Close()
+		return nil, err
+	}
+	for _, column := range []struct{ name, definition string }{
+		{"delivery_reason", "TEXT NOT NULL DEFAULT ''"},
+		{"delivery_machine", "TEXT NOT NULL DEFAULT ''"},
+		{"delivery_pane", "TEXT NOT NULL DEFAULT ''"},
+		{"delivery_at", "INTEGER NOT NULL DEFAULT 0"},
+		{"relay_id", "INTEGER NOT NULL DEFAULT 0"},
+	} {
+		if _, err := addLaneInboxColumn(ctx, db, column.name, column.definition); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if stageAdded {
+		if err := backfillLaneInboxDeliveryStage(ctx, db); err != nil {
+			db.Close()
+			return nil, err
+		}
+	}
+	if _, err := db.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS lane_inbox_relay_id ON lane_inbox(relay_id) WHERE relay_id<>0`); err != nil {
+		db.Close()
+		return nil, err
+	}
 	for _, column := range []struct{ name, definition string }{{"cause", "TEXT"}, {"superseded_at", "INTEGER NOT NULL DEFAULT 0"}, {"superseded_by", "INTEGER NOT NULL DEFAULT 0"}} {
 		if _, err := addLaneInboxColumn(ctx, db, column.name, column.definition); err != nil {
 			db.Close()
@@ -357,6 +384,18 @@ func backfillLaneInboxEventIDs(db *sql.DB) error {
 	return tx.Commit()
 }
 
+// backfillLaneInboxDeliveryStage gives rows stored before the stage columns
+// the stage their other columns already prove: a confirmed delivery, or an
+// inbox item the lane reads rather than receives in its pane. Every other old
+// row stays empty and reads as queued.
+func backfillLaneInboxDeliveryStage(ctx context.Context, db *sql.DB) error {
+	if _, err := db.ExecContext(ctx, `UPDATE lane_inbox SET delivery_stage='delivered',delivery_at=delivered_at WHERE delivered_at>0 AND delivery_stage=''`); err != nil {
+		return err
+	}
+	_, err := db.ExecContext(ctx, `UPDATE lane_inbox SET delivery_stage='inbox_only' WHERE delivery_stage='' AND class='inbox'`)
+	return err
+}
+
 func addLaneInboxMustAck(ctx context.Context, db *sql.DB) error {
 	if _, err := addLaneInboxColumn(ctx, db, "must_ack", "INTEGER NOT NULL DEFAULT 0"); err != nil {
 		return err
@@ -542,9 +581,15 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 	if !validLaneEventID(eventID) {
 		eventID = ""
 	}
-	query := `INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id,cause) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
+	// The stage a sender may soon ask about: an inbox-class row is delivered
+	// through the lane's inbox, every other row is queued for the pane.
+	stage := laneInboxStageQueued
+	if class == "inbox" {
+		stage = laneInboxStageInboxOnly
+	}
+	query := `INSERT INTO lane_inbox(event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id,cause,delivery_stage,delivery_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
 	if s.dialect == laneInboxSQLite {
-		query = `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id,cause) VALUES((SELECT max(COALESCE((SELECT max(id) FROM lane_inbox),0),floor)+1 FROM lane_inbox_id_floor WHERE singleton=1),?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
+		query = `INSERT INTO lane_inbox(id,event_key,lane,kind,class,payload,created_at,read_at,due_at,digest_at,must_ack,hold_until,sender,event_id,cause,delivery_stage,delivery_at) VALUES((SELECT max(COALESCE((SELECT max(id) FROM lane_inbox),0),floor)+1 FROM lane_inbox_id_floor WHERE singleton=1),?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(event_key) DO NOTHING`
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -556,7 +601,7 @@ func (s *laneInboxStore) putFrom(sender, key, lane, kind, class string, e hubJob
 			return laneInboxItem{}, err
 		}
 	}
-	insert, err := tx.ExecContext(ctx, s.q(query), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn, holdUntil, sender, eventID, nullableCause(e.Cause))
+	insert, err := tx.ExecContext(ctx, s.q(query), s.storedKey(key), lane, kind, class, string(raw), now.UnixMilli(), read, due, digest, mustAckColumn, holdUntil, sender, eventID, nullableCause(e.Cause), stage, now.UnixMilli())
 	if err != nil {
 		return laneInboxItem{}, err
 	}
@@ -629,19 +674,35 @@ func (s *laneInboxStore) list(lane string, unread bool) ([]laneInboxItem, error)
 	return items, rows.Err()
 }
 
-// laneInboxAckState is what the ack-state lookup may say about an event: its
-// id and whether, and when, its inbox row was acked or superseded. It carries no lane, kind
-// or body.
+// laneInboxAckState is what the ack-state lookup may say about an event: the
+// lane it targets, the delivery stage its latest row change reached, and
+// whether, and when, its inbox row was acked or superseded. It carries no
+// kind or body.
 type laneInboxAckState struct {
 	EventID string `json:"event_id"`
+	Lane    string `json:"lane,omitempty"`
+	Stage   string `json:"stage"`
+	Reason  string `json:"reason,omitempty"`
+	Machine string `json:"machine,omitempty"`
+	Pane    string `json:"pane,omitempty"`
+	At      string `json:"at,omitempty"`
 	Acked   bool   `json:"acked"`
 	AckedAt string `json:"acked_at,omitempty"`
+}
+
+// laneInboxAckRow is one visible row behind an event id, before the answer is
+// aggregated across the lanes the same event reached.
+type laneInboxAckRow struct {
+	lane, stage, reason, machine, pane string
+	deliveryAt, deliveredAt            int64
+	ackedAt, supersededAt              int64
 }
 
 // ackStates answers for each event id the rows the caller may see: every row
 // when sender is "", otherwise only rows that sender relayed. An id with
 // several visible rows (the same event relayed to several lanes) is acked
-// once all are acked or superseded, at the latest resolution time. An id with no visible row is
+// once all are acked or superseded, at the latest resolution time, and its
+// delivery is the row whose stage last changed. An id with no visible row is
 // absent from the result, so a hidden row and a missing one look the same.
 func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string]laneInboxAckState, error) {
 	args := make([]any, 0, len(eventIDs)+2)
@@ -653,25 +714,73 @@ func (s *laneInboxStore) ackStates(eventIDs []string, sender string) (map[string
 	args = append(args, sender, sender)
 	ctx, done := s.op(s.life)
 	defer done()
-	rows, err := s.db.QueryContext(ctx, s.q(`SELECT event_id,count(*),sum(CASE WHEN acked_at>0 OR superseded_at>0 THEN 1 ELSE 0 END),max(CASE WHEN acked_at>0 THEN acked_at ELSE superseded_at END) FROM lane_inbox WHERE event_id IN (`+strings.Join(marks, ",")+`) AND (?='' OR sender=?) GROUP BY event_id`), args...)
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT event_id,lane,delivery_stage,delivery_reason,delivery_machine,delivery_pane,delivery_at,delivered_at,acked_at,superseded_at FROM lane_inbox WHERE event_id IN (`+strings.Join(marks, ",")+`) AND (?='' OR sender=?) ORDER BY event_id,id`), args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	states := map[string]laneInboxAckState{}
+	type aggregate struct {
+		state   laneInboxAckState
+		total   int64
+		settled int64
+		latest  int64
+		at      int64
+		rank    int
+		have    bool
+	}
+	aggregates := map[string]*aggregate{}
 	for rows.Next() {
-		var id string
-		var total, acked, latest int64
-		if err := rows.Scan(&id, &total, &acked, &latest); err != nil {
+		var eventID string
+		var row laneInboxAckRow
+		if err := rows.Scan(&eventID, &row.lane, &row.stage, &row.reason, &row.machine, &row.pane, &row.deliveryAt, &row.deliveredAt, &row.ackedAt, &row.supersededAt); err != nil {
 			return nil, err
 		}
-		state := laneInboxAckState{EventID: id, Acked: acked == total}
+		agg := aggregates[eventID]
+		if agg == nil {
+			agg = &aggregate{}
+			aggregates[eventID] = agg
+		}
+		agg.total++
+		settledAt := row.ackedAt
+		if row.supersededAt > settledAt {
+			settledAt = row.supersededAt
+		}
+		if settledAt > 0 {
+			agg.settled++
+			if settledAt > agg.latest {
+				agg.latest = settledAt
+			}
+		}
+		stage := laneInboxStageFor(row.stage, row.deliveredAt)
+		at := row.deliveryAt
+		if at == 0 {
+			at = row.deliveredAt
+		}
+		rank := laneInboxStageRank(stage)
+		if !agg.have || at > agg.at || (at == agg.at && rank > agg.rank) {
+			agg.have, agg.at, agg.rank = true, at, rank
+			agg.state.Lane, agg.state.Stage, agg.state.Reason = row.lane, stage, row.reason
+			agg.state.Machine, agg.state.Pane = row.machine, row.pane
+			agg.state.At = ""
+			if at > 0 {
+				agg.state.At = time.UnixMilli(at).UTC().Format(time.RFC3339)
+			}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	states := map[string]laneInboxAckState{}
+	for id, agg := range aggregates {
+		state := agg.state
+		state.EventID = id
+		state.Acked = agg.settled == agg.total
 		if state.Acked {
-			state.AckedAt = time.UnixMilli(latest).UTC().Format(time.RFC3339)
+			state.AckedAt = time.UnixMilli(agg.latest).UTC().Format(time.RFC3339)
 		}
 		states[id] = state
 	}
-	return states, rows.Err()
+	return states, nil
 }
 
 func (s *laneInboxStore) read(id int64, lane string, now time.Time) (laneInboxItem, error) {

@@ -20,7 +20,7 @@ func TestInboxDeliveredMustAckInterruptNoEscalationNoReplay(t *testing.T) {
 	e.NotifyType = "ready"
 	h.relayLaneEvent(e, a)
 	d := holdReceive(t, a)
-	if err := h.inbox.store.recordDelivery(relayEventDedupeKey("lane.event", e), now); err != nil {
+	if err := h.inbox.store.recordDelivery(relayEventDedupeKey("lane.event", e), "", "", now); err != nil {
 		t.Fatal(err)
 	}
 	var class string

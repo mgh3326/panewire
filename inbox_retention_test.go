@@ -38,11 +38,11 @@ func TestInboxRetentionKeepsUnreadAndReplayEvidence(t *testing.T) {
 			ack(add("recent-ack", "lane-a", "interrupt", "ready", old), now)
 			ack(add("recent-created", "lane-a", "interrupt", "ready", now), old)
 			add("old-delivered", "lane-a", "interrupt", "", old)
-			if err := s.recordDelivery("old-delivered", old); err != nil {
+			if err := s.recordDelivery("old-delivered", "", "", old); err != nil {
 				t.Fatal(err)
 			}
 			add("recent-delivery", "lane-a", "interrupt", "", old)
-			if err := s.recordDelivery("recent-delivery", now); err != nil {
+			if err := s.recordDelivery("recent-delivery", "", "", now); err != nil {
 				t.Fatal(err)
 			}
 
@@ -50,14 +50,14 @@ func TestInboxRetentionKeepsUnreadAndReplayEvidence(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := s.recordDelivery("pending-held", old); err != nil {
+			if err := s.recordDelivery("pending-held", "", "", old); err != nil {
 				t.Fatal(err)
 			}
 			_, err = s.put("pending-digest", "lane-a", "lane.event", "interrupt", quietEvent("pending-digest", "digest"), old, 0, time.Second)
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := s.recordDelivery("pending-digest", old); err != nil {
+			if err := s.recordDelivery("pending-digest", "", "", old); err != nil {
 				t.Fatal(err)
 			}
 			// Count pruning must not destroy even recent creation/ack/delivery evidence.
@@ -164,7 +164,7 @@ func TestInboxRestartSuppressesCompletedAndReplaysUnconfirmedOnce(t *testing.T) 
 			case "delivered":
 				t650Send(t, h, "host-a", a, "relay.delivered", relayAckPayload{JobID: d.JobID, Pane: d.Pane, OriginalEventID: d.EventID})
 			case "confirmed-inbox":
-				if err := h.inbox.store.recordDelivery(relayEventDedupeKey("lane.event", e), now); err != nil {
+				if err := h.inbox.store.recordDelivery(relayEventDedupeKey("lane.event", e), "", "", now); err != nil {
 					t.Fatal(err)
 				}
 			}
@@ -266,7 +266,7 @@ func TestInboxReadMustAckWaitsForAck(t *testing.T) {
 			record := handoffkeepRelayEvent{ID: 42, Kind: "lane.event", OwnerLane: event.OwnerLane, JobID: event.JobID, Epoch: 1, EventID: event.EventID, Text: event.Text, ReceivedAt: now.Format(time.RFC3339Nano)}
 			for _, delivered := range []bool{false, true} {
 				if delivered {
-					if err := store.recordDelivery(key, old); err != nil {
+					if err := store.recordDelivery(key, "", "", old); err != nil {
 						t.Fatal(err)
 					}
 				}

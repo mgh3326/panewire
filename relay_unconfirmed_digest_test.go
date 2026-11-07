@@ -195,7 +195,7 @@ func TestUnconfirmedDigestTheInboxDeliveredIsRetiredAsInboxDelivered(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.recordDelivery(relayEventDedupeKey("lane.event", rig.event), rig.now); err != nil {
+	if err := store.recordDelivery(relayEventDedupeKey("lane.event", rig.event), "", "", rig.now); err != nil {
 		t.Fatal(err)
 	}
 	store.db.Close()

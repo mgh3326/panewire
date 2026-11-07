@@ -82,9 +82,48 @@ func (h *HubServer) pruneInbox() {
 }
 
 // recordDelivery preserves receiver confirmation independently of handoffkeep.
-func (s *laneInboxStore) recordDelivery(key string, now time.Time) error {
+// The confirmation is also the row's final delivery stage, so a sender reading
+// ack-state sees that its event reached the pane.
+func (s *laneInboxStore) recordDelivery(key, machine, pane string, now time.Time) error {
 	ctx, done := s.op(s.life)
 	defer done()
-	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET delivered_at=CASE WHEN delivered_at=0 THEN ? ELSE delivered_at END WHERE event_key=?`), now.UnixMilli(), s.storedKey(key))
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET delivered_at=CASE WHEN delivered_at=0 THEN ? ELSE delivered_at END,delivery_stage=?,delivery_reason='',delivery_machine=?,delivery_pane=?,delivery_at=? WHERE event_key=?`), now.UnixMilli(), laneInboxStageDelivered, machine, pane, now.UnixMilli(), s.storedKey(key))
+	return err
+}
+
+// recordStage moves a row to a stage the hub learned after it queued the
+// event: held, typed, unconfirmed or dropped. A delivered row is final, so no
+// later report can move it backwards.
+func (s *laneInboxStore) recordStage(key, stage, reason, machine, pane string, now time.Time) error {
+	if stage == "" || stage == laneInboxStageDelivered {
+		return nil
+	}
+	ctx, done := s.op(s.life)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET delivery_stage=?,delivery_reason=?,delivery_machine=?,delivery_pane=?,delivery_at=? WHERE event_key=? AND delivery_stage<>?`), stage, reason, machine, pane, now.UnixMilli(), s.storedKey(key), laneInboxStageDelivered)
+	return err
+}
+
+// recordStageByRelayID is recordStage for a node report that names the
+// durable handoffkeep row (relay.held, relay.released, relay.dropped).
+func (s *laneInboxStore) recordStageByRelayID(relayID int64, stage, reason, machine, pane string, now time.Time) error {
+	if relayID <= 0 || stage == "" || stage == laneInboxStageDelivered {
+		return nil
+	}
+	ctx, done := s.op(s.life)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET delivery_stage=?,delivery_reason=?,delivery_machine=?,delivery_pane=?,delivery_at=? WHERE relay_id=? AND delivery_stage<>?`), stage, reason, machine, pane, now.UnixMilli(), relayID, laneInboxStageDelivered)
+	return err
+}
+
+// linkRelayID ties a row to the durable handoffkeep row the hub persisted for
+// it, so the node reports that carry only that id can update the stage.
+func (s *laneInboxStore) linkRelayID(key string, relayID int64) error {
+	if relayID <= 0 {
+		return nil
+	}
+	ctx, done := s.op(s.life)
+	defer done()
+	_, err := s.db.ExecContext(ctx, s.q(`UPDATE lane_inbox SET relay_id=? WHERE event_key=? AND relay_id=0`), relayID, s.storedKey(key))
 	return err
 }
