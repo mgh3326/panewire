@@ -22,6 +22,23 @@ type sweepGitFake struct {
 	held      map[string]bool // branch name → another worktree holds it
 	removed   []string
 	deleted   []string
+	// A non-merged end: what the worktree holds, whether its branch tip is on
+	// origin, the branches deleted with -D, and a hook run as the worktree is
+	// removed.
+	diff string
+	// untracked names the files git diff HEAD does not show; ls-files lists
+	// them and diff --no-index renders each as "+<name> contents".
+	untracked []string
+	lsFailed  bool
+	// detached: the worktree is on a detached HEAD. refs are the update-ref
+	// calls made, refErr fails them, fetches records each fetch's arguments.
+	detached bool
+	refs     []string
+	refErr   bool
+	fetches  [][]string
+	onOrigin bool
+	forced   []string
+	onRemove func(path string)
 }
 
 func newSweepGitFake(t *testing.T) *sweepGitFake {
@@ -56,13 +73,23 @@ func (g *sweepGitFake) do(c Command) Result {
 		gitDir := filepath.Join(g.clone, ".git", "worktrees", filepath.Base(cwd))
 		return Result{Out: gitDir + "\n" + filepath.Join(g.clone, ".git") + "\n"}
 	case len(args) >= 4 && args[2] == "branch" && args[3] == "--show-current":
+		if g.detached {
+			return Result{}
+		}
 		return Result{Out: "wk/job\n"}
+	case len(args) >= 5 && args[2] == "update-ref":
+		if g.refErr {
+			return Result{Code: 1, Err: "cannot lock ref"}
+		}
+		g.refs = append(g.refs, args[3])
+		return Result{}
 	case len(args) >= 4 && args[2] == "status":
 		if g.dirty {
 			return Result{Out: " M file\n"}
 		}
 		return Result{}
 	case len(args) >= 4 && args[2] == "fetch":
+		g.fetches = append(g.fetches, args[3:])
 		if g.fetchErr {
 			return Result{Code: 1, Err: "no remote"}
 		}
@@ -72,10 +99,30 @@ func (g *sweepGitFake) do(c Command) Result {
 			return Result{Code: 1}
 		}
 		return Result{}
+	case len(args) >= 4 && args[2] == "ls-files":
+		if g.lsFailed {
+			return Result{Code: 1, Err: "ls-files failed"}
+		}
+		return Result{Out: strings.Join(g.untracked, "\x00") + "\x00"}
+	case len(args) >= 4 && args[2] == "diff" && slices.Contains(args, "--no-index"):
+		return Result{Code: 1, Out: "diff --git a/" + args[len(args)-1] + " b/" + args[len(args)-1] + "\n+contents of " + args[len(args)-1] + "\n"}
+	case len(args) >= 4 && args[2] == "diff":
+		return Result{Out: g.diff}
+	case len(args) >= 4 && args[2] == "branch" && args[3] == "-r":
+		if g.onOrigin {
+			return Result{Out: "  origin/wk/job\n"}
+		}
+		return Result{}
+	case len(args) >= 5 && args[2] == "branch" && args[3] == "-D":
+		g.forced = append(g.forced, args[4])
+		return Result{}
 	case len(args) >= 5 && args[2] == "worktree" && args[3] == "remove":
-		path := args[4]
+		path := args[len(args)-1]
 		if g.removeErr {
 			return Result{Code: 1, Err: "worktree locked"}
+		}
+		if g.onRemove != nil {
+			g.onRemove(path)
 		}
 		g.removed = append(g.removed, path)
 		_ = os.RemoveAll(path)
@@ -167,25 +214,6 @@ func TestSweepKeepsAWorktreeWhoseHeadIsNotMerged(t *testing.T) {
 	}
 	if !f.infoHas("task worktree kept", "job=a", "reason=unmerged_kept") {
 		t.Fatalf("info lines = %q", f.info)
-	}
-}
-
-func TestSweepKeepsADroppedJobsWorktree(t *testing.T) {
-	g := newSweepGitFake(t)
-	f := newPaneSweepFixture(t)
-	f.withGit(g)
-	f.sweptJob("a", "42", g.worktree(t, "job-a"))
-	f.tasks["42"] = "dropped"
-	f.at(0)
-	f.at(11)
-	if len(g.removed) != 0 || len(g.deleted) != 0 {
-		t.Fatalf("removed %v, deleted %v", g.removed, g.deleted)
-	}
-	if !f.infoHas("task worktree kept", "job=a", "reason=dropped_kept") {
-		t.Fatalf("info lines = %q", f.info)
-	}
-	if f.reaped("a") == nil {
-		t.Fatalf("the dropped job's pane was not closed")
 	}
 }
 
