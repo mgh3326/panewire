@@ -256,6 +256,9 @@ type selReq struct {
 	creditAt time.Time
 	// route is the role routing decision (routing.go); nil filters nothing.
 	route *routing
+	// e6Arm is the experiment marker a hub submission carried; empty reads
+	// the environment, as every local selection does.
+	e6Arm string
 }
 
 // effortRank orders rung efforts cheap-first; an empty effort is the catalog's
@@ -346,7 +349,7 @@ func (a *App) seatFor(row CatalogRow, req selReq) (string, *Seat, string) {
 				reason = "builder_family_unreadable"
 			case (req.role == "tester" || req.role == "reviewer") && seat.Family == req.builderFamily:
 				reason = "family_excluded"
-			case seat.seatE6(row.Effort) && a.envOr("PANEWIRE_E6_ARM", "SCOPEFUEL_E6_ARM") != seat.Canon+"@"+row.Effort:
+			case seat.seatE6(row.Effort) && a.e6Arm(req.e6Arm) != seat.Canon+"@"+row.Effort:
 				reason = "e6_marker"
 			}
 		}
@@ -667,7 +670,7 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 	if a.Quota == nil {
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: selection needs the quota catalog")
 	}
-	req := selReq{t: s.T, role: s.Role, effort: s.Effort, allowEscalation: s.AllowEscalation, builderFamily: s.ParentFamily, excludeFamilies: s.ExcludeFamilies, onlyFamily: s.OnlyFamily}
+	req := selReq{t: s.T, role: s.Role, effort: s.Effort, allowEscalation: s.AllowEscalation, builderFamily: s.ParentFamily, excludeFamilies: s.ExcludeFamilies, onlyFamily: s.OnlyFamily, e6Arm: s.E6Arm}
 	tags, e := parseTags(s.Tags)
 	if e != nil {
 		return nil, e

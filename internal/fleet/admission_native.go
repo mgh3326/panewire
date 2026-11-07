@@ -147,7 +147,7 @@ func (a *App) nativeGate(ctx context.Context, r QuotaRequest, live bool) Result 
 // shape, catalog, excluded pool); only an admit or an unmeasurable one goes on
 // to the account's stored reading. It returns the account key it read.
 func (a *App) nativeVerdict(ctx context.Context, r QuotaRequest, live bool) (admissionVerdict, string) {
-	req := admissionRequest{Profile: firstNonempty(r.GateProfile, r.Profile), Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: os.Getenv("PACELEVER_E6_ARM")}
+	req := admissionRequest{Profile: firstNonempty(r.GateProfile, r.Profile), Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: firstNonempty(r.E6Arm, os.Getenv("PACELEVER_E6_ARM"))}
 	invalid := admissionVerdict{Profile: req.Profile, Exit: gateInvalid, Missing: []string{}, Alternatives: []string{}, ManualIDs: []string{}}
 	policy, err := loadAdmissionPolicy(os.Getenv, a.Home)
 	if err != nil {

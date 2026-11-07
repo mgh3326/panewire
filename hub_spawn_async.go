@@ -342,6 +342,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		outcome.Fix = "Upgrade the selected node panewire to advertise spawn_ops_v1, then replay the saved request."
 	}
 	outcome.Retryable = true
+	outcome.E6Arm = request.E6Arm
 	if ctx.Err() != nil {
 		outcome.RC = 124
 		outcome.Reason = "timeout"
@@ -517,7 +518,7 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 		if stage == "" {
 			stage = "placement"
 		}
-		outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m")}
+		outcome := hubSpawnOutcome{RC: result.RC, Stage: stage, Reason: result.Error, Host: node.Machine, Pane: result.Pane, Retryable: result.Retryable, NodeResult: true, StageMS: result.StageMS, Role: hubSpawnArg(node.Args, "--role"), Profile: hubSpawnArg(node.Args, "-m"), E6Arm: t.task.Request.E6Arm}
 		if outcome.StageMS == nil {
 			outcome.StageMS = map[string]int64{}
 		}
@@ -551,7 +552,7 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	}
 }
 func (t *directSpawnTransport) unknown(ctx context.Context, reason string) (fleet.HubSpawnReply, error) {
-	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: reason, Host: spawnTaskHost(t.task)}
+	outcome := hubSpawnOutcome{RC: 75, Stage: "landing", Reason: reason, Host: spawnTaskHost(t.task), E6Arm: t.task.Request.E6Arm}
 	if reason == "timeout" {
 		outcome.RC = 124
 	}
@@ -710,6 +711,7 @@ func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 }
 
 func (h *HubServer) finishSpawnOutcome(task hubSpawnTask, outcome hubSpawnOutcome) {
+	outcome.E6Arm = task.Request.E6Arm
 	if changed, _ := h.inbox.store.completeSpawn(h.closeCtx, task, outcome, h.now().UTC()); changed {
 		h.recordSpawnTrace(task, outcome)
 	}

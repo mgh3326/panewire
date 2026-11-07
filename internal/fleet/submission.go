@@ -35,6 +35,10 @@ type Submission struct {
 	Repository      Repository `json:"repository"`
 	OriginMachine   string     `json:"origin_machine"`
 	DeadlineSeconds int        `json:"deadline_seconds"`
+	// E6Arm is the exact <canon>@<effort> experiment marker the submitter saw
+	// in its environment. Hub admission and the node launch use it exactly as
+	// a local spawn reads the environment; empty means none.
+	E6Arm string `json:"e6_arm,omitempty"`
 	// RetryHost is the hub-internal marker of a verified-cleanup retry: the
 	// hub sets it, in memory, on the one request it rewrites to `--host <the
 	// stored outcome host>`, and validateContainment then does not treat that
@@ -201,6 +205,10 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 			return Submission{}, fail(exitUsage, "explicit -m or --host requires --override-reason")
 		}
 	}
+	s.E6Arm = a.e6Arm("")
+	if s.E6Arm != "" && !validE6Arm(s.E6Arm, s.Profile) {
+		return Submission{}, fail(exitUsage, "PANEWIRE_E6_ARM must be <canon>@<effort> with canon %s, got %q", s.Profile, s.E6Arm)
+	}
 	cwd, err := filepath.Abs(expand(s.CWD))
 	if err != nil {
 		return Submission{}, err
@@ -288,7 +296,7 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 	if originalHost == "local" {
 		submissionSpawn.Host = "local"
 	}
-	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, OriginMachine: a.machine(), DeadlineSeconds: 600, Args: submissionArgs(submissionSpawn)}
+	request := Submission{RequestID: id, Brief: string(brief), Repository: Repository{Name: repo.name, Origin: checkout.Origin, Relative: repo.rel, Worktree: repo.wt, LocalRoot: repo.localRoot, Checkout: checkout}, OriginMachine: a.machine(), DeadlineSeconds: 600, E6Arm: s.E6Arm, Args: submissionArgs(submissionSpawn)}
 	if _, err = ValidateSubmission(request); err != nil {
 		return Submission{}, err
 	}
@@ -300,6 +308,10 @@ func ValidateSubmission(request Submission) (Spawn, error) {
 	if err != nil {
 		return s, err
 	}
+	if request.E6Arm != "" && !validE6Arm(request.E6Arm, s.Profile) {
+		return s, fail(exitUsage, "e6_arm %q must be <canon>@<effort> with canon %q", request.E6Arm, s.Profile)
+	}
+	s.E6Arm = request.E6Arm
 	s.hubRetryHost = request.RetryHost
 	if err := validateContainment(s); err != nil {
 		return s, err
