@@ -263,6 +263,11 @@ type relayBusyManager struct {
 	// whose original then dies mid-flight (reroute, failed inject) is a
 	// lost delivery. #725's counters are the shadow/apply operator surface.
 	dedupeInFlight map[string]chan struct{}
+	// cmdHoldUntil is the deadline a working cmd row's hold was moved to (hk
+	// 3411, keepWorkingCmdHold), by event id. arm waits at least until it, so
+	// a store that rejects the extension write cannot make the next wait end
+	// at once. Entries are dropped once they pass.
+	cmdHoldUntil map[int64]time.Time
 	// dedupeRestorePending gates the held-vs-delivered reconcile to the one
 	// resume() that follows restore(): emits made in restore() land before
 	// the relay emitter exists, so the reconcile belongs to the post-hello
@@ -278,7 +283,7 @@ func (client *HubClient) relayBusyManager() *relayBusyManager {
 	client.busyRelayMu.Lock()
 	defer client.busyRelayMu.Unlock()
 	if client.busyRelay == nil {
-		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc), inflight: make(map[int64]struct{}), lanePane: make(map[string]string), dedupeInFlight: make(map[string]chan struct{})}
+		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc), inflight: make(map[int64]struct{}), lanePane: make(map[string]string), dedupeInFlight: make(map[string]chan struct{}), cmdHoldUntil: make(map[int64]time.Time)}
 	}
 	return client.busyRelay
 }
@@ -448,6 +453,11 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 		return
 	}
 	held := relayHeld{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, MaxWait: policy.MaxWait, RecvSeq: message.RecvSeq, fresh: true}
+	if ceiling := manager.client.relayCmdHoldMax(); relayPaneWorkingUnprovable(status, parseRelayAgentHarness(output)) && ceiling < held.MaxWait {
+		// hk 3411: a working cmd row is held at most relay.cmd_hold_max, so
+		// its first wait ends no later than that ceiling.
+		held.MaxWait = ceiling
+	}
 	// The lease rides the same agent get that proved the pane busy — no extra
 	// probe is needed to bind the row to the occupant instance it waited on.
 	if occupant, ok := parseRelayAgentOccupant(output); ok && occupant.Pane == message.Pane {
@@ -631,9 +641,9 @@ func (manager *relayBusyManager) arm(parent context.Context, pane string) {
 	}
 	waitFor := items[0].MaxWait
 	if !items[0].fresh || len(items) > 1 {
-		deadline := items[0].HeldSince.Add(items[0].MaxWait)
+		deadline := manager.heldDeadlineLocked(items[0])
 		for _, item := range items[1:] {
-			if candidate := item.HeldSince.Add(item.MaxWait); candidate.Before(deadline) {
+			if candidate := manager.heldDeadlineLocked(item); candidate.Before(deadline) {
 				deadline = candidate
 			}
 		}
@@ -659,6 +669,16 @@ func (manager *relayBusyManager) arm(parent context.Context, pane string) {
 	manager.waits[pane] = cancel
 	manager.mu.Unlock()
 	go manager.waitForPane(ctx, pane, waitFor, directiveHeld)
+}
+
+// heldDeadlineLocked is when item's wait runs out: its policy deadline, or
+// the later deadline its cmd hold was moved to. The caller holds manager.mu.
+func (manager *relayBusyManager) heldDeadlineLocked(item relayHeld) time.Time {
+	deadline := item.HeldSince.Add(item.MaxWait)
+	if until, ok := manager.cmdHoldUntil[item.EventID]; ok && until.After(deadline) {
+		deadline = until
+	}
+	return deadline
 }
 
 func (manager *relayBusyManager) waitForPane(ctx context.Context, pane string, waitFor time.Duration, directiveHeld bool) {
