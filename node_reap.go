@@ -331,7 +331,7 @@ func (client *HubClient) nodeJobDone(ctx context.Context, args nodeJobDoneArgs) 
 	}
 	line := nodeJobDoneLine(output)
 	result := JobDoneResult{Outcome: nodeJobDoneOK, Line: line}
-	if strings.HasSuffix(line, nodeLifecycleDuplicateTag) {
+	if strings.Contains(line, nodeLifecycleDuplicateTag) {
 		result.Outcome = nodeJobAlreadyDone
 	}
 	// panewire has finished, so a failed marker costs only a repeat run, which

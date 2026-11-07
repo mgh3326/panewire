@@ -54,26 +54,13 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	}
 	var result json.RawMessage
 	var rejected string
-	if watchResult {
-		*resultFile = filepath.Join(filepath.Dir(*report), "findings.json")
-		info, err := os.Lstat(*resultFile)
-		if os.IsNotExist(err) {
-			*resultFile = ""
-		} else if err != nil || !info.Mode().IsRegular() {
-			rejected = "result is not a regular file"
-			*resultFile = ""
-		}
-	}
-	if *resultFile != "" {
+	if !watchResult && *resultFile != "" {
 		if kind != "done" {
 			return fail(exitUsage, "%s accepts no --result", kind)
 		}
 		result, e = readResult(*resultFile)
 		if e != nil {
-			if !watchResult {
-				return e
-			}
-			rejected = "result failed validation"
+			return e
 		}
 	}
 	if *report == "" && kind == "done" {
@@ -81,6 +68,15 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	}
 	if kind == "done" && *report == "" {
 		return fail(exitUsage, "done requires an existing report")
+	}
+	if watchResult {
+		*resultFile, rejected = watcherResultFile(a.Jobs, id, *report)
+		if *resultFile != "" {
+			result, e = readResult(*resultFile)
+			if e != nil {
+				result, rejected = nil, "result failed validation"
+			}
+		}
 	}
 	body := []byte{}
 	if *report != "" {
@@ -126,12 +122,20 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 		if ev.Kind == eventKind {
 			rounds++
 			if str(ev.Payload, "report_sha256") == digest && str(ev.Payload, "question") == *question {
+				suffix := ""
 				if kind == "done" {
 					if e = a.releaseQuota(ctx, j); e != nil {
 						return e
 					}
+					var status string
+					if status, e = a.attachDuplicateResult(ctx, id, *report, digest, result); e != nil {
+						return e
+					}
+					if status != "" {
+						suffix = " " + status
+					}
 				}
-				fmt.Fprintf(a.Out, "OK job=%s report=%s duplicate=yes\n", id, *report)
+				fmt.Fprintf(a.Out, "OK job=%s report=%s duplicate=yes%s\n", id, *report, suffix)
 				return nil
 			}
 			if str(ev.Payload, "report") == *report {
@@ -267,6 +271,98 @@ func readResult(path string) (json.RawMessage, error) {
 		return nil, fail(exitUsage, "--result must be a JSON object")
 	}
 	return json.RawMessage(body), nil
+}
+
+// watcherResultFile finds the result a finished pane filed in its job dir:
+// findings.json (a reviewer's convention), then result.json (`panewire
+// delegate`, delegatePaths.result). The report's directory is checked first,
+// where a worker writes both files.
+func watcherResultFile(jobs, id, report string) (string, string) {
+	var candidates []string
+	if report != "" {
+		candidates = append(candidates, filepath.Join(filepath.Dir(report), "findings.json"))
+	}
+	candidates = append(candidates, filepath.Join(jobs, id, "findings.json"), filepath.Join(jobs, id, "result.json"))
+	seen := map[string]bool{}
+	for _, path := range candidates {
+		if seen[path] {
+			continue
+		}
+		seen[path] = true
+		info, e := os.Lstat(path)
+		if os.IsNotExist(e) {
+			continue
+		}
+		if e != nil || !info.Mode().IsRegular() {
+			return "", "result is not a regular file"
+		}
+		return path, ""
+	}
+	return "", ""
+}
+
+// attachDuplicateResult stores the result a later `done --result` carries when
+// a completion for the same report already exists and this call returned
+// duplicate. The record may still have no result (the watcher or an earlier
+// done completed without one); a stored result is never overwritten.
+func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest string, result json.RawMessage) (string, error) {
+	if result == nil {
+		return "", nil
+	}
+	store, e := a.jobStore()
+	if e != nil {
+		a.warn("result attach failed: %v", e)
+		return "result=unattached", nil
+	}
+	rec, e := store.Get(ctx, id)
+	if e != nil {
+		a.warn("result attach: job record unreadable: %v", e)
+		return "result=unattached", nil
+	}
+	if stored := rec["result"]; stored != nil {
+		if sameJSONValue(stored, result) {
+			return "result=equal", nil
+		}
+		a.warn("result conflict: job %s already has a different result; keeping it", id)
+		return "result=conflict", nil
+	}
+	// hk accepts a result only in a write that also names completed; the job is
+	// already completed locally, so this re-states the same state.
+	if e := store.Put(ctx, id, map[string]any{"state": "completed", "result": result}); e != nil {
+		a.warn("result attach failed: %v", e)
+		return "result=unattached", nil
+	}
+	if e := a.event(ctx, id, "job.result_attached", map[string]any{"report": report, "report_sha256": digest}); e != nil {
+		return "", e
+	}
+	return "result=attached", nil
+}
+
+// sameJSONValue compares two decoded JSON values: key order, whitespace and
+// number spelling do not matter.
+func sameJSONValue(x, y any) bool {
+	cx, ok := canonicalJSON(x)
+	if !ok {
+		return false
+	}
+	cy, ok := canonicalJSON(y)
+	return ok && cx == cy
+}
+
+func canonicalJSON(v any) (string, bool) {
+	b, e := json.Marshal(v)
+	if e != nil {
+		return "", false
+	}
+	var decoded any
+	if e := json.Unmarshal(b, &decoded); e != nil {
+		return "", false
+	}
+	b, e = json.Marshal(decoded)
+	if e != nil {
+		return "", false
+	}
+	return string(b), true
 }
 
 func (a *App) releaseQuota(ctx context.Context, j Job) error {
