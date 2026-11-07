@@ -184,6 +184,29 @@ Everything else reaches a design lane exactly as before: ESC and decision
 questions, `automation-failed` (a SPAWN_FAILED notice), `blocked`, desk orders
 and deploy approvals.
 
+### Worker results stay in a design lane's inbox
+
+A worker's routine result does not interrupt a design lane (hk 3426). mergewake
+reviews and merges from the PR, so the design session has nothing to do with it.
+The hub keeps these in the lane's inbox, without a pane injection:
+
+- `job.completed` for a job that has a PR (the event's `pr`) or a task (the
+  `task_id` of the job's hk record, read through the hub's existing spawn
+  client);
+- a `lane.event` declared `--type ready`, also when the sender passed
+  `--deliver interrupt`.
+
+They are ordinary unread inbox items (a `ready` one stays unacked until
+`panewire inbox ack`): readable through `panewire inbox list --lane LANE`, never
+digested or escalated, and never replayed into the pane after a hub restart. The
+job's own state, its hk record and `spawn --wait` are unchanged.
+
+A completion of a job with neither a task nor a PR — a consult answer the
+session waits for — is delivered as before, and so is one whose hk job record
+cannot be read. `job.escalate` and the `decision`, `blocked`, `findings` and
+`automation-failed` types still interrupt. Lanes that are not design lanes,
+`operator-desk` included, are unchanged.
+
 ## Durability and replay
 
 `--inbox-store PATH` chooses a private, persistent SQLite database on the hub;

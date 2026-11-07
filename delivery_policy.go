@@ -154,6 +154,27 @@ func (p *deliveryPolicy) designLane(lane string) bool {
 	return false
 }
 
+// designQuiet reports whether a design lane keeps this event in its inbox
+// without a pane injection (hk 3426): a worker's lane.event declared ready,
+// and the completion of a job that has a PR or a task. mergewake reviews and
+// merges from the PR, so the design session has nothing to do with either.
+// The completion of a job with neither -- a consult answer the session waits
+// for -- is delivered as before. hasTask is consulted only for a design-lane
+// completion that names no PR. The declared type and the kind decide alone:
+// text tags, an explicit class and replay do not bring either back.
+func (p *deliveryPolicy) designQuiet(lane, kind string, e hubJobEventPayload, hasTask func() bool) bool {
+	if !p.designLane(lane) {
+		return false
+	}
+	switch kind {
+	case "lane.event":
+		return e.NotifyType == "ready"
+	case "job.completed":
+		return e.PR != "" || hasTask()
+	}
+	return false
+}
+
 func loadDeliveryPolicy(path string) (*deliveryPolicy, error) {
 	raw := defaultDeliveryPolicy
 	if path != "default" && path != "off" {
