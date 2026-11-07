@@ -148,6 +148,20 @@ func TestNonLeadRolesKeepTodaysOrdering(t *testing.T) {
 			}
 		}
 	}
+
+	// A reviewer with no min_effort keeps today's grade-driven ordering: the
+	// cheapest covering rung wins and nothing is dropped for a floor.
+	a, s, _ := reviewerRungFixture(t, routingBlockV1)
+	sel, e := a.selectProfile(context.Background(), s)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if c := sel.chosen; c.row.Profile != "codex-luna" || c.row.Effort != "low" {
+		t.Fatalf("no min_effort must keep today's codex-luna@low, got %s@%s", c.row.Profile, c.row.Effort)
+	}
+	if got := candOutcome(sel.record(), "codex-luna", "low"); got["outcome"] == "dropped:"+reasonBelowRoleMinEffort {
+		t.Fatalf("no min_effort must not drop a rung for the floor: %v", got)
+	}
 }
 
 // Acceptance 4: `panewire resolve --role consult` prints the choice spawn's

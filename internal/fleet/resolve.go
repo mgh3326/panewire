@@ -19,8 +19,7 @@ import (
 // --t takes the same values as plan's (T0..T3) and defaults to T0, so the
 // bare `resolve --role R --grade G` form keeps working. The seat role is worker, or reviewer for the reviewer and judge routing
 // roles, whose family rule needs --builder-family (the author's or parent's
-// family). The effort is the role's starting effort when the table sets
-// one, else the chosen rung's.
+// family). The effort is the one the chosen rung launches at.
 type resolveResult struct {
 	RoutingRole    string         `json:"routing_role"`
 	SeatRole       string         `json:"seat_role"`
@@ -116,6 +115,10 @@ func (a *App) resolveCmd(ctx context.Context, args []string) error {
 		c := sel.chosen
 		r.Seat, r.ModelID, r.Pool, r.Tier, r.RungEffort = c.seatName, c.row.ModelID, c.row.Pool, c.tierName, c.row.Effort
 		r.Profile, r.Effort = c.seat.Canon, route.effort(c.row)
+		if r.Effort == "" {
+			// A rung-less row launches at the seat's declared default.
+			r.Effort = c.seat.Effort
+		}
 		r.AccountKey, r.Host = c.accountKey, c.host
 		if c.seat.Kind == "omp" && (role == "implementer" || role == "explorer") {
 			r.OMPAgent = a.ompAgent(c.row.ModelID)
