@@ -32,6 +32,9 @@ type admissionPolicy struct {
 	Pools    map[string]admissionPoolPolicy
 	Profiles map[string]*bool
 	Settings map[string]float64
+	// Accounts is pacelever's [quota.accounts]: the account fingerprint this
+	// host is pinned to per pool, which pacelever's own gate judges.
+	Accounts map[string]string
 }
 
 // admissionPolicyPools are the pools pacelever's config accepts; a table for
@@ -75,11 +78,19 @@ func parseAdmissionPolicy(data []byte) (admissionPolicy, error) {
 			Subscribed *bool `toml:"subscribed"`
 		} `toml:"profiles"`
 		Settings map[string]float64 `toml:"settings"`
+		Quota    struct {
+			Accounts map[string]string `toml:"accounts"`
+		} `toml:"quota"`
 	}
 	if err := toml.Unmarshal(data, &raw); err != nil {
 		return admissionPolicy{}, fmt.Errorf("invalid pacelever configuration (values withheld)")
 	}
-	p := admissionPolicy{Pools: map[string]admissionPoolPolicy{}, Profiles: map[string]*bool{}, Settings: raw.Settings}
+	p := admissionPolicy{Pools: map[string]admissionPoolPolicy{}, Profiles: map[string]*bool{}, Settings: raw.Settings, Accounts: map[string]string{}}
+	for pool, fp := range raw.Quota.Accounts {
+		if validID(pool) && accountFP.MatchString(fp) {
+			p.Accounts[pool] = fp
+		}
+	}
 	for name, profile := range raw.Profiles {
 		p.Profiles[name] = profile.Subscribed
 	}

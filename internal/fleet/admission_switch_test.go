@@ -255,8 +255,18 @@ func TestAdmissionLocalRequestReadsHeldAccount(t *testing.T) {
 	if _, err := a.Quota.Gate(context.Background(), local); exitCode(err) != gateUnmeasurable {
 		t.Fatalf("a host holding no claude account cannot be judged: %v", err)
 	}
-	a.Config.Quota["accounts"] = map[string]any{"claude": "0123456789abcdef"}
+	config := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(config, []byte("[quota.accounts]\nclaude = \"0123456789abcdef\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PACELEVER_CONFIG", config)
 	out, err := a.Quota.Gate(context.Background(), local)
+	if err != nil || !strings.Contains(out, `"reading_account_key":"`+switchKey+`"`) {
+		t.Fatalf("local request must judge the account pacelever's config pins: %v\n%s", err, out)
+	}
+	t.Setenv("PACELEVER_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
+	a.Config.Quota["accounts"] = map[string]any{"claude": "0123456789abcdef"}
+	out, err = a.Quota.Gate(context.Background(), local)
 	if err != nil || !strings.Contains(out, `"reading_account_key":"`+switchKey+`"`) {
 		t.Fatalf("local request must judge the held account: %v\n%s", err, out)
 	}

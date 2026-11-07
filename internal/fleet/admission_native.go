@@ -172,6 +172,8 @@ func (a *App) nativeVerdict(ctx context.Context, catalog QuotaGate, r QuotaReque
 	if key == "" {
 		if keys := a.localAccountKeys(ctx, d.Pool); len(keys) > 0 {
 			key = keys[0]
+		} else if fp := policy.Accounts[d.Pool]; fp != "" {
+			key = d.Pool + ":" + fp
 		}
 	}
 	if key == "" {

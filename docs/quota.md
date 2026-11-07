@@ -400,8 +400,9 @@ pacelever v0.3.28's gate) from three inputs:
   (`/v1/quota/accounts/<key>/latest`): bucket windows with scope, used
   percentage and reset, the plan, devin's free-bucket state, and the
   operator-entered manual windows. A request with an account key reads that
-  account; a local request reads the account this host holds
-  (`[quota.accounts]`, then this host's presence records).
+  account; a local request reads the account this host holds (the fleet
+  config's `[quota.accounts]`, this host's presence records, then pacelever's
+  own `[quota.accounts]`).
 - **The bench catalog** (`pacelever bench catalog list`, until hk 3249 moves it).
 - **The pool policy** in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
   `~/.config/pacelever/config.toml`): class and its `until` date, cutoff,
