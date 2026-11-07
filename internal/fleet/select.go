@@ -181,6 +181,9 @@ type selCand struct {
 	// creditPool identifies a prepaid pool; credit records its expiry reading.
 	creditPool bool
 	credit     *creditFinal
+	// usdUrgency is a credit pool's dollars at risk per hour until expiry;
+	// nil for a credit entry without a dollar balance.
+	usdUrgency *float64
 	// creditLeft marks a credit pool with a recorded balance above zero; only
 	// then may a paced pool rank behind credit.
 	creditLeft bool
@@ -227,6 +230,9 @@ type selPlan struct {
 	// names required caps no usable host declares, for the refusal text.
 	hosts   []hostTrace
 	capsGap string
+	// creditMissing names credit pools whose entry records no dollars, logged
+	// once per plan so the operator knows to record them.
+	creditMissing []string
 }
 type selReq struct {
 	grade           string
@@ -827,6 +833,9 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		}
 	}
 	orderSelCands(pending)
+	for _, pool := range p.creditMissing {
+		a.warn("credit_usd_missing pool=%s", pool)
+	}
 	p.ranked = pending
 	pres.admitHostFirst(ctx, s, p, pending)
 	p.markRoleEffort()
@@ -896,14 +905,16 @@ func (p *selPlan) markRoleEffort() {
 	}
 }
 
-// orderSelCands ranks tiered candidates: waste-risk pools first (by waste
-// urgency), then policy tier, then the lowest grade
-// that fits, then waste urgency — the unused projected share per hour until
-// the pool's longest window's reset, highest first. A candidate whose pool
-// reset can be paced always ranks ahead of one whose cannot; candidates
-// without urgency keep the lower projected use at reset (the used
-// percentage when it cannot be paced yet), then smaller effort, catalog
-// score, profile.
+// orderSelCands ranks tiered candidates: waste-risk pools first, then policy
+// tier, then the lowest grade that fits, then waste urgency — the unused
+// projected share per hour until the pool's longest window's reset, highest
+// first. A waste-risk credit pool with a dollar balance ranks by the dollars
+// at risk per hour until expiry and ahead of percent-ranked waste risk; a
+// credit pool without dollars keeps the percentage rule and ranks after any
+// credit that has dollars. A candidate whose pool reset can be paced always
+// ranks ahead of one whose cannot; candidates without urgency keep the lower
+// projected use at reset (the used percentage when it cannot be paced yet),
+// then smaller effort, catalog score, profile.
 func orderSelCands(pending []*selCand) {
 	// Credit pacing: a pool on pace to use up its longest window ranks behind
 	// credit, but only when a credit pool with a recorded balance is a
@@ -930,11 +941,40 @@ func orderSelCands(pending []*selCand) {
 			return 1
 		}
 		if x.risk {
-			if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
+			// A dollar credit ranks ahead of percent-ranked waste risk, and
+			// within each group the higher urgency wins.
+			if (x.usdUrgency != nil) != (y.usdUrgency != nil) {
+				if x.usdUrgency != nil {
+					return -1
+				}
+				return 1
+			}
+			if x.usdUrgency != nil {
+				if c := cmp.Compare(*y.usdUrgency, *x.usdUrgency); c != 0 {
+					return c
+				}
+			} else if c := cmp.Compare(*y.urgency, *x.urgency); c != 0 {
 				return c
 			}
-		} else if x.tier != y.tier {
-			return x.tier - y.tier
+		} else {
+			if x.tier != y.tier {
+				return x.tier - y.tier
+			}
+			// Among credit pools a dollar balance outranks a percentage-only
+			// entry and is ordered by dollars at risk per hour.
+			if x.creditPool && y.creditPool {
+				if (x.usdUrgency != nil) != (y.usdUrgency != nil) {
+					if x.usdUrgency != nil {
+						return -1
+					}
+					return 1
+				}
+				if x.usdUrgency != nil {
+					if c := cmp.Compare(*y.usdUrgency, *x.usdUrgency); c != 0 {
+						return c
+					}
+				}
+			}
 		}
 		// Grade fit: the lowest grade that satisfies the task.
 		if gx, gy := gradeOrder[x.row.Grade], gradeOrder[y.row.Grade]; !x.ignoreGrade && gx != gy {
@@ -1058,13 +1098,18 @@ func (p *selPlan) record() map[string]any {
 			row["credit"] = c.credit.record()
 		}
 		if c.tier >= 0 {
-			// Ranked candidates state how they were ordered: by waste urgency
-			// when the pool's longest window's reset was paceable, else by
-			// the projected-at-reset fallback.
-			if c.urgency != nil {
+			// Ranked candidates state how they were ordered: by dollars at
+			// risk per hour for a dollar credit, else by waste urgency when the
+			// pool's longest window's reset was paceable, else by the
+			// projected-at-reset fallback.
+			switch {
+			case c.usdUrgency != nil:
+				row["usd_urgency"] = *c.usdUrgency
+				row["waste_order"] = "usd"
+			case c.urgency != nil:
 				row["waste_urgency"] = *c.urgency
 				row["waste_order"] = "reset"
-			} else {
+			default:
 				row["waste_order"] = "projected_fallback"
 			}
 			if c.resetHrs != nil {
@@ -1085,7 +1130,7 @@ func (p *selPlan) record() map[string]any {
 		"outcome_code":   p.outcome,
 		"mode":           "auto",
 		"decision":       fmt.Sprintf("urgency=%s source=%s tiers=%s", p.req.urgency, p.req.urgencySource, strings.Join(p.order, ">")),
-		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk pools and expiring credit rank by waste urgency (unused share per hour until reset or expiry), then tier, lowest grade >= %s, waste urgency and smaller effort; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
+		"rule":           fmt.Sprintf("hosts first; within each host, waste-risk pools rank by waste urgency (unused share per hour until reset) and expiring credit by dollars at risk per hour until expiry, then tier, lowest grade >= %s, waste urgency and smaller effort; waste < %g%%, excluded >= %g%% projected", p.req.grade, *p.policy.WasteBelow, *p.policy.ExcludeAt),
 		"waste_risk":     map[string]any{"horizon_hours": *p.policy.WasteRisk.HorizonHours, "min_unused_pct": *p.policy.WasteRisk.MinUnusedPct},
 		"policy_version": p.policy.Version,
 		"policy_source":  p.policy.SourceDoc,
@@ -1120,6 +1165,9 @@ func (p *selPlan) record() map[string]any {
 			chosen["waste_urgency"] = *c.urgency
 			why += fmt.Sprintf(" waste_urgency=%.2f", *c.urgency)
 		}
+		if c.usdUrgency != nil {
+			chosen["usd_urgency"] = *c.usdUrgency
+		}
 		chosen["why"] = why
 		rec["chosen"] = chosen
 	}
@@ -1137,7 +1185,7 @@ func (p *selPlan) record() map[string]any {
 		}
 		rec["hosts"] = hosts
 		rec["host_order"] = order
-		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score or load; on each host its present accounts in pool order; first admitted pair wins; credit, and pools ranked behind credit, are a last band tried on the hosts again (pass 2) only when no other account was admitted on any host (pass 1); expiring credit is waste-risk and stays in pass 1"
+		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score or load; on each host its present accounts in pool order; first admitted pair wins; credit, and pools ranked behind credit, are a last band tried on the hosts again (pass 2) only when no other account was admitted on any host (pass 1); expiring credit with dollars at risk is waste-risk and stays in pass 1"
 	}
 	if p.req.route != nil {
 		rt := p.req.route.record(p.routeRefusal)

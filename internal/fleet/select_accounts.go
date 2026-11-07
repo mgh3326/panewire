@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"math"
 	"slices"
 	"strings"
 	"time"
@@ -236,17 +237,36 @@ func (p *selPlan) classify(c *selCand, v PoolView) {
 			c.reason, c.code, c.outcome = "pool_excluded", outcomeNoRoleCandidate, "dropped:pool_excluded"
 			return
 		}
-		// A recorded balance competes on urgency until its expiry.
+		// A recorded balance competes until its expiry. With dollars, rank by
+		// the dollars at risk after the spend projected before expiry; without,
+		// keep the percentage rule and tell the operator to record dollars.
+		if v.Credit != nil && v.Credit.BalanceUSD == nil && !slices.Contains(p.creditMissing, c.row.Pool) {
+			p.creditMissing = append(p.creditMissing, c.row.Pool)
+		}
 		at := p.req.creditAt
 		if at.IsZero() {
 			at = p.at
 		}
 		if ok, hours := v.Credit.expiring(at); ok {
 			c.creditLeft = true
+			c.credit = &creditFinal{balance: v.Credit, hoursLeft: hours}
+			if v.Credit.BalanceUSD != nil {
+				burn := v.Credit.BurnUSDPerH
+				atRisk := math.Max(0, *v.Credit.BalanceUSD-burn*hours)
+				usdUrgency := atRisk / hours
+				c.credit.burnUSDPerH, c.credit.atRiskUSD, c.credit.usdUrgency = &burn, &atRisk, &usdUrgency
+				c.usdUrgency = &usdUrgency
+				// Only money that will be lost makes credit waste risk; a
+				// balance the pace uses up first stays in the plain credit tier.
+				if atRisk > 0 {
+					c.tierName, c.tier = "waste", slices.Index(p.order, "waste")
+					c.risk = true
+				}
+				return
+			}
 			left, urgency := v.Credit.LeftPct, v.Credit.LeftPct/hours
 			c.tierName, c.tier = "waste", slices.Index(p.order, "waste")
 			c.risk, c.urgency, c.resetHrs, c.unused = true, &urgency, &hours, &left
-			c.credit = &creditFinal{balance: v.Credit, hoursLeft: hours}
 		}
 		return
 	}

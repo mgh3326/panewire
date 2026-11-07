@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -16,7 +17,12 @@ type CreditBalance struct {
 	LeftPct float64
 	// BalanceUSD is the dollar balance when the entry records one.
 	BalanceUSD *float64
-	ExpiresAt  time.Time
+	// BurnUSDPerH is the dollar spend rate from the pool's two latest entries
+	// that record dollars: (older remaining − newer remaining) over the hours
+	// between their measurements. It is 0 when fewer than two such entries
+	// exist or the balance did not fall.
+	BurnUSDPerH float64
+	ExpiresAt   time.Time
 }
 
 // expiring reports a positive balance with a future expiry.
@@ -29,13 +35,14 @@ func (c *CreditBalance) expiring(now time.Time) (bool, float64) {
 }
 
 type manualEntry struct {
-	ID        string   `json:"manual_observation_id"`
-	Event     string   `json:"event"`
-	Pool      string   `json:"pool"`
-	Window    string   `json:"window"`
-	UsedPct   *float64 `json:"used_pct"`
-	ExpiresAt string   `json:"expires_at"`
-	Credit    *struct {
+	ID         string   `json:"manual_observation_id"`
+	Event      string   `json:"event"`
+	Pool       string   `json:"pool"`
+	Window     string   `json:"window"`
+	UsedPct    *float64 `json:"used_pct"`
+	MeasuredAt string   `json:"measured_at"`
+	ExpiresAt  string   `json:"expires_at"`
+	Credit     *struct {
 		RemainingUSD float64 `json:"remaining_usd"`
 		ExpiresOn    string  `json:"expires_on"`
 	} `json:"credit"`
@@ -56,23 +63,71 @@ func (q CLIQuota) creditBalances(ctx context.Context) (map[string]*CreditBalance
 	if e := json.Unmarshal([]byte(r.Out), &store); e != nil || store.Schema == "" {
 		return nil, fail(exitConfig, "invalid manual store JSON")
 	}
-	out := map[string]*CreditBalance{}
+	byPool := map[string][]manualEntry{}
 	for _, m := range store.History {
-		if m.Window != "credit" || m.Event != "set" || store.Latest[m.Pool+":credit"] != m.ID || m.UsedPct == nil || *m.UsedPct < 0 || *m.UsedPct > 100 {
+		if m.Window != "credit" || m.Event != "set" || m.UsedPct == nil || *m.UsedPct < 0 || *m.UsedPct > 100 {
 			continue
 		}
-		expires, e := creditExpiry(m)
+		byPool[m.Pool] = append(byPool[m.Pool], m)
+	}
+	out := map[string]*CreditBalance{}
+	for pool, entries := range byPool {
+		var current *manualEntry
+		for i := range entries {
+			if store.Latest[pool+":credit"] == entries[i].ID {
+				current = &entries[i]
+				break
+			}
+		}
+		if current == nil {
+			continue
+		}
+		expires, e := creditExpiry(*current)
 		if e != nil {
 			continue
 		}
-		c := &CreditBalance{LeftPct: 100 - *m.UsedPct, ExpiresAt: expires}
-		if m.Credit != nil {
-			usd := m.Credit.RemainingUSD
+		c := &CreditBalance{LeftPct: 100 - *current.UsedPct, ExpiresAt: expires}
+		if current.Credit != nil {
+			usd := current.Credit.RemainingUSD
 			c.BalanceUSD = &usd
+			c.BurnUSDPerH = creditBurnUSDPerH(entries)
 		}
-		out[m.Pool] = c
+		out[pool] = c
 	}
 	return out, nil
+}
+
+// creditBurnUSDPerH is a credit pool's spend rate from its two latest entries
+// that record dollars: (older remaining − newer remaining) over the hours
+// between their measurements. It is 0 when fewer than two such entries exist
+// or the balance did not fall.
+func creditBurnUSDPerH(entries []manualEntry) float64 {
+	type reading struct {
+		at  time.Time
+		usd float64
+	}
+	var readings []reading
+	for _, m := range entries {
+		if m.Credit == nil {
+			continue
+		}
+		if at, e := time.Parse(time.RFC3339Nano, m.MeasuredAt); e == nil {
+			readings = append(readings, reading{at: at, usd: m.Credit.RemainingUSD})
+		}
+	}
+	if len(readings) < 2 {
+		return 0
+	}
+	slices.SortStableFunc(readings, func(a, b reading) int { return a.at.Compare(b.at) })
+	older, newer := readings[len(readings)-2], readings[len(readings)-1]
+	hours := newer.at.Sub(older.at).Hours()
+	if hours <= 0 {
+		return 0
+	}
+	if burn := (older.usd - newer.usd) / hours; burn > 0 {
+		return burn
+	}
+	return 0
 }
 
 // creditExpiry is the credit's own expiry when the entry records dollars,
@@ -88,16 +143,29 @@ func creditExpiry(m manualEntry) (time.Time, error) {
 	return time.Parse(time.RFC3339Nano, s)
 }
 
-// creditFinal records a candidate's balance and time to expiry.
+// creditFinal records a candidate's balance and time to expiry, and for a
+// dollar balance its burn rate, dollars at risk and urgency.
 type creditFinal struct {
-	balance   *CreditBalance
-	hoursLeft float64
+	balance     *CreditBalance
+	hoursLeft   float64
+	burnUSDPerH *float64
+	atRiskUSD   *float64
+	usdUrgency  *float64
 }
 
 func (c *creditFinal) note() string {
 	s := fmt.Sprintf("credit_expiring days_left=%.1f balance_pct=%.1f", c.hoursLeft/24, c.balance.LeftPct)
 	if c.balance.BalanceUSD != nil {
 		s += fmt.Sprintf(" balance_usd=%.2f", *c.balance.BalanceUSD)
+	}
+	if c.burnUSDPerH != nil {
+		s += fmt.Sprintf(" burn_usd_per_h=%.4f", *c.burnUSDPerH)
+	}
+	if c.atRiskUSD != nil {
+		s += fmt.Sprintf(" at_risk_usd=%.2f", *c.atRiskUSD)
+	}
+	if c.usdUrgency != nil {
+		s += fmt.Sprintf(" usd_urgency=%.4f", *c.usdUrgency)
 	}
 	return s
 }
@@ -106,6 +174,15 @@ func (c *creditFinal) record() map[string]any {
 	r := map[string]any{"days_left": c.hoursLeft / 24, "balance_pct": c.balance.LeftPct, "expires_at": c.balance.ExpiresAt.Format(time.RFC3339)}
 	if c.balance.BalanceUSD != nil {
 		r["balance_usd"] = *c.balance.BalanceUSD
+	}
+	if c.burnUSDPerH != nil {
+		r["burn_usd_per_h"] = *c.burnUSDPerH
+	}
+	if c.atRiskUSD != nil {
+		r["at_risk_usd"] = *c.atRiskUSD
+	}
+	if c.usdUrgency != nil {
+		r["usd_urgency"] = *c.usdUrgency
 	}
 	return r
 }
