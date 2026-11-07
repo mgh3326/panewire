@@ -614,13 +614,28 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	if e != nil {
 		return ledgerFail(e, "lease")
 	}
+	committed := false
+	var createdWs *createdWorkspace
 	if !s.DryRun {
 		var resolveErr error
-		s.Workspace, resolveErr = a.resolveWorkspace(ctx, s.Workspace)
+		s.Workspace, createdWs, resolveErr = a.resolveWorkspace(ctx, s.Workspace)
 		if resolveErr != nil {
 			return resolveErr
 		}
 	}
+	// The created workspace's root pane keeps it alive. Close it when the
+	// launch fails so a failed spawn leaves no empty workspace; a workspace
+	// another spawn adopted survives on that spawn's own pane.
+	defer func() {
+		if committed || createdWs == nil || createdWs.rootPane == "" {
+			return
+		}
+		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if e := a.must(cleanup, "herdr", "pane", "close", createdWs.rootPane); e != nil {
+			a.warn("created workspace cleanup failed; close pane %s on the executing host: %v", createdWs.rootPane, e)
+		}
+	}()
 	if s.AccountKey == "" {
 		key, _ := a.remoteAccount(ctx, firstNonempty(launch.Pool, gatePool(gate)), a.machine(), a.Config.Local)
 		s.AccountKey = key
@@ -648,7 +663,6 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return e
 	}
 	a.stage("claim", startedClaim)
-	committed := false
 	retrySafe := true
 	ownedClaim := false
 	hadPool := false
