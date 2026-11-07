@@ -13,6 +13,12 @@ type hubRelayControlState struct {
 	relayTimeoutOrder      lruIndex[string]
 	acceptingOverride      map[string]acceptingOverride
 	acceptingOverridesPath string
+	// workingExpired maps a durable row a node dropped as working_wait_expired
+	// to its lane, until an idle wake re-delivers it; idleRedelivered holds
+	// the newest idle wake that re-delivered a row per machine and pane (hk
+	// 3411, hub_relay_idle_redelivery.go). Both are guarded by HubServer.mu.
+	workingExpired  map[int64]workingExpiredRow
+	idleRedelivered map[string]idleRedeliveryWake
 }
 
 func (s *hubRelayControlState) rememberRelayTimeout(jobID string) bool {
@@ -37,6 +43,9 @@ func (s *hubRelayControlState) forgetRelayTimeout(jobID string) {
 
 type clientRelayControlState struct {
 	relayInjectTimeout time.Duration
+	// cmdHoldMax is the relay.cmd_hold_max setting: the ceiling on how long a
+	// row stays held for a working cmd pane (hk 3411). Zero reads the default.
+	cmdHoldMax time.Duration
 }
 
 func newHubRelayControlState(config HubServerConfig, overrides map[string]acceptingOverride) hubRelayControlState {
@@ -47,5 +56,5 @@ func newHubRelayControlState(config HubServerConfig, overrides map[string]accept
 }
 
 func newClientRelayControlState(config HubClientConfig) clientRelayControlState {
-	return clientRelayControlState{relayInjectTimeout: relayInjectTimeout(config.RelayInjectTimeout)}
+	return clientRelayControlState{relayInjectTimeout: relayInjectTimeout(config.RelayInjectTimeout), cmdHoldMax: relayCmdHoldMaxFromEnv()}
 }

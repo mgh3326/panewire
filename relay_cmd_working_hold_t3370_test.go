@@ -77,11 +77,13 @@ func TestWorkingCmdDirectiveHeldUntilIdle_t3370(t *testing.T) {
 	}
 }
 
-// A cmd pane that is still working when max_wait runs out is not typed into:
-// the delivery is reported unconfirmed and dropped, the design lane hears once,
-// and the durable row stays undelivered.
+// A cmd pane that is still working when its hold ends is not typed into: the
+// delivery is reported unconfirmed and dropped, the design lane hears once,
+// and the durable row stays undelivered. Since hk 3411 the hold ends only at
+// the relay.cmd_hold_max ceiling, which this test sets already passed.
 func TestWorkingCmdDirectiveNotTypedPastMaxWait_t3370(t *testing.T) {
 	rig := t3276Start(t)
+	rig.node.relayControl.cmdHoldMax = time.Nanosecond
 	directive := rig.send("ev-cmd-expiry", "findings", "[mergewake] findings for the worker")
 	pane := t3330InstallPaneFor(t, "working", "working", t3276TypedFor(directive), true)
 	manager := rig.node.relayBusyManager()

@@ -314,6 +314,12 @@ func (h *HubServer) inboxImmediate(lane, kind string) bool {
 // unconfirmed replay can claim an injection. Old handoffkeep rows are migrated
 // to the inbox before being retired; a failed retire is harmless and retried.
 func (h *HubServer) replayInbox(record handoffkeepRelayEvent) bool {
+	return h.replayInboxAged(record, true)
+}
+
+// replayInboxAged is replayInbox with the receipt-age gate optional
+// (relayReplayRetireReasonAged); the inbox settlement checks always apply.
+func (h *HubServer) replayInboxAged(record handoffkeepRelayEvent, receiptAge bool) bool {
 	if record.DeliveredAt != "" {
 		return true
 	}
@@ -323,7 +329,7 @@ func (h *HubServer) replayInbox(record handoffkeepRelayEvent) bool {
 	// item on every restart (hk 2976). Chat rows keep the chat store as their
 	// only authority.
 	if h.handoffkeep != nil && !strings.HasPrefix(record.DeliveredTo, relayReplayRetiredMarker) && chatRelayEventPattern.FindStringSubmatch(record.EventID) == nil {
-		if reason := h.relayReplayRetireReason(record); reason != "" {
+		if reason := h.relayReplayRetireReasonAged(record, receiptAge); reason != "" {
 			h.retireRelayReplay(record, reason)
 			return true
 		}
