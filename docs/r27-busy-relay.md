@@ -8,7 +8,7 @@ fail-open으로 즉시 넣는다.
 
 정책은 이벤트별 `deliver` 값이다. `now`는 상태 조회 없이 즉시 넣고,
 `directive`(워커 지시, [relay-harness-delivery](relay-harness-delivery.md))는
-`working`이어도 즉시 넣되 `blocked`일 때만 보류한다.
+`working`이어도 즉시 넣되 `blocked`일 때 보류한다. working 상태의 지시를 증명할 수 없는 하니스(어댑터의 `workingUnprovable`, 현재 cmd)는 `working`일 때도 보류하고 idle/done이 되면 넣는다(hk 3370).
 `idle`은 기본 정책이며 최대 1800초를 기다린다. `max_wait=<초>`는 그
 이벤트의 한도를 바꾼다. 대기는 폴링이 아니라
 `herdr agent wait <pane> --until idle --until done --timeout <ms>` 한 번으로

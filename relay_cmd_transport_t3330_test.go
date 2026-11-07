@@ -4,15 +4,15 @@ package panewire
 // answers `agent get` and `agent read` for a cmd pane but refuses `agent prompt`
 // and `agent send-keys` with agent_not_ready, so the relay types with
 // `pane send-text` and submits with `pane send-keys return` — the pair the spawn
-// path already uses. The proof rule stays relayProofEchoAndWorking, so a working
-// cmd pane is typed into but reported unconfirmed, exactly as for grok and omp.
+// path already uses. The proof rule stays relayProofEchoAndWorking; a directive
+// for a working cmd pane is held until the pane is idle (hk 3370), see
+// relay_cmd_working_hold_t3370_test.go.
 
 import (
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // t3330CmdPane is a shell herdr that models one cmd pane: reads answer, agent
@@ -138,38 +138,6 @@ func TestCmdPaneDeliveredThroughPaneTransport_t3330(t *testing.T) {
 				t.Fatalf("a delivered cmd event escalated: %+v", got)
 			}
 		})
-	}
-}
-
-// Acceptance 1 (unconfirmed half): a working cmd pane is typed into through the
-// pane transport, but with no idle-to-working transition nothing proves the
-// submit. It is typed once more at once and the design lane hears exactly once.
-func TestWorkingCmdPaneInjectedThenEscalated_t3330(t *testing.T) {
-	prevWindow := relayObserveWindow
-	relayObserveWindow = 300 * time.Millisecond
-	t.Cleanup(func() { relayObserveWindow = prevWindow })
-
-	rig := t3276Start(t)
-	directive := rig.send("ev-cmd-working", "findings", "[mergewake] findings for the worker")
-	pane := t3330InstallPaneFor(t, "working", "working", t3276TypedFor(directive), true)
-
-	rig.node.relayBusyManager().offer(t.Context(), t3276Message(directive))
-
-	if got := pane.calls(t, "agent prompt"); got != 0 {
-		t.Fatalf("a working cmd pane got %d agent prompts, want the pane transport only", got)
-	}
-	if got := pane.calls(t, "pane send-text"); got != 2 {
-		t.Fatalf("pane send-text called %d times, want the directive and one retry", got)
-	}
-	kinds, _ := rig.drainEvents()
-	if t3276Count(kinds, "relay.held") != 0 || t3276Count(kinds, "relay.delivered") != 0 {
-		t.Fatalf("events=%v: want injected at once and not delivered without proof", kinds)
-	}
-	if t3276Count(kinds, "relay.unconfirmed") != 1 || t3276Count(kinds, "relay.dropped") != 1 {
-		t.Fatalf("events=%v, want one relay.unconfirmed then one relay.dropped", kinds)
-	}
-	if got := rig.escalations(); len(got) != 1 {
-		t.Fatalf("design lane got %d escalations, want exactly 1", len(got))
 	}
 }
 

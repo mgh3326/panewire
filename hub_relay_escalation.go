@@ -26,6 +26,9 @@ const (
 	// send that may already be in the pane and is never re-injected.
 	relayDroppedRetriesExhausted = "inject_failed_max_attempts"
 	relayDroppedMaybeInPane      = "maybe_in_pane"
+	// relayDroppedWorkingExpired ends a directive held for a working pane that
+	// never turned idle within max_wait (hk 3370). Nothing was typed.
+	relayDroppedWorkingExpired = "working_wait_expired"
 )
 
 // unconfirmedEscalationBackoff spaces the retries of an escalation whose
@@ -34,7 +37,7 @@ const (
 var unconfirmedEscalationBackoff = []time.Duration{2 * time.Second, 10 * time.Second, time.Minute, 5 * time.Minute}
 
 func relayDroppedIsUnconfirmed(reason string) bool {
-	return reason == relayDroppedRetriesExhausted || reason == relayDroppedMaybeInPane
+	return reason == relayDroppedRetriesExhausted || reason == relayDroppedMaybeInPane || reason == relayDroppedWorkingExpired
 }
 
 // designLaneFor names the lane that owns the job a worker lane belongs to: the

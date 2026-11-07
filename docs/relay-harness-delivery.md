@@ -10,15 +10,17 @@ busy hold in [R27](r27-busy-relay.md), the lane routes in [R19](r19-lanes.md).
 
 A worker directive is typed into the pane at once on every harness. It never
 waits for a turn boundary, and a `working` pane is not a reason to refuse or
-defer it. A `blocked` pane is the exception: it is waiting on a prompt (a codex
+defer it, except for a harness whose adapter sets `workingUnprovable` (today
+only cmd, see the adapter table). A `blocked` pane is an exception too: it is waiting on a prompt (a codex
 approval) that the text could answer, so the R27 hold still applies and the
 directive waits until the pane is released, which is when it turns idle, done
 or working again (the held directive's wait also ends on `working`, and only the
-directive is typed then; a row on the idle policy keeps waiting). A directive
+directive is typed then, except on a `workingUnprovable` harness, whose wait
+ends on idle or done only; a row on the idle policy keeps waiting). A directive
 is also never filed as inbox or kept for a digest by a lane policy, and it never
 shares a send with an ordinary held row. A worker directive is a `lane.event` of type `findings`, `decision`
 (an ESC answer) or `order` sent to a lane whose route names a parent, the
-design lane it reports to. The hub gives it `deliver: directive` (typed at once, held only while `blocked`)
+design lane it reports to. The hub gives it `deliver: directive` (typed at once, held while `blocked`, and for a `workingUnprovable` harness while `working`)
 unless the event or the route already names a policy. An explicit `deliver: now`
 still skips the hold entirely. A lane with no parent (the desk) and every
 other type keep their delivery policy, and so still wait for an idle pane
@@ -47,8 +49,19 @@ report, has no adapter and no delivery proof.
 | devin | nonce in the transcript, or devin's own queue banner (`nonce_echo`, `devin_queue_banner`) | no |
 | grok | nonce on screen and herdr reports idle/done before the send and `working` after it (`nonce_echo+status_working`) | observed 8 s |
 | omp | same as grok | observed 8 s |
-| cmd | same as grok, typed through `pane send-text` plus `pane send-keys return`; the composer is found with claude's rule (below) | observed 8 s |
+| cmd | same as grok, typed through `pane send-text` plus `pane send-keys return`; the composer is found with claude's rule (below); `workingUnprovable`: a directive waits for idle or done | observed 8 s |
 | anything else | none | n/a |
+
+`workingUnprovable` marks a harness that cannot prove a directive typed into a
+working pane. cmd sets it: its proof needs the composer of an idle or done pane,
+so a send into a working one stays unproven and the retry-once rule would type
+the directive a second time (hk 3370). For such a harness the directive policy
+holds while the pane is `working` as well as `blocked`, through the same R27
+hold, and types when the pane turns idle or done. The wait ends on idle or done
+only. Past `max_wait` (30 minutes) a pane that is still working is not typed
+into: the row is dropped as `working_wait_expired`, the design lane is told once
+(see below), and the durable row stays undelivered for a replay. Every other
+harness is typed at once as before.
 
 The nonce is the per-row `[r<id><check>]` token at the head of every typed text
 (#687). It identifies this row, so a replay of another row never counts.
@@ -144,5 +157,6 @@ codex (idle and working), devin, grok and omp. `relay_cmd_transport_t3330_test.g
 does the same for cmd, with a shell `herdr` that refuses the agent-level writes
 the way herdr does; `relay_cmd_composer_t3330_test.go` pins the send-text
 failure, the failed-return replay, the draft, dim-suggestion, draft-between and
-echo-lag cases; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
+echo-lag cases; `relay_cmd_working_hold_t3370_test.go` pins the working hold,
+its expiry and the unchanged claude pane; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
 transport.
