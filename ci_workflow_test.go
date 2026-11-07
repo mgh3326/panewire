@@ -24,7 +24,8 @@ type ciWorkflow struct {
 		Uses     string   `yaml:"uses"`
 		Continue bool     `yaml:"continue-on-error"`
 		Steps    []struct {
-			Run string `yaml:"run"`
+			Name string `yaml:"name"`
+			Run  string `yaml:"run"`
 		} `yaml:"steps"`
 	} `yaml:"jobs"`
 }
@@ -55,8 +56,7 @@ func TestCITiers(t *testing.T) {
 		"post-test": `${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}`,
 		// postgres also runs on a pull request that touches the inbox store
 		// (store-paths), because the production hub keeps its inbox there.
-		"postgres":   `${{ !cancelled() && ((github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all')) || (github.event_name == 'pull_request' && needs.store-paths.outputs.store == 'true')) }}`,
-		"test-macos": `${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') && github.event_name != 'pull_request' }}`,
+		"postgres": `${{ !cancelled() && ((github.event_name != 'pull_request' && contains(fromJSON('["all","postgres"]'), inputs.suite || 'all')) || (github.event_name == 'pull_request' && needs.store-paths.outputs.store == 'true')) }}`,
 	}
 	for name, job := range w.Jobs {
 		if condition, ok := postOnly[name]; ok && job.If == condition {
@@ -82,7 +82,7 @@ func TestCITiers(t *testing.T) {
 	if pg := w.Jobs["postgres"]; !slices.Contains(pg.Needs, "store-paths") {
 		t.Error("postgres must need store-paths to decide pull request runs")
 	}
-	for _, name := range []string{"post-test", "postgres", "test-macos"} {
+	for _, name := range []string{"post-test", "postgres"} {
 		job := w.Jobs[name]
 		if job.If != postOnly[name] {
 			t.Errorf("%s is not post-only (or, for postgres, not store-gated)", name)
@@ -102,21 +102,29 @@ func TestCITiers(t *testing.T) {
 	for _, step := range post.Steps {
 		runs += step.Run + "\n"
 	}
-	for _, want := range []string{"-race -count=3", "TestQuiet", "TestAsyncSpawn", "sh -n"} {
+	for _, want := range []string{"gofmt -l .", "go vet ./...", "go test ./...", "sh -n"} {
 		if !strings.Contains(runs, want) {
 			t.Errorf("post-test missing %s", want)
 		}
 	}
-	mac := w.Jobs["test-macos"]
-	if !mac.Continue {
-		t.Error("macOS must remain advisory")
+	// The heavy checks moved to deploy.yml (r2 §1): the main stage keeps the
+	// basic set and must not run a race pin or a macOS runner.
+	if strings.Contains(runs, "-race") {
+		t.Error("post-test still runs a race pin; race belongs to deploy.yml")
 	}
-	var macRuns string
-	for _, step := range mac.Steps {
-		macRuns += step.Run
+	if _, ok := w.Jobs["test-macos"]; ok {
+		t.Error("macOS belongs to deploy.yml, not the main stage")
 	}
-	if !strings.Contains(macRuns, "gitleaks") {
-		t.Error("macOS missing gitleaks")
+	pg := w.Jobs["postgres"]
+	var pgRuns string
+	for _, step := range pg.Steps {
+		pgRuns += step.Name + "\n" + step.Run + "\n"
+	}
+	if !strings.Contains(pgRuns, "go test -count=1 -v") {
+		t.Error("main stage must run the Postgres suite without -race")
+	}
+	if !strings.Contains(pgRuns, "migration and startup") {
+		t.Error("main stage must run the migration and startup check")
 	}
 	gate := w.Jobs["ci-ok"]
 	if gate.If != "${{ always() && (contains(needs.*.result, 'failure') || !contains(needs.*.result, 'cancelled')) }}" {
@@ -128,7 +136,7 @@ func TestCITiers(t *testing.T) {
 		}
 	}
 	if slices.Contains(gate.Needs, "test-macos") {
-		t.Fatal("macOS must remain advisory")
+		t.Fatal("macOS is not a main-stage job")
 	}
 	raw, err := os.ReadFile(".github/workflows/ci-any-ref.yml")
 	if err != nil {
