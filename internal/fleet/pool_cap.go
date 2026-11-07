@@ -16,9 +16,17 @@ import (
 // with a cap admits a candidate only while fewer live spawns than the cap run
 // on it fleet-wide. A candidate over the cap is dropped `pool_at_cap` and
 // selection moves on; it never waits for a slot.
+//
+// The reserved key `devin-free` caps only the SWE-2 free rungs
+// (devinFreeRungs). They draw on Devin's free-model quota while the paid devin
+// rungs draw on the account's paid window, so the two quotas are capped apart
+// even though every rung shares the catalog pool `devin`.
 
 const (
 	reasonPoolAtCap = "pool_at_cap"
+	// devinFreeCapKey is the reserved pool_max_concurrent key for the SWE-2
+	// free rungs.
+	devinFreeCapKey = "devin-free"
 	// degradedPoolCapCount marks a selection that could not read the live
 	// count: the cap did not apply to it (fail-open).
 	degradedPoolCapCount = "pool_cap_count_unavailable"
@@ -91,14 +99,15 @@ func (a *App) liveSpawnProfiles(ctx context.Context) (map[string]int, error) {
 	return reply.Profiles, nil
 }
 
-// poolCapGate answers "is this pool full" for one selection. The live count is
-// read once, and only when a candidate in a capped pool reaches it.
+// poolCapGate answers "is this candidate over a cap" for one selection. The
+// live count is read once, and only when a candidate reaches a capped key.
 type poolCapGate struct {
 	a           *App
 	caps        map[string]int
 	rows        []CatalogRow
 	loaded      bool
 	live        map[string]int // by pool
+	freeLive    int            // SWE-2 free rungs (devinFreeCapKey)
 	unavailable bool
 }
 
@@ -106,17 +115,35 @@ func (a *App) newPoolCapGate(rows []CatalogRow) *poolCapGate {
 	return &poolCapGate{a: a, caps: poolMaxConcurrent(a.Config.Quota), rows: rows}
 }
 
-// full reports whether pool is at its cap. A pool without a cap, or a count
-// that cannot be read, is never full.
-func (g *poolCapGate) full(ctx context.Context, pool string) bool {
-	limit, capped := g.caps[pool]
-	if !capped {
-		return false
+// full names the cap this candidate is over: its pool's cap, then the reserved
+// devin-free cap for a SWE-2 free rung. It returns "" when no cap applies, so
+// a free rung must pass both keys. A key without a cap, or a count that cannot
+// be read, is never full.
+func (g *poolCapGate) full(ctx context.Context, row CatalogRow) string {
+	keys := []string{row.Pool}
+	if _, free := devinFreeRungs[row.Profile]; free {
+		keys = append(keys, devinFreeCapKey)
 	}
-	if !g.loaded {
-		g.load(ctx)
+	for _, key := range keys {
+		limit, capped := g.caps[key]
+		if !capped {
+			continue
+		}
+		if !g.loaded {
+			g.load(ctx)
+		}
+		if !g.unavailable && g.count(key) >= limit {
+			return key
+		}
 	}
-	return !g.unavailable && g.live[pool] >= limit
+	return ""
+}
+
+func (g *poolCapGate) count(key string) int {
+	if key == devinFreeCapKey {
+		return g.freeLive
+	}
+	return g.live[key]
 }
 
 func (g *poolCapGate) load(ctx context.Context) {
@@ -130,6 +157,16 @@ func (g *poolCapGate) load(ctx context.Context) {
 		return
 	}
 	g.live = g.byPool(profiles)
+	g.freeLive = g.freeRungSpawns(profiles)
+}
+
+// canon maps a placed profile (a seat name or a catalog profile) to the
+// catalog profile it runs.
+func (g *poolCapGate) canon(profile string) string {
+	if seat, ok := g.a.Policy.Profiles[profile]; ok && seat.Canon != "" {
+		return seat.Canon
+	}
+	return profile
 }
 
 // byPool folds live spawns by placed profile (a seat name or a catalog
@@ -143,12 +180,20 @@ func (g *poolCapGate) byPool(profiles map[string]int) map[string]int {
 	}
 	live := map[string]int{}
 	for _, profile := range slices.Sorted(maps.Keys(profiles)) {
-		canon := profile
-		if seat, ok := g.a.Policy.Profiles[profile]; ok && seat.Canon != "" {
-			canon = seat.Canon
-		}
-		if pool, ok := poolOf[canon]; ok {
+		if pool, ok := poolOf[g.canon(profile)]; ok {
 			live[pool] += profiles[profile]
+		}
+	}
+	return live
+}
+
+// freeRungSpawns counts live spawns of the SWE-2 free rungs. A placed seat
+// counts under the catalog profile it runs, so an alias is counted once.
+func (g *poolCapGate) freeRungSpawns(profiles map[string]int) int {
+	live := 0
+	for _, profile := range slices.Sorted(maps.Keys(profiles)) {
+		if _, free := devinFreeRungs[g.canon(profile)]; free {
+			live += profiles[profile]
 		}
 	}
 	return live
@@ -164,20 +209,21 @@ func (g *poolCapGate) degraded() []string {
 }
 
 // poolAtCapNote is the refusal suffix for a selection that dropped a candidate
-// for pool_at_cap: it names the pools and their caps.
+// for pool_at_cap: it names the caps (a pool, or the reserved devin-free key)
+// and their limits.
 func (p *selPlan) poolAtCapNote() string {
-	var pools []string
+	var caps []string
 	for _, c := range p.cands {
-		if c.reason == reasonPoolAtCap && !slices.Contains(pools, c.row.Pool) {
-			pools = append(pools, c.row.Pool)
+		if c.reason == reasonPoolAtCap && c.cap != "" && !slices.Contains(caps, c.cap) {
+			caps = append(caps, c.cap)
 		}
 	}
-	if len(pools) == 0 {
+	if len(caps) == 0 {
 		return ""
 	}
-	slices.Sort(pools)
-	for i, pool := range pools {
-		pools[i] = fmt.Sprintf("%s=%d", pool, p.poolCaps[pool])
+	slices.Sort(caps)
+	for i, key := range caps {
+		caps[i] = fmt.Sprintf("%s=%d", key, p.poolCaps[key])
 	}
-	return "; " + reasonPoolAtCap + ": " + strings.Join(pools, ", ") + " at [quota].pool_max_concurrent"
+	return "; " + reasonPoolAtCap + ": " + strings.Join(caps, ", ") + " at [quota].pool_max_concurrent"
 }

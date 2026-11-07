@@ -97,12 +97,19 @@ emit this trace too. The handoffkeep placement API payload is unchanged.
 
 `[quota].pool_max_concurrent = { "openai-api" = 2 }` limits live spawns on a pool,
 fleet-wide ([config](config.md#quota)). Selection drops a candidate whose pool
-is at its cap with the reason `pool_at_cap`. The reason shows in the
-selection record and as `dropped … reason=pool_at_cap` in `plan` and
+is at its cap with the reason `pool_at_cap`, naming the cap in `cap` (the
+candidate's pool, or the reserved `devin-free` key). The reason shows in the
+selection record and as `dropped … reason=pool_at_cap cap=…` in `plan` and
 `--dry-run`. Selection then goes on to the next candidate or pool as for any
 other drop. A spawn never waits for a slot. If every candidate is dropped and
-at least one only for `pool_at_cap`, the refusal names the pools and their
-caps (`pool_at_cap: openai-api=2 at [quota].pool_max_concurrent`).
+at least one only for `pool_at_cap`, the refusal names the caps and their
+limits (`pool_at_cap: openai-api=2 at [quota].pool_max_concurrent`).
+
+The reserved key `devin-free` caps only the SWE-2 free rungs
+(`devinFreeRungs`): their live spawns are counted by catalog profile, seat
+aliases included. It exists because those rungs spend Devin's free-model quota
+while paid `devin-ds41` spends the account's paid window. `devin` remains a
+whole-pool cap, so a free rung must pass both keys when both are set.
 
 The hub counts, because it places every hub spawn
 ([durable spawn operations](hub-spawn-operations.md)). A live spawn on a pool
