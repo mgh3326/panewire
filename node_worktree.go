@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/harnessstate"
 )
 
 // worktree.prepare, worktree.remove and quota.refresh (docs/node-commands.md,
@@ -37,9 +39,6 @@ const (
 	nodePrepareShaMissing      = "sha-missing"
 	nodePrepareOriginMismatch  = "origin-mismatch"
 )
-
-// Add another harness by adding its Git exclude pattern as a separate line.
-const nodeHarnessStateExcludes = ".commandcode/\n"
 
 // worktree.remove outcomes mirror the receipt reasons mergewake
 // internal/reap reports today, verbatim.
@@ -535,7 +534,7 @@ func nodeEnsureHarnessStateExcludes(ctx context.Context, git relayCommandRunner,
 	}
 	text := string(contents)
 	updated := text
-	for _, pattern := range strings.Split(strings.TrimSuffix(nodeHarnessStateExcludes, "\n"), "\n") {
+	for _, pattern := range strings.Split(strings.TrimSuffix(harnessstate.Excludes, "\n"), "\n") {
 		found := false
 		for _, line := range strings.Split(text, "\n") {
 			if strings.TrimSuffix(line, "\r") == pattern {

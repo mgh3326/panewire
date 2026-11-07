@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/mgh3326/panewire/internal/durable"
+	"github.com/mgh3326/panewire/internal/harnessstate"
 )
 
 // The sweep's worktree tail (docs/pane-sweep.md): after it closes a job's pane
@@ -83,6 +84,15 @@ func (s *TaskPaneSweeper) sweepWorktree(ctx context.Context, a *App, j Job, end 
 	}
 	if sweepSymlink(cwd) {
 		keep(sweepWorktreeSymlink)
+		return
+	}
+	// Harness state excluded by prepare must remain safe from either removal path.
+	args := []string{"-C", cwd, "ls-files", "--others", "--ignored", "-z"}
+	for _, pattern := range strings.Split(strings.TrimSuffix(harnessstate.Excludes, "\n"), "\n") {
+		args = append(args, "--exclude="+pattern)
+	}
+	if r := a.call(ctx, "git", args...); r.Code != 0 || r.Out != "" {
+		keep(sweepWorktreeDirty)
 		return
 	}
 	if end.discard && !end.merged {
