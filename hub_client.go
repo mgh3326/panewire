@@ -782,7 +782,7 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		if !after.visibleOK {
 			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "return_withheld:composer_unread"}
 		}
-		if safe, why := relayComposerReturnSafe(harness, after.visible, text, presend.visible); !safe {
+		if safe, why := relayCmdReturnGate(ctx, pane, harness, text, presend.visible, after.visible); !safe {
 			return relayInjectResult{Outcome: relayInjectMaybeInPane, Harness: harness, Evidence: "return_withheld:" + why}
 		}
 		if relaySendReturn(ctx, pane, harness) != nil {
@@ -959,6 +959,67 @@ func relayComposerReturnSafe(harness, screen, text, before string) (bool, string
 		return true, "composer_queue_hint"
 	}
 	return false, "composer_foreign"
+}
+
+// relayCmdDrawWindow bounds how long the pane-transport return gate re-reads a
+// composer that has not finished drawing the text just typed (hk 3419).
+var relayCmdDrawWindow = 2 * time.Second
+
+// relayCmdReturnGate is relayComposerReturnSafe for the read taken right after
+// pane send-text. herdr returns before the harness has drawn the text, so that
+// first read can still show the composer as it was before the send, or only
+// the head of a long text, and either one reads as composer_foreign (hk 3419).
+// While the composer is still drawing, it is re-read until it shows the whole
+// text or relayCmdDrawWindow passes. These reads type nothing and press
+// nothing. A composer that holds anything else, such as a draft before or
+// after the text or another nonce, is withheld at once.
+//
+// A gate that re-read logs one line with its rule, the number of re-reads and
+// how long they took, so a live occurrence shows whether drawing lag was the
+// cause. The line never carries the composer or the text.
+func relayCmdReturnGate(ctx context.Context, pane, harness, text, before, screen string) (safe bool, why string) {
+	safe, why = relayComposerReturnSafe(harness, screen, text, before)
+	start := time.Now()
+	rereads := 0
+	defer func() {
+		if rereads > 0 {
+			slog.Info("relay cmd return gate settled", "pane", pane, "harness", harness, "rule", why, "rereads", rereads, "elapsed_ms", time.Since(start).Milliseconds())
+		}
+	}()
+	deadline := start.Add(relayCmdDrawWindow)
+	for !safe && why == "composer_foreign" && relayComposerStillDrawing(harness, screen, text, before) && time.Now().Before(deadline) {
+		timer := time.NewTimer(100 * time.Millisecond)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return safe, why
+		case <-timer.C:
+		}
+		rereads++
+		reads := relayReadPane(ctx, pane, harness)
+		if !reads.visibleOK {
+			return false, "composer_unread"
+		}
+		screen = reads.visible
+		safe, why = relayComposerReturnSafe(harness, screen, text, before)
+	}
+	return safe, why
+}
+
+// relayComposerStillDrawing reports whether screen's composer can be text
+// partway through being drawn: it holds a strict head of text, or exactly what
+// the composer held before the send (the presend gate allowed only an empty
+// one, a dim suggestion or the idle placeholder).
+func relayComposerStillDrawing(harness, screen, text, before string) bool {
+	content, ok := relayComposer(harness, screen)
+	if !ok {
+		return false
+	}
+	if want := compactWhitespace(text); len(content) < len(want) && strings.HasPrefix(want, content) {
+		return true
+	}
+	prior, ok := relayComposer(harness, before)
+	return ok && content == prior
 }
 
 // relayVerifyVisibleLines / relayVerifyUnwrappedLines are the two read

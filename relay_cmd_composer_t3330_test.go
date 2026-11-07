@@ -48,6 +48,12 @@ case "$1 $2" in
   for a in "$@"; do [ "$prev" = "--source" ] && src=$a; prev=$a; done
   fmt=plain; [ "$1" = pane ] && fmt=ansi
   buf=$(cat "$d/buf")
+  # drawing lag: the next visible reads after send-text show only the head of
+  # what was typed (hk 3419)
+  if [ "$src" = visible ] && [ $fmt = plain ] && [ -s "$d/lag_left" ]; then
+    left=$(cat "$d/lag_left")
+    if [ "$left" -gt 0 ]; then buf=$(printf '%s' "$buf" | cut -c1-20); echo $((left - 1)) > "$d/lag_left"; fi
+  fi
   # echo lag: right after a return the first visible read still draws the text
   # the keypress just submitted.
   if [ "$src" = visible ] && [ -f "$d/stale" ]; then buf=$(cat "$d/stale"); rm "$d/stale"; fi
@@ -66,6 +72,10 @@ case "$1 $2" in
       # an idle composer holds claude's dim prompt suggestion; only the ANSI
       # read can tell it from a draft.
       if [ $fmt = ansi ]; then printf '❯ \033[2m%s\033[0m\n' "$(cat "$d/suggestion")"; else echo "❯ $(cat "$d/suggestion")"; fi
+    elif [ -f "$d/wrap" ]; then
+      # a long text wraps at the pane width; continuation rows carry the
+      # two-space indent under the prompt (hk 3419)
+      printf '%s\n' "$buf" | fold -s -w "$(cat "$d/wrap")" | sed '1s/^/❯ /;2,$s/^/  /'
     else
       echo "❯ $buf"
     fi
@@ -85,6 +95,7 @@ case "$1 $2" in
     exit 1
   fi
   printf '%s%s' "$(cat "$d/buf")" "$4" > "$d/buf"
+  if [ -f "$d/draw_lag" ]; then cp "$d/draw_lag" "$d/lag_left"; fi
   # a draft the operator types between send-text and return
   if [ -f "$d/draft_after_text" ]; then printf '%s operator-draft' "$(cat "$d/buf")" > "$d/buf"; fi ;;
 "pane send-keys")
