@@ -6,10 +6,10 @@ import "time"
 // paid windows. These are pacelever's rules for that state (shared_devin.go),
 // so a reading either writer publishes is read the same by both.
 
-// normalizeFree is b as a reader sees it at now, and whether it is well formed.
+// NormalizeFree is b as a reader sees it at now, and whether it is well formed.
 // An exhausted state needs a reset; one whose reset has passed reads as
 // available; available and unknown carry no reset. Nil is valid and absent.
-func normalizeFree(b *FreeBucket, now time.Time) (*FreeBucket, bool) {
+func NormalizeFree(b *FreeBucket, now time.Time) (*FreeBucket, bool) {
 	if b == nil {
 		return nil, true
 	}
@@ -33,7 +33,7 @@ func normalizeFree(b *FreeBucket, now time.Time) (*FreeBucket, bool) {
 // not wait for the reading to age, and a host without that record must not
 // clear another host's active hold.
 func freeNeedsPublish(stored, local *FreeBucket, now time.Time) bool {
-	prior, ok := normalizeFree(stored, now)
+	prior, ok := NormalizeFree(stored, now)
 	if !ok || prior == nil {
 		return true
 	}
@@ -46,7 +46,7 @@ func freeNeedsPublish(stored, local *FreeBucket, now time.Time) bool {
 // mergeFree is the state to publish: another host's active, later hold wins
 // over this host's weaker record.
 func mergeFree(stored, local *FreeBucket, now time.Time) *FreeBucket {
-	prior, ok := normalizeFree(stored, now)
+	prior, ok := NormalizeFree(stored, now)
 	if ok && prior != nil && prior.State == FreeExhausted {
 		if local.State != FreeExhausted || prior.ResetsAt.After(*local.ResetsAt) {
 			return prior

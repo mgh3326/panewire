@@ -173,6 +173,11 @@ func quotaArgs(a []string, r QuotaRequest) []string {
 	return a
 }
 func (q CLIQuota) Gate(ctx context.Context, r QuotaRequest) (string, error) {
+	return gateResult(q.runGate(ctx, r), r)
+}
+
+// runGate runs `pacelever gate --json` for one request.
+func (q CLIQuota) runGate(ctx context.Context, r QuotaRequest) Result {
 	name := r.Profile
 	if r.GateProfile != "" {
 		name = r.GateProfile
@@ -182,7 +187,13 @@ func (q CLIQuota) Gate(ctx context.Context, r QuotaRequest) (string, error) {
 		args = append(args, "--account-key", r.AccountKey)
 	}
 	args = append(args, "--json")
-	x := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: args}, "quota gate", 30*time.Second)
+	return runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: args}, "quota gate", 30*time.Second)
+}
+
+// gateResult reads a gate's exit status and JSON receipt — pacelever's or
+// panewire's own (admission_native.go) — into the receipt an admission
+// records or the typed refusal it surfaces.
+func gateResult(x Result, r QuotaRequest) (string, error) {
 	if x.Code == quotaGateRoleDenied {
 		err := checkQuota(x, "quota role-denied (gate exit 5 → panewire exit 77)")
 		return "", fail(exitSeatRefused, "%s", err)
@@ -375,26 +386,33 @@ func gateBasis(gate string) string {
 // localAccountKeys lists the pool account keys this host holds: the pinned
 // [quota.accounts] fingerprint and every key the local presence records name.
 func (a *App) localAccountKeys(ctx context.Context, pool string) []string {
-	var keys []string
-	if accounts, ok := a.Config.Quota["accounts"].(map[string]any); ok {
+	return a.heldAccountKeys(ctx, []string{pool})[pool]
+}
+
+// heldAccountKeys is localAccountKeys for several pools from one presence read.
+func (a *App) heldAccountKeys(ctx context.Context, pools []string) map[string][]string {
+	held := map[string][]string{}
+	accounts, _ := a.Config.Quota["accounts"].(map[string]any)
+	for _, pool := range pools {
 		if fp := str(accounts, pool); accountFP.MatchString(fp) {
-			keys = append(keys, pool+":"+fp)
+			held[pool] = append(held[pool], pool+":"+fp)
 		}
 	}
 	if a.Source == nil {
-		return keys
+		return held
 	}
 	records, e := a.Source.Presence(ctx)
 	if e != nil {
-		return keys
+		return held
 	}
 	id := firstNonempty(str(a.Config.Local, "presence_id"), a.machine())
 	for _, rec := range records {
-		if rec.HostID == id && strings.HasPrefix(rec.AccountKey, pool+":") && !slices.Contains(keys, rec.AccountKey) {
-			keys = append(keys, rec.AccountKey)
+		pool := accountPool(rec.AccountKey)
+		if rec.HostID == id && slices.Contains(pools, pool) && !slices.Contains(held[pool], rec.AccountKey) {
+			held[pool] = append(held[pool], rec.AccountKey)
 		}
 	}
-	return keys
+	return held
 }
 
 // refreshCommand is the on-demand refresh of pool on this host: panewire's own

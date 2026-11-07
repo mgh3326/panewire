@@ -15,7 +15,7 @@ import (
 // marker, a custom CODEX_HOME, a strict lane flag) cannot change test results;
 // tests that need one set it with t.Setenv.
 var (
-	hermeticEnvPrefixes = []string{"PANEWIRE_", "FLEET_", "WRK_", "SCOPEFUEL_", "ARBITER_", "HERDR_", "HANDOFFKEEP_", "HK_", "CLINEPASS_", "MOCK_MCP_"}
+	hermeticEnvPrefixes = []string{"PANEWIRE_", "FLEET_", "WRK_", "SCOPEFUEL_", "ARBITER_", "HERDR_", "HANDOFFKEEP_", "HK_", "CLINEPASS_", "MOCK_MCP_", "PACELEVER_"}
 	hermeticEnvNames    = []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"}
 )
 
