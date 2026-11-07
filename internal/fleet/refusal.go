@@ -99,7 +99,7 @@ type spawnRefusal struct {
 }
 
 const (
-	spawnWorkspaceHint = "Run herdr workspace list on the executing host; set local.workspace to its id or pass -w WORKSPACE_ID."
+	spawnWorkspaceHint = "Run herdr workspace list on the executing host; configure the workspace label (workspace = \"workers\") so spawn can recreate it when herdr has deleted it, or pass the exact -w WORKSPACE_ID for an ambiguous label."
 	spawnBriefHint     = "Pass -p with a readable nonempty brief file; for presets, save it under jobs/JOB/brief.md or override -p."
 	spawnPreflightHint = "Run panewire preflight --json to identify the failing host check; fix that check or pass an eligible --host with --override-reason."
 )
