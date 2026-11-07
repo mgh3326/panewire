@@ -170,7 +170,7 @@ func parseHubScopes(raw string) ([]hubScopeGrant, error) {
 			grants = append(grants, hubScopeGrant{name: scope})
 		case strings.HasPrefix(scope, hubScopeInboxRead+":"), strings.HasPrefix(scope, hubScopeInboxAck+":"), strings.HasPrefix(scope, hubScopeJobsClose+":"):
 			name, lane, _ := strings.Cut(scope, ":")
-			if !validReportRelayLaneName(lane) {
+			if !(lane == "*" && name != hubScopeJobsClose) && !validReportRelayLaneName(lane) {
 				return nil, invalid
 			}
 			grants = append(grants, hubScopeGrant{name: name, resource: lane})
@@ -198,11 +198,11 @@ func hubGrantsAllow(grants []hubScopeGrant, scope, resource string) bool {
 		if grant.name != scope {
 			continue
 		}
-		if grant.resource == resource {
+		if grant.resource == resource && grant.resource != hubScopeAnyMachine {
 			return true
 		}
-		// "*" is a machine wildcard only; lane scopes always name one lane.
-		if grant.resource == hubScopeAnyMachine && scope != hubScopeInboxRead && scope != hubScopeInboxAck && scope != hubScopeJobsClose {
+		// Inbox wildcards require an explicit valid lane; jobs.close stays lane-specific.
+		if grant.resource == hubScopeAnyMachine && scope != hubScopeJobsClose && ((scope != hubScopeInboxRead && scope != hubScopeInboxAck) || validReportRelayLaneName(resource)) {
 			return true
 		}
 	}

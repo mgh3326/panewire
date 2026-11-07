@@ -182,7 +182,7 @@ func TestHubAuthScopesPerRoute(t *testing.T) {
 	if status != http.StatusForbidden {
 		t.Fatalf("op outside scope: status %d", status)
 	}
-	// A lane scope has no wildcard and the lane must come from ?lane=.
+	// A lane-specific scope requires the lane to come from ?lane=.
 	status, _ = pw2Caller{"svc-ok", "svc-ok", pw2ServiceToken("svc-ok")}.do(t, server, "POST", "/v1/inbox/ack", `{"id":1,"lane":"lane-a"}`)
 	if status != http.StatusForbidden {
 		t.Fatalf("ack without ?lane=: status %d", status)
@@ -272,7 +272,10 @@ func TestHubAuthConfigRejects(t *testing.T) {
 		"unknown op":           base + service + "HUB_SCOPES_svc-a=node.command:pane.kill@*\n",
 		"no resource":          base + service + "HUB_SCOPES_svc-a=spawn\n",
 		"operator machine":     base + service + "HUB_SCOPES_svc-a=spawn@operator\n",
-		"lane wildcard":        base + service + "HUB_SCOPES_svc-a=inbox.read:*\n",
+		"jobs close wildcard":  base + service + "HUB_SCOPES_svc-a=jobs.close:*\n",
+		"lane prefix wildcard": base + service + "HUB_SCOPES_svc-a=inbox.read:a*\n",
+		"empty lane":           base + service + "HUB_SCOPES_svc-a=inbox.read:\n",
+		"lane suffix wildcard": base + service + "HUB_SCOPES_svc-a=inbox.read:*x\n",
 		"empty item":           base + service + "HUB_SCOPES_svc-a=nodes.agents.read,\n",
 		"empty line":           base + service + "HUB_SCOPES_svc-a=\n",
 		"shared token":         base + "HUB_TOKEN_svc-a=" + pw2NodeAToken + "\nHUB_SCOPES_svc-a=nodes.agents.read\n",
@@ -712,5 +715,38 @@ func TestHubAuthIdleReloadClosesRevokedNodeWebsocket(t *testing.T) {
 			t.Fatalf("idle hub kept a rotated node websocket open: %v", err)
 		}
 		break
+	}
+}
+
+func TestHubAuthInboxAnyLane(t *testing.T) {
+	hub, server := pw2Hub(t, map[string]string{"svc-read": "inbox.read:*", "svc-ack": "inbox.ack:*", "svc-one": "inbox.read:lane-a"}, "", nil)
+	inbox, err := newHubInbox("default", filepath.Join(t.TempDir(), "inbox.sqlite3"), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	hub.inbox = inbox
+	t.Cleanup(func() { inbox.store.close() })
+	tests := []struct {
+		client, method, path, body string
+		status                     int
+	}{
+		{"svc-read", "GET", "/v1/inbox?lane=lane-a", "", 200},
+		{"svc-read", "GET", "/v1/inbox?lane=lane-b", "", 200},
+		{"svc-read", "GET", "/v1/inbox/count?lane=lane-b", "", 200},
+		{"svc-ack", "POST", "/v1/inbox/ack?lane=lane-b", `{"all":true}`, 200},
+		{"svc-read", "POST", "/v1/inbox/ack?lane=lane-b", `{"all":true}`, 403},
+		{"svc-one", "GET", "/v1/inbox?lane=lane-b", "", 403},
+		{"svc-read", "GET", "/v1/inbox", "", 403},
+		{"svc-ack", "POST", "/v1/inbox/ack", `{"all":true}`, 403},
+		{"svc-read", "GET", "/v1/inbox?lane=bad*lane", "", 403},
+		{"svc-read", "GET", "/v1/inbox?lane=*", "", 403},
+	}
+	for _, tc := range tests {
+		t.Run(tc.client+tc.method+tc.path, func(t *testing.T) {
+			status, body := (pw2Caller{tc.client, tc.client, pw2ServiceToken(tc.client)}).do(t, server, tc.method, tc.path, tc.body)
+			if status != tc.status || (status == 403 && !strings.Contains(body, `"scope_forbidden"`)) {
+				t.Fatalf("status %d body %s, want %d", status, body, tc.status)
+			}
+		})
 	}
 }
