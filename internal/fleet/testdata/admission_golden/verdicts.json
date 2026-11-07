@@ -1876,6 +1876,7 @@
   },
   {
    "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "disagreement": "Operator decision 2026-11-07 (hk 3248 comment 11914): cmd-dsflash41 seats only a worker or tester. pacelever v0.3.28 also seats a builder on a placed default rung.",
    "latest": {
     "observation": {
      "id": 7,
@@ -1903,7 +1904,13 @@
      ]
     }
    },
-   "name": "cmd-dsflash41-builder-placed-default",
+   "name": "cmd-dsflash41-builder-denied",
+   "native": {
+    "ok": false,
+    "exit_code": 5,
+    "provider_id": "commandcode",
+    "reason": "role_restricted: cmd-dsflash41 seats only a worker or tester"
+   },
    "now": "2026-11-07T03:00:00Z",
    "pacelever": {
     "ok": true,

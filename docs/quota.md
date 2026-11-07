@@ -422,7 +422,9 @@ measurement (hk 3211).
 Rules beyond pacelever's: a commandcode reading without its `30d` window is
 unmeasurable (`commandcode_required_window_missing:30d`,
 decision/2026-11-06/commandcode-30d-required-in-panewire-gate). It needs the
-node's native commandcode measurement, the only one that publishes `30d`.
+node's native commandcode measurement, the only one that publishes `30d`. And
+cmd-dsflash41 seats only a worker or tester (operator, 2026-11-07); pacelever
+also seats a builder on it.
 
 Where panewire reads less than pacelever's local gate, it refuses or omits
 rather than guesses:
@@ -430,7 +432,10 @@ rather than guesses:
 - no local probe: a reading is the stored one, measured by the node;
 - no host-local manual store, free-limit file, usage-limit hold or inflight
   count (a configured `inflight_reserve_pct` reads `inflight=unknown(local)`);
-  the shared store carries the free-bucket state and manual windows instead;
+  the shared store carries the free-bucket state and manual windows instead.
+  A local request falls back to the held account's stored manual windows when
+  its automatic reading is unusable; a named account (`--account-key`) does not,
+  as in pacelever;
 - the catalog JSON has no `placed` flag or effort defaults: a graded rung is
   placed, and an effortless rung's reason names no default effort.
 

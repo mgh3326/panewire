@@ -186,9 +186,11 @@ func TestAdmissionNativeRefusalsKeepGateOutcomes(t *testing.T) {
 	if exitCode(err) != gateUnmeasurable || !strings.Contains(err.Error(), msgAccountStale) {
 		t.Fatalf("stale reading must refuse unmeasurable: %v", err)
 	}
-	_, err = a.Quota.Gate(context.Background(), QuotaRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "reviewer"})
-	if exitCode(err) != exitSeatRefused {
-		t.Fatalf("cmd-dsflash41 reviewer must be role-denied (gate exit 5 → %d): %v", exitSeatRefused, err)
+	for _, role := range []string{"reviewer", "builder"} {
+		_, err = a.Quota.Gate(context.Background(), QuotaRequest{Profile: "cmd-dsflash41", Effort: "high", Role: role})
+		if exitCode(err) != exitSeatRefused {
+			t.Fatalf("cmd-dsflash41 %s must be role-denied (gate exit 5 → %d): %v", role, exitSeatRefused, err)
+		}
 	}
 	if gateRuns(runner) != 0 {
 		t.Fatal("native refusals ran pacelever gate")
@@ -269,6 +271,47 @@ func TestAdmissionLocalRequestReadsHeldAccount(t *testing.T) {
 	out, err = a.Quota.Gate(context.Background(), local)
 	if err != nil || !strings.Contains(out, `"reading_account_key":"`+switchKey+`"`) {
 		t.Fatalf("local request must judge the held account: %v\n%s", err, out)
+	}
+}
+
+// TestAdmissionLocalRequestFallsBackToManualWindows: a local request with no
+// usable automatic reading is judged on the account's operator entries, as
+// pacelever's local gate is; a named account stays strict.
+func TestAdmissionLocalRequestFallsBackToManualWindows(t *testing.T) {
+	a, _, _ := switchApp(t, gateModeNative, nil, Result{Code: 99})
+	a.Config.Quota["accounts"] = map[string]any{"commandcode": "0123456789abcdef"}
+	expires := switchNow.Add(48 * time.Hour)
+	entry := shared.Observation{ID: 41, Kind: "manual", Window: "credit", MeasuredAt: switchNow.Add(-time.Hour), ExpiresAt: &expires, Buckets: []shared.Bucket{{Window: "credit", UsedPct: 20, Scope: "account"}}}
+	a.SharedLatest = func(context.Context, string) (shared.Latest, error) {
+		return shared.Latest{Manual: []shared.Observation{entry}}, nil
+	}
+	local := QuotaRequest{Profile: "cmd-dsflash41", Effort: "high", Role: "worker"}
+	x := a.nativeGate(context.Background(), a.Quota.(admissionQuota).CLIQuota, local, true)
+	var receipt gateReceipt
+	if err := json.Unmarshal([]byte(x.Out), &receipt); err != nil || x.Code != 0 || receipt.Source == nil || *receipt.Source != sourceOperator || !slices.Equal(receipt.ManualIDs, []string{"hk-41"}) {
+		t.Fatalf("local request must admit on the manual credit window: %d %s", x.Code, x.Out)
+	}
+	named := local
+	named.AccountKey = "commandcode:0123456789abcdef"
+	if x = a.nativeGate(context.Background(), a.Quota.(admissionQuota).CLIQuota, named, true); x.Code != gateUnmeasurable || !strings.Contains(x.Out, msgAccountStale) {
+		t.Fatalf("a named account without a fresh automatic reading stays unmeasurable: %d %s", x.Code, x.Out)
+	}
+}
+
+// TestAdmissionKeepsConfiguredQuotaBinary: wrapping the quota CLI keeps
+// PANEWIRE_QUOTA_BIN for the refreshes panewire runs through pacelever.
+func TestAdmissionKeepsConfiguredQuotaBinary(t *testing.T) {
+	a := &App{}
+	a.Quota = admissionQuota{CLIQuota{&fakeRunner{}, "/custom/pacelever"}, a}
+	if got := a.paceleverBinary(); got != "/custom/pacelever" {
+		t.Fatalf("wrapped quota binary = %q", got)
+	}
+	if got := refreshCommand("kiro", a.paceleverBinary(), false); got.Name != "/custom/pacelever" {
+		t.Fatalf("selection refresh runs %q", got.Name)
+	}
+	a.Quota = &fakeQuota{}
+	if a.paceleverBinary() != "pacelever" {
+		t.Fatal("a non-CLI quota gate refreshes with pacelever")
 	}
 }
 

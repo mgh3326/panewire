@@ -113,7 +113,9 @@ sc("commandcode-30d-missing", {"pool": "commandcode", "profile": "cmd-dsflash41"
 sc("commandcode-30d-exhausted", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high"}, {"observation": auto([b("5h", 10, t(h=2)), b("7d", 20, t(d=5)), b("30d", 100, t(d=20))])})
 sc("cmd-dsflash41-reviewer-denied", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high", "role": "reviewer"}, {"observation": auto(CC_OK)})
 sc("cmd-dsflash41-tester-admit", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high", "role": "tester"}, {"observation": auto(CC_OK)})
-sc("cmd-dsflash41-builder-placed-default", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high", "role": "builder"}, {"observation": auto(CC_OK)})
+sc("cmd-dsflash41-builder-denied", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "high", "role": "builder"}, {"observation": auto(CC_OK)},
+   note="Operator decision 2026-11-07 (hk 3248 comment 11914): cmd-dsflash41 seats only a worker or tester. pacelever v0.3.28 also seats a builder on a placed default rung.",
+   native={"ok": False, "exit_code": 5, "provider_id": "commandcode", "reason": "role_restricted: cmd-dsflash41 seats only a worker or tester"})
 sc("cmd-dsflash41-needs-effort", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": ""}, {"observation": auto(CC_OK)})
 sc("cmd-dsflash41-effort-not-placed", {"pool": "commandcode", "profile": "cmd-dsflash41", "effort": "medium"}, {"observation": auto(CC_OK)})
 # credit pool: operator entries
