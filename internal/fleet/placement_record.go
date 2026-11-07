@@ -329,15 +329,23 @@ func placementSkipReason(reason string) string {
 }
 
 func (a *App) placementRepo(ctx context.Context, cwd string) string {
+	repo, _ := a.placementRepoCheckout(ctx, cwd)
+	return repo
+}
+
+// placementRepoCheckout answers the repo key and whether the spawn carries a
+// linked-worktree checkout the target node can clone instead of relying on
+// its cwd_map.
+func (a *App) placementRepoCheckout(ctx context.Context, cwd string) (string, bool) {
 	if cwd == "" {
-		return ""
+		return "", false
 	}
 	bounded, cancel := context.WithTimeout(ctx, placementDeliveryBudget)
 	defer cancel()
 	if repo := a.localRepo(bounded, cwd); repo != nil {
-		return RepoKey(repo.name)
+		return RepoKey(repo.name), a.carriesCheckout(repo)
 	}
-	return ""
+	return "", false
 }
 
 // Attempt markers survive successful delivery. O_EXCL allocates without a

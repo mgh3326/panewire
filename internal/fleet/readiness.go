@@ -121,6 +121,9 @@ type ReadinessNeed struct {
 	Kind string
 	// Repo is the cwd_map key the node must hold; "" skips the check.
 	Repo string
+	// Checkout marks a spawn that carries a linked-worktree checkout the node
+	// can clone. With Config.WorkRoot set, that node need not list Repo.
+	Checkout bool
 	// Brief is set when the node fetches the brief document itself (a
 	// hub-routed spawn).
 	Brief bool
@@ -158,7 +161,9 @@ func (s ReadinessState) Drop(n ReadinessNeed, now time.Time) string {
 		return ReadyLoginMissing
 	}
 	switch {
-	case n.Repo != "" && !slices.ContainsFunc(r.Repos, func(repo string) bool { return RepoKey(repo) == RepoKey(n.Repo) }):
+	// A linked-worktree checkout is cloned into the node's work root
+	// (node_worktree.go), so an unlisted repo is still hostable there.
+	case n.Repo != "" && !slices.ContainsFunc(r.Repos, func(repo string) bool { return RepoKey(repo) == RepoKey(n.Repo) }) && !(n.Checkout && r.Config.WorkRoot):
 		return ReadyRepoUnmapped
 	case n.Brief && !r.Brief.HandoffkeepEnv:
 		return ReadyBriefUnavailable
@@ -236,6 +241,7 @@ type readinessDrop struct {
 type readinessView struct {
 	states     map[string]ReadinessState
 	repo       string
+	checkout   bool
 	minVersion map[string]string
 	toolchains []string
 	now        time.Time
@@ -244,7 +250,7 @@ type readinessView struct {
 func (a *App) newReadinessView(ctx context.Context, cwd string) readinessView {
 	v := readinessView{now: a.Now(), states: a.readinessStates(ctx)}
 	if len(v.states) > 0 {
-		v.repo = a.placementRepo(ctx, cwd)
+		v.repo, v.checkout = a.placementRepoCheckout(ctx, cwd)
 		v.minVersion = harnessMinVersions(a.Config.Placement)
 		v.toolchains = repoToolchains(a.Config.Placement, v.repo)
 	}
@@ -258,7 +264,7 @@ func (v readinessView) drop(host string, cfg map[string]any, kind string) string
 	if !reported {
 		return ""
 	}
-	return state.Drop(ReadinessNeed{Kind: kind, Repo: v.repo, Brief: str(cfg, "via") == "hub", Toolchains: v.toolchains, MinVersion: v.minVersion[kind]}, v.now)
+	return state.Drop(ReadinessNeed{Kind: kind, Repo: v.repo, Checkout: v.checkout, Brief: str(cfg, "via") == "hub", Toolchains: v.toolchains, MinVersion: v.minVersion[kind]}, v.now)
 }
 
 // readinessDrop answers the code that removes the pair (host, seat), and

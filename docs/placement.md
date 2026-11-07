@@ -188,6 +188,17 @@ lists each dropped profile with its code, and the placement event's candidate
 `reason` carries the same code. A kind the node does not report on
 (`kiro`, `opencode`) is not judged.
 
+`repo_unmapped` is about the node's `cwd_map`, not about what it can clone. A
+spawn that carries a linked-worktree checkout (origin URL and a branch or
+commit) is cloned into `<work_root>/<repo>` by `worktree.prepare`, so a node
+whose readiness reports `config.work_root = true` is not dropped for
+`repo_unmapped` even when the repository is absent from `repos`. The drop
+remains when the spawn has no checkout (a local-cwd spawn that relies on
+`cwd_map`) and when the node has no work root. When every candidate is dropped
+this way the refusal is `NO_ELIGIBLE_HOST` with the dominant reason and a
+matching repair, for example `repo_unmapped: no node maps repo X; add it to
+cwd_map or ensure work_root`, never `AUTH_UNAVAILABLE`.
+
 **Old nodes.** A node that never sent readiness is `readiness_unknown`, and
 no readiness check drops it: it is placed as before. A readiness value that
 is stale, or whose publisher is dead, reads the same way. Only the

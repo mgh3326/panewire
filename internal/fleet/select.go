@@ -241,6 +241,8 @@ type selPlan struct {
 	// names required caps no usable host declares, for the refusal text.
 	hosts   []hostTrace
 	capsGap string
+	// repo is the spawn's repository key, named in a host-side refusal.
+	repo string
 	// creditMissing names credit pools whose entry records no dollars, logged
 	// once per plan so the operator knows to record them.
 	creditMissing []string
@@ -737,6 +739,7 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 		return nil, fail(exitConfig, "POLICY_UNAVAILABLE: bench catalog unreadable: %v", e)
 	}
 	pres := a.newSelPresence(ctx, s, req)
+	p.repo = pres.ready.repo
 	p.capsGap = capsGap(pres.hosts, req.tags)
 	p.degraded = append(p.degraded, pres.degraded...)
 	// API credit is ranked from pacelever's hand-entered balance when one is
