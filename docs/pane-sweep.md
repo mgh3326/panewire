@@ -4,7 +4,8 @@ A worker stays in its pane after READY, so `panewire reap` (terminal jobs
 only) never reaches it, and mergewake's reap, which runs once at merge time,
 skips a worker that is busy then and never retries. The node daemon therefore
 sweeps its own jobs: it closes the pane of a worker or tester once the hk task
-the job is bound to has ended and the pane has stayed not working for a grace.
+the job is bound to has ended, or the job itself was closed, and the pane has
+stayed not working for a grace.
 
 ## Which jobs
 
@@ -14,9 +15,21 @@ A local job is swept when all of these hold:
 - its role is `worker` or `tester` (never `builder`, `captain`, `lead` or
   `reviewer`; the hub's [finished-reviewer release](hub-spawn-operations.md)
   keeps reviewer panes);
-- its claim names an hk task (`--task`, or the task inherited from the parent
-  job);
-- the hk task state is `merged`, `done` or `dropped`.
+- and one of these ends it:
+  - **its task ended.** The task is the claim's `--task`, or, for a fix author
+    spawned with `--parent-job` whose claim names none, the task of the parent
+    job: read from the parent's job record on this node, else from the hk job
+    record's `task_id` (the parent is the claim's `task_inherited_from`, else
+    the hk record's `parent_job`). If no task resolves the pane stays, logged
+    `no_task`. A task has ended when its hk **category** is `completed` (the
+    job ends `completed`; any state such as `merged`, `done` or `deployed`) or
+    `canceled` (the job ends `lost`). Only when the record carries no category
+    do the state names `merged`, `done` (completed) and `dropped` (lost) decide;
+  - **the job was closed.** Its latest record is terminal: a `job.revoked`
+    with any outcome (`panewire job close`), or a `job.completed`. This holds
+    whatever the task's state, and whether or not hk can be read. The job ends
+    `completed` for outcome `completed` or a `job.completed`, else `lost`. A
+    job reprompted after its close is live again and is kept.
 
 Each job is judged alone. Another live job on the same task, such as a fix
 author, does not keep this job's pane open.
@@ -44,12 +57,14 @@ When the pane has been not working for at least the grace, the sweep:
 3. reads the job's token usage while herdr still lists the pane, then closes
    the pane; a failed close keeps the job as it was, with nothing written to
    hk, and the next sweep tries again;
-4. runs reap's tail: sets the hk job state (`completed` for `merged` and
-   `done`, `lost` for `dropped`; a record that is already completed, escalated
+4. runs reap's tail: sets the hk job state (`completed` or `lost`, as
+   above; a record that is already completed, escalated
    or lost is left alone), records the usage it read, releases the job's quota,
-   removes its lane, and records `job.reaped` with reason `task_merged`,
-   `task_done` or `task_dropped`. If the hk write fails, the pane is already
-   closed: the sweep logs a warning and records `job.record_failed`, as reap
+   removes its lane, and records `job.reaped` with reason `task_<state>` (the
+   task's state, such as `task_merged` or `task_deployed`) or, for a closed job
+   whose task has not ended, `job_<outcome>` (`job_abandoned`,
+   `job_superseded`, `job_completed`; `job_revoked` when no outcome is named). If the hk write fails, the pane is
+   already closed: the sweep logs a warning and records `job.record_failed`, as reap
    does, and does not retry the write.
 
 The close runs under the node's acting-command lock, so it never interleaves
@@ -68,17 +83,32 @@ all of these make it the node's to remove:
 - the receipt cwd is under the node's `work_root` and is a linked worktree of
   a clone that is a direct child of that root, the clone `worktree.prepare`
   creates. Anything else is kept and logged `not_node_worktree`;
-- the task state is `merged` or `done`. A `dropped` task keeps its worktree,
-  logged `dropped_kept`: its work may never have merged;
 - no other live job's receipt cwd is the same path, logged `shared_kept`;
-- the path is not reached through a symlink, is not the canonical checkout,
-  is clean, and its HEAD is an ancestor of `origin/main` after a
-  `git fetch origin` in the clone.
+- the path is not reached through a symlink, and is not the canonical checkout.
 
-It then runs `git worktree remove <cwd>`, and `git branch -d <branch>` (never
-`-D`) only while no other worktree holds the branch. A remote branch, a
-requester's design worktree (`~/work/<repo>.<slug>`) and a reviewer's worktree
-stay with mergewake.
+What happens next depends on how the job ended:
+
+- **A merged end** (the task's category is `completed`): the worktree must be
+  clean and its HEAD an ancestor of `origin/main` after a `git fetch origin` in
+  the clone. It then runs `git worktree remove <cwd>`, and `git branch -d
+  <branch>` (never `-D`) only while no other worktree holds the branch. A dirty
+  or unmerged worktree is kept (`dirty_kept`, `unmerged_kept`).
+- **A non-merged end** (a `canceled` task, or a job closed `abandoned` or
+  `superseded`): the sweep first writes `git status --porcelain` and `git diff
+  --binary HEAD` to `<job dir>/abandoned-worktree.patch` (mode 0600, replaced
+  atomically, written before anything is removed; a patch that cannot be saved
+  keeps the worktree, `patch_failed_kept`). It then runs `git worktree remove
+  --force <cwd>`, which frees the directory for the next attempt. The local
+  branch is deleted with `-D` only when no other worktree holds it and, after a
+  `git fetch origin`, its tip is contained in some `origin/*` ref (`task branch
+  removed`, reason `on_origin`); otherwise the branch stays and the line says
+  why (`task branch kept`, reason `not_on_origin_kept` or `fetch_failed_kept`).
+  A merged task wins over an abandoned job: the clean-only rule applies.
+- **A closed job whose task is still open** keeps its worktree for the task's
+  owner (`task_open_kept`).
+
+A remote branch, a requester's design worktree (`~/work/<repo>.<slug>`) and a
+reviewer's worktree stay with mergewake.
 
 A removal that fails is a warning and a keep line, never a failed pass. One
 INFO line per removal (`task worktree removed`) or keep (`task worktree kept`,
@@ -92,8 +122,10 @@ a git call that cannot be read keeps the worktree.
 
 One INFO line per closed pane (`task pane closed`: job, task, task_state, pane,
 idle_seconds) and one per kept candidate (`task pane kept`, with a `reason`).
-A candidate is a job whose task is in an ending state, or whose task could not
-be read. A job whose task is still live logs nothing. Lines carry ids only: no
+A candidate is a job whose task is in an ending state, whose task could not be
+read, whose task did not resolve (`no_task`), or that was closed. A job whose
+task is still live logs nothing. A `task pane closed` and a `task worktree
+removed` line carry the `reason` (`task_<state>` or `job_<outcome>`). Lines carry ids only: no
 screen text, no task body, no credentials.
 
 ## Configuration

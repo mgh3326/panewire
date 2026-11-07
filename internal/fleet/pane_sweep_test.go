@@ -26,6 +26,7 @@ type paneSweepFixture struct {
 	sessions map[string]string // pane id → herdr agent_session JSON; the row also reports agent claude
 	shut     map[string]bool   // panes closed: herdr stops listing them
 	tasks    map[string]string // task id → hk task state
+	category map[string]string // task id → hk task category; absent reads as no category
 	taskErr  error
 	taskRead int
 	info     []string
@@ -35,7 +36,7 @@ func newPaneSweepFixture(t *testing.T) *paneSweepFixture {
 	t.Helper()
 	a := testApp(t)
 	f := &paneSweepFixture{t: t, a: a, store: a.JobStore.(*fakeJobStore), now: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
-		status: map[string]string{}, names: map[string]string{}, sessions: map[string]string{}, shut: map[string]bool{}, tasks: map[string]string{}}
+		status: map[string]string{}, names: map[string]string{}, sessions: map[string]string{}, shut: map[string]bool{}, tasks: map[string]string{}, category: map[string]string{}}
 	a.Now = func() time.Time { return f.now }
 	f.runner = &fakeRunner{}
 	f.runner.Do = func(c Command) Result {
@@ -65,12 +66,12 @@ func newPaneSweepFixture(t *testing.T) *paneSweepFixture {
 	}
 	a.Runner = f.runner
 	f.sweeper = &TaskPaneSweeper{Grace: 10 * time.Minute,
-		TaskState: func(_ context.Context, task string) (string, error) {
+		TaskState: func(_ context.Context, task string) (TaskStatus, error) {
 			f.taskRead++
 			if f.taskErr != nil {
-				return "", f.taskErr
+				return TaskStatus{}, f.taskErr
 			}
-			return f.tasks[task], nil
+			return TaskStatus{State: f.tasks[task], Category: f.category[task]}, nil
 		},
 		Info: func(message string, attrs ...any) {
 			line := message

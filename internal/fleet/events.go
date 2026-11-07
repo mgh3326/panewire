@@ -14,9 +14,12 @@ type Event struct {
 	CreatedAt string         `json:"created_at"`
 	TS        string         `json:"ts"`
 	Payload   map[string]any `json:"payload"`
-	when      time.Time
-	mtime     time.Time
-	name      string
+	// Outcome is the flat outcome a `panewire job close` record carries
+	// (completed, abandoned or superseded); other events leave it empty.
+	Outcome string `json:"outcome"`
+	when    time.Time
+	mtime   time.Time
+	name    string
 }
 type Job struct {
 	ID                                                                                                string
@@ -28,10 +31,14 @@ type Job struct {
 	SpawnRole string
 	// Ended is the kind of the newest terminal event since the last claim,
 	// spawn or reprompt; empty while the job is live.
-	Ended   string
-	At      time.Time
-	Receipt map[string]any
-	Events  []Event
+	Ended string
+	// Outcome is the outcome the newest terminal event declared, if it named
+	// one (job close). Inherited is the job whose task the claim inherited
+	// (--parent-job); both are empty when the events do not say.
+	Outcome, Inherited string
+	At                 time.Time
+	Receipt            map[string]any
+	Events             []Event
 }
 
 func (a *App) events(id string) ([]Event, error) {
@@ -109,8 +116,9 @@ func (a *App) job(id string) (Job, error) {
 				}
 			}
 			j.Task = scalar(p["task_id"])
+			j.Inherited = str(p, "task_inherited_from")
 			j.T = str(p, "t_level")
-			j.Terminal, j.Ended = false, ""
+			j.Terminal, j.Ended, j.Outcome = false, "", ""
 			j.Reaped = false
 		case "job.spawned":
 			j.Receipt = p
@@ -127,15 +135,16 @@ func (a *App) job(id string) (Job, error) {
 			j.Report = str(p, "report")
 			j.HubLane = str(p, "hub_lane")
 			j.Machine = str(p, "hub_lane_machine")
-			j.Terminal, j.Ended = false, ""
+			j.Terminal, j.Ended, j.Outcome = false, "", ""
 			j.Reaped = false
 			if j.Task == "" {
 				j.Task = scalar(p["task_id"])
 			}
 		case "job.reprompted":
-			j.Terminal, j.Ended = false, ""
+			j.Terminal, j.Ended, j.Outcome = false, "", ""
 		case "job.completed", "job.joined", "job.revoked", "job.handed_off", "job.lost":
 			j.Terminal, j.Ended = true, ev.Kind
+			j.Outcome = firstNonempty(ev.Outcome, str(p, "outcome"))
 			j.At = ev.when
 		case "job.reaped":
 			j.Reaped = true

@@ -450,7 +450,7 @@ Node sweep behaviour (see [pane-sweep.md](pane-sweep.md)).
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `remove_worktrees` | `true` | After the sweep closes a job whose task is `merged` or `done`, remove the worktree the node prepared under `work_root` and its local branch. `false` keeps every worktree. |
+| `remove_worktrees` | `true` | After the sweep closes a job, remove the worktree the node prepared under `work_root` and its local branch: a clean, merged worktree when the task completed; any worktree, after saving its changes, when the end was not a merge (see [pane-sweep.md](pane-sweep.md#the-worktree)). `false` keeps every worktree. |
 
 ## Job records in handoffkeep
 

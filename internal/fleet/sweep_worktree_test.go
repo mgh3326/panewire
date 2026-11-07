@@ -22,6 +22,13 @@ type sweepGitFake struct {
 	held      map[string]bool // branch name → another worktree holds it
 	removed   []string
 	deleted   []string
+	// A non-merged end: what the worktree holds, whether its branch tip is on
+	// origin, the branches deleted with -D, and a hook run as the worktree is
+	// removed.
+	diff     string
+	onOrigin bool
+	forced   []string
+	onRemove func(path string)
 }
 
 func newSweepGitFake(t *testing.T) *sweepGitFake {
@@ -72,10 +79,23 @@ func (g *sweepGitFake) do(c Command) Result {
 			return Result{Code: 1}
 		}
 		return Result{}
+	case len(args) >= 4 && args[2] == "diff":
+		return Result{Out: g.diff}
+	case len(args) >= 4 && args[2] == "branch" && args[3] == "-r":
+		if g.onOrigin {
+			return Result{Out: "  origin/wk/job\n"}
+		}
+		return Result{}
+	case len(args) >= 5 && args[2] == "branch" && args[3] == "-D":
+		g.forced = append(g.forced, args[4])
+		return Result{}
 	case len(args) >= 5 && args[2] == "worktree" && args[3] == "remove":
-		path := args[4]
+		path := args[len(args)-1]
 		if g.removeErr {
 			return Result{Code: 1, Err: "worktree locked"}
+		}
+		if g.onRemove != nil {
+			g.onRemove(path)
 		}
 		g.removed = append(g.removed, path)
 		_ = os.RemoveAll(path)
@@ -167,25 +187,6 @@ func TestSweepKeepsAWorktreeWhoseHeadIsNotMerged(t *testing.T) {
 	}
 	if !f.infoHas("task worktree kept", "job=a", "reason=unmerged_kept") {
 		t.Fatalf("info lines = %q", f.info)
-	}
-}
-
-func TestSweepKeepsADroppedJobsWorktree(t *testing.T) {
-	g := newSweepGitFake(t)
-	f := newPaneSweepFixture(t)
-	f.withGit(g)
-	f.sweptJob("a", "42", g.worktree(t, "job-a"))
-	f.tasks["42"] = "dropped"
-	f.at(0)
-	f.at(11)
-	if len(g.removed) != 0 || len(g.deleted) != 0 {
-		t.Fatalf("removed %v, deleted %v", g.removed, g.deleted)
-	}
-	if !f.infoHas("task worktree kept", "job=a", "reason=dropped_kept") {
-		t.Fatalf("info lines = %q", f.info)
-	}
-	if f.reaped("a") == nil {
-		t.Fatalf("the dropped job's pane was not closed")
 	}
 }
 
