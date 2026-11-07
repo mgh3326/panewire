@@ -486,6 +486,17 @@ func (in admissionInputs) judge(req admissionRequest) admissionVerdict {
 }
 
 // judgeWith is pacelever's gateWithUnrated, rule for rule.
+// devinFreeRungs maps each SWE-2 profile to the free bucket it draws on. These
+// rungs run on Devin's invisible free-model quota, not the account's paid
+// window, so admission judges them on the stored free-bucket state only.
+var devinFreeRungs = map[string]string{
+	"devin-swe2":              "swe-2-high",
+	"devin-swe2-medium":       "swe-2-medium",
+	"devin-swe2-max":          "swe-2-max",
+	"devin-swe2-flash":        "swe-2-flash-high",
+	"devin-swe2-flash-medium": "swe-2-flash-medium",
+}
+
 func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) admissionVerdict {
 	d := admissionVerdict{Profile: req.Profile, Exit: gateBlocked, Missing: []string{}, Alternatives: []string{}, ManualIDs: []string{}}
 	now := in.Now
@@ -551,7 +562,7 @@ func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) adm
 			return d.refuse(gateUnmeasurable, "fusion_billing_account_unavailable")
 		}
 	}
-	if rung, free := map[string]string{"devin-swe2": "swe-2-high", "devin-swe2-medium": "swe-2-medium", "devin-swe2-max": "swe-2-max"}[profile]; free {
+	if rung, free := devinFreeRungs[profile]; free {
 		// The SWE-2 free bucket cannot be measured. A named account is
 		// admitted on its stored free-bucket state.
 		if in.AccountScoped {
