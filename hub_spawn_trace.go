@@ -163,7 +163,7 @@ func spawnTraceReason(reason string) string {
 	// Refusal text follows the code in a reason. It never reaches a fingerprint.
 	reason, _, _ = strings.Cut(reason, ": ")
 	switch reason {
-	case "timeout", "disconnected", "unknown", "spawn_failed", "configuration", "admission_refused", "parent_job_not_found", "quota_unconfirmed", "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable", "node_upgrade_required":
+	case "timeout", "disconnected", "unknown", "spawn_failed", "configuration", "admission_refused", "parent_job_not_found", "quota_unconfirmed", "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable", "node_upgrade_required", spawnOrphanedReason, spawnAbandonedReason:
 		return reason
 	}
 	if code, ok := strings.CutPrefix(reason, "spawn_failed:"); ok && fleet.IsSpawnRefusalCode(code) {

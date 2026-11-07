@@ -154,8 +154,10 @@ Unmarked node requests retain the legacy result shape, including on result repla
 Recovery replays that exact UUID on that exact node. An uncertain send never
 falls through to another host. The node commits an executing journal entry
 before launch and commits its completed result before replying. Duplicate
-completed requests replay that result; active or restart-interrupted requests
-answer reconciling instead of silently disappearing or running twice.
+completed requests replay that result; a request this node process is still
+running answers `reconciling`, and an executing entry no live execution owns
+(the node restarted mid-spawn) answers `unknown`. Neither runs it twice. See
+[Stranded requests](#stranded-requests).
 
 Node RPC includes the absolute deadline (`TestNodeSpawnExpiredAbsoluteDeadlineSkipsEngine`). A request first received after it
 expires is refused without calling the engine. An execution already in progress
@@ -205,10 +207,65 @@ sent merely because a deadline expired.
 | Node disconnect or uncertain send | Retain node UUID/host; replay its journal on reconnect. | `TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox`, `TestAsyncSpawnLateResultReconcilesAgainstSameNode`. |
 | Duplicate accept / lost HTTP response | Identical key/body replays; changed body conflicts; CLI receipt preserves key. | Reservation test and `TestSubmissionReceiptReusesKeyAfterLostHTTPResponse`. |
 | Timeout followed by late pane | Retain ownership; reconcile receipt with exact node identity; never close working/unknown. | Late-result test and `TestFailedSpawnCleanupRequiresExactIdlePane`. |
-| Node restart while executing | Do not rerun or invent success from a pane's presence. | `TestNodeSpawnJournalRestartDedupAndLostResultReplay`. Automatic adoption/cleanup after this crash window is a non-goal; operator reconciliation is required. |
+| Node restart while executing | Do not rerun or invent success from a pane's presence. Past the deadline, a node answering `unknown` with no pane bearing the job label finishes the request `failed` (`orphaned_after_restart`) and releases its reservation; a labelled pane keeps it for the operator. | `TestNodeSpawnJournalRestartDedupAndLostResultReplay`, `TestNodeSpawnReplayAnswersUnknownAfterRestart`, `TestStrandedSpawnUnknownWithoutPaneFailsAndReleases`, `TestStrandedSpawnStaysPendingWithoutProof`. Adopting a pane after this crash window is a non-goal. |
 | Lost event or lost ACK | Commit state and outbox atomically; retry with a stable event id and actual job id. | `TestSpawnOutboxFailureRollsBackResult`, `TestAsyncSpawnLostEventRetriesWithStableJobIdentity`. |
 | Process pressure / shutdown | Bounded execution and persisted pending work. | `TestAsyncSpawnWorkersBoundedAndIndependentOfHTTP`, `TestAsyncSpawnOutlivesSubmittingHTTPContext`; HTTP-independent execution lifetime is owned by maintenance/shutdown, never the POST context. |
 | Backend migration | Never silently drop reservations or tombstones. | Spawn store contract refuses the inbox-only SQLite-to-Postgres migrator when spawn rows exist. Full backend transfer is a separate migration, not an inbox-only copy. |
+
+### Stranded requests
+
+A request bound to a node stays `reconciling` or `deadline_exceeded` until the
+node answers. The coordinator replays the bound request to its node every few
+seconds (the late-result path), so the hub asks about it well inside a minute
+after the deadline. When a node restarted mid-spawn, its journal keeps the
+entry executing for good; the node now answers such a replay `unknown`
+instead of `reconciling` (an older hub ignores that answer and keeps the
+request pending, as before).
+
+Past the deadline, an `unknown` answer from the bound, connected node makes the
+hub read that node's panes (`agents.list`, at most once a minute per request):
+
+- No pane bearing the job label (hk's recorded label, else the request's
+  `-l`), from a complete pane list: the hub has that node mark the hk job
+  `lost` with `end_reason` `orphaned_after_restart` when the record exists and
+  is not terminal, finishes the request `failed` with reason
+  `orphaned_after_restart` (`SPAWN_FAILED … replay=no`), and releases the
+  (task, role) reservation. A new job id for the same task and role then
+  claims at once. A crash after the lost write converges: a failed holder
+  whose hk job is lost releases on the next claim.
+- A labelled pane, an unreadable pane list, an hk read error or a node that
+  refuses the lost write keep the request pending; the hub logs
+  `hub kept a stranded spawn` with the reason.
+- A real late success still wins: a completed journal result with a verified
+  pane finishes the request `succeeded`, as above.
+- A disconnected node, or one still running the request (`reconciling`),
+  keeps it pending.
+
+`panewire hub spawn abandon REQUEST_ID --reason TEXT` (operator token env;
+`--hub-url`, `--hub-token-env`, `--hub-cf-env`, defaulting to
+`PANEWIRE_HUB_URL`, `PANEWIRE_HUB_TOKEN_ENV`, `PANEWIRE_HUB_CF_ENV`) calls
+`POST /v1/spawns/<request_id>/abandon` with `{"reason": TEXT}` (operator
+credential). It applies to a pending request bound to a node, and runs the same
+check: only when that node lists no pane bearing the job label does the hub
+mark the hk job lost (`end_reason` `operator_abandoned`), finish the request
+`failed` with reason `operator_abandoned: <TEXT>` and release the reservation
+(200, the CLI prints `ABANDONED request=… job=… status=failed`). The reason
+travels in the `SPAWN_FAILED` event and the status API, and the hub logs one
+WARN line `hub spawn abandon` with the request, job, host, verdict and reason.
+A live labelled pane, an unreachable node or a refused lost write answers 409
+`spawn_abandon_refused` with the check that held it; a finished request answers
+409 `spawn_not_pending`, an unbound one 409 `spawn_not_bound` (it releases
+itself at its deadline). The CLI exits 5 on a refusal. Abandon does not stop a
+spawn the node may still be running before its pane exists; use it for a
+request whose node has restarted or whose deadline has passed.
+
+A request still pending 30 minutes past its deadline warns once per attempt:
+one Sentry warning `SPAWN_OWNERSHIP_STUCK <status>` fingerprinted
+`spawn-ownership-stuck` (tags job, host, status, request, attempt), one fleet
+event (`kind` `spawn`, `outcome` `stuck`, `reason` the status, `request_id`)
+and one WARN line `hub spawn ownership stuck`. A delivered outbox row
+`<request_id>:<attempt>:stuck` records it, so a hub restart does not warn
+again.
 
 The new spawn attempt binding is durable. Restoring the existing global legacy
 job epoch/fence/revocation queue is explicitly outside this change; its documented

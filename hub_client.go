@@ -183,6 +183,10 @@ type HubClient struct {
 	spawnJournalMu    sync.Mutex
 	spawnJournal      *nodeSpawnJournal
 	spawnJournalUsers int
+	// spawnActive holds the journal requests this process is executing; an
+	// executing entry missing from it was left by a restart.
+	spawnActiveMu sync.Mutex
+	spawnActive   map[string]bool
 	// Task pane sweep (node_pane_sweep.go, docs/pane-sweep.md). An interval of
 	// zero leaves the sweep off, as in every fixture.
 	taskPaneSweepInterval time.Duration

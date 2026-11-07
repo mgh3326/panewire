@@ -264,6 +264,7 @@ func (h *HubServer) executeSpawnTask(parent context.Context, task hubSpawnTask) 
 		defer cancel()
 		transport := directSpawnTransport{h: h, task: task}
 		_, _ = transport.dispatch(ctx, *task.Node)
+		h.noteStuckSpawn(task)
 		return
 	}
 	if task.Node == nil && task.Status == "reconciling" {
@@ -505,7 +506,13 @@ func (t *directSpawnTransport) dispatch(ctx context.Context, node hubSpawnReques
 	}
 	select {
 	case result := <-entry.waiter:
-		if result.CompletedAt == nil || result.Error == "reconciling" || result.Error == "journal_unavailable" || result.Error == "journal_conflict" {
+		// unknown: the node holds no live execution of this request. Past the
+		// deadline nothing will finish it, so a node without a labelled pane
+		// makes it orphaned (hub_spawn_orphan.go).
+		if result.CompletedAt != nil && result.Error == "unknown" && !h.now().Before(t.task.Deadline) && h.resolveOrphanedSpawn(t.task) {
+			return fleet.HubSpawnReply{}, &fleet.HubError{Kind: "hub_spawn_pending"}
+		}
+		if result.CompletedAt == nil || result.Error == "reconciling" || result.Error == "unknown" || result.Error == "journal_unavailable" || result.Error == "journal_conflict" {
 			return t.unknown(ctx, "unknown")
 		}
 		// The authenticated node's completed journal is necessary, and a current

@@ -136,7 +136,7 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 		return
 	}
 	defer client.releaseSpawnJournal()
-	claimed, cached, err := journal.claim(ctx, message)
+	claimed, cached, active, err := client.claimHubSpawn(ctx, journal, message)
 	if err != nil {
 		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "journal_conflict"}, message.OperatorAuthorized)
 		return
@@ -146,9 +146,17 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 		return
 	}
 	if !claimed {
-		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: "reconciling"}, message.OperatorAuthorized)
+		// An executing entry this process is not running was left by a node
+		// restart: nothing will ever complete it, so the answer is unknown, and
+		// the hub decides from the panes whether the request is orphaned.
+		reply := "unknown"
+		if active {
+			reply = "reconciling"
+		}
+		client.sendSpawnResult(ctx, peer, hubSpawnResult{RequestID: message.RequestID, RC: 75, Error: reply}, message.OperatorAuthorized)
 		return
 	}
+	defer client.endHubSpawn(message.RequestID)
 	deadline := time.Now().Add(time.Duration(message.WaitSeconds)*time.Second + client.spawnTimeoutExtra)
 	if message.DeadlineMS != 0 && time.UnixMilli(message.DeadlineMS).Before(deadline) {
 		deadline = time.UnixMilli(message.DeadlineMS)
@@ -167,6 +175,30 @@ func (client *HubClient) handleHubSpawn(ctx context.Context, peer *hubClientConn
 	}
 	client.sendSpawnResult(ctx, peer, result, message.OperatorAuthorized)
 }
+
+// claimHubSpawn claims message in the journal and reports whether this process
+// is running it. The claim and the running mark change under one lock, so a
+// replay racing a fresh claim never sees an executing entry nobody owns.
+func (client *HubClient) claimHubSpawn(ctx context.Context, journal *nodeSpawnJournal, message hubOutboundMessage) (claimed bool, cached *hubSpawnResult, active bool, err error) {
+	client.spawnActiveMu.Lock()
+	defer client.spawnActiveMu.Unlock()
+	claimed, cached, err = journal.claim(ctx, message)
+	if claimed {
+		if client.spawnActive == nil {
+			client.spawnActive = map[string]bool{}
+		}
+		client.spawnActive[message.RequestID] = true
+	}
+	return claimed, cached, client.spawnActive[message.RequestID], err
+}
+
+// endHubSpawn drops the running mark once the execution has returned.
+func (client *HubClient) endHubSpawn(requestID string) {
+	client.spawnActiveMu.Lock()
+	defer client.spawnActiveMu.Unlock()
+	delete(client.spawnActive, requestID)
+}
+
 func (client *HubClient) sendSpawnResult(ctx context.Context, peer *hubClientConnection, result hubSpawnResult, extended bool) {
 	_ = peer.write(ctx, spawnResultWire(result, extended))
 }
@@ -174,7 +206,7 @@ func spawnResultWire(result hubSpawnResult, extended bool) any {
 	if !extended {
 		result.Receipt, result.Stage, result.StageMS, result.Retryable = nil, "", nil, false
 		switch result.Error {
-		case "reconciling", "journal_unavailable", "journal_conflict":
+		case "reconciling", "unknown", "journal_unavailable", "journal_conflict":
 			result.Error = "timeout" // Legacy hubs understand uncertainty as timeout.
 		}
 	}
