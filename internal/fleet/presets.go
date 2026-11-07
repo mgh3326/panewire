@@ -122,9 +122,12 @@ func (a *App) workspaceRows(ctx context.Context, value string) ([]map[string]any
 }
 
 // createdWorkspace is a workspace resolveWorkspace created. Its root pane keeps
-// the workspace alive, so Spawn closes that pane when the launch fails instead
-// of leaving an empty workspace behind.
-type createdWorkspace struct{ rootPane string }
+// the workspace alive; Spawn may close it when the launch fails.
+type createdWorkspace struct {
+	id       string
+	label    string
+	rootPane string
+}
 
 func (a *App) resolveWorkspace(ctx context.Context, value string) (string, *createdWorkspace, error) {
 	rows, err := a.workspaceRows(ctx, value)
@@ -194,5 +197,32 @@ func (a *App) createWorkspace(ctx context.Context, label string) (string, *creat
 		fmt.Fprintf(a.Out, " duplicates=%d", duplicates)
 	}
 	fmt.Fprintln(a.Out)
-	return workspace, &createdWorkspace{rootPane: created.Result.RootPane.PaneID}, nil
+	return workspace, &createdWorkspace{id: created.Result.Workspace.WorkspaceID, label: label, rootPane: created.Result.RootPane.PaneID}, nil
+}
+
+// closeCreatedWorkspace closes the root pane of a workspace this spawn created
+// only when a workspace with the same label is older. Resolve picks the oldest
+// match, so no other spawn can have adopted this one; the oldest is kept
+// because an adopter may not have created its pane yet.
+func (a *App) closeCreatedWorkspace(ctx context.Context, w *createdWorkspace) error {
+	rows, err := a.workspaceRows(ctx, w.label)
+	if err != nil {
+		return err
+	}
+	var matches []string
+	for _, row := range rows {
+		if id := str(row, "workspace_id"); str(row, "label") == w.label && id != "" {
+			matches = append(matches, id)
+		}
+	}
+	for i, id := range matches {
+		if id != w.id {
+			continue
+		}
+		if i == 0 {
+			return nil
+		}
+		return a.must(ctx, "herdr", "pane", "close", w.rootPane)
+	}
+	return nil
 }
