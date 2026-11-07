@@ -43,8 +43,13 @@ type RoutingPolicy struct {
 // RoutingRule is one routing role's entry. Allowed names catalog profiles
 // (pacelever launch profiles); "*" admits any profile.
 type RoutingRule struct {
-	Allowed      []string `json:"allowed"`
-	Effort       string   `json:"effort"`
+	Allowed []string `json:"allowed"`
+	Effort  string   `json:"effort"`
+	// MinEffort is the cheapest effort rung the role admits. Selection drops
+	// a candidate rung below it as below_role_min_effort; "" leaves today's
+	// ordering untouched. Only consult applies Effort itself (roleEffortCap),
+	// so this is how every other role sets an effort floor.
+	MinEffort    string   `json:"min_effort,omitempty"`
 	OnExhaustion string   `json:"on_exhaustion"`
 	DowngradeTo  []string `json:"downgrade_to,omitempty"`
 	FamilyRule   string   `json:"family_rule,omitempty"`
@@ -140,6 +145,11 @@ func (p RoutingPolicy) validate() error {
 	for name, r := range p.Roles {
 		if len(r.Allowed) == 0 {
 			return fmt.Errorf("routing role %s allows nothing", name)
+		}
+		if r.MinEffort != "" {
+			if _, ok := effortRank[r.MinEffort]; !ok {
+				return fmt.Errorf("routing role %s has unknown min_effort %q", name, r.MinEffort)
+			}
 		}
 		switch r.OnExhaustion {
 		case exhaustWait, exhaustEscalate:
@@ -384,17 +394,28 @@ func (a *App) routeFor(ctx context.Context, seatRole, override string) (*routing
 	return r, nil
 }
 
-// effort is the role's starting effort, else the chosen rung's. A consult
-// rung escalated above the role effort, or one whose effort a
-// family_effort entry sets, reports its own effort.
+// effort is the effort the chosen rung launches at. A consult rung at or
+// below the role effort reports that effort, unless family_effort or an
+// escalation sets its own. Every other role's Effort does not shape
+// selection (roleEffortCap is ""), so it reports the rung itself.
 func (r *routing) effort(row CatalogRow) string {
-	if row.Effort != "" && r.familyEffortKey(row) != "" {
-		return row.Effort
-	}
-	if r != nil && r.rule != nil && r.rule.Effort != "" && !aboveEffort(row.Effort, r.roleEffortCap()) {
-		return r.rule.Effort
+	if r != nil && r.top() {
+		if row.Effort != "" && r.familyEffortKey(row) != "" {
+			return row.Effort
+		}
+		if r.rule != nil && r.rule.Effort != "" && !aboveEffort(row.Effort, r.roleEffortCap()) {
+			return r.rule.Effort
+		}
 	}
 	return row.Effort
+}
+
+// minEffort is the role's effort floor; "" admits every rung.
+func (r *routing) minEffort() string {
+	if r == nil || r.rule == nil {
+		return ""
+	}
+	return r.rule.MinEffort
 }
 
 // roleEffortCap is the effort a consult never climbs above without
@@ -462,6 +483,9 @@ func (r *routing) record(refusal string) map[string]any {
 		if r.rule.Effort != "" {
 			m["effort"] = r.rule.Effort
 		}
+		if r.rule.MinEffort != "" {
+			m["min_effort"] = r.rule.MinEffort
+		}
 		if r.top() && len(r.rule.FamilyEffort) > 0 {
 			m["family_effort"] = r.rule.FamilyEffort
 		}
@@ -487,6 +511,9 @@ const (
 	reasonAboveRoleEffort    = "above_role_effort"
 	reasonRoleEffortUnplaced = "role_effort_unplaced"
 )
+
+// reasonBelowRoleMinEffort drops a rung below the role's min_effort.
+const reasonBelowRoleMinEffort = "below_role_min_effort"
 
 // roleExhausted handles a routed selection that admitted nothing. With no
 // in-role candidate left after the static filters it refuses

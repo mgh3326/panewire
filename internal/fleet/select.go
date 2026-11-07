@@ -285,6 +285,18 @@ func rankEffort(e string) int {
 	return len(effortRank)
 }
 
+// rowLaunchEffort is the effort a catalog row launches at. A rung-less row
+// ("") is the profile's default rung: admission resolves it to the profile's
+// declared default effort (quotaRequest falls back to seat.Effort), so a
+// role's min_effort floor judges that effort rather than the catalog's
+// rank-0 default.
+func (a *App) rowLaunchEffort(row CatalogRow) string {
+	if row.Effort != "" {
+		return row.Effort
+	}
+	return a.Policy.Profiles[row.Profile].Effort
+}
+
 // seatRoles resolves the role list a seat admits for one catalog effort,
 // mirroring Seat.Check's rung lookup. A missing rung is a refusal.
 func (s Seat) seatRoles(effort string) ([]string, bool) {
@@ -778,6 +790,8 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			c.reason = "gate_class"
 		case aboveEffort(row.Effort, roleCap) && !req.allowEscalation:
 			c.reason = reasonAboveRoleEffort
+		case req.route.minEffort() != "" && rankEffort(a.rowLaunchEffort(row)) < rankEffort(req.route.minEffort()):
+			c.reason = reasonBelowRoleMinEffort
 		case req.effort != "" && row.Effort != req.effort:
 			c.reason = "effort_mismatch"
 		case !validID(row.Pool):

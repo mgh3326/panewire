@@ -15,6 +15,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/harnessstate"
 )
 
 // worktree.prepare, worktree.remove and quota.refresh (docs/node-commands.md,
@@ -506,6 +508,53 @@ func nodeWorktreeClean(ctx context.Context, git relayCommandRunner, path string)
 	return strings.TrimSpace(string(out)) == "", nil
 }
 
+func nodeEnsureHarnessStateExcludes(ctx context.Context, git relayCommandRunner, clone string) error {
+	out, err := git(ctx, "-C", clone, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return err
+	}
+	common := strings.TrimSpace(string(out))
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(clone, common)
+	}
+	dir := filepath.Join(common, "info")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	name := filepath.Join(dir, "exclude")
+	contents, err := os.ReadFile(name)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	mode := os.FileMode(0644)
+	if info, err := os.Stat(name); err == nil {
+		mode = info.Mode().Perm()
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	text := string(contents)
+	updated := text
+	for _, pattern := range strings.Split(strings.TrimSuffix(harnessstate.Excludes, "\n"), "\n") {
+		found := false
+		for _, line := range strings.Split(text, "\n") {
+			if strings.TrimSuffix(line, "\r") == pattern {
+				found = true
+				break
+			}
+		}
+		if !found {
+			if updated != "" && !strings.HasSuffix(updated, "\n") {
+				updated += "\n"
+			}
+			updated += pattern + "\n"
+		}
+	}
+	if updated == text {
+		return nil
+	}
+	return replaceFileAtomically(name, ".exclude-*", []byte(updated), mode)
+}
+
 // nodeWorktreeIgnored lists every ignored path in the worktree; callers
 // must refuse on any the regenerable allowlist does not cover, so the list
 // is never truncated.
@@ -650,6 +699,9 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 		}
 	default:
+		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
+	}
+	if err := nodeEnsureHarnessStateExcludes(ctx, git, clone); err != nil {
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
 

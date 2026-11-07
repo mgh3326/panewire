@@ -127,6 +127,8 @@ func (g *sweepGitFake) do(c Command) Result {
 			return Result{Code: 1}
 		}
 		return Result{}
+	case len(args) >= 4 && args[2] == "ls-files" && slices.Contains(args, "--ignored"):
+		return Result{}
 	case len(args) >= 4 && args[2] == "ls-files":
 		if g.lsFailed {
 			return Result{Code: 1, Err: "ls-files failed"}
