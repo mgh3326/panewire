@@ -414,7 +414,7 @@ func validateCatalogMonotonic(rows []CatalogEntry) error {
 		rungs := byProfile[profile]
 		sort.SliceStable(rungs, func(i, j int) bool { return catalogEffortRank(rungs[i].Effort) < catalogEffortRank(rungs[j].Effort) })
 		for i := 1; i < len(rungs); i++ {
-			if catalogGradeRank(rungs[i].Grade) > catalogGradeRank(rungs[i-1].Grade) {
+			if catalogGradeRank(rungs[i].Grade) < catalogGradeRank(rungs[i-1].Grade) {
 				return fmt.Errorf("catalog effort grades are not monotonic for %s", profile)
 			}
 		}
