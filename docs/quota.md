@@ -403,9 +403,9 @@ pacelever v0.3.28's gate) from three inputs:
   account; a local request reads the account this host holds (the fleet
   config's `[quota.accounts]`, this host's presence records, then pacelever's
   own `[quota.accounts]`).
-- **The bench catalog**, read from handoffkeep (`/v1/bench/catalog`, the
-  endpoint and credential pacelever's catalog uses) and checked as pacelever
-  checks it; an unreadable or invalid catalog refuses (exit 2).
+- **The bench catalog**, pacelever's own (`pacelever bench catalog list`, with
+  its bundled snapshot and validation) until hk 3249 moves it; an unavailable
+  or stale catalog refuses (exit 2).
 - **The pool policy** in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
   `~/.config/pacelever/config.toml`): class and its `until` date, cutoff,
   subscription, `fusion_billing_fp`. A missing file is the default policy; an
@@ -464,10 +464,11 @@ gate = "native"   # or "shadow", the default
   A commandcode spawn on a host whose commandcode readings pacelever publishes
   reads `disagree` (no `30d`): that is the expected difference until the pool
   is native. The desk reads the events and flips the switch.
-- **Native.** panewire's verdict decides, and the gate runs no pacelever
-  command at all. Outside the gate, `pacelever policy launch`, the status and
-  manual reads and the selector's refresh of a pool panewire does not measure
-  stay until hk 3249 and 3250.
+- **Native.** panewire's verdict decides: no `pacelever gate` and no
+  `pacelever refresh` run in the gate. Its one pacelever call is the catalog
+  read; that, `pacelever policy launch`, the status and manual reads and the
+  selector's refresh of a pool panewire does not measure stay until hk 3249 and
+  3250.
 
 The golden verdicts in `internal/fleet/testdata/admission_golden/verdicts.json`
 are pacelever's own: `generator/regen.sh` runs its gate over the scenarios in a

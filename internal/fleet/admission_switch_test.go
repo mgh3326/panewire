@@ -22,13 +22,17 @@ var switchNow = time.Date(2026, 11, 7, 3, 0, 0, 0, time.UTC)
 
 const switchKey = "claude:0123456789abcdef"
 
-// switchCatalog is the bench catalog as handoffkeep serves it.
+// catalogList is pacelever's catalog read, the one pacelever call the native
+// gate keeps until hk 3249.
+var catalogList = []string{"bench", "catalog", "list", "--json"}
+
+// switchCatalog is the bench catalog pacelever lists.
 const switchCatalog = `{"catalog":[
  {"profile":"opus","effort":"high","model_id":"claude-opus-5-5","pool":"claude","grade":"S+","gate":"default"},
  {"profile":"codex-sol","effort":"max","model_id":"gpt-6.1-sol","pool":"codex","grade":"S+","gate":"default"},
  {"profile":"cmd-dsflash41","effort":"high","model_id":"deepseek/deepseek-v4.1-flash","pool":"commandcode","grade":"A+","gate":"default"},
  {"profile":"kiro-sonnet","effort":"high","model_id":"claude-sonnet-5-5","pool":"kiro","grade":"A","gate":"default"}
-]}`
+],"source":{"stale":false}}`
 
 // switchApp is an App whose quota CLI is a fake pacelever: it lists the
 // catalog and answers `gate` with paceleverGate. The shared store holds
@@ -38,6 +42,8 @@ func switchApp(t *testing.T, mode string, reading *shared.Observation, pacelever
 	t.Setenv("PACELEVER_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
 	runner := &fakeRunner{Do: func(c Command) Result {
 		switch {
+		case c.Name == "pacelever" && slices.Equal(c.Args, catalogList):
+			return Result{Out: switchCatalog}
 		case c.Name == "pacelever" && len(c.Args) > 0 && c.Args[0] == "gate":
 			return paceleverGate
 		case c.Name == "panewire" && len(c.Args) >= 2 && slices.Equal(c.Args[:2], []string{"quota", "refresh"}):
@@ -52,15 +58,6 @@ func switchApp(t *testing.T, mode string, reading *shared.Observation, pacelever
 	a.Quota = admissionQuota{CLIQuota{runner, "pacelever"}, a}
 	a.SharedLatest = func(context.Context, string) (shared.Latest, error) {
 		return shared.Latest{Observation: reading}, nil
-	}
-	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) {
-		var doc struct {
-			Catalog []CatalogRow `json:"catalog"`
-		}
-		if err := json.Unmarshal([]byte(switchCatalog), &doc); err != nil {
-			t.Fatal(err)
-		}
-		return checkBenchCatalog(doc.Catalog)
 	}
 	var events []fleetevent.Event
 	a.EventSink = func(e fleetevent.Event) { events = append(events, e) }
@@ -80,11 +77,11 @@ func paceleverReceipt(ok bool, code int, reason string) Result {
 	return Result{Code: code, Out: string(b)}
 }
 
-// paceleverRuns counts every pacelever execution, not only `gate`.
+// paceleverRuns lists every pacelever execution other than the catalog read.
 func paceleverRuns(r *fakeRunner) []Command {
 	var runs []Command
 	for _, c := range r.Calls {
-		if c.Name == "pacelever" {
+		if c.Name == "pacelever" && !slices.Equal(c.Args, catalogList) {
 			runs = append(runs, c)
 		}
 	}
@@ -161,8 +158,8 @@ func TestAdmissionShadowNeverMeasures(t *testing.T) {
 }
 
 // TestAdmissionNativeNeverRunsPaceleverGate: native mode decides from the
-// stored reading and the handoffkeep catalog and executes pacelever zero
-// times — no gate, no catalog list, no refresh.
+// stored reading and runs no pacelever gate or refresh; pacelever's catalog
+// read is the one pacelever call left (hk 3249 moves it).
 func TestAdmissionNativeNeverRunsPaceleverGate(t *testing.T) {
 	a, runner, events := switchApp(t, gateModeNative, switchReading(20, 40), Result{Code: 99})
 	j, err := a.judgeGate(context.Background(), opusRequest, "claude", quotaJudgment{Host: "local", Source: "shared", AccountKey: switchKey})
@@ -181,7 +178,12 @@ func TestAdmissionNativeNeverRunsPaceleverGate(t *testing.T) {
 		t.Fatalf("native receipt must admit through admissionGate: %+v %v\n%s", granted, err, out)
 	}
 	if runs := paceleverRuns(runner); len(runs) != 0 {
-		t.Fatalf("native mode ran pacelever: %v", runs)
+		t.Fatalf("native mode ran pacelever beyond its catalog read: %v", runs)
+	}
+	for _, c := range runner.Calls {
+		if c.Name != "pacelever" || !slices.Equal(c.Args, catalogList) {
+			t.Fatalf("native mode ran %s %v", c.Name, c.Args)
+		}
 	}
 }
 
@@ -199,8 +201,8 @@ func TestAdmissionNativeStaleUnmeasuredPoolRunsNoPacelever(t *testing.T) {
 			t.Fatalf("account %q: stale kiro reading must be unmeasurable: %v", key, err)
 		}
 	}
-	if len(runner.Calls) != 0 {
-		t.Fatalf("native gate executed %v", runner.Calls)
+	if runs := paceleverRuns(runner); len(runs) != 0 || slices.ContainsFunc(runner.Calls, func(c Command) bool { return slices.Contains(c.Args, "refresh") }) {
+		t.Fatalf("native gate measured or ran pacelever: %v", runner.Calls)
 	}
 }
 
@@ -252,7 +254,7 @@ func TestAdmissionNativeAlternativesReadOtherHeldPools(t *testing.T) {
 	if !slices.Equal(receipt.Alternatives, []string{"codex-sol --effort max"}) {
 		t.Fatalf("alternatives = %v, want the codex rung the held codex account admits", receipt.Alternatives)
 	}
-	if len(runner.Calls) != 0 {
+	if runs := paceleverRuns(runner); len(runs) != 0 || slices.ContainsFunc(runner.Calls, func(c Command) bool { return slices.Contains(c.Args, "refresh") }) {
 		t.Fatalf("alternatives must not run pacelever or measure: %v", runner.Calls)
 	}
 }
@@ -350,10 +352,10 @@ func TestAdmissionKeepsConfiguredQuotaBinary(t *testing.T) {
 	}
 }
 
-// TestAdmissionNativeReadsHandoffkeepOnly: the production native gate
-// reads the catalog and the account's reading over handoffkeep's HTTP API —
-// the endpoints pacelever reads — and runs no command.
-func TestAdmissionNativeReadsHandoffkeepOnly(t *testing.T) {
+// TestAdmissionNativeReadsStoredReadingOverHandoffkeep: the production
+// native gate reads the account's reading over handoffkeep's HTTP API and
+// runs no pacelever command but its catalog read.
+func TestAdmissionNativeReadsStoredReadingOverHandoffkeep(t *testing.T) {
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.URL.RequestURI())
@@ -362,8 +364,6 @@ func TestAdmissionNativeReadsHandoffkeepOnly(t *testing.T) {
 			return
 		}
 		switch r.URL.Path {
-		case "/v1/bench/catalog":
-			_, _ = io.WriteString(w, switchCatalog)
 		case "/v1/quota/accounts/" + switchKey + "/latest":
 			_ = json.NewEncoder(w).Encode(shared.Latest{Observation: switchReading(20, 40)})
 		default:
@@ -373,37 +373,17 @@ func TestAdmissionNativeReadsHandoffkeepOnly(t *testing.T) {
 	t.Cleanup(srv.Close)
 	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
 	a, runner, _ := switchApp(t, gateModeNative, nil, Result{Code: 99})
-	a.SharedLatest, a.BenchCatalog = nil, nil
+	a.SharedLatest = nil
 	a.Config.Quota["url"] = srv.URL
 	out, err := a.Quota.Gate(context.Background(), opusRequest)
 	if err != nil || gatePool(out) != "claude" {
 		t.Fatalf("native gate over handoffkeep: %v\n%s", err, out)
 	}
-	if !slices.Equal(paths, []string{"/v1/bench/catalog?include_retired=1", "/v1/quota/accounts/" + switchKey + "/latest"}) {
+	if !slices.Equal(paths, []string{"/v1/quota/accounts/" + switchKey + "/latest"}) {
 		t.Fatalf("handoffkeep reads = %v", paths)
 	}
-	if len(runner.Calls) != 0 {
+	if !slices.EqualFunc(runner.Calls, []Command{{Name: "pacelever", Args: catalogList}}, func(a, b Command) bool { return a.Name == b.Name && slices.Equal(a.Args, b.Args) }) {
 		t.Fatalf("native gate executed %v", runner.Calls)
-	}
-}
-
-// TestBenchCatalogChecksRowsLikePacelever: the handoffkeep catalog is
-// refused on a malformed or duplicate rung, and rows of unknown pools are
-// skipped, as pacelever's catalog decoder does.
-func TestBenchCatalogChecksRowsLikePacelever(t *testing.T) {
-	good := CatalogRow{Profile: "opus", Effort: "high", ModelID: "claude-opus-5-5", Pool: "claude", Grade: "S+", Gate: "default"}
-	other := good
-	other.Pool, other.Profile = "mystery", "x"
-	rows, err := checkBenchCatalog([]CatalogRow{good, other})
-	if err != nil || len(rows) != 1 || rows[0].Profile != "opus" {
-		t.Fatalf("unknown pool must be skipped: %+v %v", rows, err)
-	}
-	bad := good
-	bad.Grade = "Z"
-	for _, tc := range [][]CatalogRow{{good, good}, {bad}, {other}, nil} {
-		if _, err := checkBenchCatalog(tc); err == nil {
-			t.Errorf("catalog %+v must be refused", tc)
-		}
 	}
 }
 

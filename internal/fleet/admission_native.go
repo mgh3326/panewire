@@ -58,8 +58,9 @@ func (a *App) gateMode() string {
 }
 
 // admissionQuota is the production QuotaGate. Launch, Catalog and Pools stay
-// pacelever's (CLIQuota); Gate follows the switch. The native verdict runs no
-// pacelever: it reads the catalog and readings from handoffkeep.
+// pacelever's (CLIQuota); Gate follows the switch. The native verdict reads
+// the account's stored reading from handoffkeep and pacelever's catalog; it
+// never runs `pacelever gate` or `pacelever refresh`.
 type admissionQuota struct {
 	CLIQuota
 	app *App
@@ -286,50 +287,19 @@ func (a *App) paceleverBinary() string {
 	return "pacelever"
 }
 
-// benchCatalog reads the bench catalog from handoffkeep — the endpoint and
-// credential pacelever's catalog reads — so the gate never runs pacelever.
-// Rows are checked as pacelever's catalog decoder checks them: a rung needs a
-// profile, a model id, a known grade and gate, and appears once; a row of a
-// pool pacelever does not know is skipped. A catalog that fails a check is
-// refused, never guessed.
+// benchCatalog is the bench catalog the gate judges with: pacelever's own
+// (`pacelever bench catalog list`), which merges its bundled snapshot and
+// validates the rows. The catalog stays pacelever's until hk 3249 moves it
+// (hk 3248 brief, Dependency status); the gate itself runs no other
+// pacelever command.
 func (a *App) benchCatalog(ctx context.Context) ([]CatalogRow, error) {
 	if a.BenchCatalog != nil {
 		return a.BenchCatalog(ctx)
 	}
-	c, err := a.quotaClient()
-	if err != nil {
-		return nil, err
+	if a.Quota == nil {
+		return nil, fmt.Errorf("bench catalog unavailable")
 	}
-	var doc struct {
-		Catalog []CatalogRow `json:"catalog"`
-	}
-	if err := c.get(ctx, "/v1/bench/catalog?include_retired=1", &doc); err != nil {
-		return nil, err
-	}
-	return checkBenchCatalog(doc.Catalog)
-}
-
-func checkBenchCatalog(rows []CatalogRow) ([]CatalogRow, error) {
-	var out []CatalogRow
-	seen := map[string]bool{}
-	for _, r := range rows {
-		if r.Profile == "" || r.ModelID == "" || !slices.Contains(admissionGrades, r.Grade) || r.Gate != defaultGate && r.Gate != escalationGate && r.Gate != consultOnlyGate {
-			return nil, fmt.Errorf("catalog row lacks valid identity, grade or gate")
-		}
-		if !slices.Contains(admissionPolicyPools, r.Pool) {
-			continue
-		}
-		key := r.Profile + "@" + r.Effort
-		if seen[key] {
-			return nil, fmt.Errorf("duplicate catalog rung")
-		}
-		seen[key] = true
-		out = append(out, r)
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("catalog contains no supported pool rows")
-	}
-	return out, nil
+	return a.Quota.Catalog(ctx)
 }
 
 // sharedLatest reads one account's latest stored reading and operator entries.
