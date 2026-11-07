@@ -47,15 +47,21 @@ On each host in that order, selection considers only the accounts it holds
 and the rungs its harnesses can launch. Grade, role, routing, effort, and seat
 checks still apply. The quota policy orders those rungs within that host:
 waste, free, ranked, credit, including the existing waste-risk, expiring-credit,
-and credit-pacing rules. Expiring credit competes with waste-risk subscriptions by remaining percentage divided by hours to expiry.
+and credit-pacing rules. Expiring credit competes by the dollars at risk per
+hour until expiry — the balance less the spend projected before expiry — and
+ranks ahead of waste-risk subscriptions. A credit entry without a recorded
+dollar balance keeps the percentage rule (remaining percent per hour) and
+ranks after any credit that has dollars.
 
 Credit is a fleet-wide last band. Selection walks the ranked hosts twice.
 Pass 1 tries every candidate except plain credit and the pools ranked behind
 credit (a subscription paced to use up its window, on a host that also holds
 credit worth spending). Pass 2 walks the same hosts again with those
 candidates, credit first, and runs only when pass 1 admitted nothing on any
-host. Expiring credit is waste-risk, so it stays in pass 1 and keeps its
-urgency order against waste-risk subscriptions. The first admitted host,
+host. Expiring credit with dollars at risk is waste-risk, so it stays in pass 1
+and keeps its dollars-at-risk order against waste-risk subscriptions; credit
+whose balance the projected spend uses up first drops back to the plain credit
+tier. The first admitted host,
 rung, and account wins. A host whose accounts are exhausted or unknown is
 skipped. A credit candidate left unchosen because pass 1 admitted another
 account records `below_choice`. A pool is paced behind credit only when that credit is present on its own host

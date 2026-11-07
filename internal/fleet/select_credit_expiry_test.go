@@ -40,6 +40,14 @@ func balance(left float64, in time.Duration) func(time.Time) *CreditBalance {
 
 func noBalance(time.Time) *CreditBalance { return nil }
 
+// pctOnly is a credit entry with no recorded dollars: the percentage rule
+// still ranks it, after any credit that has dollars.
+func pctOnly(left float64, in time.Duration) func(time.Time) *CreditBalance {
+	return func(now time.Time) *CreditBalance {
+		return &CreditBalance{LeftPct: left, ExpiresAt: now.Add(in)}
+	}
+}
+
 func TestCreditUrgencyCompetesWithWaste(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -51,7 +59,7 @@ func TestCreditUrgencyCompetesWithWaste(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			// 77/220 = 0.35; subscription unused is 80%.
-			a, s := creditFixture(t, balance(77, 220*time.Hour), riskPool(20, tc.hours), `, "credit_final_days": 30`, nil)
+			a, s := creditFixture(t, pctOnly(77, 220*time.Hour), riskPool(20, tc.hours), `, "credit_final_days": 30`, nil)
 			sel, err := a.selectProfile(context.Background(), s)
 			if err != nil {
 				t.Fatal(err)
