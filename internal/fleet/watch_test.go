@@ -56,7 +56,7 @@ func TestWatcherMissingPaneReleasesThroughLedger(t *testing.T) {
 }
 func TestMalformedCatalogNeverUsesFallbackModel(t *testing.T) {
 	for _, body := range []string{`{"profile":"p","profile":"q"}`, `{} {}`, `{"catalog":{"stale":true},"profile":"p"}`} {
-		q := CLIQuota{&fakeRunner{Do: func(Command) Result { return Result{Out: body} }}, "quota", nil}
+		q := CLIQuota{Runner: &fakeRunner{Do: func(Command) Result { return Result{Out: body} }}, Binary: "quota"}
 		if _, e := q.Launch(context.Background(), QuotaRequest{Profile: "p"}); code(e) != 70 {
 			t.Fatalf("malformed/stale catalog accepted: %v", e)
 		}

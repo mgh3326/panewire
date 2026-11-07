@@ -27,9 +27,10 @@ const PaneScreenFile = "pane-screen.txt"
 // DefaultPaneSweepGrace is how long a pane must have stayed not working.
 const DefaultPaneSweepGrace = 10 * time.Minute
 
-// TaskStatus is what the sweep reads of one hk task: its state and the
-// category that state belongs to.
-type TaskStatus struct{ State, Category string }
+// TaskStatus is what the sweep reads of one hk task: its state, category and
+// title. The title carries the task's "(grade X, Tn)" marker, which the
+// automatic outcome records.
+type TaskStatus struct{ State, Category, Title string }
 
 // TaskStateReader answers the status of one hk task.
 type TaskStateReader func(ctx context.Context, task string) (TaskStatus, error)
@@ -50,6 +51,7 @@ func NewTaskStateReader(baseURL, token, cfID, cfSecret string) (TaskStateReader,
 			ID       int64  `json:"id"`
 			State    string `json:"state"`
 			Category string `json:"category"`
+			Title    string `json:"title"`
 		}
 		if err := client.get(ctx, "/v1/tasks/"+url.PathEscape(task), &record); err != nil {
 			return TaskStatus{}, err
@@ -57,16 +59,19 @@ func NewTaskStateReader(baseURL, token, cfID, cfSecret string) (TaskStateReader,
 		if record.ID != id || record.State == "" {
 			return TaskStatus{}, errors.New("task record is invalid")
 		}
-		return TaskStatus{State: record.State, Category: record.Category}, nil
+		return TaskStatus{State: record.State, Category: record.Category, Title: record.Title}, nil
 	}, nil
 }
 
 // PRChange is one PR handoffkeep links to a task: its number, its state and
 // the commit it heads.
 type PRChange struct {
-	Number int
-	State  string
-	Head   string
+	Number   int
+	State    string
+	Head     string
+	Repo     string
+	OpenedAt string
+	MergedAt string
 }
 
 // PRReader lists the PRs handoffkeep links to one task. It is what keeps a
@@ -92,6 +97,9 @@ func NewPRReader(baseURL, token, cfID, cfSecret string) (PRReader, error) {
 				PRNumber int    `json:"pr_number"`
 				State    string `json:"state"`
 				HeadSHA  string `json:"head_sha"`
+				Repo     string `json:"repo"`
+				OpenedAt string `json:"opened_at"`
+				MergedAt string `json:"merged_at"`
 			} `json:"changes"`
 		}
 		if err := client.get(ctx, "/v1/changes?task="+url.PathEscape(task), &list); err != nil {
@@ -102,7 +110,8 @@ func NewPRReader(baseURL, token, cfID, cfSecret string) (PRReader, error) {
 			if change.PRNumber <= 0 {
 				continue
 			}
-			changes = append(changes, PRChange{Number: change.PRNumber, State: change.State, Head: change.HeadSHA})
+			changes = append(changes, PRChange{Number: change.PRNumber, State: change.State, Head: change.HeadSHA,
+				Repo: change.Repo, OpenedAt: change.OpenedAt, MergedAt: change.MergedAt})
 		}
 		return changes, nil
 	}, nil
@@ -315,6 +324,27 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 				continue
 			}
 			status = read.status
+		}
+		// The hk change record is the merged signal panewire already polls:
+		// record the job's one outcome from it before deciding the pane. Only
+		// a job that joined a PR can own the change, and only such a job pays
+		// for the read.
+		if task != "" && status.State != "" && s.PR != nil && jobHasJoinedPR(j) {
+			read, known := prs[task]
+			if !known {
+				read = s.readPRs(ctx, task)
+				prs[task] = read
+			}
+			if read.err == nil {
+				for _, change := range read.changes {
+					if !strings.EqualFold(change.State, "merged") {
+						continue
+					}
+					if err := a.recordMergedOutcome(ctx, j, task, status, change); err != nil {
+						s.info("merged outcome not recorded", "job", j.ID, "pr", change.Number, "reason", err.Error())
+					}
+				}
+			}
 		}
 		// A task that ended decides the end state; a closed job whose task is
 		// still live, or unreadable, ends by its own record.

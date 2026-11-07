@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/quota/agy"
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 type Launch struct {
@@ -147,6 +148,12 @@ type CLIQuota struct {
 	// only its used percentage, so credit_expiry.go derives the dollar balance
 	// from this total; an entry that records its own dollars still wins.
 	CreditTotalUSD map[string]float64
+	// SharedLatest reads one account's stored manual and automatic entries
+	// from hk. When set, credit balances are read there directly and the
+	// pacelever process is never started. Accounts maps a pool to its
+	// configured account fingerprint for that read.
+	SharedLatest func(context.Context, string) (shared.Latest, error)
+	Accounts     map[string]string
 }
 
 func (q CLIQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {

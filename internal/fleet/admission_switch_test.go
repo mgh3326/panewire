@@ -60,7 +60,7 @@ func switchApp(t *testing.T, mode string, reading *shared.Observation, pacelever
 	if mode != "" {
 		a.Config.Quota["gate"] = mode
 	}
-	a.Quota = admissionQuota{CLIQuota{runner, "pacelever", nil}, a}
+	a.Quota = admissionQuota{CLIQuota{Runner: runner, Binary: "pacelever"}, a}
 	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return switchRows(t), nil }
 	a.SharedLatest = func(context.Context, string) (shared.Latest, error) {
 		return shared.Latest{Observation: reading}, nil
@@ -339,7 +339,7 @@ func TestAdmissionLocalRequestFallsBackToManualWindows(t *testing.T) {
 // PANEWIRE_QUOTA_BIN for the refreshes panewire runs through pacelever.
 func TestAdmissionKeepsConfiguredQuotaBinary(t *testing.T) {
 	a := &App{}
-	a.Quota = admissionQuota{CLIQuota{&fakeRunner{}, "/custom/pacelever", nil}, a}
+	a.Quota = admissionQuota{CLIQuota{Runner: &fakeRunner{}, Binary: "/custom/pacelever"}, a}
 	if got := a.paceleverBinary(); got != "/custom/pacelever" {
 		t.Fatalf("wrapped quota binary = %q", got)
 	}
