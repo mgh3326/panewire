@@ -74,6 +74,7 @@ func t3411AssertNothingTyped(t *testing.T, pane *t3384Pane) {
 // with the pane still working. The node clock is first moved past it.
 func t3411ExpireWorking(t *testing.T, rig *t3276Rig, clock *t3411Clock, past time.Duration) {
 	t.Helper()
+	eventually(t, 2*time.Second, "the hold's current wait", func() bool { return t3411WaitCount(rig) > 0 })
 	clock.advance(past)
 	before := t3411WaitCount(rig)
 	rig.node.relayBusyManager().releaseWorking(t.Context(), "w1:pW", true)
@@ -233,7 +234,9 @@ func TestCmdHoldDroppedWhenJobEnded_t3411(t *testing.T) {
 	}
 
 	write("00002-job.completed.json", "job.completed")
-	t3411ExpireWorking(t, rig, clock, relayCmdHoldRecheck+time.Minute)
+	// The next expiry drops the row, so no wait is armed after it.
+	clock.advance(relayCmdHoldRecheck + time.Minute)
+	rig.node.relayBusyManager().releaseWorking(t.Context(), "w1:pW", true)
 
 	t3411AssertNothingTyped(t, pane)
 	kinds, payloads := rig.drainEvents()
@@ -576,5 +579,53 @@ func TestCmdIdleRedeliveryOfRowHeldToCeiling_t3411(t *testing.T) {
 	rig.node.relayBusyManager().offer(t.Context(), t3276Message(redelivered[0]))
 	if got := pane.calls(t, "pane send-text"); got != 1 {
 		t.Fatalf("the re-delivered row was typed %d times, want 1", got)
+	}
+}
+
+// A relay.cmd_hold_max below the policy wait caps the first wait of a working
+// cmd row: the ceiling applies from the start, not after a full max_wait.
+func TestCmdHoldCeilingCapsFirstWait_t3411(t *testing.T) {
+	rig := t3276Start(t)
+	rig.node.relayControl.cmdHoldMax = 5 * time.Minute
+	t3384Install(t, "cmd", "working")
+	t3384Hold(t, rig, relayDeliverDirective)
+	rows := t3384HeldRows(t, rig)
+	if len(rows) != 1 || rows[0].MaxWait != 5*time.Minute {
+		t.Fatalf("held rows=%+v, want max_wait capped at the 5m ceiling", rows)
+	}
+	eventually(t, 2*time.Second, "the first wait", func() bool { return t3411WaitCount(rig) > 0 })
+	if timeout := t3411LastWaitTimeout(t, rig); timeout > 5*time.Minute {
+		t.Fatalf("first wait --timeout %s, want at most the 5m ceiling", timeout)
+	}
+}
+
+// A store that rejects the extension write (here an UPDATE trigger) does not
+// make the next wait end at once: the moved deadline is kept in memory too.
+func TestCmdHoldExtensionWriteFailureDoesNotSpin_t3411(t *testing.T) {
+	rig := t3276Start(t)
+	t3384Install(t, "cmd", "working")
+	t3384Hold(t, rig, relayDeliverDirective)
+	store := rig.node.relayStore()
+	store.mu.Lock()
+	// The row was held 31 minutes ago, so its stored deadline has passed.
+	_, err := store.db.Exec(`UPDATE relay_held SET held_since=?`, time.Now().Add(-defaultRelayMaxWait-time.Minute).UnixMilli())
+	if err == nil {
+		_, err = store.db.Exec(`CREATE TRIGGER t3411_reject BEFORE UPDATE ON relay_held BEGIN SELECT RAISE(ABORT, 't3411 write rejected'); END`)
+	}
+	store.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 2*time.Second, "the hold's first wait", func() bool { return t3411WaitCount(rig) > 0 })
+	before := t3411WaitCount(rig)
+
+	rig.node.relayBusyManager().releaseWorking(t.Context(), "w1:pW", true)
+
+	eventually(t, 2*time.Second, "the wait re-armed after the expiry", func() bool { return t3411WaitCount(rig) > before })
+	if timeout := t3411LastWaitTimeout(t, rig); timeout < 25*time.Minute {
+		t.Fatalf("the re-armed wait has --timeout %s after a failed extension write, want the moved deadline (~30m), not a spin", timeout)
+	}
+	if rows := t3384HeldRows(t, rig); len(rows) != 1 {
+		t.Fatalf("held rows=%+v, want the row still held", rows)
 	}
 }

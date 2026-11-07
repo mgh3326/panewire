@@ -63,9 +63,19 @@ func (manager *relayBusyManager) keepWorkingCmdHold(parent context.Context, item
 	if next.After(ceiling) {
 		next = ceiling
 	}
+	// The in-memory deadline is what the next wait is armed with; the store
+	// keeps it across a node restart. A failed write only loses that.
+	manager.mu.Lock()
+	if manager.cmdHoldUntil[item.EventID].Before(next) {
+		manager.cmdHoldUntil[item.EventID] = next
+	}
+	for id, until := range manager.cmdHoldUntil {
+		if until.Before(now) {
+			delete(manager.cmdHoldUntil, id)
+		}
+	}
+	manager.mu.Unlock()
 	if store := manager.client.relayStore(); store != nil && next.After(item.HeldSince.Add(item.MaxWait)) {
-		// A failed write leaves the old deadline: the next wake comes at once
-		// and decides again, which costs a wait, never a keystroke.
 		_, _ = store.ExtendRelayHeldMaxWait(parent, item.EventID, next.Sub(item.HeldSince))
 	}
 	return true

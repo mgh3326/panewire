@@ -74,7 +74,7 @@ per inject. It is dropped only when:
   keeps its hold;
 - the `relay.cmd_hold_max` ceiling passes, counted from when the row was held
   (default 24h; set it on the node with `PANEWIRE_RELAY_CMD_HOLD_MAX`, a Go
-  duration). Then the row is dropped as `working_wait_expired`, the design lane
+  duration; a ceiling below the policy wait also caps the first wait). Then the row is dropped as `working_wait_expired`, the design lane
   is told once (see below), and the durable row stays undelivered.
 
 A row dropped as `working_wait_expired` was never typed. The hub remembers it
