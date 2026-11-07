@@ -65,12 +65,8 @@ func (h *HubServer) resolveOrphanedSpawn(task hubSpawnTask) bool {
 	released, why := h.finishUnownedSpawn(h.closeCtx, task, outcome)
 	if !released {
 		h.logger.Info("hub kept a stranded spawn", "request_id", task.Request.RequestID, "job", task.Job, "host", spawnTaskHost(task), "reason", why)
-		return false
 	}
-	h.mu.Lock()
-	delete(h.spawnOrphanProbed, task.Request.RequestID)
-	h.mu.Unlock()
-	return true
+	return released
 }
 
 // finishUnownedSpawn finishes a bound pending request as failed with outcome
@@ -118,6 +114,9 @@ func (h *HubServer) finishUnownedSpawn(ctx context.Context, task hubSpawnTask, o
 		return false, "not_pending"
 	}
 	h.recordSpawnTrace(task, outcome)
+	h.mu.Lock()
+	delete(h.spawnOrphanProbed, task.Request.RequestID)
+	h.mu.Unlock()
 	if err = h.releaseSpawnRole(ctx, task); err != nil {
 		return false, "release_write_failed"
 	}
