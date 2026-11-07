@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 type hubInbox struct {
@@ -299,6 +301,18 @@ func (h *HubServer) receiverInboxState(lane string) receiverInboxState {
 func (h *HubServer) jobHasTask(jobID string) bool {
 	ctx, cancel := context.WithTimeout(h.closeCtx, handoffkeepTimeout)
 	defer cancel()
+	task, _, err := h.jobTaskID(ctx, jobID)
+	if err != nil {
+		h.logger.Warn("job record unreadable; design-lane completion delivered", "job", jobID)
+		return false
+	}
+	return task != ""
+}
+
+// jobTaskID returns the task id the job's hk record names ("" when it names
+// none, or the record is missing) and the App it read the record with, so the
+// caller reads the task through the same handoffkeep client.
+func (h *HubServer) jobTaskID(ctx context.Context, jobID string) (string, *fleet.App, error) {
 	app, err := h.newSpawnApp(io.Discard, io.Discard)
 	if err == nil {
 		err = app.CheckTrust()
@@ -308,16 +322,17 @@ func (h *HubServer) jobHasTask(jobID string) bool {
 		record, _, err = app.ExistingJob(ctx, jobID)
 	}
 	if err != nil {
-		h.logger.Warn("job record unreadable; design-lane completion delivered", "job", jobID)
-		return false
+		return "", nil, err
 	}
 	switch task := record["task_id"].(type) {
 	case float64:
-		return task > 0
+		if task > 0 {
+			return strconv.FormatInt(int64(task), 10), app, nil
+		}
 	case string:
-		return strings.TrimSpace(task) != ""
+		return strings.TrimSpace(task), app, nil
 	}
-	return false
+	return "", app, nil
 }
 
 // inboxImmediate promotes an inbox-class event to immediate delivery when the
