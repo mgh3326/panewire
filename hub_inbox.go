@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -177,7 +178,10 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		}
 	}
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
-	if kind == "job.completed" && event.Late {
+	// hk 3426: a design lane keeps a worker's routine result in its inbox; no
+	// owner-completion or idle promotion below puts it in the pane.
+	quiet := h.inbox.policy.designQuiet(lane, kind, *event, func() bool { return h.jobHasTask(event.JobID) })
+	if quiet || (kind == "job.completed" && event.Late) {
 		class = "inbox"
 	}
 	// hk 3276: a worker directive reaches the worker's pane at once. A lane
@@ -188,7 +192,7 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		class = "interrupt"
 	}
 	holdClass := class == "interrupt"
-	if class == "inbox" && !event.Late && h.inboxImmediate(lane, kind) {
+	if class == "inbox" && !event.Late && !quiet && h.inboxImmediate(lane, kind) {
 		class = "interrupt"
 	}
 	deadline, window := h.inbox.policy.timing(lane, class)
@@ -285,6 +289,34 @@ func (h *HubServer) receiverInboxState(lane string) receiverInboxState {
 		}
 	}
 	return receiverInboxState{}
+}
+
+// jobHasTask reports whether the job's hk record names a task. The record is
+// the one place a job's task is kept; the hub reads it through the client
+// hub-placed spawns use. A missing or unreadable record counts as no task, so
+// the completion is delivered as before (hk 3426).
+func (h *HubServer) jobHasTask(jobID string) bool {
+	ctx, cancel := context.WithTimeout(h.closeCtx, handoffkeepTimeout)
+	defer cancel()
+	app, err := h.newSpawnApp(io.Discard, io.Discard)
+	if err == nil {
+		err = app.CheckTrust()
+	}
+	var record map[string]any
+	if err == nil {
+		record, _, err = app.ExistingJob(ctx, jobID)
+	}
+	if err != nil {
+		h.logger.Warn("job record unreadable; design-lane completion delivered", "job", jobID)
+		return false
+	}
+	switch task := record["task_id"].(type) {
+	case float64:
+		return task > 0
+	case string:
+		return strings.TrimSpace(task) != ""
+	}
+	return false
 }
 
 // inboxImmediate promotes an inbox-class event to immediate delivery when the

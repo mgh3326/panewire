@@ -293,6 +293,17 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task Task, ev map[st
 	return "rebound"
 }
 
+// taskLinkedTo reports whether hk's task record already binds the task to
+// the job (refs.job_id). A task that cannot be read counts as not linked.
+func (a *App) taskLinkedTo(ctx context.Context, task, job string) bool {
+	r := a.call(ctx, "handoffkeep", "tasks", "show", task)
+	var t Task
+	if r.Code != 0 || json.Unmarshal([]byte(r.Out), &t) != nil {
+		return false
+	}
+	return job != "" && (t.ID == nil || scalar(t.ID) == task) && str(t.Refs, "job_id") == job
+}
+
 type taskClaimFailure struct{ reason string }
 
 func (e *taskClaimFailure) Error() string { return e.reason }
@@ -311,8 +322,14 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task Task, bypassed bool) e
 		var t Task
 		if r.Code != 0 {
 			if !bypassed || !s.Bypass || strings.Contains(r.Out+r.Err, "conflict") || strings.Contains(r.Out+r.Err, "refused") {
-				claimFailure = &taskClaimFailure{reason: fmt.Sprintf("task claim exited with status %d", r.Code)}
-				status = "failed"
+				if a.taskLinkedTo(ctx, s.Task, s.Job) {
+					// hk already binds the task to this job (a design session
+					// rebound it before the spawn): nothing to link (hk 3426).
+					status = "already_linked"
+				} else {
+					claimFailure = &taskClaimFailure{reason: fmt.Sprintf("task claim exited with status %d", r.Code)}
+					status = "failed"
+				}
 			} else {
 				status = "bypassed"
 			}
