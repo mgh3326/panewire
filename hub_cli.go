@@ -375,6 +375,9 @@ func runHubCLI(args []string) int {
 	if len(args) > 0 && args[0] == "migrate-sqlite" {
 		return runHubMigrateSQLite(context.Background(), args[1:], os.Getenv(hubDatabaseURLEnv), os.Stdout, os.Stderr)
 	}
+	if len(args) > 0 && args[0] == "spawn" {
+		return runHubSpawnCLI(args[1:], os.Stdout, os.Stderr, hubCLIDeps{})
+	}
 	hub, _, code, err := newHubServerForCLI(args, slog.Default())
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "hub configuration rejected:", err)

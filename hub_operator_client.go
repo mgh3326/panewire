@@ -60,6 +60,11 @@ func validHubOperatorAPIPath(path string) bool {
 	if lane, found := strings.CutPrefix(path, "/v1/lanes/"); found {
 		return laneNamePattern.MatchString(lane)
 	}
+	if id, found := strings.CutPrefix(path, "/v1/spawns/"); found {
+		if id, ok := strings.CutSuffix(id, "/abandon"); ok {
+			return validHubSpawnRequestID(id)
+		}
+	}
 	if machine, found := strings.CutPrefix(path, "/v1/nodes/"); found {
 		if machine, ok := strings.CutSuffix(machine, "/command"); ok {
 			return machineIDPattern.MatchString(machine)
