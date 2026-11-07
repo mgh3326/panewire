@@ -160,7 +160,7 @@ func (f *Flow) current(o *Observation, key string, now time.Time) (Reading, bool
 	if f.LocalFree == nil {
 		return current(o, key, now, ttl)
 	}
-	free, ok := normalizeFree(o.freeBucket(), now)
+	free, ok := NormalizeFree(o.freeBucket(), now)
 	if !ok || free == nil || freeNeedsPublish(free, f.LocalFree(now), now) {
 		return Reading{}, false
 	}

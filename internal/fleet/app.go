@@ -14,6 +14,7 @@ import (
 	"github.com/mgh3326/panewire/internal/fleetevent"
 
 	"github.com/mgh3326/panewire/internal/arbiter"
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 // BuildVersion and BuildCommit are set by the binary's main from its link-time
@@ -39,10 +40,13 @@ type App struct {
 	warned         map[string]bool
 	ompModelNames  map[string]string // omp's footer names, read once per spawn
 	PlacementHosts func(context.Context, string) ([]HostView, error)
-	Source         PlacementSource
-	Wake           Waker
-	LoadRatio      func(context.Context) (float64, error)
-	JobStore       JobStore
+	// SharedLatest reads one account's latest stored quota reading for the
+	// admission gate; nil reads handoffkeep (admission_native.go).
+	SharedLatest func(context.Context, string) (shared.Latest, error)
+	Source       PlacementSource
+	Wake         Waker
+	LoadRatio    func(context.Context) (float64, error)
+	JobStore     JobStore
 	// Hub carries via="hub" spawns and quota refreshes; nil builds the HTTP
 	// client from [hub] on first use.
 	Hub              HubTransport
@@ -123,7 +127,7 @@ func New(out, errout io.Writer) (*App, error) {
 	if v := os.Getenv("PANEWIRE_QUOTA_BIN"); v != "" {
 		quota = v
 	}
-	a.Quota = CLIQuota{a.Runner, quota}
+	a.Quota = admissionQuota{CLIQuota{a.Runner, quota}, a}
 	a.Source = stateSource{a: a, inner: fleetSource{a}}
 	a.Wake = cliWaker{a}
 	a.LoadRatio = a.loadRatio

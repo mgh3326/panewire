@@ -1,0 +1,2812 @@
+{
+ "source": "pacelever v0.3.28 (9cd47a6) Gate via the CLI --account-key flow; regenerate with generator/regen.sh",
+ "catalog": [
+  {
+   "profile": "codex-sol",
+   "effort": "xhigh",
+   "model_id": "gpt-6.1-sol",
+   "pool": "codex",
+   "grade": "S+",
+   "gate": "escalation"
+  },
+  {
+   "profile": "codex-sol",
+   "effort": "max",
+   "model_id": "gpt-6.1-sol",
+   "pool": "codex",
+   "grade": "S+",
+   "gate": "default"
+  },
+  {
+   "profile": "codex-luna",
+   "effort": "low",
+   "model_id": "gpt-5.6-luna",
+   "pool": "codex",
+   "grade": "C",
+   "gate": "default"
+  },
+  {
+   "profile": "codex-luna",
+   "effort": "medium",
+   "model_id": "gpt-6-luna",
+   "pool": "codex",
+   "grade": "B",
+   "gate": "default"
+  },
+  {
+   "profile": "codex-luna",
+   "effort": "high",
+   "model_id": "gpt-6-luna",
+   "pool": "codex",
+   "grade": "A",
+   "gate": "default"
+  },
+  {
+   "profile": "codex-luna",
+   "effort": "xhigh",
+   "model_id": "gpt-6-luna",
+   "pool": "codex",
+   "grade": "A+",
+   "gate": "default"
+  },
+  {
+   "profile": "codex-luna-max",
+   "effort": "",
+   "model_id": "gpt-6-luna",
+   "pool": "codex",
+   "grade": "A+",
+   "gate": "default"
+  },
+  {
+   "profile": "codex-astra",
+   "effort": "",
+   "model_id": "gpt-6-astra",
+   "pool": "codex",
+   "grade": "S+",
+   "gate": "consult_only"
+  },
+  {
+   "profile": "devin-fusion-sol61",
+   "effort": "",
+   "model_id": "fusion-gpt-6-1-sol-high-sidekick-swe-2-medium",
+   "pool": "codex",
+   "grade": "B",
+   "gate": "default"
+  },
+  {
+   "profile": "codex-terra61",
+   "effort": "max",
+   "model_id": "gpt-6.1-terra",
+   "pool": "codex",
+   "grade": "C",
+   "gate": "default"
+  },
+  {
+   "profile": "opus",
+   "effort": "low",
+   "model_id": "claude-opus-5-5",
+   "pool": "claude",
+   "grade": "S",
+   "gate": "default"
+  },
+  {
+   "profile": "opus",
+   "effort": "medium",
+   "model_id": "claude-opus-5-5",
+   "pool": "claude",
+   "grade": "S+",
+   "gate": "default"
+  },
+  {
+   "profile": "opus",
+   "effort": "high",
+   "model_id": "claude-opus-5-5",
+   "pool": "claude",
+   "grade": "S+",
+   "gate": "default"
+  },
+  {
+   "profile": "opus",
+   "effort": "xhigh",
+   "model_id": "claude-opus-5-5",
+   "pool": "claude",
+   "grade": "S+",
+   "gate": "default"
+  },
+  {
+   "profile": "opus",
+   "effort": "max",
+   "model_id": "claude-opus-5-5",
+   "pool": "claude",
+   "grade": "S+",
+   "gate": "escalation"
+  },
+  {
+   "profile": "sonnet",
+   "effort": "high",
+   "model_id": "claude-sonnet-5-5",
+   "pool": "claude",
+   "grade": "A",
+   "gate": "default"
+  },
+  {
+   "profile": "sonnet",
+   "effort": "xhigh",
+   "model_id": "claude-sonnet-5-5",
+   "pool": "claude",
+   "grade": "A+",
+   "gate": "escalation"
+  },
+  {
+   "profile": "haiku",
+   "effort": "low",
+   "model_id": "claude-haiku-5-5",
+   "pool": "claude",
+   "grade": "C",
+   "gate": "default"
+  },
+  {
+   "profile": "fable",
+   "effort": "",
+   "model_id": "claude-fable-5-1",
+   "pool": "claude",
+   "grade": "S+",
+   "gate": "consult_only"
+  },
+  {
+   "profile": "cmd-dsflash41",
+   "effort": "high",
+   "model_id": "deepseek/deepseek-v4.1-flash",
+   "pool": "commandcode",
+   "grade": "A+",
+   "gate": "default"
+  },
+  {
+   "profile": "devin-swe2",
+   "effort": "",
+   "model_id": "swe-2",
+   "pool": "devin",
+   "grade": "A+",
+   "gate": "default"
+  },
+  {
+   "profile": "devin-swe2",
+   "effort": "high",
+   "model_id": "swe-2",
+   "pool": "devin",
+   "grade": "A+",
+   "gate": "default"
+  },
+  {
+   "profile": "devin-ds41",
+   "effort": "",
+   "model_id": "deepseek-v4-1-flash-high",
+   "pool": "devin",
+   "grade": "A+",
+   "gate": "default"
+  },
+  {
+   "profile": "devin-swe2-medium",
+   "effort": "",
+   "model_id": "swe-2-medium",
+   "pool": "devin",
+   "grade": "A",
+   "gate": "default"
+  },
+  {
+   "profile": "pi-sonnet55",
+   "effort": "high",
+   "model_id": "anthropic/claude-sonnet-5-5",
+   "pool": "anthropic-api",
+   "grade": "A",
+   "gate": "default"
+  },
+  {
+   "profile": "pi-sonnet55",
+   "effort": "xhigh",
+   "model_id": "anthropic/claude-sonnet-5-5",
+   "pool": "anthropic-api",
+   "grade": "A+",
+   "gate": "default"
+  },
+  {
+   "profile": "pi-sonnet55",
+   "effort": "max",
+   "model_id": "anthropic/claude-sonnet-5-5",
+   "pool": "anthropic-api",
+   "grade": "A+",
+   "gate": "consult_only"
+  },
+  {
+   "profile": "grok",
+   "effort": "medium",
+   "model_id": "grok-4.7",
+   "pool": "grok",
+   "grade": "A+",
+   "gate": "default"
+  },
+  {
+   "profile": "agy-flash",
+   "effort": "",
+   "model_id": "gemini-3.7-flash",
+   "pool": "agy",
+   "grade": "A+",
+   "gate": "default"
+  }
+ ],
+ "scenarios": [
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-admit",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "opus pool=claude used=40% class=spend [rung opus@high]\npace-warning pool=claude window=7d multiple=1.40",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 99.5,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-5h-exhausted",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "quota exhausted window=5h cutoff=99",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n[pools.claude]\nclass = \"preserve\"\nuntil = 2026-12-01\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 91,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-preserve-cutoff-90",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "quota exhausted window=7d cutoff=90",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n[pools.claude]\nclass = \"preserve\"\nuntil = \"2026-11-01\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 91,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-preserve-until-passed",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "opus pool=claude used=91% class=spend [rung opus@high]\npace-warning pool=claude window=7d multiple=3.19",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n[pools.claude]\ncutoff = 80\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 85,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-configured-cutoff",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "quota exhausted window=5h cutoff=80",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "sonnet",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:40:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-stale-reading",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "fresh automatic shared quota unavailable for account",
+    "provider_id": "",
+    "gate_basis": "",
+    "receipt": false
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:46:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-fresh-within-15m",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "opus pool=claude used=40% class=spend [rung opus@high]\npace-warning pool=claude window=7d multiple=1.40",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T01:00:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "confirmed_at": "2026-11-07T02:58:00Z"
+    }
+   },
+   "name": "claude-confirmed-at-refreshes",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "opus pool=claude used=40% class=spend [rung opus@high]\npace-warning pool=claude window=7d multiple=1.40",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "weekly",
+       "resets_at": "2026-11-07T06:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-malformed-scope",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "shared quota observation unusable for account",
+    "provider_id": "",
+    "gate_basis": "",
+    "receipt": false
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": null
+   },
+   "name": "claude-no-reading",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "fresh automatic shared quota unavailable for account",
+    "provider_id": "",
+    "gate_basis": "",
+    "receipt": false
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T02:55:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-reset-passed",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "fresh automatic shared quota unavailable for account",
+    "provider_id": "",
+    "gate_basis": "",
+    "receipt": false
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-missing-5h-admits",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "opus pool=claude used=40% class=spend [rung opus@high]\npace-warning pool=claude window=7d multiple=1.40",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [
+     "5h"
+    ],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 99.9,
+       "scope": "model",
+       "resets_at": "2026-11-12T03:00:00Z",
+       "model": "opus"
+      }
+     ]
+    }
+   },
+   "name": "claude-model-windows-do-not-gate",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "measurement unavailable; manual fallback missing required window 5h",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 60,
+       "scope": "account",
+       "resets_at": "2026-11-10T15:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-pace-warning",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "opus pool=claude used=60% class=spend [rung opus@high]\npace-warning pool=claude window=7d multiple=1.20",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n[pools.claude]\nsubscribed = false\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-unsubscribed-pool",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 6,
+    "reason": "unsubscribed: profile or pool subscription disabled",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n[pools.claude]\nsubscribed = false\n[profiles.opus]\nsubscribed = true\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-profile-subscription-wins",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "opus pool=claude used=40% class=spend [rung opus@high]\npace-warning pool=claude window=7d multiple=1.40",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n[pools.claude.inflight_reserve_pct]\n5h = 5\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-inflight-reserve-unknown",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "opus pool=claude used=40% class=spend [rung opus@high]\npace-warning pool=claude window=7d multiple=1.40",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-escalation-operator-override",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "sonnet pool=claude used=40% class=spend [rung sonnet@xhigh]\npace-warning pool=claude window=7d multiple=1.40",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "sonnet",
+    "effort": "xhigh",
+    "operator_request": "hk:task/3248",
+    "requested_by": "desk",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "claude-escalation-default-request-refused",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "operator_request_not_applicable: ordinary placement",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "operator_request": "hk:task/3248",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "requested-by-needs-operator-request",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "requested_by_requires_operator_request",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "requested_by": "desk",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "operator-request-ref-invalid",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "operator_request_ref_invalid",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "sonnet",
+    "effort": "xhigh",
+    "operator_request": "task 12",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "fable-worker-role-denied",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 5,
+    "reason": "role_restricted: consult model cannot hold this seat",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "fable",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "fable-builder-needs-round-ext",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 5,
+    "reason": "role_restricted: round-extension and a round-ext document required",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "fable",
+    "role": "builder",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "fable-consult-only-needs-request",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "consult_only: pass --operator-request",
+    "provider_id": "claude",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "fable",
+    "role": "lead",
+    "account_key": "claude:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "plan": "pro"
+    }
+   },
+   "name": "codex-astra-needs-purpose",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 5,
+    "reason": "role_restricted: astra requires director, architect, or operator-request purpose",
+    "provider_id": "codex",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "codex-astra",
+    "role": "lead",
+    "account_key": "codex:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "disagreement": "Same verdict; only the reason's rung suffix differs. pacelever names the effortless rung after its bundled default effort (codex-astra@xhigh); the bench catalog JSON carries no defaults, so panewire's reason names no rung. The admitted row is the same.",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "plan": "pro"
+    }
+   },
+   "name": "codex-astra-director-admit",
+   "native": {
+    "ok": true,
+    "exit_code": 0,
+    "provider_id": "codex",
+    "reason": "codex-astra pool=codex used=10% class=spend"
+   },
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "codex-astra pool=codex used=10% class=spend [rung codex-astra@xhigh]",
+    "provider_id": "codex",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "codex-astra",
+    "role": "lead",
+    "purpose": "director",
+    "account_key": "codex:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 30,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "plan": "plus"
+    }
+   },
+   "name": "codex-plus-missing-5h",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "codex_required_window_missing:5h",
+    "provider_id": "codex",
+    "gate_basis": "",
+    "missing_windows": [
+     "5h"
+    ],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "codex-sol",
+    "effort": "max",
+    "role": "worker",
+    "account_key": "codex:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 30,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "plan": "prolite"
+    }
+   },
+   "name": "codex-prolite-7d-only-admits",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "codex-sol pool=codex used=30% class=spend [rung codex-sol@max]\npace-warning pool=codex window=7d multiple=1.05",
+    "provider_id": "codex",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "codex-sol",
+    "effort": "max",
+    "role": "worker",
+    "account_key": "codex:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 30,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      }
+     ],
+     "plan": "free"
+    }
+   },
+   "name": "codex-free-missing-30d",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "codex_required_window_missing:30d",
+    "provider_id": "codex",
+    "gate_basis": "",
+    "missing_windows": [
+     "30d"
+    ],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "codex-luna",
+    "effort": "low",
+    "role": "worker",
+    "account_key": "codex:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 30,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "plan": "pro"
+    }
+   },
+   "name": "codex-pro-missing-5h-admits",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "codex-sol pool=codex used=30% class=spend [rung codex-sol@max]\npace-warning pool=codex window=7d multiple=1.05",
+    "provider_id": "codex",
+    "gate_basis": "",
+    "missing_windows": [
+     "5h"
+    ],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "codex-sol",
+    "effort": "max",
+    "role": "worker",
+    "account_key": "codex:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 99,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "plan": "pro"
+    }
+   },
+   "name": "codex-7d-exhausted-alternatives",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "quota exhausted window=7d cutoff=99",
+    "provider_id": "codex",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "codex-luna",
+    "effort": "xhigh",
+    "role": "worker",
+    "account_key": "codex:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n[pools.codex]\nfusion_billing_fp = \"0123456789abcdef\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "plan": "pro"
+    }
+   },
+   "name": "fusion-billing-fp-matches",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "devin-fusion-sol61 pool=codex used=20% class=spend",
+    "provider_id": "codex",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "devin-fusion-sol61",
+    "role": "worker",
+    "account_key": "codex:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n[pools.codex]\nfusion_billing_fp = \"fedcba9876543210\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "plan": "pro"
+    }
+   },
+   "name": "fusion-billing-fp-differs",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "fusion_billing_account_unavailable",
+    "provider_id": "codex",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [
+     "codex-luna --effort medium"
+    ],
+    "receipt": true
+   },
+   "request": {
+    "profile": "devin-fusion-sol61",
+    "role": "worker",
+    "account_key": "codex:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "disagreement": "pacelever's catalog decoder keeps its bundled snapshot's placed=false for codex-terra61 (an E6 measurement rung); the bench catalog JSON panewire reads carries no placed flag, so a graded rung reads as placed. Catalog placement moves with hk 3249; until then `pacelever policy launch`, which stays in the spawn path before the gate, refuses the rung with the same e6_arm_required.",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "plan": "pro"
+    }
+   },
+   "name": "codex-terra61-catalog-placement",
+   "native": {
+    "ok": true,
+    "exit_code": 0,
+    "provider_id": "codex",
+    "reason": "codex-terra61 pool=codex used=20% class=spend [rung codex-terra61@max]"
+   },
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "e6_arm_required: exact measurement marker required",
+    "provider_id": "codex",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "codex-terra61",
+    "effort": "max",
+    "role": "worker",
+    "account_key": "codex:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      },
+      {
+       "window": "30d",
+       "used_pct": 30,
+       "scope": "account",
+       "resets_at": "2026-11-27T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "commandcode-30d-present-admits",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "cmd-dsflash41 pool=commandcode used=30% class=spend [rung cmd-dsflash41@high]",
+    "provider_id": "commandcode",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "cmd-dsflash41",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "commandcode:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "disagreement": "New rule (decision/2026-11-06/commandcode-30d-required-in-panewire-gate): a commandcode reading without its 30d window is unmeasurable in panewire's gate. pacelever admits it.",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "commandcode-30d-missing",
+   "native": {
+    "ok": false,
+    "exit_code": 4,
+    "provider_id": "commandcode",
+    "reason": "commandcode_required_window_missing:30d",
+    "missing_windows": [
+     "30d"
+    ]
+   },
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "cmd-dsflash41 pool=commandcode used=20% class=spend [rung cmd-dsflash41@high]",
+    "provider_id": "commandcode",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "cmd-dsflash41",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "commandcode:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      },
+      {
+       "window": "30d",
+       "used_pct": 100,
+       "scope": "account",
+       "resets_at": "2026-11-27T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "commandcode-30d-exhausted",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "quota exhausted window=30d cutoff=99",
+    "provider_id": "commandcode",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "cmd-dsflash41",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "commandcode:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      },
+      {
+       "window": "30d",
+       "used_pct": 30,
+       "scope": "account",
+       "resets_at": "2026-11-27T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "cmd-dsflash41-reviewer-denied",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 5,
+    "reason": "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder",
+    "provider_id": "commandcode",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "cmd-dsflash41",
+    "effort": "high",
+    "role": "reviewer",
+    "account_key": "commandcode:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      },
+      {
+       "window": "30d",
+       "used_pct": 30,
+       "scope": "account",
+       "resets_at": "2026-11-27T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "cmd-dsflash41-tester-admit",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "cmd-dsflash41 pool=commandcode used=30% class=spend [rung cmd-dsflash41@high]",
+    "provider_id": "commandcode",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "cmd-dsflash41",
+    "effort": "high",
+    "role": "tester",
+    "account_key": "commandcode:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      },
+      {
+       "window": "30d",
+       "used_pct": 30,
+       "scope": "account",
+       "resets_at": "2026-11-27T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "cmd-dsflash41-builder-placed-default",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "cmd-dsflash41 pool=commandcode used=30% class=spend [rung cmd-dsflash41@high]",
+    "provider_id": "commandcode",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "cmd-dsflash41",
+    "effort": "high",
+    "role": "builder",
+    "account_key": "commandcode:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      },
+      {
+       "window": "30d",
+       "used_pct": 30,
+       "scope": "account",
+       "resets_at": "2026-11-27T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "cmd-dsflash41-needs-effort",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "explicit --effort required for credit profile",
+    "provider_id": "commandcode",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "cmd-dsflash41",
+    "effort": "",
+    "role": "worker",
+    "account_key": "commandcode:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-07T05:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      },
+      {
+       "window": "30d",
+       "used_pct": 30,
+       "scope": "account",
+       "resets_at": "2026-11-27T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "cmd-dsflash41-effort-not-placed",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "credit effort is not placed",
+    "provider_id": "commandcode",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "cmd-dsflash41",
+    "effort": "medium",
+    "role": "worker",
+    "account_key": "commandcode:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": null,
+    "manual": [
+     {
+      "id": 41,
+      "kind": "manual",
+      "window": "credit",
+      "measured_at": "2026-11-07T02:00:00Z",
+      "expires_at": "2026-11-09T03:00:00Z",
+      "buckets": [
+       {
+        "window": "credit",
+        "used_pct": 40,
+        "scope": "account"
+       }
+      ]
+     }
+    ]
+   },
+   "name": "pi-reviewer-denied",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 5,
+    "reason": "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder",
+    "provider_id": "anthropic-api",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "pi-sonnet55",
+    "effort": "high",
+    "role": "reviewer",
+    "account_key": "anthropic-api:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": null,
+    "manual": [
+     {
+      "id": 41,
+      "kind": "manual",
+      "window": "credit",
+      "measured_at": "2026-11-07T02:00:00Z",
+      "expires_at": "2026-11-09T03:00:00Z",
+      "buckets": [
+       {
+        "window": "credit",
+        "used_pct": 40,
+        "scope": "account"
+       }
+      ]
+     }
+    ]
+   },
+   "name": "pi-worker-manual-credit-admit",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "pi-sonnet55 pool=anthropic-api used=40% class=spend [rung pi-sonnet55@high]",
+    "provider_id": "anthropic-api",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "pi-sonnet55",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "anthropic-api:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": null,
+    "manual": []
+   },
+   "name": "pi-worker-no-credit-entry",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "measurement unavailable; manual fallback missing required window credit",
+    "provider_id": "anthropic-api",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "pi-sonnet55",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "anthropic-api:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": null,
+    "manual": [
+     {
+      "id": 41,
+      "kind": "manual",
+      "window": "credit",
+      "measured_at": "2026-11-07T02:00:00Z",
+      "expires_at": "2026-11-07T02:00:00Z",
+      "buckets": [
+       {
+        "window": "credit",
+        "used_pct": 40,
+        "scope": "account"
+       }
+      ]
+     }
+    ]
+   },
+   "name": "pi-worker-credit-expired-entry",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "measurement unavailable; manual fallback missing required window credit",
+    "provider_id": "anthropic-api",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "pi-sonnet55",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "anthropic-api:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": null,
+    "manual": [
+     {
+      "id": 41,
+      "kind": "manual",
+      "window": "credit",
+      "measured_at": "2026-11-07T02:00:00Z",
+      "expires_at": "2026-11-09T03:00:00Z",
+      "buckets": [
+       {
+        "window": "credit",
+        "used_pct": 99.5,
+        "scope": "account"
+       }
+      ]
+     }
+    ]
+   },
+   "name": "pi-worker-credit-exhausted",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "quota exhausted window=credit cutoff=99",
+    "provider_id": "anthropic-api",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "pi-sonnet55",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "anthropic-api:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": null,
+    "manual": [
+     {
+      "id": 40,
+      "kind": "manual",
+      "window": "credit",
+      "measured_at": "2026-11-07T02:00:00Z",
+      "expires_at": "2026-11-09T03:00:00Z",
+      "buckets": [
+       {
+        "window": "credit",
+        "used_pct": 99.5,
+        "scope": "account"
+       }
+      ]
+     },
+     {
+      "id": 41,
+      "kind": "manual",
+      "window": "credit",
+      "measured_at": "2026-11-07T02:00:00Z",
+      "expires_at": "2026-11-09T03:00:00Z",
+      "buckets": [
+       {
+        "window": "credit",
+        "used_pct": 30,
+        "scope": "account"
+       }
+      ]
+     }
+    ]
+   },
+   "name": "pi-latest-credit-entry-wins",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "pi-sonnet55 pool=anthropic-api used=30% class=spend [rung pi-sonnet55@high]",
+    "provider_id": "anthropic-api",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "pi-sonnet55",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "anthropic-api:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": null,
+    "manual": [
+     {
+      "id": 41,
+      "kind": "manual",
+      "window": "credit",
+      "measured_at": "2026-11-07T02:00:00Z",
+      "expires_at": "2026-11-09T03:00:00Z",
+      "buckets": [
+       {
+        "window": "credit",
+        "used_pct": 40,
+        "scope": "account"
+       }
+      ]
+     }
+    ]
+   },
+   "name": "pi-consult-only-needs-request",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "consult_only: pass --operator-request",
+    "provider_id": "anthropic-api",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [
+     "devin-swe2",
+     "devin-swe2 --effort high"
+    ],
+    "receipt": true
+   },
+   "request": {
+    "profile": "pi-sonnet55",
+    "effort": "max",
+    "role": "worker",
+    "account_key": "anthropic-api:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": null,
+    "manual": [
+     {
+      "id": 41,
+      "kind": "manual",
+      "window": "credit",
+      "measured_at": "2026-11-07T02:00:00Z",
+      "expires_at": "2026-11-09T03:00:00Z",
+      "buckets": [
+       {
+        "window": "credit",
+        "used_pct": 40,
+        "scope": "account"
+       }
+      ]
+     }
+    ]
+   },
+   "name": "pi-consult-only-with-request",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "pi-sonnet55 pool=anthropic-api used=40% class=spend [rung pi-sonnet55@max]",
+    "provider_id": "anthropic-api",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "pi-sonnet55",
+    "effort": "max",
+    "operator_request": "hk:doc/decision/x",
+    "requested_by": "desk",
+    "role": "worker",
+    "account_key": "anthropic-api:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": null,
+    "manual": [
+     {
+      "id": 41,
+      "kind": "manual",
+      "window": "credit",
+      "measured_at": "2026-11-07T02:00:00Z",
+      "expires_at": "2026-11-09T03:00:00Z",
+      "buckets": [
+       {
+        "window": "credit",
+        "used_pct": 40,
+        "scope": "account"
+       }
+      ]
+     }
+    ]
+   },
+   "name": "pi-builder-placed-default",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "pi-sonnet55 pool=anthropic-api used=40% class=spend [rung pi-sonnet55@xhigh]",
+    "provider_id": "anthropic-api",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "pi-sonnet55",
+    "effort": "xhigh",
+    "role": "builder",
+    "account_key": "anthropic-api:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 50,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "free_bucket": {
+      "state": "available"
+     }
+    }
+   },
+   "name": "devin-swe2-free-available",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "available (free): SWE-2 free bucket; account credits do not constrain this rung",
+    "provider_id": "devin",
+    "gate_basis": "free-bucket:swe-2-high",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "devin-swe2",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "devin:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 50,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "free_bucket": {
+      "state": "exhausted",
+      "resets_at": "2026-11-07T08:00:00Z"
+     }
+    }
+   },
+   "name": "devin-swe2-free-exhausted",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "free limit exceeded until 2026-11-07T08:00:00Z",
+    "provider_id": "devin",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [
+     "devin-ds41"
+    ],
+    "receipt": true
+   },
+   "request": {
+    "profile": "devin-swe2",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "devin:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 50,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "free_bucket": {
+      "state": "exhausted",
+      "resets_at": "2026-11-07T02:00:00Z"
+     }
+    }
+   },
+   "name": "devin-swe2-free-reset-passed",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "available (free): SWE-2 free bucket; account credits do not constrain this rung",
+    "provider_id": "devin",
+    "gate_basis": "free-bucket:swe-2-high",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "devin-swe2",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "devin:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 50,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "free_bucket": {
+      "state": "unknown"
+     }
+    }
+   },
+   "name": "devin-swe2-free-unknown",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "shared free bucket state unavailable",
+    "provider_id": "devin",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [
+     "devin-ds41"
+    ],
+    "receipt": true
+   },
+   "request": {
+    "profile": "devin-swe2",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "devin:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 50,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "devin-swe2-no-free-bucket",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 4,
+    "reason": "fresh automatic shared quota unavailable for account",
+    "provider_id": "",
+    "gate_basis": "",
+    "receipt": false
+   },
+   "request": {
+    "profile": "devin-swe2",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "devin:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 50,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "free_bucket": {
+      "state": "available"
+     }
+    }
+   },
+   "name": "devin-ds41-paid-admit",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "devin-ds41 pool=devin used=50% class=spend\npace-warning pool=devin window=7d multiple=1.75",
+    "provider_id": "devin",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "devin-ds41",
+    "role": "worker",
+    "account_key": "devin:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 99.2,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ],
+     "free_bucket": {
+      "state": "available"
+     }
+    }
+   },
+   "name": "devin-ds41-paid-exhausted-alternatives",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "quota exhausted window=7d cutoff=99",
+    "provider_id": "devin",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [
+     "devin-swe2",
+     "devin-swe2 --effort high"
+    ],
+    "receipt": true
+   },
+   "request": {
+    "profile": "devin-ds41",
+    "role": "worker",
+    "account_key": "devin:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 30,
+       "scope": "group",
+       "resets_at": "2026-11-07T05:00:00Z",
+       "model": "gemini"
+      },
+      {
+       "window": "7d",
+       "used_pct": 30,
+       "scope": "group",
+       "resets_at": "2026-11-12T03:00:00Z",
+       "model": "gemini"
+      },
+      {
+       "window": "5h",
+       "used_pct": 99.5,
+       "scope": "group",
+       "resets_at": "2026-11-07T05:00:00Z",
+       "model": "3p"
+      }
+     ]
+    }
+   },
+   "name": "agy-group-window-gates-its-group",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": true,
+    "exit_code": 0,
+    "reason": "agy-flash pool=agy used=30% class=spend\npace-warning pool=agy window=7d multiple=1.05",
+    "provider_id": "agy",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [],
+    "receipt": true
+   },
+   "request": {
+    "profile": "agy-flash",
+    "role": "worker",
+    "account_key": "agy:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "7d",
+       "used_pct": 10,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "grok-excluded-pool",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 3,
+    "reason": "pool excluded by policy",
+    "provider_id": "grok",
+    "gate_basis": "",
+    "missing_windows": [],
+    "alternatives": [
+     "devin-swe2",
+     "devin-swe2 --effort high"
+    ],
+    "receipt": true
+   },
+   "request": {
+    "profile": "grok",
+    "effort": "medium",
+    "role": "worker",
+    "account_key": "grok:0123456789abcdef"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": {
+     "id": 7,
+     "kind": "auto",
+     "measured_at": "2026-11-07T02:59:00Z",
+     "buckets": [
+      {
+       "window": "5h",
+       "used_pct": 20,
+       "scope": "account",
+       "resets_at": "2026-11-07T06:00:00Z"
+      },
+      {
+       "window": "7d",
+       "used_pct": 40,
+       "scope": "account",
+       "resets_at": "2026-11-12T03:00:00Z"
+      }
+     ]
+    }
+   },
+   "name": "account-key-pool-mismatch",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 2,
+    "reason": "--account-key does not match profile pool",
+    "provider_id": "",
+    "gate_basis": "",
+    "receipt": false
+   },
+   "request": {
+    "profile": "opus",
+    "effort": "high",
+    "account_key": "codex:0123456789abcdef",
+    "role": "worker"
+   }
+  },
+  {
+   "config": "[pools.grok]\nclass = \"exclude\"\n",
+   "latest": {
+    "observation": null
+   },
+   "name": "unknown-profile-account-key",
+   "now": "2026-11-07T03:00:00Z",
+   "pacelever": {
+    "ok": false,
+    "exit_code": 2,
+    "reason": "--account-key does not match profile pool",
+    "provider_id": "",
+    "gate_basis": "",
+    "receipt": false
+   },
+   "request": {
+    "profile": "opus-legacy",
+    "effort": "high",
+    "role": "worker",
+    "account_key": "claude:0123456789abcdef"
+   }
+  }
+ ]
+}

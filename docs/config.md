@@ -31,6 +31,7 @@ brief_submit_timeout_ms = 120000
 brief_submit_retry_ms = 15000
 cmd_dsflash41 = false
 clinepass = false
+omp_commandcode = false
 
 [hub]
 hub_url = "https://hub.example.invalid"
@@ -87,6 +88,7 @@ local_delete_at = "drive_confirmed"
 | `brief_submit_retry_ms` | `15000` | How often the submit key repeats during that wait, at least 1000 and below the timeout. It goes only to an idle pane; Claude and Codex panes must also still show the brief in the composer. The brief is never pasted twice. |
 | `cmd_dsflash41` | `false` | Literal capability opt-in required by cmd policy rows. The provisioned cmd account must have no persisted MCP servers. |
 | `clinepass` | `false` | Literal capability opt-in required by the `cc-*` seats, which route the Claude Code harness through the host's local ClinePass proxy (`CLINEPASS_GATE_URL`, key read at spawn time from `CLINEPASS_GATE_KEY_FILE`; defaults are a loopback URL and `~/.config/cliproxyapi-key.txt`). |
+| `omp_commandcode` | `false` | Literal capability opt-in required by the `omp-dsflash41` seat: the host's omp has the Command Code provider configured (`omp models` lists `commandcode/deepseek/deepseek-v4.1-flash`). The seat is unrated and admits only with `PANEWIRE_E6_ARM` (experiment hk 3382). |
 | `tags` | unset | Capability tags offered by this host for job placement (`spawn --tags`). Lowercase tag names. `caps` is an alias; both lists merge. |
 | `roles`, `grades` | unset | Light-host limits, as for [`[hosts.NAME]`](#hostsname): the spawn roles and task grades this machine accepts. |
 | `presence_id` | `machine_id` | Identity this host uses in pacelever host-presence records. |
@@ -440,6 +442,7 @@ overrides.
 | `presence_ttl_s` | `86400` | How recent a host-presence record must be to count as login evidence. |
 | `fresh_ttl_s` | `900` for `claude`, `300` otherwise | How recent a shared observation must be to count as fresh, for every pool without its own `pool_fresh_ttl_s` entry. A reading is valid as of the later of `measured_at` and `confirmed_at`: handoffkeep keeps `measured_at` when a re-measurement publishes the same values and only advances `confirmed_at`. This is pacelever's rule, so `pacelever --json` and the gate agree on a reading. A spawn delegated over ssh with a selected account carries the placing host's window for that account's pool, and the executing host rechecks that account with it (up to 86400). |
 | `native_pools` | `[]` | Pools with a native/shadow switch that this host measures itself instead of through pacelever (`["commandcode", "devin", "agy"]`; no other pool is accepted). Unlisted, the pool is in shadow: spawns keep running pacelever for it and the node logs a comparison ([docs/quota.md](quota.md#shadow-and-native)). Read at each use by the node and the CLI; an invalid file is shadow. |
+| `gate` | `"shadow"` | Who decides spawn admission: `"shadow"` runs `pacelever gate` and records how panewire's own verdict compares (fleet event `quota_gate_shadow`); `"native"` decides from panewire's verdict and runs no `pacelever gate` ([docs/quota.md](quota.md#admission)). Any other value is a config error. |
 | `pool_fresh_ttl_s` | unset | Optional pool → seconds table (`[quota.pool_fresh_ttl_s]`, nonnegative integers) that overrides `fresh_ttl_s` for one pool. |
 | `measure_timeout_s` | `60` | Bound on the on-target refresh (`panewire quota refresh <pool>` for claude, codex and native commandcode, devin or agy, else `pacelever refresh`) for a remote account the spawning host does not hold. |
 | `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. For `agy` it is the account the node measures: agy has no login to derive a key from ([docs/quota.md](quota.md#native-measurement-agy)). |

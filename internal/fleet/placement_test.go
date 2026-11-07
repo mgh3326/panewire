@@ -824,7 +824,7 @@ func TestQuotaBinaryDefaultsToPacelever(t *testing.T) {
 	if e != nil {
 		t.Fatalf("New: %v", e)
 	}
-	q, ok := a.Quota.(CLIQuota)
+	q, ok := a.Quota.(admissionQuota)
 	if !ok || q.Binary != "pacelever" {
 		t.Fatalf("quota CLI default = %+v, want pacelever", a.Quota)
 	}
@@ -832,7 +832,7 @@ func TestQuotaBinaryDefaultsToPacelever(t *testing.T) {
 	if a, e = New(io.Discard, io.Discard); e != nil {
 		t.Fatalf("New: %v", e)
 	}
-	if q, ok = a.Quota.(CLIQuota); !ok || q.Binary != "/opt/quota" {
+	if q, ok = a.Quota.(admissionQuota); !ok || q.Binary != "/opt/quota" {
 		t.Fatalf("PANEWIRE_QUOTA_BIN must override: %+v %v", a.Quota, e)
 	}
 }

@@ -70,9 +70,12 @@ type Observation struct {
 }
 
 // Latest is the store's answer for one account; Observation is nil when none
-// has been published.
+// has been published. Manual holds the operator-entered windows (kind
+// "manual"), which the admission gate reads when no automatic reading covers
+// the account (internal/fleet admission_native.go).
 type Latest struct {
-	Observation *Observation `json:"observation"`
+	Observation *Observation  `json:"observation"`
+	Manual      []Observation `json:"manual,omitempty"`
 }
 
 // Lease is the answer to a lease request: who holds the account's measurement

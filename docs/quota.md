@@ -372,7 +372,7 @@ a config error. `claude` and `codex` are always native and need no entry.
   store as for codex, and no spawn-side step runs `pacelever refresh` for the
   pool (an ssh refresh of a remote account runs `panewire quota refresh
   commandcode`, which follows the target's own switch). The `pacelever gate`
-  call is unchanged and is not part of this switch.
+  call is not part of this switch; [Admission](#admission) has its own.
 
 ### Artificial Analysis annotations
 
@@ -387,3 +387,81 @@ Set `ARTIFICIAL_ANALYSIS_API_KEY` in the environment, or place it in the optiona
 mode-0600 `panewire/aa.env` under the user configuration directory. Data is
 provided by [Artificial Analysis](https://artificialanalysis.ai/); see its
 [Data API reference](https://artificialanalysis.ai/data-api/docs/reference).
+
+## Admission
+
+Every spawn, delegate, placement and selection asks one admission question per
+candidate: may this profile, effort and role run on this account now? Until
+hk 3248 that answer came from `pacelever gate`. panewire now computes the same
+verdict itself (`internal/fleet/admission_verdict.go`, a rule-for-rule port of
+pacelever v0.3.28's gate) from three inputs:
+
+- **The account's stored reading** in the shared quota store
+  (`/v1/quota/accounts/<key>/latest`): bucket windows with scope, used
+  percentage and reset, the plan, devin's free-bucket state, and the
+  operator-entered manual windows. A request with an account key reads that
+  account; a local request reads the account this host holds (the fleet
+  config's `[quota.accounts]`, this host's presence records, then pacelever's
+  own `[quota.accounts]`).
+- **The bench catalog** (`pacelever bench catalog list`, until hk 3249 moves it).
+- **The pool policy** in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
+  `~/.config/pacelever/config.toml`): class and its `until` date, cutoff,
+  subscription, `fusion_billing_fp`. A missing file is the default policy; an
+  invalid one refuses (exit 2).
+
+The verdict keeps pacelever's exit statuses (0 admit, 2 invalid, 3 blocked,
+4 unmeasurable, 5 role denied, 6 unsubscribed) and prints the same
+`scopefuel.gate.v1` receipt, with `"judged_by": "panewire"`, so every caller
+reads it as before. Like pacelever's gate it measures a stale reading of an
+account this host holds once (`panewire quota refresh <pool>`, or `pacelever
+refresh` for a pool panewire does not measure) and reads again. On a refusal of
+a graded rung, `alternatives` lists the same-grade rungs the stored readings of
+the other pools this host holds would admit, read with no lease and no
+measurement (hk 3211).
+
+Rules beyond pacelever's: a commandcode reading without its `30d` window is
+unmeasurable (`commandcode_required_window_missing:30d`,
+decision/2026-11-06/commandcode-30d-required-in-panewire-gate). It needs the
+node's native commandcode measurement, the only one that publishes `30d`.
+
+Where panewire reads less than pacelever's local gate, it refuses or omits
+rather than guesses:
+
+- no local probe: a reading is the stored one, measured by the node;
+- no host-local manual store, free-limit file, usage-limit hold or inflight
+  count (a configured `inflight_reserve_pct` reads `inflight=unknown(local)`);
+  the shared store carries the free-bucket state and manual windows instead;
+- the catalog JSON has no `placed` flag or effort defaults: a graded rung is
+  placed, and an effortless rung's reason names no default effort.
+
+### Shadow and native gate
+
+`[quota].gate` in the host's fleet config picks who decides:
+
+```toml
+[quota]
+gate = "native"   # or "shadow", the default
+```
+
+- **Shadow (the default).** `pacelever gate` decides. Beside each call panewire
+  computes its own verdict within 10 s — reading only: no measurement, no
+  alternatives — and records one fleet event:
+
+  ```
+  kind=quota_gate_shadow outcome=disagree reason=claude
+  detail=profile=opus effort=high role=worker account=claude:… pacelever{exit=0 pool=claude basis= reason="…"} native{exit=3 pool=claude basis= reason="quota exhausted window=5h cutoff=99"}
+  ```
+
+  `agree` means the same exit status, pool and gate basis and the same reason;
+  `reason_differs` the same decision in other words; `disagree` anything else.
+  A commandcode spawn on a host whose commandcode readings pacelever publishes
+  reads `disagree` (no `30d`): that is the expected difference until the pool
+  is native. The desk reads the events and flips the switch.
+- **Native.** panewire's verdict decides and no spawn path runs `pacelever
+  gate`. `pacelever policy launch`, `bench catalog list` and the status and
+  manual reads stay until hk 3249 and 3250.
+
+The golden verdicts in `internal/fleet/testdata/admission_golden/verdicts.json`
+are pacelever's own: `generator/regen.sh` runs its gate over the scenarios in a
+throwaway clone. A scenario where panewire differs on purpose records the
+native verdict and why.
