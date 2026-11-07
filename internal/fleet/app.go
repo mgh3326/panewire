@@ -43,6 +43,9 @@ type App struct {
 	// SharedLatest reads one account's latest stored quota reading for the
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)
+	// BenchCatalog reads the bench catalog for the admission gate; nil reads
+	// handoffkeep (admission_native.go).
+	BenchCatalog func(context.Context) ([]CatalogRow, error)
 	Source       PlacementSource
 	Wake         Waker
 	LoadRatio    func(context.Context) (float64, error)

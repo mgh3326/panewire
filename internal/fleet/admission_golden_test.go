@@ -72,8 +72,9 @@ func goldenGate(t *testing.T, catalog []CatalogRow, s goldenScenario) (Result, g
 		}
 		return s.Latest, nil
 	}
+	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return catalog, nil }
 	r := s.Request
-	x := a.nativeGate(context.Background(), &fakeQuota{CatalogRows: catalog}, QuotaRequest{Profile: r["profile"], Effort: r["effort"], Role: r["role"], Purpose: r["purpose"], OperatorRequest: r["operator_request"], RequestedBy: r["requested_by"], AccountKey: r["account_key"]}, true)
+	x := a.nativeGate(context.Background(), QuotaRequest{Profile: r["profile"], Effort: r["effort"], Role: r["role"], Purpose: r["purpose"], OperatorRequest: r["operator_request"], RequestedBy: r["requested_by"], AccountKey: r["account_key"]}, true)
 	var got goldenVerdict
 	if err := json.Unmarshal([]byte(x.Out), &got); err != nil {
 		t.Fatalf("%s: native receipt is not JSON: %v\n%s", s.Name, err, x.Out)
@@ -139,7 +140,7 @@ func TestAdmissionGoldenCoversEveryPoolAndRule(t *testing.T) {
 	for _, name := range []string{
 		"claude-5h-exhausted", "claude-preserve-cutoff-90", "claude-stale-reading", "claude-malformed-scope",
 		"codex-plus-missing-5h", "codex-free-missing-30d", "codex-prolite-7d-only-admits",
-		"commandcode-30d-missing", "commandcode-30d-exhausted", "cmd-dsflash41-reviewer-denied",
+		"commandcode-30d-missing", "commandcode-30d-exhausted", "cmd-dsflash41-reviewer-denied", "cmd-dsflash41-builder-denied",
 		"pi-reviewer-denied", "pi-worker-manual-credit-admit", "devin-swe2-free-exhausted",
 		"agy-group-window-gates-its-group", "grok-excluded-pool", "fusion-billing-fp-differs",
 		"devin-ds41-paid-exhausted-alternatives", "claude-escalation-operator-override",
