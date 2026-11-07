@@ -26,9 +26,51 @@ concurrency:
   cancel-in-progress: false
 permissions:
   contents: read
+  # The gate below reads the main-stage verdict on the release commit.
+  checks: read
+  statuses: read
 
 jobs:
+  gate:
+    # A release never builds or publishes before the main stage is green on
+    # this commit: `ci-ok` today, `deploy-ok` once §4-3 switches the gate (set
+    # the PANEWIRE_RELEASE_GATE_CONTEXT repository variable; the default is
+    # `ci-ok`). Pull requests keep their fast build: they have no main stage.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Wait for the main-stage gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          CONTEXT: ${{ vars.PANEWIRE_RELEASE_GATE_CONTEXT || 'ci-ok' }}
+        shell: bash
+        run: |
+          deadline=$((SECONDS + 3600))
+          while :; do
+            check=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/check-runs?check_name=${CONTEXT}" \
+              --jq '[.check_runs[]][0] | "\(.status) \(.conclusion)"' 2>/dev/null || true)
+            case "$check" in
+              "completed success") echo "release gate: ${CONTEXT} check run success on ${SHA}"; exit 0 ;;
+              "completed "*) echo "release gate: ${CONTEXT} check run ${check} on ${SHA}" >&2; exit 1 ;;
+            esac
+            state=$(gh api "repos/${GITHUB_REPOSITORY}/commits/${SHA}/status" \
+              --jq '[.statuses[] | select(.context == env.CONTEXT)][0].state // ""' 2>/dev/null || true)
+            case "$state" in
+              success) echo "release gate: ${CONTEXT} commit status success on ${SHA}"; exit 0 ;;
+              failure|error) echo "release gate: ${CONTEXT} commit status ${state} on ${SHA}" >&2; exit 1 ;;
+            esac
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo "release gate: ${CONTEXT} did not turn green on ${SHA} within 60m" >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
   build:
+    needs: [gate]
+    # The gate is skipped for pull requests; every other event must pass it.
+    if: ${{ always() && (needs.gate.result == 'success' || needs.gate.result == 'skipped') }}
     runs-on: ubuntu-latest
     steps:
       - name: Validate requested publication ref
@@ -98,7 +140,8 @@ jobs:
           retention-days: 7
 
   test:
-    if: ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
+    needs: [gate]
+    if: ${{ always() && (needs.gate.result == 'success' || needs.gate.result == 'skipped') && ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
@@ -113,7 +156,7 @@ jobs:
       - run: go test ./...
 
   publish:
-    needs: [build, test]
+    needs: [gate, build, test]
     if: ((github.event_name == 'push' && github.ref_type == 'tag') || (github.event_name == 'workflow_dispatch' && inputs.publish)) && github.ref_type == 'tag' && !startsWith(github.ref_name, 'v0.0.0')
     runs-on: ubuntu-latest
     permissions:

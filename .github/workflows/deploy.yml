@@ -1,0 +1,317 @@
+name: Deploy
+
+# The heavy stage (operator decision 2026-11-07,
+# hk:doc decision/2026-11-07/fleet-ci-three-tiers-r2 §1, §4-2): race, the
+# deploy target platform (macOS), the four release artifacts, the deployed
+# schema -> candidate migration path, and mixed server/CLI version
+# compatibility. It starts only from a successful main-stage run, for that
+# run's head sha, and posts the commit status deploy-ok as candidate evidence.
+#
+# A reusable call is the any-ref path (`suite=deploy` in ci-any-ref.yml); it
+# takes the same resolved sha. Nothing here is narrowed by changed paths.
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+  workflow_call:
+    inputs:
+      ref:
+        description: Exact sha to deploy-check; empty means the triggering run's head sha
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  # Never cancel a deploy: a running check finishes, because a cancelled run
+  # proves nothing and would leave a half-written verdict. One deploy per
+  # repository; GitHub keeps only the newest pending entry, so a newer head
+  # replaces an older queued one (r2 §1).
+  group: deploy-${{ github.repository }}
+  cancel-in-progress: false
+
+jobs:
+  candidate:
+    # Only a successful CI *push* run on this repository's main, for the sha it
+    # ran on. A workflow_run branches filter matches the triggering run's head
+    # branch, so a fork pull request from a source branch named "main" would
+    # otherwise pass it: require the upstream event to be a push and the head
+    # repository to be this repository before any checkout. A reusable call
+    # from ci-any-ref (suite=deploy) is the manual/any-ref path; inside a
+    # reusable workflow github.event_name is the CALLER's event, so the call is
+    # recognised by the sha input it passes.
+    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) || inputs.ref != '' }}
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.sha.outputs.sha }}
+      policy: ${{ steps.policy.outputs.revision }}
+    steps:
+      - name: Resolve the candidate sha
+        id: sha
+        env:
+          INPUT_REF: ${{ inputs.ref }}
+          RUN_SHA: ${{ github.event.workflow_run.head_sha }}
+          EVENT: ${{ github.event_name }}
+          TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
+          CONCLUSION: ${{ github.event.workflow_run.conclusion }}
+        run: |
+          # Defence in depth for the job condition: never accept a sha from a
+          # pull-request-triggered run or another repository.
+          if [ "$EVENT" = "workflow_run" ]; then
+            [ "$TRIGGER_EVENT" = push ] || { echo "deploy: triggering run is $TRIGGER_EVENT, not a push" >&2; exit 1; }
+            [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ] || { echo "deploy: triggering run is from $HEAD_REPO" >&2; exit 1; }
+          fi
+          sha="${INPUT_REF:-$RUN_SHA}"
+          case "$sha" in
+            '' | *[!0-9a-fA-F]*) echo "deploy: not a sha: '$sha' (event $EVENT, conclusion $CONCLUSION)" >&2; exit 1 ;;
+          esac
+          if [ "${#sha}" -ne 40 ]; then
+            echo "deploy: sha is ${#sha} hex characters, want 40: '$sha'" >&2; exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.sha.outputs.sha }}
+      - name: Read the policy revision
+        id: policy
+        run: |
+          version=$(sed -n 's/^version:[[:space:]]*//p' .mergewake/policy.yaml)
+          hash=$(sha256sum .mergewake/policy.yaml | cut -d' ' -f1)
+          echo "revision=v${version}@${hash:0:12}" >> "$GITHUB_OUTPUT"
+
+  race:
+    needs: candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      # The pins the main stage used to carry. They run here now, and the
+      # other packages run the full -race suite beside them.
+      - run: go test -race -count=3 -run 'T1002|T1034' .
+      - run: go test -race -run '^TestQuiet' .
+      - run: go test -race -run '^(TestAsyncSpawn|TestSpawn|TestNodeSpawn)' .
+      # The root package's full -race run is red on the pre-existing hk 1243
+      # bytes.Buffer race: a relay ack timer (time.AfterFunc) outlives its test
+      # and logs through the test's buffer while another timer does the same.
+      # The three pins above cover the root concurrency paths; every other
+      # package runs its full -race suite here.
+      - run: go list ./... | grep -v -x "$(go list -m)" | xargs go test -race
+
+  macos:
+    needs: candidate
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"
+            exit 1
+          fi
+      - run: go vet ./...
+      - run: go build ./...
+      - run: go test ./...
+      - run: go test -race -count=3 -run 'T1002|T1034' .
+      - run: go test -race -run '^TestQuiet' .
+      - run: go test -race -run '^(TestAsyncSpawn|TestSpawn|TestNodeSpawn)' .
+      - run: sh -n deploy/alloy/install-linux.sh deploy/alloy/run-alloy.sh
+      # gitleaks is installed through Homebrew, which only the macOS runner has.
+      - run: brew install gitleaks && gitleaks git --no-banner --config .gitleaks.toml
+
+  release:
+    needs: candidate
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.digest.outputs.digest }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      - name: Build the four release artifacts
+        run: |
+          version=$(sh scripts/build-release.sh dist/release)
+          test "$version" = "pw-$(git rev-parse HEAD | cut -c1-7)"
+          echo "RELEASE_VERSION=$version" >> "$GITHUB_ENV"
+      - name: Verify assets, SHA256SUMS and version output
+        run: |
+          for target in darwin_amd64 darwin_arm64 linux_amd64 linux_arm64; do
+            test -x "dist/release/panewire_${RELEASE_VERSION}_${target}"
+          done
+          test "$("dist/release/panewire_${RELEASE_VERSION}_linux_amd64" version)" = "$RELEASE_VERSION"
+          (cd dist/release && sha256sum -c SHA256SUMS)
+          test "$(wc -l < dist/release/SHA256SUMS)" -eq 4
+          cat dist/release/SHA256SUMS
+      - name: Digest the artifact set
+        id: digest
+        run: echo "digest=$(sha256sum dist/release/SHA256SUMS | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: deploy-release-assets
+          path: dist/release/
+          if-no-files-found: error
+          retention-days: 7
+
+  postgres:
+    needs: candidate
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_HOST_AUTH_METHOD: trust
+          POSTGRES_DB: panewire
+        ports: ["55432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      # The deployed schema is the migrations already recorded in
+      # panewire_schema_migrations; the candidate applies any new file on top.
+      # A re-open is the candidate schema over the deployed one, and the
+      # SQLite copy path is the inbox's deployed-schema -> candidate migration.
+      - name: Deployed-schema to candidate migration (hub Postgres inbox)
+        env:
+          PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run 'TestLaneInboxStorePostgresMigrationsTwiceChangeNothing|TestLaneInboxStorePostgresConcurrentStartsMigrateOnce|TestHubMigrateSQLiteCopiesToPostgres|TestHubMigrateSQLitePreservesPrunedIDFloor|TestHubServerOpensPostgresInbox|TestHubDatabaseURLNeverEchoed' . 2>&1 | tee "$RUNNER_TEMP/deploy-postgres.log"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/deploy-postgres.log"; then
+            echo "a Postgres test skipped"; exit 1
+          fi
+
+  compat:
+    needs: candidate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.candidate.outputs.sha }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.27.x'
+          cache: true
+      # Mixed hub/node versions in both directions: the candidate hub accepts a
+      # legacy node heartbeat (TestTask268AC5...), the frozen pre-change hub
+      # vocabulary rejects the candidate node (the same test), and the legacy
+      # heartbeat vocabulary still decodes here
+      # (TestHubHostMemoryJSONAndHeartbeatCompatibility,
+      # TestHubQuotaLegacyHeartbeatFieldIsAcceptedAndDropped).
+      - name: Mixed server/CLI version compatibility
+        run: |
+          go test -count=1 -v -run 'TestTask268AC5HubFirstRolloutAndLegacyNodeCompatibility|TestHubHostMemoryJSONAndHeartbeatCompatibility|TestHubQuotaLegacyHeartbeatFieldIsAcceptedAndDropped|TestReadinessKeepsBuildVersionForms' .
+      - name: Release version form
+        run: go test -count=1 -v -run 'TestDistVersion|TestDevBuildReportsPlaceholderVersion|TestVersionSubcommandSanitizesInjectedValue' .
+      # The hub is deployed before the nodes, so the candidate hub must accept
+      # a node client from the previous release. This builds the candidate,
+      # downloads the latest published release and drives its `hub-emit`
+      # against the candidate hub over wss (fleet CI r2 §7).
+      - name: Build the candidate binary
+        run: |
+          go build -trimpath -ldflags "-X main.version=pw-$(git rev-parse HEAD | cut -c1-7)" \
+            -o "$RUNNER_TEMP/panewire-candidate" ./cmd/panewire
+      - name: Previous release node client against the candidate hub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          tag=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name // empty')
+          if [ -z "$tag" ]; then
+            echo "no previous release; the old-client check has nothing to compare"
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/old-release"
+          gh release download "$tag" --repo "$REPO" \
+            --pattern "panewire_${tag}_linux_amd64" --dir "$RUNNER_TEMP/old-release" --clobber
+          chmod +x "$RUNNER_TEMP/old-release/panewire_${tag}_linux_amd64"
+          sh scripts/check-hub-old-client.sh "$RUNNER_TEMP/panewire-candidate" \
+            "$RUNNER_TEMP/old-release/panewire_${tag}_linux_amd64" "$tag"
+
+  deploy-ok:
+    name: deploy-ok
+    needs: [candidate, race, macos, release, postgres, compat]
+    # The verdict is always posted, including on a failed check, so the head is
+    # never left looking green by a missing status. Candidate must have run, or
+    # there is no sha to post on.
+    if: ${{ always() && needs.candidate.result == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Post deploy-ok commit status with candidate evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          TARGET_SHA: ${{ needs.candidate.outputs.sha || github.event.workflow_run.head_sha || inputs.ref }}
+          POLICY_REVISION: ${{ needs.candidate.outputs.policy }}
+          ARTIFACT_DIGEST: ${{ needs.release.outputs.digest }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          RACE_RESULT: ${{ needs.race.result }}
+          MACOS_RESULT: ${{ needs.macos.result }}
+          RELEASE_RESULT: ${{ needs.release.result }}
+          POSTGRES_RESULT: ${{ needs.postgres.result }}
+          COMPAT_RESULT: ${{ needs.compat.result }}
+        shell: bash
+        run: |
+          state=success result=success
+          for r in "$RACE_RESULT" "$MACOS_RESULT" "$RELEASE_RESULT" "$POSTGRES_RESULT" "$COMPAT_RESULT"; do
+            case "$r" in
+              success) ;;
+              cancelled) [ "$state" = failure ] || state=error ;;
+              *) state=failure ;;
+            esac
+          done
+          if [ "$state" = error ]; then result=cancelled
+          elif [ "$state" = failure ]; then result=failure
+          fi
+          short_sha=${TARGET_SHA:0:12}
+          short_digest=${ARTIFACT_DIGEST:0:16}
+          description="repo=$REPO sha=$short_sha policy=$POLICY_REVISION suite=deploy env=ci run=$RUN_ID $result digest=$short_digest"
+          if [ "${#description}" -gt 140 ]; then
+            echo "deploy-ok description is ${#description} characters, over the 140 limit" >&2; exit 1
+          fi
+          {
+            echo "## deploy-ok candidate evidence"
+            echo
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| repo | \`$REPO\` |"
+            echo "| sha | \`$TARGET_SHA\` |"
+            echo "| policy_revision | \`$POLICY_REVISION\` |"
+            echo "| suite | deploy |"
+            echo "| environment | ci |"
+            echo "| run_id | \`$RUN_ID\` |"
+            echo "| result | $result |"
+            echo "| artifact digest | \`$ARTIFACT_DIGEST\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
+          gh api "repos/${REPO}/statuses/${TARGET_SHA}" \
+            -f state="$state" \
+            -f context=deploy-ok \
+            -f target_url="$RUN_URL" \
+            -f description="$description"

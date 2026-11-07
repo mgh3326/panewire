@@ -10,7 +10,10 @@
    git tag vMAJOR.MINOR.PATCH origin/main
    git push origin vMAJOR.MINOR.PATCH
    ```
-3. `.github/workflows/release.yml` calls `scripts/build-release.sh dist/release
+3. `.github/workflows/release.yml` first waits for the main-stage gate on the
+   release commit (`ci-ok` today; set the `PANEWIRE_RELEASE_GATE_CONTEXT`
+   repository variable to `deploy-ok` when §4-3 switches the gate). It then
+   calls `scripts/build-release.sh dist/release
    <tag>`. The script builds CGO-disabled (`CGO_ENABLED=0`, `-trimpath`) binaries
    named `panewire_<tag>_<os>_<arch>` for linux/amd64, linux/arm64,
    darwin/amd64 and darwin/arm64, and writes `SHA256SUMS`. The workflow

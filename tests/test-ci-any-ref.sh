@@ -8,9 +8,14 @@
 #   (d) the permissions block is minimal
 #   (e) the concurrency group is keyed on the RESOLVED sha plus the suite, never
 #       inputs.ref alone
+#   (f) suite=deploy is the deploy stage: it calls deploy.yml with the resolved
+#       sha, ci.yml is not asked for that suite, and deploy.yml (not this
+#       workflow) posts deploy-ok
 # and that mutants (merge main first; post on the dispatch sha; ci-ok for a
 # partial suite; inline inputs.* in a run body; drop the sha from the group key;
-# drop the suite from the group key) are RED.
+# drop the suite from the group key; run ci.yml for suite=deploy; pass the
+# dispatch sha to deploy.yml; post a ci-ok status for suite=deploy; drop the
+# deploy job's statuses permission) are RED.
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
@@ -150,6 +155,30 @@ def validate(wf_text: str, ci_text: str) -> None:
     assert "ref: ${{ needs.resolve.outputs.sha }}" in wf_text, \
         "reusable call must pass the resolved sha"
     assert "suite: ${{ inputs.suite }}" in wf_text
+
+    # Suite deploy is the deploy stage (r2 §4-2/§4-4). ci.yml knows only
+    # all|test|postgres, so its job must be gated off, and the deploy job calls
+    # deploy.yml with the same resolved sha. deploy.yml posts deploy-ok itself,
+    # so this workflow must not post a ci-ok status for that suite.
+    suite_input = re.search(r"(?ms)^      suite:\n(.*?)(?=^      \w|\Z)", wf_text)
+    assert suite_input and re.search(r"(?m)^          - deploy$", suite_input.group(1)), \
+        "suite input must offer deploy"
+    ci_block = job_block(wf_text, "ci")
+    assert re.search(r"(?m)^    if: \$\{\{ inputs\.suite != 'deploy' \}\}$", ci_block), \
+        "ci.yml must not be called for suite=deploy"
+    deploy_block = job_block(wf_text, "deploy")
+    assert "needs: resolve" in deploy_block, "deploy must wait for the resolved sha"
+    assert "uses: ./.github/workflows/deploy.yml" in deploy_block, \
+        "suite=deploy must call deploy.yml"
+    assert "ref: ${{ needs.resolve.outputs.sha }}" in deploy_block, \
+        "deploy must receive the resolved sha, never the dispatch sha"
+    assert re.search(r"(?m)^      statuses: write$", deploy_block), \
+        "deploy must grant statuses: write to post deploy-ok"
+    status_block = job_block(wf_text, "status")
+    assert "inputs.suite != 'deploy'" in status_block, \
+        "status must skip suite=deploy; deploy.yml posts deploy-ok"
+    assert "context=deploy-ok" not in status_block, \
+        "deploy-ok has exactly one writer, deploy.yml"
 
     # status target: must be the resolved sha, never github.sha / the dispatch sha.
     assert "statuses/${TARGET_SHA}" in wf_text, "status must post to statuses/<target sha>"
@@ -307,7 +336,36 @@ mutant_ctx2 = wf.replace(
 )
 expect_red(mutant_ctx2, ci, "extra-ci-ok-writer")
 
-print("structural checks ok (incl. 11 mutants)")
+# Mutant 12: ci.yml is called for suite=deploy too -> must be RED.
+mutant_ci_deploy = wf.replace(
+    "    if: ${{ inputs.suite != 'deploy' }}\n",
+    "",
+    1,
+)
+expect_red(mutant_ci_deploy, ci, "ci-runs-for-deploy")
+
+# Mutant 13: the deploy job gets the dispatch sha -> must be RED.
+mutant_deploy_sha = wf.replace(
+    "    uses: ./.github/workflows/deploy.yml\n    with:\n      ref: ${{ needs.resolve.outputs.sha }}",
+    "    uses: ./.github/workflows/deploy.yml\n    with:\n      ref: ${{ github.sha }}",
+)
+expect_red(mutant_deploy_sha, ci, "deploy-on-dispatch-sha")
+
+# Mutant 14: the status job also runs for suite=deploy -> must be RED.
+mutant_status_deploy = wf.replace(
+    "needs.resolve.result == 'success' && inputs.suite != 'deploy'",
+    "needs.resolve.result == 'success'",
+)
+expect_red(mutant_status_deploy, ci, "status-for-deploy")
+
+# Mutant 15: the deploy job drops statuses: write -> must be RED.
+mutant_deploy_perm = wf.replace(
+    "    permissions:\n      contents: read\n      statuses: write\n    uses: ./.github/workflows/deploy.yml",
+    "    permissions:\n      contents: read\n    uses: ./.github/workflows/deploy.yml",
+)
+expect_red(mutant_deploy_perm, ci, "deploy-without-statuses")
+
+print("structural checks ok (incl. 15 mutants)")
 PY
 
 # --- live-ish harness: resolver + checkout simulation against a fixture repo ---
