@@ -555,8 +555,10 @@ cursor), and every other cell is dim or in the foreground colour the divider
 rows use (cmd draws it muted, not dim). The style decides; the literal is a
 guard, because that muted colour is shared by the dividers and footer and so
 proves "not a draft" only for the one text known to be drawn in it. A draft in
-the default foreground, or any other text, reads `has_text`. The relay's cmd
-presend asks the same rule, so an idle cmd pane is typed into once (hk 3374).
+the default foreground, or any other non-dim text, reads `has_text`; as for
+Claude, a composer whose every visible character is dim reads `empty`. The
+relay's cmd presend asks the same rule, so an idle cmd pane is typed into once
+(hk 3374), and `pane.close` reads cmd's composer by it too.
 
 Codex and Devin are classified from the plain text alone. That text cannot prove
 a placeholder is dim, so a known idle placeholder

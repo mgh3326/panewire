@@ -132,6 +132,9 @@ func TestNodeCommandPaneCloseIdleHarnessFixtures(t *testing.T) {
 		{"idle devin closes", "devin", nodeTailWith(nodeDevinIdleTail, nodeDevinPlaceholderRow), 1},
 		{"codex draft keeps the pane", "codex", nodeTailWith(nodeCodexIdleTail, nodeCodexPlaceholderRow+" and fix the tests"), 0},
 		{"devin draft keeps the pane", "devin", nodeTailWith(nodeDevinIdleTail, nodeDevinPlaceholderRow+" and fix the tests"), 0},
+		{"idle cmd closes", "cmd", t3374Screen(t3374IdleRow), 1},
+		{"cmd draft keeps the pane", "cmd", t3374Screen("❯ fix the test"), 0},
+		{"cmd draft after the cursor cell keeps the pane", "cmd", t3374Screen("❯ \x1b[7mf" + sgrReset + "ix the test"), 0},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {

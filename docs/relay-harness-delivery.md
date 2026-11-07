@@ -94,8 +94,11 @@ submitted with the one return and not typed again, so exactly one copy lands.
 The presend reads cmd's composer from the ANSI screen (`herdr pane read
 --format ansi`), because an idle cmd pane draws claude's dim prompt suggestion
 in its empty composer and a plain read cannot tell it from a draft. It applies
-the reap's dim rule (`nodeComposerState`): a composer whose every visible
-character is dim reads empty and the event is typed. The return after
+the reap's rules (`nodeComposerState("cmd", …)`): a composer whose every
+visible character is dim reads empty, and so does cmd's idle placeholder
+`Ask your question...`, which cmd draws in the muted foreground its dividers
+use (not dim) with the cursor on the first cell (hk 3374; see "Reap composer
+adapter" in `node-commands.md`). Either way the event is typed. The return after
 `pane send-text` goes through the same gate as every other harness
 (`relayComposerReturnSafe`, on a read taken after the text landed); a draft that
 appears in between is `return_withheld:composer_foreign` and `maybe_in_pane`.
