@@ -1369,6 +1369,12 @@ outcome, reason, detail`) to `$XDG_STATE_HOME/panewire/events/fleet-events.jsonl
 | `placement` | `placed` | ranking metric: `score`, `raw_load` (some host had no hub score), `single_candidate`, `wake`, `forced` | a non-dry-run spawn chose a host; `detail` names `chosen=`, `candidates=`, `pool=` and the hosts that `refused=` first |
 | `placement` | `refused` | automatic selection's outcome code, such as `quota_exhausted` or `quota_unknown` | selection refused before execution placement; `selection` retains the ordered host and rung attempts |
 | `quota_observation` | `stale` or `unusable` | the shared-observation reason (`stale`, `not_observed`, `measure_failed`, ...) | a target account's quota observation refused a host; `detail` carries `target=`, `pool=` and `age_min=` |
+| `relay` | `delivered`, `dropped:<reason>` or `unconfirmed:<reason>` | the drop code, or the first token of the report | the hub saw one worker or design lane row's outcome |
+| `spawn_held` | the held branch (`succeeded_pane_held`, `failed_pane_held`, ...) | the pane-probe reason | a refused reclaim kept a role reservation |
+| `job_result` | `attached`, `conflict` or `missing` | `duplicate_done`, `different_result` or `no_result` | a `done` attached, conflicted with, or lacked a result |
+
+The relay, held-reservation and job-result kinds and their Sentry fingerprints
+are in [observability](observability.md).
 
 Every field is redacted (tokens, URL credentials) and bounded (`detail` at
 1 KiB); the file rotates to `.1` at 4 MiB. Writing an event never changes the

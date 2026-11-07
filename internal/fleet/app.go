@@ -64,6 +64,9 @@ type App struct {
 	// EventSink receives fleet events instead of the state directory's file;
 	// tests only.
 	EventSink func(fleetevent.Event)
+	// SentryWarning sends one warning-level Sentry event. Tests substitute it;
+	// nil uses SENTRY_DSN_PANEWIRE (sentry_warning.go).
+	SentryWarning func(fingerprint []string, message string, tags map[string]string)
 	// LiveSpawnProfiles counts live hub spawns by placed profile for the
 	// [quota].pool_max_concurrent cap, leaving out the hub request named by
 	// its second argument (the spawn being placed). The hub's own App reads

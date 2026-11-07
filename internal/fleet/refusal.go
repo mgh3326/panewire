@@ -117,6 +117,10 @@ var spawnRefusals = []spawnRefusal{
 	// Auto placement exhaustion lists the tried hosts, whose notes can say "brief".
 	{match: "no remote candidate completed", code: "local_disabled", hint: "Read the tried list above: add the repository to that node's spawn.json.cwd_map or repair the named refusal, or enable local.spawn on this host; then replay the saved request."},
 	{match: "no placement candidate accepted", code: "placement", hint: "Read the tried list above; add the repository to that node's spawn.json.cwd_map or repair the named refusal, then replay the saved request."},
+	// Admission refused before a host was bound: the cause the hub reports in
+	// Sentry's admission_refused class (docs/observability.md).
+	{match: "missing seat policy", code: "seat_policy_missing", hint: "Run panewire resolve --role ROLE --t Tn to select a rung with an admitted seat policy, or repair the policy that omits this profile, then retry."},
+	{match: "quota catalog", code: "quota_catalog", hint: "Restore the quota catalog (pacelever refresh, or the policy cache it is read from), then retry; admission cannot decide without it."},
 	{match: "symlink path refused", code: "symlink_path", hint: "Replace the named symlink with a real directory or point the executing node's jobs root at a symlink-free path, then replay the request."},
 	{match: "report must be under", code: "report_path", hint: "Pass --report inside this job's own jobs/JOB directory, or its --parent-job directory, then retry."},
 	{match: "cwd is not a directory", code: "cwd_not_directory", hint: "Run panewire preflight --json on the executing node and repair its checkout or spawn.json.cwd_map path, then replay the request."},

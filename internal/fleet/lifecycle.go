@@ -203,6 +203,10 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	if e = a.event(ctx, id, eventKind, p); e != nil {
 		return e
 	}
+	if kind == "done" && result == nil && j.SpawnRole == "reviewer" {
+		a.jobResultEvent(id, "missing", "no_result", "")
+		a.warn("reviewer done carried no result: %s", id)
+	}
 	owner := j.Owner
 	if j.Parent != "" && (kind == "escalate" || j.Role == "builder" || j.Role == "captain") {
 		owner = j.Parent
@@ -324,6 +328,8 @@ func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest stri
 			return "result=equal", nil
 		}
 		a.warn("result conflict: job %s already has a different result; keeping it", id)
+		a.jobResultEvent(id, "conflict", "different_result", "stored result kept")
+		a.captureSentryWarning([]string{"job-result-conflict"}, "JOB_RESULT_CONFLICT "+id, map[string]string{"job": id})
 		return "result=conflict", nil
 	}
 	// hk accepts a result only in a write that also names completed; the job is
@@ -335,6 +341,7 @@ func (a *App) attachDuplicateResult(ctx context.Context, id, report, digest stri
 	if e := a.event(ctx, id, "job.result_attached", map[string]any{"report": report, "report_sha256": digest}); e != nil {
 		return "", e
 	}
+	a.jobResultEvent(id, "attached", "duplicate_done", "duplicate completion")
 	return "result=attached", nil
 }
 

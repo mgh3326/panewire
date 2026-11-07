@@ -23,6 +23,13 @@ func (a *App) fleetEventWriter() *fleetevent.Writer {
 	return w
 }
 
+// jobResultEvent records whether a done carried a result the job now holds.
+// The #311 duplicate attach, its conflict and a reviewer's resultless done are
+// otherwise indistinguishable in the durable record.
+func (a *App) jobResultEvent(id, outcome, reason, detail string) {
+	a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "job_result", Job: id, Outcome: outcome, Reason: reason, Detail: detail})
+}
+
 // spawnEvents records how a spawn ended: its refusal, or, for --host local
 // (which never goes through place), the forced placement it completed.
 func (a *App) spawnEvents(s Spawn, err error) {

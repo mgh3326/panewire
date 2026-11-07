@@ -963,6 +963,7 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 	}
 	h.mu.Unlock()
 	if h.handoffkeep == nil {
+		h.observeRelayDelivered(pending)
 		return true
 	}
 	if pending.eventID == 0 {
@@ -973,12 +974,14 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 			h.logger.Warn("relay delivery acknowledged but the durable row could not be named", "job", pending.event.JobID, "kind", pending.kind, "machine", pending.machine, "pane", pending.pane)
 			return false
 		}
+		h.observeRelayDelivered(pending)
 		return true
 	}
 	if err := h.handoffkeep.markDelivered(context.Background(), pending.eventID, pending.machine, pending.pane); err != nil {
 		h.logger.Warn("relay delivery was not recorded", "event_id", pending.eventID, "machine", pending.machine)
 		return false
 	}
+	h.observeRelayDelivered(pending)
 	return true
 }
 

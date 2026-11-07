@@ -444,6 +444,8 @@ func (h *HubServer) logHeldSpawnRole(spawn fleet.Spawn, request fleet.Submission
 	if trace.probe.reason == "" {
 		trace.probe.reason = "not_probed"
 	}
+	h.observeSpawnHeld(spawn.Job, spawn.RoleKey(), trace.branch, trace.probe.reason,
+		"holder_job="+holder.Job+" holder_host="+spawnHolderHost(holder)+" holder_pane="+pane+" hk_read="+trace.hk+" probe="+trace.probe.state.String())
 	h.logger.Info("hub held a spawn role reservation",
 		"branch", trace.branch,
 		"role_key", spawn.RoleKey(),
