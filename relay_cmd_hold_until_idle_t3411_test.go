@@ -408,3 +408,47 @@ func TestCmdWorkingExpiredRowRedeliveredOnIdle_t3411(t *testing.T) {
 		t.Fatalf("idle wakes after both rows re-delivered queued %+v, want nothing", more)
 	}
 }
+
+// A retry of an older idle wake that arrives after a newer one re-delivers
+// nothing, even with another dropped row still waiting: only a later idle turn
+// may bring the next row.
+func TestCmdIdleRedeliveryIgnoresOlderWakeRetry_t3411(t *testing.T) {
+	rig := t3276Start(t)
+	rig.node.relayControl.cmdHoldMax = time.Nanosecond
+	pane := t3384Install(t, "cmd", "working")
+	held := t3384Hold(t, rig, relayDeliverDirective, relayDeliverDirective, relayDeliverDirective)
+	rig.node.relayBusyManager().releaseWorking(t.Context(), "w1:pW", true)
+	if kinds, _ := rig.drainEvents(); t3276Count(kinds, "relay.dropped") != len(held) {
+		t.Fatalf("events=%v, want all %d rows dropped as %s", kinds, len(held), relayDroppedWorkingExpired)
+	}
+	t3411AssertNothingTyped(t, pane)
+
+	for turn, seq := range []uint64{1, 2} {
+		t650Send(t, rig.hub, "host-a", rig.dest, "idle-wake.route.request", t3411IdleWake(seq))
+		var redelivered []hubRelayInjectEvent
+		eventually(t, 3*time.Second, "the idle re-delivery", func() bool {
+			redelivered = append(redelivered, t3411WorkerRelays(rig)...)
+			return len(redelivered) > 0
+		})
+		if len(redelivered) != 1 || redelivered[0].EventID != held[turn].EventID {
+			t.Fatalf("idle wake %d re-delivered %+v, want only row %d", seq, redelivered, held[turn].EventID)
+		}
+	}
+
+	t650Send(t, rig.hub, "host-a", rig.dest, "idle-wake.route.request", t3411IdleWake(1))
+	// A window that proves the stale retry queues nothing.
+	time.Sleep(300 * time.Millisecond)
+	if more := t3411WorkerRelays(rig); len(more) != 0 {
+		t.Fatalf("a retry of idle wake 1 after wake 2 re-delivered %+v, want nothing", more)
+	}
+
+	t650Send(t, rig.hub, "host-a", rig.dest, "idle-wake.route.request", t3411IdleWake(3))
+	var third []hubRelayInjectEvent
+	eventually(t, 3*time.Second, "the third row at the next idle wake", func() bool {
+		third = append(third, t3411WorkerRelays(rig)...)
+		return len(third) > 0
+	})
+	if len(third) != 1 || third[0].EventID != held[2].EventID {
+		t.Fatalf("idle wake 3 re-delivered %+v, want only row %d", third, held[2].EventID)
+	}
+}

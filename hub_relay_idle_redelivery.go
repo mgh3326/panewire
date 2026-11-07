@@ -11,7 +11,10 @@ package panewire
 // marked row's one labelled replay, so each row is re-delivered at most once.
 // The memory is not durable; a hub restart replays every marked row anyway.
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 const (
 	// relayReplaySourceIdle names the idle-wake re-delivery in replay logs and
@@ -49,10 +52,11 @@ func (h *HubServer) rememberWorkingExpired(pending relayPending, ack relayAckPay
 
 // redeliverWorkingExpiredOnIdle runs on an idle-wake route request: the pane
 // has settled idle or done. It re-delivers the oldest remembered row whose
-// lane routes to that pane, once. A retried request for the same idle wake
-// re-delivers nothing more, so two rows are never typed into one idle turn:
-// the node types the row, the pane works, and its next idle wake brings the
-// next row.
+// lane routes to that pane, once. Only a wake newer than the last one that
+// re-delivered a row for the pane re-delivers another, so a retried request
+// for an idle wake already used, or for an older one, re-delivers nothing and
+// two rows are never typed into one idle turn: the node types the row, the
+// pane works, and its next idle wake brings the next row.
 func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWakeRouteRequest) {
 	h.mu.Lock()
 	remembered := len(h.relayControl.workingExpired)
@@ -73,16 +77,18 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 			pick = id
 		}
 	}
-	if pick == 0 || h.relayControl.idleRedelivered[paneKey] == request.EventID {
+	wake := idleRedeliveryWakeOf(request)
+	previous, seen := h.relayControl.idleRedelivered[paneKey]
+	if pick == 0 || seen && !wake.newerThan(previous) {
 		h.mu.Unlock()
 		return
 	}
 	lane := h.relayControl.workingExpired[pick]
 	delete(h.relayControl.workingExpired, pick)
 	if h.relayControl.idleRedelivered == nil {
-		h.relayControl.idleRedelivered = make(map[string]string)
+		h.relayControl.idleRedelivered = make(map[string]idleRedeliveryWake)
 	}
-	h.relayControl.idleRedelivered[paneKey] = request.EventID
+	h.relayControl.idleRedelivered[paneKey] = wake
 	h.mu.Unlock()
 	ctx := context.Background()
 	record, found, err := h.handoffkeep.relayEvent(ctx, pick)
@@ -90,7 +96,11 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 		// Nothing was spent: the next idle wake tries the row again.
 		h.mu.Lock()
 		h.relayControl.workingExpired[pick] = lane
-		delete(h.relayControl.idleRedelivered, paneKey)
+		if seen {
+			h.relayControl.idleRedelivered[paneKey] = previous
+		} else {
+			delete(h.relayControl.idleRedelivered, paneKey)
+		}
 		h.mu.Unlock()
 		h.logger.Warn("idle re-delivery could not read its row", "event_id", pick)
 		return
@@ -108,6 +118,29 @@ func (h *HubServer) redeliverWorkingExpiredOnIdle(machine string, request idleWa
 	}
 	h.mu.Unlock()
 	h.replayMarkedUnconfirmed(ctx, record, relayReplaySourceIdle, false)
+}
+
+// idleRedeliveryWake orders the idle wakes of one pane: the node's sequence
+// namespace and the pane's state change sequence, both from the wake's event
+// id (validIdleWakeEventID has checked its shape).
+type idleRedeliveryWake struct {
+	namespace string
+	sequence  uint64
+}
+
+func idleRedeliveryWakeOf(request idleWakeRouteRequest) idleRedeliveryWake {
+	wake := idleRedeliveryWake{sequence: request.StateChangeSeq}
+	if parts := strings.Split(request.EventID, ":"); len(parts) == 4 {
+		wake.namespace = parts[1]
+	}
+	return wake
+}
+
+// newerThan reports whether wake is a later idle turn than previous. A new
+// namespace means the node's idle-wake journal was reset, so its sequence
+// restarts and the wake counts as newer.
+func (wake idleRedeliveryWake) newerThan(previous idleRedeliveryWake) bool {
+	return wake.namespace != previous.namespace || wake.sequence > previous.sequence
 }
 
 // relayIdleRedeliveryLabel is the one-line prefix an idle re-delivery carries.
