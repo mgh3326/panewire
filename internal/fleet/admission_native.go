@@ -180,7 +180,7 @@ func (a *App) nativeVerdict(ctx context.Context, catalog QuotaGate, r QuotaReque
 		return d.refuse(gateUnmeasurable, "measurement unavailable: this host holds no "+d.Pool+" account"), ""
 	}
 	in.AccountScoped = true
-	if why := a.loadAccount(ctx, &in, catalog, key, live); why != "" {
+	if why := a.loadAccount(ctx, &in, key, live, r.AccountKey == ""); why != "" {
 		return d.refuse(gateUnmeasurable, why), key
 	}
 	in.Now = a.Now()
@@ -192,7 +192,7 @@ func (a *App) nativeVerdict(ctx context.Context, catalog QuotaGate, r QuotaReque
 		held := a.heldAccountKeys(ctx, pools)
 		for _, pool := range pools {
 			if keys := held[pool]; len(keys) > 0 {
-				_ = a.loadAccount(ctx, &in, catalog, keys[0], false)
+				_ = a.loadAccount(ctx, &in, keys[0], false, false)
 			}
 		}
 		for _, alt := range in.recommend(d.Grade, req.Role) {
@@ -223,35 +223,44 @@ func validAccountKey(key string) bool {
 // loadAccount reads one account's stored reading into in: a credit pool's
 // operator entries, any other pool's automatic reading. It returns why the
 // account cannot be judged, or "". With refresh set, a stale reading of an
-// account this host holds is measured once and read again.
-func (a *App) loadAccount(ctx context.Context, in *admissionInputs, catalog QuotaGate, key string, refresh bool) string {
+// account this host holds is measured once and read again. A local request
+// (the host's own account, no --account-key) also carries the account's
+// operator entries, so like pacelever's local gate it falls back to them when
+// the automatic reading is unusable; a named account stays strict.
+func (a *App) loadAccount(ctx context.Context, in *admissionInputs, key string, refresh, local bool) string {
 	pool := accountPool(key)
 	latest, err := a.sharedLatest(ctx, key)
 	if err != nil {
 		return msgSharedQuotaDown
 	}
+	if in.Manual == nil {
+		in.Manual = map[string][]admissionManual{}
+	}
 	if slices.Contains(creditAccountPools, pool) {
-		if in.Manual == nil {
-			in.Manual = map[string][]admissionManual{}
-		}
 		in.Manual[pool] = admissionManualFrom(latest.Manual)
 		return ""
 	}
+	if local {
+		in.Manual[pool] = admissionManualFrom(latest.Manual)
+	}
 	reading, why := admissionReadingFrom(latest.Observation, pool, key, a.Now(), a.sharedFreshTTL(pool))
 	if why == msgAccountStale && refresh && slices.Contains(a.localAccountKeys(ctx, pool), key) {
-		binary := "pacelever"
-		if q, ok := catalog.(CLIQuota); ok {
-			binary = q.Binary
-		}
-		if checkQuotaPlain(runQuotaCommand(ctx, a.Runner, refreshCommand(pool, binary, a.nativeQuotaPool(pool)), "quota refresh", 60*time.Second), "quota refresh") != nil {
-			return msgAccountStale + "; local refresh failed"
-		}
-		if latest, err = a.sharedLatest(ctx, key); err != nil {
+		if checkQuotaPlain(runQuotaCommand(ctx, a.Runner, refreshCommand(pool, a.paceleverBinary(), a.nativeQuotaPool(pool)), "quota refresh", 60*time.Second), "quota refresh") != nil {
+			why = msgAccountStale + "; local refresh failed"
+		} else if latest, err = a.sharedLatest(ctx, key); err != nil {
 			return msgSharedQuotaDown
+		} else {
+			reading, why = admissionReadingFrom(latest.Observation, pool, key, a.Now(), a.sharedFreshTTL(pool))
+			if local {
+				in.Manual[pool] = admissionManualFrom(latest.Manual)
+			}
 		}
-		reading, why = admissionReadingFrom(latest.Observation, pool, key, a.Now(), a.sharedFreshTTL(pool))
 	}
 	if why != "" {
+		if local && len(in.Manual[pool]) > 0 {
+			// No automatic reading: the verdict's manual fallback decides.
+			return ""
+		}
 		return why
 	}
 	if in.Readings == nil {
@@ -259,6 +268,18 @@ func (a *App) loadAccount(ctx context.Context, in *admissionInputs, catalog Quot
 	}
 	in.Readings[pool] = reading
 	return ""
+}
+
+// paceleverBinary is the configured quota CLI (PANEWIRE_QUOTA_BIN, else
+// pacelever), for a refresh of a pool panewire does not measure itself.
+func (a *App) paceleverBinary() string {
+	switch q := a.Quota.(type) {
+	case CLIQuota:
+		return q.Binary
+	case admissionQuota:
+		return q.Binary
+	}
+	return "pacelever"
 }
 
 // sharedLatest reads one account's latest stored reading and operator entries.
