@@ -1507,9 +1507,17 @@ Job/label default to `refs.job_id`, otherwise `task<ID>-work`.
 Working directory comes
 from `refs.worktree.path`, `refs.worktree`, `refs.cwd`, then the current directory.
 Brief/report use `refs.brief_path` / `refs.report_path`, otherwise
-`<jobs>/<job>/brief.md` and `report.md`. Caller lane comes from `PANEWIRE_LANE`,
-`local.lane`, or the calling `ARBITER_JOB` metadata. It is the `--owner`. An unknown caller lane names the flag to supply.
-Flags after the task id override defaults. Save the brief first; presets do
+`<jobs>/<job>/brief.md` and `report.md`. `--owner` is resolved from the task's
+project, not from the caller lane. When it is omitted, `panewire work` and
+`panewire spawn` read the task's `project`, ask handoffkeep
+(`handoffkeep tasks owner PROJECT`, the
+`GET /v1/tasks/projects/{project}/owner` endpoint) for `effective_owner`, and
+use it, printing `owner=<lane> source=hk project=<p>`. An explicit `--owner`
+always wins. If hk cannot answer (unreachable, no such project, the task names
+no project, or `effective_owner` is empty), the command is refused with exit 2
+and a message to pass `--owner`; panewire never guesses or silently falls back
+to operator-desk. A spawn with no `--task` and no `--parent-job` keeps its
+previous default. Flags after the task id override defaults. Save the brief first; presets do
 not invent or overwrite instructions. A dry run uses the same planning path
 as the equivalent long spawn command and creates no claim or worker.
 
