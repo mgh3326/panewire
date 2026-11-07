@@ -51,32 +51,36 @@ func TestRoutingMinEffortDropsRungsBelowFloor(t *testing.T) {
 	}
 }
 
-// A rung-less row ("") is the profile's default rung: admission resolves it
-// to the profile's declared default effort, so the floor judges that effort
-// rather than the catalog's rank-0 "". A profile with no declared default is
-// rank 0 and falls below any floor.
-func TestRoutingMinEffortResolvesRunglessRowAtProfileDefault(t *testing.T) {
+// A rung-less row ("") has no catalog effort: it launches at the selected
+// seat's declared default, the same seat.Effort fallback quotaRequest uses,
+// and the floor is judged on that effort. A seat that declares an effort
+// rejects a rung-less row as effort_empty before the floor, so it keeps that
+// reason; an admitted rung-less row with no default is rank 0 and below any
+// floor.
+func TestRoutingMinEffortResolvesRunglessRowAtSelectedSeat(t *testing.T) {
 	rows := []CatalogRow{
 		{Profile: "devin-swe2", Effort: "", Grade: "C", Pool: "devin", Gate: "default", ModelID: "swe-2"},
-		{Profile: "no-default", Effort: "", Grade: "C", Pool: "devin", Gate: "default", ModelID: "none"},
+		{Profile: "nodefault", Effort: "", Grade: "C", Pool: "devin", Gate: "default", ModelID: "none"},
 	}
 	a, s, q := selFixture(t, "C", rows, map[string]PoolView{"devin": {Status: "ok", Class: "spend", Blocking: ptrF(0)}}, []string{"devin"})
-	q.GateDo = gatePools(map[string]string{"devin-swe2": "devin", "no-default": "devin"})
+	// A seat that launches without an effort flag and declares no default is
+	// the only shape that admits a rung-less row.
+	a.Policy.Profiles["nodefault"] = Seat{Canon: "nodefault", Kind: "devin", Roles: []string{"worker", "tester", "reviewer", "counsel"}}
+	q.GateDo = gatePools(map[string]string{"devin-swe2": "devin"})
 	serveRouting(a, routingDoc(reviewerMinEffortBlock("medium")))
 	s.Role, s.ParentFamily = "reviewer", "anthropic"
 	sel, _ := a.selectProfile(context.Background(), s)
 	rec := sel.record()
 
-	// devin-swe2's seat declares effort high, so the rung clears the floor; the
-	// seat rule then drops the rung-less row as effort_empty, not for the floor.
-	if got := candOutcome(rec, "devin-swe2", ""); got["reason"] == reasonBelowRoleMinEffort || got["outcome"] == "dropped:"+reasonBelowRoleMinEffort {
-		t.Fatalf("a profile default of high must clear the medium floor: %v", got)
+	// devin-swe2's seat declares effort high: the seat rule rejects the
+	// rung-less row effort_empty before the floor, so it keeps its own reason.
+	if got := candOutcome(rec, "devin-swe2", ""); got["reason"] != "effort_empty" {
+		t.Fatalf("a rung-less row whose seat declares an effort keeps effort_empty: %v", got)
 	}
-	if got := candOutcome(rec, "devin-swe2", "")["reason"]; got != "effort_empty" {
-		t.Fatalf("the rung-less default row keeps its seat reason: %v", got)
-	}
-	if got := candOutcome(rec, "no-default", "")["reason"]; got != reasonBelowRoleMinEffort {
-		t.Fatalf("a rung-less profile with no default is rank 0: %v", got)
+	// nodefault admits the rung at its seat default ""; that is rank 0 and
+	// below the medium floor.
+	if got := candOutcome(rec, "nodefault", ""); got["reason"] != reasonBelowRoleMinEffort {
+		t.Fatalf("a rung-less row is judged at its seat default: %v", got)
 	}
 }
 

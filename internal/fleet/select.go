@@ -285,16 +285,15 @@ func rankEffort(e string) int {
 	return len(effortRank)
 }
 
-// rowLaunchEffort is the effort a catalog row launches at. A rung-less row
-// ("") is the profile's default rung: admission resolves it to the profile's
-// declared default effort (quotaRequest falls back to seat.Effort), so a
-// role's min_effort floor judges that effort rather than the catalog's
-// rank-0 default.
-func (a *App) rowLaunchEffort(row CatalogRow) string {
+// seatLaunchEffort is the effort a candidate launches at: the row's rung, or
+// the selected seat's declared default for a rung-less row (quotaRequest
+// applies the same seat.Effort fallback). A role's min_effort floor is judged
+// on this effort rather than the catalog's rank-0 "".
+func seatLaunchEffort(row CatalogRow, seat Seat) string {
 	if row.Effort != "" {
 		return row.Effort
 	}
-	return a.Policy.Profiles[row.Profile].Effort
+	return seat.Effort
 }
 
 // seatRoles resolves the role list a seat admits for one catalog effort,
@@ -790,8 +789,6 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			c.reason = "gate_class"
 		case aboveEffort(row.Effort, roleCap) && !req.allowEscalation:
 			c.reason = reasonAboveRoleEffort
-		case req.route.minEffort() != "" && rankEffort(a.rowLaunchEffort(row)) < rankEffort(req.route.minEffort()):
-			c.reason = reasonBelowRoleMinEffort
 		case req.effort != "" && row.Effort != req.effort:
 			c.reason = "effort_mismatch"
 		case !validID(row.Pool):
@@ -806,9 +803,13 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			} else {
 				c.seat = seat
 				c.seatName = name
-				// Checked after the seat rules so a candidate those rules
-				// drop keeps its own reason.
-				if capKey := capGate.full(ctx, row); capKey != "" {
+				// The floor is judged on the effort this candidate launches
+				// at, which needs the selected seat: a rung-less row launches
+				// at seat.Effort. Checked after the seat rules so a candidate
+				// those rules drop keeps its own reason.
+				if m := req.route.minEffort(); m != "" && rankEffort(seatLaunchEffort(row, *seat)) < rankEffort(m) {
+					c.reason = reasonBelowRoleMinEffort
+				} else if capKey := capGate.full(ctx, row); capKey != "" {
 					c.reason, c.cap = reasonPoolAtCap, capKey
 				}
 			}
