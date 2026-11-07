@@ -72,8 +72,9 @@ func goldenGate(t *testing.T, catalog []CatalogRow, s goldenScenario) (Result, g
 		}
 		return s.Latest, nil
 	}
+	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return checkBenchCatalog(catalog) }
 	r := s.Request
-	x := a.nativeGate(context.Background(), &fakeQuota{CatalogRows: catalog}, QuotaRequest{Profile: r["profile"], Effort: r["effort"], Role: r["role"], Purpose: r["purpose"], OperatorRequest: r["operator_request"], RequestedBy: r["requested_by"], AccountKey: r["account_key"]}, true)
+	x := a.nativeGate(context.Background(), QuotaRequest{Profile: r["profile"], Effort: r["effort"], Role: r["role"], Purpose: r["purpose"], OperatorRequest: r["operator_request"], RequestedBy: r["requested_by"], AccountKey: r["account_key"]}, true)
 	var got goldenVerdict
 	if err := json.Unmarshal([]byte(x.Out), &got); err != nil {
 		t.Fatalf("%s: native receipt is not JSON: %v\n%s", s.Name, err, x.Out)

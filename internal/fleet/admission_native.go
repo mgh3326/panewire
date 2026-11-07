@@ -58,7 +58,8 @@ func (a *App) gateMode() string {
 }
 
 // admissionQuota is the production QuotaGate. Launch, Catalog and Pools stay
-// pacelever's (CLIQuota); Gate follows the switch.
+// pacelever's (CLIQuota); Gate follows the switch. The native verdict runs no
+// pacelever: it reads the catalog and readings from handoffkeep.
 type admissionQuota struct {
 	CLIQuota
 	app *App
@@ -66,12 +67,12 @@ type admissionQuota struct {
 
 func (q admissionQuota) Gate(ctx context.Context, r QuotaRequest) (string, error) {
 	if q.app.gateMode() == gateModeNative {
-		return gateResult(q.app.nativeGate(ctx, q.CLIQuota, r, true), r)
+		return gateResult(q.app.nativeGate(ctx, r, true), r)
 	}
 	// The shadow verdict reads only: no measurement, no alternatives.
 	x := q.CLIQuota.runGate(ctx, r)
 	shadow, cancel := context.WithTimeout(ctx, shadowGateTimeout)
-	q.app.shadowGate(r, x, q.app.nativeGate(shadow, q.CLIQuota, r, false))
+	q.app.shadowGate(r, x, q.app.nativeGate(shadow, r, false))
 	cancel()
 	return gateResult(x, r)
 }
@@ -115,8 +116,8 @@ type gateReceipt struct {
 // alike. A live run decides the spawn: like pacelever's gate it measures a
 // stale reading of an account this host holds once, and lists alternatives on
 // a refusal. The shadow run is not live: it only reads.
-func (a *App) nativeGate(ctx context.Context, catalog QuotaGate, r QuotaRequest, live bool) Result {
-	d, readingKey := a.nativeVerdict(ctx, catalog, r, live)
+func (a *App) nativeGate(ctx context.Context, r QuotaRequest, live bool) Result {
+	d, readingKey := a.nativeVerdict(ctx, r, live)
 	receipt := gateReceipt{Schema: "scopefuel.gate.v1", GeneratedAt: a.Now().UTC().Format(time.RFC3339Nano), JudgedBy: "panewire", AccountKey: r.AccountKey, OK: d.OK, ExitCode: d.Exit,
 		Profile: d.Profile, Pool: d.Pool, Reason: d.Reason, UsedPct: d.UsedPct, Unmeasurable: d.Exit == gateUnmeasurable, RoleDenied: d.Exit == gateRoleDenied, Unsubscribed: d.Exit == gateUnsubscribed,
 		Alternatives: d.Alternatives, MissingWindows: d.Missing, GateBasis: d.Basis, E6Arm: d.E6Arm, Inflight: d.Inflight, EscalationOverride: d.EscalationOverride, ManualIDs: d.ManualIDs}
@@ -144,14 +145,14 @@ func (a *App) nativeGate(ctx context.Context, catalog QuotaGate, r QuotaRequest,
 // settles every refusal no reading can lift (role, subscription, request
 // shape, catalog, excluded pool); only an admit or an unmeasurable one goes on
 // to the account's stored reading. It returns the account key it read.
-func (a *App) nativeVerdict(ctx context.Context, catalog QuotaGate, r QuotaRequest, live bool) (admissionVerdict, string) {
+func (a *App) nativeVerdict(ctx context.Context, r QuotaRequest, live bool) (admissionVerdict, string) {
 	req := admissionRequest{Profile: firstNonempty(r.GateProfile, r.Profile), Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: os.Getenv("PACELEVER_E6_ARM")}
 	invalid := admissionVerdict{Profile: req.Profile, Exit: gateInvalid, Missing: []string{}, Alternatives: []string{}, ManualIDs: []string{}}
 	policy, err := loadAdmissionPolicy(os.Getenv, a.Home)
 	if err != nil {
 		return invalid.refuse(gateInvalid, err.Error()), ""
 	}
-	rows, err := catalog.Catalog(ctx)
+	rows, err := a.benchCatalog(ctx)
 	if err != nil {
 		return invalid.refuse(gateInvalid, "bench catalog unavailable"), ""
 	}
@@ -223,7 +224,8 @@ func validAccountKey(key string) bool {
 // loadAccount reads one account's stored reading into in: a credit pool's
 // operator entries, any other pool's automatic reading. It returns why the
 // account cannot be judged, or "". With refresh set, a stale reading of an
-// account this host holds is measured once and read again. A local request
+// account this host holds in a pool panewire measures is measured once
+// (`panewire quota refresh <pool>`) and read again. A local request
 // (the host's own account, no --account-key) also carries the account's
 // operator entries, so like pacelever's local gate it falls back to them when
 // the automatic reading is unusable; a named account stays strict.
@@ -244,8 +246,10 @@ func (a *App) loadAccount(ctx context.Context, in *admissionInputs, key string, 
 		in.Manual[pool] = admissionManualFrom(latest.Manual)
 	}
 	reading, why := admissionReadingFrom(latest.Observation, pool, key, a.Now(), a.sharedFreshTTL(pool))
-	if why == msgAccountStale && refresh && slices.Contains(a.localAccountKeys(ctx, pool), key) {
-		if checkQuotaPlain(runQuotaCommand(ctx, a.Runner, refreshCommand(pool, a.paceleverBinary(), a.nativeQuotaPool(pool)), "quota refresh", 60*time.Second), "quota refresh") != nil {
+	// Only panewire's own measurement refreshes here: the gate never runs
+	// pacelever, so a pool panewire does not measure stays unmeasurable.
+	if why == msgAccountStale && refresh && a.nativeQuotaPool(pool) && slices.Contains(a.localAccountKeys(ctx, pool), key) {
+		if checkQuotaPlain(runQuotaCommand(ctx, a.Runner, refreshCommand(pool, "", true), "quota refresh", 60*time.Second), "quota refresh") != nil {
 			why = msgAccountStale + "; local refresh failed"
 		} else if latest, err = a.sharedLatest(ctx, key); err != nil {
 			return msgSharedQuotaDown
@@ -280,6 +284,52 @@ func (a *App) paceleverBinary() string {
 		return q.Binary
 	}
 	return "pacelever"
+}
+
+// benchCatalog reads the bench catalog from handoffkeep — the endpoint and
+// credential pacelever's catalog reads — so the gate never runs pacelever.
+// Rows are checked as pacelever's catalog decoder checks them: a rung needs a
+// profile, a model id, a known grade and gate, and appears once; a row of a
+// pool pacelever does not know is skipped. A catalog that fails a check is
+// refused, never guessed.
+func (a *App) benchCatalog(ctx context.Context) ([]CatalogRow, error) {
+	if a.BenchCatalog != nil {
+		return a.BenchCatalog(ctx)
+	}
+	c, err := a.quotaClient()
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Catalog []CatalogRow `json:"catalog"`
+	}
+	if err := c.get(ctx, "/v1/bench/catalog?include_retired=1", &doc); err != nil {
+		return nil, err
+	}
+	return checkBenchCatalog(doc.Catalog)
+}
+
+func checkBenchCatalog(rows []CatalogRow) ([]CatalogRow, error) {
+	var out []CatalogRow
+	seen := map[string]bool{}
+	for _, r := range rows {
+		if r.Profile == "" || r.ModelID == "" || !slices.Contains(admissionGrades, r.Grade) || r.Gate != defaultGate && r.Gate != escalationGate && r.Gate != consultOnlyGate {
+			return nil, fmt.Errorf("catalog row lacks valid identity, grade or gate")
+		}
+		if !slices.Contains(admissionPolicyPools, r.Pool) {
+			continue
+		}
+		key := r.Profile + "@" + r.Effort
+		if seen[key] {
+			return nil, fmt.Errorf("duplicate catalog rung")
+		}
+		seen[key] = true
+		out = append(out, r)
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("catalog contains no supported pool rows")
+	}
+	return out, nil
 }
 
 // sharedLatest reads one account's latest stored reading and operator entries.

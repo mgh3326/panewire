@@ -403,7 +403,9 @@ pacelever v0.3.28's gate) from three inputs:
   account; a local request reads the account this host holds (the fleet
   config's `[quota.accounts]`, this host's presence records, then pacelever's
   own `[quota.accounts]`).
-- **The bench catalog** (`pacelever bench catalog list`, until hk 3249 moves it).
+- **The bench catalog**, read from handoffkeep (`/v1/bench/catalog`, the
+  endpoint and credential pacelever's catalog uses) and checked as pacelever
+  checks it; an unreadable or invalid catalog refuses (exit 2).
 - **The pool policy** in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
   `~/.config/pacelever/config.toml`): class and its `until` date, cutoff,
   subscription, `fusion_billing_fp`. A missing file is the default policy; an
@@ -413,8 +415,8 @@ The verdict keeps pacelever's exit statuses (0 admit, 2 invalid, 3 blocked,
 4 unmeasurable, 5 role denied, 6 unsubscribed) and prints the same
 `scopefuel.gate.v1` receipt, with `"judged_by": "panewire"`, so every caller
 reads it as before. Like pacelever's gate it measures a stale reading of an
-account this host holds once (`panewire quota refresh <pool>`, or `pacelever
-refresh` for a pool panewire does not measure) and reads again. On a refusal of
+account this host holds once (`panewire quota refresh <pool>`) and reads again;
+in a pool panewire does not measure, a stale reading is unmeasurable. On a refusal of
 a graded rung, `alternatives` lists the same-grade rungs the stored readings of
 the other pools this host holds would admit, read with no lease and no
 measurement (hk 3211).
@@ -462,9 +464,10 @@ gate = "native"   # or "shadow", the default
   A commandcode spawn on a host whose commandcode readings pacelever publishes
   reads `disagree` (no `30d`): that is the expected difference until the pool
   is native. The desk reads the events and flips the switch.
-- **Native.** panewire's verdict decides and no spawn path runs `pacelever
-  gate`. `pacelever policy launch`, `bench catalog list` and the status and
-  manual reads stay until hk 3249 and 3250.
+- **Native.** panewire's verdict decides, and the gate runs no pacelever
+  command at all. Outside the gate, `pacelever policy launch`, the status and
+  manual reads and the selector's refresh of a pool panewire does not measure
+  stay until hk 3249 and 3250.
 
 The golden verdicts in `internal/fleet/testdata/admission_golden/verdicts.json`
 are pacelever's own: `generator/regen.sh` runs its gate over the scenarios in a
