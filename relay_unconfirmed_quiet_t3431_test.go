@@ -570,3 +570,231 @@ func TestUnconfirmedNoticeRedropAfterExpirySends_t3431(t *testing.T) {
 		t.Fatalf("the re-dropped row's notice did not open a window: %+v", got)
 	}
 }
+
+// t3431FastBackoff makes every escalation retry wait one millisecond.
+func t3431FastBackoff(t *testing.T) {
+	prev := unconfirmedEscalationBackoff
+	unconfirmedEscalationBackoff = []time.Duration{time.Millisecond, time.Millisecond}
+	t.Cleanup(func() { unconfirmedEscalationBackoff = prev })
+}
+
+// t3431LiveRig is a rig whose worker lane runs a live job with a task in
+// progress, so every drop that is not folded is sent.
+func t3431LiveRig(t *testing.T) *t3431Rig {
+	rig := t3431Start(t, t3431LiveJobWithTask())
+	rig.task(t3431Task, "in_progress", "started")
+	rig.job(t3431Job, false, false)
+	return rig
+}
+
+// markDelivered closes row in the store, as a late confirmation from the pane
+// would.
+func (rig *t3431Rig) markDelivered(row int64) {
+	rig.fake.mu.Lock()
+	defer rig.fake.mu.Unlock()
+	for _, stored := range rig.fake.rows {
+		if stored.ID == row {
+			stored.DeliveredAt = "2026-11-07T10:43:00Z"
+		}
+	}
+}
+
+// rowReads counts the by-id reads of row the escalation made.
+func (rig *t3431Rig) rowReads(row int64) int {
+	rig.fake.mu.Lock()
+	defer rig.fake.mu.Unlock()
+	reads := 0
+	for _, call := range rig.fake.calls {
+		if call.Method == http.MethodGet && call.Query == fmt.Sprintf("after_id=%d&limit=1", row-1) {
+			reads++
+		}
+	}
+	return reads
+}
+
+// onFirstNoticePost runs hook once, while the first owner-lane notice post is
+// in flight: after the store read the request and before it replies.
+func (rig *t3431Rig) onFirstNoticePost(hook func()) {
+	rig.fake.mu.Lock()
+	defer rig.fake.mu.Unlock()
+	rig.fake.observe = func(method, path string) {
+		if method != http.MethodPost || path != "/v1/relay/events" {
+			return
+		}
+		rig.fake.mu.Lock()
+		rig.fake.observe = nil
+		rig.fake.mu.Unlock()
+		hook()
+	}
+}
+
+func (rig *t3431Rig) storeStatus(status int) {
+	rig.fake.mu.Lock()
+	defer rig.fake.mu.Unlock()
+	rig.fake.status = status
+}
+
+// t3431FoldCount is N in a notice's "(+N more unconfirmed ...)", 0 without one.
+func t3431FoldCount(text string) int {
+	folded := 0
+	if at := strings.Index(text, "(+"); at >= 0 {
+		fmt.Sscanf(text[at:], "(+%d more", &folded)
+	}
+	return folded
+}
+
+// F1: R1's post fails, and R1 is confirmed before its retry, which then stops
+// early. R1's notice was never stored, so it holds no window: R2, dropped 5
+// minutes later, is sent.
+func TestUnconfirmedNoticeEarlyRetryExitLeavesWindowOpen_t3431(t *testing.T) {
+	t3431FastBackoff(t)
+	rig := t3431LiveRig(t)
+
+	r1 := rig.relayRow()
+	rig.storeStatus(http.StatusInternalServerError)
+	rig.onFirstNoticePost(func() {
+		rig.storeStatus(http.StatusCreated)
+		rig.markDelivered(r1.OriginalEventID)
+	})
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
+	eventually(t, 5*time.Second, "R1's retry to read its row again", func() bool { return rig.rowReads(r1.OriginalEventID) >= 2 })
+	if got := rig.notices(); len(got) != 0 {
+		t.Fatalf("a notice the store refused reached the owner lane: %+v", got)
+	}
+
+	rig.clock.advance(5 * time.Minute)
+	row, _ := rig.drop()
+	got := rig.notices()
+	if len(got) != 1 || !strings.HasSuffix(got[0].Text, t3431TodayText(row, "mergewake-findings-2")) {
+		t.Fatalf("the drop after an early-exited retry sent %d notices, want 1 naming event %d: %+v", len(got), row, got)
+	}
+}
+
+// F2: R2 is dropped while R1's post is failing, and its own notice is never
+// stored either. The next drop is sent and names R2.
+func TestUnconfirmedNoticeFoldDuringFailedRetriesIsNamed_t3431(t *testing.T) {
+	t3431FastBackoff(t)
+	rig := t3431LiveRig(t)
+	first := rig.clock.Now()
+
+	r1 := rig.relayRow()
+	r2 := rig.relayRow()
+	rig.fake.mu.Lock()
+	rig.fake.failPostOwnerLane = t3431Design
+	rig.fake.mu.Unlock()
+	rig.onFirstNoticePost(func() {
+		t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r2)
+		rig.markDelivered(r1.OriginalEventID)
+	})
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
+	eventually(t, 5*time.Second, "R1's retry to stop and R2 to settle", func() bool {
+		settled := strings.Contains(rig.logs.String(), fmt.Sprintf(`msg="relay unconfirmed escalation gave up" event_id=%d `, r2.OriginalEventID)) ||
+			len(rig.infoLines(fmt.Sprintf("event_id=%d", r2.OriginalEventID), "why=folded")) > 0
+		return settled && rig.rowReads(r1.OriginalEventID) >= 2
+	})
+	rig.fake.mu.Lock()
+	rig.fake.failPostOwnerLane = ""
+	rig.fake.mu.Unlock()
+	if got := rig.notices(); len(got) != 0 {
+		t.Fatalf("a notice reached the owner lane through a failing store: %+v", got)
+	}
+
+	rig.clock.advance(5 * time.Minute)
+	row, _ := rig.drop()
+	got := rig.notices()
+	if len(got) != 1 || len(t3431NoticeFor(got, row)) != 1 {
+		t.Fatalf("the next drop sent %d notices, want 1 naming event %d: %+v", len(got), row, got)
+	}
+	suffix := fmt.Sprintf("(+1 more unconfirmed for this lane since %s UTC)", first.Format("15:04"))
+	if !strings.HasSuffix(got[0].Text, t3431TodayText(row, "mergewake-findings-3")+" "+suffix) {
+		t.Fatalf("the next notice does not name R2 (want suffix %q):\n%q", suffix, got[0].Text)
+	}
+}
+
+// Two drops at the same moment, while R1's post is in flight and about to
+// fail, may both be sent; they are never both lost. Each is either sent or
+// counted in a later notice.
+func TestUnconfirmedNoticeConcurrentDropsNeverLost_t3431(t *testing.T) {
+	t3431FastBackoff(t)
+	rig := t3431LiveRig(t)
+	first := rig.clock.Now()
+
+	r1 := rig.relayRow()
+	concurrent := []relayDroppedPayload{rig.relayRow(), rig.relayRow()}
+	var wires [][]byte
+	for _, dropped := range concurrent {
+		payload, _ := json.Marshal(dropped)
+		wire, _ := json.Marshal(map[string]any{"type": "event", "kind": "relay.dropped", "payload": json.RawMessage(payload)})
+		wires = append(wires, wire)
+	}
+	rig.storeStatus(http.StatusInternalServerError)
+	rig.onFirstNoticePost(func() {
+		rig.storeStatus(http.StatusCreated)
+		var wg sync.WaitGroup
+		for _, wire := range wires {
+			wg.Add(1)
+			go func(wire []byte) {
+				defer wg.Done()
+				rig.hub.handleAgentMessage("host-a", "fixture", rig.dest, wire)
+			}(wire)
+		}
+		wg.Wait()
+		rig.markDelivered(r1.OriginalEventID)
+	})
+	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
+	eventually(t, 5*time.Second, "R1's retry to read its row again", func() bool { return rig.rowReads(r1.OriginalEventID) >= 2 })
+
+	sent := rig.notices()
+	told := 0
+	for _, dropped := range concurrent {
+		told += len(t3431NoticeFor(sent, dropped.OriginalEventID))
+	}
+	if told == 0 {
+		t.Fatalf("both drops made while a post was in flight were lost: %+v", sent)
+	}
+
+	rig.clock.set(first.Add(31 * time.Minute))
+	row, _ := rig.drop()
+	got := t3431NoticeFor(rig.notices(), row)
+	if len(got) != 1 {
+		t.Fatalf("the drop after the window sent %d notices, want 1", len(got))
+	}
+	if folded := t3431FoldCount(got[0].Text); told+folded != len(concurrent) {
+		t.Fatalf("%d drops were sent and %d named as folded, want %d in all: %q", told, folded, len(concurrent), got[0].Text)
+	}
+}
+
+// Under a persistent 4xx every notice is refused and every drop is folded.
+// The window tracks at most 64 rows and counts the rest, and the next stored
+// notice still names them all.
+func TestUnconfirmedNoticeFoldsBoundedUnderRefusal_t3431(t *testing.T) {
+	rig := t3431LiveRig(t)
+	first := rig.clock.Now()
+
+	const drops = 70
+	var rows []relayDroppedPayload
+	for i := 0; i < drops; i++ {
+		rows = append(rows, rig.relayRow())
+	}
+	rig.storeStatus(http.StatusBadRequest)
+	for _, dropped := range rows {
+		t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", dropped)
+	}
+	if got := rig.notices(); len(got) != 0 {
+		t.Fatalf("a refused notice reached the owner lane: %+v", got)
+	}
+	rig.hub.unconfirmedNotices.mu.Lock()
+	tracked := len(rig.hub.unconfirmedNotices.byLanes[[2]string{t3431Design, t3431Worker}].folded)
+	rig.hub.unconfirmedNotices.mu.Unlock()
+	if tracked > 64 {
+		t.Fatalf("the window tracks %d folded rows under a persistent 4xx, want at most 64", tracked)
+	}
+
+	rig.storeStatus(http.StatusCreated)
+	row, _ := rig.drop()
+	got := rig.notices()
+	suffix := fmt.Sprintf("(+%d more unconfirmed for this lane since %s UTC)", drops, first.Format("15:04"))
+	if len(got) != 1 || !strings.HasSuffix(got[0].Text, t3431TodayText(row, fmt.Sprintf("mergewake-findings-%d", drops+1))+" "+suffix) {
+		t.Fatalf("the notice after the refusals does not name all %d (want suffix %q): %+v", drops, suffix, got)
+	}
+}
