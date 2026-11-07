@@ -117,6 +117,9 @@ var spawnRefusals = []spawnRefusal{
 	// Auto placement exhaustion lists the tried hosts, whose notes can say "brief".
 	{match: "no remote candidate completed", code: "local_disabled", hint: "Read the tried list above: add the repository to that node's spawn.json.cwd_map or repair the named refusal, or enable local.spawn on this host; then replay the saved request."},
 	{match: "no placement candidate accepted", code: "placement", hint: "Read the tried list above; add the repository to that node's spawn.json.cwd_map or repair the named refusal, then replay the saved request."},
+	// NO_ELIGIBLE_HOST with every candidate dropped for an unmapped repo: the
+	// repair is the node's cwd_map or work root, not the quota account.
+	{match: "no node maps repo", code: "placement", hint: "Add the repository to that node's spawn.json.cwd_map, or give the node a work root so it can clone the checkout, then retry."},
 	// Admission refused before a host was bound: the cause the hub reports in
 	// Sentry's admission_refused class (docs/observability.md).
 	{match: "missing seat policy", code: "seat_policy_missing", hint: "Run panewire resolve --role ROLE --t Tn to select a rung with an admitted seat policy, or repair the policy that omits this profile, then retry."},

@@ -955,6 +955,16 @@ func (a *App) localRepo(ctx context.Context, cwd string) *repoResolution {
 	return repo
 }
 
+// carriesCheckout reports whether the spawn carries a linked-worktree
+// checkout the target node can clone (node_worktree.go). A canonical checkout
+// does not: it launches in a cwd_map path.
+func (a *App) carriesCheckout(repo *repoResolution) bool {
+	if a.Repository != nil && a.Repository.Checkout != nil {
+		return true
+	}
+	return repo != nil && repo.wt != ""
+}
+
 // remotePlan is where a job runs on a target and what must exist there
 // first: the repo clone under root, and for a linked local worktree the
 // matching worktree beside it.

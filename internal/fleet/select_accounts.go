@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"strings"
@@ -411,7 +412,15 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 	if len(accounts) == 0 {
 		accounts = p.cands
 	}
-	for _, code := range []string{outcomeQuotaUnknown, outcomeAuthUnavailable, outcomeNoEligibleHost, outcomePolicyUnavailable, outcomeNoRoleCandidate} {
+	order := []string{outcomeQuotaUnknown, outcomeAuthUnavailable, outcomeNoEligibleHost, outcomePolicyUnavailable, outcomeNoRoleCandidate}
+	if !slices.ContainsFunc(p.cands, func(c *selCand) bool { return c.accountKey != "" }) {
+		// No account was bound, so no measured account failure decided this.
+		// A host-side drop (repo_unmapped, caps, readiness) names the cause
+		// the operator can repair; AUTH_UNAVAILABLE would send them to sign
+		// in instead.
+		order = []string{outcomeQuotaUnknown, outcomeNoEligibleHost, outcomeAuthUnavailable, outcomePolicyUnavailable, outcomeNoRoleCandidate}
+	}
+	for _, code := range order {
 		if !slices.ContainsFunc(accounts, func(c *selCand) bool { return c.code == code }) {
 			continue
 		}
@@ -419,7 +428,7 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		exit := map[string]int{outcomeQuotaUnknown: exitQuotaUnknown, outcomeAuthUnavailable: exitAuthUnavailable, outcomeNoEligibleHost: exitPlacement, outcomePolicyUnavailable: exitConfig, outcomeNoRoleCandidate: exitSeatRefused}[code]
 		gap := ""
 		if code == outcomeNoEligibleHost {
-			gap = p.capsGap
+			gap = p.capsGap + p.hostDropNote()
 		}
 		return p, fail(exit, "%s: no account admitted routing role %s%s%s%s", code, routingRole(req), hostScope(s), gap, p.poolAtCapNote())
 	}
@@ -442,6 +451,35 @@ func routingRole(req selReq) string {
 		return req.route.role
 	}
 	return req.role
+}
+
+// hostDropNote names the dominant host-side drop among the candidates, with
+// the repair that matches it. It answers "" when capsGap already names the
+// cause or no host-side drop was recorded.
+func (p *selPlan) hostDropNote() string {
+	if p.capsGap != "" {
+		return ""
+	}
+	counts := map[string]int{}
+	for _, c := range p.cands {
+		if c.code == outcomeNoEligibleHost && c.reason != "" {
+			counts[c.reason]++
+		}
+	}
+	reason, best := "", 0
+	for r, n := range counts {
+		if n > best || n == best && (reason == "" || r < reason) {
+			reason, best = r, n
+		}
+	}
+	if reason != ReadyRepoUnmapped {
+		return ""
+	}
+	repo := p.repo
+	if repo == "" {
+		repo = "the repository"
+	}
+	return fmt.Sprintf("; %s: no node maps repo %s; add it to cwd_map or ensure work_root", reason, repo)
 }
 
 func hostScope(s Spawn) string {
