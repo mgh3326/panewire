@@ -180,8 +180,8 @@ func TestCatalogDecodeRejectsDuplicateAndNonMonotonic(t *testing.T) {
 		t.Fatalf("duplicate: %v", err)
 	}
 	nonMonotonic := []json.RawMessage{
-		json.RawMessage(`{"profile":"opus","effort":"low","model_id":"m","pool":"claude","grade":"C","gate":"default"}`),
-		json.RawMessage(`{"profile":"opus","effort":"high","model_id":"m","pool":"claude","grade":"A","gate":"default"}`),
+		json.RawMessage(`{"profile":"opus","effort":"low","model_id":"m","pool":"claude","grade":"A","gate":"default"}`),
+		json.RawMessage(`{"profile":"opus","effort":"high","model_id":"m","pool":"claude","grade":"C","gate":"default"}`),
 	}
 	if _, _, _, err := decodeCatalogRows(nonMonotonic); err == nil || !strings.Contains(err.Error(), "not monotonic for opus") {
 		t.Fatalf("non-monotonic: %v", err)
@@ -225,8 +225,8 @@ func TestValidateCatalogRefusals(t *testing.T) {
 		{"provenance", []CatalogEntry{func() CatalogEntry { r := valid; r.DecidedBy = ""; return r }()}, "catalog provenance required"},
 		{"decided_at", []CatalogEntry{func() CatalogEntry { r := valid; r.DecidedAt = "2026-11-01 00:00:00"; return r }()}, "catalog decided_at must include timezone"},
 		{"monotonic", []CatalogEntry{
-			func() CatalogEntry { r := valid; r.Effort = "low"; r.Grade = "C"; return r }(),
-			func() CatalogEntry { r := valid; r.Effort = "high"; r.Grade = "A"; return r }(),
+			func() CatalogEntry { r := valid; r.Effort = "low"; r.Grade = "A"; return r }(),
+			func() CatalogEntry { r := valid; r.Effort = "high"; r.Grade = "C"; return r }(),
 		}, "not monotonic for example"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -289,5 +289,20 @@ func TestCatalogCredentialsIncompletePair(t *testing.T) {
 	}
 	if _, err := NewCatalogClient(CatalogClientConfig{URL: "http://catalog.example.invalid", Token: "t"}); err == nil || !strings.Contains(err.Error(), "requires HTTPS") {
 		t.Fatalf("plaintext remote: %v", err)
+	}
+}
+
+// A ladder whose grade improves with effort is the normal shape (live
+// 2026-11-07: codex-luna low C, medium B, xhigh A+). v0.0.167 refused it and
+// every -m auto placement failed with POLICY_UNAVAILABLE.
+func TestCatalogAcceptsGradeImprovingWithEffort(t *testing.T) {
+	ladder := []json.RawMessage{
+		json.RawMessage(`{"profile":"codex-luna","effort":"low","model_id":"m","pool":"codex","grade":"C","gate":"default"}`),
+		json.RawMessage(`{"profile":"codex-luna","effort":"medium","model_id":"m","pool":"codex","grade":"B","gate":"default"}`),
+		json.RawMessage(`{"profile":"codex-luna","effort":"high","model_id":"m","pool":"codex","grade":"unrated","gate":"default"}`),
+		json.RawMessage(`{"profile":"codex-luna","effort":"xhigh","model_id":"m","pool":"codex","grade":"A+","gate":"default"}`),
+	}
+	if _, _, _, err := decodeCatalogRows(ladder); err != nil {
+		t.Fatalf("improving ladder refused: %v", err)
 	}
 }
