@@ -442,6 +442,7 @@ func hubArgs(jobs string, s Spawn) ([]string, error) {
 	add("--job", s.Job)
 	add("--owner", s.Owner)
 	add("--effort", s.Effort)
+	add("--e6-arm", s.E6Arm)
 	add("--role", s.Role)
 	add("--lane", s.Lane)
 	add("--parent", s.Parent)

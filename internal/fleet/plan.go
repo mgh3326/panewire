@@ -169,7 +169,7 @@ func (a *App) planHosts(ctx context.Context, s Spawn, grade string) (*placePlan,
 		launch, err := a.Quota.Launch(ctx, qr)
 		if err == nil {
 			seat := a.Policy.Profiles[s.Profile]
-			err = seat.Check(launch, s.Role, grade, s.ParentFamily, a.envOr("PANEWIRE_E6_ARM", "SCOPEFUEL_E6_ARM"), a.Config.Local)
+			err = seat.Check(launch, s.Role, grade, s.ParentFamily, a.e6Arm(s.E6Arm), a.Config.Local)
 		}
 		if err != nil {
 			c.outcome, localRefusal = "admission_refused", err

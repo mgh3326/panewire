@@ -68,6 +68,10 @@ type Spawn struct {
 	// Grade is the task grade a caller states itself (`panewire delegate`),
 	// used instead of the "(grade X, Tn" marker in the bound task's title.
 	Grade string `json:"-"`
+	// E6Arm is the resolved experiment marker (<canon>@<effort>): the value a
+	// hub submission carried, else this process's environment. It travels to
+	// the node as --e6-arm and is recorded on the job.
+	E6Arm string `json:"-"`
 	// ExcludeFamilies and OnlyFamily narrow automatic selection to seats of
 	// other families, or of one family (`panewire delegate --panel`).
 	ExcludeFamilies []string `json:"-"`
@@ -145,7 +149,7 @@ func parseSpawn(args []string) (Spawn, error) {
 	for _, p := range []struct {
 		k string
 		v *string
-	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"urgency", &s.Urgency}, {"builder-family", &s.BuilderFamily}, {"builder-job", &s.BuilderJob}, {"routing-role", &s.RoutingRole}} {
+	}{{"c", &s.CWD}, {"m", &s.Profile}, {"profile", &s.Profile}, {"p", &s.Prompt}, {"w", &s.Workspace}, {"l", &s.Label}, {"t", &s.T}, {"job", &s.Job}, {"owner", &s.Owner}, {"effort", &s.Effort}, {"role", &s.Role}, {"lane", &s.Lane}, {"parent", &s.Parent}, {"task", &s.Task}, {"parent-job", &s.ParentJob}, {"host", &s.Host}, {"report", &s.Report}, {"L", &s.ExecutionLane}, {"operator-request", &s.OperatorRequest}, {"requested-by", &s.RequestedBy}, {"purpose", &s.Purpose}, {"report-relative", &s.ReportRelative}, {"tags", &s.Tags}, {"exclude-host", &s.ExcludeHosts}, {"exclude-pool", &s.ExcludePools}, {"override-reason", &s.OverrideReason}, {"containment", &s.Containment}, {"wait-timeout", &s.WaitTimeout}, {"urgency", &s.Urgency}, {"builder-family", &s.BuilderFamily}, {"builder-job", &s.BuilderJob}, {"routing-role", &s.RoutingRole}, {"e6-arm", &s.E6Arm}} {
 		f.StringVar(p.v, p.k, *p.v, "")
 	}
 	f.StringVar(&s.Grade, "grade", "", "task grade (workers only)")
@@ -186,6 +190,22 @@ func parseSpawn(args []string) (Spawn, error) {
 		return s, fail(exitConfig, "%s: --grade is not accepted for consult", noLeadGradeRule)
 	}
 	return s, nil
+}
+
+// e6Arm resolves the experiment marker for a spawn. A value a hub submission
+// carried wins; a spawn without one reads the environment exactly as a local
+// spawn always has. It never invents a marker.
+func (a *App) e6Arm(carried string) string {
+	return firstNonempty(carried, a.envOr("PANEWIRE_E6_ARM", "SCOPEFUEL_E6_ARM"))
+}
+
+// validE6Arm reports whether arm is exactly canon@effort with the given canon.
+func validE6Arm(arm, canon string) bool {
+	at := strings.IndexByte(arm, '@')
+	if at <= 0 || at == len(arm)-1 || arm[:at] != canon {
+		return false
+	}
+	return validID(arm[at+1:]) && !strings.ContainsAny(arm, " \t\r\n")
 }
 
 type Task struct {
@@ -399,6 +419,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	if s.Task != "" && s.ParentJob != "" {
 		return fail(exitUsage, "--task and --parent-job are exclusive")
+	}
+	if s.E6Arm == "" {
+		s.E6Arm = a.e6Arm("")
 	}
 	if err := validateContainment(s); err != nil {
 		return err
@@ -918,6 +941,9 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	receipt := map[string]any{"pane_id": pane, "tab_id": tab, "herdr_session": a.herdrSession(), "label": s.Label, "profile": s.Profile, "launch_profile": launchProfile(seat.Canon, launch.Effort), "model_id": launch.ModelID, "effort": launch.Effort, "family": seat.Family, "role": s.Role, "lane_role": s.Role, "owner_lane": owner, "parent_lane": s.Parent, "task_id": s.Task, "report": s.Report, "cwd": s.CWD, "keep": s.Keep, "pool": pool, "host": machine}
 	receipt["harness_session"] = a.harnessSession(ctx, pane, seat.Kind)
+	if s.E6Arm != "" {
+		receipt["e6_arm"] = s.E6Arm
+	}
 	if laneOK {
 		receipt["hub_lane"] = lane
 		receipt["hub_lane_machine"] = machine
@@ -958,7 +984,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 // gate and the hub for the spawn. It is the admission half shared by spawn and
 // `panewire delegate --headless`; it claims and writes nothing.
 func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEffort, grade, builderFamily string, autoSel bool) (Launch, string, error) {
-	qr := QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: s.AccountKey}
+	qr := QuotaRequest{Profile: seat.Canon, GateProfile: seat.gateName(), Effort: effort, Role: s.Role, OperatorRequest: s.OperatorRequest, RequestedBy: s.RequestedBy, Purpose: s.Purpose, AccountKey: s.AccountKey, E6Arm: a.e6Arm(s.E6Arm)}
 	launch, e := a.Quota.Launch(ctx, qr)
 	if e != nil {
 		// Preserve the gate's role/quota refusal even when the catalog also
@@ -983,7 +1009,7 @@ func (a *App) admitLaunch(ctx context.Context, s Spawn, seat Seat, effort, selEf
 			return Launch{}, "", fail(exitSeatRefused, "NO_ROLE_CANDIDATE: model %s in harness %s cannot consult", launch.ModelID, seat.Kind)
 		}
 	}
-	if e = seat.Check(launch, s.Role, grade, builderFamily, a.envOr("PANEWIRE_E6_ARM", "SCOPEFUEL_E6_ARM"), a.Config.Local); e != nil {
+	if e = seat.Check(launch, s.Role, grade, builderFamily, a.e6Arm(s.E6Arm), a.Config.Local); e != nil {
 		return Launch{}, "", e
 	}
 	// A gate alias is the pool gate for a whole family of spellings, so it

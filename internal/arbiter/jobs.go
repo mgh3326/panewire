@@ -248,7 +248,7 @@ func spawnReceipt(c *conn, job string) (map[string]string, error) {
 		return nil, errf(ExitStorage, "job.spawned event pane_id is invalid: job=%s", job)
 	}
 	r := map[string]string{"pane_id": pane, "spawned_at": created}
-	for _, k := range []string{"label", "profile", "workspace"} {
+	for _, k := range []string{"label", "profile", "workspace", "e6_arm"} {
 		v, present := p[k]
 		if !present || v == nil {
 			continue
