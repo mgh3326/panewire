@@ -36,11 +36,15 @@ concurrency:
 
 jobs:
   candidate:
-    # Only a successful main-stage run, for the sha it ran on. A reusable
-    # call from ci-any-ref (suite=deploy) is the manual/any-ref path; inside a
+    # Only a successful CI *push* run on this repository's main, for the sha it
+    # ran on. A workflow_run branches filter matches the triggering run's head
+    # branch, so a fork pull request from a source branch named "main" would
+    # otherwise pass it: require the upstream event to be a push and the head
+    # repository to be this repository before any checkout. A reusable call
+    # from ci-any-ref (suite=deploy) is the manual/any-ref path; inside a
     # reusable workflow github.event_name is the CALLER's event, so the call is
     # recognised by the sha input it passes.
-    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main') || inputs.ref != '' }}
+    if: ${{ (github.event_name == 'workflow_run' && github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.head_repository.full_name == github.repository) || inputs.ref != '' }}
     runs-on: ubuntu-latest
     outputs:
       sha: ${{ steps.sha.outputs.sha }}
@@ -52,8 +56,16 @@ jobs:
           INPUT_REF: ${{ inputs.ref }}
           RUN_SHA: ${{ github.event.workflow_run.head_sha }}
           EVENT: ${{ github.event_name }}
+          TRIGGER_EVENT: ${{ github.event.workflow_run.event }}
+          HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}
           CONCLUSION: ${{ github.event.workflow_run.conclusion }}
         run: |
+          # Defence in depth for the job condition: never accept a sha from a
+          # pull-request-triggered run or another repository.
+          if [ "$EVENT" = "workflow_run" ]; then
+            [ "$TRIGGER_EVENT" = push ] || { echo "deploy: triggering run is $TRIGGER_EVENT, not a push" >&2; exit 1; }
+            [ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ] || { echo "deploy: triggering run is from $HEAD_REPO" >&2; exit 1; }
+          fi
           sha="${INPUT_REF:-$RUN_SHA}"
           case "$sha" in
             '' | *[!0-9a-fA-F]*) echo "deploy: not a sha: '$sha' (event $EVENT, conclusion $CONCLUSION)" >&2; exit 1 ;;

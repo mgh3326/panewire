@@ -111,6 +111,20 @@ func deployShape(raw []byte) error {
 		!strings.Contains(candidate.If, "github.event.workflow_run.head_branch == 'main'") {
 		return errors.New("candidate must run only on a successful main-stage run")
 	}
+	// A branches filter matches the head branch, so a fork pull request from a
+	// source branch named main must not reach the privileged deploy stage.
+	if !strings.Contains(candidate.If, "github.event.workflow_run.event == 'push'") {
+		return errors.New("candidate must require the triggering run to be a push")
+	}
+	if !strings.Contains(candidate.If, "github.event.workflow_run.head_repository.full_name == github.repository") {
+		return errors.New("candidate must require the triggering run to be from this repository")
+	}
+	if !strings.Contains(text, "TRIGGER_EVENT: ${{ github.event.workflow_run.event }}") ||
+		!strings.Contains(text, "HEAD_REPO: ${{ github.event.workflow_run.head_repository.full_name }}") ||
+		!strings.Contains(text, `[ "$TRIGGER_EVENT" = push ]`) ||
+		!strings.Contains(text, `[ "$HEAD_REPO" = "$GITHUB_REPOSITORY" ]`) {
+		return errors.New("candidate must also refuse a non-push or foreign run before accepting the sha")
+	}
 	if !strings.Contains(candidate.If, "inputs.ref != ''") {
 		return errors.New("candidate must recognise the any-ref call by its sha input")
 	}
@@ -277,6 +291,20 @@ func TestDeployWorkflowBranchMutantFails(t *testing.T) {
 	}
 	if err := deployShape([]byte(mutant)); err == nil {
 		t.Fatal("a deploy without the main-only branch filter went undetected")
+	}
+}
+
+// TestDeployWorkflowForkPullRequestMutantFails proves the push/repository
+// guard is load bearing: without it a fork PR whose source branch is named
+// main would pass the branches filter and reach the privileged stage.
+func TestDeployWorkflowForkPullRequestMutantFails(t *testing.T) {
+	raw := string(readDeployWorkflow(t))
+	mutant := strings.Replace(raw, "github.event.workflow_run.event == 'push' && ", "", 1)
+	if mutant == raw {
+		t.Fatal("mutant did not apply: deploy.yml has no push-event guard")
+	}
+	if err := deployShape([]byte(mutant)); err == nil {
+		t.Fatal("a deploy that accepts a pull_request-triggered run went undetected")
 	}
 }
 
