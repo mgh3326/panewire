@@ -52,7 +52,10 @@ case "$1 $2" in
   # what was typed (hk 3419)
   if [ "$src" = visible ] && [ $fmt = plain ] && [ -s "$d/lag_left" ]; then
     left=$(cat "$d/lag_left")
-    if [ "$left" -gt 0 ]; then buf=$(printf '%s' "$buf" | cut -c1-20); echo $((left - 1)) > "$d/lag_left"; fi
+    if [ "$left" -gt 0 ]; then
+      if [ -f "$d/lag_empty" ]; then buf=; else buf=$(printf '%s' "$buf" | cut -c1-20); fi
+      echo $((left - 1)) > "$d/lag_left"
+    fi
   fi
   # echo lag: right after a return the first visible read still draws the text
   # the keypress just submitted.
@@ -103,6 +106,9 @@ case "$1 $2" in
   if [ -f "$d/fail_return" ]; then rm "$d/fail_return"; exit 1; fi
   # a return the pane ignores: the text stays in the composer, nothing submits
   if [ -f "$d/stuck_return" ]; then exit 0; fi
+  # a return pressed before the text is drawn submits nothing; the text then
+  # stays in the composer (hk 3419)
+  if [ -s "$d/lag_left" ] && [ "$(cat "$d/lag_left")" -gt 0 ]; then exit 0; fi
   echo "❯ $(cat "$d/buf")" >> "$d/submitted"
   if [ -f "$d/lag_return" ]; then cp "$d/buf" "$d/stale"; fi
   : > "$d/buf"

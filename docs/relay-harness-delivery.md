@@ -137,8 +137,9 @@ character is dim reads empty and the event is typed. The return after
 appears in between is `return_withheld:composer_foreign` and `maybe_in_pane`.
 herdr returns from `pane send-text` before cmd has drawn the text, so the first
 read can still show the composer as it was before the send, or only the head of
-a long text. While the composer holds a strict head of this text, or exactly
-what it held before the send, the gate re-reads it every 100 ms for up to 2 s
+a long text. While the composer holds a strict head of this text (an empty
+composer included, where a return would submit nothing), or exactly what it
+held before the send, the gate re-reads it every 100 ms for up to 2 s
 (hk 3419). These reads type nothing and press nothing. A gate that re-read logs
 one line (`relay cmd return gate settled`) with its rule, the number of
 re-reads and the time they took. A composer that holds anything else, such as a

@@ -136,22 +136,33 @@ func (pane *t3330Composer) set(t *testing.T, name, body string) {
 // pressed and the delivery is proven.
 func TestCmdWrappedEventReturnPressedOnce_t3419(t *testing.T) {
 	cases := []struct {
-		name string
-		lag  string
+		name        string
+		lag         string
+		placeholder bool
+		empty       bool
 	}{
-		{"drawn at once", ""},
+		{"drawn at once", "", true, false},
 		// The production symptom: the first reads after pane send-text see only
 		// the head of the text. Without the gate's re-read this is
 		// return_withheld:composer_foreign.
-		{"drawn late", "3"},
+		{"drawn late", "3", true, false},
+		// The first reads still show the empty composer the text was typed
+		// into. That reads composer_empty, and a return pressed then submits
+		// nothing, so the gate re-reads it too (PR 321 review).
+		{"drawn late into an empty composer", "3", false, true},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
 			pane := t3330InstallComposer(t, "")
-			pane.flag(t, "placeholder")
+			if test.placeholder {
+				pane.flag(t, "placeholder")
+			}
 			pane.set(t, "wrap", "40")
 			if test.lag != "" {
 				pane.set(t, "draw_lag", test.lag)
+			}
+			if test.empty {
+				pane.flag(t, "lag_empty")
 			}
 			text := t3419Long()
 

@@ -969,8 +969,9 @@ var relayCmdDrawWindow = 2 * time.Second
 // pane send-text. herdr returns before the harness has drawn the text, so that
 // first read can still show the composer as it was before the send, or only
 // the head of a long text, and either one reads as composer_foreign (hk 3419).
-// While the composer is still drawing, it is re-read until it shows the whole
-// text or relayCmdDrawWindow passes. These reads type nothing and press
+// While the composer is still drawing, empty included, it is re-read until it
+// shows the whole text or relayCmdDrawWindow passes; an empty composer at the
+// end of the window keeps the composer_empty rule it had before. These reads type nothing and press
 // nothing. A composer that holds anything else, such as a draft before or
 // after the text or another nonce, is withheld at once.
 //
@@ -987,7 +988,11 @@ func relayCmdReturnGate(ctx context.Context, pane, harness, text, before, screen
 		}
 	}()
 	deadline := start.Add(relayCmdDrawWindow)
-	for !safe && why == "composer_foreign" && relayComposerStillDrawing(harness, screen, text, before) && time.Now().Before(deadline) {
+	// An empty composer reads composer_empty, which is safe, but right after
+	// the send it is the composer before the text was drawn: a return there
+	// would submit nothing and leave the text unsent. It is re-read the same
+	// way.
+	for (why == "composer_foreign" || why == "composer_empty") && relayComposerStillDrawing(harness, screen, text, before) && time.Now().Before(deadline) {
 		timer := time.NewTimer(100 * time.Millisecond)
 		select {
 		case <-ctx.Done():
