@@ -9,19 +9,6 @@ import (
 // only on ack; automatic interrupt read-on-insert never completes an item.
 const laneInboxTerminal = `(superseded_at>0 OR acked_at>0 OR (must_ack=0 AND (delivered_at>0 OR (class='inbox' AND read_at>0))))`
 
-// replaySuppressed also honors confirmed delivery of must-ack work: it stays
-// unread until acked, but must not be injected into the pane a second time.
-func (s *laneInboxStore) replaySuppressed(key string) (bool, error) {
-	ctx, done := s.op(s.life)
-	defer done()
-	var suppressed bool
-	err := s.db.QueryRowContext(ctx, s.q(`SELECT (`+laneInboxTerminal+` OR delivered_at>0) FROM lane_inbox WHERE event_key=?`), s.storedKey(key)).Scan(&suppressed)
-	if err == sql.ErrNoRows {
-		return false, nil
-	}
-	return suppressed, err
-}
-
 // laneInboxSettled is the evidence that the receiver already has an item:
 // superseded, acked, confirmed delivered, or read by the receiver. A read
 // stamped at insert (a non-must-ack interrupt) is not the receiver's read, so

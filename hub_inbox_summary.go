@@ -181,6 +181,12 @@ func (h *HubServer) appendInboxSummary(kind string, e hubJobEventPayload, lane, 
 	if h.inbox == nil {
 		return text
 	}
+	// A design-session lane answers questions; it is never handed a digest
+	// pointer. Its unread items stay readable through `panewire inbox list`
+	// (hk 3410).
+	if h.inbox.policy.designLane(lane) {
+		return text
+	}
 	settings := h.inbox.policy.Lanes[lane].InboxSummary
 	if settings == nil {
 		return text

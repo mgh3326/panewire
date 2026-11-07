@@ -416,6 +416,11 @@ func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
 	}
 	var ids []int64
 	for _, i := range unclaimed {
+		// A design lane never escalates unread items, even a misfiled must-act
+		// original; it can still read them with `inbox list` (hk 3410).
+		if policy.designLane(i.Lane) {
+			continue
+		}
 		if !(i.Kind == "job.completed" && i.Event.Late) && policy.mustAct(i.Lane, i.Event) {
 			ids = append(ids, i.ID)
 		}
@@ -695,6 +700,27 @@ func (s *laneInboxStore) ack(id int64, lane string, all bool, now time.Time) (in
 		return 0, err
 	}
 	return result.RowsAffected()
+}
+
+// laneNames lists the lanes with stored items so a policy sweep can cover a
+// lane the policy's lanes: block never names (a globbed class, for example).
+func (s *laneInboxStore) laneNames() ([]string, error) {
+	ctx, done := s.op(s.life)
+	defer done()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT DISTINCT lane FROM lane_inbox ORDER BY lane`))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var lanes []string
+	for rows.Next() {
+		var lane string
+		if err := rows.Scan(&lane); err != nil {
+			return nil, err
+		}
+		lanes = append(lanes, lane)
+	}
+	return lanes, rows.Err()
 }
 
 func (s *laneInboxStore) counts(lane string) (map[string]int, error) {

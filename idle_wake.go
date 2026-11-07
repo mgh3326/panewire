@@ -639,7 +639,10 @@ func (m *idleWakeManager) ApplyRoute(ctx context.Context, decision hubIdleWakeRo
 		return
 	}
 	at := m.now().UTC()
-	if !decision.Eligible {
+	if !decision.Eligible && decision.Reason != idleWakeReasonDesignLane {
+		// A design-lane suppression is the hub's class and is logged there once
+		// per event; the node's aggregate WARN tally is for routes the hub could
+		// not resolve, not for lanes that deliberately hear no wake (hk 3410).
 		m.recordSuppressionLocked(decision.Reason, at)
 	}
 	m.materializeAssigned(ctx, at)
@@ -714,11 +717,16 @@ const (
 	idleWakeReasonAmbiguous  = "ambiguous_owner"
 	idleWakeReasonParentless = "parentless_lane"
 	idleWakeReasonInvalid    = "invalid_route"
+	// idleWakeReasonDesignLane suppresses a wake whose resolved owner lane is a
+	// design-session lane: those lanes hear decisions and failures only (hk
+	// 3410). The hub classifies the lane and logs one DEBUG line per event; the
+	// node records the suppression without its aggregate WARN tally.
+	idleWakeReasonDesignLane = "design_lane"
 )
 
 func validIdleWakeDecisionReason(reason string) bool {
 	switch reason {
-	case idleWakeReasonUnknown, idleWakeReasonAmbiguous, idleWakeReasonParentless, idleWakeReasonInvalid:
+	case idleWakeReasonUnknown, idleWakeReasonAmbiguous, idleWakeReasonParentless, idleWakeReasonInvalid, idleWakeReasonDesignLane:
 		return true
 	default:
 		return false
@@ -776,6 +784,19 @@ func (h *HubServer) resolveIdleWakeOwner(machineID, pane string) idleWakeOwnerRe
 		return idleWakeOwnerResolution{Reason: idleWakeReasonInvalid}
 	}
 	return idleWakeOwnerResolution{Lane: job.OwnerLane, JobID: job.JobID, Label: job.AgentLabel}
+}
+
+// idleWakeRoute resolves one settled candidate and applies the hub's
+// design-lane class. A design lane receives no idle-wake at all, so the node is
+// told to suppress the candidate and never emits an event, an injection or an
+// inbox item. Every other decision is unchanged.
+func (h *HubServer) idleWakeRoute(machineID string, request idleWakeRouteRequest) hubIdleWakeRouteEvent {
+	resolution := h.resolveIdleWakeOwner(machineID, request.Pane)
+	if resolution.Lane != "" && h.inbox != nil && h.inbox.policy.designLane(resolution.Lane) {
+		h.logger.Debug("idle-wake suppressed for design lane", "lane", resolution.Lane, "pane", request.Pane, "event_id", request.EventID)
+		resolution = idleWakeOwnerResolution{Reason: idleWakeReasonDesignLane}
+	}
+	return idleWakeRouteDecision(request, resolution)
 }
 
 func idleWakeRouteText(request idleWakeRouteRequest, resolution idleWakeOwnerResolution) string {

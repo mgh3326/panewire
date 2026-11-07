@@ -1418,8 +1418,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
-			resolution := h.resolveIdleWakeOwner(machineID, request.Pane)
-			agent.queueIdleWakeRoute(idleWakeRouteDecision(request, resolution))
+			agent.queueIdleWakeRoute(h.idleWakeRoute(machineID, request))
 		}
 		if message.Kind == "relay.held" {
 			held, valid := decodeRelayHeldPayload(message.Payload)
