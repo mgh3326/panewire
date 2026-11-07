@@ -436,11 +436,12 @@ func TestRoutingPolicyValidation(t *testing.T) {
 		t.Fatalf("the recorded v1 document parses: %v", e)
 	}
 	for name, block := range map[string]string{
-		"version":   strings.Replace(routingBlockV1, `"version": 1`, `"version": 2`, 1),
-		"exhaust":   strings.Replace(routingBlockV1, `"on_exhaustion": "escalate", "family_rule": "not_author"`, `"on_exhaustion": "panic"`, 1),
-		"downgrade": strings.Replace(routingBlockV1, `, "downgrade_to": ["haiku", "devin-swe2-medium"]`, ``, 1),
-		"role map":  strings.Replace(routingBlockV1, `"worker": "implementer"`, `"worker": "boss"`, 1),
-		"dup key":   strings.Replace(routingBlockV1, `"version": 1,`, `"version": 1, "version": 1,`, 1),
+		"version":    strings.Replace(routingBlockV1, `"version": 1`, `"version": 2`, 1),
+		"exhaust":    strings.Replace(routingBlockV1, `"on_exhaustion": "escalate", "family_rule": "not_author"`, `"on_exhaustion": "panic"`, 1),
+		"downgrade":  strings.Replace(routingBlockV1, `, "downgrade_to": ["haiku", "devin-swe2-medium"]`, ``, 1),
+		"role map":   strings.Replace(routingBlockV1, `"worker": "implementer"`, `"worker": "boss"`, 1),
+		"dup key":    strings.Replace(routingBlockV1, `"version": 1,`, `"version": 1, "version": 1,`, 1),
+		"min_effort": strings.Replace(routingBlockV1, `"effort": "high", "on_exhaustion": "escalate"`, `"effort": "high", "min_effort": "turbo", "on_exhaustion": "escalate"`, 1),
 	} {
 		if _, e := parseRoutingDoc(routingDoc(block)); e == nil {
 			t.Errorf("%s: invalid policy accepted", name)

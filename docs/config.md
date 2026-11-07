@@ -887,7 +887,9 @@ routing role to obtain weaker eligibility.
 panewire reads the first fenced `json` block of `policy/model-routing`.
 `version` must be `1`. `roles.R.allowed` lists catalog profile names, or
 `"*"`. The table also supplies `effort`, `on_exhaustion`, `downgrade_to`,
-`family_rule`, `fixed`, and, on consult, `family_effort`. Unknown
+`family_rule`, `fixed`, and, on consult, `family_effort`. A role may also set
+`min_effort` (one of the effort ranks): selection drops a rung below it as
+`below_role_min_effort`, and the routing stamp records it. Unknown
 fields are ignored. Duplicate keys, invalid exhaustion modes, and role maps
 naming absent roles are refused. A `family_effort` entry is refused with
 `family_effort_invalid` in three cases: it sits on a role other than
