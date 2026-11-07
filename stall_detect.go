@@ -1758,7 +1758,7 @@ func (m *stallDetectManager) sendNotification(ctx context.Context, row *stallNot
 	// records on (lane, event_id), so a redelivery binds the attempt number
 	// into the id and reuses never overwrites a first writer.
 	sum := sha256.Sum256([]byte(row.IncidentKey + "\x00" + strconv.FormatInt(row.Level, 10) + "\x00" + strconv.FormatInt(row.Attempts+1, 10)))
-	row.EventID = "stall:" + hex.EncodeToString(sum[:16])
+	row.EventID = stallNoticeEventIDPrefix + hex.EncodeToString(sum[:16])
 	record := emitRecord{
 		Type: "lane.event", Epoch: 1, CreatedAt: at.Format(time.RFC3339),
 		OwnerLane: row.Lane, EventID: row.EventID, Text: text, PaneID: incident.PaneID,

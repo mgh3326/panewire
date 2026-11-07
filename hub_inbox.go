@@ -180,14 +180,15 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
 	// hk 3426: a design lane keeps a worker's routine result in its inbox; no
 	// owner-completion or idle promotion below puts it in the pane.
-	quiet := h.inbox.policy.designQuiet(lane, kind, *event, func() bool { return h.jobHasTask(event.JobID) })
+	quiet := h.inbox.policy.designQuiet(lane, kind, *event, func() bool { return h.jobHasTask(event.JobID) }, func() bool { return h.laneEventFromWorker(senderID, event.PaneID) })
 	if quiet || (kind == "job.completed" && event.Late) {
 		class = "inbox"
 	}
 	// hk 3276: a worker directive reaches the worker's pane at once. A lane
 	// policy that files its findings or orders as inbox (kept for a digest or
-	// an idle promotion) must not retain them.
-	directive := isWorkerDirective(kind, *event, loadReportRelayRoutes(h.reportRelayPath)[lane])
+	// an idle promotion) must not retain them. designQuiet decides alone for
+	// a design lane: what it quiets is never a directive (hk 3434).
+	directive := !quiet && isWorkerDirective(kind, *event, loadReportRelayRoutes(h.reportRelayPath)[lane])
 	if directive && class == "inbox" {
 		class = "interrupt"
 	}
