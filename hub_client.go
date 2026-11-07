@@ -1320,11 +1320,13 @@ func relayReadPaneANSI(ctx context.Context, pane string) (string, error) {
 }
 
 // relayAnsiComposerState is relayComposerState for a pane transport harness
-// (cmd), read from an ANSI screen. cmd draws claude's composer, so it takes
-// the rule nodeComposerState applies to claude: a composer whose every visible
+// (cmd), read from an ANSI screen. cmd draws claude's composer, so
+// nodeComposerState reads it by claude's rule: a composer whose every visible
 // character is dim is a prompt suggestion, not unsent text, and reads empty.
+// It also reads cmd's idle placeholder, drawn muted rather than dim, as empty
+// (hk 3374).
 func relayAnsiComposerState(ansi string) string {
-	switch nodeComposerState("claude", ansi) {
+	switch nodeComposerState("cmd", ansi) {
 	case nodeComposerEmpty:
 		return "composer_empty"
 	case nodeComposerHasText:

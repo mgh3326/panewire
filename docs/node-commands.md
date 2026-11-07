@@ -548,6 +548,16 @@ between the last two dividers is dim (SGR 2), the composer is a prompt
 suggestion and reads `empty`; one non-dim character is typed text and reads
 `has_text`. `screen_tail` is returned as plain text.
 
+cmd draws the same two-divider composer, so it takes the Claude rule, plus its
+idle placeholder: the composer row reads `empty` when the text after the `❯` is
+exactly `Ask your question...`, its first cell may be reverse video (the
+cursor), and every other cell is dim or in the foreground colour the divider
+rows use (cmd draws it muted, not dim). The style decides; the literal is a
+guard, because that muted colour is shared by the dividers and footer and so
+proves "not a draft" only for the one text known to be drawn in it. A draft in
+the default foreground, or any other text, reads `has_text`. The relay's cmd
+presend asks the same rule, so an idle cmd pane is typed into once (hk 3374).
+
 Codex and Devin are classified from the plain text alone. That text cannot prove
 a placeholder is dim, so a known idle placeholder
 counts as `empty` only when it is the whole composer, matched exactly after the
