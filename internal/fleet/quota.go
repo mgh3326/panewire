@@ -5,13 +5,13 @@ import (
 	"encoding/json"
 	"errors"
 	"math"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/quota/agy"
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 type Launch struct {
@@ -90,10 +90,17 @@ type PoolView struct {
 	// manual store records none.
 	Credit *CreditBalance
 	// Groups is the view of each metering group of a reading that has only
-	// group-scoped windows (agy), by group name. The fields above then rank on
-	// the strictest group; a rung that maps to a group ranks on its own group's
-	// view instead (forRung).
+	// group-scoped windows (agy), by group name. Each group view ranks on that
+	// group's longest window even when it is sub-daily, since the group has no
+	// longer one (hk 3415): gemini's 5h window paces and can be wasted. The
+	// fields above then carry the strictest group's view whole, so a rung that
+	// maps to no group is blocked and paced on the same group. A rung that maps
+	// to a group ranks on its own group's view instead (forRung).
 	Groups map[string]PoolView
+	// Group names the metering group this view is: a group view's own name, or
+	// the strictest group's name on the account view of a group-only reading.
+	// Empty for an account-scoped reading and for a pool view built elsewhere.
+	Group string
 }
 
 // forRung is the view a catalog rung ranks and is blocked on. A rung that maps
@@ -148,6 +155,12 @@ type CLIQuota struct {
 	// only its used percentage, so credit_expiry.go derives the dollar balance
 	// from this total; an entry that records its own dollars still wins.
 	CreditTotalUSD map[string]float64
+	// SharedLatest reads one account's stored manual and automatic entries
+	// from hk. When set, credit balances are read there directly and the
+	// pacelever process is never started. Accounts maps a pool to its
+	// configured account fingerprint for that read.
+	SharedLatest func(context.Context, string) (shared.Latest, error)
+	Accounts     map[string]string
 }
 
 func (q CLIQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
@@ -577,99 +590,24 @@ func (a *App) judgeGate(ctx context.Context, r QuotaRequest, pool string, j quot
 	return j, err
 }
 
-// Catalog lists the bench catalog rungs from the JSON envelope. A stale
-// catalog is refused: grades and models must come from fresh evidence.
+// Catalog reads the bench catalog from handoffkeep with pacelever's cache
+// rules (one-hour TTL, one-day stale maximum). A stale catalog is refused:
+// grades and models must come from fresh evidence. No pacelever process runs.
 func (q CLIQuota) Catalog(ctx context.Context) ([]CatalogRow, error) {
-	r := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: []string{"bench", "catalog", "list", "--json"}}, "bench catalog", 15*time.Second)
-	if e := checkQuota(r, "bench catalog"); e != nil {
-		return nil, e
+	client, e := NewCatalogClient(CatalogClientConfig{})
+	if e != nil {
+		return nil, fail(exitConfig, "%v", e)
 	}
-	return parseCatalogJSON(strings.TrimSpace(r.Out))
-}
-func parseCatalogJSON(out string) ([]CatalogRow, error) {
-	var doc struct {
-		Catalog []CatalogRow `json:"catalog"`
-		Source  struct {
-			Stale bool `json:"stale"`
-		} `json:"source"`
+	data, e := client.Read(ctx, false)
+	if e != nil {
+		return nil, fail(exitConfig, "%v", e)
 	}
-	if e := uniqueJSON([]byte(out)); e != nil {
-		return nil, fail(exitConfig, "ambiguous bench catalog JSON: %v", e)
-	}
-	if e := json.Unmarshal([]byte(out), &doc); e != nil || doc.Catalog == nil {
-		return nil, fail(exitConfig, "invalid bench catalog JSON")
-	}
-	if doc.Source.Stale {
+	if data.Info.Stale {
 		return nil, fail(exitConfig, "bench catalog is stale")
 	}
-	return doc.Catalog, nil
-}
-
-// parseCatalogText reads the table form: GRADE LABEL k=v... where LABEL is
-// profile or profile@effort (a trailing @ means the default rung) and the
-// "retired" word marks a withdrawn rung. Lines that do not open with a grade
-// are headers or prose and skipped; a graded row missing its key fields is a
-// malformed contract and refused rather than guessed.
-var catalogAge = regexp.MustCompile(`\(age ([0-9.]+)([smhd])\)`)
-
-func parseCatalogText(out string) ([]CatalogRow, error) {
-	var rows []CatalogRow
-	for _, line := range strings.Split(out, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
-		if strings.HasPrefix(line, "catalog=") {
-			if strings.Contains(line, "stale") {
-				return nil, fail(exitConfig, "bench catalog is stale")
-			}
-			if m := catalogAge.FindStringSubmatch(line); m != nil {
-				n, e := strconv.ParseFloat(m[1], 64)
-				if e == nil && (m[2] == "d" || m[2] == "h" && n > 24) {
-					return nil, fail(exitConfig, "bench catalog is stale")
-				}
-			}
-			continue
-		}
-		f := strings.Fields(line)
-		if len(f) < 2 {
-			continue
-		}
-		if !validCatalogGrade(f[0]) {
-			continue
-		}
-		row := CatalogRow{Grade: f[0]}
-		row.Profile, row.Effort, _ = strings.Cut(f[1], "@")
-		for _, w := range f[2:] {
-			k, v, ok := strings.Cut(w, "=")
-			if !ok {
-				if w == "retired" {
-					row.RetiredAt = &w
-				}
-				continue
-			}
-			switch k {
-			case "model":
-				row.ModelID = v
-			case "pool":
-				row.Pool = v
-			case "gate":
-				row.Gate = v
-			case "score":
-				if v != "-" {
-					if n, e := strconv.ParseFloat(v, 64); e == nil {
-						row.Score = &n
-					}
-				}
-			}
-		}
-		if row.ModelID == "" || row.Pool == "" || row.Gate == "" {
-			return nil, fail(exitConfig, "bench catalog row incomplete: %s", line)
-		}
-		rows = append(rows, row)
-	}
-	if rows == nil {
-		return nil, fail(exitConfig, "empty bench catalog")
+	rows := make([]CatalogRow, len(data.Rows))
+	for i, entry := range data.Rows {
+		rows[i] = entry.row()
 	}
 	return rows, nil
 }

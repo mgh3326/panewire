@@ -135,6 +135,17 @@ character is dim reads empty and the event is typed. The return after
 `pane send-text` goes through the same gate as every other harness
 (`relayComposerReturnSafe`, on a read taken after the text landed); a draft that
 appears in between is `return_withheld:composer_foreign` and `maybe_in_pane`.
+herdr returns from `pane send-text` before cmd has drawn the text, so the first
+read can still show the composer as it was before the send, or only the head of
+a long text. While the composer holds a strict head of this text (an empty
+composer included, where a return would submit nothing), or exactly what it
+held before the send, the gate re-reads it every 100 ms for up to 2 s
+(hk 3419). These reads type nothing and press nothing. A gate that re-read logs
+one line (`relay cmd return gate settled`) with its rule, the number of
+re-reads and the time they took. A composer that holds anything else, such as a
+draft or another nonce, is withheld at once. The composer is read across every
+row between the dividers, without whitespace, so a text wrapped over several
+rows matches itself.
 That is the one return of the inject: verify does not press a second one when
 the composer still draws the text (echo lag), it observes until the echo lands.
 If it still draws the text when the observation window ends, the verdict is
@@ -199,4 +210,5 @@ the expiry of every policy, one row per inject and the unchanged claude batch;
 `relay_cmd_hold_until_idle_t3411_test.go` pins the hold past `max_wait`, the
 drops for a gone pane, an ended job and the ceiling, the unchanged claude pane,
 and the idle re-delivery of a `working_wait_expired` row; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
-transport.
+transport; `relay_cmd_wrapped_return_t3419_test.go` pins the return gate on a
+wrapped composer, a draft or second nonce beside it, and a late-drawn text.

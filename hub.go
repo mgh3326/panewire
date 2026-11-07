@@ -409,6 +409,9 @@ type HubServer struct {
 	quotaReplaceBudget time.Duration
 	spawnKick          chan struct{}
 	spawnWorkers       sync.WaitGroup
+	// spawnOrphanProbed is when the hub last probed each stranded request's
+	// node for a labelled pane (hub_spawn_orphan.go); guarded by mu.
+	spawnOrphanProbed map[string]time.Time
 	// auth is swapped whole on an auth-file reload; read it through
 	// currentAuth on authentication paths and auth.Load() elsewhere.
 	auth              atomic.Pointer[hubAuthSet]
@@ -881,6 +884,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/spawns", h.handleSpawnSubmit)
 	mux.HandleFunc("GET /v1/spawns/live", h.handleSpawnLive)
 	mux.HandleFunc("GET /v1/spawns/{request_id}", h.handleSpawnOperation)
+	mux.HandleFunc("POST /v1/spawns/{request_id}/abandon", h.handleSpawnAbandon)
 	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
 	mux.HandleFunc("GET /v1/nodes/agents", h.handleNodesAgents)

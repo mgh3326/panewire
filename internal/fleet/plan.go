@@ -287,7 +287,11 @@ func (a *App) printPlan(asJSON bool, out map[string]any, sel *selPlan, pp *place
 			continue
 		}
 		name := firstNonempty(c.seatName, c.row.Profile)
-		fmt.Fprintf(a.Out, "dropped %s@%s pool=%s reason=%s grade=%s\n", name, c.row.Effort, c.row.Pool, c.reason, c.row.Grade)
+		capNote := ""
+		if c.cap != "" {
+			capNote = " cap=" + c.cap
+		}
+		fmt.Fprintf(a.Out, "dropped %s@%s pool=%s reason=%s%s grade=%s\n", name, c.row.Effort, c.row.Pool, c.reason, capNote, c.row.Grade)
 	}
 	for _, t := range sel.hosts {
 		var tried []string

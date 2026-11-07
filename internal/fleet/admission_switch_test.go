@@ -22,11 +22,7 @@ var switchNow = time.Date(2026, 11, 7, 3, 0, 0, 0, time.UTC)
 
 const switchKey = "claude:0123456789abcdef"
 
-// catalogList is pacelever's catalog read, the one pacelever call the native
-// gate keeps until hk 3249.
-var catalogList = []string{"bench", "catalog", "list", "--json"}
-
-// switchCatalog is the bench catalog pacelever lists.
+// switchCatalog is the bench catalog the gate judges with.
 const switchCatalog = `{"catalog":[
  {"profile":"opus","effort":"high","model_id":"claude-opus-5-5","pool":"claude","grade":"S+","gate":"default"},
  {"profile":"codex-sol","effort":"max","model_id":"gpt-6.1-sol","pool":"codex","grade":"S+","gate":"default"},
@@ -34,16 +30,25 @@ const switchCatalog = `{"catalog":[
  {"profile":"kiro-sonnet","effort":"high","model_id":"claude-sonnet-5-5","pool":"kiro","grade":"A","gate":"default"}
 ],"source":{"stale":false}}`
 
-// switchApp is an App whose quota CLI is a fake pacelever: it lists the
-// catalog and answers `gate` with paceleverGate. The shared store holds
-// reading for switchKey.
+func switchRows(t *testing.T) []CatalogRow {
+	t.Helper()
+	var doc struct {
+		Catalog []CatalogRow `json:"catalog"`
+	}
+	if err := json.Unmarshal([]byte(switchCatalog), &doc); err != nil || len(doc.Catalog) == 0 {
+		t.Fatalf("switch catalog: %v", err)
+	}
+	return doc.Catalog
+}
+
+// switchApp is an App whose quota CLI is a fake pacelever that answers `gate`
+// with paceleverGate, and whose catalog is handoffkeep's. The shared store
+// holds a reading for switchKey.
 func switchApp(t *testing.T, mode string, reading *shared.Observation, paceleverGate Result) (*App, *fakeRunner, *[]fleetevent.Event) {
 	t.Helper()
 	t.Setenv("PACELEVER_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
 	runner := &fakeRunner{Do: func(c Command) Result {
 		switch {
-		case c.Name == "pacelever" && slices.Equal(c.Args, catalogList):
-			return Result{Out: switchCatalog}
 		case c.Name == "pacelever" && len(c.Args) > 0 && c.Args[0] == "gate":
 			return paceleverGate
 		case c.Name == "panewire" && len(c.Args) >= 2 && slices.Equal(c.Args[:2], []string{"quota", "refresh"}):
@@ -55,7 +60,8 @@ func switchApp(t *testing.T, mode string, reading *shared.Observation, pacelever
 	if mode != "" {
 		a.Config.Quota["gate"] = mode
 	}
-	a.Quota = admissionQuota{CLIQuota{runner, "pacelever", nil}, a}
+	a.Quota = admissionQuota{CLIQuota{Runner: runner, Binary: "pacelever"}, a}
+	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return switchRows(t), nil }
 	a.SharedLatest = func(context.Context, string) (shared.Latest, error) {
 		return shared.Latest{Observation: reading}, nil
 	}
@@ -77,11 +83,11 @@ func paceleverReceipt(ok bool, code int, reason string) Result {
 	return Result{Code: code, Out: string(b)}
 }
 
-// paceleverRuns lists every pacelever execution other than the catalog read.
+// paceleverRuns lists every pacelever execution.
 func paceleverRuns(r *fakeRunner) []Command {
 	var runs []Command
 	for _, c := range r.Calls {
-		if c.Name == "pacelever" && !slices.Equal(c.Args, catalogList) {
+		if c.Name == "pacelever" {
 			runs = append(runs, c)
 		}
 	}
@@ -158,8 +164,7 @@ func TestAdmissionShadowNeverMeasures(t *testing.T) {
 }
 
 // TestAdmissionNativeNeverRunsPaceleverGate: native mode decides from the
-// stored reading and runs no pacelever gate or refresh; pacelever's catalog
-// read is the one pacelever call left (hk 3249 moves it).
+// stored reading and the handoffkeep catalog, and runs no pacelever command.
 func TestAdmissionNativeNeverRunsPaceleverGate(t *testing.T) {
 	a, runner, events := switchApp(t, gateModeNative, switchReading(20, 40), Result{Code: 99})
 	j, err := a.judgeGate(context.Background(), opusRequest, "claude", quotaJudgment{Host: "local", Source: "shared", AccountKey: switchKey})
@@ -178,12 +183,7 @@ func TestAdmissionNativeNeverRunsPaceleverGate(t *testing.T) {
 		t.Fatalf("native receipt must admit through admissionGate: %+v %v\n%s", granted, err, out)
 	}
 	if runs := paceleverRuns(runner); len(runs) != 0 {
-		t.Fatalf("native mode ran pacelever beyond its catalog read: %v", runs)
-	}
-	for _, c := range runner.Calls {
-		if c.Name != "pacelever" || !slices.Equal(c.Args, catalogList) {
-			t.Fatalf("native mode ran %s %v", c.Name, c.Args)
-		}
+		t.Fatalf("native mode ran pacelever: %v", runs)
 	}
 }
 
@@ -339,7 +339,7 @@ func TestAdmissionLocalRequestFallsBackToManualWindows(t *testing.T) {
 // PANEWIRE_QUOTA_BIN for the refreshes panewire runs through pacelever.
 func TestAdmissionKeepsConfiguredQuotaBinary(t *testing.T) {
 	a := &App{}
-	a.Quota = admissionQuota{CLIQuota{&fakeRunner{}, "/custom/pacelever", nil}, a}
+	a.Quota = admissionQuota{CLIQuota{Runner: &fakeRunner{}, Binary: "/custom/pacelever"}, a}
 	if got := a.paceleverBinary(); got != "/custom/pacelever" {
 		t.Fatalf("wrapped quota binary = %q", got)
 	}
@@ -353,8 +353,8 @@ func TestAdmissionKeepsConfiguredQuotaBinary(t *testing.T) {
 }
 
 // TestAdmissionNativeReadsStoredReadingOverHandoffkeep: the production
-// native gate reads the account's reading over handoffkeep's HTTP API and
-// runs no pacelever command but its catalog read.
+// native gate reads the account's reading over handoffkeep's HTTP API and the
+// catalog from the injected reader, and runs no pacelever command.
 func TestAdmissionNativeReadsStoredReadingOverHandoffkeep(t *testing.T) {
 	var paths []string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -382,7 +382,7 @@ func TestAdmissionNativeReadsStoredReadingOverHandoffkeep(t *testing.T) {
 	if !slices.Equal(paths, []string{"/v1/quota/accounts/" + switchKey + "/latest"}) {
 		t.Fatalf("handoffkeep reads = %v", paths)
 	}
-	if !slices.EqualFunc(runner.Calls, []Command{{Name: "pacelever", Args: catalogList}}, func(a, b Command) bool { return a.Name == b.Name && slices.Equal(a.Args, b.Args) }) {
+	if len(runner.Calls) != 0 {
 		t.Fatalf("native gate executed %v", runner.Calls)
 	}
 }

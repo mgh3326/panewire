@@ -78,7 +78,8 @@ func TestLoadConfigValidatesMeasurableAccounts(t *testing.T) {
 
 // A group-only reading keeps the whole-account view (the strictest group, for a
 // rung that maps to no group) and adds one view per group, each ranked on that
-// group's windows alone.
+// group's windows alone. A group whose longest window is sub-daily ranks on it:
+// gemini's 5h window is the only one it has to pace and waste (hk 3415).
 func TestAccountPoolViewGroupViews(t *testing.T) {
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	reset5h := now.Add(4 * time.Hour).Format(time.RFC3339)
@@ -92,18 +93,22 @@ func TestAccountPoolViewGroupViews(t *testing.T) {
 	if v == nil || v.Blocking == nil || *v.Blocking != 100 {
 		t.Fatalf("the account view is the strictest group: %+v", v)
 	}
+	if v.Group != "gemini" {
+		t.Fatalf("the account view names its group: %+v", v)
+	}
 	gemini, third := v.Groups["gemini"], v.Groups["3p"]
-	if gemini.Blocking == nil || *gemini.Blocking != 100 || gemini.Urgency != nil {
+	if gemini.Blocking == nil || *gemini.Blocking != 100 || gemini.Urgency == nil || gemini.Group != "gemini" {
 		t.Fatalf("gemini view %+v", gemini)
 	}
-	if third.Blocking == nil || *third.Blocking != 30 || third.Urgency == nil {
+	// The 7d window is 3p's longest, so its 5h window never paces the group.
+	if third.Blocking == nil || *third.Blocking != 30 || third.Urgency == nil || *third.ResetHours != 96 || third.Group != "3p" {
 		t.Fatalf("3p view %+v", third)
 	}
 	if len(v.Groups) != 2 {
 		t.Fatalf("groups %v", v.Groups)
 	}
-	// An account-scoped reading has no group views.
-	if v := accountPoolView([]accountBucket{{Scope: "account", UsedPct: ptrF(10), Window: "7d", ResetsAt: reset7d}}, now); v == nil || v.Groups != nil {
+	// An account-scoped reading has no group views and names no group.
+	if v := accountPoolView([]accountBucket{{Scope: "account", UsedPct: ptrF(10), Window: "7d", ResetsAt: reset7d}}, now); v == nil || v.Groups != nil || v.Group != "" {
 		t.Fatalf("account reading has group views: %+v", v)
 	}
 	// One invalid bucket in any group voids the whole reading, as before.

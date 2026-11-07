@@ -7,21 +7,11 @@ import (
 	"testing"
 )
 
-func TestUnratedCatalogParsers(t *testing.T) {
-	for _, input := range []string{
-		`{"catalog":[{"profile":"codex-sol","effort":"high","model_id":"sol-m","pool":"codex","grade":"unrated","gate":"default"}]}`,
-		"unrated codex-sol@high model=sol-m pool=codex gate=default\ncatalog=server\n",
-	} {
-		var rows []CatalogRow
-		var err error
-		if strings.HasPrefix(input, "{") {
-			rows, err = parseCatalogJSON(input)
-		} else {
-			rows, err = parseCatalogText(input)
-		}
-		if err != nil || len(rows) != 1 || rows[0].Grade != "unrated" {
-			t.Fatalf("unrated catalog: rows=%+v err=%v", rows, err)
-		}
+func TestUnratedCatalogDecode(t *testing.T) {
+	raw := []json.RawMessage{json.RawMessage(`{"profile":"codex-sol","effort":"high","model_id":"sol-m","pool":"codex","grade":"unrated","gate":"default"}`)}
+	rows, _, _, err := decodeCatalogRows(raw)
+	if err != nil || len(rows) != 1 || rows[0].Grade != "unrated" || rows[0].row().Grade != "unrated" {
+		t.Fatalf("unrated catalog: rows=%+v err=%v", rows, err)
 	}
 }
 

@@ -445,8 +445,8 @@ overrides.
 | `native_pools` | `[]` | Pools with a native/shadow switch that this host measures itself instead of through pacelever (`["commandcode", "devin", "agy"]`; no other pool is accepted). Unlisted, the pool is in shadow: spawns keep running pacelever for it and the node logs a comparison ([docs/quota.md](quota.md#shadow-and-native)). Read at each use by the node and the CLI; an invalid file is shadow. |
 | `gate` | `"shadow"` | Who decides spawn admission: `"shadow"` runs `pacelever gate` and records how panewire's own verdict compares (fleet event `quota_gate_shadow`); `"native"` decides from panewire's verdict and runs no `pacelever gate` ([docs/quota.md](quota.md#admission)). Any other value is a config error. |
 | `pool_fresh_ttl_s` | unset | Optional pool → seconds table (`[quota.pool_fresh_ttl_s]`, nonnegative integers) that overrides `fresh_ttl_s` for one pool. |
-| `pool_max_concurrent` | unset | Optional pool → positive integer table (`pool_max_concurrent = { "openai-api" = 2 }`; pool name as in the catalog's `pool` column) that caps live spawns on a pool fleet-wide. A candidate whose pool is at its cap is dropped `pool_at_cap` and selection moves to the next pool; a spawn never waits for a slot. A pool not named has no cap. Read at each placement. A value that is not a positive integer is refused at config load with the key named (`quota.pool_max_concurrent.openai-api must be a positive integer`). When the live count cannot be read from the hub the cap does not apply and the reason is logged. How the count is made and the refusal text: [placement](placement.md#pool-concurrency-cap). |
-| `credit_total_usd` | unset | Optional pool → dollars table (`[quota.credit_total_usd]`, positive numbers): each prepaid credit pool's grant total. A shared manual entry records only its used percentage, so panewire derives the dollar balance `total × (100 − used_pct) / 100` for credit ranking, dollars at risk and burn; an entry's own `remaining_usd` still wins. Set it on the hub and every node, and **update it whenever a new grant is bought** — a stale total gives wrong dollars. |
+| `pool_max_concurrent` | unset | Optional pool → positive integer table (`pool_max_concurrent = { "openai-api" = 2 }`; pool name as in the catalog's `pool` column) that caps live spawns on a pool fleet-wide. A candidate whose pool is at its cap is dropped `pool_at_cap` and selection moves to the next pool; a spawn never waits for a slot. A pool not named has no cap. Read at each placement. A value that is not a positive integer is refused at config load with the key named (`quota.pool_max_concurrent.openai-api must be a positive integer`). When the live count cannot be read from the hub the cap does not apply and the reason is logged. The reserved key `devin-free` caps only the SWE-2 free rungs (`devin-swe2`, `devin-swe2-medium`, `devin-swe2-max`, `devin-swe2-flash`, `devin-swe2-flash-medium`) by their live spawns: those rungs draw on Devin's free-model quota while paid `devin-ds41` draws on the account's paid window, so capping them must not cap paid devin. `devin` stays a whole-pool cap; when both keys are set a free rung must pass both. How the count is made and the refusal text: [placement](placement.md#pool-concurrency-cap). |
+| `credit_total_usd` | unset | Optional pool → dollars table (`[quota.credit_total_usd]`, positive numbers): each prepaid credit pool's grant total. A shared manual entry records only its used percentage, so panewire derives the dollar balance `total × (100 − used_pct) / 100` for credit ranking, dollars at risk and burn; an entry's own `remaining_usd` still wins. Set it on the hub and every node, and **update it whenever a new grant is bought** — a stale total gives wrong dollars. Keeping the dollars in the shared record needs hk 3418; until it lands this table stays the source. |
 | `measure_timeout_s` | `60` | Bound on the on-target refresh (`panewire quota refresh <pool>` for claude, codex and native commandcode, devin or agy, else `pacelever refresh`) for a remote account the spawning host does not hold. |
 | `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. For `agy` it is the account the node measures: agy has no login to derive a key from ([docs/quota.md](quota.md#native-measurement-agy)). |
 | `measurable_accounts` | `[]` | `pool:<16-hex>` account keys this host may measure. A host measures agy, announces it and publishes under its key only when `accounts.agy` is set and `agy:<fp>` is listed here; otherwise it does not measure agy and logs one line. Read at each use. |
@@ -510,23 +510,28 @@ the rebind failed or the parent's state was unreadable; neither fails the landed
 spawn.
 
 Automatic model selection (`spawn` with `-m` omitted or `-m auto`) reads the
-live bench catalog and pool status from the quota CLI, then orders candidates
-under the versioned pool-order policy (`[local].pool_policy` or
+live bench catalog from handoffkeep and pool status from the quota CLI, then
+orders candidates under the versioned pool-order policy (`[local].pool_policy` or
 `PANEWIRE_POOL_POLICY`, else the embedded copy): paid pools at waste risk
 first (see below), then other WASTE subscription pools, then free pool/model
 sets, then ranked subscription pools, then credit pools without a usable expiry. Expiring credit joins the waste-risk ordering by dollars at risk per hour until expiry (below); an entry without recorded dollars keeps the percentage rule. Inside a tier the lowest catalog grade that satisfies the task wins,
 then the pool with the higher waste urgency — the unused projected share
 (100 − projected) per hour until its longest account window's reset (7d,
-monthly; sub-daily windows such as a 5h rate window never rank a pool, they
-stay admission gates only). A pool whose longest window's reset can be paced
-always ranks ahead of one whose cannot; unpaceable pools keep the lower
-projected use at reset (the used percentage when it cannot be paced yet) —
+monthly; sub-daily windows such as a 5h rate window never rank an account's
+pool, they stay admission gates only). A pool whose longest window's reset can
+be paced always ranks ahead of one whose cannot; unpaceable pools keep the
+lower projected use at reset (the used percentage when it cannot be paced yet) —
 then the smaller effort, then the catalog score. A pool whose reading has no
-account window (agy publishes only group windows) ranks on its group windows:
-an agy rung ranks and is blocked on the windows of the group it draws from
-(`gemini` or `3p`, from the catalog row's `group` or its model id), so one
-exhausted group blocks only its own rungs and a rung with no group is blocked by
-the strictest group.
+account window (agy publishes only group windows) is paced, ranked and put at
+waste risk on the group the rung draws from: `gemini` or `3p`, from the catalog
+row's `group` or its model id. That group's longest window is used exactly as an
+account window is, even when it is sub-daily — the gemini group publishes only a
+5h window, and that window's reset is the one point where the rest of it is
+lost. So one exhausted group blocks only its own rungs, a group whose window
+projects unused quota at reset puts its rungs at waste risk, and a rung with no
+group keeps the conservative rule: it is blocked and paced on the strictest
+group (highest used share, then highest projection). The selection record names
+the group as `waste_group`.
 
 The pool-order policy is version `2`. A version `1` file supplied through
 `[local].pool_policy`, `PANEWIRE_POOL_POLICY`, or `simulate --policy` is refused
@@ -599,8 +604,13 @@ percent per hour until expiry), ranks after any credit that has dollars, and
 the plan logs `credit_usd_missing pool=<pool>` once so it can be recorded:
 
 ```sh
-pacelever manual set --pool <pool> --credit-balance <usd> --credit-total <usd> --expires <YYYY-MM-DD>
+panewire manual set --pool <pool> --credit-balance <usd> --credit-total <usd> --expires <YYYY-MM-DD>
 ```
+
+`panewire manual set|list|clear` writes the same hk shared manual observation
+pacelever writes. The command's JSON reply keeps the dollar fields; the shared
+wire carries only the used percentage, so `credit_total_usd` supplies the
+dollars on read. Keeping `remaining_usd`/`total_usd` in hk itself is hk 3418.
 
 The selection record and the chosen `why` text carry `balance_usd`,
 `burn_usd_per_h`, `at_risk_usd` and `usd_urgency`.
@@ -656,8 +666,10 @@ per candidate, `waste_risk` (`true`/`false`) on every candidate and
 paced,
 `waste_urgency`, `reset_hours` and `waste_order` (`reset` or
 `projected_fallback`) per ranked candidate,
-and on `chosen` its `tier`, `grade`, `waste_risk`, `projected_pct`,
-`waste_urgency` and a one-line `why`;
+`waste_group` (`gemini` or `3p`) on a candidate of a pool that publishes only
+group windows,
+and on `chosen` its `tier`, `grade`, `waste_risk`, `waste_group`,
+`projected_pct`, `waste_urgency` and a one-line `why`;
 `--dry-run` prints `urgency=<v> source=<s> tiers=<a>><b>...` before the full
 record.
 
@@ -1281,7 +1293,10 @@ for ownership and distribution.
 | `HANDOFFKEEP_BIN` | Must resolve to the canonical current-user ~/.local/bin executable in production. |
 | `XDG_DATA_HOME` | Data home of the local ledger (`$XDG_DATA_HOME/arbiter/state.db`); production guard requires the canonical `~/.local/share`. |
 | `XDG_STATE_HOME` | State home of the role routing cache (`$XDG_STATE_HOME/panewire/model-routing.json`); default `~/.local/state`. |
-| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools, and commandcode, devin and agy once switched native, are measured by panewire itself and ignore it. |
+| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools, and commandcode, devin and agy once switched native, are measured by panewire itself and ignore it. The bench catalog is handoffkeep's and never uses it. |
+| `HANDOFFKEEP_CONFIG` | handoffkeep credential file for `panewire catalog` and the shared quota endpoint; default `~/.config/handoffkeep/config.env`. |
+| `XDG_CACHE_HOME` | Cache home of the bench catalog read (`$XDG_CACHE_HOME/panewire/bench`); default `~/.cache`. |
+| `ARTIFICIAL_ANALYSIS_API_KEY` | Free Artificial Analysis Data API key for `panewire catalog aa-sync`; else the mode-0600 `$XDG_CONFIG_HOME/panewire/aa.env`. |
 | `PANEWIRE_NODE_ENV` | Panewire node env file for `HUB_MACHINE_ID` (job record host id); default `~/.config/panewire/hub-node.env`, or `[quota].node_env`. |
 | `ARBITER_INBOX_ROOT` | Jobs root; production guard requires the canonical inbox. |
 | `HERDR_SESSION` | Herdr session passed through or selected for remote execution. |
@@ -1366,6 +1381,7 @@ outcome, reason, detail`) to `$XDG_STATE_HOME/panewire/events/fleet-events.jsonl
 | `kind` | `outcome` | `reason` | When |
 | --- | --- | --- | --- |
 | `spawn`, `plan` | `refused` or `failed` | the exit status name (`config`, `seat_refused`, `placement`, ...) | the command exits non-zero; `detail` is `exit=N <message>` |
+| `spawn` (hub) | `stuck` | the request's status, `reconciling` or `deadline_exceeded` | a hub spawn request is still pending 30 minutes past its deadline; written once per attempt with `request_id`, and `detail` is `host=<node> past_deadline_s=N`. See [hub-spawn-operations.md](hub-spawn-operations.md#stranded-requests) |
 | `placement` | `placed` | ranking metric: `score`, `raw_load` (some host had no hub score), `single_candidate`, `wake`, `forced` | a non-dry-run spawn chose a host; `detail` names `chosen=`, `candidates=`, `pool=` and the hosts that `refused=` first |
 | `placement` | `refused` | automatic selection's outcome code, such as `quota_exhausted` or `quota_unknown` | selection refused before execution placement; `selection` retains the ordered host and rung attempts |
 | `quota_observation` | `stale` or `unusable` | the shared-observation reason (`stale`, `not_observed`, `measure_failed`, ...) | a target account's quota observation refused a host; `detail` carries `target=`, `pool=` and `age_min=` |

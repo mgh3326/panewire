@@ -8,12 +8,13 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"reflect"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
 )
 
 const aaKeyName = "ARTIFICIAL_ANALYSIS_API_KEY"
@@ -179,16 +180,17 @@ func aaAnnotate(rows []map[string]any, models []aaModel, version int, at time.Ti
 	return result, annotated, unmapped, changed
 }
 
-func aaCatalogArtifact(data []byte, rows []map[string]any) ([]byte, error) {
-	var original struct {
-		Catalog []map[string]json.RawMessage `json:"catalog"`
-	}
-	if err := json.Unmarshal(data, &original); err != nil || len(original.Catalog) != len(rows) {
+func aaCatalogArtifact(raw []json.RawMessage, rows []map[string]any) ([]byte, error) {
+	if len(raw) != len(rows) {
 		return nil, fmt.Errorf("invalid catalog")
 	}
 	var out bytes.Buffer
 	out.WriteString("{\n  \"catalog\": [\n")
-	for i, row := range original.Catalog {
+	for i, item := range raw {
+		var row map[string]json.RawMessage
+		if json.Unmarshal(item, &row) != nil {
+			return nil, fmt.Errorf("invalid catalog")
+		}
 		if i > 0 {
 			out.WriteString(",\n")
 		}
@@ -224,6 +226,18 @@ func aaCatalogArtifact(data []byte, rows []map[string]any) ([]byte, error) {
 	}
 	out.WriteString("\n  ]\n}\n")
 	return out.Bytes(), nil
+}
+
+func aaRawRows(raw []json.RawMessage) ([]map[string]any, error) {
+	rows := make([]map[string]any, len(raw))
+	for i, item := range raw {
+		decoder := json.NewDecoder(bytes.NewReader(item))
+		decoder.UseNumber()
+		if decoder.Decode(&rows[i]) != nil {
+			return nil, fmt.Errorf("invalid catalog")
+		}
+	}
+	return rows, nil
 }
 
 func runAASync(args []string, out, errOut io.Writer) int {
@@ -263,22 +277,21 @@ func runAASync(args []string, out, errOut io.Writer) int {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "pacelever", "bench", "catalog", "list", "--json")
-	data, err := cmd.Output()
+	client, err := fleet.NewCatalogClient(fleet.CatalogClientConfig{})
 	if err != nil {
 		fmt.Fprintln(errOut, "aa-sync: cannot read catalog")
 		return ExitInternal
 	}
-	var doc struct {
-		Catalog []map[string]any `json:"catalog"`
-		Source  struct {
-			Source string `json:"source"`
-			Stale  bool   `json:"stale"`
-		} `json:"source"`
+	catalog, err := client.Read(ctx, path != "")
+	if err != nil || len(catalog.Rows) == 0 || catalog.Info.Stale || (path != "" && !catalog.Info.FreshServer()) {
+		fmt.Fprintln(errOut, "aa-sync: requires a fresh server catalog for --out")
+		return ExitInternal
 	}
-	dec := json.NewDecoder(bytes.NewReader(data))
-	dec.UseNumber()
-	if !json.Valid(data) || dec.Decode(&doc) != nil || len(doc.Catalog) == 0 || doc.Source.Stale || (path != "" && doc.Source.Source != "server") {
+	for _, warning := range catalog.Warnings {
+		fmt.Fprintln(errOut, "warning:", warning)
+	}
+	catalogRows, err := aaRawRows(catalog.Raw)
+	if err != nil {
 		fmt.Fprintln(errOut, "aa-sync: requires a fresh server catalog for --out")
 		return ExitInternal
 	}
@@ -288,9 +301,9 @@ func runAASync(args []string, out, errOut io.Writer) int {
 		fmt.Fprintln(errOut, err)
 		return ExitInternal
 	}
-	rows, annotated, unmapped, changed := aaAnnotate(doc.Catalog, models, version, sync.now())
+	rows, annotated, unmapped, changed := aaAnnotate(catalogRows, models, version, sync.now())
 	if path != "" && !dry {
-		b, e := aaCatalogArtifact(data, rows)
+		b, e := aaCatalogArtifact(catalog.Raw, rows)
 		if e != nil || replaceFileAtomically(path, ".aa-sync-*", b, 0600) != nil {
 			fmt.Fprintln(errOut, "aa-sync: cannot write catalog artifact")
 			return ExitInternal

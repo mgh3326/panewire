@@ -44,12 +44,16 @@ type App struct {
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)
 	// BenchCatalog reads the bench catalog for the admission gate; nil reads
-	// handoffkeep (admission_native.go).
+	// handoffkeep through catalog.go.
 	BenchCatalog func(context.Context) ([]CatalogRow, error)
 	Source       PlacementSource
 	Wake         Waker
 	LoadRatio    func(context.Context) (float64, error)
 	JobStore     JobStore
+	// BenchStore reads and writes the shared bench reps. Nil builds it from
+	// [quota] / the handoffkeep env on first use; a node sets the store built
+	// from its own spawn.json credential.
+	BenchStore *BenchStore
 	// Hub carries via="hub" spawns and quota refreshes; nil builds the HTTP
 	// client from [hub] on first use.
 	Hub              HubTransport
@@ -139,7 +143,9 @@ func New(out, errout io.Writer) (*App, error) {
 	if v := os.Getenv("PANEWIRE_QUOTA_BIN"); v != "" {
 		quota = v
 	}
-	a.Quota = admissionQuota{CLIQuota{Runner: a.Runner, Binary: quota, CreditTotalUSD: creditTotals(c.Quota)}, a}
+	cliQuota := CLIQuota{Runner: a.Runner, Binary: quota, CreditTotalUSD: creditTotals(c.Quota), Accounts: quotaAccounts(c.Quota)}
+	cliQuota.SharedLatest = a.sharedLatest
+	a.Quota = admissionQuota{cliQuota, a}
 	a.Source = stateSource{a: a, inner: fleetSource{a}}
 	a.Wake = cliWaker{a}
 	a.LoadRatio = a.loadRatio

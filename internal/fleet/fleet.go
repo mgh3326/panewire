@@ -347,15 +347,59 @@ func accountPoolView(buckets []accountBucket, now time.Time) *PoolView {
 			v.Groups[b.Model] = *g
 		}
 	}
+	// A rung that maps to no group is blocked and paced on the strictest
+	// group: blocking keeps today's conservative rule, and waste is judged on
+	// the same group's windows instead of on whichever group had a daily
+	// window (hk 3415).
+	if strict, ok := strictestGroup(v.Groups); ok {
+		groups := v.Groups
+		*v = strict
+		v.Groups = groups
+	}
 	return v
+}
+
+// strictestGroup is the group whose whole view the account view of a
+// group-only reading takes: the highest blocking share, then the highest
+// projection at reset; equal views keep the lexically first group name, so the
+// choice is deterministic.
+func strictestGroup(groups map[string]PoolView) (PoolView, bool) {
+	names := make([]string, 0, len(groups))
+	for name := range groups {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	var best PoolView
+	found := false
+	for _, name := range names {
+		g := groups[name]
+		if !found || pct(g.Blocking) > pct(best.Blocking) || pct(g.Blocking) == pct(best.Blocking) && pct(g.Projected) > pct(best.Projected) {
+			best, found = g, true
+		}
+	}
+	return best, found
+}
+
+// pct reads an optional percentage as a number; an absent one is the least
+// restrictive value.
+func pct(v *float64) float64 {
+	if v == nil {
+		return -1
+	}
+	return *v
 }
 
 // rankedPoolView ranks the buckets of rankScope — only those of one group when
 // group is set — after checking that every bucket in the reading is valid and
 // still running.
+//
+// A group view ranks on its longest window even when that is sub-daily: the
+// group has no longer one to pace, so its 5h reset is the only point where the
+// rest is lost (hk 3415). Every other view ranks on a window of a day or more
+// only, since a sub-daily rate window is an admission gate.
 func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group string) *PoolView {
-	v := &PoolView{Status: "ok", Class: "spend"}
-	var longest time.Duration
+	inView := func(b accountBucket) bool { return b.Scope == rankScope && (group == "" || b.Model == group) }
+	var rankLen time.Duration
 	for _, b := range buckets {
 		if b.UsedPct == nil || !finite(*b.UsedPct) || *b.UsedPct < 0 || *b.UsedPct > 100 {
 			return nil
@@ -366,7 +410,16 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 				return nil
 			}
 		}
-		if b.Scope != rankScope || group != "" && b.Model != group {
+		if w, err := windowDuration(b.Window); err == nil && inView(b) && w > rankLen {
+			rankLen = w
+		}
+	}
+	if group == "" && rankLen < 24*time.Hour {
+		rankLen = 0
+	}
+	v := &PoolView{Status: "ok", Class: "spend", Group: group}
+	for _, b := range buckets {
+		if !inView(b) {
 			continue
 		}
 		if v.Blocking == nil || *b.UsedPct > *v.Blocking {
@@ -374,27 +427,29 @@ func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group str
 		}
 		w, err := windowDuration(b.Window)
 		long := err == nil && w >= 24*time.Hour
-		if long && w > longest {
-			longest, v.Urgency, v.ResetHours = w, nil, nil
-		}
 		if err == nil && !long && (v.ShortUsed == nil || *b.UsedPct > *v.ShortUsed) {
 			v.ShortUsed = b.UsedPct
 		}
-		if x := projectAtReset(b.UsedPct, b.Window, b.ResetsAt, now); x != nil {
-			if v.Projected == nil || *x > *v.Projected {
-				v.Projected = x
-			}
-			if long && (v.LongProjected == nil || *x > *v.LongProjected) {
-				v.LongProjected = x
-			}
-			if long && w == longest {
-				reset, _ := time.Parse(time.RFC3339Nano, b.ResetsAt)
-				h := reset.Sub(now).Hours()
-				u := (100 - *x) / h
-				if v.Urgency == nil || u > *v.Urgency {
-					v.Urgency, v.ResetHours = &u, &h
-				}
-			}
+		x := projectAtReset(b.UsedPct, b.Window, b.ResetsAt, now)
+		if x == nil {
+			continue
+		}
+		if v.Projected == nil || *x > *v.Projected {
+			v.Projected = x
+		}
+		// LongProjected is a day-or-more window's projection, or the group's
+		// ranking window when that group has no longer one.
+		if (long || err == nil && w == rankLen) && (v.LongProjected == nil || *x > *v.LongProjected) {
+			v.LongProjected = x
+		}
+		if rankLen == 0 || err != nil || w != rankLen {
+			continue
+		}
+		reset, _ := time.Parse(time.RFC3339Nano, b.ResetsAt)
+		h := reset.Sub(now).Hours()
+		u := (100 - *x) / h
+		if v.Urgency == nil || u > *v.Urgency {
+			v.Urgency, v.ResetHours = &u, &h
 		}
 	}
 	return v

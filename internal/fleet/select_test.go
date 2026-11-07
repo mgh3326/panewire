@@ -411,28 +411,6 @@ func TestSelectRecordsPolicyVersionAndOverride(t *testing.T) {
 	}
 }
 
-func TestCatalogTextFallbackParsesTable(t *testing.T) {
-	out := `catalog=cache (age 0.8h)
-S+  codex-sol@max model=gpt-6.1-sol pool=codex gate=default score=67 decided_by=op decided_at=2026-10-08T11:45:00Z ref=hk:task/1269
-S+  kiro-opus model=claude-opus-5 pool=kiro gate=default score=67 retired unsubscribed decided_by=op
-A+  agy-flash@ model=gemini-3.7-flash pool=agy gate=default
-! a prose line
-`
-	rows, e := parseCatalogText(out)
-	if e != nil || len(rows) != 3 {
-		t.Fatalf("%v %v", rows, e)
-	}
-	if rows[0].Profile != "codex-sol" || rows[0].Effort != "max" || rows[0].Grade != "S+" || *rows[0].Score != 67 {
-		t.Fatalf("%+v", rows[0])
-	}
-	if rows[1].RetiredAt == nil || rows[1].Effort != "" {
-		t.Fatalf("retired marker and empty effort: %+v", rows[1])
-	}
-	if _, e = parseCatalogText("catalog=stale (age 25h)\nS+  x model=m pool=p gate=default\n"); e == nil {
-		t.Fatal("a stale catalog must refuse")
-	}
-}
-
 func TestPoolsPrefersUsableDuplicateRows(t *testing.T) {
 	doc := `{"schema":"scopefuel.v1","providers":[
 	  {"id":"p","status":"stale","stale":true,"pool_class":"spend","verdict":{"waste":false,"blocking_pct":90}},

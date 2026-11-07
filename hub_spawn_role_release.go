@@ -60,6 +60,12 @@ func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane, agent stri
 	if !nodeCommandPaneIDPattern.MatchString(pane) {
 		return heldProbe{reason: "no_pane_id"}
 	}
+	return h.probeNodePanes(ctx, machine, pane, agent)
+}
+
+// probeNodePanes reads machine's agents.list and finds the row with pane id
+// pane (when non-empty) or agent name agent (when non-empty).
+func (h *HubServer) probeNodePanes(ctx context.Context, machine, pane, agent string) heldProbe {
 	pending, id, _, sent := h.sendNodeCommand(machine, nodeCommandAgentsList, json.RawMessage("{}"))
 	if !sent {
 		return heldProbe{reason: "node_unreachable"}
@@ -82,7 +88,7 @@ func (h *HubServer) probeHeldPane(ctx context.Context, machine, pane, agent stri
 		// status, so it is read last and wins.
 		found, byLabel := nodeAgentRow{}, false
 		for _, row := range append(append([]nodeAgentRow(nil), list.Panes...), list.Agents...) {
-			if row.PaneID == pane || agent != "" && row.Name == agent {
+			if pane != "" && row.PaneID == pane || agent != "" && row.Name == agent {
 				found, byLabel = row, row.PaneID != pane
 			}
 		}
