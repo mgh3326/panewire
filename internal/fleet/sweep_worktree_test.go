@@ -30,9 +30,15 @@ type sweepGitFake struct {
 	// them and diff --no-index renders each as "+<name> contents".
 	untracked []string
 	lsFailed  bool
-	onOrigin  bool
-	forced    []string
-	onRemove  func(path string)
+	// detached: the worktree is on a detached HEAD. refs are the update-ref
+	// calls made, refErr fails them, fetches records each fetch's arguments.
+	detached bool
+	refs     []string
+	refErr   bool
+	fetches  [][]string
+	onOrigin bool
+	forced   []string
+	onRemove func(path string)
 }
 
 func newSweepGitFake(t *testing.T) *sweepGitFake {
@@ -67,13 +73,23 @@ func (g *sweepGitFake) do(c Command) Result {
 		gitDir := filepath.Join(g.clone, ".git", "worktrees", filepath.Base(cwd))
 		return Result{Out: gitDir + "\n" + filepath.Join(g.clone, ".git") + "\n"}
 	case len(args) >= 4 && args[2] == "branch" && args[3] == "--show-current":
+		if g.detached {
+			return Result{}
+		}
 		return Result{Out: "wk/job\n"}
+	case len(args) >= 5 && args[2] == "update-ref":
+		if g.refErr {
+			return Result{Code: 1, Err: "cannot lock ref"}
+		}
+		g.refs = append(g.refs, args[3])
+		return Result{}
 	case len(args) >= 4 && args[2] == "status":
 		if g.dirty {
 			return Result{Out: " M file\n"}
 		}
 		return Result{}
 	case len(args) >= 4 && args[2] == "fetch":
+		g.fetches = append(g.fetches, args[3:])
 		if g.fetchErr {
 			return Result{Code: 1, Err: "no remote"}
 		}

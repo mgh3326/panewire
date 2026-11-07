@@ -2,8 +2,11 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/mgh3326/panewire/internal/durable"
@@ -30,6 +33,7 @@ const (
 	sweepWorktreeNotNode      = "not_node_worktree"
 	sweepWorktreeTaskOpen     = "task_open_kept"
 	sweepWorktreePatchFailed  = "patch_failed_kept"
+	sweepWorktreeRefFailed    = "ref_failed_kept"
 	sweepWorktreeShared       = "shared_kept"
 	sweepWorktreeSymlink      = "symlink_kept"
 	sweepWorktreeDirty        = "dirty_kept"
@@ -73,7 +77,7 @@ func (s *TaskPaneSweeper) sweepWorktree(ctx context.Context, a *App, j Job, end 
 		keep(sweepWorktreeTaskOpen)
 		return
 	}
-	if s.worktreeInUse(a, j, cwd) {
+	if s.worktreeInUse(ctx, a, j, cwd) {
 		keep(sweepWorktreeShared)
 		return
 	}
@@ -143,6 +147,16 @@ func (s *TaskPaneSweeper) discardWorktree(ctx context.Context, a *App, j Job, en
 		keep(sweepWorktreePatchFailed)
 		return
 	}
+	// Commits made on a detached HEAD are in no branch, and the diff above holds
+	// only the uncommitted changes. A ref under refs/panewire keeps them from
+	// garbage collection; one that cannot be made keeps the worktree.
+	if branch == "" {
+		if err := a.must(ctx, "git", "-C", cwd, "update-ref", "refs/panewire/abandoned/"+j.ID, "HEAD"); err != nil {
+			a.warn("worktree retained: %v", err)
+			keep(sweepWorktreeRefFailed)
+			return
+		}
+	}
 	if err := a.must(ctx, "git", "-C", clone, "worktree", "remove", "--force", cwd); err != nil {
 		a.warn("worktree retained: %v", err)
 		keep(sweepWorktreeRemoveFailed)
@@ -152,12 +166,13 @@ func (s *TaskPaneSweeper) discardWorktree(ctx context.Context, a *App, j Job, en
 	if branch == "" || s.branchHeld(ctx, a, clone, branch) {
 		return
 	}
-	// origin/* refs are a cache: refresh them before they prove the tip is
-	// there. A tip that cannot be proven on origin keeps the branch.
+	// origin/* refs are a cache: refresh them, pruning the ones origin no
+	// longer has, before they prove the tip is there. A tip that cannot be
+	// proven on origin keeps the branch.
 	keepBranch := func(reason string) {
 		s.info("task branch kept", "job", j.ID, "branch", branch, "reason", reason)
 	}
-	if err := a.must(ctx, "git", "-C", clone, "fetch", "origin"); err != nil {
+	if err := a.must(ctx, "git", "-C", clone, "fetch", "--prune", "origin"); err != nil {
 		a.warn("branch retained: %v", err)
 		keepBranch(sweepBranchFetchFailed)
 		return
@@ -247,25 +262,76 @@ func (s *TaskPaneSweeper) nodeWorktree(ctx context.Context, a *App, cwd string) 
 	return clone, branch, true
 }
 
-// worktreeInUse reports that another live job's receipt cwd is the same path.
-// Two live jobs can share one worktree (they share `panewire.cmd-relay`), so
-// neither may remove it under the other. "Live" is panewire's own sense: not
-// terminal and not reaped. An unreadable job list counts as in use, so no
-// path is removed blind.
-func (s *TaskPaneSweeper) worktreeInUse(a *App, j Job, cwd string) bool {
+// worktreeInUse reports that another job still uses the receipt cwd. Two live
+// jobs can share one worktree (they share `panewire.cmd-relay`), so neither may
+// remove it under the other. Another job uses it while it is not terminal, and
+// while it is terminal but not reaped and herdr still lists its pane: a closed
+// job's pane may still be at work in the directory. A job whose history cannot
+// be read counts as using it when its event files mention the path or cannot be
+// read at all, and so does an unreadable job list or herdr, so no path is
+// removed blind.
+func (s *TaskPaneSweeper) worktreeInUse(ctx context.Context, a *App, j Job, cwd string) bool {
 	entries, err := os.ReadDir(a.Jobs)
 	if err != nil {
 		return true
 	}
+	var agents []Agent
+	agentsRead := false
 	for _, entry := range entries {
 		if !entry.IsDir() || !validID(entry.Name()) || entry.Name() == j.ID {
 			continue
 		}
 		other, err := a.job(entry.Name())
-		if err != nil || other.Terminal || other.Reaped {
+		if err != nil {
+			if eventsMention(filepath.Join(a.Jobs, entry.Name(), "events"), cwd) {
+				return true
+			}
 			continue
 		}
-		if sweepSamePath(str(other.Receipt, "cwd"), cwd) {
+		if other.Reaped || !sweepSamePath(str(other.Receipt, "cwd"), cwd) {
+			continue
+		}
+		if !other.Terminal {
+			return true
+		}
+		if other.Pane == "" {
+			continue
+		}
+		if !agentsRead {
+			if agents, err = a.agents(ctx); err != nil {
+				return true
+			}
+			agentsRead = true
+		}
+		if slices.ContainsFunc(agents, func(ag Agent) bool { return ag.Pane == other.Pane }) {
+			return true
+		}
+	}
+	return false
+}
+
+// eventsMention reports that a job's event files cannot be shown not to name
+// the path: any file in dir that contains it, or any read that fails. A job
+// with no events directory names nothing.
+func eventsMention(dir, path string) bool {
+	entries, err := os.ReadDir(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	if err != nil {
+		return true
+	}
+	quoted, err := json.Marshal(path)
+	if err != nil {
+		return true
+	}
+	needle := strings.Trim(string(quoted), `"`)
+	for _, entry := range entries {
+		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		contents, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil || strings.Contains(string(contents), needle) {
 			return true
 		}
 	}

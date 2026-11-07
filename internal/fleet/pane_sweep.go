@@ -377,6 +377,11 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string,
 		delete(s.idleSince, key)
 		return "job-changed"
 	}
+	if end.byJob {
+		// The job may have been closed again, with another outcome, since the
+		// pass judged it: the end that is written and cleaned up is the latest.
+		end = paneSweepJobEnd(latest, end.taskState)
+	}
 	fresh, err := a.agents(ctx)
 	if err != nil {
 		return "herdr-unreadable"

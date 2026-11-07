@@ -546,3 +546,138 @@ func TestSweepCapturesAnUntrackedSymlinkWithoutFollowingIt(t *testing.T) {
 		t.Fatalf("removed %v, want [%s]", g.removed, cwd)
 	}
 }
+
+// The end is the latest record's: a job re-closed as completed between the
+// pass and the close is a completed one, so its worktree is not discarded.
+func TestSweepRecomputesAClosedJobsEndBeforeClosing(t *testing.T) {
+	f, g, _ := abandonedFixture(t)
+	g.dirty = true
+	base := f.runner.Do
+	reclosed := false
+	f.runner.Do = func(c Command) Result {
+		if c.Name == "herdr" && len(c.Args) > 1 && c.Args[0] == "pane" && c.Args[1] == "read" && !reclosed {
+			reclosed = true
+			f.closeJob("a", "completed")
+		}
+		return base(c)
+	}
+	f.at(0)
+	f.at(11)
+	if !reclosed || f.reaped("a") == nil {
+		t.Fatalf("the job was not closed (reclosed %v)", reclosed)
+	}
+	if payload := f.reaped("a"); payload["reason"] != "job_completed" {
+		t.Fatalf("job.reaped payload = %v, want job_completed", payload)
+	}
+	if state := f.store.record(t, "a")["state"]; state != "completed" {
+		t.Fatalf("hk job state = %v, want completed", state)
+	}
+	if len(g.removed) != 0 {
+		t.Fatalf("removed %v: the job completed, its task is open", g.removed)
+	}
+	if !f.infoHas("task worktree kept", "job=a", "reason=task_open_kept") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}
+
+// A job whose history cannot be read may still use the path: when its event
+// files name it, the worktree stays; when they do not, it does not block.
+func TestSweepKeepsAWorktreeAnUnreadableJobNames(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		named   bool
+		removed int
+	}{{"names the path", true, 0}, {"names another path", false, 1}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f, g, cwd := abandonedFixture(t)
+			dir := filepath.Join(f.a.Jobs, "z", "events")
+			if err := os.MkdirAll(dir, 0700); err != nil {
+				t.Fatal(err)
+			}
+			path := "/elsewhere"
+			if tc.named {
+				path = cwd
+			}
+			// No kind: the job cannot be parsed, as with a hub revocation marker.
+			if err := os.WriteFile(filepath.Join(dir, "00001-x.json"), []byte(`{"type":"job.revoked","cwd":"`+path+`"}`), 0600); err != nil {
+				t.Fatal(err)
+			}
+			f.at(0)
+			f.at(11)
+			if len(g.removed) != tc.removed {
+				t.Fatalf("removed %v, want %d", g.removed, tc.removed)
+			}
+			if tc.named && !f.infoHas("task worktree kept", "job=a", "reason=shared_kept") {
+				t.Fatalf("info lines = %q", f.info)
+			}
+		})
+	}
+}
+
+// A job that is terminal but not reaped may still have its pane at work in the
+// directory: the worktree stays while herdr lists that pane.
+func TestSweepKeepsAWorktreeATerminalJobsPaneStillHolds(t *testing.T) {
+	f, g, cwd := abandonedFixture(t)
+	other := f.sweptJob("b", "43", cwd)
+	f.tasks["43"], f.category["43"] = "developing", "started"
+	putEvent(t, f.a, "b", "job.completed", map[string]any{})
+	f.status[other] = "working"
+	f.at(0)
+	f.at(11)
+	if len(g.removed) != 0 {
+		t.Fatalf("removed %v while the other pane was open", g.removed)
+	}
+	if !f.infoHas("task worktree kept", "job=a", "reason=shared_kept") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}
+
+func TestSweepRemovesAWorktreeATerminalJobsPaneHasLeft(t *testing.T) {
+	f, g, cwd := abandonedFixture(t)
+	other := f.sweptJob("b", "43", cwd)
+	f.tasks["43"], f.category["43"] = "developing", "started"
+	putEvent(t, f.a, "b", "job.completed", map[string]any{})
+	delete(f.status, other)
+	f.at(0)
+	f.at(11)
+	if !slices.Equal(g.removed, []string{cwd}) {
+		t.Fatalf("removed %v, want [%s]", g.removed, cwd)
+	}
+}
+
+// Commits made on a detached HEAD sit in no branch: a ref keeps them before
+// the worktree goes, and a ref that cannot be made keeps the worktree.
+func TestSweepKeepsDetachedCommitsReachableBeforeRemoving(t *testing.T) {
+	f, g, cwd := abandonedFixture(t)
+	g.detached = true
+	f.at(0)
+	f.at(11)
+	if !slices.Equal(g.refs, []string{"refs/panewire/abandoned/a"}) || !slices.Equal(g.removed, []string{cwd}) {
+		t.Fatalf("refs %v, removed %v", g.refs, g.removed)
+	}
+}
+
+func TestSweepKeepsADetachedWorktreeWhenItsRefCannotBeMade(t *testing.T) {
+	f, g, _ := abandonedFixture(t)
+	g.detached, g.refErr = true, true
+	f.at(0)
+	f.at(11)
+	if len(g.removed) != 0 {
+		t.Fatalf("removed %v", g.removed)
+	}
+	if !f.infoHas("task worktree kept", "job=a", "reason=ref_failed_kept") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}
+
+// An origin branch deleted since the last fetch leaves a stale tracking ref;
+// the refresh prunes it before the ref can prove the tip is on origin.
+func TestSweepPrunesBeforeProvingTheTipIsOnOrigin(t *testing.T) {
+	f, g, _ := abandonedFixture(t)
+	g.onOrigin = true
+	f.at(0)
+	f.at(11)
+	if len(g.fetches) != 1 || !slices.Equal(g.fetches[0], []string{"--prune", "origin"}) {
+		t.Fatalf("fetches = %v, want one fetch --prune origin", g.fetches)
+	}
+}

@@ -83,7 +83,10 @@ all of these make it the node's to remove:
 - the receipt cwd is under the node's `work_root` and is a linked worktree of
   a clone that is a direct child of that root, the clone `worktree.prepare`
   creates. Anything else is kept and logged `not_node_worktree`;
-- no other live job's receipt cwd is the same path, logged `shared_kept`;
+- no other job still uses the path, logged `shared_kept`: one that is not
+  terminal, one that is terminal and not reaped while herdr still lists its
+  pane, or one whose history cannot be read when its event files name the path
+  (or cannot be read at all). An unreadable job list or herdr counts as in use;
 - the path is not reached through a symlink, and is not the canonical checkout.
 
 What happens next depends on how the job ended:
@@ -103,7 +106,7 @@ What happens next depends on how the job ended:
   read), keeps the worktree, `patch_failed_kept`). It then runs `git worktree remove
   --force <cwd>`, which frees the directory for the next attempt. The local
   branch is deleted with `-D` only when no other worktree holds it and, after a
-  `git fetch origin`, its tip is contained in some `origin/*` ref (`task branch
+  `git fetch --prune origin`, its tip is contained in some `origin/*` ref (`task branch
   removed`, reason `on_origin`); otherwise the branch stays and the line says
   why (`task branch kept`, reason `not_on_origin_kept` or `fetch_failed_kept`).
   A merged task wins over an abandoned job: the clean-only rule applies.
