@@ -1133,6 +1133,15 @@ const (
 // A lanes file that cannot be read proves nothing about lanes, so it never
 // retires a row on lane grounds.
 func (h *HubServer) relayReplayRetireReason(record handoffkeepRelayEvent) string {
+	return h.relayReplayRetireReasonAged(record, true)
+}
+
+// relayReplayRetireReasonAged is relayReplayRetireReason with the receipt-age
+// gate optional. The idle re-delivery of a working_wait_expired row turns it
+// off (hk 3411): such a row was held on its node for up to relay.cmd_hold_max,
+// so its receipt says nothing about its age, and the hub bounds it by the
+// time of the drop instead (hub_relay_idle_redelivery.go).
+func (h *HubServer) relayReplayRetireReasonAged(record handoffkeepRelayEvent, receiptAge bool) string {
 	now := h.now().UTC()
 	if record.Kind == "lane.event" {
 		if wake, ok := decodeIdleWakeRelayText(record.Text); ok {
@@ -1144,6 +1153,9 @@ func (h *HubServer) relayReplayRetireReason(record handoffkeepRelayEvent) string
 			}
 			return ""
 		}
+	}
+	if !receiptAge {
+		return ""
 	}
 	if received, err := time.Parse(time.RFC3339Nano, record.ReceivedAt); err == nil && now.Sub(received) > relayReplayMaxAge {
 		return "stale"

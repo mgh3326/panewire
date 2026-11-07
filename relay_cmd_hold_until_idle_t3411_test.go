@@ -452,3 +452,129 @@ func TestCmdIdleRedeliveryIgnoresOlderWakeRetry_t3411(t *testing.T) {
 		t.Fatalf("idle wake 3 re-delivered %+v, want only row %d", third, held[2].EventID)
 	}
 }
+
+// An idle wake whose replay spends nothing (here the durable retire write
+// fails, so nothing is queued) keeps the row for the next idle wake instead of
+// stranding it until a hub restart.
+func TestCmdIdleRedeliveryRetriesUnspentRow_t3411(t *testing.T) {
+	rig := t3276Start(t)
+	rig.node.relayControl.cmdHoldMax = time.Nanosecond
+	pane := t3384Install(t, "cmd", "working")
+	held := t3384Hold(t, rig, relayDeliverDirective)
+	rig.node.relayBusyManager().releaseWorking(t.Context(), "w1:pW", true)
+	if kinds, _ := rig.drainEvents(); t3276Count(kinds, "relay.dropped") != 1 {
+		t.Fatalf("events=%v, want the row dropped as %s", kinds, relayDroppedWorkingExpired)
+	}
+	t3411AssertNothingTyped(t, pane)
+	rig.fake.mu.Lock()
+	rig.fake.deliveredFailIDs = map[int64]bool{held[0].EventID: true}
+	rig.fake.mu.Unlock()
+
+	retirePath := "/v1/relay/events/" + strconv.FormatInt(held[0].EventID, 10) + "/delivered"
+	t650Send(t, rig.hub, "host-a", rig.dest, "idle-wake.route.request", t3411IdleWake(1))
+	// The row sits in the hub's memory until the wake picks it, so first wait
+	// for the retire write the replay attempts, then for the row to come back.
+	eventually(t, 3*time.Second, "the replay's failed retire write", func() bool {
+		rig.fake.mu.Lock()
+		defer rig.fake.mu.Unlock()
+		for _, call := range rig.fake.calls {
+			if call.Method == "POST" && call.Path == retirePath {
+				return true
+			}
+		}
+		return false
+	})
+	eventually(t, 3*time.Second, "the failed re-delivery to put the row back", func() bool {
+		rig.hub.mu.Lock()
+		defer rig.hub.mu.Unlock()
+		_, kept := rig.hub.relayControl.workingExpired[held[0].EventID]
+		return kept
+	})
+	if got := t3411WorkerRelays(rig); len(got) != 0 {
+		t.Fatalf("a replay whose retire failed queued %+v, want nothing", got)
+	}
+	if row := rig.row(held[0].EventID); row.DeliveredAt != "" {
+		t.Fatalf("the row closed although its retire failed: %+v", row)
+	}
+
+	rig.fake.mu.Lock()
+	rig.fake.deliveredFailIDs = nil
+	rig.fake.mu.Unlock()
+	t650Send(t, rig.hub, "host-a", rig.dest, "idle-wake.route.request", t3411IdleWake(2))
+	var redelivered []hubRelayInjectEvent
+	eventually(t, 3*time.Second, "the re-delivery at the next idle wake", func() bool {
+		redelivered = append(redelivered, t3411WorkerRelays(rig)...)
+		return len(redelivered) > 0
+	})
+	if len(redelivered) != 1 || redelivered[0].EventID != held[0].EventID {
+		t.Fatalf("idle wake 2 re-delivered %+v, want row %d once", redelivered, held[0].EventID)
+	}
+}
+
+// The job ends while its cmd pane is still working, then the pane turns idle:
+// the held row is dropped as job_ended, not typed into the ended job's pane.
+func TestCmdHoldDroppedWhenJobEndedBeforeIdle_t3411(t *testing.T) {
+	rig := t3276Start(t)
+	root := t.TempDir()
+	rig.node.jobsInboxRoot = root
+	pane := t3384Install(t, "cmd", "working")
+	held := t3384Hold(t, rig, relayDeliverDirective)
+	events := filepath.Join(root, "jobs", t3276Worker, "events")
+	if err := os.MkdirAll(events, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, kind := range map[string]string{"00001-job.claim.json": "job.claim", "00002-job.completed.json": "job.completed"} {
+		body, _ := json.Marshal(map[string]any{"kind": kind, "job_id": t3276Worker, "payload": map[string]any{"agent_label": t3276Worker}})
+		if err := os.WriteFile(filepath.Join(events, name), body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pane.setStatus(t, "idle")
+
+	rig.node.relayBusyManager().release(t.Context(), "w1:pW", false)
+
+	t3411AssertNothingTyped(t, pane)
+	kinds, payloads := rig.drainEvents()
+	if t3276Count(kinds, "relay.dropped") != 1 || payloads["relay.dropped"].Reason != relayDroppedJobEnded || t3276Count(kinds, "relay.delivered") != 0 {
+		t.Fatalf("events=%v dropped=%+v, want one relay.dropped %s and no delivery", kinds, payloads["relay.dropped"], relayDroppedJobEnded)
+	}
+	if row := rig.row(held[0].EventID); row.DeliveredAt != "" {
+		t.Fatalf("a dropped row was marked delivered: %+v", row)
+	}
+}
+
+// A row the node held up to the ceiling was received more than the replay
+// window ago. Its idle re-delivery is bounded by the drop, not the receipt, so
+// it still reaches the pane instead of being retired as stale.
+func TestCmdIdleRedeliveryOfRowHeldToCeiling_t3411(t *testing.T) {
+	rig := t3276Start(t)
+	rig.node.relayControl.cmdHoldMax = time.Nanosecond
+	pane := t3384Install(t, "cmd", "working")
+	held := t3384Hold(t, rig, relayDeliverDirective)
+	rig.fake.mu.Lock()
+	for _, row := range rig.fake.rows {
+		if row.ID == held[0].EventID {
+			row.ReceivedAt = time.Now().UTC().Add(-relayReplayMaxAge - time.Hour).Format(time.RFC3339Nano)
+		}
+	}
+	rig.fake.mu.Unlock()
+	rig.node.relayBusyManager().releaseWorking(t.Context(), "w1:pW", true)
+	if kinds, _ := rig.drainEvents(); t3276Count(kinds, "relay.dropped") != 1 {
+		t.Fatalf("events=%v, want the row dropped as %s", kinds, relayDroppedWorkingExpired)
+	}
+	pane.setStatus(t, "idle")
+
+	t650Send(t, rig.hub, "host-a", rig.dest, "idle-wake.route.request", t3411IdleWake(1))
+	var redelivered []hubRelayInjectEvent
+	eventually(t, 3*time.Second, "the idle re-delivery of the old row", func() bool {
+		redelivered = append(redelivered, t3411WorkerRelays(rig)...)
+		return len(redelivered) > 0
+	})
+	if len(redelivered) != 1 || redelivered[0].EventID != held[0].EventID {
+		t.Fatalf("re-delivered %+v, want row %d", redelivered, held[0].EventID)
+	}
+	rig.node.relayBusyManager().offer(t.Context(), t3276Message(redelivered[0]))
+	if got := pane.calls(t, "pane send-text"); got != 1 {
+		t.Fatalf("the re-delivered row was typed %d times, want 1", got)
+	}
+}

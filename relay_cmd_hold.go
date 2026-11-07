@@ -49,19 +49,15 @@ func (client *HubClient) relayCmdHoldMax() time.Duration {
 }
 
 // keepWorkingCmdHold decides an expired held row whose pane is working and
-// cannot be typed into (hk 3411). It reports true when the row stays held,
-// with its deadline moved one recheck later (never past the ceiling), or when
-// it was dropped because its job ended. False means the ceiling has passed and
-// the caller takes the working_wait_expired drop.
+// cannot be typed into (hk 3411); the release filter has already dropped a row
+// whose job ended. It reports true when the row stays held, with its deadline
+// moved one recheck later (never past the ceiling). False means the ceiling has
+// passed and the caller takes the working_wait_expired drop.
 func (manager *relayBusyManager) keepWorkingCmdHold(parent context.Context, item relayHeld) bool {
 	now := manager.client.nowUTC()
 	ceiling := item.HeldSince.Add(manager.client.relayCmdHoldMax())
 	if !now.Before(ceiling) {
 		return false
-	}
-	if relayLaneJobEnded(manager.client.jobsInboxRoot, item.Lane) {
-		manager.expireHeldLease(parent, item, relayDroppedJobEnded)
-		return true
 	}
 	next := now.Add(relayCmdHoldRecheck)
 	if next.After(ceiling) {

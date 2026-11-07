@@ -17,7 +17,7 @@ type hubRelayControlState struct {
 	// to its lane, until an idle wake re-delivers it; idleRedelivered holds
 	// the newest idle wake that re-delivered a row per machine and pane (hk
 	// 3411, hub_relay_idle_redelivery.go). Both are guarded by HubServer.mu.
-	workingExpired  map[int64]string
+	workingExpired  map[int64]workingExpiredRow
 	idleRedelivered map[string]idleRedeliveryWake
 }
 

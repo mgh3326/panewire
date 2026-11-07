@@ -219,7 +219,10 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 	if h.retireUnconfirmedDigest(record, digestMark) {
 		return
 	}
-	if h.replayInbox(record) {
+	// An idle re-delivery is bounded by the time of its drop, not its receipt
+	// (hk 3411, relayReplayRetireReasonAged).
+	receiptAge := source != relayReplaySourceIdle
+	if h.replayInboxAged(record, receiptAge) {
 		return
 	}
 	if h.handoffkeep == nil {
@@ -244,7 +247,7 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 				return
 			}
 		}
-	} else if reason := h.relayReplayRetireReason(record); reason != "" {
+	} else if reason := h.relayReplayRetireReasonAged(record, receiptAge); reason != "" {
 		h.retireRelayReplay(record, reason)
 		return
 	}

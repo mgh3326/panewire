@@ -973,6 +973,12 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 			manager.expireHeldLease(parent, item, reason)
 			continue
 		}
+		if relayHarnessWorkingUnprovable(harness) && relayLaneJobEnded(manager.client.jobsInboxRoot, item.Lane) {
+			// hk 3411: a cmd row is held for its job; once the job has ended it
+			// is dropped, whether the pane is still working or turned idle.
+			manager.expireHeldLease(parent, item, relayDroppedJobEnded)
+			continue
+		}
 		if paneWorkingUnprovable {
 			if !expired {
 				// The pane turned working again before this release read it.

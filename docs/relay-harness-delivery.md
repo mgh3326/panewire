@@ -69,7 +69,9 @@ per inject. It is dropped only when:
   gate: `pane_occupant_gone`, `pane_occupant_changed`, `lease_unverifiable`,
   `lane_rerouted`);
 - the node's own record of the lane's job (`jobs/<lane>/events`) shows the job
-  ended (`job_ended`); a lane with no job record keeps its hold;
+  ended (`job_ended`), checked at every release, so a row is not typed into
+  the pane of an ended job even once it turns idle; a lane with no job record
+  keeps its hold;
 - the `relay.cmd_hold_max` ceiling passes, counted from when the row was held
   (default 24h; set it on the node with `PANEWIRE_RELAY_CMD_HOLD_MAX`, a Go
   duration). Then the row is dropped as `working_wait_expired`, the design lane
@@ -78,7 +80,11 @@ per inject. It is dropped only when:
 A row dropped as `working_wait_expired` was never typed. The hub remembers it
 when its unconfirmed mark lands and re-delivers it when the idle-wake observer
 next reports the pane idle: the oldest such row per idle wake, so one row per
-inject, as the row's one labelled replay, so at most once. Its text starts with
+inject, as the row's one labelled replay, so at most once. A wake that spends
+nothing (a failed read or retire) keeps the row for the next wake, up to three
+wakes. Its age is counted from the drop, not the receipt, since the node held it
+up to `relay.cmd_hold_max`: a row dropped more than the replay window (24h) ago
+is left to the restart replay. Its text starts with
 `[held while this pane was working - first sent <KST time> - delivered now that
 it is idle]`. The memory is not durable; after a hub restart the startup replay
 gives every marked row its one labelled replay instead (#1002). Every other
