@@ -91,6 +91,11 @@ func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.Task
 			return
 		}
 	}
+	if app.BenchStore == nil {
+		if env, err := client.nodeHandoffkeepEnv(); err == nil {
+			app.BenchStore, _ = fleet.NewBenchStore(env.URL, env.Token, env.CFID, env.CFSecret)
+		}
+	}
 	if err := sweeper.Pass(ctx, app); err != nil {
 		slog.Warn("task pane sweep failed", "reason", "jobs-unreadable")
 	}

@@ -78,20 +78,76 @@ func creditEntryUSD(m manualEntry, total float64, hasTotal bool) (float64, bool)
 	return total * (100 - *m.UsedPct) / 100, true
 }
 
-// creditBalances reads the current credit-window entry of every pool in
-// pacelever's manual store.
-func (q CLIQuota) creditBalances(ctx context.Context) (map[string]*CreditBalance, error) {
+// manualStoreData is the manual store shape credit_expiry reads, whether it
+// came from hk or from pacelever's JSON.
+type manualStoreData struct {
+	Schema  string            `json:"schema"`
+	History []manualEntry     `json:"history"`
+	Latest  map[string]string `json:"latest"`
+}
+
+func quotaAccounts(quota map[string]any) map[string]string {
+	m, _ := quota["accounts"].(map[string]any)
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for pool := range m {
+		if fp, ok := m[pool].(string); ok && accountFP.MatchString(fp) {
+			out[pool] = fp
+		}
+	}
+	return out
+}
+
+// manualStore reads the operator-entered entries. A shared reader answers from
+// hk with no pacelever process; the last branch is the pre-migration and test
+// fallback.
+func (q CLIQuota) manualStore(ctx context.Context) (manualStoreData, error) {
+	out := manualStoreData{Schema: "pacelever.manual.v1", History: []manualEntry{}, Latest: map[string]string{}}
+	if q.SharedLatest != nil {
+		for pool, fp := range q.Accounts {
+			if !accountFP.MatchString(fp) {
+				continue
+			}
+			latest, err := q.SharedLatest(ctx, pool+":"+fp)
+			if err != nil {
+				return out, err
+			}
+			for _, x := range latest.Manual {
+				if x.Kind != "manual" || x.ExpiresAt == nil || len(x.Buckets) != 1 || x.Buckets[0].Scope != "account" {
+					continue
+				}
+				used := x.Buckets[0].UsedPct
+				entry := manualEntry{
+					ID: fmt.Sprintf("hk-%d", x.ID), Event: "set", Pool: pool, Window: x.Window,
+					UsedPct: &used, MeasuredAt: x.MeasuredAt.Format(time.RFC3339Nano),
+					ExpiresAt: x.ExpiresAt.Format(time.RFC3339Nano),
+				}
+				out.History = append(out.History, entry)
+				out.Latest[pool+":"+x.Window] = entry.ID
+			}
+		}
+		return out, nil
+	}
 	r := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: []string{"manual", "list"}}, "manual store", 30*time.Second)
 	if e := checkQuota(r, "manual store"); e != nil {
-		return nil, e
+		return out, e
 	}
-	var store struct {
-		Schema  string            `json:"schema"`
-		History []manualEntry     `json:"history"`
-		Latest  map[string]string `json:"latest"`
+	if e := json.Unmarshal([]byte(r.Out), &out); e != nil || out.Schema == "" {
+		return out, fail(exitConfig, "invalid manual store JSON")
 	}
-	if e := json.Unmarshal([]byte(r.Out), &store); e != nil || store.Schema == "" {
-		return nil, fail(exitConfig, "invalid manual store JSON")
+	return out, nil
+}
+
+// creditBalances reads the current credit-window entry of every pool. With a
+// shared reader it reads hk directly; the configured total supplies the dollars
+// the shared record does not carry (#309). Without one it keeps the pacelever
+// process as a test and pre-migration fallback.
+func (q CLIQuota) creditBalances(ctx context.Context) (map[string]*CreditBalance, error) {
+	store, err := q.manualStore(ctx)
+	if err != nil {
+		return nil, err
 	}
 	byPool := map[string][]manualEntry{}
 	for _, m := range store.History {

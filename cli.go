@@ -34,13 +34,19 @@ func RunCLI(args []string, cfg CLIConfig) int {
 	if len(args) > 0 && args[0] == "catalog" {
 		return runCatalogCLI(args[1:], os.Stdout, os.Stderr)
 	}
+	if len(args) > 0 && args[0] == "reps" {
+		return fleet.RepsMain(context.Background(), args[1:], os.Stdout, os.Stderr)
+	}
+	if len(args) > 0 && args[0] == "manual" {
+		return fleet.ManualMain(context.Background(), args[1:], os.Stdout, os.Stderr)
+	}
 	if len(args) > 0 && args[0] == "heavy" {
 		fmt.Fprintln(os.Stderr, "panewire: heavy was removed; use panewire place to select a host by load")
 		return ExitUsage
 	}
 	if len(args) == 1 && (args[0] == "-h" || args[0] == "--help") {
 		fmt.Fprintln(os.Stdout, "Usage: panewire COMMAND [arguments]")
-		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, burst, place, node, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, inbox, job, pr, wait, version, quota, catalog")
+		fmt.Fprintln(os.Stdout, "Commands: spawn, work, reap, done, escalate, delegate, hosts, profiles, find, plan, resolve, preflight, daemon, hub, hub-status, hub-emit, burst, place, node, prompt, deliveries, jobs, lanes, lanes-audit, fleet-census, session-reap, relay, emit, inbox, job, pr, wait, version, quota, catalog, reps, manual")
 		fmt.Fprintln(os.Stdout)
 		fmt.Fprintln(os.Stdout, lanesUsage)
 		return ExitOK
