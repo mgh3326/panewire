@@ -615,6 +615,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return ledgerFail(e, "lease")
 	}
 	committed := false
+	configuredWorkspace := s.Workspace
 	var createdWs *createdWorkspace
 	if !s.DryRun {
 		var resolveErr error
@@ -624,17 +625,15 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		}
 	}
 	// A workspace this spawn created is kept alive by its root pane. On failure
-	// close that pane only for a non-oldest duplicate: resolve always picks the
-	// oldest match, so no spawn can have adopted this one, while the oldest is
-	// left because an adopter may not have created its pane yet.
+	// close that pane so the spawn leaves no empty workspace behind.
 	defer func() {
 		if committed || createdWs == nil || createdWs.rootPane == "" {
 			return
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if e := a.closeCreatedWorkspace(cleanup, createdWs); e != nil {
-			a.warn("created workspace cleanup failed; inspect workspace %s on the executing host: %v", createdWs.id, e)
+		if e := a.must(cleanup, "herdr", "pane", "close", createdWs.rootPane); e != nil {
+			a.warn("created workspace cleanup failed; close pane %s on the executing host: %v", createdWs.rootPane, e)
 		}
 	}()
 	if s.AccountKey == "" {
@@ -791,14 +790,36 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			a.stage("launch", startedLaunch)
 		}
 	}()
-	tabArgs := []string{"tab", "create", "--workspace", s.Workspace, "--cwd", s.CWD, "--label", s.Label, "--no-focus"}
-	for _, v := range env {
-		tabArgs = append(tabArgs, "--env", v)
+	createTab := func(workspace string) Result {
+		args := []string{"tab", "create", "--workspace", workspace, "--cwd", s.CWD, "--label", s.Label, "--no-focus"}
+		for _, v := range env {
+			args = append(args, "--env", v)
+		}
+		return a.call(ctx, "herdr", args...)
 	}
 	s.placement.started = true
-	r := a.call(ctx, "herdr", tabArgs...)
+	usedWorkspace := s.Workspace
+	r := createTab(s.Workspace)
 	if e = check(r, "herdr tab create"); e != nil {
-		return e
+		// Another spawn's failed cleanup may close a workspace this spawn
+		// adopted before the tab exists. A label can be recreated; an id cannot.
+		if !workspaceGone(r) || herdrWorkspaceID.MatchString(configuredWorkspace) {
+			return e
+		}
+		retryWorkspace, retryCreated, retryErr := a.resolveWorkspace(ctx, configuredWorkspace)
+		if retryErr != nil {
+			return retryErr
+		}
+		if retryCreated != nil {
+			createdWs = retryCreated
+		} else if retryWorkspace != usedWorkspace {
+			createdWs = nil
+		}
+		s.Workspace = retryWorkspace
+		r = createTab(s.Workspace)
+		if e = check(r, "herdr tab create"); e != nil {
+			return e
+		}
 	}
 	var created map[string]any
 	if e = json.Unmarshal([]byte(r.Out), &created); e != nil {

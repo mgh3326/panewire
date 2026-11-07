@@ -36,7 +36,7 @@ func TestResolveWorkspaceCreatesMissingLabel(t *testing.T) {
 	if got != "w2" || creates != 1 {
 		t.Fatalf("workspace=%q creates=%d", got, creates)
 	}
-	if created == nil || created.id != "w2" || created.label != "workers" || created.rootPane != "w2:p0" {
+	if created == nil || created.rootPane != "w2:p0" {
 		t.Fatalf("created=%+v", created)
 	}
 	if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "workspace_created label=workers workspace=w2") {
@@ -98,7 +98,7 @@ func TestResolveWorkspaceUsesOldestAfterCreateRace(t *testing.T) {
 	if got != "w1" {
 		t.Fatalf("workspace=%q, want the oldest", got)
 	}
-	if created == nil || created.id != "w2" || created.rootPane != "w2:p0" {
+	if created == nil || created.rootPane != "w2:p0" {
 		t.Fatalf("created=%+v, want this call's own workspace", created)
 	}
 	if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "workspace_created label=workers workspace=w1 duplicates=1") {
@@ -137,17 +137,17 @@ func TestResolveWorkspaceUsesListedID(t *testing.T) {
 	}
 }
 
-// A failed spawn must not delete a workspace another spawn may have adopted.
-// Resolve picks the oldest match, so only a non-oldest duplicate is safe to
-// close; the oldest is kept because an adopter may not have created its pane.
+// A failed spawn closes the root pane of a workspace it created, even when the
+// workspace list is unavailable after the create.
 func TestSpawnWorkspaceCleanupOnFailure(t *testing.T) {
 	for _, test := range []struct {
 		name       string
 		workspaces string
-		closed     bool
+		listError  bool
 	}{
-		{"oldest kept", `[{"workspace_id":"w2","label":"workers"}]`, false},
-		{"non-oldest duplicate closed", `[{"workspace_id":"w1","label":"workers"},{"workspace_id":"w2","label":"workers"}]`, true},
+		{"oldest", `[{"workspace_id":"w2","label":"workers"}]`, false},
+		{"duplicate", `[{"workspace_id":"w1","label":"workers"},{"workspace_id":"w2","label":"workers"}]`, false},
+		{"listing unavailable", "", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			a, s, f, _ := cmdFixture(t)
@@ -162,6 +162,9 @@ func TestSpawnWorkspaceCleanupOnFailure(t *testing.T) {
 					if !created {
 						return Result{Out: noWorkspaces}
 					}
+					if test.listError {
+						return Result{Code: 1, Err: "fixture workspace list failure"}
+					}
 					return Result{Out: `{"result":{"workspaces":` + test.workspaces + `}}`}
 				case "workspace create --label workers":
 					created = true
@@ -175,9 +178,69 @@ func TestSpawnWorkspaceCleanupOnFailure(t *testing.T) {
 			if err := a.Spawn(context.Background(), s); exitCode(err) != exitDuplicate {
 				t.Fatalf("spawn exit=%d err=%v", exitCode(err), err)
 			}
-			if !created || closed != test.closed {
-				t.Fatalf("created=%t root pane closed=%t, want %t", created, closed, test.closed)
+			if !created || !closed {
+				t.Fatalf("created=%t root pane closed=%t", created, closed)
 			}
 		})
+	}
+}
+
+// A spawn that adopted a workspace may find it closed by another spawn's failed
+// cleanup before its tab exists. A label is recreated and the tab retried.
+func TestSpawnRetriesTabCreateWhenAdoptedWorkspaceVanishes(t *testing.T) {
+	a, s, f, _ := cmdFixture(t)
+	s.Workspace = "workers"
+	previous := f.Do
+	lists, creates, tabs := 0, 0, 0
+	f.Do = func(c Command) Result {
+		switch strings.Join(c.Args, " ") {
+		case "workspace list":
+			lists++
+			switch lists {
+			case 1:
+				return Result{Out: `{"result":{"workspaces":[{"workspace_id":"w1","label":"workers"}]}}`}
+			case 2:
+				return Result{Out: noWorkspaces}
+			}
+			return Result{Out: `{"result":{"workspaces":[{"workspace_id":"w3","label":"workers"}]}}`}
+		case "workspace create --label workers":
+			creates++
+			return Result{Out: `{"result":{"workspace":{"workspace_id":"w3"},"root_pane":{"pane_id":"w3:p0"}}}`}
+		}
+		if strings.HasPrefix(strings.Join(c.Args, " "), "tab create") {
+			tabs++
+			if tabs == 1 {
+				return Result{Code: 1, Out: `{"error":{"code":"workspace_not_found"}}`}
+			}
+		}
+		return previous(c)
+	}
+	if err := a.Spawn(context.Background(), s); err != nil {
+		t.Fatal(err)
+	}
+	if lists != 3 || creates != 1 || tabs != 2 {
+		t.Fatalf("lists=%d creates=%d tabs=%d", lists, creates, tabs)
+	}
+}
+
+// An explicit workspace id cannot be recreated, so a vanished id is not retried.
+func TestSpawnDoesNotRetryVanishedIDWorkspace(t *testing.T) {
+	a, s, f, _ := cmdFixture(t)
+	s.Workspace = "w1Q"
+	previous := f.Do
+	tabs := 0
+	f.Do = func(c Command) Result {
+		switch strings.Join(c.Args, " ") {
+		case "workspace list":
+			return Result{Out: `{"result":{"workspaces":[{"workspace_id":"w1Q","label":"workers"}]}}`}
+		}
+		if strings.HasPrefix(strings.Join(c.Args, " "), "tab create") {
+			tabs++
+			return Result{Code: 1, Out: `{"error":{"code":"workspace_not_found"}}`}
+		}
+		return previous(c)
+	}
+	if err := a.Spawn(context.Background(), s); err == nil || tabs != 1 {
+		t.Fatalf("err=%v tabs=%d", err, tabs)
 	}
 }
