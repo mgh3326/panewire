@@ -267,7 +267,10 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 		// name under its work root.
 		cwd, found = defaultRepoDir(config.WorkRoot, message.CWDKey)
 	}
-	if !found {
+	// A checkout clones into the work root and sets cwd itself, so a repo
+	// absent from cwd_map is not a refusal when the node has a work root.
+	// This is the node-side half of the placement repo_unmapped rule.
+	if !found && (message.Checkout == nil || config.WorkRoot == "") {
 		result.RC, result.Error = 2, "cwd_unmapped"
 		return result
 	}

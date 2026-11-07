@@ -199,6 +199,10 @@ this way the refusal is `NO_ELIGIBLE_HOST` with the dominant reason and a
 matching repair, for example `repo_unmapped: no node maps repo X; add it to
 cwd_map or ensure work_root`, never `AUTH_UNAVAILABLE`.
 
+The node follows the same rule: a spawn that carries a checkout on a node
+with a work root proceeds to `worktree.prepare` even when the repository is
+absent from `cwd_map`.
+
 **Old nodes.** A node that never sent readiness is `readiness_unknown`, and
 no readiness check drops it: it is placed as before. A readiness value that
 is stale, or whose publisher is dead, reads the same way. Only the

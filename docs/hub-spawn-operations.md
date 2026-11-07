@@ -171,7 +171,9 @@ newest hub operation is `retryable`.
 
 Under `--host auto`, a node's `cwd_unmapped` refusal returns the operation to
 placement, which tries the next candidate. The node answers it before any
-checkout or engine call. A first-run refusal (`hooks_review`, `trust_prompt`,
+checkout or engine call. A spawn carrying a checkout on a node with a work
+root is not answered that way: the node clones into the work root, following
+[the placement rule](placement.md#the-filter). A first-run refusal (`hooks_review`, `trust_prompt`,
 `omp_setup_wizard`, `auth_unavailable`) does the same once the node verified
 its pane cleanup, and the hub tells `operator-desk` which one-time action the
 host needs ([placement.md](placement.md#first-run-refusals-and-the-desk-notice)).
