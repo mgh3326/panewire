@@ -412,9 +412,6 @@ type HubServer struct {
 	// spawnOrphanProbed is when the hub last probed each stranded request's
 	// node for a labelled pane (hub_spawn_orphan.go); guarded by mu.
 	spawnOrphanProbed map[string]time.Time
-	// fleetEvents writes a hub fleet event. Tests substitute a recorder;
-	// production leaves it nil and events go to the state directory.
-	fleetEvents func(time.Time, fleetEvent) bool
 	// auth is swapped whole on an auth-file reload; read it through
 	// currentAuth on authentication paths and auth.Load() elsewhere.
 	auth              atomic.Pointer[hubAuthSet]
@@ -425,6 +422,14 @@ type HubServer struct {
 	authFailedMissing bool
 	alertNodes        map[string]struct{}
 	now               func() time.Time
+	// fleetEvents writes a fleet event. Tests substitute a recorder; production
+	// leaves it nil and events go to the state directory (emitFleet).
+	fleetEvents func(time.Time, fleetEvent) bool
+	// heldLoop counts held role reservations per role key; heldLoopMu guards it
+	// separately from mu because a Sentry send must not run under the hub lock.
+	heldLoopMu        sync.Mutex
+	heldLoop          map[string]*spawnHeldLoop
+	heldLoopOrder     lruIndex[string]
 	staleAfter        time.Duration
 	keepaliveInterval time.Duration
 	gracePeriod       time.Duration
@@ -1464,6 +1469,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
+			h.observeRelayDropped(machineID, dropped)
 			h.escalateUnconfirmedRelay(machineID, dropped)
 		}
 		if message.Kind == "job.revocation.ack" {
@@ -1521,6 +1527,7 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 		}
 		h.consumeRelayPending(key)
 		h.rememberWorkingExpired(pending, ack)
+		h.observeRelayUnconfirmed(pending, ack)
 		// Logging it keeps a dropped-ack diagnosis greppable.
 		h.logger.Warn("relay delivery unconfirmed", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "event_id", pending.eventID, "reason", ack.Reason)
 		h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: received})

@@ -160,10 +160,18 @@ func (h *HubServer) flushSpawnTrace() {
 }
 
 func spawnTraceReason(reason string) string {
-	// Refusal text follows the code in a reason. It never reaches a fingerprint.
-	reason, _, _ = strings.Cut(reason, ": ")
+	// Refusal text follows the code in a reason. It never reaches a fingerprint
+	// except through spawnAdmissionRefusalClass, whose result is a bounded code.
+	code, text, _ := strings.Cut(reason, ": ")
+	if code == "admission_refused" {
+		if class := spawnAdmissionRefusalClass(text); class != "" {
+			return code + ":" + class
+		}
+		return code
+	}
+	reason = code
 	switch reason {
-	case "timeout", "disconnected", "unknown", "spawn_failed", "configuration", "admission_refused", "parent_job_not_found", "quota_unconfirmed", "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable", "node_upgrade_required", spawnOrphanedReason, spawnAbandonedReason:
+	case "timeout", "disconnected", "unknown", "spawn_failed", "configuration", "parent_job_not_found", "quota_unconfirmed", "spawn_disabled", "cwd_unmapped", "brief_doc_unavailable", "node_upgrade_required", spawnOrphanedReason, spawnAbandonedReason:
 		return reason
 	}
 	if code, ok := strings.CutPrefix(reason, "spawn_failed:"); ok && fleet.IsSpawnRefusalCode(code) {
@@ -175,4 +183,20 @@ func spawnTraceReason(reason string) string {
 		}
 	}
 	return "spawn_failed"
+}
+
+// spawnAdmissionRefusalClass names the cause behind an admission_refused
+// reason's free text so one Sentry issue groups one cause. Only the refusal
+// table's closed codes become a class; anything it cannot classify is "other",
+// so free text (a path, a host, a job name) never reaches a fingerprint or a
+// tag and one cause cannot split across issues.
+func spawnAdmissionRefusalClass(text string) string {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return ""
+	}
+	if code := fleet.SpawnRefusalCode(text, 0); code != "" {
+		return code
+	}
+	return "other"
 }

@@ -12,8 +12,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/getsentry/sentry-go"
-
 	"github.com/mgh3326/panewire/internal/fleet"
 )
 
@@ -225,15 +223,8 @@ func (h *HubServer) noteStuckSpawn(task hubSpawnTask) {
 	host := spawnTaskHost(current)
 	pending := int64(now.Sub(current.Deadline) / time.Second)
 	h.logger.Warn("hub spawn ownership stuck", "request_id", current.Request.RequestID, "job", current.Job, "host", host, "status", current.Status, "past_deadline_s", pending)
-	write := emitFleetEvent
-	if h.fleetEvents != nil {
-		write = h.fleetEvents
-	}
-	write(now, fleetEvent{Kind: "spawn", Job: current.Job, RequestID: current.Request.RequestID, Outcome: "stuck", Reason: current.Status, Detail: fmt.Sprintf("host=%s past_deadline_s=%d", firstNonEmptyString(host, "none"), pending)})
-	if client := h.spawnSentryClient(); client != nil {
-		hub := sentry.NewHub(client, sentry.NewScope())
-		hub.CaptureEvent(&sentry.Event{Level: sentry.LevelWarning, Message: "SPAWN_OWNERSHIP_STUCK " + current.Status, Fingerprint: []string{"spawn-ownership-stuck"}, Tags: map[string]string{"job": current.Job, "host": firstNonEmptyString(host, "none"), "status": current.Status, "request": current.Request.RequestID, "attempt": strconv.Itoa(current.Attempt)}})
-	}
+	h.emitFleet(fleetEvent{Kind: "spawn", Job: current.Job, RequestID: current.Request.RequestID, Outcome: "stuck", Reason: current.Status, Detail: fmt.Sprintf("host=%s past_deadline_s=%d", firstNonEmptyString(host, "none"), pending)})
+	h.captureWarning([]string{"spawn-ownership-stuck"}, "SPAWN_OWNERSHIP_STUCK "+current.Status, map[string]string{"job": current.Job, "host": firstNonEmptyString(host, "none"), "status": current.Status, "request": current.Request.RequestID, "attempt": strconv.Itoa(current.Attempt)})
 	h.inbox.store.recordSpawnStuck(h.closeCtx, eventID)
 }
 

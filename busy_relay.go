@@ -236,6 +236,9 @@ type relayDroppedPayload struct {
 	Lane            string `json:"lane"`
 	OriginalEventID int64  `json:"original_event_id"`
 	Reason          string `json:"reason"`
+	// Harness is the pane's harness at the drop, when the node could read it.
+	// The hub's Sentry fingerprint names it; an older hub ignores the field.
+	Harness string `json:"harness,omitempty"`
 }
 
 // relayBusyManager serializes each pane, so a returned wait can batch every
@@ -396,7 +399,7 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 				manager.dedupeMismatch.Add(1)
 				manager.journalDedupe(parent, "mismatch", message)
 				manager.client.warnMessage(fmt.Sprintf("relay dedupe mismatch: lane=%s event_id=%d resend targets pane=%s but the queued row sits on %s; retiring the stale lease and delivering this copy", message.Lane, message.EventID, message.Pane, existing.Pane))
-				manager.expireHeldLease(parent, existing, "lane_rerouted")
+				manager.expireHeldLease(parent, existing, "lane_rerouted", "")
 				manager.mu.Lock()
 				if queued := manager.held[existing.Pane]; queued != nil {
 					kept := queued[:0]
@@ -532,11 +535,11 @@ func (manager *relayBusyManager) hold(parent context.Context, item relayHeld, re
 // wait context, and re-arming calls arm(), which cancels that same context
 // as "the previous wait" -- reusing it here would cancel the retry before
 // it starts.
-func (manager *relayBusyManager) retryOrDrop(item relayHeld) {
-	manager.retryOrDropWithin(item, relayMaxInjectAttempts)
+func (manager *relayBusyManager) retryOrDrop(item relayHeld, harness string) {
+	manager.retryOrDropWithin(item, relayMaxInjectAttempts, harness)
 }
 
-func (manager *relayBusyManager) retryOrDropWithin(item relayHeld, maxAttempts int) {
+func (manager *relayBusyManager) retryOrDropWithin(item relayHeld, maxAttempts int, harness string) {
 	if item.EventID == 0 || item.Lane == "" {
 		return
 	}
@@ -546,7 +549,7 @@ func (manager *relayBusyManager) retryOrDropWithin(item relayHeld, maxAttempts i
 	}
 	item.Attempts++
 	if item.Attempts >= maxAttempts {
-		manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: "inject_failed_max_attempts"})
+		manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: "inject_failed_max_attempts", Harness: harness})
 		return
 	}
 	item.HeldSince = manager.client.nowUTC()
@@ -581,14 +584,14 @@ func (manager *relayBusyManager) inject(ctx context.Context, group []relayHeld, 
 // rearm. relay.dropped clears the hub's held projection; the hub's durable
 // row stays undelivered, and a later hub replay meets devinRelayInject's
 // presend check before anything is typed.
-func (manager *relayBusyManager) stopWithoutRetry(item relayHeld) {
+func (manager *relayBusyManager) stopWithoutRetry(item relayHeld, harness string) {
 	if item.EventID == 0 || item.Lane == "" {
 		return
 	}
 	if store := manager.client.relayStore(); store != nil {
 		_, _ = store.DeleteRelayHeld(context.Background(), item.EventID)
 	}
-	manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: "maybe_in_pane"})
+	manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: "maybe_in_pane", Harness: harness})
 }
 
 // relayAckReason keeps a reason inside the hub's relay ack bounds: one line,
@@ -945,7 +948,7 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 	var survivors []relayHeld
 	for _, item := range items {
 		if manager.laneRerouted(item) {
-			manager.expireHeldLease(parent, item, "lane_rerouted")
+			manager.expireHeldLease(parent, item, "lane_rerouted", "")
 			continue
 		}
 		survivors = append(survivors, item)
@@ -986,17 +989,17 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 	}
 	for _, item := range survivors {
 		if unverifiable {
-			manager.retryOrDrop(item)
+			manager.retryOrDrop(item, harness)
 			continue
 		}
 		if stale, reason := relayHeldLeaseStale(item, occupant, occupantKnown); stale {
-			manager.expireHeldLease(parent, item, reason)
+			manager.expireHeldLease(parent, item, reason, harness)
 			continue
 		}
 		if relayHarnessWorkingUnprovable(harness) && relayLaneJobEnded(manager.client.jobsInboxRoot, item.Lane) {
 			// hk 3411: a cmd row is held for its job; once the job has ended it
 			// is dropped, whether the pane is still working or turned idle.
-			manager.expireHeldLease(parent, item, relayDroppedJobEnded)
+			manager.expireHeldLease(parent, item, relayDroppedJobEnded, harness)
 			continue
 		}
 		if paneWorkingUnprovable {
@@ -1017,7 +1020,7 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 			// Past relay.cmd_hold_max the hub tells the design lane once, and
 			// the durable row stays undelivered for a replay.
 			manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayDroppedWorkingExpired, OriginalEventID: item.EventID})
-			manager.expireHeldLease(parent, item, relayDroppedWorkingExpired)
+			manager.expireHeldLease(parent, item, relayDroppedWorkingExpired, harness)
 			continue
 		}
 		keep = append(keep, item)
@@ -1075,11 +1078,11 @@ func (manager *relayBusyManager) laneRerouted(item relayHeld) bool {
 // reported so the hub projection and operator feed show the row leaving held
 // for a named reason. The durable event is deliberately untouched — expiring
 // the lease is not delivering it, and replay still owes it to the lane.
-func (manager *relayBusyManager) expireHeldLease(parent context.Context, item relayHeld, reason string) {
+func (manager *relayBusyManager) expireHeldLease(parent context.Context, item relayHeld, reason, harness string) {
 	if store := manager.client.relayStore(); store != nil {
 		_, _ = store.DeleteRelayHeld(parent, item.EventID)
 	}
-	manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: reason})
+	manager.emit("relay.dropped", relayDroppedPayload{JobID: item.JobID, Pane: item.Pane, Lane: item.Lane, OriginalEventID: item.EventID, Reason: reason, Harness: harness})
 }
 
 // relayBatchText composes the injectable text for one group. #687: every
@@ -1155,7 +1158,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		var live []relayHeld
 		for _, item := range group {
 			if manager.laneRerouted(item) {
-				manager.expireHeldLease(parent, item, "lane_rerouted")
+				manager.expireHeldLease(parent, item, "lane_rerouted", "")
 				continue
 			}
 			live = append(live, item)
@@ -1191,13 +1194,13 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			}
 			for _, item := range group {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason(result.Evidence), OriginalEventID: item.EventID})
-				manager.retryOrDropWithin(item, maxAttempts)
+				manager.retryOrDropWithin(item, maxAttempts, result.Harness)
 			}
 			continue
 		case relayInjectMaybeInPane:
 			for _, item := range group {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane " + result.Evidence), OriginalEventID: item.EventID})
-				manager.stopWithoutRetry(item)
+				manager.stopWithoutRetry(item, result.Harness)
 			}
 			continue
 		}
@@ -1219,7 +1222,7 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		for _, item := range group {
 			if !proven(item) {
 				manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayAckReason("maybe_in_pane nonce_missing " + result.Evidence), OriginalEventID: item.EventID})
-				manager.stopWithoutRetry(item)
+				manager.stopWithoutRetry(item, result.Harness)
 				continue
 			}
 			landed = append(landed, item)

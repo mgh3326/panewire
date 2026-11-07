@@ -7,10 +7,15 @@ import "time"
 // extensions do not need to edit HubServer's shared field and constructor
 // blocks.
 type hubRelayControlState struct {
-	relayAckTimeout        time.Duration
-	relayPending           map[string]relayPending
-	relayTimeouts          map[string]struct{}
-	relayTimeoutOrder      lruIndex[string]
+	relayAckTimeout   time.Duration
+	relayPending      map[string]relayPending
+	relayTimeouts     map[string]struct{}
+	relayTimeoutOrder lruIndex[string]
+	// relayOutcomes remembers the (outcome, row) pairs already reported as
+	// fleet events, so a node's retries do not restate one row outcome.
+	// relayOutcomeOrder bounds it. Both are guarded by HubServer.mu.
+	relayOutcomes          map[string]struct{}
+	relayOutcomeOrder      lruIndex[string]
 	acceptingOverride      map[string]acceptingOverride
 	acceptingOverridesPath string
 	// workingExpired maps a durable row a node dropped as working_wait_expired
@@ -50,7 +55,7 @@ type clientRelayControlState struct {
 
 func newHubRelayControlState(config HubServerConfig, overrides map[string]acceptingOverride) hubRelayControlState {
 	return hubRelayControlState{
-		relayAckTimeout: config.RelayAckTimeout, relayPending: make(map[string]relayPending), relayTimeouts: make(map[string]struct{}),
+		relayAckTimeout: config.RelayAckTimeout, relayPending: make(map[string]relayPending), relayTimeouts: make(map[string]struct{}), relayOutcomes: make(map[string]struct{}),
 		acceptingOverride: overrides, acceptingOverridesPath: config.AcceptingOverridesPath,
 	}
 }
