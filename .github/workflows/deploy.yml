@@ -211,14 +211,36 @@ jobs:
       # vocabulary rejects the candidate node (the same test), and the legacy
       # heartbeat vocabulary still decodes here
       # (TestHubHostMemoryJSONAndHeartbeatCompatibility,
-      # TestHubQuotaLegacyHeartbeatFieldIsAcceptedAndDropped). The dual-binary
-      # launch is a host operation; where a test can prove the wire contract,
-      # this is where it runs.
+      # TestHubQuotaLegacyHeartbeatFieldIsAcceptedAndDropped).
       - name: Mixed server/CLI version compatibility
         run: |
           go test -count=1 -v -run 'TestTask268AC5HubFirstRolloutAndLegacyNodeCompatibility|TestHubHostMemoryJSONAndHeartbeatCompatibility|TestHubQuotaLegacyHeartbeatFieldIsAcceptedAndDropped|TestReadinessKeepsBuildVersionForms' .
       - name: Release version form
         run: go test -count=1 -v -run 'TestDistVersion|TestDevBuildReportsPlaceholderVersion|TestVersionSubcommandSanitizesInjectedValue' .
+      # The hub is deployed before the nodes, so the candidate hub must accept
+      # a node client from the previous release. This builds the candidate,
+      # downloads the latest published release and drives its `hub-emit`
+      # against the candidate hub over wss (fleet CI r2 §7).
+      - name: Build the candidate binary
+        run: |
+          go build -trimpath -ldflags "-X main.version=pw-$(git rev-parse HEAD | cut -c1-7)" \
+            -o "$RUNNER_TEMP/panewire-candidate" ./cmd/panewire
+      - name: Previous release node client against the candidate hub
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+        run: |
+          tag=$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name // empty')
+          if [ -z "$tag" ]; then
+            echo "no previous release; the old-client check has nothing to compare"
+            exit 0
+          fi
+          mkdir -p "$RUNNER_TEMP/old-release"
+          gh release download "$tag" --repo "$REPO" \
+            --pattern "panewire_${tag}_linux_amd64" --dir "$RUNNER_TEMP/old-release" --clobber
+          chmod +x "$RUNNER_TEMP/old-release/panewire_${tag}_linux_amd64"
+          sh scripts/check-hub-old-client.sh "$RUNNER_TEMP/panewire-candidate" \
+            "$RUNNER_TEMP/old-release/panewire_${tag}_linux_amd64" "$tag"
 
   deploy-ok:
     name: deploy-ok

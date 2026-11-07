@@ -172,6 +172,17 @@ func deployShape(raw []byte) error {
 	if !strings.Contains(text, "TestTask268AC5HubFirstRolloutAndLegacyNodeCompatibility") {
 		return errors.New("deploy must run mixed hub/node version compatibility")
 	}
+	// The hub deploys before the nodes: the compat job must also drive a node
+	// client from the previous release against the candidate hub.
+	var compatRuns string
+	for _, step := range w.Jobs["compat"].Steps {
+		compatRuns += step.Run + "\n"
+	}
+	for _, want := range []string{"releases/latest", "gh release download", "check-hub-old-client.sh", "./cmd/panewire"} {
+		if !strings.Contains(compatRuns, want) {
+			return errors.New("the compat job never runs the previous-release client check: " + want)
+		}
+	}
 
 	// Never cancelled: concurrency must say so explicitly, and the group must
 	// be one per repository so a newer head replaces only a pending entry.
@@ -270,8 +281,7 @@ func TestDeployWorkflowBranchMutantFails(t *testing.T) {
 }
 
 // TestDeployStageLeavesTheMergeGateAlone pins r2 §4-3: this PR posts deploy-ok
-// but keeps the ci-ok gate, so the policy and release.yml read the same thing
-// before and after it.
+// but keeps the ci-ok merge gate in the policy.
 func TestDeployStageLeavesTheMergeGateAlone(t *testing.T) {
 	raw, err := os.ReadFile(".mergewake/policy.yaml")
 	if err != nil {
@@ -290,12 +300,68 @@ func TestDeployStageLeavesTheMergeGateAlone(t *testing.T) {
 	if !slices.Equal(policy.WatchChecks, []string{"ci-ok"}) {
 		t.Errorf("watch_checks must stay ci-ok: %v", policy.WatchChecks)
 	}
-	release, err := os.ReadFile(".github/workflows/release.yml")
+}
+
+// TestReleaseWaitsForMainStage pins r2 §7: release.yml must not build or
+// publish before the main-stage gate on the release commit is green. The gate
+// is ci-ok today and deploy-ok after the switch, selected by a repository
+// variable, so the switch is configuration rather than another code change.
+func TestReleaseWaitsForMainStage(t *testing.T) {
+	raw, err := os.ReadFile(".github/workflows/release.yml")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(release), "deploy-ok") {
-		t.Error("release.yml must keep reading the ci-ok gate for now")
+	var wf struct {
+		Permissions struct {
+			Contents string `yaml:"contents"`
+			Checks   string `yaml:"checks"`
+			Statuses string `yaml:"statuses"`
+		} `yaml:"permissions"`
+		Jobs map[string]struct {
+			If    string    `yaml:"if"`
+			Needs needsList `yaml:"needs"`
+			Steps []struct {
+				Env map[string]string `yaml:"env"`
+				Run string            `yaml:"run"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	if err := yaml.Unmarshal(raw, &wf); err != nil {
+		t.Fatal(err)
+	}
+	gate := wf.Jobs["gate"]
+	if gate.If != "github.event_name != 'pull_request'" {
+		t.Errorf("the release gate must run for every non-PR event: %q", gate.If)
+	}
+	if wf.Permissions.Checks != "read" || wf.Permissions.Statuses != "read" {
+		t.Errorf("the release gate needs checks: read and statuses: read: %+v", wf.Permissions)
+	}
+	var gateRun string
+	var gateEnv map[string]string
+	for _, step := range gate.Steps {
+		if step.Env["CONTEXT"] != "" {
+			gateRun, gateEnv = step.Run, step.Env
+		}
+	}
+	if gateEnv["CONTEXT"] != "${{ vars.PANEWIRE_RELEASE_GATE_CONTEXT || 'ci-ok' }}" {
+		t.Fatalf("the gate context must default to ci-ok and be switchable: %q", gateEnv["CONTEXT"])
+	}
+	for _, want := range []string{"check-runs?check_name=", "commits/${SHA}/status", "SECONDS", "sleep 30"} {
+		if !strings.Contains(gateRun, want) {
+			t.Errorf("the release gate never waits with %q", want)
+		}
+	}
+	// Build, test and publish all wait for the gate. Build and test must still
+	// run for a pull request, where the gate is skipped.
+	for _, job := range []string{"build", "test", "publish"} {
+		if !slices.Contains(wf.Jobs[job].Needs, "gate") {
+			t.Errorf("release job %s does not wait for the gate", job)
+		}
+	}
+	for _, job := range []string{"build", "test"} {
+		if !strings.Contains(wf.Jobs[job].If, "needs.gate.result == 'skipped'") {
+			t.Errorf("release job %s must still run when the gate is skipped", job)
+		}
 	}
 }
 
