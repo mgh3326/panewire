@@ -194,7 +194,7 @@ The hub keeps these in the lane's inbox, without a pane injection:
   `task_id` of the job's hk record, read through the hub's existing spawn
   client);
 - a `lane.event` declared `--type ready`, also when the sender passed
-  `--deliver interrupt`.
+  `--deliver interrupt`, unless its text starts with `[consult-done]`.
 
 They are ordinary unread inbox items (a `ready` one stays unacked until
 `panewire inbox ack`): readable through `panewire inbox list --lane LANE`, never
@@ -203,9 +203,17 @@ job's own state, its hk record and `spawn --wait` are unchanged.
 
 A completion of a job with neither a task nor a PR — a consult answer the
 session waits for — is delivered as before, and so is one whose hk job record
-cannot be read. `job.escalate` and the `decision`, `blocked`, `findings` and
+cannot be read. A consult answer — `--type ready` with text that starts
+with `[consult-done]`, the form rstack's ops consult reference gives the
+answerer — is also delivered (hk 3434): the session that asked waits for it in
+its pane. `job.escalate` and the `decision`, `blocked`, `findings` and
 `automation-failed` types still interrupt. Lanes that are not design lanes,
 `operator-desk` included, are unchanged.
+
+Every other `lane.event` to a design lane, untyped or of another type, is
+classified as for any lane. The hub cannot tell which session sent a
+`lane.event`: its wire payload names the destination lane, never the sending
+pane, lane or job, so a worker's progress report and a desk order look alike.
 
 ## Durability and replay
 
