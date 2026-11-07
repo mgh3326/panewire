@@ -511,7 +511,7 @@ live bench catalog and pool status from the quota CLI, then orders candidates
 under the versioned pool-order policy (`[local].pool_policy` or
 `PANEWIRE_POOL_POLICY`, else the embedded copy): paid pools at waste risk
 first (see below), then other WASTE subscription pools, then free pool/model
-sets, then ranked subscription pools, then credit pools without a usable expiry. Expiring credit joins the waste-risk ordering by remaining balance percentage per hour until expiry. Inside a tier the lowest catalog grade that satisfies the task wins,
+sets, then ranked subscription pools, then credit pools without a usable expiry. Expiring credit joins the waste-risk ordering by dollars at risk per hour until expiry (below); an entry without recorded dollars keeps the percentage rule. Inside a tier the lowest catalog grade that satisfies the task wins,
 then the pool with the higher waste urgency — the unused projected share
 (100 − projected) per hour until its longest account window's reset (7d,
 monthly; sub-daily windows such as a 5h rate window never rank a pool, they
@@ -580,10 +580,29 @@ admissible without a balance observation. An operator pool class of `exclude`
 refuses them. Their selection record carries `tier=credit`, with absent
 balance values left unset.
 
-A credit pool with a recorded positive balance and future expiry joins the
-waste-risk ordering. Its urgency is the remaining balance percentage divided
-by the hours until expiry; it competes with subscription waste risk on that
-value. Its account-bound gate still decides admission. Credit without a
+A credit pool with a recorded balance and future expiry competes for work.
+With a dollar balance (`credit.remaining_usd`) its rank is the money at risk:
+the balance less the spend projected before expiry (the burn rate times the
+hours to expiry). The burn rate is the fall in dollar balance between the two
+latest credit entries of the pool, divided by the hours between their
+`measured_at`; it is `0` when fewer than two entries record dollars or the
+balance rose. `at_risk_usd = max(0, balance − projected spend)` and
+`usd_urgency = at_risk_usd ÷ hours to expiry`. The pool is waste-risk only
+when `at_risk_usd > 0`, and then ranks inside the waste band ahead of
+waste-risk subscriptions; otherwise it stays in the plain `credit` tier.
+Among credit pools a dollar balance outranks one without, ordered by
+`usd_urgency`. An entry without dollars keeps the percentage rule (remaining
+percent per hour until expiry), ranks after any credit that has dollars, and
+the plan logs `credit_usd_missing pool=<pool>` once so it can be recorded:
+
+```sh
+pacelever manual set --pool <pool> --credit-balance <usd> --credit-total <usd> --expires <YYYY-MM-DD>
+```
+
+The selection record and the chosen `why` text carry `balance_usd`,
+`burn_usd_per_h`, `at_risk_usd` and `usd_urgency`.
+
+Its account-bound gate still decides admission. Credit without a
 recorded balance or expiry, already expired, or used up stays in tier `credit`.
 `credit_final_days` is deprecated, has no effect, and emits a warning when set.
 `panewire plan --credit-at TIME` evaluates expiry at the supplied time.
