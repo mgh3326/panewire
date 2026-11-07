@@ -36,6 +36,25 @@ panewire emit --kind lane.event --lane lane-a --event-id producer-42 --text "app
 
 Without `--pane`, the command records the pane named by `HERDR_PANE_ID`, if any.
 
+The node sends that pane to the hub as the wire payload's `pane_id`, the
+emitting pane, so a design lane can keep a worker's own progress in its inbox
+(see [quiet delivery](quiet-delivery.md), "Worker results stay in a design
+lane's inbox"). It is bounded to 128 bytes with no control byte; a pane over the
+bound is sent as no pane, never cut. A node's own notice about a pane, a stall
+notice (`stall:` event id) or an idle-wake, sends none. The hub reads a
+`pane_id` it cannot use as no pane.
+
+**Rollout: hub and nodes deploy in either order.** A hub before this change
+refuses a `lane.event` payload with a key it does not know, so a node adds
+`pane_id` only on a connection whose hub sent
+`{"type":"hub.features","features":[…,"lane_event_pane"]}`, and it forgets
+that on every new connection. The pane is added when the event is written to
+that connection, not when it is queued. A refused event was never
+acknowledged, so it stays in the node's outbox either way. An older node sends
+no `pane_id`, and the hub delivers its events as before. The first events a node
+sends on a new connection, before the hub's `hub.features` arrives, carry no
+pane and are delivered as before.
+
 The command writes an atomic mode-0600 file under `events-lane/` before it
 tries the local daemon socket. That namespace is separate from `jobs/<id>/`:
 there is no real job ID to collide with, and job scanners cannot mistake a

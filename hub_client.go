@@ -100,6 +100,9 @@ type hubClientEvent struct {
 	// that never reached the wire carries no stamp at all.
 	relayKey     relayOutboxKey
 	relayPending bool
+	// senderPane is a lane.event's emitting pane, added to the payload only on
+	// a connection whose hub accepts it (relayWire).
+	senderPane string
 }
 
 // HubClient owns a bounded in-memory event queue. It is intentionally not a
@@ -590,8 +593,11 @@ type hubClientConnection struct {
 	acceptsSignals atomic.Bool
 	// acceptsReadiness is the same for hubFeatureReadiness (readiness_node.go).
 	acceptsReadiness atomic.Bool
-	connection       *websocket.Conn
-	writeMu          sync.Mutex
+	// acceptsLaneEventPane is the same for hubFeatureLaneEventPane
+	// (lane_event_sender.go).
+	acceptsLaneEventPane atomic.Bool
+	connection           *websocket.Conn
+	writeMu              sync.Mutex
 }
 
 type hubOutboundMessage struct {
@@ -1904,6 +1910,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			case "hub.features":
 				peer.acceptsSignals.Store(slices.Contains(message.Features, hubFeatureHostSignals))
 				peer.acceptsReadiness.Store(slices.Contains(message.Features, hubFeatureReadiness))
+				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
 				continue
 			case "burst.holds":
 				client.burstMu.Lock()
@@ -1993,7 +2000,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 			}
 			helloAck.Reset(client.helloAckTimeoutOrDefault())
 		case event := <-client.events:
-			if err := peer.write(ctx, hubClientWireEvent(event)); err != nil {
+			if err := peer.write(ctx, peer.relayWire(event)); err != nil {
 				client.releaseRelayEvents(event)
 				return nil, err
 			}
@@ -2045,7 +2052,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 // function is what lets writeRelayEvents be exercised with a write that fails
 // half-way through a batch.
 func (peer *hubClientConnection) relayWriter(ctx context.Context) func(hubClientEvent) error {
-	return func(event hubClientEvent) error { return peer.write(ctx, hubClientWireEvent(event)) }
+	return func(event hubClientEvent) error { return peer.write(ctx, peer.relayWire(event)) }
 }
 
 // handleRelayInject is isolated from serve so transport extensions can add
@@ -2342,7 +2349,7 @@ func (client *HubClient) relayEventForSend(job hubScannedRelayEvent) (hubClientE
 		}{job.OwnerLane, job.EventID, job.Text, job.Epoch, job.Truncated, replay, job.Cause, job.Head, job.PR})
 		payload = relayPayloadDeliveryClass(payload, job.DeliveryClass)
 		payload = relayPayloadNotifyType(payload, job.NotifyType)
-		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true}, true
+		return hubClientEvent{Kind: job.Kind, Payload: payload, relayKey: key, relayPending: true, senderPane: laneEventSenderPane(job)}, true
 	}
 	payload := hubJobCompletionPayloadForJob(job.HubActiveJob, job.EventID, replay)
 	if job.Kind == "job.escalate" || job.Kind == "job.joined" || relayTerminalSignalKinds[job.Kind] {
