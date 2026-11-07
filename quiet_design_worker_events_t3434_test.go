@@ -492,3 +492,110 @@ func TestQuietDesignWorkerLaneEventEndToEnd(t *testing.T) {
 		t.Fatalf("injections=%q, want only the decision in %s", injected, t3434DesignPane)
 	}
 }
+
+// t3434ParentedLanes is t3426Lanes with the design lane naming a parent, as a
+// design lane that reports to the desk does: the shape under which a worker
+// directive type (findings, order) to the lane counts as isWorkerDirective.
+const t3434ParentedLanes = `{"lanes":{
+ "handoffkeep-design":{"machine":"host-a","pane":"w1:design","parent":"operator-desk"},
+ "operator-desk":{"machine":"host-a","pane":"w1:desk"},
+ "director-1":{"machine":"host-a","pane":"w1:director"},
+ "worker-3404":{"machine":"host-a","pane":"w1:worker","parent":"handoffkeep-design"}
+}}`
+
+// t3434Routes runs f once on the plain t3426 lanes and once with the design
+// lane naming a parent, so a route-based override after designQuiet shows.
+func t3434Routes(t *testing.T, f func(t *testing.T, h *HubServer, agent *hubAgent, fake *fakeHandoffkeep)) {
+	for _, tc := range []struct{ name, lanes string }{{"design lane without a parent", t3426Lanes}, {"design lane with a parent", t3434ParentedLanes}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, agent, fake := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+			if err := os.WriteFile(h.reportRelayPath, []byte(tc.lanes), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			f(t, h, agent, fake)
+		})
+	}
+}
+
+// t3434WorkerActions are a worker's lane.events to its design lane that need
+// a person: an untyped action tag, and every declared type that is not
+// routine.
+var t3434WorkerActions = []struct{ notifyType, text string }{
+	{"", "ESC need a decision | options: ship the hub first, or the node first"},
+	{"", "BLOCKER hk 3430: CI needs an operator secret"},
+	{"", "hk 3430: BOUNCE, the brief contradicts the contract"},
+	{"", "URGENT hk 3430: main is red"},
+	{"", "hk 3430: needs_decision on the migration order"},
+	{"decision", "ESC hk 3430: which migration order do we ship?"},
+	{"blocked", "BLOCKED hk 3430: CI needs an operator secret"},
+	{"findings", "hk 3430: review findings on #221 | /jobs/hk3430/findings.md"},
+	{"order", "hk 3430: rebase #222 on #221 first"},
+	{"automation-failed", "hk 3430: mergewake watch failed on #221"},
+	{"deploy-approval", "hk 3430: #221 needs a deploy approval"},
+	{"watch-hold", "hk 3430: watch hold on #221"},
+	{"culprit-hold", "hk 3430: #221 is the culprit of a revert"},
+}
+
+// t3434WorkerRoutine are a worker's routine lane.events to its design lane:
+// untyped progress with no action tag (an untyped READY is a completion
+// record), and the routine declared types.
+var t3434WorkerRoutine = []struct{ notifyType, text string }{
+	{"", "READY | PR #1 | report"},
+	{"", "hk 3430: PR #221 open"},
+	{"", "#221 merged; follow-up #222 open"},
+	{"progress", "hk 3430: tests green, pushing"},
+	{"report", "hk 3430: report written /jobs/hk3430/report.md"},
+	{"info", "hk 3430: rebased on main"},
+	{"merged", "hk 3430: #221 merged"},
+	{"ack", "hk 3430: ack, starting"},
+	{"closed", "hk 3430: #220 closed as superseded"},
+	{"ready", "READY hk 3430 | PR #221 | /jobs/hk3430/report.md"},
+}
+
+// A worker's action lane.event reaches its design lane's pane, whether or not
+// the design lane's route names a parent.
+func TestQuietDesignWorkerActionLaneEventsAreInjected(t *testing.T) {
+	t3434Routes(t, func(t *testing.T, h *HubServer, agent *hubAgent, _ *fakeHandoffkeep) {
+		for _, tc := range t3434WorkerActions {
+			t.Run("type="+tc.notifyType+"/"+tc.text, func(t *testing.T) {
+				t3434Injected(t, h, agent, agent, t3434Event(t3426Design, t3434WorkerPane, tc.notifyType, tc.text), t3434DesignPane)
+			})
+		}
+	})
+}
+
+// A worker's routine lane.event stays in its design lane's inbox, whether or
+// not the design lane's route names a parent, and also with --deliver
+// interrupt.
+func TestQuietDesignWorkerRoutineLaneEventsAreQuiet(t *testing.T) {
+	t3434Routes(t, func(t *testing.T, h *HubServer, agent *hubAgent, fake *fakeHandoffkeep) {
+		for _, deliver := range []string{"", "interrupt"} {
+			for _, tc := range t3434WorkerRoutine {
+				t.Run("deliver="+deliver+"/type="+tc.notifyType+"/"+tc.text, func(t *testing.T) {
+					e := t3434Event(t3426Design, t3434WorkerPane, tc.notifyType, tc.text)
+					e.DeliveryClass = deliver
+					t3434Quiet(t, h, agent, fake, e)
+				})
+			}
+		}
+	})
+}
+
+// designQuiet is the one decision point, and it agrees with the documented
+// rule: for a worker's lane.event, every declared type quiets exactly when it
+// is routine, so a type added to the vocabulary interrupts until someone
+// decides otherwise.
+func TestQuietDesignWorkerLaneEventTypesMatchTheDocumentedRule(t *testing.T) {
+	p, err := loadDeliveryPolicy("default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	routine := map[string]bool{"progress": true, "report": true, "info": true, "merged": true, "ack": true, "closed": true, "ready": true}
+	noTask, worker := func() bool { return false }, func() bool { return true }
+	for notifyType := range hubNotifyTypes {
+		e := hubJobEventPayload{OwnerLane: t3426Design, NotifyType: notifyType, PaneID: t3434WorkerPane, Text: "hk 3430: status"}
+		if got := p.designQuiet(t3426Design, "lane.event", e, noTask, worker); got != routine[notifyType] {
+			t.Errorf("a worker's %q lane.event to a design lane: designQuiet=%t, want %t", notifyType, got, routine[notifyType])
+		}
+	}
+}
