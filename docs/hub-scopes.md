@@ -29,8 +29,11 @@ and `Authorization: Bearer <token>`. The client env file is
 
 ## Scopes
 
-Each scope names its resource. `@*` means any machine; lane scopes always
-name one lane.
+Each scope names its resource. `@*` means any machine. Inbox lane scopes
+name one lane or use `*` for any valid lane; only the whole lane may be `*`.
+The wildcard forms suit fleet-wide services such as mergewake. A service with
+`inbox.ack:*` can acknowledge all unacknowledged, non-superseded items in any
+lane with `{"all":true}`, including items intended for other agents.
 
 | Scope | Grants |
 | --- | --- |
@@ -39,8 +42,8 @@ name one lane.
 | `spawn@<machine>` or `@*` | `POST /v1/spawn` for that machine, and `GET /v1/spawn/{id}` for a request on it. A spawn request with `checkout` also authorizes the node's internal `worktree.prepare` preflight; no separate `node.command` grant is needed. Requests with `checkout` or `brief.doc` require the connected node to advertise `spawn_v2` in its hello; otherwise the hub returns `503 spawn_capability_required` immediately. |
 | `wake@<machine>` or `@*` | `POST /v1/nodes/wake` for that machine |
 | `jobs.close:<lane>` | `POST /v1/jobs/close` for the calling lane, without operator override; see [job-close.md](job-close.md) |
-| `inbox.read:<lane>` | `GET /v1/inbox`, `/v1/inbox/count`, `/v1/inbox/wait` and `POST /v1/inbox/{id}/read` with `?lane=<lane>` |
-| `inbox.ack:<lane>` | `POST /v1/inbox/ack` with `?lane=<lane>` |
+| `inbox.read:<lane>` or `inbox.read:*` | `GET /v1/inbox`, `/v1/inbox/count`, `/v1/inbox/wait` and `POST /v1/inbox/{id}/read` with `?lane=<lane>` |
+| `inbox.ack:<lane>` or `inbox.ack:*` | `POST /v1/inbox/ack` with `?lane=<lane>` |
 | `inbox.ack_state` | `GET /v1/inbox/ack-state?event_id=…` (see [Ack state](#ack-state)); no lane, no resource |
 | `state.read` | `GET /v1/state` ([fleet-state.md](fleet-state.md)) |
 
@@ -57,7 +60,7 @@ body is validated before the scope check, so a malformed request answers `400`.
 The `svc-mergewake` line for hub reap (operator decision D1: every machine):
 
 ```sh
-HUB_SCOPES_svc-mergewake=nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*,node.command:worktree.remove@*,node.command:pane.read@*,node.command:job.done@*
+HUB_SCOPES_svc-mergewake=nodes.agents.read,node.command:agents.list@*,node.command:worktree.inspect@*,node.command:pane.capture@*,node.command:pane.close@*,node.command:worktree.remove@*,node.command:pane.read@*,node.command:job.done@*,inbox.read:*,inbox.ack:*,inbox.ack_state
 ```
 
 An initiating panewire service needs `spawn@<machine>` for one destination, or
