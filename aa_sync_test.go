@@ -145,19 +145,30 @@ type aaTestTransport func(*http.Request) (*http.Response, error)
 func (f aaTestTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 func TestAASyncCommandArtifact(t *testing.T) {
 	dir := t.TempDir()
-	catalog := `{"catalog":[{"profile":"codex-sol","model_id":"gpt-6.1-sol","effort":"low","grade":"B","gate":"default","decided_at":"2026-11-01T00:00:00Z","decided_by":"operator","decided_reason":"a & b <c> \u0061","extra": { "nested" : [ 1, 2 ] },"score":7.50,"benchmark_source":"old","benchmark_annotation":"old"},{"profile":"unknown","model_id":"x","effort":"","grade":"A","gate":"escalation","decided_at":"2026-11-02T00:00:00Z","decided_by":"operator"}],"source":{"source":"server","stale":false}}`
-	script := "#!/bin/sh\nprintf '%s\\n' '" + catalog + "'\n"
-	if e := os.WriteFile(filepath.Join(dir, "pacelever"), []byte(script), 0700); e != nil {
-		t.Fatal(e)
-	}
-	t.Setenv("PATH", dir)
+	catalog := `{"catalog":[{"profile":"codex-sol","model_id":"gpt-6.1-sol","effort":"low","pool":"codex","grade":"B","gate":"default","decided_at":"2026-11-01T00:00:00Z","decided_by":"operator","decided_reason":"a & b <c> \u0061","extra": { "nested" : [ 1, 2 ] },"score":7.50,"benchmark_source":"old","benchmark_annotation":"old"},{"profile":"unknown","model_id":"x","effort":"","pool":"claude","grade":"A","gate":"escalation","decided_at":"2026-11-02T00:00:00Z","decided_by":"operator"}]}`
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/bench/catalog" || r.Header.Get("Authorization") != "Bearer test-token" {
+			http.Error(w, "unexpected", http.StatusNotFound)
+			return
+		}
+		fmt.Fprint(w, catalog)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(dir, "absent.env"))
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv(aaKeyName, "fixture-key")
 	fixture, e := os.ReadFile("testdata/aa_models_v2.json")
 	if e != nil {
 		t.Fatal(e)
 	}
 	old := http.DefaultTransport
+	hkHost := strings.TrimPrefix(server.URL, "http://")
 	http.DefaultTransport = aaTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == hkHost {
+			return old.RoundTrip(r)
+		}
 		if r.Header.Get("x-api-key") != "fixture-key" || strings.Contains(r.URL.String(), "fixture-key") {
 			t.Error("key not confined to header")
 		}
@@ -166,7 +177,7 @@ func TestAASyncCommandArtifact(t *testing.T) {
 	t.Cleanup(func() { http.DefaultTransport = old })
 	path := filepath.Join(dir, "catalog.json")
 	var out, errs bytes.Buffer
-	if code := runQuotaCLI([]string{"aa-sync", "--out", path}, &out, &errs); code != 0 {
+	if code := runCatalogCLI([]string{"aa-sync", "--out", path}, &out, &errs); code != 0 {
 		t.Fatalf("code=%d error=%s", code, errs.String())
 	}
 	b, e := os.ReadFile(path)
@@ -211,7 +222,7 @@ func TestAASyncCommandArtifact(t *testing.T) {
 	os.Remove(path)
 	out.Reset()
 	errs.Reset()
-	if code := runQuotaCLI([]string{"aa-sync", "--out", path, "--dry-run"}, &out, &errs); code != 0 {
+	if code := runCatalogCLI([]string{"aa-sync", "--out", path, "--dry-run"}, &out, &errs); code != 0 {
 		t.Fatalf("dry-run: %d %s", code, errs.String())
 	}
 	if _, e := os.Stat(path); !os.IsNotExist(e) {
@@ -235,28 +246,37 @@ func TestAASyncAmbiguity(t *testing.T) {
 
 func TestAASyncOutRejectsFlag(t *testing.T) {
 	t.Setenv(aaKeyName, "fixture-key")
-	t.Setenv("PATH", t.TempDir())
 	var out, errs bytes.Buffer
-	if code := runQuotaCLI([]string{"aa-sync", "--out", "--dry-run"}, &out, &errs); code != ExitUsage {
+	if code := runCatalogCLI([]string{"aa-sync", "--out", "--dry-run"}, &out, &errs); code != ExitUsage {
 		t.Fatalf("--out --dry-run: got exit %d, want usage exit %d", code, ExitUsage)
 	}
 }
 
 func TestAASyncRejectsTrailingCatalogDataBeforeFetch(t *testing.T) {
 	dir := t.TempDir()
-	script := "#!/bin/sh\nprintf '%s\\n' '{\"catalog\":[{\"profile\":\"p\"}],\"source\":{\"source\":\"server\"}}' 'warning'\n"
-	if err := os.WriteFile(filepath.Join(dir, "pacelever"), []byte(script), 0700); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"catalog":[{"profile":"p"}]}`+"\nwarning\n")
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(dir, "absent.env"))
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	t.Setenv(aaKeyName, "fixture-key")
 	old := http.DefaultTransport
-	calls := 0
-	http.DefaultTransport = aaTestTransport(func(*http.Request) (*http.Response, error) { calls++; return nil, fmt.Errorf("unexpected request") })
+	hkHost := strings.TrimPrefix(server.URL, "http://")
+	aaCalls := 0
+	http.DefaultTransport = aaTestTransport(func(r *http.Request) (*http.Response, error) {
+		if r.URL.Host == hkHost {
+			return old.RoundTrip(r)
+		}
+		aaCalls++
+		return nil, fmt.Errorf("unexpected request")
+	})
 	t.Cleanup(func() { http.DefaultTransport = old })
 	var out, errs bytes.Buffer
-	code := runQuotaCLI([]string{"aa-sync", "--out", filepath.Join(dir, "catalog.json")}, &out, &errs)
-	if code != ExitInternal || calls != 0 {
-		t.Fatalf("exit=%d HTTP requests=%d; want internal error before fetch", code, calls)
+	code := runCatalogCLI([]string{"aa-sync", "--out", filepath.Join(dir, "catalog.json")}, &out, &errs)
+	if code != ExitInternal || aaCalls != 0 {
+		t.Fatalf("exit=%d AA requests=%d; want internal error before fetch", code, aaCalls)
 	}
 }

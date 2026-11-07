@@ -44,7 +44,7 @@ type App struct {
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)
 	// BenchCatalog reads the bench catalog for the admission gate; nil reads
-	// handoffkeep (admission_native.go).
+	// handoffkeep through catalog.go.
 	BenchCatalog func(context.Context) ([]CatalogRow, error)
 	Source       PlacementSource
 	Wake         Waker

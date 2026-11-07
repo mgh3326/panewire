@@ -510,8 +510,8 @@ the rebind failed or the parent's state was unreadable; neither fails the landed
 spawn.
 
 Automatic model selection (`spawn` with `-m` omitted or `-m auto`) reads the
-live bench catalog and pool status from the quota CLI, then orders candidates
-under the versioned pool-order policy (`[local].pool_policy` or
+live bench catalog from handoffkeep and pool status from the quota CLI, then
+orders candidates under the versioned pool-order policy (`[local].pool_policy` or
 `PANEWIRE_POOL_POLICY`, else the embedded copy): paid pools at waste risk
 first (see below), then other WASTE subscription pools, then free pool/model
 sets, then ranked subscription pools, then credit pools without a usable expiry. Expiring credit joins the waste-risk ordering by dollars at risk per hour until expiry (below); an entry without recorded dollars keeps the percentage rule. Inside a tier the lowest catalog grade that satisfies the task wins,
@@ -1281,7 +1281,10 @@ for ownership and distribution.
 | `HANDOFFKEEP_BIN` | Must resolve to the canonical current-user ~/.local/bin executable in production. |
 | `XDG_DATA_HOME` | Data home of the local ledger (`$XDG_DATA_HOME/arbiter/state.db`); production guard requires the canonical `~/.local/share`. |
 | `XDG_STATE_HOME` | State home of the role routing cache (`$XDG_STATE_HOME/panewire/model-routing.json`); default `~/.local/state`. |
-| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools, and commandcode, devin and agy once switched native, are measured by panewire itself and ignore it. |
+| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools, and commandcode, devin and agy once switched native, are measured by panewire itself and ignore it. The bench catalog is handoffkeep's and never uses it. |
+| `HANDOFFKEEP_CONFIG` | handoffkeep credential file for `panewire catalog` and the shared quota endpoint; default `~/.config/handoffkeep/config.env`. |
+| `XDG_CACHE_HOME` | Cache home of the bench catalog read (`$XDG_CACHE_HOME/panewire/bench`); default `~/.cache`. |
+| `ARTIFICIAL_ANALYSIS_API_KEY` | Free Artificial Analysis Data API key for `panewire catalog aa-sync`; else the mode-0600 `$XDG_CONFIG_HOME/panewire/aa.env`. |
 | `PANEWIRE_NODE_ENV` | Panewire node env file for `HUB_MACHINE_ID` (job record host id); default `~/.config/panewire/hub-node.env`, or `[quota].node_env`. |
 | `ARBITER_INBOX_ROOT` | Jobs root; production guard requires the canonical inbox. |
 | `HERDR_SESSION` | Herdr session passed through or selected for remote execution. |
