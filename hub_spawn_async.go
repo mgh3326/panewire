@@ -702,7 +702,11 @@ func (h *HubServer) startSpawnCoordinator(ctx context.Context) {
 	if h.closed {
 		return
 	}
-	h.spawnCoordinatorOnce.Do(func() { h.spawnWorkers.Add(1); go func() { defer h.spawnWorkers.Done(); h.runSpawnCoordinator(ctx) }() })
+	h.spawnCoordinatorOnce.Do(func() {
+		h.spawnWorkers.Add(2)
+		go func() { defer h.spawnWorkers.Done(); h.runSpawnCoordinator(ctx) }()
+		go func() { defer h.spawnWorkers.Done(); h.runQuotaReconcile(ctx) }()
+	})
 }
 
 func (h *HubServer) finishSpawnOutcome(task hubSpawnTask, outcome hubSpawnOutcome) {

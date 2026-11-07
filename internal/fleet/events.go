@@ -22,6 +22,10 @@ type Job struct {
 	ID                                                                                                string
 	Owner, Parent, Role, Label, Pane, Tab, Task, Family, Profile, Effort, Report, HubLane, Machine, T string
 	Keep, Terminal, Reaped                                                                            bool
+	// SpawnRole is the role the job.spawned receipt names (reviewer, tester, ...).
+	// The claim records only worker or builder, so the role a quota stop is
+	// handled by comes from here (QuotaRole).
+	SpawnRole string
 	// Ended is the kind of the newest terminal event since the last claim,
 	// spawn or reprompt; empty while the job is live.
 	Ended   string
@@ -110,6 +114,7 @@ func (a *App) job(id string) (Job, error) {
 			j.Reaped = false
 		case "job.spawned":
 			j.Receipt = p
+			j.SpawnRole = str(p, "role")
 			j.Pane = str(p, "pane_id")
 			j.Tab = str(p, "tab_id")
 			j.Label = str(p, "label")

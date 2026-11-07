@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
 // quotaStopFixture is a live job of the given role whose pane reports status
@@ -37,8 +39,10 @@ func quotaStopFixture(t *testing.T, role, status, screen string) (*App, *fakeRun
 		return Result{}
 	}
 	report := filepath.Join(a.Jobs, "j", "report.md")
-	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": role})
-	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "report": report})
+	// As in production: the claim always says worker; the spawn receipt names
+	// the role.
+	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "report": report, "role": role})
 	seedLedger(t, a, "j")
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
 	return a, f, h, report
@@ -449,5 +453,34 @@ func TestWatcherQuotaStopWithoutStateChangeSeqKeepsTheGraceDeadline(t *testing.T
 	}
 	if st, _ := ledgerState(t, a, "j"); st != "released" {
 		t.Fatalf("quota not released: %s", st)
+	}
+}
+
+// A watcher that ended before the hand-off (a worker that waited past its
+// completion deadline) is started by the announcement, and a node restart
+// re-arms a watcher that died during the grace: both keep the fallback that
+// ends the job and frees its lease (review finding).
+func TestAnnounceQuotaStopStartsAWatcherAndRearmFindsAnnouncedJobs(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "worker", "idle", "I stopped here.\n")
+	started := []string{}
+	old := announceStartWatch
+	announceStartWatch = func(_ *App, job string) error { started = append(started, job); return nil }
+	t.Cleanup(func() { announceStartWatch = old })
+	if e := AnnounceQuotaStop(context.Background(), a.Jobs, "j", "w:p1", quotastop.Stop{Pool: "claude"}); e != nil {
+		t.Fatal(e)
+	}
+	if len(started) != 1 || started[0] != "j" {
+		t.Fatalf("watchers started: %v", started)
+	}
+	j, e := a.job("j")
+	if e != nil || !j.Terminal {
+		t.Fatalf("setup: the announced job should read as ended: %+v %v", j, e)
+	}
+	var rearmed []string
+	if e := a.RearmWatchers(func(id string) error { rearmed = append(rearmed, id); return nil }, func(string) {}); e != nil {
+		t.Fatal(e)
+	}
+	if len(rearmed) != 1 || rearmed[0] != "j" {
+		t.Fatalf("re-armed %v, want the announced job", rearmed)
 	}
 }

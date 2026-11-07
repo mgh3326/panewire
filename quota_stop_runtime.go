@@ -115,16 +115,19 @@ func (q *quotaStopManager) jobForPane(ctx context.Context, pane string) (HubActi
 	return found, count == 1 && found.JobID != "" && !quotaExcluded(found.AgentLabel)
 }
 
-// jobRole is the role the job's own claim event names. The scanned active job
-// keeps only worker and captain (the hub wire has no other roles), so the
-// manager reads the claim itself: it must tell a tester from a reviewer.
-func (q *quotaStopManager) jobRole(jobID string, scanned string) string {
+// jobFacts reads what the job's own events say that the scanned active job
+// does not keep: the role and the task it inherited. The role is the spawn
+// receipt's (reviewer, tester, worker): the claim always says worker, and the
+// scanned job keeps only worker and captain. inherited is the builder job a
+// tester's task is still bound to (the claim's task_inherited_from).
+func (q *quotaStopManager) jobFacts(jobID, scanned string) (role, inherited string) {
 	dir := filepath.Join(q.root, "jobs", jobID, "events")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return scanned
+		return scanned, ""
 	}
-	role := scanned
+	role = scanned
+	claimRole, spawnRole := "", ""
 	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
@@ -138,11 +141,34 @@ func (q *quotaStopManager) jobRole(jobID string, scanned string) string {
 		if json.Unmarshal(contents, &event) != nil {
 			continue
 		}
-		if kind := event.eventKind(); (kind == "job.claimed" || kind == "job.claim") && event.role() != "" {
-			role = event.role()
+		var extra struct {
+			Inherited string `json:"task_inherited_from"`
+			Payload   struct {
+				Inherited string `json:"task_inherited_from"`
+			} `json:"payload"`
+		}
+		_ = json.Unmarshal(contents, &extra)
+		switch kind := event.eventKind(); kind {
+		case "job.claimed", "job.claim":
+			if event.role() != "" {
+				claimRole = event.role()
+			}
+			if v := firstHubValue(extra.Inherited, extra.Payload.Inherited); v != "" {
+				inherited = v
+			}
+		case "job.spawned":
+			if event.role() != "" {
+				spawnRole = event.role()
+			}
 		}
 	}
-	return role
+	switch {
+	case spawnRole != "":
+		role = spawnRole
+	case claimRole != "":
+		role = claimRole
+	}
+	return role, inherited
 }
 
 func (q *quotaStopManager) loadPolicy(ctx context.Context, now time.Time) (quotaPolicy, bool) {
@@ -177,7 +203,10 @@ func (q *quotaStopManager) loadPolicy(ctx context.Context, now time.Time) (quota
 	q.policyOK = false
 	return q.policy, false
 }
-func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob) (int, time.Duration, bool) {
+
+// task finds the hk task bound to the job, or to the builder job a tester
+// inherited its task from.
+func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited string) (int, time.Duration, bool) {
 	b, err := q.command(ctx, "tasks", "list", "--limit", "1000")
 	if err != nil {
 		return 0, 0, false
@@ -198,7 +227,7 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob) (int, tim
 	priority := 0
 	var duration time.Duration
 	for _, t := range v.Tasks {
-		if t.Refs.Job == job.JobID {
+		if t.Refs.Job == job.JobID || inherited != "" && t.Refs.Job == inherited {
 			n++
 			priority = t.Priority
 			if t.Expected != nil {
@@ -237,7 +266,8 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	if !ok || quotaExcluded(c.Label) {
 		return
 	}
-	job.Role = q.jobRole(job.JobID, job.Role)
+	var inherited string
+	job.Role, inherited = q.jobFacts(job.JobID, job.Role)
 	// Reserve the wake before touching the screen. A restart can never reread it.
 	q.store.mu.Lock()
 	result, err := q.store.db.ExecContext(scanCtx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created,role,owner) VALUES(?,?,?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli(), job.Role, job.OwnerLane)
@@ -288,7 +318,7 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	lookupCtx, lookupCancel := context.WithTimeout(ctx, quotaStopLookupBudget)
 	defer lookupCancel()
 	policy, policyOK := q.loadPolicy(lookupCtx, now)
-	priority, expected, taskOK := q.task(lookupCtx, job)
+	priority, expected, taskOK := q.task(lookupCtx, job, inherited)
 	// Preserve the decision even if the bounded external lookup timed out.
 	dbCtx, dbCancel := context.WithTimeout(context.WithoutCancel(lookupCtx), time.Second)
 	defer dbCancel()

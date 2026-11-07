@@ -257,6 +257,27 @@ func (s *laneInboxStore) latestSpawnForJob(parent context.Context, job string) (
 	defer done()
 	return scanSpawnTask(s.db.QueryRowContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE job=? ORDER BY created_ms DESC,request_id DESC LIMIT 1`), job))
 }
+
+// quotaSuccessorSpawns lists recent operations whose job id is a quota-stop
+// successor ("<old>-q<n>"), newest first.
+func (s *laneInboxStore) quotaSuccessorSpawns(parent context.Context) ([]hubSpawnTask, error) {
+	ctx, done := s.op(parent)
+	defer done()
+	rows, err := s.db.QueryContext(ctx, s.q(`SELECT `+spawnTaskColumns+` FROM spawn_operations WHERE job LIKE ? ORDER BY created_ms DESC LIMIT 200`), "%-q%")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var tasks []hubSpawnTask
+	for rows.Next() {
+		task, err := scanSpawnTask(rows)
+		if err != nil {
+			return nil, err
+		}
+		tasks = append(tasks, task)
+	}
+	return tasks, rows.Err()
+}
 func (s *laneInboxStore) spawnTaskByNode(parent context.Context, id string) (hubSpawnTask, error) {
 	ctx, done := s.op(parent)
 	defer done()

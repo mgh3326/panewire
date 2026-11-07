@@ -60,6 +60,7 @@ type quotaReplaceFixture struct {
 	holder      hubSpawnTask
 	job         string
 	paneStatus  string
+	role        string
 }
 
 // quotaHolderRequest is the submission of a stopped job of the given role: task
@@ -77,6 +78,12 @@ func quotaHolderRequest(role, job string) fleet.Submission {
 }
 
 func newQuotaReplaceFixture(t *testing.T, role, job string) *quotaReplaceFixture {
+	t.Helper()
+	return newQuotaReplaceFixtureWith(t, role, job, nil)
+}
+
+// newQuotaReplaceFixtureWith lets a test change the stopped job's stored submission.
+func newQuotaReplaceFixtureWith(t *testing.T, role, job string, mutate func(*fleet.Submission)) *quotaReplaceFixture {
 	t.Helper()
 	t.Setenv(crashReportDSNEnv, "")
 	fake, client, stop := newFakeHandoffkeep(t)
@@ -106,7 +113,11 @@ func newQuotaReplaceFixture(t *testing.T, role, job string) *quotaReplaceFixture
 	server := httptest.NewServer(hub.Handler())
 	t.Cleanup(server.Close)
 	node := t14Node(t, hub, server, true)
-	held, _, err := hub.inbox.store.claimSpawn(t.Context(), quotaHolderRequest(role, job), job, "parent", time.Now())
+	holderRequest := quotaHolderRequest(role, job)
+	if mutate != nil {
+		mutate(&holderRequest)
+	}
+	held, _, err := hub.inbox.store.claimSpawn(t.Context(), holderRequest, job, "parent", time.Now())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +128,7 @@ func newQuotaReplaceFixture(t *testing.T, role, job string) *quotaReplaceFixture
 	if err != nil || held.Status != "succeeded" {
 		t.Fatalf("holder %+v %v", held, err)
 	}
-	return &quotaReplaceFixture{hub: hub, node: node, jobs: jobs, destination: destination, holder: held, job: job, paneStatus: "idle"}
+	return &quotaReplaceFixture{hub: hub, node: node, jobs: jobs, destination: destination, holder: held, job: job, paneStatus: "idle", role: role}
 }
 
 func quotaStopEvent(job string) hubJobEventPayload {
@@ -168,6 +179,14 @@ func (f *quotaReplaceFixture) run(t *testing.T, placed hubSpawnOutcome, nodeComm
 	// The hub closes the old pane (capture, close) before it places anything.
 	serve(nodeCommandRead(t, f.node))
 	serve(nodeCommandRead(t, f.node))
+	served := 3
+	if f.role != "reviewer" && nodeCommands > 3 {
+		// A worker or tester's record ends (handed_over_to) before the
+		// successor is admitted, because the spawn refuses a task still bound
+		// to a job that is not lost.
+		serve(nodeCommandRead(t, f.node))
+		served++
+	}
 	next, _, _ := quotaReplacementJob(f.job)
 	var successor hubSpawnTask
 	eventually(t, 2*time.Second, "the successor to be claimed", func() bool {
@@ -178,7 +197,7 @@ func (f *quotaReplaceFixture) run(t *testing.T, placed hubSpawnOutcome, nodeComm
 	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), successor, placed, time.Now()); err != nil {
 		t.Fatal(err)
 	}
-	for i := 3; i < nodeCommands; i++ {
+	for i := served; i < nodeCommands; i++ {
 		serve(nodeCommandRead(t, f.node))
 	}
 	select {
@@ -225,7 +244,7 @@ func TestQuotaStopReviewerIsReplacedAtOnceOnAnotherPool(t *testing.T) {
 	if i := slices.Index(args, "--exclude-pool"); i < 0 || args[i+1] != "claude" {
 		t.Fatalf("the replacement must exclude the stopped pool: %v", args)
 	}
-	for flag, want := range map[string]string{"--job": "mwr-1-p1-q1", "--task": "42", "--role": "reviewer", "--review-pass": "1", "--owner": "parent", "--report-relative": "mwr-1-p1/report.md"} {
+	for flag, want := range map[string]string{"--job": "mwr-1-p1-q1", "--task": "42", "--role": "reviewer", "--review-pass": "1", "--owner": "parent", "--report-relative": "mwr-1-p1-q1/report.md"} {
 		if got := hubSpawnArg(args, flag); got != want {
 			t.Fatalf("%s=%q, want %q (%v)", flag, got, want, args)
 		}
@@ -582,5 +601,88 @@ func TestQuotaStopUndecidedSuccessorStillGetsItsPointer(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("the replacement did not finish")
+	}
+}
+
+// An operation never bound to a node (accepted) can never place a job: a
+// reviewer successor still accepted when the wait ends gets no pointer, and the
+// stopped job is left to the watcher's plain quota_stop (review finding).
+func TestQuotaStopAcceptedSuccessorGetsNoPointer(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-11-p1")
+	f.hub.quotaWait = 100 * time.Millisecond
+	done := make(chan quotaReplaceResult, 1)
+	go func() {
+		job, ok := f.hub.replaceQuotaStopped(t.Context(), "machine-a", quotaStopEvent(f.job))
+		done <- quotaReplaceResult{job, ok}
+	}()
+	roleReplyPanes(t, f.node, nodeCommandRead(t, f.node), []nodeAgentRow{{PaneID: roleHeldPane, Name: f.job, AgentStatus: "idle", Cwd: "/work/project.checkout"}}, true)
+	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodeCaptureScreen, "saved": "/jobs/x/pane-screen.txt"}})
+	nodeCommandReplyTo(t, f.node, nodeCommandRead(t, f.node), map[string]any{"result": map[string]any{"outcome": nodePaneClosed}})
+	select {
+	case result := <-done:
+		if result.ok {
+			t.Fatalf("a successor that never left accepted got a pointer: %+v", result)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the replacement did not finish")
+	}
+}
+
+// A tester that inherited its builder's task (--parent-job, no --task) is
+// replaced with the same arguments (review finding).
+func TestQuotaStopReplacesAnInheritedTesterJob(t *testing.T) {
+	f := newQuotaReplaceFixtureWith(t, "tester", "pw-test-1", func(r *fleet.Submission) {
+		for i, arg := range r.Args {
+			if arg == "--task" {
+				r.Args[i], r.Args[i+1] = "--parent-job", "builder-1"
+			}
+		}
+		r.Args = append(r.Args, "--builder-family", "anthropic", "--builder-job", "builder-1")
+	})
+	placed := hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}
+	result, _ := f.run(t, placed, 4)
+	if !result.ok || result.job != "pw-test-1-q1" {
+		t.Fatalf("replacement=%+v", result)
+	}
+	args := f.successor(t, "pw-test-1-q1").Args
+	if hubSpawnArg(args, "--parent-job") != "builder-1" || hubSpawnArg(args, "--task") != "" || hubSpawnArg(args, "--exclude-pool") != "claude" {
+		t.Fatalf("successor args %v", args)
+	}
+}
+
+// A hub restarted between claiming a reviewer's successor and writing the old
+// record leaves a running successor nobody points to. The reconcile pass finds
+// the successor, closes what is left of the old pane and writes replaced_by
+// (review finding).
+func TestQuotaReplacementIsReconciledAfterAHubRestart(t *testing.T) {
+	f := newQuotaReplaceFixture(t, "reviewer", "mwr-12-p1")
+	request, err := quotaReplacementRequest(f.holder.Request, "mwr-12-p1", "mwr-12-p1-q1", "claude", "reviewer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	old := time.Now().Add(-quotaReplaceBudget - time.Minute)
+	if err := f.hub.inbox.store.releaseCompletedSpawnRole(t.Context(), f.holder.Request.RequestID, "42:reviewer:p1"); err != nil {
+		t.Fatal(err)
+	}
+	task, _, err := f.hub.inbox.store.claimSpawn(t.Context(), request, "mwr-12-p1-q1", "parent", old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.hub.inbox.store.completeSpawn(t.Context(), task, hubSpawnOutcome{RC: 0, Stage: "done", Host: quotaPlaced, Pane: "w9:p1", Profile: "sonnet"}, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	wrote := make(chan int, 1)
+	go func() { wrote <- f.hub.reconcileQuotaReplacements(t.Context()) }()
+	// The old pane is already gone (the hub closed it before it stopped).
+	roleReplyPanes(t, f.node, nodeCommandRead(t, f.node), []nodeAgentRow{{PaneID: "w2:p9", Cwd: "/work/other"}}, true)
+	command := nodeCommandRead(t, f.node)
+	nodeCommandReplyTo(t, f.node, command, map[string]any{"result": map[string]any{"outcome": nodeJobMarkLostLost}})
+	select {
+	case n := <-wrote:
+		if n != 1 || endReasonOf(t, command) != "quota_stop pool=claude replaced_by=mwr-12-p1-q1" {
+			t.Fatalf("wrote %d, end_reason %q", n, endReasonOf(t, command))
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the reconcile pass did not finish")
 	}
 }

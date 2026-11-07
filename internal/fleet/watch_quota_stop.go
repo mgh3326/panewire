@@ -54,7 +54,7 @@ type quotaStopWatch struct {
 // the visible screen; it never sends input to the pane, so no "send a message
 // to retry" automation exists here. A failed read is not a stop.
 func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStopWatch) (quotastop.Stop, bool) {
-	if !slices.Contains(quotaStopRoles, j.Role) || (ag.Status != "idle" && ag.Status != "done") {
+	if !slices.Contains(quotaStopRoles, j.QuotaRole()) || (ag.Status != "idle" && ag.Status != "done") {
 		return quotastop.Stop{}, false
 	}
 	if ag.StateChangeSeq != nil {
@@ -71,6 +71,16 @@ func (a *App) quotaStopped(ctx context.Context, j Job, ag Agent, seen *quotaStop
 		return quotastop.Stop{}, false
 	}
 	return quotastop.Classify(r.Out, a.Now(), time.Local)
+}
+
+// QuotaRole is the role a quota stop is handled by: the spawn receipt's
+// (reviewer, tester, worker), else the claim's. The claim always says worker
+// for a spawned job, so reading only it would treat every reviewer as a worker.
+func (j Job) QuotaRole() string {
+	if j.SpawnRole != "" {
+		return j.SpawnRole
+	}
+	return j.Role
 }
 
 // quotaHandOff is a reviewer watcher's wait for the hub to replace a
@@ -113,9 +123,23 @@ func quotaStopPayload(j Job, stop quotastop.Stop) map[string]any {
 // (QuotaStopHandOffGrace).
 func AnnounceQuotaStop(ctx context.Context, jobs, job, pane string, stop quotastop.Stop) error {
 	home, _ := os.UserHomeDir()
-	a := &App{Jobs: jobs, Home: home, Now: time.Now}
-	return a.quotaStopAnnounce(ctx, Job{ID: job, Pane: pane}, stop)
+	a := &App{Jobs: jobs, Home: home, Now: time.Now, Runner: ExecRunner{}}
+	if e := a.quotaStopAnnounce(ctx, Job{ID: job, Pane: pane}, stop); e != nil {
+		return e
+	}
+	// The job's own watcher may have ended already (a worker that waited past
+	// its completion deadline). Its fallback is what ends the job and frees its
+	// quota lease when the hub cannot replace it, so make sure one is running.
+	if !a.watchActive(job) {
+		if e := announceStartWatch(a, job); e != nil {
+			return e
+		}
+	}
+	return nil
 }
+
+// announceStartWatch starts the job's re-armed watcher; tests replace it.
+var announceStartWatch = func(a *App, job string) error { return a.startWatchMode(job, true) }
 
 // announcedQuotaStop returns the quota stop a job.lost of this attempt
 // announced, if the job's newest end is one.

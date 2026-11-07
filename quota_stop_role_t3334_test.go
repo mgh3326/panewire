@@ -39,8 +39,8 @@ func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task st
 	}
 	started := rig.now.Add(-startedAgo).UTC().Format(time.RFC3339)
 	for name, body := range map[string]string{
-		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"` + role + `","epoch":1}`,
-		"00002-job.spawned.json": `{"type":"job.spawned","created_at":"` + started + `","pane_id":"workspace:pane-1"}`} {
+		"00001-job.claimed.json": `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"worker","epoch":1}`,
+		"00002-job.spawned.json": `{"type":"job.spawned","created_at":"` + started + `","pane_id":"workspace:pane-1","role":"` + role + `"}`} {
 		if err := os.WriteFile(filepath.Join(events, name), []byte(body), 0600); err != nil {
 			t.Fatal(err)
 		}
@@ -168,9 +168,11 @@ func TestQuotaStopWorkerBeyondExpectedIsHandedOver(t *testing.T) {
 	}
 }
 
-// Other roles stay observe-only in shadow mode: no input, no hand-over.
+// Other roles stay observe-only in shadow mode: no input, no hand-over. The
+// claim says worker for every spawned job; the spawn receipt's role decides
+// (a reviewer is not resumed like a worker).
 func TestQuotaStopOtherRolesStayShadow(t *testing.T) {
-	for _, role := range []string{"reviewer", "counsel", ""} {
+	for _, role := range []string{"reviewer", "counsel"} {
 		t.Run("role="+role, func(t *testing.T) {
 			rig := newRoleStopRig(t, role, 5*time.Hour, roleStopTask)
 			rig.run()
@@ -189,5 +191,25 @@ func TestQuotaStopWorkerReadFailureIsNotHandedOver(t *testing.T) {
 	rig.run()
 	if len(rig.announce) != 0 || rig.sends != 0 {
 		t.Fatalf("acted without a quota screen: sends=%d announced=%d", rig.sends, len(rig.announce))
+	}
+}
+
+// A tester inherits its builder's task: the task is bound to the builder's job,
+// so the manager finds it through the claim's task_inherited_from and decides
+// on its expected time, not task_unavailable (review finding).
+func TestQuotaStopTesterFindsItsInheritedTask(t *testing.T) {
+	rig := newRoleStopRig(t, "tester", time.Hour, `{"tasks":[{"priority":3,"expected":"4h","refs":{"job_id":"builder-job"}}]}`)
+	events := filepath.Join(rig.manager.inboxRoot, "jobs", "job-active", "events")
+	started := rig.now.Add(-time.Hour).UTC().Format(time.RFC3339)
+	claim := `{"type":"job.claimed","created_at":"` + started + `","agent_label":"worker-synthetic","owner_lane":"owner","role":"worker","task_inherited_from":"builder-job","epoch":1}`
+	if err := os.WriteFile(filepath.Join(events, "00001-job.claimed.json"), []byte(claim), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rig.run()
+	if d, reason := rig.decision(t); d != "wait" || reason != "reset_within_expected" {
+		t.Fatalf("decision=%s reason=%s, want wait reset_within_expected", d, reason)
+	}
+	if rig.sends != 1 || len(rig.announce) != 0 {
+		t.Fatalf("sends=%d announced=%d", rig.sends, len(rig.announce))
 	}
 }

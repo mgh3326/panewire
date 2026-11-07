@@ -82,7 +82,12 @@ func (a *App) RearmWatchers(start func(string) error, log func(string)) error {
 		if err != nil {
 			continue
 		}
-		if j.Terminal || j.Reaped || j.Pane == "" || a.watchActive(id) {
+		if j.Reaped || j.Pane == "" || a.watchActive(id) {
+			continue
+		}
+		// A job ended by an announced quota stop is not finished until its
+		// hand-off grace has run: a watcher that died during it is re-armed.
+		if _, announced := announcedQuotaStop(j); j.Terminal && !announced {
 			continue
 		}
 		if err := start(id); err != nil {
