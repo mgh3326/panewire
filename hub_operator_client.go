@@ -37,15 +37,16 @@ var hubOperatorAPIPaths = map[string]bool{
 	"/v1/nodes":           true,
 	"/v1/nodes/wake":      true,
 	"/v1/jobs":            true,
-	"/v1/jobs/close":      true,
-	"/v1/jobs/orphaned":   true,
-	"/v1/jobs/reassign":   true,
-	"/v1/lanes":           true,
-	"/v1/placement":       true,
-	"/v1/burst":           true,
-	"/v1/burst/request":   true,
-	"/v1/burst/release":   true,
-	"/v1/burst/holds":     true,
+	// Shared with nodeHubClient, which uses this boundary for daemon requests.
+	"/v1/jobs/close":    true,
+	"/v1/jobs/orphaned": true,
+	"/v1/jobs/reassign": true,
+	"/v1/lanes":         true,
+	"/v1/placement":     true,
+	"/v1/burst":         true,
+	"/v1/burst/request": true,
+	"/v1/burst/release": true,
+	"/v1/burst/holds":   true,
 }
 
 func validHubOperatorAPIPath(path string) bool {

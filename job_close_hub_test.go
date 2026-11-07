@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,9 @@ import (
 
 func TestJobCloseViaHub(t *testing.T) {
 	f := newR19eFixture(t)
+	if err := os.WriteFile(f.hub.reportRelayPath, []byte(`{"lanes":{"lane-a":{"machine":"node-b","pane":"w1:p1"},"wrong":{"machine":"node-b","pane":"w1:p2"}}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
 	stopWorker := f.connectWorker(t)
 	eventually(t, time.Second, "worker connected", func() bool {
 		f.hub.mu.Lock()
@@ -47,7 +51,11 @@ func TestJobCloseViaHub(t *testing.T) {
 		code := runJobCLI(args, &out, &errOut, CLIConfig{SocketPath: socket})
 		return code, out.String(), errOut.String()
 	}
-	code, _, errOut := run("remote", "wrong", false)
+	code, _, errOut := run("remote", "unrouted", false)
+	if code != jobCloseRefused || !strings.Contains(errOut, "lane_not_routed_to_caller") {
+		t.Fatalf("unrouted: %d %s", code, errOut)
+	}
+	code, _, errOut = run("remote", "wrong", false)
 	if code != jobCloseRefused || !strings.Contains(errOut, "owner_mismatch") {
 		t.Fatalf("wrong lane: %d %s", code, errOut)
 	}
@@ -59,7 +67,22 @@ func TestJobCloseViaHub(t *testing.T) {
 	if len(entries) != 1 {
 		t.Fatalf("wrong lane wrote records: %v", entries)
 	}
-	code, out, errOut := run("remote", "wrong", true)
+	code, _, errOut = run("remote", "wrong", true)
+	if code != jobCloseRefused || !strings.Contains(errOut, "override_requires_operator") {
+		t.Fatalf("node override: %d %s", code, errOut)
+	}
+	operator, err := newHubOperatorClient(f.server.URL, r6OperatorToken, hubCFAccessEnv{}, hubCLIDeps{AllowInsecureForTests: true}, nodeReapClientTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := requestHubJobClose(t.Context(), operator, hubJobCloseRequest{Job: "remote", Lane: "wrong", Outcome: "abandoned", Reason: "test reason", Override: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var output, errOutput bytes.Buffer
+	cli := &jobCLI{stdout: &output, stderr: &errOutput}
+	code = cli.printHubClose(jobCloseOptions{job: "remote"}, result)
+	out, errOut := output.String(), errOutput.String()
 	if code != 0 || !strings.Contains(out, "OK job=remote kind=job.revoked") || !strings.Contains(out, "override=operator") {
 		t.Fatalf("close: %d %q %q", code, out, errOut)
 	}
@@ -149,6 +172,7 @@ func TestJobCloseHubOwnerAndOffline(t *testing.T) {
 func TestJobCloseHubRoleRelease(t *testing.T) {
 	hub, server, _, held := roleHolderHub(t, hubSpawnOutcome{RC: 0, Host: "machine-a", Pane: roleHeldPane}, "spawned", "succeeded")
 	node := t14Node(t, hub, server, true)
+	hub.reportRelayPath = r20LanesFile(t, `{"lanes":{"lane-a":{"machine":"machine-a","pane":"w1:p1"}}}`)
 	root := t.TempDir()
 	eventsDir := filepath.Join(root, "jobs", "test-job", "events")
 	if err := os.MkdirAll(eventsDir, 0700); err != nil {
@@ -221,7 +245,7 @@ func TestJobCloseHubAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, tc := range []struct{ machine, token string }{{"", ""}, {"", t14OperatorToken}, {"machine-a", "wrong"}} {
+	for _, tc := range []struct{ machine, token string }{{"", ""}, {"machine-a", "wrong"}} {
 		r, err := http.NewRequest(http.MethodPost, server.URL+"/v1/jobs/close", bytes.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
@@ -236,5 +260,141 @@ func TestJobCloseHubAuthorization(t *testing.T) {
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Fatalf("machine=%s status=%d", tc.machine, resp.StatusCode)
 		}
+	}
+}
+
+func TestJobCloseServiceScope(t *testing.T) {
+	hub, err := NewHubServer(HubServerConfig{Tokens: map[string]string{"operator": "operator-token", "machine-a": "node-token", "svc-close": "service-close-token", "svc-other": "service-other-token"}, Scopes: map[string]string{"svc-close": "jobs.close:lane-a", "svc-other": "inbox.read:lane-a"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { hub.Close() })
+	server := httptest.NewServer(hub.Handler())
+	t.Cleanup(server.Close)
+	node := t14Node(t, hub, server, true)
+	hub.mu.Lock()
+	hub.jobs["remote"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "remote", OwnerLane: "lane-a", Epoch: 1}, Node: "machine-a"}
+	hub.mu.Unlock()
+	makeClient := func(id, token string) *hubOperatorClient {
+		c, err := newHubOperatorClient(server.URL, token, hubCFAccessEnv{}, hubCLIDeps{AllowInsecureForTests: true}, nodeReapClientTimeout)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.machineID = id
+		return c
+	}
+	allowed := makeClient("svc-close", "service-close-token")
+	denied := makeClient("svc-other", "service-other-token")
+	req := hubJobCloseRequest{Job: "remote", Lane: "lane-a", Outcome: "completed", Reason: "done"}
+	result, err := requestHubJobClose(t.Context(), denied, req)
+	if err != nil || result.Refusal != "scope_forbidden" {
+		t.Fatalf("denied %+v %v", result, err)
+	}
+	req.Override = true
+	result, err = requestHubJobClose(t.Context(), allowed, req)
+	if err != nil || result.Refusal != "override_requires_operator" {
+		t.Fatalf("override %+v %v", result, err)
+	}
+	req.Override = false
+	done := make(chan hubJobCloseResult, 1)
+	go func() { result, _ := requestHubJobClose(t.Context(), allowed, req); done <- result }()
+	cmd := nodeCommandRead(t, node)
+	root := t.TempDir()
+	dir := filepath.Join(root, "jobs", "remote", "events")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"kind":"job.claim","payload":{"owner_lane":"lane-a"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	worker := &HubClient{jobsInboxRoot: root}
+	nodeResult, nodeErr := worker.runNodeCommand(t.Context(), nodeCommandJobClose, cmd["args"])
+	if nodeErr != "" {
+		t.Fatal(nodeErr)
+	}
+	nodeCommandReplyTo(t, node, cmd, map[string]any{"result": nodeResult})
+	result = <-done
+	if result.Record.JobID != "remote" || result.Refusal != "" {
+		t.Fatalf("allowed %+v", result)
+	}
+}
+
+func TestJobCloseUnconfirmedAfterSend(t *testing.T) {
+	hub, server := t14Hub(t)
+	node := t14Node(t, hub, server, true)
+	hub.mu.Lock()
+	hub.jobs["remote"] = &hubJobRecord{HubActiveJob: HubActiveJob{JobID: "remote", OwnerLane: "lane-a", Epoch: 1}, Node: "machine-a"}
+	hub.mu.Unlock()
+	client, err := newHubOperatorClient(server.URL, t14OperatorToken, hubCFAccessEnv{}, hubCLIDeps{AllowInsecureForTests: true}, nodeReapClientTimeout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan hubJobCloseResult, 1)
+	go func() {
+		result, _ := requestHubJobClose(t.Context(), client, hubJobCloseRequest{Job: "remote", Lane: "lane-a", Outcome: "completed", Reason: "done"})
+		done <- result
+	}()
+	cmd := nodeCommandRead(t, node)
+	root := t.TempDir()
+	dir := filepath.Join(root, "jobs", "remote", "events")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "00001-job.claim.json"), []byte(`{"kind":"job.claim","payload":{"owner_lane":"lane-a"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	worker := &HubClient{jobsInboxRoot: root}
+	_, code := worker.runNodeCommand(t.Context(), nodeCommandJobClose, cmd["args"])
+	if code != "" {
+		t.Fatal(code)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "00002-job.revoked.json")); err != nil {
+		t.Fatal(err)
+	}
+	node.CloseNow()
+	result := <-done
+	if result.Failure != "close_unconfirmed" || result.Refusal != "" {
+		t.Fatalf("result %+v", result)
+	}
+}
+
+func TestJobCloseNodeFailures(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, "jobs", "remote")
+	events := filepath.Join(dir, "events")
+	if err := os.MkdirAll(events, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(events, "00001-job.claim.json"), []byte(`{"kind":"job.claim","payload":{"owner_lane":"lane-a"}}`), 0600); err != nil {
+		t.Fatal(err)
+	}
+	worker := &HubClient{jobsInboxRoot: root}
+	req := hubJobCloseRequest{Job: "remote", Lane: "other", Outcome: "completed", Reason: "done"}
+	raw, _ := worker.nodeJobClose(req)
+	refusal := raw.(hubJobCloseResult)
+	if !strings.Contains(refusal.Refusal, "owned by lane") || refusal.Failure != "" {
+		t.Fatalf("ownership %+v", refusal)
+	}
+	req.Lane = "lane-a"
+	if err := os.Remove(filepath.Join(dir, ".wrk-events.lock")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(filepath.Join(dir, ".wrk-events.lock"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ = worker.nodeJobClose(req)
+	failure := raw.(hubJobCloseResult)
+	if failure.Failure != "close_failed" || failure.Refusal != "" {
+		t.Fatalf("IO %+v", failure)
+	}
+}
+
+func TestJobCloseConnectionOptions(t *testing.T) {
+	opts, err := parseJobCloseArgs([]string{"remote", "--lane", "lane-a", "--outcome", "completed", "--reason", "done", "--hub-url", "https://hub.robinco.dev", "--hub-token-env", "credential-path", "--hub-cf-env", "cf-path"})
+	if err != nil || opts.hubURL != "https://hub.robinco.dev" || opts.tokenEnv != "credential-path" || opts.cfEnv != "cf-path" {
+		t.Fatalf("options %+v error %v", opts, err)
+	}
+	if _, err := parseHubScopes("jobs.close:*"); err == nil {
+		t.Fatal("wildcard lane scope accepted")
 	}
 }

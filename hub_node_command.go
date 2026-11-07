@@ -154,6 +154,9 @@ func (h *HubServer) sendNodeCommand(machine, op string, args json.RawMessage) (p
 	}{Type: "node.command", RequestID: requestID, Op: op, Args: args}
 	if err := agent.writeJSON(message); err != nil {
 		h.forgetNodeCommand(requestID)
+		if op == nodeCommandJobClose {
+			return nil, "", "send_failed", false
+		}
 		return nil, "", "disconnected", false
 	}
 	return pending, requestID, state, true

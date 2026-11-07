@@ -397,7 +397,7 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		target = result
 	case nodeCommandJobClose:
 		var result hubJobCloseResult
-		valid = decodeNodeCommandStrict(raw, &result) && ((result.Refusal != "" && result.Name == "") || (result.Refusal == "" && result.Name != "" && result.Record.Kind == jobCloseKind))
+		valid = decodeNodeCommandStrict(raw, &result) && ((result.Refusal != "" && result.Failure == "" && result.Name == "") || (result.Failure == "close_failed" && result.Refusal == "" && result.Name == "") || (result.Refusal == "" && result.Failure == "" && result.Name != "" && result.Record.Kind == jobCloseKind))
 		target = result
 	case nodeCommandPRStatus:
 		var result nodePRStatusResult

@@ -43,7 +43,7 @@ var (
 	jobCloseReviveKinds   = map[string]bool{"job.claim": true, "job.reclaim": true, "job.spawned": true, "job.reprompted": true}
 )
 
-const jobCloseHelp = `Usage: panewire job close JOB --lane LANE --outcome completed|abandoned|superseded --reason TEXT [--operator-override]
+const jobCloseHelp = `Usage: panewire job close JOB --lane LANE --outcome completed|abandoned|superseded --reason TEXT [--operator-override] [--hub-url URL --hub-token-env FILE] [--hub-cf-env FILE]
 
 Declare JOB ended on behalf of its owner lane. Writes one job.revoked record
 into the job's events directory, using the hub if the directory is not local.
@@ -54,6 +54,9 @@ Options:
   --outcome OUTCOME     completed, abandoned or superseded
   --reason TEXT         required, kept in the record
   --operator-override   close a job another lane owns; recorded as override=operator
+  --hub-url URL         hub URL for a direct service or operator connection
+  --hub-token-env FILE  mode-0600 hub credential file
+  --hub-cf-env FILE     optional Cloudflare Access credential file
   -h, --help            show this usage
 `
 
@@ -77,6 +80,7 @@ type jobCloseRecord struct {
 
 type jobCloseOptions struct {
 	job, lane, outcome, reason string
+	hubURL, tokenEnv, cfEnv    string
 	override                   bool
 }
 
@@ -96,7 +100,7 @@ func (c *jobCLI) close(args []string) int {
 	eventsDir := jobDir + "/events"
 	if info, err := os.Stat(eventsDir); err != nil || !info.IsDir() {
 		if errors.Is(err, os.ErrNotExist) {
-			return c.closeThroughHub(options)
+			return c.closeRemote(options)
 		}
 		return c.exit(jobDie("close: no events directory for job %s", options.job))
 	}
@@ -136,7 +140,7 @@ func parseJobCloseArgs(args []string) (jobCloseOptions, error) {
 		case "--operator-override":
 			options.override, args = true, args[1:]
 			continue
-		case "--lane", "--outcome", "--reason":
+		case "--lane", "--outcome", "--reason", "--hub-url", "--hub-token-env", "--hub-cf-env":
 		default:
 			return options, jobDie("unknown close option '%s'", flag)
 		}
@@ -152,6 +156,12 @@ func parseJobCloseArgs(args []string) (jobCloseOptions, error) {
 			options.outcome = value
 		case "--reason":
 			options.reason = value
+		case "--hub-url":
+			options.hubURL = value
+		case "--hub-token-env":
+			options.tokenEnv = value
+		case "--hub-cf-env":
+			options.cfEnv = value
 		}
 	}
 	if options.lane == "" {
