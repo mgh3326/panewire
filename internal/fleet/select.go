@@ -169,6 +169,10 @@ type selCand struct {
 	urgency   *float64
 	resetHrs  *float64
 	reason    string
+	// cap names the [quota].pool_max_concurrent key that dropped the
+	// candidate: its catalog pool, or the reserved devin-free key for a
+	// SWE-2 free rung.
+	cap       string
 	outcome   string
 	judgments []quotaJudgment
 	// exhausted marks a free rung whose account projection reaches the
@@ -779,8 +783,8 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 				c.seatName = name
 				// Checked after the seat rules so a candidate those rules
 				// drop keeps its own reason.
-				if capGate.full(ctx, row.Pool) {
-					c.reason = reasonPoolAtCap
+				if capKey := capGate.full(ctx, row); capKey != "" {
+					c.reason, c.cap = reasonPoolAtCap, capKey
 				}
 			}
 		}
@@ -1086,6 +1090,9 @@ func (p *selPlan) record() map[string]any {
 		}
 		if c.reason != "" {
 			row["reason"] = c.reason
+		}
+		if c.cap != "" {
+			row["cap"] = c.cap
 		}
 		if c.projected != nil {
 			row["projected_pct"] = *c.projected

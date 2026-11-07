@@ -252,3 +252,162 @@ func TestPoolCapDropsCappedCreditPoolInSecondPass(t *testing.T) {
 		}
 	}
 }
+
+// devinCapRows is three SWE-2 free rungs and the paid devin rung. They all sit
+// in catalog pool devin but draw on different Devin quotas.
+func devinCapRows() []CatalogRow {
+	return []CatalogRow{
+		{Profile: "devin-swe2", Effort: "high", Grade: "A+", Pool: "devin", Gate: "default", ModelID: "swe-2"},
+		{Profile: "devin-swe2-medium", Effort: "medium", Grade: "A", Pool: "devin", Gate: "default", ModelID: "swe-2-medium"},
+		{Profile: "devin-swe2-max", Effort: "max", Grade: "S+", Pool: "devin", Gate: "default", ModelID: "swe-2-max"},
+		{Profile: "devin-ds41", Effort: "high", Grade: "A+", Pool: "devin", Gate: "default", ModelID: "deepseek-v4-1-flash-high"},
+	}
+}
+
+// devinCapFixture builds a selection over rows with the devin caps set and the
+// live spawns answered by live.
+func devinCapFixture(t *testing.T, rows []CatalogRow, caps map[string]any, live map[string]int) (*App, Spawn) {
+	t.Helper()
+	a, s, q := selFixture(t, "B", rows, nil, []string{"devin"})
+	q.GateDo = gatePools(map[string]string{
+		"devin-swe2": "devin", "devin-swe2-medium": "devin", "devin-swe2-max": "devin",
+		"devin-swe2-flash": "devin", "devin-swe2-flash-medium": "devin", "devin-ds41": "devin",
+	})
+	a.Config.Quota = map[string]any{"pool_max_concurrent": caps}
+	a.LiveSpawnProfiles = func(context.Context, string) (map[string]int, error) { return live, nil }
+	return a, s
+}
+
+// freeCand is one free-rung candidate in a devinCapRows selection.
+type freeCand struct{ profile, effort string }
+
+var devinFreeCands = []freeCand{
+	{"devin-swe2", "high"},
+	{"devin-swe2-medium", "medium"},
+	{"devin-swe2-max", "max"},
+}
+
+func wantDroppedAtCap(t *testing.T, rec map[string]any, profile, effort, capKey string) {
+	t.Helper()
+	row := candOutcome(rec, profile, effort)
+	if row["outcome"] != "dropped:pool_at_cap" || row["cap"] != capKey {
+		t.Fatalf("%s@%s = %v, want dropped:pool_at_cap cap=%s", profile, effort, row, capKey)
+	}
+}
+
+// (a) The reserved devin-free cap holds the SWE-2 free rungs to two live
+// spawns; the paid devin rung in the same catalog pool is still admitted.
+func TestPoolCapDevinFreeDropsFreeRungsNotPaidDevin(t *testing.T) {
+	a, s := devinCapFixture(t, devinCapRows(), map[string]any{devinFreeCapKey: int64(2)}, map[string]int{"devin-swe2": 2})
+	sel, seat := chosenSeat(t, a, s)
+	if seat != "devin-ds41" {
+		t.Fatalf("chosen = %s, want devin-ds41: the SWE-2 free rungs are at their cap", seat)
+	}
+	rec := sel.record()
+	for _, c := range devinFreeCands {
+		wantDroppedAtCap(t, rec, c.profile, c.effort, devinFreeCapKey)
+	}
+	if row := candOutcome(rec, "devin-ds41", "high"); row["outcome"] == "dropped:pool_at_cap" {
+		t.Fatalf("paid devin was capped by devin-free: %v", row)
+	}
+}
+
+// (b) devin alone stays a whole-pool cap: the free rungs and paid devin fall
+// together. A free rung must still pass it when devin-free has room.
+func TestPoolCapDevinWholePoolCapsFreeAndPaidTogether(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		caps map[string]any
+	}{
+		{"devin alone", map[string]any{"devin": int64(2)}},
+		{"both keys", map[string]any{"devin": int64(2), devinFreeCapKey: int64(10)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a, s := devinCapFixture(t, devinCapRows(), tc.caps, map[string]int{"devin-swe2": 2})
+			sel, err := a.selectProfile(context.Background(), s)
+			if err == nil {
+				t.Fatal("selection admitted a spawn on a full devin pool")
+			}
+			for _, want := range []string{"pool_at_cap", "devin=2"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Fatalf("refusal %q does not name %q", err, want)
+				}
+			}
+			rec := sel.record()
+			for _, c := range devinFreeCands {
+				wantDroppedAtCap(t, rec, c.profile, c.effort, "devin")
+			}
+			wantDroppedAtCap(t, rec, "devin-ds41", "high", "devin")
+		})
+	}
+}
+
+// (c) A SWE-2 flash rung counts as free: #318 added it to devinFreeRungs.
+func TestPoolCapDevinFreeCountsFlashRung(t *testing.T) {
+	rows := []CatalogRow{
+		{Profile: "devin-swe2-flash", Effort: "high", Grade: "B", Pool: "devin", Gate: "default", ModelID: "swe-2-flash-high"},
+		{Profile: "devin-ds41", Effort: "high", Grade: "A+", Pool: "devin", Gate: "default", ModelID: "deepseek-v4-1-flash-high"},
+	}
+	a, s := devinCapFixture(t, rows, map[string]any{devinFreeCapKey: int64(2)}, map[string]int{"devin-swe2": 2})
+	sel, seat := chosenSeat(t, a, s)
+	if seat != "devin-ds41" {
+		t.Fatalf("chosen = %s, want devin-ds41: the flash rung is a free rung", seat)
+	}
+	wantDroppedAtCap(t, sel.record(), "devin-swe2-flash", "high", devinFreeCapKey)
+}
+
+// A live paid devin spawn does not count against devin-free: only the free
+// rungs do.
+func TestPoolCapDevinFreeCountsOnlyFreeRungs(t *testing.T) {
+	a, s := devinCapFixture(t, devinCapRows(), map[string]any{devinFreeCapKey: int64(2)}, map[string]int{"devin-swe2": 1, "devin-ds41": 1})
+	sel, err := a.selectProfile(context.Background(), s)
+	if err != nil {
+		t.Fatalf("one live free spawn and one live paid spawn leave room under devin-free=2: %v", err)
+	}
+	if _, free := devinFreeRungs[sel.chosen.row.Profile]; !free {
+		t.Fatalf("chosen = %s, want a free rung: the paid spawn filled the free cap", sel.chosen.row.Profile)
+	}
+}
+
+// A seat alias counts toward the free rungs it runs.
+func TestPoolCapDevinFreeCountsSeatAliases(t *testing.T) {
+	a, s := devinCapFixture(t, devinCapRows(), map[string]any{devinFreeCapKey: int64(2)}, map[string]int{"devin-swe2": 1, "builder-devin": 1})
+	sel, seat := chosenSeat(t, a, s)
+	if seat != "devin-ds41" {
+		t.Fatalf("chosen = %s, want devin-ds41: a live swe2 and its builder-devin alias fill devin-free=2", seat)
+	}
+	for _, c := range devinFreeCands {
+		wantDroppedAtCap(t, sel.record(), c.profile, c.effort, devinFreeCapKey)
+	}
+}
+
+// (d) An invalid devin-free value is refused at load, naming the key.
+func TestPoolCapDevinFreeInvalidConfigRefusedAtLoad(t *testing.T) {
+	for _, tc := range []struct{ name, body, want string }{
+		{"valid", `pool_max_concurrent = { "devin-free" = 2, "devin" = 3 }`, ""},
+		{"zero", `pool_max_concurrent = { "devin-free" = 0 }`, "quota.pool_max_concurrent.devin-free must be a positive integer"},
+		{"string_value", `pool_max_concurrent = { "devin-free" = "2" }`, "quota.pool_max_concurrent.devin-free must be a positive integer"},
+		{"negative", `pool_max_concurrent = { "devin-free" = -2 }`, "quota.pool_max_concurrent.devin-free must be a positive integer"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "hosts.toml")
+			if err := os.WriteFile(path, []byte("[quota]\n"+tc.body+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cfg, err := LoadConfig(path)
+			if tc.want == "" {
+				if err != nil {
+					t.Fatal(err)
+				}
+				caps := poolMaxConcurrent(cfg.Quota)
+				if caps[devinFreeCapKey] != 2 || caps["devin"] != 3 {
+					t.Fatalf("caps = %v, want devin-free=2 devin=3", caps)
+				}
+				return
+			}
+			if exitCode(err) != exitConfig || err == nil || err.Error() != tc.want {
+				t.Fatalf("want exit %d %q, got %v", exitConfig, tc.want, err)
+			}
+		})
+	}
+}
