@@ -88,6 +88,16 @@ func (a *App) jobStore() (JobStore, error) {
 // endpoint and bearer credential. It is how a node writes a job record with its
 // own credential (spawn.json handoffkeep_env) rather than the hub's.
 func NewJobStore(baseURL, token, cfID, cfSecret string) (JobStore, error) {
+	client, err := newNodeHKClient(baseURL, token, cfID, cfSecret)
+	if err != nil {
+		return nil, err
+	}
+	return newHKJobs(client), nil
+}
+
+// newNodeHKClient validates an explicit handoffkeep endpoint and credential
+// and returns the shared HTTP client over them.
+func newNodeHKClient(baseURL, token, cfID, cfSecret string) (*hkQuota, error) {
 	parsed, err := url.Parse(strings.TrimSpace(baseURL))
 	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
 		return nil, errors.New("invalid handoffkeep endpoint")
@@ -101,7 +111,7 @@ func NewJobStore(baseURL, token, cfID, cfSecret string) (JobStore, error) {
 	if token == "" || (cfID == "") != (cfSecret == "") {
 		return nil, errors.New("invalid handoffkeep credential")
 	}
-	return newHKJobs(&hkQuota{base: strings.TrimRight(baseURL, "/"), token: token, cfID: cfID, cfSecret: cfSecret}), nil
+	return &hkQuota{base: strings.TrimRight(baseURL, "/"), token: token, cfID: cfID, cfSecret: cfSecret}, nil
 }
 
 // NodeID reports the host id this app claims job records under: HUB_MACHINE_ID

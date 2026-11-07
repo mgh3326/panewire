@@ -313,6 +313,8 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 	statePublish := fs.Bool("state-publish", false, "publish this host's fleet state (quota for --state-quota-pools) to the hub; see docs/fleet-state.md")
 	stateQuotaPools := fs.String("state-quota-pools", "", "comma-separated pacelever pools whose accounts this host measures; requires --state-publish")
 	stateQuotaInterval := fs.Duration("state-quota-interval", defaultFleetQuotaInterval, "how often to refresh and publish --state-quota-pools")
+	taskPaneSweepInterval := fs.Duration("task-pane-sweep-interval", defaultTaskPaneSweepInterval, "how often the node closes worker panes whose hk task is merged, done or dropped (0 = off); see docs/pane-sweep.md")
+	taskPaneSweepGrace := fs.Duration("task-pane-sweep-grace", fleet.DefaultPaneSweepGrace, "how long a pane must have stayed not working before the sweep closes it")
 	idleShutdown := fs.Duration("idle-shutdown", 0, "power this machine off after being fully idle this long (0 = off)")
 	idleShutdownCommand := fs.String("idle-shutdown-command", "", "idle shutdown argv, e.g. 'sudo -n /usr/sbin/poweroff' (required when --idle-shutdown > 0)")
 	idleShutdownPoll := fs.Duration("idle-shutdown-poll", time.Minute, "idle condition probe interval")
@@ -388,6 +390,10 @@ func newDaemonForCLI(args []string, deps daemonCLIDeps) (*Daemon, int, error) {
 			return nil, ExitConditionInvalid, fmt.Errorf("state publishing flags are invalid")
 		}
 		configuredHub.statePublish, configuredHub.stateQuotaPools, configuredHub.stateQuotaInterval = *statePublish, pools, *stateQuotaInterval
+		if *taskPaneSweepInterval < 0 || (*taskPaneSweepInterval > 0 && *taskPaneSweepInterval < minTaskPaneSweepInterval) || *taskPaneSweepGrace < 0 {
+			return nil, ExitConditionInvalid, fmt.Errorf("task pane sweep flags are invalid")
+		}
+		configuredHub.taskPaneSweepInterval, configuredHub.taskPaneSweepGrace = *taskPaneSweepInterval, *taskPaneSweepGrace
 		hubClient = configuredHub
 		cfg.Hub = HubDaemonConfig{Enabled: true, Client: hubClient}
 	}
@@ -449,7 +455,7 @@ func (values *hubURLValues) Set(raw string) error {
 }
 
 func hubFlagsProvided(args []string) bool {
-	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "quota-stop-act", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "wake-targets", "checks-config", "state-publish", "state-quota-pools", "state-quota-interval"} {
+	for _, name := range []string{"hub-url", "hub-token-env", "hub-cf-env", "hub-accepting", "hub-jobs-root", "idle-wake-settle", "quota-stop-act", "failover-wake-on", "failover-wake-mac", "burst-wake-mac", "burst-poweroff-allowed", "wake-targets", "checks-config", "state-publish", "state-quota-pools", "state-quota-interval", "task-pane-sweep-interval", "task-pane-sweep-grace"} {
 		flagName := "--" + name
 		for _, arg := range args {
 			if arg == flagName || strings.HasPrefix(arg, flagName+"=") {

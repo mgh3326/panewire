@@ -249,15 +249,20 @@ func (client *HubClient) nodeJobStoreForCommand() (fleet.JobStore, error) {
 	if client.nodeJobs != nil {
 		return client.nodeJobs, nil
 	}
-	config, _, err := client.resolveHubSpawnConfig()
-	if err != nil || config.HandoffkeepEnv == "" {
-		return nil, errors.New("handoffkeep env unset")
-	}
-	env, err := loadHubHandoffkeepEnv(config.HandoffkeepEnv)
+	env, err := client.nodeHandoffkeepEnv()
 	if err != nil {
 		return nil, err
 	}
 	return fleet.NewJobStore(env.URL, env.Token, env.CFID, env.CFSecret)
+}
+
+// nodeHandoffkeepEnv loads the node's own hk endpoint and credential.
+func (client *HubClient) nodeHandoffkeepEnv() (hubHandoffkeepEnv, error) {
+	config, _, err := client.resolveHubSpawnConfig()
+	if err != nil || config.HandoffkeepEnv == "" {
+		return hubHandoffkeepEnv{}, errors.New("handoffkeep env unset")
+	}
+	return loadHubHandoffkeepEnv(config.HandoffkeepEnv)
 }
 
 // nodeJobRole is the role the job's own ledger names: the newest claim or
