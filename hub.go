@@ -1439,6 +1439,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
+			h.recordInboxStageByRelayID(held.EventID, laneInboxStageHeld, held.Reason, machineID, held.Pane)
 		}
 		if message.Kind == "relay.released" {
 			released, valid := decodeRelayReleasedPayload(message.Payload)
@@ -1446,6 +1447,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
+			h.recordInboxStageByRelayID(released.OriginalEventID, laneInboxStageTyped, "", machineID, released.Pane)
 		}
 		if message.Kind == "relay.cancelled" {
 			cancelled, valid := decodeRelayCancelledPayload(message.Payload)
@@ -1469,6 +1471,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
+			h.recordInboxStageByRelayID(dropped.OriginalEventID, laneInboxStageDropped, dropped.Reason, machineID, dropped.Pane)
 			h.observeRelayDropped(machineID, dropped)
 			h.escalateUnconfirmedRelay(machineID, dropped)
 		}
@@ -1528,6 +1531,7 @@ func (h *HubServer) handleRelayAck(machineID string, message hubInbound) {
 		h.consumeRelayPending(key)
 		h.rememberWorkingExpired(pending, ack)
 		h.observeRelayUnconfirmed(pending, ack)
+		h.recordInboxStage(relayEventDedupeKey(pending.kind, pending.event), laneInboxStageUnconfirmed, ack.Reason, machineID, pending.pane)
 		// Logging it keeps a dropped-ack diagnosis greppable.
 		h.logger.Warn("relay delivery unconfirmed", "machine", machineID, "job", ack.JobID, "pane", ack.Pane, "event_id", pending.eventID, "reason", ack.Reason)
 		h.broadcast(hubEvent{MachineID: machineID, Kind: message.Kind, Payload: append(json.RawMessage(nil), message.Payload...), Received: received})

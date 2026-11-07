@@ -348,6 +348,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 		// the id for future 409s, then release the active claim for replay.
 		h.rememberLanePersisted(key, stored.ID)
 		h.forgetRelayEvent(key)
+		h.linkInboxRelayID(key, stored.ID)
 		return relayLaneEventResult{ID: stored.ID, Duplicate: true}
 	}
 	// handoffkeep is first-writer-wins. A hub that restarted after the first
@@ -357,6 +358,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 	}
 	h.rememberLanePersisted(key, stored.ID)
 	h.rememberRelayEvent(key, stored.ID)
+	h.linkInboxRelayID(key, stored.ID)
 	if event.Truncated {
 		h.broadcastRelayTruncated(event)
 	}
@@ -367,6 +369,7 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 	}
 	if relayEventAlreadyDelivered(status, stored, event) {
 		h.broadcastRelayAlreadyDelivered("lane.event", event, stored)
+		h.recordInboxDelivered(key, "", "")
 		return relayLaneEventResult{ID: stored.ID, AlreadyDelivered: true}
 	}
 	if route.Sink {
@@ -467,12 +470,14 @@ func (h *HubServer) relayJobEventFrom(senderMachine, kind string, event hubJobEv
 		return
 	}
 	h.rememberRelayEvent(key, stored.ID)
+	h.linkInboxRelayID(key, stored.ID)
 	if relayEventAlreadyDelivered(status, stored, event) {
 		// handoffkeep already holds this record as delivered, so the note is in
 		// the pane. The node still owes its outbox row an answer: acknowledge,
 		// and put the injection nobody needs on the operator feed instead.
 		h.queueRelayPersisted(kind, event, h.relayPersistedAgent(senderMachine, destinationAgent), stored.ID)
 		h.broadcastRelayAlreadyDelivered(kind, event, stored)
+		h.recordInboxDelivered(key, "", "")
 		return
 	}
 	h.injectRelayEvent(kind, event, route, destinationAgent, h.relayPersistedAgent(senderMachine, destinationAgent), stored.ID, key)
@@ -937,7 +942,7 @@ func (h *HubServer) markRelayEventDelivered(pending relayPending) bool {
 		if err := h.inbox.store.surfaceInboxSummary(relayEventDedupeKey(pending.kind, pending.event), h.now().UTC()); err != nil {
 			h.logger.Warn("inbox summary surfacing was not recorded", "kind", pending.kind)
 		}
-		if err := h.inbox.store.recordDelivery(relayEventDedupeKey(pending.kind, pending.event), h.now().UTC()); err != nil {
+		if err := h.inbox.store.recordDelivery(relayEventDedupeKey(pending.kind, pending.event), pending.machine, pending.pane, h.now().UTC()); err != nil {
 			h.logger.Warn("inbox delivery confirmation was not recorded", "kind", pending.kind)
 		}
 	}

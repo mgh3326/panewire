@@ -79,8 +79,7 @@ func (d *Daemon) Start(ctx context.Context) error {
 	if d.store == nil {
 		path := d.cfg.DBPath
 		if path == "" {
-			home, _ := os.UserHomeDir()
-			path = filepath.Join(home, "Library", "Application Support", "panewire", "panewire.sqlite3")
+			path = defaultDBPath()
 		}
 		s, err := OpenStore(path)
 		if err != nil {

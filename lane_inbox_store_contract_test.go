@@ -859,7 +859,7 @@ func TestLaneInboxStoreContractSettled(t *testing.T) {
 			t.Fatal(err)
 		}
 		expect("must", true)
-		if err := s.recordDelivery("plain", now.Add(time.Second)); err != nil {
+		if err := s.recordDelivery("plain", "", "", now.Add(time.Second)); err != nil {
 			t.Fatal(err)
 		}
 		expect("plain", true)

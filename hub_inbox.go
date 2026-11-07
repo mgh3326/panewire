@@ -644,14 +644,15 @@ func (h *HubServer) handleInboxList(w http.ResponseWriter, r *http.Request) {
 // hubInboxAckStateMaxIDs bounds one ack-state request.
 const hubInboxAckStateMaxIDs = 100
 
-// handleInboxAckState answers, for each ?event_id=, whether its inbox row was
-// acked and when — nothing else about the row. The operator and a service
-// holding inbox.ack_state see every row; a node sees only rows it relayed
-// itself, so a sender can check its own events without reading any lane. A
-// node with no visible row among the ids gets the 401 it gets everywhere
-// else, whether the ids are another node's or unknown: the two must not be
-// told apart. For anyone else an id with no row is reported in not_found, and
-// the answer is 404 when no id has a row.
+// handleInboxAckState answers, for each ?event_id=, the lane its row targets,
+// the delivery stage that row reached, the stage's reason/machine/pane when it
+// has one, and whether the row was acked and when — and nothing of the row's
+// kind or body. The operator and a service holding inbox.ack_state see every
+// row; a node sees only rows it relayed itself, so a sender can check its own
+// events without reading any lane. A node with no visible row among the ids
+// gets the 401 it gets everywhere else, whether the ids are another node's or
+// unknown: the two must not be told apart. For anyone else an id with no row
+// is reported in not_found, and the answer is 404 when no id has a row.
 func (h *HubServer) handleInboxAckState(w http.ResponseWriter, r *http.Request) {
 	caller := h.authenticate(r)
 	sender := ""

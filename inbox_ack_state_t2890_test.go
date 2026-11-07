@@ -184,17 +184,19 @@ func testInboxAckStateAuthz(t *testing.T, storage hubInboxStorage) {
 		}
 	}
 
-	// No row content leaks: only the three fields, nothing of the body or lane.
+	// No row content leaks: the lane, delivery stage and ack state, nothing of
+	// the body or kind.
 	for _, caller := range []pw2Caller{operator, service, nodeA} {
 		_, body = ackStateGet(t, server, caller, "ev-a", "ev-a2")
-		for _, leaked := range []string{"secret", "FYI", "lane", "payload", "text", "sender", "node-a", "kind"} {
+		for _, leaked := range []string{"secret", "FYI", "payload", "text", "sender", "node-a", "kind"} {
 			if strings.Contains(body, leaked) {
 				t.Fatalf("%s answer leaks %q: %s", caller.name, leaked, body)
 			}
 		}
+		allowed := map[string]bool{"event_id": true, "lane": true, "stage": true, "reason": true, "machine": true, "pane": true, "at": true, "acked": true, "acked_at": true}
 		for _, event := range decodeAckState(t, body).Events {
 			for key := range event {
-				if key != "event_id" && key != "acked" && key != "acked_at" {
+				if !allowed[key] {
 					t.Fatalf("%s answer carries %q: %s", caller.name, key, body)
 				}
 			}
@@ -399,12 +401,12 @@ func TestInboxStatusCLI(t *testing.T) {
 		t.Fatalf("node status --json: %d %q %q", code, out, errText)
 	}
 	code, out, _ = run("operator", ackStateOperatorToken, "--event-id", "ev-a")
-	if code != ExitOK || out != "ev-a\tunacked\n" {
+	if code != ExitOK || out != "event=ev-a lane=lane-a stage=inbox_only reason=- machine=- pane=- acked=no\n" {
 		t.Fatalf("status text: %d %q", code, out)
 	}
 	// An id with no row is printed and exits 7, so a script can tell it from an unacked one.
 	code, out, _ = run("operator", ackStateOperatorToken, "--event-id", "ev-a", "--event-id", "nope")
-	if code != ExitPartial || out != "ev-a\tunacked\nnope\tnot found\n" {
+	if code != ExitPartial || out != "event=ev-a lane=lane-a stage=inbox_only reason=- machine=- pane=- acked=no\nnope\tnot found\n" {
 		t.Fatalf("partial status: %d %q", code, out)
 	}
 	code, out, _ = run("operator", ackStateOperatorToken, "--event-id", "nope", "--json")

@@ -127,6 +127,7 @@ func (h *HubServer) expireRelayAck(key string) {
 	}{JobID: pending.event.JobID, Reason: "ack_timeout"})
 	h.broadcast(hubEvent{Kind: "relay.unconfirmed", Payload: payload, Received: h.now().UTC()})
 	h.observeRelayUnconfirmed(pending, relayAckPayload{Reason: "ack_timeout"})
+	h.recordInboxStage(relayEventDedupeKey(pending.kind, pending.event), laneInboxStageUnconfirmed, "ack_timeout", pending.machine, pending.pane)
 }
 
 func (h *HubServer) acknowledgeRelay(machineID string, ack relayAckPayload) bool {

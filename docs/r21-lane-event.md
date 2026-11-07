@@ -104,6 +104,45 @@ pane in handoffkeep; it does not travel to or depend on the producer's
 machine. The earlier `relay.persisted` acknowledgement is separately returned
 to the producer node when the hub accepts durable responsibility.
 
+## How a sender checks delivery
+
+`panewire emit --kind lane.event` prints the event id it wrote and the command
+that answers where it is. `--event-id` may be given; without it `emit` generates
+one and prints it. The id is also in the durable `events-lane/` record.
+
+```sh
+$ panewire emit --kind lane.event --lane lane-a --event-id producer-42 --text "approval requested"
+event_id=producer-42
+panewire inbox status --event-id producer-42
+```
+
+`panewire inbox status --event-id ID` asks the hub's ack-state and prints one
+line per event:
+
+```text
+event=producer-42 lane=lane-a stage=delivered reason=- machine=host-a pane=w1:p1 acked=no
+```
+
+The stages are:
+
+| stage | meaning |
+|---|---|
+| `queued` | the hub accepted the event; no pane has proven it yet |
+| `held` | the pane was busy, so the node holds the text until it can type it |
+| `typed` | the node typed the text; proof is still pending |
+| `delivered` | the pane proved it received the text |
+| `unconfirmed` | the node could not prove reception; `reason` says why (`maybe_in_pane presend:composer_pending`, `ack_timeout`, `working_wait_expired`) |
+| `dropped` | the node gave up; `reason` says why |
+| `inbox_only` | the lane reads this event from its inbox, not from its pane |
+
+`--json` returns each event's `reason`, `machine`, `pane` and `at` as well; `at`
+is the latest stage change. The stage is stored on the lane's inbox row, so a
+hub restart does not lose it. Scoping is the same as the ack answer: a node
+credential sees only the events its own node relayed, and another node's id is
+answered exactly like an unknown one (401). The operator and a service holding
+`inbox.ack_state` see every row. An id with no visible row prints `not found`
+and exits 7.
+
 ## Bounded relay bookkeeping
 
 The hub removes a `lanePersisted` entry and its `relayTimeouts` suppression

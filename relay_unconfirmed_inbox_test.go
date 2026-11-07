@@ -54,7 +54,7 @@ func unconfirmedInboxStart(t *testing.T, state string) *unconfirmedInboxRig {
 			t.Fatal(err)
 		}
 	case "delivered":
-		if err := store.recordDelivery(key, rig.now); err != nil {
+		if err := store.recordDelivery(key, "", "", rig.now); err != nil {
 			t.Fatal(err)
 		}
 	case "acked":
