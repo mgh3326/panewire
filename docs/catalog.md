@@ -1,0 +1,75 @@
+# Catalog commands
+
+`panewire catalog` owns the bench catalog, its grades and Artificial Analysis
+annotations. The catalog lives in handoffkeep (`GET`/`PUT /v1/bench/catalog`)
+and its grades in `/v1/bench/grades`; no subcommand runs pacelever.
+
+- `panewire catalog list [--json]` reads the catalog and prints one line per
+  rung, then `catalog=<source> stale=<bool>`. `--json` prints the same rows as
+  the push payload plus a `source` object with `source`, `stale` and `age_s`.
+- `panewire catalog push FILE [--dry-run]` validates a catalog document and
+  writes it. `--dry-run` prints the payload without a request. A row in a pool
+  panewire does not serve is ignored with `warning: unknown pool [NAME]
+  ignored`.
+- `panewire catalog grade set --profile P --grade G --deviation-ref REF
+  [--boundary-version V] [--dry-run]` writes one grade projection. `G` is one
+  of `S+`, `S`, `A+`, `A`, `B`, `C` or `unrated`.
+- `panewire catalog aa-sync [--out FILE] [--dry-run]` fetches the free
+  Artificial Analysis Data API and annotates the explicit model mappings.
+  Annotations are written to `FILE` for review; sync itself never pushes.
+  `--out` requires a fresh server catalog.
+
+## Credentials
+
+Every command resolves handoffkeep the way pacelever does: `HANDOFFKEEP_URL`
+and `HANDOFFKEEP_TOKEN` in the environment win, and when neither is set the
+file named by `HANDOFFKEEP_CONFIG` (else `$XDG_CONFIG_HOME/handoffkeep/config.env`,
+default `~/.config/handoffkeep/config.env`) supplies the URL and token. A
+partial environment override never falls back to the file. The optional
+`HANDOFFKEEP_CF_ACCESS_CLIENT_ID` and `HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET`
+pair adds Cloudflare Access headers; both or neither must be set. The catalog
+endpoint must be HTTPS, or HTTP on loopback or a tailnet address for tests.
+
+The operator and operator-desk credential path is therefore the same one the
+operator already uses: `pacelever bench push-catalog FILE` becomes
+`panewire catalog push FILE`.
+
+## Cache
+
+A catalog read reuses a cache entry younger than one hour and otherwise reads
+the endpoint. A cache entry is served for up to one day when the endpoint
+fails, and is marked `cache-stale` after that. Admission and selection refuse
+a stale catalog; `catalog list` prints it with `stale=true`. The cache is
+per endpoint under
+`$XDG_CACHE_HOME/panewire/bench/<endpoint-id>-catalog.json`, written mode 0600
+through the durable file helper.
+
+## Validation
+
+The decoder applies pacelever's rules: a row must name a profile, model, known
+grade and known gate; rows are unique by `profile@effort`; grades must not
+improve as effort rises for one profile (unrated and retired rungs are
+excluded); and only pools panewire serves are kept. A push additionally
+requires a non-empty catalog, `decided_by`, `deviation_ref` and an RFC 3339
+`decided_at` with a timezone. The wire payload carries `profile`, `effort`,
+`model_id`, `pool`, `grade`, `score`, `gate`, `gate_reason`,
+`boundary_version`, `deviation_ref`, `decided_at`, `decided_by`, `retired_at`
+and, when present, `benchmark_source` and `benchmark_annotation`; local
+placement fields never leave the caller.
+
+## Artificial Analysis
+
+The key comes from `ARTIFICIAL_ANALYSIS_API_KEY` in the environment, or from
+the optional mode-0600 `panewire/aa.env` under the user configuration
+directory. The endpoint is the free v2 models route, and only the explicit
+mapping table is annotated; unmapped or ambiguous rows are reported and left
+unchanged. Data is provided by
+[Artificial Analysis](https://artificialanalysis.ai/).
+
+The weekly dagu job switches from `pacelever bench aa-sync` to
+`panewire catalog aa-sync`, with the same `--out` argument.
+
+## Exit status
+
+`0` success, `2` usage, `5` invalid input or an unavailable/unreachable
+catalog, `70` an internal write failure.

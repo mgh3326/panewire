@@ -287,11 +287,8 @@ func (a *App) paceleverBinary() string {
 	return "pacelever"
 }
 
-// benchCatalog is the bench catalog the gate judges with: pacelever's own
-// (`pacelever bench catalog list`), which merges its bundled snapshot and
-// validates the rows. The catalog stays pacelever's until hk 3249 moves it
-// (hk 3248 brief, Dependency status); the gate itself runs no other
-// pacelever command.
+// benchCatalog is the bench catalog the gate judges with: handoffkeep's rows,
+// validated and cached by catalog.go. The gate runs no pacelever command.
 func (a *App) benchCatalog(ctx context.Context) ([]CatalogRow, error) {
 	if a.BenchCatalog != nil {
 		return a.BenchCatalog(ctx)

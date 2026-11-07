@@ -8,8 +8,9 @@ scheduled for removal; callers should use panewire's interface.
 - `panewire quota observe KIND ...` forwards the observation kind and all remaining arguments, including `devin-free-limit` options, and returns the dependency's exit code.
 
 Status and version calls each have a 30-second bound; gate calls have a
-30-second bound and catalog calls a 15-second bound. A timeout reports
-`<what>: timed out after <duration>`. Warnings from the dependency are omitted.
+30-second bound. A timeout reports `<what>: timed out after <duration>`.
+Warnings from the dependency are omitted. The catalog read is not a
+dependency call; it has an 8-second bound ([catalog.md](catalog.md)).
 
 ## Status JSON v1
 
@@ -376,12 +377,13 @@ a config error. `claude` and `codex` are always native and need no entry.
 
 ### Artificial Analysis annotations
 
-`panewire quota aa-sync --out catalog.json` reads the current catalog through
-pacelever, fetches the free Data API, and writes a catalog artifact for review
-and a later operator-controlled catalog push. `--dry-run` reports the result
-without writing the artifact. The catalog must be fresh and server-sourced when
-using `--out`. Only explicit model mappings are annotated; unmapped or ambiguous
-rows are reported. Annotations are model priors, not grade evidence.
+`panewire catalog aa-sync --out catalog.json` reads the catalog from
+handoffkeep, fetches the free Data API, and writes a catalog artifact for
+review and a later operator-controlled `panewire catalog push`. See
+[the catalog command contract](catalog.md). `--dry-run` reports the result
+without writing the artifact. The catalog must be fresh and server-sourced
+when using `--out`. Only explicit model mappings are annotated; unmapped or
+ambiguous rows are reported. Annotations are model priors, not grade evidence.
 
 Set `ARTIFICIAL_ANALYSIS_API_KEY` in the environment, or place it in the optional
 mode-0600 `panewire/aa.env` under the user configuration directory. Data is
@@ -403,9 +405,9 @@ pacelever v0.3.28's gate) from three inputs:
   account; a local request reads the account this host holds (the fleet
   config's `[quota.accounts]`, this host's presence records, then pacelever's
   own `[quota.accounts]`).
-- **The bench catalog**, pacelever's own (`pacelever bench catalog list`, with
-  its bundled snapshot and validation) until hk 3249 moves it; an unavailable
-  or stale catalog refuses (exit 2).
+- **The bench catalog** from handoffkeep (`GET /v1/bench/catalog`), validated
+  and cached by panewire as [catalog.md](catalog.md) describes; an unavailable
+  or stale catalog refuses (exit 2). No pacelever process runs.
 - **The pool policy** in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
   `~/.config/pacelever/config.toml`): class and its `until` date, cutoff,
   subscription, `fusion_billing_fp`. A missing file is the default policy; an
@@ -465,10 +467,10 @@ gate = "native"   # or "shadow", the default
   reads `disagree` (no `30d`): that is the expected difference until the pool
   is native. The desk reads the events and flips the switch.
 - **Native.** panewire's verdict decides: no `pacelever gate` and no
-  `pacelever refresh` run in the gate. Its one pacelever call is the catalog
-  read; that, `pacelever policy launch`, the status and manual reads and the
-  selector's refresh of a pool panewire does not measure stay until hk 3249 and
-  3250.
+  `pacelever refresh` run in the gate, and the catalog comes from handoffkeep
+  ([catalog.md](catalog.md)). `pacelever policy launch`, the status and manual
+  reads and the selector's refresh of a pool panewire does not measure stay
+  until hk 3250.
 
 The golden verdicts in `internal/fleet/testdata/admission_golden/verdicts.json`
 are pacelever's own: `generator/regen.sh` runs its gate over the scenarios in a
