@@ -104,6 +104,11 @@ const defaultDesignLanePattern = "*-design"
 // inbox summary and on idle-wake delivery.
 const deskPolicyLane = "operator-desk"
 
+// consultDoneMarker opens the text of a consult answer's notice, as rstack
+// skills/ops/references/consult.md §2 has the answerer send it:
+// `--type ready --text '[consult-done] <gist> | <answer path>'`.
+const consultDoneMarker = "[consult-done]"
+
 // deliveryRelayPolicy is the hub-side relay classification. A design-session
 // lane (handoffkeep-design, panewire-design, mergewake-design, …) receives
 // decisions and failures only; routine progress, idle-wakes and the inbox
@@ -161,14 +166,17 @@ func (p *deliveryPolicy) designLane(lane string) bool {
 // The completion of a job with neither -- a consult answer the session waits
 // for -- is delivered as before. hasTask is consulted only for a design-lane
 // completion that names no PR. The declared type and the kind decide alone:
-// text tags, an explicit class and replay do not bring either back.
+// text tags, an explicit class and replay do not bring either back. The one
+// text exception is a consult answer: a ready lane.event whose text starts with
+// consultDoneMarker is the reply the design session asked for and waits for in
+// its pane (hk 3434), so it is delivered.
 func (p *deliveryPolicy) designQuiet(lane, kind string, e hubJobEventPayload, hasTask func() bool) bool {
 	if !p.designLane(lane) {
 		return false
 	}
 	switch kind {
 	case "lane.event":
-		return e.NotifyType == "ready"
+		return e.NotifyType == "ready" && !strings.HasPrefix(e.Text, consultDoneMarker)
 	case "job.completed":
 		return e.PR != "" || hasTask()
 	}
