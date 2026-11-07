@@ -91,7 +91,7 @@ func TestSpawnRefusalCodeFromTheRealFailSites(t *testing.T) {
 	f.Do = func(Command) Result {
 		return Result{Out: `{"result":{"workspaces":[{"workspace_id":"wA","label":"reviews"},{"workspace_id":"wB","label":"reviews"}]}}`}
 	}
-	_, ambiguous := a.resolveWorkspace(context.Background(), "reviews")
+	_, _, ambiguous := a.resolveWorkspace(context.Background(), "reviews")
 	for _, test := range []struct {
 		err  error
 		code string

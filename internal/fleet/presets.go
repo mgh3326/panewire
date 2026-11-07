@@ -121,53 +121,61 @@ func (a *App) workspaceRows(ctx context.Context, value string) ([]map[string]any
 	return rows, nil
 }
 
-func (a *App) resolveWorkspace(ctx context.Context, value string) (string, error) {
+// createdWorkspace is a workspace resolveWorkspace created. Its root pane keeps
+// the workspace alive, so Spawn closes that pane when the launch fails instead
+// of leaving an empty workspace behind.
+type createdWorkspace struct{ rootPane string }
+
+func (a *App) resolveWorkspace(ctx context.Context, value string) (string, *createdWorkspace, error) {
 	rows, err := a.workspaceRows(ctx, value)
 	if err != nil {
 		// Herdr ids are unambiguous; keep them usable when listing is unavailable.
 		if herdrWorkspaceID.MatchString(value) {
-			return value, nil
+			return value, nil, nil
 		}
-		return "", err
+		return "", nil, err
 	}
 	var matches []string
 	for _, row := range rows {
 		id := str(row, "workspace_id")
 		if id == value {
-			return id, nil
+			return id, nil, nil
 		}
 		if str(row, "label") == value && id != "" {
 			matches = append(matches, id)
 		}
 	}
 	if herdrWorkspaceID.MatchString(value) {
-		return "", fail(exitUsage, "workspace id %q is not in herdr's list; herdr deletes an empty workspace, so configure its label instead: workspace = \"workers\", not the id", value)
+		return "", nil, fail(exitUsage, "workspace id %q is not in herdr's list; herdr deletes an empty workspace, so configure its label instead: workspace = \"workers\", not the id", value)
 	}
 	switch len(matches) {
 	case 0:
 		return a.createWorkspace(ctx, value)
 	case 1:
 		fmt.Fprintf(a.Out, "workspace_label=%s workspace=%s\n", value, matches[0])
-		return matches[0], nil
+		return matches[0], nil, nil
 	}
-	return "", fail(exitUsage, "workspace %q matched %d entries; run herdr workspace list on the executing host and pass -w WORKSPACE_ID", value, len(matches))
+	return "", nil, fail(exitUsage, "workspace %q matched %d entries; run herdr workspace list on the executing host and pass -w WORKSPACE_ID", value, len(matches))
 }
 
 // createWorkspace recreates a workspace whose label matched none. Herdr deletes
 // a workspace when its last pane closes, and the spawn path is the only place
 // that sees every such case. Two spawns may race; the re-list picks the oldest
-// match and nothing is closed.
-func (a *App) createWorkspace(ctx context.Context, label string) (string, error) {
+// match and closes nothing.
+func (a *App) createWorkspace(ctx context.Context, label string) (string, *createdWorkspace, error) {
 	r := a.call(ctx, "herdr", "workspace", "create", "--label", label)
 	var created struct {
 		Result struct {
 			Workspace struct {
 				WorkspaceID string `json:"workspace_id"`
 			} `json:"workspace"`
+			RootPane struct {
+				PaneID string `json:"pane_id"`
+			} `json:"root_pane"`
 		} `json:"result"`
 	}
 	if r.Code != 0 || json.Unmarshal([]byte(r.Out), &created) != nil || created.Result.Workspace.WorkspaceID == "" {
-		return "", fail(exitConfig, "cannot create workspace %q; run herdr workspace create --label %s on the executing host", label, label)
+		return "", nil, fail(exitConfig, "cannot create workspace %q; run herdr workspace create --label %s on the executing host", label, label)
 	}
 	workspace, duplicates := created.Result.Workspace.WorkspaceID, 0
 	if rows, err := a.workspaceRows(ctx, label); err == nil {
@@ -186,5 +194,5 @@ func (a *App) createWorkspace(ctx context.Context, label string) (string, error)
 		fmt.Fprintf(a.Out, " duplicates=%d", duplicates)
 	}
 	fmt.Fprintln(a.Out)
-	return workspace, nil
+	return workspace, &createdWorkspace{rootPane: created.Result.RootPane.PaneID}, nil
 }
