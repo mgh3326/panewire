@@ -1488,6 +1488,18 @@
         "reviewer",
         "counsel"
       ]
+    },
+    "omp-dsflash41": {
+      "canon": "omp-dsflash41",
+      "kind": "omp",
+      "family": "deepseek",
+      "capability": "omp_commandcode",
+      "effort": "high",
+      "e6": true,
+      "roles": [
+        "worker",
+        "tester"
+      ]
     }
   }
 }
