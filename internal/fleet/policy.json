@@ -1500,6 +1500,30 @@
         "worker",
         "tester"
       ]
+    },
+    "devin-swe2-flash": {
+      "canon": "devin-swe2-flash",
+      "kind": "devin",
+      "family": "cognition",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
+    },
+    "devin-swe2-flash-medium": {
+      "canon": "devin-swe2-flash-medium",
+      "kind": "devin",
+      "family": "cognition",
+      "capability": "standard",
+      "roles": [
+        "worker",
+        "tester",
+        "reviewer",
+        "counsel"
+      ]
     }
   }
 }
