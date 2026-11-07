@@ -49,6 +49,12 @@ type relayHarnessAdapter struct {
 	// prompt` both read this one field, so the two cannot disagree about how a
 	// pane is reached.
 	paneTransport bool
+	// workingUnprovable marks a harness that cannot prove a directive typed
+	// into a working pane: its proof needs the composer of an idle or done
+	// pane, so a send into a working one stays unproven and the retry-once rule
+	// would type the directive again (hk 3370). The directive policy holds such
+	// a pane while it is working and types when it turns idle or done.
+	workingUnprovable bool
 	// observe: a read that shows no proof yet is re-read for the observation
 	// window before the inject is called unconfirmed, because the echo renders
 	// late on a busy pane. Observation never types or presses anything.
@@ -86,7 +92,7 @@ var relayHarnessAdapters = map[string]relayHarnessAdapter{
 	"devin":  {composerEdge: isDevinDividerLine, composerGlyph: "❭", queued: devinQueued, proof: relayProofTranscriptEcho, maxAttempts: relayDevinMaxInjectAttempts},
 	"grok":   {proof: relayProofEchoAndWorking, observe: true},
 	"omp":    {proof: relayProofEchoAndWorking, observe: true},
-	"cmd":    {composerEdge: isClaudeDividerLine, composerGlyph: "❯", proof: relayProofEchoAndWorking, observe: true, paneTransport: true},
+	"cmd":    {composerEdge: isClaudeDividerLine, composerGlyph: "❯", proof: relayProofEchoAndWorking, observe: true, paneTransport: true, workingUnprovable: true},
 }
 
 // relayAdapterFor looks a harness name up case-insensitively. An empty or
@@ -101,6 +107,13 @@ func (adapter relayHarnessAdapter) injectAttempts() int {
 		return adapter.maxAttempts
 	}
 	return relayMaxInjectAttempts
+}
+
+// relayHarnessWorkingUnprovable reports whether a directive for harness is held
+// while its pane is working (hk 3370).
+func relayHarnessWorkingUnprovable(harness string) bool {
+	adapter, ok := relayAdapterFor(harness)
+	return ok && adapter.workingUnprovable
 }
 
 // harnessPaneTransport reports whether harness is typed at the pane level
