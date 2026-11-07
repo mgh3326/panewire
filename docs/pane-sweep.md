@@ -95,8 +95,10 @@ What happens next depends on how the job ended:
   or unmerged worktree is kept (`dirty_kept`, `unmerged_kept`).
 - **A non-merged end** (a `canceled` task, or a job closed `abandoned` or
   `superseded`): the sweep first writes `git status --porcelain` and `git diff
-  --binary HEAD` to `<job dir>/abandoned-worktree.patch` (mode 0600, replaced
-  atomically, written before anything is removed; a patch that cannot be saved
+  --binary HEAD` to `<job dir>/abandoned-worktree.patch`, followed by each
+  untracked, non-ignored file as a new-file diff (`git diff --no-index`), since
+  the removal deletes them (mode 0600, replaced atomically, written before
+  anything is removed; a patch or an untracked file that cannot be captured
   keeps the worktree, `patch_failed_kept`). It then runs `git worktree remove
   --force <cwd>`, which frees the directory for the next attempt. The local
   branch is deleted with `-D` only when no other worktree holds it and, after a

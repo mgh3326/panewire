@@ -449,3 +449,39 @@ func TestSweepKeepsAnAbandonedWorktreeWhenItsChangesCannotBeSaved(t *testing.T) 
 		t.Fatalf("the pane stayed open for a worktree failure")
 	}
 }
+
+// git diff HEAD leaves untracked files out and the removal deletes them, so
+// their contents must be in the saved patch.
+func TestSweepSavesTheContentsOfUntrackedFilesBeforeRemoving(t *testing.T) {
+	f, g, cwd := abandonedFixture(t)
+	g.dirty = true
+	g.untracked = []string{"new_file.go", "dir/other.txt"}
+	f.at(0)
+	f.at(11)
+	if !slices.Equal(g.removed, []string{cwd}) {
+		t.Fatalf("removed worktrees = %v, want [%s]", g.removed, cwd)
+	}
+	got, err := os.ReadFile(filepath.Join(f.a.Jobs, "a", AbandonedWorktreeFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"+contents of new_file.go", "+contents of dir/other.txt"} {
+		if !strings.Contains(string(got), want) {
+			t.Fatalf("patch lacks %q:\n%s", want, got)
+		}
+	}
+}
+
+// An untracked file that cannot be captured keeps the worktree.
+func TestSweepKeepsAnAbandonedWorktreeWhenUntrackedFilesCannotBeCaptured(t *testing.T) {
+	f, g, _ := abandonedFixture(t)
+	g.lsFailed = true
+	f.at(0)
+	f.at(11)
+	if len(g.removed) != 0 {
+		t.Fatalf("removed %v", g.removed)
+	}
+	if !f.infoHas("task worktree kept", "job=a", "reason=patch_failed_kept") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}

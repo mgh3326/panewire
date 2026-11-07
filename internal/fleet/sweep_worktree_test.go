@@ -25,10 +25,14 @@ type sweepGitFake struct {
 	// A non-merged end: what the worktree holds, whether its branch tip is on
 	// origin, the branches deleted with -D, and a hook run as the worktree is
 	// removed.
-	diff     string
-	onOrigin bool
-	forced   []string
-	onRemove func(path string)
+	diff string
+	// untracked names the files git diff HEAD does not show; ls-files lists
+	// them and diff --no-index renders each as "+<name> contents".
+	untracked []string
+	lsFailed  bool
+	onOrigin  bool
+	forced    []string
+	onRemove  func(path string)
 }
 
 func newSweepGitFake(t *testing.T) *sweepGitFake {
@@ -79,6 +83,13 @@ func (g *sweepGitFake) do(c Command) Result {
 			return Result{Code: 1}
 		}
 		return Result{}
+	case len(args) >= 4 && args[2] == "ls-files":
+		if g.lsFailed {
+			return Result{Code: 1, Err: "ls-files failed"}
+		}
+		return Result{Out: strings.Join(g.untracked, "\x00") + "\x00"}
+	case len(args) >= 4 && args[2] == "diff" && slices.Contains(args, "--no-index"):
+		return Result{Code: 1, Out: "diff --git a/" + args[len(args)-1] + " b/" + args[len(args)-1] + "\n+contents of " + args[len(args)-1] + "\n"}
 	case len(args) >= 4 && args[2] == "diff":
 		return Result{Out: g.diff}
 	case len(args) >= 4 && args[2] == "branch" && args[3] == "-r":

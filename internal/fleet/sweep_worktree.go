@@ -117,8 +117,8 @@ func (s *TaskPaneSweeper) sweepWorktree(ctx context.Context, a *App, j Job, end 
 }
 
 // discardWorktree removes the worktree of a non-merged end. The worktree's
-// status and diff are saved to the job directory first, and a patch that
-// cannot be saved keeps the worktree. The local branch goes (-D) only when its
+// status, its diff and the contents of its untracked files are saved to the job
+// directory first, and a patch that cannot be saved keeps the worktree. The local branch goes (-D) only when its
 // tip is already on origin, so no commit exists nowhere else.
 func (s *TaskPaneSweeper) discardWorktree(ctx context.Context, a *App, j Job, end paneSweepEnd, clone, branch, cwd, base string) {
 	keep := func(reason string) {
@@ -130,7 +130,15 @@ func (s *TaskPaneSweeper) discardWorktree(ctx context.Context, a *App, j Job, en
 		keep(sweepWorktreePatchFailed)
 		return
 	}
-	if err := saveAbandonedWorktree(a, j.ID, base, end.reason, status.Out, diff.Out); err != nil {
+	// git diff HEAD leaves untracked files out and the removal below deletes
+	// them, so each goes into the patch as a new-file diff. One that cannot be
+	// captured keeps the worktree. Ignored files are build output, not work.
+	untracked, ok := sweepUntrackedDiff(ctx, a, cwd)
+	if !ok {
+		keep(sweepWorktreePatchFailed)
+		return
+	}
+	if err := saveAbandonedWorktree(a, j.ID, base, end.reason, status.Out, diff.Out+untracked); err != nil {
 		a.warn("worktree retained: %v", err)
 		keep(sweepWorktreePatchFailed)
 		return
@@ -165,6 +173,28 @@ func (s *TaskPaneSweeper) discardWorktree(ctx context.Context, a *App, j Job, en
 	s.info("task branch removed", "job", j.ID, "branch", branch, "reason", sweepBranchOnOrigin)
 }
 
+// sweepUntrackedDiff renders every untracked, non-ignored file of the worktree
+// as a diff against /dev/null. git diff --no-index exits 1 when the files
+// differ, which is the normal answer here.
+func sweepUntrackedDiff(ctx context.Context, a *App, cwd string) (string, bool) {
+	list := a.call(ctx, "git", "-C", cwd, "ls-files", "--others", "--exclude-standard", "-z")
+	if list.Code != 0 {
+		return "", false
+	}
+	var out strings.Builder
+	for _, name := range strings.Split(list.Out, "\x00") {
+		if name == "" {
+			continue
+		}
+		r := a.call(ctx, "git", "-C", cwd, "diff", "--binary", "--no-index", "--", "/dev/null", name)
+		if r.Code != 0 && r.Code != 1 {
+			return "", false
+		}
+		out.WriteString(r.Out)
+	}
+	return out.String(), true
+}
+
 // saveAbandonedWorktree writes the patch file through an os.Root on the job
 // directory, with its mode set before any byte is written.
 func saveAbandonedWorktree(a *App, jobID, base, reason, status, diff string) error {
@@ -174,7 +204,7 @@ func saveAbandonedWorktree(a *App, jobID, base, reason, status, diff string) err
 	}
 	defer root.Close()
 	contents := "# panewire abandoned worktree " + base + " of job " + jobID + " (" + reason + ")\n" +
-		"# git status --porcelain\n" + status + "\n# git diff HEAD\n" + diff
+		"# git status --porcelain\n" + status + "\n# git diff HEAD, then each untracked file as a new file\n" + diff
 	return durable.ReplaceFileAtomicallyInRoot(root, AbandonedWorktreeFile, []byte(contents), 0600)
 }
 
