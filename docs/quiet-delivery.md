@@ -194,7 +194,7 @@ The hub keeps these in the lane's inbox, without a pane injection:
   `task_id` of the job's hk record, read through the hub's existing spawn
   client);
 - a `lane.event` declared `--type ready`, also when the sender passed
-  `--deliver interrupt`;
+  `--deliver interrupt`, unless its text starts with `[consult-done]`;
 - a worker's own `lane.event` of any other type except `decision` and
   `blocked` (hk 3434): untyped progress such as "hk 3430: PR #221 open",
   `progress`, `report`, `info`, `merged` and the rest, also with
