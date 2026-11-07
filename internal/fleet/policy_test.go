@@ -45,7 +45,7 @@ func TestR15GateRoleDenialRemaps77(t *testing.T) {
 	for _, n := range []int{0, 2, 3, 4, 5, 6, 70} {
 		t.Run("gate_exit_"+strconv.Itoa(n), func(t *testing.T) {
 			f := &fakeRunner{Do: func(Command) Result { return Result{Code: n, Out: `{}`} }}
-			q := CLIQuota{f, "quota"}
+			q := CLIQuota{f, "quota", nil}
 			_, e := q.Gate(context.Background(), QuotaRequest{Profile: "profile", Role: "tester", Effort: "high"})
 			want := n
 			if n == 5 {
@@ -116,7 +116,7 @@ func TestR02InstalledCatalogOwnsModelsEffortsAndGrades(t *testing.T) {
 	f := &fakeRunner{Do: func(c Command) Result {
 		return Result{Out: `{"profile":"p","model_id":"new-model-from-installed-tool","effort":"high","grade":"A+","gate":"default"}`}
 	}}
-	q := CLIQuota{f, "pacelever"}
+	q := CLIQuota{f, "pacelever", nil}
 	l, e := q.Launch(context.Background(), QuotaRequest{Profile: "p", Effort: "high", Role: "worker"})
 	if e != nil || l.ModelID != "new-model-from-installed-tool" {
 		t.Fatalf("%+v %v", l, e)
