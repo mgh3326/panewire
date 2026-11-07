@@ -141,7 +141,7 @@ func (h *HubServer) observeRelayDropped(machine string, dropped relayDroppedPayl
 		return
 	}
 	h.emitFleet(fleetEvent{Kind: "relay", Job: dropped.JobID, Outcome: "dropped:" + reason, Reason: reason, Detail: relayDetail(dropped.Lane, machine, dropped.Pane, dropped.Harness, dropped.Reason)})
-	if !worker {
+	if !worker || !relayDropWarns(reason) {
 		return
 	}
 	harness := fleetEventCode(dropped.Harness)
@@ -151,6 +151,17 @@ func (h *HubServer) observeRelayDropped(machine string, dropped relayDroppedPayl
 	h.captureWarning([]string{"relay-dropped", reason, harness}, "RELAY_DROPPED "+reason+"/"+harness, map[string]string{
 		"job": dropped.JobID, "lane": dropped.Lane, "machine": machine, "pane": dropped.Pane, "reason": reason, "harness": harness,
 	})
+}
+
+// relayDropWarns says whether a dropped row's reason is a failure worth a
+// warning. job_ended and lane_rerouted are the designed end-of-job and re-route
+// drops; every other reason is a failure that would otherwise leave no trace.
+func relayDropWarns(reason string) bool {
+	switch reason {
+	case relayDroppedJobEnded, "lane_rerouted":
+		return false
+	}
+	return true
 }
 
 func relayDetail(lane, machine, pane, harness, reason string) string {

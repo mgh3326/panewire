@@ -58,6 +58,22 @@ func TestRelayWorkingWaitDropEmitsFleetEventAndSentry(t *testing.T) {
 	}
 }
 
+// A routine job_ended drop still emits its relay event but sends no warning:
+// only a failure reason would otherwise leave no trace.
+func TestRelayRoutineDropEmitsEventWithoutSentry(t *testing.T) {
+	hub, events, transport := acceptObserveHub(t)
+	dropped := relayDroppedPayload{JobID: "lane-event-worker-a-e18", Pane: "w1:p1", Lane: "worker-a", OriginalEventID: 18, Reason: relayDroppedJobEnded, Harness: "cmd"}
+
+	hub.observeRelayDropped("host-a", dropped)
+
+	if len(*events) != 1 || (*events)[0].Outcome != "dropped:"+relayDroppedJobEnded {
+		t.Fatalf("relay events=%+v", *events)
+	}
+	if len(transport.events) != 0 {
+		t.Fatalf("routine drop sent Sentry: %+v", transport.events)
+	}
+}
+
 // A relay delivered for a worker lane is recorded once, and a design lane's
 // row is recorded too.
 func TestRelayDeliveredEmitsOneFleetEvent(t *testing.T) {
