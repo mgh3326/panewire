@@ -29,14 +29,22 @@ type paneSweepFixture struct {
 	category map[string]string // task id → hk task category; absent reads as no category
 	taskErr  error
 	taskRead int
-	info     []string
+	// prChanges is what hk links to a task; prErr makes every PR read fail.
+	prChanges map[string][]PRChange
+	prErr     error
+	prRead    int
+	info      []string
 }
+
+// paneSweepTestHead is the HEAD the fixture's git answers when a test does not
+// use the worktree fake.
+const paneSweepTestHead = "0123456789abcdef0123456789abcdef01234567"
 
 func newPaneSweepFixture(t *testing.T) *paneSweepFixture {
 	t.Helper()
 	a := testApp(t)
 	f := &paneSweepFixture{t: t, a: a, store: a.JobStore.(*fakeJobStore), now: time.Date(2026, 3, 1, 12, 0, 0, 0, time.UTC),
-		status: map[string]string{}, names: map[string]string{}, sessions: map[string]string{}, shut: map[string]bool{}, tasks: map[string]string{}, category: map[string]string{}}
+		status: map[string]string{}, names: map[string]string{}, sessions: map[string]string{}, shut: map[string]bool{}, tasks: map[string]string{}, category: map[string]string{}, prChanges: map[string][]PRChange{}}
 	a.Now = func() time.Time { return f.now }
 	f.runner = &fakeRunner{}
 	f.runner.Do = func(c Command) Result {
@@ -61,6 +69,8 @@ func newPaneSweepFixture(t *testing.T) *paneSweepFixture {
 			return Result{}
 		case c.Name == "herdr" && strings.HasPrefix(line, "pane read "):
 			return Result{Out: "last screen of " + strings.TrimPrefix(line, "pane read ")}
+		case c.Name == "git" && len(c.Args) >= 4 && c.Args[2] == "rev-parse" && c.Args[3] == "HEAD":
+			return Result{Out: paneSweepTestHead + "\n"}
 		}
 		return Result{}
 	}
@@ -72,6 +82,13 @@ func newPaneSweepFixture(t *testing.T) *paneSweepFixture {
 				return TaskStatus{}, f.taskErr
 			}
 			return TaskStatus{State: f.tasks[task], Category: f.category[task]}, nil
+		},
+		PR: func(_ context.Context, task string) ([]PRChange, error) {
+			f.prRead++
+			if f.prErr != nil {
+				return nil, f.prErr
+			}
+			return f.prChanges[task], nil
 		},
 		Info: func(message string, attrs ...any) {
 			line := message

@@ -313,6 +313,20 @@ func TestNodeJobDoneReportsLifecycleDuplicate(t *testing.T) {
 	}
 }
 
+// A duplicate completion that attaches a result ends its line with
+// " result=attached", so the duplicate tag is matched anywhere in the line.
+func TestNodeJobDoneReportsDuplicateWithAttachedResult(t *testing.T) {
+	client, report := nodeReapJobDir(t, "job-a", nodeJobReportFile)
+	line := "OK job=job-a report=" + report + " duplicate=yes result=attached"
+	client.nodeLifecycle = func(context.Context, ...string) ([]byte, error) {
+		return []byte(line + "\n"), nil
+	}
+	result, code := nodeRun(t, client, nodeCommandJobDone, nodeJobDoneArgs{Job: "job-a", Report: report})
+	if code != "" || result["outcome"] != nodeJobAlreadyDone || result["line"] != line {
+		t.Fatalf("code=%q result=%v", code, result)
+	}
+}
+
 // A released job id can be claimed again, so a new report must still complete
 // that later round instead of being swallowed by the earlier marker.
 func TestNodeJobDoneNewReportRunsAgain(t *testing.T) {

@@ -872,6 +872,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("PATCH /v1/relay/events/{id}", h.handleRelayHeldEdit)
 	mux.HandleFunc("DELETE /v1/relay/events/{id}", h.handleRelayHeldDelete)
 	mux.HandleFunc("POST /v1/spawns", h.handleSpawnSubmit)
+	mux.HandleFunc("GET /v1/spawns/live", h.handleSpawnLive)
 	mux.HandleFunc("GET /v1/spawns/{request_id}", h.handleSpawnOperation)
 	mux.HandleFunc("POST /v1/spawn", h.handleSpawn)
 	mux.HandleFunc("GET /v1/spawn/{request_id}", h.handleSpawnGet)
@@ -1417,8 +1418,7 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				h.countUnknownMessage()
 				return
 			}
-			resolution := h.resolveIdleWakeOwner(machineID, request.Pane)
-			agent.queueIdleWakeRoute(idleWakeRouteDecision(request, resolution))
+			agent.queueIdleWakeRoute(h.idleWakeRoute(machineID, request))
 		}
 		if message.Kind == "relay.held" {
 			held, valid := decodeRelayHeldPayload(message.Payload)

@@ -95,15 +95,40 @@ func (h *HubServer) prepareInbox() {
 		return
 	}
 	var err error
-	for lane, p := range h.inbox.policy.Lanes {
-		if p.InboxSummary == nil {
-			continue
+	quiet := func(lanes []string, inboxOnly bool) {
+		for _, lane := range lanes {
+			if err != nil {
+				return
+			}
+			query := `UPDATE lane_inbox SET due_at=0,digest_at=0 WHERE lane=?`
+			if inboxOnly {
+				query += ` AND class='inbox'`
+			}
+			ctx, cancel := h.inbox.store.op(h.closeCtx)
+			_, err = h.inbox.store.db.ExecContext(ctx, h.inbox.store.q(query), lane)
+			cancel()
 		}
-		ctx, cancel := h.inbox.store.op(h.closeCtx)
-		_, err = h.inbox.store.db.ExecContext(ctx, h.inbox.store.q(`UPDATE lane_inbox SET due_at=0,digest_at=0 WHERE lane=? AND class='inbox'`), lane)
-		cancel()
-		if err != nil {
-			break
+	}
+	summaryLanes := make([]string, 0, len(h.inbox.policy.Lanes))
+	for lane, p := range h.inbox.policy.Lanes {
+		if p.InboxSummary != nil {
+			summaryLanes = append(summaryLanes, lane)
+		}
+	}
+	quiet(summaryLanes, true)
+	if err == nil {
+		// A design lane may be absent from lanes: (its class is a glob), so sweep
+		// every lane the store knows. Its pre-existing unread items must not
+		// escalate after the class is enabled (hk 3410).
+		var lanes []string
+		if lanes, err = h.inbox.store.laneNames(); err == nil {
+			design := lanes[:0]
+			for _, lane := range lanes {
+				if h.inbox.policy.designLane(lane) {
+					design = append(design, lane)
+				}
+			}
+			quiet(design, false)
 		}
 	}
 	if err == nil {
@@ -172,6 +197,11 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	}
 	if class == "inbox" && h.inbox.policy.Lanes[lane].InboxSummary != nil {
 		// The external digest owns scheduling; no deadline may inject a second digest.
+		deadline, window = 0, 0
+	}
+	if h.inbox.policy.designLane(lane) {
+		// A design lane is never handed the "N unread inbox items" digest; its
+		// unread items stay readable through `panewire inbox list` (hk 3410).
 		deadline, window = 0, 0
 	}
 	// Ordinary deadline digests still exclude must-ack types. Working holds
@@ -302,12 +332,16 @@ func (h *HubServer) replayInbox(record handoffkeepRelayEvent) bool {
 		return false
 	}
 	event := relayEventFromRecord(record)
-	suppressed, err := h.inbox.store.replaySuppressed(relayEventDedupeKey(record.Kind, event))
+	// settled is strictly broader than the old injected-only check: a receiver
+	// read — including a must-ack item read before its ack — is evidence the
+	// lane already has the event, so a restart must not inject it again (hk
+	// 3410). An insert-time read of an interrupt never counts here.
+	settled, err := h.inbox.store.settled(relayEventDedupeKey(record.Kind, event))
 	if err != nil {
 		h.logger.Warn("inbox replay evidence unavailable; replay deferred", "event_id", record.ID)
 		return true
 	}
-	if suppressed {
+	if settled {
 		return true
 	}
 	if h.isHeldBatch(record.OwnerLane, record.EventID) || isUnconfirmedMarkRecord(record) {

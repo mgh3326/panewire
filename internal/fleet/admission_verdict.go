@@ -160,8 +160,8 @@ func admissionPct(v float64) *float64 {
 
 // admissionRoleCheck is pacelever's roleCheck as of v0.3.28: a credit rung
 // (pi- profiles and cmd-dsflash41) seats only a worker or tester, or a builder
-// on a placed default rung — so cmd-dsflash41 is never a reviewer — and the
-// consult models keep their seat restrictions.
+// on a placed default rung, and the consult models keep their seat
+// restrictions. cmd-dsflash41 is narrower still: worker or tester only.
 func admissionRoleCheck(req admissionRequest, row admissionRow) *gateDenial {
 	role := admissionNormalize(req.Role)
 	purpose := admissionNormalize(req.Purpose)
@@ -170,6 +170,11 @@ func admissionRoleCheck(req admissionRequest, row admissionRow) *gateDenial {
 		if !allowed {
 			return &gateDenial{gateRoleDenied, "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder"}
 		}
+	}
+	// Operator 2026-11-07 (hk 3248): cmd-dsflash41 seats only a worker or
+	// tester — stricter than pacelever, which also seats a builder.
+	if req.Profile == "cmd-dsflash41" && role != "worker" && role != "tester" {
+		return &gateDenial{gateRoleDenied, "role_restricted: cmd-dsflash41 seats only a worker or tester"}
 	}
 	if req.Profile == "codex-astra" || req.Profile == "fable" {
 		if role == "worker" || role == "captain" {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"regexp"
 	"strings"
 	"time"
@@ -93,8 +94,27 @@ type inboxRetentionPolicy struct {
 	PerLane int `yaml:"per_lane"`
 }
 
+// defaultDesignLanePattern is the built-in design-lane class: every lane named
+// *-design. An explicit relay.design_lanes list replaces it, and an explicit
+// empty list disables the class.
+const defaultDesignLanePattern = "*-design"
+
+// deskPolicyLane keeps the operator desk out of the design-lane class whatever
+// an operator pattern matches: the desk's external scheduler depends on the
+// inbox summary and on idle-wake delivery.
+const deskPolicyLane = "operator-desk"
+
+// deliveryRelayPolicy is the hub-side relay classification. A design-session
+// lane (handoffkeep-design, panewire-design, mergewake-design, …) receives
+// decisions and failures only; routine progress, idle-wakes and the inbox
+// summary are suppressed for it (hk 3410).
+type deliveryRelayPolicy struct {
+	DesignLanes []string `yaml:"design_lanes"`
+}
+
 type deliveryPolicy struct {
 	Retention          inboxRetentionPolicy `yaml:"retention"`
+	Relay              deliveryRelayPolicy  `yaml:"relay"`
 	deliveryLanePolicy `yaml:",inline"`
 	// Agents maps the receiving pane's reported agent CLI (harness) to
 	// supported|unsupported. Receivers without a supported entry — unknown,
@@ -106,6 +126,32 @@ type deliveryPolicy struct {
 
 func validDeliveryClass(class string) bool {
 	return class == "" || class == "interrupt" || class == "inbox"
+}
+
+// validDesignLanePattern accepts an exact lane name or a shell-style glob in
+// path.Match syntax. The empty pattern, control bytes and a malformed glob are
+// refused at load rather than silently matching nothing.
+func validDesignLanePattern(pattern string) bool {
+	if pattern == "" || len(pattern) > 128 || strings.ContainsAny(pattern, "\x00\r\n") {
+		return false
+	}
+	_, err := path.Match(pattern, "")
+	return err == nil
+}
+
+// designLane reports whether the lane is a design-session lane: an exact name
+// or glob from relay.design_lanes. The desk is never one, whatever an operator
+// pattern would match.
+func (p *deliveryPolicy) designLane(lane string) bool {
+	if lane == "" || lane == deskPolicyLane {
+		return false
+	}
+	for _, pattern := range p.Relay.DesignLanes {
+		if matched, err := path.Match(pattern, lane); err == nil && matched {
+			return true
+		}
+	}
+	return false
 }
 
 func loadDeliveryPolicy(path string) (*deliveryPolicy, error) {
@@ -149,6 +195,14 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 	}
 	if p.Default == "" {
 		return nil, fmt.Errorf("delivery policy needs a default")
+	}
+	if p.Relay.DesignLanes == nil {
+		p.Relay.DesignLanes = []string{defaultDesignLanePattern}
+	}
+	for _, pattern := range p.Relay.DesignLanes {
+		if !validDesignLanePattern(pattern) {
+			return nil, fmt.Errorf("invalid relay.design_lanes pattern")
+		}
 	}
 	validate := func(l *deliveryLanePolicy) error {
 		if v := l.InboxSummary; v != nil {

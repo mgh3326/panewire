@@ -233,11 +233,26 @@ func LoadConfig(path string) (Config, error) {
 	if err := validateNativePools(c.Quota); err != nil {
 		return c, err
 	}
+	if err := validatePoolMaxConcurrent(c.Quota); err != nil {
+		return c, err
+	}
 	if err := validateMeasurableAccounts(c.Quota); err != nil {
 		return c, err
 	}
 	if err := validateGateMode(c.Quota); err != nil {
 		return c, err
+	}
+	if v, ok := c.Quota["credit_total_usd"]; ok {
+		m, isMap := v.(map[string]any)
+		if !isMap {
+			return c, fail(exitConfig, "quota.credit_total_usd must map pool names to positive numbers")
+		}
+		for _, pool := range slices.Sorted(maps.Keys(m)) {
+			n, isNum := number(m, pool)
+			if !validID(pool) || !isNum || n <= 0 || !finite(n) {
+				return c, fail(exitConfig, "quota.credit_total_usd.%s must be a positive number", pool)
+			}
+		}
 	}
 	if v := str(c.Quota, "url"); v != "" {
 		u, e := url.Parse(v)

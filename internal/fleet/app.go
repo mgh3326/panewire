@@ -43,6 +43,9 @@ type App struct {
 	// SharedLatest reads one account's latest stored quota reading for the
 	// admission gate; nil reads handoffkeep (admission_native.go).
 	SharedLatest func(context.Context, string) (shared.Latest, error)
+	// BenchCatalog reads the bench catalog for the admission gate; nil reads
+	// handoffkeep (admission_native.go).
+	BenchCatalog func(context.Context) ([]CatalogRow, error)
 	Source       PlacementSource
 	Wake         Waker
 	LoadRatio    func(context.Context) (float64, error)
@@ -61,6 +64,12 @@ type App struct {
 	// EventSink receives fleet events instead of the state directory's file;
 	// tests only.
 	EventSink func(fleetevent.Event)
+	// LiveSpawnProfiles counts live hub spawns by placed profile for the
+	// [quota].pool_max_concurrent cap, leaving out the hub request named by
+	// its second argument (the spawn being placed). The hub's own App reads
+	// its operations; nil reads GET /v1/spawns/live with the [hub] operator
+	// credential.
+	LiveSpawnProfiles func(context.Context, string) (map[string]int, error)
 	// State reads the hub's fleet state snapshot; nil reads GET /v1/state
 	// with the [hub] operator credential. fleetLog records the sources used.
 	DecisionReply func(context.Context, string, string, time.Time) (bool, error)
@@ -127,7 +136,7 @@ func New(out, errout io.Writer) (*App, error) {
 	if v := os.Getenv("PANEWIRE_QUOTA_BIN"); v != "" {
 		quota = v
 	}
-	a.Quota = admissionQuota{CLIQuota{a.Runner, quota}, a}
+	a.Quota = admissionQuota{CLIQuota{Runner: a.Runner, Binary: quota, CreditTotalUSD: creditTotals(c.Quota)}, a}
 	a.Source = stateSource{a: a, inner: fleetSource{a}}
 	a.Wake = cliWaker{a}
 	a.LoadRatio = a.loadRatio

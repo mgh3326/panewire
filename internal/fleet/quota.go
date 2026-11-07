@@ -143,6 +143,11 @@ type QuotaGate interface {
 type CLIQuota struct {
 	Runner Runner
 	Binary string
+	// CreditTotalUSD is each prepaid credit pool's fixed grant total in
+	// dollars, from `[quota].credit_total_usd`. A shared manual entry records
+	// only its used percentage, so credit_expiry.go derives the dollar balance
+	// from this total; an entry that records its own dollars still wins.
+	CreditTotalUSD map[string]float64
 }
 
 func (q CLIQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {

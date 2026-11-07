@@ -55,7 +55,7 @@ func TestLaneInboxStoreContractSupersede(t *testing.T) {
 					t.Fatalf("old=%+v next=%+v", got, b)
 				}
 				if tc.want {
-					suppressed, err := s.replaySuppressed(fmt.Sprint("old", n))
+					suppressed, err := s.settled(fmt.Sprint("old", n))
 					if err != nil || !suppressed {
 						t.Fatalf("replay suppression: %v %v", suppressed, err)
 					}

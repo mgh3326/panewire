@@ -86,7 +86,7 @@ func TestLoadPolicyRejectsBadAliasAndRoute(t *testing.T) {
 
 func TestCLIQuotaGateUsesGateAlias(t *testing.T) {
 	f := &fakeRunner{Do: func(Command) Result { return Result{Out: `{}`} }}
-	q := CLIQuota{f, "quota"}
+	q := CLIQuota{f, "quota", nil}
 	if _, e := q.Gate(context.Background(), QuotaRequest{Profile: "agy-sonnet46", GateProfile: "agy-flash", Role: "worker"}); e != nil {
 		t.Fatal(e)
 	}
