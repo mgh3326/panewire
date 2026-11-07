@@ -1506,6 +1506,11 @@ match still refuses and tells the caller to pass the exact workspace id. An
 explicit workspace id is used only while that host/session's `herdr workspace
 list` still contains it; a vanished id refuses and names the label fix.
 
+A spawn that created a workspace closes only its own tab there when the launch
+fails, never the workspace, so a workspace another spawn adopted keeps that
+spawn's tab and live session. Herdr closes the workspace with its last tab, so
+an unused created workspace still disappears.
+
 ## Failed spawn retries
 
 A failed launch with confirmed pane cleanup releases its local claim and

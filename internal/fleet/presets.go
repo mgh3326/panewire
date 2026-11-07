@@ -121,9 +121,14 @@ func (a *App) workspaceRows(ctx context.Context, value string) ([]map[string]any
 	return rows, nil
 }
 
-// createdWorkspace is a workspace resolveWorkspace created. Its root pane keeps
-// the workspace alive, so Spawn closes that pane when the launch fails.
-type createdWorkspace struct{ rootPane string }
+// createdWorkspace is a workspace resolveWorkspace created. The tab and its root
+// pane are ours: a failed spawn removes that tab and nothing else, so a
+// workspace another spawn adopted keeps its own tab and live session.
+type createdWorkspace struct {
+	workspace string
+	tab       string
+	rootPane  string
+}
 
 func (a *App) resolveWorkspace(ctx context.Context, value string) (string, *createdWorkspace, error) {
 	rows, err := a.workspaceRows(ctx, value)
@@ -168,6 +173,9 @@ func (a *App) createWorkspace(ctx context.Context, label string) (string, *creat
 			Workspace struct {
 				WorkspaceID string `json:"workspace_id"`
 			} `json:"workspace"`
+			Tab struct {
+				TabID string `json:"tab_id"`
+			} `json:"tab"`
 			RootPane struct {
 				PaneID string `json:"pane_id"`
 			} `json:"root_pane"`
@@ -193,7 +201,33 @@ func (a *App) createWorkspace(ctx context.Context, label string) (string, *creat
 		fmt.Fprintf(a.Out, " duplicates=%d", duplicates)
 	}
 	fmt.Fprintln(a.Out)
-	return workspace, &createdWorkspace{rootPane: created.Result.RootPane.PaneID}, nil
+	return workspace, &createdWorkspace{workspace: created.Result.Workspace.WorkspaceID, tab: created.Result.Tab.TabID, rootPane: created.Result.RootPane.PaneID}, nil
+}
+
+// closeCreatedWorkspace removes the tab this spawn created and never the
+// workspace. Herdr closes a workspace when its last tab closes, so an unused
+// created workspace still disappears, while a workspace another spawn adopted
+// keeps that spawn's tab and live session. A tab that is already gone was
+// cleaned up by someone else, so that refusal is not an error.
+func (a *App) closeCreatedWorkspace(ctx context.Context, w *createdWorkspace) error {
+	if w.tab == "" {
+		return fail(exitConfig, "created workspace %s has no tab id; run herdr workspace close %s on the executing host", w.workspace, w.workspace)
+	}
+	r := a.call(ctx, "herdr", "tab", "close", w.tab)
+	if r.Code == 0 || strings.Contains(strings.ToLower(r.Out+r.Err), "not_found") {
+		return nil
+	}
+	// Herdr before 0.8.0 refuses a workspace's last tab. Closing the root pane is
+	// the same atomic step there: herdr removes that tab, and the workspace only
+	// when it was the last one, so another spawn's tab still survives.
+	if strings.Contains(r.Out+r.Err, "cannot close the last tab") && w.rootPane != "" {
+		p := a.call(ctx, "herdr", "pane", "close", w.rootPane)
+		if p.Code == 0 || strings.Contains(strings.ToLower(p.Out+p.Err), "not_found") {
+			return nil
+		}
+		return check(p, "herdr pane close")
+	}
+	return check(r, "herdr tab close")
 }
 
 // workspaceGone reports a herdr refusal caused by the target workspace no longer

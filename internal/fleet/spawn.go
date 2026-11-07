@@ -616,24 +616,30 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	}
 	committed := false
 	configuredWorkspace := s.Workspace
-	var createdWs *createdWorkspace
+	var createdWorkspaces []*createdWorkspace
 	if !s.DryRun {
-		var resolveErr error
-		s.Workspace, createdWs, resolveErr = a.resolveWorkspace(ctx, s.Workspace)
+		resolved, made, resolveErr := a.resolveWorkspace(ctx, s.Workspace)
 		if resolveErr != nil {
 			return resolveErr
 		}
+		s.Workspace = resolved
+		if made != nil {
+			createdWorkspaces = append(createdWorkspaces, made)
+		}
 	}
-	// A workspace this spawn created is kept alive by its root pane. On failure
-	// close that pane so the spawn leaves no empty workspace behind.
+	// A workspace this spawn created stays alive on the tab it created there. On
+	// failure remove that tab only; another spawn that adopted the workspace by
+	// label keeps its own tab, and herdr closes the workspace with its last tab.
 	defer func() {
-		if committed || createdWs == nil || createdWs.rootPane == "" {
+		if committed || len(createdWorkspaces) == 0 {
 			return
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if e := a.must(cleanup, "herdr", "pane", "close", createdWs.rootPane); e != nil {
-			a.warn("created workspace cleanup failed; close pane %s on the executing host: %v", createdWs.rootPane, e)
+		for _, w := range createdWorkspaces {
+			if e := a.closeCreatedWorkspace(cleanup, w); e != nil {
+				a.warn("created workspace cleanup failed; close tab %s (workspace %s) on the executing host: %v", w.tab, w.workspace, e)
+			}
 		}
 	}()
 	if s.AccountKey == "" {
@@ -798,7 +804,6 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		return a.call(ctx, "herdr", args...)
 	}
 	s.placement.started = true
-	usedWorkspace := s.Workspace
 	r := createTab(s.Workspace)
 	if e = check(r, "herdr tab create"); e != nil {
 		// Another spawn's failed cleanup may close a workspace this spawn
@@ -811,9 +816,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			return retryErr
 		}
 		if retryCreated != nil {
-			createdWs = retryCreated
-		} else if retryWorkspace != usedWorkspace {
-			createdWs = nil
+			createdWorkspaces = append(createdWorkspaces, retryCreated)
 		}
 		s.Workspace = retryWorkspace
 		r = createTab(s.Workspace)
