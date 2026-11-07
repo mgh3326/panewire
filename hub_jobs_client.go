@@ -575,6 +575,18 @@ func (e hubInboxEvent) eventTime(entry os.DirEntry, eventsDir string) time.Time 
 	return time.Time{}
 }
 
+// hubJobEndKind reports whether a job event kind ends the job's run. Besides
+// the completion and the revocation, panewire writes these when a job ends
+// without a completion: the quota release closes every run (done, failed
+// spawn, reap, lost pane), and a lost or reaped job has no pane left.
+func hubJobEndKind(kind string) bool {
+	switch kind {
+	case "job.completed", "job.completion", "job.revoked", "quota_pool.release", "quota_pool.release.force", "job.lost", "job.reaped":
+		return true
+	}
+	return false
+}
+
 func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 	entries, err := os.ReadDir(eventsDir)
 	if err != nil {
@@ -620,12 +632,10 @@ func scanHubJobEventDetails(eventsDir, jobID string) (hubScannedJob, bool) {
 		case "job.spawned":
 			// The spawn record is the only place the worker pane is named.
 			paneID = event.paneID()
-		case "job.completed", "job.completion", "job.revoked",
-			// panewire writes these when a job ends without a completion: the
-			// quota release closes every run (done, failed spawn, reap,
-			// lost pane), and a lost or reaped job has no pane left.
-			"quota_pool.release", "quota_pool.release.force", "job.lost", "job.reaped":
-			active, claimTime, paneID = HubActiveJob{}, time.Time{}, ""
+		default:
+			if hubJobEndKind(event.eventKind()) {
+				active, claimTime, paneID = HubActiveJob{}, time.Time{}, ""
+			}
 		}
 	}
 	if !validHubActiveJob(active) || claimTime.Before(time.Now().Add(-hubJobActiveMaxAge())) {
