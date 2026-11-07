@@ -71,6 +71,11 @@ func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.Task
 		return
 	}
 	sweeper.TaskState = client.nodeTaskState
+	if workRoot, err := client.nodeWorkRoot(); err == nil {
+		// Only a worktree of a clone under this root is the node's to remove
+		// (sweep_worktree.go); without the root nothing proves one is.
+		sweeper.WorkRoot = workRoot
+	}
 	if sweeper.TaskState == nil {
 		env, err := client.nodeHandoffkeepEnv()
 		if err == nil {

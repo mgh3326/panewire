@@ -438,6 +438,14 @@ overrides.
 | `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. |
 | `node_env` | `~/.config/panewire/hub-node.env` | Panewire node env file; `HUB_MACHINE_ID` in it is the host id written to job records. `PANEWIRE_NODE_ENV` overrides the path. |
 
+## `[sweep]`
+
+Node sweep behaviour (see [pane-sweep.md](pane-sweep.md)).
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `remove_worktrees` | `true` | After the sweep closes a job whose task is `merged` or `done`, remove the worktree the node prepared under `work_root` and its local branch. `false` keeps every worktree. |
+
 ## Job records in handoffkeep
 
 Each spawn writes a record to hk `/v1/jobs` on the executing host (the design
@@ -1508,7 +1516,9 @@ rules are in [pane-sweep.md](pane-sweep.md). Two daemon flags configure it:
   finds the task ended.
 
 The sweep needs `--hub-url`, `--hub-token-env` and `--hub-jobs-root`, and reads
-hk through `handoffkeep_env` in the node's `spawn.json`.
+hk through `handoffkeep_env` in the node's `spawn.json`. After a close it also
+removes the worktree the node prepared, unless `[sweep].remove_worktrees` is
+`false`; see [pane-sweep.md](pane-sweep.md#the-worktree).
 
 ## Lane registration failure
 

@@ -64,6 +64,28 @@ func TestConfigCaps(t *testing.T) {
 	}
 }
 
+func TestConfigSweepRemoveWorktrees(t *testing.T) {
+	load := func(t *testing.T, body string) (Config, error) {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "hosts.toml")
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return LoadConfig(path)
+	}
+	c, err := load(t, "[sweep]\nremove_worktrees = false\n")
+	if err != nil || boolean(c.Sweep, "remove_worktrees", true) != false {
+		t.Fatalf("explicit off: %v %v", c.Sweep, err)
+	}
+	c, err = load(t, "[local]\n")
+	if err != nil || boolean(c.Sweep, "remove_worktrees", true) != true {
+		t.Fatalf("default on: %v %v", c.Sweep, err)
+	}
+	if _, err = load(t, "[sweep]\nremove_worktrees = \"no\"\n"); exitCode(err) != exitConfig {
+		t.Fatalf("a non-boolean was accepted: %v", err)
+	}
+}
+
 func TestConfigPathFleetResolution(t *testing.T) {
 	xdg := t.TempDir()
 	t.Setenv("XDG_CONFIG_HOME", xdg)

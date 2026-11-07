@@ -59,8 +59,34 @@ Unlike `pane.close`, the sweep does not read the pane's composer, and it does
 not compare the pane's cwd; the task's ended state and the grace stand in for
 them.
 
+## The worktree
+
+After a close, the sweep removes the worktree the node prepared for the job,
+and the job's local branch with it (see [config.md](config.md#sweep)). Only
+all of these make it the node's to remove:
+
+- the receipt cwd is under the node's `work_root` and is a linked worktree of
+  a clone that is a direct child of that root, the clone `worktree.prepare`
+  creates. Anything else is kept and logged `not_node_worktree`;
+- the task state is `merged` or `done`. A `dropped` task keeps its worktree,
+  logged `dropped_kept`: its work may never have merged;
+- no other live job's receipt cwd is the same path, logged `shared_kept`;
+- the path is not reached through a symlink, is not the canonical checkout,
+  is clean, and its HEAD is an ancestor of `origin/main` after a
+  `git fetch origin` in the clone.
+
+It then runs `git worktree remove <cwd>`, and `git branch -d <branch>` (never
+`-D`) only while no other worktree holds the branch. A remote branch, a
+requester's design worktree (`~/work/<repo>.<slug>`) and a reviewer's worktree
+stay with mergewake.
+
+A removal that fails is a warning and a keep line, never a failed pass. One
+INFO line per removal (`task worktree removed`) or keep (`task worktree kept`,
+with a `reason`) carries the job and the path's basename.
+
 It fails closed. A task that cannot be read, a herdr that cannot be listed, a
-pane that does not match its job, and a close that fails each keep the pane.
+pane that does not match its job, and a close that fails each keep the pane;
+a git call that cannot be read keeps the worktree.
 
 ## Log lines
 
@@ -83,4 +109,5 @@ The sweep runs only on a hub-connected daemon with `--hub-jobs-root`. It reads
 hk with the node's own credential (`handoffkeep_env` in `spawn.json`), the same
 one `job.mark_lost` uses.
 
-Worktree and branch removal is not part of the sweep.
+Worktree removal runs only when the node's `work_root` is known from
+`spawn.json`; without it every worktree is kept.
