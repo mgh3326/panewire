@@ -375,6 +375,53 @@ func TestSpawnCleanupRemovesUnusedCreatedWorkspace(t *testing.T) {
 	}
 }
 
+// A workspace-create response that names the root pane but no tab still cleans
+// up: the create tab's only pane is the root pane, so closing it removes the
+// tab and, when it was the last one, the workspace.
+func TestSpawnCleanupWithoutTabIDClosesRootPane(t *testing.T) {
+	a, s, f, _ := cmdFixture(t)
+	s.Workspace = "workers"
+	store := a.JobStore.(*fakeJobStore)
+	store.records[s.Job] = map[string]any{"job_id": s.Job, "task_id": "other", "host": "other", "state": "claimed"}
+	previous := f.Do
+	herdr := newFakeHerdr()
+	created, closed := false, ""
+	f.Do = func(c Command) Result {
+		args := strings.Join(c.Args, " ")
+		switch args {
+		case "workspace list":
+			if !created {
+				return Result{Out: noWorkspaces}
+			}
+			return Result{Out: herdr.list()}
+		case "workspace create --label workers":
+			created = true
+			herdr.add("w2", "w2:t1")
+			return Result{Out: `{"result":{"workspace":{"workspace_id":"w2"},"root_pane":{"pane_id":"w2:t1-pane"}}}`}
+		}
+		if rest, ok := strings.CutPrefix(args, "pane close "); ok {
+			closed = rest
+			if !herdr.closePane(rest) {
+				return Result{Code: 1, Out: `{"error":{"code":"pane_not_found"}}`}
+			}
+			return Result{}
+		}
+		if strings.HasPrefix(args, "workspace close ") {
+			t.Fatalf("cleanup closed a whole workspace: %s", args)
+		}
+		return previous(c)
+	}
+	if err := a.Spawn(context.Background(), s); exitCode(err) != exitDuplicate {
+		t.Fatalf("spawn exit=%d err=%v", exitCode(err), err)
+	}
+	if closed != "w2:t1-pane" {
+		t.Fatalf("closed pane=%q, want the created root pane", closed)
+	}
+	if _, ok := herdr.tabs["w2"]; ok {
+		t.Fatalf("unused created workspace survived: tabs=%v", herdr.tabs)
+	}
+}
+
 // Herdr before 0.8.0 refuses to close a workspace's last tab. Closing the root
 // pane is the same atomic step there: it removes this spawn's tab, and the
 // workspace only when no other spawn's tab shares it.
