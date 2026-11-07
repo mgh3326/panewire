@@ -1,6 +1,12 @@
 # Safety tags interrupt. The operator-desk override defers routine READY.
 # Otherwise explicit class wins, then the first lane/global rule.
 default: interrupt
+# Design-session lanes (panewire-design, handoffkeep-design, ...) hear
+# decisions and failures only: no idle-wake, no inbox summary, no unread
+# digest. Exact names and shell-style globs (path.Match). operator-desk is
+# never a design lane.
+relay:
+  design_lanes: ["*-design"]
 # Completed inbox history; unread items and the one-day replay window are protected.
 retention:
   days: 14

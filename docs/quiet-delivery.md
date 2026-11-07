@@ -157,6 +157,33 @@ as a usage error: upgrade the hub, then nodes and emitters, before producers
 declare them. Rollback: producers stop declaring `blocked`/`findings`, then the
 hub binary reverts; the extra column is ignored by the old binary.
 
+## Design lanes
+
+A design-session lane (`handoffkeep-design`, `panewire-design`,
+`mergewake-design`, …) gets decisions and failures only. The class comes from
+`relay.design_lanes` in the delivery policy: exact lane names and shell-style
+globs (`path.Match` syntax), default `["*-design"]`. An explicit empty list
+disables the class. A malformed pattern refuses the policy at load.
+`operator-desk` is never a design lane, even under a pattern that matches it,
+because the desk's external scheduler depends on the inbox summary.
+
+```yaml
+relay:
+  design_lanes: ["*-design", "handoffkeep-design"]
+```
+
+For a design lane the hub:
+
+- answers the node's idle-wake route request with a `design_lane` suppression
+  and logs one DEBUG line per suppressed event. The node never materializes
+  the wake, so no event, pane injection or inbox item is produced;
+- never appends the `inbox_summary` handoff to an interrupt. Unread items stay
+  readable through `panewire inbox list --lane LANE`.
+
+Everything else reaches a design lane exactly as before: ESC and decision
+questions, `automation-failed` (a SPAWN_FAILED notice), `blocked`, desk orders
+and deploy approvals.
+
 ## Durability and replay
 
 `--inbox-store PATH` chooses a private, persistent SQLite database on the hub;
@@ -192,8 +219,9 @@ Original inbox items never become relay directives. On old handoffkeep replay
 (including `hub_unconfirmed_once.go`), the hub saves informational rows in its
 inbox before retiring those relay rows. A failed retirement retries harmlessly;
 the inbox identity and class are stable. Delivered handoffkeep rows are not
-imported. Confirmed deliveries and explicitly acked inbox items (and read
-inbox-class items that do not require an ack) also suppress both ordinary and labelled restart replay. An
+imported. A settled inbox item — confirmed delivered, read by the receiver (a
+must-ack item included), acked, or superseded — suppresses both ordinary and
+labelled restart replay, for every lane, not only design lanes. An
 interrupt's automatic read-on-insert timestamp alone never suppresses replay;
 only genuinely unconfirmed delivery can receive the once-only labelled copy,
 and a digest or escalation batch never receives it (see below).
