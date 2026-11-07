@@ -42,6 +42,23 @@ func NewTaskStateReader(baseURL, token, cfID, cfSecret string) (TaskStateReader,
 	if err != nil {
 		return nil, err
 	}
+	return taskStateReader(client), nil
+}
+
+// TaskStatus reads one hk task through the App's handoffkeep client, the one
+// ExistingJob reads job records with. A nil TaskState is built on first use.
+func (a *App) TaskStatus(ctx context.Context, task string) (TaskStatus, error) {
+	if a.TaskState == nil {
+		client, err := a.quotaClient()
+		if err != nil {
+			return TaskStatus{}, err
+		}
+		a.TaskState = taskStateReader(client)
+	}
+	return a.TaskState(ctx, task)
+}
+
+func taskStateReader(client *hkQuota) TaskStateReader {
 	return func(ctx context.Context, task string) (TaskStatus, error) {
 		id, err := strconv.ParseInt(task, 10, 64)
 		if err != nil || id <= 0 {
@@ -60,7 +77,7 @@ func NewTaskStateReader(baseURL, token, cfID, cfSecret string) (TaskStateReader,
 			return TaskStatus{}, errors.New("task record is invalid")
 		}
 		return TaskStatus{State: record.State, Category: record.Category, Title: record.Title}, nil
-	}, nil
+	}
 }
 
 // PRChange is one PR handoffkeep links to a task: its number, its state and
@@ -124,6 +141,23 @@ const (
 	taskCategoryCompleted = "completed"
 	taskCategoryCanceled  = "canceled"
 )
+
+// taskEndedStates are the hk task states that end a task when the record
+// carries no category.
+var taskEndedStates = []string{"merged", "deployed", "done", "dropped", "canceled"}
+
+// Ended reports whether nobody works the task any more: hk's completed or
+// canceled category (merged, deployed, dropped, canceled), or, for a record
+// without a category, one of taskEndedStates.
+func (t TaskStatus) Ended() bool {
+	switch t.Category {
+	case taskCategoryCompleted, taskCategoryCanceled:
+		return true
+	case "":
+		return slices.Contains(taskEndedStates, t.State)
+	}
+	return false
+}
 
 // paneSweepStateFallback is the hk job state a sweep writes for each task
 // state that makes a pane eligible when the task record carries no category.

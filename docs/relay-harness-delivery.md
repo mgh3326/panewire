@@ -193,6 +193,24 @@ that also fails) is answered by the durable idempotency and sends nothing. An
 event that is itself such an escalation never escalates again, and a lane with
 no design lane is only logged.
 
+hk 3431: the escalation goes out only when someone can act on it, and at most
+once per window. The hub logs one INFO line (event id, lane, reason, `why`)
+instead of sending when every hub job in the worker lane is completed or
+orphaned (`why=job_ended`), or when the hk task of every live job there is in
+an ended state (`why=task_ended`). A task is ended when hk's category is
+`completed` or `canceled`, or, if the record has no category, when its state
+is `merged`, `deployed`, `done`, `dropped` or `canceled`. The hub reads the job
+record and the task through the client that hub-placed spawns use. The
+escalation still goes out when the record or task cannot be read, when a live
+job has no task, or when the hub knows no job in the lane. The last case covers
+a hub restart, which forgets ended jobs. For a live job, the hub sends at most
+one escalation per (design lane, worker lane) every 30 minutes, and sends the
+first one at once. A later drop inside the window is logged (`why=folded`) and
+counted. The next escalation after the window ends with
+`(+N more unconfirmed for this lane since HH:MM UTC)`. The window is kept in
+memory only, so a hub restart resets it and the first drop after a restart is
+sent at once.
+
 The hub's own one-labelled-replay after a restart
 ([#1002](r27-busy-relay.md)) is unchanged and is not an escalation.
 
@@ -212,3 +230,5 @@ drops for a gone pane, an ended job and the ceiling, the unchanged claude pane,
 and the idle re-delivery of a `working_wait_expired` row; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
 transport; `relay_cmd_wrapped_return_t3419_test.go` pins the return gate on a
 wrapped composer, a draft or second nonce beside it, and a late-drawn text.
+`relay_unconfirmed_quiet_t3431_test.go` pins the quiet escalation for an ended
+job or task, the fail-open reads and the 30-minute window.
