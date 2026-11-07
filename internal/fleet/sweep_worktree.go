@@ -175,7 +175,8 @@ func (s *TaskPaneSweeper) discardWorktree(ctx context.Context, a *App, j Job, en
 
 // sweepUntrackedDiff renders every untracked, non-ignored file of the worktree
 // as a diff against /dev/null. git diff --no-index exits 1 when the files
-// differ, which is the normal answer here.
+// differ, which is the normal answer here. An entry that is not a regular file
+// or a symlink fails the capture, so the worktree stays.
 func sweepUntrackedDiff(ctx context.Context, a *App, cwd string) (string, bool) {
 	list := a.call(ctx, "git", "-C", cwd, "ls-files", "--others", "--exclude-standard", "-z")
 	if list.Code != 0 {
@@ -185,6 +186,12 @@ func sweepUntrackedDiff(ctx context.Context, a *App, cwd string) (string, bool) 
 	for _, name := range strings.Split(list.Out, "\x00") {
 		if name == "" {
 			continue
+		}
+		// A named pipe or device would block git's read: only a regular file
+		// or a symlink (read as a link, never followed) can be captured.
+		info, err := os.Lstat(filepath.Join(cwd, name))
+		if err != nil || (!info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0) {
+			return "", false
 		}
 		r := a.call(ctx, "git", "-C", cwd, "diff", "--binary", "--no-index", "--", "/dev/null", name)
 		if r.Code != 0 && r.Code != 1 {

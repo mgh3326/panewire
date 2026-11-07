@@ -98,8 +98,9 @@ What happens next depends on how the job ended:
   --binary HEAD` to `<job dir>/abandoned-worktree.patch`, followed by each
   untracked, non-ignored file as a new-file diff (`git diff --no-index`), since
   the removal deletes them (mode 0600, replaced atomically, written before
-  anything is removed; a patch or an untracked file that cannot be captured
-  keeps the worktree, `patch_failed_kept`). It then runs `git worktree remove
+  anything is removed; a patch, or an untracked file that cannot be captured
+  (one that is not a regular file or a symlink, such as a named pipe, is never
+  read), keeps the worktree, `patch_failed_kept`). It then runs `git worktree remove
   --force <cwd>`, which frees the directory for the next attempt. The local
   branch is deleted with `-D` only when no other worktree holds it and, after a
   `git fetch origin`, its tip is contained in some `origin/*` ref (`task branch

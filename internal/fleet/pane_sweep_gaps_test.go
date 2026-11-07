@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -456,6 +457,7 @@ func TestSweepSavesTheContentsOfUntrackedFilesBeforeRemoving(t *testing.T) {
 	f, g, cwd := abandonedFixture(t)
 	g.dirty = true
 	g.untracked = []string{"new_file.go", "dir/other.txt"}
+	touchUntracked(t, cwd, g.untracked...)
 	f.at(0)
 	f.at(11)
 	if !slices.Equal(g.removed, []string{cwd}) {
@@ -483,5 +485,64 @@ func TestSweepKeepsAnAbandonedWorktreeWhenUntrackedFilesCannotBeCaptured(t *test
 	}
 	if !f.infoHas("task worktree kept", "job=a", "reason=patch_failed_kept") {
 		t.Fatalf("info lines = %q", f.info)
+	}
+}
+
+// touchUntracked makes the untracked files the fake git lists exist in cwd.
+func touchUntracked(t *testing.T, cwd string, names ...string) {
+	t.Helper()
+	for _, name := range names {
+		path := filepath.Join(cwd, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// A named pipe among the untracked files would block git's read, so it is
+// never diffed: the capture fails and the worktree stays. The fake would answer
+// a diff of it, so only the type check keeps it from being called.
+func TestSweepKeepsAnAbandonedWorktreeHoldingANamedPipe(t *testing.T) {
+	f, g, cwd := abandonedFixture(t)
+	touchUntracked(t, cwd, "plain.txt")
+	if err := syscall.Mkfifo(filepath.Join(cwd, "pipe"), 0600); err != nil {
+		t.Skipf("no named pipes here: %v", err)
+	}
+	g.untracked = []string{"plain.txt", "pipe"}
+	var diffed []string
+	base := f.runner.Do
+	f.runner.Do = func(c Command) Result {
+		if c.Name == "git" && slices.Contains(c.Args, "--no-index") {
+			diffed = append(diffed, c.Args[len(c.Args)-1])
+		}
+		return base(c)
+	}
+	f.at(0)
+	f.at(11)
+	if slices.Contains(diffed, "pipe") {
+		t.Fatalf("the named pipe was handed to git diff")
+	}
+	if len(g.removed) != 0 {
+		t.Fatalf("removed %v", g.removed)
+	}
+	if !f.infoHas("task worktree kept", "job=a", "reason=patch_failed_kept") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}
+
+// A symlink is captured as a link, not followed.
+func TestSweepCapturesAnUntrackedSymlinkWithoutFollowingIt(t *testing.T) {
+	f, g, cwd := abandonedFixture(t)
+	if err := os.Symlink("/nonexistent/target", filepath.Join(cwd, "link")); err != nil {
+		t.Fatal(err)
+	}
+	g.untracked = []string{"link"}
+	f.at(0)
+	f.at(11)
+	if !slices.Equal(g.removed, []string{cwd}) {
+		t.Fatalf("removed %v, want [%s]", g.removed, cwd)
 	}
 }
