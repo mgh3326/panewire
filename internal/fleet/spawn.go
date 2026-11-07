@@ -55,6 +55,10 @@ type Spawn struct {
 	// selection or admitPinnedProfile); launch admission reads its
 	// family_effort opt-in. Initiator-local like Sel.
 	route *routing
+	// ownerOmitted records that the command line carried no --owner. Spawn then
+	// resolves the owner from the task's hk project instead of inheriting a
+	// caller lane. A Spawn built in-process leaves it false.
+	ownerOmitted bool
 	// laneUnregistered is set once hub lane registration failed after its
 	// retry; --wait output and the execution receipt name it.
 	laneUnregistered bool
@@ -156,6 +160,7 @@ func parseSpawn(args []string) (Spawn, error) {
 	if e := f.Parse(args); e != nil {
 		return s, fail(exitUsage, "%v", e)
 	}
+	s.ownerOmitted = !flagPassed(f, "owner")
 	if flagPassed(f, "containment") && s.Containment == "" {
 		return s, fail(exitUsage, "invalid containment: expected hk:<task id>")
 	}
@@ -189,6 +194,7 @@ type Task struct {
 	State     string         `json:"state"`
 	ClaimedBy string         `json:"claimed_by"`
 	Refs      map[string]any `json:"refs"`
+	Project   string         `json:"project"`
 	CreatedAt string         `json:"created_at"`
 	Priority  any            `json:"priority"`
 }
@@ -459,12 +465,17 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 				builderFamily = seat.Family
 			}
 		}
-		if s.Owner == "" {
+		if s.Owner == "" && !s.ownerOmitted {
 			s.Owner = j.Owner
 		}
 		s.ParentFamily = builderFamily
 		if s.Report == "" && s.ReportRelative == "" {
 			return fail(exitUsage, "--parent-job requires --report")
+		}
+	}
+	if s.ownerOmitted {
+		if e := a.resolveOwner(ctx, &s); e != nil {
+			return e
 		}
 	}
 	if !regexp.MustCompile(`^[0-9]+$`).MatchString(s.Task) {
