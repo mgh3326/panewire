@@ -186,8 +186,9 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	}
 	// hk 3276: a worker directive reaches the worker's pane at once. A lane
 	// policy that files its findings or orders as inbox (kept for a digest or
-	// an idle promotion) must not retain them.
-	directive := isWorkerDirective(kind, *event, loadReportRelayRoutes(h.reportRelayPath)[lane])
+	// an idle promotion) must not retain them. designQuiet decides alone for
+	// a design lane: what it quiets is never a directive (hk 3434).
+	directive := !quiet && isWorkerDirective(kind, *event, loadReportRelayRoutes(h.reportRelayPath)[lane])
 	if directive && class == "inbox" {
 		class = "interrupt"
 	}

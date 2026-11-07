@@ -159,20 +159,28 @@ func (p *deliveryPolicy) designLane(lane string) bool {
 	return false
 }
 
+// designRoutineWorkerTypes are the declared types of a worker's routine
+// result: nothing in them asks the design session to act.
+var designRoutineWorkerTypes = map[string]bool{"progress": true, "report": true, "info": true, "merged": true, "ack": true, "closed": true}
+
 // designQuiet reports whether a design lane keeps this event in its inbox
 // without a pane injection (hk 3426): a lane.event declared ready, the
-// completion of a job that has a PR or a task, and (hk 3434) any lane.event a
-// worker sends from its own pane except a decision or a blocked notice.
-// mergewake reviews and merges from the PR, and the job's hk record keeps the
-// rest, so the design session has nothing to do with any of them. The
-// completion of a job with neither -- a consult answer the session waits for
-// -- is delivered as before. hasTask is consulted only for a design-lane
-// completion that names no PR, fromWorker only for a lane.event of another
-// type. The declared type, the kind and the sender decide alone: text tags,
-// an explicit class and replay do not bring any of them back. The one text
-// exception is a consult answer: a lane.event whose text starts with
+// completion of a job that has a PR or a task, and (hk 3434) a worker's
+// routine lane.event from its own pane -- a type in designRoutineWorkerTypes,
+// or untyped text with none of the action tags neverHoldTags matches (ESC,
+// BLOCKER, BOUNCE, URGENT, needs_decision; an untyped READY is a completion
+// record). mergewake reviews and merges from the PR, and the job's hk record
+// keeps the rest, so the design session has nothing to do with any of them.
+// Every other type a worker declares (decision, blocked, findings, order,
+// automation-failed, deploy-approval, watch-hold, culprit-hold, and any type
+// added later) is classified as before. The completion of a job with neither
+// a PR nor a task -- a consult answer the session waits for -- is delivered as
+// before. hasTask is consulted only for a design-lane completion that names
+// no PR, fromWorker only for a lane.event that would otherwise be quiet. Once
+// quiet, an explicit class, replay and a worker-directive route do not bring
+// an event back (receiveInbox). A lane.event whose text starts with
 // consultDoneMarker is the reply the design session asked for and waits for
-// in its pane (hk 3434), so it is delivered.
+// in its pane (hk 3434), so it is delivered whatever its type.
 func (p *deliveryPolicy) designQuiet(lane, kind string, e hubJobEventPayload, hasTask, fromWorker func() bool) bool {
 	if !p.designLane(lane) {
 		return false
@@ -184,8 +192,10 @@ func (p *deliveryPolicy) designQuiet(lane, kind string, e hubJobEventPayload, ha
 			return false
 		case e.NotifyType == "ready":
 			return true
+		case e.NotifyType == "":
+			return !neverHoldTags.MatchString(deliveryEventText(e)) && fromWorker()
 		}
-		return e.NotifyType != "decision" && e.NotifyType != "blocked" && fromWorker()
+		return designRoutineWorkerTypes[e.NotifyType] && fromWorker()
 	case "job.completed":
 		return e.PR != "" || hasTask()
 	}
@@ -521,6 +531,8 @@ func (p *deliveryPolicy) holdPolicy(lane string) *deliveryHoldPolicy {
 	return p.HoldWhileWorking
 }
 
+// neverHoldTags are the must-act tags without READY: a working hold never
+// keeps them, and designQuiet never quiets a worker's untyped text with one.
 var neverHoldTags = regexp.MustCompile(`(?i)\b(?:BLOCKER|URGENT|ESC|BOUNCE|needs_decision)\b`)
 
 func holdableEvent(kind string, e hubJobEventPayload) bool {

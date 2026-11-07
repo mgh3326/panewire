@@ -1,7 +1,7 @@
 package panewire
 
-// hk 3434: a worker's own lane.event to its design owner lane interrupts only
-// for a decision or a blocked notice. The node names the emitting pane on the
+// hk 3434: a worker's own routine lane.event to its design owner lane stays in
+// the lane's inbox; every other one is classified as before. The node names the emitting pane on the
 // lane.event wire (pane_id) to a hub that advertised it; the hub counts the
 // event a worker's when the sending node runs a live worker job in that pane.
 // Everything it cannot attribute that way is delivered as before.

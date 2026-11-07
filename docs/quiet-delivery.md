@@ -195,10 +195,28 @@ The hub keeps these in the lane's inbox, without a pane injection:
   client);
 - a `lane.event` declared `--type ready`, also when the sender passed
   `--deliver interrupt`, unless its text starts with `[consult-done]`;
-- a worker's own `lane.event` of any other type except `decision` and
-  `blocked` (hk 3434): untyped progress such as "hk 3430: PR #221 open",
-  `progress`, `report`, `info`, `merged` and the rest, also with
-  `--deliver interrupt`.
+- a worker's own routine `lane.event` (hk 3434), also with
+  `--deliver interrupt`:
+  - one declared `--type progress`, `report`, `info`, `merged`, `ack` or
+    `closed`;
+  - an untyped one whose text carries none of the action tags `ESC`,
+    `BLOCKER`, `BOUNCE`, `URGENT` and `needs_decision`, such as
+    "hk 3430: PR #221 open" or "#221 merged; follow-up #222 open". These are
+    the must-act tags without `READY`: an untyped worker READY is a
+    completion record, so it stays in the inbox too.
+
+Every other type a worker declares is classified as before, so it interrupts
+by default: `decision`, `blocked`, `findings`, `order`, `automation-failed`,
+`deploy-approval`, `watch-hold` and `culprit-hold`, and any type added to the
+vocabulary later. So does a worker's untyped text with an action tag, such as
+"ESC need a decision | options …". The fleet-v1 brief preamble
+(`internal/fleet/brief-policy.json`) tells a worker to escalate with
+`--type decision` and to report being stuck with `--type blocked`.
+
+`designQuiet` (`delivery_policy.go`) is the one decision point. Once it keeps
+an event in the inbox, nothing after it in `receiveInbox` (`hub_inbox.go`)
+puts the event back in the pane: not an explicit `--deliver`, not a replay,
+not the inbox-immediate rule and not a worker-directive route.
 
 They are ordinary unread inbox items (a `ready` one stays unacked until
 `panewire inbox ack`): readable through `panewire inbox list --lane LANE`, never
@@ -232,7 +250,7 @@ cannot be read. A consult answer — a `lane.event` whose text starts with
 `[consult-done]`, sent `--type ready` as rstack's ops consult reference gives
 the answerer — is also delivered (hk 3434), from a counsel job's pane too: the
 session that asked waits for it in its pane. `job.escalate`, a worker's
-`decision` and `blocked`, and the `decision`, `blocked`, `findings` and
+action events above, and the `decision`, `blocked`, `findings` and
 `automation-failed` types from anyone else still interrupt. Lanes that are not
 design lanes, `operator-desk` included, are unchanged, and so are chat relays
 and `job.*` kinds.
