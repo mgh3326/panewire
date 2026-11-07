@@ -257,3 +257,42 @@ func TestSelectionTermsListEachHostOnce(t *testing.T) {
 		}
 	}
 }
+
+// A credit-band row that placed carries no refusal: the record keeps the
+// pass 1 reason for the host selection chose, even when execution never
+// started, so it is never reported as skipped for the reason "chosen".
+func TestPlacementRecordDoesNotMergeAdmittedCreditBandRow(t *testing.T) {
+	a, s, _, _ := creditBandFixture(t, []CatalogRow{creditRow}, map[string]string{"mac-b": testCreditA}, noBalance)
+	sel, err := a.selectProfile(context.Background(), s)
+	if err != nil || sel.chosen.host != "mac-b" {
+		t.Fatalf("credit chosen on mac-b: %v %+v", err, sel)
+	}
+	for _, r := range selectionCandidates(sel.record(), "mac-b", false) {
+		if r.Host == "mac-b" && (r.Reason == "chosen" || r.Reason == "admitted") {
+			t.Fatalf("an admitted pass 2 row must not become a skip reason: %+v", r)
+		}
+	}
+}
+
+// A pass 2 row that was never tried (an earlier host admitted the credit)
+// does not erase the refusal pass 1 recorded for a later host.
+func TestSelectionTermsKeepPassOneRefusalOverNotTriedPassTwo(t *testing.T) {
+	a, s, q, src := creditBandFixture(t, []CatalogRow{creditRow, codexRow}, map[string]string{"mac-b": testCreditA, "cloud-small": testCodexA}, noBalance)
+	src.presence = append(src.presence, PresenceRecord{HostID: "cloud-small", AccountKey: testCreditA, LastSeen: a.Now()})
+	gate := q.GateDo
+	q.GateDo = func(r QuotaRequest) (string, error) {
+		if r.AccountKey == testCodexA {
+			return "", fail(3, "quota exhausted")
+		}
+		return gate(r)
+	}
+	sel, err := a.selectProfile(context.Background(), s)
+	if err != nil || sel.chosen.seatName != "omp-opus" || sel.chosen.host != "mac-b" {
+		t.Fatalf("credit band admits on mac-b: %v %+v", err, sel)
+	}
+	for _, h := range selectionTerms(sel.record()) {
+		if h.Host == "cloud-small" && (h.Outcome != "quota_exhausted" || len(h.Tried) == 0) {
+			t.Fatalf("cloud-small keeps pass 1's refusal, got %+v", h)
+		}
+	}
+}

@@ -174,7 +174,7 @@ func (a *App) placementEvent(s Spawn, rec map[string]any, err error) {
 
 // selectionTerms projects the ordered host/rung trace without account keys,
 // free-text gate reasons or other selection metadata. A host appears once: the
-// credit band's pass 2 row replaces the pass 1 row in its place, so the event
+// credit band's pass 2 row replaces the pass 1 row in its place when it tried a rung, so the event
 // does not spend MaxCandidates on a host twice.
 func selectionTerms(sel map[string]any) []fleetevent.HostSelection {
 	var out []fleetevent.HostSelection
@@ -193,7 +193,11 @@ func selectionTerms(sel map[string]any) []fleetevent.HostSelection {
 			x.Tried = append(x.Tried, fleetevent.RungAttempt{Profile: str(r, "profile"), Effort: str(r, "effort"), Pool: str(r, "pool"), Outcome: str(r, "outcome")})
 		}
 		if i, ok := at[x.Host]; ok {
-			out[i] = x
+			// A pass 2 row that tried nothing (not_tried after an earlier
+			// host admitted) must not erase what pass 1 recorded.
+			if len(x.Tried) > 0 {
+				out[i] = x
+			}
 			continue
 		}
 		at[x.Host] = len(out)
