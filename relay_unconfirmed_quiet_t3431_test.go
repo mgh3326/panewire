@@ -327,7 +327,8 @@ func TestUnconfirmedNoticeSentForTaskInProgress_t3431(t *testing.T) {
 }
 
 // Acceptance 4: seven drops inside the window send one notice; the first drop
-// after the window sends the next one and names the six folded into it.
+// after the window sends the next one and names the six folded into it, from
+// the earliest fold.
 func TestUnconfirmedNoticeOncePerWindow_t3431(t *testing.T) {
 	rig := t3431Start(t, t3431LiveJobWithTask())
 	rig.task(t3431Task, "in_progress", "started")
@@ -360,7 +361,8 @@ func TestUnconfirmedNoticeOncePerWindow_t3431(t *testing.T) {
 	if len(second) != 1 {
 		t.Fatalf("the drop after the window sent %d notices, want 1", len(second))
 	}
-	suffix := fmt.Sprintf("(+6 more unconfirmed for this lane since %s UTC)", first.Format("15:04"))
+	// HH:MM is the earliest fold: the second drop, 4 minutes after the first.
+	suffix := fmt.Sprintf("(+6 more unconfirmed for this lane since %s UTC)", first.Add(4*time.Minute).Format("15:04"))
 	if !strings.HasSuffix(second[0].Text, t3431TodayText(row, "mergewake-findings-8")+" "+suffix) {
 		t.Fatalf("the notice after the window does not name the folded drops (%q):\n%q", suffix, second[0].Text)
 	}
@@ -446,9 +448,9 @@ func t3431NoticeFor(notices []hubRelayInjectEvent, row int64) []hubRelayInjectEv
 }
 
 // An escalation whose every retry of a 5xx post gave up told nobody, so it
-// must not hold the window: the next drop, 7 minutes later, is sent at once and
+// records no window: the next drop, 7 minutes later, is sent at once and
 // counts the lost one.
-func TestUnconfirmedNoticeGiveUpReleasesWindow_t3431(t *testing.T) {
+func TestUnconfirmedNoticeGiveUpLeavesWindowOpen_t3431(t *testing.T) {
 	prev := unconfirmedEscalationBackoff
 	unconfirmedEscalationBackoff = []time.Duration{time.Millisecond, time.Millisecond}
 	t.Cleanup(func() { unconfirmedEscalationBackoff = prev })
@@ -483,56 +485,47 @@ func TestUnconfirmedNoticeGiveUpReleasesWindow_t3431(t *testing.T) {
 	}
 }
 
-// A notice the store answers as a duplicate releases only its own claim on the
-// window. A drop folded while that post was in flight stays counted, and the
-// next notice names it with a real time, never the zero time.
-func TestUnconfirmedNoticeReleaseKeepsConcurrentFold_t3431(t *testing.T) {
-	rig := t3431Start(t, t3431LiveJobWithTask())
-	rig.task(t3431Task, "in_progress", "started")
-	rig.job(t3431Job, false, false)
+// A notice the store answers as a duplicate on its first post was told before
+// (in a window this hub no longer remembers) and records nothing, so R2,
+// dropped while that post is in flight, is sent. R3 is then folded behind R2's
+// notice, and the drop after the window names it with a real time, never the
+// zero time.
+func TestUnconfirmedNoticeDuplicateRecordsNothing_t3431(t *testing.T) {
+	rig := t3431LiveRig(t)
 
 	r1 := rig.relayRow()
 	r2 := rig.relayRow()
-	// R1's notice was told in a window this hub no longer remembers: the
-	// store holds it, so the post answers as a duplicate.
 	told := handoffkeepRelayEvent{ID: 9001, Kind: "lane.event", OwnerLane: t3431Design, EventID: fmt.Sprintf("%s%d", unconfirmedEscalationPrefix, r1.OriginalEventID), Text: "told before the restart"}
 	rig.fake.mu.Lock()
 	rig.fake.rows[fakeHandoffkeepStoredKey(told)] = &told
 	rig.fake.mu.Unlock()
-	// R2 is dropped while R1's post is in flight, on another connection.
-	var once sync.Once
-	rig.fake.mu.Lock()
-	rig.fake.observe = func(method, path string) {
-		if method != http.MethodPost || path != "/v1/relay/events" {
-			return
-		}
-		once.Do(func() {
-			rig.clock.advance(time.Minute)
-			t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r2)
-		})
-	}
-	rig.fake.mu.Unlock()
+	rig.onFirstNoticePost(func() {
+		rig.clock.advance(time.Minute)
+		t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r2)
+	})
 	t650Send(t, rig.hub, "host-a", rig.dest, "relay.dropped", r1)
-	rig.fake.mu.Lock()
-	rig.fake.observe = nil
-	rig.fake.mu.Unlock()
-	if lines := rig.infoLines(fmt.Sprintf("event_id=%d", r2.OriginalEventID), "why=folded"); len(lines) != 1 {
-		t.Fatalf("R2 was not folded while R1's post was in flight; logs:\n%s", rig.logs.String())
+	if got := t3431NoticeFor(rig.notices(), r2.OriginalEventID); len(got) != 1 {
+		t.Fatalf("R2, dropped while R1's duplicate post was in flight, sent %d notices, want 1", len(got))
 	}
-	folded := rig.clock.Now()
 
 	rig.clock.advance(time.Minute)
+	folded := rig.clock.Now()
+	rig.drop()
+	if got := rig.notices(); len(got) != 0 {
+		t.Fatalf("a drop inside R2's window was sent: %+v", got)
+	}
+	rig.clock.advance(31 * time.Minute)
 	row, _ := rig.drop()
 	got := t3431NoticeFor(rig.notices(), row)
 	if len(got) != 1 {
-		t.Fatalf("the drop after a released claim sent %d notices, want 1", len(got))
+		t.Fatalf("the drop after the window sent %d notices, want 1", len(got))
 	}
 	if strings.Contains(got[0].Text, "00:00 UTC") {
 		t.Fatalf("the notice printed the zero time: %q", got[0].Text)
 	}
 	suffix := fmt.Sprintf("(+1 more unconfirmed for this lane since %s UTC)", folded.Format("15:04"))
 	if !strings.HasSuffix(got[0].Text, suffix) {
-		t.Fatalf("the notice lost R2's fold (want suffix %q):\n%q", suffix, got[0].Text)
+		t.Fatalf("the notice lost the fold (want suffix %q):\n%q", suffix, got[0].Text)
 	}
 }
 

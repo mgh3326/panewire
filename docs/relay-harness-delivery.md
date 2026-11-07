@@ -205,18 +205,21 @@ escalation still goes out when the record or task cannot be read, when a live
 job has no task, or when the hub knows no job in the lane. The last case covers
 a hub restart, which forgets ended jobs. For a live job, the hub sends at most
 one escalation per (design lane, worker lane) every 30 minutes, and sends the
-first one at once. A later drop inside the window is logged (`why=folded`) and
-counted. The next escalation after the window ends with
-`(+N more unconfirmed for this lane since HH:MM UTC)`. `HH:MM` is when the
-last escalation was admitted, or the first counted drop when none holds the
-window. An escalation holds the window from the moment it is admitted. If
-handoffkeep never stores it, because every retry gives up or handoffkeep
-refuses it, the hub releases the window and counts that drop, so the next drop
-is sent at once. A duplicate answer to a new escalation releases only that
-escalation's own hold, and every drop counted meanwhile stays counted. A
-counted row dropped again after the window is sent like any other drop. The
-window is kept in memory only, so a hub restart resets it and the first drop
-after a restart is sent at once.
+first one at once. The window starts only when handoffkeep stores an
+escalation, as a new row or as a retry that answers duplicate; nothing holds
+the window before that. A later drop inside the window is logged
+(`why=folded`) and counted. The next escalation after the window ends with
+`(+N more unconfirmed for this lane since HH:MM UTC)`, where `HH:MM` is the
+earliest counted drop; storing it clears the drops it names, and drops counted
+while it was in flight stay counted. An escalation handoffkeep never stores
+(every retry gives up, handoffkeep refuses it, or a retry stops early because
+the row was delivered or its job ended) records nothing, so the next drop is
+sent at once; a refused or given-up drop is counted. Two drops at the same
+moment can both be sent: one extra escalation is accepted, a lost one is not.
+A window tracks at most 64 counted rows and only counts the rest. A counted
+row dropped again after the window is sent like any other drop and does not
+count itself. The window is kept in memory only, so a hub restart resets it
+and the first drop after a restart is sent at once.
 
 The hub's own one-labelled-replay after a restart
 ([#1002](r27-busy-relay.md)) is unchanged and is not an escalation.
@@ -238,4 +241,5 @@ and the idle re-delivery of a `working_wait_expired` row; `prompt_cmd_t3330_test
 transport; `relay_cmd_wrapped_return_t3419_test.go` pins the return gate on a
 wrapped composer, a draft or second nonce beside it, and a late-drawn text.
 `relay_unconfirmed_quiet_t3431_test.go` pins the quiet escalation for an ended
-job or task, the fail-open reads, the 30-minute window and its release.
+job or task, the fail-open reads, the 30-minute window, the escalations that
+are never stored, concurrent drops and the bound on counted rows.
