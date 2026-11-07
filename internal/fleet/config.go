@@ -25,6 +25,7 @@ type Config struct {
 	Artifacts map[string]any            `toml:"artifacts"`
 	Placement map[string]any            `toml:"placement"`
 	Quota     map[string]any            `toml:"quota"`
+	Sweep     map[string]any            `toml:"sweep"`
 }
 
 func expand(p string) string {
@@ -91,7 +92,7 @@ func LoadConfig(path string) (Config, error) {
 		return c, fail(exitConfig, "hosts config: %v", e)
 	}
 	for _, k := range slices.Sorted(maps.Keys(raw)) {
-		if k != "local" && k != "hub" && k != "hosts" && k != "artifacts" && k != "placement" && k != "quota" {
+		if k != "local" && k != "hub" && k != "hosts" && k != "artifacts" && k != "placement" && k != "quota" && k != "sweep" {
 			return c, fail(exitConfig, "unknown hosts table %q", k)
 		}
 	}
@@ -122,6 +123,11 @@ func LoadConfig(path string) (Config, error) {
 	}
 	if v, ok := c.Hub["state"]; ok && v != "on" && v != "off" {
 		return c, fail(exitConfig, "hub.state accepts only on or off")
+	}
+	if v, ok := c.Sweep["remove_worktrees"]; ok {
+		if _, ok := v.(bool); !ok {
+			return c, fail(exitConfig, "sweep.remove_worktrees must be a boolean")
+		}
 	}
 	if v, ok := c.Hub["state_publisher_ttl_s"]; ok {
 		if n, ok := v.(int64); !ok || n < 1 || n > 3600 {

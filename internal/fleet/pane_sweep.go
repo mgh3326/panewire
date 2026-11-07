@@ -69,6 +69,10 @@ var paneSweepIdleStatus = []string{"idle", "done"}
 type TaskPaneSweeper struct {
 	Grace     time.Duration
 	TaskState TaskStateReader
+	// WorkRoot is the node's own work root: the clone it prepares job
+	// worktrees from. Empty keeps every worktree, since nothing then proves
+	// one was the node's (sweep_worktree.go).
+	WorkRoot string
 	// Info receives one line per closed pane and one per kept candidate. It
 	// gets ids and states only, never screen text.
 	Info func(message string, attrs ...any)
@@ -269,6 +273,7 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, taskState, e
 		a.warn("job.reaped not recorded: %v", err)
 	}
 	s.info("task pane closed", "job", j.ID, "task", j.Task, "task_state", taskState, "pane", j.Pane, "idle_seconds", int(now.Sub(since).Seconds()))
+	s.sweepWorktree(ctx, a, latest, taskState)
 	return ""
 }
 
