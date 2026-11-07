@@ -215,7 +215,7 @@ func TestNormalizeFree(t *testing.T) {
 		{"other state", freeState("full", nil), "", false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			got, valid := normalizeFree(test.in, testNow)
+			got, valid := NormalizeFree(test.in, testNow)
 			state := ""
 			if got != nil {
 				state = got.State
