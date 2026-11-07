@@ -39,6 +39,10 @@ type sweepGitFake struct {
 	onOrigin bool
 	forced   []string
 	onRemove func(path string)
+	// head is the worktree's HEAD; originTip is what
+	// refs/remotes/origin/<branch> resolves to ("" means it does not exist).
+	head      string
+	originTip string
 }
 
 func newSweepGitFake(t *testing.T) *sweepGitFake {
@@ -47,7 +51,7 @@ func newSweepGitFake(t *testing.T) *sweepGitFake {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := &sweepGitFake{workRoot: root, clone: filepath.Join(root, "panewire"), held: map[string]bool{}}
+	g := &sweepGitFake{workRoot: root, clone: filepath.Join(root, "panewire"), held: map[string]bool{}, head: paneSweepTestHead}
 	if err := os.MkdirAll(filepath.Join(g.clone, ".git"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +72,14 @@ func (g *sweepGitFake) worktree(t *testing.T, name string) string {
 func (g *sweepGitFake) do(c Command) Result {
 	args := c.Args
 	switch {
-	case len(args) >= 3 && args[2] == "rev-parse":
+	case len(args) >= 4 && args[2] == "rev-parse" && args[3] == "HEAD":
+		return Result{Out: g.head + "\n"}
+	case len(args) >= 5 && args[2] == "rev-parse" && args[3] == "--verify":
+		if g.originTip == "" {
+			return Result{Code: 1}
+		}
+		return Result{Out: g.originTip + "\n"}
+	case len(args) >= 5 && args[2] == "rev-parse" && args[3] == "--path-format=absolute":
 		cwd := args[1]
 		gitDir := filepath.Join(g.clone, ".git", "worktrees", filepath.Base(cwd))
 		return Result{Out: gitDir + "\n" + filepath.Join(g.clone, ".git") + "\n"}

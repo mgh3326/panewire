@@ -31,6 +31,16 @@ A local job is swept when all of these hold:
     `completed` for outcome `completed` or a `job.completed`, else `lost`. A
     job reprompted after its close is live again and is kept.
 
+A task-derived end waits while the job's worktree is on an open PR. The sweep
+reads hk's changes for the task (`GET /v1/changes?task=<id>`, the source
+`panewire pr status` uses) and keeps the pane when an open change names the
+worktree's `HEAD`, or the tip of the worktree's branch on origin (hk's change
+carries the PR head, not its branch). The line says `reason=open_pr` and the PR
+number. A job whose own record ended (`job.completed` or `job.revoked`) is
+still swept: its result is already in hk. An hk read that fails keeps the pane
+(`reason=pr_state_unknown`), so a failure never closes a pane that may still
+own an open PR.
+
 Each job is judged alone. Another live job on the same task, such as a fix
 author, does not keep this job's pane open.
 
@@ -131,7 +141,8 @@ idle_seconds) and one per kept candidate (`task pane kept`, with a `reason`).
 A candidate is a job whose task is in an ending state, whose task could not be
 read, whose task did not resolve (`no_task`), or that was closed. A job whose
 task is still live logs nothing. A `task pane closed` and a `task worktree
-removed` line carry the `reason` (`task_<state>` or `job_<outcome>`). Lines carry ids only: no
+removed` line carry the `reason` (`task_<state>` or `job_<outcome>`); a kept
+line whose worktree is on an open PR also carries its `pr` number. Lines carry ids only: no
 screen text, no task body, no credentials.
 
 ## Configuration

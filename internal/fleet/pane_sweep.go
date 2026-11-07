@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mgh3326/panewire/internal/durable"
@@ -57,6 +58,53 @@ func NewTaskStateReader(baseURL, token, cfID, cfSecret string) (TaskStateReader,
 			return TaskStatus{}, errors.New("task record is invalid")
 		}
 		return TaskStatus{State: record.State, Category: record.Category}, nil
+	}, nil
+}
+
+// PRChange is one PR handoffkeep links to a task: its number, its state and
+// the commit it heads.
+type PRChange struct {
+	Number int
+	State  string
+	Head   string
+}
+
+// PRReader lists the PRs handoffkeep links to one task. It is what keeps a
+// task-derived close from closing a pane whose worktree is on an open PR.
+type PRReader func(ctx context.Context, task string) ([]PRChange, error)
+
+// NewPRReader reads GET /v1/changes?task=<id> with an explicit handoffkeep
+// endpoint and credential, as NewTaskStateReader does for the task itself.
+// That is the source pr status already reads (docs/pr-status.md): a change
+// carries the PR's state and head, so no GitHub request is spent.
+func NewPRReader(baseURL, token, cfID, cfSecret string) (PRReader, error) {
+	client, err := newNodeHKClient(baseURL, token, cfID, cfSecret)
+	if err != nil {
+		return nil, err
+	}
+	return func(ctx context.Context, task string) ([]PRChange, error) {
+		id, err := strconv.ParseInt(task, 10, 64)
+		if err != nil || id <= 0 {
+			return nil, errors.New("task id is not numeric")
+		}
+		var list struct {
+			Changes []struct {
+				PRNumber int    `json:"pr_number"`
+				State    string `json:"state"`
+				HeadSHA  string `json:"head_sha"`
+			} `json:"changes"`
+		}
+		if err := client.get(ctx, "/v1/changes?task="+url.PathEscape(task), &list); err != nil {
+			return nil, err
+		}
+		changes := make([]PRChange, 0, len(list.Changes))
+		for _, change := range list.Changes {
+			if change.PRNumber <= 0 {
+				continue
+			}
+			changes = append(changes, PRChange{Number: change.PRNumber, State: change.State, Head: change.HeadSHA})
+		}
+		return changes, nil
 	}, nil
 }
 
@@ -145,6 +193,10 @@ var paneSweepIdleStatus = []string{"idle", "done"}
 type TaskPaneSweeper struct {
 	Grace     time.Duration
 	TaskState TaskStateReader
+	// PR lists the PRs hk links to a task, so a task-derived end waits while
+	// the job's worktree is on an open PR (hk 3401). A nil reader leaves that
+	// state unknown, and an unknown state keeps a worktree's pane.
+	PR PRReader
 	// WorkRoot is the node's own work root: the clone it prepares job
 	// worktrees from. Empty keeps every worktree, since nothing then proves
 	// one was the node's (sweep_worktree.go).
@@ -236,6 +288,7 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 		}
 	}
 	statuses := map[string]paneSweepTaskRead{}
+	prs := map[string]paneSweepPRRead{}
 	parents := map[string]string{}
 	for _, j := range candidates {
 		closed := paneSweepClosed(j)
@@ -279,6 +332,19 @@ func (s *TaskPaneSweeper) Pass(ctx context.Context, a *App) error {
 		case now.Sub(since) < s.Grace:
 			s.info("task pane kept", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", "grace", "idle_seconds", int(now.Sub(since).Seconds()))
 		default:
+			// A job whose own record ended is swept whatever its PRs say (hk
+			// 3383): its result is already in hk. Only a task-derived end can
+			// wait on an open PR.
+			if !closed {
+				if reason, number := s.paneSweepPRKeep(ctx, a, j, task, prs); reason != "" {
+					attrs := []any{"job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", reason}
+					if number > 0 {
+						attrs = append(attrs, "pr", number)
+					}
+					s.info("task pane kept", attrs...)
+					continue
+				}
+			}
 			if reason := s.close(ctx, a, j, task, end, since, now); reason != "" {
 				s.info("task pane kept", "job", j.ID, "task", task, "task_state", end.taskState, "pane", j.Pane, "reason", reason)
 			}
@@ -300,6 +366,88 @@ func (s *TaskPaneSweeper) readTask(ctx context.Context, task string) paneSweepTa
 	}
 	status, err := s.TaskState(ctx, task)
 	return paneSweepTaskRead{status: status, err: err}
+}
+
+// paneSweepPRRead is one task's change list, kept for the pass so a task
+// shared by several jobs is read once.
+type paneSweepPRRead struct {
+	changes []PRChange
+	err     error
+}
+
+func (s *TaskPaneSweeper) readPRs(ctx context.Context, task string) paneSweepPRRead {
+	if s.PR == nil {
+		return paneSweepPRRead{err: errors.New("no PR reader")}
+	}
+	changes, err := s.PR(ctx, task)
+	return paneSweepPRRead{changes: changes, err: err}
+}
+
+// paneSweepPRKeep reports why the job's worktree keeps a task-derived close,
+// and the open PR's number when one is found. "" means no open PR: the close
+// goes ahead. An unreadable worktree or change list keeps the pane, so a
+// failure never closes a pane that may still own an open PR.
+func (s *TaskPaneSweeper) paneSweepPRKeep(ctx context.Context, a *App, j Job, task string, cache map[string]paneSweepPRRead) (reason string, number int) {
+	cwd := str(j.Receipt, "cwd")
+	if cwd == "" {
+		// No worktree: nothing it could have an open PR on.
+		return "", 0
+	}
+	heads, ok := paneSweepHeads(ctx, a, cwd)
+	if !ok {
+		return "pr_state_unknown", 0
+	}
+	read, known := cache[task]
+	if !known {
+		read = s.readPRs(ctx, task)
+		cache[task] = read
+	}
+	if read.err != nil {
+		return "pr_state_unknown", 0
+	}
+	if number, open := paneSweepOpenPR(read.changes, heads); open {
+		return "open_pr", number
+	}
+	return "", 0
+}
+
+// paneSweepHeads is the commit(s) that identify the job's worktree: HEAD, and
+// for an attached worktree the tip of its branch on origin, which is the PR
+// head hk records (a change carries no head branch). A worktree with no
+// readable HEAD leaves the answer unknown.
+func paneSweepHeads(ctx context.Context, a *App, cwd string) ([]string, bool) {
+	r := a.call(ctx, "git", "-C", cwd, "rev-parse", "HEAD")
+	head := strings.TrimSpace(r.Out)
+	if r.Code != 0 || head == "" {
+		return nil, false
+	}
+	heads := []string{head}
+	if b := a.call(ctx, "git", "-C", cwd, "branch", "--show-current"); b.Code == 0 {
+		if branch := strings.TrimSpace(b.Out); branch != "" {
+			t := a.call(ctx, "git", "-C", cwd, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch)
+			if tip := strings.TrimSpace(t.Out); t.Code == 0 && tip != "" && tip != head {
+				heads = append(heads, tip)
+			}
+		}
+	}
+	return heads, true
+}
+
+// paneSweepOpenPR is the number of an open change whose head is one of the
+// worktree's commits.
+func paneSweepOpenPR(changes []PRChange, heads []string) (int, bool) {
+	for _, change := range changes {
+		if !strings.EqualFold(change.State, "open") {
+			continue
+		}
+		changeHead := strings.TrimSpace(change.Head)
+		for _, head := range heads {
+			if head != "" && strings.EqualFold(changeHead, head) {
+				return change.Number, true
+			}
+		}
+	}
+	return 0, false
 }
 
 // inheritedTask resolves the task of a job whose claim names none: the task of

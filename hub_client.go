@@ -190,6 +190,7 @@ type HubClient struct {
 	taskPaneSweepTicks    <-chan time.Time      // fixture seam; nil uses a ticker.
 	taskPaneSweepPass     func(context.Context) // fixture seam; nil runs the real pass.
 	nodeTaskState         fleet.TaskStateReader // fixture seam; nil reads spawn.json handoffkeep_env.
+	nodePR                fleet.PRReader        // fixture seam; nil reads spawn.json handoffkeep_env.
 	// Fleet state publisher (fleet_state_node.go, docs/fleet-state.md).
 	statePublish       bool
 	stateQuotaPools    []string
