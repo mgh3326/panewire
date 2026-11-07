@@ -124,7 +124,7 @@ func TestCatalogPushRefusals(t *testing.T) {
 		{"grade", `{"catalog":[{"profile":"p","effort":"high","model_id":"m","pool":"claude","grade":"Z","gate":"default","deviation_ref":"hk:task/1","decided_at":"2026-11-01T00:00:00Z","decided_by":"operator"}]}`, `invalid catalog grade "Z"`},
 		{"provenance", `{"catalog":[{"profile":"p","effort":"high","model_id":"m","pool":"claude","grade":"A","gate":"default","decided_at":"2026-11-01T00:00:00Z"}]}`, "catalog provenance required"},
 		{"decided_at", `{"catalog":[{"profile":"p","effort":"high","model_id":"m","pool":"claude","grade":"A","gate":"default","deviation_ref":"hk:task/1","decided_at":"2026-11-01 00:00:00","decided_by":"operator"}]}`, "catalog decided_at must include timezone"},
-		{"monotonic", `{"catalog":[{"profile":"p","effort":"low","model_id":"m","pool":"claude","grade":"C","gate":"default","deviation_ref":"hk:task/1","decided_at":"2026-11-01T00:00:00Z","decided_by":"operator"},{"profile":"p","effort":"high","model_id":"m","pool":"claude","grade":"A","gate":"default","deviation_ref":"hk:task/1","decided_at":"2026-11-01T00:00:00Z","decided_by":"operator"}]}`, "not monotonic for p"},
+		{"monotonic", `{"catalog":[{"profile":"p","effort":"low","model_id":"m","pool":"claude","grade":"A","gate":"default","deviation_ref":"hk:task/1","decided_at":"2026-11-01T00:00:00Z","decided_by":"operator"},{"profile":"p","effort":"high","model_id":"m","pool":"claude","grade":"C","gate":"default","deviation_ref":"hk:task/1","decided_at":"2026-11-01T00:00:00Z","decided_by":"operator"}]}`, "not monotonic for p"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := writeCatalogFile(t, tc.body)
