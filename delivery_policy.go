@@ -104,6 +104,11 @@ const defaultDesignLanePattern = "*-design"
 // inbox summary and on idle-wake delivery.
 const deskPolicyLane = "operator-desk"
 
+// consultDoneMarker opens the text of a consult answer's notice, as rstack
+// skills/ops/references/consult.md §2 has the answerer send it:
+// `--type ready --text '[consult-done] <gist> | <answer path>'`.
+const consultDoneMarker = "[consult-done]"
+
 // deliveryRelayPolicy is the hub-side relay classification. A design-session
 // lane (handoffkeep-design, panewire-design, mergewake-design, …) receives
 // decisions and failures only; routine progress, idle-wakes and the inbox
@@ -155,20 +160,32 @@ func (p *deliveryPolicy) designLane(lane string) bool {
 }
 
 // designQuiet reports whether a design lane keeps this event in its inbox
-// without a pane injection (hk 3426): a worker's lane.event declared ready,
-// and the completion of a job that has a PR or a task. mergewake reviews and
-// merges from the PR, so the design session has nothing to do with either.
-// The completion of a job with neither -- a consult answer the session waits
-// for -- is delivered as before. hasTask is consulted only for a design-lane
-// completion that names no PR. The declared type and the kind decide alone:
-// text tags, an explicit class and replay do not bring either back.
-func (p *deliveryPolicy) designQuiet(lane, kind string, e hubJobEventPayload, hasTask func() bool) bool {
+// without a pane injection (hk 3426): a lane.event declared ready, the
+// completion of a job that has a PR or a task, and (hk 3434) any lane.event a
+// worker sends from its own pane except a decision or a blocked notice.
+// mergewake reviews and merges from the PR, and the job's hk record keeps the
+// rest, so the design session has nothing to do with any of them. The
+// completion of a job with neither -- a consult answer the session waits for
+// -- is delivered as before. hasTask is consulted only for a design-lane
+// completion that names no PR, fromWorker only for a lane.event of another
+// type. The declared type, the kind and the sender decide alone: text tags,
+// an explicit class and replay do not bring any of them back. The one text
+// exception is a consult answer: a lane.event whose text starts with
+// consultDoneMarker is the reply the design session asked for and waits for
+// in its pane (hk 3434), so it is delivered.
+func (p *deliveryPolicy) designQuiet(lane, kind string, e hubJobEventPayload, hasTask, fromWorker func() bool) bool {
 	if !p.designLane(lane) {
 		return false
 	}
 	switch kind {
 	case "lane.event":
-		return e.NotifyType == "ready"
+		switch {
+		case strings.HasPrefix(e.Text, consultDoneMarker):
+			return false
+		case e.NotifyType == "ready":
+			return true
+		}
+		return e.NotifyType != "decision" && e.NotifyType != "blocked" && fromWorker()
 	case "job.completed":
 		return e.PR != "" || hasTask()
 	}

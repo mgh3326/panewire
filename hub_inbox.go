@@ -180,7 +180,7 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
 	// hk 3426: a design lane keeps a worker's routine result in its inbox; no
 	// owner-completion or idle promotion below puts it in the pane.
-	quiet := h.inbox.policy.designQuiet(lane, kind, *event, func() bool { return h.jobHasTask(event.JobID) })
+	quiet := h.inbox.policy.designQuiet(lane, kind, *event, func() bool { return h.jobHasTask(event.JobID) }, func() bool { return h.laneEventFromWorker(senderID, event.PaneID) })
 	if quiet || (kind == "job.completed" && event.Late) {
 		class = "inbox"
 	}

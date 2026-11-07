@@ -194,6 +194,10 @@ The hub keeps these in the lane's inbox, without a pane injection:
   `task_id` of the job's hk record, read through the hub's existing spawn
   client);
 - a `lane.event` declared `--type ready`, also when the sender passed
+  `--deliver interrupt`;
+- a worker's own `lane.event` of any other type except `decision` and
+  `blocked` (hk 3434): untyped progress such as "hk 3430: PR #221 open",
+  `progress`, `report`, `info`, `merged` and the rest, also with
   `--deliver interrupt`.
 
 They are ordinary unread inbox items (a `ready` one stays unacked until
@@ -201,11 +205,37 @@ They are ordinary unread inbox items (a `ready` one stays unacked until
 digested or escalated, and never replayed into the pane after a hub restart. The
 job's own state, its hk record and `spawn --wait` are unchanged.
 
+A `lane.event` is a worker's when the hub can attribute it to a live worker job
+on the node that sent it. The node names the emitting pane in the wire payload's
+`pane_id` (see [R21 direct lane events](r21-lane-event.md)), and the hub looks
+for a job that the sending node's latest heartbeat lists in that pane and that
+the hub holds as not completed and not orphaned on that node, with role
+`worker`. Every `panewire spawn` job claims as `worker`, whether it was spawned
+as a worker, tester, reviewer or counsel; a builder or captain is not one.
+Design sessions, the desk and workers share hosts, so the node match alone does
+not decide. Whatever the hub cannot attribute this way is delivered as before:
+
+- a `lane.event` with no `pane_id` (an older node, or a hub that has not
+  advertised it to the node yet);
+- a hub notice (SPAWN_FAILED, `[delivery unconfirmed]`), an HTTP ingress
+  event and a restart replay, which have no sending node;
+- a pane with no live job, a completed or orphaned job's pane, and a pane id
+  that only a job on another node uses;
+- a design session's or the desk's own `lane.event`, including the
+  TASK_LINK_FAILED the spawning CLI sends from the design session's pane;
+- a node's own notice about a worker pane (a stall notice or an idle-wake): it
+  names the pane it is about, not a sender, so it carries no `pane_id`.
+
 A completion of a job with neither a task nor a PR — a consult answer the
 session waits for — is delivered as before, and so is one whose hk job record
-cannot be read. `job.escalate` and the `decision`, `blocked`, `findings` and
-`automation-failed` types still interrupt. Lanes that are not design lanes,
-`operator-desk` included, are unchanged.
+cannot be read. A consult answer — a `lane.event` whose text starts with
+`[consult-done]`, sent `--type ready` as rstack's ops consult reference gives
+the answerer — is also delivered (hk 3434), from a counsel job's pane too: the
+session that asked waits for it in its pane. `job.escalate`, a worker's
+`decision` and `blocked`, and the `decision`, `blocked`, `findings` and
+`automation-failed` types from anyone else still interrupt. Lanes that are not
+design lanes, `operator-desk` included, are unchanged, and so are chat relays
+and `job.*` kinds.
 
 ## Durability and replay
 

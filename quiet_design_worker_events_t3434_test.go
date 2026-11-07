@@ -9,10 +9,14 @@ package panewire
 import (
 	"context"
 	"encoding/json"
+	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -49,6 +53,8 @@ func t3434Hub(t *testing.T, path string) (*HubServer, *hubAgent, *fakeHandoffkee
 		{JobID: t3434WorkerJob, AgentLabel: t3434WorkerJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434WorkerPane, Role: "worker"},
 		{JobID: t3434ConsultJob, AgentLabel: t3434ConsultJob, Epoch: 1, OwnerLane: t3426Design, Pane: t3434ConsultPan, Role: "worker"},
 		{JobID: "hk3434-done", AgentLabel: "hk3434-done", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:finished", Role: "worker"},
+		{JobID: "hk3434-captain", AgentLabel: "hk3434-captain", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:captain", Role: "captain"},
+		{JobID: "hk3434-builder", AgentLabel: "hk3434-builder", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:builder"},
 	}, now)
 	h.observeActiveJobs("host-b", []HubActiveJob{
 		{JobID: "hk3434-remote", AgentLabel: "hk3434-remote", Epoch: 1, OwnerLane: t3426Design, Pane: "w1:remote", Role: "worker"},
@@ -148,6 +154,8 @@ func TestQuietDesignUnattributedLaneEventsAreInjected(t *testing.T) {
 		{"pane with no live job", t3434Event(t3426Design, "w1:p99", "", progress)},
 		{"pane of a job on another node", t3434Event(t3426Design, "w1:remote", "", progress)},
 		{"pane of a completed job", t3434Event(t3426Design, "w1:finished", "", progress)},
+		{"pane of a captain job", t3434Event(t3426Design, "w1:captain", "", progress)},
+		{"pane of a builder job (no role on the hub)", t3434Event(t3426Design, "w1:builder", "", progress)},
 		{"TASK_LINK_FAILED from the design session's own pane", t3434Event(t3426Design, t3434DesignPane, "automation-failed", "[panewire] TASK_LINK_FAILED job=job-2 task=7 reason=task claim exited with status 1; link the task manually")},
 		{"design session's own note on the worker's node", t3434Event(t3426Design, t3434DesignPane, "", "note to self: review #221 after lunch")},
 		{"desk's own note on the worker's node", t3434Event(t3426Design, t3434DeskPane, "progress", "desk: hk 3430 is next")},
@@ -389,5 +397,98 @@ func TestNewNodeLaneEventIsAcceptedByAnOldHub(t *testing.T) {
 		if !oldHub[name] {
 			t.Errorf("an old hub would refuse the lane.event for %q", name)
 		}
+	}
+}
+
+// End to end over a real socket: a real hub advertises lane_event_pane, a real
+// node that runs the worker job sends its pane, and the hub keeps the
+// worker's progress in the design lane's inbox while its decision reaches the
+// design pane.
+func TestQuietDesignWorkerLaneEventEndToEnd(t *testing.T) {
+	_, hk, closeServer := newFakeHandoffkeep(t)
+	t.Cleanup(closeServer)
+	h, err := NewHubServer(HubServerConfig{
+		Tokens:             map[string]string{"operator": "op", "host-a": "node"},
+		ReportRelayPath:    r20LanesFile(t, t3426Lanes),
+		DeliveryPolicyPath: "default",
+		InboxStorePath:     filepath.Join(t.TempDir(), "inbox.sqlite3"),
+		handoffkeep:        hk,
+		Logger:             slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { h.Close() })
+	server := httptest.NewServer(h.Handler())
+	t.Cleanup(server.Close)
+
+	root := t.TempDir()
+	events := filepath.Join(root, "jobs", t3434WorkerJob, "events")
+	if err := os.MkdirAll(events, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	for name, record := range map[string]string{
+		"00001-job.claimed.json": `{"type":"job.claimed","job_id":"` + t3434WorkerJob + `","epoch":1,"agent_label":"` + t3434WorkerJob + `","owner_lane":"` + t3426Design + `","role":"worker","created_at":"` + now + `"}`,
+		"00002-job.spawned.json": `{"type":"job.spawned","job_id":"` + t3434WorkerJob + `","pane_id":"` + t3434WorkerPane + `","created_at":"` + now + `"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(events, name), []byte(record), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var mu sync.Mutex
+	var injected []string
+	client, err := NewHubClient(HubClientConfig{
+		URL: r6WSURL(server.URL, ""), MachineID: "host-a", Token: "node", Accepting: true,
+		AllowInsecureForTests: true, PingInterval: 20 * time.Millisecond, Warn: func(string) {},
+		relayInject: func(_ context.Context, pane, text string) bool {
+			mu.Lock()
+			defer mu.Unlock()
+			injected = append(injected, pane+" "+text)
+			return true
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	client.jobsInboxRoot = root
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { defer close(done); client.Run(ctx) }()
+	t.Cleanup(func() { cancel(); <-done })
+
+	eventually(t, 10*time.Second, "the hub sees the worker job and the node the feature", func() bool {
+		peer := client.signalsPeer.Load()
+		return peer != nil && peer.acceptsLaneEventPane.Load() && h.laneEventFromWorker("host-a", t3434WorkerPane)
+	})
+	progress := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: now, OwnerLane: t3426Design, EventID: "e2e-progress", PaneID: t3434WorkerPane, Text: "hk 3430: PR #221 open"}
+	decision := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: now, OwnerLane: t3426Design, EventID: "e2e-decision", PaneID: t3434WorkerPane, NotifyType: "decision", Text: "ESC hk 3430: which order do we ship?"}
+	if _, err := writeLaneEmitRecord(root, progress); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 10*time.Second, "the progress note in the design lane's inbox", func() bool {
+		items, err := h.inbox.store.list(t3426Design, false)
+		if err != nil {
+			return false
+		}
+		for _, item := range items {
+			if item.Kind == "lane.event" && item.Event.EventID == "e2e-progress" {
+				return item.Class == "inbox" && item.ReadAt == 0
+			}
+		}
+		return false
+	})
+	if _, err := writeLaneEmitRecord(root, decision); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, 10*time.Second, "the decision in the design pane", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(injected) > 0
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	if len(injected) != 1 || !strings.HasPrefix(injected[0], t3434DesignPane+" ") || !strings.Contains(injected[0], "which order do we ship") {
+		t.Fatalf("injections=%q, want only the decision in %s", injected, t3434DesignPane)
 	}
 }

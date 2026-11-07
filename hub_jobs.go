@@ -159,11 +159,11 @@ func decodeHubJobEscalationPayload(payload []byte) (hubJobEventPayload, bool) {
 // heartbeat, completion, late registration, or orphan-sweep candidate.
 func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 	var fields map[string]json.RawMessage
-	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 11 {
+	if json.Unmarshal(payload, &fields) != nil || len(fields) < 3 || len(fields) > 12 {
 		return hubJobEventPayload{}, false
 	}
 	for name := range fields {
-		if name != "owner_lane" && name != "event_id" && name != "text" && name != "epoch" && name != "truncated" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "cause" && name != "head" && name != "pr" {
+		if name != "owner_lane" && name != "event_id" && name != "text" && name != "epoch" && name != "truncated" && name != "replay" && name != "delivery_class" && name != "notify_type" && name != "cause" && name != "head" && name != "pr" && name != "pane_id" {
 			return hubJobEventPayload{}, false
 		}
 	}
@@ -193,6 +193,14 @@ func decodeHubLaneEventPayload(payload []byte) (hubJobEventPayload, bool) {
 	}
 	if raw, present := fields["replay"]; present && json.Unmarshal(raw, &event.Replay) != nil {
 		return hubJobEventPayload{}, false
+	}
+	// pane_id is the emitting pane (lane_event_sender.go). It only ever quiets
+	// a design lane, so a value the hub cannot use is no pane, not a refusal.
+	if raw, present := fields["pane_id"]; present {
+		var pane string
+		if json.Unmarshal(raw, &pane) == nil {
+			event.PaneID = boundLaneEventPaneID(pane)
+		}
 	}
 	event.JobID = laneEventTransportID(event.OwnerLane, event.EventID)
 	return event, true
