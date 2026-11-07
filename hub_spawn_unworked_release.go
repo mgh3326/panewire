@@ -65,18 +65,31 @@ func (h *HubServer) nodeCall(ctx context.Context, machine, op string, args any, 
 // pane itself and refuses one that changed, so it runs before the irreversible
 // hk write; a refused or unreadable step returns false with the node's reason.
 func (h *HubServer) closeHeldPaneAndMarkLost(ctx context.Context, app *fleet.App, holder hubSpawnTask, name string, row nodeAgentRow) (bool, string) {
+	return h.closeHeldPaneAndMarkLostBecause(ctx, app, holder, name, row, "")
+}
+
+// closeHeldPaneAndMarkLostBecause is closeHeldPaneAndMarkLost with the hk
+// end_reason the lost record takes.
+func (h *HubServer) closeHeldPaneAndMarkLostBecause(ctx context.Context, app *fleet.App, holder hubSpawnTask, name string, row nodeAgentRow, endReason string) (bool, string) {
+	if !h.closeHeldPane(ctx, holder, name, row) {
+		return false, ""
+	}
+	return h.markHolderJobLostBecause(ctx, app, holder, name, endReason)
+}
+
+// closeHeldPane saves the holder's pane screen and closes the pane through the
+// holder's node. pane.close re-reads the pane and refuses one that changed, so
+// a true result means the pane is closed or already gone.
+func (h *HubServer) closeHeldPane(ctx context.Context, holder hubSpawnTask, name string, row nodeAgentRow) bool {
 	machine := spawnHolderHost(holder)
 	var captured nodePaneCaptureResult
 	capture := nodePaneCaptureArgs{PaneID: row.PaneID, Name: name, Cwd: row.Cwd, MergedAfter: 0, Write: true}
 	if !h.nodeCall(ctx, machine, nodeCommandPaneCapture, capture, spawnHeldPaneActWait, &captured) || captured.Outcome != nodeCaptureScreen {
-		return false, ""
+		return false
 	}
 	var closed nodePaneCloseResult
 	closeArgs := nodePaneCloseArgs{PaneID: row.PaneID, Name: name, AgentStatus: row.AgentStatus, Cwd: row.Cwd}
-	if !h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) || (closed.Outcome != nodePaneClosed && closed.Outcome != nodePaneGone) {
-		return false, ""
-	}
-	return h.markHolderJobLost(ctx, app, holder, name)
+	return h.nodeCall(ctx, machine, nodeCommandPaneClose, closeArgs, spawnHeldPaneActWait, &closed) && (closed.Outcome == nodePaneClosed || closed.Outcome == nodePaneGone)
 }
 
 // releaseUnworkedLanding closes the empty pane of a failed-at-landing holder

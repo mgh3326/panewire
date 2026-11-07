@@ -242,7 +242,9 @@ type selReq struct {
 	// one (delegate --panel picks one seat per distinct family).
 	excludeFamilies []string
 	onlyFamily      string
-	harness         string
+	// excludePools drops candidates of those quota pools (--exclude-pool).
+	excludePools []string
+	harness      string
 	// creditAt judges credit expiry as of this time instead of the plan's
 	// clock (`plan --credit-at`, read-only); zero means the plan's clock.
 	creditAt time.Time
@@ -665,6 +667,9 @@ func (a *App) selectProfile(ctx context.Context, s Spawn) (*selPlan, error) {
 		return nil, e
 	}
 	req.tags = tags
+	if req.excludePools, e = parsePools(s.ExcludePools); e != nil {
+		return nil, e
+	}
 	task, _, e := a.taskPrecheck(ctx, s)
 	if e != nil {
 		return nil, e
@@ -751,6 +756,8 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 			c.reason = "effort_mismatch"
 		case !validID(row.Pool):
 			c.reason = "pool_invalid"
+		case slices.Contains(req.excludePools, row.Pool):
+			c.reason = "pool_excluded"
 		case snapshot != nil && snapshot.poolCooling(row.Pool, p.at):
 			c.reason = "pool_cooling"
 		default:

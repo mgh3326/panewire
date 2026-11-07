@@ -5,10 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
 // quotaStopFixture is a live job of the given role whose pane reports status
@@ -36,8 +39,10 @@ func quotaStopFixture(t *testing.T, role, status, screen string) (*App, *fakeRun
 		return Result{}
 	}
 	report := filepath.Join(a.Jobs, "j", "report.md")
-	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": role})
-	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "report": report})
+	// As in production: the claim always says worker; the spawn receipt names
+	// the role.
+	putEvent(t, a, "j", "job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "t_level": "T1", "role": "worker"})
+	putEvent(t, a, "j", "job.spawned", map[string]any{"pane_id": "w:p1", "label": "agent-a", "report": report, "role": role})
 	seedLedger(t, a, "j")
 	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "60")
 	return a, f, h, report
@@ -66,11 +71,12 @@ func lostPayload(t *testing.T, a *App) map[string]any {
 	return nil
 }
 
-// An idle worker, tester or reviewer pane on devin's rate-limit screen with no
-// report ends the job as lost with a reason, instead of idling to the watch
-// deadline (hk 3302).
+// An idle reviewer pane on devin's rate-limit screen with no report ends the
+// job as lost with a reason, instead of idling to the watch deadline (hk
+// 3302). A worker or tester is left to the quota-stop manager (hk 3334): see
+// TestWatcherQuotaStopLeavesWorkerAndTesterToTheManager.
 func TestWatcherQuotaStopEndsIdleJobAsLost(t *testing.T) {
-	for _, role := range []string{"worker", "tester", "reviewer"} {
+	for _, role := range []string{"reviewer"} {
 		t.Run(role, func(t *testing.T) {
 			a, f, h, _ := quotaStopFixture(t, role, "idle", devinStopScreen(t))
 			reset := a.Now().Add(5 * time.Minute).UTC().Format(time.RFC3339)
@@ -157,7 +163,7 @@ func TestWatcherQuotaStopWithReportKeepsDonePath(t *testing.T) {
 
 // With no parsed reset, reset_at is left out of both the hk end_reason and job.lost.
 func TestWatcherQuotaStopUnknownResetOmitsResetAt(t *testing.T) {
-	a, _, h, _ := quotaStopFixture(t, "worker", "idle", "▲ Something went wrong — Reached free model rate limit\n❭ Ask Devin to build features, fix bugs, or work on your code\n")
+	a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", "▲ Something went wrong — Reached free model rate limit\n❭ Ask Devin to build features, fix bugs, or work on your code\n")
 	if e := a.watch(context.Background(), []string{"j"}); e != nil {
 		t.Fatal(e)
 	}
@@ -166,5 +172,315 @@ func TestWatcherQuotaStopUnknownResetOmitsResetAt(t *testing.T) {
 	}
 	if p := lostPayload(t, a); p == nil || str(p, "reason") != "quota_stop" || str(p, "pool") != "devin-free" || p["reset_at"] != nil {
 		t.Fatalf("job.lost payload=%v", p)
+	}
+}
+
+// hk 3334: the watcher no longer ends a worker or tester on a quota stop; the
+// quota-stop manager waits for the reset or hands it over. Dropping this split
+// (putting worker or tester back into quotaStopRoles) fails here.
+func TestWatcherQuotaStopLeavesWorkerAndTesterToTheManager(t *testing.T) {
+	for _, role := range []string{"worker", "tester"} {
+		t.Run(role, func(t *testing.T) {
+			a, _, h, _ := quotaStopFixture(t, role, "idle", devinStopScreen(t))
+			t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "1")
+			if e := a.watch(context.Background(), []string{"j"}); e != nil {
+				t.Fatal(e)
+			}
+			if got := str(h.record(t, "j"), "state"); got == "lost" {
+				t.Fatal("the watcher ended a worker or tester on a quota stop")
+			}
+			if slices.Contains(eventKindsOf(t, a, "j"), "job.lost") {
+				t.Fatal("job.lost recorded for a worker or tester")
+			}
+			if st, pools := ledgerState(t, a, "j"); st != "leased" || len(pools) != 1 {
+				t.Fatalf("a live worker lost its lease: %s %v", st, pools)
+			}
+		})
+	}
+}
+
+// The mergewake contract (hk 3335): replaced_by is the LAST key=value token of
+// end_reason and the successor id fits [A-Za-z0-9._-]{1,128}.
+func TestQuotaStopEndReasonFormatIsPinned(t *testing.T) {
+	reset := time.Date(2026, 11, 7, 3, 4, 5, 0, time.FixedZone("KST", 9*3600))
+	for _, tc := range []struct {
+		name, key, job string
+		reset          time.Time
+		want           string
+	}{
+		{"replaced with reset", "replaced_by", "mwr-1-p1-q1", reset, "quota_stop pool=claude reset_at=2026-11-06T18:04:05Z replaced_by=mwr-1-p1-q1"},
+		{"replaced, reset unknown", "replaced_by", "mwr-1-p1-q1-q2", time.Time{}, "quota_stop pool=claude replaced_by=mwr-1-p1-q1-q2"},
+		{"handed over", "handed_over_to", "pw-x-q1", time.Time{}, "quota_stop pool=claude handed_over_to=pw-x-q1"},
+		{"no successor", "", "", reset, "quota_stop pool=claude reset_at=2026-11-06T18:04:05Z"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := QuotaStopEndReason("claude", tc.reset, tc.key, tc.job)
+			if got != tc.want {
+				t.Fatalf("end_reason=%q, want %q", got, tc.want)
+			}
+			if tc.job == "" {
+				return
+			}
+			fields := strings.Fields(got)
+			last := fields[len(fields)-1]
+			if last != tc.key+"="+tc.job || !regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`).MatchString(strings.TrimPrefix(last, tc.key+"=")) {
+				t.Fatalf("%q is not the last key=value token of %q", tc.key, got)
+			}
+		})
+	}
+}
+
+// With a hand-off grace the reviewer watcher announces job.lost, leaves the hk
+// record alone while the hub works, and ends the job without a replacement
+// when the grace runs out: today's behaviour.
+func TestWatcherQuotaStopReviewerWaitsForTheHubThenEndsWithoutReplacement(t *testing.T) {
+	a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	a.QuotaHandOffGrace = 2 * time.Minute
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	started := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if waited := a.Now().Sub(started); waited < 2*time.Minute {
+		t.Fatalf("the watcher ended the job after %v, before the hand-off grace", waited)
+	}
+	rec := h.record(t, "j")
+	if str(rec, "state") != "lost" || !strings.HasPrefix(str(rec, "end_reason"), "quota_stop pool=devin-free") || strings.Contains(str(rec, "end_reason"), "replaced_by") {
+		t.Fatalf("hk record %v", rec)
+	}
+	lost := 0
+	for _, kind := range eventKindsOf(t, a, "j") {
+		if kind == "job.lost" {
+			lost++
+		}
+	}
+	if lost != 1 {
+		t.Fatalf("job.lost recorded %d times, want exactly the one announcement", lost)
+	}
+	if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
+		t.Fatalf("quota not released: %s %v", st, pools)
+	}
+}
+
+// A worker the manager handed over announces job.lost reason quota_stop
+// (AnnounceQuotaStop) and leaves its hk record to the hub. The watcher does not
+// end it at once and does not return early (which would leave its quota
+// leased): when the hub does not replace it, the watcher ends it after the
+// grace, with the announced pool and reset, and releases the quota.
+func TestWatcherEndsAnnouncedHandOverAfterGraceWhenNobodyReplacesIt(t *testing.T) {
+	a, _, h, _ := quotaStopFixture(t, "worker", "idle", "I stopped here.\n")
+	a.QuotaHandOffGrace = 2 * time.Minute
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	reset := a.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+	if e := a.event(context.Background(), "j", "job.lost", map[string]any{"pane_id": "w:p1", "reason": "quota_stop", "pool": "claude", "reset_at": reset}); e != nil {
+		t.Fatal(e)
+	}
+	started := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if a.Now().Sub(started) < 2*time.Minute {
+		t.Fatalf("the watcher ended the handed-over job after %v, before the grace", a.Now().Sub(started))
+	}
+	rec := h.record(t, "j")
+	if str(rec, "state") != "lost" || str(rec, "end_reason") != "quota_stop pool=claude reset_at="+reset {
+		t.Fatalf("hk record %v", rec)
+	}
+	if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
+		t.Fatalf("quota not released: %s %v", st, pools)
+	}
+}
+
+// When the hub replaced the job it closed the pane and wrote the hk record;
+// the watcher then sees the pane gone, leaves that record alone and releases
+// the quota.
+func TestWatcherReleasesQuotaWhenTheHubClosedTheHandedOverPane(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "worker", "idle", "I stopped here.\n")
+	a.QuotaHandOffGrace = 10 * time.Minute
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	if e := a.event(context.Background(), "j", "job.lost", map[string]any{"pane_id": "w:p1", "reason": "quota_stop", "pool": "claude"}); e != nil {
+		t.Fatal(e)
+	}
+	h.records["j"]["state"] = "lost"
+	h.records["j"]["end_reason"] = "quota_stop pool=claude replaced_by=j-q1"
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			return Result{Out: `{"result":{"agents":[]}}`}
+		}
+		return do(c)
+	}
+	started := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if a.Now().Sub(started) < 10*time.Minute {
+		t.Fatalf("the watcher ended the job %v after the pane vanished, before the grace: the generic lost path wrote the record without the successor pointer", a.Now().Sub(started))
+	}
+	if got := str(h.record(t, "j"), "end_reason"); got != "quota_stop pool=claude replaced_by=j-q1" {
+		t.Fatalf("end_reason rewritten: %q", got)
+	}
+	if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
+		t.Fatalf("quota not released: %s %v", st, pools)
+	}
+}
+
+// A pane that goes back to work during the hand-off grace is not stopped any
+// more: the job is live again (job.reprompted), the announced job.lost is not
+// adopted a second time, the grace does not restart, and the quota stays leased.
+func TestWatcherPaneResumedDuringGraceKeepsTheJobLive(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	a.QuotaHandOffGrace = 2 * time.Minute
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	lists := 0
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			lists++
+			status, seq := "idle", 7
+			if lists > 2 {
+				status, seq = "working", 8
+			}
+			return Result{Out: fmt.Sprintf(`{"result":{"agents":[{"pane_id":"w:p1","agent_status":%q,"state_change_seq":%d}]}}`, status, seq)}
+		}
+		return do(c)
+	}
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	kinds := eventKindsOf(t, a, "j")
+	count := func(kind string) (n int) {
+		for _, k := range kinds {
+			if k == kind {
+				n++
+			}
+		}
+		return
+	}
+	if count("job.lost") != 1 || count("job.reprompted") != 1 {
+		t.Fatalf("events %v, want one job.lost and one job.reprompted (no restarted grace)", kinds)
+	}
+	if got := str(h.record(t, "j"), "state"); got == "lost" {
+		t.Fatal("a job whose pane went back to work was ended as lost")
+	}
+	if st, pools := ledgerState(t, a, "j"); st != "leased" || len(pools) != 1 {
+		t.Fatalf("a live job lost its lease: %s %v", st, pools)
+	}
+}
+
+// A pane that vanishes during the grace but whose record the hub never wrote
+// (the replacement did not happen) is ended after the grace with the plain
+// quota_stop end_reason, not by the generic missing-pane path.
+func TestWatcherVanishedPaneWithoutHubRecordEndsAfterGraceWithQuotaReason(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	a.QuotaHandOffGrace = 4 * time.Minute
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "6000")
+	lists := 0
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			if lists++; lists > 2 {
+				return Result{Out: `{"result":{"agents":[]}}`}
+			}
+		}
+		return do(c)
+	}
+	started := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if a.Now().Sub(started) < 4*time.Minute {
+		t.Fatalf("ended after %v, before the grace", a.Now().Sub(started))
+	}
+	if rec := h.record(t, "j"); str(rec, "state") != "lost" || !strings.HasPrefix(str(rec, "end_reason"), "quota_stop pool=devin-free") {
+		t.Fatalf("hk record %v", rec)
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota not released: %s", st)
+	}
+}
+
+// A stop announced close to the ordinary completion deadline is still watched
+// through its grace: the fallback must end the job and release its lease.
+func TestWatcherQuotaHandOffOutlivesTheCompletionDeadline(t *testing.T) {
+	a, _, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	a.QuotaHandOffGrace = 2 * time.Minute
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "30")
+	started := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if a.Now().Sub(started) < 2*time.Minute {
+		t.Fatalf("the completion deadline ended the watch after %v, inside the grace", a.Now().Sub(started))
+	}
+	if str(h.record(t, "j"), "state") != "lost" {
+		t.Fatalf("hk record %v", h.record(t, "j"))
+	}
+	if st, pools := ledgerState(t, a, "j"); st != "released" || len(pools) != 0 {
+		t.Fatalf("quota not released: %s %v", st, pools)
+	}
+}
+
+// herdr may omit state_change_seq. A stable quota pane is then read on every
+// poll; once a hand-off is active it is not announced again, so the grace
+// deadline holds, the fallback ends the job and the lease is released.
+func TestWatcherQuotaStopWithoutStateChangeSeqKeepsTheGraceDeadline(t *testing.T) {
+	a, f, h, _ := quotaStopFixture(t, "reviewer", "idle", devinStopScreen(t))
+	a.QuotaHandOffGrace = 2 * time.Minute
+	t.Setenv("PANEWIRE_COMPLETION_TIMEOUT_S", "600")
+	do := f.Do
+	f.Do = func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			return Result{Out: `{"result":{"agents":[{"pane_id":"w:p1","agent_status":"idle"}]}}`}
+		}
+		return do(c)
+	}
+	started := a.Now()
+	if e := a.watch(context.Background(), []string{"j"}); e != nil {
+		t.Fatal(e)
+	}
+	if waited := a.Now().Sub(started); waited < 2*time.Minute || waited > 3*time.Minute {
+		t.Fatalf("ended after %v, want the 2 minute grace (not restarted by each poll)", waited)
+	}
+	lost := 0
+	for _, kind := range eventKindsOf(t, a, "j") {
+		if kind == "job.lost" {
+			lost++
+		}
+	}
+	if lost != 1 || str(h.record(t, "j"), "state") != "lost" {
+		t.Fatalf("job.lost events=%d record=%v", lost, h.record(t, "j"))
+	}
+	if st, _ := ledgerState(t, a, "j"); st != "released" {
+		t.Fatalf("quota not released: %s", st)
+	}
+}
+
+// A watcher that ended before the hand-off (a worker that waited past its
+// completion deadline) is started by the announcement, and a node restart
+// re-arms a watcher that died during the grace: both keep the fallback that
+// ends the job and frees its lease (review finding).
+func TestAnnounceQuotaStopStartsAWatcherAndRearmFindsAnnouncedJobs(t *testing.T) {
+	a, _, _, _ := quotaStopFixture(t, "worker", "idle", "I stopped here.\n")
+	started := []string{}
+	old := announceStartWatch
+	announceStartWatch = func(_ *App, job string) error { started = append(started, job); return nil }
+	t.Cleanup(func() { announceStartWatch = old })
+	if e := AnnounceQuotaStop(context.Background(), a.Jobs, "j", "w:p1", quotastop.Stop{Pool: "claude"}); e != nil {
+		t.Fatal(e)
+	}
+	if len(started) != 1 || started[0] != "j" {
+		t.Fatalf("watchers started: %v", started)
+	}
+	j, e := a.job("j")
+	if e != nil || !j.Terminal {
+		t.Fatalf("setup: the announced job should read as ended: %+v %v", j, e)
+	}
+	var rearmed []string
+	if e := a.RearmWatchers(func(id string) error { rearmed = append(rearmed, id); return nil }, func(string) {}); e != nil {
+		t.Fatal(e)
+	}
+	if len(rearmed) != 1 || rearmed[0] != "j" {
+		t.Fatalf("re-armed %v, want the announced job", rearmed)
 	}
 }

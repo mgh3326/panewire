@@ -82,7 +82,12 @@ func (a *App) RearmWatchers(start func(string) error, log func(string)) error {
 		if err != nil {
 			continue
 		}
-		if j.Terminal || j.Reaped || j.Pane == "" || a.watchActive(id) {
+		if j.Reaped || j.Pane == "" || a.watchActive(id) {
+			continue
+		}
+		// A job ended by an announced quota stop is not finished until its
+		// hand-off grace has run: a watcher that died during it is re-armed.
+		if _, announced := announcedQuotaStop(j); j.Terminal && !announced {
 			continue
 		}
 		if err := start(id); err != nil {
@@ -144,12 +149,21 @@ func (a *App) watch(ctx context.Context, args []string) error {
 	seen := len(args) == 1
 	latePoll := false
 	var screenRead quotaStopWatch
+	var handOff quotaHandOff
 	for {
 		j, e := a.job(id)
 		if e != nil {
 			return e
 		}
-		if j.Terminal || j.Reaped {
+		// The job.lost announced for a quota stop (by this watcher for a
+		// reviewer, by the manager for a handed-over worker or tester) is not
+		// an end until the grace for the hub's replacement runs out.
+		if !handOff.active {
+			if stop, ok := announcedQuotaStop(j); ok && !j.Reaped {
+				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), active: true}
+			}
+		}
+		if j.Reaped || j.Terminal && !handOff.active {
 			return nil
 		}
 		if workerEscalated(j) {
@@ -193,7 +207,10 @@ func (a *App) watch(ctx context.Context, args []string) error {
 			}
 			return a.releaseQuota(ctx, j)
 		}
-		if waiting == nil && a.Now().After(deadline) && (!pending || latePoll) {
+		// An announced quota stop is watched through its hand-off grace, past
+		// the ordinary completion deadline: its fallback ends the job and
+		// releases the lease, which nothing else would.
+		if waiting == nil && !handOff.active && a.Now().After(deadline) && (!pending || latePoll) {
 			fmt.Fprintln(a.Err, "watch-expired: job stays live; quota retained")
 			return nil
 		}
@@ -217,12 +234,43 @@ func (a *App) watch(ctx context.Context, args []string) error {
 		// An idle pane stopped by a quota screen with no report will not
 		// finish: end the job with the reason, so it is retried, not lost
 		// silently at the watch deadline.
-		if present && !pending {
+		// Not while a hand-off is active: its stop is already announced, and a
+		// pane that reports no state_change_seq would be read and announced on
+		// every poll, moving the grace deadline each time.
+		if present && !pending && !handOff.active {
 			if stop, ok := a.quotaStopped(ctx, j, paneAgent, &screenRead); ok {
-				return a.quotaStopLost(ctx, j, stop)
+				if a.QuotaHandOffGrace <= 0 {
+					return a.quotaStopLost(ctx, j, stop, true)
+				}
+				// A reviewer is replaced on another pool at once, by the
+				// hub (hk 3334): announce the stop, then leave the hk
+				// record to the hub for a grace period.
+				if e := a.quotaStopAnnounce(ctx, j, stop); e != nil {
+					return e
+				}
+				handOff = quotaHandOff{stop: stop, until: a.Now().Add(a.QuotaHandOffGrace), seq: paneAgent.StateChangeSeq, active: true}
 			}
 		}
-		if missing >= 2 {
+		if handOff.active {
+			if handOff.expired(a.Now(), paneAgent, present) {
+				return a.quotaStopLost(ctx, j, handOff.stop, false)
+			}
+			if present && !handOff.unchanged(paneAgent) {
+				// The pane moved on during the grace (someone resumed it): the
+				// stop is stale and the job lives. job.reprompted makes the
+				// job live again, so the announced job.lost is not adopted a
+				// second time and the grace does not restart.
+				if e := a.event(ctx, id, "job.reprompted", map[string]any{"reason": "quota_stop_resumed", "pane_id": j.Pane}); e != nil {
+					return e
+				}
+				handOff = quotaHandOff{}
+			}
+		}
+		// A pane that vanished during a quota hand-off is the hub closing it
+		// after placing the successor: the hk record is the hub's to write
+		// (with the successor pointer), and the watcher ends the job after the
+		// grace instead.
+		if missing >= 2 && !handOff.active {
 			if e := a.putJobRecord(ctx, id, map[string]any{"state": "lost"}); e != nil {
 				a.jobRecordFailed(ctx, id, "lost", e)
 			}

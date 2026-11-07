@@ -234,6 +234,7 @@ Explicit `-m PROFILE` (except `auto`) or `--host NAME` (except `auto` or
 `local`) requires `--containment hk:ID` or `--operator-request REF`.
 `--exclude-host` is not gated: a standing exclusion (mergewake keeps
 reviewers off its own host on every spawn) is policy, not a containment.
+`--exclude-pool` is the same kind of standing exclusion for quota pools (below).
 `--containment` may still be passed with it and is recorded. The containment ID must match `hk:` followed by a nonzero decimal
 task ID of at most nine digits. It is recorded in `job.placement` and does
 not replace the existing `--override-reason` requirement.
@@ -335,6 +336,31 @@ candidate remains the spawn fails with the usual placement refusal. An explicit
 `--host NAME` (or `--host local`) that names an excluded host is refused with
 exit 2. The list is initiator-local and is not sent to a delegated host.
 
+`--exclude-pool P[,P]` removes the named quota pools from automatic selection
+for this one request (`claude`, `codex`, `devin-free`, ... as the catalog names
+them). It is a standing exclusion like `--exclude-host`, not a pin: it needs no
+containment and no override reason. Every candidate of an excluded pool drops
+with reason `pool_excluded`, visible in `--dry-run` and in the `job.placement`
+selection record; when no candidate remains the spawn fails with the usual
+placement refusal. It travels with the submission to the hub and on to the node
+(`--exclude-pool` is on the hub's operator allowlist beside `--exclude-host`);
+`panewire plan` takes it too. The hub adds it itself when it replaces a
+quota-stopped job (below).
+
+### A quota-stopped job, by role
+
+When a running pane stops on a quota or rate-limit screen the job is handled by
+its role. The wait/hand-over policy is hk `policy/quota-stop`; it is not
+restated here. `docs/quota-stop.md` has the mechanics.
+
+| Role | What happens |
+| --- | --- |
+| reviewer | The hub submits a replacement at once: same task, role, review pass, owner and brief, job id `<old>-q<n>` and `--exclude-pool <pool>`. The old hk record ends `quota_stop pool=<pool> replaced_by=<new job>`; `replaced_by` is the last `key=value` token (mergewake follows it). At most 2 replacements per review pass (`<old>-q1`, then `<old>-q1-q2`). When no other pool can take it, there is no replacement and the watcher ends the job as before. |
+| worker, tester | The quota-stop manager acts even with `--quota-stop-act` off. It waits and resumes the same pane once at the reset when the reset is at or before the job's start plus the task's expected time; otherwise (reset later, no expected time, an urgent task, or a second stop after one resume) the job is handed over like a reviewer, with `end_reason` `quota_stop pool=<pool> handed_over_to=<new job>`, the same worktree and branch, and one brief line naming the earlier job's report and branch. |
+
+The owner gets one info lane event for either action. `--quota-stop-act` still
+gates every other role.
+
 Automatic selection measures an account the same way with or without
 `--host NAME` or `--exclude-host`: a stale shared reading is refreshed on any
 holder of that account, the local machine first, and a host those flags keep
@@ -430,8 +456,9 @@ text, command lines, pane output and absolute local paths are never written.
 `--result FILE` (a JSON object of at most 64 KiB) is given, in the same PUT,
 and emits the relay only after the PUT returns; `escalate` writes
 `{state:"escalated"}` and the watcher writes `{state:"lost"}` after two
-missing-pane observations, or when a worker, tester or reviewer pane is idle on
-a quota or rate-limit screen with no report (see `docs/quota-stop.md`). A failed write after the pane exists degrades to a
+missing-pane observations, or when a reviewer pane is idle on a quota or
+rate-limit screen with no report (see `docs/quota-stop.md`; a worker or tester is
+the quota-stop manager's). A failed write after the pane exists degrades to a
 `job.record_failed` event and a warning; the relay still goes out so readers
 fall back.
 
@@ -659,7 +686,7 @@ carries `policy_file` and `policy_overrides`.
 ### `panewire plan`
 
 `panewire plan [--grade G] --t T0..T3 [--role R] [--tags a,b] [--effort E]
-[--urgency normal|urgent] [--exclude-host a,b] [--builder-family F]
+[--urgency normal|urgent] [--exclude-host a,b] [--exclude-pool P,P] [--builder-family F]
 [--routing-role R] [--allow-escalation] [--json]` answers "right now, which host and which
 model would a spawn get" without a task or brief. It is live and read-only:
 it runs the spawn's selection core with catalog, account observations,

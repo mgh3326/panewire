@@ -395,8 +395,20 @@ type HubServer struct {
 	spawnSentry          *sentry.Client
 	spawnCoordinatorOnce sync.Once
 	spawnNewApp          func(io.Writer, io.Writer) (*fleet.App, error)
-	spawnKick            chan struct{}
-	spawnWorkers         sync.WaitGroup
+	// quotaReplacePoll overrides how often a quota-stop replacement looks for
+	// its successor's outcome; zero uses quotaReplacePoll.
+	quotaReplacePoll time.Duration
+	// quotaMarkBackoff overrides the wait between tries to write the stopped
+	// job's record; zero uses quotaMarkBackoff.
+	quotaMarkBackoff time.Duration
+	// quotaWait overrides how long a replacement waits for its successor; zero
+	// uses quotaReplaceWait.
+	quotaWait time.Duration
+	// quotaReplaceBudget overrides the hard bound on one replacement; zero uses
+	// quotaReplaceBudget.
+	quotaReplaceBudget time.Duration
+	spawnKick          chan struct{}
+	spawnWorkers       sync.WaitGroup
 	// auth is swapped whole on an auth-file reload; read it through
 	// currentAuth on authentication paths and auth.Load() elsewhere.
 	auth              atomic.Pointer[hubAuthSet]
@@ -1387,6 +1399,9 @@ func (h *HubServer) handleAgentMessage(machineID, remoteAddr string, agent *hubA
 				agent.queuePersisted(hubRelayPersistedEvent{Type: "pool.cooling.ack", JobID: event.JobID, Kind: message.Kind, Epoch: event.Epoch, ReportPath: event.ReportPath, Reason: event.Reason, EventID: 1, ProducerEventID: event.EventID})
 			}
 			h.relayJobEventFrom(machineID, message.Kind, event)
+			if message.Kind == "job.lost" && !event.Replay {
+				h.startQuotaReplacement(machineID, event)
+			}
 		}
 		if message.Kind == "lane.event" {
 			event, valid := decodeHubLaneEventPayload(message.Payload)

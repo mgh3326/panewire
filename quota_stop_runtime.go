@@ -14,17 +14,23 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/quotastop"
 )
 
 type quotaStopManager struct {
-	store      *Store
-	root       string
-	act        bool
-	logger     *slog.Logger
-	read       func(context.Context, string) (string, error)
-	command    func(context.Context, ...string) ([]byte, error)
-	send       func(context.Context, string, string, string) relayInjectResult
-	enqueue    func(hubScannedRelayEvent) bool
+	store   *Store
+	root    string
+	act     bool
+	logger  *slog.Logger
+	read    func(context.Context, string) (string, error)
+	command func(context.Context, ...string) ([]byte, error)
+	send    func(context.Context, string, string, string) relayInjectResult
+	enqueue func(hubScannedRelayEvent) bool
+	// announce records job.lost reason quota_stop for a handed-over job, which
+	// the hub then replaces (hub_quota_replace.go).
+	announce   func(ctx context.Context, job, pane string, stop quotastop.Stop) error
 	mu         sync.Mutex
 	lastPolicy time.Time
 	policy     quotaPolicy
@@ -46,7 +52,20 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 			return nil, err
 		}
 	}
+	// role and owner are the job's role and owner lane when the wake was
+	// reserved: the role decides whether the manager acts in shadow mode (hk
+	// 3334) and the owner receives the one info lane event.
+	for _, column := range []string{"role", "owner"} {
+		if !storeHasColumn(s.db, "quota_stop_decisions", column) {
+			if _, err := s.db.Exec(`ALTER TABLE quota_stop_decisions ADD COLUMN ` + column + ` TEXT NOT NULL DEFAULT ''`); err != nil {
+				return nil, err
+			}
+		}
+	}
 	q := &quotaStopManager{store: s, root: root, act: act, logger: logger}
+	q.announce = func(ctx context.Context, job, pane string, stop quotastop.Stop) error {
+		return fleet.AnnounceQuotaStop(ctx, filepath.Join(root, "jobs"), job, pane, stop)
+	}
 	q.read = func(ctx context.Context, pane string) (string, error) {
 		b, e := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", "60").Output()
 		return string(b), e
@@ -95,6 +114,63 @@ func (q *quotaStopManager) jobForPane(ctx context.Context, pane string) (HubActi
 	}
 	return found, count == 1 && found.JobID != "" && !quotaExcluded(found.AgentLabel)
 }
+
+// jobFacts reads what the job's own events say that the scanned active job
+// does not keep: the role and the task it inherited. The role is the spawn
+// receipt's (reviewer, tester, worker): the claim always says worker, and the
+// scanned job keeps only worker and captain. inherited is the builder job a
+// tester's task is still bound to (the claim's task_inherited_from).
+func (q *quotaStopManager) jobFacts(jobID, scanned string) (role, inherited string) {
+	dir := filepath.Join(q.root, "jobs", jobID, "events")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return scanned, ""
+	}
+	role = scanned
+	claimRole, spawnRole := "", ""
+	slices.SortFunc(entries, func(a, b os.DirEntry) int { return strings.Compare(a.Name(), b.Name()) })
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		contents, err := os.ReadFile(filepath.Join(dir, entry.Name()))
+		if err != nil || len(contents) > 16<<10 {
+			continue
+		}
+		var event hubInboxEvent
+		if json.Unmarshal(contents, &event) != nil {
+			continue
+		}
+		var extra struct {
+			Inherited string `json:"task_inherited_from"`
+			Payload   struct {
+				Inherited string `json:"task_inherited_from"`
+			} `json:"payload"`
+		}
+		_ = json.Unmarshal(contents, &extra)
+		switch kind := event.eventKind(); kind {
+		case "job.claimed", "job.claim":
+			if event.role() != "" {
+				claimRole = event.role()
+			}
+			if v := firstHubValue(extra.Inherited, extra.Payload.Inherited); v != "" {
+				inherited = v
+			}
+		case "job.spawned":
+			if event.role() != "" {
+				spawnRole = event.role()
+			}
+		}
+	}
+	switch {
+	case spawnRole != "":
+		role = spawnRole
+	case claimRole != "":
+		role = claimRole
+	}
+	return role, inherited
+}
+
 func (q *quotaStopManager) loadPolicy(ctx context.Context, now time.Time) (quotaPolicy, bool) {
 	if !q.lastPolicy.IsZero() && now.Sub(q.lastPolicy) < 5*time.Minute {
 		return q.policy, q.policyOK
@@ -127,7 +203,10 @@ func (q *quotaStopManager) loadPolicy(ctx context.Context, now time.Time) (quota
 	q.policyOK = false
 	return q.policy, false
 }
-func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob) (int, time.Duration, bool) {
+
+// task finds the hk task bound to the job, or to the builder job a tester
+// inherited its task from.
+func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited string) (int, time.Duration, bool) {
 	b, err := q.command(ctx, "tasks", "list", "--limit", "1000")
 	if err != nil {
 		return 0, 0, false
@@ -148,7 +227,7 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob) (int, tim
 	priority := 0
 	var duration time.Duration
 	for _, t := range v.Tasks {
-		if t.Refs.Job == job.JobID {
+		if t.Refs.Job == job.JobID || inherited != "" && t.Refs.Job == inherited {
 			n++
 			priority = t.Priority
 			if t.Expected != nil {
@@ -187,9 +266,11 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	if !ok || quotaExcluded(c.Label) {
 		return
 	}
+	var inherited string
+	job.Role, inherited = q.jobFacts(job.JobID, job.Role)
 	// Reserve the wake before touching the screen. A restart can never reread it.
 	q.store.mu.Lock()
-	result, err := q.store.db.ExecContext(scanCtx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created) VALUES(?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli())
+	result, err := q.store.db.ExecContext(scanCtx, `INSERT OR IGNORE INTO quota_stop_decisions(event_id,job,pane,label,created,role,owner) VALUES(?,?,?,?,?,?,?)`, c.EventID, job.JobID, c.PaneID, job.AgentLabel, now.UnixMilli(), job.Role, job.OwnerLane)
 	q.store.mu.Unlock()
 	if err != nil {
 		return
@@ -220,7 +301,7 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 		q.logger.Info("quota-stop observation", append([]any{"pane", c.PaneID, "outcome", reason}, timing...)...)
 		dbCtx, done := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
 		defer done()
-		q.recordDecision(dbCtx, c, now, "unknown", "unknown", "handover", reason, "", 0)
+		q.recordDecisionFor(dbCtx, c, job.Role, now, "unknown", "unknown", "handover", reason, "", 0)
 		return
 	}
 	stop, ok := classifyQuotaStop(screen, now, time.Local)
@@ -237,7 +318,7 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	lookupCtx, lookupCancel := context.WithTimeout(ctx, quotaStopLookupBudget)
 	defer lookupCancel()
 	policy, policyOK := q.loadPolicy(lookupCtx, now)
-	priority, expected, taskOK := q.task(lookupCtx, job)
+	priority, expected, taskOK := q.task(lookupCtx, job, inherited)
 	// Preserve the decision even if the bounded external lookup timed out.
 	dbCtx, dbCancel := context.WithTimeout(context.WithoutCancel(lookupCtx), time.Second)
 	defer dbCancel()
@@ -246,6 +327,10 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 	waitErr := q.store.db.QueryRowContext(dbCtx, `SELECT count(*) FROM quota_stop_decisions WHERE job=? AND attempted=1`, job.JobID).Scan(&waits)
 	q.store.mu.Unlock()
 	decision, reason := quotaDecision(policy, policyOK, priority, expected, waits, stop, now)
+	if quotaActsFor(job.Role) {
+		started, _ := time.Parse(time.RFC3339, job.StartedAt)
+		decision, reason = quotaDecisionJob(policy, policyOK, priority, expected, started, waits, stop, now)
+	}
 	if !taskOK || waitErr != nil {
 		decision, reason = "handover", "task_unavailable"
 	}
@@ -262,21 +347,28 @@ func (q *quotaStopManager) observe(ctx context.Context, c idleWakeCandidate, now
 		sum := sha256.Sum256([]byte(c.EventID))
 		due = stop.Reset.Add(time.Duration(1+int(sum[0])%5) * time.Second).UnixMilli()
 	}
-	q.recordDecision(dbCtx, c, now, stop.Pool, reset, decision, reason, policy.ResumeText, due)
+	q.recordDecisionFor(dbCtx, c, job.Role, now, stop.Pool, reset, decision, reason, policy.ResumeText, due)
 }
 
 // recordDecision deduplicates known resets exactly; unknown resets are scoped
 // to an hour so a later independent stop on a reused pane is still reported.
 func (q *quotaStopManager) recordDecision(ctx context.Context, c idleWakeCandidate, now time.Time, pool, reset, decision, reason, resume string, due int64) {
+	q.recordDecisionFor(ctx, c, "", now, pool, reset, decision, reason, resume, due)
+}
+
+// recordDecisionFor is recordDecision for a job of role: a worker or tester's
+// decision is left for the manager to act on even in shadow mode.
+func (q *quotaStopManager) recordDecisionFor(ctx context.Context, c idleWakeCandidate, role string, now time.Time, pool, reset, decision, reason, resume string, due int64) {
+	shadow := !q.act && !quotaActsOn(role, pool)
 	q.store.mu.Lock()
-	result, err := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET pool=?,reset=?,decision=?,reason=?,resume_text=?,due=?,action_recorded=? WHERE event_id=? AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.pane=? AND d.reset=? AND d.decision<>'' AND d.event_id<>? AND (? <> 'unknown' OR d.created / 3600000 = ?))`, pool, reset, decision, reason, resume, due, boolInt(!q.act), c.EventID, c.PaneID, reset, c.EventID, reset, now.UnixMilli()/3600000)
+	result, err := q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET pool=?,reset=?,decision=?,reason=?,resume_text=?,due=?,action_recorded=? WHERE event_id=? AND NOT EXISTS (SELECT 1 FROM quota_stop_decisions d WHERE d.pane=? AND d.reset=? AND d.decision<>'' AND d.event_id<>? AND (? <> 'unknown' OR d.created / 3600000 = ?))`, pool, reset, decision, reason, resume, due, boolInt(shadow), c.EventID, c.PaneID, reset, c.EventID, reset, now.UnixMilli()/3600000)
 	q.store.mu.Unlock()
 	if err != nil {
 		q.logger.Warn("quota-stop decision was not recorded", "error", err)
 		return
 	}
 	if n, _ := result.RowsAffected(); n != 0 {
-		q.logger.Info("quota-stop decision", "pane", c.PaneID, "pool", pool, "reset", reset, "decision", decision, "reason", reason, "shadow", !q.act)
+		q.logger.Info("quota-stop decision", "pane", c.PaneID, "pool", pool, "reset", reset, "decision", decision, "reason", reason, "shadow", shadow)
 	}
 }
 func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettle bool) {
@@ -287,20 +379,20 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 	}
 	// The outbox is drained separately from the one-per-wake screen read.
 	q.store.mu.Lock()
-	rows, err := q.store.db.QueryContext(ctx, `SELECT event_id,job,pane,label,pool,reset,decision,reason,resume_text,due,attempted,hk_recorded,action_recorded,created,action_retry FROM quota_stop_decisions WHERE decision<>'' AND ((hk_recorded=0 AND hk_retry<=?) OR (action_recorded=0 AND action_retry<=? AND (decision='handover' OR due<=?))) ORDER BY action_recorded, event_id LIMIT 1`, now.UnixMilli(), now.UnixMilli(), now.UnixMilli())
+	rows, err := q.store.db.QueryContext(ctx, `SELECT event_id,job,pane,label,pool,reset,decision,reason,resume_text,due,attempted,hk_recorded,action_recorded,created,action_retry,role,owner FROM quota_stop_decisions WHERE decision<>'' AND ((hk_recorded=0 AND hk_retry<=?) OR (action_recorded=0 AND action_retry<=? AND (decision='handover' OR due<=?))) ORDER BY action_recorded, event_id LIMIT 1`, now.UnixMilli(), now.UnixMilli(), now.UnixMilli())
 	if err != nil {
 		q.store.mu.Unlock()
 		return
 	}
 	type row struct {
-		id, job, pane, label, pool, reset, decision, reason, text string
-		due, created, actionRetry                                 int64
-		attempted, hk, action                                     int
+		id, job, pane, label, pool, reset, decision, reason, text, role, owner string
+		due, created, actionRetry                                              int64
+		attempted, hk, action                                                  int
 	}
 	var pending []row
 	for rows.Next() {
 		var r row
-		if rows.Scan(&r.id, &r.job, &r.pane, &r.label, &r.pool, &r.reset, &r.decision, &r.reason, &r.text, &r.due, &r.attempted, &r.hk, &r.action, &r.created, &r.actionRetry) == nil {
+		if rows.Scan(&r.id, &r.job, &r.pane, &r.label, &r.pool, &r.reset, &r.decision, &r.reason, &r.text, &r.due, &r.attempted, &r.hk, &r.action, &r.created, &r.actionRetry, &r.role, &r.owner) == nil {
 			pending = append(pending, r)
 		}
 	}
@@ -340,8 +432,14 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		if r.action != 0 || r.actionRetry > now.UnixMilli() {
 			continue
 		}
-		if !q.act {
+		// A worker or tester is acted on whatever --quota-stop-act says (hk
+		// 3334); every other role is only recorded unless the flag is set.
+		if !q.act && !quotaActsOn(r.role, r.pool) {
 			q.update(ctx, r.id, "action_recorded", 1)
+			continue
+		}
+		if r.decision == "handover" && quotaActsOn(r.role, r.pool) {
+			q.handOver(ctx, r.id, r.job, r.pane, r.pool, r.reset, now)
 			continue
 		}
 		if r.decision == "handover" {
@@ -411,11 +509,47 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		cancel()
 		if sent.Outcome == relayInjectDelivered && sent.Evidence != "" && slices.Contains(sent.Proven, marker) {
 			q.update(ctx, r.id, "action_recorded", 1)
+			if quotaActsOn(r.role, r.pool) {
+				q.infoToOwner(r.owner, "quota-stop-resumed:"+r.id, fmt.Sprintf("resumed %s (%s quota reset) in pane %s", r.job, r.pool, r.pane), now)
+			}
 		} else {
 			q.failResume(ctx, r.id, "submission_unproven")
 		}
 	}
 }
+
+// handOver announces job.lost reason quota_stop for a worker or tester the
+// policy hands over. The hub places the replacement on another pool, closes the
+// pane with a screen capture and writes the hk record lost with
+// handed_over_to=<new job>; it sends the owner the info lane event. When it
+// cannot, the job's watcher ends the job after its grace, without a
+// replacement. A write that fails is retried after a backoff.
+func (q *quotaStopManager) handOver(ctx context.Context, id, job, pane, pool, reset string, now time.Time) {
+	stop := quotastop.Stop{Pool: pool}
+	if at, err := time.Parse(time.RFC3339, reset); err == nil {
+		stop.Reset = at
+	}
+	if q.announce == nil || q.announce(ctx, job, pane, stop) != nil {
+		q.backoffAction(ctx, id, now)
+		return
+	}
+	q.update(ctx, id, "action_recorded", 1)
+}
+
+// infoToOwner sends the owner one info lane event; a lane event that cannot be
+// written is dropped, since the action it reports is already done.
+func (q *quotaStopManager) infoToOwner(owner, eventID, text string, now time.Time) {
+	if owner == "" || q.enqueue == nil {
+		return
+	}
+	record := emitRecord{Type: "lane.event", Epoch: 1, CreatedAt: now.UTC().Format(time.RFC3339Nano), OwnerLane: owner, EventID: eventID, Text: text, NotifyType: "info"}
+	if _, err := ensureLaneEmitRecord(q.root, record); err != nil {
+		q.logger.Warn("quota-stop owner notice was not written", "error", err)
+		return
+	}
+	q.enqueue(hubScannedRelayEvent{Kind: "lane.event", NotifyType: "info", HubActiveJob: HubActiveJob{JobID: laneEventTransportID(owner, eventID), Epoch: 1, OwnerLane: owner}, EventID: eventID, Text: text})
+}
+
 func (q *quotaStopManager) update(ctx context.Context, id, col string, value int) {
 	if col != "hk_recorded" && col != "action_recorded" {
 		return

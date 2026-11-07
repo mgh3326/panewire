@@ -149,17 +149,23 @@ func (h *HubServer) markLostAndRelease(ctx context.Context, app *fleet.App, hold
 // what the caller logs. The hub writes the record itself only for a holder on
 // its own host, whose grant it holds.
 func (h *HubServer) markHolderJobLost(ctx context.Context, app *fleet.App, holder hubSpawnTask, label string) (bool, string) {
+	return h.markHolderJobLostBecause(ctx, app, holder, label, "")
+}
+
+// markHolderJobLostBecause is markHolderJobLost with the hk end_reason the
+// lost record takes ("" writes none).
+func (h *HubServer) markHolderJobLostBecause(ctx context.Context, app *fleet.App, holder hubSpawnTask, label, endReason string) (bool, string) {
 	host, pane := spawnHolderHost(holder), holder.Outcome.Pane
 	if host == "" {
 		return false, "no_host"
 	}
 	if hubHost, known := app.NodeID(); known && hubHost == host {
-		return h.writeJobLost(ctx, app, holder.Job)
+		return h.writeJobLost(ctx, app, holder.Job, endReason)
 	}
 	if pane == "" && label == "" {
 		return false, "no_pane_or_label"
 	}
-	raw, err := json.Marshal(nodeJobMarkLostArgs{Job: holder.Job, PaneID: pane, Label: label})
+	raw, err := json.Marshal(nodeJobMarkLostArgs{Job: holder.Job, PaneID: pane, Label: label, EndReason: endReason})
 	if err != nil {
 		return false, "invalid_args"
 	}
@@ -202,8 +208,8 @@ func (h *HubServer) markHolderJobLost(ctx context.Context, app *fleet.App, holde
 // writeJobLost is the hub-local fallback. hk never rewrites a terminal record
 // (409), so a refused write re-reads it: a record now completed or lost
 // releases the role as the terminal path does; anything else keeps the hold.
-func (h *HubServer) writeJobLost(ctx context.Context, app *fleet.App, job string) (bool, string) {
-	if err := app.MarkJobLost(ctx, job); err != nil {
+func (h *HubServer) writeJobLost(ctx context.Context, app *fleet.App, job, endReason string) (bool, string) {
+	if err := app.MarkJobLostBecause(ctx, job, endReason); err != nil {
 		readCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		record, exists, readErr := app.ExistingJob(readCtx, job)
 		cancel()

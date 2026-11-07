@@ -152,6 +152,24 @@ func parseHosts(raw string) ([]string, error) {
 	return out, nil
 }
 
+// parsePools reads the comma-separated --exclude-pool list.
+func parsePools(raw string) ([]string, error) {
+	var out []string
+	for _, p := range strings.Split(raw, ",") {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		if !validID(p) {
+			return nil, fail(exitUsage, "invalid excluded pool %q", p)
+		}
+		if !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	return out, nil
+}
+
 func exitCode(e error) int {
 	var x *ExitError
 	if errors.As(e, &x) {

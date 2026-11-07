@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -210,5 +211,35 @@ func TestNodeJobMarkLostArgValidation(t *testing.T) {
 		if _, code := (&HubClient{}).runNodeCommand(t.Context(), nodeCommandJobMarkLost, raw); code != "invalid_args" {
 			t.Fatalf("args=%+v code=%q", args, code)
 		}
+	}
+}
+
+// The hub writes end_reason with the lost record when it replaces a
+// quota-stopped job (hk 3334); the node writes it in the same PUT.
+func TestNodeJobMarkLostWritesEndReason(t *testing.T) {
+	inbox := t.TempDir()
+	markLostJobDir(t, inbox, "job-a", "job.claim", "job.spawned")
+	client, store, _ := markLostClient(t, inbox, []string{nodeAgentList()}, markLostEmptyPanes)
+	args := nodeJobMarkLostArgs{Job: "job-a", PaneID: "w2:p3", Label: "job-a", EndReason: "quota_stop pool=claude replaced_by=job-a-q1"}
+	if result, code := nodeRun(t, client, nodeCommandJobMarkLost, args); code != "" || result["outcome"] != nodeJobMarkLostLost {
+		t.Fatalf("code=%q result=%v", code, result)
+	}
+	if got := store.records["job-a"]["end_reason"]; store.state("job-a") != "lost" || got != args.EndReason {
+		t.Fatalf("hk state=%v end_reason=%v", store.state("job-a"), got)
+	}
+}
+
+func TestNodeJobMarkLostRefusesBadEndReason(t *testing.T) {
+	for name, reason := range map[string]string{"newline": "quota_stop\nreplaced_by=x", "too long": strings.Repeat("a", 129), "control": "quota\x01stop", "non-ascii": "quota_stop 정지"} {
+		t.Run(name, func(t *testing.T) {
+			raw, _ := json.Marshal(nodeJobMarkLostArgs{Job: "job-a", PaneID: "w2:p3", Label: "job-a", EndReason: reason})
+			if _, ok := decodeNodeCommandArgs(nodeCommandJobMarkLost, raw); ok {
+				t.Fatalf("end_reason %q was accepted", reason)
+			}
+		})
+	}
+	old, _ := json.Marshal(nodeJobMarkLostArgs{Job: "job-a", PaneID: "w2:p3", Label: "job-a"})
+	if _, ok := decodeNodeCommandArgs(nodeCommandJobMarkLost, old); !ok {
+		t.Fatal("the original three-field shape was refused")
 	}
 }

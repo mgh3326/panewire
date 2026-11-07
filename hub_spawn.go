@@ -176,7 +176,7 @@ func validHubSpawnArgsForMode(args []string, operator bool) bool {
 	}
 	booleans := map[string]bool{}
 	if operator {
-		for _, flag := range []string{"-c", "-p", "--host", "--exclude-host", "--grade", "--routing-role", "--override-reason", "--containment", "--operator-request", "--requested-by", "--purpose"} {
+		for _, flag := range []string{"-c", "-p", "--host", "--exclude-host", "--exclude-pool", "--grade", "--routing-role", "--override-reason", "--containment", "--operator-request", "--requested-by", "--purpose"} {
 			allowed[flag] = true
 		}
 		booleans = map[string]bool{"--keep": true, "--job-dup-ok": true, "--task-hk-bypass": true, "--allow-escalation": true}
@@ -203,7 +203,7 @@ func validHubSpawnArgsForMode(args []string, operator bool) bool {
 		if flag == "--grade" {
 			pattern = hubSpawnGradeValuePattern
 		}
-		if flag == "--exclude-host" {
+		if flag == "--exclude-host" || flag == "--exclude-pool" {
 			pattern = hubSpawnExcludedHostsPattern
 		}
 		path := operator && (flag == "-c" || flag == "-p")

@@ -296,6 +296,10 @@ func (c *hubHTTP) Refresh(ctx context.Context, machine, pool string) error {
 	return classify(status, data)
 }
 
+// NewRequestID is a fresh version-4 request id, for a hub-originated
+// submission such as a quota-stop replacement.
+func NewRequestID() (string, error) { return newRequestID() }
+
 func newRequestID() (string, error) {
 	var b [16]byte
 	if _, e := rand.Read(b[:]); e != nil {
