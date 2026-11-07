@@ -413,8 +413,12 @@ func (s *TaskPaneSweeper) paneSweepPRKeep(ctx context.Context, a *App, j Job, ta
 
 // paneSweepHeads is the commit(s) that identify the job's worktree: HEAD, and
 // for an attached worktree the tip of its branch on origin, which is the PR
-// head hk records (a change carries no head branch). A worktree with no
-// readable HEAD leaves the answer unknown.
+// head hk records (a change carries no head branch). The tip is read from
+// origin itself (ls-remote), not from refs/remotes/origin/<branch>: that ref is
+// only as fresh as this clone's last fetch, and a PR head pushed from another
+// checkout would be missed. A worktree with no readable HEAD, or an origin
+// that cannot be read, leaves the answer unknown; a branch that is not on
+// origin is identified by HEAD alone.
 func paneSweepHeads(ctx context.Context, a *App, cwd string) ([]string, bool) {
 	r := a.call(ctx, "git", "-C", cwd, "rev-parse", "HEAD")
 	head := strings.TrimSpace(r.Out)
@@ -424,9 +428,17 @@ func paneSweepHeads(ctx context.Context, a *App, cwd string) ([]string, bool) {
 	heads := []string{head}
 	if b := a.call(ctx, "git", "-C", cwd, "branch", "--show-current"); b.Code == 0 {
 		if branch := strings.TrimSpace(b.Out); branch != "" {
-			t := a.call(ctx, "git", "-C", cwd, "rev-parse", "--verify", "--quiet", "refs/remotes/origin/"+branch)
-			if tip := strings.TrimSpace(t.Out); t.Code == 0 && tip != "" && tip != head {
-				heads = append(heads, tip)
+			t := a.call(ctx, "git", "-C", cwd, "ls-remote", "--exit-code", "origin", "refs/heads/"+branch)
+			switch t.Code {
+			case 0:
+				tip, _, _ := strings.Cut(strings.TrimSpace(t.Out), "\t")
+				if tip = strings.TrimSpace(tip); tip != "" && tip != head {
+					heads = append(heads, tip)
+				}
+			case 2:
+				// --exit-code: origin has no such branch.
+			default:
+				return nil, false
 			}
 		}
 	}

@@ -85,6 +85,68 @@ func TestPaneSweepKeepsAPaneWhoseBranchOriginTipIsAnOpenPR(t *testing.T) {
 	}
 }
 
+// The clone's cached refs/remotes/origin/<branch> is older than the PR head,
+// which was pushed from another checkout: origin itself names the open PR, so
+// the pane is kept (mergewake review of #310).
+func TestPaneSweepKeepsAPaneWhoseCachedOriginRefIsStale(t *testing.T) {
+	g := newSweepGitFake(t)
+	f := newPaneSweepFixture(t)
+	f.withGit(g)
+	cwd := g.worktree(t, "j")
+	f.sweptJob("j", "42", cwd)
+	f.tasks["42"], f.category["42"] = "deployed", "completed"
+	stale := "0123456789abcdef0123456789abcdef01234567"
+	g.head, g.originTip, g.remoteTip = stale, stale, paneSweepPRHead
+	f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
+	f.at(0)
+	f.at(11)
+	if len(f.closed()) != 0 || f.reaped("j") != nil {
+		t.Fatalf("pane closed although origin's branch tip is an open PR head")
+	}
+	if !f.infoHas("task pane kept", "job=j", "reason=open_pr", "pr=306") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}
+
+// origin cannot be read, so the branch's PR head is unknown: the pane is kept.
+func TestPaneSweepKeepsAPaneWhenOriginCannotBeRead(t *testing.T) {
+	g := newSweepGitFake(t)
+	f := newPaneSweepFixture(t)
+	f.withGit(g)
+	cwd := g.worktree(t, "j")
+	f.sweptJob("j", "42", cwd)
+	f.tasks["42"], f.category["42"] = "deployed", "completed"
+	g.head = "0123456789abcdef0123456789abcdef01234567"
+	g.lsRemoteErr = true
+	f.prChanges["42"] = []PRChange{{Number: 306, State: "open", Head: paneSweepPRHead}}
+	f.at(0)
+	f.at(11)
+	if len(f.closed()) != 0 || f.reaped("j") != nil {
+		t.Fatalf("pane closed although origin could not be read")
+	}
+	if !f.infoHas("task pane kept", "job=j", "reason=pr_state_unknown") {
+		t.Fatalf("info lines = %q", f.info)
+	}
+}
+
+// A branch that never reached origin is identified by HEAD alone: with its PRs
+// merged the pane closes.
+func TestPaneSweepClosesAPaneWhoseBranchIsNotOnOrigin(t *testing.T) {
+	g := newSweepGitFake(t)
+	f := newPaneSweepFixture(t)
+	f.withGit(g)
+	cwd := g.worktree(t, "j")
+	pane := f.sweptJob("j", "42", cwd)
+	f.tasks["42"], f.category["42"] = "deployed", "completed"
+	g.head, g.remoteTip = "0123456789abcdef0123456789abcdef01234567", "none"
+	f.prChanges["42"] = []PRChange{{Number: 300, State: "merged", Head: paneSweepPRHead}}
+	f.at(0)
+	f.at(11)
+	if !slices.Equal(f.closed(), []string{pane}) {
+		t.Fatalf("closed %v, want [%s]", f.closed(), pane)
+	}
+}
+
 // (b) The PR is merged: the pane closes as before.
 func TestPaneSweepClosesAPaneWhoseTaskEndedAndPRsAreMerged(t *testing.T) {
 	g := newSweepGitFake(t)

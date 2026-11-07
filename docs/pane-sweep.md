@@ -35,8 +35,11 @@ A task-derived end waits while the job's worktree is on an open PR. The sweep
 reads hk's changes for the task (`GET /v1/changes?task=<id>`, the source
 `panewire pr status` uses) and keeps the pane when an open change names the
 worktree's `HEAD`, or the tip of the worktree's branch on origin (hk's change
-carries the PR head, not its branch). The line says `reason=open_pr` and the PR
-number. A job whose own record ended (`job.completed` or `job.revoked`) is
+carries the PR head, not its branch). The tip is read from origin with
+`git ls-remote`, not from the clone's `refs/remotes/origin/<branch>`, which can
+be older than a PR head pushed from another checkout; if origin cannot be read
+the pane is kept (`reason=pr_state_unknown`). The line says `reason=open_pr` and
+the PR number. A job whose own record ended (`job.completed` or `job.revoked`) is
 still swept: its result is already in hk. An hk read that fails keeps the pane
 (`reason=pr_state_unknown`), so a failure never closes a pane that may still
 own an open PR.
