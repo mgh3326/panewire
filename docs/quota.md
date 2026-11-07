@@ -4,7 +4,7 @@
 scheduled for removal; callers should use panewire's interface.
 
 - `panewire quota status [--json]` reads the local host's cached readings.
-- `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` and `codex` are measured by panewire itself ([claude](#native-measurement-claude), [codex](#native-measurement-codex)), and so are `commandcode` and `devin` once their switch is flipped ([commandcode](#native-measurement-commandcode), [devin](#native-measurement-devin)); every other pool, and those two until then, runs the dependency.
+- `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` and `codex` are measured by panewire itself ([claude](#native-measurement-claude), [codex](#native-measurement-codex)), and so are `commandcode`, `devin` and `agy` once their switch is flipped ([commandcode](#native-measurement-commandcode), [devin](#native-measurement-devin), [agy](#native-measurement-agy)); every other pool, and those two until then, runs the dependency.
 - `panewire quota observe KIND ...` forwards the observation kind and all remaining arguments, including `devin-free-limit` options, and returns the dependency's exit code.
 
 Status and version calls each have a 30-second bound; gate calls have a
@@ -261,19 +261,83 @@ shared store flow. It has a switch and ships in [shadow](#shadow-and-native).
   lease windows): past it the refresh ends `shared_pending` instead of holding a
   spawn path.
 
+## Native measurement: agy
+
+panewire measures the `agy` (Antigravity) pool in its own process
+(`internal/quota/agy`) with pacelever's sources, buckets, error kinds and
+shared-store flow. It has a switch and ships in [shadow](#shadow-and-native).
+
+- **agy meters per group, and the groups have separate quotas.** The `gemini`
+  group covers the Gemini models (`agy-flash`, `agy-flash38-*`); the `3p` group
+  covers the third-party models, Claude and GPT (`agy-sonnet46`, `agy-opus46`,
+  `agy-oss120`). A reading has only group buckets — `scope` `group`, the group
+  name in `model` (`gemini`, `3p`, or `unknown` for an identity that maps to
+  neither) — and never an account-wide bucket. Buckets are the worst reading of
+  a group and window, ordered gemini, 3p, unknown and by window (`5h`, `7d`,
+  `30d`, `1d`, `unknown`).
+- **Sources, in order.** (1) The running Antigravity app's local server: the
+  process whose command line names `language_server*` or `agy` and carries an
+  antigravity marker, its `--csrf_token` and `--extension_server_port`, asked
+  over Connect-RPC on `127.0.0.1` only (its TLS ports from `lsof` first, then
+  the plain extension port; the CSRF token never leaves loopback) at
+  `RetrieveUserQuotaSummary`, `GetUserStatus` and `GetCommandModelConfigs`.
+  It needs no credential. Any failure falls through to (2). (2) The cloud:
+  `POST /v1internal:retrieveUserQuotaSummary` at the daily Cloud Code
+  endpoint, then the production one (pacelever's hosts, in that order), with
+  the CLI's OAuth token, merged with the per-model list
+  (`fetchAvailableModels`, best effort) that supplies a group the summary omits.
+  A refused token is re-armed once with `agy models` under the lock file
+  pacelever uses (`<cache>/pacelever/agy-wake.lock`, so the two never wake the
+  CLI at once) and retried; a token another holder just refreshed is reused. On
+  macOS the keychain item the CLI keeps (`security find-generic-password -s
+  gemini -a antigravity`) is the login when the file has none, and the fallback
+  when the file's token stays refused.
+- **Credentials** are located, not copied: the token is `token.access_token` of
+  `~/.gemini/antigravity-cli/antigravity-oauth-token`, else of
+  `$XDG_CONFIG_HOME/antigravity-cli/antigravity-oauth-token`. It is read into
+  memory for one measurement and never logged, written, put in an error or on a
+  command line. `PACELEVER_AGY_BIN` names the agy binary, else `agy` on `PATH`.
+- **Error kinds** follow pacelever's: no login `credentials`; a refused login
+  `auth_failed`; 429 `rate_limited` (with `Retry-After`); a 5xx a retryable
+  `network` failure; any other status `http`; a request that got no answer
+  `network`; an answer with no usable window `parse_error`.
+- **Account key** `agy:<fp>` is **configured, not derived** — agy has no login to
+  hash, and pacelever takes it from config too. This host's `[quota.accounts]`
+  `agy = "<16-hex fingerprint>"` names the account, and `[quota].measurable_accounts`
+  must list `agy:<fp>`: the host measures agy, announces presence and publishes
+  under that key only then. A host with neither does not measure agy, claims no
+  presence, answers `credentials` (as a host with no login) and logs one line
+  (`quota agy: this host has no measurable agy account …`); it never guesses a
+  key. Both keys are read at each use, so a change needs no restart.
+- **Shared store flow** as for codex: a reading stays fresh for 300 s.
+- **Placement.** Each agy catalog rung names the group it draws from — the
+  catalog row's `group` when pacelever's catalog names one, else the group of its
+  model id by pacelever's rule (`gemini*` → gemini; `3p-*`, or a name containing
+  `claude`, `gpt` or `oss` → 3p). Placement ranks and blocks a rung on its own
+  group's windows only: with gemini exhausted `agy-flash*` is `window_exhausted`
+  and `agy-sonnet46` is still offered, and the reverse. A rung whose group the
+  reading has no window for is `quota_unknown` (no other group's window stands in
+  for it). A rung that maps to no group keeps the conservative rule: the
+  strictest group blocks it. The admission gate (`pacelever gate`) already
+  matches a row to its own group.
+
 ### Shadow and native
 
-`commandcode` and `devin` are native only when the host's fleet config
+`commandcode`, `devin` and `agy` are native only when the host's fleet config
 (`~/.config/fleet/hosts.toml`, or `FLEET_HOSTS_CONFIG`) lists them:
 
 ```toml
 [quota]
-native_pools = ["commandcode", "devin"]
+native_pools = ["commandcode", "devin", "agy"]
+measurable_accounts = ["agy:0123456789abcdef"]   # agy: the account this host measures
+
+[quota.accounts]
+agy = "0123456789abcdef"                       # agy: its fingerprint (configured, not derived)
 ```
 
 The file is read at each use, so flipping the switch needs no restart. A
 missing, unreadable or invalid file leaves the pool in shadow; `native_pools`
-lists only pools that have a switch (today `commandcode` and `devin`) and any other entry is
+lists only pools that have a switch (today `commandcode`, `devin` and `agy`) and any other entry is
 a config error. `claude` and `codex` are always native and need no entry.
 
 - **Shadow (the default).** Spawns, placement refresh, the `quota.refresh` node
@@ -298,7 +362,11 @@ a config error. `claude` and `codex` are always native and need no entry.
   For `devin` the line is `quota shadow devin: …` and healthy means `match=true`;
   pacelever's windowless per-model Free tag is not a window and is left out of the
   comparison. A host without a devin login reads `native=error credentials` (the
-  node starts no probe and sends no request there).
+  node starts no probe and sends no request there). For `agy` the line is
+  `quota shadow agy: …` and a window is told apart by its group
+  (`5h/gemini=20.0%@…  5h/3p=50.0%@…  7d/3p=60.0%@…`); healthy means
+  `match=true`. A host with no measurable agy account reads
+  `native=error credentials`.
 - **Native.** The fleet-state loop, `quota.refresh`, placement refresh and
   `panewire quota refresh commandcode` use the node's measurement and the shared
   store as for codex, and no spawn-side step runs `pacelever refresh` for the

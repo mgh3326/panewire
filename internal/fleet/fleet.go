@@ -327,14 +327,35 @@ func accountPoolView(buckets []accountBucket, now time.Time) *PoolView {
 	if len(buckets) == 0 {
 		return nil
 	}
-	v := &PoolView{Status: "ok", Class: "spend"}
-	var longest time.Duration
-	// The strictest group window gates every rung of the account: placement
-	// does not map a rung to its model group.
 	rankScope := "group"
 	if slices.ContainsFunc(buckets, func(b accountBucket) bool { return b.Scope == "account" }) {
 		rankScope = "account"
 	}
+	// The account's own view: for a group-only reading its strictest group
+	// gates every rung that maps to no group (PoolView.forRung).
+	v := rankedPoolView(buckets, now, rankScope, "")
+	if v == nil || rankScope != "group" {
+		return v
+	}
+	// Each group's own view ranks and blocks the rungs that draw from it.
+	v.Groups = map[string]PoolView{}
+	for _, b := range buckets {
+		if _, done := v.Groups[b.Model]; done || b.Scope != "group" || b.Model == "" {
+			continue
+		}
+		if g := rankedPoolView(buckets, now, rankScope, b.Model); g != nil {
+			v.Groups[b.Model] = *g
+		}
+	}
+	return v
+}
+
+// rankedPoolView ranks the buckets of rankScope — only those of one group when
+// group is set — after checking that every bucket in the reading is valid and
+// still running.
+func rankedPoolView(buckets []accountBucket, now time.Time, rankScope, group string) *PoolView {
+	v := &PoolView{Status: "ok", Class: "spend"}
+	var longest time.Duration
 	for _, b := range buckets {
 		if b.UsedPct == nil || !finite(*b.UsedPct) || *b.UsedPct < 0 || *b.UsedPct > 100 {
 			return nil
@@ -345,7 +366,7 @@ func accountPoolView(buckets []accountBucket, now time.Time) *PoolView {
 				return nil
 			}
 		}
-		if b.Scope != rankScope {
+		if b.Scope != rankScope || group != "" && b.Model != group {
 			continue
 		}
 		if v.Blocking == nil || *b.UsedPct > *v.Blocking {

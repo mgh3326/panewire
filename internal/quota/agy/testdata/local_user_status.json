@@ -1,0 +1,1 @@
+{"userStatus":{"email":"x@example.invalid","planStatus":{"planInfo":{"planName":"pro"}},"cascadeModelConfigData":{"clientModelConfigs":[{"label":"Gemini 3.8 Flash","quotaInfo":{"remainingFraction":0.9,"resetTime":"2026-11-06T09:00:00Z"}},{"label":"Claude Sonnet 4.6","quotaInfo":{"remainingFraction":0.25,"resetTime":"2026-11-06T09:00:00Z"}}]}}}

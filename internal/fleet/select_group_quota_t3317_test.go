@@ -42,13 +42,20 @@ func (s hubObservedSource) SharedAccount(ctx context.Context, key string) (Share
 
 func agyGroupFixture(t *testing.T, elapsed time.Duration, rows []CatalogRow, present []string) (*App, Spawn, *fakeQuota) {
 	t.Helper()
+	return agyReadingFixture(t, func(now time.Time) []map[string]any { return agyGroupBuckets(now, elapsed) }, rows, present)
+}
+
+// agyReadingFixture is agyGroupFixture with the agy reading's buckets chosen by
+// the caller.
+func agyReadingFixture(t *testing.T, agyBuckets func(now time.Time) []map[string]any, rows []CatalogRow, present []string) (*App, Spawn, *fakeQuota) {
+	t.Helper()
 	a, s, q := selFixture(t, "B", rows, nil, present)
 	now := a.Now()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		key := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/v1/quota/accounts/"), "/latest")
 		buckets := []map[string]any{{"window": "7d", "used_pct": 20, "resets_at": now.Add(24 * time.Hour).UTC().Format(time.RFC3339), "scope": "account"}}
 		if strings.HasPrefix(key, "agy:") {
-			buckets = agyGroupBuckets(now, elapsed)
+			buckets = agyBuckets(now)
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"observation": map[string]any{"kind": "auto", "measured_at": now.Add(-time.Minute), "buckets": buckets}})
 	}))
@@ -80,16 +87,18 @@ func TestSelectOffersAgyWithGroupOnlyReading(t *testing.T) {
 	}
 }
 
-// Midway through the 7d window an unused agy account has waste urgency, as the
-// operator's confirmed order needs.
+// Midway through the 7d window an unused agy 3p rung has waste urgency, as the
+// operator's confirmed order needs. The 7d window belongs to the 3p group: a
+// gemini rung ranks on the gemini group's 5h window alone and has none.
 func TestSelectRanksAgyByWasteUrgencyMidWindow(t *testing.T) {
-	a, s, q := agyGroupFixture(t, 3*24*time.Hour, agyGroupRows(), []string{"agy"})
+	rows := []CatalogRow{{Profile: "agy-sonnet46", Effort: "medium", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"}}
+	a, s, q := agyGroupFixture(t, 3*24*time.Hour, rows, []string{"agy"})
 	q.GateDo = gatePools(map[string]string{"agy-flash": "agy"})
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
 	}
-	row := candOutcome(sel.record(), "agy-flash38-medium", "medium")
+	row := candOutcome(sel.record(), "agy-sonnet46", "medium")
 	if row["tier"] != "waste" || row["waste_risk"] != true || row["waste_urgency"] == nil {
 		t.Fatalf("unused agy mid-window is waste with an urgency: %v", row)
 	}
@@ -119,6 +128,7 @@ func productionShapeRows() []CatalogRow {
 		{Profile: "agy-flash", Effort: "", Grade: "A+", Pool: "agy", Gate: "default", ModelID: "gemini-3.7-flash"},
 		{Profile: "agy-flash38-high", Effort: "", Grade: "A", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-high"},
 		{Profile: "agy-flash38-medium", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "gemini-3.8-flash-medium"},
+		{Profile: "agy-sonnet46", Effort: "", Grade: "B", Pool: "agy", Gate: "default", ModelID: "claude-sonnet-4-6"},
 		{Profile: "cmd-dsflash41", Effort: "high", Grade: "A+", Pool: "commandcode", Gate: "default", ModelID: "deepseek/deepseek-v4.1-flash"},
 		{Profile: "codex-luna", Effort: "medium", Grade: "B", Pool: "codex", Gate: "default", ModelID: "gpt-6-luna"},
 	}
@@ -143,12 +153,16 @@ func TestSelectDryRunProductionShapeOffersAgyAndCommandcode(t *testing.T) {
 		t.Fatal(e)
 	}
 	rec := sel.record()
-	for _, c := range []struct{ profile, effort string }{{"agy-flash", ""}, {"agy-flash38-high", ""}, {"agy-flash38-medium", ""}, {"cmd-dsflash41", "high"}} {
+	for _, c := range []struct {
+		profile, effort string
+		urgency         bool
+	}{{"agy-flash", "", false}, {"agy-flash38-high", "", false}, {"agy-flash38-medium", "", false}, {"agy-sonnet46", "", true}, {"cmd-dsflash41", "high", true}} {
 		row := candOutcome(rec, c.profile, c.effort)
 		if row == nil || row["outcome"] == "dropped:quota_unknown" || row["tier"] == nil || row["tier"] == "" {
 			t.Fatalf("%s must be a ranked candidate with a tier: %v", c.profile, row)
 		}
-		if row["waste_urgency"] == nil {
+		// Only the 3p group has a 7d window to pace.
+		if c.urgency && row["waste_urgency"] == nil {
 			t.Fatalf("%s must carry its waste urgency: %v", c.profile, row)
 		}
 	}

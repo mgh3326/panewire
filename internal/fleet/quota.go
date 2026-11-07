@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/quota/agy"
 )
 
 type Launch struct {
@@ -50,6 +52,10 @@ type CatalogRow struct {
 	Gate      string   `json:"gate"`
 	Score     *float64 `json:"score"`
 	RetiredAt *string  `json:"retired_at"`
+	// Group is the metering group of an agy rung ("gemini", "3p") as
+	// pacelever's catalog names it; empty for other pools and for a rung it
+	// does not group (meteringGroup).
+	Group string `json:"group,omitempty"`
 }
 
 // PoolView is one quota pool's status from the quota CLI's status
@@ -83,6 +89,45 @@ type PoolView struct {
 	// Credit is a prepaid credit pool's hand-entered balance, nil when the
 	// manual store records none.
 	Credit *CreditBalance
+	// Groups is the view of each metering group of a reading that has only
+	// group-scoped windows (agy), by group name. The fields above then rank on
+	// the strictest group; a rung that maps to a group ranks on its own group's
+	// view instead (forRung).
+	Groups map[string]PoolView
+}
+
+// forRung is the view a catalog rung ranks and is blocked on. A rung that maps
+// to a metering group of a group-scoped reading takes its own group's view, so
+// one exhausted group blocks only the rungs that draw from it; false when the
+// reading has no window for that group (it stays unknown, never borrowed from
+// another group). Every other rung — one that maps to no group, or any rung of
+// an account-scoped reading — takes the whole view, the strictest group.
+func (v PoolView) forRung(row CatalogRow) (PoolView, bool) {
+	if len(v.Groups) == 0 {
+		return v, true
+	}
+	group := row.meteringGroup()
+	if group == "" {
+		return v, true
+	}
+	g, ok := v.Groups[group]
+	return g, ok
+}
+
+// meteringGroup is the quota group an agy rung draws from — "gemini" or "3p" —
+// "" when it maps to none. It is the catalog row's own group when pacelever's
+// catalog names one, else the group of its model id by pacelever's agy rule
+// (agy.Group), so a rung of a new profile still maps.
+func (r CatalogRow) meteringGroup() string {
+	if r.Pool != "agy" {
+		return ""
+	}
+	for _, group := range []string{r.Group, agy.Group(r.ModelID, "")} {
+		if group == agy.GroupGemini || group == agy.Group3P {
+			return group
+		}
+	}
+	return ""
 }
 
 // QuotaGate is deliberately independent of the executable name; pacelever

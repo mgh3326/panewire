@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/quota"
 	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
@@ -36,11 +37,30 @@ func isShadowQuotaPool(pool string) bool {
 	return fleet.QuotaPoolHasSwitch(pool) && !isNativeQuotaPool(pool)
 }
 
-// shadowBucket is one window of a reading in the comparison.
+// shadowBucket is one window of a reading in the comparison. A group-scoped
+// window (agy) is told apart by its metering group: gemini and 3p both have a
+// 5h window.
 type shadowBucket struct {
 	window string
+	group  string // the metering group of a group-scoped window, else ""
 	used   float64
 	reset  time.Time // zero when the window names none
+}
+
+// label names the window in the comparison line: the window, then its group.
+func (b shadowBucket) label() string {
+	if b.group == "" {
+		return b.window
+	}
+	return b.window + "/" + b.group
+}
+
+// shadowGroup is the group a bucket is scoped to, "" for any other scope.
+func shadowGroup(scope, name string) string {
+	if scope == quota.ScopeGroup {
+		return name
+	}
+	return ""
 }
 
 // shadowReading is one side of the comparison: the account key and windows it
@@ -61,7 +81,7 @@ func shadowFromPublish(publish FleetStatePublish, ok bool, errKind string) shado
 	}
 	reading := shadowReading{key: publish.Key}
 	for _, b := range publish.Quota.Buckets {
-		bucket := shadowBucket{window: b.Window}
+		bucket := shadowBucket{window: b.Window, group: shadowGroup(b.Scope, b.Model)}
 		if b.UsedPct != nil {
 			bucket.used = *b.UsedPct
 		}
@@ -97,7 +117,7 @@ func shadowFromPacelever(pool string, output []byte, publish FleetStatePublish, 
 		if b.UsedPct == nil || b.Window == "" {
 			continue
 		}
-		bucket := shadowBucket{window: b.Window, used: *b.UsedPct}
+		bucket := shadowBucket{window: b.Window, group: shadowGroup(b.Scope.Kind, b.Scope.Name), used: *b.UsedPct}
 		if at, err := time.Parse(time.RFC3339Nano, b.ResetsAt); err == nil {
 			bucket.reset = at
 		}
@@ -116,7 +136,7 @@ func shadowFromShared(reading shared.Reading, err error) shadowReading {
 	}
 	out := shadowReading{key: reading.Key}
 	for _, b := range reading.Buckets {
-		bucket := shadowBucket{window: b.Window, used: b.UsedPct}
+		bucket := shadowBucket{window: b.Window, group: shadowGroup(b.Scope, b.Model), used: b.UsedPct}
 		if b.ResetsAt != nil {
 			bucket.reset = *b.ResetsAt
 		}
@@ -135,7 +155,7 @@ func (r shadowReading) String() string {
 		if !b.reset.IsZero() {
 			reset = b.reset.UTC().Format(time.RFC3339)
 		}
-		parts = append(parts, fmt.Sprintf("%s=%.1f%%@%s", b.window, b.used, reset))
+		parts = append(parts, fmt.Sprintf("%s=%.1f%%@%s", b.label(), b.used, reset))
 	}
 	return "[" + strings.Join(parts, " ") + "]"
 }
@@ -161,7 +181,7 @@ func compareShadow(pacelever, native shadowReading) []string {
 	seen := map[string]bool{}
 	index := func(buckets []shadowBucket, window string) (shadowBucket, bool) {
 		for _, b := range buckets {
-			if b.window == window {
+			if b.label() == window {
 				return b, true
 			}
 		}
@@ -169,9 +189,9 @@ func compareShadow(pacelever, native shadowReading) []string {
 	}
 	var windows []string
 	for _, b := range append(append([]shadowBucket{}, pacelever.buckets...), native.buckets...) {
-		if !seen[b.window] {
-			seen[b.window] = true
-			windows = append(windows, b.window)
+		if !seen[b.label()] {
+			seen[b.label()] = true
+			windows = append(windows, b.label())
 		}
 	}
 	for _, window := range windows {

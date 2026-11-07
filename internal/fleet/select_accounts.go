@@ -213,6 +213,18 @@ func (sp *selPresence) unknownJudgment(b accountBinding, why string) quotaJudgme
 	return quotaJudgment{Host: host.name, AccountKey: b.key, Source: source, Outcome: "unknown", ExitCode: status, Reason: why, Measured: r.measured}
 }
 
+// classifyRung classifies c on the view of the account's reading that its rung
+// draws from (PoolView.forRung). A rung whose group the reading has no window
+// for is quota_unknown, so a refresh may still supply it.
+func (p *selPlan) classifyRung(c *selCand, account *PoolView) {
+	v, ok := account.forRung(c.row)
+	if !ok {
+		c.reason, c.code, c.outcome = "quota_unknown", outcomeQuotaUnknown, "dropped:quota_unknown"
+		return
+	}
+	p.classify(c, v)
+}
+
 func (p *selPlan) classify(c *selCand, v PoolView) {
 	c.blocking, c.projected, c.urgency, c.resetHrs = v.Blocking, v.Projected, v.Urgency, v.ResetHours
 	c.longProj = longProjection(v)
@@ -309,7 +321,7 @@ func (sp *selPresence) admitAccount(ctx context.Context, qr QuotaRequest, c *sel
 			}
 			return []quotaJudgment{j}, fail(exitEvictionUnconfirmed, "account quota remains unknown after refresh")
 		}
-		p.classify(c, *acc.Quota)
+		p.classifyRung(c, acc.Quota)
 		if c.reason != "" {
 			j := quotaJudgment{Host: ordered[0].name, AccountKey: c.accountKey, Source: "shared", Outcome: "unknown", ExitCode: exitEvictionUnconfirmed, Reason: c.reason}
 			if ordered[0].local {
@@ -344,7 +356,7 @@ func (sp *selPresence) admitAccount(ctx context.Context, qr QuotaRequest, c *sel
 					return append(judgments, j), cause
 				}
 				if sharedReason(c.accountKey, acc) == "" && acc.Quota != nil {
-					p.classify(c, *acc.Quota)
+					p.classifyRung(c, acc.Quota)
 					if c.reason == "" {
 						j, err = sp.a.judgeHost(ctx, qr, c.row.Pool, h.name, h.local, c.accountKey, acc)
 					}
