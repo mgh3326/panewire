@@ -31,7 +31,9 @@ and `Authorization: Bearer <token>`. The client env file is
 
 Each scope names its resource. `@*` means any machine. Inbox lane scopes
 name one lane or use `*` for any valid lane; only the whole lane may be `*`.
-The wildcard forms suit fleet-wide services such as mergewake.
+The wildcard forms suit fleet-wide services such as mergewake. A service with
+`inbox.ack:*` can acknowledge all unacknowledged, non-superseded items in any
+lane with `{"all":true}`, including items intended for other agents.
 
 | Scope | Grants |
 | --- | --- |
