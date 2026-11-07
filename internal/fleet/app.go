@@ -130,7 +130,7 @@ func New(out, errout io.Writer) (*App, error) {
 	if v := os.Getenv("PANEWIRE_QUOTA_BIN"); v != "" {
 		quota = v
 	}
-	a.Quota = admissionQuota{CLIQuota{a.Runner, quota}, a}
+	a.Quota = admissionQuota{CLIQuota{Runner: a.Runner, Binary: quota, CreditTotalUSD: creditTotals(c.Quota)}, a}
 	a.Source = stateSource{a: a, inner: fleetSource{a}}
 	a.Wake = cliWaker{a}
 	a.LoadRatio = a.loadRatio

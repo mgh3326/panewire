@@ -48,6 +48,36 @@ type manualEntry struct {
 	} `json:"credit"`
 }
 
+// creditTotals reads `[quota].credit_total_usd` — each prepaid credit pool's
+// fixed grant total in dollars — into the map a CLIQuota derives balances
+// from. LoadConfig has already refused anything but a positive number.
+func creditTotals(quota map[string]any) map[string]float64 {
+	m, _ := quota["credit_total_usd"].(map[string]any)
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]float64, len(m))
+	for pool := range m {
+		if n, ok := number(m, pool); ok {
+			out[pool] = n
+		}
+	}
+	return out
+}
+
+// creditEntryUSD is one manual entry's dollar balance: its own remaining_usd
+// when it records dollars, else the configured grant total times its unused
+// share. A pool with neither source has no dollars (ok false).
+func creditEntryUSD(m manualEntry, total float64, hasTotal bool) (float64, bool) {
+	if m.Credit != nil {
+		return m.Credit.RemainingUSD, true
+	}
+	if !hasTotal || m.UsedPct == nil {
+		return 0, false
+	}
+	return total * (100 - *m.UsedPct) / 100, true
+}
+
 // creditBalances reads the current credit-window entry of every pool in
 // pacelever's manual store.
 func (q CLIQuota) creditBalances(ctx context.Context) (map[string]*CreditBalance, error) {
@@ -87,10 +117,10 @@ func (q CLIQuota) creditBalances(ctx context.Context) (map[string]*CreditBalance
 			continue
 		}
 		c := &CreditBalance{LeftPct: 100 - *current.UsedPct, ExpiresAt: expires}
-		if current.Credit != nil {
-			usd := current.Credit.RemainingUSD
+		total, hasTotal := q.CreditTotalUSD[pool]
+		if usd, ok := creditEntryUSD(*current, total, hasTotal); ok {
 			c.BalanceUSD = &usd
-			c.BurnUSDPerH = creditBurnUSDPerH(entries)
+			c.BurnUSDPerH = creditBurnUSDPerH(entries, total, hasTotal)
 		}
 		out[pool] = c
 	}
@@ -98,21 +128,23 @@ func (q CLIQuota) creditBalances(ctx context.Context) (map[string]*CreditBalance
 }
 
 // creditBurnUSDPerH is a credit pool's spend rate from its two latest entries
-// that record dollars: (older remaining − newer remaining) over the hours
-// between their measurements. It is 0 when fewer than two such entries exist
-// or the balance did not fall.
-func creditBurnUSDPerH(entries []manualEntry) float64 {
+// with a dollar balance — an entry's own remaining_usd, else the configured
+// grant total times its unused share: (older − newer) over the hours between
+// their measurements. It is 0 when fewer than two such entries exist or the
+// balance did not fall.
+func creditBurnUSDPerH(entries []manualEntry, total float64, hasTotal bool) float64 {
 	type reading struct {
 		at  time.Time
 		usd float64
 	}
 	var readings []reading
 	for _, m := range entries {
-		if m.Credit == nil {
+		usd, ok := creditEntryUSD(m, total, hasTotal)
+		if !ok {
 			continue
 		}
 		if at, e := time.Parse(time.RFC3339Nano, m.MeasuredAt); e == nil {
-			readings = append(readings, reading{at: at, usd: m.Credit.RemainingUSD})
+			readings = append(readings, reading{at: at, usd: usd})
 		}
 	}
 	if len(readings) < 2 {
