@@ -211,7 +211,12 @@ func (a *App) createWorkspace(ctx context.Context, label string) (string, *creat
 // cleaned up by someone else, so that refusal is not an error.
 func (a *App) closeCreatedWorkspace(ctx context.Context, w *createdWorkspace) error {
 	if w.tab == "" {
-		return fail(exitConfig, "created workspace %s has no tab id; run herdr workspace close %s on the executing host", w.workspace, w.workspace)
+		// A response without a tab id can still name the root pane, which herdr
+		// scopes to that tab and the workspace only when it was the last one.
+		if w.rootPane == "" {
+			return fail(exitConfig, "created workspace %s names no tab or pane; run herdr workspace close %s on the executing host", w.workspace, w.workspace)
+		}
+		return a.closeCreatedPane(ctx, w.rootPane)
 	}
 	r := a.call(ctx, "herdr", "tab", "close", w.tab)
 	if r.Code == 0 || strings.Contains(strings.ToLower(r.Out+r.Err), "not_found") {
@@ -221,13 +226,17 @@ func (a *App) closeCreatedWorkspace(ctx context.Context, w *createdWorkspace) er
 	// the same atomic step there: herdr removes that tab, and the workspace only
 	// when it was the last one, so another spawn's tab still survives.
 	if strings.Contains(r.Out+r.Err, "cannot close the last tab") && w.rootPane != "" {
-		p := a.call(ctx, "herdr", "pane", "close", w.rootPane)
-		if p.Code == 0 || strings.Contains(strings.ToLower(p.Out+p.Err), "not_found") {
-			return nil
-		}
-		return check(p, "herdr pane close")
+		return a.closeCreatedPane(ctx, w.rootPane)
 	}
 	return check(r, "herdr tab close")
+}
+
+func (a *App) closeCreatedPane(ctx context.Context, pane string) error {
+	r := a.call(ctx, "herdr", "pane", "close", pane)
+	if r.Code == 0 || strings.Contains(strings.ToLower(r.Out+r.Err), "not_found") {
+		return nil
+	}
+	return check(r, "herdr pane close")
 }
 
 // workspaceGone reports a herdr refusal caused by the target workspace no longer
