@@ -49,7 +49,7 @@ report, has no adapter and no delivery proof.
 | devin | nonce in the transcript, or devin's own queue banner (`nonce_echo`, `devin_queue_banner`) | no |
 | grok | nonce on screen and herdr reports idle/done before the send and `working` after it (`nonce_echo+status_working`) | observed 8 s |
 | omp | same as grok | observed 8 s |
-| cmd | same as grok, typed through `pane send-text` plus `pane send-keys return`; the composer is found with claude's rule (below); `workingUnprovable`: a directive waits for idle or done | observed 8 s |
+| cmd | same as grok, typed through `pane send-text` plus `pane send-keys return`; the composer is found with claude's rule (below); `workingUnprovable`: a directive waits for idle or done; nothing is typed into it while working; one row per inject | observed 8 s |
 | anything else | none | n/a |
 
 `workingUnprovable` marks a harness that cannot prove a directive typed into a
@@ -58,10 +58,21 @@ so a send into a working one stays unproven and the retry-once rule would type
 the directive a second time (hk 3370). For such a harness the directive policy
 holds while the pane is `working` as well as `blocked`, through the same R27
 hold, and types when the pane turns idle or done. The wait ends on idle or done
-only. Past `max_wait` (30 minutes) a pane that is still working is not typed
-into: the row is dropped as `working_wait_expired`, the design lane is told once
-(see below), and the durable row stays undelivered for a replay. Every other
-harness is typed at once as before.
+only. Past `max_wait` a pane that is still working is not typed into, whatever
+the row's policy (`directive`, `idle` or `max_wait=N`; hk 3384): the row is
+dropped as `working_wait_expired`, the design lane is told once (see below),
+and the durable row stays undelivered for a replay. A release that finds such a
+pane working before `max_wait` types nothing and keeps the rows held. Every
+other harness is typed at once as before.
+
+A pane-transport harness (cmd) is never sent a batch (hk 3384). Its return gate
+reads the composer after the text lands, and a batch wrapped over several
+composer rows did not match, so the return was withheld and the batch sat
+unsent in the composer. A release types one held row per inject instead, each
+with its own nonce, presend check, gated return and proof. A submitted row
+turns the pane working, so before each later row the pane is read again; unless
+it is idle or done, the rest stay held and the next idle wake types the next
+one. Other harnesses keep the batch.
 
 The nonce is the per-row `[r<id><check>]` token at the head of every typed text
 (#687). It identifies this row, so a replay of another row never counts.
@@ -158,5 +169,6 @@ does the same for cmd, with a shell `herdr` that refuses the agent-level writes
 the way herdr does; `relay_cmd_composer_t3330_test.go` pins the send-text
 failure, the failed-return replay, the draft, dim-suggestion, draft-between and
 echo-lag cases; `relay_cmd_working_hold_t3370_test.go` pins the working hold,
-its expiry and the unchanged claude pane; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
+its expiry and the unchanged claude pane; `relay_cmd_release_t3384_test.go` pins
+the expiry of every policy, one row per inject and the unchanged claude batch; `prompt_cmd_t3330_test.go` covers the direct prompt's pane
 transport.

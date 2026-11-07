@@ -116,6 +116,13 @@ func relayHarnessWorkingUnprovable(harness string) bool {
 	return ok && adapter.workingUnprovable
 }
 
+// relayPaneWorkingUnprovable reports whether a pane in status, occupied by
+// harness, must not be typed into: it is working and its harness cannot prove
+// text typed into a working pane (hk 3370, hk 3384).
+func relayPaneWorkingUnprovable(status, harness string) bool {
+	return status == "working" && relayHarnessWorkingUnprovable(harness)
+}
+
 // harnessPaneTransport reports whether harness is typed at the pane level
 // rather than through herdr's agent prompt. Both the relay and `panewire
 // prompt` ask this, so the two can never disagree about how a pane is

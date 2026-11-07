@@ -8,7 +8,7 @@ fail-open으로 즉시 넣는다.
 
 정책은 이벤트별 `deliver` 값이다. `now`는 상태 조회 없이 즉시 넣고,
 `directive`(워커 지시, [relay-harness-delivery](relay-harness-delivery.md))는
-`working`이어도 즉시 넣되 `blocked`일 때 보류한다. working 상태의 지시를 증명할 수 없는 하니스(어댑터의 `workingUnprovable`, 현재 cmd)는 `working`일 때도 보류하고 idle/done이 되면 넣는다(hk 3370).
+`working`이어도 즉시 넣되 `blocked`일 때 보류한다. working 상태의 지시를 증명할 수 없는 하니스(어댑터의 `workingUnprovable`, 현재 cmd)는 `working`일 때도 보류하고 idle/done이 되면 넣는다(hk 3370). 그런 하니스의 pane이 `working`인 동안에는 정책과 무관하게 아무것도 넣지 않는다. 대기가 만료되면 행을 `working_wait_expired`로 버리고 durable 행은 재전송을 위해 남긴다(hk 3384).
 `idle`은 기본 정책이며 최대 1800초를 기다린다. `max_wait=<초>`는 그
 이벤트의 한도를 바꾼다. 대기는 폴링이 아니라
 `herdr agent wait <pane> --until idle --until done --timeout <ms>` 한 번으로
@@ -21,7 +21,9 @@ fail-open으로 즉시 넣는다.
 `[batch N건] 1) ... 2) ...` 한 번에 보낸다. UTF-8 바이트 기준 8KB를 넘는
 묶음은 순서대로 나누며, 한 항목이 자체로 8KB보다 크면 자르지 않고 단독
 주입한다. 한 batch prompt가 성공해도 각 원 이벤트는 별도
-`relay.delivered`를 보내므로 durable 행도 각각 닫힌다.
+`relay.delivered`를 보내므로 durable 행도 각각 닫힌다. pane 전송 하니스(cmd)는
+묶지 않고 한 주입에 한 행만 넣으며, 다음 행 전에 pane이 idle/done이 아니면
+나머지는 보류한 채 다음 대기로 넘긴다(hk 3384).
 
 노드는 `relay.held`, `relay.released`, `relay.cancelled`, `relay.batched`를
 허브에 보내고 허브는 같은 kind를 `/v1/events`에 브로드캐스트한다.
