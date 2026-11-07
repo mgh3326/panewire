@@ -200,12 +200,16 @@ type selCand struct {
 	// balance was a candidate.
 	paced        bool
 	behindCredit bool
-	accountKey   string
-	host         string
-	hosts        []selHost
-	holders      []selHost
-	code         string
-	ignoreGrade  bool
+	// wasteGroup names the metering group this rung's pacing and waste were
+	// judged on, for a pool that publishes only group windows; empty for every
+	// other pool.
+	wasteGroup  string
+	accountKey  string
+	host        string
+	hosts       []selHost
+	holders     []selHost
+	code        string
+	ignoreGrade bool
 }
 
 type selPlan struct {
@@ -406,8 +410,9 @@ func (p PoolPolicy) tierOf(row CatalogRow, order []string, v PoolView) (string, 
 // day or more: LongProjected, else the longest window's waste urgency times
 // its hours to reset, else Projected when the pool reported no sub-daily
 // window (so Projected can only come from longer ones). It is nil when no
-// such window can be paced. Sub-daily windows gate admission only and never
-// enter it.
+// such window can be paced. Sub-daily windows never rank an account-scoped
+// pool; a group view's own longest window ranks even when it is sub-daily
+// (PoolView.Groups), and LongProjected then carries it.
 func longProjection(v PoolView) *float64 {
 	if v.LongProjected != nil {
 		return v.LongProjected
@@ -1101,6 +1106,9 @@ func (p *selPlan) record() map[string]any {
 			row["used_pct"] = *c.blocking
 		}
 		row["waste_risk"] = c.risk
+		if c.wasteGroup != "" {
+			row["waste_group"] = c.wasteGroup
+		}
 		if c.longProj != nil {
 			row["long_projected_pct"] = *c.longProj
 		}
@@ -1165,6 +1173,9 @@ func (p *selPlan) record() map[string]any {
 			canon = c.seat.Canon
 		}
 		chosen := map[string]any{"seat": c.seatName, "canon": canon, "effort": c.row.Effort, "model_id": c.row.ModelID, "pool": c.row.Pool, "gate": c.row.Gate, "tier": c.tierName, "grade": c.row.Grade, "waste_risk": c.risk}
+		if c.wasteGroup != "" {
+			chosen["waste_group"] = c.wasteGroup
+		}
 		chosen["account_key"], chosen["host"], chosen["outcome_code"] = c.accountKey, c.host, c.code
 		rec["account_key"], rec["host"] = c.accountKey, c.host
 		why := fmt.Sprintf("tier=%s grade=%s for task %s", c.tierName, c.row.Grade, p.req.grade)
