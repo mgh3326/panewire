@@ -233,6 +233,9 @@ func LoadConfig(path string) (Config, error) {
 	if err := validateNativePools(c.Quota); err != nil {
 		return c, err
 	}
+	if err := validatePoolMaxConcurrent(c.Quota); err != nil {
+		return c, err
+	}
 	if err := validateMeasurableAccounts(c.Quota); err != nil {
 		return c, err
 	}
