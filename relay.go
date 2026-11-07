@@ -353,7 +353,11 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 	// handoffkeep is first-writer-wins. A hub that restarted after the first
 	// POST must inject the returned durable text, not a changed duplicate body.
 	if status == http.StatusOK {
+		suppressed := event.designSuppressed
 		event = laneEventFromStored(stored)
+		// The stored row carries no policy decision; keep the one receiveInbox
+		// made so a resend of a suppressed completion is still retired (hk 3425).
+		event.designSuppressed = suppressed
 	}
 	h.rememberLanePersisted(key, stored.ID)
 	h.rememberRelayEvent(key, stored.ID)
@@ -368,6 +372,11 @@ func (h *HubServer) relayLaneEventContext(ctx context.Context, event hubJobEvent
 	if relayEventAlreadyDelivered(status, stored, event) {
 		h.broadcastRelayAlreadyDelivered("lane.event", event, stored)
 		return relayLaneEventResult{ID: stored.ID, AlreadyDelivered: true}
+	}
+	if event.designSuppressed {
+		h.retireDesignSuppressedRecord(ctx, stored.ID)
+		h.forgetRelayEvent(key)
+		return relayLaneEventResult{ID: stored.ID, Machine: "design-lane"}
 	}
 	if route.Sink {
 		if err := h.handoffkeep.markDelivered(ctx, stored.ID, "sink", "sink:"+event.OwnerLane); err != nil {
@@ -475,7 +484,28 @@ func (h *HubServer) relayJobEventFrom(senderMachine, kind string, event hubJobEv
 		h.broadcastRelayAlreadyDelivered(kind, event, stored)
 		return
 	}
+	if event.designSuppressed {
+		// hk 3425: the record is durable and the producer is acknowledged; the
+		// design lane is not told. Retiring the row keeps a restart replay from
+		// delivering it later.
+		h.retireDesignSuppressedRecord(context.Background(), stored.ID)
+		h.queueRelayPersisted(kind, event, h.relayPersistedAgent(senderMachine, nil), stored.ID)
+		return
+	}
 	h.injectRelayEvent(kind, event, route, destinationAgent, h.relayPersistedAgent(senderMachine, destinationAgent), stored.ID, key)
+}
+
+// retireDesignSuppressedRecord marks a persisted routine completion delivered
+// nowhere, so a restart replay cannot inject it later (hk 3425). The row stays
+// in handoffkeep as the audit record; the producer is acknowledged by the
+// caller.
+func (h *HubServer) retireDesignSuppressedRecord(ctx context.Context, id int64) {
+	if h.handoffkeep == nil || id < 1 {
+		return
+	}
+	if err := h.handoffkeep.markDelivered(ctx, id, "hub", "design-lane"); err != nil {
+		h.logger.Warn("suppressed completion row was not retired", "event_id", id)
+	}
 }
 
 // relayEventAlreadyDelivered is the hub's inject gate. Its authority is

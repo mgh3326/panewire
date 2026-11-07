@@ -178,11 +178,19 @@ For a design lane the hub:
   and logs one DEBUG line per suppressed event. The node never materializes
   the wake, so no event, pane injection or inbox item is produced;
 - never appends the `inbox_summary` handoff to an interrupt. Unread items stay
-  readable through `panewire inbox list --lane LANE`.
+  readable through `panewire inbox list --lane LANE`;
+- drops a worker's completion notice: `job.completed`, and a lane event declared
+  `--type ready` or `--type merged`, produce no pane injection and no inbox
+  item (hk 3425). The hk job record (state, `report_doc`, `result`), the report
+  doc and the job events are written exactly as before — mergewake reads those
+  records, not the lane notice. One DEBUG line records each suppressed event,
+  and the durable relay row is retired so a restart does not replay it.
 
 Everything else reaches a design lane exactly as before: ESC and decision
 questions, `automation-failed` (a SPAWN_FAILED notice), `blocked`, desk orders
-and deploy approvals.
+and deploy approvals. A TASK_LINK_FAILED notice is not emitted when the task's
+`refs.job_id` already names the job, or the job's lane is its claimant; panewire
+logs that at INFO instead.
 
 ## Durability and replay
 

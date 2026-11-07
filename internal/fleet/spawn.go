@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -337,6 +338,24 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task Task, bypassed bool) e
 	}
 	return nil
 }
+
+// taskLinkHolds reports whether the hk task already names this job in
+// refs.job_id, or this spawn's lane as its claimant. A claim can fail after the
+// write that bound the task (hk 3404), so the TASK_LINK_FAILED notice would ask
+// for an action nobody needs (hk 3425). An unreadable task keeps today's
+// notice.
+func (a *App) taskLinkHolds(ctx context.Context, s Spawn) bool {
+	r := a.call(ctx, "handoffkeep", "tasks", "show", s.Task)
+	if r.Code != 0 {
+		return false
+	}
+	var t Task
+	if json.Unmarshal([]byte(r.Out), &t) != nil {
+		return false
+	}
+	return str(t.Refs, "job_id") == s.Job || t.ClaimedBy == s.Label
+}
+
 func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 	startedAdmission := time.Now()
 	admissionRecorded := false
@@ -866,12 +885,18 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 		if !errors.As(e, &claimFailure) {
 			return e
 		}
-		a.warn("job %s task %s: %s; link the task manually", s.Job, s.Task, claimFailure.reason)
-		id := sha256.Sum256([]byte(s.Job))
-		text := fmt.Sprintf("[panewire] TASK_LINK_FAILED job=%s task=%s reason=%s; link the task manually", s.Job, s.Task, claimFailure.reason)
-		r := a.call(ctx, "panewire", "emit", "--kind", "lane.event", "--lane", owner, "--type", "automation-failed", "--event-id", fmt.Sprintf("task-link-failed-%x", id[:]), "--text", text, "--inbox-root", filepath.Dir(a.Jobs))
-		if r.Code != 0 {
-			a.warn("task link notice failed (exit %d)", r.Code)
+		if a.taskLinkHolds(ctx, s) {
+			// The claim can fail after the write that already bound the task
+			// (hk 3404). Then there is no action to ask for (hk 3425).
+			slog.Info("task link already holds this job; no notice", "job", s.Job, "task", s.Task, "reason", claimFailure.reason)
+		} else {
+			a.warn("job %s task %s: %s; link the task manually", s.Job, s.Task, claimFailure.reason)
+			id := sha256.Sum256([]byte(s.Job))
+			text := fmt.Sprintf("[panewire] TASK_LINK_FAILED job=%s task=%s reason=%s; link the task manually", s.Job, s.Task, claimFailure.reason)
+			r := a.call(ctx, "panewire", "emit", "--kind", "lane.event", "--lane", owner, "--type", "automation-failed", "--event-id", fmt.Sprintf("task-link-failed-%x", id[:]), "--text", text, "--inbox-root", filepath.Dir(a.Jobs))
+			if r.Code != 0 {
+				a.warn("task link notice failed (exit %d)", r.Code)
+			}
 		}
 	}
 	a.stage("landing", startedLanding)

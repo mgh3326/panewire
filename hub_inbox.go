@@ -153,6 +153,14 @@ func (h *HubServer) receivingLane(kind string, e hubJobEventPayload) string {
 	return lane
 }
 
+// designCompletionNotice is the routine set held back from a design-session
+// lane (hk 3425): a job.completed record and the worker's own ready/merged lane
+// event. Decisions and failures are not in it. The hk record is the delivery
+// mergewake reads; the design session is not told.
+func designCompletionNotice(kind string, e hubJobEventPayload) bool {
+	return kind == "job.completed" || e.NotifyType == "ready" || e.NotifyType == "merged"
+}
+
 // receiveInbox returns handled=true only after durable ownership, or on a
 // storage error for an inbox-class event. Interrupts fail open to the existing
 // handoffkeep and node receipt machinery.
@@ -175,6 +183,14 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		case "job.escalate", "job.lost", "job.revoked":
 			event.NotifyType = "decision"
 		}
+	}
+	if designCompletionNotice(kind, *event) && h.inbox.policy.designLane(lane) {
+		// hk 3425: a completion is a record, not a design-lane notice. The relay
+		// path persists the record so the producer's outbox is acknowledged, then
+		// retires it there; nothing is injected and no inbox item is filed.
+		event.designSuppressed = true
+		h.logger.Debug("completion notice suppressed for design lane", "kind", kind, "lane", lane, "event_id", event.EventID, "type", event.NotifyType)
+		return relayLaneEventResult{}, false
 	}
 	class := h.inbox.policy.classify(lane, kind, *event, replay)
 	if kind == "job.completed" && event.Late {
@@ -355,6 +371,12 @@ func (h *HubServer) replayInboxAged(record handoffkeepRelayEvent, receiptAge boo
 	}
 	result, handled := h.receiveInbox(record.Kind, &event, nil, "", true)
 	if !handled {
+		if event.designSuppressed {
+			// A row stored before hk 3425 (or one whose first retirement failed)
+			// is closed here instead of injected into a design lane.
+			h.retireDesignSuppressedRecord(context.Background(), record.ID)
+			return true
+		}
 		return false
 	}
 	if !result.PersistFailed && h.handoffkeep != nil {

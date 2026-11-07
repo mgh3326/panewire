@@ -298,6 +298,11 @@ type hubJobEventPayload struct {
 	// sinkOnly is set by hub-originated operator notices: relayLaneEvent
 	// refuses them unless the lane resolves to a sink route.
 	sinkOnly bool
+	// designSuppressed is set by receiveInbox for a routine completion notice
+	// addressed to a design lane: the relay path still persists the record so
+	// the producer's outbox is acknowledged, then retires it without injecting
+	// or filing an inbox item (hk 3425).
+	designSuppressed bool
 }
 
 type relayAckPayload struct {
