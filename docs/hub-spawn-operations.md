@@ -263,9 +263,11 @@ A request still pending 30 minutes past its deadline warns once per attempt:
 one Sentry warning `SPAWN_OWNERSHIP_STUCK <status>` fingerprinted
 `spawn-ownership-stuck` (tags job, host, status, request, attempt), one fleet
 event (`kind` `spawn`, `outcome` `stuck`, `reason` the status, `request_id`)
-and one WARN line `hub spawn ownership stuck`. A delivered outbox row
-`<request_id>:<attempt>:stuck` records it, so a hub restart does not warn
-again.
+and one WARN line `hub spawn ownership stuck`. An outbox row
+`<request_id>:<attempt>:stuck` (never relayed to a lane) is marked recorded
+only after the warning is emitted, so a hub restart does not warn again, and a
+hub that stops between writing the row and warning warns on the next pass: at
+least once, never lost.
 
 The new spawn attempt binding is durable. Restoring the existing global legacy
 job epoch/fence/revocation queue is explicitly outside this change; its documented

@@ -205,9 +205,10 @@ func validSpawnAbandonReason(reason string) bool {
 
 // noteStuckSpawn warns once when task is still pending spawnStuckAfter past
 // its deadline: a Sentry warning fingerprinted spawn-ownership-stuck and a
-// fleet event kind spawn, outcome stuck. A delivered outbox row under
-// <request>:<attempt>:stuck is the durable once-marker, so a restart does not
-// warn again.
+// fleet event kind spawn, outcome stuck. An outbox row under
+// <request>:<attempt>:stuck, marked recorded after the warning is emitted, is
+// the durable once-marker: a restart does not warn again, and a stop between
+// the row and the warning still warns on the next pass.
 func (h *HubServer) noteStuckSpawn(task hubSpawnTask) {
 	now := h.now().UTC()
 	if now.Sub(task.Deadline) < spawnStuckAfter {
@@ -217,7 +218,8 @@ func (h *HubServer) noteStuckSpawn(task hubSpawnTask) {
 	if err != nil || !spawnPending(current.Status) || current.Attempt != task.Attempt {
 		return
 	}
-	if first, err := h.inbox.store.markSpawnStuck(h.closeCtx, current, now); err != nil || !first {
+	eventID, pendingWarning, err := h.inbox.store.pendingSpawnStuck(h.closeCtx, current, now)
+	if err != nil || !pendingWarning {
 		return
 	}
 	host := spawnTaskHost(current)
@@ -232,21 +234,36 @@ func (h *HubServer) noteStuckSpawn(task hubSpawnTask) {
 		hub := sentry.NewHub(client, sentry.NewScope())
 		hub.CaptureEvent(&sentry.Event{Level: sentry.LevelWarning, Message: "SPAWN_OWNERSHIP_STUCK " + current.Status, Fingerprint: []string{"spawn-ownership-stuck"}, Tags: map[string]string{"job": current.Job, "host": firstNonEmptyString(host, "none"), "status": current.Status, "request": current.Request.RequestID, "attempt": strconv.Itoa(current.Attempt)}})
 	}
+	h.inbox.store.recordSpawnStuck(h.closeCtx, eventID)
 }
 
-// markSpawnStuck records the stuck warning for task's attempt and reports
-// whether this call recorded it first.
-func (s *laneInboxStore) markSpawnStuck(parent context.Context, task hubSpawnTask, now time.Time) (bool, error) {
+// pendingSpawnStuck makes sure task's attempt has a stuck-warning outbox row
+// and reports whether its warning is still to be emitted. The row is
+// delivered=1 so lane delivery never relays it; telemetry_recorded turns 1
+// only after the warning was emitted, so a hub that stops in between warns
+// on the next pass instead of never (at least once, never lost).
+func (s *laneInboxStore) pendingSpawnStuck(parent context.Context, task hubSpawnTask, now time.Time) (eventID string, pending bool, err error) {
 	ctx, done := s.op(parent)
 	defer done()
 	raw, err := json.Marshal(map[string]string{"status": task.Status})
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
-	result, err := s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,delivered,telemetry_recorded) VALUES(?,?,?,?,?,?,1,1) ON CONFLICT DO NOTHING`), fmt.Sprintf("%s:%d:stuck", task.Request.RequestID, task.Attempt), task.Request.RequestID, task.Job, task.Owner, string(raw), now.UnixMilli())
-	if err != nil {
-		return false, err
+	eventID = fmt.Sprintf("%s:%d:stuck", task.Request.RequestID, task.Attempt)
+	if _, err = s.db.ExecContext(ctx, s.q(`INSERT INTO spawn_notifications(event_id,request_id,job,owner,result,created_ms,delivered,telemetry_recorded) VALUES(?,?,?,?,?,?,1,0) ON CONFLICT DO NOTHING`), eventID, task.Request.RequestID, task.Job, task.Owner, string(raw), now.UnixMilli()); err != nil {
+		return "", false, err
 	}
-	n, _ := result.RowsAffected()
-	return n == 1, nil
+	var recorded int
+	if err = s.db.QueryRowContext(ctx, s.q(`SELECT telemetry_recorded FROM spawn_notifications WHERE event_id=?`), eventID).Scan(&recorded); err != nil {
+		return "", false, err
+	}
+	return eventID, recorded == 0, nil
+}
+
+// recordSpawnStuck marks an emitted stuck warning; a failed write only
+// repeats the warning on a later pass.
+func (s *laneInboxStore) recordSpawnStuck(parent context.Context, eventID string) {
+	ctx, done := s.op(parent)
+	defer done()
+	_, _ = s.db.ExecContext(ctx, s.q(`UPDATE spawn_notifications SET telemetry_recorded=1 WHERE event_id=?`), eventID)
 }

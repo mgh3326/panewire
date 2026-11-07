@@ -321,6 +321,11 @@ func TestStrandedSpawnWarnsOnceWhenStuck(t *testing.T) {
 		t.Fatalf("warned before 30 minutes: %v %v", got, s.events.all())
 	}
 	s.hub.now = func() time.Time { return s.task.Deadline.Add(31 * time.Minute) }
+	// A hub that stopped after writing the marker but before warning: the
+	// pending marker must not swallow the warning.
+	if _, pending, err := s.hub.inbox.store.pendingSpawnStuck(t.Context(), s.task, s.hub.now()); err != nil || !pending {
+		t.Fatalf("pending marker %v %v", pending, err)
+	}
 	s.run(t)()
 	s.run(t)()
 	if got := stuck(); len(got) != 1 || got[0] != "spawn-ownership-stuck" {
