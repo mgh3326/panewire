@@ -138,6 +138,41 @@ func deployShape(raw []byte) error {
 		return errors.New("no checkout pins the candidate sha")
 	}
 
+	// The three race pins plus the full -race suite where it is green. The
+	// root package's full -race run is excluded by hk 1243, so the race job
+	// must keep the pins and run the other packages in full.
+	var raceRuns string
+	for _, step := range w.Jobs["race"].Steps {
+		raceRuns += step.Run + "\n"
+	}
+	for _, want := range []string{"-race -count=3", "TestQuiet", "TestAsyncSpawn", `go list ./... | grep -v -x "$(go list -m)" | xargs go test -race`} {
+		if !strings.Contains(raceRuns, want) {
+			return errors.New("race job is missing " + want)
+		}
+	}
+	for _, job := range []string{"race", "macos", "release", "postgres", "compat", "deploy-ok"} {
+		if _, ok := w.Jobs[job]; !ok {
+			return errors.New("deploy job missing: " + job)
+		}
+	}
+	if !strings.Contains(text, "runs-on: macos-latest") || !strings.Contains(text, "gitleaks") {
+		return errors.New("deploy must run the deploy target platform (macOS) with gitleaks")
+	}
+	if !strings.Contains(text, "scripts/build-release.sh") {
+		return errors.New("deploy must build the release artifacts")
+	}
+	for _, target := range []string{"darwin_amd64", "darwin_arm64", "linux_amd64", "linux_arm64"} {
+		if !strings.Contains(text, target) {
+			return errors.New("release build is missing " + target)
+		}
+	}
+	if !strings.Contains(text, "TestLaneInboxStorePostgresMigrationsTwiceChangeNothing") {
+		return errors.New("deploy must run the deployed-schema -> candidate migration path")
+	}
+	if !strings.Contains(text, "TestTask268AC5HubFirstRolloutAndLegacyNodeCompatibility") {
+		return errors.New("deploy must run mixed hub/node version compatibility")
+	}
+
 	// Never cancelled: concurrency must say so explicitly, and the group must
 	// be one per repository so a newer head replaces only a pending entry.
 	if w.Concurrency.Cancel == nil || *w.Concurrency.Cancel {

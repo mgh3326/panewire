@@ -83,15 +83,17 @@ jobs:
         with:
           go-version: '1.27.x'
           cache: true
-      # The pins the main stage used to carry. They run here now, and the full
-      # -race suite runs beside them.
+      # The pins the main stage used to carry. They run here now, and the
+      # other packages run the full -race suite beside them.
       - run: go test -race -count=3 -run 'T1002|T1034' .
       - run: go test -race -run '^TestQuiet' .
       - run: go test -race -run '^(TestAsyncSpawn|TestSpawn|TestNodeSpawn)' .
-      # The full -race suite is red on the pre-existing hk 1243 bytes.Buffer
-      # race in the r20t5 10ms-timer tests, so that group is skipped (the
-      # T1002/T1034 pins above cover the unconfirmed-replay path).
-      - run: go test -race -skip 'TestR20T5' ./...
+      # The root package's full -race run is red on the pre-existing hk 1243
+      # bytes.Buffer race: a relay ack timer (time.AfterFunc) outlives its test
+      # and logs through the test's buffer while another timer does the same.
+      # The three pins above cover the root concurrency paths; every other
+      # package runs its full -race suite here.
+      - run: go list ./... | grep -v -x "$(go list -m)" | xargs go test -race
 
   macos:
     needs: candidate
