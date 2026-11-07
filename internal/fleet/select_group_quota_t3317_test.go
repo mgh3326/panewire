@@ -161,7 +161,8 @@ func TestSelectDryRunProductionShapeOffersAgyAndCommandcode(t *testing.T) {
 		if row == nil || row["outcome"] == "dropped:quota_unknown" || row["tier"] == nil || row["tier"] == "" {
 			t.Fatalf("%s must be a ranked candidate with a tier: %v", c.profile, row)
 		}
-		// Only the 3p group has a 7d window to pace.
+		// 3p paces on its 7d window and gemini on its 5h one (hk 3415); the
+		// commandcode pool paces on its account window.
 		if c.urgency && row["waste_urgency"] == nil {
 			t.Fatalf("%s must carry its waste urgency: %v", c.profile, row)
 		}
