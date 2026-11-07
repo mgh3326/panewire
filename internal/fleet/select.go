@@ -810,12 +810,12 @@ func (a *App) selectFor(ctx context.Context, s Spawn, req selReq) (*selPlan, err
 				x.judgments = []quotaJudgment{pres.unknownJudgment(binding, why)}
 				continue
 			}
-			p.classify(&x, *acc.Quota)
+			p.classifyRung(&x, acc.Quota)
 			if x.code == outcomeQuotaUnknown {
 				acc = pres.account(ctx, binding.key, row.Pool, binding.holders, true)
 				if sharedReason(binding.key, acc) == "" && acc.Quota != nil {
 					x.reason, x.code, x.outcome = "", "", ""
-					p.classify(&x, *acc.Quota)
+					p.classifyRung(&x, acc.Quota)
 				} else {
 					x.code = pres.accountFailureCode(binding.key)
 					x.reason, x.outcome = strings.ToLower(x.code), "dropped:"+strings.ToLower(x.code)

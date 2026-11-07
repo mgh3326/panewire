@@ -88,6 +88,10 @@ func isolateDevinShadow(client *HubClient) {
 	client.nativeQuota["devin"] = devinTestSource("", devinLoginFiles(false), func(*http.Request) (*http.Response, error) {
 		return nil, errors.New("no network in tests")
 	})
+	// agy is in shadow too: its default source would read this host's real
+	// fleet config and, with an account configured there, its real app and
+	// login.
+	client.nativeQuota["agy"] = &nativeQuotaSource{Pool: "agy", AgyAccount: func() (string, bool) { return "", false }}
 }
 
 // setDevinSwitch writes this host's fleet config with devin listed (native) or

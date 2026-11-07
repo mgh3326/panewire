@@ -305,7 +305,7 @@ panewire:
 
 The target account is refreshed with the `quota.refresh` node command instead
 of `ssh <host> pacelever refresh` (or `panewire quota refresh <pool>` for the
-claude and codex pools, and for commandcode and devin once native); `measure_timeout_s` still bounds it.
+claude and codex pools, and for commandcode, devin and agy once native); `measure_timeout_s` still bounds it.
 
 Failures never fall back to ssh (design D4):
 
@@ -438,10 +438,11 @@ overrides.
 | `credential_env` | `HANDOFFKEEP_TOKEN` | Name of the environment variable holding the bearer token. |
 | `presence_ttl_s` | `86400` | How recent a host-presence record must be to count as login evidence. |
 | `fresh_ttl_s` | `900` for `claude`, `300` otherwise | How recent a shared observation must be to count as fresh, for every pool without its own `pool_fresh_ttl_s` entry. A reading is valid as of the later of `measured_at` and `confirmed_at`: handoffkeep keeps `measured_at` when a re-measurement publishes the same values and only advances `confirmed_at`. This is pacelever's rule, so `pacelever --json` and the gate agree on a reading. A spawn delegated over ssh with a selected account carries the placing host's window for that account's pool, and the executing host rechecks that account with it (up to 86400). |
-| `native_pools` | `[]` | Pools with a native/shadow switch that this host measures itself instead of through pacelever (`["commandcode", "devin"]`; no other pool is accepted). Unlisted, the pool is in shadow: spawns keep running pacelever for it and the node logs a comparison ([docs/quota.md](quota.md#shadow-and-native)). Read at each use by the node and the CLI; an invalid file is shadow. |
+| `native_pools` | `[]` | Pools with a native/shadow switch that this host measures itself instead of through pacelever (`["commandcode", "devin", "agy"]`; no other pool is accepted). Unlisted, the pool is in shadow: spawns keep running pacelever for it and the node logs a comparison ([docs/quota.md](quota.md#shadow-and-native)). Read at each use by the node and the CLI; an invalid file is shadow. |
 | `pool_fresh_ttl_s` | unset | Optional pool → seconds table (`[quota.pool_fresh_ttl_s]`, nonnegative integers) that overrides `fresh_ttl_s` for one pool. |
-| `measure_timeout_s` | `60` | Bound on the on-target refresh (`panewire quota refresh <pool>` for claude, codex and native commandcode or devin, else `pacelever refresh`) for a remote account the spawning host does not hold. |
-| `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. |
+| `measure_timeout_s` | `60` | Bound on the on-target refresh (`panewire quota refresh <pool>` for claude, codex and native commandcode, devin or agy, else `pacelever refresh`) for a remote account the spawning host does not hold. |
+| `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. For `agy` it is the account the node measures: agy has no login to derive a key from ([docs/quota.md](quota.md#native-measurement-agy)). |
+| `measurable_accounts` | `[]` | `pool:<16-hex>` account keys this host may measure. A host measures agy, announces it and publishes under its key only when `accounts.agy` is set and `agy:<fp>` is listed here; otherwise it does not measure agy and logs one line. Read at each use. |
 | `node_env` | `~/.config/panewire/hub-node.env` | Panewire node env file; `HUB_MACHINE_ID` in it is the host id written to job records. `PANEWIRE_NODE_ENV` overrides the path. |
 
 ## `[sweep]`
@@ -514,8 +515,11 @@ stay admission gates only). A pool whose longest window's reset can be paced
 always ranks ahead of one whose cannot; unpaceable pools keep the lower
 projected use at reset (the used percentage when it cannot be paced yet) —
 then the smaller effort, then the catalog score. A pool whose reading has no
-account window (agy publishes only group windows) ranks on its group windows;
-its strictest group sets the blocking use for every rung of the account.
+account window (agy publishes only group windows) ranks on its group windows:
+an agy rung ranks and is blocked on the windows of the group it draws from
+(`gemini` or `3p`, from the catalog row's `group` or its model id), so one
+exhausted group blocks only its own rungs and a rung with no group is blocked by
+the strictest group.
 
 The pool-order policy is version `2`. A version `1` file supplied through
 `[local].pool_policy`, `PANEWIRE_POOL_POLICY`, or `simulate --policy` is refused
@@ -1251,7 +1255,7 @@ for ownership and distribution.
 | `HANDOFFKEEP_BIN` | Must resolve to the canonical current-user ~/.local/bin executable in production. |
 | `XDG_DATA_HOME` | Data home of the local ledger (`$XDG_DATA_HOME/arbiter/state.db`); production guard requires the canonical `~/.local/share`. |
 | `XDG_STATE_HOME` | State home of the role routing cache (`$XDG_STATE_HOME/panewire/model-routing.json`); default `~/.local/state`. |
-| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools, and commandcode and devin once switched native, are measured by panewire itself and ignore it. |
+| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools, and commandcode, devin and agy once switched native, are measured by panewire itself and ignore it. |
 | `PANEWIRE_NODE_ENV` | Panewire node env file for `HUB_MACHINE_ID` (job record host id); default `~/.config/panewire/hub-node.env`, or `[quota].node_env`. |
 | `ARBITER_INBOX_ROOT` | Jobs root; production guard requires the canonical inbox. |
 | `HERDR_SESSION` | Herdr session passed through or selected for remote execution. |

@@ -188,7 +188,7 @@ func currentWith(o *Observation, key string, now time.Time, ttl time.Duration, f
 	}
 	for _, b := range o.Buckets {
 		used := b.UsedPct
-		if !quota.ValidPct(&used) || b.Scope != quota.ScopeAccount && b.Scope != quota.ScopeModel {
+		if !quota.ValidPct(&used) || b.Scope != quota.ScopeAccount && b.Scope != quota.ScopeModel && b.Scope != quota.ScopeGroup {
 			return Reading{}, false
 		}
 		if b.ResetsAt != nil && !b.ResetsAt.After(now) {

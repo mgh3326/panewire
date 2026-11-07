@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -119,6 +120,8 @@ type paceleverRunnerFake struct {
 	calls  []string
 	output string
 	status string
+	// pool is the pool whose refresh it answers; empty is commandcode.
+	pool string
 }
 
 func (p *paceleverRunnerFake) run(_ context.Context, args ...string) ([]byte, error) {
@@ -126,7 +129,7 @@ func (p *paceleverRunnerFake) run(_ context.Context, args ...string) ([]byte, er
 	defer p.mu.Unlock()
 	p.calls = append(p.calls, strings.Join(args, " "))
 	switch {
-	case len(args) == 2 && args[0] == "refresh" && args[1] == "commandcode" && p.output != "":
+	case len(args) == 2 && args[0] == "refresh" && args[1] == cmp.Or(p.pool, "commandcode") && p.output != "":
 		return []byte(p.output), nil
 	case len(args) == 1 && args[0] == "--json":
 		return []byte(p.status), nil

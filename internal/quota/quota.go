@@ -45,9 +45,11 @@ const (
 
 	ScopeAccount = "account"
 	ScopeModel   = "model"
+	ScopeGroup   = "group" // a provider metering group (agy: gemini, 3p)
 )
 
-// Scope says what a bucket limits: the whole account or one model.
+// Scope says what a bucket limits: the whole account, one model or one
+// metering group.
 type Scope struct {
 	Kind string
 	Name string

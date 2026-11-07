@@ -24,7 +24,8 @@ const (
 	KindAuto = "auto"
 )
 
-// Bucket is one published window. The scope is "account" or "model".
+// Bucket is one published window. The scope is "account", "model" or "group";
+// a group bucket names its metering group in Model.
 type Bucket struct {
 	Window   string     `json:"window"`
 	UsedPct  float64    `json:"used_pct"`
