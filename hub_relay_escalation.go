@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -14,6 +15,11 @@ import (
 // send, or the pane never showed the text taken -- nobody else knows the worker
 // did not get it. The hub then tells the job's design lane once, naming the
 // event, instead of leaving a quiet gap.
+//
+// hk 3431: only when someone can act on it, and at most once per window. A
+// worker lane whose hub jobs have all ended, or whose live job's hk task has
+// ended, is logged instead (unconfirmedNoticeMoot); drops inside the window
+// are folded into the next notice (unconfirmedNoticeWindows).
 
 const (
 	// unconfirmedEscalationPrefix starts the producer event id of the
@@ -94,8 +100,13 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 	if !relayDroppedIsUnconfirmed(dropped.Reason) || dropped.OriginalEventID < 1 || dropped.Lane == "" || h.handoffkeep == nil {
 		return
 	}
+	var design string
 	retry := func(why string) {
 		if attempt >= len(unconfirmedEscalationBackoff) {
+			if design != "" {
+				// Nobody was told: the next notice names this drop.
+				h.unconfirmedNotices.fold(design, dropped.Lane, dropped.OriginalEventID, h.now())
+			}
 			h.logger.Error("relay unconfirmed escalation gave up", "event_id", dropped.OriginalEventID, "lane", dropped.Lane, "why", why)
 			return
 		}
@@ -111,9 +122,18 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 	if !found || record.DeliveredAt != "" || !escalatesWhenUnconfirmed(record) {
 		return
 	}
-	design := h.designLaneFor(dropped.Lane)
+	design = h.designLaneFor(dropped.Lane)
 	if design == "" {
 		h.logger.Warn("relay unconfirmed escalation has no design lane", "event_id", record.ID, "lane", dropped.Lane, "reason", dropped.Reason)
+		return
+	}
+	if why := h.unconfirmedNoticeMoot(dropped.Lane); why != "" {
+		h.logger.Info("relay unconfirmed escalation skipped; nobody can act on it", "event_id", record.ID, "lane", dropped.Lane, "design_lane", design, "reason", dropped.Reason, "why", why)
+		return
+	}
+	note, folded, send := h.unconfirmedNotices.admit(design, dropped.Lane, record.ID, h.now())
+	if !send {
+		h.logger.Info("relay unconfirmed escalation folded into the next notice", "event_id", record.ID, "lane", dropped.Lane, "design_lane", design, "reason", dropped.Reason, "why", "folded", "folded", folded)
 		return
 	}
 	eventID := fmt.Sprintf("%s%d", unconfirmedEscalationPrefix, record.ID)
@@ -126,19 +146,26 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 		Host:       "hub",
 		Label:      "delivery-unconfirmed",
 		Reason:     dropped.Reason,
-		Text:       unconfirmedEscalationText(record, dropped, machine),
+		Text:       unconfirmedEscalationText(record, dropped, machine) + note.text,
 	}
 	result := h.relayLaneEventContext(ctx, event, nil)
-	if result.PersistFailed && (result.PersistStatus == 0 || result.PersistStatus >= 500) {
-		retry("persist_failed")
-		return
-	}
-	if result.ID == 0 || result.Duplicate {
+	switch {
+	case result.Duplicate && attempt > 0 || result.ID != 0 && !result.Duplicate:
+		// Stored: a new row, or a retry whose earlier post was stored though
+		// its reply was lost.
+		h.unconfirmedNotices.record(design, dropped.Lane, record.ID, note, h.now())
+		if !result.Duplicate {
+			h.logger.Warn("relay delivery unconfirmed; design lane told", "event_id", record.ID, "lane", dropped.Lane, "design_lane", design, "reason", dropped.Reason)
+		}
+	case result.Duplicate:
 		// A second drop of the same row posts the same event id and the
 		// durable idempotency answers it: the design lane was told already.
-		return
+	case result.PersistFailed && (result.PersistStatus == 0 || result.PersistStatus >= 500):
+		retry("persist_failed")
+	default:
+		// The store refused the notice: nobody was told.
+		h.unconfirmedNotices.fold(design, dropped.Lane, record.ID, h.now())
 	}
-	h.logger.Warn("relay delivery unconfirmed; design lane told", "event_id", record.ID, "lane", dropped.Lane, "design_lane", design, "reason", dropped.Reason)
 }
 
 // unconfirmedEscalationText is the one line the design lane reads. It carries
@@ -147,4 +174,170 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 func unconfirmedEscalationText(record handoffkeepRelayEvent, dropped relayDroppedPayload, machine string) string {
 	return fmt.Sprintf("[delivery unconfirmed] event %d (%s, producer id %s) for lane %s was not confirmed on %s pane %s: %s. The worker may not have it; read the pane or re-send. Reported once.",
 		record.ID, record.Kind, truncateRelayText(record.EventID, 64), dropped.Lane, truncateRelayText(machine, 64), truncateRelayText(dropped.Pane, 64), dropped.Reason)
+}
+
+// unconfirmedNoticeMoot names why nobody can act on a notice about the worker
+// lane: "job_ended" when the hub knows jobs in that lane and every one is
+// completed or orphaned, "task_ended" when every live one's hk task has ended.
+// It returns "" -- send the notice -- when the hub knows no job in the lane (a
+// hub restart forgets ended jobs, and a lane may run work the hub never
+// placed), when a live job has no task, and when a job record or task cannot
+// be read.
+func (h *HubServer) unconfirmedNoticeMoot(lane string) string {
+	known := false
+	var live []string
+	h.mu.Lock()
+	for id, job := range h.jobs {
+		if job.AgentLabel != lane {
+			continue
+		}
+		known = true
+		if !job.Completed && !job.Orphaned {
+			live = append(live, id)
+		}
+	}
+	h.mu.Unlock()
+	if !known {
+		return ""
+	}
+	if len(live) == 0 {
+		return "job_ended"
+	}
+	ctx, cancel := context.WithTimeout(h.closeCtx, handoffkeepTimeout)
+	defer cancel()
+	for _, id := range live {
+		task, app, err := h.jobTaskID(ctx, id)
+		if err != nil {
+			h.logger.Warn("job record unreadable; unconfirmed delivery reported", "job", id, "lane", lane)
+			return ""
+		}
+		if task == "" {
+			return ""
+		}
+		status, err := app.TaskStatus(ctx, task)
+		if err != nil {
+			h.logger.Warn("task unreadable; unconfirmed delivery reported", "job", id, "task", task, "lane", lane)
+			return ""
+		}
+		if !status.Ended() {
+			return ""
+		}
+	}
+	return "task_ended"
+}
+
+// unconfirmedNoticeSpacing is how long one stored notice speaks for a worker
+// lane: a later drop inside it is folded into the next notice.
+const unconfirmedNoticeSpacing = 30 * time.Minute
+
+// unconfirmedNoticeFoldLimit bounds the folded rows one window tracks by id;
+// a fold past it is only counted, so a store that refuses every notice cannot
+// grow the window without limit.
+const unconfirmedNoticeFoldLimit = 64
+
+// unconfirmedNoticeWindows records, per (design lane, worker lane), the last
+// notice the store accepted and the drops folded since. Nothing is held before
+// a notice is stored, so a notice that is never stored (every retry gave up,
+// the store refused it, or a retry stopped early) records nothing and the next
+// drop is sent. Two drops at the same moment may both be sent: one extra
+// notice is accepted, a lost one is not. It lives in memory: a hub restart
+// forgets it, so the first drop after a restart is sent at once.
+type unconfirmedNoticeWindows struct {
+	mu      sync.Mutex
+	byLanes map[[2]string]*unconfirmedNoticeWindow
+}
+
+type unconfirmedNoticeWindow struct {
+	told   time.Time           // when the last stored notice was recorded; zero for none
+	row    int64               // the row that notice reports
+	folded map[int64]time.Time // rows folded and not yet announced, by fold time
+	over   int                 // folds past unconfirmedNoticeFoldLimit, counted only
+	overAt time.Time           // the first of them
+}
+
+// unconfirmedNoticeNote is what one notice announces: its text, and the folds
+// it names, which recording the notice clears.
+type unconfirmedNoticeNote struct {
+	text string
+	rows []int64
+	over int
+}
+
+// window returns the window of the two lanes. The caller holds n.mu.
+func (n *unconfirmedNoticeWindows) window(design, worker string) *unconfirmedNoticeWindow {
+	if n.byLanes == nil {
+		n.byLanes = make(map[[2]string]*unconfirmedNoticeWindow)
+	}
+	key := [2]string{design, worker}
+	if n.byLanes[key] == nil {
+		n.byLanes[key] = &unconfirmedNoticeWindow{folded: make(map[int64]time.Time)}
+	}
+	return n.byLanes[key]
+}
+
+// admit decides whether row's notice is posted now. A drop of another row
+// while a stored notice is younger than unconfirmedNoticeSpacing is folded and
+// not posted; folded is the count waiting. Otherwise the note names the drops
+// folded since, row itself excluded, from the earliest fold time. The row of
+// the stored notice is posted again: the durable idempotency answers it.
+func (n *unconfirmedNoticeWindows) admit(design, worker string, row int64, now time.Time) (note unconfirmedNoticeNote, folded int, send bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	w := n.window(design, worker)
+	if !w.told.IsZero() && now.Sub(w.told) < unconfirmedNoticeSpacing && row != w.row {
+		w.fold(row, now)
+		return note, len(w.folded) + w.over, false
+	}
+	note = unconfirmedNoticeNote{rows: []int64{row}, over: w.over}
+	since := w.overAt
+	for id, at := range w.folded {
+		if id == row {
+			continue
+		}
+		note.rows = append(note.rows, id)
+		if since.IsZero() || at.Before(since) {
+			since = at
+		}
+	}
+	if count := len(note.rows) - 1 + note.over; count > 0 {
+		note.text = fmt.Sprintf(" (+%d more unconfirmed for this lane since %s UTC)", count, since.UTC().Format("15:04"))
+	}
+	return note, 0, true
+}
+
+// record notes that the store accepted row's notice: it holds the window from
+// now, and the folds its note named are cleared. Folds made while it was in
+// flight stay for the next notice.
+func (n *unconfirmedNoticeWindows) record(design, worker string, row int64, note unconfirmedNoticeNote, now time.Time) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	w := n.window(design, worker)
+	w.told, w.row = now, row
+	for _, id := range note.rows {
+		delete(w.folded, id)
+	}
+	if w.over -= note.over; w.over <= 0 {
+		w.over, w.overAt = 0, time.Time{}
+	}
+}
+
+// fold counts row, whose notice nobody received, for the next notice.
+func (n *unconfirmedNoticeWindows) fold(design, worker string, row int64, now time.Time) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.window(design, worker).fold(row, now)
+}
+
+func (w *unconfirmedNoticeWindow) fold(row int64, now time.Time) {
+	if _, seen := w.folded[row]; seen {
+		return
+	}
+	if len(w.folded) < unconfirmedNoticeFoldLimit {
+		w.folded[row] = now
+		return
+	}
+	if w.over == 0 {
+		w.overAt = now
+	}
+	w.over++
 }

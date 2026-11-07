@@ -16,6 +16,7 @@ on:
           - all
           - test
           - postgres
+          - deploy
 
 permissions:
   contents: read
@@ -43,6 +44,9 @@ jobs:
   ci:
     name: ci at target ref
     needs: resolve
+    # Suite deploy is the deploy stage: it calls deploy.yml below, and ci.yml
+    # does not know that suite name.
+    if: ${{ inputs.suite != 'deploy' }}
     # Concurrency is keyed on the RESOLVED sha plus the suite (hk 2199): a
     # dispatch by branch name and one by its sha share a key, and a dispatch on
     # the same sha cancels only the same suite, never a run of a different
@@ -58,13 +62,29 @@ jobs:
       ref: ${{ needs.resolve.outputs.sha }}
       suite: ${{ inputs.suite }}
 
+  deploy:
+    name: deploy at target ref
+    needs: resolve
+    # Any ref can run the deploy stage (r2 §4-2/§4-4). deploy.yml applies its
+    # own "never cancelled, one per repo" concurrency rule, and posts the
+    # deploy-ok commit status with the candidate evidence.
+    if: ${{ inputs.suite == 'deploy' }}
+    permissions:
+      contents: read
+      statuses: write
+    uses: ./.github/workflows/deploy.yml
+    with:
+      ref: ${{ needs.resolve.outputs.sha }}
+
   status:
     name: post ci-ok status
     # A completed dispatch posts a COMMIT STATUS named ci-ok on the target sha;
     # PR CI reports a CHECK RUN named ci-ok. For fixed-base drafts the gate reads
     # the commit status on the exact head, which only exists for suite=all —
     # partial suites post ci-ok-<suite> and name their check ci-ok (<suite>).
-    if: always() && needs.resolve.result == 'success'
+    # Suite deploy posts deploy-ok itself from deploy.yml, so it has no ci-ok
+    # status to add.
+    if: always() && needs.resolve.result == 'success' && inputs.suite != 'deploy'
     needs: [resolve, ci]
     runs-on: ubuntu-latest
     concurrency:
@@ -73,8 +93,7 @@ jobs:
     env:
       GH_TOKEN: ${{ github.token }}
       TARGET_SHA: ${{ needs.resolve.outputs.sha }}
-      # The ci-ok gate's verdict, not the whole run: the advisory macOS job
-      # may fail or be cancelled without failing the dispatch.
+      # The ci-ok gate's verdict, not the whole run.
       RESULT: ${{ needs.ci.outputs.ok == 'true' && 'success' || needs.ci.result == 'success' && 'failure' || needs.ci.result }}
       SUITE: ${{ inputs.suite }}
       RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}

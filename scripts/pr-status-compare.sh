@@ -63,6 +63,15 @@ hk_check_counts() {
          | group_by(.) | map("\(.[0]):\(length)") | sort | join(",")'
 }
 hk_thread_count() { jq '[.threads[] | select(.resolved | not)] | length'; }
+# A function, not `$(case ...)`: bash 3.2 (the macOS runner's /bin/bash)
+# cannot parse a case statement inside a command substitution.
+panewire_class() {
+  case "$1" in
+    merged) printf 'MERGED' ;;
+    closed) printf 'CLOSED' ;;
+    *) printf 'OPEN' ;;
+  esac
+}
 
 # gh before 2.50 has `pr checks --required` but no `--json`: read the second
 # tab-separated column of its table, which is the same bucket word.
@@ -107,7 +116,9 @@ for n in "$@"; do
     start=$(now_ms)
     hk_json=$("$hk_bin" changes show --repo "$repo" --pr "$n" 2>/dev/null) || hk_json=''
     hk_ms=$(($(now_ms) - start))
-    if jq -e '.change.state' >/dev/null 2>&1 <<<"$hk_json"; then
+    # jq 1.6 exits 0 for `-e` with an empty here-string, so an empty answer
+    # must be rejected before parsing.
+    if [ -n "$hk_json" ] && jq -e '.change.state' >/dev/null 2>&1 <<<"$hk_json"; then
       hk_state=$(hk_class <<<"$hk_json")
       hk_checks=$(hk_check_counts <<<"$hk_json")
       hk_findings=$(hk_thread_count <<<"$hk_json")
@@ -121,7 +132,7 @@ for n in "$@"; do
 
   if [ "$source" = "panewire" ] && [ "$(jq -r '(.snapshot // .mergewake) != null' <<<"$status_json")" = "true" ]; then
     panewire_state=$(jq -r '(.snapshot // .mergewake).state' <<<"$status_json")
-    class=$(case "$panewire_state" in merged) echo MERGED ;; closed) echo CLOSED ;; *) echo OPEN ;; esac)
+    class=$(panewire_class "$panewire_state")
     panewire_checks=$(panewire_check_counts <<<"$status_json")
     panewire_findings=$(jq '(.findings | length) + (.findings_omitted // 0)' <<<"$findings_json")
     state_agrees=$([ "$class" = "$gh_state" ] && echo yes || echo no)

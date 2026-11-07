@@ -50,6 +50,9 @@ type App struct {
 	Wake         Waker
 	LoadRatio    func(context.Context) (float64, error)
 	JobStore     JobStore
+	// TaskState reads one hk task; nil builds it from [quota] / the
+	// handoffkeep env on first use (TaskStatus).
+	TaskState TaskStateReader
 	// BenchStore reads and writes the shared bench reps. Nil builds it from
 	// [quota] / the handoffkeep env on first use; a node sets the store built
 	// from its own spawn.json credential.

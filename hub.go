@@ -513,6 +513,8 @@ type HubServer struct {
 	// cannot announce the same retire twice (#658).
 	replayRetired      map[int64]struct{}
 	replayRetiredOrder lruIndex[int64]
+	// unconfirmedNotices spaces delivery-unconfirmed notices (hk 3431).
+	unconfirmedNotices unconfirmedNoticeWindows
 	handoffkeep        *handoffkeepRelayClient
 	chatStore          ChatStore
 	chatDeskLane       string

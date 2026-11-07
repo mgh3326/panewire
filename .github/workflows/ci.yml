@@ -19,8 +19,7 @@ on:
     outputs:
       ok:
         # 'true' when the ci-ok gate passed. ci-any-ref posts its status from
-        # this, not from the whole run, so the advisory test-macos job cannot
-        # fail or cancel a dispatch.
+        # this, not from the whole run.
         value: ${{ jobs.ci-ok.outputs.ok }}
 
 concurrency:
@@ -88,7 +87,7 @@ jobs:
     # keeps that name and fails when the vet job or any shard fails. The
     # process-group kill and reaping behaviour the R19 quota path depends on
     # differs between Darwin and Linux, so both are exercised: Linux here as a
-    # required check, Darwin in test-macos as an advisory one.
+    # required check, Darwin in deploy.yml's macos job (the deploy stage).
     #
     # A needed job that was only cancelled (a hosted runner not acquired) is
     # not a red verdict, so this job is then skipped, as ci-ok is (hk 2924).
@@ -113,9 +112,12 @@ jobs:
           case "$POSTGRES_RESULT" in success|skipped) ;; *) echo "postgres job did not succeed: $POSTGRES_RESULT"; exit 1 ;; esac
 
   post-test:
-    # The process-group kill and reaping behaviour the R19 quota path depends on
-    # differs between Darwin and Linux, so both are exercised: Linux here as a
-    # required check, Darwin in test-macos as an advisory one.
+    # The main stage's basic check set. Race, macOS and the release build live
+    # in deploy.yml (operator decision 2026-11-07,
+    # hk:doc decision/2026-11-07/fleet-ci-three-tiers-r2 §1), so a main push
+    # stays under ten minutes. The process-group kill and reaping behaviour
+    # the R19 quota path depends on differs between Darwin and Linux: Linux
+    # here, Darwin in deploy.yml's macos job.
     if: ${{ github.event_name != 'pull_request' && contains(fromJSON('["all","test"]'), inputs.suite || 'all') }}
     strategy:
       fail-fast: false
@@ -140,49 +142,7 @@ jobs:
       - run: go vet ./...
       - run: go build ./...
       - run: go test ./...
-      # The full -race suite stays red on a pre-existing hk 1243 bytes.Buffer
-      # race in the r20t5 10ms-timer tests, so the unconfirmed-replay races
-      # (#1002/#1034) get their own -race pin on both OSes.
-      - run: go test -race -count=3 -run 'T1002|T1034' .
-      - run: go test -race -run '^TestQuiet' .
-      - run: go test -race -run '^(TestAsyncSpawn|TestSpawn|TestNodeSpawn)' .
       - run: sh -n deploy/alloy/install-linux.sh deploy/alloy/run-alloy.sh
-
-  test-macos:
-    # Advisory: hosted macOS runners are often not acquired, so this job never
-    # gates ci-ok or mergewake (operator decision 2026-11-05). Same steps as
-    # test, plus gitleaks, which only the macOS runner can install.
-    name: test (macos-latest, advisory)
-    # Post-merge and dispatch runs include this advisory job; ci-ok does not wait for it.
-    if: ${{ contains(fromJSON('["all","test"]'), inputs.suite || 'all') && github.event_name != 'pull_request' }}
-    runs-on: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.PANEWIRE_POST_MAC_RUNNER) || 'macos-latest' }}
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27.x'
-          cache: true
-      - name: gofmt
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "gofmt needed on:"; echo "$unformatted"
-            exit 1
-          fi
-      - run: go vet ./...
-      - run: go test ./...
-      # The full -race suite stays red on a pre-existing hk 1243 bytes.Buffer
-      # race in the r20t5 10ms-timer tests, so the unconfirmed-replay races
-      # (#1002/#1034) get their own -race pin on both OSes.
-      - run: go test -race -count=3 -run 'T1002|T1034' .
-      - run: go test -race -run '^TestQuiet' .
-      - run: go test -race -run '^(TestAsyncSpawn|TestSpawn|TestNodeSpawn)' .
-      - run: sh -n deploy/alloy/install-linux.sh deploy/alloy/run-alloy.sh
-      # gitleaks is installed through Homebrew, which only the macOS runner has.
-      - run: brew install gitleaks && gitleaks git --no-banner --config .gitleaks.toml
 
   store-paths:
     # Pull request only: does this change touch the hub inbox store? The
@@ -237,6 +197,7 @@ jobs:
           go-version: '1.27.x'
           cache: true
       - name: store contract, must-ack and migrate-sqlite on Postgres
+        if: ${{ github.event_name == 'pull_request' }}
         env:
           PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
         shell: bash
@@ -245,6 +206,30 @@ jobs:
           set -o pipefail
           go test -race -count=2 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead|HubServerOpensPostgresInbox|HubMigrateSQLite|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-test.log"
           if grep -q -- '--- SKIP' "$RUNNER_TEMP/postgres-test.log"; then
+            echo "a Postgres test skipped"; exit 1
+          fi
+      # Main stage (r2 §1): the full Postgres integration test, without -race,
+      # for every store test, and never narrowed by changed paths.
+      - name: store contract on Postgres (main stage, no race)
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run 'LaneInboxStore|MustAck|IdleWakeKeepsRead' . 2>&1 | tee "$RUNNER_TEMP/postgres-store.log"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/postgres-store.log"; then
+            echo "a Postgres test skipped"; exit 1
+          fi
+      - name: migration and startup check on Postgres (main stage)
+        if: ${{ github.event_name != 'pull_request' }}
+        env:
+          PANEWIRE_TEST_HUB_DATABASE_URL: postgres://postgres@localhost:55432/panewire?sslmode=disable
+        shell: bash
+        run: |
+          set -o pipefail
+          go test -count=1 -v -run 'HubServerOpensPostgresInbox|HubMigrateSQLite|HubDatabaseURL' . 2>&1 | tee "$RUNNER_TEMP/postgres-migrate.log"
+          if grep -q -- '--- SKIP' "$RUNNER_TEMP/postgres-migrate.log"; then
             echo "a Postgres test skipped"; exit 1
           fi
 
