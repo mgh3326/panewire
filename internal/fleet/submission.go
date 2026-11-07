@@ -155,12 +155,18 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 			s.Task = os.Getenv("HK_TASK_ID")
 		}
 	}
-	if s.ParentJob != "" && s.Owner == "" {
-		parent, err := a.resolveParent(ctx, s.ParentJob)
-		if err != nil {
-			return Submission{}, fail(exitStateConflict, "parent metadata unreadable; restore handoffkeep access before retrying")
+	if s.Owner == "" {
+		if s.ownerOmitted {
+			if err := a.resolveOwner(ctx, &s); err != nil {
+				return Submission{}, err
+			}
+		} else if s.ParentJob != "" {
+			parent, err := a.resolveParent(ctx, s.ParentJob)
+			if err != nil {
+				return Submission{}, fail(exitStateConflict, "parent metadata unreadable; restore handoffkeep access before retrying")
+			}
+			s.Owner = parent.Owner
 		}
-		s.Owner = parent.Owner
 	}
 
 	if s.CWD == "" || s.Prompt == "" || !validID(s.Job) || !validID(s.Label) || !isNumeric(s.Task) && s.ParentJob == "" {

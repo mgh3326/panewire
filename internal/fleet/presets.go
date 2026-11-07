@@ -35,22 +35,11 @@ func (a *App) workPreset(ctx context.Context, args []string) (Spawn, error) {
 	} else {
 		cwd = firstNonempty(str(task.Refs, "worktree"), str(task.Refs, "cwd"), cwd)
 	}
-	caller := firstNonempty(os.Getenv("PANEWIRE_LANE"), str(a.Config.Local, "lane"))
-	if caller == "" && os.Getenv("ARBITER_JOB") != "" {
-		j, e := a.resolveParent(ctx, os.Getenv("ARBITER_JOB"))
-		if e != nil {
-			return Spawn{}, fail(exitStateConflict, "caller job metadata unavailable; set PANEWIRE_LANE or pass --owner/--parent: %v", e)
-		}
-		caller = firstNonempty(j.Label, j.Owner)
-	}
 	defaults := []string{"-c", cwd, "-m", "auto", "-p", firstNonempty(str(task.Refs, "brief_path"), filepath.Join(a.Jobs, job, "brief.md")), "-w", "workers", "-l", job, "--job", job, "--t", strings.ToUpper(marker[2]), "--task", id, "--host", "auto", "--report", firstNonempty(str(task.Refs, "report_path"), filepath.Join(a.Jobs, job, "report.md"))}
-	defaults = append(defaults, "--role", "worker", "--owner", caller)
+	defaults = append(defaults, "--role", "worker")
 	s, err := parseSpawn(append(defaults, args[1:]...))
 	if err != nil {
 		return s, err
-	}
-	if s.Owner == "" {
-		return s, fail(exitUsage, "caller lane unknown; set PANEWIRE_LANE or pass --owner LANE")
 	}
 	return s, nil
 }

@@ -241,6 +241,8 @@ func TestRespawnUnreadableParentStateKeepsTask(t *testing.T) {
 func TestRespawnSavedRequestReplayRebindsOnce(t *testing.T) {
 	fx := newRebindFixture(t, "lost", rebindParent)
 	fx.s.Report, fx.s.ReportRelative = "", filepath.Join(fx.s.Job, "report.md")
+	// A submitted request always carries the owner the submitter resolved.
+	fx.s.Owner = "owner"
 	saved := submissionArgs(fx.s)
 	replay := func() error {
 		s, e := parseSpawn(saved)

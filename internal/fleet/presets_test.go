@@ -11,12 +11,14 @@ import (
 
 func TestPresetFlagSets(t *testing.T) {
 	a := testApp(t)
+	// The pane's own lane is not the owner any more: an omitted --owner is
+	// resolved from the task's hk project by the spawn path.
 	t.Setenv("PANEWIRE_LANE", "caller-lane")
 	a.Runner = &fakeRunner{Do: func(c Command) Result {
 		return Result{Out: `{"id":42,"title":"change (grade A, T1)","state":"ready","refs":{"worktree":{"path":"/work/project.feature"}}}`}
 	}}
 	job := "task42-work"
-	want, err := parseSpawn([]string{"-c", "/work/project.feature", "-m", "auto", "-p", filepath.Join(a.Jobs, job, "brief.md"), "-w", "workers", "-l", job, "--job", job, "--t", "T1", "--task", "42", "--host", "auto", "--report", filepath.Join(a.Jobs, job, "report.md"), "--role", "worker", "--owner", "caller-lane", "--dry-run"})
+	want, err := parseSpawn([]string{"-c", "/work/project.feature", "-m", "auto", "-p", filepath.Join(a.Jobs, job, "brief.md"), "-w", "workers", "-l", job, "--job", job, "--t", "T1", "--task", "42", "--host", "auto", "--report", filepath.Join(a.Jobs, job, "report.md"), "--role", "worker", "--dry-run"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -28,6 +30,9 @@ func TestPresetFlagSets(t *testing.T) {
 		g, _ := json.Marshal(got)
 		w, _ := json.Marshal(want)
 		t.Fatalf("preset=%s\nlong=%s", g, w)
+	}
+	if got.Owner != "" || !got.ownerOmitted {
+		t.Fatalf("pane lane must not become the owner: %+v", got)
 	}
 }
 
