@@ -66,6 +66,31 @@ func (a *App) workspaceTrust(ctx context.Context, s Spawn, seat Seat, env []stri
 			data["trusted_paths"] = append(paths, cwd)
 			return nil
 		})
+	case "agy":
+		// agy keeps trustedWorkspaces in its settings.json; it did not honour
+		// a trusted parent (a trusted ~/work still prompted for a new child
+		// worktree), so only the exact cwd counts as already trusted.
+		path := filepath.Join(a.Home, ".gemini", "antigravity-cli", "settings.json")
+		return a.mergeStore(ctx, path, false, func(data map[string]any) error {
+			var paths []any
+			if data["trustedWorkspaces"] != nil {
+				var ok bool
+				if paths, ok = data["trustedWorkspaces"].([]any); !ok {
+					return fail(exitConfig, "malformed workspace trust store: agy trustedWorkspaces is not a list")
+				}
+			}
+			for _, path := range paths {
+				base, ok := path.(string)
+				if !ok {
+					return fail(exitConfig, "malformed workspace trust store: invalid agy trusted workspace")
+				}
+				if base == cwd {
+					return nil
+				}
+			}
+			data["trustedWorkspaces"] = append(paths, cwd)
+			return nil
+		})
 	case "codex":
 		home := firstNonempty(os.Getenv("CODEX_HOME"), filepath.Join(a.Home, ".codex"))
 		for _, entry := range env {
@@ -149,7 +174,7 @@ func (a *App) mergeStore(ctx context.Context, path string, required bool, mutate
 	data := map[string]any{}
 	if len(raw) > 0 {
 		if e = uniqueJSON(raw); e != nil {
-			return e
+			return fail(exitConfig, "malformed workspace trust store: %v", e)
 		}
 		if e = json.Unmarshal(raw, &data); e != nil || data == nil {
 			return fail(exitConfig, "malformed workspace trust store")
