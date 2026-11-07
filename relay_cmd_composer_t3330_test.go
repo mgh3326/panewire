@@ -52,15 +52,28 @@ case "$1 $2" in
   # the keypress just submitted.
   if [ "$src" = visible ] && [ -f "$d/stale" ]; then buf=$(cat "$d/stale"); rm "$d/stale"; fi
   { cat "$d/submitted"
-    echo '` + t3330CmdDivider + `'
-    if [ -z "$buf" ] && [ -f "$d/suggestion" ]; then
+    if [ $fmt = ansi ] && [ -f "$d/placeholder" ]; then
+      # cmd's dividers are drawn in the muted truecolour (hk 3374)
+      printf '\033[38;2;138;148;168m%s\033[0m\n' '` + t3330CmdDivider + `'
+    else
+      echo '` + t3330CmdDivider + `'
+    fi
+    if [ -z "$buf" ] && [ -f "$d/placeholder" ]; then
+      # cmd's idle composer, byte for byte from the live pane: the cursor cell
+      # is reverse video, the rest of the placeholder is muted, not dim.
+      if [ $fmt = ansi ]; then printf '❯ \033[0m\033[7mA\033[0m\033[38;2;138;148;168msk your question...\033[0m\n'; else echo '❯ Ask your question...'; fi
+    elif [ -z "$buf" ] && [ -f "$d/suggestion" ]; then
       # an idle composer holds claude's dim prompt suggestion; only the ANSI
       # read can tell it from a draft.
       if [ $fmt = ansi ]; then printf '❯ \033[2m%s\033[0m\n' "$(cat "$d/suggestion")"; else echo "❯ $(cat "$d/suggestion")"; fi
     else
       echo "❯ $buf"
     fi
-    echo '` + t3330CmdDivider + `'; } ;;
+    if [ $fmt = ansi ] && [ -f "$d/placeholder" ]; then
+      printf '\033[38;2;138;148;168m%s\033[0m\n' '` + t3330CmdDivider + `'
+    else
+      echo '` + t3330CmdDivider + `'
+    fi; } ;;
 "agent prompt"|"agent send-keys")
   echo '{"error":{"code":"agent_not_ready"}}' >&2
   exit 1 ;;

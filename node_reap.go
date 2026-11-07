@@ -113,6 +113,12 @@ func validJobDoneResult(result JobDoneResult) bool {
 const (
 	nodeCodexIdlePlaceholder = "Ask Codex to do anything"
 	nodeDevinIdlePlaceholder = "Ask Devin to build features, fix bugs, or work on your code"
+	// cmd draws its placeholder in the muted foreground its dividers use, not
+	// dim, so it is told apart by style (nodeScreenRow.idlePlaceholder). The
+	// literal stays as a guard: the muted colour is shared by the dividers and
+	// the footer, so it proves "not a draft" only for the one text known to be
+	// drawn that way; any other muted text keeps the pane.
+	nodeCmdIdlePlaceholder = "Ask your question..."
 )
 
 // nodeCodexQueueHeadings title the rows codex draws above its composer for
@@ -129,14 +135,17 @@ var nodeCodexQueueHeadings = []string{
 // harness's idle one reads as text, which keeps the pane. The screen is an ANSI
 // read (nodeReadScreen). A Claude composer whose every visible character is
 // dim (SGR 2) is a prompt suggestion, which is not unsent text, so it reads
-// empty; one non-dim character, typed text, keeps the pane.
+// empty; one non-dim character, typed text, keeps the pane. cmd draws the same
+// two-divider composer, so it takes that rule, and its idle placeholder
+// counts as empty too (nodeCmdIdlePlaceholder). The relay presend for cmd
+// asks through here as "cmd", so the reap and the relay read one rule.
 func nodeComposerState(harness, screen string) string {
 	rows := parseNodeScreen(screen)
 	screen = nodeScreenPlain(screen)
 	if strings.EqualFold(harness, "codex") {
 		return nodeCodexComposerState(screen)
 	}
-	if strings.EqualFold(harness, "claude") {
+	if isClaude, isCmd := strings.EqualFold(harness, "claude"), strings.EqualFold(harness, "cmd"); isClaude || isCmd {
 		var dividers []int
 		for i, row := range rows {
 			if line := row.String(); strings.Contains(line, "─") && strings.Trim(line, " \t─") == "" {
@@ -146,7 +155,12 @@ func nodeComposerState(harness, screen string) string {
 		if len(dividers) < 2 {
 			return nodeComposerUnknown
 		}
-		for i, row := range rows[dividers[len(dividers)-2]+1 : dividers[len(dividers)-1]] {
+		top, bottom := dividers[len(dividers)-2], dividers[len(dividers)-1]
+		muted := rows[top].ruleForeground()
+		if muted != rows[bottom].ruleForeground() {
+			muted = ""
+		}
+		for i, row := range rows[top+1 : bottom] {
 			from := 0
 			if i == 0 {
 				for from < len(row.text) && unicode.IsSpace(row.text[from]) {
@@ -158,6 +172,9 @@ func nodeComposerState(harness, screen string) string {
 				if from < len(row.text) && row.text[from] == '>' {
 					from++
 				}
+			}
+			if isCmd && i == 0 && row.idlePlaceholder(from, nodeCmdIdlePlaceholder, muted) {
+				continue
 			}
 			if row.solid(from) {
 				return nodeComposerHasText
