@@ -36,7 +36,7 @@ func TestResolveWorkspaceCreatesMissingLabel(t *testing.T) {
 	if got != "w2" || creates != 1 {
 		t.Fatalf("workspace=%q creates=%d", got, creates)
 	}
-	if created == nil || created.rootPane != "w2:p0" {
+	if created == nil || created.id != "w2" || created.label != "workers" || created.rootPane != "w2:p0" {
 		t.Fatalf("created=%+v", created)
 	}
 	if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "workspace_created label=workers workspace=w2") {
@@ -98,7 +98,7 @@ func TestResolveWorkspaceUsesOldestAfterCreateRace(t *testing.T) {
 	if got != "w1" {
 		t.Fatalf("workspace=%q, want the oldest", got)
 	}
-	if created == nil || created.rootPane != "w2:p0" {
+	if created == nil || created.id != "w2" || created.rootPane != "w2:p0" {
 		t.Fatalf("created=%+v, want this call's own workspace", created)
 	}
 	if out := a.Out.(*bytes.Buffer).String(); !strings.Contains(out, "workspace_created label=workers workspace=w1 duplicates=1") {
@@ -137,35 +137,47 @@ func TestResolveWorkspaceUsesListedID(t *testing.T) {
 	}
 }
 
-// A workspace created before a refusable step must not outlive a failed spawn:
-// its root pane is closed when the launch aborts.
-func TestSpawnClosesCreatedWorkspaceRootPaneWhenClaimIsRefused(t *testing.T) {
-	a, s, f, _ := cmdFixture(t)
-	s.Workspace = "workers"
-	store := a.JobStore.(*fakeJobStore)
-	store.records[s.Job] = map[string]any{"job_id": s.Job, "task_id": "other", "host": "other", "state": "claimed"}
-	previous := f.Do
-	created, closed := false, false
-	f.Do = func(c Command) Result {
-		switch strings.Join(c.Args, " ") {
-		case "workspace list":
-			if !created {
-				return Result{Out: noWorkspaces}
+// A failed spawn must not delete a workspace another spawn may have adopted.
+// Resolve picks the oldest match, so only a non-oldest duplicate is safe to
+// close; the oldest is kept because an adopter may not have created its pane.
+func TestSpawnWorkspaceCleanupOnFailure(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		workspaces string
+		closed     bool
+	}{
+		{"oldest kept", `[{"workspace_id":"w2","label":"workers"}]`, false},
+		{"non-oldest duplicate closed", `[{"workspace_id":"w1","label":"workers"},{"workspace_id":"w2","label":"workers"}]`, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			a, s, f, _ := cmdFixture(t)
+			s.Workspace = "workers"
+			store := a.JobStore.(*fakeJobStore)
+			store.records[s.Job] = map[string]any{"job_id": s.Job, "task_id": "other", "host": "other", "state": "claimed"}
+			previous := f.Do
+			created, closed := false, false
+			f.Do = func(c Command) Result {
+				switch strings.Join(c.Args, " ") {
+				case "workspace list":
+					if !created {
+						return Result{Out: noWorkspaces}
+					}
+					return Result{Out: `{"result":{"workspaces":` + test.workspaces + `}}`}
+				case "workspace create --label workers":
+					created = true
+					return Result{Out: `{"result":{"workspace":{"workspace_id":"w2"},"root_pane":{"pane_id":"w2:p0"}}}`}
+				case "pane close w2:p0":
+					closed = true
+					return Result{}
+				}
+				return previous(c)
 			}
-			return Result{Out: `{"result":{"workspaces":[{"workspace_id":"w2","label":"workers"}]}}`}
-		case "workspace create --label workers":
-			created = true
-			return Result{Out: `{"result":{"workspace":{"workspace_id":"w2"},"root_pane":{"pane_id":"w2:p0"}}}`}
-		case "pane close w2:p0":
-			closed = true
-			return Result{}
-		}
-		return previous(c)
-	}
-	if err := a.Spawn(context.Background(), s); exitCode(err) != exitDuplicate {
-		t.Fatalf("spawn exit=%d err=%v", exitCode(err), err)
-	}
-	if !created || !closed {
-		t.Fatalf("created=%t root pane closed=%t", created, closed)
+			if err := a.Spawn(context.Background(), s); exitCode(err) != exitDuplicate {
+				t.Fatalf("spawn exit=%d err=%v", exitCode(err), err)
+			}
+			if !created || closed != test.closed {
+				t.Fatalf("created=%t root pane closed=%t, want %t", created, closed, test.closed)
+			}
+		})
 	}
 }

@@ -623,17 +623,18 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			return resolveErr
 		}
 	}
-	// The created workspace's root pane keeps it alive. Close it when the
-	// launch fails so a failed spawn leaves no empty workspace; a workspace
-	// another spawn adopted survives on that spawn's own pane.
+	// A workspace this spawn created is kept alive by its root pane. On failure
+	// close that pane only for a non-oldest duplicate: resolve always picks the
+	// oldest match, so no spawn can have adopted this one, while the oldest is
+	// left because an adopter may not have created its pane yet.
 	defer func() {
 		if committed || createdWs == nil || createdWs.rootPane == "" {
 			return
 		}
 		cleanup, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
-		if e := a.must(cleanup, "herdr", "pane", "close", createdWs.rootPane); e != nil {
-			a.warn("created workspace cleanup failed; close pane %s on the executing host: %v", createdWs.rootPane, e)
+		if e := a.closeCreatedWorkspace(cleanup, createdWs); e != nil {
+			a.warn("created workspace cleanup failed; inspect workspace %s on the executing host: %v", createdWs.id, e)
 		}
 	}()
 	if s.AccountKey == "" {
