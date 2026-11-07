@@ -440,7 +440,10 @@ func (manager *relayBusyManager) offer(parent context.Context, message hubOutbou
 	output, err := runner(getContext, "agent", "get", message.Pane)
 	cancel()
 	status, parsed := parseRelayAgentStatus(output)
-	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" || (policy.Name == relayDeliverDirective && status != "blocked" && !(status == "working" && relayHarnessWorkingUnprovable(parseRelayAgentHarness(output)))) {
+	// A working pane is typed into only for a directive, and never for a harness
+	// that cannot prove text typed into a working pane (hk 3370, hk 3384): every
+	// other policy holds it.
+	if err != nil || !parsed || status == "unknown" || status == "idle" || status == "done" || (policy.Name == relayDeliverDirective && status != "blocked" && !relayPaneWorkingUnprovable(status, parseRelayAgentHarness(output))) {
 		manager.deliver(parent, []relayHeld{{Pane: message.Pane, Lane: message.Lane, EventID: message.EventID, JobID: message.JobID, Text: message.Text, HeldSince: manager.client.nowUTC(), DeliverPolicy: policy.Name, RecvSeq: message.RecvSeq}}, false)
 		return
 	}
@@ -693,13 +696,16 @@ func (manager *relayBusyManager) waitForPane(ctx context.Context, pane string, w
 }
 
 // paneWorkingUnprovable reports whether the harness occupying pane is one whose
-// directive is held while working (hk 3370). An unreadable pane or an unknown
-// harness is not: it keeps the wait a held directive has always had.
+// held rows are not typed while it works (hk 3370, hk 3384). An unknown harness
+// is not: it keeps the wait a held directive has always had. An unreadable pane
+// is treated as one (hk 3384): a wait that also ended on working would wake a
+// release that, for a cmd pane, must hold everything again, and the next
+// unreadable probe would wake it again at once.
 func (manager *relayBusyManager) paneWorkingUnprovable(ctx context.Context, runner relayCommandRunner, pane string) bool {
 	getContext, cancel := context.WithTimeout(ctx, manager.client.relayInjectTimeout())
 	defer cancel()
 	output, err := runner(getContext, "agent", "get", pane)
-	return err == nil && relayHarnessWorkingUnprovable(parseRelayAgentHarness(output))
+	return err != nil || relayHarnessWorkingUnprovable(parseRelayAgentHarness(output))
 }
 
 // releaseWorking is the wake-up when a blocked pane turned working: only the
@@ -751,7 +757,7 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 		if relayWorkingReleaseGap != nil {
 			relayWorkingReleaseGap()
 		}
-		manager.deliver(parent, manager.filterDeliverableHeld(parent, items, expired), expired)
+		manager.deliverReleased(parent, pane, items, expired)
 		manager.finishInflight(items)
 		manager.reconcileHeld(parent, pane)
 		manager.arm(context.Background(), pane)
@@ -780,7 +786,7 @@ func (manager *relayBusyManager) releaseWorking(parent context.Context, pane str
 	if relayWorkingReleaseGap != nil {
 		relayWorkingReleaseGap()
 	}
-	manager.deliver(parent, manager.filterDeliverableHeld(parent, directives, false), false)
+	manager.deliverReleased(parent, pane, directives, false)
 	manager.finishInflight(directives)
 	manager.reconcileHeld(parent, pane)
 	manager.arm(context.Background(), pane)
@@ -875,10 +881,12 @@ func (manager *relayBusyManager) release(parent context.Context, pane string, ex
 	manager.mu.Unlock()
 	// The state transition is serialized above, but prompt itself must not hold
 	// the manager-wide map lock: another pane's read-loop work stays independent.
-	manager.deliver(parent, manager.filterDeliverableHeld(parent, items, expired), expired)
+	manager.deliverReleased(parent, pane, items, expired)
 	manager.finishInflight(items)
-	// A retry inside deliver re-holds a row; a wake that came while it was in
-	// flight skipped it, so wait again for whatever is held now.
+	// A retry inside deliver re-holds a row, and a cmd release can leave rows
+	// held in the store (hk 3384); a wake that came while they were in flight
+	// skipped them, so wait again for whatever is held now.
+	manager.reconcileHeld(parent, pane)
 	manager.mu.Lock()
 	rearm := len(manager.held[pane]) > 0
 	manager.mu.Unlock()
@@ -905,8 +913,13 @@ func (manager *relayBusyManager) release(parent context.Context, pane string, ex
 // probe (dead socket, malformed output, missing runner) goes through
 // retryOrDrop's bounded rearm instead of expiring the row on a transient
 // failure.
-func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, items []relayHeld, expired bool) []relayHeld {
-	var keep []relayHeld
+//
+// The same read names the harness, which the caller needs to decide how the
+// kept rows are typed (deliverReleased). A harness that cannot prove text typed
+// into a working pane (cmd) gets nothing typed while that pane is working, on
+// any policy (hk 3370, hk 3384): past the wait the row is dropped and told as
+// working_wait_expired, before it the row simply stays held.
+func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, items []relayHeld, expired bool) (keep []relayHeld, harness string) {
 	var survivors []relayHeld
 	for _, item := range items {
 		if manager.laneRerouted(item) {
@@ -916,14 +929,12 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 		survivors = append(survivors, item)
 	}
 	if len(survivors) == 0 {
-		return keep
+		return keep, ""
 	}
 	pane := survivors[0].Pane
 	var occupant relayOccupant
 	occupantKnown, unverifiable := false, false
-	// paneStillWorking is hk 3370's expiry rule: a pane read at the end of a
-	// wait that ran out. Only a directive held for a working pane acts on it.
-	paneStillWorking := false
+	paneWorkingUnprovable := false
 	runner := manager.client.relayRunner()
 	if runner == nil {
 		unverifiable = true
@@ -940,7 +951,8 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 			if parsed && (occupant.Pane == "" || occupant.Pane == pane) {
 				occupantKnown = true
 				status, _ := parseRelayAgentStatus(output)
-				paneStillWorking = expired && status == "working" && relayHarnessWorkingUnprovable(parseRelayAgentHarness(output))
+				harness = parseRelayAgentHarness(output)
+				paneWorkingUnprovable = relayPaneWorkingUnprovable(status, harness)
 			} else {
 				unverifiable = true
 			}
@@ -959,19 +971,62 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 			manager.expireHeldLease(parent, item, reason)
 			continue
 		}
-		if paneStillWorking && item.DeliverPolicy == relayDeliverDirective {
-			// hk 3370: the wait ran out with the pane still working, and this
-			// harness cannot prove a directive typed into a working pane.
-			// Typing it anyway is the duplicate the hold exists to prevent, so
-			// nothing is typed: the hub tells the design lane once, and the
-			// durable row stays undelivered for a replay.
+		if paneWorkingUnprovable {
+			if !expired {
+				// The pane turned working again before this release read it.
+				// The row is still in the store; the release re-arms its wait.
+				continue
+			}
+			// hk 3370, hk 3384: the wait ran out with the pane still working,
+			// and this harness cannot prove text typed into a working pane —
+			// whatever the row's policy. Typed anyway it sits unsent in the
+			// composer (or, for a directive, is typed twice), so nothing is
+			// typed: the hub tells the design lane once, and the durable row
+			// stays undelivered for a replay.
 			manager.emit("relay.unconfirmed", relayAckPayload{JobID: item.JobID, Pane: item.Pane, Reason: relayDroppedWorkingExpired, OriginalEventID: item.EventID})
 			manager.expireHeldLease(parent, item, relayDroppedWorkingExpired)
 			continue
 		}
 		keep = append(keep, item)
 	}
-	return keep
+	return keep, harness
+}
+
+// deliverReleased types the rows a release kept. A pane-level harness (cmd)
+// gets one row per inject (hk 3384): its return gate reads the composer after
+// the text lands and cannot match a batch the composer wraps over several rows,
+// so a batch is typed and left unsent. Each row then has its own nonce, presend
+// check, gated return and proof. A submitted row turns the pane working, so
+// before each later row the pane is read again, and unless it is idle or done
+// the rest stay held in the store for the release to re-arm. Every other
+// harness keeps the batch.
+func (manager *relayBusyManager) deliverReleased(parent context.Context, pane string, items []relayHeld, expired bool) {
+	keep, harness := manager.filterDeliverableHeld(parent, items, expired)
+	if !harnessPaneTransport(harness) || len(keep) < 2 {
+		manager.deliver(parent, keep, expired)
+		return
+	}
+	sort.SliceStable(keep, func(i, j int) bool { return keep[i].RecvSeq < keep[j].RecvSeq })
+	for index, item := range keep {
+		if index > 0 && !manager.paneIdleOrDone(parent, pane) {
+			return
+		}
+		manager.deliver(parent, []relayHeld{item}, expired)
+	}
+}
+
+// paneIdleOrDone reads pane's status between two one-row injects. Anything but
+// idle or done, an unreadable pane included, stops the run.
+func (manager *relayBusyManager) paneIdleOrDone(parent context.Context, pane string) bool {
+	runner := manager.client.relayRunner()
+	if runner == nil {
+		return false
+	}
+	getContext, cancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
+	defer cancel()
+	output, err := runner(getContext, "agent", "get", pane)
+	status, parsed := parseRelayAgentStatus(output)
+	return err == nil && parsed && (status == "idle" || status == "done")
 }
 
 // laneRerouted reports whether the lane a held row is bound to has since been
