@@ -70,16 +70,21 @@ func (client *HubClient) sweepTaskPanes(ctx context.Context, sweeper *fleet.Task
 		slog.Warn("task pane sweep skipped", "reason", "hk-unavailable")
 		return
 	}
-	sweeper.TaskState = client.nodeTaskState
+	sweeper.TaskState, sweeper.PR = client.nodeTaskState, client.nodePR
 	if workRoot, err := client.nodeWorkRoot(); err == nil {
 		// Only a worktree of a clone under this root is the node's to remove
 		// (sweep_worktree.go); without the root nothing proves one is.
 		sweeper.WorkRoot = workRoot
 	}
-	if sweeper.TaskState == nil {
+	if sweeper.TaskState == nil || sweeper.PR == nil {
 		env, err := client.nodeHandoffkeepEnv()
 		if err == nil {
-			sweeper.TaskState, err = fleet.NewTaskStateReader(env.URL, env.Token, env.CFID, env.CFSecret)
+			if sweeper.TaskState == nil {
+				sweeper.TaskState, err = fleet.NewTaskStateReader(env.URL, env.Token, env.CFID, env.CFSecret)
+			}
+			if err == nil && sweeper.PR == nil {
+				sweeper.PR, err = fleet.NewPRReader(env.URL, env.Token, env.CFID, env.CFSecret)
+			}
 		}
 		if err != nil {
 			slog.Warn("task pane sweep skipped", "reason", "hk-unavailable")

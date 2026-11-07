@@ -39,6 +39,15 @@ type sweepGitFake struct {
 	onOrigin bool
 	forced   []string
 	onRemove func(path string)
+	// head is the worktree's HEAD; originTip is what
+	// refs/remotes/origin/<branch> resolves to ("" means it does not exist).
+	head      string
+	originTip string
+	// remoteTip is the branch tip ls-remote reads from origin itself
+	// (originTip when empty, "none" when origin has no such branch);
+	// lsRemoteErr makes origin unreadable.
+	remoteTip   string
+	lsRemoteErr bool
 }
 
 func newSweepGitFake(t *testing.T) *sweepGitFake {
@@ -47,7 +56,7 @@ func newSweepGitFake(t *testing.T) *sweepGitFake {
 	if err != nil {
 		t.Fatal(err)
 	}
-	g := &sweepGitFake{workRoot: root, clone: filepath.Join(root, "panewire"), held: map[string]bool{}}
+	g := &sweepGitFake{workRoot: root, clone: filepath.Join(root, "panewire"), held: map[string]bool{}, head: paneSweepTestHead}
 	if err := os.MkdirAll(filepath.Join(g.clone, ".git"), 0700); err != nil {
 		t.Fatal(err)
 	}
@@ -68,10 +77,29 @@ func (g *sweepGitFake) worktree(t *testing.T, name string) string {
 func (g *sweepGitFake) do(c Command) Result {
 	args := c.Args
 	switch {
-	case len(args) >= 3 && args[2] == "rev-parse":
+	case len(args) >= 4 && args[2] == "rev-parse" && args[3] == "HEAD":
+		return Result{Out: g.head + "\n"}
+	case len(args) >= 5 && args[2] == "rev-parse" && args[3] == "--verify":
+		if g.originTip == "" {
+			return Result{Code: 1}
+		}
+		return Result{Out: g.originTip + "\n"}
+	case len(args) >= 5 && args[2] == "rev-parse" && args[3] == "--path-format=absolute":
 		cwd := args[1]
 		gitDir := filepath.Join(g.clone, ".git", "worktrees", filepath.Base(cwd))
 		return Result{Out: gitDir + "\n" + filepath.Join(g.clone, ".git") + "\n"}
+	case len(args) >= 3 && args[2] == "ls-remote":
+		if g.lsRemoteErr {
+			return Result{Code: 128, Err: "could not read from remote repository"}
+		}
+		tip := g.remoteTip
+		if tip == "" {
+			tip = g.originTip
+		}
+		if tip == "" || tip == "none" {
+			return Result{Code: 2}
+		}
+		return Result{Out: tip + "\t" + args[len(args)-1] + "\n"}
 	case len(args) >= 4 && args[2] == "branch" && args[3] == "--show-current":
 		if g.detached {
 			return Result{}
