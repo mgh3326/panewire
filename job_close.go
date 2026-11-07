@@ -13,29 +13,8 @@ import (
 	"unicode/utf8"
 )
 
-// `panewire job close` is the owner's end-of-job declaration (#502 E-1). A
-// worker that finished without `panewire job done` leaves no terminal event, so no
-// reaper ever picks its pane up; the lane that owns the job closes it here.
-//
-// The declaration is one flat record and nothing else: no emit, no hub call,
-// no handoffkeep upload, no herdr call. Closing the pane stays reap's job, and
-// reap's grace runs from this record's created_at — declare, wait out the
-// grace, then reap.
-//
-// The kind is job.revoked, already in every terminal set (the reap contract's TERMINAL,
-// fleetCensusTerminalKinds, stallTerminalKinds, the node's active-job scan).
-// Since #507 the relay scanner also forwards it: the record always carries a
-// reason and an owner lane, so the declaration reaches the owner lane's parent
-// pane and a durable handoffkeep row — the expressiveness gap #507 closed.
-// job.completed is still deliberately not used: its payload carries no reason
-// and its relay text reads as a report, not a revocation. The hub's own
-// revocation writes {"type":"job.revoked",job_id,epoch} — no reason, no owner
-// lane — which is exactly what keeps that hub→node marker out of the node→hub
-// relay direction; a declaration carries "kind" (the key reap reads) plus
-// source, closed_by and outcome, so the two stay distinguishable.
-//
-// None of this touches done/escalate/joined: their writers and wire stay
-// pinned by testdata/job_golden.
+// See docs/job-close.md for the ownership, routing and record contract.
+// Closing declares a job terminal; the reaper handles its pane separately.
 
 const (
 	jobCloseKind   = "job.revoked"
@@ -67,8 +46,8 @@ var (
 const jobCloseHelp = `Usage: panewire job close JOB --lane LANE --outcome completed|abandoned|superseded --reason TEXT [--operator-override]
 
 Declare JOB ended on behalf of its owner lane. Writes one job.revoked record
-into the job's events directory; the pane is not touched (the reaper closes it
-after its grace).
+into the job's events directory, using the hub if the directory is not local.
+The pane is not touched (the reaper closes it after its grace).
 
 Options:
   --lane LANE           the calling lane; must equal the latest claim's owner_lane exactly
@@ -116,9 +95,12 @@ func (c *jobCLI) close(args []string) int {
 	jobDir := jobJobsRoot() + "/" + options.job
 	eventsDir := jobDir + "/events"
 	if info, err := os.Stat(eventsDir); err != nil || !info.IsDir() {
+		if errors.Is(err, os.ErrNotExist) {
+			return c.closeThroughHub(options)
+		}
 		return c.exit(jobDie("close: no events directory for job %s", options.job))
 	}
-	record, name, err := c.publishJobClose(jobDir, eventsDir, options)
+	record, name, err := c.publishJobClose(jobDir, eventsDir, options, jobCloseSource)
 	if err != nil {
 		return c.exit(err)
 	}
@@ -262,7 +244,7 @@ func scanJobCloseState(eventsDir string) (jobCloseState, error) {
 // hold across their scan and write — so the check, the seq choice and the
 // publish see one state. The record lands by link, which never replaces an
 // existing name; a collision rescans and retries.
-func (c *jobCLI) publishJobClose(jobDir, eventsDir string, options jobCloseOptions) (jobCloseRecord, string, error) {
+func (c *jobCLI) publishJobClose(jobDir, eventsDir string, options jobCloseOptions, source string) (jobCloseRecord, string, error) {
 	lock, err := os.OpenFile(filepath.Join(jobDir, ".wrk-events.lock"), os.O_WRONLY|os.O_CREATE, 0o666)
 	if err != nil {
 		return jobCloseRecord{}, "", &jobExit{code: 1, message: "close: " + err.Error()}
@@ -283,7 +265,7 @@ func (c *jobCLI) publishJobClose(jobDir, eventsDir string, options jobCloseOptio
 		}
 		record := jobCloseRecord{
 			Kind: jobCloseKind, JobID: options.job, OwnerLane: state.owner, ClosedBy: options.lane,
-			Outcome: options.outcome, Reason: options.reason, Source: jobCloseSource, Host: host,
+			Outcome: options.outcome, Reason: options.reason, Source: source, Host: host,
 			CreatedAt: c.now().UTC().Format("2006-01-02T15:04:05Z"), Epoch: 1,
 		}
 		if options.override {

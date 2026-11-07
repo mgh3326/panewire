@@ -869,6 +869,7 @@ func (h *HubServer) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/placement", h.handlePlacement)
 	mux.HandleFunc("GET /v1/state", h.handleFleetStateSnapshot)
 	mux.HandleFunc("GET /v1/jobs", h.handleJobs)
+	mux.HandleFunc("POST /v1/jobs/close", h.handleJobClose)
 	mux.HandleFunc("GET /v1/jobs/orphaned", h.handleOrphanedJobs)
 	mux.HandleFunc("GET /v1/session-reap", h.handleSessionReap)
 	mux.HandleFunc("POST /v1/jobs/reassign", h.handleReassignJob)
