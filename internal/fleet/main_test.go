@@ -16,7 +16,7 @@ import (
 // tests that need one set it with t.Setenv.
 var (
 	hermeticEnvPrefixes = []string{"PANEWIRE_", "FLEET_", "WRK_", "SCOPEFUEL_", "ARBITER_", "HERDR_", "HANDOFFKEEP_", "HK_", "CLINEPASS_", "MOCK_MCP_", "PACELEVER_"}
-	hermeticEnvNames    = []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"}
+	hermeticEnvNames    = []string{"CODEX_HOME", "CLAUDE_CONFIG_DIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"}
 )
 
 func hermeticEnv(name string) bool {
@@ -32,7 +32,16 @@ func TestMain(m *testing.M) {
 			os.Unsetenv(name)
 		}
 	}
-	os.Exit(m.Run())
+	// The bench catalog cache is written under XDG_CACHE_HOME; keep tests out
+	// of the developer's real cache.
+	cache, err := os.MkdirTemp("", "panewire-test-cache-")
+	if err != nil {
+		panic(err)
+	}
+	os.Setenv("XDG_CACHE_HOME", cache)
+	code := m.Run()
+	os.RemoveAll(cache)
+	os.Exit(code)
 }
 
 // TestEnvReadsAreHermetic requires every literal environment variable name the

@@ -32,6 +32,8 @@ func TestMain(m *testing.M) {
 	if os.Getenv("PANEWIRE_CRASH_CHILD") == "" {
 		os.Setenv("XDG_STATE_HOME", state)
 	}
+	// The bench catalog cache must not land in the developer's real cache.
+	os.Setenv("XDG_CACHE_HOME", filepath.Join(state, "cache"))
 	code := m.Run()
 	os.RemoveAll(state)
 	os.Exit(code)

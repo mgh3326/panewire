@@ -445,7 +445,7 @@ overrides.
 | `native_pools` | `[]` | Pools with a native/shadow switch that this host measures itself instead of through pacelever (`["commandcode", "devin", "agy"]`; no other pool is accepted). Unlisted, the pool is in shadow: spawns keep running pacelever for it and the node logs a comparison ([docs/quota.md](quota.md#shadow-and-native)). Read at each use by the node and the CLI; an invalid file is shadow. |
 | `gate` | `"shadow"` | Who decides spawn admission: `"shadow"` runs `pacelever gate` and records how panewire's own verdict compares (fleet event `quota_gate_shadow`); `"native"` decides from panewire's verdict and runs no `pacelever gate` ([docs/quota.md](quota.md#admission)). Any other value is a config error. |
 | `pool_fresh_ttl_s` | unset | Optional pool → seconds table (`[quota.pool_fresh_ttl_s]`, nonnegative integers) that overrides `fresh_ttl_s` for one pool. |
-| `pool_max_concurrent` | unset | Optional pool → positive integer table (`pool_max_concurrent = { "openai-api" = 2 }`; pool name as in the catalog's `pool` column) that caps live spawns on a pool fleet-wide. A candidate whose pool is at its cap is dropped `pool_at_cap` and selection moves to the next pool; a spawn never waits for a slot. A pool not named has no cap. Read at each placement. A value that is not a positive integer is refused at config load with the key named (`quota.pool_max_concurrent.openai-api must be a positive integer`). When the live count cannot be read from the hub the cap does not apply and the reason is logged. How the count is made and the refusal text: [placement](placement.md#pool-concurrency-cap). |
+| `pool_max_concurrent` | unset | Optional pool → positive integer table (`pool_max_concurrent = { "openai-api" = 2 }`; pool name as in the catalog's `pool` column) that caps live spawns on a pool fleet-wide. A candidate whose pool is at its cap is dropped `pool_at_cap` and selection moves to the next pool; a spawn never waits for a slot. A pool not named has no cap. Read at each placement. A value that is not a positive integer is refused at config load with the key named (`quota.pool_max_concurrent.openai-api must be a positive integer`). When the live count cannot be read from the hub the cap does not apply and the reason is logged. The reserved key `devin-free` caps only the SWE-2 free rungs (`devin-swe2`, `devin-swe2-medium`, `devin-swe2-max`, `devin-swe2-flash`, `devin-swe2-flash-medium`) by their live spawns: those rungs draw on Devin's free-model quota while paid `devin-ds41` draws on the account's paid window, so capping them must not cap paid devin. `devin` stays a whole-pool cap; when both keys are set a free rung must pass both. How the count is made and the refusal text: [placement](placement.md#pool-concurrency-cap). |
 | `credit_total_usd` | unset | Optional pool → dollars table (`[quota.credit_total_usd]`, positive numbers): each prepaid credit pool's grant total. A shared manual entry records only its used percentage, so panewire derives the dollar balance `total × (100 − used_pct) / 100` for credit ranking, dollars at risk and burn; an entry's own `remaining_usd` still wins. Set it on the hub and every node, and **update it whenever a new grant is bought** — a stale total gives wrong dollars. |
 | `measure_timeout_s` | `60` | Bound on the on-target refresh (`panewire quota refresh <pool>` for claude, codex and native commandcode, devin or agy, else `pacelever refresh`) for a remote account the spawning host does not hold. |
 | `accounts` | unset | Optional pool → 16-hex account-fingerprint table for exact account keys. For `agy` it is the account the node measures: agy has no login to derive a key from ([docs/quota.md](quota.md#native-measurement-agy)). |
@@ -510,8 +510,8 @@ the rebind failed or the parent's state was unreadable; neither fails the landed
 spawn.
 
 Automatic model selection (`spawn` with `-m` omitted or `-m auto`) reads the
-live bench catalog and pool status from the quota CLI, then orders candidates
-under the versioned pool-order policy (`[local].pool_policy` or
+live bench catalog from handoffkeep and pool status from the quota CLI, then
+orders candidates under the versioned pool-order policy (`[local].pool_policy` or
 `PANEWIRE_POOL_POLICY`, else the embedded copy): paid pools at waste risk
 first (see below), then other WASTE subscription pools, then free pool/model
 sets, then ranked subscription pools, then credit pools without a usable expiry. Expiring credit joins the waste-risk ordering by dollars at risk per hour until expiry (below); an entry without recorded dollars keeps the percentage rule. Inside a tier the lowest catalog grade that satisfies the task wins,
@@ -1281,7 +1281,10 @@ for ownership and distribution.
 | `HANDOFFKEEP_BIN` | Must resolve to the canonical current-user ~/.local/bin executable in production. |
 | `XDG_DATA_HOME` | Data home of the local ledger (`$XDG_DATA_HOME/arbiter/state.db`); production guard requires the canonical `~/.local/share`. |
 | `XDG_STATE_HOME` | State home of the role routing cache (`$XDG_STATE_HOME/panewire/model-routing.json`); default `~/.local/state`. |
-| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools, and commandcode, devin and agy once switched native, are measured by panewire itself and ignore it. |
+| `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools, and commandcode, devin and agy once switched native, are measured by panewire itself and ignore it. The bench catalog is handoffkeep's and never uses it. |
+| `HANDOFFKEEP_CONFIG` | handoffkeep credential file for `panewire catalog` and the shared quota endpoint; default `~/.config/handoffkeep/config.env`. |
+| `XDG_CACHE_HOME` | Cache home of the bench catalog read (`$XDG_CACHE_HOME/panewire/bench`); default `~/.cache`. |
+| `ARTIFICIAL_ANALYSIS_API_KEY` | Free Artificial Analysis Data API key for `panewire catalog aa-sync`; else the mode-0600 `$XDG_CONFIG_HOME/panewire/aa.env`. |
 | `PANEWIRE_NODE_ENV` | Panewire node env file for `HUB_MACHINE_ID` (job record host id); default `~/.config/panewire/hub-node.env`, or `[quota].node_env`. |
 | `ARBITER_INBOX_ROOT` | Jobs root; production guard requires the canonical inbox. |
 | `HERDR_SESSION` | Herdr session passed through or selected for remote execution. |
