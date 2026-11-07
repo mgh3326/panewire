@@ -171,7 +171,7 @@ func validHubSpawnArgs(args []string) bool {
 
 func validHubSpawnArgsForMode(args []string, operator bool) bool {
 	allowed := map[string]bool{}
-	for _, flag := range []string{"-m", "-w", "-l", "--t", "--effort", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--builder-family", "--builder-job", "--review-pass"} {
+	for _, flag := range []string{"-m", "-w", "-l", "--t", "--effort", "--e6-arm", "--job", "--owner", "--report", "--report-relative", "--role", "--lane", "--parent", "-L", "--task", "--parent-job", "--tags", "--urgency", "--builder-family", "--builder-job", "--review-pass"} {
 		allowed[flag] = true
 	}
 	booleans := map[string]bool{}

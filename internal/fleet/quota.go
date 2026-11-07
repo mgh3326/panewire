@@ -38,6 +38,10 @@ func (l Launch) row() CatalogRow {
 type QuotaRequest struct {
 	Profile, Effort, Role, OperatorRequest, RequestedBy, Purpose, GateProfile string
 	AccountKey                                                                string
+	// E6Arm is the exact <canon>@<effort> experiment marker, when policy
+	// requires one. pacelever reads it from its own environment, so Launch and
+	// Gate pass it explicitly instead of relying on this process having it.
+	E6Arm string
 }
 
 // CatalogRow is one bench catalog rung: profile@effort with its operator-set
@@ -166,7 +170,7 @@ type CLIQuota struct {
 func (q CLIQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
 	a := []string{"policy", "launch", r.Profile, "--json"}
 	a = quotaArgs(a, r)
-	result := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: a}, "quota catalog", 15*time.Second)
+	result := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: a, Env: quotaE6Env(r.E6Arm)}, "quota catalog", 15*time.Second)
 	if e := checkQuota(result, "quota catalog"); e != nil {
 		return Launch{}, e
 	}
@@ -205,7 +209,17 @@ func (q CLIQuota) runGate(ctx context.Context, r QuotaRequest) Result {
 		args = append(args, "--account-key", r.AccountKey)
 	}
 	args = append(args, "--json")
-	return runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: args}, "quota gate", 30*time.Second)
+	return runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: args, Env: quotaE6Env(r.E6Arm)}, "quota gate", 30*time.Second)
+}
+
+// quotaE6Env supplies pacelever the experiment marker a hub submission carried.
+// pacelever reads PACELEVER_E6_ARM (then the retired SCOPEFUEL_E6_ARM); an
+// empty marker adds nothing, so a local spawn keeps inheriting its environment.
+func quotaE6Env(arm string) []string {
+	if arm == "" {
+		return nil
+	}
+	return []string{"PACELEVER_E6_ARM=" + arm}
 }
 
 // gateResult reads a gate's exit status and JSON receipt — pacelever's or

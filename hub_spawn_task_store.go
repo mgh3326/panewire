@@ -26,6 +26,9 @@ type hubSpawnOutcome struct {
 	Profile string `json:"profile,omitempty"`
 	Model   string `json:"model,omitempty"`
 	Role    string `json:"role,omitempty"`
+	// E6Arm is the experiment marker the submission carried, kept on the
+	// operation record so a run stays visible after the fact.
+	E6Arm string `json:"e6_arm,omitempty"`
 	// LaneUnregistered: the pane exists but hub lane registration failed.
 	LaneUnregistered bool             `json:"lane_unregistered,omitempty"`
 	Retryable        bool             `json:"retryable,omitempty"`

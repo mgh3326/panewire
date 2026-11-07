@@ -83,3 +83,18 @@ func capInboxSummaryContent(content string, budget int) string {
 	}
 	return textbound.RunePrefix(content, max(0, budget-1)) + "…"
 }
+
+// hubPaneIDLimit is the byte bound the hub keeps a job's pane under
+// (normalizeHubActiveJobMetadata) and that every relay pane field uses.
+const hubPaneIDLimit = 128
+
+// boundLaneEventPaneID is the lane.event wire's sender pane: the value whole,
+// or "" when it is over hubPaneIDLimit or holds a control byte. A pane id is
+// an identity, so a cut one would name some other pane; no pane is the
+// fail-open answer the hub already gives an older node.
+func boundLaneEventPaneID(pane string) string {
+	if utf8PrefixWithin(pane, hubPaneIDLimit) != pane || strings.ContainsAny(pane, "\x00\r\n\t") {
+		return ""
+	}
+	return pane
+}
