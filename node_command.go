@@ -74,7 +74,7 @@ func knownNodeCommandOp(op string) bool {
 	switch op {
 	case nodeCommandAgentsList, nodeCommandPaneClose, nodeCommandPaneCapture, nodeCommandPaneRead,
 		nodeCommandWorktreeInspect, nodeCommandWorktreeList, nodeCommandWorktreePrepare, nodeCommandWorktreeRemove,
-		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus:
+		nodeCommandQuotaRefresh, nodeCommandJobDone, nodeCommandJobResult, nodeCommandJobMarkLost, nodeCommandPRStatus, nodeCommandJobClose:
 		return true
 	}
 	return false
@@ -179,6 +179,7 @@ func decodeNodeCommandStrict(raw []byte, target any) bool {
 // required: a zero value such as write:false or merged_after:0 is a decision
 // the caller must state, never a default for an omitted field.
 var nodeCommandArgFields = map[string][]string{
+	nodeCommandJobClose:        {"job", "lane", "outcome", "reason", "override"},
 	nodeCommandAgentsList:      {},
 	nodeCommandPaneClose:       {"pane_id", "name", "agent_status", "cwd"},
 	nodeCommandPaneCapture:     {"pane_id", "name", "cwd", "merged_after", "write"},
@@ -250,6 +251,13 @@ func parseNodeCommandArgs(op string, raw json.RawMessage) (any, bool) {
 	case nodeCommandJobMarkLost:
 		var args nodeJobMarkLostArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobMarkLostArgs(args)
+	case nodeCommandJobClose:
+		var args hubJobCloseRequest
+		if !decodeNodeCommandStrict(raw, &args) {
+			return nil, false
+		}
+		_, err := args.options()
+		return args, err == nil
 	case nodeCommandJobDone:
 		var args nodeJobDoneArgs
 		return args, decodeNodeCommandStrict(raw, &args) && validNodeJobName(args.Job) && validNodeCommandPath(args.Report)
@@ -387,6 +395,10 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		var result nodeQuotaRefreshResult
 		valid = decodeNodeCommandStrict(raw, &result) && result.Outcome == nodeQuotaRefreshed
 		target = result
+	case nodeCommandJobClose:
+		var result hubJobCloseResult
+		valid = decodeNodeCommandStrict(raw, &result) && ((result.Refusal != "" && result.Failure == "" && result.Name == "") || (result.Failure == "close_failed" && result.Refusal == "" && result.Name == "") || (result.Refusal == "" && result.Failure == "" && result.Name != "" && result.Record.Kind == jobCloseKind))
+		target = result
 	case nodeCommandPRStatus:
 		var result nodePRStatusResult
 		valid = decodeNodeCommandStrict(raw, &result) && validNodePRStatusResult(result)
@@ -512,6 +524,8 @@ func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()
 		return client.nodeJobMarkLost(ctx, args)
+	case hubJobCloseRequest:
+		return client.nodeJobClose(args)
 	case nodeJobDoneArgs:
 		client.nodeCommandMu.Lock()
 		defer client.nodeCommandMu.Unlock()

@@ -17,6 +17,7 @@ const (
 	hubScopeNodeCommand     = "node.command:" // + op, granted @<machine> or @*
 	hubScopeSpawn           = "spawn"
 	hubScopeWake            = "wake"
+	hubScopeJobsClose       = "jobs.close"
 	hubScopeInboxRead       = "inbox.read"
 	hubScopeInboxAck        = "inbox.ack"
 	hubScopeInboxAckState   = "inbox.ack_state"
@@ -167,7 +168,7 @@ func parseHubScopes(raw string) ([]hubScopeGrant, error) {
 		switch {
 		case scope == hubScopeNodesAgentsRead, scope == hubScopeStateRead, scope == hubScopeInboxAckState:
 			grants = append(grants, hubScopeGrant{name: scope})
-		case strings.HasPrefix(scope, hubScopeInboxRead+":"), strings.HasPrefix(scope, hubScopeInboxAck+":"):
+		case strings.HasPrefix(scope, hubScopeInboxRead+":"), strings.HasPrefix(scope, hubScopeInboxAck+":"), strings.HasPrefix(scope, hubScopeJobsClose+":"):
 			name, lane, _ := strings.Cut(scope, ":")
 			if !validReportRelayLaneName(lane) {
 				return nil, invalid
@@ -201,7 +202,7 @@ func hubGrantsAllow(grants []hubScopeGrant, scope, resource string) bool {
 			return true
 		}
 		// "*" is a machine wildcard only; lane scopes always name one lane.
-		if grant.resource == hubScopeAnyMachine && scope != hubScopeInboxRead && scope != hubScopeInboxAck {
+		if grant.resource == hubScopeAnyMachine && scope != hubScopeInboxRead && scope != hubScopeInboxAck && scope != hubScopeJobsClose {
 			return true
 		}
 	}
