@@ -294,7 +294,7 @@ func (a *App) printPlan(asJSON bool, out map[string]any, sel *selPlan, pp *place
 		for _, x := range t.tries {
 			tried = append(tried, fmt.Sprintf("%s/%s@%s:%s", x.cand.accountKey, firstNonempty(x.cand.seatName, x.cand.row.Profile), x.cand.row.Effort, firstNonempty(x.reason, x.result)))
 		}
-		fmt.Fprintf(a.Out, "host-first %s rank=%d caps=%v outcome=%s tried=[%s]\n", t.host.name, t.rank, hostCaps(t.host.cfg), t.outcome, strings.Join(tried, " "))
+		fmt.Fprintf(a.Out, "host-first %s rank=%d pass=%d caps=%v outcome=%s tried=[%s]\n", t.host.name, t.rank, t.pass, hostCaps(t.host.cfg), t.outcome, strings.Join(tried, " "))
 	}
 	if pp != nil {
 		for _, c := range pp.candidates {

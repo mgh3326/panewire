@@ -25,6 +25,13 @@ shape; no op runs a shell, and no op takes a caller-chosen file path to write.
 The one report path an op reads (`job.done`) must be one of two fixed files in
 that job's directory.
 
+## Task pane sweep
+
+The node also closes finished worker panes by itself, without a hub command:
+see [pane-sweep.md](pane-sweep.md). It matches a pane by id, name and tab and
+requires an idle status, and writes the same `pane-screen.txt` as
+`pane.capture`. It does not run `pane.close`'s composer guard.
+
 ## Hub endpoints
 
 ### `GET /v1/nodes/agents`

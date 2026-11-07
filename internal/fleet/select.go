@@ -1131,13 +1131,13 @@ func (p *selPlan) record() map[string]any {
 		order := []string{}
 		for _, t := range p.hosts {
 			hosts = append(hosts, t.record())
-			if t.rank > 0 {
+			if t.rank > 0 && !slices.Contains(order, t.host.name) {
 				order = append(order, t.host.name)
 			}
 		}
 		rec["hosts"] = hosts
 		rec["host_order"] = order
-		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score or load; on each host its present accounts in pool order; first admitted pair wins"
+		rec["host_rule"] = "hosts that fit (caps, roles, grades, hub availability) ranked by load bucket, then hub score or load; on each host its present accounts in pool order; first admitted pair wins; credit, and pools ranked behind credit, are a last band tried on the hosts again (pass 2) only when no other account was admitted on any host (pass 1); expiring credit is waste-risk and stays in pass 1"
 	}
 	if p.req.route != nil {
 		rt := p.req.route.record(p.routeRefusal)
