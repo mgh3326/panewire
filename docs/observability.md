@@ -38,7 +38,7 @@ fleet event.
 | `relay-dropped/<reason>/<harness>` | `job`, `lane`, `machine`, `pane`, `reason`, `harness` | a relay row was dropped for a worker lane; `harness` is `unknown` when the node could not read it |
 | `spawn-held-loop/<branch>` | `role_key`, `branch` | the same `role_key` was held five times in 30 minutes; at most one event per `role_key` per hour |
 | `job-result-conflict` | `job` | a `done --result` conflicted with the stored result |
-| `spawn/<stage>/admission_refused:<class>` | `stage`, `reason`, `request`, `attempt` | an admission refusal before a host was bound; `<class>` is the refusal table's code (`seat_policy_missing`, `quota_catalog`, `containment_required`, ...) or the reason text's first token |
+| `spawn/<stage>/admission_refused:<class>` | `stage`, `reason`, `request`, `attempt` | an admission refusal before a host was bound; `<class>` is the refusal table's code (`seat_policy_missing`, `quota_catalog`, `containment_required`, ...), or `other` when the table does not classify the text |
 
 The existing `SPAWN_FAILED` fingerprint keeps `<stage>` and a normalized reason;
 the admission class splits the former single `admission_refused` group. Free

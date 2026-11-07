@@ -248,7 +248,7 @@ func TestSpawnTraceReasonNormalizesRefusalText(t *testing.T) {
 		"spawn_failed:quota_unknown":                                    "spawn_failed:quota_unknown",
 		"spawn_failed:made_up_code: free text":                          "spawn_failed",
 		"spawn_failed:":                                                 "spawn_failed",
-		"admission_refused: quota gate unavailable":                     "admission_refused:quota",
+		"admission_refused: quota gate unavailable":                     "admission_refused:other",
 		"admission_refused: missing seat policy for worker-x":           "admission_refused:seat_policy_missing",
 		"admission_refused: quota catalog unavailable":                  "admission_refused:quota_catalog",
 		"admission_refused":                                             "admission_refused",

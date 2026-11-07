@@ -186,9 +186,10 @@ func spawnTraceReason(reason string) string {
 }
 
 // spawnAdmissionRefusalClass names the cause behind an admission_refused
-// reason's free text so one Sentry issue groups one cause. The refusal table's
-// closed codes win where they classify the text; otherwise the first token
-// keeps the class bounded enough for a fingerprint.
+// reason's free text so one Sentry issue groups one cause. Only the refusal
+// table's closed codes become a class; anything it cannot classify is "other",
+// so free text (a path, a host, a job name) never reaches a fingerprint or a
+// tag and one cause cannot split across issues.
 func spawnAdmissionRefusalClass(text string) string {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -197,6 +198,5 @@ func spawnAdmissionRefusalClass(text string) string {
 	if code := fleet.SpawnRefusalCode(text, 0); code != "" {
 		return code
 	}
-	first, _, _ := strings.Cut(text, " ")
-	return fleetEventCode(first)
+	return "other"
 }
