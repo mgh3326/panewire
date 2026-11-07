@@ -79,6 +79,7 @@ local_delete_at = "drive_confirmed"
 | `spawn` | `true` | Literal boolean; `false` refuses local admission with 80, including explicit local requests. |
 | `max_load_ratio` | unset | Nonnegative load5 / CPU threshold for fallback spillover when hub placement is unavailable. |
 | `max_active` | unset | Nonnegative active-agent threshold for fallback spillover. |
+| `workspace` | unset | Herdr workspace for local spawns, named by label (`workers`), not by id. Herdr deletes a workspace when its last pane closes; spawn recreates a missing label with `herdr workspace create --label` before creating the tab. A configured id is used only while it still exists. |
 | `heavy_max` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `heavy_load_wait` | legacy | Accepted and ignored; the `heavy` command was removed. |
 | `shell_ready_timeout_ms` | `120000` | Startup readiness window, integer 30000–300000. |
@@ -151,7 +152,7 @@ and its error is preserved in the registration warning.
 | `ssh` | `NAME` | SSH config target; BatchMode is used. |
 | `via` | `ssh` | `ssh` (default; unchanged when unset) or `hub`: spawn, worktree preparation and quota refresh go through the panewire hub (see [Hub transport](#hub-transport-via--hub)). A `hub` host never falls back to ssh. |
 | `herdr_session` | `worker` | Remote HERDR_SESSION; set it to the session served by the target node. |
-| `workspace` | target `[local] workspace` | Workspace on this remote host. The caller's `-w` / `--workspace` applies only to local placement. Missing target workspace configuration refuses with `WORKSPACE_UNCONFIGURED` (70). Automatic SSH placement tries the next candidate on this early refusal; forced placement still stops. |
+| `workspace` | target `[local] workspace` | Workspace on this remote host, named by label (`workers`), not by id. Herdr deletes a workspace when its last pane closes; spawn recreates a missing label, but an id cannot be recreated. The caller's `-w` / `--workspace` applies only to local placement. Missing target workspace configuration refuses with `WORKSPACE_UNCONFIGURED` (70). Automatic SSH placement tries the next candidate on this early refusal; forced placement still stops. |
 | `cwd_map` | explicit override | Inline table of local prefix → remote prefix; longest prefix wins. Only needed as an exception: the default remote cwd is `$HOME/work/<repo>` on the target, cloned when missing. For a job run from a linked git worktree the default is `<work root>/<worktree dir>`, where the work root is derived from entries that map a checkout directly under the local work root (else `$HOME/work`). |
 | `cwd_keys` | legacy | Kept for legacy hub configurations; not used. A hub host's cwd key is the canonical repo name. |
 | `hub_wait` | `240` | `via = "hub"` only: seconds (1..300) the hub waits for the node to answer a spawn. It bounds the whole node run, so it must exceed the node's `brief_submit_timeout_ms` plus launch time; a shorter budget cuts the submit window. A first spawn that clones a large repo may need more. |
@@ -1060,7 +1061,7 @@ panewire delegate --role reader|verifier|reviewer --prompt FILE [--grade G] [--c
 | `--patch` | The delegate works in a temporary detached worktree and the result carries a patch path (below). |
 | `--panel N` | N from 2 to 4: see Panel. |
 | `--family F` | The caller's model family, for a reviewer outside a panewire job. Inside a job the job's own family is used. |
-| `--workspace W` | The herdr workspace for the pane, or `[local] workspace`. Not needed with `--headless`. |
+| `--workspace W` | The herdr workspace for the pane, by label (`workers`), or `[local] workspace`. Not needed with `--headless`. |
 | `--json` | Print one JSON document instead of text. |
 
 **Selection.** The seat is chosen by the same code as `spawn` auto-selection
@@ -1471,10 +1472,14 @@ aliases refuse and name the canonical-key fix. Resolution prints the alias
 and resolved machine id. The optional `local.aliases` list names this machine.
 
 Omitting `-w` uses the executing host's `local.workspace`. Remote delegation
-uses the target host's configured workspace, not the caller's label. A label
-such as `workers` is resolved through that host/session's `herdr workspace
-list`; zero or multiple matches refuse and tell the caller to pass the exact
-workspace id. An explicit workspace id is used directly.
+uses the target host's configured workspace, not the caller's label. Name a
+workspace by label (`workers`), not by id: herdr deletes a workspace when its
+last pane closes, so spawn recreates a label that matches zero workspaces with
+`herdr workspace create --label` and uses the new id. Two spawns may race; the
+re-list keeps the oldest match and closes nothing. A label with more than one
+match still refuses and tells the caller to pass the exact workspace id. An
+explicit workspace id is used only while that host/session's `herdr workspace
+list` still contains it; a vanished id refuses and names the label fix.
 
 ## Failed spawn retries
 

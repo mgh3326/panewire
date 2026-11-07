@@ -98,27 +98,40 @@ func stringList(value any) []string {
 	return names
 }
 
-func (a *App) resolveWorkspace(ctx context.Context, value string) (string, error) {
-	// Herdr ids are already unambiguous and remain usable when listing is unavailable.
-	if regexp.MustCompile(`^w[A-Z0-9]+$`).MatchString(value) {
-		return value, nil
-	}
+var herdrWorkspaceID = regexp.MustCompile(`^w[A-Z0-9]+$`)
+
+// workspaceRows lists the executing host's workspaces in herdr's order.
+func (a *App) workspaceRows(ctx context.Context, value string) ([]map[string]any, error) {
 	r := a.call(ctx, "herdr", "workspace", "list")
 	var raw map[string]any
 	if r.Code != 0 || json.Unmarshal([]byte(r.Out), &raw) != nil {
-		return "", fail(exitConfig, "cannot resolve workspace %q; run herdr workspace list on the executing host and pass -w WORKSPACE_ID", value)
+		return nil, fail(exitConfig, "cannot resolve workspace %q; run herdr workspace list on the executing host and pass -w WORKSPACE_ID", value)
 	}
 	raw = unwrap(raw)
-	rows, ok := raw["workspaces"].([]any)
+	items, ok := raw["workspaces"].([]any)
 	if !ok {
-		return "", fail(exitConfig, "workspace inventory missing; run herdr workspace list on the executing host and pass -w WORKSPACE_ID")
+		return nil, fail(exitConfig, "workspace inventory missing; run herdr workspace list on the executing host and pass -w WORKSPACE_ID")
+	}
+	var rows []map[string]any
+	for _, item := range items {
+		if row, ok := item.(map[string]any); ok {
+			rows = append(rows, row)
+		}
+	}
+	return rows, nil
+}
+
+func (a *App) resolveWorkspace(ctx context.Context, value string) (string, error) {
+	rows, err := a.workspaceRows(ctx, value)
+	if err != nil {
+		// Herdr ids are unambiguous; keep them usable when listing is unavailable.
+		if herdrWorkspaceID.MatchString(value) {
+			return value, nil
+		}
+		return "", err
 	}
 	var matches []string
-	for _, item := range rows {
-		row, ok := item.(map[string]any)
-		if !ok {
-			continue
-		}
+	for _, row := range rows {
 		id := str(row, "workspace_id")
 		if id == value {
 			return id, nil
@@ -127,9 +140,51 @@ func (a *App) resolveWorkspace(ctx context.Context, value string) (string, error
 			matches = append(matches, id)
 		}
 	}
-	if len(matches) == 1 {
+	if herdrWorkspaceID.MatchString(value) {
+		return "", fail(exitUsage, "workspace id %q is not in herdr's list; herdr deletes an empty workspace, so configure its label instead: workspace = \"workers\", not the id", value)
+	}
+	switch len(matches) {
+	case 0:
+		return a.createWorkspace(ctx, value)
+	case 1:
 		fmt.Fprintf(a.Out, "workspace_label=%s workspace=%s\n", value, matches[0])
 		return matches[0], nil
 	}
 	return "", fail(exitUsage, "workspace %q matched %d entries; run herdr workspace list on the executing host and pass -w WORKSPACE_ID", value, len(matches))
+}
+
+// createWorkspace recreates a workspace whose label matched none. Herdr deletes
+// a workspace when its last pane closes, and the spawn path is the only place
+// that sees every such case. Two spawns may race; the re-list picks the oldest
+// match and nothing is closed.
+func (a *App) createWorkspace(ctx context.Context, label string) (string, error) {
+	r := a.call(ctx, "herdr", "workspace", "create", "--label", label)
+	var created struct {
+		Result struct {
+			Workspace struct {
+				WorkspaceID string `json:"workspace_id"`
+			} `json:"workspace"`
+		} `json:"result"`
+	}
+	if r.Code != 0 || json.Unmarshal([]byte(r.Out), &created) != nil || created.Result.Workspace.WorkspaceID == "" {
+		return "", fail(exitConfig, "cannot create workspace %q; run herdr workspace create --label %s on the executing host", label, label)
+	}
+	workspace, duplicates := created.Result.Workspace.WorkspaceID, 0
+	if rows, err := a.workspaceRows(ctx, label); err == nil {
+		var matches []string
+		for _, row := range rows {
+			if id := str(row, "workspace_id"); str(row, "label") == label && id != "" {
+				matches = append(matches, id)
+			}
+		}
+		if len(matches) > 0 {
+			workspace, duplicates = matches[0], len(matches)-1
+		}
+	}
+	fmt.Fprintf(a.Out, "workspace_created label=%s workspace=%s", label, workspace)
+	if duplicates > 0 {
+		fmt.Fprintf(a.Out, " duplicates=%d", duplicates)
+	}
+	fmt.Fprintln(a.Out)
+	return workspace, nil
 }
