@@ -103,6 +103,8 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 	retry := func(why string) {
 		if attempt >= len(unconfirmedEscalationBackoff) {
 			h.logger.Error("relay unconfirmed escalation gave up", "event_id", dropped.OriginalEventID, "lane", dropped.Lane, "why", why)
+			// Nobody was told: the next drop must not be folded behind it.
+			h.unconfirmedNotices.release(dropped.Lane, dropped.OriginalEventID, true)
 			return
 		}
 		h.logger.Warn("relay unconfirmed escalation will retry", "event_id", dropped.OriginalEventID, "lane", dropped.Lane, "why", why, "attempt", attempt+1)
@@ -148,16 +150,25 @@ func (h *HubServer) escalateUnconfirmedRelayAttempt(machine string, dropped rela
 		retry("persist_failed")
 		return
 	}
+	if result.Duplicate && attempt > 0 {
+		// A retry answered as a duplicate: an earlier attempt's post was
+		// stored though its reply was lost, so this notice was told.
+		h.unconfirmedNotices.posted(dropped.Lane, record.ID)
+		return
+	}
 	if result.ID == 0 || result.Duplicate {
 		if fresh {
-			// Nothing new reached the design lane: the window stays open
-			// for the next drop.
-			h.unconfirmedNotices.release(design, dropped.Lane, record.ID)
+			// Nothing new reached the design lane: the claim this drop made
+			// is taken back so the next drop is told. A duplicate was told
+			// before (in a window a restart forgot); a notice never stored
+			// counts as folded.
+			h.unconfirmedNotices.release(dropped.Lane, record.ID, !result.Duplicate)
 		}
 		// A second drop of the same row posts the same event id and the
 		// durable idempotency answers it: the design lane was told already.
 		return
 	}
+	h.unconfirmedNotices.posted(dropped.Lane, record.ID)
 	h.logger.Warn("relay delivery unconfirmed; design lane told", "event_id", record.ID, "lane", dropped.Lane, "design_lane", design, "reason", dropped.Reason)
 }
 
@@ -231,22 +242,31 @@ type unconfirmedNoticeWindows struct {
 	byLanes map[[2]string]*unconfirmedNoticeWindow
 }
 
+// unconfirmedNoticeClaim is the notice that holds a window: the row it
+// reports, when it was admitted, the folded-count note it carries, and whether
+// the store took it.
+type unconfirmedNoticeClaim struct {
+	at     time.Time
+	row    int64
+	note   string
+	posted bool
+}
+
 type unconfirmedNoticeWindow struct {
-	sentAt  time.Time
-	sentRow int64
-	note    string             // the folded-count suffix of sentRow's notice
-	folded  map[int64]struct{} // rows dropped since sentAt and not told
-	// before is the window sentRow's notice replaced, kept so a notice that
-	// never reached the design lane can be taken back.
-	before *unconfirmedNoticeWindow
+	claim  unconfirmedNoticeClaim
+	folded map[int64]time.Time // rows dropped since claim.at and not told, by drop time
+	// prev is the claim this one replaced, and announced the folded rows its
+	// note names. Until the claim is posted, release puts both back.
+	prev      unconfirmedNoticeClaim
+	announced map[int64]time.Time
 }
 
 // admit decides whether row's notice is sent now. send is false for a drop
-// inside the open window, which is counted in folded. A new window opens with
-// a note naming the drops folded into it. The row that opened the current
-// window is always admitted again with its note (a retry, or a re-drop the
-// durable idempotency answers), and fresh is true only when this call opened
-// the window.
+// inside the claim's window, which is counted in folded. A drop once the
+// window has expired, a folded row dropped again included, makes a new claim
+// with a note naming the drops folded into it. The row that holds the claim is
+// always admitted again with its note (a retry, or a re-drop the durable
+// idempotency answers), and fresh is true only when this call made the claim.
 func (n *unconfirmedNoticeWindows) admit(design, worker string, row int64, now time.Time) (note string, folded int, send, fresh bool) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
@@ -256,40 +276,85 @@ func (n *unconfirmedNoticeWindows) admit(design, worker string, row int64, now t
 	key := [2]string{design, worker}
 	w := n.byLanes[key]
 	if w == nil {
-		w = &unconfirmedNoticeWindow{folded: make(map[int64]struct{})}
+		w = &unconfirmedNoticeWindow{folded: make(map[int64]time.Time)}
 		n.byLanes[key] = w
 	}
-	if row == w.sentRow {
-		return w.note, len(w.folded), true, false
+	if row == w.claim.row {
+		return w.claim.note, len(w.folded), true, false
 	}
-	if _, seen := w.folded[row]; seen {
+	if !w.claim.at.IsZero() && now.Sub(w.claim.at) < unconfirmedNoticeSpacing {
+		if _, seen := w.folded[row]; !seen {
+			w.folded[row] = now
+		}
 		return "", len(w.folded), false, false
 	}
-	if !w.sentAt.IsZero() && now.Sub(w.sentAt) < unconfirmedNoticeSpacing {
-		w.folded[row] = struct{}{}
-		return "", len(w.folded), false, false
-	}
+	delete(w.folded, row)
 	if len(w.folded) > 0 {
-		note = fmt.Sprintf(" (+%d more unconfirmed for this lane since %s UTC)", len(w.folded), w.sentAt.UTC().Format("15:04"))
+		note = fmt.Sprintf(" (+%d more unconfirmed for this lane since %s UTC)", len(w.folded), w.since().UTC().Format("15:04"))
 	}
-	before := *w
-	before.before = nil
-	*w = unconfirmedNoticeWindow{sentAt: now, sentRow: row, note: note, folded: make(map[int64]struct{}), before: &before}
+	*w = unconfirmedNoticeWindow{claim: unconfirmedNoticeClaim{at: now, row: row, note: note}, folded: make(map[int64]time.Time), prev: w.claim, announced: w.folded}
 	return note, 0, true, true
 }
 
-// release takes back the window row opened when its notice was not posted,
-// keeping every drop folded meanwhile, so the next drop is told instead.
-func (n *unconfirmedNoticeWindows) release(design, worker string, row int64) {
+// since is when the folded drops began: the last claim, or, when no claim
+// holds the window (a released first claim), the earliest folded drop. It is
+// never the zero time while a drop is folded.
+func (w *unconfirmedNoticeWindow) since() time.Time {
+	if !w.claim.at.IsZero() {
+		return w.claim.at
+	}
+	var first time.Time
+	for _, at := range w.folded {
+		if first.IsZero() || at.Before(first) {
+			first = at
+		}
+	}
+	return first
+}
+
+// claimed returns the window whose claim, posted or not, row holds. A row
+// id is one durable row, so at most one window's claim names it.
+func (n *unconfirmedNoticeWindows) claimed(worker string, row int64) *unconfirmedNoticeWindow {
+	for key, w := range n.byLanes {
+		if key[1] == worker && w.claim.row == row {
+			return w
+		}
+	}
+	return nil
+}
+
+// posted records that row's notice reached the store: its claim can no longer
+// be taken back.
+func (n *unconfirmedNoticeWindows) posted(worker string, row int64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	w := n.byLanes[[2]string{design, worker}]
-	if w == nil || w.sentRow != row || w.before == nil {
+	if w := n.claimed(worker, row); w != nil {
+		w.claim.posted = true
+		w.prev, w.announced = unconfirmedNoticeClaim{}, nil
+	}
+}
+
+// release takes back row's own claim when its notice was not posted: the claim
+// it replaced holds the window again, and the drops its note named stay folded
+// beside every drop folded since. untold also folds row itself, whose notice
+// nobody received. A posted claim, or a window another row now holds, is left
+// alone.
+func (n *unconfirmedNoticeWindows) release(worker string, row int64, untold bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	w := n.claimed(worker, row)
+	if w == nil || w.claim.posted {
 		return
 	}
-	restored := *w.before
-	for id := range w.folded {
-		restored.folded[id] = struct{}{}
+	folded := w.announced
+	if folded == nil {
+		folded = make(map[int64]time.Time)
 	}
-	*w = restored
+	for id, at := range w.folded {
+		folded[id] = at
+	}
+	if _, seen := folded[row]; untold && !seen {
+		folded[row] = w.claim.at
+	}
+	*w = unconfirmedNoticeWindow{claim: w.prev, folded: folded}
 }
