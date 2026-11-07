@@ -21,8 +21,8 @@ const (
 	spawnHeldLoopWindow   = 30 * time.Minute
 	spawnHeldLoopCount    = 5
 	spawnHeldLoopCooldown = time.Hour
-	// spawnHeldLoopMaxKeys bounds the per-role-key memory. Past it a new key
-	// still leaves its spawn_held fleet event but is not counted for Sentry.
+	// spawnHeldLoopMaxKeys bounds the per-role-key memory. Past it the least
+	// recently held key is evicted, so a new key is always counted.
 	spawnHeldLoopMaxKeys = 4096
 )
 
@@ -206,12 +206,12 @@ func (h *HubServer) observeSpawnHeld(job, roleKey, branch, reason, details strin
 	if h.heldLoop == nil {
 		h.heldLoop = make(map[string]*spawnHeldLoop)
 	}
+	_, evicted, overflowed := h.heldLoopOrder.touch(roleKey, spawnHeldLoopMaxKeys)
+	if overflowed {
+		delete(h.heldLoop, evicted)
+	}
 	state := h.heldLoop[roleKey]
 	if state == nil {
-		if len(h.heldLoop) >= spawnHeldLoopMaxKeys {
-			h.heldLoopMu.Unlock()
-			return
-		}
 		state = &spawnHeldLoop{}
 		h.heldLoop[roleKey] = state
 	}

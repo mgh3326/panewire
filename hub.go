@@ -429,6 +429,7 @@ type HubServer struct {
 	// separately from mu because a Sentry send must not run under the hub lock.
 	heldLoopMu        sync.Mutex
 	heldLoop          map[string]*spawnHeldLoop
+	heldLoopOrder     lruIndex[string]
 	staleAfter        time.Duration
 	keepaliveInterval time.Duration
 	gracePeriod       time.Duration

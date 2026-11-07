@@ -128,6 +128,27 @@ func TestSpawnHeldLoopReportsOncePerRoleKeyPerHour(t *testing.T) {
 	}
 }
 
+// The key cap evicts the least recently held key instead of refusing new
+// keys, so a later role key still reports its loop.
+func TestSpawnHeldLoopTracksNewKeyPastCap(t *testing.T) {
+	hub, _, transport := acceptObserveHub(t)
+	now := time.Unix(1_800_000_000, 0)
+	hub.now = func() time.Time { return now }
+	for i := range spawnHeldLoopMaxKeys {
+		hub.observeSpawnHeld("job-cap", fmt.Sprintf("key-%d", i), "succeeded_pane_held", "pane_listed", "")
+	}
+	for range spawnHeldLoopCount {
+		hub.observeSpawnHeld("job-new", "key-new", "succeeded_pane_held", "pane_listed", "")
+	}
+	if len(transport.events) != 1 {
+		t.Fatalf("sentry events=%d, want 1", len(transport.events))
+	}
+	failure, raw := spawnReasonErrorEvent(t, transport)
+	if strings.Join(failure.Fingerprint, "|") != "spawn-held-loop|succeeded_pane_held" || failure.Tags["role_key"] != "key-new" {
+		t.Fatalf("sentry=%+v raw=%s", failure, raw)
+	}
+}
+
 // Acceptance (d): two admission_refused causes carry different fingerprints.
 func TestAdmissionRefusedSentryFingerprintSplitsByReason(t *testing.T) {
 	hub := asyncSpawnHub(t)
