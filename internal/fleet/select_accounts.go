@@ -420,16 +420,19 @@ func (a *App) selectionRefused(ctx context.Context, s Spawn, req selReq, p *selP
 		if code == outcomeNoEligibleHost {
 			gap = p.capsGap
 		}
-		return p, fail(exit, "%s: no account admitted routing role %s%s%s", code, routingRole(req), hostScope(s), gap)
+		return p, fail(exit, "%s: no account admitted routing role %s%s%s%s", code, routingRole(req), hostScope(s), gap, p.poolAtCapNote())
 	}
 	if slices.ContainsFunc(accounts, func(c *selCand) bool { return c.code == outcomeQuotaExhausted }) {
 		p.outcome = outcomeQuotaExhausted
 		if req.route != nil && req.route.rule != nil {
 			return a.roleExhausted(ctx, s, req, p)
 		}
-		return p, fail(exitRoleWait, "%s: every eligible account is measured exhausted%s", outcomeQuotaExhausted, hostScope(s))
+		return p, fail(exitRoleWait, "%s: every eligible account is measured exhausted%s%s", outcomeQuotaExhausted, hostScope(s), p.poolAtCapNote())
 	}
 	p.outcome, p.routeRefusal = outcomeNoRoleCandidate, reasonRoleNoCandidate
+	if note := p.poolAtCapNote(); note != "" {
+		return p, fail(exitSeatRefused, "%s: %s: every eligible candidate is in a pool at its concurrency cap%s", reasonRoleNoCandidate, outcomeNoRoleCandidate, note)
+	}
 	return p, fail(exitSeatRefused, "%s: %s: no profile passes role, retirement, grade, gate and seat rules", reasonRoleNoCandidate, outcomeNoRoleCandidate)
 }
 
