@@ -101,8 +101,11 @@ func hkTaskIDIs(t client.Task, task string) bool {
 // CLI path reported unparseable `handoffkeep` output.
 var errHKUnreadable = errors.New("unreadable hk answer")
 
-// hkAnswerLimit bounds the 2xx body kept for cliTaskAnswer; a longer one is
-// cut, so it does not parse and reads as errHKUnreadable.
+// hkAnswerLimit bounds the 2xx body kept for cliTaskAnswer. A longer body is
+// not kept at all: its first hkAnswerLimit bytes can be complete JSON ahead of
+// a truncated or malformed rest, so the capture reads one byte past the limit
+// and keeps nothing on overflow, which does not parse and reads as
+// errHKUnreadable.
 const hkAnswerLimit = 4 << 20
 
 // answerCapture keeps the body of a 2xx answer — hk's client decodes it into
@@ -121,12 +124,15 @@ func (c *answerCapture) RoundTrip(r *http.Request) (*http.Response, error) {
 	if err != nil || resp.StatusCode < 200 || resp.StatusCode > 299 {
 		return resp, err
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, hkAnswerLimit))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, hkAnswerLimit+1))
 	resp.Body.Close()
 	if err != nil {
 		return nil, err
 	}
 	resp.Body = io.NopCloser(bytes.NewReader(body))
+	if len(body) > hkAnswerLimit {
+		body = nil
+	}
 	c.body, c.answered = body, true
 	return resp, nil
 }
