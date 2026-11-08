@@ -38,6 +38,9 @@ func (ttlNodeHerdr) Run(_ context.Context, c fleet.Command) fleet.Result {
 	if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
 		return fleet.Result{Out: `{"result":{"agents":[]}}`}
 	}
+	if c.Name == "herdr" && strings.Join(c.Args, " ") == "pane list" {
+		return fleet.Result{Out: `{"result":{"panes":[]}}`}
+	}
 	return fleet.Result{Code: 1, Err: "unexpected command"}
 }
 
@@ -67,7 +70,7 @@ func ttlNodeApp(t *testing.T) (*fleet.App, string, string) {
 		payload map[string]any
 	}{
 		{"job.claim", map[string]any{"owner_lane": "owner", "task_id": "42", "role": "worker"}},
-		{"job.spawned", map[string]any{"pane_id": "w:j1", "label": "j1"}},
+		{"job.spawned", map[string]any{"pane_id": "w:j1", "label": "j1", "herdr_session": "default"}},
 		{"job.completed", map[string]any{}},
 		{"job.reaped", map[string]any{"pane_id": "w:j1"}},
 	} {

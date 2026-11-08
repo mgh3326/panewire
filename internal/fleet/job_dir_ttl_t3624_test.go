@@ -13,6 +13,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -36,6 +37,8 @@ type ttlRig struct {
 	store  *fakeJobStore
 	agents string
 	herdr  int // exit status of `herdr agent list`
+	panes  string
+	paneRC int // exit status of `herdr pane list`
 	base   time.Time
 	now    time.Time
 	events []fleetevent.Event
@@ -54,13 +57,16 @@ func newTTLRig(t *testing.T) *ttlRig {
 	if home, err := os.UserHomeDir(); err == nil && within(filepath.Join(home, "work", "herdr-inbox"), a.Jobs) {
 		t.Fatalf("jobs root %s is under the real herdr-inbox", a.Jobs)
 	}
-	r := &ttlRig{t: t, a: a, store: a.JobStore.(*fakeJobStore), agents: `{"result":{"agents":[]}}`, base: a.Now()}
+	r := &ttlRig{t: t, a: a, store: a.JobStore.(*fakeJobStore), agents: `{"result":{"agents":[]}}`, panes: `{"result":{"panes":[]}}`, base: a.Now()}
 	r.now = r.base
 	a.Now = func() time.Time { return r.now }
 	r.hk = useFakeHK(t)
 	a.Runner = &fakeRunner{Do: func(c Command) Result {
 		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
 			return Result{Out: r.agents, Code: r.herdr}
+		}
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "pane list" {
+			return Result{Out: r.panes, Code: r.paneRC}
 		}
 		return Result{}
 	}}
@@ -122,7 +128,7 @@ func (r *ttlRig) doc(key string, body []byte, want string) {
 func (r *ttlRig) seedJob(id string) {
 	r.t.Helper()
 	putEvent(r.t, r.a, id, "job.claim", map[string]any{"owner_lane": "owner", "parent_lane": "parent", "task_id": "42", "t_level": "T1", "role": "worker"})
-	putEvent(r.t, r.a, id, "job.spawned", map[string]any{"pane_id": "w:" + id, "tab_id": "w:t1", "label": id, "profile": "cmd-dsflash41", "family": "deepseek", "keep": false})
+	putEvent(r.t, r.a, id, "job.spawned", map[string]any{"pane_id": "w:" + id, "tab_id": "w:t1", "herdr_session": "default", "label": id, "profile": "cmd-dsflash41", "family": "deepseek", "keep": false})
 	putEvent(r.t, r.a, id, "job.completed", map[string]any{"report": filepath.Join(r.dir(id), "report.md")})
 	putEvent(r.t, r.a, id, "job.reaped", map[string]any{"pane_id": "w:" + id})
 	report := []byte("work done\nREADY: done\n")
@@ -714,5 +720,338 @@ func TestJobDirTTLConfigKey(t *testing.T) {
 		if _, err = load(body); code(err) != exitConfig {
 			t.Fatalf("%q: %v, want a config error", body, err)
 		}
+	}
+}
+
+// A plain shell pane is in `herdr pane list` and not in `herdr agent list`:
+// a job whose agent exited while its shell pane stays keeps its dir.
+func TestJobDirTTLShellPaneKeeps(t *testing.T) {
+	for name, panes := range map[string]string{
+		"pane id":    `{"result":{"panes":[{"pane_id":"w:j1","tab_id":"w:t1","agent_status":"","cwd":"/work/a"}]}}`,
+		"pane label": `{"result":{"panes":[{"pane_id":"w:other","tab_id":"w:t9","label":"j1","agent_status":"","cwd":"/work/a"}]}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newTTLRig(t)
+			r.seedJob("j1")
+			r.panes = panes
+			wantKeep(t, r, r.pass(true), "j1", "pane-live")
+		})
+	}
+}
+
+// A pane list herdr cannot answer, or answers in a shape panewire cannot
+// read, keeps the dir even when the agent list is empty.
+func TestJobDirTTLPaneListUnreadableKeeps(t *testing.T) {
+	cases := map[string]func(r *ttlRig){
+		"pane list fails":       func(r *ttlRig) { r.paneRC = 1 },
+		"pane list has no rows": func(r *ttlRig) { r.panes = `{"result":{}}` },
+		"pane list garbled":     func(r *ttlRig) { r.panes = `{"result":` },
+	}
+	for name, break_ := range cases {
+		t.Run(name, func(t *testing.T) {
+			r := newTTLRig(t)
+			r.seedJob("j1")
+			break_(r)
+			wantKeep(t, r, r.pass(true), "j1", "pane-unreadable")
+		})
+	}
+}
+
+// The pane inventory is read in the herdr session the receipt recorded.
+func TestJobDirTTLPaneInRecordedSessionKeeps(t *testing.T) {
+	r := newTTLRig(t)
+	r.seedJob("j1")
+	putEvent(t, r.a, "j1", "job.spawned", map[string]any{"pane_id": "w:j1", "tab_id": "w:t1", "label": "j1", "herdr_session": "other"})
+	r.age("j1")
+	r.a.HerdrSession = "default"
+	r.a.Runner = &fakeRunner{Do: func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "pane list" {
+			if slices.Contains(c.Env, "HERDR_SESSION=other") {
+				return Result{Out: `{"result":{"panes":[{"pane_id":"w:j1","tab_id":"w:t1","agent_status":""}]}}`}
+			}
+			return Result{Out: `{"result":{"panes":[]}}`}
+		}
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			return Result{Out: `{"result":{"agents":[]}}`}
+		}
+		return Result{}
+	}}
+	wantKeep(t, r, r.pass(true), "j1", "pane-live")
+}
+
+// A node-side dir whose receipt names no herdr session (one written before
+// the receipt recorded it) keeps: its pane cannot be looked up for sure.
+func TestJobDirTTLReceiptWithoutSessionKeeps(t *testing.T) {
+	r := newTTLRig(t)
+	r.seedJob("j1")
+	putEvent(t, r.a, "j1", "job.spawned", map[string]any{"pane_id": "w:j1", "tab_id": "w:t1", "label": "j1"})
+	r.age("j1")
+	wantKeep(t, r, r.pass(true), "j1", "pane-session-unknown")
+}
+
+// Every report path the receipt or a completion recorded, inside the dir,
+// needs hk's confirmation as a top-level report*.md does.
+func TestJobDirTTLRecordedReportPaths(t *testing.T) {
+	cases := []struct {
+		name, action, reason string
+		setup                func(r *ttlRig)
+	}{
+		{"completion summary without a doc", "keep", "report-unconfirmed", func(r *ttlRig) {
+			r.write("j1", "sub/summary.md", []byte("summary\n"))
+			putEvent(r.t, r.a, "j1", "job.completed", map[string]any{"report": filepath.Join(r.dir("j1"), "sub", "summary.md")})
+		}},
+		{"spawn report without a doc", "keep", "report-unconfirmed", func(r *ttlRig) {
+			r.write("j1", "out/result.md", []byte("result\n"))
+			putEvent(r.t, r.a, "j1", "job.spawned", map[string]any{"pane_id": "w:j1", "tab_id": "w:t1", "herdr_session": "default", "label": "j1", "report": filepath.Join(r.dir("j1"), "out", "result.md")})
+		}},
+		{"completion summary whose doc differs", "keep", "report-sha-mismatch", func(r *ttlRig) {
+			r.write("j1", "sub/summary.md", []byte("summary\n"))
+			r.doc("reports/j1/summary.md", []byte("other summary\n"), "")
+			putEvent(r.t, r.a, "j1", "job.completed", map[string]any{"report": filepath.Join(r.dir("j1"), "sub", "summary.md")})
+		}},
+		{"relative recorded path", "keep", "report-path-unreadable", func(r *ttlRig) {
+			putEvent(r.t, r.a, "j1", "job.completed", map[string]any{"report": "summary.md"})
+		}},
+		{"recorded path not a string", "keep", "report-path-unreadable", func(r *ttlRig) {
+			putEvent(r.t, r.a, "j1", "job.completed", map[string]any{"report": 7})
+		}},
+		{"completion summary with its doc", "delete", "confirmed", func(r *ttlRig) {
+			r.write("j1", "sub/summary.md", []byte("summary\n"))
+			r.doc("reports/j1/summary.md", []byte("summary\n"), "")
+			putEvent(r.t, r.a, "j1", "job.completed", map[string]any{"report": filepath.Join(r.dir("j1"), "sub", "summary.md")})
+		}},
+		{"recorded path no longer present", "delete", "confirmed", func(r *ttlRig) {
+			putEvent(r.t, r.a, "j1", "job.completed", map[string]any{"report": filepath.Join(r.dir("j1"), "sub", "gone.md")})
+		}},
+		{"recorded path in the parent job's dir", "delete", "confirmed", func(r *ttlRig) {
+			r.write("parent", "summary.md", []byte("parent summary\n"))
+			r.age("parent")
+			putEvent(r.t, r.a, "j1", "job.completed", map[string]any{"report": filepath.Join(r.dir("parent"), "summary.md")})
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newTTLRig(t)
+			r.seedJob("j1")
+			c.setup(r)
+			r.age("j1")
+			out := r.pass(true)
+			if c.action == "delete" {
+				wantDelete(t, r, out, "j1", c.reason)
+			} else {
+				wantKeep(t, r, out, "j1", c.reason)
+			}
+		})
+	}
+}
+
+// A writer that lands during the locked re-check's own herdr read (after the
+// re-check read the dir, before the delete) keeps the dir (hk 3624 N1).
+func TestJobDirTTLWriteDuringLockedRecheckKeeps(t *testing.T) {
+	r := newTTLRig(t)
+	r.seedJob("j1")
+	calls := 0
+	base := r.a.Runner.(*fakeRunner).Do
+	r.a.Runner = &fakeRunner{Do: func(c Command) Result {
+		if c.Name == "herdr" && strings.Join(c.Args, " ") == "agent list" {
+			calls++
+			if calls == 2 { // the locked re-check's fresh herdr read
+				if err := os.WriteFile(filepath.Join(r.dir("j1"), "late-report.md"), []byte("written during the re-check\n"), 0600); err != nil {
+					t.Error(err)
+				}
+			}
+		}
+		return base(c)
+	}}
+	out := r.pass(true)
+	if calls < 2 {
+		t.Fatalf("the locked re-check read herdr %d times, want a second read", calls)
+	}
+	wantKeep(t, r, out, "j1", "changed-during-pass")
+	if _, err := os.Stat(filepath.Join(r.dir("j1"), "late-report.md")); err != nil {
+		t.Fatalf("the late write is gone: %v", err)
+	}
+}
+
+// tombstones lists the .expiring-* entries of the jobs root.
+func (r *ttlRig) tombstones() []string {
+	r.t.Helper()
+	entries, err := os.ReadDir(r.a.Jobs)
+	if err != nil {
+		r.t.Fatal(err)
+	}
+	var out []string
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), ".expiring-") {
+			out = append(out, entry.Name())
+		}
+	}
+	return out
+}
+
+// A file that lands after the final gate, right before or right after the
+// dir is renamed to its tombstone, keeps the dir: it is renamed back intact.
+func TestJobDirTTLWriteAroundTheRenameKeeps(t *testing.T) {
+	for _, when := range []string{"before the rename", "after the rename"} {
+		t.Run(when, func(t *testing.T) {
+			r := newTTLRig(t)
+			r.seedJob("j1")
+			before, after := false, false
+			p := &JobDirTTL{TTL: DefaultJobDirTTL, Apply: true}
+			p.beforeRename = func(id string) {
+				before = true
+				if when == "before the rename" {
+					r.write(id, "findings.json", []byte(`{"findings":[]}`))
+				}
+			}
+			p.afterRename = func(id, tombstone string) {
+				after = true
+				if filepath.Dir(tombstone) != r.a.Jobs || !strings.HasPrefix(filepath.Base(tombstone), ".expiring-"+id+"-") || validID(filepath.Base(tombstone)) {
+					t.Errorf("tombstone %s is not a non-job name in the jobs root", tombstone)
+				}
+				if r.exists(id) {
+					t.Errorf("%s still exists under its name after the rename", id)
+				}
+				if when == "after the rename" {
+					if err := os.WriteFile(filepath.Join(tombstone, "findings.json"), []byte(`{"findings":[]}`), 0600); err != nil {
+						t.Error(err)
+					}
+				}
+			}
+			out, err := r.passWith(p)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantKeep(t, r, out, "j1", "changed-during-pass")
+			if !before || !after {
+				t.Fatalf("hooks ran before=%t after=%t, want both", before, after)
+			}
+			for _, name := range []string{"report.md", "brief.md", "findings.json", "events"} {
+				if _, err := os.Lstat(filepath.Join(r.dir("j1"), name)); err != nil {
+					t.Fatalf("the renamed-back dir lacks %s: %v", name, err)
+				}
+			}
+			if left := r.tombstones(); len(left) != 0 {
+				t.Fatalf("tombstones left behind: %v", left)
+			}
+			if len(r.events) != 0 {
+				t.Fatalf("a kept dir recorded fleet events %+v", r.events)
+			}
+		})
+	}
+}
+
+// When the tombstone changed and cannot be renamed back, it stays where it
+// is, is never deleted, and the pass records it.
+func TestJobDirTTLTombstoneThatCannotGoBackStays(t *testing.T) {
+	r := newTTLRig(t)
+	r.seedJob("j1")
+	var tomb string
+	p := &JobDirTTL{TTL: DefaultJobDirTTL, Apply: true}
+	p.afterRename = func(id, tombstone string) {
+		tomb = tombstone
+		if err := os.WriteFile(filepath.Join(tombstone, "findings.json"), []byte(`{"findings":[]}`), 0600); err != nil {
+			t.Error(err)
+		}
+		// A new dir under the job's name holds the way back.
+		r.write(id, "spawn.out", []byte("new\n"))
+	}
+	out, err := r.passWith(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantKeep(t, r, out, "j1", "tombstone-left")
+	for _, name := range []string{"report.md", "findings.json", "events"} {
+		if _, err := os.Lstat(filepath.Join(tomb, name)); err != nil {
+			t.Fatalf("the tombstone lost %s: %v", name, err)
+		}
+	}
+	if len(r.events) != 1 || r.events[0].Kind != "job_dir_expired" || r.events[0].Job != "j1" || r.events[0].Outcome != "tombstone_left" {
+		t.Fatalf("fleet events = %+v, want one tombstone_left for j1", r.events)
+	}
+}
+
+// A tombstone left by an earlier pass is listed and never deleted or
+// restored.
+func TestJobDirTTLLeftoverTombstoneIsReportedNeverTouched(t *testing.T) {
+	r := newTTLRig(t)
+	r.seedJob("j1")
+	r.seedJob("j2")
+	tomb := ".expiring-j2-1767225600000000000"
+	if err := os.Rename(r.dir("j2"), filepath.Join(r.a.Jobs, tomb)); err != nil {
+		t.Fatal(err)
+	}
+	if validID(tomb) {
+		t.Fatalf("tombstone name %s is a valid job id", tomb)
+	}
+	out := r.pass(true)
+	if got := line(out, tomb); !strings.HasPrefix(got, "job="+tomb+" action=keep reason=tombstone ") {
+		t.Fatalf("line for the tombstone = %q\n%s", got, out)
+	}
+	wantDelete(t, r, out, "j1", "confirmed")
+	if _, err := os.Stat(filepath.Join(r.a.Jobs, tomb, "report.md")); err != nil {
+		t.Fatalf("the leftover tombstone was touched: %v", err)
+	}
+	if r.exists("j2") {
+		t.Fatal("the leftover tombstone was restored")
+	}
+	if !strings.Contains(out, "tombstone:1") {
+		t.Fatalf("summary does not count the tombstone:\n%s", out)
+	}
+}
+
+// ttlUploadedEvidence answers hk with an artifact record of j1 that lists
+// rel (under the job dir) as uploaded with Mirror=false, its archive not
+// drive-confirmed.
+func (r *ttlRig) ttlUploadedEvidence(rel string, body []byte) {
+	r.t.Helper()
+	r.write("j1", rel, body)
+	r.age("j1")
+	src := filepath.Join(r.dir("j1"), filepath.Dir(rel))
+	rec := ArtifactRecord{Schema: "fleet.artifact.v2", Name: "run", Host: r.a.machine(), Job: "j1", Task: "42", Archive: Archive{Source: src, State: "uploaded", Contents: []Content{{Path: filepath.Base(rel), Bytes: int64(len(body)), SHA: sha(body), Mirror: false, UploadedAt: "2026-01-01T00:00:00Z"}}}}
+	raw, _ := json.Marshal(rec)
+	key := "artifacts/proj/42/j1/run"
+	r.hk.SetTask("42", hkTaskJSON(42, "merged", "t", "", "proj", "{}"))
+	r.hk.SetDoc(key, string(raw))
+	r.hk.Handle(func(req hkRequest) (int, string, bool) {
+		return http.StatusOK, `{"documents":[{"key":"` + key + `"}]}`, req.Method == http.MethodGet && req.Path == "/v1/documents"
+	})
+	r.a.Config.Artifacts = map[string]any{"local_delete_at": "uploaded"}
+}
+
+// Under a jobs root the artifact policy's root does not match (/srv/jobs),
+// evidence/** has no policy class, so no mirror requirement applies to it:
+// an uploaded Mirror=false row must not let it go.
+func TestJobDirTTLUnclassifiedEvidenceKeeps(t *testing.T) {
+	r := newTTLRig(t)
+	r.a.Jobs = filepath.Join(r.a.Home, "srv", "jobs")
+	if err := os.MkdirAll(r.a.Jobs, 0700); err != nil {
+		t.Fatal(err)
+	}
+	r.seedJob("j1")
+	r.ttlUploadedEvidence("evidence/run.log", []byte("log\n"))
+	wantKeep(t, r, r.pass(true), "j1", "evidence-unclassified")
+}
+
+// Under the policy's own root, evidence is mirror-required: the uploaded
+// hatch never lets it go before the drive confirms it.
+func TestJobDirTTLUploadedEvidenceNeedsTheDrive(t *testing.T) {
+	r := newTTLRig(t)
+	r.seedJob("j1")
+	r.ttlUploadedEvidence("evidence/run.log", []byte("log\n"))
+	wantKeep(t, r, r.pass(true), "j1", "evidence-unconfirmed")
+}
+
+// --lane filters the pane reap; the job dir TTL has no lane filter, so the
+// two together are a usage error, refused before anything runs.
+func TestJobDirTTLReapRefusesLane(t *testing.T) {
+	r := newTTLRig(t)
+	r.seedJob("j1")
+	r.now = r.base.Add(73 * time.Hour)
+	var out bytes.Buffer
+	r.a.Out = &out
+	err := r.a.hygiene(context.Background(), "reap", []string{"--lane", "A", "--apply", "--expire-job-dirs"})
+	if code(err) != exitUsage || !r.exists("j1") {
+		t.Fatalf("reap --lane A --apply --expire-job-dirs: err=%v exists=%t\n%s", err, r.exists("j1"), out.String())
 	}
 }

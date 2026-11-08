@@ -81,6 +81,10 @@ type JobDirTTL struct {
 	// beforeRecheck runs between the scan and the locked re-check of a dir
 	// the scan would delete; tests only.
 	beforeRecheck func(job string)
+	// beforeRename and afterRename run right before and right after the dir
+	// is renamed to its tombstone; tests only.
+	beforeRename func(job string)
+	afterRename  func(job, tombstone string)
 }
 
 // JobDirTTLSummary counts one pass: dirs deleted (or, in a dry run, that
