@@ -279,7 +279,7 @@ func TestQuietDesignCompletionWithoutTaskOrPRWakes(t *testing.T) {
 			t.Cleanup(closeServer)
 			h, agent := t3426Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), hk, tc.jobs)
 			h.relayJobCompletionFrom("host-a", t3426Completion(tc.job, t3426Design, ""))
-			t3602AssertWoken(t, h, t3426Injected(agent), t3426Design, "w1:design", "job.completed", tc.job)
+			t3602AssertWoken(t, h, t3426Injected(agent), t3426Design, "w1:design", "job.completed", tc.job, "ready")
 		})
 	}
 }
@@ -299,7 +299,7 @@ func TestQuietDesignLaneStillGetsEscalationsAndFailures(t *testing.T) {
 	escalation.Question = "ESC which migration order do we ship?"
 	escalation.Reason = "needs_decision"
 	h.relayJobEventFrom("host-a", "job.escalate", escalation)
-	t3602AssertWoken(t, h, t3426Injected(agent), t3426Design, "w1:design", "job.escalate", escalation.JobID)
+	t3602AssertWoken(t, h, t3426Injected(agent), t3426Design, "w1:design", "job.escalate", escalation.JobID, "decision")
 	for _, tc := range []struct{ id, notifyType, text string }{
 		{"decision", "decision", "ESC which release do we ship?"},
 		{"blocked", "blocked", "BLOCKED review needs an operator decision"},
@@ -307,11 +307,12 @@ func TestQuietDesignLaneStillGetsEscalationsAndFailures(t *testing.T) {
 		{"spawn-failed", "automation-failed", "[panewire] SPAWN_FAILED job-1 request=r1 host=none profile=none rc=70 stage=launch replay=no reason=spawn_failed fix=Check the checkout."},
 		{"task-link-failed", "automation-failed", "[panewire] TASK_LINK_FAILED job=job-2 task=7 reason=task claim exited with status 1; link the task manually"},
 	} {
+		// The declared type is the wake's urgency kind.
 		e := hubJobEventPayload{JobID: laneEventTransportID(t3426Design, tc.id), Epoch: 1, OwnerLane: t3426Design, EventID: tc.id, NotifyType: tc.notifyType, Text: tc.text}
 		if r := h.relayLaneEvent(e, agent); r.ID == 0 || r.PersistFailed {
 			t.Fatalf("%s relay=%+v", tc.id, r)
 		}
-		t3602AssertWoken(t, h, t3426Injected(agent), t3426Design, "w1:design", "lane.event", e.JobID)
+		t3602AssertWoken(t, h, t3426Injected(agent), t3426Design, "w1:design", "lane.event", e.JobID, tc.notifyType)
 	}
 }
 

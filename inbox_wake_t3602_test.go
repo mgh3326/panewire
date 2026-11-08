@@ -438,17 +438,22 @@ func TestInboxWakeHubRestartReplaysNoInjection(t *testing.T) {
 }
 
 // t3602AssertWoken fails unless got is exactly one wake line for lane in pane
-// and the lane's inbox holds the kind/jobID item unread, then closes the
-// lane's wake window so the next event is judged on its own. The hk 3410,
-// 3426 and 3434 tests use it where a design lane used to be interrupted.
-func t3602AssertWoken(t *testing.T, h *HubServer, got []hubRelayInjectEvent, lane, pane, kind, jobID string) {
+// whose most urgent kind is most, and the lane's inbox holds the kind/jobID
+// item unread. It then acks the item and closes the lane's wake window, so
+// the next event is judged on its own: its wake names its own urgency. The
+// hk 3410, 3426 and 3434 tests use it where a design lane used to be
+// interrupted.
+func t3602AssertWoken(t *testing.T, h *HubServer, got []hubRelayInjectEvent, lane, pane, kind, jobID, most string) {
 	t.Helper()
-	if len(got) != 1 || got[0].Pane != pane || got[0].EventID != 0 || !strings.HasPrefix(got[0].Text, "[inbox] "+lane+": ") || !strings.HasSuffix(got[0].Text, " | panewire inbox list --lane "+lane) {
-		t.Fatalf("injections=%+v, want one wake line for %s in %s", got, lane, pane)
+	if len(got) != 1 || got[0].Pane != pane || got[0].EventID != 0 || !strings.HasPrefix(got[0].Text, "[inbox] "+lane+": ") || !strings.HasSuffix(got[0].Text, " unread (most urgent: "+most+") | panewire inbox list --lane "+lane) {
+		t.Fatalf("injections=%+v, want one wake line for %s in %s, most urgent %s", got, lane, pane, most)
 	}
 	item := t3426Item(t, h, lane, kind, jobID)
 	if item.Class != "inbox" || item.ReadAt != 0 || item.AckedAt != 0 {
 		t.Fatalf("%s %s stored as %+v, want an unread inbox item", kind, jobID, item)
+	}
+	if _, err := h.inbox.store.ack(item.ID, lane, false, time.Now().UTC()); err != nil {
+		t.Fatal(err)
 	}
 	h.inbox.wakes.mu.Lock()
 	delete(h.inbox.wakes.lanes, lane)

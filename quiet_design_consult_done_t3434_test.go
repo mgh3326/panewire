@@ -34,7 +34,7 @@ func TestQuietDesignConsultDoneWakes(t *testing.T) {
 			if len(got) != 1 || !strings.Contains(got[0].Text, "(most urgent: ready)") {
 				t.Fatalf("injections=%+v, want a ready wake", got)
 			}
-			t3602AssertWoken(t, h, got, t3426Design, "w1:design", "lane.event", e.JobID)
+			t3602AssertWoken(t, h, got, t3426Design, "w1:design", "lane.event", e.JobID, "ready")
 		})
 	}
 
