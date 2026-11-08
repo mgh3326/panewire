@@ -2,6 +2,8 @@ package fleet
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -108,7 +110,7 @@ type fakeHK struct {
 	down    bool
 }
 
-var jobRecordFields = []string{"state", "role", "label", "family", "profile", "model", "harness", "effort", "pool", "owner_lane", "parent_lane", "parent_job", "pane_id", "worktree", "report_doc", "result", "end_reason"}
+var jobRecordFields = []string{"state", "role", "label", "family", "profile", "model", "harness", "effort", "pool", "owner_lane", "parent_lane", "parent_job", "pane_id", "worktree", "report_doc", "report_sha256", "result", "end_reason"}
 
 func newFakeHK(t *testing.T) *fakeHK {
 	t.Helper()
@@ -202,6 +204,11 @@ func (h *fakeHK) serve(w http.ResponseWriter, r *http.Request) {
 			}
 			if str(fields, "state") == "completed" && str(rec, "state") != "spawned" {
 				h.fail(w, 409, "job_state_conflict")
+				return
+			}
+			// hk's checkJobUpdate: a report pin needs a report doc.
+			if _, pin := fields["report_sha256"]; pin && str(fields, "report_doc") == "" && str(rec, "report_doc") == "" {
+				h.fail(w, 400, "invalid_context")
 				return
 			}
 			for k, v := range fields {
@@ -422,7 +429,9 @@ func TestDoneResultOnePutThenRelay(t *testing.T) {
 			t.Fatalf("relay emitted before the record PUT: %v", seq)
 		}
 		rec := h.record(t, "j")
-		if str(rec, "state") != "completed" || str(rec, "report_doc") == "" {
+		// The report pin travels in the same PUT as report_doc (hk 3615).
+		pin := sha256.Sum256([]byte("done\n"))
+		if str(rec, "state") != "completed" || str(rec, "report_doc") == "" || str(rec, "report_sha256") != hex.EncodeToString(pin[:]) {
 			t.Fatalf("record=%v", rec)
 		}
 		if withResult {
