@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/url"
 	"os"
 	"os/exec"
@@ -54,7 +55,7 @@ const (
 	nodeCaptureScreen    = "screen"
 	nodeCaptureWould     = "would-screen"
 	nodeCaptureNotAJob   = "not-a-job"
-	nodeCaptureScreenTxt = "pane-screen.txt"
+	nodeCaptureScreenTxt = fleet.PaneScreenFile
 )
 
 var (
@@ -138,7 +139,18 @@ type nodePaneCloseResult struct {
 type nodePaneCaptureResult struct {
 	Outcome string `json:"outcome"`
 	Saved   string `json:"saved,omitempty"`
+	// Doc is the hk screen document key (fleet.PaneScreenDocKey) once a
+	// written screen was uploaded; omitted otherwise, so a result without an
+	// upload keeps its earlier bytes (hk 3617). It goes on the wire only to a
+	// hub that advertised hubFeaturePaneCaptureDoc (nodeCommandWire).
+	Doc string `json:"doc,omitempty"`
 }
+
+// hubFeaturePaneCaptureDoc: a hub before hk 3617 decodes a pane.capture
+// result strictly and refuses the whole result for an unknown doc, so a node
+// sends doc only on a connection whose hub advertised this. The upload to hk
+// happens either way.
+const hubFeaturePaneCaptureDoc = "pane_capture_doc"
 
 type nodeWorktree struct {
 	Path      string `json:"path"`
@@ -325,9 +337,9 @@ func canonicalNodeCommandResult(op string, raw json.RawMessage) (json.RawMessage
 		switch {
 		case !decodeNodeCommandStrict(raw, &result):
 		case result.Outcome == nodeCaptureReport || result.Outcome == nodeCaptureScreen || result.Outcome == nodeCaptureWould:
-			valid = validNodeCommandPath(result.Saved)
+			valid = validNodeCommandPath(result.Saved) && (result.Doc == "" || validNodeCaptureDoc(result))
 		case result.Outcome == nodeCaptureNotAJob || result.Outcome == nodePaneChanged || result.Outcome == nodePaneGone:
-			valid = result.Saved == ""
+			valid = result.Saved == "" && result.Doc == ""
 		}
 		target = result
 	case nodeCommandPaneRead:
@@ -472,6 +484,7 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 	defer cancel()
 	reply := nodeCommandReply{Type: "node.command.result", RequestID: message.RequestID, Op: message.CommandOp}
 	result, code := client.runNodeCommand(runContext, message.CommandOp, message.CommandArgs)
+	result = peer.nodeCommandWire(result)
 	if nodeCommandReapOnly(message.CommandOp) {
 		decoded, _ := decodeNodeCommandArgs(message.CommandOp, message.CommandArgs)
 		logNodeReapCommand(message.CommandOp, decoded, result, code)
@@ -496,6 +509,18 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 	} else {
 		_ = peer.write(ctx, reply)
 	}
+}
+
+// nodeCommandWire is a node command result's wire form on this connection.
+// It is shaped here, at reply time, because the command ran without knowing
+// which hub it answers: pane.capture's doc reaches only a hub that advertised
+// hubFeaturePaneCaptureDoc.
+func (peer *hubClientConnection) nodeCommandWire(result any) any {
+	if capture, ok := result.(nodePaneCaptureResult); ok && !peer.acceptsPaneCaptureDoc.Load() {
+		capture.Doc = ""
+		return capture
+	}
+	return result
 }
 
 func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json.RawMessage) (any, string) {
@@ -734,7 +759,23 @@ func (client *HubClient) nodePaneCapture(ctx context.Context, args nodePaneCaptu
 	if err := replaceFileAtomicallyInRoot(job, nodeCaptureScreenTxt, output, 0600); err != nil {
 		return nil, "capture_failed"
 	}
-	return nodePaneCaptureResult{Outcome: nodeCaptureScreen, Saved: screen}, ""
+	// The saved screen also goes to hk (hk 3617), under what is left of the
+	// command's bound. A failed upload is one warning and an empty doc: the
+	// screen is saved, so the outcome stays screen.
+	doc, err := fleet.UploadPaneScreen(ctx, args.Name, nodeJobTask(job), output)
+	if err != nil {
+		slog.Warn("pane screen upload failed; local screen retained", "job", args.Name, "err", err)
+	}
+	return nodePaneCaptureResult{Outcome: nodeCaptureScreen, Saved: screen, Doc: doc}, ""
+}
+
+// validNodeCaptureDoc reports whether a pane.capture result's doc is the
+// screen document of the job its saved screen belongs to: only a written
+// screen is uploaded.
+func validNodeCaptureDoc(result nodePaneCaptureResult) bool {
+	job := filepath.Base(filepath.Dir(result.Saved))
+	return result.Outcome == nodeCaptureScreen && filepath.Base(result.Saved) == nodeCaptureScreenTxt &&
+		validNodeJobName(job) && result.Doc == fleet.PaneScreenDocKey(job)
 }
 
 // nodeWorktreeInspect resolves a cwd to a linked git worktree. A path that is

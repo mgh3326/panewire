@@ -647,7 +647,9 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string,
 
 // savePaneScreen writes the pane's last screen to <job dir>/pane-screen.txt
 // through an os.Root on the job directory, with the mode set before any byte
-// is written, as the pane.capture node command does.
+// is written, as the pane.capture node command does. The saved screen then
+// goes to hk as the job's screen document (UploadPaneScreen); a failed upload
+// is one warning and never fails the save, so the pane still closes.
 func (a *App) savePaneScreen(ctx context.Context, j Job) error {
 	r := a.call(ctx, "herdr", "pane", "read", j.Pane)
 	if err := check(r, "pane screen"); err != nil {
@@ -658,7 +660,13 @@ func (a *App) savePaneScreen(ctx context.Context, j Job) error {
 		return err
 	}
 	defer root.Close()
-	return durable.ReplaceFileAtomicallyInRoot(root, PaneScreenFile, []byte(r.Out), 0600)
+	if err := durable.ReplaceFileAtomicallyInRoot(root, PaneScreenFile, []byte(r.Out), 0600); err != nil {
+		return err
+	}
+	if _, err := UploadPaneScreen(ctx, j.ID, j.Task, []byte(r.Out)); err != nil {
+		a.warn("pane screen upload failed for job %s; local screen retained: %v", j.ID, err)
+	}
+	return nil
 }
 
 // markSweptJob writes the end state to the hk record of a job that never
