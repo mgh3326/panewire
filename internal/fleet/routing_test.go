@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -31,24 +32,21 @@ func routingDoc(block string) string {
 	return "# policy/model-routing\n\nRules in prose.\n\n## Machine-readable block (v1)\n```json\n" + block + "\n```\nProfile names are pacelever launch profiles.\n"
 }
 
-// serveRouting answers `handoffkeep doc get policy/model-routing` with body
-// as hk would; an empty body makes hk unreachable.
-func serveRouting(a *App, body string) {
-	fr := a.Runner.(*fakeRunner)
-	next := fr.Do
-	fr.Do = func(c Command) Result {
-		if c.Name == "handoffkeep" && strings.Join(c.Args, " ") == "doc get "+routingDocKey {
-			if body == "" {
-				return Result{Code: 1, Err: "connection refused"}
-			}
-			b, _ := json.Marshal(map[string]any{"key": routingDocKey, "body": body})
-			return Result{Out: string(b)}
+// serveRouting makes the test's fake hk answer GET
+// /v1/documents/policy%2Fmodel-routing with body from now on; an empty body
+// makes hk unavailable (503).
+func serveRouting(t *testing.T, body string) {
+	t.Helper()
+	useFakeHK(t).Handle(func(r hkRequest) (int, string, bool) {
+		if r.Route() != "GET /v1/documents/policy%2Fmodel-routing" {
+			return 0, "", false
 		}
-		if next != nil {
-			return next(c)
+		if body == "" {
+			return http.StatusServiceUnavailable, `{"error":"unavailable"}`, true
 		}
-		return Result{}
-	}
+		b, _ := json.Marshal(map[string]any{"key": routingDocKey, "body": body})
+		return http.StatusOK, string(b), true
+	})
 }
 
 func routingStamp(t *testing.T, sel *selPlan) map[string]any {
@@ -77,7 +75,7 @@ func consultFixture(t *testing.T) (*App, Spawn, *fakeQuota) {
 	pools := map[string]PoolView{"claude": riskPool(30, 8), "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	a, s, q := selFixture(t, "A", rows, pools, []string{"claude", "codex"})
 	q.GateDo = gatePools(map[string]string{"sonnet": "claude", "opus": "claude", "fable": "claude", "codex-sol": "codex"})
-	serveRouting(a, routingDocV1)
+	serveRouting(t, routingDocV1)
 	return a, s, q
 }
 
@@ -154,7 +152,7 @@ func TestRoutingImplementerKeepsPoolOrder(t *testing.T) {
 	run := func(unrouted bool) *selPlan {
 		a, s, q := selFixture(t, "A", rows, pools, []string{"devin", "claude", "codex"})
 		q.GateDo = gatePools(gates)
-		serveRouting(a, routingDocV1)
+		serveRouting(t, routingDocV1)
 		var sel *selPlan
 		var e error
 		if unrouted {
@@ -206,7 +204,7 @@ func TestRoutingCacheFallback(t *testing.T) {
 	}
 
 	// hk goes away: the cache still filters and is stamped.
-	serveRouting(a, "")
+	serveRouting(t, "")
 	sel, e := a.selectProfile(ctx, s)
 	if e != nil || sel.chosen.seat.Canon != "opus" {
 		t.Fatalf("cached policy must still filter the lead: %v", e)
@@ -219,7 +217,7 @@ func TestRoutingCacheFallback(t *testing.T) {
 	}
 
 	// An unreadable document falls back the same way.
-	serveRouting(a, "# policy/model-routing\n\nno block\n")
+	serveRouting(t, "# policy/model-routing\n\nno block\n")
 	if sel, e = a.selectProfile(ctx, s); e != nil || routingStamp(t, sel)["policy_source"] != "cache@v1" {
 		t.Fatalf("an unreadable document uses the cache: %v", e)
 	}
@@ -229,7 +227,7 @@ func TestRoutingCacheFallback(t *testing.T) {
 	if e := os.Remove(a.routingCachePath()); e != nil {
 		t.Fatal(e)
 	}
-	serveRouting(a, "")
+	serveRouting(t, "")
 	for _, tc := range []struct{ role, override string }{{"counsel", ""}, {"worker", "consult"}, {"tester", ""}} {
 		s.Role, s.RoutingRole, s.ParentFamily = tc.role, tc.override, "openai"
 		if _, e := a.selectProfile(ctx, s); exitCode(e) != exitConfig {
@@ -268,7 +266,7 @@ func TestRoutingOnExhaustion(t *testing.T) {
 	fixture := func(gates map[string]string) (*App, Spawn) {
 		a, s, q := selFixture(t, "A", rows, pools, []string{"claude", "codex"})
 		q.GateDo = exhaustedGatePools(gates)
-		serveRouting(a, routingDoc(block))
+		serveRouting(t, routingDoc(block))
 		s.RoutingRole = "explorer"
 		return a, s
 	}
@@ -341,7 +339,7 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 			}
 			return gate(r)
 		}
-		serveRouting(a, routingDocV1)
+		serveRouting(t, routingDocV1)
 		return a, fr, out
 	}
 
@@ -380,9 +378,12 @@ func TestResolveMatchesPlanAndSpawnsNothing(t *testing.T) {
 }`) {
 		t.Fatalf("the answer is the last thing printed:\n%s", body)
 	}
-	for _, c := range fr.Calls {
-		if c.Name != "handoffkeep" || strings.Join(c.Args, " ") != "doc get "+routingDocKey {
-			t.Fatalf("resolve only reads the routing table: %v", fr.Calls)
+	if len(fr.Calls) != 0 {
+		t.Fatalf("resolve runs nothing: %v", fr.Calls)
+	}
+	for _, route := range useFakeHK(t).Routes() {
+		if route != "GET /v1/documents/policy%2Fmodel-routing" {
+			t.Fatalf("resolve only reads the routing table: %v", useFakeHK(t).Routes())
 		}
 	}
 
@@ -449,7 +450,7 @@ func TestRoutingPolicyValidation(t *testing.T) {
 	}
 	a := testApp(t)
 	a.Runner = &fakeRunner{}
-	serveRouting(a, routingDocV1)
+	serveRouting(t, routingDocV1)
 	if _, e := a.routeFor(context.Background(), "worker", "boss"); exitCode(e) != exitUsage {
 		t.Fatalf("an unknown --routing-role is a usage error: %v", e)
 	}
@@ -470,7 +471,7 @@ func TestSpawnRecordsRouting(t *testing.T) {
 			accounts: map[string]SharedAccount{key: {Key: key, Observed: true, Fresh: true, Quota: &PoolView{Status: "ok", Class: "spend", Blocking: ptrF(0)}}},
 		}
 		q.GateDo = gatePools(map[string]string{"cmd-dsflash41": "example"})
-		serveRouting(a, routingDocV1)
+		serveRouting(t, routingDocV1)
 		return a, s, f
 	}
 	a, s, _ := setup()

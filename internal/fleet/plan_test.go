@@ -87,8 +87,6 @@ func TestPlanPrintsHostAndModelWithoutSideEffects(t *testing.T) {
 		case c.Name == "ssh" && len(c.Args) > 0 && c.Args[len(c.Args)-1] == probeScript:
 			probes++
 		case c.Name == "panewire" && strings.Join(c.Args, " ") == "--version":
-		case c.Name == "handoffkeep" && strings.Join(c.Args, " ") == "doc get "+routingDocKey:
-			// The role routing table is read, never written.
 		case c.Name == "handoffkeep" || c.Name == "herdr" || c.Name == "panewire" || c.Name == "ssh":
 			t.Fatalf("plan must not spawn or write: %v", fr.Calls)
 		}

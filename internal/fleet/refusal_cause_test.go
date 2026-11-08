@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,11 +38,11 @@ func TestNodeUsageRefusalsNameTheirCause(t *testing.T) {
 		{"checkout missing", "cwd is not a directory", "preflight", func(_ *testing.T, a *App, s *Spawn, _ *fakeRunner) {
 			s.CWD = filepath.Join(a.Home, "gone")
 		}},
-		{"task unknown to this node", "task does not exist", "handoffkeep tasks show", func(_ *testing.T, _ *App, _ *Spawn, f *fakeRunner) {
-			taskShow(f, Result{Code: 1, Err: "not_found"})
+		{"task unknown to this node", "task does not exist", "handoffkeep tasks show", func(t *testing.T, _ *App, _ *Spawn, _ *fakeRunner) {
+			useFakeHK(t).Handle(hkFails("GET /v1/tasks/42", http.StatusNotFound, `{"error":"not_found"}`))
 		}},
-		{"stale claimant", "another claimant", "stale claim", func(_ *testing.T, _ *App, _ *Spawn, f *fakeRunner) {
-			taskShow(f, Result{Out: `{"id":42,"title":"implement (grade B, T1)","state":"claimed","refs":{},"claimed_by":"someone-else"}`})
+		{"stale claimant", "another claimant", "stale claim", func(t *testing.T, _ *App, _ *Spawn, _ *fakeRunner) {
+			useFakeHK(t).SetTask("42", `{"id":42,"title":"implement (grade B, T1)","state":"claimed","refs":{},"claimed_by":"someone-else"}`)
 		}},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -60,30 +61,18 @@ func TestNodeUsageRefusalsNameTheirCause(t *testing.T) {
 	}
 }
 
-func taskShow(f *fakeRunner, result Result) {
-	next := f.Do
-	f.Do = func(c Command) Result {
-		if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks show") {
-			return result
-		}
-		return next(c)
-	}
-}
-
 // A spawn refused before delivery never claims its task (taskLink runs after
 // the brief lands), so a retry on the same task has no binding to trip over.
 func TestRefusedSpawnLeavesTaskUnbound(t *testing.T) {
-	a, s, f, _ := cmdFixture(t)
+	a, s, _, _ := cmdFixture(t)
 	s.Delegated = true
 	refused := s
 	refused.Report = filepath.Join(a.Jobs, "earlier-attempt", "report.md")
 	if err := a.Spawn(context.Background(), refused); code(err) != exitUsage {
 		t.Fatalf("first attempt: %v", err)
 	}
-	for _, c := range f.Calls {
-		if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks claim") {
-			t.Fatalf("refused spawn claimed its task: %v", c.Args)
-		}
+	if hkClaimed(t) {
+		t.Fatalf("refused spawn claimed its task: %v", useFakeHK(t).Routes())
 	}
 	if err := a.Spawn(context.Background(), s); err != nil {
 		t.Fatalf("retry on the same task: %v", err)

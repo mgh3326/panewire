@@ -160,7 +160,7 @@ func TestSelectAccountTiersPreserveImplementerOrder(t *testing.T) {
 	}
 	a, s, q := selFixture(t, "S", rows, pools, []string{"devin", "claude", "anthropic-api", "codex"})
 	q.GateDo = gatePools(map[string]string{"devin-swe2": "devin"})
-	serveRouting(a, routingDocV1)
+	serveRouting(t, routingDocV1)
 	sel, err := a.selectProfile(context.Background(), s)
 	if err != nil {
 		t.Fatal(err)

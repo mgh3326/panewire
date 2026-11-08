@@ -84,7 +84,7 @@ func TestUnratedPlanOutput(t *testing.T) {
 			if top {
 				q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "unrated", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
 				q.GateDo = gatePools(map[string]string{"opus": "claude"})
-				serveRouting(a, routingDocV1)
+				serveRouting(t, routingDocV1)
 				args = []string{"--role", "counsel", "--t", "T1"}
 			}
 			if asJSON {

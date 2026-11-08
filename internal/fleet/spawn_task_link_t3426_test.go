@@ -3,6 +3,7 @@ package fleet
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -11,28 +12,33 @@ import (
 // to this very job (a design session rebound it before the spawn) is not a
 // failure. Any other claim failure still notifies the owner lane.
 
-// t3426TaskLinkSpawn runs the cmd fixture spawn with a claim that exits 1 and
-// a `tasks show` that answers precheck first, then show for every later read.
-func t3426TaskLinkSpawn(t *testing.T, precheck, later Result) (*App, Spawn, *fakeRunner) {
+// t3426Answer is one hk answer: an HTTP status and its body.
+type t3426Answer struct {
+	status int
+	body   string
+}
+
+// t3426TaskLinkSpawn runs the cmd fixture spawn with a claim hk refuses (409)
+// and a task read that answers precheck first, then later for every later
+// read.
+func t3426TaskLinkSpawn(t *testing.T, precheck, later t3426Answer) (*App, Spawn, *fakeRunner) {
 	t.Helper()
 	a, s, f, _ := cmdFixture(t)
 	s.Owner = "handoffkeep-design"
-	base := f.Do
 	shows := 0
-	f.Do = func(c Command) Result {
-		args := strings.Join(c.Args, " ")
-		switch {
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks claim"):
-			return Result{Code: 1, Err: "conflict: task 42 is already claimed"}
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show"):
+	useFakeHK(t).Handle(func(r hkRequest) (int, string, bool) {
+		switch r.Route() {
+		case "POST /v1/tasks/42/claim":
+			return http.StatusConflict, `{"error":"conflict","reason":"task 42 is already claimed"}`, true
+		case "GET /v1/tasks/42":
 			shows++
 			if shows == 1 {
-				return precheck
+				return precheck.status, precheck.body, true
 			}
-			return later
+			return later.status, later.body, true
 		}
-		return base(c)
-	}
+		return 0, "", false
+	})
 	if err := a.Spawn(context.Background(), s); err != nil {
 		t.Fatalf("landed spawn failed: %v", err)
 	}
@@ -71,7 +77,7 @@ func t3426TaskLinkNotices(f *fakeRunner) []string {
 const t3426LinkedToJob = `{"id":42,"title":"implement (grade B, T1)","state":"in_progress","claimed_by":"handoffkeep-design","refs":{"job_id":"job-a"}}`
 
 func TestSpawnTaskLinkAlreadyLinkedToThisJobT3426(t *testing.T) {
-	a, s, f := t3426TaskLinkSpawn(t, Result{Out: t3426LinkedToJob}, Result{Out: t3426LinkedToJob})
+	a, s, f := t3426TaskLinkSpawn(t, t3426Answer{http.StatusOK, t3426LinkedToJob}, t3426Answer{http.StatusOK, t3426LinkedToJob})
 	links := t3426TaskLinkEvents(t, a, s)
 	if len(links) != 1 || links[0]["status"] != "already_linked" {
 		t.Fatalf("job.task_link=%v, want one already_linked", links)
@@ -91,14 +97,14 @@ func TestSpawnTaskLinkClaimFailureStillNotifiesT3426(t *testing.T) {
 	unlinked := `{"id":42,"title":"implement (grade B, T1)","state":"ready","refs":{}}`
 	for _, tc := range []struct {
 		name  string
-		later Result
+		later t3426Answer
 	}{
-		{"linked to another job", Result{Out: `{"id":42,"title":"implement (grade B, T1)","state":"in_progress","claimed_by":"worker-b","refs":{"job_id":"job-b"}}`}},
-		{"task read fails", Result{Code: 1, Err: "handoffkeep unavailable"}},
-		{"task read unparseable", Result{Out: "not json"}},
+		{"linked to another job", t3426Answer{http.StatusOK, `{"id":42,"title":"implement (grade B, T1)","state":"in_progress","claimed_by":"worker-b","refs":{"job_id":"job-b"}}`}},
+		{"task read fails", t3426Answer{http.StatusServiceUnavailable, `{"error":"unavailable"}`}},
+		{"task read unparseable", t3426Answer{http.StatusOK, "not json"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			a, s, f := t3426TaskLinkSpawn(t, Result{Out: unlinked}, tc.later)
+			a, s, f := t3426TaskLinkSpawn(t, t3426Answer{http.StatusOK, unlinked}, tc.later)
 			links := t3426TaskLinkEvents(t, a, s)
 			if len(links) != 1 || links[0]["status"] != "failed" || links[0]["reason"] != "task claim exited with status 1" {
 				t.Fatalf("job.task_link=%v, want one failed", links)

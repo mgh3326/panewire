@@ -155,13 +155,7 @@ func TestSelectionPolicyScenarios(t *testing.T) {
 				}
 				return fmt.Sprintf("pool=%s profile=%s\n", pool, r.Profile), nil
 			}
-			base := a.Runner.(*fakeRunner).Do
-			a.Runner.(*fakeRunner).Do = func(c Command) Result {
-				if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks show") {
-					return Result{Out: fmt.Sprintf(`{"id":42,"title":"work (grade %s, %s)","state":"ready","priority":%s,"refs":{}}`, tt.grade, tt.t, tt.priority)}
-				}
-				return base(c)
-			}
+			useFakeHK(t).SetTask("42", fmt.Sprintf(`{"id":42,"title":"work (grade %s, %s)","state":"ready","priority":%s,"refs":{}}`, tt.grade, tt.t, tt.priority))
 			s.T = tt.t
 			sel, e := a.selectProfile(context.Background(), s)
 			if e != nil {

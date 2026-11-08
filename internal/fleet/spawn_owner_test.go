@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,21 +27,11 @@ func ownerHKFixture(t *testing.T, project, effective string) (*App, Spawn, *fake
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := f.Do
-	f.Do = func(c Command) Result {
-		args := strings.Join(c.Args, " ")
-		switch {
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show"):
-			b, _ := json.Marshal(map[string]any{"id": "42", "project": project})
-			return Result{Out: string(b)}
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks owner"):
-			if effective == "" {
-				return Result{Code: 1, Err: "no such project: " + project}
-			}
-			b, _ := json.Marshal(map[string]any{"name": project, "design_lane": effective, "effective_owner": effective})
-			return Result{Out: string(b)}
-		}
-		return base(c)
+	b, _ := json.Marshal(map[string]any{"id": "42", "project": project})
+	hk := useFakeHK(t).SetTask("42", string(b))
+	if effective != "" {
+		b, _ := json.Marshal(map[string]any{"name": project, "design_lane": effective, "effective_owner": effective})
+		hk.SetOwner(project, string(b))
 	}
 	return a, parsed, f
 }
@@ -78,47 +69,17 @@ func TestSpawnOwnerDefaultsFromHKProject(t *testing.T) {
 
 func TestSpawnOwnerRefusedWhenHKCannotAnswer(t *testing.T) {
 	tests := []struct {
-		name  string
-		show  func(Command) (Result, bool)
-		owner func(Command) (Result, bool)
+		name   string
+		answer func(hkRequest) (int, string, bool)
 	}{
-		{
-			name: "owner endpoint 500",
-			owner: func(Command) (Result, bool) {
-				return Result{Code: 1, Err: "ERROR: handoffkeep HTTP 500"}, true
-			},
-		},
-		{
-			name: "owner endpoint 404",
-			owner: func(Command) (Result, bool) {
-				return Result{Code: 1, Err: "no such project: nope"}, true
-			},
-		},
-		{
-			name: "hk unreachable",
-			show: func(Command) (Result, bool) {
-				return Result{Code: 1, Err: "dial tcp: connection refused"}, true
-			},
-		},
+		{"owner endpoint 500", hkFails("GET /v1/tasks/projects/", http.StatusInternalServerError, `{"error":"internal"}`)},
+		{"owner endpoint 404", hkFails("GET /v1/tasks/projects/", http.StatusNotFound, `{"error":"not_found"}`)},
+		{"hk unreachable", hkFails("GET /v1/tasks/42", http.StatusBadGateway, `{"error":"bad_gateway"}`)},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			a, s, f := ownerHKFixture(t, "panewire", "panewire-design")
-			base := f.Do
-			f.Do = func(c Command) Result {
-				args := strings.Join(c.Args, " ")
-				if tc.show != nil && c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show") {
-					if r, ok := tc.show(c); ok {
-						return r
-					}
-				}
-				if tc.owner != nil && c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks owner") {
-					if r, ok := tc.owner(c); ok {
-						return r
-					}
-				}
-				return base(c)
-			}
+			a, s, _ := ownerHKFixture(t, "panewire", "panewire-design")
+			useFakeHK(t).Handle(tc.answer)
 			_, err := a.PrepareSubmission(context.Background(), s)
 			if exitCode(err) != exitUsage || !strings.Contains(err.Error(), "--owner") {
 				t.Fatalf("hk failure must refuse with exitUsage naming --owner: %v", err)
@@ -144,13 +105,8 @@ func TestSpawnExplicitOwnerWinsWhenHKIsDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := f.Do
-	f.Do = func(c Command) Result {
-		if c.Name == "handoffkeep" {
-			return Result{Code: 1, Err: "dial tcp: connection refused"}
-		}
-		return base(c)
-	}
+	hk := useFakeHK(t)
+	hk.Close()
 	request, err := a.PrepareSubmission(context.Background(), parsed)
 	if err != nil {
 		t.Fatalf("explicit owner must not need hk: %v", err)
@@ -158,15 +114,20 @@ func TestSpawnExplicitOwnerWinsWhenHKIsDown(t *testing.T) {
 	if got := ownerArgValue(request.Args, "--owner"); got != "explicit-lane" {
 		t.Fatalf("owner=%q args=%v", got, request.Args)
 	}
+	for _, r := range hk.Requests() {
+		if strings.Contains(r.Path, "/owner") {
+			t.Fatalf("explicit owner must not read hk: %v", r.Route())
+		}
+	}
 	for _, c := range f.Calls {
 		if c.Name == "handoffkeep" {
-			t.Fatalf("explicit owner must not read hk: %v", c.Args)
+			t.Fatalf("explicit owner must not run the hk CLI: %v", c.Args)
 		}
 	}
 }
 
 func TestSpawnParentJobOwnerFromHKProject(t *testing.T) {
-	a, s, f, _, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
+	a, s, _, _, _ := hubFixture(t, gitState{pushed: true}, "wk/feat", hubHosts())
 	a.Config.Local["machine_id"] = "source-a"
 	if err := os.MkdirAll(s.CWD, 0700); err != nil {
 		t.Fatal(err)
@@ -181,17 +142,8 @@ func TestSpawnParentJobOwnerFromHKProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := f.Do
-	f.Do = func(c Command) Result {
-		args := strings.Join(c.Args, " ")
-		switch {
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show 77"):
-			return Result{Out: `{"id":"77","project":"mergewake"}`}
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks owner mergewake"):
-			return Result{Out: `{"name":"mergewake","design_lane":"mergewake-design","effective_owner":"mergewake-design"}`}
-		}
-		return base(c)
-	}
+	useFakeHK(t).SetTask("77", `{"id":"77","project":"mergewake"}`).
+		SetOwner("mergewake", `{"name":"mergewake","design_lane":"mergewake-design","effective_owner":"mergewake-design"}`)
 	request, err := a.PrepareSubmission(context.Background(), parsed)
 	if err != nil {
 		t.Fatal(err)
@@ -208,22 +160,13 @@ func TestSpawnParentJobOwnerFromHKProject(t *testing.T) {
 }
 
 func TestSpawnDryRunOwnerResolvedFromHK(t *testing.T) {
-	a, s, f, _ := cmdFixture(t)
+	a, s, _, _ := cmdFixture(t)
 	parsed, err := parseSpawn([]string{"-c", s.CWD, "-p", s.Prompt, "-m", "cmd-dsflash41", "-w", "workspace", "-l", "worker-a", "--job", "job-a", "--t", "T1", "--task", "42", "--host", "local", "--override-reason", "fixture", "--containment", "hk:12", "--dry-run"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	base := f.Do
-	f.Do = func(c Command) Result {
-		args := strings.Join(c.Args, " ")
-		switch {
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show"):
-			return Result{Out: `{"id":"42","project":"panewire"}`}
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks owner"):
-			return Result{Out: `{"name":"panewire","design_lane":"panewire-design","effective_owner":"panewire-design"}`}
-		}
-		return base(c)
-	}
+	useFakeHK(t).SetTask("42", `{"id":"42","title":"implement (grade B, T1)","state":"ready","refs":{},"project":"panewire"}`).
+		SetOwner("panewire", `{"name":"panewire","design_lane":"panewire-design","effective_owner":"panewire-design"}`)
 	if err := a.Spawn(context.Background(), parsed); err != nil {
 		t.Fatal(err)
 	}

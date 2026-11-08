@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
@@ -72,6 +73,7 @@ func testApp(t *testing.T) *App {
 	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "")
 	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_ID", "")
 	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET", "")
+	rearmFakeHK(t)
 	nodeEnv := filepath.Join(root, "node.env")
 	if e := os.WriteFile(nodeEnv, []byte("HUB_MACHINE_ID=test-host\n"), 0600); e != nil {
 		t.Fatal(e)
@@ -117,14 +119,11 @@ func cmdFixture(t *testing.T) (*App, Spawn, *fakeRunner, *int) {
 	returns := 0
 	token := ""
 	banner := "# Command Code v1.0\n# models: example-model-(latest) with high effort · tag\n# " + cwd + "\n"
+	useFakeHK(t).SetTask("42", `{"id":42,"title":"implement (grade B, T1)","state":"ready","refs":{}}`).Handle(hkClaimAnswer)
 	f := &fakeRunner{}
 	f.Do = func(c Command) Result {
 		args := strings.Join(c.Args, " ")
 		switch {
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show"):
-			return Result{Out: `{"id":42,"title":"implement (grade B, T1)","state":"ready","refs":{}}`}
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks claim"):
-			return Result{Out: `{"claimed_by":"worker-a","refs":{"job_id":"job-a"}}`}
 		case strings.HasPrefix(args, "tab create"):
 			return Result{Out: `{"result":{"root_pane":{"pane_id":"w:p1"},"tab_id":"w:t1"}}`}
 		case strings.HasPrefix(args, "pane process-info"):
@@ -239,7 +238,7 @@ func TestSpawnSubmissionFailureCleansPaneAndLease(t *testing.T) {
 	if st, pools := ledgerState(t, a, s.Job); st != "released" || len(pools) != 0 {
 		t.Fatalf("lease cleanup missing: %s %v", st, pools)
 	}
-	if strings.Contains(calls, "tasks claim") || slices.Contains(eventKindsOf(t, a, s.Job), "job.spawned") {
+	if hkClaimed(t) || slices.Contains(eventKindsOf(t, a, s.Job), "job.spawned") {
 		t.Fatal("failed spawn committed")
 	}
 }
@@ -249,9 +248,12 @@ func TestSpawnDryRunShowsPreambleWithoutSideEffects(t *testing.T) {
 	if e := a.Spawn(context.Background(), s); e != nil {
 		t.Fatal(e)
 	}
-	for _, c := range f.Calls {
-		if c.Name != "handoffkeep" || strings.Join(c.Args, " ") != "doc get "+routingDocKey {
-			t.Fatalf("dry run mutated state: %+v", c)
+	if len(f.Calls) != 0 {
+		t.Fatalf("dry run ran commands: %+v", f.Calls)
+	}
+	for _, r := range useFakeHK(t).Requests() {
+		if r.Method != http.MethodGet {
+			t.Fatalf("dry run wrote to hk: %s", r.Route())
 		}
 	}
 	if !strings.Contains(a.Out.(*bytes.Buffer).String(), "fleet-v1") {
@@ -359,14 +361,13 @@ func TestNoArbiterExecInSources(t *testing.T) {
 	}
 }
 func TestTaskClaimMustConfirmAtomicBinding(t *testing.T) {
-	a, s, f, _ := cmdFixture(t)
-	original := f.Do
-	f.Do = func(c Command) Result {
-		if c.Name == "handoffkeep" && c.Args[1] == "claim" {
-			return Result{Out: `{"claimed_by":"worker-a","refs":{}}`}
+	a, s, _, _ := cmdFixture(t)
+	useFakeHK(t).Handle(func(r hkRequest) (int, string, bool) {
+		if r.Route() != "POST /v1/tasks/42/claim" {
+			return 0, "", false
 		}
-		return original(c)
-	}
+		return http.StatusOK, `{"id":42,"state":"developing","claimed_by":"worker-a","refs":{}}`, true
+	})
 	// hk 2928: the claim runs after the brief is delivered, so a half record
 	// no longer fails the landed spawn; it must still never count as linked.
 	if err := a.Spawn(context.Background(), s); err != nil {

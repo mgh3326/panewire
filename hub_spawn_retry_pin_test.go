@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
@@ -64,15 +65,36 @@ func (s retrySource) SharedAccount(_ context.Context, key string) (fleet.SharedA
 	return fleet.SharedAccount{Key: key, Observed: true, Fresh: true, MeasuredAt: s.now, Quota: &fleet.PoolView{Status: "ok", Class: "spend", Blocking: &zero}}, nil
 }
 
-// retryRunner answers the hk reads and brief upload the hub path makes.
+// retryRunner runs nothing: the hub path's hk reads and brief upload go over
+// HTTP to retryHK.
 type retryRunner struct{}
 
 func (retryRunner) Run(_ context.Context, c fleet.Command) fleet.Result {
-	args := strings.Join(c.Args, " ")
-	if c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show") {
-		return fleet.Result{Out: `{"id":42,"title":"work (grade B, T1)","state":"ready","refs":{}}`}
+	if c.Name == "handoffkeep" {
+		return fleet.Result{Code: 1, Err: "the spawn path must not run the hk CLI: " + strings.Join(c.Args, " ")}
 	}
 	return fleet.Result{}
+}
+
+// retryHK is the svc-panewire hk the hub path reaches over HTTP: task 42 and
+// the brief upload; anything else is not_found.
+func retryHK(t *testing.T) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/tasks/42":
+			io.WriteString(w, `{"id":42,"title":"work (grade B, T1)","state":"ready","refs":{}}`)
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/v1/documents/"):
+			io.WriteString(w, `{"document":{},"changed":true}`)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+			io.WriteString(w, `{"error":"not_found"}`)
+		}
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "svc-panewire-retry-token")
 }
 
 // retryDispatchApp is an App whose auto placement can select a seat, so a
@@ -108,6 +130,7 @@ func TestHubSpawnRetryReplayIsNotAPlacementPin(t *testing.T) {
 	// outcome's host (desktop) may receive the job.
 	t14NamedNode(t, h, server, "machine-a", true, true)
 	node := t14NamedNode(t, h, server, "desktop", true, true)
+	retryHK(t)
 	h.spawnNewApp = func(out, errout io.Writer) (*fleet.App, error) { return retryDispatchApp(t, out, errout), nil }
 	request := durableSpawnRequest()
 	task := retryableStoredHostTask(t, h, request)

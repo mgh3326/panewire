@@ -63,7 +63,7 @@ func reviewSpawnFixture(t *testing.T, sharedClaude, explicit bool) (*App, Spawn,
 		pool, _, _ := strings.Cut(r.AccountKey, ":")
 		return "pool=" + pool + "\n", nil
 	}
-	serveRouting(a, routingDocV1)
+	serveRouting(t, routingDocV1)
 	var delivered []Spawn
 	next := fr.Do
 	fr.Do = func(c Command) Result {

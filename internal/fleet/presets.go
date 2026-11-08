@@ -16,6 +16,8 @@ func (a *App) workPreset(ctx context.Context, args []string) (Spawn, error) {
 		return Spawn{}, fail(exitUsage, "use panewire work TASK_ID followed by optional spawn flags")
 	}
 	id := args[0]
+	// Still the hk CLI (hk 3591): this preset reads refs.report_path, which
+	// the hk public client's TaskRefs does not carry.
 	r := a.call(ctx, "handoffkeep", "tasks", "show", id)
 	var task Task
 	if r.Code != 0 || json.Unmarshal([]byte(r.Out), &task) != nil || scalar(task.ID) != id {

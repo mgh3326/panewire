@@ -27,7 +27,7 @@ func roleEffortFixture(t *testing.T) (*App, Spawn, *fakeQuota) {
 		}
 		return admit(r)
 	}
-	serveRouting(a, routingDocV1)
+	serveRouting(t, routingDocV1)
 	return a, s, q
 }
 
@@ -128,7 +128,7 @@ func TestNonLeadRolesKeepTodaysOrdering(t *testing.T) {
 		{"worker unrouted (builtin_default)", ""},
 	} {
 		a, s, q := roleEffortFixture(t)
-		serveRouting(a, tc.body)
+		serveRouting(t, tc.body)
 		s.Role = "worker"
 		q.CatalogRows = append(q.CatalogRows, CatalogRow{Profile: "sonnet", Effort: "high", Grade: "C", Pool: "claude", Gate: "default", ModelID: "sonnet-m"})
 		sel, e := a.selectProfile(context.Background(), s)

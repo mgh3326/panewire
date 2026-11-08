@@ -3,6 +3,7 @@ package fleet
 import (
 	"bytes"
 	"context"
+	"net/http"
 	"strings"
 	"testing"
 )
@@ -16,16 +17,15 @@ func TestSpawnTaskClaimAfterDelivery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			a, s, f, submitted := cmdFixture(t)
 			s.Owner = "owner"
-			base := f.Do
-			f.Do = func(c Command) Result {
-				if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks claim") && tc.fail {
-					if *submitted != 2 {
-						t.Fatal("claim preceded delivery")
-					}
-					return Result{Code: 17, Err: "token=private-value"}
+			useFakeHK(t).Handle(func(r hkRequest) (int, string, bool) {
+				if r.Route() != "POST /v1/tasks/42/claim" || !tc.fail {
+					return 0, "", false
 				}
-				return base(c)
-			}
+				if *submitted != 2 {
+					t.Error("claim preceded delivery")
+				}
+				return http.StatusConflict, `{"error":"conflict","reason":"token=private-value"}`, true
+			})
 			if err := a.Spawn(context.Background(), s); err != nil {
 				t.Fatalf("landed spawn failed: %v", err)
 			}
@@ -43,7 +43,7 @@ func TestSpawnTaskClaimAfterDelivery(t *testing.T) {
 					if ev.Payload["status"] != tc.status {
 						t.Fatalf("task link: %v", ev.Payload)
 					}
-					if tc.fail && ev.Payload["reason"] != "task claim exited with status 17" {
+					if tc.fail && ev.Payload["reason"] != "task claim exited with status 1" {
 						t.Fatalf("task link reason: %v", ev.Payload)
 					}
 				}
@@ -61,7 +61,7 @@ func TestSpawnTaskClaimAfterDelivery(t *testing.T) {
 				// an unregistered lane, hk 2888) are not this test's subject.
 				if c.Name == "panewire" && strings.HasPrefix(args, "emit --kind lane.event") && strings.Contains(args, "--event-id task-link-failed-") {
 					notices++
-					for _, want := range []string{"--lane owner", s.Job, s.Task, "task claim exited with status 17"} {
+					for _, want := range []string{"--lane owner", s.Job, s.Task, "task claim exited with status 1"} {
 						if !strings.Contains(args, want) {
 							t.Errorf("notice missing %q: %s", want, args)
 						}
@@ -74,7 +74,7 @@ func TestSpawnTaskClaimAfterDelivery(t *testing.T) {
 			if tc.fail && notices != 1 || !tc.fail && notices != 0 {
 				t.Fatalf("notices=%d", notices)
 			}
-			if tc.fail && !strings.Contains(a.Err.(*bytes.Buffer).String(), "task claim exited with status 17") {
+			if tc.fail && !strings.Contains(a.Err.(*bytes.Buffer).String(), "task claim exited with status 1") {
 				t.Fatal("warning missing")
 			}
 		})

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -137,14 +138,16 @@ func newDelegateEnvWith(t *testing.T, rows []CatalogRow, gates map[string]string
 	if err := os.WriteFile(e.prompt, []byte("Where is the retry loop?\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	useFakeHK(t).SetTask("42", `{"id":42,"title":"work (grade B, T1)","state":"ready","refs":{}}`).Handle(func(r hkRequest) (int, string, bool) {
+		if r.Route() != "GET /v1/documents/policy%2Fmodel-routing" {
+			return 0, "", false
+		}
+		body, _ := json.Marshal(map[string]any{"key": routingDocKey, "body": e.routingBody})
+		return http.StatusOK, string(body), true
+	})
 	e.runner = &deadlineRunner{do: func(c Command) Result {
 		args := strings.Join(c.Args, " ")
 		switch {
-		case c.Name == "handoffkeep" && args == "doc get "+routingDocKey:
-			body, _ := json.Marshal(map[string]any{"body": e.routingBody})
-			return Result{Out: string(body)}
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show"):
-			return Result{Out: `{"id":42,"title":"work (grade B, T1)","state":"ready","refs":{}}`}
 		case c.Name == "herdr" && strings.HasPrefix(args, "agent list"):
 			e.mu.Lock()
 			defer e.mu.Unlock()
@@ -828,14 +831,7 @@ func TestDelegatePatchOutsideGitRefuses(t *testing.T) {
 
 func TestSpawnGradeOverrideSkipsTaskMarker(t *testing.T) {
 	a, s, _, _ := cmdFixture(t)
-	f := a.Runner.(*fakeRunner)
-	inner := f.Do
-	f.Do = func(c Command) Result {
-		if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks show") {
-			return Result{Out: `{"id":42,"title":"a task with no grade marker","state":"ready","refs":{}}`}
-		}
-		return inner(c)
-	}
+	useFakeHK(t).SetTask("42", `{"id":42,"title":"a task with no grade marker","state":"ready","refs":{}}`)
 	if code(a.Spawn(context.Background(), s)) != exitSeatRefused {
 		t.Fatal("without a grade marker or a stated grade the spawn must refuse")
 	}

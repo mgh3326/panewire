@@ -3,10 +3,12 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"path/filepath"
-	"slices"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/handoffkeep/client"
 )
 
 const (
@@ -16,13 +18,17 @@ const (
 
 // rebindFixture is a spawn that inherits task 42 from rebindParent. The fake hk
 // keeps refs.job_id, so a rebind is visible to whatever reads the task next.
+// rebindFail, when set, is the hk error body a rebind answers with 409;
+// rebindAnswer, when set, replaces the rebind's success answer.
 type rebindFixture struct {
-	a          *App
-	s          Spawn
-	f          *fakeRunner
-	store      *fakeJobStore
-	bound      string
-	rebindFail string
+	a            *App
+	s            Spawn
+	f            *fakeRunner
+	hk           *spawnHK
+	store        *fakeJobStore
+	bound        string
+	rebindFail   string
+	rebindAnswer string
 }
 
 func newRebindFixture(t *testing.T, parentState, bound string) *rebindFixture {
@@ -33,38 +39,41 @@ func newRebindFixture(t *testing.T, parentState, bound string) *rebindFixture {
 	a.JobStore = store
 	s.ParentJob, s.Task = rebindParent, ""
 	s.Report = filepath.Join(a.Jobs, s.Job, "report.md")
-	fx := &rebindFixture{a: a, s: s, f: f, store: store, bound: bound}
-	base := f.Do
-	f.Do = func(c Command) Result {
-		args := strings.Join(c.Args, " ")
-		switch {
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show"):
-			out, e := json.Marshal(map[string]any{"id": 42, "title": "implement (grade B, T1)", "state": "claimed", "refs": map[string]any{"job_id": fx.bound}})
-			if e != nil {
-				t.Fatal(e)
-			}
-			return Result{Out: string(out)}
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks rebind"):
+	fx := &rebindFixture{a: a, s: s, f: f, hk: useFakeHK(t), store: store, bound: bound}
+	task := func(state, claimedBy, job string) string {
+		out, e := json.Marshal(map[string]any{"id": 42, "title": "implement (grade B, T1)", "state": state, "claimed_by": claimedBy, "refs": map[string]any{"job_id": job}})
+		if e != nil {
+			t.Fatal(e)
+		}
+		return string(out)
+	}
+	fx.hk.Handle(func(r hkRequest) (int, string, bool) {
+		switch r.Route() {
+		case "GET /v1/tasks/42":
+			return http.StatusOK, task("claimed", "", fx.bound), true
+		case "POST /v1/tasks/42/rebind":
 			if fx.rebindFail != "" {
-				return Result{Code: 1, Err: fx.rebindFail}
+				return http.StatusConflict, fx.rebindFail, true
+			}
+			if fx.rebindAnswer != "" {
+				return http.StatusOK, fx.rebindAnswer, true
 			}
 			fx.bound = s.Job
-			out, e := json.Marshal(map[string]any{"id": 42, "state": "claimed", "claimed_by": s.Label, "refs": map[string]any{"job_id": s.Job}})
-			if e != nil {
-				t.Fatal(e)
-			}
-			return Result{Out: string(out)}
+			return http.StatusOK, task("claimed", s.Label, s.Job), true
 		}
-		return base(c)
-	}
+		return 0, "", false
+	})
 	return fx
 }
 
-func (fx *rebindFixture) rebinds() [][]string {
-	var calls [][]string
-	for _, c := range fx.f.Calls {
-		if c.Name == "handoffkeep" && len(c.Args) > 1 && c.Args[0] == "tasks" && c.Args[1] == "rebind" {
-			calls = append(calls, c.Args)
+// rebinds returns the body of every rebind hk received.
+func (fx *rebindFixture) rebinds() []map[string]string {
+	var calls []map[string]string
+	for _, r := range fx.hk.Requests() {
+		if r.Route() == "POST /v1/tasks/42/rebind" {
+			var body map[string]string
+			_ = json.Unmarshal(r.Body, &body)
+			calls = append(calls, body)
 		}
 	}
 	return calls
@@ -98,14 +107,14 @@ func (fx *rebindFixture) wantRebind(t *testing.T) {
 	t.Helper()
 	calls := fx.rebinds()
 	if len(calls) != 1 {
-		t.Fatalf("tasks rebind calls=%v want exactly one", calls)
+		t.Fatalf("task rebind calls=%v want exactly one", calls)
 	}
 	got := calls[0]
-	if !slices.Equal(got[:9], []string{"tasks", "rebind", "42", "--from-job", rebindParent, "--to-job", fx.s.Job, "--by", fx.s.Label}) {
-		t.Fatalf("tasks rebind args=%v", got)
+	if len(got) != 4 || got["from_job"] != rebindParent || got["to_job"] != fx.s.Job || got["by"] != fx.s.Label {
+		t.Fatalf("task rebind body=%v", got)
 	}
-	if len(got) != 11 || got[9] != "--reason" || !strings.Contains(got[10], rebindParent) {
-		t.Fatalf("tasks rebind reason=%v", got)
+	if !strings.Contains(got["reason"], rebindParent) {
+		t.Fatalf("task rebind reason=%v", got)
 	}
 }
 
@@ -188,13 +197,13 @@ func TestRespawnLeavesTaskBoundToThirdJob(t *testing.T) {
 
 func TestRespawnRebindFailureKeepsLandedSpawn(t *testing.T) {
 	fx := newRebindFixture(t, "lost", rebindParent)
-	fx.rebindFail = "task conflict: cannot rebind"
+	fx.rebindFail = `{"error":"conflict","reason":"cannot rebind"}`
 	if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
 		t.Fatalf("a failed rebind failed the landed spawn: %v", e)
 	}
 	fx.wantRebind(t)
 	ev := fx.taskLinkEvent(t)
-	if ev["status"] != "inherited" || !strings.Contains(str(ev, "rebind_error"), fx.rebindFail) {
+	if ev["status"] != "inherited" || !strings.Contains(str(ev, "rebind_error"), "conflict: cannot rebind") {
 		t.Fatalf("event=%v", ev)
 	}
 	if st := str(fx.store.record(t, fx.s.Job), "state"); st != "spawned" {
@@ -205,13 +214,7 @@ func TestRespawnRebindFailureKeepsLandedSpawn(t *testing.T) {
 // An unconfirmed answer is a failed rebind, as it is for tasks claim.
 func TestRespawnRebindUnconfirmedAnswerIsRecorded(t *testing.T) {
 	fx := newRebindFixture(t, "lost", rebindParent)
-	base := fx.f.Do
-	fx.f.Do = func(c Command) Result {
-		if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks rebind") {
-			return Result{Out: `{"id":42,"refs":{"job_id":"` + rebindParent + `"}}`}
-		}
-		return base(c)
-	}
+	fx.rebindAnswer = `{"id":42,"refs":{"job_id":"` + rebindParent + `"}}`
 	if e := fx.a.Spawn(context.Background(), fx.s); e != nil {
 		t.Fatal(e)
 	}
@@ -272,7 +275,7 @@ func TestRespawnRetryAfterRebindDoesNotRebindAgain(t *testing.T) {
 	}
 	retry := fx.s
 	retry.Inherited = rebindParent
-	task := Task{Refs: map[string]any{"job_id": fx.bound}}
+	task := client.Task{Refs: client.TaskRefs{JobID: fx.bound}}
 	ev := map[string]any{}
 	if got := fx.a.rebindInherited(context.Background(), retry, task, ev); got != "rebound" {
 		t.Fatalf("retry status=%q", got)
@@ -298,7 +301,7 @@ func TestRespawnChildBesideParentKeepsTask(t *testing.T) {
 			fx := newRebindFixture(t, "completed", rebindParent)
 			s := fx.s
 			s.Role, s.RoutingRole, s.Inherited = tc.role, tc.routing, rebindParent
-			if e := fx.a.taskLink(context.Background(), s, Task{Refs: map[string]any{"job_id": rebindParent}}, false); e != nil {
+			if e := fx.a.taskLink(context.Background(), s, client.Task{Refs: client.TaskRefs{JobID: rebindParent}}, false); e != nil {
 				t.Fatal(e)
 			}
 			if calls := fx.rebinds(); len(calls) != 0 {

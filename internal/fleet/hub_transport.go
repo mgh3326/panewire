@@ -18,6 +18,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/mgh3326/handoffkeep/client"
 )
 
 // Hub transport (hosts.<name>.via = "hub"): a remote spawn goes through the
@@ -520,25 +522,17 @@ func hubReportRelative(jobs string, s Spawn) (string, error) {
 
 // putBrief uploads the brief as an hk document under the node's prefix and
 // returns its key. The key is per job, so a retry overwrites its own upload.
+// The document goes over hk HTTP with the svc-panewire credential: kind brief,
+// the job id and the brief's bytes, as `handoffkeep doc put` sent them, under
+// its own bound (hkBriefUploadTimeout), not a task read's.
 func (a *App) putBrief(ctx context.Context, s Spawn, prefix, body string) (string, error) {
 	key := prefix + s.Job + ".md"
-	f, e := os.CreateTemp("", "panewire-hub-brief-*")
-	if e != nil {
-		return "", e
-	}
-	defer os.Remove(f.Name())
-	if e = f.Chmod(0o600); e == nil {
-		_, e = f.WriteString(body)
-	}
-	if ce := f.Close(); e == nil {
-		e = ce
+	c, e := newHKClientWithin(hkBriefUploadTimeout)
+	if e == nil {
+		_, _, e = c.PutDocument(ctx, client.Document{Key: key, Kind: "brief", Job: s.Job, Body: body})
 	}
 	if e != nil {
-		return "", e
-	}
-	r := a.call(ctx, "handoffkeep", "doc", "put", "--key", key, "--kind", "brief", "--job", s.Job, "--file", f.Name())
-	if r.Code != 0 {
-		return "", fail(exitPlacement, "brief upload to %s failed: %s", key, strings.TrimSpace(r.Err+" "+r.Out))
+		return "", fail(exitPlacement, "brief upload to %s failed: %s", key, hkErrText(e))
 	}
 	return key, nil
 }
