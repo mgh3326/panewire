@@ -380,9 +380,9 @@ func TestLaunchNativeValidatesPaceleverConfig(t *testing.T) {
 		name, toml string
 		ok         bool
 	}{
-		// config.go:131 the file must be TOML.
+		// config.go:133 the file must be TOML.
 		{"not toml", "[pools\n", false},
-		// config.go:145 typed decode of [quota], [profiles], [bench], [settings].
+		// config.go:146 typed decode of [quota], [profiles], [bench], [settings].
 		{"quota url type", "[quota]\nurl = 1\n", false},
 		{"quota lease_ttl_s type", "[quota]\nlease_ttl_s = 1.5\n", false},
 		{"profile subscribed type", "[profiles.opus]\nsubscribed = \"no\"\n", false},
@@ -409,13 +409,13 @@ func TestLaunchNativeValidatesPaceleverConfig(t *testing.T) {
 		{"quota account unknown pool", "[quota.accounts]\nnowhere = \"0123456789abcdef\"\n", false},
 		// shared_quota.go:49 measurable account keys.
 		{"quota measurable account key", "[quota]\nmeasurable_accounts = [\"claude\"]\n", false},
-		// config.go:166 typed decode of a known pool.
+		// config.go:169 typed decode of a known pool.
 		{"pool boost type", "[pools.claude]\nboost = \"high\"\n", false},
 		{"pool credit_max_age_s type", "[pools.claude]\ncredit_max_age_s = \"3d\"\n", false},
 		{"pool exploration type", "[pools.claude]\nexploration = 1\n", false},
-		// config.go:170 class.
+		// config.go:172 class.
 		{"pool class", "[pools.claude]\nclass = \"hoard\"\n", false},
-		// config.go:173 exploration (exploration.go:23).
+		// config.go:175 exploration (exploration.go:23).
 		{"exploration fraction over 1", "[pools.claude.exploration]\nfraction = 1.5\nexperiment_id = \"e1\"\n", false},
 		{"exploration fraction negative", "[pools.claude.exploration]\nfraction = -0.1\n", false},
 		{"exploration fraction nan", "[pools.claude.exploration]\nfraction = nan\n", false},
@@ -425,11 +425,11 @@ func TestLaunchNativeValidatesPaceleverConfig(t *testing.T) {
 		{"exploration seed too long", "[pools.claude.exploration]\nseed = \"" + strings.Repeat("s", 257) + "\"\n", false},
 		{"exploration model_order repeat", "[pools.claude.exploration]\nmodel_order = [\"opus\", \"opus\"]\n", false},
 		{"exploration model_order empty name", "[pools.claude.exploration]\nmodel_order = [\"\"]\n", false},
-		// config.go:176 cutoff.
+		// config.go:178 cutoff.
 		{"pool cutoff over 100", "[pools.claude]\ncutoff = 101\n", false},
-		// config.go:179 in-flight reserve.
+		// config.go:182 in-flight reserve.
 		{"pool inflight_reserve_pct", "[pools.claude.inflight_reserve_pct]\nweek = 101\n", false},
-		// config.go:184 credit balance age.
+		// config.go:186 credit balance age.
 		{"pool credit_max_age_s negative", "[pools.claude]\ncredit_max_age_s = -1\n", false},
 		{"pool credit_max_age_s nan", "[pools.claude]\ncredit_max_age_s = nan\n", false},
 		{"pool credit_max_age_s over 1e9", "[pools.claude]\ncredit_max_age_s = 1e10\n", false},

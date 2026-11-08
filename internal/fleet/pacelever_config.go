@@ -82,12 +82,12 @@ type paceleverQuotaConfig struct {
 // bytes; it returns the file's [bench]. Errors withhold the file's values, as
 // pacelever's do.
 func parsePaceleverConfig(data []byte) (paceleverBenchConfig, error) {
-	// config.go:131 the file is TOML.
+	// config.go:133 the file is TOML.
 	var raw map[string]any
 	if err := toml.Unmarshal(data, &raw); err != nil {
 		return paceleverBenchConfig{}, errors.New("invalid TOML configuration (values withheld)")
 	}
-	// config.go:145 the sections decode into pacelever's types.
+	// config.go:146 the sections decode into pacelever's types.
 	var w struct {
 		Quota    paceleverQuotaConfig      `toml:"quota"`
 		Pools    map[string]map[string]any `toml:"pools"`
@@ -105,7 +105,7 @@ func parsePaceleverConfig(data []byte) (paceleverBenchConfig, error) {
 		return paceleverBenchConfig{}, err
 	}
 	for name, v := range w.Pools {
-		// config.go:155 a pool pacelever does not know is ignored.
+		// config.go:157 a pool pacelever does not know is ignored.
 		if !slices.Contains(admissionPolicyPools, name) {
 			continue
 		}
@@ -117,7 +117,7 @@ func parsePaceleverConfig(data []byte) (paceleverBenchConfig, error) {
 }
 
 // validatePaceleverPool is LoadConfig's check of one known pool's table
-// (config.go:159-187).
+// (config.go:161-188).
 func validatePaceleverPool(name string, v map[string]any) error {
 	// An unquoted TOML date is read as its text.
 	if until, ok := v["until"]; ok {
