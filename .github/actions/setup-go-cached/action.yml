@@ -1,0 +1,71 @@
+name: Set up Go with a cached toolchain
+description: >-
+  Installs one exact Go toolchain version. The toolchain directory for that
+  version is restored from and saved to the runner tool cache, so a warm run
+  skips the download. On a miss, actions/setup-go runs up to three times with
+  backoff so a transient 403 or 504 does not fail the job. Module and build
+  caches stay with actions/setup-go. Callers must check out the repository
+  first.
+inputs:
+  go-version:
+    description: Exact Go version x.y.z to install. Keep it the one version the repository builds with.
+    required: false
+    default: '1.27.3'
+runs:
+  using: composite
+  steps:
+    - id: version
+      shell: bash
+      env:
+        GO_VERSION: ${{ inputs.go-version }}
+      run: |
+        set -euo pipefail
+        if ! [[ "$GO_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "go-version must be x.y.z (got '$GO_VERSION')" >&2
+          exit 1
+        fi
+        echo "version=$GO_VERSION" >> "$GITHUB_OUTPUT"
+
+    # Restore first so setup-go finds the toolchain in the tool cache. The
+    # post step saves the directory only after a miss.
+    - id: toolchain-cache
+      uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      with:
+        path: ${{ runner.tool_cache }}/go/${{ steps.version.outputs.version }}
+        key: setup-go-toolchain-${{ runner.os }}-${{ runner.arch }}-go${{ steps.version.outputs.version }}
+
+    - id: setup-go-1
+      uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      continue-on-error: true
+      with:
+        go-version: ${{ steps.version.outputs.version }}
+        cache: true
+
+    - name: Back off before setup-go attempt 2
+      if: steps.setup-go-1.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "setup-go attempt 1 failed; retrying in 30s" >&2
+        sleep 30
+
+    - id: setup-go-2
+      if: steps.setup-go-1.outcome == 'failure'
+      uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      continue-on-error: true
+      with:
+        go-version: ${{ steps.version.outputs.version }}
+        cache: true
+
+    - name: Back off before setup-go attempt 3
+      if: steps.setup-go-1.outcome == 'failure' && steps.setup-go-2.outcome == 'failure'
+      shell: bash
+      run: |
+        echo "setup-go attempt 2 failed; retrying in 90s" >&2
+        sleep 90
+
+    - id: setup-go-3
+      if: steps.setup-go-1.outcome == 'failure' && steps.setup-go-2.outcome == 'failure'
+      uses: actions/setup-go@44694675825211faa026b3c33043df3e48a5fa00 # v6.0.0
+      with:
+        go-version: ${{ steps.version.outputs.version }}
+        cache: true
