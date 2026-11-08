@@ -496,6 +496,24 @@ HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET=…
 `[quota] url` in `hosts.toml` still overrides the URL for the jobs, bench and
 quota reads; the token always comes from the loader.
 
+**Spawn path over HTTP (hk 3591).** The spawn path calls hk over HTTP through
+hk's public client package (`github.com/mgh3326/handoffkeep/client`) with this
+svc-panewire credential, never through the `handoffkeep` CLI or its
+`config.env`: the task precheck and the link check (`GET /v1/tasks/{id}`), the
+task claim (`POST /v1/tasks/{id}/claim`), the respawn rebind
+(`POST /v1/tasks/{id}/rebind`), the owner lookup for an omitted `--owner`
+(`GET /v1/tasks/projects/{project}/owner`), the routing policy read
+(`GET /v1/documents/policy%2Fmodel-routing`) and the via=hub brief upload
+(`PUT /v1/documents/{key}`, kind `brief`, the job id). The URL is the loader's
+(`[quota] url` does not apply), and the HTTP settings are those of the other hk
+clients: 8 s per call, no redirect followed, HTTPS off loopback and the
+tailnet, no proxy over plain HTTP. Refusal texts and exit classes are the CLI
+path's: hk's error reads as `handoffkeep: <code>[: reason]`, a claim refusal is
+still `task claim exited with status 1`, and a routing doc that fails its schema
+never replaces the last good cache, which is used with a warning. `panewire
+work TASK_ID` still reads its task through the CLI: it needs the task's
+`refs.report_path`, which the public client's task type does not carry.
+
 **Explicit files.** A file the operator names (the hub's `--handoffkeep-env`
 and `--chat-env`, a node's `spawn.json` `handoffkeep_env`, and the assistant's
 `-config`) is read as before, and its bearer is `HANDOFFKEEP_TOKEN_SVC_PANEWIRE`
@@ -526,6 +544,11 @@ HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create ~/.config/panewire/hk-svc.env`):
 | Native admission shared reads, presence, manual quota, task status | Unavailable: the account reads as unknown or degraded. |
 | Bench reps (`panewire reps`, merged-PR outcomes) | `panewire reps` is refused (exit 70); the sweep's merged-PR outcome is not recorded. |
 | Node brief fetch (default `handoffkeep_env`) | `brief_doc_unavailable` / `brief_doc_fetch`. |
+| Spawn task precheck | Refused, `task precheck unavailable: handoffkeep: hk service credential unconfigured: …` (exit 70); a bypassed spawn proceeds. |
+| Spawn task claim (after delivery) | `job.task_link` `failed`, `TASK_LINK_FAILED … reason=task claim exited with status 1` to the owner lane. |
+| Owner lookup (omitted `--owner`) | Refused with exit 2, naming the error and `--owner LANE`. |
+| Routing policy read | The last good cache, with a warning; no cache gives the builtin rules for implementers and refuses consult and verifier. |
+| via=hub brief upload | The hub candidate is refused, `brief upload to <key> failed: …`. |
 
 **Rollout.** Put `hk-svc.env` (the `svc-panewire` token, Infisical `/panewire`)
 on every panewire host before deploying this; otherwise hk reads fail and
