@@ -686,3 +686,13 @@ func TestHKSiteUploadsUseTheUploadBound(t *testing.T) {
 		t.Fatal("a task read outlived the call bound")
 	}
 }
+
+// An artifact record write carries a kind hk accepts: the fake refuses the
+// kinds hk's documentKinds lacks, as hk answers 400 invalid_context.
+func TestArtifactRecordWriteUsesKindHKAccepts(t *testing.T) {
+	a, hk := testApp(t), useFakeHK(t)
+	if e := a.putRecord(context.Background(), sweepPrefix+"/dataset", ArtifactRecord{}); e != nil {
+		t.Fatalf("putRecord: %v", e)
+	}
+	hkOnly(t, hk, docRoute(http.MethodPut, sweepPrefix+"/dataset"))
+}
