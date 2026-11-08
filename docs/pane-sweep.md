@@ -64,7 +64,11 @@ also starts the count again.
 When the pane has been not working for at least the grace, the sweep:
 
 1. saves the pane's screen to `<job dir>/pane-screen.txt` (mode 0600, replaced
-   atomically); a pane whose screen cannot be saved is kept;
+   atomically); a pane whose screen cannot be saved is kept. It then uploads
+   the screen to hk as `screens/<job>/pane-screen.txt` (kind `evidence`, the
+   job, `origin_class` `job`, and `task_id` for a numeric task), cut to its
+   tail as `pane.capture` does (see [node-commands.md](node-commands.md#panecapture));
+   a failed upload is one warning and the close goes on;
 2. re-reads the job and the pane immediately before closing, as
    `panewire reap` does, and keeps the pane if either changed;
 3. reads the job's token usage while herdr still lists the pane, then closes

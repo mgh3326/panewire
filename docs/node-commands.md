@@ -30,7 +30,8 @@ that job's directory.
 The node also closes finished worker panes by itself, without a hub command:
 see [pane-sweep.md](pane-sweep.md). It matches a pane by id, name and tab and
 requires an idle status, and writes the same `pane-screen.txt` as
-`pane.capture`. It does not run `pane.close`'s composer guard.
+`pane.capture` and uploads it to hk as the same screen document. It does not
+run `pane.close`'s composer guard.
 
 ## Hub endpoints
 
@@ -137,7 +138,7 @@ mergewake reap applies over ssh:
 | `not-a-job` | — | The job directory does not exist, or is a symlink rather than a real directory: the fleet did not spawn this pane. Nothing is written. |
 | `report` | `<dir>/report.md` | `report.md` is a regular file (not a symlink) whose mtime is strictly later than `merged_after` (unix seconds; 0 means never). |
 | `would-screen` | `<dir>/pane-screen.txt` | `write:false`: where the screen would go. Nothing is read or written. |
-| `screen` | `<dir>/pane-screen.txt` | The pane, re-read and still matching `name` and `cwd`, had its `herdr pane read` output written there atomically, mode 0600. |
+| `screen` | `<dir>/pane-screen.txt` | The pane, re-read and still matching `name` and `cwd`, had its `herdr pane read` output written there atomically, mode 0600. The result also carries `doc` when the screen reached hk (below). |
 | `pane-changed` / `pane-gone` | — | The pane no longer matches; nothing is written. |
 
 `<inbox>` is the node daemon's jobs inbox root; a node without one answers
@@ -147,6 +148,25 @@ it; the screen is written to an `O_EXCL|O_NOFOLLOW` temporary file and
 renamed over `pane-screen.txt`, which replaces a symlink there instead of
 writing through it. A symlink above `<inbox>/jobs` is operator-provisioned
 and honoured. Read or write failures answer `capture_failed`.
+
+After a `screen` capture the node uploads the saved screen to hk as the
+document `screens/<name>/pane-screen.txt`: kind `evidence`, job `<name>`,
+`origin_class` `job`, and `task_id` when the job's ledger names a numeric hk
+task (the newest claim's, else the spawn receipt's). On success the result
+carries the key as `doc`:
+
+```json
+{"outcome": "screen", "saved": "<dir>/pane-screen.txt", "doc": "screens/<name>/pane-screen.txt"}
+```
+
+`doc` is additive and omitted when there was no upload, so every other result
+is unchanged; the hub forwards it only on `screen` and only as the screen
+document of the job `saved` names. A failed upload — hk unconfigured on the
+node, a refusal such as hk's secret guard, an outage — is one node warning:
+the local screen stays, the outcome stays `screen`, and `doc` is omitted. A
+screen over hk's 512 KiB document cap is uploaded as its last bytes, cut on a
+rune boundary, under a first line saying it was cut; the local file keeps the
+whole screen. The upload runs inside the command's 20-second bound.
 
 ### `pane.read`
 
