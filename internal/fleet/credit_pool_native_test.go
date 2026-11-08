@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/fleetevent"
 	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
@@ -173,4 +174,52 @@ func TestCreditPoolViewsFollowLaunchSwitch(t *testing.T) {
 			t.Fatalf("native mode must not run pacelever --json: %v", runner.Calls)
 		}
 	})
+}
+
+// TestCreditPoolViewsShadowRecordsComparison: in shadow mode the native
+// view is built beside pacelever's and compared on class and used share
+// (fleet event quota_pools_shadow); pacelever's view is what the caller gets.
+func TestCreditPoolViewsShadowRecordsComparison(t *testing.T) {
+	record := func(a *App) *[]fleetevent.Event {
+		var events []fleetevent.Event
+		a.EventSink = func(e fleetevent.Event) { events = append(events, e) }
+		return &events
+	}
+	a, _ := creditPoolApp(t, excludedAnthropicPolicy, anthropicCreditLatest)
+	events := record(a)
+	views, err := a.Quota.Pools(context.Background())
+	if err != nil || views["anthropic-api"].Class != "spend" {
+		t.Fatalf("shadow must return pacelever's views: %+v %v", views, err)
+	}
+	if len(*events) != 1 {
+		t.Fatalf("want one shadow event, got %+v", *events)
+	}
+	e := (*events)[0]
+	if e.Kind != "quota_pools_shadow" || e.Outcome != "disagree" || e.Reason != "credit" {
+		t.Fatalf("shadow event = %+v", e)
+	}
+	for _, want := range []string{"anthropic-api pacelever{class=spend blocking=-} native{class=exclude blocking=40.00}", "diff=anthropic-api:class,anthropic-api:blocking"} {
+		if !strings.Contains(e.Detail, want) {
+			t.Errorf("shadow detail lacks %q: %s", want, e.Detail)
+		}
+	}
+
+	a, _ = creditPoolApp(t, "", func(string) shared.Latest { return shared.Latest{} })
+	events = record(a)
+	if _, err := a.Quota.Pools(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(*events) != 1 || (*events)[0].Outcome != "agree" {
+		t.Fatalf("matching views must agree: %+v", *events)
+	}
+
+	a, _ = creditPoolApp(t, excludedAnthropicPolicy, anthropicCreditLatest)
+	a.Config.Quota["launch"] = launchModeNative
+	events = record(a)
+	if _, err := a.Quota.Pools(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if len(*events) != 0 {
+		t.Fatalf("native mode records no comparison: %+v", *events)
+	}
 }
