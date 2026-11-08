@@ -461,6 +461,14 @@ Node sweep behaviour (see [pane-sweep.md](pane-sweep.md)).
 | --- | --- | --- |
 | `remove_worktrees` | `true` | After the sweep closes a job, remove the worktree the node prepared under `work_root` and its local branch: a clean, merged worktree when the task completed; any worktree, after saving its changes, when the end was not a merge (see [pane-sweep.md](pane-sweep.md#the-worktree)). `false` keeps every worktree. |
 
+## `[reap]`
+
+The job dir TTL (see [job-dir-ttl.md](job-dir-ttl.md)).
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `job_dir_ttl` | unset | The node's opt-in to deleting job directories: when set (`"72h"`, `"3d"`; at least `24h`), the node sweep loop runs the job dir TTL with this age, at most once an hour, and deletes each directory its gate lets go. Unset, the node deletes nothing. `panewire reap --expire-job-dirs` uses it as its TTL, else 72 h. A value under 24 h or one that does not parse is a config error. |
+
 ## handoffkeep service credential
 
 Every panewire hk HTTP path that is not handed an explicit file authenticates
