@@ -17,10 +17,12 @@ import (
 // host's fleet config picks who resolves a launch rung — the profile, effort,
 // model, grade, gate, pool and family a spawn runs:
 //
-//   - shadow (the default): `pacelever policy launch` resolves it, and panewire
-//     resolves it beside pacelever from its own catalog and records whether
-//     the two agree (fleet event quota_launch_shadow). The native answer never
-//     changes the spawn's outcome.
+//   - shadow (the default): `pacelever policy launch` resolves it. After it
+//     answers, panewire resolves the same request offline — from pacelever's
+//     config.toml and panewire's catalog cache, read only — and records
+//     whether the two agree (fleet event quota_launch_shadow). The comparison
+//     never asks handoffkeep, never writes the cache, never runs on the
+//     caller's context and never changes the spawn's outcome.
 //   - native: panewire resolves it and `pacelever policy launch` is never run.
 //
 // panewire-design flips the switch once the shadow events show agreement.
@@ -29,9 +31,26 @@ const (
 	launchModeNative = "native"
 )
 
-// shadowLaunchTimeout bounds the native lookup beside pacelever's, so it
-// cannot hold up the spawn it rides on.
-const shadowLaunchTimeout = 10 * time.Second
+// shadowBound bounds a shadow comparison. The comparison reads only local
+// files, so it takes milliseconds; the bound keeps a hung filesystem from
+// holding up the spawn it rides on.
+const shadowBound = 2 * time.Second
+
+// shadowRun runs read for a shadow comparison on ctx — which the caller
+// detaches from its own context — bounded by shadowBound. ok is false when the
+// bound passes first; read then runs on to its end and its answer is dropped.
+func shadowRun[T any](ctx context.Context, read func() T) (answer T, ok bool) {
+	ctx, cancel := context.WithTimeout(ctx, shadowBound)
+	defer cancel()
+	done := make(chan T, 1)
+	go func() { done <- read() }()
+	select {
+	case answer = <-done:
+		return answer, true
+	case <-ctx.Done():
+		return answer, false
+	}
+}
 
 func validateLaunchMode(quota map[string]any) error {
 	v, ok := quota["launch"]
@@ -51,17 +70,17 @@ func (a *App) launchMode() string {
 	return launchModeShadow
 }
 
-// Launch resolves the launch rung following the switch.
+// Launch resolves the launch rung following the switch. In shadow mode the
+// answer is pacelever's, computed before the comparison starts; the
+// comparison gets a context detached from the caller's.
 func (q admissionQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
 	if q.app.launchMode() == launchModeNative {
 		return q.app.nativeLaunch(ctx, r)
 	}
 	x := q.CLIQuota.runLaunch(ctx, r)
-	shadow, cancel := context.WithTimeout(ctx, shadowLaunchTimeout)
-	native, err := q.app.nativeLaunch(shadow, r)
-	cancel()
-	q.app.shadowLaunch(r, x, native, err)
-	return launchResult(x)
+	l, err := launchResult(x)
+	q.app.shadowLaunch(context.WithoutCancel(ctx), r, x)
+	return l, err
 }
 
 // nativeLaunch is `pacelever policy launch PROFILE --json` as CLIQuota.Launch
@@ -72,25 +91,62 @@ func (q admissionQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, err
 // stale catalog is refused as CLIQuota.Launch refuses it. No pacelever process
 // runs.
 //
-// The catalog is panewire's, with its own freshness rule (catalog.go). A
-// lookup a cached catalog refuses reads handoffkeep once more before it
-// refuses, so a rung added there is found by the next lookup instead of an
-// hour later.
+// pacelever's config.toml is loaded and validated as pacelever loads it
+// (pacelever_config.go), and its [bench] catalog_ttl_s and
+// catalog_stale_max_s set the catalog's freshness, as they do pacelever's.
+// The catalog is panewire's client and cache (catalog.go). A lookup a cached
+// catalog refuses reads handoffkeep once more before it refuses, so a rung
+// added there is found by the next lookup instead of an hour later; that
+// refresh replaces the cache the selection also reads, which is the host's
+// choice in setting native.
 func (a *App) nativeLaunch(ctx context.Context, r QuotaRequest) (Launch, error) {
 	if r.Profile == "" {
 		return Launch{}, fail(gateInvalid, "quota catalog: profile required")
 	}
-	policy, err := loadAdmissionPolicy(os.Getenv, a.Home)
+	policy, err := loadLaunchPolicy(os.Getenv, a.Home)
 	if err != nil {
 		return Launch{}, fail(gateInvalid, "quota catalog: %v", err)
 	}
-	// pacelever reads the marker from PACELEVER_E6_ARM, which CLIQuota sets
-	// from the request and a local spawn otherwise inherits.
-	req := admissionRequest{Profile: r.Profile, Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: strings.TrimSpace(firstNonempty(r.E6Arm, os.Getenv("PACELEVER_E6_ARM")))}
-	catalog := a.launchCatalog(ctx, false)
+	catalog := a.launchCatalog(ctx, policy.Freshness, false)
+	return decideLaunch(policy.admissionPolicy, launchRequest(r), catalog, func() launchCatalog {
+		return a.launchCatalog(ctx, policy.Freshness, true)
+	})
+}
+
+// offlineLaunch is the native lookup the shadow compares with pacelever's:
+// nativeLaunch over panewire's catalog cache alone, read only, with no
+// refresh. found is false when there is no cache entry younger than
+// panewire's TTL to resolve against.
+func (a *App) offlineLaunch(r QuotaRequest) (l Launch, found bool, err error) {
+	if r.Profile == "" {
+		return Launch{}, true, fail(gateInvalid, "quota catalog: profile required")
+	}
+	catalog, found := a.cachedLaunchCatalog()
+	if !found {
+		return Launch{}, false, nil
+	}
+	policy, err := loadLaunchPolicy(os.Getenv, a.Home)
+	if err != nil {
+		return Launch{}, true, fail(gateInvalid, "quota catalog: %v", err)
+	}
+	l, err = decideLaunch(policy.admissionPolicy, launchRequest(r), catalog, nil)
+	return l, true, err
+}
+
+// launchRequest is the request as pacelever's policy launch reads it.
+// pacelever reads the marker from PACELEVER_E6_ARM, which CLIQuota sets from
+// the request and a local spawn otherwise inherits.
+func launchRequest(r QuotaRequest) admissionRequest {
+	return admissionRequest{Profile: r.Profile, Effort: r.Effort, Role: r.Role, Purpose: r.Purpose, OperatorRequest: r.OperatorRequest, RequestedBy: r.RequestedBy, E6Arm: strings.TrimSpace(firstNonempty(r.E6Arm, os.Getenv("PACELEVER_E6_ARM")))}
+}
+
+// decideLaunch resolves req against catalog. A refusal from a cached catalog
+// is resolved once more against refetch's catalog when refetch is set. A
+// refusal exits 3; a launch from a stale catalog exits 70.
+func decideLaunch(policy admissionPolicy, req admissionRequest, catalog launchCatalog, refetch func() launchCatalog) (Launch, error) {
 	l, why := catalog.resolve(policy, req)
-	if why != "" && catalog.cached {
-		catalog = a.launchCatalog(ctx, true)
+	if why != "" && catalog.cached && refetch != nil {
+		catalog = refetch()
 		l, why = catalog.resolve(policy, req)
 	}
 	if why != "" {
@@ -159,34 +215,62 @@ func launchRowFrom(r CatalogRow) launchRow {
 }
 
 // launchCatalog reads the catalog: a.BenchCatalog when set (a fixture), else
-// handoffkeep through the catalog client and its cache. fresh skips the cache.
-func (a *App) launchCatalog(ctx context.Context, fresh bool) launchCatalog {
-	snapshot := catalogSnapshot()
-	stale := snapshot
+// handoffkeep through the catalog client and its cache, with freshness's
+// limits. fresh skips the cache.
+func (a *App) launchCatalog(ctx context.Context, freshness CatalogFreshness, fresh bool) launchCatalog {
+	stale := catalogSnapshot()
 	stale.Stale = true
-	var rows []CatalogRow
-	var info CatalogInfo
 	if a.BenchCatalog != nil {
-		var err error
-		if rows, err = a.BenchCatalog(ctx); err != nil {
-			return stale
-		}
-	} else {
-		client, err := NewCatalogClient(CatalogClientConfig{Now: a.Now})
+		rows, err := a.BenchCatalog(ctx)
 		if err != nil {
 			return stale
 		}
-		data, err := client.Read(ctx, fresh)
-		if err != nil {
-			return stale
-		}
-		info = data.Info
-		for _, entry := range data.Rows {
-			rows = append(rows, entry.row())
-		}
+		return overlayLaunchCatalog(rows, false)
 	}
-	c := launchCatalog{Defaults: snapshot.Defaults, Aliases: snapshot.Aliases, Stale: info.Stale}
-	c.cached = info.Source == catalogSourceCache && info.AgeS != nil && *info.AgeS >= 0 && *info.AgeS < catalogTTL.Seconds()
+	client, err := NewCatalogClient(CatalogClientConfig{Now: a.Now, Freshness: freshness})
+	if err != nil {
+		return stale
+	}
+	data, err := client.Read(ctx, fresh)
+	if err != nil {
+		return stale
+	}
+	c := overlayLaunchCatalog(catalogDataRows(data), data.Info.Stale)
+	c.cached = data.Info.Source == catalogSourceCache && data.Info.AgeS != nil && client.fresh(*data.Info.AgeS)
+	return c
+}
+
+// cachedLaunchCatalog is the launch catalog from panewire's catalog cache
+// alone, when it holds an entry younger than panewire's TTL (catalog.go
+// ReadCached). It never asks handoffkeep and never writes, and it ignores
+// a.BenchCatalog: it is what the shadow comparison resolves against.
+func (a *App) cachedLaunchCatalog() (launchCatalog, bool) {
+	client, err := NewCatalogClient(CatalogClientConfig{Now: a.Now})
+	if err != nil {
+		return launchCatalog{}, false
+	}
+	data, ok := client.ReadCached()
+	if !ok {
+		return launchCatalog{}, false
+	}
+	c := overlayLaunchCatalog(catalogDataRows(data), false)
+	c.cached = true
+	return c, true
+}
+
+func catalogDataRows(data CatalogData) []CatalogRow {
+	rows := make([]CatalogRow, len(data.Rows))
+	for i, entry := range data.Rows {
+		rows[i] = entry.row()
+	}
+	return rows
+}
+
+// overlayLaunchCatalog is handoffkeep's rows with the bundled snapshot's
+// local fields and the snapshot's rows for profiles the rows do not list.
+func overlayLaunchCatalog(rows []CatalogRow, stale bool) launchCatalog {
+	snapshot := catalogSnapshot()
+	c := launchCatalog{Defaults: snapshot.Defaults, Aliases: snapshot.Aliases, Stale: stale}
 	listed := map[string]bool{}
 	for _, r := range rows {
 		row := launchRowFrom(r)
@@ -443,13 +527,35 @@ func (s launchSide) diff(o launchSide) []string {
 	return out
 }
 
-// shadowLaunch records how the native lookup compares with pacelever's for
-// one request (fleet event quota_launch_shadow). Outcome agree: the same exit
-// status, launch fields and reason; reason_differs: the same exit status and
-// fields, other refusal words; disagree: anything else, with the differing
-// fields listed.
-func (a *App) shadowLaunch(r QuotaRequest, pacelever Result, native Launch, err error) {
-	p, n := paceleverLaunchSide(pacelever), nativeLaunchSide(native, err)
+// shadowLaunch records how the offline native lookup compares with
+// pacelever's run for one request (fleet event quota_launch_shadow). Outcome
+// agree: the same exit status, launch fields and reason; reason_differs: the
+// same exit status and fields, other refusal words; disagree: anything else,
+// with the differing fields listed; skipped: nothing compared, because the
+// catalog cache holds no entry younger than panewire's TTL (reason
+// no_fresh_cache) or the local reads outlasted shadowBound (reason
+// shadow_timeout). The event is best effort.
+func (a *App) shadowLaunch(ctx context.Context, r QuotaRequest, pacelever Result) {
+	type answer struct {
+		l     Launch
+		err   error
+		found bool
+	}
+	native, ok := shadowRun(ctx, func() answer {
+		l, found, err := a.offlineLaunch(r)
+		return answer{l, err, found}
+	})
+	p := paceleverLaunchSide(pacelever)
+	request := fmt.Sprintf("profile=%s effort=%s role=%s purpose=%s", r.Profile, r.Effort, r.Role, r.Purpose)
+	switch {
+	case !ok:
+		a.emitFleetEvent("quota_launch_shadow", "", "skipped", "shadow_timeout", fmt.Sprintf("%s pacelever{%s}", request, p))
+		return
+	case !native.found:
+		a.emitFleetEvent("quota_launch_shadow", "", "skipped", "no_fresh_cache", fmt.Sprintf("%s pacelever{%s}", request, p))
+		return
+	}
+	n := nativeLaunchSide(native.l, native.err)
 	diff := p.diff(n)
 	outcome := "agree"
 	switch {
@@ -458,6 +564,6 @@ func (a *App) shadowLaunch(r QuotaRequest, pacelever Result, native Launch, err 
 	case p.why != n.why:
 		outcome = "reason_differs"
 	}
-	detail := fmt.Sprintf("profile=%s effort=%s role=%s purpose=%s pacelever{%s} native{%s} diff=%s", r.Profile, r.Effort, r.Role, r.Purpose, p, n, strings.Join(diff, ","))
+	detail := fmt.Sprintf("%s pacelever{%s} native{%s} diff=%s", request, p, n, strings.Join(diff, ","))
 	a.emitFleetEvent("quota_launch_shadow", "", outcome, firstNonempty(n.l.Pool, p.l.Pool, "unknown"), detail)
 }

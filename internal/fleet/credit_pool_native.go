@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 )
 
@@ -15,16 +14,21 @@ import (
 // §Credit pool views):
 //
 //   - shadow (the default): pacelever's status document (`pacelever --json`)
-//     is the view, as before. When the shared store serves every credit pool,
-//     the native view is built beside it and the two are compared (fleet event
-//     quota_pools_shadow); the native view never reaches the caller.
+//     is the view, as before. After it is read, when the shared store serves
+//     every credit pool, each pool's class is read offline from pacelever's
+//     pool policy and compared with pacelever's (fleet event
+//     quota_pools_shadow). The comparison never reads the shared store, never
+//     runs on the caller's context, and never reaches the caller.
 //   - native: when the shared store serves every credit pool — each is one of
 //     the hand-recorded API pools (creditAccountPools) and shared reads are
 //     wired — the view is built here and `pacelever --json` is not started;
 //     otherwise pacelever's status document is read as in shadow.
 func (q admissionQuota) Pools(ctx context.Context) (map[string]PoolView, error) {
-	pools, served := q.nativeCreditPools()
-	if served && q.app.launchMode() == launchModeNative {
+	if q.app.launchMode() == launchModeNative {
+		pools, served := q.nativeCreditPools()
+		if !served {
+			return q.CLIQuota.Pools(ctx)
+		}
 		views, err := q.creditStoreViews(ctx, pools)
 		if err != nil {
 			return nil, err
@@ -33,12 +37,7 @@ func (q admissionQuota) Pools(ctx context.Context) (map[string]PoolView, error) 
 		return views, nil
 	}
 	views, err := q.CLIQuota.Pools(ctx)
-	if served {
-		shadow, cancel := context.WithTimeout(ctx, shadowLaunchTimeout)
-		native, nerr := q.creditStoreViews(shadow, pools)
-		cancel()
-		q.app.shadowPools(pools, views, err, native, nerr)
-	}
+	q.shadowPools(context.WithoutCancel(ctx), views, err)
 	return views, err
 }
 
@@ -67,14 +66,13 @@ func (q admissionQuota) nativeCreditPools() ([]string, bool) {
 // alone, as pacelever's status keeps it for an unmeasured pool; an unreadable
 // policy is an error, so a failed read never clears an exclusion.
 func (q admissionQuota) creditStoreViews(ctx context.Context, pools []string) (map[string]PoolView, error) {
-	policy, err := loadAdmissionPolicy(os.Getenv, q.app.Home)
+	views, policy, err := q.creditPolicyViews(pools)
 	if err != nil {
-		return nil, fail(exitConfig, "quota status: %v", err)
+		return nil, err
 	}
 	now := q.app.Now()
-	views := map[string]PoolView{}
 	for _, pool := range pools {
-		v := PoolView{Status: "degraded", Class: policy.pool(pool, now).Class}
+		v := views[pool]
 		if fp := firstNonempty(q.Accounts[pool], policy.Accounts[pool]); accountFP.MatchString(fp) {
 			if latest, err := q.SharedLatest(ctx, pool+":"+fp); err == nil {
 				in := admissionInputs{Now: now, Manual: map[string][]admissionManual{pool: admissionManualFrom(latest.Manual)}}
@@ -88,6 +86,21 @@ func (q admissionQuota) creditStoreViews(ctx context.Context, pools []string) (m
 		views[pool] = v
 	}
 	return views, nil
+}
+
+// creditPolicyViews is each credit pool's view from pacelever's pool policy
+// alone: its class, with no reading. It reads only the local config file.
+func (q admissionQuota) creditPolicyViews(pools []string) (map[string]PoolView, admissionPolicy, error) {
+	policy, err := loadAdmissionPolicy(os.Getenv, q.app.Home)
+	if err != nil {
+		return nil, policy, fail(exitConfig, "quota status: %v", err)
+	}
+	now := q.app.Now()
+	views := map[string]PoolView{}
+	for _, pool := range pools {
+		views[pool] = PoolView{Status: "degraded", Class: policy.pool(pool, now).Class}
+	}
+	return views, policy, nil
 }
 
 // addCreditBalances sets each view's balance (credit_expiry.go), as
@@ -105,34 +118,56 @@ func (q admissionQuota) addCreditBalances(ctx context.Context, views map[string]
 	}
 }
 
-// shadowPools records how the native credit pool views compare with
-// pacelever's (fleet event quota_pools_shadow). Only the class and the used
-// share are compared: the balance is read from the same store on both paths.
-// Outcome agree: both read and every credit pool has the same class and used
-// share; disagree otherwise, with the differing pool:field pairs.
-func (a *App) shadowPools(pools []string, pacelever map[string]PoolView, perr error, native map[string]PoolView, nerr error) {
+// shadowPools records how each credit pool's class from pacelever's pool
+// policy, read offline, compares with pacelever's status document (fleet
+// event quota_pools_shadow), when the shared store serves every credit pool.
+// Only the class is compared: the used share is read from the shared store,
+// which the comparison never reads, and the balance is the same store's on
+// both paths. Outcome agree: both read and every credit pool has the same
+// class; disagree otherwise, with the differing pool:field pairs; skipped
+// (reason shadow_timeout) when the local reads outlast shadowBound. The event
+// is best effort.
+func (q admissionQuota) shadowPools(ctx context.Context, pacelever map[string]PoolView, perr error) {
+	type answer struct {
+		pools  []string
+		served bool
+		views  map[string]PoolView
+		err    error
+	}
+	native, ok := shadowRun(ctx, func() answer {
+		pools, served := q.nativeCreditPools()
+		if !served {
+			return answer{}
+		}
+		views, _, err := q.creditPolicyViews(pools)
+		return answer{pools, true, views, err}
+	})
+	switch {
+	case !ok:
+		q.app.emitFleetEvent("quota_pools_shadow", "", "skipped", "shadow_timeout", "")
+		return
+	case !native.served:
+		return
+	}
 	var diff, sides []string
 	switch {
-	case perr != nil || nerr != nil:
+	case perr != nil || native.err != nil:
 		diff = append(diff, "error")
-		sides = append(sides, fmt.Sprintf("pacelever{error=%q} native{error=%q}", errText(perr), errText(nerr)))
+		sides = append(sides, fmt.Sprintf("pacelever{error=%q} native{error=%q}", errText(perr), errText(native.err)))
 	default:
-		for _, pool := range pools {
-			p, n := pacelever[pool], native[pool]
+		for _, pool := range native.pools {
+			p, n := pacelever[pool], native.views[pool]
 			if p.Class != n.Class {
 				diff = append(diff, pool+":class")
 			}
-			if fmtPct(p.Blocking) != fmtPct(n.Blocking) {
-				diff = append(diff, pool+":blocking")
-			}
-			sides = append(sides, fmt.Sprintf("%s pacelever{class=%s blocking=%s} native{class=%s blocking=%s}", pool, p.Class, fmtPct(p.Blocking), n.Class, fmtPct(n.Blocking)))
+			sides = append(sides, fmt.Sprintf("%s pacelever{class=%s} native{class=%s}", pool, p.Class, n.Class))
 		}
 	}
 	outcome := "agree"
 	if len(diff) > 0 {
 		outcome = "disagree"
 	}
-	a.emitFleetEvent("quota_pools_shadow", "", outcome, "credit", strings.Join(sides, " ")+" diff="+strings.Join(diff, ","))
+	q.app.emitFleetEvent("quota_pools_shadow", "", outcome, "credit", strings.Join(sides, " ")+" diff="+strings.Join(diff, ","))
 }
 
 func errText(err error) string {
@@ -140,12 +175,4 @@ func errText(err error) string {
 		return ""
 	}
 	return err.Error()
-}
-
-// fmtPct is a used share to two decimals, or "-" when absent.
-func fmtPct(v *float64) string {
-	if v == nil {
-		return "-"
-	}
-	return strconv.FormatFloat(*v, 'f', 2, 64)
 }

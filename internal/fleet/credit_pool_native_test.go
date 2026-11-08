@@ -176,9 +176,11 @@ func TestCreditPoolViewsFollowLaunchSwitch(t *testing.T) {
 	})
 }
 
-// TestCreditPoolViewsShadowRecordsComparison: in shadow mode the native
-// view is built beside pacelever's and compared on class and used share
-// (fleet event quota_pools_shadow); pacelever's view is what the caller gets.
+// TestCreditPoolViewsShadowRecordsComparison: in shadow mode each credit
+// pool's class is read offline from the pool policy and compared with
+// pacelever's (fleet event quota_pools_shadow); the used share, which only
+// the shared store holds, is not compared. pacelever's view is what the
+// caller gets.
 func TestCreditPoolViewsShadowRecordsComparison(t *testing.T) {
 	record := func(a *App) *[]fleetevent.Event {
 		var events []fleetevent.Event
@@ -198,10 +200,13 @@ func TestCreditPoolViewsShadowRecordsComparison(t *testing.T) {
 	if e.Kind != "quota_pools_shadow" || e.Outcome != "disagree" || e.Reason != "credit" {
 		t.Fatalf("shadow event = %+v", e)
 	}
-	for _, want := range []string{"anthropic-api pacelever{class=spend blocking=-} native{class=exclude blocking=40.00}", "diff=anthropic-api:class,anthropic-api:blocking"} {
+	for _, want := range []string{"anthropic-api pacelever{class=spend} native{class=exclude}", "diff=anthropic-api:class"} {
 		if !strings.Contains(e.Detail, want) {
 			t.Errorf("shadow detail lacks %q: %s", want, e.Detail)
 		}
+	}
+	if !strings.HasSuffix(e.Detail, " diff=anthropic-api:class") || strings.Contains(e.Detail, "blocking") {
+		t.Errorf("only the class is compared: %s", e.Detail)
 	}
 
 	a, _ = creditPoolApp(t, "", func(string) shared.Latest { return shared.Latest{} })

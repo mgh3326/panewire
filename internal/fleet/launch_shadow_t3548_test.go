@@ -70,6 +70,13 @@ func shadowCatalogEnv(t *testing.T, h *countingHandoffkeep) *CatalogClient {
 // visible in the mtime.
 func writeCatalogCacheAt(t *testing.T, client *CatalogClient, rows []CatalogRow, age time.Duration) {
 	t.Helper()
+	writeCatalogCacheFetched(t, client, rows, launchNow.Add(-age))
+}
+
+// writeCatalogCacheFetched stores rows as the client's cache entry fetched
+// at fetched.
+func writeCatalogCacheFetched(t *testing.T, client *CatalogClient, rows []CatalogRow, fetched time.Time) {
+	t.Helper()
 	raw := make([]json.RawMessage, len(rows))
 	for i, r := range rows {
 		b, err := json.Marshal(r)
@@ -78,7 +85,7 @@ func writeCatalogCacheAt(t *testing.T, client *CatalogClient, rows []CatalogRow,
 		}
 		raw[i] = b
 	}
-	data, err := json.Marshal(catalogCache{FetchedAt: launchNow.Add(-age).Format(time.RFC3339Nano), EndpointID: client.endpointID(), Rows: raw})
+	data, err := json.Marshal(catalogCache{FetchedAt: fetched.Format(time.RFC3339Nano), EndpointID: client.endpointID(), Rows: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +126,27 @@ func cacheDirState(t *testing.T, client *CatalogClient) map[string]string {
 		out[e.Name()] = info.ModTime().String() + "\x00" + string(data)
 	}
 	return out
+}
+
+// cacheLaunchRows makes rows panewire's catalog cache, fetched ten minutes
+// before now, for a handoffkeep that fails the test if it is asked: what a
+// shadow comparison resolves against.
+func cacheLaunchRows(t *testing.T, rows []CatalogRow, now time.Time) {
+	t.Helper()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("handoffkeep was asked: %s %s", r.Method, r.URL.Path)
+		http.Error(w, "unexpected", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	t.Setenv("HANDOFFKEEP_URL", server.URL)
+	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("XDG_CACHE_HOME", t.TempDir())
+	client, err := NewCatalogClient(CatalogClientConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeCatalogCacheFetched(t, client, rows, now.Add(-10*time.Minute))
 }
 
 // newRungLaunch is pacelever's admit of a rung only handoffkeep's live

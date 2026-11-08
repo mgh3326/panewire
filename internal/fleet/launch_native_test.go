@@ -20,7 +20,8 @@ var launchNow = time.Date(2026, 11, 8, 3, 0, 0, 0, time.UTC)
 // launchApp is an App whose quota is the production admissionQuota over a fake
 // pacelever. paceleverLaunch answers `pacelever policy launch`; nil means the
 // test expects none, so any run of it fails the test. rows, when set, is the
-// bench catalog handoffkeep serves.
+// bench catalog: the native lookup's fixture, and the catalog cache the
+// shadow comparison reads, for a handoffkeep that must not be asked.
 func launchApp(t *testing.T, mode string, rows []CatalogRow, paceleverLaunch *Result) (*App, *fakeRunner, *[]fleetevent.Event) {
 	t.Helper()
 	t.Setenv("PACELEVER_CONFIG", filepath.Join(t.TempDir(), "absent.toml"))
@@ -43,6 +44,7 @@ func launchApp(t *testing.T, mode string, rows []CatalogRow, paceleverLaunch *Re
 	a.Quota = admissionQuota{CLIQuota{Runner: runner, Binary: "pacelever"}, a}
 	if rows != nil {
 		a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return rows, nil }
+		cacheLaunchRows(t, rows, launchNow)
 	}
 	var events []fleetevent.Event
 	a.EventSink = func(e fleetevent.Event) { events = append(events, e) }
@@ -460,6 +462,7 @@ func TestSpawnAdmissionDefaultRunsPaceleverLaunch(t *testing.T) {
 	a.Runner = runner
 	a.Quota = admissionQuota{CLIQuota{Runner: runner, Binary: "pacelever"}, a}
 	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return launchRulesCatalog(), nil }
+	cacheLaunchRows(t, launchRulesCatalog(), a.Now())
 	var events []fleetevent.Event
 	a.EventSink = func(e fleetevent.Event) { events = append(events, e) }
 	s := Spawn{CWD: "/work/project", Profile: "opus", Role: "worker", Effort: "high"}
