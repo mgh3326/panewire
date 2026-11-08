@@ -585,10 +585,13 @@ func (a *App) jobDirArtifacts(ctx context.Context, root, dir string, j Job, rec 
 
 // jobDirReportFiles lists the report files in dir (named id, under the real
 // jobs root) that hk must confirm: every top-level report*.md and each
-// recorded report path that lies in the dir and exists. A recorded path
-// outside the dir is not this pass's to delete and is skipped; one that is
-// not an absolute path keeps the dir (report-path-unreadable), since where
-// it points cannot be known.
+// recorded report path that lies in the dir and exists. A recorded path is
+// judged by the file it really names, so any doubt keeps the dir
+// (report-path-unreadable): a path that is not absolute or that
+// filepath.Clean would change (a .. after a symlink names another file
+// than the cleaned path), or one a symlink resolves to another path. Only
+// the resolved path is tested against the dir; one outside it is not this
+// pass's to delete and is skipped.
 func jobDirReportFiles(root, dir, id string, recorded []any) ([]string, string) {
 	real := filepath.Join(root, id)
 	reports, err := filepath.Glob(filepath.Join(real, "report*.md"))
@@ -600,46 +603,62 @@ func jobDirReportFiles(root, dir, id string, recorded []any) ([]string, string) 
 			continue
 		}
 		text, ok := value.(string)
-		if !ok || strings.ContainsRune(text, 0) || text != "" && !filepath.IsAbs(text) {
+		if !ok || strings.ContainsRune(text, 0) || text != "" && (!filepath.IsAbs(text) || text != filepath.Clean(text)) {
 			return nil, "report-path-unreadable"
 		}
 		if text == "" {
 			continue
 		}
-		path := filepath.Clean(text)
-		rel, inside := "", false
-		for _, base := range []string{real, dir} {
-			if r, err := filepath.Rel(base, path); err == nil && within(base, path) {
-				rel, inside = r, true
-				break
-			}
+		// The pass resolved the jobs root itself (Pass), so a path through
+		// its alias is read under the real root.
+		lexical := text
+		if jobs := filepath.Dir(dir); within(jobs, text) {
+			rel, _ := filepath.Rel(jobs, text)
+			lexical = filepath.Join(root, rel)
 		}
-		if !inside {
-			// A path through a symlink (an aliased jobs root) may still
-			// name a file in this dir.
-			resolved, err := filepath.EvalSymlinks(path)
-			if errors.Is(err, fs.ErrNotExist) {
-				continue
-			}
-			if err != nil {
-				return nil, "report-path-unreadable"
-			}
-			if !within(real, resolved) {
-				continue
-			}
-			rel, _ = filepath.Rel(real, resolved)
+		resolved, err := resolveExisting(text)
+		if err != nil || resolved != lexical && resolved != text {
+			return nil, "report-path-unreadable"
 		}
-		local := filepath.Join(real, rel)
-		if _, err := os.Lstat(local); errors.Is(err, fs.ErrNotExist) {
+		if !within(real, resolved) {
+			continue
+		}
+		if _, err := os.Lstat(resolved); errors.Is(err, fs.ErrNotExist) {
 			continue
 		} else if err != nil {
 			return nil, "report-unconfirmed"
 		}
-		if !slices.Contains(reports, local) {
-			reports = append(reports, local)
+		if !slices.Contains(reports, resolved) {
+			reports = append(reports, resolved)
 		}
 	}
 	return reports, ""
+}
+
+// resolveExisting is filepath.EvalSymlinks of path, or for a path that does
+// not exist, of its nearest existing parent joined with the rest. A path
+// component that exists but cannot be resolved (a dangling symlink, an
+// unreadable dir) is an error.
+func resolveExisting(path string) (string, error) {
+	rest := ""
+	for cur := path; ; {
+		resolved, err := filepath.EvalSymlinks(cur)
+		if err == nil {
+			return filepath.Join(resolved, rest), nil
+		}
+		if !errors.Is(err, fs.ErrNotExist) {
+			return "", err
+		}
+		if _, err := os.Lstat(cur); !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("resolve %s: %w", cur, fs.ErrInvalid)
+		}
+		parent := filepath.Dir(cur)
+		if parent == cur {
+			return "", err
+		}
+		rest = filepath.Join(filepath.Base(cur), rest)
+		cur = parent
+	}
 }
 
 // jobDirReports confirms each local report file: the record names a

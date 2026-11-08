@@ -1,6 +1,7 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -131,11 +132,7 @@ func (a *App) panes(ctx context.Context) ([]Pane, error) {
 	if e := check(r, "herdr pane list"); e != nil {
 		return nil, e
 	}
-	panes, e := parseHerdrList[Pane]([]byte(r.Out), "pane", "panes")
-	if e == nil && panes == nil {
-		e = fail(exitConfig, "pane list missing panes")
-	}
-	return panes, e
+	return parsePaneList([]byte(r.Out))
 }
 
 // parseHerdrList decodes the rows under key of a herdr list answer, bare or
@@ -157,6 +154,67 @@ func parseHerdrList[T any](data []byte, list, key string) ([]T, error) {
 	var rows []T
 	e := json.Unmarshal(v, &rows)
 	return rows, e
+}
+
+// parsePaneList decodes a `herdr pane list` answer, bare or in its result
+// envelope, more strictly than parseHerdrList: its absence of a pane is
+// evidence a job dir may go. An answer that carries an error (an "error"
+// member or "ok":false, at either level), one with no panes array, and any
+// row that is not an object with a pane id is an error: a row panewire
+// cannot read must not read as a pane that is not there.
+func parsePaneList(data []byte) ([]Pane, error) {
+	var m map[string]json.RawMessage
+	if e := json.Unmarshal(data, &m); e != nil {
+		return nil, e
+	}
+	if e := herdrListError(m, "pane"); e != nil {
+		return nil, e
+	}
+	if v, ok := m["result"]; ok {
+		m = nil
+		if e := json.Unmarshal(v, &m); e != nil {
+			return nil, e
+		}
+		if e := herdrListError(m, "pane"); e != nil {
+			return nil, e
+		}
+	}
+	var raw []json.RawMessage
+	if v, ok := m["panes"]; ok {
+		if e := json.Unmarshal(v, &raw); e != nil {
+			return nil, e
+		}
+	}
+	if raw == nil {
+		return nil, fail(exitConfig, "pane list missing panes")
+	}
+	panes := make([]Pane, 0, len(raw))
+	for i, r := range raw {
+		if !bytes.HasPrefix(bytes.TrimSpace(r), []byte("{")) {
+			return nil, fail(exitConfig, "pane list row %d is not an object", i)
+		}
+		var p Pane
+		if e := json.Unmarshal(r, &p); e != nil {
+			return nil, e
+		}
+		if strings.TrimSpace(p.Pane) == "" {
+			return nil, fail(exitConfig, "pane list row %d has no pane_id", i)
+		}
+		panes = append(panes, p)
+	}
+	return panes, nil
+}
+
+// herdrListError names the error a herdr list answer (or its result)
+// carries: a non-null "error" member, or "ok":false.
+func herdrListError(m map[string]json.RawMessage, list string) error {
+	if v, ok := m["error"]; ok && string(bytes.TrimSpace(v)) != "null" {
+		return fail(exitConfig, "%s list answered an error", list)
+	}
+	if v, ok := m["ok"]; ok && string(bytes.TrimSpace(v)) == "false" {
+		return fail(exitConfig, "%s list answered ok:false", list)
+	}
+	return nil
 }
 func (a *App) status(ctx context.Context, pane string) (string, error) {
 	agents, e := a.agents(ctx)
