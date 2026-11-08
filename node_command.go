@@ -141,9 +141,16 @@ type nodePaneCaptureResult struct {
 	Saved   string `json:"saved,omitempty"`
 	// Doc is the hk screen document key (fleet.PaneScreenDocKey) once a
 	// written screen was uploaded; omitted otherwise, so a result without an
-	// upload keeps its earlier bytes (hk 3617).
+	// upload keeps its earlier bytes (hk 3617). It goes on the wire only to a
+	// hub that advertised hubFeaturePaneCaptureDoc (nodeCommandWire).
 	Doc string `json:"doc,omitempty"`
 }
+
+// hubFeaturePaneCaptureDoc: a hub before hk 3617 decodes a pane.capture
+// result strictly and refuses the whole result for an unknown doc, so a node
+// sends doc only on a connection whose hub advertised this. The upload to hk
+// happens either way.
+const hubFeaturePaneCaptureDoc = "pane_capture_doc"
 
 type nodeWorktree struct {
 	Path      string `json:"path"`
@@ -477,6 +484,7 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 	defer cancel()
 	reply := nodeCommandReply{Type: "node.command.result", RequestID: message.RequestID, Op: message.CommandOp}
 	result, code := client.runNodeCommand(runContext, message.CommandOp, message.CommandArgs)
+	result = peer.nodeCommandWire(result)
 	if nodeCommandReapOnly(message.CommandOp) {
 		decoded, _ := decodeNodeCommandArgs(message.CommandOp, message.CommandArgs)
 		logNodeReapCommand(message.CommandOp, decoded, result, code)
@@ -501,6 +509,18 @@ func (client *HubClient) handleNodeCommand(ctx context.Context, peer *hubClientC
 	} else {
 		_ = peer.write(ctx, reply)
 	}
+}
+
+// nodeCommandWire is a node command result's wire form on this connection.
+// It is shaped here, at reply time, because the command ran without knowing
+// which hub it answers: pane.capture's doc reaches only a hub that advertised
+// hubFeaturePaneCaptureDoc.
+func (peer *hubClientConnection) nodeCommandWire(result any) any {
+	if capture, ok := result.(nodePaneCaptureResult); ok && !peer.acceptsPaneCaptureDoc.Load() {
+		capture.Doc = ""
+		return capture
+	}
+	return result
 }
 
 func (client *HubClient) runNodeCommand(ctx context.Context, op string, raw json.RawMessage) (any, string) {

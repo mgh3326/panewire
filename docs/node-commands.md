@@ -153,7 +153,7 @@ After a `screen` capture the node uploads the saved screen to hk as the
 document `screens/<name>/pane-screen.txt`: kind `evidence`, job `<name>`,
 `origin_class` `job`, and `task_id` when the job's ledger names a numeric hk
 task (the newest claim's, else the spawn receipt's). On success the result
-carries the key as `doc`:
+carries the key as `doc`, when the hub advertised `pane_capture_doc` (below):
 
 ```json
 {"outcome": "screen", "saved": "<dir>/pane-screen.txt", "doc": "screens/<name>/pane-screen.txt"}
@@ -167,6 +167,19 @@ the local screen stays, the outcome stays `screen`, and `doc` is omitted. A
 screen over hk's 512 KiB document cap is uploaded as its last bytes, cut on a
 rune boundary, under a first line saying it was cut; the local file keeps the
 whole screen. The upload runs inside the command's 20-second bound.
+
+`doc` is gated on the connection, so a mixed-version rollout works in either
+order. A hub before `doc` decodes a `pane.capture` result strictly and refuses
+the whole result for an unknown field, which would leave the pane open. A hub
+that understands `doc` lists `pane_capture_doc` in its `hub.features` event;
+the node records that per connection and puts `doc` on the wire only on a
+connection whose hub listed it. The upload to hk happens either way, so an
+older hub gets the result it always got and the screen document still exists.
+
+| hub \ node | node without `doc` | node with `doc` |
+|---|---|---|
+| hub without `doc` | `screen`, no upload | `screen` without `doc`; screen uploaded |
+| hub with `doc` | `screen`, no upload; the node ignores the feature it does not know | `screen` with `doc`; screen uploaded |
 
 ### `pane.read`
 

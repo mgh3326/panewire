@@ -216,6 +216,7 @@ func TestNodePaneCaptureDocOnlyForAHubThatAdvertisedIt(t *testing.T) {
 		doc       bool
 	}{
 		"hub did not advertise": {advertise: func(*hubClientConnection) {}},
+		"hub advertised":        {advertise: func(peer *hubClientConnection) { peer.acceptsPaneCaptureDoc.Store(true) }, doc: true},
 	} {
 		t.Run(name, func(t *testing.T) {
 			hk := captureDocHK(t, 0, "")

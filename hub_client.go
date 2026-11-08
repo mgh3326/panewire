@@ -596,8 +596,11 @@ type hubClientConnection struct {
 	// acceptsLaneEventPane is the same for hubFeatureLaneEventPane
 	// (lane_event_sender.go).
 	acceptsLaneEventPane atomic.Bool
-	connection           *websocket.Conn
-	writeMu              sync.Mutex
+	// acceptsPaneCaptureDoc is the same for hubFeaturePaneCaptureDoc
+	// (node_command.go).
+	acceptsPaneCaptureDoc atomic.Bool
+	connection            *websocket.Conn
+	writeMu               sync.Mutex
 }
 
 type hubOutboundMessage struct {
@@ -1924,6 +1927,7 @@ func (client *HubClient) serveConnection(ctx context.Context, connection *websoc
 				peer.acceptsSignals.Store(slices.Contains(message.Features, hubFeatureHostSignals))
 				peer.acceptsReadiness.Store(slices.Contains(message.Features, hubFeatureReadiness))
 				peer.acceptsLaneEventPane.Store(slices.Contains(message.Features, hubFeatureLaneEventPane))
+				peer.acceptsPaneCaptureDoc.Store(slices.Contains(message.Features, hubFeaturePaneCaptureDoc))
 				continue
 			case "burst.holds":
 				client.burstMu.Lock()
