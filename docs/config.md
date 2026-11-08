@@ -1415,6 +1415,24 @@ for ownership and distribution.
 Legacy periodic prune environment switches are not read. Panewire never
 silently enables automatic pruning.
 
+## Delivery policy relay keys
+
+The hub's delivery policy (`--delivery-policy`, `PANEWIRE_DELIVERY_POLICY`,
+embedded `delivery-policy.yaml`) carries the lane classes under `relay:`. See
+[inbox-only lanes](quiet-delivery.md#inbox-only-lanes) for the behaviour.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `relay.design_lanes` | `["*-design"]` | Design lanes: inbox-only, quieted worker results, no idle-wake or digest. |
+| `relay.desk_lanes` | `["operator-desk", "*-operator-desk"]` | Desk lanes: inbox-only. A desk lane is never a design lane. |
+| `relay.inbox_wake_window` | `5m` | Coalescing window of the one-line wake, `10s` to `1h`. |
+| `relay.worker_inbox_trial` | `[]` | Worker lane patterns that are inbox-only with the wake during the trial. |
+| `relay.worker_inbox_trial_until` | none | RFC3339 end of the trial. It is required with a trial list, and the trial is off from this instant. |
+
+The wake line is
+`[inbox] <lane>: N unread (most urgent: <kind>) | panewire inbox list --lane <lane>`.
+Policy changes need a hub restart. The trial's end needs none.
+
 ## Local job ledger
 
 Since RT-arb the host-local ledger lives in panewire (`internal/arbiter`); panewire
@@ -1493,6 +1511,7 @@ outcome, reason, detail`) to `$XDG_STATE_HOME/panewire/events/fleet-events.jsonl
 | `relay` | `delivered`, `dropped:<reason>` or `unconfirmed:<reason>` | the drop code, or the first token of the report | the hub saw one worker or design lane row's outcome |
 | `spawn_held` | the held branch (`succeeded_pane_held`, `failed_pane_held`, ...) | the pane-probe reason | a refused reclaim kept a role reservation |
 | `job_result` | `attached`, `conflict` or `missing` | `duplicate_done`, `different_result` or `no_result` | a `done` attached, conflicted with, or lacked a result |
+| `inbox_wake` | `sent` or `skipped` | the lane class (`design`, `desk`, `trial`) when sent; `count_failed` or `unrouted` when skipped | the hub typed, or could not type, an inbox-only lane's one-line wake; `job` is the lane and `detail` names `unread=`, `most_urgent=`, `machine=` and `pane=`. See [inbox-only lanes](quiet-delivery.md#inbox-only-lanes) |
 
 The relay, held-reservation and job-result kinds and their Sentry fingerprints
 are in [observability](observability.md).
