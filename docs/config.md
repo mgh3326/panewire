@@ -504,7 +504,9 @@ task claim (`POST /v1/tasks/{id}/claim`), the respawn rebind
 (`POST /v1/tasks/{id}/rebind`), the owner lookup for an omitted `--owner`
 (`GET /v1/tasks/projects/{project}/owner`), the routing policy read
 (`GET /v1/documents/policy%2Fmodel-routing`) and the via=hub brief upload
-(`PUT /v1/documents/{key}`, kind `brief`, the job id). The URL is the loader's
+(`PUT /v1/documents/{key}`, kind `brief`, the job id), and the read of a
+`-p hk:doc/KEY` brief (`GET /v1/documents/{key}`, see [Brief from
+hk](#brief-from-hk--p-hkdockey)). The URL is the loader's
 (`[quota] url` does not apply), and the HTTP settings are those of the other hk
 clients: 8 s per call, no redirect followed, HTTPS off loopback and the
 tailnet, no proxy over plain HTTP; the brief upload alone has 60 s, as the CLI's
@@ -1679,6 +1681,44 @@ to operator-desk. A spawn with no `--task` and no `--parent-job` keeps its
 previous default. Flags after the task id override defaults. Save the brief first; presets do
 not invent or overwrite instructions. A dry run uses the same planning path
 as the equivalent long spawn command and creates no claim or worker.
+A `refs.brief_path` of `hk:doc/KEY` reads the brief from hk, as `-p` does
+below.
+
+## Brief from hk (`-p hk:doc/KEY`)
+
+`panewire spawn` and `panewire work` take the brief from an hk document when
+`-p` starts with `hk:doc/`: the rest of the value is the document key, for
+example `-p hk:doc/brief/2026-11-09/my-job`, the key a design session stores
+its briefs under. Every other `-p` value is a file path and reads exactly as
+before. `panewire delegate --prompt FILE` has its own reader and takes only a
+file.
+
+The key must be nonempty, at most 512 bytes of UTF-8, and must not start with
+`/` or contain a control character or `..`; any other key is refused with
+exit 2 before hk is asked. The body is read once, on the command's host, over
+hk HTTP with the [svc-panewire credential](#handoffkeep-service-credential)
+(`GET /v1/documents/{key}`), before any side effect: no job directory, no
+`submission.json`, no hub submission and no pane. The submission then carries
+the body inline, as it carries a file's, so the hub and nodes need no hk
+access for it and no newer wire.
+
+| Failure | Exit | Refusal names |
+| --- | --- | --- |
+| Invalid key | 2 | the key and the `hk:doc/KEY` grammar |
+| Credential unconfigured or endpoint refused | 70 | the key and what is missing, never a value |
+| Key not found | 2 | the key |
+| hk answered 2xx with something that is not that document | 75 | the key, `unreadable hk answer` |
+| hk unreachable or an hk error | 75 | the key and hk's error |
+| Empty or whitespace-only body | 2 | the key |
+| Body over 64 KiB (`spawn` and `work` without `--dry-run`) | 2 | the key and its size |
+
+The same limits apply as to a file: the submit path takes at most 64 KiB of
+UTF-8, and `--dry-run` has no size bound. A read brief prints
+`brief_doc=KEY source=hk bytes=N`. The submission keeps `-p hk:doc/KEY` in its
+args, so `jobs/JOB/submission.json` (and the hub operation built from it)
+records that the brief lives in hk under KEY; the brief body is kept inline
+there too, and the executing host still writes `brief-delivered.md` as for a
+file brief. The hk job record has no brief field, so it does not name the key.
 
 ## Host aliases and workspaces
 
