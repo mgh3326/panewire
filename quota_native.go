@@ -251,6 +251,51 @@ func (s *nativeQuotaSource) Refresh(ctx context.Context) (shared.Reading, error)
 	return s.flow.Refresh(ctx, store, s.Pool+":"+fp, measure)
 }
 
+// nativeStatusPools are the pools panewire can measure itself, in the order
+// `panewire quota status` lists them when pacelever is absent; a pool with a
+// switch is listed only once the host's native_pools names it.
+var nativeStatusPools = []string{"claude", "codex", "commandcode", "devin", "agy"}
+
+// stored is the pool's reading as the shared store holds it for this host's
+// account, read without measuring: no lease, no publication, no presence.
+// `panewire quota status` reports it when pacelever is absent. The error is a
+// *quota.Error.
+func (s *nativeQuotaSource) stored(ctx context.Context) (quotaReading, error) {
+	_, accountFP, freshTTL := s.poolMeasurement()
+	store, err := quotaStoreClient(s.SpawnConfigPath, s.StoreTransport)
+	if err != nil {
+		return quotaReading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
+	}
+	fp, err := accountFP(ctx)
+	if err != nil {
+		return quotaReading{}, err
+	}
+	if fp == "" {
+		return quotaReading{}, quota.Fail(quota.ErrKindAccountUnknown, "no account key")
+	}
+	latest, err := store.Latest(ctx, s.Pool+":"+fp)
+	if err != nil {
+		return quotaReading{}, quota.Fail(quota.ErrKindSharedUnavailable, "shared quota unavailable")
+	}
+	reading := quotaReading{Pool: s.Pool, Account: fp, Source: quota.SourceHandoffkeep, Stale: true, Buckets: []quotaBucket{}}
+	o := latest.Observation
+	if o == nil || o.Kind != shared.KindAuto || o.MeasuredAt.IsZero() {
+		return reading, nil
+	}
+	age := max(s.now().Sub(shared.ValidAt(o)).Seconds(), 0)
+	reading.AgeSeconds, reading.Stale = &age, age > freshTTL.Seconds()
+	for _, b := range o.Buckets {
+		used := b.UsedPct
+		bucket := quotaBucket{Window: b.Window, UsedPct: &used}
+		if b.ResetsAt != nil {
+			bucket.ResetsAt = b.ResetsAt.UTC().Format(time.RFC3339Nano)
+		}
+		bucket.Scope.Kind, bucket.Scope.Name = b.Scope, b.Model
+		reading.Buckets = append(reading.Buckets, bucket)
+	}
+	return reading, nil
+}
+
 // devinLeaseWait bounds how long a devin refresh waits for another measurement
 // of the account: past it the refresh gives up with shared_pending instead of
 // holding a spawn path for two lease windows.

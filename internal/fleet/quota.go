@@ -142,7 +142,8 @@ func (r CatalogRow) meteringGroup() string {
 }
 
 // QuotaGate is deliberately independent of the executable name; pacelever
-// can implement this interface or the same CLI/JSON contract.
+// can implement this interface or the same CLI/JSON contract. Pools is read
+// for the pool policy's credit pools only (selection and creditPoolStatus).
 type QuotaGate interface {
 	Launch(context.Context, QuotaRequest) (Launch, error)
 	// Raw exit 3 is legacy quota-blocked compatibility at this boundary.
@@ -168,9 +169,18 @@ type CLIQuota struct {
 }
 
 func (q CLIQuota) Launch(ctx context.Context, r QuotaRequest) (Launch, error) {
-	a := []string{"policy", "launch", r.Profile, "--json"}
-	a = quotaArgs(a, r)
-	result := runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: a, Env: quotaE6Env(r.E6Arm)}, "quota catalog", 15*time.Second)
+	return launchResult(q.runLaunch(ctx, r))
+}
+
+// runLaunch runs `pacelever policy launch PROFILE --json` for one request.
+func (q CLIQuota) runLaunch(ctx context.Context, r QuotaRequest) Result {
+	a := quotaArgs([]string{"policy", "launch", r.Profile, "--json"}, r)
+	return runQuotaCommand(ctx, q.Runner, Command{Name: q.Binary, Args: a, Env: quotaE6Env(r.E6Arm)}, "quota catalog", 15*time.Second)
+}
+
+// launchResult reads a policy launch run into the launch it resolved; a stale
+// catalog is refused.
+func launchResult(result Result) (Launch, error) {
 	if e := checkQuota(result, "quota catalog"); e != nil {
 		return Launch{}, e
 	}

@@ -51,9 +51,9 @@ func spawnRefusalFix(err error) string {
 	var quota *quotaHostRefusal
 	if errors.As(err, &quota) {
 		if quota.reason == "no_usable_presence" {
-			return "No host measurement names an account for this pool on the target. Refresh the pool on a host that holds it with pacelever refresh POOL, or choose a host that does."
+			return "No host measurement names an account for this pool on the target. Refresh the pool on a host that holds it with panewire quota refresh POOL, or choose a host that does."
 		}
-		return "Refresh the named pool on the target with pacelever refresh POOL, confirm a fresh observation of its account, then retry."
+		return "Refresh the named pool on the target with panewire quota refresh POOL, confirm a fresh observation of its account, then retry."
 	}
 	rc := 0
 	var exit *ExitError
@@ -123,7 +123,7 @@ var spawnRefusals = []spawnRefusal{
 	// Admission refused before a host was bound: the cause the hub reports in
 	// Sentry's admission_refused class (docs/observability.md).
 	{match: "missing seat policy", code: "seat_policy_missing", hint: "Run panewire resolve --role ROLE --t Tn to select a rung with an admitted seat policy, or repair the policy that omits this profile, then retry."},
-	{match: "quota catalog", code: "quota_catalog", hint: "Restore the quota catalog (pacelever refresh, or the policy cache it is read from), then retry; admission cannot decide without it."},
+	{match: "quota catalog", code: "quota_catalog", hint: "Read the reason after quota catalog: for an unknown, retired or unplaced rung (e6_arm_required) select an admitted rung with panewire resolve, or set only the exact PANEWIRE_E6_ARM the operator authorized; for a stale or unreadable catalog check handoffkeep's bench catalog with panewire catalog list. Then retry; admission cannot decide without it."},
 	{match: "symlink path refused", code: "symlink_path", hint: "Replace the named symlink with a real directory or point the executing node's jobs root at a symlink-free path, then replay the request."},
 	{match: "report must be under", code: "report_path", hint: "Pass --report inside this job's own jobs/JOB directory, or its --parent-job directory, then retry."},
 	{match: "cwd is not a directory", code: "cwd_not_directory", hint: "Run panewire preflight --json on the executing node and repair its checkout or spawn.json.cwd_map path, then replay the request."},
@@ -152,15 +152,15 @@ var spawnRefusals = []spawnRefusal{
 	{match: "requires PANEWIRE_E6_ARM=", code: "e6_arm_required", hint: "Set the exact PANEWIRE_E6_ARM value named in the refusal only if the operator authorized that rung; otherwise select an admitted rung."},
 	{rc: exitDuplicate, code: "duplicate", hint: "Inspect the existing job with panewire find JOB. Use a new --job only for new work; never override a live duplicate. Failed launches with verified cleanup can retry on the same host."},
 	{rc: exitSubmitUnconfirmed, code: "submit_unconfirmed", hint: "Read the saved jobs/JOB/spawn-failure-*.txt capture and fix the harness submission failure; retry the same command after verified cleanup."},
-	{rc: exitAuthUnavailable, code: "auth_unavailable", hint: "Sign in to the selected quota account on the executing host and refresh that pool with pacelever refresh POOL, then retry."},
-	{rc: exitQuotaUnknown, code: "quota_unknown", hint: "Run pacelever refresh POOL for the named pool, confirm a fresh quota observation, then retry."},
+	{rc: exitAuthUnavailable, code: "auth_unavailable", hint: "Sign in to the selected quota account on the executing host and refresh that pool with panewire quota refresh POOL, then retry."},
+	{rc: exitQuotaUnknown, code: "quota_unknown", hint: "Run panewire quota refresh POOL for the named pool, confirm a fresh quota observation, then retry."},
 	{rc: exitLocalDisabled, code: "local_disabled", hint: "Enable local.spawn in the hosts config or configure an admitted remote host, then retry."},
 	{rc: exitPlacement, code: "placement", hint: spawnPreflightHint},
 	{rc: exitPreflight, code: "preflight", hint: spawnPreflightHint},
 	{rc: exitSeatRefused, code: "seat_refused", hint: "Use panewire resolve --role ROLE --t Tn to select a rung admitted for the requested role and task, then retry with that policy."},
 	{rc: exitLaneUnregistered, code: "lane_unregistered", hint: "Run panewire lanes to inspect routing and register the committed pane's lane before dispatching more work; do not relaunch the live job."},
 	{rc: exitStateConflict, code: "state_conflict", hint: "Inspect the job's saved report and events under jobs/JOB; reconcile the conflicting task/job binding before retrying."},
-	{rc: exitRoleWait, code: "role_wait", hint: "Wait until a listed eligible pool resets, refresh it with pacelever refresh POOL, then retry."},
+	{rc: exitRoleWait, code: "role_wait", hint: "Wait until a listed eligible pool resets, refresh it with panewire quota refresh POOL, then retry."},
 	{rc: exitRoleEscalate, code: "role_escalate", hint: "Emit a decision to the parent lane naming the exhausted role pools; choose another authorized policy only after its reply."},
 	{rc: exitUsage, code: "usage", hint: "Run panewire spawn --help and supply or correct the exact flag named in the refusal."},
 }
