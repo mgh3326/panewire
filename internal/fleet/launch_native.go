@@ -36,6 +36,12 @@ const (
 // holding up the spawn it rides on.
 const shadowBound = 2 * time.Second
 
+// shadowReadHook, when set, runs in each shadow comparison's goroutine just
+// before its local reads. Tests use it to hold a comparison as a hung
+// filesystem would and to count the comparisons started; production leaves it
+// nil.
+var shadowReadHook func()
+
 // shadowRun runs read for a shadow comparison on ctx — which the caller
 // detaches from its own context — bounded by shadowBound. ok is false when the
 // bound passes first; read then runs on to its end and its answer is dropped.
@@ -43,7 +49,12 @@ func shadowRun[T any](ctx context.Context, read func() T) (answer T, ok bool) {
 	ctx, cancel := context.WithTimeout(ctx, shadowBound)
 	defer cancel()
 	done := make(chan T, 1)
-	go func() { done <- read() }()
+	go func() {
+		if hook := shadowReadHook; hook != nil {
+			hook()
+		}
+		done <- read()
+	}()
 	select {
 	case answer = <-done:
 		return answer, true
