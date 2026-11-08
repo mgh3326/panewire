@@ -165,3 +165,39 @@ func TestImageCacheImageJobOnlyReads(t *testing.T) {
 		t.Errorf("image login if = %q, want the cache gate %q", logins[0].If, imageCacheGate)
 	}
 }
+
+// Every checkout in image.yml leaves no token in .git/config: the build
+// context includes .git and publish exports every layer, the COPY . . layer
+// included, to the publicly readable :buildcache tag.
+func TestImageCacheCheckoutPersistsNoCredentials(t *testing.T) {
+	var w struct {
+		Jobs map[string]struct {
+			Steps []struct {
+				Uses string         `yaml:"uses"`
+				With map[string]any `yaml:"with"`
+			} `yaml:"steps"`
+		} `yaml:"jobs"`
+	}
+	raw, err := os.ReadFile(imageCacheWorkflowPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal(raw, &w); err != nil {
+		t.Fatalf("%s: %v", imageCacheWorkflowPath, err)
+	}
+	checkouts := 0
+	for name, job := range w.Jobs {
+		for _, step := range job.Steps {
+			if !strings.HasPrefix(step.Uses, "actions/checkout@") {
+				continue
+			}
+			checkouts++
+			if v, ok := step.With["persist-credentials"].(bool); !ok || v {
+				t.Errorf("job %q checkout persist-credentials = %v, want false", name, step.With["persist-credentials"])
+			}
+		}
+	}
+	if checkouts == 0 {
+		t.Fatalf("%s has no actions/checkout step", imageCacheWorkflowPath)
+	}
+}

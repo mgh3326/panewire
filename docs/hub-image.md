@@ -19,6 +19,11 @@ token for the package, builds uncached. The Actions cache is shared by the
 repository's toolchain caches and capped at 10 GB; layers there were evicted
 by every PR ref's copy and pushed out those toolchains.
 
+The `:buildcache` tag is publicly readable, and with `mode=max` it holds every
+build-stage layer, including the `COPY . .` layer whose context keeps `.git`
+for VCS stamping. Every `actions/checkout` in `image.yml` therefore sets
+`persist-credentials: false`, so `.git/config` never carries the job token.
+
 ## Image
 
 - One static binary (`CGO_ENABLED=0`) at `/panewire` on
