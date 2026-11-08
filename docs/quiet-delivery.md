@@ -285,14 +285,32 @@ default covers `operator-desk` and per-fleet desks such as
 `work-operator-desk`. A desk lane is never a design lane. An explicit empty
 list turns a class off.
 
-Three kinds of traffic keep their existing delivery in every lane:
+Two kinds of traffic keep their existing delivery in every lane:
 
-- operator chat turns (`chat-N` event ids), which are not lane notifications;
+- operator chat turns the hub's own chat creates, which are not lane
+  notifications. The hub marks the turn where it creates it; an event id that
+  merely looks like `chat-N` (a `panewire emit --event-id chat-7`, a job event)
+  is a lane notification. A restart replay of a chat row keeps its delivery
+  only when the chat store holds the operator message whose id and body hash
+  make up the row's event id;
 - events the operator posts through the [R24 HTTP ingress](r24-http-ingress.md)
   with the operator token, including the assistant's `deliver` tool and its
   outbox notices. This is the explicit operator path into a pane, so it is
-  kept. A restart replay of such a row is filed like any other item;
-- the hub's own digest and hold batches.
+  kept. A restart replay of such a row is filed like any other item.
+
+The hub's digest and hold batches are not typed into an inbox-only lane
+either. A batch built for one (an item stored before the lane became
+inbox-only, for example) is filed: its items become unread inbox items, the
+batch is quarantined with the reason `inbox-only lane: items filed unread`,
+and the lane gets its wake. The inbox summary pointer (`inbox_summary`) is not
+added to anything typed into an inbox-only lane, so an operator chat turn to
+the desk is typed as sent.
+
+The rule holds where a body would be typed, not only where an event arrives.
+An item stored under another class, by an older hub or before the lane became
+inbox-only, is filed unread when a producer retry, a job resend or a restart
+replay would type it, and its handoffkeep row is closed as delivered to the
+inbox.
 
 `panewire prompt` types directly through the local herdr and never reaches the
 hub, so it is unaffected too.
@@ -332,21 +350,28 @@ When the line is sent:
   `relay.inbox_wake_window` (default 5 minutes).
 - Further items inside the window add no line. At the window's end the hub
   sends exactly one more line, and only if the lane still has unread items.
-  That line opens the next window.
+  That line opens the next window. A window end that finds nothing unread
+  closes the window instead, so the next item is announced at once.
+- A line still owed to a [trial](#worker-trial) lane when its trial ends is
+  dropped: the lane is a worker lane again.
+- When the hub starts, every inbox-only lane with unread items above `info`
+  gets one line, through the same window, with `startup` as the fleet-event
+  reason. A lane whose unread items cannot be read gets none.
 
 The wake decision lives in the hub, which owns the inbox store and sees each
 arrival. The node does not keep an inbox copy, so it would have to poll the
 hub for counts. The node daemon still types the line. The line is a plain
 inject with no handoffkeep row, so a hub restart never replays it. The
-window state is in memory, so a window open during a restart is dropped, and
-the next item wakes the lane again.
+window state is in memory, so a window open during a restart is dropped; the
+startup line above announces what is still unread.
 
 A failed count read never becomes `0 unread`. The hub skips the line, logs a
 warning, records the skip and retries at the next window's end. A lane whose
-pane cannot be reached (no route, no connected node) is retried the same way.
-Every wake writes one [fleet event](config.md#fleet-events) of kind
-`inbox_wake`: outcome `sent` with the lane class (`design`, `desk` or
-`trial`) as the reason, or `skipped` with `count_failed` or `unrouted`.
+pane cannot be reached (no route, no connected node) is retried the same way,
+or at once when a node next says hello. Every wake writes one
+[fleet event](config.md#fleet-events) of kind `inbox_wake`: outcome `sent`
+with the lane class (`design`, `desk` or `trial`) or `startup` as the reason,
+or `skipped` with `count_failed` or `unrouted`.
 
 Worker lanes are unchanged: a job, reviewer, tester or counsel lane keeps
 body injection for READY, findings, an ESC answer, chat and everything else.
@@ -370,7 +395,8 @@ A design or desk session never gets a notification body in its pane. When the
 and acks each `ready`, `decision`, `blocked` or `findings` item with
 `panewire inbox ack ID --lane LANE`. The line itself is not an instruction and
 is not acked. A session should also list its inbox at start and after a
-compaction, because a window open during a hub restart is not announced again.
+compaction: the line counts what is unread, and a session that missed it
+learns nothing else.
 
 ### Rollback
 

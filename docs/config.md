@@ -1511,7 +1511,7 @@ outcome, reason, detail`) to `$XDG_STATE_HOME/panewire/events/fleet-events.jsonl
 | `relay` | `delivered`, `dropped:<reason>` or `unconfirmed:<reason>` | the drop code, or the first token of the report | the hub saw one worker or design lane row's outcome |
 | `spawn_held` | the held branch (`succeeded_pane_held`, `failed_pane_held`, ...) | the pane-probe reason | a refused reclaim kept a role reservation |
 | `job_result` | `attached`, `conflict` or `missing` | `duplicate_done`, `different_result` or `no_result` | a `done` attached, conflicted with, or lacked a result |
-| `inbox_wake` | `sent` or `skipped` | the lane class (`design`, `desk`, `trial`) when sent; `count_failed` or `unrouted` when skipped | the hub typed, or could not type, an inbox-only lane's one-line wake; `job` is the lane and `detail` names `unread=`, `most_urgent=`, `machine=` and `pane=`. See [inbox-only lanes](quiet-delivery.md#inbox-only-lanes) |
+| `inbox_wake` | `sent` or `skipped` | the lane class (`design`, `desk`, `trial`), or `startup` for the line a hub start owes, when sent; `count_failed` or `unrouted` when skipped | the hub typed, or could not type, an inbox-only lane's one-line wake; `job` is the lane and `detail` names `unread=`, `most_urgent=`, `machine=` and `pane=`. See [inbox-only lanes](quiet-delivery.md#inbox-only-lanes) |
 
 The relay, held-reservation and job-result kinds and their Sentry fingerprints
 are in [observability](observability.md).
