@@ -54,19 +54,30 @@ func paceleverConfigPath(getenv func(string) string, home string) (path, legacy 
 	return filepath.Join(base, "pacelever", "config.toml"), filepath.Join(base, "scopefuel", "config.toml")
 }
 
-// loadAdmissionPolicy reads the policy. A missing file is the default policy;
-// an unreadable or invalid one is an error, never a guessed policy.
-func loadAdmissionPolicy(getenv func(string) string, home string) (admissionPolicy, error) {
+// readPaceleverConfig reads pacelever's config file, falling back to the
+// legacy scopefuel file as pacelever does. found is false when neither
+// exists.
+func readPaceleverConfig(getenv func(string) string, home string) (data []byte, found bool, err error) {
 	path, legacy := paceleverConfigPath(getenv, home)
-	data, err := os.ReadFile(path)
+	data, err = os.ReadFile(path)
 	if errors.Is(err, fs.ErrNotExist) && legacy != "" {
 		data, err = os.ReadFile(legacy)
 	}
 	if errors.Is(err, fs.ErrNotExist) {
-		return admissionPolicy{}, nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return admissionPolicy{}, fmt.Errorf("cannot read pacelever configuration")
+		return nil, false, fmt.Errorf("cannot read pacelever configuration")
+	}
+	return data, true, nil
+}
+
+// loadAdmissionPolicy reads the policy. A missing file is the default policy;
+// an unreadable or invalid one is an error, never a guessed policy.
+func loadAdmissionPolicy(getenv func(string) string, home string) (admissionPolicy, error) {
+	data, found, err := readPaceleverConfig(getenv, home)
+	if err != nil || !found {
+		return admissionPolicy{}, err
 	}
 	return parseAdmissionPolicy(data)
 }

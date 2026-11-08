@@ -105,6 +105,68 @@ func quotaRun(ctx context.Context, what string, timeout time.Duration, jsonOutpu
 	}
 	return out.Bytes(), 0, nil
 }
+
+// quotaStatusHost is one host of the status document (docs/quota.md §Status
+// JSON v1). Pacelever is "absent" when this host has no pacelever binary and
+// the readings are panewire's own.
+type quotaStatusHost struct {
+	Host             string         `json:"host"`
+	PaceleverVersion string         `json:"pacelever_version"`
+	Pacelever        string         `json:"pacelever,omitempty"`
+	Readings         []quotaReading `json:"readings"`
+}
+
+func writeQuotaStatus(out io.Writer, jsonOutput bool, generatedAt string, host quotaStatusHost) {
+	if jsonOutput {
+		_ = json.NewEncoder(out).Encode(struct {
+			Schema      string            `json:"schema"`
+			GeneratedAt string            `json:"generated_at"`
+			Hosts       []quotaStatusHost `json:"hosts"`
+		}{"panewire.quota.status.v1", generatedAt, []quotaStatusHost{host}})
+		return
+	}
+	for _, v := range host.Readings {
+		age := "unknown"
+		if v.AgeSeconds != nil {
+			age = fmt.Sprint(*v.AgeSeconds)
+		}
+		buckets, _ := json.Marshal(v.Buckets)
+		fmt.Fprintf(out, "%s %s account=%s source=%s age_seconds=%s stale=%t buckets=%s\n", host.Host, v.Pool, v.Account, v.Source, age, v.Stale, buckets)
+	}
+}
+
+// runNativeQuotaStatus is `panewire quota status` on a host without pacelever:
+// the shared store's reading of each pool this host measures itself, read
+// without measuring, and a note on stderr that pacelever is absent. A pool
+// whose reading cannot be read is listed as unavailable.
+func runNativeQuotaStatus(ctx context.Context, jsonOutput bool, out, errOut io.Writer) int {
+	host, err := os.Hostname()
+	if err != nil {
+		fmt.Fprintln(errOut, "quota status: hostname unavailable")
+		return ExitInternal
+	}
+	fmt.Fprintln(errOut, "quota status: pacelever absent; native readings only")
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	readings := []quotaReading{}
+	var generatedAt time.Time
+	for _, pool := range nativeStatusPools {
+		if !isNativeQuotaPool(pool) {
+			continue
+		}
+		source := quotaCLISource(pool)
+		generatedAt = source.now()
+		reading, err := source.stored(ctx)
+		if err != nil {
+			fmt.Fprintf(errOut, "quota status: %s: %s\n", pool, quotaErrorKind(err))
+			reading = quotaReading{Pool: pool, Source: "unavailable", Stale: true, Buckets: []quotaBucket{}}
+		}
+		readings = append(readings, reading)
+	}
+	writeQuotaStatus(out, jsonOutput, generatedAt.Format(time.RFC3339Nano), quotaStatusHost{Host: host, Pacelever: "absent", Readings: readings})
+	return 0
+}
+
 func runQuotaCLI(args []string, out, errOut io.Writer) int {
 	if len(args) == 0 {
 		fmt.Fprintln(errOut, "usage: panewire quota status [--json] | refresh POOL | observe KIND ...")
@@ -115,6 +177,9 @@ func runQuotaCLI(args []string, out, errOut io.Writer) int {
 	case "status":
 		if len(args) > 2 || len(args) == 2 && args[1] != "--json" {
 			return ExitUsage
+		}
+		if _, err := exec.LookPath("pacelever"); err != nil {
+			return runNativeQuotaStatus(ctx, len(args) == 2, out, errOut)
 		}
 		data, code, err := quotaRun(ctx, "quota status", 30*time.Second, true, "--json")
 		if err != nil {
@@ -144,32 +209,7 @@ func runQuotaCLI(args []string, out, errOut io.Writer) int {
 		for _, p := range doc.Providers {
 			readings = append(readings, p.reading())
 		}
-		result := struct {
-			Schema      string `json:"schema"`
-			GeneratedAt string `json:"generated_at"`
-			Hosts       []struct {
-				Host             string         `json:"host"`
-				PaceleverVersion string         `json:"pacelever_version"`
-				Readings         []quotaReading `json:"readings"`
-			} `json:"hosts"`
-		}{Schema: "panewire.quota.status.v1", GeneratedAt: doc.GeneratedAt}
-		result.Hosts = append(result.Hosts, struct {
-			Host             string         `json:"host"`
-			PaceleverVersion string         `json:"pacelever_version"`
-			Readings         []quotaReading `json:"readings"`
-		}{host, strings.TrimSpace(string(version)), readings})
-		if len(args) == 2 {
-			_ = json.NewEncoder(out).Encode(result)
-		} else {
-			for _, v := range readings {
-				age := "unknown"
-				if v.AgeSeconds != nil {
-					age = fmt.Sprint(*v.AgeSeconds)
-				}
-				buckets, _ := json.Marshal(v.Buckets)
-				fmt.Fprintf(out, "%s %s account=%s source=%s age_seconds=%s stale=%t buckets=%s\n", host, v.Pool, v.Account, v.Source, age, v.Stale, buckets)
-			}
-		}
+		writeQuotaStatus(out, len(args) == 2, doc.GeneratedAt, quotaStatusHost{Host: host, PaceleverVersion: strings.TrimSpace(string(version)), Readings: readings})
 		return 0
 	case "refresh":
 		if len(args) != 2 || !fleetQuotaPoolPattern.MatchString(args[1]) {

@@ -93,6 +93,32 @@ type CatalogClientConfig struct {
 	CacheDir                               string
 	Now                                    func() time.Time
 	Client                                 *http.Client
+	// Freshness is pacelever's [bench] catalog freshness; the zero value is
+	// pacelever's defaults, which are panewire's own.
+	Freshness CatalogFreshness
+}
+
+// CatalogFreshness is how long a cached catalog is used without asking
+// handoffkeep (TTLS) and how old a last-good cache may be before it is stale
+// (StaleMaxS), in seconds: pacelever's [bench] catalog_ttl_s and
+// catalog_stale_max_s (v0.3.28 bench.go ReadRows). Zero or less is the
+// default, one hour and one day.
+type CatalogFreshness struct {
+	TTLS, StaleMaxS float64
+}
+
+func (f CatalogFreshness) ttl() float64 {
+	if f.TTLS <= 0 {
+		return catalogTTL.Seconds()
+	}
+	return f.TTLS
+}
+
+func (f CatalogFreshness) staleMax() float64 {
+	if f.StaleMaxS <= 0 {
+		return catalogStaleMax.Seconds()
+	}
+	return f.StaleMaxS
 }
 
 // CatalogClient reads and writes the handoffkeep bench catalog. Redirects are
@@ -103,6 +129,7 @@ type CatalogClient struct {
 	cacheDir                    string
 	now                         func() time.Time
 	client                      *http.Client
+	freshness                   CatalogFreshness
 }
 
 // NewCatalogClient resolves credentials and builds the catalog client. An
@@ -127,7 +154,7 @@ func NewCatalogClient(cfg CatalogClientConfig) (*CatalogClient, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &CatalogClient{base: strings.TrimRight(creds.URL, "/"), token: creds.Token, cfID: creds.CFClientID, cfSecret: creds.CFClientSecret, cacheDir: cacheDir, now: now, client: cfg.Client}, nil
+	return &CatalogClient{base: strings.TrimRight(creds.URL, "/"), token: creds.Token, cfID: creds.CFClientID, cfSecret: creds.CFClientSecret, cacheDir: cacheDir, now: now, client: cfg.Client, freshness: cfg.Freshness}, nil
 }
 
 type catalogCredentials struct {
@@ -213,31 +240,83 @@ type catalogCache struct {
 	Rows       []json.RawMessage `json:"rows"`
 }
 
+// catalogCacheEntry is this endpoint's cache entry as loadCache reads it.
+// dated is false when its fetched_at is missing or unreadable: such an entry
+// has no age, so it is never fresh and, served without a refresh, always
+// stale — as pacelever reads it fetched at the zero time.
+type catalogCacheEntry struct {
+	catalogCache
+	age   float64
+	dated bool
+}
+
+// ageS is the entry's age for CatalogInfo, nil when it has none.
+func (e catalogCacheEntry) ageS() *float64 {
+	if !e.dated {
+		return nil
+	}
+	age := e.age
+	return &age
+}
+
+// loadCache reads this endpoint's cache entry and its age in seconds. It
+// only reads.
+func (c *CatalogClient) loadCache() (catalogCacheEntry, bool) {
+	var cache catalogCache
+	data, err := os.ReadFile(c.cachePath())
+	if err != nil || json.Unmarshal(data, &cache) != nil || cache.EndpointID != c.endpointID() || cache.Rows == nil {
+		return catalogCacheEntry{}, false
+	}
+	fetched, err := time.Parse(time.RFC3339Nano, cache.FetchedAt)
+	if err != nil {
+		return catalogCacheEntry{catalogCache: cache}, true
+	}
+	return catalogCacheEntry{catalogCache: cache, age: c.now().Sub(fetched).Seconds(), dated: true}, true
+}
+
+// fresh reports a cache age inside the TTL.
+func (c *CatalogClient) fresh(age float64) bool {
+	return age >= 0 && age < c.freshness.ttl()
+}
+
+// freshEntry reports an entry that may be used without asking the endpoint:
+// a dated one inside the TTL. An undated entry is never fresh, whatever the
+// TTL.
+func (c *CatalogClient) freshEntry(e catalogCacheEntry) bool {
+	return e.dated && c.fresh(e.age)
+}
+
+// staleEntry reports an entry served without a refresh as stale: undated, or
+// dated outside [0, stale maximum).
+func (c *CatalogClient) staleEntry(e catalogCacheEntry) bool {
+	return !e.dated || e.age < 0 || e.age >= c.freshness.staleMax()
+}
+
+// ReadCached returns the cache entry when it is younger than the TTL, and
+// false otherwise. It never asks the endpoint and never writes, so a
+// comparison beside another lookup can read the catalog without changing what
+// that lookup reads.
+func (c *CatalogClient) ReadCached() (CatalogData, bool) {
+	entry, ok := c.loadCache()
+	if !ok || !c.freshEntry(entry) {
+		return CatalogData{}, false
+	}
+	data, err := c.decode(entry.Rows, catalogSourceCache, false, entry.ageS())
+	return data, err == nil
+}
+
 // Read returns the catalog. A cache entry younger than the TTL is used
 // without a request; otherwise the endpoint is read and the cache replaced.
 // When the endpoint fails, a cache entry for the same endpoint is served, and
 // one older than the stale maximum is marked stale rather than dropped.
 func (c *CatalogClient) Read(ctx context.Context, noCache bool) (CatalogData, error) {
-	var cache catalogCache
-	haveCache := false
-	var age float64
-	if data, err := os.ReadFile(c.cachePath()); err == nil {
-		if json.Unmarshal(data, &cache) == nil && cache.EndpointID == c.endpointID() && cache.Rows != nil {
-			haveCache = true
-			if fetched, err := time.Parse(time.RFC3339Nano, cache.FetchedAt); err == nil {
-				age = c.now().Sub(fetched).Seconds()
-			} else {
-				// An unreadable timestamp is an old entry, never a fresh one.
-				age = catalogStaleMax.Seconds()
-			}
-		}
-	}
-	if haveCache && !noCache && age >= 0 && age < catalogTTL.Seconds() {
-		return c.decode(cache.Rows, catalogSourceCache, false, &age)
+	entry, haveCache := c.loadCache()
+	if haveCache && !noCache && c.freshEntry(entry) {
+		return c.decode(entry.Rows, catalogSourceCache, false, entry.ageS())
 	}
 	rows, err := c.fetch(ctx)
 	if err == nil {
-		cache = catalogCache{FetchedAt: c.now().UTC().Format(time.RFC3339Nano), EndpointID: c.endpointID(), Rows: rows}
+		cache := catalogCache{FetchedAt: c.now().UTC().Format(time.RFC3339Nano), EndpointID: c.endpointID(), Rows: rows}
 		data, marshalErr := json.Marshal(cache)
 		if marshalErr != nil {
 			return CatalogData{}, errors.New("cannot persist bench cache")
@@ -253,10 +332,10 @@ func (c *CatalogClient) Read(ctx context.Context, noCache bool) (CatalogData, er
 	}
 	if haveCache {
 		source, stale := catalogSourceCache, false
-		if age < 0 || age >= catalogStaleMax.Seconds() {
+		if c.staleEntry(entry) {
 			source, stale = catalogSourceCacheStale, true
 		}
-		if data, decodeErr := c.decode(cache.Rows, source, stale, &age); decodeErr == nil {
+		if data, decodeErr := c.decode(entry.Rows, source, stale, entry.ageS()); decodeErr == nil {
 			return data, nil
 		}
 	}

@@ -3,7 +3,13 @@
 `panewire quota` is the quota entry point. Pacelever is an internal dependency
 scheduled for removal; callers should use panewire's interface.
 
-- `panewire quota status [--json]` reads the local host's cached readings.
+- `panewire quota status [--json]` reads the local host's cached readings. On a
+  host with no `pacelever` on `PATH` it does not fail: it reports, for each pool
+  this host measures itself, the shared store's stored reading of the host's
+  account (read only: no measurement, lease or publication), sets
+  `"pacelever": "absent"` on the host, and prints
+  `quota status: pacelever absent; native readings only` on stderr. A pool whose
+  reading cannot be read is listed with `source` `unavailable`.
 - `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` and `codex` are measured by panewire itself ([claude](#native-measurement-claude), [codex](#native-measurement-codex)), and so are `commandcode`, `devin` and `agy` once their switch is flipped ([commandcode](#native-measurement-commandcode), [devin](#native-measurement-devin), [agy](#native-measurement-agy)); every other pool, and those two until then, runs the dependency.
 - `panewire quota observe KIND ...` forwards the observation kind and all remaining arguments, including `devin-free-limit` options, and returns the dependency's exit code.
 
@@ -16,7 +22,8 @@ dependency call; it has an 8-second bound ([catalog.md](catalog.md)).
 
 `status --json` emits an object with `schema` set to
 `panewire.quota.status.v1`, `generated_at` (the source timestamp), and a
-`hosts` array. Each host contains `host`, `pacelever_version`, and `readings`.
+`hosts` array. Each host contains `host`, `pacelever_version`, and `readings`,
+plus `pacelever: "absent"` when the readings are panewire's own.
 Each reading has `pool`, `account` (empty if unknown), `source`, `age_seconds`
 (number or null), `stale`, and `buckets`. Each bucket contains `window`,
 `used_pct` (number or null), optional `resets_at`, and `scope` with `kind` and
@@ -390,6 +397,198 @@ mode-0600 `panewire/aa.env` under the user configuration directory. Data is
 provided by [Artificial Analysis](https://artificialanalysis.ai/); see its
 [Data API reference](https://artificialanalysis.ai/data-api/docs/reference).
 
+## Launch
+
+Before admission, every spawn, delegate, placement and plan resolves the
+launch rung: the profile (its canon), effort, model id, grade, gate, pool and
+family a request runs. Until hk 3548 only `pacelever policy launch PROFILE
+--json` answered it, from pacelever's own catalog cache (one-hour TTL), so a
+row added in handoffkeep was refused until that cache expired (2026-11-08:
+`omp-dsflash41@max`, `e6_arm_required: unplaced profile`, expired by hand on
+two hosts). panewire now has its own lookup
+(`internal/fleet/launch_native.go`), a rule-for-rule port of pacelever
+v0.3.28's `policy launch` (catalog.go `resolveLaunch`, `resolveRow`,
+`roleCheck`, `defaultEffort`; bench.go `decodeCatalog`, `ReadCatalog`). It
+reads:
+
+- **The bench catalog** through panewire's catalog client and its freshness
+  rule ([catalog.md](catalog.md#cache)): a cache entry younger than the TTL,
+  else handoffkeep, else a cache entry, stale past the stale maximum. The TTL
+  and the stale maximum are pacelever's `[bench] catalog_ttl_s` and
+  `catalog_stale_max_s` in its `config.toml`, as pacelever's policy launch
+  reads them (bench.go `ReadRows`); unset, or zero or less, they are one hour
+  and one day, pacelever's defaults and panewire's own. When a cached catalog
+  refuses a request, the lookup reads handoffkeep once more before it
+  refuses, so a new row is found by the next lookup; that read replaces the
+  cache the selection also reads (see [Shadow and native
+  launch](#shadow-and-native-launch)). Without any catalog it judges the
+  bundled snapshot as stale, as pacelever does.
+- **pacelever's bundled snapshot** (`internal/fleet/catalog-snapshot.json`,
+  pacelever v0.3.28's `catalog_snapshot.json` byte for byte) for what the
+  handoffkeep rows do not carry: each rung's family; a rung the snapshot holds
+  unplaced at the same grade stays unplaced (it needs an exact E6 marker); the
+  effort a profile defaults to; the alias `codex-max` → `codex-sol`; and the
+  rows of a profile handoffkeep does not list.
+- **pacelever's `config.toml`**, loaded with every rule pacelever v0.3.28's
+  `LoadConfig` applies before `policy launch` resolves anything
+  (`internal/fleet/pacelever_config.go`): the TOML types of `[quota]`,
+  `[profiles]`, `[bench]`, `[settings]` and each known pool; the shared quota
+  TTL ranges, `host_id`, per-pool fresh TTLs, account fingerprints and
+  measurable account keys; and each known pool's class, exploration, cutoff,
+  in-flight reserve and `credit_max_age_s`. A file pacelever refuses exits 2.
+  The pool policy in it, read as [Admission](#admission) reads it, gives
+  subscription. The gate and the credit pool views keep their narrower read.
+- **The E6 marker** from the request, else `PACELEVER_E6_ARM`.
+
+It answers as `pacelever policy launch` does through panewire: a refusal exits 3
+with pacelever's reason (`quota catalog: e6_arm_required: …`; the pacelever path
+reports `quota catalog: dependency failed`, since pacelever prints its reason
+only on stderr), a missing profile or an unreadable pool policy exits 2, and a
+stale catalog is refused `quota catalog is stale` (exit 70) unless the rung's
+own rule refuses first. The rules, each with its test in
+`internal/fleet/launch_native_test.go`:
+
+| Rule (pacelever v0.3.28) | Refusal |
+|---|---|
+| A pi- profile or `cmd-dsflash41` needs an explicit effort, one of its placed efforts | `explicit --effort required for credit profile`, `credit effort is not placed` |
+| An effort outside the effort ladder must be a catalog rung | `unknown effort rung` |
+| `codex-med`, `builder-terra-*` and any profile with a `gpt-5.6-terra` row | `model_refused: retired model identity` |
+| A profile with no live row | `profile "P" is unknown or retired` |
+| An unrated or unplaced rung needs the exact `<canon>@<effort>` marker, except for the lead, consult, builder and counsel roles on an unrated rung | `e6_arm_required: exact measurement marker required`, `e6_arm_required: unplaced profile requires exact measurement marker`, `e6_arm_required` |
+| A requested rung that is retired | `rung is retired in the catalog` |
+| A credit or `codex-terra61` request for a rung that is not placed | `e6_arm_required: rung is not placed` |
+| Seat roles: a credit rung seats a worker or tester, or a builder on a placed default rung; `fable` and `codex-astra` never a worker or captain, and a builder, tester or reviewer only for a round extension; `codex-astra` only for a director, architect, operator-request or round-extension purpose; any other `astra` profile is removed | `role_restricted: …` |
+| An `--operator-request` must be `hk:task/N` or `hk:doc/…` | `operator_request_ref_invalid` |
+| An unsubscribed profile or pool | `profile is unsubscribed` |
+| A `consult_only` rung needs `--operator-request` (not `codex-astra`) | `profile is consult_only; pass --operator-request` |
+| On a stale catalog, an escalation rung needs `--operator-request` | `catalog is stale; non-default gate requires --operator-request` |
+
+An effortless request resolves to the profile's default effort, else the best
+graded ordinary rung at the lowest effort; a requested effort with no eligible
+rung of its own falls back to that rung and keeps the requested effort, as in
+pacelever. The launch rule for a credit rung is pacelever's (`pi-` profiles
+and `cmd-dsflash41`); the gate's stricter one ([Command Code
+seats](#command-code-seats)) still refuses at admission. pacelever's
+exploration does not apply: panewire passes no `--task`, so pacelever keeps
+its baseline answer.
+
+### Shadow and native launch
+
+`[quota].launch` in the host's fleet config picks who resolves the rung:
+
+```toml
+[quota]
+launch = "native"   # or "shadow", the default
+```
+
+- **Shadow (the default).** `pacelever policy launch` resolves it, and the
+  spawn gets exactly its answer, as before. After pacelever answers, panewire
+  resolves the same request offline and records one fleet event. The
+  comparison is side-effect free:
+
+  - it reads only local state: pacelever's `config.toml` and panewire's
+    catalog cache, read only (and the handoffkeep endpoint from the
+    environment or handoffkeep's `config.env`, only to name the cache file);
+  - it never asks handoffkeep, never refreshes after a refusal, and never
+    writes, renames or touches a cache file, so it cannot change what the
+    selection reads;
+  - it never holds up the spawn: the lookup returns pacelever's answer at
+    once, and the comparison — its local reads and its event append — runs
+    in a background goroutine with no context of the caller's, so it cannot
+    spend the deadline the next gate call needs;
+  - the event is a best-effort fleet event append, to the local state
+    directory only (no network).
+
+  **One comparison at a time.** A process runs at most one shadow comparison,
+  launch or [credit pool](#credit-pool-views), at a time. While one runs, a
+  new one is skipped — no goroutine starts — and counted; the next event a
+  comparison records starts its detail with `skipped_busy=N`. The slot is
+  freed only when the running comparison really returns, so a hung
+  filesystem holds one goroutine, not one per spawn. A comparison whose
+  local reads take more than 2 s records `outcome=skipped
+  reason=shadow_timeout` instead of its answer when they do return.
+
+  **Sampling, not a record of every spawn.** Nothing waits for a comparison
+  at process exit. A spawn admitted in a short-lived `panewire` process — a
+  `spawn --dry-run`, `plan`, `resolve`, `delegate --headless`, or the legacy
+  ssh `_spawn-stdin` — may exit before its comparison ends, and that
+  comparison is lost. A real spawn submitted with `panewire spawn` or `work`
+  is admitted in the hub server (placement: `launchPool` and the pool views)
+  and then in the node daemon (`ExecuteNode`: `admitLaunch` and the pool
+  views), both long-lived, so their comparisons complete; the losses are
+  dry runs and the CLI-only commands above, plus comparisons skipped as busy.
+
+  The cache counts as fresh under pacelever's `[bench] catalog_ttl_s` in its
+  `config.toml` (default one hour), read in the same local config read the
+  comparison makes, so the shadow and native mode agree on which cache is
+  fresh. When the cache holds no fresh entry for the endpoint, nothing is
+  compared: `outcome=skipped reason=no_fresh_cache`. A cache entry whose
+  `fetched_at` is missing or unreadable is never fresh, whatever the TTL.
+  Otherwise:
+
+  ```
+  kind=quota_launch_shadow outcome=disagree reason=commandcode
+  detail=profile=omp-dsflash41 effort=max role=worker purpose= pacelever{exit=3 profile= model= effort= grade= gate= pool= family= stale=false reason="e6_arm_required: unplaced profile requires exact measurement marker"} native{exit=0 profile=omp-dsflash41 model=deepseek/deepseek-v4.1-flash effort=max grade=A+ gate=default pool=commandcode family= stale=false reason=""} diff=exit,profile,model_id,effort,grade,gate,pool
+  ```
+
+  `agree` means the same exit status, launch fields and reason;
+  `reason_differs` the same status and fields in other words; `disagree`
+  anything else, and `diff` lists the fields that differ. pacelever's reason is
+  the `error:` line it prints on stderr. The native answer never changes the
+  spawn's outcome. Expected differences: pacelever's own catalog cache is not
+  panewire's, so a row changed in the last hour can differ until both caches
+  read it, and the shadow never refreshes to close that gap; and pacelever
+  with no catalog backend configured serves its snapshot as fresh where
+  panewire refuses it as stale.
+- **Native.** panewire's lookup decides and `pacelever policy launch` is never
+  run. panewire-design flips it on a host after the shadow events agree; it is
+  host config, independent of `[quota].gate`. Only native mode reads
+  handoffkeep for the lookup, and only native mode refreshes after a cached
+  refusal. That refresh replaces panewire's shared catalog cache, which the
+  selection (`CLIQuota.Catalog`) also reads, so on a native host the
+  selection can see a newer catalog before its own TTL expires. This is
+  accepted: native is a deliberate host switch, and the refreshed catalog is
+  handoffkeep's current one.
+
+### Credit pool views
+
+Selection ranks a credit pool, and admission refuses an excluded one, from the
+pool's view: its class, the used share of its current operator credit entry
+and its balance. The view follows `[quota].launch`:
+
+- **Shadow (the default).** The view is pacelever's status document, read by
+  one `pacelever --json` run, and the caller gets exactly that, as before.
+  After it is read, when the shared store serves every credit pool (see
+  Native), panewire reads each credit pool's class offline from pacelever's
+  `config.toml` and records one fleet event per read:
+
+  ```
+  kind=quota_pools_shadow outcome=disagree reason=credit
+  detail=anthropic-api pacelever{class=spend} native{class=exclude} openai-api pacelever{class=spend} native{class=spend} diff=anthropic-api:class
+  ```
+
+  The comparison is offline and side-effect free, as the launch shadow is: it
+  reads only the pool policy files, never the shared store, in the background
+  after the views are returned, one comparison per process at a time, and
+  may be lost when a short-lived process exits ([Shadow and native
+  launch](#shadow-and-native-launch); `outcome=skipped reason=shadow_timeout`
+  when its reads take more than 2 s). So only the class is
+  compared: the used share lives only in the shared store, and the balance is
+  the same store's on both paths. `agree` means every credit pool has the same
+  class; `disagree` anything else, with `diff` listing the differing
+  `pool:class` pairs, or `error` when either side failed to read. The native
+  view never reaches selection or admission.
+- **Native.** When every credit pool of the pool policy (`credit_pools`) is a
+  hand-recorded API pool (`anthropic-api`, `openai-api`) and the shared store
+  is wired, panewire builds the view itself: the class from pacelever's
+  `config.toml` as [Admission](#admission) reads it, the entry and balance
+  from the shared store for the account `[quota.accounts]` (else pacelever's
+  own `[quota.accounts]`) names. `pacelever --json` is not started. Otherwise
+  — a credit pool the store does not serve, or no shared reader — the
+  `pacelever --json` status read runs as in shadow.
+
+panewire-design switches a host to native after its shadow events agree.
+
 ## Admission
 
 Every spawn, delegate, placement and selection asks one admission question per
@@ -407,7 +606,9 @@ pacelever v0.3.28's gate) from three inputs:
   own `[quota.accounts]`).
 - **The bench catalog** from handoffkeep (`GET /v1/bench/catalog`), validated
   and cached by panewire as [catalog.md](catalog.md) describes; an unavailable
-  or stale catalog refuses (exit 2). No pacelever process runs.
+  or stale catalog refuses (exit 2). No pacelever process runs. The launch rung
+  the verdict is asked about comes from the launch lookup ([Launch](#launch)),
+  which has its own switch.
 - **The pool policy** in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
   `~/.config/pacelever/config.toml`): class and its `until` date, cutoff,
   subscription, `fusion_billing_fp`. A missing file is the default policy; an
@@ -492,8 +693,9 @@ gate = "native"   # or "shadow", the default
   is native. The desk reads the events and flips the switch.
 - **Native.** panewire's verdict decides: no `pacelever gate` and no
   `pacelever refresh` run in the gate, and the catalog comes from handoffkeep
-  ([catalog.md](catalog.md)). `pacelever policy launch`, the status and manual
-  reads and the selector's refresh of a pool panewire does not measure stay
+  ([catalog.md](catalog.md)). `pacelever policy launch` follows its own switch
+  ([Launch](#launch)); the status read of a pool the shared store does not
+  serve and the selector's refresh of a pool panewire does not measure stay
   until hk 3250.
 
 The golden verdicts in `internal/fleet/testdata/admission_golden/verdicts.json`

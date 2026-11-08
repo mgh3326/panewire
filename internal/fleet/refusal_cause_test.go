@@ -138,7 +138,7 @@ func TestQuotaUnconfirmedReasonNamesCause(t *testing.T) {
 			if !strings.Contains(err.Error(), "host-b") || !strings.Contains(err.Error(), "claude") {
 				t.Fatalf("refusal omits host or pool: %v", err)
 			}
-			if fix := SpawnRefusalFix(err); !strings.Contains(fix, "pacelever refresh") {
+			if fix := SpawnRefusalFix(err); !strings.Contains(fix, "panewire quota refresh POOL") || strings.Contains(fix, "pacelever") {
 				t.Fatalf("fix=%q", fix)
 			}
 		})

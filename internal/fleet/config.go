@@ -242,6 +242,9 @@ func LoadConfig(path string) (Config, error) {
 	if err := validateGateMode(c.Quota); err != nil {
 		return c, err
 	}
+	if err := validateLaunchMode(c.Quota); err != nil {
+		return c, err
+	}
 	if v, ok := c.Quota["credit_total_usd"]; ok {
 		m, isMap := v.(map[string]any)
 		if !isMap {
