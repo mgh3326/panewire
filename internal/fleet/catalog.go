@@ -240,20 +240,38 @@ type catalogCache struct {
 	Rows       []json.RawMessage `json:"rows"`
 }
 
+// catalogCacheEntry is this endpoint's cache entry as loadCache reads it.
+// dated is false when its fetched_at is missing or unreadable: such an entry
+// has no age, so it is never fresh and, served without a refresh, always
+// stale — as pacelever reads it fetched at the zero time.
+type catalogCacheEntry struct {
+	catalogCache
+	age   float64
+	dated bool
+}
+
+// ageS is the entry's age for CatalogInfo, nil when it has none.
+func (e catalogCacheEntry) ageS() *float64 {
+	if !e.dated {
+		return nil
+	}
+	age := e.age
+	return &age
+}
+
 // loadCache reads this endpoint's cache entry and its age in seconds. It
 // only reads.
-func (c *CatalogClient) loadCache() (catalogCache, float64, bool) {
+func (c *CatalogClient) loadCache() (catalogCacheEntry, bool) {
 	var cache catalogCache
 	data, err := os.ReadFile(c.cachePath())
 	if err != nil || json.Unmarshal(data, &cache) != nil || cache.EndpointID != c.endpointID() || cache.Rows == nil {
-		return catalogCache{}, 0, false
+		return catalogCacheEntry{}, false
 	}
 	fetched, err := time.Parse(time.RFC3339Nano, cache.FetchedAt)
 	if err != nil {
-		// An unreadable timestamp is an old entry, never a fresh one.
-		return cache, max(c.freshness.staleMax(), catalogStaleMax.Seconds()), true
+		return catalogCacheEntry{catalogCache: cache}, true
 	}
-	return cache, c.now().Sub(fetched).Seconds(), true
+	return catalogCacheEntry{catalogCache: cache, age: c.now().Sub(fetched).Seconds(), dated: true}, true
 }
 
 // fresh reports a cache age inside the TTL.
@@ -261,16 +279,29 @@ func (c *CatalogClient) fresh(age float64) bool {
 	return age >= 0 && age < c.freshness.ttl()
 }
 
+// freshEntry reports an entry that may be used without asking the endpoint:
+// a dated one inside the TTL. An undated entry is never fresh, whatever the
+// TTL.
+func (c *CatalogClient) freshEntry(e catalogCacheEntry) bool {
+	return e.dated && c.fresh(e.age)
+}
+
+// staleEntry reports an entry served without a refresh as stale: undated, or
+// dated outside [0, stale maximum).
+func (c *CatalogClient) staleEntry(e catalogCacheEntry) bool {
+	return !e.dated || e.age < 0 || e.age >= c.freshness.staleMax()
+}
+
 // ReadCached returns the cache entry when it is younger than the TTL, and
 // false otherwise. It never asks the endpoint and never writes, so a
 // comparison beside another lookup can read the catalog without changing what
 // that lookup reads.
 func (c *CatalogClient) ReadCached() (CatalogData, bool) {
-	cache, age, ok := c.loadCache()
-	if !ok || !c.fresh(age) {
+	entry, ok := c.loadCache()
+	if !ok || !c.freshEntry(entry) {
 		return CatalogData{}, false
 	}
-	data, err := c.decode(cache.Rows, catalogSourceCache, false, &age)
+	data, err := c.decode(entry.Rows, catalogSourceCache, false, entry.ageS())
 	return data, err == nil
 }
 
@@ -279,13 +310,13 @@ func (c *CatalogClient) ReadCached() (CatalogData, bool) {
 // When the endpoint fails, a cache entry for the same endpoint is served, and
 // one older than the stale maximum is marked stale rather than dropped.
 func (c *CatalogClient) Read(ctx context.Context, noCache bool) (CatalogData, error) {
-	cache, age, haveCache := c.loadCache()
-	if haveCache && !noCache && c.fresh(age) {
-		return c.decode(cache.Rows, catalogSourceCache, false, &age)
+	entry, haveCache := c.loadCache()
+	if haveCache && !noCache && c.freshEntry(entry) {
+		return c.decode(entry.Rows, catalogSourceCache, false, entry.ageS())
 	}
 	rows, err := c.fetch(ctx)
 	if err == nil {
-		cache = catalogCache{FetchedAt: c.now().UTC().Format(time.RFC3339Nano), EndpointID: c.endpointID(), Rows: rows}
+		cache := catalogCache{FetchedAt: c.now().UTC().Format(time.RFC3339Nano), EndpointID: c.endpointID(), Rows: rows}
 		data, marshalErr := json.Marshal(cache)
 		if marshalErr != nil {
 			return CatalogData{}, errors.New("cannot persist bench cache")
@@ -301,10 +332,10 @@ func (c *CatalogClient) Read(ctx context.Context, noCache bool) (CatalogData, er
 	}
 	if haveCache {
 		source, stale := catalogSourceCache, false
-		if age < 0 || age >= c.freshness.staleMax() {
+		if c.staleEntry(entry) {
 			source, stale = catalogSourceCacheStale, true
 		}
-		if data, decodeErr := c.decode(cache.Rows, source, stale, &age); decodeErr == nil {
+		if data, decodeErr := c.decode(entry.Rows, source, stale, entry.ageS()); decodeErr == nil {
 			return data, nil
 		}
 	}

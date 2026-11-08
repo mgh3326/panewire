@@ -188,6 +188,7 @@ func TestLaunchShadowReadsNoHandoffkeep(t *testing.T) {
 			if policyLaunchRuns(runner) != 1 {
 				t.Fatalf("pacelever policy launch ran %d times, want 1", policyLaunchRuns(runner))
 			}
+			awaitShadowIdle(t)
 			if n := hk.hits.Load(); n != 0 {
 				t.Fatalf("shadow read handoffkeep %d times, want 0", n)
 			}
@@ -252,6 +253,7 @@ func TestLaunchShadowLeavesCallerDeadline(t *testing.T) {
 	if d, _ := ctx.Deadline(); !d.Equal(deadline) {
 		t.Fatalf("caller deadline changed: %v -> %v", deadline, d)
 	}
+	awaitShadowIdle(t)
 	if n := hk.hits.Load(); n != 0 {
 		t.Fatalf("shadow read handoffkeep %d times, want 0", n)
 	}
@@ -281,6 +283,7 @@ func TestLaunchShadowIgnoresCallerCancellation(t *testing.T) {
 	if err != nil || got != opusLaunch {
 		t.Fatalf("shadow must return pacelever's launch: %+v %v", got, err)
 	}
+	awaitShadowIdle(t)
 	if len(*events) != 1 || (*events)[0].Outcome != "agree" {
 		t.Fatalf("the comparison must run past the caller's cancellation: %+v", *events)
 	}
@@ -317,6 +320,7 @@ func TestCreditPoolShadowReadsNoStore(t *testing.T) {
 	if err != nil || views["anthropic-api"].Class != "spend" {
 		t.Fatalf("shadow must return pacelever's views: %+v %v", views, err)
 	}
+	awaitShadowIdle(t)
 	if n := reads.Load(); n != alone {
 		t.Fatalf("shadow mode read the shared store %d times, pacelever's path alone %d", n, alone)
 	}

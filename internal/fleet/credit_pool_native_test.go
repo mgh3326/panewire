@@ -36,6 +36,9 @@ func creditPoolApp(t *testing.T, policyTOML string, latest func(string) shared.L
 		return Result{Code: 1, Err: "unexpected command"}
 	}}
 	a := &App{Home: t.TempDir(), Now: func() time.Time { return launchNow }, Runner: runner, Err: io.Discard, Config: Config{Quota: map[string]any{}, Local: map[string]any{}}}
+	// A shadow comparison may outlive the call; it ends before the test's
+	// directories are removed.
+	t.Cleanup(func() { awaitShadowIdle(t) })
 	cli := CLIQuota{Runner: runner, Binary: "pacelever", Accounts: map[string]string{"anthropic-api": "0123456789abcdef"}}
 	if latest != nil {
 		cli.SharedLatest = func(_ context.Context, key string) (shared.Latest, error) { return latest(key), nil }
@@ -193,6 +196,7 @@ func TestCreditPoolViewsShadowRecordsComparison(t *testing.T) {
 	if err != nil || views["anthropic-api"].Class != "spend" {
 		t.Fatalf("shadow must return pacelever's views: %+v %v", views, err)
 	}
+	awaitShadowIdle(t)
 	if len(*events) != 1 {
 		t.Fatalf("want one shadow event, got %+v", *events)
 	}
@@ -214,6 +218,7 @@ func TestCreditPoolViewsShadowRecordsComparison(t *testing.T) {
 	if _, err := a.Quota.Pools(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	awaitShadowIdle(t)
 	if len(*events) != 1 || (*events)[0].Outcome != "agree" {
 		t.Fatalf("matching views must agree: %+v", *events)
 	}
@@ -224,6 +229,7 @@ func TestCreditPoolViewsShadowRecordsComparison(t *testing.T) {
 	if _, err := a.Quota.Pools(context.Background()); err != nil {
 		t.Fatal(err)
 	}
+	awaitShadowIdle(t)
 	if len(*events) != 0 {
 		t.Fatalf("native mode records no comparison: %+v", *events)
 	}

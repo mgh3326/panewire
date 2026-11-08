@@ -38,6 +38,9 @@ func launchApp(t *testing.T, mode string, rows []CatalogRow, paceleverLaunch *Re
 		return Result{Code: 1}
 	}}
 	a := &App{Home: t.TempDir(), Now: func() time.Time { return launchNow }, Runner: runner, Err: io.Discard, Config: Config{Quota: map[string]any{}}}
+	// A shadow comparison may outlive the call; it ends before the test's
+	// directories are removed.
+	t.Cleanup(func() { awaitShadowIdle(t) })
 	if mode != "" {
 		a.Config.Quota["launch"] = mode
 	}
@@ -352,6 +355,7 @@ func TestLaunchShadowRecordsAgreement(t *testing.T) {
 	if policyLaunchRuns(runner) != 1 {
 		t.Fatalf("shadow runs pacelever policy launch once, got %d", policyLaunchRuns(runner))
 	}
+	awaitShadowIdle(t)
 	if len(*events) != 1 {
 		t.Fatalf("want one shadow event, got %+v", *events)
 	}
@@ -371,6 +375,7 @@ func TestLaunchShadowRecordsDisagreement(t *testing.T) {
 	if err != nil || got != other {
 		t.Fatalf("shadow must return pacelever's launch: %+v %v", got, err)
 	}
+	awaitShadowIdle(t)
 	if len(*events) != 1 {
 		t.Fatalf("want one shadow event, got %+v", *events)
 	}
@@ -390,6 +395,7 @@ func TestLaunchShadowRecordsDisagreement(t *testing.T) {
 	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"}); exitCode(err) != 3 {
 		t.Fatalf("shadow must keep pacelever's refusal: %v", err)
 	}
+	awaitShadowIdle(t)
 	if len(*events) != 1 || (*events)[0].Outcome != "disagree" {
 		t.Fatalf("shadow event = %+v", *events)
 	}
@@ -404,6 +410,7 @@ func TestLaunchShadowRecordsDisagreement(t *testing.T) {
 	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "test-retired", Effort: "high", Role: "worker"}); exitCode(err) != 3 {
 		t.Fatalf("shadow must keep pacelever's refusal: %v", err)
 	}
+	awaitShadowIdle(t)
 	if len(*events) != 1 || (*events)[0].Outcome != "agree" {
 		t.Fatalf("matching refusals must agree: %+v", *events)
 	}
@@ -419,6 +426,7 @@ func TestLaunchNativeNeverRunsPacelever(t *testing.T) {
 	if err != nil || got != opusLaunch {
 		t.Fatalf("native launch: %+v %v", got, err)
 	}
+	awaitShadowIdle(t)
 	if len(runner.Calls) != 0 || len(*events) != 0 {
 		t.Fatalf("native mode ran %v and recorded %+v", runner.Calls, *events)
 	}
@@ -476,6 +484,7 @@ func TestSpawnAdmissionDefaultRunsPaceleverLaunch(t *testing.T) {
 	if n := policyLaunchRuns(runner); n != 1 {
 		t.Fatalf("pacelever policy launch ran %d times, want 1", n)
 	}
+	awaitShadowIdle(t)
 	shadow := slices.IndexFunc(events, func(e fleetevent.Event) bool { return e.Kind == "quota_launch_shadow" })
 	if shadow < 0 || events[shadow].Outcome != "disagree" || !strings.Contains(events[shadow].Detail, "diff=grade") {
 		t.Fatalf("native lookup not recorded as a disagreement: %+v", events)

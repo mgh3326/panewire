@@ -297,9 +297,14 @@ func TestLaunchShadowFollowsCatalogFreshness(t *testing.T) {
 	}
 }
 
-// awaitShadowIdle waits until no shadow comparison runs in this process. At
-// f61e43d a comparison ends before Launch or Pools returns, so there is
-// nothing to wait for.
+// awaitShadowIdle waits until no shadow comparison runs in this process, so
+// its event is recorded and nothing writes into the test's directories after
+// it, failing the test after 10 s.
 func awaitShadowIdle(t *testing.T) {
 	t.Helper()
+	select {
+	case <-shadows.idle():
+	case <-time.After(10 * time.Second):
+		t.Fatal("a shadow comparison is still running")
+	}
 }
