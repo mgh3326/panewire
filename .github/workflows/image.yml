@@ -16,6 +16,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      packages: read
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
@@ -24,6 +25,19 @@ jobs:
       - name: Version stamp
         id: version
         run: echo "version=pw-$(printf '%s' "$GITHUB_SHA" | cut -c1-7)" >> "$GITHUB_OUTPUT"
+      # Same name as publish; the layer cache lives at <image>:buildcache (docs/hub-image.md).
+      - name: Image name
+        id: image
+        run: echo "name=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+      # Read-only login so the cache can be read if the package is private. A fork
+      # PR has no such token, so it skips the login and builds uncached.
+      - name: Log in to GHCR (cache read)
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        uses: docker/login-action@5e57cd118135c172c3672efd75eb46360885c0ef # v3.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Build linux/amd64 image (load)
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         env:
@@ -34,8 +48,7 @@ jobs:
           load: true
           tags: panewire:ci
           build-args: PANEWIRE_VERSION=${{ steps.version.outputs.version }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
       - name: Smoke test image
         if: github.event_name != 'pull_request'
         env:
@@ -89,4 +102,5 @@ jobs:
           tags: |
             ${{ steps.image.outputs.name }}:${{ github.sha }}
             ${{ steps.image.outputs.name }}:main
-          cache-from: type=gha
+          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          cache-to: type=registry,ref=${{ steps.image.outputs.name }}:buildcache,mode=max,image-manifest=true,oci-mediatypes=true

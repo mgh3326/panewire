@@ -12,6 +12,13 @@ binaries from `scripts/build-release.sh`.
 There is no deploy step; rolling a host onto the image is a separate,
 operator-run change.
 
+The build layer cache lives in the same GHCR package, at the
+`<image>:buildcache` tag, and not in the GitHub Actions cache. `publish` reads
+and writes it (`mode=max`); `image` only reads it, and a fork PR, which has no
+token for the package, builds uncached. The Actions cache is shared by the
+repository's toolchain caches and capped at 10 GB; layers there were evicted
+by every PR ref's copy and pushed out those toolchains.
+
 ## Image
 
 - One static binary (`CGO_ENABLED=0`) at `/panewire` on
