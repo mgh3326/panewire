@@ -28,7 +28,7 @@ var (
 	}
 	toolchainCacheFullSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
 	toolchainCacheExact   = regexp.MustCompile(`^[0-9]+\.[0-9]+\.[0-9]+$`)
-	toolchainCacheGoCmd   = regexp.MustCompile(`(^|[\s;&|(])go (test|vet|build|run|mod|generate|env|version)\b`)
+	toolchainCacheGoCmd   = regexp.MustCompile(`(^|[\s;&|(])(go (test|vet|build|run|mod|generate|env|version|list)\b|scripts/ci-test-shard\.sh\b)`)
 )
 
 // toolchainCacheActionOf returns "owner/repo" from a uses value "owner/repo@ref".
@@ -174,23 +174,39 @@ func TestCIToolchainCacheCompositeRestoresBeforeSetupGo(t *testing.T) {
 	}
 }
 
-// Actions this change adds or moves are pinned to a full commit SHA. The
-// composite's own actions and every setup-go or cache use in the three Go
-// workflows must be pinned; other workflow actions are outside this change.
+// Actions across .github/ (both workflow files and composite actions) must be
+// pinned to a full commit SHA, and each action must appear with only one SHA
+// across the repository (hk decision/2026-11-08/ci-toolchain-cache rule 4).
 func TestCIToolchainCachePinsActionsToFullSHA(t *testing.T) {
 	composites, err := filepath.Glob(".github/actions/*/action.yml")
 	if err != nil || len(composites) == 0 {
 		t.Fatalf("no composite actions found: %v", err)
 	}
+	workflows, err := filepath.Glob(".github/workflows/*.yml")
+	if err != nil || len(workflows) == 0 {
+		t.Fatalf("no workflow files found: %v", err)
+	}
+
+	seen := make(map[string]string) // action -> first seen SHA
+
 	check := func(where, uses string) {
 		if uses == "" || strings.HasPrefix(uses, "./") || strings.HasPrefix(uses, "docker://") {
 			return
 		}
-		_, ref, ok := strings.Cut(uses, "@")
+		action, ref, ok := strings.Cut(uses, "@")
 		if !ok || !toolchainCacheFullSHA.MatchString(ref) {
 			t.Errorf("%s: %s is not pinned to a full 40-hex SHA", where, uses)
+			return
+		}
+		if first, exists := seen[action]; exists {
+			if first != ref {
+				t.Errorf("%s: %s uses SHA %s, but earlier use had %s", where, action, ref, first)
+			}
+		} else {
+			seen[action] = ref
 		}
 	}
+
 	for _, path := range composites {
 		var a toolchainCacheComposite
 		readToolchainCacheFile(t, path, &a)
@@ -198,15 +214,20 @@ func TestCIToolchainCachePinsActionsToFullSHA(t *testing.T) {
 			check(path, step.Uses)
 		}
 	}
-	for _, path := range toolchainCacheWorkflows {
-		var w toolchainCacheWorkflow
+	for _, path := range workflows {
+		var w struct {
+			Jobs map[string]struct {
+				Uses  string               `yaml:"uses"`
+				Steps []toolchainCacheStep `yaml:"steps"`
+			} `yaml:"jobs"`
+		}
 		readToolchainCacheFile(t, path, &w)
 		for name, job := range w.Jobs {
+			if job.Uses != "" {
+				check(path+" job "+name, job.Uses)
+			}
 			for _, step := range job.Steps {
-				switch toolchainCacheActionOf(step.Uses) {
-				case "actions/setup-go", "actions/cache":
-					check(path+" job "+name, step.Uses)
-				}
+				check(path+" job "+name, step.Uses)
 			}
 		}
 	}

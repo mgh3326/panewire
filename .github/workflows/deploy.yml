@@ -74,7 +74,7 @@ jobs:
             echo "deploy: sha is ${#sha} hex characters, want 40: '$sha'" >&2; exit 1
           fi
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ steps.sha.outputs.sha }}
       - name: Read the policy revision
@@ -88,7 +88,7 @@ jobs:
     needs: candidate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ needs.candidate.outputs.sha }}
       - uses: ./.github/actions/setup-go-cached
@@ -108,7 +108,7 @@ jobs:
     needs: candidate
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ needs.candidate.outputs.sha }}
       - uses: ./.github/actions/setup-go-cached
@@ -135,7 +135,7 @@ jobs:
     outputs:
       digest: ${{ steps.digest.outputs.digest }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ needs.candidate.outputs.sha }}
       - uses: ./.github/actions/setup-go-cached
@@ -156,7 +156,7 @@ jobs:
       - name: Digest the artifact set
         id: digest
         run: echo "digest=$(sha256sum dist/release/SHA256SUMS | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: deploy-release-assets
           path: dist/release/
@@ -176,7 +176,7 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U postgres" --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ needs.candidate.outputs.sha }}
       - uses: ./.github/actions/setup-go-cached
@@ -199,7 +199,7 @@ jobs:
     needs: candidate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
         with:
           ref: ${{ needs.candidate.outputs.sha }}
       - uses: ./.github/actions/setup-go-cached
