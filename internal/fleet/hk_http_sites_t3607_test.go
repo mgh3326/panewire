@@ -162,7 +162,7 @@ func docAnswer(key, kind, body string) string {
 func docList(keys ...string) string {
 	docs := []map[string]any{}
 	for i, k := range keys {
-		docs = append(docs, map[string]any{"id": i + 1, "key": k, "kind": "artifact", "session": "", "job": "", "sha256": "ab", "created_by": "svc-panewire", "created_at": "2026-11-08T08:00:00Z", "updated_at": "2026-11-08T08:00:00Z"})
+		docs = append(docs, map[string]any{"id": i + 1, "key": k, "kind": "evidence", "session": "", "job": "", "sha256": "ab", "created_by": "svc-panewire", "created_at": "2026-11-08T08:00:00Z", "updated_at": "2026-11-08T08:00:00Z"})
 	}
 	b, _ := json.Marshal(map[string]any{"documents": docs})
 	return string(b)
@@ -197,7 +197,7 @@ func TestHKSitesGoOverHTTPWithSvcToken(t *testing.T) {
 		fx.hk.SetTask("42", hkTaskJSON(42, "merged", "change (grade A, T1)", "", "Example", `{}`)).
 			Handle(hkAnswers(map[string]hkAnswerFixture{
 				"GET /v1/documents":           hkOK(docList(key)),
-				docRoute(http.MethodGet, key): hkOK(docAnswer(key, "artifact", fx.record)),
+				docRoute(http.MethodGet, key): hkOK(docAnswer(key, "evidence", fx.record)),
 			}))
 		if e := fx.a.artifactSweep(ctx, []string{"--job", "j", "--age", "0s", "--apply"}); e != nil {
 			t.Fatal(e)
@@ -210,8 +210,8 @@ func TestHKSitesGoOverHTTPWithSvcToken(t *testing.T) {
 			t.Fatalf("list query=%q, want the CLI's doc list: the prefix, limit 100, no kind or session", reqs[1].Query)
 		}
 		put := hkJSON(t, reqs[3])
-		if put["key"] != key || put["kind"] != "artifact" || put["job"] != "" {
-			t.Fatalf("artifact put=%v, want the key, kind artifact and no job", put)
+		if put["key"] != key || put["kind"] != "evidence" || put["job"] != "" {
+			t.Fatalf("artifact put=%v, want the key, kind evidence and no job", put)
 		}
 		var rec ArtifactRecord
 		if e := json.Unmarshal([]byte(put["body"].(string)), &rec); e != nil || len(rec.Deleted) != 1 || rec.Deleted[0].Path != "build.bin" {
@@ -302,7 +302,7 @@ func TestHKSiteFailuresKeepCLIHandling(t *testing.T) {
 		fx.hk.SetTask("42", hkTaskJSON(42, "merged", "change (grade A, T1)", "", "Example", `{}`)).
 			Handle(hkAnswers(map[string]hkAnswerFixture{
 				"GET /v1/documents":           hkOK(docList(key)),
-				docRoute(http.MethodGet, key): hkOK(docAnswer(key, "artifact", fx.record)),
+				docRoute(http.MethodGet, key): hkOK(docAnswer(key, "evidence", fx.record)),
 				docRoute(http.MethodPut, key): {http.StatusConflict, `{"error":"conflict","reason":"stale"}`},
 			}))
 		e := fx.a.artifactSweep(ctx, []string{"--job", "j", "--age", "0s", "--apply"})
@@ -328,7 +328,7 @@ func TestHKSiteFailuresKeepCLIHandling(t *testing.T) {
 			return http.StatusOK, hkTaskJSON(42, "merged", "change (grade A, T1)", "", "Example", `{}`), true
 		}).Handle(hkAnswers(map[string]hkAnswerFixture{
 			"GET /v1/documents":           hkOK(docList(key)),
-			docRoute(http.MethodGet, key): hkOK(docAnswer(key, "artifact", fx.record)),
+			docRoute(http.MethodGet, key): hkOK(docAnswer(key, "evidence", fx.record)),
 		}))
 		e := fx.a.artifactSweep(ctx, []string{"--job", "j", "--age", "0s", "--apply"})
 		if exitCode(e) != 1 || e == nil || !strings.HasPrefix(e.Error(), "sweep task recheck: handoffkeep: ") {
@@ -588,8 +588,8 @@ func TestArtifactSweepCLIHTTPParity(t *testing.T) {
 		{name: "document outage", task: merged, list: hkOK(docList(key)), docs: map[string]hkAnswerFixture{key: hkOutage}},
 		{name: "document malformed", task: merged, list: hkOK(docList(key)), docs: map[string]hkAnswerFixture{key: hkOK(`{"body":`)}},
 		{name: "document body not a string", task: merged, list: hkOK(docList(key)), docs: map[string]hkAnswerFixture{key: hkOK(`{"key":"k","body":{}}`)}},
-		{name: "document body not a record", task: merged, list: hkOK(docList(key)), docs: map[string]hkAnswerFixture{key: hkOK(docAnswer(key, "artifact", "notes"))}},
-		{name: "document of another host", task: merged, list: hkOK(docList(key)), docs: map[string]hkAnswerFixture{key: hkOK(docAnswer(key, "artifact", `{"schema":"fleet.artifact.v2","host":"other"}`))}},
+		{name: "document body not a record", task: merged, list: hkOK(docList(key)), docs: map[string]hkAnswerFixture{key: hkOK(docAnswer(key, "evidence", "notes"))}},
+		{name: "document of another host", task: merged, list: hkOK(docList(key)), docs: map[string]hkAnswerFixture{key: hkOK(docAnswer(key, "evidence", `{"schema":"fleet.artifact.v2","host":"other"}`))}},
 		{name: "document with a bad timestamp", task: merged, list: hkOK(docList(key)), docs: map[string]hkAnswerFixture{key: {http.StatusOK, "record:" + `{"created_at":"yesterday"}`}}, judged: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -598,12 +598,12 @@ func TestArtifactSweepCLIHTTPParity(t *testing.T) {
 			cliDocs := map[string]cliOut{}
 			for k, a := range tc.docs {
 				if a == recordDoc {
-					a = hkOK(docAnswer(k, "artifact", fx.record))
+					a = hkOK(docAnswer(k, "evidence", fx.record))
 				} else if strings.HasPrefix(a.body, "record:") {
 					var extra map[string]any
 					_ = json.Unmarshal([]byte(strings.TrimPrefix(a.body, "record:")), &extra)
 					var doc map[string]any
-					_ = json.Unmarshal([]byte(docAnswer(k, "artifact", fx.record)), &doc)
+					_ = json.Unmarshal([]byte(docAnswer(k, "evidence", fx.record)), &doc)
 					for x, v := range extra {
 						doc[x] = v
 					}

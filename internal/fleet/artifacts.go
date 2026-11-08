@@ -450,15 +450,15 @@ func (a *App) confirmUpload(ctx context.Context, paths []string) error {
 }
 
 // putRecord writes the artifact record over hk HTTP with the svc-panewire
-// credential (hk 3607): kind artifact, no job, the encoded record as the body,
-// as `handoffkeep doc put --kind artifact --file` sent it, under the upload
+// credential (hk 3607): kind evidence, no job, the encoded record as the body,
+// as `handoffkeep doc put --kind evidence --file` sent it, under the upload
 // bound. A failure reads as a.must's did.
 func (a *App) putRecord(ctx context.Context, key string, record any) error {
 	b, e := encode(record)
 	if e != nil {
 		return e
 	}
-	return hkCheck(hkPutDocument(ctx, client.Document{Key: key, Kind: "artifact", Body: string(b)}), "handoffkeep")
+	return hkCheck(hkPutDocument(ctx, client.Document{Key: key, Kind: "evidence", Body: string(b)}), "handoffkeep")
 }
 func (a *App) remoteArtifactMove(ctx context.Context, src, dest, host string, apply bool) error {
 	h, ok := a.Config.Hosts[host]

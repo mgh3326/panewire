@@ -261,11 +261,11 @@ func hkGetDocument(ctx context.Context, key string) (client.Document, error) {
 
 // hkUploadKinds are the document kinds that carry a file's bytes, which
 // hkPutDocument sends under the upload bound.
-var hkUploadKinds = map[string]bool{"brief": true, "report": true, "artifact": true}
+var hkUploadKinds = map[string]bool{"brief": true, "report": true, "evidence": true}
 
 // hkPutDocument writes doc over hk HTTP, as `handoffkeep doc put --key
 // --kind [--job] --file` did: the key, kind, job and the file's bytes as the
-// body. A brief, report or artifact record gets the upload bound
+// body. A brief, report or artifact (evidence) record gets the upload bound
 // (hkUploadTimeout), any other document the call bound. An answer hk's
 // client cannot decode is an error: hk's outcome is unknown, and the CLI
 // failed on it too.

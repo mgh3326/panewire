@@ -51,7 +51,7 @@ func TestHKAnswerOverLimitIsUnreadable(t *testing.T) {
 		fx.hk.Handle(hkAnswers(map[string]hkAnswerFixture{
 			"GET /v1/tasks/42":            hkOK(paddedAnswer(t, merged, "garbage")),
 			"GET /v1/documents":           hkOK(docList(key)),
-			docRoute(http.MethodGet, key): hkOK(docAnswer(key, "artifact", fx.record)),
+			docRoute(http.MethodGet, key): hkOK(docAnswer(key, "evidence", fx.record)),
 		}))
 		if e := fx.a.artifactSweep(context.Background(), []string{"--job", "j", "--age", "0s", "--apply"}); e != nil {
 			t.Fatal(e)
@@ -72,7 +72,7 @@ func TestHKAnswerOverLimitIsUnreadable(t *testing.T) {
 		reads := 0
 		answers := hkAnswers(map[string]hkAnswerFixture{
 			"GET /v1/documents":           hkOK(docList(key)),
-			docRoute(http.MethodGet, key): hkOK(docAnswer(key, "artifact", fx.record)),
+			docRoute(http.MethodGet, key): hkOK(docAnswer(key, "evidence", fx.record)),
 		})
 		fx.hk.Handle(func(r hkRequest) (int, string, bool) {
 			if r.Route() == "GET /v1/tasks/42" {
