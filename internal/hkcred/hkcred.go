@@ -96,10 +96,28 @@ func PathIn(home string) string {
 	return filepath.Join(home, ".config", "panewire", "hk-svc.env")
 }
 
-// Load resolves the svc-panewire credential. On error the returned
-// Credentials still holds what the chosen source did carry (a caller that
-// needs only the URL, such as a transport preflight, may use it).
+// Load resolves the svc-panewire credential. On error it answers the zero
+// Credentials, so no caller can take a token from a source it refused; a
+// caller that needs only the endpoint uses URL.
 func Load() (Credentials, error) {
+	creds, err := resolve()
+	if err != nil {
+		return Credentials{}, err
+	}
+	return creds, nil
+}
+
+// URL is the hk endpoint of the source Load would choose, even when that
+// source lacks its token or half a CF pair: a transport preflight compares
+// endpoints, not credentials. Empty when there is none.
+func URL() string {
+	creds, _ := resolve()
+	return creds.URL
+}
+
+// resolve is Load before the error rule: with an error it still answers what
+// the chosen source carried.
+func resolve() (Credentials, error) {
 	env := func(key string) string { return strings.TrimSpace(os.Getenv(key)) }
 	if url, token := env(URLKey), env(TokenKey); url != "" && token != "" {
 		creds := Credentials{URL: url, Token: token, CFID: env(CFIDKey), CFSecret: env(CFSecretKey)}

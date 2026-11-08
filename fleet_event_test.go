@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -42,9 +43,44 @@ func TestMain(m *testing.M) {
 		os.Unsetenv(key)
 	}
 	os.Setenv(hkcred.PathEnv, filepath.Join(state, "no-hk-svc.env"))
+	// No test may read the developer's real files through a default path
+	// under HOME (spawn.json, hk-svc.env, the herdr socket; hk 3570): HOME is
+	// a private directory for the whole package. The go toolchain keeps the
+	// launch HOME's caches and env file, so a test that runs go stays warm and
+	// offline. A test that needs another HOME sets it with t.Setenv.
+	testLaunchHome = os.Getenv("HOME")
+	pinGoToolchainEnv()
+	home := filepath.Join(state, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		panic(err)
+	}
+	os.Setenv("HOME", home)
 	code := m.Run()
 	os.RemoveAll(state)
 	os.Exit(code)
+}
+
+// testLaunchHome is the HOME the test binary was started with, before
+// TestMain moved it.
+var testLaunchHome string
+
+// pinGoToolchainEnv fixes GOCACHE, GOMODCACHE, GOPATH and GOENV to what they
+// resolve to under the launch HOME, before TestMain moves HOME. Without go on
+// PATH nothing is pinned: no test can run go then either.
+func pinGoToolchainEnv() {
+	out, err := exec.Command("go", "env", "-json", "GOCACHE", "GOMODCACHE", "GOPATH", "GOENV").Output()
+	if err != nil {
+		return
+	}
+	var values map[string]string
+	if json.Unmarshal(out, &values) != nil {
+		return
+	}
+	for key, value := range values {
+		if value != "" && os.Getenv(key) == "" {
+			os.Setenv(key, value)
+		}
+	}
 }
 
 var fleetEventFakeSecrets = []string{"ghp_FAKEfakeFAKEfakeFAKEfake0123456789", "hunter2pass", "tok3nVALUEfake99"}

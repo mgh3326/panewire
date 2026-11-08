@@ -85,7 +85,7 @@ func TestHKSvcNodeDefaultBriefFetchSendsSvcToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	text, err := client.fetchHubSpawnBrief(t.Context(), config.HandoffkeepEnv, key)
+	text, err := client.fetchNodeSpawnBrief(t.Context(), config, key)
 	if err != nil || text != "brief text" {
 		t.Fatalf("brief fetch: text=%q err=%v", text, err)
 	}

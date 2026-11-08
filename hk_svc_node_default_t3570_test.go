@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
 	"github.com/mgh3326/panewire/internal/hkcred"
@@ -173,5 +174,19 @@ func TestFsRunNodeNeverReadsTheLaunchHomeSpawnConfig(t *testing.T) {
 	config, _, err := client.resolveHubSpawnConfig()
 	if err == nil && (config.Workspace == "planted-workspace" || strings.HasPrefix(config.HandoffkeepEnv, "/planted")) {
 		t.Fatalf("fixture node read the planted spawn.json: %+v", config)
+	}
+}
+
+// TestMain moves HOME for the whole package: a helper that resolves a default
+// path under HOME (spawn.json, hk-svc.env) never reaches the launch HOME.
+func TestRootTestsRunUnderAPrivateHome(t *testing.T) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || home == testLaunchHome {
+		t.Fatalf("tests run with the launch HOME %q (err=%v)", home, err)
+	}
+	if client, err := NewHubClient(HubClientConfig{URL: r6WSURL("http://127.0.0.1:1", ""), MachineID: "node-a", Token: fsNodeAToken, Accepting: true, AllowInsecureForTests: true, PingInterval: 20 * time.Millisecond, Warn: func(string) {}}); err != nil {
+		t.Fatal(err)
+	} else if testLaunchHome != "" && strings.HasPrefix(client.spawnConfigPath, testLaunchHome+string(filepath.Separator)) {
+		t.Fatalf("a default node client resolves spawn.json under the launch HOME: %s", client.spawnConfigPath)
 	}
 }

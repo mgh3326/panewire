@@ -439,7 +439,7 @@ below overrides the URL.
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `url` | `HANDOFFKEEP_URL` | Shared quota cache endpoint; HTTPS required outside loopback. |
-| `credential_env` | retired | Ignored since hk 3570; the bearer is always `HANDOFFKEEP_TOKEN_SVC_PANEWIRE` from the [service credential](#handoffkeep-service-credential). Still accepted so an old file loads. |
+| `credential_env` | retired | Ignored since hk 3570; the bearer is always `HANDOFFKEEP_TOKEN_SVC_PANEWIRE` from the [service credential](#handoffkeep-service-credential). Still accepted so an old file loads, with a one-line warning that names the key. |
 | `presence_ttl_s` | `86400` | How recent a host-presence record must be to count as login evidence. |
 | `fresh_ttl_s` | `900` for `claude`, `300` otherwise | How recent a shared observation must be to count as fresh, for every pool without its own `pool_fresh_ttl_s` entry. A reading is valid as of the later of `measured_at` and `confirmed_at`: handoffkeep keeps `measured_at` when a re-measurement publishes the same values and only advances `confirmed_at`. This is pacelever's rule, so `pacelever --json` and the gate agree on a reading. A spawn delegated over ssh with a selected account carries the placing host's window for that account's pool, and the executing host rechecks that account with it (up to 86400). |
 | `native_pools` | `[]` | Pools with a native/shadow switch that this host measures itself instead of through pacelever (`["commandcode", "devin", "agy"]`; no other pool is accepted). Unlisted, the pool is in shadow: spawns keep running pacelever for it and the node logs a comparison ([docs/quota.md](quota.md#shadow-and-native)). Read at each use by the node and the CLI; an invalid file is shadow. |
@@ -478,8 +478,11 @@ placement record producer, and the node's default `handoffkeep_env`. One loader
    else is refused. `PANEWIRE_HK_ENV` names another path.
 3. The hk CLI's `~/.config/handoffkeep/config.env` and `HANDOFFKEEP_TOKEN` are
    never read. `HANDOFFKEEP_CONFIG` and `[quota] credential_env` are retired:
-   an old `hosts.toml` that sets `credential_env` still loads, and the key is
-   ignored.
+   an old `hosts.toml` that sets `credential_env` still loads, the key is
+   ignored, and each `panewire` command prints one warning naming the key
+   (not its value): `panewire: warning: [quota] credential_env is retired;
+   panewire reads HANDOFFKEEP_TOKEN_SVC_PANEWIRE or
+   ~/.config/panewire/hk-svc.env`.
 
 ```
 # ~/.config/panewire/hk-svc.env (mode 0600)
@@ -497,10 +500,14 @@ quota reads; the token always comes from the loader.
 and `--chat-env`, a node's `spawn.json` `handoffkeep_env`, and the assistant's
 `-config`) is read as before, and its bearer is `HANDOFFKEEP_TOKEN_SVC_PANEWIRE`
 when present, else `HANDOFFKEEP_TOKEN`, so files written before hk 3570 keep
-working. With no `spawn.json`, the node's default `handoffkeep_env` is the
-panewire file (`PANEWIRE_HK_ENV`, else `~/.config/panewire/hk-svc.env`), no
-longer the hk CLI's `config.env`; that default is a file, so the environment
-pair of step 1 does not apply to it.
+working. **Node on defaults.** With no `spawn.json`, the node's hk credential
+is not an explicit file: it resolves through the same loader, in the same
+order — the environment pair of step 1, else the panewire file
+(`PANEWIRE_HK_ENV`, else `~/.config/panewire/hk-svc.env`) with
+`HANDOFFKEEP_TOKEN_SVC_PANEWIRE` only. A legacy-only file there is refused as
+unconfigured. A `spawn.json` `handoffkeep_env` that names the same path is
+still an explicit file and keeps the `HANDOFFKEEP_TOKEN` fallback: the node
+decides by where the setting came from, never by the path.
 
 **Unconfigured.** Each caller behaves as it did with no hk credential, and the
 one-line error names the missing keys or the file, never a value (for example
@@ -1364,7 +1371,7 @@ for ownership and distribution.
 | `XDG_STATE_HOME` | State home of the role routing cache (`$XDG_STATE_HOME/panewire/model-routing.json`); default `~/.local/state`. |
 | `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools, and commandcode, devin and agy once switched native, are measured by panewire itself and ignore it. The bench catalog is handoffkeep's and never uses it, nor does `[quota].launch = "native"` or `[quota].gate = "native"`, nor, with `[quota].launch = "native"`, the credit pool view when the shared store serves every credit pool ([docs/quota.md](quota.md#credit-pool-views)). |
 | `HANDOFFKEEP_URL`, `HANDOFFKEEP_TOKEN_SVC_PANEWIRE` | panewire's svc-panewire hk credential; both must be set to win over the file ([handoffkeep service credential](#handoffkeep-service-credential)). `HANDOFFKEEP_TOKEN` and `HANDOFFKEEP_CONFIG` are not read. |
-| `PANEWIRE_HK_ENV` | The svc-panewire credential file; default `~/.config/panewire/hk-svc.env` (regular, mode 0600). Also the node's default `handoffkeep_env`. |
+| `PANEWIRE_HK_ENV` | The svc-panewire credential file; default `~/.config/panewire/hk-svc.env` (regular, mode 0600, read through a descriptor opened without following a leaf symlink). A node with no `spawn.json` reads it too, after the environment pair and with the svc key only. |
 | `XDG_CACHE_HOME` | Cache home of the bench catalog read (`$XDG_CACHE_HOME/panewire/bench`); default `~/.cache`. |
 | `ARTIFICIAL_ANALYSIS_API_KEY` | Free Artificial Analysis Data API key for `panewire catalog aa-sync`; else the mode-0600 `$XDG_CONFIG_HOME/panewire/aa.env`. |
 | `PANEWIRE_NODE_ENV` | Panewire node env file for `HUB_MACHINE_ID` (job record host id); default `~/.config/panewire/hub-node.env`, or `[quota].node_env`. |

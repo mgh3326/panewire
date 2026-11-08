@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // MaxBytes bounds a mode-0600 env file. A larger file is rejected rather
@@ -40,13 +41,9 @@ func Load(path string) (map[string]string, error) {
 // Entries answers every assignment in file order, repeats included, after
 // the same mode, size and syntax checks as Load. No error carries a value.
 func Entries(path string) ([]Entry, error) {
-	info, err := os.Lstat(path)
-	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm() != 0600 {
-		return nil, errors.New("env file must be regular mode 0600")
-	}
-	file, err := os.Open(path)
+	file, err := openChecked(path)
 	if err != nil {
-		return nil, errors.New("open env file")
+		return nil, err
 	}
 	defer file.Close()
 	var entries []Entry
@@ -80,4 +77,24 @@ func Entries(path string) ([]Entry, error) {
 		return nil, errors.New("env file is too large")
 	}
 	return entries, nil
+}
+
+// openChecked opens path and answers the descriptor only when the object it
+// names is a regular mode-0600 file. The checks run on the open descriptor, so
+// the object checked is the object read: a leaf replaced between a check and
+// an open cannot slip through. O_NOFOLLOW refuses a symlink at the leaf
+// (ELOOP); symlinks in parent directories are followed, as they always were.
+// O_NONBLOCK keeps the open of a FIFO from waiting for a writer; the FIFO is
+// then refused as not regular.
+func openChecked(path string) (*os.File, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, errors.New("env file must be regular mode 0600")
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		file.Close()
+		return nil, errors.New("env file must be regular mode 0600")
+	}
+	return file, nil
 }

@@ -80,14 +80,13 @@ func (w cliWaker) Wake(ctx context.Context, host string, req WakeRequest) error 
 }
 
 // quotaURL is the configured shared-quota endpoint: hosts.toml [quota] url,
-// else the svc-panewire credential's HANDOFFKEEP_URL (internal/hkcred), even
-// when that credential lacks its token.
+// else the svc-panewire credential's HANDOFFKEEP_URL (hkcred.URL), even when
+// that credential lacks its token.
 func (a *App) quotaURL() string {
 	if u := str(a.Config.Quota, "url"); u != "" {
 		return u
 	}
-	creds, _ := hkcred.Load()
-	return creds.URL
+	return hkcred.URL()
 }
 
 // quotaClient resolves the handoffkeep client every jobs, bench, presence and

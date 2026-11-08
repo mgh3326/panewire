@@ -75,6 +75,15 @@ func configPath(errw io.Writer) string {
 	}
 	return next
 }
+
+// warnRetiredQuotaKeys prints one migration line per retired [quota] key the
+// loaded config still sets. It names the key, never its value.
+func warnRetiredQuotaKeys(c Config, errw io.Writer) {
+	if str(c.Quota, "credential_env") != "" {
+		fmt.Fprintln(errw, "panewire: warning: [quota] credential_env is retired; panewire reads HANDOFFKEEP_TOKEN_SVC_PANEWIRE or ~/.config/panewire/hk-svc.env")
+	}
+}
+
 func LoadConfig(path string) (Config, error) {
 	c := Config{}
 	b, e := os.ReadFile(path)
@@ -264,7 +273,8 @@ func LoadConfig(path string) (Config, error) {
 		}
 	}
 	// credential_env is retired (hk 3570): the bearer is always the
-	// svc-panewire credential (internal/hkcred). An old file still parses.
+	// svc-panewire credential (internal/hkcred). An old file still parses,
+	// and New warns once (warnRetiredQuotaKeys).
 	if v := str(c.Quota, "credential_env"); v != "" && !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(v) {
 		return c, fail(exitConfig, "quota.credential_env must name an environment variable")
 	}

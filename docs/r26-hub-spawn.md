@@ -172,8 +172,11 @@ still hub first, then nodes.
   **The file is optional at its default path.** A node started without
   `--spawn-config` and with no `~/.config/panewire/spawn.json` runs on
   defaults: work root `~/work`, workspace `workers`, herdr session `default`,
-  `handoffkeep_env` `~/.config/panewire/hk-svc.env` (or `PANEWIRE_HK_ENV`;
-  never the hk CLI's `config.env`, hk 3570), and no `cwd_map`. On
+  panewire's svc-panewire hk credential (the `HANDOFFKEEP_URL` +
+  `HANDOFFKEEP_TOKEN_SVC_PANEWIRE` environment pair, else
+  `~/.config/panewire/hk-svc.env` or `PANEWIRE_HK_ENV` with the svc key only;
+  never the hk CLI's `config.env` or `HANDOFFKEEP_TOKEN`, hk 3570), and no
+  `cwd_map`. On
   defaults a `cwd_key` is the directory of that name directly under the work
   root (a real directory; a symlink is unmapped). A file named explicitly with
   `--spawn-config` must exist, and a file that exists is never replaced by
