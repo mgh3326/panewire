@@ -112,6 +112,35 @@ func (a *App) agents(ctx context.Context) ([]Agent, error) {
 
 // ParseAgents decodes herdr agent.list metadata.
 func ParseAgents(data []byte) ([]Agent, error) {
+	return parseHerdrList[Agent](data, "agent", "agents")
+}
+
+// Pane is one `herdr pane list` row. The pane list names plain shells as
+// well as agents, and carries a pane's label where the agent list has its
+// name.
+type Pane struct {
+	Pane  string `json:"pane_id"`
+	Label string `json:"label"`
+	Name  string `json:"name"`
+}
+
+// panes reads `herdr pane list`, the full pane inventory. As the node's
+// pane list reader does, an answer with no rows array is an error.
+func (a *App) panes(ctx context.Context) ([]Pane, error) {
+	r := a.call(ctx, "herdr", "pane", "list")
+	if e := check(r, "herdr pane list"); e != nil {
+		return nil, e
+	}
+	panes, e := parseHerdrList[Pane]([]byte(r.Out), "pane", "panes")
+	if e == nil && panes == nil {
+		e = fail(exitConfig, "pane list missing panes")
+	}
+	return panes, e
+}
+
+// parseHerdrList decodes the rows under key of a herdr list answer, bare or
+// in its result envelope; list names the command in the error.
+func parseHerdrList[T any](data []byte, list, key string) ([]T, error) {
 	var m map[string]json.RawMessage
 	if e := json.Unmarshal(data, &m); e != nil {
 		return nil, e
@@ -121,13 +150,13 @@ func ParseAgents(data []byte) ([]Agent, error) {
 			return nil, e
 		}
 	}
-	v, ok := m["agents"]
+	v, ok := m[key]
 	if !ok {
-		return nil, fail(exitConfig, "agent list missing agents")
+		return nil, fail(exitConfig, "%s list missing %s", list, key)
 	}
-	var agents []Agent
-	e := json.Unmarshal(v, &agents)
-	return agents, e
+	var rows []T
+	e := json.Unmarshal(v, &rows)
+	return rows, e
 }
 func (a *App) status(ctx context.Context, pane string) (string, error) {
 	agents, e := a.agents(ctx)

@@ -43,6 +43,11 @@ func (a *App) hygiene(ctx context.Context, kind string, args []string) error {
 	if *expire && kind != "reap" {
 		return fail(exitUsage, "--expire-job-dirs belongs to reap")
 	}
+	if *expire && *lane != "" {
+		// The TTL pass has no lane filter; with --lane it would expire
+		// every lane's dirs while the reap kept to one.
+		return fail(exitUsage, "--expire-job-dirs takes no --lane; limit it with --job")
+	}
 	age, e := duration(*grace)
 	if e != nil || age < 0 {
 		return fail(exitUsage, "invalid grace")

@@ -39,6 +39,10 @@ const (
 	// jobDirLock is the job's operation lock, the one `panewire done` holds
 	// (lifecycle.go); the gate is decided again under it before a delete.
 	jobDirLock = ".panewire-operation.lock"
+	// jobDirTombstone starts the name a dir is renamed to right before it is
+	// deleted: <root>/.expiring-<job>-<unixnano>. A leading dot is never a
+	// valid job id, so nothing reads a tombstone as a job.
+	jobDirTombstone = ".expiring-"
 )
 
 // ConfiguredJobDirTTL is [reap] job_dir_ttl; ok is false when it is unset.
@@ -104,17 +108,18 @@ type jobDirVerdict struct {
 	shape        jobDirShape
 }
 
-// jobDirShape is what a re-check compares to see that a dir did not change
-// between the scan and the delete: its file count, bytes and newest mtime,
-// the operation lock left out.
+// jobDirShape is the inventory a re-check compares to see that a dir did not
+// change between the scan and the delete: its file count, bytes, newest
+// mtime and the relative path of every entry, the operation lock left out.
 type jobDirShape struct {
 	files  int
 	bytes  int64
 	newest time.Time
+	paths  []string
 }
 
 func (s jobDirShape) same(o jobDirShape) bool {
-	return s.files == o.files && s.bytes == o.bytes && s.newest.Equal(o.newest)
+	return s.files == o.files && s.bytes == o.bytes && s.newest.Equal(o.newest) && slices.Equal(s.paths, o.paths)
 }
 
 // Pass decides every dir under a.Jobs, deletes those the gate lets go when
@@ -155,7 +160,14 @@ func (p *JobDirTTL) Pass(ctx context.Context, a *App) (JobDirTTLSummary, error) 
 		if len(p.Only) > 0 && !slices.Contains(p.Only, id) {
 			continue
 		}
-		v := p.decide(ctx, a, root, id, panes)
+		var v jobDirVerdict
+		if strings.HasPrefix(id, jobDirTombstone) {
+			// A tombstone an earlier pass could not delete or rename back:
+			// listed for the operator, never deleted or restored here.
+			v.reason = "tombstone"
+		} else {
+			v = p.decide(ctx, a, root, id, panes)
+		}
 		if v.remove && p.Apply {
 			v = p.expire(ctx, a, root, id, v)
 		}
@@ -205,6 +217,9 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 	newest := shape.newest
 	var j Job
 	submitter, request := false, ""
+	// recorded holds every report path the receipt, a completion or the
+	// submission named, as recorded; jobDirReports confirms those in the dir.
+	var recorded []any
 	if _, err = os.Lstat(filepath.Join(path, "events")); err == nil {
 		if j, err = a.job(id); err != nil {
 			return keep("events-unreadable")
@@ -212,6 +227,9 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 		for _, ev := range j.Events {
 			if ev.when.After(newest) {
 				newest = ev.when
+			}
+			if report, ok := ev.Payload["report"]; ok {
+				recorded = append(recorded, report)
 			}
 		}
 	} else if !errors.Is(err, fs.ErrNotExist) {
@@ -230,6 +248,12 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 		}
 		submitter, request = true, sub.RequestID
 		j = Job{ID: id, Task: s.Task, Keep: s.Keep}
+		recorded = append(recorded, s.Report)
+		if s.ReportRelative != "" {
+			// Relative to the jobs root of the node that ran it; the same
+			// layout here names this dir.
+			recorded = append(recorded, filepath.Join(a.Jobs, s.ReportRelative))
+		}
 	}
 	if j.Keep {
 		return keep("protected")
@@ -249,7 +273,7 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 	if reason != "" {
 		return keep(reason)
 	}
-	if reason, v.note = a.jobDirArtifacts(ctx, path, j, rec); reason != "" {
+	if reason, v.note = a.jobDirArtifacts(ctx, root, path, j, rec, recorded); reason != "" {
 		v.note = ""
 		return keep(reason)
 	}
@@ -264,7 +288,9 @@ func (p *JobDirTTL) decide(ctx context.Context, a *App, root, id string, panes j
 }
 
 // expire takes the job's operation lock, decides the gate again and deletes
-// the dir only when it still passes and did not change since the scan.
+// the dir only when it still passes and did not change since the scan: it
+// renames the dir to a tombstone, checks the tombstone holds what the dir
+// held, and only then removes it; a changed tombstone is renamed back.
 func (p *JobDirTTL) expire(ctx context.Context, a *App, root, id string, scan jobDirVerdict) jobDirVerdict {
 	if p.beforeRecheck != nil {
 		p.beforeRecheck(id)
@@ -294,15 +320,51 @@ func (p *JobDirTTL) expire(ctx context.Context, a *App, root, id string, scan jo
 	if !again.remove {
 		return again
 	}
-	if !again.shape.same(scan.shape) {
+	// The gate's herdr and hk reads are all done. An inventory taken now
+	// sees a write that landed while they ran; the one decide took came
+	// before them.
+	before, err := jobDirShapeOf(dir)
+	if err != nil {
+		return kept("unreadable")
+	}
+	if !before.same(scan.shape) {
 		return kept("changed-during-pass")
 	}
 	if reason := confineJobDir(root, path, id); reason != "" {
 		return kept(reason)
 	}
+	// The dir leaves the job namespace in one atomic rename to a tombstone
+	// in the same root. A writer that opens a path under the job's name
+	// after it fails; one that wrote before it shows in the tombstone's
+	// inventory. Only a writer holding an fd opened before the rename can
+	// still write unseen (docs/job-dir-ttl.md).
+	tomb := filepath.Join(root, fmt.Sprintf("%s%s-%d", jobDirTombstone, id, a.Now().UnixNano()))
+	if _, err = os.Lstat(tomb); !errors.Is(err, fs.ErrNotExist) {
+		return kept("tombstone-busy")
+	}
+	if p.beforeRename != nil {
+		p.beforeRename(id)
+	}
+	if err = os.Rename(dir, tomb); err != nil {
+		return kept("delete-failed")
+	}
+	if p.afterRename != nil {
+		p.afterRename(id, tomb)
+	}
+	if after, err := jobDirShapeOf(tomb); err != nil || !after.same(before) {
+		if err = os.Rename(tomb, dir); err != nil {
+			// Never deleted, never retried: the next pass lists it as a
+			// tombstone for the operator.
+			slog.Error("job dir tombstone left", "job", id, "tombstone", filepath.Base(tomb))
+			a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "job_dir_expired", Job: id, Outcome: "tombstone_left", Reason: "rename-back-failed", Detail: "tombstone=" + filepath.Base(tomb)})
+			return kept("tombstone-left")
+		}
+		return kept("changed-during-pass")
+	}
 	// RemoveAll unlinks a symlink found inside the dir; it never follows one.
-	if err = os.RemoveAll(dir); err != nil {
-		slog.Warn("job dir expiry failed", "job", id, "reason", again.reason)
+	if err = os.RemoveAll(tomb); err != nil {
+		slog.Error("job dir expiry failed", "job", id, "reason", again.reason, "tombstone", filepath.Base(tomb))
+		a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "job_dir_expired", Job: id, Outcome: "tombstone_left", Reason: "delete-failed", Detail: "tombstone=" + filepath.Base(tomb)})
 		return kept("delete-failed")
 	}
 	slog.Info("job dir expired", "job", id, "reason", again.reason, "bytes", again.shape.bytes)
@@ -357,6 +419,11 @@ func jobDirShapeOf(dir string) (jobDirShape, error) {
 			s.files++
 			s.bytes += info.Size()
 		}
+		rel, err := filepath.Rel(dir, path)
+		if err != nil {
+			return err
+		}
+		s.paths = append(s.paths, filepath.ToSlash(rel))
 		return nil
 	})
 	return s, err
@@ -385,31 +452,47 @@ func readSubmissionSpawn(dir string) (Submission, Spawn, error) {
 	return sub, s, err
 }
 
-// jobDirPanes caches herdr's agent list per session for one scan.
-type jobDirPanes map[string]jobDirAgents
+// jobDirPanes caches herdr's pane inventory per session for one scan.
+type jobDirPanes map[string]jobDirInventory
 
-type jobDirAgents struct {
+// jobDirInventory is one session's `herdr pane list`, which names plain
+// shells as well as agents, and its `herdr agent list`.
+type jobDirInventory struct {
+	panes  []Pane
 	agents []Agent
 	err    error
 }
 
-// check names why j's pane may still exist: herdr cannot be read
-// (pane-unreadable), the job recorded neither a pane nor a label
-// (pane-unknown), or herdr lists the recorded pane id or label
-// (pane-live). The job's own herdr session is asked.
+// check names why j's pane may still exist: the job recorded neither a pane
+// nor a label (pane-unknown), its receipt names no herdr session
+// (pane-session-unknown, a receipt from before the session was recorded),
+// herdr cannot be read (pane-unreadable), or the pane inventory or agent
+// list of the recorded session names the recorded pane id or label
+// (pane-live). The agent list alone never proves a pane gone: a shell pane
+// whose agent exited is only in the pane list.
 func (panes jobDirPanes) check(ctx context.Context, a *App, j Job) string {
 	if j.Pane == "" && j.Label == "" {
 		return "pane-unknown"
 	}
-	route := a.laneRoute(j)
-	session := route.herdrSession()
+	session := str(j.Receipt, "herdr_session")
+	if session == "" {
+		return "pane-session-unknown"
+	}
 	list, ok := panes[session]
 	if !ok {
-		list.agents, list.err = route.agents(ctx)
+		route := a.laneRoute(j)
+		if list.panes, list.err = route.panes(ctx); list.err == nil {
+			list.agents, list.err = route.agents(ctx)
+		}
 		panes[session] = list
 	}
 	if list.err != nil {
 		return "pane-unreadable"
+	}
+	for _, pane := range list.panes {
+		if j.Pane != "" && pane.Pane == j.Pane || j.Label != "" && (pane.Label == j.Label || pane.Name == j.Label) {
+			return "pane-live"
+		}
 	}
 	for _, ag := range list.agents {
 		if j.Pane != "" && ag.Pane == j.Pane || j.Label != "" && ag.Name == j.Label {
@@ -475,10 +558,15 @@ func (a *App) spawnStatus(ctx context.Context, request string) (string, error) {
 	return reader.SpawnStatus(ctx, request)
 }
 
-// jobDirArtifacts names the first artifact in dir hk does not confirm; note
-// records an accepted cut pane screen.
-func (a *App) jobDirArtifacts(ctx context.Context, dir string, j Job, rec map[string]any) (reason, note string) {
-	if reason = a.jobDirReports(ctx, dir, j.ID, rec); reason != "" {
+// jobDirArtifacts names the first artifact in dir (root/<job>) hk does not
+// confirm; recorded are the report paths the job recorded. note records an
+// accepted cut pane screen.
+func (a *App) jobDirArtifacts(ctx context.Context, root, dir string, j Job, rec map[string]any, recorded []any) (reason, note string) {
+	reports, reason := jobDirReportFiles(root, dir, j.ID, recorded)
+	if reason != "" {
+		return reason, ""
+	}
+	if reason = jobDirReports(ctx, reports, j.ID, rec); reason != "" {
 		return reason, ""
 	}
 	for _, name := range []string{"findings.json", "result.json"} {
@@ -495,14 +583,70 @@ func (a *App) jobDirArtifacts(ctx context.Context, dir string, j Job, rec map[st
 	return "", note
 }
 
-// jobDirReports confirms each local report*.md: the record names a
-// report_doc, and the local bytes' sha256 equals the record's report_sha256
-// pin for that doc, else the sha256 hk holds for reports/<job>/<file>.
-func (a *App) jobDirReports(ctx context.Context, dir, id string, rec map[string]any) string {
-	reports, err := filepath.Glob(filepath.Join(dir, "report*.md"))
+// jobDirReportFiles lists the report files in dir (named id, under the real
+// jobs root) that hk must confirm: every top-level report*.md and each
+// recorded report path that lies in the dir and exists. A recorded path
+// outside the dir is not this pass's to delete and is skipped; one that is
+// not an absolute path keeps the dir (report-path-unreadable), since where
+// it points cannot be known.
+func jobDirReportFiles(root, dir, id string, recorded []any) ([]string, string) {
+	real := filepath.Join(root, id)
+	reports, err := filepath.Glob(filepath.Join(real, "report*.md"))
 	if err != nil {
-		return "report-unconfirmed"
+		return nil, "report-unconfirmed"
 	}
+	for _, value := range recorded {
+		if value == nil {
+			continue
+		}
+		text, ok := value.(string)
+		if !ok || strings.ContainsRune(text, 0) || text != "" && !filepath.IsAbs(text) {
+			return nil, "report-path-unreadable"
+		}
+		if text == "" {
+			continue
+		}
+		path := filepath.Clean(text)
+		rel, inside := "", false
+		for _, base := range []string{real, dir} {
+			if r, err := filepath.Rel(base, path); err == nil && within(base, path) {
+				rel, inside = r, true
+				break
+			}
+		}
+		if !inside {
+			// A path through a symlink (an aliased jobs root) may still
+			// name a file in this dir.
+			resolved, err := filepath.EvalSymlinks(path)
+			if errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return nil, "report-path-unreadable"
+			}
+			if !within(real, resolved) {
+				continue
+			}
+			rel, _ = filepath.Rel(real, resolved)
+		}
+		local := filepath.Join(real, rel)
+		if _, err := os.Lstat(local); errors.Is(err, fs.ErrNotExist) {
+			continue
+		} else if err != nil {
+			return nil, "report-unconfirmed"
+		}
+		if !slices.Contains(reports, local) {
+			reports = append(reports, local)
+		}
+	}
+	return reports, ""
+}
+
+// jobDirReports confirms each local report file: the record names a
+// report_doc, and the local bytes' sha256 equals the record's report_sha256
+// pin for that doc, else the sha256 hk holds for reports/<job>/<basename>,
+// the key `panewire done` uploads a report under.
+func jobDirReports(ctx context.Context, reports []string, id string, rec map[string]any) string {
 	if len(reports) == 0 {
 		return ""
 	}
@@ -591,17 +735,19 @@ func jobRecordHasResult(rec map[string]any) bool {
 	return true
 }
 
-// jobDirEvidence confirms every evidence/** and final/** file in dir (and any
-// file the artifact policy classes evidence or final-build) the way
-// `artifacts sweep` would before deleting it: an artifact record of this job
-// on this host lists it with the local bytes and sha256, and the archive is
-// drive-confirmed (or uploaded, under that hatch).
+// jobDirEvidence confirms every file in dir the artifact policy classes
+// evidence or final-build the way `artifacts sweep` would before deleting
+// it: an artifact record of this job on this host lists it with the local
+// bytes and sha256, and the archive is drive-confirmed (or uploaded, under
+// that hatch, for a final build no mirror needs). A file under evidence/ or
+// final/ the policy gives no such class keeps the dir
+// (evidence-unclassified): its mirror requirement is unknown.
 func (a *App) jobDirEvidence(ctx context.Context, dir string, j Job) string {
 	var pol ArtifactPolicy
 	if decode(defaultArtifactPolicy, &pol) != nil {
 		return "evidence-unconfirmed"
 	}
-	pending := map[string]bool{}
+	pending, unclassified := map[string]bool{}, false
 	err := filepath.WalkDir(dir, func(path string, entry fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -618,13 +764,21 @@ func (a *App) jobDirEvidence(ctx context.Context, dir string, j Job) string {
 			return err
 		}
 		top, _, _ := strings.Cut(filepath.ToSlash(rel), "/")
-		if top == "evidence" || top == "final" || class == "evidence" || class == "final-build" {
+		if class == "evidence" || class == "final-build" {
 			pending[path] = true
+		} else if top == "evidence" || top == "final" {
+			// No policy row classes it (a jobs root the policy's root
+			// does not match), so neither the mirror requirement nor the
+			// uploaded hatch can be decided for it.
+			unclassified = true
 		}
 		return nil
 	})
 	if err != nil {
 		return "evidence-unconfirmed"
+	}
+	if unclassified {
+		return "evidence-unclassified"
 	}
 	if len(pending) == 0 {
 		return ""
