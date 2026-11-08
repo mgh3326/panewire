@@ -123,9 +123,9 @@ func (q admissionQuota) addCreditBalances(ctx context.Context, views map[string]
 
 // shadowPools starts the comparison of each credit pool's class from
 // pacelever's pool policy, read offline, with pacelever's status document
-// (runShadow) and returns at once; pacelever is the caller's copy. When the
-// shared store serves every credit pool, the comparison records its outcome
-// as fleet event quota_pools_shadow. Only the class is compared: the used
+// (runShadow) and returns at once; pacelever is a copy of the caller's
+// views. When the shared store serves every credit pool, the comparison
+// records its outcome as fleet event quota_pools_shadow. Only the class is compared: the used
 // share is read from the shared store, which the comparison never reads, and
 // the balance is the same store's on both paths. Outcome agree: both read and
 // every credit pool has the same class; disagree otherwise, with the
