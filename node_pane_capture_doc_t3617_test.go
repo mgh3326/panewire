@@ -3,10 +3,15 @@ package panewire
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
+	"time"
+
+	"github.com/coder/websocket"
 )
 
 // hk 3617: a pane.capture that writes the screen also uploads it to hk as the
@@ -149,4 +154,124 @@ func TestHubCarriesThePaneCaptureDoc(t *testing.T) {
 			t.Fatalf("hub accepted %s", payload)
 		}
 	}
+}
+
+// captureJobInbox is a jobs inbox holding job-a and a herdr fake whose pane
+// w1:p1 is that job's, done, with a screen to save.
+func captureJobInbox(t *testing.T) (string, *nodeFakeHerdr) {
+	t.Helper()
+	inbox := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(inbox, "jobs", "job-a"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	return inbox, &nodeFakeHerdr{agents: []string{nodeAgentList(nodeAgentJSON("w1:p1", "job-a", "done", "/work/a"))}, read: "last screen\n"}
+}
+
+// captureOverPeer runs a writing pane.capture the way a hub's node.command
+// reaches the node, and returns the node.command.result the hub reads off
+// the socket.
+func captureOverPeer(t *testing.T, client *HubClient, advertise func(*hubClientConnection)) nodeCommandReply {
+	t.Helper()
+	replies := make(chan []byte, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.CloseNow()
+		if _, payload, err := conn.Read(r.Context()); err == nil {
+			replies <- payload
+		}
+	}))
+	defer server.Close()
+	conn, _, err := websocket.Dial(t.Context(), r6WSURL(server.URL, ""), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.CloseNow()
+	peer := &hubClientConnection{connection: conn}
+	advertise(peer)
+	args, _ := json.Marshal(map[string]any{"pane_id": "w1:p1", "name": "job-a", "cwd": "/work/a", "merged_after": 0, "write": true})
+	client.handleNodeCommand(t.Context(), peer, hubOutboundMessage{Type: "node.command", RequestID: "cmd-1", CommandOp: nodeCommandPaneCapture, CommandArgs: args})
+	select {
+	case payload := <-replies:
+		var reply nodeCommandReply
+		if err := json.Unmarshal(payload, &reply); err != nil || reply.Type != "node.command.result" || reply.RequestID != "cmd-1" || reply.Error != "" {
+			t.Fatalf("reply=%s err=%v", payload, err)
+		}
+		return reply
+	case <-time.After(10 * time.Second):
+		t.Fatal("node sent no node.command.result")
+	}
+	return nodeCommandReply{}
+}
+
+// Rollout in either order: a node reaches hubs that predate hk 3617, whose
+// pane.capture result decoder refuses an unknown field and with it the whole
+// result. The node still uploads the screen, but puts doc on the wire only
+// for a hub that advertised pane_capture_doc in hub.features.
+func TestNodePaneCaptureDocOnlyForAHubThatAdvertisedIt(t *testing.T) {
+	for name, test := range map[string]struct {
+		advertise func(*hubClientConnection)
+		doc       bool
+	}{
+		"hub did not advertise": {advertise: func(*hubClientConnection) {}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			hk := captureDocHK(t, 0, "")
+			inbox, fake := captureJobInbox(t)
+			reply := captureOverPeer(t, &HubClient{jobsInboxRoot: inbox, nodeHerdr: fake.run}, test.advertise)
+			if put := captureDocPut(t, hk); put["key"] != captureDocKey {
+				t.Fatalf("screen put=%v, want the upload whatever the hub", put)
+			}
+			var result map[string]any
+			if err := json.Unmarshal(reply.Result, &result); err != nil {
+				t.Fatal(err)
+			}
+			if _, carried := result["doc"]; carried != test.doc || result["outcome"] != nodeCaptureScreen {
+				t.Fatalf("result=%s, want outcome screen and doc present=%v", reply.Result, test.doc)
+			}
+			if test.doc {
+				return
+			}
+			// The pane.capture result decoder of a hub before hk 3617.
+			var old struct {
+				Outcome string `json:"outcome"`
+				Saved   string `json:"saved,omitempty"`
+			}
+			if !decodeNodeCommandStrict(reply.Result, &old) || old.Outcome != nodeCaptureScreen || old.Saved != filepath.Join(inbox, "jobs", "job-a", nodeCaptureScreenTxt) {
+				t.Fatalf("an old hub refuses result %s", reply.Result)
+			}
+		})
+	}
+}
+
+func TestHubFeaturesAdvertisePaneCaptureDoc(t *testing.T) {
+	agent := &hubAgent{features: make(chan hubFeaturesEvent, 1)}
+	agent.queueFeatures()
+	select {
+	case event := <-agent.features:
+		if !slices.Contains(event.Features, "pane_capture_doc") {
+			t.Fatalf("hub.features=%v, want pane_capture_doc", event.Features)
+		}
+	default:
+		t.Fatal("hub queued no hub.features")
+	}
+}
+
+// New hub and new node end to end: the hub advertises, the node records it
+// on that connection, and the pane.capture result the hub reads carries doc.
+func TestHubCarriesThePaneCaptureDocEndToEnd(t *testing.T) {
+	captureDocHK(t, 0, "")
+	hub, server := fsHub(t, "")
+	inbox, fake := captureJobInbox(t)
+	fsRunNode(t, server.URL, func(client *HubClient) {
+		client.jobsInboxRoot, client.nodeHerdr = inbox, fake.run
+	})
+	args := nodePaneCaptureArgs{PaneID: "w1:p1", Name: "job-a", Cwd: "/work/a", MergedAfter: 0, Write: true}
+	eventually(t, 10*time.Second, "the hub read a pane.capture result with doc", func() bool {
+		var captured nodePaneCaptureResult
+		return hub.nodeCall(t.Context(), "node-a", nodeCommandPaneCapture, args, 5*time.Second, &captured) &&
+			captured.Outcome == nodeCaptureScreen && captured.Doc == captureDocKey
+	})
 }
