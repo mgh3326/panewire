@@ -82,3 +82,57 @@ func TestExplicitFileToken(t *testing.T) {
 		}
 	}
 }
+
+// Every error return is a zero Credentials: no caller can pick a token out of
+// a refused source (hk 3570 review).
+func TestLoadErrorCarriesNoCredential(t *testing.T) {
+	writeDefault := func(t *testing.T, home, body string, mode os.FileMode) {
+		t.Helper()
+		path := filepath.Join(home, ".config", "panewire", "hk-svc.env")
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), mode); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, mode); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, home string)
+	}{
+		{"environment half CF pair", func(t *testing.T, home string) {
+			t.Setenv(URLKey, "https://hk.example")
+			t.Setenv(TokenKey, "svc-env-value")
+			t.Setenv(CFIDKey, "cf-id-value")
+		}},
+		{"file without URL", func(t *testing.T, home string) {
+			writeDefault(t, home, TokenKey+"=svc-file-value\n", 0o600)
+		}},
+		{"file half CF pair", func(t *testing.T, home string) {
+			writeDefault(t, home, URLKey+"=https://hk.example\n"+TokenKey+"=svc-file-value\n"+CFSecretKey+"=cf-secret-value\n", 0o600)
+		}},
+		{"file legacy key only", func(t *testing.T, home string) {
+			writeDefault(t, home, URLKey+"=https://hk.example\nHANDOFFKEEP_TOKEN=legacy-value\n", 0o600)
+		}},
+		{"loose file", func(t *testing.T, home string) {
+			writeDefault(t, home, URLKey+"=https://hk.example\n"+TokenKey+"=svc-file-value\n", 0o644)
+		}},
+		{"absent file", func(t *testing.T, home string) {}},
+		{"no home", func(t *testing.T, home string) { t.Setenv("HOME", "") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := isolate(t)
+			tc.setup(t, home)
+			creds, err := Load()
+			if err == nil {
+				t.Fatal("Load accepted the case")
+			}
+			if creds != (Credentials{}) {
+				t.Fatalf("an error return carried credentials: token set=%t url set=%t cf set=%t", creds.Token != "", creds.URL != "", creds.CFID != "" || creds.CFSecret != "")
+			}
+		})
+	}
+}
