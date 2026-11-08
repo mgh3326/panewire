@@ -492,14 +492,39 @@ launch = "native"   # or "shadow", the default
   - it never asks handoffkeep, never refreshes after a refusal, and never
     writes, renames or touches a cache file, so it cannot change what the
     selection reads;
-  - it runs on a context detached from the caller's, bounded by its own 2 s,
-    so it cannot spend the deadline the next gate call needs;
-  - the event is a best-effort fleet event append.
+  - it never holds up the spawn: the lookup returns pacelever's answer at
+    once, and the comparison — its local reads and its event append — runs
+    in a background goroutine with no context of the caller's, so it cannot
+    spend the deadline the next gate call needs;
+  - the event is a best-effort fleet event append, to the local state
+    directory only (no network).
 
-  When the cache holds no entry for the endpoint younger than panewire's
-  one-hour TTL, nothing is compared: `outcome=skipped reason=no_fresh_cache`.
-  When the local reads outlast the bound, `outcome=skipped
-  reason=shadow_timeout`. Otherwise:
+  **One comparison at a time.** A process runs at most one shadow comparison,
+  launch or [credit pool](#credit-pool-views), at a time. While one runs, a
+  new one is skipped — no goroutine starts — and counted; the next event a
+  comparison records starts its detail with `skipped_busy=N`. The slot is
+  freed only when the running comparison really returns, so a hung
+  filesystem holds one goroutine, not one per spawn. A comparison whose
+  local reads take more than 2 s records `outcome=skipped
+  reason=shadow_timeout` instead of its answer when they do return.
+
+  **Sampling, not a record of every spawn.** Nothing waits for a comparison
+  at process exit. A spawn admitted in a short-lived `panewire` process — a
+  `spawn --dry-run`, `plan`, `resolve`, `delegate --headless`, or the legacy
+  ssh `_spawn-stdin` — may exit before its comparison ends, and that
+  comparison is lost. A real spawn submitted with `panewire spawn` or `work`
+  is admitted in the hub server (placement: `launchPool` and the pool views)
+  and then in the node daemon (`ExecuteNode`: `admitLaunch` and the pool
+  views), both long-lived, so their comparisons complete; the losses are
+  dry runs and the CLI-only commands above, plus comparisons skipped as busy.
+
+  The cache counts as fresh under pacelever's `[bench] catalog_ttl_s` in its
+  `config.toml` (default one hour), read in the same local config read the
+  comparison makes, so the shadow and native mode agree on which cache is
+  fresh. When the cache holds no fresh entry for the endpoint, nothing is
+  compared: `outcome=skipped reason=no_fresh_cache`. A cache entry whose
+  `fetched_at` is missing or unreadable is never fresh, whatever the TTL.
+  Otherwise:
 
   ```
   kind=quota_launch_shadow outcome=disagree reason=commandcode
@@ -543,9 +568,11 @@ and its balance. The view follows `[quota].launch`:
   ```
 
   The comparison is offline and side-effect free, as the launch shadow is: it
-  reads only the pool policy files, never the shared store, on a context
-  detached from the caller's and bounded by its own 2 s
-  (`outcome=skipped reason=shadow_timeout` past it). So only the class is
+  reads only the pool policy files, never the shared store, in the background
+  after the views are returned, one comparison per process at a time, and
+  may be lost when a short-lived process exits ([Shadow and native
+  launch](#shadow-and-native-launch); `outcome=skipped reason=shadow_timeout`
+  when its reads take more than 2 s). So only the class is
   compared: the used share lives only in the shared store, and the balance is
   the same store's on both paths. `agree` means every credit pool has the same
   class; `disagree` anything else, with `diff` listing the differing
