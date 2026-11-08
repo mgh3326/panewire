@@ -21,6 +21,7 @@ func TestSpawnRefusalReplayableTable(t *testing.T) {
 		{"checkout_refused:work_root_unset", true},
 		{"checkout_refused:git_too_old", true},
 		{"checkout_refused:git-failed", true},
+		{"checkout_refused:cancelled", true},
 		{"timeout", true},
 		{"disconnected", true},
 		{"node_upgrade_required", true},
@@ -37,7 +38,7 @@ func TestSpawnRefusalReplayableTable(t *testing.T) {
 // and correct is not. git_too_old is the one fix that names neither; upgrading
 // git is the operator's repair and the same request then succeeds.
 func TestSpawnRefusalReplayableFollowsNodeFix(t *testing.T) {
-	for _, code := range []string{"busy", "dirty", "sha-missing", "work_root_unset", "origin-mismatch", "branch-elsewhere", "git_too_old", "git-failed"} {
+	for _, code := range []string{"busy", "dirty", "sha-missing", "work_root_unset", "origin-mismatch", "branch-elsewhere", "git_too_old", "git-failed", "cancelled"} {
 		fix := nodeSpawnRefusalFix("checkout_refused:"+code, "")
 		want := strings.Contains(fix, "replay")
 		if code == "git_too_old" {

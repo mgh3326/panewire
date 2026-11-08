@@ -28,6 +28,8 @@ func nodeSpawnRefusalFix(code, rule string) string {
 	}
 	if reason, ok := strings.CutPrefix(code, "checkout_refused:"); ok {
 		switch reason {
+		case "cancelled":
+			return "the node ran past the hub deadline; check the node's load, then replay the saved request"
 		case "work_root_unset":
 			return "Set spawn.json.work_root to an existing absolute node-local work root and replay the saved request."
 		case "busy":

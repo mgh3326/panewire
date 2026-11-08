@@ -640,7 +640,20 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	if err := os.MkdirAll(workRoot, 0700); err != nil {
 		return nil, "work_root_unset"
 	}
-	git := client.nodeGitRunner()
+
+	tracker := newNodeGitTracker(client.nodeGitRunner())
+	if ctx.Err() != nil {
+		return tracker.decide(ctx, nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed})
+	}
+	res, code := client.nodeWorktreePrepareRun(ctx, tracker, ownerRepo, workRoot, args)
+	if code != "" {
+		return nil, code
+	}
+	return tracker.decide(ctx, res)
+}
+
+func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *nodeGitTracker, ownerRepo, workRoot string, args nodeWorktreePrepareArgs) (nodeWorktreePrepareResult, string) {
+	git := tracker.git
 	if ok, err := nodeGitVersionOK(ctx, git); err != nil {
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 	} else if !ok {
@@ -651,11 +664,11 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	// The clone must be a direct child of the work root before anything is
 	// created there.
 	if filepath.Dir(clone) != filepath.Clean(workRoot) || filepath.Base(clone) != repo {
-		return nil, "invalid_args"
+		return nodeWorktreePrepareResult{}, "invalid_args"
 	}
 	if strings.EqualFold(args.Dir, repo) {
 		// The job worktree may never be the clone's own main worktree.
-		return nil, "invalid_args"
+		return nodeWorktreePrepareResult{}, "invalid_args"
 	}
 	if _, err := os.Stat(clone); err == nil && !nodePathWithin(workRoot, clone) {
 		// Refuse before the lock path resolves beside a target outside the root.
@@ -663,6 +676,9 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 	}
 	lockPath, err := nodeGitOpLockPath(clone)
 	if err != nil {
+		tracker.step = "lock"
+		tracker.exit = 1
+		tracker.stderr = err.Error()
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
 	wait := client.nodeGitOpWait()
@@ -672,8 +688,12 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 		case errors.Is(err, errNodeGitOpBusy):
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeBusy, RetryAfterS: nodeGitOpRetryAfter(wait)}, ""
 		case errors.Is(err, errNodeGitOpCancelled):
+			tracker.step = "lock"
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeCancelled}, ""
 		}
+		tracker.step = "lock"
+		tracker.exit = 1
+		tracker.stderr = err.Error()
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
 	defer release()
@@ -699,6 +719,9 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 		}
 	default:
+		tracker.step = "stat"
+		tracker.exit = 1
+		tracker.stderr = err.Error()
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
 	if err := nodeEnsureHarnessStateExcludes(ctx, git, clone); err != nil {
@@ -720,10 +743,170 @@ func (client *HubClient) nodeWorktreePrepare(ctx context.Context, args nodeWorkt
 		if result.Worktree == nil || result.Worktree.Head == "" {
 			// A success the hub would reject as malformed is reported as
 			// the failure it is; a retry answers reused.
+			if tracker.step == "" || tracker.step == "prepare" {
+				tracker.step = "inspect"
+				tracker.subcmd = "inspect"
+				tracker.exit = 1
+				tracker.stderr = "worktree head missing"
+			}
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 		}
 	}
 	return result, ""
+}
+
+type nodeGitTracker struct {
+	runner relayCommandRunner
+	step   string
+	subcmd string
+	exit   int
+	stderr string
+}
+
+func newNodeGitTracker(runner relayCommandRunner) *nodeGitTracker {
+	return &nodeGitTracker{
+		runner: runner,
+		step:   "prepare",
+		subcmd: "prepare",
+	}
+}
+
+func (tracker *nodeGitTracker) git(ctx context.Context, args ...string) ([]byte, error) {
+	subcmd := nodeGitSubcommand(args)
+	tracker.step = subcmd
+	tracker.subcmd = subcmd
+	out, err := tracker.runner(ctx, args...)
+	if err != nil {
+		tracker.exit, tracker.stderr = extractGitExitAndStderr(err)
+	}
+	return out, err
+}
+
+func (tracker *nodeGitTracker) decide(ctx context.Context, result nodeWorktreePrepareResult) (nodeWorktreePrepareResult, string) {
+	if result.Outcome == nodeOutcomeGitFailed {
+		if ctx.Err() != nil {
+			result.Outcome = nodeOutcomeCancelled
+			logNodeCheckoutCancelled(ctx, tracker.step, tracker.subcmd)
+		} else {
+			logNodeCheckoutGitFailed(tracker.step, tracker.subcmd, tracker.exit, tracker.stderr)
+		}
+	} else if result.Outcome == nodeOutcomeCancelled {
+		logNodeCheckoutCancelled(ctx, tracker.step, tracker.subcmd)
+	}
+	return result, ""
+}
+
+func logNodeCheckoutGitFailed(step, subcmd string, exit int, stderr string) {
+	sub := subcmd
+	if sub == "" {
+		sub = step
+	}
+	if exit <= 0 {
+		exit = 1
+	}
+	stderrTail := nodeCheckoutBoundedStderr(stderr)
+	slog.Warn("node checkout git failed",
+		"step", step,
+		"subcommand", sub,
+		"exit", exit,
+		"stderr", stderrTail,
+	)
+}
+
+func logNodeCheckoutCancelled(ctx context.Context, step, subcmd string) {
+	err := ctx.Err()
+	if subcmd != "" && subcmd != step {
+		slog.Info("node checkout cancelled",
+			"step", step,
+			"subcommand", subcmd,
+			"err", err,
+			"error", err,
+		)
+	} else {
+		slog.Info("node checkout cancelled",
+			"step", step,
+			"err", err,
+			"error", err,
+		)
+	}
+}
+
+func extractGitExitAndStderr(err error) (int, string) {
+	if err == nil {
+		return 0, ""
+	}
+	exitCode := 1
+	stderr := ""
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		exitCode = exitErr.ExitCode()
+		stderr = string(exitErr.Stderr)
+	} else {
+		type coder interface {
+			ExitCode() int
+		}
+		if c, ok := err.(coder); ok {
+			exitCode = c.ExitCode()
+		}
+		type stderrer interface {
+			Stderr() []byte
+		}
+		if s, ok := err.(stderrer); ok {
+			stderr = string(s.Stderr())
+		} else {
+			type stderrerStr interface {
+				Stderr() string
+			}
+			if s, ok := err.(stderrerStr); ok {
+				stderr = s.Stderr()
+			}
+		}
+	}
+	if exitCode == 1 {
+		var code int
+		if _, scanErr := fmt.Sscanf(err.Error(), "exit status %d", &code); scanErr == nil {
+			exitCode = code
+		}
+	}
+	if stderr == "" {
+		stderr = err.Error()
+	}
+	return exitCode, stderr
+}
+
+var userinfoCredentialPattern = regexp.MustCompile(`(?i)[^/\s:@]+:[^/\s@]+@`)
+
+func nodeCheckoutBoundedStderr(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	redacted := fleetEventRedact(raw)
+	redacted = userinfoCredentialPattern.ReplaceAllString(redacted, "[redacted]@")
+	return utf8SuffixWithin(redacted, hubSpawnStderrTail)
+}
+
+func nodeGitSubcommand(args []string) string {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "-C" || arg == "-c" {
+			i++
+			continue
+		}
+		if strings.HasPrefix(arg, "-C") {
+			continue
+		}
+		if arg == "--version" {
+			return "version"
+		}
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		return arg
+	}
+	if len(args) > 0 {
+		return strings.TrimPrefix(args[0], "--")
+	}
+	return "git"
 }
 
 func (client *HubClient) nodePrepareBranch(ctx context.Context, git relayCommandRunner, clone, dir string, args nodeWorktreePrepareArgs, result *nodeWorktreePrepareResult) string {
