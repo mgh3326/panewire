@@ -142,9 +142,27 @@ type gateDenial struct {
 
 func admissionNormalize(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
-// admissionCredit marks the credit rungs: the pi- profiles and cmd-dsflash41.
-func admissionCredit(profile string) bool {
-	return strings.HasPrefix(profile, "pi-") || profile == "cmd-dsflash41"
+// commandcodePool is the catalog pool of the Command Code account. Every rung
+// on it draws on that one account and its 30-day window (docs/quota.md
+// §Command Code seats).
+const commandcodePool = "commandcode"
+
+// admissionCredit marks a credit rung: a pi- profile, or any rung whose
+// catalog pool is commandcode. The pool decides, not the profile name, so
+// cmd-dsflash41 and omp-dsflash41 are credit rungs for the same reason.
+func admissionCredit(profile, pool string) bool {
+	return strings.HasPrefix(profile, "pi-") || pool == commandcodePool
+}
+
+// profileCredit answers admissionCredit for a caller that holds only a
+// profile: it asks the pool of each of the profile's rungs.
+func (in admissionInputs) profileCredit(profile string) bool {
+	if admissionCredit(profile, "") {
+		return true
+	}
+	return slices.ContainsFunc(in.profileRows(profile), func(r admissionRow) bool {
+		return admissionCredit(profile, r.Pool)
+	})
 }
 
 func admissionValidPct(p *float64) bool {
@@ -159,13 +177,13 @@ func admissionPct(v float64) *float64 {
 }
 
 // admissionRoleCheck is pacelever's roleCheck as of v0.3.28: a credit rung
-// (pi- profiles and cmd-dsflash41) seats only a worker or tester, or a builder
-// on a placed default rung, and the consult models keep their seat
+// (pi- profiles and commandcode-pool rungs) seats only a worker or tester, or a
+// builder on a placed default rung, and the consult models keep their seat
 // restrictions. cmd-dsflash41 is narrower still: worker or tester only.
 func admissionRoleCheck(req admissionRequest, row admissionRow) *gateDenial {
 	role := admissionNormalize(req.Role)
 	purpose := admissionNormalize(req.Purpose)
-	if admissionCredit(req.Profile) {
+	if admissionCredit(req.Profile, row.Pool) {
 		allowed := role == "worker" || role == "tester" || (role == "builder" && row.Placed && row.Gate == defaultGate)
 		if !allowed {
 			return &gateDenial{gateRoleDenied, "role_restricted: credit rung requires worker/tester; placed default rungs also allow builder"}
@@ -287,7 +305,7 @@ func admissionDefaultEffort(rows []admissionRow) string {
 func (in admissionInputs) resolveRow(req admissionRequest, allowUnrated bool) (admissionRow, string, string, *gateDenial) {
 	profile := req.Profile
 	requested := admissionNormalize(req.Effort)
-	if admissionCredit(profile) && requested == "" {
+	if in.profileCredit(profile) && requested == "" {
 		return admissionRow{}, "", "", &gateDenial{gateBlocked, "explicit --effort required for credit profile"}
 	}
 	if requested != "" && admissionEffortRank(requested) == 99 {
@@ -296,7 +314,7 @@ func (in admissionInputs) resolveRow(req admissionRequest, allowUnrated bool) (a
 			return admissionRow{}, "", "", &gateDenial{gateBlocked, "unknown effort rung"}
 		}
 	}
-	if admissionCredit(profile) {
+	if in.profileCredit(profile) {
 		allowed := requested == "low" || requested == "high" || requested == "max"
 		if strings.HasPrefix(profile, "pi-") {
 			allowed = slices.Contains([]string{"off", "minimal", "low", "medium", "high", "xhigh", "max"}, requested)
@@ -338,7 +356,7 @@ func (in admissionInputs) resolveRow(req admissionRequest, allowUnrated bool) (a
 	}
 	i := slices.IndexFunc(eligible, func(r admissionRow) bool { return r.Effort == resolved })
 	if i < 0 {
-		if admissionCredit(profile) || profile == "codex-terra61" {
+		if in.profileCredit(profile) || profile == "codex-terra61" {
 			return admissionRow{}, "", "", &gateDenial{gateBlocked, "e6_arm_required: rung is not placed"}
 		}
 		i = slices.IndexFunc(eligible, func(r admissionRow) bool { return r.Effort == fallback })
@@ -508,7 +526,7 @@ func (in admissionInputs) judgeWith(req admissionRequest, allowUnrated bool) adm
 	}
 	d.Pool = hint.Pool
 	// Consult-role checks precede subscription and request-shape checks.
-	if !admissionCredit(profile) {
+	if !in.profileCredit(profile) {
 		if e := admissionRoleCheck(req, hint); e != nil {
 			return d.refuse(e.code, e.msg)
 		}
@@ -717,7 +735,7 @@ func (in admissionInputs) recommend(grade, role string) []admissionAlternative {
 		}
 		seen[key] = true
 		req := admissionRequest{Profile: row.Profile, Effort: row.Effort, Role: role}
-		if req.Role == "" && admissionCredit(row.Profile) {
+		if req.Role == "" && admissionCredit(row.Profile, row.Pool) {
 			req.Role = "worker"
 		}
 		d := in.judge(req)
@@ -730,7 +748,7 @@ func (in admissionInputs) recommend(grade, role string) []admissionAlternative {
 		if d.UsedPct != nil {
 			r.score -= *d.UsedPct
 		}
-		if admissionCredit(row.Profile) {
+		if admissionCredit(row.Profile, row.Pool) {
 			r.priority = 4
 		}
 		if d.Basis != "" {
