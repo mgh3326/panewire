@@ -48,7 +48,9 @@ jobs:
           load: true
           tags: panewire:ci
           build-args: PANEWIRE_VERSION=${{ steps.version.outputs.version }}
-          cache-from: type=registry,ref=${{ steps.image.outputs.name }}:buildcache
+          # Same gate as the login step: without GHCR credentials (fork PR) the
+          # import is dropped and the build runs uncached, never against the private tag.
+          cache-from: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && format('type=registry,ref={0}:buildcache', steps.image.outputs.name) || '' }}
       - name: Smoke test image
         if: github.event_name != 'pull_request'
         env:
