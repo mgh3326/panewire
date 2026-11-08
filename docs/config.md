@@ -507,10 +507,15 @@ task claim (`POST /v1/tasks/{id}/claim`), the respawn rebind
 (`PUT /v1/documents/{key}`, kind `brief`, the job id). The URL is the loader's
 (`[quota] url` does not apply), and the HTTP settings are those of the other hk
 clients: 8 s per call, no redirect followed, HTTPS off loopback and the
-tailnet, no proxy over plain HTTP. Refusal texts and exit classes are the CLI
+tailnet, no proxy over plain HTTP; the brief upload alone has 60 s, as the CLI's
+`doc put` had no bound of its own. Refusal texts and exit classes are the CLI
 path's: hk's error reads as `handoffkeep: <code>[: reason]`, a claim refusal is
 still `task claim exited with status 1`, and a routing doc that fails its schema
-never replaces the last good cache, which is used with a warning. `panewire
+never replaces the last good cache, which is used with a warning. Task and owner
+answers are read as the CLI path read its output (a string id, an unparseable
+timestamp), and a 2xx answer that cannot be read at all is never covered by
+`--bypass`: the precheck refuses with `unreadable task precheck` (exit 70) and
+the claim records `task claim did not confirm claimed_by and refs.job_id`. `panewire
 work TASK_ID` still reads its task through the CLI: it needs the task's
 `refs.report_path`, which the public client's task type does not carry.
 

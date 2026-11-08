@@ -2,6 +2,7 @@ package fleet
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -29,10 +30,10 @@ func (a *App) resolveOwner(ctx context.Context, s *Spawn) error {
 		return nil
 	}
 	t, err := hkGetTask(ctx, task)
-	if err != nil {
+	if err != nil && !errors.Is(err, errHKUnreadable) {
 		return fail(exitUsage, "cannot read task %s from hk to resolve the owner (%s); pass --owner LANE explicitly", task, hkErrText(err))
 	}
-	if !hkTaskIDIs(t, task) {
+	if err != nil || !hkTaskIDIs(t, task) {
 		return fail(exitUsage, "unreadable task %s from hk to resolve the owner; pass --owner LANE explicitly", task)
 	}
 	project := hkTaskProject(t)
@@ -40,10 +41,10 @@ func (a *App) resolveOwner(ctx context.Context, s *Spawn) error {
 		return fail(exitUsage, "task %s names no project, so hk cannot resolve an owner; pass --owner LANE explicitly", task)
 	}
 	owner, err := hkProjectOwner(ctx, project)
-	if err != nil {
+	if err != nil && !errors.Is(err, errHKUnreadable) {
 		return fail(exitUsage, "cannot resolve the hk owner of project %s (%s); pass --owner LANE explicitly", project, hkErrText(err))
 	}
-	if strings.TrimSpace(owner.EffectiveOwner) == "" {
+	if err != nil || strings.TrimSpace(owner.EffectiveOwner) == "" {
 		return fail(exitUsage, "hk returned no effective owner for project %s; pass --owner LANE explicitly", project)
 	}
 	s.Owner = owner.EffectiveOwner
@@ -52,15 +53,27 @@ func (a *App) resolveOwner(ctx context.Context, s *Spawn) error {
 }
 
 // hkProjectOwner reads the project's owner over hk HTTP. A project hk does
-// not know reads "no such project", as the hk CLI printed it.
+// not know reads "no such project", as the hk CLI printed it. The answer is
+// read as the CLI path read `handoffkeep tasks owner` output — its two lanes
+// only, so a timestamp hk's typed client cannot decode does not matter — and
+// one that path could not read is errHKUnreadable.
 func hkProjectOwner(ctx context.Context, project string) (client.ProjectOwner, error) {
-	c, err := newHKClient()
-	if err != nil {
+	body, answered, err := hkAnswer(func(c client.Client) error {
+		_, e := c.ProjectOwner(ctx, project)
+		return e
+	})
+	if client.ErrorCode(err) == "not_found" {
+		return client.ProjectOwner{}, errors.New("no such project: " + project)
+	}
+	if !answered {
 		return client.ProjectOwner{}, err
 	}
-	owner, err := c.ProjectOwner(ctx, project)
-	if client.ErrorCode(err) == "not_found" {
-		return owner, errors.New("no such project: " + project)
+	var owner struct {
+		DesignLane     string `json:"design_lane"`
+		EffectiveOwner string `json:"effective_owner"`
 	}
-	return owner, err
+	if json.Unmarshal(body, &owner) != nil {
+		return client.ProjectOwner{}, errHKUnreadable
+	}
+	return client.ProjectOwner{Name: project, DesignLane: owner.DesignLane, EffectiveOwner: owner.EffectiveOwner}, nil
 }

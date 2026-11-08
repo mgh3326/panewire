@@ -1,12 +1,16 @@
 package fleet
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mgh3326/handoffkeep/client"
 
@@ -19,11 +23,24 @@ import (
 // is panewire's svc-panewire credential from hkcred.Load — the environment,
 // else ~/.config/panewire/hk-svc.env — and never the hk CLI's config.env. The
 // HTTP settings are those of panewire's other hk clients (catalog.go,
-// fleet.go): the catalogTimeout per call, no redirect followed, HTTPS off
-// loopback and the tailnet, and over plain HTTP no proxy, so an HTTP_PROXY
-// never receives the bearer. An unconfigured credential is the
-// *hkcred.UnconfiguredError Load returns; no error names the URL or a value.
-func newHKClient() (client.Client, error) {
+// fleet.go): the catalogTimeout per call (hkCallTimeout), no redirect
+// followed, HTTPS off loopback and the tailnet, and over plain HTTP no proxy,
+// so an HTTP_PROXY never receives the bearer. An unconfigured credential is
+// the *hkcred.UnconfiguredError Load returns; no error names the URL or a
+// value.
+func newHKClient() (client.Client, error) { return newHKClientWithin(hkCallTimeout) }
+
+// The bounds of one hk call. The hub brief upload has its own, longer one:
+// the hk CLI's `doc put` it replaces had no timeout, and a large brief over a
+// slow link must not fail at a task read's bound. Variables only so a test
+// can shrink them.
+var (
+	hkCallTimeout        = catalogTimeout
+	hkBriefUploadTimeout = 60 * time.Second
+)
+
+// newHKClientWithin is newHKClient with timeout as each call's bound.
+func newHKClientWithin(timeout time.Duration) (client.Client, error) {
 	creds, err := hkcred.Load()
 	if err != nil {
 		return client.Client{}, err
@@ -36,7 +53,7 @@ func newHKClient() (client.Client, error) {
 	if u.Scheme != "https" && !(plain && (isLoopbackHost(u.Hostname()) || isTailnetHost(u.Hostname()))) {
 		return client.Client{}, errors.New("hk endpoint requires HTTPS off loopback and the tailnet")
 	}
-	h := &http.Client{Timeout: catalogTimeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	h := &http.Client{Timeout: timeout, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	if plain {
 		t := http.DefaultTransport.(*http.Transport).Clone()
 		t.Proxy = nil
@@ -67,27 +84,148 @@ func hkTaskID(task string) (int64, error) {
 	return id, nil
 }
 
-// hkTaskIDIs reports whether an answered task id is the requested one; an
-// answer without an id (0) is not checked, as the CLI path did not.
+// hkTaskIDIs reports whether an answered task is the requested one. The id
+// is cliTaskAnswer's: the requested id when hk's answer named it or named
+// none, 0 when it named another — an explicit 0 included.
 func hkTaskIDIs(t client.Task, task string) bool {
-	return t.ID == 0 || strconv.FormatInt(t.ID, 10) == task
+	return t.ID != 0 && strconv.FormatInt(t.ID, 10) == task
 }
 
-// hkGetTask reads one task; a task hk does not have is errHKNotFound.
-func hkGetTask(ctx context.Context, task string) (client.Task, error) {
+// errHKUnreadable is a 2xx hk answer the hk CLI path's parser could not read.
+// It is not an hk error: hk answered, so --bypass, which covers an hk that
+// cannot be reached or refuses, never covers it. Each site reports it as the
+// CLI path reported unparseable `handoffkeep` output.
+var errHKUnreadable = errors.New("unreadable hk answer")
+
+// hkAnswerLimit bounds the 2xx body kept for cliTaskAnswer; a longer one is
+// cut, so it does not parse and reads as errHKUnreadable.
+const hkAnswerLimit = 4 << 20
+
+// answerCapture keeps the body of a 2xx answer — hk's client decodes it into
+// its types and drops it — so the spawn path can read it as the CLI path did.
+// It reads the body whole inside the round trip, under the call's bound; a
+// failure to read it is a transport error, as before.
+type answerCapture struct {
+	next     http.RoundTripper
+	body     []byte
+	answered bool
+}
+
+func (c *answerCapture) RoundTrip(r *http.Request) (*http.Response, error) {
+	c.body, c.answered = nil, false
+	resp, err := c.next.RoundTrip(r)
+	if err != nil || resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return resp, err
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, hkAnswerLimit))
+	resp.Body.Close()
+	if err != nil {
+		return nil, err
+	}
+	resp.Body = io.NopCloser(bytes.NewReader(body))
+	c.body, c.answered = body, true
+	return resp, nil
+}
+
+// hkAnswer runs call on an hk client that keeps the 2xx answer's body.
+// answered is false when hk sent none — a transport failure, a non-2xx or
+// HTML answer (*client.HTTPError), a refused redirect — and call's error then
+// stands as it is: those keep their --bypass semantics.
+func hkAnswer(call func(client.Client) error) (body []byte, answered bool, err error) {
+	c, err := newHKClient()
+	if err != nil {
+		return nil, false, err
+	}
+	h := *c.HTTP
+	capture := &answerCapture{next: h.Transport}
+	if capture.next == nil {
+		capture.next = http.DefaultTransport
+	}
+	h.Transport = capture
+	c.HTTP = &h
+	err = call(c)
+	var he *client.HTTPError
+	if errors.As(err, &he) || !capture.answered {
+		return nil, false, err
+	}
+	return capture.body, true, err
+}
+
+// hkTaskCall runs a task call (read, claim, rebind) and reads hk's answer
+// with the hk CLI path's parser (cliTaskAnswer), so the spawn path sees the
+// fields it saw through `handoffkeep`: a string id or priority, a non-string
+// job_id and a timestamp that does not parse read as they did, where hk's
+// typed client fails to decode. An answer that parser cannot read is
+// errHKUnreadable. Any other error is call's own: an hk error or outage, or
+// the client's check of an answer it decoded (claim_claimant_not_recorded).
+func hkTaskCall(task string, call func(client.Client, int64) (client.Task, error)) (client.Task, error) {
 	id, err := hkTaskID(task)
 	if err != nil {
 		return client.Task{}, err
 	}
-	c, err := newHKClient()
-	if err != nil {
+	body, answered, err := hkAnswer(func(c client.Client) error {
+		_, e := call(c, id)
+		return e
+	})
+	if !answered {
 		return client.Task{}, err
 	}
-	t, found, err := c.GetTask(ctx, id)
-	if err == nil && !found {
-		err = errHKNotFound
+	t, ok := cliTaskAnswer(body, task)
+	if !ok {
+		return client.Task{}, errHKUnreadable
+	}
+	if json.NewDecoder(bytes.NewReader(body)).Decode(new(client.Task)) != nil {
+		// The client's error is its decode of an answer the CLI parser
+		// reads, so its checks of the answer never ran; the spawn path
+		// makes its own, as it did on the CLI's output.
+		err = nil
 	}
 	return t, err
+}
+
+// cliTaskAnswer reads a task answer as panewire read `handoffkeep tasks
+// show|claim|rebind` output (the Task type), and gives it as a client.Task.
+// The id is the requested one when the answer names it — a number or a
+// string — or names none (absent or null), as that parser accepted; a task
+// naming another id, 0 included, has id 0, which hkTaskIDIs refuses. A
+// created_at that does not parse is zero, so the task's wait reads 0; a
+// priority is a whole number or a numeric string, else 0; a non-string
+// refs.job_id reads "".
+func cliTaskAnswer(body []byte, task string) (client.Task, bool) {
+	var t Task
+	if json.Unmarshal(body, &t) != nil {
+		return client.Task{}, false
+	}
+	out := client.Task{Title: t.Title, State: t.State, ClaimedBy: t.ClaimedBy, Refs: client.TaskRefs{JobID: str(t.Refs, "job_id")}}
+	if t.ID == nil || scalar(t.ID) == task {
+		out.ID, _ = strconv.ParseInt(task, 10, 64)
+	}
+	if t.Project != "" {
+		out.Project = &t.Project
+	}
+	if ts, e := time.Parse(time.RFC3339Nano, t.CreatedAt); e == nil {
+		out.CreatedAt = ts
+	}
+	switch n := t.Priority.(type) {
+	case float64:
+		if n == float64(int(n)) {
+			out.Priority = int(n)
+		}
+	case string:
+		out.Priority, _ = strconv.Atoi(strings.TrimSpace(n))
+	}
+	return out, true
+}
+
+// hkGetTask reads one task; a task hk does not have is errHKNotFound.
+func hkGetTask(ctx context.Context, task string) (client.Task, error) {
+	return hkTaskCall(task, func(c client.Client, id int64) (client.Task, error) {
+		t, found, err := c.GetTask(ctx, id)
+		if err == nil && !found {
+			err = errHKNotFound
+		}
+		return t, err
+	})
 }
 
 // hkTaskProject is the task's project, "" when it has none.

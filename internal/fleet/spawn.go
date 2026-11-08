@@ -232,9 +232,13 @@ func (s Spawn) unlinkedReviewer() bool {
 }
 
 // taskPrecheck reads the task over hk HTTP (hkGetTask) and refuses a spawn
-// the task cannot take.
+// the task cannot take. --bypass covers an hk the precheck cannot reach or
+// that errs, never an answer it cannot read (errHKUnreadable).
 func (a *App) taskPrecheck(ctx context.Context, s Spawn) (client.Task, bool, error) {
 	t, err := hkGetTask(ctx, s.Task)
+	if errors.Is(err, errHKUnreadable) {
+		return t, false, fail(exitConfig, "unreadable task precheck")
+	}
 	if err != nil {
 		if strings.Contains(err.Error(), "not_found") {
 			return t, false, fail(exitUsage, "task does not exist")
@@ -312,10 +316,10 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 		return "inherited"
 	}
 	t, e := hkRebindTask(ctx, s.Task, s.Inherited, s.Job, s.Label, "respawn continues "+state+" parent job "+s.Inherited)
-	if e != nil {
+	if e != nil && !errors.Is(e, errHKUnreadable) {
 		return refused("task rebind refused: " + hkErrText(e))
 	}
-	if t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
+	if e != nil || t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
 		return refused("task rebind did not confirm claimed_by and refs.job_id")
 	}
 	return "rebound"
@@ -323,16 +327,11 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev
 
 // hkRebindTask moves the task's job link from fromJob to toJob over hk HTTP.
 // A refusal (such as wrk_receipt_required) is the server's error code.
+// An answer the CLI path's parser cannot read is errHKUnreadable.
 func hkRebindTask(ctx context.Context, task, fromJob, toJob, by, reason string) (client.Task, error) {
-	id, err := hkTaskID(task)
-	if err != nil {
-		return client.Task{}, err
-	}
-	c, err := newHKClient()
-	if err != nil {
-		return client.Task{}, err
-	}
-	return c.RebindTaskJob(ctx, id, fromJob, toJob, by, reason)
+	return hkTaskCall(task, func(c client.Client, id int64) (client.Task, error) {
+		return c.RebindTaskJob(ctx, id, fromJob, toJob, by, reason)
+	})
 }
 
 // taskLinkedTo reports whether hk's task record already binds the task to
@@ -346,17 +345,12 @@ type taskClaimFailure struct{ reason string }
 
 func (e *taskClaimFailure) Error() string { return e.reason }
 
-// hkClaimTask claims the task for label, linked to job, over hk HTTP.
+// hkClaimTask claims the task for label, linked to job, over hk HTTP. An
+// answer the CLI path's parser cannot read is errHKUnreadable.
 func hkClaimTask(ctx context.Context, task, label, job string) (client.Task, error) {
-	id, err := hkTaskID(task)
-	if err != nil {
-		return client.Task{}, err
-	}
-	c, err := newHKClient()
-	if err != nil {
-		return client.Task{}, err
-	}
-	return c.ClaimTask(ctx, id, label, job, "")
+	return hkTaskCall(task, func(c client.Client, id int64) (client.Task, error) {
+		return c.ClaimTask(ctx, id, label, job, "")
+	})
 }
 
 // hkClaimRefused reports whether a claim error is a refusal a bypassed spawn
@@ -380,7 +374,7 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task client.Task, bypassed 
 		status = "unlinked"
 	} else if s.Inherited == "" {
 		t, err := hkClaimTask(ctx, s.Task, s.Label, s.Job)
-		if err != nil {
+		if err != nil && !errors.Is(err, errHKUnreadable) {
 			if !bypassed || !s.Bypass || hkClaimRefused(err) {
 				if a.taskLinkedTo(ctx, s.Task, s.Job) {
 					// hk already binds the task to this job (a design session
@@ -394,7 +388,9 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task client.Task, bypassed 
 				status = "bypassed"
 			}
 		} else {
-			if t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
+			// hk answered: an answer that cannot be read did not confirm
+			// the binding, and --bypass does not cover it.
+			if err != nil || t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
 				claimFailure = &taskClaimFailure{reason: "task claim did not confirm claimed_by and refs.job_id"}
 				status = "failed"
 			} else {
