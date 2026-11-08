@@ -26,6 +26,9 @@ type Config struct {
 	Placement map[string]any            `toml:"placement"`
 	Quota     map[string]any            `toml:"quota"`
 	Sweep     map[string]any            `toml:"sweep"`
+	// Reap holds [reap] job_dir_ttl, the node's opt-in to the job dir TTL
+	// (docs/job-dir-ttl.md).
+	Reap map[string]any `toml:"reap"`
 }
 
 func expand(p string) string {
@@ -101,7 +104,7 @@ func LoadConfig(path string) (Config, error) {
 		return c, fail(exitConfig, "hosts config: %v", e)
 	}
 	for _, k := range slices.Sorted(maps.Keys(raw)) {
-		if k != "local" && k != "hub" && k != "hosts" && k != "artifacts" && k != "placement" && k != "quota" && k != "sweep" {
+		if k != "local" && k != "hub" && k != "hosts" && k != "artifacts" && k != "placement" && k != "quota" && k != "sweep" && k != "reap" {
 			return c, fail(exitConfig, "unknown hosts table %q", k)
 		}
 	}
@@ -136,6 +139,11 @@ func LoadConfig(path string) (Config, error) {
 	if v, ok := c.Sweep["remove_worktrees"]; ok {
 		if _, ok := v.(bool); !ok {
 			return c, fail(exitConfig, "sweep.remove_worktrees must be a boolean")
+		}
+	}
+	if v, ok := c.Reap["job_dir_ttl"]; ok {
+		if text, isText := v.(string); !isText || jobDirTTLValue(text) == 0 {
+			return c, fail(exitConfig, "reap.job_dir_ttl must be a duration of at least %s, such as \"72h\" or \"3d\"", MinJobDirTTL)
 		}
 	}
 	if v, ok := c.Hub["state_publisher_ttl_s"]; ok {

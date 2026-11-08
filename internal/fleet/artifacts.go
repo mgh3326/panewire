@@ -585,12 +585,9 @@ func (a *App) artifactSweep(ctx context.Context, args []string) error {
 	if e = decode(b, &pol); e != nil || pol.Schema != "fleet.artifact-policy.v1" {
 		return fail(exitConfig, "invalid artifact policy")
 	}
-	hatch := str(a.Config.Artifacts, "local_delete_at")
-	if hatch == "" {
-		hatch = "drive_confirmed"
-	}
-	if hatch != "drive_confirmed" && hatch != "uploaded" {
-		return fail(exitConfig, "invalid local_delete_at")
+	hatch, e := a.artifactDeleteHatch()
+	if e != nil {
+		return e
 	}
 	agents, e := a.agents(ctx)
 	if e != nil {
@@ -654,12 +651,8 @@ func (a *App) artifactSweep(ctx context.Context, args []string) error {
 			if e != nil {
 				continue
 			}
-			var d struct{ Body string }
-			if json.Unmarshal(b, &d) != nil {
-				continue
-			}
-			var rec ArtifactRecord
-			if json.Unmarshal([]byte(d.Body), &rec) != nil || rec.Schema != "fleet.artifact.v2" || rec.Host != a.machine() || rec.Job != "" && rec.Job != j.ID || rec.Task != "" && rec.Task != j.Task {
+			rec, ok := a.jobArtifactRecord(b, j)
+			if !ok {
 				continue
 			}
 			if e = a.sweepRecord(ctx, j, doc.Key, rec, pol, hatch, *apply); e != nil {
@@ -685,50 +678,16 @@ func (a *App) sweepRecord(ctx context.Context, j Job, key string, rec ArtifactRe
 			continue
 		}
 		path := filepath.Join(src, row.Path)
-		class := ""
-		mirror := row.Mirror
-		for _, rule := range pol.Rows {
-			var root struct{ Path, Kind string }
-			raw, ok := pol.Roots[rule.Root]
-			if !ok {
-				return fail(exitConfig, "unknown artifact policy root")
-			}
-			if json.Unmarshal(raw, &root) != nil {
-				var rel string
-				if json.Unmarshal(raw, &rel) != nil {
-					return fail(exitConfig, "invalid artifact policy root")
-				}
-				root.Path = rel
-				root.Kind = "per-job"
-			}
-			workRoot := filepath.Dir(filepath.Dir(a.Jobs))
-			base := filepath.Join(workRoot, root.Path)
-			if !within(workRoot, base) {
-				return fail(exitConfig, "artifact root escapes work root")
-			}
-			if root.Kind == "per-job" {
-				base = filepath.Join(base, j.ID)
-			}
-			rel, e := filepath.Rel(base, path)
-			if e != nil || strings.HasPrefix(rel, "..") {
-				continue
-			}
-			if rule.Job != "" && rule.Job != j.ID || rule.Host != "" && rule.Host != a.machine() {
-				continue
-			}
-			if glob(rule.Glob, filepath.ToSlash(rel)) {
-				class = rule.Class
-				mirror = mirror || rule.Mirror
-				break
-			}
+		class, ruleMirror, e := a.artifactClass(pol, j.ID, path)
+		if e != nil {
+			return e
 		}
+		mirror := row.Mirror || ruleMirror
 		if class != "evidence" && class != "final-build" {
 			continue
 		}
-		if rec.Archive.State != "drive_confirmed" && rec.Archive.ConfirmedAt == "" {
-			if hatch != "uploaded" || class == "evidence" || mirror || row.UploadedAt == "" {
-				continue
-			}
+		if !artifactArchived(rec, row, class, mirror, hatch) {
+			continue
 		}
 		if excluded(row.Path, stringsValue(a.Config.Artifacts, "exclude")) {
 			continue
@@ -781,6 +740,84 @@ func (a *App) sweepRecord(ctx context.Context, j Job, key string, rec ArtifactRe
 	}
 	return nil
 }
+
+// artifactDeleteHatch is [artifacts] local_delete_at: drive_confirmed (the
+// default) or uploaded.
+func (a *App) artifactDeleteHatch() (string, error) {
+	hatch := str(a.Config.Artifacts, "local_delete_at")
+	if hatch == "" {
+		hatch = "drive_confirmed"
+	}
+	if hatch != "drive_confirmed" && hatch != "uploaded" {
+		return "", fail(exitConfig, "invalid local_delete_at")
+	}
+	return hatch, nil
+}
+
+// jobArtifactRecord reads an hk document answer as an artifact record of job
+// j written on this host; ok is false for anything else.
+func (a *App) jobArtifactRecord(answer []byte, j Job) (ArtifactRecord, bool) {
+	var d struct{ Body string }
+	if json.Unmarshal(answer, &d) != nil {
+		return ArtifactRecord{}, false
+	}
+	var rec ArtifactRecord
+	if json.Unmarshal([]byte(d.Body), &rec) != nil || rec.Schema != "fleet.artifact.v2" || rec.Host != a.machine() || rec.Job != "" && rec.Job != j.ID || rec.Task != "" && rec.Task != j.Task {
+		return ArtifactRecord{}, false
+	}
+	return rec, true
+}
+
+// artifactClass is the class the artifact policy gives path in job's
+// directory, with the matching row's mirror_required; "" when no row
+// matches.
+func (a *App) artifactClass(pol ArtifactPolicy, job, path string) (string, bool, error) {
+	for _, rule := range pol.Rows {
+		var root struct{ Path, Kind string }
+		raw, ok := pol.Roots[rule.Root]
+		if !ok {
+			return "", false, fail(exitConfig, "unknown artifact policy root")
+		}
+		if json.Unmarshal(raw, &root) != nil {
+			var rel string
+			if json.Unmarshal(raw, &rel) != nil {
+				return "", false, fail(exitConfig, "invalid artifact policy root")
+			}
+			root.Path = rel
+			root.Kind = "per-job"
+		}
+		workRoot := filepath.Dir(filepath.Dir(a.Jobs))
+		base := filepath.Join(workRoot, root.Path)
+		if !within(workRoot, base) {
+			return "", false, fail(exitConfig, "artifact root escapes work root")
+		}
+		if root.Kind == "per-job" {
+			base = filepath.Join(base, job)
+		}
+		rel, e := filepath.Rel(base, path)
+		if e != nil || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		if rule.Job != "" && rule.Job != job || rule.Host != "" && rule.Host != a.machine() {
+			continue
+		}
+		if glob(rule.Glob, filepath.ToSlash(rel)) {
+			return rule.Class, rule.Mirror, nil
+		}
+	}
+	return "", false, nil
+}
+
+// artifactArchived reports whether the record confirms row's copy off this
+// host, so its local file may go: the archive is drive-confirmed, or the
+// hatch is uploaded and the row is an uploaded final build no mirror needs.
+func artifactArchived(rec ArtifactRecord, row Content, class string, mirror bool, hatch string) bool {
+	if rec.Archive.State == "drive_confirmed" || rec.Archive.ConfirmedAt != "" {
+		return true
+	}
+	return hatch == "uploaded" && class != "evidence" && !mirror && row.UploadedAt != ""
+}
+
 func (a *App) watchActive(id string) bool {
 	path := filepath.Join(a.Jobs, id, ".panewire-watch.lock")
 	f, e := secureOpen(path, false, a.warn)

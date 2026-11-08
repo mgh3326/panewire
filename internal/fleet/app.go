@@ -334,6 +334,9 @@ func (a *App) help(cmd string) error {
 		fmt.Fprintln(a.Out, "Usage: panewire restore JOB (rebind a released job to its verified existing pane)")
 	case "reap", "prune":
 		fmt.Fprintf(a.Out, "Usage: panewire %s [--job ID[,ID]] [--lane L] [--grace 10m] [--include-builders] [--worktrees] [--apply]\n", cmd)
+		if cmd == "reap" {
+			fmt.Fprintln(a.Out, "       panewire reap --expire-job-dirs [--job ID[,ID]] [--apply] (job dir TTL; a dry run without --apply; docs/job-dir-ttl.md)")
+		}
 	case "gc":
 		fmt.Fprintln(a.Out, "Usage: panewire gc [--json] (expire path/linear_permit leases, clean quota_pool records and release leased jobs whose agent left Herdr)")
 	case "artifacts":
