@@ -158,9 +158,53 @@ func TestNodeWorktreePrepareDetached(t *testing.T) {
 		t.Fatalf("unfetchable ref outcome=%v", result["outcome"])
 	}
 
-	mismatchedFetch := fixture.prepareArgs("detached", "", fixture.main, "refs/heads/feat", "repo.mismatch")
-	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, mismatchedFetch); result["outcome"] != nodePrepareShaMissing {
-		t.Fatalf("fetched-ref mismatch outcome=%v", result["outcome"])
+}
+
+// pushFixtureBranch pushes one empty commit to the fixture origin as branch.
+// Its parent is parent, or an unrelated root commit when parent is empty.
+func (fixture *nodeWorktreeFixture) pushFixtureBranch(t *testing.T, branch, parent string) {
+	t.Helper()
+	tmp := filepath.Join(fixture.root, "push."+branch)
+	nodeGit(t, fixture.root, "clone", "-q", fixture.origin, tmp)
+	if parent == "" {
+		nodeGit(t, tmp, "checkout", "-q", "--orphan", branch)
+	} else {
+		nodeGit(t, tmp, "checkout", "-q", "-b", branch, parent)
+	}
+	nodeGit(t, tmp, "commit", "-q", "--allow-empty", "-m", branch)
+	nodeGit(t, tmp, "push", "-q", "origin", "HEAD:refs/heads/"+branch)
+}
+
+// A fetched branch whose tip is a descendant of the sha is accepted: the
+// worktree is detached at the sha, not at the fetched tip. A branch that
+// does not contain the sha is still sha-missing.
+func TestNodeWorktreePrepareDetachedContainingFetch(t *testing.T) {
+	fixture := newNodeWorktreeFixture(t)
+	client := fixture.client()
+	fixture.pushFixtureBranch(t, "child", fixture.main)
+	fixture.pushFixtureBranch(t, "unrelated", "")
+	dir := filepath.Join(fixture.workRoot, "repo.child")
+	args := fixture.prepareArgs("detached", "", fixture.main, "refs/heads/child", "repo.child")
+
+	result, code := nodeRun(t, client, nodeCommandWorktreePrepare, args)
+	if code != "" || result["outcome"] != nodePreparePrepared {
+		t.Fatalf("containing fetch outcome=%v code=%q", result["outcome"], code)
+	}
+	worktree, _ := result["worktree"].(map[string]any)
+	if worktree["path"] != dir || worktree["branch"] != "" || worktree["head"] != fixture.main {
+		t.Fatalf("worktree=%v want detached at %s", worktree, fixture.main)
+	}
+	if head := nodeGit(t, dir, "rev-parse", "HEAD"); head != fixture.main {
+		t.Fatalf("HEAD=%s want the sha %s, not the fetched tip", head, fixture.main)
+	}
+
+	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, args); result["outcome"] != nodePrepareReused {
+		t.Fatalf("second prepare outcome=%v", result["outcome"])
+	}
+
+	unrelated := fixture.prepareArgs("detached", "", fixture.main, "refs/heads/unrelated", "repo.unrelated")
+	if result, _ = nodeRun(t, client, nodeCommandWorktreePrepare, unrelated); result["outcome"] != nodePrepareShaMissing {
+		t.Fatalf("non-containing fetch outcome=%v", result["outcome"])
 	}
 }
 

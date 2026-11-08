@@ -895,17 +895,24 @@ func nodeBranchRelationReason(local, expected, relation string) string {
 }
 
 // nodePrepareDetached fetches the caller's closed ref, requires the commit
-// to exist, and reuses only a clean worktree detached at exactly that sha.
+// to exist and to be FETCH_HEAD or an ancestor of it (a ref that contains
+// the sha, see docs/node-commands.md), and reuses only a clean worktree
+// detached at exactly that sha. The worktree is always detached at args.Sha.
 func (client *HubClient) nodePrepareDetached(ctx context.Context, git relayCommandRunner, clone, dir string, args nodeWorktreePrepareArgs) string {
 	if _, err := git(ctx, "-C", clone, "fetch", "origin", args.Fetch); err != nil {
 		return nodeOutcomeGitFailed
 	}
 	fetched, err := git(ctx, "-C", clone, "rev-parse", "--verify", "FETCH_HEAD^{commit}")
-	if err != nil || !strings.EqualFold(strings.TrimSpace(string(fetched)), args.Sha) {
+	if err != nil {
 		return nodePrepareShaMissing
 	}
 	if _, err := git(ctx, "-C", clone, "cat-file", "-e", args.Sha+"^{commit}"); err != nil {
 		return nodePrepareShaMissing
+	}
+	if !strings.EqualFold(strings.TrimSpace(string(fetched)), args.Sha) {
+		if _, err := git(ctx, "-C", clone, "merge-base", "--is-ancestor", args.Sha, "FETCH_HEAD"); err != nil {
+			return nodePrepareShaMissing
+		}
 	}
 	entries, err := nodeListWorktrees(ctx, git, clone)
 	if err != nil {

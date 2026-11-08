@@ -353,10 +353,12 @@ closed shape: `refs/heads/<branch>` or `pull/<n>/head`.
   freshly fetched `origin/<branch>`, which must exist. A missing local branch
   is created tracking `origin/<branch>`.
 - `mode:"detached"` — `sha` and `fetch` are required and `branch` must be
-  stated empty. The node runs `git fetch origin <fetch>`, requires the
-  fetched `FETCH_HEAD` to resolve to `sha`, and runs `git worktree add
-  --detach <dir> <sha>`. An existing worktree is reused only when detached
-  at exactly that commit and clean.
+  stated empty. The node runs `git fetch origin <fetch>` and requires `sha`
+  to be a commit that is `FETCH_HEAD` or an ancestor of it (a ref that
+  contains the sha; otherwise `sha-missing`). It then runs `git worktree add
+  --detach <dir> <sha>`, so the worktree sits at `sha`, never at the fetched
+  tip. An existing worktree is reused only when detached at exactly that
+  commit and clean.
 
 A clone that already exists keeps its identity: a `git remote get-url
 origin` that decodes to a different `owner/repo` than the argument — a fork
