@@ -31,7 +31,9 @@ func sharedHK(t *testing.T, a *App, key string, measured, confirmed time.Duratio
 		_ = json.NewEncoder(w).Encode(map[string]any{"observation": obs})
 	}))
 	t.Cleanup(srv.Close)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	// hosts.toml [quota] url overrides this endpoint.
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	if a.Config.Quota == nil {
 		a.Config.Quota = map[string]any{}
 	}

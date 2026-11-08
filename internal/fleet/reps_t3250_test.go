@@ -108,7 +108,9 @@ func writeJSONBody(w http.ResponseWriter, status int, v any) {
 func benchFakeApp(t *testing.T, srv *httptest.Server) *App {
 	t.Helper()
 	a := testApp(t)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	// hosts.toml [quota] url overrides this endpoint.
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	a.Config.Quota = map[string]any{
 		"url":      srv.URL,
 		"accounts": map[string]any{"anthropic-api": "0123456789abcdef"},

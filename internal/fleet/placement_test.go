@@ -791,8 +791,10 @@ func TestCandidateLoginAcceptsStaleButReadableObservation(t *testing.T) {
 }
 
 func TestQuotaClientPlaintextOnlyForOptedInTailnet(t *testing.T) {
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
+	// hosts.toml [quota] url overrides this endpoint.
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	for _, tc := range []struct {
 		url   string
 		optIn bool

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/hkcred"
 	"github.com/mgh3326/panewire/internal/quota/codex"
 )
 
@@ -34,6 +35,13 @@ func TestMain(m *testing.M) {
 	}
 	// The bench catalog cache must not land in the developer's real cache.
 	os.Setenv("XDG_CACHE_HOME", filepath.Join(state, "cache"))
+	// No test may reach hk with the developer's own credential (hk 3570): the
+	// svc-panewire variables are cleared and the default file points at a
+	// path that does not exist. A test that wants one sets it with t.Setenv.
+	for _, key := range []string{hkcred.URLKey, hkcred.TokenKey, hkcred.CFIDKey, hkcred.CFSecretKey} {
+		os.Unsetenv(key)
+	}
+	os.Setenv(hkcred.PathEnv, filepath.Join(state, "no-hk-svc.env"))
 	code := m.Run()
 	os.RemoveAll(state)
 	os.Exit(code)

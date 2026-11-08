@@ -106,8 +106,8 @@ func newHubServerForCLIWithDeps(args []string, logger *slog.Logger, deps hubServ
 	controlPlaneLanesPath := flags.String("control-plane-lanes", "", "operator-owned JSON authority lane set, e.g. /etc/panewire/control-plane-lanes.json (hot-reloaded)")
 	reportRelayPath := flags.String("report-relay-routes", "", "deprecated alias for --lanes")
 	acceptingOverridesPath := flags.String("accepting-overrides", "", "optional accepting override JSON (updated by operator POST)")
-	handoffkeepEnvPath := flags.String("handoffkeep-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file enabling durable relay events")
-	chatEnvPath := flags.String("chat-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN env file for the operator chat store (defaults to --handoffkeep-env)")
+	handoffkeepEnvPath := flags.String("handoffkeep-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN_SVC_PANEWIRE env file enabling durable relay events (legacy HANDOFFKEEP_TOKEN accepted)")
+	chatEnvPath := flags.String("chat-env", "", "optional mode-0600 HANDOFFKEEP_URL/HANDOFFKEEP_TOKEN_SVC_PANEWIRE env file for the operator chat store (defaults to --handoffkeep-env; legacy HANDOFFKEEP_TOKEN accepted)")
 	chatDeskLane := flags.String("chat-desk-lane", "", "fixed destination lane for operator chat; required when chat store is enabled")
 	// PANEWIRE_DELIVERY_POLICY is the env-var kill switch equal to the flag:
 	// "off" restores pre-policy pane delivery without editing the unit's

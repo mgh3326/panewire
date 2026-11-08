@@ -30,7 +30,7 @@ func (r remoteFake) output() string {
 // versions. Each test breaks one thing.
 func preflightFixture(t *testing.T) (*App, *fakePlacementSource, *remoteFake, *bytes.Buffer) {
 	t.Helper()
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
 	a := testApp(t)
 	const key = "claude:00000000000000aa"
 	load := 0.2
@@ -257,7 +257,7 @@ func TestPlanPrintsPreflightPerHost(t *testing.T) {
 	a, _, fr, _, out := planFixture(t)
 	a.Version = "panewire v1 (abc)"
 	a.Config.Quota = map[string]any{"url": "https://hk.example.invalid"}
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
 	remote := goodRemote()
 	remote.review = "absent"
 	fr.Do = func(c Command) Result {
@@ -309,7 +309,7 @@ func TestPlanPrintsPreflightPerHost(t *testing.T) {
 // the preflight probe with a missing review config.
 func placementPreflightFixture(t *testing.T) (*App, Spawn, *fakeRunner) {
 	t.Helper()
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
 	src := &fakePlacementSource{hosts: []HostView{
 		{Name: "first", Connected: true, LoadRatio: ptrF(0.1), Reason: "memory_pressure: swap in use"},
 		{Name: "second", Connected: true, LoadRatio: ptrF(0.5)},

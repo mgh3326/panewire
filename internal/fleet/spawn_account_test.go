@@ -92,8 +92,10 @@ func hkServer(t *testing.T, a *App, host, key string, age time.Duration) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
+	// hosts.toml [quota] url overrides this endpoint.
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	if a.Config.Quota == nil {
 		a.Config.Quota = map[string]any{}
 	}

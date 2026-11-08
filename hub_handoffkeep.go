@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/hkcred"
 )
 
 const (
@@ -83,13 +85,17 @@ func (env hubHandoffkeepEnv) setAuth(request *http.Request) {
 }
 
 // loadHubHandoffkeepEnv requires an explicit mode-0600 file and never includes
-// a credential value in an error, matching loadHubTelegramEnv.
+// a credential value in an error, matching loadHubTelegramEnv. It reads the
+// hub's --handoffkeep-env/--chat-env, a node's spawn.json handoffkeep_env, and
+// the node default (hkcred.PathIn). The bearer is
+// HANDOFFKEEP_TOKEN_SVC_PANEWIRE, else the file's legacy key
+// (hkcred.ExplicitFileToken), so files written before hk 3570 keep working.
 func loadHubHandoffkeepEnv(path string) (hubHandoffkeepEnv, error) {
 	values, err := loadMode0600Env(path)
 	if err != nil {
 		return hubHandoffkeepEnv{}, errors.New("hub handoffkeep env must be a regular mode-0600 file")
 	}
-	env := hubHandoffkeepEnv{URL: values["HANDOFFKEEP_URL"], Token: values["HANDOFFKEEP_TOKEN"], CFID: values["HANDOFFKEEP_CF_ACCESS_CLIENT_ID"], CFSecret: values["HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET"]}
+	env := hubHandoffkeepEnv{URL: values[hkcred.URLKey], Token: hkcred.ExplicitFileToken(values), CFID: values[hkcred.CFIDKey], CFSecret: values[hkcred.CFSecretKey]}
 	if !validHandoffkeepBaseURL(env.URL) || !validHandoffkeepToken(env.Token) {
 		return hubHandoffkeepEnv{}, errors.New("hub handoffkeep env is missing required values")
 	}

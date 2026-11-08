@@ -371,7 +371,9 @@ func TestAdmissionNativeReadsStoredReadingOverHandoffkeep(t *testing.T) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	// hosts.toml [quota] url overrides this endpoint.
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	a, runner, _ := switchApp(t, gateModeNative, nil, Result{Code: 99})
 	a.SharedLatest = nil
 	a.Config.Quota["url"] = srv.URL

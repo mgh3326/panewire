@@ -331,8 +331,7 @@ func (p remoteProbe) refuse(name string) (preflightCheck, bool) {
 // plain-http hk URL on the tailnet works there only with [quota]
 // allow_plaintext_tailnet = true in the remote hosts.toml.
 func (a *App) quotaTransport(p remoteProbe) preflightCheck {
-	read, _ := a.hkRead()
-	u := a.quotaURL(read)
+	u := a.quotaURL()
 	if u == "" {
 		return refuse(checkQuotaTransport, "hk_url_unset", "no hk URL is configured on this machine to compare against")
 	}

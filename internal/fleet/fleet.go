@@ -8,12 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
 
+	"github.com/mgh3326/panewire/internal/hkcred"
 	"github.com/mgh3326/panewire/internal/textbound"
 )
 
@@ -80,66 +79,34 @@ func (w cliWaker) Wake(ctx context.Context, host string, req WakeRequest) error 
 	return nil
 }
 
-// hkRead returns the reader for the handoffkeep settings — environment first,
-// then ~/.config/handoffkeep/config.env — together with the parsed file.
-func (a *App) hkRead() (func(string) string, map[string]string) {
-	envFile := map[string]string{}
-	path := os.Getenv("HANDOFFKEEP_CONFIG")
-	if path == "" {
-		if xdg := os.Getenv("XDG_CONFIG_HOME"); xdg != "" {
-			path = filepath.Join(xdg, "handoffkeep", "config.env")
-		} else {
-			path = expand("~/.config/handoffkeep/config.env")
-		}
-	}
-	if data, e := os.ReadFile(path); e == nil {
-		for _, line := range strings.Split(string(data), "\n") {
-			line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export "))
-			if line == "" || strings.HasPrefix(line, "#") {
-				continue
-			}
-			k, v, ok := strings.Cut(line, "=")
-			if ok {
-				envFile[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), "\"'")
-			}
-		}
-	}
-	return func(k string) string {
-		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-			return v
-		}
-		return envFile[k]
-	}, envFile
-}
-
 // quotaURL is the configured shared-quota endpoint: hosts.toml [quota] url,
-// else HANDOFFKEEP_URL.
-func (a *App) quotaURL(read func(string) string) string {
+// else the svc-panewire credential's HANDOFFKEEP_URL (internal/hkcred), even
+// when that credential lacks its token.
+func (a *App) quotaURL() string {
 	if u := str(a.Config.Quota, "url"); u != "" {
 		return u
 	}
-	return read("HANDOFFKEEP_URL")
+	creds, _ := hkcred.Load()
+	return creds.URL
 }
 
-// quotaClient resolves the shared-quota read endpoint. The URL and bearer
-// credential follow the same convention as pacelever: HANDOFFKEEP_URL /
-// HANDOFFKEEP_TOKEN in the environment or ~/.config/handoffkeep/config.env,
-// with hosts.toml [quota] url / credential_env as explicit overrides. Errors
-// never echo URLs or credentials.
+// quotaClient resolves the handoffkeep client every jobs, bench, presence and
+// shared-quota read uses. The bearer is panewire's svc-panewire credential
+// (internal/hkcred: HANDOFFKEEP_URL + HANDOFFKEEP_TOKEN_SVC_PANEWIRE in the
+// environment, else the mode-0600 ~/.config/panewire/hk-svc.env, path
+// overridable by PANEWIRE_HK_ENV); hosts.toml [quota] url overrides the URL.
+// The hk CLI's config.env and HANDOFFKEEP_TOKEN are never read, and
+// [quota] credential_env is retired (hk 3570). Errors name keys and the file,
+// never URLs or credentials.
 func (a *App) quotaClient() (*hkQuota, error) {
 	q := a.Config.Quota
-	read, envFile := a.hkRead()
-	u := a.quotaURL(read)
-	tokenEnv := str(q, "credential_env")
-	if tokenEnv == "" {
-		tokenEnv = "HANDOFFKEEP_TOKEN"
+	creds, err := hkcred.Load()
+	if err != nil {
+		return nil, fail(exitConfig, "shared quota cache unavailable: %v", err)
 	}
-	token := strings.TrimSpace(os.Getenv(tokenEnv))
-	if token == "" {
-		token = envFile[tokenEnv]
-	}
-	if u == "" || token == "" {
-		return nil, fail(exitConfig, "shared quota cache unavailable")
+	u := creds.URL
+	if configured := str(q, "url"); configured != "" {
+		u = configured
 	}
 	parsed, e := url.Parse(u)
 	if e != nil || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
@@ -151,11 +118,7 @@ func (a *App) quotaClient() (*hkQuota, error) {
 	if parsed.Scheme == "http" && !isLoopbackHost(parsed.Hostname()) && !(boolean(q, "allow_plaintext_tailnet", false) && isTailnetHost(parsed.Hostname())) {
 		return nil, fail(exitConfig, "shared quota cache requires HTTPS")
 	}
-	c := &hkQuota{base: strings.TrimRight(u, "/"), token: token, cfID: read("HANDOFFKEEP_CF_ACCESS_CLIENT_ID"), cfSecret: read("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET"), now: a.Now, freshTTL: a.sharedFreshTTL}
-	if (c.cfID == "") != (c.cfSecret == "") {
-		return nil, fail(exitConfig, "CF Access credential pair incomplete")
-	}
-	return c, nil
+	return &hkQuota{base: strings.TrimRight(u, "/"), token: creds.Token, cfID: creds.CFID, cfSecret: creds.CFSecret, now: a.Now, freshTTL: a.sharedFreshTTL}, nil
 }
 
 // hkQuota reads the shared quota cache and pacelever host presence from the

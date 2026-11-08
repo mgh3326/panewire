@@ -102,7 +102,9 @@ func placementServer(t *testing.T, a *App) *placementHK {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(h.server.Close)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	// hosts.toml [quota] url overrides this endpoint.
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	a.Config.Quota = map[string]any{"url": h.server.URL}
 	return h
 }
@@ -280,7 +282,9 @@ func TestPlacementDeliveryTimeoutAndCancellationDoNotFailSpawn(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	// hosts.toml [quota] url overrides this endpoint.
+	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	a.Config.Quota = map[string]any{"url": server.URL}
 	start := time.Now()
 	if err := a.Spawn(context.Background(), s); err != nil {

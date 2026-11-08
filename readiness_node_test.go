@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/hkcred"
 )
 
 const readinessHerdrStatus = `pi: not installed (/Users/someone/.pi/agent/extensions/herdr-agent-state.ts)
@@ -149,7 +150,7 @@ func TestSpawnConfigOptionalAtTheDefaultPath(t *testing.T) {
 	}
 	client := &HubClient{spawnConfigPath: defaultHubSpawnConfigPath(""), spawnConfigDefault: true, readinessDeps: readinessFakes(nil)}
 	config, defaults, err := client.resolveHubSpawnConfig()
-	if err != nil || !defaults || config.Workspace != "workers" || config.HERDRSession != "default" || config.WorkRoot != workRoot || config.HandoffkeepEnv != filepath.Join(home, ".config", "handoffkeep", "config.env") || !config.Enabled {
+	if err != nil || !defaults || config.Workspace != "workers" || config.HERDRSession != "default" || config.WorkRoot != workRoot || config.HandoffkeepEnv != hkcred.PathIn(home) || !config.Enabled {
 		t.Fatalf("config=%+v defaults=%t err=%v", config, defaults, err)
 	}
 	client.readinessDeps.listDir = func(dir string) []string {

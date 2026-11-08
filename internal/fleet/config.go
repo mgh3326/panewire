@@ -263,6 +263,8 @@ func LoadConfig(path string) (Config, error) {
 			return c, fail(exitConfig, "quota.url requires HTTPS")
 		}
 	}
+	// credential_env is retired (hk 3570): the bearer is always the
+	// svc-panewire credential (internal/hkcred). An old file still parses.
 	if v := str(c.Quota, "credential_env"); v != "" && !regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`).MatchString(v) {
 		return c, fail(exitConfig, "quota.credential_env must name an environment variable")
 	}
