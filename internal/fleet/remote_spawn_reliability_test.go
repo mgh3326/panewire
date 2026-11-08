@@ -303,10 +303,13 @@ func TestCodexTrustPromptStopsSpawnAndCleansResources(t *testing.T) {
 	closed := false
 	for _, c := range f.Calls {
 		args := strings.Join(c.Args, " ")
-		if strings.HasPrefix(args, "agent prompt") || strings.Contains(args, "send-keys") || strings.Contains(args, "tasks claim") {
+		if strings.HasPrefix(args, "agent prompt") || strings.Contains(args, "send-keys") {
 			t.Fatalf("trust prompt received job input: %s", args)
 		}
 		closed = closed || args == "pane close w:p1"
+	}
+	if hkClaimed(t) {
+		t.Fatal("trust prompt claimed the task")
 	}
 	if !closed {
 		t.Fatal("failed pane not closed")

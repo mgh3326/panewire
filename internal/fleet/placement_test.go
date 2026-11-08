@@ -261,12 +261,11 @@ func remoteFixture(t *testing.T, src *fakePlacementSource, w *fakeWaker, taskCre
 	}
 	a.Quota = &fakeQuota{LaunchValue: Launch{Pool: "claude"}, GateDo: gatePools(map[string]string{"sonnet": "claude"})}
 	cwd := a.Home + "/work/repo-a"
+	useFakeHK(t).SetTask("42", `{"id":42,"title":"work (grade B, T1)","state":"ready","refs":{},"created_at":`+strconv.Quote(taskCreated)+`}`)
 	f := &fakeRunner{}
 	f.Do = func(c Command) Result {
 		args := strings.Join(c.Args, " ")
 		switch {
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show"):
-			return Result{Out: `{"id":42,"title":"work (grade B, T1)","state":"ready","refs":{},"created_at":` + strconv.Quote(taskCreated) + `}`}
 		case c.Name == "herdr" && strings.HasPrefix(args, "agent list"):
 			return Result{Out: `{"agents":[]}`}
 		case c.Name == "git" && strings.Contains(args, "rev-parse --show-toplevel"):

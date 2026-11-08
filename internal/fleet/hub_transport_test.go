@@ -63,6 +63,15 @@ func hubFixture(t *testing.T, g gitState, branch string, hosts map[string]map[st
 	events := &[]string{}
 	hub := &fakeHub{t: t, events: events}
 	a.Hub = hub
+	useFakeHK(t).Handle(func(r hkRequest) (int, string, bool) {
+		if r.Method != http.MethodPut || !strings.HasPrefix(r.Path, "/v1/documents/") {
+			return 0, "", false
+		}
+		var doc struct{ Body string }
+		_ = json.Unmarshal(r.Body, &doc)
+		*events = append(*events, "doc.put", "doc.body="+doc.Body)
+		return 0, "", false
+	})
 	base := f.Do
 	f.Do = func(c Command) Result {
 		args := strings.Join(c.Args, " ")
@@ -86,14 +95,6 @@ func hubFixture(t *testing.T, g gitState, branch string, hosts map[string]map[st
 			return Result{Out: strings.Join(g.pointsAt, "\n")}
 		case c.Name == "git" && strings.Contains(args, "for-each-ref") && strings.Contains(args, "--contains"):
 			return Result{Out: strings.Join(g.contained, "\n")}
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "doc put"):
-			*events = append(*events, "doc.put")
-			if i := indexArg(c.Args, "--file"); i >= 0 {
-				if b, e := os.ReadFile(c.Args[i+1]); e == nil {
-					*events = append(*events, "doc.body="+string(b))
-				}
-			}
-			return Result{}
 		}
 		return base(c)
 	}
@@ -166,14 +167,15 @@ func TestHubWorktreeCheckouts(t *testing.T) {
 			if out := a.Out.(interface{ String() string }).String(); !strings.Contains(out, "OK pane=w:p1 job=job-a host=h1") {
 				t.Fatalf("receipt: %q", out)
 			}
-			var put []string
-			for _, c := range f.Calls {
-				if c.Name == "handoffkeep" {
-					put = c.Args
+			var put []hkRequest
+			for _, r := range useFakeHK(t).Requests() {
+				if r.Method == http.MethodPut {
+					put = append(put, r)
 				}
 			}
-			if !reflect.DeepEqual(put[:8], []string{"doc", "put", "--key", "briefs/job-a.md", "--kind", "brief", "--job", "job-a"}) {
-				t.Fatalf("doc put: %v", put)
+			var doc struct{ Key, Kind, Job string }
+			if len(put) != 1 || put[0].Path != "/v1/documents/briefs%2Fjob-a.md" || json.Unmarshal(put[0].Body, &doc) != nil || doc != (struct{ Key, Kind, Job string }{"briefs/job-a.md", "brief", "job-a"}) {
+				t.Fatalf("doc put: %v %+v", put, doc)
 			}
 		})
 	}

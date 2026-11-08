@@ -294,21 +294,16 @@ func (a *App) writeRoutingCache(p RoutingPolicy) error {
 	return durable.ReplaceFileAtomically(path, ".model-routing-*.json", append(b, '\n'), 0600)
 }
 
-// routingPolicy reads the table from hk, refreshing the cache, else falls
-// back to the cache. The source is "hk" or "cache@v<N>".
+// routingPolicy reads the table from hk over HTTP (hkGetDocument), refreshing
+// the cache, else falls back to the cache: hk unreachable, the credential
+// unconfigured, or a doc that fails parseRoutingDoc, which never overwrites
+// the last good copy. The source is "hk" or "cache@v<N>".
 func (a *App) routingPolicy(ctx context.Context) (RoutingPolicy, string, error) {
 	var why string
-	r := a.call(ctx, "handoffkeep", "doc", "get", routingDocKey)
-	if r.Code == 0 {
-		var doc struct {
-			Body string `json:"body"`
-		}
-		e := json.Unmarshal([]byte(r.Out), &doc)
+	doc, e := hkGetDocument(ctx, routingDocKey)
+	if e == nil {
 		var p RoutingPolicy
-		if e == nil {
-			p, e = parseRoutingDoc(doc.Body)
-		}
-		if e == nil {
+		if p, e = parseRoutingDoc(doc.Body); e == nil {
 			if e := a.writeRoutingCache(p); e != nil {
 				a.warn("routing policy cache not written: %v", e)
 			}
@@ -316,7 +311,7 @@ func (a *App) routingPolicy(ctx context.Context) (RoutingPolicy, string, error) 
 		}
 		why = "unreadable " + routingDocKey + ": " + e.Error()
 	} else {
-		why = fmt.Sprintf("hk doc get %s exit %d: %s", routingDocKey, r.Code, clip(strings.TrimSpace(r.Err), 200))
+		why = fmt.Sprintf("hk doc get %s: %s", routingDocKey, clip(strings.TrimSpace(e.Error()), 200))
 	}
 	p, e := a.readRoutingCache()
 	if e != nil {

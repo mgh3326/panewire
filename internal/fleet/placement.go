@@ -18,6 +18,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/client"
 )
 
 // HostView is one machine's connectivity and load as reported by the hub's
@@ -1565,15 +1567,11 @@ func (a *App) launchPool(ctx context.Context, s Spawn) (string, error) {
 	return l.Pool, nil
 }
 
-func taskWaited(t Task, now time.Time) time.Duration {
-	if t.CreatedAt == "" {
+func taskWaited(t client.Task, now time.Time) time.Duration {
+	if t.CreatedAt.IsZero() {
 		return 0
 	}
-	ts, e := time.Parse(time.RFC3339Nano, t.CreatedAt)
-	if e != nil {
-		return 0
-	}
-	if d := now.Sub(ts); d > 0 {
+	if d := now.Sub(t.CreatedAt); d > 0 {
 		return d
 	}
 	return 0

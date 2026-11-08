@@ -23,7 +23,7 @@ func serveOMPRouting(t *testing.T, a *App) {
 		p.Roles[name] = rule
 	}
 	b, _ := json.Marshal(p)
-	serveRouting(a, routingDoc(string(b)))
+	serveRouting(t, routingDoc(string(b)))
 }
 
 func ompRow(profile, model, pool string) CatalogRow {
@@ -45,13 +45,10 @@ func ompSpawnFixture(t *testing.T) (*App, Spawn, *fakeRunner) {
 	a.Quota = &fakeQuota{LaunchValue: Launch{Profile: "omp-opus", ModelID: "anthropic/claude-opus-5-5", Effort: "high", Grade: "S+", Pool: "anthropic-api", Gate: "default"}, GateDo: gatePools(map[string]string{"omp-opus": "anthropic-api"})}
 	started, submitted := false, false
 	token := ""
+	useFakeHK(t).SetTask("42", `{"id":42,"title":"work (grade A, T1)","state":"ready","refs":{}}`).Handle(hkClaimAnswer)
 	fr := &fakeRunner{Do: func(c Command) Result {
 		args := strings.Join(c.Args, " ")
 		switch {
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show"):
-			return Result{Out: `{"id":42,"title":"work (grade A, T1)","state":"ready","refs":{}}`}
-		case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks claim"):
-			return Result{Out: `{"claimed_by":"worker-a","refs":{"job_id":"job-a"}}`}
 		case strings.HasPrefix(args, "tab create"):
 			return Result{Out: `{"result":{"root_pane":{"pane_id":"w:p1"},"tab_id":"w:t1"}}`}
 		case strings.HasPrefix(args, "pane process-info"):

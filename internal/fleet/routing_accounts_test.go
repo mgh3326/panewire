@@ -113,7 +113,7 @@ func TestLeadConsultRejectEmptyGradeFlag(t *testing.T) {
 func TestExplicitProfileCannotBypassConsultOrRetirement(t *testing.T) {
 	for _, retired := range []bool{false, true} {
 		a, s, fr, _ := cmdFixture(t)
-		serveRouting(a, routingDocV1)
+		serveRouting(t, routingDocV1)
 		q := a.Quota.(*fakeQuota)
 		q.CatalogRows = []CatalogRow{{Profile: "sonnet", Effort: "high", Grade: "A", Pool: "claude", Gate: "default", ModelID: "sonnet-m"}}
 		s.Profile, s.Role, s.OverrideReason = "sonnet", "counsel", "test placement override"
@@ -215,7 +215,7 @@ func TestLeadConsultNativeTopOnly(t *testing.T) {
 				a, s, q := consultFixture(t)
 				s.Role = role
 				block := strings.Replace(routingBlockV1, `["opus", "fable", "codex-sol", "codex-astra"]`, `["*"]`, 1)
-				serveRouting(a, routingDoc(block))
+				serveRouting(t, routingDoc(block))
 				q.CatalogRows = []CatalogRow{{Profile: profile, Effort: "high", Grade: "S", Pool: "claude", Gate: "default", ModelID: "anthropic-model"}}
 				for name, seat := range a.Policy.Profiles {
 					if seat.Canon == profile {
@@ -250,7 +250,7 @@ func TestLeadConsultResolveAndPlanWithoutGrade(t *testing.T) {
 		a, q, _, _, _ := planFixture(t)
 		q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "C", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
 		q.GateDo = gatePools(map[string]string{"opus": "claude"})
-		serveRouting(a, routingDocV1)
+		serveRouting(t, routingDocV1)
 		if err := a.planCmd(context.Background(), []string{"--role", role, "--t", "T1", "--json"}); err != nil {
 			t.Fatalf("plan %s without grade: %v", role, err)
 		}
@@ -309,13 +309,8 @@ func TestLeadConsultSpawnWithoutTaskGrade(t *testing.T) {
 		q.CatalogRows = []CatalogRow{{Profile: "opus", Effort: "high", Grade: "C", Pool: "claude", Gate: "default", ModelID: "opus-m"}}
 		q.GateDo = gatePools(map[string]string{"opus": "claude"})
 		a.Source = &fakePlacementSource{presence: []PresenceRecord{{HostID: "local", AccountKey: testClaudeA, LastSeen: a.Now()}}, accounts: map[string]SharedAccount{testClaudeA: {Key: testClaudeA, Observed: true, Fresh: true, Quota: &PoolView{Status: "ok", Class: "spend", Blocking: ptrF(10)}}}}
-		serveRouting(a, routingDocV1)
-		a.Runner = wrapRunner(a.Runner, func(c Command) (Result, bool) {
-			if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks show") {
-				return Result{Out: `{"id":42,"title":"ungraded request","state":"ready","refs":{}}`}, true
-			}
-			return Result{}, false
-		})
+		serveRouting(t, routingDocV1)
+		useFakeHK(t).SetTask("42", `{"id":42,"title":"ungraded request","state":"ready","refs":{}}`)
 		if err := a.Spawn(context.Background(), s); err != nil {
 			t.Fatalf("%s requires no task grade: %v", role, err)
 		}
@@ -348,7 +343,7 @@ func TestSelectionRefusalCodes(t *testing.T) {
 			case "role":
 				q.CatalogRows = q.CatalogRows[:1]
 			case "policy":
-				serveRouting(a, "")
+				serveRouting(t, "")
 			}
 			err := a.resolveCmd(context.Background(), []string{"--role", "consult", "--json"})
 			var result resolveResult

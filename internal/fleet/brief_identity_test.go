@@ -19,6 +19,7 @@ func TestBriefIdentityMatchesSpawnReceipt(t *testing.T) {
 			a, s, f, _ := cmdFixture(t)
 			s.Profile = tc.profile
 			s.Task = "3113"
+			useFakeHK(t).SetTask("3113", `{"id":3113,"title":"work (grade C, T1)","state":"ready","refs":{}}`)
 			s.Effort = "high"
 			seat := a.Policy.Profiles[s.Profile]
 			seat.Canon, seat.Family = tc.canon, tc.family
@@ -31,8 +32,6 @@ func TestBriefIdentityMatchesSpawnReceipt(t *testing.T) {
 			f.Do = func(c Command) Result {
 				args := strings.Join(c.Args, " ")
 				switch {
-				case c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks show"):
-					return Result{Out: `{"id":3113,"title":"work (grade C, T1)","state":"ready","refs":{}}`}
 				case strings.HasPrefix(args, "agent start"):
 					started = true
 					return Result{}

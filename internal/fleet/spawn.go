@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/client"
+
 	"github.com/mgh3326/panewire/internal/arbiter"
 )
 
@@ -229,22 +231,23 @@ func (s Spawn) unlinkedReviewer() bool {
 	return s.Role == "reviewer" && s.ParentFamily != "" && s.Inherited == "" && s.ParentJob == ""
 }
 
-func (a *App) taskPrecheck(ctx context.Context, s Spawn) (Task, bool, error) {
-	r := a.call(ctx, "handoffkeep", "tasks", "show", s.Task)
-	var t Task
-	if r.Code != 0 {
-		if strings.Contains(r.Out+r.Err, "not_found") {
+// taskPrecheck reads the task over hk HTTP (hkGetTask) and refuses a spawn
+// the task cannot take.
+func (a *App) taskPrecheck(ctx context.Context, s Spawn) (client.Task, bool, error) {
+	t, err := hkGetTask(ctx, s.Task)
+	if err != nil {
+		if strings.Contains(err.Error(), "not_found") {
 			return t, false, fail(exitUsage, "task does not exist")
 		}
 		if s.Bypass {
 			return t, true, nil
 		}
-		return t, false, fail(exitConfig, "task precheck unavailable: %s", r.Err)
+		return t, false, fail(exitConfig, "task precheck unavailable: %s", hkErrText(err))
 	}
-	if e := json.Unmarshal([]byte(r.Out), &t); e != nil || t.State == "" {
+	if t.State == "" {
 		return t, false, fail(exitConfig, "unreadable task precheck")
 	}
-	if t.ID != nil && scalar(t.ID) != s.Task {
+	if !hkTaskIDIs(t, s.Task) {
 		return t, false, fail(exitConfig, "task response ID mismatch")
 	}
 	if s.Inherited != "" || s.unlinkedReviewer() {
@@ -253,10 +256,10 @@ func (a *App) taskPrecheck(ctx context.Context, s Spawn) (Task, bool, error) {
 	if slices.Contains([]string{"merged", "dropped", "hold", "needs_decision"}, t.State) {
 		return t, false, fail(exitUsage, "task unavailable: %s", t.State)
 	}
-	if j := str(t.Refs, "job_id"); j != "" && j != s.Job {
+	if j := t.Refs.JobID; j != "" && j != s.Job {
 		return t, false, fail(exitUsage, "task bound to another job")
 	}
-	if str(t.Refs, "job_id") == "" && t.ClaimedBy != "" && t.ClaimedBy != s.Label {
+	if t.Refs.JobID == "" && t.ClaimedBy != "" && t.ClaimedBy != s.Label {
 		return t, false, fail(exitUsage, "task has another claimant without a job binding")
 	}
 	return t, false, nil
@@ -279,13 +282,13 @@ func (s Spawn) replacesParent() bool {
 // the task is still bound to that parent, and returns the job.task_link status.
 // The spawn has landed by now, so a failure is recorded on ev and never returned.
 // Rule: docs/config.md, "--parent-job".
-func (a *App) rebindInherited(ctx context.Context, s Spawn, task Task, ev map[string]any) string {
+func (a *App) rebindInherited(ctx context.Context, s Spawn, task client.Task, ev map[string]any) string {
 	refused := func(why string) string {
 		a.warn("task %s stays bound to job %s: %s", s.Task, s.Inherited, why)
 		ev["rebind_error"] = strings.ToValidUTF8(clip(why, 240), "")
 		return "inherited"
 	}
-	switch bound := str(task.Refs, "job_id"); bound {
+	switch bound := task.Refs.JobID; bound {
 	case "":
 		return "inherited"
 	case s.Job:
@@ -308,33 +311,65 @@ func (a *App) rebindInherited(ctx context.Context, s Spawn, task Task, ev map[st
 	if !slices.Contains([]string{"lost", "failed", "completed"}, state) {
 		return "inherited"
 	}
-	r := a.call(ctx, "handoffkeep", "tasks", "rebind", s.Task, "--from-job", s.Inherited, "--to-job", s.Job, "--by", s.Label, "--reason", "respawn continues "+state+" parent job "+s.Inherited)
-	if r.Code != 0 {
-		return refused("task rebind refused: " + strings.TrimSpace(r.Err))
+	t, e := hkRebindTask(ctx, s.Task, s.Inherited, s.Job, s.Label, "respawn continues "+state+" parent job "+s.Inherited)
+	if e != nil {
+		return refused("task rebind refused: " + hkErrText(e))
 	}
-	var t Task
-	if e := json.Unmarshal([]byte(r.Out), &t); e != nil || t.ClaimedBy != s.Label || str(t.Refs, "job_id") != s.Job {
+	if t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
 		return refused("task rebind did not confirm claimed_by and refs.job_id")
 	}
 	return "rebound"
 }
 
+// hkRebindTask moves the task's job link from fromJob to toJob over hk HTTP.
+// A refusal (such as wrk_receipt_required) is the server's error code.
+func hkRebindTask(ctx context.Context, task, fromJob, toJob, by, reason string) (client.Task, error) {
+	id, err := hkTaskID(task)
+	if err != nil {
+		return client.Task{}, err
+	}
+	c, err := newHKClient()
+	if err != nil {
+		return client.Task{}, err
+	}
+	return c.RebindTaskJob(ctx, id, fromJob, toJob, by, reason)
+}
+
 // taskLinkedTo reports whether hk's task record already binds the task to
 // the job (refs.job_id). A task that cannot be read counts as not linked.
 func (a *App) taskLinkedTo(ctx context.Context, task, job string) bool {
-	r := a.call(ctx, "handoffkeep", "tasks", "show", task)
-	var t Task
-	if r.Code != 0 || json.Unmarshal([]byte(r.Out), &t) != nil {
-		return false
-	}
-	return job != "" && (t.ID == nil || scalar(t.ID) == task) && str(t.Refs, "job_id") == job
+	t, err := hkGetTask(ctx, task)
+	return err == nil && job != "" && hkTaskIDIs(t, task) && t.Refs.JobID == job
 }
 
 type taskClaimFailure struct{ reason string }
 
 func (e *taskClaimFailure) Error() string { return e.reason }
 
-func (a *App) taskLink(ctx context.Context, s Spawn, task Task, bypassed bool) error {
+// hkClaimTask claims the task for label, linked to job, over hk HTTP.
+func hkClaimTask(ctx context.Context, task, label, job string) (client.Task, error) {
+	id, err := hkTaskID(task)
+	if err != nil {
+		return client.Task{}, err
+	}
+	c, err := newHKClient()
+	if err != nil {
+		return client.Task{}, err
+	}
+	return c.ClaimTask(ctx, id, label, job, "")
+}
+
+// hkClaimRefused reports whether a claim error is a refusal a bypassed spawn
+// must not ignore: its text names a conflict or a refusal, as the hk CLI's
+// stderr did. The CLI reworded invalid_context — a server that predates
+// job_id claims — as "claim_job_id_rejected: server refused the claim", so
+// that code counts too.
+func hkClaimRefused(err error) bool {
+	text := err.Error()
+	return strings.Contains(text, "conflict") || strings.Contains(text, "refused") || client.ErrorCode(err) == "invalid_context"
+}
+
+func (a *App) taskLink(ctx context.Context, s Spawn, task client.Task, bypassed bool) error {
 	ev := map[string]any{"task_id": s.Task, "job_id": s.Job, "claimed_by": s.Label, "inherited_from": s.Inherited}
 	status := "inherited"
 	var claimFailure *taskClaimFailure
@@ -344,23 +379,22 @@ func (a *App) taskLink(ctx context.Context, s Spawn, task Task, bypassed bool) e
 		// No claim: the task stays bound to whatever it was bound to.
 		status = "unlinked"
 	} else if s.Inherited == "" {
-		r := a.call(ctx, "handoffkeep", "tasks", "claim", s.Task, "--by", s.Label, "--job-id", s.Job)
-		var t Task
-		if r.Code != 0 {
-			if !bypassed || !s.Bypass || strings.Contains(r.Out+r.Err, "conflict") || strings.Contains(r.Out+r.Err, "refused") {
+		t, err := hkClaimTask(ctx, s.Task, s.Label, s.Job)
+		if err != nil {
+			if !bypassed || !s.Bypass || hkClaimRefused(err) {
 				if a.taskLinkedTo(ctx, s.Task, s.Job) {
 					// hk already binds the task to this job (a design session
 					// rebound it before the spawn): nothing to link (hk 3426).
 					status = "already_linked"
 				} else {
-					claimFailure = &taskClaimFailure{reason: fmt.Sprintf("task claim exited with status %d", r.Code)}
+					claimFailure = &taskClaimFailure{reason: fmt.Sprintf("task claim exited with status %d", hkCLIErrorExit)}
 					status = "failed"
 				}
 			} else {
 				status = "bypassed"
 			}
 		} else {
-			if e := json.Unmarshal([]byte(r.Out), &t); e != nil || t.ClaimedBy != s.Label || str(t.Refs, "job_id") != s.Job {
+			if t.ClaimedBy != s.Label || t.Refs.JobID != s.Job {
 				claimFailure = &taskClaimFailure{reason: "task claim did not confirm claimed_by and refs.job_id"}
 				status = "failed"
 			} else {

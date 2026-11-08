@@ -2,17 +2,12 @@ package fleet
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
-)
 
-// hkProjectOwner is handoffkeep's project-owner answer
-// (GET /v1/tasks/projects/{project}/owner).
-type hkProjectOwner struct {
-	DesignLane     string `json:"design_lane"`
-	EffectiveOwner string `json:"effective_owner"`
-}
+	"github.com/mgh3326/handoffkeep/client"
+)
 
 // resolveOwner fills s.Owner from the task's project owner in handoffkeep when
 // the caller omitted --owner. A task is required: a spawn with neither --task
@@ -33,26 +28,39 @@ func (a *App) resolveOwner(ctx context.Context, s *Spawn) error {
 	if task == "" {
 		return nil
 	}
-	r := a.call(ctx, "handoffkeep", "tasks", "show", task)
-	if r.Code != 0 {
-		return fail(exitUsage, "cannot read task %s from hk to resolve the owner (%s); pass --owner LANE explicitly", task, strings.TrimSpace(r.Err))
+	t, err := hkGetTask(ctx, task)
+	if err != nil {
+		return fail(exitUsage, "cannot read task %s from hk to resolve the owner (%s); pass --owner LANE explicitly", task, hkErrText(err))
 	}
-	var t Task
-	if json.Unmarshal([]byte(r.Out), &t) != nil || (t.ID != nil && scalar(t.ID) != task) {
+	if !hkTaskIDIs(t, task) {
 		return fail(exitUsage, "unreadable task %s from hk to resolve the owner; pass --owner LANE explicitly", task)
 	}
-	if t.Project == "" {
+	project := hkTaskProject(t)
+	if project == "" {
 		return fail(exitUsage, "task %s names no project, so hk cannot resolve an owner; pass --owner LANE explicitly", task)
 	}
-	r = a.call(ctx, "handoffkeep", "tasks", "owner", t.Project)
-	if r.Code != 0 {
-		return fail(exitUsage, "cannot resolve the hk owner of project %s (%s); pass --owner LANE explicitly", t.Project, strings.TrimSpace(r.Err))
+	owner, err := hkProjectOwner(ctx, project)
+	if err != nil {
+		return fail(exitUsage, "cannot resolve the hk owner of project %s (%s); pass --owner LANE explicitly", project, hkErrText(err))
 	}
-	var owner hkProjectOwner
-	if json.Unmarshal([]byte(r.Out), &owner) != nil || strings.TrimSpace(owner.EffectiveOwner) == "" {
-		return fail(exitUsage, "hk returned no effective owner for project %s; pass --owner LANE explicitly", t.Project)
+	if strings.TrimSpace(owner.EffectiveOwner) == "" {
+		return fail(exitUsage, "hk returned no effective owner for project %s; pass --owner LANE explicitly", project)
 	}
 	s.Owner = owner.EffectiveOwner
-	fmt.Fprintf(a.Out, "owner=%s source=hk project=%s\n", s.Owner, t.Project)
+	fmt.Fprintf(a.Out, "owner=%s source=hk project=%s\n", s.Owner, project)
 	return nil
+}
+
+// hkProjectOwner reads the project's owner over hk HTTP. A project hk does
+// not know reads "no such project", as the hk CLI printed it.
+func hkProjectOwner(ctx context.Context, project string) (client.ProjectOwner, error) {
+	c, err := newHKClient()
+	if err != nil {
+		return client.ProjectOwner{}, err
+	}
+	owner, err := c.ProjectOwner(ctx, project)
+	if client.ErrorCode(err) == "not_found" {
+		return owner, errors.New("no such project: " + project)
+	}
+	return owner, err
 }

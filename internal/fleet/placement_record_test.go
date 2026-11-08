@@ -38,7 +38,7 @@ func placementServer(t *testing.T, a *App) *placementHK {
 			http.NotFound(w, r)
 			return
 		}
-		if r.Header.Get("Authorization") != "Bearer test-token" {
+		if r.Header.Get("Authorization") != "Bearer "+hkSvcTestToken {
 			t.Error("existing hk bearer credential was not used")
 		}
 		b, _ := io.ReadAll(r.Body)
@@ -102,9 +102,9 @@ func placementServer(t *testing.T, a *App) *placementHK {
 		w.WriteHeader(http.StatusOK)
 	}))
 	t.Cleanup(h.server.Close)
-	// hosts.toml [quota] url overrides this endpoint.
-	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
-	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	// The svc-panewire credential points at the test's spawn-path fake hk
+	// (tasks, routing); hosts.toml [quota] url overrides it for placements.
+	useFakeHK(t)
 	a.Config.Quota = map[string]any{"url": h.server.URL}
 	return h
 }
@@ -129,7 +129,7 @@ func onePlacement(t *testing.T, h *placementHK) placementRecord {
 	if err := json.Unmarshal(requests[0], &rec); err != nil {
 		t.Fatal(err)
 	}
-	for _, bad := range append(fakeSecrets, "test-token", "brief text", "decided_on", "login", "@example.invalid") {
+	for _, bad := range append(fakeSecrets, hkSvcTestToken, "brief text", "decided_on", "login", "@example.invalid") {
 		if bytes.Contains(requests[0], []byte(bad)) {
 			t.Fatalf("private field or value %q reached placement payload", bad)
 		}
@@ -282,9 +282,9 @@ func TestPlacementDeliveryTimeoutAndCancellationDoNotFailSpawn(t *testing.T) {
 		}
 	}))
 	t.Cleanup(server.Close)
-	// hosts.toml [quota] url overrides this endpoint.
-	t.Setenv("HANDOFFKEEP_URL", "https://hk.test.invalid")
-	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	// The svc-panewire credential points at the test's spawn-path fake hk
+	// (tasks, routing); hosts.toml [quota] url overrides it for placements.
+	useFakeHK(t)
 	a.Config.Quota = map[string]any{"url": server.URL}
 	start := time.Now()
 	if err := a.Spawn(context.Background(), s); err != nil {
@@ -512,17 +512,17 @@ func TestPlacementRetryDoesNotLeakLaunchStateIntoLocalRefusal(t *testing.T) {
 				if err := os.MkdirAll(s.CWD, 0700); err != nil {
 					t.Fatal(err)
 				}
-				f := a.Runner.(*fakeRunner)
-				base, checks := f.Do, 0
-				f.Do = func(c Command) Result {
-					if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks show") {
-						checks++
-						if checks > 1 {
-							return Result{Code: 1, Err: "local precheck unavailable"}
-						}
+				checks := 0
+				useFakeHK(t).Handle(func(r hkRequest) (int, string, bool) {
+					if r.Route() != "GET /v1/tasks/42" {
+						return 0, "", false
 					}
-					return base(c)
-				}
+					checks++
+					if checks > 1 {
+						return http.StatusServiceUnavailable, `{"error":"local precheck unavailable"}`, true
+					}
+					return 0, "", false
+				})
 				if err := a.Spawn(context.Background(), s); exitCode(err) != exitConfig || checks != 2 {
 					t.Fatalf("fixture did not reach local pre-launch refusal: checks=%d err=%v", checks, err)
 				}

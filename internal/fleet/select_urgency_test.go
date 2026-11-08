@@ -31,13 +31,7 @@ func urgencyRows() ([]CatalogRow, map[string]PoolView, []string, map[string]stri
 // urgencyFixture is selFixture with an hk task priority on the bound task.
 func urgencyFixture(t *testing.T, priority string, rows []CatalogRow, pools map[string]PoolView, present []string) (*App, Spawn, *fakeQuota) {
 	a, s, q := selFixture(t, "A", rows, pools, present)
-	base := a.Runner.(*fakeRunner).Do
-	a.Runner.(*fakeRunner).Do = func(c Command) Result {
-		if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks show") {
-			return Result{Out: fmt.Sprintf(`{"id":42,"title":"work (grade A, T1)","state":"ready","priority":%s,"refs":{}}`, priority)}
-		}
-		return base(c)
-	}
+	useFakeHK(t).SetTask("42", fmt.Sprintf(`{"id":42,"title":"work (grade A, T1)","state":"ready","priority":%s,"refs":{}}`, priority))
 	return a, s, q
 }
 

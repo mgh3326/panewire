@@ -62,7 +62,7 @@ func familyEffortFixture(t *testing.T, familyEffort string) (*App, Spawn, *fakeQ
 	a, s, q := roleEffortFixture(t)
 	q.CatalogRows = append(q.CatalogRows, CatalogRow{Profile: "codex-sol", Effort: "xhigh", Grade: "S+", Pool: "codex", Gate: "escalation", ModelID: "sol-m"})
 	if familyEffort != "" {
-		serveRouting(a, routingDoc(consultFamilyEffortBlock(t, familyEffort)))
+		serveRouting(t, routingDoc(consultFamilyEffortBlock(t, familyEffort)))
 	}
 	return a, s, q
 }
@@ -237,7 +237,7 @@ func TestLeadFamilyEffortOMPSol(t *testing.T) {
 				return admit(r)
 			}
 			block := strings.Replace(consultFamilyEffortBlock(t, tc.familyEffort), `"allowed": ["opus", "fable", "codex-sol", "codex-astra"], "effort": "high", "on_exhaustion": "wait", "family`, `"allowed": ["*"], "effort": "high", "on_exhaustion": "wait", "family`, 1)
-			serveRouting(a, routingDoc(block))
+			serveRouting(t, routingDoc(block))
 			s.RoutingRole = "consult"
 			sel, e := a.selectProfile(context.Background(), s)
 			if e != nil {

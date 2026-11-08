@@ -23,7 +23,7 @@ func TestRoutingPublishedRuntugRoleMapFiltersWorkers(t *testing.T) {
 	pools := map[string]PoolView{"devin": {Status: "ok", Class: "spend", Blocking: ptrF(4)}, "claude": {Status: "ok", Class: "spend", Blocking: ptrF(10), Projected: ptrF(50)}, "codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}
 	a, s, q := selFixture(t, "A", rows, pools, []string{"devin", "claude", "codex"})
 	q.GateDo = gatePools(map[string]string{"devin-swe2": "devin", "sonnet": "claude", "haiku": "claude", "codex-luna": "codex", "codex-sol": "codex"})
-	serveRouting(a, routingDoc(routingBlockPublished))
+	serveRouting(t, routingDoc(routingBlockPublished))
 	sel, e := a.selectProfile(context.Background(), s)
 	if e != nil {
 		t.Fatal(e)
@@ -73,7 +73,7 @@ func TestRoutingUnmappedSeatRoleUsesBuiltinRole(t *testing.T) {
 	}
 	a := testApp(t)
 	a.Runner = &fakeRunner{}
-	serveRouting(a, routingDoc(block))
+	serveRouting(t, routingDoc(block))
 	r, e := a.routeFor(context.Background(), "worker", "")
 	if e != nil {
 		t.Fatal(e)
@@ -89,7 +89,7 @@ func TestRoutingCacheStoresPanewireRoleMap(t *testing.T) {
 	ctx := context.Background()
 	a := testApp(t)
 	a.Runner = &fakeRunner{}
-	serveRouting(a, routingDoc(routingBlockPublished))
+	serveRouting(t, routingDoc(routingBlockPublished))
 	if _, e := a.routeFor(ctx, "worker", ""); e != nil {
 		t.Fatal(e)
 	}
@@ -101,7 +101,7 @@ func TestRoutingCacheStoresPanewireRoleMap(t *testing.T) {
 		t.Fatalf("cache must carry only panewire_role_map:\n%s", b)
 	}
 	a.Runner = &fakeRunner{}
-	serveRouting(a, "")
+	serveRouting(t, "")
 	r, e := a.routeFor(ctx, "worker", "")
 	if e != nil || r.role != "implementer" || r.admits("codex-luna") {
 		t.Fatalf("the cached policy routes workers as implementers: %+v %v", r, e)

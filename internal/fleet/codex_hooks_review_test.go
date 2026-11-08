@@ -56,13 +56,18 @@ func readFixture(t *testing.T, name string) string {
 	return string(b)
 }
 
-func jobInput(f *fakeRunner) []string {
+// jobInput lists the job input the pane received and, as "task claim", a
+// task claim hk received.
+func jobInput(t *testing.T, f *fakeRunner) []string {
 	var got []string
 	for _, c := range f.Calls {
 		args := strings.Join(c.Args, " ")
-		if strings.HasPrefix(args, "agent prompt") || strings.Contains(args, "send-keys") || strings.Contains(args, "send-text") || strings.Contains(args, "tasks claim") {
+		if strings.HasPrefix(args, "agent prompt") || strings.Contains(args, "send-keys") || strings.Contains(args, "send-text") {
 			got = append(got, args)
 		}
+	}
+	if hkClaimed(t) {
+		got = append(got, "task claim")
 	}
 	return got
 }
@@ -78,7 +83,7 @@ func TestCodexHooksReviewScreenRefusesBeforeTheFooterDeadline(t *testing.T) {
 			if *reads < 2 {
 				t.Fatalf("pane reads after start = %d: the footer loop never polled", *reads)
 			}
-			if input := jobInput(f); len(input) > 0 {
+			if input := jobInput(t, f); len(input) > 0 {
 				t.Fatalf("hooks review screen received job input: %v", input)
 			}
 			if got := SpawnRefusalCode(err.Error(), code(err)); got != "hooks_review" {
@@ -94,7 +99,7 @@ func TestCodexTrustPromptStillRefusedInFooterLoop(t *testing.T) {
 	if code(err) != exitTrustPrompt || err == nil || !strings.HasPrefix(err.Error(), "WORKSPACE_TRUST_REQUIRED:") {
 		t.Fatalf("trust prompt not refused: code=%d err=%v", code(err), err)
 	}
-	if input := jobInput(f); len(input) > 0 {
+	if input := jobInput(t, f); len(input) > 0 {
 		t.Fatalf("trust prompt received job input: %v", input)
 	}
 }
@@ -118,7 +123,7 @@ func TestCodexFooterStillProvesLaunchBesideHooksCheck(t *testing.T) {
 			if err != nil && code(err) != exitSubmitUnconfirmed {
 				t.Fatalf("spawn failed before delivery: %v", err)
 			}
-			if len(jobInput(f)) == 0 {
+			if len(jobInput(t, f)) == 0 {
 				t.Fatal("brief never sent after the footer proof")
 			}
 		})

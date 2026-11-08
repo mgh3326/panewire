@@ -3,14 +3,16 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"strings"
 	"testing"
 )
 
-func claimCalls(f *fakeRunner) int {
+// claimCalls counts the task claims the test's fake hk received.
+func claimCalls(t *testing.T) int {
 	n := 0
-	for _, c := range f.Calls {
-		if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks claim") {
+	for _, r := range useFakeHK(t).Requests() {
+		if r.Method == http.MethodPost && strings.HasSuffix(r.Path, "/claim") {
 			n++
 		}
 	}
@@ -21,21 +23,21 @@ func claimCalls(f *fakeRunner) int {
 // launched through panewire) names only the author's family. It spawns, the
 // seat is still checked against that family, and it never claims the task.
 func TestReviewerBuilderFamilyWithoutBuilderJob(t *testing.T) {
-	a, s, f, _ := cmdFixture(t)
+	a, s, _, _ := cmdFixture(t)
 	s.Role, s.BuilderFamily = "reviewer", "anthropic"
 	if e := a.Spawn(context.Background(), s); e != nil {
 		t.Fatal(e)
 	}
-	if n := claimCalls(f); n != 0 {
+	if n := claimCalls(t); n != 0 {
 		t.Fatalf("an unlinked reviewer claimed the task %d times", n)
 	}
 
-	a, s, f, _ = cmdFixture(t)
+	a, s, _, _ = cmdFixture(t)
 	s.Role, s.BuilderFamily = "reviewer", "deepseek"
 	if e := a.Spawn(context.Background(), s); code(e) != exitSeatRefused {
 		t.Fatalf("a seat of the author's family must still be refused: %v", e)
 	}
-	if n := claimCalls(f); n != 0 {
+	if n := claimCalls(t); n != 0 {
 		t.Fatalf("claims after refusal: %d", n)
 	}
 }
@@ -46,19 +48,13 @@ func TestReviewerBuilderFamilyWithoutBuilderJob(t *testing.T) {
 // claimed it.
 func TestTwoUnlinkedReviewerSpawnsOnOneTask(t *testing.T) {
 	for _, tc := range []struct{ id, refs string }{{"mwr-1-pass1", `{}`}, {"mwr-1-pass2", `{"job_id":"mwr-1-pass1"}`}} {
-		a, s, f, _ := cmdFixture(t)
-		original := f.Do
-		f.Do = func(c Command) Result {
-			if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks show") {
-				return Result{Out: `{"id":42,"title":"implement (grade B, T1)","state":"ready","refs":` + tc.refs + `}`}
-			}
-			return original(c)
-		}
+		a, s, _, _ := cmdFixture(t)
+		useFakeHK(t).SetTask("42", `{"id":42,"title":"implement (grade B, T1)","state":"ready","refs":`+tc.refs+`}`)
 		s.Role, s.BuilderFamily, s.Label, s.Job = "reviewer", "anthropic", tc.id, tc.id
 		if e := a.Spawn(context.Background(), s); e != nil {
 			t.Fatalf("%s: %v", tc.id, e)
 		}
-		if n := claimCalls(f); n != 0 {
+		if n := claimCalls(t); n != 0 {
 			t.Fatalf("%s claimed the task %d times; it must stay unbound", tc.id, n)
 		}
 	}
@@ -66,12 +62,12 @@ func TestTwoUnlinkedReviewerSpawnsOnOneTask(t *testing.T) {
 
 func TestBuilderFamilyWithoutBuilderJobOnlyForReviewer(t *testing.T) {
 	for _, role := range []string{"worker", "tester", "builder"} {
-		a, s, f, _ := cmdFixture(t)
+		a, s, _, _ := cmdFixture(t)
 		s.Role, s.BuilderFamily = role, "anthropic"
 		if e := a.Spawn(context.Background(), s); code(e) != exitUsage {
 			t.Errorf("role %s: want exit 2, got %v", role, e)
 		}
-		if n := claimCalls(f); n != 0 {
+		if n := claimCalls(t); n != 0 {
 			t.Errorf("role %s claimed the task", role)
 		}
 	}

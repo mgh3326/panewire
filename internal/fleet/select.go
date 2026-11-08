@@ -9,9 +9,10 @@ import (
 	"math"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/client"
 )
 
 //go:embed pool-order.json
@@ -512,24 +513,14 @@ var urgentPriorities = []int{1, 2}
 
 // resolveUrgency applies the explicit flag first, then the bound task's hk
 // priority, then the normal default. The returned source names which won.
-func resolveUrgency(flag string, task Task) (string, string) {
+func resolveUrgency(flag string, task client.Task) (string, string) {
 	if flag != "" {
 		return flag, "flag"
 	}
-	if n, ok := taskPriority(task.Priority); ok && slices.Contains(urgentPriorities, n) {
+	if slices.Contains(urgentPriorities, task.Priority) {
 		return urgencyUrgent, "task-priority"
 	}
 	return urgencyNormal, "default"
-}
-func taskPriority(v any) (int, bool) {
-	switch n := v.(type) {
-	case float64:
-		return int(n), n == float64(int(n))
-	case string:
-		i, e := strconv.Atoi(strings.TrimSpace(n))
-		return i, e == nil
-	}
-	return 0, false
 }
 
 // selHost is one spawn host as the presence rule sees it.

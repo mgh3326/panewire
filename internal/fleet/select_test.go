@@ -41,12 +41,8 @@ func selFixture(t *testing.T, grade string, rows []CatalogRow, pools map[string]
 	}}
 	a.Quota = q
 	a.Config.Local = map[string]any{}
-	a.Runner = &fakeRunner{Do: func(c Command) Result {
-		if c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks show") {
-			return Result{Out: fmt.Sprintf(`{"id":42,"title":"work (grade %s, T1)","state":"ready","refs":{}}`, grade)}
-		}
-		return Result{}
-	}}
+	a.Runner = &fakeRunner{}
+	useFakeHK(t).SetTask("42", fmt.Sprintf(`{"id":42,"title":"work (grade %s, T1)","state":"ready","refs":{}}`, grade))
 	s := Spawn{CWD: a.Home + "/repo", Job: "job-a", Task: "42", Role: "worker", Host: "auto", T: "T1"}
 	return a, s, q
 }
@@ -354,7 +350,7 @@ func TestSelectTesterExcludesBuilderFamily(t *testing.T) {
 		"codex":  {Status: "ok", Class: "spend", Blocking: ptrF(90)},
 	}
 	a, s, q := selFixture(t, "S", rows, pools, []string{"claude", "codex"})
-	serveRouting(a, routingDocV1)
+	serveRouting(t, routingDocV1)
 	s.Role = "tester"
 	s.ParentFamily = "anthropic"
 	q.GateDo = gatePools(map[string]string{"codex-terra61": "codex"})
@@ -493,10 +489,13 @@ func TestSpawnAutoDryRunPrintsSelection(t *testing.T) {
 	for _, c := range f.Calls {
 		joined += c.Name + " " + strings.Join(c.Args, " ") + "\n"
 	}
-	for _, bad := range []string{"tab create", "pane ", "tasks claim"} {
+	for _, bad := range []string{"tab create", "pane "} {
 		if strings.Contains(joined, bad) {
 			t.Fatalf("dry-run must emit no side effects: %s", joined)
 		}
+	}
+	if hkClaimed(t) {
+		t.Fatal("dry-run must not claim the task")
 	}
 	if _, e := os.Stat(a.ledger().DB); e == nil {
 		t.Fatal("dry-run must not touch the ledger")

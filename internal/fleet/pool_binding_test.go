@@ -69,9 +69,12 @@ func TestLaunchPoolSources(t *testing.T) {
 			}
 			if err != nil {
 				for _, c := range runner.Calls {
-					if c.Name == "herdr" || c.Name == "panewire" || c.Name == "handoffkeep" && strings.HasPrefix(strings.Join(c.Args, " "), "tasks claim") {
+					if c.Name == "herdr" || c.Name == "panewire" {
 						t.Fatal("unresolved or mismatched pool reached execution")
 					}
+				}
+				if hkClaimed(t) {
+					t.Fatal("unresolved or mismatched pool claimed the task")
 				}
 				return
 			}

@@ -26,7 +26,7 @@ func reviewerRungFixture(t *testing.T, block string) (*App, Spawn, *fakeQuota) {
 	}
 	a, s, q := selFixture(t, "C", rows, map[string]PoolView{"codex": {Status: "ok", Class: "spend", Blocking: ptrF(40)}}, []string{"codex"})
 	q.GateDo = gatePools(map[string]string{"codex-luna": "codex"})
-	serveRouting(a, routingDoc(block))
+	serveRouting(t, routingDoc(block))
 	s.Role, s.ParentFamily = "reviewer", "anthropic"
 	return a, s, q
 }
@@ -62,7 +62,7 @@ func TestRoutingMinEffortResolvesRunglessRowAtProfileDefault(t *testing.T) {
 	}
 	a, s, q := selFixture(t, "C", rows, map[string]PoolView{"devin": {Status: "ok", Class: "spend", Blocking: ptrF(0)}}, []string{"devin"})
 	q.GateDo = gatePools(map[string]string{"devin-swe2": "devin", "no-default": "devin"})
-	serveRouting(a, routingDoc(reviewerMinEffortBlock("medium")))
+	serveRouting(t, routingDoc(reviewerMinEffortBlock("medium")))
 	s.Role, s.ParentFamily = "reviewer", "anthropic"
 	sel, _ := a.selectProfile(context.Background(), s)
 	rec := sel.record()
@@ -100,7 +100,7 @@ func TestSpawnRecordCarriesRoleMinEffort(t *testing.T) {
 	block := strings.Replace(routingBlockV1,
 		`"cmd-dsflash41"], "effort": "high", "on_exhaustion": "wait"`,
 		`"cmd-dsflash41"], "effort": "high", "min_effort": "medium", "on_exhaustion": "wait"`, 1)
-	serveRouting(a, routingDoc(block))
+	serveRouting(t, routingDoc(block))
 	if e := a.Spawn(context.Background(), s); e != nil {
 		t.Fatal(e)
 	}

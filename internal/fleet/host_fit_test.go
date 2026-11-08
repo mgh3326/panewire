@@ -17,7 +17,7 @@ func hostFirstFixture(t *testing.T, role, grade string, rows []CatalogRow, place
 	t.Helper()
 	pools := map[string]PoolView{"claude": riskPool(30, 8)}
 	a, s, q := selFixture(t, grade, rows, pools, nil)
-	serveRouting(a, routingDocV1)
+	serveRouting(t, routingDocV1)
 	q.GateDo = gatePools(map[string]string{"opus": "claude", "sonnet": "claude"})
 	s.Role = role
 	a.Config.Local["spawn"] = false

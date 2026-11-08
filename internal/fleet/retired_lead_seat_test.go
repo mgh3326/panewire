@@ -37,7 +37,7 @@ func TestPolicyWithoutLeadEntryRoutesEverySeatRole(t *testing.T) {
 	for seat, want := range map[string]string{"worker": "implementer", "tester": "verifier", "reviewer": "reviewer", "counsel": "consult"} {
 		a := testApp(t)
 		a.Runner = &fakeRunner{}
-		serveRouting(a, routingDocV1)
+		serveRouting(t, routingDocV1)
 		r, err := a.routeFor(context.Background(), seat, "")
 		if err != nil || r.role != want {
 			t.Fatalf("%s: want routing role %s, got %+v %v", seat, want, r, err)
@@ -51,7 +51,7 @@ func TestLeadEntryInPolicyIsNeverRead(t *testing.T) {
 	leadOnly := strings.Replace(routingBlockV1, `"consult":     {`, `"lead":        {`, 1)
 	a := testApp(t)
 	a.Runner = &fakeRunner{}
-	serveRouting(a, routingDoc(leadOnly))
+	serveRouting(t, routingDoc(leadOnly))
 	if _, err := a.routeFor(context.Background(), "counsel", ""); exitCode(err) != exitConfig || err == nil || !strings.Contains(err.Error(), "POLICY_UNAVAILABLE") {
 		t.Fatalf("counsel must not fall back to a lead entry: %v", err)
 	}

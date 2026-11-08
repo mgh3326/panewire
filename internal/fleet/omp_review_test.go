@@ -179,9 +179,12 @@ func TestOMPSpawnReceiptPoolBinding(t *testing.T) {
 				}
 				for _, c := range fr.Calls {
 					args := strings.Join(c.Args, " ")
-					if c.Name == "herdr" || c.Name == "panewire" || c.Name == "handoffkeep" && strings.HasPrefix(args, "tasks claim") {
+					if c.Name == "herdr" || c.Name == "panewire" {
 						t.Fatalf("swapped pool reached a launch side effect: %s %s", c.Name, args)
 					}
+				}
+				if hkClaimed(t) {
+					t.Fatal("swapped pool claimed the task")
 				}
 			})
 		}
