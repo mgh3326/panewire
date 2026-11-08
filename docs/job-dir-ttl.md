@@ -61,7 +61,7 @@ directory is kept. Any read error or doubt keeps it.
 | kind | It has `events/` (a job that ran here), or `submission.json` and no `events/` (a submitter-side dir, below). Anything else — lead scratch, a consult folder — is not a job. | `not-a-job`, `events-unreadable`, `submission-unreadable`, `submission-mismatch` |
 | (a) | The job is not `--keep`, and no completion watcher holds it (`watchActive`). | `protected`, `watcher-active` |
 | (d) | The newest file mtime and event time under it are at least the TTL old. | `too-young` |
-| (c) | In the herdr session the receipt recorded, `herdr pane list` (the full inventory, plain shells included) names no pane with the job's recorded pane id or label, and neither does `herdr agent list`. The agent list alone never proves a pane gone: a shell pane whose agent exited is only in the pane list. A job that recorded neither a pane nor a label, a receipt that names no `herdr_session` (one from before it was recorded), or a list that cannot be read keeps it. | `pane-live`, `pane-unknown`, `pane-session-unknown`, `pane-unreadable` |
+| (c) | In the herdr session the receipt recorded, `herdr pane list` (the full inventory, plain shells included) names no pane with the job's recorded pane id or label, and neither does `herdr agent list`. The agent list alone never proves a pane gone: a shell pane whose agent exited is only in the pane list. A job that recorded neither a pane nor a label, a receipt that names no `herdr_session` (one from before it was recorded), or a list that cannot be read keeps it. A list answer that carries an error (an `error` member or `"ok":false`), or any row that is not an object with a pane id (`null`, `{}`), cannot be read. | `pane-live`, `pane-unknown`, `pane-session-unknown`, `pane-unreadable` |
 | (b) | The hk job record is `completed` or `lost`. `escalated` and every live state keep it. | `hk-not-terminal`, `hk-missing`, `hk-unreadable` |
 | (e) | hk confirms every artifact in the directory (below). | `report-…`, `result-unconfirmed`, `screen-…`, `evidence-unconfirmed`, `evidence-unclassified` |
 
@@ -74,9 +74,16 @@ hk confirms an artifact when:
   `report_doc`, and the sha256 of the local bytes equals the record's
   `report_sha256` for that document, else the `sha256` hk holds for
   `reports/<job>/<basename>`. A recorded path outside the directory (a
-  parent job's) is not this pass's to delete and is skipped; a recorded
-  path that is not absolute, or not a string, keeps the directory
-  (`report-path-unreadable`);
+  parent job's) is not this pass's to delete and is skipped. A recorded
+  path is judged by the file it really names: one that is not a string,
+  not absolute, or not clean (`filepath.Clean` would change it: `..`, `.`,
+  a doubled separator), and one whose symlinks resolve it to another path,
+  keep the directory (`report-path-unreadable`). A missing file is resolved
+  through its nearest existing parent. `link/../summary.md`, for one, names
+  the file `..` reaches from where `link` points, not the cleaned
+  `summary.md`. Only the resolved path is tested against the directory. A
+  path recorded through the jobs root's own alias is read under the real
+  root, which the pass resolves itself;
 - **`findings.json` or `result.json`**: the record's `result` is not empty;
 - **`pane-screen.txt`**: the document `screens/<job>/pane-screen.txt` exists,
   and, for a screen of at most 512 KiB, its sha256 matches. A larger screen
@@ -126,14 +133,19 @@ again with fresh herdr and hk reads. A held lock keeps the directory
 4. Only then does `os.RemoveAll` remove the tombstone, without following a
    symlink.
 
-A writer that opens a path under the job's name after the rename fails, and
-one that wrote before it shows in the tombstone's inventory. **Residual
+After the rename, the job's name no longer exists: a writer that opens a
+file under it fails, while a writer that first runs `MkdirAll` recreates a
+fresh, empty directory under that name. That fresh directory is not
+deleted; a later pass judges it as any other. A writer that wrote before the
+rename shows in the tombstone's inventory. **Residual
 window:** a writer holding a file descriptor it opened in the directory
 before the rename can still write into the tombstone after step 3, and that
 write is deleted with it.
 
 A pass lists any `.expiring-*` tombstone it finds as `keep reason=tombstone`.
 It never deletes one and never renames one back; the operator decides.
+`panewire artifacts sweep` and `panewire lanes-missing` skip a tombstone: it
+is not a job.
 
 Each delete is logged (`job dir expired`, with the job, reason and bytes) and
 recorded as a `job_dir_expired` [fleet event](observability.md) in the state
