@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/client"
 )
 
 //go:embed artifact-policy.json
@@ -446,24 +448,17 @@ func (a *App) confirmUpload(ctx context.Context, paths []string) error {
 		}
 	}
 }
+
+// putRecord writes the artifact record over hk HTTP with the svc-panewire
+// credential (hk 3607): kind artifact, no job, the encoded record as the body,
+// as `handoffkeep doc put --kind artifact --file` sent it, under the upload
+// bound. A failure reads as a.must's did.
 func (a *App) putRecord(ctx context.Context, key string, record any) error {
 	b, e := encode(record)
 	if e != nil {
 		return e
 	}
-	f, e := os.CreateTemp("", "panewire-artifact-*")
-	if e != nil {
-		return e
-	}
-	defer os.Remove(f.Name())
-	if _, e = f.Write(b); e != nil {
-		f.Close()
-		return e
-	}
-	if e = f.Close(); e != nil {
-		return e
-	}
-	return a.must(ctx, "handoffkeep", "doc", "put", "--key", key, "--kind", "artifact", "--file", f.Name())
+	return hkCheck(hkPutDocument(ctx, client.Document{Key: key, Kind: "artifact", Body: string(b)}), "handoffkeep")
 }
 func (a *App) remoteArtifactMove(ctx context.Context, src, dest, host string, apply bool) error {
 	h, ok := a.Config.Hosts[host]
@@ -628,33 +623,39 @@ func (a *App) artifactSweep(ctx context.Context, args []string) error {
 		if a.watchActive(j.ID) {
 			continue
 		}
-		r := a.call(ctx, "handoffkeep", "tasks", "show", j.Task)
-		if r.Code != 0 {
+		// hk HTTP with the svc-panewire credential (hk 3607); each answer is
+		// read as the hk CLI's output was, and any hk failure skips the job
+		// or the document as a failed CLI call did.
+		b, e := hkTaskBody(ctx, j.Task)
+		if e != nil {
 			continue
 		}
 		var task struct{ State, Project string }
-		if json.Unmarshal([]byte(r.Out), &task) != nil || !slices.Contains([]string{"merged", "dropped"}, task.State) || task.Project == "" {
+		if json.Unmarshal(b, &task) != nil || !slices.Contains([]string{"merged", "dropped"}, task.State) || task.Project == "" {
 			continue
 		}
 		prefix := "artifacts/" + task.Project + "/" + j.Task + "/" + j.ID
-		r = a.call(ctx, "handoffkeep", "doc", "list", "--prefix", prefix)
-		if r.Code != 0 {
+		b, e = hkDocumentListBody(ctx, prefix)
+		if e != nil {
 			continue
 		}
-		var docs []struct{ Key string }
-		if json.Unmarshal([]byte(r.Out), &docs) != nil {
+		var listing struct {
+			Documents []struct{ Key string } `json:"documents"`
+		}
+		if json.Unmarshal(b, &listing) != nil {
 			return fail(exitConfig, "invalid artifact doc listing")
 		}
-		for _, doc := range docs {
+		for _, doc := range listing.Documents {
+			// The prefix is a LIKE pattern: a _ or % in it matches more.
 			if doc.Key != prefix && !strings.HasPrefix(doc.Key, prefix+"/") {
 				continue
 			}
-			r = a.call(ctx, "handoffkeep", "doc", "get", doc.Key)
-			if r.Code != 0 {
+			b, e = hkDocumentBody(ctx, doc.Key)
+			if e != nil {
 				continue
 			}
 			var d struct{ Body string }
-			if json.Unmarshal([]byte(r.Out), &d) != nil {
+			if json.Unmarshal(b, &d) != nil {
 				continue
 			}
 			var rec ArtifactRecord
@@ -810,12 +811,12 @@ func (a *App) sweepStillSafe(ctx context.Context, j Job) error {
 			return fail(exitStateConflict, "pane present during sweep")
 		}
 	}
-	r := a.call(ctx, "handoffkeep", "tasks", "show", j.Task)
-	if e = check(r, "sweep task recheck"); e != nil {
-		return e
+	b, e := hkTaskBody(ctx, j.Task)
+	if e != nil {
+		return hkCheck(e, "sweep task recheck")
 	}
 	var t struct{ State string }
-	if json.Unmarshal([]byte(r.Out), &t) != nil || !slices.Contains([]string{"merged", "dropped"}, t.State) {
+	if json.Unmarshal(b, &t) != nil || !slices.Contains([]string{"merged", "dropped"}, t.State) {
 		return fail(exitStateConflict, "task reopened during sweep")
 	}
 	return nil

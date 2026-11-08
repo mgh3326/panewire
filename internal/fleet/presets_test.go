@@ -14,9 +14,7 @@ func TestPresetFlagSets(t *testing.T) {
 	// The pane's own lane is not the owner any more: an omitted --owner is
 	// resolved from the task's hk project by the spawn path.
 	t.Setenv("PANEWIRE_LANE", "caller-lane")
-	a.Runner = &fakeRunner{Do: func(c Command) Result {
-		return Result{Out: `{"id":42,"title":"change (grade A, T1)","state":"ready","refs":{"worktree":{"path":"/work/project.feature"}}}`}
-	}}
+	useFakeHK(t).SetTask("42", `{"id":42,"title":"change (grade A, T1)","state":"ready","refs":{"worktree":{"path":"/work/project.feature"}}}`)
 	job := "task42-work"
 	want, err := parseSpawn([]string{"-c", "/work/project.feature", "-m", "auto", "-p", filepath.Join(a.Jobs, job, "brief.md"), "-w", "workers", "-l", job, "--job", job, "--t", "T1", "--task", "42", "--host", "auto", "--report", filepath.Join(a.Jobs, job, "report.md"), "--role", "worker", "--dry-run"})
 	if err != nil {
@@ -38,9 +36,7 @@ func TestPresetFlagSets(t *testing.T) {
 
 func TestPresetOverrides(t *testing.T) {
 	a := testApp(t)
-	a.Runner = &fakeRunner{Do: func(Command) Result {
-		return Result{Out: `{"id":42,"title":"change (grade A, T1)","state":"ready","refs":{"job_id":"existing-work","cwd":"/work/project"}}`}
-	}}
+	useFakeHK(t).SetTask("42", `{"id":42,"title":"change (grade A, T1)","state":"ready","refs":{"job_id":"existing-work","cwd":"/work/project"}}`)
 	s, err := a.workPreset(context.Background(), []string{"42", "--owner", "caller", "--job", "custom", "-l", "custom", "-p", "/brief", "--report", "/report", "-c", "/work/other", "-w", "wF"})
 	if err != nil {
 		t.Fatal(err)

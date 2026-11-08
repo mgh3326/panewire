@@ -14,12 +14,12 @@ import (
 // both the task read's bound and less than the upload's lets the upload
 // through and times the task read out.
 func TestHKBriefUploadHasItsOwnLongerBound(t *testing.T) {
-	if hkBriefUploadTimeout < 60*time.Second || hkCallTimeout != catalogTimeout {
-		t.Fatalf("bounds: upload %v call %v, want the upload at least 60s and calls at the catalog's %v", hkBriefUploadTimeout, hkCallTimeout, catalogTimeout)
+	if hkUploadTimeout < 60*time.Second || hkCallTimeout != catalogTimeout {
+		t.Fatalf("bounds: upload %v call %v, want the upload at least 60s and calls at the catalog's %v", hkUploadTimeout, hkCallTimeout, catalogTimeout)
 	}
-	call, upload := hkCallTimeout, hkBriefUploadTimeout
-	t.Cleanup(func() { hkCallTimeout, hkBriefUploadTimeout = call, upload })
-	hkCallTimeout, hkBriefUploadTimeout = 150*time.Millisecond, 20*time.Second
+	call, upload := hkCallTimeout, hkUploadTimeout
+	t.Cleanup(func() { hkCallTimeout, hkUploadTimeout = call, upload })
+	hkCallTimeout, hkUploadTimeout = 150*time.Millisecond, 20*time.Second
 
 	ctx := context.Background()
 	a, hk := hkSiteApp(t)

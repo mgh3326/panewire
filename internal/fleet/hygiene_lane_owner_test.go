@@ -52,6 +52,7 @@ func TestReapSkipsLaneOwnedByAnotherMachineAndNamesIt(t *testing.T) {
 // The same-machine path keeps the #234 route guard: the hub removes the lane
 // only while it still names this machine and pane.
 func TestReapRemovesOwnLaneWithRouteGuard(t *testing.T) {
+	useFakeHK(t).Handle(hkCommentAnswer)
 	laneRM, stderr, _ := reapLaneJob(t, "host-a", "host-a")
 	for _, want := range []string{"lanes rm lane-j", "--expect-machine host-a", "--expect-pane w:p1"} {
 		if !strings.Contains(laneRM, want) {

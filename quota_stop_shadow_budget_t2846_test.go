@@ -3,7 +3,6 @@ package panewire
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"os"
@@ -37,12 +36,7 @@ func quotaShadowFixture(t *testing.T) (*quotaStopManager, *Store, *bytes.Buffer)
 	if err != nil {
 		t.Fatal(err)
 	}
-	q.command = func(_ context.Context, args ...string) ([]byte, error) {
-		if args[0] == "doc" {
-			return json.Marshal(map[string]string{"body": "## Values\n- default_expected: 1d\n- urgent_priorities: [1, 2]\n- max_waits: 1\n- resume_text: \"continue\"\n"})
-		}
-		return []byte(`{"tasks":[{"priority":3,"refs":{"job_id":"job-active"}}]}`), nil
-	}
+	q.hk = quotaStopHKFixture(quotaPolicyAnswer("## Values\n- default_expected: 1d\n- urgent_priorities: [1, 2]\n- max_waits: 1\n- resume_text: \"continue\"\n"), `{"tasks":[{"priority":3,"refs":{"job_id":"job-active"}}]}`, nil)
 	return q, store, logs
 }
 

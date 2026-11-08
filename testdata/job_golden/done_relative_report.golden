@@ -2,7 +2,7 @@
 -- stdout
 OK job=jw report=reports/report.md
 -- stderr
-<cmd>: warning: handoffkeep not found; report document not uploaded (job=jw)
+<cmd>: warning: hk service credential unconfigured: set HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create @ROOT@/bin/absent-hk-svc.env; report document not uploaded (job=jw)
 == file inbox/jobs/jw/.wrk-events.lock mode=0644
 == file inbox/jobs/jw/events/00001-job.claim.json mode=0644
 {"created_at": "2026-09-21T00:00:00+00:00", "job_id": "jw", "kind": "job.claim", "payload": {"agent_label": "jw-label", "owner_lane": "owner-lane", "t_level": "T2"}, "seq": 1}

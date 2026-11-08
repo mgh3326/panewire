@@ -2,7 +2,6 @@ package panewire
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -61,18 +60,7 @@ func newRoleStopRig(t *testing.T, role string, startedAgo time.Duration, task st
 	}
 	q.read = func(context.Context, string) (string, error) { return string(screen), nil }
 	policy := "## Values\n- default_expected: 1d\n- urgent_priorities: [1, 2]\n- max_waits: 1\n- resume_text: \"continue\"\n"
-	q.command = func(_ context.Context, args ...string) ([]byte, error) {
-		switch strings.Join(args[:2], " ") {
-		case "doc get":
-			return json.Marshal(map[string]string{"body": policy})
-		case "tasks list":
-			return []byte(task), nil
-		case "doc put":
-			return []byte(`{}`), nil
-		}
-		t.Fatalf("unexpected command %v", args)
-		return nil, nil
-	}
+	q.hk = quotaStopHKFixture(quotaPolicyAnswer(policy), task, nil)
 	q.send = func(_ context.Context, pane, pool, text string) relayInjectResult {
 		rig.sends++
 		return relayInjectResult{Outcome: relayInjectDelivered, Evidence: "visible:nonce_echo", Proven: relayNoncesIn(text)}

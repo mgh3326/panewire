@@ -4,16 +4,12 @@ OK job=jw report=@ROOT@/reports/report.md
 -- stderr
 <cmd>: warning: handoffkeep document upload failed (rc=1 job=jw); continuing without document link
 == file handoffkeep.log mode=0644
-doc
-put
---key
-reports/jw/report.md
---kind
-report
---job
-jw
---file
-@ROOT@/reports/report.md
+PUT /v1/documents/reports%2Fjw%2Freport.md
+key=reports/jw/report.md
+kind=report
+job=jw
+body_bytes=18
+body_sha256=3426702715566646f5f286ced3c8cca30de7f2742cfcea32bbf2580e6c4f0eb2
 --
 == file inbox/jobs/jw/.wrk-events.lock mode=0644
 == file inbox/jobs/jw/events/00001-job.claim.json mode=0644

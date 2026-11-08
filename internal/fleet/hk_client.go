@@ -17,12 +17,15 @@ import (
 	"github.com/mgh3326/panewire/internal/hkcred"
 )
 
-// newHKClient builds the hk public client the spawn path calls hk through
-// (hk 3526 §5, hk 3591): the task precheck, claim, rebind and link check, the
-// owner lookup, the routing policy read and the hub brief upload. The bearer
-// is panewire's svc-panewire credential from hkcred.Load — the environment,
-// else ~/.config/panewire/hk-svc.env — and never the hk CLI's config.env. The
-// HTTP settings are those of panewire's other hk clients (catalog.go,
+// newHKClient builds the hk public client panewire calls hk through in place
+// of the `handoffkeep` CLI (hk 3526 §5): the spawn path's task precheck,
+// claim, rebind and link check, owner lookup, routing policy read and hub
+// brief upload (hk 3591), and `panewire work`'s task read, the artifact
+// records and sweep, the lifecycle report upload and task comment, the job
+// command's report upload and the quota stop manager's calls (hk 3607). The
+// bearer is panewire's svc-panewire credential from hkcred.Load — the
+// environment, else ~/.config/panewire/hk-svc.env — and never the hk CLI's
+// config.env. The HTTP settings are those of panewire's other hk clients (catalog.go,
 // fleet.go): the catalogTimeout per call (hkCallTimeout), no redirect
 // followed, HTTPS off loopback and the tailnet, and over plain HTTP no proxy,
 // so an HTTP_PROXY never receives the bearer. An unconfigured credential is
@@ -30,13 +33,14 @@ import (
 // value.
 func newHKClient() (client.Client, error) { return newHKClientWithin(hkCallTimeout) }
 
-// The bounds of one hk call. The hub brief upload has its own, longer one:
-// the hk CLI's `doc put` it replaces had no timeout, and a large brief over a
-// slow link must not fail at a task read's bound. Variables only so a test
-// can shrink them.
+// The bounds of one hk call. An upload — the hub brief, a report, an
+// artifact record (hkPutDocument) — has its own, longer one: the hk CLI's
+// `doc put` it replaces had no timeout, and a large file over a slow link
+// must not fail at a task read's bound. Variables only so a test can shrink
+// them.
 var (
-	hkCallTimeout        = catalogTimeout
-	hkBriefUploadTimeout = 60 * time.Second
+	hkCallTimeout   = catalogTimeout
+	hkUploadTimeout = 60 * time.Second
 )
 
 // newHKClientWithin is newHKClient with timeout as each call's bound.
@@ -247,4 +251,135 @@ func hkGetDocument(ctx context.Context, key string) (client.Document, error) {
 		err = errHKNotFound
 	}
 	return doc, err
+}
+
+// hkUploadKinds are the document kinds that carry a file's bytes, which
+// hkPutDocument sends under the upload bound.
+var hkUploadKinds = map[string]bool{"brief": true, "report": true, "artifact": true}
+
+// hkPutDocument writes doc over hk HTTP, as `handoffkeep doc put --key
+// --kind [--job] --file` did: the key, kind, job and the file's bytes as the
+// body. A brief, report or artifact record gets the upload bound
+// (hkUploadTimeout), any other document the call bound. An answer hk's
+// client cannot decode is an error: hk's outcome is unknown, and the CLI
+// failed on it too.
+func hkPutDocument(ctx context.Context, doc client.Document) error {
+	timeout := hkCallTimeout
+	if hkUploadKinds[doc.Kind] {
+		timeout = hkUploadTimeout
+	}
+	c, err := newHKClientWithin(timeout)
+	if err != nil {
+		return err
+	}
+	_, _, err = c.PutDocument(ctx, doc)
+	return err
+}
+
+// hkAnswerBody runs one hk read and returns hk's 2xx answer as hk sent it,
+// for a site that reads it with the parser it used on the hk CLI's output
+// (the CLI printed hk's answer): an answer that parser read is read as it
+// was, and one it could not read takes the branch it took for unparseable
+// output, never success. Any other outcome — hk unreachable, an hk error,
+// the credential unconfigured — is the call's error.
+func hkAnswerBody(call func(client.Client) error) ([]byte, error) {
+	body, answered, err := hkAnswer(call)
+	if !answered {
+		return nil, err
+	}
+	return body, nil
+}
+
+// hkTaskBody is GET /v1/tasks/{id}, the read behind `handoffkeep tasks show
+// ID`; a task hk does not have is errHKNotFound.
+func hkTaskBody(ctx context.Context, task string) ([]byte, error) {
+	id, err := hkTaskID(task)
+	if err != nil {
+		return nil, err
+	}
+	return hkAnswerBody(func(c client.Client) error {
+		_, found, e := c.GetTask(ctx, id)
+		if e == nil && !found {
+			e = errHKNotFound
+		}
+		return e
+	})
+}
+
+// hkDocumentBody is GET /v1/documents/{key}, the read behind `handoffkeep
+// doc get KEY`; a key hk does not have is errHKNotFound.
+func hkDocumentBody(ctx context.Context, key string) ([]byte, error) {
+	return hkAnswerBody(func(c client.Client) error {
+		_, found, e := c.GetDocument(ctx, key)
+		if e == nil && !found {
+			e = errHKNotFound
+		}
+		return e
+	})
+}
+
+// hkDocListLimit is the hk CLI's `doc list` page.
+const hkDocListLimit = 100
+
+// hkDocumentListBody is GET /v1/documents?prefix=, the read behind
+// `handoffkeep doc list --prefix PREFIX`, with the CLI's limit. Its answer
+// is {"documents": [...]}, where the CLI printed the array; the prefix is a
+// LIKE pattern, so the caller still checks each key against it.
+func hkDocumentListBody(ctx context.Context, prefix string) ([]byte, error) {
+	return hkAnswerBody(func(c client.Client) error {
+		_, e := c.ListDocuments(ctx, prefix, hkDocListLimit)
+		return e
+	})
+}
+
+// hkCommentTask appends a comment to the task over hk HTTP, as `handoffkeep
+// tasks comment ID --body` did, under the call bound. hk checks the body as
+// the CLI checked it before sending (non-empty, at most hk's comment limit,
+// UTF-8, no NUL, no secret-like content).
+func hkCommentTask(ctx context.Context, task, body string) error {
+	id, err := hkTaskID(task)
+	if err != nil {
+		return err
+	}
+	c, err := newHKClient()
+	if err != nil {
+		return err
+	}
+	_, err = c.CommentTask(ctx, id, body)
+	return err
+}
+
+// hkCheck is check(r, what) for an hk call that failed: the CLI's exit
+// status and, where check printed the CLI's stderr, hk's error as the CLI
+// printed it.
+func hkCheck(err error, what string) error {
+	if err == nil {
+		return nil
+	}
+	return fail(hkCLIErrorExit, "%s: %s", what, hkErrText(err))
+}
+
+// PutHKDocument writes one document over hk HTTP with the svc-panewire
+// credential (hkPutDocument): the job command's report upload and the quota
+// stop manager's note, which ran `handoffkeep doc put`.
+func PutHKDocument(ctx context.Context, key, kind, job, body string) error {
+	return hkPutDocument(ctx, client.Document{Key: key, Kind: kind, Job: job, Body: body})
+}
+
+// HKDocumentAnswer is hk's 2xx answer to GET /v1/documents/{key}
+// (hkDocumentBody), for the quota stop manager's policy read, which parses it
+// as it parsed `handoffkeep doc get` output.
+func HKDocumentAnswer(ctx context.Context, key string) ([]byte, error) {
+	return hkDocumentBody(ctx, key)
+}
+
+// HKTaskListAnswer is hk's 2xx answer to GET /v1/tasks with no filter and
+// limit tasks, the read behind `handoffkeep tasks list --limit N`, for the
+// quota stop manager's task lookup, which parses it as it parsed that
+// output.
+func HKTaskListAnswer(ctx context.Context, limit int) ([]byte, error) {
+	return hkAnswerBody(func(c client.Client) error {
+		_, e := c.ListTasks(ctx, client.ListTasksInput{Limit: limit})
+		return e
+	})
 }

@@ -54,7 +54,7 @@ func TestQuotaStopResumeSkipsBlockedPane(t *testing.T) {
 			}
 			reads := 0
 			q.read = func(context.Context, string) (string, error) { reads++; return screen, nil }
-			q.command = func(context.Context, ...string) ([]byte, error) { return []byte(`{}`), nil }
+			q.hk = quotaStopHKFixture(`{}`, `{}`, nil)
 			sends := 0
 			q.send = func(_ context.Context, _, _, text string) relayInjectResult {
 				sends++

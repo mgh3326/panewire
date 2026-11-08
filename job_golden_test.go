@@ -3,11 +3,15 @@ package panewire
 import (
 	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io/fs"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -16,6 +20,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/mgh3326/panewire/internal/hkcred"
 )
 
 // The job golden files are the frozen record contract for
@@ -152,29 +158,64 @@ func jobGoldenWorkspace(t *testing.T, c jobGoldenCase) (string, map[string]strin
 	if err := os.MkdirAll(filepath.Join(root, "bin"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	handoffkeep := filepath.Join(root, "bin", "absent-handoffkeep")
-	if c.Handoffkeep == "ok" || c.Handoffkeep == "fail" {
-		handoffkeep = filepath.Join(root, "bin", "handoffkeep")
-		rc := "0"
-		if c.Handoffkeep == "fail" {
-			rc = "1"
-		}
-		script := fmt.Sprintf("#!/bin/sh\n{ for a in \"$@\"; do printf '%%s\\n' \"$a\"; done; printf -- '--\\n'; } >>%q\nexit %s\n", filepath.Join(root, "handoffkeep.log"), rc)
-		if err := os.WriteFile(handoffkeep, []byte(script), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
+	// The report upload goes to hk over HTTP with the svc-panewire
+	// credential (hk 3607). "absent" is no credential; "ok" and "fail" are a
+	// fake hk that logs each request to handoffkeep.log and answers 200 or
+	// 500.
 	env := map[string]string{
 		"ARBITER_INBOX_ROOT":  filepath.Join(root, "inbox", "jobs"),
 		"HOSTNAME":            "fixture-host",
-		"HANDOFFKEEP_BIN":     handoffkeep,
 		"PANEWIRE_SOCKET":     filepath.Join(root, "s"),
 		"PANEWIRE_INBOX_ROOT": filepath.Join(root, "unused-inbox"),
+		hkcred.URLKey:         "",
+		hkcred.TokenKey:       "",
+		hkcred.PathEnv:        filepath.Join(root, "bin", "absent-hk-svc.env"),
+	}
+	if c.Handoffkeep == "ok" || c.Handoffkeep == "fail" {
+		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			jobGoldenHKLog(t, filepath.Join(root, "handoffkeep.log"), r)
+			w.Header().Set("Content-Type", "application/json")
+			if c.Handoffkeep == "fail" {
+				w.WriteHeader(http.StatusInternalServerError)
+				fmt.Fprint(w, `{"error":"internal"}`)
+				return
+			}
+			fmt.Fprint(w, `{"document":{"id":1,"key":"k","kind":"report","sha256":"ab","created_by":"svc-panewire","created_at":"2026-09-21T00:00:00Z","updated_at":"2026-09-21T00:00:00Z"},"changed":true}`)
+		}))
+		t.Cleanup(server.Close)
+		env[hkcred.URLKey] = server.URL
+		env[hkcred.TokenKey] = jobGoldenHKToken
 	}
 	for key, value := range c.Env {
 		env[key] = value
 	}
 	return root, env
+}
+
+const jobGoldenHKToken = "svc-panewire-golden-token"
+
+// jobGoldenHKLog appends one hk request to the case's handoffkeep.log: the
+// route, and the document's key, kind, job and body (its length and sha256,
+// which is the report_sha256 the event carries for an unchanged report). A
+// request without the svc-panewire bearer fails the test.
+func jobGoldenHKLog(t *testing.T, path string, r *http.Request) {
+	if r.Header.Get("Authorization") != "Bearer "+jobGoldenHKToken {
+		t.Errorf("%s %s: Authorization %q, want the svc-panewire bearer", r.Method, r.URL.EscapedPath(), r.Header.Get("Authorization"))
+	}
+	var doc struct {
+		Key, Kind, Job, Body string
+	}
+	if err := json.NewDecoder(r.Body).Decode(&doc); err != nil {
+		t.Errorf("hk request body: %v", err)
+	}
+	sum := sha256.Sum256([]byte(doc.Body))
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		t.Error(err)
+		return
+	}
+	defer f.Close()
+	fmt.Fprintf(f, "%s %s\nkey=%s\nkind=%s\njob=%s\nbody_bytes=%d\nbody_sha256=%s\n--\n", r.Method, r.URL.EscapedPath(), doc.Key, doc.Kind, doc.Job, len(doc.Body), hex.EncodeToString(sum[:]))
 }
 
 var jobGoldenTimestamp = regexp.MustCompile(`(?m)^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z `)

@@ -2,7 +2,7 @@
 -- stdout
 OK job=jw report=@ROOT@/reports/report.md
 -- stderr
-<cmd>: warning: handoffkeep not found; report document not uploaded (job=jw)
+<cmd>: warning: hk service credential unconfigured: set HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create @ROOT@/bin/absent-hk-svc.env; report document not uploaded (job=jw)
 <cmd>: warning: panewire emit failed (rc=2 job=jw kind=job.completed); relay event left as file only
 == file inbox/jobs/jw/.wrk-events.lock mode=0644
 == file inbox/jobs/jw/emit-failures.log mode=0644

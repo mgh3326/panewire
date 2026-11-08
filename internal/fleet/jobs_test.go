@@ -375,6 +375,7 @@ func TestDoneResultOnePutThenRelay(t *testing.T) {
 	for _, withResult := range []bool{true, false} {
 		a := testApp(t)
 		f := ledgerRunner(t, a)
+		useFakeHK(t).Handle(hkCommentAnswer)
 		h := newFakeHK(t)
 		h.claimJob("j", float64(42), "test-host")
 		h.records["j"]["state"] = "spawned"

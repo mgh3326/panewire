@@ -37,6 +37,14 @@ func noHKCLI(t *testing.T, f *fakeRunner) {
 	}
 }
 
+// hkCommentAnswer answers POST /v1/tasks/{id}/comments as hk does.
+func hkCommentAnswer(r hkRequest) (int, string, bool) {
+	if r.Method != http.MethodPost || !strings.HasSuffix(r.Path, "/comments") {
+		return 0, "", false
+	}
+	return http.StatusCreated, `{"id":5,"task_id":42,"body":"x","author":"svc-panewire","created_at":"2026-11-08T08:00:00Z"}`, true
+}
+
 // hkJSON decodes a request's JSON body into a map.
 func hkJSON(t *testing.T, r hkRequest) map[string]any {
 	t.Helper()
@@ -219,12 +227,7 @@ func TestHKSitesGoOverHTTPWithSvcToken(t *testing.T) {
 		f := ledgerRunner(t, a)
 		hk := useFakeHK(t)
 		noHKCLI(t, f)
-		hk.Handle(func(r hkRequest) (int, string, bool) {
-			if r.Route() != "POST /v1/tasks/42/comments" {
-				return 0, "", false
-			}
-			return http.StatusCreated, `{"id":5,"task_id":42,"body":"x","author":"svc-panewire","created_at":"2026-11-08T08:00:00Z"}`, true
-		})
+		hk.Handle(hkCommentAnswer)
 		seedDoneJob(t, a)
 		path := filepath.Join(a.Jobs, "j", "report.md")
 		report := "first line\n" + strings.Repeat("길이 ", 1<<18) + "\nlast line\n"
@@ -639,3 +642,47 @@ func TestArtifactSweepCLIHTTPParity(t *testing.T) {
 
 // recordDoc stands, in a parity row, for the sweep fixture's own record.
 var recordDoc = hkAnswerFixture{status: -1}
+
+// A report upload and an artifact record write get the upload bound, as the
+// brief upload does; the task comment, the reads and a note get the call
+// bound. Shrunk bounds and an hk slower than the call bound prove which one
+// each uses.
+func TestHKSiteUploadsUseTheUploadBound(t *testing.T) {
+	call, upload := hkCallTimeout, hkUploadTimeout
+	t.Cleanup(func() { hkCallTimeout, hkUploadTimeout = call, upload })
+	hkCallTimeout, hkUploadTimeout = 150*time.Millisecond, 20*time.Second
+	ctx := context.Background()
+
+	a := testApp(t)
+	f := ledgerRunner(t, a)
+	hk := useFakeHK(t)
+	noHKCLI(t, f)
+	hk.SetTask("42", hkTaskJSON(42, "merged", "change (grade A, T1)", "", "Example", `{}`)).
+		Handle(func(hkRequest) (int, string, bool) {
+			time.Sleep(600 * time.Millisecond)
+			return 0, "", false
+		})
+	seedDoneJob(t, a)
+	path := filepath.Join(a.Jobs, "j", "report.md")
+	if e := os.WriteFile(path, []byte("done\n"), 0600); e != nil {
+		t.Fatal(e)
+	}
+	if e := a.lifecycle(ctx, "done", []string{"j", "--report", path}); e != nil {
+		t.Fatal(e)
+	}
+	if rec := a.JobStore.(*fakeJobStore).record(t, "j"); str(rec, "report_doc") != "reports/j/report.md" {
+		t.Fatalf("record=%v, want the report uploaded under the upload bound", rec)
+	}
+	if errs := a.Err.(*bytes.Buffer).String(); !strings.Contains(errs, "task comment failed: ") {
+		t.Fatalf("warnings=%q, want the comment timed out at the call bound", errs)
+	}
+	if e := a.putRecord(ctx, sweepPrefix+"/dataset", map[string]any{"schema": "fleet.artifact.v2"}); e != nil {
+		t.Fatalf("artifact record write=%v, want it under the upload bound", e)
+	}
+	if e := PutHKDocument(ctx, "quota-stop/k", "note", "j", "note\n"); e == nil {
+		t.Fatal("a note write outlived the call bound")
+	}
+	if _, e := hkTaskBody(ctx, "42"); e == nil {
+		t.Fatal("a task read outlived the call bound")
+	}
+}

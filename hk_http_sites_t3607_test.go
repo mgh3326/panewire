@@ -184,6 +184,42 @@ func TestJobReportUploadGoesOverHTTP(t *testing.T) {
 	})
 }
 
+// quotaStopHKFixture answers the quota stop manager's policy read and task
+// lookup with fixed hk answers and counts its note writes in notes.
+func quotaStopHKFixture(policyAnswer, taskAnswer string, notes *int) quotaStopHK {
+	return quotaStopHK{
+		policy: func(context.Context) ([]byte, error) { return []byte(policyAnswer), nil },
+		tasks:  func(context.Context) ([]byte, error) { return []byte(taskAnswer), nil },
+		note: func(context.Context, string, string, string) error {
+			if notes != nil {
+				*notes++
+			}
+			return nil
+		},
+	}
+}
+
+// quotaStopHKDown is an hk that cannot be reached; calls counts every call.
+func quotaStopHKDown(calls *int) quotaStopHK {
+	down := func() error {
+		if calls != nil {
+			*calls++
+		}
+		return os.ErrNotExist
+	}
+	return quotaStopHK{
+		policy: func(context.Context) ([]byte, error) { return nil, down() },
+		tasks:  func(context.Context) ([]byte, error) { return nil, down() },
+		note:   func(context.Context, string, string, string) error { return down() },
+	}
+}
+
+// quotaPolicyAnswer is hk's answer for a policy document whose body is body.
+func quotaPolicyAnswer(body string) string {
+	b, _ := json.Marshal(map[string]string{"body": body})
+	return string(b)
+}
+
 const quotaSitesPolicy = "## Values\n- default_expected: 1d\n- urgent_priorities: [1, 2]\n- max_waits: 1\n- resume_text: \"continue\"\n"
 
 func quotaSitesManager(t *testing.T) *quotaStopManager {

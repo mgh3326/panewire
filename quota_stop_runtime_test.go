@@ -2,7 +2,6 @@ package panewire
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
@@ -52,19 +51,7 @@ func TestQuotaStopWakeShadowAndResume(t *testing.T) {
 - max_waits: 1
 - resume_text: "continue"
 `
-			q.command = func(_ context.Context, args ...string) ([]byte, error) {
-				switch strings.Join(args[:2], " ") {
-				case "doc get":
-					return json.Marshal(map[string]string{"body": policy})
-				case "tasks list":
-					return []byte(`{"tasks":[{"priority":3,"expected":"4h","refs":{"job_id":"job-active"}}]}`), nil
-				case "doc put":
-					records++
-					return []byte(`{}`), nil
-				}
-				t.Fatalf("unexpected command %v", args)
-				return nil, nil
-			}
+			q.hk = quotaStopHKFixture(quotaPolicyAnswer(policy), `{"tasks":[{"priority":3,"expected":"4h","refs":{"job_id":"job-active"}}]}`, &records)
 			q.send = func(_ context.Context, pane, pool, text string) relayInjectResult {
 				sends++
 				if pane != "workspace:pane-1" || !strings.HasPrefix(text, "continue [r0") {
@@ -133,7 +120,7 @@ func TestQuotaStopPolicyCacheAndExclusions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	q.command = func(context.Context, ...string) ([]byte, error) { return nil, os.ErrNotExist }
+	q.hk = quotaStopHKDown(nil)
 	if _, ok := q.loadPolicy(context.Background(), time.Now()); ok {
 		t.Fatal("missing policy accepted")
 	}
@@ -184,7 +171,7 @@ func TestQuotaStopOutboxBackoffIsPerRow(t *testing.T) {
 		t.Fatal(err)
 	}
 	calls := 0
-	q.command = func(context.Context, ...string) ([]byte, error) { calls++; return nil, os.ErrNotExist }
+	q.hk = quotaStopHKDown(&calls)
 	now := time.Now().UTC()
 	for _, id := range []string{"a", "b"} {
 		if _, err := store.db.Exec(`INSERT INTO quota_stop_decisions(event_id,job,pane,label,pool,reset,decision,reason,created) VALUES(?,?,?,?,?,?,?,?,?)`, id, "job-"+id, "pane-"+id, "worker", "codex", "unknown", "handover", "urgent", now.UnixMilli()); err != nil {
@@ -228,12 +215,7 @@ func TestQuotaStopDeduplicatesPaneAndReset(t *testing.T) {
 	q.read = func(context.Context, string) (string, error) {
 		return "You've hit your usage limit. Please try again at " + reset + " UTC", nil
 	}
-	q.command = func(_ context.Context, args ...string) ([]byte, error) {
-		if args[0] == "doc" {
-			return json.Marshal(map[string]string{"body": "## Values\n- default_expected: 1d\n- urgent_priorities: [1, 2]\n- max_waits: 1\n- resume_text: \"continue\"\n"})
-		}
-		return []byte(`{"tasks":[{"priority":3,"refs":{"job_id":"job-active"}}]}`), nil
-	}
+	q.hk = quotaStopHKFixture(quotaPolicyAnswer("## Values\n- default_expected: 1d\n- urgent_priorities: [1, 2]\n- max_waits: 1\n- resume_text: \"continue\"\n"), `{"tasks":[{"priority":3,"refs":{"job_id":"job-active"}}]}`, nil)
 	for _, id := range []string{"wake-one", "wake-two"} {
 		q.observeBounded(context.Background(), idleWakeCandidate{EventID: id, PaneID: "workspace:pane-1", Label: "worker-synthetic"}, now)
 	}

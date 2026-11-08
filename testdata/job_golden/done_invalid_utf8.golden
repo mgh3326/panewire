@@ -2,7 +2,7 @@
 -- stdout
 OK job=jw report=@ROOT@/reports/report.md
 -- stderr
-<cmd>: warning: handoffkeep not found; report document not uploaded (job=jw)
+<cmd>: warning: hk service credential unconfigured: set HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create @ROOT@/bin/absent-hk-svc.env; report document not uploaded (job=jw)
 tr: Illegal byte sequence
 tr: Illegal byte sequence
 == file inbox/jobs/jw/.wrk-events.lock mode=0644
