@@ -141,12 +141,18 @@ func (s Seat) Check(l Launch, role, grade, builderFamily, arm string, host map[s
 	if !slices.Contains(roles, role) {
 		return fail(exitSeatRefused, "seat does not allow role %s", role)
 	}
-	if e6 && arm != s.Canon+"@"+l.Effort {
+	armed := arm == s.Canon+"@"+l.Effort
+	if e6 && !armed {
 		return fail(exitSeatRefused, "requires PANEWIRE_E6_ARM=%s@%s", s.Canon, l.Effort)
 	}
 	if grade != "" && role != "counsel" {
 		n, ok := gradeOrder[grade]
-		if !ok || l.Grade == gradeUnrated || gradeOrder[l.Grade] < n {
+		if ok && l.Grade == gradeUnrated {
+			// An E6 arm admits an unrated rung for a graded task; it never raises a grade.
+			if !armed {
+				return fail(exitSeatRefused, "canon grade unrated does not cover task grade %s; requires PANEWIRE_E6_ARM=%s@%s", grade, s.Canon, l.Effort)
+			}
+		} else if !ok || l.Grade == gradeUnrated || gradeOrder[l.Grade] < n {
 			return fail(exitSeatRefused, "canon grade %s does not cover task grade %s", l.Grade, grade)
 		}
 	}
