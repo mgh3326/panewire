@@ -552,7 +552,7 @@ func (a *App) Spawn(ctx context.Context, s Spawn) (err error) {
 			return fail(exitUsage, "--host %s is excluded by --exclude-host", s.Host)
 		}
 	}
-	brief, e := os.ReadFile(expand(s.Prompt))
+	brief, e := a.readBrief(ctx, s.Prompt, 0)
 	if e != nil {
 		return e
 	}
