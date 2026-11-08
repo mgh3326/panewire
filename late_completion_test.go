@@ -57,7 +57,7 @@ func TestLateCompletionEmitScanAndInbox(t *testing.T) {
 			if err != nil || len(items) != 1 || items[0].Class != "inbox" || !handled || !items[0].Event.Late || len(agent.relays) != 0 {
 				t.Fatalf("items=%+v err=%v handled=%v result=%+v relays=%d", items, err, handled, result, len(agent.relays))
 			}
-			if err := h.inbox.store.recoverMustAct(h.inbox.policy); err != nil {
+			if err := h.inbox.store.recoverMustAct(h.inbox.policy, time.Now()); err != nil {
 				t.Fatal(err)
 			}
 			items, err = h.inbox.store.list("lane-a", true)

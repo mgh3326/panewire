@@ -289,8 +289,13 @@ func TestQuietDesignLaneKeepsDecisionsAndFailures(t *testing.T) {
 			t.Fatalf("%s relay=%+v", event.id, r)
 		}
 	}
-	if got := len(agent.relays); got != 3 {
-		t.Fatalf("design lane received %d interrupts, want 3", got)
+	// Since hk 3602 the three are filed and the first wakes the lane once.
+	got := t3426Injected(agent)
+	if len(got) != 1 || got[0].EventID != 0 || got[0].Text != "[inbox] panewire-design: 1 unread (most urgent: automation-failed) | panewire inbox list --lane panewire-design" {
+		t.Fatalf("design lane injections=%+v, want one wake line", got)
+	}
+	if unread, err := h.inbox.store.list("panewire-design", true); err != nil || len(unread) != 3 {
+		t.Fatalf("design lane unread=%d err=%v, want 3", len(unread), err)
 	}
 }
 

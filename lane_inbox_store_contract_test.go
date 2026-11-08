@@ -334,7 +334,7 @@ func TestLaneInboxStoreContractQuarantineInvalidAndRecoverMustAct(t *testing.T) 
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.recoverMustAct(policy); err != nil {
+		if err := s.recoverMustAct(policy, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		items, err := s.list("lane-a", true)

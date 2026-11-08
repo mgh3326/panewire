@@ -95,17 +95,15 @@ func t3434Quiet(t *testing.T, h *HubServer, agent *hubAgent, fake *fakeHandoffke
 	}
 }
 
-// t3434Injected relays e from sender and fails unless exactly e reached the
-// destination lane's pane.
-func t3434Injected(t *testing.T, h *HubServer, sender, receiver *hubAgent, e hubJobEventPayload, pane string) {
+// t3434Woken relays e from sender and fails unless e was filed unread in the
+// design lane's inbox and the lane got its one-line wake in pane instead of
+// the body (hk 3602), naming most as the most urgent kind.
+func t3434Woken(t *testing.T, h *HubServer, sender, receiver *hubAgent, e hubJobEventPayload, pane, most string) {
 	t.Helper()
-	if r := h.relayLaneEvent(e, sender); r.PersistFailed {
-		t.Fatalf("%q relay=%+v", e.Text, r)
+	if r := h.relayLaneEvent(e, sender); r.PersistFailed || r.Machine != "inbox" {
+		t.Fatalf("%q relay=%+v, want an inbox item", e.Text, r)
 	}
-	got := t3426Injected(receiver)
-	if len(got) != 1 || got[0].JobID != e.JobID || got[0].Pane != pane {
-		t.Fatalf("%q (type %q, pane %q) injections=%+v, want it in %s", e.Text, e.NotifyType, e.PaneID, got, pane)
-	}
+	t3602AssertWoken(t, h, t3426Injected(receiver), e.OwnerLane, pane, "lane.event", e.JobID, most)
 }
 
 // (1, 2) A worker's own progress lane.event to its design lane -- untyped as
@@ -129,39 +127,48 @@ func TestQuietDesignWorkerLaneEventIsNotInjected(t *testing.T) {
 	}
 }
 
-// (3) A worker's decision and blocked lane.events still interrupt its design
-// lane.
-func TestQuietDesignWorkerDecisionAndBlockedAreInjected(t *testing.T) {
+// (3) A worker's decision and blocked lane.events still wake its design lane;
+// since hk 3602 the body is filed and the lane gets the one-line wake.
+func TestQuietDesignWorkerDecisionAndBlockedWake(t *testing.T) {
 	h, agent, _ := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
 	for _, tc := range []struct{ notifyType, text string }{
 		{"decision", "ESC hk 3430: which migration order do we ship?"},
 		{"blocked", "BLOCKED hk 3430: CI needs an operator secret"},
 	} {
-		t3434Injected(t, h, agent, agent, t3434Event(t3426Design, t3434WorkerPane, tc.notifyType, tc.text), t3434DesignPane)
+		t3434Woken(t, h, agent, agent, t3434Event(t3426Design, t3434WorkerPane, tc.notifyType, tc.text), t3434DesignPane, tc.notifyType)
 	}
 }
 
 // (4) Everything the hub cannot attribute to a live worker's own pane on the
-// sending node is delivered as before.
-func TestQuietDesignUnattributedLaneEventsAreInjected(t *testing.T) {
-	h, agent, _ := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
+// sending node is not quieted. Since hk 3602 it is filed like everything else
+// and what was typed before wakes the design lane, except a declared info
+// record (here progress), which is filed without a wake.
+func TestQuietDesignUnattributedLaneEventsWake(t *testing.T) {
+	h, agent, fake := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
 	progress := "hk 3430: PR #221 open"
+	// Untyped text with no action tag wakes the lane ranked info: the hub
+	// cannot tell it is routine.
 	for _, tc := range []struct {
 		name string
 		e    hubJobEventPayload
+		most string
 	}{
-		{"no pane_id (an older node)", t3434Event(t3426Design, "", "", progress)},
-		{"pane with no live job", t3434Event(t3426Design, "w1:p99", "", progress)},
-		{"pane of a job on another node", t3434Event(t3426Design, "w1:remote", "", progress)},
-		{"pane of a completed job", t3434Event(t3426Design, "w1:finished", "", progress)},
-		{"pane of a captain job", t3434Event(t3426Design, "w1:captain", "", progress)},
-		{"pane of a builder job (no role on the hub)", t3434Event(t3426Design, "w1:builder", "", progress)},
-		{"TASK_LINK_FAILED from the design session's own pane", t3434Event(t3426Design, t3434DesignPane, "automation-failed", "[panewire] TASK_LINK_FAILED job=job-2 task=7 reason=task claim exited with status 1; link the task manually")},
-		{"design session's own note on the worker's node", t3434Event(t3426Design, t3434DesignPane, "", "note to self: review #221 after lunch")},
-		{"desk's own note on the worker's node", t3434Event(t3426Design, t3434DeskPane, "progress", "desk: hk 3430 is next")},
+		{"no pane_id (an older node)", t3434Event(t3426Design, "", "", progress), "info"},
+		{"pane with no live job", t3434Event(t3426Design, "w1:p99", "", progress), "info"},
+		{"pane of a job on another node", t3434Event(t3426Design, "w1:remote", "", progress), "info"},
+		{"pane of a completed job", t3434Event(t3426Design, "w1:finished", "", progress), "info"},
+		{"pane of a captain job", t3434Event(t3426Design, "w1:captain", "", progress), "info"},
+		{"pane of a builder job (no role on the hub)", t3434Event(t3426Design, "w1:builder", "", progress), "info"},
+		{"TASK_LINK_FAILED from the design session's own pane", t3434Event(t3426Design, t3434DesignPane, "automation-failed", "[panewire] TASK_LINK_FAILED job=job-2 task=7 reason=task claim exited with status 1; link the task manually"), "automation-failed"},
+		{"design session's own note on the worker's node", t3434Event(t3426Design, t3434DesignPane, "", "note to self: review #221 after lunch"), "info"},
+		{"desk's own note on the worker's node", t3434Event(t3426Design, t3434DeskPane, "progress", "desk: hk 3430 is next"), ""},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			t3434Injected(t, h, agent, agent, tc.e, t3434DesignPane)
+			if tc.e.NotifyType != "progress" {
+				t3434Woken(t, h, agent, agent, tc.e, t3434DesignPane, tc.most)
+				return
+			}
+			t3434Quiet(t, h, agent, fake, tc.e)
 		})
 	}
 
@@ -170,16 +177,16 @@ func TestQuietDesignUnattributedLaneEventsAreInjected(t *testing.T) {
 		"[panewire] SPAWN_FAILED job-1 request=r1 host=none profile=none rc=70 stage=launch replay=no reason=spawn_failed fix=Check the checkout.",
 		"[delivery unconfirmed] event 7 (lane.event, producer id p-1) for lane handoffkeep-design was not confirmed on host-a pane w1:design: timeout. The worker may not have it; read the pane or re-send. Reported once.",
 	} {
-		t3434Injected(t, h, nil, agent, t3434Event(t3426Design, t3434WorkerPane, "automation-failed", text), t3434DesignPane)
+		t3434Woken(t, h, nil, agent, t3434Event(t3426Design, t3434WorkerPane, "automation-failed", text), t3434DesignPane, "automation-failed")
 	}
 }
 
-// (5) The [consult-done] answer from a counsel (consult) job's pane reaches
-// the design lane that asked; the same pane's routine progress does not.
-func TestQuietDesignConsultDoneFromCounselIsInjected(t *testing.T) {
+// (5) The [consult-done] answer from a counsel (consult) job's pane wakes the
+// design lane that asked; the same pane's routine progress does not.
+func TestQuietDesignConsultDoneFromCounselWakes(t *testing.T) {
 	h, agent, fake := t3434Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"))
-	t3434Injected(t, h, agent, agent, t3434Event(t3426Design, t3434ConsultPan, "ready", "[consult-done] ship the hub first | /jobs/consult-hk3434/answer.md"), t3434DesignPane)
-	t3434Injected(t, h, agent, agent, t3434Event(t3426Design, t3434ConsultPan, "", "[consult-done] ship the hub first | /jobs/consult-hk3434/answer.md"), t3434DesignPane)
+	t3434Woken(t, h, agent, agent, t3434Event(t3426Design, t3434ConsultPan, "ready", "[consult-done] ship the hub first | /jobs/consult-hk3434/answer.md"), t3434DesignPane, "ready")
+	t3434Woken(t, h, agent, agent, t3434Event(t3426Design, t3434ConsultPan, "", "[consult-done] ship the hub first | /jobs/consult-hk3434/answer.md"), t3434DesignPane, "ready")
 	t3434Quiet(t, h, agent, fake, t3434Event(t3426Design, t3434ConsultPan, "", "consult: reading the code"))
 }
 
@@ -402,8 +409,8 @@ func TestNewNodeLaneEventIsAcceptedByAnOldHub(t *testing.T) {
 
 // End to end over a real socket: a real hub advertises lane_event_pane, a real
 // node that runs the worker job sends its pane, and the hub keeps the
-// worker's progress in the design lane's inbox while its decision reaches the
-// design pane.
+// worker's progress in the design lane's inbox while its decision wakes the
+// design pane with one line (hk 3602).
 func TestQuietDesignWorkerLaneEventEndToEnd(t *testing.T) {
 	_, hk, closeServer := newFakeHandoffkeep(t)
 	t.Cleanup(closeServer)
@@ -481,15 +488,16 @@ func TestQuietDesignWorkerLaneEventEndToEnd(t *testing.T) {
 	if _, err := writeLaneEmitRecord(root, decision); err != nil {
 		t.Fatal(err)
 	}
-	eventually(t, 10*time.Second, "the decision in the design pane", func() bool {
+	eventually(t, 10*time.Second, "the decision's wake in the design pane", func() bool {
 		mu.Lock()
 		defer mu.Unlock()
 		return len(injected) > 0
 	})
 	mu.Lock()
 	defer mu.Unlock()
-	if len(injected) != 1 || !strings.HasPrefix(injected[0], t3434DesignPane+" ") || !strings.Contains(injected[0], "which order do we ship") {
-		t.Fatalf("injections=%q, want only the decision in %s", injected, t3434DesignPane)
+	// Since hk 3602 the decision is filed and the node types the wake line.
+	if len(injected) != 1 || !strings.HasPrefix(injected[0], t3434DesignPane+" ") || !strings.Contains(injected[0], "[inbox] "+t3426Design+": 2 unread (most urgent: decision) | panewire inbox list --lane "+t3426Design) || strings.Contains(injected[0], "which order do we ship") {
+		t.Fatalf("injections=%q, want only the decision's wake in %s", injected, t3434DesignPane)
 	}
 }
 
@@ -520,20 +528,20 @@ func t3434Routes(t *testing.T, f func(t *testing.T, h *HubServer, agent *hubAgen
 // t3434WorkerActions are a worker's lane.events to its design lane that need
 // a person: an untyped action tag, and every declared type that is not
 // routine.
-var t3434WorkerActions = []struct{ notifyType, text string }{
-	{"", "ESC need a decision | options: ship the hub first, or the node first"},
-	{"", "BLOCKER hk 3430: CI needs an operator secret"},
-	{"", "hk 3430: BOUNCE, the brief contradicts the contract"},
-	{"", "URGENT hk 3430: main is red"},
-	{"", "hk 3430: needs_decision on the migration order"},
-	{"decision", "ESC hk 3430: which migration order do we ship?"},
-	{"blocked", "BLOCKED hk 3430: CI needs an operator secret"},
-	{"findings", "hk 3430: review findings on #221 | /jobs/hk3430/findings.md"},
-	{"order", "hk 3430: rebase #222 on #221 first"},
-	{"automation-failed", "hk 3430: mergewake watch failed on #221"},
-	{"deploy-approval", "hk 3430: #221 needs a deploy approval"},
-	{"watch-hold", "hk 3430: watch hold on #221"},
-	{"culprit-hold", "hk 3430: #221 is the culprit of a revert"},
+var t3434WorkerActions = []struct{ notifyType, text, most string }{
+	{"", "ESC need a decision | options: ship the hub first, or the node first", "decision"},
+	{"", "BLOCKER hk 3430: CI needs an operator secret", "blocked"},
+	{"", "hk 3430: BOUNCE, the brief contradicts the contract", "blocked"},
+	{"", "URGENT hk 3430: main is red", "decision"},
+	{"", "hk 3430: needs_decision on the migration order", "decision"},
+	{"decision", "ESC hk 3430: which migration order do we ship?", "decision"},
+	{"blocked", "BLOCKED hk 3430: CI needs an operator secret", "blocked"},
+	{"findings", "hk 3430: review findings on #221 | /jobs/hk3430/findings.md", "findings"},
+	{"order", "hk 3430: rebase #222 on #221 first", "decision"},
+	{"automation-failed", "hk 3430: mergewake watch failed on #221", "automation-failed"},
+	{"deploy-approval", "hk 3430: #221 needs a deploy approval", "decision"},
+	{"watch-hold", "hk 3430: watch hold on #221", "blocked"},
+	{"culprit-hold", "hk 3430: #221 is the culprit of a revert", "blocked"},
 }
 
 // t3434WorkerRoutine are a worker's routine lane.events to its design lane:
@@ -552,13 +560,13 @@ var t3434WorkerRoutine = []struct{ notifyType, text string }{
 	{"ready", "READY hk 3430 | PR #221 | /jobs/hk3430/report.md"},
 }
 
-// A worker's action lane.event reaches its design lane's pane, whether or not
-// the design lane's route names a parent.
-func TestQuietDesignWorkerActionLaneEventsAreInjected(t *testing.T) {
+// A worker's action lane.event wakes its design lane, whether or not the
+// design lane's route names a parent.
+func TestQuietDesignWorkerActionLaneEventsWake(t *testing.T) {
 	t3434Routes(t, func(t *testing.T, h *HubServer, agent *hubAgent, _ *fakeHandoffkeep) {
 		for _, tc := range t3434WorkerActions {
 			t.Run("type="+tc.notifyType+"/"+tc.text, func(t *testing.T) {
-				t3434Injected(t, h, agent, agent, t3434Event(t3426Design, t3434WorkerPane, tc.notifyType, tc.text), t3434DesignPane)
+				t3434Woken(t, h, agent, agent, t3434Event(t3426Design, t3434WorkerPane, tc.notifyType, tc.text), t3434DesignPane, tc.most)
 			})
 		}
 	})

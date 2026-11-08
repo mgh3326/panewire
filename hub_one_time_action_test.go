@@ -31,13 +31,27 @@ func firstRunNodeRequest(request fleet.Submission, id int, profile string) fleet
 	return node
 }
 
-func deskNotices(t *testing.T, destination *hubAgent) []string {
+// deskNotices returns the desk notices filed since the last call. The desk is
+// inbox-only (hk 3602): its pane gets only the one-line wake, never a notice
+// body, and the notice is read from the desk's inbox, the way the desk
+// session reads it; reading marks it read.
+func deskNotices(t *testing.T, h *HubServer, destination *hubAgent) []string {
 	t.Helper()
-	var texts []string
 	for _, relay := range spawnFailedInjections(destination) {
-		// The relay wraps the event text as "<preface> [event] <lane> :: <text>".
-		_, text, _ := strings.Cut(relay.Text, " :: ")
-		texts = append(texts, text)
+		if relay.EventID != 0 || !strings.HasPrefix(relay.Text, "[inbox] operator-desk: ") {
+			t.Fatalf("the desk pane got a body: %+v", relay)
+		}
+	}
+	items, err := h.inbox.store.list("operator-desk", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var texts []string
+	for i := len(items) - 1; i >= 0; i-- {
+		texts = append(texts, items[i].Event.Text)
+		if _, err := h.inbox.store.read(items[i].ID, "operator-desk", time.Now()); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return texts
 }
@@ -101,7 +115,7 @@ func TestFirstRunRefusalMovesToNextHost(t *testing.T) {
 			want := "[machine-a] " + test.kind + deskNotice + test.action
 			var notices []string
 			eventually(t, 5*time.Second, "desk notice", func() bool {
-				notices = append(notices, deskNotices(t, destination)...)
+				notices = append(notices, deskNotices(t, h, destination)...)
 				return len(notices) > 0
 			})
 			if len(notices) != 1 || notices[0] != want {
@@ -189,7 +203,7 @@ func TestOneTimeActionNoticeIsToldOncePerUnclearedNeed(t *testing.T) {
 	want := `[oci] codex needs a one-time action: run codex once and choose "Trust all and continue"`
 	collect := func() (all []string) {
 		eventually(t, 5*time.Second, "desk notice", func() bool {
-			all = append(all, deskNotices(t, destination)...)
+			all = append(all, deskNotices(t, h, destination)...)
 			return len(all) > 0
 		})
 		return all
@@ -203,27 +217,27 @@ func TestOneTimeActionNoticeIsToldOncePerUnclearedNeed(t *testing.T) {
 	h.noteReadinessActions("oci", readinessWith(start.Add(90*time.Second), "codex", dialog.Harnesses["codex"]), start.Add(90*time.Second))
 	// A refusal for the same pair while it is uncleared adds nothing either.
 	h.noteOneTimeActionRefusal("oci", "codex-sol", hubSpawnResult{RC: 90, StdoutTail: hooksTail})
-	if got := deskNotices(t, destination); len(got) != 0 {
+	if got := deskNotices(t, h, destination); len(got) != 0 {
 		t.Fatalf("an uncleared need was told again: %q", got)
 	}
 
 	// A report the node computed before the notice cannot clear it.
 	h.noteReadinessActions("oci", readinessWith(start.Add(-time.Minute), "codex", fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent}), start.Add(100*time.Second))
 	h.noteReadinessActions("oci", dialog, start.Add(100*time.Second))
-	if got := deskNotices(t, destination); len(got) != 0 {
+	if got := deskNotices(t, h, destination); len(got) != 0 {
 		t.Fatalf("a stale clear re-told the need: %q", got)
 	}
 
 	// Another host's clean report leaves oci alone.
 	h.noteReadinessActions("other", readinessWith(start.Add(2*time.Minute), "codex", fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent}), start.Add(2*time.Minute))
 	h.noteReadinessActions("oci", readinessWith(start.Add(3*time.Minute), "codex", dialog.Harnesses["codex"]), start.Add(3*time.Minute))
-	if got := deskNotices(t, destination); len(got) != 0 {
+	if got := deskNotices(t, h, destination); len(got) != 0 {
 		t.Fatalf("another host's report cleared oci: %q", got)
 	}
 
 	// The readiness clears, then the dialog comes back: one new notice.
 	h.noteReadinessActions("oci", readinessWith(start.Add(4*time.Minute), "codex", fleet.HarnessReadiness{Installed: true, Login: fleet.ReadinessLoginPresent}), start.Add(4*time.Minute))
-	if got := deskNotices(t, destination); len(got) != 0 {
+	if got := deskNotices(t, h, destination); len(got) != 0 {
 		t.Fatalf("a clear report sent a notice: %q", got)
 	}
 	h.noteReadinessActions("oci", readinessWith(start.Add(5*time.Minute), "codex", dialog.Harnesses["codex"]), start.Add(5*time.Minute))
@@ -244,7 +258,7 @@ func TestOneTimeActionNoticeNamesLoginAndTrustAndKeepsScreenOut(t *testing.T) {
 	h.noteReadinessActions("oci", report, now)
 	var got []string
 	eventually(t, 5*time.Second, "two notices", func() bool {
-		got = append(got, deskNotices(t, destination)...)
+		got = append(got, deskNotices(t, h, destination)...)
 		return len(got) >= 2
 	})
 	if len(got) != 2 {
@@ -261,7 +275,7 @@ func TestOneTimeActionNoticeNamesLoginAndTrustAndKeepsScreenOut(t *testing.T) {
 	h.noteOneTimeActionRefusal("oci", "codex-sol", hubSpawnResult{RC: 90, StdoutTail: secret})
 	h.noteOneTimeActionRefusal("fresh", "codex-sol", hubSpawnResult{RC: 90, StdoutTail: secret})
 	eventually(t, 5*time.Second, "refusal notice", func() bool {
-		got = append(got, deskNotices(t, destination)...)
+		got = append(got, deskNotices(t, h, destination)...)
 		return len(got) >= 3
 	})
 	if strings.Contains(strings.Join(got, "\n"), "SECRET-SCREEN-LINE") || strings.Contains(strings.Join(got, "\n"), "abc123") {
@@ -278,7 +292,7 @@ func TestOneTimeActionSendsOneSentryWarning(t *testing.T) {
 	h.noteReadinessActions("oci", dialog, now)
 	h.noteReadinessActions("oci", dialog, now.Add(time.Minute))
 	h.noteOneTimeActionRefusal("oci", "codex-sol", hubSpawnResult{RC: 90, StdoutTail: hooksTail})
-	eventually(t, 5*time.Second, "desk notice", func() bool { return len(deskNotices(t, destination)) > 0 })
+	eventually(t, 5*time.Second, "desk notice", func() bool { return len(deskNotices(t, h, destination)) > 0 })
 	transport.mu.Lock()
 	n := len(transport.events)
 	transport.mu.Unlock()

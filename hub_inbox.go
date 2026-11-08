@@ -36,6 +36,8 @@ type hubInbox struct {
 	nextPrune       time.Time
 	// flushFailures counts failed flush passes for monitoring and tests.
 	flushFailures uint64
+	// wakes holds each inbox-only lane's coalescing window (inbox_wake.go).
+	wakes inboxWakes
 }
 
 const (
@@ -122,12 +124,13 @@ func (h *HubServer) prepareInbox() {
 	if err == nil {
 		// A design lane may be absent from lanes: (its class is a glob), so sweep
 		// every lane the store knows. Its pre-existing unread items must not
-		// escalate after the class is enabled (hk 3410).
+		// escalate after the class is enabled (hk 3410), nor those of any other
+		// inbox-only lane (hk 3602).
 		var lanes []string
 		if lanes, err = h.inbox.store.laneNames(); err == nil {
 			design := lanes[:0]
 			for _, lane := range lanes {
-				if h.inbox.policy.designLane(lane) {
+				if h.inbox.policy.inboxOnlyClass(lane, h.now()) != "" {
 					design = append(design, lane)
 				}
 			}
@@ -138,12 +141,13 @@ func (h *HubServer) prepareInbox() {
 		err = h.inbox.store.quarantineInvalidBatches()
 	}
 	if err == nil {
-		err = h.inbox.store.recoverMustAct(h.inbox.policy)
+		err = h.inbox.store.recoverMustAct(h.inbox.policy, h.now())
 	}
 	if err != nil {
 		h.inbox.persistDisabled = true
 		h.logger.Error("inbox digest delivery disabled: startup recovery failed; fix the inbox store and restart the hub", "error", h.inbox.store.loggable("startup recovery", err))
 	}
+	h.seedStartupInboxWakes()
 }
 
 func (h *HubServer) receivingLane(kind string, e hubJobEventPayload) string {
@@ -211,6 +215,21 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 		// unread items stay readable through `panewire inbox list` (hk 3410).
 		deadline, window = 0, 0
 	}
+	// hk 3602: a design or desk lane, or a worker lane in the inbox trial, is
+	// inbox-only. Whatever the class above, the event is filed unread and never
+	// typed into the pane, digested or held; what would have been typed asks
+	// for the lane's coalesced one-line wake instead. Only an operator chat
+	// turn and an operator HTTP ingress event are exempt (inboxOnlyExempt);
+	// refuseInboxOnlyBody holds the same rule where a body would be typed.
+	inboxOnly := h.inbox.policy.inboxOnlyClass(lane, h.now())
+	wake := false
+	if inboxOnly != "" && !inboxOnlyExempt(*event) {
+		wake = inboxWakeWorthy(class, quiet, kind, *event)
+		class, directive, holdClass = "inbox", false, false
+		deadline, window = 0, 0
+	} else {
+		inboxOnly = ""
+	}
 	// Ordinary deadline digests still exclude must-ack types. Working holds
 	// retain each original ID so the receiver can acknowledge its items.
 	if event.Late || event.noDigest || h.inbox.policy.mustAct(lane, *event) || mustAckNotifyTypes[event.NotifyType] || chatRelayEventPattern.MatchString(event.EventID) {
@@ -239,6 +258,9 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	}
 	// The durable decision wins over changed config or a changed retry body.
 	event.DeliveryClass = item.Class
+	if wake && item.Fresh && item.Class == "inbox" {
+		h.noteInboxWakeArrival(lane, inboxOnly)
+	}
 	if item.SupersededAt > 0 {
 		if sender != nil {
 			if kind == "lane.event" {
@@ -385,7 +407,7 @@ func (h *HubServer) replayInboxAged(record handoffkeepRelayEvent, receiptAge boo
 	if h.inbox == nil {
 		return false
 	}
-	event := relayEventFromRecord(record)
+	event := h.replayedRelayEvent(record)
 	// settled is strictly broader than the old injected-only check: a receiver
 	// read — including a must-ack item read before its ack — is evidence the
 	// lane already has the event, so a restart must not inject it again (hk
@@ -429,6 +451,7 @@ func (h *HubServer) runInbox(ctx context.Context) {
 		case <-ticker.C:
 			h.pruneInbox()
 			h.flushInbox()
+			h.flushInboxWakes()
 		}
 	}
 }
@@ -529,6 +552,15 @@ func (h *HubServer) flushInbox() {
 			return
 		}
 		if blockedLanes[b.Lane] {
+			continue
+		}
+		if class := h.inbox.policy.inboxOnlyClass(b.Lane, h.now()); class != "" {
+			// An inbox-only lane is never typed a batch (hk 3602): its items
+			// are filed unread and the batch is retired untyped.
+			if err := h.fileInboxOnlyBatch(b.Lane, class, b.ID); err != nil {
+				h.logger.Error("inbox-only batch filing failed; batch retained", "lane", b.Lane)
+				failed = true
+			}
 			continue
 		}
 		if h.inbox.policy.Lanes[b.Lane].InboxSummary != nil {

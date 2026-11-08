@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,24 @@ import (
 )
 
 func deskDietHub(t *testing.T, path string, now *time.Time) (*HubServer, *hubAgent, string) {
+	t.Helper()
+	return deskDietHubWith(t, path, "default", now)
+}
+
+// deskLanesOffPolicy is the shipped policy with the desk-lane class turned
+// off (relay.desk_lanes: []): the desk then keeps its pre-hk 3602 interrupts
+// and their inbox-summary piggyback, which this file pins.
+func deskLanesOffPolicy(t *testing.T) string {
+	t.Helper()
+	raw := strings.Replace(string(defaultDeliveryPolicy), "relay:\n", "relay:\n  desk_lanes: []\n", 1)
+	path := filepath.Join(t.TempDir(), "delivery.yaml")
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func deskDietHubWith(t *testing.T, path, policy string, now *time.Time) (*HubServer, *hubAgent, string) {
 	t.Helper()
 	fake := &fakeHandoffkeep{nextID: 1000, status: 201, rows: map[string]*handoffkeepRelayEvent{}}
 	doc := "inbox/operator-desk/digest/" + now.Format("20060102T150405Z")
@@ -35,7 +54,7 @@ func deskDietHub(t *testing.T, path string, now *time.Time) (*HubServer, *hubAge
 	if e != nil {
 		t.Fatal(e)
 	}
-	h, a := quietHub(t, path, "default", hk, now)
+	h, a := quietHub(t, path, policy, hk, now)
 	h.reportRelayPath = r20LanesFile(t, `{"lanes":{"operator-desk":{"machine":"host-a","pane":"w1:p1"}}}`)
 	return h, a, doc
 }
@@ -108,10 +127,14 @@ func TestDeskDietReviewedPolicyAndReceiverStates(t *testing.T) {
 	}
 }
 
+// With the desk-lane class off, a desk interrupt carries the bounded inbox
+// summary. Under the shipped policy the desk is inbox-only (hk 3602) and gets
+// no interrupt to carry it; see TestDeskDietReplay500Events.
 func TestDeskDietPiggybackBoundPointerSurfacingAndRestart(t *testing.T) {
 	now := time.Now().UTC()
 	path := filepath.Join(t.TempDir(), "inbox.sqlite3")
-	h, a, doc := deskDietHub(t, path, &now)
+	policy := deskLanesOffPolicy(t)
+	h, a, doc := deskDietHubWith(t, path, policy, &now)
 	for _, ev := range []hubJobEventPayload{
 		deskDietEvent("dots", "report", "[dots] RESULT ISSUE-42 concise title\nDO NOT COPY REPORT BODY"),
 		deskDietEvent("report", "report", "[report] weekly-update "+strings.Repeat("한", 500)+"\nDO NOT COPY REPORT BODY"),
@@ -146,7 +169,7 @@ func TestDeskDietPiggybackBoundPointerSurfacingAndRestart(t *testing.T) {
 		t.Fatal(items, e)
 	}
 	h.Close()
-	h2, a2, _ := deskDietHub(t, path, &now)
+	h2, a2, _ := deskDietHubWith(t, path, policy, &now)
 	replay := h2.inboxRelayDirective("lane.event", first, reportRelayRoute{Machine: "host-a", Pane: "w1:p1"}, result.ID)
 	if replay.Text != directive.Text {
 		t.Fatal("retry changed its frozen snapshot", replay.Text, directive.Text)
@@ -180,9 +203,17 @@ func TestDeskDietPiggybackBoundPointerSurfacingAndRestart(t *testing.T) {
 
 // Synthetic replay preserves the supplied counts without private event text.
 // The named groups total 414; the remaining 86 of the 500 are routine info.
+// With the desk-lane class off the 22 decisions interrupt; under the shipped
+// policy the desk is inbox-only (hk 3602): all 500 are filed and the first
+// decision types the one wake line, which the frozen clock never re-opens.
 func TestDeskDietReplay500Events(t *testing.T) {
+	t.Run("desk class off", func(t *testing.T) { deskDietReplay500(t, deskLanesOffPolicy(t), 22, 478) })
+	t.Run("inbox-only desk", func(t *testing.T) { deskDietReplay500(t, "default", 1, 500) })
+}
+
+func deskDietReplay500(t *testing.T, policy string, wantInterrupts, wantInbox int) {
 	now := time.Now().UTC()
-	h, a, _ := deskDietHub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), &now)
+	h, a, _ := deskDietHubWith(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), policy, &now)
 	fixture := []struct {
 		kind, typ, text string
 		n               int
@@ -216,11 +247,14 @@ func TestDeskDietReplay500Events(t *testing.T) {
 				if group.typ != "decision" {
 					t.Fatal("routine interrupt", d)
 				}
+				if wantInterrupts == 1 && (d.EventID != 0 || !strings.HasPrefix(d.Text, "[inbox] operator-desk: ") || !strings.Contains(d.Text, "(most urgent: decision) | panewire inbox list --lane operator-desk")) {
+					t.Fatal("inbox-only desk got a body", d)
+				}
 			}
 		}
 	}
-	if total != 500 || interrupts != 22 {
-		t.Fatalf("events=%d interrupts=%d, want 500/22", total, interrupts)
+	if total != 500 || interrupts != wantInterrupts {
+		t.Fatalf("events=%d interrupts=%d, want 500/%d", total, interrupts, wantInterrupts)
 	}
 	now = now.Add(time.Hour)
 	h.flushInbox()
@@ -237,8 +271,8 @@ func TestDeskDietReplay500Events(t *testing.T) {
 			inbox++
 		}
 	}
-	if inbox != 478 {
-		t.Fatalf("inbox=%d want 478", inbox)
+	if inbox != wantInbox {
+		t.Fatalf("inbox=%d want %d", inbox, wantInbox)
 	}
 	t.Logf("synthetic events=%d; interrupt=%d; inbox=%d", total, interrupts, inbox)
 }

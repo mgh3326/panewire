@@ -4,15 +4,17 @@ package panewire
 // lane.event --type ready whose text starts with [consult-done] (rstack
 // skills/ops/references/consult.md §2). A claude requester waits for that
 // event in its pane (relay.md §3-1), so a design lane that asked for advice
-// must still be interrupted by it. hk 3426 quieted every ready lane.event to a
-// design lane, this one included.
+// must still be told about it. hk 3426 quieted every ready lane.event to a
+// design lane, this one included. Since hk 3602 the answer is filed and wakes
+// the lane with the one-line wake rather than being typed.
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestQuietDesignConsultDoneIsInjected(t *testing.T) {
+func TestQuietDesignConsultDoneWakes(t *testing.T) {
 	_, hk, closeServer := newFakeHandoffkeep(t)
 	t.Cleanup(closeServer)
 	h, agent := t3426Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), hk, t3426Records)
@@ -29,9 +31,10 @@ func TestQuietDesignConsultDoneIsInjected(t *testing.T) {
 				t.Fatalf("relay=%+v", r)
 			}
 			got := t3426Injected(agent)
-			if len(got) != 1 || got[0].JobID != e.JobID || got[0].Pane != "w1:design" {
-				t.Fatalf("injections=%+v, want the consult answer in the design pane", got)
+			if len(got) != 1 || !strings.Contains(got[0].Text, "(most urgent: ready)") {
+				t.Fatalf("injections=%+v, want a ready wake", got)
 			}
+			t3602AssertWoken(t, h, got, t3426Design, "w1:design", "lane.event", e.JobID, "ready")
 		})
 	}
 

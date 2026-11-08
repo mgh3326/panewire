@@ -1443,6 +1443,8 @@ func (h *HubServer) relayChatMessage(ctx context.Context, id int64, pending chat
 		Reason:    "operator_chat",
 		// Question IDs ride the durable relay row for reconstruction and audit.
 		Question: strings.Join(pending.QuestionIDs, ","),
+
+		operatorChat: true,
 	}
 	if pending.RetryOf > 0 {
 		// The durable marker is what lets a restarted hub enforce

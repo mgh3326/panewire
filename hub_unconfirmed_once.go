@@ -228,7 +228,7 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 	if h.handoffkeep == nil {
 		return
 	}
-	event := relayEventFromRecord(record)
+	event := h.replayedRelayEvent(record)
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
 	}
@@ -291,6 +291,9 @@ func (h *HubServer) replayMarkedUnconfirmed(ctx context.Context, record handoffk
 	}
 	if !found || latest.DeliveredAt != "" || strings.HasPrefix(latest.DeliveredTo, relayReplayRetiredMarker) {
 		h.forgetRelayEvent(key)
+		return
+	}
+	if h.refuseInboxOnlyBody(record.Kind, event, record.ID, key) {
 		return
 	}
 	// Spend before inject: the retire write is what bounds the row to one
