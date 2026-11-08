@@ -21,18 +21,17 @@ and its grades in `/v1/bench/grades`; no subcommand runs pacelever.
 
 ## Credentials
 
-Every command resolves handoffkeep the way pacelever does: `HANDOFFKEEP_URL`
-and `HANDOFFKEEP_TOKEN` in the environment win, and when neither is set the
-file named by `HANDOFFKEEP_CONFIG` (else `$XDG_CONFIG_HOME/handoffkeep/config.env`,
-default `~/.config/handoffkeep/config.env`) supplies the URL and token. A
-partial environment override never falls back to the file. The optional
+Every command authenticates as panewire's `svc-panewire` hk client
+([config.md](config.md#handoffkeep-service-credential)): `HANDOFFKEEP_URL` and
+`HANDOFFKEEP_TOKEN_SVC_PANEWIRE` in the environment win when both are set,
+else the mode-0600 `~/.config/panewire/hk-svc.env` (`PANEWIRE_HK_ENV`
+overrides the path) supplies them. The hk CLI's `config.env` and
+`HANDOFFKEEP_TOKEN` are never read. The optional
 `HANDOFFKEEP_CF_ACCESS_CLIENT_ID` and `HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET`
 pair adds Cloudflare Access headers; both or neither must be set. The catalog
 endpoint must be HTTPS, or HTTP on loopback or a tailnet address for tests.
 
-The operator and operator-desk credential path is therefore the same one the
-operator already uses: `pacelever bench push-catalog FILE` becomes
-`panewire catalog push FILE`.
+`pacelever bench push-catalog FILE` becomes `panewire catalog push FILE`.
 
 ## Cache
 

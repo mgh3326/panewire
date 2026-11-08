@@ -172,7 +172,8 @@ still hub first, then nodes.
   **The file is optional at its default path.** A node started without
   `--spawn-config` and with no `~/.config/panewire/spawn.json` runs on
   defaults: work root `~/work`, workspace `workers`, herdr session `default`,
-  `handoffkeep_env` `~/.config/handoffkeep/config.env`, and no `cwd_map`. On
+  `handoffkeep_env` `~/.config/panewire/hk-svc.env` (or `PANEWIRE_HK_ENV`;
+  never the hk CLI's `config.env`, hk 3570), and no `cwd_map`. On
   defaults a `cwd_key` is the directory of that name directly under the work
   root (a real directory; a symlink is unmapped). A file named explicitly with
   `--spawn-config` must exist, and a file that exists is never replaced by
@@ -182,7 +183,8 @@ still hub first, then nodes.
   file. Rejections also reply as
   `job.spawn.result{rc:2, error}`. The optional `handoffkeep_env` path names
   a mode-0600 env file containing this node’s `HANDOFFKEEP_URL` and
-  `HANDOFFKEEP_TOKEN`; the node uses it to fetch `brief.doc`. The hub never
+  `HANDOFFKEEP_TOKEN_SVC_PANEWIRE` (a legacy `HANDOFFKEEP_TOKEN` is accepted
+  when the svc key is absent); the node uses it to fetch `brief.doc`. The hub never
   receives the document text.
 - A checkout runs `worktree.prepare` first; on success its returned path is
   used as spawn `cwd`. Any refusal returns `rc:81` and its outcome without

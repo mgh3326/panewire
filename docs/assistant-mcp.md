@@ -339,8 +339,10 @@ invalid_answer.
 
 One mode-0600 env file (-config):
 
-- HANDOFFKEEP_URL, HANDOFFKEEP_TOKEN — the handoffkeep credential;
-  required.
+- HANDOFFKEEP_URL, HANDOFFKEEP_TOKEN_SVC_PANEWIRE — the handoffkeep
+  credential; required. A file written before hk 3570 may carry
+  HANDOFFKEEP_TOKEN instead; the svc key wins when both are present
+  ([config.md](config.md#handoffkeep-service-credential)).
 - HANDOFFKEEP_CF_ACCESS_CLIENT_ID / _SECRET — optional outbound Access
   service-token pair for an hk URL behind Access; all-or-nothing,
   attached only to the configured origin, and redirects are never
