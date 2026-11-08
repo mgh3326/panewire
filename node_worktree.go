@@ -676,9 +676,7 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 	}
 	lockPath, err := nodeGitOpLockPath(clone)
 	if err != nil {
-		tracker.step = "lock"
-		tracker.exit = 1
-		tracker.stderr = err.Error()
+		tracker.recordFailure("lock", "lock", 1, err.Error())
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
 	wait := client.nodeGitOpWait()
@@ -688,12 +686,11 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 		case errors.Is(err, errNodeGitOpBusy):
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeBusy, RetryAfterS: nodeGitOpRetryAfter(wait)}, ""
 		case errors.Is(err, errNodeGitOpCancelled):
-			tracker.step = "lock"
+			tracker.currentStep = "lock"
+			tracker.currentSub = "lock"
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeCancelled}, ""
 		}
-		tracker.step = "lock"
-		tracker.exit = 1
-		tracker.stderr = err.Error()
+		tracker.recordFailure("lock", "lock", 1, err.Error())
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
 	defer release()
@@ -719,9 +716,7 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 		}
 	default:
-		tracker.step = "stat"
-		tracker.exit = 1
-		tracker.stderr = err.Error()
+		tracker.recordFailure("stat", "stat", 1, err.Error())
 		return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 	}
 	if err := nodeEnsureHarnessStateExcludes(ctx, git, clone); err != nil {
@@ -743,11 +738,8 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 		if result.Worktree == nil || result.Worktree.Head == "" {
 			// A success the hub would reject as malformed is reported as
 			// the failure it is; a retry answers reused.
-			if tracker.step == "" || tracker.step == "prepare" {
-				tracker.step = "inspect"
-				tracker.subcmd = "inspect"
-				tracker.exit = 1
-				tracker.stderr = "worktree head missing"
+			if tracker.failedStep == "" {
+				tracker.recordFailure("inspect", "inspect", 1, "worktree head missing")
 			}
 			return nodeWorktreePrepareResult{Outcome: nodeOutcomeGitFailed}, ""
 		}
@@ -756,42 +748,75 @@ func (client *HubClient) nodeWorktreePrepareRun(ctx context.Context, tracker *no
 }
 
 type nodeGitTracker struct {
-	runner relayCommandRunner
-	step   string
-	subcmd string
-	exit   int
-	stderr string
+	runner       relayCommandRunner
+	currentStep  string
+	currentSub   string
+	failedStep   string
+	failedSubcmd string
+	exit         int
+	stderr       string
 }
 
 func newNodeGitTracker(runner relayCommandRunner) *nodeGitTracker {
 	return &nodeGitTracker{
-		runner: runner,
-		step:   "prepare",
-		subcmd: "prepare",
+		runner:      runner,
+		currentStep: "prepare",
+		currentSub:  "prepare",
 	}
 }
 
 func (tracker *nodeGitTracker) git(ctx context.Context, args ...string) ([]byte, error) {
 	subcmd := nodeGitSubcommand(args)
-	tracker.step = subcmd
-	tracker.subcmd = subcmd
+	tracker.currentStep = subcmd
+	tracker.currentSub = subcmd
 	out, err := tracker.runner(ctx, args...)
 	if err != nil {
+		tracker.failedStep = subcmd
+		tracker.failedSubcmd = subcmd
 		tracker.exit, tracker.stderr = extractGitExitAndStderr(err)
 	}
 	return out, err
 }
 
+func (tracker *nodeGitTracker) recordFailure(step, subcmd string, exit int, stderr string) {
+	tracker.failedStep = step
+	tracker.failedSubcmd = subcmd
+	tracker.exit = exit
+	tracker.stderr = stderr
+}
+
+func (tracker *nodeGitTracker) step() string {
+	if tracker.failedStep != "" {
+		return tracker.failedStep
+	}
+	if tracker.currentStep != "" {
+		return tracker.currentStep
+	}
+	return "prepare"
+}
+
+func (tracker *nodeGitTracker) subcmd() string {
+	if tracker.failedSubcmd != "" {
+		return tracker.failedSubcmd
+	}
+	if tracker.currentSub != "" {
+		return tracker.currentSub
+	}
+	return "prepare"
+}
+
 func (tracker *nodeGitTracker) decide(ctx context.Context, result nodeWorktreePrepareResult) (nodeWorktreePrepareResult, string) {
+	step := tracker.step()
+	subcmd := tracker.subcmd()
 	if result.Outcome == nodeOutcomeGitFailed {
 		if ctx.Err() != nil {
 			result.Outcome = nodeOutcomeCancelled
-			logNodeCheckoutCancelled(ctx, tracker.step, tracker.subcmd)
+			logNodeCheckoutCancelled(ctx, step, subcmd)
 		} else {
-			logNodeCheckoutGitFailed(tracker.step, tracker.subcmd, tracker.exit, tracker.stderr)
+			logNodeCheckoutGitFailed(step, subcmd, tracker.exit, tracker.stderr)
 		}
 	} else if result.Outcome == nodeOutcomeCancelled {
-		logNodeCheckoutCancelled(ctx, tracker.step, tracker.subcmd)
+		logNodeCheckoutCancelled(ctx, step, subcmd)
 	}
 	return result, ""
 }

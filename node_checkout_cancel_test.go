@@ -2,6 +2,7 @@ package panewire
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -272,5 +273,83 @@ func TestNodeCheckoutPreCancelledContext(t *testing.T) {
 	infoRecords := capture.find(slog.LevelInfo, "cancelled")
 	if len(infoRecords) == 0 {
 		t.Fatalf("expected slog INFO log on pre-cancelled checkout, found none")
+	}
+}
+
+func TestNodeCheckoutInspectFailurePreservesFailingStep(t *testing.T) {
+	root := t.TempDir()
+	workRoot := filepath.Join(root, "work")
+	if err := os.MkdirAll(workRoot, 0700); err != nil {
+		t.Fatal(err)
+	}
+	clone := filepath.Join(workRoot, "repo")
+	if err := os.MkdirAll(clone, 0700); err != nil {
+		t.Fatal(err)
+	}
+	config := filepath.Join(root, "spawn.json")
+	configText := fmt.Sprintf(`{"work_root":%q,"cwd_map":{"repo-a":"/old/cwd"},"workspace":"worker","herdr_session":"worker","enabled":true}`, workRoot)
+	if err := os.WriteFile(config, []byte(configText), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	capture := &nodeCheckoutLogCapture{}
+	prev := slog.Default()
+	slog.SetDefault(slog.New(capture))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+
+	client := &HubClient{
+		spawnConfigPath: config,
+		nodeGit: func(ctx context.Context, args ...string) ([]byte, error) {
+			switch {
+			case len(args) == 1 && (args[0] == "--version" || args[0] == "version"):
+				return []byte("git version 2.31.0\n"), nil
+			case len(args) >= 4 && args[0] == "-C" && args[2] == "remote" && args[3] == "get-url":
+				return []byte("https://example.invalid/owner/repo.git\n"), nil
+			case len(args) >= 3 && args[0] == "-C" && args[2] == "rev-parse" && args[3] == "--git-common-dir":
+				return []byte(clone + "\n"), nil
+			case len(args) >= 3 && args[0] == "-C" && args[2] == "fetch":
+				return []byte(""), nil
+			case len(args) >= 4 && args[0] == "-C" && args[2] == "worktree" && args[3] == "list":
+				return []byte("worktree " + clone + "\nHEAD 1111111111111111111111111111111111111111\nbranch refs/heads/main\n\n"), nil
+			case strings.Contains(strings.Join(args, " "), "refs/remotes/origin/feature"):
+				return []byte("1111111111111111111111111111111111111111\n"), nil
+			case len(args) >= 4 && args[0] == "-C" && args[2] == "show-ref":
+				return nil, errors.New("not found")
+			case len(args) >= 4 && args[0] == "-C" && args[2] == "worktree" && args[3] == "add":
+				return []byte(""), nil
+			case len(args) >= 4 && args[0] == "-C" && args[2] == "branch" && args[3] == "--set-upstream-to":
+				return []byte(""), nil
+			case len(args) >= 4 && args[0] == "-C" && args[2] == "rev-parse" && args[3] == "HEAD":
+				// rev-parse HEAD inside inspect fails!
+				return nil, &fakeGitExitError{code: 128, stderr: []byte("fatal: bad revision 'HEAD'")}
+			}
+			return nil, fmt.Errorf("unexpected git invocation: %v", args)
+		},
+	}
+
+	prepared, code := client.nodeWorktreePrepare(t.Context(), nodeWorktreePrepareArgs{
+		Origin: "https://example.invalid/owner/repo.git",
+		Mode:   "branch",
+		Branch: "feature",
+		Dir:    "repo.job",
+	})
+	if code != "" {
+		t.Fatalf("unexpected code=%q", code)
+	}
+	res, ok := prepared.(nodeWorktreePrepareResult)
+	if !ok || res.Outcome != nodeOutcomeGitFailed {
+		t.Fatalf("prepared outcome=%+v, want %q", prepared, nodeOutcomeGitFailed)
+	}
+
+	warnRecords := capture.find(slog.LevelWarn, "git failed")
+	if len(warnRecords) == 0 {
+		t.Fatalf("expected slog WARN log on git-failed, found none")
+	}
+	attrs := recordAttrsMap(warnRecords[0])
+	if attrs["step"] != "rev-parse" {
+		t.Errorf("step=%v, want 'rev-parse' (the failing command, not subsequent successful remote get-url)", attrs["step"])
+	}
+	if attrs["subcommand"] != "rev-parse" {
+		t.Errorf("subcommand=%v, want 'rev-parse'", attrs["subcommand"])
 	}
 }
