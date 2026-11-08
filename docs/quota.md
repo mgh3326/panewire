@@ -3,7 +3,13 @@
 `panewire quota` is the quota entry point. Pacelever is an internal dependency
 scheduled for removal; callers should use panewire's interface.
 
-- `panewire quota status [--json]` reads the local host's cached readings.
+- `panewire quota status [--json]` reads the local host's cached readings. On a
+  host with no `pacelever` on `PATH` it does not fail: it reports, for each pool
+  this host measures itself, the shared store's stored reading of the host's
+  account (read only: no measurement, lease or publication), sets
+  `"pacelever": "absent"` on the host, and prints
+  `quota status: pacelever absent; native readings only` on stderr. A pool whose
+  reading cannot be read is listed with `source` `unavailable`.
 - `panewire quota refresh POOL` measures the named pool now, with a 60-second bound. `claude` and `codex` are measured by panewire itself ([claude](#native-measurement-claude), [codex](#native-measurement-codex)), and so are `commandcode`, `devin` and `agy` once their switch is flipped ([commandcode](#native-measurement-commandcode), [devin](#native-measurement-devin), [agy](#native-measurement-agy)); every other pool, and those two until then, runs the dependency.
 - `panewire quota observe KIND ...` forwards the observation kind and all remaining arguments, including `devin-free-limit` options, and returns the dependency's exit code.
 
@@ -16,7 +22,8 @@ dependency call; it has an 8-second bound ([catalog.md](catalog.md)).
 
 `status --json` emits an object with `schema` set to
 `panewire.quota.status.v1`, `generated_at` (the source timestamp), and a
-`hosts` array. Each host contains `host`, `pacelever_version`, and `readings`.
+`hosts` array. Each host contains `host`, `pacelever_version`, and `readings`,
+plus `pacelever: "absent"` when the readings are panewire's own.
 Each reading has `pool`, `account` (empty if unknown), `source`, `age_seconds`
 (number or null), `stale`, and `buckets`. Each bucket contains `window`,
 `used_pct` (number or null), optional `resets_at`, and `scope` with `kind` and
@@ -390,6 +397,111 @@ mode-0600 `panewire/aa.env` under the user configuration directory. Data is
 provided by [Artificial Analysis](https://artificialanalysis.ai/); see its
 [Data API reference](https://artificialanalysis.ai/data-api/docs/reference).
 
+## Launch
+
+Before admission, every spawn, delegate, placement and plan resolves the
+launch rung: the profile (its canon), effort, model id, grade, gate, pool and
+family a request runs. Until hk 3548 only `pacelever policy launch PROFILE
+--json` answered it, from pacelever's own catalog cache (one-hour TTL), so a
+row added in handoffkeep was refused until that cache expired (2026-11-08:
+`omp-dsflash41@max`, `e6_arm_required: unplaced profile`, expired by hand on
+two hosts). panewire now has its own lookup
+(`internal/fleet/launch_native.go`), a rule-for-rule port of pacelever
+v0.3.28's `policy launch` (catalog.go `resolveLaunch`, `resolveRow`,
+`roleCheck`, `defaultEffort`; bench.go `decodeCatalog`, `ReadCatalog`). It
+reads:
+
+- **The bench catalog** through panewire's catalog client and its freshness
+  rule ([catalog.md](catalog.md#cache)): a cache entry younger than one hour,
+  else handoffkeep, else a cache entry, stale after one day. When a cached
+  catalog refuses a request, the lookup reads handoffkeep once more before it
+  refuses, so a new row is found by the next lookup. Without any catalog it
+  judges the bundled snapshot as stale, as pacelever does.
+- **pacelever's bundled snapshot** (`internal/fleet/catalog-snapshot.json`,
+  pacelever v0.3.28's `catalog_snapshot.json` byte for byte) for what the
+  handoffkeep rows do not carry: each rung's family; a rung the snapshot holds
+  unplaced at the same grade stays unplaced (it needs an exact E6 marker); the
+  effort a profile defaults to; the alias `codex-max` → `codex-sol`; and the
+  rows of a profile handoffkeep does not list.
+- **The pool policy** in pacelever's `config.toml`, as [Admission](#admission)
+  reads it, for subscription.
+- **The E6 marker** from the request, else `PACELEVER_E6_ARM`.
+
+It answers as `pacelever policy launch` does through panewire: a refusal exits 3
+with pacelever's reason (`quota catalog: e6_arm_required: …`; the pacelever path
+reports `quota catalog: dependency failed`, since pacelever prints its reason
+only on stderr), a missing profile or an unreadable pool policy exits 2, and a
+stale catalog is refused `quota catalog is stale` (exit 70) unless the rung's
+own rule refuses first. The rules, each with its test in
+`internal/fleet/launch_native_test.go`:
+
+| Rule (pacelever v0.3.28) | Refusal |
+|---|---|
+| A pi- profile or `cmd-dsflash41` needs an explicit effort, one of its placed efforts | `explicit --effort required for credit profile`, `credit effort is not placed` |
+| An effort outside the effort ladder must be a catalog rung | `unknown effort rung` |
+| `codex-med`, `builder-terra-*` and any profile with a `gpt-5.6-terra` row | `model_refused: retired model identity` |
+| A profile with no live row | `profile "P" is unknown or retired` |
+| An unrated or unplaced rung needs the exact `<canon>@<effort>` marker, except for the lead, consult, builder and counsel roles on an unrated rung | `e6_arm_required: exact measurement marker required`, `e6_arm_required: unplaced profile requires exact measurement marker`, `e6_arm_required` |
+| A requested rung that is retired | `rung is retired in the catalog` |
+| A credit or `codex-terra61` request for a rung that is not placed | `e6_arm_required: rung is not placed` |
+| Seat roles: a credit rung seats a worker or tester, or a builder on a placed default rung; `fable` and `codex-astra` never a worker or captain, and a builder, tester or reviewer only for a round extension; `codex-astra` only for a director, architect, operator-request or round-extension purpose; any other `astra` profile is removed | `role_restricted: …` |
+| An `--operator-request` must be `hk:task/N` or `hk:doc/…` | `operator_request_ref_invalid` |
+| An unsubscribed profile or pool | `profile is unsubscribed` |
+| A `consult_only` rung needs `--operator-request` (not `codex-astra`) | `profile is consult_only; pass --operator-request` |
+| On a stale catalog, an escalation rung needs `--operator-request` | `catalog is stale; non-default gate requires --operator-request` |
+
+An effortless request resolves to the profile's default effort, else the best
+graded ordinary rung at the lowest effort; a requested effort with no eligible
+rung of its own falls back to that rung and keeps the requested effort, as in
+pacelever. The launch rule for a credit rung is pacelever's (`pi-` profiles
+and `cmd-dsflash41`); the gate's stricter one ([Command Code
+seats](#command-code-seats)) still refuses at admission. pacelever's
+exploration does not apply: panewire passes no `--task`, so pacelever keeps
+its baseline answer.
+
+### Shadow and native launch
+
+`[quota].launch` in the host's fleet config picks who resolves the rung:
+
+```toml
+[quota]
+launch = "native"   # or "shadow", the default
+```
+
+- **Shadow (the default).** `pacelever policy launch` resolves it, as before.
+  Beside each call panewire runs its own lookup within 10 s and records one
+  fleet event:
+
+  ```
+  kind=quota_launch_shadow outcome=disagree reason=commandcode
+  detail=profile=omp-dsflash41 effort=max role=worker purpose= pacelever{exit=3 profile= model= effort= grade= gate= pool= family= stale=false reason="e6_arm_required: unplaced profile requires exact measurement marker"} native{exit=0 profile=omp-dsflash41 model=deepseek/deepseek-v4.1-flash effort=max grade=A+ gate=default pool=commandcode family= stale=false reason=""} diff=exit,profile,model_id,effort,grade,gate,pool
+  ```
+
+  `agree` means the same exit status, launch fields and reason;
+  `reason_differs` the same status and fields in other words; `disagree`
+  anything else, and `diff` lists the fields that differ. pacelever's reason is
+  the `error:` line it prints on stderr. The native answer never changes the
+  spawn's outcome. Expected differences: pacelever's own catalog cache is not
+  panewire's, so a row changed in the last hour can differ until both caches
+  read it; and pacelever with no catalog backend configured serves its snapshot
+  as fresh where panewire refuses it as stale.
+- **Native.** panewire's lookup decides and `pacelever policy launch` is never
+  run. panewire-design flips it on a host after the shadow events agree; it is
+  host config, independent of `[quota].gate`.
+
+### Credit pool views
+
+Selection ranks a credit pool, and admission refuses an excluded one, from the
+pool's view: its class, the used share of its current operator credit entry
+and its balance. When every credit pool of the pool policy (`credit_pools`) is
+a hand-recorded API pool (`anthropic-api`, `openai-api`) and the shared store
+is wired, panewire builds that view itself: the class from pacelever's
+`config.toml` as [Admission](#admission) reads it, the entry and balance from
+the shared store for the account `[quota.accounts]` (else pacelever's own
+`[quota.accounts]`) names. `pacelever --json` is not started. Otherwise — a
+credit pool the store does not serve, or no shared reader — the
+`pacelever --json` status read runs as before.
+
 ## Admission
 
 Every spawn, delegate, placement and selection asks one admission question per
@@ -407,7 +519,9 @@ pacelever v0.3.28's gate) from three inputs:
   own `[quota.accounts]`).
 - **The bench catalog** from handoffkeep (`GET /v1/bench/catalog`), validated
   and cached by panewire as [catalog.md](catalog.md) describes; an unavailable
-  or stale catalog refuses (exit 2). No pacelever process runs.
+  or stale catalog refuses (exit 2). No pacelever process runs. The launch rung
+  the verdict is asked about comes from the launch lookup ([Launch](#launch)),
+  which has its own switch.
 - **The pool policy** in pacelever's `config.toml` (`PACELEVER_CONFIG`, else
   `~/.config/pacelever/config.toml`): class and its `until` date, cutoff,
   subscription, `fusion_billing_fp`. A missing file is the default policy; an
@@ -492,8 +606,9 @@ gate = "native"   # or "shadow", the default
   is native. The desk reads the events and flips the switch.
 - **Native.** panewire's verdict decides: no `pacelever gate` and no
   `pacelever refresh` run in the gate, and the catalog comes from handoffkeep
-  ([catalog.md](catalog.md)). `pacelever policy launch`, the status and manual
-  reads and the selector's refresh of a pool panewire does not measure stay
+  ([catalog.md](catalog.md)). `pacelever policy launch` follows its own switch
+  ([Launch](#launch)); the status read of a pool the shared store does not
+  serve and the selector's refresh of a pool panewire does not measure stay
   until hk 3250.
 
 The golden verdicts in `internal/fleet/testdata/admission_golden/verdicts.json`
