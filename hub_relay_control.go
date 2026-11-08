@@ -51,6 +51,10 @@ type clientRelayControlState struct {
 	// cmdHoldMax is the relay.cmd_hold_max setting: the ceiling on how long a
 	// row stays held for a working cmd pane (hk 3411). Zero reads the default.
 	cmdHoldMax time.Duration
+	// cmdStaleAfter is the relay.cmd_stale_after setting: how long a working
+	// cmd pane's screen must stay frozen to count as stale (hk 3517). Zero
+	// reads the default.
+	cmdStaleAfter time.Duration
 }
 
 func newHubRelayControlState(config HubServerConfig, overrides map[string]acceptingOverride) hubRelayControlState {
@@ -61,5 +65,5 @@ func newHubRelayControlState(config HubServerConfig, overrides map[string]accept
 }
 
 func newClientRelayControlState(config HubClientConfig) clientRelayControlState {
-	return clientRelayControlState{relayInjectTimeout: relayInjectTimeout(config.RelayInjectTimeout), cmdHoldMax: relayCmdHoldMaxFromEnv()}
+	return clientRelayControlState{relayInjectTimeout: relayInjectTimeout(config.RelayInjectTimeout), cmdHoldMax: relayCmdHoldMaxFromEnv(), cmdStaleAfter: relayCmdStaleAfterFromEnv()}
 }

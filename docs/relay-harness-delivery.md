@@ -49,7 +49,7 @@ report, has no adapter and no delivery proof.
 | devin | nonce in the transcript, or devin's own queue banner (`nonce_echo`, `devin_queue_banner`) | no |
 | grok | nonce on screen and herdr reports idle/done before the send and `working` after it (`nonce_echo+status_working`) | observed 8 s |
 | omp | same as grok | observed 8 s |
-| cmd | same as grok, typed through `pane send-text` plus `pane send-keys return`; the composer is found with claude's rule (below); `workingUnprovable`: a directive waits for idle or done; nothing is typed into it while working, and a held row waits for idle while the job is live; one row per inject | observed 8 s |
+| cmd | same as grok, typed through `pane send-text` plus `pane send-keys return`; the composer is found with claude's rule (below); `workingUnprovable`: a directive waits for idle or done; nothing is typed into it while working, and a held row waits for idle while the job is live, unless its pane is proven stuck at working (below); one row per inject | observed 8 s |
 | anything else | none | n/a |
 
 `workingUnprovable` marks a harness that cannot prove a directive typed into a
@@ -61,9 +61,10 @@ hold, and types when the pane turns idle or done. The wait ends on idle or done
 only. A pane that is still working is never typed into, whatever the row's
 policy (`directive`, `idle` or `max_wait=N`; hk 3384), and while the job is live
 the row has no working-wait expiry (hk 3411): when `max_wait` runs out the row
-stays held, its deadline moves 30 minutes on, and the same wait is armed again;
+stays held, its deadline moves 5 minutes on, and the same wait is armed again;
 nothing new polls. The row is typed when the pane turns idle or done, one row
-per inject. It is dropped only when:
+per inject, or earlier when its pane is proven stuck at `working` (below). The
+row is dropped only when:
 
 - the pane is gone or holds another occupant, or the lane moved (the lease
   gate: `pane_occupant_gone`, `pane_occupant_changed`, `lease_unverifiable`,
@@ -76,6 +77,42 @@ per inject. It is dropped only when:
   (default 24h; set it on the node with `PANEWIRE_RELAY_CMD_HOLD_MAX`, a Go
   duration; a ceiling below the policy wait also caps the first wait). Then the row is dropped as `working_wait_expired`, the design lane
   is told once (see below), and the durable row stays undelivered.
+
+A cmd pane stuck at `working` (hk 3517): cmd reports its own lifecycle to herdr
+and sometimes never sends the report that ends a turn, so herdr keeps `working` for hours after the final answer
+while the pane sits idle. At each re-check of a held row whose cmd pane is
+`working`, the node reads the visible screen with SGR
+(`herdr pane read --source visible --format ansi`) and remembers a digest of it
+per pane and occupant, in memory only; a held row on a working cmd pane is
+re-checked every 5 minutes (`relayCmdHoldRecheck`), so a stuck pane is found
+about `relay.cmd_stale_after` plus one re-check after its screen froze. The pane
+is **stale-working** only when all of these hold:
+
+- herdr still says `working` and the occupant (the lease) is unchanged;
+- the visible ANSI screen is byte-identical to the one remembered at an earlier
+  re-check at least `relay.cmd_stale_after` ago (default 10 minutes; set it on
+  the node with `PANEWIRE_RELAY_CMD_STALE_AFTER`, a Go duration);
+- the composer reads empty (`composer_empty`, the same rule the presend check
+  uses).
+
+A real working turn redraws (spinner, timers), so a screen frozen for the whole
+window is the proof; there is no second heuristic. A failed or unparsable read
+is not evidence and the row keeps its hold. A pane that is not working, or
+another occupant, starts the window over, as does any change of the screen.
+
+A stale-working pane takes the idle path: the row is typed as one row per
+inject, with the same presend check, gated return and nonce, and the rows behind
+it stay held for the next re-check. herdr never shows the idle-to-working
+transition the cmd proof needs, so for such a send `marker_observed` is the
+nonce echo on screen and a visible ANSI screen that differs from the stale one
+after the return. Without both it is `maybe_in_pane`, and the row is not typed a
+second time (a directive's retry-once does not apply). The delivery evidence
+(`relay.delivered` reason, or the `maybe_in_pane` reason) starts with
+`stale_working:`, and the node logs one `relay cmd pane stale working` warning
+per pane per stale episode with the pane, lane, event id and seconds frozen.
+The proof only reads herdr; nothing is written back to it. The job-ended and
+lease gates apply as before, and a stale pane's row is typed instead of dropped
+at the `relay.cmd_hold_max` ceiling.
 
 A row dropped as `working_wait_expired` was never typed. The hub remembers it
 when its unconfirmed mark lands and re-delivers it when the idle-wake observer

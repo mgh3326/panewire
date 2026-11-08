@@ -622,8 +622,8 @@ func TestCmdHoldExtensionWriteFailureDoesNotSpin_t3411(t *testing.T) {
 	rig.node.relayBusyManager().releaseWorking(t.Context(), "w1:pW", true)
 
 	eventually(t, 2*time.Second, "the wait re-armed after the expiry", func() bool { return t3411WaitCount(rig) > before })
-	if timeout := t3411LastWaitTimeout(t, rig); timeout < 25*time.Minute {
-		t.Fatalf("the re-armed wait has --timeout %s after a failed extension write, want the moved deadline (~30m), not a spin", timeout)
+	if timeout := t3411LastWaitTimeout(t, rig); timeout < relayCmdHoldRecheck-time.Minute {
+		t.Fatalf("the re-armed wait has --timeout %s after a failed extension write, want the moved deadline (~%s), not a spin", timeout, relayCmdHoldRecheck)
 	}
 	if rows := t3384HeldRows(t, rig); len(rows) != 1 {
 		t.Fatalf("held rows=%+v, want the row still held", rows)

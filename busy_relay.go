@@ -271,6 +271,10 @@ type relayBusyManager struct {
 	// a store that rejects the extension write cannot make the next wait end
 	// at once. Entries are dropped once they pass.
 	cmdHoldUntil map[int64]time.Time
+	// cmdScreens is the screen each working cmd pane showed at the re-check that
+	// first saw it (hk 3517, cmdStaleWorkingDigest), by pane. It is in memory
+	// only: a node restart starts the frozen window again.
+	cmdScreens map[string]relayScreenSample
 	// dedupeRestorePending gates the held-vs-delivered reconcile to the one
 	// resume() that follows restore(): emits made in restore() land before
 	// the relay emitter exists, so the reconcile belongs to the post-hello
@@ -286,7 +290,7 @@ func (client *HubClient) relayBusyManager() *relayBusyManager {
 	client.busyRelayMu.Lock()
 	defer client.busyRelayMu.Unlock()
 	if client.busyRelay == nil {
-		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc), inflight: make(map[int64]struct{}), lanePane: make(map[string]string), dedupeInFlight: make(map[string]chan struct{}), cmdHoldUntil: make(map[int64]time.Time)}
+		client.busyRelay = &relayBusyManager{client: client, held: make(map[string][]relayHeld), waits: make(map[string]context.CancelFunc), inflight: make(map[int64]struct{}), lanePane: make(map[string]string), dedupeInFlight: make(map[string]chan struct{}), cmdHoldUntil: make(map[int64]time.Time), cmdScreens: make(map[string]relayScreenSample)}
 	}
 	return client.busyRelay
 }
@@ -943,7 +947,9 @@ func (manager *relayBusyManager) release(parent context.Context, pane string, ex
 // any policy (hk 3370, hk 3384). Before the wait runs out the row simply stays
 // held; past it the row keeps waiting while its job is live (hk 3411,
 // keepWorkingCmdHold) and is dropped and told as working_wait_expired only
-// past the relay.cmd_hold_max ceiling.
+// past the relay.cmd_hold_max ceiling. The exception is a pane proven stuck at
+// working from herdr's own reads (hk 3517, cmdStaleWorkingDigest): its rows are
+// kept for the idle path, marked with the stale screen their proof starts from.
 func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, items []relayHeld, expired bool) (keep []relayHeld, harness string) {
 	var survivors []relayHeld
 	for _, item := range items {
@@ -987,6 +993,11 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 			unverifiable = true
 		}
 	}
+	if !unverifiable && !paneWorkingUnprovable {
+		// No longer working (or gone): there is no frozen window to measure.
+		manager.forgetCmdScreen(pane)
+	}
+	staleDigest, staleChecked := "", false
 	for _, item := range survivors {
 		if unverifiable {
 			manager.retryOrDrop(item, harness)
@@ -1006,6 +1017,18 @@ func (manager *relayBusyManager) filterDeliverableHeld(parent context.Context, i
 			if !expired {
 				// The pane turned working again before this release read it.
 				// The row is still in the store; the release re-arms its wait.
+				continue
+			}
+			if !staleChecked {
+				// hk 3517: one screen read per re-check, shared by every row held
+				// on the pane.
+				staleDigest, staleChecked = manager.cmdStaleWorkingDigest(parent, item, occupant.key()), true
+			}
+			if staleDigest != "" {
+				// Proven stuck at working: the pane takes the idle path, as if
+				// herdr had reported idle.
+				item.staleScreen = staleDigest
+				keep = append(keep, item)
 				continue
 			}
 			// hk 3370, hk 3384: the wait ran out with the pane still working,
@@ -1044,8 +1067,13 @@ func (manager *relayBusyManager) deliverReleased(parent context.Context, pane st
 	}
 	sort.SliceStable(keep, func(i, j int) bool { return keep[i].RecvSeq < keep[j].RecvSeq })
 	for index, item := range keep {
-		if index > 0 && !manager.paneIdleOrDone(parent, pane) {
-			return
+		if index > 0 {
+			if !manager.paneIdleOrDone(parent, pane) {
+				return
+			}
+			// The pane left working after the first row, so this row has the
+			// ordinary idle proof and nothing of the stale screen applies.
+			item.staleScreen = ""
 		}
 		manager.deliver(parent, []relayHeld{item}, expired)
 	}
@@ -1169,10 +1197,17 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 		group = live
 		text := relayBatchText(group, expired, now)
 		ctx, cancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
+		// hk 3517: a row released into a pane proven stale-working is typed
+		// once. Its proof starts from the stale screen, and an unproven send is
+		// never typed again: the pane may already hold the row.
+		staleScreen := group[0].staleScreen
+		if staleScreen != "" {
+			ctx = withRelayStaleScreen(ctx, staleScreen)
+		}
 		result := manager.inject(ctx, group, text)
 		cancel()
 		immediate := relayGroupImmediate(group)
-		if immediate && relayRetriesOnce(result) {
+		if immediate && staleScreen == "" && relayRetriesOnce(result) {
 			// hk 3276: a worker directive is not held for a quieter pane, so a
 			// send that was rejected or never showed up is typed once more
 			// right away. The row's nonce is unchanged, and the text already
@@ -1180,6 +1215,9 @@ func (manager *relayBusyManager) deliver(parent context.Context, items []relayHe
 			retryContext, retryCancel := context.WithTimeout(parent, manager.client.relayInjectTimeout())
 			result = manager.inject(retryContext, group, text)
 			retryCancel()
+		}
+		if staleScreen != "" {
+			result.Evidence = relayStaleWorkingEvidence + result.Evidence
 		}
 		switch result.Outcome {
 		case relayInjectRetryable:

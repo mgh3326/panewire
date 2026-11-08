@@ -800,7 +800,7 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		}
 		returnSpent = true
 	}
-	result := relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, returnSpent, relayReadPane(ctx, pane, harness).withPresend(presend))
+	result := relayVerifyOutcome(ctx, pane, harness, text, presend.visible, "", presendQueued, returnSpent, relayReadPane(ctx, pane, harness).withPresend(presend).withStaleScreen(ctx, pane))
 	if !known || !adapter.observe || !strings.HasPrefix(result.Evidence, "unproven:") || len(relayNoncesIn(text)) == 0 {
 		return result
 	}
@@ -817,7 +817,7 @@ func relayInjectForHarnessGuarded(ctx context.Context, pane, harness, text strin
 		case <-deadline.C:
 			return result
 		case <-tick.C:
-			reads := relayReadPane(ctx, pane, harness).withPresend(presend)
+			reads := relayReadPane(ctx, pane, harness).withPresend(presend).withStaleScreen(ctx, pane)
 			classification, rule, proven := relayClassifyReads(harness, reads, text, true, presendQueued)
 			switch classification {
 			case "marker_observed":
@@ -1057,6 +1057,11 @@ type relayPaneReads struct {
 	// read before the paste. Only a relayProofEchoAndWorking harness asks for
 	// them: its proof is the pane going idle/done -> working after the send.
 	status, presendStatus string
+	// staleSend marks reads taken after a send into a pane proven
+	// stale-working (hk 3517), and screenMoved says the visible ANSI screen
+	// then differs from the stale one. Together they replace the status
+	// transition relayProofEchoAndWorking needs.
+	staleSend, screenMoved bool
 }
 
 // relayReadPane reads the visible screen and the recent-unwrapped transcript
@@ -1360,6 +1365,14 @@ func relayClassifyReads(harness string, reads relayPaneReads, text string, postS
 		// send and herdr now reports it working: a submitted prompt starts a
 		// turn, a pending paste does not.
 		started := reads.status == "working" && (reads.presendStatus == "idle" || reads.presendStatus == "done")
+		if reads.staleSend {
+			// hk 3517: herdr already says working and never shows the
+			// transition, so the screen leaving its stale state stands in for it.
+			if postSend && len(proven) > 0 && reads.screenMoved {
+				return "marker_observed", source + ":nonce_echo+screen_changed", proven
+			}
+			return "unproven", "none", nil
+		}
 		if postSend && len(proven) > 0 && started {
 			return "marker_observed", source + ":nonce_echo+status_working", proven
 		}
