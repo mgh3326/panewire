@@ -91,10 +91,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.candidate.outputs.sha }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27.x'
-          cache: true
+      - uses: ./.github/actions/setup-go-cached
       # The pins the main stage used to carry. They run here now, and the
       # other packages run the full -race suite beside them.
       - run: go test -race -count=3 -run 'T1002|T1034' .
@@ -114,10 +111,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.candidate.outputs.sha }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27.x'
-          cache: true
+      - uses: ./.github/actions/setup-go-cached
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -144,10 +138,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.candidate.outputs.sha }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27.x'
-          cache: true
+      - uses: ./.github/actions/setup-go-cached
       - name: Build the four release artifacts
         run: |
           version=$(sh scripts/build-release.sh dist/release)
@@ -188,10 +179,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.candidate.outputs.sha }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27.x'
-          cache: true
+      - uses: ./.github/actions/setup-go-cached
       # The deployed schema is the migrations already recorded in
       # panewire_schema_migrations; the candidate applies any new file on top.
       # A re-open is the candidate schema over the deployed one, and the
@@ -214,10 +202,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.candidate.outputs.sha }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27.x'
-          cache: true
+      - uses: ./.github/actions/setup-go-cached
       # Mixed hub/node versions in both directions: the candidate hub accepts a
       # legacy node heartbeat (TestTask268AC5...), the frozen pre-change hub
       # vocabulary rejects the candidate node (the same test), and the legacy

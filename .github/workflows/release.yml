@@ -90,10 +90,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version: '1.27.x'
-          cache: true
+      - uses: ./.github/actions/setup-go-cached
       - name: Fast PR build
         if: github.event_name == 'pull_request'
         run: go build ./...
@@ -148,10 +145,7 @@ jobs:
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5.6.0
-        with:
-          go-version: '1.27.x'
-          cache: true
+      - uses: ./.github/actions/setup-go-cached
       - run: go vet ./...
       - run: go test ./...
 

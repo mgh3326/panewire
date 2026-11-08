@@ -43,10 +43,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27.x'
-          cache: true
+      - uses: ./.github/actions/setup-go-cached
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -76,10 +73,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27.x'
-          cache: true
+      - uses: ./.github/actions/setup-go-cached
       - run: scripts/ci-test-shard.sh ${{ matrix.shard }}
 
   test:
@@ -128,10 +122,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27.x'
-          cache: true
+      - uses: ./.github/actions/setup-go-cached
       - name: gofmt
         run: |
           unformatted=$(gofmt -l .)
@@ -192,10 +183,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref }}
-      - uses: actions/setup-go@v5
-        with:
-          go-version: '1.27.x'
-          cache: true
+      - uses: ./.github/actions/setup-go-cached
       - name: store contract, must-ack and migrate-sqlite on Postgres
         if: ${{ github.event_name == 'pull_request' }}
         env:
