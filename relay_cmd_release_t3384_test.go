@@ -34,6 +34,9 @@ d='` + dir + `'
 div='` + t3330CmdDivider + `'
 echo "$1 $2" >> "$d/calls"
 screen() {
+  # A working cmd pane redraws (spinner, timers), so every read of it differs; a
+  # frozen screen is what hk 3517 reads as stuck. calls grows with each read.
+  if [ "$(cat "$d/status")" = working ]; then printf '✻ working %s\n' "$(wc -l < "$d/calls")"; fi
   if [ -f "$d/submitted" ]; then printf '❯ %s\ndone\n' "$(cat "$d/submitted")"; fi
   printf '%s\n' "$div"
   if [ -f "$d/composer" ]; then printf '❯ %s\n' "$(cat "$d/composer")"; else printf '❯\n'; fi

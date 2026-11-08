@@ -22,6 +22,10 @@ type relayHeld struct {
 	// occupant at delivery time; '' marks a row no hold-time identity exists
 	// for and is never treated as a match.
 	Lease string
+	// staleScreen is the digest of the screen a release proved stale-working
+	// (hk 3517) and is set on a row only for the one inject that follows. It is
+	// never persisted.
+	staleScreen string
 }
 
 func (s *Store) InsertRelayHeld(ctx context.Context, held relayHeld) (bool, error) {

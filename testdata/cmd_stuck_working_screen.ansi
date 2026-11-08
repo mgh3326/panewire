@@ -1,0 +1,36 @@
+ [0m[38;2;138;148;168m└[0m emit rc=0
+
+[0m[38;2;228;204;255m✻ Thought for 1 second [0m[38;2;53;61;80m[[0m[38;2;138;148;168mctrl+o to expand[0m[38;2;53;61;80m][0m
+
+[0m[1m[38;2;244;244;244m[48;2;89;69;177m SHELL [0m [0m[38;2;53;61;80m[[0mcd ~/work/panewire.e6-hub && ...[0m[38;2;53;61;80m][0m
+ [0m[38;2;138;148;168m│[0m ## wk/e6-hub...origin/wk/e6-hub
+ [0m[38;2;138;148;168m│[0m ?? report.draft.md
+ [0m[38;2;138;148;168m└ [0m [0m[38;2;138;148;168m... +4 lines [0m[38;2;53;61;80m[[0m[38;2;138;148;168mctrl+o to expand[0m[38;2;53;61;80m][0m
+
+[0m[38;2;165;153;233m⠶[0m Done. PR #307 is open at head [0m[38;2;177;186;249m25b3770[0m, and READY was emitted once.
+
+  [0m[1mWhat I changed[0m
+
+  - Hub submissions carry [0m[38;2;177;186;249me6_arm[0m when [0m[38;2;177;186;249mPANEWIRE_E6_ARM[0m/[0m[38;2;177;186;249mSCOPEFUEL_E6_ARM[0m matches the spawn's [0m[38;2;177;186;249m-m[0m canon; a
+  mismatch refuses at submit with exit 2.
+  - Hub admission threads the marker through pacelever's catalog/gate ([0m[38;2;177;186;249mPACELEVER_E6_ARM[0m), the native
+  verdict, seat checks and selection; the node receives [0m[38;2;177;186;249m--e6-arm[0m.
+  - Recorded on panewire's own job record ([0m[38;2;177;186;249mjob.spawned[0m receipt, durable job view) and the hub operation
+  outcome, since hk's job/placement endpoints reject unknown JSON fields.
+  - [0m[38;2;177;186;249mdocs/config.md[0m updated; new tests cover (a)-(d), the mutant, the pacelever env, and the hub-node argv
+  round trip.
+
+  [0m[1mVerification[0m
+
+  - [0m[38;2;177;186;249mgofmt[0m, [0m[38;2;177;186;249mgo vet[0m, [0m[38;2;177;186;249minternal/fleet[0m and [0m[38;2;177;186;249minternal/arbiter[0m suites pass; related root hub/spawn tests pass.
+  - Full root suite has one pre-existing failure ([0m[38;2;177;186;249mTestPRStatusCompareScript[0m), reproduced identically at base
+   a56ee3c.
+  - Merg ewave first review skipped: [0m[38;2;177;186;249m~/.config/mergewake/config.yaml[0m is missing (allowed by the brief).
+
+[0m[38;2;138;148;168m✻ Worked for 33m 0s[0m
+
+[0m[38;2;138;148;168m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+❯ [0m[7mA[0m[38;2;138;148;168msk your question...[0m
+[0m[38;2;138;148;168m───────────────────────────────────────────────────────────────────────────────────────────────────────────────────────[0m
+  [0m[38;2;232;64;87m» permission bypass on [0m[38;2;53;61;80m[[0m[38;2;138;148;168mshift+tab[0m[38;2;53;61;80m][0m
+  [0m[38;2;138;148;168m? for shortcuts · [0m[38;2;2;136;142mtaste on[0m

@@ -24,9 +24,12 @@ const (
 	// defaultRelayCmdHoldMax is the relay.cmd_hold_max default.
 	defaultRelayCmdHoldMax = 24 * time.Hour
 	// relayCmdHoldRecheck is how far a working cmd pane's held row moves its
-	// deadline at each expiry. The wake at the new deadline only checks the
-	// job and the ceiling again; nothing is typed into a working pane.
-	relayCmdHoldRecheck = defaultRelayMaxWait
+	// deadline at each expiry. The wake at the new deadline checks the job and
+	// the ceiling again and reads the screen for a stuck pane (hk 3517,
+	// relay_cmd_stale.go); nothing is typed into a pane not proven stale. It is
+	// short so a frozen screen is seen within about relay.cmd_stale_after plus
+	// one recheck.
+	relayCmdHoldRecheck = 5 * time.Minute
 	// relayDroppedJobEnded drops a held row whose job has ended. The durable
 	// row stays undelivered, as with every other lease expiry.
 	relayDroppedJobEnded = "job_ended"
