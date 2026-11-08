@@ -526,7 +526,7 @@ client and credential:
 | Caller | hk route | Was |
 | --- | --- | --- |
 | `panewire work TASK_ID` | `GET /v1/tasks/{id}` | `tasks show` |
-| Artifact record write (move, upload, sweep) | `PUT /v1/documents/{key}`, kind `artifact`, no job | `doc put --kind artifact` |
+| Artifact record write (move, upload, sweep) | `PUT /v1/documents/{key}`, kind `evidence`, no job (hk has no `artifact` kind) | `doc put --kind artifact` |
 | Artifact sweep task read and recheck | `GET /v1/tasks/{id}` | `tasks show` |
 | Artifact sweep listing | `GET /v1/documents?prefix=…&limit=100` | `doc list --prefix` |
 | Artifact sweep record read | `GET /v1/documents/{key}` | `doc get` |

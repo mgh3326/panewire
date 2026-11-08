@@ -134,6 +134,11 @@ func (hk *spawnHK) Routes() []string {
 // Close stops the server, so the next call finds hk unreachable.
 func (hk *spawnHK) Close() { hk.srv.Close() }
 
+// hkDocumentKinds is the kind vocabulary hk accepts on a document write: a
+// copy of documentKinds at handoffkeep internal/store/store.go:38 (v0.0.130).
+// hk answers 400 invalid_context for any other kind, so the fake does too.
+var hkDocumentKinds = map[string]bool{"brief": true, "report": true, "answer": true, "handoff": true, "note": true, "other": true, "decision": true, "research": true, "design": true, "policy": true, "evidence": true}
+
 func (hk *spawnHK) serve(w http.ResponseWriter, r *http.Request) {
 	body, _ := io.ReadAll(r.Body)
 	req := hkRequest{Method: r.Method, Path: r.URL.EscapedPath(), Auth: r.Header.Get("Authorization"), Query: r.URL.RawQuery, Body: body}
@@ -179,6 +184,10 @@ func (hk *spawnHK) serve(w http.ResponseWriter, r *http.Request) {
 		var doc map[string]any
 		if json.Unmarshal(body, &doc) != nil {
 			answer(http.StatusBadRequest, `{"error":"invalid_request"}`)
+			return
+		}
+		if kind, _ := doc["kind"].(string); !hkDocumentKinds[kind] {
+			answer(http.StatusBadRequest, `{"error":"invalid_context","reason":"invalid kind"}`)
 			return
 		}
 		out, _ := json.Marshal(map[string]any{"document": doc, "changed": true})
