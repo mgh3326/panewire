@@ -3,12 +3,15 @@ package panewire
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/quota/shared"
 )
 
 func quotaFake(t *testing.T, script string) {
@@ -155,5 +158,80 @@ func TestQuotaObserveSignalFailure(t *testing.T) {
 	var out, errout bytes.Buffer
 	if code := runQuotaCLI([]string{"observe", "devin-free-limit"}, &out, &errout); code != ExitInternal || !strings.Contains(errout.String(), "exit 70") {
 		t.Fatalf("code=%d stderr=%q", code, errout.String())
+	}
+}
+
+// TestQuotaCLIStatusWithoutPacelever: with no pacelever binary, `panewire
+// quota status` reports the stored readings of the pools this host measures
+// natively and says pacelever is absent, instead of failing. It reads the
+// shared store only: no measurement, no lease, no publication.
+func TestQuotaCLIStatusWithoutPacelever(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	hosts := filepath.Join(t.TempDir(), "hosts.toml")
+	if err := os.WriteFile(hosts, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FLEET_HOSTS_CONFIG", hosts)
+	hk := newClaudeHK(t)
+	reset := claudeTestNow.Add(3 * time.Hour)
+	stored, _ := json.Marshal(shared.Observation{Kind: shared.KindAuto, MeasuredAt: claudeTestNow.Add(-time.Minute), Buckets: []shared.Bucket{{Window: "5h", UsedPct: 42, ResetsAt: &reset, Scope: "account"}}})
+	hk.latest = stored
+	spawn := claudeStore(t, hk.server.URL)
+	previous := quotaCLISource
+	t.Cleanup(func() { quotaCLISource = previous })
+	quotaCLISource = func(pool string) *nativeQuotaSource {
+		if pool == "claude" {
+			return claudeTestSource(spawn, claudeLoginFiles(claudeSecret, claudeTestNow.Add(time.Hour)), claudeAPIReply(500, ""))
+		}
+		return &nativeQuotaSource{Pool: pool, Now: func() time.Time { return claudeTestNow }}
+	}
+	var out, errOut bytes.Buffer
+	if code := runQuotaCLI([]string{"status", "--json"}, &out, &errOut); code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut.String())
+	}
+	var doc struct {
+		Schema string `json:"schema"`
+		Hosts  []struct {
+			Pacelever string         `json:"pacelever"`
+			Readings  []quotaReading `json:"readings"`
+		} `json:"hosts"`
+	}
+	if err := json.Unmarshal(out.Bytes(), &doc); err != nil || doc.Schema != "panewire.quota.status.v1" || len(doc.Hosts) != 1 {
+		t.Fatalf("status JSON: %v %s", err, out.String())
+	}
+	host := doc.Hosts[0]
+	if host.Pacelever != "absent" {
+		t.Fatalf("status must say pacelever is absent: %s", out.String())
+	}
+	byPool := map[string]quotaReading{}
+	for _, r := range host.Readings {
+		byPool[r.Pool] = r
+	}
+	claudeReading := byPool["claude"]
+	if claudeReading.Account != claudeFPForTest || claudeReading.Source != "handoffkeep" || claudeReading.Stale || claudeReading.AgeSeconds == nil || *claudeReading.AgeSeconds != 60 || len(claudeReading.Buckets) != 1 || *claudeReading.Buckets[0].UsedPct != 42 {
+		t.Fatalf("claude reading = %+v", claudeReading)
+	}
+	if codex, ok := byPool["codex"]; !ok || codex.Source != "unavailable" || !codex.Stale || len(codex.Buckets) != 0 {
+		t.Fatalf("codex without a store reads unavailable: %+v (%s)", codex, out.String())
+	}
+	if !strings.Contains(errOut.String(), "pacelever absent") || strings.Contains(out.String()+errOut.String(), claudeSecret) {
+		t.Fatalf("stderr = %q", errOut.String())
+	}
+	hk.mu.Lock()
+	calls := append([]string(nil), hk.calls...)
+	hk.mu.Unlock()
+	for _, call := range calls {
+		if !strings.HasPrefix(call, "GET ") {
+			t.Fatalf("status must only read the store, got %v", calls)
+		}
+	}
+	if len(calls) == 0 {
+		t.Fatal("status did not read the shared store")
+	}
+
+	out.Reset()
+	errOut.Reset()
+	if code := runQuotaCLI([]string{"status"}, &out, &errOut); code != 0 || !strings.Contains(out.String(), " claude account="+claudeFPForTest+" source=handoffkeep") {
+		t.Fatalf("text status %d: %q %q", code, out.String(), errOut.String())
 	}
 }

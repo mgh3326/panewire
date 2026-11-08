@@ -197,3 +197,27 @@ func TestSpawnRefusalCodeInWaitSpawnTextKeepsItsHint(t *testing.T) {
 		}
 	}
 }
+
+// Refusal advice names the panewire command where one exists: `panewire quota
+// refresh POOL` measures every pool (running pacelever itself for a pool
+// panewire does not measure yet), and the catalog is panewire's.
+func TestSpawnRefusalAdviceNamesPanewire(t *testing.T) {
+	for _, row := range spawnRefusals {
+		if strings.Contains(row.hint, "pacelever refresh") {
+			t.Errorf("%s hint names pacelever refresh: %s", row.code, row.hint)
+		}
+	}
+	for _, tc := range []struct {
+		err  error
+		want string
+	}{
+		{fail(3, "quota catalog: e6_arm_required: unplaced profile requires exact measurement marker"), "panewire catalog list"},
+		{fail(exitQuotaUnknown, "QUOTA_UNKNOWN: claude"), "panewire quota refresh POOL"},
+		{fail(exitAuthUnavailable, "AUTH_UNAVAILABLE: claude"), "panewire quota refresh POOL"},
+		{fail(exitRoleWait, "ROLE_WAIT"), "panewire quota refresh POOL"},
+	} {
+		if fix := spawnRefusalFix(tc.err); !strings.Contains(fix, tc.want) {
+			t.Errorf("%v: fix %q lacks %q", tc.err, fix, tc.want)
+		}
+	}
+}
