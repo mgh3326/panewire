@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -72,33 +73,31 @@ func TestArtifactSweepConfirmationAndHashGates(t *testing.T) {
 			rec := ArtifactRecord{Schema: "fleet.artifact.v2", Host: "local", Job: "j", Task: "42", Archive: Archive{Source: src, State: tt.state, Contents: []Content{{Path: "build.bin", Bytes: n, SHA: h}}}}
 			body, _ := json.Marshal(rec)
 			doc, _ := json.Marshal(map[string]string{"body": string(body)})
-			original := f.Do
+			noHKCLI(t, f)
 			reopened := false
-			f.Do = func(c Command) Result {
-				if c.Name == "handoffkeep" {
-					switch strings.Join(c.Args[:2], " ") {
-					case "tasks show":
-						if reopened {
-							return Result{Out: `{"state":"reopened","project":"Example"}`}
-						}
-						return Result{Out: `{"state":"merged","project":"Example"}`}
-					case "doc list":
-						return Result{Out: `[{"key":"artifacts/Example/42/j/dataset"}]`}
-					case "doc get":
-						return Result{Out: string(doc)}
-					case "doc put":
-						if tt.name == "task reopened" {
-							reopened = true
-						}
-						if tt.mutate {
-							if e := os.WriteFile(path, []byte("changed"), 0600); e != nil {
-								t.Fatal(e)
-							}
+			useFakeHK(t).Handle(func(r hkRequest) (int, string, bool) {
+				switch {
+				case r.Route() == "GET /v1/tasks/42":
+					if reopened {
+						return http.StatusOK, `{"state":"reopened","project":"Example"}`, true
+					}
+					return http.StatusOK, `{"state":"merged","project":"Example"}`, true
+				case r.Route() == "GET /v1/documents":
+					return http.StatusOK, `{"documents":[{"key":"artifacts/Example/42/j/dataset"}]}`, true
+				case r.Method == http.MethodGet && strings.HasPrefix(r.Path, "/v1/documents/"):
+					return http.StatusOK, string(doc), true
+				case r.Method == http.MethodPut && strings.HasPrefix(r.Path, "/v1/documents/"):
+					if tt.name == "task reopened" {
+						reopened = true
+					}
+					if tt.mutate {
+						if e := os.WriteFile(path, []byte("changed"), 0600); e != nil {
+							t.Fatal(e)
 						}
 					}
 				}
-				return original(c)
-			}
+				return 0, "", false
+			})
 			a.Now = func() time.Time { return time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC) }
 			args := []string{"--job", "j", "--age", "0s"}
 			if tt.apply {

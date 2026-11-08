@@ -16,11 +16,14 @@ func (a *App) workPreset(ctx context.Context, args []string) (Spawn, error) {
 		return Spawn{}, fail(exitUsage, "use panewire work TASK_ID followed by optional spawn flags")
 	}
 	id := args[0]
-	// Still the hk CLI (hk 3591): this preset reads refs.report_path, which
-	// the hk public client's TaskRefs does not carry.
-	r := a.call(ctx, "handoffkeep", "tasks", "show", id)
+	// The task comes over hk HTTP with the svc-panewire credential (hk 3607)
+	// and is read as `handoffkeep tasks show` output was: it must name this
+	// id. refs.worktree, refs.cwd and refs.brief_path are not task refs hk
+	// keeps, so those fallbacks never fire; they stay for an answer that
+	// carries them.
+	b, err := hkTaskBody(ctx, id)
 	var task Task
-	if r.Code != 0 || json.Unmarshal([]byte(r.Out), &task) != nil || scalar(task.ID) != id {
+	if err != nil || json.Unmarshal(b, &task) != nil || scalar(task.ID) != id {
 		return Spawn{}, fail(exitConfig, "cannot read task %s; run handoffkeep tasks show %s and restore task access", id, id)
 	}
 	marker := taskMarker.FindStringSubmatch(task.Title)

@@ -2,12 +2,12 @@
 -- stdout
 OK job=jw report=@ROOT@/reports/report.md
 -- stderr
-<cmd>: warning: handoffkeep not found; report document not uploaded (job=jw)
+<cmd>: warning: hk service credential unconfigured: set HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create @ROOT@/bin/absent-hk-svc.env; report document not uploaded (job=jw)
 == step ["done" "jw" "--report" "@ROOT@/reports/report.md"] rc=0
 -- stdout
 OK job=jw report=@ROOT@/reports/report.md
 -- stderr
-<cmd>: warning: handoffkeep not found; report document not uploaded (job=jw)
+<cmd>: warning: hk service credential unconfigured: set HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create @ROOT@/bin/absent-hk-svc.env; report document not uploaded (job=jw)
 <cmd>: warning: job.completed already recorded for this report; suppressed duplicate (job=jw)
 == file inbox/jobs/jw/.wrk-events.lock mode=0644
 == file inbox/jobs/jw/completion-suppressed.log mode=0644

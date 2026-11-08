@@ -21,6 +21,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/hkcred"
 )
 
 // `panewire job done|escalate|joined` owns the job record contract the
@@ -498,36 +499,27 @@ func jobFindLatestReport(directory string) string {
 
 // uploadReportDocument mirrors upload_report_document and returns the
 // document suffix ("" when nothing was uploaded). Every failure is a warning.
+// The report goes to hk over HTTP with the svc-panewire credential (hk 3607),
+// as `handoffkeep doc put --key --kind report --job --file` sent it, under
+// the upload bound; rc is the status the CLI exited with: 124 when the upload
+// timed out, else 1.
 func (c *jobCLI) uploadReportDocument(job, report string) string {
-	name := os.Getenv("HANDOFFKEEP_BIN")
-	if name == "" {
-		name = "handoffkeep"
+	key := "reports/" + job + "/" + strings.TrimRight(filepath.Base(report), "\n")
+	body, err := os.ReadFile(report)
+	if err == nil {
+		err = fleet.PutHKDocument(context.Background(), key, "report", job, string(body))
 	}
-	binary, err := exec.LookPath(name)
-	if err != nil {
-		c.warn("handoffkeep not found; report document not uploaded (job=%s)", job)
+	var unconfigured *hkcred.UnconfiguredError
+	if errors.As(err, &unconfigured) {
+		c.warn("%v; report document not uploaded (job=%s)", err, job)
 		return ""
 	}
-	key := "reports/" + job + "/" + strings.TrimRight(filepath.Base(report), "\n")
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	command := exec.CommandContext(ctx, binary, "doc", "put", "--key", key, "--kind", "report", "--job", job, "--file", report)
-	command.Stdout, command.Stderr = nil, nil
-	rc := 0
-	if err := command.Run(); err != nil {
-		rc = 1
-		if ctx.Err() != nil {
+	if err != nil {
+		rc := 1
+		var timeout interface{ Timeout() bool }
+		if errors.Is(err, context.DeadlineExceeded) || errors.As(err, &timeout) && timeout.Timeout() {
 			rc = 124
-		} else {
-			var exitErr *exec.ExitError
-			if errors.As(err, &exitErr) && exitErr.ExitCode() > 0 {
-				rc = exitErr.ExitCode()
-			} else if errors.As(err, &exitErr) {
-				rc = 128 + int(exitErr.Sys().(syscall.WaitStatus).Signal())
-			}
 		}
-	}
-	if rc != 0 {
 		c.warn("handoffkeep document upload failed (rc=%d job=%s); continuing without document link", rc, job)
 		return ""
 	}

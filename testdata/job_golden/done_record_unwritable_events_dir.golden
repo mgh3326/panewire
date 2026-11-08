@@ -1,7 +1,7 @@
 == step ["done" "jw" "--report" "@ROOT@/reports/report.md"] rc=1
 -- stdout
 -- stderr
-<cmd>: warning: handoffkeep not found; report document not uploaded (job=jw)
+<cmd>: warning: hk service credential unconfigured: set HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create @ROOT@/bin/absent-hk-svc.env; report document not uploaded (job=jw)
 Traceback (most recent call last):
   File "<stdin>", line 56, in <module>
   File "/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/lib/python3.9/tempfile.py", line 332, in mkstemp

@@ -2,7 +2,7 @@
 -- stdout
 OK job=jc owner_lane=builder-lane kind=job.joined pr=https://example.invalid/pr/3 head=abc123 report=@ROOT@/reports/report.md
 -- stderr
-<cmd>: warning: handoffkeep not found; report document not uploaded (job=jc)
+<cmd>: warning: hk service credential unconfigured: set HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create @ROOT@/bin/absent-hk-svc.env; report document not uploaded (job=jc)
 <cmd>: warning: panewire emit failed (rc=2 job=jc kind=job.joined); relay event left as file only
 == file inbox/jobs/jc/emit-failures.log mode=0644
 <TS> kind=job.joined rc=2

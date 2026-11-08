@@ -3,16 +3,12 @@
 OK job=jw report=@ROOT@/reports/report.md
 -- stderr
 == file handoffkeep.log mode=0644
-doc
-put
---key
-reports/jw/report.md
---kind
-report
---job
-jw
---file
-@ROOT@/reports/report.md
+PUT /v1/documents/reports%2Fjw%2Freport.md
+key=reports/jw/report.md
+kind=report
+job=jw
+body_bytes=70
+body_sha256=dc3e9c820dd958163b143ba6d51b47db4b372864221430a0b31606dd6352316d
 --
 == file inbox/jobs/jw/.wrk-events.lock mode=0644
 == file inbox/jobs/jw/events/00001-job.claim.json mode=0644

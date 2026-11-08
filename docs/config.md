@@ -251,7 +251,7 @@ behind access); the files must be private and are never echoed. For one spawn
 panewire:
 
 1. uploads the brief as an hk document `<brief_doc_prefix><job>.md`
-   (`handoffkeep doc put --kind brief --job <job>`) and sends the key as
+   (`PUT /v1/documents/{key}`, kind `brief`, the job) and sends the key as
    `brief.doc`; the hub never sees the text. A brief over 64 KiB is refused
    (exit 2); a retry overwrites the same key.
 2. for a job started from a linked worktree, sends a `checkout` spec that the
@@ -515,9 +515,42 @@ never replaces the last good cache, which is used with a warning. Task and owner
 answers are read as the CLI path read its output (a string id, an unparseable
 timestamp), and a 2xx answer that cannot be read at all is never covered by
 `--bypass`: the precheck refuses with `unreadable task precheck` (exit 70) and
-the claim records `task claim did not confirm claimed_by and refs.job_id`. `panewire
-work TASK_ID` still reads its task through the CLI: it needs the task's
-`refs.report_path`, which the public client's task type does not carry.
+the claim records `task claim did not confirm claimed_by and refs.job_id`.
+
+**The other hk calls over HTTP (hk 3607).** No panewire command runs the
+`handoffkeep` CLI any more; the calls hk 3591 left on it go through the same
+client and credential:
+
+| Caller | hk route | Was |
+| --- | --- | --- |
+| `panewire work TASK_ID` | `GET /v1/tasks/{id}` | `tasks show` |
+| Artifact record write (move, upload, sweep) | `PUT /v1/documents/{key}`, kind `artifact`, no job | `doc put --kind artifact` |
+| Artifact sweep task read and recheck | `GET /v1/tasks/{id}` | `tasks show` |
+| Artifact sweep listing | `GET /v1/documents?prefix=…&limit=100` | `doc list --prefix` |
+| Artifact sweep record read | `GET /v1/documents/{key}` | `doc get` |
+| `done` / `escalate` report upload (lifecycle and `panewire job`) | `PUT /v1/documents/reports%2F{job}%2F{file}`, kind `report`, the job | `doc put --kind report --job` |
+| `done` / `escalate` task comment | `POST /v1/tasks/{id}/comments` | `tasks comment --body` |
+| Quota stop policy read | `GET /v1/documents/policy%2Fquota-stop` | `doc get policy/quota-stop` |
+| Quota stop task lookup | `GET /v1/tasks?limit=1000` | `tasks list --limit 1000` |
+| Quota stop note | `PUT /v1/documents/quota-stop%2F{sha}`, kind `note`, the job | `doc put --kind note --job` |
+
+Each read keeps hk's answer and parses it as the site parsed the CLI's output,
+so the same answer gives the same result; an answer that parser cannot read
+takes the branch unparseable output took (for the sweep listing, `invalid
+artifact doc listing`, exit 70), never success. `panewire work` reads
+`refs.job_id` and `refs.report_path`; its `refs.worktree`, `refs.cwd` and
+`refs.brief_path` fallbacks are kept, though hk keeps no such task refs. The
+sweep re-checks each listed key against its prefix, which hk matches with SQL
+`LIKE`. Failures are handled and worded as before: a failed report upload or
+task comment is a warning and the job still completes; a failed artifact
+record write or sweep recheck ends the sweep with exit 1 and `handoffkeep:
+handoffkeep: <error>` (the CLI's stderr under panewire's prefix); a failed
+quota-stop note is retried after a minute; the quota-stop policy keeps its
+five-minute memo and its last good copy (`quota-stop-policy-cache.json`).
+Report, artifact and brief uploads get 60 s (the CLI's `doc put` had no bound;
+the `panewire job` upload had 3 s, and a timed-out upload still warns
+`rc=124`); the other calls get 8 s. hk checks a comment's body as the CLI did
+before sending it.
 
 **Explicit files.** A file the operator names (the hub's `--handoffkeep-env`
 and `--chat-env`, a node's `spawn.json` `handoffkeep_env`, and the assistant's
@@ -554,6 +587,11 @@ HANDOFFKEEP_TOKEN_SVC_PANEWIRE, or create ~/.config/panewire/hk-svc.env`):
 | Owner lookup (omitted `--owner`) | Refused with exit 2, naming the error and `--owner LANE`. |
 | Routing policy read | The last good cache, with a warning; no cache gives the builtin rules for implementers and refuses consult and verifier. |
 | via=hub brief upload | The hub candidate is refused, `brief upload to <key> failed: …`. |
+| `panewire work TASK_ID` | Refused, `cannot read task <id>; run handoffkeep tasks show <id> and restore task access` (exit 70). |
+| Artifact sweep | Every job's task is unreadable, so nothing is swept; an artifact record write fails with exit 1. |
+| `done` / `escalate` report upload and task comment | Warnings (`report upload failed; local report retained`, `task comment failed: … unconfigured …`); the job completes without a report document. |
+| `panewire job` done, escalate and joined report upload | Warning `<unconfigured error>; report document not uploaded (job=<job>)`; no document link. |
+| Quota stop manager | No policy (the last good copy, else hand over), no task, and the note is retried each minute. |
 
 **Rollout.** Put `hk-svc.env` (the `svc-panewire` token, Infisical `/panewire`)
 on every panewire host before deploying this; otherwise hk reads fail and
@@ -1394,7 +1432,7 @@ for ownership and distribution.
 | --- | --- |
 | `PANEWIRE_POOL_POLICY` | Overrides the pool-order policy used by `spawn` automatic model selection; `[local].pool_policy` takes precedence. |
 | `HERDR_BIN`, `PANEWIRE_BIN` | CLI executable overrides. |
-| `HANDOFFKEEP_BIN` | Must resolve to the canonical current-user ~/.local/bin executable in production. |
+| `HANDOFFKEEP_BIN` | Must resolve to the canonical current-user ~/.local/bin executable in production (the spawn trust check); panewire no longer runs it. |
 | `XDG_DATA_HOME` | Data home of the local ledger (`$XDG_DATA_HOME/arbiter/state.db`); production guard requires the canonical `~/.local/share`. |
 | `XDG_STATE_HOME` | State home of the role routing cache (`$XDG_STATE_HOME/panewire/model-routing.json`); default `~/.local/state`. |
 | `PANEWIRE_QUOTA_BIN` | Quota executable override; default `pacelever`. The claude and codex pools, and commandcode, devin and agy once switched native, are measured by panewire itself and ignore it. The bench catalog is handoffkeep's and never uses it, nor does `[quota].launch = "native"` or `[quota].gate = "native"`, nor, with `[quota].launch = "native"`, the credit pool view when the shared store serves every credit pool ([docs/quota.md](quota.md#credit-pool-views)). |

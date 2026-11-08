@@ -20,12 +20,14 @@ import (
 )
 
 type quotaStopManager struct {
-	store   *Store
-	root    string
-	act     bool
-	logger  *slog.Logger
-	read    func(context.Context, string) (string, error)
-	command func(context.Context, ...string) ([]byte, error)
+	store  *Store
+	root   string
+	act    bool
+	logger *slog.Logger
+	read   func(context.Context, string) (string, error)
+	// hk is the manager's hk access, over HTTP with the svc-panewire
+	// credential (hk 3607); tests substitute it.
+	hk      quotaStopHK
 	send    func(context.Context, string, string, string) relayInjectResult
 	enqueue func(hubScannedRelayEvent) bool
 	// announce records job.lost reason quota_stop for a handed-over job, which
@@ -70,10 +72,12 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 		b, e := exec.CommandContext(ctx, "herdr", "agent", "read", pane, "--source", "visible", "--lines", "60").Output()
 		return string(b), e
 	}
-	q.command = func(ctx context.Context, args ...string) ([]byte, error) {
-		bounded, cancel := context.WithTimeout(ctx, 10*time.Second)
-		defer cancel()
-		return exec.CommandContext(bounded, "handoffkeep", args...).Output()
+	q.hk = quotaStopHK{
+		policy: func(ctx context.Context) ([]byte, error) { return fleet.HKDocumentAnswer(ctx, quotaStopPolicyKey) },
+		tasks:  func(ctx context.Context) ([]byte, error) { return fleet.HKTaskListAnswer(ctx, quotaStopTaskLimit) },
+		note: func(ctx context.Context, key, job, body string) error {
+			return fleet.PutHKDocument(ctx, key, "note", job, body)
+		},
 	}
 	q.send = func(ctx context.Context, pane, pool, text string) relayInjectResult {
 		harness := strings.ToLower(relayInjectHarness(ctx, pane))
@@ -88,6 +92,25 @@ func newQuotaStopManager(s *Store, root string, act bool, logger *slog.Logger) (
 	}
 	return q, nil
 }
+
+// quotaStopHK is the quota stop manager's hk access (hk 3607), which ran
+// `handoffkeep doc get policy/quota-stop`, `tasks list --limit 1000` and `doc
+// put --kind note --job` until then. policy and tasks give hk's 2xx answer,
+// which the manager reads as it read that CLI output; any other outcome is
+// an error. note writes one note document for the job.
+type quotaStopHK struct {
+	policy func(context.Context) ([]byte, error)
+	tasks  func(context.Context) ([]byte, error)
+	note   func(ctx context.Context, key, job, body string) error
+}
+
+const (
+	quotaStopPolicyKey = "policy/quota-stop"
+	// quotaStopTaskLimit is the task lookup's page; a full page may be a cut
+	// one, so the lookup refuses it.
+	quotaStopTaskLimit = 1000
+)
+
 func quotaExcluded(label string) bool {
 	s := strings.ToLower(strings.TrimSpace(label))
 	return s == "" || s == "operator-desk" || s == "director" || s == "consult" || strings.HasSuffix(s, "-integrator") || strings.HasPrefix(s, "director-") || strings.HasPrefix(s, "fleet-tooling-") || strings.HasPrefix(s, "consult-")
@@ -177,7 +200,7 @@ func (q *quotaStopManager) loadPolicy(ctx context.Context, now time.Time) (quota
 	}
 	q.lastPolicy = now
 	cache := filepath.Join(q.root, "quota-stop-policy-cache.json")
-	b, e := q.command(ctx, "doc", "get", "policy/quota-stop")
+	b, e := q.hk.policy(ctx)
 	if e == nil {
 		var doc struct {
 			Body string `json:"body"`
@@ -207,7 +230,7 @@ func (q *quotaStopManager) loadPolicy(ctx context.Context, now time.Time) (quota
 // task finds the hk task bound to the job, or to the builder job a tester
 // inherited its task from.
 func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited string) (int, time.Duration, bool) {
-	b, err := q.command(ctx, "tasks", "list", "--limit", "1000")
+	b, err := q.hk.tasks(ctx)
 	if err != nil {
 		return 0, 0, false
 	}
@@ -220,7 +243,7 @@ func (q *quotaStopManager) task(ctx context.Context, job HubActiveJob, inherited
 			} `json:"refs"`
 		} `json:"tasks"`
 	}
-	if json.Unmarshal(b, &v) != nil || len(v.Tasks) >= 1000 {
+	if json.Unmarshal(b, &v) != nil || len(v.Tasks) >= quotaStopTaskLimit {
 		return 0, 0, false
 	}
 	n := 0
@@ -408,21 +431,8 @@ func (q *quotaStopManager) tick(ctx context.Context, now time.Time, advanceSettl
 		_ = q.store.db.QueryRowContext(ctx, `SELECT hk_retry FROM quota_stop_decisions WHERE event_id=?`, r.id).Scan(&hkDue)
 		q.store.mu.Unlock()
 		if r.hk == 0 && hkDue <= now.UnixMilli() {
-			f, e := os.CreateTemp("", "quota-stop-*.md")
-			if e == nil {
-				_, e = f.WriteString(msg + "\n")
-				_ = f.Close()
-				if e == nil {
-					_, e = q.command(ctx, "doc", "put", "--key", "quota-stop/"+key, "--kind", "note", "--job", r.job, "--file", f.Name())
-				}
-				_ = os.Remove(f.Name())
-				if e == nil {
-					q.update(ctx, r.id, "hk_recorded", 1)
-				} else {
-					q.store.mu.Lock()
-					_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET hk_retry=? WHERE event_id=?`, now.Add(time.Minute).UnixMilli(), r.id)
-					q.store.mu.Unlock()
-				}
+			if e := q.hk.note(ctx, "quota-stop/"+key, r.job, msg+"\n"); e == nil {
+				q.update(ctx, r.id, "hk_recorded", 1)
 			} else {
 				q.store.mu.Lock()
 				_, _ = q.store.db.ExecContext(ctx, `UPDATE quota_stop_decisions SET hk_retry=? WHERE event_id=?`, now.Add(time.Minute).UnixMilli(), r.id)

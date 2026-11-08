@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/mgh3326/handoffkeep/client"
+
 	"github.com/mgh3326/panewire/internal/arbiter"
 )
 
@@ -167,11 +169,17 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 			break
 		}
 	}
+	// The report goes to hk over HTTP with the svc-panewire credential (hk
+	// 3607): kind report, the job and the report file's bytes, read when
+	// sent as `handoffkeep doc put --file` read them, under the upload bound.
 	doc := ""
 	if *report != "" {
 		key := "reports/" + id + "/" + filepath.Base(*report)
-		r := a.call(ctx, "handoffkeep", "doc", "put", "--key", key, "--kind", "report", "--job", id, "--file", *report)
-		if r.Code == 0 {
+		b, e := os.ReadFile(*report)
+		if e == nil {
+			e = hkPutDocument(ctx, client.Document{Key: key, Kind: "report", Job: id, Body: string(b)})
+		}
+		if e == nil {
 			doc = key
 		} else {
 			a.warn("report upload failed; local report retained")
@@ -237,7 +245,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	}
 	if j.Task != "" {
 		comment := "panewire " + eventKind + " job=" + id + " report=" + *report
-		if e = a.must(ctx, "handoffkeep", "tasks", "comment", j.Task, "--body", comment); e != nil {
+		if e = hkCheck(hkCommentTask(ctx, j.Task, comment), "handoffkeep"); e != nil {
 			a.warn("task comment failed: %v", e)
 		}
 	}
