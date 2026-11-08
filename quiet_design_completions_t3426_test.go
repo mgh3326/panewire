@@ -262,9 +262,9 @@ func TestQuietDesignReadyIsNotInjected(t *testing.T) {
 }
 
 // (3) a completion of a job with neither a task nor a PR -- a consult answer
-// the design session waits for -- is injected as before, and so is one whose
-// job record cannot be read.
-func TestQuietDesignCompletionWithoutTaskOrPRIsInjected(t *testing.T) {
+// the design session waits for -- is not quieted, and neither is one whose
+// job record cannot be read. Since hk 3602 it is filed and wakes the lane.
+func TestQuietDesignCompletionWithoutTaskOrPRWakes(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		jobs t3426Jobs
@@ -279,17 +279,15 @@ func TestQuietDesignCompletionWithoutTaskOrPRIsInjected(t *testing.T) {
 			t.Cleanup(closeServer)
 			h, agent := t3426Hub(t, filepath.Join(t.TempDir(), "inbox.sqlite3"), hk, tc.jobs)
 			h.relayJobCompletionFrom("host-a", t3426Completion(tc.job, t3426Design, ""))
-			got := t3426Injected(agent)
-			if len(got) != 1 || got[0].JobID != tc.job || got[0].Pane != "w1:design" {
-				t.Fatalf("injections=%+v, want the completion in the design pane", got)
-			}
+			t3602AssertWoken(t, h, t3426Injected(agent), t3426Design, "w1:design", "job.completed", tc.job)
 		})
 	}
 }
 
-// (4) the notices a design lane must act on still interrupt it: an escalation
-// of a job with a task, and lane events declared decision, blocked, findings
-// and automation-failed (SPAWN_FAILED, TASK_LINK_FAILED).
+// (4) the notices a design lane must act on still reach it: an escalation of
+// a job with a task, and lane events declared decision, blocked, findings and
+// automation-failed (SPAWN_FAILED, TASK_LINK_FAILED). Since hk 3602 each is
+// filed and wakes the lane.
 func TestQuietDesignLaneStillGetsEscalationsAndFailures(t *testing.T) {
 	_, hk, closeServer := newFakeHandoffkeep(t)
 	t.Cleanup(closeServer)
@@ -301,9 +299,7 @@ func TestQuietDesignLaneStillGetsEscalationsAndFailures(t *testing.T) {
 	escalation.Question = "ESC which migration order do we ship?"
 	escalation.Reason = "needs_decision"
 	h.relayJobEventFrom("host-a", "job.escalate", escalation)
-	if got := t3426Injected(agent); len(got) != 1 || got[0].JobID != escalation.JobID || got[0].Pane != "w1:design" {
-		t.Fatalf("escalation injections=%+v, want 1", got)
-	}
+	t3602AssertWoken(t, h, t3426Injected(agent), t3426Design, "w1:design", "job.escalate", escalation.JobID)
 	for _, tc := range []struct{ id, notifyType, text string }{
 		{"decision", "decision", "ESC which release do we ship?"},
 		{"blocked", "blocked", "BLOCKED review needs an operator decision"},
@@ -315,9 +311,7 @@ func TestQuietDesignLaneStillGetsEscalationsAndFailures(t *testing.T) {
 		if r := h.relayLaneEvent(e, agent); r.ID == 0 || r.PersistFailed {
 			t.Fatalf("%s relay=%+v", tc.id, r)
 		}
-		if got := t3426Injected(agent); len(got) != 1 || got[0].JobID != e.JobID {
-			t.Fatalf("%s injections=%+v, want 1", tc.id, got)
-		}
+		t3602AssertWoken(t, h, t3426Injected(agent), t3426Design, "w1:design", "lane.event", e.JobID)
 	}
 }
 

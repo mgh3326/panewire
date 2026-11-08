@@ -26,7 +26,7 @@ func TestInboxEscalationDoesNotRepeatAfterQuarantine(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := s.recoverMustAct(policy); err != nil {
+		if err := s.recoverMustAct(policy, time.Now()); err != nil {
 			t.Fatal(err)
 		}
 		if err := s.makeBatches(now.Add(3 * time.Second)); err != nil {

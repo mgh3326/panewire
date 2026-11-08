@@ -4,7 +4,9 @@ default: interrupt
 # Design-session lanes (panewire-design, handoffkeep-design, ...) hear
 # decisions and failures only: no idle-wake, no inbox summary, no unread
 # digest. Exact names and shell-style globs (path.Match). operator-desk is
-# never a design lane.
+# never a design lane. Design lanes and desk lanes (relay.desk_lanes, default
+# operator-desk and *-operator-desk) are inbox-only with a coalesced one-line
+# wake (relay.inbox_wake_window, default 5m); see docs/quiet-delivery.md.
 relay:
   design_lanes: ["*-design"]
 # Completed inbox history; unread items and the one-day replay window are protected.

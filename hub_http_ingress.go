@@ -86,6 +86,8 @@ func (h *HubServer) handleRelayIngress(writer http.ResponseWriter, request *http
 		DeliverPolicy: body.Deliver,
 		DeliveryClass: body.DeliveryClass,
 		NotifyType:    body.NotifyType,
+
+		operatorIngress: true,
 	}
 	result := h.relayLaneEvent(event, nil)
 	if result.RejectedTooLong {

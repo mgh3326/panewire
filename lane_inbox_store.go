@@ -448,7 +448,7 @@ func (s *laneInboxStore) invalidBatches() ([]laneInboxBatch, error) {
 // recoverMustAct scans all unread originals at startup, including rows without
 // a deadline and unsent, invalid legacy claims. A sent or externally owned
 // claim stays intact, so restart cannot escalate an item twice.
-func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
+func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy, now time.Time) error {
 	unclaimed, err := s.unclaimedUnread()
 	if err != nil {
 		return err
@@ -456,8 +456,9 @@ func (s *laneInboxStore) recoverMustAct(policy *deliveryPolicy) error {
 	var ids []int64
 	for _, i := range unclaimed {
 		// A design lane never escalates unread items, even a misfiled must-act
-		// original; it can still read them with `inbox list` (hk 3410).
-		if policy.designLane(i.Lane) {
+		// original; it can still read them with `inbox list` (hk 3410). Nor
+		// does any other inbox-only lane: its wake is the line (hk 3602).
+		if policy.inboxOnlyClass(i.Lane, now) != "" {
 			continue
 		}
 		if !(i.Kind == "job.completed" && i.Event.Late) && policy.mustAct(i.Lane, i.Event) {

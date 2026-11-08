@@ -436,3 +436,21 @@ func TestInboxWakeHubRestartReplaysNoInjection(t *testing.T) {
 		t.Fatalf("the replayed row was stored as %+v, want an unread inbox item", item)
 	}
 }
+
+// t3602AssertWoken fails unless got is exactly one wake line for lane in pane
+// and the lane's inbox holds the kind/jobID item unread, then closes the
+// lane's wake window so the next event is judged on its own. The hk 3410,
+// 3426 and 3434 tests use it where a design lane used to be interrupted.
+func t3602AssertWoken(t *testing.T, h *HubServer, got []hubRelayInjectEvent, lane, pane, kind, jobID string) {
+	t.Helper()
+	if len(got) != 1 || got[0].Pane != pane || got[0].EventID != 0 || !strings.HasPrefix(got[0].Text, "[inbox] "+lane+": ") || !strings.HasSuffix(got[0].Text, " | panewire inbox list --lane "+lane) {
+		t.Fatalf("injections=%+v, want one wake line for %s in %s", got, lane, pane)
+	}
+	item := t3426Item(t, h, lane, kind, jobID)
+	if item.Class != "inbox" || item.ReadAt != 0 || item.AckedAt != 0 {
+		t.Fatalf("%s %s stored as %+v, want an unread inbox item", kind, jobID, item)
+	}
+	h.inbox.wakes.mu.Lock()
+	delete(h.inbox.wakes.lanes, lane)
+	h.inbox.wakes.mu.Unlock()
+}

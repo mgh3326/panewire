@@ -104,6 +104,16 @@ const defaultDesignLanePattern = "*-design"
 // inbox summary and on idle-wake delivery.
 const deskPolicyLane = "operator-desk"
 
+// defaultDeskLanePatterns is the built-in desk-lane class: the personal desk
+// and the per-fleet desks named <prefix>-operator-desk (work-operator-desk).
+// An explicit relay.desk_lanes list replaces it, and an explicit empty list
+// disables the class.
+var defaultDeskLanePatterns = []string{deskPolicyLane, "*-" + deskPolicyLane}
+
+// defaultInboxWakeWindow is how long an inbox-only lane's one-line wake
+// coalesces later arrivals (relay.inbox_wake_window).
+const defaultInboxWakeWindow = 5 * time.Minute
+
 // consultDoneMarker opens the text of a consult answer's notice, as rstack
 // skills/ops/references/consult.md §2 has the answerer send it:
 // `--type ready --text '[consult-done] <gist> | <answer path>'`.
@@ -113,8 +123,19 @@ const consultDoneMarker = "[consult-done]"
 // lane (handoffkeep-design, panewire-design, mergewake-design, …) receives
 // decisions and failures only; routine progress, idle-wakes and the inbox
 // summary are suppressed for it (hk 3410).
+//
+// Design and desk lanes are inbox-only (hk 3602): a notification is filed in
+// the lane's inbox and never typed into the pane; the hub types one coalesced
+// line instead (inbox_wake.go). WorkerInboxTrial puts matching worker lanes in
+// the same class until WorkerInboxTrialUntil, after which it is off by itself.
 type deliveryRelayPolicy struct {
-	DesignLanes []string `yaml:"design_lanes"`
+	DesignLanes           []string `yaml:"design_lanes"`
+	DeskLanes             []string `yaml:"desk_lanes"`
+	InboxWakeWindow       string   `yaml:"inbox_wake_window"`
+	WorkerInboxTrial      []string `yaml:"worker_inbox_trial"`
+	WorkerInboxTrialUntil string   `yaml:"worker_inbox_trial_until"`
+	wakeWindow            time.Duration
+	trialUntil            time.Time
 }
 
 type deliveryPolicy struct {
@@ -148,10 +169,43 @@ func validDesignLanePattern(pattern string) bool {
 // or glob from relay.design_lanes. The desk is never one, whatever an operator
 // pattern would match.
 func (p *deliveryPolicy) designLane(lane string) bool {
-	if lane == "" || lane == deskPolicyLane {
+	if lane == "" || lane == deskPolicyLane || p.deskLane(lane) {
 		return false
 	}
-	for _, pattern := range p.Relay.DesignLanes {
+	return laneMatchesAny(p.Relay.DesignLanes, lane)
+}
+
+// deskLane reports whether the lane is a desk lane: an exact name or glob from
+// relay.desk_lanes (default operator-desk and *-operator-desk).
+func (p *deliveryPolicy) deskLane(lane string) bool {
+	return lane != "" && laneMatchesAny(p.Relay.DeskLanes, lane)
+}
+
+// workerInboxTrial reports whether a worker lane is in the one-week inbox-only
+// trial at now: it matches relay.worker_inbox_trial and now is before
+// relay.worker_inbox_trial_until. Past that instant the trial is off.
+func (p *deliveryPolicy) workerInboxTrial(lane string, now time.Time) bool {
+	return lane != "" && len(p.Relay.WorkerInboxTrial) > 0 && now.Before(p.Relay.trialUntil) && laneMatchesAny(p.Relay.WorkerInboxTrial, lane)
+}
+
+// inboxOnlyClass names the lane's inbox-only class at now -- "design", "desk"
+// or "trial" -- or "" for a lane that keeps pane injection (hk 3602).
+func (p *deliveryPolicy) inboxOnlyClass(lane string, now time.Time) string {
+	switch {
+	case p.legacy:
+		return ""
+	case p.deskLane(lane):
+		return "desk"
+	case p.designLane(lane):
+		return "design"
+	case p.workerInboxTrial(lane, now):
+		return "trial"
+	}
+	return ""
+}
+
+func laneMatchesAny(patterns []string, lane string) bool {
+	for _, pattern := range patterns {
 		if matched, err := path.Match(pattern, lane); err == nil && matched {
 			return true
 		}
@@ -251,6 +305,36 @@ func parseDeliveryPolicy(raw []byte) (*deliveryPolicy, error) {
 		if !validDesignLanePattern(pattern) {
 			return nil, fmt.Errorf("invalid relay.design_lanes pattern")
 		}
+	}
+	if p.Relay.DeskLanes == nil {
+		p.Relay.DeskLanes = append([]string(nil), defaultDeskLanePatterns...)
+	}
+	for _, pattern := range p.Relay.DeskLanes {
+		if !validDesignLanePattern(pattern) {
+			return nil, fmt.Errorf("invalid relay.desk_lanes pattern")
+		}
+	}
+	p.Relay.wakeWindow = defaultInboxWakeWindow
+	if p.Relay.InboxWakeWindow != "" {
+		window, err := time.ParseDuration(p.Relay.InboxWakeWindow)
+		if err != nil || window < 10*time.Second || window > time.Hour {
+			return nil, fmt.Errorf("relay.inbox_wake_window must be 10s..1h")
+		}
+		p.Relay.wakeWindow = window
+	}
+	for _, pattern := range p.Relay.WorkerInboxTrial {
+		if !validDesignLanePattern(pattern) {
+			return nil, fmt.Errorf("invalid relay.worker_inbox_trial pattern")
+		}
+	}
+	if len(p.Relay.WorkerInboxTrial) > 0 || p.Relay.WorkerInboxTrialUntil != "" {
+		// The trial carries its own end: a lane list without one, or an end
+		// without a list, is refused rather than left running forever.
+		until, err := time.Parse(time.RFC3339, p.Relay.WorkerInboxTrialUntil)
+		if err != nil || len(p.Relay.WorkerInboxTrial) == 0 {
+			return nil, fmt.Errorf("relay.worker_inbox_trial needs lane patterns and an RFC3339 relay.worker_inbox_trial_until")
+		}
+		p.Relay.trialUntil = until
 	}
 	validate := func(l *deliveryLanePolicy) error {
 		if v := l.InboxSummary; v != nil {

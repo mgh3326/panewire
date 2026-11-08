@@ -298,6 +298,9 @@ type hubJobEventPayload struct {
 	// sinkOnly is set by hub-originated operator notices: relayLaneEvent
 	// refuses them unless the lane resolves to a sink route.
 	sinkOnly bool
+	// operatorIngress marks an event the operator posted through the R24
+	// HTTP ingress; the inbox-only rule leaves it as before (hk 3602).
+	operatorIngress bool
 }
 
 type relayAckPayload struct {
