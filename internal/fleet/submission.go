@@ -224,7 +224,10 @@ func (a *App) PrepareSubmission(ctx context.Context, s Spawn) (Submission, error
 		return Submission{}, fail(exitUsage, "cwd is unreadable; pass -c with an existing checkout")
 	}
 	s.CWD = cwd
-	brief, err := os.ReadFile(expand(s.Prompt))
+	brief, err := a.readBrief(ctx, s.Prompt, hubMaxBriefBytes)
+	if _, doc, _ := briefDocKey(s.Prompt); doc && err != nil {
+		return Submission{}, err
+	}
 	if err != nil || len(brief) > hubMaxBriefBytes || !utf8.Valid(brief) || strings.TrimSpace(string(brief)) == "" {
 		return Submission{}, fail(exitUsage, "pass -p with a nonempty UTF-8 brief of at most 64 KiB")
 	}
