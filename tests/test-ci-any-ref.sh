@@ -229,7 +229,7 @@ def validate(wf_text: str, ci_text: str) -> None:
         "inputs.ref must not be expanded into the run script"
 
     # exact checkout: every checkout in ci.yml honors inputs.ref; no merge anywhere.
-    n_checkout = len(re.findall(r"uses: actions/checkout@v[\w.:-]+", ci_text))
+    n_checkout = len(re.findall(r"uses: actions/checkout@[\w.:-]+", ci_text))
     n_ref = len(re.findall(r"ref: \$\{\{ inputs\.ref \}\}", ci_text))
     assert n_checkout > 0 and n_checkout == n_ref, \
         f"every checkout must pin inputs.ref ({n_ref}/{n_checkout})"
