@@ -1055,3 +1055,155 @@ func TestJobDirTTLReapRefusesLane(t *testing.T) {
 		t.Fatalf("reap --lane A --apply --expire-job-dirs: err=%v exists=%t\n%s", err, r.exists("j1"), out.String())
 	}
 }
+
+// A recorded report path is judged by the file it really names. One that is
+// not absolute, or that filepath.Clean would change, keeps the dir; so does
+// one a symlink resolves to another path. Cleaning link/../summary.md
+// lexically names a file that is absent, while the path really names the
+// nested sub/summary.md hk never confirmed (hk 3624 fix 2).
+func TestJobDirTTLRecordedReportPathResolved(t *testing.T) {
+	// link is j1/link -> j1/sub/deep, with an unconfirmed j1/sub/summary.md.
+	link := func(r *ttlRig) {
+		r.write("j1", "sub/deep/note.txt", []byte("note\n"))
+		r.write("j1", "sub/summary.md", []byte("nested summary\n"))
+		if err := os.Symlink(filepath.Join(r.dir("j1"), "sub", "deep"), filepath.Join(r.dir("j1"), "link")); err != nil {
+			r.t.Fatal(err)
+		}
+	}
+	record := func(r *ttlRig, path string) {
+		putEvent(r.t, r.a, "j1", "job.completed", map[string]any{"report": path})
+	}
+	sep := string(filepath.Separator)
+	cases := []struct {
+		name, action, reason string
+		setup                func(r *ttlRig)
+	}{
+		{"link then dotdot names a nested report", "keep", "report-path-unreadable", func(r *ttlRig) {
+			link(r)
+			record(r, r.dir("j1")+sep+"link"+sep+".."+sep+"summary.md")
+		}},
+		{"relative path", "keep", "report-path-unreadable", func(r *ttlRig) {
+			r.write("j1", "sub/summary.md", []byte("nested summary\n"))
+			record(r, "sub/summary.md")
+		}},
+		{"dotdot without a symlink", "keep", "report-path-unreadable", func(r *ttlRig) {
+			r.write("j1", "sub/note.txt", []byte("note\n"))
+			record(r, r.dir("j1")+sep+"sub"+sep+".."+sep+"report.md")
+		}},
+		{"dot segment", "keep", "report-path-unreadable", func(r *ttlRig) {
+			record(r, r.dir("j1")+sep+"."+sep+"report.md")
+		}},
+		{"doubled separator", "keep", "report-path-unreadable", func(r *ttlRig) {
+			record(r, r.dir("j1")+sep+sep+"report.md")
+		}},
+		{"report through a symlink in the dir", "keep", "report-path-unreadable", func(r *ttlRig) {
+			link(r)
+			r.write("j1", "sub/deep/summary.md", []byte("deep summary\n"))
+			record(r, filepath.Join(r.dir("j1"), "link", "summary.md"))
+		}},
+		{"missing report under a symlink in the dir", "keep", "report-path-unreadable", func(r *ttlRig) {
+			link(r)
+			record(r, filepath.Join(r.dir("j1"), "link", "gone", "summary.md"))
+		}},
+		{"alias outside the root then dotdot", "keep", "report-path-unreadable", func(r *ttlRig) {
+			link(r)
+			alias := filepath.Join(r.a.Home, "alias")
+			if err := os.Symlink(filepath.Join(r.dir("j1"), "sub", "deep"), alias); err != nil {
+				r.t.Fatal(err)
+			}
+			record(r, alias+sep+".."+sep+"summary.md")
+		}},
+		{"alias outside the root", "keep", "report-path-unreadable", func(r *ttlRig) {
+			link(r)
+			alias := filepath.Join(r.a.Home, "alias")
+			if err := os.Symlink(filepath.Join(r.dir("j1"), "sub"), alias); err != nil {
+				r.t.Fatal(err)
+			}
+			record(r, filepath.Join(alias, "summary.md"))
+		}},
+		{"plain nested report with its doc", "delete", "confirmed", func(r *ttlRig) {
+			r.write("j1", "sub/summary.md", []byte("nested summary\n"))
+			r.doc("reports/j1/summary.md", []byte("nested summary\n"), "")
+			record(r, filepath.Join(r.dir("j1"), "sub", "summary.md"))
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			r := newTTLRig(t)
+			r.seedJob("j1")
+			c.setup(r)
+			r.age("j1")
+			if _, err := os.Lstat(filepath.Join(r.dir("j1"), "link")); err == nil {
+				// age cannot reach the link's own mtime, the wall clock's:
+				// the pass runs a TTL past the wall clock.
+				r.now = time.Now().Add(73 * time.Hour)
+			}
+			out := r.pass(true)
+			if c.action == "delete" {
+				wantDelete(t, r, out, "j1", c.reason)
+			} else {
+				wantKeep(t, r, out, "j1", c.reason)
+				if _, err := os.Stat(filepath.Join(r.dir("j1"), "sub")); c.name != "relative path" && c.name != "dot segment" && c.name != "doubled separator" && err != nil {
+					t.Fatalf("kept dir lost sub/: %v", err)
+				}
+			}
+		})
+	}
+}
+
+// The pass resolves an aliased jobs root itself, so a report path recorded
+// through that alias is no doubt: a submitter-side dir (node-side dirs
+// under an aliased root keep for their events) whose --report names the
+// alias goes once hk holds the report.
+func TestJobDirTTLRecordedReportThroughRootAliasDeletes(t *testing.T) {
+	r := newTTLRig(t)
+	r.a.Hub = &ttlHub{}
+	alias := filepath.Join(r.a.Home, "jobs-alias")
+	if err := os.Symlink(r.a.Jobs, alias); err != nil {
+		t.Fatal(err)
+	}
+	r.seedSubmission("s1", "--report", filepath.Join(alias, "s1", "sub", "summary.md"))
+	r.write("s1", "sub/summary.md", []byte("nested summary\n"))
+	r.doc("reports/s1/summary.md", []byte("nested summary\n"), "")
+	r.store.records["s1"] = map[string]any{"job_id": "s1", "state": "completed", "report_doc": "reports/s1/summary.md"}
+	r.age("s1")
+	r.a.Jobs = alias
+	out := r.pass(true)
+	if got := line(out, "s1"); !strings.HasPrefix(got, "job=s1 action=delete ") {
+		t.Fatalf("line for s1 = %q, want action=delete\n%s", got, out)
+	}
+	if r.exists("s1") {
+		t.Fatal("s1 still exists after an apply pass")
+	}
+}
+
+// A pane list row panewire cannot read (null, not an object, or without a
+// pane id) makes the whole inventory unreadable, as does an explicit error
+// envelope: with an empty agent list such a row must not read as "no pane"
+// (hk 3624 fix 2).
+func TestJobDirTTLUnreadablePaneRowKeeps(t *testing.T) {
+	for name, panes := range map[string]string{
+		"null row":                   `{"result":{"panes":[null]}}`,
+		"empty row":                  `{"result":{"panes":[{}]}}`,
+		"row without a pane id":      `{"result":{"panes":[{"label":"x"}]}}`,
+		"blank pane id":              `{"result":{"panes":[{"pane_id":"  ","label":"x"}]}}`,
+		"null beside a readable row": `{"result":{"panes":[{"pane_id":"w:other"},null]}}`,
+		"row not an object":          `{"result":{"panes":["w:j1"]}}`,
+		"error envelope":             `{"error":{"code":"internal","message":"pane list failed"},"result":{"panes":[]}}`,
+		"error in the result":        `{"result":{"panes":[],"error":{"code":"internal"}}}`,
+		"ok false":                   `{"ok":false,"result":{"panes":[]}}`,
+		"bare error envelope":        `{"error":{"code":"internal","message":"pane list failed"},"panes":[]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			r := newTTLRig(t)
+			r.seedJob("j1")
+			r.panes = panes
+			wantKeep(t, r, r.pass(true), "j1", "pane-unreadable")
+		})
+	}
+	// Readable rows that name other panes are evidence of absence.
+	r := newTTLRig(t)
+	r.seedJob("j1")
+	r.panes = `{"ok":true,"result":{"panes":[{"pane_id":"w:other","label":"x"}]}}`
+	wantDelete(t, r, r.pass(true), "j1", "confirmed")
+}
