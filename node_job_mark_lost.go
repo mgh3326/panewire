@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/mgh3326/panewire/internal/fleet"
@@ -86,7 +87,7 @@ type nodeJobLedger struct {
 }
 
 type nodeJobLedgerEvent struct {
-	kind, pane, label, role string
+	kind, pane, label, role, task string
 }
 
 func nodeJobClaimKind(kind string) bool {
@@ -187,6 +188,8 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 				Label      string `json:"label"`
 				AgentLabel string `json:"agent_label"`
 				Role       string `json:"role"`
+				// TaskID is a string or a number in the ledger.
+				TaskID any `json:"task_id"`
 			} `json:"payload"`
 		}
 		if json.Unmarshal(data, &event) != nil || event.Kind == "" {
@@ -196,7 +199,14 @@ func readNodeJobLedgerEvents(job *os.Root) ([]nodeJobLedgerEvent, error) {
 		if label == "" {
 			label = event.Payload.AgentLabel
 		}
-		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role})
+		task := ""
+		switch id := event.Payload.TaskID.(type) {
+		case string:
+			task = id
+		case float64:
+			task = strconv.FormatFloat(id, 'f', -1, 64)
+		}
+		events = append(events, nodeJobLedgerEvent{kind: event.Kind, pane: event.Payload.PaneID, label: label, role: event.Payload.Role, task: task})
 	}
 	return events, nil
 }
@@ -306,4 +316,24 @@ func (client *HubClient) nodeJobRole(name string) (string, error) {
 		}
 	}
 	return role, err
+}
+
+// nodeJobTask is the task the job's ledger names, read as the fleet's job
+// fold reads it: the newest claim's task_id, else the spawn receipt's. An
+// unreadable ledger names none; the caller then links nothing.
+func nodeJobTask(job *os.Root) string {
+	events, err := readNodeJobLedgerEvents(job)
+	if err != nil {
+		return ""
+	}
+	task := ""
+	for _, event := range events {
+		switch {
+		case nodeJobClaimKind(event.kind):
+			task = event.task
+		case event.kind == "job.spawned" && task == "":
+			task = event.task
+		}
+	}
+	return task
 }
