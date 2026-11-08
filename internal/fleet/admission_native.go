@@ -59,8 +59,9 @@ func (a *App) gateMode() string {
 
 // admissionQuota is the production QuotaGate. Catalog is handoffkeep's
 // (CLIQuota); Gate and Launch each follow their switch (launch_native.go), and
-// Pools reads the credit pools without pacelever when the shared store serves
-// them (credit_pool_native.go). The native verdict reads the account's stored
+// Pools follows the launch switch, reading the credit pools without pacelever
+// only in native mode when the shared store serves them
+// (credit_pool_native.go). The native verdict reads the account's stored
 // reading from handoffkeep and the bench catalog; it never runs `pacelever
 // gate` or `pacelever refresh`.
 type admissionQuota struct {

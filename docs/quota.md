@@ -493,14 +493,33 @@ launch = "native"   # or "shadow", the default
 
 Selection ranks a credit pool, and admission refuses an excluded one, from the
 pool's view: its class, the used share of its current operator credit entry
-and its balance. When every credit pool of the pool policy (`credit_pools`) is
-a hand-recorded API pool (`anthropic-api`, `openai-api`) and the shared store
-is wired, panewire builds that view itself: the class from pacelever's
-`config.toml` as [Admission](#admission) reads it, the entry and balance from
-the shared store for the account `[quota.accounts]` (else pacelever's own
-`[quota.accounts]`) names. `pacelever --json` is not started. Otherwise — a
-credit pool the store does not serve, or no shared reader — the
-`pacelever --json` status read runs as before.
+and its balance. The view follows `[quota].launch`:
+
+- **Shadow (the default).** The view is pacelever's status document, read by
+  one `pacelever --json` run, as before. When the shared store serves every
+  credit pool (see Native), panewire also builds its own view within 10 s and
+  records one fleet event per read:
+
+  ```
+  kind=quota_pools_shadow outcome=disagree reason=credit
+  detail=anthropic-api pacelever{class=spend blocking=-} native{class=exclude blocking=40.00} openai-api pacelever{class=spend blocking=-} native{class=spend blocking=-} diff=anthropic-api:class,anthropic-api:blocking
+  ```
+
+  Only the class and the used share (`blocking`) are compared; the balance is
+  read from the same store on both paths. `agree` means every credit pool has
+  the same class and used share; `disagree` anything else, with `diff` listing
+  the differing `pool:field` pairs, or `error` when either side failed to
+  read. The native view never reaches selection or admission.
+- **Native.** When every credit pool of the pool policy (`credit_pools`) is a
+  hand-recorded API pool (`anthropic-api`, `openai-api`) and the shared store
+  is wired, panewire builds the view itself: the class from pacelever's
+  `config.toml` as [Admission](#admission) reads it, the entry and balance
+  from the shared store for the account `[quota.accounts]` (else pacelever's
+  own `[quota.accounts]`) names. `pacelever --json` is not started. Otherwise
+  — a credit pool the store does not serve, or no shared reader — the
+  `pacelever --json` status read runs as in shadow.
+
+panewire-design switches a host to native after its shadow events agree.
 
 ## Admission
 
