@@ -301,6 +301,11 @@ type hubJobEventPayload struct {
 	// operatorIngress marks an event the operator posted through the R24
 	// HTTP ingress; the inbox-only rule leaves it as before (hk 3602).
 	operatorIngress bool
+	// operatorChat marks an operator chat turn the hub's own chat created
+	// (relayChatMessage), or a replay of one the chat store vouches for
+	// (hubChatTurn). The inbox-only rule leaves it as before; an event id
+	// that merely looks like chat-N earns nothing (hk 3602).
+	operatorChat bool
 }
 
 type relayAckPayload struct {
@@ -1961,7 +1966,14 @@ func knownHubEventKind(kind string) bool {
 func (h *HubServer) connect(machineID, version, remoteAddr string, agent *hubAgent, accepting bool, capabilityLists ...[]string) {
 	// A node registration is the safe no-restart retry trigger for durable
 	// lane.event rows whose route was absent or disconnected when produced.
-	defer func() { go h.replayUndeliveredLaneEvents(context.Background()) }()
+	defer func() {
+		go func() {
+			// A wake an inbox-only lane is owed because its pane was not
+			// reachable is retried at once, not at its window's end (hk 3602).
+			h.retryUnroutedInboxWakes()
+			h.replayUndeliveredLaneEvents(context.Background())
+		}()
+	}()
 	now := h.now().UTC()
 	var previous *hubAgent
 	var previousSnapshot *hubSessionSnapshotRecord

@@ -147,6 +147,7 @@ func (h *HubServer) prepareInbox() {
 		h.inbox.persistDisabled = true
 		h.logger.Error("inbox digest delivery disabled: startup recovery failed; fix the inbox store and restart the hub", "error", h.inbox.store.loggable("startup recovery", err))
 	}
+	h.seedStartupInboxWakes()
 }
 
 func (h *HubServer) receivingLane(kind string, e hubJobEventPayload) string {
@@ -217,8 +218,9 @@ func (h *HubServer) receiveInbox(kind string, event *hubJobEventPayload, sender 
 	// hk 3602: a design or desk lane, or a worker lane in the inbox trial, is
 	// inbox-only. Whatever the class above, the event is filed unread and never
 	// typed into the pane, digested or held; what would have been typed asks
-	// for the lane's coalesced one-line wake instead. Operator chat, operator
-	// HTTP ingress and the hub's own batches are not lane notifications.
+	// for the lane's coalesced one-line wake instead. Only an operator chat
+	// turn and an operator HTTP ingress event are exempt (inboxOnlyExempt);
+	// refuseInboxOnlyBody holds the same rule where a body would be typed.
 	inboxOnly := h.inbox.policy.inboxOnlyClass(lane, h.now())
 	wake := false
 	if inboxOnly != "" && !inboxOnlyExempt(*event) {
@@ -405,7 +407,7 @@ func (h *HubServer) replayInboxAged(record handoffkeepRelayEvent, receiptAge boo
 	if h.inbox == nil {
 		return false
 	}
-	event := relayEventFromRecord(record)
+	event := h.replayedRelayEvent(record)
 	// settled is strictly broader than the old injected-only check: a receiver
 	// read — including a must-ack item read before its ack — is evidence the
 	// lane already has the event, so a restart must not inject it again (hk
@@ -550,6 +552,15 @@ func (h *HubServer) flushInbox() {
 			return
 		}
 		if blockedLanes[b.Lane] {
+			continue
+		}
+		if class := h.inbox.policy.inboxOnlyClass(b.Lane, h.now()); class != "" {
+			// An inbox-only lane is never typed a batch (hk 3602): its items
+			// are filed unread and the batch is retired untyped.
+			if err := h.fileInboxOnlyBatch(b.Lane, class, b.ID); err != nil {
+				h.logger.Error("inbox-only batch filing failed; batch retained", "lane", b.Lane)
+				failed = true
+			}
 			continue
 		}
 		if h.inbox.policy.Lanes[b.Lane].InboxSummary != nil {

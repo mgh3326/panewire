@@ -719,6 +719,11 @@ func (h *HubServer) resolveRelayRoute(kind string, event hubJobEventPayload) (re
 
 // injectRelayEvent reports whether the injection was queued.
 func (h *HubServer) injectRelayEvent(kind string, event hubJobEventPayload, route reportRelayRoute, destinationAgent, persistedAgent *hubAgent, eventID int64, key string) bool {
+	if h.refuseInboxOnlyBody(kind, event, eventID, key) {
+		// Filed in the lane's inbox instead: the producer's row is done.
+		h.queueRelayPersisted(kind, event, persistedAgent, eventID)
+		return false
+	}
 	h.registerRelayAckEvent(kind, event, route.Machine, route.Pane, eventID)
 	if !destinationAgent.queueRelay(h.inboxRelayDirective(kind, event, route, eventID)) {
 		// The row is durable but this injection never happened. Holding the
@@ -738,6 +743,9 @@ func (h *HubServer) injectRelayEvent(kind string, event hubJobEventPayload, rout
 }
 
 func (h *HubServer) injectLaneRelayEvent(event hubJobEventPayload, route reportRelayRoute, agent *hubAgent, eventID int64, key string) bool {
+	if h.refuseInboxOnlyBody("lane.event", event, eventID, key) {
+		return false
+	}
 	h.registerRelayAckEvent("lane.event", event, route.Machine, route.Pane, eventID)
 	if !agent.queueRelay(h.inboxRelayDirective("lane.event", event, route, eventID)) {
 		h.forgetRelayEvent(key)
@@ -1300,7 +1308,7 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent, source string
 	if h.replayInbox(record) {
 		return
 	}
-	event := relayEventFromRecord(record)
+	event := h.replayedRelayEvent(record)
 	if event.OwnerLane == "" || event.JobID == "" {
 		return
 	}
@@ -1371,6 +1379,9 @@ func (h *HubServer) replayRelayEvent(record handoffkeepRelayEvent, source string
 		return
 	}
 	if record.Kind == "lane.event" {
+		if h.refuseInboxOnlyBody("lane.event", event, record.ID, key) {
+			return
+		}
 		h.registerRelayAckEvent("lane.event", event, route.Machine, route.Pane, record.ID)
 		if !agent.queueRelay(h.inboxRelayDirective("lane.event", event, route, record.ID)) {
 			h.forgetRelayEvent(key)

@@ -183,8 +183,10 @@ func (h *HubServer) appendInboxSummary(kind string, e hubJobEventPayload, lane, 
 	}
 	// A design-session lane answers questions; it is never handed a digest
 	// pointer. Its unread items stay readable through `panewire inbox list`
-	// (hk 3410).
-	if h.inbox.policy.designLane(lane) {
+	// (hk 3410). Nor is any other inbox-only lane, the desk included: only an
+	// operator chat or ingress turn is typed there, and the lane's wake line
+	// is its pointer (hk 3602).
+	if h.inbox.policy.inboxOnlyClass(lane, h.now()) != "" {
 		return text
 	}
 	settings := h.inbox.policy.Lanes[lane].InboxSummary
