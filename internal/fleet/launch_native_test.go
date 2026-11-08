@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -471,8 +472,15 @@ func TestSpawnAdmissionDefaultRunsPaceleverLaunch(t *testing.T) {
 	a.Quota = admissionQuota{CLIQuota{Runner: runner, Binary: "pacelever"}, a}
 	a.BenchCatalog = func(context.Context) ([]CatalogRow, error) { return launchRulesCatalog(), nil }
 	cacheLaunchRows(t, launchRulesCatalog(), a.Now())
+	// The gate's events arrive on this goroutine and the launch shadow's on
+	// its own.
+	var mu sync.Mutex
 	var events []fleetevent.Event
-	a.EventSink = func(e fleetevent.Event) { events = append(events, e) }
+	a.EventSink = func(e fleetevent.Event) {
+		mu.Lock()
+		defer mu.Unlock()
+		events = append(events, e)
+	}
 	s := Spawn{CWD: "/work/project", Profile: "opus", Role: "worker", Effort: "high"}
 	launch, _, err := a.admitLaunch(context.Background(), s, a.Policy.Profiles["opus"], "high", "", "", "", false)
 	if err != nil {
@@ -485,6 +493,8 @@ func TestSpawnAdmissionDefaultRunsPaceleverLaunch(t *testing.T) {
 		t.Fatalf("pacelever policy launch ran %d times, want 1", n)
 	}
 	awaitShadowIdle(t)
+	mu.Lock()
+	defer mu.Unlock()
 	shadow := slices.IndexFunc(events, func(e fleetevent.Event) bool { return e.Kind == "quota_launch_shadow" })
 	if shadow < 0 || events[shadow].Outcome != "disagree" || !strings.Contains(events[shadow].Detail, "diff=grade") {
 		t.Fatalf("native lookup not recorded as a disagreement: %+v", events)
