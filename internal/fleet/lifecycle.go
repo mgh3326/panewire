@@ -172,22 +172,32 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	// The report goes to hk over HTTP with the svc-panewire credential (hk
 	// 3607): kind report, the job and the report file's bytes, read when
 	// sent as `handoffkeep doc put --file` read them, under the upload bound.
-	doc := ""
+	// The document is linked to the job's hk task when the job has a numeric
+	// one, with origin class job (hk 3615); docSHA is the uploaded bytes'
+	// sha256, which the record pins next to report_doc.
+	doc, docSHA := "", ""
 	if *report != "" {
 		key := "reports/" + id + "/" + filepath.Base(*report)
 		b, e := os.ReadFile(*report)
 		if e == nil {
-			e = hkPutDocument(ctx, client.Document{Key: key, Kind: "report", Job: id, Body: string(b)})
+			upload := client.Document{Key: key, Kind: "report", Job: id, Body: string(b), OriginClass: "job"}
+			if task, err := hkTaskID(j.Task); err == nil {
+				upload.TaskID = &task
+			}
+			e = hkPutDocument(ctx, upload)
 		}
 		if e == nil {
 			doc = key
+			sum := sha256.Sum256(b)
+			docSHA = hex.EncodeToString(sum[:])
 		} else {
 			a.warn("report upload failed; local report retained")
 		}
 	}
 	a.recordJobUsage(ctx, j, false)
 	// The hk record state is written before the relay: one PUT carries the
-	// terminal state, the report doc and — for done --result — the findings.
+	// terminal state, the report doc with its sha256 pin and — for done
+	// --result — the findings.
 	// A failed write degrades to a job.record_failed event and the relay
 	// still goes out, so a cross-host reader falls back per the design.
 	state := "completed"
@@ -197,6 +207,7 @@ func (a *App) lifecycleWithOptions(ctx context.Context, kind string, args []stri
 	rec := map[string]any{"state": state}
 	if doc != "" {
 		rec["report_doc"] = doc
+		rec["report_sha256"] = docSHA
 	}
 	if result != nil {
 		rec["result"] = result
