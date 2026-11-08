@@ -28,6 +28,13 @@ uses `[reap] job_dir_ttl` when it is set, else 72 h. The node runs the pass
 after its [task pane sweep](pane-sweep.md), at most once an hour, and only
 while the key is set, so a deploy changes nothing until panewire-design sets
 it. A value under 24 h, or one that does not parse, is a config error.
+`--expire-job-dirs` takes no `--lane` (a usage error): the pass has no lane
+filter, so limit it with `--job`.
+
+**Rollout order.** Set `[reap] job_dir_ttl` only after every host that reads
+that hosts config runs a binary with this change. An older binary refuses
+the unknown `[reap]` table: the whole config fails to load there, and that
+node's sweep loop stops.
 
 ## Dry-run output
 
@@ -50,20 +57,26 @@ directory is kept. Any read error or doubt keeps it.
 
 | | Condition | Kept as |
 | --- | --- | --- |
-| path | A plain directory directly under the jobs root, named a valid job id. A symlink whose real path leaves the root, or any other symlink, is never followed. | `outside-root`, `symlink`, `invalid-id`, `unreadable` |
+| path | A plain directory directly under the jobs root, named a valid job id. A symlink whose real path leaves the root, or any other symlink, is never followed. A `.expiring-*` tombstone (below) is listed and never touched. | `outside-root`, `symlink`, `invalid-id`, `unreadable`, `tombstone` |
 | kind | It has `events/` (a job that ran here), or `submission.json` and no `events/` (a submitter-side dir, below). Anything else — lead scratch, a consult folder — is not a job. | `not-a-job`, `events-unreadable`, `submission-unreadable`, `submission-mismatch` |
 | (a) | The job is not `--keep`, and no completion watcher holds it (`watchActive`). | `protected`, `watcher-active` |
 | (d) | The newest file mtime and event time under it are at least the TTL old. | `too-young` |
-| (c) | herdr lists no pane with the job's recorded pane id or label, in the job's own herdr session. A job that recorded neither, or a herdr that cannot be read, keeps it. | `pane-live`, `pane-unknown`, `pane-unreadable` |
+| (c) | In the herdr session the receipt recorded, `herdr pane list` (the full inventory, plain shells included) names no pane with the job's recorded pane id or label, and neither does `herdr agent list`. The agent list alone never proves a pane gone: a shell pane whose agent exited is only in the pane list. A job that recorded neither a pane nor a label, a receipt that names no `herdr_session` (one from before it was recorded), or a list that cannot be read keeps it. | `pane-live`, `pane-unknown`, `pane-session-unknown`, `pane-unreadable` |
 | (b) | The hk job record is `completed` or `lost`. `escalated` and every live state keep it. | `hk-not-terminal`, `hk-missing`, `hk-unreadable` |
-| (e) | hk confirms every artifact in the directory (below). | `report-…`, `result-unconfirmed`, `screen-…`, `evidence-unconfirmed` |
+| (e) | hk confirms every artifact in the directory (below). | `report-…`, `result-unconfirmed`, `screen-…`, `evidence-unconfirmed`, `evidence-unclassified` |
 
 hk confirms an artifact when:
 
-- **a report** (`report*.md`, the `-rN` rounds included): the record names a
+- **a report** — every top-level `report*.md` (the `-rN` rounds included),
+  and every report path the spawn receipt (`--report`), a completion
+  (`done`/`escalate`, `job.result_attached`) or the submission recorded,
+  when it lies in the directory and exists: the record names a
   `report_doc`, and the sha256 of the local bytes equals the record's
   `report_sha256` for that document, else the `sha256` hk holds for
-  `reports/<job>/<file>`;
+  `reports/<job>/<basename>`. A recorded path outside the directory (a
+  parent job's) is not this pass's to delete and is skipped; a recorded
+  path that is not absolute, or not a string, keeps the directory
+  (`report-path-unreadable`);
 - **`findings.json` or `result.json`**: the record's `result` is not empty;
 - **`pane-screen.txt`**: the document `screens/<job>/pane-screen.txt` exists,
   and, for a screen of at most 512 KiB, its sha256 matches. A larger screen
@@ -72,7 +85,12 @@ hk confirms an artifact when:
 - **`evidence/**`, `final/**`**: the check `panewire artifacts sweep` makes
   before it deletes such a file — an artifact record of this job on this host
   lists the file with its local bytes and sha256, and the archive is
-  drive-confirmed (or uploaded, under `local_delete_at = "uploaded"`).
+  drive-confirmed (or, under `local_delete_at = "uploaded"`, uploaded — for
+  a final build only; evidence is mirror-required and waits for the drive).
+  A file under `evidence/` or `final/` the policy gives no `evidence` or
+  `final-build` class — a jobs root the policy's `herdr-inbox/jobs` root
+  does not match, such as `/srv/jobs` — keeps the directory
+  (`evidence-unclassified`), since its mirror requirement is unknown.
 
 ### Submitter-side dirs
 
@@ -90,11 +108,32 @@ contract.
 
 Right before a delete the pass takes the job's `.panewire-operation.lock`
 (the lock `panewire done` holds) without waiting, decides the whole gate
-again with fresh herdr and hk reads, and deletes only when it still passes
-and the directory's file count, bytes and newest mtime are those the scan
-saw. A held lock keeps the directory (`locked`); a change keeps it
-(`changed-during-pass`). The path is checked again, and `os.RemoveAll`
-removes the directory without following a symlink.
+again with fresh herdr and hk reads. A held lock keeps the directory
+(`locked`). Then, with every read done:
+
+1. It takes a fresh inventory — file count, bytes, newest mtime and the set
+   of relative paths — and compares it to the scan's. A change keeps the
+   directory (`changed-during-pass`).
+2. It renames the directory, in one atomic rename on the same filesystem, to
+   a tombstone in the jobs root: `.expiring-<job>-<unixnano>`. A leading dot
+   is never a valid job id, so nothing reads a tombstone as a job.
+3. It takes the tombstone's inventory. If it differs from step 1's, the
+   tombstone is renamed back to the job's name and the directory is kept
+   (`changed-during-pass`). If that rename back fails, the tombstone stays
+   where it is, never deleted; the pass logs it at error, records a
+   `job_dir_expired` fleet event with outcome `tombstone_left`, and keeps
+   (`tombstone-left`).
+4. Only then does `os.RemoveAll` remove the tombstone, without following a
+   symlink.
+
+A writer that opens a path under the job's name after the rename fails, and
+one that wrote before it shows in the tombstone's inventory. **Residual
+window:** a writer holding a file descriptor it opened in the directory
+before the rename can still write into the tombstone after step 3, and that
+write is deleted with it.
+
+A pass lists any `.expiring-*` tombstone it finds as `keep reason=tombstone`.
+It never deletes one and never renames one back; the operator decides.
 
 Each delete is logged (`job dir expired`, with the job, reason and bytes) and
 recorded as a `job_dir_expired` [fleet event](observability.md) in the state

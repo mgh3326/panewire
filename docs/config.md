@@ -465,6 +465,11 @@ Node sweep behaviour (see [pane-sweep.md](pane-sweep.md)).
 
 The job dir TTL (see [job-dir-ttl.md](job-dir-ttl.md)).
 
+Set `[reap] job_dir_ttl` only after every host that reads this hosts config
+runs a binary that knows the `[reap]` table. An older binary refuses an
+unknown table: the whole config fails to load there, and that node's sweep
+loop stops.
+
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `job_dir_ttl` | unset | The node's opt-in to deleting job directories: when set (`"72h"`, `"3d"`; at least `24h`), the node sweep loop runs the job dir TTL with this age, at most once an hour, and deletes each directory its gate lets go. Unset, the node deletes nothing. `panewire reap --expire-job-dirs` uses it as its TTL, else 72 h. A value under 24 h or one that does not parse is a config error. |
