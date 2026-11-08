@@ -427,8 +427,32 @@ Rules beyond pacelever's: a commandcode reading without its `30d` window is
 unmeasurable (`commandcode_required_window_missing:30d`,
 decision/2026-11-06/commandcode-30d-required-in-panewire-gate). It needs the
 node's native commandcode measurement, the only one that publishes `30d`. And
-cmd-dsflash41 seats only a worker or tester (operator, 2026-11-07); pacelever
-also seats a builder on it.
+a credit rung seats only a worker or tester (operator, 2026-11-07 for
+cmd-dsflash41; hk 3532 extends it to every commandcode-pool rung); pacelever
+also seats a builder on a placed default rung.
+
+### Command Code seats
+
+A rung is a credit rung when its catalog row's pool is `commandcode`
+(`admissionCredit` in `internal/fleet/admission_verdict.go`). The pool decides,
+not the profile name: a credit rung needs an explicit effort, ranks as credit
+among alternatives, and seats only a worker or tester. The profiles that draw on
+the pool:
+
+| Profile | Harness | How it reaches Command Code | Seat roles | Notes |
+|---|---|---|---|---|
+| `cmd-dsflash41` | cmd | the cmd harness's Command Code provider | worker, tester | Operator 2026-11-07 (hk 3248): no builder. |
+| `omp-dsflash41` | omp | omp's `commandcode` provider, gated by the host's `omp_commandcode` capability | worker, tester, reviewer | The policy seat lists reviewer, but admission refuses it on a credit rung (see below). |
+
+Both profiles share one Command Code account, its 30-day window
+(`commandcode_required_window_missing:30d`), and any
+`quota.pool_max_concurrent.commandcode` cap (see [config](config.md)). A spawn
+on either profile counts against the same account reading.
+
+Admission refuses the reviewer role for omp-dsflash41 today, because the credit
+rule admits only a worker or tester. The policy seat still lists reviewer, so a
+reviewer launch passes the seat check but is refused at admission. Whether to
+lift that for omp-dsflash41 is the operator's decision; it is not changed here.
 
 Where panewire reads less than pacelever's local gate, it refuses or omits
 rather than guesses:

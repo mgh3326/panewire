@@ -1495,10 +1495,10 @@
       "family": "deepseek",
       "capability": "omp_commandcode",
       "effort": "high",
-      "e6": true,
       "roles": [
         "worker",
-        "tester"
+        "tester",
+        "reviewer"
       ]
     },
     "devin-swe2-flash": {
