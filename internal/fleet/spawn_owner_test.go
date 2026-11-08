@@ -27,7 +27,7 @@ func ownerHKFixture(t *testing.T, project, effective string) (*App, Spawn, *fake
 	if err != nil {
 		t.Fatal(err)
 	}
-	b, _ := json.Marshal(map[string]any{"id": 42, "project": project})
+	b, _ := json.Marshal(map[string]any{"id": "42", "project": project})
 	hk := useFakeHK(t).SetTask("42", string(b))
 	if effective != "" {
 		b, _ := json.Marshal(map[string]any{"name": project, "design_lane": effective, "effective_owner": effective})
@@ -142,7 +142,7 @@ func TestSpawnParentJobOwnerFromHKProject(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	useFakeHK(t).SetTask("77", `{"id":77,"project":"mergewake"}`).
+	useFakeHK(t).SetTask("77", `{"id":"77","project":"mergewake"}`).
 		SetOwner("mergewake", `{"name":"mergewake","design_lane":"mergewake-design","effective_owner":"mergewake-design"}`)
 	request, err := a.PrepareSubmission(context.Background(), parsed)
 	if err != nil {
@@ -165,7 +165,7 @@ func TestSpawnDryRunOwnerResolvedFromHK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	useFakeHK(t).SetTask("42", `{"id":42,"title":"implement (grade B, T1)","state":"ready","refs":{},"project":"panewire"}`).
+	useFakeHK(t).SetTask("42", `{"id":"42","title":"implement (grade B, T1)","state":"ready","refs":{},"project":"panewire"}`).
 		SetOwner("panewire", `{"name":"panewire","design_lane":"panewire-design","effective_owner":"panewire-design"}`)
 	if err := a.Spawn(context.Background(), parsed); err != nil {
 		t.Fatal(err)

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"maps"
 	"net/http"
 	"os"
@@ -12,6 +13,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/mgh3326/handoffkeep/client"
 )
 
 // hkSiteApp is a test App whose hk is a fake reached with the svc-panewire
@@ -412,6 +415,18 @@ func TestSpawnPathHKCLIHTTPParity(t *testing.T) {
 		{"no id", `{"title":"t","state":"ready","refs":{"job_id":"job-a"},"claimed_by":"worker-a"}`},
 		{"id mismatch", hkTaskJSON(43, "ready", "implement (grade B, T1)", "", "panewire", `{}`)},
 		{"no state", `{"id":42,"title":"t","refs":{}}`},
+		// What the CLI parser read and hk's typed client does not: a 2xx body
+		// that is not JSON, an explicit id 0 or null, a string id, a string
+		// priority, a non-string job_id and a timestamp that does not parse.
+		{"malformed json", `{"id":42,"title":"t","state":"ready","refs":{`},
+		{"truncated empty", ``},
+		{"explicit id zero", `{"id":0,"title":"t","state":"ready","refs":{}}`},
+		{"null id", `{"id":null,"title":"t","state":"ready","refs":{"job_id":"job-a"},"claimed_by":"worker-a"}`},
+		{"string id", `{"id":"42","title":"urgent (grade B, T1)","state":"ready","priority":"1","refs":{"job_id":"job-a"},"claimed_by":"worker-a","created_at":"2025-12-31T00:00:00Z","project":"panewire"}`},
+		{"string id mismatch", `{"id":"042","title":"t","state":"ready","refs":{}}`},
+		{"invalid created_at hold", `{"id":42,"title":"held (grade B, T1)","state":"hold","priority":2,"refs":{},"created_at":"yesterday","project":"panewire"}`},
+		{"invalid created_at ready", `{"id":42,"title":"t","state":"ready","priority":1,"refs":{"job_id":"job-a"},"claimed_by":"worker-a","created_at":"yesterday","updated_at":"later"}`},
+		{"non-string job_id", `{"id":42,"title":"t","state":"developing","refs":{"job_id":7},"claimed_by":"worker-b"}`},
 	}
 	spawns := []struct {
 		name string
@@ -419,6 +434,10 @@ func TestSpawnPathHKCLIHTTPParity(t *testing.T) {
 	}{
 		{"fresh", Spawn{Task: "42", Job: "job-a", Label: "worker-a", Role: "worker"}},
 		{"inherited", Spawn{Task: "42", Job: "job-c", Label: "worker-c", Role: "worker", Inherited: "job-b"}},
+		// --bypass covers an hk the precheck cannot reach, never an answer
+		// it cannot read: the CLI path reached bypass on a nonzero exit only.
+		{"fresh bypass", Spawn{Task: "42", Job: "job-a", Label: "worker-a", Role: "worker", Bypass: true}},
+		{"inherited bypass", Spawn{Task: "42", Job: "job-c", Label: "worker-c", Role: "worker", Inherited: "job-b", Bypass: true}},
 	}
 	now := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	for _, tc := range tasks {
@@ -426,10 +445,15 @@ func TestSpawnPathHKCLIHTTPParity(t *testing.T) {
 			t.Run(tc.name+"/"+sp.name, func(t *testing.T) {
 				a, hk := hkSiteApp(t)
 				hk.SetTask("42", tc.body)
-				got, _, ge := a.taskPrecheck(ctx, sp.s)
-				want, _, we := cliPrecheck(tc.body, sp.s)
-				if exitCode(ge) != exitCode(we) || hkErrOf(ge) != hkErrOf(we) {
-					t.Fatalf("precheck: http %d %q, cli %d %q", exitCode(ge), hkErrOf(ge), exitCode(we), hkErrOf(we))
+				got, gotBypassed, ge := a.taskPrecheck(ctx, sp.s)
+				want, wantBypassed, we := cliPrecheck(tc.body, sp.s)
+				if exitCode(ge) != exitCode(we) || hkErrOf(ge) != hkErrOf(we) || gotBypassed != wantBypassed {
+					t.Fatalf("precheck: http %d %q bypassed=%t, cli %d %q bypassed=%t", exitCode(ge), hkErrOf(ge), gotBypassed, exitCode(we), hkErrOf(we), wantBypassed)
+				}
+				for _, job := range []string{"job-a", "job-b", ""} {
+					if g, w := a.taskLinkedTo(ctx, "42", job), cliLinkedTo(tc.body, "42", job); g != w {
+						t.Errorf("linked to %q: http %t, cli %t", job, g, w)
+					}
 				}
 				if ge != nil {
 					return
@@ -443,11 +467,6 @@ func TestSpawnPathHKCLIHTTPParity(t *testing.T) {
 				if g, _ := resolveUrgency("", got); g != cliUrgency(want) {
 					t.Errorf("urgency: http %q, cli %q", g, cliUrgency(want))
 				}
-				for _, job := range []string{"job-a", "job-b", ""} {
-					if g, w := a.taskLinkedTo(ctx, "42", job), cliLinkedTo(tc.body, "42", job); g != w {
-						t.Errorf("linked to %q: http %t, cli %t", job, g, w)
-					}
-				}
 			})
 		}
 	}
@@ -458,31 +477,35 @@ func TestSpawnPathHKCLIHTTPParity(t *testing.T) {
 		{"no effective owner", hkTaskJSON(77, "ready", "t", "", "blank", `{}`), `{"name":"blank","design_lane":"","effective_owner":"  "}`},
 		{"no project", hkTaskJSON(77, "ready", "t", "", "", `{}`), `{}`},
 		{"id mismatch", hkTaskJSON(78, "ready", "t", "", "panewire", `{}`), `{}`},
+		{"malformed task json", `{"id":77,"project":"panewire"`, `{"effective_owner":"panewire-design"}`},
+		{"malformed owner json", hkTaskJSON(77, "ready", "t", "", "panewire", `{}`), `{"name":"panewire","effective_owner":"panewire-design"`},
+		{"string id", `{"id":"77","project":"panewire"}`, `{"name":"panewire","design_lane":"panewire-design","effective_owner":"panewire-design"}`},
+		{"explicit id zero", `{"id":0,"project":"panewire"}`, `{"name":"panewire","effective_owner":"panewire-design"}`},
+		{"invalid created_at", `{"id":77,"state":"hold","project":"panewire","created_at":"yesterday"}`, `{"name":"panewire","effective_owner":"panewire-design"}`},
+		{"invalid owner updated_at", hkTaskJSON(77, "ready", "t", "", "panewire", `{}`), `{"name":"panewire","design_lane":"panewire-design","effective_owner":"panewire-design","updated_at":"later"}`},
 	}
 	for _, tc := range owners {
-		t.Run("owner/"+tc.name, func(t *testing.T) {
-			a, hk := hkSiteApp(t)
-			var project struct {
-				Project *string `json:"project"`
-			}
-			_ = json.Unmarshal([]byte(tc.task), &project)
-			hk.SetTask("77", tc.task)
-			if project.Project != nil {
-				hk.SetOwner(*project.Project, tc.owner)
-			}
-			s := Spawn{Task: "77"}
-			ge := a.resolveOwner(ctx, &s)
-			wantOwner, wantProject, we := cliOwner(tc.task, tc.owner, "77")
-			if exitCode(ge) != exitCode(we) || hkErrOf(ge) != hkErrOf(we) || s.Owner != wantOwner {
-				t.Fatalf("owner: http %q %d %q, cli %q %d %q", s.Owner, exitCode(ge), hkErrOf(ge), wantOwner, exitCode(we), hkErrOf(we))
-			}
-			if we == nil {
-				line := "owner=" + wantOwner + " source=hk project=" + wantProject + "\n"
-				if out := a.Out.(*bytes.Buffer).String(); out != line {
-					t.Fatalf("owner line %q want %q", out, line)
+		for _, bypass := range []bool{false, true} {
+			t.Run("owner/"+tc.name+"/bypass="+strconv.FormatBool(bypass), func(t *testing.T) {
+				a, hk := hkSiteApp(t)
+				hk.SetTask("77", tc.task)
+				for _, project := range []string{"panewire", "other", "blank", "mergewake"} {
+					hk.SetOwner(project, tc.owner)
 				}
-			}
-		})
+				s := Spawn{Task: "77", Bypass: bypass}
+				ge := a.resolveOwner(ctx, &s)
+				wantOwner, wantProject, we := cliOwner(tc.task, tc.owner, "77")
+				if exitCode(ge) != exitCode(we) || hkErrOf(ge) != hkErrOf(we) || s.Owner != wantOwner {
+					t.Fatalf("owner: http %q %d %q, cli %q %d %q", s.Owner, exitCode(ge), hkErrOf(ge), wantOwner, exitCode(we), hkErrOf(we))
+				}
+				if we == nil {
+					line := "owner=" + wantOwner + " source=hk project=" + wantProject + "\n"
+					if out := a.Out.(*bytes.Buffer).String(); out != line {
+						t.Fatalf("owner line %q want %q", out, line)
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -586,6 +609,126 @@ func TestSpawnPathHKRefusalsKeepTheirClassAndText(t *testing.T) {
 		o := Spawn{Task: "77"}
 		if e := a.resolveOwner(ctx, &o); exitCode(e) != exitUsage || hkErrOf(e) != "cannot resolve the hk owner of project nope (handoffkeep: no such project: nope); pass --owner LANE explicitly" {
 			t.Fatalf("owner=%v", e)
+		}
+	})
+}
+
+// cliClaim is the claim branch of panewire@8422639 taskLink, copied but for
+// its name and its inputs: the CLI's exit code, stdout and stderr, and
+// whether hk already bound the task to the job. It returns the
+// job.task_link status and the failure reason.
+func cliClaim(code int, out, errText string, s Spawn, bypassed, linked bool) (string, string) {
+	if code != 0 {
+		if !bypassed || !s.Bypass || strings.Contains(out+errText, "conflict") || strings.Contains(out+errText, "refused") {
+			if linked {
+				return "already_linked", ""
+			}
+			return "failed", fmt.Sprintf("task claim exited with status %d", code)
+		}
+		return "bypassed", ""
+	}
+	var t cliTask
+	if e := json.Unmarshal([]byte(out), &t); e != nil || t.ClaimedBy != s.Label || str(t.Refs, "job_id") != s.Job {
+		return "failed", "task claim did not confirm claimed_by and refs.job_id"
+	}
+	return "linked", ""
+}
+
+// The claim reaches the job.task_link status and reason the CLI path
+// recorded, with and without --bypass: a 2xx answer the CLI parser cannot
+// read is "did not confirm" and never bypassed; one it can read (a string
+// id, a bad timestamp) links; a conflict, a refusal and the invalid_context
+// code the CLI reworded as "claim_job_id_rejected: server refused the claim"
+// are never bypassed; an outage and a client-side non-confirmation are.
+func TestSpawnPathHKClaimCLIHTTPParity(t *testing.T) {
+	ctx := context.Background()
+	const confirming = `{"id":42,"state":"developing","claimed_by":"worker-a","refs":{"job_id":"job-a"}}`
+	cases := []struct {
+		name           string
+		status         int
+		body           string
+		cliCode        int
+		cliOut, cliErr string
+	}{
+		{name: "linked", status: http.StatusOK, body: confirming, cliOut: confirming},
+		{name: "malformed 2xx", status: http.StatusOK, body: `{"id":42,"state":"developing","claimed_by":`, cliOut: `{"id":42,"state":"developing","claimed_by":`},
+		{name: "empty 2xx", status: http.StatusOK, body: ``, cliOut: ``},
+		{name: "string id bad timestamp", status: http.StatusOK,
+			body:   `{"id":"42","state":"developing","claimed_by":"worker-a","refs":{"job_id":"job-a"},"created_at":"yesterday"}`,
+			cliOut: `{"id":"42","state":"developing","claimed_by":"worker-a","refs":{"job_id":"job-a"},"created_at":"yesterday"}`},
+		{name: "conflict", status: http.StatusConflict, body: `{"error":"conflict"}`, cliCode: 1, cliErr: "handoffkeep: conflict"},
+		{name: "outage", status: http.StatusServiceUnavailable, body: `{"error":"unavailable"}`, cliCode: 1, cliErr: "handoffkeep: unavailable"},
+		{name: "invalid_context", status: http.StatusBadRequest, body: `{"error":"invalid_context"}`, cliCode: 1, cliErr: "claim_job_id_rejected: server refused the claim"},
+		{name: "claimant not recorded", status: http.StatusOK, body: `{"id":42,"state":"developing","claimed_by":"worker-b","refs":{"job_id":"job-a"}}`,
+			cliCode: 1, cliErr: `handoffkeep: claim_claimant_not_recorded: server response has claimed_by="worker-b", want "worker-a"`},
+	}
+	for _, tc := range cases {
+		for _, bypass := range []bool{false, true} {
+			t.Run(tc.name+"/bypass="+strconv.FormatBool(bypass), func(t *testing.T) {
+				a, hk := hkSiteApp(t)
+				hk.SetTask("42", hkTaskJSON(42, "ready", "implement (grade B, T1)", "", "panewire", `{}`)).
+					Handle(func(r hkRequest) (int, string, bool) {
+						if r.Route() != "POST /v1/tasks/42/claim" {
+							return 0, "", false
+						}
+						return tc.status, tc.body, true
+					})
+				s := Spawn{Task: "42", Job: "job-a", Label: "worker-a", Bypass: bypass}
+				ge := a.taskLink(ctx, s, client.Task{}, bypass)
+				events, e := a.ledger().Events(ctx, s.Job)
+				if e != nil || len(events) != 1 {
+					t.Fatalf("events=%v %v", events, e)
+				}
+				gotStatus, _ := events[0].Payload["status"].(string)
+				gotReason, _ := events[0].Payload["reason"].(string)
+				wantStatus, wantReason := cliClaim(tc.cliCode, tc.cliOut, tc.cliErr, s, bypass, false)
+				if gotStatus != wantStatus || gotReason != wantReason || hkErrOf(ge) != wantReason {
+					t.Fatalf("claim: http status=%q reason=%q err=%v, cli status=%q reason=%q", gotStatus, gotReason, ge, wantStatus, wantReason)
+				}
+			})
+		}
+	}
+}
+
+// A 2xx answer the CLI parser could not read keeps the CLI path's exit class
+// and text and is never bypassed: the precheck is exitConfig "unreadable task
+// precheck" under --bypass too, and a rebind records that it did not confirm
+// the binding.
+func TestSpawnPathHKUnreadableAnswerIsNotBypassed(t *testing.T) {
+	ctx := context.Background()
+	for _, body := range []string{`{"id":42,"state":"ready"`, `not json`, ``, `{"id":42,"state":"ready","created_at":7}`} {
+		for _, bypass := range []bool{false, true} {
+			t.Run(fmt.Sprintf("precheck %q bypass=%t", body, bypass), func(t *testing.T) {
+				a, hk := hkSiteApp(t)
+				hk.SetTask("42", body)
+				_, bypassed, e := a.taskPrecheck(ctx, Spawn{Task: "42", Job: "job-a", Label: "worker-a", Bypass: bypass})
+				if bypassed || exitCode(e) != exitConfig || hkErrOf(e) != "unreadable task precheck" {
+					t.Fatalf("precheck bypassed=%t %d %v, want exitConfig \"unreadable task precheck\"", bypassed, exitCode(e), e)
+				}
+			})
+		}
+	}
+	t.Run("rebind", func(t *testing.T) {
+		fx := newRebindFixture(t, "completed", rebindParent)
+		failHKCLI(t, fx.f)
+		fx.rebindAnswer = `{"id":42,"state":"claimed","claimed_by":`
+		if e := fx.a.Spawn(ctx, fx.s); e != nil {
+			t.Fatalf("an unreadable rebind answer failed the landed spawn: %v", e)
+		}
+		ev := fx.taskLinkEvent(t)
+		if ev["status"] != "inherited" || ev["rebind_error"] != "task rebind did not confirm claimed_by and refs.job_id" {
+			t.Fatalf("event=%v", ev)
+		}
+	})
+	t.Run("rebind readable with a string id", func(t *testing.T) {
+		fx := newRebindFixture(t, "completed", rebindParent)
+		failHKCLI(t, fx.f)
+		fx.rebindAnswer = `{"id":"42","state":"claimed","claimed_by":"` + fx.s.Label + `","refs":{"job_id":"` + fx.s.Job + `"},"updated_at":"later"}`
+		if e := fx.a.Spawn(ctx, fx.s); e != nil {
+			t.Fatal(e)
+		}
+		if ev := fx.taskLinkEvent(t); ev["status"] != "rebound" {
+			t.Fatalf("event=%v", ev)
 		}
 	})
 }
