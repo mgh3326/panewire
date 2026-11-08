@@ -16,8 +16,8 @@ import (
 func catalogTestEnv(t *testing.T, url string) {
 	t.Helper()
 	t.Setenv("HANDOFFKEEP_URL", url)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 }
 
@@ -199,15 +199,14 @@ func TestCatalogListWarnsUnknownPool(t *testing.T) {
 	}
 }
 
-// The operator/operator-desk credential path: HANDOFFKEEP_CONFIG names the env
-// file, as it does for pacelever.
+// The svc-panewire file: PANEWIRE_HK_ENV names the mode-0600 env file (hk 3570).
 func TestCatalogCredentialsFromConfigFile(t *testing.T) {
 	server := catalogCatalogServer(t, `{"catalog":[{"profile":"opus","effort":"high","model_id":"m","pool":"claude","grade":"S+","gate":"default"}]}`)
 	t.Setenv("HANDOFFKEEP_URL", "")
-	t.Setenv("HANDOFFKEEP_TOKEN", "")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
-	env := writeMode0600(t, t.TempDir(), "hk.env", "HANDOFFKEEP_URL="+server.URL+"\nHANDOFFKEEP_TOKEN=test-token\n")
-	t.Setenv("HANDOFFKEEP_CONFIG", env)
+	env := writeMode0600(t, t.TempDir(), "hk.env", "HANDOFFKEEP_URL="+server.URL+"\nHANDOFFKEEP_TOKEN_SVC_PANEWIRE=test-token\n")
+	t.Setenv("PANEWIRE_HK_ENV", env)
 	var out, errs bytes.Buffer
 	if code := runCatalogCLI([]string{"list"}, &out, &errs); code != ExitOK {
 		t.Fatalf("exit=%d stderr=%s", code, errs.String())

@@ -4,10 +4,13 @@ import (
 	"go/ast"
 	"go/token"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/mgh3326/panewire/internal/hkcred"
 )
 
 // hermeticEnvPrefixes and hermeticEnvNames cover every environment variable
@@ -39,6 +42,11 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	os.Setenv("XDG_CACHE_HOME", cache)
+	// No test may fall through to the developer's real svc-panewire file
+	// (~/.config/panewire/hk-svc.env, hk 3570): point the default at a path
+	// that does not exist. A test that wants the file sets PANEWIRE_HK_ENV,
+	// or clears it under a temporary HOME.
+	os.Setenv(hkcred.PathEnv, filepath.Join(cache, "no-hk-svc.env"))
 	code := m.Run()
 	os.RemoveAll(cache)
 	os.Exit(code)

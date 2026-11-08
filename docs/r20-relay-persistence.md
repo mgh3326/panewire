@@ -69,11 +69,15 @@ regular mode-0600 file holding these keys:
 
 ```
 HANDOFFKEEP_URL=…
-HANDOFFKEEP_TOKEN=…
+HANDOFFKEEP_TOKEN_SVC_PANEWIRE=…
 # optional, both or neither: a handoffkeep behind Cloudflare Access
 HANDOFFKEEP_CF_ACCESS_CLIENT_ID=…
 HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET=…
 ```
+
+A file written before hk 3570 may carry `HANDOFFKEEP_TOKEN` instead of
+`HANDOFFKEEP_TOKEN_SVC_PANEWIRE`; the svc key wins when both are present
+([config.md](config.md#handoffkeep-service-credential)).
 
 The same file format is the node's `spawn.json` `handoffkeep_env` (brief
 fetch) and the hub's `--chat-env`. When the CF Access pair is present, every

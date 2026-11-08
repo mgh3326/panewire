@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/hkcred"
 )
 
 const (
@@ -83,20 +85,58 @@ func (env hubHandoffkeepEnv) setAuth(request *http.Request) {
 }
 
 // loadHubHandoffkeepEnv requires an explicit mode-0600 file and never includes
-// a credential value in an error, matching loadHubTelegramEnv.
+// a credential value in an error, matching loadHubTelegramEnv. It reads only
+// files the operator named: the hub's --handoffkeep-env/--chat-env and a
+// node's spawn.json handoffkeep_env. The bearer is
+// HANDOFFKEEP_TOKEN_SVC_PANEWIRE, else the file's legacy key
+// (hkcred.ExplicitFileToken), so files written before hk 3570 keep working.
+// A node on defaults never comes here; see hubSpawnConfig.handoffkeepEnv.
 func loadHubHandoffkeepEnv(path string) (hubHandoffkeepEnv, error) {
 	values, err := loadMode0600Env(path)
 	if err != nil {
 		return hubHandoffkeepEnv{}, errors.New("hub handoffkeep env must be a regular mode-0600 file")
 	}
-	env := hubHandoffkeepEnv{URL: values["HANDOFFKEEP_URL"], Token: values["HANDOFFKEEP_TOKEN"], CFID: values["HANDOFFKEEP_CF_ACCESS_CLIENT_ID"], CFSecret: values["HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET"]}
-	if !validHandoffkeepBaseURL(env.URL) || !validHandoffkeepToken(env.Token) {
-		return hubHandoffkeepEnv{}, errors.New("hub handoffkeep env is missing required values")
-	}
-	if (env.CFID == "") != (env.CFSecret == "") || (env.CFID != "" && (!validHandoffkeepToken(env.CFID) || !validHandoffkeepToken(env.CFSecret) || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(env.URL)), "https://"))) {
-		return hubHandoffkeepEnv{}, errors.New("hub handoffkeep env has an incomplete or invalid CF Access pair")
+	env := hubHandoffkeepEnv{URL: values[hkcred.URLKey], Token: hkcred.ExplicitFileToken(values), CFID: values[hkcred.CFIDKey], CFSecret: values[hkcred.CFSecretKey]}
+	if err := env.validate(); err != nil {
+		return hubHandoffkeepEnv{}, err
 	}
 	return env, nil
+}
+
+// handoffkeepEnv is the node's hk endpoint and credential under its spawn
+// config. A node on defaults resolves exactly as hkcred.Load does — the
+// HANDOFFKEEP_URL + HANDOFFKEEP_TOKEN_SVC_PANEWIRE environment pair, else
+// hk-svc.env with the svc key only — and an unconfigured one is refused with
+// the typed *hkcred.UnconfiguredError. A file spawn.json names reads through
+// loadHubHandoffkeepEnv and keeps the HANDOFFKEEP_TOKEN fallback.
+func (config hubSpawnConfig) handoffkeepEnv() (hubHandoffkeepEnv, error) {
+	if config.HandoffkeepEnvDefault {
+		creds, err := hkcred.Load()
+		if err != nil {
+			return hubHandoffkeepEnv{}, err
+		}
+		env := hubHandoffkeepEnv{URL: creds.URL, Token: creds.Token, CFID: creds.CFID, CFSecret: creds.CFSecret}
+		if err := env.validate(); err != nil {
+			return hubHandoffkeepEnv{}, err
+		}
+		return env, nil
+	}
+	if config.HandoffkeepEnv == "" {
+		return hubHandoffkeepEnv{}, errors.New("handoffkeep env unset")
+	}
+	return loadHubHandoffkeepEnv(config.HandoffkeepEnv)
+}
+
+// validate applies the hub's endpoint and token rules to a resolved
+// credential. Its errors carry no value.
+func (env hubHandoffkeepEnv) validate() error {
+	if !validHandoffkeepBaseURL(env.URL) || !validHandoffkeepToken(env.Token) {
+		return errors.New("hub handoffkeep env is missing required values")
+	}
+	if (env.CFID == "") != (env.CFSecret == "") || (env.CFID != "" && (!validHandoffkeepToken(env.CFID) || !validHandoffkeepToken(env.CFSecret) || !strings.HasPrefix(strings.ToLower(strings.TrimSpace(env.URL)), "https://"))) {
+		return errors.New("hub handoffkeep env has an incomplete or invalid CF Access pair")
+	}
+	return nil
 }
 
 func validHandoffkeepToken(value string) bool {

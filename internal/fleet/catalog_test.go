@@ -74,8 +74,8 @@ func TestCatalogReadsHandoffkeepWithoutPacelever(t *testing.T) {
 	server := httptest.NewServer(state)
 	t.Cleanup(server.Close)
 	t.Setenv("HANDOFFKEEP_URL", server.URL)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	runner := &fakeRunner{Do: func(c Command) Result {
 		t.Errorf("catalog ran %s %v", c.Name, c.Args)
@@ -244,7 +244,7 @@ func TestCatalogReadRefusesStaleQuotaCatalog(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { http.Error(w, "offline", http.StatusServiceUnavailable) }))
 	t.Cleanup(server.Close)
 	t.Setenv("HANDOFFKEEP_URL", server.URL)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	client, err := NewCatalogClient(CatalogClientConfig{})
 	if err != nil {

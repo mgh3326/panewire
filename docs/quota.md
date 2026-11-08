@@ -488,7 +488,8 @@ launch = "native"   # or "shadow", the default
 
   - it reads only local state: pacelever's `config.toml` and panewire's
     catalog cache, read only (and the handoffkeep endpoint from the
-    environment or handoffkeep's `config.env`, only to name the cache file);
+    svc-panewire credential, environment or `~/.config/panewire/hk-svc.env`,
+    only to name the cache file);
   - it never asks handoffkeep, never refreshes after a refusal, and never
     writes, renames or touches a cache file, so it cannot change what the
     selection reads;

@@ -55,8 +55,8 @@ func shadowCatalogEnv(t *testing.T, h *countingHandoffkeep) *CatalogClient {
 	t.Cleanup(server.Close)
 	t.Cleanup(func() { close(h.done) })
 	t.Setenv("HANDOFFKEEP_URL", server.URL)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	client, err := NewCatalogClient(CatalogClientConfig{})
 	if err != nil {
@@ -139,8 +139,8 @@ func cacheLaunchRows(t *testing.T, rows []CatalogRow, now time.Time) {
 	}))
 	t.Cleanup(server.Close)
 	t.Setenv("HANDOFFKEEP_URL", server.URL)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	client, err := NewCatalogClient(CatalogClientConfig{})
 	if err != nil {

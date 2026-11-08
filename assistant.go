@@ -16,6 +16,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/mgh3326/panewire/internal/hkcred"
 )
 
 // The panewire-assistant binary (MGH-36) is the thin external surface that
@@ -149,10 +151,10 @@ func loadAssistantConfig(path string) (assistantConfig, error) {
 	}
 	cfg := assistantConfig{
 		Listen:          strings.TrimSpace(values["PANEWIRE_ASSISTANT_LISTEN"]),
-		HKURL:           values["HANDOFFKEEP_URL"],
-		HKToken:         values["HANDOFFKEEP_TOKEN"],
-		HKCFID:          strings.TrimSpace(values["HANDOFFKEEP_CF_ACCESS_CLIENT_ID"]),
-		HKCFSecret:      strings.TrimSpace(values["HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET"]),
+		HKURL:           values[hkcred.URLKey],
+		HKToken:         hkcred.ExplicitFileToken(values),
+		HKCFID:          strings.TrimSpace(values[hkcred.CFIDKey]),
+		HKCFSecret:      strings.TrimSpace(values[hkcred.CFSecretKey]),
 		HubURL:          values["PANEWIRE_ASSISTANT_HUB_URL"],
 		HubToken:        values["PANEWIRE_ASSISTANT_HUB_TOKEN"],
 		DrainInterval:   assistantDrainIntervalDefault,

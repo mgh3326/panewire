@@ -120,9 +120,9 @@ func t3431Start(t *testing.T, jobs fleet.JobStore) *t3431Rig {
 	tasks := &t3431Tasks{tasks: map[string]fleet.TaskStatus{}}
 	taskServer := httptest.NewServer(tasks)
 	t.Cleanup(taskServer.Close)
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
 	t.Setenv("HANDOFFKEEP_URL", taskServer.URL)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
 	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_ID", "")
 	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET", "")
 

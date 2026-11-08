@@ -123,6 +123,7 @@ func New(out, errout io.Writer) (*App, error) {
 	if e != nil {
 		return nil, e
 	}
+	warnRetiredQuotaKeys(c, errout)
 	p, e := LoadPolicy(os.Getenv("PANEWIRE_POLICY"))
 	if e != nil {
 		return nil, e

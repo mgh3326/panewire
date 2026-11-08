@@ -23,8 +23,11 @@ func fsWriteJobEvent(t *testing.T, root, job, name, body string) {
 }
 
 // fsRunNode runs a real node client against the test hub until the test ends.
+// The node gets a private HOME, so its default spawn.json and hk credential
+// paths never reach a real one (hk 3570); configure may still name files.
 func fsRunNode(t *testing.T, server string, configure func(*HubClient)) *HubClient {
 	t.Helper()
+	t.Setenv("HOME", t.TempDir())
 	client, err := NewHubClient(HubClientConfig{
 		URL: r6WSURL(server, ""), MachineID: "node-a", Token: fsNodeAToken, Accepting: true,
 		AllowInsecureForTests: true, PingInterval: 20 * time.Millisecond, Warn: func(string) {},

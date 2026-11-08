@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/fleet"
+	"github.com/mgh3326/panewire/internal/hkcred"
 )
 
 // Node side of readiness (docs/placement.md, "Readiness"). The node probes
@@ -226,8 +227,12 @@ func (client *HubClient) noteLaunchResult(message hubOutboundMessage, result hub
 
 // resolveHubSpawnConfig reads spawn.json. A missing file at the default path
 // is not an error: the node runs on defaults (work root ~/work, the workers
-// workspace, the default herdr session, the standard handoffkeep env). A file
-// the operator named explicitly must exist. defaults reports which one ran.
+// workspace, the default herdr session, and panewire's svc-panewire hk
+// credential resolved as hkcred.Load does: the HANDOFFKEEP_URL +
+// HANDOFFKEEP_TOKEN_SVC_PANEWIRE environment pair, else hkcred.PathIn
+// (PANEWIRE_HK_ENV, else ~/.config/panewire/hk-svc.env) with the svc key
+// only; never the hk CLI's config.env, hk 3570). A file the operator named
+// explicitly must exist. defaults reports which one ran.
 func (client *HubClient) resolveHubSpawnConfig() (config hubSpawnConfig, defaults bool, err error) {
 	config, err = loadHubSpawnConfig(client.spawnConfigPath)
 	var configErr *hubSpawnConfigError
@@ -238,7 +243,7 @@ func (client *HubClient) resolveHubSpawnConfig() (config hubSpawnConfig, default
 	if homeErr != nil {
 		return hubSpawnConfig{}, false, err
 	}
-	return hubSpawnConfig{Enabled: true, Workspace: hubSpawnDefaultWorkspace, HERDRSession: hubSpawnDefaultSession, WorkRoot: filepath.Join(home, "work"), HandoffkeepEnv: filepath.Join(home, ".config", "handoffkeep", "config.env")}, true, nil
+	return hubSpawnConfig{Enabled: true, Workspace: hubSpawnDefaultWorkspace, HERDRSession: hubSpawnDefaultSession, WorkRoot: filepath.Join(home, "work"), HandoffkeepEnv: hkcred.PathIn(home), HandoffkeepEnvDefault: true}, true, nil
 }
 
 func asConfigError(err error, target **hubSpawnConfigError) bool {
@@ -370,11 +375,12 @@ func (client *HubClient) collectReadiness(ctx context.Context) *fleet.Readiness 
 	if len(out.Repos) > nodeReadinessMaxRepos {
 		out.Repos = out.Repos[:nodeReadinessMaxRepos]
 	}
-	envReadable := deps.envReadable
-	if envReadable == nil {
-		envReadable = func(path string) bool { _, err := loadHubHandoffkeepEnv(path); return err == nil }
+	if deps.envReadable != nil {
+		out.Brief.HandoffkeepEnv = config.HandoffkeepEnv != "" && deps.envReadable(config.HandoffkeepEnv)
+	} else {
+		_, envErr := config.handoffkeepEnv()
+		out.Brief.HandoffkeepEnv = envErr == nil
 	}
-	out.Brief.HandoffkeepEnv = config.HandoffkeepEnv != "" && envReadable(config.HandoffkeepEnv)
 	return out
 }
 

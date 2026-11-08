@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/mgh3326/panewire/internal/durable"
+	"github.com/mgh3326/panewire/internal/hkcred"
 	"github.com/mgh3326/panewire/internal/quota/agy"
 )
 
@@ -87,7 +88,7 @@ type CatalogData struct {
 }
 
 // CatalogClientConfig names an endpoint explicitly. The zero value resolves
-// handoffkeep credentials from the environment and handoffkeep's config file.
+// panewire's svc-panewire hk credential (internal/hkcred).
 type CatalogClientConfig struct {
 	URL, Token, CFClientID, CFClientSecret string
 	CacheDir                               string
@@ -133,15 +134,20 @@ type CatalogClient struct {
 }
 
 // NewCatalogClient resolves credentials and builds the catalog client. An
-// explicit URL and token take precedence; otherwise the pacelever credential
-// path applies: HANDOFFKEEP_URL and HANDOFFKEEP_TOKEN win, and when neither is
-// set the file named by HANDOFFKEEP_CONFIG (else the default handoffkeep
-// config.env) supplies them. A partial environment override never falls back
-// to the file, as in pacelever.
+// explicit URL and token take precedence; otherwise panewire's svc-panewire
+// credential applies (internal/hkcred): HANDOFFKEEP_URL and
+// HANDOFFKEEP_TOKEN_SVC_PANEWIRE in the environment, else the mode-0600
+// ~/.config/panewire/hk-svc.env (PANEWIRE_HK_ENV overrides the path). An
+// unconfigured credential is an *hkcred.UnconfiguredError naming the missing
+// keys or file.
 func NewCatalogClient(cfg CatalogClientConfig) (*CatalogClient, error) {
 	creds := catalogCredentials{URL: cfg.URL, Token: cfg.Token, CFClientID: cfg.CFClientID, CFClientSecret: cfg.CFClientSecret}
 	if creds.URL == "" && creds.Token == "" {
-		creds = loadCatalogCredentials()
+		loaded, err := hkcred.Load()
+		if err != nil {
+			return nil, err
+		}
+		creds = catalogCredentials{URL: loaded.URL, Token: loaded.Token, CFClientID: loaded.CFID, CFClientSecret: loaded.CFSecret}
 	}
 	if err := creds.validate(); err != nil {
 		return nil, err
@@ -159,39 +165,6 @@ func NewCatalogClient(cfg CatalogClientConfig) (*CatalogClient, error) {
 
 type catalogCredentials struct {
 	URL, Token, CFClientID, CFClientSecret string
-}
-
-func loadCatalogCredentials() catalogCredentials {
-	values := map[string]string{}
-	envOverride := strings.TrimSpace(os.Getenv("HANDOFFKEEP_URL")) != "" || strings.TrimSpace(os.Getenv("HANDOFFKEEP_TOKEN")) != ""
-	if !envOverride {
-		path := os.Getenv("HANDOFFKEEP_CONFIG")
-		if path == "" {
-			path = filepath.Join(configBase(), "handoffkeep", "config.env")
-		}
-		if data, err := os.ReadFile(path); err == nil {
-			for _, line := range strings.Split(string(data), "\n") {
-				line = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(line), "export "))
-				if line == "" || strings.HasPrefix(line, "#") {
-					continue
-				}
-				k, v, ok := strings.Cut(line, "=")
-				if ok {
-					values[strings.TrimSpace(k)] = strings.Trim(strings.TrimSpace(v), "\"'")
-				}
-			}
-		}
-	}
-	read := func(k string) string {
-		if v := strings.TrimSpace(os.Getenv(k)); v != "" {
-			return v
-		}
-		if !envOverride {
-			return values[k]
-		}
-		return ""
-	}
-	return catalogCredentials{URL: read("HANDOFFKEEP_URL"), Token: read("HANDOFFKEEP_TOKEN"), CFClientID: read("HANDOFFKEEP_CF_ACCESS_CLIENT_ID"), CFClientSecret: read("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET")}
 }
 
 func (c catalogCredentials) validate() error {
@@ -216,13 +189,6 @@ func cacheBase() string {
 		return v
 	}
 	return expand("~/.cache")
-}
-
-func configBase() string {
-	if v := os.Getenv("XDG_CONFIG_HOME"); v != "" {
-		return v
-	}
-	return expand("~/.config")
 }
 
 func (c *CatalogClient) endpointID() string {

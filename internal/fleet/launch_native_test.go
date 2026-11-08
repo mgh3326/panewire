@@ -252,8 +252,8 @@ func catalogEnv(t *testing.T, state *catalogServer) *CatalogClient {
 	server := httptest.NewServer(state)
 	t.Cleanup(server.Close)
 	t.Setenv("HANDOFFKEEP_URL", server.URL)
-	t.Setenv("HANDOFFKEEP_TOKEN", "test-token")
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "test-token")
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
 	t.Setenv("XDG_CACHE_HOME", t.TempDir())
 	client, err := NewCatalogClient(CatalogClientConfig{})
 	if err != nil {
@@ -327,8 +327,8 @@ func TestLaunchNativeStaleCatalog(t *testing.T) {
 // and an unknown profile is unknown (exit 3).
 func TestLaunchNativeCatalogUnavailable(t *testing.T) {
 	t.Setenv("HANDOFFKEEP_URL", "")
-	t.Setenv("HANDOFFKEEP_TOKEN", "")
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(t.TempDir(), "absent.env"))
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "")
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(t.TempDir(), "absent.env"))
 	a, _, _ := launchApp(t, "native", nil, nil)
 	if _, err := a.Quota.Launch(context.Background(), QuotaRequest{Profile: "opus", Effort: "high", Role: "worker"}); exitCode(err) != exitConfig || err.Error() != "quota catalog is stale" {
 		t.Fatalf("known rung without a catalog: %v", err)

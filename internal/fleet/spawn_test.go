@@ -67,9 +67,9 @@ func testApp(t *testing.T) *App {
 		root = real
 	}
 	// HTTP producers must never inherit the developer's hk endpoint or token.
-	t.Setenv("HANDOFFKEEP_CONFIG", filepath.Join(root, "absent-hk.env"))
+	t.Setenv("PANEWIRE_HK_ENV", filepath.Join(root, "absent-hk.env"))
 	t.Setenv("HANDOFFKEEP_URL", "")
-	t.Setenv("HANDOFFKEEP_TOKEN", "")
+	t.Setenv("HANDOFFKEEP_TOKEN_SVC_PANEWIRE", "")
 	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_ID", "")
 	t.Setenv("HANDOFFKEEP_CF_ACCESS_CLIENT_SECRET", "")
 	nodeEnv := filepath.Join(root, "node.env")

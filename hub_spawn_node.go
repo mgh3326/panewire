@@ -29,6 +29,11 @@ type hubSpawnConfig struct {
 	BriefDocPrefix string `json:"brief_doc_prefix,omitempty"`
 	HandoffkeepEnv string `json:"handoffkeep_env,omitempty"`
 	Enabled        bool   `json:"enabled"`
+	// HandoffkeepEnvDefault is set only by resolveHubSpawnConfig on a node
+	// running on defaults, never from JSON: the credential then resolves as
+	// hkcred.Load does (handoffkeepEnv), without the HANDOFFKEEP_TOKEN
+	// fallback a file named in spawn.json keeps. The path alone never decides.
+	HandoffkeepEnvDefault bool `json:"-"`
 }
 
 func defaultHubSpawnConfigPath(path string) string {
@@ -299,7 +304,7 @@ func (client *HubClient) runHubSpawn(parent context.Context, message hubOutbound
 	// a prepared worktree behind.
 	briefText := message.BriefInline
 	if message.BriefDoc != "" {
-		fetched, err := client.fetchHubSpawnBrief(runContext, config.HandoffkeepEnv, message.BriefDoc)
+		fetched, err := client.fetchNodeSpawnBrief(runContext, config, message.BriefDoc)
 		if err != nil || fetched == "" || !utf8.ValidString(fetched) || len([]byte(fetched)) > hubSpawnMaxBriefBytes {
 			result.RC, result.Error = 2, "brief_doc_unavailable"
 			reason, detail = "brief_doc_fetch", "this node could not fetch the brief document"
@@ -478,12 +483,30 @@ func hubSpawnArg(args []string, flag string) string {
 // Tests point it at a TLS test server.
 var hubSpawnBriefTransport http.RoundTripper
 
-func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key string) (string, error) {
-	if !validHubSpawnDocKey(key) || envPath == "" {
+// fetchNodeSpawnBrief fetches a brief document with the node's own hk
+// credential under its spawn config (hubSpawnConfig.handoffkeepEnv): a node
+// on defaults resolves as hkcred.Load does, a spawn.json handoffkeep_env is an
+// explicit file.
+func (client *HubClient) fetchNodeSpawnBrief(ctx context.Context, config hubSpawnConfig, key string) (string, error) {
+	env, err := config.handoffkeepEnv()
+	if err != nil {
 		return "", errors.New("brief unavailable")
 	}
+	return client.fetchHubSpawnBriefWith(ctx, env, key)
+}
+
+// fetchHubSpawnBrief fetches a brief document with the explicit hk env file
+// envPath (loadHubHandoffkeepEnv).
+func (client *HubClient) fetchHubSpawnBrief(ctx context.Context, envPath, key string) (string, error) {
 	env, err := loadHubHandoffkeepEnv(envPath)
 	if err != nil {
+		return "", errors.New("brief unavailable")
+	}
+	return client.fetchHubSpawnBriefWith(ctx, env, key)
+}
+
+func (client *HubClient) fetchHubSpawnBriefWith(ctx context.Context, env hubHandoffkeepEnv, key string) (string, error) {
+	if !validHubSpawnDocKey(key) {
 		return "", errors.New("brief unavailable")
 	}
 	base, err := url.Parse(strings.TrimSuffix(env.URL, "/"))
