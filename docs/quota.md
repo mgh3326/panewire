@@ -412,19 +412,32 @@ v0.3.28's `policy launch` (catalog.go `resolveLaunch`, `resolveRow`,
 reads:
 
 - **The bench catalog** through panewire's catalog client and its freshness
-  rule ([catalog.md](catalog.md#cache)): a cache entry younger than one hour,
-  else handoffkeep, else a cache entry, stale after one day. When a cached
-  catalog refuses a request, the lookup reads handoffkeep once more before it
-  refuses, so a new row is found by the next lookup. Without any catalog it
-  judges the bundled snapshot as stale, as pacelever does.
+  rule ([catalog.md](catalog.md#cache)): a cache entry younger than the TTL,
+  else handoffkeep, else a cache entry, stale past the stale maximum. The TTL
+  and the stale maximum are pacelever's `[bench] catalog_ttl_s` and
+  `catalog_stale_max_s` in its `config.toml`, as pacelever's policy launch
+  reads them (bench.go `ReadRows`); unset, or zero or less, they are one hour
+  and one day, pacelever's defaults and panewire's own. When a cached catalog
+  refuses a request, the lookup reads handoffkeep once more before it
+  refuses, so a new row is found by the next lookup; that read replaces the
+  cache the selection also reads (see [Shadow and native
+  launch](#shadow-and-native-launch)). Without any catalog it judges the
+  bundled snapshot as stale, as pacelever does.
 - **pacelever's bundled snapshot** (`internal/fleet/catalog-snapshot.json`,
   pacelever v0.3.28's `catalog_snapshot.json` byte for byte) for what the
   handoffkeep rows do not carry: each rung's family; a rung the snapshot holds
   unplaced at the same grade stays unplaced (it needs an exact E6 marker); the
   effort a profile defaults to; the alias `codex-max` → `codex-sol`; and the
   rows of a profile handoffkeep does not list.
-- **The pool policy** in pacelever's `config.toml`, as [Admission](#admission)
-  reads it, for subscription.
+- **pacelever's `config.toml`**, loaded with every rule pacelever v0.3.28's
+  `LoadConfig` applies before `policy launch` resolves anything
+  (`internal/fleet/pacelever_config.go`): the TOML types of `[quota]`,
+  `[profiles]`, `[bench]`, `[settings]` and each known pool; the shared quota
+  TTL ranges, `host_id`, per-pool fresh TTLs, account fingerprints and
+  measurable account keys; and each known pool's class, exploration, cutoff,
+  in-flight reserve and `credit_max_age_s`. A file pacelever refuses exits 2.
+  The pool policy in it, read as [Admission](#admission) reads it, gives
+  subscription. The gate and the credit pool views keep their narrower read.
 - **The E6 marker** from the request, else `PACELEVER_E6_ARM`.
 
 It answers as `pacelever policy launch` does through panewire: a refusal exits 3
@@ -468,9 +481,25 @@ its baseline answer.
 launch = "native"   # or "shadow", the default
 ```
 
-- **Shadow (the default).** `pacelever policy launch` resolves it, as before.
-  Beside each call panewire runs its own lookup within 10 s and records one
-  fleet event:
+- **Shadow (the default).** `pacelever policy launch` resolves it, and the
+  spawn gets exactly its answer, as before. After pacelever answers, panewire
+  resolves the same request offline and records one fleet event. The
+  comparison is side-effect free:
+
+  - it reads only local state: pacelever's `config.toml` and panewire's
+    catalog cache, read only (and the handoffkeep endpoint from the
+    environment or handoffkeep's `config.env`, only to name the cache file);
+  - it never asks handoffkeep, never refreshes after a refusal, and never
+    writes, renames or touches a cache file, so it cannot change what the
+    selection reads;
+  - it runs on a context detached from the caller's, bounded by its own 2 s,
+    so it cannot spend the deadline the next gate call needs;
+  - the event is a best-effort fleet event append.
+
+  When the cache holds no entry for the endpoint younger than panewire's
+  one-hour TTL, nothing is compared: `outcome=skipped reason=no_fresh_cache`.
+  When the local reads outlast the bound, `outcome=skipped
+  reason=shadow_timeout`. Otherwise:
 
   ```
   kind=quota_launch_shadow outcome=disagree reason=commandcode
@@ -483,11 +512,18 @@ launch = "native"   # or "shadow", the default
   the `error:` line it prints on stderr. The native answer never changes the
   spawn's outcome. Expected differences: pacelever's own catalog cache is not
   panewire's, so a row changed in the last hour can differ until both caches
-  read it; and pacelever with no catalog backend configured serves its snapshot
-  as fresh where panewire refuses it as stale.
+  read it, and the shadow never refreshes to close that gap; and pacelever
+  with no catalog backend configured serves its snapshot as fresh where
+  panewire refuses it as stale.
 - **Native.** panewire's lookup decides and `pacelever policy launch` is never
   run. panewire-design flips it on a host after the shadow events agree; it is
-  host config, independent of `[quota].gate`.
+  host config, independent of `[quota].gate`. Only native mode reads
+  handoffkeep for the lookup, and only native mode refreshes after a cached
+  refusal. That refresh replaces panewire's shared catalog cache, which the
+  selection (`CLIQuota.Catalog`) also reads, so on a native host the
+  selection can see a newer catalog before its own TTL expires. This is
+  accepted: native is a deliberate host switch, and the refreshed catalog is
+  handoffkeep's current one.
 
 ### Credit pool views
 
@@ -496,20 +532,25 @@ pool's view: its class, the used share of its current operator credit entry
 and its balance. The view follows `[quota].launch`:
 
 - **Shadow (the default).** The view is pacelever's status document, read by
-  one `pacelever --json` run, as before. When the shared store serves every
-  credit pool (see Native), panewire also builds its own view within 10 s and
-  records one fleet event per read:
+  one `pacelever --json` run, and the caller gets exactly that, as before.
+  After it is read, when the shared store serves every credit pool (see
+  Native), panewire reads each credit pool's class offline from pacelever's
+  `config.toml` and records one fleet event per read:
 
   ```
   kind=quota_pools_shadow outcome=disagree reason=credit
-  detail=anthropic-api pacelever{class=spend blocking=-} native{class=exclude blocking=40.00} openai-api pacelever{class=spend blocking=-} native{class=spend blocking=-} diff=anthropic-api:class,anthropic-api:blocking
+  detail=anthropic-api pacelever{class=spend} native{class=exclude} openai-api pacelever{class=spend} native{class=spend} diff=anthropic-api:class
   ```
 
-  Only the class and the used share (`blocking`) are compared; the balance is
-  read from the same store on both paths. `agree` means every credit pool has
-  the same class and used share; `disagree` anything else, with `diff` listing
-  the differing `pool:field` pairs, or `error` when either side failed to
-  read. The native view never reaches selection or admission.
+  The comparison is offline and side-effect free, as the launch shadow is: it
+  reads only the pool policy files, never the shared store, on a context
+  detached from the caller's and bounded by its own 2 s
+  (`outcome=skipped reason=shadow_timeout` past it). So only the class is
+  compared: the used share lives only in the shared store, and the balance is
+  the same store's on both paths. `agree` means every credit pool has the same
+  class; `disagree` anything else, with `diff` listing the differing
+  `pool:class` pairs, or `error` when either side failed to read. The native
+  view never reaches selection or admission.
 - **Native.** When every credit pool of the pool policy (`credit_pools`) is a
   hand-recorded API pool (`anthropic-api`, `openai-api`) and the shared store
   is wired, panewire builds the view itself: the class from pacelever's
