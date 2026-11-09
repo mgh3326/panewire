@@ -680,8 +680,13 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string,
 	if err != nil {
 		return "job-unreadable"
 	}
-	// A job that now waits on its PR (it completed, or was revived, since the
-	// pass judged it) is judged again on the next pass, PR read included.
+	// A job that did not wait on its PR when the pass judged it (one its
+	// owner closed) and does now (revived, or revived and then completed as
+	// an author) is judged again on the next pass, PR read included. A live
+	// job that has since completed is not caught here: it already waited on
+	// its PR, and this pass's PR read applied to it. Neither git nor the
+	// change list is read again, so a PR opened after the task's first PR
+	// read in this pass does not keep the pane (docs/pane-sweep.md).
 	if !paneSweepCandidate(latest) || latest.Pane != j.Pane || latest.Label != j.Label || (end.byJob && !paneSweepClosed(latest)) ||
 		(paneSweepWaitsOnPR(latest) && !paneSweepWaitsOnPR(j)) {
 		delete(s.idleSince, key)
