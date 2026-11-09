@@ -192,6 +192,11 @@ func (s *laneInboxStore) completeSpawn(parent context.Context, task hubSpawnTask
 			return false, err
 		}
 	}
+	// reconciling is not an outcome: ownership stays and neither lane is told.
+	// A later verified landing notifies SPAWNED, a terminal failure SPAWN_FAILED.
+	if status == "reconciling" {
+		return true, tx.Commit()
+	}
 	eventID := fmt.Sprintf("%s:%d:%s", task.Request.RequestID, task.Attempt, status)
 	// The owner keeps the bare event id. A failed or retryable spawn also tells
 	// the submitting lane, whose only other sign of it was ACCEPTED.

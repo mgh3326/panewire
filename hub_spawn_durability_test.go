@@ -115,9 +115,15 @@ func TestSpawnUnknownRetainsOwnershipAndLateResultCommitsOutbox(t *testing.T) {
 			if changed, err := recovered.completeSpawn(ctx, task, hubSpawnOutcome{RC: 124, Reason: "timeout"}, now); err != nil || changed {
 				t.Fatalf("terminal result regressed: %v %v", changed, err)
 			}
+			// A reconciling step notifies nothing (hk 3676). A timeout also leaves its
+			// SPAWN_FAILED row before the late SPAWNED; the other two leave only SPAWNED.
+			wantRows := 1
+			if reason == "timeout" {
+				wantRows = 2
+			}
 			var count int
-			if err = recovered.db.QueryRow(`SELECT count(*) FROM spawn_notifications WHERE delivered=0`).Scan(&count); err != nil || count != 2 {
-				t.Fatalf("atomic outbox lost: %d %v", count, err)
+			if err = recovered.db.QueryRow(`SELECT count(*) FROM spawn_notifications WHERE delivered=0`).Scan(&count); err != nil || count != wantRows {
+				t.Fatalf("atomic outbox: %d undelivered, want %d: %v", count, wantRows, err)
 			}
 			if changed, err := recovered.completeSpawn(ctx, task, success, now); err != nil || changed {
 				t.Fatalf("duplicate success: %v %v", changed, err)

@@ -21,6 +21,11 @@ const (
 // reporter's sampling/budget. Only accepted spawn operations enter it.
 func (h *HubServer) recordSpawnTrace(task hubSpawnTask, result hubSpawnOutcome) {
 	h.logSpawnOutcome(task, result)
+	// A reconciling operation is not an outcome. Its error event and trace claim
+	// belong to the terminal outcome that follows, so it must not take them here.
+	if spawnOutcomeStatus(result) == "reconciling" {
+		return
+	}
 	if h.spawnSentryClient() == nil || h.inbox == nil {
 		return
 	}
@@ -127,6 +132,12 @@ func spawnOutcomeTarget(task hubSpawnTask, result hubSpawnOutcome) (host, profil
 func (h *HubServer) logSpawnOutcome(task hubSpawnTask, result hubSpawnOutcome) {
 	host, profile := spawnOutcomeTarget(task, result)
 	attrs := []any{"request_id", task.Request.RequestID, "job", task.Job, "host", host, "profile", profile, "rc", result.RC, "stage", result.Stage, "reason", result.Reason}
+	if spawnOutcomeStatus(result) == "reconciling" {
+		// Info, not Warn: nothing was refused, and ownership is retained while the
+		// request may still land.
+		h.logger.Info("hub spawn reconciling", attrs...)
+		return
+	}
 	if result.RC != 0 {
 		h.logger.Warn("hub spawn refused", attrs...)
 		return
