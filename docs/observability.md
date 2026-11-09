@@ -32,9 +32,11 @@ and are read with `| json`.
 배치 후보의 `candidates`와 자동 선택의 `selection`은 이벤트 안의 배열입니다.
 현재 LogQL은 배열 원소마다 별도 시계열을 만들지 못하므로 대시보드는 제외
 결과가 담긴 배치 원본 행을 보여 주며, 후보 호스트·결과별 건수로 해석하면 안
-됩니다. refusal 패널과 alert는 coordinator의 fleet label `host=ncp`에서 기록한
-`spawn` 결과만 세어 노드 측 중간 `spawn` 거절 중복을 제외합니다. 구형 `runtug`
-이벤트도 포함합니다. 배치 차트는 허브 `placement` 이벤트의 `request_id` 필드가 비어 있지
+됩니다. refusal 패널과 alert는 coordinator가 기록한 `request_id`가 있는 `spawn`
+결과만 세어 같은 호스트에 기록될 수 있는 노드 측 `spawn` 거절을 제외합니다.
+`request_id`가 없는 `kind=spawn` 거절은 별도 진단 패널에 표시하며, 직접 CLI 실행과
+허브 실행 노드의 기록이 포함될 수 있어 고유 시도 수로 해석하면 안 됩니다.
+배치 차트는 허브 `placement` 이벤트의 `request_id` 필드가 비어 있지
 않은 행만 세어 request_id가 없는 노드의 `reason=forced` 실행 echo를 제외합니다.
 `node-local placement records (direct spawn + hub spawn node record)` 패널은
 request_id 없는 placement 성공 행을 따로 보여 줍니다. 배치 결과 패널은 호스트별 `placed`와

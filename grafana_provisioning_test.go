@@ -59,6 +59,14 @@ func fleetEventQuerySelects(expr string, labels map[string]string) bool {
 			return false
 		}
 	}
+	if strings.Contains(expr, `request_id="request_id"`) {
+		if strings.Contains(expr, `request_id != ""`) && labels["request_id"] == "" {
+			return false
+		}
+		if strings.Contains(expr, `request_id = ""`) && labels["request_id"] != "" {
+			return false
+		}
+	}
 	return true
 }
 
@@ -104,9 +112,9 @@ func TestGrafanaRefusalQueriesSelectOneEmitterPerAttempt(t *testing.T) {
 		labels map[string]string
 		want   bool
 	}{
-		{"hub final refusal", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "panewire", "kind": "spawn", "outcome": "refused"}, true},
-		{"same attempt node intermediate spawn refusal", map[string]string{"source": "fleet_events", "host": "mac-personal", "tool": "panewire", "kind": "spawn", "outcome": "refused"}, false},
-		{"legacy hub refusal", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "runtug", "kind": "spawn", "outcome": "failed"}, true},
+		{"hub final refusal", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "panewire", "kind": "spawn", "outcome": "refused", "request_id": "r-1"}, true},
+		{"same-host node intermediate spawn refusal", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "panewire", "kind": "spawn", "outcome": "refused"}, false},
+		{"legacy hub refusal with request id", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "runtug", "kind": "spawn", "outcome": "failed", "request_id": "r-2"}, true},
 		{"node_spawn refusal", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "panewire", "kind": "node_spawn", "outcome": "refused"}, false},
 		{"successful spawn", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "panewire", "kind": "spawn", "outcome": "ok"}, false},
 	}
@@ -146,7 +154,7 @@ func TestGrafanaDashboardIsValidAndUsesTheLabelContract(t *testing.T) {
 			checkFleetEventQuery(t, panel.Title, target.Expr)
 		}
 	}
-	for _, want := range []string{"Spawn refusals by host and reason", "Review outcomes", "Node spawn refusals by reason", "Quota observation age (minutes) at refusal"} {
+	for _, want := range []string{"Spawn refusals by host and reason", "Request-ID-less node-side spawn refusals", "Review outcomes", "Node spawn refusals by reason", "Quota observation age (minutes) at refusal"} {
 		if !titles[want] {
 			t.Fatalf("dashboard lacks panel %q", want)
 		}
@@ -162,8 +170,12 @@ func TestGrafanaDashboardIsValidAndUsesTheLabelContract(t *testing.T) {
 		t.Errorf("placements must select hub records by request_id presence: %s", placement)
 	}
 	refusals := panelsByTitle["Spawn refusals by host and reason"]
-	if !strings.Contains(refusals, `host="ncp"`) || !strings.Contains(refusals, `kind="spawn"`) || strings.Contains(refusals, `node_spawn`) || !strings.Contains(refusals, `tool=~"runtug|panewire"`) {
+	if strings.Contains(refusals, `host="ncp"`) || !strings.Contains(refusals, `kind="spawn"`) || strings.Contains(refusals, `node_spawn`) || !strings.Contains(refusals, `tool=~"runtug|panewire"`) || !strings.Contains(refusals, `request_id != ""`) {
 		t.Errorf("refusal panel must count only coordinator spawn results and retain legacy tool events: %s", refusals)
+	}
+	localSpawnRefusals := panelsByTitle["Request-ID-less node-side spawn refusals"]
+	if !strings.Contains(localSpawnRefusals, `kind="spawn"`) || !strings.Contains(localSpawnRefusals, `request_id = ""`) {
+		t.Errorf("node-side spawn refusal panel must select request-ID-less records: %s", localSpawnRefusals)
 	}
 	nodeRefusals := panelsByTitle["Node spawn refusals by reason"]
 	if !strings.Contains(nodeRefusals, `outcome=~"refused|failed"`) {
@@ -255,7 +267,7 @@ func TestGrafanaAlertRulesAreValid(t *testing.T) {
 		if strings.Contains(expr, "by (host, reason)") && !strings.Contains(expr, "unspecified") {
 			t.Fatalf("%s: a missing reason must group as unspecified", rule.Title)
 		}
-		if rule.Title == "Repeated spawn refusals" && (!strings.Contains(expr, `host="ncp"`) || !strings.Contains(expr, `kind="spawn"`) || strings.Contains(expr, "node_spawn") || !strings.Contains(expr, `tool=~"runtug|panewire"`)) {
+		if rule.Title == "Repeated spawn refusals" && (strings.Contains(expr, `host="ncp"`) || !strings.Contains(expr, `kind="spawn"`) || strings.Contains(expr, "node_spawn") || !strings.Contains(expr, `tool=~"runtug|panewire"`) || !strings.Contains(expr, `request_id != ""`)) {
 			t.Errorf("refusal alert must count only coordinator spawn results and retain legacy tool events: %s", expr)
 		}
 	}
