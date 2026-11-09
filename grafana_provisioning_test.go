@@ -38,6 +38,95 @@ func checkFleetEventQuery(t *testing.T, where, expr string) {
 	}
 }
 
+func fleetEventQuerySelects(expr string, labels map[string]string) bool {
+	selector := fleetEventStreamSelector.FindStringSubmatch(expr)
+	if selector == nil {
+		return false
+	}
+	for _, matcher := range strings.Split(selector[1], ",") {
+		matcher = strings.TrimSpace(matcher)
+		name, value, isRegexp := strings.Cut(matcher, "=~")
+		if !isRegexp {
+			name, value, _ = strings.Cut(matcher, "=")
+		}
+		name, value = strings.TrimSpace(name), strings.Trim(value, `"`)
+		if isRegexp {
+			pattern, err := regexp.Compile(value)
+			if err != nil || !pattern.MatchString(labels[name]) {
+				return false
+			}
+		} else if labels[name] != value {
+			return false
+		}
+	}
+	if strings.Contains(expr, `request_id="request_id"`) {
+		if strings.Contains(expr, `request_id != ""`) && labels["request_id"] == "" {
+			return false
+		}
+		if strings.Contains(expr, `request_id = ""`) && labels["request_id"] != "" {
+			return false
+		}
+	}
+	return true
+}
+
+func TestGrafanaRefusalQueriesSelectOneEmitterPerAttempt(t *testing.T) {
+	dashboardRaw, err := os.ReadFile("deploy/grafana/fleet-dashboard.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dashboard struct {
+		Panels []struct {
+			Title   string `json:"title"`
+			Targets []struct {
+				Expr string `json:"expr"`
+			} `json:"targets"`
+		} `json:"panels"`
+	}
+	if err := json.Unmarshal(dashboardRaw, &dashboard); err != nil {
+		t.Fatal(err)
+	}
+	var panelExpr string
+	for _, panel := range dashboard.Panels {
+		if panel.Title == "Spawn refusals by host and reason" && len(panel.Targets) > 0 {
+			panelExpr = panel.Targets[0].Expr
+		}
+	}
+	alertRaw, err := os.ReadFile("deploy/grafana/fleet-alert-rules.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var alertGroup grafanaRuleGroup
+	if err := json.Unmarshal(alertRaw, &alertGroup); err != nil {
+		t.Fatal(err)
+	}
+	var alertExpr string
+	for _, rule := range alertGroup.Rules {
+		if rule.Title == "Repeated spawn refusals" && len(rule.Data) > 0 {
+			alertExpr, _ = rule.Data[0].Model["expr"].(string)
+		}
+	}
+	queries := map[string]string{"refusal panel": panelExpr, "refusal alert": alertExpr}
+	fixtures := []struct {
+		name   string
+		labels map[string]string
+		want   bool
+	}{
+		{"hub final refusal", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "panewire", "kind": "spawn", "outcome": "refused", "request_id": "r-1"}, true},
+		{"same-host node intermediate spawn refusal", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "panewire", "kind": "spawn", "outcome": "refused"}, false},
+		{"legacy hub refusal with request id", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "runtug", "kind": "spawn", "outcome": "failed", "request_id": "r-2"}, true},
+		{"node_spawn refusal", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "panewire", "kind": "node_spawn", "outcome": "refused"}, false},
+		{"successful spawn", map[string]string{"source": "fleet_events", "host": "ncp", "tool": "panewire", "kind": "spawn", "outcome": "ok"}, false},
+	}
+	for queryName, expr := range queries {
+		for _, fixture := range fixtures {
+			if got := fleetEventQuerySelects(expr, fixture.labels); got != fixture.want {
+				t.Errorf("%s selected %s=%v, want %v; query=%s", queryName, fixture.name, got, fixture.want, expr)
+			}
+		}
+	}
+}
+
 func TestGrafanaDashboardIsValidAndUsesTheLabelContract(t *testing.T) {
 	raw, err := os.ReadFile("deploy/grafana/fleet-dashboard.json")
 	if err != nil {
@@ -65,10 +154,63 @@ func TestGrafanaDashboardIsValidAndUsesTheLabelContract(t *testing.T) {
 			checkFleetEventQuery(t, panel.Title, target.Expr)
 		}
 	}
-	for _, want := range []string{"Spawn refusals by host and reason", "Review outcomes", "Node spawn refusals by reason", "Quota observation age (minutes) at refusal"} {
+	for _, want := range []string{"Spawn refusals by host and reason", "Request-ID-less node-side spawn refusals", "Review outcomes", "Node spawn refusals by reason", "Quota observation age (minutes) at refusal"} {
 		if !titles[want] {
 			t.Fatalf("dashboard lacks panel %q", want)
 		}
+	}
+	panelsByTitle := map[string]string{}
+	for _, panel := range dashboard.Panels {
+		if len(panel.Targets) > 0 {
+			panelsByTitle[panel.Title] = panel.Targets[0].Expr
+		}
+	}
+	placement := panelsByTitle["Placements by chosen host and ranking"]
+	if !strings.Contains(placement, `kind="placement"`) || !strings.Contains(placement, `request_id="request_id"`) || !strings.Contains(placement, `request_id != ""`) {
+		t.Errorf("placements must select hub records by request_id presence: %s", placement)
+	}
+	refusals := panelsByTitle["Spawn refusals by host and reason"]
+	if strings.Contains(refusals, `host="ncp"`) || !strings.Contains(refusals, `kind="spawn"`) || strings.Contains(refusals, `node_spawn`) || !strings.Contains(refusals, `tool=~"runtug|panewire"`) || !strings.Contains(refusals, `request_id != ""`) {
+		t.Errorf("refusal panel must count only coordinator spawn results and retain legacy tool events: %s", refusals)
+	}
+	localSpawnRefusals := panelsByTitle["Request-ID-less node-side spawn refusals"]
+	if !strings.Contains(localSpawnRefusals, `kind="spawn"`) || !strings.Contains(localSpawnRefusals, `request_id = ""`) {
+		t.Errorf("node-side spawn refusal panel must select request-ID-less records: %s", localSpawnRefusals)
+	}
+	nodeRefusals := panelsByTitle["Node spawn refusals by reason"]
+	if !strings.Contains(nodeRefusals, `outcome=~"refused|failed"`) {
+		t.Errorf("node refusal panel must filter outcomes: %s", nodeRefusals)
+	}
+	for title, kind := range map[string]string{
+		"Placement refusals by reason":                                        "kind=\"placement\"",
+		"Quota shadow agreement by kind":                                      "kind=~\"quota_gate_shadow|quota_pools_shadow\"",
+		"Placement candidate exclusion records":                               "kind=\"placement\"",
+		"Placement decisions: placed vs final refusals by host":               "kind=\"placement\"",
+		"node-local placement records (direct spawn + hub spawn node record)": "kind=\"placement\"",
+	} {
+		if !strings.Contains(panelsByTitle[title], kind) {
+			t.Errorf("dashboard lacks a query for %q with %s: %s", title, kind, panelsByTitle[title])
+		}
+	}
+	if !strings.Contains(panelsByTitle["Placement refusals by reason"], `request_id="request_id"`) || !strings.Contains(panelsByTitle["Placement refusals by reason"], `request_id != ""`) {
+		t.Errorf("placement refusals must select hub records by request_id: %s", panelsByTitle["Placement refusals by reason"])
+	}
+	if !strings.Contains(panelsByTitle["Placement decisions: placed vs final refusals by host"], `outcome=~"placed|refused"`) || !strings.Contains(panelsByTitle["Placement decisions: placed vs final refusals by host"], `request_id != ""`) {
+		t.Errorf("placement decisions must compare hub placed and refused outcomes: %s", panelsByTitle["Placement decisions: placed vs final refusals by host"])
+	}
+	if !strings.Contains(panelsByTitle["node-local placement records (direct spawn + hub spawn node record)"], `request_id = ""`) {
+		t.Errorf("node-local placement panel must select missing request_id records: %s", panelsByTitle["node-local placement records (direct spawn + hub spawn node record)"])
+	}
+	if !strings.Contains(panelsByTitle["Spawn stuck and held by branch"], `kind="spawn"`) || !strings.Contains(panelsByTitle["Spawn stuck and held by branch"], `outcome="stuck"`) {
+		t.Errorf("stuck series must select spawn outcome=stuck: %s", panelsByTitle["Spawn stuck and held by branch"])
+	}
+	for _, panel := range dashboard.Panels {
+		if panel.Title == "Spawn stuck and held by branch" && (len(panel.Targets) != 2 || !strings.Contains(panel.Targets[1].Expr, `kind="spawn_held"`)) {
+			t.Errorf("held series must separately select spawn_held: %+v", panel.Targets)
+		}
+	}
+	if strings.Contains(strings.ToLower(panelsByTitle["Placement decisions: placed vs final refusals by host"]), "completed") {
+		t.Error("placement decision panel must not claim completion")
 	}
 	if dashboard.UID != "fleet-observability" {
 		t.Fatalf("uid %q", dashboard.UID)
@@ -124,6 +266,9 @@ func TestGrafanaAlertRulesAreValid(t *testing.T) {
 		}
 		if strings.Contains(expr, "by (host, reason)") && !strings.Contains(expr, "unspecified") {
 			t.Fatalf("%s: a missing reason must group as unspecified", rule.Title)
+		}
+		if rule.Title == "Repeated spawn refusals" && (strings.Contains(expr, `host="ncp"`) || !strings.Contains(expr, `kind="spawn"`) || strings.Contains(expr, "node_spawn") || !strings.Contains(expr, `tool=~"runtug|panewire"`) || !strings.Contains(expr, `request_id != ""`)) {
+			t.Errorf("refusal alert must count only coordinator spawn results and retain legacy tool events: %s", expr)
 		}
 	}
 	for _, want := range []string{"Repeated spawn refusals", "Review missing", "Reviewer failing repeatedly", "Quota observation stale", "Fleet events pipeline silent"} {
