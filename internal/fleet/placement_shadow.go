@@ -610,14 +610,27 @@ func (pol shadowPolicy) shadowInput(h selHost, req shadowReq, now time.Time) fle
 	return in
 }
 
-// recordPlacementShadow ranks the hosts under each arm and emits the
-// placement_shadow event. live is the order the live ranking produced. It
-// never changes what the caller does: every failure is contained here.
-func (a *App) recordPlacementShadow(s Spawn, role string, tags []string, hosts, live []selHost, now time.Time) {
+// shadowRecord is one placement_shadow event between the two halves of
+// host-first selection. The host arms and the inputs are fixed before admission
+// runs. The waste_first arm (placement_shadow_waste.go) reads the quota states
+// admission produces, so finishPlacementShadow writes the event after it.
+type shadowRecord struct {
+	job, reason, outcome, detail string
+	sh                           *fleetevent.PlacementShadow
+	snap                         wasteSnap
+	snapErr                      string
+}
+
+// recordPlacementShadow ranks the hosts under the host arms and returns the
+// event to finish once admission has run. live is the order the live ranking
+// produced; cands are the plan's candidates, which the waste_first arm snapshots
+// before admission rewrites them. It never changes what the caller does: every
+// failure is contained here.
+func (a *App) recordPlacementShadow(s Spawn, role string, tags []string, hosts, live []selHost, now time.Time, cands []*selCand) (rec *shadowRecord) {
 	defer func() { _ = recover() }()
 	pol := a.shadowPolicy()
 	if !pol.enabled || s.DryRun {
-		return
+		return nil
 	}
 	req := shadowReq{role: role, class: workClassOf(role), tags: tags}
 	liveRank := shadowRank(live)
@@ -661,8 +674,23 @@ func (a *App) recordPlacementShadow(s Spawn, role string, tags []string, hosts, 
 		}
 	}
 	if len(liveRank) == 0 && len(sh.Inputs) == 0 {
-		return
+		return nil
 	}
 	detail := fmt.Sprintf("work_class=%s role=%s fixed=%s measured=%s", req.class, role, sh.Arms[shadowArmFixed].Outcome, sh.Arms[shadowArmMeasured].Outcome)
-	a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "placement_shadow", Job: s.Job, RequestID: a.RequestID, Outcome: outcome, Reason: req.class, Detail: detail, Shadow: sh})
+	snap, snapErr := wasteSnapOf(cands)
+	return &shadowRecord{job: s.Job, reason: req.class, outcome: outcome, detail: detail, sh: sh, snap: snap, snapErr: snapErr}
+}
+
+// finishPlacementShadow adds the waste_first arm to rec and writes the event.
+// It runs once admission has run. usable are the ranked hosts the walk could
+// still use; livePass is the pass that chose (1, or 2 for the credit band).
+// The event outcome and detail stay those of the host arms. A nil rec (shadow
+// off, dry run, or nothing to record) writes nothing.
+func (a *App) finishPlacementShadow(rec *shadowRecord, p *selPlan, usable []selHost, livePass int) {
+	if rec == nil {
+		return
+	}
+	defer func() { _ = recover() }()
+	rec.sh.WasteFirst = a.runWasteFirst(rec.snap, rec.snapErr, p, usable, livePass)
+	a.fleetEventWriter().EmitEvent(fleetevent.Event{Kind: "placement_shadow", Job: rec.job, RequestID: a.RequestID, Outcome: rec.outcome, Reason: rec.reason, Detail: rec.detail, Shadow: rec.sh})
 }
