@@ -14,6 +14,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -37,7 +38,77 @@ type Event struct {
 	Chosen     string          `json:"chosen,omitempty"`
 	Candidates []Candidate     `json:"candidates,omitempty"`
 	Selection  []HostSelection `json:"selection,omitempty"`
+	// Shadow is the placement_shadow comparison (docs/placement.md, "Shadow
+	// comparison"). Other lines omit it.
+	Shadow *PlacementShadow `json:"shadow,omitempty"`
 }
+
+// PlacementShadow records how alternative host rankings would have ordered the
+// hosts of one job next to the order the live path used. Arms is a map so a
+// later arm (hk 3651) adds a key without a schema change. It carries numbers
+// and host ids only.
+type PlacementShadow struct {
+	// Role is the spawn role the work class was derived from.
+	Role      string               `json:"role"`
+	WorkClass string               `json:"work_class"`
+	Live      ShadowOrder          `json:"live"`
+	Arms      map[string]ShadowArm `json:"arms"`
+	// LoadMeasure is the one load measure the fixed arm used for every host:
+	// cpu_busy or load5_per_core.
+	LoadMeasure string `json:"load_measure,omitempty"`
+	// Truncated says an order or the inputs were cut to MaxCandidates hosts.
+	Truncated bool `json:"truncated,omitempty"`
+	// Inputs are the readings the arms used, one row per host, once per event.
+	Inputs []ShadowInput `json:"inputs,omitempty"`
+}
+
+// ShadowOrder is a host order, best first.
+type ShadowOrder struct {
+	First string           `json:"first"`
+	Order []ShadowHostRank `json:"order"`
+}
+
+// ShadowHostRank is one host's place in an order: the live bucket (0 awake
+// under the load threshold, 1 awake without a reading, 2 awake over it, 3
+// asleep) and the score the order used, when it had one.
+type ShadowHostRank struct {
+	Host   string   `json:"host"`
+	Bucket int      `json:"bucket"`
+	Score  *float64 `json:"score,omitempty"`
+}
+
+// ShadowArm is one arm's order and how it compares with the live one. Outcome
+// is agree (same order), order_differs (same first host, other order),
+// disagree (other first host) or shadow_error (the arm failed; Error says
+// how, and the live path was not touched).
+type ShadowArm struct {
+	Outcome string           `json:"outcome"`
+	First   string           `json:"first"`
+	Order   []ShadowHostRank `json:"order"`
+	Error   string           `json:"shadow_error,omitempty"`
+}
+
+// ShadowInput is what the arms read for one host. A nil value is a reading the
+// hub did not send.
+type ShadowInput struct {
+	Host       string   `json:"host"`
+	Local      bool     `json:"local,omitempty"`
+	CPUBusy    *float64 `json:"cpu_busy,omitempty"`
+	Load5Core  *float64 `json:"load5_per_core,omitempty"`
+	Load1Core  *float64 `json:"load1_per_core,omitempty"`
+	MemAvail   *float64 `json:"mem_available,omitempty"`
+	MemFreePct *float64 `json:"mem_free_pct,omitempty"`
+	Pressure   *float64 `json:"pressure,omitempty"`
+	SwapInPerS *float64 `json:"swap_in_per_s,omitempty"`
+	Jobs       *int     `json:"jobs,omitempty"`
+	Power      *float64 `json:"power,omitempty"`
+	Capability *float64 `json:"capability,omitempty"`
+	SignalAgeS *float64 `json:"signal_age_s,omitempty"`
+	MemorySrc  string   `json:"memory_source,omitempty"`
+}
+
+// MaxShadowArms bounds the arms of one line.
+const MaxShadowArms = 8
 
 // HostSelection records admission in host rank order, before execution placement.
 // It carries no account identities or gate output.
@@ -170,6 +241,7 @@ func (w *Writer) EmitEvent(ev Event) bool {
 			r.Pool, r.Outcome = Code(Redact(r.Pool)), Code(Redact(r.Outcome))
 		}
 	}
+	ev.Shadow = ev.Shadow.bounded()
 	if w.Sink != nil {
 		w.Sink(ev)
 		return true
@@ -280,4 +352,51 @@ func Redact(s string) string {
 		}
 		return "[redacted]"
 	})
+}
+
+// bounded returns a normalised copy: at most MaxCandidates hosts per order and
+// MaxShadowArms arms, codes on every identifier, no free text.
+func (p *PlacementShadow) bounded() *PlacementShadow {
+	if p == nil {
+		return nil
+	}
+	out := &PlacementShadow{Role: Code(p.Role), WorkClass: Code(p.WorkClass), Live: p.Live.bounded(), Arms: map[string]ShadowArm{}, LoadMeasure: Code(p.LoadMeasure), Truncated: p.Truncated}
+	out.Truncated = out.Truncated || len(p.Live.Order) > MaxCandidates || len(p.Inputs) > MaxCandidates || len(p.Arms) > MaxShadowArms
+	names := make([]string, 0, len(p.Arms))
+	for name := range p.Arms {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if len(out.Arms) == MaxShadowArms {
+			break
+		}
+		out.Arms[Code(name)] = p.Arms[name].bounded()
+		out.Truncated = out.Truncated || len(p.Arms[name].Order) > MaxCandidates
+	}
+	for i, in := range p.Inputs {
+		if i == MaxCandidates {
+			break
+		}
+		in.Host, in.MemorySrc = Code(in.Host), Code(in.MemorySrc)
+		out.Inputs = append(out.Inputs, in)
+	}
+	return out
+}
+
+func (o ShadowOrder) bounded() ShadowOrder {
+	out := ShadowOrder{First: Code(o.First), Order: []ShadowHostRank{}}
+	for i, r := range o.Order {
+		if i == MaxCandidates {
+			break
+		}
+		r.Host = Code(r.Host)
+		out.Order = append(out.Order, r)
+	}
+	return out
+}
+
+func (a ShadowArm) bounded() ShadowArm {
+	o := ShadowOrder{First: a.First, Order: a.Order}.bounded()
+	return ShadowArm{Outcome: Code(a.Outcome), First: o.First, Order: o.Order, Error: Bound(Redact(a.Error), maxCode)}
 }

@@ -430,6 +430,27 @@ No host installation or service management is performed by spawn.
 | `load_threshold` | `1.0` | load5/ncpu value above which a host takes no new job while anything else qualifies. |
 | `wake_after_s` | `600` | How long the task must have waited before saturated awake hosts justify waking a sleeper. |
 
+`[placement.shadow]` and `[placement.capability.<class>]` tune the placement
+shadow comparison, which records how other rankings would have ordered the
+hosts and never changes a placement. Every key is optional; see
+[Shadow comparison](placement.md#shadow-comparison) for what each does and its
+default.
+
+| Key | Default | Meaning |
+| --- | --- | --- |
+| `shadow.enabled` | `true` | `false` stops recording the `placement_shadow` event. |
+| `shadow.cpu_busy_over` | `load_threshold` | CPU-busy fraction at or above which a host counts as loaded in the shadow arms. |
+| `shadow.hysteresis` | `1.25` | Factor a rival's hub score must reach over the policy-order host's to take the decision. |
+| `shadow.all_loaded_below` | `15` | Best score under which every host counts as loaded. |
+| `shadow.mem_refuse_below_pct` | `30` | The measured arm refuses a host whose available memory is below this percentage. |
+| `shadow.pressure_refuse_level` | `2` | The measured arm refuses a macOS host at or above this pressure level (0 normal, 1 warn, 2 critical). |
+| `shadow.pressure_warn_mem` | `0.5` | The memory term of a macOS host at warn pressure. |
+| `shadow.mem_floor`, `shadow.mem_span` | `0.20`, `0.20` | The memory term is 0 at `mem_floor` available and 1 at `mem_floor + mem_span`. |
+| `shadow.swap_in_half_per_s` | `5000` | Swap-ins per second (pages) that halve the swap term. |
+| `shadow.load_knee`, `shadow.load_cap` | `0.75`, `4` | Load per core below the knee costs nothing; a higher reading stops costing more at the cap. |
+| `shadow.jobs_half`, `shadow.claim_cost` | `8`, `10` | Live job count that halves the jobs term; points one claim in the spawn bridge costs. |
+| `capability.light.<host>`, `capability.heavy.<host>` | none | The host's capability for light and heavy work, in the unit of the hub's `power`. A host with no entry keeps its `power`. |
+
 ## `[quota]`
 
 Shared-quota read settings for presence-aware placement. The URL and bearer

@@ -79,8 +79,10 @@ type FleetStateMessage struct {
 		SlotFull  bool    `json:"slot_full"`
 		Reason    string  `json:"reason"`
 		Source    string  `json:"source"`
+		// Usable is the hub's own verdict for the host (placementUsable).
+		Usable softBool `json:"usable,omitempty"`
 		PlacementSignals
-		Signals *PlacementSignals `json:"signals,omitempty"`
+		Signals *hubSignals `json:"signals,omitempty"`
 	} `json:"load,omitempty"`
 	Publisher *struct {
 		Connected bool      `json:"connected"`
@@ -96,6 +98,10 @@ type fleetStateLog struct {
 	fetchedAt time.Time
 	hosts     *StateUse
 	quota     map[string]StateUse
+	// slotFull names the hosts hubHosts left out because the hub reported
+	// them slot-full. Only the placement shadow reads it (placement_shadow.go);
+	// the live host list is unchanged.
+	slotFull map[string]bool
 }
 
 // hubStateHTTP is the production reader: the operator credential from [hub],
@@ -227,11 +233,17 @@ func (m FleetStateMessage) validAt() time.Time {
 // value: any other case falls back to `panewire place`, whose placement call
 // is also what triggers the hub's wake-on-spill for a sleeping host.
 func (a *App) hubHosts(ctx context.Context) ([]HostView, string) {
+	// The slot-full names belong to one successful read of the host list: drop
+	// the previous read's before trying another.
+	if a.fleetLog != nil {
+		a.fleetLog.slotFull = nil
+	}
 	snap, why := a.fleetSnapshot(ctx)
 	if snap == nil {
 		return nil, why
 	}
 	var out []HostView
+	slotFull := map[string]bool{}
 	for _, m := range snap.States {
 		if m.Kind != "load" || m.Load == nil {
 			continue
@@ -246,11 +258,14 @@ func (a *App) hubHosts(ctx context.Context) ([]HostView, string) {
 		}
 		if m.Load.SlotFull {
 			// /v1/placement drops a slot-full machine from its candidates.
+			slotFull[m.Host] = true
 			continue
 		}
 		hv := HostView{Name: m.Host, Connected: true, Reason: m.Load.Reason, Signals: m.Load.PlacementSignals, Source: m.Load.Source}
+		hv.Extra = HostExtra{Usable: m.Load.Usable.v, MeasuredAt: m.MeasuredAt}
 		if m.Load.Signals != nil {
-			hv.Signals = *m.Load.Signals
+			hv.Signals = m.Load.Signals.PlacementSignals
+			hv.Extra.CPUBusy1m, hv.Extra.SwapInLinux = m.Load.Signals.CPUBusy1m.v, m.Load.Signals.SwapInLinux.true()
 		}
 		score := m.Load.Score
 		hv.Score = &score
@@ -261,6 +276,9 @@ func (a *App) hubHosts(ctx context.Context) ([]HostView, string) {
 		}
 		out = append(out, hv)
 	}
+	// Kept even when every host is slot-full (out is nil and the live path
+	// falls back to the direct read, which omits them too).
+	a.fleetLog.slotFull = slotFull
 	if out == nil {
 		return nil, stateAbsent
 	}

@@ -44,6 +44,9 @@ type HostView struct {
 	// so a rival has to beat the winner by the hub's margin, not by a point.
 	Decided        bool
 	DecisionReason string
+	// Extra is what only the shadow comparison reads (placement_shadow.go);
+	// no live decision looks at it.
+	Extra HostExtra
 }
 
 // PresenceRecord is a pacelever host-presence row: which host measured which
@@ -1597,7 +1600,13 @@ func parseHubHosts(raw string) ([]HostView, error) {
 			LoadRatio *float64 `json:"load_ratio"`
 			Score     *float64 `json:"score"`
 			PlacementSignals
-			Signals *PlacementSignals `json:"signals"`
+			Signals *hubSignals `json:"signals"`
+			// The node's memory telemetry is on the candidate already; only
+			// the shadow comparison reads it.
+			MemoryFreePct softFloat `json:"memory_free_pct"`
+			SwapUsedMB    softFloat `json:"swap_used_mb"`
+			SwapInPerS    softFloat `json:"swap_in_per_s"`
+			Pressure      softFloat `json:"pressure"`
 		}
 		var name string
 		if json.Unmarshal(v, &name) != nil {
@@ -1619,8 +1628,10 @@ func parseHubHosts(raw string) ([]HostView, error) {
 		if p.Decision != nil && *p.Decision == name {
 			hv.Decided, hv.DecisionReason = true, p.Reason
 		}
+		hv.Extra = HostExtra{MemFreePct: c.MemoryFreePct.v, SwapUsedMB: c.SwapUsedMB.v, SwapInPerS: c.SwapInPerS.v, Pressure: c.Pressure.v}
 		if c.Signals != nil {
-			hv.Signals = *c.Signals
+			hv.Signals = c.Signals.PlacementSignals
+			hv.Extra.CPUBusy1m, hv.Extra.SwapInLinux = c.Signals.CPUBusy1m.v, c.Signals.SwapInLinux.true()
 		}
 		if c.Connected != nil {
 			hv.Connected = *c.Connected

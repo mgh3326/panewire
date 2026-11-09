@@ -548,6 +548,20 @@ type selHost struct {
 	// (host_fit.go), "" when it can.
 	over bool
 	fit  string
+	// The fields below are read only by the shadow comparison
+	// (placement_shadow.go); no live decision uses them. view is the hub's
+	// reading of this host (nil when it sent none), local5 the local load5 per
+	// core, guard the local max_load_ratio, memExcluded marks a host dropped
+	// only by the hub's memory admission floor, and fitNoMem is what fit would
+	// be without that exclusion.
+	view        *HostView
+	local5      *float64
+	guard       *float64
+	memExcluded bool
+	fitNoMem    string
+	// slotFull marks a host the hub reported slot-full and hubHosts left out of
+	// the host list, so it has no view.
+	slotFull bool
 }
 
 // selPresence snapshots eligible hosts and their current account bindings for
@@ -604,8 +618,10 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 			h.presence = firstNonempty(str(cfg, "presence_id"), machine)
 			h.awake = true
 			h.load = a.localLoad(ctx)
+			h.local5 = h.load
 			if hv, reported := sp.hub[name]; reported {
 				h.score, h.decided = hv.Score, hv.Decided
+				h.view = &hv
 			}
 			if !boolean(cfg, "spawn", true) {
 				h.excluded = true
@@ -615,8 +631,10 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 			if hv, reported := sp.hub[name]; reported {
 				h.awake = hv.Connected
 				h.load, h.score, h.decided = hv.LoadRatio, hv.Score, hv.Decided
+				h.view = &hv
 				if strings.Contains(hv.Reason, "not_accepting") {
 					h.excluded = true
+					h.memExcluded = onlyMemoryNotAccepting(hv.Reason)
 				}
 			} else {
 				h.awake = !h.wakeable || sp.hub == nil
@@ -625,6 +643,7 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 		if slices.Contains(excluded, name) || s.Host != "" && s.Host != "auto" && s.Host != name && !(local && s.Host == "local") {
 			h.restricted = !h.excluded
 			h.excluded = true
+			h.memExcluded = false
 		}
 		// The same pressure rule as the placement plan: the local
 		// max_load_ratio guard (an unreadable load counts as pressured),
@@ -632,21 +651,32 @@ func (a *App) newSelPresence(ctx context.Context, s Spawn, req selReq) *selPrese
 		if maxRatio, guard := number(cfg, "max_load_ratio"); local && guard && (h.load == nil || *h.load >= maxRatio) {
 			h.over = true
 		}
+		if maxRatio, guard := number(cfg, "max_load_ratio"); local && guard {
+			h.guard = &maxRatio
+		}
 		if h.load != nil && *h.load >= threshold {
 			h.over = true
 		}
 		missing := missingCaps(cfg, required)
 		refusal := roleRefusal(cfg, req.role, grade)
 		h.eligible = len(missing) == 0 && refusal == ""
-		switch {
-		case h.excluded:
-			h.fit = "excluded"
-		case len(missing) > 0:
-			h.fit = "missing_caps:" + strings.Join(missing, ",")
-		case refusal != "":
-			h.fit = refusal
-		case !h.awake && !h.wakeable:
-			h.fit = "disconnected"
+		h.slotFull = a.fleetLog != nil && a.fleetLog.slotFull[name]
+		fit := func(excluded bool) string {
+			switch {
+			case excluded:
+				return "excluded"
+			case len(missing) > 0:
+				return "missing_caps:" + strings.Join(missing, ",")
+			case refusal != "":
+				return refusal
+			case !h.awake && !h.wakeable:
+				return "disconnected"
+			}
+			return ""
+		}
+		h.fit = fit(h.excluded)
+		if h.memExcluded {
+			h.fitNoMem = fit(false)
 		}
 		sp.hosts = append(sp.hosts, h)
 	}

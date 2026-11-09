@@ -21,6 +21,14 @@ and are read with `| json`.
 | `job_result` | `attached` | `duplicate_done` | node | the duplicate `done --result` attached a result (the duplicate-completion fix) |
 | `job_result` | `conflict` | `different_result` | node | a later `done --result` met a different stored result |
 | `job_result` | `missing` | `no_result` | node | a reviewer's completed `done` carried no result |
+| `placement_shadow` | `agree`, `order_differs`, `disagree` or `shadow_error` (the worst of the arms) | the work class (`light`, `heavy`) | node | the spawn engine ranked the hosts for a job; the line compares the live order with the shadow arms and changes nothing live. See [Shadow comparison](placement.md#shadow-comparison) |
+
+A `placement_shadow` line carries `job`, `request_id` when known, and a `shadow`
+object: `role`, `work_class`, `live` (the live order), `arms` (a map of arm name
+to `outcome`, `first`, `order` and `shadow_error`), `inputs` (one row of
+readings per host) and `load_measure`. Orders and inputs are cut at 16 hosts
+(`truncated`). It carries numbers and host ids only. Loki labels stay `kind` and
+`outcome`; read the arms with `| json`.
 
 ## Grafana에서 차트로 보는 kind
 
