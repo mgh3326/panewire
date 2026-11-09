@@ -61,7 +61,7 @@ directory is kept. Any read error or doubt keeps it.
 | kind | It has `events/` (a job that ran here), or `submission.json` and no `events/` (a submitter-side dir, below). Anything else — lead scratch, a consult folder — is not a job. | `not-a-job`, `events-unreadable`, `submission-unreadable`, `submission-mismatch` |
 | (a) | The job is not `--keep`, and no completion watcher holds it (`watchActive`). | `protected`, `watcher-active` |
 | (d) | The newest file mtime and event time under it are at least the TTL old. | `too-young` |
-| (c) | In the herdr session the receipt recorded, `herdr pane list` (the full inventory, plain shells included) names no pane with the job's recorded pane id or label, and neither does `herdr agent list`. The agent list alone never proves a pane gone: a shell pane whose agent exited is only in the pane list. A job that recorded neither a pane nor a label, a receipt that names no `herdr_session` (one from before it was recorded), or a list that cannot be read keeps it. A list answer that carries an error (an `error` member or `"ok":false`), or any row that is not an object with a pane id (`null`, `{}`), cannot be read. | `pane-live`, `pane-unknown`, `pane-session-unknown`, `pane-unreadable` |
+| (c) | In the herdr session the receipt recorded, `herdr pane list` (the full inventory, plain shells included) names no pane with the job's recorded pane id or label, and neither does `herdr agent list`. The agent list alone never proves a pane gone: a shell pane whose agent exited is only in the pane list. A job that recorded neither a pane nor a label, a receipt that names no `herdr_session` (one from before it was recorded), or a list that cannot be read keeps it. A pane list answer that carries an error (an `error` member or `"ok":false`), or any row that is not an object with a pane id (`null`, `{}`), cannot be read. Only the pane list is read that strictly; the agent list still vetoes. The agent list is decoded leniently: an `error` member is ignored, and any decoded agent with the job's pane id or label keeps the directory (`pane-live`), even beside an `error` member. `"agents": null`, a `null` row and a `{}` row read as no agent. An agent answer with no `agents` key, or malformed JSON, cannot be decoded and keeps the directory (`pane-unreadable`). | `pane-live`, `pane-unknown`, `pane-session-unknown`, `pane-unreadable` |
 | (b) | The hk job record is `completed` or `lost`. `escalated` and every live state keep it. | `hk-not-terminal`, `hk-missing`, `hk-unreadable` |
 | (e) | hk confirms every artifact in the directory (below). | `report-…`, `result-unconfirmed`, `screen-…`, `evidence-unconfirmed`, `evidence-unclassified` |
 
@@ -111,6 +111,36 @@ be read keeps it (`spawn-status-unreadable`). Its pane is not checked here:
 it lives on the executing node, whose own directory for the job keeps the
 contract.
 
+The receipt's `--report` is a recorded report path like any other. Its
+`--report-relative` is relative to the jobs root of the node that ran the
+job, and the same layout here names this directory: the pass records the
+clean jobs root, `/` and the value as written, and judges that path as
+above. It is never cleaned first, so a value that is absolute or not clean
+keeps the directory (`report-path-unreadable`) at its place in the gate
+order: a `.` or `..` segment, an empty segment (`s1//summary.md`), or a
+trailing `/`. The check is by path segment, so `s1/report..md` and
+`s1/.hidden/summary.md` are ordinary paths, and no hub charset or Windows
+separator rule applies: `s1/sub\summary.md` names a file whose name holds a
+backslash. An empty value records nothing. The locked re-check reads the
+receipt again through the same code.
+
+### Directories that never expire
+
+Some directories fail the gate on every pass, so the TTL never deletes
+them; the operator decides:
+
+- A receipt that records a label but no `herdr_session` (a headless
+  receipt, or one from before the session was recorded): `pane-session-unknown`.
+- A receipt that records neither a pane nor a label: `pane-unknown`.
+- A recorded report path that goes through a symlink other than the jobs
+  root's own alias: `report-path-unreadable`. On macOS, for one, a path
+  recorded under `/tmp` when the jobs root is configured by its real path
+  under `/private/tmp`. A report recorded under the jobs root's own alias
+  is still accepted.
+
+A submitter-side directory skips the pane check, so the first two never
+apply to it.
+
 ## Deletion
 
 Right before a delete the pass takes the job's `.panewire-operation.lock`
@@ -136,8 +166,13 @@ again with fresh herdr and hk reads. A held lock keeps the directory
 After the rename, the job's name no longer exists: a writer that opens a
 file under it fails, while a writer that first runs `MkdirAll` recreates a
 fresh, empty directory under that name. That fresh directory is not
-deleted; a later pass judges it as any other. A writer that wrote before the
-rename shows in the tombstone's inventory. **Residual
+deleted; a later pass judges it as any other. The one exception is step 3:
+when the tombstone changed and any directory exists under the job's name,
+empty or not, the rename back fails (Go's `os.Rename` refuses an existing
+directory target), so the tombstone stays as `tombstone-left` for the
+operator and nothing is deleted. A
+writer that wrote before the rename shows in the tombstone's inventory.
+**Residual
 window:** a writer holding a file descriptor it opened in the directory
 before the rename can still write into the tombstone after step 3, and that
 write is deleted with it.

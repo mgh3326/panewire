@@ -528,13 +528,11 @@ func (a *App) delegateHeadless(ctx context.Context, s Spawn, c delegateCaller, b
 	if e = a.event(ctx, s.Job, "job.spawned", receipt); e != nil {
 		return "", e
 	}
-	spawned := map[string]any{"state": "spawned", "role": s.Role, "label": s.Label, "family": seat.Family, "profile": s.Profile, "model": launch.ModelID, "pool": pool, "owner_lane": owner}
+	spawned := map[string]any{"state": "spawned", "role": s.Role, "label": s.Label, "family": seat.Family, "profile": s.Profile, "model": launch.ModelID, "pool": pool, "owner_lane": owner, "selection": jobSelection(s, "delegate")}
 	if s.Inherited != "" {
 		spawned["parent_job"] = s.Inherited
 	}
-	if e = a.putJobRecord(ctx, s.Job, spawned); e != nil {
-		a.jobRecordFailed(ctx, s.Job, "spawned", e)
-	}
+	putSpawnedJobRecord(ctx, a, s.Job, spawned)
 
 	env = append(env, "ARBITER_JOB="+s.Job, "ARBITER_RESOURCE="+pool, "ARBITER_KIND=quota_pool", "ARBITER_PROFILE="+seat.gateName(), "HK_TASK_ID="+s.Task)
 	cmdArgs := slices.Concat(shot.pre, argv, shot.post)
