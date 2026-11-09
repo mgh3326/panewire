@@ -3,6 +3,7 @@ package fleet
 import (
 	"context"
 	"encoding/json"
+	"flag"
 	"os"
 	"testing"
 
@@ -15,8 +16,10 @@ import (
 // below as the BASE produced it; TestPlacementShadowLiveMatchesBase_T3650
 // compares the head with it. Regenerate only from the base commit:
 //
-//	SHADOW_WRITE_LIVE_BASE=1 go test -run PlacementShadowLiveMatchesBase ./internal/fleet/
+//	go test -run PlacementShadowLiveMatchesBase ./internal/fleet/ -args -write-live-base
 const liveBaseGolden = "testdata/placement_shadow_live_base.json"
+
+var writeLiveBase = flag.Bool("write-live-base", false, "write the live-output golden (run on the base commit only)")
 
 // shadowEvents collects the fleet events of an App.
 func shadowEvents(a *App) *[]fleetevent.Event {
@@ -194,7 +197,7 @@ func TestPlacementShadowLiveMatchesBase_T3650(t *testing.T) {
 	for _, sc := range liveScenarios() {
 		got[sc.name] = liveOutput(t, sc)
 	}
-	if os.Getenv("SHADOW_WRITE_LIVE_BASE") != "" {
+	if *writeLiveBase {
 		b, err := json.MarshalIndent(got, "", " ")
 		if err != nil || os.WriteFile(liveBaseGolden, append(b, '\n'), 0o644) != nil {
 			t.Fatalf("write golden: %v", err)
