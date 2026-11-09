@@ -541,21 +541,26 @@ when hardware changes; a rounded value is fine. Measure with the host
 unloaded: load enters through the live signals, so a weight measured on a
 busy host would count that load twice.
 
-**Recommended fleet values (2026-11-02).** These come from the workload
-benchmark (`handoffkeep doc get fleet/bench/2026-11-02-hosts`: the same Go
-workload took 37.6 s on mac-dev, 40.6 s on mac-work, 96.0 s on desktop), and
-replace `capacity_weight`:
+**Fleet measurements (2026-11-02).** The workload benchmark in
+`handoffkeep doc get fleet/bench/2026-11-02-hosts` ran the same Go workload
+once per host:
 
-```json
-{"power": {"mac-dev": 100, "mac-work": 100, "desktop": 39,
-           "mac-personal": 35, "oci": 11, "rpi": 7, "ncp": 9}}
-```
+| Machine | Seconds | Conditions |
+|---|---|---|
+| mac-dev | 37.6 | as it was |
+| mac-work | 40.6 | under load (43% memory free, swapping) |
+| oci | 87.2 | idle |
+| desktop | 96.0 | nearly idle |
+| rpi | 308.8 | idle |
 
-mac-dev and desktop are measured (desktop nearly idle; mac-work is the same
-machine as mac-dev). mac-personal, oci, rpi and ncp are unmeasured. They keep
-their current `capacity_weight` relative to mac-dev's 4.6 (×100 / 4.6), so
-their standing does not change until the desk's oci and rpi runs land in the
-same hk doc. `capacity_weight` is ignored, so leave it out.
+mac-dev and mac-work are two machines of the same model (M1
+Pro, 10 cores, 32 GB), not one machine; mac-work-default is a second node
+daemon on the mac-work machine. Each figure is a single run of one build and
+test workload, so it is not a speed for every kind of job. The live `power`
+map is the operator's; it is not re-tuned by hand while a measured, per-work
+class estimate is compared with it in shadow (hk 3650, decision
+`decision/2026-11-09/placement-measurement-direction`). `capacity_weight` is
+ignored, so leave it out.
 
 Power multiplies the measured free fraction (`free * power`), so an idle
 power-100 host outranks an idle power-40 one, and a claim's 10 points are a
