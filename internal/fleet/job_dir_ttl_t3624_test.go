@@ -288,15 +288,6 @@ func TestJobDirTTLEachGateConditionAloneKeeps(t *testing.T) {
 			r.store.records["j1"]["result"] = map[string]any{}
 			r.age("j1")
 		}},
-		{"screen without a doc", "screen-unconfirmed", func(r *ttlRig) {
-			r.write("j1", PaneScreenFile, []byte("$ \n"))
-			r.age("j1")
-		}},
-		{"screen sha mismatch", "screen-sha-mismatch", func(r *ttlRig) {
-			r.write("j1", PaneScreenFile, []byte("$ \n"))
-			r.doc(PaneScreenDocKey("j1"), []byte("$ other\n"), "")
-			r.age("j1")
-		}},
 		{"unconfirmed evidence", "evidence-unconfirmed", func(r *ttlRig) {
 			r.hk.SetTask("42", hkTaskJSON(42, "merged", "t", "", "proj", "{}"))
 			r.hk.Handle(func(req hkRequest) (int, string, bool) {
@@ -349,10 +340,20 @@ func TestJobDirTTLConfirmedArtifactsDelete(t *testing.T) {
 			r.doc(PaneScreenDocKey("j1"), []byte("$ \n"), "")
 			r.age("j1")
 		}},
-		{"screen over the cap accepts the cut copy", " note=screen-cut", func(r *ttlRig) {
+		// hk 3702: a leftover pane-screen.txt is an ordinary file of the dir;
+		// hk's copy of the screen does not decide the gate.
+		{"leftover screen without a doc", "", func(r *ttlRig) {
+			r.write("j1", PaneScreenFile, []byte("$ \n"))
+			r.age("j1")
+		}},
+		{"leftover screen with another sha", "", func(r *ttlRig) {
+			r.write("j1", PaneScreenFile, []byte("$ \n"))
+			r.doc(PaneScreenDocKey("j1"), []byte("$ other\n"), "")
+			r.age("j1")
+		}},
+		{"leftover screen over the cap", "", func(r *ttlRig) {
 			big := bytes.Repeat([]byte("x"), PaneScreenDocMaxBytes+10)
 			r.write("j1", PaneScreenFile, big)
-			r.doc(PaneScreenDocKey("j1"), []byte(paneScreenDocBody(big)), "")
 			r.age("j1")
 		}},
 		{"drive-confirmed evidence", "", func(r *ttlRig) {
@@ -402,11 +403,6 @@ func TestJobDirTTLHKOutageOrUnreadableAnswerKeeps(t *testing.T) {
 			r.hk.Handle(func(req hkRequest) (int, string, bool) {
 				return http.StatusOK, `{"key":`, strings.HasPrefix(req.Path, "/v1/documents/")
 			})
-		}},
-		{"hk down for the screen doc", func(r *ttlRig) {
-			r.write("j1", PaneScreenFile, []byte("$ \n"))
-			r.age("j1")
-			r.hk.Close()
 		}},
 		{"hk unconfigured", func(r *ttlRig) {
 			delete(r.store.records["j1"], "report_sha256")

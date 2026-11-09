@@ -63,7 +63,7 @@ directory is kept. Any read error or doubt keeps it.
 | (d) | The newest file mtime and event time under it are at least the TTL old. | `too-young` |
 | (c) | In the herdr session the receipt recorded, `herdr pane list` (the full inventory, plain shells included) names no pane with the job's recorded pane id or label, and neither does `herdr agent list`. The agent list alone never proves a pane gone: a shell pane whose agent exited is only in the pane list. A job that recorded neither a pane nor a label, a receipt that names no `herdr_session` (one from before it was recorded), or a list that cannot be read keeps it. A pane list answer that carries an error (an `error` member or `"ok":false`), or any row that is not an object with a pane id (`null`, `{}`), cannot be read. Only the pane list is read that strictly; the agent list still vetoes. The agent list is decoded leniently: an `error` member is ignored, and any decoded agent with the job's pane id or label keeps the directory (`pane-live`), even beside an `error` member. `"agents": null`, a `null` row and a `{}` row read as no agent. An agent answer with no `agents` key, or malformed JSON, cannot be decoded and keeps the directory (`pane-unreadable`). | `pane-live`, `pane-unknown`, `pane-session-unknown`, `pane-unreadable` |
 | (b) | The hk job record is `completed` or `lost`. `escalated` and every live state keep it. | `hk-not-terminal`, `hk-missing`, `hk-unreadable` |
-| (e) | hk confirms every artifact in the directory (below). | `report-…`, `result-unconfirmed`, `screen-…`, `evidence-unconfirmed`, `evidence-unclassified` |
+| (e) | hk confirms every artifact in the directory (below). | `report-…`, `result-unconfirmed`, `evidence-unconfirmed`, `evidence-unclassified` |
 
 hk confirms an artifact when:
 
@@ -85,10 +85,10 @@ hk confirms an artifact when:
   path recorded through the jobs root's own alias is read under the real
   root, which the pass resolves itself;
 - **`findings.json` or `result.json`**: the record's `result` is not empty;
-- **`pane-screen.txt`**: the document `screens/<job>/pane-screen.txt` exists,
-  and, for a screen of at most 512 KiB, its sha256 matches. A larger screen
-  was stored cut to hk's cap, so the cut copy is accepted and the line says
-  `note=screen-cut`;
+- **`pane-screen.txt`**: not confirmed. A leftover pane screen is an ordinary
+  file of the dir: the pane sweep writes it only when hk did not store the
+  screen, and the dir goes with the rest of its files once the other checks
+  pass;
 - **`evidence/**`, `final/**`**: the check `panewire artifacts sweep` makes
   before it deletes such a file — an artifact record of this job on this host
   lists the file with its local bytes and sha256, and the archive is

@@ -751,28 +751,33 @@ func (s *TaskPaneSweeper) close(ctx context.Context, a *App, j Job, task string,
 	return ""
 }
 
-// savePaneScreen writes the pane's last screen to <job dir>/pane-screen.txt
-// through an os.Root on the job directory, with the mode set before any byte
-// is written, as the pane.capture node command does. The saved screen then
-// goes to hk as the job's screen document (UploadPaneScreen); a failed upload
-// is one warning and never fails the save, so the pane still closes.
+// savePaneScreen uploads the pane's last screen to hk as the job's screen
+// document (UploadPaneScreen). A stored screen of at most PaneScreenDocMaxBytes
+// is the whole screen, so no local copy is written. A failed upload is one
+// warning, and a screen hk stored only as a cut tail keeps its whole copy in
+// <job dir>/pane-screen.txt, mode 0600, through an os.Root on the job
+// directory. Nothing uploads a local copy again: the job dir's TTL net removes
+// it with the dir (decision hk 3685 §3). Only a failed pane read, or a failed
+// local write where a local copy is needed, is an error: the pane is kept.
+// See docs/pane-sweep.md.
 func (a *App) savePaneScreen(ctx context.Context, j Job) error {
 	r := a.call(ctx, "herdr", "pane", "read", j.Pane)
 	if err := check(r, "pane screen"); err != nil {
 		return err
+	}
+	_, err := UploadPaneScreen(ctx, j.ID, j.Task, []byte(r.Out))
+	switch {
+	case err != nil:
+		a.warn("pane screen upload failed for job %s; local screen retained: %v", j.ID, err)
+	case len(r.Out) <= PaneScreenDocMaxBytes:
+		return nil
 	}
 	root, err := os.OpenRoot(filepath.Join(a.Jobs, j.ID))
 	if err != nil {
 		return err
 	}
 	defer root.Close()
-	if err := durable.ReplaceFileAtomicallyInRoot(root, PaneScreenFile, []byte(r.Out), 0600); err != nil {
-		return err
-	}
-	if _, err := UploadPaneScreen(ctx, j.ID, j.Task, []byte(r.Out)); err != nil {
-		a.warn("pane screen upload failed for job %s; local screen retained: %v", j.ID, err)
-	}
-	return nil
+	return durable.ReplaceFileAtomicallyInRoot(root, PaneScreenFile, []byte(r.Out), 0600)
 }
 
 // markSweptJob writes the end state to the hk record of a job that never
